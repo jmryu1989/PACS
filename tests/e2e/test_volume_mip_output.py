@@ -542,7 +542,7 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
   self.refused(v,MESSAGES['digest'])
   v.unroute_all(behavior='wait')
   self.refresh_output(v);v.evaluate(TAKE)
-  # Transport fix (hosted diagnostic run 35022850312): Chromium failed one source read with net::ERR_FAILED, before any response and
+  # A11-OUTPUT transport fix (hosted diagnostic run 35022850312; same cause as s9u4 re-login): Chromium failed one source read with net::ERR_FAILED, before any response and
   # without resending it, when its HTTP/2 connection received nginx's GOAWAY. That page-visible rejection is injected on a direct
   # print, outside the guarded open_output: a source read or a lookup rejected once is sent once more and the page is ready with every
   # fresh read; the same read rejected on both sends refuses with the source-read message after exactly two sends and leaves nothing.
@@ -552,6 +552,7 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
   # failed, and did not abort itself, may be requested twice, at most TRANSPORT_CEILING of them in one sub-case, each rejected once
   # and sent exactly twice, and every such window is reported. The cause of that rejection is not established by that run and is not
   # asserted here.
+  # s9u4 re-login shares the original GOAWAY cause. Retain this contract for other pre-response failures too; a proxy change alone does not remove them.
   def rejecting(fragment,times):
    sent=[]
    def reject(route,request):

@@ -75,7 +75,7 @@ B2_REPLACED = frozenset({"admin.controller.ts", "admin.service.ts", "auth.servic
                          "pacs.service.ts", "app.module.ts", "main.ts", "member-rights-import.ts"})
 def legacy_source_contract(path):
     relative = path.relative_to(API).as_posix() if path.is_relative_to(API) else path.as_posix()
-    return relative not in B2_REPLACED and not relative.startswith(("emr-runtime/", "emr-retention/", "emr-viewing/"))
+    return relative not in B2_REPLACED and not relative.startswith(("emr-runtime/", "emr-retention/", "emr-audit/", "emr-viewing/"))
 
 POLICY = API / "clinician-policy.ts"
 GUARD = API / "auth.guard.ts"
@@ -1637,9 +1637,10 @@ class ClinicianPolicySpec(unittest.TestCase):
         # the state change whose accept/close/decline the service keeps to technician/admin and whose cancel to the
         # requester or admin) and the S7-U1a explicit acknowledgement of a critical result by its named recipient
         # (contract S7-U1p section 6.3), plus S8-CTX's POST studies/:uid/viewer-context-events diagnostic record.
-        # HEAD shares the image read boundary; other methods need their declared write/lookup contract.
+        # HEAD shares the image read boundary. F auditor writes have their separate real HTTP/PG
+        # designation/scope contract in emr/f/link_live.py; these remain the clinician workflow writes.
         self.assertEqual(len(FIXTURES["business_routes"]), len(set(FIXTURES["business_routes"])))
-        self.assertEqual([k for k in FIXTURES["business_routes"] if not k.startswith(("GET ", "HEAD "))],
+        self.assertEqual([k for k in FIXTURES["business_routes"] if not k.startswith(("GET ", "HEAD ")) and not k.startswith("POST emr-audit/")],
                          ["POST studies/:uid/viewer-context-events", "POST dicom/lookup", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
                           "POST studies/:uid/image-requests", "POST image-requests/:id", "POST critical-results/:id/ack"])
         self.assertTrue({"GET authz/dicom", "POST dicom/lookup"} <= set(FIXTURES["business_routes"]),
@@ -3387,7 +3388,7 @@ class ClinicianPolicySpec(unittest.TestCase):
             return str(caught.exception)
 
         added, outside, app = API / "review-inherited.controller.ts", API / "unlisted-routes.ts", API / "app.module.ts"
-        registered = "controllers: [DictationController,"
+        registered = "controllers: ["
         self.assertEqual(sources[app].count(registered), 1)
         self.assertTrue({added, outside}.isdisjoint(sources))
 
@@ -3397,8 +3398,7 @@ class ClinicianPolicySpec(unittest.TestCase):
                     + ("import { PacsController } from './pacs.controller';\n" if inherits else "") + before
                     + "@Controller('unlisted')\nexport " + heading + " {" + body + "}\n")
             return {added: text, app: "import { ReviewInheritedController } from './review-inherited.controller';\n"
-                                      + sources[app].replace(registered, "controllers: [ReviewInheritedController, "
-                                                                         "DictationController,")}
+                                      + sources[app].replace(registered, "controllers: [ReviewInheritedController, ")}
 
         forms = {
             "<T = {}>": controller("class ReviewInheritedController<T = {}> extends PacsController"),

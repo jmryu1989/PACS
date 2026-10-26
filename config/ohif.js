@@ -209,6 +209,7 @@ function KinViewerBrand({ React }) {
     const labelOf = node => node.nodeType === Node.ELEMENT_NODE
       ? (node.localName === 'svg' ? '' : [...node.childNodes].map(labelOf).join(''))
       : node.nodeType === 3 ? node.data : '';
+    // The native preferences entry keeps non-letter hotkeys and language reachable.
     // 드롭다운은 한 목록에서 같은 태그의 행을 나란히 만든다. 클래스는 마지막 행만 다를 수 있어 비교하지 않는다.
     const hideAboutRows = scope => {
       scope.querySelectorAll('*').forEach(row => {
@@ -1273,7 +1274,9 @@ function kinCreateViewerHistory() {
       return exporting && SCREEN_EXPORT.includes(name) || ACTIVATING.includes(name) && !VIEW_TOOLS.has(command?.commandOptions?.toolName ?? button.id);
     });
     const TOOLBAR = ['getButtons', 'removeButton', 'addButtons', 'clearButtonSection', 'createButtonSection'];
-    const trimmed = new Set(), originals = new Map(), sectionOriginals = new Map(), replacements = new WeakSet(); let trimming = false;
+    // OHIF refreshToolbarState clones definitions with object spread. Ownership
+    // must survive that refresh so a writer gets the full tool group back.
+    const trimmed = new Set(), originals = new Map(), sectionOriginals = new Map(), replacement = Symbol('kin-read-only-toolbar'); let trimming = false;
     // S5-UI5 fix1. Capture를 빼는 때: clinician-only, 그리고 계정이 아직 확인되지 않은 동안(안전한 기본 — writer 답이 오면 제자리로
     // 돌아온다). writer 문서의 로그인이 끝난 뒤(거절·로그아웃·다른 계정)에는 빼지 않는다. 이미 뺀 것은 writer 답 전까지 그대로라서
     // clinician-only·미확인에서 끝난 문서는 계속 없다. 끝난 문서에 다시 들어온 마운트는 역할을 알 수 없어 안전한 기본을 따른다.
@@ -1284,14 +1287,14 @@ function kinCreateViewerHistory() {
       if (trimming || TOOLBAR.some(name => typeof bar?.[name] !== 'function')) return;
       const replaced = [], exporting = exportClosed();
       for (const [id, button] of Object.entries(bar.getButtons() || {})) {
-        if (replacements.has(button)) continue;
+        if (button[replacement]) continue;
         const props = button?.props || {}, items = Array.isArray(props.items) ? props.items : null;
         if (!items) { if (authoring({ id, commands: props.commands }, exporting)) { trimmed.add(id); originals.set(id, button); } continue; }
         const kept = items.filter(item => !authoring(item, exporting));
         if (!kept.length) { trimmed.add(id); originals.set(id, button); continue; }
         if (kept.length < items.length || props.primary && authoring(props.primary, exporting)) {
-          const replacement = { ...button, props: { ...props, items: kept, primary: props.primary && !authoring(props.primary, exporting) ? props.primary : kept[0] } };
-          originals.set(id, button); replacements.add(replacement); replaced.push(replacement);
+          const restricted = { ...button, [replacement]: true, props: { ...props, items: kept, primary: props.primary && !authoring(props.primary, exporting) ? props.primary : kept[0] } };
+          originals.set(id, button); replaced.push(restricted);
         }
       }
       const buttons = bar.getButtons() || {}, gone = [...trimmed].filter(id => buttons[id]);
@@ -1320,7 +1323,7 @@ function kinCreateViewerHistory() {
         const listed = new Set(sections.flatMap(([, record]) => record.original));
         const buttons = bar.getButtons() || {}, back = [];
         for (const [id, original] of originals) {
-          if (buttons[id] ? !replacements.has(buttons[id]) : !listed.has(id)) continue;
+          if (buttons[id] ? !buttons[id][replacement] : !listed.has(id)) continue;
           if (buttons[id]) bar.removeButton(id);
           back.push(original);
         }
@@ -2300,6 +2303,7 @@ const kinViewerSession = (() => {
   });
   return {
     state,
+    owner: () => owner === null ? null : JSON.parse(owner),
     ended: () => ended,
     readOnly: () => state() === 'read-only',
     writer: () => state() === 'writer',
@@ -4276,7 +4280,12 @@ function kinCreateStudyPrefetch() {
     };
     prefetch.enable = wrapped;
     const leave = () => {
-      for (const element of elements) prefetch.disable(element);
+      // The pinned disable removes listeners before reading enabled-element
+      // state. OHIF can already have removed that state during pane teardown.
+      for (const element of elements) {
+        try { prefetch.disable(element); }
+        catch (error) { if (core.getEnabledElement(element)) throw error; }
+      }
       elements.clear(); clearQueued();
     };
     window.addEventListener('pagehide', leave);
@@ -4287,9 +4296,77 @@ function kinCreateStudyPrefetch() {
   }
   return { id: 'kin.study-prefetch', onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
+// The stock mode owns the grid and Cornerstone elements. This extension owns
+// only its chrome and removes it when that mode or document ends.
+function kinCreateViewerUX() {
+  let services, dispose, toolbar, shortcuts, generation = 0, ready;
+  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-ux-toolbar.js', 'viewer-ux-shell.js'];
+  // The theme fixes the chrome rows' heights. It is loaded once per document,
+  // before the first mount, and stays: a stylesheet attached per mount and
+  // dropped on mode exit left a window on re-entry (saved Job, patient tab) in
+  // which the stock grid measured unstyled rows, so a camera applied then was
+  // re-fitted when the rows took their height.
+  function stylesheet() {
+    return new Promise((resolve, reject) => {
+      const href = '/worklist/hpacs-lite/viewer-ux-theme.css';
+      const existing = document.head.querySelector('link[rel="stylesheet"][href="' + href + '"]');
+      if (existing?.sheet) { resolve(); return; }
+      const link = existing || document.createElement('link');
+      link.rel = 'stylesheet'; link.href = href;
+      link.addEventListener('load', () => resolve(), { once: true });
+      link.addEventListener('error', () => { link.remove(); reject(new Error('뷰어 화면 모듈을 불러오지 못했습니다.')); }, { once: true });
+      if (!existing) document.head.append(link);
+    });
+  }
+  function load() {
+    return ready ||= assets.reduce((previous, name) => previous.then(() => new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = '/worklist/hpacs-lite/' + name;
+      script.onload = () => { script.remove(); resolve(); };
+      script.onerror = () => { script.remove(); reject(new Error('뷰어 화면 모듈을 불러오지 못했습니다.')); };
+      document.head.append(script);
+    })), stylesheet()).catch(error => { ready = null; throw error; });
+  }
+  function stop() { generation++; dispose?.(); dispose = null; }
+  return {
+    id: 'kin.viewer-ux',
+    async preRegistration({ servicesManager }) {
+      services = servicesManager.services;
+      if (window.top !== window) return;
+      try { await load(); }
+      catch (error) {
+        // Optional chrome cannot prevent the native viewer from opening images.
+        services.uiNotificationService?.show({ title: 'Viewer', message: error.message, type: 'error' });
+        return;
+      }
+      // Own letter keys before the first mode enters, including route teardown.
+      shortcuts = window.KinViewerUXShortcuts.mount({
+        getBindings: () => toolbar?.bindings() || {}, invoke: id => toolbar?.invoke(id),
+        allowed: () => !kinViewerSession.ended(),
+      });
+      kinViewerOnEnd(() => { shortcuts?.dispose(); window.KinViewerUXToolbar.clear(); });
+    },
+    onModeEnter() {
+      stop();
+      if (window.top !== window || !shortcuts) return;
+      const ticket = generation;
+      if (kinViewerSession.ended()) return;
+      try {
+        const shell = window.KinViewerUXShell.mount({ services, session: kinViewerSession });
+        toolbar = window.KinViewerUXToolbar.mount({ services, session: kinViewerSession });
+        const channel = kinViewerOnEnd(() => { window.KinViewerPatientTabs.end(); stop(); });
+        dispose = () => { channel?.close(); toolbar?.dispose(); toolbar = null; shell.dispose(); };
+      } catch (error) {
+        if (ticket !== generation) return;
+        services.uiNotificationService?.show({ title: 'Viewer', message: error.message, type: 'error' });
+      }
+    },
+    onModeExit: stop,
+  };
+}
 
 window.config = {
-  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch()],
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateViewerUX()],
   // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
   // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
   kinThreeDCursor: { enabled: false },

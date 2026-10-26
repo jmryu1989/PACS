@@ -71,6 +71,9 @@ jobs:
       - name: Module A local-read recording on the real PG record port
         timeout-minutes: 5
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-pg --tree api/src --tree tests/emr/a --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/a/recording_boundary_test.py --class LocalReadRecordingBoundary --mode live --unit ci-module-a-pg --timeout 300
+      - name: Module A report reads on the real HTTP route and PG record port
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-report-reads --tree api/src --tree tests/emr/a --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/a/report_reads_test.py --class ReportReadsHttp --mode live --unit ci-module-a-report-reads --timeout 300
       - name: Module A W9 metadata through real HTTP and PG
         timeout-minutes: 5
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-w9 --tree api/src --tree tests/emr/a --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/a/viewing_set_test.py --class ViewingSetHttpBoundary --mode live --unit ci-module-a-w9 --timeout 300
@@ -87,6 +90,7 @@ jobs:
             tmp/emr-b-ci/
             tmp/emr-b2-replace-20261023/
             tmp/module-a-01-2/
+            tmp/emr-a/
             tmp/download-producer-b2/
             tmp/request-auth/
           if-no-files-found: error
@@ -767,12 +771,20 @@ jobs:
     - name: TEST-F-01..08 declared allow/refuse cases
       if: ${{ !cancelled() }}
       run: python3 scripts/record-run.py --run-dir tmp/emr-f-ci/contract --cwd . --tree api/src/emr-contract --tree api/src/emr-audit --file api/tsconfig.json --file api/package-lock.json --file tests/emr/f/contract_test.cjs -- node --test --test-reporter=tap tests/emr/f/contract_test.cjs
+    - name: F_LINK audit, fixed-copy issuance and hold over HTTP and PostgreSQL
+      run: |
+        node api/node_modules/typescript/bin/tsc -p api/tsconfig.json --incremental false
+        export KIN_B2R_NODE="$(command -v node)"
+        export KIN_B2R_PRISMA_CLI="$PWD/api/node_modules/prisma/build/index.js"
+        python3 scripts/record-run.py --run-dir tmp/emr-f-ci/online-pg --cwd . --tree api/src/emr-audit --tree api/src/emr-clinical --tree api/src/emr-report --tree api/src/emr-signature --tree api/src/emr-runtime --tree api/src/emr-contract --tree tests/emr/f --tree api/prisma --file api/src/app.module.ts --file tests/emr/b/pg_ledger_restore_test.py -- python3 -B scripts/run-tests.py --module tests/emr/f/link_live.py --class AuditLinkPg --mode live --unit emr-f-link --timeout 600
     - name: Raw run evidence
       if: always()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: emr-f-${{ env.TARGET_SHA }}
-        path: tmp/emr-f-ci/
+        path: |
+          tmp/emr-f-ci/
+          tmp/emr-f-link/
         if-no-files-found: error
         retention-days: 7
     needs: runtime
@@ -1445,6 +1457,21 @@ jobs:
           tests/e2e/artifacts/test_d03a_*.png
           tests/e2e/artifacts/test_scope_*.png
           tmp/u2b-regressions-ci/
+        if-no-files-found: error
+        retention-days: 7
+    - name: Isolated declared Viewer U2 shell tests
+      timeout-minutes: 28
+      run: |
+        "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile viewer-ux-shell
+      if: ${{ !cancelled() }}
+    - name: Sanitized synthetic Viewer U2 shell evidence
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-viewer-ux-shell-results
+        path: |
+          tests/e2e/artifacts/viewer-ux-shell-ci/
+          tmp/viewer-ux-u2/screens/
         if-no-files-found: error
         retention-days: 7
     - name: Worklist folder multi-selection and shortcut module contract

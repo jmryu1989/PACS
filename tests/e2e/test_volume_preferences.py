@@ -3,6 +3,7 @@
 from viewer_session import end_viewer
 import json,os,sys,unittest,uuid
 from pathlib import Path
+from viewer_tools import select_image_tool
 from playwright.sync_api import expect
 from test_volume_sync import VolumeSyncE2E
 from document_session import document_request
@@ -104,7 +105,7 @@ class VolumePreferencesE2E(VolumeSyncE2E):
   v.evaluate('()=>{const actors=projectionVP.getActors(),mapper=actors[0].actor.getMapper();window.prefBase=mapper.getSampleDistance();window.failRefine=true;const adapter={...mapper,setSampleDistance(value){return mapper.setSampleDistance(value===prefBase&&failRefine?prefBase*2:value)}};projectionVP.getActors=()=>[{...actors[0],actor:{...actors[0].actor,getMapper:()=>adapter}}];window.prefMapper=adapter;projectionVP.element.dispatchEvent(new PointerEvent("pointerdown",{bubbles:true}));document.dispatchEvent(new PointerEvent("pointerup",{bubbles:true}))}')
   v.wait_for_timeout(2100);self.assertTrue(v.evaluate('()=>kinMprRenderingState.busy()'));expect(panel.get_by_role('button',name='Save MPR Preferences',exact=True)).to_be_enabled();expect(panel.get_by_label('MPR Progressive Rendering',exact=True)).to_be_enabled();expect(v.locator('.kin-mpr-refining').first).to_have_text('Refinement failed');self.assertIn('\ubcf5\uad6c',panel.locator('[role=status]').inner_text());v.evaluate('()=>{failRefine=false}');v.wait_for_function('()=>prefMapper.getSampleDistance()===prefBase&&!kinMprRenderingState.busy()');self.preserved_volume(before,self.volume_state(v))
  def test_properties_09_teardown_preserves_newer_native_tool_choice(self):
-  a,p,v=self.starting();self.mouse(v);v.locator('[data-cy=WindowLevel]').click()
+  a,p,v=self.starting();self.mouse(v);select_image_tool(v, 'WindowLevel')
   native=v.evaluate('()=>{window.prefTools=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(projectionVP.id,projectionVP.renderingEngineId);return prefTools.toolOptions}')
   v=end_viewer(v);v.assert_quiet()
   v.assert_quiet();v.assert_quiet();self.assertEqual(v.evaluate('()=>prefTools.toolOptions'),authoring_closed(native))
@@ -177,7 +178,7 @@ class VolumePreferencesE2E(VolumeSyncE2E):
   # A pass-through record of every mode change on the native group; each call still reaches the pinned setter unchanged.
   v.evaluate("""id=>{const view=services.cornerstoneViewportService.getCornerstoneViewport(id),g=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(view.id,view.renderingEngineId);window.bindingGroup=g;window.bindingCalls=[];
    for(const name of ['setToolActive','setToolPassive','setToolEnabled','setToolDisabled']){const setter=g[name];g[name]=function(...args){bindingCalls.push([name,...structuredClone(args)]);return setter.apply(this,args)}}}""",ids[0])
-  v.locator('#root button[data-cy="Zoom"]').click();v.wait_for_function('()=>bindingGroup.getActivePrimaryMouseButtonTool()==="Zoom"')
+  select_image_tool(v, 'Zoom');v.wait_for_function('()=>bindingGroup.getActivePrimaryMouseButtonTool()==="Zoom"')
   original=state();self.mouse(v,left='Pan',middle='WindowLevel',right='Zoom');applied=state()
   first=retire()
   v.select_option('#kin-hp-rule',hp.RULE_ID);ids,_=opened()

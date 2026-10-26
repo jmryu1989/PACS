@@ -219,7 +219,14 @@ function withoutDeclared(now, declared) {
     assert.deepEqual(injectables[name], change.after, name + ' is exactly its declared later form');
     injectables[name] = change.before;
   }
-  return { ...now, controllers: take(now.controllers, declared.controllers), providers: take(now.providers, declared.providers), injectables,
+  let middleware = now.middleware;
+  for (const addition of declared.middleware_routes ?? []) {
+    const bindings = middleware.filter(binding => JSON.stringify(binding.apply) === JSON.stringify(addition.apply));
+    assert.equal(bindings.length, 1, 'the declared middleware has exactly one binding');
+    middleware = middleware.map(binding => binding === bindings[0] ?
+      { ...binding, forRoutes: take(binding.forRoutes, addition.forRoutes) } : binding);
+  }
+  return { ...now, controllers: take(now.controllers, declared.controllers), providers: take(now.providers, declared.providers), injectables, middleware,
     routes: now.routes.filter(r => !declaredRoutes.includes(routeKey(r))) };
 }
 /** W5-API (D1460): the snapshot minus exactly the declared added parameter decorators (spec.w5_api.route_args) - each present once. */
@@ -261,9 +268,10 @@ test('U0B-DI Nest metadata equals the pre-split snapshot plus declared additions
     routes: [...w9.routes, ...u4b.routes].sort((a, b) =>
       `${a.controller}.${a.handler}`.localeCompare(`${b.controller}.${b.handler}`)),
   };
-  const additions = [spec.di_additions_d_online, spec.di_additions_emr_online, spec.di_additions_b2, declared];
+  const additions = [spec.di_additions_d_online, spec.di_additions_f_link, spec.di_additions_emr_online, spec.di_additions_b2, declared];
   assert.equal(full.routes.length, spec.di.routes.length + additions.reduce((count, item) => count + item.routes.length, 0));
   // Undo clinical and later online/identity bindings before B2 and the earlier feature declarations.
+  // D-online and F_LINK are full declared additions too: the whole snapshot is compared, not a minimal DI check.
   const now = additions.reduce(withoutDeclared, withoutW5Arguments(full));
   assert.deepEqual(now, spec.di);
   // Use the approved split's route set, independent of today's editable spec, so an addition cannot be re-pinned as baseline.
@@ -271,7 +279,8 @@ test('U0B-DI Nest metadata equals the pre-split snapshot plus declared additions
     'c8e4f1b485ec05ccbb97589c74a573b3f48b70ce:tests/pacs_split_spec.json'],
   { cwd: path.resolve(__dirname, '..'), encoding: 'utf8', maxBuffer: 8e6 })).di.routes;
   assert.deepEqual(now.routes, splitRoutes, 'the approved pre-split route set is unchanged');
-  assert.deepEqual(full.middleware, spec.di.middleware, 'no middleware binding moves with the additions');
+  assert.deepEqual(withoutDeclared(full, spec.di_additions_f_link).middleware, spec.di.middleware,
+    'existing middleware bindings remain unchanged outside the declared F route');
   assert.ok(w9.routes.every(r => r.controller === 'MultiStudyViewController' && !r.public), 'no declared route is public');
   assert.ok(u4b.routes.every(r => r.controller === 'StudyTransferLocalController' && !r.public), 'no declared route is public');
   assert.ok(spec.di_additions_emr_online.routes.every(r => !r.public), 'no declared route is public');
@@ -282,9 +291,10 @@ test('U0B-DI Nest metadata equals the pre-split snapshot plus declared additions
     const cls = require('/app/dist/' + target.slice('api/src/'.length, -3))[concern.class];
     assert.equal(typeof cls, 'function', concern.class);
     assert.equal(Reflect.getMetadata('__injectable__', cls), undefined, concern.class);
-    assert.equal(now.providers.includes(concern.class) || now.controllers.includes(concern.class), false, concern.class);
+    assert.equal(full.providers.includes(concern.class) || full.controllers.includes(concern.class), false, concern.class);
   }
 });
+
 test('U0B-DI-RUNTIME Nest builds one PacsService for its consumers and starts it once', async () => {
   diSnapshot();   // compiles api/src through the loader unless /app/dist exists
   const { NestFactory } = require('/app/node_modules/@nestjs/core');

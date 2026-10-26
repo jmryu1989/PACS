@@ -194,7 +194,8 @@
       "20261024120000_emr_d_online",
       "20261025000000_emr_e_online",
     "20261025120000_access_review",
-    "20261026120000_assignment_access_stream"
+      "20261025150000_emr_f_link",
+      "20261026120000_assignment_access_stream"
     ],
     "latest_before": "20261016120000_related_report_insert_receipt",
     "historic_b1": "unchanged"
@@ -247,7 +248,10 @@
       "pending_operations(integer)",
       "record_failure(uuid,uuid,text,timestamptz,text)",
       "entries_after(bigint,integer)",
-      "entry_for_event(text,text)"
+      "entry_for_event(text,text)",
+      "investigation_entries(text,text,timestamptz,timestamptz,bigint,bigint,integer,jsonb)",
+      "investigation_count(text,text,timestamptz,timestamptz,bigint,jsonb)",
+      "existing_member_identity(text,text)"
     ],
     "reader_functions": [
       "storage_placement()",
@@ -477,7 +481,7 @@
     "contract": 13,
     "live": 13,
     "mutants": 15,
-    "profiles": 40,
+    "profiles": 41,
     "measurements_suites": 20,
     "validate_jobs": 22,
     "emr_b_jobs": 1,

@@ -1,5 +1,6 @@
 import type { SigningTransaction, ServerKeyRegistration, WrappedServerPrivateKey, ServerSignedEnvelope } from '../emr-signature/server-contract';
 import { refuse } from '../emr-contract/validation';
+import { lockFixedRecord } from '../emr-runtime/fixed-record-lock';
 
 export interface StoredApproval extends ServerSignedEnvelope {
   operationId: string;
@@ -70,6 +71,7 @@ export class OnlineSigningStore {
   }
 
   async save(tx: SigningTransaction, result: StoredApproval): Promise<void> {
+    await lockFixedRecord(tx, result.recordId);
     await tx.$executeRaw`INSERT INTO emr_signing.signed_version(record_id,version_id,kid,outcome)
       VALUES (${result.recordId},${result.versionId},${result.kid},${JSON.stringify(result)}::jsonb)`;
     const changed = await tx.$executeRaw`UPDATE emr_signing.operation SET outcome=${JSON.stringify(result)}::jsonb

@@ -11,6 +11,9 @@ function fixture(standalone=false,identityReady=true,optionalReady=true){
   // Isolate required note/identity/dock failures from independently tested
   // optional MPR modules. New unseeded dependencies still fail this harness.
   window.KinWorkspaceShortcuts={};window.KinViewerWindows={};
+  // Toolbar behavior is covered on the served viewer; these tests isolate
+  // note/identity/dock connection and retry lifecycles.
+  window.KinViewerUXShortcuts={};window.KinViewerUXToolbar={mount(){}};
   if(optionalReady){
     for(const name of ['KinVolumeOrientation','KinVolumeDisplay','KinVolumeMarks','KinVolumePreferences','KinVolumeCrosshair','KinVolumeBatch','KinVolumeBatchScout','KinVolumeCurved','KinVolumePath'])window[name]={};
     for(const name of ['kinCreateVolumeOrientation','kinCreateVolumeDisplay','kinCreateVolumeSync','kinCreateVolumeProgressive','kinCreateVolumeMarks','kinCreateVolumePreferences','kinCreateVolumeCrosshair','kinRenderVolumeScout','kinCreateVolumeBatch','kinCreateVolumeCurved','kinCreateVolumePath'])window[name]=()=>{};
