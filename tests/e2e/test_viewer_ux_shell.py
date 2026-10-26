@@ -872,21 +872,28 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         view = '''() => {const v=services.cornerstoneViewportService.getCornerstoneViewport(
           services.viewportGridService.getActiveViewportId()), c=v.getCamera();
           return {h:!!c.flipHorizontal, v:!!c.flipVertical, rotation:(Math.round(v.getViewPresentation().rotation)%360+360)%360};}'''
+        def settle(expected, after):
+            try:
+                page.wait_for_function('expected => JSON.stringify((' + view + ')()) === JSON.stringify(expected)', arg=expected)
+            except Exception:
+                self.fail(after + ': expected ' + json.dumps(expected) + ', the viewer shows ' + json.dumps(page.evaluate(view)))
         canvas = page.locator('[data-cy="viewport-pane"] canvas').first
         canvas.click(position=dict(x=100, y=100))
         start = page.evaluate(view)
-        turned = lambda degrees: dict(start, rotation=(start['rotation'] + degrees) % 360)
-        for key, expected in [('Shift+R', turned(90)), ('Shift+L', start), ('Shift+L', turned(270)), ('Shift+R', start),
-                              ('Shift+H', dict(start, h=not start['h'])), ('Shift+V', dict(start, h=not start['h'], v=not start['v'])),
-                              ('Shift+H', dict(start, v=not start['v'])), ('Shift+V', start)]:
+        self.assertEqual(start, {'h': False, 'v': False, 'rotation': 0})
+        turned = lambda degrees: dict(start, rotation=degrees)
+        # Rotate Left from 0 degrees is the case the stock counter-clockwise command leaves unturned.
+        for step, (key, expected) in enumerate([('Shift+R', turned(90)), ('Shift+L', start), ('Shift+L', turned(270)), ('Shift+R', start),
+                                                ('Shift+H', dict(start, h=True)), ('Shift+V', dict(start, h=True, v=True)),
+                                                ('Shift+H', dict(start, v=True)), ('Shift+V', start)]):
             page.keyboard.press(key)
-            page.wait_for_function('expected => JSON.stringify((' + view + ')()) === JSON.stringify(expected)', arg=expected)
+            settle(expected, 'step %d %s' % (step + 1, key))
         # With Caps Lock on, Shift+H reports a lower-case key; it is still Shift+H.
         page.evaluate('''() => (document.activeElement || document.body).dispatchEvent(new KeyboardEvent('keydown',
           {key:'h', code:'KeyH', shiftKey:true, bubbles:true, cancelable:true}))''')
-        page.wait_for_function('expected => JSON.stringify((' + view + ')()) === JSON.stringify(expected)', arg=dict(start, h=not start['h']))
+        settle(dict(start, h=True), 'Caps Lock Shift+H')
         page.keyboard.press('Shift+H')
-        page.wait_for_function('expected => JSON.stringify((' + view + ')()) === JSON.stringify(expected)', arg=start)
+        settle(start, 'Shift+H back')
         # Plain L and R choose Length and Rectangle; the stock turn on those letters does not also run.
         page.keyboard.press('l'); self.assertEqual(page.evaluate(active_tool), 'Length')
         page.keyboard.press('r'); self.assertEqual(page.evaluate(active_tool), 'RectangleROI')
@@ -910,9 +917,12 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         for name, key in keys.items():
             expect(dialog.get_by_label(name + ' Shortcut', exact=True)).to_have_value(key)
         rotate_left = dialog.get_by_label('Rotate Left Shortcut', exact=True)
+        revision = document_request(page, 'GET', '/api/workspace-shortcuts').json()['revision']
         for wrong in ['Shift+1', 'Shift+H', 'Control+K']:
             rotate_left.fill(wrong); dialog.get_by_role('button', name='Save', exact=True).click()
             expect(dialog.get_by_role('status')).to_contain_text('Shift+영문자로 지정하세요')
+            expect(dialog).to_be_visible()
+        self.assertEqual(document_request(page, 'GET', '/api/workspace-shortcuts').json()['revision'], revision)
         rotate_left.fill('shift+k')
         dialog.get_by_role('button', name='Save', exact=True).click()
         expect(dialog).not_to_be_visible()
@@ -931,7 +941,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
         self.assertEqual(page.evaluate(view), start)
         page.keyboard.press('Shift+K')
-        page.wait_for_function('expected => JSON.stringify((' + view + ')()) === JSON.stringify(expected)', arg=turned(270))
+        settle(turned(270), 'Shift+K')
 
 
 def load_tests(loader, tests, pattern):

@@ -4,8 +4,10 @@ window.KinViewerUXToolbar = (() => {
     Angle: '∠', EllipticalROI: '◯', RectangleROI: '□', ArrowAnnotate: '↗', invert: '◑', Cine: '▷', Crosshairs: '⊕',
     flipHorizontal: '⇆', flipVertical: '⇅', 'rotate-left': '↺', 'rotate-right': '↻' };
   // The stock More Tools flips and turns one way each; F8 asks for both ways.
+  // A left turn is three right quarter turns: the stock counter-clockwise
+  // command asks a stack at 0 degrees for -90, which the viewport ignores.
   const companions = [['flipHorizontal', 'flipVertical', 'Flip Vertical', 'Flip Vertically', 'flipViewportVertical'],
-    ['rotate-right', 'rotate-left', 'Rotate Left', 'Rotate -90', 'rotateViewportCCW']];
+    ['rotate-right', 'rotate-left', 'Rotate Left', 'Rotate -90', { commandName: 'rotateViewportCW', commandOptions: { rotation: 270 } }]];
   // Version 1 offered no key for the flips and turns, so a null there is the
   // old default rather than a cleared choice; version 2 gives them the F8 keys.
   const turns = ['flipHorizontal', 'flipVertical', 'rotate-left', 'rotate-right'];
