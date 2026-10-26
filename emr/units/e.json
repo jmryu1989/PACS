@@ -34,7 +34,7 @@
     "GET/HEAD Connect API route with explicit unavailable Module A seam",
     "migration, production-image and restore consumers together",
     "E_ROUTE: nginx sends the viewer's WADO-RS frame requests (GET/HEAD) to the E route with the normalized path as target, unbuffered on a keepalive upstream; metadata, rendered, /instances and Gateway STOW routes unchanged",
-    "E_ROUTE: one verified study manifest is reused across that study's requests (joined builds, rebuilt when a request names an object/frame it lacks, forgotten when the source or current study facts no longer match)"
+    "E_ROUTE: one verified study manifest is reused across the requests that name an object of that study (joined builds, rebuilt when a request names an object/frame it lacks, forgotten when the source or current study facts no longer match); a study or series request (retrieve, query, metadata) always reads the catalog, so an object that arrived since is selected (R244-01)"
   ],
   "routes": [
     "GET images/dicom-web",
@@ -55,7 +55,8 @@
     "pg_http_implementation": "tests/emr/e/stream_pg_test.cjs",
     "served": [
       "tests/e2e/test_image_route.py:ImageRouteE2E.test_route_01_one_frame_through_https_is_one_recorded_delivery",
-      "tests/e2e/test_image_route.py:ImageRouteE2E.test_route_02_served_viewer_ct_series_every_received_frame_recorded_once"
+      "tests/e2e/test_image_route.py:ImageRouteE2E.test_route_02_served_viewer_ct_series_every_received_frame_recorded_once",
+      "tests/e2e/test_image_route.py:ImageRouteE2E.test_route_03_study_and_series_retrieve_answer_with_an_object_that_arrived_after_a_frame"
     ],
     "acceptance_limit": "actual B2 transaction and shipped E migration/evidence store plus synthetic Orthanc protocol; served nginx/OHIF acceptance needs the Module A context binding (source-readers) and the deployed viewer/decoder asset catalog",
     "ci": {
@@ -70,7 +71,8 @@
       "risk": "different object/frame/representation",
       "tests": [
         "TEST-E-02",
-        "test_fixed_image_http"
+        "test_fixed_image_http",
+        "test_route_03_study_and_series_retrieve_answer_with_an_object_that_arrived_after_a_frame"
       ]
     },
     "E-02": {

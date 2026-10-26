@@ -3063,9 +3063,12 @@ E_ROUTE puts the viewer's WADO-RS frame requests on that route. `python -B tests
 `/api/images/dicom-web?target=<normalized path>` with the session headers and the proxy's peer address, that writes
 are refused, and that metadata, rendered frames and the Gateway STOW keep authz -> Orthanc.
 `node --test tests/emr/e/manifest_reuse_test.cjs` (compiled `api/dist`) checks that one study manifest serves the
-study's frame requests and is rebuilt or forgotten when the request or source no longer matches it.
+study's frame requests and is rebuilt or forgotten when the request or source no longer matches it, and that a study
+or series request (retrieve, query, metadata) reads the catalog again so an object that arrived since is selected.
 `python -B scripts/run-tests.py --module tests/e2e/test_image_route.py --mode live --unit e-route --timeout 1800`
 runs on the served stack: one frame through HTTPS is one recorded delivery, and the served OHIF CT series
 (`KIN_E_ROUTE_SLICES`, default 200, `KIN_E_ROUTE_MATRIX`, default 512) records every received frame once; it prints
 one `MEASURE` line (first render and all-frames time) before its assertions, so the same case times the direct
-route and the E route. It passes only with the Module A binding and a deployed viewer/decoder asset catalog.
+route and the E route. A third case retrieves a series and its study through `GET /api/images/dicom-web` after a
+frame and one later arrival, and expects every stored object. It passes only with the Module A binding and a deployed
+viewer/decoder asset catalog.

@@ -303,7 +303,8 @@ class ImageRouteE2E(base.WorklistE2E):
         self.assertEqual(200, status, body[:300])
         self.assertTrue(headers.get("x-kin-image-event"), "the frame went through E, which keeps this study's manifest")
         arrived = store_ct(study, "arrival", 2, 1, 64)
-        stored = sorted(self.stack.orthanc_bytes(f"/instances/{self.orthanc_instance(sop)}/file") for sop in sops + arrived)
+        digest = lambda data: hashlib.sha256(data).hexdigest()
+        stored = sorted(digest(self.stack.orthanc_bytes(f"/instances/{self.orthanc_instance(sop)}/file")) for sop in sops + arrived)
         for target in (f"/dicom-web/studies/{fixture.uid}/series/{series}", f"/dicom-web/studies/{fixture.uid}"):
             with self.subTest(target=target):
                 status, headers, body = self.frame("/api/images/dicom-web?target=" + quote(target, safe=""), "doctor",
@@ -311,7 +312,7 @@ class ImageRouteE2E(base.WorklistE2E):
                 self.assertEqual(200, status, body[:300])
                 self.assertTrue(headers.get("x-kin-image-event"))
                 parts = multipart_parts(headers.get("content-type", ""), body)
-                self.assertEqual(stored, sorted(payload for _, payload in parts),
+                self.assertEqual(stored, sorted(digest(payload) for _, payload in parts),
                                  "every object the study holds now, the later arrival included, as stored")
 
 
