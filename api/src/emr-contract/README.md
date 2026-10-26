@@ -139,7 +139,7 @@ Finalized는 24시간 수정창 종료일 뿐 목적 종료가 아니다. `archi
 
 ## 접속 사건과 별도 저장소
 
-성공한 환자 기록 사건은 환자 연결 snapshot·검사·기록·판이 모두 `known`이어야 한다. `surface`는 서버의 실제 라우트/외부 제공 경계에서 기록하며 target.kind가 그 경계 분류에 속하는지 대조한다. 판독 조회를 preferences로 바꾸어 면제할 수 없다. `not-applicable: non-record-target`은 **preferences, reading-template, institution, identity-access, authentication-session, system-operation**에만 허용한다. 자유문구 사유는 사실을 대체하지 못한다. 인증/인가 실패 전에 확인 불가능한 값은 `unresolved`; 실제 빈 결과는 명시적 빈 targets다.
+성공한 환자 기록 사건은 환자 연결 snapshot·검사·기록·판이 모두 `known`이어야 한다. `surface`는 서버의 실제 라우트/외부 제공 경계에서 기록하며 target.kind가 그 경계 분류에 속하는지 대조한다. 판독 조회를 preferences로 바꾸어 면제할 수 없다. `not-applicable: non-record-target`은 **preferences, reading-template, institution, identity-access, authentication-session, system-operation, assignment**에만 허용한다(assignment: 판독 배정은 제23조④의 기재·추가기재·수정·열람이 아니며 진료기록 입력·열람 권한을 바꾸지 않는다, D1860; 배정 해제는 `server:reader-assignment-close` 내부 경계에 기록한다). 자유문구 사유는 사실을 대체하지 못한다. 인증/인가 실패 전에 확인 불가능한 값은 `unresolved`; 실제 빈 결과는 명시적 빈 targets다.
 
 `GET bootstrap`처럼 기록/비기록을 함께 제공하는 경계에서는 `parseAccessEvent(input, servedRows)`에 서버가 실제 제공한 검증 행 목록을 전달해야 한다. 목록 길이·행의 분류·기록/판을 대조하므로 target 라벨만 preferences로 바꾸어 면제할 수 없다. 실제 설정 행과 비기록 전용 경로의 면제는 유지한다. 저장된 혼합 사건의 재검증도 해당 서버 행 manifest가 필요하다. 접속 보존 생성에는 모듈 내부의 고정 AuditLog 어댑터를 쓰며 호출별 reader를 만들지 않는다.
 

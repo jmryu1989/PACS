@@ -108,8 +108,9 @@ test('the U1b allowlist and the S5-F5 constants are exactly the fixture values',
   // follow-up, close), the S5-U4c image request's two routes (create, action) and the S7-U1p §6.1 explicit
   // acknowledgement of a critical result it received; each is idempotent on requestId with a stored receipt.
   // S8-CTX also records finite viewer diagnostics after image-read admission; it exposes no report write.
+  // F auditor writes use their real HTTP/PG designation test; this assertion covers clinician workflow writes.
   // Besides read-only GET/HEAD, the remaining row is the viewer's SOP lookup, which answers an Orthanc id and writes nothing.
-  assert.deepEqual(FIXTURES.business_routes.filter(route => !/^(GET|HEAD) /.test(route)),
+  assert.deepEqual(FIXTURES.business_routes.filter(route => !/^(GET|HEAD) /.test(route) && !route.startsWith('POST emr-audit/')),
     ['POST studies/:uid/viewer-context-events', 'POST dicom/lookup', 'POST studies/:uid/questions', 'POST questions/:id/entries', 'POST questions/:id/close',
       'POST studies/:uid/image-requests', 'POST image-requests/:id', 'POST critical-results/:id/ack']);
 });

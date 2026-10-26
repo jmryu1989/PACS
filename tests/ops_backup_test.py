@@ -1077,6 +1077,20 @@ class EmrRestoreVerification(unittest.TestCase):
         self.assertIn("Restored catalog differs from the snapshot: databases", str(error))
         self.assertFalse(result["success"])
 
+    def test_f_link_12_daily_rehearsal_counts_audit_and_image_rows(self):
+        for table in ("emr_audit.fixed_copy", "emr_image.preparation"):
+            self.host.table_counts[table] = 1
+        folder, manifest, error = self.host.backup(self.answer)
+        self.assertIsNone(error)
+        self.assertIn("role_catalog", manifest)
+        for table in ("emr_audit.fixed_copy", "emr_image.preparation"):
+            self.assertEqual(manifest["counts"]["kin"][table], 1)
+            self.host.table_counts[table] = 0
+            result, error, _, _ = self.host.rehearse(folder, self.answer)
+            self.assertIn("row counts differ", str(error))
+            self.assertFalse(result["success"])
+            self.host.table_counts[table] = 1
+
     def test_d23_an_older_daily_set_without_a_role_catalog_keeps_its_previous_rehearsal(self):
         """D23: a set made before the role catalog was recorded is rehearsed as before (pg_dumpall roles as postgres)."""
         manifest = dict(self.manifest)
@@ -1155,7 +1169,7 @@ class WrappingCustodyTests(unittest.TestCase):
         self.temp = self.enterContext(tempfile.TemporaryDirectory())
         self.root = Path(self.temp)
         self.host = Host(self.temp)
-        self.host.table_counts.update({"emr_signing.private_key": 1, "emr_clinical.online_version": 2})
+        self.host.table_counts.update({"emr_signing.private_key": 1, "emr_clinical.online_version": 2, "emr_audit.fixed_copy": 3, "emr_image.preparation": 4})
         self.secret = self.root / "live.key"
         self.secret.write_bytes(bytes(range(32)))
         self.config = self.root / "custody.json"
@@ -1186,6 +1200,32 @@ class WrappingCustodyTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             ops.restore_wrapping_custody(manifest, self.root / "restored")
 
+    def test_relocated_custody_restores_without_the_original_host_path(self):
+        import shutil
+        folder, manifest = self.backup()
+        old = Path(manifest["wrapping_custody"]["directory"])
+        moved = self.root / "fresh-host-custody"
+        shutil.move(str(old), moved)
+        self.secret.unlink()
+        restored = ops.restore_wrapping_custody(manifest, self.root / "fresh-secrets", source=moved)
+        self.assertEqual(Path(restored["wrap-1"]).read_bytes(), bytes(range(32)))
+        self.assertFalse(old.exists())
+        import io
+        with patch.object(sys, "argv", ["ops_backup.py", "restore-wrapping", str(folder),
+                "--source", str(moved), "--destination", str(self.root / "cli-secrets")]), \
+                patch.object(sys, "stdout", io.StringIO()) as output:
+            ops.main()
+        self.assertEqual(Path(json.loads(output.getvalue())["files"]["wrap-1"]).read_bytes(), bytes(range(32)))
+
+    def test_missing_second_custody_file_leaves_destination_retryable(self):
+        _, manifest = self.backup()
+        manifest["wrapping_custody"]["files"]["wrap-2"] = {
+            "file": "wrap-1.key", "sha256": "a" * 64, "bytes": 32}
+        destination = self.root / "retry-secrets"
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            ops.restore_wrapping_custody(manifest, destination)
+        self.assertFalse(destination.exists())
+
     def test_nightly_backup_refuses_missing_custody_and_resumes_writers(self):
         for failure in ("configuration", "file", "id", "length"):
             with self.subTest(failure=failure):
@@ -1214,7 +1254,7 @@ class WrappingCustodyTests(unittest.TestCase):
                 self.assertIsNotNone(error)
                 self.assertFalse(result["success"])
         custody.write_bytes(bytes(range(32)))
-        for schema in ("emr_signing.private_key", "emr_clinical.online_version"):
+        for schema in ("emr_signing.private_key", "emr_clinical.online_version", "emr_audit.fixed_copy", "emr_image.preparation"):
             self.host.table_counts[schema] += 1
             result, error, _, _ = self.host.rehearse(folder, rows_stream({1: "original"}))
             self.assertIn("row counts differ", str(error))

@@ -56,10 +56,10 @@ window.KinConsultations = function(app) {
   }
   function clearEditor() {row=null;createUid=null;$('reason').value=$('note').value='';$('create').hidden=$('detail').hidden=true;
     for(const id of ['study','participants','current-state','original','answer'])$(id).textContent='';$('reader').replaceChildren();$('heading').textContent='Select a Request';}
-  function drawRow(value) {
+  function drawRow(value, evidence) {
     row=item(value);createUid=null;$('create').hidden=true;$('detail').hidden=false;$('heading').textContent='Request Details';
     $('study').textContent=identity(row.studyUid);$('participants').textContent=`From: ${row.requesterActor} · To: ${row.recipientName} · ${row.recipientActor}`;
-    $('current-state').textContent=`${row.state} · ${new Date(row.updatedAt).toLocaleString()} · ${row.changedBy}`;
+    $('current-state').textContent=[row.state,new Date(row.updatedAt).toLocaleString(),row.changedBy,window.KinClinicalSignature?.(evidence,row.revision)].filter(Boolean).join(' · ');
     $('original').textContent=row.reason;$('answer').textContent=row.reply||row.cancelReason||'—';$('reason').value=$('note').value='';drawList();
   }
   let interruptedTask=null;
@@ -90,7 +90,7 @@ window.KinConsultations = function(app) {
     pending=null;
     run(async(signal,current,at)=>{const value=await app.api('GET','/consultations/'+encodeURIComponent(id),undefined,signal,at);
       work.commit(at,()=>{
-      if(!current())return;verified(value);if(value.item?.id!==id)throw Error('자문 대상이 바뀌었습니다');drawRow(value.item);$('status').textContent='최신 자문 의뢰입니다.';});});
+      if(!current())return;verified(value);if(value.item?.id!==id)throw Error('자문 대상이 바뀌었습니다');drawRow(value.item,value.emr);$('status').textContent='최신 자문 의뢰입니다.';});});
   }
   function create() {
     if(!mayLeave())return;const study=app.current();if(!study){$('status').textContent='검사 목록에서 의뢰할 검사를 먼저 선택하세요.';return;}
@@ -110,7 +110,7 @@ window.KinConsultations = function(app) {
         const value=await app.api('POST',request.path,request.body,signal,at);
       work.commit(at,()=>{if(!current())return;verified(value);
         if(value.item?.studyUid!==request.uid||value.item?.id!==request.id)throw Error('자문 저장 대상을 확인할 수 없습니다');
-        const next=item(value.item);pending=null;items=items.map(r=>r.id===next.id?next:r);drawRow(next);$('status').textContent='자문 요청을 저장했습니다. 목록은 Reload로 갱신할 수 있습니다.';});
+        const next=item(value.item);pending=null;items=items.map(r=>r.id===next.id?next:r);drawRow(next,value.emr);$('status').textContent='자문 요청을 저장했습니다. 목록은 Reload로 갱신할 수 있습니다.';});
       } catch(e) {
         work.commit(at,()=>{if(current()&&[400,403,404,409].includes(e.status))pending=null;});
         if(current()&&e.status===409&&request.path.startsWith('/consultations/')) {
@@ -118,7 +118,7 @@ window.KinConsultations = function(app) {
           try {
             const latest=await app.api('GET',request.path,undefined,signal,at);
       work.commit(at,()=>{
-            if(current()){verified(latest);if(latest.item?.id!==request.id)throw Error('자문 대상이 바뀌었습니다');const fresh=item(latest.item);items=items.map(r=>r.id===fresh.id?fresh:r);drawRow(fresh);$('note').value=note;e.message+=' · 최신 상태를 표시했습니다';}});
+            if(current()){verified(latest);if(latest.item?.id!==request.id)throw Error('자문 대상이 바뀌었습니다');const fresh=item(latest.item);items=items.map(r=>r.id===fresh.id?fresh:r);drawRow(fresh,latest.emr);$('note').value=note;e.message+=' · 최신 상태를 표시했습니다';}});
           } catch(error) {if(current())e.message+=' · 최신 상태를 확인하지 못했습니다: '+error.message+' · 목록의 요청을 다시 선택하세요';}
         }
         throw e;

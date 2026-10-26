@@ -1,7 +1,9 @@
 """D-T1/T2/T4/T5: real PG/B2 and C2 signing, synthetic fixture only.
 
-This is the storage/signing boundary, not evidence of served-page or HTTP wiring.
-The fixture applies the normal production migrations, including C2 and D.
+OnlineClinicalPg exercises storage/signing; ReportCommitPg and ClinicalRoutesPg
+use actual Nest HTTP controllers, AuthGuard, C2 and B2. Only the external identity
+and study sources are synthetic. Served pages are exercised separately. The
+fixture applies the normal production migrations, including C2 and D.
 """
 import os
 from pathlib import Path
@@ -53,7 +55,11 @@ class OnlineClinicalPg(pg.PgLedgerFixture):
 
 
 class ReportCommitPg(pg.PgLedgerFixture):
+    script = 'report_commit_pg_test.cjs'
     def test_report_commit_http(self):
+        self.run_http_script()
+
+    def run_http_script(self):
         logs = ROOT / 'tmp/emr-d-online' / ('report-' + self.token)
         logs.mkdir(parents=True)
         env = {'DATABASE_URL': self.runtime_url, 'KIN_D_WITNESS_URL': self.witness_url,
@@ -63,15 +69,22 @@ class ReportCommitPg(pg.PgLedgerFixture):
                        '-v', str(ROOT / 'tests/emr/d') + ':/tests:ro', '-e', 'KIN_D_API=/app']
             for key, value in env.items():
                 command += ['-e', key + '=' + value]
-            command += ['--entrypoint', 'node', self.image, '--test', '/tests/report_commit_pg_test.cjs']
+            command += ['--entrypoint', 'node', self.image, '--test', '/tests/' + self.script]
             result = self.command(command, check=False)
         else:
-            result = self.command([os.environ['KIN_B2R_NODE'], '--test', str(ROOT / 'tests/emr/d/report_commit_pg_test.cjs')],
+            result = self.command([os.environ['KIN_B2R_NODE'], '--test', str(ROOT / 'tests/emr/d' / self.script)],
                                   env={**os.environ, **env}, check=False)
         (logs / 'stdout.log').write_text(result.stdout, encoding='utf-8')
         (logs / 'stderr.log').write_text(result.stderr, encoding='utf-8')
         print('Report commit HTTP raw logs:', logs)
         self.assertEqual(result.returncode, 0, result.stdout[-3000:] + result.stderr[-1000:])
+
+
+class ClinicalRoutesPg(pg.PgLedgerFixture):
+    script = 'routes_pg_test.cjs'
+
+    def test_clinical_routes_http(self):
+        ReportCommitPg.run_http_script(self)
 
 
 if __name__ == '__main__':

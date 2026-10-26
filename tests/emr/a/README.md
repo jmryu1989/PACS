@@ -17,6 +17,10 @@ preparation. A3 also supplies its existing W9_AUDIT_UNAVAILABLE failure body;
 other consumers retain EMR_VIEWING_UNAVAILABLE. A1 introduces no timer, reserve
 or new timeout. A lifecycle abort refuses HTTP immediately while the admitted
 append and its aborted follow-up drain in the original work.
+A local-read route answers 200: preparation refuses any other status set before
+the interceptor runs, and only a finished 200 is `transfer-ended`. Nest gives a
+POST route 201, so a POST local-read route declares `@HttpCode(200)` (W9's
+resolve already does).
 
 Serialization runs once before recording. The hash identifies the actual
 serialized target projection; it is not a signature or an integrity chain.
@@ -38,6 +42,14 @@ formal PatientLink, signature or retained-state placeholders. Audit replay expos
 `patient: null` with `localSource` for these targets. The `sourcePatientId` filter
 is an observed identifier inside the investigation's existing institution scope;
 it is not interchangeable with the formal patient/assigning-authority filter.
+`incidentScope` lists these subjects in `identifiedLocally` by their observed
+PatientID and source institution (an unobserved PatientID stays unresolved, one
+entry per study). They are not formal identifications: their presence adds the
+reason `identified-locally`, so `subjectsIdentifiable` is false. The auditor's
+own access event (`investigationLedgerEvent`, also `incidentScope.auditEvent`)
+carries one `access-audit` target per shown local row with the same observed
+identifiers and no PatientLink. The route that records that event must accept
+these targets; no route records it yet.
 
 Run the parser/projection, failure and transport component cases:
 
@@ -55,16 +67,52 @@ KIN_TEST_API_IMAGE=<candidate-image> python scripts/run-tests.py --module tests/
 The PG driver proves append/readback/filter, request attribution, all receipts
 before stream selection, a last-target SQL failure and close before a delayed
 COMMIT using fixture-owned SQL locks. Its transport objects are component inputs,
-not a substitute route or real HTTP wire. Pure failures use no fake durable
-receipt. UNKNOWN is queried only under the original operation ID and is never
-retried as a new event.
+not a substitute route or real HTTP wire. A second PG case (A-PG-AUDIT-LOCAL)
+builds the incident scope and the export from rows read back from
+`emr_access.access_entry`. Pure failures use no fake durable receipt. UNKNOWN is
+queried only under the original operation ID and is never retried as a new event.
 
 REQ-A-DURABLE / A-PG-COMMIT remains partial until A2/A3's real routes prove
 COMMIT before their first clinical byte and lost-reply resolution. REQ-A-TARGET
 / A-HTTP-BODY and REQ-A-OUTCOME / A-HTTP-OUTCOME require the real Nest routes;
 renderer acceptance belongs to A5. Empty fixture endpoints do not close them.
 The current workflow is `validate.yml`; the order's `emr-b.yml` is absent.
-A1 and A3 selections are registered there under the `emr-b` job.
+
+## A2 report history reads
+
+`GET studies/:uid/report/versions` and
+`GET studies/:uid/report/versions/:version/citations` return a `LocalReadResponse`
+built by `api/src/emr-viewing/report-read.ts` from the rows their existing gates
+already fixed (no second read). Every returned version row is a `report-version`
+target (study UID, the `ReportVersion` id, its version) and carries its own
+`accessRef`, the event ID of its provide-prepared record; an empty history has no
+target. A version citations answer is one `report-evidence` target for the stored
+version and the filtered answer (an empty projection is still that version's
+read) and carries its `accessRef`. The routes' own refusals (400/403/404/409)
+record nothing; a refusal by an outer interceptor after preparation (the
+`StudyAccessInterceptor` 409) leaves the prepared records with `transfer-aborted`.
+The routes retain the raw source PatientID and InstitutionName observed by this
+request's `StudyAccessService.prepareSourceIdentity`; its single QIDO read names
+`00080080` in `includefield`, because InstitutionName is not a QIDO default
+attribute (measured on Orthanc 1.12.5). Missing or blank values
+remain `not-observed`; neither value is inferred from StudyState. Cause is
+`user-view` and no work context is observed.
+
+The real cells run the production `AppModule.withLedger` over HTTP on the B2 PG
+fixture with an independent witness: all targets committed before the first
+response byte (ledger INSERT held by an SQL lock), the exact returned rows and
+hashes, filtered/empty/missing/refused citations, a last-target SQL failure, a
+client that leaves before a late COMMIT, an outer `StudyAccessInterceptor`
+refusal after preparation, and a COMMIT reply lost in a TCP relay in front of
+the ledger connection. The synthetic Orthanc answers only the default QIDO study
+attributes and the tags the request names in `includefield`, as Orthanc does:
+
+```sh
+KIN_TEST_API_IMAGE=<candidate-image> python scripts/run-tests.py --module tests/emr/a/report_reads_test.py --class ReportReadsHttp --mode live --unit module-a-02-http --timeout <measured-hang-timeout-seconds>
+```
+
+Display (`client-shown`) of the returned rows belongs to A4/A5.
+A1, A2 and A3 selections are registered in `validate.yml`'s `emr-b` job.
 
 
 A3 binds W9's ready metadata to this boundary. Its source manifest uses each
