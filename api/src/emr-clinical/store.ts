@@ -5,7 +5,7 @@ import type { AccessEvent } from '../emr-contract/access-event';
 import { refuse } from '../emr-contract/validation';
 import { EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS, boundEmrStatements } from '../emr-runtime/limits';
 import type { ClinicalRecord, ClinicalUnit } from './contract';
-import { applyPlan, ClinicalWritePlan, projectUnit, RequestIdentity, WriteInput } from './records';
+import { applyPlan, ClinicalWritePlan, projectUnit, replayUnit, RequestIdentity, WriteInput } from './records';
 import type { ClinicalSignature } from './signing';
 
 export interface StoredClinicalCommand {
@@ -83,9 +83,7 @@ export class ClinicalStore {
   }
 
   async unit(tx: Prisma.TransactionClient, record: ClinicalRecord, recordId: string): Promise<Readonly<ClinicalUnit> | null> {
-    let unit: Readonly<ClinicalUnit> | null = null;
-    for (const version of await this.versions(tx, record, recordId)) unit = applyPlan(unit, version.plan);
-    return unit;
+    return replayUnit((await this.versions(tx, record, recordId)).map(version => version.plan));
   }
 
   async version(tx: Prisma.TransactionClient, versionId: string): Promise<StoredClinicalVersion | null> {
