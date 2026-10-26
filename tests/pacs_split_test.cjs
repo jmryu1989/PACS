@@ -5,6 +5,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 // Split phase (S9-U0b round 2): every original unit lives in its approved concern and is compared with its unchanged
 // RELIST baseline through the bounded correspondence its entry records (pacs_split_contract.cjs); the facade and the
 // concern files may hold nothing the spec does not name. Current Nest registration and the real DI consumer below
@@ -195,15 +196,98 @@ test('U0B-CORRESPONDENCE a receiver is read back only as recorded: exact pair an
   assert.throws(() => assertEntry(other, { ...entry, live: other.spec.entries[0].live }), /Move equivalence/);
 });
 
-// The pre-split whole-application snapshot predates approved B2/request-facts,
-// E and F consumers. D73: their registration is exercised by real HTTP tests;
-// it must not require another inventory of unrelated providers and routes.
-test('U0B-DI the shipped app registers the PACS facade once and keeps concerns plain', () => {
+// ── Nest DI and routes (order section 7 DI/routes, M23/M24) ──
+/**
+ * The snapshot minus exactly the declared additions of a later feature unit equals the unchanged pre-split snapshot, and
+ * what was taken away is exactly the declaration - nothing more, nothing less, nothing re-pinned (the S9-U4b pattern).
+ */
+function withoutDeclared(now, declared) {
+  const take = (list, names) => {
+    const kept = list.filter(item => !names.includes(item));
+    assert.deepEqual(list.filter(item => names.includes(item)), names, 'each declared name is present once, in order');
+    return kept;
+  };
+  const routeKey = r => JSON.stringify(r);
+  const declaredRoutes = declared.routes.map(routeKey);
+  const added = now.routes.filter(r => declaredRoutes.includes(routeKey(r)));
+  assert.deepEqual(added.map(routeKey), declaredRoutes, 'the declared routes are exactly present, in snapshot order');
+  const injectables = { ...now.injectables };
+  for (const [name, value] of Object.entries(declared.injectables)) {
+    assert.deepEqual(injectables[name], value, name);
+    delete injectables[name];
+  }
+  // D1489: a declared constructor change is taken back only if the snapshot holds exactly its declared later form.
+  for (const [name, change] of Object.entries(declared.changed_injectables ?? {})) {
+    if (name === 'note') continue;
+    assert.deepEqual(injectables[name], change.after, name + ' is exactly its declared later form');
+    injectables[name] = change.before;
+  }
+  let middleware = now.middleware;
+  for (const addition of declared.middleware_routes ?? []) {
+    const bindings = middleware.filter(binding => JSON.stringify(binding.apply) === JSON.stringify(addition.apply));
+    assert.equal(bindings.length, 1, 'the declared middleware has exactly one binding');
+    middleware = middleware.map(binding => binding === bindings[0] ?
+      { ...binding, forRoutes: take(binding.forRoutes, addition.forRoutes) } : binding);
+  }
+  return { ...now, controllers: take(now.controllers, declared.controllers), providers: take(now.providers, declared.providers), injectables, middleware,
+    routes: now.routes.filter(r => !declaredRoutes.includes(routeKey(r))) };
+}
+/** W5-API (D1460): the snapshot minus exactly the declared added parameter decorators (spec.w5_api.route_args) - each present once. */
+function withoutW5Arguments(now) {
+  const declared = spec.w5_api.route_args;
+  assert.deepEqual(declared.map(change => `${change.controller}.${change.handler}`), ['PacsController.draft']);
+  return { ...now, routes: now.routes.map(route => {
+    const change = declared.find(item => item.controller === route.controller && item.handler === route.handler);
+    if (!change) return route;
+    assert.deepEqual(route.args.filter(arg => change.added.includes(arg)), change.added, 'each declared argument is present once');
+    return { ...route, args: route.args.filter(arg => !change.added.includes(arg)) };
+  }) };
+}
+test('U0B-DI-W9 metadata selector and route match their declared Nest boundary', () => {
+  const full = diSnapshot(), w9 = spec.di_additions_w9;
+  const remaining = withoutDeclared(full, w9);
+  assert.equal(full.routes.length - remaining.routes.length, w9.routes.length);
+  assert.equal(remaining.providers.includes('ViewingSetAccess'), false);
+});
+
+test('U0B-DI Nest metadata equals the pre-split snapshot plus declared additions: tokens, constructor tokens, scopes, enhancers, middleware, routes', () => {
   const full = diSnapshot();
-  assert.equal(full.providers.filter(name => name === 'PacsService').length, 1);
-  assert.equal(full.controllers.filter(name => name === 'PacsController').length, 1);
-  assert.equal(full.injectables.PacsService.scope, null, 'the facade keeps the application lifetime');
-  assert.ok(full.injectables.PacsController.params.includes('PacsService'));
+  // W9-API (D1500): the viewing-set resolve controller, its service and the A1 metadata selector, one route.
+  const w9 = spec.di_additions_w9;
+  assert.equal(w9.unit, 'W9-API');
+  assert.deepEqual([w9.controllers, w9.providers, w9.routes.length], [['MultiStudyViewController'],
+    ['MultiStudyViewService', 'ViewingSetAccess'], 1]);
+  const u4b = spec.di_additions;
+  assert.equal(u4b.unit, 'S9-U4b');
+  assert.deepEqual([u4b.controllers, u4b.providers, u4b.routes.length], [['StudyTransferLocalController'],
+    ['StudyTransferLocalService', 'DicomImportGateService'], 7]);
+  assert.deepEqual(Object.keys(u4b.changed_injectables).filter(k => k !== 'note'), ['AuthGuard'], 'D1489: one constructor change, the AuthGuard');
+  assert.deepEqual(u4b.changed_injectables.AuthGuard.before, spec.di.injectables.AuthGuard, 'its earlier form is the unchanged snapshot');
+  const declared = {
+    controllers: [...w9.controllers, ...u4b.controllers],
+    providers: [...u4b.providers, ...w9.providers],
+    injectables: { ...u4b.injectables, ...w9.injectables },
+    changed_injectables: u4b.changed_injectables,
+    routes: [...w9.routes, ...u4b.routes].sort((a, b) =>
+      `${a.controller}.${a.handler}`.localeCompare(`${b.controller}.${b.handler}`)),
+  };
+  const additions = [spec.di_additions_f_link, spec.di_additions_emr_online, spec.di_additions_b2, declared];
+  assert.equal(full.routes.length, spec.di.routes.length + additions.reduce((count, item) => count + item.routes.length, 0));
+  // Undo later online/identity bindings before B2 and the earlier feature declarations.
+  const now = additions.reduce(withoutDeclared, withoutW5Arguments(full));
+  assert.deepEqual(now, spec.di);
+  // Use the approved split's route set, independent of today's editable spec, so an addition cannot be re-pinned as baseline.
+  const splitRoutes = JSON.parse(execFileSync('git', ['show',
+    'c8e4f1b485ec05ccbb97589c74a573b3f48b70ce:tests/pacs_split_spec.json'],
+  { cwd: path.resolve(__dirname, '..'), encoding: 'utf8', maxBuffer: 8e6 })).di.routes;
+  assert.deepEqual(now.routes, splitRoutes, 'the approved pre-split route set is unchanged');
+  assert.deepEqual(withoutDeclared(full, spec.di_additions_f_link).middleware, spec.di.middleware,
+    'existing middleware bindings remain unchanged outside the declared F route');
+  assert.ok(w9.routes.every(r => r.controller === 'MultiStudyViewController' && !r.public), 'no declared route is public');
+  assert.ok(u4b.routes.every(r => r.controller === 'StudyTransferLocalController' && !r.public), 'no declared route is public');
+  assert.ok(spec.di_additions_emr_online.routes.every(r => !r.public), 'no declared route is public');
+  assert.deepEqual(now.injectables.PacsService.params, ['PrismaService', 'OrthancService', 'KeycloakService', 'StudyAccessService', 'FindingService']);
+  // the concerns are plain objects the facade owns: no Nest metadata, not registered anywhere
   for (const [target, concern] of Object.entries(spec.concerns)) {
     if (!concern.class) continue;
     const cls = require('/app/dist/' + target.slice('api/src/'.length, -3))[concern.class];

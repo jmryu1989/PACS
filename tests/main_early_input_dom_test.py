@@ -1818,10 +1818,16 @@ class LoadBudget(PreCase):
         cls.browser = cls.pw.chromium.launch(channel="chromium", headless=True)
 
     def sample(self, layout, context):
-        context.unroute_all(behavior="wait")
         site = PreSite()
         site.held_me = []
-        context.route("**/*", lambda route, request: site.handle(route, request))
+        inflight = []
+        def handle(route, request):
+            inflight.append(route)
+            try:
+                return site.handle(route, request)
+            finally:
+                inflight.remove(route)
+        context.route("**/*", handle)
         side = layout[1].get("side", "current")
         if side != "current":
             site.historical_file = lambda name: Pages.blob_file(side, name)
@@ -1854,8 +1860,14 @@ class LoadBudget(PreCase):
                     "console_errors": console_errors, "page_errors": errors,
                     "inputs": delivery.expected, "delivered": delivery.bodies}
         finally:
-            delivery.dispose()
-            page.close()
+            try:
+                # Keep both context routes registered until their callbacks finish. Removing them with 'wait' while a
+                # callback is active lets Playwright 1.60's late interception removal disable the next sample's routes.
+                delivery.wait(page, lambda: not inflight and not delivery.inflight, "sample route handlers finished")
+                context.unroute_all(behavior="wait")
+            finally:
+                delivery.dispose()
+                page.close()
 
     def test_uninstrumented_paired_load_budget(self):
         mode = os.environ.get("KIN_PRE_LOAD_MODE", "hosted")
