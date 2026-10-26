@@ -44,7 +44,8 @@ export class PacsClinicalRoutes {
     // Read it through the clinical boundary so the provided head is recorded.
     if (result.emr.replayed) {
       const current = await clinicalRoutes(this.clinical).read(request, 'tech-note', uid,
-        tx => this.notes.techNote(uid, c, undefined, tx), undefined, 'POST studies/:uid/tech-note');
+        tx => this.notes.techNote(uid, c, undefined, tx), undefined, 'POST studies/:uid/tech-note',
+        value => value.note ? [value.note.version] : []);
       return { ...result, latestNote: current.note };
     }
     return result;

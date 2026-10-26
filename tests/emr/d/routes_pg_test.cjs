@@ -390,7 +390,8 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     assert.equal((await send('clinician', 'GET', '/image-requests?view=mine')).items[0].id, imageRequest.applied.id);
     assert.equal((await send('doctor', 'GET', `/studies/${uid}/image-requests`)).items[0].id, imageRequest.applied.id);
     await send('tech', 'POST', `/studies/${uid}/tech-note`, { attemptId: 'not-a-uuid', baseVersion: 0, text: '잘못된 요청 ID', reason: '' }, 400);
-    const note = await send('tech', 'POST', `/studies/${uid}/tech-note`, { attemptId: randomUUID(), baseVersion: 0, text: '합성 촬영 메모', reason: '' });
+    const noteBody = { attemptId: randomUUID(), baseVersion: 0, text: '합성 촬영 메모', reason: '' };
+    const note = await send('tech', 'POST', `/studies/${uid}/tech-note`, noteBody);
     assert.ok(note.emr.signature);
     const history = await send('doctor', 'GET', `/studies/${uid}/tech-note/history`);
     assert.equal(history.items[0].text, '합성 촬영 메모'); assert.equal(history.emr.signatures.length, 1);
@@ -415,6 +416,13 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     assert.deepEqual([emptyPage.items, emptyPage.emr.signatures], [[], []]);
     const pageReads = (await noteReads('GET studies/:uid/tech-note/history')).slice(historyBefore);
     assert.deepEqual(pageReads.map(row => row.event.targets.map(t => t.versionId.value)), [[noteVersions[0]]]);
+    // A late resend of the first save answers its stored receipt (v1) and today's head (v2): its 열람 entries name
+    // exactly those two, one each, and no retained version it did not return.
+    const resendBefore = (await noteReads('POST studies/:uid/tech-note')).filter(row => row.event.action === 'provide-prepared').length;
+    const resent = await send('tech', 'POST', `/studies/${uid}/tech-note`, noteBody);
+    assert.deepEqual([resent.emr.replayed, resent.note.version, resent.latestNote.version], [true, 1, 2]);
+    const resendReads = (await noteReads('POST studies/:uid/tech-note')).filter(row => row.event.action === 'provide-prepared').slice(resendBefore);
+    assert.deepEqual(resendReads.map(row => row.event.targets.map(t => t.versionId.value)), [[noteVersions[0]], [noteVersions[1]]]);
     const before = await db.studyState.findUnique({ where: { uid: teleUid } });
     await send('tech', 'POST', `/studies/${teleUid}/tech-note`, { attemptId: randomUUID(), baseVersion: 0, text: '합성 원격 메모', reason: '' });
     const teleQuestion = await send('clinician', 'POST', `/studies/${teleUid}/questions`, { requestId: randomUUID(), expectedOwner: owner('clinician'), body: '합성 원격 검사 질문' });
