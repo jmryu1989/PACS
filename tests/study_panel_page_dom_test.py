@@ -66,24 +66,19 @@ W6_REPORT_FIELDS = ('#findings', '#conclusion')
 # W4-LAND (pre-granted decided difference, same rule as W6R1-05): the report column gains Approve & Next in its footer row,
 # in front of Prev/Next, which keep their place (the row is right-aligned and stays one line), and two rows hidden at first
 # paint - the Notice of a study move that did not happen (6 nodes) and the read-only Recommendation notice (3 nodes).
-# First paint: + the measured W4 region nodes. In a picture the new button is made invisible where it stands (HIDE_W4, layout
+# Its first-paint nodes are a declared region of study_panel_size_dom_test.py (DECIDED_REGIONS); this module counts no
+# nodes. In a picture the new button is made invisible where it stands (HIDE_W4, layout
 # kept), so every other pixel and box is still compared with the baseline; its own place and reach are the W4 cases'
 # (report_actions_dom_test.py, report_flow_dom_test.py).
 HIDE_W4 = "() => document.querySelector('#b-approve-next')?.style.setProperty('visibility', 'hidden')"
 # W9-UI (order 01-multi-study-view.md; the W9 prep ui-contract: "Open Selected Studies appears in Radiology's Selected
 # toolbar ... Disabled for fewer than 2"): a decided difference. The Selected toolbar gains that one button, disabled at
 # first paint (nothing is selected), and main.html adds the Multi-Study View's stylesheet link, its script tag and its
-# hidden #multi-study section. w9_view_nodes derives this bounded region and its assets from the served DOM;
-# adding a status line must not require a new node-count pin. The button lengthens the toolbar line (and wraps it where the list column is narrow), so the first-paint
+# hidden #multi-study section (a declared region of study_panel_size_dom_test.py, DECIDED_REGIONS). The button lengthens
+# the toolbar line (and wraps it where the list column is narrow), so the first-paint
 # comparisons take that button, and only it, out of the layout where it stands (HIDE_W9, display none: the toolbar is the
 # baseline's again) and compare every other box and pixel with the baseline; its own place, reach and disabled reason are
 # the W9 cases (multi_study_view_dom_test.py).
-def w9_view_nodes(page):
-    """Count only the decided W9 region, its launch control and its two assets (zero in the old baseline)."""
-    return page.evaluate("""() => document.querySelectorAll(
-      '#multi-study, #multi-study *, #multi-selection-open-set, '
-      + 'link[href="multi-study-view.css"], script[src="multi-study-view.js"]').length""")
-
 HIDE_W9 = """() => [...document.querySelectorAll('#worklist-selection button')]
   .find(b => b.textContent === 'Open Selected Studies')?.style.setProperty('display', 'none')"""
 SCROLLER = '''() => { const r = document.querySelector('.redit').getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; }'''
@@ -1244,7 +1239,7 @@ class StudyPanelPageDOM(unittest.TestCase):
             page.goto(auth.MAIN_URL)
             expect(page.locator('#rows')).to_contain_text(auth.PATIENT)
             wait_startup(page, site)
-            page.evaluate(HIDE_W9)   # W9-UI decided difference, see w9_view_nodes
+            page.evaluate(HIDE_W9)   # W9-UI decided difference, see HIDE_W9
             settle(page)
             facts = page.evaluate("""(names) => ({focus:document.activeElement.id || document.activeElement.tagName,
               panels:names.map(s=>{
@@ -1260,7 +1255,7 @@ class StudyPanelPageDOM(unittest.TestCase):
             w6 = w6_facts(page)
             pixels = None
             if picture:
-                page.evaluate(HIDE_W4)   # W4-LAND decided difference, see the measured W4 region
+                page.evaluate(HIDE_W4)   # W4-LAND decided difference, see HIDE_W4
                 cover(page, [rail, w6['scroller']])
                 pixels = first_paint_pixels(page, picture)
             self.assertEqual([], site.violations)
@@ -1333,7 +1328,7 @@ class StudyPanelPageDOM(unittest.TestCase):
         #   are left out of the geometry and each picture covers its own W6 scroller;
         #   what lies below the scroller in its column is compared where the scroller
         #   leaves it (w6_moved, w6_regions) and stays reachable (assert_w6_reachable).
-        # - W9-UI (w9_view_nodes above): the Selected toolbar's Open Selected Studies
+        # - W9-UI (HIDE_W9 above): the Selected toolbar's Open Selected Studies
         #   button is taken out of the layout before anything is measured (HIDE_W9).
         # Pixels count as equal within ANTIALIAS (16/255 per channel), not exact.
         current = auth.ROOT

@@ -57,6 +57,7 @@ MEMBER_LF = "이 검사의 영상을 불러오지 못했습니다. Retry로 다�
 MODE_REASON = "Related Report 모드에서는 쓸 수 없습니다"
 BUSY = "기존 영상 창에 저장하지 않은 표식이나 작업 내용"
 POPUP_BLOCKED = "영상 창이 차단되었습니다."
+VIEWER_GONE = "영상 창이 닫히거나 다시 읽혀 열지 않았습니다."
 NO_POPUP = """(() => { const open = window.open.bind(window);
   window.__synBlockPopups = false;
   window.open = (...args) => window.__synBlockPopups ? null : open(...args); })();"""
@@ -312,6 +313,45 @@ class MultiStudyViewPage(unittest.TestCase):
         expect(self.host()).to_be_hidden()
         self.assertIsNone(self.target())
 
+    def assert_admission_gone_recovers(self, popup, order):
+        """The viewer document that held the admission is gone: the page says so, and its own controls recover."""
+        self.page.clock.run_for(2001)  # existing Viewer Windows lifecycle tick
+        expect(self.status()).to_contain_text('Not Opened')
+        expect(self.status()).to_contain_text(VIEWER_GONE)
+        expect(self.page.locator('#multi-study-next')).to_be_enabled()
+        expect(self.page.locator('#multi-study-retry')).to_be_visible()
+        expect(self.member(order[2])).to_contain_text('Not Opened')
+        self.assertIsNone(self.target())
+
+    def test_closing_the_viewer_during_patient_tab_admission_frees_the_composition(self):
+        self.open(); order = self.visible_order()[:3]
+        self.open_set(order); self.wait_viewer(order[:2])
+        popup = self.viewer()
+        self.pending_patient_tab(popup)
+        self.press('#multi-study-next')
+        popup.wait_for_function('() => !!window.__synAdmitPatient')
+        expect(self.page.locator('#multi-study-next')).to_be_disabled()
+        popup.close()
+        self.assert_admission_gone_recovers(popup, order)
+        expect(self.page.locator('#multi-study-identity')).to_contain_text('Viewing: None')
+        popups = len(self.popups)
+        self.press('#multi-study-retry')
+        self.wait(lambda: len(self.popups) > popups, 'Retry opens a viewer in its own click')
+        self.wait_viewer(order[2:])
+
+    def test_reloading_the_viewer_during_patient_tab_admission_frees_the_composition(self):
+        self.open(); order = self.visible_order()[:3]
+        self.open_set(order); self.wait_viewer(order[:2])
+        popup = self.viewer()
+        self.pending_patient_tab(popup)
+        self.press('#multi-study-next')
+        popup.wait_for_function('() => !!window.__synAdmitPatient')
+        popup.reload()
+        self.assert_admission_gone_recovers(popup, order)
+        self.assertEqual(self.viewer_studies(popup)[0], order[:2])
+        self.press('#multi-study-retry')
+        self.wait_viewer(order[2:])
+
     # ── V-ENTRY ──
     def test_three_entries_one_action_frozen_visible_order_and_no_target_move(self):
         self.open()
@@ -360,7 +400,7 @@ class MultiStudyViewPage(unittest.TestCase):
         button = self.page.locator("#multi-selection-open-set")
         expect(button).to_be_disabled()
         # The Selected toolbar keeps the action whole in view at first paint, also where the list column is narrow and the
-        # toolbar line wraps (the Study Panel first-paint comparisons take this one button out: w9_view_nodes there).
+        # toolbar line wraps (the Study Panel first-paint comparisons take this one button out: HIDE_W9 there).
         for width, height in ((1920, 1080), (1366, 768), (900, 1200), (768, 1024)):
             with self.subTest(width=width, height=height):
                 self.page.set_viewport_size({"width": width, "height": height})

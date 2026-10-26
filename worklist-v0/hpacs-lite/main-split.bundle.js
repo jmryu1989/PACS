@@ -9104,12 +9104,34 @@
             popup.focus(); watchOhifRect(popup);
             // Patient tabs admit a route asynchronously. W9 must bind its renderer channel only after that admission,
             // while a refusal keeps the previous opening's sequence and displayed state.
-            return Promise.resolve(pending).then(accepted => {
-              if (!accepted || !work.admits(at) || popup.closed || ohifPopupSequences.get(popup) !== previousSequence)
-                return outcome('refused', '기존 영상 창을 유지했습니다. 영상 창의 안내를 확인하세요.');
-              ohifPopupSequences.set(popup, seq);
-              return outcome('accepted');
-            }, () => outcome('failed', '영상 창에서 검사를 열지 못했습니다. 영상 창의 안내를 확인한 뒤 다시 시도하세요.'));
+            // That promise belongs to the viewer document: closing or reloading the window discards its tasks and the
+            // promise never settles, which would leave the caller waiting for good. This page watches that document
+            // itself (its pagehide, and a check every 2 s as a backstop) and answers for it.
+            const admitting = popup.document;
+            return new Promise(resolve => {
+              let done = false, watch = null;
+              const lost = () => finish(outcome('refused', '영상 창이 닫히거나 다시 읽혀 열지 않았습니다. 다시 여세요.'));
+              const check = () => {
+                let gone = true;
+                try { gone = popup.closed || popup.document !== admitting; } catch (_) {}
+                if (gone) lost();
+              };
+              const finish = result => {
+                if (done) return;
+                done = true; clearInterval(watch);
+                try { popup.removeEventListener('pagehide', lost); } catch (_) {}
+                resolve(result);
+              };
+              // pagehide fires on the admitting document only as it is unloaded; a tab switch replaces the route in place.
+              try { popup.addEventListener('pagehide', lost); } catch (_) {}
+              watch = setInterval(check, 2000);
+              Promise.resolve(pending).then(accepted => {
+                if (!accepted || !work.admits(at) || popup.closed || ohifPopupSequences.get(popup) !== previousSequence)
+                  return finish(outcome('refused', '기존 영상 창을 유지했습니다. 영상 창의 안내를 확인하세요.'));
+                ohifPopupSequences.set(popup, seq);
+                finish(outcome('accepted'));
+              }, () => finish(outcome('failed', '영상 창에서 검사를 열지 못했습니다. 영상 창의 안내를 확인한 뒤 다시 시도하세요.')));
+            });
           }
           if (typeof popup.kinViewerFrameCoverageConfirm !== 'function' || !popup.kinViewerFrameCoverageConfirm(message => confirm(message))) {
             popup.focus(); notify('기존 영상 창을 유지했습니다. Frame Coverage와 원본 영상을 확인하세요.', 'info');

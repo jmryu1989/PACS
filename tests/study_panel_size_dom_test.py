@@ -26,13 +26,14 @@ of a paint, its contents are W4-SC's cases, and the requirement these counts car
 in the opened panel, nothing else is added to the first paint but the declared W6/W4 report nodes - is unchanged. The
 dialog must be present and closed in every count, so it cannot leave the count by being opened or moved.
 
-The declared feature regions are measured in both served trees by decided_nodes: W4's Approve & Next and
-report notices; W6's report frame assets and removed Recommendation heading; W5's related-mode reason lines,
-Related Report section and assets; S9-U4b's hidden DICOM Transfer section and assets; the clinical-signature asset;
-and W9's Open Selected Studies control, Multi-Study View section (including the New Selection status line) and
-assets. The opened panel's Text Size, Default, controls row and resize edge are measured in the same way. These
-counts are derived, never pinned; the remaining DOM is compared exactly. W9's launch button is taken out of the
-layout before pictures and geometry are measured (HIDE_W9), preserving the existing round-6 comparison.
+Decided differences in the node counts (PR #231 fix round, 2026-10-27, by D73 §14): each decision that adds to or
+removes from the first paint is declared once, as the region it owns, in DECIDED_REGIONS - W6-PAGE-22 (D1300), W4-LAND,
+W5-UI Phases A and B, S9-U4b (D1486/D1617/D1668), EMR-D #219, W9-UI and the opened panel's round-7 controls (Text Size,
+its row, Default, the edge). The counts of those regions are derived from that declaration in each served tree
+(decided_nodes) and never pinned; every element outside them is compared exactly, at first paint and with the panel
+open. What a feature builds inside its own declared region is that feature's own cases' (e.g. study_transfer_local,
+related_report_mode, multi_study_view), so growth there is not a difference of this comparison. W9's launch button is
+taken out of the layout before pictures and geometry are taken (HIDE_W9), so the round-6 comparison stays as it was.
 
 """
 import io
@@ -79,37 +80,44 @@ DEFAULT_SIZES = ((1920, 1080), (1366, 768), (2560, 1440), (1200, 1920), (1440, 2
 BOUND_SIZES = ((1200, 1920), (1440, 2560), (900, 1200), (1920, 1080), (1366, 768),
                (840, 768), (860, 700), (900, 768), (1024, 768), (900, 600), (1280, 720), (800, 768))
 SCALES = (1, 1.2, 1.4)
-# Count the declared feature regions in each served tree. A feature may change its
-# internal markup without changing the Study Panel's first-paint contract (D73).
-# Geometry, reachability and pixel comparisons below remain independent of these counts.
+STUDY_PANEL = '[role="complementary"][aria-label="Study Panel"]'
+# The decided differences of the round-6 comparison, each declared as the region it owns (module header):
+# (decision, CSS selector, 'tree' = the element and all it holds | 'node' = the element only, accessible name or None).
+# A feature's own cases own what happens inside its region; this comparison owns everything outside all of them.
+DECIDED_REGIONS = (
+    ('W6-PAGE-22 D1300: report frame script and measurement iframe', 'script[src="report-editor-frame.js"]', 'node', None),
+    ('W6-PAGE-22 D1300', 'body > iframe[aria-hidden="true"][sandbox="allow-same-origin"]', 'node', None),
+    ('W6-PAGE-22 D1300: the removed Recommendation heading', 'h4:has(+ #recommendation)', 'node', None),
+    ('W4-LAND: Approve & Next', '#b-approve-next', 'node', None),
+    ('W4-LAND: Notice of a move that did not happen', '#report-notice', 'tree', None),
+    ('W4-LAND: read-only Recommendation notice', '#recnote', 'tree', None),
+    ('W5-UI Phase A: Related-mode reason lines', '#cvr-sent-mode-reason, #cvr-inbox-mode-reason', 'node', None),
+    ('W5-UI Phase B: Related Report mode', '#related-mode', 'tree', None),
+    ('W5-UI Phase B', 'link[href="related-report-mode.css"], script[src="related-report-mode.js"]', 'node', None),
+    ('S9-U4b D1486/D1617/D1668: DICOM Transfer', '#study-transfer', 'tree', None),
+    ('S9-U4b D1486', '#t-import, style:has(+ #study-transfer), script[src="study-transfer-local.js"]', 'node', None),
+    ('EMR-D #219: clinical signing facts', 'script[src="clinical-signature.js"]', 'node', None),
+    ('W9-UI: Multi-Study View', '#multi-study', 'tree', None),
+    ('W9-UI', '#multi-selection-open-set, link[href="multi-study-view.css"], script[src="multi-study-view.js"]', 'node', None),
+    ('D1160 round 7: Text Size', STUDY_PANEL + ' select[aria-label="Text Size"]', 'tree', None),
+    ('D1160 round 7: the controls row', STUDY_PANEL + ' :has(> select[aria-label="Text Size"])', 'node', None),
+    ('D1160 round 7: Default', STUDY_PANEL + ' button', 'node', 'Default'),
+    ('D1160 round 7: the panel edge', STUDY_PANEL + ' [role="separator"]', 'node', None),
+)
+
+
 def decided_nodes(page):
-    return page.evaluate("""() => {
+    """The elements of the declared regions (DECIDED_REGIONS) in this served tree, each counted once."""
+    return page.evaluate("""(regions) => {
       const nodes = new Set();
-      const add = n => { if (n) nodes.add(n); };
-      const tree = n => { if (n) { add(n); n.querySelectorAll('*').forEach(add); } };
-      for (const selector of ['#report-notice', '#recnote', '#related-mode', '#multi-study', '#study-transfer'])
-        tree(document.querySelector(selector));
-      document.querySelectorAll('#b-approve-next, #multi-selection-open-set, #t-import, '
-        + '#cvr-sent-mode-reason, #cvr-inbox-mode-reason, '
-        + 'link[href="related-report-mode.css"], link[href="multi-study-view.css"], '
-        + 'script[src="report-editor-frame.js"], script[src="related-report-mode.js"], '
-        + 'script[src="multi-study-view.js"], script[src="study-transfer-local.js"], '
-        + 'script[src="clinical-signature.js"], body > iframe[aria-hidden="true"][sandbox="allow-same-origin"]')
-        .forEach(add);
-      const heading = document.querySelector('#recommendation')?.previousElementSibling;
-      if (heading?.matches('h4')) add(heading);
-      const transferStyle = document.querySelector('#study-transfer')?.previousElementSibling;
-      if (transferStyle?.matches('style')) add(transferStyle);
-      const panel = document.querySelector('[role="complementary"][aria-label="Study Panel"]');
-      if (panel) {
-        const size = panel.querySelector('select[aria-label="Text Size"]');
-        tree(size);
-        if (size) add(size.parentElement);
-        [...panel.querySelectorAll('button')].filter(b => b.textContent === 'Default').forEach(add);
-        panel.querySelectorAll('[role="separator"]').forEach(add);
-      }
+      for (const [, selector, scope, name] of regions)
+        for (const n of document.querySelectorAll(selector)) {
+          if (name !== null && n.textContent !== name) continue;
+          nodes.add(n);
+          if (scope === 'tree') n.querySelectorAll('*').forEach(child => nodes.add(child));
+        }
       return nodes.size;
-    }""")
+    }""", [list(region) for region in DECIDED_REGIONS])
 
 
 def nodes_outside_shortcuts(page):
@@ -242,7 +250,7 @@ class StudyPanelSizeDOM(unittest.TestCase):
             page.goto(auth.MAIN_URL)
             expect(page.locator('#rows tr[data-uid]')).to_have_count(2)
             wait_startup(page, site)
-            page.evaluate(HIDE_W9)   # W9-UI decided difference (study_panel_page_dom_test.py w9_view_nodes)
+            page.evaluate(HIDE_W9)   # W9-UI decided difference (study_panel_page_dom_test.py HIDE_W9)
             settle(page)
             facts = {'first_paint_nodes': nodes_outside_shortcuts(page), 'decided_first_paint_nodes': decided_nodes(page)}
             self.click_row(page, 0, f'{width}x{height}')
@@ -261,7 +269,7 @@ class StudyPanelSizeDOM(unittest.TestCase):
                 left, top = min(c['x'] for c in controls), min(c['y'] for c in controls)
                 mask = [left, top, max(c['x'] + c['width'] for c in controls) - left, max(c['y'] + c['height'] for c in controls) - top]
             if picture:
-                page.evaluate(HIDE_W4)   # W4-LAND decided difference (study_panel_page_dom_test.py the measured W4 region)
+                page.evaluate(HIDE_W4)   # W4-LAND decided difference (study_panel_page_dom_test.py HIDE_W4)
                 cover(page, [mask])
                 settle(page)
                 facts['pixels'] = page.screenshot(animations='disabled', caret='hide',

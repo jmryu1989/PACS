@@ -245,18 +245,14 @@ class MultiStudyViewE2E(base.WorklistE2E):
         select_image_tool(viewer, 'Length')
         # The U2 shell changes the image's letterboxing. Place both handles in the
         # actual image, as the manual-measurement suites do, rather than in its canvas margin.
-        geometry = viewer.evaluate('''() => {
+        start, end = viewer.evaluate('''() => {
           const v=cornerstone.getRenderingEngines().filter(e=>e.id!=='_thumbnails')
             .flatMap(e=>e.getViewports()).find(v=>v.getCurrentImageId?.() && v.element.getBoundingClientRect().width>0);
           const d=v.getImageData(),r=v.element.getBoundingClientRect();
           const point=([x,y])=>v.worldToCanvas(d.imageData.indexToWorld([x*(d.dimensions[0]-1),y*(d.dimensions[1]-1),0]))
             .map((n,i)=>n+(i?r.y:r.x));
-          return {dimensions:d.dimensions,points:[[.4,.4],[.6,.6]].map(point),
-            formerCanvasPoints:[[r.width*.38,r.height*.4],[r.width*.38+65,r.height*.4+32]]
-              .map(p=>Array.from(d.imageData.worldToIndex(v.canvasToWorld(p))))};
+          return [[.4,.4],[.6,.6]].map(point);
         }''')
-        print('W9_MEASUREMENT_GEOMETRY', json.dumps(geometry), flush=True)
-        start, end = geometry['points']
         viewer.mouse.move(*start);viewer.mouse.down();viewer.mouse.move(*end,steps=10);viewer.mouse.up()
         viewer.wait_for_function('''() => cornerstoneTools.annotation.state.getAllAnnotations().some(a=>
           a.metadata.toolName==='Length' && !a.invalidated && Object.values(a.data.cachedStats||{}).some(s=>Number.isFinite(s.length)))''')
