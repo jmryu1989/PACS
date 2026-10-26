@@ -184,7 +184,8 @@ W9's real metadata read for the provisions: the ACK waits for the client-shown
 INSERT held by an SQL lock, resend/conflict/new opening, wrong study/unknown/
 metadata/disposed references, malformed reports, institution/preliminary/
 clinician refusals, cookie account switch and re-login, a lost COMMIT reply in
-the ledger relay, a closed record port and an API restart on the same database.
+the ledger relay, a closed record port, and a resend to a second API process on the
+same database (B2 composes once per process, so the restart is a new process).
 They do not prove that a page displayed anything; the served renderer is A5.
 The route's EMR route classification (`api/src/emr-contract/routes.ts`) is
 outside A4's paths and is handed to its owner; until it lands,

@@ -3,12 +3,13 @@
 The production AppModule.withLedger serves POST studies/:uid/view-observations beside A2's real report reads on the
 accepted B2 synthetic PG fixture; an independent witness connection reads the ledger back. Only external collaborators
 are synthetic (OIDC keys, the Orthanc QIDO answer, a TCP relay in front of the ledger connection). SQL locks, a lost
-COMMIT reply, a closed record port and an API restart on the same database make the ordinary schedules. The served
+COMMIT reply, a closed record port and a second API process on the same database make the ordinary schedules. The served
 page's renderer (which displays and reports) belongs to A5 and is not proven here.
 The Node driver is embedded so the single A4 entry point is self-contained (A3's form).
 """
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import unittest
@@ -145,12 +146,15 @@ before(async () => {
     KC_JWKS_URL: providerUrl + '/certs', ORTHANC_URL: providerUrl, ORTHANC_USER: 'synthetic', ORTHANC_PASS: randomUUID() });
   const witness = new PrismaClient({ datasources: { db: { url: process.env.KIN_B2R_WITNESS_URL } } });
   await witness.$connect();
-  await witness.memberRightsImport.create({ data: { id: 'realm-v1' } });
-  for (const institution of [site, foreignSite]) await witness.institution.create({ data: { id: institution, name: 'SYN ' + institution } });
+  // The restart phase is a second process on the same database: the synthetic rows already exist then.
+  await witness.memberRightsImport.upsert({ where: { id: 'realm-v1' }, create: { id: 'realm-v1' }, update: {} });
+  for (const institution of [site, foreignSite]) await witness.institution.upsert({ where: { id: institution },
+    create: { id: institution, name: 'SYN ' + institution }, update: {} });
   for (const member of Object.values(members)) {
     member.email = member.sub + '@example.test';
-    await witness.memberRights.create({ data: { sub: member.sub, username: member.sub, email: member.email,
-      name: 'Synthetic ' + member.sub, emailVerified: true, approved: true, suspended: false, institution: site, roles: member.roles } });
+    await witness.memberRights.upsert({ where: { sub: member.sub }, update: {}, create: { sub: member.sub, username: member.sub,
+      email: member.email, name: 'Synthetic ' + member.sub, emailVerified: true, approved: true, suspended: false,
+      institution: site, roles: member.roles } });
     member.token = await new jose.SignJWT({ email: member.email, realm_access: { roles: member.roles }, groups: ['/' + site] })
       .setProtectedHeader({ alg: 'RS256', kid: jwk.kid }).setIssuer(issuer).setSubject(member.sub).setAudience('kin-api')
       .setIssuedAt().setExpirationTime('30m').sign(privateKey);
@@ -289,8 +293,12 @@ function assertShown(entry, source, sent, binding) {
   assert.notEqual(event.auditLinkId, source.event.auditLinkId);
 }
 const BEARER = { method: 'bearer', sessionRef: null };
+// One process holds the main cells; the restart cell runs in a second API process on the same database.
+const phase = process.env.KIN_A4_PHASE || 'main';
+const mainTest = phase === 'main' ? test : () => {};
+const restartTest = phase === 'restart' ? test : () => {};
 
-test('A-HTTP-OBSERVE: the ACK follows the COMMIT of a client-shown bound to the stored provision; client and server times stay apart', async () => {
+mainTest('A-HTTP-OBSERVE: the ACK follows the COMMIT of a client-shown bound to the stored provision; client and server times stay apart', async () => {
   const uid = await study();
   await version(uid, 1, { action: 'save' });
   await version(uid, 2);
@@ -331,7 +339,7 @@ test('A-HTTP-OBSERVE: the ACK follows the COMMIT of a client-shown bound to the 
   assert.equal(evidenceShown.event.targets[0].kind, 'report-evidence');
 });
 
-test('A-HTTP-OBSERVE: a resent report is the same event; a new opening is a new event; another report under the ID is refused', async () => {
+mainTest('A-HTTP-OBSERVE: a resent report is the same event; a new opening is a new event; another report under the ID is refused', async () => {
   const uid = await study();
   await version(uid, 1);
   const [row] = await history(uid);
@@ -360,7 +368,7 @@ test('A-HTTP-OBSERVE: a resent report is the same event; a new opening is a new 
     transfers, 'a display report adds no transfer outcome');
 });
 
-test('A-HTTP-OBSERVE: wrong targets, absent or disposed provisions and malformed reports never record a display', async () => {
+mainTest('A-HTTP-OBSERVE: wrong targets, absent or disposed provisions and malformed reports never record a display', async () => {
   const uid = await study(), elsewhere = await study();
   await version(uid, 1); await version(elsewhere, 1);
   const [row] = await history(uid);
@@ -369,10 +377,12 @@ test('A-HTTP-OBSERVE: wrong targets, absent or disposed provisions and malformed
     ['another study path', elsewhere, report(row.accessRef), 404],
     ['an unknown reference', uid, report(randomUUID()), 404],
   ];
-  // W9's real metadata read: its accessRef is a study-metadata provision, not a report display reference.
+  // W9's real metadata read (two studies of the one synthetic patient): an accessRef of a study-metadata provision is not
+  // a report display reference.
   const resolved = await send('POST', '/studies/viewing-set/resolve', { member: members.reader, body: { compositionId: randomUUID(),
-    generation: 1, requestId: randomUUID(), expectedSourcePatientKey: null, studyUids: [uid] } }).done;
+    generation: 1, requestId: randomUUID(), expectedSourcePatientKey: null, studyUids: [uid, elsewhere] } }).done;
   assert.equal(resolved.status, 200, resolved.text);
+  assert.equal(resolved.body.members[0].status, 'ready', resolved.text);
   const metadataRef = resolved.body.members[0].accessRef;
   assert.equal((await prepared(metadataRef)).event.targets[0].kind, 'study-metadata');
   refusals.push(['a metadata reference', uid, report(metadataRef), 404]);
@@ -410,7 +420,7 @@ test('A-HTTP-OBSERVE: wrong targets, absent or disposed provisions and malformed
   assert.equal(await allShown(), before, 'no refused report left a display record');
 });
 
-test('A-HTTP-OBSERVE: the new request takes the existing report-history access decision', async () => {
+mainTest('A-HTTP-OBSERVE: the new request takes the existing report-history access decision', async () => {
   const before = await allShown();
   // Institution: the study left this member's institution after the read.
   const moved = await study();
@@ -434,7 +444,7 @@ test('A-HTTP-OBSERVE: the new request takes the existing report-history access d
   assert.equal(await allShown(), before);
 });
 
-test('A-HTTP-OBSERVE: a cookie session reports only its own provisions; account switch and re-login keep old references out', async () => {
+mainTest('A-HTTP-OBSERVE: a cookie session reports only its own provisions; account switch and re-login keep old references out', async () => {
   const uid = await study();
   await version(uid, 1);
   const first = await session(members.reader);
@@ -461,7 +471,7 @@ test('A-HTTP-OBSERVE: a cookie session reports only its own provisions; account 
   assert.equal(answer.status, 404, answer.text);
 });
 
-test('A-PG-COMMIT: a lost COMMIT reply of the display record resolves through the same operation before the ACK', async () => {
+mainTest('A-PG-COMMIT: a lost COMMIT reply of the display record resolves through the same operation before the ACK', async () => {
   const uid = await study();
   await version(uid, 1);
   const [row] = await history(uid);
@@ -480,7 +490,7 @@ test('A-PG-COMMIT: a lost COMMIT reply of the display record resolves through th
   assert.equal(ack.body.receivedAt, await outcomeAt(recorded[0].operationId));
 });
 
-test('A-HTTP-OBSERVE: a closed record port answers the non-PHI 503; after an API restart a resend is the same event', async () => {
+mainTest('A-HTTP-OBSERVE: a closed record port answers the non-PHI 503 and records nothing', async () => {
   const uid = await study();
   await version(uid, 1);
   const [row] = await history(uid);
@@ -494,33 +504,35 @@ test('A-HTTP-OBSERVE: a closed record port answers the non-PHI 503; after an API
   assert.equal(refused.body.code, 'EMR_VIEWING_UNAVAILABLE');
   assert.equal(refused.text.includes(uid), false, 'no study or patient value in the refusal');
   assert.deepEqual((await shown(row.accessRef)).map(e => e.eventId), [accepted.eventId]);
-  await stopApi();
-  await startApi();
-  const replayed = await observe(uid, accepted).done;
+  // This API process ends here. B2 composes once per process, so the restart is a new process on the same database.
+  console.log('A4_RESTART ' + JSON.stringify({ uid, accessRef: row.accessRef, accepted, first: first.body, refused: refusedReport }));
+});
+
+restartTest('A-HTTP-OBSERVE: after an API process restart a resend is the same event; the report refused while closed now records', async () => {
+  const carried = JSON.parse(process.env.KIN_A4_RESTART);
+  const replayed = await observe(carried.uid, carried.accepted).done;
   assert.equal(replayed.status, 200, replayed.text);
-  assert.deepEqual(replayed.body, first.body, 'the restarted API answers the first accepted fact');
-  const retried = await observe(uid, refusedReport).done;
+  assert.deepEqual(replayed.body, carried.first, 'the restarted API answers the first accepted fact');
+  assert.equal((await shown(carried.accessRef)).length, 1, 'the resend added no entry');
+  const retried = await observe(carried.uid, carried.refused).done;
   assert.equal(retried.status, 200, retried.text);
-  assert.deepEqual((await shown(row.accessRef)).map(e => e.eventId), [accepted.eventId, refusedReport.eventId]);
+  assert.deepEqual((await shown(carried.accessRef)).map(e => e.eventId), [carried.accepted.eventId, carried.refused.eventId]);
 });
 """
 
 
 class ReportObservationHttp(PgLedgerFixture):
-    def test_display_reports_bind_to_the_stored_provision(self):
-        evidence = EVIDENCE / self.token
-        evidence.mkdir(parents=True, exist_ok=True)
-        driver = evidence / 'report-observation.cjs'
-        driver.write_text(DRIVER, encoding='utf-8')
+    def node_phase(self, evidence, driver, phase, extra):
         env = {**os.environ, 'DATABASE_URL': self.runtime_url, 'KIN_B2R_WITNESS_URL': self.witness_url,
-               'KIN_B2R_SPOOL': str(evidence / 'spool'),
-               'KIN_B2R_BUILD': os.environ.get('KIN_B2R_BUILD', str(ROOT / 'api/dist'))}
+               'KIN_B2R_SPOOL': str(evidence / ('spool-' + phase)),
+               'KIN_B2R_BUILD': os.environ.get('KIN_B2R_BUILD', str(ROOT / 'api/dist')), 'KIN_A4_PHASE': phase, **extra}
         if self.image:
             command = ['docker', 'run', '--rm', '--name', self.container + '-node', '--label', 'kin.b2r=' + self.token,
                        '--network', self.network, '--memory', '1536m', '--memory-swap', '1536m', '--cpus', '2',
                        '--mount', 'type=bind,source=' + str(driver) + ',target=/app/report_observation.cjs,readonly']
             for key, value in {'DATABASE_URL': self.runtime_url, 'KIN_B2R_WITNESS_URL': self.witness_url,
-                               'KIN_B2R_BUILD': '/app/dist', 'KIN_B2R_SPOOL': '/tmp/report-observation-spool'}.items():
+                               'KIN_B2R_BUILD': '/app/dist', 'KIN_B2R_SPOOL': '/tmp/report-observation-spool',
+                               'KIN_A4_PHASE': phase, **extra}.items():
                 command += ['-e', key + '=' + value]
             command += [self.image, 'node', '--test', '--test-reporter=tap', '/app/report_observation.cjs']
         else:
@@ -531,12 +543,24 @@ class ReportObservationHttp(PgLedgerFixture):
             # Keep partial raw output; the command line carries ephemeral fixture credentials.
             for name, value in [('stdout', error.stdout), ('stderr', error.stderr)]:
                 raw = value if isinstance(value, bytes) else (value or '').encode('utf-8')
-                (evidence / ('node.' + name + '.log')).write_bytes(raw)
+                (evidence / ('node.' + phase + '.' + name + '.log')).write_bytes(raw)
             raise RuntimeError('Node fixture timed out; partial logs: ' + str(evidence)) from None
-        (evidence / 'node.stdout.log').write_text(result.stdout, encoding='utf-8')
-        (evidence / 'node.stderr.log').write_text(result.stderr, encoding='utf-8')
+        (evidence / ('node.' + phase + '.stdout.log')).write_text(result.stdout, encoding='utf-8')
+        (evidence / ('node.' + phase + '.stderr.log')).write_text(result.stderr, encoding='utf-8')
         print(result.stdout)
         self.assertEqual(result.returncode, 0, result.stderr[-3000:] or result.stdout[-3000:])
+        return result.stdout
+
+    def test_display_reports_bind_to_the_stored_provision(self):
+        evidence = EVIDENCE / self.token
+        evidence.mkdir(parents=True, exist_ok=True)
+        driver = evidence / 'report-observation.cjs'
+        driver.write_text(DRIVER, encoding='utf-8')
+        main = self.node_phase(evidence, driver, 'main', {})
+        # The main process ends with its port closed; a second API process on the same database takes the resend.
+        carried = re.search(r'A4_RESTART (\{.*\})', main)
+        self.assertIsNotNone(carried, 'the main phase handed no restart case over')
+        self.node_phase(evidence, driver, 'restart', {'KIN_A4_RESTART': carried.group(1)})
 
 
 if __name__ == '__main__':
