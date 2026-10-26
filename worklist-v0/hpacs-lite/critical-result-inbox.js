@@ -401,8 +401,15 @@
       caret.textContent = field.value.slice(offset) || '\u200b';
       mirror.append(caret);
       document.body.append(mirror);
-      const line = caret.getClientRects()[0], height = parseFloat(style.lineHeight) || line.height;
-      const top = rect.top + line.top - mirror.getBoundingClientRect().top - field.scrollTop - (height - line.height) / 2;
+      const range = document.createRange();
+      range.setStart(mirror.firstChild, offset);
+      range.collapse(true);
+      const line = caret.getClientRects()[0], before = range.getBoundingClientRect();
+      // At a soft wrap the native caret can belong to either line, depending on the last navigation key.
+      const lineTop = before.height ? Math.min(before.top, line.top) : line.top;
+      const height = (parseFloat(style.lineHeight) || line.height) + line.top - lineTop;
+      const top = rect.top + lineTop - mirror.getBoundingClientRect().top - field.scrollTop -
+        ((parseFloat(style.lineHeight) || line.height) - line.height) / 2;
       mirror.remove();
       return { ...rect, top: Math.max(rect.top + field.clientTop, top),
         bottom: Math.min(rect.top + field.clientTop + field.clientHeight, top + height) };
@@ -460,10 +467,8 @@
         const required = Math.max(head.getBoundingClientRect().bottom, identity.getBoundingClientRect().bottom) -
           row.getBoundingClientRect().top;
         if (body.clientHeight < required) {
-          bodyOpen = arrivalOpen = false;
-          dismissedArrival = pending > 0;
           revealId = null;
-          paint();
+          closeBody();
           return;
         }
       }

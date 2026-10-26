@@ -2433,26 +2433,55 @@ class RelatedModePage(unittest.TestCase):
                         self.assertEqual([], self.arrival_posts)
 
     def test_w5b_arrival_tracks_caret_within_wrapped_findings(self):
-        self.page.set_viewport_size({"width": 1366, "height": 768})
-        recipient = self.install_arrivals()
-        self.open()
-        self.open_target()
-        self.enter_reading()
-        findings = self.page.locator('#findings')
-        findings.fill('\n'.join('SYN long finding ' * 12 for _ in range(45)))
-        self.page.locator('#conclusion').fill('SYN impression line 1\nSYN impression line 2')
-        self.autosave()
-        findings.click()
-        self.page.keyboard.press('Control+End')
-        self.arrival_server.add(recipient.rec(181, case='R2'))
-        self.poll_arrivals()
-        for key in ('Control+Home', 'ArrowDown', 'End', 'Shift+ArrowUp', 'Control+End'):
-            self.page.keyboard.press(key)
-            self.settle()
-            self.visible_arrival(181)
-            self.arrival_stays_over_report()
-            self.assertTrue(self.js(self.CARET_VISIBLE, 'findings'), key + ' leaves the caret visible')
-        self.assertEqual([], self.arrival_posts)
+        for width, height in self.ARRIVAL_VIEWPORTS:
+            for reading in (False, True):
+                with self.subTest(viewport=(width, height), reading=reading):
+                    self.page.set_viewport_size({"width": width, "height": height})
+                    recipient = self.install_arrivals()
+                    self.open()
+                    self.open_target()
+                    if reading:
+                        self.enter_reading()
+                    findings = self.page.locator('#findings')
+                    findings.fill('\n'.join('SYN long finding ' * 12 for _ in range(45)))
+                    self.page.locator('#conclusion').fill('SYN impression line 1\nSYN impression line 2')
+                    self.autosave()
+                    findings.focus()
+                    self.page.keyboard.press('Control+End')
+                    self.arrival_server.add(recipient.rec(181, case='R2'))
+                    self.poll_arrivals()
+                    for key in ('Control+Home', 'ArrowDown', 'End', 'Shift+ArrowUp', 'Control+End',
+                                'ArrowUp', 'ArrowUp', 'ArrowUp', 'ArrowUp', 'Home', 'End'):
+                        self.page.keyboard.press(key)
+                        self.settle()
+                        self.visible_arrival(181)
+                        self.arrival_stays_over_report()
+                        self.assertTrue(self.js(self.CARET_VISIBLE, 'findings'), key + ' leaves the caret visible')
+                    self.assertEqual([], self.arrival_posts)
+
+    def test_w5b_fold_returns_focus_from_received_list(self):
+        for report_focus in (True, False):
+            with self.subTest(report_focus=report_focus):
+                self.page.set_viewport_size({"width": 1400, "height": 900})
+                recipient = self.install_arrivals()
+                self.open()
+                self.open_target()
+                self.enter_reading()
+                self.poll_arrivals()
+                if report_focus:
+                    self.page.locator('#findings').click()
+                else:
+                    self.page.locator('#reading-target').click()
+                self.arrival_server.add(recipient.rec(181, case='R2'))
+                self.poll_arrivals()
+                self.visible_arrival(181)
+                self.page.get_by_role('button', name='Acknowledge', exact=True).focus()
+                self.page.set_viewport_size({"width": 1400, "height": 470})
+                self.settle()
+                expect(self.page.get_by_role('button', name='Acknowledge', exact=True)).to_be_hidden()
+                target = self.page.locator('#findings') if report_focus else self.page.get_by_role('button', name='Show Received', exact=True)
+                expect(target).to_be_focused()
+                self.assertEqual([], self.arrival_posts)
 
     def test_w5b_arrival_follows_reading_splitter(self):
         for width, height in self.ARRIVAL_VIEWPORTS:
