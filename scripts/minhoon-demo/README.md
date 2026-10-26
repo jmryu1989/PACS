@@ -37,6 +37,6 @@ A failure after launch tears the stack down automatically (logs kept).
 ## Samples
 CT: TCIA TCGA-KIRC `TCGA-CW-5580` (1992-06-01 / prior 1992-02-25) and `TCGA-B8-A54F` (2006-01-12 / prior 2005-08-03),
 CC BY 3.0. MG: TCIA EA1141 `EA1141-4339969` DBT + Intelligent 2D (1945-02-13 / prior 1944-02-21), CC BY 4.0.
-XA: GDCMData 12-frame catheter cine (no licence stated). The collectors' manifests mark EA1141 and the XA file
-"local test/evaluation only" and the TCIA subset "no server upload"; serving them to the doctor follows the D1872 order
-(`-SkipXa` drops the XA clip). Attribution lines are in the guide.
+XA: GDCMData 12-frame catheter cine (no licence file in the repository). The licence terms are CC BY (attribution
+lines are in the guide). The "local test only" / "not uploaded" lines in the collectors' notes record the scope of
+those download runs, not a licence condition (user, 2026-10-26). `-SkipXa` drops the XA clip.
