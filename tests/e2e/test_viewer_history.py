@@ -1,5 +1,6 @@
 """D05D: real pinned OHIF configuration, BFF login and owned viewer fixtures."""
 from pathlib import Path
+from viewer_tools import select_image_tool
 import sys,json,unittest,uuid,io,hashlib,copy,math
 from unittest.mock import patch
 import test_worklist as base
@@ -32,7 +33,7 @@ class ViewerHistoryE2E(ThumbnailRequestsE2E):
         expect(p.locator('#kin-viewer-history')).to_be_visible()
 
     def draw(self,p,label):
-        p.locator('[data-cy="MeasurementTools-split-button-secondary"]').click();p.get_by_text('Annotation',exact=True).click()
+        select_image_tool(p, 'ArrowAnnotate')
         box=p.locator('.cornerstone-canvas').bounding_box();x,y=box['x']+box['width']*.47,box['y']+box['height']*.47
         p.mouse.move(x,y);p.mouse.down();p.mouse.move(x+45,y+28,steps=8);p.mouse.up()
         entry=p.get_by_placeholder('Enter label');expect(entry).to_be_visible();entry.fill(label)
@@ -196,9 +197,9 @@ class ViewerHistoryE2E(ThumbnailRequestsE2E):
         points=self.saved(f)[0]['item']['points'];row.get_by_role('button',name='Edit',exact=True).click()
         box=p.locator('.cornerstone-canvas').bounding_box()
         for tool,dx,dy in [('Pan',20,12),('Zoom',0,35)]:
-            p.locator('[data-cy="'+tool+'"]').click();x,y=box['x']+box['width']*.8,box['y']+box['height']*.8
+            select_image_tool(p, tool);x,y=box['x']+box['width']*.8,box['y']+box['height']*.8
             p.mouse.move(x,y);p.mouse.down();p.mouse.move(x+dx,y+dy,steps=8);p.mouse.up()
-        p.keyboard.press('h');row.get_by_label('Annotation Text').fill('큰 좌표 유지');row.get_by_role('button',name='Save',exact=True).click();expect(row).to_contain_text('Saved r2')
+        select_image_tool(p, 'flipHorizontal');row.get_by_label('Annotation Text').fill('큰 좌표 유지');row.get_by_role('button',name='Save',exact=True).click();expect(row).to_contain_text('Saved r2')
         self.assertEqual(self.saved(f)[0]['item']['points'],points)
         w2,p2=self.open_viewer(f);p2.wait_for_function("()=>cornerstoneTools.annotation.state.getAllAnnotations().some(a=>a.metadata.toolName==='ArrowAnnotate')")
         self.assertEqual(p2.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().find(a=>a.metadata.toolName==='ArrowAnnotate').data.handles.points"),points)

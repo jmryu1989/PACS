@@ -5,6 +5,7 @@
     "toolbar-labels.js",
     "branding.js",
     "stack-precision.js",
+    "frame-metadata.js",
     "sr-provenance.js",
     "navigation.js",
     "history.js",
@@ -28,7 +29,9 @@
     "series-recovery.js",
     "context-loss.js",
     "mammography-hanging.js",
+    "mg-reference-lines.js",
     "study-prefetch.js",
+    "viewer-ux.js",
     "configuration.js"
   ]
 }

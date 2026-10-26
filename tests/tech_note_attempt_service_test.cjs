@@ -220,7 +220,13 @@ async function world() {
   const store = PG ? await postgres() : (shared ??= standIn());
   store.hooks.failAudit = null; store.hooks.beforeCommit = null; store.hooks.beforeTransaction = null;
   const access = new StudyAccessService(store.prisma, {}, {});
-  const svc = new PacsService(store.prisma, {}, {}, access, {});
+  // This suite isolates projection attempts/CAS/SQL rollback. The real online
+  // signature + ledger + HTTP composition is covered by emr/d/routes_pg_test.cjs.
+  const projectionBoundary = {
+    read: (_request, _kind, _id, project) => project(undefined),
+    write: async (_request, _write, project) => ({ ...await project(undefined), emr: { replayed: false } }),
+  };
+  const svc = new PacsService(store.prisma, {}, {}, access, {}, undefined, undefined, projectionBoundary);
   const controller = new PacsController(svc);
   const req = who => ({ ...who, headers: {} });
   return {

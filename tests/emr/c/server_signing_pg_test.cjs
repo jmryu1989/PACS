@@ -193,6 +193,10 @@ test('T-TX/T-BIND/T-LOG signature, publication, exact bytes and law-level event 
   assert.equal(entry.facts.targets[0].patientLinkSnapshot.value.patientId, cmd.patient.patientId);
   assert.equal(entry.facts.targets[0].versionId.value, signed.versionId);
   assert.equal(entry.facts.trustedProxyIp.value.address, '192.0.2.1');
+  for (const { facts } of entries) {
+    assert.equal(facts.context.basis, 'worklist');
+    assert.equal(facts.context.studyId, cmd.studyId);
+  }
   assert.equal(JSON.stringify(entry).includes(cmd.text.findings), false);
   assert.equal(JSON.stringify(entry).includes('ciphertext'), false);
 });

@@ -145,6 +145,14 @@ PROFILES = {
         'suites': (('e2e/test_prior_selection.py', 'PriorSelectionE2E', 'ci-u2b-prior-selection'),
                    ('e2e/test_related_scope.py', 'RelatedScopeE2E', 'ci-u2b-related-scope')),
     },
+    'viewer-ux-shell': {
+        'out': ROOT / 'tests/e2e/artifacts/viewer-ux-shell-ci',
+        'project_prefix': 'kin-viewer-ux-shell-ci-',
+        # Viewer U2 shell (D1821): the module's own test_shell_* cases on the shipped viewer, in the
+        # worklist-ux-measurements job. One suite at the single-suite 900s ceiling, not an estimate.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_viewer_ux_shell.py', 'ViewerUXShellE2E', 'ci-viewer-ux-shell'),),
+    },
     'display-scope': {
         'out': ROOT / 'tests/e2e/artifacts/display-scope-ci',
         'project_prefix': 'kin-display-scope-ci-',
@@ -767,11 +775,16 @@ def main(profile_name, credential_provider=None):
         evidence_stage = Path(runner_temp)/('kin-vr-suite-evidence-'+secrets.token_hex(6))
         evidence_stage.mkdir(parents=True, exist_ok=False)
     env = profile_environment(profile_name, out, values, evidence_stage)
+    from emr.d.synthetic_stack import configure as configure_signing, compose_arguments as signing_compose_arguments
+    signing_custody = configure_signing(ROOT, env)
     project = profile['project_prefix']+secrets.token_hex(6)
     # Fixed container names mean isolation comes from the empty hosted daemon,
     # not this project name. Helpers must still address the same Compose project.
     env['COMPOSE_PROJECT_NAME'] = project
-    compose = ['docker','compose','-p',project]
+    # The signing override is this owner's -f list only (compose[3] stays the project): the suites
+    # run with COMPOSE_FILE unset, which the e2e local-target guard requires, and reach the same
+    # containers through COMPOSE_PROJECT_NAME.
+    compose = ['docker','compose','-p',project, *signing_compose_arguments(ROOT, signing_custody)]
     results = []; deadline = time.monotonic() + profile_deadline_seconds(profile_name)
     def run(name, command, timeout=600, finalizing=False, fail_fast=True):
         started = time.monotonic()
@@ -854,7 +867,7 @@ def main(profile_name, credential_provider=None):
                     # Its own Compose project, never an orphan of this one: removed after the consumer stack.
                     cleanup = gateway_remove(run, out) or cleanup
                 if cleanup and not failed: raise RuntimeError('CI cleanup failed; see sanitized artifact')
-                if not cleanup and not failed and seeded:
+                if not cleanup and seeded:
                     # Merged jobs run profiles sequentially. Remove only this
                     # profile's generated seed after successful stack cleanup.
                     for path in seeded:
@@ -869,6 +882,7 @@ def main(profile_name, credential_provider=None):
                         f"{row['seconds']:.3f}\t{row['name']}.log\n" for row in results), encoding='utf-8')
                 if evidence_stage is not None:
                     shutil.rmtree(evidence_stage)
+                signing_custody.cleanup()
 
 
 if __name__ == '__main__':

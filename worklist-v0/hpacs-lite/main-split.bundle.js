@@ -9054,6 +9054,9 @@
                 popup.dispatchEvent(new popup.Event('kin-window-link-changed'));
               }catch(_){notify('판독문 복귀 연결을 확인하지 못했습니다. 목록 창을 직접 선택하세요.','info');}
             }
+            // A selected tab can also cancel an in-flight open, or reopen the
+            // last closed patient while retaining the same document URL.
+            popup.kinViewerOpenPatient?.(url);
             popup.focus();
             watchOhifRect(popup);
             return;
@@ -9067,6 +9070,11 @@
               ? "기존 영상 창의 저장·복원 또는 상태 확인을 마치고 열린 대화상자를 닫은 뒤 다른 검사를 여세요."
               : "기존 영상 창에 저장하지 않은 표식이나 작업 내용(소견 작성 내용 포함)이 있습니다. 저장하거나 비운 뒤 다른 검사를 여세요.", "err", 8000);
             return;
+          }
+          // U2 keeps this document and checks coverage at the final assignment.
+          if (!freshDocument && !stopped && typeof popup.kinViewerOpenPatient === 'function') {
+            popup.kinViewerOpenPatient(url);
+            popup.focus(); watchOhifRect(popup); return;
           }
           if (typeof popup.kinViewerFrameCoverageConfirm !== 'function' || !popup.kinViewerFrameCoverageConfirm(message => confirm(message))) {
             popup.focus(); notify('기존 영상 창을 유지했습니다. Frame Coverage와 원본 영상을 확인하세요.', 'info'); return;
@@ -9389,6 +9397,7 @@
       onSessionEnd(end); window.addEventListener('pagehide', end);
       render();
     }
+
 
     favoriteList = KinFavoriteList({ api,
       identity: () => { const s=KinAuth.session(); return s?.state==='approved' ? [s.institution,s.sub] : null; },
@@ -10343,7 +10352,7 @@
               || !text(entry.body) || (entry.kind !== 'close' && !entry.body.trim()) || !who(entry.author, true) || !anchor(entry.reportAnchor))
             throw new Error(TEXT.malformed);
         });
-        return item;
+        return { ...item, emr: data.emr };
       }
 
       /**
@@ -10511,7 +10520,7 @@
           threadFailure ? readDetail(threadFailure) : '');
         part('state').hidden = state === 'ready';
         part('retry').hidden = !threadFailure;
-        part('entries').replaceChildren(...(loaded ? loaded.entries.map(item => entryItem(item, loaded.current)) : []));
+        part('entries').replaceChildren(...(loaded ? loaded.entries.map(item => entryItem(item, loaded.current, loaded.emr)) : []));
         part('closed').hidden = !loaded || loaded.state !== 'Closed';
         for (const wrap of threadBox.querySelectorAll('.question-compose')) {
           paintComposer(wrap);
@@ -10520,7 +10529,7 @@
         }
       }
 
-      function entryItem(entry, current) {
+      function entryItem(entry, current, evidence) {
         const li = make('li');
         li.dataset.seq = String(entry.seq);
         li.dataset.kind = entry.kind;
@@ -10528,6 +10537,8 @@
         meta.append(make('strong', null, KINDS[entry.kind]), ` · ${person(entry.author)} (${ROLES[entry.author.role]}) · ${time(entry.at)}`);
         const body = entry.body ? make('p', 'question-body', entry.body) : make('p', 'question-muted', TEXT.closeEmpty);
         li.append(meta, body);
+        const signed = window.KinClinicalSignature?.(evidence, entry.seq);
+        if (signed) li.append(make('p', 'question-muted', signed));
         // 답변 뒤 판독이 승인·Addendum·Reset되었으면 그 답이 어느 판독 상태를 보고 쓴 것인지 알린다(서버는 스레드를 다시 열지 않는다).
         if (entry.kind === 'answer' && (entry.reportAnchor.rs !== current.rs || entry.reportAnchor.version !== current.version)) {
           const note = make('p', 'question-anchor');

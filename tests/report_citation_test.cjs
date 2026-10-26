@@ -2,6 +2,8 @@
 // B2 consumer fixture only: these existing pure suites exercise business/CAS rules.
 // Real ledger atomicity and HTTP publication are tested against PostgreSQL.
 const {withDraftRequestContext} = require('./emr/request/consumer_fixture.cjs');
+// Native signing is a collaborator here; this fixture is not cryptographic evidence.
+const nativeSigning = { sign: async () => ({ fixture: 'native-signature' }) };
 function b2Ledger(prisma) {
   return { begin: () => ({
     resolveRequestIdentity: async () => '00000000-0000-4000-8000-000000000001',
@@ -117,7 +119,7 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
   };
   const studyAccess = { prepare: async () => calls.push({ call: 'prepare' }),
     // WORKLIST-SPLIT-UID: the request's source observation; this store answers one resource per UID.
-    prepareSourceIdentity: async () => {}, assertUnsplitSource: () => {},
+    prepareSourceIdentity: async () => {}, assertUnsplitSource: () => ({ sourcePatientId: null, sourceInstitution: null }),
     // The third argument is the transaction client. Recording it is what tells a re-check that
     // runs inside the snapshot from one that ran outside it - the two were indistinguishable.
     // `refuseTxRequire` refuses ONLY the tx-bound call, which is the revocation the new read
@@ -136,7 +138,7 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
   const keycloak = { usersInGroupWithRole: async () => [] };
   // The document that read this fixture's study: every mutation carries its account and the boundary it read, and a
   // draft PUT the whole snapshot - a keep list the case does not name is the draft's current list (nothing dropped).
-  const real = withDraftRequestContext(new PacsService(prisma, {}, keycloak, studyAccess, findings, b2Ledger(prisma)), b2Ledger(prisma));
+  const real = withDraftRequestContext(new PacsService(prisma, {}, keycloak, studyAccess, findings, b2Ledger(prisma), nativeSigning), b2Ledger(prisma));
   const pre = c => ({ expectedOwner: { institution: c.institution, sub: c.sub, author: c.actor }, expectedRevision: `${EPOCH}:${row?.revision ?? 0}` });
   const ids = (key, id) => (Array.isArray(row?.[key]) ? row[key].map(entry => entry[id]) : []);
   const svc = new Proxy(real, { get(target, name) {
@@ -522,7 +524,7 @@ test('the history response names its columns and the new one is not among them',
   const row = { version: 4, findings: 'SYN history', citations: [carried('history')],
     structured: [{ sid: 'syn-structure', renderedText: 'SYN structured evidence' }] };
   const f = fixture({ versions: new Map([[4, row]]) });
-  const history = await f.svc.versions(UID, CALLER);
+  const history = JSON.parse((await f.svc.versions(UID, CALLER)).json);
   assert.equal(history.length, 1, 'exercise a stored version with both evidence columns');
   assert.equal(history[0].findings, row.findings);
   assert.equal(Object.hasOwn(history[0], 'citations'), false, 'history must not expose citations');
@@ -599,7 +601,8 @@ test('no audit line carries a source pointer or clinical text', async () => {
 // REVOKED-LINEAGE / ALIASED-VERSION -> TEST-S3-U5b-VERSION-CITATIONS.
 const preserved = (citations, findings = LINE) =>
   ({ citations, findings, conclusion: '', recommendation: '' });
-const historyRead = (f, version, caller = CALLER) => f.svc.reportVersionCitations(UID, version, caller);
+// MODULE_A A2: the read returns the selected response (A1 LocalReadResponse); its serialized body is the HTTP answer.
+const historyRead = (f, version, caller = CALLER) => f.svc.reportVersionCitations(UID, version, caller).then(r => JSON.parse(r.json));
 
 test('the historical read runs the report gates and the access re-check inside one snapshot', async () => {
   const f = fixture({ versions: new Map([[2, preserved([{ ...carried('a'), findingId: FINDING, insertedText: LINE }])]]) });
@@ -647,12 +650,16 @@ test('the historical read runs the report gates and the access re-check inside o
 test('the historical read answers one preserved row, and a version with no row is not an empty one', async () => {
   const mine = { ...carried('a', '2026-09-02T00:00:00.000Z', 'v2-author@synthetic'), findingId: FINDING, insertedText: LINE };
   const head = { ...carried('z', '2026-09-03T00:00:00.000Z', 'v4-author@synthetic'), findingId: FINDING, insertedText: LINE };
-  const f = fixture({ versions: new Map([[2, preserved([mine])], [4, preserved([head])]]) });
+  const stored = { ...preserved([mine]), id: 202, uid: UID, version: 2, action: 'approve',
+    author: 'stored-author@synthetic', at: new Date('2026-09-04T00:00:00.000Z'), reason: 'SYN stored reason' };
+  const f = fixture({ versions: new Map([[2, stored], [4, preserved([head])]]) });
   const answer = await historyRead(f, '2');
-  const call = f.calls.find(c => c.call === 'reportVersion.findUnique');
-  assert.deepEqual(call.args.where, { uid_version: { uid: UID, version: 2 } });
-  assert.deepEqual(Object.keys(call.args.select).sort(), ['citations', 'conclusion', 'findings', 'recommendation'],
-    'action/author/at/reason belong to the history response and must not leave the DB layer here');
+  assert.equal(answer.version, 2, 'the answer names the requested version');
+  // The public projection is the contract; internal query columns may also support the access record.
+  for (const key of ['id', 'action', 'author', 'at', 'reason', 'findings', 'conclusion', 'recommendation', 'citations'])
+    assert.equal(Object.hasOwn(answer, key), false, key + ' must not be answered by the citations route');
+  assert.deepEqual(Object.keys(answer).sort(), ['accessRef', 'actor', 'entries', 'version']);
+  for (const value of [stored.author, stored.reason, stored.at.toISOString()]) assert.equal(JSON.stringify(answer).includes(value), false);
   assert.equal(answer.entries.length, 1);
   assert.equal(answer.entries[0].insertedBy, 'v2-author@synthetic', 'the head row is not the answer');
 
@@ -671,7 +678,7 @@ test('the historical answer is metadata only, reads no draft on any path and wri
   const f = fixture({ versions: new Map([[2, preserved([readableEntry, hiddenLineage])]]),
     draft: { baseVersion: 4, citations: [{ ...readableEntry, cid: 'draft-cid' }] } });
   const answer = await historyRead(f, '2');
-  assert.deepEqual(Object.keys(answer).sort(), ['actor', 'entries', 'version']);
+  assert.deepEqual(Object.keys(answer).sort(), ['accessRef', 'actor', 'entries', 'version']);
   assert.equal(answer.actor, CALLER.actor);
   assert.deepEqual(Object.keys(answer.entries[0]).sort(),
     ['field', 'findingRevision', 'insertedAt', 'insertedBy', 'linkStateAtInsert', 'presence', 'sourceIndex']);

@@ -1950,7 +1950,7 @@
           || !text(entry.body) || (entry.kind !== 'close' && !entry.body.trim()) || !person(entry.author, true) || !anchor(entry.reportAnchor))
         throw new Error(QUESTION.malformed);
     });
-    return item;
+    return { ...item, emr: data.emr };
   }
 
   /**
@@ -2320,13 +2320,13 @@
     box.dataset.state = item.state;
     $('#question-thread-status').replaceChildren(questionBadge(item.state));
     $('#question-thread-meta').textContent = QUESTION.threadMeta(questionTime(item.createdAt), dash(item.author.name || item.author.actor));
-    $('#question-entries').replaceChildren(...item.entries.map(entry => questionEntry(entry, item.current)));
+    $('#question-entries').replaceChildren(...item.entries.map(entry => questionEntry(entry, item.current, item.emr)));
     $('#question-closed-note').hidden = item.state !== 'Closed';
     setThreadState('ready', '');
     paintQuestionComposers(uid, item.id);
   }
 
-  function questionEntry(entry, current) {
+  function questionEntry(entry, current, evidence) {
     const li = node('li');
     li.dataset.seq = String(entry.seq);
     li.dataset.kind = entry.kind;
@@ -2347,6 +2347,8 @@
         QUESTION.anchorDetail(reportStateText(entry.reportAnchor), reportStateText(current)));
       li.append(note);
     }
+    const signed = window.KinClinicalSignature?.(evidence, entry.seq);
+    if (signed) li.append(node('p', 'muted', signed));
     return li;
   }
 

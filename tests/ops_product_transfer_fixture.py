@@ -105,7 +105,7 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql',
               'api/prisma/migrations/20261015013945_import_operation/migration.sql',
               'api/prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql',
-              'api/prisma/migrations/20261023180000_emr_pg_ledger/migration.sql', 'api/prisma/migrations/20261023200000_emr_server_signing/migration.sql', 'api/prisma/migrations/20261024120000_emr_d_online/migration.sql', 'api/prisma/migrations/20261025000000_emr_e_online/migration.sql', 'api/prisma/migrations/20261025120000_access_review/migration.sql']
+              'api/prisma/migrations/20261023180000_emr_pg_ledger/migration.sql', 'api/prisma/migrations/20261023200000_emr_server_signing/migration.sql', 'api/prisma/migrations/20261024120000_emr_d_online/migration.sql', 'api/prisma/migrations/20261025000000_emr_e_online/migration.sql', 'api/prisma/migrations/20261025120000_access_review/migration.sql', 'api/prisma/migrations/20261025150000_emr_f_link/migration.sql', 'api/prisma/migrations/20261026120000_assignment_access_stream/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -712,6 +712,38 @@ def seed_emr(name, db):
         for row in rows:
             execute(name, db, 'INSERT INTO emr_image.'+table+' OVERRIDING SYSTEM VALUE SELECT * FROM json_populate_record(NULL::emr_image.'+table+', '+sql_literal(json.dumps(row))+')')
     execute(name, db, "DO $$ BEGIN PERFORM setval('emr_image.observation_sequence_seq', 2, true); END $$")
+    for table, rows in expected_audit_rows().items():
+        for row in rows:
+            execute(name, db, 'INSERT INTO emr_audit.'+table+' OVERRIDING SYSTEM VALUE SELECT * FROM json_populate_record(NULL::emr_audit.'+table+', '+sql_literal(json.dumps(row))+')')
+    for table in ('roster_event', 'issuance_event', 'request_event'):
+        execute(name, db, "DO $$ BEGIN PERFORM setval('emr_audit."+table+"_sequence_seq', 1, true); END $$")
+
+
+def expected_audit_rows():
+    return dict(
+        grantor=[dict(institution_id='synthetic-f', subject_id='synthetic-officer', capacity='privacy-officer', basis_document_id='synthetic-authority')],
+        roster_event=[dict(sequence=1, grant_id='synthetic-grant', institution_id='synthetic-f', subject_id='synthetic-auditor', body=dict(grantId='synthetic-grant', events=[dict(kind='granted', basisDocumentId='synthetic-authority')]))],
+        issuance_event=[dict(sequence=1, issuance_id='synthetic-copy', institution_id='synthetic-f', body=dict(issuanceId='synthetic-copy', environment='synthetic-test', events=[dict(kind='issued', sha256='f'*64)]))],
+        fixed_copy=[dict(issuance_id='synthetic-copy', body='\\x73796e746865746963', sha256=hashlib.sha256(b'synthetic').hexdigest())],
+        request_event=[dict(sequence=1, request_id='synthetic-f-request', institution_id='synthetic-f', body=dict(kind='access-request', facts=dict(requestId='synthetic-f-request', extensions=[dict(evidenceId='synthetic-extension')]), holds=[]))])
+
+
+def observe_audit(name, db):
+    return dict(catalog=inventory.parse(psql(name, db, CATALOG_SQL.replace("'public'", "'emr_audit'"))),
+        rows={table: inventory.parse(psql(name, db,
+            'SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text COLLATE "C"), \'[]\'::jsonb) FROM emr_audit.'+table+' t'))
+            for table in expected_audit_rows()},
+        sequences={table: inventory.parse(psql(name, db,
+            "SELECT jsonb_build_object('last_value',last_value,'is_called',is_called) FROM emr_audit."+table+"_sequence_seq"))
+            for table in ('roster_event', 'issuance_event', 'request_event')})
+
+
+def audit_contract(audit):
+    require(type(audit) is dict and set(audit) == {'catalog', 'rows', 'sequences'})
+    require(audit['catalog']['tables'] == sorted(expected_audit_rows()))
+    require(canonical(sorted_rows(audit['rows'])) == canonical(sorted_rows(expected_audit_rows())))
+    require(audit['sequences'] == {table: dict(last_value=1, is_called=True)
+        for table in ('roster_event', 'issuance_event', 'request_event')})
 
 
 def expected_image_rows():
@@ -867,7 +899,7 @@ def observe(name, db):
     emr_rows = {table: inventory.parse(psql(name, db,
         'SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text COLLATE "C"), \'[]\'::jsonb) FROM emr_access."'+table+'" t'))
         for table in EMR_TABLES}
-    return dict(catalog=catalog, rows=rows, sequences=sequences, emr=dict(catalog=emr_catalog, rows=emr_rows, image=observe_image(name, db)))
+    return dict(catalog=catalog, rows=rows, sequences=sequences, emr=dict(catalog=emr_catalog, rows=emr_rows, image=observe_image(name, db), audit=observe_audit(name, db)))
 
 
 def sorted_rows(rows):
@@ -928,10 +960,11 @@ def product_contract(product):
     catalog_contract(product['catalog'])
     require(canonical(sorted_rows(product['rows'])) == canonical(sorted_rows(expected_rows(product['study_uid']))))
     require(canonical(product['sequences']) == canonical(expected_sequences()))
-    require(type(product['emr']) is dict and set(product['emr']) == {'catalog', 'rows', 'image'})
+    require(type(product['emr']) is dict and set(product['emr']) == {'catalog', 'rows', 'image', 'audit'})
     emr_catalog_contract(product['emr']['catalog'])
     require(canonical(sorted_rows(product['emr']['rows'])) == canonical(sorted_rows(expected_emr_rows())))
     image_contract(product['emr']['image'])
+    audit_contract(product['emr']['audit'])
 
 
 def relation(snapshot):
