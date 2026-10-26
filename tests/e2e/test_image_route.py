@@ -6,10 +6,12 @@ TEST-E-ROUTE-01 one frame through the public HTTPS entry: the exact stored frame
   transport/copy observations; a member of another institution gets no bytes and leaves no provide entry.
 TEST-E-ROUTE-02 the served OHIF viewer opens a synthetic CT series twice (the first opening after arrival, then again
   from a fresh browser): every frame response the browser received carries its E event and has exactly one provide
-  entry; every provide entry for the series is either such a received response or ends as an aborted/unknown transfer
-  (never a completed one the browser did not get). Each opening prints one MEASURE line (first rendered image, every
-  slice's frame) before the assertions, so the same test times the route it runs against (direct Orthanc before
-  E_ROUTE, the E boundary after it).
+  entry; a provide entry the browser did not receive has at most one terminal entry and is never recorded as ended
+  short of its planned bytes (E-03). E observes its own connection to nginx: a frame nginx took whole and the page
+  dropped afterwards (requestfailed, nginx 200 with every byte, run e-route-diag-opus-20261026a) is an ended transfer,
+  never a viewed one. Each opening prints one MEASURE line (first rendered image, every slice's frame) and one
+  FRAME_REQUEST_FAILED line per failed frame request before the assertions, so the same test times the route it runs
+  against (direct Orthanc before E_ROUTE, the E boundary after it).
 
 Synthetic studies only (the D03A phantom pattern, larger matrix); cleaned through the local guard like the other D03A suites.
 """
@@ -218,7 +220,7 @@ class ImageRouteE2E(base.WorklistE2E):
 
         def lost(request):
             if ours(request):
-                failed.append(request.url)
+                failed.append({"url": request.url, "failure": request.failure})
 
         page.context.on("response", headers)
         page.context.on("requestfinished", done)
@@ -237,6 +239,8 @@ class ImageRouteE2E(base.WorklistE2E):
                    "first_render_seconds": round(first, 3), "all_frames_seconds": None if every is None else round(every, 3),
                    "frame_responses": len(received), "distinct_sops": len(set(finished) & set(sops)), "failed_requests": len(failed)}
         print("MEASURE " + json.dumps(measure), flush=True)
+        for row in failed:
+            print("FRAME_REQUEST_FAILED " + json.dumps({"opening": opening, **row}), flush=True)
         page.context.close()
         return measure, received
 
@@ -266,15 +270,19 @@ class ImageRouteE2E(base.WorklistE2E):
         for event, payload in self.wait_entries(
                 f"e.payload::jsonb->>'relatedEventId' IN ({quoted(ids)})", len(events)):
             terminals.setdefault(payload["relatedEventId"], []).append(payload["action"])
+        wire = {row.split("\t", 1)[0]: json.loads(row.split("\t", 1)[1]) for row in psql(
+            "SELECT event_id || E'\\t' || (body->'wire')::text FROM emr_image.observation "
+            f"WHERE kind = 'transport' AND event_id IN ({quoted(ids)});")}
         for event in ids:
             with self.subTest(event=event):
                 actions = terminals.get(event, [])
                 self.assertLessEqual(len(actions), 1, "at most one terminal entry per delivery")
                 if event in events:
                     self.assertEqual(["transfer-ended"], actions)
-                else:
-                    # A prefetch the browser gave up on: never counted as a completed delivery.
-                    self.assertNotIn("transfer-ended", actions)
+                if "transfer-ended" in actions:
+                    # Ended means E wrote the whole planned response to its connection, whatever the page did later.
+                    self.assertEqual(wire[event]["plannedBytes"], wire[event]["bytesWritten"], wire.get(event))
+                    self.assertEqual("transfer-ended", wire[event]["terminal"])
 
 
 def load_tests(loader, tests, pattern):
