@@ -203,6 +203,12 @@ if(process.argv.includes('--serve')){
     assert.equal(imageFacts.preparation.source_manifest.sha256,image.sha256,'the study manifest the delivery was prepared from');
     assert.ok(imageFacts.observations.some(o=>o.kind==='transport'));
     assert.ok(imageFacts.observations.some(o=>o.kind==='copies'));
+    // R244-GPT-03: a response of the same record whose preparation failed (the source's object belongs to another
+    // patient now) has no preparation row; its copy observation is still found from the record.
+    const failed=page.images.find(i=>i.eventId===image.failedEventId);
+    assert.ok(failed,'the failed response is reachable from its record');
+    assert.deepEqual([failed.deliveryEventId,failed.preparation],[image.deliveryEventId,null]);
+    assert.deepEqual(failed.observations.map(o=>[o.kind,o.retained_after,o.body[0].state]),[['copies',null,'removed']]);
     assert.ok(!page.views.rows.some(r=>r.action==='client-shown'),'transport is not a display observation');
     const exported=await ok('auditor','POST','exports',{...query,recordId});assert.ok(exported.totalEntries>=2);
     const limited=await ok('auditor','POST','investigations',{...query,recordId,limit:1});
@@ -373,10 +379,11 @@ async function imageDelivery(port,db,actor,study,servers){
       bytes:original.length,sha256:hash(original),declaredFrameCount:1,frames:[{number:1,bytes:original.length,sha256:hash(original)}],
       provenance:{kind:'device',receiptEventId:null},derivation:{kind:'original'},mammography:null,timing:null}]}],referencedObjects:[],
     decoderCatalog:{native:{version:'synthetic',sha256:hash('decoder')}},viewer:{id:'synthetic',version:'fixture',sha256:hash('viewer')}});
+  let sourcePatientId=study.patient.patientId;
   const source=createServer((req,res)=>{
     const json=value=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify(value));};
     if(req.url==='/tools/lookup')return json([{Type:'Instance',ID:'11111111-22222222-33333333-44444444-55555555'}]);
-    if(req.url.endsWith('/simplified-tags'))return json({StudyInstanceUID:studyUid,SeriesInstanceUID:seriesUid,SOPInstanceUID:sop,SOPClassUID:manifest.objects[0].sopClassUid,NumberOfFrames:'1'});
+    if(req.url.endsWith('/simplified-tags'))return json({StudyInstanceUID:studyUid,SeriesInstanceUID:seriesUid,SOPInstanceUID:sop,SOPClassUID:manifest.objects[0].sopClassUid,NumberOfFrames:'1',PatientID:sourcePatientId});
     if(req.url.endsWith('/header'))return json({'0002,0010':{Value:ts}});
     if(req.url.endsWith('/file'))return res.end(original);
     res.writeHead(404);res.end();
@@ -401,18 +408,30 @@ async function imageDelivery(port,db,actor,study,servers){
     receipt=await work.confirm({provisional:true,operationId:operation.operationId,eventId});
   }finally{work.end();}
   const staging=path.join(process.env.KIN_F_SPOOL,'staging');await mkdir(staging,{recursive:true});
-  let finish;const settled=new Promise((resolve,reject)=>finish={resolve,reject});
+  let finish,current=prepared;const settled=()=>new Promise((resolve,reject)=>finish={resolve,reject});
   const server=createServer(async(req,res)=>{
     try{await sendOnlineImage({records:port,evidence:new PgImageEvidenceStore(db),source:new OrthancService().imageSource(),stagingDirectory:staging},
-      {manifest,delivery:{event,receipt,prepared:studyPlan},prepare:async()=>prepared,requestId:randomUUID(),response:res,signal:new AbortController().signal});finish.resolve();}
+      {manifest,delivery:{event,receipt,prepared:studyPlan},prepare:async()=>current,requestId:randomUUID(),response:res,signal:new AbortController().signal});finish.resolve();}
     catch(error){res.statusCode=500;res.end();finish.reject(error);}
   });servers.push(server);
-  const response=await fetch(await listen(server));assert.equal(response.status,200);
+  const endpoint=await listen(server);
+  let pending=settled();
+  const response=await fetch(endpoint);assert.equal(response.status,200);
   assert.match(response.headers.get('content-type'),/^multipart\/related/);
   assert.equal(response.headers.get('x-kin-image-event'),eventId);assert.equal(response.headers.get('x-kin-image-response'),responseId);
   const wire=Buffer.from(await response.arrayBuffer()), bodyStart=wire.indexOf('\r\n\r\n')+4;
-  assert.ok(bodyStart>=4);assert.equal(hash(wire.subarray(bodyStart,bodyStart+original.length)),hash(original));await settled;
-  return{eventId:responseId,deliveryEventId:eventId,sha256:manifest.sha256};
+  assert.ok(bodyStart>=4);assert.equal(hash(wire.subarray(bodyStart,bodyStart+original.length)),hash(original));await pending;
+  // A second response of the same record whose preparation fails: the archive now attributes the object to another
+  // patient (same UIDs, same bytes). No preparation row; the copy observation names the record (R244-GPT-01/03).
+  const failedEventId=randomUUID();
+  current=E.prepareDelivery(manifest,E.parseImageRequest('GET',target),{eventId:failedEventId,deliveryEventId:eventId,at,cause:'user-view',opening:null,authorization,provision});
+  sourcePatientId='SYNTHETIC-OTHER';
+  // The handler's rejection arrives while the fetch is in flight: observe it as a value at once, not as an unhandled rejection.
+  pending=settled().then(()=>{throw new Error('the changed patient was served');},error=>error);
+  const refused=await fetch(endpoint);assert.equal(refused.status,500);await refused.arrayBuffer();
+  assert.equal((await pending).status,409,'the source refuses the object of another patient as a changed original');
+  sourcePatientId=study.patient.patientId;
+  return{eventId:responseId,deliveryEventId:eventId,sha256:manifest.sha256,failedEventId};
 }
 
 async function reportProducer(port,witness,doctor,study,wrap){

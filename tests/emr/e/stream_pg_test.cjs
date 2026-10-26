@@ -60,13 +60,14 @@ const studyEvent = (eventId, at, cause = 'user-view', requestId = randomUUID()) 
   targets: [{ kind: 'image', patientLinkSnapshot: known(patient), studyId: known(studyUid), recordId: known(studyUid), versionId: known(manifest.sha256) }],
   action: 'provide-prepared', result: 'prepared', requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null });
 
-/** A synthetic Orthanc answering the manifest's one object; `state` lets a case swap bytes or the header syntax. */
+/** A synthetic Orthanc answering the manifest's one object; `state` lets a case swap bytes, the header syntax or the
+ * object's current PatientID (a patient correction that keeps the UIDs and the pixels). */
 function syntheticSource(state) {
   return createServer((req, res) => {
     const json = value => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(value)); };
     if (req.url === '/tools/lookup') return json([{ Type: 'Instance', ID: objectId }]);
     if (req.url.endsWith('/simplified-tags')) return json({ StudyInstanceUID: studyUid, SeriesInstanceUID: seriesUid,
-      SOPInstanceUID: sop, SOPClassUID: manifest.objects[0].sopClassUid, NumberOfFrames: '2' });
+      SOPInstanceUID: sop, SOPClassUID: manifest.objects[0].sopClassUid, NumberOfFrames: '2', PatientID: state.patientId ?? patient.patientId });
     if (req.url.endsWith('/header')) return json({ '0002,0010': { Value: state.headerSyntax } });
     if (req.url.endsWith('/file')) { state.sourceReads++; res.end(state.sourceBytes); return; }
     const frame = /\/frames\/(\d+)\/raw$/.exec(req.url);
@@ -113,11 +114,11 @@ test('E real B2 COMMIT gates fixed HTTP bodies, ranges, multipart, failures and 
       if (failPrepared) throw new Error('SyntheticPrepareRollback');
       afterPrepared();
     },
-    async transferred(id, observations, wire) {
+    async transferred(link, observations, wire) {
       if (failObservation) throw new Error('SyntheticObservationFailure');
-      await storedEvidence.transferred(id, observations, wire);
+      await storedEvidence.transferred(link, observations, wire);
     },
-    async copiesRemoved(id, copies) { await storedEvidence.copiesRemoved(id, copies); },
+    async copiesRemoved(link, copies) { await storedEvidence.copiesRemoved(link, copies); },
   };
   const boundary = { records: port, evidence, source: orthanc.imageSource(), stagingDirectory: staging };
   const server = createServer(async (req, res) => {
@@ -291,11 +292,24 @@ test('E real B2 COMMIT gates fixed HTTP bodies, ranges, multipart, failures and 
     assert.equal((await witness.$queryRaw`SELECT event_id FROM emr_image.preparation WHERE event_id=${current.prepared.eventId}::uuid`).length, 0);
     await begin(); state.sourceBytes = Buffer.alloc(original.length, 99); sent = await request(); state.sourceBytes = original;
     assert.equal(sent.answer.status, 503); assert.equal(sent.answer.body.length, 0);
-    const failedCopies = await witness.$queryRaw`SELECT body FROM emr_image.observation WHERE kind='copies' AND event_id=${current.prepared.eventId}::uuid`;
+    const failedCopies = await witness.$queryRaw`SELECT body, delivery_event_id::text AS delivery, request_id, retained_after
+      FROM emr_image.observation WHERE kind='copies' AND event_id=${current.prepared.eventId}::uuid`;
     assert.equal(failedCopies.length, 1, 'a failed preparation still accounts for its temporary copy');
     assert.equal(failedCopies[0].body[0].state, 'removed');
+    // R244-GPT-03: there is no preparation row to follow, so the copy observation names its record and request itself.
+    assert.deepEqual([failedCopies[0].delivery, failedCopies[0].request_id, failedCopies[0].retained_after], [delivery.event.eventId, current.requestId, null]);
+    assert.equal((await witness.$queryRaw`SELECT event_id FROM emr_image.preparation WHERE event_id=${current.prepared.eventId}::uuid`).length, 0);
     await begin(); state.headerSyntax = '1.2.840.10008.1.2.4.50'; sent = await request(); state.headerSyntax = ts;
     assert.equal(sent.answer.status, 503); assert.equal(sent.answer.body.length, 0);
+    // R244-GPT-01: the object's current PatientID is not the manifest's (same UIDs, same pixels): refused before the
+    // body is read, no preparation row, the temporary copy accounted for under the record.
+    await begin(); state.patientId = 'SYNTHETIC-OTHER'; const readsBeforePatient = state.sourceReads; sent = await request(); state.patientId = undefined;
+    assert.equal(sent.answer.status, 503); assert.equal(sent.answer.body.length, 0);
+    assert.equal(sent.error?.status, 409, 'the source refuses the changed patient as a changed original');
+    assert.equal(state.sourceReads, readsBeforePatient, 'no body read for an object of another patient');
+    assert.equal((await witness.$queryRaw`SELECT event_id FROM emr_image.preparation WHERE event_id=${current.prepared.eventId}::uuid`).length, 0);
+    assert.deepEqual(await witness.$queryRaw`SELECT delivery_event_id::text AS delivery FROM emr_image.observation WHERE event_id=${current.prepared.eventId}::uuid`,
+      [{ delivery: delivery.event.eventId }]);
     // A lost COMMIT response of the delivery's own transaction is settled from the ledger, never retried as a new record.
     loseCommit = true; const settled = await openDelivery(port); assert.equal(loseCommit, false);
     await begin('', 'GET', { delivery: settled }); sent = await request();
@@ -312,6 +326,12 @@ test('E real B2 COMMIT gates fixed HTTP bodies, ranges, multipart, failures and 
     await begin(); failObservation = true; sent = await request(); failObservation = false;
     assert.equal(sent.result.observationStored, false);
     assert.ok(sent.result.observationError);
+    // The refused row is returned to the caller for its delivery to retain (R244-GPT-02), with the facts intact.
+    assert.equal(sent.result.unstored.length, 1);
+    assert.deepEqual([sent.result.unstored[0].kind, sent.result.unstored[0].link],
+      ['transport', { eventId: current.prepared.eventId, deliveryEventId: delivery.event.eventId, requestId: current.requestId }]);
+    assert.equal(sent.result.unstored[0].body.wire.terminal, 'transfer-ended');
+    assert.equal(sent.result.unstored[0].body.observations, sent.result.observations);
     assert.deepEqual(await readdir(staging), []);
 
     // R244-02: every committed preparation above came from the one study manifest. Its exact body is kept once, and
@@ -355,18 +375,39 @@ test('E image service: one ledger record per requester, session and manifest ver
       binding: { method: 'session', sessionRef: sessions.get(request) ?? 'authref:session-1' }, ingress: known({ address: '127.0.0.1', source: 'trusted-proxy' }),
       requestId: request.requestId ??= randomUUID() };
   } };
-  let currentChecks = 0, rechecks = 0, refuseCurrent = null;
+  let currentChecks = 0, rechecks = 0, refuseCurrent = null, manifestBuilds = 0;
   const facts = (request, at) => {
     if (refuseCurrent) throw refuseCurrent;
     return { actor: { identity: doctor, kind: 'member', roles: ['radiologist'], institutionId: 'synthetic-hospital', signingRegistrationId: null },
       requestId: request.requestId, ip: known({ address: '127.0.0.1', source: 'trusted-proxy' }), accountGeneration: 1, provision: provision(at) };
   };
   const context = {
-    async manifest() { return manifest; },
+    async manifest() { manifestBuilds++; return manifest; },
     // The delivery opening reads the current study (archive patient identity included); a response re-checks the
     // identity, scope, access and provision without the archive read.
     async current(_tx, request, _manifest, at) { currentChecks++; return facts(request, at); },
     async recheck(_tx, request, _manifest, at) { rechecks++; return facts(request, at); },
+  };
+  // The application connection E writes its rows on: a case makes it refuse the next transport-observation insert, as
+  // a pool failure would, while the ledger's own transactions are untouched. (The kind is the fourth parameter of the
+  // observation insert; a response's rows are written after its body ended, so a case waits for the previous
+  // response's rows before arming this.)
+  let refuseObservationWrites = 0;
+  const applicationExecuteRaw = db.$executeRaw.bind(db);
+  db.$executeRaw = (parts, ...values) => {
+    if (refuseObservationWrites > 0 && parts.join('?').includes('INSERT INTO emr_image.observation') && values[3] === 'transport') {
+      refuseObservationWrites--;
+      return Promise.reject(Object.assign(new Error('synthetic application pool failure'), { code: 'SyntheticAppPoolWriteFailure' }));
+    }
+    return applicationExecuteRaw(parts, ...values);
+  };
+  const rowsOf = async (responseId, count) => {
+    for (let i = 0; i < 100; i++) {
+      const rows = await witness.$queryRaw`SELECT kind FROM emr_image.observation WHERE event_id=${responseId}::uuid`;
+      if (rows.length >= count) return rows;
+      await sleep(50);
+    }
+    throw new Error(`response ${responseId} did not reach ${count} observation rows`);
   };
   const service = new OnlineImageService(port, context, db, new OrthancService(), requests, registry.work);
   const server = createServer((req, res) => {
@@ -433,13 +474,43 @@ test('E image service: one ledger record per requester, session and manifest ver
     refuseCurrent = null;
     const next = await frame(2); assert.equal(next.status, 200); await next.arrayBuffer();
     assert.notEqual(next.headers.get('x-kin-image-event'), freshId, 'the record a refused response retired takes no later frame');
+    const lastId = next.headers.get('x-kin-image-event');
+    // R244-GPT-01: a patient correction in the archive (same UIDs and pixels, another PatientID) between two frames of
+    // one record: the response is refused before any body read, serves no bytes, and the kept manifest is forgotten so
+    // the next request rebuilds it from the current study.
+    const buildsBefore = manifestBuilds, readsBeforeCorrection = state.sourceReads;
+    state.patientId = 'SYNTHETIC-OTHER';
+    const corrected = await frame(1); assert.equal(corrected.status, 409); assert.equal((await corrected.arrayBuffer()).byteLength, 0);
+    assert.equal(corrected.headers.get('x-kin-image-response'), null, 'no response row was prepared for another patient\'s object');
+    assert.equal(state.sourceReads, readsBeforeCorrection, 'the body of another patient\'s object is not read');
+    state.patientId = undefined;
+    const rebuilt = await frame(1); assert.equal(rebuilt.status, 200); await rebuilt.arrayBuffer();
+    assert.equal(manifestBuilds, buildsBefore + 1, 'the manifest was forgotten and rebuilt after the correction');
+    await rowsOf(rebuilt.headers.get('x-kin-image-response'), 2);
+    // R244-GPT-02: the application connection refuses a response's transport row. The response ended all the same
+    // (HTTP 200, every byte); its facts are kept by the record and written on the record's closing ledger transaction,
+    // before the terminal event, naming the first failure.
+    refuseObservationWrites = 1;
+    const late = await frame(2); assert.equal(late.status, 200); assert.ok(Buffer.from(await late.arrayBuffer()).includes(frames[1]));
+    assert.equal(refuseObservationWrites, 0, 'the synthetic pool failure was consumed by the transport write');
+    const lateResponse = late.headers.get('x-kin-image-response');
+    assert.equal(late.headers.get('x-kin-image-event'), lastId);
+    assert.deepEqual((await rowsOf(lateResponse, 1)).map(r => r.kind), ['copies'], 'the transport row is missing until the record closes');
     // Shutdown closes the open record now, before the ledger drains.
     registry.quiesce();
     await service.beforeApplicationShutdown();
     control.close();
     await Promise.race([control.drained(), sleep(5000).then(() => { throw new Error('ledger work left open by a delivery'); })]);
-    const lastId = next.headers.get('x-kin-image-event');
-    assert.deepEqual((await entries(`payload::jsonb->>'relatedEventId' = '${lastId}'`)).map(c => c.action), ['transfer-ended']);
+    const closedLast = await entries(`payload::jsonb->>'relatedEventId' = '${lastId}'`);
+    assert.deepEqual(closedLast.map(c => c.action), ['transfer-ended']);
+    const retained = await witness.$queryRaw`SELECT delivery_event_id::text AS delivery, request_id, retained_after, body->'wire' AS wire, recorded_at
+      FROM emr_image.observation WHERE event_id=${lateResponse}::uuid AND kind='transport'`;
+    assert.equal(retained.length, 1, 'the refused transport row was written when the record closed');
+    assert.equal(retained[0].delivery, lastId);
+    assert.equal(retained[0].retained_after, 'SyntheticAppPoolWriteFailure');
+    assert.deepEqual([retained[0].wire.terminal, retained[0].wire.bytesWritten === retained[0].wire.plannedBytes], ['transfer-ended', true]);
+    const [terminalRow] = await witness.$queryRaw`SELECT recorded_at FROM emr_access.access_entry WHERE event_id=${closedLast[0].eventId}`;
+    assert.ok(retained[0].recorded_at <= terminalRow.recorded_at, 'retained on the closing transaction, not after the terminal event');
     await sleep(DELIVERY_IDLE_MS + 1500);
     assert.deepEqual((await entries(`payload::jsonb->>'relatedEventId' = '${freshId}'`)).map(c => [c.action, c.result]), [['transfer-ended', 'succeeded']],
       'the retired record transferred its one frame before the refusal');

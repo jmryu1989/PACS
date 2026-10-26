@@ -166,13 +166,16 @@ export class EmrAuditService {
         LEFT JOIN emr_image.source_manifest m ON m.body_sha256=p.source_manifest_body
         WHERE p.event_id=ANY(${imageIds}::uuid[]) OR p.delivery_event_id=ANY(${imageIds}::uuid[])` : [];
       const responseIds = [...new Set([...imageIds, ...prepared.map(p => p.event_id)])];
-      const observations = responseIds.length ? await tx.$queryRaw<any[]>`SELECT event_id::text,sequence::text,kind,body
-        FROM emr_image.observation WHERE event_id=ANY(${responseIds}::uuid[]) ORDER BY sequence` : [];
+      // An observation names its delivery record itself (since 20261027150000): a response whose preparation failed
+      // has no preparation row, and its copy observation is found from the record all the same.
+      const observations = responseIds.length ? await tx.$queryRaw<any[]>`SELECT event_id::text,delivery_event_id::text,request_id,
+        sequence::text,kind,body,retained_after FROM emr_image.observation
+        WHERE event_id=ANY(${responseIds}::uuid[]) OR delivery_event_id=ANY(${imageIds}::uuid[]) ORDER BY sequence` : [];
       const joined = new Map<string, { eventId: string; deliveryEventId: string | null; preparation: any; observations: any[] }>();
       for (const { delivery_event_id, ...p } of prepared)
         joined.set(p.event_id, { eventId: p.event_id, deliveryEventId: delivery_event_id ?? null, preparation: p, observations: [] });
-      for (const { event_id, ...observation } of observations) {
-        if (!joined.has(event_id)) joined.set(event_id, { eventId: event_id, deliveryEventId: null, preparation: null, observations: [] });
+      for (const { event_id, delivery_event_id, ...observation } of observations) {
+        if (!joined.has(event_id)) joined.set(event_id, { eventId: event_id, deliveryEventId: delivery_event_id ?? null, preparation: null, observations: [] });
         joined.get(event_id).observations.push(observation);
       }
       const images = [...joined.values()];

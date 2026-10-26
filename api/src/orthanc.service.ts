@@ -60,7 +60,7 @@ export class OrthancService {
       const source = manifest.objects.find(o => o.sopInstanceUid === unit.sopInstanceUid);
       if (prepared.manifestSha256 !== manifest.sha256 || request.studyUid !== manifest.studyUid ||
           !prepared.units.some(u => u === unit)) throw new BadRequestException('영상 제공 범위가 일치하지 않습니다');
-      let path: string, syntax: string | null = null;
+      let path: string, syntax: string | null = null, patientId: string;
       if (unit.part === 'object' || unit.part === 'frame') {
         if (!source || source.unsupported) throw new BadRequestException('영상 표현 형식을 확인할 수 없습니다');
         const matches = await this.viewerJson('/tools/lookup', source.sopInstanceUid, signal);
@@ -73,6 +73,12 @@ export class OrthancService {
         if (tags?.StudyInstanceUID !== manifest.studyUid || tags?.SeriesInstanceUID !== source.seriesUid ||
             tags?.SOPInstanceUID !== source.sopInstanceUid || tags?.SOPClassUID !== source.sopClassUid ||
             syntax !== source.transferSyntaxUid) throw new ConflictException('영상 원본 판이 변경되었습니다');
+        // The same header carries the object's current PatientID: a patient correction that keeps the UIDs and the
+        // pixels is refused here, before the body is read, with no further archive call (R244-GPT-01). Exact text, as
+        // D's study read compares it (no trim, no issuer: CS-02).
+        if (typeof tags?.PatientID !== 'string' || tags.PatientID !== manifest.patient.patientId)
+          throw new ConflictException('영상 원본의 환자 식별이 변경되었습니다');
+        patientId = tags.PatientID;
         if (unit.part === 'frame') {
           const count = Number(tags.NumberOfFrames ?? 1);
           if (count !== source.declaredFrameCount || !source.frames.some(f => f.number === unit.frame))
@@ -103,7 +109,7 @@ export class OrthancService {
               decoder === 'rle' ? 'image/dicom-rle' : 'application/octet-stream';
           contentType = `${media}; transfer-syntax=${syntax}`;
         }
-        return { contentType, transferSyntaxUid: syntax, source: path };
+        return { contentType, transferSyntaxUid: syntax, source: path, patientId };
       });
     } };
   }

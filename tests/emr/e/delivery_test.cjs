@@ -8,7 +8,7 @@ const { test } = require('node:test');
 const path = require('node:path');
 const api = process.env.KIN_E_API || path.resolve(__dirname, '../../../api');
 const load = name => require(path.join(api, 'dist', name));
-const { ImageDeliveries, deliveryClosing, DELIVERY_IDLE_MS, DELIVERY_MAX_AGE_MS } = load('emr-image/delivery');
+const { ImageDeliveries, deliveryClosing } = load('emr-image/delivery');
 const { createBackgroundWorkRegistry } = load('emr-runtime/background-work');
 
 const live = () => new AbortController().signal;
@@ -40,7 +40,6 @@ test('the terminal event follows what E observed on the responses', () => {
   assert.equal(deliveryClosing(o(199, 0, 1)), null, 'an unconfirmed ending has no v1 access action');
   assert.equal(deliveryClosing(o(0, 1, 1)), 'transfer-aborted');
   assert.equal(deliveryClosing(o(0, 0, 0)), 'transfer-aborted', 'nothing transferred is not an ended transfer');
-  assert.equal(DELIVERY_IDLE_MS, 3000); assert.equal(DELIVERY_MAX_AGE_MS, 60000);
 });
 
 test('a burst of simultaneous frames of one requester is one record, closed once after they end', async () => {
@@ -57,7 +56,7 @@ test('a burst of simultaneous frames of one requester is one record, closed once
   assert.equal(h.closed.length, 1);
   assert.equal(h.closed[0].closing, 'transfer-ended');
   assert.deepEqual([h.closed[0].outcome.responses, h.closed[0].outcome.ended, h.closed[0].outcome.bytesWritten], [51, 51, 50010]);
-  assert.equal(h.deliveries.size(), 0);
+  assert.deepEqual(h.closed[0].outcome.unstored, [], 'every response stored its own rows');
   // After the idle close the next frame opens a new record.
   const later = await h.deliveries.join('k1', { n: 3 }, live());
   assert.notEqual(later.delivery.event.eventId, h.opened[0].id);
@@ -65,6 +64,21 @@ test('a burst of simultaneous frames of one requester is one record, closed once
   later.end('transfer-aborted', 5);
   await sleep(120);
   assert.equal(h.closed[1].closing, 'transfer-aborted');
+});
+
+test('rows the store refused on a response reach the close hook with the terminal choice unchanged', async () => {
+  // R244-GPT-02: the response ended; what failed is the retention of its facts. The delivery keeps them for its own
+  // closing transaction instead of dropping them with the response's result.
+  const h = harness();
+  const refusedTransport = { kind: 'transport', link: { eventId: 'r1', deliveryEventId: 'd', requestId: 'q1' }, body: { observations: [], wire: { bytesWritten: 9, plannedBytes: 9, terminal: 'transfer-ended' } }, error: new Error('synthetic pool failure') };
+  const refusedCopies = { kind: 'copies', link: { eventId: 'r2', deliveryEventId: 'd', requestId: 'q2' }, body: [], error: new Error('synthetic pool failure') };
+  const [a, b, c] = await Promise.all([h.deliveries.join('k', {}, live()), h.deliveries.join('k', {}, live()), h.deliveries.join('k', {}, live())]);
+  a.end('transfer-ended', 9, [refusedTransport]); b.end('transfer-ended', 9); c.end('not-sent', 0, [refusedCopies]);
+  await sleep(120);
+  assert.equal(h.closed.length, 1);
+  assert.equal(h.closed[0].closing, 'transfer-ended', 'the transfers ended; only their retention is late');
+  assert.deepEqual(h.closed[0].outcome.unstored, [refusedTransport, refusedCopies]);
+  assert.deepEqual([h.closed[0].outcome.responses, h.closed[0].outcome.ended, h.closed[0].outcome.notSent], [3, 2, 1]);
 });
 
 test('another requester, session or manifest version is another record; an unconfirmed ending closes without a v1 action', async () => {

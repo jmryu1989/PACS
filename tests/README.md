@@ -3069,10 +3069,12 @@ The access record of viewing (의료법 제23조④) is the study delivery (`api
 provide-prepared event per requester, session and manifest version, durable before the delivery's first response,
 closed by one terminal event after a short idle period, a bounded age, a changed current fact or shutdown; every
 response checks the requester's current access on one bounded ledger transaction before its first byte and keeps its
-fixed representation, transport and copy facts in `emr_image` rows naming that event (`X-KIN-Image-Event` is the
-record, `X-KIN-Image-Response` the row). `node --test tests/emr/e/delivery_test.cjs` (compiled `api/dist`) checks that
-lifecycle with stand-in hooks; the real-PG `stream_pg_test.cjs` case drives the service against the ledger and checks
-its events.
+fixed representation, transport and copy facts in `emr_image` rows naming that event and the request (`X-KIN-Image-Event`
+is the record, `X-KIN-Image-Response` the row); the source compares the object's current PatientID with the manifest's
+on every response, and a row the application connection refused is written on the delivery's closing ledger transaction
+before its terminal event, with the first failure's cause. `node --test tests/emr/e/delivery_test.cjs` (compiled
+`api/dist`) checks that lifecycle with stand-in hooks; the real-PG `stream_pg_test.cjs` case drives the service against
+the ledger and checks its events, the refused patient change, and the late-retained row.
 `python -B scripts/run-tests.py --module tests/e2e/test_image_route.py --mode live --unit e-route --timeout 1800`
 runs on the served stack: one frame through HTTPS is one recorded delivery, and the served OHIF CT series
 (`KIN_E_ROUTE_SLICES`, default 200, `KIN_E_ROUTE_MATRIX`, default 512) records every received frame once; it prints

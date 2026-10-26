@@ -18,11 +18,11 @@ import { DeliveryClosing, DeliveryOutcome, ImageDeliveries, OpenedDelivery, Resp
 import type { ImageManifest } from './manifest';
 import { ManifestReuse } from './manifest-reuse';
 import { PgImageEvidenceStore } from './store';
-import { sendOnlineImage } from './stream';
+import { sendOnlineImage, UnstoredObservation } from './stream';
 
 const known = <T>(value: T) => ({ status: 'known' as const, value });
 // The kept manifest no longer describes the source or the current study: the next request rebuilds it.
-const SOURCE_CHANGED = ['ImageCurrentStudyChanged', 'ImageSourceMismatch', 'ScopeOutsideManifest', 'FrameOutOfManifest'];
+const SOURCE_CHANGED = ['ImageCurrentStudyChanged', 'ImageSourceMismatch', 'ImageSourcePatientChanged', 'ScopeOutsideManifest', 'FrameOutOfManifest'];
 const sourceChanged = (error: any) => error instanceof ConflictException || SOURCE_CHANGED.includes(error?.code) ||
   error instanceof AggregateError && error.errors.some(sourceChanged);
 
@@ -45,10 +45,12 @@ function sameAuthority(current: CurrentImageFacts, opened: CurrentImageFacts, ma
 export class OnlineImageService implements BeforeApplicationShutdown {
   private readonly manifests = new ManifestReuse();
   private readonly deliveries: ImageDeliveries<DeliveryFacts, Opener>;
+  private readonly evidence: PgImageEvidenceStore;
   constructor(@Inject(EMR_RECORD_PORT) private readonly records: EmrRecordPort,
     private readonly context: ImageContextSource, private readonly db: PrismaService,
     private readonly orthanc: OrthancService, @Inject(REQUEST_CONTEXT_SOURCE) private readonly requests: RequestContextSource,
     @Inject(EMR_BACKGROUND_WORK) background: BackgroundWork) {
+    this.evidence = new PgImageEvidenceStore(db);
     this.deliveries = new ImageDeliveries<DeliveryFacts, Opener>(background, {
       open: (_key, opener) => this.openDelivery(opener),
       close: (delivery, outcome, closing) => this.closeDelivery(delivery, outcome, closing),
@@ -81,13 +83,16 @@ export class OnlineImageService implements BeforeApplicationShutdown {
         [...facts.roles].sort(), facts.binding.method, facts.binding.sessionRef, facts.ingress, manifest.sha256]);
       const lease = await this.deliveries.join(key, { request, manifest, facts }, abort.signal);
       let end: ResponseEnd = 'not-sent', bytesWritten = 0;
+      const unstored: UnstoredObservation[] = [];
       try {
-        const result = await sendOnlineImage({ records: this.records, evidence: new PgImageEvidenceStore(this.db),
+        const result = await sendOnlineImage({ records: this.records, evidence: this.evidence,
           source: this.orthanc.imageSource(), stagingDirectory }, {
           manifest, delivery: lease.delivery, requestId: facts.requestId,
+          // A row the application connection refused goes to the delivery, which writes it when it closes.
+          unstored: row => unstored.push(row),
           // This response's current access check, on its own bounded ledger transaction, before any source read:
-          // identity, institution scope, StudyAccess and provision; the archive's patient identity was compared with
-          // the manifest when the delivery opened (context.ts recheck).
+          // identity, institution scope, StudyAccess and provision (context.ts recheck); the archive's current
+          // patient identity of the object is compared by the source and the stream outside the lane.
           prepare: async (tx: EmrRecordTransaction) => {
             const at = new Date().toISOString();
             let current: CurrentImageFacts;
@@ -102,7 +107,7 @@ export class OnlineImageService implements BeforeApplicationShutdown {
           response, signal: abort.signal, range: request.headers.range });
         end = result.terminal; bytesWritten = result.bytesWritten;
         return result;
-      } finally { lease.end(end, bytesWritten); }
+      } finally { lease.end(end, bytesWritten, unstored); }
     } catch (error) {
       if (kept && sourceChanged(error)) this.manifests.forget(image.studyUid, kept);
       throw error;
@@ -151,15 +156,21 @@ export class OnlineImageService implements BeforeApplicationShutdown {
     }
   }
 
-  /** The delivery's terminal event, related to its provide-prepared event, from what E observed on its responses. */
-  private async closeDelivery(delivery: OpenedDelivery<DeliveryFacts>, _outcome: DeliveryOutcome, closing: DeliveryClosing): Promise<void> {
+  /** The delivery's terminal event, related to its provide-prepared event, from what E observed on its responses.
+   * Rows of its responses that the application connection refused are written first, on this same ledger
+   * transaction: the terminal event exists only if every response's facts are retained, and a retention failure is a
+   * failed ledger transaction (B2's own failure handling), not a silently closed record (R244-GPT-02). */
+  private async closeDelivery(delivery: OpenedDelivery<DeliveryFacts>, outcome: DeliveryOutcome, closing: DeliveryClosing): Promise<void> {
     const { work } = delivery.facts;
     try {
-      if (closing === null) return;
-      const followup: AccessEvent = parseAccessEvent({ ...delivery.event, eventId: randomUUID(), relatedEventId: delivery.event.eventId,
-        action: closing, result: closing === 'transfer-ended' ? 'succeeded' : 'aborted', occurredAt: new Date().toISOString() });
-      await work.transactionWithRecords((_tx, record) => record(followup,
-        async () => ({ kind: 'emr-image', id: delivery.event.eventId, version: delivery.prepared.manifestSha256 })));
+      if (closing === null && !outcome.unstored.length) return;
+      const followup: AccessEvent | null = closing === null ? null : parseAccessEvent({ ...delivery.event, eventId: randomUUID(),
+        relatedEventId: delivery.event.eventId, action: closing, result: closing === 'transfer-ended' ? 'succeeded' : 'aborted',
+        occurredAt: new Date().toISOString() });
+      await work.transactionWithRecords(async (tx, record) => {
+        for (const row of outcome.unstored) await this.evidence.retain(tx, row);
+        if (followup) await record(followup, async () => ({ kind: 'emr-image', id: delivery.event.eventId, version: delivery.prepared.manifestSha256 }));
+      });
     } finally { work.end(); }
   }
 }

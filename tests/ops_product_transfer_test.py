@@ -41,7 +41,7 @@ def fixture():
                    rows=transfer.expected_rows(UID), sequences=transfer.expected_sequences(),
                    emr=dict(catalog=emr_catalog(), rows=transfer.expected_emr_rows(),
                        image=dict(catalog=dict(tables=['observation', 'preparation', 'source_manifest']), rows=transfer.expected_image_rows(),
-                           sequence=dict(last_value=2, is_called=True)),
+                           sequence=dict(last_value=3, is_called=True)),
                        audit=dict(catalog=dict(tables=sorted(transfer.expected_audit_rows())), rows=transfer.expected_audit_rows(),
                            sequences={table: dict(last_value=1, is_called=True) for table in ('roster_event', 'issuance_event', 'request_event')})))
     return dict(body, schema=2, profile=transfer.PROFILE, product=product,
@@ -77,9 +77,12 @@ class Pure(unittest.TestCase):
         with patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
             transfer.verify_product('owned', 'kin', expected)
         # A preparation written since 20261026210000 names the one kept study-manifest body, and since 20261027090000 the
-        # study delivery's access record and its request: losing any of them is a mismatch.
+        # study delivery's access record and its request; an observation written since 20261027150000 names them too, with
+        # the cause of a late write: losing any of them is a mismatch.
         for lose in (lambda rows: rows['source_manifest'].pop(), lambda rows: rows['preparation'][1].update(source_manifest_body=None),
-                     lambda rows: rows['preparation'][1].update(delivery_event_id=None), lambda rows: rows['preparation'][1].update(request_id=None)):
+                     lambda rows: rows['preparation'][1].update(delivery_event_id=None), lambda rows: rows['preparation'][1].update(request_id=None),
+                     lambda rows: rows['observation'][2].update(delivery_event_id=None), lambda rows: rows['observation'][2].update(request_id=None),
+                     lambda rows: rows['observation'][2].update(retained_after=None)):
             actual = copy.deepcopy(expected)
             lose(actual['emr']['image']['rows'])
             with patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):

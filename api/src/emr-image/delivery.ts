@@ -2,6 +2,7 @@ import type { AccessEvent, DurableAccessReceipt } from '../emr-contract/access-e
 import { refuse } from '../emr-contract/validation';
 import type { BackgroundWork } from '../emr-runtime/background-work';
 import type { PreparedDelivery } from './contract';
+import type { UnstoredObservation } from './stream';
 
 /**
  * A study delivery is one access record for one requester's continuous viewing of one study manifest version.
@@ -14,7 +15,9 @@ import type { PreparedDelivery } from './contract';
  * record is the delivery: B2 holds one provide-prepared event for the study, durable before any response's first byte,
  * and one terminal event when the delivery closes; each response keeps its exact representation, transport and copy
  * facts in E's own tables, naming that event. No fact is dropped: who, when, from where, which patient and study at
- * which manifest version, what was done, and per response what was sent and whether it ended.
+ * which manifest version, what was done, and per response what was sent and whether it ended. A row the store refused
+ * on a response's own path is kept by the delivery and written on the delivery's ledger transaction when it closes,
+ * before the terminal event, so the terminal event is appended only with every response's facts retained.
  *
  * The key is the requester's identity, rights, session, address and the manifest digest, so a changed account, another
  * session or another manifest version is another record. A delivery closes after a short idle period, after a bounded
@@ -27,24 +30,33 @@ export interface OpenedDelivery<T> {
 export type ResponseEnd = 'transfer-ended' | 'transfer-aborted' | 'transfer-unknown' | 'not-sent';
 export interface DeliveryOutcome {
   responses: number; ended: number; aborted: number; unknown: number; notSent: number; bytesWritten: number;
+  /** Rows of this delivery's responses that the store refused; the close hook retains them with the terminal event. */
+  unstored: readonly UnstoredObservation[];
   openedAt: string; closedAt: string;
 }
 export type DeliveryClosing = 'transfer-ended' | 'transfer-aborted' | null;
 export interface DeliveryLease<T> {
   readonly delivery: OpenedDelivery<T>;
-  /** This response is over: what E observed on its own connection and how many body bytes it wrote. */
-  end(terminal: ResponseEnd, bytesWritten: number): void;
+  /** This response is over: what E observed on its own connection, how many body bytes it wrote, and which of its
+   * rows the store refused (kept until the delivery closes). */
+  end(terminal: ResponseEnd, bytesWritten: number, unstored?: readonly UnstoredObservation[]): void;
   /** The current facts no longer match this record: no later response joins it; it closes once its responses end. */
   retire(): void;
 }
 export interface DeliveryHooks<T, R> {
   /** The study's provide-prepared event, durable (B2 receipt) before the first response of this delivery is prepared. */
   open(key: string, opener: R): Promise<OpenedDelivery<T>>;
-  /** The delivery's terminal event (null: no v1 access action describes it; E's rows hold the facts). */
+  /** The delivery's terminal event (null: no v1 access action describes it; E's rows hold the facts), and the retention
+   * of the outcome's unstored rows. */
   close(delivery: OpenedDelivery<T>, outcome: DeliveryOutcome, closing: DeliveryClosing): Promise<void>;
 }
-/** idle: a viewer loading or scrolling a series asks for its next frame within a fraction of a second; a longer pause
- * ends the viewing this record describes. maxAge: a bound on how long one pre-read authorization covers source reads. */
+/** idle: the pause after which a viewing is over. In the served run e-route-diag-fable-20261027a (synthetic 200-slice
+ * CT, 405 responses, five records) the largest gap between consecutive frame requests inside one viewer opening was
+ * 0.68 s (p99 0.44 s, median 14 ms) and separate openings were 6 s or more apart; the GET and HEAD of one request pair
+ * were 2.1 s apart and are one viewing (tests/e2e/test_image_route.py route_01). 3 s sits above the first and below the
+ * second. maxAge: a bound on how long one pre-read authorization covers source reads; the longest opening observed in
+ * those runs took 19.4 s (e-route-before-fable-20261027a), so 60 s re-reads the current study about three times less
+ * often than a viewing lasts. Neither is a user or Minhoon decision; a first-site observation replaces them. */
 export const DELIVERY_IDLE_MS = 3000;
 export const DELIVERY_MAX_AGE_MS = 60000;
 
@@ -60,7 +72,7 @@ export function deliveryClosing(outcome: Pick<DeliveryOutcome, 'ended' | 'aborte
 interface Entry<T> {
   key: string; delivery: OpenedDelivery<T>; openedMs: number; openedAt: string;
   state: 'open' | 'retiring' | 'closing' | 'closed'; inFlight: number;
-  tally: { responses: number; ended: number; aborted: number; unknown: number; notSent: number; bytesWritten: number };
+  tally: { responses: number; ended: number; aborted: number; unknown: number; notSent: number; bytesWritten: number; unstored: UnstoredObservation[] };
   cancelIdle: () => void; closed: Promise<void> | null;
 }
 
@@ -108,11 +120,11 @@ export class ImageDeliveries<T, R> {
     const target = entry;
     return {
       delivery: target.delivery,
-      end: (terminal, bytesWritten) => {
+      end: (terminal, bytesWritten, unstored = []) => {
         if (ended) return;
         ended = true;
         const t = target.tally;
-        t.responses++; t.bytesWritten += bytesWritten;
+        t.responses++; t.bytesWritten += bytesWritten; t.unstored.push(...unstored);
         if (terminal === 'transfer-ended') t.ended++; else if (terminal === 'transfer-aborted') t.aborted++;
         else if (terminal === 'transfer-unknown') t.unknown++; else t.notSent++;
         target.inFlight--;
@@ -135,12 +147,9 @@ export class ImageDeliveries<T, R> {
     await Promise.all(closing);
   }
 
-  /** Open deliveries, for tests and accounting only. */
-  size(): number { return this.live.size; }
-
   private admit(key: string, delivery: OpenedDelivery<T>): Entry<T> {
     const entry: Entry<T> = { key, delivery, openedMs: Date.now(), openedAt: new Date().toISOString(), state: 'open', inFlight: 0,
-      tally: { responses: 0, ended: 0, aborted: 0, unknown: 0, notSent: 0, bytesWritten: 0 }, cancelIdle: () => undefined, closed: null };
+      tally: { responses: 0, ended: 0, aborted: 0, unknown: 0, notSent: 0, bytesWritten: 0, unstored: [] }, cancelIdle: () => undefined, closed: null };
     const previous = this.current.get(key);
     if (previous) this.retire(previous);
     this.current.set(key, entry);

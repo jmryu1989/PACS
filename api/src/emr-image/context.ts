@@ -16,9 +16,11 @@ export interface CurrentImageFacts extends ClinicalRequestFacts {
  * lock current identity, institution, patient link and StudyAccess on tx and
  * compare the selected source manifest. Browser fields are never these facts.
  * recheck() is the per-response check of a study delivery that current() opened (delivery.ts): the same identity,
- * institution scope, StudyAccess and provision facts on tx, without reading the archive's patient identity again.
- * That identity was compared with the manifest when the delivery opened; every response's bytes are still verified
- * against the manifest's digests, so a replaced object is refused by the stream, not by this check. */
+ * institution scope, StudyAccess and provision facts on tx, without D's study read (the archive QIDO) on the ledger
+ * lane. The archive's current patient identity is still compared on every response, by the source: it reads the
+ * object's header for the response anyway and the stream refuses an object whose PatientID is not the manifest's
+ * (stream.ts, R244-GPT-01). D's patient link is made of the managing institution and that PatientID, so the two reads
+ * together cover what current() compares; a replaced object is refused by the digests. */
 export abstract class ImageContextSource {
   abstract manifest(request: object, image: ImageRequest, signal: AbortSignal): Promise<ImageManifest>;
   abstract current(tx: EmrRecordTransaction, request: object, manifest: ImageManifest,
@@ -51,7 +53,8 @@ export class ProductionImageContext extends ImageContextSource {
     return { ...facts, ...await this.catalog.delivery(tx, request, facts, study, at) };
   }
   /** D's scope read (institution, tele scope, StudyAccess) instead of its study read: the archive's study identity
-   * (an Orthanc QIDO) is not read on every frame inside the ledger lane; it was read when the delivery opened. */
+   * (an Orthanc QIDO) is not read on every frame inside the ledger lane; the source compares the object's current
+   * PatientID with the manifest's for this response, outside the lane (stream.ts). */
   async recheck(tx: EmrRecordTransaction, request: object, manifest: ImageManifest, at: string): Promise<CurrentImageFacts> {
     const facts = await this.clinical.facts(tx, request);
     const scope = await this.clinical.scope(tx, request, manifest.studyUid);

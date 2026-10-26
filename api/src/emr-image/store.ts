@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import type { ImageManifest } from './manifest';
 import type { TransferObservation } from './contract';
-import type { ImageCopy, ImageEvidenceStore, ImageResponseManifest } from './stream';
+import type { ImageCopy, ImageEvidenceStore, ImageResponseManifest, ObservationLink, TransportWire, UnstoredObservation } from './stream';
 
 // The exact JSON of a built study manifest and the digest that names it, made once per manifest: the frames of a
 // kept manifest (manifest-reuse.ts) share one object. `stored` remembers that this process already wrote the body
@@ -17,11 +17,20 @@ function body(source: ImageManifest) {
   }
   return kept;
 }
+/** A connection that can run the observation insert: the application pool, or the delivery's ledger transaction. */
+type Writer = Pick<PrismaClient, '$executeRaw'>;
+/** The cause kept with a row written late: the first failure's code or message, never its stack or query. */
+function reason(error: unknown): string {
+  const e = error as { code?: unknown; message?: unknown } | null;
+  const text = typeof e?.code === 'string' ? e.code : typeof e?.message === 'string' ? e.message : String(error);
+  return text.slice(0, 200);
+}
 
 /** E's own rows: each response's fixed representation, transport and copy facts, naming the B2 access record of its
- * study delivery. They are written on the application's connection, durable (synchronous commit) before the first
- * byte; the ledger's append lanes carry only the delivery's own events. No row here decides whether an access record
- * committed: that belongs to B2. */
+ * study delivery and its HTTP request. They are written on the application's connection, durable (synchronous commit)
+ * before the first byte; the ledger's append lanes carry only the delivery's own events. A row the application
+ * connection refused is written by retain() on the delivery's ledger transaction when it closes. No row here decides
+ * whether an access record committed: that belongs to B2. */
 export class PgImageEvidenceStore implements ImageEvidenceStore {
   constructor(private readonly db: PrismaClient) {}
 
@@ -40,15 +49,24 @@ export class PgImageEvidenceStore implements ImageEvidenceStore {
         ${JSON.stringify(manifest)}::jsonb, ${JSON.stringify(copies)}::jsonb)`;
   }
 
-  async transferred(eventId: string, observations: readonly TransferObservation[],
-    wire: Parameters<ImageEvidenceStore['transferred']>[2]): Promise<void> {
-    await this.db.$executeRaw`INSERT INTO emr_image.observation (event_id, kind, body)
-      VALUES (${eventId}::uuid, 'transport', ${JSON.stringify({ observations, wire })}::jsonb)`;
+  async transferred(link: ObservationLink, observations: readonly TransferObservation[], wire: TransportWire): Promise<void> {
+    await observe(this.db, link, 'transport', { observations, wire }, null);
   }
 
-  async copiesRemoved(eventId: string, copies: readonly ImageCopy[]): Promise<void> {
-    // Cleanup is recorded even if the preparation failed.
-    await this.db.$executeRaw`INSERT INTO emr_image.observation (event_id, kind, body)
-      VALUES (${eventId}::uuid, 'copies', ${JSON.stringify(copies)}::jsonb)`;
+  async copiesRemoved(link: ObservationLink, copies: readonly ImageCopy[]): Promise<void> {
+    // Cleanup is recorded even if the preparation failed; the delivery link is how a failed preparation's copy
+    // observation is found from its record (there is no preparation row to follow).
+    await observe(this.db, link, 'copies', copies, null);
   }
+
+  /** The row the application connection refused, written on the closing delivery's ledger transaction with the first
+   * failure's cause, so that an investigation sees both the facts and that they were retained late. */
+  async retain(tx: Writer, row: UnstoredObservation): Promise<void> {
+    await observe(tx, row.link, row.kind, row.body, reason(row.error));
+  }
+}
+
+async function observe(writer: Writer, link: ObservationLink, kind: UnstoredObservation['kind'], body: unknown, retainedAfter: string | null) {
+  await writer.$executeRaw`INSERT INTO emr_image.observation (event_id, delivery_event_id, request_id, kind, body, retained_after)
+    VALUES (${link.eventId}::uuid, ${link.deliveryEventId}::uuid, ${link.requestId}, ${kind}, ${JSON.stringify(body)}::jsonb, ${retainedAfter})`;
 }
