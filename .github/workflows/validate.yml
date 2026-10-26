@@ -4,11 +4,13 @@ permissions:
 concurrency:
   # The nightly restore run keeps its own group so it never replaces a pending main-push run.
   group: validate-${{ github.event_name == 'schedule' && 'nightly-' || '' }}${{ github.ref }}
-  cancel-in-progress: false
+  # D1876 d2: a newer push to the same PR makes the older head's run useless (the gate reads only the exact head).
+  # main push, tags and the nightly keep queueing so no main or restore run is dropped.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   emr-b:
-    needs: runtime
-    if: ${{ fromJSON(needs.runtime.outputs.jobs)['emr-b'] }}
+    needs: select
+    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['emr-b']) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 210
     env:
@@ -16,6 +18,13 @@ jobs:
       KIN_EMR_PYTHON: python3
       KIN_TEST_API_IMAGE: kin-emrb-ci:${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
     steps:
+      - name: Path selection completed
+        if: ${{ needs.select.result != 'success' }}
+        env:
+          SELECT_RESULT: ${{ needs.select.result }}
+        run: |
+          echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+          exit 1
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -95,6 +104,36 @@ jobs:
             tmp/request-auth/
           if-no-files-found: error
           retention-days: 7
+  select:
+    # D1876 d1: module jobs consume only this selection, so they wait for this short job, not for the
+    # ~15-minute runtime job, which now runs beside them. A failed or cancelled select must never leave a
+    # required module check skipped (the gate counts path-selection skips as satisfied, D1831): every module
+    # job still starts and its first step fails unless this job succeeded.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+        ref: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
+    - name: Select affected modules
+      id: paths
+      run: python3 scripts/ci_select.py
+    - name: Selection is a complete boolean map
+      env:
+        JOBS: ${{ steps.paths.outputs.jobs }}
+      run: |
+        python3 - <<'PY'
+        import json, os
+        selected = json.loads(os.environ['JOBS'])
+        declared = json.load(open('scripts/ci-paths.json', encoding='utf-8'))['jobs']
+        if not isinstance(selected, dict) or set(selected) != set(declared) or \
+                not all(isinstance(value, bool) for value in selected.values()):
+            raise SystemExit('module selection is not a boolean map of every declared job: ' + os.environ['JOBS'])
+        PY
+    outputs:
+      jobs: ${{ steps.paths.outputs.jobs }}
   runtime:
     runs-on: ubuntu-24.04
     # 19m43s-19m52s on main and a 20-minute timeout already hit under queue load (#182).
@@ -200,7 +239,7 @@ jobs:
     - name: SR source tree identity and bounded literal values
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/sr_tree_test.cjs
     - name: Pinned viewer precision and isolated stack method boundaries
-      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_precision_test.cjs tests/viewer_frame_metadata_test.cjs
+      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_precision_test.cjs tests/viewer_frame_metadata_test.cjs tests/viewer_reference_lines_test.cjs
     - name: Deployment preflight refusal and shared lock
       run: python3 tests/ops_deploy_preflight_test.py
     - name: Deployment state machine and retained operations lock
@@ -453,12 +492,17 @@ jobs:
         path: tmp/runtime-ci/
         if-no-files-found: error
         retention-days: 7
-    outputs:
-      jobs: ${{ steps.paths.outputs.jobs }}
   asr-engine:
     runs-on: ubuntu-24.04
     timeout-minutes: 85
     steps:
+    - name: Path selection completed
+      if: ${{ needs.select.result != 'success' }}
+      env:
+        SELECT_RESULT: ${{ needs.select.result }}
+      run: |
+        echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+        exit 1
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
         persist-credentials: false
@@ -601,12 +645,19 @@ jobs:
         path: tmp/dictation-capture-ci/
         if-no-files-found: error
         retention-days: 7
-    needs: runtime
-    if: ${{ fromJSON(needs.runtime.outputs.jobs)['asr-engine'] }}
+    needs: select
+    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['asr-engine']) }}
   emr-c:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
+    - name: Path selection completed
+      if: ${{ needs.select.result != 'success' }}
+      env:
+        SELECT_RESULT: ${{ needs.select.result }}
+      run: |
+        echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+        exit 1
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
         persist-credentials: false
@@ -650,14 +701,21 @@ jobs:
           tmp/emr-d-online/
         if-no-files-found: error
         retention-days: 7
-    needs: runtime
-    if: ${{ fromJSON(needs.runtime.outputs.jobs)['emr-c'] }}
+    needs: select
+    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['emr-c']) }}
   emr-d:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       TARGET_SHA: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
     steps:
+    - name: Path selection completed
+      if: ${{ needs.select.result != 'success' }}
+      env:
+        SELECT_RESULT: ${{ needs.select.result }}
+      run: |
+        echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+        exit 1
     - name: Requested source is a full commit SHA
       run: |
         [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "TARGET_SHA must be a full lowercase 40-character SHA"; exit 1; }
@@ -702,14 +760,21 @@ jobs:
         path: tmp/emr-d-ci/
         if-no-files-found: error
         retention-days: 7
-    needs: runtime
-    if: ${{ fromJSON(needs.runtime.outputs.jobs)['emr-d'] }}
+    needs: select
+    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['emr-d']) }}
   emr-e-contracts:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       TARGET_SHA: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
     steps:
+    - name: Path selection completed
+      if: ${{ needs.select.result != 'success' }}
+      env:
+        SELECT_RESULT: ${{ needs.select.result }}
+      run: |
+        echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+        exit 1
     - name: Refuse anything but a full lowercase commit SHA
       run: printf '%s' "$TARGET_SHA" | grep -Eqx '[0-9a-f]{40}'
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -746,14 +811,21 @@ jobs:
           tmp/emr-e-online/
         if-no-files-found: error
         retention-days: 7
-    needs: runtime
-    if: ${{ fromJSON(needs.runtime.outputs.jobs)['emr-e-contracts'] }}
+    needs: select
+    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['emr-e-contracts']) }}
   emr-f-contracts:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       TARGET_SHA: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
     steps:
+    - name: Path selection completed
+      if: ${{ needs.select.result != 'success' }}
+      env:
+        SELECT_RESULT: ${{ needs.select.result }}
+      run: |
+        echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+        exit 1
     - name: Refuse anything but a full lowercase commit SHA
       run: printf '%s' "$TARGET_SHA" | grep -Eqx '[0-9a-f]{40}'
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -791,14 +863,21 @@ jobs:
           tmp/emr-f-link/
         if-no-files-found: error
         retention-days: 7
-    needs: runtime
-    if: ${{ fromJSON(needs.runtime.outputs.jobs)['emr-f-contracts'] }}
+    needs: select
+    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['emr-f-contracts']) }}
   contract:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
     steps:
+    - name: Path selection completed
+      if: ${{ needs.select.result != 'success' }}
+      env:
+        SELECT_RESULT: ${{ needs.select.result }}
+      run: |
+        echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+        exit 1
     - name: Validate immutable input
       shell: bash
       run: '[[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]'
@@ -821,12 +900,19 @@ jobs:
         name: emr-h-${{ env.CANDIDATE_SHA }}
         path: tmp/emr-h-r1/runs
         if-no-files-found: error
-    needs: runtime
-    if: ${{ fromJSON(needs.runtime.outputs.jobs)['contract'] }}
+    needs: select
+    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['contract']) }}
   hanging-protocols:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
+    - name: Path selection completed
+      if: ${{ needs.select.result != 'success' }}
+      env:
+        SELECT_RESULT: ${{ needs.select.result }}
+      run: |
+        echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+        exit 1
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
         persist-credentials: false
@@ -878,8 +964,8 @@ jobs:
           tmp/cell-merge-ci/
         if-no-files-found: error
         retention-days: 7
-    needs: runtime
-    if: ${{ fromJSON(needs.runtime.outputs.jobs)['hanging-protocols'] }}
+    needs: select
+    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['hanging-protocols']) }}
   part1-mg:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -890,6 +976,13 @@ jobs:
       PYTHONDONTWRITEBYTECODE: '1'
       KIN_MG_RULE_CASES: tests/emr/e/rule-cases.json
     steps:
+    - name: Path selection completed
+      if: ${{ needs.select.result != 'success' }}
+      env:
+        SELECT_RESULT: ${{ needs.select.result }}
+      run: |
+        echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+        exit 1
     - name: Initialize runner-local paths
       shell: python
       run: |
@@ -1018,8 +1111,8 @@ jobs:
         path: tmp/part1-mg-ci/
         if-no-files-found: error
         retention-days: 7
-    needs: runtime
-    if: ${{ fromJSON(needs.runtime.outputs.jobs)['part1-mg'] }}
+    needs: select
+    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['part1-mg']) }}
   part1-xa:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -1028,6 +1121,13 @@ jobs:
       TARGET_SHA: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
+    - name: Path selection completed
+      if: ${{ needs.select.result != 'success' }}
+      env:
+        SELECT_RESULT: ${{ needs.select.result }}
+      run: |
+        echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+        exit 1
     - name: Initialize runner-local paths
       shell: python
       run: |
@@ -1230,12 +1330,19 @@ jobs:
         path: tmp/part1-xa-ci/
         if-no-files-found: error
         retention-days: 7
-    needs: runtime
-    if: ${{ fromJSON(needs.runtime.outputs.jobs)['part1-xa'] }}
+    needs: select
+    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['part1-xa']) }}
   volume-marks:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
+    - name: Path selection completed
+      if: ${{ needs.select.result != 'success' }}
+      env:
+        SELECT_RESULT: ${{ needs.select.result }}
+      run: |
+        echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+        exit 1
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
         persist-credentials: false
@@ -1270,12 +1377,19 @@ jobs:
           tmp/marks-ci/
         if-no-files-found: error
         retention-days: 7
-    needs: runtime
-    if: ${{ fromJSON(needs.runtime.outputs.jobs)['volume-marks'] }}
+    needs: select
+    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-marks']) }}
   volume-rendering:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
+    - name: Path selection completed
+      if: ${{ needs.select.result != 'success' }}
+      env:
+        SELECT_RESULT: ${{ needs.select.result }}
+      run: |
+        echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+        exit 1
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
         persist-credentials: false
@@ -1318,12 +1432,19 @@ jobs:
           tmp/vr-ci/
         if-no-files-found: error
         retention-days: 7
-    needs: runtime
-    if: ${{ fromJSON(needs.runtime.outputs.jobs)['volume-rendering'] }}
+    needs: select
+    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-rendering']) }}
   worklist-ux-measurements:
     runs-on: ubuntu-24.04
     timeout-minutes: 260
     steps:
+    - name: Path selection completed
+      if: ${{ needs.select.result != 'success' }}
+      env:
+        SELECT_RESULT: ${{ needs.select.result }}
+      run: |
+        echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+        exit 1
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
         persist-credentials: false
@@ -1496,12 +1617,19 @@ jobs:
         path: tmp/runtime-ci/
         if-no-files-found: error
         retention-days: 7
-    needs: runtime
-    if: ${{ fromJSON(needs.runtime.outputs.jobs)['worklist-ux-measurements'] }}
+    needs: select
+    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['worklist-ux-measurements']) }}
   volume-mpr:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
+    - name: Path selection completed
+      if: ${{ needs.select.result != 'success' }}
+      env:
+        SELECT_RESULT: ${{ needs.select.result }}
+      run: |
+        echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+        exit 1
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
         persist-credentials: false
@@ -1593,12 +1721,19 @@ jobs:
           tmp/syncpref-ci/
         if-no-files-found: error
         retention-days: 7
-    needs: runtime
-    if: ${{ fromJSON(needs.runtime.outputs.jobs)['volume-mpr'] }}
+    needs: select
+    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-mpr']) }}
   volume-batch:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
+    - name: Path selection completed
+      if: ${{ needs.select.result != 'success' }}
+      env:
+        SELECT_RESULT: ${{ needs.select.result }}
+      run: |
+        echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+        exit 1
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
         persist-credentials: false
@@ -1634,12 +1769,19 @@ jobs:
           tmp/batch-ci/
         if-no-files-found: error
         retention-days: 7
-    needs: runtime
-    if: ${{ fromJSON(needs.runtime.outputs.jobs)['volume-batch'] }}
+    needs: select
+    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-batch']) }}
   volume-mip-voi:
     runs-on: ubuntu-24.04
     timeout-minutes: 225
     steps:
+    - name: Path selection completed
+      if: ${{ needs.select.result != 'success' }}
+      env:
+        SELECT_RESULT: ${{ needs.select.result }}
+      run: |
+        echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+        exit 1
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
         persist-credentials: false
@@ -1731,12 +1873,19 @@ jobs:
           tmp/miporient-ci/
         if-no-files-found: error
         retention-days: 7
-    needs: runtime
-    if: ${{ fromJSON(needs.runtime.outputs.jobs)['volume-mip-voi'] }}
+    needs: select
+    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-mip-voi']) }}
   s7-u5-session-contracts:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
+    - name: Path selection completed
+      if: ${{ needs.select.result != 'success' }}
+      env:
+        SELECT_RESULT: ${{ needs.select.result }}
+      run: |
+        echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+        exit 1
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
         persist-credentials: false
@@ -1851,8 +2000,8 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     name: s7-u5-session-contracts (u5-session-api)
-    needs: runtime
-    if: ${{ fromJSON(needs.runtime.outputs.jobs)['s7-u5-session-contracts'] }}
+    needs: select
+    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['s7-u5-session-contracts']) }}
   produce:
     name: restore-product / produce
     runs-on: ubuntu-24.04
@@ -1862,6 +2011,13 @@ jobs:
       product_sha256: ${{ steps.prepare.outputs.product_sha256 }}
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
+    - name: Path selection completed
+      if: ${{ needs.select.result != 'success' }}
+      env:
+        SELECT_RESULT: ${{ needs.select.result }}
+      run: |
+        echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+        exit 1
     # Default ref (GITHUB_SHA): the transfer fixtures bind their receipts to GITHUB_SHA and refuse another HEAD.
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
@@ -1893,8 +2049,8 @@ jobs:
         compression-level: 0
         include-hidden-files: false
         overwrite: false
-    needs: runtime
-    if: ${{ fromJSON(needs.runtime.outputs.jobs)['restore-product'] }}
+    needs: select
+    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['restore-product']) }}
   consume:
     name: restore-product / consume
     needs: produce
@@ -2007,6 +2163,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
+    - name: Path selection completed
+      if: ${{ needs.select.result != 'success' }}
+      env:
+        SELECT_RESULT: ${{ needs.select.result }}
+      run: |
+        echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+        exit 1
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
         persist-credentials: false
@@ -2041,12 +2204,19 @@ jobs:
           tmp/s9-u0e-served-ci/
         if-no-files-found: error
         retention-days: 7
-    needs: runtime
-    if: ${{ fromJSON(needs.runtime.outputs.jobs)['s9-u0e-served'] }}
+    needs: select
+    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['s9-u0e-served']) }}
   patient-identity-measurements:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
+    - name: Path selection completed
+      if: ${{ needs.select.result != 'success' }}
+      env:
+        SELECT_RESULT: ${{ needs.select.result }}
+      run: |
+        echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+        exit 1
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
         persist-credentials: false
@@ -2082,8 +2252,8 @@ jobs:
           tests/e2e/artifacts/measurement-accuracy-ci/
         if-no-files-found: error
         retention-days: 7
-    needs: runtime
-    if: ${{ fromJSON(needs.runtime.outputs.jobs)['patient-identity-measurements'] }}
+    needs: select
+    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['patient-identity-measurements']) }}
 'on':
   push:
     branches:
