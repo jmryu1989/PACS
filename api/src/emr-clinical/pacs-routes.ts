@@ -33,8 +33,17 @@ export class PacsClinicalRoutes {
     // Older pages have no attempt ID. Give this operation its own identity while
     // preserving the projection's legacy null attempt and version-conflict rule.
     const onlineBody = body && typeof body === 'object' && !('attemptId' in body) ? { ...body, attemptId: randomUUID() } : body;
-    return clinicalRoutes(this.clinical).write(request,
+    const result = await clinicalRoutes(this.clinical).write(request,
       { surface: 'tech-note.write', studyId: uid, recordId: uid, body: onlineBody },
       tx => this.notes.saveTechNote(uid, body, c, tx));
+    // The stored receipt identifies the original attempt. The editor also needs
+    // today's head so a delayed retry cannot roll its version basis back.
+    // Read it through the clinical boundary so the provided head is recorded.
+    if (result.emr.replayed) {
+      const current = await clinicalRoutes(this.clinical).read(request, 'tech-note', uid,
+        tx => this.notes.techNote(uid, c, undefined, tx), undefined, 'POST studies/:uid/tech-note');
+      return { ...result, latestNote: current.note };
+    }
+    return result;
   }
 }

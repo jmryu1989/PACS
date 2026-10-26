@@ -71,6 +71,9 @@ jobs:
       - name: Module A local-read recording on the real PG record port
         timeout-minutes: 5
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-pg --tree api/src --tree tests/emr/a --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/a/recording_boundary_test.py --class LocalReadRecordingBoundary --mode live --unit ci-module-a-pg --timeout 300
+      - name: Module A report reads on the real HTTP route and PG record port
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-report-reads --tree api/src --tree tests/emr/a --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/a/report_reads_test.py --class ReportReadsHttp --mode live --unit ci-module-a-report-reads --timeout 300
       - name: Module A W9 metadata through real HTTP and PG
         timeout-minutes: 5
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-w9 --tree api/src --tree tests/emr/a --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/a/viewing_set_test.py --class ViewingSetHttpBoundary --mode live --unit ci-module-a-w9 --timeout 300
@@ -87,6 +90,7 @@ jobs:
             tmp/emr-b-ci/
             tmp/emr-b2-replace-20261023/
             tmp/module-a-01-2/
+            tmp/emr-a/
             tmp/download-producer-b2/
             tmp/request-auth/
           if-no-files-found: error

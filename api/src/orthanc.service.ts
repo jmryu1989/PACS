@@ -389,10 +389,11 @@ export class OrthancService {
    * observation and the single-UID access preparation. A normal study is a one-element array, a UID that two
    * patient resources share returns both, and no resource is []. A row naming another UID, or a malformed answer,
    * is a failed read (503) — never a smaller array. studyAccessMetadata() keeps its single-row contract.
+   * InstitutionName is not a QIDO default attribute: unnamed, every source institution would read as not observed.
    */
   async studyIdentityResources(uid: string, signal?: AbortSignal): Promise<any[]> {
     const rows = await this.viewerJson('/dicom-web/studies?StudyInstanceUID=' + encodeURIComponent(uid) +
-      '&includefield=00100020,00080020,00080061', undefined, signal);
+      '&includefield=00100020,00080020,00080061,00080080', undefined, signal);
     if (!Array.isArray(rows) || rows.some(row => !row || typeof row !== 'object' || OrthancService.tag(row, '0020000D') !== uid))
       throw new ServiceUnavailableException('원본 검사의 소속을 확인할 수 없습니다');
     return rows;
