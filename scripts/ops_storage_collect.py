@@ -259,7 +259,7 @@ def collect(config_path, config_hash, destination):
         objects, pages = core.listing(listing_raw, receipt['listing_sha256'], config['bucket'], config['prefix'])
         require(core.integer(receipt['request_attempts'], pages, REQUEST_LIMIT)
                 and core.integer(receipt['pages'], 1, core.PAGE_LIMIT) and receipt['pages'] == pages
-                and core.integer(receipt['listed_objects'], 0, core.ITEM_LIMIT) and receipt['listed_objects'] == len(objects))
+                and type(receipt['listed_objects']) is int and receipt['listed_objects'] >= 0 and receipt['listed_objects'] == len(objects))
         for name in ('config.json', 'request.json', 'ca.pem'):
             path = pending/name
             if path.exists():

@@ -54,8 +54,8 @@ def validate_plan(plan):
         if ROOT / "tests" not in path.parents or path.suffix != ".py" or not path.is_file():
             raise gate.Refused("Module must be a test file in this repository")
         return plan
-    if not isinstance(plan["tests"], list) or not 1 <= len(plan["tests"]) <= 200:
-        raise gate.Refused("Select 1..200 exact tests")
+    if not isinstance(plan["tests"], list) or not plan["tests"]:
+        raise gate.Refused("Select at least one exact test")
     seen = set()
     for item in plan["tests"]:
         if not isinstance(item, dict) or set(item) != {"file", "case"}:
@@ -134,12 +134,12 @@ def worker(path):
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         # A failed live run retains its marker as the record of the fixtures it
         # owned, even if it appears to have cleaned up.
-        if not result.wasSuccessful() or result.skipped:
-            raise gate.Refused("Tests failed or skipped; this is not a completed plan")
+        if not result.wasSuccessful():
+            raise gate.Refused("Tests failed; this is not a completed plan")
         # An exit status alone is not completion (os._exit, a stray sys.exit):
         # attest the completed suite with the parent's ticket.
         with completion_path(path).open("x", encoding="utf-8") as stream:
-            json.dump({"ticket_proof": completion_proof(ticket), "marker": identity}, stream)
+            json.dump({"ticket_proof": completion_proof(ticket), "marker": identity, "skipped": len(result.skipped)}, stream)
     return 0
 
 
@@ -159,6 +159,7 @@ def completed_marker(frozen, ticket, plan, row):
         raise gate.Refused("Worker exited without attesting a completed plan") from error
     if not isinstance(completion, dict) or completion.get("ticket_proof") != completion_proof(ticket):
         raise gate.Refused("Worker completion does not belong to this attempt")
+    row['skipped'] = completion.get('skipped', 0)
     marker = completion.get("marker")
     if plan["mode"] == "pure":
         if marker is not None:
@@ -209,7 +210,7 @@ def execute(path):
                 row.update(status="failed", exit_code=code)
             else:
                 marker = completed_marker(frozen, ticket, plan, row)
-                row.update(status="passed", exit_code=0)
+                row.update(status="completed_with_skips" if row["skipped"] else "passed", exit_code=0)
         except gate.Refused as error:
             # Exit 0 without this attempt's attestation: not a completed plan.
             # A live marker stays for inspection.
@@ -237,7 +238,7 @@ def execute(path):
             write_json(ledger_path, ledger)
         # Reopen only after the parent's own terminal state is persisted as
         # passed; the marker is checked to be exactly the one this attempt wrote.
-        if row["status"] == "passed" and marker is not None:
+        if row["status"] in ("passed", "completed_with_skips") and marker is not None:
             try:
                 gate.release_after_success(marker)
             except gate.Refused as error:

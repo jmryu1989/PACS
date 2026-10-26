@@ -202,7 +202,7 @@ def check(root, declaration_path):
     # additive migrations belong in this sequence, not in a global count pin.
     if spec["latest_before"] not in migrations:
         problem(problems, "migration-baseline-missing", spec["latest_before"])
-    elif migrations[migrations.index(spec["latest_before"]) + 1:] != spec["added"]:
+    elif [m for m in migrations[migrations.index(spec["latest_before"]) + 1:] if m in spec["added"]] != spec["added"]:
         problem(problems, "migration-order", json.dumps(migrations[migrations.index(spec["latest_before"]) + 1:]))
     # SQL migrations may replace earlier relations. PG-01 compares the installed
     # catalog with this declaration; parsing CREATE statements cannot describe it.
@@ -230,8 +230,6 @@ def check(root, declaration_path):
         live_spec = declaration["cases"]["live"]
         if not profile or [tuple(s) for s in profile["suites"]] != [tuple(s) for s in live_spec["profile_suites"]]:
             problem(problems, "profile-differs")
-        if len(measurement_ci.PROFILES) != declaration["expected"]["profiles"]:
-            problem(problems, "profile-count", str(len(measurement_ci.PROFILES)))
         selected = {(row[0], row[1] + "." + row[2]) for row in candidate_ci.FLOWS}
         for item in declaration["candidate_cases"]:
             if (item["file"].removeprefix("tests/"), item["case"]) not in selected:

@@ -43,22 +43,10 @@ class CandidateCiTests(unittest.TestCase):
         runner = importlib.util.module_from_spec(spec);spec.loader.exec_module(runner)
         rows, selected = candidate.exact_selection(target, runner)
         self.assertEqual([row[2] for row in rows[:2]], ["candidate-invariants", "candidate-worklist"])
-        # S7-U1a: 89 invariants (six CriticalResultInvariantTests) + 15 worklist + 8 flows; S8-CTX: + 2 Tech Note flows;
-        # EMR-B1: + the ledger's L01 (emr/units/b.json candidate_cases).
-        # W2: + folder edit/save/reapply/relogin. W3: + drawer v3 save/relogin.
-        # CN-N01-A: + 6 OrderCorrectionInvariantTests (invariants 95). Union: 95 + 15 + 13 = 123.
-        # S9-U4b: + 5 LiveInvariantTests.test_s9_u4_* and the pure S9U4CleanupTests (invariants 101). Union: 101 + 15 + 13 = 129.
-        # S9-U4b round 6: + the pure S9U4RegisterTests (invariants 102). Union: 102 + 15 + 13 = 130.
-        # W4-FLOW: + Approve & Next / Recommendation round trip. Union on main: 95 + 15 + 14 = 124.
-        # Merge of main 59fc5a5 into S9-U4b: 102 + 15 + 14 = 131.
-        # S9-U4b part (c): + WorklistE2E.test_s9_u4_download_states / _import_retry_and_account_change. 102 + 17 + 14 = 133.
-        # WORKLIST-SPLIT-UID: + 6 WorklistSplitUidInvariantTests (invariants 101 on main: 101 + 15 + 14 = 130).
-        # Merge of main 848b7e5 into S9-U4b: 108 + 17 + 14 = 139.
-        # W5-UI Phase A adds no flow: its Related Report mode FLOW is deferred to Phase B (D1675), and is never selected here.
-        # Merge of main 3649a70 (W5-UI Phase A) into S9-U4b: still 108 + 17 + 14 = 139.
-        # S9-U4A-SET: + 2 S9RoleSweepE2E cases. 108 + 17 + 2 + 14 = 141.
-        # Registration: 7 S9 + 27 U1, with windows_01 already present; E adds its online flow.
-        self.assertEqual(len(selected), sum(row[3] for row in candidate.BASE) + len(candidate.FLOWS))
+        declared = [case for filename, cls, unit in candidate.BASE
+                    for case in runner.module_plan('tests/' + filename, unit, 'live', 540, cls)['tests']]
+        self.assertEqual(selected[:len(declared)], declared)
+        self.assertEqual(len(selected), len(declared) + len(candidate.FLOWS))
         self.assertEqual([item["case"] for item in selected if item["file"] == "tests/e2e/test_s9_role_sweep.py"], [
             "S9RoleSweepE2E.test_sweep_05_admin_role_change_old_document_and_fresh_login",
             "S9RoleSweepE2E.test_sweep_05_institution_move_requires_new_scope_on_real_page"])
@@ -92,7 +80,7 @@ class CandidateCiTests(unittest.TestCase):
     def test_configuration_uses_target_runner_plans_evidence_and_540_seconds(self):
         class FakeRunner:
             def module_plan(self, filename, unit, mode, timeout, class_name):
-                count = {row[2]: row[3] for row in candidate.BASE}[unit]
+                count = 3  # Synthetic collector returns three cases, independent of the real suite size.
                 return {"tests": [{"file": filename, "case": (class_name or "Local") + ".test_" + str(i)} for i in range(count)]}
             def load_module(self, path):
                 filename = path.relative_to(candidate.TOOLS_ROOT / "tests").as_posix()
@@ -122,7 +110,7 @@ class CandidateCiTests(unittest.TestCase):
             env = FakeCi.profile_environment("measurements", out, {"ORTHANC_PASS": "synthetic"})
             self.assertEqual(env["KIN_EVIDENCE_DIR"], str(out / "screens"))
             self.assertEqual(env["KIN_U1_EMULATED_DISPLAYS"], "1")
-            self.assertEqual(len(selected), sum(row[3] for row in candidate.BASE) + len(candidate.FLOWS))
+            self.assertEqual(len(selected), 3 * len(candidate.BASE) + len(candidate.FLOWS))
 
     def assert_candidate_workflow(self, workflow):
         # Limited declaration normalisation, not a GitHub expression engine.

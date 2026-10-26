@@ -1,3 +1,31 @@
+# Clean installation (D1800)
+
+First installation uses a new site stack and its configured empty volumes. It does
+not call `ops_deploy_entry.py` with `mode=emr-introduction`: that mode is for an
+existing installation's conversion only. No conversion phase or rehearsal receipt
+is an admission condition for a clean install.
+
+1. Backup: preserve the selected installation configuration and signing wrapping
+   secrets before installation. For an existing stack, first run
+   `python3 scripts/ops_backup.py backup --output <backup-directory>` and keep the
+   resulting snapshot. A new empty site has no patient database to back up.
+2. Install and migrate: from the site's configured checkout run
+   `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build`.
+   The API image runs `prisma migrate deploy`; do not use schema reset or db push.
+3. Verify: inspect `docker compose -f docker-compose.yml -f docker-compose.prod.yml ps`
+   and the configured HTTPS origin's `/api/health`, then perform the approved
+   synthetic save/reopen and signing checks before clinical handover.
+4. Restore: rehearse the resulting backup with
+   `python3 scripts/ops_backup.py rehearse <snapshot-directory>` and the wrapping
+   custody commands below. If installation verification fails, preserve the failed
+   installation and restore the selected snapshot in the recovery environment;
+   do not overwrite an existing site's volumes with a clean install.
+
+The first site's measured backup size and elapsed time are installation records;
+recheck them before a larger site. Conversion commands remain available only when
+an existing installation actually needs conversion. This procedure does not claim
+an installation or restore was executed by this documentation change.
+
 # Online signing keys: backup and restore
 
 The per-doctor encrypted private keys are in `kin.emr_signing.private_key`;
