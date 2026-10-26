@@ -841,6 +841,8 @@
       "tests/e2e/test_sr_provenance.py"
     ],
     "ci-selfchecks": [
+      "scripts/mgxa_*.py",
+      "tests/mgxa_acceptance_test.py",
       "tests/measurement_ci*.py",
       "tests/execution_selection_test.py",
       "tests/ci_workflows.py"

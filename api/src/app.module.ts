@@ -1,3 +1,4 @@
+import { startupClinicalProviders } from './emr-clinical/startup';
 import { EMR_BACKGROUND_WORK } from './emr-runtime/background-work';
 import { EmrAuditController } from './emr-audit/audit.controller';
 import { EmrAuditService } from './emr-audit/service';
@@ -71,6 +72,7 @@ function adminNoStore(_req: any, res: any, next: () => void) {
   controllers: [EmrAuditController, DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController],
   providers: [
     EmrAuditService,
+    ...startupClinicalProviders,
     ViewerContextEventService,
     OnlineImageService, ModuleAImageContextPending,
     { provide: ImageContextSource, inject: [ModuleAImageContextPending],

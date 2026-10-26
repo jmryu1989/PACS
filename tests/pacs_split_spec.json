@@ -4666,7 +4666,9 @@
       "keycloak:KeycloakService",
       "studyAccess:StudyAccessService",
       "findings:FindingService",
-      "ledger:EmrRecordPort"
+      "ledger:EmrRecordPort",
+      "signing:NativeReportSigning",
+      "clinical:ClinicalRoutes"
     ],
     "slots": [
       {
@@ -4828,7 +4830,22 @@
           "keycloak",
           "studyAccess",
           "reportEvidenceConcern",
-          "reportDraftConcern"
+          "reportDraftConcern",
+          {
+            "parameter": "signing"
+          }
+        ]
+      },
+      {
+        "name": "clinicalConcern",
+        "class": "PacsClinicalRoutes",
+        "file": "api/src/emr-clinical/pacs-routes.ts",
+        "args": [
+          "studyStateConcern",
+          "techNoteConcern",
+          {
+            "parameter": "clinical"
+          }
         ]
       }
     ],
@@ -5035,8 +5052,14 @@
       },
       {
         "name": "patchState",
-        "slot": "studyStateConcern",
-        "signature_sha256": "ae196d283dd5e2b5d71c6e42efe6ad8822627d0d4fb55b8c6541f0fe7590e2bf"
+        "slot": "clinicalConcern",
+        "signature_sha256": "6e2ff4d84377b63791ef80dea12c52141493ea19a4b6e271265536f478f306c8",
+        "implementation": {
+          "file": "api/src/emr-clinical/pacs-routes.ts",
+          "owner": "PacsClinicalRoutes",
+          "name": "patchState",
+          "kind": "MethodDeclaration"
+        }
       },
       {
         "name": "match",
@@ -5050,18 +5073,36 @@
       },
       {
         "name": "removeState",
-        "slot": "studyStateConcern",
-        "signature_sha256": "e0f73b12b47d0a4854068a2a15e546424a003a8973a3b8dcb0a6d2d8d4e4f73a"
+        "slot": "clinicalConcern",
+        "signature_sha256": "4dbbe19f2abd9ec49bd0192f3a1583fd6b4beccf714466d9d7fdbcc987437817",
+        "implementation": {
+          "file": "api/src/emr-clinical/pacs-routes.ts",
+          "owner": "PacsClinicalRoutes",
+          "name": "removeState",
+          "kind": "MethodDeclaration"
+        }
       },
       {
         "name": "techNote",
-        "slot": "techNoteConcern",
-        "signature_sha256": "a2ab0279514bdfa6fd55a9a5279dcf05ee93e5c645e5b86de76e5aad6ab0d639"
+        "slot": "clinicalConcern",
+        "signature_sha256": "02b3c302eee7c82d8cea8476ec05ea83571225d1afacc36540f88116902da95e",
+        "implementation": {
+          "file": "api/src/emr-clinical/pacs-routes.ts",
+          "owner": "PacsClinicalRoutes",
+          "name": "techNote",
+          "kind": "MethodDeclaration"
+        }
       },
       {
         "name": "saveTechNote",
-        "slot": "techNoteConcern",
-        "signature_sha256": "0f47d8dcfdfa14e410804c19926eac95678857223269b7610259972bc9333b1a"
+        "slot": "clinicalConcern",
+        "signature_sha256": "ff971cfc1c5b2533e27aab8b827acc201b3b33f7df06ca4fc81a594fd3c18a1e",
+        "implementation": {
+          "file": "api/src/emr-clinical/pacs-routes.ts",
+          "owner": "PacsClinicalRoutes",
+          "name": "saveTechNote",
+          "kind": "MethodDeclaration"
+        }
       },
       {
         "name": "hold",
@@ -5170,6 +5211,14 @@
     "parameter_decorators": {
       "ledger": [
         "Inject(EMR_RECORD_PORT)"
+      ],
+      "signing": [
+        "Optional()",
+        "Inject(EMR_NATIVE_REPORT_SIGNING)"
+      ],
+      "clinical": [
+        "Optional()",
+        "Inject(EMR_CLINICAL_ROUTES)"
       ]
     }
   },
@@ -5262,7 +5311,8 @@
         "keycloak:KeycloakService",
         "studyAccess:StudyAccessService",
         "reportEvidence:PacsReportEvidence",
-        "reportDraft:PacsReportDraft"
+        "reportDraft:PacsReportDraft",
+        "signing:NativeReportSigning"
       ]
     },
     "api/src/pacs/hold.ts": {
@@ -8824,7 +8874,16 @@
   },
   "di_additions_f_link": {
     "unit": "F_LINK",
-    "middleware_routes": [{"apply": ["adminNoStore"], "forRoutes": ["EmrAuditController"]}],
+    "middleware_routes": [
+      {
+        "apply": [
+          "adminNoStore"
+        ],
+        "forRoutes": [
+          "EmrAuditController"
+        ]
+      }
+    ],
     "controllers": [
       "EmrAuditController"
     ],
@@ -9026,6 +9085,181 @@
           "1:Symbol(RequestContextSource)"
         ],
         "optional": []
+      }
+    }
+  },
+  "di_additions_d_online": {
+    "unit": "EMR-D online routes",
+    "controllers": [],
+    "providers": [
+      "ModuleAClinicalSourcesPending",
+      "Symbol(OnlineClinicalServices)=factory",
+      "Symbol(EMR_CLINICAL_ROUTES)=factory",
+      "Symbol(EMR_NATIVE_REPORT_SIGNING)=factory"
+    ],
+    "routes": [],
+    "injectables": {
+      "ModuleAClinicalSourcesPending": {
+        "params": [],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      }
+    },
+    "changed_injectables": {
+      "PacsService": {
+        "before": {
+          "params": [
+            "PrismaService",
+            "OrthancService",
+            "KeycloakService",
+            "StudyAccessService",
+            "FindingService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "5:Symbol(EmrRecordPort)"
+          ],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PrismaService",
+            "OrthancService",
+            "KeycloakService",
+            "StudyAccessService",
+            "FindingService",
+            "Object",
+            "NativeReportSigning",
+            "ClinicalRoutes"
+          ],
+          "scope": null,
+          "declared": [
+            "7:Symbol(EMR_CLINICAL_ROUTES)",
+            "6:Symbol(EMR_NATIVE_REPORT_SIGNING)",
+            "5:Symbol(EmrRecordPort)"
+          ],
+          "optional": [
+            7,
+            6
+          ]
+        }
+      },
+      "ClinicianQuestionController": {
+        "before": {
+          "params": [
+            "ClinicianQuestionService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "ClinicianQuestionService",
+            "ClinicalRoutes"
+          ],
+          "scope": null,
+          "declared": [
+            "1:Symbol(EMR_CLINICAL_ROUTES)"
+          ],
+          "optional": [
+            1
+          ]
+        }
+      },
+      "ConsultationController": {
+        "before": {
+          "params": [
+            "ConsultationService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "ConsultationService",
+            "ClinicalRoutes"
+          ],
+          "scope": null,
+          "declared": [
+            "1:Symbol(EMR_CLINICAL_ROUTES)"
+          ],
+          "optional": [
+            1
+          ]
+        }
+      },
+      "FindingController": {
+        "before": {
+          "params": [
+            "FindingService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "FindingService",
+            "ClinicalRoutes"
+          ],
+          "scope": null,
+          "declared": [
+            "1:Symbol(EMR_CLINICAL_ROUTES)"
+          ],
+          "optional": [
+            1
+          ]
+        }
+      },
+      "ImageRequestController": {
+        "before": {
+          "params": [
+            "ImageRequestService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "ImageRequestService",
+            "ClinicalRoutes"
+          ],
+          "scope": null,
+          "declared": [
+            "1:Symbol(EMR_CLINICAL_ROUTES)"
+          ],
+          "optional": [
+            1
+          ]
+        }
+      },
+      "ReaderAssignmentController": {
+        "before": {
+          "params": [
+            "ReaderAssignmentService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "ReaderAssignmentService",
+            "ClinicalRoutes"
+          ],
+          "scope": null,
+          "declared": [
+            "1:Symbol(EMR_CLINICAL_ROUTES)"
+          ],
+          "optional": [
+            1
+          ]
+        }
       }
     }
   }

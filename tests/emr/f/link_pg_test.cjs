@@ -137,6 +137,43 @@ if(process.argv.includes('--serve')){
     const actor={identity:doctor.identity,kind:'member',roles:['radiologist'],institutionId:doctor.institutionId,signingRegistrationId:doctor.identityRegistrationId};
     const patient={linkId:'synthetic-f-link',patientId:'SYNTHETIC-F',assigningAuthority:'synthetic-hospital'};
     const study={studyId:'2.25.901',patient,managingInstitutionId:doctor.institutionId};
+    // A1 local reads and F's accesses to those reads preserve the same observed
+    // subject through the real HTTP/PG path, including an unobserved PatientID.
+    const { LocalReadResponse, localReadEvents } = load('emr-viewing/local-read');
+    const { parseAccessEvent } = load('emr-contract/access-event');
+    for (const sourcePatientId of [known('synthetic-local-f'), {status:'unresolved',reason:'not-observed'}]) {
+      const localRecord=randomUUID(), localEventId=randomUUID();
+      const sourceInstitution={status:'unresolved',reason:'not-observed'};
+      const localFacts={issuer,subject:doctor.identity.subject,actor:doctor.identity,roles:actor.roles,rightsVersion:1,
+        institution:doctor.institutionId,binding:{method:'bearer',sessionRef:null},requestId:randomUUID(),
+        ingress:known({address:'127.0.0.1',source:'trusted-proxy'}),surface:'GET studies/:uid/report/versions'};
+      const [localEvent]=localReadEvents(localFacts,new LocalReadResponse([{id:localRecord,text:'synthetic local report'}],[{
+        eventId:localEventId,managingInstitution:doctor.institutionId,cause:'user-view',path:[0],
+        target:{kind:'report-version',studyId:known(study.studyId),recordId:known(localRecord),versionId:known('local-v1'),
+          sourcePatientId,sourceInstitution},
+      }]));
+      const work=port.begin();try {await work.append(localEvent);} finally {work.end();}
+      for (const route of ['investigations','exports']) {
+        const shown=await ok('auditor','POST',route,{...query,recordId:localRecord});
+        const rows=[...shown.changes.rows,...shown.views.rows];
+        assert.ok(rows.some(r=>r.eventId===localEventId));
+        const stored=await witness.$queryRaw`SELECT payload FROM emr_access.access_entry
+          WHERE payload::jsonb->>'surface'=${'POST emr-audit/'+route}
+          AND payload::jsonb->'targets' @> ${JSON.stringify([{recordId:known(localEventId)}])}::jsonb`;
+        assert.ok(stored.length>0);
+        for (const row of stored) {
+          const event=parseAccessEvent(JSON.parse(row.payload));
+          const target=event.targets.find(t=>t.recordId.value===localEventId);
+          assert.deepEqual(target.sourcePatientId,sourcePatientId);
+          assert.deepEqual(target.sourceInstitution,sourceInstitution);
+          assert.equal('patientLinkSnapshot' in target,false);
+          const replay=await ok('auditor','POST','investigations',{...query,recordId:localEventId});
+          const replayed=[...replay.changes.rows,...replay.views.rows].find(r=>r.eventId===event.eventId);
+          assert.ok(replayed);assert.deepEqual(replayed.targets[0].localSource.sourcePatientId,sourcePatientId);
+          assert.equal(replayed.targets[0].patient,null);
+        }
+      }
+    }
     const wrap=randomBytes(32),pair=crypto.generateServerKeyPair(),kid=randomUUID();
     await new OnlineSigningStore().insertKey(witness,{kid,publicKey:pair.publicKey,doctor,status:'active',registeredAt:time(-1000),endedAt:null},
       crypto.wrapServerPrivateKey(pair.privateKey,kid,'synthetic-wrap',wrap));
@@ -174,7 +211,7 @@ if(process.argv.includes('--serve')){
       {recordId}, {versionId:second.receipt.versionId}, {studyId:study.studyId},
       {patient:{patientId:patient.patientId,assigningAuthority:patient.assigningAuthority}},
       {actorId:doctor.identity.id}, {address:'127.0.0.1'}, {actions:['write','cancel']},
-      {results:['succeeded']}, {sourcePatientId:'no-local-source'},
+      {results:['succeeded']}, {sourcePatientId:'no-local-source'}, {sourcePatientId:'synthetic-local-f'},
       {recordId,versionId:'another-version'}, {actorId:'another-person'}, {actions:['auth.login']},
     ]) {
       const selection={...query,...filter};

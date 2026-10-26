@@ -21,9 +21,14 @@ export interface StoredClinicalVersion {
   plan: ClinicalWritePlan;
   signature: ClinicalSignature | null;
   operationId: string;
+  response?: unknown;
 }
 const options = { maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_TX_TIMEOUT_MS };
 const parse = <T>(text: string): T => JSON.parse(text);
+function storedBody(text: string): { plan: ClinicalWritePlan; response?: unknown } {
+  const body = parse<ClinicalWritePlan | { plan: ClinicalWritePlan; response: unknown }>(text);
+  return 'plan' in body ? body : { plan: body };
+}
 
 /** D stores original commands and immutable versions. B2 alone owns admission,
  * terminal outcomes and COMMIT settlement; no D success/negative register. */
@@ -73,7 +78,7 @@ export class ClinicalStore {
     const rows = await tx.$queryRaw<{ body: string; signature: string | null; operation_id: string }[]>`
       SELECT body, signature, operation_id::text FROM emr_clinical.online_version
       WHERE record_type=${record} AND record_id=${recordId} ORDER BY sequence`;
-    return rows.map(row => ({ plan: parse<ClinicalWritePlan>(row.body),
+    return rows.map(row => ({ ...storedBody(row.body),
       signature: row.signature === null ? null : parse<ClinicalSignature>(row.signature), operationId: row.operation_id }));
   }
 
@@ -86,11 +91,11 @@ export class ClinicalStore {
   async version(tx: Prisma.TransactionClient, versionId: string): Promise<StoredClinicalVersion | null> {
     const rows = await tx.$queryRaw<{ body: string; signature: string | null; operation_id: string }[]>`
       SELECT body, signature, operation_id::text FROM emr_clinical.online_version WHERE version_id=${versionId}`;
-    return rows.length ? { plan: parse<ClinicalWritePlan>(rows[0].body),
+    return rows.length ? { ...storedBody(rows[0].body),
       signature: rows[0].signature === null ? null : parse<ClinicalSignature>(rows[0].signature), operationId: rows[0].operation_id } : null;
   }
 
-  async append(tx: Prisma.TransactionClient, command: StoredClinicalCommand, signature: ClinicalSignature | null): Promise<void> {
+  async append(tx: Prisma.TransactionClient, command: StoredClinicalCommand, signature: ClinicalSignature | null, response?: unknown): Promise<void> {
     const { plan } = command;
     await lockFixedRecord(tx, plan.version.recordId);
     if ((plan.signing === null) !== (signature === null)) refuse('SignatureRequired');
@@ -99,7 +104,7 @@ export class ClinicalStore {
     await tx.$executeRaw`INSERT INTO emr_clinical.online_version
       (record_type, record_id, version_id, sequence, operation_id, body, signature)
       VALUES (${plan.record}, ${plan.version.recordId}, ${plan.version.versionId}, ${plan.version.sequence},
-        ${command.operationId}::uuid, ${JSON.stringify(plan)}, ${signature === null ? null : JSON.stringify(signature)})`;
+        ${command.operationId}::uuid, ${JSON.stringify(response === undefined ? plan : { plan, response })}, ${signature === null ? null : JSON.stringify(signature)})`;
     for (const reference of plan.version.attachments) {
       await tx.$executeRaw`INSERT INTO emr_clinical.online_reference
         (version_id, source_kind, source_record_id, source_version_id, source_sha256)

@@ -146,6 +146,7 @@ export async function sendOnlineImage(boundary: OnlineImageBoundary, input: {
   const targets = new Set(p.units.map(u => u.sopInstanceUid ?? manifest.studyUid));
   if (event.targets.length !== targets.size) refuse('ImageEventMismatch');
   for (const target of event.targets) {
+    if (!('patientLinkSnapshot' in target)) refuse('ImageEventMismatch');
     const { recordId, studyId, versionId, patientLinkSnapshot, kind } = target;
     if (studyId.status !== 'known' || studyId.value !== manifest.studyUid || recordId.status !== 'known' ||
         !targets.delete(recordId.value) || versionId.status !== 'known' || versionId.value !== manifest.sha256 ||

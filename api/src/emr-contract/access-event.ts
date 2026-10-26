@@ -12,9 +12,12 @@ export const ACCESS_ACTIONS = freeze({
   export: ['print-opened', 'print-done', 'pdf', 'copy', 'download', 'disclosure'],
   failure: ['auth-refused', 'permission-refused', 'conflict', 'storage-failed', 'signature-failed'],
 } as const);
-/** Closed non-patient targets. Patient-bearing records retain their observed identity facts. */
+/** Closed non-patient targets. Patient-bearing records retain their observed identity facts.
+ * `assignment` (D1860, D-T5): reader allocation is none of the four record acts 의료법 제23조④ names
+ * (기재·추가기재·수정·열람) and never changes clinical entry or read rights, so its event waives the
+ * patient link; it stays bound to its study and allocation row. */
 export const NON_RECORD_TARGETS: readonly RecordKind[] = freeze(['preferences', 'reading-template', 'institution',
-  'identity-access', 'authentication-session', 'system-operation']);
+  'identity-access', 'authentication-session', 'system-operation', 'assignment']);
 export const STATUTORY_ACT = freeze({
   write: '기재', 'additional-entry': '추가기재', modify: '수정', 'approve-sign': '기재', amend: '수정', addendum: '추가기재', cancel: '수정',
   release: 'none', 'draft-save': '기재', clear: '수정', discard: '수정', finalize: 'none', archive: 'none',
@@ -39,6 +42,10 @@ export interface AccessTarget {
   recordId: EvidenceFact<string>;
   versionId: EvidenceFact<string>;
 }
+/** An auditor's access to an event about an observed local subject does not create a PatientLink. */
+export interface LocalAuditTarget extends Pick<LocalReadTarget, 'studyId' | 'recordId' | 'versionId' | 'sourcePatientId' | 'sourceInstitution'> {
+  kind: 'access-audit';
+}
 export interface AccessEventV1 {
   formatVersion: 1;
   surface: string;
@@ -53,7 +60,7 @@ export interface AccessEventV1 {
   /** D-18: the business context the server bound to this access (optional reason out of context). */
   context: Readonly<WorkContext>;
   executor: 'member' | 'service' | 'unauthenticated';
-  targets: readonly AccessTarget[];
+  targets: readonly (AccessTarget | LocalAuditTarget)[];
   action: AccessAction;
   result: 'prepared' | 'succeeded' | 'aborted' | 'refused' | 'failed' | 'reported';
   requestId: string;
@@ -119,10 +126,27 @@ function surfaceKindsOf(surface: string): readonly RecordKind[] {
   return Object.prototype.hasOwnProperty.call(EXTERNAL_SURFACES, surface) ? EXTERNAL_SURFACES[surface] :
     Object.prototype.hasOwnProperty.call(INTERNAL_SURFACES, surface) ? INTERNAL_SURFACES[surface].kinds : routeContract(surface).kinds;
 }
+function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manifest: readonly ResolvedRecord[] | undefined,
+    failure: boolean): AccessTarget[];
+function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manifest: readonly ResolvedRecord[] | undefined,
+    failure: boolean, surface: string): (AccessTarget | LocalAuditTarget)[];
 function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manifest: readonly ResolvedRecord[] | undefined, failure: boolean,
-    surface?: string): AccessTarget[] {
+    surface?: string): (AccessTarget | LocalAuditTarget)[] {
   if (!Array.isArray(input)) throw new Error('Actual returned target set required');
   return input.map((target, index) => {
+    // Preserve A1's observed subject when F records access to that audit row.
+    // Clinical record reads still require their existing patient-linked target contract.
+    if (['POST emr-audit/investigations', 'POST emr-audit/exports'].includes(surface) &&
+        target?.kind === 'access-audit' && 'sourcePatientId' in target) {
+      const t = object(target, ['kind', 'studyId', 'recordId', 'versionId', 'sourcePatientId', 'sourceInstitution']);
+      const parsed: LocalAuditTarget = { kind: 'access-audit', studyId: fact(t.studyId, string),
+        recordId: fact(t.recordId, string), versionId: fact(t.versionId, string),
+        sourcePatientId: fact(t.sourcePatientId, string), sourceInstitution: fact(t.sourceInstitution, string) };
+      if ([parsed.studyId, parsed.recordId, parsed.versionId, parsed.sourcePatientId, parsed.sourceInstitution]
+          .some(f => f.status === 'not-applicable') || parsed.recordId.status !== 'known' || parsed.versionId.status !== 'known')
+        throw new Error('Investigated local event identity required');
+      return parsed;
+    }
     const t = object(target, ['kind', 'patientLinkSnapshot', 'studyId', 'recordId', 'versionId']);
     const kind = choice(t.kind, Object.keys(RECORD_CLASSIFICATION) as RecordKind[]);
     if (manifest) {

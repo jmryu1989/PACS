@@ -68,6 +68,7 @@ test('D online exact versions, B2 result recovery and current access on PostgreS
     secrets: { currentId: 'synthetic-wrap', read: async () => Buffer.from(wrap) }, context: {
     async facts() { return facts(); },
     async study(_tx, _request, uid) { facts(); assert.equal(uid, study.studyId); return structuredClone(study); },
+    async scope(_tx, _request, uid) { facts(); assert.equal(uid, study.studyId); const { patient: _patient, ...rest } = structuredClone(study); return rest; },
   }, async project(tx, _request, plan) {
     await tx.$executeRaw`INSERT INTO public.d_online_projection(version_id,body) VALUES (${plan.version.versionId},${plan.version.text})`;
     if (projectFailure) throw new Error('SyntheticProjectionFailure');

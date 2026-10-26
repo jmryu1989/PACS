@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { PrismaService } from './prisma.service';
@@ -89,13 +90,14 @@ export class ClinicianQuestionService {
    * 취소가 섞여 revision·항목·closed·current가 실제로 없었던 조합이 된다(S5-U4a-F01). 읽기는 행 잠금을 잡지 않는다.
    * 스냅샷은 접근 정책 공유 잠금을 기다리기 전에 정해지므로 그 사이의 정책 변경은 StudyAccessInterceptor가 응답 전에 거절한다.
    */
-  private async run<T>(c: Caller, fn: (tx: any) => Promise<T>, read = false): Promise<T> {
+  private async run<T>(c: Caller, fn: (tx: any) => Promise<T>, read = false, transaction?: Prisma.TransactionClient): Promise<T> {
     try {
-      return await this.prisma.$transaction(async tx => {
+      const execute = async (tx: Prisma.TransactionClient) => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         await this.studyAccess.snapshot(c, tx);
         return fn(tx);
-      }, read ? { isolationLevel: 'RepeatableRead', maxWait: 4000, timeout: 8000 } : { maxWait: 4000, timeout: 8000 });
+      };
+      return await (transaction ? execute(transaction) : this.prisma.$transaction(execute, read ? { isolationLevel: 'RepeatableRead', maxWait: 4000, timeout: 8000 } : { maxWait: 4000, timeout: 8000 }));
     } catch (e: any) {
       // 영수증 PK가 부딪히는 경우는 같은 requestId가 다른 부모에서 동시에 쓰인 때뿐이다(같은 부모는 행 잠금이 줄 세운다).
       if (e?.code === 'P2002') throw reused();
@@ -192,7 +194,8 @@ export class ClinicianQuestionService {
   }
 
   /** #1 목록. view=mine은 clinician 역할의 자기 질문, view=inbox는 판독의·관리자의 기관 풀. 총개수는 싣지 않는다. */
-  async list(c: QuestionCaller, q: any) {
+  async list(c: QuestionCaller, q: any, transaction?: Prisma.TransactionClient) {
+    const db = transaction ?? this.prisma;
     this.member(c);
     const query = object(q) ? q : {};
     if (Object.keys(query).some(k => !['view', 'state', 'cursor'].includes(k)) || Object.values(query).some(v => typeof v !== 'string')
@@ -202,9 +205,9 @@ export class ClinicianQuestionService {
     const state = query.state ?? 'all';
     if (!['open', 'answered', 'closed', 'all'].includes(state)) throw invalid('질문 상태 필터를 확인하세요');
     const stateValue = state === 'all' ? 'all' : state[0].toUpperCase() + state.slice(1);
-    const accessPolicy = await this.studyAccess.snapshot(c);
+    const accessPolicy = await this.studyAccess.snapshot(c, transaction);
     const restricted = accessPolicy.policy.restricted;
-    const scope = restricted ? [...await this.studyAccess.allowed(c, (await this.prisma.studyState.findMany({
+    const scope = restricted ? [...await this.studyAccess.allowed(c, (await db.studyState.findMany({
       where: { institutionId: c.institution }, select: { uid: true } })).map(s => s.uid))] : [];
     let cursor: any = null;
     if (query.cursor !== undefined) {
@@ -218,7 +221,7 @@ export class ClinicianQuestionService {
     // 불변인 생성 기관과 **현재** 소유 기관을 함께 JOIN한다 — 옮겨 간 검사의 질문은 어느 쪽 목록에도 나오지 않는다.
     // 항목 요약·lastEntryAt·소유 기관이 한 문장이라 한 스냅샷이다. 여러 문장을 조합하는 #2·#3만 읽기 트랜잭션을 쓴다.
     const before = cursor?.at ?? '9999-12-31T00:00:00.000Z', beforeId = cursor?.id ?? 'ffffffff-ffff-ffff-ffff-ffffffffffff';
-    const rows: any[] = await this.prisma.$queryRaw`SELECT q.*,
+    const rows: any[] = await db.$queryRaw`SELECT q.*,
         (SELECT max(e.at) FROM "StudyQuestionEntry" e WHERE e."questionId"=q.id) AS "lastEntryAt"
       FROM "StudyQuestion" q JOIN "StudyState" s ON s.uid=q."studyUid" AND s."institutionId"=q."institutionId"
       WHERE q."institutionId"=${c.institution} AND (NOT ${restricted} OR q."studyUid"=ANY(${scope}::text[]))
@@ -232,7 +235,7 @@ export class ClinicianQuestionService {
   }
 
   /** #2 스레드 전체. */
-  async read(id: string, c: QuestionCaller) {
+  async read(id: string, c: QuestionCaller, transaction?: Prisma.TransactionClient) {
     this.member(c);
     const scope = this.scope(c);
     if (!uuid(id)) throw questionMissing();
@@ -241,11 +244,11 @@ export class ClinicianQuestionService {
       const { row, rs } = await this.question(tx, id.toLowerCase(), c, scope, false);
       const entries: any[] = await tx.studyQuestionEntry.findMany({ where: { questionId: row.id }, orderBy: { seq: 'asc' } });
       return { owner: this.owner(c), item: this.thread(row, entries, await this.anchor(tx, row.studyUid, rs)) };
-    }, true);
+    }, true, transaction);
   }
 
   /** #3 한 검사의 스레드 요약(최신 50개). 임상의는 자기 질문만. */
-  async forStudy(uid: string, c: QuestionCaller) {
+  async forStudy(uid: string, c: QuestionCaller, transaction?: Prisma.TransactionClient) {
     this.member(c);
     const scope = this.scope(c);
     if (!studyUid(uid)) throw invalid('검사 UID를 확인하세요');
@@ -259,11 +262,11 @@ export class ClinicianQuestionService {
           AND (NOT ${own} OR q."authorSub"=${c.sub})
         ORDER BY q."createdAt" DESC,q.id DESC LIMIT 50`;
       return { owner: this.owner(c), items: rows.map(row => this.summary(row, row.lastEntryAt)) };
-    }, true);
+    }, true, transaction);
   }
 
   /** #4 질문 등록. 작성자·기관·역할 표지는 토큰에서만 오고 body에는 정확히 세 키만 받는다. */
-  async create(uid: string, c: QuestionCaller, b: any) {
+  async create(uid: string, c: QuestionCaller, b: any, transaction?: Prisma.TransactionClient) {
     this.member(c);
     if (!holds(c, CLINICIAN_ROLE)) throw roleRequired();
     if (!studyUid(uid)) throw invalid('검사 UID를 확인하세요');
@@ -285,11 +288,11 @@ export class ClinicianQuestionService {
         createdAt: at, updatedAt: at } });
       await this.receipt(tx, c, applied, mark, b.body, 'clinician', anchor, at, name);
       return { owner: this.owner(c), applied, replayed: false };
-    });
+    }, false, transaction);
   }
 
   /** #5 답변 또는 추가 질문. 종류는 서버가 정한다: 작성자면 followup(clinician), 아니면 answer(radiologist). */
-  async reply(id: string, c: QuestionCaller, b: any) {
+  async reply(id: string, c: QuestionCaller, b: any, transaction?: Prisma.TransactionClient) {
     this.member(c);
     if (!holds(c, CLINICIAN_ROLE) && !holds(c, RADIOLOGIST)) throw roleRequired();
     if (!exactKeys(b, ['requestId', 'expectedOwner', 'revision', 'body']) || !uuid(b.requestId) || !revision(b.revision) || !text(b.body))
@@ -313,11 +316,11 @@ export class ClinicianQuestionService {
       return this.apply(tx, c, row, rs, requestId, mark, author
         ? { action: 'followup', kind: 'followup', to: 'Open', role: 'clinician', body: b.body }
         : { action: 'answer', kind: 'answer', to: 'Answered', role: RADIOLOGIST, body: b.body });
-    });
+    }, false, transaction);
   }
 
   /** #6 닫기. 작성자(clinician)는 사유를 비울 수 있고, 판독의·관리자가 남의 질문을 닫을 때는 사유가 필요하다. */
-  async close(id: string, c: QuestionCaller, b: any) {
+  async close(id: string, c: QuestionCaller, b: any, transaction?: Prisma.TransactionClient) {
     this.member(c);
     if (!holds(c, CLINICIAN_ROLE) && !holds(c, RADIOLOGIST) && !holds(c, ADMIN)) throw roleRequired();
     if (!exactKeys(b, ['requestId', 'expectedOwner', 'revision', 'note']) || !uuid(b.requestId) || !revision(b.revision)
@@ -343,6 +346,6 @@ export class ClinicianQuestionService {
       } else throw actionForbidden();
       if (row.entryCount >= QUESTION_ENTRY_LIMIT) throw entryLimit();
       return this.apply(tx, c, row, rs, requestId, mark, { action: 'close', kind: 'close', to: 'Closed', role, body: b.note });
-    });
+    }, false, transaction);
   }
 }

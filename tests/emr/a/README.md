@@ -17,6 +17,10 @@ preparation. A3 also supplies its existing W9_AUDIT_UNAVAILABLE failure body;
 other consumers retain EMR_VIEWING_UNAVAILABLE. A1 introduces no timer, reserve
 or new timeout. A lifecycle abort refuses HTTP immediately while the admitted
 append and its aborted follow-up drain in the original work.
+A local-read route answers 200: preparation refuses any other status set before
+the interceptor runs, and only a finished 200 is `transfer-ended`. Nest gives a
+POST route 201, so a POST local-read route declares `@HttpCode(200)` (W9's
+resolve already does).
 
 Serialization runs once before recording. The hash identifies the actual
 serialized target projection; it is not a signature or an integrity chain.
@@ -38,6 +42,14 @@ formal PatientLink, signature or retained-state placeholders. Audit replay expos
 `patient: null` with `localSource` for these targets. The `sourcePatientId` filter
 is an observed identifier inside the investigation's existing institution scope;
 it is not interchangeable with the formal patient/assigning-authority filter.
+`incidentScope` lists these subjects in `identifiedLocally` by their observed
+PatientID and source institution (an unobserved PatientID stays unresolved, one
+entry per study). They are not formal identifications: their presence adds the
+reason `identified-locally`, so `subjectsIdentifiable` is false. The auditor's
+own access event (`investigationLedgerEvent`, also `incidentScope.auditEvent`)
+carries one `access-audit` target per shown local row with the same observed
+identifiers and no PatientLink. The route that records that event must accept
+these targets; no route records it yet.
 
 Run the parser/projection, failure and transport component cases:
 
@@ -55,9 +67,10 @@ KIN_TEST_API_IMAGE=<candidate-image> python scripts/run-tests.py --module tests/
 The PG driver proves append/readback/filter, request attribution, all receipts
 before stream selection, a last-target SQL failure and close before a delayed
 COMMIT using fixture-owned SQL locks. Its transport objects are component inputs,
-not a substitute route or real HTTP wire. Pure failures use no fake durable
-receipt. UNKNOWN is queried only under the original operation ID and is never
-retried as a new event.
+not a substitute route or real HTTP wire. A second PG case (A-PG-AUDIT-LOCAL)
+builds the incident scope and the export from rows read back from
+`emr_access.access_entry`. Pure failures use no fake durable receipt. UNKNOWN is
+queried only under the original operation ID and is never retried as a new event.
 
 REQ-A-DURABLE / A-PG-COMMIT remains partial until A2/A3's real routes prove
 COMMIT before their first clinical byte and lost-reply resolution. REQ-A-TARGET

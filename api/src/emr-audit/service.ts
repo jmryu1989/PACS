@@ -58,7 +58,7 @@ export class EmrAuditService {
     });
   }
   private async recorded(record: RecordMutation, ctx: RequestWorkContext, action: AccessEventV1['action'],
-    targets: readonly AccessTarget[], reference: string, surface = ctx.facts.surface): Promise<void> {
+    targets: readonly F.InvestigationAuditTarget[], reference: string, surface = ctx.facts.surface): Promise<void> {
     const f = ctx.facts;
     const event: AccessEventV1 = { formatVersion: 1, surface, eventId: randomUUID(),
       userId: known(f.actor), rolesAtTime: known(f.roles), actingInstitution: known(f.institution), managingInstitution: known(f.institution),
@@ -69,7 +69,7 @@ export class EmrAuditService {
     // B1's admit_operation/storage contract caps the canonical UTF-8 payload at 65,536 bytes.
     // Partition by bytes, keeping every target and the request correlation in the same transaction.
     const cap = 65_536, overhead = Buffer.byteLength(JSON.stringify({ ...event, targets: [] }));
-    let chunk: AccessTarget[] = [], bytes = overhead;
+    let chunk: F.InvestigationAuditTarget[] = [], bytes = overhead;
     const append = async () => {
       // B1 validates each complete chunk at admission; avoid parsing the unbounded export first.
       await record({ ...event, eventId: randomUUID(), auditLinkId: newAuditLinkId(), targets: chunk },
