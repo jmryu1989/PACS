@@ -755,7 +755,7 @@ class WorklistE2E(unittest.TestCase):
         self.assertIsNone(download.failure(), "the archive reached the browser's download list")
         return download, found.group(1)
 
-    def archive_supplied(self, path, operation, number):
+    def archive_supplied(self, page, path, operation, number):
         """The saved file is the server's whole ZIP of the prepared manifest: the ZIP signature, every central-directory
         entry in manifest order and then manifest.json, each object's length and MD5 as prepared and its CRC-32, the final
         manifest's per-object SHA-256 equal to the saved bytes and to the attempt's recorded objects, the archive SHA-256
@@ -763,6 +763,9 @@ class WorklistE2E(unittest.TestCase):
         with open(path, "rb") as saved:
             data = saved.read()
         self.assertEqual(data[:4], b"PK\x03\x04")
+        # Receiving the ZIP can precede the transaction that records the B2 transfer-ended event and Sent state.
+        # Wait for the served page to observe that commit before checking its persisted bytes and audit facts.
+        expect(self.transfer_box(page, operation).locator(".study-transfer-state")).to_have_text("Sent", timeout=30000)
         [stored] = psql(f"SELECT download::text FROM \"ImportOperation\" WHERE id='{operation}';")
         download = json.loads(stored)
         manifest = json.loads(download["manifestCanonical"])["objects"]
@@ -836,8 +839,7 @@ class WorklistE2E(unittest.TestCase):
                 expect(old_box).to_have_count(1)
                 new = prepare_again(old)
                 downloaded, _ = self.native_download(page, fixture, new)
-                self.archive_supplied(downloaded.path(), new, 1)
-                expect(self.transfer_box(page, new).locator(".study-transfer-state")).to_have_text("Sent", timeout=30000)
+                self.archive_supplied(page, downloaded.path(), new, 1)
                 self.assertEqual(self.download_row(new), "sent|1")
                 self.assertEqual(psql(f"SELECT download::text FROM \"ImportOperation\" WHERE id='{old}';"), history,
                                  "D1606: new preparation preserves every old attempt and grant fact")
@@ -849,7 +851,7 @@ class WorklistE2E(unittest.TestCase):
             box = self.transfer_box(page, operation)
             since = str(int(time.time()) - 5)
             download, grant = self.native_download(page, fixture, operation)
-            stored, attempt, use = self.archive_supplied(download.path(), operation, 1)
+            stored, attempt, use = self.archive_supplied(page, download.path(), operation, 1)
             self.assertEqual(use["hash"], hashlib.sha256(("kin-original-download-grant-v1:" + grant).encode()).hexdigest(),
                              "the row keeps the domain-separated hash of this grant")
             audit = self.download_audit(operation)
@@ -1017,7 +1019,7 @@ class WorklistE2E(unittest.TestCase):
             expect(old_box).to_have_count(1)
             new = prepare_again(old)
             downloaded, _ = self.native_download(page, fixture, new)
-            self.archive_supplied(downloaded.path(), new, 1)
+            self.archive_supplied(page, downloaded.path(), new, 1)
             self.assertEqual(native_events, [True], "only the new operation starts a download")
             self.assertEqual(seen.count(("POST", grant_path)), 1, "one old-operation grant across all reads and new preparation")
             self.assertEqual(self.download_row(old), "prepared|0")
@@ -1062,7 +1064,7 @@ class WorklistE2E(unittest.TestCase):
             self.select(page, fixture)
             fresh = self.download_operation(page, fixture, operations)
             downloaded, _ = self.native_download(page, fixture, fresh)
-            self.archive_supplied(downloaded.path(), fresh, 1)
+            self.archive_supplied(page, downloaded.path(), fresh, 1)
             self.assertEqual(native_events, [True, True], "a fresh operation still downloads once")
         finally:
             # The download rows of this case; the fixture's own cleanup removes its study, originals and audit rows.

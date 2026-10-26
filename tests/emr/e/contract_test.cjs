@@ -1182,13 +1182,22 @@ def('TEST-E-02 manifest_sources R22', () => {
     else if (flaw === 'acquisition-sequence') hd['00189507'] = dj('SQ', { '00082112': dj('SQ', null) });
     else if (flaw === 'derivation-sequence') hd['00089124'] = dj('SQ', { '00082112': { vr: 'CS', Value: [] } });
     else hd['52009230'] = dj('SQ', { '00089124': dj('SQ', { '00082112': dj('SQ', null) }) });
+    hd['00100010'] = dj('PN', { Alphabetic: 'SYNTHETIC^NAME' });
+    hd['00100020'] = dj('LO', 'SYNTHETIC-PATIENT');
     const before = structuredClone(all), m = allowed(() => build(all)), bad = m.objects.find(x => x.sopInstanceUid === uid).mammography;
     assert.equal(m.objects.length, baseline.objects.length, flaw);
     assert.deepEqual([bad.class, bad.status, bad.fullViewAutoMatch, bad.sourceAccepted, bad.sourceLinkStatus],
       ['unverified', 'unverified', false, false, 'unresolved'], flaw);
     assert.equal(bad.declaredSourceCount, null, 'failed extraction cannot report a known empty source inventory');
     assert.equal(bad.fullness, flaw === 'source-uid-absent-partial' ? 'undetermined' : 'declared-not-partial');
-    assert.deepEqual(bad.sourceHeader, hd, 'unreadable source evidence stays available without inventing an inventory');
+    assert.ok(bad.sourceHeader, 'unreadable source evidence remains available');
+    assert.equal(JSON.stringify(bad.sourceHeader).includes('SYNTHETIC^NAME'), false);
+    assert.equal(JSON.stringify(bad.sourceHeader).includes('SYNTHETIC-PATIENT'), false);
+    if (hd['00082112']) assert.deepEqual(bad.sourceHeader['00082112'], hd['00082112']);
+    const headerVerdict = M.classifyMammography(hd).result;
+    assert.deepEqual([bad.class, bad.representation, bad.presentation, bad.fullViewAutoMatch],
+      [headerVerdict.class, headerVerdict.representation, headerVerdict.presentation, headerVerdict.fullViewAutoMatch],
+      'the stored manifest and header consumer agree on an unverified representation');
     const normal = m.objects.find(x => x.sopInstanceUid === S(STUDY, 2) + '.1');
     assert.deepEqual(normal, baseline.objects.find(x => x.sopInstanceUid === normal.sopInstanceUid));
     assert.equal(normal.mammography.status, 'verified'); assert.equal(normal.mammography.fullViewAutoMatch, true);

@@ -228,13 +228,23 @@
       "api/prisma/schema.prisma",
       "api/src/emr-contract/**",
       "api/src/emr-image/**",
+      "api/src/emr-runtime/**",
+      "api/src/orthanc.service.ts",
       "api/tsconfig*.json",
       "docker-compose*.yml",
+      "emr/units/e.json",
       "keycloak/**",
       "proxy/**",
       "scripts/emr-compose.py",
       "scripts/record-run.py",
-      "tests/emr/e/**"
+      "scripts/run-tests.py",
+      "tests/emr/b/pg_ledger_restore_test.py",
+      "tests/emr/e/**",
+      "tests/live_test_gate.py",
+      "api/src/app.module.ts",
+      "api/src/connect.controller.ts",
+      "api/src/clinician-policy.ts",
+      "tests/ops_product_transfer_fixture.py"
     ],
     "emr-f-contracts": [
       "api/Dockerfile*",
@@ -816,6 +826,8 @@
       "tests/e2e/test_sr_provenance.py"
     ],
     "ci-selfchecks": [
+      "scripts/mgxa_*.py",
+      "tests/mgxa_acceptance_test.py",
       "tests/measurement_ci*.py",
       "tests/execution_selection_test.py",
       "tests/ci_workflows.py"

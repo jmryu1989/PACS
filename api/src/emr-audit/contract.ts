@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
 import { ACCESS_ACTIONS, AUTH_ACTIONS, identity, parseAccessEvent, patientLink, statutoryAct } from '../emr-contract/access-event';
-import type { AccessEvent, AccessTarget, LocalReadTarget, EvidenceFact, ImmutableIdentity, PatientLinkSnapshot } from '../emr-contract/access-event';
+import type { AccessEvent, AccessTarget, LocalReadTarget, DownloadTarget, EvidenceFact, ImmutableIdentity, PatientLinkSnapshot } from '../emr-contract/access-event';
 import { retentionDisposition, verifiedRecord } from '../emr-contract/classification';
 import type { ResolvedRecord } from '../emr-contract/classification';
 import { civilPeriodEnd } from '../emr-contract/lawful-defaults';
@@ -251,7 +251,7 @@ function inInstitutionScope(plan: InvestigationPlan, event: Readonly<AccessEvent
   if (event.managingInstitution.status === 'known') return event.managingInstitution.value === plan.institutionId;
   return event.actingInstitution.status === 'known' && event.actingInstitution.value === plan.institutionId;
 }
-type InvestigationTarget = AccessTarget | LocalReadTarget;
+type InvestigationTarget = AccessTarget | LocalReadTarget | DownloadTarget;
 function targetMatches(f: InvestigationFilters, t: InvestigationTarget): boolean {
   if (f.patient && !('patientLinkSnapshot' in t && t.patientLinkSnapshot.status === 'known' && samePatient(t.patientLinkSnapshot.value, f.patient))) return false;
   if (f.sourcePatientId != null && !('sourcePatientId' in t && t.sourcePatientId.status === 'known' && t.sourcePatientId.value === f.sourcePatientId)) return false;
@@ -435,13 +435,29 @@ export async function readInvestigationStreams(
   return freeze({ changes: changePage, views: viewPage, totalEntries: changePage.total + viewPage.total });
 }
 
+/** A shown local-read row names its subject only by the observed local identifiers; it carries no formal PatientLink. */
+export interface LocalAuditTarget extends Pick<LocalReadTarget, 'studyId' | 'recordId' | 'versionId' | 'sourcePatientId' | 'sourceInstitution'> {
+  kind: 'access-audit';
+}
+export type InvestigationAuditTarget = AccessTarget | LocalAuditTarget;
 /** The investigation is itself an access to the shown events (B ledger, 제23조④ 열람): one access-audit target per shown
- * event and patient, and an export is a download. Events without a resolved patient target carry no patient record. */
-export function investigationLedgerEvent(page: InvestigationPage): Readonly<{ action: 'provide-prepared' | 'download'; targets: readonly AccessTarget[] }> {
+ * event and patient, and an export is a download. Events without a resolved patient target carry no patient record.
+ * A local-read target is kept with its observed local identifiers (even an unobserved PatientID), never dropped and
+ * never given a formal link; a recorder of this event must accept these targets rather than omit them. */
+export function investigationLedgerEvent(page: InvestigationPage): Readonly<{ action: 'provide-prepared' | 'download'; targets: readonly InvestigationAuditTarget[] }> {
   const plan = pages.get(page);
   if (!plan) refuse('InvestigationPageRequired');
-  const targets: AccessTarget[] = [], seen = new Set<string>();
+  const targets: InvestigationAuditTarget[] = [], seen = new Set<string>();
   for (const row of page.rows) for (const t of row.targets) {
+    if (t.localSource) {
+      const { sourcePatientId, sourceInstitution } = t.localSource;
+      const key = JSON.stringify([row.eventId, 'local', sourcePatientId, sourceInstitution, t.studyId]);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      targets.push({ kind: 'access-audit', studyId: t.studyId, recordId: { status: 'known', value: row.eventId },
+        versionId: { status: 'known', value: row.eventId }, sourcePatientId, sourceInstitution });
+      continue;
+    }
     if (t.patient?.status !== 'known' || t.studyId.status !== 'known') continue;
     const key = JSON.stringify([row.eventId, t.patient.value.patientId, t.patient.value.assigningAuthority, t.studyId.value]);
     if (seen.has(key)) continue;
@@ -459,18 +475,28 @@ export function investigationLedgerEvent(page: InvestigationPage): Readonly<{ ac
 /** A designated person's recorded finding that the ledger cannot name everyone affected (access that bypassed the
  * product, a copied backup, records that cannot be attributed). Recorded, never inferred. */
 export interface IncidentDetermination { kind: 'access-outside-ledger' | 'records-not-attributable'; note: string }
+/** Subjects of local reads: the observed source PatientID (and source institution) inside the plan's institution. Not a
+ * patient + assigning-authority identification; an unobserved PatientID stays unresolved and is kept per study. */
+export interface LocallyIdentifiedSubject {
+  source: Pick<LocalReadTarget, 'sourcePatientId' | 'sourceInstitution'>;
+  studyIds: readonly string[]; eventIds: readonly string[]; firstAt: string; lastAt: string;
+}
 export interface IncidentScope {
   institutionId: string; filters: InvestigationFilters; top: number | null;
-  auditEvent: { action: 'provide-prepared' | 'download'; targets: readonly AccessTarget[] };
+  auditEvent: { action: 'provide-prepared' | 'download'; targets: readonly InvestigationAuditTarget[] };
   identified: readonly { patient: { patientId: string; assigningAuthority: string }; eventIds: readonly string[]; firstAt: string; lastAt: string }[];
-  /** False when the people affected cannot be identified: the possible-leak notice of 제34조② (시행령 제39조의2①1) applies. */
+  identifiedLocally: readonly LocallyIdentifiedSubject[];
+  /** False when the people affected cannot be identified: the possible-leak notice of 제34조② (시행령 제39조의2①1) applies.
+   * Locally identified subjects are listed but do not make the scope identifiable (reason `identified-locally`). */
   subjectsIdentifiable: boolean;
-  reasons: readonly ({ kind: 'ledger-unreadable'; code: string } | { kind: IncidentDetermination['kind']; note: string; by: ImmutableIdentity })[];
+  reasons: readonly ({ kind: 'ledger-unreadable'; code: string } | { kind: 'identified-locally'; subjects: number } |
+    { kind: IncidentDetermination['kind']; note: string; by: ImmutableIdentity })[];
 }
 const incidentScopes = new WeakSet<object>();
 /** Every matching event of an export plan (period, patient, actor, address, event types). Refused and failed requests
  * provided nothing and name no one. A ledger read or integrity failure is itself the fact that the subjects cannot be
- * identified, and is reported as such — never as "nobody affected". */
+ * identified, and is reported as such — never as "nobody affected". Local reads name their subjects in
+ * identifiedLocally by the observed source PatientID only; that list is never dropped and never counted as identified. */
 export async function incidentScope(authority: AuditAuthority, plan: InvestigationPlan, ledger: InvestigationLedger,
   determinations: readonly IncidentDetermination[] = []): Promise<Readonly<IncidentScope>> {
   requireScope(authority, 'investigate');
@@ -490,9 +516,23 @@ export async function incidentScope(authority: AuditAuthority, plan: Investigati
     reasons.push({ kind: 'ledger-unreadable', code: error.code });
   }
   const groups = new Map<string, { patient: { patientId: string; assigningAuthority: string }; eventIds: string[]; firstAt: string; lastAt: string }>();
+  const local = new Map<string, { source: LocallyIdentifiedSubject['source']; studyIds: string[]; eventIds: string[]; firstAt: string; lastAt: string }>();
   for (const row of page?.rows ?? []) {
     if (row.result === 'refused' || row.result === 'failed') continue;
     for (const t of row.targets) {
+      if (t.localSource) {
+        const source = { sourcePatientId: t.localSource.sourcePatientId, sourceInstitution: t.localSource.sourceInstitution };
+        const studyId = t.studyId.status === 'known' ? t.studyId.value : null;
+        // Without an observed PatientID the person is unknown: one entry per study, never merged with another study.
+        const key = JSON.stringify(source.sourcePatientId.status === 'known' ? [source] : [source, studyId]);
+        if (!local.has(key)) local.set(key, { source, studyIds: [], eventIds: [], firstAt: row.occurredAt, lastAt: row.occurredAt });
+        const g = local.get(key);
+        if (studyId !== null && !g.studyIds.includes(studyId)) g.studyIds.push(studyId);
+        if (!g.eventIds.includes(row.eventId)) g.eventIds.push(row.eventId);
+        if (row.occurredAt < g.firstAt) g.firstAt = row.occurredAt;
+        if (row.occurredAt > g.lastAt) g.lastAt = row.occurredAt;
+        continue;
+      }
       if (t.patient?.status !== 'known') continue;
       const p = { patientId: t.patient.value.patientId, assigningAuthority: t.patient.value.assigningAuthority };
       const key = JSON.stringify([p.patientId, p.assigningAuthority]), g = groups.get(key);
@@ -502,10 +542,12 @@ export async function incidentScope(authority: AuditAuthority, plan: Investigati
       if (row.occurredAt > g.lastAt) g.lastAt = row.occurredAt;
     }
   }
+  const identifiedLocally = [...local.values()].sort((a, b) => JSON.stringify([a.source, a.studyIds]).localeCompare(JSON.stringify([b.source, b.studyIds])));
+  if (identifiedLocally.length) reasons.push({ kind: 'identified-locally', subjects: identifiedLocally.length });
   reasons.push(...recorded);
   const identified = [...groups.values()].sort((a, b) => a.patient.patientId.localeCompare(b.patient.patientId) ||
     a.patient.assigningAuthority.localeCompare(b.patient.assigningAuthority));
-  const scope = freeze({ institutionId: plan.institutionId, filters: plan.filters, top: page?.top ?? null, identified,
+  const scope = freeze({ institutionId: plan.institutionId, filters: plan.filters, top: page?.top ?? null, identified, identifiedLocally,
     subjectsIdentifiable: reasons.length === 0, reasons,
     auditEvent: page ? investigationLedgerEvent(page) : { action: 'download' as const, targets: [] } });
   incidentScopes.add(scope);

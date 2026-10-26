@@ -127,14 +127,15 @@ function replayMismatch(replay: any, fingerprint: string, uid: string, c: Caller
 export class FindingService {
   constructor(private prisma: PrismaService, private studyAccess: StudyAccessService, private orthanc: OrthancService) {}
 
-  private async bounded<T>(work: (tx: Prisma.TransactionClient) => Promise<T>, read = false): Promise<T> {
+  private async bounded<T>(work: (tx: Prisma.TransactionClient) => Promise<T>, read = false, transaction?: Prisma.TransactionClient): Promise<T> {
     try {
-      return await this.prisma.$transaction(async tx => {
+      const execute = async (tx: Prisma.TransactionClient) => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         await tx.$executeRaw`SET LOCAL statement_timeout = '5s'`;
         return work(tx);
-      }, { isolationLevel: read ? Prisma.TransactionIsolationLevel.RepeatableRead : Prisma.TransactionIsolationLevel.ReadCommitted,
-        maxWait: 4000, timeout: 8000 });
+      };
+      return await (transaction ? execute(transaction) : this.prisma.$transaction(execute, { isolationLevel: read ? Prisma.TransactionIsolationLevel.RepeatableRead : Prisma.TransactionIsolationLevel.ReadCommitted,
+        maxWait: 4000, timeout: 8000 }));
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError) {
         if (['P2002', 'P2003', 'P2034'].includes(error.code)) conflict();
@@ -174,7 +175,7 @@ export class FindingService {
   }
 
   // `schema` is the X-KIN-Finding-Schema request header: without '2' a page holding any other version is refused whole.
-  async list(uid: string, query: any, c: Caller, id?: string, schema?: string) {
+  async list(uid: string, query: any, c: Caller, id?: string, schema?: string, transaction?: Prisma.TransactionClient) {
     member(c); viewerUid(uid); visible(await this.prisma.studyState.findUnique({ where: { uid } }), c);
     // Comparison studies are found only inside the read transaction, which cannot fetch access
     // metadata, so a metadata-rule policy is prepared for every study first (ViewerJob.list).
@@ -236,7 +237,7 @@ export class FindingService {
       const items = rows.slice(0, page.limit).map(row => ({ ...result(row), links: row.links }));
       if (schema !== '2' && !legacyOnly(items.map(i => i.item))) clientOutdated();
       return { items, nextCursor: rows.length > page.limit ? items[items.length - 1].id : null };
-    }, true);
+    }, true, transaction);
   }
 
   /**
@@ -361,7 +362,7 @@ export class FindingService {
     return { studies: [...new Set([uid, ...lineage, ...linked])].sort(), checked, frames };
   }
 
-  async write(uid: string, raw: Buffer, c: Caller, id?: string) {
+  async write(uid: string, raw: Buffer, c: Caller, id?: string, online?: { tx: Prisma.TransactionClient; recordId: string }) {
     member(c, true); viewerUid(uid); if (id !== undefined) viewerUuid(id);
     const command = findingCommand(raw, id === undefined), fingerprint = findingFingerprint(uid, id ?? null, command);
     const anchor = await this.prisma.studyState.findUnique({ where: { uid } });
@@ -498,7 +499,7 @@ export class FindingService {
         RETURNING id, "studyUid", "authorSub", "authorActor", revision, hidden, "createdAt", "updatedAt", snapshot::text AS snapshot`;
       else [head] = await tx.$queryRaw<any[]>`INSERT INTO "Finding"
         (id, "studyUid", "authorSub", "authorActor", snapshot, hidden, revision, "createdAt", "updatedAt")
-        VALUES (${randomUUID()}::uuid, ${uid}, ${c.sub}, ${c.actor}, ${serialized}::jsonb, ${hidden}, ${revision}, ${now}, ${now})
+        VALUES (${online?.recordId ?? randomUUID()}::uuid, ${uid}, ${c.sub}, ${c.actor}, ${serialized}::jsonb, ${hidden}, ${revision}, ${now}, ${now})
         RETURNING id, "studyUid", "authorSub", "authorActor", revision, hidden, "createdAt", "updatedAt", snapshot::text AS snapshot`;
       head = { ...head, snapshot: parsed(head.snapshot) };
       await tx.$executeRaw`INSERT INTO "FindingRevision"
@@ -508,6 +509,6 @@ export class FindingService {
       await tx.auditLog.create({ data: { actor: c.actor, action: 'finding.' + command.action, target: uid,
         detail: JSON.stringify({ findingId: head.id, revision, authorSub: c.sub, payloadBytes: bytes, sources: sources.length }) } });
       return result(head);
-    });
+    }, false, online?.tx);
   }
 }
