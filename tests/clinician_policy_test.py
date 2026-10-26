@@ -2692,7 +2692,7 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertEqual(len(baseline), MATRIX["counts"]["routes"])
         self.assertEqual({m + " " + p for (m, p), meta in baseline.items() if meta["public"]}, PUBLIC)
         tags, outside, app = API / "study-tags.controller.ts", API / "unlisted-routes.ts", API / "app.module.ts"
-        member, registered = "  @Get() read(", "StudyTransferLocalController],"
+        member, registered = "  @Get() read(", "controllers: ["
         self.assertEqual(sources[tags].count(member), 1)
         self.assertEqual(sources[app].count(registered), 1)
         self.assertTrue(sources[tags].endswith("}\n"))
@@ -2713,7 +2713,7 @@ class ClinicianPolicySpec(unittest.TestCase):
                    "const descriptor = Object.getOwnPropertyDescriptor(target, 'unlisted');\n"
                    "Put('write')(target, 'unlisted', descriptor);\nPublic()(target, 'unlisted', descriptor);\n")
         app_module = ("import { UnlistedController } from './unlisted-routes';\n"
-                      + sources[app].replace(registered, "StudyTransferLocalController, UnlistedController],"))
+                      + sources[app].replace(registered, "controllers: [UnlistedController, "))
 
         def names(source):
             return sorted({name for run in decorator_runs(source) for name, _start, _end in run["items"]})
@@ -2924,7 +2924,7 @@ class ClinicianPolicySpec(unittest.TestCase):
 
         tags, outside, helpers, app = (API / "study-tags.controller.ts", API / "unlisted-routes.ts",
                                        API / "route-helpers.ts", API / "app.module.ts")
-        member, registered = "  @Get() read(", "StudyTransferLocalController],"
+        member, registered = "  @Get() read(", "controllers: ["
         heading, constructor = "export class StudyTagsController {", "constructor(private service:StudyTagsService){}"
         for text in (member, heading, constructor):
             self.assertEqual(sources[tags].count(text), 1, text)
@@ -2933,7 +2933,7 @@ class ClinicianPolicySpec(unittest.TestCase):
 
         def register(name):
             return {app: f"import {{ {name} }} from './unlisted-routes';\n"
-                         + sources[app].replace(registered, f"StudyTransferLocalController, {name}],")}
+                         + sources[app].replace(registered, f"controllers: [{name}, ")}
 
         loader = "a module loader the binding check does not follow"
         sealed = "a sealed name or a form the source contract does not list"
@@ -3259,7 +3259,7 @@ class ClinicianPolicySpec(unittest.TestCase):
             return str(caught.exception)
 
         tags, outside, app = API / "study-tags.controller.ts", API / "unlisted-routes.ts", API / "app.module.ts"
-        member, registered = "  @Get() read(", "StudyTransferLocalController],"
+        member, registered = "  @Get() read(", "controllers: ["
         self.assertEqual(sources[tags].count(member), 1)
         self.assertEqual(sources[app].count(registered), 1)
         self.assertNotIn(outside, sources)
@@ -3281,7 +3281,7 @@ class ClinicianPolicySpec(unittest.TestCase):
                 outside, "UnlistedController", "Reflect.defineMetadata('path', 'unlisted', UnlistedController); ",
                 lambda text: {outside: "export class UnlistedController {\n  unlisted() { return {}; }\n}\n" + text,
                               app: "import { UnlistedController } from './unlisted-routes';\n"
-                                   + sources[app].replace(registered, "StudyTransferLocalController, UnlistedController],")}),
+                                   + sources[app].replace(registered, "controllers: [UnlistedController, ")}),
         }
         self.assertEqual(sorted(places), sorted(contract["places"]))
         # control: the reader at e33e040 opened a regex after '(,=:[!&|?{};+-*%<>~^', and each form puts '+', '-' or '}'
