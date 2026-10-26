@@ -186,14 +186,22 @@ class TechNoteE2E(WorklistE2E):
   self.assertEqual(psql(f'''SELECT count(*) FROM "TechNoteRevision" WHERE "studyUid"='{f.uid}' '''),['1'])
   self.assertEqual(psql(f'''SELECT count(*) FROM "AuditLog" WHERE target='{f.uid}' AND action='tech-note.revise' '''),['1'])
   self.assertEqual(psql(f'''SELECT detail::jsonb->>'attemptId' FROM "AuditLog" WHERE target='{f.uid}' AND action='tech-note.revise' '''),[attempt])
-  self.assertEqual(self.stack.request('POST',path,'tech',dict(body,text='SYNTHETIC other text')).status,400)
+  # The composed clinical route owns request identity before the note projection (EMR-D batch 2).
+  reused=self.stack.request('POST',path,'tech',dict(body,text='SYNTHETIC other text'))
+  self.assertEqual((reused.status,reused.body.get('code')),(409,'REQUEST_ID_REUSED'),reused.text)
+  self.assertNotIn('note',reused.body)
+  self.assertEqual(psql(f'''SELECT count(*) FROM "TechNoteRevision" WHERE "studyUid"='{f.uid}' '''),['1'])
+  self.assertEqual(psql(f'''SELECT count(*) FROM "AuditLog" WHERE target='{f.uid}' AND action='tech-note.revise' '''),['1'])
   for bad in ['not-a-uuid',None,attempt.upper()]:
    self.assertEqual(self.stack.request('POST',path,'tech',dict(text='x',baseVersion=1,reason='r',attemptId=bad)).status,400)
   other=self.stack.request('POST',path,'tech',dict(text='SYNTHETIC v2',baseVersion=1,reason='second',attemptId=str(uuid.uuid4())));self.assertEqual(other.status,201)
   latest=self.stack.request('GET',path,'doctor').body['note'];self.assertEqual(latest['isOwnAttempt'],False);self.assertNotIn('authorSub',latest)
   mine=self.stack.request('GET',path+'/history?before=2','tech').body['items'];self.assertEqual([(i['version'],i['attemptId'],i['isOwnAttempt']) for i in mine],[(1,attempt,True)])
   late=self.stack.request('POST',path,'tech',body);self.assertEqual((late.status,late.body['note']['version'],late.body['latestNote']['version']),(201,1,2))
+  self.assertEqual(late.body['note'],first.body['note'])
+  self.assertEqual(late.body['latestNote']['text'],'SYNTHETIC v2')
   self.assertEqual(psql(f'''SELECT count(*) FROM "TechNoteRevision" WHERE "studyUid"='{f.uid}' '''),['2'])
+  self.assertEqual(psql(f'''SELECT count(*) FROM "AuditLog" WHERE target='{f.uid}' AND action='tech-note.revise' '''),['2'])
 
 
 def load_tests(loader,tests,pattern):
