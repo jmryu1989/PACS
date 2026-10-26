@@ -713,6 +713,29 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.assertEqual(1, len(self.downloads), "one archive download")
 
 
+    def test_c06_zip64_manifest_download_and_history_reload(self):
+        from unittest.mock import patch
+        original = download_view
+        def large(op, uid, *args, **kwargs):
+            return original(op, uid, *args, **dict(kwargs, objects=65536, size=5 * 1024**3))
+        self.open_as(RAD_ONLY)
+        with patch(__name__ + '.download_view', large):
+            op = self.prepare()
+        box = self.operations().first
+        expect(box.locator('.study-transfer-state')).to_have_text('Ready')
+        with self.page.expect_download():
+            box.get_by_role('button', name='Download', exact=True).click()
+        self.assertEqual(op, self.site.grants[-1]['operation'])
+        self.site.download_state[op] = large(op, UID_A, 'sent', complete=65536)
+        self.page.clock.run_for(3100)
+        expect(box.locator('.study-transfer-state')).to_have_text('Sent')
+        self.reload_transfers()
+        box = self.operations().first
+        self.assertEqual(op, box.get_attribute('data-operation'))
+        expect(box.locator('.study-transfer-state')).to_have_text('Sent')
+        kept = self.page.evaluate('k=>JSON.parse(sessionStorage.getItem(k)).operations', self.own_slot())
+        self.assertEqual((65536, 5 * 1024**3), (kept[0]['objects'], kept[0]['bytes']))
+
     def test_c06_the_download_item_acts_only_on_the_selection_its_menu_opened_on(self):
         self.open_as(RAD_ONLY)
         self.open_study(h.PATIENT)
@@ -824,13 +847,12 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.assertEqual(["Not confirmed", "Stored", "Stored"], [self.state_of(i) for i in range(3)], "R5-A01: eligible first sends succeed")
         self.assertEqual(1, len({r["operation"] for r in self.site.imports}), "R5-A01: sibling operation unchanged")
 
-    def test_r5_a01_local_oversize_never_dispatches(self):
+    def test_r5_a01_large_file_dispatches_without_a_size_refusal(self):
         self.open_as(TECH, "Technician")
         self.choose(self.files(1, 25165825))
-        self.settle(300)
-        self.assertEqual([], self.site.imports, "R5-A01: oversized selection zero POST")
-        self.assertEqual("Not Sent", self.state_of(0), "R5-A01: local rejection")
-        self.assertEqual(0, self.controls()["Retry"], "R5-A01: oversized no retry")
+        self.observed(lambda: len(self.site.imports) == 1, 'large file POST received')
+        self.observed(lambda: self.state_of(0) == 'Stored', 'large file stored')
+        self.assertEqual(25165825, self.site.imports[0]['bytes'])
 
     def test_r5_a01_real_transport_sent_false_can_make_its_first_dispatch(self):
         # Public module host + real session transport. session:null fails before fetch; no rewritten product method.

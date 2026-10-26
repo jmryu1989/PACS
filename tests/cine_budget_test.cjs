@@ -26,3 +26,24 @@ test('cached frames need no second allocation and color samples count',()=>{
  assert.equal(budget(frames(2),pixels(2),0,[{},{}]),true);
  assert.equal(budget(frames(2),pixels(2).map(p=>({...p,samplesPerPixel:3})),2*256*256*4),false);
 });
+
+test('native 8-bit XA and RGB US fit without Float32 inflation',()=>{
+ const xa=pixels(2).map(p=>({...p,bitsAllocated:8,samplesPerPixel:1}));
+ assert.equal(budget(frames(2),xa,2*256*256),true);
+ const us=xa.map(p=>({...p,samplesPerPixel:3}));
+ assert.equal(budget(frames(2),us,2*256*256*3),true);
+ assert.equal(budget(frames(2),us,2*256*256*3-1),false);
+});
+test('cine may evict old frames but must fit the complete requested stack',()=>{
+ const p=pixels(2).map(p=>({...p,bitsAllocated:8}));
+ const full=2*256*256;
+ assert.equal(budget(frames(2),p,full,[],bytes=>bytes<=full),true);
+ assert.equal(budget(frames(2),p,full,[{sizeInBytes:256*256}],bytes=>bytes<full),false);
+ assert.equal(budget(frames(2),p,0,[{sizeInBytes:256*256},{sizeInBytes:256*256}],bytes=>bytes<=full),true);
+});
+
+test('the displayed frame allocation accounts for decoder promotion',()=>{
+ const p=pixels(2).map(p=>({...p,bitsAllocated:16,decodedBytesPerPixel:4}));
+ assert.equal(budget(frames(2),p,2*256*256*2),false);
+ assert.equal(budget(frames(2),p,2*256*256*4),true);
+});

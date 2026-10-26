@@ -456,24 +456,24 @@ test('the size and shared budget limits keep their own message and are not sent 
 const HPACS = path.join(__dirname, '../worklist-v0/hpacs-lite');
 const STUDY_UID = '1.2.840.1.1', SERIES_UID = '1.2.840.1.2', SOPS = ['1.2.840.1.5', '1.2.840.1.6'];
 const instanceId = index => 'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-' + String(index).padStart(8, '0');
-function loaderWorld(version) {
-  const sandbox = { crypto: globalThis.crypto, TextDecoder, TextEncoder, cornerstone: {}, kinRenderVolumeMipPrint: async () => ({}),
+function loaderWorld(version, sops = SOPS, capacity = 1024 * 1024 * 1024) {
+  const sandbox = { crypto: globalThis.crypto, TextDecoder, TextEncoder, cornerstone: { cache: { getBytesAvailable: () => capacity } }, kinRenderVolumeMipPrint: async () => ({}),
     KinVolumeBatch: { plan() {} }, KinVolumeBatchScout: { camera() {}, line() {} }, kinRenderVolumeScout: async () => ({}) };
   sandbox.window = sandbox;
   vm.runInContext(fs.readFileSync(path.join(HPACS, 'viewer-volume-job-print.js'), 'utf8'), vm.createContext(sandbox), { filename: 'viewer-volume-job-print.js' });
   const cell = { projection: { blend: 1 } };
-  const snapshot = { version, volume: { study: STUDY_UID, series: SERIES_UID, sops: SOPS, sourceDigest: 'f'.repeat(64) },
+  const snapshot = { version, volume: { study: STUDY_UID, series: SERIES_UID, sops, sourceDigest: 'f'.repeat(64) },
     ...(version === 5 ? { batch: { cell } } : { cells: [cell] }) };
   return { load: (api, signal) => sandbox.kinRenderVolumeJobPrint({ snapshot, api, bytes: identity.sourceBytes, signal, check() {} }) };
 }
-function source(url) {
+function source(url, sops = SOPS, side = 2) {
   const [, index, kind] = /^\/instances\/aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-(\d{8})\/(attachments\/dicom\/info|simplified-tags|frames\/0\/image-uint16)$/.exec(url);
   const json = value => reply([new TextEncoder().encode(JSON.stringify(value))]);
-  if (kind === 'attachments/dicom/info') return json({ UncompressedMD5: String(Number(index)).repeat(32) });
-  if (kind === 'simplified-tags') return json({ StudyInstanceUID: STUDY_UID, SeriesInstanceUID: SERIES_UID, SOPInstanceUID: SOPS[Number(index)],
+  if (kind === 'attachments/dicom/info') return json({ UncompressedMD5: Number(index).toString(16).padStart(32, '0') });
+  if (kind === 'simplified-tags') return json({ StudyInstanceUID: STUDY_UID, SeriesInstanceUID: SERIES_UID, SOPInstanceUID: sops[Number(index)],
     SOPClassUID: '1.2.840.10008.5.1.4.1.1.2', Modality: 'CT', NumberOfFrames: 1, SamplesPerPixel: 1, PhotometricInterpretation: 'MONOCHROME2',
-    Rows: 2, Columns: 2, BitsAllocated: 16, BitsStored: 12, HighBit: 11, PixelRepresentation: 0 });
-  const header = new TextEncoder().encode('P7\nWIDTH 2\nHEIGHT 2\nDEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\nENDHDR\n'), frame = new Uint8Array(header.length + 8);
+    Rows: side, Columns: side, BitsAllocated: 16, BitsStored: 12, HighBit: 11, PixelRepresentation: 0 });
+  const header = new TextEncoder().encode(`P7\nWIDTH ${side}\nHEIGHT ${side}\nDEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\nENDHDR\n`), frame = new Uint8Array(header.length + side * side * 2);
   frame.set(header);
   return reply([frame]);
 }
@@ -501,4 +501,21 @@ test('the version 4-6 and 12-15 volume loader reads past one rejected source rea
       assert.equal(calls.filter(call => call.url === target).length, 1, 'version ' + version + ': an abort is not sent again');
     });
   }
+});
+
+
+test('257 full-size CT slices reach digest verification beyond the old pixel and source-byte ceilings', async () => {
+  const sops = Array.from({length:257},(_,i)=>'1.2.840.9.'+i), side=512;
+  const capacity=sops.length*side*side*Float32Array.BYTES_PER_ELEMENT*2;
+  const world=loaderWorld(12,sops,capacity);
+  const api=async(url,options)=>({id:instanceId(sops.indexOf(JSON.parse(options.body).sopUid))});
+  await withFetch(url=>source(url,sops,side), async calls=>{
+    await assert.rejects(world.load(api,new AbortController().signal),{message:'저장 당시 전체 원본과 달라 출력하지 않았습니다.'});
+    assert.equal(calls.filter(c=>c.url.endsWith('/frames/0/image-uint16')).length,sops.length);
+  });
+  const low=loaderWorld(12,sops,capacity-1);
+  await withFetch(url=>source(url,sops,side), async calls=>{
+    await assert.rejects(low.load(api,new AbortController().signal),{message:'출력용 CT 메모리가 부족합니다. 다른 검사를 닫고 다시 확인하세요.'});
+    assert.equal(calls.filter(c=>c.url.includes('/frames/')).length,0);
+  });
 });

@@ -333,7 +333,7 @@ window.KinStudyTransferLocal = function (app) {
     if (!complete(answer)) return null;
     const v = answer.body;
     if (v.operationId !== op.id || v.studyUid !== op.uid || !hash(v.manifestSha256) || !time(v.preparedAt)
-        || !count(v.objects, 65533) || v.objects === 0 || !count(v.bytes, 4294967294) || v.bytes === 0
+        || !count(v.objects, Number.MAX_SAFE_INTEGER) || v.objects === 0 || !count(v.bytes, Number.MAX_SAFE_INTEGER) || v.bytes === 0
         || !(v.note === null || typeof v.note === 'string') || !Object.prototype.hasOwnProperty.call(DOWNLOAD_NAMES, v.state)
         || !Array.isArray(v.attempts) || (op.manifestSha256 && (op.manifestSha256 !== v.manifestSha256
           || op.preparedAt !== v.preparedAt || op.objects !== v.objects || op.bytes !== v.bytes))) return null;
@@ -463,8 +463,8 @@ window.KinStudyTransferLocal = function (app) {
         }
       } else if (kept.kind === 'download') {
         if (!uid(kept.uid) || !(kept.manifestSha256 == null || hash(kept.manifestSha256))
-            || !(kept.preparedAt == null || time(kept.preparedAt)) || !(kept.objects == null || count(kept.objects, 65533))
-            || !(kept.bytes == null || count(kept.bytes, 4294967294))) throw new Error('Unverified download history');
+            || !(kept.preparedAt == null || time(kept.preparedAt)) || !(kept.objects == null || count(kept.objects, Number.MAX_SAFE_INTEGER))
+            || !(kept.bytes == null || count(kept.bytes, Number.MAX_SAFE_INTEGER))) throw new Error('Unverified download history');
       } else throw new Error('Unknown history kind');
     }
   }
@@ -533,7 +533,7 @@ window.KinStudyTransferLocal = function (app) {
         }
       } else {
         op = op || downloadOperation(kept.id, kept.uid);
-        if (!op.manifestSha256 && hash(kept.manifestSha256) && time(kept.preparedAt) && count(kept.objects, 65533) && count(kept.bytes, 4294967294))
+        if (!op.manifestSha256 && hash(kept.manifestSha256) && time(kept.preparedAt) && count(kept.objects, Number.MAX_SAFE_INTEGER) && count(kept.bytes, Number.MAX_SAFE_INTEGER))
           Object.assign(op, { manifestSha256: kept.manifestSha256, preparedAt: kept.preparedAt, objects: kept.objects, bytes: kept.bytes });
       }
       if (!existing) { operations.push(op); added.push(op); }

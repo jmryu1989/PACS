@@ -27,6 +27,11 @@ export const IMPORT_FILE_SLOTS = 100;
 const LEASE_MS = 30000;
 const RENEW_MS = 10000;
 const READ_TIMEOUT_MS = 5000;
+// First-site synthetic DBT, Orthanc 24.12.0: 647 MiB POST took 10.4 s on desktop
+// (VM: 8.3 s; 1,001 MiB POST 11.9 s, GET+SHA 9.3 s). Preserve the metadata
+// allowance and add transfer time at the slowest measured rate, without a size cap.
+// Re-measure on a larger site's storage before deployment.
+const objectTimeout = (bytes: number) => READ_TIMEOUT_MS + Math.ceil(bytes * 10400 / (647 * 1024 * 1024));
 const INIT_BUDGET_MS = 240000;
 const SMALL_LIMIT = 262144;
 const CONTEXT_LIMIT = 16777216;
@@ -1620,16 +1625,16 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * One request with a 5 s deadline to body EOF and a byte cap; the body is returned only for a 200. A transport failure
+   * Metadata uses a 5 s deadline; original transfers add their measured size allowance to body EOF; the body is returned only for a 200. A transport failure
    * carries whether it ended in the connect phase (4.4); upstream text never leaves this function.
    */
   private async orthancCall(method: 'GET' | 'POST', path: string, body: string | Uint8Array | undefined, limit: number,
-    signal?: AbortSignal, contentType = 'text/plain', onChunk?: (chunk: Uint8Array) => boolean): Promise<{ status: number; bytes: Buffer }> {
+    signal?: AbortSignal, contentType = 'text/plain', onChunk?: (chunk: Uint8Array) => boolean, timeoutMs = READ_TIMEOUT_MS): Promise<{ status: number; bytes: Buffer }> {
     const { base, auth } = this.orthancConfig();
     const controller = new AbortController();
     let timedOut = false, reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     const abort = () => { controller.abort(); void reader?.cancel().catch(() => undefined); };
-    const timer = setTimeout(() => { timedOut = true; abort(); }, READ_TIMEOUT_MS);
+    const timer = setTimeout(() => { timedOut = true; abort(); }, timeoutMs);
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
     try {
@@ -1698,7 +1703,7 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
         const part = chunk.byteLength > room ? chunk.subarray(0, room) : chunk;
         hash.update(part); read += part.byteLength;
         return read <= length;
-      });
+      }, objectTimeout(length));
       const tags = await this.orthancJson('GET', `/instances/${id}/simplified-tags`, undefined, CONTEXT_LIMIT);
       if (!tags || typeof tags !== 'object' || Array.isArray(tags)) return { kind: 'failed' };
       for (const key of ['PatientID', 'StudyInstanceUID', 'SeriesInstanceUID', 'SOPInstanceUID'])
@@ -1712,7 +1717,7 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
   /** 4.5 step 2: one POST /instances of the original bytes; only a connect-phase failure is a certain no-write. */
   private async postInstance(bytes: Buffer): Promise<{ kind: 'ok'; id: string; status: string } | { kind: 'certain-no-write' } | { kind: 'unknown' }> {
     let answer: { status: number; bytes: Buffer };
-    try { answer = await this.orthancCall('POST', '/instances', new Uint8Array(bytes), POST_ANSWER_LIMIT, undefined, 'application/dicom'); }
+    try { answer = await this.orthancCall('POST', '/instances', bytes, POST_ANSWER_LIMIT, undefined, 'application/dicom', undefined, objectTimeout(bytes.length)); }
     catch (error: any) { return error instanceof OrthancFailure && (error as any).connect ? { kind: 'certain-no-write' } : { kind: 'unknown' }; }
     try {
       const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(answer.bytes));

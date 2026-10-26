@@ -34,7 +34,7 @@ function fixture(kind='orthographic',stackFrames=7){
   stopClip(){cineEvents.emit('cine');},setCine:({id,...values})=>{Object.assign(state.cines[id],values);cineEvents.emit('cine');}};
  const grid={EVENTS:{ACTIVE_VIEWPORT_ID_CHANGED:'active',GRID_STATE_CHANGED:'grid'},getActiveViewportId:()=>current.id,getState:()=>({viewports:new Map([[current.id,{}]])}),subscribe:subscribe(gridEvents)};
  window.cornerstone={Enums:{Events:events,ViewportStatus:{RENDERED:'rendered'}},getEnabledElement:element=>element.disabled?undefined:({viewport:element.viewport}),
-  cache:{getImage:()=>null,getMaxCacheSize:()=>16*1024*1024,getCacheSize:()=>0},metaData:{get:()=>({rows:64,columns:64})},imageLoader:{loadAndCacheImage:async()=>{}},utilities:{
+  cache:{getImage:()=>null,getMaxCacheSize:()=>16*1024*1024,getCacheSize:()=>0,isCacheable:n=>n<=16*1024*1024},metaData:{get:()=>({rows:64,columns:64})},imageLoader:{loadAndCacheImage:async()=>{}},utilities:{
    getVolumeViewportScrollInfo:v=>({sliceRangeInfo:{sliceRange:{min:0,max:32,current:v.getCamera().focalPoint[2]},spacingInNormalDirection:1,camera:v.getCamera()}}),
    jumpToSlice:async(element,{imageIndex})=>element.viewport.setIndex(imageIndex),scroll:(v,{delta})=>v.setIndex(v.getTargetImageIdIndex()+delta)}};
  window.cornerstoneTools={utilities:{cine:{getToolState:()=>toolState}}};

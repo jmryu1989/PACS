@@ -1,15 +1,18 @@
 
-function kinCineWithinBudget(ids, pixels, available, cached = []) {
+function kinCineWithinBudget(ids, pixels, available, cached = [], cacheable = () => true) {
   if (ids.length < 2 || pixels.length !== ids.length || !Number.isFinite(available) || available < 0) return false;
-  let needed = 0;
+  let needed = 0, total = 0;
   for (let i = 0; i < pixels.length; i++) {
-    if (cached[i]) continue;
     const p = pixels[i];
     if (![p?.rows, p?.columns].every(n => Number.isSafeInteger(n) && n > 0)) return false;
-    // The native decoder may promote scalar pixels to Float32. Include all color samples.
-    needed += p.rows * p.columns * Math.max(4, Number(p.bitsAllocated || 32) / 8) * Number(p.samplesPerPixel || 1);
+    // Use the decoded frame's size when present; an uncached frame uses its
+    // native allocation (8/16-bit monochrome or RGB), not Float32 per sample.
+    const bytes = cached[i]?.sizeInBytes ?? p.rows * p.columns * (p.decodedBytesPerPixel ?? Number(p.bitsAllocated || 32) / 8 * Number(p.samplesPerPixel || 1));
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) return false;
+    total += bytes;
+    if (!cached[i]) needed += bytes;
   }
-  return Number.isSafeInteger(needed) && needed <= available;
+  return Number.isSafeInteger(total) && needed <= available && cacheable(total);
 }
 
 function kinCineNext(index, first, last, mode, direction, loop) {
@@ -185,14 +188,25 @@ function kinCreateCine() {
             }catch(error){clearInterval(timer);if(records.get(id)===r){r.message=error.message||'MPR 재생을 중단했습니다.';if(r.ticket===ticket)halt(id);render();}}
           },1000/fps);r.volumeTimer=timer;render();return;
         }
-        const ids = v.getImageIds(), pixels = ids.map(imageId => core.metaData.get('imagePixelModule', imageId));
+        const ids = v.getImageIds(), metadata = ids.map(imageId => core.metaData.get('imagePixelModule', imageId));
         const cached = ids.map(id => core.cache.getImage(id));
-        let available = core.cache.getMaxCacheSize() - core.cache.getCacheSize();
+        // A displayed frame supplies the actual decoder allocation, including
+        // Float32 promotion for its rescale and RGB/RGBA conversion.
+        const keys = metadata.map((p,i) => JSON.stringify([p?.bitsAllocated,p?.samplesPerPixel,p?.photometricInterpretation,core.metaData.get('modalityLutModule',ids[i])]));
+        const allocations = new Map();
+        cached.forEach((image,i) => { if (image?.sizeInBytes && metadata[i]?.rows && metadata[i]?.columns)
+          allocations.set(keys[i],image.sizeInBytes/(metadata[i].rows*metadata[i].columns)); });
+        const pixels = metadata.map((p,i) => ({...p,decodedBytesPerPixel:allocations.get(keys[i])}));
+        // Cornerstone includes evictable images in isCacheable(); subtracting the
+        // whole image cache would reject cine after viewing an unrelated study.
+        let available = core.cache.getMaxCacheSize();
         const heap = performance.memory;
         if (heap && Number.isFinite(heap.jsHeapSizeLimit - heap.usedJSHeapSize))
           available = Math.min(available, heap.jsHeapSizeLimit - heap.usedJSHeapSize);
-        if (!kinCineWithinBudget(ids, pixels, available, cached))
-          throw Error('현재 영상 캐시·메모리 여유가 부족합니다. 다른 영상을 닫은 뒤 다시 재생하세요.');
+        if (!kinCineWithinBudget(ids, pixels, available, cached, bytes => core.cache.isCacheable(bytes))) {
+          r.message = '현재 영상 캐시·메모리 여유가 부족합니다. 다른 검사를 정리하거나 뷰어를 다시 연 뒤 재생하세요.';
+          throw Error(r.message);
+        }
         await session(); if (!current()) return;
         // Finish a bounded, four-worker preparation before the native timer starts, so stop/replace cannot be undone by a late frame load.
         let next = 0;
@@ -221,7 +235,7 @@ function kinCreateCine() {
         },1000/fps);r.volumeTimer=timer;
         render();
       } catch (error) {
-        if (current()) { r.message = v.type==='orthographic'?(error.message||'MPR 재생을 준비할 수 없습니다.'):'재생을 준비할 수 없습니다. 로그인·영상과 500 프레임/128 MiB 제한을 확인하세요.'; halt(id); render(); }
+        if (current()) { r.message = v.type==='orthographic' ? (error.message || 'MPR 재생을 준비할 수 없습니다.') : (r.message || '재생을 준비할 수 없습니다. 로그인 상태와 영상을 확인하고 다시 시도하세요.'); halt(id); render(); }
       } finally {
         if(v.type==='orthographic'&&records.get(id)===r&&r.ticket===ticket&&!current()){halt(id);render();}
       }
