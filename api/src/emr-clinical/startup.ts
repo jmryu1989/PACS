@@ -22,6 +22,9 @@ import { FindingService } from '../finding.service';
 import { findingSources } from '../emr-source/finding';
 
 const ONLINE_CLINICAL_SERVICES = Symbol('OnlineClinicalServices');
+/** The composed C2 administrative facade (manage only): it has no decrypt or sign capability. */
+export const EMR_SIGNING_KEY_ADMIN = Symbol('EmrSigningKeyAdmin');
+export type SigningKeyAdmin = ReturnType<typeof createOnlineClinicalServices>['keys'];
 const clinicalRole = (roles: readonly string[]) => roles.some(role => ['radiologist', 'clinician', 'technician'].includes(role));
 
 /** Registration is the immutable member identity bound to current institutional
@@ -51,8 +54,9 @@ export function onlineRequestIdentity(requests: RequestContextSource): RequestId
       return { ...current, capacity: 'operator' };
     },
     async doctor(tx, institutionId, doctorId) {
+      // The runtime login reads B2 identities only through its definer functions, never the table.
       const rows = await tx.$queryRaw<{ issuer: string; subject: string }[]>`
-        SELECT issuer, subject FROM emr_access.member_identity WHERE id=${doctorId}::uuid`;
+        SELECT issuer, subject FROM emr_access.member_identity_binding(${doctorId}::uuid)`;
       const identity = rows[0];
       if (!identity) throw new NotFoundException('회원 신원을 확인할 수 없습니다.');
       await lockMemberRights(tx, identity.subject);
@@ -142,4 +146,5 @@ export const startupClinicalProviders = [
   { provide: EMR_CLINICAL_ROUTES, inject: [ONLINE_CLINICAL_SERVICES], useFactory: (services: ReturnType<typeof createOnlineClinicalServices>) => services.routes },
   { provide: EMR_MANUAL_SR_SIGNING, inject: [ONLINE_CLINICAL_SERVICES], useFactory: (services: ReturnType<typeof createOnlineClinicalServices>) => services.manualSrSigning },
   { provide: EMR_NATIVE_REPORT_SIGNING, inject: [ONLINE_CLINICAL_SERVICES], useFactory: (services: ReturnType<typeof createOnlineClinicalServices>) => services.nativeReportSigning },
+  { provide: EMR_SIGNING_KEY_ADMIN, inject: [ONLINE_CLINICAL_SERVICES], useFactory: (services: ReturnType<typeof createOnlineClinicalServices>) => services.keys },
 ];

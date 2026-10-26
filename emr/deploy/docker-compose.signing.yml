@@ -1,0 +1,21 @@
+# Online approval key custody for the API (D1770: doctors' approval keys are held on the server).
+# The #218 custody model exactly: wrapping ID c2-wrap-v1, mounted read-only at /run/secrets/emr-signing-wrap-v1 from
+# the existing raw 32-byte host file named in /etc/kin-deploy/emr-wrapping-custody.json. The bytes never enter
+# PostgreSQL, the image, .env or a database backup. Merge it after the stack's own files, for example
+#   KIN_EMR_WRAPPING_SECRET_FILE=/srv/kin-signing-secrets/emr-signing-wrap-v1 \
+#     docker compose -f docker-compose.yml [-f docker-compose.prod.yml] -f emr/deploy/docker-compose.signing.yml up -d api
+# Procedure and file ownership: docs/ops/release-tools-runbook.md. Without this file the API still starts and
+# approvals answer "서명키 보관 파일 설정을 확인하세요" (WrappingSecretConfigurationPending).
+services:
+  api:
+    environment:
+      KIN_EMR_WRAPPING_KEY_ID: c2-wrap-v1
+      KIN_EMR_WRAPPING_KEY_FILES: '{"c2-wrap-v1":"/run/secrets/emr-signing-wrap-v1"}'
+    volumes:
+      - type: bind
+        source: ${KIN_EMR_WRAPPING_SECRET_FILE:?KIN_EMR_WRAPPING_SECRET_FILE에 서명키 보관 파일의 호스트 절대 경로를 설정하세요}
+        target: /run/secrets/emr-signing-wrap-v1
+        read_only: true
+        bind:
+          # A missing file must fail the start, never become an empty directory the API then reads.
+          create_host_path: false

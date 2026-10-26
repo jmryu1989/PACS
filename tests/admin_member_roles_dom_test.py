@@ -71,6 +71,7 @@ SCRIPTS = {
     "/worklist/hpacs-lite/work-context.js": lf_text(HPACS / "work-context.js"),
     "/worklist/hpacs-lite/session-transport.js": lf_text(HPACS / "session-transport.js"),
     "/worklist/hpacs-lite/study-access-admin.js": lf_text(HPACS / "study-access-admin.js"),
+    "/worklist/hpacs-lite/signing-key-admin.js": lf_text(HPACS / "signing-key-admin.js"),
     "/worklist/hpacs-lite/admin-access-review.js": lf_text(HPACS / "admin-access-review.js"),
 }
 INSTITUTION = "SYN-INST-A"
@@ -501,8 +502,9 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
         self.assertEqual({
             "syn-pending": ["Approve", "Temp Password", "Email Reset Link", "Suspend"],
             "syn-clinician": ["Change Membership", "Revoke Approval", "Temp Password", "Email Reset Link", "Suspend",
-                              "Study Access"],
-            "syn-suspended": ["Change Membership", "Revoke Approval", "Temp Password", "Email Reset Link", "Activate"],
+                              "Study Access", "Signing Key"],
+            "syn-suspended": ["Change Membership", "Revoke Approval", "Temp Password", "Email Reset Link", "Activate",
+                              "Signing Key"],
             "syn-invalid": ["Change Membership", "Temp Password", "Email Reset Link", "Suspend"],
         }, actions)
         self.open_membership("syn-pending", "Approve")

@@ -691,6 +691,7 @@ jobs:
         export KIN_B2R_PRISMA_CLI="$PWD/api/node_modules/prisma/build/index.js"
         python3 scripts/record-run.py --run-dir tmp/emr-c-ci/server-signing-pg --cwd . --tree api/src/emr-signature --tree api/src/emr-report --tree tests/emr/c -- python3 -B scripts/run-tests.py --module tests/emr/c/server_signing_live.py --class ServerSigningPg --mode live --unit emr-online-signing --timeout 600
         python3 scripts/record-run.py --run-dir tmp/emr-c-ci/clinical-pg --cwd . --tree api/src/emr-clinical --tree tests/emr/d -- python3 -B scripts/run-tests.py --module tests/emr/d/online_live.py --mode live --unit emr-online-clinical --timeout 600
+        python3 scripts/record-run.py --run-dir tmp/emr-c-ci/key-admin-pg --cwd . --tree api/src/emr-clinical --tree api/src/emr-signature --file api/src/signing-key-admin.controller.ts --tree tests/emr/c -- python3 -B scripts/run-tests.py --module tests/emr/c/key_admin_live.py --class KeyAdminHttpPg --mode live --unit emr-key-admin --timeout 600
     - name: Online report and server signing evidence
       if: always()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -699,6 +700,7 @@ jobs:
         path: |
           tmp/emr-c-ci/
           tmp/emr-d-online/
+          tmp/emr-key-admin/
         if-no-files-found: error
         retention-days: 7
     needs: select

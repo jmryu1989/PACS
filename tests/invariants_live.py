@@ -278,6 +278,9 @@ ROUTES: dict[tuple[str, str], Route] = {
     # D1489: the one-time grant the browser's own archive GET carries instead of the binding header (the same owner and scope).
     ("POST", "studies/:uid/original-downloads/:operationId/archive/grant"): Route(Kind.TENANT),
     ("POST", "admin/dicom-import/:operationId/files/:index/recovery"): Route(Kind.TENANT),
+    # KEY-ADMIN: the admin's own-institution doctor approval keys (ServerKeys.manage; tests/emr/c/key_admin_live.py).
+    ("GET", "admin/users/:id/signing-key"): Route(Kind.TENANT),
+    ("POST", "admin/users/:id/signing-key"): Route(Kind.TENANT),
 }
 
 

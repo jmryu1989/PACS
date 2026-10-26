@@ -9027,6 +9027,77 @@
       }
     }
   },
+  "di_additions_key_admin": {
+    "unit": "key-management-entry",
+    "middleware_routes": [
+      {
+        "apply": [
+          "adminNoStore"
+        ],
+        "forRoutes": [
+          "SigningKeyAdminController"
+        ]
+      }
+    ],
+    "controllers": [
+      "SigningKeyAdminController"
+    ],
+    "providers": [
+      "Symbol(EmrSigningKeyAdmin)=factory"
+    ],
+    "routes": [
+      {
+        "controller": "SigningKeyAdminController",
+        "handler": "change",
+        "method": "POST",
+        "paths": [
+          "/|admin/users/:id/signing-key"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "SigningKeyAdminController",
+        "handler": "read",
+        "method": "GET",
+        "paths": [
+          "/|admin/users/:id/signing-key"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      }
+    ],
+    "injectables": {
+      "SigningKeyAdminController": {
+        "params": [
+          "PrismaService",
+          "Object",
+          "Object"
+        ],
+        "scope": null,
+        "declared": [
+          "2:Symbol(EmrSigningKeyAdmin)",
+          "1:Symbol(RequestContextSource)"
+        ],
+        "optional": []
+      }
+    }
+  },
   "di_additions_d_online": {
     "unit": "EMR-D online routes",
     "controllers": [],

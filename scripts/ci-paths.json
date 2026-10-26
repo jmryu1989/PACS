@@ -202,7 +202,8 @@
       "tests/emr/b/pg_ledger_restore_test.py",
       "tests/emr/d/**",
       "tests/live_test_gate.py",
-      "scripts/run-tests.py"
+      "scripts/run-tests.py",
+      "api/src/signing-key-admin.controller.ts"
     ],
     "emr-d": [
       "api/Dockerfile*",
