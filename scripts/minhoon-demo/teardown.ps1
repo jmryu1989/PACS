@@ -22,8 +22,12 @@ $t = [ordered]@{ name = $Name; sha = $state.sha; started = (Utc) }
 
 $runState = ((& ssh @sshOpts $vmHost "cat /srv/kin-heavy/runs/$Name/state 2>/dev/null || echo missing") -join '').Trim()
 $t.state_before = $runState
+if ($runState -eq 'running') {
+  # Stop the stack and delete the demo secrets explicitly; then end the run's hold loop.
+  $t.stop = ((& ssh @sshOpts $vmHost "test -f /srv/kin-heavy/runs/$Name/demo/ctl.sh && bash /srv/kin-heavy/runs/$Name/demo/ctl.sh $Name stop || echo no-demo-dir") -join ' ').Trim()
+}
 if ($runState -notmatch '^(done|refused:|aborted|missing)') {
-  $t.cancel = (& powershell -NoProfile -ExecutionPolicy Bypass -File $vmRun -Sha $state.sha -Name $Name -Cancel) -join ' '
+  $t.cancel =(& powershell -NoProfile -ExecutionPolicy Bypass -File $vmRun -Sha $state.sha -Name $Name -Cancel) -join ' '
 }
 if ($runState -ne 'missing') {
   # Polls until the run is final, then pulls result.json, logs and the containers' logs to evidence\vm-runs\<name>.

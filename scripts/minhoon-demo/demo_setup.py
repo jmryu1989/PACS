@@ -219,15 +219,24 @@ def bind(args):
 
 
 # ---------------------------------------------------------------- seed (also used by demo_verify.py)
-def login(context, origin, username, password, timeout_ms):
+def login(context, origin, username, password, timeout_ms, shot=None):
     page = context.new_page()
     page.set_default_timeout(timeout_ms)
-    page.goto(origin + '/')
-    page.locator('#username').fill(username)
-    page.locator('#password').fill(password)
-    page.locator('#kc-login').click()
-    page.wait_for_url('**/worklist/hpacs-lite/*.html*')
-    page.wait_for_load_state('networkidle')
+    try:
+        page.goto(origin + '/')
+        page.locator('#username').fill(username)
+        page.locator('#password').fill(password)
+        page.locator('#kc-login').click()
+        # A predicate, not a glob: the landing URL carries a one-time #kin-entry proof that may contain '/'.
+        page.wait_for_url(lambda url: '/worklist/hpacs-lite/' in url and '.html' in url)
+        # Not networkidle: the worklist polls. The page exchanges its one-time entry proof during load.
+        page.wait_for_load_state('load')
+        page.wait_for_timeout(2000)
+    except Exception as error:
+        detail = {'url': page.url.split('#')[0], 'text': page.locator('body').inner_text(timeout=5000)[:600] if page.url else ''}
+        if shot:
+            page.screenshot(path=str(shot))
+        raise RuntimeError(f'login {username} did not reach the worklist: {detail}') from error
     return page
 
 
@@ -261,7 +270,8 @@ def seed(args):
         browser = pw.chromium.launch(headless=True)
         try:
             context = browser.new_context(ignore_https_errors=True)
-            page = login(context, credentials['origin'], seed_account['username'], seed_account['password'], args.timeout * 1000)
+            page = login(context, credentials['origin'], seed_account['username'], seed_account['password'], args.timeout * 1000,
+                         shot=Path(args.output).with_name('seed-login-failure.png'))
             for uid in priors:
                 draft = api(page, 'GET', f'/studies/{uid}/draft')
                 if draft['status'] != 200:

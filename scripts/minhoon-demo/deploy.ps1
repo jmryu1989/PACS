@@ -16,6 +16,8 @@ param(
   [int]$OrthancPort = 18042,
   [string]$Samples = 'C:\Users\norne\PACS\tmp\dicom-samples',
   [string]$EvidenceRoot = 'C:\Users\norne\PACS\tmp\astra-control\evidence\minhoon-demo-runs',
+  # vm-run priority lane (D1858): only when the commander designates the demo as the critical path.
+  [switch]$Priority,
   # Only fill the VM's public-sample cache (no stack, no VM lock); later deploys then ship nothing.
   [switch]$PrefillSamples,
   [switch]$Drive   # internal: the detached driver
@@ -120,9 +122,10 @@ if ($Drive) {
 
     # 3. vm-run launch (detached on the VM). The vm-run poller is stopped once launched; teardown.ps1 re-attaches to pull.
     $runLog = Join-Path $dir 'vm-run-launch.log'
-    $p = Start-Process powershell -WindowStyle Hidden -PassThru -RedirectStandardOutput $runLog -RedirectStandardError "$runLog.err" -ArgumentList @(
-      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $vmRun, '-Sha', $s.sha, '-Name', $Name, '-CmdFile', "$here\vm\demo-vm.sh",
+    $vmArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $vmRun, '-Sha', $s.sha, '-Name', $Name, '-CmdFile', "$here\vm\demo-vm.sh",
       '-TimeoutMin', $HoldMinutes, '-WaitLockMin', $WaitLockMin, '-Collect', 'none-collected')
+    if ($Priority) { $vmArgs += '-Priority' }
+    $p = Start-Process powershell -WindowStyle Hidden -PassThru -RedirectStandardOutput $runLog -RedirectStandardError "$runLog.err" -ArgumentList $vmArgs
     $laptopLog = Join-Path (Join-Path $vmEvidence $Name) 'laptop.log'
     $deadline = (Get-Date).AddMinutes(10)
     while (-not ((Test-Path $laptopLog) -and (Select-String -Quiet -Path $laptopLog -Pattern '^launch exit='))) {
@@ -228,7 +231,7 @@ if (-not $Watch) {
   WriteState $s
   $drv = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-Drive', '-Name', $Name, '-HoldMinutes', $HoldMinutes,
     '-WaitLockMin', $WaitLockMin, '-PublicIp', $PublicIp, '-OrthancPort', $OrthancPort, '-Samples', $Samples, '-EvidenceRoot', $EvidenceRoot)
-  if ($SkipXa) { $drv += '-SkipXa' }; if ($SkipVerify) { $drv += '-SkipVerify' }
+  if ($SkipXa) { $drv += '-SkipXa' }; if ($SkipVerify) { $drv += '-SkipVerify' }; if ($Priority) { $drv += '-Priority' }
   Start-Process powershell -WindowStyle Hidden -ArgumentList $drv -RedirectStandardOutput "$dir\driver.out" -RedirectStandardError "$dir\driver.err" | Out-Null
   "deploy name=$Name sha=$Sha origin=$origin evidence=$dir"
 }

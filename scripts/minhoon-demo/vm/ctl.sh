@@ -32,6 +32,18 @@ provision)
   sub=$(docker exec -i "$(one db)" psql -X -At -U kin -d kin -c "SELECT sub FROM \"MemberRights\" WHERE username='$user' AND approved AND NOT suspended")
   [ -n "$sub" ] || { echo "no approved member $user"; exit 4; }
   docker exec -i "$(one api)" node - "$sub" < "$RUN/src/tests/emr/d/provision_synthetic.cjs";;
+stop)
+  # Explicit stop used by teardown.ps1 before vm-run -Cancel (the command's TERM trap is only the hang-timeout fallback).
+  [ -d "$DEMO" ] || { echo "already stopped"; exit 0; }
+  A=$RUN/artifacts
+  dc=(docker compose -p "$P" --env-file "$DEMO/stack.env" -f "$RUN/src/docker-compose.yml" -f "$DEMO/compose.demo.yml")
+  echo "$(date -u +%FT%TZ) stopping (teardown)" >> "$A/progress.log"
+  "${dc[@]}" ps -a > "$A/compose-ps-final.txt" 2>&1
+  "${dc[@]}" logs --no-color --timestamps --tail 5000 > "$A/compose-logs-final.txt" 2>&1
+  timeout 300 "${dc[@]}" down -v --remove-orphans >> "$A/progress.log" 2>&1; rc=$?
+  echo "$(date -u +%FT%TZ) down exit=$rc" >> "$A/progress.log"
+  rm -rf "$DEMO" && echo "$(date -u +%FT%TZ) stopped; demo secrets removed" >> "$A/progress.log"
+  echo "down exit=$rc";;
 ps) docker ps --filter "label=com.docker.compose.project=$P" --format '{{.Names}} {{.Status}} {{.Ports}}';;
 *) echo "usage: ctl.sh <name> phase|load <uid>...|sql|provision <user>|ps"; exit 2;;
 esac

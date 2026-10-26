@@ -18,8 +18,11 @@ mkdir -m 700 "$DEMO" && mv "$INBOX"/* "$DEMO"/ && rmdir "$INBOX" || { echo "cann
 # shellcheck disable=SC1091
 . "$DEMO/params"    # PUBLIC_IP DEMO_ORTHANC_PORT READY_TIMEOUT_SEC
 stopping=0
+# Fallback stop for the hang timeout or an early failure; teardown.ps1 stops the stack itself first (ctl.sh stop).
 stop_stack() {
   [ "$stopping" = 1 ] && return; stopping=1
+  trap '' TERM INT
+  [ -d "$DEMO" ] || return 0
   progress "stopping (signal or exit)"
   dc ps -a > "$KIN_HEAVY_ARTIFACTS/compose-ps-final.txt" 2>&1
   dc logs --no-color --timestamps --tail 5000 > "$KIN_HEAVY_ARTIFACTS/compose-logs-final.txt" 2>&1

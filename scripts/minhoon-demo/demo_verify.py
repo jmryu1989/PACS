@@ -4,7 +4,7 @@
 Cases: TLS (self-signed, warning expected), health, reader login -> worklist with every loaded study, CT opened from
 the worklist into a separate viewer window (current + automatic prior = two panes), report editor typing Korean
 through Chromium IME composition events, save + read-back, Related Report showing the approved prior, MG DBT current
-vs prior comparison, XA cine frames, DBT frame download time, clinician-only login. Each case is PASS / FAIL /
+vs prior comparison (with the viewer's frame request timings), XA cine frames, clinician-only login. Each case is PASS / FAIL /
 NOT_RUN with its evidence; headless Chromium is not Minhoon's GPU, monitors or IME (those stay with him).
 The typing case discards its own draft and hold afterwards so the reader account starts clean.
 """
@@ -25,7 +25,7 @@ sys.path.insert(0, str(HERE))
 from demo_setup import SEED_TEXT, api, login  # noqa: E402
 from mgxa_viewer_check import SNAPSHOT, ready_snapshot  # noqa: E402
 
-KOREAN = '한글 입력 확인: 우측 폐 하엽 결절 없음'   # synthetic sentence for the typing check only
+KOREAN = '한글 입력 확인 — 시연 검증용 문장'   # typed, saved, read back, then discarded
 # Chromium IME composition steps for the first two syllables (jamo -> syllable), then the rest committed as text.
 COMPOSE = [['ㅎ', '하', '한'], ['ㄱ', '그', '글']]
 
@@ -107,7 +107,7 @@ def main():
 
             def reader_login(case):
                 t0 = time.monotonic()
-                page = login(ctx, origin, reader['username'], reader['password'], args.timeout * 1000)
+                page = login(ctx, origin, reader['username'], reader['password'], args.timeout * 1000, shot=out / 'reader-login-failure.png')
                 case['landed'] = page.url.split('#')[0]
                 case['login_seconds'] = round(time.monotonic() - t0, 1)
                 if not case['landed'].endswith('/worklist/hpacs-lite/main.html'):
@@ -192,12 +192,15 @@ def main():
                 page.screenshot(path=str(out / 'report-korean.png'))
                 if snap.get('findings') != KOREAN:
                     raise AssertionError('saved draft on the server is not the typed Korean text')
-                # Leave the account clean: discard this check's draft, release its hold, reload the editor.
+                # Leave the account clean: discard this check's draft and release its hold. No reload: the page's
+                # one-time entry proof is spent, and the page is closed at the end of the run anyway.
+                time.sleep(3)
+                draft = api(page, 'GET', f'/studies/{typing_uid}/draft')
                 body = {'expectedOwner': draft['json']['owner'], 'expectedRevision': draft['json']['revision']}
                 case['cleanup_draft'] = api(page, 'DELETE', f'/studies/{typing_uid}/draft', body)['status']
                 case['cleanup_hold'] = api(page, 'POST', f'/studies/{typing_uid}/release', {})['status']
-                page.reload()
-                page.wait_for_selector('#rows tr[data-uid]')
+                after = api(page, 'GET', f'/studies/{typing_uid}/draft')
+                case['draft_present_after_cleanup'] = (after['json'] or {}).get('present')
             run_case(result, 'report-editor-korean-ime-save', korean_typing, out)
 
             def open_direct(case, studies, compare, shot):
@@ -210,6 +213,11 @@ def main():
                 case['first_render_seconds'] = round(time.monotonic() - t0, 1)
                 case['panes'] = len(snap)
                 case['images'] = [c['image'].split('/studies/')[1][:160] for c in snap]
+                # The viewer's own frame requests up to first render (laptop network, not Minhoon's).
+                case['frame_requests'] = page.evaluate("""() => { const f = performance.getEntriesByType('resource')
+                  .filter(e => e.name.includes('/frames/')); return {count: f.length,
+                  mb: Math.round(f.reduce((a, e) => a + (e.encodedBodySize || 0), 0) / 1e5) / 10,
+                  max_ms: Math.round(Math.max(0, ...f.map(e => e.duration)))}; }""")
                 page.screenshot(path=str(out / shot))
                 return page, snap
 
@@ -231,35 +239,20 @@ def main():
                 seen = {snap[0]['image']}
                 for _ in range(4):
                     page.keyboard.press('ArrowDown')
-                    time.sleep(0.5)
-                    seen.add(page.evaluate(SNAPSHOT)[0]['image'])
+                    time.sleep(0.7)
+                    seen.update(c['image'] for c in page.evaluate(SNAPSHOT))
                 case['distinct_frames_seen'] = len(seen)
                 if len(seen) < 3:
                     raise AssertionError('XA frame navigation did not move through stored frames')
                 page.close()
             run_case(result, 'xa-cine-frames', xa_cine, out)
 
-            def dbt_frame_transfer(case):
-                row = max((r for r in inv['files'] if r['modality'] == 'MG' and r['frames'] > 1), key=lambda r: r['bytes'])
-                page = state['page']
-                url = f"{origin}/dicom-web/studies/{row['study']}/series/{row['series']}/instances/{row['sop']}/frames/1"
-                t0 = time.monotonic()
-                resp = page.request.get(url, headers={'Accept': 'multipart/related; type="application/octet-stream"; transfer-syntax=*'},
-                                        timeout=args.timeout * 1000)
-                body = resp.body()
-                secs = time.monotonic() - t0
-                case.update(http=resp.status, bytes=len(body), seconds=round(secs, 2),
-                            mb_per_s=round(len(body) / 1e6 / secs, 1), frames_in_object=row['frames'],
-                            note='one DBT frame from the laptop network; scrolling a whole DBT fetches every frame')
-                if resp.status != 200:
-                    raise AssertionError('DBT frame not served')
-            run_case(result, 'dbt-frame-transfer', dbt_frame_transfer, out)
-
             def clinician_login(case):
                 cctx = browser.new_context(ignore_https_errors=True, viewport={'width': 1440, 'height': 900}, locale='ko-KR')
                 cctx.set_default_timeout(args.timeout * 1000)
                 try:
-                    page = login(cctx, origin, clinician['username'], clinician['password'], args.timeout * 1000)
+                    page = login(cctx, origin, clinician['username'], clinician['password'], args.timeout * 1000,
+                                 shot=out / 'clinician-login-failure.png')
                     case['landed'] = page.url.split('#')[0]
                     if not case['landed'].endswith('/worklist/hpacs-lite/clinician.html'):
                         raise AssertionError('clinician-only account did not land on clinician.html')
