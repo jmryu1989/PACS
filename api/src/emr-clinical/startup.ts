@@ -13,6 +13,7 @@ import { FileWrappingSecrets } from '../emr-signature/server-keys';
 import type { RequestIdentityPort, RequestIdentity, WrappingSecrets } from '../emr-signature/server-contract';
 import { EMR_NATIVE_REPORT_SIGNING } from '../emr-report/native-signing';
 import { EMR_CLINICAL_ROUTES, ClinicalRouteSources } from './routes';
+import { EMR_MANUAL_SR_SIGNING } from './manual-sr';
 import { ClinicalStore } from './store';
 import { createOnlineClinicalServices } from './services';
 import { clinicalRouteSources } from './sources';
@@ -139,5 +140,6 @@ export const startupClinicalProviders = [
     inject: [PrismaService, EMR_RECORD_PORT, REQUEST_CONTEXT_SOURCE, OrthancService, StudyAccessService, FindingService],
     useFactory: createStartupClinicalServices },
   { provide: EMR_CLINICAL_ROUTES, inject: [ONLINE_CLINICAL_SERVICES], useFactory: (services: ReturnType<typeof createOnlineClinicalServices>) => services.routes },
+  { provide: EMR_MANUAL_SR_SIGNING, inject: [ONLINE_CLINICAL_SERVICES], useFactory: (services: ReturnType<typeof createOnlineClinicalServices>) => services.manualSrSigning },
   { provide: EMR_NATIVE_REPORT_SIGNING, inject: [ONLINE_CLINICAL_SERVICES], useFactory: (services: ReturnType<typeof createOnlineClinicalServices>) => services.nativeReportSigning },
 ];

@@ -1411,7 +1411,9 @@ test('VIEWER_JOB_DESIGNATION_RENAME_RECYCLE reads and locked parents on save',as
   }
 });
 test('MANUAL_SR_DESIGNATION_RENAME_RECYCLE prepare and locked recheck preserve SR and measurement on refusal',async()=>{
-  const w=await r11Consumer(),{ManualSrService}=require('/app/dist/manual-sr.service'),svc=new ManualSrService(w.client,w.orthanc,w.access);
+  // Preparation never signs; the required signing provider refuses if reached.
+  const unsigned={authorize:async()=>assert.fail('prepare must not sign'),authorized:async()=>assert.fail('prepare must not sign')};
+  const w=await r11Consumer(),{ManualSrService}=require('/app/dist/manual-sr.service'),svc=new ManualSrService(w.client,w.orthanc,w.access,unsigned);
   const ix=await w.item(w.x,'length'),iy=await w.item(w.y,'length');
   const command=id=>Buffer.from(JSON.stringify({requestId:randomUUID(),items:[{id,revision:1}]}));
   for(const field of ['preDoc','preReviewer']) {

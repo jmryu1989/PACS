@@ -118,7 +118,7 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const keycloak = { getUser: async sub => users.find(u => u.id === sub),
       assignmentReaders: async institution => users.filter(u => u.groups.includes(institution)), isReader: async () => true };
     const { PrismaService } = product('prisma.service'), { StudyAccessService } = product('study-access.service');
-    const services = ['pacs', 'clinician-question', 'image-request', 'consultation', 'reader-assignment', 'finding', 'connect'];
+    const services = ['pacs', 'clinician-question', 'image-request', 'consultation', 'reader-assignment', 'finding', 'connect', 'manual-sr'];
     const className = name => name.split('-').map(x => x[0].toUpperCase() + x.slice(1)).join('');
     class HttpFixture {}
     const { createRequestContext, REQUEST_CONTEXT_CAPTURE, REQUEST_CONTEXT_SOURCE } = product('emr-runtime/request-context');
@@ -488,6 +488,7 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const denied = await fetch(origin + `/api/studies/${teleUid}/reader-assignment`, { headers: { authorization: 'Bearer ' + tokens.receiving } });
     assert.ok(denied.status >= 400);
     assert.equal(await db.reportVersion.count(), 0); assert.equal(await db.reportDraft.count(), 0);
+    await require('./sr_http_cases.cjs')({ db, orthanc, send, uid, members, records: runtime.port });
   } finally {
     if (app) await app.close();
     if (ready) await runtime.stop(Date.now() + 10000);
