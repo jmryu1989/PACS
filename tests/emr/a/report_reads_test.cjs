@@ -94,15 +94,21 @@ before(async () => {
   const jwk = { ...await jose.exportJWK(publicKey), kid: 'module-a-reports', alg: 'RS256', use: 'sig' };
   const split = new Set(), sourceRows = new Map();
   // Synthetic external collaborators: the OIDC key set and Orthanc's QIDO study answer (one resource per UID, two for a
-  // UID two patients share).
+  // UID two patients share). Like Orthanc 1.12.5 (measured, R229-B6-01), the answer carries the PS3.18 default study
+  // attributes plus only the tags the request names in includefield; InstitutionName is not a default.
+  const QIDO_STUDY_DEFAULTS = new Set(['00080005', '00080020', '00080030', '00080050', '00080056', '00080061', '00080090',
+    '00080201', '00081190', '00100010', '00100020', '00100030', '00100040', '0020000D', '00200010', '00201206', '00201208']);
   const provider = http.createServer((req, res) => {
     res.setHeader('content-type', 'application/json');
     if (req.url === '/certs') return res.end(JSON.stringify({ keys: [jwk] }));
     const url = new URL(req.url, 'http://synthetic');
     if (url.pathname === '/dicom-web/studies' && url.searchParams.get('StudyInstanceUID')) {
       const uid = url.searchParams.get('StudyInstanceUID');
+      const named = new Set(url.searchParams.getAll('includefield').flatMap(value => value.split(',')).map(tag => tag.trim().toUpperCase()));
+      const answered = row => Object.fromEntries(Object.entries(row).filter(([tag]) => QIDO_STUDY_DEFAULTS.has(tag) || named.has(tag)));
       const row = patient => ({ '0020000D': { vr: 'UI', Value: [uid] }, '00100020': { vr: 'LO', Value: [patient] } });
-      return res.end(JSON.stringify(sourceRows.get(uid) ?? (split.has(uid) ? [row('SYN-PID-1'), row('SYN-PID-2')] : [row('SYN-PID-1')])));
+      const rows = sourceRows.get(uid) ?? (split.has(uid) ? [row('SYN-PID-1'), row('SYN-PID-2')] : [row('SYN-PID-1')]);
+      return res.end(JSON.stringify(rows.map(answered)));
     }
     res.statusCode = 404; res.end('{}');
   });
