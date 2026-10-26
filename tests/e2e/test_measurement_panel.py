@@ -153,7 +153,10 @@ class MeasurementPanelE2E(MeasurementReadbackE2E):
             # The Measurements panel's own tool buttons; the U2 image toolbar carries a second "Angle".
             p.locator('#kin-viewer-history').get_by_role('button', name=label, exact=True).click()
             box=p.locator('.cornerstone-canvas').bounding_box()
-            x,y=box['x']+box['width']*.4,box['y']+box['height']*(.43+index*.15)
+            # Start well below the tracked Length: opening the tracked-measurements panel narrows the canvas and moves
+            # that Length under x=.4, and in the U2 shell's shorter image area .43 lands on its line, so the press
+            # would drag the Length (Cornerstone's edit) instead of starting a new tool.
+            x,y=box['x']+box['width']*.4,box['y']+box['height']*(.55+index*.15)
             p.mouse.move(x,y); p.mouse.down(); p.mouse.move(x+65,y+32,steps=10); p.mouse.up()
             if tool=='Angle': p.mouse.move(x+85,y-15,steps=8); p.mouse.click(x+85,y-15)
             try:
