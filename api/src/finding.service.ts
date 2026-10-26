@@ -362,7 +362,17 @@ export class FindingService {
     return { studies: [...new Set([uid, ...lineage, ...linked])].sort(), checked, frames };
   }
 
+  async prepare(uid: string, raw: Buffer, c: Caller, id: string | undefined,
+    tx: Prisma.TransactionClient, recordId: string) {
+    return this.change(uid, raw, c, id, { tx, recordId, prepare: true });
+  }
+
   async write(uid: string, raw: Buffer, c: Caller, id?: string, online?: { tx: Prisma.TransactionClient; recordId: string }) {
+    return this.change(uid, raw, c, id, online);
+  }
+
+  private async change(uid: string, raw: Buffer, c: Caller, id?: string,
+    online?: { tx: Prisma.TransactionClient; recordId: string; prepare?: boolean }) {
     member(c, true); viewerUid(uid); if (id !== undefined) viewerUuid(id);
     const command = findingCommand(raw, id === undefined), fingerprint = findingFingerprint(uid, id ?? null, command);
     const anchor = await this.prisma.studyState.findUnique({ where: { uid } });
@@ -492,6 +502,11 @@ export class FindingService {
       if (usage.findings + added > FINDING_LIMITS.findings || usage.revisions + 1 > FINDING_LIMITS.revisions ||
           Number(usage.bytes) + bytes > FINDING_LIMITS.bytes) storageLimit();
       const now = new Date(), revision = head ? head.revision + 1 : 1;
+      // Preparation reads the same locked sources and limits as commit. It cannot
+      // publish a finding before its signed D version and B2 event commit together.
+      if (online?.prepare) return result({ id: id ?? online.recordId, studyUid: uid,
+        authorSub: c.sub, authorActor: c.actor, revision, hidden, snapshot,
+        createdAt: head?.createdAt ?? now, updatedAt: now });
       // The exact JSON counted above is stored in both rows; the byte-equality CHECK is not weakened.
       // The answer carries the stored snapshot read back as text.
       if (head) [head] = await tx.$queryRaw<any[]>`UPDATE "Finding" SET snapshot = ${serialized}::jsonb,

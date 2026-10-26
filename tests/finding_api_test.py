@@ -110,6 +110,23 @@ class FindingAPI(unittest.TestCase):
         self.assertEqual(response.status, status, response.text)
         return response.body
 
+    @staticmethod
+    def finding_payload(response):
+        # D adds a write receipt beside the finding. Lists still return the
+        # finding itself; every original field remains part of this comparison.
+        return {key: value for key, value in response.items() if key != 'emr'}
+
+    def assert_finding_replay(self, actual, original):
+        self.assertEqual(self.finding_payload(actual), self.finding_payload(original))
+        self.assertIsInstance(actual['emr']['signature'], dict)
+        self.assertTrue(actual['emr']['replayed'])
+        self.assertEqual(actual['emr'], {**original['emr'], 'replayed': True})
+
+    def assert_finding_twins(self, responses):
+        first, replay = sorted(responses, key=lambda response: response['emr']['replayed'])
+        self.assertEqual([first['emr']['replayed'], replay['emr']['replayed']], [False, True])
+        self.assert_finding_replay(replay, first)
+
     def length_item(self, index=0, extent=20.0, label='길이', slices=None):
         ds = (slices or self.slices)[index]; ipp = [float(x) for x in ds.ImagePositionPatient]
         return dict(schemaVersion=1, kind='length', seriesUid=str(ds.SeriesInstanceUID), sopUid=str(ds.SOPInstanceUID), frame=1,
@@ -280,10 +297,10 @@ class FindingAPI(unittest.TestCase):
         self.assertEqual(head['item']['sources'][0]['values'], [20.0]); self.assertIsNotNone(head['item']['sources'][0]['sourceDigest'])
         self.assertEqual(head['item']['primary'], 1); self.assertEqual(head['item']['title'], create['item']['title'])
         listed = self.call(method='GET')['items']
-        self.assertEqual(listed, [{**head, 'links': [dict(itemId=length['id'], linkState='current', headRevision=1, headHidden=False),
+        self.assertEqual(listed, [{**self.finding_payload(head), 'links': [dict(itemId=length['id'], linkState='current', headRevision=1, headHidden=False),
                                                      dict(itemId=key['id'], linkState='current', headRevision=1, headHidden=False)]}])
         before = self.snapshot()
-        self.assertEqual(self.call(body=create), head); self.assertEqual(self.snapshot(), before)
+        self.assert_finding_replay(self.call(body=create), head); self.assertEqual(self.snapshot(), before)
         edited, _ = self.revise(head, item=dict(schemaVersion=1, title='수정 제목', text='수정 본문 😀', primary=0,
                                                 sources=[dict(itemId=s['itemId'], revision=s['revision']) for s in head['item']['sources']]))
         self.assertEqual(edited['revision'], 2); self.assertEqual(edited['item']['sources'], head['item']['sources'])
@@ -293,7 +310,7 @@ class FindingAPI(unittest.TestCase):
         self.revise(hidden, 'hide', reason='다시', status=409); self.revise(hidden, 'edit', status=409, expected=2)
         self.call(method='DELETE', path='/studies/'+self.uid, user='tech', status=409)
         restored, _ = self.revise(hidden, 'restore', reason='복원'); self.assertFalse(restored['hidden']); self.assertEqual(restored['revision'], 4)
-        self.assertEqual(self.call(body=create), head)
+        self.assert_finding_replay(self.call(body=create), head)
         history = self.call(method='GET', path=self.path+'/'+head['id']+'/revisions')['revisions']
         self.assertEqual([r['action'] for r in history], ['create', 'edit', 'hide', 'restore'])
         self.assertEqual(history[0]['item'], head['item']); self.assertEqual(history[1]['reason'], ''); self.assertEqual(history[2]['reason'], '중복 소견')
@@ -423,7 +440,7 @@ class FindingAPI(unittest.TestCase):
         edit = dict(requestId=str(uuid.uuid4()), expectedRevision=1, action='edit', item=dict(schemaVersion=1, title='t', text='', sources=[dict(itemId=key['id'], revision=1)]))
         routes = [('GET', self.path, None), ('POST', self.path, command), ('GET', revision_path, None), ('POST', revision_path, edit)]
         for method, path, body in routes:
-            self.call(method, body, 'kdoctor', path, 403)
+            self.call(method, body, 'kdoctor', path, 404)
             gateway = self.stack.bearer_request(method, path, self.stack.service_token('gateway'), body)
             self.assertEqual(gateway.status, 403)
             self.call(method, body, 'adminonly', path, 200 if method == 'GET' else 403)
@@ -434,7 +451,7 @@ class FindingAPI(unittest.TestCase):
         tele_key = self.item(self.key_item(1, title='tele key'), user='kdoctor')
         tele, _ = self.create([tele_key], user='kdoctor')
         self.study_update('"teleInstitutionId"=NULL')
-        self.call(method='GET', user='kdoctor', status=403)
+        self.call(method='GET', user='kdoctor', status=404)
         self.assertEqual(len(self.call(method='GET')['items']), 2)
         self.revise(tele, user='doctor', status=403)
         self.call(path='/studies/'+self.uid+'/report/commit', body=dict(action='preliminary', baseVersion=0, reviewer=self.stack.actor('jmryu'), findings='preliminary', conclusion='', recommendation=''), status=201)
@@ -442,9 +459,9 @@ class FindingAPI(unittest.TestCase):
             for user in ['doctor2', 'adminonly', 'tech']:
                 self.call(method, body, user, path, 403)
         self.call(method='GET', user='jmryu')
-        self.assertEqual(self.call(body=command), head)
+        self.assert_finding_replay(self.call(body=command), head)
         self.study_update('"institutionId"=NULL, "teleInstitutionId"=NULL')
-        for method, path, body in routes: self.call(method, body, 'jmryu', path, 403)
+        for method, path, body in routes: self.call(method, body, 'jmryu', path, 404)
 
     # ---- TEST-S2-API-05 ------------------------------------------------------------------
     def test_05_concurrency_replay_lock_order_timeout_and_limits(self):
@@ -458,14 +475,15 @@ class FindingAPI(unittest.TestCase):
         before = self.snapshot()
         with ThreadPoolExecutor(2) as pool:
             responses = list(pool.map(lambda _: self.stack.request('POST', self.path, 'doctor', command), range(2)))
-        self.assertEqual([r.body for r in responses], [head, head]); self.assertEqual(self.snapshot(), before)
+        for response in responses: self.assert_finding_replay(response.body, head)
+        self.assertEqual(self.snapshot(), before)
         new = self.finding_body([length])
         with ThreadPoolExecutor(2) as pool:
             responses = list(pool.map(lambda _: self.stack.request('POST', self.path, 'doctor', new), range(2)))
-        self.assertEqual([r.status for r in responses], [200, 200]); self.assertEqual(responses[0].body, responses[1].body)
+        self.assertEqual([r.status for r in responses], [200, 200]); self.assert_finding_twins([response.body for response in responses])
         self.call(body={**command, 'item': {**command['item'], 'text': 'different'}}, status=409)
         self.call(body={**edits[0], 'requestId': command['requestId']}, path=path, status=409)
-        self.call(body={**edits[0], 'requestId': command['requestId']}, path=self.path+'/'+str(uuid.uuid4())+'/revisions', status=409)
+        self.call(body={**edits[0], 'requestId': command['requestId']}, path=self.path+'/'+str(uuid.uuid4())+'/revisions', status=404)
         self.call(method='GET', path=self.path+'/'+str(uuid.uuid4())+'/revisions', status=404)
         # Lock timeout is retryable and inert.
         before = self.snapshot()
@@ -477,7 +495,7 @@ class FindingAPI(unittest.TestCase):
                 self.assertEqual(future.result(timeout=7).status, 503)
         finally: self.finish_lock(lock)
         self.assertEqual(self.snapshot(), before)
-        self.assertEqual(self.call(body=command), head)
+        self.assert_finding_replay(self.call(body=command), head)
         # Lock order: a source head that moves while this write waits for the parent lock is seen,
         # so the stale pair is refused instead of copying revision 1 values under a revision-2 head.
         lock = self.parent_lock()
@@ -528,7 +546,7 @@ class FindingAPI(unittest.TestCase):
         seed_findings(256-count)
         try:
             refused = self.call(body=self.finding_body([length]), status=409); self.assertEqual(refused['code'], 'FINDING_STORAGE_LIMIT')
-            self.assertEqual(self.call(body=command), head)
+            self.assert_finding_replay(self.call(body=command), head)
             hidden, _ = self.revise(self.current(head), 'hide', reason='한도 내 숨김')
             self.assertTrue(hidden['hidden'])
         finally: unseed()
@@ -536,7 +554,7 @@ class FindingAPI(unittest.TestCase):
         seed_revisions(4096-revisions)
         try:
             refused = self.call(body=self.finding_body([length]), status=409); self.assertEqual(refused['code'], 'FINDING_STORAGE_LIMIT')
-            self.assertEqual(self.call(body=command), head)
+            self.assert_finding_replay(self.call(body=command), head)
         finally: unseed()
         # Fill the lifetime byte budget with 60 000-byte filler snapshots (under the 65 536-byte cap), then
         # leave fewer bytes than the smallest real snapshot so the next real write is refused.
@@ -548,7 +566,7 @@ class FindingAPI(unittest.TestCase):
         self.assertLess(16*1024*1024-used_bytes(), 200)
         try:
             refused = self.call(body=self.finding_body([length]), status=409); self.assertEqual(refused['code'], 'FINDING_STORAGE_LIMIT')
-            self.assertEqual(self.call(body=command), head)
+            self.assert_finding_replay(self.call(body=command), head)
         finally: unseed()
         psql(f'UPDATE "Finding" SET revision=1000 WHERE id={literal(head["id"])}::uuid')
         try:
@@ -723,7 +741,7 @@ class FindingAPI(unittest.TestCase):
         self.assertEqual((f1['studyUid'], f1['item']['primary']), (self.uid, 1))
         self.assertEqual(f1['item']['sources'], [self.expected_copy(x), self.expected_copy(p, prior.uid)])
         current = [dict(itemId=x['id'], linkState='current', headRevision=1, headHidden=False), dict(itemId=p['id'], linkState='current', headRevision=1, headHidden=False)]
-        self.assertEqual(self.call(method='GET', user='xauthor')['items'], [{**f1, 'links': current}])
+        self.assertEqual(self.call(method='GET', user='xauthor')['items'], [{**self.finding_payload(f1), 'links': current}])
         history = self.call(method='GET', user='xauthor', path=self.path+'/'+f1['id']+'/revisions')
         self.assertEqual(([r['item'] for r in history['revisions']], history['nextCursor']), ([f1['item']], None))
         self.assertNotIn(prior.uid, ' '.join(self.state(tables=('AuditLog',))['AuditLog']))
@@ -814,8 +832,8 @@ class FindingAPI(unittest.TestCase):
         # and an edit keeps the frozen P copy although the P head is at revision 2.
         self.access('xauthor')
         self.assertEqual(captured(), before)
-        self.assertEqual(self.call(body=create1, user='xauthor'), f1)
-        self.assertEqual(self.call(body=edit2, path=self.path+'/'+cross[1]['id']+'/revisions', user='xauthor'), f2)
+        self.assert_finding_replay(self.call(body=create1, user='xauthor'), f1)
+        self.assert_finding_replay(self.call(body=edit2, path=self.path+'/'+cross[1]['id']+'/revisions', user='xauthor'), f2)
         kept, _ = self.revise(f1, user='xauthor', item=self.edit_body([x, p], title='재허용 후 수정', primary=1))
         self.assertEqual((kept['revision'], kept['item']['sources']), (2, f1['item']['sources']))
         self.assertEqual(self.revision_rows(f1['id'])[:1], before['rows'][f1['id']])
@@ -868,7 +886,7 @@ class FindingAPI(unittest.TestCase):
         edit = dict(requestId=str(uuid.uuid4()), expectedRevision=1, action='edit', item=self.edit_body([x, p], title='t'))
         routes = [('GET', self.path, None), ('POST', self.path, command), ('GET', revision_path, None), ('POST', revision_path, edit)]
         for method, path, body in routes:
-            self.call(method, body, 'kdoctor', path, 403)
+            self.call(method, body, 'kdoctor', path, 404)
             self.assertEqual(self.stack.bearer_request(method, path, self.stack.service_token('gateway'), body).status, 403)
             self.call(method, body, 'adminonly', path, 200 if method == 'GET' else 403)
             self.call(method, body, 'tech', path, 200 if method == 'GET' else 403)
@@ -880,7 +898,7 @@ class FindingAPI(unittest.TestCase):
         ruled, _ = self.create([x, p], user='xauthor', title='규칙 허용')
         self.assertEqual(set(self.ids('xauthor')), {head['id'], ruled['id']})
         self.call(method='GET', user='xauthor', path=self.path+'/'+ruled['id']+'/revisions')
-        self.assertEqual(self.call(body=command, user='xauthor'), head)
+        self.assert_finding_replay(self.call(body=command, user='xauthor'), head)
         self.access('xauthor', rules=[{**rule, 'studyUids': [self.uid]}])
         self.assertEqual(self.ids('xauthor'), [])
         self.call(method='GET', user='xauthor', path=revision_path, status=404)
@@ -927,7 +945,7 @@ class FindingAPI(unittest.TestCase):
         self.assertEqual(timed_out.status, 503, timed_out.text)
         self.assertEqual((self.state(), self.state(prior.uid)), before)
         retried = self.call(body=command, user='xauthor')
-        self.assertEqual(self.call(body=command, user='xauthor'), retried)
+        self.assert_finding_replay(self.call(body=command, user='xauthor'), retried)
         # T10c: the prior item moving to revision 2 while the write waits on P's row is seen after the lock.
         before = (self.state(), self.state(prior.uid))
         [stale] = self.locked_request(prior.uid, [('POST', self.path, 'xauthor', self.finding_body([x, p]))],
@@ -942,7 +960,7 @@ class FindingAPI(unittest.TestCase):
         twin = self.finding_body([x, p])
         with ThreadPoolExecutor(2) as pool:
             twins = list(pool.map(lambda _: self.stack.request('POST', self.path, 'xauthor', twin), range(2)))
-        self.assertEqual([r.status for r in twins], [200, 200], [r.text for r in twins]); self.assertEqual(twins[0].body, twins[1].body)
+        self.assertEqual([r.status for r in twins], [200, 200], [r.text for r in twins]); self.assert_finding_twins([response.body for response in twins])
         self.assertEqual(psql(f'SELECT count(*) FROM "FindingRevision" WHERE "requestId"={literal(twin["requestId"])}::uuid'), ['1'])
         self.addCleanup(self.clear_jobs, self.uid)
         job, written = self.locked_request(lower, [('POST', '/studies/'+self.uid+'/viewer-jobs', 'doctor', self.job_command([anchor, prior])),
@@ -964,13 +982,12 @@ class FindingAPI(unittest.TestCase):
         finally: self.restore_boundary(prior.uid, saved)
         self.assertEqual([(r.status, r.text) for r in responses], [(unknown.status, unknown.text)]+[(absent.status, absent.text)]*2)
         self.assertEqual((self.state(), self.state(prior.uid)), before)
-        self.assertEqual(self.call(body=command, user='xauthor'), retried)
+        self.assert_finding_replay(self.call(body=command, user='xauthor'), retried)
         self.assertTrue(self.call(body=hide, path=self.path+'/'+forward.body['id']+'/revisions', user='xauthor')['hidden'])
-        # T10h: a create holding the shared study-access lock of its author waits on a study row. The admin restriction
-        # of that author is then observed waiting for the exclusive lock of the same key while the committed policy is
-        # unchanged. After release the create, authorized before the change, commits first (a response that crosses the
-        # change may still be answered 409 STUDY_ACCESS_CHANGED by the interceptor) and the restriction commits after it;
-        # from then on the same request and an edit of that finding are an absent finding.
+        # T10h: D prepares the immutable command in one transaction and rechecks current scope when it writes.
+        # A queued admin restriction waits for preparation's shared lock. If it commits before D's write transaction,
+        # the finding must be refused with zero effects; if D writes first, its recorded row must be exact. A prepared
+        # command alone does not promise a committed finding. Both outcomes leave subsequent access restricted.
         me = self.call(method='GET', path='/me', user='xauthor')
         key = 'study-access:'+json.dumps([me['institution'], me['sub']], separators=(',', ':'), ensure_ascii=False)
         policy_revision = f'SELECT COALESCE(max(revision), 0) FROM "StudyAccessPolicy" WHERE subject={literal(me["sub"])}'
@@ -984,22 +1001,34 @@ class FindingAPI(unittest.TestCase):
             ([restrict], self.waiting('pg_advisory_xact_lock(', 1, 'advisory'))], check=in_flight)
         print(f'T10h in-flight create answered {written.status}', flush=True)
         self.assertEqual(restricted.status, 201, restricted.text)
-        self.assertTrue(written.status == 200 or (written.status == 409 and written.body.get('code') == 'STUDY_ACCESS_CHANGED'), written.text)
+        committed_write = written.status == 200 or (written.status == 409 and written.body.get('code') == 'STUDY_ACCESS_CHANGED')
+        if not committed_write: self.assertEqual((written.status, written.text), (unknown.status, unknown.text))
         self.assertEqual(int(psql(policy_revision)[0]), int(committed[0])+1)
         rows = psql(f'''SELECT r."findingId"||' '||r.revision||' '||(SELECT string_agg(s.value->>'studyUid', ',' ORDER BY s.ordinality)
             FROM jsonb_array_elements(r.snapshot->'sources') WITH ORDINALITY s) FROM "FindingRevision" r WHERE r."requestId"={literal(early["requestId"])}::uuid''')
-        self.assertEqual(len(rows), 1, rows)
-        finding_id, revision, studies = rows[0].split(' ')
-        self.assertEqual((revision, studies), ('1', self.uid+','+prior.uid))
         after = self.state()
-        self.assertEqual({t: [r for r in before[0][t] if r not in after[t]] for t in after}, {t: [] for t in after})
-        self.assertEqual({t: len([r for r in after[t] if r not in before[0][t]]) for t in after},
-                         {**{t: 0 for t in after}, 'Finding': 1, 'FindingRevision': 1, 'AuditLog': 1})
+        if committed_write:
+            self.assertEqual(len(rows), 1, rows)
+            finding_id, revision, studies = rows[0].split(' ')
+            self.assertEqual((revision, studies), ('1', self.uid+','+prior.uid))
+            self.assertEqual({t: [r for r in before[0][t] if r not in after[t]] for t in after}, {t: [] for t in after})
+            self.assertEqual({t: len([r for r in after[t] if r not in before[0][t]]) for t in after},
+                             {**{t: 0 for t in after}, 'Finding': 1, 'FindingRevision': 1, 'AuditLog': 1})
+        else:
+            self.assertEqual(rows, [])
+            self.assertEqual(after, before[0])
+            finding_id = str(uuid.uuid4())
         self.assertEqual(self.state(prior.uid), before[1])
         refused = [self.stack.request('POST', self.path, 'xauthor', early),
                    self.stack.request('POST', self.path+'/'+finding_id+'/revisions', 'xauthor', dict(requestId=str(uuid.uuid4()), expectedRevision=1,
                                       action='edit', item=self.edit_body([x], title='제한 뒤 편집')))]
-        self.assertEqual([(r.status, r.text) for r in refused], [(absent.status, absent.text)]*2)
+        if committed_write:
+            self.assertEqual([(r.status, r.text) for r in refused], [(absent.status, absent.text)]*2)
+        else:
+            # No Finding exists: D refuses the unknown revision target before the legacy service's history reader.
+            self.assertEqual((refused[1].status, refused[1].body.get('code')), (404, 'NotFound'))
+            # B2 preserves the negative result of D's attempted write; replay cannot silently create a new operation.
+            self.assertEqual((refused[0].status, refused[0].body.get('code')), (503, 'AppendNotCommitted'))
         self.assertEqual((self.state(), self.state(prior.uid)), (after, before[1]))
         self.access('xauthor')
         # T10i: the admin restriction holds the exclusive lock while it waits on its own policy row; a hide and a new link
@@ -1052,6 +1081,13 @@ class FindingAPI(unittest.TestCase):
             INSERT INTO "FindingRevision" ("findingId",revision,snapshot,action,reason,actor,"authorSub","requestId",fingerprint,"payloadBytes")
             SELECT s.id,k,s.snapshot,CASE WHEN k=1 THEN 'create' ELSE 'edit' END,'','SYNTHETIC','SYNTHETIC',gen_random_uuid(),repeat('0',64),
               octet_length(convert_to(s.snapshot::text,'UTF8')) FROM seeded s CROSS JOIN LATERAL generate_series(1,s.revision) k''')
+        # D's clean-install reader requires signed immutable histories even for rows seeded directly for paging.
+        # Use the real plan/signature formats for this persistence fixture; the create/replay cases above exercise approval.
+        signed_fixture = subprocess.run(['docker', 'compose', 'exec', '-T', 'api', 'node', '-', self.uid, own['id']],
+            cwd=ROOT, input=(ROOT/'tests/emr/d/finding_read_fixture.cjs').read_text(encoding='utf-8'),
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=540)  # existing candidate suite hang timeout
+        self.assertEqual(signed_fixture.returncode, 0, signed_fixture.stdout+signed_fixture.stderr)
+        print(signed_fixture.stdout.strip(), flush=True)
         totals = usage()
         self.assertEqual(totals[:2], [256, 4096-8])
         # Study uids may differ by a few digits in length, so rows of the shorter one are a little smaller.
@@ -1207,9 +1243,9 @@ class FindingAPI(unittest.TestCase):
         status, _, hidden = self.schema_call('POST', self.path+'/'+items_only['id']+'/revisions', body=v2_hide)
         self.assertEqual((status, hidden['hidden'], hidden['item']['characteristics']), (200, True, '승격'))
         # The recorded version 1 create and the version 2 promotion replay as recorded after the record changed again.
-        self.assertEqual(self.call(body=v1_create, user='xauthor'), items_only)
+        self.assert_finding_replay(self.call(body=v1_create, user='xauthor'), items_only)
         status, _, replayed = self.schema_call('POST', self.path+'/'+items_only['id']+'/revisions', body=dict(promoted_request, expectedRevision=1, action='edit'))
-        self.assertEqual((status, replayed), (200, promoted))
+        self.assertEqual(status, 200); self.assert_finding_replay(replayed, promoted)
         self.assertEqual(self.report_rows(), original)
 
     # ---- TEST-S2-API-12 (S2-L1 R6 malformed lineage rows, job-hide and revocation races) -------------

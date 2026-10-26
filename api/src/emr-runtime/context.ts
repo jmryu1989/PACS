@@ -18,6 +18,7 @@ export interface SnapshotRequest {
   clauseIds?: readonly string[]; accessEventIds?: readonly string[]; orderRecordIds?: readonly string[];
 }
 export interface EmrSnapshot {
+  readonly fixedRecords: ReadonlyMap<string, unknown>;
   readonly holdListings: ReadonlyMap<string, readonly string[]>;
   readonly holds: ReadonlyMap<string, unknown>;
   readonly accessRequests: ReadonlyMap<string, unknown | null>;
@@ -53,6 +54,7 @@ export function transactionScope(): object { return Object.freeze(Object.create(
 
 /** What the storage adapter read under one transaction for one decision (every requested ID present). */
 export interface SnapshotRows {
+  fixedRecords?: ReadonlyMap<string, unknown>;
   holds: ReadonlyMap<string, readonly HoldRow[]>;
   accessRequests: ReadonlyMap<string, readonly RequestRow[]>;
   correctionRequests: ReadonlyMap<string, readonly RequestRow[]>;
@@ -87,7 +89,8 @@ export function snapshotFromRows(scope: object, rows: SnapshotRows): EmrSnapshot
     }
     orderFacts.set(id, freeze(parsed));
   }
-  const snapshot: EmrSnapshot = Object.freeze({ holdListings, holds, accessRequests, correctionRequests, clauseVersions, accessEvents, orderFacts });
+  const fixedRecords = new Map([...rows.fixedRecords ?? []].map(([id, row]) => [id, freeze(structuredClone(row))]));
+  const snapshot: EmrSnapshot = Object.freeze({ fixedRecords, holdListings, holds, accessRequests, correctionRequests, clauseVersions, accessEvents, orderFacts });
   owners.set(snapshot, scope);
   return snapshot;
 }
@@ -116,6 +119,7 @@ function read<T>(map: ReadonlyMap<string, T>, id: string): T {
 export const runtimeAdapters: EmrAdapters = Object.freeze({
   stored: Object.freeze({
     load(recordId: string, eventId: string) {
+      if (snapshot().fixedRecords.has(eventId)) return read(snapshot().fixedRecords, eventId);
       const orders = snapshot().orderFacts;
       if (orders.has(recordId)) {
         const fact = [...read(orders, recordId)].reverse().find(f => f.event.eventId === eventId);

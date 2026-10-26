@@ -35,7 +35,7 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     .setIssuer(issuer).setSubject(m.sub).setAudience('kin-api').setIssuedAt().setExpirationTime('10m').sign(pair.privateKey);
   const db = new PrismaClient({ datasources: { db: { url: process.env.KIN_D_WITNESS_URL } } });
   const runtime = new (product('emr-runtime/application').EmrRuntime)(process.env.DATABASE_URL, process.env.KIN_D_SPOOL);
-  let app, ready = false;
+  let app, archive, ready = false;
   const fs = require('node:fs');
   const custody = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'd-startup-'));
   try {
@@ -50,15 +50,57 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     // One original resource per study; splitUid is a WORKLIST-SPLIT-UID source (two patient resources).
     const splitUid = '1.2.840.9999.26';
     const resource = (uid, patient) => ({ '0020000D': { Value: [uid] }, '00100020': { Value: [patient] } });
-    const orthanc = { studyIdentityResources: async uid => uid === splitUid
-      ? [resource(uid, 'synthetic:split-a'), resource(uid, 'synthetic:split-b')] : [resource(uid, 'synthetic:' + uid)],
-      studyIdentities: async () => [] };
+    const imageUid = '1.2.840.9999.24', seriesUid = imageUid + '.1', sopUid = seriesUid + '.1';
+    const comparisonUid = imageUid + '.99';
+    const studyResource = '11111111-11111111-11111111-11111111-11111111';
+    const comparisonResource = '33333333-33333333-33333333-33333333-33333333';
+    const objectResource = '22222222-22222222-22222222-22222222-22222222';
+    const original = Buffer.alloc(2048, 37), frameBytes = Buffer.alloc(512, 11);
+    original.write('DICM', 128);
+    const header = { ...resource(imageUid, 'synthetic:' + imageUid),
+      '0020000E': { Value: [seriesUid] }, '00080018': { Value: [sopUid] },
+      '00080016': { Value: ['1.2.840.10008.5.1.4.1.1.2'] }, '00080008': { Value: ['ORIGINAL', 'PRIMARY'] } };
+    let catalogPatient = 'synthetic:' + imageUid, fileReads = 0, beforeIdentity = null;
+    archive = require('node:http').createServer(async (req, res) => {
+      const url = new URL(req.url, 'http://synthetic'), json = value => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(value)); };
+      if (url.pathname === '/dicom-web/studies') {
+        const uid = url.searchParams.get('StudyInstanceUID');
+        if (uid === imageUid && beforeIdentity) await beforeIdentity();
+        return json(!uid ? [] : uid === splitUid ? [resource(uid, 'synthetic:split-a'), resource(uid, 'synthetic:split-b')]
+          : [resource(uid, 'synthetic:' + (uid === comparisonUid ? imageUid : uid))]);
+      }
+      if (url.pathname === '/tools/lookup') {
+        let body = ''; for await (const chunk of req) body += chunk;
+        return json(body === imageUid ? [{ Type: 'Study', ID: studyResource }]
+          : body === comparisonUid ? [{ Type: 'Study', ID: comparisonResource }]
+          : body === sopUid ? [{ Type: 'Instance', ID: objectResource }] : []);
+      }
+      if ([`/studies/${studyResource}`, `/studies/${comparisonResource}`].includes(url.pathname)) return json({
+        MainDicomTags: { StudyInstanceUID: url.pathname.endsWith(comparisonResource) ? comparisonUid : imageUid },
+        PatientMainDicomTags: { PatientID: 'synthetic:' + imageUid } });
+      if (url.pathname === `/studies/${studyResource}/instances`) return json([{ ID: objectResource, MainDicomTags: { SOPInstanceUID: sopUid } }]);
+      if (url.pathname.endsWith('/metadata')) return json([{ ...header, '00100020': { Value: [catalogPatient] } }]);
+      if (url.pathname.endsWith('/simplified-tags')) return json({ StudyInstanceUID: imageUid, SeriesInstanceUID: seriesUid,
+        SOPInstanceUID: sopUid, SOPClassUID: header['00080016'].Value[0], NumberOfFrames: '1' });
+      if (url.pathname.endsWith('/header')) return json({ '0002,0010': { Value: '1.2.840.10008.1.2.1' } });
+      if (url.pathname.endsWith('/file')) { fileReads++; res.end(original); return; }
+      if (url.pathname.endsWith('/frames/0/raw')) { res.end(frameBytes); return; }
+      res.statusCode = 404; res.end();
+    });
+    await new Promise(resolve => archive.listen(0, '127.0.0.1', resolve));
+    Object.assign(process.env, { ORTHANC_URL: 'http://127.0.0.1:' + archive.address().port,
+      ORTHANC_USER: 'synthetic', ORTHANC_PASS: randomUUID(), KIN_EMR_STATE_DIR: custody });
+    fs.writeFileSync(path.join(custody, 'viewer.js'), 'synthetic deployed viewer and native decoder bytes');
+    const asset = { version: 'synthetic-distribution', files: ['viewer.js'] };
+    fs.writeFileSync(path.join(custody, 'assets.json'), JSON.stringify({ viewer: { id: 'viewer', ...asset }, decoders: { native: asset } }));
+    process.env.KIN_EMR_IMAGE_ASSET_CATALOG = path.join(custody, 'assets.json');
+    const orthanc = new (product('orthanc.service').OrthancService)();
     const users = Object.values(members).map(m => ({ id: m.sub, username: m.username, email: m.email, firstName: m.name,
       enabled: true, groups: [m.institution], roles: m.roles }));
     const keycloak = { getUser: async sub => users.find(u => u.id === sub),
       assignmentReaders: async institution => users.filter(u => u.groups.includes(institution)), isReader: async () => true };
     const { PrismaService } = product('prisma.service'), { StudyAccessService } = product('study-access.service');
-    const services = ['pacs', 'clinician-question', 'image-request', 'consultation', 'reader-assignment', 'finding'];
+    const services = ['pacs', 'clinician-question', 'image-request', 'consultation', 'reader-assignment', 'finding', 'connect'];
     const className = name => name.split('-').map(x => x[0].toUpperCase() + x.slice(1)).join('');
     class HttpFixture {}
     const { createRequestContext, REQUEST_CONTEXT_CAPTURE, REQUEST_CONTEXT_SOURCE } = product('emr-runtime/request-context');
@@ -66,6 +108,10 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const requests = createRequestContext(createRequestIngress({ proxyPeers: ['127.0.0.1'] }), runtime.port);
     Module({ controllers: services.map(n => product(n + '.controller')[className(n) + 'Controller']),
       providers: [PrismaService, ...services.map(n => product(n + '.service')[className(n) + 'Service']),
+        product('emr-image/service').OnlineImageService, product('emr-source/image').OrthancImageCatalog,
+        { provide: product('emr-image/context').ImageContextSource,
+          inject: [product('emr-clinical/startup').CURRENT_CLINICAL_CONTEXT, product('emr-source/image').OrthancImageCatalog],
+          useFactory: (clinical, catalog) => new (product('emr-image/context').ProductionImageContext)(clinical, catalog) },
         product('auth.service').AuthService, ...product('emr-clinical/startup').startupClinicalProviders,
         { provide: REQUEST_CONTEXT_CAPTURE, useValue: requests.capture }, { provide: REQUEST_CONTEXT_SOURCE, useValue: requests.source },
         { provide: product('orthanc.service').OrthancService, useValue: orthanc },
@@ -131,12 +177,102 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
       assert.deepEqual([event.targets[0].kind, event.targets[0].patientLinkSnapshot, event.targets[0].recordId.value, event.targets[0].versionId.value],
         ['assignment', { status: 'not-applicable', reason: 'non-record-target' }, JSON.stringify([splitUid, receiver]), '1']);
     }
-    const finding = await send('doctor', 'POST', `/studies/${uid}/findings`, {
-      requestId: randomUUID(), item: { schemaVersion: 1, title: '합성 소견', text: '원본 연결 대기',
-        sources: [{ itemId: randomUUID(), revision: 1 }] },
-    }, 503);
-    assert.equal(finding.code, 'ModuleAFixedVersionReaderPending');
-    assert.equal(await db.finding.count(), 0);
+    const itemId = randomUUID(), itemSnapshot = { schemaVersion: 1, kind: 'key',
+      seriesUid: uid + '.1', sopUid: uid + '.1.1', frame: 1, title: '합성 원본', description: '', hidden: false };
+    const [{ bytes: itemBytes }] = await db.$queryRaw`SELECT octet_length(convert_to(${JSON.stringify(itemSnapshot)}::jsonb::text, 'UTF8')) AS bytes`;
+    await db.viewerItem.create({ data: { id: itemId, studyUid: uid, authorSub: members.doctor.sub,
+      authorActor: 'doctor', revision: 1, snapshot: itemSnapshot, updatedAt: new Date(),
+      revisions: { create: { revision: 1, snapshot: itemSnapshot, action: 'create', reason: '', actor: 'doctor', payloadBytes: itemBytes } } } });
+    const findingBody = { requestId: randomUUID(), item: { schemaVersion: 1, title: '합성 소견', text: '원본 고정판 연결',
+      sources: [{ itemId, revision: 1 }] } };
+    const finding = await send('doctor', 'POST', `/studies/${uid}/findings`, findingBody, 200);
+    assert.equal(finding.item.sources[0].itemId, itemId);
+    assert.equal(finding.item.sources[0].revision, 1);
+    assert.ok(finding.emr.signature);
+    assert.equal(await db.finding.count(), 1);
+    const fixed = await db.$queryRaw`SELECT source_record_id, source_version_id, source_sha256
+      FROM emr_clinical.online_reference WHERE version_id=${finding.emr.receipt.versionId}`;
+    assert.equal(fixed.length, 1);
+    assert.equal(fixed[0].source_record_id, itemId);
+    assert.equal(fixed[0].source_version_id, '1');
+    const replayedFinding = await send('doctor', 'POST', `/studies/${uid}/findings`, findingBody, 200);
+    assert.equal(replayedFinding.id, finding.id);
+    assert.equal(replayedFinding.emr.replayed, true);
+    assert.equal(await db.findingRevision.count(), 1);
+    const updatedItem = { ...itemSnapshot, title: '나중 원본 제목' };
+    const [{ bytes: updatedBytes }] = await db.$queryRaw`SELECT octet_length(convert_to(${JSON.stringify(updatedItem)}::jsonb::text, 'UTF8')) AS bytes`;
+    await db.viewerItem.update({ where: { id: itemId }, data: { revision: 2, snapshot: updatedItem,
+      updatedAt: new Date(), revisions: { create: { revision: 2, snapshot: updatedItem, action: 'edit',
+        reason: '', actor: 'doctor', payloadBytes: updatedBytes } } } });
+    const stale = await send('doctor', 'POST', `/studies/${uid}/findings`, { ...findingBody, requestId: randomUUID() }, 409);
+    assert.equal(stale.code, 'FINDING_SOURCE_STALE');
+    const edited = await send('doctor', 'POST', `/studies/${uid}/findings/${finding.id}/revisions`, {
+      requestId: randomUUID(), expectedRevision: 1, action: 'edit',
+      item: { ...findingBody.item, text: '보존된 원본으로 수정' } }, 200);
+    assert.equal(edited.item.sources[0].label, itemSnapshot.title);
+    const keptReference = await db.$queryRaw`SELECT source_sha256 FROM emr_clinical.online_reference WHERE version_id=${edited.emr.receipt.versionId}`;
+    assert.equal(keptReference[0].source_sha256, fixed[0].source_sha256);
+    const refreshed = await send('doctor', 'POST', `/studies/${uid}/findings/${finding.id}/revisions`, {
+      requestId: randomUUID(), expectedRevision: 2, action: 'edit',
+      item: { ...findingBody.item, sources: [{ itemId, revision: 2 }] } }, 200);
+    assert.equal(refreshed.item.sources[0].label, updatedItem.title);
+    const renewedReference = await db.$queryRaw`SELECT source_sha256 FROM emr_clinical.online_reference WHERE version_id=${refreshed.emr.receipt.versionId}`;
+    assert.notEqual(renewedReference[0].source_sha256, fixed[0].source_sha256);
+    assert.equal(await db.findingRevision.count(), 3);
+    const oldFindingReplay = await send('doctor', 'POST', `/studies/${uid}/findings`, findingBody, 200);
+    assert.equal(oldFindingReplay.item.sources[0].label, itemSnapshot.title);
+    assert.deepEqual(oldFindingReplay.emr.signature, finding.emr.signature);
+    await db.studyState.create({ data: { uid: comparisonUid, institutionId: hospital, ss: 'Verified' } });
+    const comparisonItemId = randomUUID(), comparisonSnapshot = { ...itemSnapshot,
+      seriesUid: comparisonUid + '.1', sopUid: comparisonUid + '.1.1' };
+    const [{ bytes: comparisonBytes }] = await db.$queryRaw`SELECT octet_length(convert_to(${JSON.stringify(comparisonSnapshot)}::jsonb::text, 'UTF8')) AS bytes`;
+    await db.viewerItem.create({ data: { id: comparisonItemId, studyUid: comparisonUid, authorSub: members.doctor.sub,
+      authorActor: 'doctor', revision: 1, snapshot: comparisonSnapshot, updatedAt: new Date(),
+      revisions: { create: { revision: 1, snapshot: comparisonSnapshot, action: 'create', reason: '', actor: 'doctor', payloadBytes: comparisonBytes } } } });
+    const comparisonBody = { ...findingBody, requestId: randomUUID(), item: { ...findingBody.item,
+      sources: [{ itemId: comparisonItemId, revision: 1 }] } };
+    const comparisonFinding = await send('doctor', 'POST', `/studies/${uid}/findings`, comparisonBody, 200);
+    const findingVersions = await db.findingRevision.count();
+    await db.studyState.update({ where: { uid: comparisonUid }, data: { institutionId: receiver } });
+    await send('doctor', 'POST', `/studies/${uid}/findings`, comparisonBody, 404);
+    assert.equal(await db.findingRevision.count(), findingVersions);
+    await db.studyState.update({ where: { uid: comparisonUid }, data: { institutionId: hospital } });
+    const comparisonReplay = await send('doctor', 'POST', `/studies/${uid}/findings`, comparisonBody, 200);
+    assert.deepEqual(comparisonReplay.emr.signature, comparisonFinding.emr.signature);
+    assert.equal(comparisonReplay.emr.replayed, true);
+    // The registered image route reads real HTTP catalog/object/frame bodies and
+    // persists the exact preparation/transport evidence through PostgreSQL B2.
+    const imageUrl = origin + '/api/images/dicom-web?target=' + encodeURIComponent(`/dicom-web/studies/${imageUid}/series/${seriesUid}/instances/${sopUid}`);
+    const imageResponse = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
+    assert.equal(imageResponse.status, 200, await (imageResponse.status === 200 ? Promise.resolve('') : imageResponse.text()));
+    const bodyBytes = Buffer.from(await imageResponse.arrayBuffer());
+    assert.ok(bodyBytes.includes(original));
+    const preparations = await db.$queryRaw`SELECT source_manifest, response_manifest FROM emr_image.preparation`;
+    assert.equal(preparations.length, 1);
+    const observed = preparations[0].source_manifest;
+    assert.equal(observed.patient.patientId, 'synthetic:' + imageUid);
+    assert.equal(observed.objects[0].sha256, require('node:crypto').createHash('sha256').update(original).digest('hex'));
+    assert.equal(observed.objects[0].frames[0].sha256, require('node:crypto').createHash('sha256').update(frameBytes).digest('hex'));
+    const originalReads = fileReads;
+    const outside = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.receiving } });
+    assert.equal(outside.status, 404); await outside.text();
+    assert.equal(fileReads, originalReads, 'out-of-scope source is not read');
+    catalogPatient = 'synthetic:other-patient';
+    const changedPatient = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
+    assert.equal(changedPatient.status, 503);
+    assert.equal((await changedPatient.json()).code, 'ImageCurrentStudyChanged');
+    assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n, 1);
+    catalogPatient = 'synthetic:' + imageUid;
+    let identityReads = 0;
+    beforeIdentity = async () => {
+      if (++identityReads === 2) await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: receiver } });
+    };
+    const movedStudy = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
+    assert.equal(movedStudy.status, 503);
+    assert.equal((await movedStudy.json()).code, 'ImageCurrentStudyChanged');
+    assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n, 1);
+    beforeIdentity = null;
+    await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: hospital } });
     const question = { requestId: randomUUID(), expectedOwner: owner('clinician'), body: '합성 질문 원문' };
     const created = await send('clinician', 'POST', `/studies/${uid}/questions`, question);
     const signature = created.emr.signature;
@@ -229,6 +365,7 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     if (app) await app.close();
     if (ready) await runtime.stop(Date.now() + 10000);
     await db.$disconnect(); await new Promise(resolve => idp.close(resolve));
+    if (archive) await new Promise(resolve => { archive.close(resolve); archive.closeAllConnections(); });
     fs.rmSync(custody, { recursive: true });
   }
 });
