@@ -9,7 +9,7 @@ class AuditContractFilter implements ExceptionFilter {
     const status = denied.includes(error.code) ? 403 :
       ['IssuanceNotFound','RequestNotFound'].includes(error.code) ? 404 :
       ['AuditRequestInvalid','InvestigationQueryRefused','DisclosureRequestRefused','AuditIdentityUnknown'].includes(error.code) ? 400 :
-      error.code === 'InvestigationTimedOut' ? 408 : 409;
+      error.code === 'InvestigationTimedOut' ? 503 : 409;
     const message = error.code === 'InvestigationTimedOut' ? '조회 시간이 초과되었습니다. 기간이나 조회 조건을 좁혀 다시 시도하세요.' :
       error.code === 'AuditIdentityUnknown' ? '등록된 계정이 없습니다. issuer와 subject를 확인하고 대상자가 한 번 로그인한 뒤 다시 지정하세요.' :
       '감사 권한과 요청 상태를 확인하세요';

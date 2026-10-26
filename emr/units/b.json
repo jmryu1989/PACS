@@ -247,7 +247,9 @@
       "record_failure(uuid,uuid,text,timestamptz,text)",
       "entries_after(bigint,integer)",
       "entry_for_event(text,text)",
-      "investigation_entries(text,text,timestamptz,timestamptz,bigint,bigint,integer)"
+      "investigation_entries(text,text,timestamptz,timestamptz,bigint,bigint,integer,jsonb)",
+      "investigation_count(text,text,timestamptz,timestamptz,bigint,jsonb)",
+      "existing_member_identity(text,text)"
     ],
     "reader_functions": [
       "storage_placement()",

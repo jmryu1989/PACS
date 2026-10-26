@@ -189,7 +189,7 @@ if(process.argv.includes('--serve')){
       await witness.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION emr_access.investigation_count(p_stream text,p_institution text,p_from timestamptz,p_until timestamptz,p_top bigint,p_filters jsonb)
         RETURNS bigint LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(6); RETURN 0; END $$`);
       const timedOut=await call('auditor','POST','investigations',query);
-      assert.equal(timedOut.status,408);assert.equal(timedOut.body.code,'InvestigationTimedOut');
+      assert.equal(timedOut.status,503);assert.equal(timedOut.body.code,'InvestigationTimedOut');
       assert.match(timedOut.body.message,/기간/);
     } finally { await witness.$executeRawUnsafe(countFunction.sql); }
 
@@ -490,6 +490,15 @@ async function scaling(witness,ok,query,patient,actor) {
     for(const id of expected)assert.ok(actual.has(id),'shown event missing from B1: '+id);
     assert.ok(chunks.length>1);assert.ok(chunks.every(r=>r.bytes<=65536));
     measurements.push({route,ms,changes:page.changes.rows.length,views:page.views.rows.length,chunks:chunks.length,maxPayload:Math.max(...chunks.map(r=>r.bytes))});
+  }
+  fs.writeFileSync(path.join(process.env.KIN_F_SPOOL,'scaling.json'),JSON.stringify(measurements,null,2));
+  for (const limit of [undefined,1]) {
+    const started=performance.now();
+    const page=await ok('auditor','POST','investigations',{...filter,patient:{...filter.patient,patientId:'SYN-NO-MATCH'},...(limit?{limit}:{})});
+    const ms=performance.now()-started;
+    assert.deepEqual([page.changes.total,page.views.total,page.changes.rows.length,page.views.rows.length],[0,0,0,0]);
+    assert.ok(ms<load('emr-runtime/limits').EMR_TX_TIMEOUT_MS,`sparse view within product transaction limit: ${ms}`);
+    measurements.push({route:'investigations',sparse:true,limit:limit??'default',ms});
   }
   fs.writeFileSync(path.join(process.env.KIN_F_SPOOL,'scaling.json'),JSON.stringify(measurements,null,2));
   console.log('F_LINK_SCALE',JSON.stringify(measurements.map(({plan,...r})=>r)));

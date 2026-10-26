@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { IncomingMessage } from 'node:http';
 import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
-import { identity, newAuditLinkId, parseAccessEvent } from '../emr-contract/access-event';
+import { identity, newAuditLinkId } from '../emr-contract/access-event';
 import type { AccessTarget, AccessEventV1 } from '../emr-contract/access-event';
 import { clauseVersionAt, HOLD_CLAUSE_VERSIONS } from '../emr-contract/legal-basis';
 import type { LegalHold } from '../emr-contract/lawful-defaults';
@@ -134,12 +134,12 @@ export class EmrAuditService {
       const fetch = async (stream: 'history' | 'viewing', top: number | null, below: number | null, take: number) => tx.$queryRaw<{
         sequence: bigint; payload: string; recorded_at: Date; snapshot_top: bigint }[]>`
         SELECT * FROM emr_access.investigation_entries(${stream},${changes.institutionId},${changes.filters.from}::timestamptz,
-          ${changes.filters.to}::timestamptz,${top}::bigint,${below}::bigint,${take}::integer)`;
-      // Changed events occur in both B1 streams. Parse their identical payload once per request.
-      const parsed = new Map<string, ReturnType<typeof parseAccessEvent>>();
+          ${changes.filters.to}::timestamptz,${top}::bigint,${below}::bigint,${take}::integer,${JSON.stringify(changes.filters)}::jsonb)`;
+      // Changed events occur in both streams. Decode once; the replay boundary validates each row.
+      const parsed = new Map<string, unknown>();
       const eventOf = (payload: string) => {
         let event = parsed.get(payload);
-        if (!event) { event = parseAccessEvent(JSON.parse(payload)); parsed.set(payload, event); }
+        if (!event) { event = JSON.parse(payload); parsed.set(payload, event); }
         return event;
       };
       const source = (stream: 'history' | 'viewing'): F.InvestigationLedger => ({

@@ -74,9 +74,10 @@ it records the publication in force at the hold time rather than the current
 publication at reopening. Extensions preserve that placement basis.
 
 Investigation uses an indexed institution/stream/sequence snapshot and keyset pages.
-View totals are counted in SQL; replay stops after the page and its next matching event.
+SQL applies the same filters to pages and totals. Continuations carry the snapshot total;
+replay stops after the page and its next matching event.
 Exports reuse identical events across streams and validate each audit chunk at B1 admission.
-A transaction/statement timeout returns `InvestigationTimedOut` with guidance to narrow the period or filters. E facts
+A transaction/statement timeout returns HTTP 503 `InvestigationTimedOut` with guidance to narrow the period or filters. E facts
 are fetched by UUID arrays. Every recorded target survives the split into B1's
 65,536-byte canonical payloads inside the same transaction. Roster authority reads
 share the institution lock; designation writes take it exclusively.

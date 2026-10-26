@@ -357,19 +357,19 @@ function replayEntry(sequence: number, committedAt: string, event: Readonly<Acce
 
 // Restarting the server ends open cursors (same as the existing admin audit console); the auditor starts again.
 const CURSOR_KEY = randomBytes(32);
-function sealCursor(plan: InvestigationPlan, top: number, after: number): string {
-  const body = Buffer.from(JSON.stringify({ planId: plan.planId, top, after }), 'utf8').toString('base64url');
+function sealCursor(plan: InvestigationPlan, top: number, after: number, total: number): string {
+  const body = Buffer.from(JSON.stringify({ planId: plan.planId, top, after, total }), 'utf8').toString('base64url');
   return `${body}.${createHmac('sha256', CURSOR_KEY).update(body).digest('base64url')}`;
 }
-function openCursor(plan: InvestigationPlan, cursor: string): { top: number; after: number } {
+function openCursor(plan: InvestigationPlan, cursor: string): { top: number; after: number; total: number | null } {
   return guarded('InvestigationCursorRefused', () => {
     const parts = cursor.split('.');
     if (parts.length !== 2) throw new Error('Cursor shape');
     const expected = createHmac('sha256', CURSOR_KEY).update(parts[0]).digest(), given = Buffer.from(parts[1], 'base64url');
     if (given.length !== expected.length || !timingSafeEqual(given, expected)) throw new Error('Cursor seal');
-    const v = object(JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')), ['planId', 'top', 'after']);
+    const v = object(JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')), ['planId', 'top', 'after', 'total']);
     if (v.planId !== plan.planId) throw new Error('Cursor of another plan');
-    return { top: integer(v.top), after: integer(v.after, 1) };
+    return { top: integer(v.top), after: integer(v.after, 1), total: v.total === undefined ? null : integer(v.total) };
   });
 }
 
@@ -384,8 +384,8 @@ export async function readInvestigationPage(plan: InvestigationPlan, ledger: Inv
   if (!plans.has(plan)) refuse('InvestigationPlanRequired');
   const batch = options.batch ?? 500;
   guarded('InvestigationQueryRefused', () => integer(batch, 1));
-  let top: number, after: number | null = null;
-  if (plan.cursor !== null) ({ top, after } = openCursor(plan, plan.cursor));
+  let top: number, after: number | null = null, total: number | null = null;
+  if (plan.cursor !== null) ({ top, after, total } = openCursor(plan, plan.cursor));
   else {
     let read: unknown;
     try { read = await ledger.top(); } catch (error) { ledgerReadFailure(error); }
@@ -393,15 +393,16 @@ export async function readInvestigationPage(plan: InvestigationPlan, ledger: Inv
   }
   const limit = plan.mode === 'export' ? Infinity : plan.limit;
   const rows: ReplayEntry[] = [];
-  const counted = plan.mode === 'view' && ledger.count !== undefined;
-  let total = 0;
-  if (counted) {
+  const counted = plan.mode === 'view' && (total !== null || ledger.count !== undefined);
+  if (counted && total === null) {
     try { total = integer(await ledger.count(top, plan.filters)); } catch (error) { ledgerReadFailure(error); }
   }
+  total ??= 0;
   let below: number | null = counted ? after : null, previous = below ?? top + 1, last: number | null = null, more = false;
   for (;;) {
     let chunk: readonly LedgerRow[];
-    const take = counted ? Math.min(batch, limit + 1 - rows.length) : batch;
+    // The ledger port permits unfiltered candidates. Page by candidates, stop by matches.
+    const take = batch;
     try { chunk = await ledger.rows(top, below, take); } catch (error) { ledgerReadFailure(error); }
     if (!Array.isArray(chunk) || chunk.length > take) refuse('LedgerReadFailed');
     for (const input of chunk) {
@@ -418,7 +419,7 @@ export async function readInvestigationPage(plan: InvestigationPlan, ledger: Inv
     if ((counted && more) || chunk.length < take) break;
     below = previous;
   }
-  const page = freeze({ rows, total, top, nextCursor: more ? sealCursor(plan, top, last) : null });
+  const page = freeze({ rows, total, top, nextCursor: more ? sealCursor(plan, top, last, total) : null });
   pages.set(page, plan);
   return page;
 }
