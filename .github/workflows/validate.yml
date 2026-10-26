@@ -734,6 +734,8 @@ jobs:
         python3 scripts/record-run.py --run-dir tmp/emr-e-ci/online-pg --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --tree api/src/emr-contract --tree tests/emr/e --tree api/prisma --file api/src/connect.controller.ts --file api/src/app.module.ts --file api/src/orthanc.service.ts --file emr/units/e.json --file tests/emr/b/pg_ledger_restore_test.py -- python3 -B scripts/run-tests.py --module tests/emr/e/online_live.py --class OnlineImagePg --mode live --unit emr-e-online --timeout 600
     - name: E_ROUTE one study manifest serves its frame requests (compiled by the previous step)
       run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/manifest-reuse --cwd . --tree api/src/emr-image --tree api/src/emr-contract --file tests/emr/e/manifest_reuse_test.cjs -- node --test --test-reporter=tap tests/emr/e/manifest_reuse_test.cjs
+    - name: E_ROUTE one access record per study delivery, opened once for a burst and closed after the viewing (compiled above)
+      run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/delivery --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --file tests/emr/e/delivery_test.cjs -- node --test --test-reporter=tap tests/emr/e/delivery_test.cjs
     - name: E_ROUTE viewer frame requests reach the E boundary through the real nginx configuration
       run: |
         command -v nginx >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq nginx; }

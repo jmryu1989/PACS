@@ -3065,6 +3065,14 @@ are refused, and that metadata, rendered frames and the Gateway STOW keep authz 
 `node --test tests/emr/e/manifest_reuse_test.cjs` (compiled `api/dist`) checks that one study manifest serves the
 study's frame requests and is rebuilt or forgotten when the request or source no longer matches it, and that a study
 or series request (retrieve, query, metadata) reads the catalog again so an object that arrived since is selected.
+The access record of viewing (의료법 제23조④) is the study delivery (`api/src/emr-image/delivery.ts`): one B2
+provide-prepared event per requester, session and manifest version, durable before the delivery's first response,
+closed by one terminal event after a short idle period, a bounded age, a changed current fact or shutdown; every
+response checks the requester's current access on one bounded ledger transaction before its first byte and keeps its
+fixed representation, transport and copy facts in `emr_image` rows naming that event (`X-KIN-Image-Event` is the
+record, `X-KIN-Image-Response` the row). `node --test tests/emr/e/delivery_test.cjs` (compiled `api/dist`) checks that
+lifecycle with stand-in hooks; the real-PG `stream_pg_test.cjs` case drives the service against the ledger and checks
+its events.
 `python -B scripts/run-tests.py --module tests/e2e/test_image_route.py --mode live --unit e-route --timeout 1800`
 runs on the served stack: one frame through HTTPS is one recorded delivery, and the served OHIF CT series
 (`KIN_E_ROUTE_SLICES`, default 200, `KIN_E_ROUTE_MATRIX`, default 512) records every received frame once; it prints

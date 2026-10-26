@@ -32,6 +32,7 @@
     "prepared response manifest retains actual request, Range, HTTP status/headers, multipart envelope and selected byte ranges before first byte",
     "production PostgreSQL representation/transport/copy detail adapter, using B2 transaction",
     "each exact study-manifest body is kept once (emr_image.source_manifest) and every preparation names it; earlier preparations keep their own copy (R244-02)",
+    "the access record of viewing (의료법 제23조④) is the study delivery (emr-image/delivery.ts): one B2 provide-prepared event per requester, rights, session, address and manifest version, admitted/committed/confirmed before the delivery's first response is prepared, closed by one terminal event (ended, aborted, or none for an unconfirmed ending) after a short idle period, a bounded age, a changed current fact or shutdown; each response checks the requester's current access on one bounded ledger transaction before any source read and keeps its fixed representation, transport and copy facts in emr_image rows naming that event (X-KIN-Image-Event the record, X-KIN-Image-Response the row; 20261027090000_emr_e_study_delivery); earlier rows are their own record (R244-02 throughput)",
     "GET/HEAD Connect API route with explicit unavailable Module A seam",
     "migration, production-image and restore consumers together",
     "E_ROUTE: nginx sends the viewer's WADO-RS frame requests (GET/HEAD) to the E route with the normalized path as target, unbuffered on a keepalive upstream; metadata, rendered, /instances and Gateway STOW routes unchanged",
@@ -43,12 +44,14 @@
   ],
   "migrations": [
     "20261025000000_emr_e_online",
-    "20261026210000_emr_e_source_manifest"
+    "20261026210000_emr_e_source_manifest",
+    "20261027090000_emr_e_study_delivery"
   ],
   "tests": {
     "pure": [
       "tests/emr/e/contract_test.cjs",
       "tests/emr/e/manifest_reuse_test.cjs",
+      "tests/emr/e/delivery_test.cjs",
       "tests/proxy_image_route_test.py"
     ],
     "pg_http": [
