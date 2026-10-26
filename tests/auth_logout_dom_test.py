@@ -88,6 +88,8 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/worklist-columns.css",
     "worklist-v0/hpacs-lite/reading-workspace.css",
     "worklist-v0/hpacs-lite/related-report-mode.css",
+    # W9-UI: the Multi-Study View's stylesheet (main.html links it after the Related Report mode's).
+    "worklist-v0/hpacs-lite/multi-study-view.css",
     "worklist-v0/hpacs-lite/reading-panel-layout.js",
     "worklist-v0/hpacs-lite/viewer-opening.js",
     "worklist-v0/hpacs-lite/worklist-startup.js",
@@ -125,6 +127,8 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/report-citation.js",
     # W5 Phase B: the Related Report mode (main.html tags it after report-editor-frame.js, before the bundle).
     "worklist-v0/hpacs-lite/related-report-mode.js",
+    # W9-UI: the Multi-Study View controller (main.html tags it after related-report-mode.js, before the bundle).
+    "worklist-v0/hpacs-lite/multi-study-view.js",
     "worklist-v0/hpacs-lite/report-structure.js",
     "worklist-v0/hpacs-lite/dictation-session.js",
     "worklist-v0/hpacs-lite/dictation-capture.js",

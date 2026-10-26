@@ -421,6 +421,7 @@
     }, { capture: true, passive: true });
     const readingWorkspace = KinReadingWorkspace({
       current: () => selectedUid, study: uid => studies.find(s => s.uid === uid),
+      formatDate: fmtD,
       prior: autoPrior, move, select, queue: orderedStudies, layout: () => applyLayout(), popup: openOhifWindow,
       onPanelsEdit: () => { workspaceGeneration++; },
       onPanelsChange: reading => {
