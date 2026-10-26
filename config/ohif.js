@@ -209,6 +209,7 @@ function KinViewerBrand({ React }) {
     const labelOf = node => node.nodeType === Node.ELEMENT_NODE
       ? (node.localName === 'svg' ? '' : [...node.childNodes].map(labelOf).join(''))
       : node.nodeType === 3 ? node.data : '';
+    // The native preferences entry keeps non-letter hotkeys and language reachable.
     // 드롭다운은 한 목록에서 같은 태그의 행을 나란히 만든다. 클래스는 마지막 행만 다를 수 있어 비교하지 않는다.
     const hideAboutRows = scope => {
       scope.querySelectorAll('*').forEach(row => {
@@ -1273,7 +1274,9 @@ function kinCreateViewerHistory() {
       return exporting && SCREEN_EXPORT.includes(name) || ACTIVATING.includes(name) && !VIEW_TOOLS.has(command?.commandOptions?.toolName ?? button.id);
     });
     const TOOLBAR = ['getButtons', 'removeButton', 'addButtons', 'clearButtonSection', 'createButtonSection'];
-    const trimmed = new Set(), originals = new Map(), sectionOriginals = new Map(), replacements = new WeakSet(); let trimming = false;
+    // OHIF refreshToolbarState clones definitions with object spread. Ownership
+    // must survive that refresh so a writer gets the full tool group back.
+    const trimmed = new Set(), originals = new Map(), sectionOriginals = new Map(), replacement = Symbol('kin-read-only-toolbar'); let trimming = false;
     // S5-UI5 fix1. Capture를 빼는 때: clinician-only, 그리고 계정이 아직 확인되지 않은 동안(안전한 기본 — writer 답이 오면 제자리로
     // 돌아온다). writer 문서의 로그인이 끝난 뒤(거절·로그아웃·다른 계정)에는 빼지 않는다. 이미 뺀 것은 writer 답 전까지 그대로라서
     // clinician-only·미확인에서 끝난 문서는 계속 없다. 끝난 문서에 다시 들어온 마운트는 역할을 알 수 없어 안전한 기본을 따른다.
@@ -1284,14 +1287,14 @@ function kinCreateViewerHistory() {
       if (trimming || TOOLBAR.some(name => typeof bar?.[name] !== 'function')) return;
       const replaced = [], exporting = exportClosed();
       for (const [id, button] of Object.entries(bar.getButtons() || {})) {
-        if (replacements.has(button)) continue;
+        if (button[replacement]) continue;
         const props = button?.props || {}, items = Array.isArray(props.items) ? props.items : null;
         if (!items) { if (authoring({ id, commands: props.commands }, exporting)) { trimmed.add(id); originals.set(id, button); } continue; }
         const kept = items.filter(item => !authoring(item, exporting));
         if (!kept.length) { trimmed.add(id); originals.set(id, button); continue; }
         if (kept.length < items.length || props.primary && authoring(props.primary, exporting)) {
-          const replacement = { ...button, props: { ...props, items: kept, primary: props.primary && !authoring(props.primary, exporting) ? props.primary : kept[0] } };
-          originals.set(id, button); replacements.add(replacement); replaced.push(replacement);
+          const restricted = { ...button, [replacement]: true, props: { ...props, items: kept, primary: props.primary && !authoring(props.primary, exporting) ? props.primary : kept[0] } };
+          originals.set(id, button); replaced.push(restricted);
         }
       }
       const buttons = bar.getButtons() || {}, gone = [...trimmed].filter(id => buttons[id]);
@@ -1320,7 +1323,7 @@ function kinCreateViewerHistory() {
         const listed = new Set(sections.flatMap(([, record]) => record.original));
         const buttons = bar.getButtons() || {}, back = [];
         for (const [id, original] of originals) {
-          if (buttons[id] ? !replacements.has(buttons[id]) : !listed.has(id)) continue;
+          if (buttons[id] ? !buttons[id][replacement] : !listed.has(id)) continue;
           if (buttons[id]) bar.removeButton(id);
           back.push(original);
         }
@@ -2300,6 +2303,7 @@ const kinViewerSession = (() => {
   });
   return {
     state,
+    owner: () => owner === null ? null : JSON.parse(owner),
     ended: () => ended,
     readOnly: () => state() === 'read-only',
     writer: () => state() === 'writer',
@@ -4140,6 +4144,115 @@ function kinCreateMammographyHanging() {
   }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
 
+// REQ-VIEWER-REFERENCE-PLANE -> RISK-VIEWER-REFERENCE-PLANE; MG also REQ-MG-03:
+// panes do not share patient coordinates merely because they occupy one tool group.
+function kinCreateMGReferenceLines() {
+  let services, stop;
+  function mount() {
+    stop?.();
+    const core = window.cornerstone, manager = window.cornerstoneTools.ToolGroupManager;
+    const groups = new Set(), tools = new Set(), restores = [];
+    const volumes = new Map();
+    function instance(viewport) {
+      if (viewport?.type === 'orthographic') {
+        // Reformatted MPR planes have no current image ID. Native geometry uses
+        // the volume camera; establish its coordinates from the volume's sources.
+        const volumeId = viewport.getVolumeId();
+        if (!volumeId) return null;
+        let ids;
+        try { ids = viewport.getImageIds(); }
+        catch { return null; } // The actor/cache can be absent during setVolumes or teardown.
+        const frame = viewport.getFrameOfReferenceUID();
+        if (!frame || !ids?.length) return null;
+        let cached = volumes.get(volumeId);
+        // Cached volumes own a fixed image-ID array. Replacement under the same ID
+        // must recheck its sources; camera changes share the existing verdict.
+        if (!cached || cached.ids !== ids) {
+          const first = core.metaData.get('instance', ids[0]);
+          const valid = first?.StudyInstanceUID && first.FrameOfReferenceUID && ids.every((id, index) => {
+            const image = index ? core.metaData.get('instance', id) : first;
+            return storedPlane(image) && image.FrameOfReferenceUID === first.FrameOfReferenceUID &&
+              image.StudyInstanceUID === first.StudyInstanceUID && image.Modality === first.Modality &&
+              (image.Modality !== 'MG' || side(image) === side(first));
+          });
+          cached = { ids, image: valid ? first : null };
+          volumes.set(volumeId, cached);
+        }
+        return cached.image?.FrameOfReferenceUID === frame ? cached.image : null;
+      }
+      const imageId = viewport?.getCurrentImageId?.();
+      const image = imageId ? core.metaData.get('instance', imageId) : null;
+      return storedPlane(image) ? image : null;
+    }
+    function storedPlane(image) {
+      // imagePlaneModule already contains OHIF's fallback plane. The instance for
+      // the displayed frame is also the native provider's input, before defaults.
+      // DICOM DS values may remain numeric strings in the served instance.
+      const numeric = value => (typeof value === 'number' || typeof value === 'string' && value.trim() !== '') &&
+        Number.isFinite(Number(value));
+      return [[image?.ImageOrientationPatient, 6], [image?.ImagePositionPatient, 3]]
+        .every(([values, length]) => Array.isArray(values) && values.length === length && values.every(numeric));
+    }
+    function side(image) {
+      const values = [image?.ImageLaterality, image?.Laterality, image?.FrameLaterality];
+      const anatomy = group => {
+        const sequence = group?.FrameAnatomySequence;
+        values.push((Array.isArray(sequence) ? sequence[0] : sequence)?.FrameLaterality);
+      };
+      anatomy(image);
+      const shared = image?.SharedFunctionalGroupsSequence;
+      anatomy(Array.isArray(shared) ? shared[0] : shared);
+      const frames = image?.PerFrameFunctionalGroupsSequence;
+      if (Array.isArray(frames)) frames.forEach(anatomy);
+      const known = values.filter(Boolean);
+      return known.length && ['R', 'L'].includes(known[0]) && known.every(value => value === known[0]) ? known[0] : null;
+    }
+    function wrap(tool) {
+      if (!tool || tools.has(tool)) return;
+      tools.add(tool);
+      const render = tool.renderAnnotation;
+      const wrapped = function (enabledElement, svgDrawingHelper) {
+        // editData names the plane actually used by the native renderer. Reading current
+        // images/volume sources here also covers replacement, scrolling and active-pane changes.
+        const sourceViewport = core.getEnabledElementByViewportId(this.editData?.sourceViewportId)?.viewport;
+        const source = instance(sourceViewport), target = instance(enabledElement.viewport);
+        if (!source || !target ||
+            !source.FrameOfReferenceUID || source.FrameOfReferenceUID !== target.FrameOfReferenceUID ||
+            !source.StudyInstanceUID || source.StudyInstanceUID !== target.StudyInstanceUID) return false;
+        if (source?.Modality === 'MG' || target?.Modality === 'MG') {
+          const sourceSide = side(source);
+          if (source?.Modality !== 'MG' || target?.Modality !== 'MG' ||
+              !sourceSide || sourceSide !== side(target)) return false;
+        }
+        return render.call(this, enabledElement, svgDrawingHelper);
+      };
+      tool.renderAnnotation = wrapped;
+      restores.push(() => { if (tool.renderAnnotation === wrapped) tool.renderAnnotation = render; });
+    }
+    function attach(group) {
+      if (!group || groups.has(group)) return;
+      groups.add(group);
+      const add = group.addTool;
+      const wrapped = function (name, ...args) {
+        const result = add.call(this, name, ...args);
+        if (name === 'ReferenceLines') wrap(this.getToolInstance(name));
+        return result;
+      };
+      group.addTool = wrapped;
+      restores.push(() => { if (group.addTool === wrapped) group.addTool = add; });
+      if (group.hasTool('ReferenceLines')) wrap(group.getToolInstance('ReferenceLines'));
+    }
+    const service = services.toolGroupService;
+    const subscription = service.subscribe(service.EVENTS.TOOLGROUP_CREATED,
+      event => attach(manager.getToolGroup(event.toolGroupId)));
+    manager.getAllToolGroups().forEach(attach);
+    stop = () => { subscription.unsubscribe(); restores.reverse().forEach(restore => restore()); };
+  }
+  return { id: 'kin.mg-reference-lines', preRegistration({ servicesManager }) {
+    services = servicesManager.services;
+  }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
+}
+
 function kinCreateStudyPrefetch() {
   let stop;
   function mount() {
@@ -4167,7 +4280,12 @@ function kinCreateStudyPrefetch() {
     };
     prefetch.enable = wrapped;
     const leave = () => {
-      for (const element of elements) prefetch.disable(element);
+      // The pinned disable removes listeners before reading enabled-element
+      // state. OHIF can already have removed that state during pane teardown.
+      for (const element of elements) {
+        try { prefetch.disable(element); }
+        catch (error) { if (core.getEnabledElement(element)) throw error; }
+      }
       elements.clear(); clearQueued();
     };
     window.addEventListener('pagehide', leave);
@@ -4177,6 +4295,74 @@ function kinCreateStudyPrefetch() {
     };
   }
   return { id: 'kin.study-prefetch', onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
+}
+// The stock mode owns the grid and Cornerstone elements. This extension owns
+// only its chrome and removes it when that mode or document ends.
+function kinCreateViewerUX() {
+  let services, dispose, toolbar, shortcuts, generation = 0, ready;
+  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-ux-toolbar.js', 'viewer-ux-shell.js'];
+  // The theme fixes the chrome rows' heights. It is loaded once per document,
+  // before the first mount, and stays: a stylesheet attached per mount and
+  // dropped on mode exit left a window on re-entry (saved Job, patient tab) in
+  // which the stock grid measured unstyled rows, so a camera applied then was
+  // re-fitted when the rows took their height.
+  function stylesheet() {
+    return new Promise((resolve, reject) => {
+      const href = '/worklist/hpacs-lite/viewer-ux-theme.css';
+      const existing = document.head.querySelector('link[rel="stylesheet"][href="' + href + '"]');
+      if (existing?.sheet) { resolve(); return; }
+      const link = existing || document.createElement('link');
+      link.rel = 'stylesheet'; link.href = href;
+      link.addEventListener('load', () => resolve(), { once: true });
+      link.addEventListener('error', () => { link.remove(); reject(new Error('뷰어 화면 모듈을 불러오지 못했습니다.')); }, { once: true });
+      if (!existing) document.head.append(link);
+    });
+  }
+  function load() {
+    return ready ||= assets.reduce((previous, name) => previous.then(() => new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = '/worklist/hpacs-lite/' + name;
+      script.onload = () => { script.remove(); resolve(); };
+      script.onerror = () => { script.remove(); reject(new Error('뷰어 화면 모듈을 불러오지 못했습니다.')); };
+      document.head.append(script);
+    })), stylesheet()).catch(error => { ready = null; throw error; });
+  }
+  function stop() { generation++; dispose?.(); dispose = null; }
+  return {
+    id: 'kin.viewer-ux',
+    async preRegistration({ servicesManager }) {
+      services = servicesManager.services;
+      if (window.top !== window) return;
+      try { await load(); }
+      catch (error) {
+        // Optional chrome cannot prevent the native viewer from opening images.
+        services.uiNotificationService?.show({ title: 'Viewer', message: error.message, type: 'error' });
+        return;
+      }
+      // Own letter keys before the first mode enters, including route teardown.
+      shortcuts = window.KinViewerUXShortcuts.mount({
+        getBindings: () => toolbar?.bindings() || {}, invoke: id => toolbar?.invoke(id),
+        allowed: () => !kinViewerSession.ended(),
+      });
+      kinViewerOnEnd(() => { shortcuts?.dispose(); window.KinViewerUXToolbar.clear(); });
+    },
+    onModeEnter() {
+      stop();
+      if (window.top !== window || !shortcuts) return;
+      const ticket = generation;
+      if (kinViewerSession.ended()) return;
+      try {
+        const shell = window.KinViewerUXShell.mount({ services, session: kinViewerSession });
+        toolbar = window.KinViewerUXToolbar.mount({ services, session: kinViewerSession });
+        const channel = kinViewerOnEnd(() => { window.KinViewerPatientTabs.end(); stop(); });
+        dispose = () => { channel?.close(); toolbar?.dispose(); toolbar = null; shell.dispose(); };
+      } catch (error) {
+        if (ticket !== generation) return;
+        services.uiNotificationService?.show({ title: 'Viewer', message: error.message, type: 'error' });
+      }
+    },
+    onModeExit: stop,
+  };
 }
 
 // W9 multi-study view (worklist-v0/hpacs-lite/viewer-multi-study.js): load, mount and stop its strip and renderer observer
@@ -4205,7 +4391,7 @@ function kinCreateMultiStudyStrip() {
 }
 
 window.config = {
-  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateStudyPrefetch(), kinCreateMultiStudyStrip()],
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateViewerUX(), kinCreateMultiStudyStrip()],
   // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
   // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
   kinThreeDCursor: { enabled: false },

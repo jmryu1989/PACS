@@ -74,8 +74,12 @@ server {
 
 server {
     listen 443 ssl;
-    # Chromium은 GOAWAY와 스트림 생성이 겹치면 정적 파일을 재시도하지 않고 버린다.
-    # 계정 전환 뒤 앱 초기화가 멈추는 이 실패를 피하도록 HTTPS는 HTTP/1.1로 제공한다.
+    http2 on;
+    # A11-OUTPUT / s9u4 re-login: 기본 keepalive_requests 1000 / keepalive_time 1h의 GOAWAY와
+    # Chromium의 새 스트림 생성이 겹치면 요청이 ERR_FAILED로 사라진다. OHIF의 HTTP/2 병렬 요청을
+    # 유지하며 계정 전환 84회에서 관측한 총 14580요청보다 위에서 연결을 교체한다.
+    # 새 한도와 1h 만료의 경합은 남는다. 더 큰 기관/영상 부하에서는 먼저 다시 계측한다.
+    keepalive_requests 14581;
     server_name ${SERVER_NAME};
 
     ssl_certificate     ${TLS_CERTIFICATE};

@@ -324,10 +324,9 @@
     }
     function answered(intent, reply) {
       if (inflight?.intent !== intent) return;
-      const reservation = inflight.reservation; inflight = null;
       const plan = model.finish(intent, reply);
-      if (plan.status !== 'resolved') { o.viewer.release(reservation); render(); return; }
-      launch(plan, reservation);
+      if (plan.status !== 'resolved') { dropped(intent); render(); return; }
+      launch(plan, inflight);
     }
     function failedRequest(intent, error) {
       if (inflight?.intent !== intent) return;
@@ -338,20 +337,26 @@
       model.fail(intent, error?.name === 'AbortError' ? {} : error || {});
       render();
     }
-    function launch(plan, reservation) {
+    function launch(plan, pending) {
+      const { reservation, intent } = pending, at = work.capture('document');
       const id = uuid(), uids = plan.members.map(member => member.uid);
       const metadata = new Map(plan.members.map(member => [member.uid, member.metadata]));
-      const result = o.viewer.launch(reservation, plan, id, metadata);
-      if (result?.status !== 'accepted') {
-        o.viewer.release(reservation);
-        const error = result?.status === 'blocked' ? { code: 'W9_POPUP_BLOCKED' }
-          : { code: 'W9_VIEWER_BUSY', message: result?.message };
-        model.rejectLaunch(plan, error);
-        refusal = { compositionId: plan.compositionId, uids, ...errorState(error) };
-        render(); return;
-      }
-      bind(id, uids, reservation.preservePartner, result.isOpen);
-      render();
+      const settled = result => {
+        if (inflight !== pending) return;
+        if (!work.commit(at, () => {
+          inflight = null;
+          if (result?.status !== 'accepted') {
+            o.viewer.release(reservation);
+            const error = result?.status === 'blocked' ? { code: 'W9_POPUP_BLOCKED' }
+              : { code: 'W9_VIEWER_BUSY', message: result?.message };
+            model.rejectLaunch(plan, error);
+            refusal = { compositionId: plan.compositionId, uids, ...errorState(error) };
+          } else bind(id, uids, reservation.preservePartner, result.isOpen);
+          render();
+        })) dropped(intent);
+      };
+      try { Promise.resolve(o.viewer.launch(reservation, plan, id, metadata, pending.controller.signal)).then(settled, () => settled(null)); }
+      catch (_) { settled(null); }
     }
     // ── the opened viewer's channel ──
     function bind(id, uids, preservePartner, isOpen) {

@@ -63,7 +63,7 @@ class FindingNavigationE2E(ViewerHistoryE2E):
 
     def draw_length(self, p):
         self.open_measurement_tools(p)
-        p.get_by_role('button', name='Length', exact=True).click()
+        p.locator('#kin-viewer-history').get_by_role('button', name='Length', exact=True).click()
         box = p.locator('.cornerstone-canvas').bounding_box()
         x, y = box['x']+box['width']*.4, box['y']+box['height']*.4
         p.mouse.move(x, y); p.mouse.down(); p.mouse.move(x+65, y+32, steps=10); p.mouse.up()

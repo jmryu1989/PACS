@@ -108,13 +108,14 @@
     return 'unknown';
   }
   // The one source read of every saved-image output: the frame cells here and the version 4-6, 12 and 13 volume loader. A read that
-  // fetch() rejects before any response is sent once more on the same signal. Hosted diagnostic run 35022850312 (NetLog
+  // fetch() rejects before any response is sent once more on the same signal. A11-OUTPUT diagnostic run 35022850312 (NetLog
   // URL_REQUEST 18100): Chromium 148 had bound the read to an HTTP/2 connection whose GOAWAY (nginx keepalive_requests) arrived
   // before the read's stream was created, failed it with ERR_FAILED without sending it, and did not resend it itself
   // (net/spdy/spdy_session.cc TryCreateStream, net/http/http_network_transaction.cc HandleIOError), while reads already sent past that
   // GOAWAY were refused and resent by Chromium. A GET changes nothing on the server, so one more send is safe. An abort (close,
   // re-check or the output timer), an HTTP error response and a failed body read are never sent again; a second rejection or a
   // failed body read reads as the source-read failure, and an abort keeps its own error for bounded().
+  // s9u4 re-login addresses the same proxy trigger, not all pre-response read failures; retain this one GET resend.
   const SOURCE_READ_FAILED = '출력 원본을 읽지 못했습니다. 다시 확인하세요.';
   async function sourceBytes(url, signal, max, budget, accept = 'application/json') {
     const send = () => fetch(url, { signal, cache: 'no-store', credentials: 'same-origin', headers: { Accept: accept } });

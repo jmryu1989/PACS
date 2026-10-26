@@ -77,7 +77,42 @@ COMMIT before their first clinical byte and lost-reply resolution. REQ-A-TARGET
 / A-HTTP-BODY and REQ-A-OUTCOME / A-HTTP-OUTCOME require the real Nest routes;
 renderer acceptance belongs to A5. Empty fixture endpoints do not close them.
 The current workflow is `validate.yml`; the order's `emr-b.yml` is absent.
-A1 and A3 selections are registered there under the `emr-b` job.
+
+## A2 report history reads
+
+`GET studies/:uid/report/versions` and
+`GET studies/:uid/report/versions/:version/citations` return a `LocalReadResponse`
+built by `api/src/emr-viewing/report-read.ts` from the rows their existing gates
+already fixed (no second read). Every returned version row is a `report-version`
+target (study UID, the `ReportVersion` id, its version) and carries its own
+`accessRef`, the event ID of its provide-prepared record; an empty history has no
+target. A version citations answer is one `report-evidence` target for the stored
+version and the filtered answer (an empty projection is still that version's
+read) and carries its `accessRef`. The routes' own refusals (400/403/404/409)
+record nothing; a refusal by an outer interceptor after preparation (the
+`StudyAccessInterceptor` 409) leaves the prepared records with `transfer-aborted`.
+The routes retain the raw source PatientID and InstitutionName observed by this
+request's `StudyAccessService.prepareSourceIdentity`; its single QIDO read names
+`00080080` in `includefield`, because InstitutionName is not a QIDO default
+attribute (measured on Orthanc 1.12.5). Missing or blank values
+remain `not-observed`; neither value is inferred from StudyState. Cause is
+`user-view` and no work context is observed.
+
+The real cells run the production `AppModule.withLedger` over HTTP on the B2 PG
+fixture with an independent witness: all targets committed before the first
+response byte (ledger INSERT held by an SQL lock), the exact returned rows and
+hashes, filtered/empty/missing/refused citations, a last-target SQL failure, a
+client that leaves before a late COMMIT, an outer `StudyAccessInterceptor`
+refusal after preparation, and a COMMIT reply lost in a TCP relay in front of
+the ledger connection. The synthetic Orthanc answers only the default QIDO study
+attributes and the tags the request names in `includefield`, as Orthanc does:
+
+```sh
+KIN_TEST_API_IMAGE=<candidate-image> python scripts/run-tests.py --module tests/emr/a/report_reads_test.py --class ReportReadsHttp --mode live --unit module-a-02-http --timeout <measured-hang-timeout-seconds>
+```
+
+Display (`client-shown`) of the returned rows belongs to A4/A5.
+A1, A2 and A3 selections are registered in `validate.yml`'s `emr-b` job.
 
 
 A3 binds W9's ready metadata to this boundary. Its source manifest uses each

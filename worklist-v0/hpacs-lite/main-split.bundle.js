@@ -9079,6 +9079,9 @@
                 popup.dispatchEvent(new popup.Event('kin-window-link-changed'));
               }catch(_){notify('판독문 복귀 연결을 확인하지 못했습니다. 목록 창을 직접 선택하세요.','info');}
             }
+            // A selected tab can also cancel an in-flight open, or reopen the
+            // last closed patient while retaining the same document URL.
+            popup.kinViewerOpenPatient?.(url);
             popup.focus();
             watchOhifRect(popup);
             return outcome('accepted');
@@ -9093,6 +9096,20 @@
               : "기존 영상 창에 저장하지 않은 표식이나 작업 내용(소견 작성 내용 포함)이 있습니다. 저장하거나 비운 뒤 다른 검사를 여세요.";
             notify(kept, "err", 8000);
             return outcome('refused', kept);
+          }
+          // U2 keeps this document and checks coverage at the final assignment.
+          if (!freshDocument && !stopped && typeof popup.kinViewerOpenPatient === 'function') {
+            const at = work.capture('document'), previousSequence = ohifPopupSequences.get(popup);
+            const pending = popup.kinViewerOpenPatient(url, { signal: openingOptions?.signal });
+            popup.focus(); watchOhifRect(popup);
+            // Patient tabs admit a route asynchronously. W9 must bind its renderer channel only after that admission,
+            // while a refusal keeps the previous opening's sequence and displayed state.
+            return Promise.resolve(pending).then(accepted => {
+              if (!accepted || !work.admits(at) || popup.closed || ohifPopupSequences.get(popup) !== previousSequence)
+                return outcome('refused', '기존 영상 창을 유지했습니다. 영상 창의 안내를 확인하세요.');
+              ohifPopupSequences.set(popup, seq);
+              return outcome('accepted');
+            }, () => outcome('failed', '영상 창에서 검사를 열지 못했습니다. 영상 창의 안내를 확인한 뒤 다시 시도하세요.'));
           }
           if (typeof popup.kinViewerFrameCoverageConfirm !== 'function' || !popup.kinViewerFrameCoverageConfirm(message => confirm(message))) {
             popup.focus(); notify('기존 영상 창을 유지했습니다. Frame Coverage와 원본 영상을 확인하세요.', 'info');
@@ -9240,7 +9257,7 @@
       try { own = !known && popup.location.href === 'about:blank'; } catch (_) {}
       return { status: 'reserved', kind: 'window', choice, popup, own, preservePartner, compositionId };
     }
-    function launchViewingSet(reservation, plan, opening, metadata) {
+    function launchViewingSet(reservation, plan, opening, metadata, signal) {
       const uids = [plan.uid, plan.priorUid].filter(Boolean);
       // WORKLIST-SPLIT-UID: a study the last list excluded as unresolved replaces no window or workspace pane here either.
       if (uids.some(value => appState[value]?.identityUnresolved))
@@ -9250,15 +9267,16 @@
         return readingWorkspace.openViewingSet(plan.uid, plan.priorUid, { opening, metadata });
       }
       if (reservation?.kind !== 'window') return { status: 'refused', message: '영상 창을 확인하지 못했습니다. 다시 여세요.' };
-      const result = openOhifWindow(plan.uid, plan.priorUid, null, null, { reservation, viewingSet: opening });
-      if (result.status === 'accepted') {
-        const sequence = ohifPopupSequences.get(reservation.popup);
-        result.isOpen = () => !reservation.popup.closed && ohifPopupSequences.get(reservation.popup) === sequence;
-        if (reservation.preservePartner) viewingSetRetryWindow = {
-          compositionId: reservation.compositionId, popup: reservation.popup, isOpen: result.isOpen,
-        };
-      }
-      return result;
+      return Promise.resolve(openOhifWindow(plan.uid, plan.priorUid, null, null, { reservation, viewingSet: opening, signal })).then(result => {
+        if (result.status === 'accepted') {
+          const sequence = ohifPopupSequences.get(reservation.popup);
+          result.isOpen = () => !reservation.popup.closed && ohifPopupSequences.get(reservation.popup) === sequence;
+          if (reservation.preservePartner) viewingSetRetryWindow = {
+            compositionId: reservation.compositionId, popup: reservation.popup, isOpen: result.isOpen,
+          };
+        }
+        return result;
+      });
     }
     function releaseViewingSet(reservation) {
       if (reservation?.kind !== 'window') return;

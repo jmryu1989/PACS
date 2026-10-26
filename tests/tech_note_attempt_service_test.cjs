@@ -224,7 +224,7 @@ async function world() {
   // signature + ledger + HTTP composition is covered by emr/d/routes_pg_test.cjs.
   const projectionBoundary = {
     read: (_request, _kind, _id, project) => project(undefined),
-    write: (_request, _write, project) => project(undefined),
+    write: async (_request, _write, project) => ({ ...await project(undefined), emr: { replayed: false } }),
   };
   const svc = new PacsService(store.prisma, {}, {}, access, {}, undefined, undefined, projectionBoundary);
   const controller = new PacsController(svc);

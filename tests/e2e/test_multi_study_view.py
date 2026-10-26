@@ -29,6 +29,7 @@ from playwright.sync_api import expect
 import test_worklist as base
 import test_prior_selection as prior
 import test_viewer_history as history
+from viewer_tools import select_image_tool
 import viewer_api_test as viewer_fixture
 
 RESOLVE = "/api/studies/viewing-set/resolve"
@@ -53,6 +54,27 @@ class MultiStudyViewE2E(base.WorklistE2E):
             super().setUpClass()
 
     originals = prior.PriorSelectionE2E.originals
+
+    def tearDown(self):
+        result = self._outcome.result
+        if any(test is self for test, _ in result.failures + result.errors):
+            folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/w9-review'))
+            folder.mkdir(parents=True, exist_ok=True)
+            for context in self.contexts:
+                for index, page in enumerate(context.pages):
+                    if '/ohif/viewer' not in page.url: continue
+                    try:
+                        state = page.evaluate('''() => ({url:location.href,
+                          history:document.querySelector('#kin-viewer-history')?.innerText,
+                          workspace:window.kinViewerHistoryWorkspaceState?.(),
+                          annotations:cornerstoneTools.annotation.state.getAllAnnotations().map(a=>({
+                            tool:a.metadata.toolName,points:a.data.handles.points,
+                            invalidated:a.invalidated,stats:a.data.cachedStats}))})''')
+                        (folder / f'{self._testMethodName}-viewer-{index}.json').write_text(
+                            json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
+                        page.screenshot(path=str(folder / f'{self._testMethodName}-viewer-{index}.png'))
+                    except Exception as error: print('W9 viewer failure capture:', str(error)[:180], flush=True)
+        super().tearDown()
 
     def ids(self, page):
         return parse_qs(urlsplit(page.url).query)["StudyInstanceUIDs"][0].split(",")
@@ -125,6 +147,27 @@ class MultiStudyViewE2E(base.WorklistE2E):
         prior.canvas_ready(viewer, 1)
         expect(self.member(page, order[2])).to_contain_text("Displayed", timeout=60000)
         expect(page.locator("#multi-study-summary")).to_have_text("Studies 3 · Page 2/2 · Pages")
+        viewer.wait_for_function("() => !kinViewerHistoryWorkspaceState().busy && !kinViewerJobWorkspaceState().busy")
+        pending = []
+        def hold_patient(route):
+            requested = parse_qs(urlsplit(route.request.url).query).get('uids', [''])[0].split(',')
+            if requested == order[:2]: pending.append(route)
+            else: route.continue_()
+        viewer.route('**/api/studies?**', hold_patient)
+        before_url = viewer.url
+        with page.expect_response(lambda r: r.url.endswith(RESOLVE)):
+            page.locator('#multi-study-prev').click()
+        deadline = time.monotonic() + 30
+        while not pending and time.monotonic() < deadline: page.wait_for_timeout(50)
+        self.assertEqual(len(pending), 1, 'patient lookup reached the held boundary')
+        expect(page.locator('#multi-study-next')).to_be_disabled()
+        held_request = pending.pop()
+        with viewer.expect_event('requestfailed', predicate=lambda r: r == held_request.request):
+            page.locator('#multi-study-close').click()
+            held_request.continue_()
+        viewer.unroute('**/api/studies?**', hold_patient)
+        expect(page.locator('#multi-study')).to_be_hidden()
+        self.assertEqual(viewer.url, before_url)
         self.assertIsNone(page.evaluate("selectedUid"))
         self.assertEqual(clinical, self.clinical(fixtures))
         self.assertEqual(originals, self.originals())
@@ -199,10 +242,24 @@ class MultiStudyViewE2E(base.WorklistE2E):
         page.screenshot(path=str(evidence/'w9-open-1366.png'),full_page=True)
         # Real unsaved manual length: the existing viewer guard refuses both Next and a new overlapping selection.
         history.ViewerHistoryE2E.open_measurement_tools(self,viewer)
-        viewer.get_by_role('button',name='Length',exact=True).click()
-        box=viewer.locator('.cornerstone-canvas').first.bounding_box()
-        x,y=box['x']+box['width']*.38,box['y']+box['height']*.4
-        viewer.mouse.move(x,y);viewer.mouse.down();viewer.mouse.move(x+65,y+32,steps=10);viewer.mouse.up()
+        select_image_tool(viewer, 'Length')
+        # The U2 shell changes the image's letterboxing. Place both handles in the
+        # actual image, as the manual-measurement suites do, rather than in its canvas margin.
+        geometry = viewer.evaluate('''() => {
+          const v=cornerstone.getRenderingEngines().filter(e=>e.id!=='_thumbnails')
+            .flatMap(e=>e.getViewports()).find(v=>v.getCurrentImageId?.() && v.element.getBoundingClientRect().width>0);
+          const d=v.getImageData(),r=v.element.getBoundingClientRect();
+          const point=([x,y])=>v.worldToCanvas(d.imageData.indexToWorld([x*(d.dimensions[0]-1),y*(d.dimensions[1]-1),0]))
+            .map((n,i)=>n+(i?r.y:r.x));
+          return {dimensions:d.dimensions,points:[[.4,.4],[.6,.6]].map(point),
+            formerCanvasPoints:[[r.width*.38,r.height*.4],[r.width*.38+65,r.height*.4+32]]
+              .map(p=>Array.from(d.imageData.worldToIndex(v.canvasToWorld(p))))};
+        }''')
+        print('W9_MEASUREMENT_GEOMETRY', json.dumps(geometry), flush=True)
+        start, end = geometry['points']
+        viewer.mouse.move(*start);viewer.mouse.down();viewer.mouse.move(*end,steps=10);viewer.mouse.up()
+        viewer.wait_for_function('''() => cornerstoneTools.annotation.state.getAllAnnotations().some(a=>
+          a.metadata.toolName==='Length' && !a.invalidated && Object.values(a.data.cachedStats||{}).some(s=>Number.isFinite(s.length)))''')
         viewer.wait_for_function('() => kinViewerHistoryWorkspaceState().dirty')
         with page.expect_response(lambda r:r.url.endswith(RESOLVE)): page.locator('#multi-study-next').click()
         expect(page.locator('#multi-study-status')).to_contain_text('Not Opened')
@@ -213,7 +270,11 @@ class MultiStudyViewE2E(base.WorklistE2E):
         expect(self.member(page,order[1])).to_contain_text('Displayed')
         expect(self.member(page,order[1])).not_to_contain_text('Not Opened')
         expect(self.member(page,order[1]).get_by_role('button',name='Retry',exact=True)).to_have_count(0)
-        viewer.locator('#kin-viewer-history section[data-kind=length]').get_by_role('button',name='Save',exact=True).click()
+        measurement = viewer.locator('#kin-viewer-history section[data-kind=length]')
+        with viewer.expect_response(lambda r: r.request.method == 'POST' and r.url.endswith('/viewer-items')) as saved:
+            measurement.get_by_role('button',name='Save',exact=True).click()
+        self.assertTrue(saved.value.ok, saved.value.text())
+        expect(measurement).to_contain_text('Saved r1')
         viewer.wait_for_function('() => !kinViewerHistoryWorkspaceState().dirty && !kinViewerHistoryWorkspaceState().busy')
         errors[order[2]]='W9_LOAD_FAILED'
         with page.expect_response(lambda r:r.url.endswith(RESOLVE)): page.locator('#multi-study-next').click()

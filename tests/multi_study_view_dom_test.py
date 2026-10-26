@@ -259,6 +259,59 @@ class MultiStudyViewPage(unittest.TestCase):
     def clinical_writes(self):
         return (len(self.site.flow_puts), len(self.site.flow_commits), len(self.site.holds), len(self.site.releases))
 
+    def pending_patient_tab(self, popup):
+        # SYNTHETIC VIEWER: the public U2 admission boundary, deliberately held like an HTTP answer.
+        popup.evaluate("""() => { window.kinViewerOpenPatient = (href, {signal} = {}) => new Promise(resolve => {
+          window.__synAdmitPatient = accepted => {
+            if (accepted && !signal?.aborted) history.replaceState(history.state, '', href);
+            resolve(accepted && !signal?.aborted);
+          };
+        }); }""")
+
+    def test_patient_tab_admission_keeps_old_display_on_refusal_and_binds_after_acceptance(self):
+        self.open(); order = self.visible_order()[:3]
+        self.open_set(order); self.wait_viewer(order[:2])
+        popup = self.viewer(); old = self.viewer_studies()[2]
+        expect(self.member(order[0])).to_contain_text('Loading')
+        self.post_viewer_event(popup, old, {'type': 'displayed', 'study': order[0],
+                                          'series': '1.2.3', 'sop': '1.2.3.4', 'frame': 1})
+        expect(self.member(order[0])).to_contain_text('Displayed')
+        self.pending_patient_tab(popup)
+        self.press('#multi-study-next')
+        popup.wait_for_function('() => !!window.__synAdmitPatient')
+        expect(self.page.locator('#multi-study-next')).to_be_disabled()
+        expect(self.member(order[2])).to_contain_text('Not Opened')
+        popup.evaluate('() => window.__synAdmitPatient(false)')
+        expect(self.status()).to_contain_text('Not Opened')
+        expect(self.member(order[0])).to_contain_text('Displayed')
+        self.assertEqual(self.viewer_studies()[0], order[:2])
+        popup.evaluate('() => { delete window.__synAdmitPatient; }')
+        self.press('#multi-study-next')
+        popup.wait_for_function('() => !!window.__synAdmitPatient')
+        popup.evaluate('() => window.__synAdmitPatient(true)')
+        self.wait_viewer(order[2:])
+        expect(self.member(order[2])).to_contain_text('Loading')
+        current = self.viewer_studies()[2]
+        self.assertNotEqual(old, current)
+        self.post_viewer_event(popup, current, {'type': 'displayed', 'study': order[2],
+                                              'series': '1.2.3', 'sop': '1.2.3.5', 'frame': 1})
+        expect(self.member(order[2])).to_contain_text('Displayed')
+        self.assertIsNone(self.target())
+
+    def test_closing_composition_during_patient_tab_admission_does_not_reopen_it(self):
+        self.open(); order = self.visible_order()[:3]
+        self.open_set(order); self.wait_viewer(order[:2])
+        popup = self.viewer()
+        expect(self.member(order[0])).to_contain_text('Loading')
+        self.pending_patient_tab(popup)
+        self.press('#multi-study-next')
+        popup.wait_for_function('() => !!window.__synAdmitPatient')
+        self.page.locator('#multi-study-close').click()
+        popup.evaluate('() => window.__synAdmitPatient(true)')
+        self.assertEqual(self.viewer_studies()[0], order[:2])
+        expect(self.host()).to_be_hidden()
+        self.assertIsNone(self.target())
+
     # ── V-ENTRY ──
     def test_three_entries_one_action_frozen_visible_order_and_no_target_move(self):
         self.open()

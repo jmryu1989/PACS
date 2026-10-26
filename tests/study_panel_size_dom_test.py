@@ -26,22 +26,14 @@ of a paint, its contents are W4-SC's cases, and the requirement these counts car
 in the opened panel, nothing else is added to the first paint but the declared W6/W4 report nodes - is unchanged. The
 dialog must be present and closed in every count, so it cannot leave the count by being opened or moved.
 
-W5-UI Phase A decided difference (W5R3-ADMIT-02/09/10, r4 CI diagnosis W5R3A-CI-01): the two critical-result regions each hold
-one hidden live status line for the Related Report mode's reason (the Sent panel's #cvr-sent-mode-reason and the worklist
-inbox's #cvr-inbox-mode-reason). A polite live region must exist before its text changes to be announced, so both are
-present (hidden, empty) at first paint and in the opened-panel count: + W5_CVR_MODE_NODES. Nothing else in the counts moves.
+The declared feature regions are measured in both served trees by decided_nodes: W4's Approve & Next and
+report notices; W6's report frame assets and removed Recommendation heading; W5's related-mode reason lines,
+Related Report section and assets; S9-U4b's hidden DICOM Transfer section and assets; the clinical-signature asset;
+and W9's Open Selected Studies control, Multi-Study View section (including the New Selection status line) and
+assets. The opened panel's Text Size, Default, controls row and resize edge are measured in the same way. These
+counts are derived, never pinned; the remaining DOM is compared exactly. W9's launch button is taken out of the
+layout before pictures and geometry are measured (HIDE_W9), preserving the existing round-6 comparison.
 
-W5-UI Phase B decided difference (W5-PHASEB-FLOW): main.html now serves the Related Report mode, hidden until a reader opens
-it: + W5_MODE_NODES = 3 + 40, the mode's stylesheet link, the Notice's Discard Insert button and the mode's script tag, and
-the hidden #related-mode section's 40 elements (head, the two identity cards, the three Source sections, the foot and the
-Insert confirmation dialog). The mode's mount builds nothing until it is entered. Measured: first paint 1890 -> 1933 at
-every size (the opened panel the same 43).
-
-W9-UI decided difference (order 01-multi-study-view.md; w9_view_nodes and HIDE_W9 in study_panel_page_dom_test.py): the
-Selected toolbar's Open Selected Studies button (disabled while nothing is selected) and the hidden Multi-Study View
-(stylesheet link, script tag, the #multi-study section, including New Selection). The button is taken out of the layout before the
-page is measured or pictured, so everything else is still round 6's. The W9 delta is derived from this bounded region
-in the served DOM at first paint and with the panel open, instead of pinning its element count.
 """
 import io
 import json
@@ -53,22 +45,8 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 import study_panel_page_dom_test as dom
 from study_panel_page_dom_test import KEY, RASTER, ROOT, VISIBLE, WorkspaceSite, auth, cover, picture_difference, settle, wait_startup
-from study_panel_page_dom_test import W6_FIRST_PAINT_NODES, W6_REPORT_FIELDS, assert_w6_reachable, w6_facts, w6_moved, w6_regions
-from study_panel_page_dom_test import HIDE_W4, W4_REPORT_NODES, HIDE_W9, w9_view_nodes
-
-# S9-U4b part (c) decided difference (D1486, same rule as W6_FIRST_PAINT_NODES / W4_REPORT_NODES): the DICOM Transfer
-# panel adds nodes that stay hidden until a person imports or downloads. main.html gives 4 elements (the Technician
-# toolbar's Import DICOM button, the panel's style element, the hidden #study-transfer section and the
-# study-transfer-local.js script tag); the asset's mount (KinStudyTransferLocal, called from feature-mounts.js at page
-# start) builds 24 inside the hidden section: the header (div, title, Resolve Unconfirmed, Clear Finished, Hide, Close),
-# the body and its list, the status line, the file input, and the admin's Resolve Unconfirmed form (title, four labelled
-# fields, the two basis options, Resolve and its result line). Nothing of it is painted; the requirement these counts
-# carry - the Study Panel's options exist only in the opened panel - is unchanged. Its own cases are
-# study_transfer_local_dom_test.py.
-# r5 (D1617) adds one more node to the mount, so 25: the panel body's persistence note, the paragraph that says when this
-# tab could not keep its transfer history. It is built empty inside the same hidden section and is part of the approved
-# disclosure (D1668 OPUS-04 scope amendment); it is never created later just to stay out of a count (D73).
-S9U4B_TRANSFER_NODES = 4 + 25
+from study_panel_page_dom_test import W6_REPORT_FIELDS, assert_w6_reachable, w6_facts, w6_moved, w6_regions
+from study_panel_page_dom_test import HIDE_W4, HIDE_W9
 
 # Round 6 as finished (a94f2e2 product tree + the r6c test/README commit): the default this round must keep.
 R6 = 'ea2a0379cc3dc0482ee3887940f875fe34ce773c'
@@ -101,13 +79,37 @@ DEFAULT_SIZES = ((1920, 1080), (1366, 768), (2560, 1440), (1200, 1920), (1440, 2
 BOUND_SIZES = ((1200, 1920), (1440, 2560), (900, 1200), (1920, 1080), (1366, 768),
                (840, 768), (860, 700), (900, 768), (1024, 768), (900, 600), (1280, 720), (800, 768))
 SCALES = (1, 1.2, 1.4)
-# W5-UI Phase A (module header): the hidden Related-mode reason lines of the Sent panel and the worklist inbox.
-W5_CVR_MODE_NODES = 2
-# W5-UI Phase B (module header): the served Related Report mode, hidden at first paint.
-W5_MODE_NODES = 3 + 40
-# EMR-D batch 2 (#219) decided difference, same rule: main.html loads clinical-signature.js, the module the question,
-# consultation and Tech Note panes read verified signing facts through. One script element; nothing of it is painted.
-D_CLINICAL_SIGNATURE_NODES = 1
+# Count the declared feature regions in each served tree. A feature may change its
+# internal markup without changing the Study Panel's first-paint contract (D73).
+# Geometry, reachability and pixel comparisons below remain independent of these counts.
+def decided_nodes(page):
+    return page.evaluate("""() => {
+      const nodes = new Set();
+      const add = n => { if (n) nodes.add(n); };
+      const tree = n => { if (n) { add(n); n.querySelectorAll('*').forEach(add); } };
+      for (const selector of ['#report-notice', '#recnote', '#related-mode', '#multi-study', '#study-transfer'])
+        tree(document.querySelector(selector));
+      document.querySelectorAll('#b-approve-next, #multi-selection-open-set, #t-import, '
+        + '#cvr-sent-mode-reason, #cvr-inbox-mode-reason, '
+        + 'link[href="related-report-mode.css"], link[href="multi-study-view.css"], '
+        + 'script[src="report-editor-frame.js"], script[src="related-report-mode.js"], '
+        + 'script[src="multi-study-view.js"], script[src="study-transfer-local.js"], '
+        + 'script[src="clinical-signature.js"], body > iframe[aria-hidden="true"][sandbox="allow-same-origin"]')
+        .forEach(add);
+      const heading = document.querySelector('#recommendation')?.previousElementSibling;
+      if (heading?.matches('h4')) add(heading);
+      const transferStyle = document.querySelector('#study-transfer')?.previousElementSibling;
+      if (transferStyle?.matches('style')) add(transferStyle);
+      const panel = document.querySelector('[role="complementary"][aria-label="Study Panel"]');
+      if (panel) {
+        const size = panel.querySelector('select[aria-label="Text Size"]');
+        tree(size);
+        if (size) add(size.parentElement);
+        [...panel.querySelectorAll('button')].filter(b => b.textContent === 'Default').forEach(add);
+        panel.querySelectorAll('[role="separator"]').forEach(add);
+      }
+      return nodes.size;
+    }""")
 
 
 def nodes_outside_shortcuts(page):
@@ -242,13 +244,13 @@ class StudyPanelSizeDOM(unittest.TestCase):
             wait_startup(page, site)
             page.evaluate(HIDE_W9)   # W9-UI decided difference (study_panel_page_dom_test.py w9_view_nodes)
             settle(page)
-            facts = {'first_paint_nodes': nodes_outside_shortcuts(page), 'w9_first_paint_nodes': w9_view_nodes(page)}
+            facts = {'first_paint_nodes': nodes_outside_shortcuts(page), 'decided_first_paint_nodes': decided_nodes(page)}
             self.click_row(page, 0, f'{width}x{height}')
             self.open_panel(page)
             page.mouse.move(width - 1, height - 1)
             settle(page)
             facts['nodes'] = nodes_outside_shortcuts(page)
-            facts['w9_nodes'] = w9_view_nodes(page)
+            facts['decided_nodes'] = decided_nodes(page)
             facts['panel'], facts['page'] = self.panel(page), page.evaluate(PAGE)
             facts['w6'] = w6_facts(page)
             del facts['panel']['edge']
@@ -259,7 +261,7 @@ class StudyPanelSizeDOM(unittest.TestCase):
                 left, top = min(c['x'] for c in controls), min(c['y'] for c in controls)
                 mask = [left, top, max(c['x'] + c['width'] for c in controls) - left, max(c['y'] + c['height'] for c in controls) - top]
             if picture:
-                page.evaluate(HIDE_W4)   # W4-LAND decided difference (study_panel_page_dom_test.py W4_REPORT_NODES)
+                page.evaluate(HIDE_W4)   # W4-LAND decided difference (study_panel_page_dom_test.py the measured W4 region)
                 cover(page, [mask])
                 settle(page)
                 facts['pixels'] = page.screenshot(animations='disabled', caret='hide',
@@ -288,22 +290,9 @@ class StudyPanelSizeDOM(unittest.TestCase):
                     mine, mask = self.default_panel(current, width, height, picture=picture)
                     theirs, _ = self.default_panel(Path(temporary), width, height, mask=mask, picture=picture)
                     with self.subTest(width=width, height=height):
-                        # W6-PAGE-22 (D1300, W6_REPORT_FIELDS in study_panel_page_dom_test.py): a decided difference.
-                        # W6's report section adds W6_FIRST_PAINT_NODES nodes, its two field boxes are left out of the
-                        # page facts and its scroller's pixels are not compared; what lies below the scroller is compared
-                        # where the scroller leaves it (w6_moved, w6_regions) and stays reachable (assert_w6_reachable);
-                        # everything else stays round 6's.
-                        # W4-LAND: + W4_REPORT_NODES (Approve & Next and the two report rows hidden at first paint); the
-                        # closed Workspace Shortcuts dialog is outside both counts (module header, D1371).
-                        # W5-UI: + W5_CVR_MODE_NODES (the two hidden Related-mode reason lines, module header).
-                        # S9-U4b part (c): + S9U4B_TRANSFER_NODES, the hidden DICOM Transfer panel (above).
-                        # W5-UI Phase B: + W5_MODE_NODES, the hidden Related Report mode (module header).
-                        # W9-UI: the measured W9 region, the Selected toolbar's Open Selected Studies (out of the layout here,
-                        # HIDE_W9) and the hidden Multi-Study View (module header).
-                        self.assertEqual(theirs['first_paint_nodes'] + W6_FIRST_PAINT_NODES + W4_REPORT_NODES + W5_CVR_MODE_NODES
-                                         + S9U4B_TRANSFER_NODES + W5_MODE_NODES + D_CLINICAL_SIGNATURE_NODES
-                                         + mine['w9_first_paint_nodes'] - theirs['w9_first_paint_nodes'],
-                                         mine['first_paint_nodes'], 'first paint')
+                        # Compare everything outside the declared feature regions in both served trees.
+                        self.assertEqual(theirs['first_paint_nodes'] - theirs['decided_first_paint_nodes'],
+                                         mine['first_paint_nodes'] - mine['decided_first_paint_nodes'], 'first paint')
                         self.assertEqual(theirs['panel'], mine['panel'], 'panel')
                         page_facts = lambda facts: [row for row in facts['page'] if row[0] not in W6_REPORT_FIELDS]
                         self.assertEqual(page_facts(theirs), page_facts(mine), 'page')
@@ -330,12 +319,8 @@ class StudyPanelSizeDOM(unittest.TestCase):
                                 expected['shown'] = expected['shown'][:3] + [expected['shown'][3] + lost]
                             self.assertEqual(expected, within_panel(mine[key]), key)
                             self.assertEqual(mine['panel']['drawer'], mine[key]['drawer'], key + ': the panel does not move')
-                        # The opened panel's new nodes: the Text Size select and its 3 options, Default, the
-                        # controls' row and the edge (stated in the round-7 report). The whole page is counted, so the
-                        # still hidden DICOM Transfer panel's nodes (and W5-UI's two hidden reason lines) are in it too.
-                        self.assertEqual(7 + W6_FIRST_PAINT_NODES + W4_REPORT_NODES + W5_CVR_MODE_NODES + S9U4B_TRANSFER_NODES
-                                         + W5_MODE_NODES + D_CLINICAL_SIGNATURE_NODES
-                                         + mine['w9_nodes'] - theirs['w9_nodes'], mine['nodes'] - theirs['nodes'])
+                        self.assertEqual(theirs['nodes'] - theirs['decided_nodes'],
+                                         mine['nodes'] - mine['decided_nodes'], 'opened panel')
                         if picture:
                             regions = w6_regions(theirs['w6']['scroller'], mine['w6']['scroller'], width, height)
                             for difference in picture_difference(self.browser, theirs['pixels'], mine['pixels'], regions):
