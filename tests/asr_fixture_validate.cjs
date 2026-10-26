@@ -9,7 +9,7 @@
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
-const { inspectDictationWav, DICTATION_AUDIO_MAX_BYTES } = require('/app/dist/dictation-audio');
+const { inspectDictationWav, DICTATION_AUDIO_DEFAULT_BYTES } = require('/app/dist/dictation-audio');
 
 const path = process.argv[2] || '/fixture/dictation.wav';
 const bytes = fs.readFileSync(path);
@@ -19,7 +19,7 @@ const record = {
   path,
   bytes: bytes.length,
   sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
-  wav_max_bytes: DICTATION_AUDIO_MAX_BYTES,
+  wav_max_bytes: DICTATION_AUDIO_DEFAULT_BYTES,
   result,
 };
 process.stdout.write(`${JSON.stringify(record, null, 2)}\n`);

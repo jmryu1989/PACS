@@ -370,7 +370,7 @@ window.snapshot = () => {
             text: $("#dictation-text").textContent, textHidden: $("#dictation-text").hidden,
             place: $("#dictation-place").textContent, meta: $("#dictation-meta").textContent,
             metaTitle: $("#dictation-meta").getAttribute("title"),
-            stop: hdControl("stop"), cancel: hdControl("cancel"), repin: hdControl("repin"),
+            stop: hdControl("stop"), cancel: hdControl("cancel"), retry: hdControl("retry"), repin: hdControl("repin"),
             insert: hdControl("insert"), close: hdControl("close") },
     button: { disabled: $("#b-dictate").disabled, title: $("#b-dictate").getAttribute("title"),
               text: $("#b-dictate").textContent.trim(), outer: $("#b-dictate").outerHTML },
@@ -564,8 +564,9 @@ class ReportDictationHostDOMTest(unittest.TestCase):
         markup = before["button"]["outer"]
         self.assertIn('title="%s"' % DICTATE_TITLE, markup)
         self.assertTrue(markup.endswith(">Dictate</button>"))
+        # A configured limit is the site's (C13); only a size the RIFF header cannot describe is malformed.
         for capability in (None, dict(CAPABILITY, available=False), dict(CAPABILITY, available="true"),
-                           dict(CAPABILITY, maxBytes=2000000), {"available": True}):
+                           dict(CAPABILITY, maxBytes=0xFFFFFFFF + 9), {"available": True}):
             if capability is not None:
                 self.page.evaluate("c => { dictation.setServerCapability(c); updateReportButtons(); }", capability)
             value = self.snap()
@@ -809,7 +810,8 @@ class ReportDictationHostDOMTest(unittest.TestCase):
     def test_hd11_server_refusals_without_json_and_route_codes_leave_the_report(self):
         for status, raw, key in ((413, "<html><body>413 Request Entity Too Large</body></html>",
                                   "DICTATION_AUDIO_TOO_LARGE"),
-                                 (503, '{"code":"DICTATION_BUSY","message":"DICTATION_BUSY"}', "DICTATION_BUSY"),
+                                 (503, '{"code":"DICTATION_NOT_CONFIGURED","message":"DICTATION_NOT_CONFIGURED"}',
+                                  "DICTATION_NOT_CONFIGURED"),
                                  (200, reply("x" * (TEXT_CAP + 1)), "transcript-too-long")):
             if self.opened:
                 self.tearDown()
@@ -822,6 +824,37 @@ class ReportDictationHostDOMTest(unittest.TestCase):
             self.assertEqual(self.page.evaluate("k => KinDictation.REASONS[k]", key) + UNCHANGED,
                              value["pane"]["status"])
             self.assertEqual([EXISTING, "", ""], value["text"])
+
+    # ── HD-21 ──────────────────────────────────────────────────────────────────────────────
+    def test_hd21_a_busy_or_absent_engine_holds_the_recording_and_retry_sends_it_again(self):
+        """First-site recovery on the page's own pane markup: the recording waits with Retry focused, the report
+        is untouched, Retry sends the same bytes, and the answer is reviewed and inserted as any other."""
+        self.open()
+        index = self.upload()
+        self.page.evaluate("([i, s, r]) => answer(i, s, r)",
+                           [index, 503, '{"code":"DICTATION_BUSY","message":"DICTATION_BUSY"}'])
+        self.page.wait_for_function("()=>dictation.view().held")
+        value = self.snap()
+        self.assertEqual("uploading", value["session"]["state"])
+        self.assertEqual(self.page.evaluate("KinDictation.REASONS.DICTATION_BUSY + KinDictation.STATUS.held"),
+                         value["pane"]["status"])
+        self.assertEqual({"hidden": False, "disabled": False}, value["pane"]["retry"])
+        self.assertEqual({"hidden": False, "disabled": False}, value["pane"]["cancel"])
+        self.assertTrue(value["pane"]["close"]["hidden"])
+        self.assertEqual("dictation-retry", value["focused"], "Retry, not Cancel, takes the next Enter")
+        self.assertEqual([EXISTING, "", ""], value["text"])
+        self.assertTrue(value["media"]["released"], "the microphone is not held while the recording waits")
+        self.page.keyboard.press("Enter")
+        self.page.wait_for_function("n => dictCalls.length === n", arg=index + 2)
+        value = self.snap()
+        self.assertEqual(value["dict"][index]["pcm"], value["dict"][index + 1]["pcm"], "the same recording")
+        self.assertTrue(value["dict"][index + 1]["zeroed"])
+        self.assertTrue(value["pane"]["retry"]["hidden"])
+        self.page.evaluate("([i, s, r]) => answer(i, s, r)", [index + 1, 200, reply(TRANSCRIPT)])
+        self.wait_state("review")
+        self.page.click("#dictation-insert")
+        self.wait_state("inserted")
+        self.assertIn(TRANSCRIPT, self.snap()["text"][0])
 
     # ── HD-12 ──────────────────────────────────────────────────────────────────────────────
     def test_hd12_keyboard_reaches_every_step_and_an_arriving_answer_never_takes_focus(self):

@@ -102,6 +102,9 @@ W5_MODE_NODES = 3 + 40
 # EMR-D batch 2 (#219) decided difference, same rule: main.html loads clinical-signature.js, the module the question,
 # consultation and Tech Note panes read verified signing facts through. One script element; nothing of it is painted.
 D_CLINICAL_SIGNATURE_NODES = 1
+# Dictation first site decided difference, same rule: the dictation pane's Retry button, hidden until an engine that is
+# down, slow or busy leaves a recording waiting (docs/ops/dictation-first-site.md). One element in the hidden pane.
+ASR_RETRY_NODES = 1
 
 
 def nodes_outside_shortcuts(page):
@@ -291,8 +294,9 @@ class StudyPanelSizeDOM(unittest.TestCase):
                         # S9-U4b part (c): + S9U4B_TRANSFER_NODES, the hidden DICOM Transfer panel (above).
                         # W5-UI Phase B: + W5_MODE_NODES, the hidden Related Report mode (module header).
                         # EMR-D batch 2: + D_CLINICAL_SIGNATURE_NODES, the clinical-signature.js script element.
+                        # Dictation first site: + ASR_RETRY_NODES, the hidden pane's Retry button.
                         self.assertEqual(theirs['first_paint_nodes'] + W6_FIRST_PAINT_NODES + W4_REPORT_NODES + W5_CVR_MODE_NODES
-                                         + S9U4B_TRANSFER_NODES + W5_MODE_NODES + D_CLINICAL_SIGNATURE_NODES,
+                                         + S9U4B_TRANSFER_NODES + W5_MODE_NODES + D_CLINICAL_SIGNATURE_NODES + ASR_RETRY_NODES,
                                          mine['first_paint_nodes'], 'first paint')
                         self.assertEqual(theirs['panel'], mine['panel'], 'panel')
                         page_facts = lambda facts: [row for row in facts['page'] if row[0] not in W6_REPORT_FIELDS]
@@ -324,7 +328,8 @@ class StudyPanelSizeDOM(unittest.TestCase):
                         # controls' row and the edge (stated in the round-7 report). The whole page is counted, so the
                         # still hidden DICOM Transfer panel's nodes (and W5-UI's two hidden reason lines) are in it too.
                         self.assertEqual(7 + W6_FIRST_PAINT_NODES + W4_REPORT_NODES + W5_CVR_MODE_NODES + S9U4B_TRANSFER_NODES
-                                         + W5_MODE_NODES + D_CLINICAL_SIGNATURE_NODES, mine['nodes'] - theirs['nodes'])
+                                         + W5_MODE_NODES + D_CLINICAL_SIGNATURE_NODES + ASR_RETRY_NODES,
+                                         mine['nodes'] - theirs['nodes'])
                         if picture:
                             regions = w6_regions(theirs['w6']['scroller'], mine['w6']['scroller'], width, height)
                             for difference in picture_difference(self.browser, theirs['pixels'], mine['pixels'], regions):

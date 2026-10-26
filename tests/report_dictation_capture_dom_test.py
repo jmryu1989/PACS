@@ -64,7 +64,7 @@ HOLD_SECONDS = 25
 # Session states a started run never leaves by itself (dictation-session.js ACTIVE is the complement).
 TERMINAL_STATES = ("failed", "cancelled", "unavailable", "inserted")
 SMALL_CAP = 32044                           # 16000 frames: the CAP-03 worklet cap
-FULL_FRAMES = 524266                        # floor((1048576 - 44) / 2), dictation-worklet.js:8
+FULL_FRAMES = 524266                        # floor((1048576 - 44) / 2): this file's CAPABILITY maxBytes, as dictation-capture.js derives it
 WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 LOGGED_HEADERS = ("Content-Type", "Content-Length", "Transfer-Encoding", "X-KIN-CSRF", "Authorization", "Cookie",
                   "X-KIN-Session", "Origin", "Sec-Fetch-Dest", "Sec-Fetch-Mode", "Sec-Fetch-Site")

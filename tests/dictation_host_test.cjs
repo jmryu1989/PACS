@@ -137,8 +137,11 @@ async function toReview(t, text = ' 좌상엽 결절.\n') {
 
 test('capability: only the exact bootstrap shape is available, and malformed means unavailable', () => {
   assert.deepEqual(D.parseCapability(CAP), CAP);
+  // C13: the server's configured limit is taken as given, up to what a 32-bit RIFF size can describe.
+  for (const maxBytes of [46, 180 * 32000 + 44, 10 * 60 * 32000 + 44, 0xffffffff + 8])
+    assert.equal(D.parseCapability({ ...CAP, maxBytes }).maxBytes, maxBytes);
   const off = [null, undefined, [], 'x', { ...CAP, available: 1 }, { ...CAP, available: 'true' },
-    { ...CAP, maxBytes: 45 }, { ...CAP, maxBytes: 1048577 }, { ...CAP, maxBytes: 1.5 }, { ...CAP, maxBytes: '1048576' },
+    { ...CAP, maxBytes: 45 }, { ...CAP, maxBytes: 0xffffffff + 9 }, { ...CAP, maxBytes: 1.5 }, { ...CAP, maxBytes: '1048576' },
     { ...CAP, timeoutMs: 0 }, { ...CAP, timeoutMs: 240001 }, { ...CAP, languagePin: '' }, { ...CAP, enginePin: 7 },
     { ...CAP, modelPin: 'x'.repeat(257) }, { available: true }];
   for (const value of off) assert.equal(D.parseCapability(value).available, false, JSON.stringify(value));
@@ -350,22 +353,21 @@ test('zero captured frames maps to a user message, not a transport attempt', asy
   assert.equal(t.net.calls.length, 0);
 });
 
-test('server and transport failures end in failed with the report unchanged', async () => {
+test('refusals of this person, study or these bytes end in failed with the report unchanged', async () => {
   const cases = [
     [c => c.respond(413, '<html>too large</html>'), D.REASONS.DICTATION_AUDIO_TOO_LARGE],
-    [c => c.respond(503, '{"code":"DICTATION_TIMEOUT","message":"DICTATION_TIMEOUT"}'), D.REASONS.DICTATION_TIMEOUT],
-    [c => c.respond(503, '{"code":"DICTATION_ENGINE_FAILED","message":"DICTATION_ENGINE_FAILED"}'), D.REASONS.DICTATION_ENGINE_FAILED],
+    [c => c.respond(503, '{"code":"DICTATION_NOT_CONFIGURED","message":"DICTATION_NOT_CONFIGURED"}'), D.REASONS.DICTATION_NOT_CONFIGURED],
     [c => c.respond(409, '{"code":"REPORT_HELD","message":"다른 판독의가 판독 중입니다"}'), '다른 판독의가 판독 중입니다'],
     [c => c.respond(200, 'not json'), D.REASONS['invalid-response']],
     [c => c.respond(200, REPLY(' \n ')), D.REASONS['transcript-empty']],
     [c => c.respond(200, REPLY('x'.repeat(D.TEXT_CAP + 1))), D.REASONS['transcript-too-long']],
-    [c => c.reject(new TypeError('network')), D.REASONS.network],
   ];
   for (const [answer, message] of cases) {
     const t = setup(); const call = await toUpload(t);
     answer(call); await flush();
     assert.equal(t.c.snapshot().state, 'failed', message);
     assert.equal(t.c.view().status, message + ' — 판독문은 그대로입니다');
+    assert.equal(t.c.view().controls.retry, 'hidden');
     assert.deepEqual(t.ed.inserts, []); assert.equal(t.ed.values.findings, '첫 줄\n둘째 줄');
     assert.equal(t.timers.live().length, 0, 'the client timer is cleared');
   }
@@ -374,17 +376,98 @@ test('server and transport failures end in failed with the report unchanged', as
   assert.equal(exact.c.snapshot().text.length, D.TEXT_CAP);
 });
 
-test('plain 401 fails only the run; the client timeout aborts and a late answer is ignored', async () => {
-  const t = setup(); const call = await toUpload(t);
-  call.respond(401, ''); await flush();
-  assert.equal(t.c.snapshot().state, 'failed'); assert.equal(t.logouts(), 0);assert.equal(t.lifecycle.gate.state(), 'active');
+// First-site recovery: an engine that is down, slow or busy must not cost the reader a recording they spoke.
+const TRANSIENT = [
+  [c => c.respond(503, '{"code":"DICTATION_TIMEOUT","message":"DICTATION_TIMEOUT"}'), D.REASONS.DICTATION_TIMEOUT],
+  [c => c.respond(503, '{"code":"DICTATION_ENGINE_FAILED","message":"DICTATION_ENGINE_FAILED"}'), D.REASONS.DICTATION_ENGINE_FAILED],
+  [c => c.respond(503, '{"code":"DICTATION_BUSY","message":"DICTATION_BUSY"}'), D.REASONS.DICTATION_BUSY],
+  [c => c.respond(502, '<html>bad gateway</html>'), '음성 인식 요청이 거절되었습니다 (HTTP 502)'],
+  [c => c.reject(new TypeError('network')), D.REASONS.network],
+];
+async function toHeld(t, answer = TRANSIENT[1][0]) {
+  const call = await toUpload(t);
+  answer(call); await flush();
+  assert.equal(t.c.view().held, true);
+  return call;
+}
 
+test('a transient failure holds the recording; Retry sends the same bytes under the same pin and reaches review', async () => {
+  for (const [answer, message] of TRANSIENT) {
+    const t = setup(); const call = await toUpload(t); const pin = t.c.snapshot().pin;
+    answer(call); await flush();
+    const v = t.c.view();
+    assert.deepEqual([v.state, v.held, v.active, v.visible], ['uploading', true, true, true], message);
+    assert.equal(v.status, message + D.STATUS.held);
+    assert.deepEqual(v.controls, { stop: 'hidden', cancel: 'enabled', retry: 'enabled', repin: 'hidden', insert: 'hidden', close: 'hidden' });
+    assert.deepEqual(t.ed.inserts, []); assert.equal(t.ed.values.findings, '첫 줄\n둘째 줄');
+    assert.equal(t.timers.live().length, 0, 'no timer runs while the recording waits');
+    assert.equal(t.net.calls.length, 1, 'nothing is resent without the reader');
+    t.c.retry(); await flush();
+    assert.equal(t.net.calls.length, 2);
+    assert.deepEqual(t.net.calls[1].sent, call.sent, 'the same recording, byte for byte');
+    assert.ok(t.net.calls[1].init.body.every(b => b === 0), 'the sent copy is cleared as before');
+    assert.equal(t.c.view().held, false); assert.equal(t.c.view().status, D.STATUS.uploading);
+    assert.deepEqual(t.c.snapshot().pin, pin);
+    t.net.calls[1].respond(200, REPLY('다시 보낸 글')); await flush();
+    assert.equal(t.c.snapshot().state, 'review'); assert.equal(t.c.snapshot().text, '다시 보낸 글');
+    assert.equal((await t.c.insert()).inserted, true);
+    assert.equal(t.ed.values.findings, '첫 줄\n다시 보낸 글둘째 줄');
+  }
+});
+
+test('the client timeout holds the recording and a late answer to the abandoned request is ignored', async () => {
   const u = setup(); const late = await toUpload(u);
   u.timers.fire(); await flush();
   assert.equal(late.aborted, true);
-  assert.equal(u.c.view().status, D.REASONS['client-timeout'] + ' — 판독문은 그대로입니다');
+  assert.equal(u.c.view().status, D.REASONS['client-timeout'] + D.STATUS.held);
   late.respond(200, REPLY('늦음')); await flush();
-  assert.equal(u.c.snapshot().state, 'failed'); assert.deepEqual(u.ed.inserts, []);
+  assert.deepEqual([u.c.snapshot().state, u.c.view().held, u.c.snapshot().text], ['uploading', true, '']);
+  assert.deepEqual(u.ed.inserts, []);
+});
+
+test('Retry waits for the connection; repeated transient failures keep holding; a final refusal ends the run', async () => {
+  const t = setup(); await toHeld(t);
+  t.ed.serverDown = true; t.c.refresh();
+  assert.equal(t.c.view().held, true, 'losing the connection does not cost the held recording');
+  assert.equal(t.c.view().controls.retry, 'disabled'); assert.match(t.c.view().status, /서버 없음$/);
+  t.c.retry(); await flush(); assert.equal(t.net.calls.length, 1);
+  t.ed.serverDown = false; t.c.refresh();
+  assert.equal(t.c.view().controls.retry, 'enabled');
+  t.c.retry(); await flush();
+  t.net.calls[1].respond(503, '{"code":"DICTATION_BUSY","message":"DICTATION_BUSY"}'); await flush();
+  assert.equal(t.c.view().held, true); assert.equal(t.c.view().status, D.REASONS.DICTATION_BUSY + D.STATUS.held);
+  t.c.retry(); await flush();
+  t.net.calls[2].respond(409, '{"code":"REPORT_HELD","message":"다른 판독의가 판독 중입니다"}'); await flush();
+  assert.equal(t.c.snapshot().state, 'failed'); assert.equal(t.c.view().status, '다른 판독의가 판독 중입니다 — 판독문은 그대로입니다');
+  t.c.retry(); await flush(); assert.equal(t.net.calls.length, 3, 'a failed run has nothing to retry');
+});
+
+test('a held recording is discarded by Cancel, a study change, a changed base and page exit, never sent later', async () => {
+  const leave = [c => c.cancel(), (c, ed) => { ed.selectionSeq += 2; c.refresh(); }, (c, ed) => { ed.baseVersion += 1; c.refresh(); },
+    c => c.pageExit()];
+  for (const end of leave) {
+    const t = setup(); await toHeld(t);
+    end(t.c, t.ed); await flush();
+    assert.ok(['cancelled', 'failed'].includes(t.c.snapshot().state), t.c.snapshot().state);
+    assert.equal(t.c.view().held, false); assert.equal(t.c.view().controls.retry, 'hidden');
+    t.c.retry(); await flush();
+    assert.equal(t.net.calls.length, 1); assert.deepEqual(t.ed.inserts, []);
+  }
+});
+
+test('a logout preparation that is cancelled leaves a held recording waiting for the reader', async () => {
+  const t = setup(); await toHeld(t);
+  const p = t.lifecycle.gate.prepare({}); await flush();
+  t.lifecycle.gate.cancelPreparation(p); await flush();
+  assert.equal(t.net.calls.length, 1, 'no automatic resend'); assert.equal(t.c.view().held, true);
+  t.c.retry(); await flush(); assert.equal(t.net.calls.length, 2);
+  t.c.cancel();
+});
+
+test('plain 401 fails only the run', async () => {
+  const t = setup(); const call = await toUpload(t);
+  call.respond(401, ''); await flush();
+  assert.equal(t.c.snapshot().state, 'failed'); assert.equal(t.logouts(), 0);assert.equal(t.lifecycle.gate.state(), 'active');
 });
 
 test('an edited field keeps the text, needs an explicit re-pin, and never inserts on re-pin alone', async () => {
