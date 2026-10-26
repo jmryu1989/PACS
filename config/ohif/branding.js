@@ -25,6 +25,7 @@ function KinViewerBrand({ React }) {
     const labelOf = node => node.nodeType === Node.ELEMENT_NODE
       ? (node.localName === 'svg' ? '' : [...node.childNodes].map(labelOf).join(''))
       : node.nodeType === 3 ? node.data : '';
+    // The native preferences entry keeps non-letter hotkeys and language reachable.
     // 드롭다운은 한 목록에서 같은 태그의 행을 나란히 만든다. 클래스는 마지막 행만 다를 수 있어 비교하지 않는다.
     const hideAboutRows = scope => {
       scope.querySelectorAll('*').forEach(row => {

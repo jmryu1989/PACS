@@ -1,3 +1,4 @@
+import type { ClinicalWorkflow } from '../emr-clinical/routes';
 /*
  * 검사 상태 PATCH·오더 매칭/해제·검사 행 삭제와 원격판독 전이표. rs·repDoc·confirm은 여기서 바꾸지 않는다(commitReport 전용).
  * PacsService가 만들어 소유하는 평범한 객체다(Nest provider가 아니다). 생성자는 참조만 저장한다.
@@ -56,7 +57,7 @@ export class PacsStudyState {
     private readonly audit: PacsAudit) {}
 
   /** 검사 상태 부분 수정 (RS 토글, Verify, Switch EM/ReqHosp, TS 전이 …) */
-  async patchState(uid: string, body: any, c: Caller) {
+  async patchState(uid: string, body: any, c: Caller, workflow?: ClinicalWorkflow) {
     return this.access.scopeWrite(uid,c,async(tx,audit)=>{
     const me = inst(c);
 
@@ -155,12 +156,12 @@ export class PacsStudyState {
     // reader assignment in this transaction. The close goes first: it locks the StudyState row, which the update below
     // keeps to commit, and reads the channel being replaced under that lock rather than from gate()'s read above.
     if (data.teleInstitutionId !== undefined)
-      await closeReaderAssignments(tx, uid, { institutionId: prev.institutionId, teleInstitutionId: data.teleInstitutionId }, c.actor, 'tele-closed');
+      await closeReaderAssignments(tx, uid, { institutionId: prev.institutionId, teleInstitutionId: data.teleInstitutionId }, c, 'tele-closed', workflow);
     const saved = await tx.studyState.update({ where: { uid }, data });
     await audit(c.actor, 'state.patch', uid, { ...data, by: me });
     const r = await tx.report.findUnique({ where: { uid } });
     return toClient(saved, r, c, await this.access.myDraft(uid,c.actor,tx));
-    });
+    },workflow?.tx);
   }
 
   /**
@@ -286,12 +287,12 @@ export class PacsStudyState {
   }
 
   /** 검사 상태 행 삭제 (장비 수신 시뮬로 만든 가짜 검사 정리용) */
-  async removeState(uid: string, c: Caller) {
+  async removeState(uid: string, c: Caller, workflow?: ClinicalWorkflow) {
     need(c.roles, 'technician', '검사 삭제');
     const me = inst(c);
     await this.access.gate(uid, c);
     await this.studyAccess.prepare(c,[uid]);
-    return this.prisma.$transaction(async tx => {
+    const execute = async (tx: import('@prisma/client').Prisma.TransactionClient) => {
       await this.studyAccess.require(c,[uid],tx);
     await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
     await tx.$executeRaw`SET LOCAL statement_timeout = '5s'`;
@@ -353,13 +354,14 @@ export class PacsStudyState {
     // S7-U3a: deleting the study ends an open tele channel too; the receiver's reader assignment closes with it, under the
     // row lock taken above, so a study that arrives again under this UID never brings it back open.
     if (prev.teleInstitutionId)
-      await closeReaderAssignments(tx, uid, { institutionId: prev.institutionId, teleInstitutionId: null }, c.actor, 'study-deleted');
+      await closeReaderAssignments(tx, uid, { institutionId: prev.institutionId, teleInstitutionId: null }, c, 'study-deleted', workflow);
     // 남은 초안 행은 비운 자리뿐이다(위에서 present 행이 있으면 거절했다). 검사 행과 함께 치운다: 같은 UID로 다시 생긴
     // 검사는 새 세대(draftEpoch)를 받으므로, 치운 자리의 revision이 없어도 옛 경계의 쓰기는 모두 거절된다.
     await tx.reportDraft.deleteMany({ where: { uid, present: false } });
     await tx.studyState.delete({ where: { uid } });
     await tx.auditLog.create({ data: { actor: c.actor, action: 'state.delete', target: uid, detail: JSON.stringify({ by: me }) } });
     return { ok: true };
-    }, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 });
+    };
+    return workflow ? execute(workflow.tx) : this.prisma.$transaction(execute, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 });
   }
 }

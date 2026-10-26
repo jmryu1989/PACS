@@ -1,4 +1,5 @@
 'use strict';
+const nativeSigning = { sign: async () => ({ fixture: 'native-signature' }) };
 
 // B2 consumer fixture only: these existing pure suites exercise business/CAS rules.
 // Real ledger atomicity and HTTP publication are tested against PostgreSQL.
@@ -282,6 +283,7 @@ function studyAccessDouble() {
     assertUnsplitSource(c, uid) {
       sa.calls.push(['source:assert', uid]);
       if (sa.split.has(uid)) throw new ConflictException({ code: 'STUDY_IDENTITY_UNRESOLVED', message: 'synthetic split' });
+      return { sourcePatientId: null, sourceInstitution: null };
     },
   };
   return sa;
@@ -331,11 +333,18 @@ function world() {
   const clinician = new PacsClinician(prisma, sa, access, worklist);
   const evidence = new PacsReportEvidence(prisma, sa, findings, access);
   const draft = withDraftRequestContext(new PacsReportDraft(prisma, sa, access, audit, evidence, b2Ledger(prisma)), b2Ledger(prisma));
-  const commit = withDraftRequestContext(new PacsReportCommit(keycloak, sa, evidence, draft), b2Ledger(prisma));
+  const commit = withDraftRequestContext(new PacsReportCommit(keycloak, sa, evidence, draft, nativeSigning), b2Ledger(prisma));
+  const clinical = {
+    read: (_request, _kind, _id, read) => prisma.$transaction(read),
+    write: async (_request, _input, write) => ({ ...await prisma.$transaction(write), emr: { replayed: false } }),
+    workflow: (_request, execute) => prisma.$transaction(tx => execute({ tx,
+      closeAssignment: async () => {} })),
+  };
   const w = { db, sa, orthanc, keycloak, findings, access, institutions, preferences, filters, audit, metrics, worklist, gateway,
     studyState, techNote, hold, clinician, evidence, draft, commit };
   /** The PacsService facade over the same providers: it builds and owns its own concern graph. */
-  w.facade = () => withDraftRequestContext(new PacsService(prisma, orthanc, keycloak, sa, findings, b2Ledger(prisma)), b2Ledger(prisma));
+  w.facade = () => withDraftRequestContext(new PacsService(prisma, orthanc, keycloak, sa, findings, b2Ledger(prisma), nativeSigning, clinical), b2Ledger(prisma));
+  w.workflow = execute => clinical.workflow({}, execute);
   w.study = (fields = {}) => db.seed('studyState', { uid: uidOf(), institutionId: INST_A, ss: 'Verified', ...fields });
   w.audits = (action) => db.rows('auditLog').filter(row => !action || row.action === action);
   /** Starts the institutions concern as the facade's onModuleInit does: two synthetic institutions beside the seeds. */
@@ -379,7 +388,7 @@ test('SPLIT-01 every concern is built from references alone: constructing touche
   const draft = withDraftRequestContext(new PacsReportDraft(prisma, sa, access, audit, evidence, b2Ledger(prisma)), b2Ledger(prisma));
   new PacsFilters(prisma); new PacsMetrics(prisma, orthanc, sa, access); new PacsDicomGateway(prisma, orthanc, sa, access, institutions);
   new PacsStudyState(prisma, sa, access, institutions, audit); new PacsTechNote(prisma, sa, access); new PacsHold(prisma, sa, access);
-  new PacsClinician(prisma, sa, access, worklist); new PacsReportCommit(keycloak, sa, evidence, draft);
+  new PacsClinician(prisma, sa, access, worklist); new PacsReportCommit(keycloak, sa, evidence, draft, nativeSigning);
   assert.deepEqual(touched, []);
   assert.equal(process.getActiveResourcesInfo().filter(kind => kind === 'Timeout').length, timers);
   // the institution cache is empty until the facade's onModuleInit starts it
@@ -483,7 +492,7 @@ test('SPLIT-06 PATCH refuses report-owned fields without writing anything; techn
   assert.equal(out.teleInstitutionId, INST_B);
   w.db.seed('readerAssignment', { studyUid: s.uid, institutionId: INST_B, revision: 1, readerSub: RAD_B.sub, readerActor: RAD_B.actor, readerName: 'B' });
   await refused(() => w.studyState.patchState(s.uid, { ts: 'wait', teleTo: 'nowhere' }, RAD_A), 400);
-  const cancelled = await w.studyState.patchState(s.uid, { ts: 'cancelled' }, RAD_A);
+  const cancelled = await w.workflow(workflow => w.studyState.patchState(s.uid, { ts: 'cancelled' }, RAD_A, workflow));
   assert.equal(cancelled.teleInstitutionId, null);
   const assignment = w.db.rows('readerAssignment')[0];
   assert.ok(assignment.closedAt instanceof Date);
@@ -701,7 +710,7 @@ test('SPLIT-14 a citation is shown only while its finding is readable; a databas
   assert.equal(read.head[0].insertedText, 'line one');
   assert.deepEqual(read.head[1], { cid: 'c-2', field: 'findings', insertedAt: '2026-10-01T00:00:00.000Z', insertedBy: RAD_A.actor, state: 'source-unavailable' });
   w.findings.readable.clear();
-  const past = await w.evidence.reportVersionCitations(s.uid, '1', RAD_A);
+  const past = JSON.parse((await w.evidence.reportVersionCitations(s.uid, '1', RAD_A)).json);
   assert.ok(past.entries.every(e => e.state === 'source-unavailable' && !('presence' in e)));
 
   const check = name => Object.assign(new Error('violates check constraint'), { code: 'P2010', meta: { constraint: name } });
@@ -876,7 +885,7 @@ test('SPLIT-22 the facade starts its institutions concern and each public call a
   assert.deepEqual(await facade.hold(s.uid, RAD_A), { holder: RAD_A.actor, mine: true, conflict: false });
   const saved = await facade.commitReport(s.uid, commitBody(RAD_A, 'save', s.draftEpoch, 0, 0, { findings: 'via facade' }), RAD_A, null);
   assert.deepEqual([saved.state.rs, saved.state.holder], ['T', null], 'a commit releases the hold');
-  assert.deepEqual((await facade.versions(s.uid, RAD_A)).map(v => [v.version, v.action, v.findings]), [[1, 'save', 'via facade']]);
+  assert.deepEqual(JSON.parse((await facade.versions(s.uid, RAD_A)).json).map(v => [v.version, v.action, v.findings]), [[1, 'save', 'via facade']]);
   const draft = await facade.putReport(s.uid, draftBody(RAD_A, s.draftEpoch, 1, { findings: 'next', baseVersion: 1 }), RAD_A, null);
   assert.equal(draft.revision, `${s.draftEpoch}:2`);
   assert.equal((await facade.readDraft(s.uid, RAD_A)).snapshot.findings, 'next');
@@ -898,7 +907,7 @@ test('SPLIT-23 the facade passes every refusal through unchanged: status, code, 
   await refused(() => facade.adminMetrics(RAD_A), 403);
   await refused(() => facade.announceStudy('1.2.3', '', ADMIN_A), 403);
   await refused(() => facade.clinicianStudies(RAD_A), 403);
-  await refused(() => facade.saveTechNote(s.uid, { baseVersion: 0, text: 'x', reason: '' }, RAD_A), 403);
+  await refused(() => facade.saveTechNote(s.uid, { baseVersion: 0, text: 'x', reason: '' }, RAD_A, {}), 403);
   assert.deepEqual(w.db.writes, []);
 });
 

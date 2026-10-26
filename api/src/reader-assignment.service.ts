@@ -1,3 +1,5 @@
+import type { Prisma } from '@prisma/client';
+import type { ClinicalWorkflow } from './emr-clinical/routes';
 import { StudyAccessService } from './study-access.service';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
@@ -24,7 +26,8 @@ const key=(studyUid:string,institutionId:string)=>({studyUid_institutionId:{stud
  * reader is cleared, the close gets its own request id (no earlier request replays into a reopened channel), and one audit
  * entry per row records it for the institution that lost it.
  */
-export async function closeReaderAssignments(tx:any,uid:string,admits:{institutionId:string|null;teleInstitutionId:string|null},actor:string,reason:'tele-closed'|'study-deleted'){
+export async function closeReaderAssignments(tx:any,uid:string,admits:{institutionId:string|null;teleInstitutionId:string|null},caller:Caller,reason:'tele-closed'|'study-deleted',workflow?:ClinicalWorkflow){
+  const actor=caller.actor;
   const [study]=await tx.$queryRaw`SELECT "institutionId", "teleInstitutionId" FROM "StudyState" WHERE uid = ${uid} FOR NO KEY UPDATE`;
   const kept=[study?.institutionId,admits.institutionId,admits.teleInstitutionId].filter((x):x is string=>typeof x==='string');
   const rows=new Map<string,any>((await tx.readerAssignment.findMany({where:{studyUid:uid,closedAt:null,institutionId:{notIn:kept}}})).map((row:any)=>[row.institutionId,row]));
@@ -37,7 +40,10 @@ export async function closeReaderAssignments(tx:any,uid:string,admits:{instituti
       closedRevision:revision,closedAt:new Date()};
     if(row)await tx.readerAssignment.update({where:key(uid,institutionId),data});
     else await tx.readerAssignment.create({data:{studyUid:uid,institutionId,...data}});
-    await tx.auditLog.create({data:{actor,action:ACTION,target:uid,detail:JSON.stringify({institution:institutionId,revision,from:row?.readerActor??null,to:null,closed:reason})}});
+    if(!workflow)throw new ServiceUnavailableException('배정 해제 기록 연결을 확인할 수 없습니다');
+    await workflow.closeAssignment(uid,institutionId,revision);
+    await tx.auditLog.create({data:{actor,action:ACTION,target:uid,detail:JSON.stringify({institution:institutionId,revision,from:row?.readerActor??null,to:null,closed:reason,
+      caller:{sub:caller.sub,institution:caller.institution,roles:caller.roles},ownerInstitution:institutionId})}});
   }
   return rows.size;
 }
@@ -50,7 +56,7 @@ export class ReaderAssignmentService {
   private eligible(u:KeycloakUser|null,c:Caller){return !!u&&u.enabled&&!u.serviceAccountClientId&&u.groups.length===1&&u.groups[0]===c.institution&&u.roles.includes('radiologist')&&(u.email||u.username).length<=256;}
   private publicReader(u:KeycloakUser){return {sub:u.id,actor:u.email||u.username,name:([u.lastName,u.firstName].filter(Boolean).join(' ')||u.username).slice(0,256)};}
   async candidates(c:Caller){this.member(c);return {owner:[c.institution,c.sub],canManage:this.manager(c),readers:(await this.keycloak.assignmentReaders(c.institution!)).filter(u=>this.eligible(u,c)&&(this.manager(c)||u.id===c.sub)).map(u=>this.publicReader(u))};}
-  private async run<T>(c:Caller,fn:(tx:any)=>Promise<T>):Promise<T>{try{return await this.prisma.$transaction(async tx=>{await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`; await this.studyAccess.snapshot(c,tx);return fn(tx);},{maxWait:4000,timeout:8000});}catch(e:any){if(['P2028','P2034'].includes(e?.code)||e?.code==='P2010'&&['55P03','57014','40P01'].includes(e?.meta?.code))throw new ServiceUnavailableException('배정 처리 중입니다. 같은 요청으로 다시 시도하세요');throw e;}}
+  private async run<T>(c:Caller,fn:(tx:any)=>Promise<T>,transaction?:Prisma.TransactionClient):Promise<T>{try{const execute=async (tx:Prisma.TransactionClient)=>{await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`; await this.studyAccess.snapshot(c,tx);return fn(tx);};return await (transaction?execute(transaction):this.prisma.$transaction(execute,{maxWait:4000,timeout:8000}));}catch(e:any){if(['P2028','P2034'].includes(e?.code)||e?.code==='P2010'&&['55P03','57014','40P01'].includes(e?.meta?.code))throw new ServiceUnavailableException('배정 처리 중입니다. 같은 요청으로 다시 시도하세요');throw e;}}
   private async study(tx:any,uid:string,c:Caller,lock:'share'|'update'|null=null){
     if(typeof uid!=='string'||uid.length>64||!/^\d+(?:\.\d+)+$/.test(uid))throw new BadRequestException('검사 UID를 확인하세요');
     // A read holds the row shared until its transaction ends (S7-U3a-R-001-F01): a channel close, which locks this row
@@ -75,8 +81,8 @@ export class ReaderAssignmentService {
       ORDER BY at DESC, id DESC LIMIT 20`;
     return {owner:[c.institution,c.sub],studyUid:s.uid,revision:row?.revision??0,reader:row?.readerSub?{sub:row.readerSub,actor:row.readerActor,name:row.readerName}:null,canManage:this.manager(c),blocked:this.blocked(s),history:history.map((h:any)=>({at:h.at,actor:h.actor,detail:JSON.parse(h.detail)}))};
   }
-  async read(uid:string,c:Caller){this.member(c);await this.studyAccess.prepare(c,[uid]);return this.run(c,async tx=>this.result(tx,await this.study(tx,uid,c,'share'),c));}
-  async write(uid:string,c:Caller,b:any){
+  async read(uid:string,c:Caller,transaction?:Prisma.TransactionClient){this.member(c);await this.studyAccess.prepare(c,[uid]);return this.run(c,async tx=>this.result(tx,await this.study(tx,uid,c,'share'),c),transaction);}
+  async write(uid:string,c:Caller,b:any,transaction?:Prisma.TransactionClient){
     this.member(c);
     if(!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).sort().join()!=='expectedOwner,readerSub,requestId,revision'||!Number.isInteger(b.revision)||b.revision<0||b.revision>=2147483647||!uuid(b.requestId)||(b.readerSub!==null&&!uuid(b.readerSub)))throw new BadRequestException('배정 요청 형식을 확인하세요');
     if(JSON.stringify(b.expectedOwner)!==JSON.stringify([c.institution,c.sub]))throw conflict();
@@ -99,6 +105,6 @@ export class ReaderAssignmentService {
       await tx.readerAssignment.upsert({where:key(uid,c.institution!),create:{studyUid:uid,...data},update:data});
       await tx.auditLog.create({data:{actor:c.actor,action:ACTION,target:uid,detail:JSON.stringify({institution:c.institution,revision:data.revision,from:row?.readerActor??null,to:data.readerActor})}});
       return this.result(tx,s,c);
-    });
+    },transaction);
   }
 }

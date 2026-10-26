@@ -101,6 +101,16 @@ class Route:
 # 이 표가 진입점의 단일 진실원천이다. 컨트롤러에 라우트를 추가하고 여기에 선언하지
 # 않으면 test_every_controller_route_is_declared가 살아 있는 스택을 건드리기도 전에 실패한다.
 ROUTES: dict[tuple[str, str], Route] = {
+    ("POST", "emr-audit/roster/:grantId"): Route(Kind.TENANT),
+    ("POST", "emr-audit/investigations"): Route(Kind.TENANT),
+    ("POST", "emr-audit/exports"): Route(Kind.TENANT),
+    ("POST", "emr-audit/requests"): Route(Kind.TENANT),
+    ("POST", "emr-audit/issuances"): Route(Kind.TENANT),
+    ("POST", "emr-audit/issuances/:id/issue"): Route(Kind.TENANT),
+    ("POST", "emr-audit/issuances/:id/delivery"): Route(Kind.TENANT),
+    ("GET", "emr-audit/requests/:id"): Route(Kind.TENANT),
+    ("POST", "emr-audit/requests/:id/extend"): Route(Kind.TENANT),
+    ("POST", "emr-audit/requests/:id/resolve"): Route(Kind.TENANT),
     ("GET", "studies/:uid/tech-note"): Route(Kind.TENANT),
     ("POST", "studies/:uid/tech-note"): Route(Kind.TENANT),
     ("GET", "studies/:uid/tech-note/history"): Route(Kind.TENANT),
@@ -713,6 +723,16 @@ class LiveStack:
             raise RuntimeError(f"로컬 시험 사용자 비밀번호 설정 실패({logical}): {reset.status}")
         if group and roles:
             self.set_member_rights(user_id, institution=group, roles=roles, enabled=True, verificationOverride=True)
+            if os.environ.get('KIN_D_SYNTHETIC_SIGNING') == '1':
+                if os.environ.get('KIN_SYNTHETIC_REALM') != '1':
+                    raise RuntimeError('Synthetic signing requires the isolated synthetic realm')
+                script = (ROOT / 'tests/emr/d/provision_synthetic.cjs').read_text(encoding='utf-8')
+                provision = subprocess.run(['docker', 'compose', 'exec', '-T', 'api', 'node', '-', user_id],
+                                           cwd=ROOT, input=script, capture_output=True, text=True,
+                                           encoding='utf-8', errors='replace', timeout=PSQL_TIMEOUT_SECONDS)
+                if provision.returncode:
+                    raise RuntimeError(f'Synthetic signing key setup failed (exit {provision.returncode}): '
+                                       + provision.stdout + provision.stderr)
         purge_user_audit(user_id)  # Scenarios measure their own commands after the owned fixture setup.
         return user_id
 
@@ -2582,7 +2602,9 @@ class LiveInvariantTests(unittest.TestCase):
             "GET", f"/studies/{quote(fixture.uid)}/report/versions", user,
         )
         self.assertEqual(result.status, 200, "기존 ReportVersion이 조회 불가능해졌습니다: " + result.text)
-        return sorted(result.body, key=lambda row: row["version"])
+        # MODULE_A A2: accessRef names this read's own access record, so it differs per read by contract. The stored
+        # version content these cases compare across reads is every other field.
+        return sorted(({k: v for k, v in row.items() if k != "accessRef"} for row in result.body), key=lambda row: row["version"])
 
     def report_state(self, fixture: Fixture, user: str) -> dict[str, Any]:
         result = self.stack.request("GET", "/bootstrap", user)
@@ -5917,6 +5939,10 @@ class LiveInvariantTests(unittest.TestCase):
             self.assertEqual((prepared.status, prepared.body.get("state")), (200, "prepared"), prepared.text)
             archive = self.stack.bearer_request("GET", f"/studies/{study}/original-downloads/{download}/archive", self.stack.token("doctor"))
             self.assertEqual(archive.status, 200)
+            # The response finishes before the result transaction commits its audit row.
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and self.s9u4_operation(download)["status"] == "sending":
+                time.sleep(0.5)
             rows = [line.split("\t") for line in psql(f"SELECT action || E'\\t' || detail FROM \"AuditLog\" WHERE detail::jsonb->>'operationId'='{download}' ORDER BY id;")]
             self.assertEqual([action for action, _ in rows], ["original.download.prepare", "original.download.intent", "original.download.result"])
             self.assertTrue(all(json.loads(detail)["institutionId"] == "hallym" for _, detail in rows))

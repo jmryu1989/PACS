@@ -128,8 +128,10 @@ class ViewerImageTextE2E(DisplayControlsE2E):
             target.node.style.getPropertyPriority('visibility')===target.priority))"""))
 
     def annotate(self, page):
-        page.locator('[data-cy="MeasurementTools-split-button-secondary"]').click()
-        page.get_by_text("Annotation", exact=True).click()
+        annotation = page.get_by_role('button', name='Annotation', exact=True)
+        if not annotation.is_visible():
+            page.get_by_text('More', exact=True).click()
+        annotation.click()
         box = page.locator('[data-cy="viewport-grid"] > div').first.locator("canvas").bounding_box()
         x, y = box["x"] + box["width"] * .5, box["y"] + box["height"] * .5
         page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x + 38, y + 24, steps=8); page.mouse.up()

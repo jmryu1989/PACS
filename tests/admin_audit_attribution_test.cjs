@@ -3,10 +3,10 @@
  * D1816: legacy provenance below excludes the B2 auth/runtime/retention producers
  * and B2 composition decorators. Attribution behavior remains checked; the old
  * whole-product completeness claim does not cover those replacement modules.
- * EMR-D (#212/#219, api/src/emr-clinical/) records through the B2 ledger only and
+ * EMR-D (#212/#219, clinical records and native report signing) records through B2 and
  * joins that scope on the same basis, with one condition checked here: it names
- * no AuditLog. A client a legacy file hands to a B2 port (an interface member
- * declared in that scope, e.g. REQUEST_FACTS' requireCurrent, #211) enters B2.
+ * no AuditLog. A client a legacy file hands to a B2 interface port or an EMR-D
+ * method checked under that condition enters B2.
  * The B2 events and the retained AuditLog row are shown by running the real
  * producers through the shared request context (recorded-boundaries.cjs).
  * REQ-S5-U5b-ADMIN-AUDIT / MOVE-PROJECTION / UNCLEAR-HIDDEN / NO-MIGRATION-START
@@ -1210,9 +1210,12 @@ function productSources() {
 // Keep the old AuditLog checker on its remaining source scope; do not extend its
 // provenance grammar to the replacement ledger or claim completeness for B2.
 // EMR-D's online records (#212/#219) are B2 AccessEvents through the record port,
-// checked on PostgreSQL by tests/emr/d/online_pg_test.cjs; it writes no AuditLog,
+// checked on PostgreSQL by tests/emr/d/online_pg_test.cjs and report_commit_pg_test.cjs;
+// native report signing joins on the same basis: it writes no AuditLog,
 // which the scan below requires of every file it adds (emrD).
-const emrD = file => file.startsWith('api/src/emr-clinical/');
+// F_LINK writes its dedicated emr_audit records through the same record port; the AuditLog exclusion check still applies.
+const emrD = file => file.startsWith('api/src/emr-clinical/') || file === 'api/src/emr-report/native-signing.ts'
+  || file === 'api/src/emr-audit/service.ts';
 const b2Replaced = file => file === 'api/src/auth.service.ts'
   || file.startsWith('api/src/emr-runtime/') || file.startsWith('api/src/emr-retention/') || emrD(file);
 const b2Composition = file => b2Replaced(file) || ['api/src/admin.controller.ts', 'api/src/admin.service.ts',
@@ -4661,8 +4664,12 @@ function scanAuditWrites(sources = auditSources()) {
   }
   function b2Port(call) {
     const declaration = checker.getResolvedSignature(call)?.declaration;
-    if (!declaration || !(ts.isMethodSignature(declaration) || ts.isFunctionTypeNode(declaration) || ts.isCallSignatureDeclaration(declaration))
-      || !b2Replaced(repoPath(declaration.getSourceFile().fileName))) return null;
+    if (!declaration) return null;
+    const file = repoPath(declaration.getSourceFile().fileName);
+    const port = ts.isMethodSignature(declaration) || ts.isFunctionTypeNode(declaration) || ts.isCallSignatureDeclaration(declaration);
+    // Native signing exposes a class method; the EMR-D scan above still refuses
+    // any AuditLog use in its implementation before this hand-off can pass.
+    if (!(port && b2Replaced(file)) && !(ts.isMethodDeclaration(declaration) && emrD(file))) return null;
     return `\`${snippet(call.expression)}\` (${where(declaration)})`;
   }
   function followClient(start) {
@@ -4690,7 +4697,8 @@ function scanAuditWrites(sources = auditSources()) {
       || (argument && (receiving || identityMapKey(parent,node))) || (owner && callsOf(owner, 'flow').escapes.length === 0) || inert(node)) return;
     // D1816: a member the B2 scope declares without a body (an interface port such as RequestWorkContext.requireCurrent)
     // is implemented and tested there; a client handed to it enters B2. Only a call TypeScript resolves to that one
-    // declaration qualifies: a port declared outside the scope, or a receiver it does not type, stays unresolved.
+    // declaration qualifies. EMR-D's concrete methods have the same boundary while they name no AuditLog.
+    // A port declared outside the scope, or a receiver it does not type, stays unresolved.
     const port = argument && ts.isCallExpression(parent) ? b2Port(parent) : null;
     if (port) {
       note(start, 'client value', 'b2_scope', `\`${snippet(start)}\`: handed to ${port}, a port of the B2 scope`, 'D1816 B2 port');
@@ -4822,8 +4830,8 @@ export class SynService {
   assert.ok(outside.unresolved.some(entry => entry.startsWith('api/src/syn-service.ts:7 client value:')), outside.unresolved.join('\n'));
 });
 
-test('D1816 scope: an EMR-D file that names AuditLog leaves the scope basis and is unresolved', () => {
-  const file = 'api/src/emr-clinical/syn-store.ts';
+for (const file of ['api/src/emr-clinical/syn-store.ts', 'api/src/emr-report/native-signing.ts', 'api/src/emr-audit/service.ts']) {
+test(`D1816 scope: ${file} naming AuditLog leaves the scope basis and is unresolved`, () => {
   const head = "import type { Prisma } from '@prisma/client';\nexport async function put(tx: Prisma.TransactionClient, id: string) {\n";
   const clean = scanAuditWrites([{ file, text: head + '  await tx.$executeRaw`INSERT INTO emr_clinical.syn(id) VALUES (${id})`;\n}\n' }]);
   assert.deepEqual(clean.unresolved, []);
@@ -4870,6 +4878,7 @@ test('D1816 scope: an EMR-D file that names AuditLog leaves the scope basis and 
     assert.ok(legacy.candidates.some(entry => entry.kind === 'auditLog delegate' && entry.status === 'unresolved'), body);
   }
 });
+}
 
 test('B2 scope behaviour: EMR-D writes and reads record B2 events with the shared request facts; the admin create keeps its AuditLog row', async () => {
   const recorded = await require('./fixtures/admin-audit-checker/recorded-boundaries.cjs')();

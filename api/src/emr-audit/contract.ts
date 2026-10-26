@@ -1,7 +1,8 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
 import { ACCESS_ACTIONS, AUTH_ACTIONS, identity, parseAccessEvent, patientLink, statutoryAct } from '../emr-contract/access-event';
-import type { AccessEvent, AccessTarget, LocalReadTarget, DownloadTarget, EvidenceFact, ImmutableIdentity, PatientLinkSnapshot } from '../emr-contract/access-event';
+import type { AccessEvent, AccessTarget, LocalReadTarget, LocalAuditTarget, DownloadTarget, EvidenceFact, ImmutableIdentity, PatientLinkSnapshot } from '../emr-contract/access-event';
+export type { LocalAuditTarget } from '../emr-contract/access-event';
 import { retentionDisposition, verifiedRecord } from '../emr-contract/classification';
 import type { ResolvedRecord } from '../emr-contract/classification';
 import { civilPeriodEnd } from '../emr-contract/lawful-defaults';
@@ -9,6 +10,7 @@ import type { LegalHold } from '../emr-contract/lawful-defaults';
 import { inspectSignatureEnvelope } from '../emr-contract/signature';
 import type { SignatureEnvelope } from '../emr-contract/signature';
 import { choice, ContractError, freeze, integer, object, refuse, sha256, string, utc } from '../emr-contract/validation';
+import { onlineFixedListing } from './fixed-listing';
 
 /**
  * EMR unit F, round 1 (module-first): pure contracts for the designated-auditor roster, the patient-level replay of the
@@ -166,7 +168,7 @@ export function resolveAuditAuthority(reader: RosterReader, caller: VerifiedCall
   authorities.add(authority);
   return authority;
 }
-function requireScope(authority: AuditAuthority, scope: RosterScope): Readonly<AuditAuthority> {
+export function requireScope(authority: AuditAuthority, scope: RosterScope): Readonly<AuditAuthority> {
   if (!authorities.has(authority)) refuse('AuditAuthorityRequired');
   if (!authority.scopes.includes(scope)) refuse('AuditScopeNotGranted');
   return authority;
@@ -251,7 +253,7 @@ function inInstitutionScope(plan: InvestigationPlan, event: Readonly<AccessEvent
   if (event.managingInstitution.status === 'known') return event.managingInstitution.value === plan.institutionId;
   return event.actingInstitution.status === 'known' && event.actingInstitution.value === plan.institutionId;
 }
-type InvestigationTarget = AccessTarget | LocalReadTarget | DownloadTarget;
+type InvestigationTarget = AccessTarget | LocalReadTarget | LocalAuditTarget | DownloadTarget;
 function targetMatches(f: InvestigationFilters, t: InvestigationTarget): boolean {
   if (f.patient && !('patientLinkSnapshot' in t && t.patientLinkSnapshot.status === 'known' && samePatient(t.patientLinkSnapshot.value, f.patient))) return false;
   if (f.sourcePatientId != null && !('sourcePatientId' in t && t.sourcePatientId.status === 'known' && t.sourcePatientId.value === f.sourcePatientId)) return false;
@@ -285,13 +287,15 @@ export interface InvestigationLedger {
   /** Rows with sequence ≤ top and < below (when not null), strictly descending, at most `take`; may be broader than the
    * plan (candidate rows). Fewer than `take` means the end. */
   rows(top: number, below: number | null, take: number): Promise<readonly LedgerRow[]>;
+  /** Optional indexed count of this plan's matching events at the same snapshot. */
+  count?(top: number, filters: InvestigationFilters): Promise<number>;
 }
 /** C/B patient matching facts in round 2: the study's patient link today. Display only. */
 export type CurrentPatientLink = (studyId: string) => PatientLinkSnapshot | null;
 
 export interface ReplayTarget {
   kind: AccessTarget['kind']; patient: EvidenceFact<PatientLinkSnapshot> | null;
-  localSource?: Pick<LocalReadTarget, 'sourcePatientId' | 'sourceInstitution' | 'projectionSha256'>;
+  localSource?: Pick<LocalReadTarget, 'sourcePatientId' | 'sourceInstitution'> & { projectionSha256?: string };
   studyId: EvidenceFact<string>;
   recordId: EvidenceFact<string>; versionId: EvidenceFact<string>; currentLink: PatientLinkSnapshot | null; rematched: boolean;
 }
@@ -329,7 +333,8 @@ function currentPatient(currentLink: CurrentPatientLink | undefined, target: Inv
 function replayTarget(target: InvestigationTarget, currentLink: CurrentPatientLink | undefined): ReplayTarget {
   if ('sourcePatientId' in target) return {
     kind: target.kind, patient: null, studyId: target.studyId, recordId: target.recordId, versionId: target.versionId,
-    localSource: { sourcePatientId: target.sourcePatientId, sourceInstitution: target.sourceInstitution, projectionSha256: target.projectionSha256 },
+    localSource: { sourcePatientId: target.sourcePatientId, sourceInstitution: target.sourceInstitution,
+      ...('projectionSha256' in target ? { projectionSha256: target.projectionSha256 } : {}) },
     currentLink: currentPatient(currentLink, target), rematched: false,
   };
   const recorded = target.patientLinkSnapshot, current = currentPatient(currentLink, target);
@@ -354,19 +359,19 @@ function replayEntry(sequence: number, committedAt: string, event: Readonly<Acce
 
 // Restarting the server ends open cursors (same as the existing admin audit console); the auditor starts again.
 const CURSOR_KEY = randomBytes(32);
-function sealCursor(plan: InvestigationPlan, top: number, after: number): string {
-  const body = Buffer.from(JSON.stringify({ planId: plan.planId, top, after }), 'utf8').toString('base64url');
+function sealCursor(plan: InvestigationPlan, top: number, after: number, total: number): string {
+  const body = Buffer.from(JSON.stringify({ planId: plan.planId, top, after, total }), 'utf8').toString('base64url');
   return `${body}.${createHmac('sha256', CURSOR_KEY).update(body).digest('base64url')}`;
 }
-function openCursor(plan: InvestigationPlan, cursor: string): { top: number; after: number } {
+function openCursor(plan: InvestigationPlan, cursor: string): { top: number; after: number; total: number | null } {
   return guarded('InvestigationCursorRefused', () => {
     const parts = cursor.split('.');
     if (parts.length !== 2) throw new Error('Cursor shape');
     const expected = createHmac('sha256', CURSOR_KEY).update(parts[0]).digest(), given = Buffer.from(parts[1], 'base64url');
     if (given.length !== expected.length || !timingSafeEqual(given, expected)) throw new Error('Cursor seal');
-    const v = object(JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')), ['planId', 'top', 'after']);
+    const v = object(JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')), ['planId', 'top', 'after', 'total']);
     if (v.planId !== plan.planId) throw new Error('Cursor of another plan');
-    return { top: integer(v.top), after: integer(v.after, 1) };
+    return { top: integer(v.top), after: integer(v.after, 1), total: v.total === undefined ? null : integer(v.total) };
   });
 }
 
@@ -381,37 +386,51 @@ export async function readInvestigationPage(plan: InvestigationPlan, ledger: Inv
   if (!plans.has(plan)) refuse('InvestigationPlanRequired');
   const batch = options.batch ?? 500;
   guarded('InvestigationQueryRefused', () => integer(batch, 1));
-  let top: number, after: number | null = null;
-  if (plan.cursor !== null) ({ top, after } = openCursor(plan, plan.cursor));
+  let top: number, after: number | null = null, total: number | null = null;
+  if (plan.cursor !== null) ({ top, after, total } = openCursor(plan, plan.cursor));
   else {
     let read: unknown;
-    try { read = await ledger.top(); } catch { refuse('LedgerReadFailed'); }
+    try { read = await ledger.top(); } catch (error) { ledgerReadFailure(error); }
     top = guarded('LedgerReadFailed', () => integer(read));
   }
   const limit = plan.mode === 'export' ? Infinity : plan.limit;
   const rows: ReplayEntry[] = [];
-  let below: number | null = null, previous = top + 1, total = 0, last: number | null = null, more = false;
+  const counted = plan.mode === 'view' && (total !== null || ledger.count !== undefined);
+  if (counted && total === null) {
+    try { total = integer(await ledger.count(top, plan.filters)); } catch (error) { ledgerReadFailure(error); }
+  }
+  total ??= 0;
+  let below: number | null = counted ? after : null, previous = below ?? top + 1, last: number | null = null, more = false;
   for (;;) {
     let chunk: readonly LedgerRow[];
-    try { chunk = await ledger.rows(top, below, batch); } catch { refuse('LedgerReadFailed'); }
-    if (!Array.isArray(chunk) || chunk.length > batch) refuse('LedgerReadFailed');
+    // The ledger port permits unfiltered candidates. Page by candidates, stop by matches.
+    const take = batch;
+    try { chunk = await ledger.rows(top, below, take); } catch (error) { ledgerReadFailure(error); }
+    if (!Array.isArray(chunk) || chunk.length > take) refuse('LedgerReadFailed');
     for (const input of chunk) {
       const { sequence, event, durableAt } = verifiedRow(input, top, previous);
       previous = sequence;
       if (!inInstitutionScope(plan, event)) continue;
       const targets = eventMatches(plan, event);
       if (!targets) continue;
-      total++;
+      if (!counted) total++;
       if (after !== null && sequence >= after) continue;
       if (rows.length < limit) { rows.push(replayEntry(sequence, durableAt, event, targets, options.currentLink)); last = sequence; }
-      else more = true;
+      else { more = true; if (counted) break; }
     }
-    if (chunk.length < batch) break;
+    if ((counted && more) || chunk.length < take) break;
     below = previous;
   }
-  const page = freeze({ rows, total, top, nextCursor: more ? sealCursor(plan, top, last) : null });
+  const page = freeze({ rows, total, top, nextCursor: more ? sealCursor(plan, top, last, total) : null });
   pages.set(page, plan);
   return page;
+}
+
+/** Keep a transaction/statement deadline distinct from an authority or data refusal. */
+export function ledgerReadFailure(error: any): never {
+  if (error?.code === 'P2028' || error?.meta?.code === '57014' || error?.code === '57014' ||
+      error?.code === 'InvestigationTimedOut') refuse('InvestigationTimedOut');
+  refuse('LedgerReadFailed');
 }
 
 /** D-1 revised: the record-change and view streams have independent sequence spaces, snapshots and retention.
@@ -435,15 +454,29 @@ export async function readInvestigationStreams(
   return freeze({ changes: changePage, views: viewPage, totalEntries: changePage.total + viewPage.total });
 }
 
+export type InvestigationAuditTarget = AccessTarget | LocalAuditTarget;
 /** The investigation is itself an access to the shown events (B ledger, 제23조④ 열람): one access-audit target per shown
- * event and patient, and an export is a download. Events without a resolved patient target carry no patient record. */
-export function investigationLedgerEvent(page: InvestigationPage): Readonly<{ action: 'provide-prepared' | 'download'; targets: readonly AccessTarget[] }> {
+ * event and patient, and an export is a download. Events without a resolved patient target carry no patient record.
+ * A local-read target is kept with its observed local identifiers (even an unobserved PatientID), never dropped and
+ * never given a formal link; a recorder of this event must accept these targets rather than omit them. */
+export function investigationLedgerEvent(page: InvestigationPage): Readonly<{ action: 'provide-prepared' | 'download'; targets: readonly InvestigationAuditTarget[] }> {
   const plan = pages.get(page);
   if (!plan) refuse('InvestigationPageRequired');
-  const targets: AccessTarget[] = [], seen = new Set<string>();
+  const targets: InvestigationAuditTarget[] = [], seen = new Set<string>();
   for (const row of page.rows) for (const t of row.targets) {
-    if (t.patient?.status !== 'known' || t.studyId.status !== 'known') continue;
-    const key = JSON.stringify([row.eventId, t.patient.value.patientId, t.patient.value.assigningAuthority, t.studyId.value]);
+    if (t.localSource) {
+      const { sourcePatientId, sourceInstitution } = t.localSource;
+      const key = JSON.stringify([row.eventId, 'local', sourcePatientId, sourceInstitution, t.studyId]);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      targets.push({ kind: 'access-audit', studyId: t.studyId, recordId: { status: 'known', value: row.eventId },
+        versionId: { status: 'known', value: row.eventId }, sourcePatientId, sourceInstitution });
+      continue;
+    }
+    if (t.patient?.status !== 'known') continue;
+    // Intake can precede source resolution. Its event is still shown and must
+    // be recorded, carrying the unknown study rather than dropping the access.
+    const key = JSON.stringify([row.eventId, t.patient.value.patientId, t.patient.value.assigningAuthority, t.studyId]);
     if (seen.has(key)) continue;
     seen.add(key);
     targets.push({ kind: 'access-audit', patientLinkSnapshot: t.patient, studyId: t.studyId,
@@ -459,18 +492,28 @@ export function investigationLedgerEvent(page: InvestigationPage): Readonly<{ ac
 /** A designated person's recorded finding that the ledger cannot name everyone affected (access that bypassed the
  * product, a copied backup, records that cannot be attributed). Recorded, never inferred. */
 export interface IncidentDetermination { kind: 'access-outside-ledger' | 'records-not-attributable'; note: string }
+/** Subjects of local reads: the observed source PatientID (and source institution) inside the plan's institution. Not a
+ * patient + assigning-authority identification; an unobserved PatientID stays unresolved and is kept per study. */
+export interface LocallyIdentifiedSubject {
+  source: Pick<LocalReadTarget, 'sourcePatientId' | 'sourceInstitution'>;
+  studyIds: readonly string[]; eventIds: readonly string[]; firstAt: string; lastAt: string;
+}
 export interface IncidentScope {
   institutionId: string; filters: InvestigationFilters; top: number | null;
-  auditEvent: { action: 'provide-prepared' | 'download'; targets: readonly AccessTarget[] };
+  auditEvent: { action: 'provide-prepared' | 'download'; targets: readonly InvestigationAuditTarget[] };
   identified: readonly { patient: { patientId: string; assigningAuthority: string }; eventIds: readonly string[]; firstAt: string; lastAt: string }[];
-  /** False when the people affected cannot be identified: the possible-leak notice of 제34조② (시행령 제39조의2①1) applies. */
+  identifiedLocally: readonly LocallyIdentifiedSubject[];
+  /** False when the people affected cannot be identified: the possible-leak notice of 제34조② (시행령 제39조의2①1) applies.
+   * Locally identified subjects are listed but do not make the scope identifiable (reason `identified-locally`). */
   subjectsIdentifiable: boolean;
-  reasons: readonly ({ kind: 'ledger-unreadable'; code: string } | { kind: IncidentDetermination['kind']; note: string; by: ImmutableIdentity })[];
+  reasons: readonly ({ kind: 'ledger-unreadable'; code: string } | { kind: 'identified-locally'; subjects: number } |
+    { kind: IncidentDetermination['kind']; note: string; by: ImmutableIdentity })[];
 }
 const incidentScopes = new WeakSet<object>();
 /** Every matching event of an export plan (period, patient, actor, address, event types). Refused and failed requests
  * provided nothing and name no one. A ledger read or integrity failure is itself the fact that the subjects cannot be
- * identified, and is reported as such — never as "nobody affected". */
+ * identified, and is reported as such — never as "nobody affected". Local reads name their subjects in
+ * identifiedLocally by the observed source PatientID only; that list is never dropped and never counted as identified. */
 export async function incidentScope(authority: AuditAuthority, plan: InvestigationPlan, ledger: InvestigationLedger,
   determinations: readonly IncidentDetermination[] = []): Promise<Readonly<IncidentScope>> {
   requireScope(authority, 'investigate');
@@ -490,9 +533,23 @@ export async function incidentScope(authority: AuditAuthority, plan: Investigati
     reasons.push({ kind: 'ledger-unreadable', code: error.code });
   }
   const groups = new Map<string, { patient: { patientId: string; assigningAuthority: string }; eventIds: string[]; firstAt: string; lastAt: string }>();
+  const local = new Map<string, { source: LocallyIdentifiedSubject['source']; studyIds: string[]; eventIds: string[]; firstAt: string; lastAt: string }>();
   for (const row of page?.rows ?? []) {
     if (row.result === 'refused' || row.result === 'failed') continue;
     for (const t of row.targets) {
+      if (t.localSource) {
+        const source = { sourcePatientId: t.localSource.sourcePatientId, sourceInstitution: t.localSource.sourceInstitution };
+        const studyId = t.studyId.status === 'known' ? t.studyId.value : null;
+        // Without an observed PatientID the person is unknown: one entry per study, never merged with another study.
+        const key = JSON.stringify(source.sourcePatientId.status === 'known' ? [source] : [source, studyId]);
+        if (!local.has(key)) local.set(key, { source, studyIds: [], eventIds: [], firstAt: row.occurredAt, lastAt: row.occurredAt });
+        const g = local.get(key);
+        if (studyId !== null && !g.studyIds.includes(studyId)) g.studyIds.push(studyId);
+        if (!g.eventIds.includes(row.eventId)) g.eventIds.push(row.eventId);
+        if (row.occurredAt < g.firstAt) g.firstAt = row.occurredAt;
+        if (row.occurredAt > g.lastAt) g.lastAt = row.occurredAt;
+        continue;
+      }
       if (t.patient?.status !== 'known') continue;
       const p = { patientId: t.patient.value.patientId, assigningAuthority: t.patient.value.assigningAuthority };
       const key = JSON.stringify([p.patientId, p.assigningAuthority]), g = groups.get(key);
@@ -502,10 +559,12 @@ export async function incidentScope(authority: AuditAuthority, plan: Investigati
       if (row.occurredAt > g.lastAt) g.lastAt = row.occurredAt;
     }
   }
+  const identifiedLocally = [...local.values()].sort((a, b) => JSON.stringify([a.source, a.studyIds]).localeCompare(JSON.stringify([b.source, b.studyIds])));
+  if (identifiedLocally.length) reasons.push({ kind: 'identified-locally', subjects: identifiedLocally.length });
   reasons.push(...recorded);
   const identified = [...groups.values()].sort((a, b) => a.patient.patientId.localeCompare(b.patient.patientId) ||
     a.patient.assigningAuthority.localeCompare(b.patient.assigningAuthority));
-  const scope = freeze({ institutionId: plan.institutionId, filters: plan.filters, top: page?.top ?? null, identified,
+  const scope = freeze({ institutionId: plan.institutionId, filters: plan.filters, top: page?.top ?? null, identified, identifiedLocally,
     subjectsIdentifiable: reasons.length === 0, reasons,
     auditEvent: page ? investigationLedgerEvent(page) : { action: 'download' as const, targets: [] } });
   incidentScopes.add(scope);
@@ -1624,6 +1683,8 @@ export interface DisclosureManifest {
 }
 
 function verifiedListing(input: unknown): { recordId: string; revision: string; subject: VersionListing['subject']; versions: PackageVersion[] } {
+  const online = onlineFixedListing(input);
+  if (online) return online;
   return guarded('VersionListingRefused', () => {
     const l = object(input, ['recordId', 'complete', 'revision', 'subject', 'versions', 'signatures']);
     if (l.complete !== true) refuse('VersionListingIncomplete');

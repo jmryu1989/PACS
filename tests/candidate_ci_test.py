@@ -80,7 +80,10 @@ class CandidateCiTests(unittest.TestCase):
         self.assertEqual(len({row[2] for row in rows}), len(rows))
         self.assertEqual(rows[2], ("e2e/test_s9_role_sweep.py", "S9RoleSweepE2E", "s9-u4a-set"))
         self.assertEqual(rows[len(candidate.BASE)][2], "candidate-flow-document-session")
-        self.assertEqual(rows[-1], ("emr/e/online_live.py", "OnlineImagePg", "candidate-flow-emr-e-online-live"))
+        self.assertEqual(rows[-2:], [
+            ("emr/e/online_live.py", "OnlineImagePg", "candidate-flow-emr-e-online-live"),
+            ("emr/f/link_live.py", "AuditLinkPg", "candidate-flow-emr-f-link-live"),
+        ])
         # Two flows that would share a unit are refused, never run under one plan.
         doubled = candidate.FLOWS + (("emr/b/live.py", "EmrBLedgerLive", "test_b02_business_commit_and_failure_journal", "test_b02_"),)
         with patch.object(candidate, "FLOWS", doubled), self.assertRaisesRegex(RuntimeError, "units must be unique"):

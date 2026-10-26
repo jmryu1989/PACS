@@ -126,10 +126,11 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
       if (options.signal?.aborted || abort.signal.aborted) cancel();
       const timer = setTimeout(cancel, 30000);
       // A read that fetch() rejects before any response is sent once more on this call's own signal and 30-second timer. Hosted
-      // diagnostic run 35022850312: Chromium 148 fails a request whose HTTP/2 connection received GOAWAY before the request's stream
+      // A11-OUTPUT diagnostic run 35022850312 (same cause as s9u4 re-login): Chromium 148 fails a request whose HTTP/2 connection received GOAWAY before the request's stream
       // was created with ERR_FAILED, and does not resend it itself. Only GET, HEAD or a POST its caller declares read-only
       // (idempotent: true) is sent again; an abort, any HTTP response and every write are not, and a second rejection keeps the
       // browser's own error.
+      // The s9u4 proxy choice does not remove other pre-response read rejections; retain this bounded read-only resend.
       const read = idempotent === true || ['GET', 'HEAD'].includes(String(request.method || 'GET').toUpperCase());
       const send = () => fetch('/api' + url, { ...request, credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
         headers: { ...(me ? { 'X-KIN-Subject': me.sub } : {}), ...(request.body ? { 'Content-Type': 'application/json' } : {}) } });

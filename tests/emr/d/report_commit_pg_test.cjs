@@ -50,6 +50,8 @@ test('actual HTTP report approval/reset and ledger failure preserve exact versio
     await witness.memberRights.create({ data: { sub, username: sub, email: author, name: 'Synthetic',
       emailVerified: true, approved: true, suspended: false, institution, roles: ['radiologist'] } });
     await runtime.start(); ready = true;
+    const clinical = await require('./clinical_fixture.cjs').clinicalFixture(witness, runtime.port, issuer,
+      [{ sub, institution, roles: ['radiologist'] }]);
     const orthanc = { studyIdentityResources: async uid => [{ '0020000D': { Value: [uid] } }], studyIdentities: async () => [] };
     class HttpFixture {}
     // REQUEST_FACTS: the Guard captures into, and the report routes read, the shared request context;
@@ -57,7 +59,7 @@ test('actual HTTP report approval/reset and ledger failure preserve exact versio
     const { createRequestContext, REQUEST_CONTEXT_CAPTURE, REQUEST_CONTEXT_SOURCE } = product('emr-runtime/request-context');
     const { createRequestIngress } = product('emr-runtime/request-ingress');
     const requests = createRequestContext(createRequestIngress({ proxyPeers: ['127.0.0.1'] }), runtime.port);
-    Module({ controllers: [PacsController], providers: [PrismaService, PacsService, AuthService,
+    Module({ controllers: [PacsController], providers: [PrismaService, PacsService, AuthService, ...clinical.providers,
       { provide: REQUEST_CONTEXT_CAPTURE, useValue: requests.capture }, { provide: REQUEST_CONTEXT_SOURCE, useValue: requests.source },
       { provide: OrthancService, useValue: orthanc }, { provide: KeycloakService, useValue: {} },
       { provide: FindingService, useValue: {} },
@@ -90,9 +92,28 @@ test('actual HTTP report approval/reset and ledger failure preserve exact versio
     assert.equal(await witness.reportVersion.count({ where: { uid: state.uid } }), 0);
     assert.equal((await witness.studyState.findUnique({ where: { uid: state.uid } })).rs, 'W');
     assert.equal((await witness.reportDraft.findUnique({ where: { uid_author: { uid: state.uid, author } } })).present, true);
+    assert.equal(Number((await witness.$queryRaw`SELECT count(*)::int AS n FROM emr_signing.signed_version`)[0].n), 0);
+    await witness.$executeRaw`UPDATE emr_signing.doctor_key SET status='suspended'`;
+    try { assert.equal((await send(state.uid, '/report/commit', command)).status, 503); }
+    finally { await witness.$executeRaw`UPDATE emr_signing.doctor_key SET status='active'`; }
+    assert.equal(await witness.reportVersion.count({ where: { uid: state.uid } }), 0);
+    assert.equal((await witness.reportDraft.findUnique({ where: { uid_author: { uid: state.uid, author } } })).present, true);
     const approved = await send(state.uid, '/report/commit', command);
     assert.equal(approved.status, 201, JSON.stringify(approved.body));
     assert.equal(approved.body.state.rs, 'A');
+    const approval = approved.body.signature;
+    assert.equal(approval.kid, clinical.keys.get(sub).kid);
+    const verified = product('emr-signature/server-verification').verifyRegisteredServerEnvelope(approval.envelope, approval.keyAtSigning);
+    const signedVersion = JSON.parse(verified.payload.text.body);
+    assert.equal(signedVersion.uid, state.uid);
+    assert.equal(signedVersion.findings, input.findings);
+    assert.equal(signedVersion.version, approved.body.state.version);
+    const [atomic] = await witness.$queryRaw`SELECT v.xmin::text AS version_tx, s.xmin::text AS signature_tx,
+      e.xmin::text AS ledger_tx FROM "ReportVersion" v, emr_signing.signed_version s, emr_access.access_entry e
+      WHERE v.uid=${state.uid} AND s.record_id=${approval.recordId} AND s.version_id=${approval.versionId}
+      AND e.payload::jsonb->>'surface'='POST studies/:uid/report/commit'
+      AND e.payload::jsonb->>'action'='approve-sign' LIMIT 1`;
+    assert.equal(atomic.version_tx, atomic.signature_tx); assert.equal(atomic.version_tx, atomic.ledger_tx);
     const entries = async action => witness.$queryRaw`SELECT e.stream,e.statutory_act,e.payload::jsonb AS facts
       FROM emr_access.access_entry e WHERE e.payload::jsonb->>'surface'='POST studies/:uid/report/commit'
       AND e.payload::jsonb->>'action'=${action}`;
@@ -102,16 +123,24 @@ test('actual HTTP report approval/reset and ledger failure preserve exact versio
       assert.equal(e.statutory_act, '기재'); assert.equal(e.facts.userId.value.subject, sub);
       assert.equal(e.facts.targets[0].versionId.value, String(approved.body.state.version));
       assert.equal(e.facts.trustedProxyIp.value.address, '192.0.2.23');
+      assert.equal(e.facts.context.basis, 'worklist'); assert.equal(e.facts.context.studyId, state.uid);
     }
     assert.equal((await entries('provide-prepared')).length, 1);
     const reset = await send(state.uid, '/report/commit', { ...command, action: 'reset', reason: '합성 정정',
       expectedRevision: approved.body.revision, baseVersion: approved.body.state.version });
     assert.equal(reset.status, 201, JSON.stringify(reset.body));
-    assert.equal((await entries('cancel')).length, 2);
+    assert.equal((await entries('cancel')).length, 4);
+    for (const entry of await entries('cancel')) assert.equal(entry.statutory_act, '수정');
     const versions = await witness.reportVersion.findMany({ where: { uid: state.uid }, orderBy: { version: 'asc' } });
     assert.equal(versions.length, 3);
     assert.equal(versions[0].findings, input.findings); assert.equal(versions[1].findings, input.findings);
     assert.equal(versions[2].reason, '합성 정정');
+    const empty = await witness.studyState.create({ data: { uid: '1.2.840.9999.24', institutionId: institution, ss: 'Verified' } });
+    const emptyReset = await send(empty.uid, '/report/commit', { ...input, expectedRevision: empty.draftEpoch + ':0',
+      action: 'reset', reason: '아직 판독문이 없는 상태의 취소' });
+    assert.equal(emptyReset.status, 201, JSON.stringify(emptyReset.body));
+    assert.equal(emptyReset.body.signature, null);
+    assert.equal(Number((await witness.$queryRaw`SELECT count(*)::int AS n FROM emr_signing.signed_version WHERE record_id=${empty.uid}`)[0].n), 0);
   } finally {
     if (app) await app.close();
     if (ready) await runtime.stop(Date.now() + 10000);

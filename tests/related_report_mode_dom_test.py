@@ -2190,7 +2190,7 @@ class RelatedModePage(unittest.TestCase):
         self.open()
         self.open_target()
         pane = self.page.locator("#cvr-inbox-p")
-        self.page.locator("#cvr-inbox-toggle").dispatch_event("click")
+        pane.get_by_role("button", name="Show Received", exact=True).click()
         ack = pane.get_by_role("button", name="Acknowledge", exact=True)
         expect(ack).to_be_visible()
         if unknown:
@@ -2319,6 +2319,436 @@ class RelatedModePage(unittest.TestCase):
 
     def test_w5b_received_list_overlays_the_mode_reading(self):
         self.received_list_overlays_the_mode(True)
+
+    # Minhoon 2-2 / PR238 F1-F7: real served-page arrivals and native pointer/keyboard input.
+    # These are the reviewer's four viewport sizes, each in normal and reading layouts.
+    ARRIVAL_VIEWPORTS = ((1400, 900), (1366, 768), (1920, 1080), (1080, 1920))
+    CARET_VISIBLE = r"""(id) => {
+      const ta = document.getElementById(id), s = getComputedStyle(ta), mirror = document.createElement('div');
+      for (const name of ['padding', 'borderWidth', 'font', 'letterSpacing', 'wordSpacing',
+        'textIndent', 'textTransform', 'tabSize', 'direction', 'wordBreak', 'overflowWrap'])
+        mirror.style[name] = s[name];
+      Object.assign(mirror.style, {position: 'fixed', visibility: 'hidden', pointerEvents: 'none',
+        borderStyle: 'solid', boxSizing: 'border-box', whiteSpace: ta.wrap === 'off' ? 'pre' : 'pre-wrap',
+        width: (ta.clientWidth + parseFloat(s.borderLeftWidth) + parseFloat(s.borderRightWidth)) + 'px',
+        left: '0', top: '0'});
+      const offset = ta.selectionDirection === 'backward' ? ta.selectionStart : ta.selectionEnd;
+      mirror.textContent = ta.value.slice(0, offset);
+      const caret = document.createElement('span'); caret.textContent = ta.value.slice(offset) || '\u200b';
+      mirror.append(caret); document.body.append(mirror);
+      const range = document.createRange(); range.setStart(mirror.firstChild, offset); range.collapse(true);
+      // Native caret affinity at a soft wrap depends on navigation: protect both rendered readings.
+      const rects = [range.getBoundingClientRect(), caret.getClientRects()[0]].filter(r => r.height);
+      const field = ta.getBoundingClientRect(), origin = mirror.getBoundingClientRect();
+      const points = rects.map(r => ({x: field.left + r.left - origin.left - ta.scrollLeft,
+        y: field.top + r.top - origin.top - ta.scrollTop + r.height / 2}));
+      mirror.remove();
+      const overlay = document.getElementById('cvr-inbox-p');
+      const hits = points.map(p => document.elementFromPoint(p.x, p.y));
+      return hits.some(hit => hit === ta) && hits.every(hit => !hit || !overlay.contains(hit));
+    }"""
+
+    def install_arrivals(self, records=()):
+        import critical_result_recipient_dom_test as recipient
+        owner = [h.INSTITUTION, h.RAD["sub"]]
+        self.arrival_server = recipient.RecipientServer(owner)
+        self.arrival_server.add(*records)
+        self.arrival_reads, self.arrival_posts = [], []
+        pattern = re.compile(r".*/api/critical-results(?:[/?].*)?$")
+        self.context.unroute(pattern)
+
+        def received(route, request):
+            url = urlparse(request.url)
+            query = parse_qs(url.query)
+            if request.method == "POST":
+                self.arrival_posts.append(request.post_data_json)
+            if query.get("view") == ["sent"]:
+                status, body = 200, {"owner": owner, "view": "sent", "items": [], "nextCursor": None, "pending": 0}
+            else:
+                status, body = self.arrival_server.handle(recipient.kind_of(request.method, url.path), url.path, query,
+                                                        request.post_data_json)
+                self.arrival_reads.append(body)
+            route.fulfill(status=status, json=body)
+
+        self.context.route(pattern, received)
+        return recipient
+
+    def poll_arrivals(self):
+        count = len(self.arrival_reads)
+        self.page.clock.fast_forward(60000)
+        self.wait(lambda: len(self.arrival_reads) > count, "the page polls received reports")
+        self.settle()
+
+    def visible_arrival(self, n):
+        row = self.page.get_by_role("listitem").filter(has_text=f"SYN-PT-{n}")
+        expect(row).to_have_count(1)
+        # Text in a clipped DOM node is insufficient: the heading, identity and action must actually be on screen.
+        for part in (row.get_by_text("Pending ACK", exact=True), row.get_by_text(re.compile(f"^Patient: SYN-PT-{n}")),
+                     row.get_by_role("button", name="Acknowledge", exact=True)):
+            self.assertTrue(part.evaluate("""e => {
+              const r = e.getBoundingClientRect();
+              return [0.25, 0.5, 0.75].every(f => {
+                const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height * f);
+                return hit && e.contains(hit);
+              });
+            }"""), f"arrival {n}: {part} is clipped or covered")
+
+    def arrival_stays_over_report(self):
+        self.assertTrue(self.js("""() => {
+          const panel = document.querySelector('#cvr-inbox-p'), report = document.querySelector('.report-p');
+          const overlay = panel.getBoundingClientRect(), column = report.getBoundingClientRect();
+          // A scrolled report's bounding box may extend behind the reading bar. Check the actual surface underneath.
+          const overReport = [0.1, 0.5, 0.9].every(x => [0.1, 0.5, 0.9].every(y => {
+            const hit = document.elementsFromPoint(overlay.left + (Math.min(innerWidth, overlay.right) - overlay.left) * x,
+              overlay.top + overlay.height * y).find(e => !panel.contains(e));
+            return hit && report.contains(hit);
+          }));
+          const frame = document.querySelector('#reading-frame');
+          const viewer = frame && !frame.hidden && frame.getClientRects().length ? frame.getBoundingClientRect() : null;
+          return overReport && overlay.left >= column.left && overlay.right <= column.right &&
+            overlay.top >= Math.max(0, column.top) && overlay.bottom <= Math.min(innerHeight, column.bottom) &&
+            (!viewer || overlay.right <= viewer.left || overlay.left >= viewer.right ||
+              overlay.bottom <= viewer.top || overlay.top >= viewer.bottom);
+        }"""), "the arrival stays inside the report column and never covers the image viewer")
+
+    def test_w5b_arrival_while_reading_images_stays_over_report(self):
+        for width, height in self.ARRIVAL_VIEWPORTS:
+            for reading in (False, True):
+                for focus in (("body", "viewer", "splitter") if reading else ("body",)):
+                    with self.subTest(viewport=(width, height), reading=reading, focus=focus):
+                        self.page.set_viewport_size({"width": width, "height": height})
+                        recipient = self.install_arrivals()
+                        self.open()
+                        self.open_target()
+                        if reading:
+                            self.enter_reading()
+                        self.poll_arrivals()
+                        if focus == "viewer":
+                            self.page.locator('#reading-frame').content_frame.locator('body').click()
+                            expect(self.page.locator('#reading-frame')).to_be_focused()
+                        elif focus == "splitter":
+                            self.page.locator('#reading-resize-report').click()
+                            expect(self.page.locator('#reading-resize-report')).to_be_focused()
+                        else:
+                            text = self.page.locator('#reading-target' if reading else '.report-p .rbtns').first
+                            box = text.bounding_box()
+                            self.page.mouse.click(box['x'] + (10 if reading else 1), box['y'] + (box['height'] / 2 if reading else 1))
+                            self.assertEqual('BODY', self.js('document.activeElement.tagName'))
+                        active = self.js('document.activeElement.id || document.activeElement.tagName')
+                        self.arrival_server.add(recipient.rec(181, case='R2'))
+                        self.poll_arrivals()
+                        self.visible_arrival(181)
+                        self.arrival_stays_over_report()
+                        self.assertEqual(active, self.js('document.activeElement.id || document.activeElement.tagName'))
+                        self.assertEqual([], self.arrival_posts)
+
+    def test_w5b_arrival_tracks_caret_within_wrapped_findings(self):
+        for width, height in self.ARRIVAL_VIEWPORTS:
+            for reading in (False, True):
+                with self.subTest(viewport=(width, height), reading=reading):
+                    self.page.set_viewport_size({"width": width, "height": height})
+                    recipient = self.install_arrivals()
+                    self.open()
+                    self.open_target()
+                    if reading:
+                        self.enter_reading()
+                    findings = self.page.locator('#findings')
+                    findings.fill('\n'.join('SYN long finding ' * 12 for _ in range(45)))
+                    self.page.locator('#conclusion').fill('SYN impression line 1\nSYN impression line 2')
+                    self.autosave()
+                    findings.focus()
+                    self.page.keyboard.press('Control+End')
+                    self.arrival_server.add(recipient.rec(181, case='R2'))
+                    self.poll_arrivals()
+                    for key in ('Control+Home', 'ArrowDown', 'End', 'Shift+ArrowUp', 'Control+End',
+                                'ArrowUp', 'ArrowUp', 'ArrowUp', 'ArrowUp', 'Home', 'End'):
+                        self.page.keyboard.press(key)
+                        self.settle()
+                        self.visible_arrival(181)
+                        self.arrival_stays_over_report()
+                        self.assertTrue(self.js(self.CARET_VISIBLE, 'findings'), key + ' leaves the caret visible')
+                    self.assertEqual([], self.arrival_posts)
+
+    def test_w5b_fold_returns_focus_from_received_list(self):
+        for report_focus in (True, False):
+            with self.subTest(report_focus=report_focus):
+                self.page.set_viewport_size({"width": 1400, "height": 900})
+                recipient = self.install_arrivals()
+                self.open()
+                self.open_target()
+                self.enter_reading()
+                self.poll_arrivals()
+                if report_focus:
+                    self.page.locator('#findings').click()
+                else:
+                    self.page.locator('#reading-target').click()
+                self.arrival_server.add(recipient.rec(181, case='R2'))
+                self.poll_arrivals()
+                self.visible_arrival(181)
+                self.page.get_by_role('button', name='Acknowledge', exact=True).focus()
+                self.page.set_viewport_size({"width": 1400, "height": 470})
+                self.settle()
+                expect(self.page.get_by_role('button', name='Acknowledge', exact=True)).to_be_hidden()
+                target = self.page.locator('#findings') if report_focus else self.page.get_by_role('button', name='Show Received', exact=True)
+                expect(target).to_be_focused()
+                self.assertEqual([], self.arrival_posts)
+
+    def test_w5b_arrival_follows_reading_splitter(self):
+        for width, height in self.ARRIVAL_VIEWPORTS:
+            with self.subTest(viewport=(width, height)):
+                self.page.set_viewport_size({"width": width, "height": height})
+                recipient = self.install_arrivals()
+                self.open()
+                self.open_target()
+                self.enter_reading()
+                self.poll_arrivals()
+                splitter = self.page.locator('#reading-resize-report')
+                splitter.click()
+                self.page.keyboard.press('Enter')  # reset the previous subcase's saved width through the real control
+                self.settle()
+                self.arrival_server.add(recipient.rec(181, case='R2'))
+                self.poll_arrivals()
+                for key in ('Shift+ArrowRight', 'Shift+ArrowLeft'):
+                    before = splitter.bounding_box()['x']
+                    for _ in range(4):
+                        self.page.keyboard.press(key)
+                    self.settle()
+                    self.assertNotEqual(before, splitter.bounding_box()['x'], 'the keyboard moved the splitter')
+                    self.visible_arrival(181)
+                    self.arrival_stays_over_report()
+                box = splitter.bounding_box()
+                x, y = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
+                self.page.mouse.move(x, y)
+                self.page.mouse.down()
+                self.page.mouse.move(x + 160, y, steps=8)  # the review's measured drag
+                self.page.mouse.up()
+                self.settle()
+                self.assertNotEqual(box['x'], splitter.bounding_box()['x'], 'the pointer moved the splitter')
+                self.visible_arrival(181)
+                self.arrival_stays_over_report()
+                self.assertEqual([], self.arrival_posts)
+
+    def test_w5b_dismissal_clears_when_acknowledged_elsewhere(self):
+        for width, height in self.ARRIVAL_VIEWPORTS:
+            for reading in (False, True):
+                with self.subTest(viewport=(width, height), reading=reading):
+                    self.page.set_viewport_size({"width": width, "height": height})
+                    recipient = self.install_arrivals()
+                    self.open()
+                    self.open_target()
+                    if reading:
+                        self.enter_reading()
+                    self.poll_arrivals()
+                    record = self.arrival_server.add(recipient.rec(181, case='R2'))
+                    self.poll_arrivals()
+                    self.visible_arrival(181)
+                    self.page.keyboard.press('Escape')
+                    panel = self.page.locator('#cvr-inbox-p')
+                    expect(panel).to_have_attribute('data-attention', 'true')
+                    self.poll_arrivals()
+                    expect(panel).to_have_attribute('data-attention', 'true')
+                    record.update(state='acknowledged', acknowledgedAt=recipient.SERVER_NOW, revision=2)
+                    self.poll_arrivals()
+                    expect(panel.get_by_text('Pending ACK 0', exact=True)).to_be_visible()
+                    self.assertIsNone(panel.get_attribute('data-attention'))
+                    expect(self.page.locator('#cvr-inbox-body')).to_be_hidden()
+                    self.assertEqual([], self.arrival_posts)
+
+    def test_w5b_manual_received_escape_returns_to_toggle(self):
+        for width, height in self.ARRIVAL_VIEWPORTS:
+            for reading in (False, True):
+                with self.subTest(viewport=(width, height), reading=reading):
+                    self.page.set_viewport_size({"width": width, "height": height})
+                    recipient = self.install_arrivals()
+                    self.arrival_server.add(recipient.rec(181, case='R2'))
+                    self.open()
+                    self.open_target()
+                    if reading:
+                        self.enter_reading()
+                    self.poll_arrivals()
+                    toggle = self.page.get_by_role('button', name='Show Received', exact=True)
+                    toggle.click()
+                    ack = self.page.locator('#cvr-inbox-p').get_by_role('button', name='Acknowledge', exact=True)
+                    # Native Tab follows the received list controls to the ACK action without sending it.
+                    self.page.keyboard.press('Tab')  # Refresh
+                    self.page.keyboard.press('Tab')  # Show All
+                    self.page.keyboard.press('Tab')  # Acknowledge
+                    expect(ack).to_be_focused()
+                    self.page.keyboard.press('Escape')
+                    expect(self.page.locator('#cvr-inbox-body')).to_be_hidden()
+                    expect(toggle).to_be_focused()
+                    self.assertEqual([], self.arrival_posts)
+
+    def arrival_preserves_the_draft(self, reading):
+        for width, height in self.ARRIVAL_VIEWPORTS:
+            for field in ("findings", "conclusion"):
+                with self.subTest(viewport=(width, height), reading=reading, field=field):
+                    self.page.set_viewport_size({"width": width, "height": height})
+                    recipient = self.install_arrivals()
+                    self.open()
+                    self.open_target()
+                    if reading:
+                        self.enter_reading()
+                    body = self.page.locator("#cvr-inbox-body")
+                    expect(body).to_be_hidden()
+                    findings = self.page.locator("#findings")
+                    findings.fill("\n".join(f"SYN finding line {i}" for i in range(45)))
+                    self.page.locator("#conclusion").fill("SYN impression line 1\nSYN impression line 2")
+                    self.autosave()
+                    target = self.page.locator("#" + field)
+                    target.click()
+                    self.page.keyboard.press("Control+End")
+                    self.assertTrue(self.js(self.CARET_VISIBLE, field), "caret is visible before arrival")
+                    snapshot = """() => ({uid: selectedUid, fields: ['findings', 'conclusion', 'recommendation'].map(id => {
+                      const e = document.getElementById(id); return [e.value, e.selectionStart, e.selectionEnd, e.selectionDirection,
+                        e.scrollTop, e.scrollLeft]; }), active: document.activeElement.id,
+                      scroll: [scrollX, scrollY, document.querySelector('.report-p').scrollTop]})"""
+                    before, box = self.js(snapshot), self.js(self.BOX, ".redit")
+                    self.arrival_server.add(recipient.rec(181, case="R2"))
+                    self.poll_arrivals()
+                    expect(body).to_be_visible()
+                    self.visible_arrival(181)
+                    self.arrival_stays_over_report()
+                    self.assertEqual(before, self.js(snapshot), "arrival keeps draft, selection, focus and scroll")
+                    self.assertEqual(box, self.js(self.BOX, ".redit"), "arrival does not move or resize the editor")
+                    self.assertTrue(self.js(self.CARET_VISIBLE, field), "arrival leaves the typing line visible")
+                    value = target.input_value()
+                    self.page.keyboard.type(" typed")
+                    self.assertEqual(value + " typed", target.input_value())
+                    self.assertTrue(self.js(self.CARET_VISIBLE, field))
+                    self.arrival_server.add(recipient.rec(182, case="R2"))
+                    after_typing = self.js(snapshot)
+                    self.poll_arrivals()
+                    self.visible_arrival(182)
+                    expect(body).to_have_count(1)
+                    self.assertEqual(after_typing, self.js(snapshot), "another arrival reuses the overlay without taking focus")
+                    # Actual mouse close followed by actual typing, including Space. No programmatic refocus.
+                    close = self.page.get_by_role("button", name="Hide Received", exact=True).bounding_box()
+                    self.page.mouse.click(close["x"] + close["width"] / 2, close["y"] + close["height"] / 2)
+                    expect(body).to_be_hidden()
+                    expect(self.page.locator('#cvr-inbox-p')).to_have_attribute('data-attention', 'true')
+                    expect(target).to_be_focused()
+                    self.page.keyboard.type(" and more text")
+                    self.assertEqual(value + " typed and more text", target.input_value())
+                    expect(body).to_be_hidden()
+                    self.poll_arrivals()
+                    expect(body).to_be_hidden()
+                    expect(self.page.locator('#cvr-inbox-p')).to_have_attribute('data-attention', 'true')
+                    self.arrival_server.records.pop(recipient.rid(182))
+                    self.arrival_server.add(recipient.rec(183, case="R2"))
+                    before_reopen = self.js(snapshot)
+                    self.poll_arrivals()
+                    self.visible_arrival(183)
+                    self.assertEqual(before_reopen, self.js(snapshot), "a same-count arrival keeps the doctor's place")
+                    self.assertEqual(box, self.js(self.BOX, ".redit"))
+                    self.page.keyboard.press("Escape")
+                    expect(body).to_be_hidden()
+                    expect(self.page.locator('#cvr-inbox-p')).to_have_attribute('data-attention', 'true')
+                    expect(target).to_be_focused()
+                    self.page.keyboard.type(" after escape")
+                    self.assertEqual(value + " typed and more text after escape", target.input_value())
+                    self.arrival_server.add(recipient.rec(184, case="R2"))
+                    self.poll_arrivals()
+                    expect(body).to_be_visible()
+                    self.page.keyboard.press("Tab")
+                    expect(body).to_be_visible()
+                    if field == 'findings':
+                        expect(self.page.locator('#conclusion')).to_be_focused()
+                    self.arrival_stays_over_report()
+                    self.assertTrue(self.js("""() => {
+                      const e = document.activeElement, r = e.getBoundingClientRect();
+                      return e.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2));
+                    }"""), "native Tab reaches an uncovered control")
+                    self.assertEqual([], self.arrival_posts, "displaying or closing an arrival never acknowledges it")
+
+    def test_w5b_arrival_preserves_the_draft_normal(self):
+        self.arrival_preserves_the_draft(False)
+
+    def test_w5b_arrival_preserves_the_draft_reading(self):
+        self.arrival_preserves_the_draft(True)
+
+    def test_w5b_arrival_close_keeps_the_selection_made_while_open(self):
+        recipient = self.install_arrivals()
+        self.open()
+        self.open_target()
+        target = self.page.locator("#findings")
+        target.fill("SYN before arrival")
+        self.autosave()
+        target.click()
+        self.page.keyboard.press("Control+End")
+        self.arrival_server.add(recipient.rec(181, case="R2"))
+        self.poll_arrivals()
+        self.page.keyboard.type(" and continuing\nSYN next line")
+        self.assertTrue(self.js(self.CARET_VISIBLE, "findings"), "new lines remain visible while typing")
+        for _ in "line":
+            self.page.keyboard.press("Shift+ArrowLeft")
+        before = target.evaluate("e => [e.value, e.selectionStart, e.selectionEnd, e.selectionDirection]")
+        self.page.get_by_role("button", name="Hide Received", exact=True).click()
+        expect(target).to_be_focused()
+        self.assertEqual(before, target.evaluate("e => [e.value, e.selectionStart, e.selectionEnd, e.selectionDirection]"))
+        self.page.keyboard.type("word")
+        self.assertEqual(before[0][:before[1]] + "word" + before[0][before[2]:], target.input_value())
+
+    def test_w5b_arrival_keeps_dialog_then_related_mode_escape_priority(self):
+        for reading in (False, True):
+            with self.subTest(reading=reading):
+                recipient = self.install_arrivals()
+                self.open()
+                self.open_target()
+                if reading:
+                    self.enter_reading()
+                self.page.locator("#findings").fill("SYN draft retained")
+                self.autosave()
+                self.enter()
+                self.open_insert()
+                focused = self.js("document.activeElement.id")
+                before = self.js(self.BOX, "#related-mode")
+                self.arrival_server.add(recipient.rec(181, case="R2"))
+                self.poll_arrivals()
+                self.assertEqual(focused, self.js("document.activeElement.id"))
+                self.assertEqual(before, self.js(self.BOX, "#related-mode"))
+                self.assertTrue(self.js(self.ON_TOP, "#related-insert-confirm"))
+                self.page.keyboard.press("Escape")
+                expect(self.page.locator("#related-insert-dialog")).to_be_hidden()
+                expect(self.mode()).to_be_visible()
+                expect(self.page.locator("#cvr-inbox-body")).to_be_visible()
+                self.page.keyboard.press("Escape")
+                expect(self.mode()).to_be_hidden()
+                expect(self.page.locator("#findings")).to_be_focused()
+                self.assertEqual("SYN draft retained", self.value())
+                expect(self.page.locator("#cvr-inbox-body")).to_be_visible()
+                self.page.keyboard.press("Escape")
+                expect(self.page.locator("#cvr-inbox-body")).to_be_hidden()
+                self.assertEqual([], self.arrival_posts)
+
+    def test_w5b_load_is_not_arrival_and_newest_uses_previous_poll(self):
+        import critical_result_recipient_dom_test as recipient
+        for full in (True, False):
+            with self.subTest(full=full):
+                self.install_arrivals([recipient.rec(150, case="R2" if full else "R3", full=full)])
+                self.open()
+                self.poll_arrivals()
+                body = self.page.locator("#cvr-inbox-body")
+                expect(body).to_be_hidden()
+                self.page.reload()
+                self.poll_arrivals()
+                expect(body).to_be_hidden()
+                self.page.get_by_role("button", name="Show Received", exact=True).click()
+                self.page.get_by_role("region", name="Critical Results Details", exact=True).get_by_role("button", name="Show All", exact=True).click()
+                self.settle()
+                self.page.get_by_role("button", name="Hide Received", exact=True).click()
+                # Same pending count: an old pending leaves, while a pending and a still newer cancelled record arrive.
+                self.arrival_server.records[recipient.rid(150)].update(state="cancelled", revision=2,
+                    cancelledAt=recipient.iso(151), cancelReason="SYN old cancelled")
+                self.arrival_server.add(recipient.rec(161, case="R2"), recipient.rec(162, case="R2", state="cancelled",
+                    cancelledAt=recipient.iso(163), cancelReason="SYN newest cancelled"))
+                self.poll_arrivals()
+                expect(body).to_be_visible()
+                self.visible_arrival(161)
+                self.page.get_by_role("button", name="Hide Received", exact=True).click()
+                self.poll_arrivals()
+                expect(body).to_be_hidden()
+                self.assertEqual([], self.arrival_posts)
 
     # W5B-REVIEW-02: the worklist's own ways to the report editor (Enter on the current row, its keyboard activation, the
     # row menu's 판독문 작성으로) are Report Editor in the mode too: the mode closes and the editor returns with the

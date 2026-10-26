@@ -66,6 +66,7 @@ const kinViewerSession = (() => {
   });
   return {
     state,
+    owner: () => owner === null ? null : JSON.parse(owner),
     ended: () => ended,
     readOnly: () => state() === 'read-only',
     writer: () => state() === 'writer',

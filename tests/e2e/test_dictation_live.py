@@ -32,7 +32,7 @@ Every page-side read goes through PROBES; every state change is a real click or 
 Not claimed: CSP enforcement (zero Log entries is not enforcement; U4b NC-11 is the only such proof), a
 header-delivery verdict (G-CSP is Astra's conditional decision on the recorded observation), engine or model
 availability, speech accuracy, physician acceptance, U5 or Stage 3 completion, and that full Chromium honours
-the NetLog switches or negotiates HTTP/2 here (review B1/B2: only a hosted run shows it; failing to is a failure).
+the NetLog switches here. The observed HTTP exchange, including its protocol, is required evidence.
 """
 import ast
 import copy
@@ -102,7 +102,7 @@ GEO_HIT_IDS = ('b-dictate', 'dictation-status', 'dictation-stop', 'dictation-can
 # ── P10 through the browser's own NetLog (Astra decision 2026-09-23, review F1-F5). The proof object is the
 # original one: the worklet response the browser itself received, status 200, COOP same-origin, COEP
 # require-corp. Playwright never reported that response (attempt 1, A-R), so it is read from the network
-# stack's log over HTTP/2; whatever cannot be bound to exactly one exchange is an INSTRUMENTATION failure.
+# stack's log over the negotiated HTTP protocol; whatever cannot be bound to exactly one exchange is an INSTRUMENTATION failure.
 NETLOG_SECONDS = 120            # --net-log-duration: the network service stops, flushes and closes the log
 NETLOG_DEADLINE_SECONDS = 140   # completion is waited for from the pre-launch clock, never longer
 NETLOG_WINDOW_SECONDS = 115     # test 01's browser traffic ends within this; the logged POST decides (review N1)
@@ -643,8 +643,8 @@ def _netlog_response(values):
 
 
 def netlog_bind(doc, uid, authority):
-    """Schema, mode and the one worklet exchange (review B3/B5). An exchange is (HTTP2_SESSION source id, stream
-    id): exactly one request block with exactly one each of :method GET, :scheme https, the proxy :authority and
+    """Schema, mode and the one worklet exchange (review B3/B5). Bind HTTP/2 by session/stream and HTTP/1.1 by
+    URL_REQUEST source/request ordinal. Both require exactly one GET of https, the proxy authority and
     the exact worklet :path - any other request block for that path, under any method, query or origin, makes it
     ambiguous - and exactly one response block on the same key, after it. The PATH POST logged once after it is
     what shows the log's window covered this capture. Type ids come from the file's own constants."""
@@ -673,7 +673,19 @@ def netlog_bind(doc, uid, authority):
         if type(value) is not int or sum(1 for other in mapping.values() if type(other) is int and other == value) != 1:
             return fail('NETLOG-SCHEMA', 'constants.%s.%s is absent or shares its id' % (table, name))
         ids[name] = value
-    kinds, sends, recvs = {}, [], []
+    # The product's transport can change without changing the worklet's delivered-header contract.
+    # HTTP/1 response headers also appear for H2 transactions; only an actual H1 send admits that response.
+    h1_names = ('URL_REQUEST_START_JOB', 'HTTP_TRANSACTION_SEND_REQUEST_HEADERS',
+                'HTTP_TRANSACTION_READ_RESPONSE_HEADERS')
+    h1_ids = {name: constants.get('logEventTypes', {}).get(name) for name in h1_names}
+    h1_present = any(isinstance(event, dict) and event.get('type') == h1_ids[h1_names[1]] for event in events)
+    if h1_present:
+        for name, value in h1_ids.items():
+            if type(value) is not int or list(constants['logEventTypes'].values()).count(value) != 1:
+                return fail('NETLOG-SCHEMA', 'HTTP/1 event constant %s is absent or shares its id' % name)
+        if type(constants.get('logSourceType', {}).get('URL_REQUEST')) is not int:
+            return fail('NETLOG-SCHEMA', 'URL_REQUEST source type is absent')
+    kinds, sends, recvs, urls, pending, ordinals = {}, [], [], {}, {}, {}
     for index, event in enumerate(events):
         source = event.get('source') if isinstance(event, dict) else None
         if not isinstance(source, dict) or type(event.get('type')) is not int or type(event.get('phase')) is not int or \
@@ -682,16 +694,55 @@ def netlog_bind(doc, uid, authority):
             return fail('NETLOG-SCHEMA', 'event %d is not {type, phase, source {id, type}, params}' % index)
         if kinds.setdefault(source['id'], source['type']) != source['type']:
             return fail('NETLOG-SCHEMA', 'source %d appears under two source types' % source['id'])
+        params = event.get('params', {})
+        sid = source['id']
+        if h1_present and event['type'] == h1_ids[h1_names[0]] and event['phase'] == 1:
+            urls[sid] = params.get('url')
+        if h1_present and event['type'] == h1_ids[h1_names[1]]:
+            line = params.get('line')
+            words = line.split() if isinstance(line, str) else []
+            parsed = _netlog_headers(params.get('headers'))
+            address = urls.get(sid)
+            if not isinstance(address, str):
+                return fail('NETLOG-SCHEMA', 'event %d has no request URL' % index)
+            try:
+                url = urlsplit(address)
+            except ValueError:
+                return fail('NETLOG-SCHEMA', 'event %d has an invalid request URL' % index)
+            if (source['type'] != constants['logSourceType']['URL_REQUEST'] or len(words) != 3
+                    or words[2] != 'HTTP/1.1' or parsed is None or not url.scheme or not url.netloc
+                    or words[1] != (url.path or '/') + ('?' + url.query if url.query else '')
+                    or parsed[0].get('host') != [url.netloc]):
+                return fail('NETLOG-SCHEMA', 'event %d is not a bound HTTP/1.1 request' % index)
+            values, names = parsed
+            values.update({':method': [words[0]], ':scheme': [url.scheme], ':authority': [url.netloc],
+                           ':path': [words[1]]})
+            ordinals[sid] = ordinals.get(sid, 0) + 1
+            pending[sid] = (sid, ordinals[sid])
+            sends.append({'index': index, 'key': pending[sid], 'values': values, 'names': names,
+                          'event': event, 'protocol': 'http/1.1'})
+            continue
+        if h1_present and event['type'] == h1_ids[h1_names[2]] and sid in pending:
+            lines = params.get('headers')
+            status = lines[0].split() if isinstance(lines, list) and lines and isinstance(lines[0], str) else []
+            parsed = _netlog_headers(lines[1:]) if isinstance(lines, list) else None
+            if (len(status) < 2 or status[0] != 'HTTP/1.1' or not re.fullmatch(r'[0-9]{3}', status[1])
+                    or parsed is None):
+                return fail('NETLOG-SCHEMA', 'event %d is not an HTTP/1.1 response' % index)
+            values, names = parsed
+            values[':status'] = [status[1]]
+            recvs.append({'index': index, 'key': pending[sid], 'values': values, 'names': names,
+                          'event': event, 'protocol': 'http/1.1'})
+            continue
         if event['type'] not in (ids[NETLOG_SEND], ids[NETLOG_RECV]):
             continue
-        params = event.get('params', {})
         parsed = _netlog_headers(params.get('headers'))
         if source['type'] != ids[NETLOG_SESSION] or parsed is None or type(params.get('stream_id')) is not int or \
                 type(params.get('fin')) is not bool:
             return fail('NETLOG-SCHEMA', 'event %d is not an HTTP/2 header block of an HTTP2_SESSION source' % index)
         (sends if event['type'] == ids[NETLOG_SEND] else recvs).append(
             {'index': index, 'key': (source['id'], params['stream_id']), 'values': parsed[0], 'names': parsed[1],
-             'event': event})
+             'event': event, 'protocol': 'h2'})
     if len({send['key'] for send in sends}) != len(sends):
         return fail('NETLOG-SCHEMA', 'two request blocks on one session stream')
 
@@ -715,8 +766,9 @@ def netlog_bind(doc, uid, authority):
                                    if event['type'] not in (ids[NETLOG_SEND], ids[NETLOG_RECV]))
         out['counts']['worklet_path_outside_http2'] = outside
         if outside:
-            return fail('NETLOG-NOT-H2', 'the worklet path is logged, but in no HTTP/2 request block (B2)')
-        return fail('NETLOG-NO-STREAM', 'no HTTP/2 GET of exactly %s from %s' % (WORKLET_PATH, authority))
+            # Retain the existing report class for logs without a supported wire request block.
+            return fail('NETLOG-NOT-H2', 'the worklet path is logged, but in no supported HTTP request block')
+        return fail('NETLOG-NO-STREAM', 'no HTTP GET of exactly %s from %s' % (WORKLET_PATH, authority))
     if len(found) > 1 or near:
         return fail('NETLOG-AMBIGUOUS', '%d exact worklet GETs and %d other requests for its path' % (len(found), len(near)))
     send = out['send'] = found[0]
@@ -764,7 +816,7 @@ def netlog_p10(source, t0, t_end, uid, authority, read_debug, hide, limit=NETLOG
     window = round(t_end - t0, 3)
     if window > NETLOG_WINDOW_SECONDS:
         add('NETLOG-WINDOW', 'test 01 ended %.1f s after launch, over %d s' % (window, NETLOG_WINDOW_SECONDS))
-    extract = {'instrument': 'Chromium NetLog, Default capture, HTTP/2 header blocks; the raw log is not kept',
+    extract = {'instrument': 'Chromium NetLog, Default capture, HTTP header blocks; the raw log is not kept',
                'netlog_seconds': NETLOG_SECONDS, 'deadline_seconds': NETLOG_DEADLINE_SECONDS,
                'window_limit_seconds': NETLOG_WINDOW_SECONDS, 'window_s': window, 'reads': 0, 'read_at_s': None,
                'raw': None, 'guards': None, 'mode': None, 'events': None, 'counts': {}, 'exchange': None,
@@ -799,6 +851,7 @@ def netlog_p10(source, t0, t_end, uid, authority, read_debug, hide, limit=NETLOG
     if send and recv:
         names = [name for name in recv['names'] if HEADER_NAME.fullmatch(name)]
         extract['exchange'] = {
+            'protocol': send['protocol'],
             'session': send['key'][0], 'stream': send['key'][1], 'request_index': send['index'],
             'response_index': recv['index'], 'request_time': _netlog_time(send['event']),
             'response_time': _netlog_time(recv['event']),
@@ -815,6 +868,7 @@ def netlog_p10(source, t0, t_end, uid, authority, read_debug, hide, limit=NETLOG
     summary = {'classes': classes, 'details': details, 'raw': extract['raw'], 'mode': extract['mode'],
                'window_s': window, 'read_at_s': extract['read_at_s'], 'reads': extract['reads'],
                'exchange': None if not extract['exchange'] else {
+                   'protocol': extract['exchange']['protocol'],
                    'session': extract['exchange']['session'], 'stream': extract['exchange']['stream'],
                    'status': status, 'coop': coop, 'coep': coep},
                'post': extract['post']}
@@ -1355,7 +1409,8 @@ def netlog_oracle_self_check():
     class). The wait runs on a fake clock, and the private path and publication boundary are checked on values."""
     problems = []
     authority, uid = 'localhost:9443', '1.2.3'
-    types = {'URL_REQUEST_START_JOB': 2, 'HTTP_TRANSACTION_SEND_REQUEST_HEADERS': 160, NETLOG_SEND: 211, NETLOG_RECV: 215}
+    types = {'URL_REQUEST_START_JOB': 2, 'HTTP_TRANSACTION_SEND_REQUEST_HEADERS': 160,
+             'HTTP_TRANSACTION_READ_RESPONSE_HEADERS': 161, NETLOG_SEND: 211, NETLOG_RECV: 215}
     sources = {'NONE': 0, 'URL_REQUEST': 1, NETLOG_SESSION: 9}
     constants = {'logCaptureMode': 'Default', 'clientInfo': {'name': 'synthetic'}, 'logEventTypes': types,
                  'logSourceType': sources}
@@ -1462,7 +1517,7 @@ def netlog_oracle_self_check():
     if set(extract) != {'instrument', 'netlog_seconds', 'deadline_seconds', 'window_limit_seconds', 'window_s', 'reads',
                         'read_at_s', 'raw', 'guards', 'mode', 'events', 'counts', 'exchange', 'post', 'main_calibration',
                         'classes', 'details'} or \
-            set(exchange) != {'session', 'stream', 'request_index', 'response_index', 'request_time', 'response_time',
+            set(exchange) != {'protocol', 'session', 'stream', 'request_index', 'response_index', 'request_time', 'response_time',
                               'request', 'response', 'response_header_names', 'response_header_names_withheld',
                               'request_sha256', 'response_sha256'} or \
             set(extract['raw']) != {'present', 'parsed', 'bytes', 'sha256'} or \
@@ -1518,6 +1573,45 @@ def netlog_oracle_self_check():
                                                                 'method': 'GET'}),
                             other('HTTP_TRANSACTION_SEND_REQUEST_HEADERS', 21,
                                   {'line': 'GET %s HTTP/1.1\r\n' % WORKLET_PATH, 'headers': ['Host: ' + authority]})])
+    # Chromium's H1 wire events use URL_REQUEST ids, a request line and a response status line.
+    # Keep the same status, policy, request identity and capture-window obligations as H2.
+    h1_events = []
+    for offset in range(0, len(events), 2):
+        sent, received = events[offset:offset + 2]
+        values, _ = _netlog_headers(sent['params']['headers'])
+        status = _netlog_headers(received['params']['headers'])[0][':status'][0]
+        method, path = values[':method'][0], values[':path'][0]
+        source = 21 + offset
+        h1_events += [other('URL_REQUEST_START_JOB', source, {'url': 'https://' + authority + path, 'method': method}),
+                      other('HTTP_TRANSACTION_SEND_REQUEST_HEADERS', source,
+                            {'line': '%s %s HTTP/1.1\r\n' % (method, path),
+                             'headers': ['Host: ' + authority] + [line for line in sent['params']['headers']
+                                                                  if not line.startswith(':')]}),
+                      other('HTTP_TRANSACTION_READ_RESPONSE_HEADERS', source,
+                            {'headers': ['HTTP/1.1 ' + status] + [line for line in received['params']['headers']
+                                                                  if not line.startswith(':')]})]
+    h1_good, _ = judge(data=framed(constants, h1_events))
+    h1_exchange = json.loads(h1_good['text']).get('exchange') or {}
+    if (h1_good['classes'] or not h1_good['status_ok'] or not h1_good['policy_ok']
+            or h1_exchange.get('protocol') != 'http/1.1'
+            or h1_exchange.get('request') != exchange['request']
+            or h1_exchange.get('response') != exchange['response']):
+        problems.append('the H1 worklet exchange must prove the same delivered status and headers as H2')
+    for label, change, expected_class in (
+            ('response belonging to another H1 request', lambda rows: rows[5]['source'].update(id=90), 'NETLOG-NO-RESPONSE'),
+            ('H1 Host different from the requested origin',
+             lambda rows: rows[4]['params']['headers'].__setitem__(0, 'Host: localhost:9444'), 'NETLOG-SCHEMA'),
+            ('two H1 worklet requests', lambda rows: rows.extend(copy.deepcopy(rows[3:6])), 'NETLOG-AMBIGUOUS')):
+        rows = copy.deepcopy(h1_events)
+        change(rows)
+        judged, _ = judge(data=framed(constants, rows))
+        if judged['classes'] != [expected_class] or judged['status_ok'] or judged['policy_ok']:
+            problems.append('H1 evidence must reject ' + label)
+    rows = copy.deepcopy(h1_events)
+    rows[5]['params']['headers'][0] = 'HTTP/1.1 503 Service Unavailable'
+    h1_unavailable, _ = judge(data=framed(constants, rows))
+    if h1_unavailable['classes'] or h1_unavailable['status_ok'] or not h1_unavailable['policy_ok']:
+        problems.append('an H1 worklet error response must fail the status limb')
     complete = framed(constants, events)
     unfinished = framed(constants, events, complete=False)
     path_line, coop_line = ':path: ' + WORKLET_PATH, 'cross-origin-opener-policy: same-origin'
@@ -1563,7 +1657,10 @@ def netlog_oracle_self_check():
          'NETLOG-MODE'),
         # The one exchange: protocol, full URL and method.
         ('no worklet exchange', rows_changed(lambda rows: splice(rows, 2, 4)), 'NETLOG-NO-STREAM'),
-        ('the worklet over HTTP/1 only', rows_changed(http1), 'NETLOG-NOT-H2'),
+        ('the H1 worklet request without its response', rows_changed(http1), 'NETLOG-NO-RESPONSE'),
+        ('a worklet URL without a wire request block',
+         rows_changed(lambda rows: splice(rows, 2, 4, [other('URL_REQUEST_START_JOB', 21,
+                      {'url': 'https://%s%s' % (authority, WORKLET_PATH), 'method': 'GET'})])), 'NETLOG-NOT-H2'),
         ('the worklet from another port',
          rows_changed(lambda rows: swap(rows[2], ':authority: ' + authority, ':authority: localhost:9444')), 'NETLOG-NO-STREAM'),
         ('the worklet over :scheme http', rows_changed(lambda rows: swap(rows[2], ':scheme: https', ':scheme: http')), 'NETLOG-NO-STREAM'),

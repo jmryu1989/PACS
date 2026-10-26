@@ -2,6 +2,7 @@
 import time
 import unittest
 import numpy as np
+from viewer_tools import select_image_tool
 from playwright.sync_api import expect
 from test_volume_orientation import VolumeOrientationE2E
 from viewer_session import end_viewer
@@ -20,14 +21,16 @@ class VolumeCineE2E(VolumeOrientationE2E):
    v.wait_for_timeout(10)
  def cine_open(self,v):
   errors=[];v.on('pageerror',lambda e:errors.append(str(e)));self.addCleanup(lambda:self.assertEqual(errors,[]))
-  v.locator('[data-cy="MoreTools-split-button-secondary"]').click();v.locator('[data-cy="Cine"]').click();expect(v.locator('#kin-cine')).to_be_visible()
+  select_image_tool(v, 'Cine');expect(v.locator('#kin-cine')).to_be_visible()
  def cine_play(self,v):
   v.locator('[data-cy=viewport-grid] > div').nth(0).locator('[data-cy="cine-player-play-pause"]').click()
  def watch_cine(self,v):
   v.evaluate("""()=>{window.cineView=services.cornerstoneViewportService.getCornerstoneViewport('mpr-axial');window.cinePositions=[];window.cinePixels=[];cineView.element.addEventListener(cornerstone.Enums.Events.CAMERA_MODIFIED,()=>{const p=cineView.getCamera().focalPoint;if(!cinePositions.length||p.some((x,i)=>Math.abs(x-cinePositions.at(-1).point[i])>1e-6))cinePositions.push({point:p,time:performance.now()})});cineView.element.addEventListener(cornerstone.Enums.Events.IMAGE_RENDERED,()=>{const c=cineView.getCanvas(),p=cineView.getCamera().focalPoint,q=cineView.worldToCanvas(p);cinePixels.push({point:p,value:c.getContext('2d').getImageData(Math.floor(q[0]*c.width/c.clientWidth),Math.floor(q[1]*c.height/c.clientHeight),1,1).data[0]})})}""")
  def test_volume_cine_01_both_endpoints_direction_pixels(self):
   a,p,v=self.starting();original=self.originals();p.locator('#findings').fill('KEEP MPR CINE REPORT');self.cine_open(v);v.get_by_label('Loop',exact=True).uncheck();v.get_by_role('button',name='First Plane',exact=True).click();v.wait_for_timeout(200);before=self.volume_state(v);self.assertAlmostEqual(before[0]['camera']['focalPoint'][2],32,delta=1e-6);self.watch_cine(v);self.cine_play(v)
-  v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false",timeout=10000);forward=v.evaluate('()=>cinePositions');np.testing.assert_allclose([r['point'][2] for r in forward],list(range(31,-1,-1)),atol=1e-6,rtol=0);fps=(len(forward)-1)*1000/(forward[-1]['time']-forward[0]['time']);self.assertGreater(fps,18);self.assertLess(fps,30);print('VOLUME_CINE_FPS',fps,flush=True)
+  v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false",timeout=10000);forward=v.evaluate('()=>cinePositions');np.testing.assert_allclose([r['point'][2] for r in forward],list(range(31,-1,-1)),atol=1e-6,rtol=0);fps=(len(forward)-1)*1000/(forward[-1]['time']-forward[0]['time'])
+  print('VOLUME_CINE_FPS',fps,'REQUESTED',v.evaluate("()=>services.cineService.getState().cines['mpr-axial']"),flush=True)
+  self.assertGreater(fps,18);self.assertLess(fps,30)
   pixels=v.evaluate('()=>cinePixels');self.assertTrue(pixels)
   for row in pixels:
    z=row['point'][2];want=25 if z<10.5 else 230 if z>=21.5 else 128;self.assertAlmostEqual(row['value'],want,delta=3)

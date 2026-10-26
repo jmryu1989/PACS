@@ -98,7 +98,7 @@ class ViewerImagesOnlyE2E(DisplayControlsE2E):
           const exit=element.querySelector('#kin-images-only-exit'),exitBox=exit?.getBoundingClientRect();
           const overlap=exitBox&&identities.some(identity=>{const identityBox=identity.getBoundingClientRect();return exitBox.left<identityBox.right&&
             exitBox.right>identityBox.left&&exitBox.top<identityBox.bottom&&exitBox.bottom>identityBox.top});
-          const identityBox=identities[0]?.getBoundingClientRect(),dock=document.querySelector('#kin-workspace-dock'),nativeTool=document.querySelector('[data-cy="Zoom"]');
+          const identityBox=identities[0]?.getBoundingClientRect(),dock=document.querySelector('#kin-workspace-dock'),nativeTool=document.querySelector('[role="toolbar"][aria-label="Frequent Tools"] button[aria-label="Zoom"]');
           const dpr=devicePixelRatio||1,backing=box&&Math.abs(canvas.width-box.width*dpr)<=2&&Math.abs(canvas.height-box.height*dpr)<=2;
           return Math.abs(rect.left)<=2&&Math.abs(rect.top)<=2&&Math.abs(rect.right-innerWidth)<=2&&Math.abs(rect.bottom-innerHeight)<=2&&
             box&&Math.abs(box.left-rect.left)<=2&&Math.abs(box.top-rect.top)<=2&&Math.abs(box.right-rect.right)<=2&&Math.abs(box.bottom-rect.bottom)<=2&&
@@ -109,8 +109,10 @@ class ViewerImagesOnlyE2E(DisplayControlsE2E):
             "Images Only · Esc 또는 Exit Images Only로 돌아갑니다.")
 
     def annotate(self, page):
-        page.locator('[data-cy="MeasurementTools-split-button-secondary"]').click()
-        page.get_by_text("Annotation", exact=True).click()
+        annotation = page.get_by_role('button', name='Annotation', exact=True)
+        if not annotation.is_visible():
+            page.get_by_text('More', exact=True).click()
+        annotation.click()
         box = page.locator('[data-cy=viewport-grid] > div').first.locator("canvas").bounding_box()
         x, y = box["x"] + box["width"] * .5, box["y"] + box["height"] * .5
         page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x + 35, y + 22, steps=8); page.mouse.up()
@@ -161,7 +163,14 @@ class ViewerImagesOnlyE2E(DisplayControlsE2E):
 
     def test_images_only_02_native_display_changes_survive_escape_and_other_cell_is_unchanged(self):
         _, page = self.open_pair()
-        page.get_by_role("button", name="Comparison", exact=True).click()
+        page.locator('#kin-workspace-dock nav button[aria-controls="kin-viewer-layout"]').click()
+        page.get_by_role('button', name='Viewer Settings', exact=True).click()
+        settings = page.get_by_role('dialog', name='Viewer Settings')
+        settings.get_by_label('Flip Horizontal Shortcut', exact=True).fill('h')
+        settings.get_by_role('button', name='Save', exact=True).click()
+        expect(settings).not_to_be_visible()
+        comparison = page.get_by_role('button', name='Comparison', exact=True)
+        if comparison.get_attribute('aria-expanded') != 'true': comparison.click()
         page.get_by_label("Job Title", exact=True).fill("KEEP FILLED INPUT")
         self.panel(page); before = self.stable_state(page); self.enter(page)
         active = next(i for i, row in enumerate(before["rows"]) if row["id"] == before["active"])

@@ -2,6 +2,7 @@
 """Selected classic CT display operations and the native preset keyboard contract."""
 import io,json,unittest,uuid
 from pathlib import Path
+from viewer_tools import select_image_tool,display_transform
 from playwright.sync_api import expect
 from test_viewer_layout import ViewerLayoutE2E
 from test_prior_selection import synthetic_ct,canvas_ready
@@ -12,7 +13,7 @@ class DisplayControlsE2E(ViewerLayoutE2E):
  def open_pair(self):
   f=self.multiple('DISPLAY-'+uuid.uuid4().hex[:12],'current','20260801')
   p=self.launch(self.login(),[f]);self.grid(p,2);self.drag(p,'D03A current',0);self.drag(p,'D02E second series',1)
-  canvas_ready(p,2);self.choose(p,0);return f,p
+  canvas_ready(p,2);self.choose(p,0);self.settled(p);return f,p
 
  def choose(self,p,i):
   b=p.locator('[data-cy=viewport-grid] > div').nth(i).locator('canvas').bounding_box();p.mouse.click(b['x']+b['width']*.5,b['y']+b['height']*.3)
@@ -27,7 +28,7 @@ class DisplayControlsE2E(ViewerLayoutE2E):
   })''')
 
  def gesture(self,p,tool,dx,dy):
-  p.locator('[data-cy="'+tool+'"]').click();b=p.locator('[data-cy=viewport-grid] > div').first.locator('canvas').bounding_box()
+  select_image_tool(p, tool);b=p.locator('[data-cy=viewport-grid] > div').first.locator('canvas').bounding_box()
   x,y=b['x']+b['width']*.5,b['y']+b['height']*.5
   p.mouse.move(x,y);p.mouse.down();p.mouse.move(x+dx,y+dy,steps=12);p.mouse.up();p.wait_for_timeout(150)
 
@@ -72,7 +73,7 @@ class DisplayControlsE2E(ViewerLayoutE2E):
   self.assertEqual(pan[1],initial[1]);observations.append(dict(action='pan',display=pan))
   self.gesture(p,'WindowLevel',60,30);wl=self.display(p);self.assertNotEqual(wl[0]['properties']['voiRange'],pan[0]['properties']['voiRange']);self.assertEqual(wl[1],initial[1])
   for key,field in [('r','rotation'),('h','flipHorizontal'),('v','flipVertical')]:
-   before=self.display(p);p.keyboard.press(key);p.wait_for_timeout(120);after=self.display(p);self.assertNotEqual(after[0]['camera'][field],before[0]['camera'][field]);self.assertEqual(after[1],initial[1]);observations.append(dict(action=key,display=after))
+   before=self.display(p);display_transform(p,key);p.wait_for_timeout(120);after=self.display(p);self.assertNotEqual(after[0]['camera'][field],before[0]['camera'][field]);self.assertEqual(after[1],initial[1]);observations.append(dict(action=key,display=after))
   before=self.display(p);p.keyboard.press('i');p.wait_for_timeout(120);inverted=self.display(p)
   self.assertNotEqual(inverted[0]['properties']['invert'],before[0]['properties']['invert']);self.assertAlmostEqual(inverted[0]['rgba'][0]+before[0]['rgba'][0],255,delta=2);self.assertEqual(inverted[1],initial[1])
   p.keyboard.press('=');p.wait_for_timeout(120);fit=self.display(p)
@@ -105,7 +106,7 @@ class DisplayControlsE2E(ViewerLayoutE2E):
   self.assertEqual(self.stack.request('PUT','/studies/'+f.uid+'/report','doctor',dict(values,baseVersion=1)).status,200)
   self.assertEqual(self.stack.request('POST','/studies/'+f.uid+'/hold','doctor').status,201)
   original=self.originals();rows=self.report_rows(f);before=self.display(p)
-  p.locator('[data-cy="MeasurementTools-split-button-secondary"]').click();p.get_by_text('Annotation',exact=True).click()
+  select_image_tool(p, 'ArrowAnnotate')
   b=p.locator('[data-cy=viewport-grid] > div').first.locator('canvas').bounding_box();x,y=b['x']+b['width']*.5,b['y']+b['height']*.5
   p.mouse.move(x,y);p.mouse.down();p.mouse.move(x+45,y+28,steps=8);p.mouse.up();entry=p.get_by_placeholder('Enter label');expect(entry).to_be_visible()
   before=self.display(p);entry.press_sequentially('12345');expect(entry).to_have_value('12345');self.assertEqual(self.display(p),before)
@@ -113,8 +114,8 @@ class DisplayControlsE2E(ViewerLayoutE2E):
   p.locator('#draggableItem-select-annotation').get_by_role('button',name='Save',exact=True).click()
   arrows=p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='ArrowAnnotate').map(a=>({metadata:a.metadata,points:a.data.handles.points,text:a.data.text}))")
   # Saving its label leaves Annotation active; switch tools before a focus click can start another arrow.
-  p.locator('[data-cy="WindowLevel"]').click()
-  self.choose(p,0);p.keyboard.press('2');p.keyboard.press('r');p.keyboard.press('h');p.keyboard.press('Space');p.wait_for_timeout(150)
+  select_image_tool(p, 'WindowLevel')
+  self.choose(p,0);p.keyboard.press('2');display_transform(p,'r');display_transform(p,'h');p.keyboard.press('Space');p.wait_for_timeout(150)
   self.assertEqual(p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='ArrowAnnotate').map(a=>({metadata:a.metadata,points:a.data.handles.points,text:a.data.text}))"),arrows)
   p.get_by_role('button',name='Add Key Image',exact=True).click();title=p.locator('#kin-viewer-history section[data-kind=key]').last.get_by_label('Key Title');title.fill('')
   before=self.display(p);title.press_sequentially('12345');expect(title).to_have_value('12345');self.assertEqual(self.display(p),before)

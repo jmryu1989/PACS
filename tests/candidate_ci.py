@@ -74,6 +74,7 @@ FLOWS = (
     ("e2e/test_finding_worklist.py", "FindingWorklistE2E", "test_worklist_02_separate_windows_ambiguous_owner_unattached_reattach_and_close", "test_worklist_02_"),
     ("emr/b/live.py", "EmrBLedgerLive", "test_b01_ledger_roles_and_restart", "test_b01_"),
     ("emr/e/online_live.py", "OnlineImagePg", "test_fixed_image_http", "test_fixed_image_"),
+    ("emr/f/link_live.py", "AuditLinkPg", "test_audit_copy_hold_http", "test_audit_copy_"),
 )
 
 

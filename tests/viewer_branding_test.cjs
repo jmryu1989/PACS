@@ -37,7 +37,8 @@ class El{
 }
 function world(){
   const observers=new Set(),pending=[];let body;
-  const doc={title:'',connected:e=>{for(let n=e;n;n=n.parentElement)if(n===body)return true;return false;},
+  const events=new EventTarget();
+  const doc={title:'',addEventListener:events.addEventListener.bind(events),removeEventListener:events.removeEventListener.bind(events),connected:e=>{for(let n=e;n;n=n.parentElement)if(n===body)return true;return false;},
     getElementById:id=>body.querySelectorAll('*').find(e=>e.getAttribute('id')===id)||null,
     notify(record){observers.forEach(o=>{if(o.on){pending.push([o,record]);queueMicrotask(()=>{const job=pending.shift();if(job&&job[0].on)job[0].cb([job[1]]);});}});}};
   body=new El(doc,'body');doc.body=body;

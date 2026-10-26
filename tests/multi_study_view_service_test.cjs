@@ -13,9 +13,31 @@ require('./service_test_loader.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
-// The server's periodic header/request timeout sweep is off: these sources hold requests on purpose, and the sweep
-// (Node 22) can race a socket that the client just cancelled into an uncaught internal TypeError after a test ends.
-const HELD_SOURCE = { connectionsCheckingInterval: 2147483647, requestTimeout: 0, headersTimeout: 0 };
+const { channel } = require('node:diagnostics_channel');
+
+// A response's server-side close is earlier than the native fetch client's socket/parser cleanup.
+// Own both ends of each synthetic source until their close callbacks run; no parser timer may outlive its test.
+function sourceServer(handler) {
+  const server = http.createServer(handler), sockets = new Set(), closed = [];
+  const trackSocket = socket => {
+    sockets.add(socket);
+    closed.push(new Promise(resolve => socket.once('close', () => { sockets.delete(socket); resolve(); })));
+  };
+  server.on('connection', trackSocket);
+  const connected = channel('undici:client:connected');
+  const trackClient = ({ socket }) => {
+    if (socket.remotePort === server.address()?.port && socket.remoteAddress === '127.0.0.1') trackSocket(socket);
+  };
+  connected.subscribe(trackClient);
+  return { server, close: async () => {
+    // Stop accepting first, then end this source's sockets and await their actual close, including Undici's cleanup.
+    const stopped = new Promise(resolve => server.close(resolve));
+    for (const socket of sockets) socket.destroy();
+    await stopped;
+    await Promise.all(closed);
+    connected.unsubscribe(trackClient);
+  } };
+}
 const { MultiStudyViewService, VIEWING_SET_SURFACE } = require('/app/dist/multi-study-view.service');
 const { ViewingSetAccess } = require('/app/dist/emr-viewing/viewing-set-access');
 const { LocalReadResponse } = require('/app/dist/emr-viewing/local-read');
@@ -623,7 +645,7 @@ test('W9API-16 T18 HTTP: A1 admission failure withholds W9 metadata; error-only 
 test('W9API-17 A-03 Orthanc read: the named display tags, every resource row, and the caller\'s abort cancels the body', async () => {
   let mode = 'one', stallClosed = false;
   const seen = [], uid = '2.25.4242', other = '2.25.4343';
-  const server = http.createServer(HELD_SOURCE, (req, res) => {
+  const source = sourceServer((req, res) => {
     seen.push(req.url);
     if (mode === 'stall') {
       res.on('close', () => { stallClosed = true; });
@@ -633,6 +655,7 @@ test('W9API-17 A-03 Orthanc read: the named display tags, every resource row, an
       foreign: [sourceRow(uid), sourceRow(other)], malformed: { rows: [] } }[mode];
     res.setHeader('connection', 'close'); res.end(JSON.stringify(rows));
   });
+  const { server } = source;
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   process.env.ORTHANC_URL = `http://127.0.0.1:${server.address().port}`;
   process.env.ORTHANC_USER = 'synthetic'; process.env.ORTHANC_PASS = 'synthetic';
@@ -657,7 +680,7 @@ test('W9API-17 A-03 Orthanc read: the named display tags, every resource row, an
     await refusedWith(reading, 503, undefined, 'the cancelled read fails');
     assert.ok(Date.now() - start < 3000, 'the abort ends the read long before the per-read limit');
     await until(() => stallClosed, 'the source connection is closed by the abort');
-  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+  } finally { await source.close(); }
 });
 
 test('W9API-18 T16 server part: the real route key, its EMR classification and the clinician gate agree', () => {
@@ -716,15 +739,18 @@ test('W9API-21 A-03 (W9A-01): the deadline bounds the StudyAccess preparation re
   // The real StudyAccessService prepares a source-tag policy from the real OrthancService's /tools/find; the source here
   // never sends its header, or sends the header and stalls the body. Served reads are the double's (never reached).
   let mode = 'answer';
-  const calls = [];
-  const server = http.createServer(HELD_SOURCE, (req, res) => {
+  const calls = [], timers = new Set();
+  const source = sourceServer((req, res) => {
     const call = { url: req.url, closed: false, closedAt: null };
     calls.push(call);
     res.on('close', () => { call.closed = true; call.closedAt = Date.now(); });
     req.resume();
     if (mode === 'header') return;
     // served-body: the policy read answers after 6 s, so the served reads (own 5 s limit) are still held at the deadline
-    if (mode === 'served-body' && req.url === '/tools/find') { setTimeout(() => answerFind(res), 6000); return; }
+    if (mode === 'served-body' && req.url === '/tools/find') {
+      const timer = setTimeout(() => { timers.delete(timer); answerFind(res); }, 6000);
+      timers.add(timer); res.once('close', () => { clearTimeout(timer); timers.delete(timer); }); return;
+    }
     // served-body: the first member's served read answers; the second one is held until the sub-cut cancels it
     if (mode === 'served-body' && new URL(req.url, 'http://x').searchParams.get('StudyInstanceUID') === found[0].uid) {
       call.answered = true; res.writeHead(200, { 'content-type': 'application/json', connection: 'close' }); res.end(JSON.stringify([sourceRow(found[0].uid)])); return;
@@ -739,6 +765,7 @@ test('W9API-21 A-03 (W9A-01): the deadline bounds the StudyAccess preparation re
       PatientID: 'SYN-PID-1', StudyDate: '20261001', ModalitiesInStudy: 'CT' } }))));
   };
   const found = [study(), study()];
+  const { server } = source;
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   process.env.ORTHANC_URL = `http://127.0.0.1:${server.address().port}`;
   process.env.ORTHANC_USER = 'synthetic'; process.env.ORTHANC_PASS = 'synthetic';
@@ -785,7 +812,7 @@ test('W9API-21 A-03 (W9A-01): the deadline bounds the StudyAccess preparation re
       timings.push({ stall, answered_ms: run.at, socket_closed_ms: closedMs });
     }
     t.diagnostic(JSON.stringify(timings));
-  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+  } finally { for (const timer of timers) clearTimeout(timer); await source.close(); }
 });
 
 test('W9API-23 A-02/A-03 (D1550): rights per resource AND, then the policy revision, then the source identity - in that order', async () => {
@@ -822,7 +849,7 @@ const SOP = '2.25.909090', IID = 'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee';
 async function loopback() {
   const calls = [], retained = [], nativeFetch = globalThis.fetch;
   let route = () => ['F', 200, '[]'];
-  const server = http.createServer(HELD_SOURCE, (req, res) => {
+  const source = sourceServer((req, res) => {
     const call = { url: req.url, path: new URL(req.url, 'http://x').pathname, method: req.method, start: Date.now(), resClosed: null, sockClosed: null };
     calls.push(call);
     res.on('close', () => { call.resClosed = Date.now(); });
@@ -844,12 +871,13 @@ async function loopback() {
       if (mode === 'T') { const tick = setInterval(() => res.write(' '), 40); res.on('close', () => clearInterval(tick)); }
     });
   });
+  const { server } = source;
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   process.env.ORTHANC_URL = `http://127.0.0.1:${server.address().port}`;
   process.env.ORTHANC_USER = 'synthetic'; process.env.ORTHANC_PASS = 'synthetic';
   globalThis.fetch = async (...args) => { const response = await nativeFetch(...args); retained.push(response); return response; };
   return { calls, retained, route: fn => { route = fn; }, orthanc: () => new OrthancService(),
-    close: async () => { globalThis.fetch = nativeFetch; server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); } };
+    close: async () => { globalThis.fetch = nativeFetch; await source.close(); } };
 }
 /** The request's ServerResponse and its socket both closed within `ms` of `trigger`. */
 async function closedBy(call, trigger, label, ms = 500) {

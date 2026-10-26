@@ -8,6 +8,7 @@ import type { Caller } from './pacs.service';
 import { StudyAccessPolicy, StudyAccessMetadata, normalizeAccessPolicy, accessPolicyMatches, accessWindowOpen, ruleNeedsMetadata, validAccessUid } from './study-access-policy';
 import { STUDY_IDENTITY_UNRESOLVED, STUDY_IDENTITY_UNRESOLVED_MESSAGE, STUDY_SOURCE_UNAVAILABLE, STUDY_SOURCE_UNAVAILABLE_MESSAGE } from './study-source-groups';
 
+export interface SourceIdentity { readonly sourcePatientId:string|null; readonly sourceInstitution:string|null }
 export interface AccessSnapshot { revision:number; policy:StudyAccessPolicy; windowOpen:boolean; needsInstitutionReview:boolean; management?:{reason:string;updatedBy:string|null;updatedAt:Date|null} }
 type WriteRequest = { expectedOwner: unknown; policy: unknown; reason: string; requestId: string; revision: number };
 const unrestricted=():StudyAccessPolicy=>({version:1,restricted:false,startsAt:null,endsAt:null,rules:[]});
@@ -21,9 +22,9 @@ export class StudyAccessService {
   // WORKLIST-SPLIT-UID: every original resource of a UID keeps its own tags. Keeping only the last row let one
   // patient's tags decide the access to a UID another patient's resource also answers.
   private prepared=new WeakMap<Caller,{all:boolean;metadata:Map<string,StudyAccessMetadata[]|null>}>();
-  // Request-scoped source observation (resource count per UID, or unavailable). It is never a policy decision and
+  // Request-scoped source observation (count and the single resource's raw identifiers, or unavailable). It is never a policy decision and
   // never outlives the request: a past list success or another request's read is not evidence of one resource.
-  private sources=new WeakMap<Caller,Map<string,number|null>>();
+  private sources=new WeakMap<Caller,Map<string,({count:number}&SourceIdentity)|null>>();
   private owner(c:Caller) {
     if(c.kind!=='member'||![c.institution,c.sub,c.actor].every(v=>typeof v==='string'&&v.length>0&&v.length<=256))
       throw new ForbiddenException('소속 기관 회원 전용입니다');
@@ -135,7 +136,12 @@ export class StudyAccessService {
     let seen=this.sources.get(c);if(!seen){seen=new Map();this.sources.set(c,seen);}
     for(const uid of [...new Set(uids)]){
       if(seen.has(uid))continue;
-      try{seen.set(uid,(await this.orthanc.studyIdentityResources(uid)).length);}catch{seen.set(uid,null);}
+      try{
+        const rows=await this.orthanc.studyIdentityResources(uid);
+        const observed=(tag:string)=>{const value=rows.length===1?rows[0]?.[tag]?.Value?.[0]:null;return typeof value==='string'&&value.trim()?value:null;};
+        // Retain what this request actually read, without replacing a source identifier with the managing institution.
+        seen.set(uid,{count:rows.length,sourcePatientId:observed('00100020'),sourceInstitution:observed('00080080')});
+      }catch{seen.set(uid,null);}
     }
   }
   /**
@@ -143,10 +149,11 @@ export class StudyAccessService {
    * STUDY_SOURCE_UNAVAILABLE when this request could not observe the source (or never prepared it). No resource is
    * not a split; the caller's existing missing-source behaviour decides that case.
    */
-  assertUnsplitSource(c:Caller,uid:string) {
-    const count=this.sources.get(c)?.get(uid);
-    if(typeof count!=='number')throw new ServiceUnavailableException({code:STUDY_SOURCE_UNAVAILABLE,message:STUDY_SOURCE_UNAVAILABLE_MESSAGE});
-    if(count>1)throw new ConflictException({code:STUDY_IDENTITY_UNRESOLVED,message:STUDY_IDENTITY_UNRESOLVED_MESSAGE});
+  assertUnsplitSource(c:Caller,uid:string):SourceIdentity {
+    const observed=this.sources.get(c)?.get(uid);
+    if(!observed)throw new ServiceUnavailableException({code:STUDY_SOURCE_UNAVAILABLE,message:STUDY_SOURCE_UNAVAILABLE_MESSAGE});
+    if(observed.count>1)throw new ConflictException({code:STUDY_IDENTITY_UNRESOLVED,message:STUDY_IDENTITY_UNRESOLVED_MESSAGE});
+    return {sourcePatientId:observed.sourcePatientId,sourceInstitution:observed.sourceInstitution};
   }
   async status(c:Caller) {
     const s=await this.snapshot(c);

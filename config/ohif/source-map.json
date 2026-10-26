@@ -816,7 +816,9 @@
         "/worklist/hpacs-lite/volume-batch-scout.js",
         "/worklist/hpacs-lite/viewer-volume-scout.js",
         "/worklist/hpacs-lite/viewer-volume-batch.js",
-        "/worklist/hpacs-lite/viewer-tech-note.js"
+        "/worklist/hpacs-lite/viewer-tech-note.js",
+        "/worklist/hpacs-lite/viewer-ux-shortcuts.js",
+        "/worklist/hpacs-lite/viewer-ux-toolbar.js"
       ],
       "consumers": [
         "configuration.js"
@@ -1080,6 +1082,30 @@
       "loader_assets": [],
       "consumers": [],
       "registrations": []
+    },
+    {
+      "file": "viewer-ux.js",
+      "purpose": "Standalone patient tabs and viewer chrome over the stock router, grid and viewport lifecycle; viewer-local U3 context and action host.",
+      "references": [
+        {
+          "symbol": "kinViewerOnEnd",
+          "file": "session.js"
+        },
+        {
+          "symbol": "kinViewerSession",
+          "file": "clinician-context.js"
+        }
+      ],
+      "loader_assets": [
+        "/worklist/hpacs-lite/viewer-info-bar.js",
+        "/worklist/hpacs-lite/viewer-series-strip.js",
+        "/worklist/hpacs-lite/viewer-patient-tabs.js",
+        "/worklist/hpacs-lite/viewer-ux-shell.js",
+        "/worklist/hpacs-lite/viewer-ux-theme.css"
+      ],
+      "consumers": [
+        "configuration.js"
+      ]
     }
   ],
   "registration_order": [
@@ -1187,6 +1213,11 @@
       "index": 20,
       "expression": "kinCreateContextLoss()",
       "source": "context-loss.js"
+    },
+    {
+      "index": 21,
+      "expression": "kinCreateViewerUX()",
+      "source": "viewer-ux.js"
     }
   ],
   "served_consumer": {
