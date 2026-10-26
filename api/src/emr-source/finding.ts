@@ -26,22 +26,26 @@ interface FixedSource {
 async function storedSource(tx: Prisma.TransactionClient, source: any): Promise<FixedSource> {
   const job = source.kind === 'job', id = job ? source.jobId : source.itemId, revision = source.revision;
   let row: Record<string, any>, at: Date, startedAt: Date;
+  // Snapshots cross as JSON text: the query engine's Json conversion can move a 17-digit double by one
+  // ULP (viewer-job-snapshot.ts), and this copy must be the stored bytes the finding's own copy was taken from.
   if (job) {
-    const head = await tx.viewerJob.findUnique({ where: { id } });
+    const [head] = await tx.$queryRaw<any[]>`SELECT "studyUid", "authorSub", studies, snapshot::text AS snapshot
+      FROM "ViewerJob" WHERE id = ${id}::uuid`;
     const fixed = await tx.viewerJobRevision.findUnique({ where: { jobId_revision: { jobId: id, revision } } });
     const first = await tx.viewerJobRevision.findFirst({ where: { jobId: id }, orderBy: { revision: 'asc' } });
     if (!head || !fixed || !first) refuse('FindingFixedVersionMissing');
     // ViewerJob.snapshot is immutable; metadata revisions contain their own title,
     // description, author and time. A layout reference does not adopt its text.
-    row = { ...fixed, snapshot: head.snapshot, studies: head.studies, studyUid: head.studyUid,
+    row = { ...fixed, snapshot: JSON.parse(head.snapshot), studies: head.studies, studyUid: head.studyUid,
       authorSub: head.authorSub, clinicalEntry: false };
     at = fixed.at; startedAt = first.at;
   } else {
-    const head = await tx.viewerItem.findUnique({ where: { id } });
-    const fixed = await tx.viewerRevision.findUnique({ where: { itemId_revision: { itemId: id, revision } } });
-    const first = await tx.viewerRevision.findFirst({ where: { itemId: id }, orderBy: { revision: 'asc' } });
+    const head = await tx.viewerItem.findUnique({ where: { id }, select: { studyUid: true, authorSub: true } });
+    const [fixed] = await tx.$queryRaw<any[]>`SELECT "itemId", revision, snapshot::text AS snapshot, action, reason, actor, "payloadBytes", at
+      FROM "ViewerRevision" WHERE "itemId" = ${id}::uuid AND revision = ${revision}`;
+    const first = await tx.viewerRevision.findFirst({ where: { itemId: id }, orderBy: { revision: 'asc' }, select: { at: true } });
     if (!head || !fixed || !first) refuse('FindingFixedVersionMissing');
-    const snapshot = fixed.snapshot as any;
+    const snapshot = JSON.parse(fixed.snapshot);
     row = { ...fixed, studyUid: head.studyUid, authorSub: head.authorSub,
       snapshot: { ...snapshot, type: snapshot.kind === 'key' ? 'key-image' : 'measurement' } };
     at = fixed.at; startedAt = first.at;

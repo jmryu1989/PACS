@@ -1,7 +1,7 @@
 import { Inject, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { PrismaService } from '../prisma.service';
 import { ClinicalContextSource, ClinicalRequestFacts } from '../emr-clinical/runtime';
@@ -11,18 +11,41 @@ import { REQUEST_CONTEXT_SOURCE, RequestContextSource } from '../emr-runtime/req
 import { EmrRecordTransaction } from '../emr-runtime/record-port';
 import { CurrentImageFacts, ImageCatalogSource } from '../emr-image/context';
 import { checkProvisionBasis, ImageRequest } from '../emr-image/contract';
-import { AssetPin, buildImageManifest, ManifestObjectInput, Provenance, SOP_CLASSES } from '../emr-image/manifest';
+import { AssetPin, buildImageManifest, FrameDigest, ManifestObjectInput, Provenance, SOP_CLASSES } from '../emr-image/manifest';
 
 const unavailable = (code: string): never => {
   throw new ServiceUnavailableException({ code, message: '영상 원본과 배포된 뷰어 정보를 확인할 수 없습니다.' });
 };
 const value = (header: any, tag: string) => header?.[tag]?.Value?.[0];
+/** One catalog build reads the whole study once. These bound a stuck archive or an oversized listing; an object
+ * whose digests completed before the deadline is kept (below), so the next request continues rather than restarts. */
+const CATALOG_DEADLINE_MS = 120_000;
+const JSON_LIMIT_BYTES = 64 * 1024 * 1024;
+const DIGEST_CACHE_LIMIT = 20_000;
+
+type AssetFile = { size: number; mtimeMs: number; ino: number; sha256: string };
+const assetFiles = new Map<string, AssetFile>();
+/** The installed bytes of one file. A file is hashed again when its size, modification time or inode changes,
+ * which every deployment of a new distribution does. */
+async function fileDigest(path: string): Promise<string> {
+  const before = await stat(path), known = assetFiles.get(path);
+  if (known && known.size === before.size && known.mtimeMs === before.mtimeMs && known.ino === before.ino) return known.sha256;
+  const part = createHash('sha256');
+  for await (const bytes of createReadStream(path)) part.update(bytes);
+  const after = await stat(path);
+  // A file replaced while it was read has no single digest; nothing is cached and the catalog is refused.
+  if (after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ino !== before.ino) unavailable('ImageAssetCatalogUnavailable');
+  const sha256 = part.digest('hex');
+  assetFiles.set(path, { size: before.size, mtimeMs: before.mtimeMs, ino: before.ino, sha256 });
+  return sha256;
+}
 
 /** Deployment identifies the installed files, not their claimed digests. The
  * catalog hashes those actual viewer/decoder bytes for E's existing AssetPin. */
 export async function deployedImageAssets(file = process.env.KIN_EMR_IMAGE_ASSET_CATALOG) {
   if (!file) unavailable('ImageAssetCatalogUnavailable');
-  const catalog = JSON.parse(await readFile(file, 'utf8'));
+  let catalog: any;
+  try { catalog = JSON.parse(await readFile(file, 'utf8')); } catch { unavailable('ImageAssetCatalogUnavailable'); }
   const pin = async (entry: { id: string; version: string; files: string[] }): Promise<AssetPin> => {
     if (!entry || typeof entry.id !== 'string' || !entry.id || typeof entry.version !== 'string' || !entry.version ||
         !Array.isArray(entry.files) || !entry.files.length) unavailable('ImageAssetCatalogUnavailable');
@@ -31,24 +54,31 @@ export async function deployedImageAssets(file = process.env.KIN_EMR_IMAGE_ASSET
       // The ordered distribution is the versioned asset, including workers and
       // WASM files. Length-prefixed names keep concatenated files unambiguous.
       digest.update(JSON.stringify(path) + '\n');
-      const part = createHash('sha256');
-      for await (const bytes of createReadStream(resolve(dirname(file), path))) part.update(bytes);
-      digest.update(part.digest());
+      let part: string;
+      try { part = await fileDigest(resolve(dirname(file), path)); }
+      catch (error) { if (error instanceof ServiceUnavailableException) throw error; unavailable('ImageAssetCatalogUnavailable'); }
+      digest.update(Buffer.from(part, 'hex'));
     }
     return { id: entry.id, version: entry.version, sha256: digest.digest('hex') };
   };
-  const viewer = await pin(catalog.viewer), decoderCatalog: Record<string, { version: string; sha256: string }> = {};
-  for (const [id, entry] of Object.entries(catalog.decoders ?? {})) {
+  const viewer = await pin(catalog?.viewer), decoderCatalog: Record<string, { version: string; sha256: string }> = {};
+  for (const [id, entry] of Object.entries(catalog?.decoders ?? {})) {
     const asset = await pin({ ...(entry as any), id });
     decoderCatalog[id] = { version: asset.version, sha256: asset.sha256 };
   }
   return { viewer, decoderCatalog };
 }
 
+type ObjectDigests = { bytes: number; sha256: string; frames: FrameDigest[] };
+
 /** Read-only Orthanc catalog. No metadata supplied by the browser establishes
  * the patient, object version, frame digest or source provenance. */
 @Injectable()
 export class OrthancImageCatalog implements ImageCatalogSource {
+  /** Digests of an object as stored, by its Orthanc instance and stored file. Orthanc writes a changed object
+   * to a new file, so a cached entry never stands for other bytes; delivery still hashes what it stages. */
+  private readonly digests = new Map<string, ObjectDigests>();
+
   constructor(private readonly db: PrismaService,
     @Inject(CURRENT_CLINICAL_CONTEXT) private readonly clinical: ClinicalContextSource,
     @Inject(REQUEST_CONTEXT_SOURCE) private readonly requests: RequestContextSource) {}
@@ -64,7 +94,14 @@ export class OrthancImageCatalog implements ImageCatalogSource {
     return response;
   }
   private async json(path: string, signal: AbortSignal, body?: string) {
-    return (await this.response(path, signal, body)).json();
+    const response = await this.response(path, signal, body), parts: Buffer[] = [];
+    let bytes = 0;
+    for await (const part of response.body as any as AsyncIterable<Uint8Array>) {
+      bytes += part.length;
+      if (bytes > JSON_LIMIT_BYTES) { await response.body?.cancel(); unavailable('ImageCatalogTooLarge'); }
+      parts.push(Buffer.from(part));
+    }
+    try { return JSON.parse(Buffer.concat(parts).toString('utf8')); } catch { return unavailable('ImageSourceUnavailable'); }
   }
   private async digest(path: string, signal: AbortSignal) {
     const response = await this.response(path, signal), digest = createHash('sha256');
@@ -78,11 +115,38 @@ export class OrthancImageCatalog implements ImageCatalogSource {
     if (typeof id !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/.test(id)) unavailable('ImageSourceUnavailable');
     return id as string;
   }
+  private async objectDigests(instance: any, instanceId: string, frameCount: number, signal: AbortSignal): Promise<ObjectDigests> {
+    const file = typeof instance.FileUuid === 'string' && instance.FileUuid ? instance.FileUuid : null;
+    const key = file && JSON.stringify([instanceId, file, frameCount]), known = key ? this.digests.get(key) : undefined;
+    if (known) return known;
+    const original = await this.digest(`/instances/${instanceId}/file`, signal), frames: FrameDigest[] = [];
+    for (let frame = 0; frame < frameCount; frame++)
+      frames.push({ number: frame + 1, ...await this.digest(`/instances/${instanceId}/frames/${frame}/raw`, signal) });
+    const digests = { ...original, frames };
+    if (key) {
+      const oldest = this.digests.keys().next();
+      if (this.digests.size >= DIGEST_CACHE_LIMIT && !oldest.done) this.digests.delete(oldest.value);
+      this.digests.set(key, digests);
+    }
+    return digests;
+  }
 
   async manifest(request: object, image: ImageRequest, signal: AbortSignal) {
-    // Authorization happens before reading the archive; the delivery boundary
-    // checks the same context again after staging and before publishing bytes.
+    // Authorization and the deployment's own preconditions come before reading the archive; the delivery
+    // boundary checks the same context again after staging and before publishing bytes.
     const study = await this.db.$transaction(tx => this.clinical.study(tx, request, image.studyUid));
+    if (this.requests.read(request as any).institution !== study.managingInstitutionId) unavailable('ProcessingAgreementRequired');
+    const assets = await deployedImageAssets();
+    const deadline = AbortSignal.timeout(CATALOG_DEADLINE_MS), bounded = AbortSignal.any([signal, deadline]);
+    try {
+      return await this.catalog(study, image, assets, bounded);
+    } catch (error) {
+      if (deadline.aborted && !signal.aborted) unavailable('ImageCatalogTimeout');
+      throw error;
+    }
+  }
+
+  private async catalog(study: StudyFacts, image: ImageRequest, assets: Awaited<ReturnType<typeof deployedImageAssets>>, signal: AbortSignal) {
     const found = await this.json('/tools/lookup', signal, image.studyUid);
     const matches = Array.isArray(found) ? found.filter(row => row.Type === 'Study') : [];
     if (matches.length !== 1) unavailable('ImageStudyUnresolved');
@@ -105,14 +169,14 @@ export class OrthancImageCatalog implements ImageCatalogSource {
       const pixel = format === 'image' || format === 'segmentation';
       const declaredFrameCount = pixel ? Number(value(header, '00280008') ?? 1) : 0;
       if (!Number.isSafeInteger(declaredFrameCount) || declaredFrameCount < 0) unavailable('ImageFrameCountUnreadable');
-      const original = await this.digest(`/instances/${instanceId}/file`, signal), frames = [];
-      for (let frame = 0; frame < declaredFrameCount; frame++)
-        frames.push({ number: frame + 1, ...await this.digest(`/instances/${instanceId}/frames/${frame}/raw`, signal) });
+      const { frames, ...original } = await this.objectDigests(instance, instanceId, declaredFrameCount, signal);
       let provenance: Provenance = { kind: 'device', receiptEventId: null };
       if (['structured-report', 'segmentation', 'encapsulated-pdf'].includes(format)) {
-        const manual = await this.db.manualSr.findFirst({ where: { studyUid: study.studyId, orthancId: instanceId, sha256: original.sha256, storedAt: { not: null } } });
-        if (!manual || format !== 'structured-report') unavailable('ImageSourceEvidenceUnavailable');
-        provenance = { kind: 'product-authored', recordId: manual.id };
+        const manual = format === 'structured-report' ? await this.db.manualSr.findFirst({
+          where: { studyUid: study.studyId, orthancId: instanceId, sha256: original.sha256, storedAt: { not: null } } }) : null;
+        // A scanner dose SR, a KOS or a received PDF has no product receipt naming its producer yet. It is listed
+        // and refused by name; the study's images still open.
+        provenance = manual ? { kind: 'product-authored', recordId: manual.id } : { kind: 'unestablished' };
       }
       const imageType = pixel ? header['00080008']?.Value ?? null : null;
       const refs = (header['00082112']?.Value ?? []).map((item: any) => {
@@ -133,11 +197,11 @@ export class OrthancImageCatalog implements ImageCatalogSource {
     }
     const after = await this.json(`/studies/${id}/instances`, signal);
     if (!Array.isArray(after) || after.length !== listed.length ||
-        after.some(row => !listed.some(before => before.ID === row.ID))) unavailable('ImageCatalogChanged');
+        after.some(row => !listed.some(before => before.ID === row.ID && before.FileUuid === row.FileUuid))) unavailable('ImageCatalogChanged');
     return buildImageManifest({ formatVersion: 1, studyUid: image.studyUid,
       managingInstitution: study.managingInstitutionId, patient: study.patient, builtAt: new Date().toISOString(),
       expected: { series: new Set(objects.map(o => o.seriesUid)).size, objects: objects.length },
-      pages: [{ cursor: null, next: null, objects }], referencedObjects: [], ...await deployedImageAssets() });
+      pages: [{ cursor: null, next: null, objects }], referencedObjects: [], ...assets });
   }
 
   async delivery(tx: EmrRecordTransaction, request: object, facts: ClinicalRequestFacts, study: StudyFacts, at: string):

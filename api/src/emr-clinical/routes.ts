@@ -96,10 +96,11 @@ export class ClinicalRoutes {
 
   /** Every record a list serves gets its own 열람 event, as a single read does: the record's
    * study and managing institution, the versions the row serves as targets, and the served
-   * head as the appended reference. A row whose body carries its earlier entries (a question
-   * thread) serves every version up to the listed revision; a list given `served` names the
-   * revisions its row actually carries, so retained history it did not return is not recorded
-   * as read. A list that serves nothing records nothing (B2's record() treats a null effect as
+   * head as the appended reference. A row whose body folds in its earlier versions (a request's
+   * reason with its latest note, a consultation's reason with its reply) serves every version up to
+   * the listed revision; a list given `served` names the revisions its row actually carries (a
+   * finding or question summary: its listed head), so retained history it did not return is not
+   * recorded as read. A list that serves nothing records nothing (B2's record() treats a null effect as
    * a conditional write that affected no row, which is settled negative and appends no entry).
    * `studyId` is the per-study list's study, so its items resolve the study scope once. */
   async collection<T extends { items?: ListedRecord[] }>(request: object,

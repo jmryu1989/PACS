@@ -60,7 +60,11 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const header = { ...resource(imageUid, 'synthetic:' + imageUid),
       '0020000E': { Value: [seriesUid] }, '00080018': { Value: [sopUid] },
       '00080016': { Value: ['1.2.840.10008.5.1.4.1.1.2'] }, '00080008': { Value: ['ORIGINAL', 'PRIMARY'] } };
-    let catalogPatient = 'synthetic:' + imageUid, fileReads = 0, beforeIdentity = null;
+    let catalogPatient = 'synthetic:' + imageUid, fileReads = 0, beforeIdentity = null, storedFile = 'synthetic-file-1';
+    // FIND-248-F3: a finding's comparison identity is read before its write locks the anchor study row, so a
+    // concurrent write to that study never waits behind an archive call. Each comparison lookup probes the lock.
+    let comparisonLookups = 0;
+    const lockedLookups = [];
     archive = require('node:http').createServer(async (req, res) => {
       const url = new URL(req.url, 'http://synthetic'), json = value => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(value)); };
       if (url.pathname === '/dicom-web/studies') {
@@ -71,6 +75,11 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
       }
       if (url.pathname === '/tools/lookup') {
         let body = ''; for await (const chunk of req) body += chunk;
+        if (body === comparisonUid) {
+          comparisonLookups++;
+          try { await db.$transaction(tx => tx.$queryRaw`SELECT uid FROM "StudyState" WHERE uid=${imageUid} FOR UPDATE NOWAIT`); }
+          catch (error) { lockedLookups.push(String(error?.meta?.code ?? error?.message)); }
+        }
         return json(body === imageUid ? [{ Type: 'Study', ID: studyResource }]
           : body === comparisonUid ? [{ Type: 'Study', ID: comparisonResource }]
           : body === sopUid ? [{ Type: 'Instance', ID: objectResource }] : []);
@@ -78,7 +87,7 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
       if ([`/studies/${studyResource}`, `/studies/${comparisonResource}`].includes(url.pathname)) return json({
         MainDicomTags: { StudyInstanceUID: url.pathname.endsWith(comparisonResource) ? comparisonUid : imageUid },
         PatientMainDicomTags: { PatientID: 'synthetic:' + imageUid } });
-      if (url.pathname === `/studies/${studyResource}/instances`) return json([{ ID: objectResource, MainDicomTags: { SOPInstanceUID: sopUid } }]);
+      if (url.pathname === `/studies/${studyResource}/instances`) return json([{ ID: objectResource, FileUuid: storedFile, MainDicomTags: { SOPInstanceUID: sopUid } }]);
       if (url.pathname.endsWith('/metadata')) return json([{ ...header, '00100020': { Value: [catalogPatient] } }]);
       if (url.pathname.endsWith('/simplified-tags')) return json({ StudyInstanceUID: imageUid, SeriesInstanceUID: seriesUid,
         SOPInstanceUID: sopUid, SOPClassUID: header['00080016'].Value[0], NumberOfFrames: '1' });
@@ -256,6 +265,8 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const comparisonBody = { ...findingBody, requestId: randomUUID(), item: { ...findingBody.item,
       sources: [{ itemId: comparisonItemId, revision: 1 }] } };
     const comparisonFinding = await send('doctor', 'POST', `/studies/${uid}/findings`, comparisonBody, 200);
+    assert.ok(comparisonLookups > 0, 'the new comparison copy proved the patient against the archive');
+    assert.deepEqual(lockedLookups, [], 'no comparison archive read ran while the anchor study row was locked');
     const findingVersions = await db.findingRevision.count();
     await db.studyState.update({ where: { uid: comparisonUid }, data: { institutionId: receiver } });
     await send('doctor', 'POST', `/studies/${uid}/findings`, comparisonBody, 404);
@@ -264,6 +275,24 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const comparisonReplay = await send('doctor', 'POST', `/studies/${uid}/findings`, comparisonBody, 200);
     assert.deepEqual(comparisonReplay.emr.signature, comparisonFinding.emr.signature);
     assert.equal(comparisonReplay.emr.replayed, true);
+    assert.deepEqual(lockedLookups, []);
+    // FIND-248-F4: the fixed source copy D keeps is the stored revision as stored. A 17-digit double that the
+    // query engine's Json conversion would move by one ULP reaches the copy and the finding exactly.
+    const exactItemId = randomUUID(), exactValue = -0.33113281957650276;
+    const exactText = `{"schemaVersion":1,"kind":"length","seriesUid":"${uid}.1","sopUid":"${uid}.1.1","frame":1,` +
+      `"frameOfReferenceUid":"${uid}.9","label":"합성 길이","points":[[-0.33113281957650276,0.1,0],[10.5,0.2,0]],` +
+      `"viewPlaneNormal":[0,0,1],"viewUp":[0,-1,0],"baseline":{"calculator":"kin-native-manual-v1","values":[-0.33113281957650276]},"hidden":false}`;
+    await db.$executeRaw`INSERT INTO "ViewerItem" (id, "studyUid", "authorSub", "authorActor", revision, hidden, snapshot, "updatedAt")
+      VALUES (${exactItemId}::uuid, ${uid}, ${members.doctor.sub}, 'doctor', 1, false, ${exactText}::jsonb, now())`;
+    await db.$executeRaw`INSERT INTO "ViewerRevision" ("itemId", revision, snapshot, action, reason, actor, "payloadBytes")
+      VALUES (${exactItemId}::uuid, 1, ${exactText}::jsonb, 'create', '', 'doctor', octet_length(convert_to(${exactText}::jsonb::text, 'UTF8')))`;
+    const exact = await send('doctor', 'POST', `/studies/${uid}/findings`, { requestId: randomUUID(),
+      item: { schemaVersion: 1, title: '합성 정밀값', text: '원본 그대로', sources: [{ itemId: exactItemId, revision: 1 }] } }, 200);
+    assert.deepEqual(exact.item.sources[0].values, [exactValue]);
+    const [exactCommand] = await db.$queryRaw`SELECT c.body FROM emr_clinical.online_command c
+      JOIN emr_clinical.online_version v ON v.operation_id=c.operation_id WHERE v.version_id=${exact.emr.receipt.versionId}`;
+    const fixedCopy = JSON.parse(exactCommand.body).projection.fixedSources[0].row.snapshot;
+    assert.deepEqual([fixedCopy.baseline.values, fixedCopy.points[0][0]], [[exactValue], exactValue]);
     // The registered image route reads real HTTP catalog/object/frame bodies and
     // persists the exact preparation/transport evidence through PostgreSQL B2.
     const imageUrl = origin + '/api/images/dicom-web?target=' + encodeURIComponent(`/dicom-web/studies/${imageUid}/series/${seriesUid}/instances/${sopUid}`);
@@ -271,8 +300,20 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     assert.equal(imageResponse.status, 200, await (imageResponse.status === 200 ? Promise.resolve('') : imageResponse.text()));
     const bodyBytes = Buffer.from(await imageResponse.arrayBuffer());
     assert.ok(bodyBytes.includes(original));
+    const firstReads = fileReads;
+    // FIND-248-F6: an unchanged stored file is not downloaded again to rebuild the manifest; the delivery still
+    // reads and hashes what it serves. A new stored file of the same object is read for the manifest again.
+    const repeatedImage = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
+    assert.equal(repeatedImage.status, 200); assert.ok(Buffer.from(await repeatedImage.arrayBuffer()).includes(original));
+    const repeatedReads = fileReads - firstReads;
+    assert.ok(repeatedReads >= 1 && repeatedReads < firstReads, JSON.stringify({ firstReads, repeatedReads }));
+    storedFile = 'synthetic-file-2';
+    const rewrittenImage = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
+    assert.equal(rewrittenImage.status, 200); await rewrittenImage.arrayBuffer();
+    assert.equal(fileReads - firstReads - repeatedReads, firstReads);
     const preparations = await db.$queryRaw`SELECT source_manifest, response_manifest FROM emr_image.preparation`;
-    assert.equal(preparations.length, 1);
+    assert.equal(preparations.length, 3);
+    assert.equal(new Set(preparations.map(p => JSON.stringify(p.source_manifest.objects))).size, 1, 'the same fixed object version each time');
     const observed = preparations[0].source_manifest;
     assert.equal(observed.patient.patientId, 'synthetic:' + imageUid);
     assert.equal(observed.objects[0].sha256, require('node:crypto').createHash('sha256').update(original).digest('hex'));
@@ -285,7 +326,7 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const changedPatient = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
     assert.equal(changedPatient.status, 503);
     assert.equal((await changedPatient.json()).code, 'ImageCurrentStudyChanged');
-    assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n, 1);
+    assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n, 3);
     catalogPatient = 'synthetic:' + imageUid;
     let identityReads = 0;
     beforeIdentity = async () => {
@@ -294,7 +335,7 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const movedStudy = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
     assert.equal(movedStudy.status, 503);
     assert.equal((await movedStudy.json()).code, 'ImageCurrentStudyChanged');
-    assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n, 1);
+    assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n, 3);
     beforeIdentity = null;
     await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: hospital } });
     const question = { requestId: randomUUID(), expectedOwner: owner('clinician'), body: '합성 질문 원문' };
@@ -312,15 +353,20 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     assert.equal(read.emr.signatures.length, 2);
     assert.ok((await send('clinician', 'GET', '/questions?view=mine')).items.some(item => item.id === id));
     assert.ok((await send('doctor', 'GET', `/studies/${uid}/questions`)).items.some(item => item.id === id));
-    // A served record is one 열람 event per list it appears in: the record's study and institution, both
-    // versions as targets, the served head as the appended reference.
+    // A served record is one 열람 event per list it appears in: the record's study and institution, the version
+    // its row serves as target and appended reference. A list row is the thread's summary at its head and
+    // carries no entry body (R248-01); the thread read above serves, and names, both entries.
     const listed = (await readEntries()).filter(row => row.event.surface !== 'GET studies/:uid/tech-note');
     assert.deepEqual(listed.map(row => row.event.surface).sort(), ['GET questions', 'GET studies/:uid/questions']);
     for (const row of listed) {
       assert.equal(row.event.action, 'provide-prepared'); assert.equal(row.event.managingInstitution.value, hospital);
-      assert.equal(row.event.context.studyId, uid); assert.equal(row.event.targets.length, 2);
-      assert.equal(row.result_id, id); assert.ok(row.result_version);
+      assert.equal(row.event.context.studyId, uid);
+      assert.deepEqual(row.event.targets.map(t => t.versionId.value), [read.emr.signatures[1].versionId]);
+      assert.equal(row.result_id, id); assert.equal(row.result_version, read.emr.signatures[1].versionId);
     }
+    const threadReads = await db.$queryRaw`SELECT e.payload::jsonb AS event FROM emr_access.access_entry e
+      WHERE e.payload::jsonb->>'surface'='GET questions/:id'`;
+    assert.deepEqual(threadReads.map(row => row.event.targets.map(t => t.versionId.value)), [read.emr.signatures.map(s => s.versionId)]);
     await send('stranger', 'GET', `/questions/${id}`, undefined, 404);
     await send('doctor', 'POST', `/questions/${id}/entries`, { requestId: randomUUID(), expectedOwner: owner('other'), revision: 2, body: '다른 계정 입력' }, 409);
     const beforeFailure = await db.studyQuestion.count();
@@ -350,6 +396,25 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     assert.equal(history.items[0].text, '합성 촬영 메모'); assert.equal(history.emr.signatures.length, 1);
     const legacy = await send('tech', 'POST', `/studies/${uid}/tech-note`, { baseVersion: 1, text: '합성 메모 정정', reason: '합성 정정 사유' });
     assert.ok(legacy.emr.signature); assert.equal(legacy.note.attemptId, null);
+    // R248-01: the current note serves its one version, a history page the versions it lists, and a page
+    // listing nothing serves and records nothing.
+    const noteReads = surface => db.$queryRaw`SELECT e.payload::jsonb AS event, o.result_version
+      FROM emr_access.access_entry e JOIN emr_access.attempt_outcome o ON o.operation_id = e.operation_id
+      WHERE e.payload::jsonb->>'surface'=${surface} AND e.payload::jsonb->'context'->>'studyId'=${uid} ORDER BY e.sequence`;
+    const noteVersions = [note.emr.receipt.versionId, legacy.emr.receipt.versionId];
+    const currentBefore = (await noteReads('GET studies/:uid/tech-note')).length;
+    const currentNote = await send('doctor', 'GET', `/studies/${uid}/tech-note`);
+    assert.equal(currentNote.note.version, 2);
+    assert.deepEqual(currentNote.emr.signatures.map(s => s.versionId), [noteVersions[1]]);
+    const currentReads = (await noteReads('GET studies/:uid/tech-note')).slice(currentBefore);
+    assert.deepEqual(currentReads.map(row => [row.event.targets.map(t => t.versionId.value), row.result_version]), [[[noteVersions[1]], noteVersions[1]]]);
+    const historyBefore = (await noteReads('GET studies/:uid/tech-note/history')).length;
+    const olderPage = await send('doctor', 'GET', `/studies/${uid}/tech-note/history?before=2`);
+    assert.deepEqual([olderPage.items.map(i => i.version), olderPage.emr.signatures.map(s => s.versionId)], [[1], [noteVersions[0]]]);
+    const emptyPage = await send('doctor', 'GET', `/studies/${uid}/tech-note/history?before=1`);
+    assert.deepEqual([emptyPage.items, emptyPage.emr.signatures], [[], []]);
+    const pageReads = (await noteReads('GET studies/:uid/tech-note/history')).slice(historyBefore);
+    assert.deepEqual(pageReads.map(row => row.event.targets.map(t => t.versionId.value)), [[noteVersions[0]]]);
     const before = await db.studyState.findUnique({ where: { uid: teleUid } });
     await send('tech', 'POST', `/studies/${teleUid}/tech-note`, { attemptId: randomUUID(), baseVersion: 0, text: '합성 원격 메모', reason: '' });
     const teleQuestion = await send('clinician', 'POST', `/studies/${teleUid}/questions`, { requestId: randomUUID(), expectedOwner: owner('clinician'), body: '합성 원격 검사 질문' });

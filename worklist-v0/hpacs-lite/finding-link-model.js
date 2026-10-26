@@ -440,6 +440,7 @@
     if (error.status === 403 && located && !String(error.code || '').startsWith('AUTH_')) return '비교 검사가 이 검사와 다른 기관 소속이거나 접근할 수 없어 연결하지 않았습니다. 작성 내용은 저장되지 않았습니다.';
     if (error.status === 400 && located) return '같은 환자의 비교 검사 하나만 연결할 수 있습니다. 비교 검사와 입력 내용을 확인하세요. 작성 내용은 저장되지 않았습니다.';
     if (error.status === 400 || error.status === 413) return '입력 길이와 연결 표식을 확인하세요. 작성 내용은 저장되지 않았습니다.';
+    if (error.code === 'AppendNotCommitted') return '저장되지 않았습니다. 작성 내용은 유지됩니다. Save를 누르면 새 요청으로 다시 저장합니다.';
     return '저장 결과를 확인하지 못했습니다. 같은 요청 재시도로 결과를 확인하세요.';
   }
   // One viewer-items head of the comparison study, in the shape of kinViewerHistoryState().heads plus its
@@ -957,7 +958,9 @@
         if (error.oldApi) { work.commit(workAt, () => { e.message = OLD_API_TEXT + ' 작성 내용은 저장되지 않았습니다.'; }); return false; }
         work.commit(workAt, () => {
         e.message = errorMessage(error, { comparison, job });
-        if (error.status >= 400 && error.status < 500) e.pending = null;
+        // AppendNotCommitted is the server's settled answer that this request ID never committed and never will:
+        // retrying it can only repeat the answer. The draft stays and the next Save sends it under a new request ID.
+        if ((error.status >= 400 && error.status < 500) || error.code === 'AppendNotCommitted') e.pending = null;
         if (error.code === 'FINDING_SOURCE_STALE' && error.jobId) e.staleSource = { jobId: error.jobId, markId: error.markId || undefined, headRevision: error.headRevision, headHidden: error.headHidden };
         else if (error.code === 'FINDING_SOURCE_STALE') e.staleSource = { itemId: error.itemId, headRevision: error.headRevision, headHidden: error.headHidden };
         });

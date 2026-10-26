@@ -126,6 +126,8 @@ function replayMismatch(replay: any, fingerprint: string, uid: string, c: Caller
 @Injectable()
 export class FindingService {
   constructor(private prisma: PrismaService, private studyAccess: StudyAccessService, private orthanc: OrthancService) {}
+  // The plan an online prepare made, by its transaction; the entry goes with the transaction object.
+  private readonly planned = new WeakMap<Prisma.TransactionClient, { key: string; plan: Awaited<ReturnType<FindingService['plan']>> }>();
 
   private async bounded<T>(work: (tx: Prisma.TransactionClient) => Promise<T>, read = false, transaction?: Prisma.TransactionClient): Promise<T> {
     try {
@@ -375,10 +377,19 @@ export class FindingService {
     online?: { tx: Prisma.TransactionClient; recordId: string; prepare?: boolean }) {
     member(c, true); viewerUid(uid); if (id !== undefined) viewerUuid(id);
     const command = findingCommand(raw, id === undefined), fingerprint = findingFingerprint(uid, id ?? null, command);
-    const anchor = await this.prisma.studyState.findUnique({ where: { uid } });
-    visible(anchor, c);
-    await this.studyAccess.require(c, [uid]);
-    const plan = await this.plan(uid, anchor, command, fingerprint, c, id);
+    // The online write prepares and then writes the same command on one transaction. Prepare's locked section
+    // took the StudyState rows; planning again here would fetch Orthanc while holding them, so the write uses
+    // the plan prepare made on this transaction. Every locked check below runs again either way.
+    const key = JSON.stringify([uid, id ?? null, c.sub, fingerprint]), prepared = online && !online.prepare ? this.planned.get(online.tx) : undefined;
+    let plan: Awaited<ReturnType<FindingService['plan']>>;
+    if (prepared?.key === key) plan = prepared.plan;
+    else {
+      const anchor = await this.prisma.studyState.findUnique({ where: { uid } });
+      visible(anchor, c);
+      await this.studyAccess.require(c, [uid]);
+      plan = await this.plan(uid, anchor, command, fingerprint, c, id);
+    }
+    if (online?.prepare) this.planned.set(online.tx, { key, plan });
     const requestKey = { authorSub: c.sub, requestId: command.requestId };
     return this.bounded(async tx => {
       // The shared policy lock is taken first, so a concurrent access change is wholly before or

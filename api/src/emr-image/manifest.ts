@@ -58,7 +58,10 @@ export interface FrameDigest { number: number; bytes: number; sha256: string }
 export type Provenance =
   | { kind: 'device'; receiptEventId: string | null }
   | { kind: 'product-authored'; recordId: string }
-  | { kind: 'external'; system: string; receiptEventId: string; signatureEvidence: { status: 'present'; sha256: string } | { status: 'absent' } };
+  | { kind: 'external'; system: string; receiptEventId: string; signatureEvidence: { status: 'present'; sha256: string } | { status: 'absent' } }
+  /** An SR, SEG or PDF the archive holds that no receipt names a producer for. It stays listed and is never
+   * delivered: its source is neither guessed nor allowed to close the rest of the study. */
+  | { kind: 'unestablished' };
 /** 'unknown': the stored Image Type is absent or its Value 1 is neither ORIGINAL nor DERIVED; the object stays listed. */
 export type Derivation = { kind: 'original' } | { kind: 'derived'; sources: readonly SopRef[] } | { kind: 'unknown' } | { kind: 'not-image' };
 export type FrameTiming = { source: 'frame-time'; frameTimeMs: number } | { source: 'frame-time-vector'; vectorMs: readonly number[] } | { source: 'none' };
@@ -74,7 +77,7 @@ export interface ManifestObjectInput extends SopRef {
 export interface ManifestObject extends Omit<ManifestObjectInput, 'mammography'> {
   mammography: MammographyResult | null;
   format: ObjectFormat; family: SopFamily; decoder: string | null; timingVerified: boolean | null;
-  unsupported: 'UnknownObjectFormat' | 'UnknownTransferSyntax' | 'MammographyFrameCountUnreadable' | null;
+  unsupported: 'UnknownObjectFormat' | 'UnknownTransferSyntax' | 'MammographyFrameCountUnreadable' | 'ObjectSourceUnestablished' | null;
 }
 export interface AssetPin { id: string; version: string; sha256: string }
 /** referencedObjects: headers of objects outside this study that stored source references name, with the patient and
@@ -131,6 +134,12 @@ function provenance(value: unknown, format: ObjectFormat): Provenance {
     // SR, SEG and PDF come from an external producer (EMR-A 'external-sr-seg'/'pdf') and must say which.
     if (!['image', 'presentation-state', 'unsupported'].includes(format)) refuse('ExternalSourceRequired');
     return { kind, receiptEventId: v.receiptEventId === null ? null : string(v.receiptEventId) };
+  }
+  if (kind === 'unestablished') {
+    object(value, ['kind']);
+    // Only an object that needs a named producer can lack one; an image is the institution's own acquisition.
+    if (!['structured-report', 'segmentation', 'encapsulated-pdf'].includes(format)) refuse('ProvenanceMismatch');
+    return { kind };
   }
   return refuse('ObjectSourceRequired');
 }
@@ -640,6 +649,7 @@ function entry(value: unknown, studyUid: string, keys: { patientKey: string; ins
     if (!pixel && (imageType !== null || derivation.kind !== 'not-image')) refuse('DerivationMismatch');
   }
   const source = provenance(v.provenance, format);
+  if (source.kind === 'unestablished') unsupported = 'ObjectSourceUnestablished';
   // Mammography objects carry their stored header; the class is read from it (D735), never taken from a label.
   let pending: Pending = null;
   if (v.mammography === null) {

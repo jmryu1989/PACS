@@ -261,12 +261,18 @@ test('E real B2 COMMIT gates fixed HTTP bodies, ranges, multipart, failures and 
   }
 });
 
-test('E registered Connect GET/HEAD refuses unavailable production context without image bytes', async () => {
+// The production context reads current identity only from a guard-captured member admission. With
+// authentication off there is none: the registered route refuses before any archive read, with its code.
+test('E registered Connect GET/HEAD refuses a request without a member admission, without image bytes', async () => {
   const { NestFactory } = require(path.join(api, 'node_modules/@nestjs/core'));
   const { AppModule } = load('app.module');
   const { EmrRuntime } = load('emr-runtime/application');
   const previous = { ...process.env };
+  let archiveReads = 0;
+  const archive = createServer((_req, res) => { archiveReads++; res.statusCode = 404; res.end(); });
+  await new Promise(resolve => archive.listen(0, '127.0.0.1', resolve));
   Object.assign(process.env, { AUTH_REQUIRED: 'false', KIN_EMR_STATE_DIR: process.env.KIN_E_SPOOL,
+    ORTHANC_URL: 'http://127.0.0.1:' + archive.address().port, ORTHANC_USER: 'synthetic', ORTHANC_PASS: 'synthetic',
     KC_ADMIN_URL: 'http://127.0.0.1:9', KC_ISSUER: 'http://127.0.0.1:9/realms/synthetic',
     KC_JWKS_URL: 'http://127.0.0.1:9/realms/synthetic/certs', PUBLIC_ORIGIN: 'http://127.0.0.1' });
   const runtime = new EmrRuntime(process.env.DATABASE_URL, path.join(process.env.KIN_E_SPOOL, 'route-outage'));
@@ -283,11 +289,13 @@ test('E registered Connect GET/HEAD refuses unavailable production context witho
       assert.equal(response.status, 503);
       assert.equal(response.headers.get('x-kin-image-event'), null);
       if (method === 'HEAD') assert.equal((await response.arrayBuffer()).byteLength, 0);
-      else assert.equal((await response.json()).code, 'IMAGE_CONTEXT_UNAVAILABLE');
+      else assert.equal((await response.json()).code, 'ImageRequestContextUnavailable');
     }
     const malformed = await fetch(endpoint + '/api/images/dicom-web?target=' + encodeURIComponent('/instances/anything/file'));
     assert.equal(malformed.status, 400);
+    assert.equal(archiveReads, 0, 'no archive read happens before a current member is known');
   } finally {
+    await close(archive);
     if (app) await app.close(); else await runtime.stop(Date.now() + 15000);
     for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
     Object.assign(process.env, previous);
