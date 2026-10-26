@@ -745,6 +745,14 @@ export function reconcileManualSr(input: unknown, observation: unknown) {
   return freeze({ id: row.id, bytesSha256: row.bytesSha256, outcome });
 }
 
+type ManualSrAdoption = { recordId: string; versionId: string; sopInstanceUid: string; bytesSha256: string; author: unknown;
+  studyId: string; managingInstitutionId: string; patient: unknown; at: string };
+/** The signed version digest of an adoption. A retained adoption is checked against it before reconciliation. */
+export function manualSrAdoptionDigest(a: ManualSrAdoption): string {
+  return hex(JSON.stringify(['emr-clinical-sr/1', a.recordId, a.versionId, a.sopInstanceUid, a.bytesSha256,
+    a.author, a.studyId, a.managingInstitutionId, a.patient, a.at]));
+}
+
 /** The author's store intent is the clinical entry of a manual SR: one signature over the exact DICOM bytes and SOP. */
 export function planManualSrAdoption(input: { actor: ActorFacts; study: StudyFacts; sr: unknown; versionId: string; at: string }) {
   const i = object(input, ['actor', 'study', 'sr', 'versionId', 'at']);
@@ -757,8 +765,7 @@ export function planManualSrAdoption(input: { actor: ActorFacts; study: StudyFac
   if (actor.signingRegistrationId === null) refuse('SigningIdentityRequired');
   const adoption = { recordId: sr.id, versionId, sopInstanceUid: sr.sopInstanceUid, bytesSha256: sr.bytesSha256, author: actor.identity,
     studyId: study.studyId, managingInstitutionId: study.managingInstitutionId, patient: study.patient, at };
-  const digest = hex(JSON.stringify(['emr-clinical-sr/1', adoption.recordId, adoption.versionId, adoption.sopInstanceUid, adoption.bytesSha256,
-    adoption.author, adoption.studyId, adoption.managingInstitutionId, adoption.patient, adoption.at]));
+  const digest = manualSrAdoptionDigest(adoption);
   const signing: SigningRequest = { recordKind: 'manual-sr', recordId: sr.id, versionId, versionSha256: digest,
     content: { kind: 'dicom', sopInstanceUid: sr.sopInstanceUid, sha256: sr.bytesSha256 }, patient: study.patient, studyId: study.studyId,
     managingInstitutionId: study.managingInstitutionId, actingInstitutionId: actor.institutionId, author: actor.identity, signer: actor.identity,

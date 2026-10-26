@@ -163,4 +163,67 @@ module.exports = async ({ db, orthanc, send, uid, members, records }) => {
   await store(pendingBackground, 401);
   await db.memberRights.update({ where: { sub: members.doctor.sub }, data: { suspended: false } });
   await db.$executeRaw`UPDATE emr_signing.doctor_key SET status='active' WHERE kid=${approval.kid}`;
+
+  // The source patient is read at Orthanc before the study and SR rows are
+  // locked, so the archive's answer time never holds clinical work.
+  const identities = orthanc.studyIdentityResources, lockFree = [];
+  const free = async query => { try { await query; return true; } catch { return false; } };
+  const observedSr = await prepare();
+  orthanc.studyIdentityResources = async id => {
+    if (id === uid) lockFree.push(await free(db.$queryRaw`SELECT uid FROM "StudyState" WHERE uid=${uid} FOR UPDATE NOWAIT`) &&
+      await free(db.$queryRaw`SELECT id FROM "ManualSr" WHERE id=${observedSr.id}::uuid FOR UPDATE NOWAIT`));
+    return identities(id);
+  };
+  try { assert.equal((await store(observedSr)).stored, true); } finally { orthanc.studyIdentityResources = identities; }
+  assert.ok(lockFree.length > 0 && lockFree.every(Boolean), 'no Orthanc identity read while the SR store holds its locks');
+
+  // Another patient now answers for the study: a permanent, mapped refusal
+  // that signs nothing and records no intent.
+  const moved = await prepare(), movedUploads = uploads;
+  orthanc.studyIdentityResources = async id => id === uid
+    ? [{ '0020000D': { Value: [uid] }, '00100020': { Value: ['synthetic:other-patient'] } }] : identities(id);
+  try { assert.equal((await store(moved, 409)).code, 'ManualSrPatientChanged'); } finally { orthanc.studyIdentityResources = identities; }
+  assert.equal((await versions(moved.id)).length, 0);
+  assert.equal((await db.manualSr.findUnique({ where: { id: moved.id } })).attemptedAt, null);
+  assert.equal(uploads, movedUploads);
+
+  // A retained approval whose signed content is not the row's bytes is refused
+  // permanently: here the row and its unsigned adoption are both moved to other
+  // bytes while the signed half still names the original document.
+  const swapped = await prepare();
+  loseAnswer = true; await store(swapped, 503); loseAnswer = false;
+  const swappedUploads = uploads, otherBytes = Buffer.concat([Buffer.from(swapped.dicom, 'base64'), Buffer.alloc(2)]);
+  const approvalOf = async id => (await db.$queryRaw`SELECT outcome FROM emr_signing.operation WHERE outcome->>'recordId'=${id}`)[0].outcome;
+  const swappedPlan = JSON.parse((await approvalOf(swapped.id)).plan);
+  swappedPlan.adoption.bytesSha256 = digest(otherBytes);
+  await db.$executeRaw`UPDATE emr_signing.operation SET outcome=jsonb_set(outcome, '{plan}', to_jsonb(${JSON.stringify(swappedPlan)}::text))
+    WHERE outcome->>'recordId'=${swapped.id}`;
+  await db.manualSr.update({ where: { id: swapped.id }, data: { dicom: otherBytes, sha256: digest(otherBytes) } });
+  const refused = await store(swapped, 409);
+  assert.equal(refused.code, 'ManualSrAuthorizationConflict');
+  assert.doesNotMatch(refused.message, /다시 시도|다시 확인/, 'a permanent refusal does not ask for the same request again');
+  assert.equal(uploads, swappedUploads);
+  // The background loop stops rescheduling the row instead of retrying it
+  // every interval; the committed intent and its signature stay as they were.
+  const swappedVersions = await versions(swapped.id);
+  await db.manualSr.update({ where: { id: swapped.id }, data: { nextCheckAt: new Date() } });
+  const stopBy = Date.now() + 15000 + 8000;
+  let stopped;
+  do {
+    stopped = await db.manualSr.findUnique({ where: { id: swapped.id } });
+    if (stopped.nextCheckAt === null) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  } while (Date.now() < stopBy);
+  assert.equal(stopped.nextCheckAt, null, 'a permanently refused row leaves the background schedule');
+  assert.equal(stopped.storedAt, null); assert.ok(stopped.attemptedAt);
+  assert.equal(uploads, swappedUploads);
+  assert.deepEqual(await versions(swapped.id), swappedVersions);
+
+  // A stored SR whose approval is missing answers a mapped refusal, never 500.
+  const [kept] = await db.$queryRaw`SELECT operation_id, outcome FROM emr_signing.operation WHERE outcome->>'recordId'=${prepared.id}`;
+  await db.$executeRaw`UPDATE emr_signing.operation SET outcome=NULL WHERE operation_id=${kept.operation_id}`;
+  try { assert.equal((await store(prepared, 409)).code, 'ManualSrAuthorizationUnavailable'); } finally {
+    await db.$executeRaw`UPDATE emr_signing.operation SET outcome=${JSON.stringify(kept.outcome)}::jsonb WHERE operation_id=${kept.operation_id}`;
+  }
+  assert.equal((await store(prepared)).stored, true);
 };

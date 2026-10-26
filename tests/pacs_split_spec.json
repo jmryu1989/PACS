@@ -9284,9 +9284,7 @@
           "declared": [
             "3:Symbol(EMR_MANUAL_SR_SIGNING)"
           ],
-          "optional": [
-            3
-          ]
+          "optional": []
         }
       }
     }
