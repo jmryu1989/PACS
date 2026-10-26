@@ -17,11 +17,6 @@ const unavailable = (code: string): never => {
   throw new ServiceUnavailableException({ code, message: '영상 원본과 배포된 뷰어 정보를 확인할 수 없습니다.' });
 };
 const value = (header: any, tag: string) => header?.[tag]?.Value?.[0];
-/** One catalog build reads the whole study once. These bound a stuck archive or an oversized listing; an object
- * whose digests completed before the deadline is kept (below), so the next request continues rather than restarts. */
-const CATALOG_DEADLINE_MS = 120_000;
-const JSON_LIMIT_BYTES = 64 * 1024 * 1024;
-const DIGEST_CACHE_LIMIT = 20_000;
 
 type AssetFile = { size: number; mtimeMs: number; ino: number; sha256: string };
 const assetFiles = new Map<string, AssetFile>();
@@ -69,15 +64,18 @@ export async function deployedImageAssets(file = process.env.KIN_EMR_IMAGE_ASSET
   return { viewer, decoderCatalog };
 }
 
-type ObjectDigests = { bytes: number; sha256: string; frames: FrameDigest[] };
+type Digest = { bytes: number; sha256: string };
+type StoredDigests = { file: string; original?: Digest; frames: Map<number, Digest> };
 
 /** Read-only Orthanc catalog. No metadata supplied by the browser establishes
  * the patient, object version, frame digest or source provenance. */
 @Injectable()
 export class OrthancImageCatalog implements ImageCatalogSource {
-  /** Digests of an object as stored, by its Orthanc instance and stored file. Orthanc writes a changed object
-   * to a new file, so a cached entry never stands for other bytes; delivery still hashes what it stages. */
-  private readonly digests = new Map<string, ObjectDigests>();
+  /** Digests of each archive object's stored file, kept as each one completes. Orthanc writes a changed object to
+   * a new file, so a digest never stands for other bytes; a request that ends part-way through a large multiframe
+   * object leaves its finished frames for the next one. One entry per archive object: a new file replaces it.
+   * Delivery still hashes the bytes it stages. */
+  private readonly digests = new Map<string, StoredDigests>();
 
   constructor(private readonly db: PrismaService,
     @Inject(CURRENT_CLINICAL_CONTEXT) private readonly clinical: ClinicalContextSource,
@@ -94,14 +92,8 @@ export class OrthancImageCatalog implements ImageCatalogSource {
     return response;
   }
   private async json(path: string, signal: AbortSignal, body?: string) {
-    const response = await this.response(path, signal, body), parts: Buffer[] = [];
-    let bytes = 0;
-    for await (const part of response.body as any as AsyncIterable<Uint8Array>) {
-      bytes += part.length;
-      if (bytes > JSON_LIMIT_BYTES) { await response.body?.cancel(); unavailable('ImageCatalogTooLarge'); }
-      parts.push(Buffer.from(part));
-    }
-    try { return JSON.parse(Buffer.concat(parts).toString('utf8')); } catch { return unavailable('ImageSourceUnavailable'); }
+    const text = await (await this.response(path, signal, body)).text();
+    try { return JSON.parse(text); } catch { return unavailable('ImageSourceUnavailable'); }
   }
   private async digest(path: string, signal: AbortSignal) {
     const response = await this.response(path, signal), digest = createHash('sha256');
@@ -115,20 +107,23 @@ export class OrthancImageCatalog implements ImageCatalogSource {
     if (typeof id !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/.test(id)) unavailable('ImageSourceUnavailable');
     return id as string;
   }
-  private async objectDigests(instance: any, instanceId: string, frameCount: number, signal: AbortSignal): Promise<ObjectDigests> {
+  private async objectDigests(instance: any, instanceId: string, frameCount: number, signal: AbortSignal):
+    Promise<Digest & { frames: FrameDigest[] }> {
     const file = typeof instance.FileUuid === 'string' && instance.FileUuid ? instance.FileUuid : null;
-    const key = file && JSON.stringify([instanceId, file, frameCount]), known = key ? this.digests.get(key) : undefined;
-    if (known) return known;
-    const original = await this.digest(`/instances/${instanceId}/file`, signal), frames: FrameDigest[] = [];
-    for (let frame = 0; frame < frameCount; frame++)
-      frames.push({ number: frame + 1, ...await this.digest(`/instances/${instanceId}/frames/${frame}/raw`, signal) });
-    const digests = { ...original, frames };
-    if (key) {
-      const oldest = this.digests.keys().next();
-      if (this.digests.size >= DIGEST_CACHE_LIMIT && !oldest.done) this.digests.delete(oldest.value);
-      this.digests.set(key, digests);
+    // Without a stored-file identity nothing tells a later request that the bytes are the same; nothing is kept.
+    let stored: StoredDigests = { file: '', frames: new Map() };
+    if (file) {
+      const known = this.digests.get(instanceId);
+      if (known?.file === file) stored = known; else this.digests.set(instanceId, stored = { file, frames: new Map() });
     }
-    return digests;
+    stored.original ??= await this.digest(`/instances/${instanceId}/file`, signal);
+    const frames: FrameDigest[] = [];
+    for (let frame = 0; frame < frameCount; frame++) {
+      let done = stored.frames.get(frame);
+      if (!done) stored.frames.set(frame, done = await this.digest(`/instances/${instanceId}/frames/${frame}/raw`, signal));
+      frames.push({ number: frame + 1, ...done });
+    }
+    return { ...stored.original, frames };
   }
 
   async manifest(request: object, image: ImageRequest, signal: AbortSignal) {
@@ -136,14 +131,9 @@ export class OrthancImageCatalog implements ImageCatalogSource {
     // boundary checks the same context again after staging and before publishing bytes.
     const study = await this.db.$transaction(tx => this.clinical.study(tx, request, image.studyUid));
     if (this.requests.read(request as any).institution !== study.managingInstitutionId) unavailable('ProcessingAgreementRequired');
-    const assets = await deployedImageAssets();
-    const deadline = AbortSignal.timeout(CATALOG_DEADLINE_MS), bounded = AbortSignal.any([signal, deadline]);
-    try {
-      return await this.catalog(study, image, assets, bounded);
-    } catch (error) {
-      if (deadline.aborted && !signal.aborted) unavailable('ImageCatalogTimeout');
-      throw error;
-    }
+    // The build runs as long as its requester waits (the signal ends with the request); digests finished
+    // before it ends are kept above, so a large study opens across retries instead of being refused.
+    return this.catalog(study, image, await deployedImageAssets(), signal);
   }
 
   private async catalog(study: StudyFacts, image: ImageRequest, assets: Awaited<ReturnType<typeof deployedImageAssets>>, signal: AbortSignal) {
@@ -197,7 +187,11 @@ export class OrthancImageCatalog implements ImageCatalogSource {
     }
     const after = await this.json(`/studies/${id}/instances`, signal);
     if (!Array.isArray(after) || after.length !== listed.length ||
-        after.some(row => !listed.some(before => before.ID === row.ID && before.FileUuid === row.FileUuid))) unavailable('ImageCatalogChanged');
+        after.some(row => !listed.some(before => before.ID === row.ID && before.FileUuid === row.FileUuid))) {
+      // Digests read while an object was being replaced may be of the new file; none of this study's are kept.
+      for (const instance of listed) this.digests.delete(instance.ID);
+      unavailable('ImageCatalogChanged');
+    }
     return buildImageManifest({ formatVersion: 1, studyUid: image.studyUid,
       managingInstitution: study.managingInstitutionId, patient: study.patient, builtAt: new Date().toISOString(),
       expected: { series: new Set(objects.map(o => o.seriesUid)).size, objects: objects.length },

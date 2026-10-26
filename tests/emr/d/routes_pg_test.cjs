@@ -61,6 +61,8 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
       '0020000E': { Value: [seriesUid] }, '00080018': { Value: [sopUid] },
       '00080016': { Value: ['1.2.840.10008.5.1.4.1.1.2'] }, '00080008': { Value: ['ORIGINAL', 'PRIMARY'] } };
     let catalogPatient = 'synthetic:' + imageUid, fileReads = 0, beforeIdentity = null, storedFile = 'synthetic-file-1';
+    let frameCount = 1, holdFrame = null;
+    const frameReads = [], frameData = n => n === 0 ? frameBytes : Buffer.alloc(512, 11 + n);
     // FIND-248-F3: a finding's comparison identity is read before its write locks the anchor study row, so a
     // concurrent write to that study never waits behind an archive call. Each comparison lookup probes the lock.
     let comparisonLookups = 0;
@@ -88,12 +90,19 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
         MainDicomTags: { StudyInstanceUID: url.pathname.endsWith(comparisonResource) ? comparisonUid : imageUid },
         PatientMainDicomTags: { PatientID: 'synthetic:' + imageUid } });
       if (url.pathname === `/studies/${studyResource}/instances`) return json([{ ID: objectResource, FileUuid: storedFile, MainDicomTags: { SOPInstanceUID: sopUid } }]);
-      if (url.pathname.endsWith('/metadata')) return json([{ ...header, '00100020': { Value: [catalogPatient] } }]);
+      if (url.pathname.endsWith('/metadata')) return json([{ ...header, '00100020': { Value: [catalogPatient] },
+        ...(frameCount > 1 ? { '00280008': { Value: [frameCount] } } : {}) }]);
       if (url.pathname.endsWith('/simplified-tags')) return json({ StudyInstanceUID: imageUid, SeriesInstanceUID: seriesUid,
-        SOPInstanceUID: sopUid, SOPClassUID: header['00080016'].Value[0], NumberOfFrames: '1' });
+        SOPInstanceUID: sopUid, SOPClassUID: header['00080016'].Value[0], NumberOfFrames: String(frameCount) });
       if (url.pathname.endsWith('/header')) return json({ '0002,0010': { Value: '1.2.840.10008.1.2.1' } });
       if (url.pathname.endsWith('/file')) { fileReads++; res.end(original); return; }
-      if (url.pathname.endsWith('/frames/0/raw')) { res.end(frameBytes); return; }
+      const frame = url.pathname.match(/\/frames\/(\d+)\/raw$/);
+      if (frame && Number(frame[1]) < frameCount) {
+        const n = Number(frame[1]); frameReads.push(n);
+        // A held frame answers nothing until its reader goes away, like a stalled archive read.
+        if (holdFrame?.frame === n) { const held = holdFrame; holdFrame = null; res.once('close', held.closed); held.reached(); return; }
+        res.end(frameData(n)); return;
+      }
       res.statusCode = 404; res.end();
     });
     await new Promise(resolve => archive.listen(0, '127.0.0.1', resolve));
@@ -338,6 +347,27 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n, 3);
     beforeIdentity = null;
     await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: hospital } });
+    // R248-FIX3-01: the catalog has no deadline or size refusal of its own. A requester that leaves while a
+    // multiframe object is being read keeps the frames already finished; the next request reads only the rest.
+    frameCount = 3; storedFile = 'synthetic-file-3'; frameReads.length = 0;
+    const readsBeforePartial = fileReads, held = { frame: 2 };
+    const atHeldFrame = new Promise(resolve => { held.reached = resolve; }), heldClosed = new Promise(resolve => { held.closed = resolve; });
+    holdFrame = held;
+    const leaving = new AbortController();
+    const partial = fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor }, signal: leaving.signal }).catch(error => error);
+    await atHeldFrame; leaving.abort(); await heldClosed;
+    assert.equal((await partial).name, 'AbortError');
+    assert.deepEqual(frameReads, [0, 1, 2]);
+    const resumed = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
+    assert.equal(resumed.status, 200, await (resumed.status === 200 ? resumed.arrayBuffer().then(() => '') : resumed.text()));
+    assert.deepEqual(frameReads, [0, 1, 2, 2], 'only the unfinished frame is read again');
+    assert.equal(fileReads - readsBeforePartial, 1 + repeatedReads, 'the stored file is digested once, then delivered');
+    const multiframe = (await db.$queryRaw`SELECT source_manifest FROM emr_image.preparation`)
+      .map(p => p.source_manifest.objects[0]).filter(o => o.frames.length === 3);
+    assert.equal(multiframe.length, 1);
+    assert.deepEqual(multiframe[0].frames.map(f => [f.number, f.sha256]),
+      [0, 1, 2].map(n => [n + 1, require('node:crypto').createHash('sha256').update(frameData(n)).digest('hex')]));
+    frameCount = 1; storedFile = 'synthetic-file-2';
     const question = { requestId: randomUUID(), expectedOwner: owner('clinician'), body: '합성 질문 원문' };
     const created = await send('clinician', 'POST', `/studies/${uid}/questions`, question);
     const signature = created.emr.signature;
