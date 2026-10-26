@@ -239,15 +239,21 @@
       if (!Array.isArray(values)) return '';
       list = Array.from({ length: values.length }, (_, i) => { const n = values[i]; return typeof n === 'number' ? n : null; });
     } catch (_) { return UNVERIFIED + '?'; }
-    const arity = typeof kind === 'string' && Object.prototype.hasOwnProperty.call(ARITY, kind) ? ARITY[kind] : 0;
+    const planar = typeof calculator === 'string' && /^kin-planar-manual-v1:(pixel|detector|ermf|dbt)$/.test(calculator);
+    const arity = planar ? 1 : typeof kind === 'string' && Object.prototype.hasOwnProperty.call(ARITY, kind) ? ARITY[kind] : 0;
     if (!list.length && !arity) return '';
-    const known = provenance === 'server-copy' ? calculator === CALCULATOR
-      : provenance === 'live-head' ? calculator === undefined || calculator === CALCULATOR : false;
+    const mgBasis = kind === 'length' && typeof calculator === 'string' && ({
+      'kin-mg-length-v1:dbt': 'DBT PixelSpacing', 'kin-mg-length-v1:pixel': 'PixelSpacing · 원본 기준면',
+      'kin-mg-length-v1:ermf': 'ImagerPixelSpacing / ERMF · 추정 보정', 'kin-mg-length-v1:detector': 'ImagerPixelSpacing · 검출기 기준',
+    })[calculator];
+    const known = planar && ['server-copy', 'live-head'].includes(provenance) || mgBasis && ['server-copy', 'live-head'].includes(provenance) || (provenance === 'server-copy' ? calculator === CALCULATOR
+      : provenance === 'live-head' ? calculator === undefined || calculator === CALCULATOR : false);
     const exact = known && list.length === arity && list.every(n => finite(n) && Math.abs(n) < 1e21) &&
-      (kind !== 'ellipse' || (Number.isSafeInteger(list[4]) && list[4] >= 0));
+      (kind !== 'ellipse' || planar || (Number.isSafeInteger(list[4]) && list[4] >= 0));
     if (!exact) return UNVERIFIED + list.map(decimal).join(' / ');
     const [a, b, c, d] = list.map(decimal);
-    if (kind === 'length') return a + ' mm';
+    if (planar) return (kind === 'ellipse' ? '면적 ' : '') + a + (kind === 'angle' ? '°' : kind === 'ellipse' ? ' mm²' : ' mm') + ' · ' + ({ pixel: 'PixelSpacing', detector: 'ImagerPixelSpacing · 검출기 기준', ermf: 'ImagerPixelSpacing / ERMF · 추정 보정', dbt: 'DBT PixelSpacing' })[calculator.split(':')[1]];
+    if (kind === 'length') return a + ' mm' + (mgBasis ? ' · ' + mgBasis : '');
     if (kind === 'angle') return a + '°';
     return '면적 ' + a + ' mm² · 평균 ' + b + ' HU · 최소 ' + c + ' HU · 최대 ' + d + ' HU · 화소 수 ' + String(list[4]);
   }

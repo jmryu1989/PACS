@@ -34,13 +34,13 @@ function fixture(kind='orthographic',stackFrames=7){
   stopClip(){cineEvents.emit('cine');},setCine:({id,...values})=>{Object.assign(state.cines[id],values);cineEvents.emit('cine');}};
  const grid={EVENTS:{ACTIVE_VIEWPORT_ID_CHANGED:'active',GRID_STATE_CHANGED:'grid'},getActiveViewportId:()=>current.id,getState:()=>({viewports:new Map([[current.id,{}]])}),subscribe:subscribe(gridEvents)};
  window.cornerstone={Enums:{Events:events,ViewportStatus:{RENDERED:'rendered'}},getEnabledElement:element=>element.disabled?undefined:({viewport:element.viewport}),
-  metaData:{get:()=>({rows:64,columns:64})},imageLoader:{loadAndCacheImage:async()=>{}},utilities:{
+  cache:{getImage:()=>null,getMaxCacheSize:()=>16*1024*1024,getCacheSize:()=>0},metaData:{get:()=>({rows:64,columns:64})},imageLoader:{loadAndCacheImage:async()=>{}},utilities:{
    getVolumeViewportScrollInfo:v=>({sliceRangeInfo:{sliceRange:{min:0,max:32,current:v.getCamera().focalPoint[2]},spacingInNormalDirection:1,camera:v.getCamera()}}),
    jumpToSlice:async(element,{imageIndex})=>element.viewport.setIndex(imageIndex),scroll:(v,{delta})=>v.setIndex(v.getTargetImageIdIndex()+delta)}};
  window.cornerstoneTools={utilities:{cine:{getToolState:()=>toolState}}};
  window.kinGetVolumeCineTarget=()=>({key:'same-source-and-selection',contentKey:'same-source',allowed,volume:{volumeId:'volume'}});
  const fetch=()=>++requests===1?new Promise((resolve,reject)=>{resolveOld=resolve;rejectOld=reject;}):Promise.resolve(response());
- const context={window,document,fetch,AbortController,setTimeout,clearTimeout,JSON,Number,Math,Error,
+ const context={performance:{},window,document,fetch,AbortController,setTimeout,clearTimeout,JSON,Number,Math,Error,
   setInterval:(fn,ms)=>{const id=++nextTimer;timers.set(id,{fn,ms});return id;},clearInterval:id=>timers.delete(id)};
  const extension=vm.runInNewContext(implementation+';kinCreateCine()',context);
  extension.preRegistration({servicesManager:{services:{cineService:cine,viewportGridService:grid,cornerstoneViewportService:{getCornerstoneViewport:()=>current}}}});extension.onModeEnter();

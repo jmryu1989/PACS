@@ -96,6 +96,17 @@ function kinViewerOnEnd(run) {
   return { close() { off?.(); window.removeEventListener?.('kin-viewer-session-ready', attach); } };
 }
 window.kinViewerOnEnd = kinViewerOnEnd;
+// A module connection failure is retryable within the current mode, without discarding the study.
+function kinToolRetry(id, message, retry) {
+  document.getElementById(id)?.remove();
+  if (!retry) return;
+  const row = document.createElement('div'); row.id = id;
+  const text = document.createElement('span'); text.textContent = message;
+  const button = document.createElement('button'); button.type = 'button'; button.textContent = 'Retry';
+  button.onclick = () => { row.remove(); retry(); };
+  row.append(text, button);
+  (document.querySelector('#kin-viewer-layout-status')?.parentElement || document.body).append(row);
+}
 
 /* S5-UI5 (VUI-04). 고정 뷰어 도구막대의 이름과 설명: aria-label은 영어 이름, title은 한국어 설명이다. 도구 ID·data-cy·명령·
    순서·단축키는 뷰어의 것이라 DOM 속성만 붙인다. 켜고 끄는 도구에는 켜짐 상태(aria-pressed)와 title의 "사용 중"을 더해 색에만
@@ -891,6 +902,138 @@ function kinViewerActivateStudy(env, study) {
   } catch (_) { return refusal('tool-missing'); }
 }
 
+// MG coordinates stay in the source image plane. Projection fallbacks are image-local,
+// never a claimed patient Frame of Reference; the SOP/frame still identifies the image.
+function kinMgGeometry(tags, frame) {
+  const dbt = '1.2.840.10008.5.1.4.1.1.13.1.3';
+  const enhanced = [dbt, '1.2.840.10008.5.1.4.1.1.13.1.4', '1.2.840.10008.5.1.4.1.1.13.1.5'];
+  const classic = ['1.2.840.10008.5.1.4.1.1.1.2', '1.2.840.10008.5.1.4.1.1.1.2.1'];
+  if (tags?.Modality !== 'MG' || ![...enhanced, ...classic].includes(tags.SOPClassUID)) return null;
+  const fail = () => { throw new Error('MG 원본 프레임의 좌표·간격·보정을 확인할 수 없습니다'); };
+  const numbers = (value, count) => {
+    const fields = typeof value === 'string' ? value.split('\\') : Array.isArray(value) ? value : [value];
+    if (fields.length !== count || fields.some(n => !(typeof n === 'number' || typeof n === 'string' && n.trim()) || !Number.isFinite(Number(n)))) return fail();
+    return fields.map(Number);
+  };
+  const many = enhanced.includes(tags.SOPClassUID), frames = many ? Number(tags.NumberOfFrames) : 1;
+  if (!Number.isSafeInteger(frames) || frames < 1 || !Number.isSafeInteger(frame) || frame < 1 || frame > frames ||
+      !many && tags.NumberOfFrames !== undefined && Number(tags.NumberOfFrames) !== 1) return fail();
+  const shared = tags.SharedFunctionalGroupsSequence?.[0], per = tags.PerFrameFunctionalGroupsSequence?.[frame - 1];
+  if (many && tags.PerFrameFunctionalGroupsSequence !== undefined && (!Array.isArray(tags.PerFrameFunctionalGroupsSequence) || tags.PerFrameFunctionalGroupsSequence.length !== frames)) return fail();
+  // Enhanced objects must resolve this frame's functional groups. The pinned native
+  // combiner mutates top-level attributes, which can still contain another frame.
+  const value = (sequence, key) => many ? (per?.[sequence]?.[0] ?? shared?.[sequence]?.[0])?.[key] : tags[key];
+  const type = value('XRay3DFrameTypeSequence', 'FrameType') ?? tags.ImageType;
+  const types = Array.isArray(type) ? type : String(type || '').split('\\');
+  const tomographic = tags.SOPClassUID === dbt && !types.includes('GENERATED_2D');
+  let spacing, basis;
+  const pixel = value('PixelMeasuresSequence', 'PixelSpacing');
+  if (pixel !== undefined) {
+    spacing = numbers(pixel, 2); basis = tomographic ? 'dbt' : 'pixel';
+  } else {
+    if (tomographic) return fail();
+    spacing = numbers(value('FramePixelDataPropertiesSequence', 'ImagerPixelSpacing'), 2);
+    const factor = value('XRayGeometrySequence', 'EstimatedRadiographicMagnificationFactor');
+    if (factor !== undefined) {
+      const magnification = numbers(factor, 1)[0]; if (magnification <= 0) return fail();
+      spacing = spacing.map(n => n / magnification); basis = 'ermf';
+    } else basis = 'detector';
+  }
+  if (spacing.some(n => !Number.isFinite(n) || n <= 0)) return fail();
+  const ipp = value('PlanePositionSequence', 'ImagePositionPatient');
+  const iop = value('PlaneOrientationSequence', 'ImageOrientationPatient');
+  const origin = numbers(ipp === undefined && !tomographic ? [0, 0, 0] : ipp, 3);
+  const orientation = numbers(iop === undefined && !tomographic ? [0, 1, 0, 0, 0, -1] : iop, 6);
+  if (tomographic && !tags.FrameOfReferenceUID) return fail();
+  const rows = Number(tags.Rows), columns = Number(tags.Columns);
+  if (![rows, columns].every(n => Number.isSafeInteger(n) && n > 0 && n <= 65535)) return fail();
+  const u = orientation.slice(0, 3), v = orientation.slice(3), dot = (a, b) => a.reduce((s, n, i) => s + n * b[i], 0);
+  const uu = dot(u, u), vv = dot(v, v), uv = dot(u, v), det = uu * vv - uv * uv;
+  // Rounded DICOM direction cosines (e.g. EA1141 MLO) need their inverse matrix,
+  // not the unit-vector shortcut. The existing plane orthogonality tolerance applies.
+  if (uu <= 0 || vv <= 0 || det <= 0 || Math.abs(uv / Math.sqrt(uu * vv)) > 1e-4) return fail();
+  const cross = [u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0]];
+  const normal = cross.map(n => n / Math.sqrt(dot(cross, cross)));
+  const imagePoint = point => {
+    const d = numbers(point, 3).map((n, i) => n - origin[i]);
+    const x = (dot(d, u) * vv - dot(d, v) * uv) / det / spacing[1];
+    const y = (dot(d, v) * uu - dot(d, u) * uv) / det / spacing[0];
+    if (Math.abs(dot(d, normal)) > .001 || x < -.501 || y < -.501 || x > columns - .499 || y > rows - .499) return fail();
+    return [x, y];
+  };
+  const length = points => {
+    const a = imagePoint(points[0]), b = imagePoint(points[1]);
+    return Math.hypot((b[0] - a[0]) * spacing[1], (b[1] - a[1]) * spacing[0]);
+  };
+  const label = { dbt: 'DBT PixelSpacing', pixel: 'PixelSpacing · 원본 기준면',
+    ermf: 'ImagerPixelSpacing / ERMF · 추정 보정', detector: 'ImagerPixelSpacing · 검출기 기준' }[basis];
+  return { origin, orientation, spacing, normal, imagePoint, length, basis, label,
+    frameOfReferenceUid: tags.FrameOfReferenceUID || null, calculator: 'kin-mg-length-v1:' + basis };
+}
+// Physical lengths, angles and areas on a specified original frame; no non-CT HU inference.
+function kinPlanarGeometry(tags, frame) {
+  const fail = () => { throw new Error('원본 프레임의 좌표·간격·보정을 확인할 수 없습니다'); };
+  const numbers = (v, n) => {
+    const a = typeof v === 'string' ? v.split('\\') : v;
+    if (!Array.isArray(a) || a.length !== n || a.some(x => !(typeof x === 'number' || typeof x === 'string' && x.trim()) || !Number.isFinite(Number(x)))) return fail();
+    return a.map(Number);
+  };
+  const frames = Number(tags?.NumberOfFrames ?? 1);
+  if (!Number.isSafeInteger(frame) || frame < 1 || !Number.isSafeInteger(frames) || frame > frames) return fail();
+  const per = tags.PerFrameFunctionalGroupsSequence, shared = tags.SharedFunctionalGroupsSequence;
+  if (per !== undefined && (!Array.isArray(per) || per.length !== frames)) return fail();
+  const value = (sequence, key) => per || shared ? (per?.[frame - 1]?.[sequence]?.[0] ?? shared?.[0]?.[sequence]?.[0])?.[key] : tags[key];
+  const mg = tags.Modality === 'MG' ? kinMgGeometry(tags, frame) : null;
+  let origin, orientation, spacing, basis;
+  if (mg) ({ origin, orientation, spacing, basis } = mg);
+  else {
+    const pixel = value('PixelMeasuresSequence', 'PixelSpacing');
+    spacing = numbers(pixel ?? value('FramePixelDataPropertiesSequence', 'ImagerPixelSpacing'), 2);
+    basis = pixel !== undefined ? 'pixel' : 'detector';
+    if (basis === 'detector') {
+      const factor = value('XRayGeometrySequence', 'EstimatedRadiographicMagnificationFactor');
+      if (factor !== undefined) {
+        const k = numbers([factor], 1)[0]; if (k <= 0) return fail();
+        spacing = spacing.map(x => x / k); basis = 'ermf';
+      }
+    }
+    origin = numbers(value('PlanePositionSequence', 'ImagePositionPatient') ?? [0, 0, 0], 3);
+    orientation = numbers(value('PlaneOrientationSequence', 'ImageOrientationPatient') ?? [1, 0, 0, 0, 1, 0], 6);
+  }
+  if (spacing.some(n => n <= 0)) return fail();
+  const rows = Number(tags.Rows), columns = Number(tags.Columns);
+  if (![rows, columns].every(n => Number.isSafeInteger(n) && n > 0)) return fail();
+  const u = orientation.slice(0, 3), v = orientation.slice(3), dot = (a, b) => a.reduce((s, n, i) => s + n * b[i], 0);
+  const uu = dot(u, u), vv = dot(v, v), uv = dot(u, v), det = uu * vv - uv * uv;
+  if (uu <= 0 || vv <= 0 || det <= 0 || Math.abs(uv / Math.sqrt(uu * vv)) > 1e-4) return fail();
+  const cross = [u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0]];
+  const normal = cross.map(n => n / Math.sqrt(dot(cross, cross)));
+  const imagePoint = point => {
+    const d = numbers(point, 3).map((n, i) => n - origin[i]);
+    const x = (dot(d, u) * vv - dot(d, v) * uv) / det / spacing[1];
+    const y = (dot(d, v) * uu - dot(d, u) * uv) / det / spacing[0];
+    if (Math.abs(dot(d, normal)) > .001 || x < -.501 || y < -.501 || x > columns - .499 || y > rows - .499) return fail();
+    return [x, y];
+  };
+  const measure = (kind, points) => {
+    const p = points.map(point => imagePoint(point).map((n, i) => n * spacing[1 - i]));
+    const sub = (a, b) => a.map((n, i) => n - b[i]), size = a => Math.hypot(...a);
+    const a = sub(p[0], p[1]); if (size(a) <= 1e-6) return fail();
+    if (kind === 'length') return size(a);
+    const b = kind === 'angle' ? sub(p[2], p[1]) : sub(p[3], p[2]);
+    if (size(b) <= 1e-6) return fail();
+    const cosine = dot(a, b) / size(a) / size(b);
+    if (kind === 'angle') {
+      return Math.acos(Math.max(-1, Math.min(1, cosine))) * 180 / Math.PI;
+    }
+    if (kind !== 'ellipse' || Math.abs(cosine) > 1e-4 || size(p[0].map((n, i) => (n + p[1][i] - p[2][i] - p[3][i]) / 2)) > .001) return fail();
+    return Math.PI * size(a) * size(b) / 4;
+  };
+  const label = mg?.label || { pixel: 'PixelSpacing · 원본 기준면', detector: 'ImagerPixelSpacing · 검출기 기준', ermf: 'ImagerPixelSpacing / ERMF · 추정 보정' }[basis];
+  return { origin, orientation, spacing, normal, imagePoint, measure, label, frameOfReferenceUid: tags.FrameOfReferenceUID || null,
+    calculator: 'kin-planar-manual-v1:' + basis };
+}
+
 function kinCreateViewerHistory() {
   let services, commands, extensions, stop;
   const tools = { arrow: 'ArrowAnnotate', length: 'Length', angle: 'Angle', ellipse: 'EllipticalROI' };
@@ -949,9 +1092,35 @@ function kinCreateViewerHistory() {
     };
     // After a 401/403 or a logout the panel has ended: that, not the account wording, is what the user needs to hear.
     const closedText = kind => ended ? '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.' : (readOnly() ? READ_ONLY : UNCONFIRMED)[kind];
+    function planar(imageId, kind) {
+      const image = cs.metaData.get('instance', imageId);
+      if (image?.Modality === 'MG' && kind === 'length' || image?.Modality === 'CT' && image.SOPClassUID === '1.2.840.10008.5.1.4.1.1.2' && Number(image.NumberOfFrames || 1) === 1) return null;
+      return kinPlanarGeometry(image, reference(imageId)?.frame);
+    }
     function measurementReason(imageId, kind, points) {
       const image = cs.metaData.get('instance', imageId);
       const finite = n => (typeof n === 'number' || typeof n === 'string' && n.trim() !== '') && Number.isFinite(Number(n));
+      try {
+        const geometry = planar(imageId, kind);
+        if (geometry) {
+          const plane = cs.metaData.get('imagePlaneModule', imageId);
+          if (cs.cache.getImage(imageId)?.calibration?.type || Number(plane?.rowPixelSpacing) !== geometry.spacing[0] || Number(plane?.columnPixelSpacing) !== geometry.spacing[1])
+            return '표시 간격과 원본 간격이 일치하지 않습니다';
+          if (points) geometry.measure(kind, points);
+          return '';
+        }
+      } catch (error) { return error.message; }
+      if (image?.Modality === 'MG' && kind === 'length') {
+        try {
+          const mg = kinMgGeometry(image, reference(imageId)?.frame);
+          if (!mg || cs.cache.getImage(imageId)?.calibration?.type) return 'MG 원본 간격·보정을 확인할 수 없습니다';
+          const plane = cs.metaData.get('imagePlaneModule', imageId);
+          if (Number(plane?.rowPixelSpacing) !== mg.spacing[0] || Number(plane?.columnPixelSpacing) !== mg.spacing[1])
+            return '표시 간격과 MG 원본 간격이 일치하지 않습니다';
+          points?.forEach(mg.imagePoint);
+          return '';
+        } catch (error) { return error.message; }
+      }
       const spacing = image?.PixelSpacing, orientation = image?.ImageOrientationPatient, origin = image?.ImagePositionPatient;
       if (image?.SOPClassUID !== '1.2.840.10008.5.1.4.1.1.2' || image.Modality !== 'CT' || Number(image.NumberOfFrames || 1) !== 1)
         return '일반 CT 원본 프레임에서 지원합니다';
@@ -1003,10 +1172,13 @@ function kinCreateViewerHistory() {
       if (!a || a.invalidated) return null;
       const kind = kinds[a.metadata.toolName], target = 'imageId:' + a.metadata.referencedImageId, s = a.data.cachedStats?.[target];
       if (!freshStats(a.data, target) || measurementReason(a.metadata.referencedImageId, kind, a.data.handles.points)) return null;
+      const geometry = planar(a.metadata.referencedImageId, kind);
+      if (geometry) return { calculator: geometry.calculator, values: [geometry.measure(kind, a.data.handles.points)] };
       const values = kind === 'length' ? [s.length] : kind === 'angle' ? [s.angle] :
         [s.area, s.mean, s.statsArray?.find(x => x?.name === 'min')?.value, s.max, s.statsArray?.find(x => x?.name === 'count')?.value];
       if (values.some(n => !Number.isFinite(n)) || kind === 'ellipse' && s.modalityUnit !== 'HU') return null;
-      return { calculator: 'kin-native-manual-v1', values };
+      const mg = kind === 'length' && kinMgGeometry(cs.metaData.get('instance', a.metadata.referencedImageId), reference(a.metadata.referencedImageId)?.frame);
+      return mg ? { calculator: mg.calculator, values: [mg.length(a.data.handles.points)] } : { calculator: 'kin-native-manual-v1', values };
     }
     const measurementService = services.measurementService;
     const originalMeasurements = measurementService.getMeasurements;
@@ -1023,9 +1195,22 @@ function kinCreateViewerHistory() {
       // verified target on every read, including a previously captured export.
       const target = 'imageId:' + a.metadata.referencedImageId;
       try {
-        return mapping.toMeasurementSchema({ annotation: { ...a, data: {
-          ...a.data, cachedStats: { [target]: a.data.cachedStats[target] },
+        const mg = a.metadata.toolName === 'Length' && kinMgGeometry(cs.metaData.get('instance', a.metadata.referencedImageId), reference(a.metadata.referencedImageId)?.frame);
+        const checked = mapping.toMeasurementSchema({ annotation: { ...a, data: {
+          ...a.data, cachedStats: { [target]: { ...a.data.cachedStats[target], ...(mg ? { length: mg.length(a.data.handles.points) } : {}) } },
         } } });
+        if (mg) {
+          checked.displayText = { ...checked.displayText, primary: [...(checked.displayText?.primary || []), mg.label] };
+          const report = checked.getReport;
+          checked.getReport = () => { const r = report(); return { ...r, columns: [...r.columns, 'Measurement basis'], values: [...r.values, mg.label] }; };
+        }
+        const kind = kinds[a.metadata.toolName], geometry = planar(a.metadata.referencedImageId, kind);
+        if (geometry) {
+          const value = geometry.measure(kind, a.data.handles.points), unit = kind === 'angle' ? '°' : kind === 'ellipse' ? 'mm²' : 'mm';
+          checked.displayText = { primary: [value.toFixed(1) + ' ' + unit, geometry.label], secondary: [] };
+          checked.getReport = () => ({ columns: [kind, 'Unit', 'Measurement basis'], values: [value, unit, geometry.label] });
+        }
+        return checked;
       } catch (_) { return null; } // Display sets may disappear before their metadata.
     }
     function projectMeasurement(m) {
@@ -1698,7 +1883,7 @@ function kinCreateViewerHistory() {
       refreshSrButtons();
       for (const kind of ['length', 'angle', 'ellipse']) button(actions, names[kind], () => {
         const v = viewport(), group = v && ct.ToolGroupManager.getToolGroupForViewport(v.id, v.renderingEngineId);
-        if (!group || v.type !== 'stack') { status.textContent = '원본 CT 프레임을 선택하세요.'; return; }
+        if (!group || v.type !== 'stack') { status.textContent = '원본 프레임을 선택하세요.'; return; }
         if (!group.getToolInstance(tools[kind])) group.addTool(tools[kind]);
         configureMeasurements(group);
         const previous = group.getActivePrimaryMouseButtonTool();
@@ -1765,8 +1950,8 @@ function kinCreateViewerHistory() {
           }
           const v = cs.getEnabledElement(event.detail.element).viewport;
           const id = v.type === 'stack' && v.getCurrentImageId();
-          let reason = id ? measurementReason(id, kind) : '일반 CT 원본 프레임을 선택하세요';
-          if (!reason && kind === 'ellipse' && v.getCamera().viewUp.filter(n => Math.abs(n) > 1e-6).length !== 1)
+          let reason = id ? measurementReason(id, kind) : '원본 프레임을 선택하세요';
+          if (!reason && kind === 'ellipse' && !planar(id, kind) && v.getCamera().viewUp.filter(n => Math.abs(n) > 1e-6).length !== 1)
             reason = '사선·회전 ROI는 아직 지원하지 않습니다';
           if (reason) { status.textContent = reason; return; }
           const annotation = add.call(this, event);
@@ -1779,10 +1964,18 @@ function kinCreateViewerHistory() {
             id ? measurementReason(id, kind, data.handles.points) : '지원하지 않는 측정 평면입니다';
           if (reason) return [reason];
           if (!freshStats(data, target)) return ['재확인 필요: 현재 좌표로 계산되지 않았습니다'];
+          const geometry = planar(id, kind);
+          if (geometry) {
+            const value = geometry.measure(kind, data.handles.points);
+            return [value.toFixed(1) + (kind === 'angle' ? '°' : kind === 'ellipse' ? ' mm²' : ' mm'), ...geometry.label.split(' · ')];
+          }
           if (kind === 'ellipse') return lines(data, target);
-          const value = data.cachedStats[target]?.[kind === 'length' ? 'length' : 'angle'];
+          const mg = kind === 'length' && kinMgGeometry(cs.metaData.get('instance', id), reference(id)?.frame);
+          const value = mg ? mg.length(data.handles.points) : data.cachedStats[target]?.[kind === 'length' ? 'length' : 'angle'];
           if (!Number.isFinite(value) || value <= 0) return ['측정을 완료하세요'];
-          return [(Math.round(value * 10) / 10).toFixed(1) + (kind === 'length' ? ' mm' : '°')];
+          const number = (Math.round(value * 10) / 10).toFixed(1) + (kind === 'length' ? ' mm' : '°');
+          // Keep the scale basis readable in the four-view mammography layout.
+          return mg ? [number, ...mg.label.split(' · ')] : [number];
         } };
         restores.push(() => { tool.configuration = config; tool.addNewAnnotation = add; });
       }
@@ -2000,21 +2193,21 @@ function kinCreateViewerHistory() {
       heads: [...entries.values()].filter(e => e.head).map(e => ({ id: e.head.id, revision: e.head.revision, hidden: !!e.head.hidden,
         kind: e.draft.kind, label: e.draft.label ?? e.draft.title ?? '', seriesUid: e.head.item.seriesUid, sopUid: e.head.item.sopUid,
         frame: e.head.item.frame, authorSub: e.head.authorSub, referenceStatus: manual(e.draft.kind) ? e.head.referenceStatus ?? 'unverified' : null,
-        values: Array.isArray(e.head.item.baseline?.values) ? [...e.head.item.baseline.values] : null, working: !!(e.editing || e.pending || e.busy) })) });
+        calculator: e.head.item.baseline?.calculator, values: Array.isArray(e.head.item.baseline?.values) ? [...e.head.item.baseline.values] : null, working: !!(e.editing || e.pending || e.busy) })) });
     function hydrate() {
       const v = viewport(), imageId = v?.getCurrentImageId?.(), r = reference(imageId);
       if (!r || r.study !== scope || !subject || ended || suspended || held()) return;
       configureMeasurements(ct.ToolGroupManager.getToolGroupForViewport(v.id, v.renderingEngineId));
       const plane = cs.metaData.get('imagePlaneModule', imageId);
       for (const e of entries.values()) {
-        if (!e.head && !e.rehydrate || e.head?.hidden || !tools[e.draft.kind] || e.annotationUID || !matches(r, e.draft) || plane?.frameOfReferenceUID !== e.draft.frameOfReferenceUid) continue;
+        if (!e.head && !e.rehydrate || e.head?.hidden || !tools[e.draft.kind] || e.annotationUID || !matches(r, e.draft) || (plane?.frameOfReferenceUID ?? null) !== e.draft.frameOfReferenceUid) continue;
         if (manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified') {
           if (!e.message) { e.message = '재확인 필요: 원본 영상의 동일성을 확인할 수 없습니다.'; row(e); }
           continue;
         }
         const uid = crypto.randomUUID(), camera = v.getCamera();
         const a = { annotationUID: uid, highlighted: false, invalidated: true, isLocked: true, isVisible: true,
-          metadata: { toolName: tools[e.draft.kind], FrameOfReferenceUID: e.draft.frameOfReferenceUid, referencedImageId: imageId, viewPlaneNormal: e.draft.viewPlaneNormal || camera.viewPlaneNormal, viewUp: e.draft.viewUp || camera.viewUp },
+          metadata: { toolName: tools[e.draft.kind], FrameOfReferenceUID: e.draft.frameOfReferenceUid ?? v.getFrameOfReferenceUID(), referencedImageId: imageId, viewPlaneNormal: e.draft.viewPlaneNormal || camera.viewPlaneNormal, viewUp: e.draft.viewUp || camera.viewUp },
           data: { text: e.draft.label, label: e.draft.label, kinUnverified: manual(e.draft.kind) && !e.editing, handles: { points: clone(e.draft.points), activeHandleIndex: null, textBox: { hasMoved: false, worldPosition: [0, 0, 0], worldBoundingBox: { topLeft: [0, 0, 0], topRight: [0, 0, 0], bottomLeft: [0, 0, 0], bottomRight: [0, 0, 0] } } }, cachedStats: {} } };
         trackMeasurement(a);
         e.rehydrate = false;
@@ -2097,7 +2290,8 @@ function kinCreateViewerHistory() {
         if (!e) {
           const ref = reference(a.metadata.referencedImageId);
           e = { id: crypto.randomUUID(), annotationUID: a.annotationUID, editing: true,
-            draft: { schemaVersion: 1, kind, seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: a.metadata.FrameOfReferenceUID, label: a.data.text ?? a.data.label ?? '', points: clone(a.data.handles.points),
+            draft: { schemaVersion: 1, kind, seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: manual(kind) && (planar(a.metadata.referencedImageId, kind) || cs.metaData.get('instance', a.metadata.referencedImageId)?.Modality === 'MG')
+                ? cs.metaData.get('instance', a.metadata.referencedImageId).FrameOfReferenceUID || null : a.metadata.FrameOfReferenceUID, label: a.data.text ?? a.data.label ?? '', points: clone(a.data.handles.points),
               ...(kind === 'arrow' ? {} : { viewPlaneNormal: clone(a.metadata.viewPlaneNormal), viewUp: clone(a.metadata.viewUp) }) } };
           entries.set(e.id, e); annotations.set(a.annotationUID, e); row(e);
         } else if (e.editing && !e.busy && !e.pending) {
@@ -2182,7 +2376,7 @@ function kinCreateViewerHistory() {
   return { id: 'kin.viewer-history', preRegistration({ servicesManager, commandsManager, extensionManager }) { services = servicesManager.services; commands = commandsManager; extensions = extensionManager; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
 
-// Only a bounded recent grid is retained; transient display-set IDs never leave this session.
+// The recent display layout is retained; transient display-set IDs never leave this session.
 const kinViewerLayoutModel = (() => {
   const PREFIX = 'kin-viewer-layout-v1:';
   const uid = s => typeof s === 'string' && s.length <= 64 && /^[0-9]+(?:\.[0-9]+)*$/.test(s);
@@ -2191,26 +2385,41 @@ const kinViewerLayoutModel = (() => {
     const query = new URLSearchParams(search), raw = query.getAll('StudyInstanceUIDs');
     if (raw.length !== 1) return null;
     const values = raw[0].split(',');
-    return values.length >= 1 && values.length <= 2 && values.every(uid) && new Set(values).size === values.length ? values.sort() : null;
+    return values.length >= 1 && values.every(uid) && new Set(values).size === values.length ? values.sort() : null;
   }
   function owner(me) {
     return me?.kind === 'member' && [me.sub, me.institution].every(x => typeof x === 'string' && x.length > 0 && x.length <= 256)
       ? PREFIX + JSON.stringify([me.institution, me.sub]) : null;
   }
   function normalize(value) {
+    if (value?.version === 2) {
+      const { studies, rows, cols, active, cells } = value;
+      if (!Array.isArray(studies) || !studies.length || !studies.every(uid) || new Set(studies).size !== studies.length ||
+          ![rows, cols].every(n => Number.isSafeInteger(n) && n > 0) || !Array.isArray(cells) || !cells.length ||
+          !Number.isSafeInteger(active) || active < 0 || active >= cells.length) return null;
+      for (const cell of cells) {
+        if (!cell || ![cell.x, cell.y, cell.width, cell.height].every(Number.isFinite) || cell.x < 0 || cell.y < 0 ||
+            cell.width <= 0 || cell.height <= 0 || cell.x + cell.width > 1.000001 || cell.y + cell.height > 1.000001 ||
+            !Array.isArray(cell.sets) || !cell.sets.every(ref => ref && studies.includes(ref.study) && uid(ref.series) &&
+              typeof ref.handler === 'string' && Array.isArray(ref.sops) && ref.sops.every(uid)) ||
+            !cell.viewportOptions || typeof cell.viewportOptions !== 'object' || !Array.isArray(cell.displaySetOptions)) return null;
+      }
+      return JSON.parse(JSON.stringify({ version: 2, studies: [...studies].sort(), rows, cols, active, cells }));
+    }
     if (!exact(value, ['version', 'studies', 'rows', 'cols', 'active', 'cells']) || value.version !== 1) return null;
     const { studies, rows, cols, active, cells } = value;
-    if (!Array.isArray(studies) || ![1, 2].includes(studies.length) || !studies.every(uid) || new Set(studies).size !== studies.length) return null;
-    if (![1, 2].includes(rows) || ![1, 2].includes(cols) || !Number.isInteger(active) || active < 0 || active >= rows * cols) return null;
+    if (!Array.isArray(studies) || !studies.length || !studies.every(uid) || new Set(studies).size !== studies.length) return null;
+    if (![rows, cols].every(n => Number.isSafeInteger(n) && n > 0) || !Number.isInteger(active) || active < 0 || active >= rows * cols) return null;
     if (!Array.isArray(cells) || cells.length !== rows * cols || cells.every(x => x === null)) return null;
     if (!cells.every(x => x === null || (exact(x, ['study', 'series']) && studies.includes(x.study) && uid(x.series)))) return null;
     return { version: 1, studies: [...studies].sort(), rows, cols, active, cells: cells.map(x => x && ({ study: x.study, series: x.series })) };
   }
+
   function read(storage, key) {
     if (!key) throw new Error('계정 정보를 확인할 수 없습니다.');
     const raw = storage.getItem(key);
     if (raw === null) return null;
-    const value = typeof raw === 'string' && raw.length <= 8192 ? normalize(JSON.parse(raw)) : null;
+    const value = typeof raw === 'string' ? normalize(JSON.parse(raw)) : null;
     if (!value) throw new Error('저장한 배치가 손상되었거나 지원하지 않는 형식입니다.');
     return value;
   }
@@ -2424,29 +2633,33 @@ function kinCreateViewerLayout() {
       const state = grid.getState();
       return JSON.stringify([state.layout, state.activeViewportId, ordered(state).map(v => [v.viewportId, v.x, v.y, v.width, v.height, v.displaySetInstanceUIDs])]);
     };
+    function reference(d) {
+      return { study: d.StudyInstanceUID, series: d.SeriesInstanceUID, handler: d.SOPClassHandlerId || '',
+        sops: [...new Set((d.images || [d.instance || d]).map(i => i.SOPInstanceUID).filter(Boolean))].sort() };
+    }
     function resolve(cell) {
       if (!cell) return null;
-      const matches = ds.getActiveDisplaySets().filter(d => d.StudyInstanceUID === cell.study && d.SeriesInstanceUID === cell.series);
-      // Split series and non-stack objects cannot be silently replaced with a default display set.
-      if (matches.length !== 1 || matches[0].Modality !== 'CT' || !(matches[0].images?.length) ||
-          !matches[0].images.every(i => i.SOPClassUID === '1.2.840.10008.5.1.4.1.1.2')) throw new Error('시리즈를 찾을 수 없거나 지원하지 않는 영상입니다. 현재 배치를 유지합니다.');
+      const matches = ds.getActiveDisplaySets().filter(d => d.StudyInstanceUID === cell.study && d.SeriesInstanceUID === cell.series &&
+        (!cell.sops || JSON.stringify(reference(d)) === JSON.stringify(cell)));
+      if (matches.length !== 1) throw new Error('저장한 영상 구성을 찾을 수 없습니다. 현재 배치를 유지합니다.');
       return matches[0].displaySetInstanceUID;
     }
     function capture() {
-      const state = grid.getState(), views = ordered(state), { numRows: rows, numCols: cols, layoutType } = state.layout;
-      if (layoutType !== 'grid' || views.length !== rows * cols) throw new Error('1·2·4화면의 일반 CT 배치만 저장할 수 있습니다.');
-      const cells = views.map((v, i) => {
-        if (Math.abs(v.x - (i % cols) / cols) > 1e-6 || Math.abs(v.y - Math.floor(i / cols) / rows) > 1e-6 ||
-            Math.abs(v.width - 1 / cols) > 1e-6 || Math.abs(v.height - 1 / rows) > 1e-6) throw new Error('병합 또는 특수 배치는 저장할 수 없습니다.');
-        const ids = v.displaySetInstanceUIDs || [];
-        if (!ids.length) return null;
-        if (ids.length !== 1 || cs.getCornerstoneViewport(v.viewportId)?.type !== 'stack') throw new Error('일반 CT 스택만 저장할 수 있습니다.');
-        const d = ds.getDisplaySetByUID(ids[0]), cell = { study: d?.StudyInstanceUID, series: d?.SeriesInstanceUID };
-        if (!studies.includes(cell.study) || resolve(cell) !== ids[0] || !cs.getCornerstoneViewport(v.viewportId)?.getCurrentImageId?.()) throw new Error('영상 로딩이 끝난 뒤 다시 저장하세요.');
-        return cell;
+      const state = grid.getState(), views = ordered(state), { numRows: rows, numCols: cols } = state.layout;
+      const cells = views.map(v => {
+        const refs = (v.displaySetInstanceUIDs || []).map(id => {
+          const d = ds.getDisplaySetByUID(id);
+          if (!d || !studies.includes(d.StudyInstanceUID)) throw new Error('영상 로딩이 끝난 뒤 다시 저장하세요.');
+          const ref = reference(d);
+          if (resolve(ref) !== id) throw new Error('표시 영상의 구성을 확인할 수 없습니다.');
+          return ref;
+        });
+        const { viewportId, ...viewportOptions } = v.viewportOptions || {};
+        return { x: v.x, y: v.y, width: v.width, height: v.height, sets: refs,
+          viewportOptions, displaySetOptions: v.displaySetOptions || refs.map(() => ({})) };
       });
-      const value = model.normalize({ version: 1, studies, rows, cols, active: views.findIndex(v => v.viewportId === state.activeViewportId), cells });
-      if (!value) throw new Error('1·2·4화면의 일반 CT 배치만 저장할 수 있습니다.');
+      const value = model.normalize({ version: 2, studies, rows, cols, active: views.findIndex(v => v.viewportId === state.activeViewportId), cells });
+      if (!value) throw new Error('현재 화면의 배치를 확인할 수 없습니다.');
       return value;
     }
     async function run(action) {
@@ -2462,14 +2675,17 @@ function kinCreateViewerLayout() {
         if (action === 'save') { model.write(localStorage, key, capture()); status.textContent = '최근 배치를 이 브라우저에 저장했습니다.'; }
         else if (action === 'remove') { localStorage.removeItem(key); status.textContent = '이 계정의 최근 배치를 삭제했습니다. 현재 화면은 유지됩니다.'; }
         else {
-          if (ordered(grid.getState()).some(v => v.displaySetInstanceUIDs?.length && cs.getCornerstoneViewport(v.viewportId)?.type !== 'stack')) throw new Error('일반 CT 화면에서 배치를 복원하세요. 현재 화면은 유지됩니다.');
           const value = model.read(localStorage, key);
           if (!value) throw new Error('이 계정에서 저장한 최근 배치가 없습니다.');
           if (JSON.stringify(value.studies) !== JSON.stringify(studies)) throw new Error('다른 검사의 배치입니다. 저장한 검사를 먼저 여세요.');
-          const sets = value.cells.map(resolve), ids = value.cells.map(() => 'kin-layout-' + crypto.randomUUID());
+          const cells = value.version === 2 ? value.cells : value.cells.map((ref, i) => ({
+            x: i % value.cols / value.cols, y: Math.floor(i / value.cols) / value.rows, width: 1 / value.cols, height: 1 / value.rows,
+            sets: ref ? [ref] : [], viewportOptions: { viewportType: 'stack', toolGroupId: 'default' }, displaySetOptions: [{}] }));
+          const sets = cells.map(cell => cell.sets.map(resolve)), ids = cells.map(() => 'kin-layout-' + crypto.randomUUID());
           await grid.setLayout({ numRows: value.rows, numCols: value.cols, activeViewportId: ids[value.active], isHangingProtocolLayout: false,
-            findOrCreateViewport: index => ({ displaySetInstanceUIDs: sets[index] ? [sets[index]] : [], displaySetOptions: [{}],
-              viewportOptions: { viewportId: ids[index], viewportType: 'stack', toolGroupId: 'default', allowUnmatchedView: true } }) });
+            layoutOptions: cells.map(({ x, y, width, height }) => ({ x, y, width, height })),
+            findOrCreateViewport: index => ({ displaySetInstanceUIDs: sets[index], displaySetOptions: cells[index].displaySetOptions,
+              viewportOptions: { ...cells[index].viewportOptions, viewportId: ids[index], allowUnmatchedView: true } }) });
           if (live()) status.textContent = '저장한 시리즈 배치를 적용했습니다. 영상 로딩 상태를 확인하세요.';
         }
       } catch (error) {
@@ -2499,7 +2715,7 @@ function kinCreateViewerLayout() {
       if (kinViewerSession.readOnly()) { readOnlyPanel(); return; }
       status.textContent = '현재 검사의 배치를 직접 저장하거나 복원하세요.'; await mountProtocols();
     }).catch(error => { if (live()) status.textContent = error?.message || '계정 정보를 확인할 수 없습니다. 뷰어를 다시 여세요.'; }).finally(refresh);
-    else status.textContent = '현재 검사 1~2개의 일반 CT 배치만 지원합니다.';
+    else status.textContent = '현재 검사의 식별 정보를 확인할 수 없습니다.';
     stop = () => { unwatch(); unwatchEnd(); end();  channel?.close(); panel.remove(); };
   }
   return { id: 'kin.viewer-layout', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
@@ -2520,9 +2736,8 @@ const kinCTSyncModel = (() => {
   function match(source, target) {
     const deny = reason => ({ reason, index: -1 });
     if (!source?.patient || source.patient !== target?.patient) return deny('같은 환자를 확인할 수 없습니다');
-    if (!source.classic || !target.classic) return deny('일반 CT 스택만 위치 동기할 수 있습니다');
     const a = source.planes?.[source.index], planes = target.planes;
-    if (!a?.frameOfReferenceUID || !Array.isArray(planes) || planes.length < 2 || planes.length > 2000 ||
+    if (!a?.frameOfReferenceUID || !Array.isArray(planes) || planes.length < 1 ||
         planes.some(p => !p?.frameOfReferenceUID || p.frameOfReferenceUID !== a.frameOfReferenceUID)) return deny('좌표계가 다르거나 없습니다');
     const n = normal(a), t = normal(planes[0]);
     if (!n || !t || Math.abs(dot(n, t)) < 1 - 1e-6) return deny('영상 방향 또는 위치가 맞지 않습니다');
@@ -2531,7 +2746,6 @@ const kinCTSyncModel = (() => {
       const pn = normal(p);
       if (!pn || Math.abs(dot(pn, t)) < 1 - 1e-6) return deny('영상 방향 또는 위치가 맞지 않습니다');
       const d = sub(p.imagePositionPatient, origin), z = dot(d, t);
-      if (Math.sqrt(dot(d, d) - Math.min(dot(d, d), z*z)) > eps) return deny('기울어진 스택은 위치 동기하지 않습니다');
       values.push(z);
     }
     const sorted = [...values].sort((a, b) => a - b), gaps = sorted.slice(1).map((x, i) => x - sorted[i]);
@@ -2541,7 +2755,7 @@ const kinCTSyncModel = (() => {
     // Preserve native nearest-position and stable first-index tie behavior, but refuse large gaps.
     let index = 0;
     for (let i = 1; i < values.length; i++) if (Math.abs(values[i]-z) < Math.abs(values[index]-z) - 1e-9) index = i;
-    if (Math.abs(values[index]-z) > Math.min(...gaps) / 2 + eps) return deny('대상 영상 위치 사이에 큰 공백이 있습니다');
+    if (Math.abs(values[index]-z) > gaps.reduce((min, gap) => Math.min(min, gap), Infinity) / 2 + eps) return deny('대상 영상 위치 사이에 큰 공백이 있습니다');
     return { index, reason: '' };
   }
   return { match };
@@ -2686,11 +2900,10 @@ function kinCreateCTSync() {
       if (!v || !g || v.getRenderingEngine().id !== info.renderingEngineId) return null;
       const ids = v.getImageIds?.() || [], sets = g.displaySetInstanceUIDs || [];
       const d = sets.length === 1 && services.displaySetService.getDisplaySetByUID(sets[0]);
-      const classic = v.type === 'stack' && d?.Modality === 'CT' && d?.SOPClassUID === '1.2.840.10008.5.1.4.1.1.2' &&
-        d.images?.length === ids.length && d.images.every(i => i.SOPClassUID === '1.2.840.10008.5.1.4.1.1.2') &&
-        ids.length > 1 && ids.length <= 2000 && ids.every(id => id.includes('/studies/'+d.StudyInstanceUID+'/series/'+d.SeriesInstanceUID+'/'));
-      return { v, ids, study: d?.StudyInstanceUID, patient: null, classic, index: v.getCurrentImageIdIndex?.(),
-        planes: classic ? ids.map(id => core.metaData.get('imagePlaneModule', id)) : [],
+      const stack = v.type === 'stack' && d && ids.length > 1 &&
+        ids.every(id => id.includes('/studies/'+d.StudyInstanceUID+'/series/'+d.SeriesInstanceUID+'/'));
+      return { v, ids, study: d?.StudyInstanceUID, patient: null, stack, index: v.getCurrentImageIdIndex?.(),
+        planes: stack ? ids.map(id => core.metaData.get('imagePlaneModule', id)) : [],
         signature: JSON.stringify([sets, ids, v.getCurrentImageId?.()]) };
     }
     const current = (info, before) => before && view(info)?.signature === before.signature;
@@ -2732,7 +2945,7 @@ function kinCreateCTSync() {
               if (m.index >= 0) core.utilities.spatialRegistrationMetadataProvider.add([targets[i].viewportId, sourceInfo.viewportId], [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]);
             });
             const denied = matches.find(m => m.index < 0);
-            say(denied ? '위치 동기 제한: '+denied.reason : '같은 좌표계의 CT 위치 동기');
+            say(denied ? '위치 동기 제한: '+denied.reason : '같은 좌표계의 스택 위치 동기');
             return fire.call(sync, sourceInfo, event);
           } catch (error) {
             // Session termination is owned by the page transport and gate.
@@ -2763,10 +2976,17 @@ function kinCreateCTSync() {
   return { id: 'kin.ct-sync', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
 
-function kinCineWithinBudget(ids, pixels) {
-  return ids.length >= 2 && ids.length <= 500 && pixels.length === ids.length &&
-    pixels.every(p => Number.isInteger(p?.rows) && p.rows > 0 && Number.isInteger(p?.columns) && p.columns > 0) &&
-    pixels.reduce((n, p) => n + p.rows * p.columns * 4, 0) <= 128 * 1024 * 1024;
+function kinCineWithinBudget(ids, pixels, available, cached = []) {
+  if (ids.length < 2 || pixels.length !== ids.length || !Number.isFinite(available) || available < 0) return false;
+  let needed = 0;
+  for (let i = 0; i < pixels.length; i++) {
+    if (cached[i]) continue;
+    const p = pixels[i];
+    if (![p?.rows, p?.columns].every(n => Number.isSafeInteger(n) && n > 0)) return false;
+    // The native decoder may promote scalar pixels to Float32. Include all color samples.
+    needed += p.rows * p.columns * Math.max(4, Number(p.bitsAllocated || 32) / 8) * Number(p.samplesPerPixel || 1);
+  }
+  return Number.isSafeInteger(needed) && needed <= available;
 }
 
 function kinCineNext(index, first, last, mode, direction, loop) {
@@ -2943,7 +3163,13 @@ function kinCreateCine() {
           },1000/fps);r.volumeTimer=timer;render();return;
         }
         const ids = v.getImageIds(), pixels = ids.map(imageId => core.metaData.get('imagePixelModule', imageId));
-        if (!kinCineWithinBudget(ids, pixels)) throw Error('재생 준비 범위는 2~500 프레임·128 MiB 이내입니다');
+        const cached = ids.map(id => core.cache.getImage(id));
+        let available = core.cache.getMaxCacheSize() - core.cache.getCacheSize();
+        const heap = performance.memory;
+        if (heap && Number.isFinite(heap.jsHeapSizeLimit - heap.usedJSHeapSize))
+          available = Math.min(available, heap.jsHeapSizeLimit - heap.usedJSHeapSize);
+        if (!kinCineWithinBudget(ids, pixels, available, cached))
+          throw Error('현재 영상 캐시·메모리 여유가 부족합니다. 다른 영상을 닫은 뒤 다시 재생하세요.');
         await session(); if (!current()) return;
         // Finish a bounded, four-worker preparation before the native timer starts, so stop/replace cannot be undone by a late frame load.
         let next = 0;
@@ -3166,24 +3392,25 @@ function kinCreateImagesOnly() {
     if (window.KinViewerImagesOnly) return Promise.resolve(window.KinViewerImagesOnly);
     if (!ready) ready = new Promise((resolve, reject) => {
       const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/viewer-images-only.js';
-      const timer = setTimeout(() => finish(new Error('Images Only 도구를 불러오지 못했습니다. 뷰어를 다시 여세요.')), 10000);
+      const timer = setTimeout(() => finish(new Error('Images Only 도구를 불러오지 못했습니다. 다시 시도하세요.')), 10000);
       function finish(error) { clearTimeout(timer); script.onload = script.onerror = null; if (error) { script.remove(); reject(error); } else resolve(window.KinViewerImagesOnly); }
       script.onload = () => finish(window.KinViewerImagesOnly ? null : new Error('Images Only 모듈을 확인할 수 없습니다.'));
-      script.onerror = () => finish(new Error('Images Only 도구를 불러오지 못했습니다. 뷰어를 다시 여세요.'));
+      script.onerror = () => finish(new Error('Images Only 도구를 불러오지 못했습니다. 다시 시도하세요.'));
       document.head.append(script);
     }).catch(error => { ready = null; throw error; });
     return ready;
   }
-  return { id: 'kin.images-only', onModeEnter({ servicesManager }) {
-    if (ended) return; watchSession();
+  const extension = { id: 'kin.images-only', onModeEnter({ servicesManager }) {
+    if (ended) return; watchSession(); kinToolRetry('kin-images-retry');
     const ticket = ++epoch; current?.stop(); current = null;
     prepare().then(module => {
       if (ticket !== epoch) return;
       const connected = module.create(servicesManager.services);
       if (!connected.mount()) { connected.stop(); throw new Error('Images Only 패널을 연결하지 못했습니다.'); }
       current = connected;
-    }).catch(error => { if (ticket === epoch) { const status = document.querySelector('#kin-viewer-layout-status'); if (status) status.textContent = error.message; } });
-  }, onModeExit() { epoch++; current?.stop(); current = null; } };
+    }).catch(error => { if (ticket === epoch) { kinToolRetry('kin-images-retry', error.message, () => extension.onModeEnter({ servicesManager })); } });
+  }, onModeExit() { kinToolRetry('kin-images-retry'); epoch++; current?.stop(); current = null; } };
+  return extension;
 }
 
 function kinCreateImageText() {
@@ -3320,6 +3547,7 @@ function kinCreateViewerTechNote() {
   kinViewerSession.onChange(next=>{if(next==='writer'){connect();return;}epoch++;if(active)state=next;if(next==='read-only'){current?.stop();current=null;}});
   function connect() {
     if(!active||state==='loading'||state==='ready'||!kinViewerSession.writer())return;
+    kinToolRetry('kin-note-retry');
     const ticket=epoch;state='loading';
     prepare().then(extension=>{
       if(!active||ticket!==epoch)return;
@@ -3329,7 +3557,7 @@ function kinCreateViewerTechNote() {
     }).catch(e=>{
       if(!active||ticket!==epoch)return;
       state='failed';
-      if(window.top===window){const p=document.querySelector('#kin-viewer-layout-status');if(p)p.textContent='Tech 메모 화면을 연결하지 못했습니다. 영상 작업을 저장한 뒤 뷰어를 다시 여세요.';}
+      kinToolRetry('kin-note-retry', 'Tech 메모 화면을 연결하지 못했습니다.', connect);
     });
   }
   return {id:'kin.viewer-tech-note',preRegistration({servicesManager}) {
@@ -3375,26 +3603,30 @@ function kinCreateViewerTechNote() {
     // S5-U2b: Tech notes are a technician record the clinician allowlist neither reads nor writes. The bridge connects only
     // after a /me answered writer; until an answer it stays 'unconfirmed', and 'read-only'/'refused' never connect.
     kinViewerSession.decide().then(session=>{if(!active||ticket!==epoch)return;if(session==='writer')connect();else state=session;});
-  },onModeExit(){epoch++;active=false;state='stopped';current?.stop();current=null;}};
+  },onModeExit(){kinToolRetry('kin-note-retry');epoch++;active=false;state='stopped';current?.stop();current=null;}};
 }
 
 function kinCreateFrameCoverage() {
-  let ready, current, services, epoch=0;
-  return {id:'kin.frame-coverage',preRegistration({servicesManager}) {
-    services=servicesManager.services;
-    ready=new Promise((resolve,reject)=>{
-      const script=document.createElement('script');script.src='/worklist/hpacs-lite/viewer-frame-coverage.js';
-      const timeout=setTimeout(()=>reject(Error('Frame Coverage loading timeout')),20000);
-      script.onload=()=>{clearTimeout(timeout);resolve();};script.onerror=()=>{clearTimeout(timeout);reject(Error('Frame Coverage loading failed'));};document.head.append(script);
-    });ready.catch(()=>{});
-  },onModeEnter(){
-    const ticket=++epoch;
-    window.kinViewerFrameCoverageState=()=>({warn:true,phase:'unverified'});
-    window.kinViewerFrameCoverageConfirm=ask=>(ask||window.confirm)('원본 프레임 표시 확인을 연결하지 못했습니다. 이 영상을 떠날까요?');
-    ready.then(()=>{if(ticket===epoch)current=window.KinFrameCoverage.mount(services);}).catch(()=>{
-      if(ticket===epoch){const status=document.querySelector('#kin-viewer-layout-status');if(status)status.textContent='Frame Coverage를 연결하지 못했습니다. 영상 작업을 저장한 뒤 뷰어를 다시 여세요.';}
-    });
-  },onModeExit(){epoch++;current?.stop();current=null;}};
+  let ready, current, services, epoch = 0;
+  function prepare() {
+    if (!ready) ready = (window.KinFrameCoverage ? Promise.resolve() : new Promise((resolve, reject) => {
+      const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/viewer-frame-coverage.js';
+      const finish = error => { clearTimeout(timer); script.onload = script.onerror = null; script.remove(); error ? reject(error) : resolve(); };
+      const timer = setTimeout(() => finish(Error('Frame Coverage 연결 시간이 지났습니다.')), 20000);
+      script.onload = () => finish(window.KinFrameCoverage?.mount ? null : Error('Frame Coverage 도구를 확인할 수 없습니다.'));
+      script.onerror = () => finish(Error('Frame Coverage를 불러오지 못했습니다.')); document.head.append(script);
+    })).catch(error => { ready = null; throw error; });
+    return ready;
+  }
+  const extension = { id: 'kin.frame-coverage', preRegistration({ servicesManager }) { services = servicesManager.services; },
+    onModeEnter() {
+      const ticket = ++epoch; kinToolRetry('kin-coverage-retry'); current?.stop(); current = null;
+      window.kinViewerFrameCoverageState = () => ({ warn: true, phase: 'unverified' });
+      window.kinViewerFrameCoverageConfirm = ask => (ask || window.confirm)('원본 프레임 표시 확인을 연결하지 못했습니다. 이 영상을 떠날까요?');
+      prepare().then(() => { if (ticket === epoch) current = window.KinFrameCoverage.mount(services); })
+        .catch(error => { if (ticket === epoch) kinToolRetry('kin-coverage-retry', error.message, () => extension.onModeEnter()); });
+    }, onModeExit() { epoch++; kinToolRetry('kin-coverage-retry'); current?.stop(); current = null; } };
+  return extension;
 }
 
 /* REQ-D-3D-CURSOR 연결 경로. 이 확장은 3D Cursor 모듈 두 개를 불러 컨트롤러를 붙이고
@@ -3741,14 +3973,14 @@ function kinCreateDicomPdf() {
     if (!ready) ready = new Promise((resolve, reject) => {
       const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/viewer-dicom-pdf.js';
       const finish = error => { clearTimeout(timer); script.onload = script.onerror = null; script.remove(); error ? reject(error) : resolve(window.KinDicomPdf); };
-      const timer = setTimeout(() => finish(new Error('원본 PDF 도구 연결 시간이 지났습니다. 뷰어를 다시 여세요.')), 10000);
+      const timer = setTimeout(() => finish(new Error('원본 PDF 도구 연결 시간이 지났습니다. 다시 시도하세요.')), 10000);
       script.onload = () => finish(window.KinDicomPdf?.create ? null : new Error('원본 PDF 도구를 확인할 수 없습니다.'));
-      script.onerror = () => finish(new Error('원본 PDF 도구를 불러오지 못했습니다. 뷰어를 다시 여세요.'));
+      script.onerror = () => finish(new Error('원본 PDF 도구를 불러오지 못했습니다. 다시 시도하세요.'));
       document.head.append(script);
     }).catch(error => { ready = null; throw error; });
     return ready;
   }
-  return { id: 'kin.source-pdf', preRegistration({ servicesManager, extensionManager }) {
+  const extension = { id: 'kin.source-pdf', preRegistration({ servicesManager, extensionManager }) {
     services = servicesManager.services;
     if (extensionManager) { viewportGuard = kinDicomPdfViewportGuard(extensionManager, { onSessionEnd: retire,
       onFailure: (error, value, pdfUrl) => { nativeErrors.set(value, { pdfUrl, error }); current?.nativeFailure?.(error, value, pdfUrl); },
@@ -3756,6 +3988,7 @@ function kinCreateDicomPdf() {
     }); if (!viewportGuard.install()) throw new Error('원본 PDF 화면을 안전하게 연결하지 못했습니다. 뷰어를 다시 여세요.'); }
   },
     onModeEnter() {
+      kinToolRetry('kin-pdf-retry');
       if (viewportGuard && !viewportGuard.ownsWrapper() && !viewportGuard.install()) { const status = document.querySelector('#kin-viewer-layout-status'); if (status) status.textContent = '원본 PDF 화면을 안전하게 연결하지 못했습니다. 뷰어를 다시 여세요.'; return; }
       viewportGuard?.activate();
       const ticket = ++epoch; current?.stop(); current = null;
@@ -3763,11 +3996,12 @@ function kinCreateDicomPdf() {
         nativeFailureFor: (value, pdfUrl) => { const saved = nativeErrors.get(value); return saved?.pdfUrl === pdfUrl ? saved.error : null; },
         onRetry: (value, pdfUrl) => viewportGuard?.retry(value, pdfUrl)
       }); current.mount(); } }).catch(error => {
-        if (ticket === epoch) { const status = document.querySelector('#kin-viewer-layout-status'); if (status) status.textContent = error.message; }
+        if (ticket === epoch) kinToolRetry('kin-pdf-retry', error.message, () => extension.onModeEnter());
       });
     },
-    onModeExit() { viewportGuard?.deactivate(); retire(); },
+    onModeExit() { kinToolRetry('kin-pdf-retry'); viewportGuard?.deactivate(); retire(); },
   };
+  return extension;
 }
 
 /* S3-U5 CI1. OHIF 3.9.1 로더는 시리즈 메타데이터 GET 하나가 거절되면 다시 묻지 않고 검사 캐시에 거절된 약속을
@@ -3889,27 +4123,28 @@ function kinCreateSeriesMetadataRecovery() {
 }
 
 function kinCreateContextLoss() {
-  let ready, current, epoch = 0;
-  return { id: 'kin.context-loss', preRegistration({ servicesManager }) {
-    ready = new Promise((resolve, reject) => {
+  let ready, current, services, epoch = 0;
+  function prepare() {
+    if (!ready) ready = (window.KinViewerContextLoss ? Promise.resolve() : new Promise((resolve, reject) => {
       const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/viewer-context-loss.js';
-      const timeout = setTimeout(() => reject(Error('Viewer recovery loading timeout')), 20000);
-      script.onload = () => { clearTimeout(timeout); resolve(); };
-      script.onerror = () => { clearTimeout(timeout); reject(Error('Viewer recovery loading failed')); }; document.head.append(script);
-    }).then(() => {
-      current = window.KinViewerContextLoss.create({ services: servicesManager.services, session: kinViewerSession });
-      window.kinViewerContextLoss = current;
-      window.dispatchEvent(new Event('kin-context-recovery-ready'));
-    }); ready.catch(() => {});
-  }, onModeEnter() {
-    const ticket = ++epoch;
-    ready?.then(() => { if (ticket === epoch) current.start(); }).catch(() => {
-      if (ticket !== epoch) return;
-      try { current?.stop(); } catch (_) {}
-      const status = document.querySelector('#kin-viewer-layout-status');
-      if (status) status.textContent = '영상 복구 도구를 연결하지 못했습니다. 영상 작업을 저장한 뒤 뷰어를 다시 여세요.';
-    });
-  }, onModeExit() { epoch++; current?.stop(); } };
+      const finish = error => { clearTimeout(timer); script.onload = script.onerror = null; script.remove(); error ? reject(error) : resolve(); };
+      const timer = setTimeout(() => finish(Error('영상 복구 도구 연결 시간이 지났습니다.')), 20000);
+      script.onload = () => finish(window.KinViewerContextLoss?.create ? null : Error('영상 복구 도구를 확인할 수 없습니다.'));
+      script.onerror = () => finish(Error('영상 복구 도구를 불러오지 못했습니다.')); document.head.append(script);
+    })).catch(error => { ready = null; throw error; });
+    return ready;
+  }
+  const extension = { id: 'kin.context-loss', preRegistration({ servicesManager }) { services = servicesManager.services; },
+    onModeEnter() {
+      const ticket = ++epoch; kinToolRetry('kin-context-retry'); current?.stop(); current = null;
+      prepare().then(() => {
+        if (ticket !== epoch) return;
+        current = window.KinViewerContextLoss.create({ services, session: kinViewerSession });
+        window.kinViewerContextLoss = current; current.start();
+        window.dispatchEvent(new Event('kin-context-recovery-ready'));
+      }).catch(error => { if (ticket === epoch) kinToolRetry('kin-context-retry', error.message, () => extension.onModeEnter()); });
+    }, onModeExit() { epoch++; kinToolRetry('kin-context-retry'); current?.stop(); current = null; } };
+  return extension;
 }
 
 // The generic comparison protocol chooses by arrival order, not by breast/view/image kind.

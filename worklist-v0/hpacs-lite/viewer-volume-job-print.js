@@ -11,7 +11,7 @@ window.kinRenderVolumeJobPrint=async function({snapshot,api,bytes,signal,check})
   const near=(a,b)=>a.length===b.length&&a.every((n,i)=>Number.isFinite(n)&&Math.abs(n-b[i])<.001);
   const read=async path=>JSON.parse(new TextDecoder().decode(await bytes(path,signal,524288,budget)));
   const budget={bytes:0},slices=new Array(reference.sops.length);let next=0;
-  if(slices.length<2)fail();if(slices.length>256)throw Error('출력 CT 원본은 최대 256장까지 지원합니다.');
+  if(slices.length<2)fail();
   await Promise.all(Array.from({length:Math.min(4,slices.length)},async()=>{
     while(next<slices.length){
       const index=next++,sop=reference.sops[index];check();

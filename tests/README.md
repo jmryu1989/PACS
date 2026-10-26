@@ -3075,3 +3075,11 @@ interruption and staging-copy facts. It does not prove native OHIF display. The
 registered `GET`/`HEAD images/dicom-web?target=...` route requires Module A's server
 context/catalog binding (REQUEST_FACTS #211); the current binding returns 503.
 Nginx/served OHIF and derived PDF/preview/thumbnail snapshots remain unconnected.
+
+### Imaging scope after D1819/D1821
+
+`gateway/agent/test_agent.py` covers a 30 MiB object sent alone through the disk-backed STOW writer. `study_transfer_local_server_test.cjs` covers the real import parser, 30 MiB MG storage/readback and multiframe XA; `study_transfer_local_dom_test.py` covers automatic operation splitting for 101 selected files. `original_archive_test.cjs` covers ZIP64 planning and writing 65,536 entries; `KIN_ZIP64_ARCHIVE` optionally retains that archive for an independent standard-reader check.
+
+REQ-MANUAL-SPACED-MODALITIES → RISK-WRONG-SCALE-OR-UNITS → `planar_measurement_test.cjs`: MR/DX/US/XA/MG length, angle and planar area use source spacing, preserve the selected frame and measurement basis, and verify saved values before SR export. Non-CT area carries no HU statistics. MG Length retains PR #246's geometry and `mg_length_test.cjs`. Arbitrary reconstructed planes do not become fictitious original SOP/frame references.
+
+`cine_budget_test.cjs` and `cine_lifecycle_test.cjs` check current cache/heap headroom, cancellation and playback; `ct_sync_test.cjs` and `viewer_ct_sync_test.cjs` retain patient/FoR/orientation checks without modality/frame-count gates. `emr/e/contract_test.cjs` includes a complete 2401-frame DBT manifest. `viewer_caution_dom_test.py` serves the shipped layout and loader extensions over synthetic HTTP to check merged MG/MR/DX layout restoration and in-mode Retry. Native rendering, physical accuracy and sustained cine memory remain separate synthetic stack/PC validation.

@@ -566,12 +566,15 @@ class TransferPanelPage(rf.ReportFlowPage):
         self.assertEqual([UID_B, None], [r["expect"] for r in self.site.imports], "C-01 X-KIN-Expect-Study from the row only")
 
     # ── C-02 the upload loop ──
-    def test_c02_more_than_100_files_are_refused_before_any_request(self):
+    def test_c02_large_selection_splits_operations_without_reselecting(self):
         self.open_as(TECH, "Technician")
         self.choose(self.files(101, 8))
-        self.settle(300)
-        self.assertEqual([], self.site.imports, "C-02 nothing of a 101-file selection is sent")
-        expect(self.panel()).to_contain_text("100개 파일까지")
+        self.wait(lambda: len(self.site.imports) == 101, "all selected files sent")
+        groups = {}
+        for request in self.site.imports:
+            groups.setdefault(request["operation"], []).append(int(request["index"]))
+        self.assertEqual([1, 100], sorted(map(len, groups.values())))
+        for indexes in groups.values(): self.assertEqual(list(range(len(indexes))), indexes)
 
     def test_c02_one_request_in_flight_one_operation_its_indexes_and_the_bytes_as_chosen(self):
         self.open_as(TECH, "Technician")

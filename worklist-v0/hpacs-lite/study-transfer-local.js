@@ -20,9 +20,8 @@ window.KinStudyTransferLocal = function (app) {
   const root = document.getElementById('study-transfer');
   const toolbarButton = document.getElementById('t-import');
 
-  // Contract limits (4, 4.4): 100 files per selection, 24 MiB per object, one request in flight.
+  // Keep operation records in batches; selections have no file count or object size ceiling.
   const MAX_FILES = 100;
-  const MAX_BYTES = 25165824;
   // The server's own answer can take up to its 240 s reading of an existing study (4.4) behind nginx's 300 s; a shorter
   // limit here would only turn a result that is still coming into an unknown one.
   const IMPORT_DEADLINE_MS = 300000;
@@ -57,8 +56,6 @@ window.KinStudyTransferLocal = function (app) {
     ['orthanc-log-checked', 'Orthanc 기록에서 이 시도가 저장되지 않은 것을 확인했습니다'],
   ]);
   const TEXT = Object.freeze({
-    tooMany: n => `한 번에 100개 파일까지 반입할 수 있습니다. 고른 ${n}개 파일은 보내지 않았습니다. 나눠서 다시 고르세요.`,
-    tooLarge: '한 파일은 24 MiB(25,165,824 bytes)까지 반입할 수 있습니다. 선택한 파일을 보내지 않았습니다.',
     lost: '서버의 답을 받지 못했습니다. 이 작업의 상태를 다시 읽어 확인합니다.',
     // Neither a 404 of the status read (also the answer for an operation whose study this account cannot see now,
     // contract 3) nor a status without this file proves that the file did not arrive, so nothing is offered to send
@@ -294,7 +291,7 @@ window.KinStudyTransferLocal = function (app) {
     if (!isObject(r) || r.index !== entry.index || !POSITIVE.has(r.outcome) || r.code !== null || r.writeDisposition !== null
         || typeof r.message !== 'string' || !['new-study', 'matched', 'not_comparable'].includes(r.identity)
         || !uid(r.studyUid) || !uid(r.seriesUid) || !uid(r.sopUid) || !hash(r.sha256)
-        || !count(r.bytes, MAX_BYTES) || r.bytes === 0 || r.bytes !== entry.size || !time(r.at)
+        || !count(r.bytes, Number.MAX_SAFE_INTEGER) || r.bytes === 0 || r.bytes !== entry.size || !time(r.at)
         || (entry.op.expect && r.studyUid !== entry.op.expect) || (entry.sha256 && r.sha256 !== entry.sha256)
         || !Number.isSafeInteger(r.generation) || r.generation < 1 || !Array.isArray(r.attempts) || !r.attempts.length) return null;
     const ids = new Set();
@@ -607,19 +604,16 @@ window.KinStudyTransferLocal = function (app) {
     pickFor = null;
     picker.value = '';
     if (!files.length || !target || !usable()) return;
-    // 4: more than 100 files is refused before any request; nothing of the selection is sent.
-    if (files.length > MAX_FILES) { status.textContent = TEXT.tooMany(files.length); return; }
-    // A new selection alone creates dispatch authority; an existing operation can never receive new Files.
-    const op = importOperation(crypto.randomUUID(), target.expect ?? null);
-    files.forEach((file, index) => {
-      const entry = fileEntry(op, index, file, file.name, file.size, 'waiting');
-      if (file.size > MAX_BYTES) { entry.state = 'refused'; entry.final = true; entry.file = null; entry.message = TEXT.tooLarge; }
-      else unsent.add(entry);
-      op.files.push(entry);
-    });
-    operations.unshift(op);
+    // Each selection grants dispatch for its files; split operation records without asking the user to reselect.
+    for (let start = 0; start < files.length; start += MAX_FILES) {
+      const op = importOperation(crypto.randomUUID(), target.expect ?? null);
+      files.slice(start, start + MAX_FILES).forEach((file, index) => {
+        const entry = fileEntry(op, index, file, file.name, file.size, 'waiting');
+        unsent.add(entry); op.files.push(entry); queue.push(entry);
+      });
+      operations.unshift(op);
+    }
     store();
-    for (const entry of op.files) if (entry.state === 'waiting') queue.push(entry);
     render();
     pump();
   });

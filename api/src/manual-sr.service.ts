@@ -94,7 +94,7 @@ export class ManualSrService implements OnModuleInit, OnModuleDestroy {
       if (!item.sourceDigest || item.sourceDigest !== tags._kinSourceDigest) conflict();
       if (output.length && ['PatientID', 'PatientName', 'PatientBirthDate', 'PatientSex'].some(key => (output[0].tags[key] || '') !== (tags[key] || ''))) conflict();
       let pixels: Buffer;
-      if (calculate && item.kind === 'ellipse') {
+      if (calculate && item.kind === 'ellipse' && item.baseline?.calculator === 'kin-native-manual-v1') {
         pixels = await this.orthanc.manualSrPixels(item.sopUid, controller.signal); pixelBytes += pixels.length;
         if (pixelBytes > 33558528) throw new BadRequestException('한 번에 처리할 ROI 원본 크기를 초과했습니다. 나누어 선택하세요');
       }

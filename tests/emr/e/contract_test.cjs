@@ -1021,7 +1021,7 @@ def('TEST-E-02 manifest_sources R13', () => {
   assert.equal(ruleCaseResult(c).sourceAccepted, false);
 });
 def('TEST-E-02 manifest_sources R14', () => {
-  for (const [count, length, reason] of [[2001, 2001, 'frame-count-range'], [6, 2001, 'frame-count-range'], [6, 5, 'per-frame-count']]) {
+  for (const [count, length, reason] of [[6, 2001, 'per-frame-count'], [6, 5, 'per-frame-count']]) {
     const hd = studyObjects().find(o => o.sopInstanceUid === DBT).mammography.header;
     hd['00280008'].Value = [count];
     let inspected = 0;
@@ -1033,6 +1033,16 @@ def('TEST-E-02 manifest_sources R14', () => {
     assert.equal(r.result.basis, reason);
     assert.equal(inspected, 0, 'refused frame arrays must not inspect frame anatomy');
   }
+  // C17: a complete DBT source above the retired 2000-frame ceiling remains classified and readable.
+  const large = studyObjects(), object = large.find(o => o.sopInstanceUid === DBT), header = object.mammography.header;
+  header['00280008'].Value = [2401];
+  const first = header['52009230'].Value[0];
+  header['52009230'].Value = Array.from({length: 2401}, (_, i) => {
+    const frame = structuredClone(first); frame['00209113'].Value[0]['00200032'].Value = [0, 0, i]; return frame;
+  });
+  object.declaredFrameCount = 2401; object.frames = frameSet(DBT, 2401, 1); object.bytes = 6000;
+  assert.equal(build(large).objects.find(o => o.sopInstanceUid === DBT).unsupported, null);
+  assert.notEqual(M.classifyMammography(header).result.basis, 'frame-count-range');
   // Manifest array length is also checked before reading even its first frame digest.
   const o = studyObjects().find(o => o.sopInstanceUid === DBT); let inspected = 0;
   o.frames = Array.from({ length: 5 }, () => Object.defineProperty({ bytes: 10, sha256: h('frame') }, 'number', {
@@ -1168,13 +1178,9 @@ def('TEST-E-02 manifest_sources R21', () => {
 
 def('TEST-E-02 manifest_sources R22', () => {
   const baseline = build();
-  for (const flaw of ['2001-frames', 'source-uid', 'source-uid-absent-partial', 'root-sequence', 'acquisition-sequence', 'derivation-sequence', 'per-frame-source']) {
-    const all = studyObjects(), uid = flaw === '2001-frames' ? DBT : SYNTH, o = all.find(x => x.sopInstanceUid === uid), hd = o.mammography.header;
-    if (flaw === '2001-frames') {
-      hd['00280008'] = dj('IS', 2001);
-      hd['52009230'].Value = Array.from({ length: 2001 }, () => structuredClone(hd['52009230'].Value[0]));
-      o.declaredFrameCount = 2001; o.frames = frameSet(uid, 2001, 1); o.bytes = 6000;
-    } else if (flaw.startsWith('source-uid')) {
+  for (const flaw of ['source-uid', 'source-uid-absent-partial', 'root-sequence', 'acquisition-sequence', 'derivation-sequence', 'per-frame-source']) {
+    const all = studyObjects(), uid = SYNTH, o = all.find(x => x.sopInstanceUid === uid), hd = o.mammography.header;
+    if (flaw.startsWith('source-uid')) {
       hd['00082112'].Value[0]['00081155'] = dj('UI', { bad: true });
       if (flaw === 'source-uid-absent-partial') delete hd['00281350'];
     }

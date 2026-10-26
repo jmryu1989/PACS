@@ -57,9 +57,35 @@ function kinCreateViewerHistory() {
     };
     // After a 401/403 or a logout the panel has ended: that, not the account wording, is what the user needs to hear.
     const closedText = kind => ended ? '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.' : (readOnly() ? READ_ONLY : UNCONFIRMED)[kind];
+    function planar(imageId, kind) {
+      const image = cs.metaData.get('instance', imageId);
+      if (image?.Modality === 'MG' && kind === 'length' || image?.Modality === 'CT' && image.SOPClassUID === '1.2.840.10008.5.1.4.1.1.2' && Number(image.NumberOfFrames || 1) === 1) return null;
+      return kinPlanarGeometry(image, reference(imageId)?.frame);
+    }
     function measurementReason(imageId, kind, points) {
       const image = cs.metaData.get('instance', imageId);
       const finite = n => (typeof n === 'number' || typeof n === 'string' && n.trim() !== '') && Number.isFinite(Number(n));
+      try {
+        const geometry = planar(imageId, kind);
+        if (geometry) {
+          const plane = cs.metaData.get('imagePlaneModule', imageId);
+          if (cs.cache.getImage(imageId)?.calibration?.type || Number(plane?.rowPixelSpacing) !== geometry.spacing[0] || Number(plane?.columnPixelSpacing) !== geometry.spacing[1])
+            return '표시 간격과 원본 간격이 일치하지 않습니다';
+          if (points) geometry.measure(kind, points);
+          return '';
+        }
+      } catch (error) { return error.message; }
+      if (image?.Modality === 'MG' && kind === 'length') {
+        try {
+          const mg = kinMgGeometry(image, reference(imageId)?.frame);
+          if (!mg || cs.cache.getImage(imageId)?.calibration?.type) return 'MG 원본 간격·보정을 확인할 수 없습니다';
+          const plane = cs.metaData.get('imagePlaneModule', imageId);
+          if (Number(plane?.rowPixelSpacing) !== mg.spacing[0] || Number(plane?.columnPixelSpacing) !== mg.spacing[1])
+            return '표시 간격과 MG 원본 간격이 일치하지 않습니다';
+          points?.forEach(mg.imagePoint);
+          return '';
+        } catch (error) { return error.message; }
+      }
       const spacing = image?.PixelSpacing, orientation = image?.ImageOrientationPatient, origin = image?.ImagePositionPatient;
       if (image?.SOPClassUID !== '1.2.840.10008.5.1.4.1.1.2' || image.Modality !== 'CT' || Number(image.NumberOfFrames || 1) !== 1)
         return '일반 CT 원본 프레임에서 지원합니다';
@@ -111,10 +137,13 @@ function kinCreateViewerHistory() {
       if (!a || a.invalidated) return null;
       const kind = kinds[a.metadata.toolName], target = 'imageId:' + a.metadata.referencedImageId, s = a.data.cachedStats?.[target];
       if (!freshStats(a.data, target) || measurementReason(a.metadata.referencedImageId, kind, a.data.handles.points)) return null;
+      const geometry = planar(a.metadata.referencedImageId, kind);
+      if (geometry) return { calculator: geometry.calculator, values: [geometry.measure(kind, a.data.handles.points)] };
       const values = kind === 'length' ? [s.length] : kind === 'angle' ? [s.angle] :
         [s.area, s.mean, s.statsArray?.find(x => x?.name === 'min')?.value, s.max, s.statsArray?.find(x => x?.name === 'count')?.value];
       if (values.some(n => !Number.isFinite(n)) || kind === 'ellipse' && s.modalityUnit !== 'HU') return null;
-      return { calculator: 'kin-native-manual-v1', values };
+      const mg = kind === 'length' && kinMgGeometry(cs.metaData.get('instance', a.metadata.referencedImageId), reference(a.metadata.referencedImageId)?.frame);
+      return mg ? { calculator: mg.calculator, values: [mg.length(a.data.handles.points)] } : { calculator: 'kin-native-manual-v1', values };
     }
     const measurementService = services.measurementService;
     const originalMeasurements = measurementService.getMeasurements;
@@ -131,9 +160,22 @@ function kinCreateViewerHistory() {
       // verified target on every read, including a previously captured export.
       const target = 'imageId:' + a.metadata.referencedImageId;
       try {
-        return mapping.toMeasurementSchema({ annotation: { ...a, data: {
-          ...a.data, cachedStats: { [target]: a.data.cachedStats[target] },
+        const mg = a.metadata.toolName === 'Length' && kinMgGeometry(cs.metaData.get('instance', a.metadata.referencedImageId), reference(a.metadata.referencedImageId)?.frame);
+        const checked = mapping.toMeasurementSchema({ annotation: { ...a, data: {
+          ...a.data, cachedStats: { [target]: { ...a.data.cachedStats[target], ...(mg ? { length: mg.length(a.data.handles.points) } : {}) } },
         } } });
+        if (mg) {
+          checked.displayText = { ...checked.displayText, primary: [...(checked.displayText?.primary || []), mg.label] };
+          const report = checked.getReport;
+          checked.getReport = () => { const r = report(); return { ...r, columns: [...r.columns, 'Measurement basis'], values: [...r.values, mg.label] }; };
+        }
+        const kind = kinds[a.metadata.toolName], geometry = planar(a.metadata.referencedImageId, kind);
+        if (geometry) {
+          const value = geometry.measure(kind, a.data.handles.points), unit = kind === 'angle' ? '°' : kind === 'ellipse' ? 'mm²' : 'mm';
+          checked.displayText = { primary: [value.toFixed(1) + ' ' + unit, geometry.label], secondary: [] };
+          checked.getReport = () => ({ columns: [kind, 'Unit', 'Measurement basis'], values: [value, unit, geometry.label] });
+        }
+        return checked;
       } catch (_) { return null; } // Display sets may disappear before their metadata.
     }
     function projectMeasurement(m) {
@@ -806,7 +848,7 @@ function kinCreateViewerHistory() {
       refreshSrButtons();
       for (const kind of ['length', 'angle', 'ellipse']) button(actions, names[kind], () => {
         const v = viewport(), group = v && ct.ToolGroupManager.getToolGroupForViewport(v.id, v.renderingEngineId);
-        if (!group || v.type !== 'stack') { status.textContent = '원본 CT 프레임을 선택하세요.'; return; }
+        if (!group || v.type !== 'stack') { status.textContent = '원본 프레임을 선택하세요.'; return; }
         if (!group.getToolInstance(tools[kind])) group.addTool(tools[kind]);
         configureMeasurements(group);
         const previous = group.getActivePrimaryMouseButtonTool();
@@ -873,8 +915,8 @@ function kinCreateViewerHistory() {
           }
           const v = cs.getEnabledElement(event.detail.element).viewport;
           const id = v.type === 'stack' && v.getCurrentImageId();
-          let reason = id ? measurementReason(id, kind) : '일반 CT 원본 프레임을 선택하세요';
-          if (!reason && kind === 'ellipse' && v.getCamera().viewUp.filter(n => Math.abs(n) > 1e-6).length !== 1)
+          let reason = id ? measurementReason(id, kind) : '원본 프레임을 선택하세요';
+          if (!reason && kind === 'ellipse' && !planar(id, kind) && v.getCamera().viewUp.filter(n => Math.abs(n) > 1e-6).length !== 1)
             reason = '사선·회전 ROI는 아직 지원하지 않습니다';
           if (reason) { status.textContent = reason; return; }
           const annotation = add.call(this, event);
@@ -887,10 +929,18 @@ function kinCreateViewerHistory() {
             id ? measurementReason(id, kind, data.handles.points) : '지원하지 않는 측정 평면입니다';
           if (reason) return [reason];
           if (!freshStats(data, target)) return ['재확인 필요: 현재 좌표로 계산되지 않았습니다'];
+          const geometry = planar(id, kind);
+          if (geometry) {
+            const value = geometry.measure(kind, data.handles.points);
+            return [value.toFixed(1) + (kind === 'angle' ? '°' : kind === 'ellipse' ? ' mm²' : ' mm'), ...geometry.label.split(' · ')];
+          }
           if (kind === 'ellipse') return lines(data, target);
-          const value = data.cachedStats[target]?.[kind === 'length' ? 'length' : 'angle'];
+          const mg = kind === 'length' && kinMgGeometry(cs.metaData.get('instance', id), reference(id)?.frame);
+          const value = mg ? mg.length(data.handles.points) : data.cachedStats[target]?.[kind === 'length' ? 'length' : 'angle'];
           if (!Number.isFinite(value) || value <= 0) return ['측정을 완료하세요'];
-          return [(Math.round(value * 10) / 10).toFixed(1) + (kind === 'length' ? ' mm' : '°')];
+          const number = (Math.round(value * 10) / 10).toFixed(1) + (kind === 'length' ? ' mm' : '°');
+          // Keep the scale basis readable in the four-view mammography layout.
+          return mg ? [number, ...mg.label.split(' · ')] : [number];
         } };
         restores.push(() => { tool.configuration = config; tool.addNewAnnotation = add; });
       }
@@ -1108,21 +1158,21 @@ function kinCreateViewerHistory() {
       heads: [...entries.values()].filter(e => e.head).map(e => ({ id: e.head.id, revision: e.head.revision, hidden: !!e.head.hidden,
         kind: e.draft.kind, label: e.draft.label ?? e.draft.title ?? '', seriesUid: e.head.item.seriesUid, sopUid: e.head.item.sopUid,
         frame: e.head.item.frame, authorSub: e.head.authorSub, referenceStatus: manual(e.draft.kind) ? e.head.referenceStatus ?? 'unverified' : null,
-        values: Array.isArray(e.head.item.baseline?.values) ? [...e.head.item.baseline.values] : null, working: !!(e.editing || e.pending || e.busy) })) });
+        calculator: e.head.item.baseline?.calculator, values: Array.isArray(e.head.item.baseline?.values) ? [...e.head.item.baseline.values] : null, working: !!(e.editing || e.pending || e.busy) })) });
     function hydrate() {
       const v = viewport(), imageId = v?.getCurrentImageId?.(), r = reference(imageId);
       if (!r || r.study !== scope || !subject || ended || suspended || held()) return;
       configureMeasurements(ct.ToolGroupManager.getToolGroupForViewport(v.id, v.renderingEngineId));
       const plane = cs.metaData.get('imagePlaneModule', imageId);
       for (const e of entries.values()) {
-        if (!e.head && !e.rehydrate || e.head?.hidden || !tools[e.draft.kind] || e.annotationUID || !matches(r, e.draft) || plane?.frameOfReferenceUID !== e.draft.frameOfReferenceUid) continue;
+        if (!e.head && !e.rehydrate || e.head?.hidden || !tools[e.draft.kind] || e.annotationUID || !matches(r, e.draft) || (plane?.frameOfReferenceUID ?? null) !== e.draft.frameOfReferenceUid) continue;
         if (manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified') {
           if (!e.message) { e.message = '재확인 필요: 원본 영상의 동일성을 확인할 수 없습니다.'; row(e); }
           continue;
         }
         const uid = crypto.randomUUID(), camera = v.getCamera();
         const a = { annotationUID: uid, highlighted: false, invalidated: true, isLocked: true, isVisible: true,
-          metadata: { toolName: tools[e.draft.kind], FrameOfReferenceUID: e.draft.frameOfReferenceUid, referencedImageId: imageId, viewPlaneNormal: e.draft.viewPlaneNormal || camera.viewPlaneNormal, viewUp: e.draft.viewUp || camera.viewUp },
+          metadata: { toolName: tools[e.draft.kind], FrameOfReferenceUID: e.draft.frameOfReferenceUid ?? v.getFrameOfReferenceUID(), referencedImageId: imageId, viewPlaneNormal: e.draft.viewPlaneNormal || camera.viewPlaneNormal, viewUp: e.draft.viewUp || camera.viewUp },
           data: { text: e.draft.label, label: e.draft.label, kinUnverified: manual(e.draft.kind) && !e.editing, handles: { points: clone(e.draft.points), activeHandleIndex: null, textBox: { hasMoved: false, worldPosition: [0, 0, 0], worldBoundingBox: { topLeft: [0, 0, 0], topRight: [0, 0, 0], bottomLeft: [0, 0, 0], bottomRight: [0, 0, 0] } } }, cachedStats: {} } };
         trackMeasurement(a);
         e.rehydrate = false;
@@ -1205,7 +1255,8 @@ function kinCreateViewerHistory() {
         if (!e) {
           const ref = reference(a.metadata.referencedImageId);
           e = { id: crypto.randomUUID(), annotationUID: a.annotationUID, editing: true,
-            draft: { schemaVersion: 1, kind, seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: a.metadata.FrameOfReferenceUID, label: a.data.text ?? a.data.label ?? '', points: clone(a.data.handles.points),
+            draft: { schemaVersion: 1, kind, seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: manual(kind) && (planar(a.metadata.referencedImageId, kind) || cs.metaData.get('instance', a.metadata.referencedImageId)?.Modality === 'MG')
+                ? cs.metaData.get('instance', a.metadata.referencedImageId).FrameOfReferenceUID || null : a.metadata.FrameOfReferenceUID, label: a.data.text ?? a.data.label ?? '', points: clone(a.data.handles.points),
               ...(kind === 'arrow' ? {} : { viewPlaneNormal: clone(a.metadata.viewPlaneNormal), viewUp: clone(a.metadata.viewUp) }) } };
           entries.set(e.id, e); annotations.set(a.annotationUID, e); row(e);
         } else if (e.editing && !e.busy && !e.pending) {

@@ -1,8 +1,15 @@
 
-function kinCineWithinBudget(ids, pixels) {
-  return ids.length >= 2 && ids.length <= 500 && pixels.length === ids.length &&
-    pixels.every(p => Number.isInteger(p?.rows) && p.rows > 0 && Number.isInteger(p?.columns) && p.columns > 0) &&
-    pixels.reduce((n, p) => n + p.rows * p.columns * 4, 0) <= 128 * 1024 * 1024;
+function kinCineWithinBudget(ids, pixels, available, cached = []) {
+  if (ids.length < 2 || pixels.length !== ids.length || !Number.isFinite(available) || available < 0) return false;
+  let needed = 0;
+  for (let i = 0; i < pixels.length; i++) {
+    if (cached[i]) continue;
+    const p = pixels[i];
+    if (![p?.rows, p?.columns].every(n => Number.isSafeInteger(n) && n > 0)) return false;
+    // The native decoder may promote scalar pixels to Float32. Include all color samples.
+    needed += p.rows * p.columns * Math.max(4, Number(p.bitsAllocated || 32) / 8) * Number(p.samplesPerPixel || 1);
+  }
+  return Number.isSafeInteger(needed) && needed <= available;
 }
 
 function kinCineNext(index, first, last, mode, direction, loop) {
@@ -179,7 +186,13 @@ function kinCreateCine() {
           },1000/fps);r.volumeTimer=timer;render();return;
         }
         const ids = v.getImageIds(), pixels = ids.map(imageId => core.metaData.get('imagePixelModule', imageId));
-        if (!kinCineWithinBudget(ids, pixels)) throw Error('재생 준비 범위는 2~500 프레임·128 MiB 이내입니다');
+        const cached = ids.map(id => core.cache.getImage(id));
+        let available = core.cache.getMaxCacheSize() - core.cache.getCacheSize();
+        const heap = performance.memory;
+        if (heap && Number.isFinite(heap.jsHeapSizeLimit - heap.usedJSHeapSize))
+          available = Math.min(available, heap.jsHeapSizeLimit - heap.usedJSHeapSize);
+        if (!kinCineWithinBudget(ids, pixels, available, cached))
+          throw Error('현재 영상 캐시·메모리 여유가 부족합니다. 다른 영상을 닫은 뒤 다시 재생하세요.');
         await session(); if (!current()) return;
         // Finish a bounded, four-worker preparation before the native timer starts, so stop/replace cannot be undone by a late frame load.
         let next = 0;
