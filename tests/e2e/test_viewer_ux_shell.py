@@ -432,11 +432,91 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         self.assertEqual(palette, ['rgb(33, 33, 33)', 'rgb(45, 45, 45)', 'rgb(227, 227, 227)', 'rgb(180, 180, 180)', 'rgb(138, 180, 200)'])
         self.assertEqual(direct.evaluate('getComputedStyle(document.querySelector("canvas")).filter'), 'none')
 
+    def check_delayed_identity(self, page, current, prior):
+        bar = page.get_by_role('region', name='Viewport Information')
+        expect(bar).to_contain_text(current.patient_id)
+        page.wait_for_function('() => !kinViewerHistoryWorkspaceState().busy && !kinViewerJobWorkspaceState().busy')
+        snapshot = """() => {
+          const id=services.viewportGridService.getActiveViewportId(),
+            viewport=services.cornerstoneViewportService.getCornerstoneViewport(id),
+            pane=document.querySelector('[data-cy="viewport-pane"]'),
+            label=pane.querySelector('.kin-viewer-info-identity'), image=viewport?.getCurrentImageId?.();
+          return {text:label.textContent,title:label.title,image,
+            displayedImage:viewport?.getCornerstoneImage?.()?.imageId,
+            imageCached:!!(image&&cornerstone.cache.getImage(image)),
+            context:KinViewerUX.viewport(id),hasCanvas:!!pane.querySelector('canvas')};
+        }"""
+        # Establish both real stacks, then evict only the inactive current
+        # study so the delayed transport cannot be bypassed by an earlier load.
+        for study, description in [(current, 'current'), (prior, 'prior')]:
+            self.drag(page, 'D03A ' + description, 0)
+            page.wait_for_function('''uid => {
+              const id=services.viewportGridService.getActiveViewportId(),
+                viewport=services.cornerstoneViewportService.getCornerstoneViewport(id);
+              return KinViewerUX.viewport(id)?.studyUid===uid &&
+                viewport?.getCornerstoneImage?.()?.imageId.includes('/studies/'+uid+'/');
+            }''', arg=study.uid)
+            if study is current:
+                current_images = page.evaluate('''() => services.cornerstoneViewportService
+                  .getCornerstoneViewport(services.viewportGridService.getActiveViewportId()).getImageIds()''')
+        target, label, date = current, 'current', '20260801'
+        page.evaluate('''images => { for (const id of images) {
+          if (cornerstone.cache.getImageLoadObject(id)) cornerstone.cache.removeImageLoadObject(id);
+        } }''', current_images)
+        before = page.evaluate(snapshot)
+        folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/viewer-ux-u2/screens'))
+        folder.mkdir(parents=True, exist_ok=True)
+        states = {'before': before}
+        def record(stage):
+            states[stage] = page.evaluate(snapshot)
+            (folder / 'delayed-identity.json').write_text(json.dumps(states, indent=2), encoding='utf-8')
+            page.screenshot(path=str(folder / ('delayed-identity-' + stage + '.png')))
+        record('before')
+        held = []
+        route_pattern = '**/dicom-web/**/frames/**'
+        page.route(route_pattern, lambda route: held.append(route))
+        try:
+            with page.expect_request(lambda request: '/dicom-web/studies/' + target.uid + '/' in request.url and '/frames/' in request.url):
+                self.drag(page, 'D03A ' + label, 0)
+            page.wait_for_function("""uid => services.cornerstoneViewportService
+              .getCornerstoneViewport(services.viewportGridService.getActiveViewportId())
+              ?.getCurrentImageId?.().includes('/studies/'+uid+'/')""", arg=target.uid)
+            page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+            record('loading')
+        finally:
+            try:
+                for route in held:
+                    route.continue_()
+            finally:
+                page.unroute(route_pattern)
+        canvas_ready(page, 1)
+        expect(bar).to_contain_text(date)
+        record('recovered')
+        # SR provenance also uses this native empty-assignment boundary.
+        page.evaluate("""() => { const grid=services.viewportGridService;
+          grid.setDisplaySetsForViewport({viewportId:grid.getActiveViewportId(),displaySetInstanceUIDs:[]}); }""")
+        page.wait_for_function("""() => !document.querySelector('[data-cy="viewport-pane"] canvas')""")
+        expect(bar).to_contain_text('Loading / No image')
+        record('empty')
+        with self.subTest(boundary='delayed-frame-identity'):
+            self.assertTrue(held, 'The real DICOM frame request must be held')
+            self.assertFalse(states['loading']['imageCached'], 'This case requires an uncached frame')
+            self.assertNotIn(date, states['loading']['text'])
+            self.assertNotIn(date, states['loading']['title'])
+            self.assertIsNone(states['loading']['context'])
+        with self.subTest(boundary='rendered-frame-recovery'):
+            self.assertEqual(states['recovered']['context']['studyUid'], target.uid)
+            self.assertIn(date, states['recovered']['title'])
+        with self.subTest(boundary='empty-viewport-identity'):
+            self.assertFalse(states['empty']['title'])
+            self.assertIsNone(states['empty']['context'])
+
     def test_shell_01_cell_study_and_metadata_retry(self):
         patient = 'U2-' + uuid.uuid4().hex[:16]
         current = self.multiple(patient, 'current', '20260801')
         prior = self.ct(patient, 'prior', '20260701')
         page = self.launch(self.login(), [current, prior])
+        self.check_delayed_identity(page, current, prior)
         self.grid(page, 2)
         self.drag(page, 'D03A current', 0)
         self.drag(page, 'D03A prior', 1)

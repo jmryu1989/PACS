@@ -1,4 +1,5 @@
 window.KinViewerInfoBar = (() => {
+  const renderedImages = new WeakMap();
   const text = value => typeof value === 'object' && value !== null
     ? String(value.Alphabetic || value.Ideographic || value.Phonetic || '') : String(value ?? '');
   function identity(services, viewportId) {
@@ -7,6 +8,12 @@ window.KinViewerInfoBar = (() => {
     const ids = cell?.displaySetInstanceUIDs || [];
     const set = ids.length === 1 && services.displaySetService.getDisplaySetByUID(ids[0]);
     let image = viewport?.getCurrentImageId?.();
+    if (viewport?.type === 'stack') {
+      // The requested index advances before its frame arrives. Only the image
+      // observed at a completed render may supply a stack's clinical identity.
+      const renderedImage = renderedImages.get(viewport);
+      if (!renderedImage || renderedImage !== viewport.getCornerstoneImage?.() || renderedImage.imageId !== image) image = null;
+    }
     if (!image && ['orthographic', 'volume3d'].includes(viewport?.type)) {
       const volumeId = viewport.getVolumeId?.(), actors = viewport.getActors?.() || [];
       const volume = volumeId && window.cornerstone.cache.getVolume(volumeId);
@@ -24,6 +31,18 @@ window.KinViewerInfoBar = (() => {
   }
   function mount({ services, studyActions }) {
     const bars = new Map(), labels = new Map();
+    function rememberRendered(viewport) {
+      if (viewport?.type === 'stack' && viewport.viewportStatus === window.cornerstone.Enums.ViewportStatus.RENDERED) {
+        renderedImages.set(viewport, viewport.getCornerstoneImage?.());
+      }
+    }
+    const imageRendered = event => rememberRendered(services.cornerstoneViewportService.getCornerstoneViewport(event.detail?.viewportId));
+    const renderedEvent = window.cornerstone.Enums.Events.IMAGE_RENDERED;
+    document.addEventListener(renderedEvent, imageRendered, true);
+    // The shell assets can finish loading after the first native render.
+    for (const id of services.viewportGridService.getState().viewports.keys()) {
+      rememberRendered(services.cornerstoneViewportService.getCornerstoneViewport(id));
+    }
     // Attach a bar to every pane that lacks one. The pane reserves the bar's
     // row by its own padding (theme) and the bar overlays it, so attaching a
     // bar changes no size.
@@ -82,7 +101,8 @@ window.KinViewerInfoBar = (() => {
         const mode = ({ stack: '2D', orthographic: 'MPR', volume3d: '3D' })[type] || type || 'No image';
         const status = mode + ' | ' + (layout.layoutType === 'grid' ? layout.numRows + '×' + layout.numCols : layout.layoutType);
         // The bar clamps the label to two lines; the full identity stays readable on hover.
-        if (bar.children[0].textContent !== label) { bar.children[0].textContent = label; bar.children[0].title = m ? label : ''; }
+        if (bar.children[0].textContent !== label) bar.children[0].textContent = label;
+        bar.children[0].title = labels.has(id) ? label : '';
         if (bar.children[1].textContent !== status) bar.children[1].textContent = status;
         bar.children[1].title = '영상 모드는 이 셀, 배치는 전체 뷰어에 적용됩니다.';
       }
@@ -90,8 +110,14 @@ window.KinViewerInfoBar = (() => {
     return {
       refresh,
       adopt: () => { adopt(); },
-      invalidate() { labels.clear(); for (const bar of bars.values()) bar.children[0].textContent = 'Loading / No image'; },
-      dispose() { for (const bar of bars.values()) bar.remove(); bars.clear(); labels.clear(); },
+      invalidate() {
+        labels.clear();
+        for (const bar of bars.values()) {
+          bar.children[0].textContent = 'Loading / No image';
+          bar.children[0].title = '';
+        }
+      },
+      dispose() { document.removeEventListener(renderedEvent, imageRendered, true); for (const bar of bars.values()) bar.remove(); bars.clear(); labels.clear(); },
     };
   }
   return { mount, identity };
