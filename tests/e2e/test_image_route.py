@@ -21,8 +21,8 @@ import ssl
 import time
 import unittest
 import uuid
-from email import policy as email_policy
 from email.parser import BytesParser
+from email.policy import default as email_policy
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
