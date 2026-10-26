@@ -1,8 +1,8 @@
 // Synthetic persistence-only limit fixture. This completes the SQL-seeded Finding
 // histories for D's signed read contract; it is not an approval-path test.
-const { PrismaClient } = require('/app/node_modules/@prisma/client');
+const { PrismaClient, Prisma } = require('/app/node_modules/@prisma/client');
 const { randomUUID } = require('node:crypto');
-const { planClinicalWrite, applyPlan } = require('/app/dist/emr-clinical/records');
+const { planClinicalWrite } = require('/app/dist/emr-clinical/records');
 const { clinicalSigningContent } = require('/app/dist/emr-clinical/signing');
 const { generateServerKeyPair, signServerPayload } = require('/app/dist/emr-signature/server-crypto');
 const db = new PrismaClient();
@@ -27,6 +27,7 @@ async function main() {
   for (const head of heads) {
     const revisions = await db.findingRevision.findMany({ where: { findingId: head.id }, orderBy: { revision: 'asc' } });
     let unit = null;
+    const commands = [], versions = [];
     for (const revision of revisions) {
       const item = revision.snapshot, requestId = revision.requestId;
       const body = revision.revision === 1 ? { requestId, item } :
@@ -38,14 +39,21 @@ async function main() {
       const signed = signServerPayload(clinicalSigningContent(plan.signing), kid, pair.privateKey);
       const signature = { envelope: signed.envelope, registration, signedAt: signed.signedAt, payloadSha256: signed.versionSha256 };
       const operation = randomUUID();
-      await db.$transaction(async tx => {
-        await tx.$executeRaw`INSERT INTO emr_clinical.online_command (record_type,actor_id,request_id,operation_id,body)
-          VALUES ('finding',${input.actor.identity.id},${requestId},${operation}::uuid,${JSON.stringify({ plan })})`;
-        await tx.$executeRaw`INSERT INTO emr_clinical.online_version (record_type,record_id,version_id,sequence,operation_id,body,signature)
-          VALUES ('finding',${head.id},${plan.version.versionId},${revision.revision},${operation}::uuid,${JSON.stringify(plan)},${JSON.stringify(signature)})`;
-      });
-      unit = applyPlan(unit, plan); total++;
+      commands.push(Prisma.sql`('finding',${input.actor.identity.id},${requestId},${operation}::uuid,${JSON.stringify({ plan })})`);
+      versions.push(Prisma.sql`('finding',${head.id},${plan.version.versionId},${revision.revision},${operation}::uuid,${JSON.stringify(plan)},${JSON.stringify(signature)})`);
+      // The unit the next plan extends, as applyPlan would return it. applyPlan itself re-derives the whole prefix at
+      // each step (quadratic over the 1000-revision history); every D read replays and checks the stored chain anyway.
+      unit = { record: plan.record, recordId: plan.version.recordId, studyId: plan.version.studyId,
+        managingInstitutionId: plan.version.managingInstitutionId, patient: plan.version.patient, parties: plan.parties,
+        state: plan.projection.state, revision: plan.projection.revision, head: plan.projection.head,
+        clinicalEntry: plan.projection.clinicalEntry, versions: [...(unit ? unit.versions : []), plan.version] };
+      total++;
     }
+    // One finding's history in one transaction: 4081 single-revision transactions cost more than the signing above.
+    await db.$transaction([
+      db.$executeRaw`INSERT INTO emr_clinical.online_command (record_type,actor_id,request_id,operation_id,body) VALUES ${Prisma.join(commands)}`,
+      db.$executeRaw`INSERT INTO emr_clinical.online_version (record_type,record_id,version_id,sequence,operation_id,body,signature)
+        VALUES ${Prisma.join(versions)}`]);
   }
   console.log(JSON.stringify({ fixture: 'finding-read-limits', findings: heads.length, revisions: total }));
 }

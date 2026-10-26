@@ -115,13 +115,15 @@ export class ClinicalRoutes {
         const known = <V>(value: V) => ({ status: 'known' as const, value });
         for (const item of response.items) {
           const study = scope && item.studyUid === scope.studyId ? scope : await this.parts.context.scope(tx, request, item.studyUid);
-          const stored = (await this.parts.store.versions(tx, recordType, item.id))
+          // A row given `served` loads only the versions it serves and its listed head.
+          const wanted = served?.(item);
+          const stored = (await this.parts.store.versions(tx, recordType, item.id, wanted && [...wanted, item.revision]))
             .filter(v => v.plan.version.sequence <= item.revision);
           // A concurrent writer may advance the head after the list's snapshot.
           // Only versions belonging to the returned projection are provided.
           const head = stored.find(v => v.plan.version.sequence === item.revision);
           if (!head) refuse('ClinicalHistoryUnavailable');
-          const versions = served ? servedVersions(stored, served(item)) : stored;
+          const versions = wanted ? servedVersions(stored, wanted) : stored;
           verifySigned(this.parts.signer, versions);
           await record({ formatVersion: 1, surface, eventId: randomUUID(),
             userId: known(facts.actor.identity), rolesAtTime: known(facts.actor.roles),
@@ -154,9 +156,8 @@ export class ClinicalRoutes {
         const study = first ? await this.parts.context.scope(tx, request, first.studyId) : null;
         if (first) await this.parts.store.lockUnit(tx, recordType, recordId);
         const response = await read(tx);
-        const unit = first ? await this.parts.store.unit(tx, recordType, recordId) : null;
+        const { unit, versions: stored } = first ? await this.parts.store.history(tx, recordType, recordId) : { unit: null, versions: [] };
         if (!unit && !empty?.(response)) refuse('ClinicalHistoryUnavailable');
-        const stored = unit ? await this.parts.store.versions(tx, recordType, recordId) : [];
         const versions = served && unit ? servedVersions(stored, served(response)) : stored;
         verifySigned(this.parts.signer, versions);
         const known = <V>(value: V) => ({ status: 'known' as const, value });

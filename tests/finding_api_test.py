@@ -1090,11 +1090,12 @@ class FindingAPI(unittest.TestCase):
               octet_length(convert_to(s.snapshot::text,'UTF8')) FROM seeded s CROSS JOIN LATERAL generate_series(1,s.revision) k''')
         # D's clean-install reader requires signed immutable histories even for rows seeded directly for paging.
         # Use the real plan/signature formats for this persistence fixture; the create/replay cases above exercise approval.
+        started = time.monotonic()
         signed_fixture = subprocess.run(['docker', 'compose', 'exec', '-T', 'api', 'node', '-', self.uid, own['id']],
             cwd=ROOT, input=(ROOT/'tests/emr/d/finding_read_fixture.cjs').read_text(encoding='utf-8'),
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=540)  # existing candidate suite hang timeout
         self.assertEqual(signed_fixture.returncode, 0, signed_fixture.stdout+signed_fixture.stderr)
-        print(signed_fixture.stdout.strip(), flush=True)
+        print(signed_fixture.stdout.strip(), f'seconds={round(time.monotonic()-started, 3)}', flush=True)
         totals = usage()
         self.assertEqual(totals[:2], [256, 4096-8])
         # Study uids may differ by a few digits in length, so rows of the shorter one are a little smaller.
