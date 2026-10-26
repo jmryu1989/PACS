@@ -3,6 +3,8 @@ import { APP_INTERCEPTOR } from '@nestjs/core';
 import { mergeMap } from 'rxjs';
 import { REQUEST_CONTEXT_SOURCE, RequestContextSource } from '../emr-runtime/request-context';
 import { LocalReadResponse } from './local-read';
+import { ReportObservationController } from './report-observation.controller';
+import { ReportObservationService } from './report-observation.service';
 import { ViewingRecordService } from './viewing-record.service';
 
 @Injectable()
@@ -25,8 +27,9 @@ export class ViewingResponseInterceptor implements NestInterceptor {
 @Module({})
 export class EmrViewingModule {
   static withRequests(source: RequestContextSource): DynamicModule {
-    return { module: EmrViewingModule, providers: [
-      { provide: REQUEST_CONTEXT_SOURCE, useValue: source }, ViewingRecordService,
+    // A4's display report shares the same request source; the guard and interceptors of the application apply to it.
+    return { module: EmrViewingModule, controllers: [ReportObservationController], providers: [
+      { provide: REQUEST_CONTEXT_SOURCE, useValue: source }, ViewingRecordService, ReportObservationService,
       { provide: APP_INTERCEPTOR, useClass: ViewingResponseInterceptor },
     ], exports: [ViewingRecordService] };
   }

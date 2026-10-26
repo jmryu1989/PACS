@@ -145,3 +145,47 @@ The real registration is `validate.yml`'s `emr-b` job (the order's `emr-b.yml`
 does not exist); A3's continuation transfers ownership of this additive step.
 Audit replay's local-subject consumers depend on #225 and are not certified
 by the W9 HTTP tests. Actual client rendering belongs to W9-UI/A5.
+
+## A4 report display observations
+
+`POST studies/:uid/view-observations` (200) takes exactly `accessRef` (the
+event ID A2 returned with a version row or a version-citations answer),
+`eventId` (the browser's UUIDv4 for one display) and `shownAt` (the display
+time in UTC milliseconds). The new request takes the gates of
+`GET studies/:uid/report/versions` (institution/tele, StudyAccess, split source,
+preliminary readability); a clinician-only member stays outside that scope.
+The provide-prepared entry is read back from B2 (`work.snapshot` of the viewing
+stream) and must be a local-read report-version/report-evidence provision of
+this study by the same member, institution and session binding (a bearer
+provision keeps its null session; a cookie session reports only its own). A
+missing, disposed, metadata, other-study, other-member or other-session
+reference is one 404 and records nothing.
+
+The record is that provision's `client-shown` follow-up: the stored target,
+kind, projection, surface and managing institution, `relatedEventId` = the
+provision, the reporting request's actor/roles/rights/session/requestId/ingress,
+cause `user-view`. Its `occurredAt` is the client-reported display time (as
+`displayReported` and the offline branch use the device time); B2's own
+reception time is the receipt's `durableAt`, answered as `receivedAt`. The ACK
+follows the COMMIT and its durable receipt. A resend of the same report replays
+the stored entry through B2 and answers the first accepted fact; another report
+under that event ID is 409; a new opening is a new event ID. A lost COMMIT
+reply is resolved through the same operation; closed, unreachable or unknown
+recording is the non-PHI 503 and never an ACK. B2 binds an event ID to its
+first payload, so a report whose first attempt stays pending or ends negative
+is not recorded later under that ID (UNKNOWN stays unknown).
+
+```sh
+KIN_TEST_API_IMAGE=<candidate-image> python scripts/run-tests.py --module tests/emr/a/report_observation_test.py --class ReportObservationHttp --mode live --unit module-a-04-http --timeout 300
+```
+
+The cells use the production `AppModule.withLedger` with A2's real reads and
+W9's real metadata read for the provisions: the ACK waits for the client-shown
+INSERT held by an SQL lock, resend/conflict/new opening, wrong study/unknown/
+metadata/disposed references, malformed reports, institution/preliminary/
+clinician refusals, cookie account switch and re-login, a lost COMMIT reply in
+the ledger relay, a closed record port and an API restart on the same database.
+They do not prove that a page displayed anything; the served renderer is A5.
+The route's EMR route classification (`api/src/emr-contract/routes.ts`) is
+outside A4's paths and is handed to its owner; until it lands,
+`tests/emr_contract_test.cjs` TEST-EMR-01-A reports the unclassified route.

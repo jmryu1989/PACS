@@ -156,7 +156,7 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 158, "public": 7, "session": 2, "business": 33, "denied": 116},
+    "counts": {"routes": 159, "public": 7, "session": 2, "business": 33, "denied": 117},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
@@ -177,7 +177,7 @@
         "PUT studies/:uid/report", "POST studies/:uid/report/commit", "GET studies/:uid/report/versions",
         "GET studies/:uid/report/citations", "GET studies/:uid/report/versions/:version/citations",
         "GET studies/:uid/report/structure", "GET studies/:uid/draft", "GET studies/:uid/report-preview", "POST studies/:uid/dictation",
-        "GET studies/:uid/clinical-context"
+        "GET studies/:uid/clinical-context", "POST studies/:uid/view-observations"
       ],
       "viewer": [
         "POST studies/:uid/viewer-items", "GET studies/:uid/viewer-items/:id/revisions", "POST studies/:uid/viewer-items/:id/revisions",
@@ -233,6 +233,7 @@
     "post_baseline": {
       "POST studies/:uid/viewer-context-events": {"decision": "business", "unit": "S8-CTX", "commit": "56e19e0", "basis": "finite diagnostic event after image permission and institution admission; server attributes the audit row; declared in allowed_additions"},
       "POST studies/viewing-set/resolve": {"decision": "denied", "unit": "W9-API", "commit": "f83948e", "basis": "radiologist multi-study viewing of the own institution: the ordered same-patient viewing set's admission and minimal source metadata (need radiologist, admin passes; every member visible, owned, not tele, StudyAccess); a clinician-only member neither resolves nor records display"},
+      "POST studies/:uid/view-observations": {"decision": "denied", "unit": "emr-module-a-a4", "commit": null, "basis": "the browser's display report of a report version or version evidence this member was provided (MODULE_A A4): the gates of GET studies/:uid/report/versions (owning or tele institution, StudyAccess, preliminary readability); a clinician-only member reads no report history and reports no display of it"},
       "GET clinician/studies": {"decision": "business", "unit": "S5-U1b", "commit": "dc270a0", "basis": "narrow clinician worklist read: listStudies scope, one-snapshot report status, no drafts, bodies or writer fields; declared in allowed_additions"},
       "GET clinician/studies/:uid/report": {"decision": "business", "unit": "S5-U1b", "commit": "dc270a0", "basis": "the final head's body and key images only at RS A with an approve/addendum head, status otherwise; declared in allowed_additions"},
       "POST studies/:uid/dictation": {"decision": "denied", "unit": "S3-ASR", "commit": "7bc6ffc", "basis": "report writer path: dictationGate runs the report-draft write refusals and every attempt is audited; a clinician writes no report text"},
