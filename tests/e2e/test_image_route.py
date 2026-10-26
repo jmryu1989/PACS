@@ -4,11 +4,12 @@
 TEST-E-ROUTE-01 one frame through the public HTTPS entry: the exact stored frame bytes, sent only as one durable B2
   provide-prepared entry whose fixed response manifest names that frame, followed by its transfer-ended entry and the
   transport/copy observations; a member of another institution gets no bytes and leaves no provide entry.
-TEST-E-ROUTE-02 the served OHIF viewer opens a synthetic CT series: every frame response the browser received carries its
-  E event and has exactly one provide entry; every provide entry for the series is either such a received response or
-  ends as an aborted/unknown transfer (never a completed one the browser did not get). The time to the first rendered
-  image and to every slice's frame is printed as one MEASURE line before the assertions, so the same test measures the
-  route it runs against (direct Orthanc before E_ROUTE, the E boundary after it).
+TEST-E-ROUTE-02 the served OHIF viewer opens a synthetic CT series twice (the first opening after arrival, then again
+  from a fresh browser): every frame response the browser received carries its E event and has exactly one provide
+  entry; every provide entry for the series is either such a received response or ends as an aborted/unknown transfer
+  (never a completed one the browser did not get). Each opening prints one MEASURE line (first rendered image, every
+  slice's frame) before the assertions, so the same test times the route it runs against (direct Orthanc before
+  E_ROUTE, the E boundary after it).
 
 Synthetic studies only (the D03A phantom pattern, larger matrix); cleaned through the local guard like the other D03A suites.
 """
@@ -198,8 +199,8 @@ class ImageRouteE2E(base.WorklistE2E):
         after = entries(f"e.entry_id IN (SELECT entry_id FROM emr_access.access_target WHERE record_id = '{sops[1]}')")
         self.assertEqual(before, len(after))
 
-    def test_route_02_served_viewer_ct_series_every_received_frame_recorded_once(self):
-        fixture, series, sops = ct_series(self.stack, "series", SLICES, MATRIX)
+    def open_series(self, fixture, sops, opening):
+        """One served-viewer opening in a fresh signed-in browser context; (MEASURE row, received frame responses)."""
         page = self.login()
         answered, finished, failed = {}, {}, []
         ours = lambda request: "/frames/" in request.url and f"/studies/{fixture.uid}/" in request.url
@@ -231,15 +232,26 @@ class ImageRouteE2E(base.WorklistE2E):
             page.wait_for_timeout(250)
         every = time.monotonic() - started if len(set(finished) & set(sops)) == len(sops) else None
         received = [row for rows in finished.values() for row in rows]
-        measure = {"route": "e-boundary" if any(r["event"] for r in received) else "direct", "slices": SLICES, "matrix": MATRIX,
+        measure = {"route": "e-boundary" if any(r["event"] for r in received) else "direct", "opening": opening,
+                   "slices": SLICES, "matrix": MATRIX,
                    "first_render_seconds": round(first, 3), "all_frames_seconds": None if every is None else round(every, 3),
                    "frame_responses": len(received), "distinct_sops": len(set(finished) & set(sops)), "failed_requests": len(failed)}
         print("MEASURE " + json.dumps(measure), flush=True)
+        page.context.close()
+        return measure, received
+
+    def test_route_02_served_viewer_ct_series_every_received_frame_recorded_once(self):
+        fixture, series, sops = ct_series(self.stack, "series", SLICES, MATRIX)
+        # The first opening after the study arrives, then a second opening by a fresh browser (no HTTP cache).
+        cold, first = self.open_series(fixture, sops, "first")
+        warm, second = self.open_series(fixture, sops, "again")
         out = Path(os.environ.get("KIN_EVIDENCE_DIR") or Path(__file__).parent / "artifacts")
         out.mkdir(parents=True, exist_ok=True)
-        (out / "image-route-measure.json").write_text(json.dumps(measure, indent=2), encoding="utf-8")
+        (out / "image-route-measure.json").write_text(json.dumps([cold, warm], indent=2), encoding="utf-8")
 
-        self.assertIsNotNone(every, "every slice's frame reached the viewer")
+        for measure in (cold, warm):
+            self.assertIsNotNone(measure["all_frames_seconds"], f"every slice's frame reached the viewer ({measure['opening']})")
+        received = first + second
         self.assertTrue(all(r["status"] == 200 for r in received), received[:5])
         events = [r["event"] for r in received]
         self.assertTrue(all(events), "every frame the browser received came through the E boundary")

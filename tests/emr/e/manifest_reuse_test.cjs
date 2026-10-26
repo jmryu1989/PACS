@@ -117,7 +117,8 @@ test('the image service rebuilds after a source/current-study change, not after 
     async current() { throw answer; },
   };
   const records = { begin: () => ({ transactionWithRecords: fn => fn({}), end() {} }) };
-  const service = new OnlineImageService(records, context, {}, { imageSource() { throw new Error('unused'); } });
+  const service = new OnlineImageService(records, context, {}, { imageSource() { throw new Error('unused'); } },
+    { facts: async () => ({}) });
   const send = async n => {
     const request = Object.assign(new EventEmitter(), { method: 'GET', headers: {} });
     const response = Object.assign(new EventEmitter(), { writableFinished: false });
@@ -136,4 +137,33 @@ test('the image service rebuilds after a source/current-study change, not after 
     await assert.rejects(send(2), ForbiddenException);
     assert.equal(reads, before + 1, `rebuilt after ${change.code ?? change.constructor.name}`);
   }
+});
+
+test('simultaneous frames of a kept study do not wait on their own B2 append lanes', async () => {
+  // The real B2 admission: a few append lanes shared FIFO by every transaction on one client. Resolving a request's
+  // member identity takes a lane of its own; the production context resolves it lazily at its first current().
+  const { admitAppend } = load('emr-runtime/admission');
+  const client = {}, poolSize = 6, built = manifest(40);
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  const materialized = new WeakMap();
+  const requests = { facts(request) {
+    if (!materialized.has(request)) materialized.set(request, admitAppend(client, poolSize, async () => { await settle(); return {}; }));
+    return materialized.get(request);
+  } };
+  const context = {
+    async manifest() { return built; },
+    async current(_tx, request) { await requests.facts(request); throw new ForbiddenException('synthetic stop after the access check'); },
+  };
+  const records = { begin: () => ({ transactionWithRecords: fn => admitAppend(client, poolSize, async () => { await settle(); return fn({}); }), end() {} }) };
+  process.env.KIN_EMR_STATE_DIR = require('node:os').tmpdir();
+  const service = new OnlineImageService(records, context, {}, { imageSource() { throw new Error('unused'); } }, requests);
+  const send = n => service.send(Object.assign(new EventEmitter(), { method: 'GET', headers: {} }),
+    Object.assign(new EventEmitter(), { writableFinished: false }),
+    `/dicom-web/studies/${STUDY}/series/${SERIES}/instances/${sop(n)}/frames/1`);
+  // A served CT series: about 25 prefetch frames at once, more than the lanes.
+  const sends = Array.from({ length: 24 }, (_, i) => send(i + 1));
+  const outcome = await Promise.race([Promise.allSettled(sends).then(results => results),
+    new Promise(resolve => setTimeout(() => resolve('waiting on its own lanes'), 3000))]);
+  assert.notEqual(outcome, 'waiting on its own lanes');
+  assert.ok(outcome.every(result => result.status === 'rejected' && result.reason instanceof ForbiddenException));
 });

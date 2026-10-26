@@ -6,6 +6,7 @@ import type { ServerResponse } from 'node:http';
 import { newAuditLinkId, parseAccessEvent } from '../emr-contract/access-event';
 import { refuse } from '../emr-contract/validation';
 import { EMR_RECORD_PORT, EmrRecordPort } from '../emr-runtime/record-port';
+import { REQUEST_CONTEXT_SOURCE, RequestContextSource } from '../emr-runtime/request-context';
 import { OrthancService } from '../orthanc.service';
 import { PrismaService } from '../prisma.service';
 import { parseImageRequest, prepareDelivery } from './contract';
@@ -26,7 +27,7 @@ export class OnlineImageService {
   private readonly manifests = new ManifestReuse();
   constructor(@Inject(EMR_RECORD_PORT) private readonly records: EmrRecordPort,
     private readonly context: ImageContextSource, private readonly db: PrismaService,
-    private readonly orthanc: OrthancService) {}
+    private readonly orthanc: OrthancService, @Inject(REQUEST_CONTEXT_SOURCE) private readonly requests: RequestContextSource) {}
 
   async send(request: any, response: ServerResponse, target: string) {
     let image: ReturnType<typeof parseImageRequest>;
@@ -39,6 +40,11 @@ export class OnlineImageService {
     let kept: ImageManifest | undefined;
     try {
       const manifest = kept = await this.manifests.manifest(image, () => this.context.manifest(request, image, abort.signal), abort.signal);
+      // The request's member identity is resolved once, under its own append admission. Left to the first current()
+      // below, it would wait for a lane while that transaction holds one: with as many simultaneous frames as lanes,
+      // none proceeds (served CT series, run e-route-green-opus-20261026c). A kept manifest skips the catalog read
+      // that used to resolve it first.
+      await this.requests.facts(request);
       const at = new Date().toISOString(), eventId = randomUUID();
       const work = this.records.begin();
       let facts: Awaited<ReturnType<ImageContextSource['current']>>;
