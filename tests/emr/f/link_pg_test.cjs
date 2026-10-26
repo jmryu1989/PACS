@@ -221,6 +221,22 @@ if(process.argv.includes('--serve')){
       // Reads append to viewing; compare the independent replay at the original snapshot.
       assert.equal(replayed.views.rows.filter(row=>row.sequence<=counted.views.top).length,counted.views.total,JSON.stringify(filter));
     }
+    // A plan that matches nothing still names the snapshot it covered: top is the stream's in-window ceiling for the
+    // institution (managing, else acting), read here independently of the product's SQL.
+    const ceiling=async stream=>Number((await witness.$queryRaw`SELECT COALESCE(max(sequence),0)::text AS top
+      FROM emr_access.access_entry WHERE stream=${stream}
+      AND occurred_at>=${query.from}::timestamptz AND occurred_at<${query.to}::timestamptz
+      AND CASE WHEN payload::jsonb#>>'{managingInstitution,status}'='known' THEN payload::jsonb#>>'{managingInstitution,value}'
+        ELSE payload::jsonb#>>'{actingInstitution,value}' END=${doctor.institutionId}`)[0].top);
+    for (const route of ['investigations','exports']) {
+      const history=await ceiling('history'),viewing=await ceiling('viewing');
+      assert.ok(history>0&&viewing>0,'both streams hold in-window events');
+      const none=await ok('auditor','POST',route,{...query,recordId,versionId:'another-version'});
+      assert.deepEqual([none.changes.total,none.views.total],[0,0],route);
+      // F's reads append only to viewing, so history is still; viewing may gain this request's own event after top is read.
+      assert.equal(none.changes.top,history,route);
+      assert.ok(none.views.top>=viewing&&none.views.top<=await ceiling('viewing'),`${route} views.top ${none.views.top}`);
+    }
     const [countFunction]=await witness.$queryRaw`SELECT pg_get_functiondef('emr_access.investigation_count(text,text,timestamptz,timestamptz,bigint,jsonb)'::regprocedure) AS sql`;
     try {
       await witness.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION emr_access.investigation_count(p_stream text,p_institution text,p_from timestamptz,p_until timestamptz,p_top bigint,p_filters jsonb)

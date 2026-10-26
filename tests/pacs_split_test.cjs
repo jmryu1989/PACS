@@ -8,8 +8,8 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 // Split phase (S9-U0b round 2): every original unit lives in its approved concern and is compared with its unchanged
 // RELIST baseline through the bounded correspondence its entry records (pacs_split_contract.cjs); the facade and the
-// concern files may hold nothing the spec does not name. Current Nest registration and the real DI consumer below
-// cover the facade; current HTTP/route suites own later features. The counter-cases below change synthetic sources and must be
+// concern files may hold nothing the spec does not name; Nest's DI and route metadata equal the snapshot taken from main
+// before the split (spec.di_source). The counter-cases below each change one thing on synthetic sources and must be
 // refused by their own check.
 const { createSource, targets, sha256 } = require('./pacs_source.cjs');
 const { assertContract, assertEntry, fingerprint, diSnapshot, historicalSource } = require('./pacs_split_contract.cjs');
@@ -25,10 +25,7 @@ function fixture(text = plain, change = () => {}, extra = {}) {
   change(wanted);
   return createSource({ apiSrc, spec: wanted, overrides: { [path.join(apiSrc, relative)]: text, ...extra } });
 }
-// C6: STRUCT/R02/FACADE/DI are current ownership contracts.
-// commitReport gained the approved RequestFacts argument after the split. Its
-// forwarding/argument binding and real request tests apply; the old signature
-// byte pin no longer describes that API. Historical move hashes remain intact. HISTORY retains
+// C6: STRUCT/R02/FACADE/DI are current ownership contracts. HISTORY retains
 // every approved text/SQL hash; synthetic M21..25 and CORRESPONDENCE still prove
 // their individual historical or structural rejection. Workspace v3 behavior is
 // exercised through the public facade by workspace_layout_v3_service_test.cjs.
@@ -274,6 +271,7 @@ test('U0B-DI Nest metadata equals the pre-split snapshot plus declared additions
   const additions = [spec.di_additions_d_online, spec.di_additions_f_link, spec.di_additions_emr_online, spec.di_additions_b2, declared];
   assert.equal(full.routes.length, spec.di.routes.length + additions.reduce((count, item) => count + item.routes.length, 0));
   // Undo clinical and later online/identity bindings before B2 and the earlier feature declarations.
+  // D-online and F_LINK are full declared additions too: the whole snapshot is compared, not a minimal DI check.
   const now = additions.reduce(withoutDeclared, withoutW5Arguments(full));
   assert.deepEqual(now, spec.di);
   // Use the approved split's route set, independent of today's editable spec, so an addition cannot be re-pinned as baseline.

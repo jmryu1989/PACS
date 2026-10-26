@@ -131,10 +131,11 @@ export class EmrAuditService {
       if ('after' in query) refuse('InvestigationQueryRefused');
       const changes = F.planInvestigation(authority, { ...query, ...(changesAfter ? { after: changesAfter } : {}) }, mode);
       const views = F.planInvestigation(authority, { ...query, ...(viewsAfter ? { after: viewsAfter } : {}) }, mode);
-      const fetch = async (stream: 'history' | 'viewing', top: number | null, below: number | null, take: number) => tx.$queryRaw<{
+      const fetch = async (stream: 'history' | 'viewing', top: number | null, below: number | null, take: number,
+        filters: object = changes.filters) => tx.$queryRaw<{
         sequence: bigint; payload: string; recorded_at: Date; snapshot_top: bigint }[]>`
         SELECT * FROM emr_access.investigation_entries(${stream},${changes.institutionId},${changes.filters.from}::timestamptz,
-          ${changes.filters.to}::timestamptz,${top}::bigint,${below}::bigint,${take}::integer,${JSON.stringify(changes.filters)}::jsonb)`;
+          ${changes.filters.to}::timestamptz,${top}::bigint,${below}::bigint,${take}::integer,${JSON.stringify(filters)}::jsonb)`;
       // Changed events occur in both streams. Decode once; the replay boundary validates each row.
       const parsed = new Map<string, unknown>();
       const eventOf = (payload: string) => {
@@ -143,7 +144,9 @@ export class EmrAuditService {
         return event;
       };
       const source = (stream: 'history' | 'viewing'): F.InvestigationLedger => ({
-        top: async () => Number((await fetch(stream, null, null, 1))[0]?.snapshot_top ?? 0),
+        // The ceiling is the stream's highest in-window entry, matching or not. A filtered read returns no row when
+        // nothing matches, which would report "nothing found up to sequence 0" instead of up to the ceiling.
+        top: async () => Number((await fetch(stream, null, null, 1, {}))[0]?.snapshot_top ?? 0),
         count: async (top, filters) => Number((await tx.$queryRaw<{ total: bigint }[]>`
           SELECT emr_access.investigation_count(${stream},${changes.institutionId},${filters.from}::timestamptz,
             ${filters.to}::timestamptz,${top}::bigint,${JSON.stringify(filters)}::jsonb) AS total`)[0].total),
