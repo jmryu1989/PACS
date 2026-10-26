@@ -38,7 +38,7 @@ class MeasurementCiTests(unittest.TestCase):
         bindings = self.catalog.profile_bindings()
         for owner, profiles in expected.items():
             job = self.catalog.job(owner)
-            self.assertEqual(job['needs'], 'runtime')
+            self.assertEqual(job['needs'], 'select')
             self.assertEqual(job['runs-on'], 'ubuntu-24.04')
             self.assertEqual(len([s for s in job['steps'] if s.get('uses', '').startswith('actions/checkout@')]), 1)
             uploads = [s for s in job['steps'] if s.get('uses', '').startswith('actions/upload-artifact@')]
@@ -56,6 +56,41 @@ class MeasurementCiTests(unittest.TestCase):
                     self.assertEqual(matching[0]['if'], 'always()')
                     self.assertEqual(matching[0]['with']['if-no-files-found'], 'error')
         self.assertNotIn('u5-session-mutants', bindings)
+
+    def test_module_jobs_wait_for_selection_and_fail_when_it_fails(self):
+        # D1876 d1: module jobs start after the short select job, not after runtime, and use none of runtime's
+        # outputs. D1831: the merge gate counts a skipped required check as satisfied, so a select that did not
+        # succeed must make every module check run and fail, not skip; a cancelled run still skips.
+        workflow = self.catalog.documents['.github/workflows/validate.yml']
+        jobs = workflow['jobs']
+        declared = json.loads((ci.ROOT / 'scripts/ci-paths.json').read_text(encoding='utf-8'))['jobs']
+        self.assertNotIn('needs', jobs['select'])
+        self.assertNotIn('needs', jobs['runtime'])
+        self.assertNotIn('outputs', jobs['runtime'])
+        self.assertEqual(jobs['select']['outputs'], {'jobs': '${{ steps.paths.outputs.jobs }}'})
+        self.assertIn('python3 scripts/ci_select.py', [step.get('run') for step in jobs['select']['steps']])
+        selected = {}
+        for name, job in jobs.items():
+            if name in ('select', 'runtime') or job.get('needs') == 'produce':
+                continue
+            with self.subTest(job=name):
+                self.assertEqual(job['needs'], 'select')
+                condition = re.fullmatch(
+                    r"\$\{\{ !cancelled\(\) && \(needs\.select\.result != 'success' \|\| "
+                    r"fromJSON\(needs\.select\.outputs\.jobs\)\['([a-z0-9-]+)'\]\) \}\}", job['if'])
+                self.assertIsNotNone(condition, job['if'])
+                selected[name] = condition[1]
+                guard = job['steps'][0]
+                self.assertEqual(guard['if'], "${{ needs.select.result != 'success' }}")
+                self.assertTrue(guard['run'].rstrip().endswith('exit 1'))
+                text = json.dumps(job)
+                self.assertNotIn('needs.runtime', text)
+                self.assertNotIn('actions/download-artifact@', text)
+        self.assertEqual(set(selected.values()), set(declared) - {'ci-selfchecks'})
+        self.assertEqual(len(set(selected.values())), len(selected))
+        consume = jobs['consume']
+        self.assertEqual(jobs[consume['needs']]['needs'], 'select')
+        self.assertEqual(workflow['concurrency']['cancel-in-progress'], "${{ github.event_name == 'pull_request' }}")
 
     def test_accuracy_pr_subset_keeps_original_suite_contracts(self):
         expected = [('e2e/test_measurement_readback.py', 'MeasurementReadbackE2E'),

@@ -1021,17 +1021,25 @@
        접힌다. 요약 줄은 보낸 목록 줄(.cvr-sent-bar)과 같은 모양이라 판독 칼럼에 더하는 높이는 그 한 줄이다. 펼친 본문은 높이 상한
        안에서 스크롤해 판독문 칸을 밀어내지 않는다. 글자는 12px 이상, 상태는 색과 함께 늘 글자로 쓴다. */
     #cvr-inbox-p { flex: none; font-size: 12px; color: var(--kin-text); background: var(--kin-panel); border-top: 1px solid var(--kin-line2); }
-    /* D1821/D1822 (W5B-REVIEW-01): the received list the reader opens (Show Received; it never opens by itself on this page)
-       floats over the report area instead of taking its room. The report column (editor or Related Report mode) keeps its
-       size; the list is anchored to the column's bottom, no taller than the column, scrolls inside, and keeps its bar (Hide
-       Received) on top. What used to open it by itself marks the bar (data-attention) in the existing CVR amber. */
+    /* D1822 follow-up (Minhoon 2-2): a received report automatically opens the existing overlay. The report column keeps its
+       size; the list scrolls inside and keeps its bar (Hide Received) on top. An arrival moves the overlay away from the
+       typing line or focused control within the column without scrolling or resizing the editor. Dismissed arrivals and read/ACK failures
+       mark the bar (data-attention) in the existing CVR amber. */
     #cvr-inbox-p[data-attention] > .cvr-inbox-bar { box-shadow: inset 3px 0 #d29a3a; }
     #cvr-inbox-p[data-attention] #cvr-inbox-toggle { border-color: #d29a3a; color: #f0c27a; }
     .report-p { position: relative; }
+    /* The floating panel leaves its summary row's space in flow: 24px buttons + 6px bar padding + 1px border below.
+       Without that space, opening the overlay grows the editor and shifts the controls beneath it. */
+    .report-p:has(> #cvr-inbox-p:not([hidden]) > #cvr-inbox-body:not([hidden]))::after {
+      content: ''; flex: 0 0 calc(24px + 6px + 1px); }
     #cvr-inbox-p:has(> #cvr-inbox-body:not([hidden])) { position: absolute; left: 0; right: 0; bottom: 0; max-height: 100%;
       overflow: auto; z-index: 5; box-shadow: 0 -6px 18px #0009; }
     #cvr-inbox-p:has(> #cvr-inbox-body:not([hidden])) > .cvr-inbox-bar { position: sticky; top: 0; z-index: 1;
       background: var(--kin-panel); }
+    /* Keep arrivals within the report column; the list scrolls above or below the typing line or focused control. */
+    #cvr-inbox-p.cvr-inbox-arrival:has(> #cvr-inbox-body:not([hidden])) { position: fixed; right: auto; bottom: auto; display: flex; flex-direction: column; }
+    #cvr-inbox-p.cvr-inbox-arrival > .cvr-inbox-bar { flex: none; }
+    #cvr-inbox-p.cvr-inbox-arrival > #cvr-inbox-body { min-height: 0; }
     #cvr-inbox-p[hidden], #cvr-inbox-p [hidden] { display: none !important; }
     .cvr-inbox-bar { display: flex; align-items: center; gap: 6px; padding: 3px 8px; min-width: 0; white-space: nowrap; }
     #cvr-inbox-badge { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--kin-muted); }
@@ -1679,14 +1687,14 @@
             <button id="cvr-sent-more" type="button" hidden>More</button>
           </div>
         </section>
-        <!-- S7-U2a 받은 중요 결과. 받는 세션(clinician·radiologist)에는 요약 줄이 늘 서고 본문만 접힌다. 본문은 확인 대기가
-             생기거나 늘 때·읽기 실패·결과를 모르는 수신 확인에서만 스스로 열리고 스스로 닫히지 않는다. 판독 대상과 무관한 이
+          <!-- S7-U2a 받은 중요 결과. 받는 세션(clinician·radiologist)에는 요약 줄이 늘 서고 본문만 접힌다. 새 확인 대기가
+               도착하면 본문이 자동으로 겹쳐 뜨며 사용자가 닫는다. 판독 대상과 무관한 이
              계정의 받은 목록이며 판독문을 읽거나 쓰지 않는다. -->
         <section id="cvr-inbox-p" aria-label="Critical Results" data-state="idle" hidden>
           <div class="cvr-inbox-bar">
             <b id="cvr-inbox-title" tabindex="-1">Critical Results</b>
             <span id="cvr-inbox-badge" role="status" aria-live="polite"></span>
-            <button id="cvr-inbox-toggle" type="button" aria-expanded="false" aria-controls="cvr-inbox-body">Show Received</button>
+            <button id="cvr-inbox-toggle" type="button" aria-expanded="false" aria-controls="cvr-inbox-body" aria-keyshortcuts="Escape" title="받은 중요 결과 목록을 펼칩니다.">Show Received</button>
             <button id="cvr-inbox-refresh" type="button" title="받은 목록을 서버에서 다시 읽습니다. 읽기만 하며 어떤 전달도 바꾸지 않습니다.">Refresh</button>
           </div>
           <div id="cvr-inbox-body" role="region" aria-label="Critical Results Details" hidden>
