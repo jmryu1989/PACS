@@ -1,4 +1,4 @@
-import { Inject, Injectable, ServiceUnavailableException, BadRequestException } from '@nestjs/common';
+import { Inject, Injectable, ServiceUnavailableException, BadRequestException, ConflictException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -10,14 +10,20 @@ import { OrthancService } from '../orthanc.service';
 import { PrismaService } from '../prisma.service';
 import { parseImageRequest, prepareDelivery } from './contract';
 import { ImageContextSource } from './context';
-import { verifiedManifest } from './manifest';
+import type { ImageManifest } from './manifest';
+import { ManifestReuse } from './manifest-reuse';
 import { PgImageEvidenceStore } from './store';
 import { sendOnlineImage } from './stream';
 
 const known = <T>(value: T) => ({ status: 'known' as const, value });
+// The kept manifest no longer describes the source or the current study: the next request rebuilds it.
+const SOURCE_CHANGED = ['ImageCurrentStudyChanged', 'ImageSourceMismatch', 'ScopeOutsideManifest', 'FrameOutOfManifest'];
+const sourceChanged = (error: any) => error instanceof ConflictException || SOURCE_CHANGED.includes(error?.code) ||
+  error instanceof AggregateError && error.errors.some(sourceChanged);
 
 @Injectable()
 export class OnlineImageService {
+  private readonly manifests = new ManifestReuse();
   constructor(@Inject(EMR_RECORD_PORT) private readonly records: EmrRecordPort,
     private readonly context: ImageContextSource, private readonly db: PrismaService,
     private readonly orthanc: OrthancService) {}
@@ -30,8 +36,9 @@ export class OnlineImageService {
     const abort = new AbortController();
     const stop = () => { if (!response.writableFinished) abort.abort(); };
     request.once('aborted', stop); response.once('close', stop);
+    let kept: ImageManifest | undefined;
     try {
-      const manifest = verifiedManifest(await this.context.manifest(request, image, abort.signal));
+      const manifest = kept = await this.manifests.manifest(image, () => this.context.manifest(request, image, abort.signal), abort.signal);
       const at = new Date().toISOString(), eventId = randomUUID();
       const work = this.records.begin();
       let facts: Awaited<ReturnType<ImageContextSource['current']>>;
@@ -63,6 +70,9 @@ export class OnlineImageService {
               current.provision.relation !== facts.provision.relation || current.provision.basisId !== facts.provision.basisId ||
               current.provision.agreementId !== facts.provision.agreementId) refuse('ImageAuthorityChanged');
         } }, { manifest, prepared, event, response, signal: abort.signal, range: request.headers.range });
+    } catch (error) {
+      if (kept && sourceChanged(error)) this.manifests.forget(image.studyUid, kept);
+      throw error;
     } finally { request.off('aborted', stop); response.off('close', stop); }
   }
 }

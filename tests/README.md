@@ -3056,4 +3056,16 @@ It checks durable preparation before body bytes, Range/multipart/HEAD, rollback,
 interruption and staging-copy facts. It does not prove native OHIF display. The
 registered `GET`/`HEAD images/dicom-web?target=...` route requires Module A's server
 context/catalog binding (REQUEST_FACTS #211); the current binding returns 503.
-Nginx/served OHIF and derived PDF/preview/thumbnail snapshots remain unconnected.
+Derived PDF/preview/thumbnail/metadata snapshots remain unconnected.
+
+E_ROUTE puts the viewer's WADO-RS frame requests on that route. `python -B tests/proxy_image_route_test.py`
+(real nginx from PATH or `KIN_PROXY_NGINX`, as `proxy_grant_log_test.py`) checks that frame GET/HEAD reach only
+`/api/images/dicom-web?target=<normalized path>` with the session headers and the proxy's peer address, that writes
+are refused, and that metadata, rendered frames and the Gateway STOW keep authz -> Orthanc.
+`node --test tests/emr/e/manifest_reuse_test.cjs` (compiled `api/dist`) checks that one study manifest serves the
+study's frame requests and is rebuilt or forgotten when the request or source no longer matches it.
+`python -B scripts/run-tests.py --module tests/e2e/test_image_route.py --mode live --unit e-route --timeout 1800`
+runs on the served stack: one frame through HTTPS is one recorded delivery, and the served OHIF CT series
+(`KIN_E_ROUTE_SLICES`, default 200, `KIN_E_ROUTE_MATRIX`, default 512) records every received frame once; it prints
+one `MEASURE` line (first render and all-frames time) before its assertions, so the same case times the direct
+route and the E route. It passes only with the Module A binding and a deployed viewer/decoder asset catalog.
