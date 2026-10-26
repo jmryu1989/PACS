@@ -21,11 +21,15 @@
   const REFUSAL_CHARS = 8192;
   const LABEL_CHARS = 256;
   const ACTIVE = new Set(['requesting-permission', 'recording', 'uploading', 'review']);
-  // Answers after which the same recording may still succeed: the engine, its one slot or the proxy comes
-  // back. The run then keeps its recording for Retry instead of ending; a refusal of this person, this
-  // study or these bytes still ends it.
-  const RETRYABLE = new Set(['network', 'client-timeout', 'DICTATION_BUSY', 'DICTATION_TIMEOUT', 'DICTATION_ENGINE_FAILED']);
-  const retryable = reason => RETRYABLE.has(reason) || /^HTTP_5\d\d$/.test(reason);
+  // Answers after which the same recording may still succeed: the engine, its one slot, the proxy, the identity
+  // provider or the session store comes back. The run then keeps its recording for Retry instead of ending. Judged by
+  // the HTTP status, not by a list of codes, so a 5xx from any layer in front of the engine (AUTH_IDP_UNAVAILABLE,
+  // AUTH_STORAGE_FAILURE, an nginx 502) is held too; the 409 AUTH_SESSION_BUSY is the session store's own "try again".
+  // An engine that is not configured at all, and a refusal of this person, this study or these bytes (4xx), end it.
+  function transient(status, code) {
+    if (code === 'DICTATION_NOT_CONFIGURED') return false;
+    return status === 429 || (status >= 500 && status <= 599) || (status === 409 && code === 'AUTH_SESSION_BUSY');
+  }
 
   const TITLES = Object.freeze({
     browser: '이 브라우저 환경에서는 녹음할 수 없습니다 — 보안 연결(HTTPS)과 마이크 기능이 필요합니다',
@@ -219,9 +223,9 @@
     }
     /** The request's own outcome: a transient one holds the recording for Retry (the session stays in
      * uploading under the same pin); any other is the run's one failure. */
-    function settle(cur, reason, detail) {
+    function settle(cur, held, reason, detail) {
       if (run !== cur) return;
-      if (!retryable(reason) || !cur.audio) { failRun(cur, reason, detail); return; }
+      if (!held || !cur.audio) { failRun(cur, reason, detail); return; }
       cur.held = { reason, detail: detail || null };
       emit();
     }
@@ -316,14 +320,14 @@
         if (run !== cur) return;
         raw = await res.text();
       } catch (_) {
-        work.commit(at, () => { settle(cur, timedOut ? 'client-timeout' : 'network'); });
+        work.commit(at, () => { settle(cur, true, timedOut ? 'client-timeout' : 'network'); });
         return;
       } finally {
         zero(bytes); timers.clear(timer); if (cur.timer === timer) cur.timer = null;
       }
       if (run !== cur) return;
       work.commit(at, () => {
-      if (!res.ok) { const f = refusal(res.status, raw); settle(cur, f.code, f.message); return; }
+      if (!res.ok) { const f = refusal(res.status, raw); settle(cur, transient(res.status, f.code), f.code, f.message); return; }
       const value = readResponse(raw);
       if (!value) { failRun(cur, 'invalid-response'); return; }
       const problem = transcriptProblem(value.text);

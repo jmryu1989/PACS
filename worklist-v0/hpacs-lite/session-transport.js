@@ -150,12 +150,14 @@
       if (outer) outer.addEventListener('abort', onAbort, { once: true });
       open.add(operation);
       let finished = false;
-      const finish = () => {
+      // `keepCaller`: a Response handed back unread is still being read by the caller, and the caller's signal must
+      // cut that read as it does with a native fetch — detaching it at the headers left a stalled body uncancellable.
+      const finish = (keepCaller = false) => {
         if (finished) return;
         finished = true;
         open.delete(operation);
         if (timer !== null) unschedule(timer);
-        if (outer) outer.removeEventListener('abort', onAbort);
+        if (outer && !keepCaller) outer.removeEventListener('abort', onAbort);
       };
       const thrown = () => failure(operation.cause || 'network', true);
 
@@ -191,8 +193,9 @@
         if (read === 'response') {
           // 본문은 부른 쪽이 읽는다. 종료 신호는 머리글의 코드로만 가린다(본문을 여기서 읽으면 부른 쪽이 읽지 못한다) —
           // 서버는 AUTH_* 거절마다 같은 코드를 X-KIN-Auth-Code 머리글에도 싣는다.
-          // 한도가 없으면 여기까지가 이 전송의 몫이다. 한도가 있으면 그 시각까지 같은 신호가 본문 읽기도 끊는다.
-          if (timer === null) finish();
+          // 한도가 없으면 여기까지가 이 전송의 몫이다(부른 쪽의 signal은 본문 읽기를 계속 끊는다). 한도가 있으면 그 시각까지
+          // 같은 신호가 본문 읽기도 끊는다.
+          if (timer === null) finish(true);
           return response;
         }
 

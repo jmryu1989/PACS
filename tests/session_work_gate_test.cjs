@@ -507,6 +507,24 @@ test('SEND-05 the caller can cancel, before the request leaves and while it is o
   assert.equal(transport.pending(), 0);
 });
 
+test('SEND-15 a Response handed back unread stays under the caller\'s signal until its body is read', async () => {
+  // Native fetch semantics: the caller that reads the body itself can still cut a body that stops arriving.
+  for (const method of ['request', 'fetch']) {
+    const { gate, net, transport } = wired();
+    const control = new AbortController();
+    const done = transport[method]('/api/upload', { context: gate.capture('document'), read: 'response',
+      method: 'POST', body: 'synthetic', signal: control.signal });
+    const body = net.calls[0].headersThenBody(200);
+    const response = await done;
+    assert.equal(transport.pending(), 0, method + ': without a deadline the transport\'s part ends at the headers');
+    body.push('{"te');
+    const read = response.text();
+    control.abort();
+    await assert.rejects(read, error => error.name === 'AbortError', method);
+    assert.equal(net.calls[0].aborted, true, method);
+  }
+});
+
 test('SEND-06 only the server\'s word that the session ended or was replaced is a session-end signal', async () => {
   const { gate, source, net, failures, transport } = wired('S1');
   const context = gate.capture('document');

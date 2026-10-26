@@ -22,9 +22,11 @@ the default".
 | `KIN_ASR_MAX_BYTES` | largest recording in bytes, header included (32,000 bytes per second + 44) | `5760044` (180 s) |
 | `KIN_ASR_TIMEOUT_MS` | how long the API waits for one transcript, 1 to 240000 | `120000` |
 
-A value outside its rule turns Dictate off and the API log says which setting is wrong
-(`KIN_ASR_URL 설정 오류 …`). The engine and model values are configured labels; they do not prove
-which binary or model actually runs (the engine CI job attests its own build only).
+A value outside its rule turns Dictate off. Only a malformed `KIN_ASR_URL` is named in the API log
+(`KIN_ASR_URL 설정 오류 …`; a name that resolves outside the internal ranges is logged when a request
+connects, below). The other keys have no log line of their own: when Dictate stays off with a well-formed
+URL, check each of them against the table above. The engine and model values are configured labels;
+they do not prove which binary or model actually runs (the engine CI job attests its own build only).
 
 **Applying a change.** The values are read when the container is created, so after editing `.env` run
 `docker compose up -d api proxy` and then `docker compose restart proxy`. The restart is needed even
@@ -72,7 +74,8 @@ the reader typed stays on screen and keeps being autosaved as the server draft.
 | Engine does not answer within `KIN_ASR_TIMEOUT_MS` | 음성 인식 시간이 초과되었습니다 — 녹음은 … | kept |
 | Another reader's transcription is running | 다른 음성 인식이 처리 중입니다 — 잠시 뒤 다시 시도하세요 — 녹음은 … | kept |
 | API or proxy unreachable (network error, 502/503/504 without a dictation code) | 음성 인식 서버에 연결하지 못했습니다 / 음성 인식 요청이 거절되었습니다 (HTTP 5xx) — 녹음은 … | kept; Retry waits while the page is offline |
-| No answer within the client's own deadline (`KIN_ASR_TIMEOUT_MS` + 5 s) | 음성 인식 응답이 없어 요청을 멈췄습니다 — 녹음은 … | kept |
+| Sign-in server (Keycloak) or session store briefly unavailable (503 `AUTH_IDP_UNAVAILABLE`, 500 `AUTH_STORAGE_FAILURE`, 409 `AUTH_SESSION_BUSY`); the login stays | the server's own message (for example 인증 서버에 연결하지 못해 …) — 녹음은 … | kept |
+| No answer within the client's own deadline (`KIN_ASR_TIMEOUT_MS` + 5 s), including an answer whose body stops arriving | 음성 인식 응답이 없어 요청을 멈췄습니다 — 녹음은 … | kept |
 | Configuration wrong or name resolves outside the internal ranges | 음성 인식기가 연결되지 않았습니다. — 판독문은 그대로입니다 | discarded (Close) |
 | Recording too long, invalid audio, report held by another reader, role/institution refusal, empty or overlong transcript | that refusal's own message — 판독문은 그대로입니다 | discarded (Close) |
 
