@@ -92,7 +92,7 @@ let ctx;
 before(async () => {
   const { privateKey, publicKey } = await jose.generateKeyPair('RS256');
   const jwk = { ...await jose.exportJWK(publicKey), kid: 'module-a-reports', alg: 'RS256', use: 'sig' };
-  const split = new Set();
+  const split = new Set(), sourceRows = new Map();
   // Synthetic external collaborators: the OIDC key set and Orthanc's QIDO study answer (one resource per UID, two for a
   // UID two patients share).
   const provider = http.createServer((req, res) => {
@@ -102,7 +102,7 @@ before(async () => {
     if (url.pathname === '/dicom-web/studies' && url.searchParams.get('StudyInstanceUID')) {
       const uid = url.searchParams.get('StudyInstanceUID');
       const row = patient => ({ '0020000D': { vr: 'UI', Value: [uid] }, '00100020': { vr: 'LO', Value: [patient] } });
-      return res.end(JSON.stringify(split.has(uid) ? [row('SYN-PID-1'), row('SYN-PID-2')] : [row('SYN-PID-1')]));
+      return res.end(JSON.stringify(sourceRows.get(uid) ?? (split.has(uid) ? [row('SYN-PID-1'), row('SYN-PID-2')] : [row('SYN-PID-1')])));
     }
     res.statusCode = 404; res.end('{}');
   });
@@ -132,7 +132,7 @@ before(async () => {
   app.setGlobalPrefix('api');
   await app.listen(0, '127.0.0.1');
   const origin = await app.getUrl();
-  ctx = { witness, runtime, app, provider, relay, split, origin, token };
+  ctx = { witness, runtime, app, provider, relay, split, sourceRows, origin, token };
 });
 after(async () => {
   if (!ctx) return;
@@ -265,7 +265,7 @@ test('A-HTTP-REPORT / A-HTTP-BODY / A-PG-COMMIT: every returned version is commi
     assertAttribution(entry.event, 'GET studies/:uid/report/versions');
     assert.deepEqual(entry.event.targets, [{ kind: 'report-version', studyId: { status: 'known', value: uid },
       recordId: { status: 'known', value: String(row.id) }, versionId: { status: 'known', value: String(row.version) },
-      sourcePatientId: { status: 'unresolved', reason: 'not-observed' }, sourceInstitution: { status: 'unresolved', reason: 'not-observed' },
+      sourcePatientId: { status: 'known', value: 'SYN-PID-1' }, sourceInstitution: { status: 'unresolved', reason: 'not-observed' },
       projectionSha256: sha(JSON.stringify(row)) }], 'the target is the exact returned row');
     assert.equal(entry.payload.includes(sentinel), false, 'the ledger keeps the projection identity, not the report text');
     const ended = recorded.filter(e => e.event.relatedEventId === row.accessRef);
@@ -306,7 +306,7 @@ test('A-HTTP-REPORT: version citations record the filtered projection of the sto
   assertAttribution(opened.event, 'GET studies/:uid/report/versions/:version/citations');
   assert.deepEqual(opened.event.targets, [{ kind: 'report-evidence', studyId: { status: 'known', value: uid },
     recordId: { status: 'known', value: String(v2.id) }, versionId: { status: 'known', value: '2' },
-    sourcePatientId: { status: 'unresolved', reason: 'not-observed' }, sourceInstitution: { status: 'unresolved', reason: 'not-observed' },
+    sourcePatientId: { status: 'known', value: 'SYN-PID-1' }, sourceInstitution: { status: 'unresolved', reason: 'not-observed' },
     projectionSha256: sha(JSON.stringify(answer.body)) }], 'the target is the stored version and the filtered answer');
   for (const value of [hidden, secret, finding, line]) assert.equal(opened.payload.includes(value), false, 'nothing hidden enters the record');
   assert.deepEqual(recorded.filter(e => e.event.relatedEventId === accessRef).map(e => e.event.action), ['transfer-ended']);
@@ -442,4 +442,32 @@ test('A-PG-COMMIT: a lost COMMIT reply resolves through the same operation; no n
     WHERE event_id = ${row.accessRef} AND cause = 'commit-unknown'`;
   assert.equal(unknown.n, 1, 'B2 kept the truthful unknown before resolving it');
   assert.deepEqual(recorded.filter(e => e.event.relatedEventId === row.accessRef).map(e => e.event.action), ['transfer-ended']);
+});
+
+// The same UID is read in new requests as its source changes; no older observation or local institution substitutes for it.
+test('A-HTTP-REPORT source identities: retain observed values, and only absent values stay unresolved', async () => {
+  const uid = await study();
+  await version(uid, 1);
+  const unknown = { status: 'unresolved', reason: 'not-observed' };
+  for (const [patient, sourceInstitution, noResource] of [
+    [' SYN-PID-observed ', 'SYN source hospital', false],
+    [null, 'SYN source only', false], ['SYN patient only', null, false],
+    ['  ', '', false], [null, null, true],
+  ]) {
+    const row = { '0020000D': { vr: 'UI', Value: [uid] } };
+    if (patient !== null) row['00100020'] = { vr: 'LO', Value: [patient] };
+    if (sourceInstitution !== null) row['00080080'] = { vr: 'LO', Value: [sourceInstitution] };
+    ctx.sourceRows.set(uid, noResource ? [] : [row]);
+    for (const suffix of ['/versions', '/versions/1/citations']) {
+      const answer = await get('/studies/' + uid + '/report' + suffix);
+      assert.equal(answer.status, 200);
+      const accessRef = Array.isArray(answer.body) ? answer.body[0].accessRef : answer.body.accessRef;
+      const recorded = await events(uid);
+      const prepared = recorded.find(entry => entry.event.eventId === accessRef);
+      assert.ok(prepared, 'the returned access reference identifies its committed source observation');
+      assert.deepEqual(prepared.event.targets[0].sourcePatientId, patient?.trim() ? { status: 'known', value: patient } : unknown);
+      assert.deepEqual(prepared.event.targets[0].sourceInstitution, sourceInstitution?.trim() ? { status: 'known', value: sourceInstitution } : unknown);
+      assert.equal(prepared.event.managingInstitution.value, institution);
+    }
+  }
 });

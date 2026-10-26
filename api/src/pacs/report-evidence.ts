@@ -321,7 +321,7 @@ export class PacsReportEvidence {
      * 발견). 이력의 조회 관문은 StudyState 행이다 — 행이 없으면 기관을 가를 수 없고, 가를 수 없으면 거절한다.
      */
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
-    this.studyAccess.assertUnsplitSource(c, uid);
+    const sourceIdentity = this.studyAccess.assertUnsplitSource(c, uid);
     // 본문을 가려놓고 이력에서 읽히면 가린 게 아니다. 같은 규칙을 여기에도 건다.
     if (!canReadPreliminary(prev, c))
       throw new ForbiddenException(
@@ -336,7 +336,7 @@ export class PacsReportEvidence {
         recommendation: true, reason: true, author: true, at: true } });
     // MODULE_A A2: 이 읽기가 고정한 행 전부가 열람 기록의 대상이다. 화면이 나중에 고르는 판만 기록하면 내보낸 다른 판의
     // 열람이 기록에서 빠진다. 응답은 기록이 COMMIT된 뒤 이 행 그대로 나간다(A1 응답 경계).
-    return reportVersionsRead(uid, prev.institutionId, rows);
+    return reportVersionsRead(uid, prev.institutionId, rows, sourceIdentity);
   }
 
   /**
@@ -482,7 +482,7 @@ export class PacsReportEvidence {
        */
       const prev = await this.access.gate(uid, c, tx);
       if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
-      this.studyAccess.assertUnsplitSource(c, uid);
+      const sourceIdentity = this.studyAccess.assertUnsplitSource(c, uid);
       if (!canReadPreliminary(prev, c))
         throw new ForbiddenException(
           `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
@@ -518,10 +518,10 @@ export class PacsReportEvidence {
             ? presenceState(lineBlockOccurrences(String((row as any)[entry.field] ?? ''), entry.insertedText), counts[index])
             : null };
       }) };
-      return { institution: prev.institutionId, stored: { id: row.id, version: want }, answer };
+      return { institution: prev.institutionId, sourceIdentity, stored: { id: row.id, version: want }, answer };
     }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
     // MODULE_A A2: 같은 스냅샷이 고정한 판과 걸러진 답을 그대로 기록 대상으로 쓴다. 다시 읽지 않는다 — 다시 읽으면 기록한
     // 판과 내보낸 판이 갈릴 수 있다. 빈 증언도 그 판을 읽은 사실이다.
-    return reportVersionCitationsRead(uid, read.institution, read.stored, read.answer);
+    return reportVersionCitationsRead(uid, read.institution, read.stored, read.answer, read.sourceIdentity);
   }
 }

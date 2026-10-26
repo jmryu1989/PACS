@@ -283,6 +283,7 @@ function studyAccessDouble() {
     assertUnsplitSource(c, uid) {
       sa.calls.push(['source:assert', uid]);
       if (sa.split.has(uid)) throw new ConflictException({ code: 'STUDY_IDENTITY_UNRESOLVED', message: 'synthetic split' });
+      return { sourcePatientId: null, sourceInstitution: null };
     },
   };
   return sa;

@@ -91,9 +91,10 @@ version and the filtered answer (an empty projection is still that version's
 read) and carries its `accessRef`. The routes' own refusals (400/403/404/409)
 record nothing; a refusal by an outer interceptor after preparation (the
 `StudyAccessInterceptor` 409) leaves the prepared records with `transfer-aborted`.
-The routes keep no source PatientID or source institution
-(`StudyAccessService.prepareSourceIdentity` keeps only the resource count), so
-both are `not-observed`. Cause is `user-view` and no work context is observed.
+The routes retain the raw source PatientID and InstitutionName observed by this
+request's `StudyAccessService.prepareSourceIdentity`. Missing or blank values
+remain `not-observed`; neither value is inferred from StudyState. Cause is
+`user-view` and no work context is observed.
 
 The real cells run the production `AppModule.withLedger` over HTTP on the B2 PG
 fixture with an independent witness: all targets committed before the first

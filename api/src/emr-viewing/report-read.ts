@@ -2,6 +2,7 @@ import { ServiceUnavailableException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { LocalReadResponse, LocalReadSource } from './local-read';
 import { LOCAL_READ_UNAVAILABLE } from './response-lifecycle';
+import type { SourceIdentity } from '../study-access.service';
 
 /**
  * Report history reads (A-023 versions, A-025 version citations) as A1 local reads.
@@ -10,8 +11,8 @@ import { LOCAL_READ_UNAVAILABLE } from './response-lifecycle';
  * recorded targets and the body are the same read. Each returned row or answer carries its own `accessRef`, the
  * server-generated event ID of its provide-prepared record, so a later display report can name that exact record.
  *
- * These routes observe the study's managing institution (StudyState) and the stored rows. They do not retain the
- * source PatientID or source institution, so both stay `not-observed`; no formal patient link is implied.
+ * These routes retain the request's source PatientID/institution observation beside the managing institution and
+ * stored rows. Missing source values stay `not-observed`; no formal patient link is implied.
  */
 const NOT_OBSERVED = Object.freeze({ status: 'unresolved', reason: 'not-observed' } as const);
 const known = (value: string) => Object.freeze({ status: 'known', value } as const);
@@ -24,21 +25,22 @@ function institutionOf(managingInstitution: string | null | undefined): string {
 }
 
 function source(kind: 'report-version' | 'report-evidence', eventId: string, uid: string, managingInstitution: string,
-  stored: { id: number; version: number }, path: readonly (string | number)[]): LocalReadSource {
+  stored: { id: number; version: number }, path: readonly (string | number)[], identity: SourceIdentity): LocalReadSource {
   return { eventId, managingInstitution, path, cause: 'user-view',
     target: { kind, studyId: known(uid), recordId: known(String(stored.id)), versionId: known(String(stored.version)),
-      sourcePatientId: NOT_OBSERVED, sourceInstitution: NOT_OBSERVED } };
+      sourcePatientId: identity.sourcePatientId === null ? NOT_OBSERVED : known(identity.sourcePatientId),
+      sourceInstitution: identity.sourceInstitution === null ? NOT_OBSERVED : known(identity.sourceInstitution) } };
 }
 
 /** Every stored version the history answer returns is a target, not only the ones a screen later picks. */
 export function reportVersionsRead<T extends { id: number; uid: string; version: number }>(uid: string,
-  managingInstitution: string | null | undefined, rows: readonly T[]): LocalReadResponse {
+  managingInstitution: string | null | undefined, rows: readonly T[], identity: SourceIdentity): LocalReadResponse {
   const institution = rows.length ? institutionOf(managingInstitution) : '';
   const body: (T & { accessRef: string })[] = [], sources: LocalReadSource[] = [];
   rows.forEach((row, index) => {
     const eventId = randomUUID();
     body.push({ ...row, accessRef: eventId });
-    sources.push(source('report-version', eventId, uid, institution, row, [index]));
+    sources.push(source('report-version', eventId, uid, institution, row, [index], identity));
   });
   // An empty history has no stored version to record; it is not a synthetic target.
   return new LocalReadResponse(body, sources);
@@ -49,8 +51,8 @@ export function reportVersionsRead<T extends { id: number; uid: string; version:
  * version is still that version's read; reduced entries stay reduced in the record's projection as in the answer.
  */
 export function reportVersionCitationsRead<T extends object>(uid: string, managingInstitution: string | null | undefined,
-  stored: { id: number; version: number }, answer: T): LocalReadResponse {
+  stored: { id: number; version: number }, answer: T, identity: SourceIdentity): LocalReadResponse {
   const eventId = randomUUID();
   return new LocalReadResponse({ ...answer, accessRef: eventId },
-    [source('report-evidence', eventId, uid, institutionOf(managingInstitution), stored, [])]);
+    [source('report-evidence', eventId, uid, institutionOf(managingInstitution), stored, [], identity)]);
 }

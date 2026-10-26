@@ -119,7 +119,7 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
   };
   const studyAccess = { prepare: async () => calls.push({ call: 'prepare' }),
     // WORKLIST-SPLIT-UID: the request's source observation; this store answers one resource per UID.
-    prepareSourceIdentity: async () => {}, assertUnsplitSource: () => {},
+    prepareSourceIdentity: async () => {}, assertUnsplitSource: () => ({ sourcePatientId: null, sourceInstitution: null }),
     // The third argument is the transaction client. Recording it is what tells a re-check that
     // runs inside the snapshot from one that ran outside it - the two were indistinguishable.
     // `refuseTxRequire` refuses ONLY the tx-bound call, which is the revocation the new read
@@ -651,13 +651,15 @@ test('the historical read answers one preserved row, and a version with no row i
   const mine = { ...carried('a', '2026-09-02T00:00:00.000Z', 'v2-author@synthetic'), findingId: FINDING, insertedText: LINE };
   const head = { ...carried('z', '2026-09-03T00:00:00.000Z', 'v4-author@synthetic'), findingId: FINDING, insertedText: LINE };
   const stored = { ...preserved([mine]), id: 202, uid: UID, version: 2, action: 'approve',
-    author: 'stored-author@synthetic', at: new Date('2026-09-02T00:00:00.000Z'), reason: 'SYN stored reason' };
+    author: 'stored-author@synthetic', at: new Date('2026-09-04T00:00:00.000Z'), reason: 'SYN stored reason' };
   const f = fixture({ versions: new Map([[2, stored], [4, preserved([head])]]) });
   const answer = await historyRead(f, '2');
-  assert.equal(answer.version, 2, 'the answer identifies the requested stored version');
+  assert.equal(answer.version, 2, 'the answer names the requested version');
   // The public projection is the contract; internal query columns may also support the access record.
   for (const key of ['id', 'action', 'author', 'at', 'reason', 'findings', 'conclusion', 'recommendation', 'citations'])
     assert.equal(Object.hasOwn(answer, key), false, key + ' must not be answered by the citations route');
+  assert.deepEqual(Object.keys(answer).sort(), ['accessRef', 'actor', 'entries', 'version']);
+  for (const value of [stored.author, stored.reason, stored.at.toISOString()]) assert.equal(JSON.stringify(answer).includes(value), false);
   assert.equal(answer.entries.length, 1);
   assert.equal(answer.entries[0].insertedBy, 'v2-author@synthetic', 'the head row is not the answer');
 
