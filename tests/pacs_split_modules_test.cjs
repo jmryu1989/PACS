@@ -283,6 +283,7 @@ function studyAccessDouble() {
     assertUnsplitSource(c, uid) {
       sa.calls.push(['source:assert', uid]);
       if (sa.split.has(uid)) throw new ConflictException({ code: 'STUDY_IDENTITY_UNRESOLVED', message: 'synthetic split' });
+      return { sourcePatientId: null, sourceInstitution: null };
     },
   };
   return sa;
@@ -709,7 +710,7 @@ test('SPLIT-14 a citation is shown only while its finding is readable; a databas
   assert.equal(read.head[0].insertedText, 'line one');
   assert.deepEqual(read.head[1], { cid: 'c-2', field: 'findings', insertedAt: '2026-10-01T00:00:00.000Z', insertedBy: RAD_A.actor, state: 'source-unavailable' });
   w.findings.readable.clear();
-  const past = await w.evidence.reportVersionCitations(s.uid, '1', RAD_A);
+  const past = JSON.parse((await w.evidence.reportVersionCitations(s.uid, '1', RAD_A)).json);
   assert.ok(past.entries.every(e => e.state === 'source-unavailable' && !('presence' in e)));
 
   const check = name => Object.assign(new Error('violates check constraint'), { code: 'P2010', meta: { constraint: name } });
@@ -884,7 +885,7 @@ test('SPLIT-22 the facade starts its institutions concern and each public call a
   assert.deepEqual(await facade.hold(s.uid, RAD_A), { holder: RAD_A.actor, mine: true, conflict: false });
   const saved = await facade.commitReport(s.uid, commitBody(RAD_A, 'save', s.draftEpoch, 0, 0, { findings: 'via facade' }), RAD_A, null);
   assert.deepEqual([saved.state.rs, saved.state.holder], ['T', null], 'a commit releases the hold');
-  assert.deepEqual((await facade.versions(s.uid, RAD_A)).map(v => [v.version, v.action, v.findings]), [[1, 'save', 'via facade']]);
+  assert.deepEqual(JSON.parse((await facade.versions(s.uid, RAD_A)).json).map(v => [v.version, v.action, v.findings]), [[1, 'save', 'via facade']]);
   const draft = await facade.putReport(s.uid, draftBody(RAD_A, s.draftEpoch, 1, { findings: 'next', baseVersion: 1 }), RAD_A, null);
   assert.equal(draft.revision, `${s.draftEpoch}:2`);
   assert.equal((await facade.readDraft(s.uid, RAD_A)).snapshot.findings, 'next');
