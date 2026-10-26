@@ -388,7 +388,7 @@ async function imageDelivery(port,db,actor,study,servers){
   let finish;const settled=new Promise((resolve,reject)=>finish={resolve,reject});
   const server=createServer(async(req,res)=>{
     try{await sendOnlineImage({records:port,evidence:new PgImageEvidenceStore(db),source:new OrthancService().imageSource(),stagingDirectory:staging,authorize:async()=>{}},
-      {manifest,prepared,event,response:res,signal:new AbortController().signal});finish.resolve();}
+      {manifest,open:async()=>({prepared,event}),response:res,signal:new AbortController().signal});finish.resolve();}
     catch(error){res.statusCode=500;res.end();finish.reject(error);}
   });servers.push(server);
   const response=await fetch(await listen(server));assert.equal(response.status,200);
