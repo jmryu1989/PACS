@@ -2325,17 +2325,27 @@ class RelatedModePage(unittest.TestCase):
     ARRIVAL_VIEWPORTS = ((1400, 900), (1366, 768), (1920, 1080), (1080, 1920))
     CARET_VISIBLE = r"""(id) => {
       const ta = document.getElementById(id), s = getComputedStyle(ta), mirror = document.createElement('div');
-      for (const name of ['boxSizing', 'paddingTop', 'paddingLeft', 'paddingRight', 'paddingBottom', 'borderTopWidth',
-        'borderLeftWidth', 'borderRightWidth', 'fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'tabSize'])
+      for (const name of ['padding', 'borderWidth', 'font', 'letterSpacing', 'wordSpacing',
+        'textIndent', 'textTransform', 'tabSize', 'direction', 'wordBreak', 'overflowWrap'])
         mirror.style[name] = s[name];
-      Object.assign(mirror.style, {position: 'absolute', visibility: 'hidden', whiteSpace: 'pre-wrap',
-        overflowWrap: 'break-word', width: ta.getBoundingClientRect().width + 'px', left: '0', top: '0'});
-      mirror.textContent = ta.value.slice(0, ta.selectionDirection === 'backward' ? ta.selectionStart : ta.selectionEnd);
-      const end = document.createElement('span'); end.textContent = '\u200b'; mirror.append(end); document.body.append(mirror);
-      const r = ta.getBoundingClientRect(), line = parseFloat(s.lineHeight) || parseFloat(s.fontSize) * 1.2;
-      const x = r.left + end.offsetLeft + 1 - ta.scrollLeft, y = r.top + end.offsetTop - ta.scrollTop + line / 2;
+      Object.assign(mirror.style, {position: 'fixed', visibility: 'hidden', pointerEvents: 'none',
+        borderStyle: 'solid', boxSizing: 'border-box', whiteSpace: ta.wrap === 'off' ? 'pre' : 'pre-wrap',
+        width: (ta.clientWidth + parseFloat(s.borderLeftWidth) + parseFloat(s.borderRightWidth)) + 'px',
+        left: '0', top: '0'});
+      const offset = ta.selectionDirection === 'backward' ? ta.selectionStart : ta.selectionEnd;
+      mirror.textContent = ta.value.slice(0, offset);
+      const caret = document.createElement('span'); caret.textContent = ta.value.slice(offset) || '\u200b';
+      mirror.append(caret); document.body.append(mirror);
+      const range = document.createRange(); range.setStart(mirror.firstChild, offset); range.collapse(true);
+      // Native caret affinity at a soft wrap depends on navigation: protect both rendered readings.
+      const rects = [range.getBoundingClientRect(), caret.getClientRects()[0]].filter(r => r.height);
+      const field = ta.getBoundingClientRect(), origin = mirror.getBoundingClientRect();
+      const points = rects.map(r => ({x: field.left + r.left - origin.left - ta.scrollLeft,
+        y: field.top + r.top - origin.top - ta.scrollTop + r.height / 2}));
       mirror.remove();
-      return document.elementFromPoint(x, y) === ta;
+      const overlay = document.getElementById('cvr-inbox-p');
+      const hits = points.map(p => document.elementFromPoint(p.x, p.y));
+      return hits.some(hit => hit === ta) && hits.every(hit => !hit || !overlay.contains(hit));
     }"""
 
     def install_arrivals(self, records=()):
