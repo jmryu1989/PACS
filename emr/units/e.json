@@ -31,6 +31,7 @@
     "unverified MG representation and source-reference subtree preservation",
     "prepared response manifest retains actual request, Range, HTTP status/headers, multipart envelope and selected byte ranges before first byte",
     "production PostgreSQL representation/transport/copy detail adapter, using B2 transaction",
+    "each exact study-manifest body is kept once (emr_image.source_manifest) and every preparation names it; earlier preparations keep their own copy (R244-02)",
     "GET/HEAD Connect API route with explicit unavailable Module A seam",
     "migration, production-image and restore consumers together",
     "E_ROUTE: nginx sends the viewer's WADO-RS frame requests (GET/HEAD) to the E route with the normalized path as target, unbuffered on a keepalive upstream; metadata, rendered, /instances and Gateway STOW routes unchanged",
@@ -41,7 +42,8 @@
     "HEAD images/dicom-web"
   ],
   "migrations": [
-    "20261025000000_emr_e_online"
+    "20261025000000_emr_e_online",
+    "20261026210000_emr_e_source_manifest"
   ],
   "tests": {
     "pure": [

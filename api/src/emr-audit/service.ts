@@ -158,8 +158,10 @@ export class EmrAuditService {
       const ids = [...new Set([...page.changes.rows, ...page.views.rows].flatMap(r => [r.eventId, ...(r.relatedEventId ? [r.relatedEventId] : [])]))];
       // E's primary/index keys are UUIDs; other B1 event IDs have no E facts.
       const imageIds = ids.filter(id => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id));
-      const prepared = imageIds.length ? await tx.$queryRaw<any[]>`SELECT event_id::text,source_manifest,response_manifest,staging_copies
-        FROM emr_image.preparation WHERE event_id=ANY(${imageIds}::uuid[])` : [];
+      // E keeps one copy of each study-manifest body and a preparation names it; earlier rows hold their own copy.
+      const prepared = imageIds.length ? await tx.$queryRaw<any[]>`SELECT p.event_id::text,COALESCE(p.source_manifest,m.body) AS source_manifest,
+        p.response_manifest,p.staging_copies FROM emr_image.preparation p
+        LEFT JOIN emr_image.source_manifest m ON m.body_sha256=p.source_manifest_body WHERE p.event_id=ANY(${imageIds}::uuid[])` : [];
       const observations = imageIds.length ? await tx.$queryRaw<any[]>`SELECT event_id::text,sequence::text,kind,body
         FROM emr_image.observation WHERE event_id=ANY(${imageIds}::uuid[]) ORDER BY sequence` : [];
       const joined = new Map<string, { eventId: string; preparation: any; observations: any[] }>();

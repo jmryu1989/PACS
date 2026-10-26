@@ -40,7 +40,7 @@ def fixture():
     product = dict(migrations=MIGRATIONS, study_uid=UID, catalog=catalog,
                    rows=transfer.expected_rows(UID), sequences=transfer.expected_sequences(),
                    emr=dict(catalog=emr_catalog(), rows=transfer.expected_emr_rows(),
-                       image=dict(catalog=dict(tables=['observation', 'preparation']), rows=transfer.expected_image_rows(),
+                       image=dict(catalog=dict(tables=['observation', 'preparation', 'source_manifest']), rows=transfer.expected_image_rows(),
                            sequence=dict(last_value=2, is_called=True)),
                        audit=dict(catalog=dict(tables=sorted(transfer.expected_audit_rows())), rows=transfer.expected_audit_rows(),
                            sequences={table: dict(last_value=1, is_called=True) for table in ('roster_event', 'issuance_event', 'request_event')})))
@@ -76,6 +76,12 @@ class Pure(unittest.TestCase):
         actual['emr']['image']['rows']['observation'].pop()
         with patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
             transfer.verify_product('owned', 'kin', expected)
+        # A preparation written since 20261026210000 names the one kept study-manifest body: losing either is a mismatch.
+        for lose in (lambda rows: rows['source_manifest'].pop(), lambda rows: rows['preparation'][1].update(source_manifest_body=None)):
+            actual = copy.deepcopy(expected)
+            lose(actual['emr']['image']['rows'])
+            with patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
+                transfer.verify_product('owned', 'kin', expected)
     def test_catalog_column_budget_supports_current_schema_and_stays_bounded(self):
         catalog=fixture()[0]['product']['catalog']
         # S9-U4b + W5-API: the product has 542 scalar columns in schema.prisma with ImportOperation (15) and

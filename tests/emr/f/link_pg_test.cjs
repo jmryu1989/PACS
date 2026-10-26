@@ -196,6 +196,7 @@ if(process.argv.includes('--serve')){
     assert.ok(page.changes.rows.some(r=>r.action==='cancel'&&r.targets.some(t=>t.versionId.value===second.receipt.versionId)));
     const imageFacts=page.images.find(i=>i.eventId===image.eventId);
     assert.equal(imageFacts.preparation.response_manifest.studyManifestSha256,image.sha256);
+    assert.equal(imageFacts.preparation.source_manifest.sha256,image.sha256,'the study manifest the delivery was prepared from');
     assert.ok(imageFacts.observations.some(o=>o.kind==='transport'));
     assert.ok(imageFacts.observations.some(o=>o.kind==='copies'));
     assert.ok(!page.views.rows.some(r=>r.action==='client-shown'),'transport is not a display observation');
