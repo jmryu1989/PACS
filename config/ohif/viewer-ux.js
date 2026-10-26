@@ -1,8 +1,8 @@
 // The stock mode owns the grid and Cornerstone elements. This extension owns
 // only its chrome and removes it when that mode or document ends.
 function kinCreateViewerUX() {
-  let services, dispose, generation = 0, ready;
-  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shell.js'];
+  let services, dispose, toolbar, shortcuts, generation = 0, ready;
+  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-ux-toolbar.js', 'viewer-ux-shell.js'];
   // The theme fixes the chrome rows' heights. It is loaded once per document,
   // before the first mount, and stays: a stylesheet attached per mount and
   // dropped on mode exit left a window on re-entry (saved Job, patient tab) in
@@ -32,20 +32,36 @@ function kinCreateViewerUX() {
   function stop() { generation++; dispose?.(); dispose = null; }
   return {
     id: 'kin.viewer-ux',
-    preRegistration({ servicesManager }) { services = servicesManager.services; },
+    async preRegistration({ servicesManager }) {
+      services = servicesManager.services;
+      if (window.top !== window) return;
+      try { await load(); }
+      catch (error) {
+        // Optional chrome cannot prevent the native viewer from opening images.
+        services.uiNotificationService?.show({ title: 'Viewer', message: error.message, type: 'error' });
+        return;
+      }
+      // Own letter keys before the first mode enters, including route teardown.
+      shortcuts = window.KinViewerUXShortcuts.mount({
+        getBindings: () => toolbar?.bindings() || {}, invoke: id => toolbar?.invoke(id),
+        allowed: () => !kinViewerSession.ended(),
+      });
+      kinViewerOnEnd(() => { shortcuts?.dispose(); window.KinViewerUXToolbar.clear(); });
+    },
     onModeEnter() {
       stop();
-      if (window.top !== window) return;
+      if (window.top !== window || !shortcuts) return;
       const ticket = generation;
-      load().then(() => {
-        if (ticket !== generation || kinViewerSession.ended()) return;
-        const shell = window.KinViewerUXShell.mount({ services });
+      if (kinViewerSession.ended()) return;
+      try {
+        const shell = window.KinViewerUXShell.mount({ services, session: kinViewerSession });
+        toolbar = window.KinViewerUXToolbar.mount({ services, session: kinViewerSession });
         const channel = kinViewerOnEnd(() => { window.KinViewerPatientTabs.end(); stop(); });
-        dispose = () => { channel?.close(); shell.dispose(); };
-      }).catch(error => {
+        dispose = () => { channel?.close(); toolbar?.dispose(); toolbar = null; shell.dispose(); };
+      } catch (error) {
         if (ticket !== generation) return;
         services.uiNotificationService?.show({ title: 'Viewer', message: error.message, type: 'error' });
-      });
+      }
     },
     onModeExit: stop,
   };

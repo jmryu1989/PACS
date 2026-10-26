@@ -1,5 +1,5 @@
 window.KinViewerUXShell = (() => {
-  function mount({ services }) {
+  function mount({ services, session }) {
     // The theme stylesheet is loaded once per document by the extension before
     // this mount; the body class scopes its viewer-wide rules to the mounted shell.
     document.body.classList.add('kin-viewer-ux');
@@ -28,11 +28,11 @@ window.KinViewerUXShell = (() => {
         if (!admits(value) || !tabs.guard()) return false;
         const sets = displaySetInstanceUIDs.map(id => services.displaySetService.getDisplaySetByUID(id));
         if (sets.some(set => !set)) return false;
-        const response = await fetch('/api/studies', { credentials: 'same-origin' });
-        if (!response.ok) return false;
-        const data = await response.json();
-        if (!admits(value) || !tabs.guard(true) || sets.some(set =>
-          data.studies?.find(study => study.uid === set.StudyInstanceUID)?.sourcePatientKey !== value.patientKey)) return false;
+        const url = new URL('/ohif/viewer', location.origin);
+        url.searchParams.set('StudyInstanceUIDs', [...new Set(sets.map(set => set.StudyInstanceUID))].join(','));
+        let patient;
+        try { patient = await tabs.resolve(url.href); } catch (_) { return false; }
+        if (!admits(value) || !tabs.guard(true) || patient.key !== value.patientKey) return false;
         services.viewportGridService.setDisplaySetsForViewport({ viewportId: value.viewportId, displaySetInstanceUIDs });
         return true;
       },
@@ -66,7 +66,7 @@ window.KinViewerUXShell = (() => {
       open(viewportId, anchor) { const value = context(viewportId); if (value) actions?.listPriors({ ...value, anchor, openImages: actions.openImages, openReport: actions.openReport }); },
     } });
     const series = window.KinViewerSeriesStrip.mount({ services });
-    tabs.mount({ services, refreshChrome() { info.refresh(); series.refresh(); } });
+    tabs.mount({ services, session, refreshChrome() { info.refresh(); series.refresh(); } });
     const subscriptions = [];
     let frame, ended = false;
     // The shell never resizes the rendering engine. The stock viewport observer

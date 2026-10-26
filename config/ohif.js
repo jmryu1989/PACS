@@ -209,20 +209,7 @@ function KinViewerBrand({ React }) {
     const labelOf = node => node.nodeType === Node.ELEMENT_NODE
       ? (node.localName === 'svg' ? '' : [...node.childNodes].map(labelOf).join(''))
       : node.nodeType === 3 ? node.data : '';
-    // D1821 replaces the browser-local shortcut editor with account settings.
-    // Route the existing settings entry to its current owner without moving React nodes.
-    const accountSettings = event => {
-      const scope = menuScope(), menu = event.target.closest?.('.absolute.right-0');
-      if (!scope || !menu || !scope.contains(menu)) return;
-      let row = event.target;
-      while (row && row !== menu) {
-        if (SETTINGS_TITLES.has(labelOf(row).trim()) && window.kinViewerUXOpenSettings?.()) {
-          event.preventDefault(); event.stopImmediatePropagation(); return;
-        }
-        row = row.parentElement;
-      }
-    };
-    document.addEventListener('click', accountSettings, true);
+    // The native preferences entry keeps non-letter hotkeys and language reachable.
     // 드롭다운은 한 목록에서 같은 태그의 행을 나란히 만든다. 클래스는 마지막 행만 다를 수 있어 비교하지 않는다.
     const hideAboutRows = scope => {
       scope.querySelectorAll('*').forEach(row => {
@@ -284,7 +271,6 @@ function KinViewerBrand({ React }) {
     return () => {
       document.title = KIN_VIEWER_DEFAULT_TITLE;
       observer.disconnect();
-      document.removeEventListener('click', accountSettings, true);
       if (sessionChannel) {
         sessionChannel.close();
       }
@@ -1288,7 +1274,9 @@ function kinCreateViewerHistory() {
       return exporting && SCREEN_EXPORT.includes(name) || ACTIVATING.includes(name) && !VIEW_TOOLS.has(command?.commandOptions?.toolName ?? button.id);
     });
     const TOOLBAR = ['getButtons', 'removeButton', 'addButtons', 'clearButtonSection', 'createButtonSection'];
-    const trimmed = new Set(), originals = new Map(), sectionOriginals = new Map(), replacements = new WeakSet(); let trimming = false;
+    // OHIF refreshToolbarState clones definitions with object spread. Ownership
+    // must survive that refresh so a writer gets the full tool group back.
+    const trimmed = new Set(), originals = new Map(), sectionOriginals = new Map(), replacement = Symbol('kin-read-only-toolbar'); let trimming = false;
     // S5-UI5 fix1. Capture를 빼는 때: clinician-only, 그리고 계정이 아직 확인되지 않은 동안(안전한 기본 — writer 답이 오면 제자리로
     // 돌아온다). writer 문서의 로그인이 끝난 뒤(거절·로그아웃·다른 계정)에는 빼지 않는다. 이미 뺀 것은 writer 답 전까지 그대로라서
     // clinician-only·미확인에서 끝난 문서는 계속 없다. 끝난 문서에 다시 들어온 마운트는 역할을 알 수 없어 안전한 기본을 따른다.
@@ -1299,14 +1287,14 @@ function kinCreateViewerHistory() {
       if (trimming || TOOLBAR.some(name => typeof bar?.[name] !== 'function')) return;
       const replaced = [], exporting = exportClosed();
       for (const [id, button] of Object.entries(bar.getButtons() || {})) {
-        if (replacements.has(button)) continue;
+        if (button[replacement]) continue;
         const props = button?.props || {}, items = Array.isArray(props.items) ? props.items : null;
         if (!items) { if (authoring({ id, commands: props.commands }, exporting)) { trimmed.add(id); originals.set(id, button); } continue; }
         const kept = items.filter(item => !authoring(item, exporting));
         if (!kept.length) { trimmed.add(id); originals.set(id, button); continue; }
         if (kept.length < items.length || props.primary && authoring(props.primary, exporting)) {
-          const replacement = { ...button, props: { ...props, items: kept, primary: props.primary && !authoring(props.primary, exporting) ? props.primary : kept[0] } };
-          originals.set(id, button); replacements.add(replacement); replaced.push(replacement);
+          const restricted = { ...button, [replacement]: true, props: { ...props, items: kept, primary: props.primary && !authoring(props.primary, exporting) ? props.primary : kept[0] } };
+          originals.set(id, button); replaced.push(restricted);
         }
       }
       const buttons = bar.getButtons() || {}, gone = [...trimmed].filter(id => buttons[id]);
@@ -1335,7 +1323,7 @@ function kinCreateViewerHistory() {
         const listed = new Set(sections.flatMap(([, record]) => record.original));
         const buttons = bar.getButtons() || {}, back = [];
         for (const [id, original] of originals) {
-          if (buttons[id] ? !replacements.has(buttons[id]) : !listed.has(id)) continue;
+          if (buttons[id] ? !buttons[id][replacement] : !listed.has(id)) continue;
           if (buttons[id]) bar.removeButton(id);
           back.push(original);
         }
@@ -2315,6 +2303,7 @@ const kinViewerSession = (() => {
   });
   return {
     state,
+    owner: () => owner === null ? null : JSON.parse(owner),
     ended: () => ended,
     readOnly: () => state() === 'read-only',
     writer: () => state() === 'writer',
@@ -3379,9 +3368,6 @@ function kinCreateViewerTechNote() {
         typeof window.kinRenderVolumeScout==='function'?Promise.resolve():load('viewer-volume-scout.js'),
         typeof window.kinCreateVolumeBatch==='function'?Promise.resolve():load('viewer-volume-batch.js')]))
       .then(()=>typeof window.kinViewerTechNote==='function'?undefined:load('viewer-tech-note.js'))
-      .then(()=>standalone&&!window.KinViewerUXShortcuts?load('viewer-ux-shortcuts.js'):undefined)
-      .then(()=>standalone&&!window.KinViewerUXToolbar?load('viewer-ux-toolbar.js'):undefined)
-      .then(()=>{if(standalone)window.kinCreateViewerToolbarPreferences=window.KinViewerUXToolbar.mount;})
       .then(()=>window.kinViewerTechNote(servicesManager.services,kinViewerSession.writeModule)).catch(e=>{ready=null;throw e;}));
     window.kinViewerNoteConnectionState=()=>state;
     window.kinViewerNoteReconnect=()=>{if(active&&state==='failed')connect();};
@@ -4204,8 +4190,8 @@ function kinCreateStudyPrefetch() {
 // The stock mode owns the grid and Cornerstone elements. This extension owns
 // only its chrome and removes it when that mode or document ends.
 function kinCreateViewerUX() {
-  let services, dispose, generation = 0, ready;
-  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shell.js'];
+  let services, dispose, toolbar, shortcuts, generation = 0, ready;
+  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-ux-toolbar.js', 'viewer-ux-shell.js'];
   // The theme fixes the chrome rows' heights. It is loaded once per document,
   // before the first mount, and stays: a stylesheet attached per mount and
   // dropped on mode exit left a window on re-entry (saved Job, patient tab) in
@@ -4235,20 +4221,36 @@ function kinCreateViewerUX() {
   function stop() { generation++; dispose?.(); dispose = null; }
   return {
     id: 'kin.viewer-ux',
-    preRegistration({ servicesManager }) { services = servicesManager.services; },
+    async preRegistration({ servicesManager }) {
+      services = servicesManager.services;
+      if (window.top !== window) return;
+      try { await load(); }
+      catch (error) {
+        // Optional chrome cannot prevent the native viewer from opening images.
+        services.uiNotificationService?.show({ title: 'Viewer', message: error.message, type: 'error' });
+        return;
+      }
+      // Own letter keys before the first mode enters, including route teardown.
+      shortcuts = window.KinViewerUXShortcuts.mount({
+        getBindings: () => toolbar?.bindings() || {}, invoke: id => toolbar?.invoke(id),
+        allowed: () => !kinViewerSession.ended(),
+      });
+      kinViewerOnEnd(() => { shortcuts?.dispose(); window.KinViewerUXToolbar.clear(); });
+    },
     onModeEnter() {
       stop();
-      if (window.top !== window) return;
+      if (window.top !== window || !shortcuts) return;
       const ticket = generation;
-      load().then(() => {
-        if (ticket !== generation || kinViewerSession.ended()) return;
-        const shell = window.KinViewerUXShell.mount({ services });
+      if (kinViewerSession.ended()) return;
+      try {
+        const shell = window.KinViewerUXShell.mount({ services, session: kinViewerSession });
+        toolbar = window.KinViewerUXToolbar.mount({ services, session: kinViewerSession });
         const channel = kinViewerOnEnd(() => { window.KinViewerPatientTabs.end(); stop(); });
-        dispose = () => { channel?.close(); shell.dispose(); };
-      }).catch(error => {
+        dispose = () => { channel?.close(); toolbar?.dispose(); toolbar = null; shell.dispose(); };
+      } catch (error) {
         if (ticket !== generation) return;
         services.uiNotificationService?.show({ title: 'Viewer', message: error.message, type: 'error' });
-      });
+      }
     },
     onModeExit: stop,
   };

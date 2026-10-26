@@ -26,7 +26,7 @@ window.KinViewerSeriesStrip = (() => {
       if (ended || current.set?.StudyInstanceUID !== expectedStudy) return;
       // Reuse the same busy/unsaved boundaries as HP and saved-work restore.
       const states = [window.kinViewerHistoryWorkspaceState?.(), window.kinViewerJobWorkspaceState?.()];
-      if (states.some(state => !state || state.dirty || state.busy) || window.kinViewerHistoryHasUnsaved?.() || window.kinMprMarks?.dirty?.()) {
+      if (states.some(state => state?.dirty || state?.busy) || window.kinViewerHistoryHasUnsaved?.() || window.kinMprMarks?.dirty?.()) {
         services.uiNotificationService?.show({ title: 'Series', message: '미저장 작업을 저장하거나 편집을 마친 뒤 시리즈를 여세요.', type: 'info' }); return;
       }
       const matches = sets.getActiveDisplaySets().filter(set => set.StudyInstanceUID === expectedStudy && set.SeriesInstanceUID === series);

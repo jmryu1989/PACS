@@ -2,34 +2,30 @@ window.KinViewerUXToolbar = (() => {
   const frequent = ['WindowLevel', 'Pan', 'Zoom', 'StackScroll', 'Length', 'Angle', 'EllipticalROI'];
   const symbols = { WindowLevel: '◐', Pan: '✥', Zoom: '⌕', StackScroll: '↕', Length: '↔',
     Angle: '∠', EllipticalROI: '◯', RectangleROI: '□', ArrowAnnotate: '↗', invert: '◑', Cine: '▷', Crosshairs: '⊕' };
-  function mount({ services, host: settingsHost, owner, live }) {
+  let cached = null;
+  function mount({ services, session }) {
+    const owner = () => session.owner();
     const service = services.toolbarService;
     const original = service.getButtonSection('primary').map(button => button.id);
     const catalog = new Map(), removed = new Set();
-    for (const id of original) {
-      const definition = service.getButtons()[id], props = definition?.props || {};
-      const items = props.items ? [props.primary, ...props.items].filter(Boolean) : [{ id, ...props }];
-      // Layout and other custom renderers stay in the native section.
-      if (!['ohif.radioGroup', 'ohif.splitButton'].includes(definition?.uiType) || !items.length || items.some(item => !item.commands)) continue;
-      removed.add(id);
-      for (const item of items) if (item.id && !catalog.has(item.id)) catalog.set(item.id, item);
-    }
-    if (!catalog.size) return null;
     let ended = false, loaded = false, saving = false, preferences, record, dragged, opener, loadSequence = 0;
-    const abort = new AbortController(), initialOwner = JSON.stringify(owner());
-    const active = () => !ended && live() && JSON.stringify(owner()) === initialOwner;
+    let initialOwner = JSON.stringify(owner()), syncing = false, queued = false;
+    const abort = new AbortController();
+    const active = () => !ended && !session.ended() && (initialOwner === 'null' || JSON.stringify(owner()) === initialOwner);
     const element = (tag, text, parent) => { const node = document.createElement(tag); if (text) node.textContent = text; parent?.append(node); return node; };
     const button = (text, parent, click) => { const node = element('button', text, parent); node.type = 'button'; node.onclick = click; return node; };
-    const defaults = () => ({ version: 1, bar: frequent.filter(id => catalog.has(id)),
-      shortcuts: Object.fromEntries([...catalog.keys()].map(id => [id, window.KinViewerUXShortcuts.defaults[id] || null])) });
-    preferences = defaults();
+    const defaults = () => ({ version: 1, bar: [...frequent],
+      shortcuts: { ...Object.fromEntries([...catalog.keys()].map(id => [id, null])), ...window.KinViewerUXShortcuts.defaults } });
+    record = cached && JSON.stringify(cached.owner) === initialOwner ? cached : null;
+    loaded = !!record;
+    preferences = record?.viewerSettings || defaults();
     const toolbar = element('section'); toolbar.className = 'kin-ux-toolbar'; toolbar.dataset.kinUxOwned = '';
     toolbar.setAttribute('aria-label', 'Image Tools');
     const bar = element('div', '', toolbar); bar.className = 'kin-ux-tools-bar'; bar.setAttribute('role', 'toolbar'); bar.setAttribute('aria-label', 'Frequent Tools');
     const more = element('details', '', toolbar); more.className = 'kin-ux-more';
     const summary = element('summary', 'More', more); summary.title = '도구를 도구 모음과 More 사이로 끌어 옮길 수 있습니다.';
     const menu = element('div', '', more); menu.setAttribute('role', 'group'); menu.setAttribute('aria-label', 'More Tools');
-    const settings = element('section', '', settingsHost); settings.className = 'kin-ux-toolbar-settings';
+    const settings = element('section', '', toolbar); settings.className = 'kin-ux-toolbar-settings';
     const edit = button('Viewer Settings', settings, () => openSettings());
     const status = element('span', '', settings); status.setAttribute('role', 'status');
     const retry = button('Reload Settings', settings, () => load()); retry.hidden = true;
@@ -51,18 +47,45 @@ window.KinViewerUXToolbar = (() => {
         button('Clear', row, () => { input.value = ''; input.focus(); });
       }
     }
-    function openSettings() { if (saving || !active()) return false; opener = document.activeElement; fill(preferences); feedback.textContent = loaded ? '' : status.textContent; dialog.showModal(); return true; }
+    let pointer = null, screenDetails = null;
+    const trackPointer = event => { if (event.target.closest?.('[data-cy=viewport-pane]')) pointer = { x: event.clientX, y: event.clientY }; };
+    window.addEventListener('pointerdown', trackPointer, true);
+    // Reuse already granted window-management access; never prompt at viewer open.
+    navigator.permissions?.query({ name: 'window-management' }).then(permission => {
+      if (permission.state === 'granted') return window.getScreenDetails?.();
+    }).then(value => { if (!ended) screenDetails = value; }).catch(() => {});
+    function positionSettings() {
+      const id = services.viewportGridService.getActiveViewportId();
+      const viewport = services.cornerstoneViewportService.getCornerstoneViewport(id);
+      const rect = viewport?.element?.getBoundingClientRect();
+      const inCell = rect && pointer && pointer.x >= rect.left && pointer.x <= rect.right && pointer.y >= rect.top && pointer.y <= rect.bottom;
+      const anchor = inCell ? pointer : rect ? { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } : { x: innerWidth / 2, y: innerHeight / 2 };
+      const screens = screenDetails?.screens || [window.screen];
+      const screenPoint = anchor;
+      const monitor = screens.find(s => screenPoint.x + screenX >= (s.availLeft || 0) && screenPoint.x + screenX < (s.availLeft || 0) + s.availWidth &&
+        screenPoint.y + screenY >= (s.availTop || 0) && screenPoint.y + screenY < (s.availTop || 0) + s.availHeight) || screenDetails?.currentScreen || window.screen;
+      const left = Math.max(0, (monitor.availLeft || 0) - screenX), top = Math.max(0, (monitor.availTop || 0) - screenY);
+      const right = Math.min(innerWidth, (monitor.availLeft || 0) + monitor.availWidth - screenX);
+      const bottom = Math.min(innerHeight, (monitor.availTop || 0) + monitor.availHeight - screenY);
+      dialog.style.maxWidth = Math.max(0, right - left) + 'px'; dialog.style.maxHeight = Math.max(0, bottom - top) + 'px';
+      dialog.style.margin = '0'; dialog.style.position = 'fixed';
+      const box = dialog.getBoundingClientRect();
+      dialog.style.left = Math.max(left, Math.min(anchor.x - box.width / 2, right - box.width)) + 'px';
+      dialog.style.top = Math.max(top, Math.min(anchor.y - box.height / 2, bottom - box.height)) + 'px';
+    }
+    function openSettings() { if (saving || !active()) return false; opener = document.activeElement; fill(preferences); feedback.textContent = loaded ? '' : status.textContent; dialog.showModal(); positionSettings(); return true; }
     window.kinViewerUXOpenSettings = openSettings;
     button('Restore Defaults', dialog, () => fill(defaults()));
     const saveButton = button('Save', dialog, async () => {
-      const used = new Set(), shortcuts = {};
+      const shortcuts = { ...preferences.shortcuts };
+      const used = new Set(Object.entries(shortcuts).filter(([id, key]) => !inputs.has(id) && key).map(([, key]) => key));
       for (const [id, input] of inputs) {
         const value = input.value.trim().toLowerCase();
         if (value && (!/^[a-z0-9]$/.test(value) || used.has(value))) { feedback.textContent = '단축키는 중복 없이 영문자·숫자 한 개로 지정하세요.'; input.focus(); return; }
         shortcuts[id] = value || null; if (value) used.add(value);
       }
       const selected = [...checks].filter(([, check]) => check.checked).map(([id]) => id);
-      const next = { version: 1, shortcuts, bar: [...preferences.bar.filter(id => selected.includes(id)), ...selected.filter(id => !preferences.bar.includes(id))] };
+      const next = { version: 1, shortcuts, bar: [...preferences.bar.filter(id => !checks.has(id) || selected.includes(id)), ...selected.filter(id => !preferences.bar.includes(id))] };
       if (await save(next)) close(); else feedback.textContent = status.textContent;
     });
     button('Cancel', dialog, close);
@@ -73,7 +96,11 @@ window.KinViewerUXToolbar = (() => {
       if (!active() || document.body.classList.contains('kin-viewer-empty') || document.body.classList.contains('kin-patient-switching')) return false;
       const item = service.getButtonProps(id); if (!item || item.disabled) return false;
       const states = [window.kinViewerHistoryWorkspaceState?.(), window.kinViewerJobWorkspaceState?.()];
-      if (states.some(state => !state || state.busy)) return false;
+      if (states.some(state => state?.busy)) {
+        status.textContent = '영상 작업을 불러오는 중입니다. 완료 후 도구를 다시 선택하세요.';
+        services.uiNotificationService?.show({ title: 'Image Tools', message: status.textContent, type: 'info' });
+        return false;
+      }
       try {
         service.recordInteraction({ ...item, itemId: id });
         return true;
@@ -134,10 +161,16 @@ window.KinViewerUXToolbar = (() => {
     async function load() {
       if (!active() || saving) return;
       const sequence = ++loadSequence;
-      loaded = false; render(); status.textContent = '계정 설정을 불러오는 중…';
+      // Keep the cached bar and bindings, but wait for the current revision before editing.
+      loaded = false; render();
+      if (session.state() === 'unconfirmed') await session.decide();
+      if (!active() || sequence !== loadSequence) return;
+      if (!session.writer()) { status.textContent = '보기 도구를 사용할 수 있습니다. 계정 도구 설정은 판독 작업에서 저장합니다.'; render(); return; }
+      initialOwner = JSON.stringify(owner());
+      status.textContent = '계정 설정을 불러오는 중…';
       try {
         const data = await request(); if (!active() || sequence !== loadSequence) return;
-        record = data; preferences = data.viewerSettings || defaults(); loaded = true; retry.hidden = true;
+        record = cached = data; preferences = data.viewerSettings || defaults(); loaded = true; retry.hidden = true;
         status.textContent = '계정 설정 · 다른 PC에서도 적용됩니다.';
       } catch (error) { if (active() && sequence === loadSequence) { status.textContent = error.message; retry.hidden = false; } }
       if (active() && sequence === loadSequence) render();
@@ -148,13 +181,40 @@ window.KinViewerUXToolbar = (() => {
       try {
         const data = await request({ method: 'PUT', body: JSON.stringify({ expectedOwner: record.owner, revision: record.revision, viewerSettings: next }) });
         if (!active()) return false;
-        record = data; preferences = data.viewerSettings; status.textContent = '계정에 저장했습니다.'; retry.hidden = true; return true;
+        record = cached = data; preferences = data.viewerSettings; status.textContent = '계정에 저장했습니다.'; retry.hidden = true; return true;
       } catch (error) { if (active()) { status.textContent = error.message; retry.hidden = false; } return false; }
       finally { saving = false; if (active()) render(); }
     }
-    const retained = original.filter(id => !removed.has(id));
-    service.clearButtonSection('primary'); service.createButtonSection('primary', retained);
-    const subscription = service.subscribe(service.EVENTS.TOOL_BAR_MODIFIED, refreshState);
+    const nativeStyle = element('style', '', document.head);
+    function rebuild() {
+      if (ended || syncing) return;
+      queued = false; syncing = true;
+      try {
+        const present = service.getButtonSection('primary').map(button => button.id);
+        for (const id of present) if (!original.includes(id)) original.push(id);
+        const next = new Map(); removed.clear();
+        for (const id of original) {
+          const definition = service.getButtons()[id], props = definition?.props || {};
+          const items = props.items ? [props.primary, ...props.items].filter(Boolean) : [{ id, ...props }];
+          if (!['ohif.radioGroup', 'ohif.splitButton'].includes(definition?.uiType) || !items.length || items.some(item => !item.commands)) continue;
+          removed.add(id);
+          for (const item of items) if (item.id && !next.has(item.id)) next.set(item.id, item);
+        }
+        const changed = JSON.stringify([...next].map(([id, item]) => [id, label(item)])) !== JSON.stringify([...catalog].map(([id, item]) => [id, label(item)]));
+        catalog.clear(); next.forEach((item, id) => catalog.set(id, item));
+        // Leave native sections intact: the role policy restores their authoring
+        // tools after /me. Hide only the controls replaced by this toolbar.
+        nativeStyle.textContent = [...removed].map(id => {
+          const key = CSS.escape(id);
+          return 'body.kin-viewer-ux #root .relative.flex.justify-center > div:has([data-cy="' + key + '"], [data-cy^="' + key + '-split-button-"]) { display: none; }';
+        }).join('\n');
+        if (changed) render(); else refreshState();
+      } finally { syncing = false; }
+    }
+    const subscription = service.subscribe(service.EVENTS.TOOL_BAR_MODIFIED, () => {
+      if (!syncing && !queued) { queued = true; queueMicrotask(rebuild); }
+    });
+    rebuild();
     function focusTools() {
       if (!active() || document.querySelector('dialog[open],[role="dialog"][aria-modal="true"]')) return false;
       const first = bar.querySelector('button:not(:disabled)') || summary;
@@ -163,7 +223,6 @@ window.KinViewerUXToolbar = (() => {
     // Reuse the existing navigation bindings and their modal/session guards.
     // That controller also serves the Image Tools button and embedded focus requests.
     window.kinViewerUXFocusTools = focusTools;
-    const shortcuts = window.KinViewerUXShortcuts.mount({ getBindings: () => preferences.shortcuts, invoke, allowed: active });
     function refresh() {
       if (toolbar.isConnected) return;
       // The shell reserves this toolbar's row when it places the strip, so the
@@ -174,15 +233,13 @@ window.KinViewerUXToolbar = (() => {
     }
     refresh(); const observer = new MutationObserver(refresh); observer.observe(document.getElementById('root'), { childList: true, subtree: true });
     render(); load();
-    return { dispose() {
-      if (ended) return; ended = true; abort.abort(); observer.disconnect(); shortcuts.dispose(); toolbar.remove(); settings.remove(); dialog.remove();
+    return { invoke, bindings: () => preferences.shortcuts, dispose() {
+      if (ended) return; ended = true; abort.abort(); observer.disconnect(); window.removeEventListener('pointerdown', trackPointer, true); toolbar.remove(); settings.remove(); dialog.remove();
       subscription.unsubscribe();
       if (window.kinViewerUXFocusTools === focusTools) delete window.kinViewerUXFocusTools;
       if (window.kinViewerUXOpenSettings === openSettings) delete window.kinViewerUXOpenSettings;
-      if (JSON.stringify(service.getButtonSection('primary').map(button => button.id)) === JSON.stringify(retained)) {
-        service.clearButtonSection('primary'); service.createButtonSection('primary', original);
-      }
+      nativeStyle.remove();
     } };
   }
-  return { mount };
+  return { mount, clear() { cached = null; } };
 })();

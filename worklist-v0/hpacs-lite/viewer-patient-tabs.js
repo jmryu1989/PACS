@@ -2,7 +2,7 @@ window.KinViewerPatientTabs = (() => {
   // Document-local tabs survive the stock router's mode teardown. Clinical
   // controllers still enter/exit normally for each URL; no second grid exists.
   const tabs = [], listeners = new Set();
-  let current = null, services, refreshChrome, host, status, sequence = 0, pending = false, mounted = false;
+  let current = null, explicitlyClosed = false, session, services, refreshChrome, host, status, sequence = 0, pending = false, mounted = false;
   let controller, pendingHref, restoreSubscription, dataSubscription, dataReady, mountEpoch = 0, focusAfterMount = false;
   const text = value => typeof value === 'object' && value !== null
     ? String(value.Alphabetic || value.Ideographic || value.Phonetic || '') : String(value ?? '');
@@ -16,7 +16,7 @@ window.KinViewerPatientTabs = (() => {
   }
   function guard(coverage = false) {
     const states = [window.kinViewerHistoryWorkspaceState?.(), window.kinViewerJobWorkspaceState?.()];
-    if (states.some(state => !state || state.busy || state.dirty) || document.querySelector('dialog[open]') || window.kinMprMarks?.dirty?.()) {
+    if (states.some(state => state?.busy || state?.dirty) || document.querySelector('dialog[open]') || window.kinMprMarks?.dirty?.()) {
       if (status) status.textContent = '저장·편집을 마친 뒤 환자를 전환하세요. 현재 화면을 유지합니다.';
       return false;
     }
@@ -73,7 +73,6 @@ window.KinViewerPatientTabs = (() => {
         // Complete the info/series chrome before fitting the recreated canvas.
         // Loading headings have a different height from the real patient label.
         refreshChrome();
-        services.cornerstoneViewportService.resize(true);
         if (cell.properties) v.setProperties(cell.properties);
         if (cell.camera) v.setCamera({ flipHorizontal: cell.camera.flipHorizontal, flipVertical: cell.camera.flipVertical });
         if (cell.size?.[0] === v.canvas.width && cell.size?.[1] === v.canvas.height) {
@@ -124,12 +123,25 @@ window.KinViewerPatientTabs = (() => {
       remove.setAttribute('aria-label', 'Close ' + p.name + ' ' + p.id); remove.onclick = () => close(tab);
       row.append(button, remove); list.append(row);
     }
-    document.body.classList.toggle('kin-viewer-empty', !current && !pending);
+    document.body.classList.toggle('kin-viewer-empty', explicitlyClosed && !current && !pending);
   }
   async function resolve(href, signal) {
-    const wanted = studies(href), response = await fetch('/api/studies', { credentials: 'same-origin', signal });
-    if (!response.ok) throw new Error('환자 정보를 불러오지 못했습니다. 다시 시도하세요.');
-    const result = await response.json(), rows = wanted.map(uid => result.studies?.find(row => row.uid === uid));
+    const wanted = studies(href), found = new Map();
+    if (session.state() === 'unconfirmed') await session.decide();
+    const endpoint = session.readOnly() ? '/api/clinician/studies' : '/api/studies';
+    // Use the existing list page contract (maximum 100), stopping once the
+    // requested studies are found. A mode re-entry reuses this resolved tab.
+    let after = null;
+    do {
+      const query = new URLSearchParams({ limit: '100' });
+      if (after) query.set('after', after);
+      const response = await fetch(endpoint + '?' + query, { credentials: 'same-origin', signal });
+      if (!response.ok) throw new Error('환자 정보를 불러오지 못했습니다. 영상은 계속 볼 수 있습니다. 다시 시도하세요.');
+      const result = await response.json();
+      for (const row of result.studies || []) if (wanted.includes(row.uid)) found.set(row.uid, row);
+      after = result.pagination?.next;
+    } while (after && found.size < wanted.length);
+    const rows = wanted.map(uid => found.get(uid));
     if (!rows.length || rows.some(row => !row?.sourcePatientKey) || rows.some(row => row.sourcePatientKey !== rows[0].sourcePatientKey))
       throw new Error('같은 환자의 검사인지 확인할 수 없어 현재 화면을 유지합니다.');
     const row = rows[0], born = String(row.birth || '').replace(/-/g, ''), date = String(row.date || '').replace(/-/g, '');
@@ -139,7 +151,7 @@ window.KinViewerPatientTabs = (() => {
   }
   function navigate(tab) {
     tab.restorePending = !!tab.view;
-    current = tab; pending = false; render(); publish();
+    current = tab; explicitlyClosed = false; pending = false; render(); publish();
     if (location.href === tab.href) { restore(); return; }
     // The pinned BrowserRouter consumes the native popstate event. Its route
     // lifecycle tears down study-scoped extensions before new pixels mount.
@@ -182,12 +194,12 @@ window.KinViewerPatientTabs = (() => {
       const next = tabs[tabs.indexOf(tab) + 1] || tabs[tabs.indexOf(tab) - 1];
       if (next && !await open(next.href)) return false;
       if (!next && !guard(true)) return false;
-      if (!next) { sequence++; controller?.abort(); current = null; publish(); }
+      if (!next) { sequence++; controller?.abort(); current = null; explicitlyClosed = true; publish(); }
     }
     tabs.splice(tabs.indexOf(tab), 1); render(); return true;
   }
   async function mount(options) {
-    services = options.services; refreshChrome = options.refreshChrome; mounted = true; const epoch = ++mountEpoch;
+    services = options.services; session = options.session; refreshChrome = options.refreshChrome; mounted = true; const epoch = ++mountEpoch;
     dataReady = new Set();
     dataSubscription = services.cornerstoneViewportService.subscribe(
       services.cornerstoneViewportService.EVENTS.VIEWPORT_DATA_CHANGED, ({ viewportId }) => {
@@ -207,11 +219,11 @@ window.KinViewerPatientTabs = (() => {
       const ticket = sequence;
       retry.hidden = true;
       try {
-      const resolved = await resolve(location.href);
+      const resolved = current?.href === location.href ? current : await resolve(location.href);
       if (!mounted || epoch !== mountEpoch || ticket !== sequence) return;
       let tab = tabs.find(tab => tab.key === resolved.key);
       if (!tab) { tab = resolved; tabs.push(tab); }
-      current = tab; status.textContent = ''; render(); publish(); restore();
+      current = tab; explicitlyClosed = false; status.textContent = ''; render(); publish(); restore();
       if (focusAfterMount) { host.querySelector('[aria-selected=true]')?.focus(); focusAfterMount = false; }
       document.body.classList.remove('kin-patient-switching');
       } catch (error) {
@@ -227,7 +239,7 @@ window.KinViewerPatientTabs = (() => {
   function dispose() {
     mounted = false; mountEpoch++; dataSubscription?.unsubscribe(); dataSubscription = null; dataReady = null; restoreSubscription?.(); restoreSubscription = null; host?.remove(); host = null;
   }
-  return { mount, dispose, refresh, open, guard, snapshot,
+  return { mount, dispose, refresh, open, guard, snapshot, resolve,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
-    end() { sequence++; controller?.abort(); tabs.length = 0; current = null; focusAfterMount = false; publish(); dispose(); delete window.kinViewerOpenPatient; } };
+    end() { sequence++; controller?.abort(); tabs.length = 0; current = null; explicitlyClosed = false; focusAfterMount = false; publish(); dispose(); delete window.kinViewerOpenPatient; } };
 })();
