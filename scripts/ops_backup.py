@@ -4,9 +4,8 @@ Usage: python scripts/ops_backup.py backup --output <outside-repository-director
        python scripts/ops_backup.py rehearse <completed-backup-directory> [--wrapping-source <relocated-custody>]
        python scripts/ops_backup.py restore-wrapping <backup> --destination <new-secret-directory> [--source <relocated-custody>]
        python scripts/ops_backup.py rotate --root <backup-root> [--keep N] [--protect NAME ...] [--dry-run]
-The running write services pause during backup and are resumed in finally. A complete backup's AuditLog rows are then
-sealed into audit-checkpoint.json and the backup root's ledger (scripts/ops_audit_integrity.py; the root needs a one-time
-`ops_audit_integrity.py init`), and rehearse verifies its restored copy against that seal.
+The running write services pause during backup and are resumed in finally. New backups need no audit seal.
+For older archives that declare audit-checkpoint.json, rehearse still verifies the restored copy against that checkpoint.
 
 The EMR-introduction release mode (scripts/ops_emr_introduction.py) uses capture_held() instead of backup(): it captures a
 snapshot while the caller keeps every writer fenced and never resumes them itself (the release decides when they return).
@@ -172,6 +171,18 @@ class LockLease:
     token: str | None = None
     identity: tuple | None = None
 
+    def retain(self):
+        """Persist the inspection hold before a deployment can start mutating."""
+        self.verify()
+        token = 'retained:' + self.token.split(':', 1)[-1]
+        if token != self.token:
+            with self.path.open('w') as handle:
+                handle.write(token)
+                handle.flush()
+                os.fsync(handle.fileno())
+            self.token = token
+        self.retained = True
+
     def verify(self):
         if (self.path is None or self.path.is_symlink() or not self.path.is_file()
                 or (self.path.stat().st_dev, self.path.stat().st_ino) != self.identity
@@ -242,10 +253,7 @@ def lock():
     finally:
         try:
             lease.verify()
-            if lease.retained:
-                lease.token = lease.token.split(':', 1)[-1]
-                path.write_text(lease.token)
-            else:
+            if not lease.retained:
                 path.unlink()
         finally:
             _operations_lease.reset(context)

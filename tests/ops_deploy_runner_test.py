@@ -403,6 +403,32 @@ class RunnerTests(unittest.TestCase):
                 child.kill()
             child.communicate(timeout=5)
 
+    def test_29b_killed_deployment_after_retain_requires_inspection(self):
+        source = ("import sys,pathlib,time;sys.path.insert(0,sys.argv[1]);import ops_backup as o;"
+                  "o.ROOT=pathlib.Path(sys.argv[2]);\nwith o.lock() as lease:\n lease.retain()\n"
+                  " (o.ROOT/'child-ready').write_text('ready')\n time.sleep(30)")
+        child = subprocess.Popen([sys.executable, "-B", "-c", source,
+                                  str(Path(ops.__file__).parent), str(self.root)],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 5
+            while not (self.root / "child-ready").exists() and time.monotonic() < deadline:
+                if child.poll() is not None:
+                    self.fail("child exited before owning lock")
+                time.sleep(0.02)
+            self.assertTrue((self.root / "child-ready").exists())
+            child.kill()
+            child.communicate(timeout=5)
+            retained = (self.root / '.kin-ops.lock').read_bytes()
+            with self.assertRaises(FileExistsError):
+                with ops.lock():
+                    self.fail('unfinished deployment admitted another operation')
+            self.assertEqual((self.root / '.kin-ops.lock').read_bytes(), retained)
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=5)
+
     def test_30_rollback_start_record_failure_stops_replacement(self):
         self.host.faults["smoke_target"] = {}
         self.host.faults["record_ROLLING_BACK"] = OSError("secret")

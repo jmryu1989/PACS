@@ -42,7 +42,7 @@ class OpsBoundaryTests(unittest.TestCase):
                             pass
                 self.assertFalse(lock.exists())
                 with backup.lock() as lease:
-                    lease.retained = True
+                    lease.retain()
                 with self.assertRaises(FileExistsError):
                     with backup.lock():
                         pass
@@ -54,7 +54,7 @@ class OpsBoundaryTests(unittest.TestCase):
                         pass
             self.assertFalse(record.with_name('round.json.lock').exists())
 
-    def test_distinct_environments_run_concurrently_and_same_environment_waits(self):
+    def test_live_host_lease_refuses_even_a_distinct_environment(self):
         with tempfile.TemporaryDirectory() as folder:
             state = Path(folder)
             script = '''import sys
@@ -73,13 +73,16 @@ with gate.live_run('child', 'synthetic', 'a'*64, 1, environment='site-a'):
                     with patch.object(gate, 'STATE', state):
                         with self.assertRaises(gate.LeaseBusy):
                             gate.preflight_live('site-a')
-                        with gate.live_run('parent', 'synthetic', 'b'*64, 1, environment='site-b'):
-                            self.assertTrue(any(row.get('environment') == 'site-a' for _, row in gate.pending_markers()))
+                        with self.assertRaises(gate.LeaseBusy):
+                            with gate.live_run('parent', 'synthetic', 'b'*64, 1, environment='site-b'):
+                                self.fail('second live stack admitted')
                 finally:
                     child.communicate('\n', timeout=30)
             self.assertEqual(child.returncode, 0)
             with patch.object(gate, 'STATE', state):
                 self.assertEqual(gate.pending_markers(), [])
+                with gate.live_run('parent', 'synthetic', 'b'*64, 1, environment='site-b'):
+                    gate.require_live_run()
 
 
 if __name__ == '__main__':

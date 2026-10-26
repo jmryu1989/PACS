@@ -1,7 +1,7 @@
 """Failure-path checks for backup/restore safety; no Docker mutations in this file.
 
-test_18..test_23 (S7-AUDIT-STORE OB-01..OB-05): the audit seal and the rehearsal's restored-copy verification inside the
-real backup/rehearse flow. The isolated verifier boundary is answered with synthetic digest streams (its PostgreSQL
+test_18 verifies new backups need no seal; test_19 and test_21..test_23 exercise existing sealed archives'
+restored-copy verification in the real rehearse flow. The isolated verifier boundary is answered with synthetic digest streams (its PostgreSQL
 behaviour is tests/audit_store_db_test.py); the manifest the flow wrote is fed to the unchanged ops_monitor.backup_status.
 test_24 (OB-06, S7-AUDIT-STORE-F02) runs the real verifier boundary with a short time limit against the test-side fake
 docker CLI of tests/ops_audit_integrity_test.py.
@@ -246,6 +246,15 @@ class Host:
                 error = caught
         folder = next(self.parent / name for name in {entry.name for entry in self.parent.iterdir()} - before)
         return folder, json.loads((folder / "manifest.json").read_text(encoding="utf-8")), error
+
+    def legacy_backup(self, answer):
+        """Construct a pre-cleanup sealed archive; new daily backups no longer seal."""
+        folder, manifest, error = self.backup(answer)
+        if error:
+            raise error
+        with patch.object(audit, 'evaluate', side_effect=self.boundary(answer)):
+            alarm = audit.seal(folder, self.parent, manifest)
+        return folder, manifest, RuntimeError(alarm) if alarm else None
 
     def rehearse(self, folder, answer):
         """One ops.rehearse run whose restored-copy verification is answered with `answer`."""
@@ -598,6 +607,222 @@ class BackupSafetyTests(unittest.TestCase):
 
 
 
+
+    def test_21_ob04_past_event_restores_verified_current_defect_restores_but_fails(self):
+        """OB-04 (SE-05, SE-07, SE-14, RS-08, RS-09) [OP-3 (a)]."""
+        with tempfile.TemporaryDirectory() as temporary:
+            host = Host(temporary)
+            host.init_ledger()
+            host.legacy_backup(rows_stream({1: "a", 2: "b"}))
+            # (1) a past event: a sealed row changed since the previous seal; this snapshot's own guard and shape are sound
+            past, manifest, error = host.legacy_backup(rows_stream({1: "a", 2: "B"}))
+            body = json.loads((past / audit.CHECKPOINT).read_text())
+            self.assertEqual(body["previous_verification"]["state"], "failed")
+            self.assertEqual((body["guard"]["state"], body["schema"]), ("present", []))
+            self.assertTrue(manifest["complete"])
+            self.assertEqual(manifest.get("backup_error"), {"stage": "audit integrity", "type": "AuditIntegrityMismatch"})
+            self.assertIsNotNone(error)
+            self.assertEqual(host.status(), ["backup_failed"])
+            with patch.object(ops, "run"):
+                ops.validate_backup(past)
+            result, error, _, _ = host.rehearse(past, rows_stream({1: "a", 2: "B"}))
+            self.assertIsNone(error)
+            self.assertTrue(result["success"])
+            self.assertTrue(result["audit"]["verified"])
+            self.assertEqual(result["audit"]["previous_verification"]["state"], "failed")
+
+            # (2) a current defect: this snapshot's own guard is ineffective (variant: an inheritance finding)
+            for label, answer in (("guard", rows_stream({1: "a", 2: "B"}, guard=INEFFECTIVE)),
+                                  ("inheritance", rows_stream({1: "a", 2: "B"}, schema=["inheritance"]))):
+                with self.subTest(label):
+                    current, manifest, error = host.legacy_backup(answer)
+                    body = json.loads((current / audit.CHECKPOINT).read_text())
+                    self.assertEqual((body["guard"], body["schema"]), (answer.guard, answer.schema))
+                    self.assertEqual((manifest.get("backup_error") or {}).get("stage"), "audit integrity")
+                    self.assertTrue(manifest["complete"])
+                    self.assertIsNotNone(error)
+                    self.assertEqual(host.status(), ["backup_failed"])
+                    with patch.object(ops, "run"):
+                        ops.validate_backup(current)
+                    before = host.files(current)
+                    result, error, _, cleanup = host.rehearse(current, answer)
+                    self.assertIsNotNone(error)
+                    self.assertFalse(result["success"])
+                    self.assertFalse(result["audit"]["verified"])
+                    self.assertEqual((result["audit"]["guard"], result["audit"]["schema"]), (answer.guard, answer.schema))
+                    self.assertTrue(cleanup.called)
+                    self.assertEqual(host.files(current), before, "the snapshot, its manifest and checkpoint are kept")
+
+    def test_22_ob05_rehearse_verifies_the_export_of_its_own_restored_copy(self):
+        """OB-05 (RS-01, RS-03, RS-07, RS-08, RS-09, RS-10)."""
+        with tempfile.TemporaryDirectory() as temporary:
+            host = Host(temporary)
+            old, _, _ = host.backup(rows_stream({1: "a"}))            # no ledger: an unsealed snapshot
+            result, error, _, _ = host.rehearse(old, rows_stream({1: "a"}))
+            self.assertIsNone(error)
+            self.assertEqual((result["success"], result["audit"]), (True, "not_sealed"))
+            self.assertEqual(host.sources, [])
+
+            host.init_ledger()
+            host.legacy_backup(rows_stream({1: "a", 2: "b"}))
+            verified, _, _ = host.legacy_backup(rows_stream({1: "a", 2: "b", 3: "c"}))
+            past, manifest, _ = host.legacy_backup(rows_stream({1: "a", 2: "B", 3: "c"}))
+            self.assertEqual((manifest.get("backup_error") or {}).get("stage"), "audit integrity")
+            defect, manifest, _ = host.legacy_backup(rows_stream({1: "a", 2: "B", 3: "c"}, guard=INEFFECTIVE))
+            self.assertEqual((manifest.get("backup_error") or {}).get("stage"), "audit integrity")
+            cases = {"(a) verified": (verified, rows_stream({1: "a", 2: "b", 3: "c"}), True, "verified"),
+                     "(b) past event": (past, rows_stream({1: "a", 2: "B", 3: "c"}), True, "failed"),
+                     "(c) restored copy differs": (verified, rows_stream({1: "a", 2: "x", 3: "c"}), False, "verified"),
+                     "(d) current guard defect": (defect, rows_stream({1: "a", 2: "B", 3: "c"}, guard=INEFFECTIVE),
+                                                  False, "verified"),
+                     "(e) input error": (verified, audit.InputError("synthetic export failure"), False, "verified")}
+            for label, (folder, answer, success, previous) in cases.items():
+                with self.subTest(label):
+                    before = host.files(folder)
+                    result, error, container, cleanup = host.rehearse(folder, answer)
+                    self.assertEqual(len(host.sources), 1, "a sealed backup's rehearsal verifies its restored copy")
+                    source = host.sources[0]
+                    self.assertIsInstance(source, audit.DatabaseExport, "the restored copy, never the snapshot file")
+                    self.assertEqual((source.container, source.database), (container, "kin"))
+                    self.assertEqual(result["success"], success)
+                    self.assertEqual(result["audit"]["verified"], success)
+                    self.assertEqual(error is None, success)
+                    self.assertTrue(cleanup.called)
+                    self.assertEqual(result["cleanup_failures"], [])
+                    self.assertEqual(host.files(folder), before)
+                    if label.startswith("(e)"):
+                        self.assertEqual(result["audit"]["exit"], 2)
+                    else:
+                        self.assertEqual(result["audit"]["previous_verification"]["state"], previous)
+                    if label.startswith("(c)"):
+                        self.assertEqual(result["audit"]["changed"]["ids"], [2])
+
+    def test_23_ob04_an_unrecovered_declaration_is_a_past_event_that_restores_and_stays_reported(self):
+        """OB-04 with SE-13 (RS-08, RT-13; S7-AUDIT-STORE-F01): a seal that stopped after its manifest declaration and
+        does not continue the ledger makes the next backup alarm with a past event; that snapshot still restores verified,
+        the backups after it are sealed without an alarm, and retention keeps reporting the unresolved declaration."""
+        with tempfile.TemporaryDirectory() as temporary:
+            host = Host(temporary)
+            host.init_ledger()
+            first, _, _ = host.legacy_backup(rows_stream({1: "a"}))
+            ledger = (host.parent / audit.LEDGER).read_bytes()
+            broken, _, _ = host.legacy_backup(rows_stream({1: "a", 2: "b"}))
+            body = json.loads((broken / audit.CHECKPOINT).read_text())
+            body["previous"] = {"backup": first.name, "sha256": "0" * 64, "seq": 1}
+            (broken / audit.CHECKPOINT).write_text(json.dumps(body))
+            manifest = json.loads((broken / "manifest.json").read_text())
+            manifest["sha256"][audit.CHECKPOINT] = ops.digest(broken / audit.CHECKPOINT)
+            manifest["bytes"][audit.CHECKPOINT] = (broken / audit.CHECKPOINT).stat().st_size
+            ops.write_json(broken / "manifest.json", manifest)
+            (host.parent / audit.LEDGER).write_bytes(ledger)        # the seal stopped before its ledger step
+
+            rows = {1: "a", 2: "b", 3: "c"}
+            past, manifest, error = host.legacy_backup(rows_stream(rows))
+            body = json.loads((past / audit.CHECKPOINT).read_text())
+            self.assertEqual(body["previous_verification"], {"state": "unverifiable", "reason": "uncommitted_checkpoint"})
+            self.assertEqual((body["guard"]["state"], body["schema"]), ("present", []))
+            self.assertEqual(manifest.get("backup_error"), {"stage": "audit integrity", "type": "AuditPreviousUnverifiable"})
+            self.assertTrue(manifest["complete"])
+            self.assertIsNotNone(error)
+            self.assertEqual(host.status(), ["backup_failed"])
+            # the snapshot itself is sound: its restored copy verifies and the rehearsal succeeds carrying the past event
+            result, error, _, _ = host.rehearse(past, rows_stream(rows))
+            self.assertIsNone(error)
+            self.assertEqual((result["success"], result["audit"]["verified"]), (True, True))
+            self.assertEqual(result["audit"]["previous_verification"]["state"], "unverifiable")
+
+            # the backups after it are sealed and verified against the ledger without an alarm
+            later, manifest, error = host.legacy_backup(rows_stream({**rows, 4: "d"}))
+            self.assertIsNone(error)
+            self.assertNotIn("backup_error", manifest)
+            self.assertEqual(json.loads((later / audit.CHECKPOINT).read_text())["previous_verification"],
+                             {"state": "verified"})
+            self.assertEqual(host.status(), [])
+            # and retention still reports the declaration the ledger never received
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = audit.main(["retention", str(host.parent),
+                                   "--as-of", (host.clock + timedelta(minutes=1)).isoformat()])
+            report = json.loads(output.getvalue())
+            self.assertEqual((code, report["uncommitted"], report["latest"]), (1, [broken.name], later.name))
+
+    def test_24_ob06_a_stalled_legacy_rehearsal_fails_within_the_time_limit(self):
+        """The legacy archive's real exporter has a 3 s hang limit; cleanup releases the lock."""
+        limit, grace = 3, 15
+        with tempfile.TemporaryDirectory() as temporary:
+            host = Host(temporary)
+            host.init_ledger()
+            fake = FakeDocker(temporary)
+            self.addCleanup(fake.kill_all)
+            real_evaluate, real_run, real_text = audit.evaluate, ops.run, ops.text
+
+            def limited(source):
+                # the verifier's own docker commands reach the fake CLI even where the flow's other commands are faked
+                with patch.object(ops, "run", real_run), patch.object(ops, "text", real_text):
+                    return real_evaluate(source, timeout=limit)
+
+            rows = {1: "a", 2: "b"}
+            fake.plan(answer=verifier_answer(rows))
+            with fake.active():
+                sealed, manifest, error = host.legacy_backup(limited)
+            self.assertIsNone(error)
+            self.assertNotIn("backup_error", manifest)
+            self.assertIn(audit.CHECKPOINT, manifest["sha256"])
+            self.assertEqual((fake.running(), fake.names("containers")), ([], []))
+
+            def rehearse():
+                with patch.object(sys, "argv", ["ops_backup.py", "rehearse", str(sealed)]):
+                    ops.main()
+            clusters = []
+
+            def rehearsal_run(args, **kwargs):
+                # This boundary test simulates provisioning and the catalog replay of the fresh cluster (D23) only; the
+                # real verifier/exporter still hits FakeDocker and its watchdog. B L07/L19 exercise these statements on
+                # PostgreSQL itself.
+                if args[:3] == ["docker", "run", "-d"]:
+                    clusters.append(DailyCluster(json.loads((sealed / "manifest.json").read_text(encoding="utf-8"))["role_catalog"]))
+                if args[:2] == ["docker", "exec"] and "pg_restore" in args:
+                    clusters[-1].observe(args, kwargs.get("input_file"))
+                elif args[:2] == ["docker", "exec"] and ("mkdir" in args or "psql" in args):
+                    clusters[-1].observe(args, kwargs.get("input_file"))
+                    try:
+                        answer = clusters[-1].text(args)
+                    except AssertionError:
+                        answer = ""
+                    return SimpleNamespace(returncode=0, stdout=answer.encode(), stderr=b"")
+                return real_run(args, **kwargs)
+            for label, plan, success in (("sound", dict(answer=verifier_answer(rows)), True),
+                                         ("the restored copy's export stalls", dict(exporter="stall"), False)):
+                with self.subTest(label):
+                    fake.plan(**plan)
+                    earlier = set(sealed.glob("rehearsal-*.json"))
+                    before = host.files(sealed)
+                    with fake.active(), patch.object(ops, "ROOT", host.repo), patch.object(ops, "require_local_docker"), \
+                            patch.object(ops, "run", side_effect=rehearsal_run), \
+                            patch.object(ops, "emr_catalog", return_value={"synthetic": "catalog"}), \
+                            patch.object(ops, "restored_emr_expiry", return_value=expiry_receipt()), \
+                            patch.object(ops, "counts", return_value={"public.Report": 5}), \
+                            patch.object(ops, "temporary_run", side_effect=host.fake_archive), \
+                            patch.object(audit, "evaluate", side_effect=limited), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        outcome, elapsed, finished = fake.bounded(rehearse, limit + grace)
+                    self.assertTrue(finished, "the rehearsal was still running after its limit and a bounded stop")
+                    self.assertEqual(isinstance(outcome.get("error"), RuntimeError), not success, outcome)
+                    (written,) = set(sealed.glob("rehearsal-*.json")) - earlier
+                    result = json.loads(written.read_text())
+                    self.assertEqual((result["success"], result["audit"]["verified"]), (success, success))
+                    if not success:
+                        self.assertEqual(result["audit"]["exit"], 2)
+                        proof = result["audit"]["cleanup"]
+                        self.assertTrue(proof["confirmed"], proof)
+                        self.assertTrue(proof["steps"]["remote"]["confirmed"], "the restored copy's export was ended")
+                        # D23: the restored copy is a cluster whose bootstrap superuser is kin (the catalog replay).
+                        self.assertEqual((proof["target"]["database"], proof["target"]["role"]), ("kin", "kin"))
+                    self.assertEqual(result["cleanup_failures"], [])
+                    self.assertFalse((host.repo / ".kin-ops.lock").exists(), "the operations lock is released")
+                    self.assertEqual(fake.running(), [])
+                    self.assertEqual((fake.names("containers"), fake.names("volumes")), ([], []))
+                    self.assertEqual(host.files(sealed), before)
 
 
 class EmrRestoreVerification(unittest.TestCase):

@@ -210,7 +210,8 @@ def execute(path):
                 row.update(status="failed", exit_code=code)
             else:
                 marker = completed_marker(frozen, ticket, plan, row)
-                row.update(status="completed_with_skips" if row["skipped"] else "passed", exit_code=0)
+                row.update(status="completed_with_skips" if row["skipped"] else "passed",
+                           exit_code=1 if row["skipped"] else 0)
         except gate.Refused as error:
             # Exit 0 without this attempt's attestation: not a completed plan.
             # A live marker stays for inspection.
@@ -237,7 +238,7 @@ def execute(path):
             row["ended"] = time.time()
             write_json(ledger_path, ledger)
         # Reopen only after the parent's own terminal state is persisted as
-        # passed; the marker is checked to be exactly the one this attempt wrote.
+        # completed (skips still return non-zero); release only this attempt's marker.
         if row["status"] in ("passed", "completed_with_skips") and marker is not None:
             try:
                 gate.release_after_success(marker)

@@ -1268,7 +1268,7 @@ if '--plan' in sys.argv:
 
     def test_skipped_live_run_is_recorded_without_blocking_the_environment(self):
         result = self.run_plan(self.plan(case='test_live_skip', mode='live'))
-        self.assertEqual(result.returncode, 0)
+        self.assertNotEqual(result.returncode, 0)
         attempt = json.loads((self.state/'probe.json').read_bytes())['attempts'][-1]
         self.assertEqual(attempt['status'], 'completed_with_skips')
         self.assertEqual(attempt['skipped'], 1)

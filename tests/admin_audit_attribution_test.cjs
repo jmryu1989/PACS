@@ -4,7 +4,6 @@
  * reader_assignment_scope_test.cjs; source spelling is not an audit contract. */
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { readFileSync, readdirSync } = require('node:fs');
 const path = require('node:path');
 const { createCipheriv, randomBytes } = require('node:crypto');
 

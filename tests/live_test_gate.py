@@ -111,13 +111,13 @@ def bookkeeping(wait_seconds=10):
 
 
 def live_lock(environment=None):
-    name = environment or environment_name()
-    return STATE / ('live-' + hashlib.sha256(name.encode('utf-8')).hexdigest() + '.lock')
+    # D1034: different environments still share the host's finite memory.
+    return STATE / 'live.lock'
 
 
 def preflight_live(environment=None):
     """Fail fast while another live run owns the lease, or while an uninspected
-    failed run used this same environment. Other environments are not blocked."""
+    failed run used this same environment. Only inspection is environment-scoped."""
     with exclusive(live_lock(environment)):
         with bookkeeping():
             refuse_if_pending(environment or environment_name())
@@ -178,9 +178,11 @@ def release_after_inspection(record):
             raise Refused("Inspection does not identify the failed live run")
         marker, marker_contents = matches[0]
         validate_identity(marker_contents)
-        # Another environment may have set aside a still-running owner's marker.
-        with exclusive(live_lock(marker_environment(marker_contents))):
-            pass
+        if marker == STATE / MARKER:
+            # The host lease prevents another run from setting this marker aside until
+            # its owner ends. Only the current marker can still belong to an active run.
+            with exclusive(live_lock()):
+                pass
         if (not isinstance(inspection, dict)
                 or any(not isinstance(inspection.get(key), str) or not inspection[key].strip()
                        for key in ("unit", "module", "inspected_at", "inspector"))

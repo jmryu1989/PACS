@@ -88,7 +88,8 @@ REQ-D01-COLUMNS → RISK-D01-HIDDEN-FILTER/OWNER/PREFERENCE-LOSS → TEST-D01-CO
 
 현재 workflow와 job은 `.github/workflows/` 및 `ci_workflows.py`에서 확인한다.
 삭제된 `restore-combined.yml`, `restore-database.yml`, `restore-image.yml`,
-`restore-orthanc.yml`, `restore-product.yml`, `emr-b.yml`은 현행 관문이 아니다.
+`restore-orthanc.yml`, `restore-product.yml`, `emr-b.yml` 파일은 더 이상 별도 workflow가 아니다.
+`restore-product / produce|consume` 검사는 `validate.yml`의 현행 job으로 계속 실행된다.
 PR은 required CI와 교차 검수를 거치며 G3는 최종 후보 SHA에서 dispatch한다.
 
 

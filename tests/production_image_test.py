@@ -269,7 +269,7 @@ const runtime=new EmrRuntime(process.env.DATABASE_URL, '/var/lib/kin-emr/outage'
         name = self.api("installer", DATABASE_URL=INSTALLER_URL)
         logs = self.stopped_with_error(name)
         self.assertIn("EmrRuntimeRefused", logs)
-        for problem in ("not-the-runtime-role", "rolsuper"):
+        for problem in ("rolsuper", "audit-append-only-required"):
             self.assertIn(problem, logs)
 
     def test_04_production_refuses_disabled_auth(self):
