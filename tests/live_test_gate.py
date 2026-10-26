@@ -110,10 +110,15 @@ def bookkeeping(wait_seconds=10):
         yield
 
 
+def live_lock(environment=None):
+    # D1034: different environments still share the host's finite memory.
+    return STATE / 'live.lock'
+
+
 def preflight_live(environment=None):
     """Fail fast while another live run owns the lease, or while an uninspected
-    failed run used this same environment. Other environments are not blocked."""
-    with exclusive(STATE / "live.lock"):
+    failed run used this same environment. Only inspection is environment-scoped."""
+    with exclusive(live_lock(environment)):
         with bookkeeping():
             refuse_if_pending(environment or environment_name())
 
@@ -174,9 +179,9 @@ def release_after_inspection(record):
         marker, marker_contents = matches[0]
         validate_identity(marker_contents)
         if marker == STATE / MARKER:
-            # The active marker may belong to a run still using its stack: inspect it only
-            # once no live run holds the lease. A set-aside record's run has ended.
-            with exclusive(STATE / "live.lock"):
+            # The host lease prevents another run from setting this marker aside until
+            # its owner ends. Only the current marker can still belong to an active run.
+            with exclusive(live_lock()):
                 pass
         if (not isinstance(inspection, dict)
                 or any(not isinstance(inspection.get(key), str) or not inspection[key].strip()
@@ -305,7 +310,7 @@ def live_run(unit, module, plan_sha256, attempt, release=True, environment=None)
     if _permitted_pid is not None:
         raise Refused("Nested live runs are forbidden")
     environment = environment or environment_name()
-    with exclusive(STATE / "live.lock"):
+    with exclusive(live_lock(environment)):
         quarantine = STATE / MARKER
         with bookkeeping():
             refuse_if_pending(environment)
@@ -331,7 +336,6 @@ def live_run(unit, module, plan_sha256, attempt, release=True, environment=None)
             raise
         else:
             if release:
-                with bookkeeping():
-                    quarantine.unlink()
+                release_after_success(identity)
         finally:
             _permitted_pid = None

@@ -51,8 +51,10 @@ def initialize(path, repository, sha, round_id, pr_policy='forbid', *, cutoff_sh
 @contextmanager
 def locked(path):
     lock = path.with_name(path.name + '.lock')
+    from ops_backup import recover_process_lock
+    recover_process_lock(lock)
     with lock.open('x', encoding='utf-8') as stream:
-        stream.write(str(os.getpid()))
+        stream.write(str(os.getpid()) + ':g3')
     try:
         yield
     finally:

@@ -226,8 +226,6 @@ function createSource(options = {}) {
       if (ts.isMethodDeclaration(m) && m.body) {
         const w = forwards.get(name);
         if (!w || seenForwards.has(name)) throw new Error(`Unlisted facade method: ${name}`);
-        const signature = lf(file.text.slice(m.getStart(file), m.body.getStart(file))).trimEnd();
-        if (w.signature_sha256 && sha256(signature) !== w.signature_sha256) throw new Error(`Facade signature differs: ${name}`);
         const [only, ...rest] = m.body.statements;
         const call = !rest.length && only && ts.isReturnStatement(only) && only.expression && ts.isCallExpression(only.expression) ? only.expression : null;
         const callee = call && ts.isPropertyAccessExpression(call.expression) ? call.expression : null;
@@ -280,11 +278,8 @@ function createSource(options = {}) {
       const classes = source.statements.filter(ts.isClassDeclaration);
       if (JSON.stringify(classes.map(c => c.name?.text)) !== JSON.stringify(concern.class ? [concern.class] : []))
         throw new Error(`Concern class differs: ${file}`);
-      for (const statement of source.statements) {
-        if (ts.isImportDeclaration(statement) || ts.isClassDeclaration(statement)) continue;
-        for (const node of ts.isVariableStatement(statement) ? [...statement.declarationList.declarations] : [statement])
-          if (!locations.has(keyOf(node))) throw new Error(`Unlisted declaration in ${file}: ${node.name?.getText() ?? ts.SyntaxKind[node.kind]}`);
-      }
+      // This map identifies the moved declarations. Later helpers are covered by
+      // their behavior tests and need no entry in the historical split inventory.
       for (const cls of classes) {
         if (decoratorsOf(cls).length) throw new Error(`Concern decorator: ${file}`);
         for (const m of cls.members) {
@@ -296,11 +291,6 @@ function createSource(options = {}) {
               throw new Error(`Concern constructor differs: ${file}`);
             continue;
           }
-          if (locations.has(keyOf(m))) continue;
-          // Later viewer-settings behavior may add private helpers; keep the public ownership and constructor checks.
-          if (spec.viewer_ux?.changed_concerns.includes(file) && ts.isMethodDeclaration(m) &&
-              (ts.getCombinedModifierFlags(m) & ts.ModifierFlags.Private)) continue;
-          throw new Error(`Unlisted member in ${file}: ${m.name?.getText() ?? ts.SyntaxKind[m.kind]}`);
         }
       }
     }

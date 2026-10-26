@@ -6,8 +6,7 @@ import { verifyRuntimeConnection } from './emr-runtime/manifest';
 export class PrismaService extends PrismaClient implements OnModuleInit, OnApplicationShutdown {
   async onModuleInit() {
     await this.$connect();
-    // EMR-B1 시작 경계: 운영 서버는 최소권한 runtime 역할(소유·superuser·이관/보존 자격 없음)과 전용 저장소에 놓인 원장
-    // 위에서만 시작한다. 확인에 실패하면 HTTP를 열기 전에 Nest 초기화가 실패한다. 이관은 별도 프로세스의 설치 자격으로 한다.
+    // 운영 기동은 접속기록 추가 전용 권한과 PostgreSQL 내구성을 확인한다.
     if (process.env.DEPLOYMENT_MODE === 'production') await verifyRuntimeConnection(this);
   }
   // onModuleDestroy는 HTTP 서버가 닫히기 전에 호출된다. 남은 요청의 DB 사용이

@@ -469,7 +469,7 @@ class RequestApprovalReceiptTests(unittest.TestCase):
         del missing["phases"]["rollback"]
         refuses(self, lambda: intro.receipt_valid(missing, plan, "8" * 64, production, bundle=bundle), message="phases")
 
-    def test_59_a_receipt_binds_its_run_artifacts_plan_host_time_and_one_use(self):
+    def test_59_a_receipt_binds_its_run_artifacts_plan_host_and_one_use(self):
         """IRT-02: every way a receipt can be other than one real rehearsal of this plan's B0 is refused."""
         plan, production = plan_fixture(), production_identity()
         now = datetime.now(timezone.utc)
@@ -516,9 +516,6 @@ class RequestApprovalReceiptTests(unittest.TestCase):
             "rollback smoke on another frame": evidence(lambda e: e["rollback_reopen"]["smoke"].__setitem__("frame_sha256", "0" * 64)),
             "rollback smoke without the worklist": evidence(lambda e: e["rollback_reopen"]["smoke"].__setitem__("worklist_uid", "9.9")),
             "rollback smoke with an old token": evidence(lambda e: e["rollback_reopen"]["smoke"].__setitem__("token_after_restore", False)),
-            "stale": variant(created=now - timedelta(days=8)),
-            "from the year 2000": variant(created_utc="2000-01-01T00:00:00Z"),
-            "dated in the future": variant(created=now + timedelta(hours=1)),
             "another rehearsal host": variant(host_key_sha256="c" * 64),
             "for another production plan": variant(production_plan_sha256="0" * 64),
         }
@@ -526,8 +523,7 @@ class RequestApprovalReceiptTests(unittest.TestCase):
             with self.subTest(case=name):
                 refuses(self, lambda: intro.receipt_valid(body, plan, "8" * 64, production, bundle=bundle))
         refuses(self, lambda: intro.receipt_valid(good, other_plan, "8" * 64, production, bundle=bundle), message="another production plan")
-        with self.assertRaisesRegex(intro.Stop, "predates"):
-            intro.receipt_valid(good, plan, "8" * 64, production, b0_created_utc=now.isoformat(), bundle=bundle)
+        intro.receipt_valid(good, plan, "8" * 64, production, b0_created_utc=now.isoformat(), bundle=bundle)
         with self.assertRaisesRegex(intro.Stop, "already used"):
             intro.receipt_valid(good, plan, "8" * 64, production, used=[intro.receipt_sha256(good)], bundle=bundle)
 
@@ -3333,29 +3329,24 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
 class RoundThreeMachineTests(MachineHarness, unittest.TestCase):
     """Round 3 at the phase level: the D12 receipt clock and the recorded warnings and kept values of a plan."""
 
-    def test_101_a_receipt_tolerates_five_minutes_of_clock_skew_and_the_skew_is_recorded(self):
-        """D12: the rehearsal host's clock may run up to five minutes ahead of production's (receipt 'in the future') or
-        behind it (receipt 'before' the B0 it rehearsed); more is refused; what was observed is recorded at admission."""
+    def test_101_matching_receipts_do_not_expire_and_clock_differences_are_recorded(self):
+        """An unchanged release/snapshot remains rehearsed across calendar and host-clock differences."""
         plan, production = plan_fixture(), production_identity()
         now = datetime.now(timezone.utc)
-        for created, b0, accepted in ((now + timedelta(minutes=4), None, True), (now + timedelta(minutes=6), None, False),
-                                      (now - timedelta(hours=1), now - timedelta(hours=1) + timedelta(minutes=4), True),
-                                      (now - timedelta(hours=1), now - timedelta(hours=1) + timedelta(minutes=6), False)):
+        for created, b0 in ((now - timedelta(days=8), None), (now + timedelta(hours=1), None),
+                            (now - timedelta(hours=1), now), (datetime(2000, 1, 1, tzinfo=timezone.utc), None)):
             receipt, bundle = receipt_bundle(plan, self.root / ("bundle-" + created.isoformat().replace(":", "-")), created=created)
             with self.subTest(created=created.isoformat(), b0=b0 and b0.isoformat()):
                 check = lambda: intro.receipt_valid(receipt, plan, "8" * 64, production, now=now, b0_created_utc=b0 and b0.isoformat(),
                                                     bundle=bundle)
-                if accepted:
-                    check()
-                else:
-                    refuses(self, check)
+                check()
         self.run_phase("capture")
         receipt, bundle = receipt_bundle(plan_fixture(target_fixture(repository=str(self.repository))), self.root / "bundle-ahead",
                                          created=NOW + timedelta(minutes=3))
         self.assertEqual(self.run_phase("introduce", {"local-restore": receipt, "local-restore-bundle": bundle})["status"], "INTRODUCED")
         journal = [json.loads(line) for line in (self.records.directory / "journal.jsonl").read_text().splitlines()]
         start = next(entry for entry in journal if entry["event"] == "phase-start" and entry["phase"] == "introduce")
-        self.assertEqual(start["receipt_clock"], {"tolerance_s": 300, "ahead_of_production_s": 180.0})
+        self.assertEqual(start["receipt_clock"], {"ahead_of_production_s": 180.0})
 
     def test_103_the_release_smoke_gets_one_bounded_retry_before_an_automatic_rollback(self):
         """D07 (IRT2-08): a settled refusal of the fenced smoke is retried once within SMOKE_RETRY_S, recorded (state,

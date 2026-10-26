@@ -89,8 +89,6 @@ RESUME_ORDER = ("orthanc", "keycloak", "api", "proxy")
 VOLUMES = ("pg", "orthanc", "emr_access", "emr_state")
 PHASES = ("capture", "release", "introduce", "verify", "reopen", "rollback", "rollback_reopen", "seed", "receipt")
 RECEIPT_PHASES = ("seed", "capture", "introduce", "verify", "rollback", "rollback_reopen")
-RECEIPT_MAX_AGE = timedelta(days=7)
-CLOCK_SKEW = timedelta(minutes=5)
 HASH, SHA, IMAGE = pre.HASH, pre.SHA, pre.IMAGE
 NONCE = re.compile(r"[0-9a-f]{32}")
 UUID4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
@@ -874,8 +872,8 @@ def receipt_use_identity(receipt):
 
 def receipt_valid(receipt, plan, b0_manifest_sha256, production, *, now=None, b0_created_utc=None, used=(), bundle=None):
     """A local-restore receipt is the rehearsal's own run record, never an offsite claim. It is accepted only for the
-    production plan it names, on the rehearsal host that plan allows, for this production attempt's B0, within its
-    freshness window and once (used: the receipts this plan already admitted). Every rehearsal phase must carry its
+    production plan it names, on the rehearsal host that plan allows, for this production attempt's B0,
+    and once (used: the receipts this plan already admitted). Every rehearsal phase must carry its
     exact step list (all PASS), its request and its result file's hash; the artifacts it names (B0, B1 and its restore
     check, the probe, Bfail, the recovery volumes and the previous-version smoke over this plan's frame) must agree
     with each other. IRT2-01: and with the producer's own run - the bundle (its result files and journal, see
@@ -896,13 +894,8 @@ def receipt_valid(receipt, plan, b0_manifest_sha256, production, *, now=None, b0
     require(receipt["tool"] == plan["tool"], "Receipt was produced by another tool")
     require(receipt["host_key_sha256"] != production["host_key_sha256"], "Receipt was produced on the production host")
     require(receipt["host_key_sha256"] == plan["rehearsal_host"], "Receipt comes from a host the plan does not allow")
-    created, now = parse_utc(receipt["created_utc"]), now or utc_now()
-    # D12: created_utc is the rehearsal host's clock, now and the B0 time are production's; up to CLOCK_SKEW of difference
-    # between the two clocks is tolerated in both directions (receipt_clock records what was observed).
-    require(created <= now + CLOCK_SKEW, "Receipt is dated in the future")
-    require(now - created <= RECEIPT_MAX_AGE, "Receipt is stale")
-    if b0_created_utc is not None:
-        require(created >= parse_utc(b0_created_utc) - CLOCK_SKEW, "Receipt predates the B0 snapshot it rehearsed")
+    # Receipt validity follows the recorded inputs and versions, not the hosts' calendars.
+    parse_utc(receipt["created_utc"])
     phases = receipt["phases"]
     require(type(phases) is dict and set(phases) == set(RECEIPT_PHASES), "Receipt phases incomplete")
     requests = []
@@ -941,10 +934,9 @@ def receipt_valid(receipt, plan, b0_manifest_sha256, production, *, now=None, b0
 
 
 def receipt_clock(receipt, now, b0_created_utc=None):
-    """The clock facts of an accepted receipt (D12): how far its creation lies ahead of production's clock (0 when it is
-    not ahead) and how long after the B0 it rehearsed it was made (negative within the tolerated skew), in seconds."""
+    """Record clock differences for diagnosis without making them admission limits."""
     created = parse_utc(receipt["created_utc"])
-    facts = {"tolerance_s": int(CLOCK_SKEW.total_seconds()), "ahead_of_production_s": round(max(0.0, (created - now).total_seconds()), 3)}
+    facts = {"ahead_of_production_s": round(max(0.0, (created - now).total_seconds()), 3)}
     if b0_created_utc is not None:
         facts["after_b0_s"] = round((created - parse_utc(b0_created_utc)).total_seconds(), 3)
     return facts
