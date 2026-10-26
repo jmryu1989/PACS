@@ -74,7 +74,8 @@ server {
 
 server {
     listen 443 ssl;
-    http2 on;
+    # Chromium은 GOAWAY와 스트림 생성이 겹치면 정적 파일을 재시도하지 않고 버린다.
+    # 계정 전환 뒤 앱 초기화가 멈추는 이 실패를 피하도록 HTTPS는 HTTP/1.1로 제공한다.
     server_name ${SERVER_NAME};
 
     ssl_certificate     ${TLS_CERTIFICATE};
