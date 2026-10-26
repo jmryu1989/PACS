@@ -767,12 +767,20 @@ jobs:
     - name: TEST-F-01..08 declared allow/refuse cases
       if: ${{ !cancelled() }}
       run: python3 scripts/record-run.py --run-dir tmp/emr-f-ci/contract --cwd . --tree api/src/emr-contract --tree api/src/emr-audit --file api/tsconfig.json --file api/package-lock.json --file tests/emr/f/contract_test.cjs -- node --test --test-reporter=tap tests/emr/f/contract_test.cjs
+    - name: F_LINK audit, fixed-copy issuance and hold over HTTP and PostgreSQL
+      run: |
+        node api/node_modules/typescript/bin/tsc -p api/tsconfig.json --incremental false
+        export KIN_B2R_NODE="$(command -v node)"
+        export KIN_B2R_PRISMA_CLI="$PWD/api/node_modules/prisma/build/index.js"
+        python3 scripts/record-run.py --run-dir tmp/emr-f-ci/online-pg --cwd . --tree api/src/emr-audit --tree api/src/emr-clinical --tree api/src/emr-report --tree api/src/emr-signature --tree api/src/emr-runtime --tree api/src/emr-contract --tree tests/emr/f --tree api/prisma --file api/src/app.module.ts --file tests/emr/b/pg_ledger_restore_test.py -- python3 -B scripts/run-tests.py --module tests/emr/f/link_live.py --class AuditLinkPg --mode live --unit emr-f-link --timeout 600
     - name: Raw run evidence
       if: always()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: emr-f-${{ env.TARGET_SHA }}
-        path: tmp/emr-f-ci/
+        path: |
+          tmp/emr-f-ci/
+          tmp/emr-f-link/
         if-no-files-found: error
         retention-days: 7
     needs: runtime
