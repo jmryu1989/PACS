@@ -76,8 +76,10 @@ class Pure(unittest.TestCase):
         actual['emr']['image']['rows']['observation'].pop()
         with patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
             transfer.verify_product('owned', 'kin', expected)
-        # A preparation written since 20261026210000 names the one kept study-manifest body: losing either is a mismatch.
-        for lose in (lambda rows: rows['source_manifest'].pop(), lambda rows: rows['preparation'][1].update(source_manifest_body=None)):
+        # A preparation written since 20261026210000 names the one kept study-manifest body, and since 20261027090000 the
+        # study delivery's access record and its request: losing any of them is a mismatch.
+        for lose in (lambda rows: rows['source_manifest'].pop(), lambda rows: rows['preparation'][1].update(source_manifest_body=None),
+                     lambda rows: rows['preparation'][1].update(delivery_event_id=None), lambda rows: rows['preparation'][1].update(request_id=None)):
             actual = copy.deepcopy(expected)
             lose(actual['emr']['image']['rows'])
             with patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):

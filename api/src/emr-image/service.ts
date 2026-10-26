@@ -1,16 +1,20 @@
 import { Inject, Injectable, ServiceUnavailableException, BadRequestException, ConflictException } from '@nestjs/common';
+import type { BeforeApplicationShutdown } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ServerResponse } from 'node:http';
+import type { AccessEvent } from '../emr-contract/access-event';
 import { newAuditLinkId, parseAccessEvent } from '../emr-contract/access-event';
 import { refuse } from '../emr-contract/validation';
-import { EMR_RECORD_PORT, EmrRecordPort, EmrRecordTransaction } from '../emr-runtime/record-port';
-import { REQUEST_CONTEXT_SOURCE, RequestContextSource } from '../emr-runtime/request-context';
+import { BackgroundWork, EMR_BACKGROUND_WORK } from '../emr-runtime/background-work';
+import { EMR_RECORD_PORT, EmrRecordPort, EmrRecordTransaction, EmrRecordWork } from '../emr-runtime/record-port';
+import { REQUEST_CONTEXT_SOURCE, RequestContextSource, RequestFacts } from '../emr-runtime/request-context';
 import { OrthancService } from '../orthanc.service';
 import { PrismaService } from '../prisma.service';
-import { parseImageRequest, prepareDelivery } from './contract';
+import { ImageRequest, parseImageRequest, prepareDelivery } from './contract';
 import { CurrentImageFacts, ImageContextSource } from './context';
+import { DeliveryClosing, DeliveryOutcome, ImageDeliveries, OpenedDelivery, ResponseEnd } from './delivery';
 import type { ImageManifest } from './manifest';
 import { ManifestReuse } from './manifest-reuse';
 import { PgImageEvidenceStore } from './store';
@@ -22,12 +26,37 @@ const SOURCE_CHANGED = ['ImageCurrentStudyChanged', 'ImageSourceMismatch', 'Scop
 const sourceChanged = (error: any) => error instanceof ConflictException || SOURCE_CHANGED.includes(error?.code) ||
   error instanceof AggregateError && error.errors.some(sourceChanged);
 
+/** What a delivery was opened with, kept to compare every later response's current facts against it. */
+interface DeliveryFacts { facts: CurrentImageFacts; work: EmrRecordWork }
+interface Opener { request: any; manifest: ImageManifest; facts: RequestFacts }
+
+function sameAuthority(current: CurrentImageFacts, opened: CurrentImageFacts, manifest: ImageManifest): boolean {
+  return current.actor.identity.id === opened.actor.identity.id && current.actor.identity.issuer === opened.actor.identity.issuer &&
+    current.actor.identity.subject === opened.actor.identity.subject &&
+    current.actor.institutionId === opened.actor.institutionId && current.accountGeneration === opened.accountGeneration &&
+    current.actor.roles.length === opened.actor.roles.length && current.actor.roles.every(role => opened.actor.roles.includes(role)) &&
+    current.provision.deliverable && current.provision.studyUid === manifest.studyUid &&
+    current.provision.managingInstitution === manifest.managingInstitution && current.provision.recipient === opened.provision.recipient &&
+    current.provision.relation === opened.provision.relation && current.provision.basisId === opened.provision.basisId &&
+    current.provision.agreementId === opened.provision.agreementId;
+}
+
 @Injectable()
-export class OnlineImageService {
+export class OnlineImageService implements BeforeApplicationShutdown {
   private readonly manifests = new ManifestReuse();
+  private readonly deliveries: ImageDeliveries<DeliveryFacts, Opener>;
   constructor(@Inject(EMR_RECORD_PORT) private readonly records: EmrRecordPort,
     private readonly context: ImageContextSource, private readonly db: PrismaService,
-    private readonly orthanc: OrthancService, @Inject(REQUEST_CONTEXT_SOURCE) private readonly requests: RequestContextSource) {}
+    private readonly orthanc: OrthancService, @Inject(REQUEST_CONTEXT_SOURCE) private readonly requests: RequestContextSource,
+    @Inject(EMR_BACKGROUND_WORK) background: BackgroundWork) {
+    this.deliveries = new ImageDeliveries<DeliveryFacts, Opener>(background, {
+      open: (_key, opener) => this.openDelivery(opener),
+      close: (delivery, outcome, closing) => this.closeDelivery(delivery, outcome, closing),
+    });
+  }
+
+  /** Idle deliveries close now; one with responses in flight closes when they end, before the ledger drains. */
+  async beforeApplicationShutdown(): Promise<void> { await this.deliveries.closeAll(); }
 
   async send(request: any, response: ServerResponse, target: string) {
     let image: ReturnType<typeof parseImageRequest>;
@@ -44,44 +73,91 @@ export class OnlineImageService {
       // below, it would wait for a lane while that transaction holds one: with as many simultaneous frames as lanes,
       // none proceeds (served CT series, run e-route-green-opus-20261026c). A kept manifest skips the catalog read
       // that used to resolve it first.
-      await this.requests.facts(request);
-      const at = new Date().toISOString(), eventId = randomUUID();
-      let facts!: CurrentImageFacts;
+      const facts = await this.requests.facts(request);
       const stagingDirectory = join(process.env.KIN_EMR_STATE_DIR, 'image-staging');
       await mkdir(stagingDirectory, { recursive: true });
-      // The opening transaction's current read is also the stream's first access check. A separate read before it
-      // took one more append lane and one more StudyAccess/source read per frame, for facts the stream re-read at once.
-      const open = async (tx: EmrRecordTransaction) => {
-        facts = await this.context.current(tx, request, manifest, at);
-        const prepared = prepareDelivery(manifest, image, { eventId, at, cause: 'background-fetch', opening: null,
-          authorization: { studyUid: image.studyUid, institution: facts.actor.institutionId,
-            accountGeneration: facts.accountGeneration }, provision: facts.provision });
-        const targets = [...new Map(prepared.units.map(unit => [unit.sopInstanceUid ?? manifest.studyUid, unit])).entries()];
-        const event = parseAccessEvent({ formatVersion: 1, surface: `${image.method} images/dicom-web`, eventId,
-          userId: known(facts.actor.identity), rolesAtTime: known(facts.actor.roles), actingInstitution: known(facts.actor.institutionId),
-          managingInstitution: known(manifest.managingInstitution), occurredAt: at, trustedProxyIp: facts.ip,
-          cause: prepared.cause, context: { basis: 'background-fetch', studyId: null, relatedStudyId: null, reason: null },
-          executor: 'member', targets: targets.map(([id, unit]) => ({ kind: unit.recordKind,
-            patientLinkSnapshot: known(manifest.patient), studyId: known(manifest.studyUid), recordId: known(id), versionId: known(manifest.sha256) })),
-          action: 'provide-prepared', result: 'prepared', requestId: facts.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null });
-        return { prepared, event };
-      };
-      return await sendOnlineImage({ records: this.records, evidence: new PgImageEvidenceStore(this.db),
-        source: this.orthanc.imageSource(), stagingDirectory,
-        authorize: async (tx, _event, selected) => {
-          const current = await this.context.current(tx, request, selected, new Date().toISOString());
-          if (current.actor.identity.id !== facts.actor.identity.id || current.actor.identity.issuer !== facts.actor.identity.issuer ||
-              current.actor.identity.subject !== facts.actor.identity.subject ||
-              current.actor.institutionId !== facts.actor.institutionId || current.accountGeneration !== facts.accountGeneration ||
-              current.actor.roles.length !== facts.actor.roles.length || current.actor.roles.some(role => !facts.actor.roles.includes(role)) ||
-              !current.provision.deliverable || current.provision.studyUid !== selected.studyUid ||
-              current.provision.managingInstitution !== selected.managingInstitution || current.provision.recipient !== facts.provision.recipient ||
-              current.provision.relation !== facts.provision.relation || current.provision.basisId !== facts.provision.basisId ||
-              current.provision.agreementId !== facts.provision.agreementId) refuse('ImageAuthorityChanged');
-        } }, { manifest, open, response, signal: abort.signal, range: request.headers.range });
+      // One access record per requester, rights, session, address and manifest version (delivery.ts).
+      const key = JSON.stringify([facts.actor.id, facts.actor.issuer, facts.actor.subject, facts.institution, facts.rightsVersion,
+        [...facts.roles].sort(), facts.binding.method, facts.binding.sessionRef, facts.ingress, manifest.sha256]);
+      const lease = await this.deliveries.join(key, { request, manifest, facts }, abort.signal);
+      let end: ResponseEnd = 'not-sent', bytesWritten = 0;
+      try {
+        const result = await sendOnlineImage({ records: this.records, evidence: new PgImageEvidenceStore(this.db),
+          source: this.orthanc.imageSource(), stagingDirectory }, {
+          manifest, delivery: lease.delivery, requestId: facts.requestId,
+          // This response's current access check, on its own bounded ledger transaction, before any source read.
+          prepare: async (tx: EmrRecordTransaction) => {
+            const at = new Date().toISOString();
+            let current: CurrentImageFacts;
+            try { current = await this.context.current(tx, request, manifest, at); }
+            catch (error) { lease.retire(); throw error; }
+            if (!sameAuthority(current, lease.delivery.facts.facts, manifest)) { lease.retire(); refuse('ImageAuthorityChanged'); }
+            return prepareDelivery(manifest, image, { eventId: randomUUID(), deliveryEventId: lease.delivery.event.eventId, at,
+              cause: 'background-fetch', opening: null,
+              authorization: { studyUid: image.studyUid, institution: current.actor.institutionId, accountGeneration: current.accountGeneration },
+              provision: current.provision });
+          },
+          response, signal: abort.signal, range: request.headers.range });
+        end = result.terminal; bytesWritten = result.bytesWritten;
+        return result;
+      } finally { lease.end(end, bytesWritten); }
     } catch (error) {
       if (kept && sourceChanged(error)) this.manifests.forget(image.studyUid, kept);
       throw error;
     } finally { request.off('aborted', stop); response.off('close', stop); }
+  }
+
+  /** The study delivery's access record: E's provide-prepared event for the whole manifest version, admitted,
+   * committed with the opener's current access check on the same transaction, and confirmed durable, before any
+   * response of the delivery is prepared. The same admission/transaction/confirmation that each frame used to take. */
+  private async openDelivery({ request, manifest, facts }: Opener): Promise<OpenedDelivery<DeliveryFacts>> {
+    const work = this.records.begin();
+    try {
+      const at = new Date().toISOString(), eventId = randomUUID();
+      const study: ImageRequest = parseImageRequest('GET', `/dicom-web/studies/${manifest.studyUid}`);
+      let current!: CurrentImageFacts, prepared!: ReturnType<typeof prepareDelivery>;
+      // The first access check is also the pre-read authorization of this delivery's source reads.
+      await work.transactionWithRecords(async tx => {
+        current = await this.context.current(tx, request, manifest, at);
+        prepared = prepareDelivery(manifest, study, { eventId, at, cause: 'background-fetch', opening: null,
+          authorization: { studyUid: manifest.studyUid, institution: current.actor.institutionId, accountGeneration: current.accountGeneration },
+          provision: current.provision });
+      });
+      // One target per record kind the delivery may carry, naming the study and this manifest version. The manifest
+      // body (kept once, emr_image.source_manifest) lists every object; a B2 payload is bounded and cannot.
+      const kinds = [...new Set(prepared.units.map(unit => unit.recordKind))];
+      const event = parseAccessEvent({ formatVersion: 1, surface: `GET images/dicom-web`, eventId,
+        userId: known(current.actor.identity), rolesAtTime: known(current.actor.roles), actingInstitution: known(current.actor.institutionId),
+        managingInstitution: known(manifest.managingInstitution), occurredAt: at, trustedProxyIp: current.ip,
+        cause: 'background-fetch', context: { basis: 'background-fetch', studyId: null, relatedStudyId: null, reason: null },
+        executor: 'member', targets: kinds.map(kind => ({ kind, patientLinkSnapshot: known(manifest.patient),
+          studyId: known(manifest.studyUid), recordId: known(manifest.studyUid), versionId: known(manifest.sha256) })),
+        action: 'provide-prepared', result: 'prepared', requestId: facts.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null });
+      const operation = await work.admit(event, undefined, { operationId: eventId, attemptId: eventId });
+      const result = await work.transaction(operation, async tx => {
+        const again = await this.context.current(tx, request, manifest, new Date().toISOString());
+        if (!sameAuthority(again, current, manifest)) refuse('ImageAuthorityChanged');
+        return { kind: 'emr-image', id: eventId, version: manifest.sha256 };
+      });
+      if (result.outcome !== 'committed' || result.result?.kind !== 'emr-image' || result.result.id !== eventId ||
+          result.result.version !== manifest.sha256) refuse('ImageEventMismatch');
+      const receipt = await work.confirm({ provisional: true, operationId: operation.operationId, eventId });
+      return { event, receipt, prepared, facts: { facts: current, work } };
+    } catch (error) {
+      work.end();
+      throw error;
+    }
+  }
+
+  /** The delivery's terminal event, related to its provide-prepared event, from what E observed on its responses. */
+  private async closeDelivery(delivery: OpenedDelivery<DeliveryFacts>, _outcome: DeliveryOutcome, closing: DeliveryClosing): Promise<void> {
+    const { work } = delivery.facts;
+    try {
+      if (closing === null) return;
+      const followup: AccessEvent = parseAccessEvent({ ...delivery.event, eventId: randomUUID(), relatedEventId: delivery.event.eventId,
+        action: closing, result: closing === 'transfer-ended' ? 'succeeded' : 'aborted', occurredAt: new Date().toISOString() });
+      await work.transactionWithRecords((_tx, record) => record(followup,
+        async () => ({ kind: 'emr-image', id: delivery.event.eventId, version: delivery.prepared.manifestSha256 })));
+    } finally { work.end(); }
   }
 }

@@ -159,15 +159,20 @@ export class EmrAuditService {
       // E's primary/index keys are UUIDs; other B1 event IDs have no E facts.
       const imageIds = ids.filter(id => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id));
       // E keeps one copy of each study-manifest body and a preparation names it; earlier rows hold their own copy.
-      const prepared = imageIds.length ? await tx.$queryRaw<any[]>`SELECT p.event_id::text,COALESCE(p.source_manifest,m.body) AS source_manifest,
-        p.response_manifest,p.staging_copies FROM emr_image.preparation p
-        LEFT JOIN emr_image.source_manifest m ON m.body_sha256=p.source_manifest_body WHERE p.event_id=ANY(${imageIds}::uuid[])` : [];
-      const observations = imageIds.length ? await tx.$queryRaw<any[]>`SELECT event_id::text,sequence::text,kind,body
-        FROM emr_image.observation WHERE event_id=ANY(${imageIds}::uuid[]) ORDER BY sequence` : [];
-      const joined = new Map<string, { eventId: string; preparation: any; observations: any[] }>();
-      for (const p of prepared) joined.set(p.event_id, { eventId: p.event_id, preparation: p, observations: [] });
+      // A study delivery's one ledger event covers every response row that names it (delivery_event_id); a row written
+      // before study deliveries is its own ledger event.
+      const prepared = imageIds.length ? await tx.$queryRaw<any[]>`SELECT p.event_id::text,p.delivery_event_id::text,p.request_id,
+        COALESCE(p.source_manifest,m.body) AS source_manifest,p.response_manifest,p.staging_copies FROM emr_image.preparation p
+        LEFT JOIN emr_image.source_manifest m ON m.body_sha256=p.source_manifest_body
+        WHERE p.event_id=ANY(${imageIds}::uuid[]) OR p.delivery_event_id=ANY(${imageIds}::uuid[])` : [];
+      const responseIds = [...new Set([...imageIds, ...prepared.map(p => p.event_id)])];
+      const observations = responseIds.length ? await tx.$queryRaw<any[]>`SELECT event_id::text,sequence::text,kind,body
+        FROM emr_image.observation WHERE event_id=ANY(${responseIds}::uuid[]) ORDER BY sequence` : [];
+      const joined = new Map<string, { eventId: string; deliveryEventId: string | null; preparation: any; observations: any[] }>();
+      for (const { delivery_event_id, ...p } of prepared)
+        joined.set(p.event_id, { eventId: p.event_id, deliveryEventId: delivery_event_id ?? null, preparation: p, observations: [] });
       for (const { event_id, ...observation } of observations) {
-        if (!joined.has(event_id)) joined.set(event_id, { eventId: event_id, preparation: null, observations: [] });
+        if (!joined.has(event_id)) joined.set(event_id, { eventId: event_id, deliveryEventId: null, preparation: null, observations: [] });
         joined.get(event_id).observations.push(observation);
       }
       const images = [...joined.values()];

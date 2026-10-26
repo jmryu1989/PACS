@@ -105,7 +105,7 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql',
               'api/prisma/migrations/20261015013945_import_operation/migration.sql',
               'api/prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql',
-              'api/prisma/migrations/20261023180000_emr_pg_ledger/migration.sql', 'api/prisma/migrations/20261023200000_emr_server_signing/migration.sql', 'api/prisma/migrations/20261024120000_emr_d_online/migration.sql', 'api/prisma/migrations/20261025000000_emr_e_online/migration.sql', 'api/prisma/migrations/20261025120000_access_review/migration.sql', 'api/prisma/migrations/20261025150000_emr_f_link/migration.sql', 'api/prisma/migrations/20261026120000_assignment_access_stream/migration.sql', 'api/prisma/migrations/20261026210000_emr_e_source_manifest/migration.sql']
+              'api/prisma/migrations/20261023180000_emr_pg_ledger/migration.sql', 'api/prisma/migrations/20261023200000_emr_server_signing/migration.sql', 'api/prisma/migrations/20261024120000_emr_d_online/migration.sql', 'api/prisma/migrations/20261025000000_emr_e_online/migration.sql', 'api/prisma/migrations/20261025120000_access_review/migration.sql', 'api/prisma/migrations/20261025150000_emr_f_link/migration.sql', 'api/prisma/migrations/20261026120000_assignment_access_stream/migration.sql', 'api/prisma/migrations/20261026210000_emr_e_source_manifest/migration.sql', 'api/prisma/migrations/20261027090000_emr_e_study_delivery/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -752,15 +752,18 @@ def expected_image_rows():
     copy = dict(location='/synthetic/image-staging/body', kind='staging', eventId=event,
                 unit='object:2.25.701.1.1', bytes=4, sha256='1'*64, state='present')
     source = dict(studyUid='2.25.701', sha256='3'*64, patient=dict(linkId='synthetic-link', patientId='SYNTHETIC-E', assigningAuthority='synthetic'))
-    # Inserted in this order: a preparation written since 20261026210000 names the one kept study-manifest body.
+    # Inserted in this order: a preparation written since 20261026210000 names the one kept study-manifest body, and one
+    # written since 20261027090000 names the study delivery's access record (B2 event) and its HTTP request; the earlier
+    # row is its own record (delivery_event_id and request_id NULL).
+    delivery, request = '00000000-0000-4000-8000-0000000e00d1', '00000000-0000-4000-8000-0000000e00a1'
     return dict(source_manifest=[dict(body_sha256='4'*64, study_uid='2.25.701', body=source, recorded_at=at)],
-        preparation=[dict(event_id=event, study_uid='2.25.701',
+        preparation=[dict(event_id=event, delivery_event_id=None, request_id=None, study_uid='2.25.701',
         source_manifest=dict(studyUid='2.25.701', patient=dict(linkId='synthetic-link', patientId='SYNTHETIC-E', assigningAuthority='synthetic')),
         source_manifest_body=None,
         response_manifest=dict(eventId=event, sha256='2'*64, http=dict(status=206, plannedBytes=2,
             selections=[dict(unit=copy['unit'], start=0, end=2)])), staging_copies=[copy], recorded_at=at),
-            dict(event_id=named, study_uid='2.25.701', source_manifest=None, source_manifest_body='4'*64,
-                 response_manifest=dict(eventId=named, sha256='5'*64), staging_copies=[], recorded_at=at)],
+            dict(event_id=named, delivery_event_id=delivery, request_id=request, study_uid='2.25.701', source_manifest=None, source_manifest_body='4'*64,
+                 response_manifest=dict(eventId=named, deliveryEventId=delivery, sha256='5'*64), staging_copies=[], recorded_at=at)],
         observation=[dict(sequence=1, event_id=event, kind='transport',
             body=dict(wire=dict(bytesWritten=2, plannedBytes=2, terminal='transfer-ended'), observations=[]), recorded_at=at),
             dict(sequence=2, event_id=event, kind='copies', body=[dict(copy, state='removed')], recorded_at=at)])

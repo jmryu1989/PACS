@@ -21,6 +21,8 @@ const { ContractError } = load('emr-contract/validation');
 const { ConflictException, ForbiddenException } = require(path.join(api, 'node_modules/@nestjs/common'));
 
 const hash = value => createHash('sha256').update(value).digest('hex');
+// The service's owned-timer registry for study deliveries (delivery.ts); these cases stop at the access check.
+const background = () => load('emr-runtime/background-work').createBackgroundWorkRegistry().work;
 const STUDY = '2.25.7101', SERIES = STUDY + '.1';
 const sop = n => SERIES + '.' + n;
 function manifest(count, frames = 1, study = STUDY) {
@@ -163,7 +165,7 @@ test('the image service rebuilds after a source/current-study change, not after 
   };
   const records = { begin: () => ({ transactionWithRecords: fn => fn({}), end() {} }) };
   const service = new OnlineImageService(records, context, {}, noSourceRead,
-    { facts: async () => ({}) });
+    { facts: async () => ({ roles: [], binding: {}, actor: {} }) }, background());
   const send = async n => {
     const request = Object.assign(new EventEmitter(), { method: 'GET', headers: {} });
     const response = Object.assign(new EventEmitter(), { writableFinished: false });
@@ -190,7 +192,7 @@ test('the image service reads the catalog for each study or series request, betw
   const context = { async manifest() { reads++; return manifest(3); },
     async current() { throw new ForbiddenException('synthetic stop at the access check'); } };
   const records = { begin: () => ({ transactionWithRecords: fn => fn({}), end() {} }) };
-  const service = new OnlineImageService(records, context, {}, noSourceRead, { facts: async () => ({}) });
+  const service = new OnlineImageService(records, context, {}, noSourceRead, { facts: async () => ({ roles: [], binding: {}, actor: {} }) }, background());
   const send = target => service.send(Object.assign(new EventEmitter(), { method: 'GET', headers: {} }),
     Object.assign(new EventEmitter(), { writableFinished: false }), target);
   const seen = [];
@@ -211,7 +213,7 @@ test('simultaneous frames of a kept study do not wait on their own B2 append lan
   const settle = () => new Promise(resolve => setImmediate(resolve));
   const materialized = new WeakMap();
   const requests = { facts(request) {
-    if (!materialized.has(request)) materialized.set(request, admitAppend(client, poolSize, async () => { await settle(); return {}; }));
+    if (!materialized.has(request)) materialized.set(request, admitAppend(client, poolSize, async () => { await settle(); return { roles: [], binding: {}, actor: {} }; }));
     return materialized.get(request);
   } };
   const context = {
@@ -220,7 +222,7 @@ test('simultaneous frames of a kept study do not wait on their own B2 append lan
   };
   const records = { begin: () => ({ transactionWithRecords: fn => admitAppend(client, poolSize, async () => { await settle(); return fn({}); }), end() {} }) };
   process.env.KIN_EMR_STATE_DIR = require('node:os').tmpdir();
-  const service = new OnlineImageService(records, context, {}, noSourceRead, requests);
+  const service = new OnlineImageService(records, context, {}, noSourceRead, requests, background());
   const send = n => service.send(Object.assign(new EventEmitter(), { method: 'GET', headers: {} }),
     Object.assign(new EventEmitter(), { writableFinished: false }),
     `/dicom-web/studies/${STUDY}/series/${SERIES}/instances/${sop(n)}/frames/1`);

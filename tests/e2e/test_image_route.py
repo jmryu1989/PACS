@@ -1,14 +1,21 @@
 # coding: utf-8
 """EMR-E E_ROUTE: the viewer's image frames over the served nginx -> API E boundary -> Orthanc path (E-01/E-02/E-03/E-05).
 
-TEST-E-ROUTE-01 one frame through the public HTTPS entry: the exact stored frame bytes, sent only as one durable B2
-  provide-prepared entry whose fixed response manifest names that frame, followed by its transfer-ended entry and the
-  transport/copy observations; a member of another institution gets no bytes and leaves no provide entry.
+The access record of viewing (의료법 제23조④) is the study delivery: one durable B2 provide-prepared entry for one
+requester's continuous viewing of one study manifest version, closed by one terminal entry; every frame response
+names that record (X-KIN-Image-Event) and keeps its own fixed representation and transport facts in E's rows under its
+own ID (X-KIN-Image-Response). See api/src/emr-image/delivery.ts.
+
+TEST-E-ROUTE-01 one frame through the public HTTPS entry: the exact stored frame bytes, sent only under one durable B2
+  provide-prepared entry naming the study record, with the response's fixed representation naming that entry and its
+  transport/copy observations; a HEAD of the same viewing joins the same record; the record is closed by one
+  transfer-ended entry after the viewing; a member of another institution gets no bytes and leaves no provide entry.
 TEST-E-ROUTE-02 the served OHIF viewer opens a synthetic CT series twice (the first opening after arrival, then again
   from a fresh browser): every slice reaches the viewer (the browser read its frame response to the end, or the viewer
-  holds its image), every frame response carries its E event, and every one the browser read to the end has exactly
-  one provide entry; a provide entry the browser did not receive has at most one terminal entry and is never recorded
-  as ended short of its planned bytes (E-03). E observes its own connection to nginx: a frame nginx took whole and the
+  holds its image), every frame response names a durable provide entry of this study for this member, each opening
+  (its own session) has its own record, every frame the browser read to the end has exactly one response row naming
+  its record and was written whole (E-03), and each record is closed by at most one terminal entry that follows what E
+  observed on that record's responses. E observes its own connection to nginx: a frame nginx took whole and the
   page dropped afterwards is an ended transfer, never a viewed one. The pinned viewer's streaming frame loader stops
   reading at Content-Length without reading the end of the stream, and the browser then sometimes cancels a response it
   received whole (net::ERR_ABORTED, every byte received, no page abort; runs e-route-diag3/diag4-opus-20261026a): such
@@ -193,43 +200,50 @@ class ImageRouteE2E(base.WorklistE2E):
         parts = multipart_parts(headers.get("content-type", ""), body)
         self.assertEqual(1, len(parts))
         self.assertEqual(stored, parts[0][1], "the exact stored frame bytes")
-        event = headers.get("x-kin-image-event")
-        self.assertTrue(event, "a frame through the public entry is an E delivery with its B2 event")
-        quoted([event])
+        event, response_id = headers.get("x-kin-image-event"), headers.get("x-kin-image-response")
+        self.assertTrue(event and response_id, "a frame through the public entry is a response under a study delivery's B2 record")
+        quoted([event, response_id])
         provided = entries(f"e.event_id = '{event}'")
-        self.assertEqual(1, len(provided), "exactly one provide entry for the delivery")
+        self.assertEqual(1, len(provided), "exactly one provide entry for the delivery's record")
         payload = provided[0][1]
         self.assertEqual(("provide-prepared", "prepared", "GET images/dicom-web"),
                          (payload["action"], payload["result"], payload["surface"]))
         self.assertEqual(self.stack.user_ids["doctor"], payload["userId"]["value"]["subject"])
-        self.assertEqual([(fixture.uid, sops[1])], [(t["studyId"]["value"], t["recordId"]["value"]) for t in payload["targets"]])
-        rows = psql(f"SELECT response_manifest::text FROM emr_image.preparation WHERE event_id = '{event}'::uuid;")
+        self.assertEqual([(fixture.uid, fixture.uid, "image")], [(t["studyId"]["value"], t["recordId"]["value"], t["kind"]) for t in payload["targets"]],
+                         "the record names the study at this manifest version")
+        self.assertEqual(0, len(entries(f"e.event_id = '{response_id}'")), "a response is not its own ledger event")
+        rows = psql(f"SELECT response_manifest::text || E'\\t' || delivery_event_id::text FROM emr_image.preparation WHERE event_id = '{response_id}'::uuid;")
         self.assertEqual(1, len(rows))
-        fixed = json.loads(rows[0])
+        fixed, delivery_of_row = json.loads(rows[0].split("\t")[0]), rows[0].split("\t")[1]
+        self.assertEqual((event, event), (delivery_of_row, fixed["deliveryEventId"]), "the response row names its record")
         self.assertEqual(headers.get("x-kin-image-manifest"), fixed["sha256"])
         self.assertEqual([(sops[1], 1, len(stored), hashlib.sha256(stored).hexdigest())],
                          [(r["sopInstanceUid"], r["frame"], r["bytes"], r["sha256"]) for r in fixed["representations"]])
         self.assertEqual((200, True, int(headers["content-length"])),
                          (fixed["http"]["status"], fixed["http"]["body"], fixed["http"]["plannedBytes"]))
-        ended = self.wait_entries(f"e.payload::jsonb->>'relatedEventId' = '{event}'", 1)
-        self.assertEqual([("transfer-ended", "succeeded")], [(p["action"], p["result"]) for _, p in ended])
-        kinds = psql(f"SELECT kind FROM emr_image.observation WHERE event_id = '{event}'::uuid ORDER BY sequence;")
+        kinds = psql(f"SELECT kind FROM emr_image.observation WHERE event_id = '{response_id}'::uuid ORDER BY sequence;")
         self.assertEqual(["transport", "copies"], kinds)
 
-        # HEAD is the same prepared representation without a body.
+        # HEAD is the same prepared representation without a body, a second response of the same viewing's record.
         status, head, body = self.frame(path, "doctor", "HEAD")
         self.assertEqual((200, b""), (status, body))
-        head_event = head.get("x-kin-image-event")
-        self.assertTrue(head_event)
-        self.assertEqual(1, len(entries(f"e.event_id IN ({quoted([head_event])})")))
+        head_response = head.get("x-kin-image-response")
+        self.assertEqual(event, head.get("x-kin-image-event"), "a frame of the same viewing joins the open record")
+        self.assertTrue(head_response and head_response != response_id)
+        quoted([head_response])
+        self.assertEqual([event], psql(f"SELECT delivery_event_id::text FROM emr_image.preparation WHERE event_id = '{head_response}'::uuid;"))
 
-        # Another institution's member: no bytes, no E event, no provide entry naming this object for that member.
-        before = len(entries(f"e.entry_id IN (SELECT entry_id FROM emr_access.access_target WHERE record_id = '{sops[1]}')"))
+        # The viewing over, the record is closed by one terminal entry: both responses ended whole.
+        ended = self.wait_entries(f"e.payload::jsonb->>'relatedEventId' = '{event}'", 1)
+        self.assertEqual([("transfer-ended", "succeeded")], [(p["action"], p["result"]) for _, p in ended])
+
+        # Another institution's member: no bytes, no E event, no provide entry naming this study for that member.
+        before = len(entries(f"e.entry_id IN (SELECT entry_id FROM emr_access.access_target WHERE record_id = '{fixture.uid}')"))
         status, refused, body = self.frame(path, "kdoctor")
         self.assertIn(status, (403, 404), body[:300])
         self.assertNotIn(stored, body)
         self.assertIsNone(refused.get("x-kin-image-event"))
-        after = entries(f"e.entry_id IN (SELECT entry_id FROM emr_access.access_target WHERE record_id = '{sops[1]}')")
+        after = entries(f"e.entry_id IN (SELECT entry_id FROM emr_access.access_target WHERE record_id = '{fixture.uid}')")
         self.assertEqual(before, len(after))
 
     def open_series(self, fixture, sops, opening):
@@ -247,11 +261,12 @@ class ImageRouteE2E(base.WorklistE2E):
         def headers(response):
             if ours(response.request):
                 answered[id(response.request)] = {"sop": sop_of(response.request), "status": response.status,
-                                                  "event": response.headers.get("x-kin-image-event")}
+                                                  "event": response.headers.get("x-kin-image-event"),
+                                                  "response": response.headers.get("x-kin-image-response")}
 
         def done(request):
             if ours(request):
-                finished.setdefault(sop_of(request), []).append(answered.get(id(request), {"status": None, "event": None}))
+                finished.setdefault(sop_of(request), []).append(answered.get(id(request), {"status": None, "event": None, "response": None}))
 
         def lost(request):
             if ours(request):
@@ -295,36 +310,57 @@ class ImageRouteE2E(base.WorklistE2E):
         for measure in (cold, warm):
             self.assertIsNotNone(measure["all_frames_seconds"], f"every slice's frame reached the viewer ({measure['opening']})")
         answered = first_answered + second_answered
-        self.assertTrue(all(r["status"] == 200 and r["event"] for r in answered), "every frame response came through the E boundary")
-        self.assertEqual(len(answered), len({r["event"] for r in answered}), "one E event per delivery")
+        self.assertTrue(all(r["status"] == 200 and r["event"] and r["response"] for r in answered),
+                        "every frame response came through the E boundary under a study delivery's record")
+        self.assertEqual(len(answered), len({r["response"] for r in answered}), "one response row per answered frame")
         received = first + second
         self.assertTrue(all(r["status"] == 200 for r in received), received[:5])
-        events = [r["event"] for r in received]
-        self.assertTrue(all(events), "every frame the browser received came through the E boundary")
-        self.assertEqual(len(events), len(set(events)), "one E event per delivery")
-        provided = self.wait_entries(
-            f"e.payload::jsonb->>'action' = 'provide-prepared' AND e.entry_id IN (SELECT entry_id FROM emr_access.access_target "
-            f"WHERE record_id IN ({quoted(sops)}))", len(events))
-        ids = [event for event, _ in provided]
-        self.assertEqual(len(ids), len(set(ids)))
-        self.assertTrue(set(events) <= set(ids), "every received frame has its provide entry")
-        terminals = {}
-        for event, payload in self.wait_entries(
-                f"e.payload::jsonb->>'relatedEventId' IN ({quoted(ids)})", len(events)):
-            terminals.setdefault(payload["relatedEventId"], []).append(payload["action"])
+        responses = [r["response"] for r in received]
+        self.assertTrue(all(responses), "every frame the browser received came through the E boundary")
+        self.assertEqual(len(responses), len(set(responses)))
+        # Each opening is its own session, so its frames share no record with the other opening's.
+        self.assertTrue({r["event"] for r in first_answered}.isdisjoint({r["event"] for r in second_answered}))
+        deliveries = sorted({r["event"] for r in answered})
+        quoted(deliveries + responses)
+        provided = self.wait_entries(f"e.payload::jsonb->>'action' = 'provide-prepared' AND e.event_id IN ({quoted(deliveries)})", len(deliveries))
+        self.assertEqual(deliveries, sorted(event for event, _ in provided), "every answered frame was provided under a durable study record")
+        for _, payload in provided:
+            self.assertEqual(self.stack.user_ids["doctor"], payload["userId"]["value"]["subject"])
+            self.assertEqual([(fixture.uid, fixture.uid)], [(t["studyId"]["value"], t["recordId"]["value"]) for t in payload["targets"]])
+        self.assertEqual([], entries(f"e.event_id IN ({quoted(responses)})"), "a response is not its own ledger event")
+        # Every received frame has exactly one response row naming its record, and E wrote it whole to its connection.
+        rows = psql("SELECT event_id::text || E'\\t' || delivery_event_id::text FROM emr_image.preparation "
+                    f"WHERE delivery_event_id IN ({quoted(deliveries)});")
+        record_of = dict(row.split("\t") for row in rows)
+        self.assertEqual(len(rows), len(record_of))
+        for r in received:
+            self.assertEqual(r["event"], record_of.get(r["response"]), r)
         wire = {row.split("\t", 1)[0]: json.loads(row.split("\t", 1)[1]) for row in psql(
             "SELECT event_id || E'\\t' || (body->'wire')::text FROM emr_image.observation "
-            f"WHERE kind = 'transport' AND event_id IN ({quoted(ids)});")}
-        for event in ids:
-            with self.subTest(event=event):
-                actions = terminals.get(event, [])
-                self.assertLessEqual(len(actions), 1, "at most one terminal entry per delivery")
-                if event in events:
-                    self.assertEqual(["transfer-ended"], actions)
-                if "transfer-ended" in actions:
-                    # Ended means E wrote the whole planned response to its connection, whatever the page did later.
-                    self.assertEqual(wire[event]["plannedBytes"], wire[event]["bytesWritten"], wire.get(event))
-                    self.assertEqual("transfer-ended", wire[event]["terminal"])
+            f"WHERE kind = 'transport' AND event_id IN ({quoted(responses)});")}
+        for response in responses:
+            with self.subTest(response=response):
+                # Ended means E wrote the whole planned response to its connection, whatever the page did later.
+                self.assertEqual(wire[response]["plannedBytes"], wire[response]["bytesWritten"], wire.get(response))
+                self.assertEqual("transfer-ended", wire[response]["terminal"])
+        # The viewing over, each record is closed by at most one terminal entry that follows what E observed on all of
+        # the record's responses (not only the ones the browser finished): any aborted response makes it aborted, an
+        # unconfirmed ending leaves it without a v1 terminal action, otherwise it ended.
+        closings = {}
+        for _, payload in self.wait_entries(f"e.payload::jsonb->>'relatedEventId' IN ({quoted(deliveries)})", len(deliveries), seconds=40):
+            closings.setdefault(payload["relatedEventId"], []).append((payload["action"], payload["result"]))
+        observed = {}
+        for row in psql("SELECT p.delivery_event_id::text || E'\\t' || (o.body->'wire'->>'terminal') FROM emr_image.preparation p "
+                        "JOIN emr_image.observation o ON o.event_id = p.event_id AND o.kind = 'transport' "
+                        f"WHERE p.delivery_event_id IN ({quoted(deliveries)});"):
+            delivery, terminal = row.split("\t")
+            observed.setdefault(delivery, []).append(terminal)
+        for delivery in deliveries:
+            with self.subTest(delivery=delivery):
+                terminals = observed.get(delivery, [])
+                expected = ([("transfer-aborted", "aborted")] if "transfer-aborted" in terminals
+                            else [] if "transfer-unknown" in terminals else [("transfer-ended", "succeeded")])
+                self.assertEqual(expected, closings.get(delivery, []), terminals)
 
     def test_route_03_study_and_series_retrieve_answer_with_an_object_that_arrived_after_a_frame(self):
         fixture, series, sops, study = ct_series(self.stack, "arrival", 2, 64)

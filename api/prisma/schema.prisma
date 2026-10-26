@@ -1095,5 +1095,6 @@ model ImportOperation {
 }
 
 // EMR E: SQL-owned emr_image.preparation/observation retain fixed manifests and
-// transport/staging facts (20261025000000_emr_e_online), on the B2 connection;
-// emr_image.source_manifest keeps each study-manifest body once (20261026210000_emr_e_source_manifest).
+// transport/staging facts (20261025000000_emr_e_online), written durably before a response's first byte;
+// emr_image.source_manifest keeps each study-manifest body once (20261026210000_emr_e_source_manifest); a preparation
+// names the study delivery's B2 access record and its HTTP request (20261027090000_emr_e_study_delivery).
