@@ -54,7 +54,7 @@ UID·단계·병원 보유 N건 중 보낸 M건·재시도 횟수·고정 오류
 
 ## 검증
 
-격리된 합성 Gateway 검증은 로컬 개발 스택 전용이며 [시험 실행 안내](../tests/README.md)의 지정된 fixture 명령을 사용한다.
+격리된 합성 Gateway 검증은 합성 스택 전용이며 [시험 실행 안내](../tests/README.md)의 지정된 fixture 명령을 사용한다.
 
 로그와 큐에는 UID·SOP UID·개수·바이트 수만 남기며 환자 이름과 PatientID는 남기지 않는다.
 `KIN_TLS_VERIFY=false`는 자체 서명 인증서를 쓰는 로컬 검증 전용이다. 운영에서는 신뢰할 수 있는

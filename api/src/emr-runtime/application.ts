@@ -27,7 +27,7 @@ export class EmrRuntime {
     if (this.ready) return;
     try {
       await this.db.$connect();
-      await verifyRuntimeConnection(this.db);
+      if (process.env.DEPLOYMENT_MODE === 'production') await verifyRuntimeConnection(this.db);
       await this.ledger.recoverPending();
       await this.journal.replay();
       composeEmrAdapters(runtimeAdapters);

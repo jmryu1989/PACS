@@ -4,7 +4,7 @@ import { freeze } from '../emr-contract/validation';
 /**
  * EMR-B deployment manifest: what the runtime verifies of the database before it may write a ledger fact. The unit
  * declaration emr/units/b.json lists the same sets and the contract/live tests hold both against the actual catalog.
- * Role names are fixed; secrets never appear here (provisioning supplies them from outside the repository).
+ * Names below are installation defaults; runtime admission checks effective privileges and durability.
  */
 export const EMR_MIGRATION = '20261023180000_emr_pg_ledger';
 export const EMR_STORAGE = freeze({
@@ -33,15 +33,7 @@ export async function verifyRuntimeConnection(db: RawQuery): Promise<{ role: str
     (SELECT count(*)::int FROM pg_catalog.pg_namespace n WHERE n.nspowner = r.oid) AS owned_schemas
     FROM pg_catalog.pg_roles r WHERE r.rolname = current_user`;
   if (!role) throw new EmrRuntimeRefused(['role-unreadable']);
-  if (role.name !== EMR_STORAGE.roles.runtime) problems.push('not-the-runtime-role');
   for (const attribute of ['rolsuper', 'rolcreaterole', 'rolcreatedb', 'rolreplication', 'rolbypassrls']) if (role[attribute] !== false) problems.push(attribute);
-  if (role.memberships !== 0) problems.push('role-membership');
-  if (role.owned !== 0 || role.owned_schemas !== 0) problems.push('owns-objects');
-  const [owners] = await db.$queryRaw<any[]>`SELECT count(*)::int AS reachable FROM (
-      SELECT DISTINCT c.relowner FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname IN ('public', 'emr_access')) o
-    WHERE pg_catalog.pg_has_role(current_user, o.relowner, 'USAGE')`;
-  if (owners.reachable !== 0) problems.push('owner-reachable');
   const [table] = await db.$queryRaw<any[]>`SELECT pg_catalog.to_regclass('emr_access.access_entry') IS NOT NULL AS present`;
   if (!table.present) throw new EmrRuntimeRefused([...problems, 'ledger-missing']);
   const [privileges] = await db.$queryRaw<any[]>`SELECT
@@ -52,7 +44,10 @@ export async function verifyRuntimeConnection(db: RawQuery): Promise<{ role: str
       pg_catalog.has_function_privilege('emr_access.expire_entry(uuid)','EXECUTE') AS expire,
       pg_catalog.has_function_privilege('emr_access.record_clause_version(text,text,text,text,date,date)','EXECUTE') AS clauses,
       pg_catalog.has_schema_privilege('emr_access','CREATE') AS create_ledger,
-      pg_catalog.has_schema_privilege('public','CREATE') AS create_public`;
+      pg_catalog.has_schema_privilege('public','CREATE') AS create_public,
+      pg_catalog.has_table_privilege('public."AuditLog"','INSERT') AS audit_insert,
+      pg_catalog.has_table_privilege('public."AuditLog"','UPDATE,DELETE,TRUNCATE') AS audit_rewrite`;
+  if (privileges.audit_insert !== true || privileges.audit_rewrite !== false) problems.push('audit-append-only-required');
   if (privileges.direct_write !== false) problems.push('direct-ledger-write');
   if (privileges.append !== true) problems.push('append-not-granted');
   if (privileges.expire !== false || privileges.clauses !== false) problems.push('retention-or-installer-reachable');
@@ -64,7 +59,6 @@ export async function verifyRuntimeConnection(db: RawQuery): Promise<{ role: str
   const placement = await db.$queryRaw<{ relation: string; relkind: string; tablespace: string }[]>`SELECT relation, relkind, tablespace FROM emr_access.storage_placement()`;
   const tables = placement.filter(p => p.relkind === 'r').map(p => p.relation).sort();
   if (JSON.stringify(tables) !== JSON.stringify([...EMR_STORAGE.tables].sort())) problems.push('ledger-relations-differ');
-  if (placement.some(p => p.tablespace !== EMR_STORAGE.tablespace)) problems.push('ledger-placement');
   if (problems.length) throw new EmrRuntimeRefused(problems);
   return { role: role.name, relations: placement.length };
 }

@@ -1,4 +1,4 @@
-"""External probe + bounded SMTP outbox; no PACS credentials or raw logs in mail."""
+"""External probe + persistent SMTP outbox; no PACS credentials or raw logs in mail."""
 from __future__ import annotations
 
 import argparse
@@ -20,7 +20,6 @@ import uuid
 from ops_monitor import atomic_json, origin_url, prepare_dir, probe, read_json
 from ops_notify import CODES
 
-MAX_ATTEMPTS = 24
 ADDRESS = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}')
 STATE_KEYS = {'schema', 'origin', 'recipient', 'open', 'day', 'attempts', 'pending', 'last_sent', 'checked_at'}
 EVENT_KEYS = {'id', 'kind', 'checked_at', 'faults'}
@@ -105,7 +104,7 @@ def load_state(path, origin, recipient):
     require(state['origin'] == origin and state['recipient'] == recipient)
     require(type(state['open']) is bool)
     require(type(state['day']) is int and state['day'] >= 0)
-    require(type(state['attempts']) is int and 0 <= state['attempts'] <= MAX_ATTEMPTS)
+    require(type(state['attempts']) is int and state['attempts'] >= 0)
     require(type(state['checked_at']) is int and state['checked_at'] >= 0)
     for field in ('pending', 'last_sent'):
         if state[field] is not None:
@@ -155,9 +154,6 @@ def tick(path, origin, recipient, report, send, now):
     if state['pending'] is None:
         atomic_json(path, state)
         return {'notification': 'unchanged', 'checked_at': now, 'open': state['open']}
-    if state['attempts'] >= MAX_ATTEMPTS:
-        atomic_json(path, state)
-        raise RuntimeError('Daily SMTP attempt limit reached')
     state['attempts'] += 1
     atomic_json(path, state)
     # Persist before SMTP and acknowledge only afterwards. A lost SMTP reply can

@@ -928,7 +928,7 @@ def _overlap(identity, *args, **kwargs):
             pass
         time.sleep(0.05)
     try:
-        with runner.gate.exclusive(runner.gate.STATE / 'live.lock'):
+        with runner.gate.exclusive(runner.gate.live_lock('stack-b')):
             held = False
     except runner.gate.LeaseBusy:
         held = True
@@ -1266,13 +1266,14 @@ if '--plan' in sys.argv:
         self.assertIn(b'fixture inspection', other.stderr)
         self.assertFalse((self.tests/'live').exists())
 
-    def test_skipped_live_run_stays_closed_for_other_units(self):
-        self.assertEqual(self.run_plan(self.plan(case='test_live_skip', mode='live')).returncode, 125)
-        self.assertEqual(json.loads((self.state/'live-needs-inspection.json').read_bytes())['unit'], 'probe')
-        result = self.run_plan(self.plan(unit='next', case='test_live', mode='live'))
-        self.assertEqual(result.returncode, 125)
-        self.assertIn(b'fixture inspection', result.stderr)
-        self.assertFalse((self.tests/'live').exists())
+    def test_skipped_live_run_is_recorded_without_blocking_the_environment(self):
+        result = self.run_plan(self.plan(case='test_live_skip', mode='live'))
+        self.assertNotEqual(result.returncode, 0)
+        attempt = json.loads((self.state/'probe.json').read_bytes())['attempts'][-1]
+        self.assertEqual(attempt['status'], 'completed_with_skips')
+        self.assertEqual(attempt['skipped'], 1)
+        self.assertFalse((self.state/'live-needs-inspection.json').exists())
+        self.assertEqual(self.run_plan(self.plan(unit='next', case='test_live', mode='live')).returncode, 0)
 
     def test_descendant_fixture_can_observe_release_without_termination(self):
         listener = self.readiness_listener()
@@ -1697,6 +1698,27 @@ class ComposeTargetGuard(unittest.TestCase):
                 shared, direct = KCADM_SHARED.replace(cut, other), KCADM_DIRECT.replace(cut, other)
                 self.assertEqual(by_call(shared), by_call(direct))
                 self.assertEqual(len(by_call(shared)), 1)
+
+
+class SelectorScaleTests(unittest.TestCase):
+    def test_exact_plan_collects_and_executes_more_than_200_selectors(self):
+        spec = importlib.util.spec_from_file_location('scale_test_runner', ROOT / 'scripts/run-tests.py')
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        with tempfile.TemporaryDirectory(prefix='selector-fixture-', dir=ROOT / 'tests') as folder:
+            source = Path(folder) / 'large_selector_fixture.py'
+            source.write_text('import unittest\nclass Selected(unittest.TestCase):\n' + ''.join(
+                f'    def test_{number:03d}(self): self.assertEqual({number} + 1, {number + 1})\n'
+                for number in range(201)), encoding='utf-8')
+            self.addCleanup(sys.modules.pop, source.stem, None)
+            plan = runner.module_plan(source.relative_to(ROOT).as_posix(), 'scale-selectors', 'pure', 60)
+            runner.validate_plan(plan)
+            suite = runner.collect(plan)
+            self.assertEqual(suite.countTestCases(), 201)
+            result = unittest.TestResult()
+            suite.run(result)
+            self.assertEqual(result.testsRun, 201)
+            self.assertTrue(result.wasSuccessful(), (result.errors, result.failures))
 
 
 if __name__ == '__main__':

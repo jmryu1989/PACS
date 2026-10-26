@@ -476,7 +476,7 @@ class RotationContracts(unittest.TestCase):
 
     def test_retained_operation_lease_never_authorizes_rotation(self):
         with ops.lock() as lease:
-            lease.retained = True
+            lease.retain()
             try:
                 with self.assertRaises(RuntimeError):
                     self.rotate()
