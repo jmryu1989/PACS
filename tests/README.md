@@ -3065,3 +3065,5 @@ interruption and staging-copy facts. It does not prove native OHIF display. The
 registered `GET`/`HEAD images/dicom-web?target=...` route requires Module A's server
 context/catalog binding (REQUEST_FACTS #211); the current binding returns 503.
 Nginx/served OHIF and derived PDF/preview/thumbnail snapshots remain unconnected.
+
+REQ-MG-LENGTH-SCALE/FRAME/READBACK → RISK-MG-WRONG-SCALE/FRAME/BASIS → TEST-MG-LENGTH-BOUNDARY: `mg_length_test.cjs` checks DBT frame/shared geometry, Synthetic 2D and FFDM spacing precedence, detector/ERMF/source-plane labels, no-spacing refusal, saved baseline and SR frame/coordinates. PixelSpacing takes precedence; otherwise projection spacing is ImagerPixelSpacing / supplied ERMF or explicitly detector-based. Source: user/Minhoon 2026-10-26; DICOM PS3.3 §10.7. Real served public-sample draw/save/reopen/SR evidence is recorded separately; pure tests do not constitute physician acceptance.
