@@ -11,7 +11,7 @@ const { readFileSync } = require('node:fs');
 
 function fixture(before = false) {
   const images = new Map(), viewports = new Map(), groups = new Map(), subscribers = new Set();
-  const draws = [];
+  const draws = [], metadataReads = [];
   const native = function (element, svg) { draws.push({ tool: this, element, svg }); return 'native result'; };
   function group(id) {
     const tools = new Map();
@@ -23,8 +23,9 @@ function fixture(before = false) {
   }
   const manager = { getAllToolGroups: () => [...groups.values()], getToolGroup: id => groups.get(id) };
   const window = { cornerstoneTools: { ToolGroupManager: manager }, cornerstone: {
-    metaData: { get: (type, id) => type === 'instance' ? images.get(id) : {
-      rowCosines: [0, 1, 0], columnCosines: [0, 0, -1], imagePositionPatient: [0, 0, 0],
+    metaData: { get(type, id) {
+      if (type === 'instance') { metadataReads.push(id); return images.get(id); }
+      return { rowCosines: [0, 1, 0], columnCosines: [0, 0, -1], imagePositionPatient: [0, 0, 0] };
     } },
     getEnabledElementByViewportId: id => viewports.has(id) ? { viewport: viewports.get(id) } : undefined,
   } };
@@ -52,10 +53,10 @@ function fixture(before = false) {
       const key = `${id}-volume-${index}`; images.set(key, value); return key;
     });
     const viewport = { type: 'orthographic', getCurrentImageId: () => undefined,
-      getImageIds: () => ids, getFrameOfReferenceUID: () => frame };
+      getVolumeId: () => `${id}-volume`, getImageIds: () => ids, getFrameOfReferenceUID: () => frame };
     viewports.set(id, viewport); return { viewport };
   }
-  return { extension, tool, native, image, images, pane, volumePane, groups, subscribers, draws,
+  return { extension, tool, native, image, images, pane, volumePane, groups, subscribers, draws, metadataReads,
     render: () => tool.renderAnnotation(target, svg), target, svg };
 }
 
@@ -235,4 +236,64 @@ test('MPR checks the whole displayed volume and rechecks replacement on either p
     assert.equal(render([{ ...image, StudyInstanceUID: 'prior' }]), false);
     assert.equal(render([image, image]), 'native result');
   }
+});
+
+
+test('MPR creation, replacement and teardown without a volume draw nothing and recover after setVolumes', () => {
+  for (const changed of ['source', 'target']) {
+    const f = fixture(), image = f.image({ Modality: 'CT' });
+    const source = f.volumePane('source', [image]), target = f.volumePane('target', [image]);
+    const viewport = (changed === 'source' ? source : target).viewport;
+    const volumeId = viewport.getVolumeId, imageIds = viewport.getImageIds;
+    const render = () => f.tool.renderAnnotation(target, f.svg);
+    // Pinned cornerstone throws when the actor or its cached volume is absent.
+    viewport.getVolumeId = () => undefined;
+    viewport.getImageIds = () => { throw new Error('No actor found for the given volumeId: undefined'); };
+    assert.equal(render(), false);
+    viewport.getVolumeId = volumeId;
+    assert.equal(render(), false);
+    assert.equal(f.draws.length, 0);
+    viewport.getImageIds = imageIds;
+    assert.equal(render(), 'native result');
+    viewport.getImageIds = () => { throw new Error('imageVolume does not exist in cache'); };
+    assert.equal(render(), false);
+    viewport.getImageIds = imageIds;
+    assert.equal(render(), 'native result');
+  }
+});
+
+test('MPR camera renders share one metadata pass per volume and replacement rechecks its sources', () => {
+  const f = fixture(), image = f.image({ Modality: 'CT' });
+  const source = f.volumePane('source', [image, image]);
+  const target = f.volumePane('target', [image, image]);
+  const render = () => f.tool.renderAnnotation(target, f.svg);
+  // Orthographic panes of the same cached volume expose the same source array.
+  target.viewport.getVolumeId = source.viewport.getVolumeId;
+  target.viewport.getImageIds = source.viewport.getImageIds;
+  assert.equal(render(), 'native result');
+  assert.equal(f.metadataReads.length, 2);
+  assert.equal(render(), 'native result');
+  assert.equal(f.metadataReads.length, 2);
+  target.viewport.getFrameOfReferenceUID = () => 'other';
+  assert.equal(render(), false);
+  target.viewport.getFrameOfReferenceUID = () => 'frame';
+  assert.equal(render(), 'native result');
+  assert.equal(f.metadataReads.length, 2);
+  const replacement = f.volumePane('replacement', [image, { ...image, ImagePositionPatient: undefined }]);
+  target.viewport.getVolumeId = replacement.viewport.getVolumeId;
+  target.viewport.getImageIds = replacement.viewport.getImageIds;
+  assert.equal(render(), false);
+  assert.equal(f.metadataReads.length, 4);
+  assert.equal(render(), false);
+  assert.equal(f.metadataReads.length, 4);
+  // Replacing the cached volume under the same ID also invalidates a negative verdict.
+  const restored = f.volumePane('replacement', [image, image]);
+  target.viewport.getImageIds = restored.viewport.getImageIds;
+  assert.equal(render(), 'native result');
+  assert.equal(f.metadataReads.length, 6);
+  assert.equal(render(), 'native result');
+  assert.equal(f.metadataReads.length, 6);
+  f.extension.onModeExit(); f.extension.onModeEnter();
+  assert.equal(render(), 'native result');
+  assert.equal(f.metadataReads.length, 10);
 });

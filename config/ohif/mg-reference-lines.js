@@ -7,19 +7,33 @@ function kinCreateMGReferenceLines() {
     stop?.();
     const core = window.cornerstone, manager = window.cornerstoneTools.ToolGroupManager;
     const groups = new Set(), tools = new Set(), restores = [];
+    const volumes = new Map();
     function instance(viewport) {
       if (viewport?.type === 'orthographic') {
         // Reformatted MPR planes have no current image ID. Native geometry uses
         // the volume camera; establish its coordinates from the volume's sources.
-        const ids = viewport.getImageIds(), frame = viewport.getFrameOfReferenceUID();
-        const first = ids?.length ? core.metaData.get('instance', ids[0]) : null;
-        if (!frame || !first?.StudyInstanceUID || first.FrameOfReferenceUID !== frame) return null;
-        return ids.every(id => {
-          const image = core.metaData.get('instance', id);
-          return storedPlane(image) && image.FrameOfReferenceUID === frame &&
-            image.StudyInstanceUID === first.StudyInstanceUID && image.Modality === first.Modality &&
-            (image.Modality !== 'MG' || side(image) === side(first));
-        }) ? first : null;
+        const volumeId = viewport.getVolumeId();
+        if (!volumeId) return null;
+        let ids;
+        try { ids = viewport.getImageIds(); }
+        catch { return null; } // The actor/cache can be absent during setVolumes or teardown.
+        const frame = viewport.getFrameOfReferenceUID();
+        if (!frame || !ids?.length) return null;
+        let cached = volumes.get(volumeId);
+        // Cached volumes own a fixed image-ID array. Replacement under the same ID
+        // must recheck its sources; camera changes share the existing verdict.
+        if (!cached || cached.ids !== ids) {
+          const first = core.metaData.get('instance', ids[0]);
+          const valid = first?.StudyInstanceUID && first.FrameOfReferenceUID && ids.every((id, index) => {
+            const image = index ? core.metaData.get('instance', id) : first;
+            return storedPlane(image) && image.FrameOfReferenceUID === first.FrameOfReferenceUID &&
+              image.StudyInstanceUID === first.StudyInstanceUID && image.Modality === first.Modality &&
+              (image.Modality !== 'MG' || side(image) === side(first));
+          });
+          cached = { ids, image: valid ? first : null };
+          volumes.set(volumeId, cached);
+        }
+        return cached.image?.FrameOfReferenceUID === frame ? cached.image : null;
       }
       const imageId = viewport?.getCurrentImageId?.();
       const image = imageId ? core.metaData.get('instance', imageId) : null;
