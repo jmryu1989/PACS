@@ -12,6 +12,34 @@ configuration. The C2 handoff uses ID `c2-wrap-v1` mounted at
 `/run/secrets/emr-signing-wrap-v1`; a host source path must be supplied by the
 installation operator. This runbook does not claim that any site is configured.
 
+## Enabling online approvals
+
+`emr/deploy/docker-compose.signing.yml` is that mapping for the API container. On
+the host, keep one raw 32-byte file per wrapping ID (the file the custody
+configuration's `files` entry for `c2-wrap-v1` names), readable by the API
+container user only (`node`, uid 1000 in the production image: `chown 1000:1000`,
+`chmod 0400`). Merge the overlay after the stack's own files with
+`KIN_EMR_WRAPPING_SECRET_FILE` set to that absolute path, for example:
+
+```sh
+KIN_EMR_WRAPPING_SECRET_FILE=/srv/kin-signing-secrets/emr-signing-wrap-v1 \
+  docker compose -f docker-compose.yml -f docker-compose.prod.yml -f emr/deploy/docker-compose.signing.yml up -d api
+```
+
+A missing variable or file stops Compose; nothing creates replacement bytes. A
+stack started without the overlay still serves its other work and answers each
+approval with `WrappingSecretConfigurationPending`. The production introduction
+tooling's fixed Compose list does not include this overlay yet; adding it there is
+part of the approved operational activation, not of this file.
+
+Each doctor's key is then created by the institution's admin: Members → the
+member's **Signing Key** → Create Key (Rotate Key replaces it, Retire Key ends it;
+each needs a reason). Doctors approve as before with no extra step. Every change
+is one `server:doctor-key-management` entry of the access ledger (Access Review),
+and earlier signatures keep verifying from the retained public keys. Because the
+new private key is wrapped with `c2-wrap-v1`, the next nightly backup must succeed
+with this custody configuration before the change is considered recoverable.
+
 ## Nightly job
 
 Install a private JSON configuration at `/etc/kin-deploy/emr-wrapping-custody.json`,
@@ -56,10 +84,9 @@ python3 scripts/ops_backup.py rehearse /srv/kin-backups/SET
 ```
 
 The first command checks the custody files against the snapshot and prints only
-the restored ID/path mapping. Configure the existing signing service's
-`FileWrappingSecrets` paths and secret mounts with that mapping. The command
-refuses to overwrite an existing destination. Startup wiring of that service
-belongs to the API integration unit; this ops unit does not change it.
+the restored ID/path mapping. Point `KIN_EMR_WRAPPING_SECRET_FILE` of the signing
+overlay (above) at the restored `c2-wrap-v1` file. The command refuses to
+overwrite an existing destination.
 
 Rehearsal restores its own temporary custody copy using that same locator, checks
 all restored table counts and calls the existing product key-unwrapping function

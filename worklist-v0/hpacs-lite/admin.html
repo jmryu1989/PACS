@@ -328,6 +328,7 @@
   <script src="session-transport.js"></script>
   <script>KinWorkContext.follow(KinAuth);</script>
   <script src="study-access-admin.js"></script>
+  <script src="signing-key-admin.js"></script>
   <script>
     // Every panel closes synchronously with the page gate, before navigation or a network wait.
     const KinConsoleSession = (() => {
@@ -378,6 +379,11 @@
       };
     })();
     KinStudyAccessAdmin.attach(KinConsoleSession, message => {
+      const box = document.querySelector("#message");
+      box.textContent = message;
+      box.classList.add("show");
+    });
+    KinSigningKeyAdmin.attach(KinConsoleSession, message => {
       const box = document.querySelector("#message");
       box.textContent = message;
       box.classList.add("show");
@@ -590,6 +596,7 @@
             ? action("Suspend", () => mutate(user, { enabled: false }), "danger")
             : action("Activate", () => mutate(user, { enabled: true })));
           if(user.enabled && user.institution===KinAuth.session()?.institution && user.approvalState==="APPROVED")actions.append(action("Study Access",()=>KinStudyAccessAdmin.open(user)));
+          if (KinSigningKeyAdmin.eligible(user)) actions.append(action("Signing Key", () => KinSigningKeyAdmin.open(user)));
           row.append(actions);
           body.append(row);
         });
@@ -741,6 +748,7 @@
       function closeMembers() {
         membersEpoch++;
         KinStudyAccessAdmin.close();
+        KinSigningKeyAdmin.close();
         Object.assign(state, { page: 1, total: 0, users: [], editing: null, institutions: new Set() });
         $("#create-dialog").close();
         $("#membership-dialog").close();

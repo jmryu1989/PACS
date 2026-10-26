@@ -195,7 +195,8 @@
       "20261025000000_emr_e_online",
     "20261025120000_access_review",
       "20261025150000_emr_f_link",
-      "20261026120000_assignment_access_stream"
+      "20261026120000_assignment_access_stream",
+      "20261026180000_emr_signing_key_admin"
     ],
     "latest_before": "20261016120000_related_report_insert_receipt",
     "historic_b1": "unchanged"
@@ -251,7 +252,8 @@
       "entry_for_event(text,text)",
       "investigation_entries(text,text,timestamptz,timestamptz,bigint,bigint,integer,jsonb)",
       "investigation_count(text,text,timestamptz,timestamptz,bigint,jsonb)",
-      "existing_member_identity(text,text)"
+      "existing_member_identity(text,text)",
+      "member_identity_binding(uuid)"
     ],
     "reader_functions": [
       "storage_placement()",

@@ -308,9 +308,12 @@ test('C-C14 the C declaration matches the files and collected cases exactly; mis
     assert.equal(unit.expected[suite], cases.length, suite);
   }
   assert.equal(Object.values(unit.cases).reduce((total, cases) => total + cases.length, 0), unit.expected.total);
-  for (const empty of [unit.routes.active, unit.models.active, unit.records.active, unit.candidate_cases]) assert.deepEqual(empty, []);
+  for (const empty of [unit.models.active, unit.records.active, unit.candidate_cases]) assert.deepEqual(empty, []);
+  // KEY-ADMIN: the administrator's key entry is the only C route; its key changes ride ServerKeys.manage.
+  assert.deepEqual(unit.routes.active, ['GET admin/users/:id/signing-key', 'POST admin/users/:id/signing-key']);
   assert.deepEqual(unit.migrations.active, ['api/prisma/migrations/20261023200000_emr_server_signing/migration.sql']);
-  assert.deepEqual(unit.live.active, [{ module: 'tests/emr/c/server_signing_live.py', class: 'ServerSigningPg', methods: ['test_signing_and_restore'] }]);
+  assert.deepEqual(unit.live.active, [{ module: 'tests/emr/c/server_signing_live.py', class: 'ServerSigningPg', methods: ['test_signing_and_restore'] },
+    { module: 'tests/emr/c/key_admin_live.py', class: 'KeyAdminHttpPg', methods: ['test_key_admin_http'] }]);
   // The exact-selection judge accepts only every declared case passing once.
   const ids = ['C-C01', 'C-Q01'];
   const tap = lines => 'TAP version 13\n' + lines.join('\n') + '\n1..' + lines.length + '\n';

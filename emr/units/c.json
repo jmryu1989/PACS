@@ -41,7 +41,10 @@
     "tests/emr/c/server_signing_live.py",
     "tests/emr/c/server_signing_pg_test.cjs",
     "api/prisma/migrations/20261023200000_emr_server_signing/migration.sql",
-    "api/src/emr-report/native-signing.ts"
+    "api/src/emr-report/native-signing.ts",
+    "api/src/signing-key-admin.controller.ts",
+    "tests/emr/c/key_admin_http_pg_test.cjs",
+    "tests/emr/c/key_admin_live.py"
   ],
   "forbidden_single_writer": [
     "worklist-v0/hpacs-lite/main.html",
@@ -252,7 +255,10 @@
     ]
   },
   "routes": {
-    "active": [],
+    "active": [
+      "GET admin/users/:id/signing-key",
+      "POST admin/users/:id/signing-key"
+    ],
     "planned_c2": [
       "single report read",
       "offline event submit/receipt lookup",
@@ -279,7 +285,7 @@
     ]
   },
   "deployment": {
-    "active": "C2 PostgreSQL server-signing schema and B2 LedgerPort adapter; native route/startup wiring and operational secret custody are not yet activated.",
+    "active": "C2 PostgreSQL server-signing schema and B2 LedgerPort adapter; the admin creates/rotates/retires a doctor's server key through ServerKeys.manage (admin/users/:id/signing-key); emr/deploy/docker-compose.signing.yml supplies the #218 custody (c2-wrap-v1 at /run/secrets/emr-signing-wrap-v1). Operational activation is a separate approved step.",
     "planned_c2": "C2 + C-NATIVE package; no activation before measured Q/J/H/epsilon"
   },
   "restore": {
@@ -370,6 +376,13 @@
         "class": "ServerSigningPg",
         "methods": [
           "test_signing_and_restore"
+        ]
+      },
+      {
+        "module": "tests/emr/c/key_admin_live.py",
+        "class": "KeyAdminHttpPg",
+        "methods": [
+          "test_key_admin_http"
         ]
       }
     ],

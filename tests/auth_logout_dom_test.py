@@ -150,6 +150,8 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/critical-result-inbox.js",
     "worklist-v0/hpacs-lite/admin.html",
     "worklist-v0/hpacs-lite/study-access-admin.js",
+    "worklist-v0/hpacs-lite/signing-key-admin.js",
+    "worklist-v0/hpacs-lite/admin-access-review.js",
     "worklist-v0/hpacs-lite/clinician.html",
     "worklist-v0/hpacs-lite/clinician.js",
 )
