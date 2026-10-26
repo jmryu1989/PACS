@@ -101,6 +101,16 @@ class Route:
 # 이 표가 진입점의 단일 진실원천이다. 컨트롤러에 라우트를 추가하고 여기에 선언하지
 # 않으면 test_every_controller_route_is_declared가 살아 있는 스택을 건드리기도 전에 실패한다.
 ROUTES: dict[tuple[str, str], Route] = {
+    ("POST", "emr-audit/roster/:grantId"): Route(Kind.TENANT),
+    ("POST", "emr-audit/investigations"): Route(Kind.TENANT),
+    ("POST", "emr-audit/exports"): Route(Kind.TENANT),
+    ("POST", "emr-audit/requests"): Route(Kind.TENANT),
+    ("POST", "emr-audit/issuances"): Route(Kind.TENANT),
+    ("POST", "emr-audit/issuances/:id/issue"): Route(Kind.TENANT),
+    ("POST", "emr-audit/issuances/:id/delivery"): Route(Kind.TENANT),
+    ("GET", "emr-audit/requests/:id"): Route(Kind.TENANT),
+    ("POST", "emr-audit/requests/:id/extend"): Route(Kind.TENANT),
+    ("POST", "emr-audit/requests/:id/resolve"): Route(Kind.TENANT),
     ("GET", "studies/:uid/tech-note"): Route(Kind.TENANT),
     ("POST", "studies/:uid/tech-note"): Route(Kind.TENANT),
     ("GET", "studies/:uid/tech-note/history"): Route(Kind.TENANT),
@@ -5941,6 +5951,10 @@ class LiveInvariantTests(unittest.TestCase):
             self.assertEqual((prepared.status, prepared.body.get("state")), (200, "prepared"), prepared.text)
             archive = self.stack.bearer_request("GET", f"/studies/{study}/original-downloads/{download}/archive", self.stack.token("doctor"))
             self.assertEqual(archive.status, 200)
+            # The response finishes before the result transaction commits its audit row.
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and self.s9u4_operation(download)["status"] == "sending":
+                time.sleep(0.5)
             rows = [line.split("\t") for line in psql(f"SELECT action || E'\\t' || detail FROM \"AuditLog\" WHERE detail::jsonb->>'operationId'='{download}' ORDER BY id;")]
             self.assertEqual([action for action, _ in rows], ["original.download.prepare", "original.download.intent", "original.download.result"])
             self.assertTrue(all(json.loads(detail)["institutionId"] == "hallym" for _, detail in rows))

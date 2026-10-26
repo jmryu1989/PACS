@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { AccessEvent, AccessStream, AppendOnlyAccessStore, DurableAccessReceipt, StatutoryAct, statutoryAct } from '../emr-contract/access-event';
@@ -242,7 +243,7 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
     const rows = await this.holdRows(tx, string(released.recordId));
     const placed = rows.find(r => r.holdId === released.holdId && r.phase === 'placed');
     if (!placed || released.release === null || typeof released.release !== 'object' ||
-        placed.body !== JSON.stringify({ ...released, release: null })) refuse('HoldReleaseBindingRefused');
+        !isDeepStrictEqual(JSON.parse(placed.body), { ...released, release: null })) refuse('HoldReleaseBindingRefused');
     await this.releaseHoldRow(tx, string(released.holdId), JSON.stringify(released));
   }
   async recordDutyRequest(tx: object, kind: 'access-request' | 'correction-request', facts: { requestId: string; resolution: unknown }): Promise<void> {

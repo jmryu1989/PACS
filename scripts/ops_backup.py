@@ -228,8 +228,8 @@ def digest(path):
 
 def counts(container, database, user):
     command = ["docker", "exec", container, "psql", "-X", "-U", user, "-d", database, "-v", "ON_ERROR_STOP=1", "-qAt", "-c"]
-    tables = text(command + ["SELECT schemaname || '.' || tablename FROM pg_tables WHERE schemaname IN ('public','emr_access','emr_signing','emr_clinical') ORDER BY schemaname,tablename;"]).splitlines()
-    if not tables or any(not re.fullmatch(r"(?:public|emr_access|emr_signing|emr_clinical)\.[A-Za-z_][A-Za-z_0-9]*", name) for name in tables):
+    tables = text(command + ["SELECT schemaname || '.' || tablename FROM pg_tables WHERE schemaname IN ('public','emr_access','emr_signing','emr_clinical','emr_audit','emr_image') ORDER BY schemaname,tablename;"]).splitlines()
+    if not tables or any(not re.fullmatch(r"(?:public|emr_access|emr_signing|emr_clinical|emr_audit|emr_image)\.[A-Za-z_][A-Za-z_0-9]*", name) for name in tables):
         raise RuntimeError("Unexpected or empty database table list")
     selects = [f'SELECT \'{name}\' AS name, count(*) AS n FROM ' + '.'.join('"'+p+'"' for p in name.split('.')) for name in tables]
     return json.loads(text(command + ["SELECT json_object_agg(name,n) FROM (" + " UNION ALL ".join(selects) + ") counts;"]))
