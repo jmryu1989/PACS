@@ -77,23 +77,33 @@ export function projectUnit(unit: ClinicalUnit): Readonly<UnitProjection> {
   // Any malformed stored version is the same finding as a tampered one: the history cannot be trusted.
   try {
     u.versions.forEach((v, index) => {
-      if (!v || typeof v !== 'object' || typeof v.surface !== 'string' || !own(CLINICAL_SURFACES, v.surface)) refuse('UnitHistoryBroken');
-      const { sha256: digest, ...rest } = v;
-      if (v.formatVersion !== 'emr-clinical/1' || v.record !== u.record || v.recordId !== u.recordId || v.sequence !== index + 1 ||
-          v.studyId !== u.studyId || v.managingInstitutionId !== u.managingInstitutionId || canonical(v.patient) !== canonical(u.patient) ||
-          versionDigest(rest) !== sha256(digest) || (index > 0 && v.recipientId !== null) ||
-          !sameRef(v.previousVersion, previous ? ref(previous) : null) || v.state.from !== (previous ? previous.state.to : null) ||
-          (previous && utc(v.at) < previous.at)) refuse('UnitHistoryBroken');
-      if (v.entry === 'clinical-entry' && (CLINICAL_SURFACES[v.surface] as SurfaceSpec).marksClinicalEntry) marked = true;
+      if (versionLink(u, v, index, previous)) marked = true;
       previous = v;
     });
   } catch { refuse('UnitHistoryBroken'); }
   const first = u.versions[0];
   const parties = { authorId: first.author.id, recipientId: first.recipientId };
   const projection = { state: previous.state.to, revision: u.versions.length, head: ref(previous), clinicalEntry: marked, parties };
-  if (u.state !== projection.state || u.revision !== projection.revision || !sameRef(u.head, projection.head) || u.clinicalEntry !== projection.clinicalEntry ||
-      !u.parties || u.parties.authorId !== parties.authorId || u.parties.recipientId !== parties.recipientId) refuse('UnitHistoryBroken');
+  storedProjection(u, projection);
   return freeze(projection);
+}
+
+type UnitIdentity = Pick<ClinicalUnit, 'record' | 'recordId' | 'studyId' | 'managingInstitutionId' | 'patient'>;
+/** One version against its unit and its predecessor (projectUnit's per-version rule); true when it marks a clinical entry. */
+function versionLink(u: UnitIdentity, v: ClinicalVersion, index: number, previous: ClinicalVersion | null): boolean {
+  if (!v || typeof v !== 'object' || typeof v.surface !== 'string' || !own(CLINICAL_SURFACES, v.surface)) refuse('UnitHistoryBroken');
+  const { sha256: digest, ...rest } = v;
+  if (v.formatVersion !== 'emr-clinical/1' || v.record !== u.record || v.recordId !== u.recordId || v.sequence !== index + 1 ||
+      v.studyId !== u.studyId || v.managingInstitutionId !== u.managingInstitutionId || canonical(v.patient) !== canonical(u.patient) ||
+      versionDigest(rest) !== sha256(digest) || (index > 0 && v.recipientId !== null) ||
+      !sameRef(v.previousVersion, previous ? ref(previous) : null) || v.state.from !== (previous ? previous.state.to : null) ||
+      (previous && utc(v.at) < previous.at)) refuse('UnitHistoryBroken');
+  return v.entry === 'clinical-entry' && (CLINICAL_SURFACES[v.surface] as SurfaceSpec).marksClinicalEntry;
+}
+/** A stored projection must equal the one re-derived from its versions. */
+function storedProjection(u: Pick<ClinicalUnit, 'state' | 'revision' | 'head' | 'clinicalEntry' | 'parties'>, projection: UnitProjection): void {
+  if (u.state !== projection.state || u.revision !== projection.revision || !sameRef(u.head, projection.head) || u.clinicalEntry !== projection.clinicalEntry ||
+      !u.parties || u.parties.authorId !== projection.parties.authorId || u.parties.recipientId !== projection.parties.recipientId) refuse('UnitHistoryBroken');
 }
 
 // ---------- write planning ----------
@@ -325,6 +335,40 @@ export function applyPlan(unit: ClinicalUnit | null, plan: ClinicalWritePlan): R
     versions: [...(unit?.versions ?? []), plan.version],
   };
   const result = freeze(structuredClone(next));
+  projectUnit(result);
+  return result;
+}
+
+/**
+ * applyPlan folded over a stored history, with the same refusals in the same order. applyPlan re-derives and copies the
+ * whole prefix at every step, so a fold is quadratic in revisions (a 1000-revision finding of 4 KB entries took 26 s,
+ * twice per history page). Here each stored version is checked once against the unit identity and its predecessor, and
+ * each step's stored projection against the projection derived so far - exactly what applyPlan's projectUnit(result)
+ * adds at that step - and the folded unit is then checked whole.
+ */
+export function replayUnit(plans: readonly ClinicalWritePlan[]): Readonly<ClinicalUnit> | null {
+  let identity: UnitIdentity | null = null, previous: ClinicalVersion | null = null, marked = false;
+  let parties: UnitProjection['parties'] | null = null, last: ClinicalWritePlan | null = null;
+  const versions: ClinicalVersion[] = [];
+  for (const plan of plans) {
+    if (!sameRef(plan.version.previousVersion, last ? last.projection.head : null) || plan.version.sequence !== versions.length + 1) refuse('StaleRevision');
+    const stored = { state: plan.projection.state, revision: plan.projection.revision, head: plan.projection.head,
+      clinicalEntry: plan.projection.clinicalEntry, parties: plan.parties };
+    // applyPlan keeps the opening version's study and takes record/recordId from each plan; every earlier version
+    // was checked against the same values, so a plan that differs breaks the history exactly as projectUnit would.
+    const unit: UnitIdentity = { record: plan.record, recordId: plan.version.recordId, studyId: identity?.studyId ?? plan.version.studyId,
+      managingInstitutionId: identity?.managingInstitutionId ?? plan.version.managingInstitutionId, patient: identity?.patient ?? plan.version.patient };
+    if (identity && (unit.record !== identity.record || unit.recordId !== identity.recordId)) refuse('UnitHistoryBroken');
+    identity = unit;
+    try { if (versionLink(identity, plan.version, versions.length, previous)) marked = true; } catch { refuse('UnitHistoryBroken'); }
+    versions.push(plan.version); previous = plan.version;
+    parties ??= { authorId: versions[0].author.id, recipientId: versions[0].recipientId };
+    storedProjection(stored, { state: previous.state.to, revision: versions.length, head: ref(previous), clinicalEntry: marked, parties });
+    last = plan;
+  }
+  if (!last) return null;
+  const result = freeze(structuredClone({ ...identity, parties: last.parties, state: last.projection.state, revision: last.projection.revision,
+    head: last.projection.head, clinicalEntry: last.projection.clinicalEntry, versions }));
   projectUnit(result);
   return result;
 }

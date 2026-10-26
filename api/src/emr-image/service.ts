@@ -6,6 +6,7 @@ import type { ServerResponse } from 'node:http';
 import { newAuditLinkId, parseAccessEvent } from '../emr-contract/access-event';
 import { refuse } from '../emr-contract/validation';
 import { EMR_RECORD_PORT, EmrRecordPort } from '../emr-runtime/record-port';
+import { RequestContextUnavailable } from '../emr-runtime/request-context';
 import { OrthancService } from '../orthanc.service';
 import { PrismaService } from '../prisma.service';
 import { parseImageRequest, prepareDelivery } from './contract';
@@ -63,6 +64,12 @@ export class OnlineImageService {
               current.provision.relation !== facts.provision.relation || current.provision.basisId !== facts.provision.basisId ||
               current.provision.agreementId !== facts.provision.agreementId) refuse('ImageAuthorityChanged');
         } }, { manifest, prepared, event, response, signal: abort.signal, range: request.headers.range });
+    } catch (error) {
+      // Current identity exists only for a member admission the guard captured. Without one (authentication
+      // switched off, or a request that already ended) nothing can be authorized, and no archive byte is read.
+      if (error instanceof RequestContextUnavailable && !response.headersSent)
+        throw new ServiceUnavailableException({ code: 'ImageRequestContextUnavailable', message: '영상의 현재 접근 권한을 확인할 수 없습니다' });
+      throw error;
     } finally { request.off('aborted', stop); response.off('close', stop); }
   }
 }

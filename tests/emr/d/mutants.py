@@ -231,6 +231,7 @@ DECLARED_CASES = [
     "TEST-D-01 clinical_vs_operational: planned kinds belong to the A route and the signing request is a valid A payload",
     "TEST-D-02 versions_and_sr: every change appends a version; earlier text stays exact and the projection is the fold",
     "TEST-D-02 versions_and_sr: a rewritten, dropped or reordered earlier version is refused, never projected",
+    "TEST-D-02 versions_and_sr: a stored history replays to the step-by-step fold and is refused wherever the fold refuses it",
     "TEST-D-02 versions_and_sr: a finding correction keeps the original and incorporates source copies, not the comparison link",
     "TEST-D-02 versions_and_sr: the 24-hour window ends only an unattempted, unadopted, unreferenced, unheld copy Orthanc confirms absent",
     "TEST-D-02 versions_and_sr: Orthanc reconciliation adopts only the exact bytes this server authorized",

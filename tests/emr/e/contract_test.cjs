@@ -459,6 +459,22 @@ def('TEST-E-02 manifest_sources A2', () => {
   const all = allowed(() => prepare(withOdd, `/dicom-web/studies/${STUDY}`));
   assert.equal(all.units.length, objects.length);
   assert.deepEqual(all.excluded.map(x => x.reason).sort(), ['UnknownObjectFormat', 'UnknownTransferSyntax']);
+  // A scanner dose SR, a SEG or a PDF whose producer no receipt names is listed and refused by name; it neither
+  // borrows a source nor closes the study's images.
+  const unestablished = { kind: 'unestablished' };
+  const dose = doc(STUDY, S(STUDY, 10), S(STUDY, 10) + '.1', SC('88.67'), unestablished);
+  const seg = { ...pixel(STUDY, S(STUDY, 11), S(STUDY, 11) + '.1', SC('66.4'), { provenance: unestablished, imageType: ['DERIVED', 'PRIMARY'],
+    derivation: { kind: 'derived', sources: [] } }) };
+  const pdf = doc(STUDY, S(STUDY, 12), S(STUDY, 12) + '.1', SC('104.1'), unestablished);
+  const withUnknownSource = allowed(() => build([...studyObjects(), dose, seg, pdf]));
+  for (const o of [dose, seg, pdf]) {
+    const listed = withUnknownSource.objects.find(x => x.sopInstanceUid === o.sopInstanceUid);
+    assert.deepEqual([listed.provenance, listed.unsupported], [unestablished, 'ObjectSourceUnestablished']);
+    refused(() => prepare(withUnknownSource, `/dicom-web/studies/${STUDY}/series/${o.seriesUid}/instances/${o.sopInstanceUid}`), 'ObjectSourceUnestablished');
+  }
+  const study = allowed(() => prepare(withUnknownSource, `/dicom-web/studies/${STUDY}`));
+  assert.equal(study.units.length, objects.length);
+  assert.deepEqual(study.excluded.map(x => x.reason), ['ObjectSourceUnestablished', 'ObjectSourceUnestablished', 'ObjectSourceUnestablished']);
 });
 def('TEST-E-02 manifest_sources A3', () => {
   const m = build(), xa = m.objects.find(o => o.family === 'xa');
@@ -520,6 +536,9 @@ def('TEST-E-02 manifest_sources R4', () => {
   refused(() => build(image), 'ProvenanceMismatch');
   const pdf = studyObjects(); pdf[8] = { ...pdf[8], provenance: { kind: 'product-authored', recordId: 'x' } };
   refused(() => build(pdf), 'ProvenanceMismatch');
+  // An image is the institution's own acquisition; it cannot be listed as having no established source.
+  const unsourced = studyObjects(); unsourced[0] = { ...unsourced[0], provenance: { kind: 'unestablished' } };
+  refused(() => build(unsourced), 'ProvenanceMismatch');
   // The external SR keeps its source evidence; no product signature is added to it.
   assert.deepEqual(build().objects.find(o => o.sopInstanceUid === S(STUDY, 7) + '.1').provenance, external('Referring EMR', { status: 'absent' }));
 });
