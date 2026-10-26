@@ -96,14 +96,14 @@ test('TEST-WSU-04 policy intersection across every resource, single and batch pr
 });
 // TEST-WSU-08 (shared part): the request's source observation is its own contract, outside the policy decision.
 test('TEST-WSU-08 source observation: split 409, unobservable or unprepared 503, none and one pass, per request only',async()=>{
-  const f=service([]),one=[{'0020000D':{Value:[uid]}}];let answer=one;
+  const f=service([]),one=[{'0020000D':{Value:[uid]},'00100020':{Value:[' SYN-PID ']},'00080080':{Value:['SYN SOURCE']}}];let answer=one;
   f.orth.studyIdentityResources=async()=>{if(answer instanceof Error)throw answer;return answer;};
   const code=(fn,status,wanted)=>assert.throws(fn,e=>e.getStatus()===status&&e.getResponse().code===wanted);
   const c1={...caller};code(()=>f.svc.assertUnsplitSource(c1,uid),503,'STUDY_SOURCE_UNAVAILABLE');
-  await f.svc.prepareSourceIdentity(c1,[uid]);f.svc.assertUnsplitSource(c1,uid);
-  answer=[...one,...one];f.svc.assertUnsplitSource(c1,uid);   // the same request keeps its own observation
+  await f.svc.prepareSourceIdentity(c1,[uid]);assert.deepEqual(f.svc.assertUnsplitSource(c1,uid),{sourcePatientId:' SYN-PID ',sourceInstitution:'SYN SOURCE'});
+  answer=[...one,...one];await f.svc.prepareSourceIdentity(c1,[uid]);assert.deepEqual(f.svc.assertUnsplitSource(c1,uid),{sourcePatientId:' SYN-PID ',sourceInstitution:'SYN SOURCE'});   // the same request keeps its own observation
   const c2={...caller};await f.svc.prepareSourceIdentity(c2,[uid]);code(()=>f.svc.assertUnsplitSource(c2,uid),409,'STUDY_IDENTITY_UNRESOLVED');
-  answer=[];const c3={...caller};await f.svc.prepareSourceIdentity(c3,[uid]);f.svc.assertUnsplitSource(c3,uid);
+  answer=[];const c3={...caller};await f.svc.prepareSourceIdentity(c3,[uid]);assert.deepEqual(f.svc.assertUnsplitSource(c3,uid),{sourcePatientId:null,sourceInstitution:null});
   answer=Error('transport');const c4={...caller};await f.svc.prepareSourceIdentity(c4,[uid]);code(()=>f.svc.assertUnsplitSource(c4,uid),503,'STUDY_SOURCE_UNAVAILABLE');
   // An unrestricted caller still observes; the policy (unrestricted) and the import gate are not this contract.
   answer=[...one,...one];const c5={...caller};assert.deepEqual([...await f.svc.allowed(c5,[uid])],[uid]);await f.svc.require(c5,[uid]);

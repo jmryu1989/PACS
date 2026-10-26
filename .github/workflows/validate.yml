@@ -71,6 +71,9 @@ jobs:
       - name: Module A local-read recording on the real PG record port
         timeout-minutes: 5
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-pg --tree api/src --tree tests/emr/a --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/a/recording_boundary_test.py --class LocalReadRecordingBoundary --mode live --unit ci-module-a-pg --timeout 300
+      - name: Module A report reads on the real HTTP route and PG record port
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-report-reads --tree api/src --tree tests/emr/a --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/a/report_reads_test.py --class ReportReadsHttp --mode live --unit ci-module-a-report-reads --timeout 300
       - name: Module A W9 metadata through real HTTP and PG
         timeout-minutes: 5
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-w9 --tree api/src --tree tests/emr/a --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/a/viewing_set_test.py --class ViewingSetHttpBoundary --mode live --unit ci-module-a-w9 --timeout 300
@@ -87,6 +90,7 @@ jobs:
             tmp/emr-b-ci/
             tmp/emr-b2-replace-20261023/
             tmp/module-a-01-2/
+            tmp/emr-a/
             tmp/download-producer-b2/
             tmp/request-auth/
           if-no-files-found: error
@@ -194,7 +198,7 @@ jobs:
     - name: SR source tree identity and bounded literal values
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/sr_tree_test.cjs
     - name: Pinned viewer precision and isolated stack method boundaries
-      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_precision_test.cjs tests/viewer_frame_metadata_test.cjs
+      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_precision_test.cjs tests/viewer_frame_metadata_test.cjs tests/viewer_reference_lines_test.cjs
     - name: Deployment preflight refusal and shared lock
       run: python3 tests/ops_deploy_preflight_test.py
     - name: Deployment state machine and retained operations lock
@@ -1453,6 +1457,21 @@ jobs:
           tests/e2e/artifacts/test_d03a_*.png
           tests/e2e/artifacts/test_scope_*.png
           tmp/u2b-regressions-ci/
+        if-no-files-found: error
+        retention-days: 7
+    - name: Isolated declared Viewer U2 shell tests
+      timeout-minutes: 28
+      run: |
+        "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile viewer-ux-shell
+      if: ${{ !cancelled() }}
+    - name: Sanitized synthetic Viewer U2 shell evidence
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-viewer-ux-shell-results
+        path: |
+          tests/e2e/artifacts/viewer-ux-shell-ci/
+          tmp/viewer-ux-u2/screens/
         if-no-files-found: error
         retention-days: 7
     - name: Worklist folder multi-selection and shortcut module contract

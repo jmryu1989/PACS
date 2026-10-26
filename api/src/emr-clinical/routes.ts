@@ -78,7 +78,7 @@ export class ClinicalRoutes {
     } finally { work.end(); }
   }
   async write<T>(request: object, write: RouteWrite,
-    project: (tx: Prisma.TransactionClient, plan: Readonly<ClinicalWritePlan>) => Promise<T>): Promise<T> {
+    project: (tx: Prisma.TransactionClient, plan: Readonly<ClinicalWritePlan>) => Promise<T>) {
     if (typeof write.recordId !== 'string' || !write.recordId || typeof write.studyId !== 'string' || !write.studyId)
       throw new BadRequestException('기록 대상과 요청 ID를 확인하세요.');
     const runtime = composeClinicalRuntime({ ...this.parts, project: (tx, _request, plan) => project(tx, plan) });

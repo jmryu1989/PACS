@@ -5,6 +5,7 @@ from pathlib import Path
 from pydicom import dcmread
 from pydicom.uid import generate_uid,CTImageStorage,ExplicitVRLittleEndian
 from pynetdicom import AE
+from viewer_tools import select_image_tool,native_back
 from playwright.sync_api import expect
 from test_viewer_layout import ViewerLayoutE2E
 from test_prior_selection import canvas_ready,synthetic_ct
@@ -33,7 +34,7 @@ class CTSyncE2E(ViewerLayoutE2E):
   return p.evaluate('''()=>[...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x).map(g=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(g.viewportId),id=v.getCurrentImageId();return {id:v.id,index:v.getCurrentImageIdIndex(),image:id,position:cornerstone.metaData.get('imagePlaneModule',id)?.imagePositionPatient}})''')
 
  def toggle(self,p):
-  p.locator('[data-cy="MoreTools-split-button-secondary"]').click();p.locator('#root').get_by_text('Image Slice Sync',exact=True).click()
+  select_image_tool(p, 'ImageSliceSync')
 
  def jump(self,p,cell,index):
   ident=self.snapshot(p)[cell]['id'];p.evaluate('''async ({id,index})=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(id);await cornerstone.utilities.jumpToSlice(v.element,{imageIndex:index})}''',dict(id=ident,index=index))
@@ -60,12 +61,17 @@ class CTSyncE2E(ViewerLayoutE2E):
   self.assertEqual(self.report_rows(f),rows);self.assertEqual(self.originals(),originals)
 
  def test_sync_02_range_series_replacement_and_wrong_patient(self):
-  f,series,refs=self.pair();other=self.ct('SYNC-other-'+uuid.uuid4().hex[:12],'past','20260701');originals=self.originals()
-  p=self.launch(self.login(),[f,other]);self.grid(p,2);self.drag(p,'D03A current',0);self.drag(p,'SYNC spaced',1);canvas_ready(p,2)
+  f,series,refs=self.pair();other=self.ct('SYNC-other-'+uuid.uuid4().hex[:12],'other','20260701');past=self.ct(f.patient_id,'past','20260701');originals=self.originals()
+  p=self.launch(self.login(),[f,past]);self.grid(p,2);self.drag(p,'D03A current',0);self.drag(p,'SYNC spaced',1);canvas_ready(p,2)
   self.toggle(p);self.jump(p,0,4);self.wait_z(p,1,8);before=self.snapshot(p)[1]
   self.jump(p,0,15);expect(p.locator('#kin-ct-sync-status')).to_contain_text('범위');self.assertEqual(self.snapshot(p)[1],before)
   self.drag(p,'D03A past',1);canvas_ready(p,2);before=self.snapshot(p)[1];self.jump(p,0,6)
-  expect(p.locator('#kin-ct-sync-status')).to_contain_text('같은 환자');self.assertEqual(self.snapshot(p)[1],before)
+  expect(p.locator('#kin-ct-sync-status')).to_contain_text('좌표계');self.assertEqual(self.snapshot(p)[1],before)
+  # U2 now rejects mixed-patient studies before the native grid can load them.
+  before=self.snapshot(p);url=p.url
+  self.assertFalse(p.evaluate('href=>kinViewerOpenPatient(href)','/ohif/viewer?StudyInstanceUIDs='+f.uid+','+other.uid))
+  expect(p.locator('.kin-patient-tabs [role=status]')).to_contain_text('같은 환자')
+  self.assertEqual(p.url,url);self.assertEqual(self.snapshot(p),before)
   self.assertEqual(self.originals(),originals)
 
  def test_sync_03_different_for_and_missing_geometry(self):
@@ -76,7 +82,7 @@ class CTSyncE2E(ViewerLayoutE2E):
   self.assertEqual(self.originals(),originals)
 
  def test_sync_04_delayed_image_off_replacement_and_session(self):
-  f,series,refs=self.pair();other=self.ct('SYNC-other-'+uuid.uuid4().hex[:12],'past','20260701');originals=self.originals();rows=self.report_rows(f)
+  f,series,refs=self.pair();other=self.ct(f.patient_id,'past','20260701');originals=self.originals();rows=self.report_rows(f)
   p=self.login();pending=[];pattern='**/instances/'+refs[12]+'/frames/*';p.route(pattern,lambda r:pending.append(r))
   self.launch(p,[f,other]);self.grid(p,2);self.drag(p,'D03A current',0);self.drag(p,'SYNC spaced',1);canvas_ready(p,2);self.toggle(p)
   self.jump(p,0,6);p.wait_for_timeout(300);self.assertTrue(pending);before=self.snapshot(p)[1];self.toggle(p)
@@ -104,16 +110,17 @@ class CTSyncE2E(ViewerLayoutE2E):
   # CT sync's own access check refused: its list read (GET studies) answered 403 for the viewer only — no other viewer part reads
   # it before a user action, and none of them turns that 403 into a refusal of the document. A refusal with Recheck Access, never
   # the session words; nothing moves until Recheck Access confirms.
-  f,series,refs=self.pair();originals=self.originals();p=self.login();pattern='**/api/studies'
+  f,series,refs=self.pair();originals=self.originals();p=self.pair_page(f);pattern='**/api/studies'
   p.route(pattern,lambda r:r.fulfill(status=403,json={'message':'Synthetic denied'}) if '/ohif/viewer' in r.request.frame.url else r.continue_())
-  self.launch(p,[f]);self.grid(p,2);self.drag(p,'D03A current',0);self.drag(p,'SYNC spaced',1);canvas_ready(p,2)
+  # Refuse this extension's read after the independent patient shell has loaded.
+  p.evaluate("()=>{const e=config.extensions.find(e=>e.id==='kin.ct-sync');e.onModeExit();e.onModeEnter()}")
   status=p.locator('#kin-ct-sync-status');before=self.snapshot(p)[1];self.toggle(p);self.jump(p,0,4)
   expect(status).to_contain_text('이 계정으로 검사 접근 정보를 확인할 수 없어');expect(p.locator('#kin-ct-sync-recheck')).to_be_visible()
   expect(status).not_to_contain_text('세션이 변경');p.wait_for_timeout(300);self.assertEqual(self.snapshot(p)[1],before)
   p.unroute(pattern);p.locator('#kin-ct-sync-recheck').click();expect(status).to_contain_text('검사 접근 정보를 확인했습니다')
   self.jump(p,0,6);self.wait_z(p,1,12)
   pending=[];p.route('**/api/me',lambda r:pending.append(r));self.jump(p,0,8);p.wait_for_timeout(150);self.assertTrue(pending)
-  response=pending[0].fetch();p.evaluate('()=>{window.syncExitMarker=true}');p.mouse.click(20,24)
+  response=pending[0].fetch();p.evaluate('()=>{window.syncExitMarker=true}');native_back(p)
   expect(p.locator('#kin-ct-sync-status')).to_have_count(0);self.assertTrue(p.evaluate('window.syncExitMarker===true'));self.assertNotIn('/ohif/viewer?',p.url)
   pending[0].fulfill(response=response);p.wait_for_timeout(200);expect(p.locator('#kin-ct-sync-status')).to_have_count(0)
   self.assertEqual(self.originals(),originals)
