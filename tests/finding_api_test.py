@@ -446,14 +446,21 @@ class FindingAPI(unittest.TestCase):
             self.call(method, body, 'adminonly', path, 200 if method == 'GET' else 403)
             self.call(method, body, 'tech', path, 200 if method == 'GET' else 403)
         self.call(body=edit, path=revision_path, user='doctor2', status=403)
+        # Part 1 (D-TELE-CONTRACT-01, D548/D1190): the tele channel opens reading, and a finding is written only in
+        # the managing institution. The tele reader's create answers like an unknown study and stores nothing.
         self.study_update('"teleInstitutionId"=\'kin-center\'')
         self.call(method='GET', user='kdoctor')
         tele_key = self.item(self.key_item(1, title='tele key'), user='kdoctor')
-        tele, _ = self.create([tele_key], user='kdoctor')
+        stored = self.state(tables=FINDING_TABLES)
+        self.create([tele_key], user='kdoctor', status=404)
+        self.assertEqual(self.state(tables=FINDING_TABLES), stored)
         self.study_update('"teleInstitutionId"=NULL')
         self.call(method='GET', user='kdoctor', status=404)
+        # Another reader of the managing institution owns the second finding: its edits stay author-only.
+        other_key = self.item(self.key_item(1, title='other key'), user='doctor2')
+        other, _ = self.create([other_key], user='doctor2')
         self.assertEqual(len(self.call(method='GET')['items']), 2)
-        self.revise(tele, user='doctor', status=403)
+        self.revise(other, user='doctor', status=403)
         self.call(path='/studies/'+self.uid+'/report/commit', body=dict(action='preliminary', baseVersion=0, reviewer=self.stack.actor('jmryu'), findings='preliminary', conclusion='', recommendation=''), status=201)
         for method, path, body in routes:
             for user in ['doctor2', 'adminonly', 'tech']:
@@ -1111,18 +1118,60 @@ class FindingAPI(unittest.TestCase):
                 ids += [i['id'] for i in response.body['items']]; cursor = response.body['nextCursor']
                 if cursor is None: return ids, seconds
                 self.assertEqual((len(response.body['items']), cursor), (100, ids[-1]))
+        # D-B2-READ-SIZE-01: a 열람 event names the versions the response served - a list row its listed revision, a
+        # history page its returned revisions - never the rest of the retained history. Every history page of the
+        # 1000-revision finding is read over HTTP and matched to its admitted B2 entry and signing facts.
+        def stored_versions(finding):
+            return dict(line.split('|') for line in psql(f'''SELECT sequence||'|'||version_id FROM emr_clinical.online_version
+                WHERE record_type='finding' AND record_id={literal(finding)} ORDER BY sequence'''))
+        def read_events(surface, after):
+            """(result id, result version, served target versions, admitted payload bytes) of each 열람 entry since `after`."""
+            rows = psql(f'''SELECT o.result_id||'|'||o.result_version||'|'||octet_length(e.payload)||'|'||COALESCE((SELECT string_agg(
+                t.value->'versionId'->>'value', ',' ORDER BY t.ordinality) FROM jsonb_array_elements(e.payload::jsonb->'targets')
+                WITH ORDINALITY t), '') FROM emr_access.access_entry e JOIN emr_access.attempt_outcome o ON o.operation_id=e.operation_id
+                WHERE e.sequence>{int(after)} AND e.payload::jsonb->>'surface'={literal(surface)}
+                AND e.payload::jsonb->'context'->>'studyId'={uid} ORDER BY e.sequence''')
+            return [(i, v, int(size), targets.split(',') if targets else []) for i, v, size, targets in (r.split('|') for r in rows)]
+        def mark():
+            return psql('SELECT COALESCE(max(sequence), 0) FROM emr_access.access_entry')[0]
+        heads = dict(line.split('|') for line in psql(f'''SELECT f.id||'|'||v.version_id FROM "Finding" f
+            JOIN emr_clinical.online_version v ON v.record_type='finding' AND v.record_id=f.id::text AND v.sequence=f.revision
+            WHERE f."studyUid"={uid}'''))
         for user, expected in (('xauthor', readable), ('xreader', readable),
                                ('doctor', psql(f'SELECT id FROM "Finding" WHERE "studyUid"={uid} ORDER BY id'))):
+            since = mark()
             ids, seconds = pages(user)
             print(f'T10f list user={user} rows={len(ids)} seconds={seconds}', flush=True)
             self.assertEqual(ids, expected)
+            events = read_events('GET studies/:uid/findings', since)
+            self.assertEqual(sorted(e[0] for e in events), sorted(ids))
+            for finding, version, size, targets in events:
+                self.assertEqual((version, targets), (heads[finding], [heads[finding]]), finding)
+            print(f'T10f list user={user} events={len(events)} largest_payload_bytes={max(e[2] for e in events)}', flush=True)
         [capped] = psql(f'SELECT id FROM "Finding" WHERE "studyUid"={uid} AND revision=1000')
-        for query, first in (('?limit=100', 1), ('?limit=100&cursor=900', 901)):
+        versions = stored_versions(capped)
+        self.assertEqual(sorted(int(s) for s in versions), list(range(1, 1001)))
+        since, cursor, sizes = mark(), None, []
+        for first in range(1, 1001, 100):
+            query = '?limit=100'+('&cursor='+str(cursor) if cursor else '')
             started = time.monotonic()
             response = self.stack.request('GET', self.path+'/'+capped+'/revisions'+query, 'doctor')
             print(f'T10f history query={query} seconds={round(time.monotonic()-started, 3)}', flush=True)
             self.assertEqual(response.status, 200, response.text)
-            self.assertEqual([r['revision'] for r in response.body['revisions']], list(range(first, first+100)))
+            served = [r['revision'] for r in response.body['revisions']]
+            self.assertEqual(served, list(range(first, first+100)))
+            self.assertEqual(response.body['nextCursor'], first+99 if first < 901 else None)
+            self.assertEqual([s['revision'] for s in response.body['emr']['signatures']], served)
+            self.assertEqual([s['versionId'] for s in response.body['emr']['signatures']], [versions[str(r)] for r in served])
+            self.assertTrue(all(s['signature'] for s in response.body['emr']['signatures']))
+            [(finding, version, size, targets)] = read_events('GET studies/:uid/findings/:id/revisions', since)
+            self.assertEqual((finding, version, targets), (capped, versions[str(served[-1])], [versions[str(r)] for r in served]))
+            sizes.append(size); since, cursor = mark(), response.body['nextCursor']
+        print(f'T10f history pages={len(sizes)} payload_bytes={sizes} largest={max(sizes)} limit=65536', flush=True)
+        # A page past the last revision serves no version: no signing facts and no 열람 entry.
+        empty = self.call(method='GET', path=self.path+'/'+capped+'/revisions?limit=100&cursor=1000')
+        self.assertEqual((empty['revisions'], empty['nextCursor'], empty['emr']['signatures']), ([], None, []))
+        self.assertEqual(read_events('GET studies/:uid/findings/:id/revisions', since), [])
         self.call(method='GET', user='xreader', path=self.path+'/'+capped+'/revisions', status=404)
 
     # ---- S2-L1 saved locations, version 2 records and the schema handshake -------------------------

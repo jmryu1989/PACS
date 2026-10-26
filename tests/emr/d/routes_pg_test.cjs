@@ -222,6 +222,30 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const oldFindingReplay = await send('doctor', 'POST', `/studies/${uid}/findings`, findingBody, 200);
     assert.equal(oldFindingReplay.item.sources[0].label, itemSnapshot.title);
     assert.deepEqual(oldFindingReplay.emr.signature, finding.emr.signature);
+    // D-B2-READ-SIZE-01: a list row serves its listed revision and a history page the revisions it returned;
+    // the 열람 entry, its result reference and the signing facts name exactly those versions.
+    const findingReads = surface => db.$queryRaw`SELECT e.payload::jsonb AS event, o.result_id, o.result_version
+      FROM emr_access.access_entry e JOIN emr_access.attempt_outcome o ON o.operation_id = e.operation_id
+      WHERE e.payload::jsonb->>'surface'=${surface} AND o.result_id=${finding.id} ORDER BY e.sequence`;
+    const servedTargets = row => row.event.targets.map(target => target.versionId.value);
+    const findingVersionIds = [finding, edited, refreshed].map(written => written.emr.receipt.versionId);
+    const listedFindings = await send('doctor', 'GET', `/studies/${uid}/findings`);
+    assert.deepEqual(listedFindings.items.map(item => [item.id, item.revision]), [[finding.id, 3]]);
+    const listReads = await findingReads('GET studies/:uid/findings');
+    assert.deepEqual(listReads.map(servedTargets), [[findingVersionIds[2]]]);
+    assert.equal(listReads[0].result_version, findingVersionIds[2]);
+    const historyPath = `/studies/${uid}/findings/${finding.id}/revisions?limit=2`;
+    const firstPage = await send('doctor', 'GET', historyPath);
+    assert.deepEqual([firstPage.revisions.map(r => r.revision), firstPage.nextCursor], [[1, 2], 2]);
+    assert.deepEqual(firstPage.emr.signatures.map(s => s.versionId), findingVersionIds.slice(0, 2));
+    const lastPage = await send('doctor', 'GET', historyPath + '&cursor=2');
+    assert.deepEqual([lastPage.revisions.map(r => r.revision), lastPage.nextCursor], [[3], null]);
+    assert.deepEqual(lastPage.emr.signatures.map(s => s.versionId), findingVersionIds.slice(2));
+    const pastEnd = await send('doctor', 'GET', historyPath + '&cursor=3');
+    assert.deepEqual([pastEnd.revisions, pastEnd.emr.signatures], [[], []]);
+    const historyReads = await findingReads('GET studies/:uid/findings/:id/revisions');
+    assert.deepEqual(historyReads.map(servedTargets), [findingVersionIds.slice(0, 2), findingVersionIds.slice(2)]);
+    assert.deepEqual(historyReads.map(row => row.result_version), [findingVersionIds[1], findingVersionIds[2]]);
     await db.studyState.create({ data: { uid: comparisonUid, institutionId: hospital, ss: 'Verified' } });
     const comparisonItemId = randomUUID(), comparisonSnapshot = { ...itemSnapshot,
       seriesUid: comparisonUid + '.1', sopUid: comparisonUid + '.1.1' };
