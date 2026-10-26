@@ -93,7 +93,13 @@ test('E real B2 COMMIT gates fixed HTTP bodies, ranges, multipart, failures and 
       });
     }
     try {
-      const result = await sendOnlineImage(boundary, { ...current, response: res, signal: control.signal, range: req.headers.range });
+      // The opening transaction is the caller's first current access check (authorize call 1); commit is call 2.
+      const delivery = current;
+      const result = await sendOnlineImage(boundary, { manifest: delivery.manifest, response: res, signal: control.signal,
+        range: req.headers.range, async open(tx) {
+          await boundary.authorize(tx, delivery.event, delivery.manifest);
+          return { prepared: delivery.prepared, event: delivery.event };
+        } });
       handleResult({ result });
     } catch (error) {
       if (!res.headersSent) { res.statusCode = 503; res.end(); } else res.destroy();

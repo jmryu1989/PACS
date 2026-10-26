@@ -5,12 +5,12 @@ import { join } from 'node:path';
 import type { ServerResponse } from 'node:http';
 import { newAuditLinkId, parseAccessEvent } from '../emr-contract/access-event';
 import { refuse } from '../emr-contract/validation';
-import { EMR_RECORD_PORT, EmrRecordPort } from '../emr-runtime/record-port';
+import { EMR_RECORD_PORT, EmrRecordPort, EmrRecordTransaction } from '../emr-runtime/record-port';
 import { REQUEST_CONTEXT_SOURCE, RequestContextSource } from '../emr-runtime/request-context';
 import { OrthancService } from '../orthanc.service';
 import { PrismaService } from '../prisma.service';
 import { parseImageRequest, prepareDelivery } from './contract';
-import { ImageContextSource } from './context';
+import { CurrentImageFacts, ImageContextSource } from './context';
 import type { ImageManifest } from './manifest';
 import { ManifestReuse } from './manifest-reuse';
 import { PgImageEvidenceStore } from './store';
@@ -46,23 +46,26 @@ export class OnlineImageService {
       // that used to resolve it first.
       await this.requests.facts(request);
       const at = new Date().toISOString(), eventId = randomUUID();
-      const work = this.records.begin();
-      let facts: Awaited<ReturnType<ImageContextSource['current']>>;
-      try { facts = await work.transactionWithRecords(tx => this.context.current(tx, request, manifest, at)); }
-      finally { work.end(); }
-      const prepared = prepareDelivery(manifest, image, { eventId, at, cause: 'background-fetch', opening: null,
-        authorization: { studyUid: image.studyUid, institution: facts.actor.institutionId,
-          accountGeneration: facts.accountGeneration }, provision: facts.provision });
-      const targets = [...new Map(prepared.units.map(unit => [unit.sopInstanceUid ?? manifest.studyUid, unit])).entries()];
-      const event = parseAccessEvent({ formatVersion: 1, surface: `${image.method} images/dicom-web`, eventId,
-        userId: known(facts.actor.identity), rolesAtTime: known(facts.actor.roles), actingInstitution: known(facts.actor.institutionId),
-        managingInstitution: known(manifest.managingInstitution), occurredAt: at, trustedProxyIp: facts.ip,
-        cause: prepared.cause, context: { basis: 'background-fetch', studyId: null, relatedStudyId: null, reason: null },
-        executor: 'member', targets: targets.map(([id, unit]) => ({ kind: unit.recordKind,
-          patientLinkSnapshot: known(manifest.patient), studyId: known(manifest.studyUid), recordId: known(id), versionId: known(manifest.sha256) })),
-        action: 'provide-prepared', result: 'prepared', requestId: facts.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null });
+      let facts!: CurrentImageFacts;
       const stagingDirectory = join(process.env.KIN_EMR_STATE_DIR, 'image-staging');
       await mkdir(stagingDirectory, { recursive: true });
+      // The opening transaction's current read is also the stream's first access check. A separate read before it
+      // took one more append lane and one more StudyAccess/source read per frame, for facts the stream re-read at once.
+      const open = async (tx: EmrRecordTransaction) => {
+        facts = await this.context.current(tx, request, manifest, at);
+        const prepared = prepareDelivery(manifest, image, { eventId, at, cause: 'background-fetch', opening: null,
+          authorization: { studyUid: image.studyUid, institution: facts.actor.institutionId,
+            accountGeneration: facts.accountGeneration }, provision: facts.provision });
+        const targets = [...new Map(prepared.units.map(unit => [unit.sopInstanceUid ?? manifest.studyUid, unit])).entries()];
+        const event = parseAccessEvent({ formatVersion: 1, surface: `${image.method} images/dicom-web`, eventId,
+          userId: known(facts.actor.identity), rolesAtTime: known(facts.actor.roles), actingInstitution: known(facts.actor.institutionId),
+          managingInstitution: known(manifest.managingInstitution), occurredAt: at, trustedProxyIp: facts.ip,
+          cause: prepared.cause, context: { basis: 'background-fetch', studyId: null, relatedStudyId: null, reason: null },
+          executor: 'member', targets: targets.map(([id, unit]) => ({ kind: unit.recordKind,
+            patientLinkSnapshot: known(manifest.patient), studyId: known(manifest.studyUid), recordId: known(id), versionId: known(manifest.sha256) })),
+          action: 'provide-prepared', result: 'prepared', requestId: facts.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null });
+        return { prepared, event };
+      };
       return await sendOnlineImage({ records: this.records, evidence: new PgImageEvidenceStore(this.db),
         source: this.orthanc.imageSource(), stagingDirectory,
         authorize: async (tx, _event, selected) => {
@@ -75,7 +78,7 @@ export class OnlineImageService {
               current.provision.managingInstitution !== selected.managingInstitution || current.provision.recipient !== facts.provision.recipient ||
               current.provision.relation !== facts.provision.relation || current.provision.basisId !== facts.provision.basisId ||
               current.provision.agreementId !== facts.provision.agreementId) refuse('ImageAuthorityChanged');
-        } }, { manifest, prepared, event, response, signal: abort.signal, range: request.headers.range });
+        } }, { manifest, open, response, signal: abort.signal, range: request.headers.range });
     } catch (error) {
       if (kept && sourceChanged(error)) this.manifests.forget(image.studyUid, kept);
       throw error;

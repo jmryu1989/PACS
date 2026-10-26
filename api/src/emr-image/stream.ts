@@ -124,17 +124,14 @@ function bodyPlan(items: Staged[], manifest: ImageManifest, range: string | unde
   return { status, headers, segments, length };
 }
 
-/** Stage and hash the exact selected units, then commit their manifest together
- * with B2's provide event. The response reads only those same files. A later
- * Orthanc replacement can neither change the body nor borrow its earlier receipt. */
-export async function sendOnlineImage(boundary: OnlineImageBoundary, input: {
-  manifest: ImageManifest; prepared: PreparedDelivery; event: AccessEvent;
-  response: ServerResponse; signal: AbortSignal; range?: string;
-}): Promise<ImageSendResult> {
-  const manifest = verifiedManifest(input.manifest), p = input.prepared;
+/** This delivery's plan and its provide event, made from the current facts the opening transaction read. */
+export interface OnlineImageDelivery { prepared: PreparedDelivery; event: AccessEvent }
+
+function checkedDelivery(manifest: ImageManifest, delivery: OnlineImageDelivery) {
+  const p = delivery.prepared;
   // The existing public judgement validates the prepared capability and ordering.
   judgeDelivery([{ prepared: p, observations: [] }]);
-  const event = parseAccessEvent(input.event);
+  const event = parseAccessEvent(delivery.event);
   // Only E's own v1 provide event names the formal PatientLink of every image
   // target. A v2 branch (local-read, offline, auth) is another producer's fact.
   if (event.formatVersion !== 1 ||
@@ -153,6 +150,20 @@ export async function sendOnlineImage(boundary: OnlineImageBoundary, input: {
         patientLinkSnapshot.status !== 'known' || JSON.stringify(patientLinkSnapshot.value) !== JSON.stringify(manifest.patient) ||
         !p.units.some(u => (u.sopInstanceUid ?? manifest.studyUid) === recordId.value && u.recordKind === kind)) refuse('ImageEventMismatch');
   }
+  return { p, event };
+}
+
+/** Stage and hash the exact selected units, then commit their manifest together
+ * with B2's provide event. The response reads only those same files. A later
+ * Orthanc replacement can neither change the body nor borrow its earlier receipt. */
+export async function sendOnlineImage(boundary: OnlineImageBoundary, input: {
+  manifest: ImageManifest;
+  /** The current caller's first access check, on this delivery's first transaction. It returns the plan and the
+   * provide event made from the facts it read there; the commit transaction checks them again (authorize). */
+  open(tx: EmrRecordTransaction): Promise<OnlineImageDelivery>;
+  response: ServerResponse; signal: AbortSignal; range?: string;
+}): Promise<ImageSendResult> {
+  const manifest = verifiedManifest(input.manifest);
   const controller = new AbortController(), stop = () => controller.abort();
   const { response } = input;
   let finished = false, directory: string | undefined, saved = false, admitted = false;
@@ -175,10 +186,11 @@ export async function sendOnlineImage(boundary: OnlineImageBoundary, input: {
   let terminal: ImageSendResult['terminal'] = 'transfer-unknown', wireBytes = 0, plannedBytes = 0;
   let observationStored = false, observationError: unknown = null;
   let preparationError: unknown = null;
+  let p!: PreparedDelivery, event!: AccessEvent;
   try {
     signal.throwIfAborted();
     // No source body is read before the current caller's first access check.
-    await work.transactionWithRecords(tx => boundary.authorize(tx, event, manifest));
+    ({ p, event } = checkedDelivery(manifest, await work.transactionWithRecords(tx => input.open(tx))));
     directory = await mkdtemp(join(boundary.stagingDirectory, 'emr-image-'));
     for (const unit of p.units) {
       signal.throwIfAborted();

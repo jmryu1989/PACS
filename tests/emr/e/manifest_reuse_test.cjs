@@ -37,6 +37,8 @@ function manifest(count, frames = 1, study = STUDY) {
 const frame = (n, f = 1, study = STUDY) => parseImageRequest('GET', `/dicom-web/studies/${study}/series/${study}.1/instances/${study}.1.${n}/frames/${f}`);
 const live = () => new AbortController().signal;
 const later = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
+// Orthanc stand-in for the service cases: every one of them stops at the access check, before any source byte.
+const noSourceRead = { imageSource: () => ({ async copy() { throw new Error('a source read before the access check'); } }) };
 
 test('one catalog read serves every frame of the study, including a burst of simultaneous first requests', async () => {
   const reuse = fresh(), built = manifest(200);
@@ -117,7 +119,7 @@ test('the image service rebuilds after a source/current-study change, not after 
     async current() { throw answer; },
   };
   const records = { begin: () => ({ transactionWithRecords: fn => fn({}), end() {} }) };
-  const service = new OnlineImageService(records, context, {}, { imageSource() { throw new Error('unused'); } },
+  const service = new OnlineImageService(records, context, {}, noSourceRead,
     { facts: async () => ({}) });
   const send = async n => {
     const request = Object.assign(new EventEmitter(), { method: 'GET', headers: {} });
@@ -156,7 +158,7 @@ test('simultaneous frames of a kept study do not wait on their own B2 append lan
   };
   const records = { begin: () => ({ transactionWithRecords: fn => admitAppend(client, poolSize, async () => { await settle(); return fn({}); }), end() {} }) };
   process.env.KIN_EMR_STATE_DIR = require('node:os').tmpdir();
-  const service = new OnlineImageService(records, context, {}, { imageSource() { throw new Error('unused'); } }, requests);
+  const service = new OnlineImageService(records, context, {}, noSourceRead, requests);
   const send = n => service.send(Object.assign(new EventEmitter(), { method: 'GET', headers: {} }),
     Object.assign(new EventEmitter(), { writableFinished: false }),
     `/dicom-web/studies/${STUDY}/series/${SERIES}/instances/${sop(n)}/frames/1`);
