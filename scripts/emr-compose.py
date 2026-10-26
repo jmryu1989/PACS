@@ -198,11 +198,11 @@ def check(root, declaration_path):
     for name in spec["added"]:
         if name not in migrations:
             problem(problems, "migration-missing", name)
-    # B2 must follow the declared baseline, before the C2/D consumers. Later
-    # additive migrations belong in this sequence, not in a global count pin.
+    # Compare the full suffix after the declared baseline so omissions remain visible.
+    # Later additive migrations extend the declaration, not a fixed migration count.
     if spec["latest_before"] not in migrations:
         problem(problems, "migration-baseline-missing", spec["latest_before"])
-    elif [m for m in migrations[migrations.index(spec["latest_before"]) + 1:] if m in spec["added"]] != spec["added"]:
+    elif migrations[migrations.index(spec["latest_before"]) + 1:] != spec["added"]:
         problem(problems, "migration-order", json.dumps(migrations[migrations.index(spec["latest_before"]) + 1:]))
     # SQL migrations may replace earlier relations. PG-01 compares the installed
     # catalog with this declaration; parsing CREATE statements cannot describe it.
