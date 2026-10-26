@@ -29,6 +29,7 @@
     "series-recovery.js",
     "context-loss.js",
     "mammography-hanging.js",
+    "mg-reference-lines.js",
     "study-prefetch.js",
     "viewer-ux.js",
     "viewer-prior.js",

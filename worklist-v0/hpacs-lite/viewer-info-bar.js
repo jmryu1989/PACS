@@ -82,6 +82,7 @@ window.KinViewerInfoBar = (() => {
       const { layout, cells } = adopt();
       for (const { id, current, bar } of cells) {
         const m = current.instance;
+        bar.children[2].hidden = !!studyActions?.hidden?.();
         bar.children[2].disabled = !m || !studyActions?.available();
         bar.children[2].title = studyActions?.available() ? '이 셀의 이전 검사 목록을 엽니다.' : '이전 검사 연결은 다음 단계에서 제공됩니다.';
         let label = m ? [text(m.PatientName) || 'Unknown', text(m.PatientSex) || 'Unknown',

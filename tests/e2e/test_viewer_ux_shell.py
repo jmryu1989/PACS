@@ -382,6 +382,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         self.assertTrue(any('/api/clinician/studies?uids=' in url for url in requests))
         expect(page.get_by_role('button', name='Viewer Settings', exact=True)).not_to_be_visible()
         expect(page.get_by_role('region', name='Image Tools', exact=True).get_by_role('status')).to_be_empty()
+        expect(page.get_by_role('region', name='Viewport Information').get_by_role('button', name='Study', exact=False)).not_to_be_visible()
         self.assertFalse(any(url.split('?')[0].endswith('/api/studies') for url in requests))
         page.get_by_role('tablist', name='Patients').get_by_role('button', name='Close ', exact=False).click()
         expect(page.get_by_role('tablist', name='Patients').get_by_role('tab')).to_have_count(0)

@@ -11,6 +11,7 @@ import unittest
 import uuid
 
 from playwright.sync_api import expect
+from document_session import document_request
 from test_viewer_layout import ViewerLayoutE2E
 from test_prior_selection import canvas_ready
 
@@ -388,7 +389,9 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
                 dialog.get_by_role('button', name='Save', exact=True).click()
             self.assertEqual(reply.value.status, 200)
             expect(dialog).not_to_be_visible()
-            return reply.value.json()
+            persisted = document_request(target, 'GET', '/api/workspace-shortcuts')
+            self.assertEqual(persisted.status, 200)
+            return persisted.json()
 
         layout(page, True)
         url = page.url
@@ -458,6 +461,164 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
         self.assertEqual(reply.value.json()['viewerSettings']['mammography'], {'layout':'compare','kind':'conventional'})
         fresh.goto(url)
         layout(fresh, True)
+
+        # A v1 account created before U2 must retain MG through the first v2 toolbar save.
+        record = document_request(fresh, 'GET', '/api/workspace-shortcuts').json()
+        legacy = {**record['viewerSettings'], 'version': 1, 'mammography': {'layout': 'current', 'kind': 'conventional'}}
+        response = document_request(fresh, 'PUT', '/api/workspace-shortcuts', headers={'X-KIN-CSRF': '1'},
+                                    data={'expectedOwner': record['owner'], 'revision': record['revision'], 'viewerSettings': legacy})
+        self.assertEqual(response.status, 200)
+        migrated_work = self.login()
+        migrated = migrated_work.context.new_page()
+        migrated.goto(url)
+        migrated.on('dialog', lambda dialog: dialog.accept())
+        layout(migrated, False)
+        tools = migrated.get_by_role('region', name='Image Tools', exact=True)
+        with migrated.expect_response(lambda r: r.url.endswith('/api/workspace-shortcuts') and r.request.method == 'PUT') as reply:
+            tools.get_by_role('toolbar', name='Frequent Tools').get_by_role('button', name='Zoom', exact=True).drag_to(tools.locator('summary'))
+        self.assertEqual(reply.value.status, 200)
+        persisted = document_request(migrated, 'GET', '/api/workspace-shortcuts')
+        self.assertEqual(persisted.status, 200)
+        self.assertEqual(persisted.json()['viewerSettings']['version'], 2)
+        self.assertEqual(persisted.json()['viewerSettings']['mammography'], legacy['mammography'])
+        settings = editor(migrated)
+        settings.get_by_label('MG Layout', exact=True).select_option('compare')
+        settings.get_by_label('MG Image Type', exact=True).select_option('dbt')
+        save(migrated, settings)
+        layout(migrated, True)
+        migrated.reload(); layout(migrated, True)
+        self.evidence(migrated, 'dbt-default-conventional-fallback')
+        settings = editor(migrated)
+        settings.get_by_label('MG View Order', exact=True).select_option('MLO-CC')
+        settings.get_by_label('MG Breast Order', exact=True).select_option('L-R')
+        settings.get_by_label('MG Prior Position', exact=True).select_option('top')
+        settings.get_by_label('MG Comparison Grid', exact=True).select_option('2')
+        save(migrated, settings)
+        migrated.reload(); canvas_ready(migrated, 8)
+        rows = MG.image_state(self, migrated)
+        self.assertEqual([(r['study'], r['side'], r['view']) for r in rows],
+                         [(study, side, view) for study in [prior.uid, current.uid] for view in ['MLO', 'CC'] for side in ['L', 'R']])
+        self.assertEqual(migrated.evaluate('services.viewportGridService.getState().layout.numRows'), 4)
+        self.evidence(migrated, 'mg-custom-arrangement-fresh-login')
+        for position, columns in [('right', 2), ('left', 2), ('right', 8), ('bottom', 1)]:
+            settings = editor(migrated)
+            settings.get_by_label('MG Prior Position', exact=True).select_option(position)
+            grid = settings.get_by_label('MG Comparison Grid', exact=True)
+            expect(grid.locator('option[value="' + ('8' if position == 'bottom' else '1') + '"]')).to_have_js_property('disabled', True)
+            grid.select_option(str(columns)); save(migrated, settings)
+            canvas_ready(migrated, 8)
+            sides = [('L', 'MLO'), ('R', 'MLO'), ('L', 'CC'), ('R', 'CC')]
+            if position == 'bottom':
+                expected = [(study, side, view) for study in [current.uid, prior.uid] for side, view in sides]
+            else:
+                studies = [prior.uid, current.uid] if position == 'left' else [current.uid, prior.uid]
+                per_study = columns // 2
+                expected = [(study, side, view) for offset in range(0, 4, per_study) for study in studies for side, view in sides[offset:offset + per_study]]
+            self.assertEqual([(r['study'], r['side'], r['view']) for r in MG.image_state(self, migrated)], expected)
+            self.assertEqual(migrated.evaluate('services.viewportGridService.getState().layout.numCols'), columns)
+            self.evidence(migrated, 'mg-prior-' + position + '-columns-' + str(columns))
+            if position == 'bottom':
+                graphics = migrated.evaluate("""() => { const e=cornerstone.getRenderingEngines()[0];
+                  const w=e.offscreenMultiRenderWindow.getOpenGLRenderWindow(),g=w.getContext();
+                  return {requested:w.getSize()[0],actual:g.drawingBufferWidth,
+                    limit:Math.min(g.getParameter(g.MAX_TEXTURE_SIZE),g.getParameter(g.MAX_RENDERBUFFER_SIZE),g.getParameter(g.MAX_VIEWPORT_DIMS)[0])}; }""")
+                self.assertLessEqual(graphics['requested'], graphics['limit'])
+                self.assertEqual(graphics['actual'], graphics['requested'])
+                folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/viewer-ux-u3/screens'))
+                (folder / 'mg-bottom-graphics.json').write_text(json.dumps(graphics, indent=2), encoding='utf-8')
+        dbt = MG.phantom(self, 'U3DBT-' + uuid.uuid4().hex[:12], dbt=True)
+        migrated.goto(self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + dbt.uid)
+        canvas_ready(migrated, 4)
+        self.assertTrue(all(r['study'] == dbt.uid for r in MG.image_state(self, migrated)))
+        self.assertTrue(migrated.evaluate("[...services.viewportGridService.getState().viewports.keys()].every(id => { const v=services.cornerstoneViewportService.getCornerstoneViewport(id); return cornerstone.metaData.get('instance',v.getCurrentImageId()).SOPClassUID==='1.2.840.10008.5.1.4.1.1.13.1.3'; })"))
+        self.evidence(migrated, 'dbt-default-dbt-images')
+
+    def test_priors_07_modality_layout_and_matching_series(self):
+        # D1821 -> RISK-WRONG-SERIES/PREFERENCE-LOSS -> TEST-VIEWER-U3-HANGING.
+        patient = 'U3CT-' + uuid.uuid4().hex[:12]
+        current = self.multiple(patient, 'current', '20260801')
+        prior = self.multiple(patient, 'prior', '20250701')
+        work, page = self.open_viewer(current)
+        page.get_by_role('button', name='Viewer Settings', exact=True).click()
+        settings = page.get_by_role('dialog', name='Viewer Settings', exact=True)
+        expect(settings.get_by_role('button', name='Save', exact=True)).to_be_enabled()
+        settings.get_by_label('CT Default Layout', exact=True).select_option('2x1')
+        settings.get_by_label('CT Prior Position', exact=True).select_option('top')
+        settings.get_by_label('MR Default Layout', exact=True).select_option('2x2')
+        settings.get_by_label('MR Prior Position', exact=True).select_option('left')
+        settings.get_by_label('XA Default Layout', exact=True).select_option('1x2')
+        with page.expect_response(lambda r: r.url.endswith('/api/workspace-shortcuts') and r.request.method == 'PUT') as reply:
+            settings.get_by_role('button', name='Save', exact=True).click()
+        self.assertEqual(reply.value.status, 200)
+        expect(settings).not_to_be_visible()
+        fresh_work = self.login(); fresh = fresh_work.context.new_page()
+        fresh.on('dialog', lambda dialog: dialog.accept())
+        fresh.goto(page.url); canvas_ready(fresh, 2)
+        self.assertEqual(fresh.evaluate('services.viewportGridService.getState().layout.numRows'), 2)
+        fresh.get_by_role('region', name='Series', exact=True).get_by_role('button', name='2/2 D02E second series', exact=False).click()
+        fresh.wait_for_function("() => KinViewerUX.viewport(services.viewportGridService.getActiveViewportId())?.seriesUid === services.displaySetService.getActiveDisplaySets().find(d=>d.StudyInstanceUID==='" + current.uid + "' && d.SeriesNumber==2)?.SeriesInstanceUID")
+        reads = []
+        fresh.on('request', lambda request: reads.append(request.url) if '/api/studies' in request.url else None)
+        panel = self.studies(fresh)
+        panel.get_by_role('button', name='D03A prior', exact=True).click()
+        canvas_ready(fresh, 2)
+        fresh.wait_for_function("uid => [...services.viewportGridService.getState().viewports.values()].some(c=>services.displaySetService.getDisplaySetByUID(c.displaySetInstanceUIDs[0])?.StudyInstanceUID===uid)", arg=prior.uid)
+        state = fresh.evaluate("() => [...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x).map(c=>{const d=services.displaySetService.getDisplaySetByUID(c.displaySetInstanceUIDs[0]);return [d.StudyInstanceUID,Number(d.SeriesNumber)];})")
+        self.assertEqual(state, [[prior.uid, 2], [current.uid, 2]])
+        self.assertEqual(len(reads), 1, reads)
+        self.evidence(fresh, 'per-modality-prior-top-matching-series')
+
+    def test_priors_08_mg_reference_lines_with_comparison(self):
+        # REQ-MG-03 -> RISK-MG-FALSE-ANATOMY -> TEST-MG-REFERENCE-LINES.
+        # Stored DBT planes share a synthetic FoR deliberately, even across studies.
+        from test_mammography_hanging import MammographyHangingE2E as MG
+        from pydicom.uid import generate_uid
+        patient = 'U3REF-' + uuid.uuid4().hex[:12]
+        frame = generate_uid()
+        current = MG.phantom(self, patient, dbt=True, reference_frame=frame)
+        prior = MG.phantom(self, patient, prior=True, dbt=True, reference_frame=frame)
+        work = self.login()
+        record = document_request(work, 'GET', '/api/workspace-shortcuts').json()
+        settings = {**(record['viewerSettings'] or {'version': 2, 'bar': [], 'shortcuts': {}}),
+                    'mammography': {'layout': 'compare', 'kind': 'dbt'}}
+        response = document_request(work, 'PUT', '/api/workspace-shortcuts', headers={'X-KIN-CSRF': '1'},
+                                    data={'expectedOwner': record['owner'], 'revision': record['revision'], 'viewerSettings': settings})
+        self.assertEqual(response.status, 200)
+        page = work.context.new_page()
+        page.goto(self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + current.uid + ',' + prior.uid)
+        canvas_ready(page, 8)
+        observations = []
+        ids = page.evaluate('[...services.viewportGridService.getState().viewports.keys()]')
+        for source in ids:
+            page.evaluate('id=>services.viewportGridService.setActiveViewportId(id)', source)
+            page.wait_for_function('''id=>[...services.viewportGridService.getState().viewports.keys()].every(key=>{
+              const v=services.cornerstoneViewportService.getCornerstoneViewport(key);
+              return cornerstoneTools.ToolGroupManager.getToolGroupForViewport(v.id,v.renderingEngineId)
+                ?.getToolInstance('ReferenceLines')?.editData?.sourceViewportId===id;})''', arg=source)
+            # Observe the real gate with a pass-through native-geometry spy, as in #240's served probe.
+            observations.extend(page.evaluate('''() => {
+              const cs=cornerstone, manager=cornerstoneTools.ToolGroupManager;
+              return [...services.viewportGridService.getState().viewports.keys()].map(id=>{
+                const enabled=cs.getEnabledElementByViewportId(id), v=enabled.viewport;
+                const t=manager.getToolGroupForViewport(v.id,v.renderingEngineId).getToolInstance('ReferenceLines');
+                const src=cs.getEnabledElementByViewportId(t.editData.sourceViewportId).viewport;
+                const a=cs.metaData.get('instance',src.getCurrentImageId()), b=cs.metaData.get('instance',v.getCurrentImageId());
+                const own=Object.prototype.hasOwnProperty.call(t,'isParallel'), original=t.isParallel;
+                let reached=false;
+                t.isParallel=function(...args){reached=true;return original.apply(this,args);};
+                try { t.renderAnnotation(enabled,{getSvgNode:()=>null,appendNode:()=>{},setNodeTouched:()=>{},svgLayerElement:{id:'reference-observation'}}); }
+                finally { if(own)t.isParallel=original;else delete t.isParallel; }
+                return {source:src.id,target:id,reached,sourceStudy:a.StudyInstanceUID,targetStudy:b.StudyInstanceUID,
+                  sourceSide:a.ImageLaterality,targetSide:b.ImageLaterality};
+              });}'''))
+        pairs = [row for row in observations if row['source'] != row['target']]
+        self.assertTrue(any(row['reached'] for row in pairs), 'Same-study same-side stored planes must reach native geometry')
+        for row in pairs:
+            self.assertEqual(row['reached'], row['sourceStudy'] == row['targetStudy'] and row['sourceSide'] == row['targetSide'], row)
+        folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/viewer-ux-u3/screens'))
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / 'mg-reference-boundary.json').write_text(json.dumps(observations, indent=2), encoding='utf-8')
+        self.evidence(page, 'mg-reference-comparison')
 
 
 def load_tests(loader, tests, pattern):

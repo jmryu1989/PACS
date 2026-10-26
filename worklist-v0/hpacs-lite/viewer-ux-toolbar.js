@@ -2,7 +2,25 @@ window.KinViewerUXToolbar = (() => {
   const frequent = ['WindowLevel', 'Pan', 'Zoom', 'StackScroll', 'Length', 'Angle', 'EllipticalROI'];
   const symbols = { WindowLevel: '◐', Pan: '✥', Zoom: '⌕', StackScroll: '↕', Length: '↔',
     Angle: '∠', EllipticalROI: '◯', RectangleROI: '□', ArrowAnnotate: '↗', invert: '◑', Cine: '▷', Crosshairs: '⊕' };
+  // Keep independent preference fields when the U2 shortcut schema advances.
+  const turns = ['flipHorizontal', 'flipVertical', 'rotate-left', 'rotate-right'];
+  const upgrade = value => value?.version !== 1 ? value : { ...value, version: 2, shortcuts: { ...value.shortcuts,
+    ...Object.fromEntries(turns.filter(id => value.shortcuts[id] == null && window.KinViewerUXShortcuts.defaults[id]).map(id => [id, window.KinViewerUXShortcuts.defaults[id]])) } };
   let cached = null;
+  async function prepare(session) {
+    if (session.state() === 'unconfirmed') await session.decide();
+    if (!session.writer() || session.ended()) return;
+    const owner = JSON.stringify(session.owner());
+    try {
+      const response = await fetch('/api/workspace-shortcuts', { credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(10000) });
+      if (window.KinSessionTransport.refusal(response)) throw window.KinSessionTransport.responseError(response);
+      if (!response.ok) return;
+      const record = await response.json();
+      if (!session.ended() && JSON.stringify(session.owner()) === owner && JSON.stringify(record.owner) === owner) cached = record;
+    } catch (_) { /* The mounted toolbar exposes Reload Settings; images remain available. */ }
+    window.kinMammographyHanging?.registerPreferenceProvider(() =>
+      JSON.stringify(cached?.owner) === JSON.stringify(session.owner()) ? cached?.viewerSettings?.mammography || { layout: 'compare', kind: null } : null);
+  }
   function mount({ services, session }) {
     const owner = () => session.owner();
     const service = services.toolbarService;
@@ -14,11 +32,11 @@ window.KinViewerUXToolbar = (() => {
     const active = () => !ended && !session.ended() && (initialOwner === 'null' || JSON.stringify(owner()) === initialOwner);
     const element = (tag, text, parent) => { const node = document.createElement(tag); if (text) node.textContent = text; parent?.append(node); return node; };
     const button = (text, parent, click) => { const node = element('button', text, parent); node.type = 'button'; node.onclick = click; return node; };
-    const defaults = () => ({ version: 1, bar: [...frequent],
+    const defaults = () => ({ version: 2, bar: [...frequent],
       shortcuts: { ...Object.fromEntries([...catalog.keys()].map(id => [id, null])), ...window.KinViewerUXShortcuts.defaults } });
     record = cached && JSON.stringify(cached.owner) === initialOwner ? cached : null;
     loaded = !!record;
-    preferences = record?.viewerSettings || defaults();
+    preferences = upgrade(record?.viewerSettings) || defaults();
     const toolbar = element('section'); toolbar.className = 'kin-ux-toolbar'; toolbar.dataset.kinUxOwned = '';
     toolbar.setAttribute('aria-label', 'Image Tools');
     const bar = element('div', '', toolbar); bar.className = 'kin-ux-tools-bar'; bar.setAttribute('role', 'toolbar'); bar.setAttribute('aria-label', 'Frequent Tools');
@@ -39,7 +57,7 @@ window.KinViewerUXToolbar = (() => {
     const retry = button('Reload Settings', settings, () => load()); retry.hidden = true;
     const dialog = element('dialog', '', document.body); dialog.className = 'kin-ux-settings';
     dialog.setAttribute('aria-label', 'Viewer Settings'); element('h2', 'Viewer Settings', dialog);
-    element('p', '자주 쓰는 도구는 표시하고 나머지는 More에서 사용합니다. 단축키는 영문자·숫자 한 개이며, 입력 중에는 실행하지 않습니다. 설정은 계정에 저장됩니다.', dialog);
+    element('p', '자주 쓰는 도구는 표시하고 나머지는 More에서 사용합니다. 단축키는 영문자·숫자 한 개 또는 Shift+영문자이며, 입력 중에는 실행하지 않습니다. 설정은 계정에 저장됩니다.', dialog);
     const rows = element('div', '', dialog), inputs = new Map(), checks = new Map();
     const mgSection = element('fieldset', '', dialog), mgInputs = new Map();
     element('legend', 'Mammography', mgSection);
@@ -53,15 +71,64 @@ window.KinViewerUXToolbar = (() => {
       for (const [value, title] of options) { const option = element('option', title, select); option.value = value; }
       mgInputs.set(key, select);
     }
+    const arrangement = { viewOrder: 'CC-MLO', sideOrder: 'R-L', priorPosition: 'right', currentColumns: 2, compareColumns: 4 };
+    for (const [key, title, options] of [
+      ['viewOrder', 'MG View Order', [['CC-MLO', 'CC / MLO'], ['MLO-CC', 'MLO / CC']]],
+      ['sideOrder', 'MG Breast Order', [['R-L', 'Right / Left'], ['L-R', 'Left / Right']]],
+      ['priorPosition', 'MG Prior Position', [['right', 'Right'], ['left', 'Left'], ['bottom', 'Bottom'], ['top', 'Top']]],
+      ['currentColumns', 'MG Current Grid', [[2, '2 × 2'], [4, '1 × 4'], [1, '4 × 1']]],
+      ['compareColumns', 'MG Comparison Grid', [[4, '2 × 4'], [2, '4 × 2'], [8, '1 × 8'], [1, '8 × 1']]],
+    ]) {
+      const row = element('label', title, mgSection), select = element('select', '', row);
+      select.setAttribute('aria-label', title);
+      for (const [value, title] of options) { const option = element('option', title, select); option.value = value; }
+      mgInputs.set(key, select);
+    }
+    function updateMGGridChoices() {
+      const vertical = ['top', 'bottom'].includes(mgInputs.get('priorPosition').value);
+      const grid = mgInputs.get('compareColumns');
+      for (const option of grid.options) option.disabled = vertical ? option.value === '8' : option.value === '1';
+      if (grid.selectedOptions[0]?.disabled) grid.value = vertical ? '4' : '2';
+    }
+    mgInputs.get('priorPosition').onchange = updateMGGridChoices;
+    const hanging = window.KinViewerHangingSettings, hangingInputs = new Map();
+    const hangingSection = element('fieldset', '', dialog); element('legend', 'Hanging & Layout', hangingSection);
+    element('p', '모달리티별 기본 배치와 비교 위치를 계정에 저장합니다. Series 메뉴에서 비교 시리즈를 직접 바꿀 수 있습니다.', hangingSection);
+    for (const modality of hanging.modalities) {
+      const group = element('fieldset', '', hangingSection); element('legend', modality, group);
+      const fields = new Map(); hangingInputs.set(modality, fields);
+      for (const [key, title, options] of [
+        ['layout', 'Default Layout', [['automatic', 'Automatic'], ['1x1', '1 × 1'], ['1x2', '1 × 2'], ['2x1', '2 × 1'], ['2x2', '2 × 2'], ['custom', 'Custom']]],
+        ['priorPosition', 'Prior Position', [['right', 'Right'], ['left', 'Left'], ['bottom', 'Bottom'], ['top', 'Top']]],
+        ['seriesMatch', 'Compare Series', [['similar', 'Similar Series'], ['number', 'Same Series Number'], ['largest', 'Most Images']]],
+      ]) {
+        const row = element('label', title, group), select = element('select', '', row);
+        select.setAttribute('aria-label', modality + ' ' + title);
+        for (const [value, title] of options) { const option = element('option', title, select); option.value = value; }
+        fields.set(key, select);
+        if (key === 'layout') {
+          const custom = element('span', '', row); custom.hidden = true;
+          for (const dimension of ['Rows', 'Columns']) {
+            const input = element('input', '', custom); input.type = 'number'; input.min = '1'; input.step = '1';
+            input.setAttribute('aria-label', modality + ' Layout ' + dimension); fields.set(dimension.toLowerCase(), input);
+          }
+          select.onchange = () => { custom.hidden = select.value !== 'custom'; };
+        }
+      }
+    }
     const mammography = value => value?.mammography || { layout: 'compare', kind: null };
+    const generalHanging = hanging.mount(services, () => preferences);
+    const layoutStatus = element('span', ' · Display Fit', settings); layoutStatus.hidden = true;
+    layoutStatus.title = '현재 기기의 표시 한계에 맞춰 영상 영역의 폭을 조정했습니다. 배치 설정은 유지됩니다.';
+    const sizing = hanging.mountSizing(services, fitting => { layoutStatus.hidden = !fitting; });
+    let appliedHanging = JSON.stringify(preferences.hanging);
+    window.kinViewerHangingPreference = modality => hanging.get(preferences, modality);
     let appliedMammography = null, pendingMammography = null, requestedMammography = null;
-    const mgProvider = () => active() && loaded ? mammography(preferences) : null;
-    window.kinMammographyHanging?.registerPreferenceProvider(mgProvider);
     function applyMammography(force = false) {
-      if (!active() || !loaded || pendingMammography) return;
+      if (!active() || !loaded || pendingMammography || saving && !force) return;
       const value = mammography(preferences), signature = JSON.stringify(value);
       if (force || appliedMammography !== signature) {
-        if (window.kinMammographyHanging?.set(value)) appliedMammography = signature;
+        if (window.kinMammographyHanging?.set(value, { accountDefault: true })) appliedMammography = signature;
       }
     }
     function saveMammography() {
@@ -75,27 +142,37 @@ window.KinViewerUXToolbar = (() => {
     // not replace their account's comparison default or another queued choice.
     document.addEventListener('change', event => {
       const select = event.target;
-      if (!active() || !loaded || !select.closest?.('#kin-mammography-hanging')) return;
+      if (!active() || !select.closest?.('#kin-mammography-hanging')) return;
       const key = { 'MG Layout': 'layout', 'MG Image Type': 'kind' }[select.getAttribute('aria-label')];
       if (key) requestedMammography = { ...(requestedMammography || mammography(preferences)), [key]: select.value || null };
     }, { capture: true, signal: abort.signal });
     window.addEventListener('kin-mammography-hanging-changed', event => {
       if (!active() || !session.writer()) return;
-      if (!loaded) { status.textContent = '계정 설정을 불러온 뒤 변경하세요.'; return; }
+      if (!loaded) { pendingMammography = { ...(requestedMammography || event.detail) }; return; }
       pendingMammography = { ...(requestedMammography || event.detail) };
+      appliedMammography = JSON.stringify(pendingMammography);
       saveMammography();
     }, { signal: abort.signal });
     const feedback = element('p', '', dialog); feedback.setAttribute('role', 'status');
     const close = () => { dialog.close(); opener?.isConnected && opener.focus(); };
     function fill(value) {
       rows.replaceChildren(); inputs.clear(); checks.clear();
-      for (const [key, input] of mgInputs) input.value = mammography(value)[key] || '';
+      for (const [key, input] of mgInputs) input.value = mammography(value)[key] ?? arrangement[key] ?? '';
+      updateMGGridChoices();
+      for (const [modality, fields] of hangingInputs) {
+        const stored = hanging.get(value, modality), layout = fields.get('layout');
+        const custom = ![...layout.options].some(option => option.value === stored.layout);
+        layout.value = custom ? 'custom' : stored.layout; layout.onchange();
+        const [rows, columns] = stored.layout === 'automatic' ? [1, 1] : stored.layout.split('x');
+        fields.get('rows').value = rows; fields.get('columns').value = columns;
+        for (const key of ['priorPosition', 'seriesMatch']) fields.get(key).value = stored[key];
+      }
       for (const [id, item] of catalog) {
         const row = element('label', '', rows); row.className = 'kin-ux-setting-row';
         const check = element('input', '', row); check.type = 'checkbox'; check.checked = value.bar.includes(id);
         check.setAttribute('aria-label', 'Show ' + label(item)); checks.set(id, check);
         element('span', label(item), row);
-        const input = element('input', '', row); input.value = value.shortcuts[id] || ''; input.maxLength = 1;
+        const input = element('input', '', row); input.value = value.shortcuts[id] || ''; input.maxLength = 7;
         input.setAttribute('aria-label', label(item) + ' Shortcut'); input.autocomplete = 'off'; inputs.set(id, input);
         button('Clear', row, () => { input.value = ''; input.focus(); });
       }
@@ -134,12 +211,28 @@ window.KinViewerUXToolbar = (() => {
       const used = new Set(Object.entries(shortcuts).filter(([id, key]) => !inputs.has(id) && key).map(([, key]) => key));
       for (const [id, input] of inputs) {
         const value = input.value.trim().toLowerCase();
-        if (value && (!/^[a-z0-9]$/.test(value) || used.has(value))) { feedback.textContent = '단축키는 중복 없이 영문자·숫자 한 개로 지정하세요.'; input.focus(); return; }
+        if (value && (!/^(?:[a-z0-9]|shift\+[a-z])$/.test(value) || used.has(value))) { feedback.textContent = '단축키는 중복 없이 영문자·숫자 한 개 또는 Shift+영문자로 지정하세요.'; input.focus(); return; }
         shortcuts[id] = value || null; if (value) used.add(value);
       }
       const selected = [...checks].filter(([, check]) => check.checked).map(([id]) => id);
-      const next = { version: 1, shortcuts, bar: [...preferences.bar.filter(id => !checks.has(id) || selected.includes(id)), ...selected.filter(id => !preferences.bar.includes(id))] };
+      const next = { ...preferences, version: 2, shortcuts, bar: [...preferences.bar.filter(id => !checks.has(id) || selected.includes(id)), ...selected.filter(id => !preferences.bar.includes(id))] };
       next.mammography = { layout: mgInputs.get('layout').value, kind: mgInputs.get('kind').value || null };
+      for (const [key, fallback] of Object.entries(arrangement)) {
+        const value = typeof fallback === 'number' ? Number(mgInputs.get(key).value) : mgInputs.get(key).value;
+        if (value !== fallback) next.mammography[key] = value;
+      }
+      next.hanging = {};
+      for (const [modality, fields] of hangingInputs) {
+        const rows = Number(fields.get('rows').value), columns = Number(fields.get('columns').value);
+        let layout = fields.get('layout').value;
+        if (layout === 'custom') {
+          if (![rows, columns, rows * columns].every(v => Number.isSafeInteger(v) && v > 0)) {
+            feedback.textContent = '행과 열은 양의 정수로 지정하세요.'; fields.get('rows').focus(); return;
+          }
+          layout = rows + 'x' + columns;
+        }
+        next.hanging[modality] = { layout, priorPosition: fields.get('priorPosition').value, seriesMatch: fields.get('seriesMatch').value };
+      }
       if (await save(next)) close(); else feedback.textContent = status.textContent;
     });
     button('Cancel', dialog, close);
@@ -175,6 +268,8 @@ window.KinViewerUXToolbar = (() => {
     }
     function render() {
       applyMammography();
+      const signature = JSON.stringify(preferences.hanging);
+      if (loaded && signature !== appliedHanging) { appliedHanging = signature; generalHanging.apply(); }
       bar.replaceChildren(); menu.replaceChildren();
       preferences.bar.filter(id => catalog.has(id)).forEach(id => tool(id, bar));
       [...catalog.keys()].filter(id => !preferences.bar.includes(id)).forEach(id => tool(id, menu));
@@ -226,10 +321,10 @@ window.KinViewerUXToolbar = (() => {
       status.textContent = '계정 설정을 불러오는 중…';
       try {
         const data = await request(); if (!active() || sequence !== loadSequence) return;
-        record = cached = data; preferences = data.viewerSettings || defaults(); loaded = true; retry.hidden = true;
+        record = cached = data; preferences = upgrade(data.viewerSettings) || defaults(); loaded = true; retry.hidden = true;
         status.textContent = '계정 설정 · 다른 PC에서도 적용됩니다.';
       } catch (error) { if (active() && sequence === loadSequence) { status.textContent = error.message; retry.hidden = false; } }
-      if (active() && sequence === loadSequence) render();
+      if (active() && sequence === loadSequence) { render(); saveMammography(); }
     }
     async function save(next) {
       if (!loaded || saving || !active()) return false;
@@ -292,15 +387,15 @@ window.KinViewerUXToolbar = (() => {
       if (slot) slot.replaceChildren(toolbar); else if (strip) strip.before(toolbar);
     }
     refresh(); const observer = new MutationObserver(refresh); observer.observe(document.getElementById('root'), { childList: true, subtree: true });
-    render(); load();
+    render(); if (!loaded) load();
     return { invoke, bindings: () => preferences.shortcuts, dispose() {
       if (ended) return; ended = true; abort.abort(); observer.disconnect(); window.removeEventListener('pointerdown', trackPointer, true); toolbar.remove(); settings.remove(); dialog.remove();
       subscription.unsubscribe();
-      window.kinMammographyHanging?.registerPreferenceProvider(null);
+      sizing.dispose(); generalHanging.dispose(); delete window.kinViewerHangingPreference;
       if (window.kinViewerUXFocusTools === focusTools) delete window.kinViewerUXFocusTools;
       if (window.kinViewerUXOpenSettings === openSettings) delete window.kinViewerUXOpenSettings;
       nativeStyle.remove();
     } };
   }
-  return { mount, clear() { cached = null; } };
+  return { mount, prepare, clear() { cached = null; } };
 })();

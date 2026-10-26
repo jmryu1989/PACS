@@ -96,10 +96,10 @@ window.KinViewerPriorController = (() => {
       const admitted = () => imageRequest === request && !request.signal.aborted && current();
       onList({ state: 'ready', origin, studies: rows, message: '영상을 불러오는 중…' });
       try {
-        const sets = await loadStudy(uid);
+        const sets = await loadStudy(uid, value);
         if (!admitted()) return;
         if (!sets.length) throw new Error('표시할 영상 시리즈가 없습니다.');
-        if (!await viewer.compare(value, [sets[0].displaySetInstanceUID], { signal: request.signal })) {
+        if (!await viewer.compare(value, [sets[0].displaySetInstanceUID], { signal: request.signal, studies: rows })) {
           if (admitted()) throw new Error('저장·편집 또는 배치를 확인한 뒤 다시 시도하세요. 현재 영상은 유지합니다.');
           return;
         }

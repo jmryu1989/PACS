@@ -2,11 +2,12 @@
 // The generic comparison protocol chooses by arrival order, not by breast/view/image kind.
 // Use the existing DICOM classifier, while leaving pixels and viewport tools with OHIF.
 function kinCreateMammographyHanging() {
-  const protocolId = 'kin.mammography';
+  let protocolId = 'kin.mammography';
   let services, extensions, stop, institution;
   let preference = { layout: 'compare', kind: null };
   let preferenceProvider = null;
-  let requestedLayout = null;
+  let requestedLayout = null, accountDefault = false;
+  const arrangement = { viewOrder: 'CC-MLO', sideOrder: 'R-L', priorPosition: 'right', currentColumns: 2, compareColumns: 4 };
   let applyPreference = () => {};
   const kinds = ['conventional', 'generated2d', 'dbt'];
   const labels = { conventional: 'Conventional', generated2d: 'Synthetic 2D', dbt: 'DBT' };
@@ -23,10 +24,11 @@ function kinCreateMammographyHanging() {
       preferenceProvider = provider;
       return true;
     },
-    set(value) {
+    set(value, options = {}) {
       if (!value || !['compare', 'current'].includes(value.layout) ||
           !(value.kind === null || kinds.includes(value.kind))) return false;
-      preference = { layout: value.layout, kind: value.kind };
+      preference = { ...value };
+      accountDefault = !!options.accountDefault;
       requestedLayout = value.layout;
       applyPreference();
       return true;
@@ -39,7 +41,7 @@ function kinCreateMammographyHanging() {
     const opened = new URLSearchParams(search).get('StudyInstanceUIDs')?.split(',') || [];
     requestedLayout = null;
     preference = { layout: opened.length > 1 ? 'compare' : 'current', kind: null };
-    try { preferences.set(preferenceProvider?.({ studyInstanceUIDs: opened.slice() })); } catch (_) { /* Use the study-aware default. */ }
+    try { preferences.set(preferenceProvider?.({ studyInstanceUIDs: opened.slice() }), { accountDefault: true }); } catch (_) { /* Use the study-aware default. */ }
     const retrieve = series.metadata, run = hp.run;
     let ended = false, last = null, cells = [], stageCells = [], panel = null, missing = null;
     const live = () => !ended && location.search === search;
@@ -125,16 +127,31 @@ function kinCreateMammographyHanging() {
       const hasKind = (role, kind) => plan.objects.some(o => o.role === role && o.standard && o.kind === kind);
       // Prefer a representation shared by both examinations; never substitute a different kind
       // in an empty counterpart. A personal explicit selection still wins.
-      const selectedKind = preference.kind || kinds.find(k => hasKind('current', k) && hasKind('prior', k)) ||
+      const selectedKind = (preference.kind && (!accountDefault || hasKind('current', preference.kind)) ? preference.kind : null) || kinds.find(k => hasKind('current', k) && hasKind('prior', k)) ||
         kinds.find(k => hasKind('current', k)) || 'conventional';
+      const shape = { ...arrangement, ...preference };
+      protocolId = 'kin.mammography' + (Object.keys(arrangement).some(key => shape[key] !== arrangement[key]) ? '.' + Object.keys(arrangement).map(key => shape[key]).join('.') : '');
       const selectors = {}, stages = [], layouts = ['compare', 'current'];
       stageCells = [];
       // OHIF retains a protocol object when its ID is unchanged. Native stages keep layout/type
       // switches real, instead of re-registering one ID and leaving its former images on screen.
       for (const layout of layouts) for (const kind of kinds) {
         const specs = [];
-        for (const view of ['CC', 'MLO']) for (const role of layout === 'compare' ? ['current', 'prior'] : ['current'])
-          for (const side of ['R', 'L']) specs.push({ role, side, view });
+        const roles = layout === 'compare' ? (['left', 'top'].includes(shape.priorPosition) ? ['prior', 'current'] : ['current', 'prior']) : ['current'];
+        const views = shape.viewOrder.split('-'), sides = shape.sideOrder.split('-');
+        const vertical = ['top', 'bottom'].includes(shape.priorPosition);
+        const columns = layout === 'current' ? shape.currentColumns :
+          vertical ? Math.min(4, shape.compareColumns) : Math.max(2, shape.compareColumns);
+        const breastViews = views.flatMap(view => sides.map(side => ({ side, view })));
+        if (layout === 'current' || vertical) {
+          for (const role of roles) for (const spec of breastViews) specs.push({ role, ...spec });
+        } else {
+          // Each study occupies its chosen side at every grid width, including 4 x 2.
+          const perStudy = columns / roles.length;
+          for (let offset = 0; offset < breastViews.length; offset += perStudy) {
+            for (const role of roles) for (const spec of breastViews.slice(offset, offset + perStudy)) specs.push({ role, ...spec });
+          }
+        }
         const entries = specs.map(spec => {
           const key = [spec.role, spec.side, spec.view, kind].join('|'), slot = plan.slots[key];
           const object = slot?.status === 'ready' ? slot.object : null;
@@ -149,7 +166,7 @@ function kinCreateMammographyHanging() {
         stageCells.push(entries);
         stages.push({ id: layout + '-' + kind, name: (layout === 'compare' ? 'Current vs Prior' : 'Current') + ' · ' + labels[kind],
           stageActivation: { enabled: { minViewportsMatched: 0 } },
-          viewportStructure: { layoutType: 'grid', properties: { rows: 2, columns: layout === 'compare' ? 4 : 2 } },
+          viewportStructure: { layoutType: 'grid', properties: { rows: specs.length / columns, columns } },
           viewports: entries.map(cell => ({ viewportOptions: { toolGroupId: 'default', viewportType: 'stack', allowUnmatchedView: true },
             displaySets: [{ id: cell.key }] })) });
       }
@@ -184,7 +201,7 @@ function kinCreateMammographyHanging() {
     }
     const wrappedRun = function (data, requested, options) {
       if (!live() || !data.displaySets.some(d => d.Modality === 'MG' && d.StudyInstanceUID === opened[0]) ||
-          (requested && !['@ohif/hpCompare', 'default', protocolId].includes(requested))) {
+          (requested && !['@ohif/hpCompare', 'default'].includes(requested) && !requested.startsWith('kin.mammography'))) {
         last = null; return run.call(this, data, requested, options);
       }
       last = { data, options };

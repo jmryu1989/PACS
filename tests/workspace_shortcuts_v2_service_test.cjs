@@ -14,6 +14,22 @@ const v2=()=>({version:2,list:'Control+Alt+KeyQ',image:'Control+Alt+Digit2',prio
 const request=(bindings=v2(),revision=0,c=caller)=>({bindings,revision,expectedOwner:owner(c)});
 const status=code=>e=>e.getStatus?.()===code;
 
+test('v1 MG preference survives a v2 shortcut save with per-modality hanging',async()=>{
+  const f=fixture(), mammography={layout:'current',kind:'conventional',viewOrder:'MLO-CC',priorPosition:'left',compareColumns:2};
+  const old={version:1,bar:['Zoom'],shortcuts:{Zoom:'z'},mammography};
+  const save=(viewerSettings,revision)=>f.service.saveWorkspaceShortcuts({expectedOwner:owner(caller),revision,viewerSettings},caller);
+  const first=await save(old,0);
+  const next={...first.viewerSettings,version:2,bar:[],shortcuts:{Zoom:'shift+z'},
+    hanging:{CT:{layout:'2x2',priorPosition:'left',seriesMatch:'similar'},MR:{layout:'3x3',priorPosition:'top',seriesMatch:'number'},XA:{layout:'1x2',priorPosition:'right',seriesMatch:'largest'}}};
+  const saved=await save(next,first.revision);
+  assert.deepEqual(saved.viewerSettings,next);
+  assert.deepEqual((await f.service.workspaceShortcuts(caller)).viewerSettings.mammography,mammography);
+  const before=f.snapshot();
+  for(const hanging of [{CT:{layout:'bad',priorPosition:'left',seriesMatch:'similar'}},{CT:{layout:'2x2',priorPosition:'unknown',seriesMatch:'similar'}}])
+    await assert.rejects(save({...next,hanging},saved.revision),status(400));
+  assert.deepEqual(f.snapshot(),before);
+});
+
 test('MG layout and representation roam with viewer settings and preserve workspace shortcuts',async()=>{
   const f=fixture(), tools={version:1,bar:['Zoom'],shortcuts:{Zoom:'z'}};
   let revision=0;
@@ -30,7 +46,9 @@ test('MG layout and representation roam with viewer settings and preserve worksp
     assert.equal((await f.service.workspaceShortcuts(c)).viewerSettings,null);
   const before=f.snapshot();
   for(const mammography of [null,[],{}, {layout:'invalid',kind:null}, {layout:'compare',kind:'invalid'},
-    {layout:'current'}, {layout:'compare',kind:null,extra:true}])
+    {layout:'current'}, {layout:'compare',kind:null,extra:true},
+    {layout:'compare',kind:null,priorPosition:'right',compareColumns:1},
+    {layout:'compare',kind:null,priorPosition:'top',compareColumns:8}])
     await assert.rejects(save({...tools,mammography}),status(400));
   assert.deepEqual(f.snapshot(),before);
   await assert.rejects(f.service.saveWorkspaceShortcuts({expectedOwner:owner(caller),revision:revision-1,

@@ -25,7 +25,7 @@ function kinCreateViewerPrior() {
     const closeList = () => { controller.close(); if (anchor?.isConnected) anchor.focus(); };
     const report = (uid, opener) => { reportUid = uid; reportOpener = opener; controller.openReport(uid); };
     const controller = window.KinViewerPriorController.create({ viewer,
-      async loadStudy(uid) {
+      async loadStudy(uid, origin) {
         const source = extensions.getActiveDataSource()[0];
         try { await source.retrieve.series.metadata({ StudyInstanceUID: uid, madeInClient: true }); }
         catch (error) {
@@ -33,8 +33,10 @@ function kinCreateViewerPrior() {
           // must reach the data source again rather than replay that failure.
           source.deleteStudyMetadataPromise(uid); throw error;
         }
-        return services.displaySetService.getActiveDisplaySets().filter(set => set.StudyInstanceUID === uid && set.images?.length)
+        const sets = services.displaySetService.getActiveDisplaySets().filter(set => set.StudyInstanceUID === uid && set.images?.length)
           .sort((a, b) => Number(a.SeriesNumber || 0) - Number(b.SeriesNumber || 0) || a.SeriesInstanceUID.localeCompare(b.SeriesInstanceUID));
+        const sourceSet = services.displaySetService.getActiveDisplaySets().find(set => set.StudyInstanceUID === origin.studyUid && set.SeriesInstanceUID === origin.seriesUid);
+        return window.KinViewerHangingSettings.rank(sets, sourceSet, window.kinViewerHangingPreference?.(sourceSet?.Modality).seriesMatch);
       },
       onList(value) {
         listOpen = value.state !== 'closed';
@@ -76,6 +78,7 @@ function kinCreateViewerPrior() {
       load().then(() => {
         const attach = () => {
           if (ticket !== generation || kinViewerSession.ended()) return;
+          if (kinViewerSession.readOnly()) return;
           if (window.KinViewerUX) dispose = mount(window.KinViewerUX);
           else frame = requestAnimationFrame(attach);
         };

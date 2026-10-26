@@ -3915,11 +3915,12 @@ function kinCreateContextLoss() {
 // The generic comparison protocol chooses by arrival order, not by breast/view/image kind.
 // Use the existing DICOM classifier, while leaving pixels and viewport tools with OHIF.
 function kinCreateMammographyHanging() {
-  const protocolId = 'kin.mammography';
+  let protocolId = 'kin.mammography';
   let services, extensions, stop, institution;
   let preference = { layout: 'compare', kind: null };
   let preferenceProvider = null;
-  let requestedLayout = null;
+  let requestedLayout = null, accountDefault = false;
+  const arrangement = { viewOrder: 'CC-MLO', sideOrder: 'R-L', priorPosition: 'right', currentColumns: 2, compareColumns: 4 };
   let applyPreference = () => {};
   const kinds = ['conventional', 'generated2d', 'dbt'];
   const labels = { conventional: 'Conventional', generated2d: 'Synthetic 2D', dbt: 'DBT' };
@@ -3936,10 +3937,11 @@ function kinCreateMammographyHanging() {
       preferenceProvider = provider;
       return true;
     },
-    set(value) {
+    set(value, options = {}) {
       if (!value || !['compare', 'current'].includes(value.layout) ||
           !(value.kind === null || kinds.includes(value.kind))) return false;
-      preference = { layout: value.layout, kind: value.kind };
+      preference = { ...value };
+      accountDefault = !!options.accountDefault;
       requestedLayout = value.layout;
       applyPreference();
       return true;
@@ -3952,7 +3954,7 @@ function kinCreateMammographyHanging() {
     const opened = new URLSearchParams(search).get('StudyInstanceUIDs')?.split(',') || [];
     requestedLayout = null;
     preference = { layout: opened.length > 1 ? 'compare' : 'current', kind: null };
-    try { preferences.set(preferenceProvider?.({ studyInstanceUIDs: opened.slice() })); } catch (_) { /* Use the study-aware default. */ }
+    try { preferences.set(preferenceProvider?.({ studyInstanceUIDs: opened.slice() }), { accountDefault: true }); } catch (_) { /* Use the study-aware default. */ }
     const retrieve = series.metadata, run = hp.run;
     let ended = false, last = null, cells = [], stageCells = [], panel = null, missing = null;
     const live = () => !ended && location.search === search;
@@ -4038,16 +4040,31 @@ function kinCreateMammographyHanging() {
       const hasKind = (role, kind) => plan.objects.some(o => o.role === role && o.standard && o.kind === kind);
       // Prefer a representation shared by both examinations; never substitute a different kind
       // in an empty counterpart. A personal explicit selection still wins.
-      const selectedKind = preference.kind || kinds.find(k => hasKind('current', k) && hasKind('prior', k)) ||
+      const selectedKind = (preference.kind && (!accountDefault || hasKind('current', preference.kind)) ? preference.kind : null) || kinds.find(k => hasKind('current', k) && hasKind('prior', k)) ||
         kinds.find(k => hasKind('current', k)) || 'conventional';
+      const shape = { ...arrangement, ...preference };
+      protocolId = 'kin.mammography' + (Object.keys(arrangement).some(key => shape[key] !== arrangement[key]) ? '.' + Object.keys(arrangement).map(key => shape[key]).join('.') : '');
       const selectors = {}, stages = [], layouts = ['compare', 'current'];
       stageCells = [];
       // OHIF retains a protocol object when its ID is unchanged. Native stages keep layout/type
       // switches real, instead of re-registering one ID and leaving its former images on screen.
       for (const layout of layouts) for (const kind of kinds) {
         const specs = [];
-        for (const view of ['CC', 'MLO']) for (const role of layout === 'compare' ? ['current', 'prior'] : ['current'])
-          for (const side of ['R', 'L']) specs.push({ role, side, view });
+        const roles = layout === 'compare' ? (['left', 'top'].includes(shape.priorPosition) ? ['prior', 'current'] : ['current', 'prior']) : ['current'];
+        const views = shape.viewOrder.split('-'), sides = shape.sideOrder.split('-');
+        const vertical = ['top', 'bottom'].includes(shape.priorPosition);
+        const columns = layout === 'current' ? shape.currentColumns :
+          vertical ? Math.min(4, shape.compareColumns) : Math.max(2, shape.compareColumns);
+        const breastViews = views.flatMap(view => sides.map(side => ({ side, view })));
+        if (layout === 'current' || vertical) {
+          for (const role of roles) for (const spec of breastViews) specs.push({ role, ...spec });
+        } else {
+          // Each study occupies its chosen side at every grid width, including 4 x 2.
+          const perStudy = columns / roles.length;
+          for (let offset = 0; offset < breastViews.length; offset += perStudy) {
+            for (const role of roles) for (const spec of breastViews.slice(offset, offset + perStudy)) specs.push({ role, ...spec });
+          }
+        }
         const entries = specs.map(spec => {
           const key = [spec.role, spec.side, spec.view, kind].join('|'), slot = plan.slots[key];
           const object = slot?.status === 'ready' ? slot.object : null;
@@ -4062,7 +4079,7 @@ function kinCreateMammographyHanging() {
         stageCells.push(entries);
         stages.push({ id: layout + '-' + kind, name: (layout === 'compare' ? 'Current vs Prior' : 'Current') + ' · ' + labels[kind],
           stageActivation: { enabled: { minViewportsMatched: 0 } },
-          viewportStructure: { layoutType: 'grid', properties: { rows: 2, columns: layout === 'compare' ? 4 : 2 } },
+          viewportStructure: { layoutType: 'grid', properties: { rows: specs.length / columns, columns } },
           viewports: entries.map(cell => ({ viewportOptions: { toolGroupId: 'default', viewportType: 'stack', allowUnmatchedView: true },
             displaySets: [{ id: cell.key }] })) });
       }
@@ -4097,7 +4114,7 @@ function kinCreateMammographyHanging() {
     }
     const wrappedRun = function (data, requested, options) {
       if (!live() || !data.displaySets.some(d => d.Modality === 'MG' && d.StudyInstanceUID === opened[0]) ||
-          (requested && !['@ohif/hpCompare', 'default', protocolId].includes(requested))) {
+          (requested && !['@ohif/hpCompare', 'default'].includes(requested) && !requested.startsWith('kin.mammography'))) {
         last = null; return run.call(this, data, requested, options);
       }
       last = { data, options };
@@ -4141,6 +4158,115 @@ function kinCreateMammographyHanging() {
     const me = response.ok ? await response.json() : null;
     institution = kinViewerSession.sameAccount(me) === true ? me.institution : null;
     window.kinMammographyHanging = preferences;
+  }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
+}
+
+// REQ-VIEWER-REFERENCE-PLANE -> RISK-VIEWER-REFERENCE-PLANE; MG also REQ-MG-03:
+// panes do not share patient coordinates merely because they occupy one tool group.
+function kinCreateMGReferenceLines() {
+  let services, stop;
+  function mount() {
+    stop?.();
+    const core = window.cornerstone, manager = window.cornerstoneTools.ToolGroupManager;
+    const groups = new Set(), tools = new Set(), restores = [];
+    const volumes = new Map();
+    function instance(viewport) {
+      if (viewport?.type === 'orthographic') {
+        // Reformatted MPR planes have no current image ID. Native geometry uses
+        // the volume camera; establish its coordinates from the volume's sources.
+        const volumeId = viewport.getVolumeId();
+        if (!volumeId) return null;
+        let ids;
+        try { ids = viewport.getImageIds(); }
+        catch { return null; } // The actor/cache can be absent during setVolumes or teardown.
+        const frame = viewport.getFrameOfReferenceUID();
+        if (!frame || !ids?.length) return null;
+        let cached = volumes.get(volumeId);
+        // Cached volumes own a fixed image-ID array. Replacement under the same ID
+        // must recheck its sources; camera changes share the existing verdict.
+        if (!cached || cached.ids !== ids) {
+          const first = core.metaData.get('instance', ids[0]);
+          const valid = first?.StudyInstanceUID && first.FrameOfReferenceUID && ids.every((id, index) => {
+            const image = index ? core.metaData.get('instance', id) : first;
+            return storedPlane(image) && image.FrameOfReferenceUID === first.FrameOfReferenceUID &&
+              image.StudyInstanceUID === first.StudyInstanceUID && image.Modality === first.Modality &&
+              (image.Modality !== 'MG' || side(image) === side(first));
+          });
+          cached = { ids, image: valid ? first : null };
+          volumes.set(volumeId, cached);
+        }
+        return cached.image?.FrameOfReferenceUID === frame ? cached.image : null;
+      }
+      const imageId = viewport?.getCurrentImageId?.();
+      const image = imageId ? core.metaData.get('instance', imageId) : null;
+      return storedPlane(image) ? image : null;
+    }
+    function storedPlane(image) {
+      // imagePlaneModule already contains OHIF's fallback plane. The instance for
+      // the displayed frame is also the native provider's input, before defaults.
+      // DICOM DS values may remain numeric strings in the served instance.
+      const numeric = value => (typeof value === 'number' || typeof value === 'string' && value.trim() !== '') &&
+        Number.isFinite(Number(value));
+      return [[image?.ImageOrientationPatient, 6], [image?.ImagePositionPatient, 3]]
+        .every(([values, length]) => Array.isArray(values) && values.length === length && values.every(numeric));
+    }
+    function side(image) {
+      const values = [image?.ImageLaterality, image?.Laterality, image?.FrameLaterality];
+      const anatomy = group => {
+        const sequence = group?.FrameAnatomySequence;
+        values.push((Array.isArray(sequence) ? sequence[0] : sequence)?.FrameLaterality);
+      };
+      anatomy(image);
+      const shared = image?.SharedFunctionalGroupsSequence;
+      anatomy(Array.isArray(shared) ? shared[0] : shared);
+      const frames = image?.PerFrameFunctionalGroupsSequence;
+      if (Array.isArray(frames)) frames.forEach(anatomy);
+      const known = values.filter(Boolean);
+      return known.length && ['R', 'L'].includes(known[0]) && known.every(value => value === known[0]) ? known[0] : null;
+    }
+    function wrap(tool) {
+      if (!tool || tools.has(tool)) return;
+      tools.add(tool);
+      const render = tool.renderAnnotation;
+      const wrapped = function (enabledElement, svgDrawingHelper) {
+        // editData names the plane actually used by the native renderer. Reading current
+        // images/volume sources here also covers replacement, scrolling and active-pane changes.
+        const sourceViewport = core.getEnabledElementByViewportId(this.editData?.sourceViewportId)?.viewport;
+        const source = instance(sourceViewport), target = instance(enabledElement.viewport);
+        if (!source || !target ||
+            !source.FrameOfReferenceUID || source.FrameOfReferenceUID !== target.FrameOfReferenceUID ||
+            !source.StudyInstanceUID || source.StudyInstanceUID !== target.StudyInstanceUID) return false;
+        if (source?.Modality === 'MG' || target?.Modality === 'MG') {
+          const sourceSide = side(source);
+          if (source?.Modality !== 'MG' || target?.Modality !== 'MG' ||
+              !sourceSide || sourceSide !== side(target)) return false;
+        }
+        return render.call(this, enabledElement, svgDrawingHelper);
+      };
+      tool.renderAnnotation = wrapped;
+      restores.push(() => { if (tool.renderAnnotation === wrapped) tool.renderAnnotation = render; });
+    }
+    function attach(group) {
+      if (!group || groups.has(group)) return;
+      groups.add(group);
+      const add = group.addTool;
+      const wrapped = function (name, ...args) {
+        const result = add.call(this, name, ...args);
+        if (name === 'ReferenceLines') wrap(this.getToolInstance(name));
+        return result;
+      };
+      group.addTool = wrapped;
+      restores.push(() => { if (group.addTool === wrapped) group.addTool = add; });
+      if (group.hasTool('ReferenceLines')) wrap(group.getToolInstance('ReferenceLines'));
+    }
+    const service = services.toolGroupService;
+    const subscription = service.subscribe(service.EVENTS.TOOLGROUP_CREATED,
+      event => attach(manager.getToolGroup(event.toolGroupId)));
+    manager.getAllToolGroups().forEach(attach);
+    stop = () => { subscription.unsubscribe(); restores.reverse().forEach(restore => restore()); };
+  }
+  return { id: 'kin.mg-reference-lines', preRegistration({ servicesManager }) {
+    services = servicesManager.services;
   }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
 
@@ -4191,7 +4317,7 @@ function kinCreateStudyPrefetch() {
 // only its chrome and removes it when that mode or document ends.
 function kinCreateViewerUX() {
   let services, dispose, toolbar, shortcuts, generation = 0, ready;
-  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-ux-toolbar.js', 'viewer-ux-shell.js'];
+  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-hanging-settings.js', 'viewer-ux-toolbar.js', 'viewer-ux-shell.js'];
   // The theme fixes the chrome rows' heights. It is loaded once per document,
   // before the first mount, and stays: a stylesheet attached per mount and
   // dropped on mode exit left a window on re-entry (saved Job, patient tab) in
@@ -4230,6 +4356,7 @@ function kinCreateViewerUX() {
         services.uiNotificationService?.show({ title: 'Viewer', message: error.message, type: 'error' });
         return;
       }
+      await window.KinViewerUXToolbar.prepare(kinViewerSession);
       // Own letter keys before the first mode enters, including route teardown.
       shortcuts = window.KinViewerUXShortcuts.mount({
         getBindings: () => toolbar?.bindings() || {}, invoke: id => toolbar?.invoke(id),
@@ -4282,7 +4409,7 @@ function kinCreateViewerPrior() {
     const closeList = () => { controller.close(); if (anchor?.isConnected) anchor.focus(); };
     const report = (uid, opener) => { reportUid = uid; reportOpener = opener; controller.openReport(uid); };
     const controller = window.KinViewerPriorController.create({ viewer,
-      async loadStudy(uid) {
+      async loadStudy(uid, origin) {
         const source = extensions.getActiveDataSource()[0];
         try { await source.retrieve.series.metadata({ StudyInstanceUID: uid, madeInClient: true }); }
         catch (error) {
@@ -4290,8 +4417,10 @@ function kinCreateViewerPrior() {
           // must reach the data source again rather than replay that failure.
           source.deleteStudyMetadataPromise(uid); throw error;
         }
-        return services.displaySetService.getActiveDisplaySets().filter(set => set.StudyInstanceUID === uid && set.images?.length)
+        const sets = services.displaySetService.getActiveDisplaySets().filter(set => set.StudyInstanceUID === uid && set.images?.length)
           .sort((a, b) => Number(a.SeriesNumber || 0) - Number(b.SeriesNumber || 0) || a.SeriesInstanceUID.localeCompare(b.SeriesInstanceUID));
+        const sourceSet = services.displaySetService.getActiveDisplaySets().find(set => set.StudyInstanceUID === origin.studyUid && set.SeriesInstanceUID === origin.seriesUid);
+        return window.KinViewerHangingSettings.rank(sets, sourceSet, window.kinViewerHangingPreference?.(sourceSet?.Modality).seriesMatch);
       },
       onList(value) {
         listOpen = value.state !== 'closed';
@@ -4333,6 +4462,7 @@ function kinCreateViewerPrior() {
       load().then(() => {
         const attach = () => {
           if (ticket !== generation || kinViewerSession.ended()) return;
+          if (kinViewerSession.readOnly()) return;
           if (window.KinViewerUX) dispose = mount(window.KinViewerUX);
           else frame = requestAnimationFrame(attach);
         };
@@ -4345,7 +4475,7 @@ function kinCreateViewerPrior() {
 
 
 window.config = {
-  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateStudyPrefetch(), kinCreateViewerUX(), kinCreateViewerPrior()],
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateViewerUX(), kinCreateViewerPrior()],
   // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
   // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
   kinThreeDCursor: { enabled: false },

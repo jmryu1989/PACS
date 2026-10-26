@@ -48,26 +48,36 @@ window.KinViewerUXShell = (() => {
         return { layout: { ...state.layout }, viewportId: [...state.viewports.values()]
           .find(cell => cell.viewportId !== value.viewportId && !cell.displaySetInstanceUIDs?.length)?.viewportId || null };
       },
-      async compare(value, displaySetInstanceUIDs, { signal } = {}) {
+      async compare(value, displaySetInstanceUIDs, { signal, studies } = {}) {
         if (!admits(value) || !tabs.guard() || signal?.aborted) return false;
         const grid = services.viewportGridService;
         const signature = () => JSON.stringify([...grid.getState().viewports.values()].map(cell =>
           [cell.viewportId, cell.displaySetInstanceUIDs, cell.x, cell.y, cell.width, cell.height]));
         const before = signature(), sets = displaySetInstanceUIDs.map(id => services.displaySetService.getDisplaySetByUID(id));
         if (!sets.length || sets.some(set => !set)) return false;
-        const response = await fetch('/api/studies', { credentials: 'same-origin', signal });
-        if (!response.ok) return false;
-        const data = await response.json();
+        // The prior controller already read these rows for this patient/sequence.
+        // Direct seam callers still resolve just the affected studies.
+        if (!studies) {
+          const uids = [...new Set([value.studyUid, ...sets.map(set => set.StudyInstanceUID)])].join(',');
+          const endpoint = session.readOnly() ? '/api/clinician/studies' : '/api/studies';
+          const response = await fetch(endpoint + '?uids=' + encodeURIComponent(uids), { credentials: 'same-origin', signal });
+          if (window.KinSessionTransport.refusal(response)) throw window.KinSessionTransport.responseError(response);
+          if (!response.ok) return false;
+          studies = (await response.json()).studies;
+        }
         if (signal?.aborted || !admits(value) || before !== signature() || !tabs.guard(true) || sets.some(set =>
-          data.studies?.find(study => study.uid === set.StudyInstanceUID)?.sourcePatientKey !== value.patientKey)) return false;
+          studies?.find(study => study.uid === set.StudyInstanceUID)?.sourcePatientKey !== value.patientKey)) return false;
+        const preference = window.kinViewerHangingPreference?.(sets[0].Modality) || window.KinViewerHangingSettings.defaults;
         const currentUid = tabs.snapshot().studyUIDs[0], cells = [...grid.getState().viewports.values()];
         if (sets.every(set => set.StudyInstanceUID === value.studyUid)) return true;
         // A prior cell is replaceable. From the current cell, preserve every
         // current image and reuse an assigned comparison or an empty cell.
+        const originCell = cells.find(cell => cell.viewportId === value.viewportId);
+        const onPriorSide = cell => preference.priorPosition === 'left' ? cell.x < originCell.x : preference.priorPosition === 'top' ? cell.y < originCell.y : preference.priorPosition === 'bottom' ? cell.y > originCell.y : cell.x > originCell.x;
         let target = value.studyUid !== currentUid ? value.viewportId : cells.find(cell => {
           const rendered = context(cell.viewportId);
           return rendered && rendered.studyUid !== currentUid;
-        })?.viewportId || cells.find(cell => cell.viewportId !== value.viewportId && !cell.displaySetInstanceUIDs?.length)?.viewportId;
+        })?.viewportId || cells.find(cell => cell.viewportId !== value.viewportId && !cell.displaySetInstanceUIDs?.length && onPriorSide(cell))?.viewportId;
         if (target) {
           grid.setDisplaySetsForViewport({ viewportId: target, displaySetInstanceUIDs,
             viewportOptions: { viewportType: 'stack', toolGroupId: 'default', allowUnmatchedView: true } });
@@ -77,9 +87,12 @@ window.KinViewerUXShell = (() => {
           if (value.mode !== 'stack') return false;
           target = 'kin-prior-' + crypto.randomUUID();
           const current = cells.find(cell => cell.viewportId === value.viewportId);
-          grid.setLayout({ numRows: 1, numCols: 2, activeViewportId: value.viewportId, isHangingProtocolLayout: false,
-            findOrCreateViewport: index => index === 0 ? current : ({ displaySetInstanceUIDs, displaySetOptions: [{}],
-              viewportOptions: { viewportId: target, viewportType: 'stack', toolGroupId: 'default', allowUnmatchedView: true } }) });
+          const layout = window.KinViewerHangingSettings.dimensions(preference, true);
+          const priorIndex = layout.priorFirst ? 0 : layout.vertical ? layout.columns : 1;
+          const currentIndex = layout.priorFirst ? layout.vertical ? layout.columns : 1 : 0;
+          grid.setLayout({ numRows: layout.rows, numCols: layout.columns, activeViewportId: value.viewportId, isHangingProtocolLayout: false,
+            findOrCreateViewport: index => index === currentIndex ? current : ({ displaySetInstanceUIDs: index === priorIndex ? displaySetInstanceUIDs : [], displaySetOptions: [{}],
+              viewportOptions: { viewportId: index === priorIndex ? target : 'kin-prior-' + crypto.randomUUID(), viewportType: 'stack', toolGroupId: 'default', allowUnmatchedView: true } }) });
         }
         return true;
       },
@@ -111,7 +124,8 @@ window.KinViewerUXShell = (() => {
     window.KinViewerUX = seam;
     const stopPatient = tabs.subscribe(closeReport);
     const info = window.KinViewerInfoBar.mount({ services, studyActions: {
-      available: () => typeof actions?.listPriors === 'function',
+      hidden: () => session.readOnly(),
+      available: () => !session.readOnly() && typeof actions?.listPriors === 'function',
       open(viewportId, anchor) { const value = context(viewportId); if (value) actions?.listPriors({ ...value, anchor, openImages: actions.openImages, openReport: actions.openReport }); },
     } });
     const series = window.KinViewerSeriesStrip.mount({ services });
