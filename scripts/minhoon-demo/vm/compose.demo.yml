@@ -1,0 +1,63 @@
+# Demo override for the synthetic remote session (D1872). Applied after the checkout's own docker-compose.yml:
+#   docker compose -p <kh-run> --env-file <demo>/stack.env -f docker-compose.yml -f <demo>/compose.demo.yml
+# Only the HTTPS proxy is published on the VM's public interface (443 is the one port the cloud firewall passes);
+# Orthanc is bound to the VM loopback so the laptop loader reaches it only through an SSH tunnel. Everything else is
+# unpublished. Container names are reset to the per-run project so vm-run's cleanup diff owns every object.
+# restart: on-failure keeps a crashed service alive during the session but does not resurrect the public stack after
+# a VM reboot without its runner.
+services:
+  proxy:
+    container_name: !reset null
+    restart: on-failure
+    ports: !override
+      - "443:443"
+    volumes: !override
+      - ${DEMO_DIR}/certs:/etc/nginx/certs:ro
+
+  orthanc:
+    container_name: !reset null
+    restart: on-failure
+    ports: !override
+      - "127.0.0.1:${DEMO_ORTHANC_PORT}:8042"
+
+  db:
+    container_name: !reset null
+    restart: on-failure
+    ports: !reset []
+
+  emr-provision:
+    container_name: !reset null
+
+  # Production image: the synthetic signing fixture (tests/emr/d/provision_synthetic.cjs) runs against /app/dist.
+  api-migrate:
+    container_name: !reset null
+    build:
+      target: production
+      args:
+        VCS_REF: ${KIN_REVISION:-unknown}
+    volumes: !reset []
+
+  keycloak:
+    container_name: !reset null
+    restart: on-failure
+    ports: !reset []
+    volumes: !override
+      - ${DEMO_DIR}/realm.json:/opt/keycloak/data/import/kin-realm.json:ro
+      - ./keycloak/themes/kin-login:/opt/keycloak/themes/kin-login:ro
+      - ./keycloak/themes/kin-email:/opt/keycloak/themes/kin-email:ro
+
+  api:
+    container_name: !reset null
+    restart: on-failure
+    build:
+      target: production
+      args:
+        VCS_REF: ${KIN_REVISION:-unknown}
+    environment:
+      # Synthetic wrapping key (same custody shape as tests/emr/d/synthetic_stack.py) so report approval can sign.
+      KIN_EMR_WRAPPING_KEY_ID: synthetic
+      KIN_EMR_WRAPPING_KEY_FILES: '{"synthetic":"/run/kin-signing/wrapping.key"}'
+    ports: !reset []
+    volumes: !override
+      - emr-state:/var/lib/kin-emr
+      - ${DEMO_DIR}/wrapping.key:/run/kin-signing/wrapping.key:ro
