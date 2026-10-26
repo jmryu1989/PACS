@@ -195,13 +195,15 @@ def check(root, declaration_path):
             problem(problems, "owned-path-missing", path)
     migrations = sorted(p.parent.name for p in (root / "api/prisma/migrations").glob("*/migration.sql"))
     spec = declaration["migrations"]
-    if len(migrations) != spec["count"]:
-        problem(problems, "migration-count", "%d != %d" % (len(migrations), spec["count"]))
     for name in spec["added"]:
         if name not in migrations:
             problem(problems, "migration-missing", name)
-    if migrations and migrations[-1] != spec["added"][-1]:
-        problem(problems, "migration-not-last", migrations[-1])
+    # B2 must follow the declared baseline, before the C2/D consumers. Later
+    # additive migrations belong in this sequence, not in a global count pin.
+    if spec["latest_before"] not in migrations:
+        problem(problems, "migration-baseline-missing", spec["latest_before"])
+    elif migrations[migrations.index(spec["latest_before"]) + 1:] != spec["added"]:
+        problem(problems, "migration-order", json.dumps(migrations[migrations.index(spec["latest_before"]) + 1:]))
     # SQL migrations may replace earlier relations. PG-01 compares the installed
     # catalog with this declaration; parsing CREATE statements cannot describe it.
     tables = sorted(declaration["deployment"]["tables"])
@@ -287,7 +289,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
     sql = sub.add_parser("sql")
-    sql.add_argument("what", choices=["provision"])
+    sql.add_argument("what", choices=["provision", "audit-grantor"])
+    for option in ("institution", "issuer", "subject", "basis-document"):
+        sql.add_argument("--" + option)
+    sql.add_argument("--capacity", choices=["privacy-officer", "institution-representative"])
     chk = sub.add_parser("check")
     chk.add_argument("--declaration", type=Path, default=DECLARATION)
     chk.add_argument("--root", type=Path, default=ROOT)
@@ -299,6 +304,24 @@ def main(argv=None):
     run.add_argument("--run-dir", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "sql":
+        if args.what == "audit-grantor":
+            values = [args.institution, args.issuer, args.subject, args.capacity, args.basis_document]
+            if any(not value or not value.strip() or "\x00" in value for value in values):
+                parser.error("audit-grantor needs institution, issuer, subject, capacity and basis-document")
+            institution, issuer, subject, capacity, basis = [
+                "E'" + value.replace("\\", "\\\\").replace("'", "''") + "'" for value in values]
+            delimiter = "$designation$"
+            while any(delimiter in value for value in values):
+                delimiter = delimiter[:-1] + "_$"
+            sys.stdout.write("\\set ON_ERROR_STOP on\nBEGIN;\n"
+                f"DO {delimiter}\nDECLARE member_id uuid;\nBEGIN\n"
+                f"SELECT emr_access.existing_member_identity({issuer},{subject}) INTO member_id;\n"
+                "IF member_id IS NULL THEN RAISE EXCEPTION 'Unknown identity: check issuer/subject and ask the person to sign in once before designation'; END IF;\n"
+                "INSERT INTO emr_audit.grantor(institution_id,subject_id,capacity,basis_document_id)\n"
+                f"VALUES({institution},member_id::text,{capacity},{basis})\n"
+                "ON CONFLICT(institution_id,subject_id) DO UPDATE SET capacity=EXCLUDED.capacity,\n"
+                f"basis_document_id=EXCLUDED.basis_document_id;\nEND\n{delimiter};\nCOMMIT;\n")
+            return 0
         sys.stdout.write(PROVISION_SQL)
         return 0
     if args.command == "check":

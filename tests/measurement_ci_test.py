@@ -30,7 +30,7 @@ class MeasurementCiTests(unittest.TestCase):
             'volume-mip-voi': ['volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient'],
             's7-u5-session-contracts': ['u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries', 'u5-session-browser', 'u5-session-end', 'u5-fixups', 'context-loss'],
             'hanging-protocols': ['hanging-protocols', 'cell-merge'],
-            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions'],
+            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell'],
             'patient-identity-measurements': ['identity-fields', 'measurement-accuracy'],
             'volume-batch': ['volume-batch'], 'volume-marks': ['volume-marks'],
             'volume-rendering': ['volume-rendering'],
@@ -78,6 +78,39 @@ class MeasurementCiTests(unittest.TestCase):
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
         print('WORKFLOW_PROFILES ' + json.dumps({name: row['workflow'] for name, row in report.items()}, sort_keys=True))
+
+    def test_candidate_additions_use_dispatch_stack_and_its_own_deadline(self):
+        import candidate_ci as candidate
+        runner = candidate.load(ci.ROOT / 'scripts/run-tests.py', 'candidate_deadline_runner')
+        original = dict(ci.PROFILES['measurements'])
+        with tempfile.TemporaryDirectory() as folder, patch.dict(ci.PROFILES), \
+                patch.object(ci, 'guarded_profile_run', ci.guarded_profile_run), \
+                patch.object(ci, 'profile_environment', ci.profile_environment):
+            candidate.configure(ci.ROOT, ci, runner, Path(folder) / 'plans')
+            self.assertEqual(ci.profile_deadline_seconds('measurements'), candidate.CANDIDATE_DEADLINE_SECONDS)
+            self.assertEqual(ci.PROFILES['measurements']['suite_timeout'], original['suite_timeout'])
+            for filename, class_name, unit, _ in candidate.BASE[3:]:
+                command, outer = ci.guarded_profile_run(ci.PROFILES['measurements'], filename, class_name, unit,
+                                                       candidate.CANDIDATE_DEADLINE_SECONDS)
+                self.assertEqual(command[command.index('--module') + 1], 'tests/' + filename)
+                self.assertEqual(command[command.index('--class') + 1], class_name)
+                self.assertEqual(command[command.index('--mode') + 1], 'live')
+                self.assertEqual(command[command.index('--timeout') + 1], '540')
+                self.assertEqual(outer, 575)
+        self.assertEqual(ci.PROFILES['measurements'], original)
+        self.assertEqual(ci.profile_deadline_seconds('measurements'), 1500)
+
+    def test_u1_transport_change_selects_boundary_and_records_its_input(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('u1_ci_select', ci.ROOT / 'scripts/ci_select.py')
+        selector = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(selector)
+        path = 'worklist-v0/hpacs-lite/session-transport.js'
+        self.assertTrue(selector.select([path])['worklist-ux-measurements'])
+        steps = self.catalog.job('worklist-ux-measurements')['steps']
+        step = next(step for step in steps if 'test_viewer_ux_span.py --boundary' in step.get('run', ''))
+        args = shlex.split(step['run'])
+        self.assertIn(path, [args[i + 1] for i, arg in enumerate(args) if arg == '--file'])
 
     def test_profile_owner_survives_workflow_rename(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -131,9 +164,9 @@ class MeasurementCiTests(unittest.TestCase):
             self.assertEqual([timeout for argv, timeout in calls if 'logs' in argv], [30])
             self.assertEqual([timeout for argv, timeout in calls if 'down' in argv], [60])
 
-    def test_sequential_profiles_remove_only_successful_generated_seeds(self):
+    def test_sequential_profiles_remove_generated_seeds_after_stack_cleanup(self):
         # D1799: exercise the real seed writer and cleanup between merged profiles;
-        # failed runs retain their files for inspection, before the next admission.
+        # failed results remain in artifacts without blocking the next profile.
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             unrelated = root / 'preserved.txt'
@@ -158,7 +191,8 @@ class MeasurementCiTests(unittest.TestCase):
                     returncode=1 if 'up' in command else 0, stdout=b'', stderr=b'')
                 with self.assertRaises(RuntimeError):
                     ci.main('volume-path', credential_provider=lambda *args: 'synthetic')
-                self.assertEqual(len(list((root/'sample-data/public').glob('*.dcm'))), 8)
+                self.assertFalse((root/'sample-data').exists())
+                self.assertEqual(json.loads((root/'volume-path/results.json').read_text())[0]['exit'], 1)
                 self.assertEqual(unrelated.read_text(), 'keep')
 
     def test_context_loss_profile_selects_only_its_declared_cases_on_a_fresh_runner(self):
@@ -192,7 +226,7 @@ class MeasurementCiTests(unittest.TestCase):
 
     def test_emr_b_profile_runs_the_declared_ledger_cases_only_in_its_own_workflow(self):
         """EMR-B1 (order section 10): one declared ledger suite including D941 live latency, a 3600s planned ceiling within
-        its dedicated 65 minute deadline, a separate artifact and project, and only emr-b.yml requests the profile."""
+        its dedicated 65 minute deadline, a separate artifact and project, and only the emr-b job requests the profile."""
         import ast
         import yaml
         profile = ci.PROFILES['emr-b']
@@ -217,9 +251,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual([n.name for n in cls.body if isinstance(n, ast.FunctionDef) and n.name.startswith('test_')],
                          declaration['cases']['live']['B2R'])
         self.assertEqual([row['job'] for row in self.catalog.profile_bindings()['emr-b']], ['emr-b'])
-        workflow = yaml.safe_load((ci.ROOT/'.github/workflows/emr-b.yml').read_text(encoding='utf-8'))
-        self.assertEqual(list(workflow['jobs']), ['emr-b'])
-        steps = workflow['jobs']['emr-b']['steps']
+        steps = self.catalog.job('emr-b')['steps']
         self.assertEqual(len([s for s in steps if '--profile emr-b' in str(s.get('run', ''))]), 1)
         uploads = [s for s in steps if str(s.get('uses', '')).startswith('actions/upload-artifact@')]
         self.assertTrue(any('tests/e2e/artifacts/emr-b-ci' in str(s['with']['path']) for s in uploads))
@@ -632,6 +664,39 @@ class MeasurementCiTests(unittest.TestCase):
                 self.assertNotEqual(profile['out'], other['out'])
                 self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
                 self.assertFalse({row[0] for row in other['suites']} & {row[0] for row in profile['suites']})
+
+    def test_viewer_ux_shell_profile_runs_only_its_declared_cases_in_worklist_ux(self):
+        # Viewer U2 (D1821): the served test_viewer_ux_shell.py cases had no CI registration after
+        # worklist-ux.yml moved into validate.yml. --class selects only the methods the local class declares,
+        # never the inherited ViewerLayoutE2E cases.
+        profile = ci.PROFILES['viewer-ux-shell']
+        self.assertEqual(profile['suites'], (('e2e/test_viewer_ux_shell.py', 'ViewerUXShellE2E', 'ci-viewer-ux-shell'),))
+        self.assertEqual(profile['out'], ci.ROOT/'tests/e2e/artifacts/viewer-ux-shell-ci')
+        command, outer = ci.guarded_profile_run(profile, *profile['suites'][0], 2000)
+        self.assertEqual(command[command.index('--class')+1], 'ViewerUXShellE2E')
+        self.assertEqual(command[command.index('--mode')+1], 'live')
+        self.assertEqual(command[command.index('--timeout')+1], '900')
+        self.assertEqual(outer, 935)
+        for name, other in ci.PROFILES.items():
+            if name == 'viewer-ux-shell':
+                continue
+            with self.subTest(profile=name):
+                self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+                self.assertFalse({row[0] for row in other['suites']} & {row[0] for row in profile['suites']})
+        owner = [row for row in self.catalog.profile_bindings()['viewer-ux-shell'] if not row['dispatch']]
+        self.assertEqual([row['job'] for row in owner], ['worklist-ux-measurements'])
+        job = self.catalog.job('worklist-ux-measurements')
+        step = job['steps'][owner[0]['step']]
+        self.assertEqual(step['if'], '${{ !cancelled() }}')
+        uploads = [s for s in job['steps'] if str(s.get('uses', '')).startswith('actions/upload-artifact@')
+                   and s['with']['name'] == 'synthetic-viewer-ux-shell-results']
+        self.assertEqual(len(uploads), 1)
+        # The module's default KIN_EVIDENCE_DIR: profile_environment does not set one for this profile.
+        for path in ('tests/e2e/artifacts/viewer-ux-shell-ci/', 'tmp/viewer-ux-u2/screens/'):
+            self.assertIn(path, uploads[0]['with']['path'].splitlines())
+        self.assertEqual(self.catalog.text().count('--profile viewer-ux-shell'), 1)
+        selection = json.loads((ci.ROOT/'scripts/ci-paths.json').read_text(encoding='utf-8'))['jobs']['worklist-ux-measurements']
+        self.assertIn('tests/e2e/test_viewer_ux_shell.py', selection)
 
     def test_validate_workflow_runs_s9_u0e_served_in_its_own_bounded_job(self):
         # Owner and artifact binding for every profile is test_all_profiles_have_unique_workflow_owners_and_report_artifacts;
@@ -1175,8 +1240,10 @@ class MeasurementCiTests(unittest.TestCase):
                           'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient', 'cell-merge', 'u2b-regressions',
                           # S9-U0E: the served generated OHIF config, in its own validate.yml job.
                           's9-u0e-served',
+                          # Viewer U2 shell (D1821), in the worklist-ux-measurements job.
+                          'viewer-ux-shell', 'viewer-ux-priors',
                           'gateway-e2e', 'critical-result-screens',
-                          # EMR-B1: the access ledger profile, run only by .github/workflows/emr-b.yml.
+                          # EMR-B1: the access ledger profile, run only by the emr-b job.
                           'emr-b',
                           # S7-U5: the session contract job's eight profiles (validate.yml s7-u5-session-contracts matrix);
                           # u5-fixups is the fix round's five screen regressions (final review part 1, blocker 3).
@@ -2766,6 +2833,47 @@ class MeasurementCiTests(unittest.TestCase):
             daemon = json.loads((profile['out']/'daemon-empty.json').read_text(encoding='utf-8'))
             self.assertEqual(daemon, {'remaining': {'containers': [], 'volumes': [], 'networks': []}, 'problems': []})
             self.assertTrue((profile['out']/'results.json').exists())
+
+    def test_failed_profile_cleans_its_seed_before_viewer_shell_profile(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            profiles = {name: {**ci.PROFILES[name], 'out': root/name}
+                        for name in ['study-arrivals', 'viewer-ux-shell']}
+            failed_once = False
+
+            def seed():
+                source = root/'sample-data/public/fixture.dcm'
+                source.parent.mkdir(parents=True, exist_ok=False)
+                source.write_bytes(b'synthetic seed')
+                return [source]
+
+            def run(command, **kwargs):
+                nonlocal failed_once
+                code = 0
+                if any(str(part).endswith('run-tests.py') for part in command) and not failed_once:
+                    failed_once = True
+                    code = 1
+                return MagicMock(returncode=code, stdout=b'original result', stderr=b'')
+
+            response = MagicMock(); response.__enter__.return_value.status = 200
+            response.__enter__.return_value.read.return_value = b'{"memberRights":"ready"}'
+            with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted'}, clear=True), \
+                 patch.object(ci, 'ROOT', root), patch.dict(ci.PROFILES, profiles), \
+                 patch.object(ci, 'seed_source', side_effect=seed), \
+                 patch.object(ci.subprocess, 'check_output', side_effect=[b'', b'', b'unix:///var/run/docker.sock']*2), \
+                 patch.object(ci.subprocess, 'run', side_effect=run), \
+                 patch.object(ci, 'urlopen', return_value=response), \
+                 patch.object(ci, 'ensure_imported_admin_credential', return_value='synthetic-password'), \
+                 patch.object(ci, 'inspect_failed_module'), contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError, 'failed'):
+                    ci.main('study-arrivals')
+                self.assertFalse((root/'sample-data').exists())
+                ci.main('viewer-ux-shell')
+            failed = json.loads((root/'study-arrivals/results.json').read_text())
+            later = json.loads((root/'viewer-ux-shell/results.json').read_text())
+            self.assertTrue(any(row['exit'] == 1 for row in failed))
+            self.assertTrue(any(row['name'] == 'test_viewer_ux_shell' and row['exit'] == 0 for row in later))
+            self.assertFalse((root/'sample-data').exists())
 
     def test_local_and_self_hosted_refused_before_docker(self):
         for env in [{}, {'GITHUB_ACTIONS':'true','RUNNER_ENVIRONMENT':'self-hosted'}]:

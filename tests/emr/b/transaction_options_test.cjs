@@ -11,7 +11,7 @@ const {createRecordPort}=require(path.join(root,'api/src/emr-runtime/record-port
 const limits=require(path.join(root,'api/src/emr-runtime/limits.ts'));
 function boundary(){
   const calls=[];
-  const db={$transaction:async(body,options)=>{calls.push(options);return body({$queryRaw:async()=>[{id:'11111111-1111-4111-8111-111111111111'}]});}};
+  const db={$transaction:async(body,options)=>{calls.push(options);return body({$executeRaw:async()=>0,$queryRaw:async()=>[{id:'11111111-1111-4111-8111-111111111111'}]});}};
   const store=new AccessLedgerStore(db,{record:async()=>assert.fail('No failed business operation')});
   return {calls,...createRecordPort(store)};
 }

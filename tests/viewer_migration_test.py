@@ -230,7 +230,17 @@ const p=new PrismaClient();
 const ledgerDb=new EmrLedgerClient(process.env.DATABASE_URL);
 const {port,control}=createRecordPort(new AccessLedgerStore(ledgerDb,
  new FailureJournal(ledgerDb,new FailureSpool('/tmp/citation-ledger'))));
-const facts={issuer:'https://synthetic.invalid',ip:null,requestId:require('node:crypto').randomUUID()};
+// REQUEST_FACTS: a draft write consumes the shared request context over this same record port.
+const {createRequestContext}=require('./dist/emr-runtime/request-context.js');
+const {createRequestIngress}=require('./dist/emr-runtime/request-ingress.js');
+const {IncomingMessage,ServerResponse}=require('node:http'),{Socket}=require('node:net');
+const requests=createRequestContext(createRequestIngress({proxyPeers:[]}),port);
+const withFacts=async(run,method='PUT',route='studies/:uid/report')=>{const req=new IncomingMessage(new Socket()),res=new ServerResponse(req);
+ requests.capture.capture(req,res,{issuer:'https://synthetic.invalid',subject:CALLER.sub,roles:CALLER.roles,
+  institution:CALLER.institution,rightsVersion:1,binding:{method:'bearer',sessionRef:null}},
+  {method,route,purpose:'clinical'},async()=>{});
+ try{return await requests.source.withWork(req,request=>run({issuer:request.facts.issuer,ip:null,
+  requestId:request.facts.requestId,request}));}finally{res.emit('finish');}};
 const entry=(n,prefix)=>({v:2,cid:prefix+String(n).padStart(12,'0'),field:'findings',findingId:FINDING,
  findingRevision:1,sourceIndex:0,sourceRef:{kind:'item',itemId:ITEM,sourceRevision:1},
  linkStateAtInsert:'current',headRevisionAtInsert:1,insertedText:TEXT,
@@ -258,8 +268,8 @@ const OWNER={institution:CALLER.institution,sub:CALLER.sub,author:ACTOR};
 const read=async()=>{const s=await p.studyState.findUnique({where:{uid:UID},select:{draftEpoch:true}});const d=await draft();
  return {epoch:s.draftEpoch,pre:{expectedOwner:OWNER,expectedRevision:s.draftEpoch+':'+(d?d.revision:0)},
   kept:d&&Array.isArray(d.citations)?d.citations.map(e=>e.cid):[]};};
-const put=async b=>{const r=await read();return svc.putReport(UID,Object.assign({citationIds:r.kept,structureIds:[]},b,r.pre),CALLER,null,facts);};
-const commit=async b=>{const r=await read();return svc.commitReport(UID,Object.assign({},b,r.pre),CALLER,null);};
+const put=async b=>{const r=await read();return withFacts(facts=>svc.putReport(UID,Object.assign({citationIds:r.kept,structureIds:[]},b,r.pre),CALLER,null,facts));};
+const commit=async b=>{const r=await read();return withFacts(facts=>svc.commitReport(UID,Object.assign({},b,r.pre),CALLER,null,facts),'POST','studies/:uid/report/commit');};
 const force=async()=>{const r=await read();return svc.forceDiscardDrafts(UID,{expectedOwner:OWNER,expectedEpoch:r.epoch},CALLER,null);};
 /**
  * A failing assertion in here used to leave exit 1 and nothing else: ops.run raises on the exit code

@@ -14,6 +14,7 @@ window.KinViewerUXShortcuts = (() => {
     const nativePreset = event => !blocked(event) && allowed() &&
       !Object.values(getBindings()).includes(event.key) && !!window.kinCTPresets?.names?.[Number(event.key) - 1];
     function key(event) {
+      if (editable(event.target) || editable(document.activeElement)) return;
       if (event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
       const character = event.key?.toLowerCase();
       if (!/^[a-z0-9]$/.test(character || '')) return;
@@ -27,6 +28,7 @@ window.KinViewerUXShortcuts = (() => {
       if (id && invoke(id)) event.preventDefault();
     }
     const stopNativeCharacter = event => {
+      if (editable(event.target) || editable(document.activeElement)) return;
       if (!event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && /^[a-z0-9]$/i.test(event.key || '') && !nativePreset(event)) event.stopImmediatePropagation();
     };
     window.addEventListener('keydown', key, true);

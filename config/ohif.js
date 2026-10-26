@@ -209,20 +209,7 @@ function KinViewerBrand({ React }) {
     const labelOf = node => node.nodeType === Node.ELEMENT_NODE
       ? (node.localName === 'svg' ? '' : [...node.childNodes].map(labelOf).join(''))
       : node.nodeType === 3 ? node.data : '';
-    // D1821 replaces the browser-local shortcut editor with account settings.
-    // Route the existing settings entry to its current owner without moving React nodes.
-    const accountSettings = event => {
-      const scope = menuScope(), menu = event.target.closest?.('.absolute.right-0');
-      if (!scope || !menu || !scope.contains(menu)) return;
-      let row = event.target;
-      while (row && row !== menu) {
-        if (SETTINGS_TITLES.has(labelOf(row).trim()) && window.kinViewerUXOpenSettings?.()) {
-          event.preventDefault(); event.stopImmediatePropagation(); return;
-        }
-        row = row.parentElement;
-      }
-    };
-    document.addEventListener('click', accountSettings, true);
+    // The native preferences entry keeps non-letter hotkeys and language reachable.
     // 드롭다운은 한 목록에서 같은 태그의 행을 나란히 만든다. 클래스는 마지막 행만 다를 수 있어 비교하지 않는다.
     const hideAboutRows = scope => {
       scope.querySelectorAll('*').forEach(row => {
@@ -284,7 +271,6 @@ function KinViewerBrand({ React }) {
     return () => {
       document.title = KIN_VIEWER_DEFAULT_TITLE;
       observer.disconnect();
-      document.removeEventListener('click', accountSettings, true);
       if (sessionChannel) {
         sessionChannel.close();
       }
@@ -430,6 +416,12 @@ const kinStackPrecision = (() => {
   }
 
   function flip({ flipHorizontal, flipVertical }) {
+    // Each reflection changes the normal needed by the next one.
+    if (flipHorizontal && flipVertical) {
+      flip.call(this, { flipHorizontal: true });
+      flip.call(this, { flipVertical: true });
+      return;
+    }
     const imageData = this.getDefaultImageData();
     if (!imageData) return;
     const camera = this.getCamera();
@@ -549,6 +541,31 @@ const kinStackPrecision = (() => {
     return pending;
   } };
 })();
+
+// OHIF 3.9.1 caches DICOMweb image UIDs without a frameNumber. A cache hit then
+// bypasses URL parsing, so _getInstance skips the functional groups. Other frames
+// can incidentally populate the shared instance first, making frame 1 order-dependent.
+function kinCreateFrameMetadata() {
+  let installed = false;
+  return { id: 'kin.frame-metadata', preRegistration() {
+    if (installed) return;
+    // The pinned Orthanc OHIF bundle exposes no MetadataProvider utility module.
+    // Its @ohif/core export is shared by the data source and Cornerstone provider.
+    // Keep this adapter at that boundary so native geometry, VOI and measurements
+    // all consume the same frame, without copying the functional-group parser.
+    window.webpackChunk.push([['kin.frame-metadata'], {}, require => {
+      const provider = require(29463).Ly.MetadataProvider;
+      const original = provider.getUIDsFromImageID;
+      provider.getUIDsFromImageID = function (imageId) {
+        const uids = original.call(this, imageId);
+        if (!uids || uids.frameNumber || !imageId.startsWith('wadors:')) return uids;
+        const frame = /\/frames\/([1-9]\d*)(?:$|[?#])/.exec(imageId);
+        return frame ? { ...uids, frameNumber: frame[1] } : uids;
+      };
+      installed = true;
+    }]);
+  } };
+}
 
 /* KIN persistence owns only explicit user commands. Cornerstone objects are
  * session bindings, never wire payloads or durable identifiers. */
@@ -1257,7 +1274,9 @@ function kinCreateViewerHistory() {
       return exporting && SCREEN_EXPORT.includes(name) || ACTIVATING.includes(name) && !VIEW_TOOLS.has(command?.commandOptions?.toolName ?? button.id);
     });
     const TOOLBAR = ['getButtons', 'removeButton', 'addButtons', 'clearButtonSection', 'createButtonSection'];
-    const trimmed = new Set(), originals = new Map(), sectionOriginals = new Map(), replacements = new WeakSet(); let trimming = false;
+    // OHIF refreshToolbarState clones definitions with object spread. Ownership
+    // must survive that refresh so a writer gets the full tool group back.
+    const trimmed = new Set(), originals = new Map(), sectionOriginals = new Map(), replacement = Symbol('kin-read-only-toolbar'); let trimming = false;
     // S5-UI5 fix1. Capture를 빼는 때: clinician-only, 그리고 계정이 아직 확인되지 않은 동안(안전한 기본 — writer 답이 오면 제자리로
     // 돌아온다). writer 문서의 로그인이 끝난 뒤(거절·로그아웃·다른 계정)에는 빼지 않는다. 이미 뺀 것은 writer 답 전까지 그대로라서
     // clinician-only·미확인에서 끝난 문서는 계속 없다. 끝난 문서에 다시 들어온 마운트는 역할을 알 수 없어 안전한 기본을 따른다.
@@ -1268,14 +1287,14 @@ function kinCreateViewerHistory() {
       if (trimming || TOOLBAR.some(name => typeof bar?.[name] !== 'function')) return;
       const replaced = [], exporting = exportClosed();
       for (const [id, button] of Object.entries(bar.getButtons() || {})) {
-        if (replacements.has(button)) continue;
+        if (button[replacement]) continue;
         const props = button?.props || {}, items = Array.isArray(props.items) ? props.items : null;
         if (!items) { if (authoring({ id, commands: props.commands }, exporting)) { trimmed.add(id); originals.set(id, button); } continue; }
         const kept = items.filter(item => !authoring(item, exporting));
         if (!kept.length) { trimmed.add(id); originals.set(id, button); continue; }
         if (kept.length < items.length || props.primary && authoring(props.primary, exporting)) {
-          const replacement = { ...button, props: { ...props, items: kept, primary: props.primary && !authoring(props.primary, exporting) ? props.primary : kept[0] } };
-          originals.set(id, button); replacements.add(replacement); replaced.push(replacement);
+          const restricted = { ...button, [replacement]: true, props: { ...props, items: kept, primary: props.primary && !authoring(props.primary, exporting) ? props.primary : kept[0] } };
+          originals.set(id, button); replaced.push(restricted);
         }
       }
       const buttons = bar.getButtons() || {}, gone = [...trimmed].filter(id => buttons[id]);
@@ -1304,7 +1323,7 @@ function kinCreateViewerHistory() {
         const listed = new Set(sections.flatMap(([, record]) => record.original));
         const buttons = bar.getButtons() || {}, back = [];
         for (const [id, original] of originals) {
-          if (buttons[id] ? !replacements.has(buttons[id]) : !listed.has(id)) continue;
+          if (buttons[id] ? !buttons[id][replacement] : !listed.has(id)) continue;
           if (buttons[id]) bar.removeButton(id);
           back.push(original);
         }
@@ -2284,6 +2303,7 @@ const kinViewerSession = (() => {
   });
   return {
     state,
+    owner: () => owner === null ? null : JSON.parse(owner),
     ended: () => ended,
     readOnly: () => state() === 'read-only',
     writer: () => state() === 'writer',
@@ -3348,9 +3368,6 @@ function kinCreateViewerTechNote() {
         typeof window.kinRenderVolumeScout==='function'?Promise.resolve():load('viewer-volume-scout.js'),
         typeof window.kinCreateVolumeBatch==='function'?Promise.resolve():load('viewer-volume-batch.js')]))
       .then(()=>typeof window.kinViewerTechNote==='function'?undefined:load('viewer-tech-note.js'))
-      .then(()=>standalone&&!window.KinViewerUXShortcuts?load('viewer-ux-shortcuts.js'):undefined)
-      .then(()=>standalone&&!window.KinViewerUXToolbar?load('viewer-ux-toolbar.js'):undefined)
-      .then(()=>{if(standalone)window.kinCreateViewerToolbarPreferences=window.KinViewerUXToolbar.mount;})
       .then(()=>window.kinViewerTechNote(servicesManager.services,kinViewerSession.writeModule)).catch(e=>{ready=null;throw e;}));
     window.kinViewerNoteConnectionState=()=>state;
     window.kinViewerNoteReconnect=()=>{if(active&&state==='failed')connect();};
@@ -3894,11 +3911,304 @@ function kinCreateContextLoss() {
     });
   }, onModeExit() { epoch++; current?.stop(); } };
 }
+
+// The generic comparison protocol chooses by arrival order, not by breast/view/image kind.
+// Use the existing DICOM classifier, while leaving pixels and viewport tools with OHIF.
+function kinCreateMammographyHanging() {
+  const protocolId = 'kin.mammography';
+  let services, extensions, stop, institution;
+  let preference = { layout: 'compare', kind: null };
+  let preferenceProvider = null;
+  let requestedLayout = null;
+  let applyPreference = () => {};
+  const kinds = ['conventional', 'generated2d', 'dbt'];
+  const labels = { conventional: 'Conventional', generated2d: 'Synthetic 2D', dbt: 'DBT' };
+  // U2 owns account storage. Restore through this hook after checking its owner; reset on logout.
+  const preferences = {
+    get: () => ({ ...preference }),
+    // Register before mode entry. Called synchronously at each mount with the opened study UIDs;
+    // return { layout: 'current' | 'compare', kind: null | 'conventional' | 'generated2d' | 'dbt' }.
+    // null/invalid/throw uses the study-aware default. Storage and account ownership belong to U3.
+    // 'compare' requires a usable prior; otherwise the effective layout is 'current'.
+    // Pass null to unregister. Registration does not change an already mounted viewer.
+    registerPreferenceProvider(provider) {
+      if (provider !== null && typeof provider !== 'function') return false;
+      preferenceProvider = provider;
+      return true;
+    },
+    set(value) {
+      if (!value || !['compare', 'current'].includes(value.layout) ||
+          !(value.kind === null || kinds.includes(value.kind))) return false;
+      preference = { layout: value.layout, kind: value.kind };
+      requestedLayout = value.layout;
+      applyPreference();
+      return true;
+    },
+  };
+  function mount() {
+    stop?.();
+    const source = extensions.getActiveDataSource()[0], series = source.retrieve.series;
+    const hp = services.hangingProtocolService, raw = new Map(), search = location.search;
+    const opened = new URLSearchParams(search).get('StudyInstanceUIDs')?.split(',') || [];
+    requestedLayout = null;
+    preference = { layout: opened.length > 1 ? 'compare' : 'current', kind: null };
+    try { preferences.set(preferenceProvider?.({ studyInstanceUIDs: opened.slice() })); } catch (_) { /* Use the study-aware default. */ }
+    const retrieve = series.metadata, run = hp.run;
+    let ended = false, last = null, cells = [], stageCells = [], panel = null, missing = null;
+    const live = () => !ended && location.search === search;
+    const orientations = new WeakMap();
+    function orient(event) {
+      if (!live() || hp.getState()?.protocolId !== protocolId) return;
+      const viewport = services.cornerstoneViewportService.getCornerstoneViewport(event.detail?.viewportId);
+      const imageId = viewport?.getCurrentImageId?.();
+      if (!imageId || viewport.type !== 'stack') return;
+      const instance = window.cornerstone.metaData.get('instance', imageId);
+      const item = raw.get(instance?.SOPInstanceUID);
+      if (!item) return;
+      // setStack clears flips even if the same object is hung again in this viewport.
+      const previous = event.type === newStackEvent ? null : orientations.get(viewport);
+      if (previous?.imageId === imageId) return;
+      const frame = viewport.getCurrentImageIdIndex() + 1;
+      const orientation = window.KinMammographyModel.displaySpec(item, frame).orientation;
+      const sameObject = previous?.sop === instance.SOPInstanceUID;
+      const camera = viewport.getCamera();
+      // Preserve a reader's manual flip while scrolling; only changes in the stored frame's
+      // orientation alter the normalization. A new object starts from its own display rule.
+      const flipHorizontal = sameObject ? !!camera.flipHorizontal !== (previous.flipH !== orientation.flipH) : orientation.flipH;
+      const flipVertical = sameObject ? !!camera.flipVertical !== (previous.flipV !== orientation.flipV) : orientation.flipV;
+      orientations.set(viewport, { imageId, sop: instance.SOPInstanceUID, ...orientation });
+      if (!!camera.flipHorizontal !== flipHorizontal || !!camera.flipVertical !== flipVertical) {
+        viewport.setCamera({ flipHorizontal, flipVertical });
+        viewport.render();
+      }
+      renderLabels();
+    }
+    // Keep the raw responses that the real data source already loads. Starting all MG metadata
+    // before hanging prevents a late series from turning a missing/unique slot into another image.
+    const metadata = async function (...args) {
+      const result = await retrieve.apply(this, args);
+      if (!live() || !Array.isArray(result) || !result.some(p => p?.metadata?.Modality === 'MG')) return result;
+      await Promise.allSettled(result.map(p => p.start().then(instances => {
+        if (live()) for (const item of instances) raw.set(item['00080018']?.Value?.[0], item);
+      })));
+      return result;
+    };
+    series.metadata = metadata;
+    function renderLabels() {
+      if (!live() || hp.getState()?.protocolId !== protocolId) {
+        document.querySelectorAll('.kin-mg-slot').forEach(el => el.remove()); return;
+      }
+      cells = stageCells[hp.getState().stageIndex] || [];
+      const message = cells.filter(cell => !cell.selected).map(cell => cell.label).join(' / ');
+      if (missing && missing.textContent !== message) missing.textContent = message;
+      const views = [...services.viewportGridService.getState().viewports.values()].sort((a,b) => a.y-b.y || a.x-b.x);
+      // Empty native panes have no Cornerstone element yet. Their pane wrappers still occupy
+      // the grid's positions, so a missing counterpart can be labelled where it belongs.
+      const panes = [...document.querySelectorAll('[class~="group/pane"]')].sort((a,b) => {
+        const ar = a.getBoundingClientRect(), br = b.getBoundingClientRect();
+        return ar.top-br.top || ar.left-br.left;
+      });
+      views.forEach((v, i) => {
+        const cell = cells[i], host = document.querySelector('[data-viewport-uid="' + v.viewportId + '"]') ||
+          (!v.displaySetInstanceUIDs?.length && panes.length === views.length ? panes[i] : null);
+        if (!cell || !host) return;
+        let label = host.querySelector('.kin-mg-slot');
+        const viewport = services.cornerstoneViewportService.getCornerstoneViewport(v.viewportId);
+        const orientation = orientations.get(viewport);
+        const unverified = orientation?.imageId === viewport?.getCurrentImageId?.() && orientation?.status === 'unverified';
+        const matched = views.length === cells.length && v.displaySetInstanceUIDs?.[0] === cell.selected;
+        if (!matched && !unverified) { label?.remove(); return; }
+        const text = (matched ? cell.label : '') + (unverified ? (matched ? ' · ' : '') + 'Orientation Unverified' : '');
+        if (label?.textContent === text) return;
+        if (!label) { label = document.createElement('div'); label.className = 'kin-mg-slot'; host.append(label); }
+        label.style.cssText = 'position:absolute;bottom:24px;left:8px;z-index:5;pointer-events:none;color:#fff;background:#101e32;padding:3px 6px;font:12px sans-serif';
+        label.textContent = text;
+        label.title = unverified ? '영상 방향을 확인할 수 없어 저장된 방향으로 표시합니다.' : '';
+      });
+    }
+    function protocol(data) {
+      const model = window.KinMammographyModel;
+      const displaySets = data.displaySets.filter(d => d.Modality === 'MG');
+      const studies = opened.slice(0, 2).map((uid, i) => ({ uid, role: i ? 'prior' : 'current', institution,
+        instances: [...raw.values()].filter(item => item['0020000D']?.Value?.[0] === uid) }));
+      // The institution here is the viewing session's scope. The DICOMweb server has already
+      // authorized these objects; this client classification does not grant access to a study.
+      const plan = model.plan({ institution, studies });
+      preference.layout = plan.prior?.status === 'ok' ? (requestedLayout || 'compare') : 'current';
+      const hasKind = (role, kind) => plan.objects.some(o => o.role === role && o.standard && o.kind === kind);
+      // Prefer a representation shared by both examinations; never substitute a different kind
+      // in an empty counterpart. A personal explicit selection still wins.
+      const selectedKind = preference.kind || kinds.find(k => hasKind('current', k) && hasKind('prior', k)) ||
+        kinds.find(k => hasKind('current', k)) || 'conventional';
+      const selectors = {}, stages = [], layouts = ['compare', 'current'];
+      stageCells = [];
+      // OHIF retains a protocol object when its ID is unchanged. Native stages keep layout/type
+      // switches real, instead of re-registering one ID and leaving its former images on screen.
+      for (const layout of layouts) for (const kind of kinds) {
+        const specs = [];
+        for (const view of ['CC', 'MLO']) for (const role of layout === 'compare' ? ['current', 'prior'] : ['current'])
+          for (const side of ['R', 'L']) specs.push({ role, side, view });
+        const entries = specs.map(spec => {
+          const key = [spec.role, spec.side, spec.view, kind].join('|'), slot = plan.slots[key];
+          const object = slot?.status === 'ready' ? slot.object : null;
+          const matches = object ? displaySets.filter(d => d.images?.length === 1 &&
+            d.StudyInstanceUID === object.study && d.images[0].SOPInstanceUID === object.sop) : [];
+          const selected = matches.length === 1 ? matches[0] : null;
+          selectors[key] = { seriesMatchingRules: [{ attribute: 'displaySetInstanceUID', required: true,
+            constraint: { equals: { value: selected?.displaySetInstanceUID || '' } } }] };
+          const state = selected ? '' : slot?.status === 'ambiguous' ? ' · Select Image' : slot?.status === 'missing' ? ' · Missing' : ' · Unverified';
+          return { key, selected: selected?.displaySetInstanceUID, label: (spec.role === 'current' ? 'Current' : 'Prior') + ' · ' + spec.side + ' ' + spec.view + ' · ' + labels[kind] + state };
+        });
+        stageCells.push(entries);
+        stages.push({ id: layout + '-' + kind, name: (layout === 'compare' ? 'Current vs Prior' : 'Current') + ' · ' + labels[kind],
+          stageActivation: { enabled: { minViewportsMatched: 0 } },
+          viewportStructure: { layoutType: 'grid', properties: { rows: 2, columns: layout === 'compare' ? 4 : 2 } },
+          viewports: entries.map(cell => ({ viewportOptions: { toolGroupId: 'default', viewportType: 'stack', allowUnmatchedView: true },
+            displaySets: [{ id: cell.key }] })) });
+      }
+      const stageIndex = layouts.indexOf(preference.layout) * kinds.length + kinds.indexOf(selectedKind);
+      cells = stageCells[stageIndex];
+      return { stageIndex, value: { id: protocolId, name: 'Mammography', locked: true, numberOfPriorsReferenced: 1,
+        protocolMatchingRules: [], displaySetSelectors: selectors, stages } };
+    }
+    function showControls() {
+      if (panel) return;
+      panel = document.createElement('section'); panel.id = 'kin-mammography-hanging';
+      panel.style.cssText = 'background:#101e32;color:white;padding:4px;font:12px sans-serif';
+      const title = document.createElement('strong'); title.textContent = 'Mammography'; panel.append(title);
+      for (const [key, name, options] of [
+        ['layout', 'MG Layout', [['compare', 'Current vs Prior'], ['current', 'Current']]],
+        ['kind', 'MG Image Type', [['', 'Automatic'], ...kinds.map(k => [k, labels[k]])]],
+      ]) {
+        const select = document.createElement('select'); select.setAttribute('aria-label', name);
+        select.style.cssText = 'color:#fff;background:#101e32;border:1px solid #657c9f;padding:3px';
+        for (const [value, text] of options) { const option = document.createElement('option'); option.value = value; option.textContent = text; select.append(option); }
+        select.value = preference[key] || '';
+        select.addEventListener('change', () => {
+          preferences.set({ ...preference, [key]: select.value || null });
+          window.dispatchEvent(new CustomEvent('kin-mammography-hanging-changed', { detail: preferences.get() }));
+        });
+        panel.append(select);
+      }
+      missing = document.createElement('div'); missing.setAttribute('role', 'status');
+      missing.title = '같은 좌우·촬영 방향·영상 종류가 확인된 영상만 자동 배치합니다. 빈 칸은 다른 영상으로 대체하지 않습니다.';
+      panel.append(missing);
+      document.querySelector('#kin-viewer-layout')?.append(panel);
+    }
+    const wrappedRun = function (data, requested, options) {
+      if (!live() || !data.displaySets.some(d => d.Modality === 'MG' && d.StudyInstanceUID === opened[0]) ||
+          (requested && !['@ohif/hpCompare', 'default', protocolId].includes(requested))) {
+        last = null; return run.call(this, data, requested, options);
+      }
+      last = { data, options };
+      const next = protocol(data);
+      hp.addProtocol(protocolId, next.value);
+      showControls();
+      missing.textContent = cells.filter(cell => !cell.selected).map(cell => cell.label).join(' / ');
+      return run.call(this, data, protocolId, { ...options, stageIndex: next.stageIndex });
+    };
+    hp.run = wrappedRun;
+    applyPreference = () => {
+      if (!live()) return;
+      if (last) wrappedRun.call(hp, last.data, protocolId, last.options);
+      panel?.querySelectorAll('select').forEach((el, i) => { el.value = preference[i ? 'kind' : 'layout'] || ''; });
+    };
+    // React can replace an empty viewport without a grid-state notification.
+    const observer = new MutationObserver(renderLabels);
+    observer.observe(document.body, { childList: true, subtree: true });
+    const subscription = services.viewportGridService.subscribe(services.viewportGridService.EVENTS.GRID_STATE_CHANGED, renderLabels);
+    const imageEvent = window.cornerstone.Enums.Events.STACK_NEW_IMAGE;
+    const newStackEvent = window.cornerstone.Enums.Events.VIEWPORT_NEW_IMAGE_SET;
+    document.addEventListener(imageEvent, orient, true);
+    document.addEventListener(newStackEvent, orient, true);
+    stop = () => {
+      ended = true; raw.clear(); last = null; applyPreference = () => {};
+      if (series.metadata === metadata) series.metadata = retrieve;
+      if (hp.run === wrappedRun) hp.run = run;
+      observer.disconnect(); subscription.unsubscribe(); panel?.remove();
+      document.removeEventListener(imageEvent, orient, true);
+      document.removeEventListener(newStackEvent, orient, true);
+      document.querySelectorAll('.kin-mg-slot').forEach(el => el.remove());
+    };
+  }
+  return { id: 'kin.mammography-hanging', async preRegistration({ servicesManager, extensionManager }) {
+    services = servicesManager.services; extensions = extensionManager;
+    await new Promise((resolve, reject) => {
+      const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/mammography-model.js';
+      script.onload = resolve; script.onerror = () => reject(Error('유방영상 분류를 불러오지 못했습니다.')); document.head.append(script);
+    });
+    const response = await fetch('/api/me', { credentials: 'same-origin', headers: { 'X-KIN-CSRF': '1' } });
+    const me = response.ok ? await response.json() : null;
+    institution = kinViewerSession.sameAccount(me) === true ? me.institution : null;
+    window.kinMammographyHanging = preferences;
+  }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
+}
+
+function kinCreateStudyPrefetch() {
+  let stop;
+  function mount() {
+    stop?.();
+    const core = window.cornerstone, prefetch = window.cornerstoneTools.utilities.stackContextPrefetch;
+    const enable = prefetch.enable, elements = new Set();
+    const type = core.Enums.RequestType.Prefetch;
+    function clearQueued(imageIds) {
+      const keep = request => request.requestType !== type ||
+        (imageIds && !imageIds.has(request.additionalDetails?.imageId));
+      core.imageLoadPoolManager.filterRequests(keep);
+      core.imageRetrievalPoolManager.filterRequests(keep);
+    }
+    const wrapped = function (element) {
+      const viewport = core.getEnabledElement(element)?.viewport;
+      const imageIds = viewport?.getImageIds?.() || [];
+      const instance = imageIds.length ? core.metaData.get('instance', imageIds[0]) : null;
+      // The pinned context prefetch fills a quarter of the cache after its initial neighbours.
+      // Large DBT requests remain queued in Orthanc even after navigation. Load DBT on demand.
+      if (instance?.Modality === 'MG' && Number(instance.NumberOfFrames) > 1) {
+        prefetch.disable(element); clearQueued(new Set(imageIds)); return;
+      }
+      elements.add(element);
+      return enable.call(this, element);
+    };
+    prefetch.enable = wrapped;
+    const leave = () => {
+      // The pinned disable removes listeners before reading enabled-element
+      // state. OHIF can already have removed that state during pane teardown.
+      for (const element of elements) {
+        try { prefetch.disable(element); }
+        catch (error) { if (core.getEnabledElement(element)) throw error; }
+      }
+      elements.clear(); clearQueued();
+    };
+    window.addEventListener('pagehide', leave);
+    stop = () => {
+      leave(); window.removeEventListener('pagehide', leave);
+      if (prefetch.enable === wrapped) prefetch.enable = enable;
+    };
+  }
+  return { id: 'kin.study-prefetch', onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
+}
 // The stock mode owns the grid and Cornerstone elements. This extension owns
 // only its chrome and removes it when that mode or document ends.
 function kinCreateViewerUX() {
-  let services, dispose, generation = 0, ready;
-  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shell.js'];
+  let services, dispose, toolbar, shortcuts, generation = 0, ready;
+  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-ux-toolbar.js', 'viewer-ux-shell.js'];
+  // The theme fixes the chrome rows' heights. It is loaded once per document,
+  // before the first mount, and stays: a stylesheet attached per mount and
+  // dropped on mode exit left a window on re-entry (saved Job, patient tab) in
+  // which the stock grid measured unstyled rows, so a camera applied then was
+  // re-fitted when the rows took their height.
+  function stylesheet() {
+    return new Promise((resolve, reject) => {
+      const href = '/worklist/hpacs-lite/viewer-ux-theme.css';
+      const existing = document.head.querySelector('link[rel="stylesheet"][href="' + href + '"]');
+      if (existing?.sheet) { resolve(); return; }
+      const link = existing || document.createElement('link');
+      link.rel = 'stylesheet'; link.href = href;
+      link.addEventListener('load', () => resolve(), { once: true });
+      link.addEventListener('error', () => { link.remove(); reject(new Error('뷰어 화면 모듈을 불러오지 못했습니다.')); }, { once: true });
+      if (!existing) document.head.append(link);
+    });
+  }
   function load() {
     return ready ||= assets.reduce((previous, name) => previous.then(() => new Promise((resolve, reject) => {
       const script = document.createElement('script');
@@ -3906,30 +4216,45 @@ function kinCreateViewerUX() {
       script.onload = () => { script.remove(); resolve(); };
       script.onerror = () => { script.remove(); reject(new Error('뷰어 화면 모듈을 불러오지 못했습니다.')); };
       document.head.append(script);
-    })), Promise.resolve()).catch(error => { ready = null; throw error; });
+    })), stylesheet()).catch(error => { ready = null; throw error; });
   }
   function stop() { generation++; dispose?.(); dispose = null; }
   return {
     id: 'kin.viewer-ux',
-    preRegistration({ servicesManager }) { services = servicesManager.services; },
+    async preRegistration({ servicesManager }) {
+      services = servicesManager.services;
+      if (window.top !== window) return;
+      try { await load(); }
+      catch (error) {
+        // Optional chrome cannot prevent the native viewer from opening images.
+        services.uiNotificationService?.show({ title: 'Viewer', message: error.message, type: 'error' });
+        return;
+      }
+      // Own letter keys before the first mode enters, including route teardown.
+      shortcuts = window.KinViewerUXShortcuts.mount({
+        getBindings: () => toolbar?.bindings() || {}, invoke: id => toolbar?.invoke(id),
+        allowed: () => !kinViewerSession.ended(),
+      });
+      kinViewerOnEnd(() => { shortcuts?.dispose(); window.KinViewerUXToolbar.clear(); });
+    },
     onModeEnter() {
       stop();
-      if (window.top !== window) return;
+      if (window.top !== window || !shortcuts) return;
       const ticket = generation;
-      load().then(() => {
-        if (ticket !== generation || kinViewerSession.ended()) return;
-        const shell = window.KinViewerUXShell.mount({ services });
+      if (kinViewerSession.ended()) return;
+      try {
+        const shell = window.KinViewerUXShell.mount({ services, session: kinViewerSession });
+        toolbar = window.KinViewerUXToolbar.mount({ services, session: kinViewerSession });
         const channel = kinViewerOnEnd(() => { window.KinViewerPatientTabs.end(); stop(); });
-        dispose = () => { channel?.close(); shell.dispose(); };
-      }).catch(error => {
+        dispose = () => { channel?.close(); toolbar?.dispose(); toolbar = null; shell.dispose(); };
+      } catch (error) {
         if (ticket !== generation) return;
         services.uiNotificationService?.show({ title: 'Viewer', message: error.message, type: 'error' });
-      });
+      }
     },
     onModeExit: stop,
   };
 }
-
 // U3 consumes the U2 document/viewport context. The native data source still
 // owns DICOM loading and display-set creation; reports are API reads only.
 function kinCreateViewerPrior() {
@@ -4020,7 +4345,7 @@ function kinCreateViewerPrior() {
 
 
 window.config = {
-  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateViewerUX(), kinCreateViewerPrior()],
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateStudyPrefetch(), kinCreateViewerUX(), kinCreateViewerPrior()],
   // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
   // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
   kinThreeDCursor: { enabled: false },

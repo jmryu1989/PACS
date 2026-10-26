@@ -1,4 +1,8 @@
+import { startupClinicalProviders } from './emr-clinical/startup';
 import { EMR_BACKGROUND_WORK } from './emr-runtime/background-work';
+import { EmrAuditController } from './emr-audit/audit.controller';
+import { EmrAuditService } from './emr-audit/service';
+import { EmrViewingModule } from './emr-viewing/emr-viewing.module';
 import { AsrService } from './asr.service';
 import { DictationController } from './dictation.controller';
 import { StudyAccessService } from './study-access.service';
@@ -18,6 +22,8 @@ import { DynamicModule, MiddlewareConsumer, Module, NestModule } from '@nestjs/c
 import type { EmrRuntime } from './emr-runtime/application';
 import { EMR_RECORD_PORT } from './emr-runtime/record-port';
 import { EmrNestLifecycle } from './emr-runtime/nest-lifecycle';
+import { createRequestContext, REQUEST_CONTEXT_CAPTURE, REQUEST_CONTEXT_SOURCE } from './emr-runtime/request-context';
+import { createRequestIngress, RequestIngressConfiguration } from './emr-runtime/request-ingress';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { PrismaService } from './prisma.service';
 import { PacsController } from './pacs.controller';
@@ -29,17 +35,21 @@ import { AuthGuard } from './auth.guard';
 import { AuthService } from './auth.service';
 import { AdminController } from './admin.controller';
 import { AdminService } from './admin.service';
+import { AdminAccessReview } from './admin-access-review';
 import { ViewerController } from './viewer.controller';
 import { ViewerService } from './viewer.service';
 import { ViewerContextEventService } from './viewer-context-event.service';
 import { MultiStudyViewController } from './multi-study-view.controller';
-import { MultiStudyViewService, ViewingSetAccess, ViewingSetAccessUnbound } from './multi-study-view.service';
+import { MultiStudyViewService } from './multi-study-view.service';
+import { ViewingSetAccess } from './emr-viewing/viewing-set-access';
 import { FindingController } from './finding.controller';
 import { FindingService } from './finding.service';
 import { ViewerJobController } from './viewer-job.controller';
 import { ViewerJobService } from './viewer-job.service';
 import { ConnectController } from './connect.controller';
 import { ConnectService } from './connect.service';
+import { OnlineImageService } from './emr-image/service';
+import { ImageContextSource, ModuleAImageContextPending, ProductionImageContext } from './emr-image/context';
 import { ManualSrController } from './manual-sr.controller';
 import { ManualSrService } from './manual-sr.service';
 import { ReportPreviewController } from './report-preview.controller';
@@ -59,27 +69,36 @@ function adminNoStore(_req: any, res: any, next: () => void) {
 }
 
 @Module({
-  controllers: [DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController],
+  controllers: [EmrAuditController, DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController],
   providers: [
+    EmrAuditService,
+    ...startupClinicalProviders,
     ViewerContextEventService,
+    OnlineImageService, ModuleAImageContextPending,
+    { provide: ImageContextSource, inject: [ModuleAImageContextPending],
+      useFactory: (lookups: ModuleAImageContextPending) => new ProductionImageContext(lookups, lookups) },
     AsrService, StudyAccessService, PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, FindingService, ViewerJobService, ConnectService, ManualSrService, FavoriteService, StudyTagsService, ReaderAssignmentService, ConsultationService, ClinicianQuestionService, ImageRequestService, ClinicalContextService, CriticalResultService,
     StudyTransferLocalService, DicomImportGateService,
+    AdminAccessReview,
     { provide: APP_GUARD, useClass: AuthGuard },
     { provide: APP_INTERCEPTOR, useClass: StudyAccessInterceptor },
-    // W9-LITE: no access-ledger owner is assembled in this build (EMR-B2 base, then the shared Module A binds the port here).
-    MultiStudyViewService, { provide: ViewingSetAccess, useClass: ViewingSetAccessUnbound },
+    // W9 source selections use the same request-bound A1 response recorder.
+    MultiStudyViewService, ViewingSetAccess,
   ],
 })
 export class AppModule implements NestModule {
-  static withLedger(runtime: EmrRuntime): DynamicModule {
-    return { module: AppModule, providers: [
+  static withLedger(runtime: EmrRuntime, ingress: RequestIngressConfiguration = { proxyPeers: [] }): DynamicModule {
+    const requests = createRequestContext(createRequestIngress(ingress), runtime.port);
+    return { module: AppModule, imports: [EmrViewingModule.withRequests(requests.source)], providers: [
+      { provide: REQUEST_CONTEXT_CAPTURE, useValue: requests.capture },
+      { provide: REQUEST_CONTEXT_SOURCE, useValue: requests.source },
       { provide: EMR_RECORD_PORT, useValue: runtime.port },
       { provide: EMR_BACKGROUND_WORK, useValue: runtime.background.work },
       { provide: EmrNestLifecycle, useValue: new EmrNestLifecycle(runtime) },
-    ], exports: [EMR_RECORD_PORT] };
+    ], exports: [EMR_RECORD_PORT, REQUEST_CONTEXT_SOURCE] };
   }
   configure(consumer: MiddlewareConsumer) {
     // 가드가 401/403으로 먼저 끝내는 응답도 브라우저 캐시에 남지 않아야 한다.
-    consumer.apply(adminNoStore).forRoutes(AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController);
+    consumer.apply(adminNoStore).forRoutes(EmrAuditController, AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController);
   }
 }

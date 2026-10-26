@@ -66,57 +66,6 @@
       }
     },
     {
-      "id": "member:structureCatalogValue:PropertyDeclaration",
-      "category": "member",
-      "name": "structureCatalogValue",
-      "kind": "PropertyDeclaration",
-      "target": "api/src/pacs/report-evidence.ts",
-      "live": {
-        "file": "api/src/pacs/report-evidence.ts",
-        "owner": "PacsReportEvidence",
-        "name": "structureCatalogValue",
-        "kind": "PropertyDeclaration"
-      },
-      "baseline": {
-        "text_sha256": "26397785bcb3ea703837abb4303e0ae1847d87e1103ead9507806371571fb6ff",
-        "sql": []
-      }
-    },
-    {
-      "id": "member:structureCatalog:GetAccessor",
-      "category": "member",
-      "name": "structureCatalog",
-      "kind": "GetAccessor",
-      "target": "api/src/pacs/report-evidence.ts",
-      "live": {
-        "file": "api/src/pacs/report-evidence.ts",
-        "owner": "PacsReportEvidence",
-        "name": "structureCatalog",
-        "kind": "GetAccessor"
-      },
-      "baseline": {
-        "text_sha256": "01f9a81be3f22aa4fb9413ea8969392561a4e93a48258d59cf834b95b5418993",
-        "sql": []
-      }
-    },
-    {
-      "id": "member:structureCatalog:SetAccessor",
-      "category": "member",
-      "name": "structureCatalog",
-      "kind": "SetAccessor",
-      "target": "api/src/pacs/report-evidence.ts",
-      "live": {
-        "file": "api/src/pacs/report-evidence.ts",
-        "owner": "PacsReportEvidence",
-        "name": "structureCatalog",
-        "kind": "SetAccessor"
-      },
-      "baseline": {
-        "text_sha256": "1b34982dc61f4374cec32d7ead45e4b36c5d589b2b3d1f7b901e6488f48e15cf",
-        "sql": []
-      }
-    },
-    {
       "id": "member:onModuleInit:MethodDeclaration",
       "category": "member",
       "name": "onModuleInit",
@@ -4717,7 +4666,9 @@
       "keycloak:KeycloakService",
       "studyAccess:StudyAccessService",
       "findings:FindingService",
-      "ledger:EmrRecordPort"
+      "ledger:EmrRecordPort",
+      "signing:NativeReportSigning",
+      "clinical:ClinicalRoutes"
     ],
     "slots": [
       {
@@ -4879,7 +4830,22 @@
           "keycloak",
           "studyAccess",
           "reportEvidenceConcern",
-          "reportDraftConcern"
+          "reportDraftConcern",
+          {
+            "parameter": "signing"
+          }
+        ]
+      },
+      {
+        "name": "clinicalConcern",
+        "class": "PacsClinicalRoutes",
+        "file": "api/src/emr-clinical/pacs-routes.ts",
+        "args": [
+          "studyStateConcern",
+          "techNoteConcern",
+          {
+            "parameter": "clinical"
+          }
         ]
       }
     ],
@@ -5086,8 +5052,14 @@
       },
       {
         "name": "patchState",
-        "slot": "studyStateConcern",
-        "signature_sha256": "ae196d283dd5e2b5d71c6e42efe6ad8822627d0d4fb55b8c6541f0fe7590e2bf"
+        "slot": "clinicalConcern",
+        "signature_sha256": "6e2ff4d84377b63791ef80dea12c52141493ea19a4b6e271265536f478f306c8",
+        "implementation": {
+          "file": "api/src/emr-clinical/pacs-routes.ts",
+          "owner": "PacsClinicalRoutes",
+          "name": "patchState",
+          "kind": "MethodDeclaration"
+        }
       },
       {
         "name": "match",
@@ -5101,18 +5073,36 @@
       },
       {
         "name": "removeState",
-        "slot": "studyStateConcern",
-        "signature_sha256": "e0f73b12b47d0a4854068a2a15e546424a003a8973a3b8dcb0a6d2d8d4e4f73a"
+        "slot": "clinicalConcern",
+        "signature_sha256": "4dbbe19f2abd9ec49bd0192f3a1583fd6b4beccf714466d9d7fdbcc987437817",
+        "implementation": {
+          "file": "api/src/emr-clinical/pacs-routes.ts",
+          "owner": "PacsClinicalRoutes",
+          "name": "removeState",
+          "kind": "MethodDeclaration"
+        }
       },
       {
         "name": "techNote",
-        "slot": "techNoteConcern",
-        "signature_sha256": "a2ab0279514bdfa6fd55a9a5279dcf05ee93e5c645e5b86de76e5aad6ab0d639"
+        "slot": "clinicalConcern",
+        "signature_sha256": "02b3c302eee7c82d8cea8476ec05ea83571225d1afacc36540f88116902da95e",
+        "implementation": {
+          "file": "api/src/emr-clinical/pacs-routes.ts",
+          "owner": "PacsClinicalRoutes",
+          "name": "techNote",
+          "kind": "MethodDeclaration"
+        }
       },
       {
         "name": "saveTechNote",
-        "slot": "techNoteConcern",
-        "signature_sha256": "0f47d8dcfdfa14e410804c19926eac95678857223269b7610259972bc9333b1a"
+        "slot": "clinicalConcern",
+        "signature_sha256": "ff971cfc1c5b2533e27aab8b827acc201b3b33f7df06ca4fc81a594fd3c18a1e",
+        "implementation": {
+          "file": "api/src/emr-clinical/pacs-routes.ts",
+          "owner": "PacsClinicalRoutes",
+          "name": "saveTechNote",
+          "kind": "MethodDeclaration"
+        }
       },
       {
         "name": "hold",
@@ -5199,8 +5189,7 @@
       },
       {
         "name": "commitReport",
-        "slot": "reportCommitConcern",
-        "signature_sha256": "886a2e45e6b8e57cfa8d2aff6bf7388b84336357f879c367b8c8a2d182cde8e1"
+        "slot": "reportCommitConcern"
       }
     ],
     "reexports": [
@@ -5222,6 +5211,14 @@
     "parameter_decorators": {
       "ledger": [
         "Inject(EMR_RECORD_PORT)"
+      ],
+      "signing": [
+        "Optional()",
+        "Inject(EMR_NATIVE_REPORT_SIGNING)"
+      ],
+      "clinical": [
+        "Optional()",
+        "Inject(EMR_CLINICAL_ROUTES)"
       ]
     }
   },
@@ -5314,7 +5311,8 @@
         "keycloak:KeycloakService",
         "studyAccess:StudyAccessService",
         "reportEvidence:PacsReportEvidence",
-        "reportDraft:PacsReportDraft"
+        "reportDraft:PacsReportDraft",
+        "signing:NativeReportSigning"
       ]
     },
     "api/src/pacs/hold.ts": {
@@ -5358,13 +5356,13 @@
   "di_additions_w9": {
     "unit": "W9-API",
     "decision": "D1500",
-    "note": "W9-LITE server half: the viewing-set resolve controller, its service and the unbound access-record port that the shared Module A binds on the EMR-B2 base (one route); U0B-DI compares the snapshot minus exactly these with di",
+    "note": "W9-LITE server half: the viewing-set resolve controller, its service and the metadata selector recorded by Module A under the request work on the EMR-B2 base (one route); U0B-DI compares the snapshot minus exactly these with di",
     "controllers": [
       "MultiStudyViewController"
     ],
     "providers": [
       "MultiStudyViewService",
-      "ViewingSetAccess=ViewingSetAccessUnbound"
+      "ViewingSetAccess"
     ],
     "injectables": {
       "MultiStudyViewController": {
@@ -5386,7 +5384,7 @@
         "declared": [],
         "optional": []
       },
-      "ViewingSetAccessUnbound": {
+      "ViewingSetAccess": {
         "params": [],
         "scope": null,
         "declared": [],
@@ -8475,7 +8473,7 @@
       }
     ]
   },
-  "allocation_sha256": "f94104ae6e05dfe8e4aaf0a2f8a1fda01c00c1de1177917512ab9d1674ce79ee",
+  "allocation_sha256": "4affecaecb385eeda40deb5efd0afe0dfa5f545746c029086815f1a28271eb81",
   "w5_api": {
     "unit": "W5-API",
     "decision": "D1460",
@@ -8522,6 +8520,16 @@
     "changed_concerns": [
       "api/src/pacs/report-draft.ts"
     ]
+  },
+  "emr_d_online": {
+    "unit": "EMR-D online (D1824, 2464002)",
+    "facade_signatures": [
+      {
+        "name": "commitReport",
+        "before": "886a2e45e6b8e57cfa8d2aff6bf7388b84336357f879c367b8c8a2d182cde8e1"
+      }
+    ],
+    "note": "D73: EMR-D added the request facts parameter to commitReport. The split's move proof keeps the signature it moved; the changed signature is not pinned. The facade still forwards every parameter to the moved concern method (validateFacade), and the commit with request facts runs through the real HTTP route in tests/emr/d/report_commit_pg_test.cjs."
   },
   "di_additions_b2": {
     "controllers": [],
@@ -8631,6 +8639,626 @@
             "2:Symbol(EmrRecordPort)"
           ],
           "optional": []
+        }
+      }
+    }
+  },
+  "di_additions_emr_online": {
+    "unit": "EMR-E / REQUEST_FACTS / ACCESS-REVIEW / DOWNLOAD-PRODUCER-B2 (#226)",
+    "note": "Approved main additions after B2: REQUEST_FACTS (#211), ACCESS-REVIEW (#222), EMR-E (#220), and the StudyTransferLocalController constructor from DOWNLOAD-PRODUCER-B2 (#226). Remove these before B2 and the split declarations. The pre-split snapshot is unchanged.",
+    "source_commits": [
+      "8345d202533f0189bbd01eabf7058ff36e66f56c",
+      "3de568237077b6626b2bfe07f2e8be60e30d4612",
+      "1164584ef03b340aed31a2df9f5ca1a70d1a846a",
+      "c01afe22a296bdf9d62cf7826fbc363b3e01aab1"
+    ],
+    "controllers": [],
+    "providers": [
+      "OnlineImageService",
+      "ModuleAImageContextPending",
+      "ImageContextSource=factory",
+      "AdminAccessReview"
+    ],
+    "routes": [
+      {
+        "controller": "ConnectController",
+        "handler": "image",
+        "method": "GET",
+        "paths": [
+          "/|images/dicom-web"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "1:2@2:null:0",
+          "4:0@0:\"target\":0"
+        ]
+      },
+      {
+        "controller": "ConnectController",
+        "handler": "imageHead",
+        "method": "HEAD",
+        "paths": [
+          "/|images/dicom-web"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "1:2@2:null:0",
+          "4:0@0:\"target\":0"
+        ]
+      }
+    ],
+    "injectables": {
+      "OnlineImageService": {
+        "params": [
+          "Object",
+          "ImageContextSource",
+          "PrismaService",
+          "OrthancService"
+        ],
+        "scope": null,
+        "declared": [
+          "0:Symbol(EmrRecordPort)"
+        ],
+        "optional": []
+      },
+      "ModuleAImageContextPending": {
+        "params": [],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "AdminAccessReview": {
+        "params": [
+          "PrismaService",
+          "StudyAccessService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      }
+    },
+    "changed_injectables": {
+      "PacsController": {
+        "before": {
+          "params": [
+            "PacsService",
+            "AuthService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PacsService",
+            "AuthService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "2:Symbol(RequestContextSource)"
+          ],
+          "optional": []
+        }
+      },
+      "AdminController": {
+        "before": {
+          "params": [
+            "AdminService",
+            "PacsService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "2:Symbol(EmrRecordPort)"
+          ],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "AdminService",
+            "PacsService",
+            "Object",
+            "AdminAccessReview"
+          ],
+          "scope": null,
+          "declared": [
+            "2:Symbol(RequestContextSource)"
+          ],
+          "optional": []
+        }
+      },
+      "AdminService": {
+        "before": {
+          "params": [
+            "PrismaService",
+            "KeycloakService",
+            "StudyAccessService",
+            "AuthService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "4:Symbol(EmrRecordPort)"
+          ],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PrismaService",
+            "KeycloakService",
+            "StudyAccessService",
+            "AuthService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        }
+      },
+      "ConnectController": {
+        "before": {
+          "params": [
+            "ConnectService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "ConnectService",
+            "OnlineImageService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        }
+      },
+      "StudyTransferLocalController": {
+        "before": {
+          "params": [
+            "StudyTransferLocalService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "StudyTransferLocalService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "1:Symbol(RequestContextSource)"
+          ],
+          "optional": []
+        }
+      },
+      "AuthGuard": {
+        "before": {
+          "params": [
+            "Reflector",
+            "AuthService",
+            "StudyTransferLocalService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "Reflector",
+            "AuthService",
+            "StudyTransferLocalService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "3:Symbol(RequestContextCapture)"
+          ],
+          "optional": []
+        }
+      }
+    }
+  },
+  "di_additions_f_link": {
+    "unit": "F_LINK",
+    "middleware_routes": [
+      {
+        "apply": [
+          "adminNoStore"
+        ],
+        "forRoutes": [
+          "EmrAuditController"
+        ]
+      }
+    ],
+    "controllers": [
+      "EmrAuditController"
+    ],
+    "providers": [
+      "EmrAuditService"
+    ],
+    "routes": [
+      {
+        "controller": "EmrAuditController",
+        "handler": "delivery",
+        "method": "POST",
+        "paths": [
+          "emr-audit|issuances/:id/delivery"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:2@2:null:0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "export",
+        "method": "POST",
+        "paths": [
+          "emr-audit|exports"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "extend",
+        "method": "POST",
+        "paths": [
+          "emr-audit|requests/:id/extend"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:2@2:null:0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "investigate",
+        "method": "POST",
+        "paths": [
+          "emr-audit|investigations"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "issue",
+        "method": "POST",
+        "paths": [
+          "emr-audit|issuances/:id/issue"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "prepare",
+        "method": "POST",
+        "paths": [
+          "emr-audit|issuances"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "register",
+        "method": "POST",
+        "paths": [
+          "emr-audit|requests"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "resolve",
+        "method": "POST",
+        "paths": [
+          "emr-audit|requests/:id/resolve"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:2@2:null:0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "roster",
+        "method": "POST",
+        "paths": [
+          "emr-audit|roster/:grantId"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:2@2:null:0",
+          "5:1@1:\"grantId\":0"
+        ]
+      },
+      {
+        "controller": "EmrAuditController",
+        "handler": "state",
+        "method": "GET",
+        "paths": [
+          "emr-audit|requests/:id"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "5:1@1:\"id\":0"
+        ]
+      }
+    ],
+    "injectables": {
+      "EmrAuditController": {
+        "params": [
+          "EmrAuditService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "EmrAuditService": {
+        "params": [
+          "PrismaService",
+          "Object"
+        ],
+        "scope": null,
+        "declared": [
+          "1:Symbol(RequestContextSource)"
+        ],
+        "optional": []
+      }
+    }
+  },
+  "di_additions_d_online": {
+    "unit": "EMR-D online routes",
+    "controllers": [],
+    "providers": [
+      "ModuleAClinicalSourcesPending",
+      "Symbol(OnlineClinicalServices)=factory",
+      "Symbol(EMR_CLINICAL_ROUTES)=factory",
+      "Symbol(EMR_NATIVE_REPORT_SIGNING)=factory"
+    ],
+    "routes": [],
+    "injectables": {
+      "ModuleAClinicalSourcesPending": {
+        "params": [],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      }
+    },
+    "changed_injectables": {
+      "PacsService": {
+        "before": {
+          "params": [
+            "PrismaService",
+            "OrthancService",
+            "KeycloakService",
+            "StudyAccessService",
+            "FindingService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "5:Symbol(EmrRecordPort)"
+          ],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PrismaService",
+            "OrthancService",
+            "KeycloakService",
+            "StudyAccessService",
+            "FindingService",
+            "Object",
+            "NativeReportSigning",
+            "ClinicalRoutes"
+          ],
+          "scope": null,
+          "declared": [
+            "7:Symbol(EMR_CLINICAL_ROUTES)",
+            "6:Symbol(EMR_NATIVE_REPORT_SIGNING)",
+            "5:Symbol(EmrRecordPort)"
+          ],
+          "optional": [
+            7,
+            6
+          ]
+        }
+      },
+      "ClinicianQuestionController": {
+        "before": {
+          "params": [
+            "ClinicianQuestionService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "ClinicianQuestionService",
+            "ClinicalRoutes"
+          ],
+          "scope": null,
+          "declared": [
+            "1:Symbol(EMR_CLINICAL_ROUTES)"
+          ],
+          "optional": [
+            1
+          ]
+        }
+      },
+      "ConsultationController": {
+        "before": {
+          "params": [
+            "ConsultationService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "ConsultationService",
+            "ClinicalRoutes"
+          ],
+          "scope": null,
+          "declared": [
+            "1:Symbol(EMR_CLINICAL_ROUTES)"
+          ],
+          "optional": [
+            1
+          ]
+        }
+      },
+      "FindingController": {
+        "before": {
+          "params": [
+            "FindingService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "FindingService",
+            "ClinicalRoutes"
+          ],
+          "scope": null,
+          "declared": [
+            "1:Symbol(EMR_CLINICAL_ROUTES)"
+          ],
+          "optional": [
+            1
+          ]
+        }
+      },
+      "ImageRequestController": {
+        "before": {
+          "params": [
+            "ImageRequestService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "ImageRequestService",
+            "ClinicalRoutes"
+          ],
+          "scope": null,
+          "declared": [
+            "1:Symbol(EMR_CLINICAL_ROUTES)"
+          ],
+          "optional": [
+            1
+          ]
+        }
+      },
+      "ReaderAssignmentController": {
+        "before": {
+          "params": [
+            "ReaderAssignmentService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "ReaderAssignmentService",
+            "ClinicalRoutes"
+          ],
+          "scope": null,
+          "declared": [
+            "1:Symbol(EMR_CLINICAL_ROUTES)"
+          ],
+          "optional": [
+            1
+          ]
         }
       }
     }

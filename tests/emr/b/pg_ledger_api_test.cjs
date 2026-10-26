@@ -15,6 +15,13 @@ const { verifyRuntimeConnection } = require(path.join(build, 'emr-runtime/manife
 const { EMR_BACKGROUND_WORK } = require(path.join(build, 'emr-runtime/background-work.js'));
 const { StudyTransferLocalService } = require(path.join(build, 'study-transfer-local.service.js'));
 const { provideAfterReceipt } = require(path.join(build, 'emr-runtime/contract.js'));
+const { createRequestContext, REQUEST_CONTEXT_CAPTURE, REQUEST_CONTEXT_SOURCE } = require(path.join(build, 'emr-runtime/request-context.js'));
+const { createRequestIngress } = require(path.join(build, 'emr-runtime/request-ingress.js'));
+function requestProviders(port) {
+  const requests = createRequestContext(createRequestIngress({ proxyPeers: ['127.0.0.1'] }), port);
+  return [{ provide: REQUEST_CONTEXT_CAPTURE, useValue: requests.capture },
+    { provide: REQUEST_CONTEXT_SOURCE, useValue: requests.source }];
+}
 const known = value => ({ status: 'known', value });
 
 async function requestWork() {
@@ -248,6 +255,7 @@ async function clinicalHttp() {
   const { PacsService } = require(path.join(build, 'pacs.service.js'));
   const { AdminController } = require(path.join(build, 'admin.controller.js'));
   const { AdminService } = require(path.join(build, 'admin.service.js'));
+  const { AdminAccessReview } = require(path.join(build, 'admin-access-review.js'));
   const { StudyAccessService } = require(path.join(build, 'study-access.service.js'));
   const { OrthancService } = require(path.join(build, 'orthanc.service.js'));
   const { KeycloakService } = require(path.join(build, 'keycloak.service.js'));
@@ -284,7 +292,7 @@ async function clinicalHttp() {
     class ClinicalFixture {}
     // Only external collaborators are synthetic. Both routes, the draft/CAS
     // implementation, auth/rights checks and PostgreSQL are the actual product.
-    Module({controllers:[PacsController,AdminController],providers:[PrismaService,PacsService,AuthService,AdminService,
+    Module({controllers:[PacsController,AdminController],providers:[...requestProviders(runtime.port),PrismaService,PacsService,AuthService,AdminService,AdminAccessReview,
       {provide:OrthancService,useValue:orthanc},{provide:KeycloakService,useValue:{}},
       {provide:FindingService,useValue:{}},
       {provide:StudyAccessService,useFactory:db=>new StudyAccessService(db,orthanc,{}),inject:[PrismaService]},
@@ -314,12 +322,12 @@ async function clinicalHttp() {
     const rightEvent=JSON.parse(rightRow.payload);
     assert.equal(rightEvent.userId.value.subject,adminSub);
     assert.equal(rightEvent.surface,'PATCH admin/users/:id');
-    assert.deepEqual(rightEvent.trustedProxyIp.value,{address:'127.0.0.1',source:'request-peer'});
+    assert.deepEqual(rightEvent.trustedProxyIp,{status:'unresolved',reason:'not-observed'});
     assert.deepEqual(rightEvent.rolesAtTime.value,['admin']);
     assert.equal(rightEvent.actingInstitution.value,institution);
     const [endedRow]=await witness.$queryRaw`SELECT payload FROM emr_access.access_entry
       WHERE payload::jsonb->'auth'->>'endCause'='isolation'`;
-    assert.deepEqual(JSON.parse(endedRow.payload).trustedProxyIp.value,{address:'127.0.0.1',source:'request-peer'});
+    assert.deepEqual(JSON.parse(endedRow.payload).trustedProxyIp,{status:'unresolved',reason:'not-observed'});
     assert.equal(await witness.authSession.count({where:{sub:member}}),0);
     assert.equal((await changeRights({enabled:true})).status,200);
     const [proxyRow]=await witness.$queryRaw`SELECT e.payload FROM emr_access.access_entry e
@@ -373,7 +381,7 @@ async function clinicalHttp() {
     release();await blocker;blocker=null;
     const read=await reading;assert.equal(read.status,200,read.text);assert.equal(read.body.snapshot.findings,content);
     const viewed=(await entries(green.uid,'provide-prepared')).map(row=>JSON.parse(row.payload));assert.equal(viewed.length,2);
-    assert.deepEqual(viewed.find(event=>event.surface==='GET studies/:uid/draft').trustedProxyIp.value,{address:'127.0.0.1',source:'request-peer'});
+    assert.deepEqual(viewed.find(event=>event.surface==='GET studies/:uid/draft').trustedProxyIp,{status:'unresolved',reason:'not-observed'});
     // D1813 -> missing clinical history / unrecorded disclosure -> real W5 HTTP
     // with separate PG observations. Each of the three required records has an omission control.
     let relatedSeq=0;
@@ -650,7 +658,7 @@ async function authSuccess(endings = false) {
   let sweepCallback;
   async function start(AuthType) {
     class AuthFixture {}
-    Module({ controllers: [AuthController], providers: [PrismaService, KeycloakService,
+    Module({ controllers: [AuthController], providers: [...requestProviders(observedPort), PrismaService, KeycloakService,
       { provide: AuthService, useClass: AuthType }, { provide: EMR_RECORD_PORT, useValue: observedPort },
       { provide: EMR_BACKGROUND_WORK, useValue: runtime.background.work }, {provide: APP_GUARD, useClass: AuthGuard},
       // S9-U4b (#181): AuthGuard also injects the archive-grant service; these routes never reach it.
@@ -871,11 +879,25 @@ async function rightsProducer() {
       name:'Same',emailVerified:true,approved:true,suspended:false,institution:'synthetic-hospital',roles:sub==='administrator'?['admin']:['radiologist']}});
     for(let i=0;i<2;i++) await witness.authSession.create({data:{sid:randomUUID(),sub:'member',accessToken:'synthetic-unused',refreshToken:randomUUID(),
       atExpiresAt:new Date(Date.now()+600000),lastSeenAt:new Date(),rightsVersion:1,institution:'synthetic-hospital'}});
-    const work=runtime.port.begin(); let actor;
-    try{actor={issuer:process.env.KC_ISSUER,subject:caller.sub,id:await work.resolveRequestIdentity(process.env.KC_ISSUER,caller.sub)};}finally{work.end();}
-    const facts={surface:'PATCH admin/users/:id',actor,roles:['admin'],rightsVersion:1,institution:caller.institution,ip:null,sessionRef:null,requestId:randomUUID()};
-    const make=Type=>new Type(db,{}, {}, {},runtime.port);
-    await make(modified.exports.AdminService).patchUser('red-rights',{enabled:false},caller,facts);
+    // REQUEST_FACTS: each rights change runs inside the shared request context over this same record port,
+    // as AdminController does; the actor and its work come from that context.
+    const { createRequestContext } = require(path.join(build, 'emr-runtime/request-context.js'));
+    const { createRequestIngress } = require(path.join(build, 'emr-runtime/request-ingress.js'));
+    const { IncomingMessage, ServerResponse } = require('node:http'), { Socket } = require('node:net');
+    const requests = createRequestContext(createRequestIngress({proxyPeers:[]}), runtime.port);
+    const patch = async (service, sub, body) => {
+      const req=new IncomingMessage(new Socket()), res=new ServerResponse(req);
+      requests.capture.capture(req,res,{issuer:process.env.KC_ISSUER,subject:caller.sub,roles:caller.roles,
+        rightsVersion:1,institution:caller.institution,binding:{method:'bearer',sessionRef:null}},
+        {method:'PATCH',route:'admin/users/:id',purpose:'clinical'},async()=>{});
+      try {
+        return await requests.source.withWork(req,request=>service.patchUser(sub,body,caller,{surface:request.facts.surface,
+          actor:request.facts.actor,roles:request.facts.roles,rightsVersion:request.facts.rightsVersion,
+          institution:request.facts.institution,ip:null,ipSource:'trusted-proxy',sessionRef:null,requestId:request.facts.requestId,request}));
+      } finally { res.emit('finish'); }
+    };
+    const make=Type=>new Type(db,{}, {}, {});
+    await patch(make(modified.exports.AdminService),'red-rights',{enabled:false});
     assert.equal((await witness.memberRights.findUnique({where:{sub:'red-rights'}})).suspended,true);
     const missing=await legal('red-rights'); assert.throws(()=>assert.equal(missing.length,1,'Rights change requires its legal event'));
     const service=make(AdminService);
@@ -883,12 +905,12 @@ async function rightsProducer() {
     await witness.$executeRawUnsafe(`CREATE FUNCTION public.b2r_fail_rights() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN IF NEW.retention_class='rights3y' THEN RAISE EXCEPTION 'Synthetic rights failure'; END IF; RETURN NEW; END $$`);
     await witness.$executeRawUnsafe(`CREATE TRIGGER b2r_fail_rights BEFORE INSERT ON emr_access.access_entry FOR EACH ROW EXECUTE FUNCTION public.b2r_fail_rights()`);
-    await assert.rejects(service.patchUser('member',{enabled:false},caller,facts));
+    await assert.rejects(patch(service,'member',{enabled:false}));
     assert.equal((await witness.memberRights.findUnique({where:{sub:'member'}})).version,1);
     assert.equal(await witness.authSession.count({where:{sub:'member'}}),2);
     assert.equal(await projectionCount('member'),0); assert.equal((await legal('member')).length,0);
     await witness.$executeRawUnsafe('DROP TRIGGER b2r_fail_rights ON emr_access.access_entry');
-    const changed=await service.patchUser('member',{enabled:false},caller,facts);
+    const changed=await patch(service,'member',{enabled:false});
     assert.equal(changed.version,2); assert.equal(changed.enabled,false);
     assert.equal(await witness.authSession.count({where:{sub:'member'}}),0);
     const records=await legal('member');assert.equal(records.length,1);assert.equal(records[0].retention_class,'rights3y');

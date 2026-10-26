@@ -15,6 +15,12 @@ import sys
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1]
 SHA = re.compile(r"[0-9a-f]{40}")
+# Existing G3 allowance + U1 live06/07/09/10 measured wall time rounded up to minutes
+# + SERVICES final2 measured wall time rounded up + two NET suites at the existing
+# per-suite allowance (NET has no recorded live measurement yet). These are hang
+# timeouts, not performance targets; recheck after the first complete hosted run.
+# E CI measurements: production build 36s + PostgreSQL/HTTP 22s.
+CANDIDATE_DEADLINE_SECONDS = 1500 + 2100 + 180 + 2 * 540 + 36 + 22
 BASE = (
     # S7-U1a: CriticalResultInvariantTests added six live cases, 83 -> 89 (and the selection 105 -> 112).
     # CN-N01-A: OrderCorrectionInvariantTests added six live cases, 89 -> 95 (and the selection 116 -> 122).
@@ -29,6 +35,16 @@ BASE = (
     ("e2e/test_worklist.py", None, "candidate-worklist", 17),
     # S9-U4A-SET: SWEEP-05 role change / institution move on the real pages (the selection 139 -> 141).
     ("e2e/test_s9_role_sweep.py", "S9RoleSweepE2E", "s9-u4a-set", 2),
+    # S9-U3 failure recovery and U1 served viewer coverage require the disposable G3 stack.
+    ("e2e/test_s9_failure_network.py", "S9FailureNetworkE2E", "candidate-s9-failure-network", 3),
+    ("e2e/test_s9_failure_server.py", "S9FailureServerE2E", "candidate-s9-failure-server", 2),
+    ("e2e/test_s9_failure_services.py", "FailureServicesE2E", "candidate-s9-failure-services", 2),
+    ("e2e/test_viewer_ux_span.py", "ViewerSpanE2E", "candidate-viewer-span", 2),
+    ("e2e/test_viewer_ux_span.py", "ViewerSpanEmulatedE2E", "candidate-viewer-span-emulated", 2),
+    ("e2e/test_viewer_windows.py", "ViewerWindowsE2E", "candidate-viewer-windows", 5),
+    ("e2e/test_viewer_opening.py", "ViewerOpeningE2E", "candidate-viewer-opening", 3),
+    ("e2e/test_viewer_autoload.py", "ViewerAutoloadE2E", "candidate-viewer-autoload", 7),
+    ("e2e/test_viewer_display_layout.py", "ViewerDisplayLayoutE2E", "candidate-viewer-display-layout", 6),
 )
 FLOWS = (
     ("e2e/test_document_session.py", "DocumentSessionE2E", "test_binding_stays_with_its_document_when_cookie_is_replaced", "test_binding_"),
@@ -37,7 +53,6 @@ FLOWS = (
     ("e2e/test_saved_filter_manager.py", "SavedFilterManagerE2E", "test_manager_01_create_edit_default_relogin_apply_delete", "test_manager_01_"),
     ("e2e/test_shared_filters.py", "SharedFiltersE2E", "test_shared_05_browser_publish_copy_relogin_and_report_draft", "test_shared_05_"),
     ("e2e/test_related_keyboard.py", "RelatedKeyboardE2E", "test_related_keyboard_01_preview_compare_and_report_draft", "test_related_keyboard_01_"),
-    ("e2e/test_viewer_windows.py", "ViewerWindowsE2E", "test_windows_01_limit_dirty_close_focus_and_slot_reuse", "test_windows_01_"),
     ("e2e/test_frame_coverage.py", "FrameCoverageE2E", "test_coverage_01_real_frames_cancel_close_then_all_shown", "test_coverage_01_"),
     # S8-CTX contract 5-7: the server save attempt contract on the real API and database, and the viewer window's save,
     # conflict and history flow (the selection 112 -> 114).
@@ -48,12 +63,18 @@ FLOWS = (
     # W4-FLOW: Approve & Next under the RS=W filter moves to the row after the approved study, and a template's hidden
     # Recommendation is announced, approved and shown again (the selection 123 -> 124).
     ("e2e/test_report_flow.py", "W4ReportFlowE2E", "test_w4_01_approve_next_anchor_recommendation_roundtrip", "test_w4_01_"),
-    # W5-UI Related Report mode FLOW (e2e/test_related_report_mode.py RelatedReportModeE2E.test_w5_01_...): deferred to
-    # W5-UI Phase B by D1675, not deleted. Phase A serves no mode markup on the live page (W5-PHASE-A-INTERIM), so the flow
-    # cannot run before Phase B; Phase B adds this row back with main.html's mode markup (the selection 130 -> 131).
+    # W5-UI Phase B: the Related Report mode FLOW on the live page (main.html now serves the mode): entry save, reviewed
+    # insertion with a committed-but-lost reply, same-ID replay, Back, explicit approval, reopen once (the selection 141 -> 142;
+    # with the S9/U1 registration 174 -> 175).
+    ("e2e/test_related_report_mode.py", "RelatedReportModeE2E",
+     "test_w5_01_prior_insert_loss_check_back_commit_reopen", "test_w5_01_"),
     # EMR-B1 L01 (emr/units/b.json candidate_cases): the access ledger's roles, guards and restart in its own disposable
     # database and production API image (the merged selection 115 -> 116).
+    ("e2e/test_study_arrivals.py", "StudyArrivalsE2E", "test_arrivals_01_same_series_sop_updates_count_and_preserves_viewer_draft_hold_report_and_sources", "test_arrivals_01_"),
+    ("e2e/test_finding_worklist.py", "FindingWorklistE2E", "test_worklist_02_separate_windows_ambiguous_owner_unattached_reattach_and_close", "test_worklist_02_"),
     ("emr/b/live.py", "EmrBLedgerLive", "test_b01_ledger_roles_and_restart", "test_b01_"),
+    ("emr/e/online_live.py", "OnlineImagePg", "test_fixed_image_http", "test_fixed_image_"),
+    ("emr/f/link_live.py", "AuditLinkPg", "test_audit_copy_hold_http", "test_audit_copy_"),
 )
 
 
@@ -120,8 +141,9 @@ def exact_selection(target, runner):
         rows.append((filename, class_name, flow_unit(filename)))
         selected.append({"file": "tests/" + filename, "case": class_name + "." + method})
     require(len({row[2] for row in rows}) == len(rows), "Candidate runner units must be unique")
-    require(len(selected) == 141 and len({(x["file"], x["case"]) for x in selected}) == 141,
-            "Candidate selection must contain 141 unique exact cases")
+    expected = sum(row[3] for row in BASE) + len(FLOWS)
+    require(len(selected) == expected and len({(x["file"], x["case"]) for x in selected}) == expected,
+            "Candidate selection must match the declared unique exact cases")
     return rows, selected
 
 
@@ -145,7 +167,7 @@ def configure(target, ci, runner, plan_dir):
 
     out = target / "tests/e2e/artifacts/candidate-ci"
     ci.PROFILES["measurements"] = {**ci.PROFILES["measurements"], "out": out,
-        "suite_timeout": 540, "suites": tuple(rows)}
+        "suite_timeout": 540, "deadline_seconds": CANDIDATE_DEADLINE_SECONDS, "suites": tuple(rows)}
     original_run = ci.guarded_profile_run
     original_environment = ci.profile_environment
 
@@ -161,6 +183,8 @@ def configure(target, ci, runner, plan_dir):
         env = original_environment(profile_name, out_path, values, evidence_stage)
         if profile_name == "measurements":
             env["KIN_EVIDENCE_DIR"] = str(out_path / "screens")
+            # U1 CI uses the accepted native CDP screen fixture, not physical monitors.
+            env["KIN_U1_EMULATED_DISPLAYS"] = "1"
         return env
 
     ci.guarded_profile_run = guarded

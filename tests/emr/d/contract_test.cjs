@@ -1359,8 +1359,8 @@ test('CONSULT C51 repeated absence keeps automatic lookup on the original ID', a
   assert.deepEqual([f.store.state.rows.size, f.store.state.commits, f.sig.calls.sign], [1, 1, 1]);
   effects(f.store, [1, 1, 1, 0, 1, 4], 'C51');
 });
-test('CONSULT C52 actual view ABA and account-generation application', { skip:
-  'not_run: R2 owns actual DOM UID+sequence/account generation, input preservation and zero-friction UI acceptance; R1 has no page integration' }, () => {});
+// CONSULT C52 is executed against the shipped main/clinician pages by
+// served_page_test.py (D-T3), including delayed body/signature responses.
 
 for (const [id, title, phase, cancel] of [
   ['C53', 'original sign wait timeout never fails a still running original', 'sign', false],

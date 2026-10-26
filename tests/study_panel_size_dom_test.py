@@ -30,6 +30,12 @@ W5-UI Phase A decided difference (W5R3-ADMIT-02/09/10, r4 CI diagnosis W5R3A-CI-
 one hidden live status line for the Related Report mode's reason (the Sent panel's #cvr-sent-mode-reason and the worklist
 inbox's #cvr-inbox-mode-reason). A polite live region must exist before its text changes to be announced, so both are
 present (hidden, empty) at first paint and in the opened-panel count: + W5_CVR_MODE_NODES. Nothing else in the counts moves.
+
+W5-UI Phase B decided difference (W5-PHASEB-FLOW): main.html now serves the Related Report mode, hidden until a reader opens
+it: + W5_MODE_NODES = 3 + 40, the mode's stylesheet link, the Notice's Discard Insert button and the mode's script tag, and
+the hidden #related-mode section's 40 elements (head, the two identity cards, the three Source sections, the foot and the
+Insert confirmation dialog). The mode's mount builds nothing until it is entered. Measured: first paint 1890 -> 1933 at
+every size (the opened panel the same 43).
 """
 import io
 import json
@@ -91,6 +97,11 @@ BOUND_SIZES = ((1200, 1920), (1440, 2560), (900, 1200), (1920, 1080), (1366, 768
 SCALES = (1, 1.2, 1.4)
 # W5-UI Phase A (module header): the hidden Related-mode reason lines of the Sent panel and the worklist inbox.
 W5_CVR_MODE_NODES = 2
+# W5-UI Phase B (module header): the served Related Report mode, hidden at first paint.
+W5_MODE_NODES = 3 + 40
+# EMR-D batch 2 (#219) decided difference, same rule: main.html loads clinical-signature.js, the module the question,
+# consultation and Tech Note panes read verified signing facts through. One script element; nothing of it is painted.
+D_CLINICAL_SIGNATURE_NODES = 1
 
 
 def nodes_outside_shortcuts(page):
@@ -278,8 +289,10 @@ class StudyPanelSizeDOM(unittest.TestCase):
                         # closed Workspace Shortcuts dialog is outside both counts (module header, D1371).
                         # W5-UI: + W5_CVR_MODE_NODES (the two hidden Related-mode reason lines, module header).
                         # S9-U4b part (c): + S9U4B_TRANSFER_NODES, the hidden DICOM Transfer panel (above).
+                        # W5-UI Phase B: + W5_MODE_NODES, the hidden Related Report mode (module header).
+                        # EMR-D batch 2: + D_CLINICAL_SIGNATURE_NODES, the clinical-signature.js script element.
                         self.assertEqual(theirs['first_paint_nodes'] + W6_FIRST_PAINT_NODES + W4_REPORT_NODES + W5_CVR_MODE_NODES
-                                         + S9U4B_TRANSFER_NODES,
+                                         + S9U4B_TRANSFER_NODES + W5_MODE_NODES + D_CLINICAL_SIGNATURE_NODES,
                                          mine['first_paint_nodes'], 'first paint')
                         self.assertEqual(theirs['panel'], mine['panel'], 'panel')
                         page_facts = lambda facts: [row for row in facts['page'] if row[0] not in W6_REPORT_FIELDS]
@@ -310,8 +323,8 @@ class StudyPanelSizeDOM(unittest.TestCase):
                         # The opened panel's new nodes: the Text Size select and its 3 options, Default, the
                         # controls' row and the edge (stated in the round-7 report). The whole page is counted, so the
                         # still hidden DICOM Transfer panel's nodes (and W5-UI's two hidden reason lines) are in it too.
-                        self.assertEqual(7 + W6_FIRST_PAINT_NODES + W4_REPORT_NODES + W5_CVR_MODE_NODES + S9U4B_TRANSFER_NODES,
-                                         mine['nodes'] - theirs['nodes'])
+                        self.assertEqual(7 + W6_FIRST_PAINT_NODES + W4_REPORT_NODES + W5_CVR_MODE_NODES + S9U4B_TRANSFER_NODES
+                                         + W5_MODE_NODES + D_CLINICAL_SIGNATURE_NODES, mine['nodes'] - theirs['nodes'])
                         if picture:
                             regions = w6_regions(theirs['w6']['scroller'], mine['w6']['scroller'], width, height)
                             for difference in picture_difference(self.browser, theirs['pixels'], mine['pixels'], regions):

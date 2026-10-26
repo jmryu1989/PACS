@@ -23,12 +23,15 @@ import type { RelatedInsertRefusal } from '../report-related-insert';
 import type { AccessAction, AccessEventV1 } from '../emr-contract/access-event';
 import type { EmrRecordPort } from '../emr-runtime/record-port';
 
+import type { RequestWorkContext } from '../emr-runtime/request-context';
+
 export interface DraftRequestFacts {
+  request: RequestWorkContext;
   issuer: string;
   ip: { address: string; source: 'trusted-proxy' | 'request-peer' } | null;
   requestId: string;
 }
-type DraftObservation = { facts: DraftRequestFacts; surface: string; action: AccessAction };
+type DraftObservation = { facts: DraftRequestFacts; surface: string; action: AccessAction; target?: 'report-version' };
 type RecordDraft = (state: any, value: any, action?: AccessAction,
   source?: { uid: string; version: number }) => Promise<void>;
 
@@ -44,23 +47,26 @@ export class PacsReportDraft {
   private async recorded<T>(uid: string, c: Caller, observation: DraftObservation,
       body: (tx: Prisma.TransactionClient, record: RecordDraft) => Promise<T>,
       options: { maxWait: number; timeout: number }): Promise<T> {
-    const work = this.ledger.begin();
-    try {
-      const { facts, surface } = observation;
-      const identity = { issuer: facts.issuer, subject: c.sub,
-        id: await work.resolveRequestIdentity(facts.issuer, c.sub) };
-      return await work.transactionWithRecords((tx, record) => body(tx, async (state, value, action = observation.action, source) => {
-        const resource = source ? JSON.stringify([source.uid, source.version]) : JSON.stringify([uid, c.actor]);
-        const revision = source ? String(source.version) : value.revision;
+    const work = observation.facts.request.work;
+    const { facts } = observation;
+    const surface = facts.request.facts.surface;
+    const identity = facts.request.facts.actor;
+    return await work.transactionWithRecords(async (tx, record) => {
+      await facts.request.requireCurrent(tx);
+      return body(tx, async (state, value, action = observation.action, source) => {
+        await facts.request.requireCurrent(tx);
+        const report = !!source || observation.target === 'report-version';
+        const revision = source ? String(source.version) : report ? String(value.state.version) : value.revision;
+        const resource = report ? source?.uid ?? uid : JSON.stringify([uid, c.actor]);
         const event: AccessEventV1 = {
           formatVersion: 1, surface, eventId: randomUUID(),
-          userId: { status: 'known', value: identity }, rolesAtTime: { status: 'known', value: c.roles },
-          actingInstitution: { status: 'known', value: inst(c) },
+          userId: { status: 'known', value: identity }, rolesAtTime: { status: 'known', value: facts.request.facts.roles },
+          actingInstitution: { status: 'known', value: facts.request.facts.institution },
           managingInstitution: { status: 'known', value: state.institutionId },
           occurredAt: new Date().toISOString(),
           trustedProxyIp: facts.ip ? { status: 'known', value: facts.ip } : { status: 'unresolved', reason: 'not-observed' },
-          cause: 'user-view', context: { basis: 'out-of-context', studyId: null, relatedStudyId: null, reason: null },
-          executor: 'member', targets: [{ kind: source ? 'report-version' : 'private-draft',
+          cause: 'user-view', context: { basis: 'worklist', studyId: uid, relatedStudyId: null, reason: null },
+          executor: 'member', targets: [{ kind: report ? 'report-version' : 'private-draft',
             patientLinkSnapshot: { status: 'unresolved', reason: 'not-resolved' },
             studyId: { status: 'known', value: source?.uid ?? uid }, recordId: { status: 'known', value: resource },
             versionId: { status: 'known', value: revision } }],
@@ -69,9 +75,9 @@ export class PacsReportDraft {
         };
         // Writes reach here in their business transaction; views supply the
         // captured read snapshot. Neither response leaves before this commit.
-        await record(event, async () => ({ kind: source ? 'ReportVersion' : 'ReportDraft', id: resource, version: revision }));
-      }), options);
-    } finally { work.end(); }
+        await record(event, async () => ({ kind: report ? 'ReportVersion' : 'ReportDraft', id: resource, version: revision }));
+      });
+    }, options);
   }
 
   private relatedDraftView(outcome: any) {

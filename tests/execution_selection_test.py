@@ -326,9 +326,9 @@ class ExecutionSelectionTests(unittest.TestCase):
                     # S2-L: the finding location suite inherits every marks case; only its own three run here.
                     ('e2e/test_finding_locations.py', 'FindingLocationsE2E',
                      'test_location_', 'ci-finding-location', 3,
-                     {'test_location_01_prior_point_link_new_login_continuation_and_exact_arrival',
-                      'test_location_02_refusals_metadata_hidden_sync_off_and_server_matrix',
-                      'test_location_03_same_document_restore_keeps_finding_drafts_and_withdrawal_removes_the_finding'})]
+                     {'test_location_01_viewer_save_meets_the_interim_refusal_and_keeps_the_typed_finding',
+                      'test_location_02_api_create_route_meets_the_interim_refusal_before_any_job_is_read',
+                      'test_location_03_revisions_route_of_an_unknown_finding_answers_404_and_the_page_keeps_the_refused_draft'})]
         self.assertEqual([row[0] for row in profile['suites']], [row[0] for row in expected])
         self.assertEqual([row[2] for row in profile['suites']], [row[3] for row in expected])
         for (suite, class_name, unit), (_, cls_name, prefix, _, count, required) in zip(
@@ -715,6 +715,61 @@ class ExecutionSelectionTests(unittest.TestCase):
             {class_name+'.'+name for name in cls.__dict__ if name.startswith('test_image_thumbnails_')})
         self.assertEqual(len(plan['tests']),4)
         self.assertEqual(runner.collect(plan).countTestCases(),4)
+
+    def test_candidate_s9_and_u1_select_exact_served_cases_without_inheritance(self):
+        import candidate_ci as candidate
+        _, selected = candidate.exact_selection(ROOT, runner)
+        actual = {(row['file'], row['case']) for row in selected}
+        # The 27 served cases accepted in U1; physical monitors remain a separate check.
+        viewer_cases = [
+            ('tests/e2e/test_viewer_ux_span.py', 'ViewerSpanE2E.test_span_01_open_reuse_focus_close_reopen_preserves_workspace'),
+            ('tests/e2e/test_viewer_ux_span.py', 'ViewerSpanE2E.test_span_02_dirty_close_and_permission_denial_keep_targets'),
+            ('tests/e2e/test_viewer_ux_span.py', 'ViewerSpanEmulatedE2E.test_span_03_emulated_three_screens_restore_move_and_reconnect'),
+            ('tests/e2e/test_viewer_ux_span.py', 'ViewerSpanEmulatedE2E.test_span_05_native_clamp_keeps_saved_position_and_manual_recovery'),
+            ('tests/e2e/test_viewer_windows.py', 'ViewerWindowsE2E.test_windows_01_limit_dirty_close_focus_and_slot_reuse'),
+            ('tests/e2e/test_viewer_windows.py', 'ViewerWindowsE2E.test_windows_02_reload_rediscovers_without_scope_storage'),
+            ('tests/e2e/test_viewer_windows.py', 'ViewerWindowsE2E.test_windows_03_popup_denial_unverified_owner_and_session_end'),
+            ('tests/e2e/test_viewer_windows.py', 'ViewerWindowsE2E.test_windows_04_corrupt_registry_retains_existing_document'),
+            ('tests/e2e/test_viewer_windows.py', 'ViewerWindowsE2E.test_windows_05_open_note_prevents_close_and_retarget'),
+            ('tests/e2e/test_viewer_opening.py', 'ViewerOpeningE2E.test_opening_01_window_workspace_prior_and_retained_work'),
+            ('tests/e2e/test_viewer_opening.py', 'ViewerOpeningE2E.test_opening_02_owner_relogin_other_browser_and_corruption'),
+            ('tests/e2e/test_viewer_opening.py', 'ViewerOpeningE2E.test_opening_03_other_tab_storage_denial_and_session_end'),
+            ('tests/e2e/test_viewer_autoload.py', 'ViewerAutoloadE2E.test_autoload_01_selection_cap_and_existing_window_navigation'),
+            ('tests/e2e/test_viewer_autoload.py', 'ViewerAutoloadE2E.test_autoload_02_integrated_selection_keeps_dirty_work'),
+            ('tests/e2e/test_viewer_autoload.py', 'ViewerAutoloadE2E.test_autoload_03_reload_owner_and_dirty_reuse'),
+            ('tests/e2e/test_viewer_autoload.py', 'ViewerAutoloadE2E.test_autoload_04_context_selection_and_popup_denial'),
+            ('tests/e2e/test_viewer_autoload.py', 'ViewerAutoloadE2E.test_autoload_05_retained_windows_preserve_dirty_and_clean_documents'),
+            ('tests/e2e/test_viewer_autoload.py', 'ViewerAutoloadE2E.test_autoload_06_double_click_during_pending_document_opens_once'),
+            ('tests/e2e/test_viewer_autoload.py', 'ViewerAutoloadE2E.test_autoload_07_saved_reuse_disabled_still_reuses_one_clean_window'),
+            ('tests/e2e/test_viewer_display_layout.py', 'ViewerDisplayLayoutE2E.test_display_01_move_live_unsaved_window_and_restore_saved_screen'),
+            ('tests/e2e/test_viewer_display_layout.py', 'ViewerDisplayLayoutE2E.test_display_02_permission_denied_preserves_live_viewer'),
+            ('tests/e2e/test_viewer_display_layout.py', 'ViewerDisplayLayoutE2E.test_display_03_query_fallback_and_done_do_not_cancel_accepted_move'),
+            ('tests/e2e/test_viewer_display_layout.py', 'ViewerDisplayLayoutE2E.test_display_04_closed_window_finishes_delayed_request_with_status'),
+            ('tests/e2e/test_viewer_display_layout.py', 'ViewerDisplayLayoutE2E.test_display_05_permission_revoked_before_delayed_result'),
+            ('tests/e2e/test_viewer_display_layout.py', 'ViewerDisplayLayoutE2E.test_display_06_two_patients_move_independently_and_keep_report_target'),
+            ('tests/e2e/test_study_arrivals.py', 'StudyArrivalsE2E.test_arrivals_01_same_series_sop_updates_count_and_preserves_viewer_draft_hold_report_and_sources'),
+            ('tests/e2e/test_finding_worklist.py', 'FindingWorklistE2E.test_worklist_02_separate_windows_ambiguous_owner_unattached_reattach_and_close'),
+        ]
+        for filename, case in viewer_cases:
+            self.assertIn((filename, case), actual)
+        classes = {(filename, case.split('.')[0]) for filename, case in viewer_cases}
+        observed = {(filename, case) for filename, case in actual
+                    if (filename, case.split('.')[0]) in classes}
+        self.assertEqual(observed, set(viewer_cases))
+        self.assertFalse(any('ViewerSpanPhysicalE2E' in case or 'SpanBoundaryTests' in case
+                             for _, case in actual))
+        for filename, class_name, count in (
+                ('test_s9_failure_network.py', 'S9FailureNetworkE2E', 3),
+                ('test_s9_failure_server.py', 'S9FailureServerE2E', 2),
+                ('test_s9_failure_services.py', 'FailureServicesE2E', 2)):
+            path = 'tests/e2e/' + filename
+            cls = getattr(runner.load_module(ROOT / path), class_name)
+            declared = {(path, class_name + '.' + name) for name in cls.__dict__ if name.startswith('test_')}
+            self.assertEqual(len(declared), count)
+            self.assertEqual({row for row in actual if row[0] == path}, declared)
+        for filename, class_name, unit, count in candidate.BASE[3:]:
+            plan = runner.module_plan('tests/' + filename, unit, 'live', 540, class_name)
+            self.assertEqual(runner.collect(plan).countTestCases(), count)
 
     def test_candidate_contract_remains_101_then_15(self):
         # 69 -> 71: R15 added two live structured-entry cases (L-1, L-2). 71 -> 79: S3-ASR-U5 added

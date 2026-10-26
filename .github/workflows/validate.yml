@@ -6,6 +6,95 @@ concurrency:
   group: validate-${{ github.event_name == 'schedule' && 'nightly-' || '' }}${{ github.ref }}
   cancel-in-progress: false
 jobs:
+  emr-b:
+    needs: runtime
+    if: ${{ fromJSON(needs.runtime.outputs.jobs)['emr-b'] }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 210
+    env:
+      NODE_OPTIONS: --max-old-space-size=3072
+      KIN_EMR_PYTHON: python3
+      KIN_TEST_API_IMAGE: kin-emrb-ci:${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
+      - name: Existing compiler and Prisma client
+        timeout-minutes: 8
+        run: |
+          node --version
+          npm ci --prefix api --ignore-scripts --no-audit --no-fund
+          (cd api && ./node_modules/.bin/prisma generate)
+      - name: PG declaration and exact collection
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/declaration --tree emr/units --file scripts/emr-compose.py --tree tests/emr/b --tree api/prisma -- python3 -B scripts/emr-compose.py check
+      - name: Retained law and public boundary contracts
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/emr-b-ci/contract --tree api/src --file emr/units/b.json --file scripts/emr-compose.py --file tests/emr/b/contract_test.cjs -- node --test --test-concurrency=1 --test-reporter=tap tests/emr/b/contract_test.cjs
+          python3 -B scripts/emr-compose.py check-run --kind node --cases-from contract --run-dir tmp/emr-b-ci/contract
+      - name: Transaction options, connection reserve and background drain
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/lifecycle --tree api/src --tree tests/emr/b -- node --test --test-concurrency=1 tests/emr/b/transaction_options_test.cjs tests/emr/b/client_pool_test.cjs tests/emr/b/lock_test.cjs
+      - name: Request facts capture, ingress and ownership
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/request-facts-pure --tree api/src --tree tests/emr/request -- node --test tests/emr/request/request_facts_test.cjs
+      - name: Module A local-read projection, outcome and audit replay
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-pure --tree api/src --tree tests/emr/a -- node --test tests/emr/a/local_read_test.cjs
+      - name: Production API image of this commit
+        timeout-minutes: 15
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/image --tree api/src --tree api/prisma --file api/Dockerfile --file api/start-production.sh --file api/package-lock.json -- docker build --target production --build-arg "VCS_REF=${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}" -t "kin-emrb-ci:${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}" api
+      - name: Pinned synthetic stack test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/emr-b-python"
+          "$RUNNER_TEMP/emr-b-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+      - name: Orthanc image for same-point native restore
+        run: docker pull orthancteam/orthanc:24.12.0
+      - name: Existing thirteen candidate selectors on the PG implementation
+        timeout-minutes: 68
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/live --tree api/src --tree api/prisma --tree tests/emr/b --file scripts/ops_backup.py --file tests/measurement_ci.py -- "$RUNNER_TEMP/emr-b-python/bin/python" tests/measurement_ci.py --profile emr-b
+      - name: Actual PG roles, clinical HTTP, consumers and recovery
+        timeout-minutes: 30
+        run: |
+          for entry in 'PgLedgerRoleLive:roles' 'PgLedgerClinicalHttpLive:clinical-http' 'PgLedgerDraftRegressionLive:draft-regression' 'PgLedgerStartupLive:startup' 'PgLedgerImportCliLive:import-cli' 'PgLedgerFailureFilesLive:failure-files' 'PgLedgerRetentionAdapterLive:retention-adapter' 'PgLedgerRestoreSweepLive:restore-sweep' 'PgLedgerRequestWorkLive:request-work' 'PgLedgerAuthFailureLive:auth-failure' 'PgLedgerAuthEndLive:auth-end'; do
+            cls="${entry%%:*}"
+            unit="${entry#*:}"
+            python3 scripts/record-run.py --run-dir "tmp/emr-b-ci/$unit" --tree api/src --tree tests/emr/b -- python3 scripts/run-tests.py --module tests/emr/b/pg_ledger_restore_test.py --class "$cls" --mode live --unit "ci-b2r-$unit" --timeout 300
+          done
+      - name: Existing auth compatibility on the real PG record port
+        timeout-minutes: 65
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/auth-regression --tree api/src --file tests/auth_session_service_test.cjs --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/b/pg_ledger_restore_test.py --class PgLedgerAuthRegressionLive --mode live --unit ci-b2r-auth-regression --timeout 3600
+      - name: Request facts through registered HTTP and PostgreSQL
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/request-facts-live --tree api/src --tree tests/emr/request -- python3 scripts/run-tests.py --module tests/emr/request/request_facts_live.py --class RequestFactsLive --mode live --unit ci-request-facts --timeout 300
+      - name: Module A local-read recording on the real PG record port
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-pg --tree api/src --tree tests/emr/a --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/a/recording_boundary_test.py --class LocalReadRecordingBoundary --mode live --unit ci-module-a-pg --timeout 300
+      - name: Module A report reads on the real HTTP route and PG record port
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-report-reads --tree api/src --tree tests/emr/a --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/a/report_reads_test.py --class ReportReadsHttp --mode live --unit ci-module-a-report-reads --timeout 300
+      - name: Module A W9 metadata through real HTTP and PG
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-w9 --tree api/src --tree tests/emr/a --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/a/viewing_set_test.py --class ViewingSetHttpBoundary --mode live --unit ci-module-a-w9 --timeout 300
+      - name: Original-download stages through HTTP into the real PG record port
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/download-producer --tree api/src --tree tests/emr/request --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/request/download_producer_live.py --class DownloadProducerLive --mode live --unit ci-download-producer --timeout 300
+      - name: EMR-B evidence (synthetic, sanitized)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: emr-b-evidence
+          path: |
+            tests/e2e/artifacts/emr-b-ci/
+            tmp/emr-b-ci/
+            tmp/emr-b2-replace-20261023/
+            tmp/module-a-01-2/
+            tmp/emr-a/
+            tmp/download-producer-b2/
+            tmp/request-auth/
+          if-no-files-found: error
+          retention-days: 7
   runtime:
     runs-on: ubuntu-24.04
     # 19m43s-19m52s on main and a 20-minute timeout already hit under queue load (#182).
@@ -28,9 +117,10 @@ jobs:
       if: ${{ fromJSON(steps.paths.outputs.jobs)['ci-selfchecks'] }}
       run: |
         python3 -m venv "$RUNNER_TEMP/ci-check-python"
-        "$RUNNER_TEMP/ci-check-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+        "$RUNNER_TEMP/ci-check-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2 requests==2.32.5
         "$RUNNER_TEMP/ci-check-python/bin/python" -B tests/measurement_ci_test.py
         "$RUNNER_TEMP/ci-check-python/bin/python" -B tests/execution_selection_test.py
+        "$RUNNER_TEMP/ci-check-python/bin/python" -B tests/mgxa_acceptance_test.py
     - name: Report base-version origin, commit failure routing and refused-head model
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-rebase-model --cwd . --file worklist-v0/hpacs-lite/main.html --file tests/report_rebase_model_test.cjs --file tests/main_split_harness.cjs --file tests/main_split_harness_fixture.json --file tests/page_source.cjs --file tests/main_move_spec.json --file tests/main_move_contract.cjs --file api/package-lock.json --file worklist-v0/hpacs-lite/main-split.bundle.js --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file .gitattributes --file worklist-v0/hpacs-lite/page-core.js --file worklist-v0/hpacs-lite/study-state.js --file worklist-v0/hpacs-lite/order-list-store.js --file worklist-v0/hpacs-lite/report-templates.js --file worklist-v0/hpacs-lite/report-dictation.js --file worklist-v0/hpacs-lite/report-templates-ui.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/sr-reader.js --file worklist-v0/hpacs-lite/current-study.js --file worklist-v0/hpacs-lite/study-info-panel.js --file worklist-v0/hpacs-lite/related-studies.js --file worklist-v0/hpacs-lite/study-thumbnails.js --file worklist-v0/hpacs-lite/order-list.js --file worklist-v0/hpacs-lite/study-image-requests.js --file worklist-v0/hpacs-lite/study-corrections.js --file worklist-v0/hpacs-lite/related-report.js --file worklist-v0/hpacs-lite/report-editor.js --file worklist-v0/hpacs-lite/report-draft-sync.js --file worklist-v0/hpacs-lite/report-structure-pane.js --file worklist-v0/hpacs-lite/report-citation-pane.js --file worklist-v0/hpacs-lite/report-draft-save.js --file worklist-v0/hpacs-lite/report-commit.js --file worklist-v0/hpacs-lite/report-hold.js --file worklist-v0/hpacs-lite/work-exit.js --file worklist-v0/hpacs-lite/worklist-polling.js --file worklist-v0/hpacs-lite/report-history.js --file worklist-v0/hpacs-lite/report-toolbar.js --file worklist-v0/hpacs-lite/viewer-placement.js --file worklist-v0/hpacs-lite/viewer-launch.js --file worklist-v0/hpacs-lite/feature-mounts.js --file worklist-v0/hpacs-lite/clinical-context-panel.js --file worklist-v0/hpacs-lite/critical-result-mounts.js --file worklist-v0/hpacs-lite/study-questions.js --file worklist-v0/hpacs-lite/workspace-panels.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/worklist-row-events.js --file worklist-v0/hpacs-lite/telerad-request.js --file worklist-v0/hpacs-lite/context-menu.js --file worklist-v0/hpacs-lite/related-controls.js --file worklist-v0/hpacs-lite/session-end.js --file worklist-v0/hpacs-lite/page-boot.js --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file tests/page_source.py -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/report_rebase_model_test.cjs
     - name: S3-U2b client citation comparator, R5 template and per-study state against the shared vectors
@@ -108,7 +198,7 @@ jobs:
     - name: SR source tree identity and bounded literal values
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/sr_tree_test.cjs
     - name: Pinned viewer precision and isolated stack method boundaries
-      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_precision_test.cjs
+      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_precision_test.cjs tests/viewer_frame_metadata_test.cjs
     - name: Deployment preflight refusal and shared lock
       run: python3 tests/ops_deploy_preflight_test.py
     - name: Deployment state machine and retained operations lock
@@ -525,12 +615,12 @@ jobs:
     - name: Generate the Prisma client for the API type check
       working-directory: api
       run: ./node_modules/.bin/prisma generate
-    - name: API type check including the C1 modules
+    - name: API type check including the online report modules
       run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/tsc --cwd . --tree api/src/emr-report --tree api/src/emr-signature --file api/tsconfig.json --file api/package-lock.json -- node api/node_modules/typescript/bin/tsc --noEmit -p api
-    - name: C1 contract and queue cases (C-C01..C-C14, C-Q01..C-Q08)
+    - name: Online report read, retention and print contracts
       if: ${{ !cancelled() }}
-      run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/node --cwd . --tree api/src/emr-contract --tree api/src/emr-report --tree api/src/emr-signature --file emr/units/c.json --file tests/emr/c/contract_test.cjs --file tests/emr/c/offline_queue_test.cjs -- node --test --test-reporter=tap --test-reporter-destination=tmp/emr-c-ci/node.tap --test-reporter=spec --test-reporter-destination=stdout tests/emr/c/contract_test.cjs tests/emr/c/offline_queue_test.cjs
-    - name: Exact selection of the C1 Node cases (every declared case passed once, none skipped or extra)
+      run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/node --cwd . --tree api/src/emr-contract --tree api/src/emr-report --tree api/src/emr-signature --file emr/units/c.json --file tests/emr/c/contract_test.cjs -- node --test --test-reporter=tap --test-reporter-destination=tmp/emr-c-ci/node.tap --test-reporter=spec --test-reporter-destination=stdout tests/emr/c/contract_test.cjs
+    - name: Exact selection of the retained report cases (every declared case passed once, none skipped or extra)
       if: ${{ !cancelled() }}
       run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/node-selection --cwd . --file emr/units/c.json --file tmp/emr-c-ci/node.tap -- node tests/emr/c/contract_test.cjs --judge-tap tmp/emr-c-ci/node.tap
     - name: C2 server crypto cases
@@ -539,32 +629,21 @@ jobs:
     - name: Exact selection of C2 server crypto cases
       if: ${{ !cancelled() }}
       run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/server-crypto-selection --cwd . --file emr/units/c.json --file tmp/emr-c-ci/server-crypto.tap -- node tests/emr/c/contract_test.cjs --judge-tap tmp/emr-c-ci/server-crypto.tap --server-crypto
-    - name: Keep pinned browser dependencies independent of unused Chrome APT repository
-      if: ${{ !cancelled() }}
-      run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
-    - name: Cache pinned Python downloads
-      if: ${{ !cancelled() }}
-      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
-    - name: Install the pinned browser test dependencies
-      if: ${{ !cancelled() }}
-      timeout-minutes: 15
+    - name: Online C2 and D on the native PostgreSQL ledger, including signature restore
       run: |
-        python3 -m venv "$RUNNER_TEMP/emr-c-python"
-        "$RUNNER_TEMP/emr-c-python/bin/python" -m pip install -r tests/e2e/requirements.txt
-        "$RUNNER_TEMP/emr-c-python/bin/python" -m playwright install --with-deps chromium
-    - name: C1 isolated offline report DOM cases (C-D01..C-D06)
-      if: ${{ !cancelled() }}
-      timeout-minutes: 5
-      run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/dom --cwd . --file worklist-v0/hpacs-lite/offline-report.js --file tests/emr/c/offline_report_dom_test.py -- "$RUNNER_TEMP/emr-c-python/bin/python" -B tests/emr/c/offline_report_dom_test.py -v
-    - name: C1 evidence
+        node api/node_modules/typescript/bin/tsc -p api/tsconfig.json --incremental false
+        export KIN_B2R_NODE="$(command -v node)"
+        export KIN_B2R_PRISMA_CLI="$PWD/api/node_modules/prisma/build/index.js"
+        python3 scripts/record-run.py --run-dir tmp/emr-c-ci/server-signing-pg --cwd . --tree api/src/emr-signature --tree api/src/emr-report --tree tests/emr/c -- python3 -B scripts/run-tests.py --module tests/emr/c/server_signing_live.py --class ServerSigningPg --mode live --unit emr-online-signing --timeout 600
+        python3 scripts/record-run.py --run-dir tmp/emr-c-ci/clinical-pg --cwd . --tree api/src/emr-clinical --tree tests/emr/d -- python3 -B scripts/run-tests.py --module tests/emr/d/online_live.py --mode live --unit emr-online-clinical --timeout 600
+    - name: Online report and server signing evidence
       if: always()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: emr-c1-results
-        path: tmp/emr-c-ci/
+        path: |
+          tmp/emr-c-ci/
+          tmp/emr-d-online/
         if-no-files-found: error
         retention-days: 7
     needs: runtime
@@ -597,6 +676,20 @@ jobs:
     - name: D contracts and C01-C56 model selection (C52 explicitly deferred to R2 DOM)
       if: ${{ !cancelled() }}
       run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/contract --cwd . --tree api/src/emr-clinical --tree api/src/emr-contract --file tests/emr/d/contract_test.cjs --file api/tsconfig.json --file api/package-lock.json -- docker run --rm --network none --read-only --tmpfs /tmp -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/emr/d/contract_test.cjs
+    - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+      run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+    - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
+    - name: Browser for the served clinical pages
+      run: |
+        python3 -m venv "$RUNNER_TEMP/emr-d-browser"
+        "$RUNNER_TEMP/emr-d-browser/bin/python" -m pip install -r tests/e2e/requirements.txt
+        "$RUNNER_TEMP/emr-d-browser/bin/python" -m playwright install --with-deps chromium
+    - name: Served main and clinician response generations and assignment boundaries
+      run: |
+        "$RUNNER_TEMP/emr-d-browser/bin/python" scripts/record-run.py --run-dir tmp/emr-d-ci/pages --tree worklist-v0/hpacs-lite --tree tests/emr/d --file tests/auth_logout_dom_test.py --file tests/page_source.py --file tests/page_source.cjs -- "$RUNNER_TEMP/emr-d-browser/bin/python" scripts/run-tests.py --module tests/emr/d/served_page_test.py --mode pure --unit emr-d-served-pages --timeout 600
     - name: EMR-D evidence
       if: always()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -633,12 +726,20 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/typecheck --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json -- api/node_modules/.bin/tsc --noEmit -p api
     - name: TEST-E-01..05 declared allow/refuse cases and the shared D744-2 mammography table
       run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/contract --cwd . --tree api/src/emr-contract --tree api/src/emr-image --file api/tsconfig.json --file api/package-lock.json --file tests/emr/e/contract_test.cjs --file tests/emr/e/rule-cases.json -- node --test --test-reporter=tap tests/emr/e/contract_test.cjs
+    - name: Online image preparation and HTTP transfer on the native PostgreSQL ledger
+      run: |
+        node api/node_modules/typescript/bin/tsc -p api/tsconfig.json --incremental false
+        export KIN_B2R_NODE="$(command -v node)"
+        export KIN_B2R_PRISMA_CLI="$PWD/api/node_modules/prisma/build/index.js"
+        python3 scripts/record-run.py --run-dir tmp/emr-e-ci/online-pg --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --tree api/src/emr-contract --tree tests/emr/e --tree api/prisma --file api/src/connect.controller.ts --file api/src/app.module.ts --file api/src/orthanc.service.ts --file emr/units/e.json --file tests/emr/b/pg_ledger_restore_test.py -- python3 -B scripts/run-tests.py --module tests/emr/e/online_live.py --class OnlineImagePg --mode live --unit emr-e-online --timeout 600
     - name: Raw run evidence
       if: always()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: emr-e-${{ env.TARGET_SHA }}
-        path: tmp/emr-e-ci/
+        path: |
+          tmp/emr-e-ci/
+          tmp/emr-e-online/
         if-no-files-found: error
         retention-days: 7
     needs: runtime
@@ -670,12 +771,20 @@ jobs:
     - name: TEST-F-01..08 declared allow/refuse cases
       if: ${{ !cancelled() }}
       run: python3 scripts/record-run.py --run-dir tmp/emr-f-ci/contract --cwd . --tree api/src/emr-contract --tree api/src/emr-audit --file api/tsconfig.json --file api/package-lock.json --file tests/emr/f/contract_test.cjs -- node --test --test-reporter=tap tests/emr/f/contract_test.cjs
+    - name: F_LINK audit, fixed-copy issuance and hold over HTTP and PostgreSQL
+      run: |
+        node api/node_modules/typescript/bin/tsc -p api/tsconfig.json --incremental false
+        export KIN_B2R_NODE="$(command -v node)"
+        export KIN_B2R_PRISMA_CLI="$PWD/api/node_modules/prisma/build/index.js"
+        python3 scripts/record-run.py --run-dir tmp/emr-f-ci/online-pg --cwd . --tree api/src/emr-audit --tree api/src/emr-clinical --tree api/src/emr-report --tree api/src/emr-signature --tree api/src/emr-runtime --tree api/src/emr-contract --tree tests/emr/f --tree api/prisma --file api/src/app.module.ts --file tests/emr/b/pg_ledger_restore_test.py -- python3 -B scripts/run-tests.py --module tests/emr/f/link_live.py --class AuditLinkPg --mode live --unit emr-f-link --timeout 600
     - name: Raw run evidence
       if: always()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: emr-f-${{ env.TARGET_SHA }}
-        path: tmp/emr-f-ci/
+        path: |
+          tmp/emr-f-ci/
+          tmp/emr-f-link/
         if-no-files-found: error
         retention-days: 7
     needs: runtime
@@ -1350,6 +1459,35 @@ jobs:
           tmp/u2b-regressions-ci/
         if-no-files-found: error
         retention-days: 7
+    - name: Viewer U3 served prior images and read-only reports
+      timeout-minutes: 28
+      if: ${{ !cancelled() }}
+      run: '"$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile viewer-ux-priors'
+    - name: Viewer U3 synthetic served evidence
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-viewer-ux-priors
+        path: |
+          tests/e2e/artifacts/viewer-ux-priors-ci/
+          tmp/viewer-ux-u3/
+        if-no-files-found: error
+        retention-days: 7
+    - name: Isolated declared Viewer U2 shell tests
+      timeout-minutes: 28
+      run: |
+        "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile viewer-ux-shell
+      if: ${{ !cancelled() }}
+    - name: Sanitized synthetic Viewer U2 shell evidence
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-viewer-ux-shell-results
+        path: |
+          tests/e2e/artifacts/viewer-ux-shell-ci/
+          tmp/viewer-ux-u2/screens/
+        if-no-files-found: error
+        retention-days: 7
     - name: Worklist folder multi-selection and shortcut module contract
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/worklist-folder-tree --cwd . --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file worklist-v0/hpacs-lite/compound-filter.js --file tests/worklist_folder_tree_test.cjs --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-editor-frame.js --file worklist-v0/hpacs-lite/main-split.bundle.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/saved-filter-manager.js --file worklist-v0/hpacs-lite/page-boot.js --file worklist-v0/hpacs-lite/session-end.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_folder_tree_test.cjs
       if: ${{ !cancelled() }}
@@ -1358,7 +1496,7 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/w4-shortcut-v2-module --cwd . --tree worklist-v0/hpacs-lite --tree tests -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/workspace_shortcuts_test.cjs
     - name: U1 single viewer registry and spanning geometry boundary
       if: ${{ !cancelled() }}
-      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/viewer-ux-u1-boundary --cwd . --file tests/e2e/test_viewer_ux_span.py --file worklist-v0/hpacs-lite/viewer-display-layout.js --file worklist-v0/hpacs-lite/viewer-windows.js --file worklist-v0/hpacs-lite/work-context.js --file tests/module_session_harness.cjs -- timeout 600 python3 tests/e2e/test_viewer_ux_span.py --boundary
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/viewer-ux-u1-boundary --cwd . --file tests/e2e/test_viewer_ux_span.py --file worklist-v0/hpacs-lite/viewer-display-layout.js --file worklist-v0/hpacs-lite/viewer-windows.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file tests/module_session_harness.cjs -- timeout 600 python3 tests/e2e/test_viewer_ux_span.py --boundary
     - name: Synthetic runtime record-run evidence
       if: always()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

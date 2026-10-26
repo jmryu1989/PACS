@@ -1,7 +1,6 @@
-import { ForbiddenException, BadRequestException, Body, Controller, Delete, Get, Header, HttpCode, Param, Patch, Post, Put, Query, Req } from '@nestjs/common';
+import { ForbiddenException, BadRequestException, Body, Controller, Delete, Get, Header, HttpCode, Inject, Param, Patch, Post, Put, Query, Req } from '@nestjs/common';
 import { PacsService, Caller, DraftRequestFacts } from './pacs.service';
-import { randomUUID } from 'node:crypto';
-import { isIP } from 'node:net';
+import { REQUEST_CONTEXT_SOURCE, RequestContextSource } from './emr-runtime/request-context';
 import { Public } from './auth.guard';
 import { AuthService } from './auth.service';
 
@@ -46,17 +45,26 @@ const caller = (req: any): Caller => ({
  * `GET me`의 답과 서비스 전반으로 퍼지고, 세션 키는 초안 경로 밖으로 나가서는 안 된다.
  */
 const draftSession = (req: any): string | null => (req.authMethod === 'session' && typeof req.sid === 'string' ? req.sid : null);
-const draftFacts = (req: any): DraftRequestFacts => {
-  const proxy = req.headers?.['x-real-ip'];
-  const peer = req.socket?.remoteAddress;
-  return { issuer: process.env.KC_ISSUER, requestId: randomUUID(),
-    ip: typeof proxy === 'string' && isIP(proxy) ? { address: proxy, source: 'trusted-proxy' }
-      : typeof peer === 'string' && isIP(peer) ? { address: peer, source: 'request-peer' } : null };
-};
+
 
 @Controller()
 export class PacsController {
-  constructor(private svc: PacsService, private auth: AuthService) {}
+  constructor(private svc: PacsService, private auth: AuthService,
+    @Inject(REQUEST_CONTEXT_SOURCE) private readonly requests: RequestContextSource) {}
+
+  private withDraftFacts<T>(req: any, task: (facts: DraftRequestFacts) => Promise<T>): Promise<T> {
+    return this.requests.withWork(req, async request => {
+      await request.requireCurrent();
+      const facts = request.facts;
+      try {
+        return await task({ issuer: facts.issuer, requestId: facts.requestId,
+          ip: facts.ingress.status === 'known' ? facts.ingress.value : null, request });
+      } finally {
+        // Conflict responses can carry a private draft snapshot too.
+        await request.requireCurrent();
+      }
+    });
+  }
 
   @Public()
   @Get('health')
@@ -267,12 +275,12 @@ export class PacsController {
 
   @Patch('studies/:uid')
   patch(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
-    return this.svc.patchState(uid, body, caller(req));
+    return this.svc.patchState(uid, body, caller(req), req);
   }
 
   @Get('studies/:uid/tech-note')
   techNote(@Param('uid') uid: string, @Req() req: any) {
-    return this.svc.techNote(uid, noteCaller(req));
+    return this.svc.techNote(uid, noteCaller(req), undefined, req);
   }
 
   @Post('studies/:uid/tech-note')
@@ -284,12 +292,12 @@ export class PacsController {
     if (body && typeof body === 'object' && 'attemptId' in body &&
         !(typeof body.attemptId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(body.attemptId)))
       throw new BadRequestException('저장 시도 ID를 확인하세요');
-    return this.svc.saveTechNote(uid, body, who);
+    return this.svc.saveTechNote(uid, body, who, req);
   }
 
   @Get('studies/:uid/tech-note/history')
   techNoteHistory(@Param('uid') uid: string, @Query('before') before: string, @Req() req: any) {
-    return this.svc.techNote(uid, noteCaller(req), before ?? '2147483647');
+    return this.svc.techNote(uid, noteCaller(req), before ?? '2147483647', req);
   }
 
   /**
@@ -299,7 +307,7 @@ export class PacsController {
    */
   @Put('studies/:uid/report')
   report(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
-    return this.svc.putReport(uid, body, caller(req), draftSession(req), draftFacts(req));
+    return this.withDraftFacts(req, facts => this.svc.putReport(uid, body, caller(req), draftSession(req), facts));
   }
 
   /**
@@ -309,7 +317,7 @@ export class PacsController {
   @Get('studies/:uid/draft')
   @Header('Cache-Control', 'no-store')
   draft(@Param('uid') uid: string, @Req() req: any, @Query('insertRequestId') insertRequestId?: string) {
-    return this.svc.readDraft(uid, caller(req), draftFacts(req), insertRequestId);
+    return this.withDraftFacts(req, facts => this.svc.readDraft(uid, caller(req), facts, insertRequestId));
   }
 
   /** 초안 버리기 — 확정본으로 돌아간다. 내 초안만 비운다 */
@@ -327,7 +335,7 @@ export class PacsController {
   /** 확정 — save / approve / addendum / reset / preliminary. 내용·버전·RS를 한 트랜잭션으로 */
   @Post('studies/:uid/report/commit')
   commit(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
-    return this.svc.commitReport(uid, body, caller(req), draftSession(req));
+    return this.withDraftFacts(req, facts => this.svc.commitReport(uid, body, caller(req), draftSession(req), facts));
   }
 
   /** 판독문 이력 */
@@ -374,7 +382,7 @@ export class PacsController {
 
   @Delete('studies/:uid')
   remove(@Param('uid') uid: string, @Req() req: any) {
-    return this.svc.removeState(uid, caller(req));
+    return this.svc.removeState(uid, caller(req), req);
   }
 
   @Post('match')

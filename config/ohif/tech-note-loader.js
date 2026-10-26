@@ -53,9 +53,6 @@ function kinCreateViewerTechNote() {
         typeof window.kinRenderVolumeScout==='function'?Promise.resolve():load('viewer-volume-scout.js'),
         typeof window.kinCreateVolumeBatch==='function'?Promise.resolve():load('viewer-volume-batch.js')]))
       .then(()=>typeof window.kinViewerTechNote==='function'?undefined:load('viewer-tech-note.js'))
-      .then(()=>standalone&&!window.KinViewerUXShortcuts?load('viewer-ux-shortcuts.js'):undefined)
-      .then(()=>standalone&&!window.KinViewerUXToolbar?load('viewer-ux-toolbar.js'):undefined)
-      .then(()=>{if(standalone)window.kinCreateViewerToolbarPreferences=window.KinViewerUXToolbar.mount;})
       .then(()=>window.kinViewerTechNote(servicesManager.services,kinViewerSession.writeModule)).catch(e=>{ready=null;throw e;}));
     window.kinViewerNoteConnectionState=()=>state;
     window.kinViewerNoteReconnect=()=>{if(active&&state==='failed')connect();};

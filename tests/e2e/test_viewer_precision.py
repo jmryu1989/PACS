@@ -1,5 +1,6 @@
 # coding: utf-8
 from pathlib import Path
+from viewer_tools import select_image_tool, display_transform
 import json,sys,unittest,uuid,math,io,hashlib,re,subprocess,ssl,urllib.request
 from datetime import datetime,timezone
 import viewer_precision_support as previous
@@ -51,10 +52,10 @@ class ViewerPrecisionE2E(ThumbnailRequestsE2E):
                 response=route.fetch();self.assertEqual(response.status,200);body=response.text()
                 configs.append(hashlib.sha256(body.encode()).hexdigest());route.fulfill(response=response,body=body+'\n'+previous.hook)
             page.route(self.stack.proxy+'/ohif/app-config.js',config)
-            page.on('request',lambda r:writes.append({'method':r.method,'url':r.url.split('?')[0]}) if r.method not in ['GET','HEAD','OPTIONS'] else None)
+            page.on('request',lambda r:writes.append({'method':r.method,'url':r.url.split('?')[0]}) if r.method not in ['GET','HEAD','OPTIONS'] and r.url.split('?')[0] != self.stack.proxy+'/api/dicom/lookup' else None)
             page.goto(self.stack.proxy+'/ohif/viewer?StudyInstanceUIDs='+f.uid);canvas_ready(page,1)
             page.wait_for_function("()=>window.__d05c1?.events.includes('onModeEnter')")
-            page.locator('[data-cy="MeasurementTools-split-button-secondary"]').click();page.get_by_text('Annotation',exact=True).click()
+            select_image_tool(page, 'ArrowAnnotate')
             box=page.locator('.cornerstone-canvas').bounding_box();x,y=box['x']+box['width']*.47,box['y']+box['height']*.47
             page.mouse.move(x,y);page.mouse.down();page.mouse.move(x+55,y+30,steps=8);page.mouse.up()
             entry=page.get_by_placeholder('Enter label');expect(entry).to_be_visible();entry.fill('D05C5 '+label+' '+variant)
@@ -80,7 +81,7 @@ class ViewerPrecisionE2E(ThumbnailRequestsE2E):
             if setup=='panzoom':
                 for tool,dx,dy in [('Pan',20,12),('Zoom',0,35)]:
                     old=case['stages'][-1]['view']
-                    page.locator('[data-cy="'+tool+'"]').click()
+                    select_image_tool(page, tool)
                     px,py=box['x']+box['width']*.80,box['y']+box['height']*.80
                     page.mouse.move(px,py);page.mouse.down();page.mouse.move(px+dx,py+dy,steps=10);page.mouse.up()
                     page.evaluate('()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))')
@@ -88,9 +89,9 @@ class ViewerPrecisionE2E(ThumbnailRequestsE2E):
                     if tool=='Pan':self.assertNotEqual(old['camera']['focalPoint'],moved['camera']['focalPoint'])
                     else:self.assertNotEqual(old['camera']['parallelScale'],moved['camera']['parallelScale'])
                     self.assertEqual(baseline['arrows'][0]['points'],moved['arrows'][0]['points'])
-            page.locator('[data-cy="Pan"]').click();page.mouse.click(box['x']+box['width']*.85,box['y']+box['height']*.85)
+            select_image_tool(page, 'Pan');page.mouse.click(box['x']+box['width']*.85,box['y']+box['height']*.85)
             for key in keys:
-                page.keyboard.press(key)
+                display_transform(page, key)
                 page.evaluate('()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))')
                 transformed=take('after-'+key)
                 if key=='r':self.assertAlmostEqual(transformed['camera']['rotation'],90,delta=1e-8)
@@ -108,7 +109,7 @@ class ViewerPrecisionE2E(ThumbnailRequestsE2E):
                 __d05c2input.push({canvas:[...p.canvas],world:[...p.world],mapped:[...v.canvasToWorld(p.canvas)]});
               },true);
             }''')
-            page.locator('[data-cy="MeasurementTools-split-button-primary"]').click()
+            select_image_tool(page, 'ArrowAnnotate')
             page.mouse.move(box['x']+target[0],box['y']+target[1]);page.mouse.down()
             page.mouse.move(box['x']+target[0]+25,box['y']+target[1]-15,steps=10);page.mouse.up()
             page.wait_for_function("old=>JSON.stringify(cornerstoneTools.annotation.state.getAllAnnotations().find(a=>a.annotationUID===old.uid).data.handles.points)!==JSON.stringify(old.points)",arg=before['arrows'][0])
@@ -121,8 +122,8 @@ class ViewerPrecisionE2E(ThumbnailRequestsE2E):
             error=max(abs(p-t) for p,t in zip(after['arrows'][0]['projected'][0],[target[0]+25,target[1]-15]));self.assertLessEqual(error,2)
             case['input']=events;case['dragMaxAxisErrorPixels']=error;persist()
             if label=='stress' and setup=='panzoom':page.screenshot(path=str(out/(arm+'-stress-panzoom.png')))
-            page.locator('[data-cy="Pan"]').click();page.mouse.click(box['x']+box['width']*.85,box['y']+box['height']*.85)
-            page.keyboard.press(keys[-1]);page.evaluate('()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))')
+            select_image_tool(page, 'Pan');page.mouse.click(box['x']+box['width']*.85,box['y']+box['height']*.85)
+            display_transform(page, keys[-1]);page.evaluate('()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))')
             unflipped=take('unflipped');rotated=next((x['view'] for x in case['stages'] if x['stage']=='after-r'),next(x['view'] for x in case['stages'] if x['stage']==('after-zoom' if setup=='panzoom' else 'created')))
             self.assertFalse(unflipped['camera']['flipHorizontal']);self.assertFalse(unflipped['camera']['flipVertical']);self.assertAlmostEqual(unflipped['camera']['rotation'],90 if arm=='rh' else 0,delta=1e-8)
             self.assertEqual(unflipped['arrows'][0]['points'],after['arrows'][0]['points'])

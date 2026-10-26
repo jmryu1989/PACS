@@ -75,7 +75,6 @@
       "tests/emr/b/throughput.cjs",
       "tests/emr/b/throughput_live.py",
       "tests/emr_contract_test.cjs",
-      "tests/emr/c/mutants.py",
       "tests/emr/f/contract_test.cjs",
       "tests/ops_backup_test.py",
       "tests/ops_backup_held_test.py",
@@ -87,7 +86,7 @@
       "tests/clinician_policy_fixtures.json",
       "tests/route_inventory_ts.js",
       "tests/ci_workflow_consumers_test.py",
-      ".github/workflows/emr-b.yml",
+      ".github/workflows/validate.yml",
       "api/src/emr-contract/routes.ts",
       "api/prisma/import-member-rights.cjs",
       "tests/ops_product_transfer_fixture.py",
@@ -152,8 +151,10 @@
   "routes": {
     "nest_routes": 138,
     "internal_surfaces": [
+      "server:doctor-key-management",
       "service:auth-session-sweep",
-      "service:member-rights-import"
+      "service:member-rights-import",
+      "server:reader-assignment-close"
     ],
     "note": "B1 adds no HTTP route; the internal sweep surface is where B2 records sessions the server ends in process"
   },
@@ -188,9 +189,14 @@
   },
   "migrations": {
     "added": [
-      "20261023180000_emr_pg_ledger"
+      "20261023180000_emr_pg_ledger",
+      "20261023200000_emr_server_signing",
+      "20261024120000_emr_d_online",
+      "20261025000000_emr_e_online",
+    "20261025120000_access_review",
+      "20261025150000_emr_f_link",
+      "20261026120000_assignment_access_stream"
     ],
-    "count": 49,
     "latest_before": "20261016120000_related_report_insert_receipt",
     "historic_b1": "unchanged"
   },
@@ -242,7 +248,10 @@
       "pending_operations(integer)",
       "record_failure(uuid,uuid,text,timestamptz,text)",
       "entries_after(bigint,integer)",
-      "entry_for_event(text,text)"
+      "entry_for_event(text,text)",
+      "investigation_entries(text,text,timestamptz,timestamptz,bigint,bigint,integer,jsonb)",
+      "investigation_count(text,text,timestamptz,timestamptz,bigint,jsonb)",
+      "existing_member_identity(text,text)"
     ],
     "reader_functions": [
       "storage_placement()",
@@ -472,7 +481,7 @@
     "contract": 13,
     "live": 13,
     "mutants": 15,
-    "profiles": 40,
+    "profiles": 41,
     "measurements_suites": 20,
     "validate_jobs": 22,
     "emr_b_jobs": 1,
@@ -641,6 +650,20 @@
         "test": [
           "RET-01",
           "RESTORE-01"
+        ]
+      },
+      {
+        "consumer": "REQUEST_FACTS final Guard capture and AdminController shared facts",
+        "transaction": "original request work; current AuthService authorization in business transaction",
+        "response": "revoked on response termination; no client-derived actor or fallback ingress",
+        "test": [
+          "tests/emr/request/request_facts_test.cjs",
+          "tests/emr/request/request_facts_live.py::RequestFactsLive"
+        ],
+        "collection": "node --test discovers the pure suite; run-tests.py discovers RequestFactsLive methods; no copied count",
+        "pending": [
+          "Module A clinical RF-3/RF-4",
+          "deployed nginx and Keycloak RF-2/RF-6"
         ]
       }
     ],

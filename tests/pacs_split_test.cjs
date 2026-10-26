@@ -5,6 +5,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 // Split phase (S9-U0b round 2): every original unit lives in its approved concern and is compared with its unchanged
 // RELIST baseline through the bounded correspondence its entry records (pacs_split_contract.cjs); the facade and the
 // concern files may hold nothing the spec does not name; Nest's DI and route metadata equal the snapshot taken from main
@@ -32,45 +33,13 @@ test('U0B-STRUCT-NORMAL current ownership and forwarding hold', () => {
   assert.equal(spec.phase, 'split');
   const source = createSource();
   // validate() also holds the facade (slots, composition, 64 forwarders, 13 re-exports) and the 16 concern files to the spec
-  assert.deepEqual(source.validate(), { members: 125, declarations: 57 });
+  assert.deepEqual(source.validate(), { members: 122, declarations: 57 });
   assert.equal(spec.facade.forwards.length, 64);
-  assert.equal(spec.facade.slots.length, 15);
+  assert.equal(spec.facade.slots.length, 16);
   assert.equal(spec.facade.reexports.length, 14);
 });
-/**
- * W5-API (D1460): the facade's readDraft forwards the Check's optional insertRequestId, so the spec holds its current signature
- * and records the landed one beside it (spec.w5_api) - exactly that one forward, nothing else. The landed corpus (c8e4f1b) is
- * judged with the facade it was approved with: the same spec with that one signature put back.
- */
-function landedSpec() {
-  const declared = spec.w5_api;
-  assert.equal(declared.unit, 'W5-API');
-  assert.deepEqual(declared.facade_signatures.map(change => change.name), ['readDraft']);
-  const landed = structuredClone(spec);
-  for (const change of landed.b2_replacement.facade_signatures) {
-    const forward = landed.facade.forwards.find(item => item.name === change.name);
-    forward.signature_sha256 = change.before;
-  }
-  assert.equal(landed.facade.parameters.pop(), 'ledger:EmrRecordPort');
-  assert.equal(landed.facade.reexports.pop(), 'DraftRequestFacts');
-  assert.equal(landed.facade.slots.find(x => x.name === 'reportDraftConcern').args.pop(), 'ledger');
-  landed.concerns['api/src/pacs/report-draft.ts'] = landed.b2_replacement.draft_before;
-  delete landed.facade.parameter_decorators;
-  delete landed.b2_replacement;
-  for (const change of declared.facade_signatures) {
-    const forward = landed.facade.forwards.find(item => item.name === change.name);
-    assert.equal(forward.signature_sha256, change.current, change.name);
-    forward.signature_sha256 = change.landed;
-  }
-  delete landed.w5_api;
-  return landed;
-}
 test('U0B-HISTORY approved split text and SQL provenance stay pinned', () => {
-  // historicalSource() builds its source through pacs_source.cjs's export with the spec file's default; give it the landed spec.
-  const sources = require('./pacs_source.cjs'), current = sources.createSource;
-  sources.createSource = options => current({ spec: landedSpec(), ...options });
-  try { assert.deepEqual(assertContract(historicalSource()), { members: 125, declarations: 57 }); }
-  finally { sources.createSource = current; }
+  assert.deepEqual(assertContract(historicalSource()), { members: 125, declarations: 57 });
 });
 test('U0B-STRUCT-SPLIT explicit moved location and re-export resolve in one Program', () => {
   const source = fixture(plain, () => {}, { [path.join(apiSrc, 'pacs.service.ts')]: "export { Worklist } from './pacs/worklist';" });
@@ -123,7 +92,7 @@ test('U0B CommonJS export-assignment members resolve through installed Node decl
 for (const [field, value] of [['name', 'gatewayReceiptt'], ['kind', 'PropertyDeclaration'],
   ['id', 'member:gatewayReceiptt:MethodDeclaration'], ['category', 'declaration'], ['live.kind', undefined]]) {
   test(`U0B-R02 spec ${field} must describe the resolved declaration`, () => {
-    assert.deepEqual(createSource().validate(), { members: 125, declarations: 57 });
+    assert.deepEqual(createSource().validate(), { members: 122, declarations: 57 });
     const wrong = structuredClone(spec);
     const entry = wrong.entries.find(item => item.name === 'gatewayReceipt');
     if (field === 'live.kind') delete entry.live.kind;
@@ -250,7 +219,14 @@ function withoutDeclared(now, declared) {
     assert.deepEqual(injectables[name], change.after, name + ' is exactly its declared later form');
     injectables[name] = change.before;
   }
-  return { ...now, controllers: take(now.controllers, declared.controllers), providers: take(now.providers, declared.providers), injectables,
+  let middleware = now.middleware;
+  for (const addition of declared.middleware_routes ?? []) {
+    const bindings = middleware.filter(binding => JSON.stringify(binding.apply) === JSON.stringify(addition.apply));
+    assert.equal(bindings.length, 1, 'the declared middleware has exactly one binding');
+    middleware = middleware.map(binding => binding === bindings[0] ?
+      { ...binding, forRoutes: take(binding.forRoutes, addition.forRoutes) } : binding);
+  }
+  return { ...now, controllers: take(now.controllers, declared.controllers), providers: take(now.providers, declared.providers), injectables, middleware,
     routes: now.routes.filter(r => !declaredRoutes.includes(routeKey(r))) };
 }
 /** W5-API (D1460): the snapshot minus exactly the declared added parameter decorators (spec.w5_api.route_args) - each present once. */
@@ -264,13 +240,20 @@ function withoutW5Arguments(now) {
     return { ...route, args: route.args.filter(arg => !change.added.includes(arg)) };
   }) };
 }
-test('U0B-DI Nest metadata equals main before the split: tokens, constructor tokens, scopes, enhancers, middleware, 138 routes', () => {
+test('U0B-DI-W9 metadata selector and route match their declared Nest boundary', () => {
+  const full = diSnapshot(), w9 = spec.di_additions_w9;
+  const remaining = withoutDeclared(full, w9);
+  assert.equal(full.routes.length - remaining.routes.length, w9.routes.length);
+  assert.equal(remaining.providers.includes('ViewingSetAccess'), false);
+});
+
+test('U0B-DI Nest metadata equals the pre-split snapshot plus declared additions: tokens, constructor tokens, scopes, enhancers, middleware, routes', () => {
   const full = diSnapshot();
-  // W9-API (D1500): the viewing-set resolve controller, its service and the unbound access-record port, one route.
+  // W9-API (D1500): the viewing-set resolve controller, its service and the A1 metadata selector, one route.
   const w9 = spec.di_additions_w9;
   assert.equal(w9.unit, 'W9-API');
   assert.deepEqual([w9.controllers, w9.providers, w9.routes.length], [['MultiStudyViewController'],
-    ['MultiStudyViewService', 'ViewingSetAccess=ViewingSetAccessUnbound'], 1]);
+    ['MultiStudyViewService', 'ViewingSetAccess'], 1]);
   const u4b = spec.di_additions;
   assert.equal(u4b.unit, 'S9-U4b');
   assert.deepEqual([u4b.controllers, u4b.providers, u4b.routes.length], [['StudyTransferLocalController'],
@@ -285,14 +268,22 @@ test('U0B-DI Nest metadata equals main before the split: tokens, constructor tok
     routes: [...w9.routes, ...u4b.routes].sort((a, b) =>
       `${a.controller}.${a.handler}`.localeCompare(`${b.controller}.${b.handler}`)),
   };
-  assert.equal(full.routes.length, 138 + declared.routes.length);
-  // W5-API (D1460) x S9-U4b: both declarations are taken back - the added draft argument, then the U4b additions.
-  const now = withoutDeclared(withoutDeclared(withoutW5Arguments(full), spec.di_additions_b2), declared);
+  const additions = [spec.di_additions_d_online, spec.di_additions_f_link, spec.di_additions_emr_online, spec.di_additions_b2, declared];
+  assert.equal(full.routes.length, spec.di.routes.length + additions.reduce((count, item) => count + item.routes.length, 0));
+  // Undo clinical and later online/identity bindings before B2 and the earlier feature declarations.
+  // D-online and F_LINK are full declared additions too: the whole snapshot is compared, not a minimal DI check.
+  const now = additions.reduce(withoutDeclared, withoutW5Arguments(full));
   assert.deepEqual(now, spec.di);
-  assert.equal(now.routes.length, 138);
-  assert.deepEqual(full.middleware, spec.di.middleware, 'no middleware binding moves with the additions');
+  // Use the approved split's route set, independent of today's editable spec, so an addition cannot be re-pinned as baseline.
+  const splitRoutes = JSON.parse(execFileSync('git', ['show',
+    'c8e4f1b485ec05ccbb97589c74a573b3f48b70ce:tests/pacs_split_spec.json'],
+  { cwd: path.resolve(__dirname, '..'), encoding: 'utf8', maxBuffer: 8e6 })).di.routes;
+  assert.deepEqual(now.routes, splitRoutes, 'the approved pre-split route set is unchanged');
+  assert.deepEqual(withoutDeclared(full, spec.di_additions_f_link).middleware, spec.di.middleware,
+    'existing middleware bindings remain unchanged outside the declared F route');
   assert.ok(w9.routes.every(r => r.controller === 'MultiStudyViewController' && !r.public), 'no declared route is public');
   assert.ok(u4b.routes.every(r => r.controller === 'StudyTransferLocalController' && !r.public), 'no declared route is public');
+  assert.ok(spec.di_additions_emr_online.routes.every(r => !r.public), 'no declared route is public');
   assert.deepEqual(now.injectables.PacsService.params, ['PrismaService', 'OrthancService', 'KeycloakService', 'StudyAccessService', 'FindingService']);
   // the concerns are plain objects the facade owns: no Nest metadata, not registered anywhere
   for (const [target, concern] of Object.entries(spec.concerns)) {
@@ -300,9 +291,10 @@ test('U0B-DI Nest metadata equals main before the split: tokens, constructor tok
     const cls = require('/app/dist/' + target.slice('api/src/'.length, -3))[concern.class];
     assert.equal(typeof cls, 'function', concern.class);
     assert.equal(Reflect.getMetadata('__injectable__', cls), undefined, concern.class);
-    assert.equal(now.providers.includes(concern.class) || now.controllers.includes(concern.class), false, concern.class);
+    assert.equal(full.providers.includes(concern.class) || full.controllers.includes(concern.class), false, concern.class);
   }
 });
+
 test('U0B-DI-RUNTIME Nest builds one PacsService for its consumers and starts it once', async () => {
   diSnapshot();   // compiles api/src through the loader unless /app/dist exists
   const { NestFactory } = require('/app/node_modules/@nestjs/core');

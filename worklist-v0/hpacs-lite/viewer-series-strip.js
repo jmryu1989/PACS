@@ -9,7 +9,7 @@ window.KinViewerSeriesStrip = (() => {
     return classic.has(value(instance, '00080016')) ? 1 : null;
   }
   function mount({ services }) {
-    let host, list, uid, controller, sequence = 0, ended = false;
+    let host, slot, list, uid, controller, sequence = 0, ended = false;
     const urls = new Set(), cards = new Map();
     const grid = services.viewportGridService, sets = services.displaySetService;
     function clear() { controller?.abort(); sequence++; urls.forEach(url => URL.revokeObjectURL(url)); urls.clear(); cards.clear(); list?.replaceChildren(); }
@@ -26,7 +26,7 @@ window.KinViewerSeriesStrip = (() => {
       if (ended || current.set?.StudyInstanceUID !== expectedStudy) return;
       // Reuse the same busy/unsaved boundaries as HP and saved-work restore.
       const states = [window.kinViewerHistoryWorkspaceState?.(), window.kinViewerJobWorkspaceState?.()];
-      if (states.some(state => !state || state.dirty || state.busy) || window.kinViewerHistoryHasUnsaved?.() || window.kinMprMarks?.dirty?.()) {
+      if (states.some(state => state?.dirty || state?.busy) || window.kinViewerHistoryHasUnsaved?.() || window.kinMprMarks?.dirty?.()) {
         services.uiNotificationService?.show({ title: 'Series', message: '미저장 작업을 저장하거나 편집을 마친 뒤 시리즈를 여세요.', type: 'info' }); return;
       }
       const matches = sets.getActiveDisplaySets().filter(set => set.StudyInstanceUID === expectedStudy && set.SeriesInstanceUID === series);
@@ -92,23 +92,31 @@ window.KinViewerSeriesStrip = (() => {
         const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = 'Retry'; retry.onclick = () => load(study); list.append(retry);
       }
     }
+    // The strip and, above it, the row the toolbar will fill. The toolbar mounts
+    // only after the tech-note connection answers; reserving its row here, as
+    // soon as the grid exists, keeps the image area where it will stay, so a
+    // camera a saved Job or a patient tab applies before that answer is not
+    // re-fitted when the toolbar arrives.
+    function place() {
+      if (ended || host) return;
+      const viewportGrid = document.querySelector('[data-cy="viewport-grid"]');
+      const column = viewportGrid?.parentElement?.parentElement?.parentElement;
+      if (!column) return;
+      host = document.createElement('section'); host.className = 'kin-viewer-series-strip'; host.dataset.kinUxOwned = '';
+      host.setAttribute('aria-label', 'Series');
+      list = document.createElement('div'); list.className = 'kin-series-list';
+      for (const [label, direction] of [['Previous Series', -1], ['Next Series', 1]]) {
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'kin-series-scroll';
+        button.textContent = direction === -1 ? '‹' : '›'; button.setAttribute('aria-label', label);
+        button.onclick = () => list.scrollBy({ left: direction * list.clientWidth, behavior: 'smooth' });
+        host.append(button); if (direction === -1) host.append(list);
+      }
+      slot = document.createElement('section'); slot.className = 'kin-ux-toolbar-slot'; slot.dataset.kinUxOwned = '';
+      column.prepend(slot, host);
+    }
     function refresh() {
       if (ended) return;
-      if (!host) {
-        const viewportGrid = document.querySelector('[data-cy="viewport-grid"]');
-        const column = viewportGrid?.parentElement?.parentElement?.parentElement;
-        if (!column) return;
-        host = document.createElement('section'); host.className = 'kin-viewer-series-strip'; host.dataset.kinUxOwned = '';
-        host.setAttribute('aria-label', 'Series');
-        list = document.createElement('div'); list.className = 'kin-series-list';
-        for (const [label, direction] of [['Previous Series', -1], ['Next Series', 1]]) {
-          const button = document.createElement('button'); button.type = 'button'; button.className = 'kin-series-scroll';
-          button.textContent = direction === -1 ? '‹' : '›'; button.setAttribute('aria-label', label);
-          button.onclick = () => list.scrollBy({ left: direction * list.clientWidth, behavior: 'smooth' });
-          host.append(button); if (direction === -1) host.append(list);
-        }
-        column.prepend(host);
-      }
+      place(); if (!host) return;
       const current = window.KinViewerInfoBar.identity(services, grid.getActiveViewportId());
       // The strip follows the grid's assigned study while a slice is loading;
       // otherwise every wheel/cine frame would discard and fetch all previews.
@@ -116,7 +124,7 @@ window.KinViewerSeriesStrip = (() => {
       if (uid !== next) { load(next); return; }
       for (const [series, card] of cards) card.setAttribute('aria-pressed', String(series === current.set?.SeriesInstanceUID));
     }
-    return { refresh, dispose() { ended = true; clear(); host?.remove(); } };
+    return { refresh, place, dispose() { ended = true; clear(); host?.remove(); slot?.remove(); } };
   }
   return { mount };
 })();

@@ -30,6 +30,13 @@ SUITE_CLASSES = ['ViewerAPI', 'MeasurementReadbackE2E', 'MeasurementPanelE2E',
                  'CineE2E', 'VolumeCineE2E',
                  'FindingAPI', 'FindingNavigationE2E', 'FindingWorklistE2E', 'DictationLiveE2E']
 PROFILES = {
+    'viewer-ux-priors': {
+        'out': ROOT / 'tests/e2e/artifacts/viewer-ux-priors-ci',
+        'project_prefix': 'kin-viewer-ux-priors-ci-',
+        # Retain the measured run-4 served plan hang allowance (all five U3 cases).
+        'suite_timeout': 900,
+        'suites': (('e2e/test_viewer_ux_priors.py', 'ViewerUXPriorsE2E', 'ci-viewer-ux-priors'),),
+    },
     'context-loss': {
         'out': ROOT / 'tests/e2e/artifacts/context-loss-ci',
         'project_prefix': 'kin-context-loss-ci-',
@@ -144,6 +151,14 @@ PROFILES = {
         # WorklistE2E, ReturnToCurrentE2E or RelatedFilterE2E cases.
         'suites': (('e2e/test_prior_selection.py', 'PriorSelectionE2E', 'ci-u2b-prior-selection'),
                    ('e2e/test_related_scope.py', 'RelatedScopeE2E', 'ci-u2b-related-scope')),
+    },
+    'viewer-ux-shell': {
+        'out': ROOT / 'tests/e2e/artifacts/viewer-ux-shell-ci',
+        'project_prefix': 'kin-viewer-ux-shell-ci-',
+        # Viewer U2 shell (D1821): the module's own test_shell_* cases on the shipped viewer, in the
+        # worklist-ux-measurements job. One suite at the single-suite 900s ceiling, not an estimate.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_viewer_ux_shell.py', 'ViewerUXShellE2E', 'ci-viewer-ux-shell'),),
     },
     'display-scope': {
         'out': ROOT / 'tests/e2e/artifacts/display-scope-ci',
@@ -716,8 +731,9 @@ def inspect_failed_module(run, out, compose, unit, suite, result):
 
 def profile_deadline_seconds(profile_name):
     # D941's live 20k prefill needs the whole EMR suite budget plus setup/cleanup.
-    # Every other existing profile retains the shared 25 minute deadline.
-    return 65*60 if profile_name == 'emr-b' else 25*60
+    # Candidate configuration supplies its measured cumulative allowance;
+    # other existing profiles retain the shared 25 minute deadline.
+    return PROFILES[profile_name].get('deadline_seconds', 65*60 if profile_name == 'emr-b' else 25*60)
 
 
 def workflow_report(root=None):
@@ -766,11 +782,16 @@ def main(profile_name, credential_provider=None):
         evidence_stage = Path(runner_temp)/('kin-vr-suite-evidence-'+secrets.token_hex(6))
         evidence_stage.mkdir(parents=True, exist_ok=False)
     env = profile_environment(profile_name, out, values, evidence_stage)
+    from emr.d.synthetic_stack import configure as configure_signing, compose_arguments as signing_compose_arguments
+    signing_custody = configure_signing(ROOT, env)
     project = profile['project_prefix']+secrets.token_hex(6)
     # Fixed container names mean isolation comes from the empty hosted daemon,
     # not this project name. Helpers must still address the same Compose project.
     env['COMPOSE_PROJECT_NAME'] = project
-    compose = ['docker','compose','-p',project]
+    # The signing override is this owner's -f list only (compose[3] stays the project): the suites
+    # run with COMPOSE_FILE unset, which the e2e local-target guard requires, and reach the same
+    # containers through COMPOSE_PROJECT_NAME.
+    compose = ['docker','compose','-p',project, *signing_compose_arguments(ROOT, signing_custody)]
     results = []; deadline = time.monotonic() + profile_deadline_seconds(profile_name)
     def run(name, command, timeout=600, finalizing=False, fail_fast=True):
         started = time.monotonic()
@@ -853,7 +874,7 @@ def main(profile_name, credential_provider=None):
                     # Its own Compose project, never an orphan of this one: removed after the consumer stack.
                     cleanup = gateway_remove(run, out) or cleanup
                 if cleanup and not failed: raise RuntimeError('CI cleanup failed; see sanitized artifact')
-                if not cleanup and not failed and seeded:
+                if not cleanup and seeded:
                     # Merged jobs run profiles sequentially. Remove only this
                     # profile's generated seed after successful stack cleanup.
                     for path in seeded:
@@ -868,6 +889,7 @@ def main(profile_name, credential_provider=None):
                         f"{row['seconds']:.3f}\t{row['name']}.log\n" for row in results), encoding='utf-8')
                 if evidence_stage is not None:
                     shutil.rmtree(evidence_stage)
+                signing_custody.cleanup()
 
 
 if __name__ == '__main__':

@@ -4,6 +4,7 @@ No substitute page, config, renderer or product controller is installed.
 U3 prior/report integration and first-site hardware acceptance remain separate.
 """
 import json
+from urllib.parse import parse_qs, urlsplit
 import os
 from pathlib import Path
 import unittest
@@ -13,6 +14,7 @@ import copy
 
 from playwright.sync_api import expect
 from pydicom import dcmread
+from pydicom.dataset import Dataset
 from pydicom.uid import generate_uid
 from test_viewer_layout import ViewerLayoutE2E
 from test_prior_selection import canvas_ready
@@ -42,6 +44,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
                             image:services.cornerstoneViewportService.getCornerstoneViewport(c.viewportId)?.getCurrentImageId?.(),
                             camera:services.cornerstoneViewportService.getCornerstoneViewport(c.viewportId)?.getCamera?.()}))})''')
                         (folder / (name + '.json')).write_text(json.dumps(state, indent=2), encoding='utf-8')
+                        (folder / (name + '-browser-errors.json')).write_text(json.dumps(getattr(self, 'browser_errors', []), indent=2), encoding='utf-8')
                     except Exception as error: print('Viewer failure capture:', str(error)[:180], flush=True)
         super().tearDown()
 
@@ -53,6 +56,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
             work.locator('#m-filmbox').click()
         page = opened.value
         browser_errors = []
+        self.browser_errors = browser_errors
         page.on('pageerror', lambda error: browser_errors.append(str(error)))
         def record_console(message):
             if message.type not in ('error', 'warning', 'debug'): return
@@ -87,7 +91,8 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         before = self.cells(page)
         page.wait_for_function('''() => [...services.viewportGridService.getState().viewports.keys()]
           .every(id=>services.cornerstoneViewportService.getViewportInfo(id)?.getViewportData())''')
-        folder=Path(os.environ['KIN_EVIDENCE_DIR']);page.screenshot(path=str(folder/'patient-tabs-before.png'))
+        folder=Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/viewer-ux-u2/screens'));folder.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(folder/'patient-tabs-before.png'))
         display_state = '''() => JSON.stringify([...services.viewportGridService.getState().viewports.values()]
           .sort((a,b)=>a.y-b.y||a.x-b.x).map(cell=>{
             const v=services.cornerstoneViewportService.getCornerstoneViewport(cell.viewportId),canvas=v?.element?.querySelector('canvas');
@@ -108,7 +113,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         })''',arg=b.uid)
         canvas_ready(page, 1)
         self.assertEqual(page.evaluate('performance.timeOrigin'),document_id)
-        folder=Path(os.environ['KIN_EVIDENCE_DIR']);page.screenshot(path=str(folder/'patient-tabs-two.png'))
+        page.screenshot(path=str(folder/'patient-tabs-two.png'))
         tabs.get_by_role('tab').filter(has_text=a.patient_id).click()
         page.wait_for_function('''uid => services.viewportGridService.getState().viewports.size===2 &&
           [...services.viewportGridService.getState().viewports.keys()].every(id =>
@@ -129,10 +134,10 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         for bar in page.get_by_role('region', name='Viewport Information').all():
             expect(bar).to_contain_text(a.patient_id)
         # A late patient lookup cannot win after selecting A again (A→B→A).
-        page.wait_for_function('''() => !kinViewerHistoryWorkspaceState().busy && !kinViewerJobWorkspaceState().busy''')
+        page.wait_for_function('''() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false''')
         held = []
-        page.route('**/api/studies', lambda route: held.append(route), times=1)
-        with page.expect_request(lambda request: request.url.endswith('/api/studies')):
+        page.route('**/api/studies?*', lambda route: held.append(route), times=1)
+        with page.expect_request(lambda request: request.url.split('?')[0].endswith('/api/studies')):
             tabs.get_by_role('tab').filter(has_text=b.patient_id).click()
         tabs.get_by_role('tab').filter(has_text=a.patient_id).click()
         for route in held:
@@ -141,8 +146,8 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         expect(tabs.get_by_role('tab').filter(has_text=a.patient_id)).to_have_attribute('aria-selected','true')
         page.wait_for_function('expected => (' + display_state + ')() === expected', arg=before_display)
         held = []
-        page.route('**/api/studies', lambda route: held.append(route), times=1)
-        with page.expect_request(lambda request: request.url.endswith('/api/studies')):
+        page.route('**/api/studies?*', lambda route: held.append(route), times=1)
+        with page.expect_request(lambda request: request.url.split('?')[0].endswith('/api/studies')):
             tabs.get_by_role('tab').filter(has_text=b.patient_id).click()
         tabs.get_by_role('button', name='Close D03A SYNTHETIC ' + b.patient_id, exact=True).click()
         for route in held:
@@ -153,19 +158,25 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         self.select(work, b); work.locator('#m-filmbox').click()
         expect(tabs.get_by_role('tab')).to_have_count(2, timeout=45000)
         canvas_ready(page, 1)
-        page.wait_for_function('''() => !kinViewerHistoryWorkspaceState().busy && !kinViewerJobWorkspaceState().busy''')
+        page.wait_for_function('''() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false''')
         tabs.get_by_role('tab').filter(has_text=a.patient_id).click()
         page.wait_for_function('expected => (' + display_state + ')() === expected', arg=before_display)
-        page.wait_for_function('''() => !kinViewerHistoryWorkspaceState().busy && !kinViewerJobWorkspaceState().busy''')
+        page.wait_for_function('''() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false''')
         self.select(work, a); work.locator('#m-filmbox').click()
         expect(tabs.get_by_role('tab')).to_have_count(2)
         tabs.get_by_role('tab').filter(has_text=a.patient_id).focus();page.keyboard.press('ArrowRight')
         expect(tabs.get_by_role('tab').filter(has_text=b.patient_id)).to_have_attribute('aria-selected','true')
-        page.wait_for_function('''() => !kinViewerHistoryWorkspaceState().busy && !kinViewerJobWorkspaceState().busy''')
-        tabs.get_by_role('tab').filter(has_text=b.patient_id).focus(); page.keyboard.press('Delete')
+        page.wait_for_function('''() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false''')
+        tabs.get_by_role('tab').filter(has_text=b.patient_id).focus()
+        page.wait_for_function('''uid => !document.body.classList.contains('kin-patient-switching') &&
+          window.kinViewerHistoryWorkspaceState?.() && !kinViewerHistoryWorkspaceState().busy &&
+          window.kinViewerJobWorkspaceState?.() && !kinViewerJobWorkspaceState().busy &&
+          [...services.viewportGridService.getState().viewports.keys()].some(id =>
+            services.cornerstoneViewportService.getCornerstoneViewport(id)?.getCurrentImageId?.().includes('/studies/'+uid+'/'))''', arg=b.uid)
+        page.keyboard.press('Delete')
         expect(tabs.get_by_role('tab')).to_have_count(1)
         expect(tabs.get_by_role('tab').filter(has_text=a.patient_id)).to_be_focused()
-        page.wait_for_function('''() => !kinViewerHistoryWorkspaceState().busy && !kinViewerJobWorkspaceState().busy''')
+        page.wait_for_function('''() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false''')
         tabs.get_by_role('button', name='Close ', exact=False).click()
         expect(tabs.get_by_role('tab')).to_have_count(0)
         expect(page.get_by_text('No Patient — 목록에서 검사를 여세요.', exact=True)).to_be_visible()
@@ -185,13 +196,122 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         tabs=page.get_by_role('tablist',name='Patients')
         expect(tabs.get_by_role('tab')).to_have_count(2,timeout=45000)
         canvas_ready(page,1)
+        more = page.get_by_text('More', exact=True)
+        menu = page.get_by_role('group', name='More Tools')
+        more.click(); expect(menu).to_be_visible()
+        page.keyboard.press('Escape'); expect(menu).not_to_be_visible()
+        more.click(); expect(menu).to_be_visible()
+        page.get_by_role('toolbar', name='Frequent Tools').click(position={'x': 2, 'y': 2})
+        expect(menu).not_to_be_visible()
         ViewerImageTextE2E.annotate(self,page)
+        expect(menu).not_to_be_visible()
         before=self.cells(page)
         tabs.get_by_role('tab').filter(has_text=a.patient_id).click()
         expect(tabs.get_by_role('tab').filter(has_text=b.patient_id)).to_have_attribute('aria-selected','true')
         tabs.get_by_role('button',name='Close ',exact=False).last.click()
         expect(tabs.get_by_role('tab')).to_have_count(2)
         self.assertEqual(self.cells(page),before)
+
+    def test_shell_07_failed_patient_lookup_recovers(self):
+        fixture = self.multiple('U2-' + uuid.uuid4().hex[:12], 'lookup failure', '20260801')
+        work = self.login()
+        page = work.context.new_page()
+        page.route('**/api/studies?*', lambda route: route.fulfill(status=503, content_type='application/json', body='{}'), times=1)
+        page.goto(self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + fixture.uid)
+        canvas_ready(page, 1)
+        retry = page.get_by_role('button', name='Retry Patient', exact=True)
+        expect(retry).to_be_visible()
+        expect(page.locator('[data-cy="viewport-grid"]')).to_be_visible()
+        self.assertFalse(page.evaluate("document.body.classList.contains('kin-viewer-empty')"))
+        before = self.cells(page)
+        retry.click(); expect(retry).not_to_be_visible()
+        expect(page.get_by_role('tablist', name='Patients')).to_contain_text(fixture.patient_id)
+        self.assertEqual(self.cells(page), before)
+
+    def test_shell_08_same_patient_requested_study(self):
+        patient = 'U2-' + uuid.uuid4().hex[:12]
+        a = self.multiple(patient, 'first study', '20260801')
+        b = self.multiple(patient, 'second study', '20260701')
+        work = self.login(); self.select(work, a)
+        with work.context.expect_page() as opened: work.locator('#m-filmbox').click()
+        page = opened.value
+        # Automatic comparison hangs both series from each of these two studies.
+        canvas_ready(page, 4)
+        page.wait_for_function('() => window.kinViewerOpenPatient && window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false')
+        tabs = page.get_by_role('tablist', name='Patients')
+        expect(tabs.get_by_role('tab')).to_have_count(1)
+        document = page.evaluate('performance.timeOrigin')
+        self.select(work, b); work.locator('#m-filmbox').click()
+        page.wait_for_function('uid => new URL(location.href).searchParams.get("StudyInstanceUIDs").split(",")[0] === uid', arg=b.uid)
+        page.wait_for_function('''uid => {
+          const first=[...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x)[0];
+          return services.cornerstoneViewportService.getCornerstoneViewport(first?.viewportId)?.getCurrentImageId?.().includes(uid);
+        }''', arg=b.uid)
+        expect(tabs.get_by_role('tab')).to_have_count(1)
+        self.assertEqual(page.evaluate('performance.timeOrigin'), document)
+
+    def test_shell_09_settings_failure_keeps_default_tools(self):
+        fixture = self.multiple('U2-' + uuid.uuid4().hex[:12], 'settings failure', '20260801')
+        page = self.login()
+        page.route('**/api/workspace-shortcuts', lambda route: route.fulfill(status=503, content_type='application/json', body='{}'), times=1)
+        page = self.launch(page, [fixture])
+        page.locator('#kin-workspace-dock nav button[aria-controls="kin-viewer-layout"]').click()
+        retry = page.get_by_role('button', name='Reload Settings', exact=True)
+        expect(retry).to_be_visible()
+        zoom = page.get_by_role('toolbar', name='Frequent Tools').get_by_role('button', name='Zoom', exact=True)
+        expect(zoom).to_be_enabled(); expect(zoom).to_have_attribute('draggable', 'false')
+        page.wait_for_function('() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false')
+        zoom.click()
+        active = '() => services.toolGroupService.getToolGroupForViewport(services.viewportGridService.getActiveViewportId()).getActivePrimaryMouseButtonTool()'
+        self.assertEqual(page.evaluate(active), 'Zoom')
+        page.keyboard.press('p'); self.assertEqual(page.evaluate(active), 'Pan')
+        page.get_by_role('button', name='Viewer Settings', exact=True).click()
+        dialog = page.get_by_role('dialog', name='Viewer Settings')
+        expect(dialog.get_by_role('button', name='Save', exact=True)).to_be_disabled()
+        dialog.get_by_role('button', name='Cancel', exact=True).click()
+        retry.click(); expect(retry).not_to_be_visible()
+        expect(zoom).to_have_attribute('draggable', 'true')
+
+    def test_shell_10_mammography_tab_roundtrip(self):
+        patient = 'U2MG-' + uuid.uuid4().hex[:12]
+        current = self.ct(patient, 'MG current', '20260801')
+        prior = self.ct(patient, 'MG prior', '20250701')
+        other = self.ct('U2CT-' + uuid.uuid4().hex[:12], 'CT patient', '20260801')
+        for fixture in [current, prior]:
+            source = next(d for d in (dcmread(io.BytesIO(self.stack.orthanc_bytes(path))) for path in self.originals())
+                          if str(d.StudyInstanceUID) == fixture.uid)
+            for number, (side, view) in enumerate([('R', 'CC'), ('L', 'CC'), ('R', 'MLO'), ('L', 'MLO')], 1):
+                data = copy.deepcopy(source)
+                data.Modality = 'MG'; data.SOPClassUID = '1.2.840.10008.5.1.4.1.1.1.2'
+                data.file_meta.MediaStorageSOPClassUID = data.SOPClassUID
+                data.SOPInstanceUID = generate_uid(); data.file_meta.MediaStorageSOPInstanceUID = data.SOPInstanceUID
+                data.SeriesInstanceUID = generate_uid(); data.SeriesNumber = number + 10
+                data.ImageType = ['ORIGINAL', 'PRIMARY']; data.ImageLaterality = side; data.ViewPosition = view
+                data.PresentationIntentType = 'FOR PRESENTATION'
+                code = Dataset(); code.CodingSchemeDesignator = 'SCT'
+                code.CodeValue = '399162004' if view == 'CC' else '399368009'
+                code.CodeMeaning = 'cranio-caudal' if view == 'CC' else 'medio-lateral oblique'
+                data.ViewCodeSequence = [code]
+                data.SeriesDescription = 'MG ' + side + ' ' + view
+                stream = io.BytesIO(); data.save_as(stream, write_like_original=False)
+                self.assertEqual(self.stack._orthanc_request('POST', '/instances', stream.getvalue()).status, 200)
+        work = self.login(); page = work.context.new_page()
+        page.goto(self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + current.uid + ',' + prior.uid)
+        canvas_ready(page, 8)
+        expect(page.get_by_label('MG Layout', exact=True)).to_have_value('compare')
+        before = [cell['image'] for cell in self.cells(page)]
+        self.assertEqual(len(set(before)), 8)
+        page.wait_for_function('() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false')
+        # Exercise the published open boundary without replacing either extension.
+        self.assertTrue(page.evaluate('href => kinViewerOpenPatient(href)', self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + other.uid))
+        tabs = page.get_by_role('tablist', name='Patients')
+        expect(tabs.get_by_role('tab')).to_have_count(2, timeout=45000)
+        canvas_ready(page, 1)
+        page.wait_for_function('() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false')
+        tabs.get_by_role('tab').filter(has_text=patient).click()
+        page.wait_for_function('expected => JSON.stringify([...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x).map(c=>services.cornerstoneViewportService.getCornerstoneViewport(c.viewportId)?.getCurrentImageId?.())) === JSON.stringify(expected)', arg=before)
+        canvas_ready(page, 8)
+        expect(page.get_by_label('MG Layout', exact=True)).to_have_value('compare')
 
     def test_shell_06_study_action_seam(self):
         patient = 'U2-' + uuid.uuid4().hex[:12]
@@ -222,7 +342,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         expect(host).to_contain_text('Synthetic prior findings')
         self.assertEqual(host.locator('input,textarea,[contenteditable=true]').count(), 0)
         before = self.cells(page)
-        page.wait_for_function('''() => !kinViewerHistoryWorkspaceState().busy && !kinViewerJobWorkspaceState().busy''')
+        page.wait_for_function('''() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false''')
         self.assertTrue(page.evaluate('''() => KinViewerUX.assign(u2Origin,
           services.viewportGridService.getState().viewports.get(u2Origin.viewportId).displaySetInstanceUIDs)'''))
         canvas_ready(page, 2)
@@ -230,6 +350,150 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         page.evaluate('u2Unregister()')
         expect(host).not_to_be_visible()
         for bar in bars.all(): expect(bar.get_by_role('button', name='Study', exact=False)).to_be_disabled()
+
+    def test_shell_11_clinician_only_can_view_and_switch_series(self):
+        fixture = self.multiple('U2CL-' + uuid.uuid4().hex[:12], 'clinician', '20260801')
+        actor = 'u2-clinician'
+        self.stack.create_test_identity(actor, ['clinician'], 'hallym')
+        context = self.browser.new_context(ignore_https_errors=True, viewport={'width': 1600, 'height': 1050})
+        self.contexts.append(context)
+        home = context.new_page(); home.goto(self.stack.proxy + '/')
+        home.locator('#username').fill(self.stack.username(actor))
+        home.locator('#password').fill(self.stack.passwords[actor]); home.locator('#kc-login').click()
+        home.wait_for_url('**/worklist/hpacs-lite/clinician.html', timeout=30000)
+        expect(home.locator('#actor')).to_contain_text(actor)
+        page = context.new_page(); requests = []
+        page.on('dialog', lambda dialog: dialog.accept())
+        page.on('request', lambda request: requests.append(request.url) if '/api/' in request.url else None)
+        page.goto(self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + fixture.uid)
+        canvas_ready(page, 1)
+        expect(page.get_by_role('tablist', name='Patients')).to_contain_text(fixture.patient_id)
+        expect(page.locator('[data-cy="viewport-grid"]')).to_be_visible()
+        expect(page.get_by_role('region', name='Image Tools', exact=True)).to_be_visible()
+        page.get_by_role('toolbar', name='Frequent Tools').get_by_role('button', name='Zoom', exact=True).click()
+        page.wait_for_function("() => services.toolGroupService.getToolGroupForViewport(services.viewportGridService.getActiveViewportId()).getActivePrimaryMouseButtonTool() === 'Zoom'")
+        strip = page.get_by_role('region', name='Series', exact=True)
+        strip.get_by_role('button', name='2/2 D02E second series', exact=False).click()
+        page.wait_for_function("() => services.displaySetService.getDisplaySetByUID(services.viewportGridService.getState().viewports.get(services.viewportGridService.getActiveViewportId()).displaySetInstanceUIDs[0]).SeriesNumber == 2")
+        canvas_ready(page, 1)
+        folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/viewer-ux-u2/screens')); folder.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(folder / 'clinician-visible-second-series.png'))
+        (folder / 'clinician-requests.json').write_text(json.dumps(requests, indent=2), encoding='utf-8')
+        self.assertTrue(any('/api/clinician/studies?uids=' in url for url in requests))
+        expect(page.get_by_role('button', name='Viewer Settings', exact=True)).not_to_be_visible()
+        expect(page.get_by_role('region', name='Image Tools', exact=True).get_by_role('status')).to_be_empty()
+        self.assertFalse(any(url.split('?')[0].endswith('/api/studies') for url in requests))
+        page.get_by_role('tablist', name='Patients').get_by_role('button', name='Close ', exact=False).click()
+        expect(page.get_by_role('tablist', name='Patients').get_by_role('tab')).to_have_count(0)
+
+    def test_shell_12_catalog_save_preserves_unavailable_settings(self):
+        fixture = self.multiple('U2CAT-' + uuid.uuid4().hex[:12], 'catalog', '20260801')
+        work = self.login()
+        record = document_request(work, 'GET', '/api/workspace-shortcuts').json()
+        saved = {'version': 1, 'bar': ['Angle', 'Zoom', 'UnavailableModeTool'],
+                 'shortcuts': {'Angle': 'a', 'Zoom': 'z', 'UnavailableModeTool': 'u'}}
+        response = document_request(work, 'PUT', '/api/workspace-shortcuts', headers={'X-KIN-CSRF':'1'},
+                                    data=dict(expectedOwner=record['owner'], revision=record['revision'], viewerSettings=saved))
+        self.assertEqual(response.status, 200)
+        page = self.launch(work, [fixture])
+        expect(page.get_by_role('toolbar', name='Frequent Tools').get_by_role('button', name='Angle', exact=True)).to_be_enabled()
+        page.get_by_role('button', name='Viewer Settings', exact=True).click()
+        dialog = page.get_by_role('dialog', name='Viewer Settings')
+        dialog.get_by_label('Zoom Shortcut', exact=True).fill('j')
+        dialog.get_by_role('button', name='Save', exact=True).click()
+        expect(dialog).not_to_be_visible()
+        actual = document_request(page, 'GET', '/api/workspace-shortcuts').json()['viewerSettings']
+        self.assertEqual(actual['bar'], saved['bar'])
+        self.assertEqual(actual['shortcuts'], {**saved['shortcuts'], 'Zoom':'j', **{
+            key: value for key, value in actual['shortcuts'].items() if key not in saved['shortcuts']}})
+        # The native preferences entry remains reachable through the real header.
+        page.locator('.bg-secondary-dark.z-20:has(#kin-viewer-brand) button[aria-haspopup="menu"]').click()
+        page.get_by_role('menu').get_by_text('Preferences', exact=True).click()
+        expect(page.get_by_text('User Preferences', exact=True)).to_be_visible()
+        folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/viewer-ux-u2/screens')); folder.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(folder / 'native-user-preferences.png'))
+
+    def test_shell_13_early_tools_busy_feedback_and_cached_switch(self):
+        a = self.multiple('U2EARLY-' + uuid.uuid4().hex[:12], 'early tools', '20260801')
+        b = self.multiple('U2NEXT-' + uuid.uuid4().hex[:12], 'next tools', '20260801')
+        work = self.login()
+        record = document_request(work, 'GET', '/api/workspace-shortcuts').json()
+        response = document_request(work, 'PUT', '/api/workspace-shortcuts', headers={'X-KIN-CSRF':'1'},
+                                    data=dict(expectedOwner=record['owner'], revision=record['revision'],
+                                              viewerSettings={'version':1,'bar':['Zoom'],'shortcuts':{'Zoom':'z','RectangleROI':'r'}}))
+        self.assertEqual(response.status, 200)
+        page = work.context.new_page()
+        held_note = []
+        page.route('**/viewer-tech-note.js', lambda route: held_note.append(route))
+        page.add_init_script('''
+          window.toolFrames = [];
+          function observeTools() {
+            const native = document.querySelector('#root [data-cy="Zoom"]');
+            const bar = document.querySelector('[aria-label="Frequent Tools"]');
+            const zoom = bar?.querySelector('[data-tool="Zoom"]');
+            toolFrames.push({stock:!!native?.checkVisibility({visibilityProperty:true}),
+              binding:zoom?.getAttribute('aria-keyshortcuts'),bar:bar?.innerText});
+            requestAnimationFrame(observeTools);
+          }
+          requestAnimationFrame(observeTools);
+        ''')
+        page.goto(self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + a.uid)
+        canvas_ready(page, 1)
+        tools = page.get_by_role('region', name='Image Tools', exact=True)
+        expect(tools).to_be_visible()
+        page.wait_for_function('() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false')
+        page.keyboard.press('z')
+        active = '() => services.toolGroupService.getToolGroupForViewport(services.viewportGridService.getActiveViewportId()).getActivePrimaryMouseButtonTool()'
+        self.assertEqual(page.evaluate(active), 'Zoom')
+        page.keyboard.press('r'); self.assertEqual(page.evaluate(active), 'RectangleROI')
+        self.assertTrue(held_note, 'The view tools work while the tech-note script is still held')
+        self.assertFalse(page.evaluate('toolFrames.some(frame => frame.stock)'))
+        for route in held_note: route.continue_()
+        page.unroute('**/viewer-tech-note.js')
+        page.get_by_role('button', name='Viewer Settings', exact=True).click()
+        dialog = page.get_by_role('dialog', name='Viewer Settings')
+        dialog.get_by_label('Zoom Shortcut', exact=True).fill('j')
+        dialog.get_by_role('button', name='Save', exact=True).click()
+        expect(dialog).not_to_be_visible()
+        held_jobs = []
+        page.route('**/api/studies/*/viewer-jobs*', lambda route: held_jobs.append(route))
+        calls = []
+        page.on('request', lambda request: calls.append(request.url) if '/api/studies?' in request.url else None)
+        page.evaluate('toolFrames.length = 0')
+        self.assertTrue(page.evaluate('url => kinViewerOpenPatient(url)', '/ohif/viewer?StudyInstanceUIDs=' + b.uid))
+        expect(page.get_by_role('tablist', name='Patients')).to_contain_text(b.patient_id)
+        page.wait_for_function('() => window.kinViewerJobWorkspaceState?.()?.busy === true')
+        tools.get_by_role('toolbar', name='Frequent Tools').get_by_role('button', name='Zoom', exact=True).click()
+        expect(tools.get_by_role('status')).to_contain_text('완료 후 도구를 다시 선택하세요')
+        for route in held_jobs: route.continue_()
+        page.unroute('**/api/studies/*/viewer-jobs*')
+        page.wait_for_function('() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false')
+        canvas_ready(page, 1)
+        page.keyboard.press('j'); self.assertEqual(page.evaluate(active), 'Zoom')
+        self.assertEqual(len(calls), 1, calls)
+        self.assertEqual(parse_qs(urlsplit(calls[0]).query).get('uids'), [b.uid])
+        page.set_viewport_size({'width': 3200, 'height': 1050})
+        page.locator('[data-cy="viewport-pane"]').first.click(position={'x':100,'y':100})
+        page.get_by_role('button', name='Viewer Settings', exact=True).click()
+        box = dialog.bounding_box()
+        monitor = page.evaluate('({right:Math.min(innerWidth,(screen.availLeft||0)+screen.availWidth-screenX),left:Math.max(0,(screen.availLeft||0)-screenX)})')
+        self.assertGreaterEqual(box['x'], monitor['left'])
+        self.assertLessEqual(box['x'] + box['width'], monitor['right'])
+        dialog.get_by_role('button', name='Cancel', exact=True).click()
+        samples = page.evaluate('toolFrames')
+        self.assertFalse(any(frame['stock'] for frame in samples))
+        self.assertTrue(all(frame['binding'] == 'J' for frame in samples if frame.get('binding')))
+        folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/viewer-ux-u2/screens')); folder.mkdir(parents=True, exist_ok=True)
+        (folder / 'tool-frames-and-lookup.json').write_text(json.dumps({'frames': samples, 'calls': calls}, indent=2), encoding='utf-8')
+
+    def test_shell_14_chrome_load_failure_keeps_native_image(self):
+        fixture = self.multiple('U2ASSET-' + uuid.uuid4().hex[:12], 'chrome fallback', '20260801')
+        work = self.login(); page = work.context.new_page()
+        page.route('**/viewer-ux-shell.js', lambda route: route.fulfill(status=503, body='Unavailable'))
+        page.goto(self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + fixture.uid)
+        canvas_ready(page, 1)
+        expect(page.locator('[data-cy="viewport-grid"]')).to_be_visible()
+        expect(page.locator('#root [data-cy="Zoom"]')).to_be_visible()
 
     def test_shell_00_native_runtime(self):
         fixture = self.multiple('U2-' + uuid.uuid4().hex[:16], 'current', '20260801')
@@ -308,11 +572,91 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         self.assertEqual(palette, ['rgb(33, 33, 33)', 'rgb(45, 45, 45)', 'rgb(227, 227, 227)', 'rgb(180, 180, 180)', 'rgb(138, 180, 200)'])
         self.assertEqual(direct.evaluate('getComputedStyle(document.querySelector("canvas")).filter'), 'none')
 
+    def check_delayed_identity(self, page, current, prior):
+        bar = page.get_by_role('region', name='Viewport Information')
+        expect(bar).to_contain_text(current.patient_id)
+        page.wait_for_function('() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false')
+        snapshot = """() => {
+          const id=services.viewportGridService.getActiveViewportId(),
+            viewport=services.cornerstoneViewportService.getCornerstoneViewport(id),
+            pane=document.querySelector('[data-cy="viewport-pane"]'),
+            label=pane.querySelector('.kin-viewer-info-identity'), image=viewport?.getCurrentImageId?.();
+          return {text:label.textContent,title:label.title,image,
+            displayedImage:viewport?.getCornerstoneImage?.()?.imageId,
+            imageCached:!!(image&&cornerstone.cache.getImage(image)),
+            context:KinViewerUX.viewport(id),hasCanvas:!!pane.querySelector('canvas')};
+        }"""
+        # Establish both real stacks, then evict only the inactive current
+        # study so the delayed transport cannot be bypassed by an earlier load.
+        for study, description in [(current, 'current'), (prior, 'prior')]:
+            self.drag(page, 'D03A ' + description, 0)
+            page.wait_for_function('''uid => {
+              const id=services.viewportGridService.getActiveViewportId(),
+                viewport=services.cornerstoneViewportService.getCornerstoneViewport(id);
+              return KinViewerUX.viewport(id)?.studyUid===uid &&
+                viewport?.getCornerstoneImage?.()?.imageId.includes('/studies/'+uid+'/');
+            }''', arg=study.uid)
+            if study is current:
+                current_images = page.evaluate('''() => services.cornerstoneViewportService
+                  .getCornerstoneViewport(services.viewportGridService.getActiveViewportId()).getImageIds()''')
+        target, label, date = current, 'current', '20260801'
+        page.evaluate('''images => { for (const id of images) {
+          if (cornerstone.cache.getImageLoadObject(id)) cornerstone.cache.removeImageLoadObject(id);
+        } }''', current_images)
+        before = page.evaluate(snapshot)
+        folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/viewer-ux-u2/screens'))
+        folder.mkdir(parents=True, exist_ok=True)
+        states = {'before': before}
+        def record(stage):
+            states[stage] = page.evaluate(snapshot)
+            (folder / 'delayed-identity.json').write_text(json.dumps(states, indent=2), encoding='utf-8')
+            page.screenshot(path=str(folder / ('delayed-identity-' + stage + '.png')))
+        record('before')
+        held = []
+        route_pattern = '**/dicom-web/**/frames/**'
+        page.route(route_pattern, lambda route: held.append(route))
+        try:
+            with page.expect_request(lambda request: '/dicom-web/studies/' + target.uid + '/' in request.url and '/frames/' in request.url):
+                self.drag(page, 'D03A ' + label, 0)
+            page.wait_for_function("""uid => services.cornerstoneViewportService
+              .getCornerstoneViewport(services.viewportGridService.getActiveViewportId())
+              ?.getCurrentImageId?.().includes('/studies/'+uid+'/')""", arg=target.uid)
+            page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+            record('loading')
+        finally:
+            try:
+                for route in held:
+                    route.continue_()
+            finally:
+                page.unroute(route_pattern)
+        canvas_ready(page, 1)
+        expect(bar).to_contain_text(date)
+        record('recovered')
+        # SR provenance also uses this native empty-assignment boundary.
+        page.evaluate("""() => { const grid=services.viewportGridService;
+          grid.setDisplaySetsForViewport({viewportId:grid.getActiveViewportId(),displaySetInstanceUIDs:[]}); }""")
+        page.wait_for_function("""() => !document.querySelector('[data-cy="viewport-pane"] canvas')""")
+        expect(bar).to_contain_text('Loading / No image')
+        record('empty')
+        with self.subTest(boundary='delayed-frame-identity'):
+            self.assertTrue(held, 'The real DICOM frame request must be held')
+            self.assertFalse(states['loading']['imageCached'], 'This case requires an uncached frame')
+            self.assertNotIn(date, states['loading']['text'])
+            self.assertNotIn(date, states['loading']['title'])
+            self.assertIsNone(states['loading']['context'])
+        with self.subTest(boundary='rendered-frame-recovery'):
+            self.assertEqual(states['recovered']['context']['studyUid'], target.uid)
+            self.assertIn(date, states['recovered']['title'])
+        with self.subTest(boundary='empty-viewport-identity'):
+            self.assertFalse(states['empty']['title'])
+            self.assertIsNone(states['empty']['context'])
+
     def test_shell_01_cell_study_and_metadata_retry(self):
         patient = 'U2-' + uuid.uuid4().hex[:16]
         current = self.multiple(patient, 'current', '20260801')
         prior = self.ct(patient, 'prior', '20260701')
         page = self.launch(self.login(), [current, prior])
+        self.check_delayed_identity(page, current, prior)
         self.grid(page, 2)
         self.drag(page, 'D03A current', 0)
         self.drag(page, 'D03A prior', 1)
@@ -361,7 +705,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         expect(strip.get_by_role('button', name='1/2 D03A current', exact=False)).to_be_visible()
         card = strip.get_by_role('button', name='7/7 U2 multiframe', exact=False)
         expect(card).to_be_visible()
-        page.wait_for_function('!kinViewerHistoryWorkspaceState().busy && !kinViewerJobWorkspaceState().busy')
+        page.wait_for_function('() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false')
         card.focus(); page.keyboard.press('Enter')
         page.wait_for_function('''series => {
           const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId());
@@ -379,6 +723,9 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         overflow = strip.locator('.kin-series-list').evaluate('(element) => ({content:element.scrollWidth, available:element.clientWidth})')
         self.assertGreater(overflow['content'], overflow['available'])
         card.focus()
+        # focus() on the already-focused card does not scroll it after resize.
+        # Re-enter by the reader's actual keyboard path and check reachability.
+        page.keyboard.press('Shift+Tab'); page.keyboard.press('Tab')
         expect(card).to_be_focused()
         expect(card).to_be_in_viewport()
 
@@ -389,7 +736,8 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         bar = tools.get_by_role('toolbar', name='Frequent Tools')
         zoom = bar.get_by_role('button', name='Zoom', exact=True)
         expect(zoom).to_be_enabled()
-        page.wait_for_function('!kinViewerHistoryWorkspaceState().busy && !kinViewerJobWorkspaceState().busy')
+        expect(zoom).to_have_attribute('draggable', 'true')
+        page.wait_for_function('() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false')
         active_tool = '''() => services.toolGroupService.getToolGroupForViewport(
           services.viewportGridService.getActiveViewportId()).getActivePrimaryMouseButtonTool()'''
         zoom.click()
@@ -423,6 +771,10 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         page.keyboard.press('j'); self.assertEqual(page.evaluate(active_tool), 'Zoom')
         # A real existing editor receives text and composing keys without tool changes.
         job = page.get_by_label('Job Title', exact=True)
+        job.evaluate('''element => {
+          window.typedKeys = [];
+          for (const type of ['keydown', 'keypress', 'keyup']) element.addEventListener(type, event => typedKeys.push([type, event.key]));
+        }''')
         voi = '''() => services.cornerstoneViewportService.getCornerstoneViewport(
           services.viewportGridService.getActiveViewportId()).getProperties().voiRange'''
         before_typing = page.evaluate(voi)
@@ -430,6 +782,8 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         job.dispatch_event('keydown', dict(key='p', code='KeyP', isComposing=True, bubbles=True))
         self.assertEqual(page.evaluate(active_tool), 'Zoom')
         expect(job).to_have_value('keep ps2')
+        for kind in ['keydown', 'keypress', 'keyup']:
+            self.assertIn([kind, 'p'], page.evaluate('typedKeys'))
         self.assertEqual(page.evaluate(voi), before_typing)
         layout = bar.get_by_role('button').evaluate_all('nodes => nodes.map(n => n.getAttribute("aria-label"))')
         # A separate browser context has no local storage from the first PC.
@@ -482,7 +836,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         self.assertEqual(page.evaluate(active_tool), 'Zoom')
         self.assertEqual(page.evaluate(voi), before_override)
         self.assertEqual(document_request(page, 'GET', '/api/workspace-shortcuts').json()['bindings'], bindings)
-        folder = Path(os.environ['KIN_EVIDENCE_DIR']); folder.mkdir(parents=True, exist_ok=True)
+        folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/viewer-ux-u2/screens')); folder.mkdir(parents=True, exist_ok=True)
         other.screenshot(path=str(folder / 'toolbar-roaming.png'))
 
 

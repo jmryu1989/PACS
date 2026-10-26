@@ -14,10 +14,10 @@ import { applyKeepList, blockIsBlank, citationArray, citationIdList, citationIns
   REPORT_CITATION_LIMITS, REPORT_CITATION_SCHEMA, SOURCE_UNAVAILABLE } from '../report-citation';
 import { applyStructureKeepList, isStructureEntry, projectStructure, structureApplyInput, structureArray,
   structureIdList, structureItemKey, structureSameTextCounts, structureUnion, StructureInputError, STRUCTURE_CATALOG,
-  REPORT_STRUCTURE_LIMITS, REPORT_STRUCTURE_SCHEMA, validateCatalog } from '../report-structure';
-import type { StructureTemplate } from '../report-structure';
+  REPORT_STRUCTURE_LIMITS, REPORT_STRUCTURE_SCHEMA } from '../report-structure';
 import { draftToken } from './values';
 import type { Caller, PacsAccess } from './access';
+import { reportVersionCitationsRead, reportVersionsRead } from '../emr-viewing/report-read';
 
 /**
  * **서명 순간에 새로 생기는 유일한 거절이다.**
@@ -82,27 +82,6 @@ export class PacsReportEvidence {
     // 그보다 넓어서, 그것만으로 통과시키면 읽을 수 없는 비교 검사가 인용을 통해 새어 나온다.
     private readonly findings: FindingService,
     private readonly access: PacsAccess) {}
-
-  /**
-   * 구조화 서식 목록 (P7의 주입 이음매).
-   *
-   * 제품에서는 언제나 `STRUCTURE_CATALOG`이고 그것은 **비어 있다**(P6). 시험만이 자기
-   * 인스턴스의 이 칸을 합성 목록으로 덮는다 — 환경변수도, 헤더도, 라우트도 아니다.
-   * 제품 코드나 HTTP로 합성 항목에 닿을 방법이 없어야 지어낸 임상 내용이 새지 않는다.
-   */
-  private structureCatalogValue: readonly StructureTemplate[] = STRUCTURE_CATALOG;
-  protected get structureCatalog(): readonly StructureTemplate[] { return this.structureCatalogValue; }
-  /**
-   * 목록을 갈아끼우는 **유일한 길**이고, 그 길에는 관문이 있다 (P12).
-   *
-   * 검사는 갈아끼우기 **전에** 한다. 규칙을 어긴 목록은 던지면서 지나가고, 그때 이미 서 있던
-   * 유효한 목록은 그대로 남는다 — 잘못된 배정이 멀쩡한 목록을 치우고 그 자리를 비워두는 일은
-   * 없다. 제품 인스턴스는 언제나 비어 있는 `STRUCTURE_CATALOG`으로 시작한다.
-   */
-  protected set structureCatalog(next: readonly StructureTemplate[]) {
-    validateCatalog(next);
-    this.structureCatalogValue = next;
-  }
 
   /**
    * PUT 한 번에 들어온 인용 변경을 본문과 **같은 쓰기**로 풀어낸다.
@@ -197,7 +176,7 @@ export class PacsReportEvidence {
       if (!lineBlockOccurrences(content[input.field], input.renderedText))
         throw new ConflictException({ code: 'REPORT_STRUCTURE_TEXT',
           message: '구조화 항목의 문장이 그 칸의 본문에 줄 단위로 그대로 있지 않습니다' });
-      const template = this.structureCatalog.find(t => t.templateId === input.templateId);
+      const template = STRUCTURE_CATALOG.find(t => t.templateId === input.templateId);
       const item = template?.items.find(i => i.code === input.itemCode);
       const entry = { v: REPORT_STRUCTURE_SCHEMA, sid: randomUUID(), field: input.field,
         templateId: input.templateId, templateRevision: input.templateRevision, itemCode: input.itemCode,
@@ -238,7 +217,7 @@ export class PacsReportEvidence {
     catch (e: any) { if (e instanceof StructureInputError) throw new BadRequestException(e.message); throw e; }
   }
   private structureInput(value: any) {
-    try { return structureApplyInput(value, this.structureCatalog); }
+    try { return structureApplyInput(value, STRUCTURE_CATALOG); }
     catch (e: any) { if (e instanceof StructureInputError) throw new BadRequestException(e.message); throw e; }
   }
 
@@ -342,7 +321,7 @@ export class PacsReportEvidence {
      * 발견). 이력의 조회 관문은 StudyState 행이다 — 행이 없으면 기관을 가를 수 없고, 가를 수 없으면 거절한다.
      */
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
-    this.studyAccess.assertUnsplitSource(c, uid);
+    const sourceIdentity = this.studyAccess.assertUnsplitSource(c, uid);
     // 본문을 가려놓고 이력에서 읽히면 가린 게 아니다. 같은 규칙을 여기에도 건다.
     if (!canReadPreliminary(prev, c))
       throw new ForbiddenException(
@@ -352,9 +331,12 @@ export class PacsReportEvidence {
      * 그대로 나간다 — 관문을 하나도 새로 만들지 않았는데 노출면만 넓어지는 것이다.
      * 인용은 전용 읽기 하나에서만, 소견 가독을 다시 건 뒤에 나간다.
      */
-    return this.prisma.reportVersion.findMany({ where: { uid }, orderBy: { version: 'desc' },
+    const rows = await this.prisma.reportVersion.findMany({ where: { uid }, orderBy: { version: 'desc' },
       select: { id: true, uid: true, version: true, action: true, findings: true, conclusion: true,
         recommendation: true, reason: true, author: true, at: true } });
+    // MODULE_A A2: 이 읽기가 고정한 행 전부가 열람 기록의 대상이다. 화면이 나중에 고르는 판만 기록하면 내보낸 다른 판의
+    // 열람이 기록에서 빠진다. 응답은 기록이 COMMIT된 뒤 이 행 그대로 나간다(A1 응답 경계).
+    return reportVersionsRead(uid, prev.institutionId, rows, sourceIdentity);
   }
 
   /**
@@ -493,22 +475,22 @@ export class PacsReportEvidence {
      */
     await this.studyAccess.prepare(c);
     await this.studyAccess.prepareSourceIdentity(c, [uid]);
-    return this.prisma.$transaction(async tx => {
+    const read = await this.prisma.$transaction(async tx => {
       /**
        * 관문과 판 읽기가 **한 스냅샷** 안에 있다. 밖에서 읽으면 그 사이에 예비 판독이 끼어들어
        * RS=P가 된 판을 그 관문을 거치지 않은 채 답할 수 있다.
        */
       const prev = await this.access.gate(uid, c, tx);
       if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
-      this.studyAccess.assertUnsplitSource(c, uid);
+      const sourceIdentity = this.studyAccess.assertUnsplitSource(c, uid);
       if (!canReadPreliminary(prev, c))
         throw new ForbiddenException(
           `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
       const row = await tx.reportVersion.findUnique({
         where: { uid_version: { uid, version: want } },
-        // 네 칸뿐이다. `action`·`author`·`at`·`reason`은 이력 응답의 것이고, 여기서 다시 나가면
-        // 관문을 하나도 새로 만들지 않은 채 노출면만 넓어진다.
-        select: { citations: true, findings: true, conclusion: true, recommendation: true },
+        // 내보내는 것은 아래 메타데이터뿐이다. `action`·`author`·`at`·`reason`은 이력 응답의 것이고, 여기서 다시 나가면
+        // 관문을 하나도 새로 만들지 않은 채 노출면만 넓어진다. `id`는 응답에 싣지 않고 이 판의 열람 기록 대상에만 쓴다.
+        select: { id: true, citations: true, findings: true, conclusion: true, recommendation: true },
       });
       // 없는 판을 「인용 없음」으로 답하면 그 자체가 거짓말이다.
       if (!row) throw new NotFoundException('그 판을 찾을 수 없습니다');
@@ -518,7 +500,7 @@ export class PacsReportEvidence {
       const ids = [...new Set(entries.map(entry => String(entry?.findingId ?? '')).filter(Boolean))];
       const readable = new Set<string>();
       for (const found of await this.findings.readableFindings(tx, c, uid, ids)) readable.add(String(found.id));
-      return { version: want, actor: c.actor, entries: entries.map((entry, index) => {
+      const answer = { version: want, actor: c.actor, entries: entries.map((entry, index) => {
         if (!readable.has(String(entry?.findingId ?? '')))
           return { field: entry?.field ?? null, insertedAt: entry?.insertedAt ?? null,
             insertedBy: entry?.insertedBy ?? null, state: SOURCE_UNAVAILABLE };
@@ -536,6 +518,10 @@ export class PacsReportEvidence {
             ? presenceState(lineBlockOccurrences(String((row as any)[entry.field] ?? ''), entry.insertedText), counts[index])
             : null };
       }) };
+      return { institution: prev.institutionId, sourceIdentity, stored: { id: row.id, version: want }, answer };
     }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
+    // MODULE_A A2: 같은 스냅샷이 고정한 판과 걸러진 답을 그대로 기록 대상으로 쓴다. 다시 읽지 않는다 — 다시 읽으면 기록한
+    // 판과 내보낸 판이 갈릴 수 있다. 빈 증언도 그 판을 읽은 사실이다.
+    return reportVersionCitationsRead(uid, read.institution, read.stored, read.answer, read.sourceIdentity);
   }
 }

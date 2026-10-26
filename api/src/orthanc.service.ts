@@ -1,6 +1,8 @@
 import { Injectable, ServiceUnavailableException, BadRequestException, ConflictException } from '@nestjs/common';
 import { ViewerSourceFailure, ViewerSourceUnavailable, warnViewerSource } from './viewer-source-warning';
 import { STUDY_IDENTITY_UNRESOLVED, STUDY_IDENTITY_UNRESOLVED_MESSAGE } from './study-source-groups';
+import type { ImageSource } from './emr-image/stream';
+import { verifiedManifest } from './emr-image/manifest';
 
 // A lookup key is not a DICOM conformance assertion. Preserve legacy opaque
 // keys verbatim, but exclude path/query syntax and plain-object map collisions.
@@ -47,6 +49,63 @@ export class OrthancService {
       throw new ServiceUnavailableException('ORTHANC_USER와 ORTHANC_PASS가 설정되지 않았습니다');
     }
     this.auth = 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64');
+  }
+
+  /** E's fixed-manifest source. Raw frames retain the stored transfer syntax:
+   * Orthanc's zero-based /raw endpoint bypasses decoding (Orthanc REST API).
+   * The E stream checks bytes/hash before publishing any part of the response. */
+  imageSource(): ImageSource {
+    return { copy: async (input, prepared, unit, write, signal) => {
+      const manifest = verifiedManifest(input), request = prepared.request;
+      const source = manifest.objects.find(o => o.sopInstanceUid === unit.sopInstanceUid);
+      if (prepared.manifestSha256 !== manifest.sha256 || request.studyUid !== manifest.studyUid ||
+          !prepared.units.some(u => u === unit)) throw new BadRequestException('영상 제공 범위가 일치하지 않습니다');
+      let path: string, syntax: string | null = null;
+      if (unit.part === 'object' || unit.part === 'frame') {
+        if (!source || source.unsupported) throw new BadRequestException('영상 표현 형식을 확인할 수 없습니다');
+        const matches = await this.viewerJson('/tools/lookup', source.sopInstanceUid, signal);
+        const instances = Array.isArray(matches) ? matches.filter(x => x?.Type === 'Instance') : [];
+        if (instances.length !== 1) throw new ConflictException('영상 원본이 없거나 중복입니다');
+        const id = orthancResourceId(instances[0].ID);
+        const tags = await this.viewerJson(`/instances/${id}/simplified-tags`, undefined, signal);
+        const meta = await this.viewerJson(`/instances/${id}/header`, undefined, signal);
+        syntax = meta?.['0002,0010']?.Value ?? null;
+        if (tags?.StudyInstanceUID !== manifest.studyUid || tags?.SeriesInstanceUID !== source.seriesUid ||
+            tags?.SOPInstanceUID !== source.sopInstanceUid || tags?.SOPClassUID !== source.sopClassUid ||
+            syntax !== source.transferSyntaxUid) throw new ConflictException('영상 원본 판이 변경되었습니다');
+        if (unit.part === 'frame') {
+          const count = Number(tags.NumberOfFrames ?? 1);
+          if (count !== source.declaredFrameCount || !source.frames.some(f => f.number === unit.frame))
+            throw new ConflictException('영상 프레임 구성이 변경되었습니다');
+          path = `/instances/${id}/frames/${unit.frame - 1}/raw`;
+        } else path = `/instances/${id}/file`;
+      } else {
+        // The original digest cannot attest a generated PDF/preview/metadata
+        // representation. Its owner must supply a snapshot of that exact body;
+        // fetching a mutable URL here would silently substitute a later version.
+        throw new ServiceUnavailableException('영상 표현의 고정 원본 연결이 필요합니다');
+      }
+      return this.withSourceResponse(path, { method: 'GET', redirect: 'error',
+        headers: { Authorization: this.auth, Accept: '*/*', 'Accept-Encoding': 'identity' } }, signal,
+      async (response, read, owned) => {
+        if (response.status !== 200 || !response.body) throw new ServiceUnavailableException('영상 원본을 읽지 못했습니다');
+        const reader = read();
+        for (let part = await reader.read(); !part.done; part = await reader.read()) {
+          owned.throwIfAborted(); await write(part.value);
+        }
+        owned.throwIfAborted();
+        let contentType = response.headers.get('content-type') || 'application/octet-stream';
+        if (unit.part === 'object') contentType = 'application/dicom';
+        if (unit.part === 'frame') {
+          const decoder = source.decoder;
+          const media = decoder === 'jpeg-baseline' || decoder === 'jpeg-lossless' ? 'image/jpeg' :
+            decoder === 'jpeg-ls' ? 'image/jls' : decoder === 'jpeg-2000' || decoder === 'htj2k' ? 'image/jp2' :
+              decoder === 'rle' ? 'image/dicom-rle' : 'application/octet-stream';
+          contentType = `${media}; transfer-syntax=${syntax}`;
+        }
+        return { contentType, transferSyntaxUid: syntax, source: path };
+      });
+    } };
   }
 
   /**
@@ -330,10 +389,11 @@ export class OrthancService {
    * observation and the single-UID access preparation. A normal study is a one-element array, a UID that two
    * patient resources share returns both, and no resource is []. A row naming another UID, or a malformed answer,
    * is a failed read (503) — never a smaller array. studyAccessMetadata() keeps its single-row contract.
+   * InstitutionName is not a QIDO default attribute: unnamed, every source institution would read as not observed.
    */
   async studyIdentityResources(uid: string, signal?: AbortSignal): Promise<any[]> {
     const rows = await this.viewerJson('/dicom-web/studies?StudyInstanceUID=' + encodeURIComponent(uid) +
-      '&includefield=00100020,00080020,00080061', undefined, signal);
+      '&includefield=00100020,00080020,00080061,00080080', undefined, signal);
     if (!Array.isArray(rows) || rows.some(row => !row || typeof row !== 'object' || OrthancService.tag(row, '0020000D') !== uid))
       throw new ServiceUnavailableException('원본 검사의 소속을 확인할 수 없습니다');
     return rows;

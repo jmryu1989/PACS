@@ -1,7 +1,7 @@
 window.KinViewerUXShell = (() => {
-  function mount({ services }) {
-    const css = document.createElement('link'); css.rel = 'stylesheet';
-    css.href = '/worklist/hpacs-lite/viewer-ux-theme.css'; document.head.append(css);
+  function mount({ services, session }) {
+    // The theme stylesheet is loaded once per document by the extension before
+    // this mount; the body class scopes its viewer-wide rules to the mounted shell.
     document.body.classList.add('kin-viewer-ux');
     const tabs = window.KinViewerPatientTabs;
     let actions = null, reportContext = null, reportLifecycle = null;
@@ -34,11 +34,11 @@ window.KinViewerUXShell = (() => {
         if (!admits(value) || !tabs.guard()) return false;
         const sets = displaySetInstanceUIDs.map(id => services.displaySetService.getDisplaySetByUID(id));
         if (sets.some(set => !set)) return false;
-        const response = await fetch('/api/studies', { credentials: 'same-origin' });
-        if (!response.ok) return false;
-        const data = await response.json();
-        if (!admits(value) || !tabs.guard(true) || sets.some(set =>
-          data.studies?.find(study => study.uid === set.StudyInstanceUID)?.sourcePatientKey !== value.patientKey)) return false;
+        const url = new URL('/ohif/viewer', location.origin);
+        url.searchParams.set('StudyInstanceUIDs', [...new Set(sets.map(set => set.StudyInstanceUID))].join(','));
+        let patient;
+        try { patient = await tabs.resolve(url.href); } catch (_) { return false; }
+        if (!admits(value) || !tabs.guard(true) || patient.key !== value.patientKey) return false;
         services.viewportGridService.setDisplaySetsForViewport({ viewportId: value.viewportId, displaySetInstanceUIDs });
         return true;
       },
@@ -115,9 +115,19 @@ window.KinViewerUXShell = (() => {
       open(viewportId, anchor) { const value = context(viewportId); if (value) actions?.listPriors({ ...value, anchor, openImages: actions.openImages, openReport: actions.openReport }); },
     } });
     const series = window.KinViewerSeriesStrip.mount({ services });
-    tabs.mount({ services, refreshChrome() { info.refresh(); series.refresh(); } });
+    tabs.mount({ services, session, refreshChrome() { info.refresh(); series.refresh(); } });
     const subscriptions = [];
     let frame, ended = false;
+    // The shell never resizes the rendering engine. The stock viewport observer
+    // queues its own resize for every pane whose element changes size and that
+    // queued pass re-fits the canvas and restores each camera from its
+    // presentation; a shell-driven resize(true) ran that pass synchronously at
+    // moments of its own, so whether a rebuilt MPR plane's focal point carried
+    // the presentation rounding depended on timing and a cell-merge restore
+    // returned planes the user never touched with a camera that differed in
+    // the last bit. The shell's rows and the bar take their space before the
+    // stock sizes a canvas (theme padding, reserved rows), so nothing of the
+    // shell's needs a re-fit of its own.
     function refresh() { frame = null; if (!ended) {
       if (reportContext && !admits(reportContext)) closeReport();
       actions?.refresh?.();
@@ -136,7 +146,13 @@ window.KinViewerUXShell = (() => {
     const imageEvents = [events.PRE_STACK_NEW_IMAGE, events.STACK_NEW_IMAGE, events.IMAGE_RENDERED, events.ELEMENT_ENABLED, events.ELEMENT_DISABLED].filter(Boolean);
     imageEvents.forEach(event => document.addEventListener(event, schedule, true));
     const observer = new MutationObserver(records => {
-      if (records.some(record => !record.target.closest?.('[data-kin-ux-owned]'))) schedule();
+      if (ended || !records.some(record => !record.target.closest?.('[data-kin-ux-owned]'))) return;
+      // The strip and the toolbar's reserved row go above the grid in this same
+      // microtask, as soon as the grid exists, and a pane gets its bar in the
+      // row its padding reserves: neither changes the size of a canvas the
+      // stock has already created.
+      series.place(); info.adopt();
+      schedule();
     });
     observer.observe(document.getElementById('root'), { childList: true, subtree: true });
     schedule();
@@ -145,7 +161,7 @@ window.KinViewerUXShell = (() => {
       subscriptions.forEach(subscription => subscription.unsubscribe());
       imageEvents.forEach(event => document.removeEventListener(event, schedule, true));
       stopPatient(); closeReport(); report.remove(); if (window.KinViewerUX === seam) delete window.KinViewerUX;
-      tabs.dispose(); info.dispose(); series.dispose(); css.remove(); document.body.classList.remove('kin-viewer-ux');
+      tabs.dispose(); info.dispose(); series.dispose(); document.body.classList.remove('kin-viewer-ux');
     } };
   }
   return { mount };

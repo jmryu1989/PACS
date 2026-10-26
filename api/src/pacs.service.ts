@@ -1,4 +1,7 @@
-import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, OnModuleInit, Optional } from '@nestjs/common';
+import { EMR_NATIVE_REPORT_SIGNING, NativeReportSigning } from './emr-report/native-signing';
+import { EMR_CLINICAL_ROUTES, ClinicalRoutes } from './emr-clinical/routes';
+import { PacsClinicalRoutes } from './emr-clinical/pacs-routes';
 import { EMR_RECORD_PORT, EmrRecordPort } from './emr-runtime/record-port';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
@@ -54,6 +57,7 @@ export class PacsService implements OnModuleInit {
   private readonly reportEvidenceConcern: PacsReportEvidence;
   private readonly reportDraftConcern: PacsReportDraft;
   private readonly reportCommitConcern: PacsReportCommit;
+  private readonly clinicalConcern: PacsClinicalRoutes;
 
   constructor(
     private prisma: PrismaService,
@@ -62,7 +66,9 @@ export class PacsService implements OnModuleInit {
     // 인용이 가리키는 소견의 가독은 소견 쪽 관문이 판정한다. 판독문 관문(기관·예비판독)은
     // 그보다 넓어서, 그것만으로 통과시키면 읽을 수 없는 비교 검사가 인용을 통해 새어 나온다.
     private findings: FindingService,
-    @Inject(EMR_RECORD_PORT) private readonly ledger: EmrRecordPort) {
+    @Inject(EMR_RECORD_PORT) private readonly ledger: EmrRecordPort,
+    @Optional() @Inject(EMR_NATIVE_REPORT_SIGNING) signing?: NativeReportSigning,
+    @Optional() @Inject(EMR_CLINICAL_ROUTES) clinical?: ClinicalRoutes) {
     this.accessConcern = new PacsAccess(this.prisma, this.studyAccess);
     this.institutionsConcern = new PacsInstitutions(this.prisma, this.orthanc, this.keycloak, this.studyAccess, this.accessConcern);
     this.preferencesConcern = new PacsPreferences(this.prisma);
@@ -77,7 +83,8 @@ export class PacsService implements OnModuleInit {
     this.clinicianConcern = new PacsClinician(this.prisma, this.studyAccess, this.accessConcern, this.worklistConcern);
     this.reportEvidenceConcern = new PacsReportEvidence(this.prisma, this.studyAccess, this.findings, this.accessConcern);
     this.reportDraftConcern = new PacsReportDraft(this.prisma, this.studyAccess, this.accessConcern, this.auditConcern, this.reportEvidenceConcern, this.ledger);
-    this.reportCommitConcern = new PacsReportCommit(this.keycloak, this.studyAccess, this.reportEvidenceConcern, this.reportDraftConcern);
+    this.reportCommitConcern = new PacsReportCommit(this.keycloak, this.studyAccess, this.reportEvidenceConcern, this.reportDraftConcern, signing);
+    this.clinicalConcern = new PacsClinicalRoutes(this.studyStateConcern, this.techNoteConcern, clinical);
   }
 
   // ── institutions (api/src/pacs/institutions.ts) ──
@@ -248,8 +255,8 @@ export class PacsService implements OnModuleInit {
   }
 
   // ── study-state (api/src/pacs/study-state.ts) ──
-  async patchState(uid: string, body: any, c: Caller) {
-    return this.studyStateConcern.patchState(uid, body, c);
+  async patchState(uid: string, body: any, c: Caller, request?: object) {
+    return this.clinicalConcern.patchState(uid, body, c, request);
   }
 
   async match(uid: string, oid: string, patient: any, c: Caller) {
@@ -260,17 +267,17 @@ export class PacsService implements OnModuleInit {
     return this.studyStateConcern.unmatch(uid, c);
   }
 
-  async removeState(uid: string, c: Caller) {
-    return this.studyStateConcern.removeState(uid, c);
+  async removeState(uid: string, c: Caller, request?: object) {
+    return this.clinicalConcern.removeState(uid, c, request);
   }
 
   // ── tech-note (api/src/pacs/tech-note.ts) ──
-  async techNote(uid: string, c: Caller, before?: string) {
-    return this.techNoteConcern.techNote(uid, c, before);
+  async techNote(uid: string, c: Caller, before?: string, request?: object) {
+    return this.clinicalConcern.techNote(uid, c, before, request);
   }
 
-  async saveTechNote(uid: string, body: any, c: Caller) {
-    return this.techNoteConcern.saveTechNote(uid, body, c);
+  async saveTechNote(uid: string, body: any, c: Caller, request: object) {
+    return this.clinicalConcern.saveTechNote(uid, body, c, request);
   }
 
   // ── hold (api/src/pacs/hold.ts) ──
@@ -346,7 +353,7 @@ export class PacsService implements OnModuleInit {
   }
 
   // ── report-commit (api/src/pacs/report-commit.ts) ──
-  async commitReport(uid: string, body: any, c: Caller, session: string | null) {
-    return this.reportCommitConcern.commitReport(uid, body, c, session);
+  async commitReport(uid: string, body: any, c: Caller, session: string | null, facts: DraftRequestFacts) {
+    return this.reportCommitConcern.commitReport(uid, body, c, session, facts);
   }
 }

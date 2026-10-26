@@ -905,13 +905,21 @@ if (process.argv.includes('--emr-inventory-generator')) {
       event.surface = Object.keys(R.ROUTE_CONTRACTS).find(r => R.ROUTE_CONTRACTS[r].kinds.includes(kind)) ||
         Object.keys(R.EXTERNAL_SURFACES).find(r => R.EXTERNAL_SURFACES[r].includes(kind));
       for (const field of ['patientLinkSnapshot', 'studyId', 'recordId', 'versionId']) event.targets[0][field] = { status: 'not-applicable', reason: 'non-record-target' };
-      if (['preferences', 'reading-template', 'institution', 'identity-access', 'authentication-session', 'system-operation'].includes(kind))
+      if (['preferences', 'reading-template', 'institution', 'identity-access', 'authentication-session', 'system-operation', 'assignment'].includes(kind))
         assert(A.parseAccessEvent(event, [stored(kind, 'non-record', 'setting-v1', t0)]));
       else assert.throws(() => A.parseAccessEvent(event), kind);
     }
     const event = access(); event.targets[0].patientLinkSnapshot = { status: 'not-applicable', reason: 'I cannot find the patient' };
     assert.throws(() => A.parseAccessEvent(event));
     assert.deepEqual(A.parseAccessEvent(access({ targets: [] })).targets, []);
+  });
+  test('ACCESS-REVIEW: patientless audit rows retain their own identity on the admin report', () => {
+    const na = { status: 'not-applicable', reason: 'non-record-target' };
+    const target = { kind: 'access-audit', recordId: known('audit-entry-1'), patientLinkSnapshot: na, studyId: na, versionId: na };
+    const event = access({ surface: 'GET admin/audit', targets: [target] });
+    assert.deepEqual(A.parseAccessEvent(event).targets, [target]);
+    assert.throws(() => A.parseAccessEvent({ ...event, targets: [{ ...target, recordId: na }] }));
+    assert.throws(() => A.parseAccessEvent({ ...event, surface: 'GET audit' }));
   });
   test('TEST-EMR-07-A P09-success-with-unresolved-proxy-ip: B2 v2 records observed location or leaves it unknown', () => {
     assert(A.parseAccessEvent(access()));

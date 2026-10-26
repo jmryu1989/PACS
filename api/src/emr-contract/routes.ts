@@ -19,6 +19,16 @@ export interface RouteContract {
  * Connect transfer routes manage requests/bases; actual delivery belongs to EXTERNAL_SURFACES.
  */
 const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
+  { kinds: ['identity-access'], operation: 'write', causes: ['user-view'],
+    routes: ['POST emr-audit/roster/:grantId'] },
+  { kinds: ['access-audit'], operation: 'read', causes: ['user-view'],
+    routes: ['POST emr-audit/investigations', 'POST emr-audit/exports'] },
+  { kinds: ['disclosure'], operation: 'write', causes: ['user-view'],
+    routes: ['POST emr-audit/requests', 'POST emr-audit/issuances', 'POST emr-audit/issuances/:id/issue', 'POST emr-audit/issuances/:id/delivery',
+      'POST emr-audit/requests/:id/extend', 'POST emr-audit/requests/:id/resolve'] },
+  { kinds: ['disclosure'], operation: 'read', causes: ['user-view'], routes: ['GET emr-audit/requests/:id'] },
+  { kinds: ['image', 'external-sr-seg', 'pdf', 'thumbnail', 'download', 'study-metadata'], operation: 'read', causes: ['user-view', 'background-fetch'],
+    routes: ['GET images/dicom-web', 'HEAD images/dicom-web'] },
   { kinds: ['system-operation'], operation: 'read', causes: ['user-view', 'service-job'],
     routes: ['GET health'] },
   { kinds: ['system-operation'], operation: 'read', causes: ['user-view', 'background-fetch'],
@@ -178,8 +188,13 @@ export function classifyRoute(route: string): readonly RecordKind[] {
  * the member it affects; its events carry `not-applicable: in-process-service` instead of an invented client address.
  * Closed: a new background job adds its own entry here with the records it touches. */
 export const INTERNAL_SURFACES: Readonly<Record<string, RouteContract>> = freeze({
+  'server:doctor-key-management': { kinds: ['identity-access'], operation: 'write', causes: ['user-view'] },
   'service:auth-session-sweep': { kinds: ['authentication-session'], operation: 'auth', causes: ['service-job'] },
   'service:member-rights-import': { kinds: ['identity-access'], operation: 'write', causes: ['service-job'] },
+  // S7-U3a / D1860: the receiving institution's reader allocation closes inside the member's PATCH/DELETE studies/:uid.
+  // That close is the server's own allocation operation, not a record act of the study route: the study routes serve
+  // record kinds, and a route that mixed them with the non-record allocation would demand a served-record manifest.
+  'server:reader-assignment-close': { kinds: ['assignment'], operation: 'write', causes: ['user-view'] },
 });
 for (const surface of Object.keys(INTERNAL_SURFACES)) {
   if (Object.prototype.hasOwnProperty.call(ROUTE_CONTRACTS, surface)) throw new Error('Internal surface shadows an HTTP route');

@@ -119,6 +119,11 @@ class ReturnToCurrentE2E(previous.RelatedContextE2E):
         self.select(page, current); expect(page.locator("#related-return")).to_be_disabled()
         self.related(page, related).click()
         expect(page.locator("#prior-findings")).to_have_text(related.secret)
+        # W5: the row click opened Related Report mode; Back to Current Draft gives the editor back while the Related study
+        # stays viewed beside it (the return below is still the separate viewing action).
+        page.locator("#related-mode-back").click()
+        expect(page.locator("#findings")).to_be_editable()
+        expect(page.locator("#prior-findings")).to_have_text(related.secret)
         values = dict(findings="D03C newly typed findings", conclusion="D03C newly typed conclusion",
                       recommendation="D03C newly typed recommendation")
         # Setup, not a user path (W6R2-02): dirty three-field data, the hidden Recommendation filled directly.
@@ -142,6 +147,9 @@ class ReturnToCurrentE2E(previous.RelatedContextE2E):
         for table in ("Report","ReportVersion"):self.assertEqual(after[table], rows[current.uid][table])
         for row in after["ReportDraft"]:
             saved = json.loads(row)
+            # W5-API (#182) keeps a revision row for an absent draft (present false, no text); only a stored draft holds text.
+            if saved.get("present") is False:
+                continue
             for name,value in values.items():self.assertEqual(saved[name],value)
         self.assertEqual(self.report_rows(related),rows[related.uid])
         page.set_viewport_size(dict(width=900,height=1200))

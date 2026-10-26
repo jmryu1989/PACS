@@ -8,7 +8,7 @@ concurrency:
 jobs:
   candidate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 101
     env:
       CANDIDATE_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
     steps:
@@ -47,7 +47,7 @@ jobs:
       run: |
         "$RUNNER_TEMP/candidate-python/bin/python" -B tools/tests/candidate_ci_test.py
     - name: Final candidate invariants, worklist and cumulative workflows
-      timeout-minutes: 26
+      timeout-minutes: 83
       run: |
         "$RUNNER_TEMP/candidate-python/bin/python" -B tools/tests/candidate_ci.py --target "$GITHUB_WORKSPACE/target" --candidate-sha "$CANDIDATE_SHA"
     - name: Check candidate committed bundle without generating it

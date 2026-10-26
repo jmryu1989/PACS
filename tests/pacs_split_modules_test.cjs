@@ -1,11 +1,12 @@
 'use strict';
+const nativeSigning = { sign: async () => ({ fixture: 'native-signature' }) };
 
 // B2 consumer fixture only: these existing pure suites exercise business/CAS rules.
 // Real ledger atomicity and HTTP publication are tested against PostgreSQL.
-const B2_REQUEST_FACTS = { issuer: 'https://synthetic.invalid', ip: null, requestId: 'synthetic-request' };
+const {withDraftRequestContext} = require('./emr/request/consumer_fixture.cjs');
 function b2Ledger(prisma) {
   return { begin: () => ({
-    resolveRequestIdentity: async () => 'synthetic-member',
+    resolveRequestIdentity: async () => '00000000-0000-4000-8000-000000000001',
     transactionWithRecords: (work, options) => prisma.$transaction(tx => work(tx, async (_event, effect) => effect()), options),
     end() {},
   }) };
@@ -282,6 +283,7 @@ function studyAccessDouble() {
     assertUnsplitSource(c, uid) {
       sa.calls.push(['source:assert', uid]);
       if (sa.split.has(uid)) throw new ConflictException({ code: 'STUDY_IDENTITY_UNRESOLVED', message: 'synthetic split' });
+      return { sourcePatientId: null, sourceInstitution: null };
     },
   };
   return sa;
@@ -330,12 +332,19 @@ function world() {
   const hold = new PacsHold(prisma, sa, access);
   const clinician = new PacsClinician(prisma, sa, access, worklist);
   const evidence = new PacsReportEvidence(prisma, sa, findings, access);
-  const draft = new PacsReportDraft(prisma, sa, access, audit, evidence, b2Ledger(prisma));
-  const commit = new PacsReportCommit(keycloak, sa, evidence, draft);
+  const draft = withDraftRequestContext(new PacsReportDraft(prisma, sa, access, audit, evidence, b2Ledger(prisma)), b2Ledger(prisma));
+  const commit = withDraftRequestContext(new PacsReportCommit(keycloak, sa, evidence, draft, nativeSigning), b2Ledger(prisma));
+  const clinical = {
+    read: (_request, _kind, _id, read) => prisma.$transaction(read),
+    write: async (_request, _input, write) => ({ ...await prisma.$transaction(write), emr: { replayed: false } }),
+    workflow: (_request, execute) => prisma.$transaction(tx => execute({ tx,
+      closeAssignment: async () => {} })),
+  };
   const w = { db, sa, orthanc, keycloak, findings, access, institutions, preferences, filters, audit, metrics, worklist, gateway,
     studyState, techNote, hold, clinician, evidence, draft, commit };
   /** The PacsService facade over the same providers: it builds and owns its own concern graph. */
-  w.facade = () => new PacsService(prisma, orthanc, keycloak, sa, findings, b2Ledger(prisma));
+  w.facade = () => withDraftRequestContext(new PacsService(prisma, orthanc, keycloak, sa, findings, b2Ledger(prisma), nativeSigning, clinical), b2Ledger(prisma));
+  w.workflow = execute => clinical.workflow({}, execute);
   w.study = (fields = {}) => db.seed('studyState', { uid: uidOf(), institutionId: INST_A, ss: 'Verified', ...fields });
   w.audits = (action) => db.rows('auditLog').filter(row => !action || row.action === action);
   /** Starts the institutions concern as the facade's onModuleInit does: two synthetic institutions beside the seeds. */
@@ -376,10 +385,10 @@ test('SPLIT-01 every concern is built from references alone: constructing touche
   const audit = new PacsAudit(prisma, sa, access);
   const worklist = new PacsWorklist(prisma, orthanc, sa, access, institutions, preferences, audit);
   const evidence = new PacsReportEvidence(prisma, sa, findings, access);
-  const draft = new PacsReportDraft(prisma, sa, access, audit, evidence, b2Ledger(prisma));
+  const draft = withDraftRequestContext(new PacsReportDraft(prisma, sa, access, audit, evidence, b2Ledger(prisma)), b2Ledger(prisma));
   new PacsFilters(prisma); new PacsMetrics(prisma, orthanc, sa, access); new PacsDicomGateway(prisma, orthanc, sa, access, institutions);
   new PacsStudyState(prisma, sa, access, institutions, audit); new PacsTechNote(prisma, sa, access); new PacsHold(prisma, sa, access);
-  new PacsClinician(prisma, sa, access, worklist); new PacsReportCommit(keycloak, sa, evidence, draft);
+  new PacsClinician(prisma, sa, access, worklist); new PacsReportCommit(keycloak, sa, evidence, draft, nativeSigning);
   assert.deepEqual(touched, []);
   assert.equal(process.getActiveResourcesInfo().filter(kind => kind === 'Timeout').length, timers);
   // the institution cache is empty until the facade's onModuleInit starts it
@@ -483,7 +492,7 @@ test('SPLIT-06 PATCH refuses report-owned fields without writing anything; techn
   assert.equal(out.teleInstitutionId, INST_B);
   w.db.seed('readerAssignment', { studyUid: s.uid, institutionId: INST_B, revision: 1, readerSub: RAD_B.sub, readerActor: RAD_B.actor, readerName: 'B' });
   await refused(() => w.studyState.patchState(s.uid, { ts: 'wait', teleTo: 'nowhere' }, RAD_A), 400);
-  const cancelled = await w.studyState.patchState(s.uid, { ts: 'cancelled' }, RAD_A);
+  const cancelled = await w.workflow(workflow => w.studyState.patchState(s.uid, { ts: 'cancelled' }, RAD_A, workflow));
   assert.equal(cancelled.teleInstitutionId, null);
   const assignment = w.db.rows('readerAssignment')[0];
   assert.ok(assignment.closedAt instanceof Date);
@@ -550,32 +559,32 @@ test('SPLIT-09 a draft write is kept only on the boundary it saw, under a live s
   w.db.seed('authSession', { sid: 'sid-a', sub: RAD_A.sub });
   const epoch = s.draftEpoch;
   const mine = () => w.db.rows('reportDraft').find(r => r.uid === s.uid && r.author === RAD_A.actor);
-  const first = await w.draft.putReport(s.uid, draftBody(RAD_A, epoch, 0, { findings: 'kept text' }), RAD_A, 'sid-a', B2_REQUEST_FACTS);
+  const first = await w.draft.putReport(s.uid, draftBody(RAD_A, epoch, 0, { findings: 'kept text' }), RAD_A, 'sid-a');
   assert.deepEqual([first.revision, first.present, first.snapshot.findings], [`${epoch}:1`, true, 'kept text']);
   assert.deepEqual(w.audits().map(a => a.action), ['report.draft']);
   assert.deepEqual(w.db.writesBy('root'), [], 'the draft and its audit row went through the transaction');
 
   // a late write that saw revision 0, a write on another epoch, a write for another owner: refused, nothing changes
-  await refused(() => w.draft.putReport(s.uid, draftBody(RAD_A, epoch, 0, { findings: 'late' }), RAD_A, 'sid-a', B2_REQUEST_FACTS), 409, 'REPORT_DRAFT_CONFLICT');
-  await refused(() => w.draft.putReport(s.uid, draftBody(RAD_A, randomUUID(), 1, { findings: 'old epoch' }), RAD_A, 'sid-a', B2_REQUEST_FACTS), 409, 'REPORT_DRAFT_CONFLICT');
-  await refused(() => w.draft.putReport(s.uid, { ...draftBody(RAD_A, epoch, 1, { findings: 'x' }), expectedOwner: ownerOf(RAD_A2) }, RAD_A, 'sid-a', B2_REQUEST_FACTS), 409, 'REPORT_DRAFT_OWNER_CHANGED');
+  await refused(() => w.draft.putReport(s.uid, draftBody(RAD_A, epoch, 0, { findings: 'late' }), RAD_A, 'sid-a'), 409, 'REPORT_DRAFT_CONFLICT');
+  await refused(() => w.draft.putReport(s.uid, draftBody(RAD_A, randomUUID(), 1, { findings: 'old epoch' }), RAD_A, 'sid-a'), 409, 'REPORT_DRAFT_CONFLICT');
+  await refused(() => w.draft.putReport(s.uid, { ...draftBody(RAD_A, epoch, 1, { findings: 'x' }), expectedOwner: ownerOf(RAD_A2) }, RAD_A, 'sid-a'), 409, 'REPORT_DRAFT_OWNER_CHANGED');
   // an ended session writes nothing
-  await refused(() => w.draft.putReport(s.uid, draftBody(RAD_A, epoch, 1, { findings: 'after logout' }), RAD_A, 'sid-ended', B2_REQUEST_FACTS), 401, 'AUTH_SESSION_ENDED');
+  await refused(() => w.draft.putReport(s.uid, draftBody(RAD_A, epoch, 1, { findings: 'after logout' }), RAD_A, 'sid-ended'), 401, 'AUTH_SESSION_ENDED');
   // a failing audit row takes the draft write back with it
   const boom = new Error('audit store down');
   w.db.faults.push({ model: 'auditLog', op: 'create', client: 'tx', error: boom });
-  await assert.rejects(() => w.draft.putReport(s.uid, draftBody(RAD_A, epoch, 1, { findings: 'lost?' }), RAD_A, 'sid-a', B2_REQUEST_FACTS), error => error === boom);
+  await assert.rejects(() => w.draft.putReport(s.uid, draftBody(RAD_A, epoch, 1, { findings: 'lost?' }), RAD_A, 'sid-a'), error => error === boom);
   assert.deepEqual([mine().revision, mine().findings, mine().present], [1, 'kept text', true]);
   assert.deepEqual(w.audits().map(a => a.action), ['report.draft']);
   assert.deepEqual(w.db.writesBy('root'), []);
 
   // another radiologist's draft is a row of its own; neither answer carries the other's text
-  const other = await w.draft.putReport(s.uid, draftBody(RAD_A2, epoch, 0, { findings: 'other text' }), RAD_A2, null, B2_REQUEST_FACTS);
+  const other = await w.draft.putReport(s.uid, draftBody(RAD_A2, epoch, 0, { findings: 'other text' }), RAD_A2, null);
   assert.equal(other.snapshot.findings, 'other text');
-  const read = await w.draft.readDraft(s.uid, RAD_A, B2_REQUEST_FACTS);
+  const read = await w.draft.readDraft(s.uid, RAD_A);
   assert.deepEqual([read.revision, read.snapshot.findings], [`${epoch}:1`, 'kept text']);
   // the boundary moves on: a write on revision 1 is kept and a discard clears the row but keeps its revision
-  const second = await w.draft.putReport(s.uid, draftBody(RAD_A, epoch, 1, { findings: 'second' }), RAD_A, 'sid-a', B2_REQUEST_FACTS);
+  const second = await w.draft.putReport(s.uid, draftBody(RAD_A, epoch, 1, { findings: 'second' }), RAD_A, 'sid-a');
   assert.equal(second.revision, `${epoch}:2`);
   const discarded = await w.draft.discardDraft(s.uid, { expectedOwner: ownerOf(RAD_A), expectedRevision: `${epoch}:2` }, RAD_A, 'sid-a');
   assert.deepEqual([discarded.revision, discarded.present, discarded.state.draft], [`${epoch}:3`, false, null]);
@@ -701,7 +710,7 @@ test('SPLIT-14 a citation is shown only while its finding is readable; a databas
   assert.equal(read.head[0].insertedText, 'line one');
   assert.deepEqual(read.head[1], { cid: 'c-2', field: 'findings', insertedAt: '2026-10-01T00:00:00.000Z', insertedBy: RAD_A.actor, state: 'source-unavailable' });
   w.findings.readable.clear();
-  const past = await w.evidence.reportVersionCitations(s.uid, '1', RAD_A);
+  const past = JSON.parse((await w.evidence.reportVersionCitations(s.uid, '1', RAD_A)).json);
   assert.ok(past.entries.every(e => e.state === 'source-unavailable' && !('presence' in e)));
 
   const check = name => Object.assign(new Error('violates check constraint'), { code: 'P2010', meta: { constraint: name } });
@@ -712,21 +721,21 @@ test('SPLIT-14 a citation is shown only while its finding is readable; a databas
   assert.equal(await w.evidence.reportLimitChecked(async () => 'ok'), 'ok');
 });
 
-// ── SPLIT-15 the structure catalog gate (M18) ──
+// ── SPLIT-15 the product catalog at the report boundary ──
 
-test('SPLIT-15 the structure catalog is replaced only by a list that passes the gate; a refused list leaves the previous one standing', () => {
-  const w = world();
-  // The catalog's own replacement path (P7/P12) is the protected accessor; a subclass reaches it as the product's tests do.
-  class Seam extends PacsReportEvidence { set(next) { this.structureCatalog = next; } get current() { return this.structureCatalog; } }
-  const seam = new Seam(w.db.root, w.sa, w.findings, w.access);
-  assert.equal(seam.current, STRUCTURE_CATALOG);
-  const broken = [STRUCTURE_CATALOG[0], STRUCTURE_CATALOG[0]];   // the same templateId twice
-  assert.throws(() => seam.set(broken));
-  assert.equal(seam.current, STRUCTURE_CATALOG);
-  seam.set([]);
-  assert.deepEqual(seam.current, []);
-  assert.throws(() => seam.set(broken));
-  assert.deepEqual(seam.current, []);
+test('SPLIT-15 a report draft accepts the shipped catalog and rejects an unknown item without writing', async () => {
+  const w = world(), uid = uidOf();
+  const item = STRUCTURE_CATALOG[0].items.find(i => i.code === 'TECHNIQUE');
+  const request = { op: 'apply', field: item.field, templateId: STRUCTURE_CATALOG[0].templateId,
+    templateRevision: STRUCTURE_CATALOG[0].revision, itemCode: item.code, valueType: item.valueType,
+    value: 'SYN technique', renderedText: 'Technique: SYN technique' };
+  const result = await w.evidence.draftStructure(w.db.root, uid, null, { structure: request, structureIds: [] },
+    { findings: request.renderedText }, RAD_A, 0);
+  assert.equal(result.entries[0].value, 'SYN technique');
+  assert.equal(result.entries[0].renderedText, request.renderedText);
+  await assert.rejects(() => w.evidence.draftStructure(w.db.root, uid, null,
+    { structure: { ...request, itemCode: 'UNKNOWN' }, structureIds: [] }, { findings: request.renderedText }, RAD_A, 0),
+    error => error.getStatus() === 400);
 });
 
 // ── SPLIT-16 clinician reads ──
@@ -876,10 +885,10 @@ test('SPLIT-22 the facade starts its institutions concern and each public call a
   assert.deepEqual(await facade.hold(s.uid, RAD_A), { holder: RAD_A.actor, mine: true, conflict: false });
   const saved = await facade.commitReport(s.uid, commitBody(RAD_A, 'save', s.draftEpoch, 0, 0, { findings: 'via facade' }), RAD_A, null);
   assert.deepEqual([saved.state.rs, saved.state.holder], ['T', null], 'a commit releases the hold');
-  assert.deepEqual((await facade.versions(s.uid, RAD_A)).map(v => [v.version, v.action, v.findings]), [[1, 'save', 'via facade']]);
-  const draft = await facade.putReport(s.uid, draftBody(RAD_A, s.draftEpoch, 1, { findings: 'next', baseVersion: 1 }), RAD_A, null, B2_REQUEST_FACTS);
+  assert.deepEqual(JSON.parse((await facade.versions(s.uid, RAD_A)).json).map(v => [v.version, v.action, v.findings]), [[1, 'save', 'via facade']]);
+  const draft = await facade.putReport(s.uid, draftBody(RAD_A, s.draftEpoch, 1, { findings: 'next', baseVersion: 1 }), RAD_A, null);
   assert.equal(draft.revision, `${s.draftEpoch}:2`);
-  assert.equal((await facade.readDraft(s.uid, RAD_A, B2_REQUEST_FACTS)).snapshot.findings, 'next');
+  assert.equal((await facade.readDraft(s.uid, RAD_A)).snapshot.findings, 'next');
   assert.equal((await facade.saveTechNote(s.uid, { baseVersion: 0, text: 'facade note', reason: '', attemptId: randomUUID() }, TECH_A)).note.version, 1);
   assert.equal(await facade.clinicianViewerHead(s.uid, CLIN_A), null, 'a saved (not approved) head is not final');
   assert.deepEqual(w.audits().map(a => a.action), ['report.hold', 'report.save', 'report.draft', 'tech-note.revise']);
@@ -892,13 +901,13 @@ test('SPLIT-23 the facade passes every refusal through unchanged: status, code, 
   const facade = w.facade(), s = w.study();
   await refused(() => facade.commitReport(s.uid, commitBody(TECH_A, 'save', s.draftEpoch, 0, 0), TECH_A, null), 403);
   await refused(() => facade.patchState(s.uid, { rs: 'A' }, TECH_A), 400);
-  await refused(() => facade.putReport(s.uid, draftBody(RAD_A, randomUUID(), 0, { findings: 'x' }), RAD_A, null, B2_REQUEST_FACTS), 409, 'REPORT_DRAFT_CONFLICT');
+  await refused(() => facade.putReport(s.uid, draftBody(RAD_A, randomUUID(), 0, { findings: 'x' }), RAD_A, null), 409, 'REPORT_DRAFT_CONFLICT');
   await refused(() => facade.audits(s.uid, 10, RAD_B), 404);
   await refused(() => facade.hold(s.uid, ADMIN_B), 404);
   await refused(() => facade.adminMetrics(RAD_A), 403);
   await refused(() => facade.announceStudy('1.2.3', '', ADMIN_A), 403);
   await refused(() => facade.clinicianStudies(RAD_A), 403);
-  await refused(() => facade.saveTechNote(s.uid, { baseVersion: 0, text: 'x', reason: '' }, RAD_A), 403);
+  await refused(() => facade.saveTechNote(s.uid, { baseVersion: 0, text: 'x', reason: '' }, RAD_A, {}), 403);
   assert.deepEqual(w.db.writes, []);
 });
 
@@ -910,18 +919,18 @@ test('SPLIT-24 a split UID is refused by every report entry with STUDY_IDENTITY_
   const facade = w.facade(), s = w.study({ em: 'E', holder: RAD_A.actor, heldAt: new Date() });
   w.sa.split.add(s.uid);
   const entries = [
-    () => facade.putReport(s.uid, draftBody(RAD_A, s.draftEpoch, 0, { findings: 'x' }), RAD_A, null, B2_REQUEST_FACTS),
+    () => facade.putReport(s.uid, draftBody(RAD_A, s.draftEpoch, 0, { findings: 'x' }), RAD_A, null),
     () => facade.discardDraft(s.uid, { expectedOwner: ownerOf(RAD_A), expectedRevision: `${s.draftEpoch}:0` }, RAD_A, null),
     () => facade.forceDiscardDrafts(s.uid, { expectedOwner: ownerOf(ADMIN_A), expectedEpoch: s.draftEpoch }, ADMIN_A, null),
     ...['save', 'approve', 'reset', 'defer'].map(action => () => facade.commitReport(s.uid, commitBody(RAD_A, action, s.draftEpoch, 0, 0, { findings: 'x', reason: 'r' }), RAD_A, null)),
-    () => facade.readDraft(s.uid, RAD_A, B2_REQUEST_FACTS), () => facade.hold(s.uid, RAD_A), () => facade.dictationGate(s.uid, RAD_A),
+    () => facade.readDraft(s.uid, RAD_A), () => facade.hold(s.uid, RAD_A), () => facade.dictationGate(s.uid, RAD_A),
     () => facade.versions(s.uid, RAD_A), () => facade.reportCitations(s.uid, RAD_A), () => facade.reportStructure(s.uid, RAD_A),
     () => facade.reportVersionCitations(s.uid, '1', RAD_A), () => facade.clinicianReportRead(s.uid, CLIN_A),
   ];
   for (const entry of entries) await refused(entry, 409, 'STUDY_IDENTITY_UNRESOLVED');
   assert.deepEqual(w.db.writes, []);
   assert.ok(w.sa.calls.some(c => c[0] === 'source' && c[1].includes(s.uid)));
-  await refused(() => facade.putReport(s.uid, draftBody(RAD_B, s.draftEpoch, 0, { findings: 'x' }), RAD_B, null, B2_REQUEST_FACTS), 404);
+  await refused(() => facade.putReport(s.uid, draftBody(RAD_B, s.draftEpoch, 0, { findings: 'x' }), RAD_B, null), 404);
   assert.deepEqual(await facade.release(s.uid, RAD_A), { ok: true });
   assert.equal(w.db.rows('studyState').find(r => r.uid === s.uid).holder, null);
 });

@@ -96,6 +96,7 @@ function contractSuite() {
       'trustedProxyIp', 'cause', 'context', 'executor', 'targets', 'action', 'result', 'requestId', 'auditLinkId', 'relatedEventId']);
     assert.deepEqual(C.canonicalPayload(v1).event, v1);
     assert.equal(C.canonicalPayload(structuredClone(v1)).contentSha256,C.canonicalPayload(v1).contentSha256);
+    assert.throws(() => A.parseAccessEvent(v1, []), 'a new served manifest must still bind every target of a previously parsed event');
     // v2 verified success and refusals.
     const login = A.parseAccessEvent(authEvent(A));
     assert.equal(login.formatVersion, 2); assert.equal(login.branch, 'online-auth'); assert.deepEqual(login.targets, []);
@@ -533,7 +534,8 @@ function contractSuite() {
     for (const kind of declaration.records.kinds_added) assert(Cl.RECORD_CLASSIFICATION[kind], kind);
     for (const kinds of Object.values(Cl.SQL_STORAGE_CLASSIFICATION)) for (const kind of kinds) assert(Cl.RECORD_CLASSIFICATION[kind], kind);
     const migrations = fs.readdirSync(path.join(api, 'prisma/migrations'), { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name).sort();
-    assert.equal(migrations.length, declaration.migrations.count); assert.equal(migrations.at(-1), declaration.migrations.added.at(-1));
+    assert.ok(migrations.includes(declaration.migrations.latest_before));
+    assert.deepEqual(migrations.slice(migrations.indexOf(declaration.migrations.latest_before) + 1), declaration.migrations.added);
     // The contract cases of this very file, collected with the installed TypeScript parser, against the declaration.
     const file = ts.createSourceFile(__filename, fs.readFileSync(__filename, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
     const collected = [];
@@ -556,7 +558,9 @@ function contractSuite() {
       for (const [name, change, expected] of [
         ['missing-owner', d => d.owned_paths['B2-replacement'].push('api/src/emr-runtime/missing.ts'), 'owned-path-missing'],
         ['doubled-owner', d => d.owned_paths['B2-replacement'].push(d.owned_paths['B2-replacement'][0]), 'owned-path-duplicated'],
-        ['dropped-migration', d => { d.migrations.count -= 1; }, 'migration-count'],
+        ['dropped-migration', d => { d.migrations.added.pop(); }, 'migration-order'],
+        ['reordered-ledger', d => { d.migrations.added.reverse(); }, 'migration-order'],
+        ['missing-baseline', d => { d.migrations.latest_before = 'missing'; }, 'migration-baseline-missing'],
         ['renamed-migration', d => { d.migrations.added = ['20261008120000_emr_b_renamed']; }, 'migration-missing'],
         ['missing-live-case', d => { d.cases.live[d.round].pop(); }, 'live-cases-differ'],
         ['extra-live-case', d => { d.cases.live[d.round].push('test_b99_undeclared'); }, 'live-cases-differ'],

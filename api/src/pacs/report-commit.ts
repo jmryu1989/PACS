@@ -5,7 +5,9 @@
 import { canReadPreliminary, designationMatches } from '../preliminary-reader';
 import { rightsAllow, lockMemberRights } from '../member-rights';
 import type { StudyAccessService } from '../study-access.service';
-import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
+import type { NativeReportSigning } from '../emr-report/native-signing';
+import { ContractError } from '../emr-contract/validation';
 import type { KeycloakService } from '../keycloak.service';
 import { applyKeepList, citationArray, citationUnion } from '../report-citation';
 import { applyStructureKeepList, commitStructureSelection, structureArray, structureUnion } from '../report-structure';
@@ -14,14 +16,15 @@ import { need, inst } from './access';
 import type { Caller } from './access';
 import { citationLimit, structureLimit, isStructureCheck, isCitationCheck } from './report-evidence';
 import type { PacsReportEvidence } from './report-evidence';
-import type { PacsReportDraft } from './report-draft';
+import type { PacsReportDraft, DraftRequestFacts } from './report-draft';
 
 export class PacsReportCommit {
   constructor(
     private readonly keycloak: KeycloakService,
     private readonly studyAccess: StudyAccessService,
     private readonly reportEvidence: PacsReportEvidence,
-    private readonly reportDraft: PacsReportDraft) {}
+    private readonly reportDraft: PacsReportDraft,
+    private readonly signing?: NativeReportSigning) {}
 
   /**
    * 판독문 확정. 내용 저장 + 버전 적립 + RS 전이를 **한 번에, 트랜잭션으로** 한다.
@@ -30,7 +33,7 @@ export class PacsReportCommit {
    * 두 요청의 도착 순서가 뒤집히면 "승인됐는데 내용은 이전 것"인 상태가 남는다.
    * 판독문과 그 판독문의 상태는 같이 움직여야 하는 하나의 사실이다.
    */
-  async commitReport(uid: string, body: any, c: Caller, session: string | null) {
+  async commitReport(uid: string, body: any, c: Caller, session: string | null, facts: DraftRequestFacts) {
     need(c.roles, 'radiologist', '판독문 확정');
     const me = inst(c);
     const action = body?.action;
@@ -66,7 +69,7 @@ export class PacsReportCommit {
           const candidates = roster.filter(user => user.id === wanted);
           candidate = candidates.length === 1 ? candidates[0] : null;
         }
-      }, async (tx, prev, audit) => {
+      }, async (tx, prev, audit, record) => {
     if (prev?.ss === 'Unverified' && prev.em !== 'E')
       throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
     const heldByOther = holdAlive(prev) && prev.holder !== c.actor ? prev.holder : null;
@@ -326,6 +329,7 @@ export class PacsReportCommit {
             reason: `판독 취소로 폐기 (취소자: ${c.actor})`,
             author: cur.updatedBy ?? c.actor,
           }});
+          await record(prev, null, 'cancel', { uid, version });
           version += 1;
         }
 
@@ -335,10 +339,22 @@ export class PacsReportCommit {
           update: { ...content, version, updatedBy: c.actor } });
         // 인용은 **`ReportVersion` 행에만** 쓴다. `Report`에는 칸이 없다 — 거울을 두면
         // 같은 사실이 두 곳에서 엇갈릴 수 있고, 그 순간 어느 쪽이 기록인지 말할 수 없다.
-        await tx.reportVersion.create({ data: {
+        const savedVersion = await tx.reportVersion.create({ data: {
           uid, version, action, ...content, citations,
           ...(structured.length ? { structured } : {}),
           reason: body.reason ?? null, author: c.actor } });
+        let signature = null;
+        // An empty reset before any report exists is only a state change. C2
+        // cancellation refers to a real previous version; never invent one.
+        if (['approve', 'addendum'].includes(action) || action === 'reset' && cur) {
+          if (!this.signing || !facts.request) throw new ServiceUnavailableException('온라인 서명 연결을 확인할 수 없습니다. 입력은 보존됩니다.');
+          try { signature = await this.signing.sign(tx, facts.request, facts.requestId, savedVersion, cur?.version ?? 0); }
+          catch (error) {
+            if (error instanceof ContractError) throw new ServiceUnavailableException({ code: error.code,
+              message: '온라인 서명을 완료하지 못했습니다. 판독 입력은 보존됩니다.' });
+            throw error;
+          }
+        }
         // 확정에 실패하면 초안도 남아야 하므로 같은 트랜잭션에서 비운다. 초안이 없던 확정도 경계를 올린다 —
         // 이 확정보다 앞서 보낸 초안 쓰기가 뒤늦게 닿아 확정 뒤에 초안을 만들지 못한다.
         const cleared = await this.reportDraft.storeDraft(tx, uid, c.actor, mine, null);
@@ -359,8 +375,10 @@ export class PacsReportCommit {
           ...(structureAudit ? { strs: structureAudit } : {}),
         });
 
-        return { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, report, c, cleared) };
-      });
+        return { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, report, c, cleared), signature };
+      }, undefined, { facts, surface: 'POST studies/:uid/report/commit',
+        action: action === 'approve' ? 'approve-sign' : action === 'addendum' ? 'addendum'
+          : action === 'reset' ? 'cancel' : 'write', target: 'report-version' });
     } catch (e: any) {
       // CHECK 백스톱도 서버 고장이 아니라 명명된 409다. 우리 제약 이름일 때만 옮긴다.
       if (isCitationCheck(e)) citationLimit();
