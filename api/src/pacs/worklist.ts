@@ -45,9 +45,13 @@ export class PacsWorklist {
   async listStudies(c: Caller, query?: any) {
     const me = inst(c);
     const access=await this.studyAccess.snapshot(c);
-    const owner = [me, c.sub, c.actor, String(access.revision), String(access.windowOpen)], page = studyPageQuery(query, owner);
+    const requested = query?.uids;
+    if (requested !== undefined && (typeof requested !== 'string' || Object.keys(query).some(key => key !== 'uids')))
+      throw new BadRequestException('검사 조회 요청 형식이 잘못되었습니다');
+    const uids = requested === undefined ? null : requested.split(',');
+    const owner = [me, c.sub, c.actor, String(access.revision), String(access.windowOpen)], page = studyPageQuery(uids ? undefined : query, owner);
     // S4-U2 asks the paged enumeration for the indexed AccessionNumber too; the full QIDO carries it already.
-    const qido = page ? await this.orthanc.studyIdentities(this.studyAccess.needsMetadata(access), true) : await this.orthanc.studies();
+    const qido = uids ? await this.orthanc.studiesByUid(uids) : page ? await this.orthanc.studyIdentities(this.studyAccess.needsMetadata(access), true) : await this.orthanc.studies();
     // S4-U1b: the server time at which this successful enumeration returned. A failed QIDO throws
     // before this line, so no response ever carries an observation time it did not make.
     const observedAt = new Date().toISOString();
@@ -61,7 +65,7 @@ export class PacsWorklist {
     const enumerated = { uid:true, institutionId:true, teleInstitutionId:true, origin:true, createdAt:true,
       rs:true, preDoc:true, preReviewer:true, preDocSub:true, preReviewerSub:true };
 
-    const states = page ? await this.prisma.studyState.findMany({ select: enumerated }) : await this.prisma.studyState.findMany();
+    const states = uids ? await this.prisma.studyState.findMany({ where: { uid: { in: uids } } }) : page ? await this.prisma.studyState.findMany({ select: enumerated }) : await this.prisma.studyState.findMany();
     const byUid = new Map(states.map(s => [s.uid, s as any]));
 
     // Both source paths carry indexed InstitutionName. Cold/unassigned rows
@@ -120,7 +124,8 @@ export class PacsWorklist {
     const window = studyPageSlice(normal, st => OrthancService.tag(st, '0020000D'), page, owner);
     const pageUids = window.rows.map(st => OrthancService.tag(st, '0020000D'));
     // The list is complete with this answer: issues travel with it, like notObserved and orderReconciliation.
-    const completes = !page || window.pagination?.next === null;
+    // A targeted viewer lookup is not an archive enumeration; it cannot declare absence or reconcile orders.
+    const completes = !uids && (!page || window.pagination?.next === null);
     const watched = completes ? [...pageUids, ...issues] : pageUids;
     // Compared with the enumeration's own rows (byUid is never replaced by later reads): the exact UID set, then
     // every access field of every row.

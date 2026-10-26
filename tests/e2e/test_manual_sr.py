@@ -106,7 +106,8 @@ class ManualSrE2E(SRProvenanceE2E):
         f = self.specimen(); original = self.hashes(); p = self.observed(f)
         self.draw_length(p);p.get_by_role('button',name='Yes',exact=True).click()
         for index, (tool, label) in enumerate([('Angle', 'Angle'), ('EllipticalROI', 'Ellipse ROI')]):
-            p.get_by_role('button', name=label, exact=True).click()
+            # The Measurements panel's own tool buttons; the U2 image toolbar carries a second "Angle".
+            p.locator('#kin-viewer-history').get_by_role('button', name=label, exact=True).click()
             box=p.locator('.cornerstone-canvas').bounding_box()
             x,y=box['x']+box['width']*.4,box['y']+box['height']*(.50+index*.18)
             p.mouse.move(x,y);p.mouse.down();p.mouse.move(x+65,y+32,steps=10);p.mouse.up()

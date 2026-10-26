@@ -30,6 +30,7 @@
     "context-loss.js",
     "mammography-hanging.js",
     "study-prefetch.js",
+    "viewer-ux.js",
     "configuration.js"
   ]
 }

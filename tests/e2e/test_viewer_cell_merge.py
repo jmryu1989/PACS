@@ -4,6 +4,7 @@ import json
 import unittest
 import uuid
 
+from viewer_tools import select_image_tool
 from playwright.sync_api import expect
 from test_display_controls import DisplayControlsE2E
 
@@ -74,8 +75,7 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         # Selected once for the whole case: the tool stays active between drawings, and
         # re-opening the split button would make the exact-text match ambiguous with the
         # toolbar button that now carries the same label.
-        page.locator('[data-cy="MeasurementTools-split-button-secondary"]').click()
-        page.get_by_text('Annotation', exact=True).click()
+        select_image_tool(page, 'ArrowAnnotate')
 
     def draw_annotation(self, page, index, label):
         box = page.locator('[data-cy=viewport-grid] > div').nth(index).locator('canvas').bounding_box()
@@ -88,7 +88,7 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
 
     def gesture_on(self, page, tool, viewport_id, dx, dy):
         # The parent helper always drags the first pane; a merged cell is addressed by id.
-        page.locator(f'[data-cy="{tool}"]').click()
+        select_image_tool(page, tool)
         box = self.pane_of(page, viewport_id)
         x, y = box['x'] + box['width'] * .5, box['y'] + box['height'] * .5
         page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x + dx, y + dy, steps=12); page.mouse.up()
@@ -155,8 +155,22 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         self.shot(page, 'cell-merge-maximize')
         self.assertEqual(rows, self.report_rows(fixture)); self.assertEqual(originals, self.originals())
 
+    def square_cells(self, page):
+        # The toolbar/series/info chrome changes the available image aspect.
+        # Start with square image cells so the injected full-height rectangle
+        # crosses the native fit axis; a wider window can preserve the scale.
+        size = page.locator('.cornerstone-canvas').first.evaluate('''canvas => ({
+          width: Math.round(innerWidth - 2 * (canvas.clientWidth - canvas.clientHeight)), height: innerHeight})''')
+        page.set_viewport_size(size)
+        self.loaded(page, 2)
+        page.wait_for_function('''() => [...services.viewportGridService.getState().viewports.keys()].every(id => {
+          const v=services.cornerstoneViewportService.getCornerstoneViewport(id);
+          return !v || v.canvas.width === Math.round(v.element.clientWidth * devicePixelRatio);
+        })''')
+
     def test_cell_merge_02_column_merge_keeps_every_source_in_its_own_rectangle(self):
         fixture, page = self.quad()
+        self.square_cells(page)
         originals = self.originals()
         before_geometry = self.geometry(page); before = self.snap(page)
         self.merge_button(page, 'merge-column').click()
@@ -251,7 +265,7 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         self.assertIn('ArrowAnnotate', tools)
         # Leave the annotation tool before selecting the other cell, so activating it cannot
         # begin a drawing, and maximize the cell that carries no measurement.
-        page.locator('[data-cy="Pan"]').click()
+        select_image_tool(page, 'Pan')
         self.choose(page, 0)
         # A drawn measurement must not block the enlargement the clinician asked for.
         self.merge_button(page, 'maximize').click()
@@ -280,6 +294,7 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
 
     def test_cell_merge_04_unloaded_cell_and_failed_layout_change_nothing(self):
         fixture, page = self.quad()
+        self.square_cells(page)
         originals = self.originals(); rows = self.report_rows(fixture)
         before_geometry = self.geometry(page); before = self.snap(page)
         # An empty cell cannot become the surviving cell of a merge.
@@ -441,7 +456,7 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         tools = self.annotation_tools(page)
         self.assertEqual([], [name for name in tools if name not in self.DRAWN_TOOLS + self.DERIVED_TOOLS])
         self.assertIn('ArrowAnnotate', tools)
-        page.locator('[data-cy="Pan"]').click()
+        select_image_tool(page, 'Pan')
         windowed = self.plane_state(page)
         self.assertNotEqual(before[anchor_index]['voiRange'], windowed[anchor_index]['voiRange'])
 
