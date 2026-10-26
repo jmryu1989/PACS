@@ -163,6 +163,7 @@ class Delivery:
         if hold is not None and hold not in self.order:
             raise ValueError(f"{hold} is not a script of this layout")
         self.pending, self.arrival, self.delivered = {}, {}, {}
+        self.inflight = []
         self.disposed = False
         self.requests = []
         self.bodies = []
@@ -182,6 +183,13 @@ class Delivery:
         return self.others(name)
 
     def _handle(self, route, request):
+        self.inflight.append(route)
+        try:
+            return self._serve(route, request)
+        finally:
+            self.inflight.remove(route)
+
+    def _serve(self, route, request):
         if self.disposed:
             try:
                 return route.abort()
