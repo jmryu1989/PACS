@@ -472,14 +472,14 @@ class WorklistE2E(unittest.TestCase):
         self.locked(first)
 
     def test_09_defer_reason_cancel_and_commit(self):
-        """E2E-B2-09: reason is mandatory, cancel is inert, H carries the reason/history."""
+        """E2E-B2-09: the reason is optional (#259 census A9), cancel is inert, H carries a given reason/history."""
         fixture = self.fixture()
         page = self.login()
         self.select(page, fixture)
         self.open_toolbar_group(page, "#b-defer")
         page.locator("#b-defer").click()
         expect(page.locator("#reasonmodal")).to_be_visible()
-        expect(page.locator("#reason-ok")).to_be_disabled()
+        expect(page.locator("#reason-ok")).to_be_enabled()
         page.locator("#reason-cancel").click()
         expect(page.locator("#reasonmodal")).to_be_hidden()
         self.assertEqual(self.state(fixture)["rs"], "W")
@@ -488,7 +488,7 @@ class WorklistE2E(unittest.TestCase):
         self.open_toolbar_group(page, "#b-defer")
         page.locator("#b-defer").click()
         page.locator("#reason-choices").get_by_text("기타", exact=True).click()
-        expect(page.locator("#reason-ok")).to_be_disabled()
+        expect(page.locator("#reason-ok")).to_be_enabled()
         page.locator("#reason-extra").fill("Public fixture prior required")
         self.commit(page, fixture, "#reason-ok", "H")
         reason = "기타 — Public fixture prior required"

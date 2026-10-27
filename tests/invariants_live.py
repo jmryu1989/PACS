@@ -3387,12 +3387,10 @@ class LiveInvariantTests(unittest.TestCase):
             korders = self.stack.request("GET", "/bootstrap", "kdoctor").body["orders"]
             self.assertEqual(next(order for order in korders if order["oid"] == koid)["matched"], "U")
 
-    def test_defer_requires_reason_and_records_unoccupied_h(self) -> None:
+    def test_defer_records_reason_and_unoccupied_h(self) -> None:
+        # #259 caution census (A9): a Defer reason is optional; a reason that is given is kept on H, its version and audit.
         with self.stack.fixture() as fixture:
             path = f"/studies/{quote(fixture.uid)}"
-            result = self.stack.request("POST", path + "/report/commit", "doctor", {"action": "defer", "reason": " "})
-            self.assert_status(result, 400)
-            self.assertEqual(result.body["message"], "보류에는 사유가 필요합니다")
             self.assert_status(self.stack.request("POST", path + "/hold", "doctor"), 201)
             result = self.stack.request("POST", path + "/report/commit", "doctor", {
                 "action": "defer", "reason": "prior 없음", "baseVersion": 0, "findings": fixture.secret,
