@@ -24,6 +24,8 @@ class CautionAppE2E(WorklistE2E):
         return [(row['id'], row.get('createdDate')) for row in rows if row.get('type') == 'password']
 
     def open_password_action(self, page, actor):
+        # Change Password is in the account menu the user's name opens beside Log out (Session details).
+        page.locator('#session-who').click()
         with page.expect_popup() as popup:
             page.get_by_role('link', name='Change Password').click()
         account = popup.value

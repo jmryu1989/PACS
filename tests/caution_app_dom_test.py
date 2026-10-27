@@ -173,7 +173,10 @@ class CautionAppDOM(unittest.TestCase):
         self.page.locator('#' + action).click()
 
     def test_password_path_and_unavailable_commands(self):
-        expect(self.page.get_by_role('link', name='Change Password')).to_have_attribute(
+        # An account action: the menu the user's name opens beside Log out (Session details) carries it.
+        self.page.locator('#session-who').click()
+        details = self.page.get_by_role('group', name='Session details')
+        expect(details.get_by_role('link', name='Change Password')).to_have_attribute(
             'href', '/api/auth/login?action=UPDATE_PASSWORD')
         for selector in ['#b-except', '#t-desc']:
             expect(self.page.locator(selector)).to_be_hidden()

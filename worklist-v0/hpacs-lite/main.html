@@ -646,6 +646,11 @@
     .session-details dt { color: var(--kin-muted); }
     .session-details dd { margin: 0 0 6px; white-space: normal; overflow-wrap: anywhere; }
     .session-details dd:last-child { margin-bottom: 0; }
+    /* 계정 동작(Change Password)은 사용자 이름 단추가 여는 이 popover에 둔다. 헤더 줄에 두면 그 폭만큼 헤더 항목이 밀리고
+       좁은 세로 창에서는 헤더가 두 줄이 되어 Study Panel이 내려갔다(D1160: 기본 배치는 round 6). 닫힌 popover는 그리지 않는다. */
+    .session-details .session-action { display: block; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--kin-line2);
+                                       color: #86bdf2; text-decoration: none; }
+    .session-details .session-action:hover { color: #c7e4ff; }
     /* G-LIVE-GEO: 판독 레이아웃의 받아쓰기 기하는 1366×768 이상에서 52px 한 줄 헤더를 전제로 한다. 헤더가 두 줄(73px)이
        되자 보고서 버튼 줄이 21px 내려가 Dictate의 중심을 소견 서랍이 덮었다(CI 측정). 줄바꿈은 좁을 때의 안전장치로만
        남기고 1366px 이상에서는 내용이 한 줄에 들어가게 한다 — 상태는 두 줄로 쌓고, 사용자·기관 문구는 위처럼 한 줄로 줄이고,
@@ -1160,7 +1165,8 @@
       <div class="mright" id="dbstat" title="앱 상태(판독문·RS·매칭)가 어디에 저장되는지">● 확인 중</div>
     </div>
     <!-- 세션 묶음은 줄지 않는 한 덩어리다. 헤더가 좁으면 앞 항목이 다음 줄로 내려가도 Log out은 화면 안에 남는다.
-         사용자·기관 문구는 헤더에서 한 줄로 줄어 보일 수 있고, 전체 문구는 이 단추가 여는 Session details에 있다. -->
+         사용자·기관 문구는 헤더에서 한 줄로 줄어 보일 수 있고, 전체 문구는 이 단추가 여는 Session details에 있다.
+         계정 동작(Change Password)도 그 안에 있어 헤더 폭을 늘리지 않는다. -->
     <div class="menubar-session" role="group" aria-label="Session">
       <button class="mright session-who" id="session-who" type="button" popovertarget="session-details">
         <span id="user"></span>
@@ -1173,11 +1179,11 @@
           <dt>Institution · Roles</dt>
           <dd id="session-details-roles" title="Keycloak 렐름 롤"></dd>
         </dl>
+        <a class="session-action" href="/api/auth/login?action=UPDATE_PASSWORD" target="_blank" rel="noopener">Change Password</a>
       </div>
       <a class="mright member-link" id="member-link" href="admin.html" style="display:none">Members</a>
       <div class="mright" title="메뉴·버튼은 영어, 설명·오류 안내는 한국어로 표시합니다.">EN</div>
-      <a class="mright" href="/api/auth/login?action=UPDATE_PASSWORD" target="_blank" rel="noopener">Change Password</a>
-      <button class="logout" id="logout" type="button">Log out</button>
+      <button class="mright logout" id="logout" type="button">Log out</button>
     </div>
   </div>
 
