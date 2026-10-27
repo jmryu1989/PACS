@@ -18,6 +18,8 @@ import { applyStructureKeepList, isStructureEntry, projectStructure, structureAp
 import { draftToken } from './values';
 import type { Caller, PacsAccess } from './access';
 import { reportVersionCitationsRead, reportVersionsRead } from '../emr-viewing/report-read';
+import { LocalReadResponse } from '../emr-viewing/local-read';
+import { consumerSource } from '../emr-viewing/consumer-read';
 
 /**
  * **서명 순간에 새로 생기는 유일한 거절이다.**
@@ -353,7 +355,7 @@ export class PacsReportEvidence {
     await this.studyAccess.prepareSourceIdentity(c, [uid]);
     const prev = await this.access.gate(uid, c);
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
-    this.studyAccess.assertUnsplitSource(c, uid);
+    const sourceIdentity = this.studyAccess.assertUnsplitSource(c, uid);
     // 본문을 가려놓고 그 증언이 읽히면 가린 게 아니다. `versions()`와 같은 규칙을 건다.
     if (!canReadPreliminary(prev, c))
       throw new ForbiddenException(
@@ -391,8 +393,12 @@ export class PacsReportEvidence {
         const counts = sameTextCounts(entries);
         return entries.map((entry, i) => projectCitation(entry, readable.has(String(entry?.findingId ?? '')), counts[i]));
       };
-      return { version: report?.version ?? 0, head: project(head), draft: project(mine),
+      const body = { version: report?.version ?? 0, head: project(head), draft: project(mine),
         draftRevision: draftToken(epoch.draftEpoch, draft?.revision ?? 0) };
+      return new LocalReadResponse(body, [
+        ...(report ? [consumerSource('report-evidence', uid, prev.institutionId, uid, report.version, ['head'], sourceIdentity)] : []),
+        ...(draft?.present ? [consumerSource('private-draft', uid, prev.institutionId, JSON.stringify([uid, c.actor]), body.draftRevision, ['draft'], sourceIdentity)] : []),
+      ]);
     }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
   }
 
@@ -414,7 +420,7 @@ export class PacsReportEvidence {
     await this.studyAccess.prepareSourceIdentity(c, [uid]);
     const prev = await this.access.gate(uid, c);
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
-    this.studyAccess.assertUnsplitSource(c, uid);
+    const sourceIdentity = this.studyAccess.assertUnsplitSource(c, uid);
     if (!canReadPreliminary(prev, c))
       throw new ForbiddenException(
         `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
@@ -437,14 +443,21 @@ export class PacsReportEvidence {
        * 그 순간 읽지 못한 건이 조용히 지워진다.
        */
       if (!head.every(isStructureEntry) || !mine.every(isStructureEntry))
-        return { version: report?.version ?? 0, unknown: true, head: null, draft: null, draftRevision };
+        return new LocalReadResponse({ version: report?.version ?? 0, unknown: true, head: null, draft: null, draftRevision }, [
+          ...(report ? [consumerSource('report-head', uid, prev.institutionId, uid, report.version, [], sourceIdentity, ['version', 'unknown'])] : []),
+          ...(stored?.present ? [consumerSource('private-draft', uid, prev.institutionId, JSON.stringify([uid, c.actor]), draftRevision, [], sourceIdentity, ['draftRevision', 'unknown'])] : []),
+        ]);
       const project = (entries: any[], body: any) => {
         const counts = structureSameTextCounts(entries);
         return entries.map((entry, i) =>
           projectStructure(entry, String(body?.[String(entry.field)] ?? ''), counts[i]));
       };
-      return { version: report?.version ?? 0, unknown: false,
+      const body = { version: report?.version ?? 0, unknown: false,
         head: project(head, report), draft: project(mine, draftRow), draftRevision };
+      return new LocalReadResponse(body, [
+        ...(report ? [consumerSource('report-evidence', uid, prev.institutionId, uid, report.version, ['head'], sourceIdentity)] : []),
+        ...(draftRow ? [consumerSource('private-draft', uid, prev.institutionId, JSON.stringify([uid, c.actor]), draftRevision, ['draft'], sourceIdentity)] : []),
+      ]);
     }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
   }
 

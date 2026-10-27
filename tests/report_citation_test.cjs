@@ -1,3 +1,5 @@
+// Read the selected wire body; HTTP/PG publication is covered by emr/a/report_reads_test.cjs.
+const readBody = value => JSON.parse(value.json);
 
 // B2 consumer fixture only: these existing pure suites exercise business/CAS rules.
 // Real ledger atomicity and HTTP publication are tested against PostgreSQL.
@@ -205,7 +207,7 @@ test('counting never edits the record: the stored bytes come back exactly as the
   assert.equal(entries[0].insertedText, LINE + '\n');
 
   const f = fixture({ versions: new Map([[4, { citations: entries }]]), draft: null });
-  const answer = await f.svc.reportCitations(UID, CALLER);
+  const answer = readBody(await f.svc.reportCitations(UID, CALLER));
   assert.equal(answer.head[0].insertedText, LINE + '\n', 'the read surface returns the attested bytes');
   assert.equal(answer.head[1].insertedText, LINE);
   assert.deepEqual(answer.head.map(e => e.sameTextCount), [2, 2]);
@@ -536,7 +538,7 @@ test('the dedicated read re-gates finding readability and reduces what it cannot
   const hiddenLineage = { ...carried('b'), findingId: '00000000-0000-4000-8000-00000000beef', insertedText: LINE };
   const f = fixture({ versions: new Map([[4, { citations: [readableEntry, hiddenLineage] }]]),
     draft: { baseVersion: 4, citations: [{ ...readableEntry, cid: 'c' }] } });
-  const answer = await f.svc.reportCitations(UID, CALLER);
+  const answer = readBody(await f.svc.reportCitations(UID, CALLER));
   assert.equal(answer.version, 4);
   assert.equal(answer.head[0].insertedText, LINE);
   // n counts the whole row, reduced entries included, or the screen would call an ambiguous
@@ -555,7 +557,7 @@ test('the over-limit state the signer has to escape from is exactly the one the 
   const head = Array.from({ length: 40 }, (_, i) => ({ ...carried('h' + i), findingId: 'head-finding-' + i }));
   const mine = Array.from({ length: 30 }, (_, i) => ({ ...carried('m' + i), findingId: 'draft-finding-' + i }));
   const f = fixture({ versions: new Map([[4, { citations: head }]]), draft: { baseVersion: 4, citations: mine }, readableAll: true });
-  const answer = await f.svc.reportCitations(UID, CALLER);
+  const answer = readBody(await f.svc.reportCitations(UID, CALLER));
   assert.equal(answer.head.length, 40);
   assert.equal(answer.draft.length, 30);
   assert.equal(answer.head.every(e => e.state === undefined), true, 'every entry stayed readable');
@@ -571,7 +573,7 @@ test('the citation read answers the report gates first', async () => {
   // The gate is the one versions() uses (contract 5-12): institution, study, preliminary - not role.
   // A technician therefore reads the head attestation, and only ever their own draft, which is none.
   const technician = fixture({ versions: new Map([[4, { citations: [carried('a')] }]]) });
-  const answer = await technician.svc.reportCitations(UID, { ...CALLER, roles: ['technician'] });
+  const answer = readBody(await technician.svc.reportCitations(UID, { ...CALLER, roles: ['technician'] }));
   assert.equal(answer.head.length, 1, 'the head attestation follows the same gate as the history');
   assert.deepEqual(answer.draft, [], 'a draft belongs to its author; no one else\'s is ever returned');
 });

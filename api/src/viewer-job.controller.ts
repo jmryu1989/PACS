@@ -10,14 +10,14 @@ export class ViewerJobController {
   constructor(private svc: ViewerJobService) {}
   @Post('studies/:uid/viewer-jobs/preview')
   @HttpCode(200)
-  preview(@Param('uid') uid: string, @Req() r: any) { return this.svc.preview(uid, r.rawBody, caller(r)); }
+  preview(@Param('uid') uid: string, @Req() r: any) { return this.svc.previewRead(uid, r.rawBody, caller(r)); }
   @Get('studies/:uid/viewer-jobs')
-  list(@Param('uid') uid: string, @Query() q: any, @Req() r: any) { return this.svc.list(uid, q, caller(r)); }
+  list(@Param('uid') uid: string, @Query() q: any, @Req() r: any) { return this.svc.listRead(uid, q, caller(r)); }
   @Post('studies/:uid/viewer-jobs')
   @HttpCode(200)
   create(@Param('uid') uid: string, @Req() r: any) { return this.svc.create(uid, r.rawBody, caller(r)); }
   @Get('studies/:uid/viewer-jobs/:id')
-  get(@Param('uid') uid: string, @Param('id') id: string, @Req() r: any) { return this.svc.get(uid, id, caller(r)); }
+  get(@Param('uid') uid: string, @Param('id') id: string, @Req() r: any) { return this.svc.getRead(uid, id, caller(r)); }
   @Post('studies/:uid/viewer-jobs/:id/revisions')
   @HttpCode(200)
   revise(@Param('uid') uid: string, @Param('id') id: string, @Req() r: any) { return this.svc.revise(uid, id, r.rawBody, caller(r)); }

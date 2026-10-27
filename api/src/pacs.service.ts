@@ -221,6 +221,10 @@ export class PacsService implements OnModuleInit {
   }
 
   // ── worklist (api/src/pacs/worklist.ts) ──
+  async readStudies(c: Caller, query?: any) {
+    return this.worklistConcern.readStudies(c, query);
+  }
+
   async listStudies(c: Caller, query?: any) {
     return this.worklistConcern.listStudies(c, query);
   }
