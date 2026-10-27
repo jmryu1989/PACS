@@ -37,6 +37,10 @@ async function writeDigestNow({ dataDir, sandbox, reason = 'manual', by = null, 
   const snapshotAt = new Date().toISOString();
   const active = new Set(activeJobs());
   const writtenAt = new Date().toISOString();
+  // One revision for the log, patch, statistics and the next boundary, taken after writtenAt: an edit commits before it
+  // logs its answer, so every answer up to writtenAt names a commit this revision contains. Edits and undos go on
+  // meanwhile; reading HEAD again later could describe a newer (or a half-done undo's) revision than the patch.
+  const head = await sandbox.publishedHead();
   const dir = path.join(dataDir, 'public', 'digests');
   fs.mkdirSync(dir, { recursive: true });
   let day = today();
@@ -48,13 +52,29 @@ async function writeDigestNow({ dataDir, sandbox, reason = 'manual', by = null, 
   const usage = readJsonl(path.join(dataDir, 'usage.jsonl')).filter(inDay);
   const records = readJsonl(path.join(dataDir, 'public', 'records.jsonl')).filter(inDay);
   const missing = readJsonl(path.join(dataDir, 'missing.jsonl')).filter(inDay);
-  const log = (await sandbox.log()).filter(c => new Date(c.time).toISOString() > since);
-  const reloads = new Map(metricsAll.filter(m => m.kind === 'reload-ready').map(m => [m.jobId, m]));
+  const history = await sandbox.log(head);
+  let log = history.filter(c => new Date(c.time).toISOString() > since);
+  let sinceLast = null;
+  if (prev.lastHead) {
+    const fresh = await sandbox.git(['rev-list', `${prev.lastHead}..${head}`]);
+    if (!fresh.code) {
+      const shas = new Set(fresh.stdout.split('\n').map(s => s.trim()).filter(Boolean));
+      log = history.filter(c => shas.has(c.sha));
+      sinceLast = await sandbox.git(['diff', '--stat', `${prev.lastHead}..${head}`]).then(r => r.stdout);
+    }
+  }
+  const reloadMetrics = metricsAll.filter(m => m.kind === 'reload-ready');
+  const reloads = new Map(reloadMetrics.map(m => [m.jobId, m]));
   const edits = metricsAll.filter(m => m.kind !== 'reload-ready');
   const answersOf = new Map();
   for (const e of chatAll) if (e.jobId && e.role !== 'user') answersOf.set(e.jobId, [...(answersOf.get(e.jobId) || []), e]);
 
-  const asked = chatAll.filter(e => e.role === 'user' && (e.t > since || carried.has(e.jobId)));
+  // An applied edit leaves the active jobs before the mirror reports ready, so a handoff can be written in between.
+  // A screen outcome that arrives after that handoff brings its request back once, marked reloadOnly: already counted
+  // there, so only the reload result (a timeout, or a ready time for the statistics) is new.
+  const readyBefore = new Set(reloadMetrics.filter(m => m.t <= since).map(m => m.jobId));
+  const lateReady = new Set(reloadMetrics.filter(m => m.t > since && !readyBefore.has(m.jobId)).map(m => m.jobId));
+  const asked = chatAll.filter(e => e.role === 'user' && (e.t > since || carried.has(e.jobId) || lateReady.has(e.jobId)));
   const requests = asked.map(u => {
     const answers = answersOf.get(u.jobId) || [];
     const last = answers[answers.length - 1] || {};
@@ -70,7 +90,7 @@ async function writeDigestNow({ dataDir, sandbox, reason = 'manual', by = null, 
         : meta.changed ? 'applied' : u.mode === 'ask' ? 'answered' : 'no-change';
     return {
       t: u.t, user: u.user, mode: u.mode, request: u.text, answer: last.text || '', jobId: u.jobId, outcome,
-      carriedFromPrevious: u.t <= since,
+      carriedFromPrevious: u.t <= since, reloadOnly: u.t <= since && !carried.has(u.jobId),
       sha: meta.sha, files: meta.files,
       totalToReloadSentMs: t.totalToReloadSentMs, claudeMs: t.claudeMs, buildMs: t.buildMs,
       lastEditToReloadSentMs: t.lastEditToReloadSentMs, reloadMs: reloadOk ? reload.reloadMs : null, reloadTimedOut,
@@ -78,6 +98,8 @@ async function writeDigestNow({ dataDir, sandbox, reason = 'manual', by = null, 
     };
   });
   const pending = requests.filter(r => r.outcome === 'pending').map(r => r.jobId);
+  const counted = requests.filter(r => !r.reloadOnly);
+  const lateReloads = requests.filter(r => r.reloadOnly);
   const applied = requests.filter(r => r.outcome === 'applied');
   const tokens = usage.reduce((acc, u) => {
     const x = u.usage || {};
@@ -88,19 +110,18 @@ async function writeDigestNow({ dataDir, sandbox, reason = 'manual', by = null, 
   }, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set() });
   const missingCount = new Map();
   for (const m of missing) { const k = `${m.method} ${m.path.replace(/\/[0-9.]{8,}(?=\/|$)/g, '/:uid')}`; missingCount.set(k, (missingCount.get(k) || 0) + 1); }
-  const patch = await sandbox.diffSinceBase();
-  const stat = await sandbox.diffStatSinceBase();
-  const head = await sandbox.head();
+  const patch = await sandbox.diffSinceBase(head);
+  const stat = await sandbox.diffStatSinceBase(head);
   const base = await sandbox.base();
   const branch = await sandbox.branch();
+  if (sinceLast === null) sinceLast = stat;
 
-  const sinceLast = prev.lastHead ? await sandbox.git(['diff', '--stat', `${prev.lastHead}..HEAD`]).then(r => r.stdout) : stat;
   const summary = {
     day, reason, by, since, writtenAt, branch, base, head, previousHead: prev.lastHead || null,
-    counts: { requests: requests.length, edits: requests.filter(r => r.mode === 'edit').length, applied: applied.length,
-      questions: requests.filter(r => r.mode === 'ask').length, pending: pending.length,
-      failed: requests.filter(r => ['failed', 'interrupted', 'login-required'].includes(r.outcome)).length,
-      reloadTimeouts: requests.filter(r => r.reloadTimedOut).length,
+    counts: { requests: counted.length, edits: counted.filter(r => r.mode === 'edit').length, applied: counted.filter(r => r.outcome === 'applied').length,
+      questions: counted.filter(r => r.mode === 'ask').length, pending: pending.length,
+      failed: counted.filter(r => ['failed', 'interrupted', 'login-required'].includes(r.outcome)).length,
+      reloadTimeouts: requests.filter(r => r.reloadTimedOut).length, lateReloads: lateReloads.length,
       reverts: log.filter(c => c.trailers['Studio-Kind'] === 'revert').length,
       disagreements: records.filter(r => r.kind === 'disagreement').length, forwarded: records.filter(r => r.kind === 'question').length },
     timing: {
@@ -120,6 +141,7 @@ async function writeDigestNow({ dataDir, sandbox, reason = 'manual', by = null, 
   lines.push(`- 요청 ${summary.counts.requests}건 (바꾸기 ${summary.counts.edits}, 적용 ${summary.counts.applied}, 물어보기 ${summary.counts.questions}, 실패·중단 ${summary.counts.failed}, 진행 중 ${summary.counts.pending}) · 되돌림 ${summary.counts.reverts} · 이견 ${summary.counts.disagreements} · 넘긴 질문 ${summary.counts.forwarded}`);
   lines.push(`- 반영 시간(마지막 수정→거울 준비) p50 ${sec(summary.timing.editToReadyP50Ms)} · p90 ${sec(summary.timing.editToReadyP90Ms)}; 요청→새로고침 신호 p50 ${sec(summary.timing.totalP50Ms)} · p90 ${sec(summary.timing.totalP90Ms)}${summary.counts.reloadTimeouts ? ` · 화면 준비 시간 초과 ${summary.counts.reloadTimeouts}건(시간 통계에서 뺌)` : ''}`);
   if (pending.length) lines.push(`- 진행 중이던 요청 ${pending.length}건은 답이 나오면 다음 인계에 다시 실립니다.`);
+  if (lateReloads.length) lines.push(`- 지난 인계 뒤에 화면 준비 결과가 도착한 요청 ${lateReloads.length}건을 표에 다시 실었습니다(요청 건수는 지난 인계에 셌음).`);
   lines.push(`- 사용량: ${summary.usage.models.join(', ') || '—'} · 입력 ${tokens.input} / 출력 ${tokens.output} / 캐시 읽기 ${tokens.cacheRead} / 캐시 쓰기 ${tokens.cacheWrite} 토큰 · CLI 환산 $${summary.usage.costUsdReportedByCli} (${summary.usage.costNote})`, '');
   lines.push('## 요청 (원문)', '', '| 시각 | 누구 | 탭 | 요청 | 결과 | 커밋 | 반영 |', '|---|---|---|---|---|---|---|');
   for (const r of requests) {
@@ -163,10 +185,13 @@ function readJsonFileSafe(file) {
 function listDigests(dataDir) {
   const dir = path.join(dataDir, 'public', 'digests');
   if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir).filter(f => f.endsWith('.md')).map(f => f.slice(0, -3)).sort().reverse();
+  // Numeric order, so "-10" comes after "-9" the same day.
+  return fs.readdirSync(dir).filter(f => f.endsWith('.md')).map(f => f.slice(0, -3))
+    .sort((a, b) => a.localeCompare(b, 'en', { numeric: true })).reverse();
 }
 
-// The names writeDigest produces ("YYYY-MM-DD", then "-2", "-3", ... the same day); the read route accepts exactly these.
-const DIGEST_ID = /^\d{4}-\d{2}-\d{2}(?:-\d{1,3})?$/;
+// The names writeDigest produces ("YYYY-MM-DD", then "-2", "-3", ... without a limit the same day); the read route
+// accepts exactly these.
+const DIGEST_ID = /^\d{4}-\d{2}-\d{2}(?:-\d+)?$/;
 
 module.exports = { writeDigest, listDigests, DIGEST_ID };

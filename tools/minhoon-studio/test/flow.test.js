@@ -8,7 +8,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { Sandbox } = require('../server/sandbox');
+const { Sandbox, ALLOWED } = require('../server/sandbox');
 const { Chat } = require('../server/chat');
 const { StatusFeed } = require('../server/status');
 const { writeDigest, listDigests, DIGEST_ID } = require('../server/digest');
@@ -197,6 +197,73 @@ test('a reload that timed out is reported as such and kept out of the ready-time
   assert.strictEqual(ok.editToReadyMs, 1500);
   assert.strictEqual(d.summary.timing.editToReadyP50Ms, 1500);
   assert.strictEqual(d.summary.counts.reloadTimeouts, 1);
+});
+
+test('a digest takes its patch, commits and next boundary from one revision while edits and undos go on', async () => {
+  const sandbox = new Sandbox({ dir: repo() });
+  await sandbox.check();
+  const data = tmp();
+  const applied = await change(sandbox, PAGE, '<p>applied</p>\n', 'applied');
+  // An ordinary edit commits just after the digest read the patch.
+  const realDiff = sandbox.diffSinceBase.bind(sandbox);
+  let next = null;
+  sandbox.diffSinceBase = async rev => {
+    const out = await realDiff(rev);
+    if (!next) next = await change(sandbox, PAGE, '<p>next committed revision</p>\n', 'next');
+    return out;
+  };
+  const first = await writeDigest({ dataDir: data, sandbox });
+  sandbox.diffSinceBase = realDiff;
+  assert.ok(next);
+  const patch = fs.readFileSync(path.join(data, 'public', 'digests', `${first.day}.patch`), 'utf8');
+  const git = (...args) => execFileSync('git', args, { cwd: sandbox.dir, encoding: 'utf8' });
+  assert.strictEqual(patch, git('diff', `studio-base..${first.summary.head}`, '--', ...ALLOWED));
+  assert.deepStrictEqual(first.summary.commits.map(c => c.sha), [first.summary.head]);
+  // The next digest starts where the first one stopped, so the commit it did not describe is reported exactly once.
+  const second = await writeDigest({ dataDir: data, sandbox });
+  assert.strictEqual(second.summary.previousHead, first.summary.head);
+  assert.deepStrictEqual([...first.summary.commits, ...second.summary.commits].map(c => c.sha).sort(), [applied.sha, next.sha].sort());
+  assert.strictEqual(second.summary.head, next.sha);
+  // A digest written while an undo is being checked (and then rolled back) describes the revision on screen.
+  let during = null;
+  const undo = await sandbox.revert({ user: 'minhoon', validate: async () => { during = await writeDigest({ dataDir: data, sandbox }); return { ok: false, errors: ['synthetic'] }; } });
+  assert.ok(undo.error);
+  assert.strictEqual(await sandbox.head(), next.sha);
+  assert.strictEqual(during.summary.head, next.sha);
+  assert.deepStrictEqual(during.summary.commits, []);
+});
+
+test('a reload outcome that arrives after the handoff is reported in the next one, once', async () => {
+  const sandbox = new Sandbox({ dir: repo() });
+  await sandbox.check();
+  const data = tmp();
+  const t = new Date(Date.now() - 1000).toISOString();
+  appendJsonl(path.join(data, 'chat.jsonl'), { t, role: 'user', user: 'minhoon', mode: 'edit', text: 'j5', jobId: 'j5' });
+  appendJsonl(path.join(data, 'chat.jsonl'), { t, role: 'assistant', mode: 'edit', text: 'ok', jobId: 'j5', meta: { changed: true, sha: 'abc' } });
+  appendJsonl(path.join(data, 'metrics.jsonl'), { t, jobId: 'j5', ok: true, changed: true, timings: { lastEditToReloadSentMs: 1000, totalToReloadSentMs: 5000 } });
+  const first = await writeDigest({ dataDir: data, sandbox });
+  assert.deepStrictEqual(first.summary.requests.map(r => [r.jobId, r.outcome, r.reloadTimedOut]), [['j5', 'applied', false]]);
+  assert.strictEqual(first.summary.counts.reloadTimeouts, 0);
+  await new Promise(r => setTimeout(r, 5));
+  appendJsonl(path.join(data, 'metrics.jsonl'), { t: new Date().toISOString(), jobId: 'j5', kind: 'reload-ready', reloadMs: 31001, readyKind: 'timeout' });
+  await new Promise(r => setTimeout(r, 5));
+  const second = await writeDigest({ dataDir: data, sandbox });
+  assert.deepStrictEqual(second.summary.requests.map(r => [r.jobId, r.reloadOnly, r.reloadTimedOut]), [['j5', true, true]]);
+  assert.strictEqual(second.summary.counts.reloadTimeouts, 1);
+  assert.strictEqual(second.summary.counts.requests, 0, 'the request itself was counted in the first handoff');
+  assert.strictEqual(second.summary.timing.editToReadyP50Ms, null);
+  const third = await writeDigest({ dataDir: data, sandbox });
+  assert.deepStrictEqual(third.summary.requests, []);
+});
+
+test('every digest name the writer can produce is accepted by the read route and listed newest first', () => {
+  const data = tmp();
+  const dir = path.join(data, 'public', 'digests');
+  fs.mkdirSync(dir, { recursive: true });
+  for (const name of ['2026-10-27', '2026-10-28', '2026-10-28-2', '2026-10-28-10', '2026-10-28-1000']) fs.writeFileSync(path.join(dir, `${name}.md`), '');
+  const names = listDigests(data);
+  assert.deepStrictEqual(names, ['2026-10-28-1000', '2026-10-28-10', '2026-10-28-2', '2026-10-28', '2026-10-27']);
+  for (const name of names) assert.match(name, DIGEST_ID);
 });
 
 test('image metadata follows a changed synthetic identity', () => {

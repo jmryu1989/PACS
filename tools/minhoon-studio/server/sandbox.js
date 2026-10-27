@@ -23,6 +23,9 @@ class Sandbox {
     this.readStale = true;
     this.readHead = null;
     this.readLock = Promise.resolve();
+    // The last revision a finished commit or undo left on the branch. An undo makes revert commits, amends the last
+    // one and may reset them all away, so HEAD in the middle of it is not a revision anyone should be handed.
+    this.published = null;
   }
 
   git(args, { cwd = this.dir, input } = {}) {
@@ -47,10 +50,12 @@ class Sandbox {
       await this.ok(['worktree', 'prune']);
       await this.ok(['worktree', 'add', '--detach', '--force', this.readDir, 'HEAD']);
     }
+    this.published = await this.head();
     await this.syncReadTree();
   }
 
   async head() { return (await this.ok(['rev-parse', 'HEAD'])).trim(); }
+  async publishedHead() { return this.published || this.head(); }
   async base() { return (await this.ok(['rev-parse', 'studio-base'])).trim(); }
   async branch() { return (await this.ok(['rev-parse', '--abbrev-ref', 'HEAD'])).trim(); }
 
@@ -93,13 +98,14 @@ class Sandbox {
       ...Object.entries(trailers).map(([k, v]) => `${k}: ${String(v).replace(/\s+/g, ' ')}`)].join('\n');
     await this.ok([...IDENTITY, 'commit', '-q', '-F', '-'], { input: message });
     const sha = await this.head();
+    this.published = sha;
     await this.syncReadTree();
     return { sha, files: changed.map(e => e.file) };
   }
 
-  // Studio commits since the base, newest first.
-  async log() {
-    const out = await this.ok(['log', '--format=%x1e%H%x1f%s%x1f%cI%x1f%b%x1f', '--name-only', 'studio-base..HEAD']);
+  // Studio commits since the base up to rev, newest first.
+  async log(rev = 'HEAD') {
+    const out = await this.ok(['log', '--format=%x1e%H%x1f%s%x1f%cI%x1f%b%x1f', '--name-only', `studio-base..${rev}`]);
     const items = [];
     for (const record of out.split('\x1e').filter(r => r.trim())) {
       const [sha, subject, time, body, files] = record.split('\x1f');
@@ -161,6 +167,7 @@ class Sandbox {
       }
     }
     const head = await this.head();
+    this.published = head;
     await this.syncReadTree();
     return { sha: head, reverted: target, undone };
   }
@@ -176,12 +183,12 @@ class Sandbox {
     return r.code ? null : r.stdout;
   }
 
-  async diffSinceBase() {
-    return this.ok(['diff', 'studio-base..HEAD', '--', ...ALLOWED]);
+  async diffSinceBase(rev = 'HEAD') {
+    return this.ok(['diff', `studio-base..${rev}`, '--', ...ALLOWED]);
   }
 
-  async diffStatSinceBase() {
-    return this.ok(['diff', '--stat', 'studio-base..HEAD', '--', ...ALLOWED]);
+  async diffStatSinceBase(rev = 'HEAD') {
+    return this.ok(['diff', '--stat', `studio-base..${rev}`, '--', ...ALLOWED]);
   }
 
   // The 물어보기 Claude reads this detached copy, so a question never reads a half-applied edit. While any question
