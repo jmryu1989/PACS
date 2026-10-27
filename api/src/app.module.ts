@@ -49,6 +49,7 @@ import { ViewerJobService } from './viewer-job.service';
 import { ConnectController } from './connect.controller';
 import { ConnectService } from './connect.service';
 import { OnlineImageService } from './emr-image/service';
+import { ImageCheckDatabase } from './emr-image/check-db';
 import { ImageContextSource, ProductionImageContext } from './emr-image/context';
 import { OrthancImageCatalog } from './emr-source/image';
 import { CURRENT_CLINICAL_CONTEXT } from './emr-clinical/startup';
@@ -72,7 +73,7 @@ import { DicomImportGateService } from './dicom-import-gate.service';
     EmrAuditService,
     ...startupClinicalProviders,
     ViewerContextEventService,
-    OnlineImageService, OrthancImageCatalog,
+    OnlineImageService, ImageCheckDatabase, OrthancImageCatalog,
     { provide: ImageContextSource, inject: [CURRENT_CLINICAL_CONTEXT, OrthancImageCatalog],
       useFactory: (clinical: ClinicalContextSource, catalog: OrthancImageCatalog) => new ProductionImageContext(clinical, catalog) },
     AsrService, StudyAccessService, PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, FindingService, ViewerJobService, ConnectService, ManualSrService, FavoriteService, StudyTagsService, ReaderAssignmentService, ConsultationService, ClinicianQuestionService, ImageRequestService, ClinicalContextService, CriticalResultService,

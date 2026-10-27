@@ -3079,6 +3079,41 @@ The deployment supplies `KIN_EMR_IMAGE_ASSET_CATALOG`: a JSON file with
 Files are relative to that inventory; the reader hashes their actual bytes. Decoder
 IDs follow the existing E transfer-syntax catalog. Missing deployment assets, external
 SR/SEG/PDF receipt evidence or processor-agreement facts remain unavailable.
-Nginx/served OHIF and derived PDF/preview/thumbnail snapshots remain unconnected.
+Derived PDF/preview/thumbnail/metadata snapshots remain unconnected.
+
+E_ROUTE puts the viewer's WADO-RS frame requests on that route. `python -B tests/proxy_image_route_test.py`
+(real nginx from PATH or `KIN_PROXY_NGINX`, as `proxy_grant_log_test.py`) checks that frame GET/HEAD reach only
+`/api/images/dicom-web?target=<normalized path>` with the session headers and the proxy's peer address, that writes
+are refused, and that metadata, rendered frames and the Gateway STOW keep authz -> Orthanc.
+`node --test tests/emr/e/manifest_reuse_test.cjs` (compiled `api/dist`) checks that one study manifest serves the
+study's frame requests and is rebuilt or forgotten when the request or source no longer matches it, and that a study
+or series request (retrieve, query, metadata) reads the catalog again so an object that arrived since is selected.
+The access record of viewing (의료법 제23조④) is the study delivery (`api/src/emr-image/delivery.ts`): one B2
+provide-prepared event per requester, session and manifest version, durable before the delivery's first response,
+closed by one terminal event after a short idle period, a bounded age, a changed current fact or shutdown; every
+response checks the requester's current access on one bounded transaction of E's own check pool (`check-db.ts`, the
+same database and role) before its first byte (a response appends nothing; the ledger's lanes carry the opening and
+closing) and keeps its
+fixed representation, transport and copy facts in `emr_image` rows naming that event and the request (`X-KIN-Image-Event`
+is the record, `X-KIN-Image-Response` the row); the source reads the study's current identity (the same read as D's
+current study: no resource, two patient resources, the one patient) and the object's current PatientID on every
+response and compares both with the manifest's, and a row the application connection refused is written as the effect
+of the delivery's terminal operation on its ledger transaction, before the terminal event, with the first failure's
+cause; a closing the ledger refuses is that operation's journaled rollback and its rows are kept for the next close or
+shutdown. `node --test tests/emr/e/delivery_test.cjs` (compiled `api/dist`) checks that lifecycle with stand-in hooks;
+`node --test tests/emr/e/service_retention_test.cjs` (compiled `api/dist`, the real ledger store's transaction path over
+a synthetic SQL port) checks the split-UID refusal, the retention before the terminal append, the journaled failed closing (also one that
+gets no ledger connection, and a failed retry, journaled against the delivery's event) with its later retention; the real-PG `stream_pg_test.cjs` case drives the service against the ledger and
+checks its events, the refused patient change and split UID, and the late-retained row.
+`python -B scripts/run-tests.py --module tests/e2e/test_image_route.py --mode live --unit e-route --timeout 1800`
+runs on the served stack: one frame through HTTPS is one recorded delivery, and the served OHIF CT series
+(`KIN_E_ROUTE_SLICES`, default 200, `KIN_E_ROUTE_MATRIX`, default 512) records every received frame once; it prints
+one `MEASURE` line (first render and all-frames time) before its assertions, so the same case times the direct
+route and the E route. A slice counts as reaching the viewer when the browser read its frame response to the end or
+the viewer holds its image: the pinned viewer's streaming loader stops reading at Content-Length, and the browser
+then sometimes cancels a response it already received whole (`net::ERR_ABORTED`, printed as `FRAME_REQUEST_FAILED`).
+A third case retrieves a series and its study through `GET /api/images/dicom-web` after a
+frame and one later arrival, and expects every stored object. It passes only with a deployed viewer/decoder asset catalog
+(`KIN_EMR_IMAGE_ASSET_CATALOG`, above).
 
 REQ-MG-LENGTH-SCALE/FRAME/READBACK → RISK-MG-WRONG-SCALE/FRAME/BASIS → TEST-MG-LENGTH-BOUNDARY: `mg_length_test.cjs` checks DBT frame/shared geometry, Synthetic 2D and FFDM spacing precedence, detector/ERMF/source-plane labels, no-spacing refusal, saved baseline and SR frame/coordinates. PixelSpacing takes precedence; otherwise projection spacing is ImagerPixelSpacing / supplied ERMF or explicitly detector-based. Source: user/Minhoon 2026-10-26; DICOM PS3.3 §10.7. Real served public-sample draw/save/reopen/SR evidence is recorded separately; pure tests do not constitute physician acceptance.

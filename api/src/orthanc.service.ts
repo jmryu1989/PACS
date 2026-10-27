@@ -1,8 +1,8 @@
-import { Injectable, ServiceUnavailableException, BadRequestException, ConflictException } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException, BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { ViewerSourceFailure, ViewerSourceUnavailable, warnViewerSource } from './viewer-source-warning';
 import { STUDY_IDENTITY_UNRESOLVED, STUDY_IDENTITY_UNRESOLVED_MESSAGE } from './study-source-groups';
 import type { ImageSource } from './emr-image/stream';
-import { verifiedManifest } from './emr-image/manifest';
+import { ImageManifest, verifiedManifest } from './emr-image/manifest';
 
 // A lookup key is not a DICOM conformance assertion. Preserve legacy opaque
 // keys verbatim, but exclude path/query syntax and plain-object map collisions.
@@ -24,6 +24,8 @@ function orthancResourceId(value: unknown): string {
 // A thin-slice series lists thousands of instances and an enhanced multi-frame header carries per-frame groups;
 // the viewer's 256 KiB bound would turn such a study into a failed read, so these reads take 16 MiB.
 const CONTEXT_READ_LIMIT = 16777216;
+/** The archive id of each object of a kept study manifest (imageSource().copy); the entry lives as long as the manifest. */
+const objectIds = new WeakMap<ImageManifest, Map<string, string>>();
 
 /**
  * Orthanc(DICOMweb) 클라이언트.
@@ -60,19 +62,47 @@ export class OrthancService {
       const source = manifest.objects.find(o => o.sopInstanceUid === unit.sopInstanceUid);
       if (prepared.manifestSha256 !== manifest.sha256 || request.studyUid !== manifest.studyUid ||
           !prepared.units.some(u => u === unit)) throw new BadRequestException('영상 제공 범위가 일치하지 않습니다');
-      let path: string, syntax: string | null = null;
+      let path: string, syntax: string | null = null, patientId: string;
       if (unit.part === 'object' || unit.part === 'frame') {
         if (!source || source.unsupported) throw new BadRequestException('영상 표현 형식을 확인할 수 없습니다');
-        const matches = await this.viewerJson('/tools/lookup', source.sopInstanceUid, signal);
-        const instances = Array.isArray(matches) ? matches.filter(x => x?.Type === 'Instance') : [];
-        if (instances.length !== 1) throw new ConflictException('영상 원본이 없거나 중복입니다');
-        const id = orthancResourceId(instances[0].ID);
-        const tags = await this.viewerJson(`/instances/${id}/simplified-tags`, undefined, signal);
-        const meta = await this.viewerJson(`/instances/${id}/header`, undefined, signal);
+        // Every response reads, together: the study's current identity (the same reader and rule as D's current-study
+        // read, studyPatientIdentity: a second patient's resource that arrived under this Study UID since the delivery
+        // opened leaves the selected object's own header unchanged, so only this read notices it; R244-GPT-01), the
+        // object's header tags and its file meta header. The object's archive id is looked up at its first response
+        // under a kept manifest and reused after: Orthanc derives it from the identifiers the header check compares on
+        // every response, so a stale id fails that check and is dropped. Read one after another, the lookup, the tags
+        // and the meta header were about 140 ms of each frame's 273 ms staging on the served VM (R244-02 profile, run
+        // e-route-diag3-fable-20261027a). None of these runs inside a ledger lane.
+        let ids = objectIds.get(manifest);
+        if (!ids) objectIds.set(manifest, ids = new Map());
+        const known = ids.get(source.sopInstanceUid);
+        const object = async () => {
+          let id = known;
+          if (!id) {
+            const matches = await this.viewerJson('/tools/lookup', source.sopInstanceUid, signal);
+            const instances = Array.isArray(matches) ? matches.filter(x => x?.Type === 'Instance') : [];
+            if (instances.length !== 1) throw new ConflictException('영상 원본이 없거나 중복입니다');
+            id = orthancResourceId(instances[0].ID);
+          }
+          try {
+            const [tags, meta] = await Promise.all([
+              this.viewerJson(`/instances/${id}/simplified-tags`, undefined, signal), this.viewerJson(`/instances/${id}/header`, undefined, signal)]);
+            return { id, tags, meta };
+          } catch (error) { if (known) ids.delete(source.sopInstanceUid); throw error; }
+        };
+        const [studyPatientId, { id, tags, meta }] = await Promise.all([this.studyPatientIdentity(manifest.studyUid, signal), object()]);
+        if (studyPatientId !== manifest.patient.patientId) throw new ConflictException('영상 원본의 환자 식별이 변경되었습니다');
         syntax = meta?.['0002,0010']?.Value ?? null;
         if (tags?.StudyInstanceUID !== manifest.studyUid || tags?.SeriesInstanceUID !== source.seriesUid ||
             tags?.SOPInstanceUID !== source.sopInstanceUid || tags?.SOPClassUID !== source.sopClassUid ||
-            syntax !== source.transferSyntaxUid) throw new ConflictException('영상 원본 판이 변경되었습니다');
+            syntax !== source.transferSyntaxUid) { ids.delete(source.sopInstanceUid); throw new ConflictException('영상 원본 판이 변경되었습니다'); }
+        ids.set(source.sopInstanceUid, id);
+        // The same header carries the object's current PatientID: a patient correction that keeps the UIDs and the
+        // pixels is refused here, before the body is read, with no further archive call (R244-GPT-01). Exact text, as
+        // D's study read compares it (no trim, no issuer: CS-02).
+        if (typeof tags?.PatientID !== 'string' || tags.PatientID !== manifest.patient.patientId)
+          throw new ConflictException('영상 원본의 환자 식별이 변경되었습니다');
+        patientId = tags.PatientID;
         if (unit.part === 'frame') {
           const count = Number(tags.NumberOfFrames ?? 1);
           if (count !== source.declaredFrameCount || !source.frames.some(f => f.number === unit.frame))
@@ -103,7 +133,7 @@ export class OrthancService {
               decoder === 'rle' ? 'image/dicom-rle' : 'application/octet-stream';
           contentType = `${media}; transfer-syntax=${syntax}`;
         }
-        return { contentType, transferSyntaxUid: syntax, source: path };
+        return { contentType, transferSyntaxUid: syntax, source: path, patientId };
       });
     } };
   }
@@ -397,6 +427,20 @@ export class OrthancService {
     if (!Array.isArray(rows) || rows.some(row => !row || typeof row !== 'object' || OrthancService.tag(row, '0020000D') !== uid))
       throw new ServiceUnavailableException('원본 검사의 소속을 확인할 수 없습니다');
     return rows;
+  }
+
+  /**
+   * The one patient the study's original resources currently name: D's current-study read (emr-clinical/startup.ts)
+   * and E's per-response source check share this rule. WORKLIST-SPLIT-UID: a UID that two patient resources share
+   * has no resolved patient; the product's own refusal answers, never an invented link. No resource is "no study".
+   */
+  async studyPatientIdentity(uid: string, signal?: AbortSignal): Promise<string> {
+    const resources = await this.studyIdentityResources(uid, signal);
+    if (!resources.length) throw new NotFoundException('검사가 없습니다.');
+    if (resources.length > 1) throw new ConflictException({ code: STUDY_IDENTITY_UNRESOLVED, message: STUDY_IDENTITY_UNRESOLVED_MESSAGE });
+    const patientId = OrthancService.tag(resources[0], '00100020');
+    if (!patientId.trim() || patientId.length > 64) throw new BadRequestException('원본 환자 식별을 확인할 수 없습니다');
+    return patientId;
   }
 
   /**
