@@ -43,6 +43,12 @@ map "$kin_grant_key:$uri" $kin_grant_outside_archive {
     "~^1:/api/studies/[0-9.]+/original-downloads/[0-9a-f-]+/archive$"  0;
     "~^1:"                                                             1;
 }
+# MG-08 IDR-03: 검사 UID 경로(/dicom-web/studies/<uid>)에서 기록 중계로 보낼 읽기 메서드. POST(STOW)는 0이다.
+map $request_method $kin_image_read_method {
+    default 0;
+    GET     1;
+    HEAD    1;
+}
 # 그 archive의 API 연결은 응답 뒤에도 nginx가 먼저 끊지 않는다(keepalive). 끊으면 API의 writer가 마지막 byte를 넘긴 뒤 자기
 # 응답을 끝내기 전에 연결이 닫혀, 끝까지 받은 다운로드가 Incomplete로 기록된다(S9-U4b (c) r2, hosted G3 dfca33a: nginx 200 전체
 # byte, API attempt aborted·responseFinished false).
@@ -275,8 +281,13 @@ server {
 
     # 검사 UID를 경로에 박은 STOW만 Gateway에 연다. UID 없는 POST는 아래 읽기 전용
     # location에 남아 403이고, API authz가 announce 선행과 기관 일치를 다시 확인한다.
+    # 같은 경로의 GET/HEAD는 검사 전체 영상 읽기다(MG-08 IDR-03): 아래 /dicom-web/ 영상 읽기와 같은 기록 중계로 보낸다.
+    # 이 정규식이 그 prefix보다 먼저 맞으므로 여기서 메서드로 나눈다. if 안에서는 return만 쓰고(rewrite 단계), 그 밖의
+    # 메서드는 limit_except가 거절한다.
     location ~ ^/dicom-web/studies/[0-9.]+$ {
         limit_except GET HEAD POST { deny all; }
+        error_page 418 = @kin_study_image_read;
+        if ($kin_image_read_method) { return 418; }
         auth_request /kin-authz;
         auth_request_set $kin_auth_code $upstream_http_x_kin_auth_code;
         proxy_pass http://orthanc:8042;
@@ -285,7 +296,9 @@ server {
 
     # 4242만 닫아도 STOW-RS가 열려 있으면 HTTPS로 영상을 쓸 수 있다.
     # 조회도 먼저 API의 토큰 검증을 통과해야 Orthanc 자격증명을 대신 붙인다.
-    location /dicom-web/ {
+    # 영상이 없는 기술(QIDO 목록·DICOMweb metadata)만 여기서 Orthanc로 간다. 같은 목록이 API의 imageRead
+    # (api/src/image-relay.controller.ts)에 있고, 이 밖의 경로가 auth_request에 오면 API가 403으로 거절한다.
+    location ~ ^/dicom-web/(studies|series|instances|studies/[0-9.]+/(series|instances|series/[0-9.]+/instances)|studies/[0-9.]+(/series/[0-9.]+(/instances/[0-9.]+)?)?/metadata)$ {
         limit_except GET HEAD { deny all; }
         auth_request /kin-authz;
         auth_request_set $kin_auth_code $upstream_http_x_kin_auth_code;
@@ -293,13 +306,29 @@ server {
         include /etc/nginx/snippets/orthanc-basic-auth.conf;
     }
 
-    # 썸네일. 읽기만 — DELETE /instances/{id}는 영상을 지운다.
+    # MG-08(D1877(2)): 영상 바이트(WADO-RS frame·rendered·thumbnail·bulk·객체 전체)는 API의 기록 중계로 간다. auth_request는
+    # 읽기를 허락할 뿐 전달을 보지 못해, 이 경로로 Orthanc가 직접 보내면 검사 열람 기록(provide-prepared → 종결)이 남지 않았다.
+    # API가 같은 DICOMweb 관문을 돌고 기록이 durable해진 뒤에만 Orthanc의 답을 그대로 흘린다. 버퍼링 없이 흘려 큰 프레임을
+    # 임시 파일에 쌓지 않는다. 위 정규식 location이 이 prefix보다 먼저 맞는다.
+    location /dicom-web/ {
+        limit_except GET HEAD { deny all; }
+        proxy_buffering off;
+        proxy_pass http://api:3000/api/image-relay/dicom-web/;
+    }
+
+    # 위 검사 UID location의 GET/HEAD. 정규식이 맞은 $uri는 숫자와 점뿐이고, query는 rewrite가 그대로 붙인다.
+    location @kin_study_image_read {
+        proxy_buffering off;
+        rewrite ^ /api/image-relay$uri break;
+        proxy_pass http://api:3000;
+    }
+
+    # 워크리스트 미리보기·썸네일(frames/N/rendered), 판독문·출력 화소(image-uint16/int16), strip preview, pdf 등 저장 객체의
+    # 모든 읽기. 같은 이유로 API의 기록 중계로 간다(태그 읽기는 기록 없이 관문만). 읽기만 — DELETE /instances/{id}는 영상을 지운다.
     location /instances/ {
         limit_except GET HEAD { deny all; }
-        auth_request /kin-authz;
-        auth_request_set $kin_auth_code $upstream_http_x_kin_auth_code;
-        proxy_pass http://orthanc:8042;
-        include /etc/nginx/snippets/orthanc-basic-auth.conf;
+        proxy_buffering off;
+        proxy_pass http://api:3000/api/image-relay/instances/;
     }
 
     location = /statistics {
