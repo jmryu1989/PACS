@@ -3208,7 +3208,7 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         spec = {"origin": "http://127.0.0.1:%d" % server.server_address[1]}
-        headers = {"Cookie": "kin_sid=still-valid", "X-KIN-CSRF": "1", "X-KIN-Session": "binding"}
+        headers = {"Cookie": "kin_sid=still-valid", "X-KIN-Session": "binding"}
         self.assertEqual(intro.session_replay(spec, headers), 200, "a session the server kept is seen as accepted")
         session = {"signed_in": True, "logout_status": 204, "old_session_status": 200, "old_cookie_status": 200}
         self.assertFalse(intro.product_logout_refused(session))

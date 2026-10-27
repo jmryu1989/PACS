@@ -89,8 +89,9 @@ target (study UID, the `ReportVersion` id, its version) and carries its own
 target. A version citations answer is one `report-evidence` target for the stored
 version and the filtered answer (an empty projection is still that version's
 read) and carries its `accessRef`. The routes' own refusals (400/403/404/409)
-record nothing; a refusal by an outer interceptor after preparation (the
-`StudyAccessInterceptor` 409) leaves the prepared records with `transfer-aborted`.
+record nothing. PC3 removed the outer policy-revision interceptor: a policy edit
+after preparation does not cancel the admitted read, which ends with
+`transfer-ended`; the next request applies the new policy in its own gate.
 The routes retain the raw source PatientID and InstitutionName observed by this
 request's `StudyAccessService.prepareSourceIdentity`; its single QIDO read names
 `00080080` in `includefield`, because InstitutionName is not a QIDO default
@@ -102,8 +103,8 @@ The real cells run the production `AppModule.withLedger` over HTTP on the B2 PG
 fixture with an independent witness: all targets committed before the first
 response byte (ledger INSERT held by an SQL lock), the exact returned rows and
 hashes, filtered/empty/missing/refused citations, a last-target SQL failure, a
-client that leaves before a late COMMIT, an outer `StudyAccessInterceptor`
-refusal after preparation, and a COMMIT reply lost in a TCP relay in front of
+client that leaves before a late COMMIT, a policy edit after preparation (the
+admitted read ends; the next is refused unrecorded), and a COMMIT reply lost in a TCP relay in front of
 the ledger connection. The synthetic Orthanc answers only the default QIDO study
 attributes and the tags the request names in `includefield`, as Orthanc does:
 
@@ -126,6 +127,9 @@ finish/close releases its timer. A1 alone records response outcomes and drains
 late receipts. These metadata receipts do not certify image display/download.
 W9API-20 stays disposed. A3 removes W9's duplicate post-source StudyState/policy
 and source-tag rechecks, preserving initial access and split-source identity.
+PC3 also removes the outer policy-revision interceptor. A policy edit during a
+receipt wait does not cancel the admitted response; the next request applies
+the new policy before reading a source or recording a receipt.
 
 Run the actual W9 HTTP/PG boundary on the B2 synthetic fixture:
 

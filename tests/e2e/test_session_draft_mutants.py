@@ -33,23 +33,12 @@ class SessionDraftMutants(boundary.SessionDraftBoundaries):
             self.test_no_session_starts_real_idp_login_automatically()
         print("U5-MUTANT M01 killed: U5_AUTO_LOGIN")
 
-    def test_m02_bypassed_proof_consumption_is_detected(self):
-        self.mutation = None
-        self.test_entry_proof_consumed_automatically_once()
-        self.mutation = (
-            # Since the session end split enter() in two, this line chooses between the proof entry and the plain one.
-            "const result = proof || entryBinding ? await enterWithProof() : await enterPlain();",
-            "const result = await enterPlain();")
-        with self.assertRaisesRegex(AssertionError, "U5_ENTRY_PROOF"):
-            self.test_entry_proof_consumed_automatically_once()
-        print("U5-MUTANT M02 killed: U5_ENTRY_PROOF")
-
     def test_m03_disabled_valid_session_bootstrap_is_detected(self):
         self.mutation = None
         self.test_entry_valid_session_and_second_tab_require_no_click()
         self.mutation = (
-            "const result = proof || entryBinding ? await enterWithProof() : await enterPlain();",
-            "const result = proof || entryBinding ? await enterWithProof() : null;")
+            "const result = await enterPlain();",
+            "const result = null;")
         with self.assertRaisesRegex(AssertionError, "U5_ENTRY_ACTIVE"):
             self.test_entry_valid_session_and_second_tab_require_no_click()
         print("U5-MUTANT M03 killed: U5_ENTRY_ACTIVE")

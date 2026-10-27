@@ -5396,8 +5396,7 @@
       "ImageRequestService",
       "ClinicalContextService",
       "CriticalResultService",
-      "APP_GUARD=AuthGuard",
-      "APP_INTERCEPTOR=StudyAccessInterceptor"
+      "APP_GUARD=AuthGuard"
     ],
     "exports": [],
     "imports": [],
@@ -5774,42 +5773,9 @@
         "scope": null,
         "declared": [],
         "optional": []
-      },
-      "StudyAccessInterceptor": {
-        "params": [
-          "StudyAccessService"
-        ],
-        "scope": null,
-        "declared": [],
-        "optional": []
       }
     },
-    "middleware": [
-      {
-        "apply": [
-          "adminNoStore"
-        ],
-        "exclude": [],
-        "forRoutes": [
-          "AdminController",
-          "ViewerController",
-          "FindingController",
-          "ViewerJobController",
-          "ConnectController",
-          "ManualSrController",
-          "ReportPreviewController",
-          "FavoriteController",
-          "StudyTagsController",
-          "ReaderAssignmentController",
-          "ConsultationController",
-          "ClinicianQuestionController",
-          "ImageRequestController",
-          "ClinicalContextController",
-          "CriticalResultController",
-          "StudyAccessController"
-        ]
-      }
-    ],
+    "middleware": [],
     "routes": [
       {
         "controller": "AdminController",
@@ -5932,23 +5898,6 @@
           "4:2@2:\"code\":0",
           "4:3@3:\"state\":0",
           "4:4@4:\"error\":0"
-        ]
-      },
-      {
-        "controller": "AuthController",
-        "handler": "entry",
-        "method": "POST",
-        "paths": [
-          "auth|entry"
-        ],
-        "public": true,
-        "status": 200,
-        "headers": [],
-        "guards": [],
-        "interceptors": [],
-        "args": [
-          "0:0@0:null:0",
-          "1:1@1:null:0"
         ]
       },
       {
@@ -8257,30 +8206,6 @@
         "optional": []
       }
     },
-    "changed_injectables": {
-      "note": "D1489 (consult u4b-download-grant option A): the global AuthGuard gains StudyTransferLocalService, whose public grant check stands in for the session binding on the exact archive GET; di keeps the pre-split constructor and this delta is the only change",
-      "AuthGuard": {
-        "before": {
-          "params": [
-            "Reflector",
-            "AuthService"
-          ],
-          "scope": null,
-          "declared": [],
-          "optional": []
-        },
-        "after": {
-          "params": [
-            "Reflector",
-            "AuthService",
-            "StudyTransferLocalService"
-          ],
-          "scope": null,
-          "declared": [],
-          "optional": []
-        }
-      }
-    },
     "routes": [
       {
         "controller": "StudyTransferLocalController",
@@ -8459,6 +8384,10 @@
     "changed_concerns": [
       "api/src/pacs/report-draft.ts"
     ]
+  },
+  "viewer_ux": {
+    "note": "D73: viewer settings functionally extended preferences after the split. Preserve historical move proof; validate current owner/revision, readback and workspace/viewer preservation through workspace_shortcuts_v2_service_test.cjs, without pinning new private helpers.",
+    "changed_concerns": ["api/src/pacs/preferences.ts"]
   },
   "emr_d_online": {
     "unit": "EMR-D online (D1824, 2464002)",
@@ -8788,8 +8717,7 @@
         "before": {
           "params": [
             "Reflector",
-            "AuthService",
-            "StudyTransferLocalService"
+            "AuthService"
           ],
           "scope": null,
           "declared": [],
@@ -8799,12 +8727,11 @@
           "params": [
             "Reflector",
             "AuthService",
-            "StudyTransferLocalService",
             "Object"
           ],
           "scope": null,
           "declared": [
-            "3:Symbol(RequestContextCapture)"
+            "2:Symbol(RequestContextCapture)"
           ],
           "optional": []
         }
@@ -8813,16 +8740,7 @@
   },
   "di_additions_f_link": {
     "unit": "F_LINK",
-    "middleware_routes": [
-      {
-        "apply": [
-          "adminNoStore"
-        ],
-        "forRoutes": [
-          "EmrAuditController"
-        ]
-      }
-    ],
+    "middleware_routes": [],
     "controllers": [
       "EmrAuditController"
     ],

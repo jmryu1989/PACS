@@ -109,7 +109,7 @@
       const controller=new AbortController();accountRequest=controller;accountBusy=true;interruptedAction=action;refreshAccount();
       const timeout=setTimeout(()=>controller.abort(),10000);accountStatus.textContent='계정 단축키를 확인하는 중…';
       try{
-        const response=await transport.request('/api/workspace-shortcuts',{context:at,method:action==='save'?'PUT':'GET',credentials:'same-origin',cache:'no-store',signal:controller.signal,headers:{'X-KIN-CSRF':'1','Content-Type':'application/json'},...(action==='save'?{body:JSON.stringify({expectedOwner:JSON.parse(bound),revision:accountRevision,bindings:snapshot})}:{})});
+        const response=await transport.request('/api/workspace-shortcuts',{context:at,method:action==='save'?'PUT':'GET',credentials:'same-origin',cache:'no-store',signal:controller.signal,headers:{'Content-Type':'application/json'},...(action==='save'?{body:JSON.stringify({expectedOwner:JSON.parse(bound),revision:accountRevision,bindings:snapshot})}:{})});
         if(!live())return;
 
         if(!response.ok)throw Error(response.status===409?'다른 창에서 설정이 바뀌었습니다. 불러온 뒤 다시 저장하세요.':'계정 설정을 확인하지 못했습니다. 다시 불러오세요.');

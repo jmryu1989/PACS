@@ -679,7 +679,7 @@ class TransferPanelPage(rf.ReportFlowPage):
         # D1489: one press = one bound grant request, then the browser's own GET with that grant and nothing else.
         self.assertEqual(1, len(self.site.grants), "C-06 one grant request per press")
         grant = self.site.grants[0]
-        self.assertEqual([UID_A, op, {}, "1"], [grant["uid"], grant["operation"], grant["body"], grant["csrf"]], "C-06 the closed grant request")
+        self.assertEqual([UID_A, op, {}, None], [grant["uid"], grant["operation"], grant["body"], grant["csrf"]], "C-06 the closed grant request")
         self.assertTrue(grant["session"], "C-06 the grant request is session-bound")
         # The browser's download manager takes an a[download] request itself (it never reaches the context's routes), so
         # the case reads the URL it was given.

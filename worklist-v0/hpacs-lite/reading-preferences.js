@@ -28,7 +28,7 @@ window.KinReadingPreferences = function ({ owner, host, read, apply, generation,
     status.textContent = '메모 설정 확인 중…';
     try {
       const response = await transport.request(endpoint, { context: at, method: action === 'save' ? 'PUT' : 'GET', credentials: 'same-origin', cache: 'no-store',
-        signal: local.signal, headers: { 'X-KIN-CSRF': '1', 'Content-Type': 'application/json' },
+        signal: local.signal, headers: { 'Content-Type': 'application/json' },
         ...(action === 'save' ? { body: JSON.stringify({ expectedOwner: owner, revision, autoNote: value }) } : {}) });
       if (response.auth || !work.admits(at)) return;
       if (!response.ok || response.incomplete) { throw new Error(response.status === 409 ? '다른 창에서 설정이 바뀌었습니다. 불러온 뒤 다시 저장하세요.' : '설정 저장 여부를 확인하지 못했습니다. 불러와 확인하세요.'); }

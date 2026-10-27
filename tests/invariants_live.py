@@ -118,11 +118,10 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "auth/login"): Route(Kind.NEITHER),
     ("GET", "auth/register"): Route(Kind.NEITHER),
     ("GET", "auth/callback"): Route(Kind.NEITHER),
-    # S7-U5: the login starts that may replace a session (CSRF and, with a cookie, that session's binding) and the
-    # single-use entry of a login. Public to the guard; AuthService checks cookie, CSRF, binding and proof itself.
+    # S7-U5: the login starts that may replace a session (with a cookie, that session's binding). Public to the guard;
+    # AuthService checks the cookie and the binding itself.
     ("POST", "auth/login"): Route(Kind.NEITHER),
     ("POST", "auth/register"): Route(Kind.NEITHER),
-    ("POST", "auth/entry"): Route(Kind.NEITHER),
     ("POST", "auth/logout"): Route(Kind.NEITHER),
     ("GET", "me"): Route(Kind.NEITHER),
     ("GET", "authz/dicom"): Route(Kind.TENANT),
@@ -797,14 +796,6 @@ class LiveStack:
                 allowed = {"rights_pending", "member_isolated", "storage_failure", "token_invalid", "state_mismatch", "exchange_failed"}
                 causes = [value if value in allowed else "unclassified" for value in causes]
                 raise RuntimeError(f"Fixture BFF callback not admitted: paths={trace}, landing={landed.path}, causes={causes}")
-            proof = parse_qs(landed.fragment).get("kin-entry", [None])[0]
-            if not proof:
-                raise RuntimeError("Fixture BFF callback did not return an entry proof")
-            entry = Request(self.proxy + "/api/auth/entry", data=json.dumps({"proof": proof}).encode("utf-8"), method="POST",
-                            headers={"Content-Type": "application/json", "X-KIN-CSRF": "1"})
-            with opener.open(entry, timeout=30) as response:
-                if response.status != 200 or not json.loads(response.read()).get("sessionId"):
-                    raise RuntimeError("Fixture BFF entry proof was not admitted")
             with opener.open(self.proxy + "/api/me", timeout=30) as response:
                 me = json.loads(response.read())
             if me.get("sub") != matches[0]["id"] or "admin" not in me.get("roles", []) or not me.get("sessionId"):
@@ -1375,7 +1366,6 @@ def u5_post(stack: LiveStack, uid: str, body: bytes, headers: dict[str, str], *,
 
 def u5_bearer(stack: LiveStack, uid: str, token: str | None, body: bytes, content_type: str,
               extra: dict[str, str] | None = None) -> Callable[[], tuple[HttpResult, str]]:
-    # X-KIN-CSRF는 싣지 않는다: bearer 호출은 CSRF 대상이 아니고(A8) 대조가 그것까지 입장으로 증언한다.
     headers = {"Content-Type": content_type, **(extra or {})}
     if token is not None:
         headers["Authorization"] = "Bearer " + token
@@ -1571,8 +1561,6 @@ class BffInvariantTests(unittest.TestCase):
         self.assertEqual(legacy.status, 401, legacy.text)
 
         opener, sid = self.bff_login("doctor", self.stack.passwords["doctor"])
-        csrf = self.proxy(opener, "POST", "/api/studies/1.2.3/hold", {})
-        self.assertEqual(csrf.status, 403, csrf.text)
         logged_out = self.proxy(
             opener, "POST", "/api/auth/logout", headers={"X-KIN-CSRF": "1"},
         )
@@ -1601,8 +1589,8 @@ class BffInvariantTests(unittest.TestCase):
         )
 
     def test_dictation_u5_07_cookie_session_csrf(self) -> None:
-        """S3-ASR-U5 T7: 쿠키 호출은 CSRF 헤더와 실제 세션이 있어야 받아쓰기에 들어온다.
-        R-CSRF·R-FORGED는 같은 세션·같은 바이트의 C-SESSION이 입장해야 센다."""
+        """S3-ASR-U5 T7: 쿠키 호출은 그 문서가 본 실제 세션이 있어야 받아쓰기에 들어온다.
+        R-FORGED는 같은 세션·같은 바이트의 C-SESSION이 입장해야 센다."""
         pin = u5_precondition(self, self.stack, "T7")
         records: list[dict[str, Any]] = []
         with self.stack.fixture() as fixture:
@@ -1620,13 +1608,11 @@ class BffInvariantTests(unittest.TestCase):
                 # S7-U5: each cookie call names its session; the forged cookie rides with the real session's id, so it
                 # is refused as another session's request.
                 bound = {"X-KIN-Session": opener.kin_session}
-                u5_call(records, "R-CSRF", uid, lambda: u5_post(
-                    self.stack, uid, wave, {"Content-Type": "audio/wav", **bound}, opener=opener, base=base))
                 u5_call(records, "R-FORGED", uid, lambda: u5_post(
-                    self.stack, uid, wave, {"Content-Type": "audio/wav", "Cookie": "kin_sid=forged", "X-KIN-CSRF": "1", **bound},
+                    self.stack, uid, wave, {"Content-Type": "audio/wav", "Cookie": "kin_sid=forged", **bound},
                     opener=raw, base=base))
                 u5_call(records, "C-SESSION", uid, lambda: u5_post(
-                    self.stack, uid, wave, {"Content-Type": "audio/wav", "X-KIN-CSRF": "1", **bound}, opener=opener, base=base))
+                    self.stack, uid, wave, {"Content-Type": "audio/wav", **bound}, opener=opener, base=base))
             finally:
                 try:
                     if opener is not None:
@@ -1644,10 +1630,10 @@ class BffInvariantTests(unittest.TestCase):
             ("GET", "auth/login"): 302,
             ("GET", "auth/register"): 302,
             ("GET", "auth/callback"): 302,
-            # S7-U5: the POST login starts are public to the guard and refuse a request without the CSRF header
-            # themselves (403); the entry of a login without a cookie is 401 like any other route.
-            ("POST", "auth/login"): 403,
-            ("POST", "auth/register"): 403,
+            # S7-U5: the POST login starts are public to the guard: a login start without a declared reason is a
+            # bad request (400); a registration start with no session to end gives the address (200).
+            ("POST", "auth/login"): 400,
+            ("POST", "auth/register"): 200,
         }
         for (method, route), _meta in ROUTES.items():
             path = route.replace(":uid", "1.2.3").replace(":id", "1")

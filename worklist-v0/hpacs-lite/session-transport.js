@@ -120,7 +120,6 @@
 
       const method = String(init.method || 'GET').toUpperCase();
       const headers = new Headers(init.headers);
-      headers.set('X-KIN-CSRF', '1');
       headers.set('X-KIN-Session', session);
       let body = init.body;
       if (init.json !== undefined) {

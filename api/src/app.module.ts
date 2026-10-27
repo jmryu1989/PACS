@@ -7,7 +7,6 @@ import { AsrService } from './asr.service';
 import { DictationController } from './dictation.controller';
 import { StudyAccessService } from './study-access.service';
 import { StudyAccessController } from './study-access.controller';
-import { StudyAccessInterceptor } from './study-access.interceptor';
 import { ConsultationController } from './consultation.controller';
 import { ConsultationService } from './consultation.service';
 import { ClinicianQuestionController } from './clinician-question.controller';
@@ -18,13 +17,13 @@ import { CriticalResultController } from './critical-result.controller';
 import { CriticalResultService } from './critical-result.service';
 import { ReaderAssignmentController } from './reader-assignment.controller';
 import { ReaderAssignmentService } from './reader-assignment.service';
-import { DynamicModule, MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+import { DynamicModule, Module } from '@nestjs/common';
 import type { EmrRuntime } from './emr-runtime/application';
 import { EMR_RECORD_PORT } from './emr-runtime/record-port';
 import { EmrNestLifecycle } from './emr-runtime/nest-lifecycle';
 import { createRequestContext, REQUEST_CONTEXT_CAPTURE, REQUEST_CONTEXT_SOURCE } from './emr-runtime/request-context';
 import { createRequestIngress, RequestIngressConfiguration } from './emr-runtime/request-ingress';
-import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_GUARD } from '@nestjs/core';
 import { PrismaService } from './prisma.service';
 import { PacsController } from './pacs.controller';
 import { PacsService } from './pacs.service';
@@ -63,11 +62,6 @@ import { StudyTransferLocalController } from './study-transfer-local.controller'
 import { StudyTransferLocalService } from './study-transfer-local.service';
 import { DicomImportGateService } from './dicom-import-gate.service';
 
-function adminNoStore(_req: any, res: any, next: () => void) {
-  res.setHeader('Cache-Control', 'no-store');
-  next();
-}
-
 @Module({
   controllers: [EmrAuditController, DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController],
   providers: [
@@ -81,12 +75,11 @@ function adminNoStore(_req: any, res: any, next: () => void) {
     StudyTransferLocalService, DicomImportGateService,
     AdminAccessReview,
     { provide: APP_GUARD, useClass: AuthGuard },
-    { provide: APP_INTERCEPTOR, useClass: StudyAccessInterceptor },
     // W9 source selections use the same request-bound A1 response recorder.
     MultiStudyViewService, ViewingSetAccess,
   ],
 })
-export class AppModule implements NestModule {
+export class AppModule {
   static withLedger(runtime: EmrRuntime, ingress: RequestIngressConfiguration = { proxyPeers: [] }): DynamicModule {
     const requests = createRequestContext(createRequestIngress(ingress), runtime.port);
     return { module: AppModule, imports: [EmrViewingModule.withRequests(requests.source)], providers: [
@@ -96,9 +89,5 @@ export class AppModule implements NestModule {
       { provide: EMR_BACKGROUND_WORK, useValue: runtime.background.work },
       { provide: EmrNestLifecycle, useValue: new EmrNestLifecycle(runtime) },
     ], exports: [EMR_RECORD_PORT, REQUEST_CONTEXT_SOURCE] };
-  }
-  configure(consumer: MiddlewareConsumer) {
-    // 가드가 401/403으로 먼저 끝내는 응답도 브라우저 캐시에 남지 않아야 한다.
-    consumer.apply(adminNoStore).forRoutes(EmrAuditController, AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController);
   }
 }

@@ -258,8 +258,6 @@ test('U0B-DI Nest metadata equals the pre-split snapshot plus declared additions
   assert.equal(u4b.unit, 'S9-U4b');
   assert.deepEqual([u4b.controllers, u4b.providers, u4b.routes.length], [['StudyTransferLocalController'],
     ['StudyTransferLocalService', 'DicomImportGateService'], 7]);
-  assert.deepEqual(Object.keys(u4b.changed_injectables).filter(k => k !== 'note'), ['AuthGuard'], 'D1489: one constructor change, the AuthGuard');
-  assert.deepEqual(u4b.changed_injectables.AuthGuard.before, spec.di.injectables.AuthGuard, 'its earlier form is the unchanged snapshot');
   const declared = {
     controllers: [...w9.controllers, ...u4b.controllers],
     providers: [...u4b.providers, ...w9.providers],
@@ -278,9 +276,11 @@ test('U0B-DI Nest metadata equals the pre-split snapshot plus declared additions
   const splitRoutes = JSON.parse(execFileSync('git', ['show',
     'c8e4f1b485ec05ccbb97589c74a573b3f48b70ce:tests/pacs_split_spec.json'],
   { cwd: path.resolve(__dirname, '..'), encoding: 'utf8', maxBuffer: 8e6 })).di.routes;
-  assert.deepEqual(now.routes, splitRoutes, 'the approved pre-split route set is unchanged');
-  assert.deepEqual(withoutDeclared(full, spec.di_additions_f_link).middleware, spec.di.middleware,
-    'existing middleware bindings remain unchanged outside the declared F route');
+  // Product cuts 3 retires the entry-proof endpoint; compare all remaining historical routes.
+  const retainedSplitRoutes = splitRoutes.filter(r => !(r.controller === 'AuthController' && r.handler === 'entry'));
+  assert.equal(splitRoutes.length - retainedSplitRoutes.length, 1, 'one retired entry-proof endpoint');
+  assert.deepEqual(now.routes, retainedSplitRoutes, 'the remaining pre-split route set is unchanged');
+  assert.deepEqual(full.middleware, spec.di.middleware, 'no middleware binding moves with the additions');
   assert.ok(w9.routes.every(r => r.controller === 'MultiStudyViewController' && !r.public), 'no declared route is public');
   assert.ok(u4b.routes.every(r => r.controller === 'StudyTransferLocalController' && !r.public), 'no declared route is public');
   assert.ok(spec.di_additions_emr_online.routes.every(r => !r.public), 'no declared route is public');

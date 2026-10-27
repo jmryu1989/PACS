@@ -971,10 +971,6 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         if method == 'GET' and path == '/harness/ohif.js':
             route.fulfill(body=self.config, content_type='application/javascript; charset=utf-8')
             return
-        if path.startswith('/api/') and request.headers.get('x-kin-csrf') != '1':
-            self.unexpected.append(f'{method} {path} without X-KIN-CSRF')
-            route.abort()
-            return
         if method == 'GET' and path == '/api/me':
             if self.bootstrap or not self.viewer_page and request.frame.page is not self.page:
                 self.entry_reads.append(request.headers.get('x-kin-session'))

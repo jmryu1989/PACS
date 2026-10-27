@@ -153,8 +153,6 @@ class PageSessionDOMTest(unittest.TestCase):
             route.fulfill(status=204)
         elif path == '/api/auth/login':
             route.fulfill(status=204)
-        elif path == '/api/auth/entry':
-            route.fulfill(json={'sessionId':self.session})
         elif path in self.responses:
             route.fulfill(json=self.responses[path])
         elif path == '/api/admin/users':
@@ -686,7 +684,7 @@ class PageSessionDOMTest(unittest.TestCase):
         self.assertTrue(requests)
         self.assertTrue(all(session==SESSION for session in requests),'shared inbox must use the page transport')
 
-    def test_entry_no_session_storage_proof_and_bfcache_record(self):
+    def test_entry_no_session_storage_and_bfcache_record(self):
         for kind in ['admin','clinician']:
             with self.subTest(page=kind,entry='absent'):
                 self.fresh(kind); self.me_status=401
@@ -699,12 +697,6 @@ class PageSessionDOMTest(unittest.TestCase):
                 self.page.goto(ORIGIN+BASE+kind+'.html',wait_until='commit')
                 self.pump(lambda:self.moves)
                 self.assertFalse(any(p.startswith('/api/') for _,p,_ in self.calls))
-            with self.subTest(page=kind,entry='proof-final-document'):
-                self.fresh(kind,init=denied)
-                self.page.goto(ORIGIN+BASE+kind+'.html#kin-entry=SYN-once')
-                expect(self.page.locator('#users tr' if kind=='admin' else '#studies tr')).not_to_have_count(0)
-                self.assertEqual('',self.page.evaluate('location.hash'))
-                self.assertEqual(1,sum(p=='/api/auth/entry' for _,p,_ in self.calls))
             with self.subTest(page=kind,entry='bfcache-record'):
                 self.fresh(kind); self.open()
                 self.page.evaluate("() => { synWatch(); localStorage.setItem('kin-session-end',JSON.stringify({session:KinAuth.sessionId(),operation:77,status:'confirmed'})); dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true})); }")

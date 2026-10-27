@@ -297,10 +297,6 @@ class AdminAuditDOMTest(unittest.TestCase):
         if path == "/favicon.ico":
             route.fulfill(status=404, body="")
             return
-        if path.startswith("/api/") and request.headers.get("x-kin-csrf") != "1":
-            self.unexpected.append(f"{method} {path} without X-KIN-CSRF")
-            route.abort()
-            return
         if method == "GET" and path == "/api/me":
             route.fulfill(json=ME)
             return
@@ -412,7 +408,7 @@ class AdminAuditDOMTest(unittest.TestCase):
         self.assertEqual(("Loaded " + shown_at(1), "astate observed", "Showing 3 of 5 Events", False, True, False, False, False),
                          (s["state"], s["stateClass"], s["counts"], s["wrapHidden"], s["emptyHidden"], s["stale"],
                           s["moreHidden"], s["moreDisabled"]))
-        self.assertEqual([("limit=25", "1")], self.audit_gets())
+        self.assertEqual([("limit=25", None)], self.audit_gets())
         rows = self.table()
         self.assert_rows(rows, ["admin.user.update", "study.access", "admin.user.approve"])
         move = rows[0]
@@ -432,7 +428,7 @@ class AdminAuditDOMTest(unittest.TestCase):
         self.open()
         self.refresh((200, PAGE1))
         self.more((200, PAGE2))
-        self.assertEqual([("limit=25", "1"), ("limit=25&after=" + CURSOR, "1")], self.audit_gets())
+        self.assertEqual([("limit=25", None), ("limit=25&after=" + CURSOR, None)], self.audit_gets())
         rows = self.table()
         self.assert_rows(rows, ["admin.user.update", "study.access", "admin.user.approve", "state.patch", "admin.user.create"])
         s = self.summary()
@@ -707,7 +703,7 @@ class AdminAuditDOMTest(unittest.TestCase):
                     ["institution: SYN-INST-A", "ip: 198.51.100.7", "dataSubject: None", "cause: idle"]]
         self.assertEqual([sorted(lines) for lines in expected], [sorted(r["detail"]) for r in rows])
         self.assertTrue(all(has_hangul(r["timeTitle"]) for r in rows))
-        self.assertEqual([("limit=25", "1")], self.audit_gets())
+        self.assertEqual([("limit=25", None)], self.audit_gets())
         # Preserving: the same answer with each detail's keys in another order draws the same lines.
         reordered = deepcopy(AUTH_ROWS)
         for row in reordered:

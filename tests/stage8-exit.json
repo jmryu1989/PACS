@@ -119,7 +119,7 @@
         "viewer_vr_binding_dom_test.ViewerVrBindingDOMTest.test_render_readiness_transient_keeps_binding_without_repair_and_strict_open_refuses",
         "viewer_vr_binding_dom_test.ViewerVrBindingDOMTest.test_sculpt_resumed_shader_failure_closes_and_never_poll_spins",
         "viewer_vr_binding_dom_test.ViewerVrBindingDOMTest.test_session_bootstrap_member_and_jobs_envelope_open_vr",
-        "viewer_vr_binding_dom_test.ViewerVrBindingDOMTest.test_session_both_access_requests_carry_binding_and_csrf_on_wire",
+        "viewer_vr_binding_dom_test.ViewerVrBindingDOMTest.test_session_both_access_requests_carry_binding_without_csrf_on_wire",
         "viewer_vr_binding_dom_test.ViewerVrBindingDOMTest.test_session_end_answers_on_access_end_the_document",
         "viewer_vr_binding_dom_test.ViewerVrBindingDOMTest.test_session_logout_preparation_holds_access_and_frames",
         "viewer_vr_binding_dom_test.ViewerVrBindingDOMTest.test_session_same_account_relogin_in_another_tab_ends_viewer",
