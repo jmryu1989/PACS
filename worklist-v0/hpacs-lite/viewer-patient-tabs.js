@@ -158,7 +158,8 @@ window.KinViewerPatientTabs = (() => {
     history.replaceState(history.state, '', tab.href);
     window.dispatchEvent(new PopStateEvent('popstate', { state: history.state }));
   }
-  async function open(href) {
+  async function open(href, { signal } = {}) {
+    if (signal?.aborted) return false;
     const url = new URL(href, location.origin);
     if (url.origin !== location.origin || url.pathname !== '/ohif/viewer') return false;
     if (current && JSON.stringify(studies(href)) === JSON.stringify(current.studies)) {
@@ -167,9 +168,16 @@ window.KinViewerPatientTabs = (() => {
     }
     if (!guard()) return false;
     const ticket = ++sequence; controller?.abort(); controller = new AbortController(); pending = true; pendingHref = url.href;
+    // A caller can close or replace its composition while patient resolution is pending.
+    // Cancel only that admission; a newer patient request owns its own controller and sequence.
+    const cancel = () => {
+      if (ticket !== sequence) return;
+      sequence++; controller.abort(); pending = false; render(); publish();
+    };
+    signal?.addEventListener('abort', cancel, { once: true });
     try {
       const resolved = await resolve(url.href, controller.signal);
-      if (ticket !== sequence || !guard(true)) return false;
+      if (signal?.aborted || ticket !== sequence || !guard(true)) return false;
       capture();
       let tab = tabs.find(tab => tab.key === resolved.key);
       if (!tab) { tab = resolved; tabs.push(tab); }
@@ -180,7 +188,7 @@ window.KinViewerPatientTabs = (() => {
       }
       navigate(tab); return true;
     } catch (error) { if (ticket === sequence && error.name !== 'AbortError') status.textContent = error.message; return false; }
-    finally { if (ticket === sequence) { pending = false; render(); } }
+    finally { signal?.removeEventListener('abort', cancel); if (ticket === sequence) { pending = false; render(); } }
   }
   async function close(tab) {
     // Closing a tab also cancels a lookup started by selecting that tab, so

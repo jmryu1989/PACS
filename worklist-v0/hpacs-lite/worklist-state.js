@@ -12,6 +12,8 @@
     // S4-U4 Now Retry request tokens (requestGatewayRetry). Memory only; the server answers a repeat with the first time.
     let gatewayRetryRequestSeq = 0;
     let favoriteList = null, studyTagList = null, studyTagScope = 'personal';
+    // W9 multi-study view (multi-study-view.js), mounted at boot; the row menu and the W4 move gate read it before then.
+    let multiStudyView = null;
     let demoMode = false;
     let quickDays = -1, sortKey = null, sortDir = 0, selectedOid = null;
     let worklistFolders = null, folderLoadState = 'unknown', folderAppliedSearch = null;
