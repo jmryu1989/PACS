@@ -596,10 +596,21 @@ test('TEST-WSU-09 a split UID is observed, has no order pairing or reconciliatio
 test('TEST-WSU-09 the clinician list and timeline count the normal set and carry only UID+code issues', async () => {
   const w = await world({ resources: [A(), B(), resource(NORMAL, 'SYN-PID-N'), resource('2.25.101', 'SYN-PID-N')] }).start();
   const clinician = caller({ roles: ['clinician'], actor: 'clinician-1', sub: 'sub-clinician' });
-  const list = readBody(await w.pacs.clinicianStudies(clinician));
+  const response = await w.pacs.clinicianStudies(clinician);
+  const list = readBody(response);
   assert.deepEqual(list.studies.map(s => s.uid).sort(), [NORMAL, '2.25.101']);
   assert.deepEqual(list.identityIssues, [{ uid: SPLIT, code: 'STUDY_IDENTITY_UNRESOLVED' }]);
   assert.deepEqual(Object.keys(list).sort(), ['identityIssues', 'serverTime', 'studies']);
+  // Every study the answer carries — a returned split UID included — is an access-record target, under the stored
+  // owner, with the split's source patient left unresolved. The ordinary worklist records the same issue the same way.
+  const issueTarget = r => r.sources.filter(s => s.path[0] === 'identityIssues')
+    .map(s => [s.path, s.managingInstitution, s.target.studyId, s.target.sourcePatientId]);
+  const expected = [[['identityIssues', 0], 'hallym', { status: 'known', value: SPLIT },
+    { status: 'unresolved', reason: 'not-observed' }]];
+  assert.deepEqual(issueTarget(response), expected);
+  assert.deepEqual(issueTarget(await w.pacs.readStudies(caller())), expected);
+  assert.deepEqual(response.sources.filter(s => s.path[0] === 'studies').map(s => s.target.studyId.value).sort(),
+    [NORMAL, '2.25.101']);
   const paged = readBody(await w.pacs.clinicianStudies(clinician, { limit: '1' }));
   assert.equal(paged.pagination.total, 2);
   assert.equal('identityIssues' in paged, false);
@@ -640,7 +651,7 @@ test('viewer UID lookup reads only requested sources and preserves scoped clinic
     const w = await world({ resources: [resource(NORMAL, 'VISIBLE'), resource(other, 'OTHER', { institution: 'OTHER' }), A(), B()],
       states: [stateRow(NORMAL, { institutionId: 'hallym' }), stateRow(other, { institutionId: 'other' })] }).start();
     const query = { uids: [NORMAL, other, SPLIT].join(',') };
-    const result = clinician ? await w.pacs.clinicianStudies(caller({ roles: ['clinician'] }), query)
+    const result = clinician ? readBody(await w.pacs.clinicianStudies(caller({ roles: ['clinician'] }), query))
       : await w.pacs.listStudies(caller(), query);
     assert.deepEqual(result.studies.map(row => row.uid), [NORMAL]);
     assert.equal(result.studies[0].sourcePatientKey, 'hallym|VISIBLE');

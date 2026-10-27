@@ -41,7 +41,7 @@ export class PacsClinician {
    */
   async clinicianStudies(c: Caller, query?: any) {
     this.clinicianCaller(c);
-    const { body: list, identities } = await this.worklist.selectStudies(c, query);
+    const { body: list, identities, institutions } = await this.worklist.selectStudies(c, query);
     const uids: string[] = list.studies.map((row: any) => row.uid);
     const current = !uids.length ? [] : await this.prisma.$queryRaw<any[]>`
       SELECT s.uid, s."institutionId", s."teleInstitutionId", s.rs, s."repDoc", s.confirm,
@@ -53,11 +53,17 @@ export class PacsClinician {
     if (clinicianListChanged(list.studies, current))
       throw new ConflictException({ code: 'STUDY_LIST_CHANGED', message: '검사 목록 또는 판독 상태가 바뀌었습니다. 새로고침하세요.' });
     const body = clinicianList(list, current);
-    return new LocalReadResponse(body, body.studies.map((row, index) => {
-      const original = list.studies[index];
-      return consumerSource('study-metadata', row.uid, original.state.institutionId, row.uid, null, ['studies', index],
-        identities.get(row.uid));
-    }));
+    return new LocalReadResponse(body, [
+      ...body.studies.map((row, index) => {
+        const original = list.studies[index];
+        return consumerSource('study-metadata', row.uid, original.state.institutionId, row.uid, null, ['studies', index],
+          identities.get(row.uid));
+      }),
+      // An announced split UID is a returned study too. Its owner is the selection's stored institution; which patient
+      // resource it belongs to is exactly what is unresolved, so no source identity is attached (as worklistRead does).
+      ...(body.identityIssues ?? []).map((row, index) =>
+        consumerSource('study-metadata', row.uid, institutions.get(row.uid), row.uid, null, ['identityIssues', index])),
+    ]);
   }
 
   /**

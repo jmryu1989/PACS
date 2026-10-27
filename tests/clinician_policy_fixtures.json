@@ -553,7 +553,8 @@
     "pacs_entry_site": {"entry": "member:authzDicom:MethodDeclaration", "calls": 1, "behaviour": {"unit": "S9-U0b-RELIST", "test": "tests/pacs_source_behavior_test.cjs", "cases": ["U0B-CLINICIAN-ROLES"]}},
     "behaviour_checked_sites": {
       "auth.service.ts": {"unit": "S7-U5", "test": "tests/auth_session_service_test.cjs", "cases": ["U5S-ENTRY-01", "U5S-ENTRY-02"]},
-      "clinical-context.controller.ts": {"unit": "S7-U4a", "test": "tests/clinical_context_service_test.cjs", "cases": ["CC-S02"]}
+      "clinical-context.controller.ts": {"unit": "S7-U4a", "test": "tests/clinical_context_service_test.cjs", "cases": ["CC-S02"]},
+      "viewer.controller.ts": {"unit": "S5-U1b", "test": "tests/pacs_source_behavior_test.cjs", "cases": ["U0B-CLINICIAN-VIEWER"]}
     },
     "live_test": "test_04_mixed_and_legacy_roles_keep_their_existing_paths",
     "live_marker": "CLINICIAN_LIVE_COMPOSITION"

@@ -111,23 +111,18 @@ export class ViewerService {
     return new LocalReadResponse(selected.body, selected.sources);
   }
 
-  selectFinal(uid: string, query: any, c: Caller, final: number) {
-    if (!Number.isSafeInteger(final) || final < 1) denied();
-    return this.read(uid, query, c, undefined, final);
-  }
-
   /**
    * S5-U1b clinician-only read of the items of one signed head. The items are
    * read in the same SQL statement as the head (rs A, Report.version = `final`,
    * that version's action approve/addendum), so an item that only existed while
    * a reset had reopened the report can never be read as part of `final`.
-   * `finalVersion` is the signed head that statement saw (null: none); when it
-   * is not `final` the page is empty and the caller refuses the answer.
+   * `body.finalVersion` is the signed head that statement saw (null: none); when it
+   * is not `final` the page is empty and the caller refuses the answer. The selection
+   * also names the study's stored institution, under which the controller records what it returns.
    */
-  async listFinal(uid: string, query: any, c: Caller, final: number):
-      Promise<{ items: any[]; nextCursor: string | null; finalVersion: number | null }> {
+  selectFinal(uid: string, query: any, c: Caller, final: number) {
     if (!Number.isSafeInteger(final) || final < 1) denied();
-    return (await this.selectFinal(uid, query, c, final)).body as any;
+    return this.read(uid, query, c, undefined, final);
   }
 
   private async read(uid: string, query: any, c: Caller, id: string | undefined, final: number | null) {
