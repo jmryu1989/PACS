@@ -5722,7 +5722,8 @@ class LiveInvariantTests(unittest.TestCase):
             self.assertEqual(self.stack.request("GET", f"/dicom-import/{op}", "jmryu").status, 404)
             self.assertEqual(self.s9u4_import("tech", s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id="S9U4-O"),
                                               op=op)[1].body["code"], "OPERATION_CONTENT_CONFLICT")
-            rejected_op, rejected = self.s9u4_import("tech", s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id="S9U4-O", modality="MG"))
+            # MG and XA are importable since D1819/D1821 (dicom-import-gate modalityRefusal); NM stays outside Part 1.
+            rejected_op, rejected = self.s9u4_import("tech", s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id="S9U4-O", modality="NM"))
             scope["operations"].append(rejected_op)
             self.assertEqual((rejected.status, rejected.body["outcome"], rejected.body["code"]), (400, "rejected", "MODALITY_NOT_IMPORTABLE"))
             unregistered = self.s9u4_new_study(scope)

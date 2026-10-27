@@ -519,3 +519,18 @@ test('257 full-size CT slices reach digest verification beyond the old pixel and
     assert.equal(calls.filter(c=>c.url.includes('/frames/')).length,0);
   });
 });
+
+test('a viewer with no free memory reads as the memory shortage, not the source size limit, before any frame', async () => {
+  const world=loaderWorld(5,SOPS,0);
+  const api=async(url,options)=>({id:instanceId(SOPS.indexOf(JSON.parse(options.body).sopUid))});
+  await withFetch(url=>source(url), async calls=>{
+    await assert.rejects(world.load(api,new AbortController().signal),{message:'출력용 CT 메모리가 부족합니다. 다른 검사를 닫고 다시 확인하세요.'});
+    assert.equal(calls.filter(c=>c.url.includes('/frames/')).length,0);
+  });
+});
+
+test('a response above its own size limit keeps the source size message even under a memory budget', async () => {
+  await withFetch(() => reply([new Uint8Array(17)]), async () => {
+    await assert.rejects(identity.sourceBytes('/a', new AbortController().signal, 16, { bytes: 0, limit: 1 << 30, exceeded: 'memory' }), { message: '출력 원본 용량 한도를 초과했습니다.' });
+  });
+});
