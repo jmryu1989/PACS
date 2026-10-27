@@ -19,7 +19,7 @@ Phase 2/3.
 | 화면 / 역할 | Pick Worklist·판독, Clinician, Admin, Login 화면, or Viewer; switch the mock login role (radiologist/technician/clinician/admin). Some role and lock rules are still open questions, so a role's screen is a prototype view, not a decision. |
 | 바꾸기 | "판독문 입력칸을 더 크게" → Claude edits the front-end in the sandbox → build + syntax check → commit → mirror reloads and reselects the same study. Bad requests get a short evidence-first objection; patient-safety/legal ones are refused and a safe alternative is built (D4). |
 | 물어보기 | Read-only answers about the product and development status, with sources. Unknown dates/decisions are not guessed; the question is forwarded to the commander. |
-| 되돌리기 / 기록 | Undo the newest change, or any listed change; view each change's diff. |
+| 되돌리기 / 기록 | Undo the newest change, or any listed change; view each change's diff. An older change is undone together with the still-applied changes made after it (they were built on it; the studio asks first). Every undo is rebuilt and checked like an edit; if the check fails nothing is undone. |
 | 현황 | The commander's `status.json` (everything except live secrets). |
 | 오늘 끝 | Writes the digest now (also written after ~60 idle minutes). |
 | Claude 빠르게/꼼꼼하게 | Sonnet (default, ~8–20 s per small edit) or Opus (~25–45 s, stronger judgement). |
@@ -48,7 +48,7 @@ DB) is not used, read or changed; the unit cannot see the Docker socket or `/etc
 
 1. **Kakao Cloud security group** (instance kin-poc / 61.109.239.207): add one inbound rule —
    protocol **TCP**, port **8443**, source **Minhoon's and your own public IPs as /32** (or `0.0.0.0/0` if his IP
-   changes; the studio has its own login and login throttling). Description: `minhoon-studio`.
+   changes; the studio has its own simple login). Description: `minhoon-studio`.
 2. **Claude login (sdij), once, on the server:**
    ```bash
    ssh -i kin-key.pem ubuntu@61.109.239.207
@@ -144,6 +144,7 @@ python tools/minhoon-studio/dev/build_dicomweb_store.py                         
 python tools/minhoon-studio/deploy/make-sandbox.py --repo . --sha <main sha> --out <run>/sandbox
 # config: copy deploy/install.sh's config block with Windows paths, "shellTool": "PowerShell", "python": "python"
 node tools/minhoon-studio/server/server.js --config <run>/config.json                        # http://127.0.0.1:8443
-node --test tools/minhoon-studio/test/studio.test.js
+node --test --test-force-exit tools/minhoon-studio/test/studio.test.js tools/minhoon-studio/test/flow.test.js
 ```
+(`--test-force-exit`: a chat job keeps an hour-long cleanup timer, which would otherwise hold the test process open.)
 `dev/capture_fixtures.py` records what the screens ask a **synthetic** fixture stack, to refresh the mock shapes.

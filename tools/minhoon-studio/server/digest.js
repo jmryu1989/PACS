@@ -17,41 +17,67 @@ const cell = s => String(s == null ? '' : s).replace(/\|/g, '\\|').replace(/\r?\
 
 // A digest covers everything since the previous one (not a calendar day): a session that runs past midnight stays in
 // one handoff with its commits. The file is named by the KST day it is written; a second one that day gets "-2", ...
-async function writeDigest({ dataDir, sandbox, reason = 'manual', by = null }) {
+// Digests are written one at a time (the "오늘 끝" button of both people and the idle timer share the same files).
+const chains = new Map();
+function writeDigest(options) {
+  const key = path.resolve(options.dataDir);
+  const run = (chains.get(key) || Promise.resolve()).then(() => writeDigestNow(options));
+  chains.set(key, run.catch(() => {}));
+  return run;
+}
+
+// activeJobs(): ids of chat jobs still queued or running. A request without an answer yet is "pending" and carried
+// into the next digest, where it appears with its answer; one that is neither answered nor running was cut off
+// (for example by a restart) and is reported as "interrupted".
+async function writeDigestNow({ dataDir, sandbox, reason = 'manual', by = null, activeJobs = () => [] }) {
   const stateFile = path.join(dataDir, 'digest-state.json');
   const prev = readJsonFileSafe(stateFile);
   const since = prev.lastAt || '1970-01-01T00:00:00.000Z';
+  const carried = new Set(prev.pending || []);
+  const snapshotAt = new Date().toISOString();
+  const active = new Set(activeJobs());
   const writtenAt = new Date().toISOString();
   const dir = path.join(dataDir, 'public', 'digests');
   fs.mkdirSync(dir, { recursive: true });
   let day = today();
   for (let n = 2; fs.existsSync(path.join(dir, `${day}.md`)); n++) day = `${today()}-${n}`;
-  const inDay = e => e && e.t && e.t > since && e.t <= writtenAt;
-  const chat = readJsonl(path.join(dataDir, 'chat.jsonl')).filter(inDay);
-  const metrics = readJsonl(path.join(dataDir, 'metrics.jsonl')).filter(inDay);
+  const upTo = e => e && e.t && e.t <= writtenAt;
+  const inDay = e => upTo(e) && e.t > since;
+  const chatAll = readJsonl(path.join(dataDir, 'chat.jsonl')).filter(upTo);
+  const metricsAll = readJsonl(path.join(dataDir, 'metrics.jsonl')).filter(upTo);
   const usage = readJsonl(path.join(dataDir, 'usage.jsonl')).filter(inDay);
   const records = readJsonl(path.join(dataDir, 'public', 'records.jsonl')).filter(inDay);
   const missing = readJsonl(path.join(dataDir, 'missing.jsonl')).filter(inDay);
   const log = (await sandbox.log()).filter(c => new Date(c.time).toISOString() > since);
-  const reloads = new Map(metrics.filter(m => m.kind === 'reload-ready').map(m => [m.jobId, m]));
-  const edits = metrics.filter(m => m.kind !== 'reload-ready');
+  const reloads = new Map(metricsAll.filter(m => m.kind === 'reload-ready').map(m => [m.jobId, m]));
+  const edits = metricsAll.filter(m => m.kind !== 'reload-ready');
+  const answersOf = new Map();
+  for (const e of chatAll) if (e.jobId && e.role !== 'user') answersOf.set(e.jobId, [...(answersOf.get(e.jobId) || []), e]);
 
-  const requests = chat.filter(e => e.role === 'user').map(u => {
-    const answers = chat.filter(e => e.jobId === u.jobId && e.role !== 'user');
+  const asked = chatAll.filter(e => e.role === 'user' && (e.t > since || carried.has(e.jobId)));
+  const requests = asked.map(u => {
+    const answers = answersOf.get(u.jobId) || [];
     const last = answers[answers.length - 1] || {};
+    const meta = last.meta || {};
     const metric = edits.find(m => m.jobId === u.jobId);
     const reload = reloads.get(u.jobId);
     const t = metric ? metric.timings : {};
+    // A reload that never showed the screen is a failure to report, not a latency sample.
+    const reloadTimedOut = !!reload && reload.readyKind === 'timeout';
+    const reloadOk = reload && !reloadTimedOut && Number.isFinite(reload.reloadMs);
+    const outcome = !answers.length ? (active.has(u.jobId) || u.t >= snapshotAt ? 'pending' : 'interrupted')
+      : meta.loginRequired ? 'login-required' : meta.failed ? 'failed'
+        : meta.changed ? 'applied' : u.mode === 'ask' ? 'answered' : 'no-change';
     return {
-      t: u.t, user: u.user, mode: u.mode, request: u.text, answer: last.text || '', jobId: u.jobId,
-      outcome: last.meta && last.meta.loginRequired ? 'login-required' : last.meta && last.meta.failed ? 'failed'
-        : last.meta && last.meta.changed ? 'applied' : u.mode === 'ask' ? 'answered' : 'no-change',
-      sha: last.meta && last.meta.sha, files: last.meta && last.meta.files,
+      t: u.t, user: u.user, mode: u.mode, request: u.text, answer: last.text || '', jobId: u.jobId, outcome,
+      carriedFromPrevious: u.t <= since,
+      sha: meta.sha, files: meta.files,
       totalToReloadSentMs: t.totalToReloadSentMs, claudeMs: t.claudeMs, buildMs: t.buildMs,
-      lastEditToReloadSentMs: t.lastEditToReloadSentMs, reloadMs: reload ? reload.reloadMs : null,
-      editToReadyMs: Number.isFinite(t.lastEditToReloadSentMs) && reload ? t.lastEditToReloadSentMs + reload.reloadMs : null,
+      lastEditToReloadSentMs: t.lastEditToReloadSentMs, reloadMs: reloadOk ? reload.reloadMs : null, reloadTimedOut,
+      editToReadyMs: Number.isFinite(t.lastEditToReloadSentMs) && reloadOk ? t.lastEditToReloadSentMs + reload.reloadMs : null,
     };
   });
+  const pending = requests.filter(r => r.outcome === 'pending').map(r => r.jobId);
   const applied = requests.filter(r => r.outcome === 'applied');
   const tokens = usage.reduce((acc, u) => {
     const x = u.usage || {};
@@ -72,7 +98,10 @@ async function writeDigest({ dataDir, sandbox, reason = 'manual', by = null }) {
   const summary = {
     day, reason, by, since, writtenAt, branch, base, head, previousHead: prev.lastHead || null,
     counts: { requests: requests.length, edits: requests.filter(r => r.mode === 'edit').length, applied: applied.length,
-      questions: requests.filter(r => r.mode === 'ask').length, reverts: log.filter(c => c.trailers['Studio-Kind'] === 'revert').length,
+      questions: requests.filter(r => r.mode === 'ask').length, pending: pending.length,
+      failed: requests.filter(r => ['failed', 'interrupted', 'login-required'].includes(r.outcome)).length,
+      reloadTimeouts: requests.filter(r => r.reloadTimedOut).length,
+      reverts: log.filter(c => c.trailers['Studio-Kind'] === 'revert').length,
       disagreements: records.filter(r => r.kind === 'disagreement').length, forwarded: records.filter(r => r.kind === 'question').length },
     timing: {
       editToReadyP50Ms: pct(applied.map(r => r.editToReadyMs), 50), editToReadyP90Ms: pct(applied.map(r => r.editToReadyMs), 90),
@@ -88,12 +117,14 @@ async function writeDigest({ dataDir, sandbox, reason = 'manual', by = null }) {
   lines.push(`# 민훈 스튜디오 하루 인계 — ${day}`, '');
   lines.push(`- 작성: ${summary.writtenAt} (${reason}${by ? `, ${by}` : ''}) · 범위: 지난 인계(${since === '1970-01-01T00:00:00.000Z' ? '처음' : since}) 이후`);
   lines.push(`- 샌드박스: \`${branch}\` · base \`${base.slice(0, 12)}\` · head \`${head.slice(0, 12)}\``);
-  lines.push(`- 요청 ${summary.counts.requests}건 (바꾸기 ${summary.counts.edits}, 적용 ${summary.counts.applied}, 물어보기 ${summary.counts.questions}) · 되돌림 ${summary.counts.reverts} · 이견 ${summary.counts.disagreements} · 넘긴 질문 ${summary.counts.forwarded}`);
-  lines.push(`- 반영 시간(마지막 수정→거울 준비) p50 ${sec(summary.timing.editToReadyP50Ms)} · p90 ${sec(summary.timing.editToReadyP90Ms)}; 요청→새로고침 신호 p50 ${sec(summary.timing.totalP50Ms)} · p90 ${sec(summary.timing.totalP90Ms)}`);
+  lines.push(`- 요청 ${summary.counts.requests}건 (바꾸기 ${summary.counts.edits}, 적용 ${summary.counts.applied}, 물어보기 ${summary.counts.questions}, 실패·중단 ${summary.counts.failed}, 진행 중 ${summary.counts.pending}) · 되돌림 ${summary.counts.reverts} · 이견 ${summary.counts.disagreements} · 넘긴 질문 ${summary.counts.forwarded}`);
+  lines.push(`- 반영 시간(마지막 수정→거울 준비) p50 ${sec(summary.timing.editToReadyP50Ms)} · p90 ${sec(summary.timing.editToReadyP90Ms)}; 요청→새로고침 신호 p50 ${sec(summary.timing.totalP50Ms)} · p90 ${sec(summary.timing.totalP90Ms)}${summary.counts.reloadTimeouts ? ` · 화면 준비 시간 초과 ${summary.counts.reloadTimeouts}건(시간 통계에서 뺌)` : ''}`);
+  if (pending.length) lines.push(`- 진행 중이던 요청 ${pending.length}건은 답이 나오면 다음 인계에 다시 실립니다.`);
   lines.push(`- 사용량: ${summary.usage.models.join(', ') || '—'} · 입력 ${tokens.input} / 출력 ${tokens.output} / 캐시 읽기 ${tokens.cacheRead} / 캐시 쓰기 ${tokens.cacheWrite} 토큰 · CLI 환산 $${summary.usage.costUsdReportedByCli} (${summary.usage.costNote})`, '');
   lines.push('## 요청 (원문)', '', '| 시각 | 누구 | 탭 | 요청 | 결과 | 커밋 | 반영 |', '|---|---|---|---|---|---|---|');
   for (const r of requests) {
-    lines.push(`| ${r.t.slice(11, 19)} | ${cell(r.user)} | ${r.mode === 'ask' ? '물어보기' : '바꾸기'} | ${cell(r.request)} | ${r.outcome} | ${r.sha ? '`' + r.sha.slice(0, 8) + '`' : ''} | ${r.mode === 'edit' && r.outcome === 'applied' ? `${sec(r.editToReadyMs)} (전체 ${sec(r.totalToReloadSentMs)})` : ''} |`);
+    const ready = r.reloadTimedOut ? '화면 준비 시간 초과' : sec(r.editToReadyMs);
+    lines.push(`| ${r.carriedFromPrevious ? r.t.slice(0, 10) + ' ' : ''}${r.t.slice(11, 19)} | ${cell(r.user)} | ${r.mode === 'ask' ? '물어보기' : '바꾸기'} | ${cell(r.request)} | ${r.outcome} | ${r.sha ? '`' + r.sha.slice(0, 8) + '`' : ''} | ${r.mode === 'edit' && r.outcome === 'applied' ? `${ready} (전체 ${sec(r.totalToReloadSentMs)})` : ''} |`);
   }
   lines.push('', '## 스튜디오 답 (요약 원문)', '');
   for (const r of requests) lines.push(`- **${r.t.slice(11, 19)} ${r.user}** — ${cell(r.request).slice(0, 200)}`, `  - ${cell(r.answer).slice(0, 1200)}`);
@@ -121,7 +152,7 @@ async function writeDigest({ dataDir, sandbox, reason = 'manual', by = null }) {
   fs.writeFileSync(path.join(dir, `${day}.md`), maskSecrets(lines.join('\n')) + '\n');
   writeJsonAtomic(path.join(dir, `${day}.json`), JSON.parse(maskSecrets(JSON.stringify(summary))));
   fs.writeFileSync(path.join(dir, `${day}.patch`), patch);
-  writeJsonAtomic(stateFile, { lastAt: writtenAt, lastHead: head, lastDay: day });
+  writeJsonAtomic(stateFile, { lastAt: writtenAt, lastHead: head, lastDay: day, pending });
   return { day, file: path.join(dir, `${day}.md`), summary };
 }
 
@@ -135,4 +166,7 @@ function listDigests(dataDir) {
   return fs.readdirSync(dir).filter(f => f.endsWith('.md')).map(f => f.slice(0, -3)).sort().reverse();
 }
 
-module.exports = { writeDigest, listDigests };
+// The names writeDigest produces ("YYYY-MM-DD", then "-2", "-3", ... the same day); the read route accepts exactly these.
+const DIGEST_ID = /^\d{4}-\d{2}-\d{2}(?:-\d{1,3})?$/;
+
+module.exports = { writeDigest, listDigests, DIGEST_ID };

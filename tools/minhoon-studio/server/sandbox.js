@@ -19,6 +19,10 @@ class Sandbox {
   constructor({ dir, readDir }) {
     this.dir = dir;
     this.readDir = readDir;
+    this.readers = 0;
+    this.readStale = true;
+    this.readHead = null;
+    this.readLock = Promise.resolve();
   }
 
   git(args, { cwd = this.dir, input } = {}) {
@@ -112,22 +116,58 @@ class Sandbox {
   }
 
   // Revert the newest applied change that is not yet reverted (or a given one).
-  async revert({ sha, user }) {
+  // Changes applied after the target were built and checked with the target in place, so reverting the target alone
+  // makes a tree nobody has checked (a later change may use what it added). An older change is therefore undone
+  // together with the still-applied changes after it (newest first, one revert commit each, only when the caller
+  // confirms with withLater), which returns to the screen as it was before the target. The result is rebuilt and
+  // checked by `validate`; if that fails, everything is put back to the version that was on screen.
+  async revert({ sha, user, withLater = false, validate = null }) {
     const items = await this.log();
     const target = sha ? items.find(i => i.sha.startsWith(sha))
       : items.find(i => i.trailers['Studio-Kind'] === 'change' && !i.reverted);
     if (!target) return { error: sha ? '그 변경을 찾지 못했습니다.' : '되돌릴 변경이 없습니다.' };
+    if (target.trailers['Studio-Kind'] !== 'change') return { error: '되돌림 기록은 다시 되돌리지 않습니다.' };
     if (target.reverted) return { error: '이미 되돌린 변경입니다.' };
-    const r = await this.git(['revert', '--no-commit', target.sha]);
-    if (r.code) {
-      await this.git(['revert', '--abort']);
-      return { error: '뒤의 변경과 겹쳐서 이 변경만 따로 되돌릴 수 없습니다. 최근 변경부터 차례로 되돌려 주세요.' };
+    const later = items.slice(0, items.indexOf(target)).filter(i => i.trailers['Studio-Kind'] === 'change' && !i.reverted);
+    if (later.length && !withLater) {
+      return { error: `이 변경 뒤에 적용된 변경 ${later.length}개가 이 변경 위에서 만들어졌습니다. 함께 되돌려야 화면이 깨지지 않습니다.`,
+        code: 'later-changes', later: later.map(i => ({ sha: i.sha, subject: i.subject })) };
     }
-    const message = `되돌림: ${target.subject}`.slice(0, 120) + `\n\nStudio-Kind: revert\nStudio-Revert-Of: ${target.sha}\nStudio-User: ${user}\n`;
-    await this.ok([...IDENTITY, 'commit', '-q', '-F', '-'], { input: message });
+    const start = await this.head();
+    const undone = [];
+    for (const item of [...later, target]) {
+      const r = await this.git(['revert', '--no-commit', item.sha]);
+      if (r.code) {
+        await this.git(['revert', '--abort']);
+        await this.resetTo(start);
+        return { error: '다른 되돌림과 겹쳐서 되돌릴 수 없습니다. 최근 변경부터 차례로 되돌려 주세요.' };
+      }
+      const message = `되돌림: ${item.subject}`.slice(0, 120) + `\n\nStudio-Kind: revert\nStudio-Revert-Of: ${item.sha}\nStudio-User: ${user}\n`;
+      await this.ok([...IDENTITY, 'commit', '-q', '-F', '-'], { input: message });
+      undone.push(item);
+    }
+    if (validate) {
+      const files = (await this.ok(['diff', '--name-only', start, 'HEAD'])).split('\n').map(s => s.trim()).filter(Boolean);
+      let check;
+      try { check = await validate(files); } catch (error) { check = { ok: false, errors: [String(error.message || error)] }; }
+      if (!check.ok) {
+        await this.resetTo(start);
+        return { error: '되돌린 결과가 빌드/문법 검사를 통과하지 못해 되돌리지 않았습니다. 화면은 그대로입니다.', errors: check.errors };
+      }
+      // The builders may regenerate an artifact (bundle, OHIF config); it belongs to the last revert commit.
+      if ((await this.changes()).some(e => allowed(e.file))) {
+        await this.ok(['add', '-A', '--', ...ALLOWED.filter(p => fs.existsSync(path.join(this.dir, p)))]);
+        await this.ok([...IDENTITY, 'commit', '-q', '--amend', '--no-edit']);
+      }
+    }
     const head = await this.head();
     await this.syncReadTree();
-    return { sha: head, reverted: target };
+    return { sha: head, reverted: target, undone };
+  }
+
+  async resetTo(sha) {
+    await this.git(['reset', '-q', '--hard', sha]);
+    await this.discardAll();
   }
 
   async show(sha) {
@@ -144,11 +184,42 @@ class Sandbox {
     return this.ok(['diff', '--stat', 'studio-base..HEAD', '--', ...ALLOWED]);
   }
 
-  // The 물어보기 Claude reads this detached copy, so a question never reads a half-applied edit.
-  async syncReadTree() {
-    if (!this.readDir || !fs.existsSync(path.join(this.readDir, '.git'))) return;
+  // The 물어보기 Claude reads this detached copy, so a question never reads a half-applied edit. While any question
+  // is reading it, the copy stays on its revision (a question must not see one file old and the next one new);
+  // the newest commit is checked out when the last reader finishes, or before the next question starts.
+  syncReadTree() {
+    this.readStale = true;
+    return this.underReadLock(() => (this.readers ? null : this.checkoutRead()));
+  }
+
+  // Returns the revision the question reads.
+  async beginRead() {
+    await this.underReadLock(async () => {
+      if (!this.readers && this.readStale) await this.checkoutRead();
+      this.readers++;
+    });
+    return this.readHead;
+  }
+
+  endRead() {
+    this.readers = Math.max(0, this.readers - 1);
+    if (!this.readers && this.readStale) this.underReadLock(() => (this.readers ? null : this.checkoutRead()));
+  }
+
+  underReadLock(fn) {
+    const run = this.readLock.then(fn);
+    this.readLock = run.catch(error => console.error('read tree sync failed', error));
+    return run;
+  }
+
+  async checkoutRead() {
+    if (!this.readDir || !fs.existsSync(path.join(this.readDir, '.git'))) { this.readStale = false; return; }
     const head = await this.head();
-    await this.git(['checkout', '--detach', '--force', head], { cwd: this.readDir });
+    const r = await this.git(['checkout', '--detach', '--force', head], { cwd: this.readDir });
+    // A failed checkout leaves the copy on its last good revision and stale, so the next sync tries again.
+    if (r.code) { console.error('read tree checkout failed', r.stderr.trim()); return; }
+    this.readHead = head;
+    this.readStale = false;
   }
 }
 

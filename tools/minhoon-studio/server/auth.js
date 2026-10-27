@@ -29,29 +29,18 @@ class Auth {
     this.usersFile = path.join(dataDir, 'users.json');
     this.sessionsFile = path.join(dataDir, 'sessions.json');
     this.sessions = readJsonFile(this.sessionsFile, {});
-    this.failures = new Map(); // ip -> [timestamps]; slows password guessing on an internet-facing port
   }
 
   users() { return readJsonFile(this.usersFile, {}); }
 
-  // Throttle repeated failures per address. The window protects the two accounts from online guessing.
-  throttled(ip) {
-    const now = Date.now();
-    const recent = (this.failures.get(ip) || []).filter(t => now - t < 10 * 60e3);
-    this.failures.set(ip, recent);
-    return recent.length >= 10;
-  }
-
-  login(name, password, ip) {
-    if (this.throttled(ip)) return { error: 'throttled' };
+  // No lockout: the owner keeps the studio to a simple login (10-28), and a lockout would stop the doctor after
+  // ordinary mistypes.
+  login(name, password) {
     const users = this.users();
     const user = Object.prototype.hasOwnProperty.call(users, name) ? users[name] : null;
     // Compare against a dummy record for unknown names so timing does not reveal which names exist.
     const ok = verifyPassword(String(password || ''), user || DUMMY);
-    if (!user || !ok) {
-      this.failures.get(ip).push(Date.now());
-      return { error: 'invalid' };
-    }
+    if (!user || !ok) return { error: 'invalid' };
     const sid = crypto.randomBytes(32).toString('base64url');
     this.sessions[sid] = { user: name, created: Date.now(), seen: Date.now() };
     this.save();

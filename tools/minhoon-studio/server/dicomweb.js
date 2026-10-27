@@ -20,9 +20,11 @@ class DicomWeb {
   available() { return this.studies.size > 0; }
   studyList() { return [...this.studies.values()]; }
 
-  // dataset: { byAlias(uid) -> mock study | null, all() -> [mock studies] }
+  // dataset: { revision, byAlias(uid) -> mock study | null, all() -> [mock studies] }
   handle(req, res, url, dataset, origin) {
     const p = url.pathname;
+    // Rewritten metadata carries the synthetic identity; when the dataset changes it must be rewritten again.
+    if (dataset.revision !== this.cacheRevision) { this.cache.clear(); this.cacheRevision = dataset.revision; }
     if (req.method !== 'GET' && req.method !== 'HEAD') { notSupported(res, req, p); return true; }
     if (p === '/dicom-web/studies' || p === '/dicom-web/studies/') return this.qido(res, url, dataset, origin), true;
     const m = p.match(/^\/dicom-web\/studies\/([0-9.]+)(\/.*)?$/);

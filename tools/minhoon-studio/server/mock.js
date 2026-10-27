@@ -715,8 +715,10 @@ class Mock {
       withImages: this.studies.filter(s => s.imageUid).length, createdAt: this.state.createdAt };
   }
 
+  // The revision lets the image server drop metadata it rewrote for an earlier version of the synthetic identities.
   dataset() {
-    return { byAlias: uid => this.byUid.get(uid) || null, all: () => this.studies };
+    this.load();
+    return { revision: this.datasetStamp, byAlias: uid => this.byUid.get(uid) || null, all: () => this.studies };
   }
 }
 

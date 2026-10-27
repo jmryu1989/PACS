@@ -17,7 +17,8 @@ const { Mock } = require('./mock');
 const { Sandbox } = require('./sandbox');
 const { Chat } = require('./chat');
 const { StatusFeed } = require('./status');
-const { writeDigest, listDigests } = require('./digest');
+const { writeDigest, listDigests, DIGEST_ID } = require('./digest');
+const { buildAndCheck } = require('./build');
 
 function loadConfig(argv) {
   const i = argv.indexOf('--config');
@@ -66,7 +67,7 @@ async function main() {
   setInterval(async () => {
     if (lastActivity > lastDigest && Date.now() - lastActivity > idleMinutes * 60e3 && !chat.pending) {
       lastDigest = Date.now();
-      try { const d = await writeDigest({ dataDir: config.paths.data, sandbox, reason: 'idle' }); broadcast({ type: 'digest', day: d.day, reason: 'idle' }); }
+      try { const d = await writeDigest({ dataDir: config.paths.data, sandbox, reason: 'idle', activeJobs: () => chat.activeJobIds() }); broadcast({ type: 'digest', day: d.day, reason: 'idle' }); }
       catch (error) { console.error('digest failed', error); }
     }
   }, 60e3).unref();
@@ -101,9 +102,7 @@ async function main() {
     if (p === '/studio-api/login' && req.method === 'POST') {
       if (!sameOrigin(req, origin)) { sendJson(res, 403, { error: 'origin' }); return; }
       const body = await readJson(req, 4096).catch(() => ({}));
-      const ip = req.socket.remoteAddress || '';
-      const r = auth.login(String(body.user || '').trim().toLowerCase(), body.password, ip);
-      if (r.error === 'throttled') { sendJson(res, 429, { error: '잠시 뒤에 다시 시도해 주세요.' }); return; }
+      const r = auth.login(String(body.user || '').trim().toLowerCase(), body.password);
       if (r.error) { sendJson(res, 401, { error: '이름 또는 비밀번호가 맞지 않습니다.' }); return; }
       sendJson(res, 200, { user: r.user, displayName: r.displayName }, { 'Set-Cookie': auth.cookie(r.sid, secure) });
       return;
@@ -174,11 +173,17 @@ async function main() {
     if (p === 'undo' && method === 'POST') {
       const body = await readJson(req, 4096);
       touch();
-      const result = await (chat.queue = chat.queue.then(() => sandbox.revert({ sha: body.sha, user })));
-      if (result.error) { sendJson(res, 409, { error: result.error }); return; }
-      chat.log({ role: 'system', user, displayName: session.displayName, mode: 'edit', text: `되돌림: ${result.reverted.subject}`, meta: { sha: result.sha, reverted: result.reverted.sha } });
+      // Same writer queue as edits; the result is rebuilt and checked like an edit before it reaches the mirror.
+      const validate = files => buildAndCheck(sandbox.dir, files, { python: config.claude.python });
+      const run = chat.queue.then(() => sandbox.revert({ sha: typeof body.sha === 'string' ? body.sha : null, user, withLater: body.withLater === true, validate }));
+      chat.queue = run.catch(() => {});
+      const result = await run;
+      if (result.error) { sendJson(res, 409, { error: result.error, code: result.code || null, later: result.later || null, errors: (result.errors || []).slice(0, 5).map(maskSecrets) }); return; }
+      const names = result.undone.map(i => i.subject);
+      chat.log({ role: 'system', user, displayName: session.displayName, mode: 'edit', text: `되돌림: ${names.join(' / ')}`,
+        meta: { sha: result.sha, reverted: result.reverted.sha, undone: result.undone.map(i => i.sha) } });
       broadcast({ type: 'reload', reason: 'undo', sha: result.sha });
-      sendJson(res, 200, { sha: result.sha, reverted: result.reverted });
+      sendJson(res, 200, { sha: result.sha, reverted: result.reverted, undone: result.undone.map(i => ({ sha: i.sha, subject: i.subject })) });
       return;
     }
     if (p === 'changes' && method === 'GET') { sendJson(res, 200, await sandbox.log()); return; }
@@ -212,7 +217,7 @@ async function main() {
       return;
     }
     if (p === 'digest' && method === 'POST') {
-      const d = await writeDigest({ dataDir: config.paths.data, sandbox, reason: 'done-for-today', by: user });
+      const d = await writeDigest({ dataDir: config.paths.data, sandbox, reason: 'done-for-today', by: user, activeJobs: () => chat.activeJobIds() });
       lastDigest = Date.now();
       chat.log({ role: 'system', user, displayName: session.displayName, mode: 'edit', text: `오늘 인계를 정리했습니다 (${d.day}). 지휘자가 가져갑니다.` });
       broadcast({ type: 'digest', day: d.day, reason: 'done-for-today' });
@@ -220,7 +225,7 @@ async function main() {
       return;
     }
     if (p === 'digests' && method === 'GET') { sendJson(res, 200, listDigests(config.paths.data)); return; }
-    if ((m = p.match(/^digests\/(\d{4}-\d{2}-\d{2})$/)) && method === 'GET') {
+    if ((m = p.match(/^digests\/([0-9-]+)$/)) && DIGEST_ID.test(m[1]) && method === 'GET') {
       const file = path.join(config.paths.data, 'public', 'digests', `${m[1]}.md`);
       if (!fs.existsSync(file)) { sendJson(res, 404, { error: 'not found' }); return; }
       send(res, 200, fs.readFileSync(file), { 'Content-Type': 'text/markdown; charset=utf-8', 'Cache-Control': 'no-store' });

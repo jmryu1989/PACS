@@ -21,7 +21,7 @@
     if (res.status === 401) { location.replace('/studio/login.html'); throw new Error('login'); }
     const type = res.headers.get('content-type') || '';
     const body = type.includes('json') ? await res.json() : await res.text();
-    if (!res.ok) throw new Error((body && body.error) || res.statusText);
+    if (!res.ok) { const error = new Error((body && body.error) || res.statusText); error.body = body; throw error; }
     return body;
   }
 
@@ -206,7 +206,7 @@
         if (ready || performance.now() > deadline) {
           const reloadMs = Math.round(performance.now() - started);
           if (ev.jobId) api('metrics/reload', { json: { jobId: ev.jobId, reloadMs, readyKind: ready ? (isList ? 'rows' : 'load') : 'timeout' } }).catch(() => {});
-          if (ev.jobId && state.timings && state.timings[ev.jobId]) state.timings[ev.jobId] += ` · 화면 새로고침 ${(reloadMs / 1000).toFixed(1)}초`;
+          if (ev.jobId && state.timings && state.timings[ev.jobId]) state.timings[ev.jobId] += ready ? ` · 화면 새로고침 ${(reloadMs / 1000).toFixed(1)}초` : ' · 화면 준비 시간 초과';
           if (keep && isList) {
             const row = doc.querySelector(`#rows tr[data-uid="${CSS.escape(keep.uid)}"]`);
             if (row) row.click();
@@ -254,9 +254,17 @@
   });
 
   // ── actions ──
-  async function doUndo(sha) {
-    try { await api('undo', { json: sha ? { sha } : {} }); refreshState(); }
-    catch (error) { alert(error.message); }
+  async function doUndo(sha, withLater = false) {
+    try { await api('undo', { json: { ...(sha ? { sha } : {}), withLater } }); refreshState(); }
+    catch (error) {
+      const body = error.body || {};
+      if (body.code === 'later-changes' && body.later && !withLater) {
+        const list = body.later.map(c => `- ${c.subject}`).join('\n');
+        if (confirm(`${error.message}\n\n함께 되돌릴 변경:\n${list}\n\n모두 되돌릴까요?`)) return doUndo(sha, true);
+        return;
+      }
+      alert(error.message + (body.errors && body.errors.length ? `\n\n${body.errors[0]}` : ''));
+    }
   }
   $('undo').onclick = () => doUndo();
   $('apply-now').onclick = () => reloadMirror(state.pendingReload || {});
@@ -382,9 +390,12 @@
       const s = ms => (Number.isFinite(ms) ? (ms / 1000).toFixed(1) + '초' : '—');
       for (const m of list.filter(x => x.kind !== 'reload-ready' && x.changed).reverse()) {
         const t = m.timings || {}; const r = reloads.get(m.jobId);
+        // A reload that hit the 30 s limit never showed the screen: say so instead of reporting it as a ready time.
+        const timedOut = r && r.readyKind === 'timeout';
         const tr = el('tr');
         tr.append(el('td', '', new Date(m.t).toLocaleTimeString('ko-KR')), el('td', '', m.text), el('td', '', s(t.claudeMs)), el('td', '', s(t.buildMs)),
-          el('td', '', s(t.lastEditToReloadSentMs)), el('td', '', s(r && r.reloadMs)), el('td', '', s(r && Number.isFinite(t.lastEditToReloadSentMs) ? t.lastEditToReloadSentMs + r.reloadMs : NaN)),
+          el('td', '', s(t.lastEditToReloadSentMs)), el('td', timedOut ? 'error' : '', timedOut ? '시간 초과' : s(r && r.reloadMs)),
+          el('td', timedOut ? 'error' : '', timedOut ? '준비 안 됨' : s(r && Number.isFinite(t.lastEditToReloadSentMs) ? t.lastEditToReloadSentMs + r.reloadMs : NaN)),
           el('td', '', s(t.totalToReloadSentMs)));
         table.append(tr);
       }

@@ -1,5 +1,5 @@
 'use strict';
-// Studio unit tests: node --test tools/minhoon-studio/test/
+// Studio unit tests (run command in the README, "Laptop development").
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -33,17 +33,16 @@ test('paths cannot escape the served root', () => {
   assert.strictEqual(safeJoin(root, 'a\0b'), null);
 });
 
-test('password hashes verify only the right password; repeated failures are throttled', () => {
+test('password hashes verify only the right password; mistypes never lock the right password out', () => {
   const record = hashPassword('correct horse battery');
   assert.ok(verifyPassword('correct horse battery', record));
   assert.ok(!verifyPassword('wrong', record));
   const dir = tmp();
   fs.writeFileSync(path.join(dir, 'users.json'), JSON.stringify({ minhoon: { displayName: '민훈', ...record } }));
   const auth = new Auth(dir);
-  assert.ok(auth.login('minhoon', 'correct horse battery', '1.1.1.1').sid);
-  for (let i = 0; i < 10; i++) assert.strictEqual(auth.login('minhoon', 'x', '2.2.2.2').error, 'invalid');
-  assert.strictEqual(auth.login('minhoon', 'correct horse battery', '2.2.2.2').error, 'throttled');
-  assert.strictEqual(auth.login('nobody', 'x', '3.3.3.3').error, 'invalid');
+  for (let i = 0; i < 20; i++) assert.strictEqual(auth.login('minhoon', 'x').error, 'invalid');
+  assert.ok(auth.login('minhoon', 'correct horse battery').sid);
+  assert.strictEqual(auth.login('nobody', 'x').error, 'invalid');
 });
 
 test('chat edits may only land in front-end and studio-mock paths', () => {
