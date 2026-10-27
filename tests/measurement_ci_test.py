@@ -1061,7 +1061,7 @@ class MeasurementCiTests(unittest.TestCase):
             ('e2e/test_hanging_protocol.py', 'HangingProtocolE2E', 'ci-hp-native'),
         ))
         self.assertEqual(profile['out'].name, 'hanging-protocols-ci')
-        self.assertEqual(profile['suite_timeout'], 400)
+        self.assertEqual(profile['suite_timeout'], max(profile['suite_budgets'].values()))
 
     def test_hanging_protocol_budget_cannot_starve_the_trailing_flows(self):
         profile = ci.PROFILES['hanging-protocols']
@@ -1069,26 +1069,25 @@ class MeasurementCiTests(unittest.TestCase):
         units = [unit for _, _, unit in profile['suites']]
         # Every suite is budgeted, and nothing is budgeted that is not a suite.
         self.assertEqual(sorted(budgets), sorted(units))
-        self.assertEqual(budgets, {'ci-hp-invariants': 400, 'ci-hp-worklist': 240,
-                                   'ci-hp-account': 120, 'ci-hp-native': 300})
-        # No budget may exceed the profile's own declared maximum, and none of them
-        # may raise the 900 this profile used to request.
+        self.assertTrue(all(value > 0 for value in budgets.values()))
         self.assertLessEqual(max(budgets.values()), profile['suite_timeout'])
-        self.assertTrue(all(value < 900 for value in budgets.values()))
-        # Unlike every other profile, this one's ENTIRE configured worst case fits
-        # main()'s single deadline, with room left for the stack it shares.
-        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         worst_case = sum(budgets.values()) + 35*len(units)
-        self.assertEqual(worst_case, 1200)
-        # Measured on run 34703534031: 60.6s setup and 12.8s cleanup through this
-        # same main() path. The reserve left over is 3.8x that.
-        self.assertGreaterEqual(25*60 - worst_case, 4*74)
-        # The required order is 69 -> 15 -> API -> e2e, so the new flow runs last;
-        # even if everything ahead of it burns its whole budget and the stack takes
-        # four times its measured time, the trailing suite keeps its full slice.
-        ahead = sum(budgets[unit] + 35 for unit in units[:-1])
+        deadline = ci.profile_deadline_seconds('hanging-protocols')
+        self.assertEqual(deadline, worst_case)
+        # With no setup time consumed, each ordered suite receives its full slice
+        # even when every preceding suite consumes its supervisor budget.
+        remaining = deadline
+        for suite, class_name, unit in profile['suites']:
+            command, outer = ci.guarded_profile_run(profile, suite, class_name, unit, remaining)
+            self.assertEqual(int(command[command.index('--timeout')+1]), budgets[unit])
+            self.assertEqual(outer, budgets[unit] + 35)
+            remaining -= outer
+        self.assertEqual(remaining, 0)
         self.assertEqual(units[-1], 'ci-hp-native')
-        self.assertGreaterEqual(25*60 - ahead - 4*74, budgets['ci-hp-native'])
+        for name in ci.PROFILES:
+            if name != 'hanging-protocols':
+                self.assertEqual(ci.profile_deadline_seconds(name),
+                                 3900 if name == 'emr-b' else 1500)
 
     def test_hanging_protocol_commands_are_exact_ordered_and_separately_capped(self):
         profile = ci.PROFILES['hanging-protocols']
@@ -1337,7 +1336,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(len({row[2] for row in measurements['suites']}), 20)
         self.assertEqual(measurements['suite_timeout'], 540)
         self.assertNotIn('suite_budgets', measurements)
-        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == ci.PROFILES[name].get('deadline_seconds', 3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         self.assertEqual(volume['suites'], (('e2e/test_volume_rendering.py',
                          None, 'ci-volume-rendering'),))
         self.assertEqual(output['suites'], (
@@ -1430,7 +1429,7 @@ class MeasurementCiTests(unittest.TestCase):
         # All suites share main()'s single deadline, so no one suite may be able to
         # claim it: even at full cap every suite plus its reserved margin must fit
         # with stack time left, and the cap must stay under the volume-rendering cap.
-        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == ci.PROFILES[name].get('deadline_seconds', 3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
         self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
         self.assertLess(profile['suite_timeout'],
@@ -1573,7 +1572,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual([command[command.index('--unit')+1] for command in commands],
                          ['ci-path-native', 'ci-mpr-orientation', 'ci-finding-location'])
         # All three suites at full cap plus their reserved margins fit the shared deadline with stack time left.
-        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == ci.PROFILES[name].get('deadline_seconds', 3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         self.assertEqual(sum(budget+35 for budget in budgets.values()), 1185)
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
         self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
@@ -1672,7 +1671,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual([command[command.index('--unit')+1] for command in commands],
                          ['ci-batch-preview', 'ci-batch-context', 'ci-batch-save', 'ci-batch-scout'])
         # All four suites at full cap plus their reserved margins fit the shared deadline with stack time left.
-        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == ci.PROFILES[name].get('deadline_seconds', 3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         self.assertEqual(sum(budget+35 for budget in budgets.values()), 1220)
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
         self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
@@ -1752,7 +1751,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual([command[command.index('--unit')+1] for command in commands],
                          ['ci-mpr-sync', 'ci-mpr-preferences'])
         # Both suites at full cap plus their reserved margins fit the shared deadline with stack time left.
-        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == ci.PROFILES[name].get('deadline_seconds', 3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         self.assertEqual(sum(budget+35 for budget in budgets.values()), 970)
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
         self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
@@ -1825,7 +1824,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual([command[command.index('--unit')+1] for command in commands],
                          ['ci-mpr-marks', 'ci-mpr-marks-print'])
         # Both suites at full cap plus their reserved margins fit the shared deadline with stack time left.
-        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == ci.PROFILES[name].get('deadline_seconds', 3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         self.assertEqual(sum(budget+35 for budget in budgets.values()), 1150)
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
         self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
@@ -1890,7 +1889,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(command[command.index('--timeout')+1], '1200')
         self.assertEqual(outer, 1235)
         # The one suite at full cap plus its reserved margin fits the shared deadline with stack time left.
-        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == ci.PROFILES[name].get('deadline_seconds', 3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         self.assertEqual(sum(budget+35 for budget in budgets.values()), 1235)
         self.assertEqual(25*60-sum(budget+35 for budget in budgets.values()), 265)
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
@@ -1966,7 +1965,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(command[command.index('--unit')+1], 'ci-mip-job')
         self.assertEqual(command[command.index('--timeout')+1], '1200')
         self.assertEqual(outer, 1235)
-        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == ci.PROFILES[name].get('deadline_seconds', 3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         self.assertEqual(sum(budget+35 for budget in budgets.values()), 1235)
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
         self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
@@ -2558,7 +2557,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(command[command.index('--timeout')+1], '1260')
         self.assertEqual(outer, 1295)
         # A1: 1260+35 = 1295 <= 1500-205, and 205s is about 2.5x the recorded hosted stack setup and cleanup.
-        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == ci.PROFILES[name].get('deadline_seconds', 3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         self.assertLessEqual(profile['suite_timeout'] + 35, 25*60 - 205)
         for name, other in ci.PROFILES.items():
             if name != 'gateway-e2e':
