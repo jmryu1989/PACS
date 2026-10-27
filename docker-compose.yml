@@ -76,8 +76,10 @@ services:
     volumes:
       - pg-db:/var/lib/postgresql/data
       - emr-access:/var/lib/postgresql/emr-access
+      - ./keycloak/init-db.sql:/docker-entrypoint-initdb.d/10-keycloak.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U kin"]
+      # The temporary initdb server uses only a Unix socket; wait for initialization to finish.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U kin"]
       interval: 5s
       timeout: 5s
       retries: 10

@@ -106,8 +106,6 @@ def setup(args, directory):
     run(['docker', 'build', '--target', 'production', '--build-arg', 'VCS_REF='+facts['head_sha'],
          '-t', image, str(ROOT/'api')], args.timeout)
     cmd = command(directory, project)
-    run(cmd+['up', '-d', '--wait', 'db'], args.timeout, env=env)
-    run(cmd+['exec', '-T', 'db', 'createdb', '-U', 'kin', 'keycloak'], args.timeout, env=env)
     run(cmd+['up', '-d', '--build'], args.timeout, env=env)
     session = requests.Session()
     session.trust_env = False

@@ -1717,7 +1717,7 @@ def replay_roles(container, source, user="kin", shape="pre", credentials=None):
 
 def restore_pre_snapshot(container, directory, user="kin"):
     """A pre-EMR snapshot into a fresh product-shaped cluster (the image created kin as POSTGRES_USER/POSTGRES_DB):
-    its roles replayed, the image's empty kin database replaced, kin and keycloak restored with --create (database
+    its roles replayed, the installation's empty databases replaced, kin and keycloak restored with --create (database
     owners, privileges and settings included), never with --no-owner/--no-privileges; then the cluster's whole catalog
     (roles, memberships, databases, tablespaces, schemas, every object's owner and privileges) equals the snapshot's."""
     return restore_snapshot(container, directory, user, shape="pre")
@@ -1744,18 +1744,28 @@ def _restore_snapshot(container, directory, user, shape, source):
             _unsupported("복원 snapshot의 DB inventory가 불완전합니다")
         for database in PRE_DATABASES:
             inventory_valid(source["objects"][database], database)
-    credentials = snapshot_credentials(directory)
-    replayed = replay_roles(container, source, user, shape, credentials)
     probe = _pg_command(container, "psql") + ["-X", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-qAt", "-c"]
-    if shape == "post":
-        run(probe + ["CREATE TABLESPACE kin_emr_access OWNER kin_emr_owner LOCATION '" + EMR_TABLESPACE + "';"])
     fresh = text(probe + ["SELECT (SELECT count(*) FROM pg_database WHERE datname='keycloak') || ':' || "
                           "(SELECT count(*) FROM pg_database WHERE datname='kin');"])
-    tables = text(_pg_command(container, "psql") + ["-X", "-U", user, "-d", "kin", "-v", "ON_ERROR_STOP=1", "-qAt", "-c",
-                   "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public';"])
-    if fresh != "0:1" or tables != "0":
+    if fresh not in ("0:1", "1:1"):
         raise RuntimeError("The restore target is not a fresh cluster")
-    run(probe + ["DROP DATABASE kin WITH (FORCE);"])
+    empty_databases = ("kin", "keycloak") if fresh == "1:1" else ("kin",)
+    # Clean Compose installs also create keycloak. Check every database before dropping any;
+    # a started API/Keycloak or an existing site's non-public tables must survive a mistaken restore.
+    for database in empty_databases:
+        objects = text(_pg_command(container, "psql") + ["-X", "-U", user, "-d", database,
+                       "-v", "ON_ERROR_STOP=1", "-qAt", "-c",
+                       "SELECT (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+                       "WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema') + "
+                       "(SELECT count(*) FROM pg_largeobject_metadata);"])
+        if objects != "0":
+            raise RuntimeError("The restore target is not a fresh cluster: " + database + " is not empty")
+    credentials = snapshot_credentials(directory)
+    replayed = replay_roles(container, source, user, shape, credentials)
+    if shape == "post":
+        run(probe + ["CREATE TABLESPACE kin_emr_access OWNER kin_emr_owner LOCATION '" + EMR_TABLESPACE + "';"])
+    for database in empty_databases:
+        run(probe + ["DROP DATABASE " + database + " WITH (FORCE);"])
     for database in PRE_DATABASES:
         with (directory / (database + ".dump")).open("rb") as handle:
             run(_pg_command(container, "pg_restore", interactive=True) + ["-U", user, "-d", "postgres", "--create", "--exit-on-error"],
