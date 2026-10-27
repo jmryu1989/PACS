@@ -365,7 +365,8 @@ class FindingAPI(unittest.TestCase):
             self.call(body=self.finding_body([dict(itemId=length['id'], revision=1, **forged)]), status=400)
         self.call(body=self.finding_body([length, length]), status=400)
         self.call(body=self.finding_body([]), status=400)
-        self.call(body=self.finding_body([dict(itemId=str(uuid.uuid4()), revision=1) for _ in range(9)]), status=400)
+        # #259 removed the 8-source cap: nine sources pass the shape check and unknown ones are refused by the lookup.
+        self.call(body=self.finding_body([dict(itemId=str(uuid.uuid4()), revision=1) for _ in range(9)]), status=404)
         self.call(body=self.finding_body([length], primary=1), status=400)
         self.call(body=self.finding_body([length], title='x'*201), status=400)
         self.call(body={**self.finding_body([length]), 'author': 'forged'}, status=400)
@@ -577,8 +578,10 @@ class FindingAPI(unittest.TestCase):
         finally: unseed()
         psql(f'UPDATE "Finding" SET revision=1000 WHERE id={literal(head["id"])}::uuid')
         try:
+            # #259 removed the 1000-revision history cap (FINDING_LIMITS keeps only per-snapshot bounds). A head revision
+            # moved outside the clinical write path is not built upon: D's online version ledger answers StaleRevision.
             current = self.current(head); current['revision'] = 1000
-            restored, _ = self.revise(current, 'restore', reason=''); self.assertEqual(restored['revision'], 1001)
+            refused, _ = self.revise(current, 'restore', reason='', status=409); self.assertEqual(refused['code'], 'StaleRevision')
         finally: psql(f'UPDATE "Finding" SET revision=(SELECT max(revision) FROM "FindingRevision" WHERE "findingId"={literal(head["id"])}::uuid) WHERE id={literal(head["id"])}::uuid')
         # An audit fault rolls the whole write back.
         name = 'finding_fault_'+uuid.uuid4().hex
