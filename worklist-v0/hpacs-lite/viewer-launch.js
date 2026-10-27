@@ -94,29 +94,44 @@
         return !!entry && entry.ended === false && entry.entryStopped === true;
       } catch (_) { return false; }
     }
+    /**
+     * Opens or replaces the list's viewer window. The answer is typed for a caller that needs it (W9's launch): `accepted`
+     * (navigated, or the same scope focused), `refused` (a protected or unverifiable window kept, a session or slot that
+     * cannot be used), `blocked` (no popup) or `failed` (an invalid series). Ordinary callers ignore it; every check and
+     * notice below is the same for them.
+     *
+     * openingOptions.reservation (W9): a window slot and popup the caller took in its user gesture (reserveViewingSet), used
+     * here instead of choosing and opening one again after an await. openingOptions.viewingSet: the W9 opening id, carried
+     * to the viewer in the URL fragment (`kin-w9`) so its renderer observer reports to that opening only.
+     */
     function openOhifWindow(uid, priorUid = null, initialSeriesUid = null, readingReturn = null, openingOptions = null) {
       const freshDocument = openingOptions?.freshDocument === true;
+      const reservation = openingOptions?.reservation?.kind === 'window' ? openingOptions.reservation : null;
       const notify = (message, kind, duration) => {
         if (freshDocument && typeof openingOptions?.notice === 'function') openingOptions.notice(message);
         toast(message, kind, duration);
       };
-      if (demoMode) { alert("데모 모드에서는 뷰어를 열 수 없습니다.\n(실제 구동은 Orthanc 연결 환경에서)"); return; }
+      const outcome = (status, message = null) => ({ status, message });
+      if (demoMode) { alert("데모 모드에서는 뷰어를 열 수 없습니다.\n(실제 구동은 Orthanc 연결 환경에서)"); return outcome('refused', '데모 모드에서는 뷰어를 열 수 없습니다.'); }
       // 썸네일에 Series 식별이 없으면 기본 시리즈를 대신 열어 선택이 맞는 것처럼 보이지 않는다.
       if (initialSeriesUid !== null && (typeof initialSeriesUid !== "string" || initialSeriesUid.length > 64 ||
           !/^\d+(?:\.\d+)+$/.test(initialSeriesUid))) {
         notify("시리즈 정보를 확인할 수 없어 열지 않았습니다.", "err");
-        return;
+        return outcome('failed', "시리즈 정보를 확인할 수 없어 열지 않았습니다.");
       }
-      const returnHash=typeof readingReturn==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(readingReturn)?'#kin-reading-return='+readingReturn:'';
+      const UUID4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+      const returnHash=typeof readingReturn==='string'&&UUID4.test(readingReturn)?'#kin-reading-return='+readingReturn:'';
+      const viewingSet = typeof openingOptions?.viewingSet === 'string' && UUID4.test(openingOptions.viewingSet) ? openingOptions.viewingSet : null;
       let url = `/ohif/viewer?StudyInstanceUIDs=${encodeURIComponent(uid)}` +
         (priorUid && priorUid !== uid ? `,${encodeURIComponent(priorUid)}&hangingProtocolId=@ohif/hpCompare` : "") +
-        (initialSeriesUid === null ? "" : `&initialSeriesInstanceUID=${encodeURIComponent(initialSeriesUid)}`)+returnHash;
+        (initialSeriesUid === null ? "" : `&initialSeriesInstanceUID=${encodeURIComponent(initialSeriesUid)}`)+returnHash+
+        (viewingSet ? (returnHash ? '&' : '#') + 'kin-w9=' + viewingSet : '');
       const seq = ++ohifOpenSeq;
-      if (!viewerWindows) { notify('영상 창 연결을 확인하지 못했습니다. 통합 판독 화면을 사용하거나 목록을 새로고침하세요.', 'err'); return; }
+      if (!viewerWindows) { notify('영상 창 연결을 확인하지 못했습니다. 통합 판독 화면을 사용하거나 목록을 새로고침하세요.', 'err'); return outcome('refused', '영상 창 연결을 확인하지 못했습니다. 통합 판독 화면을 사용하거나 목록을 새로고침하세요.'); }
       // A saved multi-window preference must not allocate another viewer. Keep
       // older live windows in the registry so their work remains reachable.
-      const choice = viewerWindows.choose(url, 1, { singleWindow: true });
-      if (choice.error) { notify(choice.error, 'err', 8000); if (choice.full && !freshDocument) $('#viewer-windows-open').click(); return; }
+      const choice = reservation ? reservation.choice : viewerWindows.choose(url, 1, { singleWindow: true });
+      if (choice.error) { notify(choice.error, 'err', 8000); if (choice.full && !freshDocument) $('#viewer-windows-open').click(); return outcome('refused', choice.error); }
       url = viewerWindows.linked(url, choice.index);
       const stored = readStoredOhifRect(choice.index);
       const initial = ohifPlacement(stored);
@@ -128,7 +143,11 @@
        */
       let known = null;
       try { if (choice.popup && !choice.popup.closed) known = choice.popup; } catch (_) {}
-      const popup = known || window.open(
+      // A reserved window the reader closed while the answer was on its way is not reopened outside the click.
+      let reservedClosed = false;
+      try { reservedClosed = !!reservation && reservation.popup.closed; } catch (_) { reservedClosed = true; }
+      if (reservedClosed) return outcome('refused', '영상 창이 닫혀 열지 않았습니다. 다시 여세요.');
+      const popup = reservation ? reservation.popup : known || window.open(
         "",
         choice.name,
         `popup=yes,width=${initial.width},height=${initial.height},left=${initial.left},top=${initial.top},resizable=yes,scrollbars=yes`,
@@ -136,11 +155,11 @@
       if (popup) {
         viewerWindows.attach(choice, popup); viewerWindowCursor = choice.index; ohifPopupSlots.set(popup, choice.index);
         // Reopening a named window can restore its opener even without navigation.
-        try{popup.opener=null;}catch(_){notify('영상 창 연결을 분리하지 못했습니다. 기존 창에서 작업을 저장한 뒤 닫고 다시 여세요.','err',8000);return;}
+        try{popup.opener=null;}catch(_){notify('영상 창 연결을 분리하지 못했습니다. 기존 창에서 작업을 저장한 뒤 닫고 다시 여세요.','err',8000);return outcome('refused','영상 창 연결을 분리하지 못했습니다. 기존 창에서 작업을 저장한 뒤 닫고 다시 여세요.');}
         if (choice.pending) {
           popup.focus(); watchOhifRect(popup);
           notify('기존 영상 창을 불러오는 중입니다. 계속되지 않으면 그 창을 닫은 뒤 다시 여세요.', 'info');
-          return;
+          return outcome('refused', '기존 영상 창을 불러오는 중입니다. 계속되지 않으면 그 창을 닫은 뒤 다시 여세요.');
         }
         const previous = ohifPopupState(popup);
         const deferredPlacement = previous.kind === 'blank';
@@ -168,33 +187,67 @@
             popup.kinViewerOpenPatient?.(url);
             popup.focus();
             watchOhifRect(popup);
-            return;
+            return outcome('accepted');
           }
           if (previous.busy || previous.dirty || !previous.ready) {
             try { popup.focus(); } catch (_) {}
             watchOhifRect(popup);
-            notify(!previous.ready
+            const kept = !previous.ready
               ? "기존 영상 창의 보호 상태를 확인할 수 없습니다. 로딩을 확인하고 계속되지 않으면 그 창을 닫은 뒤 다시 여세요."
               : previous.busy
               ? "기존 영상 창의 저장·복원 또는 상태 확인을 마치고 열린 대화상자를 닫은 뒤 다른 검사를 여세요."
-              : "기존 영상 창에 저장하지 않은 표식이나 작업 내용(소견 작성 내용 포함)이 있습니다. 저장하거나 비운 뒤 다른 검사를 여세요.", "err", 8000);
-            return;
+              : "기존 영상 창에 저장하지 않은 표식이나 작업 내용(소견 작성 내용 포함)이 있습니다. 저장하거나 비운 뒤 다른 검사를 여세요.";
+            notify(kept, "err", 8000);
+            return outcome('refused', kept);
           }
           // U2 keeps this document and checks coverage at the final assignment.
           if (!freshDocument && !stopped && typeof popup.kinViewerOpenPatient === 'function') {
-            popup.kinViewerOpenPatient(url);
-            popup.focus(); watchOhifRect(popup); return;
+            const at = work.capture('document'), previousSequence = ohifPopupSequences.get(popup);
+            const pending = popup.kinViewerOpenPatient(url, { signal: openingOptions?.signal });
+            popup.focus(); watchOhifRect(popup);
+            // Patient tabs admit a route asynchronously. W9 must bind its renderer channel only after that admission,
+            // while a refusal keeps the previous opening's sequence and displayed state.
+            // That promise belongs to the viewer document: closing or reloading the window discards its tasks and the
+            // promise never settles, which would leave the caller waiting for good. This page watches that document
+            // itself (its pagehide, and a check every 2 s as a backstop) and answers for it.
+            const admitting = popup.document;
+            return new Promise(resolve => {
+              let done = false, watch = null;
+              const lost = () => finish(outcome('refused', '영상 창이 닫히거나 다시 읽혀 열지 않았습니다. 다시 여세요.'));
+              const check = () => {
+                let gone = true;
+                try { gone = popup.closed || popup.document !== admitting; } catch (_) {}
+                if (gone) lost();
+              };
+              const finish = result => {
+                if (done) return;
+                done = true; clearInterval(watch);
+                try { popup.removeEventListener('pagehide', lost); } catch (_) {}
+                resolve(result);
+              };
+              // pagehide fires on the admitting document only as it is unloaded; a tab switch replaces the route in place.
+              try { popup.addEventListener('pagehide', lost); } catch (_) {}
+              watch = setInterval(check, 2000);
+              Promise.resolve(pending).then(accepted => {
+                if (!accepted || !work.admits(at) || popup.closed || ohifPopupSequences.get(popup) !== previousSequence)
+                  return finish(outcome('refused', '기존 영상 창을 유지했습니다. 영상 창의 안내를 확인하세요.'));
+                ohifPopupSequences.set(popup, seq);
+                finish(outcome('accepted'));
+              }, () => finish(outcome('failed', '영상 창에서 검사를 열지 못했습니다. 영상 창의 안내를 확인한 뒤 다시 시도하세요.')));
+            });
           }
           if (typeof popup.kinViewerFrameCoverageConfirm !== 'function' || !popup.kinViewerFrameCoverageConfirm(message => confirm(message))) {
-            popup.focus(); notify('기존 영상 창을 유지했습니다. Frame Coverage와 원본 영상을 확인하세요.', 'info'); return;
+            popup.focus(); notify('기존 영상 창을 유지했습니다. Frame Coverage와 원본 영상을 확인하세요.', 'info');
+            return outcome('refused', '기존 영상 창을 유지했습니다. Frame Coverage와 원본 영상을 확인하세요.');
           }
           const rechecked = ohifPopupState(popup);
-          if (popup.location.href !== previous.href || !rechecked.ready || rechecked.busy || rechecked.dirty) return;
+          if (popup.location.href !== previous.href || !rechecked.ready || rechecked.busy || rechecked.dirty)
+            return outcome('refused', '기존 영상 창의 상태가 바뀌어 열지 않았습니다. 다시 여세요.');
           rememberOhifRect(popup);
         } else if (previous.kind !== "blank" && !stopped) {
           popup.focus();
           notify("기존 영상 창의 상태를 확인할 수 없습니다. 그 창을 닫은 뒤 다시 여세요.", "err", 8000);
-          return;
+          return outcome('refused', "기존 영상 창의 상태를 확인할 수 없습니다. 그 창을 닫은 뒤 다시 여세요.");
         }
         // feature는 안쪽 크기이므로 저장된 바깥 크기로 맞춰 재열기 누적을 막는다.
         if (previous.kind === "blank") {
@@ -206,7 +259,7 @@
         if (!handOverSession(popup, choice.name)) {
           if (previous.kind === "blank") { try { popup.close(); } catch (_) {} viewerWindows.blocked(choice); }
           notify("이 목록의 로그인 세션을 확인할 수 없어 영상 창을 열지 않았습니다. 목록을 새로고침한 뒤 다시 여세요.", "err", 8000);
-          return;
+          return outcome('refused', "이 목록의 로그인 세션을 확인할 수 없어 영상 창을 열지 않았습니다. 목록을 새로고침한 뒤 다시 여세요.");
         }
         const previousDocument = popup.document;
         ohifPopupSequences.set(popup, seq);
@@ -280,11 +333,82 @@
             }).catch(() => { clearTimeout(expiry);stopPlacement(); });
           } catch (_) { clearTimeout(expiry);stopPlacement(); }
         }
-        return;
+        return outcome('accepted');
       }
 
       viewerWindows.blocked(choice);
       notify('팝업이 차단되었습니다. 브라우저에서 팝업을 허용하거나 Image Opening에서 Reading Workspace를 선택하세요.', 'err', 8000);
+      return outcome('blocked', '팝업이 차단되었습니다. 브라우저에서 팝업을 허용하거나 Image Opening에서 Reading Workspace를 선택하세요.');
+    }
+
+    /**
+     * W9 (multi-study view) runs the launcher above in phases, because its answer comes after an await and a browser opens a
+     * window only inside the user's gesture. reserveViewingSet() runs in the click: it takes the window slot the ordinary
+     * open would take for these UIDs and, when no live window holds that slot, opens its blank window now. After the resolve,
+     * launchViewingSet() navigates exactly that reservation through openOhifWindow's own checks (busy/dirty/modal, Frame
+     * Coverage, session hand-over), and releaseViewingSet() closes a window only if this reservation opened it and it is
+     * still blank. The Reading Workspace needs no window: with a Reading Target it takes the members as its own 1/2-study
+     * input; without one the members open in the window and no report UID is made up.
+     */
+    function viewingSetToWorkspace() {
+      return !!selectedUid && (readingWorkspace.active() || imageOpening?.snapshot().listTarget === 'workspace');
+    }
+    let viewingSetRetryWindow = null;
+    function reserveViewingSet(uids, { preserveStudies = [], compositionId = null } = {}) {
+      if (!Array.isArray(uids) || uids.length < 1 || uids.length > 2) return { status: 'refused', message: '열 검사를 확인하지 못했습니다.' };
+      const workspace = readingWorkspace?.viewerTarget?.();
+      // Keep the workspace partner in its pane. In window mode Minhoon's option 1 replaces the existing document
+      // through openOhifWindow's normal unsaved-work and Frame Coverage checks.
+      const preservePartner = viewingSetToWorkspace() &&
+        !!workspace?.studies.some(value => preserveStudies.includes(value));
+      if (viewingSetToWorkspace() && !preservePartner) return { status: 'reserved', kind: 'workspace' };
+      if (demoMode) return { status: 'refused', message: '데모 모드에서는 뷰어를 열 수 없습니다.' };
+      if (!viewerWindows) return { status: 'refused', message: '영상 창 연결을 확인하지 못했습니다. 통합 판독 화면을 사용하거나 목록을 새로고침하세요.' };
+      const url = `/ohif/viewer?StudyInstanceUIDs=${uids.map(encodeURIComponent).join(',')}` + (uids.length === 2 ? '&hangingProtocolId=@ohif/hpCompare' : '');
+      // A previous composition may leave this retry document open. Reuse its slot through the normal launch guards.
+      const ownRetryWindow = preservePartner && viewingSetRetryWindow?.isOpen() && viewerWindows.rows().some(row => row.popup === viewingSetRetryWindow.popup);
+      const choice = viewerWindows.choose(url, 1, preservePartner && !ownRetryWindow ? { freshDocument: true } : { singleWindow: true });
+      if (choice.error) return { status: 'refused', message: choice.full
+        ? '영상 창 수 제한에 도달했습니다. Viewer Windows에서 기존 창으로 돌아가거나 저장 후 닫으세요.' : choice.error };
+      let known = null;
+      try { if (choice.popup && !choice.popup.closed) known = choice.popup; } catch (_) {}
+      const initial = ohifPlacement(readStoredOhifRect(choice.index));
+      const popup = known || window.open('', choice.name,
+        `popup=yes,width=${initial.width},height=${initial.height},left=${initial.left},top=${initial.top},resizable=yes,scrollbars=yes`);
+      if (!popup) { viewerWindows.blocked(choice); return { status: 'blocked' }; }
+      viewerWindows.attach(choice, popup); ohifPopupSlots.set(popup, choice.index);
+      try { popup.opener = null; } catch (_) { return { status: 'refused', message: '영상 창 연결을 분리하지 못했습니다. 기존 창에서 작업을 저장한 뒤 닫고 다시 여세요.' }; }
+      let own = false;
+      try { own = !known && popup.location.href === 'about:blank'; } catch (_) {}
+      return { status: 'reserved', kind: 'window', choice, popup, own, preservePartner, compositionId };
+    }
+    function launchViewingSet(reservation, plan, opening, metadata, signal) {
+      const uids = [plan.uid, plan.priorUid].filter(Boolean);
+      // WORKLIST-SPLIT-UID: a study the last list excluded as unresolved replaces no window or workspace pane here either.
+      if (uids.some(value => appState[value]?.identityUnresolved))
+        return { status: 'refused', message: '환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다.' };
+      if (reservation?.kind === 'workspace') {
+        if (!viewingSetToWorkspace()) return { status: 'refused', message: '판독 대상과 영상 작업공간을 확인한 뒤 다시 여세요.' };
+        return readingWorkspace.openViewingSet(plan.uid, plan.priorUid, { opening, metadata });
+      }
+      if (reservation?.kind !== 'window') return { status: 'refused', message: '영상 창을 확인하지 못했습니다. 다시 여세요.' };
+      return Promise.resolve(openOhifWindow(plan.uid, plan.priorUid, null, null, { reservation, viewingSet: opening, signal })).then(result => {
+        if (result.status === 'accepted') {
+          const sequence = ohifPopupSequences.get(reservation.popup);
+          result.isOpen = () => !reservation.popup.closed && ohifPopupSequences.get(reservation.popup) === sequence;
+          if (reservation.preservePartner) viewingSetRetryWindow = {
+            compositionId: reservation.compositionId, popup: reservation.popup, isOpen: result.isOpen,
+          };
+        }
+        return result;
+      });
+    }
+    function releaseViewingSet(reservation) {
+      if (reservation?.kind !== 'window') return;
+      if (reservation.own) {
+        try { if (!reservation.popup.closed && reservation.popup.location.href === 'about:blank') reservation.popup.close(); } catch (_) {}
+      }
+      viewerWindows?.refresh();
     }
 
     function mountViewerWindows() {
@@ -501,7 +625,7 @@
       button.onclick = () => { viewerWindows.refresh(); render(); status.textContent = viewerWindows.error() || ''; dialog.showModal(); $('#viewer-windows-done').focus(); };
       $('#viewer-windows-done').onclick = () => dialog.close(); dialog.addEventListener('close', () => { ++displaySequence;if (!button.disabled) button.focus(); });
       // 주기마다 그때의 문맥으로 지난다: 로그아웃 준비 중에는 다시 그리지 않고, 편집으로 돌아오면 다음 주기가 이어 간다.
-      const timer = setInterval(() => { work.commit(work.capture('document'), () => { viewerWindows.refresh(); render(); }); }, 2000);
+      const timer = setInterval(() => { work.commit(work.capture('document'), () => { viewerWindows.refresh(); render(); multiStudyView?.refresh(); }); }, 2000);
       const end = () => { ++displaySequence;displayScreens=[];clearInterval(timer); viewerWindows.end(); button.disabled = true; dialog.close(); list.replaceChildren(); };
       onSessionEnd(end); window.addEventListener('pagehide', end);
       render();

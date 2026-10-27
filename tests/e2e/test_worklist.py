@@ -914,18 +914,23 @@ class WorklistE2E(unittest.TestCase):
                 self.assertEqual(self.download_row(old), "prepared|0")
                 route.fulfill(status=502, content_type="text/html", body="<html>SYN lost preparation reply</html>")
 
+            # Each replaced answer is followed at once by the panel's own status read. The route is removed only after that
+            # read has answered: page.unroute turns Playwright's request interception off, and a request leaving at that
+            # moment can stay paused in the browser forever, never reaching the proxy (reproduced without the product:
+            # 4/500 such reads hung with unroute in the finally, 0/500 with unroute after the read).
             page.route("**" + prepare_path, lost_preparation)
             try:
                 page.locator(f'#rows tr[data-uid="{fixture.uid}"]').click(button="right")
                 with page.expect_response(lambda r: r.request.method == "POST" and r.url.endswith(prepare_path)):
                     page.locator("#ctx").get_by_text("Download Originals", exact=True).click()
+                self.assertEqual(len(committed), 1)
+                old = committed[0]
+                old_box = self.transfer_box(page, old)
+                expect(old_box.locator(".study-transfer-state")).to_have_text("Ready", timeout=30000)
             finally:
                 page.unroute("**" + prepare_path, lost_preparation)
-            self.assertEqual(len(committed), 1)
-            old = committed[0]
-            old_box = self.transfer_box(page, old)
-            expect(old_box.locator(".study-transfer-state")).to_have_text("Ready", timeout=30000)
             grant_path = prepare_path + f"/{old}/archive/grant"
+            status_path = prepare_path + "/" + old
             issued = []
 
             def lost_grant(route):
@@ -936,8 +941,9 @@ class WorklistE2E(unittest.TestCase):
 
             page.route("**" + grant_path, lost_grant)
             try:
-                with page.expect_response(lambda r: r.request.method == "POST" and r.url.endswith(grant_path)):
-                    old_box.get_by_role("button", name="Download", exact=True).click()
+                with page.expect_response(lambda r: r.request.method == "GET" and r.url.endswith(status_path)):
+                    with page.expect_response(lambda r: r.request.method == "POST" and r.url.endswith(grant_path)):
+                        old_box.get_by_role("button", name="Download", exact=True).click()
                 expect(old_box.get_by_role("button", name="Check Again", exact=True)).to_be_visible()
             finally:
                 page.unroute("**" + grant_path, lost_grant)
@@ -947,7 +953,6 @@ class WorklistE2E(unittest.TestCase):
             self.assertEqual(native_events, [], "lost grant answer cannot start native download")
             self.assertEqual(old_box.get_by_role("button", name="Download", exact=True).count(), 0)
 
-            status_path = prepare_path + "/" + old
             def malformed_archive_status(route):
                 response = route.fetch()
                 self.assertEqual(response.status, 200)

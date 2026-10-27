@@ -46,7 +46,7 @@ def select_image_tool(viewer, tool):
 
 def display_transform(viewer, action):
     if action == 'v':
-        # F8 leaves single-key defaults undecided. Use the existing display control.
+        # Flip Vertical is a U2-only tool; this dock control also serves embedded viewers.
         tab = viewer.locator('#kin-workspace-dock nav button[aria-controls="kin-viewer-layout"]')
         previous = viewer.locator('#kin-workspace-dock nav button[aria-expanded="true"]')
         previous_id = previous.get_attribute('aria-controls') if previous.count() else None

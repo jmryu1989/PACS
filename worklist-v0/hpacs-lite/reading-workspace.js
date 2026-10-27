@@ -95,6 +95,7 @@ window.KinReadingWorkspace = function (app) {
   const reportTarget = node('div'); reportTarget.id = 'reading-report-target'; reportTarget.hidden = true;
   $('.report-p').prepend(reportTarget);
   let active = false, ended = false, frame = null, shown = null, pending = null, epoch = 0, timer = null, deadline = 0, loaded = false, failed = false, lastSelection;
+  let viewingSet = null; // W9: the fresh resolve metadata of the members this workspace was asked to show (openViewingSet)
   const panelModel = KinReadingPanelLayout;
   let panelValues = panelModel.defaults(), panelDrag = null, panelStyleSignature = '';
   const split = $('.split'), reportColumn = $('.right'), relatedRegion = $('.related-p');
@@ -385,8 +386,8 @@ window.KinReadingWorkspace = function (app) {
   }
   const parentKeyboard = e => keyboard(e);
   document.addEventListener('keydown', parentKeyboard, true);
-  function label(uid) {
-    const s = app.study(uid);
+  function label(uid, image = false) {
+    const s = image && shown?.viewingSet === viewingSet?.opening && viewingSetRow(uid) || app.study(uid);
     return s ? [s.name || s.patientName || '', s.patientId || s.id || '', s.date || '날짜 미확인', s.modality || '', s.desc || s.description || '', uid].filter(Boolean).join(' · ') : uid;
   }
   const sameTarget = () => shown?.reportUid === app.current();
@@ -513,7 +514,7 @@ window.KinReadingWorkspace = function (app) {
   function identify() {
     const uid = app.current(); target.textContent = uid ? '판독 대상 · ' + label(uid) : '판독 대상을 선택하세요';
     reportTarget.textContent = target.textContent;
-    info.textContent = shown && sameTarget() ? '영상 열람 · ' + label(shown.uid) + (shown.prior ? '\n비교 영상 · ' + label(shown.prior) : '') : '';
+    info.textContent = shown && sameTarget() ? '영상 열람 · ' + label(shown.uid, true) + (shown.prior ? '\n비교 영상 · ' + label(shown.prior, true) : '') : '';
     separate.disabled = !frame || !sameTarget() || !loaded;
     imageFocus.disabled = separate.disabled;
     updateNote();
@@ -552,7 +553,35 @@ window.KinReadingWorkspace = function (app) {
   }
   function url(r) {
     return '/ohif/viewer?StudyInstanceUIDs=' + encodeURIComponent(r.uid) + (r.prior ? ',' + encodeURIComponent(r.prior) + '&hangingProtocolId=@ohif/hpCompare' : '') +
-      (r.series ? '&initialSeriesInstanceUID=' + encodeURIComponent(r.series) : '') + (r.job ? '&kinJob=' + encodeURIComponent(r.job) : '');
+      (r.series ? '&initialSeriesInstanceUID=' + encodeURIComponent(r.series) : '') + (r.job ? '&kinJob=' + encodeURIComponent(r.job) : '') +
+      (r.viewingSet ? '#kin-w9=' + r.viewingSet : '');
+  }
+  /**
+   * W9 (multi-study view): the 1/2 members its resolve just made ready, as this workspace's own input. A frozen member may
+   * have left the list (a filter, a poll), so the fresh resolve metadata of exactly these UIDs labels them, for this opening
+   * only. request()'s list check stays as it is for every other caller; the Reading Target, its report UID and every
+   * dirty/busy/Frame Coverage guard of attempt() are unchanged. The opening id travels in the fragment for the viewer's
+   * renderer observer.
+   */
+  function viewingSetRow(uid) {
+    const m = viewingSet?.metadata.get(uid);
+    return m ? { name: m.patientName, patientId: m.patientId, date: app.formatDate(m.studyDate), modality: m.modalities.join(','), desc: m.description } : null;
+  }
+  function openViewingSet(uid, prior, set) {
+    const valid = x => typeof x === 'string' && x.length <= 64 && /^\d+(?:\.\d+)+$/.test(x);
+    const refused = message => ({ status: 'refused', message });
+    if (ended) return refused('영상 작업공간이 종료되었습니다. 판독문 초안을 저장한 뒤 화면을 새로고침하세요.');
+    if (!valid(uid) || prior !== null && (!valid(prior) || prior === uid) || !(set?.metadata instanceof Map) ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(set.opening || '') ||
+        !set.metadata.has(uid) || prior && !set.metadata.has(prior)) return refused('검사 정보를 확인할 수 없어 열지 않았습니다.');
+    if (!app.current()) return refused('판독 대상을 선택하세요');
+    if (!app.allowed()) return refused('현재 로그인과 검사 접근 상태를 확인한 뒤 영상을 여세요.');
+    const before = viewingSet;
+    viewingSet = { opening: set.opening, metadata: new Map([...set.metadata].filter(([key]) => key === uid || key === prior)) };
+    const accepted = attempt({ uid, prior: prior || null, series: null, reportUid: app.current(), viewingSet: set.opening }, false);
+    if (!accepted) { viewingSet = before; identify(); return refused(status.textContent || '영상 작업공간에서 열지 않았습니다.'); }
+    const openedFrame = frame;
+    return { status: 'accepted', isOpen: () => !ended && active && frame === openedFrame && sameTarget() && shown?.viewingSet === set.opening };
   }
   function attempt(r, abandon) {
     if (ended) { app.notice('영상 작업공간이 종료되었습니다. 판독문 초안을 저장한 뒤 화면을 새로고침하세요.'); return false; }
@@ -596,6 +625,8 @@ window.KinReadingWorkspace = function (app) {
           if (values.length < 1 || values.length > 2 || values.some(x => !/^\d+(?:\.\d+)+$/.test(x) || x.length > 64) || new Set(values).size !== values.length) throw new Error('Invalid viewer scope');
           observedDocument = doc; observedHref = location.href; failed = false; deadline = Date.now() + 45000;
           shown = { uid: values[0], prior: values[1] || null, series: location.searchParams.get('initialSeriesInstanceUID'), reportUid: r.reportUid };
+          const opening = new URLSearchParams(location.hash.slice(1)).get('kin-w9');
+          if (opening) shown.viewingSet = opening;
           const job = location.searchParams.get('kinJob'); if (job) shown.job = job;
           if (sameTarget()) { status.textContent = '영상 작업공간을 불러오는 중…'; identify(); }
         }
@@ -679,7 +710,7 @@ window.KinReadingWorkspace = function (app) {
   });
   window.addEventListener('pagehide',end);
   window.addEventListener('beforeunload', e => { const s = viewerState(); let warn=false;try{warn=frame?.contentWindow.kinViewerFrameCoverageState?.().warn;}catch(_){}if (s.busy || s.dirty || warn) { e.preventDefault(); e.returnValue = ''; } });
-  return { open, openJob, resume, exit: leave, selectionChanged, refreshNote: updateNote, active: () => active, end, snapshotPanels, applyPanels, viewerTarget,
+  return { open, openJob, openViewingSet, resume, exit: leave, selectionChanged, refreshNote: updateNote, active: () => active, end, snapshotPanels, applyPanels, viewerTarget,
     preferences: { host: nav, read: () => autoNote.checked, generation: () => preferenceGeneration,
       apply: value => { syncAutoNote(); if (autoNote.disabled) return false; autoNote.checked = value; autoNote.onchange(); return true; } } };
 };

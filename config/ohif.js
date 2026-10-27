@@ -891,6 +891,75 @@ function kinViewerActivateStudy(env, study) {
   } catch (_) { return refusal('tool-missing'); }
 }
 
+// MG coordinates stay in the source image plane. Projection fallbacks are image-local,
+// never a claimed patient Frame of Reference; the SOP/frame still identifies the image.
+function kinMgGeometry(tags, frame) {
+  const dbt = '1.2.840.10008.5.1.4.1.1.13.1.3';
+  const enhanced = [dbt, '1.2.840.10008.5.1.4.1.1.13.1.4', '1.2.840.10008.5.1.4.1.1.13.1.5'];
+  const classic = ['1.2.840.10008.5.1.4.1.1.1.2', '1.2.840.10008.5.1.4.1.1.1.2.1'];
+  if (tags?.Modality !== 'MG' || ![...enhanced, ...classic].includes(tags.SOPClassUID)) return null;
+  const fail = () => { throw new Error('MG 원본 프레임의 좌표·간격·보정을 확인할 수 없습니다'); };
+  const numbers = (value, count) => {
+    const fields = typeof value === 'string' ? value.split('\\') : Array.isArray(value) ? value : [value];
+    if (fields.length !== count || fields.some(n => !(typeof n === 'number' || typeof n === 'string' && n.trim()) || !Number.isFinite(Number(n)))) return fail();
+    return fields.map(Number);
+  };
+  const many = enhanced.includes(tags.SOPClassUID), frames = many ? Number(tags.NumberOfFrames) : 1;
+  if (!Number.isSafeInteger(frames) || frames < 1 || !Number.isSafeInteger(frame) || frame < 1 || frame > frames ||
+      !many && tags.NumberOfFrames !== undefined && Number(tags.NumberOfFrames) !== 1) return fail();
+  const shared = tags.SharedFunctionalGroupsSequence?.[0], per = tags.PerFrameFunctionalGroupsSequence?.[frame - 1];
+  if (many && tags.PerFrameFunctionalGroupsSequence !== undefined && (!Array.isArray(tags.PerFrameFunctionalGroupsSequence) || tags.PerFrameFunctionalGroupsSequence.length !== frames)) return fail();
+  // Enhanced objects must resolve this frame's functional groups. The pinned native
+  // combiner mutates top-level attributes, which can still contain another frame.
+  const value = (sequence, key) => many ? (per?.[sequence]?.[0] ?? shared?.[sequence]?.[0])?.[key] : tags[key];
+  const type = value('XRay3DFrameTypeSequence', 'FrameType') ?? tags.ImageType;
+  const types = Array.isArray(type) ? type : String(type || '').split('\\');
+  const tomographic = tags.SOPClassUID === dbt && !types.includes('GENERATED_2D');
+  let spacing, basis;
+  const pixel = value('PixelMeasuresSequence', 'PixelSpacing');
+  if (pixel !== undefined) {
+    spacing = numbers(pixel, 2); basis = tomographic ? 'dbt' : 'pixel';
+  } else {
+    if (tomographic) return fail();
+    spacing = numbers(value('FramePixelDataPropertiesSequence', 'ImagerPixelSpacing'), 2);
+    const factor = value('XRayGeometrySequence', 'EstimatedRadiographicMagnificationFactor');
+    if (factor !== undefined) {
+      const magnification = numbers(factor, 1)[0]; if (magnification <= 0) return fail();
+      spacing = spacing.map(n => n / magnification); basis = 'ermf';
+    } else basis = 'detector';
+  }
+  if (spacing.some(n => !Number.isFinite(n) || n <= 0)) return fail();
+  const ipp = value('PlanePositionSequence', 'ImagePositionPatient');
+  const iop = value('PlaneOrientationSequence', 'ImageOrientationPatient');
+  const origin = numbers(ipp === undefined && !tomographic ? [0, 0, 0] : ipp, 3);
+  const orientation = numbers(iop === undefined && !tomographic ? [0, 1, 0, 0, 0, -1] : iop, 6);
+  if (tomographic && !tags.FrameOfReferenceUID) return fail();
+  const rows = Number(tags.Rows), columns = Number(tags.Columns);
+  if (![rows, columns].every(n => Number.isSafeInteger(n) && n > 0 && n <= 65535)) return fail();
+  const u = orientation.slice(0, 3), v = orientation.slice(3), dot = (a, b) => a.reduce((s, n, i) => s + n * b[i], 0);
+  const uu = dot(u, u), vv = dot(v, v), uv = dot(u, v), det = uu * vv - uv * uv;
+  // Rounded DICOM direction cosines (e.g. EA1141 MLO) need their inverse matrix,
+  // not the unit-vector shortcut. The existing plane orthogonality tolerance applies.
+  if (uu <= 0 || vv <= 0 || det <= 0 || Math.abs(uv / Math.sqrt(uu * vv)) > 1e-4) return fail();
+  const cross = [u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0]];
+  const normal = cross.map(n => n / Math.sqrt(dot(cross, cross)));
+  const imagePoint = point => {
+    const d = numbers(point, 3).map((n, i) => n - origin[i]);
+    const x = (dot(d, u) * vv - dot(d, v) * uv) / det / spacing[1];
+    const y = (dot(d, v) * uu - dot(d, u) * uv) / det / spacing[0];
+    if (Math.abs(dot(d, normal)) > .001 || x < -.501 || y < -.501 || x > columns - .499 || y > rows - .499) return fail();
+    return [x, y];
+  };
+  const length = points => {
+    const a = imagePoint(points[0]), b = imagePoint(points[1]);
+    return Math.hypot((b[0] - a[0]) * spacing[1], (b[1] - a[1]) * spacing[0]);
+  };
+  const label = { dbt: 'DBT PixelSpacing', pixel: 'PixelSpacing · 원본 기준면',
+    ermf: 'ImagerPixelSpacing / ERMF · 추정 보정', detector: 'ImagerPixelSpacing · 검출기 기준' }[basis];
+  return { origin, orientation, spacing, normal, imagePoint, length, basis, label,
+    frameOfReferenceUid: tags.FrameOfReferenceUID || null, calculator: 'kin-mg-length-v1:' + basis };
+}
+
 function kinCreateViewerHistory() {
   let services, commands, extensions, stop;
   const tools = { arrow: 'ArrowAnnotate', length: 'Length', angle: 'Angle', ellipse: 'EllipticalROI' };
@@ -952,6 +1021,17 @@ function kinCreateViewerHistory() {
     function measurementReason(imageId, kind, points) {
       const image = cs.metaData.get('instance', imageId);
       const finite = n => (typeof n === 'number' || typeof n === 'string' && n.trim() !== '') && Number.isFinite(Number(n));
+      if (image?.Modality === 'MG' && kind === 'length') {
+        try {
+          const mg = kinMgGeometry(image, reference(imageId)?.frame);
+          if (!mg || cs.cache.getImage(imageId)?.calibration?.type) return 'MG 원본 간격·보정을 확인할 수 없습니다';
+          const plane = cs.metaData.get('imagePlaneModule', imageId);
+          if (Number(plane?.rowPixelSpacing) !== mg.spacing[0] || Number(plane?.columnPixelSpacing) !== mg.spacing[1])
+            return '표시 간격과 MG 원본 간격이 일치하지 않습니다';
+          points?.forEach(mg.imagePoint);
+          return '';
+        } catch (error) { return error.message; }
+      }
       const spacing = image?.PixelSpacing, orientation = image?.ImageOrientationPatient, origin = image?.ImagePositionPatient;
       if (image?.SOPClassUID !== '1.2.840.10008.5.1.4.1.1.2' || image.Modality !== 'CT' || Number(image.NumberOfFrames || 1) !== 1)
         return '일반 CT 원본 프레임에서 지원합니다';
@@ -1006,7 +1086,8 @@ function kinCreateViewerHistory() {
       const values = kind === 'length' ? [s.length] : kind === 'angle' ? [s.angle] :
         [s.area, s.mean, s.statsArray?.find(x => x?.name === 'min')?.value, s.max, s.statsArray?.find(x => x?.name === 'count')?.value];
       if (values.some(n => !Number.isFinite(n)) || kind === 'ellipse' && s.modalityUnit !== 'HU') return null;
-      return { calculator: 'kin-native-manual-v1', values };
+      const mg = kind === 'length' && kinMgGeometry(cs.metaData.get('instance', a.metadata.referencedImageId), reference(a.metadata.referencedImageId)?.frame);
+      return mg ? { calculator: mg.calculator, values: [mg.length(a.data.handles.points)] } : { calculator: 'kin-native-manual-v1', values };
     }
     const measurementService = services.measurementService;
     const originalMeasurements = measurementService.getMeasurements;
@@ -1023,9 +1104,16 @@ function kinCreateViewerHistory() {
       // verified target on every read, including a previously captured export.
       const target = 'imageId:' + a.metadata.referencedImageId;
       try {
-        return mapping.toMeasurementSchema({ annotation: { ...a, data: {
-          ...a.data, cachedStats: { [target]: a.data.cachedStats[target] },
+        const mg = a.metadata.toolName === 'Length' && kinMgGeometry(cs.metaData.get('instance', a.metadata.referencedImageId), reference(a.metadata.referencedImageId)?.frame);
+        const checked = mapping.toMeasurementSchema({ annotation: { ...a, data: {
+          ...a.data, cachedStats: { [target]: { ...a.data.cachedStats[target], ...(mg ? { length: mg.length(a.data.handles.points) } : {}) } },
         } } });
+        if (mg) {
+          checked.displayText = { ...checked.displayText, primary: [...(checked.displayText?.primary || []), mg.label] };
+          const report = checked.getReport;
+          checked.getReport = () => { const r = report(); return { ...r, columns: [...r.columns, 'Measurement basis'], values: [...r.values, mg.label] }; };
+        }
+        return checked;
       } catch (_) { return null; } // Display sets may disappear before their metadata.
     }
     function projectMeasurement(m) {
@@ -1780,9 +1868,12 @@ function kinCreateViewerHistory() {
           if (reason) return [reason];
           if (!freshStats(data, target)) return ['재확인 필요: 현재 좌표로 계산되지 않았습니다'];
           if (kind === 'ellipse') return lines(data, target);
-          const value = data.cachedStats[target]?.[kind === 'length' ? 'length' : 'angle'];
+          const mg = kind === 'length' && kinMgGeometry(cs.metaData.get('instance', id), reference(id)?.frame);
+          const value = mg ? mg.length(data.handles.points) : data.cachedStats[target]?.[kind === 'length' ? 'length' : 'angle'];
           if (!Number.isFinite(value) || value <= 0) return ['측정을 완료하세요'];
-          return [(Math.round(value * 10) / 10).toFixed(1) + (kind === 'length' ? ' mm' : '°')];
+          const number = (Math.round(value * 10) / 10).toFixed(1) + (kind === 'length' ? ' mm' : '°');
+          // Keep the scale basis readable in the four-view mammography layout.
+          return mg ? [number, ...mg.label.split(' · ')] : [number];
         } };
         restores.push(() => { tool.configuration = config; tool.addNewAnnotation = add; });
       }
@@ -2000,21 +2091,21 @@ function kinCreateViewerHistory() {
       heads: [...entries.values()].filter(e => e.head).map(e => ({ id: e.head.id, revision: e.head.revision, hidden: !!e.head.hidden,
         kind: e.draft.kind, label: e.draft.label ?? e.draft.title ?? '', seriesUid: e.head.item.seriesUid, sopUid: e.head.item.sopUid,
         frame: e.head.item.frame, authorSub: e.head.authorSub, referenceStatus: manual(e.draft.kind) ? e.head.referenceStatus ?? 'unverified' : null,
-        values: Array.isArray(e.head.item.baseline?.values) ? [...e.head.item.baseline.values] : null, working: !!(e.editing || e.pending || e.busy) })) });
+        calculator: e.head.item.baseline?.calculator, values: Array.isArray(e.head.item.baseline?.values) ? [...e.head.item.baseline.values] : null, working: !!(e.editing || e.pending || e.busy) })) });
     function hydrate() {
       const v = viewport(), imageId = v?.getCurrentImageId?.(), r = reference(imageId);
       if (!r || r.study !== scope || !subject || ended || suspended || held()) return;
       configureMeasurements(ct.ToolGroupManager.getToolGroupForViewport(v.id, v.renderingEngineId));
       const plane = cs.metaData.get('imagePlaneModule', imageId);
       for (const e of entries.values()) {
-        if (!e.head && !e.rehydrate || e.head?.hidden || !tools[e.draft.kind] || e.annotationUID || !matches(r, e.draft) || plane?.frameOfReferenceUID !== e.draft.frameOfReferenceUid) continue;
+        if (!e.head && !e.rehydrate || e.head?.hidden || !tools[e.draft.kind] || e.annotationUID || !matches(r, e.draft) || (plane?.frameOfReferenceUID ?? null) !== e.draft.frameOfReferenceUid) continue;
         if (manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified') {
           if (!e.message) { e.message = '재확인 필요: 원본 영상의 동일성을 확인할 수 없습니다.'; row(e); }
           continue;
         }
         const uid = crypto.randomUUID(), camera = v.getCamera();
         const a = { annotationUID: uid, highlighted: false, invalidated: true, isLocked: true, isVisible: true,
-          metadata: { toolName: tools[e.draft.kind], FrameOfReferenceUID: e.draft.frameOfReferenceUid, referencedImageId: imageId, viewPlaneNormal: e.draft.viewPlaneNormal || camera.viewPlaneNormal, viewUp: e.draft.viewUp || camera.viewUp },
+          metadata: { toolName: tools[e.draft.kind], FrameOfReferenceUID: e.draft.frameOfReferenceUid ?? v.getFrameOfReferenceUID(), referencedImageId: imageId, viewPlaneNormal: e.draft.viewPlaneNormal || camera.viewPlaneNormal, viewUp: e.draft.viewUp || camera.viewUp },
           data: { text: e.draft.label, label: e.draft.label, kinUnverified: manual(e.draft.kind) && !e.editing, handles: { points: clone(e.draft.points), activeHandleIndex: null, textBox: { hasMoved: false, worldPosition: [0, 0, 0], worldBoundingBox: { topLeft: [0, 0, 0], topRight: [0, 0, 0], bottomLeft: [0, 0, 0], bottomRight: [0, 0, 0] } } }, cachedStats: {} } };
         trackMeasurement(a);
         e.rehydrate = false;
@@ -2097,7 +2188,8 @@ function kinCreateViewerHistory() {
         if (!e) {
           const ref = reference(a.metadata.referencedImageId);
           e = { id: crypto.randomUUID(), annotationUID: a.annotationUID, editing: true,
-            draft: { schemaVersion: 1, kind, seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: a.metadata.FrameOfReferenceUID, label: a.data.text ?? a.data.label ?? '', points: clone(a.data.handles.points),
+            draft: { schemaVersion: 1, kind, seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: kind === 'length' && cs.metaData.get('instance', a.metadata.referencedImageId)?.Modality === 'MG'
+                ? cs.metaData.get('instance', a.metadata.referencedImageId).FrameOfReferenceUID || null : a.metadata.FrameOfReferenceUID, label: a.data.text ?? a.data.label ?? '', points: clone(a.data.handles.points),
               ...(kind === 'arrow' ? {} : { viewPlaneNormal: clone(a.metadata.viewPlaneNormal), viewUp: clone(a.metadata.viewUp) }) } };
           entries.set(e.id, e); annotations.set(a.annotationUID, e); row(e);
         } else if (e.editing && !e.busy && !e.pending) {
@@ -4365,8 +4457,33 @@ function kinCreateViewerUX() {
   };
 }
 
+// W9 multi-study view (worklist-v0/hpacs-lite/viewer-multi-study.js): load, mount and stop its strip and renderer observer
+// with the viewer mode, the way Frame Coverage is mounted. Only a viewer the worklist opened for a multi-study opening (the
+// `kin-w9` fragment, also set later on a reused window) loads it; every other viewer loads nothing more.
+function kinCreateMultiStudyStrip() {
+  let ready = null, current = null, services, epoch = 0, active = false;
+  const wanted = () => /(?:^#|&)kin-w9=/.test(location.hash);
+  const load = () => window.KinViewerMultiStudy ? Promise.resolve() : ready || (ready = new Promise((resolve, reject) => {
+    const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/viewer-multi-study.js';
+    const timeout = setTimeout(() => { ready = null; reject(Error('Multi-Study View loading timeout')); }, 20000);
+    script.onload = () => { clearTimeout(timeout); resolve(); start(); };
+    script.onerror = () => { clearTimeout(timeout); ready = null; reject(Error('Multi-Study View loading failed')); };
+    document.head.append(script);
+  }));
+  function start() {
+    if (!active || current || !wanted()) return;
+    const ticket = epoch;
+    load().then(() => { if (active && ticket === epoch && !current) current = window.KinViewerMultiStudy.mount(services); }).catch(() => {});
+  }
+  return { id: 'kin.multi-study-strip', preRegistration({ servicesManager }) {
+    services = servicesManager.services;
+    window.addEventListener('hashchange', start); window.addEventListener('kin-window-link-changed', start);
+  }, onModeEnter() { epoch++; active = true; start(); },
+  onModeExit() { epoch++; active = false; current?.stop(); current = null; } };
+}
+
 window.config = {
-  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateViewerUX()],
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateViewerUX(), kinCreateMultiStudyStrip()],
   // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
   // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
   kinThreeDCursor: { enabled: false },

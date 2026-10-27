@@ -303,17 +303,19 @@ export class PacsPreferences {
   }
 
   private validViewerSettings(value: any) {
-    if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1 ||
+    if (!value || typeof value !== 'object' || Array.isArray(value) || ![1, 2].includes(value.version) ||
         Object.keys(value).sort().join(',') !== 'bar,shortcuts,version' ||
         !Array.isArray(value.bar) || new Set(value.bar).size !== value.bar.length ||
         !value.shortcuts || typeof value.shortcuts !== 'object' || Array.isArray(value.shortcuts)) return false;
     // IDs are native viewer tool names, never patient data or executable commands.
     const id = (v: unknown) => typeof v === 'string' && /^[A-Za-z0-9_-]+$/.test(v);
     if (!value.bar.every(id) || !Object.keys(value.shortcuts).every(id)) return false;
+    // Version 2 adds Shift with a letter (F8: Shift+H/V flip, Shift+L/R turn).
+    const pattern = value.version === 2 ? /^(?:[a-z0-9]|shift\+[a-z])$/ : /^[a-z0-9]$/;
     const used = new Set();
     return Object.values(value.shortcuts).every(key => {
       if (key === null) return true;
-      if (typeof key !== 'string' || !/^[a-z0-9]$/.test(key) || used.has(key)) return false;
+      if (typeof key !== 'string' || !pattern.test(key) || used.has(key)) return false;
       used.add(key); return true;
     });
   }
