@@ -46,7 +46,10 @@ class S9ViewerIdentityFlowE2E(ServedViewerFlow, ViewerUXPriorsE2E):
         expect(work.locator('#rows tr.sel')).to_have_attribute('data-uid', current.uid)
         expect(work.locator('#findings')).to_have_value('U7 IDENTITY KEEP REPORT')
 
-    def test_identity_flow_02_real_editor_connection_and_closed_window(self):
+    def test_identity_flow_02_unconnected_editor_is_never_shown_as_linked(self):
+        # The normal workspace launch detaches the viewer's opener (viewer-launch.js), so this
+        # viewer has no editor to ask. I4: that state is shown as not connected, nothing is read
+        # or copied from the workspace, and closing the workspace changes nothing here.
         current = self.ct('U7I-' + uuid.uuid4().hex[:12], 'editor link', '20260801')
         work, page = self.served_viewer(current)
         work.locator('#findings').fill('U7 REAL WORKSPACE DRAFT')
@@ -54,19 +57,19 @@ class S9ViewerIdentityFlowE2E(ServedViewerFlow, ViewerUXPriorsE2E):
         page.get_by_role('button', name='Print Current View', exact=True).click()
         status = page.locator('#kin-job-print [role=status]')
         expect(status).to_contain_text('미리보기 내용을 확인', timeout=45000)
-        self.evidence(page, 'identity-editor-choice-before-read')
-        page.get_by_label('함께 출력할 판독문', exact=True).select_option('editor')
-        expect(status).to_contain_text('미리보기 내용을 확인', timeout=45000)
+        choice = page.get_by_label('함께 출력할 판독문', exact=True)
+        draft = choice.locator('option[value=editor]')
+        expect(draft).to_be_disabled()
+        expect(draft).to_have_attribute('title', re.compile('연결된 판독 화면이 없습니다'))
         paper = page.frame_locator('#kin-job-print iframe')
-        expect(paper.locator('main')).to_contain_text('U7 REAL WORKSPACE DRAFT')
-        expect(paper.locator('main')).to_contain_text('저장·승인되지 않음')
+        expect(paper.locator('main')).not_to_contain_text('U7 REAL WORKSPACE DRAFT')
         expect(work.locator('#findings')).to_have_value('U7 REAL WORKSPACE DRAFT')
-        self.evidence(page, 'identity-real-editor-link')
+        self.evidence(page, 'identity-editor-not-connected')
         work.close()
         page.locator('#kin-job-print').get_by_role('button', name='다시 확인', exact=True).click()
-        expect(status).to_contain_text('연결된 판독 화면이 없습니다', timeout=45000)
-        expect(page.locator('#kin-job-print').get_by_role('button', name='인쇄 / PDF')).to_be_disabled()
-        expect(paper.locator('body')).not_to_contain_text('U7 REAL WORKSPACE DRAFT')
+        expect(status).to_contain_text('미리보기 내용을 확인', timeout=45000)
+        expect(choice.locator('option[value=editor]')).to_be_disabled()
+        expect(paper.locator('main')).not_to_contain_text('U7 REAL WORKSPACE DRAFT')
         self.evidence(page, 'identity-editor-closed')
 
     def test_identity_flow_03_clinician_launch_retains_read_only_identity(self):

@@ -109,7 +109,9 @@ const kinViewerToolbarLabels = (() => {
     Pan: ['Pan', '이동'],
     TrackballRotate: ['3D Rotate', '3D 회전(볼륨에서만 동작)'],
     WindowLevel: ['Window / Level', '창/레벨 조절(드래그)'],
-    Capture: ['Capture', '선택한 영상 칸의 화면 이미지 다운로드 · DICOM 원본·서버 작업 저장 아님 · 식별정보가 포함될 수 있습니다. Image Text/Images Only는 익명화가 아닙니다.'],
+    // The pinned download form passes 'jpg'/'png' to canvas.toDataURL, which only knows MIME types, so every
+    // choice writes PNG bytes; a jpg choice changes the file name only.
+    Capture: ['Capture', '선택한 영상 칸의 화면을 PNG 이미지로 다운로드 · File Type을 jpg로 두어도 파일 내용은 PNG입니다 · DICOM 원본·판독문·서버 작업 저장 아님 · 식별정보가 포함될 수 있습니다. Image Text/Images Only는 익명화가 아닙니다.'],
     Layout: ['Layout', '화면 배치'],
     Crosshairs: ['Crosshairs', 'MPR 교차선(3D/MPR에서만 동작)'],
     MoreTools: ['More Tools', '기타 도구'],
@@ -180,8 +182,13 @@ const kinViewerToolbarLabels = (() => {
       put(element, 'data-kin-tool-label', found.id);
     }
   }
+  // The Viewer-UX toolbar owns its button title (name, shortcut, drag hint); the output meaning goes in front of it.
   function outputScope(scope) {
-    for (const button of scope.querySelectorAll('[data-tool="Capture"]')) put(button, 'title', PRIMARY.Capture[1]);
+    const meaning = PRIMARY.Capture[1];
+    for (const button of scope.querySelectorAll('[data-tool="Capture"]')) {
+      const title = button.getAttribute('title') || '';
+      if (!title.startsWith(meaning)) put(button, 'title', meaning + (title ? ' · ' + title : ''));
+    }
   }
   return { PRIMARY, ITEMS, TOGGLES, entry, apply, outputScope };
 })();
@@ -1920,10 +1927,11 @@ function kinCreateViewerHistory() {
       if (!e.element) { e.element = document.createElement('section'); e.element.style.cssText = 'border-top:1px solid #405777;margin-top:8px;padding-top:8px'; list.append(e.element); }
       const el = e.element; el.replaceChildren(); el.dataset.itemId = e.head?.id || ''; el.dataset.kind = e.draft.kind;
       const sourceUnverified = manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified';
-      const stateLabel = e.busy ? 'Saving' : e.pending ? 'Unverified' : hasWork(e) || !e.head ? 'Unsaved' :
-        sourceUnverified ? 'Unverified' : 'Saved r' + e.head.revision;
+      // Saved names the server revision; an edit, a save in flight or an unknown answer is not that revision.
+      // Source verification keeps its own 재확인 필요 line below, so a saved item stays Saved r<n>.
+      const stateLabel = e.busy ? 'Saving' : e.pending ? 'Unverified' : hasWork(e) || !e.head ? 'Unsaved' : 'Saved r' + e.head.revision;
       text(el, 'strong', names[e.draft.kind] + ' · ' + stateLabel + (e.head?.hidden ? ' · Hidden' : ''));
-      if (e.head && stateLabel !== 'Saved r' + e.head.revision) text(el, 'div', '서버 저장 이력 r' + e.head.revision + ' · 현재 수정·원본 확인 상태와는 별개입니다.');
+      if (e.head && stateLabel !== 'Saved r' + e.head.revision) text(el, 'div', '서버 저장 이력 r' + e.head.revision + ' · 현재 수정·저장 결과와는 별개입니다.');
       // The clinician projection carries no author (clinician-policy.ts clinicianViewerItem).
       if (e.head) text(el, 'div', readOnly() ? 'Read-only' : e.head.authorActor + (writable(e) ? ' · My Item' : ' · Read-only'));
       if (e.editing) {

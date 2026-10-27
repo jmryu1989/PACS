@@ -151,7 +151,7 @@ class S9ViewerOutputScopeE2E(ServedViewerFlow, ViewerJobPrintE2E):
         work, page = self.served_viewer(current)
         page.get_by_text('More', exact=True).click()
         capture = page.get_by_role('button', name='Capture', exact=True)
-        expect(capture).to_have_attribute('title', re.compile('선택한 영상 칸'))
+        expect(capture).to_have_attribute('title', re.compile('PNG'))
         expect(capture).to_have_attribute('title', re.compile('익명화가 아닙니다'))
         self.evidence(page, 'output-before-native-capture')
         before = self.cells(page)
@@ -165,7 +165,7 @@ class S9ViewerOutputScopeE2E(ServedViewerFlow, ViewerJobPrintE2E):
         saved.value.save_as(target)
         with Image.open(target) as bitmap:
             actual_format = bitmap.format
-            # Native Capture currently defaults to jpg (observed served dialog).
+            # The pinned dialog's default File Type is jpg; the entry states the bytes are PNG.
             self.assertGreater(max(hi-lo for lo,hi in bitmap.convert('RGB').getextrema()), 100)
             self.assertGreater(bitmap.width, 0)
             self.assertGreater(bitmap.height, 0)
@@ -187,7 +187,7 @@ class S9ViewerOutputScopeE2E(ServedViewerFlow, ViewerJobPrintE2E):
         with self.subTest(boundary='jobs'):
             self.assertEqual(self.jobs(current), [])
         with self.subTest(boundary='file format'):
-            self.assertEqual(actual_format, 'JPEG', 'Native File Type jpg must match the downloaded bytes')
+            self.assertEqual(actual_format, 'PNG', 'Capture is described as a PNG image: ' + target.name)
 
 
 def load_tests(loader, tests, pattern):

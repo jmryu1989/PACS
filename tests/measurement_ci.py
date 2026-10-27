@@ -160,6 +160,18 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_viewer_ux_shell.py', 'ViewerUXShellE2E', 'ci-viewer-ux-shell'),),
     },
+    's9-u7-served': {
+        'out': ROOT / 'tests/e2e/artifacts/s9-u7-served-ci',
+        'project_prefix': 'kin-s9-u7-ci-',
+        # S9-U7 output scope, identity and unsaved work on the served worklist -> OHIF flow. Each module's
+        # load_tests is the allowlist (test_output_*, test_identity_flow_*, test_unsaved_*), so no class is
+        # passed and no inherited case runs. 400s per suite is a hang ceiling, not an estimate:
+        # (400+35)*3 = 1305s of the shared 1500s deadline leaves 195s for setup and cleanup.
+        'suite_timeout': 400,
+        'suites': (('e2e/test_s9_viewer_output_scope.py', None, 'ci-s9-u7-output'),
+                   ('e2e/test_s9_viewer_identity_flow.py', None, 'ci-s9-u7-identity'),
+                   ('e2e/test_s9_viewer_unsaved_flow.py', None, 'ci-s9-u7-work')),
+    },
     'display-scope': {
         'out': ROOT / 'tests/e2e/artifacts/display-scope-ci',
         'project_prefix': 'kin-display-scope-ci-',

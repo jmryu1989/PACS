@@ -187,9 +187,11 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
   function addEditorOptions(comparison) {
     const usable = !!editor && editor.available();
     const draft = el('option', identity.optionLabel('editor'), reportSource); draft.value = 'editor'; draft.disabled = !usable;
+    if (!usable) draft.title = linkText('missing');
     if (comparison) {
       const pair = el('option', identity.optionLabel('editor-prior', comparison), reportSource);
       pair.value = 'editor-prior'; pair.disabled = !usable;
+      if (!usable) pair.title = linkText('missing');
     }
   }
   function syncReportOptions(data) {
