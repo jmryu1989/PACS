@@ -415,7 +415,10 @@ test('E image service: one ledger record per requester, session and manifest ver
     }
     throw new Error(`response ${responseId} did not reach ${count} observation rows`);
   };
-  const service = new OnlineImageService(port, context, db, new OrthancService(), requests, registry.work);
+  // The check pool: the product's own bounded client over the same synthetic database URL.
+  const { ImageCheckDatabase } = load('emr-image/check-db');
+  const checks = new ImageCheckDatabase();
+  const service = new OnlineImageService(port, context, db, new OrthancService(), requests, registry.work, checks);
   const server = createServer((req, res) => {
     req.requestId = randomUUID();
     if (req.headers['x-synthetic-session']) sessions.set(req, req.headers['x-synthetic-session']);
@@ -537,7 +540,7 @@ test('E image service: one ledger record per requester, session and manifest ver
       'the retired record transferred its one frame before the refusal');
   } finally {
     await close(server); await close(source);
-    await journal.close(); await db.$disconnect(); await witness.$disconnect();
+    await journal.close(); await checks.$disconnect(); await db.$disconnect(); await witness.$disconnect();
   }
 });
 

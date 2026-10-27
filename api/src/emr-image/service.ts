@@ -13,6 +13,7 @@ import { EMR_RECORD_PORT, EmrRecordPort, EmrRecordWork } from '../emr-runtime/re
 import { REQUEST_CONTEXT_SOURCE, RequestContextSource, RequestFacts } from '../emr-runtime/request-context';
 import { OrthancService } from '../orthanc.service';
 import { PrismaService } from '../prisma.service';
+import { ImageCheckDatabase } from './check-db';
 import { ImageRequest, parseImageRequest, prepareDelivery } from './contract';
 import { CurrentImageFacts, ImageContextSource } from './context';
 import { DeliveryClosing, DeliveryOutcome, ImageDeliveries, OpenedDelivery, ResponseEnd } from './delivery';
@@ -47,10 +48,12 @@ export class OnlineImageService implements BeforeApplicationShutdown {
   private readonly manifests = new ManifestReuse();
   private readonly deliveries: ImageDeliveries<DeliveryFacts, Opener>;
   private readonly evidence: PgImageEvidenceStore;
+  /** db: the application connection E's rows are written on. checks: the bounded pool of the per-response check
+   * transactions (check-db.ts), apart from that pool and from the ledger's lanes. */
   constructor(@Inject(EMR_RECORD_PORT) private readonly records: EmrRecordPort,
     private readonly context: ImageContextSource, private readonly db: PrismaService,
     private readonly orthanc: OrthancService, @Inject(REQUEST_CONTEXT_SOURCE) private readonly requests: RequestContextSource,
-    @Inject(EMR_BACKGROUND_WORK) background: BackgroundWork) {
+    @Inject(EMR_BACKGROUND_WORK) background: BackgroundWork, private readonly checks: ImageCheckDatabase) {
     this.evidence = new PgImageEvidenceStore(db);
     this.deliveries = new ImageDeliveries<DeliveryFacts, Opener>(background, {
       open: (_key, opener) => this.openDelivery(opener),
@@ -97,14 +100,14 @@ export class OnlineImageService implements BeforeApplicationShutdown {
           // A row the application connection refused goes to the delivery, which writes it when it closes.
           unstored: row => unstored.push(row),
           // This response's current access check before any source read: identity, institution scope, StudyAccess
-          // and provision (context.ts recheck), on one bounded transaction of the application connection, the same
-          // database and role as the ledger's. A response appends nothing, and the ledger's four append lanes bound
-          // append work: with the check inside a lane, four lanes over the check's hold time capped a series at
-          // about 27 frames/s however the identity was resolved (fix-3 sample a, run e-route-fix3-fable-20261027a).
-          // The same reads under the same locks answer the same question here; the delivery's opening and closing
-          // (the records) keep their lanes. The archive's current study and object identity are compared by the
-          // source and the stream.
-          prepare: async () => this.db.$transaction(async tx => {
+          // and provision (context.ts recheck), on one bounded transaction of E's own check pool (check-db.ts: the
+          // same database and role as the ledger's and the application's). A response appends nothing, and the
+          // ledger's four append lanes bound append work: with the check inside a lane, four lanes over the check's
+          // hold time capped a series at about 27 frames/s however the identity was resolved (fix-3 sample a, run
+          // e-route-fix3-fable-20261027a). The same reads under the same locks answer the same question here; the
+          // delivery's opening and closing (the records) keep their lanes. The archive's current study and object
+          // identity are compared by the source and the stream.
+          prepare: async () => this.checks.$transaction(async tx => {
             await boundEmrStatements(tx);
             const at = new Date().toISOString();
             let current: CurrentImageFacts;

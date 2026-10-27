@@ -49,6 +49,7 @@ import { ViewerJobService } from './viewer-job.service';
 import { ConnectController } from './connect.controller';
 import { ConnectService } from './connect.service';
 import { OnlineImageService } from './emr-image/service';
+import { ImageCheckDatabase } from './emr-image/check-db';
 import { ImageContextSource, ModuleAImageContextPending, ProductionImageContext } from './emr-image/context';
 import { ManualSrController } from './manual-sr.controller';
 import { ManualSrService } from './manual-sr.service';
@@ -74,7 +75,7 @@ function adminNoStore(_req: any, res: any, next: () => void) {
     EmrAuditService,
     ...startupClinicalProviders,
     ViewerContextEventService,
-    OnlineImageService, ModuleAImageContextPending,
+    OnlineImageService, ImageCheckDatabase, ModuleAImageContextPending,
     { provide: ImageContextSource, inject: [ModuleAImageContextPending],
       useFactory: (lookups: ModuleAImageContextPending) => new ProductionImageContext(lookups, lookups) },
     AsrService, StudyAccessService, PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, FindingService, ViewerJobService, ConnectService, ManualSrService, FavoriteService, StudyTagsService, ReaderAssignmentService, ConsultationService, ClinicianQuestionService, ImageRequestService, ClinicalContextService, CriticalResultService,

@@ -22,8 +22,8 @@ import type { UnstoredObservation } from './stream';
  * The key is the requester's identity, rights, session, address and the manifest digest, so a changed account, another
  * session or another manifest version is another record. A delivery closes after a short idle period, after a bounded
  * age, at shutdown, and when a response finds the current facts changed. Every response still checks the requester's
- * current access on a bounded transaction before its first byte (the application connection: a response appends
- * nothing, and the ledger's lanes bound append work, service.ts); only the record it is written under is shared.
+ * current access on a bounded transaction before its first byte (E's own check pool, check-db.ts: a response appends
+ * nothing, and the ledger's lanes bound append work); only the record it is written under is shared.
  */
 export interface OpenedDelivery<T> {
   event: Readonly<AccessEvent>; receipt: DurableAccessReceipt; prepared: PreparedDelivery; facts: T;

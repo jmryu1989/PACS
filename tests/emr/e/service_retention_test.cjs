@@ -117,7 +117,8 @@ async function harness() {
   const registry = createBackgroundWorkRegistry();
   const requestFacts = { actor, institution: 'synthetic-hospital', rightsVersion: 1, roles: ['radiologist'],
     binding: { method: 'session', sessionRef: 'synthetic-session' }, ingress: facts.ip, requestId: randomUUID() };
-  const service = new OnlineImageService(records, context, db, new OrthancService(), { facts: async () => ({ ...requestFacts, requestId: randomUUID() }) }, registry.work);
+  // The check pool stand-in is the application stand-in: one in-memory port answers both.
+  const service = new OnlineImageService(records, context, db, new OrthancService(), { facts: async () => ({ ...requestFacts, requestId: randomUUID() }) }, registry.work, db);
   const target = `/dicom-web/studies/${uid}/series/${series}/instances/${sop}/frames/1`;
   let settled, lastError = null;
   const server = createServer(async (req, res) => {
@@ -136,6 +137,14 @@ async function harness() {
   const stop = async () => { registry.quiesce(); await close(server); await close(source); };
   return { send, archive, ledger, app, events, service, stop, builds: () => manifestBuilds, lastError: () => lastError };
 }
+
+test('the check pool is the application database with a bound of its own', () => {
+  const { checkPoolUrl, EMR_IMAGE_CHECK_POOL_SIZE } = load('emr-image/check-db');
+  const url = new URL(checkPoolUrl('postgresql://kin_runtime:secret@db:5432/kin'));
+  assert.deepEqual([url.hostname, url.pathname, url.username, url.searchParams.get('connection_limit')], ['db', '/kin', 'kin_runtime', String(EMR_IMAGE_CHECK_POOL_SIZE)]);
+  assert.equal(new URL(checkPoolUrl('postgresql://kin_runtime:secret@db:5432/kin?connection_limit=5&schema=public')).searchParams.get('connection_limit'),
+    String(EMR_IMAGE_CHECK_POOL_SIZE), 'the application pool\'s own bound does not carry over');
+});
 
 test('a second patient resource under the study UID refuses the response as unresolved, before any body read, and forgets the manifest', async () => {
   const h = await harness();

@@ -16,8 +16,8 @@ export interface CurrentImageFacts extends ClinicalRequestFacts {
  * lock current identity, institution, patient link and StudyAccess on tx and
  * compare the selected source manifest. Browser fields are never these facts.
  * recheck() is the per-response check of a study delivery that current() opened (delivery.ts): the same identity,
- * institution scope, StudyAccess and provision facts on tx (a bounded transaction of the application connection,
- * service.ts), without D's study read (the archive QIDO). The archive's current study identity is still compared on
+ * institution scope, StudyAccess and provision facts on tx (a bounded transaction of E's own check pool, check-db.ts),
+ * without D's study read (the archive QIDO). The archive's current study identity is still compared on
  * every response, by the source:
  * the same study read D makes (OrthancService.studyPatientIdentity: no resource, two patient resources, the one
  * patient) and the selected object's own header, both against the manifest's patient (orthanc.service.ts, stream.ts,
