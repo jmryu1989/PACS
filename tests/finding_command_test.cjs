@@ -1842,7 +1842,7 @@ test('adapter locations: the list read names the record format; characteristics 
   h.s.respond = () => Promise.resolve(page([v2Finding()]));
   await h.open();
   assert.deepEqual(h.s.fetched.map(f => [f.url, f.init.method, new Headers(f.init.headers).get('X-KIN-Finding-Schema'), new Headers(f.init.headers).get('X-KIN-CSRF'), f.init.credentials ?? 'same-origin']),
-    [['/api/studies/' + X + '/findings?includeHidden=false&limit=100', 'GET', '2', '1', 'same-origin']]);
+    [['/api/studies/' + X + '/findings?includeHidden=false&limit=100', 'GET', '2', null, 'same-origin']]);
   const article = h.articles()[0];
   assert.ok(article.all().some(e => e.dataset.kinCharacteristics === '' && e.textContent === 'Characteristics (병변 특성): 경계 불명확'));
   const list = () => h.articles()[0].children.find(e => e.tagName === 'ul').children;

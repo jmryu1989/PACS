@@ -230,7 +230,7 @@ class Pure(unittest.TestCase):
                 transfer.verify_product('owned', 'kin', expected)
 
     def test_current_git_migrations_are_covered(self):
-        self.assertEqual(len(transfer.migration_sources()),len(transfer.MIGRATIONS))
+        self.assertEqual(len(transfer.migration_sources()), len(transfer.MIGRATIONS))
 
     def test_workspace_catalog_assignment_restore_contract(self):
         body, _, _, _ = fixture(); expected=body['product']
@@ -447,7 +447,7 @@ class Pure(unittest.TestCase):
         # every attempt phase, a prepared, a Sent and a still-sending download, and the gate's four Study and four SOP reservations.
         # W5-API added ReportDraftInsertReceipt (48 migration files, 53 public tables with S9-U4b) with three synthetic receipts:
         # refused, applied and discarded.
-        self.assertEqual(len(transfer.TABLES), 53)
+        self.assertEqual(len(transfer.TABLES), 52)
         self.assertEqual(set(rows), set(transfer.TABLES))
         emr = transfer.expected_emr_rows()
         self.assertEqual(sorted(emr), transfer.EMR_TABLES)
@@ -477,7 +477,6 @@ class Pure(unittest.TestCase):
                          [(receipt['studyUid'], receipt['epoch'], receipt['seq'])])
         self.assertEqual(sum(len(value) for value in rows.values()), 46 + 1 + 2 + 1 + 1 + 1 + 1 + 3 + 2 + 4 + 4 + 7 + 6 + 1
                          + 1    # S7-U5: the emptied draft row (tombstone) beside the two present drafts
-                         + 2    # S7-U5 session end: the pending and the confirmed end mark
                          + 2    # S7-U5 member isolation: the owed and the done isolation fact
                          + 2    # S7-U5 member rights/import
                          + 1    # S8-CTX: revision with save attempt id, beside the legacy revision
@@ -493,9 +492,6 @@ class Pure(unittest.TestCase):
                          [('disable', 'SYNTHETIC-member-isolation-owed', 'unknown', True),
                           ('end_session', 'SYNTHETIC-idp-session-confirmed', 'done', False)])
         self.assertEqual(transfer.expected_sequences()['ProviderChange_id_seq'], dict(last_value=2, is_called=True))
-        self.assertEqual(sorted((r['idpSid'], r['cause'], r['confirmedAt'] is None, r['attempts']) for r in rows['IdpSessionEnd']),
-                         [('SYNTHETIC-idp-session-confirmed', 'reauthentication', False, 1),
-                          ('SYNTHETIC-idp-session-pending', 'logout', True, 3)])
         [question] = rows['StudyQuestion']
         receipts = sorted(rows['StudyQuestionEntry'], key=lambda r: r['seq'])
         self.assertEqual((question['studyUid'], question['state'], question['revision'], question['entryCount']), (UID, 'Closed', 3, 3))

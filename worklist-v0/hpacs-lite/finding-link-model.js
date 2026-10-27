@@ -241,13 +241,17 @@
     } catch (_) { return UNVERIFIED + '?'; }
     const arity = typeof kind === 'string' && Object.prototype.hasOwnProperty.call(ARITY, kind) ? ARITY[kind] : 0;
     if (!list.length && !arity) return '';
-    const known = provenance === 'server-copy' ? calculator === CALCULATOR
-      : provenance === 'live-head' ? calculator === undefined || calculator === CALCULATOR : false;
+    const mgBasis = kind === 'length' && typeof calculator === 'string' && ({
+      'kin-mg-length-v1:dbt': 'DBT PixelSpacing', 'kin-mg-length-v1:pixel': 'PixelSpacing · 원본 기준면',
+      'kin-mg-length-v1:ermf': 'ImagerPixelSpacing / ERMF · 추정 보정', 'kin-mg-length-v1:detector': 'ImagerPixelSpacing · 검출기 기준',
+    })[calculator];
+    const known = mgBasis && ['server-copy', 'live-head'].includes(provenance) || (provenance === 'server-copy' ? calculator === CALCULATOR
+      : provenance === 'live-head' ? calculator === undefined || calculator === CALCULATOR : false);
     const exact = known && list.length === arity && list.every(n => finite(n) && Math.abs(n) < 1e21) &&
       (kind !== 'ellipse' || (Number.isSafeInteger(list[4]) && list[4] >= 0));
     if (!exact) return UNVERIFIED + list.map(decimal).join(' / ');
     const [a, b, c, d] = list.map(decimal);
-    if (kind === 'length') return a + ' mm';
+    if (kind === 'length') return a + ' mm' + (mgBasis ? ' · ' + mgBasis : '');
     if (kind === 'angle') return a + '°';
     return '면적 ' + a + ' mm² · 평균 ' + b + ' HU · 최소 ' + c + ' HU · 최대 ' + d + ' HU · 화소 수 ' + String(list[4]);
   }
@@ -612,7 +616,7 @@
       try {
         if (!valid(ticket) || !work.admits(at)) throw { stale: true };
         const res = await transport.request('/api' + path, { ...options, context: at, read: 'response', deadlineMs: 0, cache: 'no-store', credentials: 'same-origin', signal: request?.signal,
-          headers: { 'X-KIN-CSRF': '1', [SCHEMA_HEADER]: String(SCHEMA), ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
+          headers: { [SCHEMA_HEADER]: String(SCHEMA), ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
         const data = await res.json().catch(() => null);
         if (!valid(ticket) || !work.admits(at)) throw { stale: true };
         const headerCode = res.headers?.get('X-KIN-Auth-Code');

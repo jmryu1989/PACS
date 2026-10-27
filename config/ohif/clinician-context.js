@@ -90,7 +90,7 @@ const kinViewerSession = (() => {
       if (role === 'read-only') return Promise.resolve(role);
       const answer = new Promise(resolve => waiting.add(resolve));
       if (!read && typeof fetch === 'function') {
-        read = fetch('/api/me', { credentials: 'same-origin', cache: 'no-store', headers: { 'X-KIN-CSRF': '1' } }).then(async response => {
+        read = fetch('/api/me', { credentials: 'same-origin', cache: 'no-store' }).then(async response => {
           if (response.ok) note(await response.json());
         }).catch(() => {}).finally(() => { read = null; for (const resolve of [...waiting]) { waiting.delete(resolve); resolve(state()); } });
       }

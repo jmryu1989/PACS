@@ -1,0 +1,41 @@
+/* Keep the existing W9 band and D390 report floor usable in short/narrow windows. The report-window panels yield first,
+   down to main.html's existing 48px compact-panel floor; the right column then scrolls instead of hiding either area's controls. */
+body:not(.portrait):not(.reading) .right:has(.multi-study:not([hidden])) { min-height: 0; overflow-y: auto; }
+body:not(.portrait):not(.reading) .right:has(.multi-study:not([hidden])) .rw {
+  flex: 0 1 auto; min-height: 48px; overflow: auto;
+}
+body:not(.portrait):not(.reading) .right:has(.multi-study:not([hidden])) .workrow { flex: 1 0 360px; }
+body:not(.portrait):not(.reading) .multi-study { flex: 0 0 auto; min-height: min-content; }
+.multi-study { flex: none; display: flex; flex-direction: column; height: min(34vh, 260px); min-height: min-content; overflow: auto;
+  border-top: 1px solid var(--kin-line2); border-bottom: 1px solid var(--kin-line2); background: var(--kin-panel);
+  color: var(--kin-text); font-size: 12px; }
+.multi-study[hidden] { display: none !important; }
+.multi-study-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 8px; flex: none; }
+.multi-study-head h3 { margin: 0; font-size: 12px; }
+.multi-study-head h3:focus-visible { outline: 2px solid var(--kin-accent); outline-offset: 2px; }
+.multi-study-nav { display: flex; flex-wrap: wrap; gap: 4px; margin-left: auto; }
+#multi-study-status, #multi-study-identity { padding: 0 8px 3px; overflow-wrap: anywhere; flex: none; }
+#multi-study-status:empty { display: none; }
+/* Keep the new-selection heading, summary and first error visible; further errors scroll without displacing member actions. */
+#multi-study-candidate { padding: 0 8px 3px; overflow-wrap: anywhere; flex: none; max-height: 3lh; overflow: auto; }
+/* A wrapped failed row is 134px in the 1024px workspace; retain it plus the list padding when status text grows. */
+.multi-study-members { list-style: none; margin: 0; padding: 0 8px 6px; overflow: auto; flex: 1 0 140px; height: 140px; min-height: 140px; }
+.multi-study-member { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; padding: 3px 4px;
+  border-top: 1px solid var(--kin-line); }
+.multi-study-member.active { box-shadow: inset 3px 0 var(--kin-accent); }
+.multi-study-label { overflow-wrap: anywhere; }
+.multi-study-marks { color: var(--kin-accent); white-space: nowrap; }
+.multi-study-state { grid-column: 1; color: var(--kin-muted); overflow-wrap: anywhere; }
+.multi-study-actions { grid-column: 2; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; justify-content: flex-end; }
+.multi-study-actions label { display: inline-flex; gap: 3px; align-items: center; }
+.multi-study button:disabled { opacity: .55; cursor: default; }
+/* The workspace side panel is narrow even on a wide monitor. Keep its action strip from squeezing the study label. */
+body.reading .multi-study-state, body.reading .multi-study-actions { grid-column: 1 / -1; }
+body.reading .multi-study-actions { justify-content: flex-start; }
+/* Let metadata and actions use the row width when a landscape column is narrow; otherwise the action strip
+   squeezes the label into a few characters and makes a single member taller than its scrolling viewport. */
+@media (max-width: 1024px) {
+  body:not(.portrait):not(.reading) .multi-study-state,
+  body:not(.portrait):not(.reading) .multi-study-actions { grid-column: 1 / -1; }
+  body:not(.portrait):not(.reading) .multi-study-actions { justify-content: flex-start; }
+}

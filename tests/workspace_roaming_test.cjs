@@ -153,9 +153,8 @@ test('a reload after a failure re-checks with the decided sentence and a confirm
   assert.equal([...storage.map.keys()].length, 0, 'the failure is forgotten once the copy is confirmed');
 });
 
-// (The session transport puts X-KIN-CSRF on every request it sends; the server checks it on writes only - the e2e
 // roam_04 sets a write without it against the real guard. Here: a read is a GET without a body.)
-test('the ordinary path asks nothing extra: a read is a plain GET, a save carries the CSRF header and its revision', async () => {
+test('the ordinary path asks nothing extra: a read is a plain GET, a save carries its revision without a CSRF header', async () => {
   const p = page({ answers: [ok(null, 2), () => ({ status: 200, body: { owner: OWNER, revision: 3, layout: LOCAL } }), ok(OTHER, 3)] });
   await settle();
   assert.equal(p.status.textContent, '계정에 저장한 배치가 없습니다. 현재 창의 배치를 유지합니다.');
@@ -166,7 +165,7 @@ test('the ordinary path asks nothing extra: a read is a plain GET, a save carrie
   await settle();
   const [read, write] = p.sent;
   assert.deepEqual([read.method, read.headers['content-type'], read.body], ['GET', undefined, null]);
-  assert.deepEqual([write.method, write.headers['x-kin-csrf'], write.body.revision, write.body.layout], ['PUT', '1', 2, LOCAL]);
+  assert.deepEqual([write.method, write.headers['x-kin-csrf'], write.body.revision, write.body.layout], ['PUT', undefined, 2, LOCAL]);
   assert.deepEqual([p.applied, p.load.textContent], [[OTHER], 'Load from Account']);
 });
 

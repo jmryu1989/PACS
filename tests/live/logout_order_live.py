@@ -69,10 +69,9 @@ const { AuthService } = copy.exports;
   const until = async (done, ms) => { for (const end = Date.now() + ms; Date.now() < end && !(await done()); ) await new Promise(r => setTimeout(r, 50)); };
   try {
     await auth.logout({sid,headers:{'x-real-ip':'127.0.0.1'}});
-    // The answer does not wait for Keycloak: wait (bounded) for this session's post-commit provider end and its recorded answer.
+    // The answer does not wait for Keycloak: wait (bounded) for this session's post-commit provider request.
     await until(() => observations.some(o => o.sessions === 0), 10000);
     await Promise.allSettled(pending);
-    await until(async () => !!(await observer.idpSessionEnd.findUnique({where:{idpSid:row.idpSid}}))?.confirmedAt, 5000);
     console.log('ORDER ' + JSON.stringify({observations}));
   } finally {
     global.fetch = realFetch;

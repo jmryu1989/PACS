@@ -113,6 +113,8 @@ class DisplayControlsE2E(ViewerLayoutE2E):
   # The label dialog's own Save: the open Measurements tab lists drawn arrows with a Save button of their own.
   p.locator('#draggableItem-select-annotation').get_by_role('button',name='Save',exact=True).click()
   arrows=p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='ArrowAnnotate').map(a=>({metadata:a.metadata,points:a.data.handles.points,text:a.data.text}))")
+  # Saving its label leaves Annotation active; switch tools before a focus click can start another arrow.
+  select_image_tool(p, 'WindowLevel')
   self.choose(p,0);p.keyboard.press('2');display_transform(p,'r');display_transform(p,'h');p.keyboard.press('Space');p.wait_for_timeout(150)
   self.assertEqual(p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='ArrowAnnotate').map(a=>({metadata:a.metadata,points:a.data.handles.points,text:a.data.text}))"),arrows)
   p.get_by_role('button',name='Add Key Image',exact=True).click();title=p.locator('#kin-viewer-history section[data-kind=key]').last.get_by_label('Key Title');title.fill('')

@@ -108,7 +108,7 @@ export class ImageRequestService {
    * 쓰기는 기본 격리(ReadCommitted)에서 검사·요청 행을 잠근 뒤 커밋된 최신 행을 본다. 읽기(#8·#9)는 RepeatableRead 한
    * 스냅샷에서 요청 행과 검사 소유 기관을 함께 읽는다 — 문장마다 새 스냅샷이면 그 사이에 커밋된 전이·소유 기관 변경이
    * 섞인 조합을 돌려줄 수 있다(S5-U4a-F01과 같은 방식). 읽기는 행 잠금을 잡지 않는다. 스냅샷은 접근 정책 공유 잠금을
-   * 기다리기 전에 정해지므로 그 사이의 정책 변경은 StudyAccessInterceptor가 응답 전에 거절한다.
+   * 기다리기 전에 정해지므로 조회는 해당 transaction의 정책 스냅샷을 따른다.
    */
   private async run<T>(c: Caller, fn: (tx: any) => Promise<T>, read = false, transaction?: Prisma.TransactionClient): Promise<T> {
     try {

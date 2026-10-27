@@ -8,6 +8,7 @@
     "frame-metadata.js",
     "sr-provenance.js",
     "navigation.js",
+    "mg-length.js",
     "history.js",
     "layout-model.js",
     "clinician-context.js",

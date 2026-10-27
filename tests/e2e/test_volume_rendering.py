@@ -274,7 +274,7 @@ class VolumeRenderingE2E(VolumeCurrentPrintE2E):
    self.assertEqual(0,v.evaluate('vrGateEvents'));self.assertEqual(state,v.evaluate('vrReaderState()'))
    self.assertEqual(before,self.native_pixels(v))
    for headers in wire:
-    self.assertTrue(headers.get('x-kin-session'));self.assertEqual('1',headers.get('x-kin-csrf'))
+    self.assertTrue(headers.get('x-kin-session'))
   finally:
    v.unroute(route_pattern,unavailable)
   v.wait_for_function('()=>vrGateEvents>0',timeout=20000)

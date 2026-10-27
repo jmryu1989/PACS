@@ -315,7 +315,7 @@ function orderKinds(row: Record<string, any>, event: RecordEvent): readonly Reco
 /** Multi-kind rows deliberately retain mixed clinical/operational content. */
 export const MODEL_CLASSIFICATION: Readonly<Record<string, readonly RecordKind[]>> = freeze({
   AuthSession: ['authentication-session'], Institution: ['institution'],
-  IdpSessionEnd: ['authentication-session'], MemberIsolation: ['identity-access'],
+  MemberIsolation: ['identity-access'],
   // Provider calls record their own completion; they are neither the rights row nor the session they affect.
   ProviderChange: ['system-operation'], MemberRights: ['identity-access'], MemberRightsImport: ['system-operation'],
   StudyState: ['study-metadata', 'study-correction', 'patient-match', 'assignment'],

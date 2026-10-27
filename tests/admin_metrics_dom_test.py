@@ -416,10 +416,6 @@ class AdminMetricsDOMTest(unittest.TestCase):
         if path == "/favicon.ico":
             route.fulfill(status=404, body="")
             return
-        if path.startswith("/api/") and request.headers.get("x-kin-csrf") != "1":
-            self.unexpected.append(f"{method} {path} without X-KIN-CSRF")
-            route.abort()
-            return
         if method == "GET" and path == "/api/me":
             if self.held_me is not None:
                 self.held_me.append(route)
@@ -554,7 +550,7 @@ class AdminMetricsDOMTest(unittest.TestCase):
         self.assertEqual("원천 값 13421772800바이트", titles["storage.server"][2])
         self.assertEqual("중앙값 12600초 · 최댓값 18000초", titles["waiting.normal"][2])
         gets = [c for c in self.calls if c["path"] == METRICS_PATH]
-        self.assertEqual([("GET", "", "1")], [(c["method"], c["query"], c["csrf"]) for c in gets])
+        self.assertEqual([("GET", "", None)], [(c["method"], c["query"], c["csrf"]) for c in gets])
 
     def test_03_unknown_is_never_zero(self):
         self.open()

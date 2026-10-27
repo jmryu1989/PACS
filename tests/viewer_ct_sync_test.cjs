@@ -279,13 +279,13 @@ function world(options = {}) {
   return w;
 }
 
-// Every request of the viewer's CT sync, in every case: a GET the guard sees as a browser call (X-KIN-CSRF, same-origin, no-store)
+// Every request of the viewer's CT sync, in every case: a GET the guard sees as a browser call (same-origin, no-store)
 // on /me, GET studies or GET clinician/studies — never a write, never a route outside the pinned allowlist for a clinician-only caller.
 function finish(w) {
   for (const e of w.log) {
     assert.equal(e.binding, 'S1', e.url);
     assert.equal(e.method, 'GET', e.url);
-    assert.deepEqual([e.csrf, e.credentials, e.cache], ['1', 'same-origin', 'no-store'], e.url);
+    assert.deepEqual([e.csrf, e.credentials, e.cache], [null, 'same-origin', 'no-store'], e.url);
     assert.ok(['GET me', 'GET studies', 'GET clinician/studies'].includes(e.key), e.url);
     if (clinicianOnly(e.roles)) { assert.ok(ALLOWED.has(e.key), `clinician-only request inside the allowlist: ${e.url}`); assert.notEqual(e.key, 'GET studies'); }
   }

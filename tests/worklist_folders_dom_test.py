@@ -207,7 +207,6 @@ class WorklistFoldersDOM(unittest.TestCase):
             self.assertEqual(account['sub'], self.site.account['sub'])
             expect(self.page.locator('dialog[open]')).to_have_count(0)
         self.assertEqual(3, self.site.logins)
-        self.assertEqual(3, len(self.site.entries))
         self.assertEqual([], self.dialogs, 'D1041 adds no prompt to the normal login/search path')
 
     def folders_state(self, page=None):

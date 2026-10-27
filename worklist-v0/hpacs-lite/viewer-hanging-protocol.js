@@ -163,7 +163,7 @@
       siteRequest=controller;
       sitePending=(async()=>{
         try{
-          const response=await fetcher(scopeEndpoints.site,{credentials:'same-origin',cache:'no-store',signal:controller.signal,headers:{'X-KIN-CSRF':'1'}});
+          const response=await fetcher(scopeEndpoints.site,{credentials:'same-origin',cache:'no-store',signal:controller.signal});
           const raw=await json(response);
           if(!response.ok)throw Error('기관 공용 Hanging Protocol을 불러오지 못했습니다.');
           const data=siteValue(raw);
@@ -382,10 +382,10 @@
          data.value!==null&&!model.normalize(data.value))throw Error('기관 Hanging Protocol 응답을 확인할 수 없습니다.');
       return data;
     }
-    async function session(signal){const response=await fetcher('/api/me',{credentials:'same-origin',cache:'no-store',signal,headers:{'X-KIN-CSRF':'1'}});if(!response.ok)throw Error('계정 세션을 확인할 수 없습니다.');const me=await json(response);if(!boundOwner||me.kind!=='member'||me.institution!==boundOwner.institution||me.sub!==boundOwner.subject)throw Error('계정이 변경되어 작업을 적용하지 않았습니다.');return me;}
+    async function session(signal){const response=await fetcher('/api/me',{credentials:'same-origin',cache:'no-store',signal});if(!response.ok)throw Error('계정 세션을 확인할 수 없습니다.');const me=await json(response);if(!boundOwner||me.kind!=='member'||me.institution!==boundOwner.institution||me.sub!==boundOwner.subject)throw Error('계정이 변경되어 작업을 적용하지 않았습니다.');return me;}
     async function verifiedContext(signal){
       if(typeof options.access==='function')return options.access({signal,owner:boundOwner});
-      await session(signal);const response=await fetcher('/api/studies',{credentials:'same-origin',cache:'no-store',signal,headers:{'X-KIN-CSRF':'1'}});if(!response.ok)throw Error('검사 접근 권한을 확인할 수 없습니다.');
+      await session(signal);const response=await fetcher('/api/studies',{credentials:'same-origin',cache:'no-store',signal});if(!response.ok)throw Error('검사 접근 권한을 확인할 수 없습니다.');
       const data=await json(response),uids=urlStudies();if(!uids||!Array.isArray(data.studies))throw Error('현재 검사 범위를 확인할 수 없습니다.');const studies=uids.map(uid=>data.studies.find(s=>s.uid===uid));if(studies.some(v=>!v))throw Error('현재 검사 접근 권한을 확인할 수 없습니다.');return {studies,displaySets:displaySets.getActiveDisplaySets()};
     }
     async function runApply(firstMatch=false,navigation=null){
@@ -458,7 +458,7 @@
       try{
         const method=action==='load'?'GET':'PUT',expectedOwner=site?boundSite:boundOwner;
         const body=method==='GET'?undefined:JSON.stringify({expectedOwner,revision,value:action==='reset'?null:value});
-        const response=await fetcher(scopeEndpoints[beforeScope],{method,credentials:'same-origin',cache:'no-store',signal:request.signal,headers:{'X-KIN-CSRF':'1',...(body?{'Content-Type':'application/json'}:{})},body});const raw=await json(response);
+        const response=await fetcher(scopeEndpoints[beforeScope],{method,credentials:'same-origin',cache:'no-store',signal:request.signal,headers:{...(body?{'Content-Type':'application/json'}:{})},body});const raw=await json(response);
         if(!response.ok)throw root.KinSessionTransport.responseError(response,response.status===409?'다른 창에서 규칙이 바뀌었습니다. 다시 불러오세요.'
           :site?'기관 저장 여부를 확인하지 못했습니다. 다시 불러오세요.':'계정 저장 여부를 확인하지 못했습니다. 다시 불러오세요.','기관 공용 규칙의 저장·초기화는 관리자 전용입니다.');
         const data=site?siteValue(raw):accountValue(raw);

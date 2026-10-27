@@ -359,7 +359,7 @@
         if (waiting) throw Object.assign(new Error(waiting), { kin: true, outcome: 'not-sent' });
         onDispatch();
         const response = await transport.request(apiBase + path, { context, deadlineMs: TIMEOUT_MS, method, signal: controller.signal,
-          headers: { 'Content-Type': 'application/json', 'X-KIN-CSRF': '1' }, body: body === undefined ? undefined : JSON.stringify(body) });
+          headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
         const data = response.incomplete ? undefined : response.body;
         if (!response.ok) {
           throw Object.assign(new Error(isObject(data) && text(data.message) ? data.message : `HTTP ${response.status}`),

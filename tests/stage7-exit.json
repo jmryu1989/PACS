@@ -177,7 +177,6 @@
         "session_proxy_live.SessionProxyLive.test_s12_all_protected_locations_binding_and_browser_headers",
         "report_draft_cas_live.ReportDraftCasLive.test_refresh_timeout_preserves_session_then_real_invalid_grant_ends_it",
         "session_end_live.SessionEndLive.test_01_log_out_ends_the_provider_session_and_login_meets_the_form",
-        "session_end_live.SessionEndLive.test_02_provider_frozen_during_log_out_cannot_be_ridden_back_in",
         "session_end_live.SessionEndLive.test_03_next_person_at_an_unfinished_logout_logs_in_as_themselves",
         "session_end_live.SessionEndLive.test_03b_next_person_in_a_profile_that_kept_an_abandoned_login_page",
         "session_end_live.SessionEndLive.test_03c_the_same_doctor_logs_in_again_in_a_tab_that_opened_the_app_twice",
@@ -185,13 +184,12 @@
         "session_end_live.SessionEndLive.test_05_the_same_doctors_other_pc_keeps_working",
         "session_end_live.SessionEndLive.test_07_a_provider_end_racing_a_refresh_still_ends_the_session",
         "session_end_live.SessionEndLive.test_09_an_isolated_member_cannot_come_back_until_activated",
-        "session_end_live.SessionEndLive.test_10_db_suspension_refuses_both_browsers_while_provider_sso_stays_alive",
-        "session_end_live.SessionEndLive.test_11_explicit_logout_ends_its_provider_session_and_the_next_same_sid_sso_lives"
+        "session_end_live.SessionEndLive.test_10_db_suspension_refuses_both_browsers_while_provider_sso_stays_alive"
       ]
     },
     {
       "id": "REQ-S7-U5-SESSION-UI",
-      "statement": "일회용 진입 증명과 현재 역할 확인 전에는 업무를 열지 않는다. 401 AUTH_SESSION_ENDED·계정 변경 뒤 옛 응답은 목록·판독 편집기·뷰어·관리·임상의 문서를 되살리지 않고 새 세션을 바꾸지 않는다. 일반 실패는 종료로 오인하지 않는다.",
+      "statement": "현재 세션과 역할 확인 전에는 업무를 열지 않는다. 401 AUTH_SESSION_ENDED·계정 변경 뒤 옛 응답은 목록·판독 편집기·뷰어·관리·임상의 문서를 되살리지 않고 새 세션을 바꾸지 않는다. 일반 실패는 종료로 오인하지 않는다.",
       "tests": [
         "auth_logout_dom_test.LogoutDOMTest.test_br01_main_log_out_closes_before_the_post_and_shares_it",
         "auth_logout_dom_test.LogoutDOMTest.test_br01_a_401_that_names_the_session_ended_confirms_without_a_post",
@@ -204,13 +202,13 @@
         "admin_session_dom_test.PageSessionDOMTest.test_clinician_report_question_request_and_inbox_end_cuts",
         "admin_session_dom_test.PageSessionDOMTest.test_s1_late_answer_and_notice_leave_s2_document_unchanged",
         "admin_session_dom_test.PageSessionDOMTest.test_pending_admin_bootstrap_never_reads_protected_panels",
-        "auth_entry_dom_test.AuthEntryDOMTest.test_replay_opens_nothing_and_reload_never_reuses_proof",
-        "auth_entry_dom_test.AuthEntryDOMTest.test_role_change_cannot_activate_or_forward_to_another_document",
+        "auth_entry_dom_test.AuthEntryDOMTest.test_callback_marker_is_consumed_and_does_not_bypass_its_session_end",
+        "auth_entry_dom_test.AuthEntryDOMTest.test_bootstrap_current_roles_choose_the_work_document",
         "auth_entry_dom_test.AuthEntryDOMTest.test_pending_and_invalid_membership_display_no_work",
-        "auth_entry_dom_test.AuthEntryDOMTest.test_no_work_before_entry_answer_and_concurrent_init_consumes_once",
+        "auth_entry_dom_test.AuthEntryDOMTest.test_no_work_before_bootstrap_and_concurrent_init_shares_one_read",
         "session_entry_dom_test.SessionEntry.test_main_entry_retries_in_place_without_landing_or_login",
         "session_entry_dom_test.SessionEntry.test_end_notice_during_retry_does_not_adopt_the_late_session",
-        "test_session_draft_boundaries.SessionDraftBoundaries.test_entry_proof_consumed_automatically_once"
+        "test_session_draft_boundaries.SessionDraftBoundaries.test_callback_document_bootstraps_current_session_without_click"
       ]
     },
     {
@@ -241,6 +239,9 @@
     }
   ],
   "left_out": [
+    "Product cuts 3 (M-MAIN-11/12/13, 사용자 결정): session_end_live의 test_02_provider_frozen_during_log_out_cannot_be_ridden_back_in과 test_11_explicit_logout_ends_its_provider_session_and_the_next_same_sid_sso_lives는 폐기된 provider-end 표식·probe/fresh 복구 요구여서 제외한다. 서버 세션 종료·로그아웃 감사·다음 사람 로그인은 SESSION-END의 나머지 실제 Keycloak 시험으로 유지한다.",
+    "Product cuts 3 (M-MAIN-11/12/13, 사용자 결정): auth_entry_dom_test의 test_replay_opens_nothing_and_reload_never_reuses_proof 및 test_session_draft_boundaries의 test_entry_proof_consumed_automatically_once는 일회용 진입 증명 폐기로 제외한다. 콜백 표식 소비·종료 세션 거절과 현재 세션의 자동 진입은 SESSION-UI의 callback 시험으로 대체한다.",
+    "Product cuts 3 (M-MAIN-11/12/13, 사용자 결정): auth_entry_dom_test의 test_role_change_cannot_activate_or_forward_to_another_document 및 test_no_work_before_entry_answer_and_concurrent_init_consumes_once는 진입 증명 발급 당시 역할 고정·증명 소비 단계를 전제로 하므로 제외한다. 현재 역할로 문서 선택·bootstrap 전 업무 차단·동시 초기화의 단일 조회는 SESSION-UI의 bootstrap 시험으로 유지한다.",
     "63c4fb2e 재결속 당시 원래 ID는 모두 현행 수집에 존재하여 삭제·이름 치환하지 않았다. 네 U5 요구에 현행 동작 사례를 추가했다. round 2에서 제외했던 이름/본문 불일치 두 ID(SE-10·SE-11)는 S7-U5-HYGIENE의 이름 변경 뒤 해소되어 필수 목록에 다시 들어갔다(아래 기록 메모).",
     "PRE-RECUT의 provider 격리 성공을 회원 권한의 근거로 삼는 주장과 처리기 메모리 draftOrder 순서 계약은 제외한다. D621에 따라 provider reconciliation은 U5b 범위이며, D623의 DB 권한과 DB revision/epoch/CAS가 기준이다.",
     "SE-10·SE-11은 round 2에서 이름/본문 불일치(옛 이름 test_10_a_member_disabled_at_the_provider_…, test_11_an_isolation_ends_each_provider_session_…)로 제외했으나, S7-U5-HYGIENE가 본문이 단언하는 사실대로 이름을 바꾼 뒤(test_10_db_suspension_refuses_both_browsers_while_provider_sso_stays_alive, test_11_explicit_logout_ends_its_provider_session_and_the_next_same_sid_sso_lives) 제외 사유가 사라져 REQ-S7-U5-SESSION-END의 필수 목록에 다시 넣었다. 둘 다 D621/D623의 DB 결정 사실(DB Suspend 뒤 두 브라우저 거절·provider SSO 보존, 명시적 Log out 뒤 같은 sid의 새 SSO 허용과 옛 토큰 거절)을 단언하며 provider reconciliation(U5b)의 근거로 세지 않는다.",
