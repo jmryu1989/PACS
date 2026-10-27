@@ -67,6 +67,7 @@ import { StudyTransferLocalService } from './study-transfer-local.service';
 import { DicomImportGateService } from './dicom-import-gate.service';
 import { DicomFrameController } from './dicom-frame.controller';
 import { DicomFrameService } from './dicom-frame.service';
+import { StudyImageDeliveryRecorder } from './dicom-frame-delivery';
 
 @Module({
   controllers: [EmrAuditController, DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController, SigningKeyAdminController, DicomFrameController],
@@ -78,7 +79,7 @@ import { DicomFrameService } from './dicom-frame.service';
     { provide: ImageContextSource, inject: [CURRENT_CLINICAL_CONTEXT, OrthancImageCatalog],
       useFactory: (clinical: ClinicalContextSource, catalog: OrthancImageCatalog) => new ProductionImageContext(clinical, catalog) },
     AsrService, StudyAccessService, PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, FindingService, ViewerJobService, ConnectService, ManualSrService, FavoriteService, StudyTagsService, ReaderAssignmentService, ConsultationService, ClinicianQuestionService, ImageRequestService, ClinicalContextService, CriticalResultService,
-    StudyTransferLocalService, DicomImportGateService, DicomFrameService,
+    StudyTransferLocalService, DicomImportGateService, DicomFrameService, StudyImageDeliveryRecorder,
     AdminAccessReview,
     { provide: APP_GUARD, useClass: AuthGuard },
     // W9 source selections use the same request-bound A1 response recorder.

@@ -2,10 +2,14 @@
  * MG-LOADING: the viewer's WADO-RS frame reads and series-strip previews, routed here by nginx (proxy/nginx.conf.template)
  * instead of straight to Orthanc. The DICOMweb gate is the same one nginx's auth_request runs for every other image
  * read (PacsService.authzDicom): institution, StudyAccess and the split-UID check, with the viewer's session binding
- * already enforced by the guard. Bytes are served by DicomFrameService (direct range read or Orthanc relay).
+ * already enforced by the guard. The study delivery's 열람 record (dicom-frame-delivery.ts, D1877) is durable before
+ * any byte; bytes are then served by DicomFrameService (direct range read or Orthanc relay).
  */
 import { BadRequestException, Controller, Get, Param, Req, Res } from '@nestjs/common';
 import { DicomFrameService } from './dicom-frame.service';
+import { FRAMES_SURFACE, PREVIEW_SURFACE, StudyImageDeliveryRecorder } from './dicom-frame-delivery';
+import type { DeliveryLease } from './dicom-frame-delivery';
+import { OrthancService } from './orthanc.service';
 import { Caller, PacsService } from './pacs.service';
 import { parseFrameList } from './dicom-frame-layout';
 
@@ -23,18 +27,23 @@ function requestOrigin(req: any): string {
 /**
  * The request's lifetime as a signal: aborted when the client goes away before the response finished (the viewer page
  * closed, a pane re-targeted). The service passes it to the index lookups and to a relayed Orthanc read, so a doctor
- * closing the viewer does not leave an Orthanc whole-file read running for nobody.
+ * closing the viewer does not leave an Orthanc whole-file read running for nobody. The response's `close` - which
+ * follows a finished response as well as one cut short - also ends the delivery lease. One listener does both: the
+ * gzip pipeline already puts six of Node's own close listeners on the response, and an eleventh is a leak warning.
  */
-function lifetime(req: any, res: any, work: (signal: AbortSignal) => Promise<void>): Promise<void> {
+function lifetime(req: any, res: any, lease: DeliveryLease, work: (signal: AbortSignal) => Promise<void>): Promise<void> {
   const abort = new AbortController();
   const stop = () => { if (!res.writableFinished) abort.abort(); };
-  req.once?.('aborted', stop); res.once?.('close', stop);
-  return work(abort.signal).finally(() => { req.off?.('aborted', stop); res.off?.('close', stop); });
+  const closed = () => { stop(); lease.release(res.writableFinished === true); };
+  req.once?.('aborted', stop);
+  if (res.destroyed || res.closed) closed(); else res.once?.('close', closed);
+  return work(abort.signal).finally(() => { req.off?.('aborted', stop); });
 }
 
 @Controller()
 export class DicomFrameController {
-  constructor(private readonly frames: DicomFrameService, private readonly pacs: PacsService) {}
+  constructor(private readonly frames: DicomFrameService, private readonly pacs: PacsService,
+    private readonly orthanc: OrthancService, private readonly deliveries: StudyImageDeliveryRecorder) {}
 
   @Get('dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames')
   async read(@Param('study') study: string, @Param('series') series: string, @Param('sop') sop: string,
@@ -44,7 +53,8 @@ export class DicomFrameController {
     if (!list) throw new BadRequestException('프레임 번호가 올바르지 않습니다');
     const uri = `/dicom-web/studies/${study}/series/${series}/instances/${sop}/frames/${frames}`;
     await this.pacs.authzDicom(uri, 'GET', member(req));
-    await lifetime(req, res, signal => this.frames.serveFrames({ studyUid: study, seriesUid: series, sopUid: sop, frames: list,
+    const lease = await this.deliveries.admit(req, FRAMES_SURFACE, study);
+    await lifetime(req, res, lease, signal => this.frames.serveFrames({ studyUid: study, seriesUid: series, sopUid: sop, frames: list,
       accept: req.headers?.accept, acceptEncoding: req.headers?.['accept-encoding'], head: req.method === 'HEAD',
       origin: requestOrigin(req) }, res, signal));
   }
@@ -53,6 +63,9 @@ export class DicomFrameController {
   async preview(@Param('id') id: string, @Req() req: any, @Res() res: any) {
     if (!ORTHANC_ID.test(id)) throw new BadRequestException('영상 식별자가 올바르지 않습니다');
     await this.pacs.authzDicom(`/instances/${id}/preview`, 'GET', member(req));
-    await lifetime(req, res, signal => this.frames.servePreview(id, res, signal));
+    // The gate just resolved (and cached) the object's study; the preview is a read of that study's delivery.
+    const study = await this.orthanc.instanceStudyUid(id);
+    const lease = await this.deliveries.admit(req, PREVIEW_SURFACE, study);
+    await lifetime(req, res, lease, signal => this.frames.servePreview(id, res, signal));
   }
 }

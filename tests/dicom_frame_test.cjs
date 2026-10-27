@@ -3,7 +3,7 @@
  * answer (api/src/dicom-frame.service.ts) over a synthetic stored object: which objects it serves itself, the byte
  * range of a frame, the multipart/related shape the viewer parses, gzip negotiation, the URL-hierarchy check and
  * the preview PNG. Synthetic bytes only; Orthanc is a stub source. No Docker here. D73: behaviour, not source text. */
-require('./service_test_loader.cjs');
+const { EXPLICIT, IMPLICIT, facts, syntheticObject, stubOrthanc, target, request, withService, pngGreys } = require('./dicom_frame_fixture.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -13,16 +13,9 @@ const zlib = require('node:zlib');
 const { PassThrough } = require('node:stream');
 
 const layout = require('/app/dist/dicom-frame-layout.js');
-const { DicomFrameService } = require('/app/dist/dicom-frame.service.js');
+const { DicomFrameService, firstFrameTransforms } = require('/app/dist/dicom-frame.service.js');
 const { DicomFrameController } = require('/app/dist/dicom-frame.controller.js');
 const { OrthancService } = require('/app/dist/orthanc.service.js');
-
-const EXPLICIT = '1.2.840.10008.1.2.1', IMPLICIT = '1.2.840.10008.1.2';
-const facts = (over = {}) => ({ transferSyntax: EXPLICIT, pixelDataOffset: 1000, rows: 4, columns: 3, bitsAllocated: 16,
-  samplesPerPixel: 1, numberOfFrames: 5, planarConfiguration: null, photometric: 'MONOCHROME2', pixelRepresentation: 0,
-  bitsStored: null, highBit: null, rescaleSlope: null, rescaleIntercept: null, modalityLutSequence: false,
-  windowCenter: null, windowWidth: null, voiLutFunction: null, voiLutSequence: false,
-  fileSize: 1000 + 12 + 4 * 3 * 2 * 5, storedSize: 1000 + 12 + 4 * 3 * 2 * 5, ...over });
 
 test('frameLayout: an uncompressed little-endian frame array is a range; everything else stays with Orthanc', () => {
   assert.deepEqual(layout.frameLayout(facts()), { headerLength: 12, frameBytes: 24, numberOfFrames: 5, firstFrameOffset: 1012 });
@@ -71,14 +64,14 @@ test('frameRange and parseFrameList: 1-based frames inside the object; any synta
   assert.deepEqual(layout.parseFrameList(long.join(',')), long);
 });
 
-test('directReadServes: octet-stream in the stored syntax (or any) is direct; another media type or syntax is Orthanc\'s', () => {
+test('directReadServes: the emitted multipart octet-stream must be acceptable by precedence; anything else is Orthanc\'s', () => {
   assert.equal(layout.directReadServes('multipart/related; type=application/octet-stream; transfer-syntax=*', EXPLICIT), true);
   assert.equal(layout.directReadServes('multipart/related; type="application/octet-stream"; transfer-syntax="1.2.840.10008.1.2.1"', EXPLICIT), true);
   assert.equal(layout.directReadServes('multipart/related; type="application/octet-stream; transfer-syntax=1.2.840.10008.1.2.1"', EXPLICIT), true, 'Orthanc\'s own quoted shape');
   assert.equal(layout.directReadServes('multipart/related; type="application/octet-stream"', EXPLICIT), true, 'no syntax parameter: the stored one');
   assert.equal(layout.directReadServes('multipart/related', EXPLICIT), true);
+  assert.equal(layout.directReadServes('multipart/*', EXPLICIT), true);
   assert.equal(layout.directReadServes('*/*', EXPLICIT), true);
-  assert.equal(layout.directReadServes('application/octet-stream', EXPLICIT), true);
   assert.equal(layout.directReadServes(undefined, EXPLICIT), true);
   assert.equal(layout.directReadServes('', EXPLICIT), true);
   assert.equal(layout.directReadServes('multipart/related; type="application/octet-stream"; transfer-syntax=1.2.840.10008.1.2.4.80', EXPLICIT), false, 'transcode');
@@ -86,8 +79,18 @@ test('directReadServes: octet-stream in the stored syntax (or any) is direct; an
   assert.equal(layout.directReadServes('multipart/related; type="image/jpeg"', EXPLICIT), false);
   assert.equal(layout.directReadServes('multipart/related; type="image/jls"; transfer-syntax=*', EXPLICIT), false);
   assert.equal(layout.directReadServes('image/jpeg', EXPLICIT), false);
-  assert.equal(layout.directReadServes('multipart/related; type="image/jpeg", multipart/related; type="application/octet-stream"', EXPLICIT), true, 'any acceptable entry');
+  assert.equal(layout.directReadServes('multipart/related; type="image/jpeg", multipart/related; type="application/octet-stream"', EXPLICIT), true, 'equally preferred: ours is acceptable');
   assert.equal(layout.directReadServes('multipart/related; type="application/octet-stream"; q=0, image/jpeg', EXPLICIT), false, 'q=0 is not acceptable');
+  // Review MG-05, second round (RFC 9110 §12.5.1): the service emits multipart/related only, so a bare application/octet-stream
+  // is a representation it does not have; an excluded multipart/related is not rescued by a positive wildcard, because the
+  // most specific matching range decides; a more preferred representation this path lacks is left to Orthanc.
+  assert.equal(layout.directReadServes('application/octet-stream', EXPLICIT), false, 'bare octet-stream is not what is emitted');
+  assert.equal(layout.directReadServes('multipart/related;q=0, */*;q=1', EXPLICIT), false, 'the specific exclusion wins over the wildcard');
+  assert.equal(layout.directReadServes('multipart/related; type="application/octet-stream";q=0, */*;q=1', EXPLICIT), false);
+  assert.equal(layout.directReadServes('multipart/related; type="application/octet-stream"; transfer-syntax=1.2.840.10008.1.2.1;q=0, multipart/related;q=1', EXPLICIT), false, 'the named syntax is the most specific match');
+  assert.equal(layout.directReadServes('multipart/related; type="application/octet-stream"; transfer-syntax=1.2.840.10008.1.2.1;q=1, multipart/related;q=0', EXPLICIT), true);
+  assert.equal(layout.directReadServes('*/*;q=0.1, multipart/related; type="image/jpeg"', EXPLICIT), false, 'a preferred rendering is Orthanc\'s to offer');
+  assert.equal(layout.directReadServes('multipart/related; type="application/octet-stream";q=0.5, image/jpeg;q=0.2', EXPLICIT), true);
 });
 
 test('acceptsGzip: a positive gzip (or wildcard) quality selects gzip; gzip;q=0, no header or no match is identity', () => {
@@ -139,12 +142,6 @@ test('previewPng: a valid greyscale PNG windowed by the stored VOI, inverted for
   assert.equal(layout.previewPng(frame.subarray(0, 100), f, { maxSide: 20 }), null, 'a short frame is not previewed');
 });
 
-/** The grey values of a PNG's rows, filter bytes dropped. */
-function pngGreys(png) {
-  const width = png.readUInt32BE(16), idat = png.indexOf('IDAT', 0, 'latin1'), length = png.readUInt32BE(idat - 4);
-  return [...zlib.inflateSync(png.subarray(idat + 4, idat + 4 + length))].filter((_, i) => i % (width + 1) !== 0);
-}
-
 test('previewPng: stored samples go through the DICOM greyscale pipeline (bit layout, sign, rescale, VOI), or stay with Orthanc', () => {
   // Review MG-02 cases. A CT-like object: stored [824, 1024, 1224], slope 1, intercept -1024 → [-200, 0, 200]; window 0/400 (LINEAR,
   // PS3.3 C.11.2.1.2.1) maps those to 0, 128 and 255, not to three white pixels.
@@ -178,63 +175,35 @@ test('previewPng: stored samples go through the DICOM greyscale pipeline (bit la
   ]) assert.equal(layout.previewPng(ctFrame, { ...ct, ...over }, { maxSide: 20 }), null, name);
   // A VOI LUT Sequence beside a window: the window is the rendered VOI (the viewer's default as well).
   assert.deepEqual(pngGreys(layout.previewPng(ctFrame, { ...ct, voiLutSequence: true }, { maxSide: 20 })), [0, 128, 255]);
+  // Review MG-02, second round: a functional-group shape the reader did not resolve is not rendered as if it had none.
+  assert.equal(layout.previewPng(ctFrame, { ...ct, unsupportedTransforms: true }, { maxSide: 20 }), null);
+});
+
+test('firstFrameTransforms: the enhanced object\'s shared and per-frame groups replace the top-level rescale and window for frame 1', () => {
+  // PS3.3 C.7.6.16.2.9/.10 as Orthanc's simplified tags give them: sequences are arrays of items with simplified names.
+  const pvt = { PixelValueTransformationSequence: [{ RescaleSlope: '1', RescaleIntercept: '-1024', RescaleType: 'HU' }] };
+  const voi = { FrameVOILUTSequence: [{ WindowCenter: '40', WindowWidth: '400', VOILUTFunction: 'LINEAR' }] };
+  assert.deepEqual(firstFrameTransforms({ Rows: '1' }), {}, 'no functional groups: the top-level attributes stand');
+  assert.deepEqual(firstFrameTransforms({ SharedFunctionalGroupsSequence: [{ ...pvt, ...voi }] }),
+    { RescaleSlope: '1', RescaleIntercept: '-1024', WindowCenter: '40', WindowWidth: '400', VOILUTFunction: 'LINEAR' });
+  assert.deepEqual(firstFrameTransforms({ PerFrameFunctionalGroupsSequence: [{ ...pvt, ...voi }, { FrameVOILUTSequence: [{ WindowCenter: '0', WindowWidth: '1' }] }] }),
+    { RescaleSlope: '1', RescaleIntercept: '-1024', WindowCenter: '40', WindowWidth: '400', VOILUTFunction: 'LINEAR' }, 'frame 1\'s item, not frame 2\'s');
+  // The per-frame item of frame 1 overrides the shared group; a present group without a window means no window (min/max), not the top-level window.
+  assert.deepEqual(firstFrameTransforms({ WindowCenter: '9', WindowWidth: '9', SharedFunctionalGroupsSequence: [voi],
+    PerFrameFunctionalGroupsSequence: [{ FrameVOILUTSequence: [{ WindowCenter: '100', WindowWidth: '200' }] }] }),
+    { WindowCenter: '100', WindowWidth: '200', VOILUTFunction: undefined });
+  assert.deepEqual(firstFrameTransforms({ SharedFunctionalGroupsSequence: [{ PixelMeasuresSequence: [{ PixelSpacing: '1\\1' }] }] }), {}, 'groups the preview does not use');
+  assert.deepEqual(firstFrameTransforms({ SharedFunctionalGroupsSequence: [], PerFrameFunctionalGroupsSequence: [] }), {}, 'empty sequences');
+  for (const [name, tags] of [
+    ['a non-sequence value', { SharedFunctionalGroupsSequence: 'x' }],
+    ['two Pixel Value Transformation items', { SharedFunctionalGroupsSequence: [{ PixelValueTransformationSequence: [{ RescaleSlope: '1' }, { RescaleSlope: '2' }] }] }],
+    ['a Modality LUT table inside the group', { SharedFunctionalGroupsSequence: [{ PixelValueTransformationSequence: [{ ModalityLUTSequence: [{ LUTDescriptor: '256\\0\\16' }] }] }] }],
+    ['a VOI LUT table inside the group', { SharedFunctionalGroupsSequence: [{ FrameVOILUTSequence: [{ VOILUTSequence: [{ LUTDescriptor: '256\\0\\16' }] }] }] }],
+    ['a malformed item', { PerFrameFunctionalGroupsSequence: [{ FrameVOILUTSequence: ['x'] }] }],
+  ]) assert.equal(firstFrameTransforms(tags), null, name);
 });
 
 // ── the service over a synthetic stored file and a stub Orthanc index ──
-
-function syntheticObject(dir, shape = {}) {
-  const { rows = 4, columns = 3, random = false, tags: extraTags = {} } = shape;
-  const frames = 5, frameBytes = rows * columns * 2, offset = 1000;
-  const uuid = '9447e43e-7a12-4de9-af18-9ceb86847e05';
-  const file = Buffer.alloc(offset + 12 + frameBytes * frames);
-  Buffer.from([0xe0, 0x7f, 0x10, 0x00]).copy(file, offset); file.write('OW', offset + 4, 'latin1'); file.writeUInt32LE(frameBytes * frames, offset + 8);
-  if (random) require('node:crypto').randomFillSync(file, offset + 12);   // incompressible: gzip emits many chunks
-  else for (let f = 0; f < frames; f++) for (let i = 0; i < rows * columns; i++) file.writeUInt16LE(f * 1000 + i, offset + 12 + f * frameBytes + i * 2);
-  const filePath = path.join(dir, uuid.slice(0, 2), uuid.slice(2, 4), uuid);
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, file);
-  const id = '3fc2d51f-e3bbd38a-db69114e-eef254ef-fcc4744b';
-  const tags = { StudyInstanceUID: '1.2.3', SeriesInstanceUID: '1.2.3.4', SOPInstanceUID: '1.2.3.4.5', Rows: String(rows), Columns: String(columns),
-    BitsAllocated: '16', SamplesPerPixel: '1', NumberOfFrames: String(frames), PhotometricInterpretation: 'MONOCHROME2', PixelRepresentation: '0', ...extraTags };
-  return { uuid, id, file, frameBytes, offset, tags, filePath,
-    attachment: { Uuid: uuid, UncompressedSize: file.length, CompressedSize: file.length, ContentType: 1 } };
-}
-
-function stubOrthanc(object, over = {}) {
-  const calls = [];
-  return { calls,
-    async lookupInstance(sop) { calls.push(['lookup', sop]); return sop === object.tags.SOPInstanceUID ? [{ Type: 'Instance', ID: object.id }] : []; },
-    async frameFacts(id) { calls.push(['facts', id]); return { tags: object.tags, attachment: object.attachment, transferSyntax: EXPLICIT, pixelDataOffset: String(object.offset), ...over }; },
-    async relay(path, accept, target) { calls.push(['relay', path, accept]); target.status(200); target.setHeader('content-type', 'relayed'); target.write(Buffer.from('relayed')); target.end(); },
-  };
-}
-
-/** A Writable like Express's response: the service pipes into it and sets status/headers on it. */
-function target() {
-  const sink = new PassThrough(), chunks = [], headers = {}; let status = 0;
-  sink.on('data', c => chunks.push(c));
-  const done = new Promise(resolve => { sink.on('end', resolve); sink.on('close', resolve); });
-  sink.status = c => { status = c; };
-  sink.setHeader = (k, v) => { headers[k.toLowerCase()] = v; };
-  sink.result = async () => { await done; return { status, headers, body: Buffer.concat(chunks) }; };
-  return sink;
-}
-
-const request = over => ({ studyUid: '1.2.3', seriesUid: '1.2.3.4', sopUid: '1.2.3.4.5', frames: [2],
-  accept: 'multipart/related; type=application/octet-stream; transfer-syntax=*', acceptEncoding: undefined, head: false, origin: 'https://pacs.example', ...over });
-
-async function withService(fn, over, shape) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-frames-'));
-  const previous = process.env.KIN_ORTHANC_STORAGE;
-  process.env.KIN_ORTHANC_STORAGE = dir;
-  try {
-    const object = syntheticObject(dir, shape), orthanc = stubOrthanc(object, over);
-    await fn(new DicomFrameService(orthanc), object, orthanc);
-  } finally {
-    if (previous === undefined) delete process.env.KIN_ORTHANC_STORAGE; else process.env.KIN_ORTHANC_STORAGE = previous;
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-}
 
 test('serveFrames: the frame bytes of the stored file in Orthanc\'s multipart shape, with an exact Content-Length', async () => {
   await withService(async (service, object, orthanc) => {
@@ -457,6 +426,97 @@ test('servePreview: the served PNG carries the object\'s modality and VOI semant
   }, undefined, { rows: 1, columns: 3 });
 });
 
+test('servePreview: an enhanced object\'s functional-group transforms are applied to frame 1, or the preview is Orthanc\'s', async () => {
+  // Review MG-02, second round. Stored [824, 1024, 1224], intercept -1024 → [-200, 0, 200]; window 40/400 LINEAR maps them to
+  // 0, 102 and 230 (PS3.3 C.11.2.1.2.1), whether the groups are shared or per frame. Treating the transforms as absent gave 0/128/255.
+  const group = { PixelValueTransformationSequence: [{ RescaleSlope: '1', RescaleIntercept: '-1024', RescaleType: 'HU' }],
+    FrameVOILUTSequence: [{ WindowCenter: '40', WindowWidth: '400', VOILUTFunction: 'LINEAR' }] };
+  for (const location of ['SharedFunctionalGroupsSequence', 'PerFrameFunctionalGroupsSequence']) {
+    await withService(async (service, object, orthanc) => {
+      const t = target();
+      await service.servePreview(object.id, t);
+      const { status, body } = await t.result();
+      assert.equal(status, 200);
+      assert.deepEqual(pngGreys(body), [0, 102, 230], location);
+      assert.ok(!orthanc.calls.some(c => c[0] === 'relay'));
+    }, undefined, { rows: 1, columns: 3, values: [824, 1024, 1224], tags: { SOPClassUID: '1.2.840.10008.5.1.4.1.1.2.1', [location]: [group] } });
+  }
+  // The per-frame window of frame 1 wins over the shared one; a top-level window is not frame 1's.
+  await withService(async (service, object) => {
+    const t = target();
+    await service.servePreview(object.id, t);
+    assert.deepEqual(pngGreys((await t.result()).body), [0, 102, 230]);
+  }, undefined, { rows: 1, columns: 3, values: [824, 1024, 1224], tags: { WindowCenter: '0', WindowWidth: '1',
+    SharedFunctionalGroupsSequence: [{ PixelValueTransformationSequence: group.PixelValueTransformationSequence, FrameVOILUTSequence: [{ WindowCenter: '0', WindowWidth: '1' }] }],
+    PerFrameFunctionalGroupsSequence: [{ FrameVOILUTSequence: group.FrameVOILUTSequence }] } });
+  // A LUT table inside a frame group is a transform this renderer does not apply: Orthanc's renderer answers, visibly not a silent identity.
+  await withService(async (service, object, orthanc) => {
+    const t = target();
+    await service.servePreview(object.id, t);
+    assert.equal((await t.result()).body.toString(), 'relayed');
+    assert.deepEqual(orthanc.calls.at(-1), ['relay', `/instances/${object.id}/preview`, 'image/png']);
+    // The frames of the same object are still a byte range: the transforms concern the rendering, not the stored bytes.
+    const frames = target();
+    await service.serveFrames(request({ frames: [1] }), frames);
+    assert.equal((await frames.result()).status, 200);
+    assert.ok(!orthanc.calls.slice(-1).some(c => c[0] === 'relay'));
+  }, undefined, { rows: 1, columns: 3, values: [824, 1024, 1224], tags: { SharedFunctionalGroupsSequence: [{ FrameVOILUTSequence: [{ VOILUTSequence: [{ LUTDescriptor: '256\\0\\16' }] }] }] } });
+});
+
+test('description: a request that leaves while a shared description is read does not cancel it for the others', async () => {
+  // Review MG-03, second round: two cold previews of one object share one frameFacts read. Closing the first client
+  // must fail only that client; the second keeps its description. Only when the last waiting client leaves is the source read stopped.
+  await withService(async (service, object, orthanc) => {
+    let entered, sharedSignal, calls = 0;
+    const started = new Promise(resolve => { entered = resolve; });
+    const source = orthanc.frameFacts.bind(orthanc);
+    orthanc.frameFacts = async (id, signal) => {
+      calls++; sharedSignal = signal; entered();
+      await new Promise((resolve, reject) => { signal.addEventListener('abort', () => reject(new Error('source cancelled')), { once: true }); setTimeout(resolve, 60); });
+      return source(id);
+    };
+    const first = new AbortController(), second = new AbortController();
+    const t1 = target(), t2 = target();
+    const p1 = service.servePreview(object.id, t1, first.signal).then(() => 'fulfilled', e => 'rejected:' + e.message);
+    await started;
+    const p2 = service.servePreview(object.id, t2, second.signal).then(() => 'fulfilled', e => 'rejected:' + e.message);
+    await new Promise(resolve => setImmediate(resolve));
+    first.abort();   // the first pane closed
+    assert.equal(await p1, 'rejected:영상 요청이 중단되었습니다');
+    assert.equal(sharedSignal.aborted, false, 'the shared source read goes on for the second client');
+    assert.equal(await p2, 'fulfilled');
+    assert.equal((await t2.result()).status, 200);
+    assert.equal(calls, 1, 'one description for both');
+    // A later request is served from the completed description (no second read).
+    const t3 = target();
+    await service.servePreview(object.id, t3);
+    assert.equal((await t3.result()).status, 200);
+    assert.equal(calls, 1);
+  });
+  // When every waiting client has left, the source read is cancelled and the next request describes afresh.
+  await withService(async (service, object, orthanc) => {
+    let entered, sharedSignal, calls = 0;
+    const started = new Promise(resolve => { entered = resolve; });
+    const source = orthanc.frameFacts.bind(orthanc);
+    orthanc.frameFacts = async (id, signal) => {
+      calls++; sharedSignal = signal; entered();
+      await new Promise((resolve, reject) => { signal.addEventListener('abort', () => reject(new Error('source cancelled')), { once: true }); setTimeout(resolve, 60); });
+      return source(id);
+    };
+    const only = new AbortController(), t = target();
+    const p = service.servePreview(object.id, t, only.signal).then(() => 'fulfilled', e => 'rejected');
+    await started;
+    only.abort();
+    assert.equal(await p, 'rejected');
+    assert.equal(sharedSignal.aborted, true, 'nobody waits: the source read stops');
+    orthanc.frameFacts = source;
+    const again = target();
+    await service.servePreview(object.id, again);
+    assert.equal((await again.result()).status, 200);
+    assert.equal(calls, 1, 'the cancelled read was not reused; the stub\'s plain read answered');
+  });
+});
+
 // ── the Orthanc relay's lifetime and the controller's lifetime signal ──
 
 /** A never-finishing Orthanc body: the fetch resolves with headers, the body's first read stays pending. */
@@ -540,27 +600,39 @@ test('relay: a caller\'s signal still ends a pending relay, and a completed rela
 });
 
 test('controller: the request\'s lifetime signal reaches the service and aborts when the response closes early', async () => {
-  const seen = [];
+  const seen = [], leases = [];
   const service = { serveFrames: async (req, res, signal) => { seen.push(['frames', signal]); await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })); },
     servePreview: async (id, res, signal) => { seen.push(['preview', signal]); } };
   const pacs = { authzDicom: async () => {} };
-  const controller = new DicomFrameController(service, pacs);
+  const orthanc = { instanceStudyUid: async () => '1.2.3' };
+  // The delivery recorder's admission is awaited before the service is called; its lease is released with the response's close.
+  const deliveries = { admit: async (req, surface, study) => { const lease = { surface, study, released: null }; leases.push(lease); return { release: finished => { lease.released = finished; } }; } };
+  const controller = new DicomFrameController(service, pacs, orthanc, deliveries);
   const req = Object.assign(new PassThrough(), { method: 'GET', headers: {}, sub: 'synthetic-doctor', institution: 'site-a' });
   const res = relayTarget();
   const reading = controller.read('1.2.3', '1.2.3.4', '1.2.3.4.5', '1', req, res);
   await new Promise(resolve => setTimeout(resolve, 10));
   assert.ok(seen[0][1] instanceof AbortSignal && !seen[0][1].aborted);
+  assert.deepEqual([leases[0].surface, leases[0].study, leases[0].released], ['GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames', '1.2.3', null]);
   res.destroy();   // closed before writableFinished
   await Promise.race([reading, new Promise((_, reject) => setTimeout(() => reject(new Error('the read did not observe the close')), 2000))]);
   assert.equal(seen[0][1].aborted, true);
   assert.equal(res.listenerCount('close'), 0);
+  assert.equal(leases[0].released, false, 'a response cut short releases its lease as unfinished');
   // A response that finished normally does not abort its own signal on the close that follows the end.
   const res2 = relayTarget();
   const service2 = { servePreview: async (id, r, signal) => { r.end(); await new Promise(resolve => setTimeout(resolve, 10)); seen.push(['preview-signal', signal.aborted]); } };
-  await new DicomFrameController(service2, pacs).preview('3fc2d51f-e3bbd38a-db69114e-eef254ef-fcc4744b', req, res2);
+  await new DicomFrameController(service2, pacs, orthanc, deliveries).preview('3fc2d51f-e3bbd38a-db69114e-eef254ef-fcc4744b', req, res2);
   assert.deepEqual(seen.at(-1), ['preview-signal', false]);
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual([leases[1].surface, leases[1].study, leases[1].released], ['GET instances/:id/preview', '1.2.3', true]);
   // The 17-frame list the review sent (MG-07) is a request like any other, not a 400.
   const service3 = { serveFrames: async (request) => { seen.push(['list', request.frames.length]); } };
-  await new DicomFrameController(service3, pacs).read('1.2.3', '1.2.3.4', '1.2.3.4.5', Array.from({ length: 17 }, (_, i) => i + 1).join(','), req, relayTarget());
+  await new DicomFrameController(service3, pacs, orthanc, deliveries).read('1.2.3', '1.2.3.4', '1.2.3.4.5', Array.from({ length: 17 }, (_, i) => i + 1).join(','), req, relayTarget());
   assert.deepEqual(seen.at(-1), ['list', 17]);
+  // No admission, no service call: a recorder that refuses leaves the gate's refusal in place and sends nothing.
+  const refusing = { admit: async () => { throw new Error('ledger down'); } };
+  const service4 = { serveFrames: async () => { seen.push(['served-without-record']); } };
+  await assert.rejects(new DicomFrameController(service4, pacs, orthanc, refusing).read('1.2.3', '1.2.3.4', '1.2.3.4.5', '1', req, relayTarget()), /ledger down/);
+  assert.ok(!seen.some(s => s[0] === 'served-without-record'));
 });

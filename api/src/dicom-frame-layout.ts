@@ -29,6 +29,8 @@ export interface FrameFacts {
   rescaleSlope: number | null; rescaleIntercept: number | null; modalityLutSequence: boolean;
   /** VOI (PS3.3 C.11.2): the first window, its function (LINEAR when absent), and whether a VOI LUT Sequence exists. */
   windowCenter: number | null; windowWidth: number | null; voiLutFunction: string | null; voiLutSequence: boolean;
+  /** The object's functional groups carry a transform shape this reader does not interpret: its preview is Orthanc's. */
+  unsupportedTransforms: boolean;
   /** Stored attachment: same size compressed and uncompressed means Orthanc's own storage compression is off. */
   fileSize: number; storedSize: number;
 }
@@ -141,21 +143,28 @@ function acceptEntries(header: string): AcceptEntry[] {
 }
 
 /**
- * Whether the request asks for what the direct reader serves: the stored frame bytes as application/octet-stream
- * (inside multipart/related, as the viewer asks, or bare), in the stored transfer syntax or any (`*`). A request for
- * another media type (image/jpeg, image/jls, …) or another syntax is a rendering/transcoding request, which stays with
- * Orthanc. No Accept header means no preference (PS3.18 §8.7.3.3.1: the default is the stored octet-stream).
+ * Whether the client accepts the one representation the direct reader emits - `multipart/related;
+ * type="application/octet-stream"; transfer-syntax=<stored>` - by RFC 9110 §12.5.1: of the Accept entries that match
+ * it, the most specific decides (a type parameter and a named syntax are more specific than their absence, a named type
+ * than the multipart or the full wildcard range), and a quality of 0 excludes it. A representation this path does not emit that the client
+ * prefers (a higher quality on image/jpeg, another transfer syntax, a bare application/octet-stream) leaves the request to
+ * Orthanc, which can answer it. No Accept header means no preference (PS3.18 §8.7.3.3.1: the stored octet-stream).
  */
 export function directReadServes(accept: unknown, storedSyntax: string): boolean {
   if (typeof accept !== 'string' || !accept.trim()) return true;
-  return acceptEntries(accept).some(entry => {
-    if (entry.q <= 0) return false;
-    const type = entry.params.get('type');
-    const octet = entry.type === '*/*' || entry.type === 'application/octet-stream' ||
-      (entry.type === 'multipart/related' && (type === undefined || type === 'application/octet-stream' || type === '*/*'));
-    const syntax = entry.params.get('transfer-syntax');
-    return octet && (syntax === undefined || syntax === '*' || syntax === storedSyntax);
-  });
+  let ours: { rank: number; q: number } | null = null, elsewhere = 0;
+  for (const entry of acceptEntries(accept)) {
+    const type = entry.params.get('type'), syntax = entry.params.get('transfer-syntax');
+    let rank = entry.type === '*/*' ? 0 : entry.type === 'multipart/*' ? 1 : entry.type === 'multipart/related' ? 2 : -1;
+    if (rank === 2) {
+      if (type !== undefined && type !== '*/*' && type !== 'application/octet-stream') rank = -1;        // multipart of another media type
+      else if (syntax !== undefined && syntax !== '*' && syntax !== storedSyntax) rank = -1;             // another syntax: transcoding
+      else rank += (type !== undefined && type !== '*/*' ? 1 : 0) + (syntax !== undefined && syntax !== '*' ? 1 : 0);
+    }
+    if (rank < 0) { elsewhere = Math.max(elsewhere, entry.q); continue; }
+    if (!ours || rank > ours.rank || (rank === ours.rank && entry.q > ours.q)) ours = { rank, q: entry.q };
+  }
+  return ours !== null && ours.q > 0 && ours.q >= elsewhere;
 }
 
 /**
@@ -244,7 +253,7 @@ export interface GreyscalePipeline {
 }
 
 export function greyscalePipeline(facts: FrameFacts): GreyscalePipeline | null {
-  if (facts.samplesPerPixel !== 1 || ![8, 16].includes(facts.bitsAllocated)) return null;
+  if (facts.unsupportedTransforms || facts.samplesPerPixel !== 1 || ![8, 16].includes(facts.bitsAllocated)) return null;
   if (facts.photometric !== 'MONOCHROME1' && facts.photometric !== 'MONOCHROME2') return null;
   if (facts.modalityLutSequence) return null;
   const bitsStored = facts.bitsStored ?? facts.bitsAllocated, highBit = facts.highBit ?? bitsStored - 1;

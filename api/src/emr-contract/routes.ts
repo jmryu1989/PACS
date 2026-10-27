@@ -171,12 +171,18 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
   // straight to Orthanc; before, the same bytes left through the external surfaces below. The frame route carries the
   // pixel frames of one image or segmentation object; the preview route the strip's rendering of one object, the same
   // kinds as `orthanc-instance-preview`. The viewer fetches them as the person looks and ahead of it (prefetch), so
-  // both causes are real. Admission is authzDicom's; the D1877 image-delivery pair per study is the image-delivery
-  // integration's and is not recorded here (nor on the external surfaces these routes replace).
+  // both causes are real. Admission is authzDicom's; the D1877 pair per study delivery (provide-prepared before the
+  // first byte, a terminal when the delivery ends) is recorded on whichever of the two routes opens the delivery, by
+  // dicom-frame-delivery.ts, with the study as the `image` target.
   { kinds: ['image', 'external-sr-seg'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames'] },
   { kinds: ['thumbnail', 'image', 'key-image'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET instances/:id/preview'] },
+  // MODULE_A A4 (#261): the browser reports that it displayed a report version (or its evidence) this member was
+  // provided; the server appends that provision's own client-shown follow-up - an access-audit entry about the stored
+  // report targets, under the provision's surface - and writes no clinical record. The report is the person's view.
+  { kinds: ['access-audit'], operation: 'write', causes: ['user-view'],
+    routes: ['POST studies/:uid/view-observations'] },
 ];
 
 const routeEntries = groups.flatMap(({ routes, ...contract }) => routes.map(route => [route, contract] as const));

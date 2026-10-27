@@ -45,6 +45,47 @@ interface StoredObject {
 class ShortRead extends Error { constructor() { super('short read'); } }
 type FileHandle = Awaited<ReturnType<typeof fs.open>>;
 
+const present = (value: unknown) => value !== undefined && value !== null && value !== '';
+/** Functional groups whose attributes the preview pipeline applies (PS3.3 C.7.6.16.2.9 Pixel Value Transformation, C.7.6.16.2.10 Frame VOI LUT). */
+const FRAME_GROUPS: readonly (readonly [string, readonly string[]])[] = [
+  ['PixelValueTransformationSequence', ['RescaleSlope', 'RescaleIntercept']],
+  ['FrameVOILUTSequence', ['WindowCenter', 'WindowWidth', 'VOILUTFunction']],
+];
+
+/**
+ * The first frame's transforms of an enhanced multi-frame object, from its functional groups (review MG-02): the shared
+ * groups apply to every frame and frame 1's per-frame item overrides them; a group that is present replaces the top-level
+ * attributes it covers, including those it leaves out (an item without a window means no window, not the top-level one).
+ * `{}` for an object without functional groups (the top-level attributes stand), `null` when a group has a shape this
+ * reader does not interpret - a malformed sequence, several items, a Modality or VOI LUT table inside a frame group -
+ * so that the preview is Orthanc's renderer's rather than a rendering with the transforms silently dropped.
+ */
+export function firstFrameTransforms(tags: any): Record<string, unknown> | null {
+  const shared = tags?.SharedFunctionalGroupsSequence, perFrame = tags?.PerFrameFunctionalGroupsSequence;
+  if (!present(shared) && !present(perFrame)) return {};
+  const groups: any[] = [];
+  for (const sequence of [shared, perFrame]) {
+    if (!present(sequence)) continue;
+    if (!Array.isArray(sequence)) return null;
+    if (!sequence.length) continue;
+    const group = sequence[0];
+    if (!group || typeof group !== 'object' || Array.isArray(group)) return null;
+    groups.push(group);
+  }
+  const over: Record<string, unknown> = {};
+  for (const group of groups) {
+    for (const [sequence, keys] of FRAME_GROUPS) {
+      const items = group[sequence];
+      if (!present(items)) continue;
+      if (!Array.isArray(items) || items.length !== 1 || !items[0] || typeof items[0] !== 'object' || Array.isArray(items[0])) return null;
+      const item = items[0];
+      if (present(item.ModalityLUTSequence) || present(item.VOILUTSequence)) return null;
+      for (const key of keys) over[key] = item[key];
+    }
+  }
+  return over;
+}
+
 @Injectable()
 export class DicomFrameService {
   private readonly logger = new Logger('DicomFrame');
@@ -52,6 +93,8 @@ export class DicomFrameService {
   private storageState: 'unchecked' | 'ready' | 'absent' = this.storage ? 'unchecked' : 'absent';
   private readonly objects = new Map<string, Promise<StoredObject>>();   // Orthanc id → immutable stored object
   private readonly located = new Map<string, string>();                  // SOP UID → Orthanc id
+  /** Descriptions still being read: who waits for each, and the one cancellation they share. */
+  private readonly describing = new Map<string, { borrowers: number; controller: AbortController }>();
 
   constructor(private readonly orthanc: OrthancService) {}
 
@@ -210,24 +253,64 @@ export class DicomFrameService {
     return this.storedById(id, signal);
   }
 
+  /**
+   * One description per object, shared by every request that needs it while it is being read. Its cancellation is
+   * shared as well: the source read stops only when the last request waiting for it has gone (review MG-03: a viewer
+   * pane closed while a cold object is described must not fail the other panes reading the same object). A request
+   * that leaves early gets its own refusal; the description goes on for the others.
+   */
   private storedById(id: string, signal?: AbortSignal): Promise<StoredObject> {
     let pending = this.objects.get(id);
     if (!pending) {
-      pending = this.describe(id, signal);
+      const owner = { borrowers: 0, controller: new AbortController() };
+      const described = this.describe(id, owner.controller.signal);
+      pending = described;
+      this.describing.set(id, owner);
+      described.finally(() => { if (this.describing.get(id) === owner) this.describing.delete(id); }).catch(() => {});
       if (this.objects.size > 5000) this.objects.clear();
       this.objects.set(id, pending);
       // A failed description is not an answer about the object: the next request asks Orthanc again.
       pending.catch(() => { if (this.objects.get(id) === pending) this.objects.delete(id); });
     }
-    return pending;
+    return this.borrow(id, pending, signal);
+  }
+
+  private borrow(id: string, pending: Promise<StoredObject>, signal?: AbortSignal): Promise<StoredObject> {
+    const owner = this.describing.get(id);
+    if (!signal || !owner) return pending;   // already described, or no lifetime to follow
+    owner.borrowers++;
+    return new Promise<StoredObject>((resolve, reject) => {
+      let left = false;
+      const leave = () => {
+        if (left) return;
+        left = true;
+        signal.removeEventListener('abort', onAbort);
+        owner.borrowers--;
+        if (owner.borrowers === 0 && this.describing.get(id) === owner) {
+          // Nobody waits for this description any more: stop the source read and let the next request start afresh.
+          owner.controller.abort();
+          this.describing.delete(id);
+          if (this.objects.get(id) === pending) this.objects.delete(id);
+        }
+      };
+      const onAbort = () => { leave(); reject(new ServiceUnavailableException('영상 요청이 중단되었습니다')); };
+      if (signal.aborted) { onAbort(); return; }
+      signal.addEventListener('abort', onAbort, { once: true });
+      pending.then(value => { if (!left) { left = true; signal.removeEventListener('abort', onAbort); owner.borrowers--; } resolve(value); },
+        error => { if (!left) { left = true; signal.removeEventListener('abort', onAbort); owner.borrowers--; } reject(error); });
+    });
   }
 
   private async describe(id: string, signal?: AbortSignal): Promise<StoredObject> {
-    const { tags, attachment, transferSyntax, pixelDataOffset } = await this.orthanc.frameFacts(id, signal);
-    if (!tags || typeof tags !== 'object' || typeof tags.SOPInstanceUID !== 'string' || typeof tags.StudyInstanceUID !== 'string' ||
-        typeof tags.SeriesInstanceUID !== 'string') throw new NotFoundException('영상 원본을 확인할 수 없습니다');
-    const present = (value: unknown) => value !== undefined && value !== null && value !== '';
+    const { tags: indexed, attachment, transferSyntax, pixelDataOffset } = await this.orthanc.frameFacts(id, signal);
+    if (!indexed || typeof indexed !== 'object' || typeof indexed.SOPInstanceUID !== 'string' || typeof indexed.StudyInstanceUID !== 'string' ||
+        typeof indexed.SeriesInstanceUID !== 'string') throw new NotFoundException('영상 원본을 확인할 수 없습니다');
+    // An enhanced multi-frame object keeps the first frame's rescale and window in its functional groups; they replace
+    // the top-level attributes, and a group shape this reader does not interpret leaves the preview to Orthanc.
+    const transforms = firstFrameTransforms(indexed);
+    const tags = transforms ? { ...indexed, ...transforms } : indexed;
     const facts: FrameFacts = {
+      unsupportedTransforms: transforms === null,
       transferSyntax: typeof transferSyntax === 'string' && /^[0-9.]{1,64}$/.test(transferSyntax.trim()) ? transferSyntax.trim() : null,
       pixelDataOffset: pixelDataOffset !== null && /^\d{1,15}$/.test(pixelDataOffset.trim()) ? Number(pixelDataOffset.trim()) : null,
       rows: tagNumber(tags.Rows) ?? 0, columns: tagNumber(tags.Columns) ?? 0,

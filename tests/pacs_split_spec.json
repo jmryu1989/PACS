@@ -8954,13 +8954,14 @@
   },
   "di_additions_mg_loading": {
     "unit": "S9-MG-LOADING",
-    "note": "MG-LOADING (Minhoon P0, 2026-10-27): the viewer's WADO-RS frame reads and series-strip previews answered by the API's range reader behind the DICOMweb gate (dicom-frame.controller.ts, dicom-frame.service.ts); two routes nginx routes to the API. U0B-DI compares the snapshot minus exactly these.",
+    "note": "MG-LOADING (Minhoon P0, 2026-10-27): the viewer's WADO-RS frame reads and series-strip previews answered by the API's range reader behind the DICOMweb gate (dicom-frame.controller.ts, dicom-frame.service.ts); two routes nginx routes to the API. MG-08 (D1877, 2026-10-28): the study delivery's 열람 record pair (dicom-frame-delivery.ts) through the record port, the request context and the current clinical context. U0B-DI compares the snapshot minus exactly these.",
     "middleware_routes": [],
     "controllers": [
       "DicomFrameController"
     ],
     "providers": [
-      "DicomFrameService"
+      "DicomFrameService",
+      "StudyImageDeliveryRecorder"
     ],
     "routes": [
       {
@@ -9007,7 +9008,9 @@
       "DicomFrameController": {
         "params": [
           "DicomFrameService",
-          "PacsService"
+          "PacsService",
+          "OrthancService",
+          "StudyImageDeliveryRecorder"
         ],
         "scope": null,
         "declared": [],
@@ -9020,6 +9023,25 @@
         "scope": null,
         "declared": [],
         "optional": []
+      },
+      "StudyImageDeliveryRecorder": {
+        "params": [
+          "Object",
+          "Object",
+          "Object",
+          "OrthancService",
+          "Number"
+        ],
+        "scope": null,
+        "declared": [
+          "4:Symbol(ImageDeliveryIdleMs)",
+          "2:Symbol(CURRENT_CLINICAL_CONTEXT)",
+          "1:Symbol(RequestContextSource)",
+          "0:Symbol(EmrRecordPort)"
+        ],
+        "optional": [
+          4
+        ]
       }
     }
   },
