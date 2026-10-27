@@ -28,7 +28,7 @@ MIGRATIONS = sorted(p for p in (ROOT / "api" / "prisma" / "migrations").iterdir(
 DEV_IMAGE = os.environ.get("KIN_TEST_API_DEV_IMAGE")
 DATABASE = "kin_critical_result_source"
 IMPORTS = {"@nestjs/common", "node:crypto", "crypto", "./member-rights", "./prisma.service", "./study-access.service", "./keycloak.service",
-           "./orthanc.service", "./clinician-policy", "./critical-result-policy", "./critical-result.service", "./preliminary-reader"}
+           "./emr-viewing/consumer-read", "./orthanc.service", "./clinician-policy", "./critical-result-policy", "./critical-result.service", "./preliminary-reader"}
 REPORT_COLUMNS = {"uid", "version"}
 FORBIDDEN_MEMBERS = {"report", "reportDraft", "reportPreview", "$queryRawUnsafe", "$executeRawUnsafe"}
 FORBIDDEN_TEXT = ("ReportDraft", "reportDraft", "report-preview", "reportPreview")

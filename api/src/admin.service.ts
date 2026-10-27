@@ -17,6 +17,7 @@ import { PrismaService } from './prisma.service';
 import { StudyAccessService } from './study-access.service';
 import { sessionEndEvent } from './emr-runtime/auth-events';
 import type { RequestWorkContext } from './emr-runtime/request-context';
+import { adminAuditRead } from './emr-viewing/consumer-read';
 
 export type AdminRequestFacts = RightsRequestFacts & { request: RequestWorkContext };
 
@@ -401,7 +402,7 @@ export class AdminService {
       if (!cursor) throw new ConflictException({ code: 'ADMIN_AUDIT_CURSOR_EXPIRED',
         message: '이어받기 유효기간이 지났거나 서버가 다시 시작되었습니다. 처음부터 다시 조회하세요.' });
     }
-    let read: { top: number; observedAt: string; rows: any[]; total: number; last: number | null };
+    let read: { top: number; observedAt: string; rows: any[]; ids: number[]; total: number; last: number | null };
     try {
       const top = cursor ? cursor.top
         : (await this.prisma.auditLog.findFirst({ orderBy: { id: 'desc' }, select: { id: true } }))?.id ?? 0;
@@ -422,9 +423,9 @@ export class AdminService {
       throw new ServiceUnavailableException({ code: 'ADMIN_AUDIT_UNAVAILABLE', message: '감사 기록을 읽지 못했습니다. 잠시 후 다시 조회하세요.' });
     }
     await this.studyAccess.unchanged(c, access);
-    return {
+    return adminAuditRead({
       institutionId: me, observedAt: read.observedAt, total: read.total, rows: read.rows,
       next: read.last === null ? null : sealAuditCursor(AUDIT_CURSOR_KEY, owner, { top: read.top, after: read.last }),
-    };
+    }, read.ids);
   }
 }

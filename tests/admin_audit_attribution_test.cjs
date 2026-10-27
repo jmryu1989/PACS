@@ -554,6 +554,7 @@ test('the page read filters before paging: totals, pages and the continuation co
   assert.equal(first.total, 10, 'hidden, unparsable and other-institution rows are not counted');
   assert.deepEqual(first.rows.map(r => r.target), [40, 36, 32, 28].map(id => `${S1}.${id}`));
   assert.equal(first.last, 28);
+  assert.deepEqual(first.ids, [40, 36, 32, 28], 'the access record names exactly the returned rows');
   assert.deepEqual(calls.slice(0, 3), [[null, 3], [38, 3], [35, 3]], 'the source is walked downward in batches');
   // Totals need every visible row: 13 full batches of 3 and a last short one of 1, whatever the page size.
   assert.equal(calls.length, 14);
@@ -570,9 +571,9 @@ test('the page read filters before paging: totals, pages and the continuation co
   const b = await A.readAuditPage(sourceOver(rows), 'inst-b', { after: null, limit: 100 });
   assert.deepEqual([b.total, b.rows.length, b.last], [10, 10, null]);
   const z = await A.readAuditPage(sourceOver(rows), 'inst-z', { after: null, limit: 25 });
-  assert.deepEqual(json(z), { rows: [], total: 0, last: null });
+  assert.deepEqual(json(z), { rows: [], ids: [], total: 0, last: null });
   const empty = await A.readAuditPage(sourceOver([]), 'inst-a', { after: null, limit: 25 });
-  assert.deepEqual(json(empty), { rows: [], total: 0, last: null });
+  assert.deepEqual(json(empty), { rows: [], ids: [], total: 0, last: null });
 });
 
 test('a failed or disordered source is an error, never an empty page', async () => {

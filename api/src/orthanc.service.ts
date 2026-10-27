@@ -471,7 +471,7 @@ export class OrthancService {
 
   async reportPreviewStudy(uid: string): Promise<any> {
     const rows = await this.viewerJson('/dicom-web/studies?StudyInstanceUID=' + encodeURIComponent(uid) +
-      '&includefield=00081030,00100030,00100040');
+      '&includefield=00081030,00100030,00100040,00080080');
     // Two patient resources under one UID: printing either one's header over the report would name the wrong patient.
     if (Array.isArray(rows) && rows.length > 1 && rows.every(row => OrthancService.tag(row, '0020000D') === uid))
       throw new ConflictException({ code: STUDY_IDENTITY_UNRESOLVED, message: STUDY_IDENTITY_UNRESOLVED_MESSAGE });
