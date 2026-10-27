@@ -94,7 +94,8 @@ export class PacsController {
   authzDicom(@Req() req: any) {
     const uri = String(req.headers['x-original-uri'] ?? ''), method = String(req.headers['x-original-method'] ?? req.method ?? '');
     // MG-08: auth_request admits a read but never sees it delivered. Image reads go to the API's recorded relay
-    // (image-relay.controller.ts); one reaching this admission (an exact-study GET, a stale proxy) gets no image byte.
+    // (image-relay.controller.ts), the exact-study GET/HEAD included; one reaching this admission (a stale proxy) gets
+    // no image byte.
     if (['GET', 'HEAD'].includes(method.toUpperCase()) && imageRead(uri.split('?')[0]))
       throw new ForbiddenException('영상은 열람 기록 경로로만 제공합니다');
     return this.svc.authzDicom(uri, method, caller(req));

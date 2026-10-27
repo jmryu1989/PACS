@@ -9,10 +9,13 @@
  * delivery across routes (open, reload within the idle gap, reload after it); descriptions (tags, metadata) and HEAD
  * are no delivery; a ledger that cannot record answers 503 and Orthanc is never asked for the image; refusals of the
  * gate leave no record; a delivery whose only response failed or was cut short closes as aborted, not succeeded
- * (MG-10); a terminal the ledger cannot take is retained as the same event and offered again until durable (MG-09); the
- * auth_request admission refuses every image read so none can bypass the relay. The PostgreSQL ledger itself is proven
- * in tests/emr/a (real PG); nginx routing is the served stack run. D73: behaviour at the boundary, no product source
- * text. Synthetic values only; 127.0.0.1 only. */
+ * (MG-10); a terminal the ledger cannot take is retained as the same event and offered again until durable, on the
+ * background schedule and at shutdown (MG-09); under the installed Nest shutdown with the real EmrNestLifecycle and
+ * record port, a delivery in preparation or a terminal offer in flight when admission closes still completes its pair
+ * after one failed offer, and a read after the recorder stopped gets 503 with no image (MG-09); whole-study GET is a
+ * recorded delivery and HEAD none; the auth_request admission refuses every image read so none can bypass the relay.
+ * The PostgreSQL ledger itself is proven in tests/emr/a (real PG); nginx routing is the served stack run. D73: behaviour
+ * at the boundary, no product source text. Synthetic values only; 127.0.0.1 only. */
 require('./service_test_loader.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -33,42 +36,40 @@ function identityOf(issuer, subject) {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
-/** An in-memory record port with the public port's semantics: durable receipts only for stored events, append-only,
- * one operation per event ID (an exact retry returns the stored result). `attempts` holds failed offers too. */
-function ledger(parseAccessEvent, mintDurableReceipt) {
-  const entries = [], attempts = [], state = { failing: false };
+/** An in-memory ledger store behind the real record port (createRecordPort: admission, work lifetime, close, drain):
+ * durable receipts only for stored events, append-only, one operation per event ID (an exact retry returns the stored
+ * result). `attempts` holds failed offers too; `state.before(event)` runs inside an append and may hold or fail it. */
+function ledger(parseAccessEvent, mintDurableReceipt, createRecordPort) {
+  const entries = [], attempts = [], state = { failing: false, before: null };
   const tx = {};
-  const port = { begin() {
-    let ended = false;
-    const guard = () => { if (ended) throw new Error('EmrRecordWorkEnded'); };
-    const find = operationId => entries.find(e => e.operationId === operationId);
-    return {
-      async append(event, served, keys) {
-        guard();
-        const parsed = parseAccessEvent(event);
-        attempts.push({ eventId: parsed.eventId, action: parsed.action, operationId: keys?.operationId, failed: state.failing });
-        if (state.failing) throw new Error('LedgerUnreachable');
-        const stored = entries.find(e => e.event.eventId === parsed.eventId);
-        if (stored) {
-          if (stored.operationId !== keys?.operationId || JSON.stringify(stored.event) !== JSON.stringify(parsed)) throw new Error('AccessEventIdConflict');
-          return mintDurableReceipt(parsed.eventId, stored.storedAt);
-        }
-        const storedAt = new Date().toISOString();
-        entries.push({ event: parsed, operationId: keys?.operationId ?? randomUUID(), storedAt });
-        return mintDurableReceipt(parsed.eventId, storedAt);
-      },
-      async lookup(operationId) { guard(); const e = find(operationId); return e ? { operationId, eventId: e.event.eventId, outcome: 'committed', durableAt: e.storedAt, result: null, entries: [] } : null; },
-      async confirm(appended) { guard(); const e = find(appended.operationId); if (!e) throw new Error('CommitUnknown'); return mintDurableReceipt(e.event.eventId, e.storedAt); },
-      async transactionWithRecords(work) { guard(); return work(tx, async (event, effect) => effect()); },
-      async resolveRequestIdentity(issuer, subject) { guard(); return identityOf(issuer, subject); },
-      async resolveIdentity(_tx, issuer, subject) { guard(); return identityOf(issuer, subject); },
-      async admit() { throw new Error('SYN admit is not used by the image delivery'); },
-      async transaction() { throw new Error('SYN transaction is not used by the image delivery'); },
-      async snapshot() { throw new Error('SYN snapshot is not used by the image delivery'); },
-      end() { ended = true; },
-    };
-  } };
-  return { port, entries, attempts, state, tx };
+  const find = operationId => entries.find(e => e.operationId === operationId);
+  const store = {
+    async append(event, served, keys) {
+      const parsed = parseAccessEvent(event);
+      const attempt = { eventId: parsed.eventId, action: parsed.action, operationId: keys?.operationId, failed: state.failing };
+      attempts.push(attempt);
+      if (state.failing) throw new Error('LedgerUnreachable');
+      if (state.before) try { await state.before(parsed); } catch (error) { attempt.failed = true; throw error; }
+      const stored = entries.find(e => e.event.eventId === parsed.eventId);
+      if (stored) {
+        if (stored.operationId !== keys?.operationId || JSON.stringify(stored.event) !== JSON.stringify(parsed)) throw new Error('AccessEventIdConflict');
+        return mintDurableReceipt(parsed.eventId, stored.storedAt);
+      }
+      const storedAt = new Date().toISOString();
+      entries.push({ event: parsed, operationId: keys?.operationId ?? randomUUID(), storedAt });
+      return mintDurableReceipt(parsed.eventId, storedAt);
+    },
+    async lookup(operationId) { const e = find(operationId); return e ? { operationId, eventId: e.event.eventId, outcome: 'committed', durableAt: e.storedAt, result: null, entries: [] } : null; },
+    async confirm(appended) { const e = find(appended.operationId); if (!e) throw new Error('CommitUnknown'); return mintDurableReceipt(e.event.eventId, e.storedAt); },
+    async transactionWithRecords(work) { return work(tx, async (event, effect) => effect()); },
+    async resolveRequestIdentity(issuer, subject) { return identityOf(issuer, subject); },
+    async resolveIdentity(_tx, issuer, subject) { return identityOf(issuer, subject); },
+    async admit() { throw new Error('SYN admit is not used by the image delivery'); },
+    async transaction() { throw new Error('SYN transaction is not used by the image delivery'); },
+    async snapshot() { throw new Error('SYN snapshot is not used by the image delivery'); },
+  };
+  const { port, control } = createRecordPort(store);
+  return { port, control, entries, attempts, state, tx };
 }
 
 /** A synthetic Orthanc: the lookups the gate and the record read, and the image representations the consumers read. */
@@ -98,11 +99,12 @@ async function syntheticOrthanc() {
       if (p === `/instances/${INSTANCE_ID}/frames/0/rendered`) return image('image/png', PNG);
       if (p === `/instances/${INSTANCE_ID}/image-uint16`) return image('image/x-portable-arbitrarymap', PAM);
       if (p === `/dicom-web/studies/${STUDY_UID}/series/${SERIES_UID}/instances/${SOP_UID}/frames/1`) return image('multipart/related; type="application/octet-stream"; boundary=b', FRAME);
+      if (p === `/dicom-web/studies/${STUDY_UID}`) return image('multipart/related; type="application/dicom"; boundary=b', FRAME);
       res.statusCode = 404; json({ Message: 'unknown' });
     });
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  const imageCalls = () => calls.filter(c => /rendered|image-uint16|\/frames\/1$/.test(c.path));
+  const imageCalls = () => calls.filter(c => /rendered|image-uint16|\/frames\/1$/.test(c.path) || c.path === `/dicom-web/studies/${STUDY_UID}`);
   return { calls, imageCalls, behaviour, origin: `http://127.0.0.1:${server.address().port}`,
     close: () => { server.closeAllConnections?.(); return new Promise(resolve => server.close(resolve)); } };
 }
@@ -124,8 +126,9 @@ async function stack() {
   const { OrthancService } = require('/app/dist/orthanc.service.js');
   const { StudyImageDeliveryRecorder } = require('/app/dist/image-delivery-record.js');
   const { ImageRelayController } = require('/app/dist/image-relay.controller.js');
+  const { createRecordPort } = require('/app/dist/emr-runtime/record-port.js');
   const orthanc = new OrthancService();
-  const records = ledger(parseAccessEvent, mintDurableReceipt);
+  const records = ledger(parseAccessEvent, mintDurableReceipt, createRecordPort);
   const states = new Map([[STUDY_UID, { uid: STUDY_UID, institutionId: SITE, teleInstitutionId: null }]]);
   const sql = async strings => {
     const text = strings.join('?');
@@ -179,6 +182,7 @@ async function stack() {
     thumbnail: `/instances/${INSTANCE_ID}/frames/0/rendered?width=256&height=256`,
     report: `/instances/${INSTANCE_ID}/image-uint16`,
     frame: `/dicom-web/studies/${STUDY_UID}/series/${SERIES_UID}/instances/${SOP_UID}/frames/1`,
+    study: `/dicom-web/studies/${STUDY_UID}`,
     tags: `/instances/${INSTANCE_ID}/simplified-tags`,
     metadata: `/dicom-web/studies/${STUDY_UID}/metadata`,
   };
@@ -191,10 +195,46 @@ async function stack() {
     for (const [key, env] of [['url', 'ORTHANC_URL'], ['user', 'ORTHANC_USER'], ['pass', 'ORTHANC_PASS']])
       if (previous[key] === undefined) delete process.env[env]; else process.env[env] = previous[key];
   };
-  return { source, records, recorder, observations, get, routes, states, close };
+  return { source, records, recorder, background, observations, get, routes, states, close };
 }
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const actions = records => records.entries.map(e => e.event.action);
+const offers = (records, action) => records.attempts.filter(a => a.action === action);
+
+/**
+ * The recorder inside an installed Nest application context next to the real EmrNestLifecycle, so app.close() runs the
+ * product's shutdown order: every onModuleDestroy (background quiesce), then beforeApplicationShutdown (record admission
+ * closes, background drain), then onApplicationShutdown (record-port drain). `closed` resolves when admission closed.
+ */
+async function nest(s, providers = []) {
+  const { Module } = require('/app/node_modules/@nestjs/common');
+  const { NestFactory } = require('/app/node_modules/@nestjs/core');
+  const { EmrNestLifecycle } = require('/app/dist/emr-runtime/nest-lifecycle.js');
+  const logs = [];
+  let admissionClosed;
+  const closed = new Promise(resolve => { admissionClosed = resolve; });
+  const runtime = { background: s.background,
+    control: { close() { s.records.control.close(); admissionClosed(); }, live: s.records.control.live, drained: s.records.control.drained },
+    async stop() { await s.background.drained(); await s.records.control.drained(); } };
+  class LifecycleModule {}
+  Module({ providers: [{ provide: 'recorder', useValue: s.recorder }, ...providers,
+    { provide: EmrNestLifecycle, useValue: new EmrNestLifecycle(runtime) }] })(LifecycleModule);
+  const app = await NestFactory.createApplicationContext(LifecycleModule, { logger: { log() {}, debug() {}, verbose() {},
+    warn(message) { logs.push(['warn', String(message)]); }, error(message) { logs.push(['error', String(message)]); } } });
+  return { app, closed, logs };
+}
+
+/** The pair is complete, its terminal bound to the prepared event, and every offer of it was the same event and operation. */
+function assertPair(s, terminal, offered) {
+  assert.deepEqual(actions(s.records), ['provide-prepared', terminal]);
+  const [prepared, closing] = s.records.entries.map(e => e.event);
+  assert.equal(closing.relatedEventId, prepared.eventId);
+  const tries = offers(s.records, terminal);
+  assert.equal(tries.length, offered);
+  assert.equal(new Set(tries.map(a => a.eventId)).size, 1, 'one event, never a second record');
+  assert.equal(new Set(tries.map(a => a.operationId)).size, 1, 'one ledger operation');
+  assert.deepEqual(tries.map(a => a.failed), [...Array(offered - 1).fill(true), false]);
+}
 
 test('MG-08 worklist thumbnail: one durable provide-prepared for the study before the first image byte; bytes relayed unchanged', async () => {
   const s = await stack();
@@ -311,6 +351,109 @@ test('MG-09 a terminal the ledger cannot take is retained as the same event and 
   } finally { await s.close(); }
 });
 
+test('MG-09 a terminal the ledger refused once is offered again on the background schedule, without a shutdown', async () => {
+  const s = await stack();
+  try {
+    let terminalOffers = 0;
+    s.records.state.before = async event => { if (event.action !== 'provide-prepared' && ++terminalOffers === 1) throw new Error('SYN transient'); };
+    assert.equal((await s.get(s.routes.thumbnail)).status, 200);
+    await wait(IDLE_MS * 3);
+    assert.deepEqual(actions(s.records), ['provide-prepared'], 'the first offer failed');
+    // The first retry follows the API's background retry schedule (1 s for the first attempt).
+    const deadline = Date.now() + 5000;
+    while (actions(s.records).length < 2 && Date.now() < deadline) await wait(50);
+    assertPair(s, 'transfer-ended', 2);
+  } finally { await s.close(); }
+});
+
+test('MG-09 shutdown: a delivery still being prepared when admission closes gets its terminal, also after one failed offer', async () => {
+  for (const failFirst of [false, true]) {
+    const s = await stack();
+    let release = () => {};
+    try {
+      let entered, terminalOffers = 0;
+      const held = new Promise(resolve => { release = resolve; }), started = new Promise(resolve => { entered = resolve; });
+      s.records.state.before = async event => {
+        if (event.action === 'provide-prepared') { entered(); await held; }
+        else if (++terminalOffers === 1 && failFirst) throw new Error('SYN transient; the next append succeeds');
+      };
+      const { app, closed, logs } = await nest(s);
+      const read = s.get(s.routes.thumbnail);
+      await started;
+      const stopping = app.close();
+      await closed;            // record admission is closed before the preparation is durable
+      release();
+      const response = await read;
+      await stopping;
+      assert.equal(response.status, 200, 'a read admitted before the stop is served');
+      // It was still being sent when the stop closed its delivery: aborted, never ended.
+      assertPair(s, 'transfer-aborted', failFirst ? 2 : 1);
+      assert.equal(s.records.control.live(), 0, 'every ledger work the stop took was ended');
+      assert.deepEqual(logs.filter(([, m]) => /terminal_not_recorded_at_shutdown/.test(m)), [], String(failFirst));
+    } finally { release(); await s.close(); }
+  }
+});
+
+test('MG-09 shutdown: an idle terminal whose offer is in flight and fails after admission closed is offered once more', async () => {
+  const s = await stack();
+  let fail = () => {};
+  try {
+    let entered, terminalOffers = 0;
+    const held = new Promise((_, reject) => { fail = reject; }), started = new Promise(resolve => { entered = resolve; });
+    held.catch(() => {});
+    s.records.state.before = async event => { if (event.action !== 'provide-prepared' && ++terminalOffers === 1) { entered(); await held; } };
+    const { app, closed, logs } = await nest(s);
+    assert.equal((await s.get(s.routes.thumbnail)).status, 200);
+    await started;           // the idle gap passed and the first terminal offer is at the ledger
+    const stopping = app.close();
+    await closed;
+    fail(new Error('SYN transient; the next append succeeds'));
+    await stopping;
+    assertPair(s, 'transfer-ended', 2);
+    assert.equal(s.records.control.live(), 0);
+    assert.deepEqual(logs.filter(([, m]) => /terminal_not_recorded_at_shutdown/.test(m)), []);
+  } finally { fail(new Error('cleanup')); await s.close(); }
+});
+
+test('MG-09 shutdown: a read after the recorder stopped, while another provider is still stopping, gets 503 and no image', async () => {
+  const s = await stack();
+  let release = () => {};
+  try {
+    let entered;
+    const held = new Promise(resolve => { release = resolve; }), started = new Promise(resolve => { entered = resolve; });
+    const { app } = await nest(s, [{ provide: 'another-provider', useValue: { async onModuleDestroy() { entered(); await held; } } }]);
+    const stopping = app.close();
+    await started;           // the record port still admits work: EmrNestLifecycle closes it after every onModuleDestroy
+    const r = await s.get(s.routes.thumbnail);
+    release();
+    await stopping;
+    assert.equal(r.status, 503);
+    assert.equal(JSON.parse(r.body.toString()).code, 'IMAGE_DELIVERY_RECORD_UNAVAILABLE');
+    assert.deepEqual(s.records.attempts, [], 'no delivery was opened outside the stop');
+    assert.deepEqual(s.source.imageCalls(), [], 'no image read reached the source');
+    assert.equal(s.records.control.live(), 0);
+  } finally { release(); await s.close(); }
+});
+
+test('MG-08 whole-study retrieval: GET is a recorded delivery before its first byte, HEAD is admitted without one', async () => {
+  const s = await stack();
+  try {
+    const head = await s.get(s.routes.study, {}, 'HEAD');
+    assert.equal(head.status, 200);
+    assert.equal(head.body.length, 0);
+    assert.deepEqual(s.records.attempts, [], 'HEAD sends no image byte, so no delivery');
+    const r = await s.get(s.routes.study, { Accept: 'multipart/related; type="application/dicom"' });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body, FRAME, 'Orthanc\'s whole-study answer, unchanged');
+    assert.deepEqual(s.observations.at(-1).firstByte, ['provide-prepared'], 'the record was durable when the first byte left');
+    assert.equal(s.records.entries[0].event.targets[0].studyId.value, STUDY_UID);
+    const refused = await s.get(s.routes.study, { 'X-Synthetic-Site': 'site-b' });
+    assert.equal(refused.status, 403, 'the study keeps the institution gate');
+    await wait(IDLE_MS * 3);
+    assert.deepEqual(actions(s.records), ['provide-prepared', 'transfer-ended']);
+  } finally { await s.close(); }
+});
+
 test('MG-08 shutdown closes an open delivery: a quiet one by what it served', async () => {
   const s = await stack();
   try {
@@ -332,6 +475,7 @@ test('MG-08 classification: image representations are deliveries, descriptions a
     assert.equal(imageRead(path), false, path);
 });
 
+// nginx sends image reads, the exact-study GET/HEAD included, to the relay; the auth_request route is left to a stale proxy.
 test('MG-08 the auth_request admission refuses every image read and still admits descriptions and STOW', async () => {
   const { PacsController } = require('/app/dist/pacs.controller.js');
   const admitted = [];
