@@ -35,6 +35,7 @@ import { AuthService } from './auth.service';
 import { AdminController } from './admin.controller';
 import { AdminService } from './admin.service';
 import { AdminAccessReview } from './admin-access-review';
+import { SigningKeyAdminController } from './signing-key-admin.controller';
 import { ViewerController } from './viewer.controller';
 import { ViewerService } from './viewer.service';
 import { ViewerContextEventService } from './viewer-context-event.service';
@@ -48,7 +49,10 @@ import { ViewerJobService } from './viewer-job.service';
 import { ConnectController } from './connect.controller';
 import { ConnectService } from './connect.service';
 import { OnlineImageService } from './emr-image/service';
-import { ImageContextSource, ModuleAImageContextPending, ProductionImageContext } from './emr-image/context';
+import { ImageContextSource, ProductionImageContext } from './emr-image/context';
+import { OrthancImageCatalog } from './emr-source/image';
+import { CURRENT_CLINICAL_CONTEXT } from './emr-clinical/startup';
+import type { ClinicalContextSource } from './emr-clinical/runtime';
 import { ManualSrController } from './manual-sr.controller';
 import { ManualSrService } from './manual-sr.service';
 import { ReportPreviewController } from './report-preview.controller';
@@ -63,14 +67,14 @@ import { StudyTransferLocalService } from './study-transfer-local.service';
 import { DicomImportGateService } from './dicom-import-gate.service';
 
 @Module({
-  controllers: [EmrAuditController, DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController],
+  controllers: [EmrAuditController, DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController, SigningKeyAdminController],
   providers: [
     EmrAuditService,
     ...startupClinicalProviders,
     ViewerContextEventService,
-    OnlineImageService, ModuleAImageContextPending,
-    { provide: ImageContextSource, inject: [ModuleAImageContextPending],
-      useFactory: (lookups: ModuleAImageContextPending) => new ProductionImageContext(lookups, lookups) },
+    OnlineImageService, OrthancImageCatalog,
+    { provide: ImageContextSource, inject: [CURRENT_CLINICAL_CONTEXT, OrthancImageCatalog],
+      useFactory: (clinical: ClinicalContextSource, catalog: OrthancImageCatalog) => new ProductionImageContext(clinical, catalog) },
     AsrService, StudyAccessService, PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, FindingService, ViewerJobService, ConnectService, ManualSrService, FavoriteService, StudyTagsService, ReaderAssignmentService, ConsultationService, ClinicianQuestionService, ImageRequestService, ClinicalContextService, CriticalResultService,
     StudyTransferLocalService, DicomImportGateService,
     AdminAccessReview,

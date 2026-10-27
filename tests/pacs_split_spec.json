@@ -8523,7 +8523,7 @@
     "controllers": [],
     "providers": [
       "OnlineImageService",
-      "ModuleAImageContextPending",
+      "OrthancImageCatalog",
       "ImageContextSource=factory",
       "AdminAccessReview"
     ],
@@ -8579,10 +8579,17 @@
         ],
         "optional": []
       },
-      "ModuleAImageContextPending": {
-        "params": [],
+      "OrthancImageCatalog": {
+        "params": [
+          "PrismaService",
+          "Object",
+          "Object"
+        ],
         "scope": null,
-        "declared": [],
+        "declared": [
+          "2:Symbol(RequestContextSource)",
+          "1:Symbol(CURRENT_CLINICAL_CONTEXT)"
+        ],
         "optional": []
       },
       "AdminAccessReview": {
@@ -8945,24 +8952,80 @@
       }
     }
   },
+  "di_additions_key_admin": {
+    "unit": "key-management-entry",
+    "middleware_routes": [],
+    "controllers": [
+      "SigningKeyAdminController"
+    ],
+    "providers": [
+      "Symbol(EmrSigningKeyAdmin)=factory"
+    ],
+    "routes": [
+      {
+        "controller": "SigningKeyAdminController",
+        "handler": "change",
+        "method": "POST",
+        "paths": [
+          "/|admin/users/:id/signing-key"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "SigningKeyAdminController",
+        "handler": "read",
+        "method": "GET",
+        "paths": [
+          "/|admin/users/:id/signing-key"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      }
+    ],
+    "injectables": {
+      "SigningKeyAdminController": {
+        "params": [
+          "PrismaService",
+          "Object",
+          "Object"
+        ],
+        "scope": null,
+        "declared": [
+          "2:Symbol(EmrSigningKeyAdmin)",
+          "1:Symbol(RequestContextSource)"
+        ],
+        "optional": []
+      }
+    }
+  },
   "di_additions_d_online": {
     "unit": "EMR-D online routes",
     "controllers": [],
     "providers": [
-      "ModuleAClinicalSourcesPending",
+      "Symbol(CURRENT_CLINICAL_CONTEXT)=factory",
       "Symbol(OnlineClinicalServices)=factory",
       "Symbol(EMR_CLINICAL_ROUTES)=factory",
+      "Symbol(EMR_MANUAL_SR_SIGNING)=factory",
       "Symbol(EMR_NATIVE_REPORT_SIGNING)=factory"
     ],
     "routes": [],
-    "injectables": {
-      "ModuleAClinicalSourcesPending": {
-        "params": [],
-        "scope": null,
-        "declared": [],
-        "optional": []
-      }
-    },
+    "injectables": {},
     "changed_injectables": {
       "PacsService": {
         "before": {
@@ -9116,6 +9179,31 @@
           "optional": [
             1
           ]
+        }
+      },
+      "ManualSrService": {
+        "before": {
+          "params": [
+            "PrismaService",
+            "OrthancService",
+            "StudyAccessService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PrismaService",
+            "OrthancService",
+            "StudyAccessService",
+            "ManualSrSigning"
+          ],
+          "scope": null,
+          "declared": [
+            "3:Symbol(EMR_MANUAL_SR_SIGNING)"
+          ],
+          "optional": []
         }
       }
     }

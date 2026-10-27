@@ -5,7 +5,7 @@ import type { AccessEvent } from '../emr-contract/access-event';
 import { refuse } from '../emr-contract/validation';
 import { EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS, boundEmrStatements } from '../emr-runtime/limits';
 import type { ClinicalRecord, ClinicalUnit } from './contract';
-import { applyPlan, ClinicalWritePlan, projectUnit, RequestIdentity, WriteInput } from './records';
+import { applyPlan, ClinicalWritePlan, projectUnit, replayUnit, RequestIdentity, WriteInput } from './records';
 import type { ClinicalSignature } from './signing';
 
 export interface StoredClinicalCommand {
@@ -74,18 +74,29 @@ export class ClinicalStore {
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify(['emr-d-unit', record, recordId])}, 0))::text`;
   }
 
-  async versions(tx: Prisma.TransactionClient, record: ClinicalRecord, recordId: string): Promise<StoredClinicalVersion[]> {
-    const rows = await tx.$queryRaw<{ body: string; signature: string | null; operation_id: string }[]>`
+  /** Every stored version in order, or only `sequences` when given: a list row serves one version of a record whose
+   * retained history may be 1000 versions, and loading all of them per row is what a list page would spend its time on. */
+  async versions(tx: Prisma.TransactionClient, record: ClinicalRecord, recordId: string,
+    sequences?: readonly number[]): Promise<StoredClinicalVersion[]> {
+    type Row = { body: string; signature: string | null; operation_id: string };
+    const rows = sequences === undefined ? await tx.$queryRaw<Row[]>`
       SELECT body, signature, operation_id::text FROM emr_clinical.online_version
-      WHERE record_type=${record} AND record_id=${recordId} ORDER BY sequence`;
+      WHERE record_type=${record} AND record_id=${recordId} ORDER BY sequence` : await tx.$queryRaw<Row[]>`
+      SELECT body, signature, operation_id::text FROM emr_clinical.online_version
+      WHERE record_type=${record} AND record_id=${recordId} AND sequence = ANY(${[...sequences]}::int[]) ORDER BY sequence`;
     return rows.map(row => ({ ...storedBody(row.body),
       signature: row.signature === null ? null : parse<ClinicalSignature>(row.signature), operationId: row.operation_id }));
   }
 
+  /** The unit and the stored versions it was replayed from, from one load of the history. */
+  async history(tx: Prisma.TransactionClient, record: ClinicalRecord, recordId: string):
+    Promise<{ unit: Readonly<ClinicalUnit> | null; versions: StoredClinicalVersion[] }> {
+    const versions = await this.versions(tx, record, recordId);
+    return { unit: replayUnit(versions.map(version => version.plan)), versions };
+  }
+
   async unit(tx: Prisma.TransactionClient, record: ClinicalRecord, recordId: string): Promise<Readonly<ClinicalUnit> | null> {
-    let unit: Readonly<ClinicalUnit> | null = null;
-    for (const version of await this.versions(tx, record, recordId)) unit = applyPlan(unit, version.plan);
-    return unit;
+    return (await this.history(tx, record, recordId)).unit;
   }
 
   async version(tx: Prisma.TransactionClient, versionId: string): Promise<StoredClinicalVersion | null> {

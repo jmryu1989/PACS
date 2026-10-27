@@ -417,12 +417,13 @@ schemaVersion 2 요청에서만 받는다. 서버는 작업 판·검사 조합(1
 `finding_api_test.py` 11·12, `test_finding_navigation.py` 8, `test_finding_worklist.py` 5(기존 `measurements` 프로필·540초 한도 그대로 — 현재 20개 suite, 마지막은 S3-ASR-U4L `e2e/test_dictation_live.py`)와
 새 `python tests/e2e/test_finding_locations.py` (3개, `VolumeMarksE2E` 상속, `test_location_`만)이다. 새 모듈은 기존 `volume-path` 프로필의
 세 번째 suite `ci-finding-location`(360초)이며 (420+35)+(300+35)+(360+35)=1185초에 예비 150초를 더해 1335≤1500초다.
-#219(D1861) 이후 이 세 case는 Module A가 소견 원본의 고정판 조회를 연결할 때까지 임시 계약을 확인한다: 소견 생성
-(`POST studies/:uid/findings`, 뷰어의 Save·Retry Request와 API)은 503 `ModuleAFixedVersionReaderPending`으로 거절하고
-입력을 유지하며(화면의 미저장 행과 Retry Request, Finding·FindingRevision·finding.* 감사 행 0), 조회와 저장 작업은 그대로다.
-`POST studies/:uid/findings/:id/revisions`는 원본 조회 전에 소견을 먼저 찾으므로 없는 id는 404이며, 생성이 거절되는 동안 그 경로의 503은 닿지 않는다.
-복원할 원래 단언(연결·새 로그인 이어보기·정확한 도착·되돌림·숨김/동기화 상태·철회)은 비공개 docs-repo
-`evidence/fable-impl-emr-d-routes-20261025/handoff-module-a-finding-reader.md`에 있고 원문은 `5ac35a3`의 같은 파일이다.
+D의 소견 원본 reader는 기존 FindingService의 원본/비교 검사 검사와 사본 준비를 공유한다.
+ViewerRevision 및 ViewerJobRevision의 고정판과 최초 저장 시각을 읽고, 서명된 소견의 준비 명령에 원본 사실을 보존한다.
+같은 연결을 유지한 편집·숨김·복원은 보존된 원본 사실을 재사용하며, 새 연결은 현재 원본을 다시 확인한다.
+`test_finding_locations.py`의 원래 연결·재로그인 이어보기·정확한 도착·되돌림·숨김/동기화·철회 단언을 복원했다.
+G3의 `test_finding_worklist.py::FindingWorklistE2E.test_worklist_02_separate_windows_ambiguous_owner_unattached_reattach_and_close`
+선택은 저장된 소견의 실제 이동 흐름을 그대로 확인한다. `tests/emr/d/online_live.py::ClinicalRoutesPg`는 실제 HTTP/PG에서
+소견 저장·재전송·고정판 참조와 E의 원본/프레임 digest·환자 연결·기관 경계를 함께 확인한다.
 
 외부 SR 출처/원문 표식: `python tests/e2e/test_sr_provenance.py` (5개).
 실제 C-STORE TID1500 SR의 NUM·단위와 출처를 native SR 캔버스/패널에서 대조한다.
@@ -3070,8 +3071,14 @@ uses owned synthetic PostgreSQL, the shipped E migration/store and HTTP sockets.
 same selected case is declared in candidate CI and the dedicated E job in validate.yml.
 It checks durable preparation before body bytes, Range/multipart/HEAD, rollback,
 interruption and staging-copy facts. It does not prove native OHIF display. The
-registered `GET`/`HEAD images/dicom-web?target=...` route requires Module A's server
-context/catalog binding (REQUEST_FACTS #211); the current binding returns 503.
+registered `GET`/`HEAD images/dicom-web?target=...` route uses the current D context
+and the Orthanc source catalog. `tests/emr/d/routes_pg_test.cjs` covers that wiring
+through HTTP and PostgreSQL, including fixed finding copies and current patient scope.
+The deployment supplies `KIN_EMR_IMAGE_ASSET_CATALOG`: a JSON file with
+`viewer: {id, version, files: [...]}` and `decoders: {native: {version, files: [...]}, ...}`.
+Files are relative to that inventory; the reader hashes their actual bytes. Decoder
+IDs follow the existing E transfer-syntax catalog. Missing deployment assets, external
+SR/SEG/PDF receipt evidence or processor-agreement facts remain unavailable.
 Nginx/served OHIF and derived PDF/preview/thumbnail snapshots remain unconnected.
 
 REQ-MG-LENGTH-SCALE/FRAME/READBACK → RISK-MG-WRONG-SCALE/FRAME/BASIS → TEST-MG-LENGTH-BOUNDARY: `mg_length_test.cjs` checks DBT frame/shared geometry, Synthetic 2D and FFDM spacing precedence, detector/ERMF/source-plane labels, no-spacing refusal, saved baseline and SR frame/coordinates. PixelSpacing takes precedence; otherwise projection spacing is ImagerPixelSpacing / supplied ERMF or explicitly detector-based. Source: user/Minhoon 2026-10-26; DICOM PS3.3 §10.7. Real served public-sample draw/save/reopen/SR evidence is recorded separately; pure tests do not constitute physician acceptance.

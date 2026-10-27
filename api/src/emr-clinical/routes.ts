@@ -5,6 +5,7 @@ import { ContractError, refuse } from '../emr-contract/validation';
 import { READ_ROUTES, ClinicalRecord, SurfaceKey } from './contract';
 import type { ClinicalWritePlan } from './records';
 import { ClinicalRuntimeParts, composeClinicalRuntime, OnlineClinicalWrite } from './runtime';
+import type { StoredClinicalVersion } from './store';
 
 export const EMR_CLINICAL_ROUTES = Symbol('EMR_CLINICAL_ROUTES');
 export type RouteWrite = Pick<OnlineClinicalWrite, 'studyId' | 'recordId' | 'body'> & { surface: SurfaceKey };
@@ -94,13 +95,17 @@ export class ClinicalRoutes {
   }
 
   /** Every record a list serves gets its own 열람 event, as a single read does: the record's
-   * study and managing institution, the versions up to the listed revision as targets, and
-   * the served head as the appended reference. A list that serves nothing records nothing
-   * (B2's record() treats a null effect as a conditional write that affected no row, which
-   * is settled negative and appends no entry). `studyId` is the per-study list's study, so
-   * its items resolve the study scope once. */
-  async collection<T extends { items?: { id: string; studyUid: string; revision: number }[] }>(request: object,
-    surface: string, recordType: ClinicalRecord, read: (tx: Prisma.TransactionClient) => Promise<T>, studyId?: string): Promise<T> {
+   * study and managing institution, the versions the row serves as targets, and the served
+   * head as the appended reference. A row whose body folds in its earlier versions (a request's
+   * reason with its latest note, a consultation's reason with its reply) serves every version up to
+   * the listed revision; a list given `served` names the revisions its row actually carries (a
+   * finding or question summary: its listed head), so retained history it did not return is not
+   * recorded as read. A list that serves nothing records nothing (B2's record() treats a null effect as
+   * a conditional write that affected no row, which is settled negative and appends no entry).
+   * `studyId` is the per-study list's study, so its items resolve the study scope once. */
+  async collection<T extends { items?: ListedRecord[] }>(request: object,
+    surface: string, recordType: ClinicalRecord, read: (tx: Prisma.TransactionClient) => Promise<T>, studyId?: string,
+    served?: (item: ListedRecord) => readonly number[]): Promise<T> {
     const work = this.parts.records.begin();
     try {
       return await work.transactionWithRecords(async (tx, record) => {
@@ -111,16 +116,16 @@ export class ClinicalRoutes {
         const known = <V>(value: V) => ({ status: 'known' as const, value });
         for (const item of response.items) {
           const study = scope && item.studyUid === scope.studyId ? scope : await this.parts.context.scope(tx, request, item.studyUid);
-          const versions = (await this.parts.store.versions(tx, recordType, item.id))
+          // A row given `served` loads only the versions it serves and its listed head.
+          const wanted = served?.(item);
+          const stored = (await this.parts.store.versions(tx, recordType, item.id, wanted && [...wanted, item.revision]))
             .filter(v => v.plan.version.sequence <= item.revision);
           // A concurrent writer may advance the head after the list's snapshot.
           // Only versions belonging to the returned projection are provided.
-          const head = versions.find(v => v.plan.version.sequence === item.revision);
+          const head = stored.find(v => v.plan.version.sequence === item.revision);
           if (!head) refuse('ClinicalHistoryUnavailable');
-          for (const version of versions) if (version.plan.signing) {
-            if (!version.signature) refuse('SignatureRequired');
-            this.parts.signer.verify(version.signature, version.plan.signing);
-          }
+          const versions = wanted ? servedVersions(stored, wanted) : stored;
+          verifySigned(this.parts.signer, versions);
           await record({ formatVersion: 1, surface, eventId: randomUUID(),
             userId: known(facts.actor.identity), rolesAtTime: known(facts.actor.roles),
             actingInstitution: known(facts.actor.institutionId), managingInstitution: known(study.managingInstitutionId),
@@ -137,10 +142,13 @@ export class ClinicalRoutes {
 
   /** A read that serves no record (a study without a note yet) records nothing: there is no
    * 열람 and B2 would settle a null effect negative anyway. The record's own study scope names
-   * the managing institution; the source archive is not consulted for a read. */
+   * the managing institution; the source archive is not consulted for a read. A read whose body
+   * is the whole record serves every stored version; a paged read gives `served`, the revisions
+   * its page returned, and its event, signing facts and reference name exactly those. A page that
+   * returns no revision serves no version and records nothing. */
   async read<T>(request: object, recordType: ClinicalRecord, recordId: string,
     read: (tx: Prisma.TransactionClient) => Promise<T>, empty?: (value: T) => boolean,
-    surface = READ_ROUTES[recordType]): Promise<T> {
+    surface = READ_ROUTES[recordType], served?: (value: T) => readonly number[]): Promise<T> {
     const work = this.parts.records.begin();
     try {
       return await work.transactionWithRecords(async (tx, record) => {
@@ -149,15 +157,12 @@ export class ClinicalRoutes {
         const study = first ? await this.parts.context.scope(tx, request, first.studyId) : null;
         if (first) await this.parts.store.lockUnit(tx, recordType, recordId);
         const response = await read(tx);
-        const unit = first ? await this.parts.store.unit(tx, recordType, recordId) : null;
+        const { unit, versions: stored } = first ? await this.parts.store.history(tx, recordType, recordId) : { unit: null, versions: [] };
         if (!unit && !empty?.(response)) refuse('ClinicalHistoryUnavailable');
-        const versions = unit ? await this.parts.store.versions(tx, recordType, recordId) : [];
-        for (const version of versions) if (version.plan.signing) {
-          if (!version.signature) refuse('SignatureRequired');
-          this.parts.signer.verify(version.signature, version.plan.signing);
-        }
+        const versions = served && unit ? servedVersions(stored, served(response)) : stored;
+        verifySigned(this.parts.signer, versions);
         const known = <V>(value: V) => ({ status: 'known' as const, value });
-        if (unit && study) {
+        if (unit && study && versions.length) {
           // The real service read above owns its existing role/party/tele and
           // source-lineage checks. Recording evidence must not change them.
           await record({ formatVersion: 1, surface, eventId: randomUUID(),
@@ -167,7 +172,8 @@ export class ClinicalRoutes {
             cause: 'user-view', context: { basis: 'worklist', studyId: study.studyId, relatedStudyId: null, reason: null },
             executor: 'member', targets: versions.map(v => v.plan.access.target), action: 'provide-prepared', result: 'prepared',
             requestId: facts.requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null },
-          async () => ({ kind: 'emr-clinical', id: recordId, version: unit.head.versionId }));
+          // The latest served version names the page, which need not hold the current head.
+          async () => ({ kind: 'emr-clinical', id: recordId, version: versions[versions.length - 1].plan.version.versionId }));
         }
         return { ...response, emr: { recordId, studyId: unit?.studyId ?? null,
           signatures: versions.map(v => ({ versionId: v.plan.version.versionId, revision: v.plan.version.sequence,
@@ -177,6 +183,24 @@ export class ClinicalRoutes {
               kid: v.signature.registration.kid, signer: v.signature.registration.doctor.identity } : null })) } };
       }).catch(routeError);
     } finally { work.end(); }
+  }
+}
+
+type ListedRecord = { id: string; studyUid: string; revision: number };
+
+/** The stored versions a response actually returned. Each served revision must be a stored,
+ * signed version: a page naming a revision D does not hold is refused, never recorded partially. */
+function servedVersions(stored: readonly StoredClinicalVersion[], revisions: readonly number[]): StoredClinicalVersion[] {
+  const wanted = new Set(revisions);
+  const versions = stored.filter(v => wanted.has(v.plan.version.sequence));
+  if (versions.length !== wanted.size) refuse('ClinicalHistoryUnavailable');
+  return versions;
+}
+
+function verifySigned(signer: ClinicalRuntimeParts['signer'], versions: readonly StoredClinicalVersion[]): void {
+  for (const version of versions) if (version.plan.signing) {
+    if (!version.signature) refuse('SignatureRequired');
+    signer.verify(version.signature, version.plan.signing);
   }
 }
 

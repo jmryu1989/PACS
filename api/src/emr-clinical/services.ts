@@ -8,6 +8,7 @@ import { ClinicalRuntimeParts, composeClinicalRuntime } from './runtime';
 import { onlineClinicalSigner } from './signing';
 import { ClinicalRoutes, ClinicalRouteSources, EMR_CLINICAL_ROUTES } from './routes';
 import { clinicalRouteSources } from './sources';
+import { ManualSrSigning, EMR_MANUAL_SR_SIGNING } from './manual-sr';
 import { NativeReportSigning, EMR_NATIVE_REPORT_SIGNING } from '../emr-report/native-signing';
 
 /** D consumes C2's custody/crypto and B2's transaction owner. The request and
@@ -22,6 +23,7 @@ export function createOnlineClinicalServices(parts: Omit<ClinicalRuntimeParts, '
   return { runtime: composeClinicalRuntime(composed),
     routes: new ClinicalRoutes(composed, parts.sources ?? clinicalRouteSources(parts.identity, parts.records)),
     nativeReportSigning: new NativeReportSigning(parts),
+    manualSrSigning: new ManualSrSigning(composed),
     keys: { manage: keys.manage.bind(keys) } };
 }
 
@@ -31,5 +33,6 @@ export function onlineClinicalProviders(services: ReturnType<typeof createOnline
   return [
     { provide: EMR_CLINICAL_ROUTES, useValue: services.routes },
     { provide: EMR_NATIVE_REPORT_SIGNING, useValue: services.nativeReportSigning },
+    { provide: EMR_MANUAL_SR_SIGNING, useValue: services.manualSrSigning },
   ];
 }
