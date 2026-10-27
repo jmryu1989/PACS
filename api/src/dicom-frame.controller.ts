@@ -20,6 +20,18 @@ function requestOrigin(req: any): string {
   return /^https?$/.test(proto) && /^[A-Za-z0-9.:\-\[\]]{1,255}$/.test(host) ? `${proto}://${host}` : (process.env.PUBLIC_ORIGIN ?? '').replace(/\/$/, '');
 }
 
+/**
+ * The request's lifetime as a signal: aborted when the client goes away before the response finished (the viewer page
+ * closed, a pane re-targeted). The service passes it to the index lookups and to a relayed Orthanc read, so a doctor
+ * closing the viewer does not leave an Orthanc whole-file read running for nobody.
+ */
+function lifetime(req: any, res: any, work: (signal: AbortSignal) => Promise<void>): Promise<void> {
+  const abort = new AbortController();
+  const stop = () => { if (!res.writableFinished) abort.abort(); };
+  req.once?.('aborted', stop); res.once?.('close', stop);
+  return work(abort.signal).finally(() => { req.off?.('aborted', stop); res.off?.('close', stop); });
+}
+
 @Controller()
 export class DicomFrameController {
   constructor(private readonly frames: DicomFrameService, private readonly pacs: PacsService) {}
@@ -32,15 +44,15 @@ export class DicomFrameController {
     if (!list) throw new BadRequestException('프레임 번호가 올바르지 않습니다');
     const uri = `/dicom-web/studies/${study}/series/${series}/instances/${sop}/frames/${frames}`;
     await this.pacs.authzDicom(uri, 'GET', member(req));
-    await this.frames.serveFrames({ studyUid: study, seriesUid: series, sopUid: sop, frames: list,
+    await lifetime(req, res, signal => this.frames.serveFrames({ studyUid: study, seriesUid: series, sopUid: sop, frames: list,
       accept: req.headers?.accept, acceptEncoding: req.headers?.['accept-encoding'], head: req.method === 'HEAD',
-      origin: requestOrigin(req) }, res);
+      origin: requestOrigin(req) }, res, signal));
   }
 
   @Get('instances/:id/preview')
   async preview(@Param('id') id: string, @Req() req: any, @Res() res: any) {
     if (!ORTHANC_ID.test(id)) throw new BadRequestException('영상 식별자가 올바르지 않습니다');
     await this.pacs.authzDicom(`/instances/${id}/preview`, 'GET', member(req));
-    await this.frames.servePreview(id, res);
+    await lifetime(req, res, signal => this.frames.servePreview(id, res, signal));
   }
 }

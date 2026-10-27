@@ -10,14 +10,14 @@
  */
 import { Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { createReadStream, promises as fs } from 'node:fs';
+import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { createGzip } from 'node:zlib';
 import { OrthancService } from './orthanc.service';
 import type { RelayTarget } from './orthanc.service';
-import { directReadServes, FrameFacts, FrameLayout, frameLayout, frameRange, multipartFrames, pixelDataHeaderMatches,
-  previewPng, tagNumber } from './dicom-frame-layout';
+import { acceptsGzip, directReadServes, FrameFacts, FrameLayout, frameLayout, frameRange, multipartFrames,
+  pixelDataHeaderMatches, previewPng, tagNumber } from './dicom-frame-layout';
 
 const ORTHANC_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -25,6 +25,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const PREVIEW_SIDE = 320;
 /** gzip level 1 shrank a 17 MB 16-bit DBT frame 6.7x in ~90 ms; higher levels gained little and cost seconds. */
 const GZIP_LEVEL = 1;
+/** One read of the stored file per chunk; a 17 MB frame is 17 reads, each handed to the response with backpressure. */
+const CHUNK_BYTES = 1 << 20;
 
 export interface FrameRequest {
   studyUid: string; seriesUid: string; sopUid: string; frames: number[];
@@ -38,6 +40,10 @@ interface StoredObject {
   /** The layout once the stored file was found, sized and its pixel data header checked; null means relay. */
   layout: FrameLayout | null;
 }
+
+/** The stored file ended before the requested range did: the index and the file disagree, so nothing of it is a frame. */
+class ShortRead extends Error { constructor() { super('short read'); } }
+type FileHandle = Awaited<ReturnType<typeof fs.open>>;
 
 @Injectable()
 export class DicomFrameService {
@@ -58,6 +64,10 @@ export class DicomFrameService {
     return this.storageState === 'ready';
   }
 
+  /**
+   * `signal` is the request's lifetime (the controller aborts it when the client goes away): it ends the index
+   * lookups and a relayed Orthanc read; the direct read watches the response itself.
+   */
   async serveFrames(request: FrameRequest, target: RelayTarget, signal?: AbortSignal): Promise<void> {
     const path = `/dicom-web/studies/${request.studyUid}/series/${request.seriesUid}/instances/${request.sopUid}/frames/${request.frames.join(',')}`;
     const accept = request.accept || 'multipart/related; type="application/octet-stream"; transfer-syntax=*';
@@ -65,21 +75,27 @@ export class DicomFrameService {
     // The URL's hierarchy must be the object's own: a study the caller may read never names another study's object.
     if (object && (object.studyUid !== request.studyUid || object.seriesUid !== request.seriesUid))
       throw new NotFoundException('요청한 검사·시리즈에 그 영상이 없습니다');
-    if (!object?.layout || !directReadServes(accept, object.facts.transferSyntax!) ||
-        request.frames.some(frame => frameRange(object.layout!, frame) === null)) {
+    const layout = object?.layout ?? null, filePath = object ? this.filePath(object.uuid) : '';
+    // The description was checked against the file once; the file is checked again for this request, since a stored
+    // file that has since changed size (replaced, truncated) is no longer the object the index describes.
+    if (!layout || !directReadServes(accept, object!.facts.transferSyntax!) ||
+        request.frames.some(frame => frameRange(layout, frame) === null) || !(await this.sameFile(object!, filePath))) {
       await this.orthanc.relay(path, accept, target, signal);
       return;
     }
-    const layout = object.layout, filePath = this.filePath(object.uuid);
+    // The file is opened before any header goes out: a file that cannot be opened is Orthanc's to answer.
+    let handle: FileHandle | undefined;
+    try { handle = await fs.open(filePath, 'r'); }
+    catch { this.forget(object!.id); await this.orthanc.relay(path, accept, target, signal); return; }
     const locationBase = `${request.origin}/dicom-web/studies/${request.studyUid}/series/${request.seriesUid}/instances/${request.sopUid}`;
-    const multipart = multipartFrames(randomUUID() + '-' + randomUUID().slice(0, 23), locationBase, object.facts.transferSyntax!, layout.frameBytes);
-    const gzip = /(?:^|,)\s*gzip\s*(?:;|,|$)/i.test(request.acceptEncoding ?? '');
+    const multipart = multipartFrames(randomUUID() + '-' + randomUUID().slice(0, 23), locationBase, object!.facts.transferSyntax!, layout.frameBytes);
+    const gzip = acceptsGzip(request.acceptEncoding);
     target.status(200);
     target.setHeader('Content-Type', multipart.contentType);
     target.setHeader('Vary', 'Accept-Encoding');
     if (gzip) target.setHeader('Content-Encoding', 'gzip');
     else target.setHeader('Content-Length', String(multipart.contentLength(request.frames, layout.frameBytes)));
-    if (request.head) { target.end(); return; }
+    if (request.head) { await handle.close().catch(() => {}); target.end(); return; }
     const out = gzip ? createGzip({ level: GZIP_LEVEL }) : target;
     const delivery = gzip ? pipeline(out as any, target as any) : Promise.resolve();
     // A client that goes away mid-stream fails this delivery before the loop below reaches `await delivery`; the
@@ -102,18 +118,33 @@ export class DicomFrameService {
       for (const frame of request.frames) {
         const range = frameRange(layout, frame)!;
         await write(multipart.partHead(frame));
-        const source = createReadStream(filePath, { start: range.start, end: range.end, highWaterMark: 1 << 20 });
-        await pipeline(source, out as any, { end: false } as any);
+        // Every byte of the frame is counted: a file that ends early (EOF is not an error to the OS) must not end as
+        // a complete part, because a shorter payload would still parse as a frame and display as one.
+        for (let position = range.start; position <= range.end;) {
+          const wanted = Math.min(CHUNK_BYTES, range.end - position + 1), chunk = Buffer.allocUnsafe(wanted);
+          let filled = 0;
+          while (filled < wanted) {
+            const { bytesRead } = await handle.read(chunk, filled, wanted - filled, position + filled);
+            if (!bytesRead) throw new ShortRead();
+            filled += bytesRead;
+          }
+          await write(chunk);
+          position += wanted;
+        }
         await write(multipart.partTail);
       }
       await write(multipart.closing);
       out.end();
       await delivery;
     } catch (error) {
-      if (!gone) this.logger.warn('frame_reader category=stream_failed');
-      (out as any).destroy?.(error);
+      if (error instanceof ShortRead) { this.logger.warn('frame_reader category=short_read'); this.forget(object!.id); }
+      else if (!gone) this.logger.warn('frame_reader category=stream_failed');
+      // Headers are out: the only truthful answer left is an aborted transfer, never a completed multipart body. The
+      // gzip stream carries the error into its pipeline (which observes it); the response's socket is just closed.
+      if (out !== target) (out as any).destroy?.(error);
+      (target as any).destroy?.();
       throw error;
-    }
+    } finally { await handle.close().catch(() => {}); }
   }
 
   /** The series strip's preview of one object; Orthanc's renderer answers objects the direct reader does not serve. */
@@ -122,9 +153,11 @@ export class DicomFrameService {
     const object = (await this.directReads()) ? await this.storedById(id, signal) : null;
     let png: Buffer | null = null;
     if (object?.layout) {
-      const range = frameRange(object.layout, 1)!;
-      const frame = await this.readRange(this.filePath(object.uuid), range.start, range.end);
-      png = previewPng(frame, object.facts, { maxSide: PREVIEW_SIDE });
+      const filePath = this.filePath(object.uuid);
+      if (await this.sameFile(object, filePath)) {
+        const range = frameRange(object.layout, 1)!;
+        png = previewPng(await this.readRange(object.id, filePath, range.start, range.end), object.facts, { maxSide: PREVIEW_SIDE });
+      }
     }
     if (!png) { await this.orthanc.relay(`/instances/${id}/preview`, 'image/png', target, signal); return; }
     target.status(200);
@@ -138,14 +171,26 @@ export class DicomFrameService {
     return join(this.storage, uuid.slice(0, 2), uuid.slice(2, 4), uuid);
   }
 
-  private async readRange(filePath: string, start: number, end: number): Promise<Buffer> {
+  /** The stored file is still the one the index describes (same size); otherwise its description is dropped. */
+  private async sameFile(object: StoredObject, filePath: string): Promise<boolean> {
+    try {
+      if ((await fs.stat(filePath)).size === object.facts.fileSize) return true;
+    } catch { /* gone or unreadable: not the same file either */ }
+    this.logger.warn('frame_reader category=file_changed');
+    this.forget(object.id);
+    return false;
+  }
+
+  private forget(id: string): void { this.objects.delete(id); }
+
+  private async readRange(id: string, filePath: string, start: number, end: number): Promise<Buffer> {
     const handle = await fs.open(filePath, 'r');
     try {
       const buffer = Buffer.alloc(end - start + 1);
       let filled = 0;
       while (filled < buffer.length) {
         const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, start + filled);
-        if (!bytesRead) throw new ServiceUnavailableException('원본 영상 파일이 예상보다 짧습니다');
+        if (!bytesRead) { this.forget(id); throw new ServiceUnavailableException('원본 영상 파일이 예상보다 짧습니다'); }
         filled += bytesRead;
       }
       return buffer;
@@ -181,16 +226,24 @@ export class DicomFrameService {
     const { tags, attachment, transferSyntax, pixelDataOffset } = await this.orthanc.frameFacts(id, signal);
     if (!tags || typeof tags !== 'object' || typeof tags.SOPInstanceUID !== 'string' || typeof tags.StudyInstanceUID !== 'string' ||
         typeof tags.SeriesInstanceUID !== 'string') throw new NotFoundException('영상 원본을 확인할 수 없습니다');
+    const present = (value: unknown) => value !== undefined && value !== null && value !== '';
     const facts: FrameFacts = {
       transferSyntax: typeof transferSyntax === 'string' && /^[0-9.]{1,64}$/.test(transferSyntax.trim()) ? transferSyntax.trim() : null,
       pixelDataOffset: pixelDataOffset !== null && /^\d{1,15}$/.test(pixelDataOffset.trim()) ? Number(pixelDataOffset.trim()) : null,
       rows: tagNumber(tags.Rows) ?? 0, columns: tagNumber(tags.Columns) ?? 0,
       bitsAllocated: tagNumber(tags.BitsAllocated) ?? 0, samplesPerPixel: tagNumber(tags.SamplesPerPixel) ?? 1,
-      numberOfFrames: tags.NumberOfFrames === undefined || tags.NumberOfFrames === null ? 1 : tagNumber(tags.NumberOfFrames) ?? 0,
-      planarConfiguration: tags.PlanarConfiguration === undefined || tags.PlanarConfiguration === null ? null : tagNumber(tags.PlanarConfiguration),
+      numberOfFrames: present(tags.NumberOfFrames) ? tagNumber(tags.NumberOfFrames) ?? 0 : 1,
+      planarConfiguration: present(tags.PlanarConfiguration) ? tagNumber(tags.PlanarConfiguration) : null,
       photometric: typeof tags.PhotometricInterpretation === 'string' ? tags.PhotometricInterpretation.trim() : '',
       pixelRepresentation: tagNumber(tags.PixelRepresentation) ?? 0,
+      bitsStored: present(tags.BitsStored) ? tagNumber(tags.BitsStored) ?? -1 : null,
+      highBit: present(tags.HighBit) ? tagNumber(tags.HighBit) ?? -1 : null,
+      rescaleSlope: present(tags.RescaleSlope) ? tagNumber(tags.RescaleSlope) ?? NaN : null,
+      rescaleIntercept: present(tags.RescaleIntercept) ? tagNumber(tags.RescaleIntercept) ?? NaN : null,
+      modalityLutSequence: present(tags.ModalityLUTSequence),
       windowCenter: tagNumber(tags.WindowCenter), windowWidth: tagNumber(tags.WindowWidth),
+      voiLutFunction: typeof tags.VOILUTFunction === 'string' && tags.VOILUTFunction.trim() ? tags.VOILUTFunction.trim() : null,
+      voiLutSequence: present(tags.VOILUTSequence),
       fileSize: typeof attachment?.UncompressedSize === 'number' ? attachment.UncompressedSize : 0,
       storedSize: typeof attachment?.CompressedSize === 'number' ? attachment.CompressedSize : -1,
     };
@@ -201,7 +254,7 @@ export class DicomFrameService {
       try {
         const filePath = this.filePath(uuid!);
         const stat = await fs.stat(filePath);
-        const header = await this.readRange(filePath, facts.pixelDataOffset!, facts.pixelDataOffset! + layout.headerLength - 1);
+        const header = await this.readRange(id, filePath, facts.pixelDataOffset!, facts.pixelDataOffset! + layout.headerLength - 1);
         if (stat.size !== facts.fileSize || !pixelDataHeaderMatches(header, layout)) layout = null;
       } catch { layout = null; }
       if (!layout) this.logger.warn('frame_reader category=layout_mismatch');

@@ -167,6 +167,16 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['GET studies/:uid/original-downloads/:operationId'] },
   { kinds: ['delivery-receipt', 'study-metadata'], operation: 'write', causes: ['user-view'],
     routes: ['POST admin/dicom-import/:operationId/files/:index/recovery'] },
+  // MG-LOADING: the two image reads nginx now routes to the API's range reader (dicom-frame.controller.ts) instead of
+  // straight to Orthanc; before, the same bytes left through the external surfaces below. The frame route carries the
+  // pixel frames of one image or segmentation object; the preview route the strip's rendering of one object, the same
+  // kinds as `orthanc-instance-preview`. The viewer fetches them as the person looks and ahead of it (prefetch), so
+  // both causes are real. Admission is authzDicom's; the D1877 image-delivery pair per study is the image-delivery
+  // integration's and is not recorded here (nor on the external surfaces these routes replace).
+  { kinds: ['image', 'external-sr-seg'], operation: 'read', causes: ['user-view', 'background-fetch'],
+    routes: ['GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames'] },
+  { kinds: ['thumbnail', 'image', 'key-image'], operation: 'read', causes: ['user-view', 'background-fetch'],
+    routes: ['GET instances/:id/preview'] },
 ];
 
 const routeEntries = groups.flatMap(({ routes, ...contract }) => routes.map(route => [route, contract] as const));
