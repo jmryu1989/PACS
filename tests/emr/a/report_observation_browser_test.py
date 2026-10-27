@@ -323,20 +323,27 @@ class ReportObservationBrowser(base.WorklistE2E):
         page.bring_to_front()
         self.wait_visibility(page, "visible")
         sent = self.reports(page)
+        # The Source read is held before it leaves the browser and sent on while the tab is hidden. (Route.fetch, which
+        # the other cases use, goes through Playwright's own HTTP client; in this browser's default context that client
+        # does not accept the stack's self-signed entry.)
         held = []
-        release = self.hold(page, first.uid, held)
+        pattern = re.compile(r"/api/studies/%s/report/versions$" % re.escape(first.uid))
+        page.route(pattern, lambda route: held.append(route) if not held and route.request.method == "GET" else route.fallback())
         self.select(page, target)
         page.locator(f'#relrows tr[data-uid="{first.uid}"] td').first.click()
         expect(page.locator("#related-mode")).to_be_visible()
         self.wait_ledger(page, lambda: held, lambda v: len(v) == 1, "the held Source read")
-        # The reader switches to the other tab; the held answer arrives and is drawn there in the background.
+        self.assertEqual(self.provisions(first.uid), {}, "the read has not reached the server yet")
+        # The reader switches to the other tab; the read goes on, and its answer arrives and is drawn in the background.
         other.bring_to_front()
         self.wait_visibility(page, "hidden")
-        route, answer = held[0]
-        provided = answer.json()[0]["accessRef"]
-        route.fulfill(response=answer)
-        release()
+        # The route stays until the held read is sent on (removing it first would release the read at once).
+        held[0].continue_()
+        page.unroute(pattern)
         self.text_in_background(page, '#related-mode [data-related-source="findings"]', "SYN A5 FIRST SOURCE")
+        provisions = self.provisions(first.uid)
+        self.assertEqual(len(provisions), 1, "one read of the one stored version")
+        provided = next(iter(provisions))
         # A report would go out within the page's own task after the draw; two seconds of wall clock give it every
         # chance, and A4 records a report in milliseconds on this stack.
         time.sleep(2)
