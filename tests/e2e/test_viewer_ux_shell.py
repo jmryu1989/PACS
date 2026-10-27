@@ -176,6 +176,8 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         page.keyboard.press('Delete')
         expect(tabs.get_by_role('tab')).to_have_count(1)
         expect(tabs.get_by_role('tab').filter(has_text=a.patient_id)).to_be_focused()
+        # Closing B starts A's native mode again; focus returns before its images.
+        page.wait_for_function('expected => (' + display_state + ')() === expected', arg=before_display)
         page.wait_for_function('''() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false''')
         tabs.get_by_role('button', name='Close ', exact=False).click()
         expect(tabs.get_by_role('tab')).to_have_count(0)
@@ -298,7 +300,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         work = self.login(); page = work.context.new_page()
         page.goto(self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + current.uid + ',' + prior.uid)
         canvas_ready(page, 8)
-        expect(page.get_by_label('MG Layout', exact=True)).to_have_value('compare')
+        expect(page.locator('#kin-mammography-hanging').get_by_label('MG Layout', exact=True)).to_have_value('compare')
         before = [cell['image'] for cell in self.cells(page)]
         self.assertEqual(len(set(before)), 8)
         page.wait_for_function('() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false')
@@ -311,7 +313,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         tabs.get_by_role('tab').filter(has_text=patient).click()
         page.wait_for_function('expected => JSON.stringify([...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x).map(c=>services.cornerstoneViewportService.getCornerstoneViewport(c.viewportId)?.getCurrentImageId?.())) === JSON.stringify(expected)', arg=before)
         canvas_ready(page, 8)
-        expect(page.get_by_label('MG Layout', exact=True)).to_have_value('compare')
+        expect(page.locator('#kin-mammography-hanging').get_by_label('MG Layout', exact=True)).to_have_value('compare')
 
     def test_shell_06_study_action_seam(self):
         patient = 'U2-' + uuid.uuid4().hex[:12]
@@ -321,8 +323,12 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         self.grid(page, 2); self.drag(page, 'D03A seam prior', 1)
         canvas_ready(page, 2)
         bars = page.get_by_role('region', name='Viewport Information')
-        for bar in bars.all(): expect(bar.get_by_role('button', name='Study', exact=False)).to_be_disabled()
-        # Register only the future consumer callbacks at the public boundary;
+        for bar in bars.all(): expect(bar.get_by_role('button', name='Study', exact=False)).to_be_enabled()
+        bars.nth(1).get_by_role('button', name='Study', exact=False).click()
+        studies = page.get_by_role('region', name='Studies', exact=True)
+        expect(studies.get_by_role('table')).to_be_visible()
+        studies.get_by_role('button', name='Close', exact=True).click()
+        # U3 is the shipped consumer. Exercise alternate callbacks and disposal at its public boundary;
         # the shipped shell, services, native grid and report host execute normally.
         page.evaluate('''() => {
           window.u2Unregister = KinViewerUX.registerStudyActions({
@@ -382,6 +388,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         self.assertTrue(any('/api/clinician/studies?uids=' in url for url in requests))
         expect(page.get_by_role('button', name='Viewer Settings', exact=True)).not_to_be_visible()
         expect(page.get_by_role('region', name='Image Tools', exact=True).get_by_role('status')).to_be_empty()
+        expect(page.get_by_role('region', name='Viewport Information').get_by_role('button', name='Study', exact=False)).not_to_be_visible()
         self.assertFalse(any(url.split('?')[0].endswith('/api/studies') for url in requests))
         page.get_by_role('tablist', name='Patients').get_by_role('button', name='Close ', exact=False).click()
         expect(page.get_by_role('tablist', name='Patients').get_by_role('tab')).to_have_count(0)
@@ -731,7 +738,25 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
 
     def test_shell_03_toolbar_shortcuts_and_account_roaming(self):
         current = self.multiple('U2-' + uuid.uuid4().hex[:16], 'current', '20260801')
+        prior = self.multiple(current.patient_id, 'prior', '20250701')
         page = self.launch(self.login(), [current])
+        comparison_url = self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + current.uid + ',' + prior.uid
+        comparison_images = '''() => [...services.viewportGridService.getState().viewports.values()]
+          .sort((a,b)=>a.y-b.y||a.x-b.x).map(c=>{
+            const v=services.cornerstoneViewportService.getCornerstoneViewport(c.viewportId);
+            const m=cornerstone.metaData.get('instance',v?.getCurrentImageId?.());
+            return [m?.StudyInstanceUID,m?.SeriesInstanceUID,m?.SOPInstanceUID];})'''
+        hanging_state = '''() => ({protocol:services.hangingProtocolService.getState().protocolId,
+          rows:services.viewportGridService.getState().layout.numRows,
+          columns:services.viewportGridService.getState().layout.numCols})'''
+        baseline = page.context.new_page()
+        baseline.goto(comparison_url); canvas_ready(baseline, 1)
+        stock_hang = baseline.evaluate(hanging_state)
+        baseline.goto(comparison_url + '&hangingProtocolId=@ohif/hpCompare'); canvas_ready(baseline, 4)
+        before_save = baseline.evaluate(comparison_images)
+        self.assertEqual({image[0] for image in before_save}, {current.uid, prior.uid})
+        self.assertEqual(len({image[1] for image in before_save}), 4)
+        baseline.close()
         tools = page.get_by_role('region', name='Image Tools', exact=True)
         bar = tools.get_by_role('toolbar', name='Frequent Tools')
         zoom = bar.get_by_role('button', name='Zoom', exact=True)
@@ -838,6 +863,42 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         self.assertEqual(document_request(page, 'GET', '/api/workspace-shortcuts').json()['bindings'], bindings)
         folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/viewer-ux-u2/screens')); folder.mkdir(parents=True, exist_ok=True)
         other.screenshot(path=str(folder / 'toolbar-roaming.png'))
+        # An unrelated Save must not create personal layouts or change the next hang.
+        self.assertFalse(document_request(other, 'GET', '/api/workspace-shortcuts').json()['viewerSettings'].get('hanging'))
+        comparison = other.context.new_page()
+        comparison.goto(comparison_url + '&hangingProtocolId=@ohif/hpCompare'); canvas_ready(comparison, 4)
+        self.assertEqual(comparison.evaluate(comparison_images), before_save)
+        comparison.screenshot(path=str(folder / 'unrelated-save-comparison.png'))
+        # Existing Automatic records also delegate to stock. A saved grid applies to
+        # the hpCompare open every product comparison path sends: current left, prior right.
+        record = document_request(other, 'GET', '/api/workspace-shortcuts').json()
+        original_settings = record['viewerSettings']
+        for layout, requested, count, expected in [
+                ('automatic', '', 1, None),
+                ('automatic', '&hangingProtocolId=@ohif/hpCompare', 4, before_save),
+                ('1x2', '&hangingProtocolId=@ohif/hpCompare', 2, [current.uid, prior.uid])]:
+            settings = {**original_settings, 'hanging': {'CT': {
+                'layout': layout, 'priorPosition': 'right', 'seriesMatch': 'similar'}}}
+            response = document_request(other, 'PUT', '/api/workspace-shortcuts', headers={'X-KIN-CSRF': '1'},
+                                        data=dict(expectedOwner=record['owner'], revision=record['revision'], viewerSettings=settings))
+            self.assertEqual(response.status, 200); record = response.json()
+            comparison.goto(comparison_url + requested); canvas_ready(comparison, count)
+            images = comparison.evaluate(comparison_images)
+            if count == 2:
+                grid = comparison.evaluate(hanging_state)
+                self.assertEqual((grid['rows'], grid['columns']), (1, 2))
+                self.assertEqual([image[0] for image in images], expected)
+            elif expected is not None:
+                self.assertEqual(images, expected)
+            else:
+                # Without a requested comparison, native OHIF owns image selection.
+                # Automatic retains that native protocol;
+                # it must not install the personal two-cell comparison.
+                self.assertEqual(comparison.evaluate(hanging_state), stock_hang)
+                self.assertIn(images[0][:2], [image[:2] for image in before_save])
+        response = document_request(other, 'PUT', '/api/workspace-shortcuts', headers={'X-KIN-CSRF': '1'},
+                                    data=dict(expectedOwner=record['owner'], revision=record['revision'], viewerSettings=original_settings))
+        self.assertEqual(response.status, 200)
 
     def test_shell_15_flip_rotate_shift_keys(self):
         # F8 (2026-10-26 reader answer): Shift+H/V flip, Shift+L/R turn; L and R stay Length and Rectangle.

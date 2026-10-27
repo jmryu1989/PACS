@@ -2,7 +2,7 @@
 // only its chrome and removes it when that mode or document ends.
 function kinCreateViewerUX() {
   let services, dispose, toolbar, shortcuts, generation = 0, ready;
-  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-ux-toolbar.js', 'viewer-ux-shell.js'];
+  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-hanging-settings.js', 'viewer-ux-toolbar.js', 'viewer-ux-shell.js'];
   // The theme fixes the chrome rows' heights. It is loaded once per document,
   // before the first mount, and stays: a stylesheet attached per mount and
   // dropped on mode exit left a window on re-entry (saved Job, patient tab) in
@@ -41,6 +41,7 @@ function kinCreateViewerUX() {
         services.uiNotificationService?.show({ title: 'Viewer', message: error.message, type: 'error' });
         return;
       }
+      await window.KinViewerUXToolbar.prepare(kinViewerSession);
       // Own letter keys before the first mode enters, including route teardown.
       shortcuts = window.KinViewerUXShortcuts.mount({
         getBindings: () => toolbar?.bindings() || {}, invoke: id => toolbar?.invoke(id),

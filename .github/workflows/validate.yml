@@ -1614,6 +1614,20 @@ jobs:
           tmp/u2b-regressions-ci/
         if-no-files-found: error
         retention-days: 7
+    - name: Viewer U3 served prior images and read-only reports
+      timeout-minutes: 28
+      if: ${{ !cancelled() }}
+      run: '"$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile viewer-ux-priors'
+    - name: Viewer U3 synthetic served evidence
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-viewer-ux-priors
+        path: |
+          tests/e2e/artifacts/viewer-ux-priors-ci/
+          tmp/viewer-ux-u3/
+        if-no-files-found: error
+        retention-days: 7
     - name: Isolated declared Viewer U2 shell tests
       timeout-minutes: 28
       run: |

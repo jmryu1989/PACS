@@ -35,6 +35,7 @@
     "mg-reference-lines.js",
     "study-prefetch.js",
     "viewer-ux.js",
+    "viewer-prior.js",
     "configuration.js"
   ]
 }

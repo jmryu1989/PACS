@@ -4164,11 +4164,12 @@ function kinCreateContextLoss() {
 // The generic comparison protocol chooses by arrival order, not by breast/view/image kind.
 // Use the existing DICOM classifier, while leaving pixels and viewport tools with OHIF.
 function kinCreateMammographyHanging() {
-  const protocolId = 'kin.mammography';
+  let protocolId = 'kin.mammography';
   let services, extensions, stop, institution;
   let preference = { layout: 'compare', kind: null };
   let preferenceProvider = null;
-  let requestedLayout = null;
+  let requestedLayout = null, accountDefault = false;
+  const arrangement = { viewOrder: 'CC-MLO', sideOrder: 'R-L', priorPosition: 'right', currentColumns: 2, compareColumns: 4 };
   let applyPreference = () => {};
   const kinds = ['conventional', 'generated2d', 'dbt'];
   const labels = { conventional: 'Conventional', generated2d: 'Synthetic 2D', dbt: 'DBT' };
@@ -4185,10 +4186,11 @@ function kinCreateMammographyHanging() {
       preferenceProvider = provider;
       return true;
     },
-    set(value) {
+    set(value, options = {}) {
       if (!value || !['compare', 'current'].includes(value.layout) ||
           !(value.kind === null || kinds.includes(value.kind))) return false;
-      preference = { layout: value.layout, kind: value.kind };
+      preference = { ...value };
+      accountDefault = !!options.accountDefault;
       requestedLayout = value.layout;
       applyPreference();
       return true;
@@ -4201,7 +4203,7 @@ function kinCreateMammographyHanging() {
     const opened = new URLSearchParams(search).get('StudyInstanceUIDs')?.split(',') || [];
     requestedLayout = null;
     preference = { layout: opened.length > 1 ? 'compare' : 'current', kind: null };
-    try { preferences.set(preferenceProvider?.({ studyInstanceUIDs: opened.slice() })); } catch (_) { /* Use the study-aware default. */ }
+    try { preferences.set(preferenceProvider?.({ studyInstanceUIDs: opened.slice() }), { accountDefault: true }); } catch (_) { /* Use the study-aware default. */ }
     const retrieve = series.metadata, run = hp.run;
     let ended = false, last = null, cells = [], stageCells = [], panel = null, missing = null;
     const live = () => !ended && location.search === search;
@@ -4287,16 +4289,31 @@ function kinCreateMammographyHanging() {
       const hasKind = (role, kind) => plan.objects.some(o => o.role === role && o.standard && o.kind === kind);
       // Prefer a representation shared by both examinations; never substitute a different kind
       // in an empty counterpart. A personal explicit selection still wins.
-      const selectedKind = preference.kind || kinds.find(k => hasKind('current', k) && hasKind('prior', k)) ||
+      const selectedKind = (preference.kind && (!accountDefault || hasKind('current', preference.kind)) ? preference.kind : null) || kinds.find(k => hasKind('current', k) && hasKind('prior', k)) ||
         kinds.find(k => hasKind('current', k)) || 'conventional';
+      const shape = { ...arrangement, ...preference };
+      protocolId = 'kin.mammography' + (Object.keys(arrangement).some(key => shape[key] !== arrangement[key]) ? '.' + Object.keys(arrangement).map(key => shape[key]).join('.') : '');
       const selectors = {}, stages = [], layouts = ['compare', 'current'];
       stageCells = [];
       // OHIF retains a protocol object when its ID is unchanged. Native stages keep layout/type
       // switches real, instead of re-registering one ID and leaving its former images on screen.
       for (const layout of layouts) for (const kind of kinds) {
         const specs = [];
-        for (const view of ['CC', 'MLO']) for (const role of layout === 'compare' ? ['current', 'prior'] : ['current'])
-          for (const side of ['R', 'L']) specs.push({ role, side, view });
+        const roles = layout === 'compare' ? (['left', 'top'].includes(shape.priorPosition) ? ['prior', 'current'] : ['current', 'prior']) : ['current'];
+        const views = shape.viewOrder.split('-'), sides = shape.sideOrder.split('-');
+        const vertical = ['top', 'bottom'].includes(shape.priorPosition);
+        const columns = layout === 'current' ? shape.currentColumns :
+          vertical ? Math.min(4, shape.compareColumns) : Math.max(2, shape.compareColumns);
+        const breastViews = views.flatMap(view => sides.map(side => ({ side, view })));
+        if (layout === 'current' || vertical) {
+          for (const role of roles) for (const spec of breastViews) specs.push({ role, ...spec });
+        } else {
+          // Each study occupies its chosen side at every grid width, including 4 x 2.
+          const perStudy = columns / roles.length;
+          for (let offset = 0; offset < breastViews.length; offset += perStudy) {
+            for (const role of roles) for (const spec of breastViews.slice(offset, offset + perStudy)) specs.push({ role, ...spec });
+          }
+        }
         const entries = specs.map(spec => {
           const key = [spec.role, spec.side, spec.view, kind].join('|'), slot = plan.slots[key];
           const object = slot?.status === 'ready' ? slot.object : null;
@@ -4311,7 +4328,7 @@ function kinCreateMammographyHanging() {
         stageCells.push(entries);
         stages.push({ id: layout + '-' + kind, name: (layout === 'compare' ? 'Current vs Prior' : 'Current') + ' · ' + labels[kind],
           stageActivation: { enabled: { minViewportsMatched: 0 } },
-          viewportStructure: { layoutType: 'grid', properties: { rows: 2, columns: layout === 'compare' ? 4 : 2 } },
+          viewportStructure: { layoutType: 'grid', properties: { rows: specs.length / columns, columns } },
           viewports: entries.map(cell => ({ viewportOptions: { toolGroupId: 'default', viewportType: 'stack', allowUnmatchedView: true },
             displaySets: [{ id: cell.key }] })) });
       }
@@ -4346,7 +4363,7 @@ function kinCreateMammographyHanging() {
     }
     const wrappedRun = function (data, requested, options) {
       if (!live() || !data.displaySets.some(d => d.Modality === 'MG' && d.StudyInstanceUID === opened[0]) ||
-          (requested && !['@ohif/hpCompare', 'default', protocolId].includes(requested))) {
+          (requested && !['@ohif/hpCompare', 'default'].includes(requested) && !requested.startsWith('kin.mammography'))) {
         last = null; return run.call(this, data, requested, options);
       }
       last = { data, options };
@@ -4549,7 +4566,7 @@ function kinCreateStudyPrefetch() {
 // only its chrome and removes it when that mode or document ends.
 function kinCreateViewerUX() {
   let services, dispose, toolbar, shortcuts, generation = 0, ready;
-  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-ux-toolbar.js', 'viewer-ux-shell.js'];
+  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-hanging-settings.js', 'viewer-ux-toolbar.js', 'viewer-ux-shell.js'];
   // The theme fixes the chrome rows' heights. It is loaded once per document,
   // before the first mount, and stays: a stylesheet attached per mount and
   // dropped on mode exit left a window on re-entry (saved Job, patient tab) in
@@ -4588,6 +4605,7 @@ function kinCreateViewerUX() {
         services.uiNotificationService?.show({ title: 'Viewer', message: error.message, type: 'error' });
         return;
       }
+      await window.KinViewerUXToolbar.prepare(kinViewerSession);
       // Own letter keys before the first mode enters, including route teardown.
       shortcuts = window.KinViewerUXShortcuts.mount({
         getBindings: () => toolbar?.bindings() || {}, invoke: id => toolbar?.invoke(id),
@@ -4613,6 +4631,97 @@ function kinCreateViewerUX() {
     onModeExit: stop,
   };
 }
+// U3 consumes the U2 document/viewport context. The native data source still
+// owns DICOM loading and display-set creation; reports are API reads only.
+function kinCreateViewerPrior() {
+  let services, extensions, generation = 0, ready, dispose, frame;
+  const assets = ['viewer-prior-controller.js', 'viewer-prior-panel.js'];
+  function load() {
+    return ready ||= assets.reduce((previous, name) => previous.then(() => new Promise((resolve, reject) => {
+      const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/' + name;
+      script.onload = () => { script.remove(); resolve(); };
+      script.onerror = () => { script.remove(); reject(new Error('이전 검사 모듈을 불러오지 못했습니다.')); };
+      document.head.append(script);
+    })), Promise.resolve()).catch(error => { ready = null; throw error; });
+  }
+  function stop() { generation++; cancelAnimationFrame(frame); dispose?.(); dispose = null; }
+  function mount(viewer) {
+    const host = document.createElement('section'); host.hidden = true; host.dataset.kinUxOwned = '';
+    host.className = 'kin-viewer-prior-list';
+    const style = document.createElement('style');
+    style.textContent = `.kin-viewer-prior-list{position:absolute;right:0;top:0;z-index:35;max-width:100%;max-height:100%;overflow:auto;background:#2D2D2D;color:#E3E3E3;border:1px solid #8AB4C8;padding:8px;font-size:12px}
+      .kin-viewer-prior-list[hidden]{display:none}.kin-viewer-prior-list table{border-collapse:collapse;width:100%}.kin-viewer-prior-list th,.kin-viewer-prior-list td{padding:4px;text-align:left;border-bottom:1px solid #555}
+      .kin-viewer-prior-list button,.kin-viewer-prior-report button{background:#212121;color:#E3E3E3;border:1px solid #8AB4C8;padding:4px;cursor:pointer}.kin-viewer-prior-list tr:focus-within,.kin-viewer-prior-list tbody tr:hover{background:#3b4c54}
+      .kin-viewer-prior-report{z-index:36;overflow:auto}.kin-viewer-prior-report p{overflow-wrap:anywhere}`;
+    document.head.append(style);
+    let anchor = null, reportOpener = null, reportUid = null, listOpen = false;
+    const closeList = () => { controller.close(); if (anchor?.isConnected) anchor.focus(); };
+    const report = (uid, opener) => { reportUid = uid; reportOpener = opener; controller.openReport(uid); };
+    const controller = window.KinViewerPriorController.create({ viewer,
+      async loadStudy(uid, origin) {
+        const source = extensions.getActiveDataSource()[0];
+        try { await source.retrieve.series.metadata({ StudyInstanceUID: uid, madeInClient: true }); }
+        catch (error) {
+          // The pinned loader caches failed metadata promises. A user's Retry
+          // must reach the data source again rather than replay that failure.
+          source.deleteStudyMetadataPromise(uid); throw error;
+        }
+        const sets = services.displaySetService.getActiveDisplaySets().filter(set => set.StudyInstanceUID === uid && set.images?.length)
+          .sort((a, b) => Number(a.SeriesNumber || 0) - Number(b.SeriesNumber || 0) || a.SeriesInstanceUID.localeCompare(b.SeriesInstanceUID));
+        const sourceSet = services.displaySetService.getActiveDisplaySets().find(set => set.StudyInstanceUID === origin.studyUid && set.SeriesInstanceUID === origin.seriesUid);
+        return window.KinViewerHangingSettings.rank(sets, sourceSet, window.kinViewerHangingPreference?.(sourceSet?.Modality).seriesMatch);
+      },
+      onList(value) {
+        listOpen = value.state !== 'closed';
+        window.KinViewerPriorPanel.list(host, value, { openImages: uid => controller.openImages(uid),
+          openReport: report, retry: () => controller.retryList(), close: closeList });
+      },
+      onReport(value) {
+        if (value.state === 'closed') { viewer.reportHost.close({ notify: false }); host.hidden = !listOpen; return; }
+        // Collapse the dropdown while its report covers the image. Keep its
+        // rows so Close can restore the exact keyboard opener.
+        host.hidden = true;
+        viewer.reportHost.render(value.origin, (container, controls) => window.KinViewerPriorPanel.report(container, value, controls),
+          { opener: reportOpener, onClose: () => controller.closeReport(), onRetry: () => controller.openReport(reportUid) });
+      },
+    });
+    host.onkeydown = event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeList(); } };
+    const unregister = viewer.registerStudyActions({
+      listPriors(value) {
+        anchor = value.anchor;
+        const pane = anchor.closest('[data-cy="viewport-pane"]');
+        if (!pane) return;
+        pane.append(host);
+        // The list starts immediately below the cell's Study information bar.
+        host.style.top = anchor.closest('.kin-viewer-info-bar').offsetHeight + 'px';
+        host.style.maxHeight = 'calc(100% - ' + host.style.top + ')';
+        controller.open(value);
+      },
+      openImages: controller.openImages, openReport: report, refresh: controller.refresh,
+    });
+    const channel = kinViewerOnEnd(stop);
+    return () => { channel?.close(); unregister(); controller.dispose(); host.remove(); style.remove(); };
+  }
+  return {
+    id: 'kin.viewer-prior',
+    preRegistration({ servicesManager, extensionManager }) { services = servicesManager.services; extensions = extensionManager; },
+    onModeEnter() {
+      stop(); if (window.top !== window) return;
+      const ticket = generation;
+      load().then(() => {
+        const attach = () => {
+          if (ticket !== generation || kinViewerSession.ended()) return;
+          if (kinViewerSession.readOnly()) return;
+          if (window.KinViewerUX) dispose = mount(window.KinViewerUX);
+          else frame = requestAnimationFrame(attach);
+        };
+        attach();
+      }).catch(error => { if (ticket === generation) services.uiNotificationService?.show({ title: 'Studies', message: error.message, type: 'error' }); });
+    },
+    onModeExit: stop,
+  };
+}
+
 
 // W9 multi-study view (worklist-v0/hpacs-lite/viewer-multi-study.js): load, mount and stop its strip and renderer observer
 // with the viewer mode, the way Frame Coverage is mounted. Only a viewer the worklist opened for a multi-study opening (the
@@ -4640,7 +4749,7 @@ function kinCreateMultiStudyStrip() {
 }
 
 window.config = {
-  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateViewerUX(), kinCreateMultiStudyStrip()],
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateViewerUX(), kinCreateViewerPrior(), kinCreateMultiStudyStrip()],
   // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
   // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
   kinThreeDCursor: { enabled: false },
