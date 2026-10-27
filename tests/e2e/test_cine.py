@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 from pydicom import dcmread
 from pydicom.uid import generate_uid
+from viewer_tools import select_image_tool,native_back
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError,expect
 from test_viewer_layout import ViewerLayoutE2E
 from test_prior_selection import canvas_ready
@@ -34,7 +35,7 @@ class CineE2E(ViewerLayoutE2E):
   for i,r in enumerate(refs):self.drag(p,r['label'],i)
   self.identity(p,refs);self.select_cell(p,0)
   if not p.evaluate('services.cineService.getState().isCineEnabled'):
-   p.locator('[data-cy="MoreTools-split-button-secondary"]').click();p.locator('[data-cy="Cine"]').click()
+   select_image_tool(p, 'Cine')
   expect(p.locator('#kin-cine')).to_be_visible();return p
 
  def select_cell(self,p,i):
@@ -52,7 +53,8 @@ class CineE2E(ViewerLayoutE2E):
    const pixels=c.getContext('2d').getImageData(0,0,c.width,c.height).data;let hi=0;for(let n=0;n<pixels.length;n+=4)hi=Math.max(hi,pixels[n]);
    const origin=cornerstone.metaData.get('imagePlaneModule',image).imagePositionPatient,xy=v.worldToCanvas([origin[0]+40+i*10,origin[1]+105,origin[2]]);
    const marker=c.getContext('2d').getImageData(Math.round(xy[0]),Math.round(xy[1]),1,1).data[0];
-   cineRenders.push({id:v.id,index:i,image,t:performance.now(),hi,marker});});}}''')
+   const heading=v.element.closest('[data-cy="viewport-pane"]')?.querySelector('.kin-viewer-info-bar');
+   cineRenders.push({id:v.id,index:i,image,t:performance.now(),hi,marker,canvasHeight:c.height,headingHeight:heading?.getBoundingClientRect().height??null,headingText:heading?.children[0].textContent,viewportStatus:v.viewportStatus});});}}''')
 
  def wait_index(self,p,i,n):p.wait_for_function('a=>services.cornerstoneViewportService.getCornerstoneViewport([...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.x-b.x)[a[0]].viewportId).getCurrentImageIdIndex()===a[1]',arg=[i,n])
 
@@ -91,9 +93,14 @@ class CineE2E(ViewerLayoutE2E):
   self.select_cell(p,1);self.wait_stopped(p,0);before=self.snapshot(p)[0];self.play(p,1);p.wait_for_timeout(850);self.assertEqual(self.snapshot(p)[0],before)
   self.play(p,1)
   for _ in range(5):p.locator('[data-cy=viewport-grid] > div').nth(1).locator('[data-cy="cine-player-left-arrow"]').click()
+  # The served native FPS control debounces its service update.
+  p.wait_for_function("()=>{const g=[...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.x-b.x)[1];return services.cineService.getState().cines[g.viewportId]?.frameRate===5}")
+  print('CINE requested speed '+json.dumps(p.evaluate('services.cineService.getState()')),flush=True)
   p.evaluate('()=>{cineRenders=[]}');self.play(p,1);p.wait_for_timeout(2500);self.play(p,1)
-  data=p.evaluate('cineRenders');seq=[r for r in data if r['id']==self.snapshot(p)[1]['id']]
-  fps=(len(seq)-1)*1000/(seq[-1]['t']-seq[0]['t']);print('CINE 5fps '+json.dumps(dict(fps=fps,renders=seq)),flush=True)
+  data=p.evaluate('cineRenders');renders=[r for r in data if r['id']==self.snapshot(p)[1]['id']]
+  # A repeated paint of the same image is not a cine frame advance.
+  seq=[r for i,r in enumerate(renders) if not i or r['index']!=renders[i-1]['index']]
+  fps=(len(seq)-1)*1000/(seq[-1]['t']-seq[0]['t']);print('CINE 5fps '+json.dumps(dict(fps=fps,renders=seq,paints=renders)),flush=True)
   self.assertGreater(fps,4);self.assertLess(fps,6);self.assertTrue(all((y['index']-x['index'])%7==1 for x,y in zip(seq,seq[1:])))
   self.play(p,1);self.drag(p,'D03A current',1);p.wait_for_timeout(500);self.wait_stopped(p,1);before=self.snapshot(p);print('CINE replacement '+json.dumps(before),flush=True);p.wait_for_timeout(450);self.assertEqual(self.snapshot(p),before);self.assertFalse(before[1]['playing'])
   self.grid(p,1);p.wait_for_timeout(300);self.assertTrue(all(not x['playing'] for x in self.snapshot(p)))
@@ -115,7 +122,7 @@ class CineE2E(ViewerLayoutE2E):
   self.watch(p);ended=observe_viewer(p);dialogs=[];work.on('dialog',lambda d:(dialogs.append(d.message),d.dismiss()))
   work.locator('#logout').click();work.wait_for_url('**/worklist/hpacs-lite/index.html')
   ended.ended();count=ended.evaluate('()=>cineRenders.length');ended.assert_quiet(500);self.assertEqual(ended.evaluate('()=>cineRenders.length'),count);self.assertEqual(dialogs,[])
-  p=self.open_cine(f,[a]);self.play(p);p.wait_for_timeout(350);p.evaluate('()=>{window.cineExitMarker=true}');p.mouse.click(20,24)
+  p=self.open_cine(f,[a]);self.play(p);p.wait_for_timeout(350);p.evaluate('()=>{window.cineExitMarker=true}');native_back(p)
   expect(p.locator('#kin-cine')).to_have_count(0);self.assertTrue(p.evaluate('window.cineExitMarker===true'));self.assertNotIn('/ohif/viewer?',p.url)
 
  def test_cine_05_delayed_image_replacement_and_failure(self):

@@ -12,12 +12,18 @@ import { FileWrappingSecrets } from '../emr-signature/server-keys';
 import type { RequestIdentityPort, RequestIdentity, WrappingSecrets } from '../emr-signature/server-contract';
 import { EMR_NATIVE_REPORT_SIGNING } from '../emr-report/native-signing';
 import { EMR_CLINICAL_ROUTES, ClinicalRouteSources } from './routes';
+import { EMR_MANUAL_SR_SIGNING } from './manual-sr';
 import { ClinicalStore } from './store';
 import { createOnlineClinicalServices } from './services';
 import { clinicalRouteSources } from './sources';
 import type { ClinicalContextSource } from './runtime';
+import { FindingService } from '../finding.service';
+import { findingSources } from '../emr-source/finding';
 
 const ONLINE_CLINICAL_SERVICES = Symbol('OnlineClinicalServices');
+/** The composed C2 administrative facade (manage only): it has no decrypt or sign capability. */
+export const EMR_SIGNING_KEY_ADMIN = Symbol('EmrSigningKeyAdmin');
+export type SigningKeyAdmin = ReturnType<typeof createOnlineClinicalServices>['keys'];
 const clinicalRole = (roles: readonly string[]) => roles.some(role => ['radiologist', 'clinician', 'technician'].includes(role));
 
 /** Registration is the immutable member identity bound to current institutional
@@ -47,8 +53,9 @@ export function onlineRequestIdentity(requests: RequestContextSource): RequestId
       return { ...current, capacity: 'operator' };
     },
     async doctor(tx, institutionId, doctorId) {
+      // The runtime login reads B2 identities only through its definer functions, never the table.
       const rows = await tx.$queryRaw<{ issuer: string; subject: string }[]>`
-        SELECT issuer, subject FROM emr_access.member_identity WHERE id=${doctorId}::uuid`;
+        SELECT issuer, subject FROM emr_access.member_identity_binding(${doctorId}::uuid)`;
       const identity = rows[0];
       if (!identity) throw new NotFoundException('회원 신원을 확인할 수 없습니다.');
       await lockMemberRights(tx, identity.subject);
@@ -70,18 +77,10 @@ export function configuredWrappingSecrets(env: NodeJS.ProcessEnv = process.env):
     } };
 }
 
-/** Only immutable source-copy resolution awaits Module A. Native report and
- * plain clinical records use the existing current-study identity reader. */
-export class ModuleAClinicalSourcesPending {
-  readonly finding: ClinicalRouteSources = async () => {
-    throw new ServiceUnavailableException({ code: 'ModuleAFixedVersionReaderPending',
-      message: '소견 원본의 고정판 조회 연결을 준비 중입니다. 입력은 유지됩니다.' });
-  };
-}
+export const CURRENT_CLINICAL_CONTEXT = Symbol('CURRENT_CLINICAL_CONTEXT');
 
-export function createStartupClinicalServices(prisma: PrismaService, records: EmrRecordPort,
-  requests: RequestContextSource, orthanc: OrthancService, studyAccess: StudyAccessService,
-  pending: ModuleAClinicalSourcesPending) {
+export function createCurrentClinicalContext(prisma: PrismaService, requests: RequestContextSource,
+  orthanc: OrthancService, studyAccess: StudyAccessService): ClinicalContextSource {
   const identity = onlineRequestIdentity(requests);
   const access = new PacsAccess(prisma, studyAccess);
   // One current-identity check per request and transaction: facts() and scope()/study() of the same request on the
@@ -124,7 +123,15 @@ export function createStartupClinicalServices(prisma: PrismaService, records: Em
         patientId, assigningAuthority: current.managingInstitutionId } };
     },
   };
-  const sources = clinicalRouteSources(identity, records, pending.finding);
+  return context;
+}
+
+export function createStartupClinicalServices(prisma: PrismaService, records: EmrRecordPort,
+  requests: RequestContextSource, orthanc: OrthancService, studyAccess: StudyAccessService,
+  findings: FindingService) {
+  const identity = onlineRequestIdentity(requests);
+  const context = createCurrentClinicalContext(prisma, requests, orthanc, studyAccess);
+  const sources = clinicalRouteSources(identity, records, findingSources(findings, identity));
   return createOnlineClinicalServices({ records, store: new ClinicalStore(prisma), identity,
     secrets: configuredWrappingSecrets(), context, sources: async (tx, request, write) => {
       const prepared = await sources(tx, request, write);
@@ -137,10 +144,13 @@ export function createStartupClinicalServices(prisma: PrismaService, records: Em
 }
 
 export const startupClinicalProviders = [
-  ModuleAClinicalSourcesPending,
+  { provide: CURRENT_CLINICAL_CONTEXT, inject: [PrismaService, REQUEST_CONTEXT_SOURCE, OrthancService, StudyAccessService],
+    useFactory: createCurrentClinicalContext },
   { provide: ONLINE_CLINICAL_SERVICES,
-    inject: [PrismaService, EMR_RECORD_PORT, REQUEST_CONTEXT_SOURCE, OrthancService, StudyAccessService, ModuleAClinicalSourcesPending],
+    inject: [PrismaService, EMR_RECORD_PORT, REQUEST_CONTEXT_SOURCE, OrthancService, StudyAccessService, FindingService],
     useFactory: createStartupClinicalServices },
   { provide: EMR_CLINICAL_ROUTES, inject: [ONLINE_CLINICAL_SERVICES], useFactory: (services: ReturnType<typeof createOnlineClinicalServices>) => services.routes },
+  { provide: EMR_MANUAL_SR_SIGNING, inject: [ONLINE_CLINICAL_SERVICES], useFactory: (services: ReturnType<typeof createOnlineClinicalServices>) => services.manualSrSigning },
   { provide: EMR_NATIVE_REPORT_SIGNING, inject: [ONLINE_CLINICAL_SERVICES], useFactory: (services: ReturnType<typeof createOnlineClinicalServices>) => services.nativeReportSigning },
+  { provide: EMR_SIGNING_KEY_ADMIN, inject: [ONLINE_CLINICAL_SERVICES], useFactory: (services: ReturnType<typeof createOnlineClinicalServices>) => services.keys },
 ];

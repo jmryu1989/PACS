@@ -23,10 +23,13 @@ export class PacsClinicalRoutes {
   }
 
   async techNote(uid: string, c: Caller, before?: string, request?: object) {
+    // The current note serves its one version and a history page the versions it lists; a note version is its
+    // D sequence (the write's baseVersion is the unit revision). Retained versions not returned are not 열람.
     return clinicalRoutes(this.clinical).read(request, 'tech-note', uid,
       tx => this.notes.techNote(uid, c, before, tx),
       value => !value.note && !value.items?.length,
-      before === undefined ? 'GET studies/:uid/tech-note' : 'GET studies/:uid/tech-note/history');
+      before === undefined ? 'GET studies/:uid/tech-note' : 'GET studies/:uid/tech-note/history',
+      value => value.note ? [value.note.version] : (value.items ?? []).map(item => item.version));
   }
 
   async saveTechNote(uid: string, body: any, c: Caller, request: object) {
@@ -41,7 +44,8 @@ export class PacsClinicalRoutes {
     // Read it through the clinical boundary so the provided head is recorded.
     if (result.emr.replayed) {
       const current = await clinicalRoutes(this.clinical).read(request, 'tech-note', uid,
-        tx => this.notes.techNote(uid, c, undefined, tx), undefined, 'POST studies/:uid/tech-note');
+        tx => this.notes.techNote(uid, c, undefined, tx), undefined, 'POST studies/:uid/tech-note',
+        value => value.note ? [value.note.version] : []);
       return { ...result, latestNote: current.note };
     }
     return result;

@@ -223,7 +223,14 @@ class VolumeMipE2E(VolumeProjectionE2E):
   v.evaluate(HELPERS);v.evaluate(SETTLE);return a,p,v,voi
  def open_mip(self,v):
   v.get_by_role('button',name='Open MIP Viewer',exact=True).click();dialog=v.locator('#kin-volume-mip')
-  expect(dialog).to_have_attribute('data-kin-mip-state','final',timeout=45000);expect(dialog.locator('[role=status]')).to_contain_text('MIP · Axial');return dialog
+  from failure_diagnostics import failure_details
+  try:
+   with failure_details(v,'MIP open failure',"""()=>{const id=services.viewportGridService.getState().activeViewportId,v=services.cornerstoneViewportService.getCornerstoneViewport(id),d=document.querySelector('#kin-volume-mip');return {active:id,volume:v?.getVolumeId?.(),viewportStatus:v?.viewportStatus,dialogOpen:d?.open,state:d?.dataset.kinMipState,status:d?.querySelector('[role=status]')?.textContent,orientation:document.querySelector('#kin-volume-orientation [role=status]')?.textContent,jobsBusy:window.kinViewerJobWorkspaceState?.().busy,previewBusy:window.kinMprRenderingState?.busy?.(),batchBusy:window.kinVolumeBatchState?.busy?.()}}"""):
+    expect(dialog).to_have_attribute('data-kin-mip-state','final',timeout=45000);expect(dialog.locator('[role=status]')).to_contain_text('MIP · Axial')
+  except Exception:
+   v.screenshot(path=str(Path(__file__).parent/'artifacts'/(self.id().split('.')[-1]+'-mip-viewer.png')))
+   raise
+  return dialog
  def choose_mip(self,dialog,mode=None,orientation=None):
   if orientation:dialog.get_by_label('MIP Orientation',exact=True).select_option(orientation)
   if mode:dialog.get_by_label('MIP Projection',exact=True).select_option(mode)

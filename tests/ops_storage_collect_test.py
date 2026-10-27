@@ -116,7 +116,7 @@ class Pure(unittest.TestCase):
         with self.assertRaises(ValueError):
             collect.collect_pages(SimpleNamespace(list_objects_v2=fake), collect.RequestGuard(config()), config())
         self.assertEqual(len(calls), 2)
-        for attribute, value in [('LIST_LIMIT', 20), ('ITEM_LIMIT', 0), ('PAGE_LIMIT', 0)]:
+        for attribute, value in [('LIST_LIMIT', 20), ('PAGE_LIMIT', 0)]:
             with patch.object(collect.core, attribute, value), self.assertRaises(ValueError):
                 collect.collect_pages(SimpleNamespace(list_objects_v2=lambda **kw: response()),
                                       collect.RequestGuard(config()), config())

@@ -35,7 +35,7 @@ export class PacsClinician {
    * 판독 상태(rs·repDoc·confirm·판 번호·머리 판 action)는 워크리스트 행에서 가져오지 않는다. listStudies는 StudyState와
    * Report를 따로 읽으므로 그 사이 Addendum이 끼면 새 판 번호에 이전 서명자가 붙는다. 여기서 **한 SQL 문장**(한 스냅샷)으로
    * 기관 두 칸과 판독 상태를 함께 읽어 그 행에서만 상태를 만들고, 워크리스트 행과 그 칸들(CLINICIAN_LIST_PINS)이 하나라도
-   * 다르면 워크리스트와 같은 409로 답 전체를 거절한다. 정책 변경은 StudyAccessInterceptor가 요청 전체에서 본다.
+   * 다르면 워크리스트와 같은 409로 답 전체를 거절한다.
    */
   async clinicianStudies(c: Caller, query?: any) {
     this.clinicianCaller(c);

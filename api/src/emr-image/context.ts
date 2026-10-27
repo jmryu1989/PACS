@@ -1,5 +1,4 @@
-import { Injectable, ServiceUnavailableException } from '@nestjs/common';
-import type { ClinicalContextSource, ClinicalRequestFacts, StudyScope } from '../emr-clinical/runtime';
+import type { ClinicalContextSource, ClinicalRequestFacts } from '../emr-clinical/runtime';
 import type { StudyFacts } from '../emr-clinical/contract';
 import { refuse } from '../emr-contract/validation';
 import type { EmrRecordTransaction } from '../emr-runtime/record-port';
@@ -65,23 +64,4 @@ export class ProductionImageContext extends ImageContextSource {
         scope.managingInstitutionId !== manifest.managingInstitution) refuse('ImageCurrentStudyChanged');
     return { ...facts, ...await this.catalog.delivery(tx, request, facts, { ...scope, patient: manifest.patient }, at) };
   }
-}
-
-/** REQUEST_FACTS #211 has not landed on the D-online base. An unavailable
- * authoritative reader must not be replaced by client identity or guessed
- * patient/source/decoder facts. This binding is replaced at Module A assembly. */
-@Injectable()
-export class ModuleAImageContextPending implements ClinicalContextSource, ImageCatalogSource {
-  private unavailable(): never {
-    throw new ServiceUnavailableException({ code: 'IMAGE_CONTEXT_UNAVAILABLE',
-      message: '영상의 현재 접근 권한과 원본 정보를 확인할 수 없습니다' });
-  }
-  async manifest(_request: object, _image: ImageRequest, _signal: AbortSignal): Promise<ImageManifest> { return this.unavailable(); }
-  async facts(_tx: EmrRecordTransaction, _request: object): Promise<ClinicalRequestFacts> { return this.unavailable(); }
-  async study(_tx: EmrRecordTransaction, _request: object, _studyId: string): Promise<StudyFacts> { return this.unavailable(); }
-  // #219 split the study's institutional scope from its patient identity (D's reads must not depend on the archive);
-  // this pending binding has no authoritative reader for either, so the scope is as unavailable as the study.
-  async scope(_tx: EmrRecordTransaction, _request: object, _studyId: string): Promise<StudyScope> { return this.unavailable(); }
-  async delivery(_tx: EmrRecordTransaction, _request: object, _facts: ClinicalRequestFacts,
-    _study: StudyFacts, _at: string): Promise<Pick<CurrentImageFacts, 'accountGeneration' | 'provision'>> { return this.unavailable(); }
 }

@@ -31,6 +31,14 @@ export class OnlineSigningStore {
     return rows[0]?.registration ?? null;
   }
 
+  /** Public registrations only (never private_key), newest first, for the key administrator's view. */
+  async doctorKeys(tx: SigningTransaction, institutionId: string, doctorId: string): Promise<ServerKeyRegistration[]> {
+    const rows = await tx.$queryRaw<{ registration: ServerKeyRegistration }[]>`
+      SELECT registration FROM emr_signing.doctor_key WHERE institution_id=${institutionId} AND doctor_id=${doctorId}
+      ORDER BY registration->>'registeredAt' DESC, kid`;
+    return rows.map(row => row.registration);
+  }
+
   async insertKey(tx: SigningTransaction, key: ServerKeyRegistration, wrapped: WrappedServerPrivateKey): Promise<void> {
     await tx.$executeRaw`INSERT INTO emr_signing.doctor_key(kid,institution_id,doctor_id,status,registration)
       VALUES (${key.kid},${key.doctor.institutionId},${key.doctor.identity.id},${key.status},${JSON.stringify(key)}::jsonb)`;

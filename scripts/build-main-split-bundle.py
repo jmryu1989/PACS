@@ -55,7 +55,7 @@ class Scripts(HTMLParser):
 def assemble(root=ROOT, manifest=None):
     manifest = manifest or json.loads((root / "scripts/main-split-order.json").read_bytes())
     sources = manifest["sources"]
-    assert len(sources) == 45 and len({s["file"] for s in sources}) == 45, "45 distinct ordered sources"
+    assert sources and len({s["file"] for s in sources}) == len(sources), "Distinct ordered sources required"
     output, ranges = bytearray(), []
     page_dir = root / Path(manifest["page"]).parent
     # The migration's 44 boundaries are empty: every trivia byte belongs to a

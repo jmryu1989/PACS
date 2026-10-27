@@ -24,39 +24,15 @@ const SESSION_TOUCH_MS = 5 * 60 * 1000;
 /**
  * 시작한 로그인(pending)이 통하는 시간. Keycloak 로그인 화면의 수명(accessCodeLifespanLogin)에 맞춘다: keycloak/kin-realm.json은
  * 그 값을 정하지 않으므로 Keycloak 기본값 1800초다. 이보다 짧으면(예전 600초) 폼을 연 지 10~30분 뒤에 로그인한 사람이
- * Keycloak은 통과하고 여기서 거절된다. 쿠키는 더 오래 둔다 — 만료된 **자기** 흐름의 콜백을 남의 흐름과 구별해, 그 흐름의
- * 의도를 지킨 채 한 번 다시 시작하기 위해서다.
+ * Keycloak은 통과하고 여기서 거절된다. pending 쿠키도 같은 수명을 따른다.
  */
 const PENDING_VALID_MS = 30 * 60 * 1000;
-const PENDING_COOKIE_SECONDS = 2 * 60 * 60;
 const PENDING_PREFIX = 'kin_pending_';
-// 한 브라우저가 들고 있는 pending 쿠키의 상한. 넘으면 가장 오래된 것부터 치운다(버려진 탭의 흐름이 쿠키 머리글을 키우지 않게).
-const PENDING_LIMIT = 8;
-// 자동으로 다시 시작한 흐름의 state 꼬리표. 쿠키가 돌아오지 않는 브라우저에서도 "두 번째 자동 재시작"을 알아본다.
-const RESTARTED = '~r';
 // 한 요청이 하는 조건부 세션 전이(idle 삭제·refresh 저장·refresh 실패 삭제, 종료 요청의 삭제)의 상한. 경쟁자가 매번
 // 먼저 바꾸면 끝없이 재시도하는 대신 409로 끝내고 다음 사용자 요청이 새 한도로 다시 한다(S7-U5 §0.A 7).
 const TRANSITION_LIMIT = 3;
-// 세션을 끝낸 **뒤의** provider 종료 요청 한 번을 기다리는 시간(U5S-REQ-18; 서비스 토큰 취득은 이 안에서 끝나거나 그 요청을
-// 보내지 않는다). 넘겨도 요청은 끊지 않는다 — 그 답이 나중에 기록(ProviderChange)을 정하고, 확인되지 않은 표식(IdpSessionEnd)이
-// 다음 시도를 부른다. 이 앱의 세션은 이미 끝났다.
+// 세션 commit 뒤 보내는 best-effort provider 종료의 기존 외부 호출 한도.
 const IDP_END_MS = 2000;
-// 사람이 답을 기다리는 종료(복구 로그인의 시작, 끝내기로 한 provider 세션을 타고 온 콜백)의 한도.
-const IDP_END_WAIT_MS = 5000;
-// 미확인 provider 종료를 다시 살피는 주기와, 실패할수록 늘어나는 간격(상한 5분). 미확인 행은 시간만으로 버리지 않는다.
-const IDP_END_TICK_MS = 5000;
-const IDP_END_BACKOFF_MS = [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 300_000];
-/**
- * 확인된 표식을 남겨 두는 시간: Keycloak SSO 세션의 최대 수명(kin-realm.json ssoSessionMaxLifespan 43200초) + 여유.
- * 그 뒤에는 그 provider 세션의 유효한 토큰이 올 수 없다 — 콜백이 잠금 뒤에 토큰의 exp를 다시 보는 것과 짝이다.
- * 마지막으로 확인된 종료(confirmedAt)부터 센다: 같은 sid가 다시 쓰이면(S7-U5 CE1) decidedAt은 첫 종료의 시각이라, 그것으로
- * 세면 방금 다시 끝낸 SSO의 표식이 그 토큰이 아직 유효할 때 지워진다.
- */
-const IDP_END_KEEP_MS = 13 * 60 * 60 * 1000;
-// provider 세션 잠금(pg_advisory_xact_lock)의 고정 이름공간. 다른 용도의 advisory lock과 키가 겹치지 않게 한다.
-const IDP_LOCK_SPACE = 0x4b494e55;
-// 인증 서버 자체가 답하지 못했다는 OAuth 오류(그 밖의 probe 오류는 SSO를 알아내지 못한 것일 뿐이다).
-const PROVIDER_DOWN = ['temporarily_unavailable', 'server_error'];
 // Keycloak 토큰 교환(로그인 code, refresh) 한 번이 쓸 수 있는 시간(U5S-REQ-18의 외부 조회 한도).
 const IDP_TOKEN_MS = 5000;
 /**
@@ -66,71 +42,31 @@ const IDP_TOKEN_MS = 5000;
 const REFRESH_LEAD_MS = 30_000;
 // 실제 만료 직전의 토큰을 "아직 유효"로 채택하면 곧이은 서명 검증에서 만료로 떨어진다. 그 틈을 만료 쪽으로 센다.
 const TOKEN_MARGIN_MS = 2000;
-// 로그인 직후의 진입 증명이 통하는 시간(U5S-REQ-09). 콜백의 이동과 첫 요청 사이만 덮는다.
-const ENTRY_PROOF_MS = 120_000;
-
-// S7-U5 접속기록(FACT-S7-RETENTION): 로그인 성공·실패, 로그아웃·계정 전환·재인증, 세션 만료, 로그인 뒤 진입.
 const AUTH_LOGIN = 'auth.login';
-const AUTH_LOGOUT = 'auth.logout';
-const AUTH_EXPIRED = 'auth.session.expired';
-const AUTH_ENTRY = 'auth.entry';
-
-/**
- * 민감한 로그인 시작이 밝히는 사유(R2). 랜딩이 아는 것을 그대로 말한다: 끝내지 못한 로그아웃, 계정 바꾸기, 떠났는지 알 수
- * 없는 브라우저(저장소 불신·기록 손상). `register`는 가입 진입이 스스로 붙인다(본문으로 받지 않는다).
- */
-const LOGIN_REASONS = ['logout_unfinished', 'switch_account', 'storage_untrusted', 'record_unreadable'] as const;
-type Reason = typeof LOGIN_REASONS[number] | 'register';
-// isolation: 관리자가 회원을 격리(정지·승인 변경·승인 취소)하며 그 회원의 세션을 끝냈다(사람의 Log out도 만료도 아니다).
 type EndCause = 'logout' | 'account_switch' | 'reauthentication' | 'idle' | 'refresh_failed' | 'sweep' | 'isolation';
-/** 사유가 접속기록의 원인이 되는 표(A019): 사람의 Log out의 완료는 logout, 계정 바꾸기만 account_switch, 그 밖은 재인증이다. */
-const REASON_CAUSE: Record<Reason, EndCause> = {
-  logout_unfinished: 'logout',
-  switch_account: 'account_switch',
-  storage_untrusted: 'reauthentication',
-  record_unreadable: 'reauthentication',
-  register: 'reauthentication',
-};
-
-/**
- * 로그인 흐름 하나의 서버 쪽 상태(서명한 쿠키, 흐름마다 하나). 단계:
- *   plain  평범한 로그인 — 살아 있는 SSO가 있으면 폼 없이 돌아온다(끝내기로 한 SSO는 콜백이 막는다).
- *   probe  복구 의도의 첫 단계 — `prompt=none`으로 이 브라우저의 SSO만 알아낸다. code가 오면 그 SSO를 끝내고(제품 세션도
- *          진입 증명도 만들지 않는다), `login_required`면 끝낼 SSO가 없는 것이다.
- *   fresh  복구 의도의 마지막 단계 — `prompt`(login·create)로 자격을 실제로 입력한 인증만 제품 세션을 만든다.
- */
-type Phase = 'plain' | 'probe' | 'fresh';
-type PendingLogin = {
-  state: string; verifier: string; issuedAt: number;
-  phase: Phase; reason: Reason | null; prompt: 'login' | 'create' | null; restarts: number;
-  memberSub?: string; rightsVersion?: number;
-};
-type Flow = { name: string; pending: PendingLogin; live: boolean };
+type PendingLogin = { state: string; verifier: string; issuedAt: number };
 type Session = {
   sid: string; auditRef: string; sub: string; accessToken: string; refreshToken: string;
   atExpiresAt: Date; createdAt: Date; lastSeenAt: Date;
-  entryProofHash: string | null; entryProofExpiresAt: Date | null;
   idpSid: string | null; rightsVersion: number; institution: string | null;
 };
 type Who = { actor: string; target: string; institution: string | null };
 export type LoginFailureCause =
-  'provider_error' | 'state_mismatch' | 'no_code' | 'exchange_failed' | 'token_invalid' | 'session_failed' | 'idp_session_ended'
+  'provider_error' | 'state_mismatch' | 'no_code' | 'exchange_failed' | 'token_invalid' | 'session_failed'
   // 격리된 회원(우리 쪽 격리 사실이 있는 회원)의 로그인: 세션을 만들지 않는다.
   | 'member_isolated' | 'rights_pending' | 'storage_failure';
 type StorageStep = 'session_read' | 'session_write' | 'end_transaction' | 'login_transaction' | 'login_failure_row'
-  | 'entry_transaction' | 'sweep_read' | 'sweep_target' | 'sweep_cycle'
-  | 'idp_end_read' | 'idp_end_write' | 'idp_end_cycle'
+  | 'sweep_read' | 'sweep_target' | 'sweep_cycle'
   | 'change_write';
 /** 보내기 전에 기록한 변경 호출 하나(ProviderChange 행). */
-type Change = { id: number; kind: 'end_session' | 'credentials'; target: string };
-type EndResult = { ended: boolean; idpSid: string | null; change: Change | null };
+type Change = { id: number; kind: 'credentials'; target: string };
+type EndResult = { ended: boolean; idpSid: string | null };
 /**
- * 콜백의 답. `entered`만 제품 세션을 만든다. `redirect`는 인증 서버로 다시 보내는 이동(복구의 다음 단계, 한 번의 자동
- * 재시작), `work`는 이미 살아 있는 세션의 업무 문서, `landing`은 사유와 함께 랜딩이다 — 최상위 이동에 JSON 오류를 답하지 않는다.
+ * 콜백의 답. `entered`만 제품 세션을 만든다. `work`는 이미 살아 있는 세션의 업무 문서,
+ * `landing`은 사유와 함께 랜딩이다 — 최상위 이동에 JSON 오류를 답하지 않는다.
  */
 export type CallbackResult =
-  | { kind: 'entered'; sid: string; proof: string; document: 'main.html' | 'clinician.html' }
-  | { kind: 'redirect'; location: string }
+  | { kind: 'entered'; sid: string; document: 'main.html' | 'clinician.html' }
   | { kind: 'work' }
   | { kind: 'landing'; error: string };
 /**
@@ -175,16 +111,8 @@ export function markAuthCode(res: any, error: any) {
  * 다른 토큰을 가리지 못한다). 끝나는 세션은 조건부 삭제와 감사 행이 한 commit이고 삭제한 호출만 행을 쓴다.
  * 0행이면 그 관찰을 버리고 다시 읽는다. 외부 Keycloak 응답을 기다리는 동안에는 트랜잭션도 잠금도 잡지 않는다.
  *
- * 세션 종료의 완성(S7-U5 R1): 제품이 어떤 이유로든 제품 세션을 끝내면 그 세션이 태어난 provider 세션(`idpSid`)도 끝낸다.
- * 끝내기와 콜백의 세션 생성은 같은 provider 세션에 대해 하나의 잠금(트랜잭션 advisory lock)으로 줄을 서고, 끝내기는
- * 그 잠금 안에서 표식(IdpSessionEnd)을 남긴다 — 표식이 덮는 인증(그 종료가 확인되기 전의 인증, `markCovers`)으로는 다시는
- * 제품 세션이 만들어지지 않는다. 표식은 sid가 아니라 그 SSO의 인증을 막는다: Keycloak은 같은 브라우저의 다음 SSO에 끝난 SSO의
- * sid를 다시 줄 수 있다.
- * provider에 종료를 청하는 일(DELETE sessions/{sid})은 commit 뒤, 잠금 밖에서 하고, 확인될 때까지 표식이 다시 부른다.
- * 그 요청은 보내기 전에 기록되고 자기 답으로만 정해진다(ProviderChange, D600): 답을 잃은 요청이 남은 sid의 표식은 다른
- * 요청의 204·404로 확인되지 않는다 — 늦게 닿은 그 요청은 그 sid를 다시 받은 다음 SSO를 끝낸다.
- * 그 답(204·404)은 "그 SSO 세션이 인증 서버에서 끝났다"까지만 말한다: 이미 발급된 토큰은 자기 만료까지 서명이 유효하고
- * (그래서 Bearer 경로도 표식을 본다), 같은 SSO에 묶인 다른 애플리케이션의 자체 세션은 그 애플리케이션의 일이다.
+ * 세션 삭제와 접속기록은 한 commit이다. 그 뒤 provider 종료는 한 번만 청한다.
+ * 다음 로그인은 항상 prompt=login으로 자격 입력을 요구한다.
  *
  * 쿠키의 주인(S7-U5, U5S-REQ-10): `kin_sid`를 쓰는 응답은 성공한 로그인 콜백 하나뿐이다. 로그아웃·만료·거절은 쿠키를
  * 지우지 않는다 — 그 응답이 늦게 닿으면 그사이 완료된 새 로그인의 쿠키를 지운다. 끝난 세션의 쿠키는 서버가 거절한다.
@@ -197,8 +125,6 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     : null;
   private readonly logger = new Logger('AuthSession');
   private stopSweep?: () => void;
-  private stopIdpEnds?: () => void;
-  private resuming = false;
   private cancelImportRetry?: () => void;
   private stopping = false;
   /**
@@ -231,16 +157,12 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     // 조회 시 idle 검사가 본체다. 타이머는 다시 오지 않는 세션 행을 치우는 수거원이고, 치운 세션도 접속기록에 남긴다.
     this.stopSweep = this.background.every('auth.sweep', 60 * 60 * 1000,
       () => this.sweep().catch(() => this.storageWarning('sweep_cycle')));
-    // 표식 표가 곧 provider 종료의 대기열이다: 프로세스가 죽어도 잃지 않고, 시작할 때 미확인 행을 기한과 무관하게 다시 청한다.
-    this.stopIdpEnds = this.background.every('auth.resumeIdpEnds', IDP_END_TICK_MS, () => this.resumeIdpEnds(false));
-    this.background.tryRun('auth.resumeIdpEnds', () => this.resumeIdpEnds(true));
   }
 
   onModuleDestroy() {
     this.stopping = true;
     this.cancelImportRetry?.();
     this.stopSweep?.();
-    this.stopIdpEnds?.();
   }
 
   private async importRights(attempt: number, signal: AbortSignal): Promise<void> {
@@ -324,12 +246,6 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     if (binding === 'mismatch') throw this.bindingMismatch();
   }
 
-  /** Bearer 호출은 CSRF 대상이 아니다. 브라우저가 자동으로 싣는 쿠키 호출만 헤더를 요구한다. */
-  requireCsrf(req: any) {
-    if (req?.headers?.['x-kin-csrf'] !== '1')
-      throw authRefusal(403, 'AUTH_CSRF_REQUIRED', 'X-KIN-CSRF 헤더가 필요합니다');
-  }
-
   credentialsMissing() {
     return authRefusal(401, 'AUTH_CREDENTIALS_MISSING', '인증 정보가 없습니다');
   }
@@ -374,7 +290,6 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     try {
       const parsed = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')) as PendingLogin;
       if (!parsed.state || !parsed.verifier || !Number.isFinite(parsed.issuedAt)) return null;
-      if (!['plain', 'probe', 'fresh'].includes(parsed.phase) || !Number.isInteger(parsed.restarts)) return null;
       return parsed;
     } catch { return null; }
   }
@@ -453,29 +368,6 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     return typeof claims?.sid === 'string' && claims.sid ? claims.sid : null;
   }
 
-  /**
-   * 표식이 이 인증을 덮는가(R1). 표식은 끝내기로 한 **그 SSO의 인증**을 막는다 — sid가 같다는 것만으로는 아니다(S7-U5 CE1).
-   * Keycloak은 SSO 세션 id로 그 브라우저의 인증 세션 id(AUTH_SESSION_ID)를 쓰고, 그 브라우저에 끝나지 않은 로그인 화면(닫은
-   * 로그인 탭, 로그인 전에 앱 주소를 한 번 더 연 것)이 남아 있으면 그 id가 로그인 뒤에도 남는다. 그래서 같은 브라우저의 다음
-   * SSO가 — 다음 사람이든 같은 사람이든 — 끝난 SSO의 sid를 다시 받는다. 끝난 SSO의 code·토큰은 그 종료가 확인되기 전에
-   * 인증된 것이다:
-   *   - 종료가 아직 확인되지 않았거나 auth_time이 없으면 덮는다(그 SSO가 아직 살아 있을 수 있다).
-   *   - 확인된 종료 이후의 인증(auth_time ≥ confirmedAt)은 덮지 않는다 — 그 sid를 다시 받은 새 SSO다.
-   *   - 확인된 종료 뒤에 시작한 fresh 흐름(prompt=login·create)의 code는 그 흐름이 시작된 **초**부터 받는다. 그 흐름의
-   *     prompt가 인증 서버에 그 시작 뒤의 인증을 요구하므로 그 code의 인증은 흐름보다 늦다. 초로 내리는 것은 auth_time이
-   *     초 단위로 잘린 값이기 때문이다(종료 확인과 같은 초에 자격을 넣은 사람도 한 번에 들어간다).
-   * 시계: auth_time은 인증 서버의 시계, confirmedAt·흐름의 시작은 이 서버의 시계다(같은 호스트에 둔다). 그 밖의 여유는 두지
-   * 않는다 — 여유는 앞 의사의 종료 직전 인증까지 받아 들인다. 인증 서버 시계가 늦으면 흐름 시작 직후의 입력이 한 번 거절되고
-   * (막힘 → 확인 → 새 흐름의 폼), 빠르면 끝난 SSO의 종료 직전 인증이 통할 수 있다 — 두 서버를 나누어 둘 때는 시계 동기가 전제다.
-   * 같은 초의 인증은 흐름 없이(평범한 흐름·Bearer) 앞뒤를 가리지 못하므로 덮는 쪽으로 판정한다.
-   */
-  private markCovers(mark: { confirmedAt: Date | null }, claims: Record<string, any>, flow?: PendingLogin): boolean {
-    const authTime = Number(claims?.auth_time);
-    if (!mark.confirmedAt || !Number.isFinite(authTime)) return true;
-    const ended = mark.confirmedAt.getTime();
-    const since = flow?.phase === 'fresh' && flow.issuedAt >= ended ? Math.floor(flow.issuedAt / 1000) * 1000 : ended;
-    return authTime * 1000 < since;
-  }
 
   /** 이 세션이 태어난 provider 세션. 열이 생기기 전의 행은 저장된 access token(저장 전에 검증한 토큰)에서 읽는다. */
   private idpSidOf(session: Session): string | null {
@@ -519,44 +411,18 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     return { sid: session.sid, accessToken: session.accessToken, refreshToken: session.refreshToken };
   }
 
-  /**
-   * provider 세션 하나에 대한 줄 세우기: 트랜잭션 advisory lock. 끝내기와 콜백의 세션 생성이 같은 키를 잡으므로 "표식을
-   * 보고 → 세션을 만든다"와 "표식을 남기고 → 그 세션의 행을 모두 지운다"가 겹치지 않는다. 트랜잭션이 끝나면 풀리고(연결
-   * 풀에 남지 않는다), 기다림은 그 트랜잭션의 lock_timeout을 따른다. 키는 고정 이름공간과, 발급자·세션 id의 해시다 — 키가
-   * 우연히 겹친 두 세션은 잠깐 줄을 설 뿐 서로의 판정에 섞이지 않는다(판정은 잠금 뒤에 읽은 행이 한다).
-   */
-  private async lockIdpSession(tx: any, idpSid: string): Promise<void> {
-    await this.advisoryLock(tx, IDP_LOCK_SPACE, idpSid);
-  }
 
   /**
    * 회원 하나에 대한 줄 세우기(같은 트랜잭션 advisory lock, 다른 이름공간). 격리 사실의 쓰기와 콜백의 "사실을 보고 → 세션을
    * 만든다"가 겹치지 않는다: 콜백이 먼저면 그 세션 행은 격리가 사실 뒤에 끝내는 행에 들고, 사실이 먼저면 콜백이 그것을 본다.
-   * 잡는 순서는 늘 provider 세션 잠금 → 회원 잠금이다(사실을 쓰는 쪽은 회원 잠금 하나만 잡는다) — 교착이 없다.
    */
   private async lockMember(tx: any, sub: string): Promise<void> {
     await lockMemberRights(tx, sub);
   }
 
-  private async advisoryLock(tx: any, space: number, name: string): Promise<void> {
-    const key = createHash('sha256').update(`${process.env.KC_ISSUER}\n${name}`).digest().readInt32BE(0);
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${space}::int4, ${key}::int4)`;
-  }
 
-  /**
-   * 관찰 S의 세션을 끝낸다(모든 원인의 한 길). 한 트랜잭션에서, S가 태어난 provider 세션의 잠금을 **먼저** 잡고:
-   *   1. 끝내는 조건을 다시 확인한다 — S 조건부 삭제(idle·sweep은 lastSeenAt < cutoff를 다시). 0행이면 아무것도 남기지 않는다:
-   *      경쟁에 진 관찰은 표식을 만들지 못한다(그사이 갱신되어 살아 있는 세션의 provider 세션을 끝내면 안 된다).
-   *   2. 표식을 남긴다. 처음 정한 cause·decidedAt은 덮지 않고, 이미 확인된 표식이면 종료 요청을 다시 깨운다.
-   *   3. 같은 provider 세션에서 태어난 다른 제품 행도 모두 끝낸다(쿠키를 잃은 뒤 같은 SSO로 생긴 둘째 행).
-   *   4. 실제로 지운 행마다 접속기록 한 행. 재시도와 provider 종료 요청은 행을 더하지 않는다.
-   * `ended: false`는 지우지 못했다는 뜻일 뿐 세션 부재의 증거가 아니다. provider 종료 요청은 commit 뒤에 부른 쪽이 한다.
-   *
-   * 대기는 유한하다(U5S-REQ-18): 연결 4초, 잠금 3초, 트랜잭션 8초. 삭제는 그 세션으로 진행 중인 초안 쓰기의 세션 잠금을
-   * 기다린다 — 그 쓰기는 종료보다 먼저 commit되거나, 종료 뒤에 실패한다. 잠금을 제때 얻지 못하면 끝내지 않고 409다.
-   */
   private async endSession(
-    session: Session, cause: EndCause, ip: string | null, options: { idleCutoff?: Date; trigger?: Reason; surface?: string | null } = {},
+    session: Session, cause: EndCause, ip: string | null, options: { idleCutoff?: Date; trigger?: ReauthenticationTrigger; surface?: string | null } = {},
   ): Promise<EndResult> {
     const idpSid = this.idpSidOf(session);
     const where = options.idleCutoff
@@ -565,12 +431,11 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       const service = cause === 'sweep' ? await this.sweepIdentity() : undefined;
       const end = async (tx: EmrRecordTransaction, record: RecordMutation, user: SessionRecordIdentity): Promise<EndResult> => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
-        if (idpSid) await this.lockIdpSession(tx, idpSid);
         const surface = options.surface ?? (cause === 'sweep' ? 'service:auth-session-sweep' : null);
         const ended = await this.endRow(tx, record, user, session, cause, ip, surface, options.trigger, service, where);
-        if (!ended) return { ended: false, idpSid: null, change: null };
-        const change = await this.endRows(tx, record, user, idpSid, cause, ip, surface, options.trigger, session.sub, service);
-        return { ended: true, idpSid, change };
+        if (!ended) return { ended: false, idpSid: null };
+        await this.endRows(tx, record, user, idpSid, cause, ip, surface, options.trigger, service);
+        return { ended: true, idpSid };
       };
       let issuer: string | undefined;
       try { issuer = decodeJwt(session.accessToken).iss; } catch { /* Keep the missing original identity explicit. */ }
@@ -589,28 +454,16 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /**
-   * 잠금을 쥔 트랜잭션 안에서: 표식을 남기고, 그 provider 세션의 남은 제품 행을 모두 지우고, 지운 행(`ended`에 이미 든 것
-   * 포함)마다 접속기록 한 행을 쓴다. 원인은 사실대로 적는다 — 재인증으로 끝난 행은 무엇이 그 재인증을 불렀는지(trigger)도.
-   * 표식을 깨우는(미확인으로 되돌리는) 것과 그 provider 세션의 새 종료 요청 기록은 한 commit이다(돌려주는 Change): 그래서
-   * 깨운 뒤의 종료 요청이 자기 답을 받기 전에는 표식이 확인되지 않는다(confirmEndIfSettled). commit 뒤 부른 쪽이 보낸다.
-   * `sub`은 그 요청 기록의 관련 회원이다(주지 않으면 끝낸 행의 회원).
-   */
+  /** 같은 provider 세션의 제품 행도 삭제와 접속기록을 한 transaction으로 끝낸다. */
   private async endRows(
     tx: EmrRecordTransaction, record: RecordMutation, user: SessionRecordIdentity,
     idpSid: string | null, cause: EndCause, ip: string | null, surface: string | null,
-    trigger?: Reason, sub?: string, service?: { status: 'known'; value: ImmutableIdentity },
-  ): Promise<Change | null> {
-    if (!idpSid) return null;
-    const now = new Date();
-    const mark = await tx.idpSessionEnd.upsert({
-      where: { idpSid }, create: { idpSid, cause, decidedAt: now, nextAttemptAt: now },
-      update: { confirmedAt: null, nextAttemptAt: now },
-    });
+    trigger?: ReauthenticationTrigger, service?: { status: 'known'; value: ImmutableIdentity },
+  ): Promise<void> {
+    if (!idpSid) return;
     const others = await tx.authSession.findMany({ where: { idpSid } });
     for (const other of others)
       await this.endRow(tx, record, user, other, cause, ip, surface, trigger, service, { sid: other.sid });
-    return this.recordEnd(tx, idpSid, sub ?? (user.status === 'known' ? user.value.subject : null), mark.attempts);
   }
 
   private async sweepIdentity() {
@@ -625,14 +478,14 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
 
   private async endRow(tx: EmrRecordTransaction, record: RecordMutation,
     user: SessionRecordIdentity, row: Session, cause: EndCause, ip: string | null,
-    surface: string | null, trigger: Reason | undefined, service: { status: 'known'; value: ImmutableIdentity } | undefined,
+    surface: string | null, trigger: ReauthenticationTrigger | undefined, service: { status: 'known'; value: ImmutableIdentity } | undefined,
     where: Prisma.AuthSessionWhereInput): Promise<boolean> {
     if (!surface || (user.status === 'known' && row.sub !== user.value.subject)) throw new Error('SessionEndObservationMissing');
     const rights = await tx.memberRights.findUnique({ where: { sub: row.sub } });
     const event = sessionEndEvent(user, { surface, roles: rights?.roles ?? [], rightsVersion: rights?.version ?? 0,
       institution: row.institution, auditRef: row.auditRef, ip, occurredAt: new Date().toISOString(),
       endCause: cause.replace(/_/g, '-') as AuthEndCause,
-      trigger: cause === 'reauthentication' ? trigger!.replace(/_/g, '-') as ReauthenticationTrigger : null, service });
+      trigger: cause === 'reauthentication' ? trigger! : null, service });
     const reference = await record(event, async () => {
       const { count } = await tx.authSession.deleteMany({ where });
       if (count !== 1) return null;
@@ -640,7 +493,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       const audit = await tx.auditLog.create({ data: {
         at: new Date(event.occurredAt), actor: who.actor, action: event.action, target: who.target,
         detail: JSON.stringify(cause === 'reauthentication'
-          ? { institution: who.institution, ip, dataSubject: null, cause, trigger: trigger ?? null }
+          ? { institution: who.institution, ip, dataSubject: null, cause, trigger: trigger?.replace(/-/g, '_') ?? null }
           : { institution: who.institution, ip, dataSubject: null, cause }),
       } });
       return { kind: 'AuditLog', id: String(audit.id), version: null };
@@ -648,18 +501,11 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     return reference !== null;
   }
 
-  /** provider 세션 하나의 종료 요청을 보내기 **전에** 기록한다(그 sid의 잠금을 쥔 트랜잭션 안에서). */
-  private async recordEnd(tx: any, idpSid: string, sub: string | null, generation: number): Promise<Change> {
-    const row = await tx.providerChange.create({ data: {
-      kind: 'end_session', target: idpSid, sub, generation, state: 'unknown', createdAt: new Date(),
-    } });
-    return { id: row.id, kind: 'end_session', target: idpSid };
-  }
 
   /** 끝내고, 끝냈으면 provider 종료를 청해 둔다(기다리지 않는다). idle·refresh 거절·수거·평소의 Log out이 쓴다. */
   private async endAndTell(session: Session, cause: EndCause, ip: string | null, idleCutoff?: Date, surface?: string | null): Promise<boolean> {
     const result = await this.endSession(session, cause, ip, { idleCutoff, surface });
-    if (result.ended && result.change) this.tellIdp(result.change);
+    if (result.ended && result.idpSid) this.tellIdp(result.idpSid);
     return result.ended;
   }
 
@@ -674,7 +520,6 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     const rights = await this.entryRights(String(claims.sub), db);
     if (rights.newAuthAfter && !this.authenticationAfter(claims.auth_time, rights.newAuthAfter))
       throw this.ended('회원 자격이 바뀌었습니다. 다시 로그인해 주십시오');
-    await this.refuseEndedIdpSession(claims, raw, db);
     return rights;
   }
 
@@ -764,11 +609,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     finally { clearTimeout(timer); }
   }
 
-  /**
-   * 그 호출 **자신의** 답만 그 기록을 정한다(id로, 아직 unknown일 때만 — 같은 대상의 다른 기록은 건드리지 않는다). 답을 잃었으면
-   * (unknown) 상태는 그대로 두고 요약만 남긴다. 적지 못한 답은 기록을 unknown으로 남긴다(안전한 쪽: 그 회원·sid는 확인되지 않은
-   * 채 남는다). 세션 종료의 답이 정해지면 그 sid의 표식을 확인할 수 있는지 본다.
-   */
+
   private async settleChange(change: Change, answer: ChangeAnswer): Promise<void> {
     const data = answer.state === 'unknown' ? { outcome: answer.outcome }
       : { state: answer.state, outcome: answer.outcome, settledAt: new Date() };
@@ -782,11 +623,10 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         if (tries === 2) { this.storageWarning('change_write'); return; }
       }
     }
-    if (change.kind === 'end_session' && answer.state !== 'unknown') await this.confirmEndIfSettled(change.target);
   }
 
   private async endByRequest(
-    sid: string, session: Session | null, cause: EndCause, ip: string | null, trigger?: Reason, surface?: string | null,
+    sid: string, session: Session | null, cause: EndCause, ip: string | null, trigger?: ReauthenticationTrigger, surface?: string | null,
   ): Promise<EndResult> {
     for (let writes = 0; session; ) {
       if (writes === TRANSITION_LIMIT) throw this.conflict();
@@ -795,253 +635,83 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       if (result.ended) return result;
       session = await this.readSession(sid);
     }
-    return { ended: false, idpSid: null, change: null };
+    return { ended: false, idpSid: null };
   }
 
-  // ── provider 종료 요청(표식이 곧 대기열) ──
-
   /**
-   * 기록해 둔 종료 요청 하나를 보내고 그 답을 최대 `waitMs` 기다린다(그 요청은 기다림이 끝나도 남고 자기 답이 기록을 정한다).
-   * true는 그 sid의 표식이 확인됐다는 것이다: 이 요청이 끝냈다(204)·없다(404)고 답했고, 그 sid에 보낸 다른 종료 요청도 모두
-   * 자기 답으로 정해졌을 때(confirmEndIfSettled). 다른 요청의 204·404가 먼저 와도 답을 모르는 요청이 남으면 false다.
+   * 세션 삭제가 commit된 뒤 provider 종료를 한 번 청한다(best-effort, 재시도 없음). 기다림은 IDP_END_MS까지이고 provider
+   * 장애는 앱의 종료를 되돌리지 않는다.
    */
-  private async confirmIdpEnd(change: Change, waitMs: number): Promise<boolean> {
-    const signal = within(waitMs);
-    const answer = await this.sendChange(change, 'end_session:' + change.target,
-      () => this.keycloak.endSession(change.target, signal), waitMs);
-    if (answer !== 'done') return false;
+  private async endIdpOnce(idpSid: string): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      return !!(await this.prisma.idpSessionEnd.findUnique({ where: { idpSid: change.target }, select: { confirmedAt: true } }))?.confirmedAt;
-    } catch {
-      this.storageWarning('idp_end_read');
-      return false;
-    }
+      await Promise.race([this.keycloak.endSession(idpSid, within(IDP_END_MS)),
+        new Promise(resolve => { timer = setTimeout(resolve, IDP_END_MS); })]);
+    } catch { this.logger.warn('auth_provider_end unavailable'); }
+    finally { clearTimeout(timer); }
   }
 
-  /**
-   * 그 provider 세션의 표식을 확인한다 — 그 sid에 보낸 종료 요청이 **모두** 자기 답으로 정해졌고 가장 나중의 것이 끝냈다(또는
-   * 없다)고 답했을 때만. 하나라도 답을 모르면 확인하지 않는다: 그 요청이 늦게 닿으면, 그 sid를 다시 받은 다음 SSO(다음 사람의
-   * 것일 수도 있다)를 끝낸다 — 확인된 표식은 그 다음 SSO를 들여보내므로 그런 요청이 남은 채 확인하면 안 된다. 표식을 깨우는 것
-   * (미확인으로 되돌림)은 언제나 새 종료 요청의 기록과 한 commit이고 둘 다 그 sid의 잠금 안에서 일어나므로, 이 판정도 같은
-   * 잠금 안에서 한다. 이 sid의 요청 답이 정해질 때마다 부른다(마지막 답이 확인을 낸다).
-   */
-  private async confirmEndIfSettled(idpSid: string): Promise<void> {
-    try {
-      await this.prisma.$transaction(async tx => {
-        await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
-        await this.lockIdpSession(tx, idpSid);
-        if (await tx.providerChange.findFirst({ where: { kind: 'end_session', target: idpSid, state: 'unknown' }, select: { id: true } })) return;
-        const last = await tx.providerChange.findFirst({ where: { kind: 'end_session', target: idpSid }, orderBy: { id: 'desc' }, select: { state: true } });
-        if (last?.state !== 'done') return;
-        await tx.idpSessionEnd.updateMany({ where: { idpSid, confirmedAt: null }, data: { confirmedAt: new Date() } });
-      }, { maxWait: 4000, timeout: 8000 });
-    } catch {
-      // 확인하지 못했을 뿐이다: 표식은 미확인으로 남아 재시도 주기의 다음 요청이 다시 확인을 낸다.
-      this.storageWarning('idp_end_write');
-    }
-  }
-
-  /** 방금 끝낸 세션의 provider 종료(기록해 둔 요청)를 보낸다. 답을 기다리지 않고, 확인되지 않으면 표식이 주기를 부른다. */
-  private tellIdp(change: Change) {
-    this.background.tryRun('auth.tellIdp', async () => {
-      try {
-        await this.prisma.idpSessionEnd.updateMany({
-          where: { idpSid: change.target, confirmedAt: null },
-          data: { attempts: { increment: 1 }, nextAttemptAt: new Date(Date.now() + IDP_END_BACKOFF_MS[0]) },
-        });
-      } catch {
-        // 다음 시도 시각을 미루지 못했을 뿐이다 — 기록한 요청은 그래도 보낸다(보내지 않은 기록은 영영 답을 모르는 채 남는다).
-        this.storageWarning('idp_end_write');
-      }
-      await this.confirmIdpEnd(change, IDP_END_MS);
-    });
-  }
-
-  /**
-   * 재시도 주기의 종료 요청 하나를 보내기 전에 기록한다 — 그 sid의 잠금 안에서, 표식이 아직 미확인일 때만(깨우지 않는다).
-   * 관련 회원은 그 sid에 앞서 보낸 요청의 것이다.
-   */
-  private async retryEnd(idpSid: string, generation: number): Promise<Change | null> {
-    return this.prisma.$transaction(async tx => {
-      await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
-      await this.lockIdpSession(tx, idpSid);
-      const mark = await tx.idpSessionEnd.findUnique({ where: { idpSid }, select: { confirmedAt: true } });
-      if (!mark || mark.confirmedAt) return null;
-      const last = await tx.providerChange.findFirst({
-        where: { kind: 'end_session', target: idpSid }, orderBy: { id: 'desc' }, select: { sub: true } });
-      return this.recordEnd(tx, idpSid, last?.sub ?? null, generation);
-    }, { maxWait: 4000, timeout: 8000 });
-  }
-
-  /**
-   * 미확인 표식의 provider 종료를 다시 청한다. 주기마다는 기한(nextAttemptAt)이 된 것만, 프로세스 시작 때는 미확인 전부.
-   * 여러 인스턴스가 같은 행을 보면 시도 횟수를 조건으로 한 갱신이 하나만 통과시킨다. 실패하면 다음 기한이 늦어질 뿐 행은 남는다.
-   * 새 요청은 표식을 확인할 기회를 줄 뿐, 답을 모르는 앞선 요청을 덮지 않는다(그것이 남으면 표식은 확인되지 않는다). 이
-   * 프로세스가 보낸 요청이 아직 답을 기다리는 sid는 이번에는 넘어간다(같은 sid에 요청을 쌓지 않는다).
-   */
-  private async resumeIdpEnds(all: boolean) {
-    if (this.resuming) return;
-    this.resuming = true;
-    try {
-      const due = await this.prisma.idpSessionEnd.findMany({
-        where: all ? { confirmedAt: null } : { confirmedAt: null, nextAttemptAt: { lte: new Date() } },
-        orderBy: { nextAttemptAt: 'asc' },
-        take: 50,
-      });
-      for (const row of due) {
-        if (this.flying.has('end_session:' + row.idpSid)) continue;
-        const wait = IDP_END_BACKOFF_MS[Math.min(row.attempts, IDP_END_BACKOFF_MS.length - 1)];
-        const { count } = await this.prisma.idpSessionEnd.updateMany({
-          where: { idpSid: row.idpSid, confirmedAt: null, attempts: row.attempts },
-          data: { attempts: row.attempts + 1, nextAttemptAt: new Date(Date.now() + wait) },
-        });
-        if (count !== 1) continue;
-        let change: Change | null;
-        try { change = await this.retryEnd(row.idpSid, row.attempts + 1); }
-        catch { this.storageWarning('idp_end_write'); continue; }
-        if (change) await this.confirmIdpEnd(change, IDP_END_MS);
-      }
-    } catch {
-      this.storageWarning('idp_end_cycle');
-    }
-    finally { this.resuming = false; }
-  }
-
-  /**
-   * Bearer 경로의 표식 검사(가드가 부른다). 제품 세션 행을 지워도 이미 발급된 access token은 만료까지 서명이 유효하다 —
-   * 끝내기로 한 SSO의 인증(표식이 덮는 인증, 콜백과 같은 판정)의 사용자 토큰은 여기서 거절한다. `sid`가 없는 토큰(서비스
-   * 계정·gateway)은 대상이 아니다.
-   * 이 길에는 흐름이 없어 확인된 종료와 **같은 초**의 인증은 auth_time만으로 앞뒤를 가리지 못한다. 그 인증을 콜백이 이미 받아
-   * 들였으면 받는다: 표식이 있는 sid의 제품 세션은 종료(그 sid의 행을 모두 지운다) 뒤에 콜백이 덮지 않는다고 판정한 인증으로만
-   * 생기므로, 그 sid에 살아 있는 세션의 토큰과 사람·auth_time이 같으면 같은 인증이다.
-   */
-  async refuseEndedIdpSession(claims: Record<string, any>, raw: string, db: any = this.prisma): Promise<void> {
-    const idpSid = this.idpSidOfClaims(claims);
-    if (!idpSid) return;
-    const mark: { confirmedAt: Date | null } | null = await this.storage('idp_end_read', () =>
-      db.idpSessionEnd.findUnique({ where: { idpSid }, select: { confirmedAt: true } }));
-    if (!mark || !this.markCovers(mark, claims)) return;
-    const authTime = Number(claims.auth_time);
-    if (mark.confirmedAt && Number.isFinite(authTime) && authTime === Math.floor(mark.confirmedAt.getTime() / 1000)) {
-      const admitted: { accessToken: string }[] = await this.storage('idp_end_read', () => db.authSession.findMany({
-        where: { idpSid, sub: String(claims.sub) }, select: { accessToken: true },
-      }));
-      if (admitted.some(row => row.accessToken === raw)) return;
-    }
-    throw this.ended('인증 세션이 없습니다');
+  /** Log out·만료·수거: 답은 provider를 기다리지 않는다(U5S-REQ-05). */
+  private tellIdp(idpSid: string) {
+    this.background.tryRun('auth.tellIdp', () => this.endIdpOnce(idpSid));
   }
 
   // ── 로그인 시작 ──
 
   /**
-   * 로그인 흐름 하나를 시작하고 인증 서버의 주소를 준다. pending은 흐름마다 따로 둔다 — 다른 탭이 시작한 로그인이 이 탭의
-   * 흐름을 덮지 않는다. 이 브라우저가 받아 둔 복구 의도(살아 있는 다른 흐름의 사유)는 평범한 시작이 낮추지 못한다: 그동안의
-   * 평범한 로그인·가입 시작은 같은 의도의 probe 단계로 시작한다.
+   * 흐름 하나에 서명한 pending 쿠키 하나. 로그인은 언제나 prompt=login으로 자격 입력을 요구하고(살아 있는 SSO로 폼 없이
+   * 돌아오지 않는다), 가입은 prompt=create의 가입 폼이다.
    */
-  private startFlow(
-    req: any, res: any, want: { phase: Phase; reason: Reason | null; prompt: 'login' | 'create' | null; restarts?: number; memberSub?: string; rightsVersion?: number },
-  ): string {
-    const flows = this.pendingFlows(req);
-    let { phase, reason, prompt } = want;
-    if (phase === 'plain') {
-      const intent = flows.find(flow => flow.live && flow.pending!.reason);
-      if (intent) {
-        phase = 'probe';
-        reason = intent.pending!.reason;
-      }
-    }
-    if (phase !== 'plain' && !prompt) prompt = 'login';
-    // 서명이 맞지 않는 쿠키는 치우고, 상한을 넘으면 가장 오래된 흐름부터 치운다.
-    const known = flows.filter(flow => flow.pending).sort((a, b) => a.pending!.issuedAt - b.pending!.issuedAt);
-    for (const flow of [...flows.filter(flow => !flow.pending), ...known.slice(0, Math.max(0, known.length - (PENDING_LIMIT - 1)))])
-      this.expirePending(res, flow.name);
-
-    const restarts = want.restarts ?? 0;
+  private startFlow(res: any, register = false): string {
     const verifier = randomBytes(32).toString('base64url');
-    const state = randomBytes(32).toString('base64url') + (restarts > 0 ? RESTARTED : '');
+    const state = randomBytes(32).toString('base64url');
     const challenge = createHash('sha256').update(verifier).digest('base64url');
-    const pending: PendingLogin = { state, verifier, issuedAt: Date.now(), phase, reason, prompt, restarts, memberSub: want.memberSub, rightsVersion: want.rightsVersion };
+    const pending: PendingLogin = { state, verifier, issuedAt: Date.now() };
     this.appendCookie(res, `${this.pendingName(state)}=${encodeURIComponent(this.signPending(pending))}; Path=/api/auth; `
-      + `HttpOnly; Secure; SameSite=Lax; Max-Age=${PENDING_COOKIE_SECONDS}`);
-
-    const query = new URLSearchParams({
-      client_id: 'kin-bff',
-      response_type: 'code',
-      scope: 'openid profile email',
-      redirect_uri: this.redirectUri(),
-      state,
-      nonce: state,
-      code_challenge: challenge,
-      code_challenge_method: 'S256',
-    });
-    // probe는 화면 없이 SSO만 알아낸다. fresh는 자격 입력을 요구한다(앞의 SSO가 끝났으므로 이름을 칠 수 있는 폼이다).
-    if (phase === 'probe') query.set('prompt', 'none');
-    else if (prompt) query.set('prompt', prompt);
+      + `HttpOnly; Secure; SameSite=Lax; Max-Age=${PENDING_VALID_MS / 1000}`);
+    const query = new URLSearchParams({ client_id: 'kin-bff', response_type: 'code', scope: 'openid profile email',
+      redirect_uri: this.redirectUri(), state, nonce: state, code_challenge: challenge, code_challenge_method: 'S256', prompt: register ? 'create' : 'login' });
     return `${this.externalOidc('/auth')}?${query}`;
   }
 
-  /**
-   * 링크로 여는 로그인·가입(GET). **아무 세션도 끝내지 않는다** — 결속 없는 GET이 세션을 끝내면 다른 문서가 쓰고 있는
-   * 로그인이 링크 한 번에 사라진다. 살아 있는 세션의 쿠키가 있으면 흐름을 시작하지 않고 null을 준다(그 세션을 바꾸는
-   * 로그인은 아래의 POST가 한다). 주소의 매개변수는 의도를 정하지 못한다: 재인증 의도는 CSRF로 보호된 POST만 시작한다.
-   */
+  /** 결속 없는 링크는 다른 문서가 쓰는 세션을 끝내지 않는다. */
   async beginLogin(req: any, res: any, prompt?: 'create'): Promise<string | null> {
     if (await this.hasSession(req)) return null;
-    return this.startFlow(req, res, { phase: 'plain', reason: null, prompt: prompt ?? null });
+    return this.startFlow(res, prompt === 'create');
   }
 
-  /**
-   * 재인증 의도의 로그인 시작(POST, R2). 사람이 떠나려 했거나(끝내지 못한 로그아웃), 떠났는지 알 수 없거나(저장소 불신·
-   * 기록 손상), 계정을 바꾸려 할 때 랜딩이 그 사유를 밝혀 보낸다. 쿠키가 없어도 받는다 — 의도는 주소가 아니라 이 요청과
-   * 서버의 pending 상태에 있다.
-   */
+  /** 종료 원인은 접속기록에만 쓰며 다음 로그인 흐름으로 전파하지 않는다. */
   async beginReauthentication(req: any, res: any, body: any): Promise<string> {
-    this.requireCsrf(req);
-    const reason = body?.intent === 'reauthenticate' && LOGIN_REASONS.includes(body?.reason) ? body.reason as Reason : null;
-    if (!reason)
-      throw authRefusal(400, 'AUTH_LOGIN_INTENT_INVALID', '로그인 시작 요청의 의도(intent·reason)가 올바르지 않습니다');
-    return this.beginSensitive(req, res, reason, 'login');
+    if (body?.intent !== 'reauthenticate')
+      throw authRefusal(400, 'AUTH_LOGIN_INTENT_INVALID', '로그인 시작 요청의 의도가 올바르지 않습니다');
+    switch (body.reason) {
+      case 'switch_account': return this.beginSensitive(req, res, 'account_switch');
+      case 'logout_unfinished': return this.beginSensitive(req, res, 'logout');
+      case 'storage_untrusted': return this.beginSensitive(req, res, 'reauthentication', 'storage-untrusted');
+      case 'record_unreadable': return this.beginSensitive(req, res, 'reauthentication', 'record-unreadable');
+      default: throw authRefusal(400, 'AUTH_LOGIN_INTENT_INVALID', '로그인 시작 사유가 올바르지 않습니다');
+    }
   }
 
-  /**
-   * 가입 진입(POST). 가입은 계정 바꾸기가 아니다: 살아 있는 세션이 있으면 같은 종료 절차로 끝내되 원인은 재인증
-   * (trigger=register)이고, 끝낼 세션이 없으면 접속기록 없이 가입 화면으로 간다.
-   */
   async beginBoundRegister(req: any, res: any): Promise<string> {
-    this.requireCsrf(req);
-    return this.beginSensitive(req, res, 'register', 'create');
+    return this.beginSensitive(req, res, 'reauthentication', 'register');
   }
 
-  /**
-   * 쿠키의 제품 세션이 살아 있으면: 이 요청이 **그 세션을 본 문서**의 것인지 결속으로 확인하고(다르면 아무것도 끝내지 않고
-   * 거절 — 다른 탭이 그사이 새로 로그인한 세션을 옛 문서가 끝내지 못한다), 그 세션을 감사와 함께 끝낸 뒤 provider 종료를
-   * **기다린다**. 확인되면 곧바로 fresh 단계의 주소를 준다. 확인되지 않으면 503이다 — 제품 세션은 이미 끝났고 표식이
-   * 남아 그 SSO로는 들어오지 못하며, 같은 버튼을 다시 누르면 된다. 종료 자체를 확인하지 못하면(409·저장소 실패) 새
-   * pending도 이동도 만들지 않는다.
-   * 끝낼 제품 세션이 없으면: 재인증 의도는 probe 단계로 시작하고(그 단계가 이 브라우저의 SSO를 알아내 끝낸다), 가입은
-   * 평범하게 시작한다.
-   */
-  private async beginSensitive(req: any, res: any, reason: Reason, prompt: 'login' | 'create'): Promise<string> {
+  private async beginSensitive(req: any, res: any, cause: EndCause, trigger?: ReauthenticationTrigger): Promise<string> {
     const sid = this.sessionId(req);
-    let session: Session | null = null;
     if (sid) {
-      // 다른 세션의 결속은 읽기 전에 거절한다. 결속 없는 요청은 끝낼 세션이 정말 있을 때만 거절한다 — 세션이 이미 없으면
-      // (401을 받은 문서는 식별값을 모른다) 끝낼 것이 없으므로 결속을 요구할 이유도 없다.
       const binding = this.binding(req, sid);
       if (binding === 'mismatch') throw this.bindingMismatch();
-      session = await this.readSession(sid);
-      if (session && binding === 'missing') throw this.bindingMissing();
+      const session = await this.readSession(sid);
+      if (session) {
+        if (binding === 'missing') throw this.bindingMissing();
+        const end = await this.endByRequest(sid, session, cause, this.requestIp(req), trigger, authRequestSurface(req));
+        // 주소를 주기 전에 그 provider 종료를 한 번 기다린다: 끝나지 않은 SSO 위의 prompt=login은 다음 사람의 폼을 앞 의사의
+        // 이름에 고정한다(D720). 확인되지 않아도 주소는 준다 — 그 폼도 자격 입력 없이는 세션을 만들지 않는다.
+        if (end.ended && end.idpSid) await this.endIdpOnce(end.idpSid);
+      }
     }
-    if (!sid || !session)
-      return this.startFlow(req, res, reason === 'register'
-        ? { phase: 'plain', reason: null, prompt } : { phase: 'probe', reason, prompt });
-    const end = await this.endByRequest(sid, session, REASON_CAUSE[reason], this.requestIp(req), reason, authRequestSurface(req));
-    // 그사이 다른 요청이 끝냈거나 provider 세션을 모르는 행이면, 남아 있을지 모르는 SSO는 probe 단계가 알아내 끝낸다.
-    if (!end.ended || !end.idpSid) return this.startFlow(req, res, { phase: 'probe', reason, prompt });
-    if (!end.change || !await this.confirmIdpEnd(end.change, IDP_END_WAIT_MS))
-      throw authRefusal(503, 'AUTH_IDP_END_UNCONFIRMED',
-        '이전 로그인의 종료를 인증 서버에서 확인하지 못했습니다. 잠시 뒤 다시 시도해 주십시오');
-    return this.startFlow(req, res, { phase: 'fresh', reason, prompt });
+    return this.startFlow(res, trigger === 'register');
   }
 
   async hasSession(req: any): Promise<boolean> {
@@ -1075,10 +745,6 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private proofHash(proof: string): string {
-    return createHash('sha256').update('kin-entry-proof:' + proof).digest('base64url');
-  }
-
   private async exchangeCode(code: string, verifier: string): Promise<any | null> {
     try {
       const response = await fetch(this.internalOidc('/token'), {
@@ -1101,70 +767,20 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /**
-   * 로그인 콜백 — 제품 세션이 만들어지는 유일한 자리다.
-   *
-   * 콜백은 **자기 흐름만** 소비한다: 돌아온 state로 찾은 pending 하나만 지우고, 그것이 없거나 맞지 않으면 code를 교환하지도
-   * 세션을 만들지도 않는다. 그런 콜백은 살아 있는 세션이 있으면 업무 문서로 가고, 없으면 로그인을 한 번만 다시 시작한다
-   * (만료된 자기 흐름이면 그 의도를 지킨 채). 두 번째는 랜딩의 안내다.
-   *
-   * 성공한 로그인은 세션과 함께 **진입 증명**을 만든다(U5S-REQ-09): 콜백이 이동시키는 그 문서가 "방금 이 로그인을 한
-   * 문서"임을 한 번 보일 수 있는 값이다. 저장하는 것은 해시와 만료뿐이고, 원문은 이동 주소의 fragment로만 나간다.
-   */
+  /** 자기 pending만 소비하고 세션과 성공 기록을 같은 transaction으로 만든다. */
   async finishCallback(req: any, res: any, query: { code?: string; state?: string; error?: string }): Promise<CallbackResult> {
     const { code, state, error } = query;
     if ((!code || !state) && await this.hasSession(req)) return { kind: 'work' };
     const flows = this.pendingFlows(req);
-    const found = state ? flows.find(flow => flow.name === this.pendingName(state)) : undefined;
-    const own: Flow | null = found?.pending && found.pending.state === state ? found as Flow : null;
+    const own = state ? flows.find(item => item.name === this.pendingName(state) && item.pending?.state === state) : undefined;
     if (own) this.expirePending(res, own.name);
-
-    if (!own?.live) {
-      // 이 서버가 시작해 아직 통하는 로그인이 이 브라우저에 있을 때만 실패 행을 남긴다(익명 콜백은 행을 만들지 못한다).
-      const started = flows.some(flow => flow.live);
-      if (error) {
-        if (started) await this.loginFailureRow(req, 'provider_error', null);
-        return { kind: 'landing', error };
-      }
-      if (!code) {
-        if (started) await this.loginFailureRow(req, 'no_code', null);
-        return { kind: 'landing', error: 'stale' };
-      }
-      if (!own && started) await this.loginFailureRow(req, 'state_mismatch', null);
-      if (await this.hasSession(req)) return { kind: 'work' };
-      if (own ? own.pending.restarts > 0 : String(state ?? '').endsWith(RESTARTED)) return { kind: 'landing', error: 'stale' };
-      const before = own?.pending;
-      return { kind: 'redirect', location: this.startFlow(req, res, before?.reason
-        ? { phase: 'probe', reason: before.reason, prompt: before.prompt, restarts: 1 }
-        : { phase: 'plain', reason: null, prompt: before?.prompt ?? null, restarts: 1 }) };
+    if (!own?.live || !own.pending) {
+      if (flows.some(item => item.live))
+        await this.loginFailureRow(req, error ? 'provider_error' : !code ? 'no_code' : 'state_mismatch', null);
+      return await this.hasSession(req) ? { kind: 'work' } : { kind: 'landing', error: 'stale' };
     }
-
     const flow = own.pending;
     if (error) {
-      // probe의 login_required: 이 브라우저에 끝낼 SSO가 없다. 마지막 단계로 간다.
-      if (flow.phase === 'probe' && error === 'login_required')
-        return { kind: 'redirect', location: this.startFlow(req, res,
-          { phase: 'fresh', reason: flow.reason, prompt: flow.prompt, restarts: flow.restarts }) };
-      if (flow.phase === 'probe') {
-        /**
-         * probe의 그 밖의 답(interaction_required·consent_required 같은): 이 브라우저의 SSO를 알아내지 못했다 — 끝낼 SSO가
-         * 없다는 뜻도, 자격 없이 들어가도 된다는 뜻도 아니다. 한 번 다시 묻는다(일시적인 답이면 이번에 code나 login_required가
-         * 온다). 또 그러면 fresh 단계(prompt=login)로 간다: 자격을 실제로 입력해야만 세션이 생기므로 R2가 지켜지고, 랜딩에서
-         * 같은 답만 되풀이하는 막다른 길이 없다(지휘자 결정, 수정 1회차). 평범한 로그인으로 낮추지 않고, probe 단계는 어떤
-         * 답에도 제품 세션을 만들지 않는다. 인증 서버 자체가 답하지 못한 것(temporarily_unavailable·server_error)만 랜딩의
-         * 문장이다 — 그때는 그 의도를 실은 흐름 하나를 남겨 그동안의 평범한 시작도 probe로 간다.
-         */
-        if (flow.restarts === 0)
-          return { kind: 'redirect', location: this.startFlow(req, res,
-            { phase: 'probe', reason: flow.reason, prompt: flow.prompt, restarts: 1 }) };
-        if (!PROVIDER_DOWN.includes(error))
-          return { kind: 'redirect', location: this.startFlow(req, res,
-            { phase: 'fresh', reason: flow.reason, prompt: flow.prompt, restarts: flow.restarts }) };
-        await this.loginFailureRow(req, 'provider_error', null);
-        this.startFlow(req, res, { phase: 'probe', reason: flow.reason, prompt: flow.prompt, restarts: flow.restarts });
-        return { kind: 'landing', error: 'sso_unidentified' };
-      }
-      // 실패 행의 error 원문은 행에 싣지 않는다(OP-2 A).
       await this.loginFailureRow(req, 'provider_error', null);
       return { kind: 'landing', error };
     }
@@ -1193,33 +809,6 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       return { kind: 'landing', error: 'login_failed' };
     }
     const ip = this.requestIp(req);
-    // 받아 둔 복구 의도는 먼저 시작해 둔 평범한 흐름의 콜백도 낮추지 못한다: 그 콜백은 probe로 다뤄진다.
-    const intent = flow.reason ? flow
-      : flow.phase === 'plain' ? flows.find(other => other.live && other.name !== own.name && other.pending!.reason)?.pending ?? null
-        : null;
-    if (flow.phase === 'probe' || (flow.phase === 'plain' && intent)) {
-      const reason = (flow.reason ?? intent?.reason)!;
-      let change: Change | null | 'ended';
-      try {
-        change = await this.withAccessRecords({ issuer: String(payload.iss), subject: String(payload.sub),
-          actor: this.identity(payload, String(payload.sub)).actor }, async (tx, record, user) => {
-          await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
-          await this.lockIdpSession(tx, idpSid!);
-          const mark = await tx.idpSessionEnd.findUnique({ where: { idpSid } });
-          if (mark?.confirmedAt && this.markCovers(mark, payload, flow)) return 'ended' as const;
-          return this.endRows(tx, record, user, idpSid, REASON_CAUSE[reason], ip, authRequestSurface(req), reason, String(payload.sub));
-        }, { maxWait: 4000, timeout: 8000 });
-      } catch {
-        this.storageWarning('end_transaction');
-        return { kind: 'landing', error: 'login_failed' };
-      }
-      if (change === 'ended') return { kind: 'landing', error: 'stale' };
-      // 끝났다는 답 없이 fresh로 가면 앞사람의 이름이 고정된 재인증 화면에 선다. 확인될 때까지 랜딩의 같은 버튼이 다시 한다.
-      if (!change || !await this.confirmIdpEnd(change, IDP_END_WAIT_MS)) return { kind: 'landing', error: 'end_unconfirmed' };
-      return { kind: 'redirect', location: this.startFlow(req, res,
-        { phase: 'fresh', reason, prompt: flow.prompt ?? intent?.prompt ?? null, restarts: flow.restarts }) };
-    }
-
     let observed: any;
     try { observed = await this.entryRights(String(payload.sub)); }
     catch (error: any) {
@@ -1236,13 +825,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         if (identity.sub !== payload.sub || identity.nonce !== flow.state ||
             typeof identity.auth_time !== 'number' || !Number.isSafeInteger(identity.auth_time))
           throw new Error('Invalid authentication identity');
-        if (flow.phase !== 'fresh' && !this.authenticationAfter(identity.auth_time, observed.newAuthAfter))
-          return { kind: 'redirect', location: this.startFlow(req, res, { phase: 'fresh', reason: flow.reason,
-            prompt: 'login', memberSub: String(payload.sub), rightsVersion: observed.version }) };
-        // The member/issuedAt clauses also defend against a mismatched fresh-flow cookie, beyond the time/version gates.
-        if (flow.phase === 'fresh' && (!this.authenticationAfter(identity.auth_time, observed.newAuthAfter) ||
-            (flow.memberSub !== undefined && (flow.memberSub !== payload.sub || flow.rightsVersion !== observed.version)) ||
-            identity.auth_time < Math.floor(flow.issuedAt / 1000) || flow.issuedAt < observed.newAuthAfter.getTime()))
+        if (!this.authenticationAfter(identity.auth_time, observed.newAuthAfter))
           throw new Error('Fresh authentication required');
       } catch {
         await this.loginFailureRow(req, 'token_invalid', this.identity(payload, String(payload.sub)));
@@ -1253,42 +836,21 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     const who = { ...this.identity(payload, String(payload.sub)), institution: observed.institution };
     const roles = rightsAllow(observed) ? observed.roles : [];
     // A single institution and a clinician role meet member approval; gateway identities are not members.
-    // Deliver the proof to its consumer, since a second document cannot reuse a consumed proof.
     const document = who.institution !== null && clinicianOnly(roles) && !roles.includes('gateway')
       && !(typeof payload.azp === 'string' && payload.azp.startsWith('gw-')) ? 'clinician.html' : 'main.html';
     const sid = randomBytes(32).toString('base64url');
     const auditRef = 'authref:' + randomUUID();
-    const proof = randomBytes(32).toString('base64url');
     const detail = JSON.stringify({ institution: who.institution, ip, dataSubject: null, outcome: 'success' });
-    let outcome: 'created' | 'blocked' | 'expired' | 'isolated';
-    let blocked: Change | null = null;
-    let alreadyEnded = false;
+    let outcome: 'created' | 'expired' | 'isolated';
     try {
-      /**
-       * 표식 검사와 세션 생성은 그 provider 세션의 잠금 안에서 한 번에 한다: 교환과 잠금 사이에 완료된 Log out은 표식으로
-       * 남아 여기서 막히고, 이 생성이 먼저면 뒤의 Log out이 이 행까지 지운다. 먼저 검증한 토큰을 무기한 믿지 않는다 —
-       * 잠금을 얻은 뒤 토큰의 exp와 흐름의 기한을 다시 본다(확인된 표식의 보존 기한이 이 재검사에 기대어 선다).
-       * 회원의 권한과 차단은 우리 쪽 사실(MemberRights)로 본다 — 인증 서버의 관리 API를 이 길에서 읽지 않는다(그 API가 멈춰도
-       * 평소 로그인은 막히지 않고, 격리는 그 API의 답에 기대지 않는다). 사실의 쓰기와 같은 회원 잠금 안에서 읽는다.
-       * 세션 생성과 성공 행은 함께 commit되거나 함께 롤백된다.
-       */
+      // MemberRights and session creation share the member lock; the session and auth.login row commit together.
       outcome = await this.withAccessRecords({ issuer: String(payload.iss), subject: String(payload.sub), actor: who.actor }, async (tx, record, user) => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
-        await this.lockIdpSession(tx, idpSid!);
         const now = new Date();
         if (Number(payload.exp) * 1000 <= now.getTime() || now.getTime() - flow.issuedAt > PENDING_VALID_MS) return 'expired';
         await this.lockMember(tx, String(payload.sub));
         const rights = await this.entryRights(String(payload.sub), tx);
         if (rights.version !== observed.version) return 'isolated';
-        const mark = await tx.idpSessionEnd.findUnique({ where: { idpSid: idpSid! } });
-        if (mark && this.markCovers(mark, payload, flow)) {
-          if (mark.confirmedAt) alreadyEnded = true;
-          else {
-            await tx.idpSessionEnd.update({ where: { idpSid: idpSid! }, data: { nextAttemptAt: now } });
-            blocked = await this.recordEnd(tx, idpSid!, String(payload.sub), mark.attempts);
-          }
-          return 'blocked';
-        }
         const event = sessionAccessEvent(user, {
           action: AUTH_LOGIN,
           roles: rightsAllow(rights) ? rights.roles : [], rightsVersion: rights.version,
@@ -1303,8 +865,6 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
             refreshToken: tokens.refresh_token,
             atExpiresAt: new Date(Number(payload.exp) * 1000 - REFRESH_LEAD_MS),
             lastSeenAt: now,
-            entryProofHash: this.proofHash(proof),
-            entryProofExpiresAt: new Date(now.getTime() + ENTRY_PROOF_MS),
             idpSid,
           } });
           const projection = await tx.auditLog.create({ data: { at: now, actor: who.actor, action: AUTH_LOGIN, target: who.target, detail } });
@@ -1323,76 +883,11 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       await this.loginFailureRow(req, 'member_isolated', who);
       return { kind: 'landing', error: 'login_failed' };
     }
-    const again = { phase: flow.phase, reason: flow.reason, prompt: flow.prompt, restarts: flow.restarts + 1 };
-    if (outcome === 'expired')
-      return flow.restarts > 0 ? { kind: 'landing', error: 'stale' }
-        : { kind: 'redirect', location: this.startFlow(req, res, again) };
-    if (outcome === 'blocked') {
-      await this.loginFailureRow(req, 'idp_session_ended', who);
-      const confirmed = alreadyEnded || (!!blocked && await this.confirmIdpEnd(blocked, IDP_END_WAIT_MS));
-      if (!confirmed || flow.restarts > 0) return { kind: 'landing', error: 'end_unconfirmed' };
-      /**
-       * 확인된 종료 뒤의 다시 시작은 fresh 흐름(prompt=login)이다. 평범한 흐름으로 다시 시작하면 인증 서버가 그 브라우저의
-       * 끝난 SSO로 폼 없이 같은 인증을 다시 내줄 수 있고(부하 중 서버 쪽 종료가 퍼지는 동안), 그 code는 또 덮여 다음 사람이
-       * 폼을 보지 못한 채 end_unconfirmed 안내에 선다. fresh는 인증 서버에 자격 입력을 요구하고 markCovers가 그 code를 이
-       * 흐름이 시작된 초부터 받는다. 흐름의 시작(issuedAt)은 confirmedAt을 적고 읽은 뒤에 같은 시계로 정해지므로 확인된 종료보다
-       * 이르지 않다(시계가 뒤로 가면 markCovers는 confirmedAt부터 세므로 끝난 인증은 여전히 덮인다). 이 흐름에서도 덮이는 인증이
-       * 오면(restarts > 0) 그때가 진짜 막다른 길이다.
-       */
-      return { kind: 'redirect', location: this.startFlow(req, res,
-        { phase: 'fresh', reason: flow.reason, prompt: flow.prompt ?? 'login', restarts: 1 }) };
+    if (outcome === 'expired') {
+      await this.loginFailureRow(req, 'token_invalid', who);
+      return { kind: 'landing', error: 'stale' };
     }
-    // 자격을 입력한 이 로그인이 받아 둔 복구 의도를 채웠다: 그 의도를 실은 다른 흐름은 더 필요 없다.
-    if (flow.reason)
-      for (const other of flows)
-        if (other.name !== own.name && other.pending?.reason) this.expirePending(res, other.name);
-    return { kind: 'entered', sid, proof, document };
-  }
-
-  /**
-   * 진입 증명의 사용(POST auth/entry). 쿠키의 세션에 걸린 증명과 같고 만료 전일 때 **한 번만** 통한다 — 증명을 비우는
-   * 조건부 갱신과 접속기록 행이 한 commit이다. 다른 세션의 증명·만료된 증명·이미 쓴 증명은 같은 거절 하나로 답한다
-   * (어느 쪽인지 말하지 않는다). 답은 그 세션의 식별값뿐이다: 문서는 이 값으로 결속된 요청을 시작한다.
-   */
-  async enter(req: any): Promise<{ sessionId: string }> {
-    const sid = this.sessionId(req);
-    if (!sid) throw this.credentialsMissing();
-    this.requireCsrf(req);
-    const proof = req?.body?.proof;
-    if (typeof proof !== 'string' || !proof || proof.length > 128)
-      throw authRefusal(400, 'AUTH_ENTRY_INVALID', '진입 증명 형식이 잘못되었습니다');
-    const refused = () => authRefusal(403, 'AUTH_ENTRY_REFUSED', '로그인 진입 증명을 확인하지 못했습니다. 다시 로그인해 주십시오');
-    const hash = this.proofHash(proof);
-    const session = await this.readSession(sid);
-    if (!session?.entryProofHash || !session.entryProofExpiresAt) throw refused();
-    const stored = Buffer.from(session.entryProofHash), given = Buffer.from(hash);
-    if (stored.length !== given.length || !timingSafeEqual(stored, given)) throw refused();
-    const who = this.storedIdentity(session);
-    const detail = JSON.stringify({ institution: who.institution, ip: this.requestIp(req), dataSubject: null });
-    const consumed = await this.storage('entry_transaction', () => this.withAccessRecords(
-      { issuer: decodeJwt(session.accessToken).iss, subject: session.sub, actor: who.actor }, async (tx, record, user) => {
-      await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
-      await this.lockMember(tx, session.sub);
-      const rights = await this.sessionRights(session, tx);
-      const event = sessionAccessEvent(user, {
-        action: AUTH_ENTRY,
-        roles: rightsAllow(rights) ? rights.roles : [], rightsVersion: rights.version,
-        institution: session.institution, auditRef: session.auditRef, ip: this.requestIp(req), occurredAt: new Date().toISOString(),
-      });
-      // 만료는 DB에 닿는 순간에 다시 본다. 0행이면 그사이 쓰였거나 만료된 것이고, 행을 쓰지 않는다.
-      const recorded = await record(event, async () => {
-        const { count } = await tx.authSession.updateMany({
-          where: { sid, entryProofHash: hash, entryProofExpiresAt: { gt: new Date() } },
-          data: { entryProofHash: null, entryProofExpiresAt: null },
-        });
-        if (count !== 1) return null;
-        const projection = await tx.auditLog.create({ data: { at: new Date(event.occurredAt), actor: who.actor, action: AUTH_ENTRY, target: who.target, detail } });
-        return { kind: 'AuditLog', id: String(projection.id), version: null };
-      });
-      return recorded !== null;
-    }));
-    if (!consumed) throw refused();
-    return { sessionId: this.sessionRef(sid) };
+    return { kind: 'entered', sid, document };
   }
 
   async verifyAccessToken(raw: string): Promise<JWTPayload & Record<string, any>> {
@@ -1546,15 +1041,14 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * 로그아웃(U5S-REQ-05). 순서가 계약이다: **세션 폐기·표식·접속기록을 먼저 commit하고, 그 뒤에만 Keycloak에 알린다.**
+   * 로그아웃(U5S-REQ-05). 순서가 계약이다: **세션 폐기·접속기록을 먼저 commit하고, 그 뒤에만 Keycloak에 알린다.**
    * 예전 순서(Keycloak 먼저)에서는 Keycloak이 멈춘 동안 이 앱의 세션이 살아 있었고, 그 응답이 늦으면 종료 자체가
    * 시작되지 않았다. 이제 DB 실패·경쟁(409)은 "끝났다"는 답도 Keycloak 호출도 만들지 않고, 폐기 뒤의 Keycloak 실패·
    * 시간 초과·프로세스 재시작은 세션을 되살리거나 접속기록을 하나 더 만들지 못한다.
-   * 이미 없는 세션은 접속기록 없이 끝난 것으로 답한다. 결속과 CSRF는 가드가 토큰 갱신 없이 먼저 확인했다.
+   * 이미 없는 세션은 접속기록 없이 끝난 것으로 답한다. 결속은 가드가 토큰 갱신 없이 먼저 확인했다.
    *
    * 답은 Keycloak을 기다리지 않는다(개정 ⑨): 폐기와 접속기록이 commit되면 이 앱의 로그아웃은 끝난 것이고, 사람이
-   * "로그아웃 중"을 보고 있을 이유가 없다. provider 세션의 종료는 그 뒤에 청하고, 늦거나 실패하면 표식이 다시 청한다 —
-   * 그동안에도 표식이 그 SSO로의 재진입을 막는다.
+   * "로그아웃 중"을 보고 있을 이유가 없다. provider 세션의 종료는 그 뒤에 한 번 청한다.
    */
   async logout(req: any): Promise<void> {
     const sid: string | null = req?.sid ?? null;
@@ -1562,13 +1056,12 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     const session = await this.readSession(sid);
     if (!session) return;
     const end = await this.endByRequest(sid, session, 'logout', this.requestIp(req), undefined, 'POST auth/logout');
-    if (end.ended && end.change) this.tellIdp(end.change);
+    if (end.ended && end.idpSid) this.tellIdp(end.idpSid);
   }
 
   /**
    * 다시 오지 않는 세션의 수거. 관찰한 대상마다 이번 주기에 한 번만 조건부 종료하고 0행이면 건너뛴다.
    * 한 대상의 실패는 그 대상만 롤백하고 고정 분류만 남긴 채 다음 대상으로 간다(다음 주기가 다시 평가한다).
-   * 확인된 지 오래된 표식도 여기서 치운다 — 미확인 표식은 치우지 않는다.
    */
   private async sweep() {
     const cutoff = new Date(Date.now() - SESSION_IDLE_MS);
@@ -1586,21 +1079,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         this.storageWarning('sweep_target');
       }
     }
-    try {
-      await this.prisma.idpSessionEnd.deleteMany({
-        where: { confirmedAt: { lt: new Date(Date.now() - IDP_END_KEEP_MS) } },
-      });
-    } catch {
-      this.storageWarning('idp_end_write');
-    }
-    // 답으로 정해진 변경 호출의 기록도 같은 보존 뒤에 치운다. 답을 모르는(unknown) 기록은 나이로 치우지 않는다.
-    try {
-      await this.prisma.providerChange.deleteMany({
-        where: { kind: 'end_session', state: { in: ['done', 'void'] }, settledAt: { lt: new Date(Date.now() - IDP_END_KEEP_MS) } },
-      });
-    } catch {
-      this.storageWarning('change_write');
-    }
+
   }
 }
 

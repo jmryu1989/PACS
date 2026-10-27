@@ -1379,7 +1379,7 @@ class Wire:
                 headers = request.headers
                 entry = {"n": n, "ctx": self.ctx, "page": page, "sub": self.sub, "method": request.method, "path": split.path,
                          "query": parse_qs(split.query), "route": found[0], "target": found[1], "body": request.post_data,
-                         "csrf": headers.get("x-kin-csrf"), "authorization": "authorization" in headers,
+                         "authorization": "authorization" in headers,
                          "t": self.test.clock(), "wall": now_iso(), "state": "out", "status": None, "json": None, "done": None,
                          "failure": None}
                 self.entries.append(entry)
@@ -2368,7 +2368,7 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
 
     def har(self) -> dict:
         """HAR 1.2 of the critical result routes only, built from the recorder: no cookie, no Authorization, no login POST;
-        headers are content-type and x-kin-csrf only."""
+        headers are content-type only."""
         entries = []
         for sess in self.sessions:
             for entry in sess.wire.entries:
@@ -2377,8 +2377,7 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                 request = {"method": entry["method"], "url": self.stack.proxy + entry["path"] + ("?" + query if query else ""),
                            "httpVersion": "HTTP/1.1", "cookies": [], "queryString": [], "headersSize": -1,
                            "bodySize": len(entry["body"] or ""),
-                           "headers": ([{"name": "content-type", "value": "application/json"}] if entry["body"] else [])
-                           + ([{"name": "x-kin-csrf", "value": entry["csrf"]}] if entry["csrf"] else [])}
+                           "headers": ([{"name": "content-type", "value": "application/json"}] if entry["body"] else [])}
                 if entry["body"]:
                     request["postData"] = {"mimeType": "application/json", "text": entry["body"]}
                 text = json.dumps(entry["json"], ensure_ascii=False) if entry["json"] is not None else ""
@@ -2473,10 +2472,10 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
     # ── end-of-case facts (I-01, I-02, K1 premise) ──
 
     def written_through_pages(self) -> None:
-        """I-01: every critical result write of the case is a page POST of a cookie session: X-KIN-CSRF 1, no Authorization."""
+        """I-01: every critical result write of the case is a page POST of a cookie session: no Authorization."""
         for sess in self.sessions:
             for entry in self.posts(sess):
-                self.harness_ok(entry["csrf"] == "1" and not entry["authorization"],
+                self.harness_ok(not entry["authorization"],
                                 f"{sess.label}: a write without the cookie-session headers (#{entry['n']})")
 
     def distinct_messages(self) -> None:
@@ -2536,7 +2535,7 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                                 "S-03 requestId is a UUID v4")
                 self.harness_ok((body["expectedOwner"], body["recipientSub"], body["sourceVersion"], body["message"])
                                 == (s.owner, self.sub("clinician"), 1, m1), "S-03 body values")
-                self.harness_ok(post["csrf"] == "1" and not post["authorization"], "S-03 cookie session")
+                self.harness_ok(not post["authorization"], "S-03 cookie session")
                 applied = (post["json"] or {}).get("applied") or {}
                 self.server_eq((post["status"], (post["json"] or {}).get("replayed"), applied.get("action"), applied.get("from"),
                                 applied.get("to"), applied.get("revision")), (201, False, "create", None, "created", 1), "S-03 answer")
@@ -2640,7 +2639,7 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                 body = body_of(ack)
                 self.harness_ok(sorted(body) == ["expectedOwner", "requestId", "revision"]
                                 and (body["expectedOwner"], body["revision"]) == (p.owner, 1)
-                                and ack["csrf"] == "1" and not ack["authorization"], "A-01 ACK request")
+                                and not ack["authorization"], "A-01 ACK request")
                 applied = (ack["json"] or {}).get("applied") or {}
                 self.server_eq((ack["status"], (ack["json"] or {}).get("replayed"), applied.get("action"), applied.get("from"),
                                 applied.get("to"), applied.get("revision")), (201, False, "ack", "created", "acknowledged", 2), "A-01 answer")

@@ -7,8 +7,7 @@ const member = (req: any): Caller => ({ sub: req.sub, actor: req.actor, roles: r
   institution: req.institution ?? null, kind: req.kind ?? 'member' });
 
 /**
- * S7-U4a Clinical Context(판독의 패널, 계약 S7-U4p §9). 읽기 route 하나이고 쓰기·감사가 없다. app.module의 adminNoStore와
- * 전역 StudyAccessInterceptor 범위에 있다. 역할·기관·StudyAccess·서명 머리 판 규칙은 clinical-context.service.ts가 판정한다.
+ * S7-U4a Clinical Context(판독의 패널, 계약 S7-U4p §9). 읽기 route 하나이고 쓰기·감사가 없다. 공통 API 응답의 no-store 정책을 따른다. 역할·기관·StudyAccess·서명 머리 판 규칙은 clinical-context.service.ts가 판정한다.
  */
 @Controller()
 export class ClinicalContextController {

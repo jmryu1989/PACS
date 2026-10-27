@@ -397,6 +397,7 @@ window.kinViewerTechNote=function(services,session=null){
     const nativeLabels=new Map();
     function focusNativeToolbar(){
       if(!live()||window.top===window&&!owner||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'))return false;
+      if(window.kinViewerUXFocusTools)return window.kinViewerUXFocusTools();
       const targets=[...document.querySelectorAll('#root button[data-cy="Zoom"]')].filter(b=>!b.disabled&&b.getAttribute('aria-disabled')!=='true'&&b.getClientRects().length&&!b.closest('[inert],[hidden],[aria-hidden="true"]')&&getComputedStyle(b).visibility==='visible');
       if(targets.length!==1)return false;
       const target=targets[0];
@@ -512,7 +513,7 @@ window.kinViewerTechNote=function(services,session=null){
     async function raw(method,path,body){
       if(!live())throw new Error('영상창이 변경되었습니다');
       const controller=new AbortController();requests.add(controller);const timer=setTimeout(()=>controller.abort(),12000);
-      try{const r=await fetch('/api'+path,{method,credentials:'same-origin',cache:'no-store',signal:controller.signal,headers:{'X-KIN-CSRF':'1',...(owner?{'X-KIN-Subject':owner[1],'X-KIN-Institution':owner[0]}:{}),...(body===undefined?{}:{'Content-Type':'application/json'})},...(body===undefined?{}:{body:JSON.stringify(body)})});
+      try{const r=await fetch('/api'+path,{method,credentials:'same-origin',cache:'no-store',signal:controller.signal,headers:{...(owner?{'X-KIN-Subject':owner[1],'X-KIN-Institution':owner[0]}:{}),...(body===undefined?{}:{'Content-Type':'application/json'})},...(body===undefined?{}:{body:JSON.stringify(body)})});
         // Session termination is owned by the page transport and gate.
         if(!live()){if(path==='/me'&&r.ok)session?.sameAccount(await r.json().catch(()=>null));throw new Error('영상창이 변경되었습니다');}
         if(window.KinSessionTransport.refusal(r))throw window.KinSessionTransport.responseError(r,undefined,'메모 계정 또는 접근 권한을 확인하세요');
@@ -571,7 +572,7 @@ window.kinViewerTechNote=function(services,session=null){
     async function connect(){
       if(!live()||busy)return;
       const restore=document.activeElement===retry;busy=true;refresh();status.textContent='메모 연결 확인 중…';
-      try{await authenticate();if(live()){windowLink||=window.KinViewerWindows?.connect({owner:()=>owner,live});projection||=kinCreateVolumeProjection({services,selected:selectedStudy,live:()=>live()&&!!owner,allowed:()=>live()&&!!owner&&!document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'),host});orientation||=window.KinVolumeOrientation&&window.kinCreateVolumeOrientation?.({services,selected:selectedStudy,owner:()=>owner,live:()=>live()&&!!owner,allowed:()=>live()&&!!owner&&!document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'),host});toolbarPreferences||=window.kinCreateViewerToolbarPreferences({services,host,owner:()=>owner,live:()=>live()&&!!owner});arrangeTools();bindShortcuts();retry.hidden=true;status.textContent='선택한 영상 칸의 검사 메모 · '+window.KinWorkspaceShortcuts.display(shortcutMap.note);}}
+      try{await authenticate();if(live()){windowLink||=window.KinViewerWindows?.connect({owner:()=>owner,live});projection||=kinCreateVolumeProjection({services,selected:selectedStudy,live:()=>live()&&!!owner,allowed:()=>live()&&!!owner&&!document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'),host});orientation||=window.KinVolumeOrientation&&window.kinCreateVolumeOrientation?.({services,selected:selectedStudy,owner:()=>owner,live:()=>live()&&!!owner,allowed:()=>live()&&!!owner&&!document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'),host});arrangeTools();bindShortcuts();retry.hidden=true;status.textContent='선택한 영상 칸의 검사 메모 · '+window.KinWorkspaceShortcuts.display(shortcutMap.note);}}
       catch(e){if(live()){retry.hidden=false;status.textContent='메모를 연결하지 못했습니다. 다시 시도하세요.';}}
       finally{busy=false;refresh();if(restore&&live()){const target=retry.hidden?(host.hidden?dock?.querySelector('nav button[aria-controls="kin-viewer-layout"]'):button):retry;target?.focus({preventScroll:true});}}
     }

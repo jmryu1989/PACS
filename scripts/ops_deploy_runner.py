@@ -109,7 +109,7 @@ def finish(adapter, plan, lease, status, stage, *, safe):
     try:
         adapter.record(dict(result))
     except Exception:
-        lease.retained = True
+        lease.retain()
         result = event_for(plan, "NEEDS_ATTENTION", "record", True, "pending")
         try:
             adapter.notify_failure(dict(result))
@@ -126,9 +126,12 @@ def finish(adapter, plan, lease, status, stage, *, safe):
             try:
                 adapter.record(dict(result))
             except Exception:
-                lease.retained = True
+                lease.retain()
                 return event_for(plan, "NEEDS_ATTENTION", "record", True, "pending")
-    lease.retained = not safe
+    if safe:
+        lease.retained = False
+    else:
+        lease.retain()
     return result
 
 
@@ -141,7 +144,7 @@ def run_locked(plan, adapter, lease):
     except Exception:
         return finish(adapter, plan, lease, "REJECTED", stage, safe=True)
 
-    lease.retained = True
+    lease.retain()
     try:
         adapter.record(event_for(plan, "STARTED", "apply", True))
     except Exception:

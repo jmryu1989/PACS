@@ -113,7 +113,6 @@ class Browser:
         self.headers = {}
         # S7-U5: the id of the login session this profile's document saw (GET me); sent as X-KIN-Session on /api calls.
         self.session = None
-        self.proof = None
         if real_ip:
             self.headers["X-Real-IP"] = real_ip
         if forwarded:
@@ -223,10 +222,6 @@ class AuthAuditLive(unittest.TestCase):
                  'SET LOCAL session_replication_role = replica; '
                  f'DELETE FROM "MemberRights" WHERE sub=\'{user_id}\'; '
                  'SET LOCAL session_replication_role = origin; COMMIT;')
-        # The end marks of this run's own provider sessions (ids read from this run's own session rows).
-        owned = [value for value in cls.provider_sessions if re.fullmatch(r"[0-9A-Za-z-]{8,64}", value)]
-        if owned:
-            psql('DELETE FROM "IdpSessionEnd" WHERE "idpSid" IN (' + ",".join(f"'{value}'" for value in owned) + ");")
         ids = [int(i) for i in getattr(cls, "failure_ids", [])]
         if ids:
             psql(past_audit_guard('DELETE FROM "AuditLog" WHERE id IN (' + ",".join(map(str, ids)) + ");"))
@@ -303,11 +298,9 @@ class AuthAuditLive(unittest.TestCase):
             server_window.append(self.server_time(browser))
         self.assertIsNotNone(browser.sid())
         self.secret("sid", browser.sid())
-        # S7-U5: the single-use entry proof rides in the fragment; the document then learns its session id from its
+        # The non-secret fragment marks explicit login; the document learns its session id from its
         # bootstrap (the one cookie request without a binding; a member awaiting approval gets the id with the 403).
-        browser.proof = urlparse(headers.get("Location", "")).fragment.partition("kin-entry=")[2] or None
-        self.assertTrue(browser.proof, "the callback hands the login's entry proof in the fragment")
-        self.secret("proof", unquote(browser.proof))
+        self.assertEqual(urlparse(headers.get('Location', '')).fragment, 'kin-login')
         browser.session = None
         _, _, me = browser.call("GET", "/api/me")
         browser.session = json.loads(me).get("sessionId")
@@ -399,19 +392,9 @@ class AuthAuditLive(unittest.TestCase):
         self.assertTrue(secret_hits([json.dumps({"x": browser.sid()})], self.secrets))
         self.assertFalse(secret_hits([json.dumps({"x": "clean"})], self.secrets))
         self.check_rows("AL-01", rows)
-        # S7-U5 (U5S-REQ-09): the login is entered once with its proof - the answer is the session id the bootstrap
-        # gives, one auth.entry row is recorded with the login's institution, and the same proof does not enter again.
-        entry = lambda: browser.call("POST", "/api/auth/entry", data=json.dumps({"proof": unquote(browser.proof)}).encode("utf-8"),
-                                     headers={"X-KIN-CSRF": "1", "Content-Type": "application/json"})
-        status, _, body = entry()
-        self.assertEqual((status, json.loads(body)), (200, {"sessionId": browser.session}))
-        entered = psql(f'SELECT detail FROM "AuditLog" WHERE target=\'{self.members["ma"]["id"]}\' AND action=\'auth.entry\' ORDER BY id;')
-        self.assertEqual([json.loads(line) for line in entered],
-                         [{"institution": self.groups["A"][0], "ip": self.expected_ip, "dataSubject": None}])
-        self.assertFalse(secret_hits(entered, self.secrets))
-        status, _, body = entry()
-        self.assertEqual((status, json.loads(body).get("code")), (403, "AUTH_ENTRY_REFUSED"))
-        self.assertEqual(len(psql(f'SELECT id FROM "AuditLog" WHERE target=\'{self.members["ma"]["id"]}\' AND action=\'auth.entry\';')), 1)
+        status, _, body = browser.call("GET", "/api/me")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["sessionId"], browser.session)
         self.assertEqual(204, self.logout(browser))
 
     def test_02_the_address_is_the_proxys_not_a_forwarded_header(self):
@@ -428,11 +411,8 @@ class AuthAuditLive(unittest.TestCase):
     def test_03_logout_row_csrf_and_absence(self):
         browser = self.login("ma")
         before = len(self.rows_of("ma"))
-        self.assertEqual(403, self.logout(browser, csrf=False))
-        self.assertEqual(before, len(self.rows_of("ma")), "a refused logout writes nothing")
-        self.assertEqual(psql(f'SELECT count(*) FROM "AuthSession" WHERE sub=\'{self.members["ma"]["id"]}\';'), ["1"])
         sid = browser.sid()
-        self.assertEqual(204, self.logout(browser))
+        self.assertEqual(204, self.logout(browser, csrf=False))
         self.assertEqual(self.ends("ma")[-1], ("auth.logout", "logout", self.groups["A"][0], self.expected_ip))
         self.assertEqual(psql(f'SELECT count(*) FROM "AuthSession" WHERE sub=\'{self.members["ma"]["id"]}\';'), ["0"])
         # The same logout again (S7-U5): without the session id it is refused as a request (428, nothing ended or
@@ -482,8 +462,6 @@ class AuthAuditLive(unittest.TestCase):
             self.assertEqual(json.loads(self.rows_of("ma")[-1]["detail"]).get("trigger"), trigger, label)
             self.assertEqual(before + 1, len(self.rows_of("ma")), label + ": one row")
             self.assertEqual(psql(count), ["0"], label)
-            mark = psql(f'SELECT cause || E\'\\t\' || ("confirmedAt" IS NOT NULL)::text FROM "IdpSessionEnd" WHERE "idpSid"=\'{browser.provider}\';')
-            self.assertEqual(mark, [cause + "\ttrue"], label + ": the provider session is marked and its end confirmed")
             if kind == "login":
                 # The provider has no session of this browser any more: the address shows the form with a name field.
                 status, _, page = browser.call("GET", location)
@@ -494,7 +472,7 @@ class AuthAuditLive(unittest.TestCase):
             status, _, answer = start()
             self.assertEqual(200, status, label)
             if kind == "login":
-                self.assertEqual(parse_qs(urlparse(json.loads(answer)["location"]).query).get("prompt"), ["none"], label)
+                self.assertEqual(parse_qs(urlparse(json.loads(answer)["location"]).query).get("prompt"), ["login"], label)
             self.assertEqual(before + 1, len(self.rows_of("ma")), label + ": no second row")
         # A start that declares no reason, or one the server does not know, starts nothing and ends nothing.
         browser = self.login("ma")
@@ -645,9 +623,9 @@ class AuthAuditLive(unittest.TestCase):
         answers = [("health", anonymous.call("GET", "/api/health")), ("me without a session", anonymous.call("GET", "/api/me")),
                    ("an unknown route", anonymous.call("GET", "/api/no-such-route-" + uuid.uuid4().hex)),
                    ("me", browser.call("GET", "/api/me")),
-                   ("a refused write", browser.call("POST", "/api/auth/logout", data=b""))]
+                   ("a refused write", browser.call("POST", "/api/auth/logout", data=b"", headers={"X-KIN-Session": "another-document"}))]
         self.assertEqual([(label, status) for label, (status, _, _) in answers],
-                         [("health", 200), ("me without a session", 401), ("an unknown route", 404), ("me", 200), ("a refused write", 403)])
+                         [("health", 200), ("me without a session", 401), ("an unknown route", 404), ("me", 200), ("a refused write", 409)])
         for label, (_, headers, _) in answers:
             self.assertEqual(headers.get("Cache-Control"), "no-store", label)
         # Every spelling that can reach Keycloak's account console (SEA-F05): a matrix parameter (Keycloak's path matching

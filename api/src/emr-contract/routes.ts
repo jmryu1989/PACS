@@ -38,9 +38,12 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
   { kinds: ['identity-access', 'authentication-session'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET me'] },
   { kinds: ['identity-access'], operation: 'read', causes: ['user-view', 'background-fetch'],
-    routes: ['GET colleagues', 'GET admin/users', 'GET study-access', 'GET admin/users/:id/study-access', 'GET reader-candidates', 'GET consultation-candidates', 'GET studies/:uid/critical-result-recipients'] },
+    routes: ['GET colleagues', 'GET admin/users', 'GET study-access', 'GET admin/users/:id/study-access', 'GET reader-candidates', 'GET consultation-candidates', 'GET studies/:uid/critical-result-recipients',
+      'GET admin/users/:id/signing-key'] },
+  // KEY-ADMIN: the change itself is recorded by ServerKeys.manage on server:doctor-key-management (INTERNAL_SURFACES).
   { kinds: ['identity-access'], operation: 'write', causes: ['user-view'],
-    routes: ['POST admin/users', 'PATCH admin/users/:id', 'POST admin/users/:id/reset-password', 'POST admin/users/:id/study-access'] },
+    routes: ['POST admin/users', 'PATCH admin/users/:id', 'POST admin/users/:id/reset-password', 'POST admin/users/:id/study-access',
+      'POST admin/users/:id/signing-key'] },
   { kinds: ['image', 'study-metadata'], operation: 'auth', causes: ['user-view', 'background-fetch', 'service-job'],
     routes: ['GET authz/dicom'] },
   { kinds: ['image', 'study-metadata'], operation: 'read', causes: ['user-view', 'background-fetch'],
@@ -148,8 +151,6 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['GET admin/agreements', 'GET studies/:uid/basis', 'GET transfers'] },
   { kinds: ['transfer-governance'], operation: 'write', causes: ['user-view'],
     routes: ['POST admin/agreements', 'PATCH admin/agreements/:id', 'POST studies/:uid/basis', 'POST studies/:uid/basis/:id/revoke', 'POST studies/:uid/transfers', 'POST transfers/:id/revoke'] },
-  { kinds: ['authentication-session'], operation: 'auth', causes: ['user-view', 'background-fetch'],
-    routes: ['POST auth/entry'] },
   { kinds: ['private-draft', 'report-evidence'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET studies/:uid/draft'] },
   // S9-U4b (contract S9-U4p 6, U4P3-06): the self-institution import writes originals, the study's metadata and per-file

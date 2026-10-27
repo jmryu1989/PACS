@@ -79,6 +79,86 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(result["deleted"], [daily(day) for day in range(1, 19)])
         self.assertEqual(self.root.names(), [daily(day) for day in range(19, 26)])
 
+    def custody(self, folder):
+        root = self.root.path.parent / "custody"
+        root.mkdir(exist_ok=True)
+        directory = root / folder.name
+        # capture_wrapping_custody creates each snapshot's copy private (0700); Linux rotation checks that mode.
+        directory.mkdir(mode=0o700)
+        key = directory / "wrap-0.key"
+        key.write_bytes(bytes(range(32)))
+        manifest = self.root.manifest(folder.name)
+        manifest["wrapping_custody"] = {"directory": str(directory), "files": {
+            "wrap": {"file": key.name, "sha256": ops.digest(key), "bytes": 32}}}
+        (folder / "manifest.json").write_text(json.dumps(manifest))
+        config = self.root.path.parent / "custody.json"
+        config.write_text(json.dumps({"backup_root": str(root)}))
+        self.enterContext(patch.dict(os.environ, {"KIN_EMR_WRAPPING_CUSTODY": str(config)}))
+        return directory
+
+    def test_rotation_retires_only_deleted_generations_custody(self):
+        old, held, current = [self.root.daily(daily(day)) for day in (1, 2, 3)]
+        old_keys, held_keys, current_keys = [self.custody(folder) for folder in (old, held, current)]
+        dry = self.rotate(keep=1, protect={held.name}, dry_run=True)
+        self.assertEqual(dry["would_delete"], [old.name])
+        self.assertTrue(old_keys.exists())
+        result = self.rotate(keep=1, protect={held.name})
+        self.assertEqual(result["deleted"], [old.name])
+        self.assertFalse(old_keys.exists())
+        self.assertTrue(held_keys.exists())
+        self.assertTrue(current_keys.exists())
+
+    def test_rotation_preserves_snapshot_if_custody_does_not_match(self):
+        old = self.root.daily(daily(1))
+        self.root.daily(daily(2))
+        keys = self.custody(old)
+        (keys / "wrap-0.key").write_bytes(b"changed")
+        result = self.rotate(keep=1)
+        self.assertEqual(result["status"], "preserved-stop")
+        self.assertTrue(old.exists())
+        self.assertTrue(keys.exists())
+        self.assertEqual(result["deleted"], [])
+
+    def test_unavailable_custody_configuration_preserves_the_same_dry_run_set(self):
+        old = self.root.daily(daily(1))
+        self.root.daily(daily(2))
+        keys = self.custody(old)
+        (self.root.path.parent / "custody.json").unlink()
+        dry = self.rotate(keep=1, dry_run=True)
+        result = self.rotate(keep=1)
+        self.assertEqual(dry["would_delete"], [])
+        self.assertEqual(result["deleted"], [])
+        self.assertEqual(result["status"], "preserved-stop")
+        self.assertTrue(old.exists())
+        self.assertTrue(keys.exists())
+
+    def test_thinning_retains_custody_for_the_remaining_database_dump(self):
+        old = self.root.daily(daily(1), checkpoint=True)
+        self.root.daily(daily(2))
+        keys = self.custody(old)
+        self.ledger(old.name)
+        result = self.rotate(keep=1)
+        self.assertEqual(result["thinned"], [old.name])
+        self.assertTrue((old / "kin.dump").exists())
+        self.assertTrue(keys.exists())
+        self.assertEqual(result["custody_deleted"], [])
+
+    def test_key_cleanup_io_failure_is_reported_as_incomplete(self):
+        old = self.root.daily(daily(1))
+        self.root.daily(daily(2))
+        keys = self.custody(old)
+        real_remove = ops.shutil.rmtree
+        def remove(path, *args, **kwargs):
+            if Path(path) == keys:
+                raise OSError("synthetic key-storage outage")
+            return real_remove(path, *args, **kwargs)
+        with patch.object(ops.shutil, "rmtree", side_effect=remove):
+            result = self.rotate(keep=1)
+        self.assertEqual(result["status"], "preserved-stop")
+        self.assertEqual(result["custody_cleanup_pending"], [str(keys)])
+        self.assertEqual(result["deleted"], [old.name])
+        self.assertTrue(keys.exists())
+
     def test_02_never_touches_release_sets_records_or_logs(self):
         for day in range(1, 12):
             self.root.daily(daily(day))
@@ -396,7 +476,7 @@ class RotationContracts(unittest.TestCase):
 
     def test_retained_operation_lease_never_authorizes_rotation(self):
         with ops.lock() as lease:
-            lease.retained = True
+            lease.retain()
             try:
                 with self.assertRaises(RuntimeError):
                     self.rotate()

@@ -2,7 +2,7 @@
  * S9-U4b part (c): Import DICOM, Download Originals and Resolve Unconfirmed (contract S9-U4p 4.4, 4.6, 4.8, 5.3, 6).
  *
  * D1606: only Files selected into a new operation in this live document can be dispatched, once. Responses change
- * observation, never send authority. Restored history is read-only. Downloads likewise have one first-grant opportunity.
+ * observation, never send authority. Restored history is read-only. This document starts each prepared download once.
  * Complete matching positive wire results confirm storage or supply; every other dispatched result stays unconfirmed.
  *
  * Every answer is applied through the work-context gate (work.commit) with the context its request left with, and only
@@ -808,7 +808,7 @@ window.KinStudyTransferLocal = function (app) {
     op.done = view.attempts.length ? view.attempts[view.attempts.length - 1].objectsComplete : 0;
   }
 
-  // One grant request and one native click, only in the creating document's still-current context.
+  // The existing issue request precedes the native click in this document; archive GET checks the session and owner.
   async function start(op) {
     if (!live(op) || !usable() || op.polling || op.inFlight || op.state !== 'prepared' || !firstDownloads.has(op)) return;
     firstDownloads.delete(op);

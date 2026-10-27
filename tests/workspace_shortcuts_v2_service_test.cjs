@@ -24,11 +24,45 @@ function fixture(){
   const prisma={workspaceShortcuts:{findUnique:args=>table(rows).findUnique(args)},async $transaction(run){const pending=clone(rows);const result=await run({workspaceShortcuts:table(pending)});rows=pending;return result;}};
   return {service:new PacsService(prisma,{},{},{},{}),snapshot:()=>clone(rows),fault:value=>{fault=value;},seed(bindings,revision=7,c=caller){rows.set(JSON.stringify(owner(c)),{institution:c.institution,subject:c.sub,bindings:clone(bindings),revision});}};
 }
+
+test('viewer toolbar and single keys roam per account without replacing workspace keys',async()=>{
+  const f=fixture(), viewerSettings={version:1,bar:['Zoom','Pan'],shortcuts:{Zoom:'j',Pan:'p',Length:null}};
+  const save=(value,revision,c=caller)=>f.service.saveWorkspaceShortcuts({expectedOwner:owner(c),revision,viewerSettings:value},c);
+  const first=await save(viewerSettings,0);
+  assert.deepEqual(first,{owner:owner(caller),revision:1,bindings:null,invalid:false,viewerSettings});
+  const workspace=await f.service.saveWorkspaceShortcuts(request(v2(),1),caller);
+  assert.deepEqual(workspace.viewerSettings,viewerSettings);
+  const changed={...viewerSettings,bar:['Pan'],shortcuts:{...viewerSettings.shortcuts,Zoom:'k'}};
+  const saved=await save(changed,2);
+  assert.deepEqual(saved.bindings,v2()); assert.deepEqual(saved.viewerSettings,changed);
+  assert.deepEqual(await f.service.workspaceShortcuts(caller),saved);
+  for(const c of [{...caller,sub:'other'}, {...caller,institution:'other'}])
+    assert.equal((await f.service.workspaceShortcuts(c)).viewerSettings,null);
+  const before=f.snapshot();
+  await assert.rejects(save(viewerSettings,2),status(409));
+  for(const value of [{...changed,bar:['Pan','Pan']},{...changed,shortcuts:{Zoom:'p',Pan:'p'}},{...changed,shortcuts:{Zoom:'Control+KeyJ'}}])
+    await assert.rejects(save(value,3),status(400));
+  assert.deepEqual(f.snapshot(),before);
+});
+test('viewer settings v2 roam Shift letter keys; v1 stays single keys',async()=>{
+  // F8: Shift+H/V flip and Shift+L/R turn beside the single keys L (Length) and R (Rectangle).
+  const f=fixture(), save=(value,revision)=>f.service.saveWorkspaceShortcuts({expectedOwner:owner(caller),revision,viewerSettings:value},caller);
+  const first={version:1,bar:['Zoom'],shortcuts:{Zoom:'z',Length:'l',flipHorizontal:null}};
+  assert.deepEqual((await save(first,0)).viewerSettings,first);
+  const second={version:2,bar:['Zoom'],shortcuts:{Zoom:'z',Length:'l',RectangleROI:'r',flipHorizontal:'shift+h',flipVertical:'shift+v','rotate-left':'shift+l','rotate-right':'shift+r',invert:null}};
+  const saved=await save(second,1);
+  assert.deepEqual(saved.viewerSettings,second); assert.deepEqual(await f.service.workspaceShortcuts(caller),saved);
+  const before=f.snapshot();
+  for(const value of [{...second,version:1},{...second,version:3},{...second,shortcuts:{...second.shortcuts,flipVertical:'shift+h'}},
+    ...['Shift+H','H','shift+1','shift+','shift+hh','ctrl+h','shift+shift+h','alt+h'].map(key=>({...second,shortcuts:{Zoom:key}}))])
+    await assert.rejects(save(value,2),status(400));
+  assert.deepEqual(f.snapshot(),before);
+});
 test('v1 and v2 exact readback and client migration roundtrip through real facade',async()=>{
   for(const bindings of [v1(),v2(),{...v2(),finalize:null,image:null}]){
-    const f=fixture();assert.deepEqual(await f.service.workspaceShortcuts(caller),{owner:owner(caller),revision:0,bindings:null,invalid:false});
+    const f=fixture();assert.deepEqual(await f.service.workspaceShortcuts(caller),{owner:owner(caller),revision:0,bindings:null,viewerSettings:null,invalid:false});
     const saved=await f.service.saveWorkspaceShortcuts(request(bindings),caller);
-    assert.deepEqual(saved,{owner:owner(caller),revision:1,bindings,invalid:false});
+    assert.deepEqual(saved,{owner:owner(caller),revision:1,bindings,viewerSettings:null,invalid:false});
     assert.deepEqual(await f.service.workspaceShortcuts(caller),saved);
     assert.equal(client.valid(saved.bindings),true);
     const migrated=client.migrate(saved.bindings).map;
@@ -66,17 +100,17 @@ test('read isolation, role denial and corrupt stored shape do not repair or leak
   await assert.rejects(f.service.workspaceShortcuts(denied),status(403));
   await assert.rejects(f.service.saveWorkspaceShortcuts(request(null),denied),status(403));
   f.seed({...v2(),finalize:'Enter'});const before=f.snapshot();
-  assert.deepEqual(await f.service.workspaceShortcuts(caller),{owner:owner(caller),revision:7,bindings:null,invalid:true});assert.deepEqual(f.snapshot(),before);
+  assert.deepEqual(await f.service.workspaceShortcuts(caller),{owner:owner(caller),revision:7,bindings:null,viewerSettings:null,invalid:true});assert.deepEqual(f.snapshot(),before);
 });
 
 test('invalid stored versions and shapes can be repaired only at the current revision',async()=>{
   for(const bindings of [{...v2(),version:3},{...v2(),version:'3'},{...v2(),version:2.5},{...v2(),finalize:'Enter'},{}]){
     const f=fixture();f.seed(bindings);const before=f.snapshot();
-    assert.deepEqual(await f.service.workspaceShortcuts(caller),{owner:owner(caller),revision:7,bindings:null,invalid:true});
+    assert.deepEqual(await f.service.workspaceShortcuts(caller),{owner:owner(caller),revision:7,bindings:null,viewerSettings:null,invalid:true});
     await assert.rejects(f.service.saveWorkspaceShortcuts(request(v2(),6),caller),status(409));
     assert.deepEqual(f.snapshot(),before);
     const repaired=await f.service.saveWorkspaceShortcuts(request(v2(),7),caller);
-    assert.deepEqual(repaired,{owner:owner(caller),revision:8,bindings:v2(),invalid:false});
+    assert.deepEqual(repaired,{owner:owner(caller),revision:8,bindings:v2(),viewerSettings:null,invalid:false});
     assert.deepEqual(await f.service.workspaceShortcuts(caller),repaired);
   }
 });

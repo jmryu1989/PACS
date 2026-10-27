@@ -20,7 +20,7 @@
     "POST studies/:uid/report/commit", "POST studies/:uid/hold", "GET colleagues", "GET unassigned"
   ],
   "denied_code": "CLINICIAN_ROUTE_DENIED",
-  "public_routes": ["GET health", "GET auth/login", "GET auth/register", "GET auth/callback", "POST auth/login", "POST auth/register", "POST auth/entry"],
+  "public_routes": ["GET health", "GET auth/login", "GET auth/register", "GET auth/callback", "POST auth/login", "POST auth/register"],
   "request_method_enum": {"0": "GET", "1": "POST", "2": "PUT", "3": "DELETE", "4": "PATCH", "5": "ALL", "6": "OPTIONS", "7": "HEAD", "8": "SEARCH"},
   "tokens_basis": "Pure memberState/clinicianOnly argument vectors, including malformed inputs, not provider-to-DB rights mapping. At C1 the guard supplies institution and roles from DB rights; an unregistered identity has neither, even if a multi-institution command was requested.",
   "tokens": [
@@ -156,14 +156,14 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 158, "public": 7, "session": 2, "business": 33, "denied": 116},
+    "counts": {"routes": 160, "public": 6, "session": 2, "business": 33, "denied": 119},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
       "multi_study_view": "radiologist multi-study viewing of the own institution (W9-LITE): the same-patient viewing set's admission read (need radiologist, admin passes; owning institution, no tele, StudyAccess for every member); a clinician-only member neither resolves a viewing set nor records its display.",
       "operations": "technologist and reader operations: tech notes, reader assignment and candidates, Preliminary colleagues, order match/unmatch.",
       "workspace": "the caller's reading-workspace state, personal or site-shared (prefs, filters, favorites, templates, columns, layout, shortcuts, appearance, reading preferences, hanging protocols, study tags) and the caller's own StudyAccess status. No clinician screen uses them before S5-U2a.",
-      "admin": "member console, study-access administration, audit, unassigned studies, institution assignment and operations metrics (need admin).",
+      "admin": "member console, study-access administration, doctor signing keys, audit, unassigned studies, institution assignment and operations metrics (need admin).",
       "consultation": "consultations and consultation candidates; the clinician question contract is S5-U4p/U4a, denied until then.",
       "connect": "inter-institution Connect agreements, basis and transfers; a far later stage (AGENTS).",
       "gateway": "the gateway client-credentials surface (needExact gateway) and the technician's Now Retry request (S4-U3/U4); never a clinician action.",
@@ -177,7 +177,7 @@
         "PUT studies/:uid/report", "POST studies/:uid/report/commit", "GET studies/:uid/report/versions",
         "GET studies/:uid/report/citations", "GET studies/:uid/report/versions/:version/citations",
         "GET studies/:uid/report/structure", "GET studies/:uid/draft", "GET studies/:uid/report-preview", "POST studies/:uid/dictation",
-        "GET studies/:uid/clinical-context"
+        "GET studies/:uid/clinical-context", "POST studies/:uid/view-observations"
       ],
       "viewer": [
         "POST studies/:uid/viewer-items", "GET studies/:uid/viewer-items/:id/revisions", "POST studies/:uid/viewer-items/:id/revisions",
@@ -206,7 +206,8 @@
       "admin": [
         "GET admin/users", "POST admin/users", "PATCH admin/users/:id", "POST admin/users/:id/reset-password",
         "GET admin/users/:id/study-access", "POST admin/users/:id/study-access", "GET audit", "GET unassigned",
-        "POST studies/:uid/assign", "GET admin/metrics", "GET admin/audit", "POST admin/dicom-import/:operationId/files/:index/recovery"
+        "POST studies/:uid/assign", "GET admin/metrics", "GET admin/audit", "POST admin/dicom-import/:operationId/files/:index/recovery",
+        "GET admin/users/:id/signing-key", "POST admin/users/:id/signing-key"
       ],
       "consultation": [
         "GET consultation-candidates", "GET consultations", "GET consultations/:id", "POST consultations/:id",
@@ -233,6 +234,7 @@
     "post_baseline": {
       "POST studies/:uid/viewer-context-events": {"decision": "business", "unit": "S8-CTX", "commit": "56e19e0", "basis": "finite diagnostic event after image permission and institution admission; server attributes the audit row; declared in allowed_additions"},
       "POST studies/viewing-set/resolve": {"decision": "denied", "unit": "W9-API", "commit": "f83948e", "basis": "radiologist multi-study viewing of the own institution: the ordered same-patient viewing set's admission and minimal source metadata (need radiologist, admin passes; every member visible, owned, not tele, StudyAccess); a clinician-only member neither resolves nor records display"},
+      "POST studies/:uid/view-observations": {"decision": "denied", "unit": "emr-module-a-a4", "commit": null, "basis": "the browser's display report of a report version or version evidence this member was provided (MODULE_A A4): the gates of GET studies/:uid/report/versions (owning or tele institution, StudyAccess, preliminary readability); a clinician-only member reads no report history and reports no display of it"},
       "GET clinician/studies": {"decision": "business", "unit": "S5-U1b", "commit": "dc270a0", "basis": "narrow clinician worklist read: listStudies scope, one-snapshot report status, no drafts, bodies or writer fields; declared in allowed_additions"},
       "GET clinician/studies/:uid/report": {"decision": "business", "unit": "S5-U1b", "commit": "dc270a0", "basis": "the final head's body and key images only at RS A with an approve/addendum head, status otherwise; declared in allowed_additions"},
       "POST studies/:uid/dictation": {"decision": "denied", "unit": "S3-ASR", "commit": "7bc6ffc", "basis": "report writer path: dictationGate runs the report-draft write refusals and every attempt is audited; a clinician writes no report text"},
@@ -263,7 +265,6 @@
       "POST critical-results/:id/cancel": {"decision": "denied", "unit": "S7-U1a", "commit": "e9bb028", "basis": "cancel by the sender (radiologist) with a reason; not a recipient action"},
       "POST critical-results/:id/supersede": {"decision": "denied", "unit": "S7-U1a", "commit": "e9bb028", "basis": "supersede by the sender onto the current head for the same recipient; not a recipient action"},
       "GET studies/:uid/draft": {"decision": "denied", "unit": "S7-U5", "commit": "aafc2d9", "basis": "the authoritative read of the caller's own report draft and its stored revision (the draft boundary of the reading workflow); a clinician reads final reports only"},
-      "POST auth/entry": {"decision": "public", "unit": "S7-U5", "commit": "aafc2d9", "basis": "consumes the one-time entry proof of the login that just finished, for the cookie's own session; it answers the session id a document binds to, so it runs before any role or member check"},
       "POST auth/login": {"decision": "public", "unit": "S7-U5", "commit": "aafc2d9", "basis": "starts a login from a document that names the session it replaces; that session is ended with its audit row first, and a binding that is not the cookie's session is refused"},
       "POST auth/register": {"decision": "public", "unit": "S7-U5", "commit": "aafc2d9", "basis": "starts a registration from a document that names the session it replaces, under the same binding rule as POST auth/login"},
       "POST dicom-import": {"decision": "denied", "unit": "S9-U4b", "commit": "5702130", "basis": "member import of one DICOM original into the owning institution (need technician, admin passes; restricted StudyAccess refuses a new study); a clinician never writes originals"},
@@ -273,6 +274,8 @@
       "GET studies/:uid/original-downloads/:operationId/archive": {"decision": "denied", "unit": "S9-U4b", "commit": "5702130", "basis": "the ZIP of the stored originals of a prepared download (audited intent before the first byte); a clinician takes no originals out"},
       "POST studies/:uid/original-downloads/:operationId/archive/grant": {"decision": "denied", "unit": "S9-U4b", "commit": "1f0977c", "basis": "the one-time grant a bound cookie session asks for before the browser's own archive GET (D1489; radiologist/technician/admin, the owner's operation, owning institution and StudyAccess); a clinician takes no originals out"},
       "POST admin/dicom-import/:operationId/files/:index/recovery": {"decision": "denied", "unit": "S9-U4b", "commit": "5702130", "basis": "own-institution admin confirmation of an unknown import attempt (admin only, Gateway refused); never a clinician action"},
+      "GET admin/users/:id/signing-key": {"decision": "denied", "unit": "emr-c-key-management-entry", "commit": null, "basis": "the admin's view of a member's online approval key registrations in the admin's own institution (public registration only; need admin); not a clinician read"},
+      "POST admin/users/:id/signing-key": {"decision": "denied", "unit": "emr-c-key-management-entry", "commit": null, "basis": "create, rotate or retire a doctor's server-held approval key through ServerKeys.manage (admin of the own institution, rechecked in the transaction); never a clinician action"},
       "GET images/dicom-web": {"decision": "business", "unit": "emr-e-online", "commit": null, "basis": "E online image delivery: the registered seam requires current server identity, patient/source and institution facts from REQUEST_FACTS #211 before activation."},
       "HEAD images/dicom-web": {"decision": "business", "unit": "emr-e-online", "commit": null, "basis": "E online image delivery: the registered seam requires current server identity, patient/source and institution facts from REQUEST_FACTS #211 before activation."},
     "POST emr-audit/roster/:grantId": {"decision": "business", "unit": "emr-f-link", "commit": null, "basis": "F checks the stored institution auditor designation or designation authority; app role alone grants nothing."},

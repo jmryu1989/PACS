@@ -76,8 +76,29 @@
       if (!tr?.dataset.uid) return;
       e.preventDefault();
       const uid = tr.dataset.uid;
+      // W9: a row of the current multi-selection (two or more) opens the selection's own menu. It is offered before any
+      // select(): opening it moves no Reading Target and saves or holds nothing. Its one item acts on the selection as it
+      // was when the menu opened (owner, generation, ordered UIDs); a changed selection closes it (closeSelectionMenu).
+      const set = mode === "Radiology" && multiSelection?.has(uid) ? multiStudyView?.menu() : null;
+      if (set) { showSelectionMenu(e, set); return; }
       whenSelected(select(uid), uid, () => showRowMenu(e, uid));
     });
+    let ctxSelection = null;
+    function showSelectionMenu(e, set) {
+      showCtx(e, [{ label: "Open Selected Studies", dis: set.studyUids.length > KinWorklistSelection.SET_LIMITS.max,
+        act: () => { ctxSelection = null; multiStudyView?.open(set); } }], null, null);
+      ctxSelection = { items: ctxItems, generation: set.generation };
+    }
+    /** The selection changed from the one the open selection menu was offered for: that menu closes before anything can act. */
+    function closeSelectionMenu(generation) {
+      if (!ctxSelection || ctxSelection.generation === generation) return;
+      if (ctxItems === ctxSelection.items && ctx.style.display === "block") {
+        const focused = ctx.contains(document.activeElement);
+        ctx.style.display = "none";
+        if (focused) ctxOpener?.focus();
+      }
+      ctxSelection = null;
+    }
     function showRowMenu(e, uid) {
       const s = studies.find(x => x.uid === uid);
       // 이 메뉴가 열린 선택. 항목은 이 선택이 그대로일 때만 실행된다(위 클릭 처리).
@@ -133,7 +154,6 @@
               appState[uid] = { ...appState[uid], reqHosp: s.reqHosp };
               saveApp(uid, { reqHosp: s.reqHosp }); render(); renderRelated();
             } },
-          { label: "Merge / Split Exam", dis: 1, act: () => {} },
           { sep: 1 },
           { label: "Delete", dis: s.rs !== "W", act: () => doDelete(uid) },
           // 이 행의 검사로 반입(X-KIN-Expect-Study)과 원본 다운로드(S9-U4p §6). 둘 다 메뉴를 연 그 선택(opened)에 묶인다.

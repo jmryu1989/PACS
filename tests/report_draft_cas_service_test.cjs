@@ -1149,7 +1149,6 @@ test('REQ-18 migration: existing drafts become present at revision 1 with their 
     await run(`CREATE TABLE ${schema}."${table}" (LIKE public."${table}" INCLUDING DEFAULTS INCLUDING CONSTRAINTS)`);
   await run(`ALTER TABLE ${schema}."ReportDraft" DROP CONSTRAINT "ReportDraft_revision_check", DROP CONSTRAINT "ReportDraft_absent_check", DROP COLUMN revision, DROP COLUMN present`);
   await run(`ALTER TABLE ${schema}."StudyState" DROP COLUMN "draftEpoch"`);
-  await run(`ALTER TABLE ${schema}."AuthSession" DROP COLUMN "entryProofHash", DROP COLUMN "entryProofExpiresAt"`);
   for (let n = 1; n <= 5; n++) await run(`INSERT INTO ${schema}."StudyState" (uid, "institutionId", "updatedAt") VALUES ('2.25.900.${n}', '${INST}', now())`);
   await run(`INSERT INTO ${schema}."ReportDraft" (uid, author, findings, conclusion, recommendation, "baseVersion", citations, "updatedAt") VALUES
     ('2.25.900.1', 'syn-old@synthetic.test', 'SYN kept findings', 'SYN kept conclusion', 'SYN kept rec', 3, '[{"cid":"syn"}]'::jsonb, now()),
@@ -1411,7 +1410,9 @@ test('VIEWER_JOB_DESIGNATION_RENAME_RECYCLE reads and locked parents on save',as
   }
 });
 test('MANUAL_SR_DESIGNATION_RENAME_RECYCLE prepare and locked recheck preserve SR and measurement on refusal',async()=>{
-  const w=await r11Consumer(),{ManualSrService}=require('/app/dist/manual-sr.service'),svc=new ManualSrService(w.client,w.orthanc,w.access);
+  // Preparation never signs; the required signing provider refuses if reached.
+  const unsigned={authorize:async()=>assert.fail('prepare must not sign'),authorized:async()=>assert.fail('prepare must not sign')};
+  const w=await r11Consumer(),{ManualSrService}=require('/app/dist/manual-sr.service'),svc=new ManualSrService(w.client,w.orthanc,w.access,unsigned);
   const ix=await w.item(w.x,'length'),iy=await w.item(w.y,'length');
   const command=id=>Buffer.from(JSON.stringify({requestId:randomUUID(),items:[{id,revision:1}]}));
   for(const field of ['preDoc','preReviewer']) {

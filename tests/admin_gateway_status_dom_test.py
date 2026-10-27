@@ -70,7 +70,7 @@ ORIGIN = "https://members.test"
 BASE = "/worklist/hpacs-lite/"
 PAGE_PATH = BASE + "admin.html"
 ARRIVALS_PATH = BASE + "study-arrivals.js"
-SCRIPTS = {BASE + name: lf_text(HPACS / name) for name in ("auth.js", "work-context.js", "session-transport.js", "study-access-admin.js", "study-arrivals.js", "admin-access-review.js")}
+SCRIPTS = {BASE + name: lf_text(HPACS / name) for name in ("auth.js", "work-context.js", "session-transport.js", "study-access-admin.js", "signing-key-admin.js", "study-arrivals.js", "admin-access-review.js")}
 INDEX = "<!doctype html><title>SYN index</title><p id=index>SYN INDEX</p>"
 INSTITUTION = "SYN-INST-A"
 ME = {"sub": "SYN-ADMIN-SUB", "user": "syn-admin", "displayName": "SYN Admin", "roles": ["admin"], "institution": INSTITUTION,
@@ -475,10 +475,6 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
         if path == "/favicon.ico":
             route.fulfill(status=404, body="")
             return
-        if path.startswith("/api/") and request.headers.get("x-kin-csrf") != "1":
-            self.unexpected.append(f"{method} {path} without X-KIN-CSRF")
-            route.abort()
-            return
         if method == "GET" and path == "/api/me":
             if self.held_me is not None:
                 self.held_me.append(route)
@@ -842,7 +838,7 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
         colours = {row["status"]: row["background"] for row in rows}
         self.assertEqual(3, len(set(colours.values())), colours)
         gets = [c for c in self.calls if c["path"] == "/api/studies"]
-        self.assertEqual([("GET", "", "1")], [(c["method"], c["query"], c["csrf"]) for c in gets])
+        self.assertEqual([("GET", "", None)], [(c["method"], c["query"], c["csrf"]) for c in gets])
 
         # Now Retry: one POST with an empty body; nothing is shown before the answer.
         self.retry_replies.append("hold")
@@ -850,7 +846,7 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
         self.wait_until(lambda: len(self.held_retries) == 1, "the retry POST")
         self.assertEqual([("1.2.12", "{}")], self.retry_posts)
         post = [c for c in self.calls if c["path"] == retry_path("1.2.12")][0]
-        self.assertEqual(("1", "application/json", ""), (post["csrf"], post["type"], post["query"]))
+        self.assertEqual((None, "application/json", ""), (post["csrf"], post["type"], post["query"]))
         waiting = self.row("1.2.12")
         self.assertEqual(("failed", "Transfer Failed", "", True, True),
                          (waiting["status"], waiting["chip"], waiting["note"], waiting["button"], waiting["disabled"]))

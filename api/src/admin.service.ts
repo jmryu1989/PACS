@@ -383,7 +383,7 @@ export class AdminService {
    *
    * 검사 접근이 제한된 관리자는 거절한다: 검사 행에는 오더 매칭 overlay 같은 검사 내용이 실리므로, 허용 범위 밖
    * 검사의 기록을 보이는 창이 된다(운영 지표의 ADMIN_METRICS_RESTRICTED와 같은 이유). 이것은 읽는 사람의 관문이며
-   * 행의 귀속에 쓰지 않는다. AdminController는 응답 뒤 재확인 interceptor를 건너뛰므로 그 확인을 여기서 한다.
+   * 행의 귀속에 쓰지 않는다.
    */
   async auditEvents(query: unknown, c: Caller) {
     if (!c.roles?.includes('admin')) throw new ForbiddenException('감사 기록 조회는 admin 권한이 필요합니다');

@@ -4,6 +4,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 from pydicom import dcmread
+from viewer_tools import display_transform
 from playwright.sync_api import expect
 import test_worklist as base
 from test_display_controls import DisplayControlsE2E
@@ -127,7 +128,8 @@ class ViewerJobsE2E(DisplayControlsE2E):
   self.seed_report(a);self.seed_report(b);originals=self.originals();rows={f.uid:self.report_rows(f) for f in [a,b]}
   p=self.launch_job([a,b]);self.grid(p,2);self.drag(p,'D03A current',0);self.drag(p,'D03A past',1);canvas_ready(p,2);self.choose(p,0)
   p.keyboard.press('ArrowDown');self.gesture(p,'Zoom',0,45);self.gesture(p,'Pan',30,20)
-  for key in ['2','r','h','v','i']:p.keyboard.press(key)
+  p.keyboard.press('2')
+  for action in ['r','h','v','i']:display_transform(p,action)
   # Soft-tissue keeps this phantom visible; Liver clips every fixture pixel to
   # black and cannot exercise the spatial canvas restoration oracle.
   self.choose(p,1);p.keyboard.press('ArrowDown');p.keyboard.press('ArrowDown');p.keyboard.press('1')

@@ -22,7 +22,8 @@ class BundleContract(unittest.TestCase):
     def test_committed_artifact_and_manifest_selected_pin(self):
         report = bundle.check()
         self.assertEqual("PASS", report["checks"]["permanent"])
-        self.assertEqual(45, len(report["sources"]))
+        manifest = json.loads((ROOT / "scripts/main-split-order.json").read_bytes())
+        self.assertEqual(len(manifest["sources"]), len(report["sources"]))
         self.assertEqual(1, report["main_html"]["bundle_tags"])
         self.assertEqual(0, report["main_html"]["source_tags"])
         if report["migration_state"] == "pristine":
@@ -33,6 +34,24 @@ class BundleContract(unittest.TestCase):
         else:
             self.assertEqual("NOT_RUN", report["checks"]["candidate_pin"])
             self.assertNotIn("equals_original_body", report)
+
+    def test_additional_declared_source_is_bundled_in_order(self):
+        current = json.loads((ROOT / 'scripts/main-split-order.json').read_bytes())
+        sources = [{'file': f'part-{index}.js'} for index in range(len(current['sources']) + 1)]
+        manifest = {'page': 'main.html', 'sources': sources}
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            expected = b''
+            for index, source in enumerate(sources):
+                data = f'// synthetic part {index}\n'.encode()
+                (root / source['file']).write_bytes(data)
+                expected += data
+            actual, report = bundle.assemble(root, manifest)
+            self.assertEqual(actual, expected)
+            self.assertEqual([row['file'] for row in report['sources']], [row['file'] for row in sources])
+            manifest['sources'].append(sources[0])
+            with self.assertRaisesRegex(AssertionError, 'Distinct'):
+                bundle.assemble(root, manifest)
 
     def test_permanent_check_has_no_historical_git_dependency(self):
         with mock.patch.object(bundle.subprocess, "check_output", side_effect=AssertionError("historical Git read")):

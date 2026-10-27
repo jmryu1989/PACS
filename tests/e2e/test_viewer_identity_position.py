@@ -18,11 +18,26 @@ class ViewerIdentityPositionE2E(ViewerIdentityE2E):
             const label=element.getBoundingClientRect(), viewport=element.parentElement.getBoundingClientRect();
             const x=(label.left+label.right)/2, y=(label.top+label.bottom)/2;
             const horizontal=position.endsWith('left') ? x < (viewport.left+viewport.right)/2 : x > (viewport.left+viewport.right)/2;
-            const vertical=position.startsWith('top') ? y < (viewport.top+viewport.bottom)/2 : y > (viewport.top+viewport.bottom)/2;
+            // Native image text occupies the corners too. In a short pane its
+            // reserved space can extend past the geometric canvas midpoint.
+            const pane=element.closest('[data-cy="viewport-pane"]');
+            const occupied=side=>[...pane.querySelectorAll('[data-cy="viewport-overlay-'+side+'-left"],[data-cy="viewport-overlay-'+side+'-right"]')]
+              .filter(node=>node.textContent.trim()).map(node=>node.getBoundingClientRect())
+              .filter(box=>box.width && box.height && label.left<box.right && label.right>box.left);
+            const top=occupied('top'),bottom=occupied('bottom');
+            const usableTop=Math.max(viewport.top,...top.map(b=>b.bottom)), usableBottom=Math.min(viewport.bottom,...bottom.map(b=>b.top));
+            const vertical=position.startsWith('top') ? y < (usableTop+usableBottom)/2 : y > (usableTop+usableBottom)/2;
             if(label.width>0 && label.height>0 && viewport.width>0 && viewport.height>0 && horizontal && vertical &&
-               label.left>=viewport.left && label.right<=viewport.right && label.top>=viewport.top && label.bottom<=viewport.bottom)
+               label.left>=viewport.left && label.right<=viewport.right && label.top>=viewport.top && label.bottom<=viewport.bottom &&
+               !top.concat(bottom).some(b=>label.top<b.bottom && label.bottom>b.top) &&
+               ![...element.closest('[data-cy="viewport-pane"]').querySelectorAll('.kin-viewer-info-bar')].some(bar => {
+                 const b=bar.getBoundingClientRect(); return label.left<b.right && label.right>b.left && label.top<b.bottom && label.bottom>b.top;
+               }))
               return resolve(true);
-            if(performance.now()>=deadline)return reject(Error('identity did not reach '+position));
+            if(performance.now()>=deadline)return reject(Error('identity did not reach '+position+' '+JSON.stringify({
+              label,viewport,element:element.style.cssText,parent:element.parentElement.outerHTML.slice(0,500),
+              offsetParent:element.offsetParent?.outerHTML.slice(0,500),
+              bars:[...element.closest('[data-cy="viewport-pane"]').querySelectorAll('.kin-viewer-info-bar')].map(b=>b.getBoundingClientRect())})));
             requestAnimationFrame(check);
           }
           check();

@@ -60,6 +60,17 @@ function kinCreateViewerHistory() {
     function measurementReason(imageId, kind, points) {
       const image = cs.metaData.get('instance', imageId);
       const finite = n => (typeof n === 'number' || typeof n === 'string' && n.trim() !== '') && Number.isFinite(Number(n));
+      if (image?.Modality === 'MG' && kind === 'length') {
+        try {
+          const mg = kinMgGeometry(image, reference(imageId)?.frame);
+          if (!mg || cs.cache.getImage(imageId)?.calibration?.type) return 'MG 원본 간격·보정을 확인할 수 없습니다';
+          const plane = cs.metaData.get('imagePlaneModule', imageId);
+          if (Number(plane?.rowPixelSpacing) !== mg.spacing[0] || Number(plane?.columnPixelSpacing) !== mg.spacing[1])
+            return '표시 간격과 MG 원본 간격이 일치하지 않습니다';
+          points?.forEach(mg.imagePoint);
+          return '';
+        } catch (error) { return error.message; }
+      }
       const spacing = image?.PixelSpacing, orientation = image?.ImageOrientationPatient, origin = image?.ImagePositionPatient;
       if (image?.SOPClassUID !== '1.2.840.10008.5.1.4.1.1.2' || image.Modality !== 'CT' || Number(image.NumberOfFrames || 1) !== 1)
         return '일반 CT 원본 프레임에서 지원합니다';
@@ -114,7 +125,8 @@ function kinCreateViewerHistory() {
       const values = kind === 'length' ? [s.length] : kind === 'angle' ? [s.angle] :
         [s.area, s.mean, s.statsArray?.find(x => x?.name === 'min')?.value, s.max, s.statsArray?.find(x => x?.name === 'count')?.value];
       if (values.some(n => !Number.isFinite(n)) || kind === 'ellipse' && s.modalityUnit !== 'HU') return null;
-      return { calculator: 'kin-native-manual-v1', values };
+      const mg = kind === 'length' && kinMgGeometry(cs.metaData.get('instance', a.metadata.referencedImageId), reference(a.metadata.referencedImageId)?.frame);
+      return mg ? { calculator: mg.calculator, values: [mg.length(a.data.handles.points)] } : { calculator: 'kin-native-manual-v1', values };
     }
     const measurementService = services.measurementService;
     const originalMeasurements = measurementService.getMeasurements;
@@ -131,9 +143,16 @@ function kinCreateViewerHistory() {
       // verified target on every read, including a previously captured export.
       const target = 'imageId:' + a.metadata.referencedImageId;
       try {
-        return mapping.toMeasurementSchema({ annotation: { ...a, data: {
-          ...a.data, cachedStats: { [target]: a.data.cachedStats[target] },
+        const mg = a.metadata.toolName === 'Length' && kinMgGeometry(cs.metaData.get('instance', a.metadata.referencedImageId), reference(a.metadata.referencedImageId)?.frame);
+        const checked = mapping.toMeasurementSchema({ annotation: { ...a, data: {
+          ...a.data, cachedStats: { [target]: { ...a.data.cachedStats[target], ...(mg ? { length: mg.length(a.data.handles.points) } : {}) } },
         } } });
+        if (mg) {
+          checked.displayText = { ...checked.displayText, primary: [...(checked.displayText?.primary || []), mg.label] };
+          const report = checked.getReport;
+          checked.getReport = () => { const r = report(); return { ...r, columns: [...r.columns, 'Measurement basis'], values: [...r.values, mg.label] }; };
+        }
+        return checked;
       } catch (_) { return null; } // Display sets may disappear before their metadata.
     }
     function projectMeasurement(m) {
@@ -382,7 +401,9 @@ function kinCreateViewerHistory() {
       return exporting && SCREEN_EXPORT.includes(name) || ACTIVATING.includes(name) && !VIEW_TOOLS.has(command?.commandOptions?.toolName ?? button.id);
     });
     const TOOLBAR = ['getButtons', 'removeButton', 'addButtons', 'clearButtonSection', 'createButtonSection'];
-    const trimmed = new Set(), originals = new Map(), sectionOriginals = new Map(), replacements = new WeakSet(); let trimming = false;
+    // OHIF refreshToolbarState clones definitions with object spread. Ownership
+    // must survive that refresh so a writer gets the full tool group back.
+    const trimmed = new Set(), originals = new Map(), sectionOriginals = new Map(), replacement = Symbol('kin-read-only-toolbar'); let trimming = false;
     // S5-UI5 fix1. Capture를 빼는 때: clinician-only, 그리고 계정이 아직 확인되지 않은 동안(안전한 기본 — writer 답이 오면 제자리로
     // 돌아온다). writer 문서의 로그인이 끝난 뒤(거절·로그아웃·다른 계정)에는 빼지 않는다. 이미 뺀 것은 writer 답 전까지 그대로라서
     // clinician-only·미확인에서 끝난 문서는 계속 없다. 끝난 문서에 다시 들어온 마운트는 역할을 알 수 없어 안전한 기본을 따른다.
@@ -393,14 +414,14 @@ function kinCreateViewerHistory() {
       if (trimming || TOOLBAR.some(name => typeof bar?.[name] !== 'function')) return;
       const replaced = [], exporting = exportClosed();
       for (const [id, button] of Object.entries(bar.getButtons() || {})) {
-        if (replacements.has(button)) continue;
+        if (button[replacement]) continue;
         const props = button?.props || {}, items = Array.isArray(props.items) ? props.items : null;
         if (!items) { if (authoring({ id, commands: props.commands }, exporting)) { trimmed.add(id); originals.set(id, button); } continue; }
         const kept = items.filter(item => !authoring(item, exporting));
         if (!kept.length) { trimmed.add(id); originals.set(id, button); continue; }
         if (kept.length < items.length || props.primary && authoring(props.primary, exporting)) {
-          const replacement = { ...button, props: { ...props, items: kept, primary: props.primary && !authoring(props.primary, exporting) ? props.primary : kept[0] } };
-          originals.set(id, button); replacements.add(replacement); replaced.push(replacement);
+          const restricted = { ...button, [replacement]: true, props: { ...props, items: kept, primary: props.primary && !authoring(props.primary, exporting) ? props.primary : kept[0] } };
+          originals.set(id, button); replaced.push(restricted);
         }
       }
       const buttons = bar.getButtons() || {}, gone = [...trimmed].filter(id => buttons[id]);
@@ -429,7 +450,7 @@ function kinCreateViewerHistory() {
         const listed = new Set(sections.flatMap(([, record]) => record.original));
         const buttons = bar.getButtons() || {}, back = [];
         for (const [id, original] of originals) {
-          if (buttons[id] ? !replacements.has(buttons[id]) : !listed.has(id)) continue;
+          if (buttons[id] ? !buttons[id][replacement] : !listed.has(id)) continue;
           if (buttons[id]) bar.removeButton(id);
           back.push(original);
         }
@@ -593,7 +614,7 @@ function kinCreateViewerHistory() {
       const timeout = setTimeout(abort, 30000);
       try {
       const res = await fetch('/api' + path, { ...options, cache: 'no-store', credentials: 'same-origin', signal: request.signal,
-        headers: { 'X-KIN-CSRF': '1', ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
+        headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
       // Session termination is owned by the page transport and gate.
       const drop = async data => {
         if (path === '/me' && res.ok) kinViewerSession.sameAccount(data === undefined ? await res.json().catch(() => null) : data);
@@ -886,9 +907,12 @@ function kinCreateViewerHistory() {
           if (reason) return [reason];
           if (!freshStats(data, target)) return ['재확인 필요: 현재 좌표로 계산되지 않았습니다'];
           if (kind === 'ellipse') return lines(data, target);
-          const value = data.cachedStats[target]?.[kind === 'length' ? 'length' : 'angle'];
+          const mg = kind === 'length' && kinMgGeometry(cs.metaData.get('instance', id), reference(id)?.frame);
+          const value = mg ? mg.length(data.handles.points) : data.cachedStats[target]?.[kind === 'length' ? 'length' : 'angle'];
           if (!Number.isFinite(value) || value <= 0) return ['측정을 완료하세요'];
-          return [(Math.round(value * 10) / 10).toFixed(1) + (kind === 'length' ? ' mm' : '°')];
+          const number = (Math.round(value * 10) / 10).toFixed(1) + (kind === 'length' ? ' mm' : '°');
+          // Keep the scale basis readable in the four-view mammography layout.
+          return mg ? [number, ...mg.label.split(' · ')] : [number];
         } };
         restores.push(() => { tool.configuration = config; tool.addNewAnnotation = add; });
       }
@@ -1106,21 +1130,21 @@ function kinCreateViewerHistory() {
       heads: [...entries.values()].filter(e => e.head).map(e => ({ id: e.head.id, revision: e.head.revision, hidden: !!e.head.hidden,
         kind: e.draft.kind, label: e.draft.label ?? e.draft.title ?? '', seriesUid: e.head.item.seriesUid, sopUid: e.head.item.sopUid,
         frame: e.head.item.frame, authorSub: e.head.authorSub, referenceStatus: manual(e.draft.kind) ? e.head.referenceStatus ?? 'unverified' : null,
-        values: Array.isArray(e.head.item.baseline?.values) ? [...e.head.item.baseline.values] : null, working: !!(e.editing || e.pending || e.busy) })) });
+        calculator: e.head.item.baseline?.calculator, values: Array.isArray(e.head.item.baseline?.values) ? [...e.head.item.baseline.values] : null, working: !!(e.editing || e.pending || e.busy) })) });
     function hydrate() {
       const v = viewport(), imageId = v?.getCurrentImageId?.(), r = reference(imageId);
       if (!r || r.study !== scope || !subject || ended || suspended || held()) return;
       configureMeasurements(ct.ToolGroupManager.getToolGroupForViewport(v.id, v.renderingEngineId));
       const plane = cs.metaData.get('imagePlaneModule', imageId);
       for (const e of entries.values()) {
-        if (!e.head && !e.rehydrate || e.head?.hidden || !tools[e.draft.kind] || e.annotationUID || !matches(r, e.draft) || plane?.frameOfReferenceUID !== e.draft.frameOfReferenceUid) continue;
+        if (!e.head && !e.rehydrate || e.head?.hidden || !tools[e.draft.kind] || e.annotationUID || !matches(r, e.draft) || (plane?.frameOfReferenceUID ?? null) !== e.draft.frameOfReferenceUid) continue;
         if (manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified') {
           if (!e.message) { e.message = '재확인 필요: 원본 영상의 동일성을 확인할 수 없습니다.'; row(e); }
           continue;
         }
         const uid = crypto.randomUUID(), camera = v.getCamera();
         const a = { annotationUID: uid, highlighted: false, invalidated: true, isLocked: true, isVisible: true,
-          metadata: { toolName: tools[e.draft.kind], FrameOfReferenceUID: e.draft.frameOfReferenceUid, referencedImageId: imageId, viewPlaneNormal: e.draft.viewPlaneNormal || camera.viewPlaneNormal, viewUp: e.draft.viewUp || camera.viewUp },
+          metadata: { toolName: tools[e.draft.kind], FrameOfReferenceUID: e.draft.frameOfReferenceUid ?? v.getFrameOfReferenceUID(), referencedImageId: imageId, viewPlaneNormal: e.draft.viewPlaneNormal || camera.viewPlaneNormal, viewUp: e.draft.viewUp || camera.viewUp },
           data: { text: e.draft.label, label: e.draft.label, kinUnverified: manual(e.draft.kind) && !e.editing, handles: { points: clone(e.draft.points), activeHandleIndex: null, textBox: { hasMoved: false, worldPosition: [0, 0, 0], worldBoundingBox: { topLeft: [0, 0, 0], topRight: [0, 0, 0], bottomLeft: [0, 0, 0], bottomRight: [0, 0, 0] } } }, cachedStats: {} } };
         trackMeasurement(a);
         e.rehydrate = false;
@@ -1203,7 +1227,8 @@ function kinCreateViewerHistory() {
         if (!e) {
           const ref = reference(a.metadata.referencedImageId);
           e = { id: crypto.randomUUID(), annotationUID: a.annotationUID, editing: true,
-            draft: { schemaVersion: 1, kind, seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: a.metadata.FrameOfReferenceUID, label: a.data.text ?? a.data.label ?? '', points: clone(a.data.handles.points),
+            draft: { schemaVersion: 1, kind, seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: kind === 'length' && cs.metaData.get('instance', a.metadata.referencedImageId)?.Modality === 'MG'
+                ? cs.metaData.get('instance', a.metadata.referencedImageId).FrameOfReferenceUID || null : a.metadata.FrameOfReferenceUID, label: a.data.text ?? a.data.label ?? '', points: clone(a.data.handles.points),
               ...(kind === 'arrow' ? {} : { viewPlaneNormal: clone(a.metadata.viewPlaneNormal), viewUp: clone(a.metadata.viewUp) }) } };
           entries.set(e.id, e); annotations.set(a.annotationUID, e); row(e);
         } else if (e.editing && !e.busy && !e.pending) {

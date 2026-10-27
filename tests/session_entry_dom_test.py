@@ -92,17 +92,21 @@ class SessionEntry(h.LogoutDOMTest):
         expect(self.page.locator('#msg')).to_contain_text('다시 확인')
         record = {'session': self.site.cookie, 'operation': 9999999999999, 'status': 'confirmed', 'origin': 'logout'}
         self.page.evaluate('(record) => {localStorage.setItem("kin-session-end:" + record.session, JSON.stringify(record)); window.dispatchEvent(new Event("focus"));}', record)
+        # The document learns which session it holds from its next /me (no entry proof any more); that session's own
+        # end record then closes it - the late answer is never adopted and no login starts.
         self.page.clock.run_for(10000)
+        self.wait_until(lambda: self.site.count('GET', '/api/me') == 2 and self.screen()['state'] == 'confirmed', 'own end applied')
         self.assertEqual(h.INDEX_URL, self.page.url)
-        self.assertEqual((0, [], 'confirmed'), (self.site.logins, self.site.login_posts, self.screen()['state']))
-        self.assertEqual(1, self.site.count('GET', '/api/me'))
+        self.assertEqual((0, [], 'confirmed', None),
+                         (self.site.logins, self.site.login_posts, self.screen()['state'], self.screen()['identity']))
+        self.assertEqual(2, self.site.count('GET', '/api/me'))
 
     def test_real_absence_still_logs_in_automatically(self):
         self.site.account = None
         self.page.goto(h.INDEX_URL)
         self.page.wait_for_url(h.MAIN_URL)
         expect(self.page.locator('#rows')).to_contain_text(h.PATIENT)
-        self.assertEqual((1, [], ['SYN-PROOF-1']), (self.site.logins, self.site.login_posts, self.site.entries))
+        self.assertEqual((1, [], []), (self.site.logins, self.site.login_posts, self.site.entries))
 
     def seed(self, record):
         """An end record as auth.js keeps it (its session's own key), put once per tab before any page script."""
@@ -118,28 +122,29 @@ class SessionEntry(h.LogoutDOMTest):
         self.page.goto(h.INDEX_URL)
         expect(self.page.locator('#signin')).to_be_enabled()
         self.page.wait_for_timeout(1200)
-        self.assertEqual((0, 0), (self.site.logins, self.site.count('GET', '/api/me')))
+        # One /me names the session; its own record keeps the document closed (no identity, no login).
+        self.assertEqual((0, 1, None), (self.site.logins, self.site.count('GET', '/api/me'), self.screen()['identity']))
         self.page.get_by_role('button', name=h.SIGN_IN).click()
         self.page.wait_for_url(h.MAIN_URL)
         self.assertEqual(([live], [{'intent': 'reauthenticate', 'reason': 'logout_unfinished'}]),
                          (self.site.login_posts, self.site.login_bodies))
         self.assertIn(live, self.site.ended)
 
-    def test_yesterdays_logout_costs_one_login_press_and_ends_nothing(self):
-        # Design section 5 case 9 (the opposite side): yesterday's explicit Log out of ANOTHER session is on record and
-        # today's session is alive. As before: the landing waits for one Login press, which enters the live session - no
-        # login start, nothing ended, the old record taken over.
+    def test_yesterdays_logout_of_another_session_does_not_hold_the_live_session(self):
+        # Design section 5 case 9 (the opposite side), changed by product cuts 3: yesterday's explicit Log out of ANOTHER
+        # session is on record and today's session is alive. That record held the landing for one Login press only while
+        # the entry proof let a login's own document past it; with the proof gone (M-MAIN-12) an end record closes only
+        # its own session's documents (M-MAIN-07 kernel). The document enters the live session by itself - no login start,
+        # nothing ended, the old record taken over.
         live = self.site.cookie
         self.seed({'session': 'SYN-SESSION-YESTERDAY', 'operation': 1, 'status': 'confirmed', 'origin': 'logout'})
         self.page.goto(h.INDEX_URL)
-        expect(self.page.locator('#msg')).to_have_text(h.CONFIRMED)
-        self.page.wait_for_timeout(700)
-        self.assertEqual((0, 0, h.INDEX_URL), (self.site.logins, self.site.count('GET', '/api/me'), self.page.url))
-        self.page.get_by_role('button', name=h.SIGN_IN).click()
         self.page.wait_for_url(h.MAIN_URL)
         expect(self.page.locator('#rows')).to_contain_text(h.PATIENT)
         self.assertEqual(([], 0, live, None), (self.site.login_posts, self.site.logins, self.site.cookie, self.screen()['end']))
         self.assertNotIn(live, self.site.ended)
+        self.assertEqual([], self.page.evaluate('Object.keys(localStorage).filter(key => key.startsWith("kin-session-end"))'),
+                         "yesterday's record was taken over")
 
     def test_no_record_or_a_server_ended_sessions_record_enters_with_no_click(self):
         # Design section 5 case 9: with no record, or with only the record of a session the SERVER ended or another

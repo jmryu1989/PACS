@@ -10,7 +10,7 @@ import { refuse } from '../emr-contract/validation';
 import { BackgroundWork, EMR_BACKGROUND_WORK } from '../emr-runtime/background-work';
 import { EMR_PENDING_LIMIT, EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS, boundEmrStatements } from '../emr-runtime/limits';
 import { EMR_RECORD_PORT, EmrRecordPort, EmrRecordWork } from '../emr-runtime/record-port';
-import { REQUEST_CONTEXT_SOURCE, RequestContextSource, RequestFacts } from '../emr-runtime/request-context';
+import { REQUEST_CONTEXT_SOURCE, RequestContextSource, RequestContextUnavailable, RequestFacts } from '../emr-runtime/request-context';
 import { OrthancService } from '../orthanc.service';
 import { PrismaService } from '../prisma.service';
 import { ImageCheckDatabase } from './check-db';
@@ -134,6 +134,10 @@ export class OnlineImageService implements BeforeApplicationShutdown {
       } finally { lease.end(end, bytesWritten, unstored); }
     } catch (error) {
       if (kept && sourceChanged(error)) this.manifests.forget(image.studyUid, kept);
+      // Current identity exists only for a member admission the guard captured. Without one (authentication
+      // switched off, or a request that already ended) nothing can be authorized, and no archive byte is read.
+      if (error instanceof RequestContextUnavailable && !response.headersSent)
+        throw new ServiceUnavailableException({ code: 'ImageRequestContextUnavailable', message: '영상의 현재 접근 권한을 확인할 수 없습니다' });
       throw error;
     } finally { request.off('aborted', stop); response.off('close', stop); }
   }
