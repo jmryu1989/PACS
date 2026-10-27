@@ -16,6 +16,12 @@ import measurement_ci as ci
 from ci_workflows import WorkflowCatalog
 from live_admin_credential_test import ImportedAdminCredentialTests
 
+# validate.yml steps that run after a failure keep doing so on a ready run and exclude a draft run, whose
+# failed first step leaves nothing to collect (test_draft_pr_fails_every_required_check_...).
+NOT_DRAFT = ' && !github.event.pull_request.draft }}'
+AFTER_FAILURE = '${{ always()' + NOT_DRAFT
+AFTER_SIBLING_FAILURE = '${{ !cancelled()' + NOT_DRAFT
+
 
 class MeasurementCiTests(unittest.TestCase):
     @classmethod
@@ -53,7 +59,7 @@ class MeasurementCiTests(unittest.TestCase):
                     path = ci.PROFILES[profile]['out'].relative_to(ci.ROOT).as_posix() + '/'
                     matching = [s for s in uploads if path in s['with']['path'].splitlines()]
                     self.assertEqual(len(matching), 1)
-                    self.assertEqual(matching[0]['if'], 'always()')
+                    self.assertEqual(matching[0]['if'], AFTER_FAILURE)
                     self.assertEqual(matching[0]['with']['if-no-files-found'], 'error')
         self.assertNotIn('u5-session-mutants', bindings)
 
@@ -117,12 +123,25 @@ class MeasurementCiTests(unittest.TestCase):
                 guard = jobs[name]['steps'][0]
                 self.assertEqual(guard['if'], draft)
                 self.assertTrue(guard['run'].rstrip().endswith('exit 1'))
-        # On a draft no later consume step runs, including the evidence steps that otherwise run after a failure.
-        # A step without `if` is skipped after the failed first step; one with a status function must exclude a draft.
-        for step in jobs['consume']['steps'][1:]:
-            with self.subTest(step=step.get('name', step.get('uses'))):
-                if 'if' in step:
-                    self.assertIn('!github.event.pull_request.draft', step['if'])
+        # On a draft every job stops at its failed first step: the draft guard above, or the select guard of a module
+        # job. A later step without a status function is skipped after that failure (the implicit success()); one
+        # that runs after a failure on a ready run (always(), !cancelled()) must exclude a draft and otherwise keep
+        # its ready-run condition exactly, so a ready run still collects its failure evidence.
+        select_failed = "${{ needs.select.result != 'success' }}"
+        status = re.compile(r'\b(?:always|cancelled|failure)\(\)')
+        excluded = 0
+        for name, job in jobs.items():
+            with self.subTest(job=name):
+                self.assertIn(job['steps'][0]['if'], (draft, select_failed))
+                self.assertTrue(job['steps'][0]['run'].rstrip().endswith('exit 1'))
+            for step in job['steps'][1:]:
+                condition = str(step.get('if', ''))
+                if not status.search(condition):
+                    continue
+                with self.subTest(job=name, step=step.get('name', step.get('uses'))):
+                    self.assertIn(condition, (AFTER_FAILURE, AFTER_SIBLING_FAILURE))
+                    excluded += 1
+        self.assertTrue(excluded)
 
     def test_accuracy_pr_subset_keeps_original_suite_contracts(self):
         expected = [('e2e/test_measurement_readback.py', 'MeasurementReadbackE2E'),
@@ -754,7 +773,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual([row['job'] for row in owner], ['worklist-ux-measurements'])
         job = self.catalog.job('worklist-ux-measurements')
         step = job['steps'][owner[0]['step']]
-        self.assertEqual(step['if'], '${{ !cancelled() }}')
+        self.assertEqual(step['if'], AFTER_SIBLING_FAILURE)
         uploads = [s for s in job['steps'] if str(s.get('uses', '')).startswith('actions/upload-artifact@')
                    and s['with']['name'] == 'synthetic-viewer-ux-shell-results']
         self.assertEqual(len(uploads), 1)
@@ -906,7 +925,9 @@ class MeasurementCiTests(unittest.TestCase):
                        for line in words(step) for index, word in enumerate(line))
 
         def always(step):
-            return re.fullmatch(r'\s*(\$\{\{\s*always\(\)\s*\}\}|always\(\))\s*', str(step.get('if', ''))) is not None
+            # Runs after any failure of a ready run; a draft run is excluded (test_draft_pr_fails_every_...).
+            return re.fullmatch(r'\s*\$\{\{\s*always\(\)\s*&&\s*!github\.event\.pull_request\.draft\s*\}\}\s*',
+                                str(step.get('if', ''))) is not None
 
         workflow = self.catalog.combined()
         requests = [(name, index, found) for name, other in workflow['jobs'].items()
@@ -929,7 +950,7 @@ class MeasurementCiTests(unittest.TestCase):
         (owner, live), = requested('u2b-regressions')
         self.assertEqual(owner, 'worklist-ux-measurements')
         self.assertEqual(int(steps[live]['timeout-minutes']), 28)
-        self.assertEqual(steps[live]['if'], '${{ !cancelled() }}')
+        self.assertEqual(steps[live]['if'], AFTER_SIBLING_FAILURE)
         self.assertFalse(steps[live].get('continue-on-error', False))
         self.assertTrue(any(executes(step, 'tests/execution_selection_test.py')
                             for step in workflow['jobs']['runtime']['steps']))
