@@ -171,13 +171,23 @@ class WorklistE2E(unittest.TestCase):
         page = context.new_page()
         page.set_default_timeout(20000)
         page.goto(self.stack.proxy + "/")
+        stage = "username"
         try:
             page.locator("#username").fill(self.stack.username(actor))
+            stage = "password"
             page.locator("#password").fill(self.stack.passwords[actor])
+            stage = "submit"
             page.locator("#kc-login").click()
-        except Exception:
-            # Playwright's call log can include fill() values; never print credentials.
-            raise RuntimeError("Real BFF login form could not be submitted") from None
+        except Exception as error:
+            # Playwright's call log can include fill() values; never print credentials. The stage, the error class and
+            # where the browser stood are enough to tell a form that never came from one that was refused.
+            where = urlsplit(page.url)
+            try:
+                title = page.title()[:80]
+            except Exception as unreadable:
+                title = type(unreadable).__name__
+            raise RuntimeError(f"Real BFF login form could not be submitted at {stage}: {type(error).__name__}; "
+                               f"page {where.netloc}{where.path} title {title!r}") from None
         page.wait_for_url("**/worklist/hpacs-lite/main.html", timeout=30000)
         expect(page.locator("#dbstat")).to_contain_text("DB Connected")
         expect(page.locator("#roles")).to_contain_text("technician" if actor == "tech" else "radiologist")

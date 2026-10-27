@@ -221,8 +221,11 @@ selection or one History opening; the page's re-read of the same Source on a
 list refresh is the same display, another Source (even before it draws) or a
 reopened History is a new one. The event keeps its ID and display time, so a
 resend after a lost acknowledgement is the same event (A4 replays it). A resend
-happens only at an existing chance (a re-render, the node coming on screen, the
-tab becoming visible); no timer, backoff or queue. 400/403/404/409 stay
+happens only at an existing chance (a re-render, the node coming on screen, a
+modal or `[inert]` cover over it going away - watched on the page's own
+`open`/`class`/`inert` changes, since Unmatched Studies and the other
+class-based modals close without a close event - the tab becoming visible); no
+timer, backoff or queue. 400/403/404/409 stay
 refused, an ended session ends it, anything else stays unconfirmed. A failed
 report never removes the shown text and asks the doctor nothing. The page keeps
 no report body cache: every opening reads again, so a reopened History is new
@@ -248,9 +251,11 @@ Log Out and a second account's login, whose display names its own provision;
 06 an answer drawn in a background tab is reported only once visible. Headless
 Chromium keeps every page visible (measured with Playwright 1.60: another page,
 a minimized window and a second tab), so 06 reports itself skipped there
-(NOT_RUN) and needs a headed browser. The 1800-second hang timeout is the one
+(NOT_RUN) and needs a headed browser (`KIN_E2E_HEADED=1`, e.g. under
+`xvfb-run`); 07 a Source drawn while Unmatched Studies covers the page is
+reported as one event only after the reader closes it. The 1800-second hang timeout is the one
 AGENTS.md gives the candidate worklist suite.
 
 Candidate selection: `tests/candidate_ci.py` FLOWS runs case 01 on the G3
-candidate stack (one flow per file). Cases 02-06 are selected by the command
+candidate stack (one flow per file). Cases 02-07 are selected by the command
 above only.

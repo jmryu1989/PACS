@@ -12,7 +12,8 @@
  * opening of Report History. A re-render of the same opening (the page re-reads the Source on every list refresh) is the
  * same event; a new opening is a new event even when the body is the same. The report keeps its event ID and display
  * time, so a resend after a lost acknowledgement is the same event, which the server replays. A resend happens only at
- * the page's next existing chance (a re-render, the node coming on screen again, the tab becoming visible); no timer,
+ * the page's next existing chance (a re-render, the node coming on screen again, a modal over it closing, the tab becoming
+ * visible); no timer,
  * backoff or queue is added. A refused or unconfirmed report stays unconfirmed; it never removes the report from screen.
  * It is the browser's display report, not proof that a person read the text.
  */
@@ -24,6 +25,7 @@
   const REFUSED = [400, 403, 404, 409];
   // The page's open modals (the same set Related Report mode's Esc yields to); what lies outside one is covered.
   const MODALS = 'dialog:modal, .modal.show, #structmodal.modal.on';
+  const COVERS = MODALS + ', [inert]';
 
   function create(doc) {
     const surfaces = new Map();     // surface name -> { subject, entries: Map(key -> entry) }
@@ -138,8 +140,17 @@
     }
 
     doc.addEventListener('visibilitychange', checkAll);
-    // A closed modal dialog no longer hides the page behind it ('close' does not bubble; the capture phase sees it).
-    doc.addEventListener('close', checkAll, true);
+    // A closed modal uncovers the page behind it without moving it, so the viewport observer says nothing. The page closes
+    // its modals in more than one way (dialog.close() drops [open]; Unmatched Studies and the others drop .show or .on;
+    // [inert] may be lifted), so the uncovering is watched on those attributes rather than on one close event. Only a cover
+    // that went away is a chance: other class changes are not, or every repaint would resend an unconfirmed report.
+    let covers = new Set();
+    if (typeof root.MutationObserver === 'function') new root.MutationObserver(() => {
+      const now = new Set(doc.querySelectorAll(COVERS));
+      const lifted = [...covers].some(node => !now.has(node));
+      covers = now;
+      if (lifted) checkAll();
+    }).observe(doc, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'open', 'inert'] });
     return Object.freeze({ open: (surface, subject) => { open(surface, subject); }, watch, end });
   }
 

@@ -20,6 +20,8 @@ Cases:
      account's display names its own provision.
   06 A Source answer drawn while the reader's tab is in the background is reported only once the tab is visible again.
      Headless Chromium keeps every page visible (measured), so there this case reports itself skipped (NOT_RUN).
+  07 A Source answer drawn while Unmatched Studies (a class-based modal) covers the page is reported once the reader
+     closes the modal, as the same single event.
 """
 from __future__ import annotations
 
@@ -404,6 +406,47 @@ class ReportObservationBrowser(base.WorklistE2E):
         self.settle(page)
         self.assertEqual(len(self.shown(source.uid)), 1)
         self.evidence(page, "account-switch", shown=shown)
+
+    def test_a5_07_a_source_drawn_under_a_modal_is_reported_when_the_modal_closes(self):
+        # Unmatched Studies is the page's own class-based modal (it closes by dropping .show, with no close event and no
+        # change of the Source's place on screen); only an administrator opens it.
+        target, source = self.pair()
+        page = self.login("jmryu")
+        sent = self.reports(page)
+        held = []
+        release = self.hold(page, source.uid, held)
+        self.select(page, target)
+        page.locator(f'#relrows tr[data-uid="{source.uid}"] td').first.click()
+        expect(page.locator("#related-mode")).to_be_visible()
+        self.wait_ledger(page, lambda: held, lambda v: len(v) == 1, "the held Source read")
+        self.open_toolbar_group(page, "#m-unassigned")
+        page.locator("#m-unassigned").click()
+        expect(page.locator("#unmodal")).to_be_visible()
+        route, answer = held[0]
+        route.fulfill(response=answer)
+        release()
+        expect(page.locator('#related-mode [data-related-source="findings"]')).to_have_text("SYN A5 SOURCE APPROVED v2")
+        self.settle(page)
+        self.assertEqual(sent, [], "a Source drawn under an open modal is not a display")
+        self.assertEqual(self.shown(source.uid), [])
+        self.evidence(page, "under-modal")
+
+        page.locator("#un-close").click()
+        expect(page.locator("#unmodal")).to_be_hidden()
+        shown = self.wait_ledger(page, lambda: self.shown(source.uid), lambda v: len(v) == 1, "the display once uncovered")
+        self.wait_ledger(page, lambda: sent, lambda v: len(v) == 1 and v[0]["status"] == 200, "the acknowledgement")
+        event = shown[0]
+        provided = self.provisions(source.uid)[event["relatedEventId"]]
+        self.assertEqual(self.target(event), ("report-version", "2"))
+        self.assertEqual(event["targets"], provided["targets"])
+        self.assertEqual(event["userId"]["value"]["subject"], self.stack.user_ids["jmryu"])
+        self.assertEqual(provided["userId"]["value"]["subject"], self.stack.user_ids["jmryu"])
+        self.assertEqual(sent[0]["body"], {"accessRef": event["relatedEventId"], "eventId": event["eventId"],
+                                           "shownAt": event["occurredAt"]})
+        self.settle(page)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(len(self.shown(source.uid)), 1)
+        self.evidence(page, "uncovered", shown=shown)
 
 
 def load_tests(loader, tests, pattern):
