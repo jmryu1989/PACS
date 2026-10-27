@@ -83,7 +83,7 @@ def lf_text(path):
 ORIGIN = "https://clinician.test"
 BASE = "/worklist/hpacs-lite/"
 SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "index.html", "auth.js", "work-context.js", "session-transport.js",
-                                                    "critical-result-inbox.js")}
+                                                    "critical-result-inbox.js", "clinical-signature.js")}
 MAIN_HTML = read_page_source(HPACS / "main.html")
 AUTH_CONTROLLER = lf_text(ROOT / "api" / "src" / "auth.controller.ts")
 EMBLEM = (HPACS / "kin-emblem-j1.svg").read_bytes()
@@ -924,6 +924,16 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         self.assertEqual((uid(2), uid(1), ["Findings", "SYN-A-LATE-ANSWER"], "홍길동 SYN"),
                          (seen["detailUid"], seen["reportUid"], seen["sections"][0], self.identity()["Name"]),
                          "no-guard: A's late report paints under B's identifiers")
+
+    def test_m11_a_removed_cursor_row_does_not_fail_the_next_page(self):
+        rows = [dict(copy.deepcopy(ROWS[0]), uid=f'1.2.{1000 + i}') for i in range(101)]
+        replies = [
+            {'json': {'studies': rows[:100], 'pagination': {'limit': 100, 'offset': 0, 'total': 101, 'next': 'SYN-next'}}},
+            {'json': {'studies': rows[100:], 'pagination': {'limit': 100, 'offset': 99, 'total': 100, 'next': None}}},
+        ]
+        self.list_reply = lambda query: replies.pop(0)
+        self.open_home(count=101)
+        self.assertEqual([row['uid'] for row in rows], self.listed()['rows'])
 
     def test_06_list_states_are_distinct_and_refusals_are_shown_as_sent(self):
         self.held_lists = []

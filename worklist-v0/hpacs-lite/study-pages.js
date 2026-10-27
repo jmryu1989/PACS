@@ -32,12 +32,11 @@
           const page = data?.pagination, rows = data?.studies;
           if (page && !same(page.owner,owner)) throw Object.assign(new Error('목록 계정이 바뀌었습니다.'),{ownerChanged:true});
           if (!page || !same(page.owner,owner) || !Array.isArray(rows) || rows.length > 100 || page.limit !== 100
-            || page.offset !== draft.rows.length || !Number.isSafeInteger(page.total) || page.total < 0
-            || (draft.total !== null && page.total !== draft.total)
+            || !Number.isSafeInteger(page.offset) || page.offset < 0 || !Number.isSafeInteger(page.total) || page.total < 0
             || !(page.next === null || typeof page.next === 'string' && page.next.length > 0 && page.next.length <= 4096)
             || (page.next !== null && (rows.length !== 100 || page.next === draft.next))
-            || draft.rows.length + rows.length > page.total
-            || (page.next === null && draft.rows.length + rows.length !== page.total)) throw Object.assign(new Error('목록 페이지 형식을 확인할 수 없습니다. 새로고침하세요.'),{stale:true});
+            || page.offset + rows.length > page.total
+            || (page.next === null && page.offset + rows.length !== page.total)) throw Object.assign(new Error('목록 페이지 형식을 확인할 수 없습니다. 새로고침하세요.'),{stale:true});
           let previous = draft.rows.at(-1)?.uid;
           for (const row of rows) {
             if (!row || typeof row.uid !== 'string' || !row.uid || (previous !== undefined && row.uid <= previous)

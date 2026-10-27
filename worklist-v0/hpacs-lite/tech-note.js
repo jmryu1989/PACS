@@ -18,8 +18,8 @@ window.KinTechNote = function (app) {
   d.setAttribute('aria-labelledby', 'tech-note-title');
   d.innerHTML = `<h2 id="tech-note-title">Tech Note</h2>
     <div id="tech-note-target"></div><p>판독문·원본 영상과 별도로 저장됩니다. 촬영 기관의 방사선사·관리자가 작성하며 수정 전 내용은 이력에 남습니다.</p>
-    <div id="tech-note-meta"></div><label>Note<textarea id="tech-note-text" maxlength="10000" rows="7"></textarea></label>
-    <label>Reason for Change<input id="tech-note-reason" maxlength="1000"></label>
+    <div id="tech-note-meta"></div><label>Note<textarea id="tech-note-text" rows="7"></textarea></label>
+    <label>Reason for Change (Optional)<input id="tech-note-reason" maxlength="1000"></label>
     <div id="tech-note-status" role="status"></div><div class="tech-note-actions">
     <button id="tech-note-save" type="button">Save Note</button><button id="tech-note-reload" type="button">Reload Note</button>
     <button id="tech-note-history" type="button">History</button><button id="tech-note-close" type="button">Close</button></div>
@@ -45,7 +45,6 @@ window.KinTechNote = function (app) {
   // none typed, not "erase the reason of the revision").
   const inputDiffers = () => text() !== Ltext() || (!!reason().trim() && reason().trim() !== Lreason());
   const dirty = () => inputDiffers() || unresolved().length > 0;
-  const reasonUsable = () => !!reason().trim() && !usedReasons.has(reasonGeneration);
   const conflict = () => !!L && L.version > basis && !mine(L);
   $('reason').addEventListener('input', () => { ++reasonGeneration; });
 
@@ -215,13 +214,6 @@ window.KinTechNote = function (app) {
     else if(ending==='refused') status((before?before+'이번 입력은 거절되어 유지됩니다':'이번 저장은 거절되어 입력을 유지합니다')+(result?.message?' ('+result.message+').':'.')+open);
     return ending;
   }
-  // T04 / T18: an edit of an existing note needs a reason typed for it; an earlier save of this edit is said with it.
-  function needReason(prior) {
-    const saved=latestSaved();
-    status(prior?`앞선 입력은 ${ro(prior.version)} 저장되었으며 현재 수정은 새 사유를 입력한 뒤 저장하세요.`:
-      (saved?`앞선 입력은 ${ro(saved.version)} 저장되었으며 이번 수정의 사유를 입력하세요.`:'이번 수정의 사유를 입력하세요.'));
-    $('reason').focus();
-  }
   /** A new attempt from the current input on `base` (T03, T09, T18 follow-up). Checks T04-T06 first. */
   async function fresh(base, sentence, prior = null) {
     if (Lv() === 0 && !text().trim()) { status('메모 내용을 입력하세요.'); $('text').focus(); return null; } // T05
@@ -230,7 +222,6 @@ window.KinTechNote = function (app) {
       status(`새 저장은 보내지 않았으며 본문은 마지막 확인한 ${gwa(Lv())} 같${reasonOnly ? '고 사유만의 변경은 저장되지 않습니다' : '습니다'}.`);
       return null;
     }
-    if (base > 0 && !reasonUsable()) { needReason(prior); return null; }
     return send(attempt(base), sentence, prior);
   }
   /** After 409 (T07): read; a different save found stops this click; my own earlier save allows the one follow-up.
@@ -310,7 +301,7 @@ window.KinTechNote = function (app) {
         learn(item); // T23: an id found in the history settles its attempt; the input stays
         const entry = document.createElement('section'), title = document.createElement('h3'), body = document.createElement('pre');
         title.textContent = `v${item.version} · ${item.author} · ${new Date(item.createdAt).toLocaleString()}`;
-        body.textContent = (item.text || '(메모 비움)') + '\n수정 사유: ' + (item.reason || '(최초 작성)');
+        body.textContent = (item.text || '(메모 비움)') + '\n수정 사유: ' + (item.reason || '(사유 없음)');
         entry.append(title, body);
         const signed = window.KinClinicalSignature?.(result.emr, item.version);
         if (signed) { const proof = document.createElement('p'); proof.textContent = signed; entry.append(proof); }

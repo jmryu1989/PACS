@@ -5,7 +5,7 @@
   "sslRequired": "external",
   "registrationAllowed": true,
   "resetPasswordAllowed": true,
-  "verifyEmail": true,
+  "verifyEmail": false,
   "internationalizationEnabled": true,
   "supportedLocales": ["ko", "en"],
   "defaultLocale": "ko",

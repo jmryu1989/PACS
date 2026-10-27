@@ -102,10 +102,10 @@
     anchorChanged: '답변 이후 판독 상태가 바뀌었습니다.',
     anchorDetail: (then, now) => `답변 때 ${then} → 지금 ${now}`,
     closeEmpty: '사유 없이 닫았습니다.',
-    askHint: '1~2,000자. 작성자·기관·시각은 서버가 로그인한 계정으로 기록합니다.',
+    askHint: '작성자·기관·시각은 서버가 로그인한 계정으로 기록합니다.',
     replyHint: '같은 스레드에 추가 질문으로 이어집니다. 답변이 있던 질문은 다시 Open이 됩니다.',
     closeHint: '작성자는 사유 없이 닫을 수 있습니다. 닫은 질문에는 더 쓸 수 없습니다.',
-    noText: '1~2,000자의 내용을 입력하세요.',
+    noText: '내용을 입력하세요.',
     sending: '보내는 중입니다…',
     saved: '저장했습니다.',
     replayed: '이미 저장된 요청입니다. 서버가 처음 저장한 결과를 돌려주었습니다.',
@@ -149,7 +149,6 @@
   const QUESTION_ACTIONS = { ask: ['create'], reply: ['answer', 'followup'], close: ['close'] };
   const REPORT_STATE = { W: 'Awaiting Report', T: 'In Progress', P: 'Preliminary', A: 'Approved', H: 'On Hold' };
   const QUESTION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-  const QUESTION_TEXT_MAX = 2000;
 
   const $ = selector => document.querySelector(selector);
   let owner = null;
@@ -264,18 +263,18 @@
 
   /**
    * 한 쪽을 받아들이기 전의 모양 검사(study-pages.js와 같은 조건, 임상의 응답에는 owner 칸이 없다).
-   * 쪽 사이에서 total이 바뀌거나 순서가 어긋나면 서로 다른 시점의 목록을 이어 붙이게 되므로 답 전체를 버린다.
+   * 새 검사·삭제로 offset과 total은 바뀔 수 있다. UID 순서와 각 페이지 자체의 형식은 확인한다.
    */
   function checkPage(data, loaded, total, after) {
     const page = data && data.pagination;
     const rows = data && data.studies;
     const bad = !page || typeof page !== 'object' || !Array.isArray(rows) || rows.length > PAGE_LIMIT
-      || page.limit !== PAGE_LIMIT || page.offset !== loaded.length
-      || !Number.isSafeInteger(page.total) || page.total < 0 || (total !== null && page.total !== total)
+      || page.limit !== PAGE_LIMIT || !Number.isSafeInteger(page.offset) || page.offset < 0
+      || !Number.isSafeInteger(page.total) || page.total < 0
       || !(page.next === null || (typeof page.next === 'string' && page.next.length > 0 && page.next.length <= 4096))
       || (page.next !== null && (rows.length !== PAGE_LIMIT || page.next === after))
-      || loaded.length + rows.length > page.total
-      || (page.next === null && loaded.length + rows.length !== page.total);
+      || page.offset + rows.length > page.total
+      || (page.next === null && page.offset + rows.length !== page.total);
     if (bad) throw new Error('목록 페이지 형식을 확인할 수 없습니다. 새로고침하세요.');
     let previous = loaded.length ? loaded[loaded.length - 1].uid : null;
     for (const row of rows) {
@@ -773,9 +772,9 @@
     closedNote: '이 기록은 실제 전송 여부를 나타내지 않습니다',
     formHint: 'Counterparty는 상대 병원 이름 등 1~256자, Reason은 1~2,000자입니다. 이 화면은 등록 기관 목록을 읽지 않아 상대 기관은 '
       + '적은 문장으로만 기록합니다. 요청자·기관·시각은 서버가 로그인한 계정으로 기록하고, 같은 종류의 처리 중인 요청이 있으면 새로 남길 수 없습니다.',
-    cancelHint: '취소하려면 사유(1~2,000자)를 적으세요. 취소한 요청은 다시 열 수 없습니다.',
+    cancelHint: '취소 사유는 선택입니다(2,000자 이내). 취소한 요청은 다시 열 수 없습니다.',
     noText: 'Counterparty(1~256자)와 Reason(1~2,000자)을 입력하세요.',
-    noCancelText: '취소 사유를 1~2,000자로 입력하세요.',
+    noCancelText: '취소 사유는 2,000자 이내로 입력하세요.',
     noItem: '이 요청의 최신 상태를 읽지 못해 보내지 않았습니다. 목록을 다시 불러온 뒤 취소하세요.',
     ownFailed: '이 계정이 남긴 요청인지 확인하지 못해 취소 칸을 열지 않았습니다. Retry로 다시 읽으세요.',
     ownTooMany: '내 요청 목록을 끝까지 보지 못해 일부 요청을 찾지 못했습니다.',
@@ -1439,7 +1438,7 @@
     }
     if (requestOwn.get(id) !== true) return;
     const draft = requestFields(wrap);
-    if (!draft.note.trim() || draft.note.length > REQUEST_TEXT_MAX) {
+    if (draft.note.length > REQUEST_TEXT_MAX) {
       setRequestNote(key, 'failed', REQUEST.noCancelText);
       return;
     }
@@ -1940,7 +1939,7 @@
     const anchor = value => !!value && typeof value === 'object' && text(value.rs) && value.rs.length > 0
       && (value.version === null || (Number.isSafeInteger(value.version) && value.version > 0));
     if (!item || typeof item !== 'object' || item.id !== id || item.studyUid !== uid || !QUESTION_STATES.includes(item.state)
-        || !person(item.author) || !Array.isArray(item.entries) || !item.entries.length || item.entries.length > 100
+        || !person(item.author) || !Array.isArray(item.entries) || !item.entries.length
         || item.revision !== item.entries.length || item.entryCount !== item.entries.length || !anchor(item.current)
         || (item.state === 'Closed') !== (!!item.closed && typeof item.closed === 'object'))
       throw new Error(QUESTION.malformed);
@@ -2375,7 +2374,6 @@
     field.dataset.field = '';
     if (spec.multiline) field.rows = 3;
     else field.type = 'text';
-    field.maxLength = QUESTION_TEXT_MAX;
     field.setAttribute('aria-describedby', hintId);
     field.style.cssText = 'display:block;width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:7px;'
       + 'background:var(--panel2);color:var(--text);font:inherit;resize:vertical';
@@ -2475,7 +2473,7 @@
     if (leaving || questionLock !== null || selected !== uid || questionAttempts.has(key)) return;
     const text = field.value;
     const blankAllowed = action === 'close' && text === '';
-    if (!blankAllowed && (!text.trim() || text.length > QUESTION_TEXT_MAX)) {
+    if (!blankAllowed && (!text.trim())) {
       setQuestionNote(noteKey, 'failed', QUESTION.noText);
       return;
     }

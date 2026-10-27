@@ -30,9 +30,9 @@ class StudyPagesLive(LiveInvariantTests):
             self.assert_status(self.page(after=cursor,limit=2),409)
     def test_pages_02_collection_change_and_invalid_query_rejected(self):
         with self.stack.fixture():
-            cursor=self.page().body['pagination']['next'];self.assertIsNotNone(cursor)
+            first=self.page();cursor=first.body['pagination']['next'];self.assertIsNotNone(cursor)
             with self.stack.fixture():
-                changed=self.page(after=cursor);self.assert_status(changed,409);self.assertEqual(changed.body['code'],'STUDY_LIST_CHANGED')
+                changed=self.page(after=cursor);self.assert_status(changed,200);self.assertTrue(all(row['uid'] > first.body['studies'][-1]['uid'] for row in changed.body['studies']))
             for query in ['limit=0','limit=101','limit=01','limit=1&limit=2','after=bad','limit=1&other=x']:
                 self.assert_status(self.stack.request('GET','/studies?'+query,'doctor'),400)
     def test_pages_03_preliminary_and_personal_draft_visibility_unchanged(self):

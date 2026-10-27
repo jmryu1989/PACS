@@ -603,7 +603,6 @@ function kinCreateSRProvenance() {
       }
     }
     walk(instance?.ContentSequence, null);
-    if (incomplete) groups.clear();
     groups.incomplete = incomplete; return groups;
   };
   function mount() {
@@ -1622,7 +1621,7 @@ function kinCreateViewerHistory() {
         do {
           const page = await api(path() + '?includeHidden=true&limit=100' + (recheck ? '&recheck=' + encodeURIComponent(recheck) : '') + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {}, ticket);
           if (!asked(ticket, seq, 'author')) return;
-          if (!Array.isArray(page.items) || heads.length + page.items.length > 512 || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
+          if (!Array.isArray(page.items) || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
           heads.push(...page.items); cursor = page.nextCursor;
         } while (cursor);
         if (!asked(ticket, seq, 'author')) return;
@@ -1672,20 +1671,20 @@ function kinCreateViewerHistory() {
     async function readOnlyLoad(ticket, seq) {
       if (!valid(ticket) || seq !== readSequence) return;
       const study = scope, heads = [];
-      let cursor = null, version = null, withheld = false, pages = 0;
+      let cursor = null, version = null, withheld = false;
       dropRows(); panel.dataset.readOnly = 'loading'; toolbar();
       try {
         do {
           const page = await api(path() + '?limit=100' + (cursor === null ? '' : '&cursor=' + encodeURIComponent(cursor)), {}, ticket);
           if (!asked(ticket, seq, 'final')) return;
-          if (++pages > 6 || !page || page.uid !== study || typeof page.final !== 'boolean') throw new Error('Invalid page');
+          if (!page || page.uid !== study || typeof page.final !== 'boolean') throw new Error('Invalid page');
           if (!page.final) {
             if (cursor !== null || page.items !== null || page.nextCursor !== null) throw new Error('Invalid page');
             withheld = true; break;
           }
           const next = page.nextCursor;
           if (!Number.isSafeInteger(page.reportVersion) || page.reportVersion < 1 || (version !== null && page.reportVersion !== version) ||
-              !Array.isArray(page.items) || page.items.length > 100 || heads.length + page.items.length > 512 ||
+              !Array.isArray(page.items) || page.items.length > 100 ||
               !page.items.every(h => h && typeof h === 'object' && typeof h.id === 'string' && h.id && Number.isSafeInteger(h.revision) &&
                 h.item && typeof h.item === 'object' && Object.hasOwn(names, h.item.kind)) ||
               !(next === null || typeof next === 'string' && next.length > 0 && next.length <= 512 && next !== cursor)) throw new Error('Invalid page');
@@ -1955,8 +1954,8 @@ function kinCreateViewerHistory() {
         else if (e.editing) button(el, 'Save', () => save(e, 'edit'), !!e.busy || !!e.latest || !!sourceUnverified);
         else if (!e.head?.hidden) button(el, 'Edit', () => { e.editing = true; lock(e, false); row(e); }, manual(e.draft.kind) && e.head?.referenceStatus !== 'verified');
         if (e.head && !e.editing && !e.pending) button(el, e.head.hidden ? 'Restore' : 'Hide', () => {
-          const reason = window.prompt((e.head.hidden ? '복원' : '숨김') + ' 사유');
-          if (reason?.trim()) save(e, e.head.hidden ? 'restore' : 'hide', reason);
+          const reason = window.prompt((e.head.hidden ? '복원' : '숨김') + ' 사유 (선택)');
+          if (reason !== null) save(e, e.head.hidden ? 'restore' : 'hide', reason);
         }, !!e.busy);
         if (e.latest && !e.pending) button(el, 'Use Latest & Keep Changes', () => {
           e.head = e.latest; e.latest = null;

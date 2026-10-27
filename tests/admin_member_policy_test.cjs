@@ -48,6 +48,11 @@ const { KeycloakService } = require('../api/src/keycloak.service.ts');
   await patch({roles:['clinician','radiologist']});
   assert.deepEqual(changed.roles,['clinician','radiologist']);
   assert.equal(events.length,5,'each successful rights change reaches the ledger transaction');
+  kc.getUser = async () => ({id:member.sub,emailVerified:false});
+  await patch({roles:['clinician']});
+  assert.deepEqual(changed.roles,['clinician'], 'face-to-face approval does not require verified email');
+  await assert.rejects(patch({roles:['clinician'],verificationOverride:false}),e=>e.getStatus()===400);
+  kc.getUser = async () => ({id:member.sub,emailVerified:true});
   for (const invalid of [[],['gateway'],['invented'],['clinician','invented']]) {
     const before=writes;
     await assert.rejects(patch({roles:invalid}),e=>e.getStatus()===400);

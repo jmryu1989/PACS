@@ -329,7 +329,7 @@ export class ImageRequestService {
     this.member(c);
     if (!holds(c, CLINICIAN_ROLE) && !staff(c)) throw roleRequired();
     if (!exactKeys(b, ['requestId', 'expectedOwner', 'revision', 'action', 'note']) || !uuid(b.requestId) || !revision(b.revision)
-      || !IMAGE_REQUEST_ACTIONS.includes(b.action) || (b.action === 'accept' ? b.note !== '' : !text(b.note, IMAGE_REQUEST_TEXT_MAX)))
+      || !IMAGE_REQUEST_ACTIONS.includes(b.action) || (b.action === 'accept' ? b.note !== '' : b.action === 'cancel' ? typeof b.note !== 'string' || b.note.length > IMAGE_REQUEST_TEXT_MAX : !text(b.note, IMAGE_REQUEST_TEXT_MAX)))
       throw invalid('요청 ID·기준 revision·동작과 note를 확인하세요(accept는 빈 note, 그 밖은 1~2,000자)');
     if (b.action === 'cancel' ? !holds(c, CLINICIAN_ROLE) && !holds(c, ADMIN) : !staff(c)) throw roleRequired();
     this.expectOwner(c, b);

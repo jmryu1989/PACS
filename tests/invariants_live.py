@@ -1982,7 +1982,7 @@ class BffInvariantTests(unittest.TestCase):
                 usernames.append(username)
                 return {"username": username, "email": username + "@local.test", "firstName": "KIN", "lastName": "Create", **extra}
 
-            plain = self.stack.request("POST", "/admin/users", "jmryu", body_for("kin-test-create-" + uuid.uuid4().hex[:10]))
+            plain = self.stack.request("POST", "/admin/users", "jmryu", body_for("kin-test-create-" + uuid.uuid4().hex[:10], verificationOverride=False))
             self.assertEqual(plain.status, 201, plain.text)
             created.append(plain.body["id"])
             self.assertEqual(
@@ -1993,7 +1993,7 @@ class BffInvariantTests(unittest.TestCase):
 
             override = self.stack.request("POST", "/admin/users", "jmryu", body_for(
                 "kin-test-create-" + uuid.uuid4().hex[:10],
-                verificationOverride=True, institution="hallym", roles=["radiologist"],
+                institution="hallym", roles=["radiologist"],
             ))
             self.assertEqual(override.status, 201, override.text)
             created.append(override.body["id"])
@@ -2004,7 +2004,7 @@ class BffInvariantTests(unittest.TestCase):
             self.assertEqual((self.admin_row(override.body["username"])["institution"], override.body["roles"]), ("hallym", ["radiologist"]))
 
             rejected = (
-                (body_for("kin-test-create-" + uuid.uuid4().hex[:10], institution="hallym"), "verificationOverride"),
+                (body_for("kin-test-create-" + uuid.uuid4().hex[:10], institution="hallym"), "roles"),
                 ({"username": "kin-test-create-" + uuid.uuid4().hex[:10], "email": "a@local.test", "firstName": "KIN"}, "lastName"),
                 (body_for("service-account-kin-test-" + uuid.uuid4().hex[:6]), "서비스 계정"),
             )
@@ -2076,13 +2076,13 @@ class BffInvariantTests(unittest.TestCase):
         try:
             path = f"/admin/users/{quote(user_id)}"
             approve = {"approvalState": "APPROVED", "enabled": True, "institution": "hallym", "roles": ["radiologist"]}
-            self.assertEqual(self.stack.request("PATCH", path, "jmryu", approve).status, 400)
+            self.assertEqual(self.stack.request("PATCH", path, "jmryu", {**approve, "verificationOverride": False}).status, 400)
             self.assertEqual(self.stack.request("PATCH", path, "jmryu", {**approve, "verificationOverride": "yes"}).status, 400)
             self.assertEqual(self.stack.request("PATCH", path, "jmryu", {"verificationOverride": True}).status, 400)
             self.assertEqual(self.stack.request("PATCH", path, "jmryu", {"enabled": True, "verificationOverride": True}).status, 400)
             self.assertEqual(user_audit(user_id), [])
 
-            ok = self.stack.request("PATCH", path, "jmryu", {**approve, "verificationOverride": True})
+            ok = self.stack.request("PATCH", path, "jmryu", approve)
             self.assertEqual(ok.status, 200, ok.text)
             self.assertEqual(
                 (ok.body["approvalState"], ok.body["institution"], ok.body["emailVerified"], ok.body["enabled"]),

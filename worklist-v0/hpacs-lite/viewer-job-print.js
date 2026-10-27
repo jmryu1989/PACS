@@ -475,7 +475,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
     const annotations = job.annotations, refs = job.snapshot.annotations;
     if (job.snapshot.version !== 3) { if (annotations !== undefined || refs !== undefined) throw new Error('출력 주석 형식이 일치하지 않습니다.'); return; }
     const refuse = () => { throw new Error('저장 주석 전체를 확인할 수 없습니다. 다시 확인하세요.'); };
-    if (!Array.isArray(annotations) || !Array.isArray(refs) || annotations.length > 64 || refs.length !== annotations.length ||
+    if (!Array.isArray(annotations) || !Array.isArray(refs) || refs.length !== annotations.length ||
         new Set(annotations.map(a => a.id)).size !== annotations.length || new Set(refs.map(r => r.id)).size !== refs.length) refuse();
     for (const a of annotations) {
       const item = a.item, count = { arrow: 2, length: 2, angle: 3, ellipse: 4 }[item?.kind];

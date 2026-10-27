@@ -525,7 +525,7 @@
     $("#b-approve-next").addEventListener("click", approveAndNext);
     $("#b-addendum").addEventListener("click", () => commitReport("addendum"));
     let reasonResolve = null;
-    function askReason({ title, choices }) {
+    function askReason({ title, choices, optional = false }) {
       if (reasonResolve) reasonResolve(null);
       const modal = $("#reasonmodal"), extra = $("#reason-extra"), ok = $("#reason-ok");
       $("#reason-title").textContent = title;
@@ -535,10 +535,12 @@
       const value = () => {
         const choice = modal.querySelector('input[name="reason-choice"]:checked')?.value;
         const detail = extra.value.trim();
-        if (!choice || (choice === "기타" && !detail) || detail.length > 200) return null;
+        if (detail.length > 200) return null;
+        if (!choice) return optional ? detail : null;
+        if (choice === "기타" && !detail && !optional) return null;
         return detail ? `${choice} — ${detail}` : choice;
       };
-      const update = () => { ok.disabled = !value(); };
+      const update = () => { ok.disabled = value() === null; };
       update();
       modal.classList.add("show");
       return new Promise(resolve => {
@@ -553,7 +555,7 @@
         modal.oninput = modal.onchange = update;
         modal.onkeydown = e => { if (e.key === "Escape") finish(null); };
         $("#reason-cancel").onclick = () => finish(null);
-        ok.onclick = () => { const reason = value(); if (reason) finish(reason); };
+        ok.onclick = () => { const reason = value(); if (reason !== null) finish(reason); };
       });
     }
     $("#b-unread").addEventListener("click", async () => {
@@ -566,8 +568,8 @@
     });
     $("#b-defer").addEventListener("click", async () => {
       const uid = selectedUid, at = work.capture("study");
-      const reason = await askReason({ title: "판독 보류 사유", choices: ["prior 없음", "임상정보 부족", "영상 불량", "재촬영 필요", "기타"] });
-      if (!reason || uid !== selectedUid || !work.admits(at)) return;
+      const reason = await askReason({ title: "Defer (Optional Reason)", optional: true, choices: ["prior 없음", "임상정보 부족", "영상 불량", "재촬영 필요", "기타"] });
+      if (reason === null || uid !== selectedUid || !work.admits(at)) return;
       commitReport("defer", reason);
     });
 

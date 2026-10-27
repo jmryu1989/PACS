@@ -60,3 +60,13 @@ test('request timeout retains retry checkpoint and explicit cancel alone pauses 
  await assert.rejects(client.read(),e=>e.name==='AbortError');assert.equal(client.resumable,true);assert.equal(client.paused,false);
  client.cancel();assert.equal(client.paused,true);client.clear();assert.equal(client.paused,false);
 });
+
+test('arrivals and removal of the previous cursor row do not discard already read pages',async()=>{
+ for(const delta of [-1,1]){
+  const first=page(0),last={studies:[rows[100]],pagination:{owner,limit:100,offset:100+delta,total:101+delta,next:null}};
+  first.pagination.total=101;
+  const replies=[first,last];
+  const client=create({identity:()=>owner,changed:()=>{},request:async path=>path==='/me'?me:replies.shift()});
+  assert.deepEqual((await client.read()).studies,rows.slice(0,101));
+ }
+});

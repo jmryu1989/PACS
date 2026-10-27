@@ -152,6 +152,8 @@ jobs:
     - name: TypeScript for the report harness fixture projection
       timeout-minutes: 5
       run: npm ci --prefix api --ignore-scripts --no-audit --no-fund
+    - name: Keycloak institution roster continuation
+      run: node --test tests/keycloak_member_paging_test.cjs
     - name: CI registry and exact suite selection (once)
       if: ${{ fromJSON(steps.paths.outputs.jobs)['ci-selfchecks'] }}
       run: |
@@ -369,6 +371,7 @@ jobs:
         done
         python3 -c 'import sys; sys.path.insert(0, "tests"); from ops_product_transfer_fixture import provision; provision(sys.argv[1])' "$db"
         python3 scripts/record-run.py --run-dir tmp/runtime-ci/tech-note-attempt --cwd . --file api/src/pacs.service.ts --file api/src/pacs/values.ts --file api/src/pacs/access.ts --file api/src/pacs/institutions.ts --file api/src/study-source-groups.ts --file api/src/pacs/worklist.ts --file api/src/pacs/dicom-gateway.ts --file api/src/pacs/preferences.ts --file api/src/pacs/filters.ts --file api/src/pacs/study-state.ts --file api/src/pacs/tech-note.ts --file api/src/pacs/report-draft.ts --file api/src/pacs/report-evidence.ts --file api/src/pacs/report-commit.ts --file api/src/pacs/hold.ts --file api/src/pacs/clinician.ts --file api/src/pacs/audit.ts --file api/src/pacs/metrics.ts --file api/src/pacs.controller.ts --file api/src/study-access.service.ts --file api/src/admin-audit.ts --file api/prisma/schema.prisma --file api/prisma/migrations/20261006000000_tech_note_attempt_id/migration.sql --file tests/tech_note_attempt_service_test.cjs --file tests/ops_product_transfer_fixture.py --file scripts/emr-compose.py -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_TECH_NOTE_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_tech_note_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/tech_note_attempt_service_test.cjs
+        python3 scripts/record-run.py --run-dir tmp/runtime-ci/caution-app-database --cwd . --tree api/prisma --file tests/caution_app_database_test.cjs -- timeout 180 docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_CAUTION_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_tech_note_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/caution_app_database_test.cjs
     - name: Build the development target for the TypeScript-parser source check
       run: docker build --target development -t kin-api:dev-ci api
     - name: S7-U1a critical result sources read the report only through ReportVersion rows

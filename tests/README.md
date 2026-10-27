@@ -1,5 +1,12 @@
 # 살아 있는 불변조건 테스트
 
+일상 업무 제한 완화(caution-app): `caution_app_dom_test.py`는 이름 초안·확인 없는 복사·계정 링크·SR 부분 표시를,
+`clinical_context_service_test.cjs`/`clinical_context_dom_test.py`는 이전 판독·이력 이어읽기를 검사한다.
+`keycloak_member_paging_test.cjs`는 1,000명 이후 사용자 조회를, `viewer_volume_job_test.cjs`는 201번째 작업과 66개 주석의 보존을 검사한다.
+`caution_app_database_test.cjs`와 `tech_note_attempt_service_test.cjs`의 합성 PostgreSQL 실행은 종전 누적 한도 이후 이력·긴 글 저장을 확인한다.
+질문·협진·Tech Note의 글자 수 제한과 질문 100항목 제한은 제거한다. Reset/Addendum 사유·다른 작성자의 질문 닫기 사유·덮어쓰기 확인은 유지한다.
+실제 Keycloak 비밀번호 변경과 동일 IP 요청은 `scripts/run-tests.py --module tests/e2e/test_caution_app.py --class CautionAppE2E --mode live --unit caution-app-real-password --timeout 600`으로 격리 합성 스택에서 확인한다.
+
 REQ-VIEWER-REFERENCE-PLANE → RISK-VIEWER-REFERENCE-PLANE → TEST-VIEWER-REFERENCE-PLANE (2026-10-26 사용자 F1/F3/F4/F5 수정 지시): 모든 modality의 Reference Lines는 두 pane의 비어 있지 않은 StudyInstanceUID·FrameOfReferenceUID가 일치할 때만 허용한다. Stack은 현재 표시 프레임의 저장된 IOP/IPP를 요구한다. 재구성 MPR은 현재 이미지 ID가 없어도 표시 volume의 원본 프레임들이 저장된 IOP/IPP와 동일 study/FoR를 가지며 volume viewport의 FoR와 일치하면 허용한다. 실제 교차 평면과 선은 native volume camera/renderer가 계산한다. MG는 추가로 양쪽 MG·동일 R/L 조건(REQ-MG-03 → RISK-MG-FALSE-ANATOMY → TEST-MG-REFERENCE-LINES)을 유지한다. 일반 위험은 무관한 좌표계/기본 대체 평면의 잘못된 위치 안내 또는 유효한 CT/MR MPR 위치 안내의 소실이다. `node --test tests/viewer_reference_lines_test.cjs`는 stack·volume/stack·MPR 양방향, 저장 plane 누락, study/FoR 불일치, 교체·스크롤·재진입을 검사한다. 실제 제공 OHIF에서 MG·CT/MR stack·CT axial/sagittal/coronal MPR의 Reference Lines와 제거/복귀를 별도로 확인한다. 순수 시험의 native 호출만으로 영상 정확성이나 실제 화면 검증을 대체하지 않는다.
 
 REQ-S7-U5-DB-RIGHTS (D621/D623) → RISK-STALE-CREDENTIAL / RISK-LOST-REVOCATION → `auth_session_service_test.cjs`: DB 차단·권한 버전·새 인증·CAS·commit 경계, R10-05/06/09와 sid 종료 U1–5/9. Migration은 46개, 복원 표는 51개다. `20261007170000_member_db_rights` 적용 후 트래픽과 회원 변경을 멈춘 상태에서 `node prisma/import-member-rights.cjs`를 실행한다. 모든 realm 회원과 기존 세션을 이관하며 기존 provider-disabled/미확인 회원 변경은 차단으로 보존한다. 이관 실패·누락은 JWT 권한으로 대체하지 않는다. 외부 realm 사전 대조와 실제 이관은 배포 관문이다. 기존 disabled 회원의 일회성 legacy enable과 운영자 `--retry-roster` 복구는 core다. B01–B08 명부 수렴·회원 provider 조정 장치는 U5b에 남는다. 정상 회원 진입에는 새 클릭·prompt·관리 API 조회를 추가하지 않는다. 아래 과거 S7-U5 전체 코스 설명 중 회원 provider 격리·15초 Activate·U5E-13/14/17~20/22~27 기대는 `fable/s7-u5b-20261007`에 보류되며 core 완료 근거가 아니다. core의 U5E-15는 차단 중 거절·명령 후 새 인증·옛 권한 거절을 검사한다. 실제 realm 이관, core 권한 fixture를 반영한 live/CE1–4, 새 SHA PR CI·G3·독립 검수는 최종 전달 관문이다. 배포 유의(D631): round 3 `e3d16b5` 이전 빌드로 이미 realm 가져오기를 끝낸 DB가 있으면 트래픽 전에 `MemberRights.newAuthAfter`를 `MemberRightsImport.completedAt`으로 보정한다(새 코드는 marker가 있으면 가져오기를 건너뛰므로 자동 보정되지 않는다; 2026-10-07 확인 기준 그런 DB는 없다).
@@ -334,7 +341,7 @@ DB 복원은 `python tests/viewer_migration_test.py ViewerMigration.test_03_real
 소견 기록/정확한 영상 이동(S2-A): `python tests/finding_api_test.py` (13개, 8~10은 S2-B2 서버, 11·12는 S2-L, 13은 S3-U2a 인용 백엔드)와 `python tests/e2e/test_finding_navigation.py` (8개, 7은 S2-B2 화면, 8은 S2-C).
 저장한 표식 1~8개를 같은 검사 안에서 소견에 연결하고 서버가 식별·판·수치·digest를 복사한다. 클라이언트가 보낸
 수치/종류/digest 거절, 같은 요청 ID 재시도의 동일 결과, 다른 본문 409, 동시 편집 하나만 200, 부모 잠금 대기 중 바뀐 표식판의
-409, 잠금 지연 503 후 재시도, 검사당 256개·누적 4096판·16MiB와 소견당 1000판 한도, 기관/P 지정/작성자/서비스 토큰 경계,
+409, 잠금 지연 503 후 재시도, 검사당 256개·누적 4096판·16MiB와 소견당 1000판의 종전 한도를 넘는 저장·이력 보존, 기관/P 지정/작성자/서비스 토큰 경계,
 표식 수정→Revised(수치는 저장 당시 값)·숨김→Hidden·미존재→Missing, 본문 수정 시 기존 사본 바이트 유지, 명시적 Refresh Link의 새 판,
 승인 후 소견 편집이 판독 행을 바꾸지 않음을 검사한다. 브라우저 시험은 새 로그인 뒤 목록·Go to Image가 실제 저장 SOP/프레임을
 `getCurrentImageId`로 증명하고 표식 강조, 응답 유실 재시도, 두 창 충돌, 같은 문서의 mode 재진입(A→B→A) 뒤 늦은 목록 폐기,
@@ -1772,7 +1779,7 @@ POST는 `requestId` UUID와 완전한 `item`을 받으며 revision 추가는 `ex
 항목 kind/Study/Series/SOP/frame/FoR은 변경할 수 없다. 삭제한 계정·철회된 작성자의
 항목을 다른 사람에게 넘기거나 대신 숨기는 기능은 없어 해당 이력은 읽기전용으로 남는다.
 
-검사당 lifetime512항목/4096revision/16MiB와 snapshot8KiB를 적용한다.
+검사당 lifetime512항목/4096revision/16MiB 제한은 제거하며, 기존 이력을 보존하고 snapshot8KiB 검증은 유지한다.
 bytes는 PostgreSQL jsonb::text의 UTF-8이며 전체 디스크 사용량 상한은 아니다.
 숨김은 용량을 반환하지 않는다. revision/bytes가 가득 차면 숨김/복원도409
 `VIEWER_STORAGE_LIMIT`이다. 항목 개수만 가득 찼을 때는 추가 identity를 만들지 않는

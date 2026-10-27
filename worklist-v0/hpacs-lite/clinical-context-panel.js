@@ -25,7 +25,9 @@
       const retry = node('button', model.TEXT.retry, 'chip');
       retry.type = 'button';
       retry.hidden = true;
-      status.after(retry);
+      const next = node('button', 'Next Page', 'chip'); next.type = 'button';
+      next.addEventListener('click', () => { if (answer?.nextCursor && !loading) start(shownUid, answer.nextCursor); });
+      status.after(retry, next);
       // shownUid: the study the panel is for (null = hidden). A request is one generation of seq; only the newest may paint.
       let ended = false, seq = 0, controller = null, loading = false, shownUid = null;
       let answer = null, stale = {}, failure = null, observation = null;
@@ -55,6 +57,7 @@
         refresh.disabled = !visible || loading;
         retry.disabled = loading;
         retry.hidden = true;
+        next.hidden = !visible || !answer?.nextCursor; next.disabled = loading;
         status.replaceChildren();
         status.title = '';
         conflict.replaceChildren();
@@ -118,7 +121,7 @@
         if (!loading) line(model.summary(answer, stale, failure));
       }
 
-      function start(uid) {
+      function start(uid, cursor) {
         if (controller) controller.abort();
         const mine = ++seq, who = owner(), own = new AbortController();
         controller = own;
@@ -126,7 +129,7 @@
         paint();
         // 이 읽기를 시작한 작업 문맥. 답도 실패도 그것이 그대로일 때만 이 패널에 닿는다.
         const at = work.capture('document');
-        read(uid, own.signal, at).then(value => settle(mine, uid, who, value, null, at), error => settle(mine, uid, who, null, error, at));
+        read(uid, own.signal, at, cursor).then(value => settle(mine, uid, who, value, null, at), error => settle(mine, uid, who, null, error, at));
       }
       function settle(mine, uid, who, value, error, at) {
         // 로그아웃 준비·그 취소 뒤에 온 답은 아무것도 그리지 않는다. 그 읽기가 세운 대기 표시만 내려 두고(자기 것만),
@@ -227,6 +230,6 @@
         allowed: () => !!sess && serverMode && !demoMode && !offline && (KinAuth.has('radiologist') || KinAuth.has('admin')),
         target: () => viewed()?.uid ?? null,
         owner: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution ?? null, s.sub ?? null] : null; },
-        read: (uid, signal, at) => api('GET', '/studies/' + encodeURIComponent(uid) + '/clinical-context', undefined, signal, at),
+        read: (uid, signal, at, cursor) => api('GET', '/studies/' + encodeURIComponent(uid) + '/clinical-context' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''), undefined, signal, at),
         actor: value => displayActor(value) });
     } catch (_) { toast('Clinical Context 패널을 준비하지 못했습니다. 판독 작업은 계속할 수 있습니다.', 'err'); }

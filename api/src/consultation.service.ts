@@ -8,7 +8,8 @@ import type { Caller } from './pacs.service';
 
 const uuid = (value:any) => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 const object = (value:any) => value && typeof value === 'object' && !Array.isArray(value);
-const text = (value:any) => typeof value === 'string' && value.trim().length > 0 && value.length <= 2000;
+const text = (value:any) => typeof value === 'string' && value.trim().length > 0;
+const optionalText = (value:any) => typeof value === 'string';
 const fingerprint = (value:any) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const conflict = () => new ConflictException('자문 의뢰가 변경되었습니다. 다시 불러온 뒤 확인하세요');
 
@@ -99,7 +100,7 @@ export class ConsultationService {
   async create(uid:string,c:Caller,b:any,transaction?:Prisma.TransactionClient) {
     this.member(c);
     if (!object(b) || Object.keys(b).sort().join()!=='expectedOwner,reason,recipientSub,requestId'
-      || !uuid(b.requestId) || !uuid(b.recipientSub) || !text(b.reason)) throw new BadRequestException('수신자와 1~2,000자의 의뢰 사유를 입력하세요');
+      || !uuid(b.requestId) || !uuid(b.recipientSub) || !optionalText(b.reason)) throw new BadRequestException('수신자를 선택하고 의뢰 사유는 2,000자 이내로 입력하세요');
     if (JSON.stringify(b.expectedOwner)!==JSON.stringify([c.institution,c.sub])) throw conflict();
     const id=b.requestId.toLowerCase(), recipientSub=b.recipientSub;
     const mark=fingerprint({uid,institution:c.institution,subject:c.sub,recipientSub,reason:b.reason});
@@ -131,7 +132,7 @@ export class ConsultationService {
     this.member(c);
     if (!uuid(id) || !object(b) || Object.keys(b).sort().join()!=='action,expectedOwner,note,requestId,revision'
       || !uuid(b.requestId) || !Number.isInteger(b.revision) || b.revision<1 || b.revision>=2147483647
-      || !['accept','complete','cancel'].includes(b.action) || (b.action==='accept'?b.note!=='':!text(b.note))) {
+      || !['accept','complete','cancel'].includes(b.action) || (b.action==='accept'?b.note!=='':b.action==='cancel'?!optionalText(b.note):!text(b.note))) {
       throw new BadRequestException('자문 처리 요청과 사유·답변을 확인하세요');
     }
     if (JSON.stringify(b.expectedOwner)!==JSON.stringify([c.institution,c.sub])) throw conflict();

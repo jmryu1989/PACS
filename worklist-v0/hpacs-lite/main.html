@@ -1176,7 +1176,8 @@
       </div>
       <a class="mright member-link" id="member-link" href="admin.html" style="display:none">Members</a>
       <div class="mright" title="메뉴·버튼은 영어, 설명·오류 안내는 한국어로 표시합니다.">EN</div>
-      <button class="mright logout" id="logout" type="button">Log out</button>
+      <a class="mright" href="/auth/realms/kin/account/account-security/signing-in" target="_blank" rel="noopener">Change Password</a>
+      <button class="logout" id="logout" type="button">Log out</button>
     </div>
   </div>
 
@@ -1312,7 +1313,7 @@
           <button id="t-modify">Modify Exam</button>
           <button id="t-verify">Verify</button>
           <button id="t-unverify">Unverify</button>
-          <button disabled title="③ 의도적 생략 (DICOM 조작 필요)">Split Exam</button>
+          <button hidden disabled title="③ 의도적 생략 (DICOM 조작 필요)">Split Exam</button>
           <button id="t-import" type="button" hidden title="이 기관의 DICOM 파일을 골라 반입합니다(파일마다 결과를 보입니다).">Import DICOM</button>
         </span>
         <span style="flex:1"></span>
@@ -1411,7 +1412,7 @@
           <div class="tpl-opts">
             <label><input type="checkbox" id="t-mod" checked> Modality</label>
             <label>부위 <select id="t-body" aria-label="상용구 부위"><option value="">전체 부위</option></select></label>
-            <label title="검사명 자동 매칭은 준비 중입니다"><input type="checkbox" id="t-desc" disabled> Study Description (준비 중)</label>
+            <label hidden title="검사명 자동 매칭은 준비 중입니다"><input type="checkbox" id="t-desc" disabled> Study Description (준비 중)</label>
           </div>
           <div class="tpl-search">
             <input id="tpl-search" type="search" maxlength="200" aria-label="상용구 검색" placeholder="제목·단축어·Modality·부위 검색">
@@ -1529,7 +1530,7 @@
               </div>
               <div class="toolbar-section" id="report-more-status" role="group" aria-label="Status">
                 <button id="b-defer">Defer</button>
-                <button id="b-except" disabled title="판독 제외: 아직 연결되지 않은 기능입니다(7/9단계 예정). 권한 때문에 막힌 것이 아닙니다.">Except</button>
+                <button hidden id="b-except" disabled title="판독 제외: 아직 연결되지 않은 기능입니다(7/9단계 예정). 권한 때문에 막힌 것이 아닙니다.">Except</button>
                 <button id="b-mark-cvr" disabled title="중요 결과(CVR) 보내기: 서버가 이 검사에서 보낼 수 있다고 답하기 전에는 켜지지 않습니다.">Mark CVR</button>
                 <button id="b-unread">Reset to Unread</button>
               </div>

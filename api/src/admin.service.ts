@@ -149,7 +149,7 @@ export class AdminService {
     const lastName = text(body?.lastName, 'lastName', 128);
     if (body?.verificationOverride !== undefined && typeof body.verificationOverride !== 'boolean')
       throw new BadRequestException('verificationOverride는 boolean이어야 합니다');
-    const verificationOverride = body?.verificationOverride === true;
+    const verificationOverride = body?.verificationOverride !== false;
     if (!verificationOverride && (body?.institution !== undefined || body?.roles !== undefined))
       throw new BadRequestException('기관·역할을 함께 지정하려면 verificationOverride:true가 필요합니다');
     if (verificationOverride && (body?.institution === undefined || body?.roles === undefined))
@@ -260,7 +260,7 @@ export class AdminService {
       try {
         identity ??= approvalMutation ? await this.managed(id)
           : await this.managed(id, within(300)).catch(() => null);
-        if (approvalMutation && !identity!.emailVerified && body?.verificationOverride !== true)
+        if (approvalMutation && !identity!.emailVerified && body?.verificationOverride === false)
           throw new BadRequestException('이메일 검증이 끝나지 않은 사용자는 승인할 수 없습니다');
       } catch (error) { preReadError = error; }
     }

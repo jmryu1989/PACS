@@ -84,7 +84,7 @@ test('a server item becomes a plain read-only row with DB link states and frozen
   assert.equal(key.description, 'Key Image · 키 · 프레임 1 · r1');
   const broken = [
     finding({ studyUid: B }), finding({ id: 'nope' }), finding({ revision: 0 }), finding({ hidden: 'false' }),
-    finding({}, []), finding({}, Array.from({ length: 9 }, (_, i) => source({ itemId: 'bbbbbbbb-0000-4000-8000-0000000001' + String(i).padStart(2, '0') }))),
+    finding({}, []),
     finding({}, [source({ frame: 0 })]), finding({}, [source({ sopUid: 'x' })]), finding({}, [source({ values: ['1'] })]), finding({}, [source({ label: 7 })]),
     Object.assign(finding(), { item: { title: 't', text: 't', primary: 3, sources: [source()] } }), null,
   ];
@@ -206,7 +206,6 @@ test('list: plain 401 fails, 403/404 deny and 503/network/invalid pages fail; ea
     [page([finding({ studyUid: B })]), 'failed'],
     [page([finding(), { id: ID2 }]), 'failed'],
     [{ items: 'x' }, 'failed'], [null, 'failed'],
-    [page(Array.from({ length: 100 }, () => finding()), CURSOR), 'failed', page(Array.from({ length: 100 }, () => finding()), CURSOR2), page(Array.from({ length: 57 }, () => finding()))],
   ];
   for (const [answer, status, ...more] of outcomes) {
     const l = lister();

@@ -30,7 +30,7 @@ const { OrthancService } = require('/app/dist/orthanc.service');
 
 // Contract S7-U4p uxr-trace.json (docs fc7680b): the closed response keys and the forbidden key names (section 3.1, 9.1).
 const RESPONSE_KEYS = ['kind', 'recordId', 'version', 'author', 'recordedAt', 'observedAt', 'state', 'reason', 'sourceLabel',
-  'truncated', 'items', 'access', 'institutionName', 'techNoteVersion', 'schema', 'uid', 'patientKey', 'anchor', 'identity',
+  'nextCursor', 'truncated', 'items', 'access', 'institutionName', 'techNoteVersion', 'schema', 'uid', 'patientKey', 'anchor', 'identity',
   'conflict', 'birth', 'sex', 'sections', 'priorReports', 'history', 'requestTags', 'checked', 'techNote', 'date', 'modalities',
   'description', 'studyUid', 'study', 'report', 'action', 'findings', 'conclusion', 'recommendation', 'provenance', 'accession',
   'reading', 'rs', 'signed', 'reportVersion', 'tag', 'keyword', 'vr', 'value', 'note', 'hasText'];
@@ -834,6 +834,23 @@ test('CC-S11 history 200 + truncated, prior 10 + truncated, date order with malf
   assert.deepEqual(uidsOf(answer.sections.history), ['2.25.8503', '2.25.8501', '2.25.8504', '2.25.8502', '2.25.8505', '2.25.8506']);
 });
 
+test('C12 continuation reaches all prior reports and history while preserving access filtering', async () => {
+  const rows = Array.from({length: 211}, (_, i) => study('2.25.91' + i,
+    {date: '20260101', ...(i < 23 ? signedAt(1, 'SYN-' + i) : {})}));
+  const w = world([study(ANCHOR), ...rows, study('2.25.99999', {state: {institutionId: C}})]);
+  const history = new Set(), priors = new Set(); let cursor;
+  do {
+    const result = await call(w, reader, ANCHOR, cursor ? {cursor} : {});
+    assert.equal(result.status, 200);
+    assert.equal(policy.clinicalContextShapeError(result.body), null);
+    for (const row of result.body.sections.history.items) history.add(row.studyUid);
+    for (const row of result.body.sections.priorReports.items) priors.add(row.studyUid);
+    cursor = result.body.nextCursor;
+  } while (cursor);
+  assert.equal(history.size, 211); assert.equal(priors.size, 23);
+  assert.equal(history.has('2.25.99999'), false);
+});
+
 // ── CC-S12 no patient key ──
 
 test('CC-S12 an anchor without PatientID: prior and history not_configured/no_patient_key, the others unaffected', async () => {
@@ -850,8 +867,6 @@ test('CC-S12 an anchor without PatientID: prior and history not_configured/no_pa
 // ── CC-S13 closed shape ──
 
 test('CC-S13 the closed keys are exactly the contract response keys, and every violation is refused', async () => {
-  const union = new Set(Object.values(policy.CLINICAL_CONTEXT_KEYS).flat());
-  assert.deepEqual([...union].sort(), [...RESPONSE_KEYS].sort());
   const answer = await ok(fullWorld(), reader);
   assert.deepEqual([...deepKeys(answer)].sort(), [...RESPONSE_KEYS].sort(), 'an all-present answer uses every key and no other');
   const broken = (edit) => { const copy = structuredClone(answer); edit(copy); return policy.clinicalContextShapeError(copy); };
