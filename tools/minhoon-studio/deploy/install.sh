@@ -120,6 +120,7 @@ if [ ! -f "$PASSFILE" ] || [ "$ROTATE" = "--rotate-passwords" ]; then
   printf '%s' "$P2" | sudo -u studio "$ROOT/node/bin/node" "$ROOT/app/server/server.js" set-password owner "정모" --config "$ROOT/etc/config.json"
   unset P1 P2
 fi
+chmod 600 "$ROOT/data/users.json" "$ROOT/data/sessions.json" 2>/dev/null || true
 
 echo "== systemd"
 install -o root -g root -m 644 "$ROOT/app/deploy/minhoon-studio.service" /etc/systemd/system/minhoon-studio.service

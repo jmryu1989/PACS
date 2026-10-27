@@ -84,7 +84,7 @@ class Auth {
     return `${COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure ? '; Secure' : ''}`;
   }
 
-  save() { writeJsonAtomic(this.sessionsFile, this.sessions); }
+  save() { writeJsonAtomic(this.sessionsFile, this.sessions, 0o600); }
 }
 
 const DUMMY = hashPassword('studio-dummy-password', Buffer.alloc(16, 7));
@@ -101,7 +101,7 @@ async function setPasswordFromStdin(dataDir, name, displayName) {
   const file = path.join(dataDir, 'users.json');
   const users = readJsonFile(file, {});
   users[name] = { displayName: displayName || users[name]?.displayName || name, ...hashPassword(password), updated: new Date().toISOString() };
-  writeJsonAtomic(file, users);
+  writeJsonAtomic(file, users, 0o600);
 }
 
 module.exports = { Auth, COOKIE, hashPassword, verifyPassword, setPasswordFromStdin };

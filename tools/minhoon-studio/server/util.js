@@ -104,10 +104,10 @@ function readJsonl(file, limit = Infinity) {
 }
 
 // Atomic JSON write so a crash mid-write never leaves a half file that the next start cannot parse.
-function writeJsonAtomic(file, value) {
+function writeJsonAtomic(file, value, mode = 0o640) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = file + '.' + process.pid + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2), { mode });
   fs.renameSync(tmp, file);
 }
 

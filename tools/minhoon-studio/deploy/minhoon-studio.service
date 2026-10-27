@@ -13,6 +13,7 @@ Environment=HOME=/opt/minhoon-studio/home
 ExecStart=/opt/minhoon-studio/node/bin/node /opt/minhoon-studio/app/server/server.js --config /opt/minhoon-studio/etc/config.json
 Restart=on-failure
 RestartSec=5
+UMask=0027
 
 # Resource limits: the PACS on this host must always win. The studio (server + Claude CLI + builders, all children
 # of this unit) gets at most MemoryMax and a low CPU weight with a one-core cap. Values and their basis are in
