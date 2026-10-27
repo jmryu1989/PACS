@@ -19,7 +19,8 @@ Cases:
   05 Account switch: a report the first account never delivered is not sent under the second account; the second
      account's display names its own provision.
   06 A Source answer drawn while the reader's tab is in the background is reported only once the tab is visible again.
-     Headless Chromium keeps every page visible (measured), so there this case reports itself skipped (NOT_RUN).
+     Playwright's Chromium keeps every page visible, headless or headed (measured), so there this case reports itself
+     skipped (NOT_RUN); it runs as written in a browser that hides a background tab.
   07 A Source answer drawn while Unmatched Studies (a class-based modal) covers the page is reported once the reader
      closes the modal, as the same single event.
 """
@@ -269,9 +270,10 @@ class ReportObservationBrowser(base.WorklistE2E):
         page.bring_to_front()
         if hidden != "hidden":
             other.close()
-            # Measured 2026-10-27 with Playwright 1.60 Chromium (headless shell and channel "chromium"): another page,
-            # a minimized window and a second tab in the same window all leave document.visibilityState "visible".
-            self.skipTest("NOT_RUN: this headless browser keeps a background page visible; the case needs a headed browser")
+            # Measured with Playwright 1.60 Chromium: headless (shell and channel "chromium", 2026-10-27) and headed
+            # (Windows, and xvfb-run on Linux, 2026-10-28) - another page, a second tab in the same window, a minimized
+            # window, with or without focus emulation - all leave document.visibilityState "visible".
+            self.skipTest("NOT_RUN: this Playwright browser keeps a background page visible (headless and headed)")
         sent = self.reports(page)
         held = []
         release = self.hold(page, first.uid, held)
