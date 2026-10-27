@@ -291,12 +291,14 @@
 
   /**
    * 쪽 사이에 목록이 바뀌면(이어받기 값이 409 STUDY_LIST_CHANGED를 받거나 checkPage가 moved를 던지면) 받은 쪽을 버리고
-   * 처음부터 다시 읽는다. 많아야 두 번(config/ohif/ct-sync.js와 같다) — 계속 바뀌면 그때 실패로 알린다. 첫 쪽의 409는
+   * 처음부터 다시 읽는다. 다시 읽기는 첫 변경을 본 때부터 요청 하나가 기다릴 수 있는 시간(TIMEOUT_MS) 동안만 하고, 그 뒤에도
+   * 바뀌면 실패로 알린다 — 횟수 상한은 근거가 없고, 이 시간은 이 화면이 요청마다 이미 허락한 시간이다. 첫 쪽의 409는
    * 한 번의 답 안에서 서버가 본 변경이라 그대로 알린다. take는 받아들이기 전의 쪽마다, progress는 다음 쪽이 남을 때,
    * reset은 다시 읽기 전마다 부른다.
    */
   async function readPages(path, fresh, { take, progress, reset }) {
-    for (let restarts = 0; ; restarts++) {
+    let changedAt = null;
+    for (;;) {
       const loaded = [];
       let total = null;
       let after = null;
@@ -314,7 +316,9 @@
         return loaded;
       } catch (error) {
         if (!fresh()) return null;
-        if (error.code !== 'STUDY_LIST_CHANGED' || !(error.moved || after !== null) || restarts >= 2) throw error;
+        if (error.code !== 'STUDY_LIST_CHANGED' || !(error.moved || after !== null)) throw error;
+        changedAt ??= Date.now();
+        if (Date.now() - changedAt >= TIMEOUT_MS) throw error;
         reset();
       }
     }

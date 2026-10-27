@@ -8,7 +8,7 @@ import type { AccessEvent } from '../emr-contract/access-event';
 import { newAuditLinkId, parseAccessEvent } from '../emr-contract/access-event';
 import { refuse } from '../emr-contract/validation';
 import { BackgroundWork, EMR_BACKGROUND_WORK } from '../emr-runtime/background-work';
-import { EMR_PENDING_LIMIT, EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS, boundEmrStatements } from '../emr-runtime/limits';
+import { EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS, boundEmrStatements } from '../emr-runtime/limits';
 import { EMR_RECORD_PORT, EmrRecordPort, EmrRecordWork } from '../emr-runtime/record-port';
 import { REQUEST_CONTEXT_SOURCE, RequestContextSource, RequestContextUnavailable, RequestFacts } from '../emr-runtime/request-context';
 import { OrthancService } from '../orthanc.service';
@@ -218,20 +218,16 @@ export class OnlineImageService implements BeforeApplicationShutdown {
     } finally { work.end(); }
   }
 
-  /** Rows of closed deliveries that no closing transaction has retained yet, oldest first. At most EMR_PENDING_LIMIT
-   * deliveries (D1770's first-site pending bound): the record port admits no more deliveries' work at once, and each
-   * held entry is one such delivery's rows. Beyond it the oldest is dropped and named; its failure is already
-   * journaled against its delivery, so the record shows its facts were not written (R244-GPT-08). */
+  /** Rows of closed deliveries that no closing transaction has retained yet, oldest first. No count bounds them: no
+   * decision sets one (R244-GPT-08), and dropping an entry would lose facts of a viewing the record already names. An
+   * entry leaves only when a transaction retains it or, at shutdown, when it is named on stderr (its failure is already
+   * journaled against its delivery). Each entry is one delivery that opened (its provide-prepared event committed) and
+   * then could not retain its rows, and every closing retries the held entries before its own. */
   private readonly unretained: Unretained[] = [];
   /** Entries a closing's own transaction could not retain join the end; entries a retry could not retain return to
    * the front, ahead of any a concurrent closing added meanwhile. */
   private hold(entries: Unretained[], error: unknown, retried: boolean): void {
     if (retried) this.unretained.unshift(...entries); else this.unretained.push(...entries);
-    while (this.unretained.length > EMR_PENDING_LIMIT) {
-      const dropped = this.unretained.shift()!;
-      console.error('[EMR-E] image observations dropped: retention refused beyond the held bound', JSON.stringify({
-        deliveryEventId: dropped.deliveryEventId, responses: dropped.rows.map(row => [row.kind, row.link.eventId, row.link.requestId]) }));
-    }
     console.error('[EMR-E] image observations held for a later retention', JSON.stringify({
       deliveries: entries.map(entry => [entry.deliveryEventId, entry.rows.length]), cause: (error as any)?.code ?? (error as any)?.message ?? String(error) }));
   }
