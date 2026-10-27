@@ -6,8 +6,10 @@
  * Orthanc index is a stub over one synthetic stored object, authentication is an explicit synthetic input (the guard's
  * capture is called with it). Asserted: no image byte before the provide-prepared event is durable; one pair per
  * study delivery (open, reload within the idle gap, reload after it); a ledger that cannot record answers 503 with no
- * body; refusals of the gate leave no record; shutdown closes open deliveries. The PostgreSQL ledger itself is proven in
- * tests/emr/a (real PG). D73: behaviour at the boundary, no product source text. Synthetic values only; 127.0.0.1 only. */
+ * body; refusals of the gate leave no record; shutdown closes open deliveries; a delivery that provided no image closes
+ * as aborted, not succeeded (MG-10); a terminal the ledger cannot take at the close is retried as the same event until
+ * durable, and the shutdown makes a last attempt without inventing one (MG-09). The PostgreSQL ledger itself is proven
+ * in tests/emr/a (real PG). D73: behaviour at the boundary, no product source text. Synthetic values only; 127.0.0.1 only. */
 const { STUDY_UID, SERIES_UID, SOP_UID, INSTANCE_ID, STUDY_ID, syntheticObject, stubOrthanc } = require('./dicom_frame_fixture.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -16,7 +18,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createHash, randomUUID } = require('node:crypto');
-const { HttpException } = require('/app/node_modules/@nestjs/common');
+const { HttpException, ServiceUnavailableException } = require('/app/node_modules/@nestjs/common');
+const { createBackgroundWorkRegistry } = require('/app/dist/emr-runtime/background-work.js');
 const { DicomFrameController } = require('/app/dist/dicom-frame.controller.js');
 const { DicomFrameService } = require('/app/dist/dicom-frame.service.js');
 const { StudyImageDeliveryRecorder, IMAGE_DELIVERY_UNAVAILABLE, FRAMES_SURFACE, PREVIEW_SURFACE } = require('/app/dist/dicom-frame-delivery.js');
@@ -37,9 +40,10 @@ function identityOf(issuer, subject) {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
-/** An in-memory record port with the public port's semantics: durable receipts only for stored events, append-only. */
+/** An in-memory record port with the public port's semantics: durable receipts only for stored events, append-only.
+ * `attempts` is every append the port saw, failed ones included (what the real store's B2 failure journal would hold). */
 function ledger() {
-  const entries = [], state = { failing: false, live: 0 };
+  const entries = [], attempts = [], state = { failing: false, live: 0 };
   const tx = {};
   const port = { begin() {
     state.live++;
@@ -50,6 +54,7 @@ function ledger() {
       async append(event, served, keys) {
         guard();
         const parsed = parseAccessEvent(event);   // the store's canonicalPayload runs this same parser
+        attempts.push({ eventId: parsed.eventId, action: parsed.action, occurredAt: parsed.occurredAt, failed: state.failing });
         if (state.failing) throw new Error('LedgerUnreachable');
         const storedAt = new Date().toISOString();
         entries.push({ event: parsed, operationId: keys?.operationId ?? randomUUID(), storedAt, at: process.hrtime.bigint() });
@@ -66,7 +71,7 @@ function ledger() {
       end() { if (!ended) { ended = true; state.live--; } },
     };
   } };
-  return { port, entries, state, tx };
+  return { port, entries, attempts, state, tx };
 }
 
 /** The whole served stack over one synthetic object; `shape` and `over` reach the stored object and the Orthanc stub. */
@@ -91,7 +96,9 @@ async function stack(options = {}) {
   const gate = new PacsDicomGateway(prisma, orthanc, studyAccess, new PacsAccess(prisma, studyAccess), {});
   const contexts = createRequestContext(createRequestIngress({ proxyPeers: [] }), records.port);
   const clinical = createCurrentClinicalContext(prisma, contexts.source, orthanc, studyAccess);
-  const recorder = new StudyImageDeliveryRecorder(records.port, contexts.source, clinical, orthanc, IDLE_MS);
+  // The runtime's background registry, as app.module provides it: terminal retries are its timers and tasks.
+  const background = createBackgroundWorkRegistry();
+  const recorder = new StudyImageDeliveryRecorder(records.port, contexts.source, clinical, orthanc, background.work, IDLE_MS);
   const service = new DicomFrameService(orthanc);
   const controller = new DicomFrameController(service, { authzDicom: (...args) => gate.authzDicom(...args) }, orthanc, recorder);
   const observations = [];
@@ -132,11 +139,14 @@ async function stack(options = {}) {
   const close = async () => {
     server.closeAllConnections?.();
     await new Promise(resolve => server.close(resolve));
+    background.quiesce();   // no retry timer outlives its stack
+    await background.drained();
     if (previousStorage === undefined) delete process.env.KIN_ORTHANC_STORAGE; else process.env.KIN_ORTHANC_STORAGE = previousStorage;
     fs.rmSync(dir, { recursive: true, force: true });
   };
-  return { object, orthanc, records, recorder, observations, get, frame, preview, close, states };
+  return { object, orthanc, records, recorder, background, observations, get, frame, preview, close, states };
 }
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
 async function until(check, label, ms = 3000) {
@@ -269,4 +279,101 @@ test('shutdown closes open deliveries: a quiet one ends, one still being sent is
     await settle();
     assert.equal(s.records.state.live, 0);
   } finally { hold = false; release?.(); await s.close(); }
+});
+
+test('a delivery that provided no image closes as transfer-aborted, never succeeded: a source read that failed with 503, a relayed refusal', async () => {
+  // Every read of the study fails at the source after the preparation was recorded: a 503 with no image byte.
+  const failing = () => ({ relay: async () => { throw new ServiceUnavailableException('synthetic Orthanc temporarily unavailable'); } });
+  const s = await stack({ orthanc: failing });
+  try {
+    const answer = await s.frame(9);   // past the object: Orthanc's to answer, and Orthanc fails
+    assert.equal(answer.status, 503);
+    assert.equal(byAction(s.records.entries, 'provide-prepared').length, 1, 'the preparation was recorded before the read');
+    await until(() => s.records.entries.length === 2, 'the delivery did not close');
+    const terminal = s.records.entries[1].event;
+    assert.deepEqual([terminal.action, terminal.result, terminal.relatedEventId], ['transfer-aborted', 'aborted', s.records.entries[0].event.eventId]);
+    assert.equal(byAction(s.records.entries, 'transfer-ended').length, 0, 'an error answer is not a successful transfer');
+  } finally { await s.close(); }
+  // Orthanc answers the relayed read with a refusal; the API relays it faithfully, and it is no image either.
+  const refusing = () => ({ relay: async (path, accept, target) => { target.status(404); target.setHeader('content-type', 'text/plain'); target.write(Buffer.from('no such frame')); target.end(); } });
+  const s2 = await stack({ orthanc: refusing });
+  try {
+    assert.equal((await s2.frame(9)).status, 404);
+    await until(() => s2.records.entries.length === 2, 'the delivery did not close');
+    assert.deepEqual([s2.records.entries[1].event.action, s2.records.entries[1].event.result], ['transfer-aborted', 'aborted']);
+  } finally { await s2.close(); }
+  // One image reached its end and another read failed: the study was provided, the delivery ended.
+  const s3 = await stack({ orthanc: failing });
+  try {
+    assert.deepEqual((await Promise.all([s3.frame(1), s3.frame(9)])).map(a => a.status), [200, 503]);
+    await until(() => s3.records.entries.length === 2, 'the delivery did not close');
+    assert.deepEqual([s3.records.entries[1].event.action, s3.records.entries[1].event.result], ['transfer-ended', 'succeeded']);
+  } finally { await s3.close(); }
+});
+
+test('a terminal the ledger cannot take at the close keeps its identity and is retried as the same event until it is durable', async () => {
+  const s = await stack();
+  try {
+    assert.equal((await s.frame(1)).status, 200);
+    const prepared = s.records.entries[0].event;
+    s.records.state.failing = true;
+    await until(() => s.records.attempts.some(a => a.action === 'transfer-ended'), 'the delivery did not close at the idle gap');
+    const closedBy = Date.now();
+    await wait(IDLE_MS);
+    assert.equal(s.records.entries.length, 1, 'the ledger refused the terminal: still only the prepared event');
+    assert.equal(s.records.attempts.filter(a => a.action === 'transfer-ended').length, 1, 'one attempt so far, within the first retry delay');
+    s.records.state.failing = false;
+    await until(() => byAction(s.records.entries, 'transfer-ended').length === 1, 'the terminal was not recorded once the ledger returned', 5000);
+    const ended = byAction(s.records.entries, 'transfer-ended')[0].event;
+    assert.equal(ended.relatedEventId, prepared.eventId);
+    assert.equal(ended.auditLinkId, prepared.auditLinkId);
+    assert.equal(s.records.entries.length, 2, 'exactly the pair');
+    const attempts = s.records.attempts.filter(a => a.action === 'transfer-ended');
+    assert.ok(attempts.length >= 2 && attempts[0].failed && !attempts.at(-1).failed, 'a failed attempt, then a durable one');
+    assert.equal(new Set(attempts.map(a => a.eventId)).size, 1, 'the retries append the same event, not a new one per attempt');
+    assert.equal(new Set(attempts.map(a => a.occurredAt)).size, 1, 'the event keeps the time the delivery closed');
+    assert.ok(Date.parse(ended.occurredAt) <= closedBy, 'the terminal is dated at the close, not at the append that held it');
+    // The study is read again meanwhile: a new delivery, its own pair, the old one untouched.
+    assert.equal((await s.frame(2)).status, 200);
+    await until(() => s.records.entries.length === 4, 'the new delivery\'s pair');
+    await settle();
+    assert.equal(s.records.state.live, 0, 'every record work was ended');
+    assert.equal(s.background.live(), 0, 'no retry task left running');
+  } finally { await s.close(); }
+});
+
+test('shutdown makes a pending terminal\'s last attempt: recorded when the ledger takes it, left pending - never invented - when it does not', async () => {
+  // The ledger is back by the time the process stops: the quiesce cleared the retry timer, the shutdown's own attempt records it.
+  const s = await stack();
+  try {
+    assert.equal((await s.frame(1)).status, 200);
+    s.records.state.failing = true;
+    await until(() => s.records.attempts.some(a => a.action === 'transfer-ended'), 'the delivery did not close');
+    assert.equal(s.records.entries.length, 1);
+    s.background.quiesce();   // EmrNestLifecycle.onModuleDestroy
+    s.records.state.failing = false;
+    s.recorder.onModuleDestroy();
+    await s.recorder.beforeApplicationShutdown();
+    assert.equal(byAction(s.records.entries, 'transfer-ended').length, 1, 'the shutdown recorded the pending terminal');
+    assert.equal(s.records.entries[1].event.relatedEventId, s.records.entries[0].event.eventId);
+    await settle();
+    assert.equal(s.records.state.live, 0);
+  } finally { await s.close(); }
+  // The ledger is still down at the stop: the attempt is made and fails; nothing is appended later and nothing claims the pair complete.
+  const s2 = await stack();
+  try {
+    assert.equal((await s2.frame(1)).status, 200);
+    s2.records.state.failing = true;
+    await until(() => s2.records.attempts.some(a => a.action === 'transfer-ended'), 'the delivery did not close');
+    const before = s2.records.attempts.length;
+    s2.background.quiesce();
+    s2.recorder.onModuleDestroy();
+    await s2.recorder.beforeApplicationShutdown();
+    assert.ok(s2.records.attempts.length > before, 'the shutdown made its last attempt');
+    assert.equal(s2.records.entries.length, 1, 'the ledger holds the prepared event alone: the pair is not complete');
+    s2.records.state.failing = false;
+    await wait(1500);
+    assert.equal(s2.records.entries.length, 1, 'no attempt after the shutdown invents a late terminal');
+    assert.equal(s2.background.live(), 0);
+  } finally { await s2.close(); }
 });

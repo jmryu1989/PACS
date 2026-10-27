@@ -91,6 +91,16 @@ test('directReadServes: the emitted multipart octet-stream must be acceptable by
   assert.equal(layout.directReadServes('multipart/related; type="application/octet-stream"; transfer-syntax=1.2.840.10008.1.2.1;q=1, multipart/related;q=0', EXPLICIT), true);
   assert.equal(layout.directReadServes('*/*;q=0.1, multipart/related; type="image/jpeg"', EXPLICIT), false, 'a preferred rendering is Orthanc\'s to offer');
   assert.equal(layout.directReadServes('multipart/related; type="application/octet-stream";q=0.5, image/jpeg;q=0.2', EXPLICIT), true);
+  // Representation parameters bind on wildcard ranges as well (RFC 9110 §12.5.1): parts of another type or syntax are not ours.
+  assert.equal(layout.directReadServes('multipart/*; type="image/jpeg"', EXPLICIT), false, 'multipart of jpeg parts, whatever the subtype');
+  assert.equal(layout.directReadServes('*/*; type="image/jpeg"', EXPLICIT), false);
+  assert.equal(layout.directReadServes('*/*; transfer-syntax=1.2.840.10008.1.2.4.80', EXPLICIT), false, 'a transcoded syntax on the full wildcard');
+  assert.equal(layout.directReadServes('multipart/*; type="application/octet-stream"; transfer-syntax=*', EXPLICIT), true);
+  assert.equal(layout.directReadServes('multipart/*; type="application/octet-stream"', EXPLICIT), true);
+  assert.equal(layout.directReadServes('multipart/*; type="image/jpeg", multipart/related; type="application/octet-stream";q=0.5', EXPLICIT), false, 'the jpeg parts are preferred');
+  assert.equal(layout.directReadServes('multipart/*; type="image/jpeg";q=0.5, multipart/related; type="application/octet-stream"', EXPLICIT), true);
+  assert.equal(layout.directReadServes('multipart/*; type="application/octet-stream";q=0, multipart/related;q=1', EXPLICIT), true, 'the named type with no parameter is the more specific match');
+  assert.equal(layout.directReadServes('multipart/related;q=0, multipart/*; type="application/octet-stream";q=1', EXPLICIT), false);
 });
 
 test('acceptsGzip: a positive gzip (or wildcard) quality selects gzip; gzip;q=0, no header or no match is identity', () => {
@@ -530,8 +540,9 @@ function pendingOrthanc() {
   return { seen, restore: () => { global.fetch = previous; } };
 }
 
+/** A response double: status code as Express keeps it (200 until set), headers dropped, body drained. */
 function relayTarget() {
-  const t = new PassThrough(); t.status = () => {}; t.setHeader = () => {}; t.resume();
+  const t = new PassThrough(); t.statusCode = 200; t.status = code => { t.statusCode = code; return t; }; t.setHeader = () => {}; t.resume();
   return t;
 }
 
@@ -626,6 +637,21 @@ test('controller: the request\'s lifetime signal reaches the service and aborts 
   assert.deepEqual(seen.at(-1), ['preview-signal', false]);
   await new Promise(resolve => setTimeout(resolve, 10));
   assert.deepEqual([leases[1].surface, leases[1].study, leases[1].released], ['GET instances/:id/preview', '1.2.3', true]);
+  // A service that failed before any image byte: the exception filter then writes the error answer and finishes the
+  // socket, which is no image served (MG-10). The lease waits for that close rather than deciding at the failure.
+  const res3 = relayTarget();
+  const failing = { servePreview: async () => { throw new Error('synthetic source failure'); } };
+  await assert.rejects(new DicomFrameController(failing, pacs, orthanc, deliveries).preview('3fc2d51f-e3bbd38a-db69114e-eef254ef-fcc4744b', req, res3), /synthetic source failure/);
+  assert.equal(leases[2].released, null, 'undecided until the response closes');
+  res3.status(503); res3.end('{"code":"synthetic"}');
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(leases[2].released, false, 'an error answer sent to its end is not an image served');
+  // A relayed non-success answer (Orthanc's 404 for a frame it does not have) finishes the socket and is no image either.
+  const res4 = relayTarget();
+  const relayed = { servePreview: async (id, r) => { r.status(404); r.end('no such frame'); } };
+  await new DicomFrameController(relayed, pacs, orthanc, deliveries).preview('3fc2d51f-e3bbd38a-db69114e-eef254ef-fcc4744b', req, res4);
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(leases[3].released, false);
   // The 17-frame list the review sent (MG-07) is a request like any other, not a 400.
   const service3 = { serveFrames: async (request) => { seen.push(['list', request.frames.length]); } };
   await new DicomFrameController(service3, pacs, orthanc, deliveries).read('1.2.3', '1.2.3.4', '1.2.3.4.5', Array.from({ length: 17 }, (_, i) => i + 1).join(','), req, relayTarget());

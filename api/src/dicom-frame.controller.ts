@@ -30,14 +30,22 @@ function requestOrigin(req: any): string {
  * closing the viewer does not leave an Orthanc whole-file read running for nobody. The response's `close` - which
  * follows a finished response as well as one cut short - also ends the delivery lease. One listener does both: the
  * gzip pipeline already puts six of Node's own close listeners on the response, and an eleventh is a leak warning.
+ *
+ * The lease learns whether an image was served, not whether the socket finished: a service that failed (its error
+ * answer is written after it, by the exception filter, and finishes the socket too) or a relayed non-success answer
+ * from Orthanc is no image (review MG-10). Both facts - the service's outcome and the response's close - may arrive
+ * in either order, so the lease is released when the second one does.
  */
 function lifetime(req: any, res: any, lease: DeliveryLease, work: (signal: AbortSignal) => Promise<void>): Promise<void> {
   const abort = new AbortController();
+  let outcome: boolean | null = null, closed = false;
+  const release = () => { if (closed && outcome !== null) lease.release(outcome && res.writableFinished === true && res.statusCode < 400); };
   const stop = () => { if (!res.writableFinished) abort.abort(); };
-  const closed = () => { stop(); lease.release(res.writableFinished === true); };
+  const onClose = () => { stop(); closed = true; release(); };
   req.once?.('aborted', stop);
-  if (res.destroyed || res.closed) closed(); else res.once?.('close', closed);
-  return work(abort.signal).finally(() => { req.off?.('aborted', stop); });
+  if (res.destroyed || res.closed) onClose(); else res.once?.('close', onClose);
+  return work(abort.signal).then(() => { outcome = true; }, error => { outcome = false; throw error; })
+    .finally(() => { req.off?.('aborted', stop); release(); });
 }
 
 @Controller()

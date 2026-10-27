@@ -6,6 +6,10 @@
  * requests). A delivery is the stream of frame and preview reads of one study by one member session; it closes after
  * an idle gap without a read, and the next read opens a new pair. No frame or preview byte leaves before the
  * `provide-prepared` event is durable in the access ledger; a ledger that cannot record answers 503 with no body.
+ * The terminal is the honest aggregate of the delivery's responses: `transfer-ended` only when at least one image
+ * response was sent to its end, `transfer-aborted` when none was (every read failed or was cut) or the process stops
+ * while one is still being sent (review MG-10). A terminal the ledger cannot take at that moment keeps its identity
+ * and is retried until it is durable or the process stops; it is never dropped for being late (review MG-09).
  *
  * The event is the formatVersion 1 image event the images/dicom-web delivery writes (emr-image/service.ts), through the
  * same record port: the study is its target (recordId = study UID, as that delivery names its study-level units) and the
@@ -23,6 +27,8 @@ import { newAuditLinkId, parseAccessEvent } from './emr-contract/access-event';
 import type { ClinicalContextSource } from './emr-clinical/runtime';
 import { CURRENT_CLINICAL_CONTEXT } from './emr-clinical/startup';
 import { isDurableReceipt } from './emr-runtime/contract';
+import { EMR_BACKGROUND_WORK } from './emr-runtime/background-work';
+import type { BackgroundWork } from './emr-runtime/background-work';
 import { EMR_RECORD_PORT } from './emr-runtime/record-port';
 import type { EmrRecordPort, EmrRecordWork } from './emr-runtime/record-port';
 import { REQUEST_CONTEXT_SOURCE, RequestContextUnavailable } from './emr-runtime/request-context';
@@ -38,21 +44,36 @@ export const IMAGE_DELIVERY_IDLE_MS = Symbol('ImageDeliveryIdleMs');
  * opening is one pair rather than several. Re-check before a larger site (D1804 first-site defaults).
  */
 export const DEFAULT_IMAGE_DELIVERY_IDLE_MS = 120_000;
+/**
+ * A terminal the ledger refused or could not take is retried after this long, doubling up to the cap: an outage of
+ * seconds costs one retry, one of minutes a few, and the retry traffic of many closed deliveries stays small.
+ */
+export const TERMINAL_RETRY_MS = 1_000;
+export const TERMINAL_RETRY_MAX_MS = 60_000;
 export const IMAGE_DELIVERY_UNAVAILABLE = Object.freeze({ code: 'IMAGE_DELIVERY_RECORD_UNAVAILABLE',
   message: '영상 열람 기록을 저장하지 못해 영상을 보낼 수 없습니다. 잠시 후 다시 시도하세요.' });
 const CONTEXT_UNAVAILABLE = Object.freeze({ code: 'ImageRequestContextUnavailable', message: '영상의 현재 접근 권한을 확인할 수 없습니다' });
 
-/** Held by one image response of a delivery; released when that response has ended (finished or not). */
-export interface DeliveryLease { release(finished: boolean): void }
+/**
+ * Held by one image response of a delivery; released when that response has ended. `served` is whether the response
+ * carried an image to its end: one that ended as an error answer (a 503 for a failed source read, a relayed refusal)
+ * or was cut short is not an image the person received, whatever the socket saw.
+ */
+export interface DeliveryLease { release(served: boolean): void }
 
 interface Delivery {
   key: string; studyUid: string;
   /** Resolves once the provide-prepared event is durable; rejects when it could not be recorded. */
   prepared: Promise<Readonly<AccessEventV1>>;
   event: Readonly<AccessEventV1> | null;
-  inflight: number; finished: number; unfinished: number;
+  inflight: number; served: number; unserved: number;
   timer: ReturnType<typeof setTimeout> | null;
   closed: boolean;
+  /** The terminal event, built once when the delivery closed; retried as the same fact until the ledger holds it. */
+  terminal: Readonly<AccessEventV1> | null;
+  attempts: number;
+  recording: Promise<void> | null;
+  cancelRetry: (() => void) | null;
 }
 
 const known = <T>(value: T) => ({ status: 'known' as const, value });
@@ -61,13 +82,17 @@ const known = <T>(value: T) => ({ status: 'known' as const, value });
 export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplicationShutdown {
   private readonly logger = new Logger('ImageDelivery');
   private readonly open = new Map<string, Delivery>();
+  /** Closed deliveries whose terminal the ledger does not hold yet. */
+  private readonly closing = new Set<Delivery>();
   private shutdown: Promise<unknown> | null = null;
+  private stopping = false;
   private readonly idleMs: number;
 
   constructor(@Inject(EMR_RECORD_PORT) private readonly records: EmrRecordPort,
     @Inject(REQUEST_CONTEXT_SOURCE) private readonly requests: RequestContextSource,
     @Inject(CURRENT_CLINICAL_CONTEXT) private readonly clinical: ClinicalContextSource,
     private readonly orthanc: OrthancService,
+    @Inject(EMR_BACKGROUND_WORK) private readonly background: BackgroundWork,
     @Optional() @Inject(IMAGE_DELIVERY_IDLE_MS) idleMs?: number) {
     this.idleMs = typeof idleMs === 'number' && idleMs > 0 ? idleMs : DEFAULT_IMAGE_DELIVERY_IDLE_MS;
   }
@@ -92,17 +117,18 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
       throw this.unavailable(error);
     }
     let released = false;
-    return { release: finished => {
+    return { release: served => {
       if (released) return;
       released = true;
       delivery.inflight--;
-      if (finished) delivery.finished++; else delivery.unfinished++;
+      if (served) delivery.served++; else delivery.unserved++;
       this.settle(delivery);
     } };
   }
 
   private start(key: string, request: IncomingMessage, surface: string, studyUid: string): Delivery {
-    const delivery: Delivery = { key, studyUid, prepared: null as any, event: null, inflight: 0, finished: 0, unfinished: 0, timer: null, closed: false };
+    const delivery: Delivery = { key, studyUid, prepared: null as any, event: null, inflight: 0, served: 0, unserved: 0, timer: null, closed: false,
+      terminal: null, attempts: 0, recording: null, cancelRetry: null };
     delivery.prepared = this.prepare(request, surface, studyUid).then(event => { delivery.event = event; return event; });
     // A delivery that could not be recorded is no delivery: the next read asks the ledger again.
     delivery.prepared.catch(() => { if (this.open.get(key) === delivery) this.open.delete(key); });
@@ -161,45 +187,92 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
   /** Nothing in flight: the delivery ends after the idle gap unless another read of the study arrives first. */
   private settle(delivery: Delivery): void {
     if (delivery.closed || delivery.inflight > 0 || delivery.timer) return;
-    delivery.timer = setTimeout(() => { delivery.timer = null; void this.close(delivery, 'ended'); }, this.idleMs);
+    delivery.timer = setTimeout(() => { delivery.timer = null; void this.close(delivery); }, this.idleMs);
     delivery.timer.unref?.();
   }
 
   /**
-   * The terminal event of the pair: `transfer-ended` for a delivery that went quiet after its responses ended (some of
-   * them may have been cut by the viewer re-targeting a pane; the delivery as a whole still ended), `transfer-aborted`
-   * for one closed while a response was still being sent (shutdown). A delivery whose preparation never succeeded has
-   * no event to close.
+   * The terminal event of the pair, built once: `transfer-ended` for a delivery that went quiet after at least one
+   * image response reached its end (others may have been cut by the viewer re-targeting a pane, or refused; the
+   * delivery as a whole still provided the study), `transfer-aborted` for one that provided no image at all - every
+   * read failed before its body or was cut - or that is closed while a response is still being sent (shutdown).
+   * A delivery whose preparation never succeeded has no event to close. The event's time is the close, not the
+   * append that eventually holds it.
    */
-  private async close(delivery: Delivery, outcome: 'ended' | 'aborted'): Promise<void> {
+  private async close(delivery: Delivery): Promise<void> {
     if (delivery.closed) return;
     delivery.closed = true;
     if (delivery.timer) { clearTimeout(delivery.timer); delivery.timer = null; }
     if (this.open.get(delivery.key) === delivery) this.open.delete(delivery.key);
-    // The work is taken before the first await: at shutdown this runs from onModuleDestroy, while the port still
-    // admits work (EmrNestLifecycle closes it in beforeApplicationShutdown, after every onModuleDestroy).
-    let work: EmrRecordWork;
-    try { work = this.records.begin(); }
-    catch (error) {
-      this.logger.error(`image_delivery category=terminal_not_recorded outcome=${outcome} ` + (error instanceof Error ? error.message : String(error)));
-      return;
-    }
-    try {
-      const event = delivery.event ?? await delivery.prepared.catch(() => null);
-      if (!event) return;
-      const followup = parseAccessEvent({ ...event, eventId: randomUUID(), occurredAt: new Date().toISOString(),
-        action: outcome === 'ended' ? 'transfer-ended' : 'transfer-aborted', result: outcome === 'ended' ? 'succeeded' : 'aborted',
-        relatedEventId: event.eventId }) as Readonly<AccessEventV1>;
-      await this.append(work, followup);
-      this.logger.log(`image_delivery outcome=${outcome} responses=${delivery.finished + delivery.unfinished} unfinished=${delivery.unfinished}`);
-    } catch (error) {
-      this.logger.error(`image_delivery category=terminal_not_recorded outcome=${outcome} ` + (error instanceof Error ? error.message : String(error)));
-    } finally { work.end(); }
+    // Only the shutdown closes a delivery still being prepared; a preparation that then succeeds is closed as well.
+    const event = delivery.event ?? await delivery.prepared.catch(() => null);
+    if (!event) return;
+    const outcome = delivery.inflight === 0 && delivery.served > 0 ? 'ended' : 'aborted';
+    delivery.terminal = parseAccessEvent({ ...event, eventId: randomUUID(), occurredAt: new Date().toISOString(),
+      action: outcome === 'ended' ? 'transfer-ended' : 'transfer-aborted', result: outcome === 'ended' ? 'succeeded' : 'aborted',
+      relatedEventId: event.eventId }) as Readonly<AccessEventV1>;
+    this.closing.add(delivery);
+    await this.record(delivery);
   }
 
-  /** Every open delivery ends with the process; one still sending is aborted, a quiet one ended. */
+  /**
+   * One attempt at a time to make the terminal durable. The same event is appended on every attempt: the ledger keys
+   * operations by event id and content, so an attempt whose COMMIT reply was lost is found, not duplicated. A failed
+   * attempt is journaled by the store (B2 failure journal, with this event id) and retried here with backoff through
+   * the background registry, whose timers the shutdown clears and whose running tasks it drains before the ledger
+   * disconnects. At shutdown no retry is scheduled: the last attempt is the one `onModuleDestroy` makes.
+   */
+  private record(delivery: Delivery): Promise<void> {
+    if (delivery.recording) return delivery.recording;
+    if (delivery.cancelRetry) { delivery.cancelRetry(); delivery.cancelRetry = null; }
+    const terminal = delivery.terminal!;
+    const attempt = async () => {
+      // The work is taken before the first await: from onModuleDestroy this still precedes the port's close
+      // (EmrNestLifecycle closes it in beforeApplicationShutdown, after every onModuleDestroy).
+      let work: EmrRecordWork;
+      try { work = this.records.begin(); }
+      catch (error) { this.defer(delivery, error); return; }
+      try {
+        await this.append(work, terminal);
+        this.closing.delete(delivery);
+        this.logger.log(`image_delivery outcome=${terminal.action === 'transfer-ended' ? 'ended' : 'aborted'} responses=${delivery.served + delivery.unserved} ` +
+          `unserved=${delivery.unserved} attempts=${delivery.attempts + 1}`);
+      } catch (error) { this.defer(delivery, error); }
+      finally { work.end(); }
+    };
+    delivery.recording = attempt().finally(() => { delivery.recording = null; });
+    return delivery.recording;
+  }
+
+  private defer(delivery: Delivery, error: unknown): void {
+    delivery.attempts++;
+    const terminal = delivery.terminal!, reason = error instanceof Error ? error.message : String(error);
+    const delay = Math.min(TERMINAL_RETRY_MAX_MS, TERMINAL_RETRY_MS * 2 ** Math.min(delivery.attempts - 1, 16));
+    if (this.stopping || this.background.quiesced) {
+      // The process is stopping: the pending pair is named here and in the store's failure journal; it is not complete.
+      this.logger.error(`image_delivery category=terminal_not_recorded_at_shutdown action=${terminal.action} event=${terminal.eventId} ` +
+        `prepared=${terminal.relatedEventId} attempts=${delivery.attempts} ${reason}`);
+      return;
+    }
+    this.logger.error(`image_delivery category=terminal_not_recorded action=${terminal.action} event=${terminal.eventId} ` +
+      `prepared=${terminal.relatedEventId} attempt=${delivery.attempts} retry_ms=${delay} ${reason}`);
+    delivery.cancelRetry = this.background.schedule('image-delivery.terminal', delay, () => this.record(delivery));
+  }
+
+  /**
+   * Every open delivery ends with the process; one still sending is aborted, a quiet one ended. Every terminal still
+   * pending gets its last attempt now; one that still fails is logged with its event ids and stays in the store's
+   * failure journal - the shutdown does not report it as a complete pair.
+   */
   onModuleDestroy(): void {
-    this.shutdown ??= Promise.allSettled([...this.open.values()].map(delivery => this.close(delivery, delivery.inflight > 0 ? 'aborted' : 'ended')));
+    this.stopping = true;
+    this.shutdown ??= (async () => {
+      await Promise.allSettled([...this.open.values()].map(delivery => this.close(delivery)));
+      // A retry that was mid-flight when the shutdown began settles first; whatever is still pending is attempted once more.
+      await Promise.allSettled([...this.closing].map(delivery => delivery.recording ?? Promise.resolve()));
+      await Promise.allSettled([...this.closing].map(delivery => this.record(delivery)));
+      if (this.closing.size) this.logger.error(`image_delivery category=terminals_pending_at_shutdown count=${this.closing.size}`);
+    })();
   }
 
   async beforeApplicationShutdown(): Promise<void> {

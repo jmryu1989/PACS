@@ -145,22 +145,25 @@ function acceptEntries(header: string): AcceptEntry[] {
 /**
  * Whether the client accepts the one representation the direct reader emits - `multipart/related;
  * type="application/octet-stream"; transfer-syntax=<stored>` - by RFC 9110 §12.5.1: of the Accept entries that match
- * it, the most specific decides (a type parameter and a named syntax are more specific than their absence, a named type
- * than the multipart or the full wildcard range), and a quality of 0 excludes it. A representation this path does not emit that the client
- * prefers (a higher quality on image/jpeg, another transfer syntax, a bare application/octet-stream) leaves the request to
- * Orthanc, which can answer it. No Accept header means no preference (PS3.18 §8.7.3.3.1: the stored octet-stream).
+ * it, the most specific decides (a named type over the multipart or the full wildcard range, and within a range a type
+ * parameter and a named syntax over their absence), and a quality of 0 excludes it. The representation parameters are
+ * matched on every range, wildcards included: `multipart/*; type="image/jpeg"`, or the full wildcard range with
+ * `transfer-syntax=1.2.840.10008.1.2.4.80`, asks for parts this path does not emit, so it does not match ours (review
+ * MG-05). A representation this path does
+ * not emit that the client prefers (a higher quality on image/jpeg, another transfer syntax, a bare application/octet-stream)
+ * leaves the request to Orthanc, which can answer it. No Accept header means no preference (PS3.18 §8.7.3.3.1: the
+ * stored octet-stream).
  */
 export function directReadServes(accept: unknown, storedSyntax: string): boolean {
   if (typeof accept !== 'string' || !accept.trim()) return true;
   let ours: { rank: number; q: number } | null = null, elsewhere = 0;
   for (const entry of acceptEntries(accept)) {
     const type = entry.params.get('type'), syntax = entry.params.get('transfer-syntax');
-    let rank = entry.type === '*/*' ? 0 : entry.type === 'multipart/*' ? 1 : entry.type === 'multipart/related' ? 2 : -1;
-    if (rank === 2) {
-      if (type !== undefined && type !== '*/*' && type !== 'application/octet-stream') rank = -1;        // multipart of another media type
-      else if (syntax !== undefined && syntax !== '*' && syntax !== storedSyntax) rank = -1;             // another syntax: transcoding
-      else rank += (type !== undefined && type !== '*/*' ? 1 : 0) + (syntax !== undefined && syntax !== '*' ? 1 : 0);
-    }
+    const range = entry.type === '*/*' ? 0 : entry.type === 'multipart/*' ? 1 : entry.type === 'multipart/related' ? 2 : -1;
+    let rank = -1;
+    if (range >= 0 && !(type !== undefined && type !== '*/*' && type !== 'application/octet-stream')       // parts of another media type
+        && !(syntax !== undefined && syntax !== '*' && syntax !== storedSyntax))                           // another syntax: transcoding
+      rank = range * 3 + (type !== undefined && type !== '*/*' ? 1 : 0) + (syntax !== undefined && syntax !== '*' ? 1 : 0);
     if (rank < 0) { elsewhere = Math.max(elsewhere, entry.q); continue; }
     if (!ours || rank > ours.rank || (rank === ours.rank && entry.q > ours.q)) ours = { rank, q: entry.q };
   }
