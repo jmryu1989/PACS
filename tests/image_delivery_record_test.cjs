@@ -79,7 +79,8 @@ async function syntheticOrthanc() {
     req.on('data', c => { body += c; });
     req.on('end', () => {
       const url = new URL(req.url, 'http://127.0.0.1'), p = url.pathname;
-      calls.push({ method: req.method, path: p, query: url.search, accept: req.headers.accept });
+      calls.push({ method: req.method, path: p, query: url.search, accept: req.headers.accept,
+        forwarded: [req.headers['x-forwarded-proto'], req.headers['x-forwarded-host']] });
       const json = value => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(value)); };
       const image = (type, bytes) => {
         if (behaviour.image === 'error') { res.statusCode = 500; return json({ Message: 'synthetic failure' }); }
@@ -198,7 +199,7 @@ const actions = records => records.entries.map(e => e.event.action);
 test('MG-08 worklist thumbnail: one durable provide-prepared for the study before the first image byte; bytes relayed unchanged', async () => {
   const s = await stack();
   try {
-    const r = await s.get(s.routes.thumbnail, { Accept: 'image/png' });
+    const r = await s.get(s.routes.thumbnail, { Accept: 'image/png', 'X-Forwarded-Proto': 'https', 'X-Forwarded-Host': 'pacs.example:9443' });
     assert.equal(r.status, 200);
     assert.equal(r.type, 'image/png');
     assert.deepEqual(r.body, PNG, 'the rendering is Orthanc\'s own answer');
@@ -206,6 +207,7 @@ test('MG-08 worklist thumbnail: one durable provide-prepared for the study befor
     const call = s.source.imageCalls()[0];
     assert.equal(call.query, '?width=256&height=256', 'rendering parameters reach Orthanc as before');
     assert.equal(call.accept, 'image/png');
+    assert.deepEqual(call.forwarded, ['https', 'pacs.example:9443'], 'Orthanc names its parts from the public origin, as behind nginx');
     const [prepared] = s.records.entries.map(e => e.event);
     assert.equal(prepared.surface, 'GET image-relay/*');
     assert.equal(prepared.result, 'prepared');

@@ -71,8 +71,11 @@ export class ImageRelayController {
     });
     req.once('aborted', stop);
     res.once('close', stop);
+    // nginx sets both forwarded headers on every proxied request (server level); the relay validates their shape.
+    const first = (name: string) => String(req.headers?.[name] ?? '').split(',')[0].trim();
+    const origin = `${first('x-forwarded-proto')}://${first('x-forwarded-host')}`;
     try {
-      await this.orthanc.relay(uri, String(req.headers?.accept ?? '*/*'), res, abort.signal);
+      await this.orthanc.relay(uri, String(req.headers?.accept ?? '*/*'), res, abort.signal, origin);
       relayed = true;
     } catch (error) {
       // After the headers a JSON error cannot follow; cutting the connection is the truthful end of a partial image.

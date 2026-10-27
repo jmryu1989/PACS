@@ -514,8 +514,11 @@ export class OrthancService {
    * the source owner's signal, joined with the caller's: a client that goes away while the headers or a body chunk are
    * still pending aborts the Orthanc fetch and cancels its reader at once (the owner's `stop`), instead of leaving the
    * request open until Orthanc happens to produce the next bytes. The caller has set no headers and writes nothing else.
+   * `origin` is the public origin the browser used: Orthanc's DICOMweb answers name their parts (Content-Location) from
+   * the forwarded host, as they did when nginx proxied to Orthanc, instead of from the internal `orthanc:8042`.
    */
-  async relay(path: string, accept: string, target: RelayTarget, signal?: AbortSignal): Promise<void> {
+  async relay(path: string, accept: string, target: RelayTarget, signal?: AbortSignal, origin?: string): Promise<void> {
+    const forwarded = /^(https?):\/\/([A-Za-z0-9.:\-\[\]]{1,255})$/.exec(origin ?? '');
     const lifetime = new AbortController(), stop = () => lifetime.abort();
     if (signal?.aborted || target.destroyed) lifetime.abort();
     else { signal?.addEventListener('abort', stop, { once: true }); target.once('close', stop); target.once('error', stop); }
@@ -525,7 +528,8 @@ export class OrthancService {
     });
     try {
       await this.withSourceResponse(path, { method: 'GET', redirect: 'error',
-        headers: { Authorization: this.auth, Accept: accept, 'Accept-Encoding': 'identity' } }, lifetime.signal,
+        headers: { Authorization: this.auth, Accept: accept, 'Accept-Encoding': 'identity',
+          ...(forwarded ? { 'X-Forwarded-Proto': forwarded[1], 'X-Forwarded-Host': forwarded[2] } : {}) } }, lifetime.signal,
       async (response, read, owned) => {
         target.status(response.status);
         for (const name of ['content-type', 'content-length']) {
