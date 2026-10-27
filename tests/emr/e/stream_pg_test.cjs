@@ -61,11 +61,17 @@ const studyEvent = (eventId, at, cause = 'user-view', requestId = randomUUID()) 
   action: 'provide-prepared', result: 'prepared', requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null });
 
 /** A synthetic Orthanc answering the manifest's one object; `state` lets a case swap bytes, the header syntax or the
- * object's current PatientID (a patient correction that keeps the UIDs and the pixels). */
+ * object's current PatientID (a patient correction that keeps the UIDs and the pixels), and add a second patient's
+ * study resource under the same Study UID (`split`: the object itself unchanged). */
 function syntheticSource(state) {
   return createServer((req, res) => {
     const json = value => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(value)); };
     if (req.url === '/tools/lookup') return json([{ Type: 'Instance', ID: objectId }]);
+    if (req.url.startsWith('/dicom-web/studies?StudyInstanceUID=')) {
+      state.studyReads = (state.studyReads ?? 0) + 1;
+      const row = id => ({ '0020000D': { vr: 'UI', Value: [studyUid] }, '00100020': { vr: 'LO', Value: [id] }, '00080080': { vr: 'LO', Value: ['synthetic-hospital'] } });
+      return json(state.split ? [row(patient.patientId), row('SYNTHETIC-SECOND')] : [row(state.patientId ?? patient.patientId)]);
+    }
     if (req.url.endsWith('/simplified-tags')) return json({ StudyInstanceUID: studyUid, SeriesInstanceUID: seriesUid,
       SOPInstanceUID: sop, SOPClassUID: manifest.objects[0].sopClassUid, NumberOfFrames: '2', PatientID: state.patientId ?? patient.patientId });
     if (req.url.endsWith('/header')) return json({ '0002,0010': { Value: state.headerSyntax } });
@@ -375,7 +381,7 @@ test('E image service: one ledger record per requester, session and manifest ver
       binding: { method: 'session', sessionRef: sessions.get(request) ?? 'authref:session-1' }, ingress: known({ address: '127.0.0.1', source: 'trusted-proxy' }),
       requestId: request.requestId ??= randomUUID() };
   } };
-  let currentChecks = 0, rechecks = 0, refuseCurrent = null, manifestBuilds = 0;
+  let currentChecks = 0, rechecks = 0, refuseCurrent = null, manifestBuilds = 0, lastRefusal = null;
   const facts = (request, at) => {
     if (refuseCurrent) throw refuseCurrent;
     return { actor: { identity: doctor, kind: 'member', roles: ['radiologist'], institutionId: 'synthetic-hospital', signingRegistrationId: null },
@@ -414,7 +420,7 @@ test('E image service: one ledger record per requester, session and manifest ver
     req.requestId = randomUUID();
     if (req.headers['x-synthetic-session']) sessions.set(req, req.headers['x-synthetic-session']);
     service.send(req, res, decodeURIComponent(new URL(req.url, 'http://x').searchParams.get('target')))
-      .catch(error => { if (!res.headersSent) { res.statusCode = error?.status ?? 503; res.end(); } else res.destroy(); });
+      .catch(error => { lastRefusal = error; if (!res.headersSent) { res.statusCode = error?.status ?? 503; res.end(); } else res.destroy(); });
   });
   const endpoint = await listen(server);
   const frame = (n, headers = {}) => fetch(`${endpoint}/?target=${encodeURIComponent(`/dicom-web/studies/${studyUid}/series/${seriesUid}/instances/${sop}/frames/${n}`)}`, { headers });
@@ -487,6 +493,21 @@ test('E image service: one ledger record per requester, session and manifest ver
     const rebuilt = await frame(1); assert.equal(rebuilt.status, 200); await rebuilt.arrayBuffer();
     assert.equal(manifestBuilds, buildsBefore + 1, 'the manifest was forgotten and rebuilt after the correction');
     await rowsOf(rebuilt.headers.get('x-kin-image-response'), 2);
+    // R244-GPT-01 (split UID): a second patient's resource arrives under the same Study UID between two frames while
+    // the selected object, its patient and its pixels are unchanged. The study's current identity is read for the
+    // response and the product's own refusal answers (STUDY_IDENTITY_UNRESOLVED, as D's current-study read), before
+    // any body read; the kept manifest is forgotten.
+    const buildsBeforeSplit = manifestBuilds, readsBeforeSplit = state.sourceReads, studyReadsBefore = state.studyReads ?? 0;
+    state.split = true;
+    const split = await frame(2); assert.equal(split.status, 409); assert.equal((await split.arrayBuffer()).byteLength, 0);
+    assert.equal(lastRefusal?.getResponse?.()?.code, 'STUDY_IDENTITY_UNRESOLVED', 'the product\'s own refusal of an unresolved study identity');
+    assert.equal(split.headers.get('x-kin-image-response'), null, 'no response row was prepared under the unresolved study');
+    assert.equal(state.sourceReads, readsBeforeSplit, 'no body read while the study names two patients');
+    assert.ok((state.studyReads ?? 0) > studyReadsBefore, 'the study identity was read for the response');
+    state.split = false;
+    const afterSplit = await frame(2); assert.equal(afterSplit.status, 200); await afterSplit.arrayBuffer();
+    assert.equal(manifestBuilds, buildsBeforeSplit + 1, 'the manifest was forgotten and rebuilt after the split');
+    await rowsOf(afterSplit.headers.get('x-kin-image-response'), 2);
     // R244-GPT-02: the application connection refuses a response's transport row. The response ended all the same
     // (HTTP 200, every byte); its facts are kept by the record and written on the record's closing ledger transaction,
     // before the terminal event, naming the first failure.

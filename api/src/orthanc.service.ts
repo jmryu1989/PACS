@@ -1,4 +1,4 @@
-import { Injectable, ServiceUnavailableException, BadRequestException, ConflictException } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException, BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { ViewerSourceFailure, ViewerSourceUnavailable, warnViewerSource } from './viewer-source-warning';
 import { STUDY_IDENTITY_UNRESOLVED, STUDY_IDENTITY_UNRESOLVED_MESSAGE } from './study-source-groups';
 import type { ImageSource } from './emr-image/stream';
@@ -63,7 +63,13 @@ export class OrthancService {
       let path: string, syntax: string | null = null, patientId: string;
       if (unit.part === 'object' || unit.part === 'frame') {
         if (!source || source.unsupported) throw new BadRequestException('영상 표현 형식을 확인할 수 없습니다');
-        const matches = await this.viewerJson('/tools/lookup', source.sopInstanceUid, signal);
+        // The study's current identity is read for every response, with the same reader and rule as D's current-study
+        // read (studyPatientIdentity): a second patient's resource that arrived under this Study UID since the delivery
+        // opened leaves the selected object's own header unchanged, so only the study-level read notices it
+        // (R244-GPT-01, split UID). It runs beside the object lookup, outside any ledger lane.
+        const [matches, studyPatientId] = await Promise.all([
+          this.viewerJson('/tools/lookup', source.sopInstanceUid, signal), this.studyPatientIdentity(manifest.studyUid, signal)]);
+        if (studyPatientId !== manifest.patient.patientId) throw new ConflictException('영상 원본의 환자 식별이 변경되었습니다');
         const instances = Array.isArray(matches) ? matches.filter(x => x?.Type === 'Instance') : [];
         if (instances.length !== 1) throw new ConflictException('영상 원본이 없거나 중복입니다');
         const id = orthancResourceId(instances[0].ID);
@@ -403,6 +409,20 @@ export class OrthancService {
     if (!Array.isArray(rows) || rows.some(row => !row || typeof row !== 'object' || OrthancService.tag(row, '0020000D') !== uid))
       throw new ServiceUnavailableException('원본 검사의 소속을 확인할 수 없습니다');
     return rows;
+  }
+
+  /**
+   * The one patient the study's original resources currently name: D's current-study read (emr-clinical/startup.ts)
+   * and E's per-response source check share this rule. WORKLIST-SPLIT-UID: a UID that two patient resources share
+   * has no resolved patient; the product's own refusal answers, never an invented link. No resource is "no study".
+   */
+  async studyPatientIdentity(uid: string, signal?: AbortSignal): Promise<string> {
+    const resources = await this.studyIdentityResources(uid, signal);
+    if (!resources.length) throw new NotFoundException('검사가 없습니다.');
+    if (resources.length > 1) throw new ConflictException({ code: STUDY_IDENTITY_UNRESOLVED, message: STUDY_IDENTITY_UNRESOLVED_MESSAGE });
+    const patientId = OrthancService.tag(resources[0], '00100020');
+    if (!patientId.trim() || patientId.length > 64) throw new BadRequestException('원본 환자 식별을 확인할 수 없습니다');
+    return patientId;
   }
 
   /**

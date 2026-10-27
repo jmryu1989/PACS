@@ -3070,11 +3070,16 @@ provide-prepared event per requester, session and manifest version, durable befo
 closed by one terminal event after a short idle period, a bounded age, a changed current fact or shutdown; every
 response checks the requester's current access on one bounded ledger transaction before its first byte and keeps its
 fixed representation, transport and copy facts in `emr_image` rows naming that event and the request (`X-KIN-Image-Event`
-is the record, `X-KIN-Image-Response` the row); the source compares the object's current PatientID with the manifest's
-on every response, and a row the application connection refused is written on the delivery's closing ledger transaction
-before its terminal event, with the first failure's cause. `node --test tests/emr/e/delivery_test.cjs` (compiled
-`api/dist`) checks that lifecycle with stand-in hooks; the real-PG `stream_pg_test.cjs` case drives the service against
-the ledger and checks its events, the refused patient change, and the late-retained row.
+is the record, `X-KIN-Image-Response` the row); the source reads the study's current identity (the same read as D's
+current study: no resource, two patient resources, the one patient) and the object's current PatientID on every
+response and compares both with the manifest's, and a row the application connection refused is written as the effect
+of the delivery's terminal operation on its ledger transaction, before the terminal event, with the first failure's
+cause; a closing the ledger refuses is that operation's journaled rollback and its rows are kept for the next close or
+shutdown. `node --test tests/emr/e/delivery_test.cjs` (compiled `api/dist`) checks that lifecycle with stand-in hooks;
+`node --test tests/emr/e/service_retention_test.cjs` (compiled `api/dist`, the real ledger store's transaction path over
+a synthetic SQL port) checks the split-UID refusal, the retention before the terminal append and the journaled failed
+closing with its later retention; the real-PG `stream_pg_test.cjs` case drives the service against the ledger and
+checks its events, the refused patient change and split UID, and the late-retained row.
 `python -B scripts/run-tests.py --module tests/e2e/test_image_route.py --mode live --unit e-route --timeout 1800`
 runs on the served stack: one frame through HTTPS is one recorded delivery, and the served OHIF CT series
 (`KIN_E_ROUTE_SLICES`, default 200, `KIN_E_ROUTE_MATRIX`, default 512) records every received frame once; it prints

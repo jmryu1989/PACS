@@ -60,6 +60,8 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
   readonly sql: PrismaLedgerSql;
   private readonly admitted = new WeakSet<object>();
   private readonly transactions = new WeakMap<object, AdmittedOperation>();
+  /** Member ids this process resolved from the database, by issuer and subject (see resolveRequestIdentity). */
+  private readonly identities = new Map<string, string>();
   constructor(private readonly db: PrismaClient, readonly journal: FailureJournal,
     private readonly poolSize = (db as PrismaClient & { emrAppendPoolSize?: number }).emrAppendPoolSize ?? EMR_APPEND_POOL_SIZE) {
     this.sql = new PrismaLedgerSql(db);
@@ -272,10 +274,21 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
     return Object.freeze(result);
   }
   /** Bootstrap the verified actor before its first event, with the same bounded
-   * admission and transaction options as the request's remaining work. */
+   * admission and transaction options as the request's remaining work.
+   * The binding (issuer, subject) -> member id is created once and never changed (resolve_member_identity inserts
+   * or keeps; names are never a key), so an id this process already obtained from the database stays that member's
+   * id for as long as the database does. A request of an established member therefore takes no append lane here:
+   * under a viewer's burst of frames this admission queued 222 ms median per request behind the lanes
+   * (R244-02 profile, run e-route-diag-fable-20261027a). A database restored to an older copy requires a restart. */
   async resolveRequestIdentity(issuer: string, subject: string): Promise<string> {
-    return admitAppend(this.db, this.poolSize, () => this.db.$transaction(
+    const key = JSON.stringify([string(issuer), string(subject)]);
+    const established = this.identities.get(key);
+    if (established) return established;
+    const id = await admitAppend(this.db, this.poolSize, () => this.db.$transaction(
       tx => this.resolveIdentity(tx, issuer, subject), options));
+    if (this.identities.size >= 4096) this.identities.clear();
+    this.identities.set(key, id);
+    return id;
   }
   /** The immutable internal member ID of a verified issuer and subject (created once; names are never a key). */
   async resolveIdentity(tx: object, issuer: string, subject: string): Promise<string> {

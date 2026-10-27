@@ -57,8 +57,14 @@ export class OnlineImageService implements BeforeApplicationShutdown {
     });
   }
 
-  /** Idle deliveries close now; one with responses in flight closes when they end, before the ledger drains. */
-  async beforeApplicationShutdown(): Promise<void> { await this.deliveries.closeAll(); }
+  /** Idle deliveries close now; one with responses in flight closes when they end, before the ledger drains. Rows an
+   * earlier closing could not retain get one more transaction here; what still fails is reported with its delivery. */
+  async beforeApplicationShutdown(): Promise<void> {
+    await this.deliveries.closeAll();
+    await this.retainPending();
+    for (const entry of this.unretained) console.error('[EMR-E] image observations not retained at shutdown', JSON.stringify({
+      deliveryEventId: entry.deliveryEventId, responses: entry.rows.map(row => [row.kind, row.link.eventId, row.link.requestId]) }));
+  }
 
   async send(request: any, response: ServerResponse, target: string) {
     let image: ReturnType<typeof parseImageRequest>;
@@ -157,20 +163,62 @@ export class OnlineImageService implements BeforeApplicationShutdown {
   }
 
   /** The delivery's terminal event, related to its provide-prepared event, from what E observed on its responses.
-   * Rows of its responses that the application connection refused are written first, on this same ledger
-   * transaction: the terminal event exists only if every response's facts are retained, and a retention failure is a
-   * failed ledger transaction (B2's own failure handling), not a silently closed record (R244-GPT-02). */
+   * Rows of its responses that the application connection refused are written as the effect of that terminal
+   * operation, on its ledger transaction: the terminal event exists only if every response's facts are retained, and
+   * a retention failure is the admitted operation's own rollback (B2 journals it against the terminal event, whose
+   * payload names the delivery), not a silently closed record (R244-GPT-02). A delivery whose ending has no v1 action
+   * retains its rows on a ledger transaction of its own. Rows a closing could not retain stay with this service and
+   * are retried before the next close and at shutdown (retainPending): the entry is retired, the facts are not. */
   private async closeDelivery(delivery: OpenedDelivery<DeliveryFacts>, outcome: DeliveryOutcome, closing: DeliveryClosing): Promise<void> {
     const { work } = delivery.facts;
     try {
-      if (closing === null && !outcome.unstored.length) return;
+      await this.retainPending();
+      const rows = [...outcome.unstored];
+      if (closing === null && !rows.length) return;
       const followup: AccessEvent | null = closing === null ? null : parseAccessEvent({ ...delivery.event, eventId: randomUUID(),
         relatedEventId: delivery.event.eventId, action: closing, result: closing === 'transfer-ended' ? 'succeeded' : 'aborted',
         occurredAt: new Date().toISOString() });
-      await work.transactionWithRecords(async (tx, record) => {
-        for (const row of outcome.unstored) await this.evidence.retain(tx, row);
-        if (followup) await record(followup, async () => ({ kind: 'emr-image', id: delivery.event.eventId, version: delivery.prepared.manifestSha256 }));
-      });
+      try {
+        await work.transactionWithRecords(async (tx, record) => {
+          const retain = async () => { for (const row of rows) await this.evidence.retain(tx, row); };
+          if (!followup) return retain();
+          await record(followup, async () => {
+            await retain();
+            return { kind: 'emr-image', id: delivery.event.eventId, version: delivery.prepared.manifestSha256 };
+          });
+        });
+      } catch (error) {
+        if (rows.length) this.keepUnretained(delivery.event.eventId, rows, error);
+        throw error;
+      }
     } finally { work.end(); }
+  }
+
+  /** Rows of closed deliveries that no closing transaction has retained yet, oldest first. Bounded: a store that
+   * refuses for longer than this holds is reported, not swallowed into memory. */
+  private readonly unretained: { deliveryEventId: string; rows: UnstoredObservation[] }[] = [];
+  private static readonly UNRETAINED_LIMIT = 1024;
+  private keepUnretained(deliveryEventId: string, rows: UnstoredObservation[], error: unknown): void {
+    this.unretained.push({ deliveryEventId, rows });
+    let held = this.unretained.reduce((n, entry) => n + entry.rows.length, 0);
+    while (held > OnlineImageService.UNRETAINED_LIMIT && this.unretained.length > 1) {
+      const dropped = this.unretained.shift()!;
+      held -= dropped.rows.length;
+      console.error('[EMR-E] image observations dropped: retention refused beyond the held bound', JSON.stringify({
+        deliveryEventId: dropped.deliveryEventId, responses: dropped.rows.map(row => [row.kind, row.link.eventId, row.link.requestId]) }));
+    }
+    console.error('[EMR-E] image observations held for a later retention', JSON.stringify({ deliveryEventId, rows: rows.length,
+      cause: (error as any)?.code ?? (error as any)?.message ?? String(error) }));
+  }
+  /** One ledger transaction per held delivery; what still fails stays held, in order. */
+  private async retainPending(): Promise<void> {
+    const held = this.unretained.splice(0);
+    for (const entry of held) {
+      try {
+        const work = this.records.begin();
+        try { await work.transactionWithRecords(async tx => { for (const row of entry.rows) await this.evidence.retain(tx, row); }); }
+        finally { work.end(); }
+      } catch { this.unretained.push(entry); }
+    }
   }
 }
