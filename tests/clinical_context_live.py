@@ -228,7 +228,9 @@ class ClinicalContextLive(unittest.TestCase):
         return result
 
     def assert_answer(self, body: dict, uid: str) -> None:
-        self.assertEqual(sorted(body), sorted(["schema", "uid", "observedAt", "patientKey", "anchor", "identity", "sections"]))
+        # #259 (caution census): a truncated history or prior-report list names the next page (null when nothing is cut).
+        self.assertEqual(sorted(body), sorted(["schema", "uid", "observedAt", "patientKey", "anchor", "identity", "sections", "nextCursor"]))
+        self.assertTrue(body["nextCursor"] is None or body["nextCursor"].isdigit(), body["nextCursor"])
         self.assertEqual((body["schema"], body["uid"]), ("kin.clinical-context/1", uid))
         self.assertLessEqual(deep_keys(body), RESPONSE_KEYS, "only the closed response keys")
         keys = [key.lower() for key in deep_keys(body)]
