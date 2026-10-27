@@ -169,11 +169,23 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['POST admin/dicom-import/:operationId/files/:index/recovery'] },
   // MG-08 (D1877(2)): the image reads nginx used to send straight to Orthanc behind authz/dicom (the external surfaces
   // below) now pass the API's relay (image-relay.controller.ts): worklist previews and thumbnails, report and print pixel
-  // reads, strip previews, encapsulated PDFs, WADO-RS frames, rendered, bulk data and whole objects, plus the plain
-  // descriptions (QIDO, metadata, tags) the relay passes without a delivery. Read as the person looks and ahead of it, so
+  // reads, encapsulated PDFs, rendered, bulk data and whole objects, plus the plain descriptions (QIDO, metadata, tags)
+  // the relay passes without a delivery. The viewer's WADO-RS frame reads and strip previews go to the range reader
+  // (the next two groups); the relay still answers them if they reach it. Read as the person looks and ahead of it, so
   // both causes are real. Admission is authzDicom's; the study delivery's pair is image-delivery-record.ts's.
   { kinds: ['image', 'external-sr-seg', 'pdf', 'thumbnail', 'key-image', 'study-metadata'], operation: 'read',
     causes: ['user-view', 'background-fetch'], routes: ['GET image-relay/*'] },
+  // MG-LOADING: the two image reads nginx now routes to the API's range reader (dicom-frame.controller.ts) instead of
+  // straight to Orthanc; before, the same bytes left through the external surfaces below. The frame route carries the
+  // pixel frames of one image or segmentation object; the preview route the strip's rendering of one object, the same
+  // kinds as `orthanc-instance-preview`. The viewer fetches them as the person looks and ahead of it (prefetch), so
+  // both causes are real. Admission is authzDicom's; the D1877 pair per study delivery (provide-prepared before the
+  // first byte, a terminal when the delivery ends) is recorded on whichever of the two routes opens the delivery, by
+  // dicom-frame-delivery.ts, with the study as the `image` target.
+  { kinds: ['image', 'external-sr-seg'], operation: 'read', causes: ['user-view', 'background-fetch'],
+    routes: ['GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames'] },
+  { kinds: ['thumbnail', 'image', 'key-image'], operation: 'read', causes: ['user-view', 'background-fetch'],
+    routes: ['GET instances/:id/preview'] },
   // MODULE_A A4 (#261): the browser reports that it displayed a report version (or its evidence) this member was
   // provided; the server appends that provision's own client-shown follow-up - an access-audit entry about the stored
   // report targets, under the provision's surface - and writes no clinical record. The report is the person's view.

@@ -62,6 +62,8 @@ export const CLINICIAN_BUSINESS_ROUTES: readonly string[] = Object.freeze([
   'GET critical-results', 'GET critical-results/:id', 'POST critical-results/:id/ack',
   // MG-08: image reads routed by nginx to the recorded API relay, behind the same gate as authz/dicom.
   'GET image-relay/*',
+  // MG-LOADING: viewer frame bytes and strip previews come through the API behind the same gate as authz/dicom.
+  'GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames', 'GET instances/:id/preview',
 ]);
 
 export const CLINICIAN_ALLOWED_ROUTES: ReadonlySet<string> =
