@@ -776,7 +776,6 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         # another account in after a logout in the same browser (rd08 S-11) through the explicit login the landing offers.
         self.real_index = False
         self.auth_session = "SYN-SESSION-" + CLIN["sub"]
-        self.entry_proof = None
         self.documents = []
         self.report_requests = []
         self.envelope_owner = None
@@ -868,24 +867,13 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
             return
         if self.real_index and method == "GET" and path in ("/api/auth/login", "/auth/syn/login"):
             self.auth_session = "SYN-SESSION-" + self.me["sub"]
-            self.entry_proof = "SYN-entry-" + self.me["sub"]
             route.fulfill(body='<!doctype html><title>SYN login</title><script>location.replace("' + BASE
-                               + 'clinician.html#kin-entry=' + self.entry_proof + '")</script>',
+                               + 'clinician.html")</script>',
                           content_type="text/html; charset=utf-8")
-            return
-        if path.startswith("/api/") and request.headers.get("x-kin-csrf") != "1":
-            self.unexpected.append(f"{method} {path} without X-KIN-CSRF")
-            route.abort()
             return
         if self.real_index and method == "POST" and path == "/api/auth/login":
             self.assertEqual(self.auth_session, request.headers.get("x-kin-session"))
             route.fulfill(json={"location": ORIGIN + "/auth/syn/login"})
-            return
-        if self.real_index and method == "POST" and path == "/api/auth/entry":
-            self.assertIsNotNone(self.entry_proof)
-            self.assertEqual({"proof": self.entry_proof}, request.post_data_json)
-            self.entry_proof = None
-            route.fulfill(json={"sessionId": self.auth_session})
             return
         query = parse_qs(url.query, keep_blank_values=True)
         if self.host == "home" and method == "GET" and path == "/api/me":
@@ -1382,7 +1370,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.tick(60000)
         self.assertEqual([], self.posts())
         self.assertIsNone(ACKED.search(self.view()["text"]))
-        # One click, one POST with exactly the contract's body and the CSRF header.
+        # One click, one POST with exactly the contract's body.
         self.fault("ack", hold=True)
         self.acknowledge("SYN-PT-06")
         held = self.take("ack")
@@ -1391,7 +1379,6 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.assertEqual(ACK_KEYS, sorted(post["body"]))
         self.assertRegex(post["body"]["requestId"], UUID_V4)
         self.assertEqual(([INSTITUTION, CLIN["sub"]], 1), (post["body"]["expectedOwner"], post["body"]["revision"]))
-        self.assertEqual("1", post["request"].headers.get("x-kin-csrf"))
         # While the answer is held nothing reads as acknowledged, and the button sends nothing more.
         waiting = self.view()
         self.assertIsNone(ACKED.search(waiting["text"]))

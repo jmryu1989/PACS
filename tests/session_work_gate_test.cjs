@@ -315,13 +315,13 @@ function wired(session = 'S1') {
   return { gate, source, net, failures, transport };
 }
 
-test('SEND-01 every request carries the session its work was captured under, and the CSRF header', async () => {
+test('SEND-01 every request carries the session its work was captured under, without a CSRF header', async () => {
   const { gate, net, transport } = wired('S1');
   const context = gate.capture('document');
   const done = transport.request('/api/studies', { context });
   assert.equal(net.calls.length, 1);
   assert.equal(new Headers(net.calls[0].headers).get('X-KIN-Session'), 'S1');
-  assert.equal(new Headers(net.calls[0].headers).get('X-KIN-CSRF'), '1');
+  assert.equal(new Headers(net.calls[0].headers).get('X-KIN-CSRF'), null);
   net.calls[0].answer(200, { studies: [] });
   const answer = await done;
   assert.deepEqual({ ok: answer.ok, status: answer.status, body: answer.body, auth: answer.auth, incomplete: answer.incomplete },
@@ -342,7 +342,7 @@ for (const [name, given] of [
   ['Headers', () => new Headers({ Accept: 'multipart/related', 'Content-Type': 'application/dicom+json' })],
   ['pairs', () => [['Accept', 'multipart/related'], ['Content-Type', 'application/dicom+json']]],
   ['lower-case bindings', () => ({ Accept: 'multipart/related', 'Content-Type': 'application/dicom+json',
-    'x-kin-session': 'forged', 'x-kin-csrf': 'forged' })],
+    'x-kin-session': 'forged' })],
 ]) test('SEND-12 caller ' + name + ' keep media headers and cannot override or duplicate binding', async () => {
   const { gate, net, transport } = wired('S1');
   for (const read of ['request', 'fetch']) {
@@ -352,7 +352,7 @@ for (const [name, given] of [
     assert.equal(headers.get('Accept'), 'multipart/related');
     assert.equal(headers.get('Content-Type'), 'application/dicom+json');
     assert.equal(headers.get('X-KIN-Session'), 'S1');
-    assert.equal(headers.get('X-KIN-CSRF'), '1');
+    assert.equal(headers.get('X-KIN-CSRF'), null);
     assert.equal(headers.has('0'), false);
     call.answer(200, {});
     await done;
@@ -1274,7 +1274,7 @@ const SITE = 'https://kin.test';
  */
 function browser({ storage = 'reliable' } = {}) {
   const local = new Map(), documents = [], channels = [];
-  const server = { sessions: new Map(), ended: new Set(), cookie: null, serial: 0, calls: [], logouts: [], proofs: new Map(),
+  const server = { sessions: new Map(), ended: new Set(), cookie: null, serial: 0, calls: [], logouts: [],
     answers: [],
     login(account = { sub: 'SYN-SUB', actor: 'syn@synthetic.test', institution: 'SYN-INST', roles: ['radiologist'], kind: 'member' }) {
       const id = `S${++server.serial}`;
@@ -1298,12 +1298,6 @@ function browser({ storage = 'reliable' } = {}) {
       return Promise.resolve(respond(scripted.status, scripted.body, scripted.code));
     }
     const refuse = (status, code) => Promise.resolve(respond(status, { code, message: 'SYN' }, code));
-    if (path === '/api/auth/entry') {
-      const proof = JSON.parse(init.body).proof, session = server.proofs.get(proof);
-      if (!session || session !== server.cookie) return refuse(403, 'AUTH_ENTRY_REFUSED');
-      server.proofs.delete(proof);
-      return Promise.resolve(respond(200, { sessionId: session }));
-    }
     if (server.cookie === null) return refuse(401, 'AUTH_CREDENTIALS_MISSING');
     if (bound !== null && bound !== server.cookie) return refuse(409, 'AUTH_SESSION_MISMATCH');
     if (bound === null && path !== '/api/me') return refuse(428, 'AUTH_SESSION_REQUIRED');
@@ -1459,10 +1453,6 @@ test('AUTH-03 the automatic login never starts over an end record, unverifiable 
       server.answers.push({ path: '/api/me', fail: true });
       return { server, doc: open(), rejects: true };
     },
-    'a refused entry proof': async () => {
-      const { server, open } = browser();
-      return { server, doc: open('/worklist/hpacs-lite/main.html', '#kin-entry=SYN-USED-PROOF') };
-    },
   };
   for (const [label, make] of Object.entries(cases)) {
     const { server, doc, rejects } = await make();
@@ -1470,7 +1460,7 @@ test('AUTH-03 the automatic login never starts over an end record, unverifiable 
     assert.equal(doc.auth.autoLogin(), false, label);
     assert.deepEqual(doc.moves, [], label);
     assert.notEqual(doc.state(), 'active', label);
-    if (!rejects && !label.includes('proof')) assert.deepEqual(server.calls, [], `${label}: the live session is not even read`);
+    assert.ok(server.calls.every(([method, path]) => method === 'GET' && path === '/api/me'), `${label}: no work or logout request`);
   }
   // The opposite side (A005): a session the SERVER ended (expiry) or another login replaced is not the person leaving.
   // Its record holds no new document: the ordinary entry asks the server and, with no session, the login starts by
@@ -1516,22 +1506,16 @@ test('AUTH-03 the automatic login never starts over an end record, unverifiable 
   assert.equal(nextDay.auth.autoLogin(), true);
 });
 
-test('AUTH-04 the entry proof is taken from the address at once, used once, and enters even where storage cannot be verified', async () => {
-  for (const storage of ['reliable', 'unreadable', 'full']) {
-    const { server, open } = browser({ storage });
-    const session = server.login();
-    server.proofs.set('SYN-PROOF', session);
-    const doc = open('/worklist/hpacs-lite/main.html', '#kin-entry=SYN-PROOF');
-    assert.equal(doc.address, '/worklist/hpacs-lite/main.html', 'the fragment left the address before any request');
-    await doc.auth.init();
-    assert.deepEqual([doc.state(), doc.auth.sessionId()], ['active', session], storage);
-    assert.deepEqual(server.calls, [['POST', '/api/auth/entry', null], ['GET', '/api/me', session]], 'the bootstrap after a proof is bound');
-    // The same proof again (history, a copied address): refused, nothing opens, and no login starts by itself.
-    const replay = open('/worklist/hpacs-lite/main.html', '#kin-entry=SYN-PROOF');
-    assert.equal(await replay.auth.init(), null);
-    assert.deepEqual([replay.state(), replay.auth.endState()?.reason, replay.auth.autoLogin()], ['unknown', storage === 'reliable' ? 'entry' : replay.auth.endState().reason, false]);
-    assert.equal(doc.state(), 'active');
-  }
+test('AUTH-04 a callback document bootstraps its current cookie session without an entry proof', async () => {
+  const { server, open } = browser();
+  const session = server.login();
+  const doc = open('/worklist/hpacs-lite/main.html');
+  await doc.auth.init();
+  assert.deepEqual([doc.state(), doc.auth.sessionId()], ['active', session]);
+  assert.deepEqual(server.calls, [['GET', '/api/me', null]]);
+  const again = open('/worklist/hpacs-lite/main.html');
+  await again.auth.init();
+  assert.deepEqual([again.state(), again.auth.sessionId()], ['active', session]);
 });
 
 test('AUTH-05 which answers close a document: the session ended, the session replaced - and nothing else', async () => {
@@ -1646,11 +1630,12 @@ test('AUTH-07 one logout: the record and the notice before the network, one boun
   assert.notEqual(sibling.state(), 'active');
   assert.deepEqual(sibling.posts, [], 'the sibling re-posts nothing and sends no logout of its own');
   assert.deepEqual(server.logouts, [session]);
-  // A new document after the confirmed end: closed, no request, no automatic login.
+  // A new document checks the cookie, then keeps the confirmed end without automatic login.
   const later = open('/worklist/hpacs-lite/index.html');
   const calls = server.calls.length;
   assert.equal(await later.auth.init(), null);
-  assert.deepEqual([later.auth.endState().state, later.auth.autoLogin(), server.calls.length], ['confirmed', false, calls]);
+  assert.deepEqual([later.auth.endState().state, later.auth.autoLogin()], ['confirmed', false]);
+  assert.deepEqual(server.calls.slice(calls), [['GET', '/api/me', null]]);
 });
 
 test('AUTH-08 a logout that the server does not confirm is unconfirmed by its kind, never retried by itself, and never a confirmed end', async () => {

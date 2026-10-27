@@ -2331,7 +2331,6 @@ class DictationLiveE2E(test_worklist.WorklistE2E):
         run.observed['post_request'] = {'headers': allowlisted(headers, REQUEST_HEADERS),
                                         'authz_header_absent': 'authorization' not in headers}
         run.check('P5', 'content-type-audio-wav', headers.get('content-type') == 'audio/wav', headers.get('content-type'))
-        run.check('P5', 'csrf-header', headers.get('x-kin-csrf') == '1', headers.get('x-kin-csrf'))
         run.check('P5', 'no-credential-header', 'authorization' not in headers)
         body = request.post_data_buffer
         declared = headers.get('content-length')

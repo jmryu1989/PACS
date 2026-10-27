@@ -2739,3 +2739,16 @@ for (const location of ['header', 'body']) for (const code of ['AUTH_SESSION_BUS
     assert.equal(reads(t, A, 'findings'), before); assert.equal(store.state().entries.get(e.id), e);
   });
 }
+
+// REQ-MG-LENGTH-READBACK -> RISK-MG-WRONG-BASIS: copied measurements retain their scale basis.
+test('MG length copied and live-head values carry the DICOM measurement basis', () => {
+  const format = require('../worklist-v0/hpacs-lite/finding-link-model.js').valueText;
+  for (const source of ['server-copy', 'live-head']) {
+    for (const [basis, label] of [['dbt', 'DBT PixelSpacing'], ['pixel', '원본 기준면'], ['ermf', '추정 보정'], ['detector', '검출기 기준']]) {
+      const value = format('length', 'kin-mg-length-v1:' + basis, [12.34], source);
+      assert.ok(value.includes('12.3 mm') && value.includes(label));
+    }
+  }
+  assert.ok(format('angle', 'kin-mg-length-v1:detector', [12], 'server-copy').includes('단위 미확인'));
+  assert.ok(format('length', 'kin-mg-length-v1:unknown', [12], 'server-copy').includes('단위 미확인'));
+});

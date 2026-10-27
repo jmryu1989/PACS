@@ -111,6 +111,7 @@ Object.assign(CONTRACT.field_rules, {"dicom.import.intent":{"source":"detail.ins
   "original.download.result":{"source":"detail.institutionId","meaning":IMPORT_MEANING}});
 // D1489: the archive grant's issue/refusal row is attributed the same way (vectors 51-52).
 CONTRACT.field_rules["original.download.grant"] = {"source":"detail.institutionId","meaning":IMPORT_MEANING};
+CONTRACT.field_rules["original.download.refused"] = {"source":"detail.institutionId","meaning":IMPORT_MEANING};
 CONTRACT.synthetic_vectors.push(
   {"row":42,"action":"dicom.import.intent","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A member's import intent"},
   {"row":43,"action":"dicom.import.result","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A's unconfirmed file result: the admin finds operationId and index"},
@@ -244,6 +245,13 @@ function deepKeys(value, keys = new Set()) {
 
 // ── the contract table ──
 
+test('a refused download belongs to its recorded institution after grant admission is removed', () => {
+  const source = { ...ROWS.get(51), action: 'original.download.refused',
+    detail: JSON.stringify({ institutionId: 'inst-a', operationId: OP_A, code: 'MANIFEST_CHANGED' }) };
+  assert.equal(A.projectAuditRow(source, 'inst-a').detail.code, 'MANIFEST_CHANGED');
+  assert.equal(A.projectAuditRow(source, 'inst-b'), null);
+});
+
 test('the module table is the card contract; allowed and hidden never overlap; the default is hidden', () => {
   assert.deepEqual(json(A.AUDIT_FIELD_RULES), Object.fromEntries(Object.entries(CONTRACT.field_rules).map(([k, v]) => [k, v.source])));
   assert.deepEqual(json(A.AUDIT_REPORT_COMMIT_ACTIONS), CONTRACT.report_commit_actions_by_detail_by);
@@ -312,14 +320,14 @@ test('the synthetic vectors (the card\'s 30 and study.question): record-time rea
   }
 });
 
-test('S9-U4b import/download rows: the admin finds operationId and index; a row without institutionId reaches nobody; eight more candidates (D1489 the grant)', () => {
+test('S9-U4b import/download rows: the admin finds operationId and index; a row without institutionId reaches nobody', () => {
   const unconfirmed = A.projectAuditRow(ROWS.get(43), 'inst-a');
   assert.deepEqual([unconfirmed.detail.operationId, unconfirmed.detail.index, unconfirmed.detail.attemptId, unconfirmed.detail.outcome],
     [OP_A, 3, ATT, 'unconfirmed']);
   assert.equal(A.projectAuditRow(ROWS.get(43), 'inst-b'), null);
   assert.equal(A.attributeAuditRow(ROWS.get(50)).hidden, 'no_institution_recorded');
   const seven = ['dicom.import.intent', 'dicom.import.result', 'dicom.import.recovery.request', 'dicom.import.recovery.result',
-    'original.download.prepare', 'original.download.grant', 'original.download.intent', 'original.download.result'];
+    'original.download.prepare', 'original.download.grant', 'original.download.intent', 'original.download.result', 'original.download.refused'];
   for (const action of seven) assert.equal(A.auditRule(action), 'field:detail.institutionId', action);
   assert.deepEqual(A.AUDIT_CANDIDATE_ACTIONS.filter(action => /^(dicom\.import|original\.download)\./.test(action)).sort(), [...seven].sort());
   // Not one of them is widened by a hidden wildcard or a neighbouring name.

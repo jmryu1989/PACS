@@ -187,7 +187,7 @@ class FailureServicesE2E(unittest.TestCase):
                 # X-KIN-Session the route answers 428 AUTH_SESSION_REQUIRED, which
                 # says nothing about the route itself.
                 probe = page.request.get(url, timeout=30000, headers={
-                    "X-KIN-CSRF": "1", "X-KIN-Session": page.evaluate("KinAuth.sessionId()") or ""})
+                    "X-KIN-Session": page.evaluate("KinAuth.sessionId()") or ""})
                 event("admin_metrics_direct_probe", status=probe.status,
                       elapsed=time.monotonic() - probe_started)
             except PlaywrightError as error:

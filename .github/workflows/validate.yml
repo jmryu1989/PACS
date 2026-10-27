@@ -93,7 +93,7 @@ jobs:
         timeout-minutes: 5
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/download-producer --tree api/src --tree tests/emr/request --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/request/download_producer_live.py --class DownloadProducerLive --mode live --unit ci-download-producer --timeout 300
       - name: EMR-B evidence (synthetic, sanitized)
-        if: always()
+        if: ${{ always() && !github.event.pull_request.draft }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: emr-b-evidence
@@ -112,9 +112,21 @@ jobs:
     # ~15-minute runtime job, which now runs beside them. A failed or cancelled select must never leave a
     # required module check skipped (the gate counts path-selection skips as satisfied, D1831): every module
     # job still starts and its first step fails unless this job succeeded.
+    # 2026-10-27 (user): a draft PR is not validated in CI. Branch protection accepts a skipped required check
+    # (one skipped by an `if` reports success), and marking the PR ready keeps the same SHA, so a draft run must
+    # leave every required check failed, never skipped: until the ready run's own checks replace them, the
+    # draft run's checks keep the PR unmergeable. This job fails at once, so every module job runs only its
+    # failing first step; runtime and consume fail on their own first step. Steps that otherwise run after a
+    # failure (`always()`, `!cancelled()`) exclude a draft: they keep a ready run's failure evidence, and on a
+    # draft there is nothing to collect, only runner time to spend.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
+    - name: Draft pull request is not validated
+      if: ${{ github.event.pull_request.draft }}
+      run: |
+        echo "::error::draft PR: CI does not validate this head; mark the PR ready for review to run it"
+        exit 1
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
         persist-credentials: false
@@ -142,6 +154,11 @@ jobs:
     # 19m43s-19m52s on main and a 20-minute timeout already hit under queue load (#182).
     timeout-minutes: 35
     steps:
+    - name: Draft pull request is not validated
+      if: ${{ github.event.pull_request.draft }}
+      run: |
+        echo "::error::draft PR: CI does not validate this head; mark the PR ready for review to run it"
+        exit 1
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
         persist-credentials: false
@@ -223,6 +240,8 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/dock-strip --cwd . --file worklist-v0/hpacs-lite/viewer-workspace-dock.js --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/viewer_dock_strip_test.cjs --file tests/module_session_harness.cjs --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_dock_strip_test.cjs
     - name: Automatic prior calendar and identity boundaries
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_prior_test.cjs
+    - name: W9 multi-study composition, selection generation and viewer channel model
+      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/multi_study_view_test.cjs tests/worklist_selection_test.cjs
     - name: Compound search operators and malformed condition boundaries
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/compound_filter_test.cjs tests/worklist_alerts_test.cjs tests/worklist_refresh_test.cjs tests/worklist_startup_test.cjs tests/related_parts_test.cjs tests/worklist_body_parts_test.cjs tests/study_priority_test.cjs tests/worklist_search_test.cjs
     - name: Worklist column visibility and account storage model
@@ -298,7 +317,7 @@ jobs:
         KIN_TEST_API_IMAGE: kin-api:ci
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/findings-migration --cwd . --file api/prisma/migrations/20260917120000_findings/migration.sql --file api/prisma/migrations/20260920120000_report_citations/migration.sql --file api/src/pacs.service.ts --file api/src/pacs/values.ts --file api/src/pacs/access.ts --file api/src/pacs/institutions.ts --file api/src/study-source-groups.ts --file api/src/pacs/worklist.ts --file api/src/pacs/dicom-gateway.ts --file api/src/pacs/preferences.ts --file api/src/pacs/filters.ts --file api/src/pacs/study-state.ts --file api/src/pacs/tech-note.ts --file api/src/pacs/report-draft.ts --file api/src/pacs/report-evidence.ts --file api/src/pacs/report-commit.ts --file api/src/pacs/hold.ts --file api/src/pacs/clinician.ts --file api/src/pacs/audit.ts --file api/src/pacs/metrics.ts --file tests/ops_product_transfer_fixture.py --file tests/viewer_migration_test.py --file api/src/worklist-columns.ts --file api/prisma/migrations/20260930120000_audit_log_append_only/migration.sql --file scripts/ops_backup.py --file scripts/ops_export_inventory.py --file scripts/emr-compose.py --file tests/ops_combined_transfer_fixture.py --file tests/ops_database_transfer_fixture.py --file tests/ops_image_transfer_fixture.py --file tests/ops_orthanc_transfer_fixture.py --file tests/ops_orthanc_transfer_worker.py --file tests/ops_product_transfer_worker.py -- python3 -B tests/viewer_migration_test.py ViewerMigration.test_findings_additive_restrict_owner_key_and_failed_ddl ViewerMigration.test_findings_action_check_survives_pg_dump_restore ViewerMigration.test_report_citations_additive_nullable_bounded_and_named ViewerMigration.test_report_citations_runtime_check_translation_and_draft_lock ViewerMigration.test_03_real_dump_restore_every_row_revision_replay_budget_and_fk
     - name: Compiled viewer input, Unicode and original-plane validation
-      run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_input_test.cjs
+      run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" -v "$PWD/config:/config:ro" --entrypoint node kin-api:ci --test /tests/viewer_input_test.cjs /tests/mg_length_test.cjs
     - name: Compiled finding input allow-list, fingerprint and copied provenance
       run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/finding_input_test.cjs
     - name: D-MEASURE2 source failures, safe warnings and real read deadlines
@@ -326,7 +345,7 @@ jobs:
           sleep 1
         done
         python3 -c 'import sys; sys.path.insert(0, "tests"); from ops_product_transfer_fixture import provision; provision(sys.argv[1])' "$db"
-        python3 scripts/record-run.py --run-dir tmp/runtime-ci/critical-result-service --cwd . --file api/src/critical-result.service.ts --file api/src/critical-result-policy.ts --file api/src/critical-result.controller.ts --file api/src/study-access.service.ts --file api/src/study-source-groups.ts --file api/src/study-access.interceptor.ts --file api/src/pacs.service.ts --file api/src/pacs/values.ts --file api/src/pacs/access.ts --file api/src/pacs/institutions.ts --file api/src/pacs/worklist.ts --file api/src/pacs/dicom-gateway.ts --file api/src/pacs/preferences.ts --file api/src/pacs/filters.ts --file api/src/pacs/study-state.ts --file api/src/pacs/tech-note.ts --file api/src/pacs/report-draft.ts --file api/src/pacs/report-evidence.ts --file api/src/pacs/report-commit.ts --file api/src/pacs/hold.ts --file api/src/pacs/clinician.ts --file api/src/pacs/audit.ts --file api/src/pacs/metrics.ts --file api/src/admin-audit.ts --file api/src/clinician-policy.ts --file api/prisma/migrations/20260928120000_critical_result/migration.sql --file tests/critical_result_service_test.cjs --file api/src/worklist-columns.ts --file api/prisma/migrations/20260930120000_audit_log_append_only/migration.sql --file tests/ops_product_transfer_fixture.py --file scripts/emr-compose.py -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_CRITICAL_RESULT_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_critical_result_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/critical_result_service_test.cjs
+        python3 scripts/record-run.py --run-dir tmp/runtime-ci/critical-result-service --cwd . --file api/src/critical-result.service.ts --file api/src/critical-result-policy.ts --file api/src/critical-result.controller.ts --file api/src/study-access.service.ts --file api/src/study-source-groups.ts --file api/src/pacs.service.ts --file api/src/pacs/values.ts --file api/src/pacs/access.ts --file api/src/pacs/institutions.ts --file api/src/pacs/worklist.ts --file api/src/pacs/dicom-gateway.ts --file api/src/pacs/preferences.ts --file api/src/pacs/filters.ts --file api/src/pacs/study-state.ts --file api/src/pacs/tech-note.ts --file api/src/pacs/report-draft.ts --file api/src/pacs/report-evidence.ts --file api/src/pacs/report-commit.ts --file api/src/pacs/hold.ts --file api/src/pacs/clinician.ts --file api/src/pacs/audit.ts --file api/src/pacs/metrics.ts --file api/src/admin-audit.ts --file api/src/clinician-policy.ts --file api/prisma/migrations/20260928120000_critical_result/migration.sql --file tests/critical_result_service_test.cjs --file api/src/worklist-columns.ts --file api/prisma/migrations/20260930120000_audit_log_append_only/migration.sql --file tests/ops_product_transfer_fixture.py --file scripts/emr-compose.py -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_CRITICAL_RESULT_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_critical_result_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/critical_result_service_test.cjs
     - name: S7-U5 compiled auth session audit rows, login, logout, account switch, idle, refresh failure, sweep, atomicity, late answers and secrets
       run: |
         db="$(docker run -d --network none --tmpfs /var/lib/postgresql/data -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=kin_auth_session_test postgres:16-alpine)"
@@ -437,7 +456,7 @@ jobs:
         docker image inspect kin-api:ci --format 'Image ID: {{.Id}}' >> "$GITHUB_STEP_SUMMARY"
         echo 'CI checks runtime packaging and disposable-DB startup. The 69 live invariants, 14 browser tests and independent review remain separate release gates. No deployment is performed.' >> "$GITHUB_STEP_SUMMARY"
     - name: Synthetic runtime print identity evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-runtime-print-identity
@@ -488,7 +507,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     - name: Synthetic runtime record-run evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-runtime-record-runs
@@ -560,13 +579,13 @@ jobs:
       timeout-minutes: 25
       run: python3 scripts/record-run.py --run-dir tmp/asr-ci/runtime --cwd . --file api/src/asr.service.ts --file api/src/asr-destination.ts --file api/src/dictation.controller.ts --file api/src/dictation-parser.ts --file api/src/dictation-audio.ts --file api/src/pacs.service.ts --file api/src/pacs/values.ts --file api/src/pacs/access.ts --file api/src/pacs/institutions.ts --file api/src/pacs/worklist.ts --file api/src/pacs/dicom-gateway.ts --file api/src/pacs/preferences.ts --file api/src/pacs/filters.ts --file api/src/pacs/study-state.ts --file api/src/pacs/tech-note.ts --file api/src/pacs/report-draft.ts --file api/src/pacs/report-evidence.ts --file api/src/pacs/report-commit.ts --file api/src/pacs/hold.ts --file api/src/pacs/clinician.ts --file api/src/pacs/audit.ts --file api/src/pacs/metrics.ts --file tests/asr_engine_runtime_test.cjs --file tmp/asr-ci/fixture/dictation.wav --file tmp/asr-ci/fixture/attestation.json --file api/src/worklist-columns.ts -- docker run --rm --network kin-asr-u3 --read-only --tmpfs /tmp:rw,size=16m -v "$PWD/tests:/tests:ro" -v "$PWD/tmp/asr-ci/fixture:/fixture:ro" -v "$PWD/tmp/asr-ci/out:/out" -e KIN_ASR_ENGINE_URL=http://kin-asr-engine-u3:8080/inference --entrypoint node kin-api:ci --test /tests/asr_engine_runtime_test.cjs
     - name: Retain the raw engine output
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       run: |
         mkdir -p tmp/asr-ci/out
         docker logs kin-asr-engine-u3 > tmp/asr-ci/out/engine-stdout.log 2> tmp/asr-ci/out/engine-stderr.log || true
         docker inspect kin-asr-engine-u3 > tmp/asr-ci/out/engine-inspect.json || true
     - name: Summarize the attested identity
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       run: |
         python3 - >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
         import json, pathlib
@@ -597,13 +616,13 @@ jobs:
               'no clinical suitability, no browser capture, no live refusal battery.')
         SUMMARY
     - name: Remove the isolated engine, network and model copy
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       run: |
         docker rm -f kin-asr-engine-u3 || true
         docker network rm kin-asr-u3 || true
         rm -rf tmp/asr-ci/model
     - name: Synthetic ASR engine runtime evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-asr-engine-runtime
@@ -641,7 +660,7 @@ jobs:
       timeout-minutes: 5
       run: python3 scripts/record-run.py --run-dir tmp/dictation-capture-ci/capture --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-citation.js --file worklist-v0/hpacs-lite/report-structure.js --file worklist-v0/hpacs-lite/dictation-session.js --file worklist-v0/hpacs-lite/dictation-capture.js --file worklist-v0/hpacs-lite/dictation.js --file worklist-v0/hpacs-lite/dictation-worklet.js --file proxy/nginx.conf.template --file scripts/asr_fixture.py --file tests/dictation_capture_signal.py --file tests/dictation_capture_signal_test.py --file tests/report_dictation_capture_dom_test.py --file tests/report_dictation_host_dom_test.py --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/report-draft-client.js --file tests/main_split_harness.cjs --file tests/main_split_harness.py --file tests/main_split_harness_fixture.json --file api/package-lock.json --file tests/page_source.cjs --file tests/main_move_spec.json --file tests/main_move_contract.cjs --file worklist-v0/hpacs-lite/main-split.bundle.js --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file .gitattributes --file worklist-v0/hpacs-lite/page-core.js --file worklist-v0/hpacs-lite/study-state.js --file worklist-v0/hpacs-lite/order-list-store.js --file worklist-v0/hpacs-lite/report-templates.js --file worklist-v0/hpacs-lite/report-dictation.js --file worklist-v0/hpacs-lite/report-templates-ui.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/sr-reader.js --file worklist-v0/hpacs-lite/current-study.js --file worklist-v0/hpacs-lite/study-info-panel.js --file worklist-v0/hpacs-lite/related-studies.js --file worklist-v0/hpacs-lite/study-thumbnails.js --file worklist-v0/hpacs-lite/order-list.js --file worklist-v0/hpacs-lite/study-image-requests.js --file worklist-v0/hpacs-lite/study-corrections.js --file worklist-v0/hpacs-lite/related-report.js --file worklist-v0/hpacs-lite/report-editor.js --file worklist-v0/hpacs-lite/report-draft-sync.js --file worklist-v0/hpacs-lite/report-structure-pane.js --file worklist-v0/hpacs-lite/report-citation-pane.js --file worklist-v0/hpacs-lite/report-draft-save.js --file worklist-v0/hpacs-lite/report-commit.js --file worklist-v0/hpacs-lite/report-hold.js --file worklist-v0/hpacs-lite/work-exit.js --file worklist-v0/hpacs-lite/worklist-polling.js --file worklist-v0/hpacs-lite/report-history.js --file worklist-v0/hpacs-lite/report-toolbar.js --file worklist-v0/hpacs-lite/viewer-placement.js --file worklist-v0/hpacs-lite/viewer-launch.js --file worklist-v0/hpacs-lite/feature-mounts.js --file worklist-v0/hpacs-lite/clinical-context-panel.js --file worklist-v0/hpacs-lite/critical-result-mounts.js --file worklist-v0/hpacs-lite/study-questions.js --file worklist-v0/hpacs-lite/workspace-panels.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/worklist-row-events.js --file worklist-v0/hpacs-lite/telerad-request.js --file worklist-v0/hpacs-lite/context-menu.js --file worklist-v0/hpacs-lite/related-controls.js --file worklist-v0/hpacs-lite/session-end.js --file worklist-v0/hpacs-lite/page-boot.js --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file tests/page_source.py --file tests/report_page_contract.py -- "$RUNNER_TEMP/capture-python/bin/python" -B tests/report_dictation_capture_dom_test.py
     - name: Synthetic dictation capture evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-dictation-capture-results
@@ -676,16 +695,16 @@ jobs:
     - name: API type check including the online report modules
       run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/tsc --cwd . --tree api/src/emr-report --tree api/src/emr-signature --file api/tsconfig.json --file api/package-lock.json -- node api/node_modules/typescript/bin/tsc --noEmit -p api
     - name: Online report read, retention and print contracts
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/node --cwd . --tree api/src/emr-contract --tree api/src/emr-report --tree api/src/emr-signature --file emr/units/c.json --file tests/emr/c/contract_test.cjs -- node --test --test-reporter=tap --test-reporter-destination=tmp/emr-c-ci/node.tap --test-reporter=spec --test-reporter-destination=stdout tests/emr/c/contract_test.cjs
     - name: Exact selection of the retained report cases (every declared case passed once, none skipped or extra)
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/node-selection --cwd . --file emr/units/c.json --file tmp/emr-c-ci/node.tap -- node tests/emr/c/contract_test.cjs --judge-tap tmp/emr-c-ci/node.tap
     - name: C2 server crypto cases
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/server-crypto --cwd . --tree api/src/emr-contract --tree api/src/emr-signature --file emr/units/c.json --file tests/emr/c/server_crypto_test.cjs -- node --test --test-reporter=tap --test-reporter-destination=tmp/emr-c-ci/server-crypto.tap --test-reporter=spec --test-reporter-destination=stdout tests/emr/c/server_crypto_test.cjs
     - name: Exact selection of C2 server crypto cases
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/server-crypto-selection --cwd . --file emr/units/c.json --file tmp/emr-c-ci/server-crypto.tap -- node tests/emr/c/contract_test.cjs --judge-tap tmp/emr-c-ci/server-crypto.tap --server-crypto
     - name: Online C2 and D on the native PostgreSQL ledger, including signature restore
       run: |
@@ -696,7 +715,7 @@ jobs:
         python3 scripts/record-run.py --run-dir tmp/emr-c-ci/clinical-pg --cwd . --tree api/src/emr-clinical --tree tests/emr/d -- python3 -B scripts/run-tests.py --module tests/emr/d/online_live.py --mode live --unit emr-online-clinical --timeout 600
         python3 scripts/record-run.py --run-dir tmp/emr-c-ci/key-admin-pg --cwd . --tree api/src/emr-clinical --tree api/src/emr-signature --file api/src/signing-key-admin.controller.ts --tree tests/emr/c -- python3 -B scripts/run-tests.py --module tests/emr/c/key_admin_live.py --class KeyAdminHttpPg --mode live --unit emr-key-admin --timeout 600
     - name: Online report and server signing evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: emr-c1-results
@@ -741,7 +760,7 @@ jobs:
     - name: API typecheck including api/src/emr-clinical
       run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/typecheck --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json -- api/node_modules/.bin/tsc --noEmit -p api
     - name: D contracts and C01-C56 model selection (C52 explicitly deferred to R2 DOM)
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/contract --cwd . --tree api/src/emr-clinical --tree api/src/emr-contract --file tests/emr/d/contract_test.cjs --file api/tsconfig.json --file api/package-lock.json -- docker run --rm --network none --read-only --tmpfs /tmp -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/emr/d/contract_test.cjs
     - name: Keep pinned browser dependencies independent of unused Chrome APT repository
       run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
@@ -758,7 +777,7 @@ jobs:
       run: |
         "$RUNNER_TEMP/emr-d-browser/bin/python" scripts/record-run.py --run-dir tmp/emr-d-ci/pages --tree worklist-v0/hpacs-lite --tree tests/emr/d --file tests/auth_logout_dom_test.py --file tests/page_source.py --file tests/page_source.cjs -- "$RUNNER_TEMP/emr-d-browser/bin/python" scripts/run-tests.py --module tests/emr/d/served_page_test.py --mode pure --unit emr-d-served-pages --timeout 600
     - name: EMR-D evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: emr-d-results
@@ -807,7 +826,7 @@ jobs:
         export KIN_B2R_PRISMA_CLI="$PWD/api/node_modules/prisma/build/index.js"
         python3 scripts/record-run.py --run-dir tmp/emr-e-ci/online-pg --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --tree api/src/emr-contract --tree tests/emr/e --tree api/prisma --file api/src/connect.controller.ts --file api/src/app.module.ts --file api/src/orthanc.service.ts --file emr/units/e.json --file tests/emr/b/pg_ledger_restore_test.py -- python3 -B scripts/run-tests.py --module tests/emr/e/online_live.py --class OnlineImagePg --mode live --unit emr-e-online --timeout 600
     - name: Raw run evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: emr-e-${{ env.TARGET_SHA }}
@@ -850,7 +869,7 @@ jobs:
     - name: Typecheck the API including api/src/emr-audit
       run: python3 scripts/record-run.py --run-dir tmp/emr-f-ci/typecheck --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json -- api/node_modules/.bin/tsc --noEmit -p api
     - name: TEST-F-01..08 declared allow/refuse cases
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/emr-f-ci/contract --cwd . --tree api/src/emr-contract --tree api/src/emr-audit --file api/tsconfig.json --file api/package-lock.json --file tests/emr/f/contract_test.cjs -- node --test --test-reporter=tap tests/emr/f/contract_test.cjs
     - name: F_LINK audit, fixed-copy issuance and hold over HTTP and PostgreSQL
       run: |
@@ -859,7 +878,7 @@ jobs:
         export KIN_B2R_PRISMA_CLI="$PWD/api/node_modules/prisma/build/index.js"
         python3 scripts/record-run.py --run-dir tmp/emr-f-ci/online-pg --cwd . --tree api/src/emr-audit --tree api/src/emr-clinical --tree api/src/emr-report --tree api/src/emr-signature --tree api/src/emr-runtime --tree api/src/emr-contract --tree tests/emr/f --tree api/prisma --file api/src/app.module.ts --file tests/emr/b/pg_ledger_restore_test.py -- python3 -B scripts/run-tests.py --module tests/emr/f/link_live.py --class AuditLinkPg --mode live --unit emr-f-link --timeout 600
     - name: Raw run evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: emr-f-${{ env.TARGET_SHA }}
@@ -899,7 +918,7 @@ jobs:
     - name: Inventory contracts
       run: python3 scripts/record-run.py --run-dir tmp/emr-h-r1/runs/contract --cwd . --tree api/src/emr-contract --tree api/src/emr-retention --tree tests/emr/h -- node --test --test-reporter=tap tests/emr/h/contract_test.cjs
     - name: Retain raw evidence
-      if: ${{ always() }}
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: emr-h-${{ env.CANDIDATE_SHA }}
@@ -939,11 +958,12 @@ jobs:
         "$RUNNER_TEMP/hp-python/bin/python" -m pip install -r tests/e2e/requirements.txt -r gateway/agent/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
         "$RUNNER_TEMP/hp-python/bin/python" -m playwright install --with-deps chromium
     - name: Isolated declared invariants, worklist and hanging protocol tests
-      timeout-minutes: 28
+      # The profile's 1884s deadline plus post-deadline logs, cleanup and inspection (tests/measurement_ci.py).
+      timeout-minutes: 35
       run: |
         "$RUNNER_TEMP/hp-python/bin/python" tests/measurement_ci.py --profile hanging-protocols
     - name: Sanitized synthetic hanging protocol evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-hanging-protocols-results
@@ -957,9 +977,9 @@ jobs:
       timeout-minutes: 28
       run: |
         "$RUNNER_TEMP/hp-python/bin/python" tests/measurement_ci.py --profile cell-merge
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Sanitized synthetic cell merge evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-cell-merge-results
@@ -1002,44 +1022,44 @@ jobs:
         ref: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
         persist-credentials: false
     - name: Checked-out source is the event SHA
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 5
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/sha --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/validate.yml -- python3 -c "import os,subprocess; assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip() == os.environ['TARGET_SHA']"
     - name: Create the isolated Python environment
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 5
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/venv --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/validate.yml --file tests/e2e/requirements.txt -- python3 -m venv "$RUNNER_TEMP/part1-mg-python"
     - name: Cache pinned Python downloads
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809
       with:
         path: ~/.cache/pip
         key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
     - name: Install the versions used by the unit tests
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 15
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/dependencies --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/validate.yml --file tests/e2e/requirements.txt -- "$RUNNER_TEMP/part1-mg-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4
     - name: Prepare the hosted browser package repositories
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 5
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/browser-apt --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/validate.yml --file scripts/ci_browser_apt.py -- sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
     - name: Install full Chromium with its Linux libraries
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 15
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/browser --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/validate.yml -- "$RUNNER_TEMP/part1-mg-python/bin/python" -m playwright install --with-deps chromium
     - name: Sample scope and download recovery contracts
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 5
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/sample-contracts --file tests/part1/archive_download.py --file tests/part1/archive_download_test.py --cwd . --tree tests/part1/mg --file .github/workflows/validate.yml -- python3 -B tests/part1/mg/ci_test.py
     - name: Declare hosted sample scope and cache hash list
       id: sample-plan
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 5
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/sample-plan --file tests/part1/archive_download.py --file tests/part1/archive_download_test.py --cwd . --tree tests/part1/mg --file .github/workflows/validate.yml -- python3 -B tests/part1/mg/ci.py plan
@@ -1049,12 +1069,12 @@ jobs:
         path: ${{ steps.sample-plan.outputs.cache-paths }}
         key: ${{ runner.os }}-${{ steps.sample-plan.outputs.cache-key }}
     - name: Fetch public DICOM series and verify every pinned file hash
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 40
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/samples --file tests/part1/archive_download.py --file tests/part1/archive_download_test.py --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/validate.yml -- python3 -B tests/part1/mg/ci.py fetch
     - name: Verify the committed hash-pinned D744-2 rule table
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 5
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/rule-table --cwd . --file "$KIN_MG_RULE_CASES" --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/validate.yml -- python3 -c "$(cat <<'PY'
@@ -1069,12 +1089,12 @@ jobs:
         PY
         )"
     - name: Model behaviour cases
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 5
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/model --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/validate.yml --file "$KIN_MG_RULE_CASES" -- node --test --test-reporter=tap --test-reporter-destination=tmp/part1-mg-ci/model.tap --test-reporter=spec --test-reporter-destination=stdout tests/part1/mg/model_test.cjs
     - name: Model declared cases equal the cases that passed
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 5
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/model-selection --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/validate.yml --file "$KIN_MG_RULE_CASES" --file tmp/part1-mg-ci/model.tap -- python3 -c "$(cat <<'PY'
@@ -1099,17 +1119,17 @@ jobs:
         PY
         )"
     - name: DICOM contract cases with exact collection and no silent skips
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 10
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/dicom --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/validate.yml -- "$RUNNER_TEMP/part1-mg-python/bin/python" -B tests/part1/mg/ci.py dicom
     - name: Full Chromium DOM cases with exact collection and no silent skips
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 20
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/dom --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/validate.yml -- "$RUNNER_TEMP/part1-mg-python/bin/python" -B tests/part1/mg/ci.py dom
     - name: R1 evidence including failures and not-run reasons
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: part1-mg-results
@@ -1146,44 +1166,44 @@ jobs:
         ref: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
         persist-credentials: false
     - name: Checked-out source is the event SHA
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 5
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/sha --cwd . --tree tests/part1/xa --file worklist-v0/hpacs-lite/xa-playback-model.js --file worklist-v0/hpacs-lite/viewer-xa-playback.js --file .github/workflows/validate.yml -- python3 -c "import os,subprocess; assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip() == os.environ['TARGET_SHA']"
     - name: Create the isolated Python environment
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 5
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/venv --cwd . --tree tests/part1/xa --file worklist-v0/hpacs-lite/xa-playback-model.js --file worklist-v0/hpacs-lite/viewer-xa-playback.js --file .github/workflows/validate.yml --file tests/e2e/requirements.txt -- python3 -m venv "$RUNNER_TEMP/part1-xa-python"
     - name: Cache pinned Python downloads
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809
       with:
         path: ~/.cache/pip
         key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
     - name: Install the versions used by the unit tests
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 15
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/dependencies --cwd . --tree tests/part1/xa --file worklist-v0/hpacs-lite/xa-playback-model.js --file worklist-v0/hpacs-lite/viewer-xa-playback.js --file .github/workflows/validate.yml --file tests/e2e/requirements.txt -- "$RUNNER_TEMP/part1-xa-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4
     - name: Prepare the hosted browser package repositories
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 5
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/browser-apt --cwd . --tree tests/part1/xa --file worklist-v0/hpacs-lite/xa-playback-model.js --file worklist-v0/hpacs-lite/viewer-xa-playback.js --file .github/workflows/validate.yml --file scripts/ci_browser_apt.py -- sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
     - name: Install full Chromium with its Linux libraries
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 15
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/browser --cwd . --tree tests/part1/xa --file worklist-v0/hpacs-lite/xa-playback-model.js --file worklist-v0/hpacs-lite/viewer-xa-playback.js --file .github/workflows/validate.yml -- "$RUNNER_TEMP/part1-xa-python/bin/python" -m playwright install --with-deps chromium
     - name: Sample download recovery contracts
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 5
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/sample-contracts --file tests/part1/archive_download.py --file tests/part1/archive_download_test.py --cwd . --tree tests/part1/xa --file .github/workflows/validate.yml -- python3 -B tests/part1/xa/ci_test.py
     - name: Declare public sample cache hash list
       id: sample-plan
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 5
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/sample-plan --file tests/part1/archive_download.py --file tests/part1/archive_download_test.py --cwd . --tree tests/part1/xa --file .github/workflows/validate.yml -- python3 -B tests/part1/xa/ci.py plan
@@ -1193,17 +1213,17 @@ jobs:
         path: ${{ steps.sample-plan.outputs.cache-paths }}
         key: ${{ runner.os }}-${{ steps.sample-plan.outputs.cache-key }}
     - name: Fetch public DICOM series and verify every pinned file hash
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 40
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/samples --file tests/part1/archive_download.py --file tests/part1/archive_download_test.py --cwd . --tree tests/part1/xa --file worklist-v0/hpacs-lite/xa-playback-model.js --file worklist-v0/hpacs-lite/viewer-xa-playback.js --file .github/workflows/validate.yml -- python3 -B tests/part1/xa/ci.py fetch
     - name: Model behaviour cases
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 5
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/model --cwd . --tree tests/part1/xa --file worklist-v0/hpacs-lite/xa-playback-model.js --file worklist-v0/hpacs-lite/viewer-xa-playback.js --file .github/workflows/validate.yml -- node --test --test-reporter=tap --test-reporter-destination=tmp/part1-xa-ci/model.tap --test-reporter=spec --test-reporter-destination=stdout tests/part1/xa/model_test.cjs
     - name: Model declared cases equal the cases that passed
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 5
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/model-selection --cwd . --tree tests/part1/xa --file worklist-v0/hpacs-lite/xa-playback-model.js --file worklist-v0/hpacs-lite/viewer-xa-playback.js --file .github/workflows/validate.yml --file tmp/part1-xa-ci/model.tap -- python3 -c "$(cat <<'PY'
@@ -1228,7 +1248,7 @@ jobs:
         PY
         )"
     - name: DICOM contract cases with exact collection and no silent skips
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 10
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/dicom --cwd . --tree tests/part1/xa --file worklist-v0/hpacs-lite/xa-playback-model.js --file worklist-v0/hpacs-lite/viewer-xa-playback.js --file .github/workflows/validate.yml -- "$RUNNER_TEMP/part1-xa-python/bin/python" -c "$(cat <<'PY'
@@ -1278,7 +1298,7 @@ jobs:
         PY
         )" dicom
     - name: Full Chromium DOM cases with exact collection and no silent skips
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 10
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/dom --cwd . --tree tests/part1/xa --file worklist-v0/hpacs-lite/xa-playback-model.js --file worklist-v0/hpacs-lite/viewer-xa-playback.js --file .github/workflows/validate.yml -- "$RUNNER_TEMP/part1-xa-python/bin/python" -c "$(cat <<'PY'
@@ -1328,7 +1348,7 @@ jobs:
         PY
         )" dom
     - name: R1 evidence including failures and not-run reasons
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: part1-xa-results
@@ -1373,7 +1393,7 @@ jobs:
       run: |
         "$RUNNER_TEMP/marks-python/bin/python" tests/measurement_ci.py --profile volume-marks
     - name: Sanitized synthetic manual 3D annotation evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-volume-marks-results
@@ -1428,7 +1448,7 @@ jobs:
       run: |
         "$RUNNER_TEMP/vr-python/bin/python" tests/measurement_ci.py --profile volume-rendering
     - name: Sanitized synthetic volume rendering evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-volume-rendering-results
@@ -1455,92 +1475,95 @@ jobs:
         persist-credentials: false
         ref: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
     - name: S7-U1a TypeScript compiler and Nest declarations for the route inventory
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 5
       run: |
         node --version
         npm ci --prefix api --ignore-scripts --no-audit --no-fund
     - name: Generate the Prisma client for source-level tests
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       working-directory: api
       run: ./node_modules/.bin/prisma generate
     - name: Landed split Git blobs for historical byte proofs
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: git fetch --no-tags --depth=1 origin c8e4f1b485ec05ccbb97589c74a573b3f48b70ce
     - name: W4 shortcut v2 server contract
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w4-shortcut-v2-server --cwd . --tree api/src --file api/prisma/schema.prisma --file api/package-lock.json --tree worklist-v0/hpacs-lite --tree tests -- node --test tests/workspace_shortcuts_v2_service_test.cjs
     - name: W5 related insert idempotency and receipt contract
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w5-related-insert-service --cwd . --tree api/src --file api/prisma/schema.prisma --file api/prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/related_report_insert_service_test.cjs -- node --test tests/related_report_insert_service_test.cjs
     - name: W2 account shortcut CAS and unavailable-target retention
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/filter-shortcuts --cwd . --tree api/src --file api/prisma/schema.prisma --file api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/filter_shortcuts_service_test.cjs -- node --test tests/filter_shortcuts_service_test.cjs
     - name: W9 viewing-set resolve and access-event contract
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w9-viewing-set-service --cwd . --tree api/src --file api/prisma/schema.prisma --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/multi_study_view_service_test.cjs -- node --test tests/multi_study_view_service_test.cjs
     - name: Keep pinned browser dependencies independent of unused Chrome APT repository
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: |
         python3 tests/ci_browser_apt_test.py
         sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
     - name: Cache pinned Python downloads
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809
       with:
         path: ~/.cache/pip
         key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
     - name: Install synthetic DICOM and pinned browser test dependencies
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 15
       run: |
         python3 -m venv "$RUNNER_TEMP/measurement-python"
         "$RUNNER_TEMP/measurement-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
         "$RUNNER_TEMP/measurement-python/bin/python" -m playwright install --with-deps chromium
     - name: S9-U0a-PRE fixed commits for the original page and the move baseline
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 3
       run: git fetch --no-tags --depth=1 origin f1d540626aac03f46de23a9620d69f4c9da66037 0261b1c834c4d5ff5c610185b17a40763985097b 7bccdb614c6582b2a718c493cfb5cff6600629b9
     - name: W2 served folder search, dates, counts and account shortcuts
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/worklist-folders --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-editor-frame.js --file worklist-v0/hpacs-lite/compound-filter.js --file worklist-v0/hpacs-lite/related-parts.js --file worklist-v0/hpacs-lite/worklist-body-parts.js --file worklist-v0/hpacs-lite/saved-filter-manager.js --file tests/worklist_body_parts_dom_test.py --file tests/module_session_harness.py --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/main-split.bundle.js --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file .gitattributes --file worklist-v0/hpacs-lite/page-core.js --file worklist-v0/hpacs-lite/study-state.js --file worklist-v0/hpacs-lite/order-list-store.js --file worklist-v0/hpacs-lite/report-templates.js --file worklist-v0/hpacs-lite/report-dictation.js --file worklist-v0/hpacs-lite/report-templates-ui.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/sr-reader.js --file worklist-v0/hpacs-lite/current-study.js --file worklist-v0/hpacs-lite/study-info-panel.js --file worklist-v0/hpacs-lite/related-studies.js --file worklist-v0/hpacs-lite/study-thumbnails.js --file worklist-v0/hpacs-lite/order-list.js --file worklist-v0/hpacs-lite/study-image-requests.js --file worklist-v0/hpacs-lite/study-corrections.js --file worklist-v0/hpacs-lite/related-report.js --file worklist-v0/hpacs-lite/report-editor.js --file worklist-v0/hpacs-lite/report-draft-sync.js --file worklist-v0/hpacs-lite/report-structure-pane.js --file worklist-v0/hpacs-lite/report-citation-pane.js --file worklist-v0/hpacs-lite/report-draft-save.js --file worklist-v0/hpacs-lite/report-commit.js --file worklist-v0/hpacs-lite/report-hold.js --file worklist-v0/hpacs-lite/work-exit.js --file worklist-v0/hpacs-lite/worklist-polling.js --file worklist-v0/hpacs-lite/report-history.js --file worklist-v0/hpacs-lite/report-toolbar.js --file worklist-v0/hpacs-lite/viewer-placement.js --file worklist-v0/hpacs-lite/viewer-launch.js --file worklist-v0/hpacs-lite/feature-mounts.js --file worklist-v0/hpacs-lite/clinical-context-panel.js --file worklist-v0/hpacs-lite/critical-result-mounts.js --file worklist-v0/hpacs-lite/study-questions.js --file worklist-v0/hpacs-lite/workspace-panels.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/worklist-row-events.js --file worklist-v0/hpacs-lite/telerad-request.js --file worklist-v0/hpacs-lite/context-menu.js --file worklist-v0/hpacs-lite/related-controls.js --file worklist-v0/hpacs-lite/session-end.js --file worklist-v0/hpacs-lite/page-boot.js --file worklist-v0/hpacs-lite/saved-filter-manager.css --file tests/page_source.py --file tests/page_source.cjs --file tests/main_move_spec.json --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file tests/main_split_harness.cjs --file tests/main_move_contract.cjs --file tests/worklist_folders_dom_test.py --file tests/auth_logout_dom_test.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/worklist_folders_dom_test.py
     - name: Current source bundle event order and held-input behavior
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: KIN_SPLIT_PARENT=7bccdb614c6582b2a718c493cfb5cff6600629b9 KIN_PRE_TRACE_DIR="$PWD/tmp/workspace-ui-ci/main-split-landing-raw" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/main-split-landing --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-editor-frame.js --file worklist-v0/hpacs-lite/compound-filter.js --file worklist-v0/hpacs-lite/related-parts.js --file worklist-v0/hpacs-lite/worklist-body-parts.js --file worklist-v0/hpacs-lite/saved-filter-manager.js --file tests/worklist_body_parts_dom_test.py --file tests/module_session_harness.py --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/main-split.bundle.js --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file .gitattributes --file worklist-v0/hpacs-lite/page-core.js --file worklist-v0/hpacs-lite/study-state.js --file worklist-v0/hpacs-lite/order-list-store.js --file worklist-v0/hpacs-lite/report-templates.js --file worklist-v0/hpacs-lite/report-dictation.js --file worklist-v0/hpacs-lite/report-templates-ui.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/sr-reader.js --file worklist-v0/hpacs-lite/current-study.js --file worklist-v0/hpacs-lite/study-info-panel.js --file worklist-v0/hpacs-lite/related-studies.js --file worklist-v0/hpacs-lite/study-thumbnails.js --file worklist-v0/hpacs-lite/order-list.js --file worklist-v0/hpacs-lite/study-image-requests.js --file worklist-v0/hpacs-lite/study-corrections.js --file worklist-v0/hpacs-lite/related-report.js --file worklist-v0/hpacs-lite/report-editor.js --file worklist-v0/hpacs-lite/report-draft-sync.js --file worklist-v0/hpacs-lite/report-structure-pane.js --file worklist-v0/hpacs-lite/report-citation-pane.js --file worklist-v0/hpacs-lite/report-draft-save.js --file worklist-v0/hpacs-lite/report-commit.js --file worklist-v0/hpacs-lite/report-hold.js --file worklist-v0/hpacs-lite/work-exit.js --file worklist-v0/hpacs-lite/worklist-polling.js --file worklist-v0/hpacs-lite/report-history.js --file worklist-v0/hpacs-lite/report-toolbar.js --file worklist-v0/hpacs-lite/viewer-placement.js --file worklist-v0/hpacs-lite/viewer-launch.js --file worklist-v0/hpacs-lite/feature-mounts.js --file worklist-v0/hpacs-lite/clinical-context-panel.js --file worklist-v0/hpacs-lite/critical-result-mounts.js --file worklist-v0/hpacs-lite/study-questions.js --file worklist-v0/hpacs-lite/workspace-panels.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/worklist-row-events.js --file worklist-v0/hpacs-lite/telerad-request.js --file worklist-v0/hpacs-lite/context-menu.js --file worklist-v0/hpacs-lite/related-controls.js --file worklist-v0/hpacs-lite/session-end.js --file worklist-v0/hpacs-lite/page-boot.js --file worklist-v0/hpacs-lite/saved-filter-manager.css --file tests/page_source.py --file tests/page_source.cjs --file tests/main_move_spec.json --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file tests/main_split_harness.cjs --file tests/main_move_contract.cjs --file tests/main_split_landing_dom_test.py --file tests/main_early_input_dom_test.py --file tests/main_split_harness.py --file tests/main_load_hosted.py --file tests/main_split_harness_fixture.json --file api/package-lock.json --file tests/auth_logout_dom_test.py --file tests/live_test_gate.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/main_split_landing_dom_test.py
     - name: W2 first-paint baseline for W3 layout
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: git fetch --no-tags --depth=1 origin 9d6984b1ba3af76f7522b1c6d6179c398c513b57
     - name: W3 layout v3 server preparation and accepted module contracts
-      if: ${{ !cancelled() }}
-      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w3-server-prep --cwd . --file api/src/admin-audit.ts --file api/src/admin.controller.ts --file api/src/admin.service.ts --file api/src/app.module.ts --file api/src/asr.service.ts --file api/src/asr-destination.ts --file api/src/auth.controller.ts --file api/src/auth.guard.ts --file api/src/auth.service.ts --file api/src/clinical-context-policy.ts --file api/src/clinical-context.controller.ts --file api/src/clinical-context.service.ts --file api/src/clinician-policy.ts --file api/src/clinician-question.controller.ts --file api/src/clinician-question.service.ts --file api/src/connect.controller.ts --file api/src/connect.service.ts --file api/src/consultation.controller.ts --file api/src/consultation.service.ts --file api/src/critical-result-policy.ts --file api/src/critical-result.controller.ts --file api/src/critical-result.service.ts --file api/src/dictation-audio.ts --file api/src/dictation-parser.ts --file api/src/dictation.controller.ts --file api/src/emr-contract/access-event.ts --file api/src/emr-contract/classification.ts --file api/src/emr-contract/composition.ts --file api/src/emr-contract/lawful-defaults.ts --file api/src/emr-contract/legal-basis.ts --file api/src/emr-contract/report-lifecycle.ts --file api/src/emr-contract/routes.ts --file api/src/emr-contract/signature.ts --file api/src/emr-contract/validation.ts --file api/src/favorite.controller.ts --file api/src/favorite.service.ts --file api/src/filter-folders.ts --file api/src/finding-input.ts --file api/src/finding.controller.ts --file api/src/finding.service.ts --file api/src/gateway-receipt.ts --file api/src/gateway-retry.ts --file api/src/hanging-protocol.ts --file api/src/image-request.controller.ts --file api/src/image-request.service.ts --file api/src/keycloak.service.ts --file api/src/main.ts --file api/src/manual-sr-dicom.ts --file api/src/manual-sr.controller.ts --file api/src/manual-sr.service.ts --file api/src/member-rights-import.ts --file api/src/member-rights.ts --file api/src/order-reconciliation.ts --file api/src/orthanc.service.ts --file api/src/pacs.controller.ts --file api/src/pacs.service.ts --file api/src/pacs/values.ts --file api/src/pacs/access.ts --file api/src/pacs/institutions.ts --file api/src/pacs/worklist.ts --file api/src/pacs/dicom-gateway.ts --file api/src/pacs/preferences.ts --file api/src/pacs/filters.ts --file api/src/pacs/study-state.ts --file api/src/pacs/tech-note.ts --file api/src/pacs/report-draft.ts --file api/src/pacs/report-evidence.ts --file api/src/pacs/report-commit.ts --file api/src/pacs/hold.ts --file api/src/pacs/clinician.ts --file api/src/pacs/audit.ts --file api/src/pacs/metrics.ts --file api/src/preliminary-reader.ts --file api/src/prisma.service.ts --file api/src/reader-assignment.controller.ts --file api/src/reader-assignment.service.ts --file api/src/report-citation.ts --file api/src/report-preview.controller.ts --file api/src/report-structure.ts --file api/src/seed.ts --file api/src/shared-filters.ts --file api/src/study-access-policy.ts --file api/src/study-access.controller.ts --file api/src/study-access.interceptor.ts --file api/src/study-access.service.ts --file api/src/study-identity.ts --file api/src/study-page.ts --file api/src/study-tags.controller.ts --file api/src/study-tags.service.ts --file api/src/viewer-context-event.service.ts --file api/src/viewer-input.ts --file api/src/viewer-job-input.ts --file api/src/viewer-job-snapshot.ts --file api/src/viewer-job.controller.ts --file api/src/viewer-job.service.ts --file api/src/viewer-source-warning.ts --file api/src/viewer-volume-curved.ts --file api/src/viewer-volume-marks.ts --file api/src/viewer-volume-mip.ts --file api/src/viewer-volume-path.ts --file api/src/viewer-volume-reference.ts --file api/src/viewer.controller.ts --file api/src/viewer.service.ts --file api/src/worklist-columns.ts --file api/tsconfig.json --file api/package.json --file api/package-lock.json --file api/prisma/schema.prisma --file tests/service_test_loader.cjs --file tests/workspace_layout_v3_service_test.cjs --file tests/workspace_layout_test.cjs --file tests/study_panel_test.cjs --file tests/reading_panel_layout_test.cjs --file tests/workspace_roaming_test.cjs --file tests/module_session_harness.cjs --file worklist-v0/hpacs-lite/workspace-layout.js --file worklist-v0/hpacs-lite/reading-panel-layout.js --file worklist-v0/hpacs-lite/study-panel.js --file worklist-v0/hpacs-lite/study-panel.css --file worklist-v0/hpacs-lite/workspace-roaming.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js -- node --test --test-reporter=tap tests/workspace_layout_v3_service_test.cjs tests/workspace_layout_test.cjs tests/study_panel_test.cjs tests/reading_panel_layout_test.cjs tests/workspace_roaming_test.cjs
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w3-server-prep --cwd . --file api/src/admin-audit.ts --file api/src/admin.controller.ts --file api/src/admin.service.ts --file api/src/app.module.ts --file api/src/asr.service.ts --file api/src/asr-destination.ts --file api/src/auth.controller.ts --file api/src/auth.guard.ts --file api/src/auth.service.ts --file api/src/clinical-context-policy.ts --file api/src/clinical-context.controller.ts --file api/src/clinical-context.service.ts --file api/src/clinician-policy.ts --file api/src/clinician-question.controller.ts --file api/src/clinician-question.service.ts --file api/src/connect.controller.ts --file api/src/connect.service.ts --file api/src/consultation.controller.ts --file api/src/consultation.service.ts --file api/src/critical-result-policy.ts --file api/src/critical-result.controller.ts --file api/src/critical-result.service.ts --file api/src/dictation-audio.ts --file api/src/dictation-parser.ts --file api/src/dictation.controller.ts --file api/src/emr-contract/access-event.ts --file api/src/emr-contract/classification.ts --file api/src/emr-contract/composition.ts --file api/src/emr-contract/lawful-defaults.ts --file api/src/emr-contract/legal-basis.ts --file api/src/emr-contract/report-lifecycle.ts --file api/src/emr-contract/routes.ts --file api/src/emr-contract/signature.ts --file api/src/emr-contract/validation.ts --file api/src/favorite.controller.ts --file api/src/favorite.service.ts --file api/src/filter-folders.ts --file api/src/finding-input.ts --file api/src/finding.controller.ts --file api/src/finding.service.ts --file api/src/gateway-receipt.ts --file api/src/gateway-retry.ts --file api/src/hanging-protocol.ts --file api/src/image-request.controller.ts --file api/src/image-request.service.ts --file api/src/keycloak.service.ts --file api/src/main.ts --file api/src/manual-sr-dicom.ts --file api/src/manual-sr.controller.ts --file api/src/manual-sr.service.ts --file api/src/member-rights-import.ts --file api/src/member-rights.ts --file api/src/order-reconciliation.ts --file api/src/orthanc.service.ts --file api/src/pacs.controller.ts --file api/src/pacs.service.ts --file api/src/pacs/values.ts --file api/src/pacs/access.ts --file api/src/pacs/institutions.ts --file api/src/pacs/worklist.ts --file api/src/pacs/dicom-gateway.ts --file api/src/pacs/preferences.ts --file api/src/pacs/filters.ts --file api/src/pacs/study-state.ts --file api/src/pacs/tech-note.ts --file api/src/pacs/report-draft.ts --file api/src/pacs/report-evidence.ts --file api/src/pacs/report-commit.ts --file api/src/pacs/hold.ts --file api/src/pacs/clinician.ts --file api/src/pacs/audit.ts --file api/src/pacs/metrics.ts --file api/src/preliminary-reader.ts --file api/src/prisma.service.ts --file api/src/reader-assignment.controller.ts --file api/src/reader-assignment.service.ts --file api/src/report-citation.ts --file api/src/report-preview.controller.ts --file api/src/report-structure.ts --file api/src/seed.ts --file api/src/shared-filters.ts --file api/src/study-access-policy.ts --file api/src/study-access.controller.ts --file api/src/study-access.service.ts --file api/src/study-identity.ts --file api/src/study-page.ts --file api/src/study-tags.controller.ts --file api/src/study-tags.service.ts --file api/src/viewer-context-event.service.ts --file api/src/viewer-input.ts --file api/src/viewer-job-input.ts --file api/src/viewer-job-snapshot.ts --file api/src/viewer-job.controller.ts --file api/src/viewer-job.service.ts --file api/src/viewer-source-warning.ts --file api/src/viewer-volume-curved.ts --file api/src/viewer-volume-marks.ts --file api/src/viewer-volume-mip.ts --file api/src/viewer-volume-path.ts --file api/src/viewer-volume-reference.ts --file api/src/viewer.controller.ts --file api/src/viewer.service.ts --file api/src/worklist-columns.ts --file api/tsconfig.json --file api/package.json --file api/package-lock.json --file api/prisma/schema.prisma --file tests/service_test_loader.cjs --file tests/workspace_layout_v3_service_test.cjs --file tests/workspace_layout_test.cjs --file tests/study_panel_test.cjs --file tests/reading_panel_layout_test.cjs --file tests/workspace_roaming_test.cjs --file tests/module_session_harness.cjs --file worklist-v0/hpacs-lite/workspace-layout.js --file worklist-v0/hpacs-lite/reading-panel-layout.js --file worklist-v0/hpacs-lite/study-panel.js --file worklist-v0/hpacs-lite/study-panel.css --file worklist-v0/hpacs-lite/workspace-roaming.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js -- node --test --test-reporter=tap tests/workspace_layout_v3_service_test.cjs tests/workspace_layout_test.cjs tests/study_panel_test.cjs tests/reading_panel_layout_test.cjs tests/workspace_roaming_test.cjs
     - name: W3 drawer relocation, layout v3, account recovery and W2 first paint
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 8
       run: KIN_W3_PILOT_DIR="$PWD/tmp/workspace-ui-ci/w3-pilot" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w3-drawer-dom --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-editor-frame.js --file worklist-v0/hpacs-lite/compound-filter.js --file worklist-v0/hpacs-lite/related-parts.js --file worklist-v0/hpacs-lite/worklist-body-parts.js --file worklist-v0/hpacs-lite/saved-filter-manager.js --file tests/worklist_body_parts_dom_test.py --file tests/module_session_harness.py --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/main-split.bundle.js --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file .gitattributes --file worklist-v0/hpacs-lite/page-core.js --file worklist-v0/hpacs-lite/study-state.js --file worklist-v0/hpacs-lite/order-list-store.js --file worklist-v0/hpacs-lite/report-templates.js --file worklist-v0/hpacs-lite/report-dictation.js --file worklist-v0/hpacs-lite/report-templates-ui.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/sr-reader.js --file worklist-v0/hpacs-lite/current-study.js --file worklist-v0/hpacs-lite/study-info-panel.js --file worklist-v0/hpacs-lite/related-studies.js --file worklist-v0/hpacs-lite/study-thumbnails.js --file worklist-v0/hpacs-lite/order-list.js --file worklist-v0/hpacs-lite/study-image-requests.js --file worklist-v0/hpacs-lite/study-corrections.js --file worklist-v0/hpacs-lite/related-report.js --file worklist-v0/hpacs-lite/report-editor.js --file worklist-v0/hpacs-lite/report-draft-sync.js --file worklist-v0/hpacs-lite/report-structure-pane.js --file worklist-v0/hpacs-lite/report-citation-pane.js --file worklist-v0/hpacs-lite/report-draft-save.js --file worklist-v0/hpacs-lite/report-commit.js --file worklist-v0/hpacs-lite/report-hold.js --file worklist-v0/hpacs-lite/work-exit.js --file worklist-v0/hpacs-lite/worklist-polling.js --file worklist-v0/hpacs-lite/report-history.js --file worklist-v0/hpacs-lite/report-toolbar.js --file worklist-v0/hpacs-lite/viewer-placement.js --file worklist-v0/hpacs-lite/viewer-launch.js --file worklist-v0/hpacs-lite/feature-mounts.js --file worklist-v0/hpacs-lite/clinical-context-panel.js --file worklist-v0/hpacs-lite/critical-result-mounts.js --file worklist-v0/hpacs-lite/study-questions.js --file worklist-v0/hpacs-lite/workspace-panels.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/worklist-row-events.js --file worklist-v0/hpacs-lite/telerad-request.js --file worklist-v0/hpacs-lite/context-menu.js --file worklist-v0/hpacs-lite/related-controls.js --file worklist-v0/hpacs-lite/session-end.js --file worklist-v0/hpacs-lite/page-boot.js --file worklist-v0/hpacs-lite/saved-filter-manager.css --file tests/page_source.py --file tests/page_source.cjs --file tests/main_move_spec.json --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file tests/main_split_harness.cjs --file tests/main_move_contract.cjs --file tests/main_split_landing_dom_test.py --file tests/main_early_input_dom_test.py --file tests/main_split_harness.py --file tests/main_load_hosted.py --file tests/main_split_harness_fixture.json --file api/package-lock.json --file tests/auth_logout_dom_test.py --file tests/live_test_gate.py --file worklist-v0/hpacs-lite/study-panel.js --file worklist-v0/hpacs-lite/study-panel.css --file tests/study_panel_page_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/study_panel_page_dom_test.py -v
     - name: Round 6 Study Panel baseline for the W3 size options
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: git fetch --no-tags --depth=1 origin ea2a0379cc3dc0482ee3887940f875fe34ce773c
     - name: W3 Study Panel size and Text Size options (pilot D1160)
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 12
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w3-panel-size-dom --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-editor-frame.js --file worklist-v0/hpacs-lite/compound-filter.js --file worklist-v0/hpacs-lite/related-parts.js --file worklist-v0/hpacs-lite/worklist-body-parts.js --file worklist-v0/hpacs-lite/saved-filter-manager.js --file tests/worklist_body_parts_dom_test.py --file tests/module_session_harness.py --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/main-split.bundle.js --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file .gitattributes --file worklist-v0/hpacs-lite/page-core.js --file worklist-v0/hpacs-lite/study-state.js --file worklist-v0/hpacs-lite/order-list-store.js --file worklist-v0/hpacs-lite/report-templates.js --file worklist-v0/hpacs-lite/report-dictation.js --file worklist-v0/hpacs-lite/report-templates-ui.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/sr-reader.js --file worklist-v0/hpacs-lite/current-study.js --file worklist-v0/hpacs-lite/study-info-panel.js --file worklist-v0/hpacs-lite/related-studies.js --file worklist-v0/hpacs-lite/study-thumbnails.js --file worklist-v0/hpacs-lite/order-list.js --file worklist-v0/hpacs-lite/study-image-requests.js --file worklist-v0/hpacs-lite/study-corrections.js --file worklist-v0/hpacs-lite/related-report.js --file worklist-v0/hpacs-lite/report-editor.js --file worklist-v0/hpacs-lite/report-draft-sync.js --file worklist-v0/hpacs-lite/report-structure-pane.js --file worklist-v0/hpacs-lite/report-citation-pane.js --file worklist-v0/hpacs-lite/report-draft-save.js --file worklist-v0/hpacs-lite/report-commit.js --file worklist-v0/hpacs-lite/report-hold.js --file worklist-v0/hpacs-lite/work-exit.js --file worklist-v0/hpacs-lite/worklist-polling.js --file worklist-v0/hpacs-lite/report-history.js --file worklist-v0/hpacs-lite/report-toolbar.js --file worklist-v0/hpacs-lite/viewer-placement.js --file worklist-v0/hpacs-lite/viewer-launch.js --file worklist-v0/hpacs-lite/feature-mounts.js --file worklist-v0/hpacs-lite/clinical-context-panel.js --file worklist-v0/hpacs-lite/critical-result-mounts.js --file worklist-v0/hpacs-lite/study-questions.js --file worklist-v0/hpacs-lite/workspace-panels.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/worklist-row-events.js --file worklist-v0/hpacs-lite/telerad-request.js --file worklist-v0/hpacs-lite/context-menu.js --file worklist-v0/hpacs-lite/related-controls.js --file worklist-v0/hpacs-lite/session-end.js --file worklist-v0/hpacs-lite/page-boot.js --file worklist-v0/hpacs-lite/saved-filter-manager.css --file tests/page_source.py --file tests/page_source.cjs --file tests/main_move_spec.json --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file tests/main_split_harness.cjs --file tests/main_move_contract.cjs --file tests/main_split_landing_dom_test.py --file tests/main_early_input_dom_test.py --file tests/main_split_harness.py --file tests/main_load_hosted.py --file tests/main_split_harness_fixture.json --file api/package-lock.json --file tests/auth_logout_dom_test.py --file tests/live_test_gate.py --file worklist-v0/hpacs-lite/study-panel.js --file worklist-v0/hpacs-lite/study-panel.css --file tests/study_panel_page_dom_test.py --file tests/study_panel_size_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/study_panel_size_dom_test.py -v
     - name: W6 frame native history and composition
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-editor-frame --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file api/package-lock.json -- $RUNNER_TEMP/measurement-python/bin/python -B tests/report_editor_frame_dom_test.py
     - name: W6 shared report frame on the delivered split page
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-editor-frame-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file api/package-lock.json -- $RUNNER_TEMP/measurement-python/bin/python -B tests/report_editor_frame_dom_test.py --page
     - name: W4 report outcomes, Finalize & Next queue anchor, Recommendation notice and menu target on the delivered split page
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-flow-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/report_flow_dom_test.py
     - name: W5 related report mode on the delivered split page
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/related-report-mode-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/related_report_mode_dom_test.py
+    - name: W9 multi-study view on the delivered split page
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/multi-study-view-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/multi_study_view_dom_test.py
     - name: S9 worklist shortcut and accessible-name boundary
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/s9-u4a-keys --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/run-tests.py -- $RUNNER_TEMP/measurement-python/bin/python -B scripts/run-tests.py --module tests/s9_a11y_dom_test.py --class S9AccessibilityPage --mode pure --unit s9-u4a-keys
     - name: Synthetic workspace DOM evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-workspace-dom-results
@@ -1551,9 +1574,9 @@ jobs:
       timeout-minutes: 28
       run: |
         "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile study-arrivals
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Sanitized synthetic study arrivals evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-study-arrivals-results
@@ -1567,9 +1590,9 @@ jobs:
       timeout-minutes: 28
       run: |
         "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile u2b-regressions
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Collect related-scope screenshots
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       run: |
         shopt -s nullglob
         shots=(../tmp/related-scope/*.png)
@@ -1578,7 +1601,7 @@ jobs:
           cp -- "${shots[@]}" tests/e2e/artifacts/u2b-regressions-ci/related-scope/
         fi
     - name: Sanitized synthetic U2b regression evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-u2b-regressions-results
@@ -1593,9 +1616,9 @@ jobs:
       timeout-minutes: 28
       run: |
         "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile viewer-ux-shell
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Sanitized synthetic Viewer U2 shell evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-viewer-ux-shell-results
@@ -1606,15 +1629,15 @@ jobs:
         retention-days: 7
     - name: Worklist folder multi-selection and shortcut module contract
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/worklist-folder-tree --cwd . --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file worklist-v0/hpacs-lite/compound-filter.js --file tests/worklist_folder_tree_test.cjs --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-editor-frame.js --file worklist-v0/hpacs-lite/main-split.bundle.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/saved-filter-manager.js --file worklist-v0/hpacs-lite/page-boot.js --file worklist-v0/hpacs-lite/session-end.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_folder_tree_test.cjs
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: W4 shortcut v2 module contract
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/w4-shortcut-v2-module --cwd . --tree worklist-v0/hpacs-lite --tree tests -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/workspace_shortcuts_test.cjs
     - name: U1 single viewer registry and spanning geometry boundary
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/viewer-ux-u1-boundary --cwd . --file tests/e2e/test_viewer_ux_span.py --file worklist-v0/hpacs-lite/viewer-display-layout.js --file worklist-v0/hpacs-lite/viewer-windows.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file tests/module_session_harness.cjs -- timeout 600 python3 tests/e2e/test_viewer_ux_span.py --boundary
     - name: Synthetic runtime record-run evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         # Distinct from the runtime job's artifact: both now upload in the same workflow run.
@@ -1660,7 +1683,7 @@ jobs:
       run: |
         "$RUNNER_TEMP/mpr-python/bin/python" tests/measurement_ci.py --profile volume-mpr
     - name: Sanitized synthetic MPR crosshair, display and curved evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-volume-mpr-results
@@ -1673,9 +1696,9 @@ jobs:
       timeout-minutes: 28
       run: |
         "$RUNNER_TEMP/mpr-python/bin/python" tests/measurement_ci.py --profile volume-slab
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Sanitized synthetic slab projection, wheel and average-affine evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-volume-slab-results
@@ -1687,14 +1710,14 @@ jobs:
     - name: 3D path editing, stale results, Go to Path Point and restore rollback on the real panel
       timeout-minutes: 5
       run: python3 scripts/record-run.py --run-dir tmp/path-ci/path-dom --cwd . --file worklist-v0/hpacs-lite/volume-path.js --file worklist-v0/hpacs-lite/viewer-volume-path.js --file tests/viewer_volume_path_dom_test.py -- "$RUNNER_TEMP/mpr-python/bin/python" -B tests/viewer_volume_path_dom_test.py
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Isolated declared 3D path and orientation tests
       timeout-minutes: 28
       run: |
         "$RUNNER_TEMP/mpr-python/bin/python" tests/measurement_ci.py --profile volume-path
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Sanitized synthetic 3D path and orientation evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-volume-path-results
@@ -1706,18 +1729,18 @@ jobs:
     - name: Applied MPR mouse setting stays bound on a new layout on the real panel
       timeout-minutes: 5
       run: python3 scripts/record-run.py --run-dir tmp/syncpref-ci/preferences-layout-dom --cwd . --file worklist-v0/hpacs-lite/volume-preferences.js --file worklist-v0/hpacs-lite/viewer-volume-preferences.js --file tests/viewer_volume_preferences_layout_dom_test.py -- "$RUNNER_TEMP/mpr-python/bin/python" -B tests/viewer_volume_preferences_layout_dom_test.py
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: MPR synchronization choices stay on a Hanging Protocol three-plane layout on the real panel
       timeout-minutes: 5
       run: python3 scripts/record-run.py --run-dir tmp/syncpref-ci/sync-layout-dom --cwd . --file worklist-v0/hpacs-lite/viewer-volume-sync.js --file tests/viewer_volume_sync_layout_dom_test.py -- "$RUNNER_TEMP/mpr-python/bin/python" -B tests/viewer_volume_sync_layout_dom_test.py
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Isolated declared MPR synchronization and preferences tests
       timeout-minutes: 28
       run: |
         "$RUNNER_TEMP/mpr-python/bin/python" tests/measurement_ci.py --profile volume-sync-preferences
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Sanitized synthetic MPR synchronization and preferences evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-volume-sync-preferences-results
@@ -1764,7 +1787,7 @@ jobs:
       run: |
         "$RUNNER_TEMP/batch-python/bin/python" tests/measurement_ci.py --profile volume-batch
     - name: Sanitized synthetic MPR batch evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-volume-batch-results
@@ -1809,7 +1832,7 @@ jobs:
       run: |
         "$RUNNER_TEMP/mipvoi-python/bin/python" tests/measurement_ci.py --profile volume-mip-voi
     - name: Sanitized synthetic MIP Viewer VOI Slab evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-volume-mip-voi-results
@@ -1822,9 +1845,9 @@ jobs:
       timeout-minutes: 28
       run: |
         "$RUNNER_TEMP/mipvoi-python/bin/python" tests/measurement_ci.py --profile volume-mip-job
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Sanitized synthetic MIP Viewer Job evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-volume-mip-job-results
@@ -1837,9 +1860,9 @@ jobs:
       timeout-minutes: 28
       run: |
         "$RUNNER_TEMP/mipvoi-python/bin/python" tests/measurement_ci.py --profile volume-mip-batch
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Sanitized synthetic MIP Viewer Batch evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-volume-mip-batch-results
@@ -1852,9 +1875,9 @@ jobs:
       timeout-minutes: 28
       run: |
         "$RUNNER_TEMP/mipvoi-python/bin/python" tests/measurement_ci.py --profile volume-mip-output
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Sanitized synthetic MIP Viewer output evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-volume-mip-output-results
@@ -1867,9 +1890,9 @@ jobs:
       timeout-minutes: 28
       run: |
         "$RUNNER_TEMP/mipvoi-python/bin/python" tests/measurement_ci.py --profile volume-mip-orient
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Sanitized synthetic MIP Viewer orientation evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-volume-mip-orient-results
@@ -1911,9 +1934,9 @@ jobs:
     - name: 'Session contracts: u5-session-api'
       timeout-minutes: 28
       run: '"$RUNNER_TEMP/u5-python/bin/python" tests/measurement_ci.py --profile u5-session-api'
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Sanitized session contract evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-u5-session-api
@@ -1923,9 +1946,9 @@ jobs:
     - name: 'Session contracts: u5-session-draft'
       timeout-minutes: 28
       run: '"$RUNNER_TEMP/u5-python/bin/python" tests/measurement_ci.py --profile u5-session-draft'
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Sanitized session contract evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-u5-session-draft
@@ -1935,9 +1958,9 @@ jobs:
     - name: 'Session contracts: u5-session-regression'
       timeout-minutes: 28
       run: '"$RUNNER_TEMP/u5-python/bin/python" tests/measurement_ci.py --profile u5-session-regression'
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Sanitized session contract evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-u5-session-regression
@@ -1947,9 +1970,9 @@ jobs:
     - name: 'Session contracts: u5-session-boundaries'
       timeout-minutes: 28
       run: '"$RUNNER_TEMP/u5-python/bin/python" tests/measurement_ci.py --profile u5-session-boundaries'
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Sanitized session contract evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-u5-session-boundaries
@@ -1959,9 +1982,9 @@ jobs:
     - name: 'Session contracts: u5-session-browser'
       timeout-minutes: 28
       run: '"$RUNNER_TEMP/u5-python/bin/python" tests/measurement_ci.py --profile u5-session-browser'
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Sanitized session contract evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-u5-session-browser
@@ -1971,9 +1994,9 @@ jobs:
     - name: 'Session contracts: u5-session-end'
       timeout-minutes: 28
       run: '"$RUNNER_TEMP/u5-python/bin/python" tests/measurement_ci.py --profile u5-session-end'
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Sanitized session contract evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-u5-session-end
@@ -1983,9 +2006,9 @@ jobs:
     - name: 'Session contracts: u5-fixups'
       timeout-minutes: 28
       run: '"$RUNNER_TEMP/u5-python/bin/python" tests/measurement_ci.py --profile u5-fixups'
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Sanitized session contract evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-u5-fixups
@@ -1995,9 +2018,9 @@ jobs:
     - name: Run context recovery profile on an empty hosted daemon
       timeout-minutes: 28
       run: '"$RUNNER_TEMP/u5-python/bin/python" tests/measurement_ci.py --profile context-loss'
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
     - name: Sanitized context recovery evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-context-loss
@@ -2059,9 +2082,17 @@ jobs:
   consume:
     name: restore-product / consume
     needs: produce
+    # A failed produce would skip this required check; on a draft it must run and fail instead (see select).
+    # Otherwise this is the default success() condition.
+    if: ${{ !cancelled() && (github.event.pull_request.draft || needs.produce.result == 'success') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 55
     steps:
+    - name: Draft pull request is not validated
+      if: ${{ github.event.pull_request.draft }}
+      run: |
+        echo "::error::draft PR: CI does not validate this head; mark the PR ready for review to run it"
+        exit 1
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
         persist-credentials: false
@@ -2077,35 +2108,35 @@ jobs:
         PRODUCT_SHA256: ${{ needs.produce.outputs.product_sha256 }}
       run: python3 -B tests/ops_product_transfer_fixture.py consume "$RUNNER_TEMP/kin-product-download" --receipt-sha256 "$RECEIPT_SHA256" --product-sha256 "$PRODUCT_SHA256"
     - name: S7 an unreachable daemon is indeterminate, never absent
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       run: python3 -B rehearsal/rehearsal_harness.py --scenario indeterminate-control --out "$RUNNER_TEMP/s7.json"
       working-directory: ${{ env.BUNDLE }}
     - name: S2 a baseline-created proxy is inert
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       run: python3 -B rehearsal/rehearsal_harness.py --scenario guard-clean --out "$RUNNER_TEMP/s2.json"
       working-directory: ${{ env.BUNDLE }}
     - name: S1 the runner's real stop/run/up sequence against the target file
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       run: python3 -B rehearsal/rehearsal_harness.py --scenario compose-network --out "$RUNNER_TEMP/s1.json"
       working-directory: ${{ env.BUNDLE }}
     - name: S8 the real stop/run/up against the observed production shape preserves the ingress
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       run: python3 -B rehearsal/rehearsal_harness.py --scenario live-shape --out "$RUNNER_TEMP/s8.json"
       working-directory: ${{ env.BUNDLE }}
     - name: S6 the real run() path with apply_migration's argv shape fails with exactly exit 7
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       run: python3 -B rehearsal/rehearsal_harness.py --scenario partial-failure --out "$RUNNER_TEMP/s6.json"
       working-directory: ${{ env.BUNDLE }}
     - name: S5 findings rollback against a throwaway synthetic database
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       run: python3 -B rehearsal/rehearsal_harness.py --scenario findings-rollback --out "$RUNNER_TEMP/s5.json"
       working-directory: ${{ env.BUNDLE }}
     - name: S3 the guard function against a real daemon, both network variants
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       run: python3 -B rehearsal/rehearsal_harness.py --scenario guard-function-against-daemon --out "$RUNNER_TEMP/s3.json"
       working-directory: ${{ env.BUNDLE }}
     - name: Collect retained recovery scenario receipts
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       run: |
         mkdir -p "$RUNNER_TEMP/receipts" "$RUNNER_TEMP/receipts/state-records"
         cp "$RUNNER_TEMP"/s[1-8].json "$RUNNER_TEMP/receipts/" 2>/dev/null || true
@@ -2145,7 +2176,7 @@ jobs:
             raise SystemExit("rehearsal incomplete: " + json.dumps(summary))
         PY
     - name: EMR-B provision, installer migration, runtime and same-point backup restore
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       run: |
         python3 -m venv "$RUNNER_TEMP/emr-b-python"
         "$RUNNER_TEMP/emr-b-python/bin/python" -m pip install PyYAML==6.0.2
@@ -2153,7 +2184,7 @@ jobs:
         docker pull orthancteam/orthanc:24.12.0
         python3 scripts/record-run.py --run-dir "$RUNNER_TEMP/receipts/emr-b-restore" --tree api/src/emr-runtime --tree api/src/emr-contract --tree api/prisma --file scripts/ops_backup.py --file scripts/ops_audit_integrity.py --file scripts/emr-compose.py --file api/Dockerfile --file api/start-production.sh --file tests/emr/b/live.py -- "$RUNNER_TEMP/emr-b-python/bin/python" -B scripts/run-tests.py --plan rehearsal-bundle/rehearsal/emr-b-restore-plan.json
     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       with:
         name: stage2-rollout-rehearsal
         path: ${{ runner.temp }}/receipts
@@ -2199,7 +2230,7 @@ jobs:
       run: |
         "$RUNNER_TEMP/s9-u0e-python/bin/python" tests/measurement_ci.py --profile s9-u0e-served
     - name: Sanitized synthetic S9-U0E served evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-s9-u0e-served-results
@@ -2240,15 +2271,15 @@ jobs:
         "$RUNNER_TEMP/precision-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
         "$RUNNER_TEMP/precision-python/bin/python" -m playwright install --with-deps chromium
     - name: 'Identity and manual accuracy: identity-fields'
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 28
       run: '"$RUNNER_TEMP/precision-python/bin/python" tests/measurement_ci.py --profile identity-fields'
     - name: 'Identity and manual accuracy: measurement-accuracy'
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 28
       run: '"$RUNNER_TEMP/precision-python/bin/python" tests/measurement_ci.py --profile measurement-accuracy'
     - name: Sanitized synthetic MPR batch evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-patient-identity-measurements
@@ -2265,7 +2296,11 @@ jobs:
     - main
     tags:
     - v*
-  pull_request: null
+  # 2026-10-27 (user): a draft PR is not validated here (every required check fails in its first step, see
+  # select); fix rounds are verified on the VM/desktop host. ready_for_review is listed so marking a draft
+  # ready runs CI in full at that head, replacing the failed draft checks.
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   # D1797/D1808: hosted nightly of runtime + restore-product on main; 18:00 UTC = 03:00 KST.
   schedule:
   - cron: '0 18 * * *'

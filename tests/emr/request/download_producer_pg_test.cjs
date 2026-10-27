@@ -74,7 +74,6 @@ async function main() {
     const guard = { async canActivate(context) {
       const req = context.switchToHttp().getRequest(), res = context.switchToHttp().getResponse();
       Object.assign(req, caller, { authMethod: 'session', sessionId: sessionRef });
-      if (req.query.grant) req.archiveGrantAdmission = await app.get(StudyTransferLocalService).admitArchiveGrant(req, sessionRef);
       requests.capture.capture(req, res, { issuer, subject: sub, roles: caller.roles, institution, rightsVersion: 1,
         binding: { method: 'session', sessionRef } },
       { method: req.method, route: req.route.path.replace(/^\/api\//, ''), purpose: 'clinical' }, async tx => {
@@ -240,19 +239,19 @@ async function main() {
     assert.ok(!(await events(uncertain)).some(e => e.action === 'transfer-ended'));
     assert.equal(await witness.auditLog.count({ where: { action: 'original.download.result', detail: { contains: uncertain } } }), 0);
 
-    // A refused archive start closes the admitted grant and records the refusal (act none) through the real parser and
+    // A refused archive start records the refusal independently of grants (act none) through the real parser and
     // ledger: no intent, no bytes. A changed original is a conflict (409); a lost right is a permission refusal (403).
     const refusal = async (change, restore) => {
       const op = randomUUID(); assert.equal((await post(prefix, { operationId: op })).status, 200);
       const issued = await post(prefix + '/' + op + '/archive/grant', {}); assert.equal(issued.status, 200);
       const files = fileRequests;
       await change();
-      let status;
-      try { const answer = await fetch(prefix + '/' + op + '/archive?grant=' + issued.body.grant); status = answer.status; await answer.arrayBuffer(); }
+      let status, code;
+      try { const answer = await fetch(prefix + '/' + op + '/archive'); status = answer.status; code = (await answer.json()).code; }
       finally { await restore(); }
       const row = await operation(op);
       assert.equal(row.status, 'prepared'); assert.equal(row.download.attempts.length, 0); assert.equal(fileRequests, files);
-      assert.equal(row.download.activeArchiveGrant.state, 'refused');
+      assert.equal(row.download.activeArchiveGrant.state, 'issued');
       const recorded = await events(op);
       assert.deepEqual(recorded.map(e => e.action).slice(0, 2), ['provide-prepared', 'provide-prepared']);
       assert.equal(recorded.length, 3, 'one refusal row and no intent');
@@ -260,7 +259,7 @@ async function main() {
       assert.equal(refused.surface, 'GET studies/:uid/original-downloads/:operationId/archive');
       assert.equal(refused.act, 'none'); assert.equal(refused.stream, 'viewing'); assert.equal(refused.relatedEventId, null);
       assert.deepEqual(refused.targets, recorded[1].targets);
-      return { status, code: row.download.activeArchiveGrant.refusal.code, action: refused.action, result: refused.result };
+      return { status, code, action: refused.action, result: refused.result };
     };
     assert.deepEqual(await refusal(async () => { changed = true; }, async () => { changed = false; }),
       { status: 409, code: 'MANIFEST_CHANGED', action: 'conflict', result: 'failed' });

@@ -610,7 +610,7 @@ class ReportDictationHostDOMTest(unittest.TestCase):
         self.page.wait_for_function("()=>dictCalls.length === 1")
         call = self.snap()["dict"][0]
         self.assertEqual({"method": "POST", "path": "/studies/%s/dictation" % UID,
-                          "headers": {"content-type": "audio/wav", "x-kin-csrf": "1", "x-kin-session": "SYN-SESSION"}, "redirect": "error",
+                          "headers": {"content-type": "audio/wav", "x-kin-session": "SYN-SESSION"}, "redirect": "error",
                           "credentials": "same-origin", "cache": "no-store"},
                          {k: call[k] for k in ("method", "path", "headers", "redirect", "credentials", "cache")})
         self.assertEqual(("RIFF", "WAVE", 48, [1, 0, 255, 127]), (call["riff"], call["wave"], call["length"], call["pcm"]))

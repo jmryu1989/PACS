@@ -91,7 +91,7 @@ function kinCreateCTSync() {
       const timer = setTimeout(abort, 10000);
       try {
         let r;
-        try { r = await fetch(path, { credentials: 'same-origin', cache: 'no-store', headers: { 'X-KIN-CSRF': '1' }, signal: request.signal }); }
+        try { r = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal: request.signal }); }
         catch (_) { throw refusal('failed'); }
         if (window.KinSessionTransport.refusal(r) === 'denied' && r.status === 403) throw refusal('denied', r.status);
         if (!r.ok) throw refusal('failed', r.status);

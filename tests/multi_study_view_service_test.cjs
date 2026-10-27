@@ -53,7 +53,6 @@ const unadmitted = () => createRequestContext(createRequestIngress({ proxyPeers:
 }).source;
 const { MultiStudyViewController } = require('/app/dist/multi-study-view.controller');
 const { StudyAccessService } = require('/app/dist/study-access.service');
-const { StudyAccessInterceptor } = require('/app/dist/study-access.interceptor');
 const { OrthancService } = require('/app/dist/orthanc.service');
 const { PrismaService } = require('/app/dist/prisma.service');
 const { STUDY_IDENTITY_UNRESOLVED } = require('/app/dist/study-source-groups');
@@ -608,16 +607,16 @@ test('W9API-28 cache: a late policy source answer cannot become the next request
     assert.deepEqual(codes(again), ['ready', 'ready']);
 });
 
-/** A real Nest HTTP application around the real controller, service and StudyAccess interceptor (guard: synthetic caller). */
+/** A real Nest HTTP application around the real controller, service and StudyAccess (guard: synthetic caller). */
 async function serve(w) {
-  const { NestFactory, APP_GUARD, APP_INTERCEPTOR } = require('/app/node_modules/@nestjs/core');
+  const { NestFactory, APP_GUARD } = require('/app/node_modules/@nestjs/core');
   const { Module } = require('/app/node_modules/@nestjs/common');
   class SyntheticGuard { canActivate(context) { const req = context.switchToHttp().getRequest(); Object.assign(req, JSON.parse(req.headers['x-syn-caller'])); return true; } }
   class HttpProbe {}
   Module({ imports: [EmrViewingModule.withRequests(unadmitted())], controllers: [MultiStudyViewController], providers: [MultiStudyViewService,
     { provide: PrismaService, useValue: w.prisma }, { provide: OrthancService, useValue: w.orthanc },
     { provide: StudyAccessService, useValue: w.studyAccess }, { provide: ViewingSetAccess, useValue: w.access },
-    { provide: APP_GUARD, useValue: new SyntheticGuard() }, { provide: APP_INTERCEPTOR, useClass: StudyAccessInterceptor }] })(HttpProbe);
+    { provide: APP_GUARD, useValue: new SyntheticGuard() }] })(HttpProbe);
   const app = await NestFactory.create(HttpProbe, { rawBody: true, logger: false });
   app.setGlobalPrefix('api');
   await app.listen(0, '127.0.0.1');

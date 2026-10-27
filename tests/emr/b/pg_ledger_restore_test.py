@@ -520,6 +520,7 @@ class PgLedgerStartupLive(PgLedgerFixture):
         self.assertNotEqual(rejected['State']['ExitCode'],0)
         self.command(['docker','rm',name])
         start(self.runtime_url)
+        self.addCleanup(self.command, ['docker','rm','-f',name])
         observations=[]
         for phase in ['initial-start','backup-resume']:
             # Docker may allocate a different ephemeral host port on restart.

@@ -609,7 +609,7 @@
       const controller = new AbortController(), stop = setTimeout(() => controller.abort(), TIMEOUT_MS);
       inflight.add(controller);
       try {
-        const headers = raw === undefined ? { 'X-KIN-CSRF': '1' } : { 'Content-Type': 'application/json', 'X-KIN-CSRF': '1' };
+        const headers = raw === undefined ? {} : { 'Content-Type': 'application/json' };
         const waiting = method === 'POST' && blocked();
         if (waiting) throw Object.assign(new Error(waiting), { kin: true, outcome: 'not-sent' });
         onDispatch();

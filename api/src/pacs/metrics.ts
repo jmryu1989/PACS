@@ -188,7 +188,6 @@ export class PacsMetrics {
     // metricsStudies의 catch 밖에서 409로 던진다 — 관측 불가 줄로 바꿔 내보내지 않는다.
     const studies = read && await this.metricsScopeHeld(me, read);
     const metrics = adminMetricRows(me, storage, studies);
-    // AdminController는 정책 관리 통로를 지키려고 응답 뒤 재확인 interceptor를 건너뛴다. 그 확인을 여기서 한다 —
     // 읽는 동안 접근 조건이 바뀌었으면 그 전 조건으로 센 합계를 내보내지 않는다.
     await this.studyAccess.unchanged(c, access);
     return { institutionId: me, generatedAt: new Date(this.metricsClock()).toISOString(), metrics };

@@ -207,11 +207,8 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
         expect(page.get_by_role('button',name='Retry',exact=True)).to_be_enabled()
         self.assertEqual(writes,[],'no PUT or DELETE while the account copy is not known')
 
-    def test_roam_04_failure_storage_denial_and_csrf(self):
+    def test_roam_04_failure_storage_denial(self):
         page=self.sign_in(self.device());self.open_toolbar_group(page,'#layout-toggle');page.locator('#layout-toggle').click();self.action(page,'Save to Account','저장했습니다');remote=self.remote(page)
-        # The server's CSRF rule: a write without the header is refused (and says so in its code); a read is not checked.
-        denied=document_request(page, "PUT", self.stack.proxy+'/api/workspace-layout',data=dict(expectedOwner=remote['owner'],revision=remote['revision'],layout=remote['layout']))
-        self.assertEqual(denied.status,403);self.assertEqual(denied.json()['code'],'AUTH_CSRF_REQUIRED');self.assertEqual(denied.headers.get('x-kin-auth-code'),'AUTH_CSRF_REQUIRED');self.assertEqual(self.remote(page),remote)
         # Local storage refused: a Load applies to this window only and says so.
         page.context.add_init_script("""(() => {const original=Storage.prototype.setItem;Storage.prototype.setItem=function(key,...rest){if(String(key).startsWith('kin-workspace:'))throw new DOMException('Synthetic denied','QuotaExceededError');return original.call(this,key,...rest);};})();""")
         self.open_toolbar_group(page,'#layout-reset');page.locator('#layout-reset').click()

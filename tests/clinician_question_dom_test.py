@@ -892,10 +892,6 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         if path.startswith("/kin-brand/") or path == "/favicon.ico":
             route.fulfill(status=404, body="")
             return
-        if path.startswith("/api/") and request.headers.get("x-kin-csrf") != "1":
-            self.unexpected.append(f"{method} {path} without X-KIN-CSRF")
-            route.abort()
-            return
         if method == "GET" and path == "/api/me":
             route.fulfill(json={**self.me, "sessionId": "SYN-SESSION-" + self.me["sub"]})
             return

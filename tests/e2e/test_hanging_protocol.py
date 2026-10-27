@@ -42,6 +42,21 @@ class HangingProtocolE2E(ViewerLayoutE2E):
                             pass
         super().tearDown()
 
+    def draft_baseline(self, page, fixture, text, before):
+        # Viewer actions must preserve the personal draft too. Observe the editor's
+        # normal autosave before taking that baseline; its 20-second timer can fire
+        # during a long viewer round trip and is independent of Hanging Protocols.
+        with page.expect_response(lambda r: r.request.method == "PUT"
+                                  and r.url.endswith(f"/studies/{fixture.uid}/report"),
+                                  timeout=40000) as saved:  # 20s autosave plus the page's 20s request wait
+            page.locator("#findings").fill(text)
+        self.assertEqual(200, saved.value.status)
+        self.assertEqual(text, self.state(fixture)["draft"]["findings"])
+        after = self.report_rows(fixture)
+        for table in ("Report", "ReportVersion"):
+            self.assertEqual(before[table], after[table], "autosave must not commit the report")
+        return after
+
     def hp(self, page):
         self.open_layout_tools(page)
         expect(page.get_by_role("heading", name="Hanging Protocols", exact=True)).to_be_visible(timeout=45000)
@@ -241,7 +256,8 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         related = self.ct(patient, "older", "20250701")
         current = self.multiple(patient, "current", "20260801")
         self.seed_report(current); originals = self.originals(); rows = self.report_rows(current)
-        work = self.login(); self.select(work, current); work.locator("#findings").fill("HP FORM UNSAVED REPORT")
+        work = self.login(); self.select(work, current)
+        rows = self.draft_baseline(work, current, "HP FORM UNSAVED REPORT", rows)
         viewer = self.launch(work.context.new_page(), [current, related]); self.hp(viewer)
 
         # Exercise the actual editor before importing the precise reusable definition.
@@ -359,7 +375,8 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         patient = "HP-STALE-" + uuid.uuid4().hex[:12]
         related = self.ct(patient, "older", "20250701"); current = self.ct(patient, "current", "20260801")
         self.seed_report(current); originals = self.originals(); rows = self.report_rows(current)
-        work = self.login(); self.select(work, current); work.locator("#findings").fill("HP STALE UNSAVED REPORT")
+        work = self.login(); self.select(work, current)
+        rows = self.draft_baseline(work, current, "HP STALE UNSAVED REPORT", rows)
         viewer = self.launch(work.context.new_page(), [current, related]); self.import_rules(viewer, self.library())
 
         def delayed_change(change):
@@ -397,7 +414,8 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         patient = "HP-MPR-" + uuid.uuid4().hex[:12]
         current = self.ct(patient, "current", "20260801")
         self.seed_report(current); originals = self.originals(); rows = self.report_rows(current)
-        work = self.login(); self.select(work, current); work.locator("#findings").fill("HP MPR UNSAVED REPORT")
+        work = self.login(); self.select(work, current)
+        rows = self.draft_baseline(work, current, "HP MPR UNSAVED REPORT", rows)
         viewer = self.launch(work.context.new_page(), [current])
         self.import_rules(viewer, self.mpr_library())
         before = self.cells(viewer)
@@ -544,7 +562,8 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         published = self.publish_site(self.site_library())
         site_key = "kin-hanging-protocols:v1:site:" + json.dumps([published["owner"]["institution"]], separators=(",", ":"))
 
-        work = self.login(); self.select(work, current); work.locator("#findings").fill("HP SITE UNSAVED REPORT")
+        work = self.login(); self.select(work, current)
+        rows = self.draft_baseline(work, current, "HP SITE UNSAVED REPORT", rows)
         viewer = work.context.new_page(); site_reads = []
         viewer.on("request", lambda request: site_reads.append(request.method)
                   if request.url.split("?")[0].endswith("/api/hanging-protocols/site") else None)
@@ -610,7 +629,8 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         patient = "HP-MIXED-" + uuid.uuid4().hex[:12]
         current = self.multiple(patient, "current", "20260801")
         self.seed_report(current); originals = self.originals(); rows = self.report_rows(current)
-        work = self.login(); self.select(work, current); work.locator("#findings").fill("HP MIXED UNSAVED REPORT")
+        work = self.login(); self.select(work, current)
+        rows = self.draft_baseline(work, current, "HP MIXED UNSAVED REPORT", rows)
         viewer = self.launch(work.context.new_page(), [current])
         self.import_rules(viewer, self.mixed_library())
         self.apply(viewer, "Applied")
@@ -792,7 +812,8 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         patient = "HP-MERGE-" + uuid.uuid4().hex[:12]
         current = self.ct(patient, "current", "20260801")
         self.seed_report(current); originals = self.originals(); rows = self.report_rows(current)
-        work = self.login(); self.select(work, current); work.locator("#findings").fill("HP MERGE UNSAVED REPORT")
+        work = self.login(); self.select(work, current)
+        rows = self.draft_baseline(work, current, "HP MERGE UNSAVED REPORT", rows)
         viewer = self.launch(work.context.new_page(), [current])
         self.import_rules(viewer, self.mpr_library())
         self.apply(viewer, "Applied")

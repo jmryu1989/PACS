@@ -43,7 +43,6 @@ window.fetch = async (url, init={}) => {
   if (path === '/api/me') return response(200,{...contractOwner,actor:contractOwner.author,sessionId:'SYN-SESSION'});
   if (!headers.get('X-KIN-Session')) return response(428,{code:'AUTH_SESSION_REQUIRED'});
   if (headers.get('X-KIN-Session') !== 'SYN-SESSION') return response(409,{code:'AUTH_SESSION_MISMATCH'});
-  if (method !== 'GET' && headers.get('X-KIN-CSRF') !== '1') return response(403,{code:'AUTH_CSRF_REQUIRED'});
   const found=path.match(/^\/api\/studies\/([^/]+)\/(draft|report(?:\/commit|\/citations|\/structure)?)$/);
   const uid=found ? decodeURIComponent(found[1]) : null, what=found?.[2];
   if (uid && method==='GET' && (what==='report/citations' || what==='report/structure')) {

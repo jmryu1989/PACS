@@ -95,8 +95,8 @@ PROFILES = {
     'u5-session-end': {
         'out': ROOT / 'tests/e2e/artifacts/u5-session-end-ci',
         'project_prefix': 'kin-u5-session-end-ci-',
-        # Admission ceiling, not a measured hosted duration. Setup/cleanup use the same 1500s deadline. Its own profile
-        # (its own empty runner): SE-02 pauses this stack's Keycloak, which must not reach another suite's stack.
+        # Admission ceiling, not a measured hosted duration. Setup/cleanup use the same 1500s deadline.
+        # Keep the real provider-session cases on their own synthetic stack.
         'suite_timeout': 900,
         'suites': (
             ('live/session_end_live.py', 'SessionEndLive', 'ci-u5-session-end'),
@@ -188,18 +188,17 @@ PROFILES = {
     'hanging-protocols': {
         'out': ROOT / 'tests/e2e/artifacts/hanging-protocols-ci',
         'project_prefix': 'kin-hp-ci-',
-        # Four suites share main()'s single 25-minute deadline, and the required
-        # order puts the hanging-protocol flows LAST, so a uniform 900 cap let the
-        # shared invariants/worklist suites legally claim the whole deadline and
-        # leave the flows this profile exists to prove with no evidence at all.
-        # 'suite_budgets' caps each suite separately instead: 400+240+120+300 plus
-        # the four 35s supervisor margins is 1200s, so the profile's entire
-        # configured worst case fits the 1500s deadline and still leaves 300s for a
-        # stack whose measured cold setup and cleanup total 73.4s. These are
-        # ceilings, not runtime estimates.
-        'suite_timeout': 400,
-        'suite_budgets': {'ci-hp-invariants': 400, 'ci-hp-worklist': 240,
+        # Recent green invariants runs peaked at 391.641154826s (2026-10-27).
+        # Use the same about-twice measured margin as volume-slab/volume-path:
+        # ceil(2 * 391.641154826) = 784. The shared deadline is the suite budgets
+        # plus their four 35s supervisor margins and a 300s reserve: main() starts
+        # the deadline before stack setup (measured 60.6s setup, 12.8s cleanup), so
+        # without it the trailing hanging-protocol flows lose that time whenever the
+        # suites ahead of them run out their budgets.
+        'suite_timeout': 784,
+        'suite_budgets': {'ci-hp-invariants': 784, 'ci-hp-worklist': 240,
                           'ci-hp-account': 120, 'ci-hp-native': 300},
+        'deadline_seconds': 784 + 240 + 120 + 300 + 4*35 + 300,
         # Shared API/DB changes retain invariants then worklist before the new flow.
         'suites': (
             ('invariants_live.py', None, 'ci-hp-invariants'),

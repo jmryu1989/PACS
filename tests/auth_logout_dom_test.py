@@ -7,7 +7,7 @@ repository: index.html, main.html, admin.html, clinician.html and every local fi
 An in-test server answers as the wire contract says (s7-u5-server-evidence/wire-contract.md v1): /api/me carries a
 sessionId; every bound request names its session in X-KIN-Session and is refused 428/409/401 by code before any handler;
 logout ends the bound session and never touches the cookie; an explicit login starts by POST bound to the session it may
-replace and ends in a single-use entry proof in the URL fragment; a report draft is one row per author with a stored
+replace and ends with a non-secret explicit-login marker in the URL fragment; a report draft is one row per author with a stored
 revision - every write, discard and confirmation carries expectedOwner and expectedRevision and the full snapshot, and a
 success answers the envelope {uid, owner, revision, present, snapshot}. The server can hold, drop, cut or mangle any
 answer. No stack, network or credential is used. Cases drive the page by its controls (buttons, typing, selection, the
@@ -29,9 +29,9 @@ Session (U5S-REQ-22):
   S04  Back to Editing is a new work epoch: answers from before the preparation never apply (header, body, error);
        study A -> B -> A never shows the first A's late answer.
   S08  A new document with an end record or with storage it cannot verify stays closed (direct URLs, reload, new tab);
-       an explicit login's entry proof enters once and a replayed proof enters nothing.
+       an explicit login can enter with untrusted storage; its own session's end still closes it.
   S09  Reliable storage, no record, a valid session: normal entry by role. No session: the IdP login starts by itself
-       (amendment 1) and its entry proof is consumed without a click (amendment 2); a tab that came back without a
+       (amendment 1) and its marker is removed without a click; a tab that came back without a
        session is not sent out again.
   S10  Recover Draft stores only for the same owner and discards the capture only when the answer (or a full read after
        it) shows the same owner, revision and whole snapshot.
@@ -72,6 +72,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # The four pages and every local file they reference (script src, link href, img src; /kin-brand/ is proxy/branding/),
 # in document order. CI-17 records exactly these with this file.
 SERVED_FILES = (
+    "worklist-v0/hpacs-lite/admin-access-review.js",
     "worklist-v0/hpacs-lite/index.html",
     "proxy/branding/kin-emblem-j1.svg",
     "proxy/branding/kin-favicon-32.png",
@@ -88,6 +89,8 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/worklist-columns.css",
     "worklist-v0/hpacs-lite/reading-workspace.css",
     "worklist-v0/hpacs-lite/related-report-mode.css",
+    # W9-UI: the Multi-Study View's stylesheet (main.html links it after the Related Report mode's).
+    "worklist-v0/hpacs-lite/multi-study-view.css",
     "worklist-v0/hpacs-lite/reading-panel-layout.js",
     "worklist-v0/hpacs-lite/viewer-opening.js",
     "worklist-v0/hpacs-lite/worklist-startup.js",
@@ -125,6 +128,8 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/report-citation.js",
     # W5 Phase B: the Related Report mode (main.html tags it after report-editor-frame.js, before the bundle).
     "worklist-v0/hpacs-lite/related-report-mode.js",
+    # W9-UI: the Multi-Study View controller (main.html tags it after related-report-mode.js, before the bundle).
+    "worklist-v0/hpacs-lite/multi-study-view.js",
     "worklist-v0/hpacs-lite/report-structure.js",
     "worklist-v0/hpacs-lite/dictation-session.js",
     "worklist-v0/hpacs-lite/dictation-capture.js",
@@ -367,16 +372,14 @@ class Site:
 
     def complete_login(self):
         """The OIDC round trip stands in as one step: the browser has a new session for login_as and the callback's
-        redirect carries a single-use entry proof in the fragment (wire contract 3, 4)."""
+        redirect identifies the explicit login document with a non-secret fragment."""
         self.logins += 1
         if self.login_as is None:
             # The round trip came back without a session cookie (a blocked cookie, a failed callback without its error).
             return '<!doctype html><title>SYN login</title><script>location.replace("' + BASE + 'index.html")</script>'
         session = self.sign_in(self.login_as)
-        proof = f"SYN-PROOF-{self.logins}"
-        self.proofs[proof] = session
-        return ('<!doctype html><title>SYN login</title><script>location.replace("' + BASE + 'main.html#kin-entry='
-                + proof + '")</script>')
+        return '<!doctype html><title>SYN login</title><script>location.replace("' + BASE + 'main.html#kin-login")</script>'
+
 
     # ── the draft row of UID (wire contract 5) ──
     def revision(self, author):
@@ -466,10 +469,6 @@ class Site:
             # Keycloak's form and the callback, as one page.
             return route.fulfill(body=self.complete_login(), content_type="text/html; charset=utf-8")
         if path.startswith("/api/"):
-            # Every write (the logout POST and the draft write among them) carries the CSRF header.
-            if method != "GET" and request.headers.get("x-kin-csrf") != "1":
-                self.violations.append(f"{method} {path} without X-KIN-CSRF")
-                return route.abort()
             self.calls.append((method, path))
             return self.api(route, request, method, path, url.query)
         if method == "GET" and (path == "/statistics" or path.startswith("/dicom-web/") or path.startswith("/instances/")):
@@ -531,12 +530,6 @@ class Site:
                     return self.refuse(route, 409, "AUTH_SESSION_MISMATCH")
                 self.ended.add(self.cookie)     # the replaced session is revoked with its audit before the IdP is reached
             return self.answer(route, 200, {"location": ORIGIN + "/auth/syn/login"})
-        if method == "POST" and path == "/api/auth/entry":
-            proof = (request.post_data_json or {}).get("proof")
-            self.entries.append(proof)
-            if proof in self.proofs and self.proofs[proof] == self.cookie and self.cookie not in self.ended:
-                return self.answer(route, 200, {"sessionId": self.proofs.pop(proof)})
-            return self.refuse(route, 403, "AUTH_ENTRY_REFUSED")
         # ── the guard ──
         bootstrap = method == "GET" and path == "/api/me"
         strict = bool(self.STRICT.match(path)) and page in ("main.html", "index.html")
@@ -1026,13 +1019,27 @@ class LogoutDOMTest(unittest.TestCase):
                          if body and str(body.get("code", "")).startswith("AUTH_") else None)
 
     def sign_in_from_landing(self, page=None):
-        """The explicit login: the control, the IdP stand-in, the entry proof, the work page."""
+        """The explicit login: the control, the IdP stand-in, the marker, the work page."""
         page = page or self.page
         page.get_by_role("button", name=SIGN_IN).click()
         page.wait_for_url(MAIN_URL)
         expect(page.locator("#rows")).to_contain_text(PATIENT)
 
     # ── S09 / BR-07: entry without an end record ──
+    def test_explicit_login_opens_served_worklist_with_untrusted_storage(self):
+        for fault in (NO_STORAGE, WRITES_FAIL % json.dumps(["kin-session-probe", "kin-session-end"]),
+                      "localStorage.setItem('kin-session-end:old', '{unreadable');"):
+            with self.subTest(storage=fault):
+                self.fresh_context()
+                self.context.add_init_script(fault)
+                self.site.account = None
+                self.page.goto(INDEX_URL)
+                self.sign_in_from_landing()
+                self.assertEqual(self.screen()["state"], "active")
+                self.assertEqual(self.site.logins, 1)
+                self.assertEqual(urlparse(self.page.url).fragment, '')
+                self.assertEqual(self.site.entries, [])
+
     def test_s09_no_session_starts_the_login_by_itself_and_enters_without_a_click(self):
         # The start of a day: no session in this browser, reliable storage, no end record. Nothing is pressed.
         for first in ("index.html", "main.html"):
@@ -1042,9 +1049,9 @@ class LogoutDOMTest(unittest.TestCase):
                 self.page.goto(ORIGIN + BASE + first)
                 self.page.wait_for_url(MAIN_URL)
                 expect(self.page.locator("#rows")).to_contain_text(PATIENT)
-                self.assertEqual((1, [], ["SYN-PROOF-1"]), (self.site.logins, self.site.login_posts, self.site.entries),
-                                 "one login by itself (nothing to replace), its proof consumed by itself")
-                self.assertEqual("", urlparse(self.page.url).fragment, "the entry proof left the address")
+                self.assertEqual((1, [], []), (self.site.logins, self.site.login_posts, self.site.entries),
+                                 "one login by itself (nothing to replace), the callback document bootstraps by itself")
+                self.assertEqual("", urlparse(self.page.url).fragment, "the explicit-login marker left the address")
                 self.assertEqual(([], "active", None), (self.dialogs, self.screen()["state"], self.screen()["end"]))
         # A login that comes back without a session is not started again by itself: the landing offers the control.
         self.fresh_context()
@@ -1250,7 +1257,7 @@ class LogoutDOMTest(unittest.TestCase):
                     self.page.goto(ORIGIN + BASE + direct)
                     again, _ = self.landing()
                     self.assertEqual(message, again, direct)
-                    self.assertEqual([], self.site.calls[calls:], f"{direct}: no API request while the end is unconfirmed")
+                    self.assertTrue(all(call == ("GET", "/api/me") for call in self.site.calls[calls:]), f"{direct}: only identity confirmation while the end is unconfirmed")
                 self.assertEqual(1, len(self.site.logouts), "no POST is sent again by itself")
         self.assertNotEqual(notices["409"], notices["500"], "a busy session and the fixed 500 say different things")
 
@@ -1331,7 +1338,7 @@ class LogoutDOMTest(unittest.TestCase):
                 self.assertEqual(0, self.site.logins, "no login starts by itself")
         self.assertEqual(2, len(self.site.logouts))
         # The login control leaves the landing. Pressing it erases nothing: the record is there until the login succeeded
-        # and its entry proof was taken.
+        # and its explicit-login marker was removed.
         self.site.account = None            # the ended session's cookie is gone: nothing to replace
         self.sign_in_from_landing()
         self.assertEqual((1, None, "active"), (self.site.logins, self.screen()["end"], self.screen()["state"]))
@@ -1460,7 +1467,7 @@ class LogoutDOMTest(unittest.TestCase):
                     self.landing()
                 self.page.wait_for_timeout(300)
                 self.assertIsNone(self.screen()["identity"], f"the late /api/me ({when}) restored the identity")
-                self.assertEqual([], self.site.calls[calls:], "no work read after the late session answer")
+                self.assertTrue(all(call == ("GET", "/api/me") for call in self.site.calls[calls:]), "no work read after the late session answer")
                 self.assertEqual([], self.docs(name="main.html")[1:])
                 self.release_logout(204)
 
@@ -1524,42 +1531,23 @@ class LogoutDOMTest(unittest.TestCase):
                 self.page.wait_for_timeout(300)
                 self.assertEqual((0, [], []), (self.site.logins, self.site.calls, self.docs(name="main.html")[1:]),
                                  "the live session is not even read, and nothing is entered")
-                # The explicit login's proof enters once, storage or not; the next new document is closed again.
-                self.sign_in_from_landing()
-                self.assertEqual(("active", RAD["sub"]), (self.screen()["state"], self.screen()["identity"]["sub"]))
-                entered = self.watch(self.context.new_page())
-                entered.goto(MAIN_URL)
-                self.assertEqual((UNKNOWN, False), self.landing(entered))
 
-    def test_s08_an_entry_proof_enters_once_and_a_replayed_or_foreign_proof_enters_nothing(self):
+    def test_s08_fresh_login_bootstraps_and_the_same_sessions_unfinished_logout_stays_closed(self):
         self.open_main()
         self.site.logout_answers = [(500, {"code": "AUTH_STORAGE_FAILURE", "message": "SYN"})]
         self.log_out_main()
         self.landing()
         self.sign_in_from_landing()
-        self.assertEqual((None, "active", ["SYN-PROOF-1"]), (self.screen()["end"], self.screen()["state"], self.site.entries))
-        self.assertNotIn("kin-entry", self.page.url)
-        self.assertEqual([], self.dialogs, "the proof was consumed without a click")
-        # That session's logout is not confirmed either: the browser holds an end record again, the session lives on.
+        self.assertEqual((None, "active", []), (self.screen()["end"], self.screen()["state"], self.site.entries))
+        self.assertEqual("", urlparse(self.page.url).fragment)
         self.site.logout_answers = [(500, {"code": "AUTH_STORAGE_FAILURE", "message": "SYN"})]
         self.log_out_main()
         notice, _ = self.landing()
-        # The address with the used proof again (history, a copied link): refused - the end record still keeps the
-        # document closed, and no login starts by itself.
         replay = self.watch(self.context.new_page())
-        replay.goto(MAIN_URL + "#kin-entry=SYN-PROOF-1")
+        replay.goto(MAIN_URL)
         self.assertEqual((notice, True), self.landing(replay))
-        self.assertEqual((None, ["SYN-PROOF-1", "SYN-PROOF-1"]), (self.screen(replay)["identity"], self.site.entries))
-        self.assertNotIn("kin-entry", replay.url)
-        # A proof issued for another session (the cookie changed since): refused too, and not consumed.
-        self.site.proofs["SYN-PROOF-FOREIGN"] = "SYN-SESSION-OTHER"
-        foreign = self.watch(self.context.new_page())
-        foreign.goto(MAIN_URL + "#kin-entry=SYN-PROOF-FOREIGN")
-        self.assertEqual((notice, True), self.landing(foreign))
-        self.assertIn("SYN-PROOF-FOREIGN", self.site.proofs, "a refused proof consumed nothing")
-        self.page.wait_for_timeout(300)
-        self.assertEqual((1, []), (self.site.logins, self.docs(replay, "main.html")[1:] + self.docs(foreign, "main.html")[1:]),
-                         "nothing was entered and no login started by itself")
+        self.assertIsNone(self.screen(replay)["identity"])
+        self.assertEqual(self.site.logins, 1)
 
     def test_br09_an_end_record_that_cannot_be_written_still_keeps_the_session_out(self):
         notices = set()
@@ -1597,7 +1585,7 @@ class LogoutDOMTest(unittest.TestCase):
                     calls = len(self.site.calls)
                     self.page.goto(ORIGIN + BASE + direct)
                     self.assertEqual((message, True), self.landing(), direct)
-                    self.assertEqual([], self.site.calls[calls:], f"{direct}: no API request while the end is unconfirmed")
+                    self.assertTrue(all(call == ("GET", "/api/me") for call in self.site.calls[calls:]), f"{direct}: only identity confirmation while the end is unconfirmed")
                 later = self.watch(self.context.new_page())
                 later.goto(INDEX_URL)
                 self.assertEqual((message, True), self.landing(later))

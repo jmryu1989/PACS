@@ -59,7 +59,7 @@ window.KinReadingFindings = function (app) {
   // Only a successful answer without the API's own header marks an older API; this panel never writes either way.
   async function listRead(path, at) {
     const response = await transport.request('/api' + path, { context: at, read: 'response', method: 'GET', credentials: 'same-origin', cache: 'no-store',
-      headers: { 'X-KIN-CSRF': '1', [links.SCHEMA_HEADER]: String(links.SCHEMA) } });
+      headers: { [links.SCHEMA_HEADER]: String(links.SCHEMA) } });
     const data = await response.json().catch(() => null);
     const headerCode = response.headers?.get('X-KIN-Auth-Code');
     if (!response.ok || !data) throw { status: response.status, code: String(headerCode || '').startsWith('AUTH_') ? headerCode : data?.code };

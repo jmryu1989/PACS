@@ -1,7 +1,7 @@
 """S3-ASR-U5: pure oracle for the dictation route's live refusal battery.
 
 REQ-S3-ASR-U5-* -> RISK-U5-* -> TEST-S3-ASR-U5-LIVE / TEST-S3-ASR-U5-ORACLE (tests/README.md).
-The live half is eight tests in tests/invariants_live.py (T1-T8: 26 cases on 8 fixtures). What they are
+The live half is eight tests in tests/invariants_live.py (T1-T8: 25 cases on 8 fixtures). What they are
 judged by lives here -- the case table, source-pinned expected bodies, the audit expectation, pairing and
 problem tags -- so tests/dictation_refusal_oracle_test.py can prove the judge with vectors and tagged
 mutants anywhere. Stdlib only, and never imports invariants_live.py: that module loads .env at import.
@@ -54,7 +54,6 @@ NO_CREDENTIAL = "인증 정보가 없습니다"
 GATEWAY_PATH = "게이트웨이에 허용되지 않는 경로입니다"
 FILMING = "촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다"
 NOT_FOUND = "검사를 찾을 수 없습니다"
-CSRF = "X-KIN-CSRF 헤더가 필요합니다"
 # S7-U5: a cookie request names the session its document saw; a cookie that is not that session's is another session.
 OTHER_SESSION = "이 요청을 시작한 로그인 세션이 지금 브라우저의 세션과 다릅니다"
 
@@ -80,7 +79,6 @@ FIXED_BODIES = {
     "gateway-path": _nest(403, "Forbidden", GATEWAY_PATH),
     "filming": _nest(409, "Conflict", FILMING),
     "not-found": _nest(404, "Not Found", NOT_FOUND),
-    "csrf": _auth("AUTH_CSRF_REQUIRED", CSRF),
     # A2 (S7-U5): the forged cookie arrives with the real session's id, so the guard refuses it as another session's
     # request before any session is read - not as an expired or a missing one.
     "other-session": _auth("AUTH_SESSION_MISMATCH", OTHER_SESSION),
@@ -133,8 +131,7 @@ CASES = (
     Case("R-TENANT", "T6", "refusal", "kdoctor", 404, "not-found", None, "C-TELE"),
     Case("C-TELE", "T6", "control", "kdoctor", 503, "not-configured", CONTROL),
     Case("R-NOSTATE", "T6", "refusal", "doctor", 404, "not-found", None, "C-TELE", probe=True),
-    # T7: a cookie call needs the CSRF header and a real session.
-    Case("R-CSRF", "T7", "refusal", "doctor", 403, "csrf", None, "C-SESSION"),
+    # T7: a cookie call needs a real session - the one its document saw.
     Case("R-FORGED", "T7", "refusal", None, 409, "other-session", None, "C-SESSION"),
     Case("C-SESSION", "T7", "control", "doctor", 503, "not-configured", CONTROL),
     # T8: approved (RS=A) admits a draft today, so it admits dictation (parity, not a new rule).

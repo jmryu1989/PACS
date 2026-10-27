@@ -20,7 +20,7 @@
     "POST studies/:uid/report/commit", "POST studies/:uid/hold", "GET colleagues", "GET unassigned"
   ],
   "denied_code": "CLINICIAN_ROUTE_DENIED",
-  "public_routes": ["GET health", "GET auth/login", "GET auth/register", "GET auth/callback", "POST auth/login", "POST auth/register", "POST auth/entry"],
+  "public_routes": ["GET health", "GET auth/login", "GET auth/register", "GET auth/callback", "POST auth/login", "POST auth/register"],
   "request_method_enum": {"0": "GET", "1": "POST", "2": "PUT", "3": "DELETE", "4": "PATCH", "5": "ALL", "6": "OPTIONS", "7": "HEAD", "8": "SEARCH"},
   "tokens_basis": "Pure memberState/clinicianOnly argument vectors, including malformed inputs, not provider-to-DB rights mapping. At C1 the guard supplies institution and roles from DB rights; an unregistered identity has neither, even if a multi-institution command was requested.",
   "tokens": [
@@ -156,7 +156,7 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 161, "public": 7, "session": 2, "business": 33, "denied": 119},
+    "counts": {"routes": 160, "public": 6, "session": 2, "business": 33, "denied": 119},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
@@ -265,7 +265,6 @@
       "POST critical-results/:id/cancel": {"decision": "denied", "unit": "S7-U1a", "commit": "e9bb028", "basis": "cancel by the sender (radiologist) with a reason; not a recipient action"},
       "POST critical-results/:id/supersede": {"decision": "denied", "unit": "S7-U1a", "commit": "e9bb028", "basis": "supersede by the sender onto the current head for the same recipient; not a recipient action"},
       "GET studies/:uid/draft": {"decision": "denied", "unit": "S7-U5", "commit": "aafc2d9", "basis": "the authoritative read of the caller's own report draft and its stored revision (the draft boundary of the reading workflow); a clinician reads final reports only"},
-      "POST auth/entry": {"decision": "public", "unit": "S7-U5", "commit": "aafc2d9", "basis": "consumes the one-time entry proof of the login that just finished, for the cookie's own session; it answers the session id a document binds to, so it runs before any role or member check"},
       "POST auth/login": {"decision": "public", "unit": "S7-U5", "commit": "aafc2d9", "basis": "starts a login from a document that names the session it replaces; that session is ended with its audit row first, and a binding that is not the cookie's session is refused"},
       "POST auth/register": {"decision": "public", "unit": "S7-U5", "commit": "aafc2d9", "basis": "starts a registration from a document that names the session it replaces, under the same binding rule as POST auth/login"},
       "POST dicom-import": {"decision": "denied", "unit": "S9-U4b", "commit": "5702130", "basis": "member import of one DICOM original into the owning institution (need technician, admin passes; restricted StudyAccess refuses a new study); a clinician never writes originals"},

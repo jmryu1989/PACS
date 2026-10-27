@@ -39,8 +39,7 @@ export class StudyAccessService {
       // first restriction cannot slip between a write's scope check and commit.
       if(tx)await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock_shared(hashtextextended(${this.lockKey(institution,subject)},0))`;
       // Stay on the caller connection. ReadCommitted writes see the committed
-      // row after locking; the response interceptor rejects policy changes
-      // spanning a RepeatableRead request before releasing its response.
+      // row after locking; RepeatableRead reads use their transaction snapshot.
       const rows:any[]=await (tx||this.prisma).$queryRaw`SELECT institution,revision,policy,reason,"updatedBy","updatedAt" FROM "StudyAccessPolicy" WHERE subject=${subject} ORDER BY (institution=${institution}) DESC,institution LIMIT 1`;
       if(!rows.length)return {revision:0,policy:unrestricted(),windowOpen:true,needsInstitutionReview:false};
       // A managed principal changing institutions needs an explicit new-scope
