@@ -13,12 +13,15 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlencode, urlsplit, parse_qs
 
 import pydicom
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, expect
 
 from mgxa_acceptance import ROOT, digest, local_endpoint, verify_orthanc_target, values, provenance, use_limits
+
+sys.path.insert(0, str(ROOT / 'tests' / 'e2e'))
+from viewer_tools import image_tool, select_image_tool
 
 SNAPSHOT = """() => {
   const service = window.services?.cornerstoneViewportService;
@@ -307,6 +310,7 @@ def main():
     parser.add_argument('--headed', action='store_true')
     parser.add_argument('--case', action='append', help='Run only named cases in a new directory; no previous results are merged')
     args = parser.parse_args()
+    expect.set_options(timeout=args.timeout * 1000)
     local_endpoint(args.origin)
     loaded = json.loads(Path(args.load_result).read_text(encoding='utf-8'))
     out = Path(args.output)
@@ -362,6 +366,9 @@ def main():
                         response = page.goto(args.origin.rstrip('/')+'/ohif/viewer?'+urlencode(query), wait_until='domcontentloaded')
                         if not response or not response.ok or '/ohif/viewer' not in page.url:
                             raise AssertionError('Real authenticated OHIF did not open')
+                        # U2 changes the grid's available area as its chrome mounts.
+                        # Record the baseline only once the user's toolbar is ready.
+                        image_tool(page, 'Zoom')
                         case['default_open'] = ready_snapshot(page,studies)
                         if prepare:
                             prepare(page, case)
@@ -373,6 +380,20 @@ def main():
                             action(page, case)
                         case['after'] = ready_snapshot(page,studies)
                         check_images(case['after'], rows, studies)
+                        if name.startswith('mg-'):
+                            patients = {r['patient'] for r in rows if r['study'] in studies}
+                            expected_priors = {r['study'] for r in rows if r['patient'] in patients}
+                            # Observe the real study browser's patient queries, not
+                            # a second lookup invoked by the acceptance harness.
+                            looked_up = set()
+                            for record in case['responses']:
+                                url = urlsplit(record['url'])
+                                query = parse_qs(url.query)
+                                if url.path == '/dicom-web/studies' and record['status'] == 200 and query.get('00100020', [None])[0] in patients:
+                                    looked_up.update(query.get('StudyInstanceUID', []))
+                            case['prior_search'] = {'expected': sorted(expected_priors), 'observed': sorted(looked_up)}
+                            if looked_up != expected_priors:
+                                raise AssertionError('Study browser did not retrieve the expected same-patient studies')
                         case['controls'] = page.get_by_role('button').all_text_contents()
                         if case['status'] == 'RUNNING':
                             case['status'] = 'PASS_TECHNICAL_CHECK_ONLY'
@@ -405,7 +426,7 @@ def main():
                 mg = [r for r in rows if r['modality'] == 'MG']
                 for index, study in enumerate(sorted({r['study'] for r in mg})):
                     def magnification(page, case):
-                        page.locator('[data-cy="Zoom"]').click()
+                        select_image_tool(page, 'Zoom')
                         canvas=page.locator('[data-cy="viewport-grid"] canvas').first
                         box=canvas.bounding_box();x=box['x']+box['width']/2;y=box['y']+box['height']/2
                         page.mouse.move(x,y);page.mouse.down();page.mouse.move(x,y+50,steps=12);page.mouse.up()
@@ -498,8 +519,7 @@ def main():
                         page.wait_for_function('last => window.mgxaRenders.some(r=>r.index===last-2)',arg=row['frames'])
                         case['backward_step']=page.evaluate(SNAPSHOT)[0]['image']
                         check_images(page.evaluate(SNAPSHOT),rows,[row['study']])
-                        page.locator('[data-cy="MoreTools-split-button-secondary"]').click()
-                        page.locator('[data-cy="Cine"]').click()
+                        select_image_tool(page, 'Cine')
                         page.evaluate('window.mgxaRenders=[]')
                         page.get_by_role('button',name='First Frame',exact=True).click()
                         page.wait_for_function('() => window.mgxaRenders.some(r=>r.index===0)')

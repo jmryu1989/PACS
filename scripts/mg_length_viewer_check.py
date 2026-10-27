@@ -136,15 +136,36 @@ def main():
                 open_history(page)
                 row = page.locator('#kin-viewer-history section').filter(has=page.get_by_role('button', name='Save', exact=True)).last
                 expect(row).to_be_visible()
+                saved_row = row.element_handle()
                 page.wait_for_function("""() => cornerstoneTools.annotation.state.getAllAnnotations().some(a => a.metadata.toolName === 'Length' && !a.invalidated && Object.keys(a.data.cachedStats || {}).length)""")
                 with page.expect_response(lambda r: '/viewer-items' in r.url and r.request.method == 'POST') as saved:
                     row.get_by_role('button', name='Save', exact=True).click()
                 response = saved.value
                 case['save_http'] = response.status
-                case['save_body'] = response.json()
                 case['save_request'] = response.request.post_data_json
-                assert response.ok, case['save_body']
-                expect(page.locator('#kin-viewer-history')).to_contain_text('Saved r1')
+                assert response.ok, case['save_http']
+                page.wait_for_function("row => row.textContent.includes('Saved r1')", arg=saved_row)
+                # Chromium's network inspector may discard a POST body while DBT
+                # frames load. Read the persisted item through the authenticated
+                # API instead; a 200 alone is not evidence of a saved measurement.
+                item_id = saved_row.get_attribute('data-item-id')
+                cursor = None
+                while True:
+                    query = {'limit': 100}
+                    if cursor:
+                        query['cursor'] = cursor
+                    readback = context.request.get(response.url, params=query)
+                    assert readback.ok, ('save readback', readback.status)
+                    body = readback.json()
+                    matches = [item for item in body['items'] if item['id'] == item_id]
+                    if matches:
+                        case['saved_item'] = matches[0]
+                        break
+                    cursor = body.get('nextCursor')
+                    assert cursor, 'Saved item missing from readback'
+                assert case['saved_item']['revision'] == 1, case['saved_item']
+                assert case['saved_item']['item']['sopUid'] == source['sop']
+                assert case['saved_item']['item']['frame'] == frame
                 marks = page.evaluate(ANNOTATIONS)
                 mark = next(m for m in marks if '/instances/' + source['sop'] + '/' in m['image'])
                 spacing, origin, matrix = geometry(ds, frame)
@@ -152,6 +173,10 @@ def main():
                 delta = pixel_points[1] - pixel_points[0]
                 expected = math.hypot(delta[0] * spacing[1], delta[1] * spacing[0])
                 case.update(frame=frame, drawn=mark, pixel_points=[p.tolist() for p in pixel_points], expected_mm=expected)
+                saved_item = case['saved_item']['item']
+                assert saved_item['points'] == mark['points']
+                assert len(saved_item['baseline']['values']) == 1
+                assert abs(saved_item['baseline']['values'][0] - expected) <= .001  # Existing server Length tolerance.
                 case['svg_text'] = page.locator('svg text').all_text_contents()
                 assert any('mm' in t for t in case['svg_text']) and any('PixelSpacing' in t for t in case['svg_text']), case['svg_text']
                 page.screenshot(path=str(out / f'{len(result["cases"])}-saved.png'))
@@ -160,7 +185,7 @@ def main():
                 page.wait_for_function('''study => window.cornerstone?.getEnabledElements?.().some(e =>
                   e.viewport.getCurrentImageId?.()?.includes('/studies/' + study + '/'))''', arg=source['study'])
                 open_history(page)
-                page.locator('#kin-viewer-history section[data-item-id="' + case['save_body']['id'] + '"]').get_by_role('button', name='Go to Image', exact=True).click()
+                page.locator('#kin-viewer-history section[data-item-id="' + case['saved_item']['id'] + '"]').get_by_role('button', name='Go to Image', exact=True).click()
                 page.wait_for_function("""([sop, frame]) => cornerstoneTools.annotation.state.getAllAnnotations().some(a =>
                   a.metadata.toolName === 'Length' && a.metadata.referencedImageId.includes('/instances/' + sop + '/') &&
                   a.metadata.referencedImageId.endsWith('/frames/' + frame) && !a.invalidated && !a.data.kinUnverified)""", arg=[source['sop'], frame])

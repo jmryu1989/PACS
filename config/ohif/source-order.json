@@ -32,6 +32,7 @@
     "mammography-hanging.js",
     "mg-reference-lines.js",
     "study-prefetch.js",
+    "study-search.js",
     "viewer-ux.js",
     "configuration.js"
   ]
