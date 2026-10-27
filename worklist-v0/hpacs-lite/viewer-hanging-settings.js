@@ -109,7 +109,10 @@ window.KinViewerHangingSettings = (() => {
       const modality = current[0]?.Modality, settings = getSettings(), value = get(settings, modality);
       last = null;
       // Mammography and explicitly requested protocols own their image selection.
-      if (current.some(set => set.Modality === 'MG') || !current.length || requested && requested !== 'default') return run.call(this, data, requested, options);
+      // The worklist, Reading Workspace and clinician viewer ask for hpCompare on
+      // every open with a prior, so it is the normal comparison, not a choice.
+      if (current.some(set => set.Modality === 'MG') || !current.length ||
+        requested && !['default', '@ohif/hpCompare'].includes(requested)) return run.call(this, data, requested, options);
       last = { data, requested, options };
       if (!settings?.hanging?.[modalities.includes(modality) ? modality : 'Other']) return run.call(this, data, requested, options);
       const prior = data.displaySets.filter(d => d.StudyInstanceUID === opened[1] && d.images?.length).sort(seriesOrder);

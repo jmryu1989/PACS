@@ -26,9 +26,11 @@ window.KinViewerUXToolbar = (() => {
       const record = await response.json();
       if (JSON.stringify(record.owner) !== owner) throw new Error('계정이 변경되었습니다. 뷰어를 다시 여세요.');
       if (!session.ended() && JSON.stringify(session.owner()) === owner) cached = record;
-    } catch (_) {
+    } catch (error) {
+      // Refusal and account messages are written for readers; fetch, timeout and
+      // JSON failures carry browser text, which the connection guidance replaces.
       if (!session.ended() && JSON.stringify(session.owner()) === owner)
-        preparedFailure = { owner, message: '설정을 불러오지 못했습니다. 연결을 확인한 뒤 다시 불러오세요.' };
+        preparedFailure = { owner, message: error?.constructor === Error ? error.message : '설정을 불러오지 못했습니다. 연결을 확인한 뒤 다시 불러오세요.' };
     }
     window.kinMammographyHanging?.registerPreferenceProvider(() =>
       JSON.stringify(cached?.owner) === JSON.stringify(session.owner()) ? cached?.viewerSettings?.mammography || { layout: 'compare', kind: null } : null);
@@ -106,7 +108,7 @@ window.KinViewerUXToolbar = (() => {
     mgInputs.get('priorPosition').onchange = updateMGGridChoices;
     const hanging = window.KinViewerHangingSettings, hangingInputs = new Map();
     const hangingSection = element('fieldset', '', dialog); element('legend', 'Hanging & Layout', hangingSection);
-    element('p', '모달리티별 기본 배치와 비교 위치를 계정에 저장합니다. Automatic은 기존 Hanging Protocol의 배치를 사용합니다. 지정한 프로토콜과 유방영상 배치는 유지됩니다. Series 메뉴에서 비교 시리즈를 직접 바꿀 수 있습니다.', hangingSection);
+    element('p', '모달리티별 기본 배치와 비교 위치를 계정에 저장합니다. 워크리스트에서 이전 검사와 함께 여는 비교에도 적용됩니다. Automatic은 기존 Hanging Protocol의 배치를 사용합니다. Hanging Protocol 편집기에서 지정한 프로토콜과 유방영상 배치는 유지됩니다. Series 메뉴에서 비교 시리즈를 직접 바꿀 수 있습니다.', hangingSection);
     for (const modality of hanging.modalities) {
       const group = element('fieldset', '', hangingSection); element('legend', modality, group);
       const fields = new Map(); hangingInputs.set(modality, fields);

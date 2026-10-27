@@ -694,6 +694,49 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
         folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/viewer-ux-u3/screens'))
         (folder / 'personal-layout-order.json').write_text(json.dumps(observations, indent=2), encoding='utf-8')
 
+    def test_priors_10_worklist_comparison_uses_saved_layout(self):
+        # D1821 -> RISK-PREFERENCE-LOSS -> TEST-VIEWER-U3-HANGING.
+        # The worklist's own comparison open (Include Latest Prior) after a Settings Save.
+        patient = 'U3WL-' + uuid.uuid4().hex[:12]
+        current = self.multiple(patient, 'current', '20260801')
+        prior = self.multiple(patient, 'prior', '20250701')
+        work, page = self.open_viewer(current)
+        page.get_by_role('button', name='Viewer Settings', exact=True).click()
+        settings = page.get_by_role('dialog', name='Viewer Settings', exact=True)
+        expect(settings.get_by_role('button', name='Save', exact=True)).to_be_enabled()
+        settings.get_by_label('CT Default Layout', exact=True).select_option('2x1')
+        settings.get_by_label('CT Prior Position', exact=True).select_option('top')
+        settings.get_by_label('CT Compare Series', exact=True).select_option('number')
+        with page.expect_response(lambda r: r.url.endswith('/api/workspace-shortcuts') and r.request.method == 'PUT') as reply:
+            settings.get_by_role('button', name='Save', exact=True).click()
+        self.assertEqual(reply.value.status, 200)
+        expect(settings).not_to_be_visible()
+        reader = self.login()
+        self.open_toolbar_group(reader, '#image-opening-open')
+        reader.locator('#image-opening-open').click()
+        reader.get_by_label('Include Latest Prior', exact=True).check()
+        reader.get_by_role('button', name='Done', exact=True).click()
+        self.select(reader, current)
+        with reader.context.expect_page() as opened: reader.locator('#m-filmbox').click()
+        viewer = opened.value
+        viewer.on('dialog', lambda dialog: dialog.accept())
+        viewer.wait_for_url('**/ohif/viewer?**')
+        self.assertIn('hangingProtocolId=@ohif/hpCompare', viewer.url)
+        self.assertIn(current.uid + ',' + prior.uid, viewer.url)
+        canvas_ready(viewer, 2)
+        state = """() => [...services.viewportGridService.getState().viewports.values()]
+          .sort((a,b)=>a.y-b.y||a.x-b.x).map(c=>{
+            const v=services.cornerstoneViewportService.getCornerstoneViewport(c.viewportId);
+            const m=cornerstone.metaData.get('instance',v?.getCurrentImageId?.());
+            return [m?.StudyInstanceUID,Number(m?.SeriesNumber)];})"""
+        expected = [[prior.uid, 1], [current.uid, 1]]
+        viewer.wait_for_function('expected => JSON.stringify((' + state + ')()) === JSON.stringify(expected)', arg=expected)
+        # The stock hpCompare hang is 2x2; the saved CT grid is one column, prior on top.
+        grid = viewer.evaluate('''() => [services.viewportGridService.getState().layout.numRows,
+          services.viewportGridService.getState().layout.numCols]''')
+        self.assertEqual(grid, [2, 1])
+        self.evidence(viewer, 'worklist-comparison-personal-layout')
+
 
 def load_tests(loader, tests, pattern):
     return unittest.TestSuite(ViewerUXPriorsE2E(name) for name in loader.getTestCaseNames(ViewerUXPriorsE2E)

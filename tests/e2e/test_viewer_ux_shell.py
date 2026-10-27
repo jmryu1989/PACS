@@ -869,14 +869,14 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         comparison.goto(comparison_url + '&hangingProtocolId=@ohif/hpCompare'); canvas_ready(comparison, 4)
         self.assertEqual(comparison.evaluate(comparison_images), before_save)
         comparison.screenshot(path=str(folder / 'unrelated-save-comparison.png'))
-        # Existing Automatic records also delegate to stock, and an explicit
-        # protocol keeps its own image selection even with a personal grid saved.
+        # Existing Automatic records also delegate to stock. A saved grid applies to
+        # the hpCompare open every product comparison path sends: current left, prior right.
         record = document_request(other, 'GET', '/api/workspace-shortcuts').json()
         original_settings = record['viewerSettings']
         for layout, requested, count, expected in [
                 ('automatic', '', 1, None),
                 ('automatic', '&hangingProtocolId=@ohif/hpCompare', 4, before_save),
-                ('1x2', '&hangingProtocolId=@ohif/hpCompare', 4, before_save)]:
+                ('1x2', '&hangingProtocolId=@ohif/hpCompare', 2, [current.uid, prior.uid])]:
             settings = {**original_settings, 'hanging': {'CT': {
                 'layout': layout, 'priorPosition': 'right', 'seriesMatch': 'similar'}}}
             response = document_request(other, 'PUT', '/api/workspace-shortcuts', headers={'X-KIN-CSRF': '1'},
@@ -884,7 +884,11 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
             self.assertEqual(response.status, 200); record = response.json()
             comparison.goto(comparison_url + requested); canvas_ready(comparison, count)
             images = comparison.evaluate(comparison_images)
-            if expected is not None:
+            if count == 2:
+                grid = comparison.evaluate(hanging_state)
+                self.assertEqual((grid['rows'], grid['columns']), (1, 2))
+                self.assertEqual([image[0] for image in images], expected)
+            elif expected is not None:
                 self.assertEqual(images, expected)
             else:
                 # Without a requested comparison, native OHIF owns image selection.
