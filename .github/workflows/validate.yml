@@ -951,7 +951,8 @@ jobs:
         "$RUNNER_TEMP/hp-python/bin/python" -m pip install -r tests/e2e/requirements.txt -r gateway/agent/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
         "$RUNNER_TEMP/hp-python/bin/python" -m playwright install --with-deps chromium
     - name: Isolated declared invariants, worklist and hanging protocol tests
-      timeout-minutes: 28
+      # The profile's 1884s deadline plus post-deadline logs, cleanup and inspection (tests/measurement_ci.py).
+      timeout-minutes: 35
       run: |
         "$RUNNER_TEMP/hp-python/bin/python" tests/measurement_ci.py --profile hanging-protocols
     - name: Sanitized synthetic hanging protocol evidence

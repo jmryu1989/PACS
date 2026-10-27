@@ -190,12 +190,15 @@ PROFILES = {
         'project_prefix': 'kin-hp-ci-',
         # Recent green invariants runs peaked at 391.641154826s (2026-10-27).
         # Use the same about-twice measured margin as volume-slab/volume-path:
-        # ceil(2 * 391.641154826) = 784. The approved shared deadline is the
-        # suite budgets plus their four 35s supervisor margins, with no extra reserve.
+        # ceil(2 * 391.641154826) = 784. The shared deadline is the suite budgets
+        # plus their four 35s supervisor margins and a 300s reserve: main() starts
+        # the deadline before stack setup (measured 60.6s setup, 12.8s cleanup), so
+        # without it the trailing hanging-protocol flows lose that time whenever the
+        # suites ahead of them run out their budgets.
         'suite_timeout': 784,
         'suite_budgets': {'ci-hp-invariants': 784, 'ci-hp-worklist': 240,
                           'ci-hp-account': 120, 'ci-hp-native': 300},
-        'deadline_seconds': 784 + 240 + 120 + 300 + 4*35,
+        'deadline_seconds': 784 + 240 + 120 + 300 + 4*35 + 300,
         # Shared API/DB changes retain invariants then worklist before the new flow.
         'suites': (
             ('invariants_live.py', None, 'ci-hp-invariants'),
