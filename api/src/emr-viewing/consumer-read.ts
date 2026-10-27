@@ -82,6 +82,16 @@ export function criticalRead(body: any, rows: any[], single = false): LocalReadR
   return new LocalReadResponse(body, sources);
 }
 
+/**
+ * D7: an audit row belongs to the institution recorded in it at write time, and readAuditPage returns only the side
+ * keyed by that institution. So every returned row's managing institution is the response's institutionId — the
+ * record-time key it was projected under, not the reader's current membership.
+ */
+export function adminAuditRead(body: any, ids: readonly number[]): LocalReadResponse {
+  return new LocalReadResponse(body, body.rows.map((_: unknown, index: number) =>
+    consumerSource('access-audit', null, body.institutionId, String(ids[index]), null, ['rows', index])));
+}
+
 /** Existing classification logs organization reads even before clinical adoption; filtered UID lists stay filtered. */
 export function organizationRead(body: any, catalogs: boolean): LocalReadResponse {
   const [institution, subject] = body.owner;

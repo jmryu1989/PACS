@@ -4979,6 +4979,16 @@
         "slot": "metricsConcern"
       },
       {
+        "name": "readStudies",
+        "slot": "worklistConcern",
+        "implementation": {
+          "file": "api/src/pacs/worklist.ts",
+          "owner": "PacsWorklist",
+          "name": "readStudies",
+          "kind": "MethodDeclaration"
+        }
+      },
+      {
         "name": "listStudies",
         "slot": "worklistConcern"
       },

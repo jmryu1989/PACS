@@ -167,7 +167,13 @@ before(async () => {
   const clinicianToken = await new jose.SignJWT({ email: clinicianSub + '@example.test', realm_access: { roles: ['clinician'] }, groups: ['/' + institution] })
     .setProtectedHeader({ alg: 'RS256', kid: jwk.kid }).setIssuer(issuer).setSubject(clinicianSub).setAudience('kin-api')
     .setIssuedAt().setExpirationTime('30m').sign(privateKey);
-  ctx = { witness, runtime, app, provider, relay, split, sourceRows, origin, token, clinicianToken, instances };
+  const adminSub = 'synthetic-consumer-admin';
+  await witness.memberRights.create({ data: { sub: adminSub, username: adminSub, email: adminSub + '@example.test',
+    name: 'Synthetic Admin', emailVerified: true, approved: true, suspended: false, institution, roles: ['admin'] } });
+  const adminToken = await new jose.SignJWT({ email: adminSub + '@example.test', realm_access: { roles: ['admin'] }, groups: ['/' + institution] })
+    .setProtectedHeader({ alg: 'RS256', kid: jwk.kid }).setIssuer(issuer).setSubject(adminSub).setAudience('kin-api')
+    .setIssuedAt().setExpirationTime('30m').sign(privateKey);
+  ctx = { witness, runtime, app, provider, relay, split, sourceRows, origin, token, clinicianToken, adminSub, adminToken, instances };
 });
 after(async () => {
   if (!ctx) return;
@@ -739,4 +745,44 @@ test('A-REMAINDER organization: returned folders and catalogs retain only visibl
       assert.equal(target.recordId.value, JSON.stringify(owner));
     });
   }
+});
+
+test('A-REMAINDER admin audit: each returned row is recorded under its record-time institution; withheld rows are not', async () => {
+  // The study now belongs to another site; D7 attributes the row by the institution written into it, not by current ownership.
+  const moved = await study({ institutionId: foreignInstitution });
+  const write = (detail, action = 'reader.assignment') => ctx.witness.auditLog.create({ data: { actor, action, target: moved, detail: JSON.stringify(detail) } });
+  const mine = await write({ institution, assignee: 'SYN reader' });
+  const theirs = await write({ institution: foreignInstitution, assignee: 'SYN reader' });
+  const unattributed = await write({ len: [1, 0, 0], by: actor }, 'report.draft');
+  const surface = 'GET admin/audit';
+  const ledger = async () => (await ctx.witness.$queryRaw`SELECT payload FROM emr_access.access_entry
+    WHERE payload::jsonb->>'surface' = ${surface} AND payload::jsonb->>'action' = 'provide-prepared' ORDER BY sequence`)
+    .map(row => JSON.parse(row.payload));
+  const before = (await ledger()).length;
+  const answer = await call('/admin/audit?limit=100', { token: ctx.adminToken }).done;
+  assert.equal(answer.status, 200, answer.text);
+  assert.equal(answer.body.institutionId, institution);
+  const records = (await ledger()).slice(before);
+  assert.equal(records.length, answer.body.rows.length);
+  records.forEach((event, index) => {
+    assert.deepEqual(parseAccessEvent(event), event);
+    assert.equal(event.branch, 'local-read');
+    assert.equal(event.userId.value.subject, ctx.adminSub);
+    assert.deepEqual(event.rolesAtTime.value, ['admin']);
+    assert.equal(event.actingInstitution.value, institution);
+    assert.equal(event.managingInstitution.value, institution);
+    const target = event.targets[0];
+    assert.equal(target.kind, 'access-audit');
+    assert.deepEqual(target.studyId, { status: 'unresolved', reason: 'not-observed' });
+    assert.deepEqual(target.versionId, { status: 'unresolved', reason: 'not-observed' });
+    assert.equal(target.projectionSha256, sha(JSON.stringify(answer.body.rows[index])));
+  });
+  const recorded = records.map(event => event.targets[0].recordId.value);
+  assert.equal(recorded.includes(String(mine.id)), true);
+  assert.equal(recorded.includes(String(theirs.id)), false);
+  assert.equal(recorded.includes(String(unattributed.id)), false);
+  // The row id stays out of the response (its gaps would count hidden rows); only the ledger keeps it.
+  assert.equal(answer.body.rows.some(row => Object.hasOwn(row, 'id')), false);
+  const ownRow = answer.body.rows[recorded.indexOf(String(mine.id))];
+  assert.equal(ownRow.target, moved); assert.equal(ownRow.detail.institution, institution);
 });
