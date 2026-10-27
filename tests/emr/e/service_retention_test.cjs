@@ -92,17 +92,19 @@ async function harness() {
     transaction: async (operation, fn) => { const result = await fn(tx); events.push(operation.event); return { outcome: 'committed', result }; },
     confirm: async x => ({ eventId: x.eventId, durableAt: new Date().toISOString() }), end() {},
   }; } };
-  // The application connection: E's own rows; `app.refuseTransport` refuses the next transport-observation insert.
-  const app = { refuseTransport: 0, preparations: [], observations: [] };
+  // The application connection: E's own rows and the response's bounded check transaction; `app.refuseTransport`
+  // refuses the next transport-observation insert.
+  const app = { refuseTransport: 0, preparations: [], observations: [], checks: 0 };
   const db = { async $executeRaw(parts, ...values) {
     const sql = parts.join('?');
+    if (sql.startsWith('SET LOCAL')) return 0;
     if (sql.includes('INSERT INTO emr_image.preparation')) app.preparations.push({ response: values[0], delivery: values[1] });
     else if (sql.includes('INSERT INTO emr_image.observation')) {
       if (values[3] === 'transport' && app.refuseTransport > 0) { app.refuseTransport--; throw Object.assign(new Error('SyntheticAppPoolWriteFailure'), { code: 'SyntheticAppPoolWriteFailure' }); }
       app.observations.push({ response: values[0], delivery: values[1], kind: values[3] });
     }
     return 1;
-  } };
+  }, $transaction(fn) { app.checks++; return fn(db); } };
   const facts = { actor: { identity: actor, kind: 'member', roles: ['radiologist'], institutionId: 'synthetic-hospital', signingRegistrationId: null },
     requestId: randomUUID(), ip: known({ address: '127.0.0.1', source: 'request-peer' }) };
   const scope = { studyId: uid, managingInstitutionId: 'synthetic-hospital', teleInstitutionId: null };

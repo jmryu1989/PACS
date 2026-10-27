@@ -6,7 +6,6 @@ import type { ServerResponse } from 'node:http';
 import type { AccessEvent, DurableAccessReceipt } from '../emr-contract/access-event';
 import { parseAccessEvent } from '../emr-contract/access-event';
 import { freeze, refuse } from '../emr-contract/validation';
-import type { EmrRecordPort, EmrRecordTransaction } from '../emr-runtime/record-port';
 import { DeliveryUnit, PreparedDelivery, TransferObservation, judgeDelivery } from './contract';
 import { ImageManifest, verifiedManifest } from './manifest';
 
@@ -61,8 +60,10 @@ export interface ImageEvidenceStore {
    * real copy, but never evidence that its image was provided. */
   copiesRemoved(link: ObservationLink, copies: readonly ImageCopy[]): Promise<void>;
 }
+/** No ledger port here: a response appends nothing. The delivery's record (its opening and closing) is the caller's;
+ * the response's current access check runs on the transaction the caller's prepare() owns. */
 export interface OnlineImageBoundary {
-  records: EmrRecordPort; evidence: ImageEvidenceStore; source: ImageSource; stagingDirectory: string;
+  evidence: ImageEvidenceStore; source: ImageSource; stagingDirectory: string;
 }
 /** The durable access record a response is provided under: the study delivery's provide-prepared event, its B2
  * receipt and the plan of everything the delivery may carry (delivery.ts). */
@@ -179,15 +180,15 @@ function checkedResponse(manifest: ImageManifest, delivery: PreparedDelivery, p:
   return p;
 }
 
-/** Check the current caller once on a bounded ledger transaction, stage and hash the exact selected units, store
- * their fixed representation under the delivery's durable record, then write only those same files. A later Orthanc
- * replacement can neither change the body nor borrow its earlier receipt. */
+/** Check the current caller once (the caller's bounded transaction) before any source read, stage and hash the exact
+ * selected units, store their fixed representation under the delivery's durable record, then write only those same
+ * files. A later Orthanc replacement can neither change the body nor borrow its earlier receipt. */
 export async function sendOnlineImage(boundary: OnlineImageBoundary, input: {
   manifest: ImageManifest;
   delivery: OnlineImageDelivery;
-  /** The current caller's access check for this response, on one bounded transaction before any source read; it
-   * returns this response's plan under the delivery's record. */
-  prepare(tx: EmrRecordTransaction): Promise<PreparedDelivery>;
+  /** The current caller's access check for this response, on one bounded transaction the caller owns, before any
+   * source read; it returns this response's plan under the delivery's record. */
+  prepare(): Promise<PreparedDelivery>;
   requestId: string;
   /** Called for each row the store refused, whether the response ends by returning or by throwing (a failed
    * preparation whose copy observation could not be written): the delivery it belongs to retains it. */
@@ -205,14 +206,6 @@ export async function sendOnlineImage(boundary: OnlineImageBoundary, input: {
   response.on('close', onClose); response.on('error', stop); response.on('finish', onFinish);
   if (input.signal.aborted || response.destroyed) stop();
   const signal = controller.signal;
-  // Admission can fail synchronously; install no orphaned HTTP listeners then.
-  let work: ReturnType<EmrRecordPort['begin']>;
-  try { work = boundary.records.begin(); }
-  catch (error) {
-    input.signal.removeEventListener('abort', stop);
-    response.off('close', onClose); response.off('error', stop); response.off('finish', onFinish);
-    throw error;
-  }
   const copies: ImageCopy[] = [], observations: TransferObservation[] = [], staged: Staged[] = [], unstored: UnstoredObservation[] = [];
   let responseManifest: ImageResponseManifest;
   let terminal: ImageSendResult['terminal'] = 'transfer-unknown', wireBytes = 0, plannedBytes = 0;
@@ -229,8 +222,7 @@ export async function sendOnlineImage(boundary: OnlineImageBoundary, input: {
   try {
     signal.throwIfAborted();
     // No source body is read before the current caller's access check for this response.
-    p = checkedResponse(manifest, deliveryPlan, await work.transactionWithRecords(tx => input.prepare(tx)));
-    work.end();
+    p = checkedResponse(manifest, deliveryPlan, await input.prepare());
     directory = await mkdtemp(join(boundary.stagingDirectory, 'emr-image-'));
     for (const unit of p.units) {
       signal.throwIfAborted();
@@ -350,7 +342,6 @@ export async function sendOnlineImage(boundary: OnlineImageBoundary, input: {
       // A failed preparation still accounts for the copies it made, under this response's own ID and its delivery's.
       if (copies.length) try { await boundary.evidence.copiesRemoved(link(), copies); }
       catch (error) { refused('copies', copies, error); }
-      work.end();
       input.signal.removeEventListener('abort', stop);
       response.off('close', onClose); response.off('error', stop); response.off('finish', onFinish);
     }

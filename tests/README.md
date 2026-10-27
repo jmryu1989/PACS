@@ -3068,7 +3068,8 @@ or series request (retrieve, query, metadata) reads the catalog again so an obje
 The access record of viewing (의료법 제23조④) is the study delivery (`api/src/emr-image/delivery.ts`): one B2
 provide-prepared event per requester, session and manifest version, durable before the delivery's first response,
 closed by one terminal event after a short idle period, a bounded age, a changed current fact or shutdown; every
-response checks the requester's current access on one bounded ledger transaction before its first byte and keeps its
+response checks the requester's current access on one bounded transaction of the application connection before its
+first byte (a response appends nothing; the ledger's lanes carry the opening and closing) and keeps its
 fixed representation, transport and copy facts in `emr_image` rows naming that event and the request (`X-KIN-Image-Event`
 is the record, `X-KIN-Image-Response` the row); the source reads the study's current identity (the same read as D's
 current study: no resource, two patient resources, the one patient) and the object's current PatientID on every

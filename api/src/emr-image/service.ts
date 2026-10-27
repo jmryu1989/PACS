@@ -8,7 +8,8 @@ import type { AccessEvent } from '../emr-contract/access-event';
 import { newAuditLinkId, parseAccessEvent } from '../emr-contract/access-event';
 import { refuse } from '../emr-contract/validation';
 import { BackgroundWork, EMR_BACKGROUND_WORK } from '../emr-runtime/background-work';
-import { EMR_RECORD_PORT, EmrRecordPort, EmrRecordTransaction, EmrRecordWork } from '../emr-runtime/record-port';
+import { EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS, boundEmrStatements } from '../emr-runtime/limits';
+import { EMR_RECORD_PORT, EmrRecordPort, EmrRecordWork } from '../emr-runtime/record-port';
 import { REQUEST_CONTEXT_SOURCE, RequestContextSource, RequestFacts } from '../emr-runtime/request-context';
 import { OrthancService } from '../orthanc.service';
 import { PrismaService } from '../prisma.service';
@@ -91,15 +92,20 @@ export class OnlineImageService implements BeforeApplicationShutdown {
       let end: ResponseEnd = 'not-sent', bytesWritten = 0;
       const unstored: UnstoredObservation[] = [];
       try {
-        const result = await sendOnlineImage({ records: this.records, evidence: this.evidence,
-          source: this.orthanc.imageSource(), stagingDirectory }, {
+        const result = await sendOnlineImage({ evidence: this.evidence, source: this.orthanc.imageSource(), stagingDirectory }, {
           manifest, delivery: lease.delivery, requestId: facts.requestId,
           // A row the application connection refused goes to the delivery, which writes it when it closes.
           unstored: row => unstored.push(row),
-          // This response's current access check, on its own bounded ledger transaction, before any source read:
-          // identity, institution scope, StudyAccess and provision (context.ts recheck); the archive's current
-          // patient identity of the object is compared by the source and the stream outside the lane.
-          prepare: async (tx: EmrRecordTransaction) => {
+          // This response's current access check before any source read: identity, institution scope, StudyAccess
+          // and provision (context.ts recheck), on one bounded transaction of the application connection, the same
+          // database and role as the ledger's. A response appends nothing, and the ledger's four append lanes bound
+          // append work: with the check inside a lane, four lanes over the check's hold time capped a series at
+          // about 27 frames/s however the identity was resolved (fix-3 sample a, run e-route-fix3-fable-20261027a).
+          // The same reads under the same locks answer the same question here; the delivery's opening and closing
+          // (the records) keep their lanes. The archive's current study and object identity are compared by the
+          // source and the stream.
+          prepare: async () => this.db.$transaction(async tx => {
+            await boundEmrStatements(tx);
             const at = new Date().toISOString();
             let current: CurrentImageFacts;
             try { current = await this.context.recheck(tx, request, manifest, at); }
@@ -109,7 +115,7 @@ export class OnlineImageService implements BeforeApplicationShutdown {
               cause: 'background-fetch', opening: null,
               authorization: { studyUid: image.studyUid, institution: current.actor.institutionId, accountGeneration: current.accountGeneration },
               provision: current.provision });
-          },
+          }, { maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_TX_TIMEOUT_MS }),
           response, signal: abort.signal, range: request.headers.range });
         end = result.terminal; bytesWritten = result.bytesWritten;
         return result;

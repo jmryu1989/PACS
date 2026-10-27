@@ -16,8 +16,9 @@ export interface CurrentImageFacts extends ClinicalRequestFacts {
  * lock current identity, institution, patient link and StudyAccess on tx and
  * compare the selected source manifest. Browser fields are never these facts.
  * recheck() is the per-response check of a study delivery that current() opened (delivery.ts): the same identity,
- * institution scope, StudyAccess and provision facts on tx, without D's study read (the archive QIDO) on the ledger
- * lane. The archive's current study identity is still compared on every response, by the source, outside the lane:
+ * institution scope, StudyAccess and provision facts on tx (a bounded transaction of the application connection,
+ * service.ts), without D's study read (the archive QIDO). The archive's current study identity is still compared on
+ * every response, by the source:
  * the same study read D makes (OrthancService.studyPatientIdentity: no resource, two patient resources, the one
  * patient) and the selected object's own header, both against the manifest's patient (orthanc.service.ts, stream.ts,
  * R244-GPT-01: a correction of the object, or a second patient's resource arriving under the UID). D's patient link is
@@ -55,8 +56,8 @@ export class ProductionImageContext extends ImageContextSource {
     return { ...facts, ...await this.catalog.delivery(tx, request, facts, study, at) };
   }
   /** D's scope read (institution, tele scope, StudyAccess) instead of its study read: the archive's study identity
-   * (an Orthanc QIDO) is not read inside the ledger lane; the source reads it for this response outside the lane,
-   * with the object's current PatientID, and compares both with the manifest's (orthanc.service.ts, stream.ts). */
+   * (an Orthanc QIDO) is not read inside the transaction; the source reads it for this response, with the object's
+   * current PatientID, and compares both with the manifest's (orthanc.service.ts, stream.ts). */
   async recheck(tx: EmrRecordTransaction, request: object, manifest: ImageManifest, at: string): Promise<CurrentImageFacts> {
     const facts = await this.clinical.facts(tx, request);
     const scope = await this.clinical.scope(tx, request, manifest.studyUid);
