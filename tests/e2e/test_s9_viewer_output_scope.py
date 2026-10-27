@@ -56,22 +56,28 @@ class ServedViewerFlow:
         expect(page.locator('.kin-viewer-identity[data-study="' + fixture.uid + '"]')).to_be_visible(timeout=45000)
         page.wait_for_function('() => window.kinViewerJobWorkspaceState && !kinViewerJobWorkspaceState().busy && !kinViewerHistoryWorkspaceState().busy')
 
-    def open_from_worklist(self, work, page, fixture, refusal=None):
-        """The worklist Viewer action on an open viewer window: accepted, or refused with the existing notice."""
+    def worklist_action(self, work, page, fixture, click, refusal=None):
+        """A worklist action that reuses the open viewer window: accepted, or refused with the existing notice."""
         before, cells, toast = page.url, self.rendered(page), work.locator('#toast')
         if refusal is not None:
             # An earlier identical notice must have expired so the refusal below is this click's. The worklist
             # is a background page here, where animation-frame polling is throttled: poll on a timer instead.
             work.wait_for_function('''text => { const t = document.querySelector('#toast');
               return !(t.classList.contains('show') && t.textContent.includes(text)); }''', arg=refusal, timeout=15000, polling=100)
-        # A caller holding a response selects first; the worklist search must not use up the client's 30 s request bound.
-        if work.locator('#rows tr.sel[data-uid="' + fixture.uid + '"]').count() != 1: self.select(work, fixture)
-        work.locator('#m-filmbox').click()
+        click()
         if refusal is None: return self.shows(page, fixture)
         expect(toast).to_have_class(re.compile(r'\bshow\b'))
         expect(toast).to_contain_text(refusal)
         self.assertEqual(page.url, before)
         self.assertEqual(self.rendered(page), cells)
+
+    def open_from_worklist(self, work, page, fixture, refusal=None):
+        """The worklist Viewer action on an open viewer window."""
+        def click():
+            # A caller holding a response selects first; the worklist search must not use up the client's 30 s request bound.
+            if work.locator('#rows tr.sel[data-uid="' + fixture.uid + '"]').count() != 1: self.select(work, fixture)
+            work.locator('#m-filmbox').click()
+        return self.worklist_action(work, page, fixture, click, refusal)
 
     def evidence(self, page, name):
         folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/s9-u7/screens'))
