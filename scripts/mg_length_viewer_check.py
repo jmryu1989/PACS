@@ -154,7 +154,8 @@ def main():
                     query = {'limit': 100}
                     if cursor:
                         query['cursor'] = cursor
-                    readback = context.request.get(response.url, params=query)
+                    readback = context.request.get(response.url, params=query,
+                        headers={'X-KIN-Session': response.request.headers.get('x-kin-session') or ''})
                     assert readback.ok, ('save readback', readback.status)
                     body = readback.json()
                     matches = [item for item in body['items'] if item['id'] == item_id]

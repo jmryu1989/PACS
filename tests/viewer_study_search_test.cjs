@@ -5,9 +5,9 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 
-function fixture(rows, read, search = '?StudyInstanceUIDs=1') {
+function fixture(rows, read, search = '?StudyInstanceUIDs=1', query) {
   const calls = [];
-  const original = async function (params) { calls.push({ params, receiver: this === studies }); return [params.studyInstanceUid]; };
+  const original = async function (params) { calls.push({ params, receiver: this === studies }); return query ? query(params) : [params.studyInstanceUid]; };
   const studies = { search: original };
   let end;
   const location = { search };
@@ -33,7 +33,7 @@ test('prior search uses the opened source patient and individually scoped UIDs',
   assert.deepEqual(Array.from(result), ['1', '2']);
   assert.deepEqual(f.calls.map(c => c.params.studyInstanceUid), ['1', '2']);
   assert.ok(f.calls.every(c => c.receiver && c.params.patientId === 'P' && c.params.disableWildcard));
-  assert.deepEqual(Array.from(await f.studies.search({ patientId: 'Q' })), []);
+  await assert.rejects(f.studies.search({ patientId: 'Q' }));
   f.extension.onModeExit();
   assert.equal(f.studies.search, f.original);
 });
@@ -53,6 +53,36 @@ test('a refused worklist read is not an empty successful prior search', async ()
   const f = fixture(rows, async () => ({ ok: false, status: 403 }));
   await assert.rejects(f.studies.search({ patientId: 'P' }), /HTTP 403/);
   assert.equal(f.calls.length, 0);
+});
+test('an absent opened identity rejects, while a successful scoped no-match remains empty', async () => {
+  for (const list of [[], rows.slice(1), [{ uid: '1', id: 'P', sourcePatientKey: null }]]) {
+    const f = fixture(list);
+    await assert.rejects(f.studies.search({ patientId: 'P' }));
+    assert.equal(f.calls.length, 0);
+  }
+  const f = fixture(rows, undefined, undefined, async () => []);
+  assert.deepEqual(Array.from(await f.studies.search({ patientId: 'P' })), []);
+});
+test('concurrent and repeated lookups share one list until mode reentry', async () => {
+  let reads = 0;
+  const f = fixture(rows, async () => { reads++; return { ok: true, json: async () => ({ studies: rows }) }; });
+  await Promise.all([f.studies.search({ patientId: 'P' }), f.studies.search({ patientId: 'P' })]);
+  await f.studies.search({ patientId: 'P' });
+  assert.equal(reads, 1);
+  assert.equal(f.calls.length, 6);
+  f.extension.onModeExit(); f.extension.onModeEnter();
+  await f.studies.search({ patientId: 'P' });
+  assert.equal(reads, 2);
+});
+test('failed list reads can be retried and scoped query errors still reject', async () => {
+  let reads = 0;
+  const f = fixture(rows, async () => ++reads === 1 ? { ok: false, status: 503 }
+    : { ok: true, json: async () => ({ studies: rows }) });
+  await assert.rejects(f.studies.search({ patientId: 'P' }), /HTTP 503/);
+  assert.deepEqual(Array.from(await f.studies.search({ patientId: 'P' })), ['1', '2']);
+  assert.equal(reads, 2);
+  const refused = fixture(rows, undefined, undefined, async () => { throw new Error('QIDO failed'); });
+  await assert.rejects(refused.studies.search({ patientId: 'P' }), /QIDO failed/);
 });
 test('mode exit/reentry and document end discard an outstanding patient lookup', async () => {
   for (const action of ['reenter', 'end']) {

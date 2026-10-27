@@ -4404,18 +4404,25 @@ function kinCreateStudySearch() {
     const session = kinViewerOnEnd(() => { ended = true; controller.abort(); });
     const live = () => !ended && location.search === search;
     const current = () => { if (!live()) throw new Error('검사 조회가 종료되었습니다.'); };
+    // OHIF repeats the patient lookup for each opened study. Share the list only
+    // within this mode/session; each UID query still checks current access.
+    let listing;
+    const readList = () => listing ||= (async () => {
+      const response = await fetch('/api/studies', { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
+      if (!response.ok) throw new Error('이전 검사 목록을 확인하지 못했습니다 (HTTP ' + response.status + ').');
+      return response.json();
+    })().catch(error => { listing = null; throw error; });
     const wrapped = async function (params) {
       if (!params?.patientId || params.studyInstanceUid) return original.call(this, params);
       current();
-      const response = await fetch('/api/studies', { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
-      if (!response.ok) throw new Error('이전 검사 목록을 확인하지 못했습니다 (HTTP ' + response.status + ').');
-      const list = await response.json();
+      const list = await readList();
       current();
       const keys = new Set(list.studies.filter(row => opened.includes(row.uid) && row.id === params.patientId && row.sourcePatientKey)
         .map(row => row.sourcePatientKey));
       // The stock MRN request does not identify which opened study asked it.
       // Keep its current-study fallback when two institutions reuse that MRN.
       if (keys.size > 1) throw new Error('기관별 환자 식별이 달라 이전 검사를 하나로 묶을 수 없습니다.');
+      if (keys.size === 0) throw new Error('열린 검사의 환자 식별을 확인하지 못했습니다.');
       const rows = list.studies.filter(row => row.id === params.patientId && keys.has(row.sourcePatientKey));
       const results = [];
       for (const row of rows) {
