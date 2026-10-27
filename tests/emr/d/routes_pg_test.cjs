@@ -97,8 +97,9 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
       if (url.pathname === `/studies/${studyResource}/instances`) return json([{ ID: objectResource, FileUuid: storedFile, MainDicomTags: { SOPInstanceUID: sopUid } }]);
       if (url.pathname.endsWith('/metadata')) return json([{ ...header, '00100020': { Value: [catalogPatient] },
         ...(frameCount > 1 ? { '00280008': { Value: [frameCount] } } : {}) }]);
+      // E reads the object's current PatientID per response (#244, R244-GPT-01); a correction changes it with the metadata.
       if (url.pathname.endsWith('/simplified-tags')) return json({ StudyInstanceUID: imageUid, SeriesInstanceUID: seriesUid,
-        SOPInstanceUID: sopUid, SOPClassUID: header['00080016'].Value[0], NumberOfFrames: String(frameCount) });
+        SOPInstanceUID: sopUid, SOPClassUID: header['00080016'].Value[0], NumberOfFrames: String(frameCount), PatientID: catalogPatient });
       if (url.pathname.endsWith('/header')) return json({ '0002,0010': { Value: '1.2.840.10008.1.2.1' } });
       // A temporary archive outage: the next `failFile` stored-file reads answer 503.
       if (url.pathname.endsWith('/file') && failFile > 0) { failFile--; res.statusCode = 503; res.end(); return; }
@@ -133,7 +134,7 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const requests = createRequestContext(createRequestIngress({ proxyPeers: ['127.0.0.1'] }), runtime.port);
     Module({ controllers: services.map(n => product(n + '.controller')[className(n) + 'Controller']),
       providers: [PrismaService, ...services.map(n => product(n + '.service')[className(n) + 'Service']),
-        product('emr-image/service').OnlineImageService, product('emr-source/image').OrthancImageCatalog,
+        product('emr-image/service').OnlineImageService, product('emr-image/check-db').ImageCheckDatabase, product('emr-source/image').OrthancImageCatalog,
         { provide: product('emr-image/context').ImageContextSource,
           inject: [product('emr-clinical/startup').CURRENT_CLINICAL_CONTEXT, product('emr-source/image').OrthancImageCatalog],
           useFactory: (clinical, catalog) => new (product('emr-image/context').ProductionImageContext)(clinical, catalog) },
@@ -314,7 +315,9 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     assert.deepEqual([fixedCopy.baseline.values, fixedCopy.points[0][0]], [[exactValue], exactValue]);
     // The registered image route reads real HTTP catalog/object/frame bodies and
     // persists the exact preparation/transport evidence through PostgreSQL B2.
-    const imageUrl = origin + '/api/images/dicom-web?target=' + encodeURIComponent(`/dicom-web/studies/${imageUid}/series/${seriesUid}/instances/${sopUid}`);
+    // A series retrieve: E keeps a study's manifest for its frame and instance requests (#244, manifest-reuse.ts) but
+    // reads the catalog again for a series or study request, so each request below exercises the catalog itself.
+    const imageUrl = origin + '/api/images/dicom-web?target=' + encodeURIComponent(`/dicom-web/studies/${imageUid}/series/${seriesUid}`);
     const imageResponse = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
     assert.equal(imageResponse.status, 200, await (imageResponse.status === 200 ? Promise.resolve('') : imageResponse.text()));
     const bodyBytes = Buffer.from(await imageResponse.arrayBuffer());
@@ -330,7 +333,9 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const rewrittenImage = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
     assert.equal(rewrittenImage.status, 200); await rewrittenImage.arrayBuffer();
     assert.equal(fileReads - firstReads - repeatedReads, firstReads);
-    const preparations = await db.$queryRaw`SELECT source_manifest, response_manifest FROM emr_image.preparation`;
+    // A preparation names its study manifest's body, kept once in emr_image.source_manifest (#244, 20261026210000).
+    const preparations = await db.$queryRaw`SELECT COALESCE(p.source_manifest, m.body) AS source_manifest, p.response_manifest
+      FROM emr_image.preparation p LEFT JOIN emr_image.source_manifest m ON m.body_sha256 = p.source_manifest_body`;
     assert.equal(preparations.length, 3);
     assert.equal(new Set(preparations.map(p => JSON.stringify(p.source_manifest.objects))).size, 1, 'the same fixed object version each time');
     const observed = preparations[0].source_manifest;
@@ -348,12 +353,15 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n, 3);
     catalogPatient = 'synthetic:' + imageUid;
     let identityReads = 0;
+    // The study moves to another institution while its identity is read for the manifest: the catalog's own access
+    // check refuses it and nothing is prepared or served. (#244: a response joining an open study delivery is then
+    // checked by recheck() before any source read, and the source's per-response identity read comes after that
+    // check, so the move can no longer be placed between the two from here; E's delivery/service tests cover recheck.)
     beforeIdentity = async () => {
-      if (++identityReads === 2) await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: receiver } });
+      if (++identityReads === 1) await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: receiver } });
     };
     const movedStudy = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
-    assert.equal(movedStudy.status, 503);
-    assert.equal((await movedStudy.json()).code, 'ImageCurrentStudyChanged');
+    assert.equal(movedStudy.status, 404); await movedStudy.text();
     assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n, 3);
     beforeIdentity = null;
     await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: hospital } });
@@ -372,7 +380,8 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     assert.equal(resumed.status, 200, await (resumed.status === 200 ? resumed.arrayBuffer().then(() => '') : resumed.text()));
     assert.deepEqual(frameReads, [0, 1, 2, 2], 'only the unfinished frame is read again');
     assert.equal(fileReads - readsBeforePartial, 1 + repeatedReads, 'the stored file is digested once, then delivered');
-    const multiframe = (await db.$queryRaw`SELECT source_manifest FROM emr_image.preparation`)
+    const multiframe = (await db.$queryRaw`SELECT COALESCE(p.source_manifest, m.body) AS source_manifest FROM emr_image.preparation p
+      LEFT JOIN emr_image.source_manifest m ON m.body_sha256 = p.source_manifest_body`)
       .map(p => p.source_manifest.objects[0]).filter(o => o.frames.length === 3);
     assert.equal(multiframe.length, 1);
     assert.deepEqual(multiframe[0].frames.map(f => [f.number, f.sha256]),

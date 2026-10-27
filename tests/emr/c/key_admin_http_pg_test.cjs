@@ -53,6 +53,8 @@ test('admin creates, rotates and retires a doctor key over HTTP; the doctor appr
     await runtime.start(); ready = true;
     const resource = uid => ({ '0020000D': { Value: [uid] }, '00100020': { Value: ['synthetic:' + uid] } });
     const orthanc = { studyIdentityResources: async uid => [resource(uid)], studyIdentities: async () => [] };
+    // D's current-study read applies the archive reader's own patient rule over these resources (#244).
+    orthanc.studyPatientIdentity = product('orthanc.service').OrthancService.prototype.studyPatientIdentity;
     const users = Object.values(members).map(m => ({ id: m.sub, username: m.username, email: m.email, firstName: m.name,
       enabled: true, groups: [m.institution], roles: m.roles }));
     const keycloak = { getUser: async sub => users.find(u => u.id === sub),

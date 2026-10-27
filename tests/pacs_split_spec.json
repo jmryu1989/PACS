@@ -9258,5 +9258,78 @@
         }
       }
     }
+  },
+  "di_additions_e_route": {
+    "unit": "EMR-E E_ROUTE study delivery (#244)",
+    "note": "OnlineImageService resolves the request's member identity once, keeps one access record per study delivery on the EMR background-work registry, and runs each response's access check on E's own check pool, so its constructor takes the request context, that registry and ImageCheckDatabase (emr-image/check-db.ts), which is registered as a provider. No controller or route is added.",
+    "middleware_routes": [],
+    "controllers": [],
+    "providers": [
+      "ImageCheckDatabase"
+    ],
+    "routes": [],
+    "injectables": {
+      "ImageCheckDatabase": {
+        "params": [],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      }
+    },
+    "changed_injectables": {
+      "OnlineImageService": {
+        "before": {
+          "params": [
+            "Object",
+            "ImageContextSource",
+            "PrismaService",
+            "OrthancService"
+          ],
+          "scope": null,
+          "declared": [
+            "0:Symbol(EmrRecordPort)"
+          ],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "Object",
+            "ImageContextSource",
+            "PrismaService",
+            "OrthancService",
+            "Object",
+            "Object",
+            "ImageCheckDatabase"
+          ],
+          "scope": null,
+          "declared": [
+            "5:Symbol(EmrBackgroundWork)",
+            "4:Symbol(RequestContextSource)",
+            "0:Symbol(EmrRecordPort)"
+          ],
+          "optional": []
+        }
+      }
+    }
+  },
+  "caution_app": {
+    "unit": "Caution census app (#259)",
+    "note": "Change Password opens Keycloak's UPDATE_PASSWORD action on the signed-in session: GET auth/login takes the literal action and GET auth/callback reads kc_action_status (auth.controller.ts). Both routes stay public; nothing else changes.",
+    "route_args": [
+      {
+        "controller": "AuthController",
+        "handler": "callback",
+        "added": [
+          "4:5@5:\"kc_action_status\":0"
+        ]
+      },
+      {
+        "controller": "AuthController",
+        "handler": "login",
+        "added": [
+          "4:2@2:\"action\":0"
+        ]
+      }
+    ]
   }
 }
