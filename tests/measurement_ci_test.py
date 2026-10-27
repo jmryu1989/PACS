@@ -76,8 +76,7 @@ class MeasurementCiTests(unittest.TestCase):
             with self.subTest(job=name):
                 self.assertEqual(job['needs'], 'select')
                 condition = re.fullmatch(
-                    r"\$\{\{ !cancelled\(\) && !github\.event\.pull_request\.draft && "
-                    r"\(needs\.select\.result != 'success' \|\| "
+                    r"\$\{\{ !cancelled\(\) && \(needs\.select\.result != 'success' \|\| "
                     r"fromJSON\(needs\.select\.outputs\.jobs\)\['([a-z0-9-]+)'\]\) \}\}", job['if'])
                 self.assertIsNotNone(condition, job['if'])
                 selected[name] = condition[1]
@@ -93,9 +92,11 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(jobs[consume['needs']]['needs'], 'select')
         self.assertEqual(workflow['concurrency']['cancel-in-progress'], "${{ github.event_name == 'pull_request' }}")
 
-    def test_draft_pr_runs_no_job_and_marking_ready_runs_every_job(self):
-        # 2026-10-27 (user): fix rounds on a draft PR are verified on the VM/desktop host, not in CI. A ready PR
-        # (ready_for_review included) runs exactly as before; main push, tags, nightly and dispatch are unchanged.
+    def test_draft_pr_fails_every_required_check_and_marking_ready_runs_every_job(self):
+        # 2026-10-27 (user): fix rounds on a draft PR are verified on the VM/desktop host, not in CI. Branch
+        # protection treats a skipped required check as passing, and ready_for_review keeps the head SHA, so a
+        # draft run must leave every job failed, never skipped; a ready PR runs exactly as before. Main push, tags,
+        # nightly and dispatch are unchanged.
         workflow = self.catalog.documents['.github/workflows/validate.yml']
         triggers = workflow.get('on', workflow.get(True))
         self.assertEqual(triggers['pull_request'],
@@ -103,14 +104,25 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(triggers['push'], {'branches': ['main'], 'tags': ['v*']})
         self.assertEqual(triggers['schedule'], [{'cron': '0 18 * * *'}])
         jobs = workflow['jobs']
-        # The two jobs without needs carry the draft condition alone; every module job carries it as a conjunct
-        # (test_module_jobs_wait_for_selection_and_fail_when_it_fails), so a ready PR's failed select still makes
-        # the module checks run and fail (D1831) while a draft run starts no runner at all.
-        for name in ('select', 'runtime'):
-            self.assertEqual(jobs[name]['if'], '${{ !github.event.pull_request.draft }}', name)
-        # consume has no condition: it skips with produce on a draft and runs after a successful produce.
-        self.assertNotIn('if', jobs['consume'])
+        draft = '${{ github.event.pull_request.draft }}'
+        # The jobs that do not wait on select start on a draft and fail first; module jobs then fail through the
+        # select guard (test_module_jobs_wait_for_selection_and_fail_when_it_fails).
+        self.assertNotIn('if', jobs['select'])
+        self.assertNotIn('if', jobs['runtime'])
         self.assertEqual(jobs['consume']['needs'], 'produce')
+        self.assertEqual(jobs['consume']['if'],
+                         "${{ !cancelled() && (github.event.pull_request.draft || needs.produce.result == 'success') }}")
+        for name in ('select', 'runtime', 'consume'):
+            with self.subTest(job=name):
+                guard = jobs[name]['steps'][0]
+                self.assertEqual(guard['if'], draft)
+                self.assertTrue(guard['run'].rstrip().endswith('exit 1'))
+        # On a draft no later consume step runs, including the evidence steps that otherwise run after a failure.
+        # A step without `if` is skipped after the failed first step; one with a status function must exclude a draft.
+        for step in jobs['consume']['steps'][1:]:
+            with self.subTest(step=step.get('name', step.get('uses'))):
+                if 'if' in step:
+                    self.assertIn('!github.event.pull_request.draft', step['if'])
 
     def test_accuracy_pr_subset_keeps_original_suite_contracts(self):
         expected = [('e2e/test_measurement_readback.py', 'MeasurementReadbackE2E'),
