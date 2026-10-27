@@ -10,7 +10,7 @@ concurrency:
 jobs:
   emr-b:
     needs: select
-    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['emr-b']) }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['emr-b']) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 210
     env:
@@ -109,6 +109,9 @@ jobs:
     # ~15-minute runtime job, which now runs beside them. A failed or cancelled select must never leave a
     # required module check skipped (the gate counts path-selection skips as satisfied, D1831): every module
     # job still starts and its first step fails unless this job succeeded.
+    # A draft PR skips this job and, by the same condition, every other job. Such a run concludes success with
+    # every check skipped, so the merge gate refuses a run in which no job ran (draft-run case).
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -135,6 +138,7 @@ jobs:
     outputs:
       jobs: ${{ steps.paths.outputs.jobs }}
   runtime:
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     # 19m43s-19m52s on main and a 20-minute timeout already hit under queue load (#182).
     timeout-minutes: 35
@@ -646,7 +650,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     needs: select
-    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['asr-engine']) }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['asr-engine']) }}
   emr-c:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -702,7 +706,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     needs: select
-    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['emr-c']) }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['emr-c']) }}
   emr-d:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -761,7 +765,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     needs: select
-    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['emr-d']) }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['emr-d']) }}
   emr-e-contracts:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -812,7 +816,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     needs: select
-    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['emr-e-contracts']) }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['emr-e-contracts']) }}
   emr-f-contracts:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -864,7 +868,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     needs: select
-    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['emr-f-contracts']) }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['emr-f-contracts']) }}
   contract:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -901,7 +905,7 @@ jobs:
         path: tmp/emr-h-r1/runs
         if-no-files-found: error
     needs: select
-    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['contract']) }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['contract']) }}
   hanging-protocols:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -965,7 +969,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     needs: select
-    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['hanging-protocols']) }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['hanging-protocols']) }}
   part1-mg:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -1112,7 +1116,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     needs: select
-    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['part1-mg']) }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['part1-mg']) }}
   part1-xa:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -1331,7 +1335,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     needs: select
-    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['part1-xa']) }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['part1-xa']) }}
   volume-marks:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -1378,7 +1382,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     needs: select
-    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-marks']) }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-marks']) }}
   volume-rendering:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -1433,7 +1437,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     needs: select
-    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-rendering']) }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-rendering']) }}
   worklist-ux-measurements:
     runs-on: ubuntu-24.04
     timeout-minutes: 260
@@ -1618,7 +1622,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     needs: select
-    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['worklist-ux-measurements']) }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['worklist-ux-measurements']) }}
   volume-mpr:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -1722,7 +1726,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     needs: select
-    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-mpr']) }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-mpr']) }}
   volume-batch:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -1770,7 +1774,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     needs: select
-    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-batch']) }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-batch']) }}
   volume-mip-voi:
     runs-on: ubuntu-24.04
     timeout-minutes: 225
@@ -1874,7 +1878,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     needs: select
-    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-mip-voi']) }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-mip-voi']) }}
   s7-u5-session-contracts:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -2001,7 +2005,7 @@ jobs:
         retention-days: 7
     name: s7-u5-session-contracts (u5-session-api)
     needs: select
-    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['s7-u5-session-contracts']) }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['s7-u5-session-contracts']) }}
   produce:
     name: restore-product / produce
     runs-on: ubuntu-24.04
@@ -2050,7 +2054,7 @@ jobs:
         include-hidden-files: false
         overwrite: false
     needs: select
-    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['restore-product']) }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['restore-product']) }}
   consume:
     name: restore-product / consume
     needs: produce
@@ -2205,7 +2209,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     needs: select
-    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['s9-u0e-served']) }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['s9-u0e-served']) }}
   patient-identity-measurements:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
@@ -2253,14 +2257,17 @@ jobs:
         if-no-files-found: error
         retention-days: 7
     needs: select
-    if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['patient-identity-measurements']) }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['patient-identity-measurements']) }}
 'on':
   push:
     branches:
     - main
     tags:
     - v*
-  pull_request: null
+  # 2026-10-27 (user): a draft PR runs no job; fix rounds are verified on the VM/desktop host. ready_for_review
+  # is listed so marking a draft ready runs CI once at that head and the required checks report.
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   # D1797/D1808: hosted nightly of runtime + restore-product on main; 18:00 UTC = 03:00 KST.
   schedule:
   - cron: '0 18 * * *'

@@ -76,7 +76,8 @@ class MeasurementCiTests(unittest.TestCase):
             with self.subTest(job=name):
                 self.assertEqual(job['needs'], 'select')
                 condition = re.fullmatch(
-                    r"\$\{\{ !cancelled\(\) && \(needs\.select\.result != 'success' \|\| "
+                    r"\$\{\{ !cancelled\(\) && !github\.event\.pull_request\.draft && "
+                    r"\(needs\.select\.result != 'success' \|\| "
                     r"fromJSON\(needs\.select\.outputs\.jobs\)\['([a-z0-9-]+)'\]\) \}\}", job['if'])
                 self.assertIsNotNone(condition, job['if'])
                 selected[name] = condition[1]
@@ -91,6 +92,25 @@ class MeasurementCiTests(unittest.TestCase):
         consume = jobs['consume']
         self.assertEqual(jobs[consume['needs']]['needs'], 'select')
         self.assertEqual(workflow['concurrency']['cancel-in-progress'], "${{ github.event_name == 'pull_request' }}")
+
+    def test_draft_pr_runs_no_job_and_marking_ready_runs_every_job(self):
+        # 2026-10-27 (user): fix rounds on a draft PR are verified on the VM/desktop host, not in CI. A ready PR
+        # (ready_for_review included) runs exactly as before; main push, tags, nightly and dispatch are unchanged.
+        workflow = self.catalog.documents['.github/workflows/validate.yml']
+        triggers = workflow.get('on', workflow.get(True))
+        self.assertEqual(triggers['pull_request'],
+                         {'types': ['opened', 'synchronize', 'reopened', 'ready_for_review']})
+        self.assertEqual(triggers['push'], {'branches': ['main'], 'tags': ['v*']})
+        self.assertEqual(triggers['schedule'], [{'cron': '0 18 * * *'}])
+        jobs = workflow['jobs']
+        # The two jobs without needs carry the draft condition alone; every module job carries it as a conjunct
+        # (test_module_jobs_wait_for_selection_and_fail_when_it_fails), so a ready PR's failed select still makes
+        # the module checks run and fail (D1831) while a draft run starts no runner at all.
+        for name in ('select', 'runtime'):
+            self.assertEqual(jobs[name]['if'], '${{ !github.event.pull_request.draft }}', name)
+        # consume has no condition: it skips with produce on a draft and runs after a successful produce.
+        self.assertNotIn('if', jobs['consume'])
+        self.assertEqual(jobs['consume']['needs'], 'produce')
 
     def test_accuracy_pr_subset_keeps_original_suite_contracts(self):
         expected = [('e2e/test_measurement_readback.py', 'MeasurementReadbackE2E'),
