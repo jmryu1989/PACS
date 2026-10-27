@@ -2,14 +2,18 @@
 /* MG-08 (D1877): the study delivery's 열람 record on the API's image path, at the served HTTP boundary. A real
  * node:http server runs the real DicomFrameController, DicomFrameService, StudyImageDeliveryRecorder, request-context
  * capture, current clinical context (identity, StudyAccess, patient link), StudyAccessService, PacsAccess and the
- * DICOMweb gate; the access ledger is an in-memory port that runs the real event parser and mints real receipts, the
- * Orthanc index is a stub over one synthetic stored object, authentication is an explicit synthetic input (the guard's
- * capture is called with it). Asserted: no image byte before the provide-prepared event is durable; one pair per
- * study delivery (open, reload within the idle gap, reload after it); a ledger that cannot record answers 503 with no
- * body; refusals of the gate leave no record; shutdown closes open deliveries; a delivery that provided no image closes
- * as aborted, not succeeded (MG-10); a terminal the ledger cannot take at the close is retried as the same event until
- * durable, and the shutdown makes a last attempt without inventing one (MG-09). The PostgreSQL ledger itself is proven
- * in tests/emr/a (real PG). D73: behaviour at the boundary, no product source text. Synthetic values only; 127.0.0.1 only. */
+ * DICOMweb gate; the access ledger is the real record port (createRecordPort: admission close and drain as in the
+ * product) over an in-memory store that runs the real event parser and mints real receipts, the Orthanc index is a
+ * stub over one synthetic stored object, authentication is an explicit synthetic input (the guard's capture is called
+ * with it). Asserted: no image byte before the provide-prepared event is durable; one pair per study delivery (open,
+ * reload within the idle gap, reload after it); a ledger that cannot record answers 503 with no body; refusals of the
+ * gate leave no record; shutdown closes open deliveries; a delivery that provided no image closes as aborted, not
+ * succeeded (MG-10); a terminal the ledger cannot take at the close is retried as the same event until durable, and the
+ * shutdown makes a last attempt without inventing one (MG-09); a graceful Nest shutdown (installed Nest's application
+ * context close, the real EmrNestLifecycle closing admission) still records the terminal of a delivery whose
+ * preparation or whose first terminal attempt was in flight when admission closed (MG-09, round 4). The PostgreSQL
+ * ledger itself is proven in tests/emr/a (real PG). D73: behaviour at the boundary, no product source text. Synthetic
+ * values only; 127.0.0.1 only. */
 const { STUDY_UID, SERIES_UID, SOP_UID, INSTANCE_ID, STUDY_ID, syntheticObject, stubOrthanc } = require('./dicom_frame_fixture.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -18,8 +22,11 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createHash, randomUUID } = require('node:crypto');
-const { HttpException, ServiceUnavailableException } = require('/app/node_modules/@nestjs/common');
+const { ConsoleLogger, HttpException, Logger, Module, ServiceUnavailableException } = require('/app/node_modules/@nestjs/common');
+const { NestFactory } = require('/app/node_modules/@nestjs/core');
 const { createBackgroundWorkRegistry } = require('/app/dist/emr-runtime/background-work.js');
+const { createRecordPort } = require('/app/dist/emr-runtime/record-port.js');
+const { EmrNestLifecycle } = require('/app/dist/emr-runtime/nest-lifecycle.js');
 const { DicomFrameController } = require('/app/dist/dicom-frame.controller.js');
 const { DicomFrameService } = require('/app/dist/dicom-frame.service.js');
 const { StudyImageDeliveryRecorder, IMAGE_DELIVERY_UNAVAILABLE, FRAMES_SURFACE, PREVIEW_SURFACE } = require('/app/dist/dicom-frame-delivery.js');
@@ -40,38 +47,33 @@ function identityOf(issuer, subject) {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
-/** An in-memory record port with the public port's semantics: durable receipts only for stored events, append-only.
- * `attempts` is every append the port saw, failed ones included (what the real store's B2 failure journal would hold). */
+/** The real record port (admission close, per-work end, drain) over an in-memory store with the ledger's semantics:
+ * durable receipts only for stored events, append-only. `attempts` is every append the store saw, failed ones included
+ * (what the real store's B2 failure journal would hold). `control.live()` is the number of record works not ended. */
 function ledger() {
-  const entries = [], attempts = [], state = { failing: false, live: 0 };
+  const entries = [], attempts = [], state = { failing: false };
   const tx = {};
-  const port = { begin() {
-    state.live++;
-    let ended = false;
-    const guard = () => { if (ended) throw new Error('EmrRecordWorkEnded'); };
-    const find = operationId => entries.find(e => e.operationId === operationId);
-    return {
-      async append(event, served, keys) {
-        guard();
-        const parsed = parseAccessEvent(event);   // the store's canonicalPayload runs this same parser
-        attempts.push({ eventId: parsed.eventId, action: parsed.action, occurredAt: parsed.occurredAt, failed: state.failing });
-        if (state.failing) throw new Error('LedgerUnreachable');
-        const storedAt = new Date().toISOString();
-        entries.push({ event: parsed, operationId: keys?.operationId ?? randomUUID(), storedAt, at: process.hrtime.bigint() });
-        return mintDurableReceipt(parsed.eventId, storedAt);
-      },
-      async lookup(operationId) { guard(); const e = find(operationId); return e ? { operationId, eventId: e.event.eventId, outcome: 'committed', durableAt: e.storedAt, result: null, entries: [] } : null; },
-      async confirm(appended) { guard(); const e = find(appended.operationId); if (!e) throw new Error('CommitUnknown'); return mintDurableReceipt(e.event.eventId, e.storedAt); },
-      async transactionWithRecords(work) { guard(); return work(tx, async (event, effect) => effect()); },
-      async resolveRequestIdentity(issuer, subject) { guard(); return identityOf(issuer, subject); },
-      async resolveIdentity(_tx, issuer, subject) { guard(); return identityOf(issuer, subject); },
-      async admit() { throw new Error('SYN admit is not used by the image delivery'); },
-      async transaction() { throw new Error('SYN transaction is not used by the image delivery'); },
-      async snapshot() { throw new Error('SYN snapshot is not used by the image delivery'); },
-      end() { if (!ended) { ended = true; state.live--; } },
-    };
-  } };
-  return { port, entries, attempts, state, tx };
+  const find = operationId => entries.find(e => e.operationId === operationId);
+  const store = {
+    async append(event, served, keys) {
+      const parsed = parseAccessEvent(event);   // the store's canonicalPayload runs this same parser
+      attempts.push({ eventId: parsed.eventId, action: parsed.action, occurredAt: parsed.occurredAt, failed: state.failing });
+      if (state.failing) throw new Error('LedgerUnreachable');
+      const storedAt = new Date().toISOString();
+      entries.push({ event: parsed, operationId: keys?.operationId ?? randomUUID(), storedAt, at: process.hrtime.bigint() });
+      return mintDurableReceipt(parsed.eventId, storedAt);
+    },
+    async lookup(operationId) { const e = find(operationId); return e ? { operationId, eventId: e.event.eventId, outcome: 'committed', durableAt: e.storedAt, result: null, entries: [] } : null; },
+    async confirm(appended) { const e = find(appended.operationId); if (!e) throw new Error('CommitUnknown'); return mintDurableReceipt(e.event.eventId, e.storedAt); },
+    async transactionWithRecords(work) { return work(tx, async (event, effect) => effect()); },
+    async resolveRequestIdentity(issuer, subject) { return identityOf(issuer, subject); },
+    async resolveIdentity(_tx, issuer, subject) { return identityOf(issuer, subject); },
+    async admit() { throw new Error('SYN admit is not used by the image delivery'); },
+    async transaction() { throw new Error('SYN transaction is not used by the image delivery'); },
+    async snapshot() { throw new Error('SYN snapshot is not used by the image delivery'); },
+  };
+  const { port, control } = createRecordPort(store);
+  return { port, control, store, entries, attempts, state, tx };
 }
 
 /** The whole served stack over one synthetic object; `shape` and `over` reach the stored object and the Orthanc stub. */
@@ -198,7 +200,7 @@ test('open: frames and the preview of one study by one session are served under 
     assert.notEqual(second.eventId, event.eventId);
     assert.equal(byAction(s.records.entries, 'transfer-ended')[1].event.relatedEventId, second.eventId);
     await settle();
-    assert.equal(s.records.state.live, 0, 'every record work was ended');
+    assert.equal(s.records.control.live(), 0, 'every record work was ended');
     assert.equal(s.orthanc.calls.filter(c => c[0] === 'revision').length, 2, 'the study revision is read once per delivery');
   } finally { await s.close(); }
 });
@@ -239,7 +241,7 @@ test('a ledger that cannot record refuses the image with 503 and no body; it ser
     assert.equal((await s.frame(1)).status, 200);
     assert.equal(byAction(s.records.entries, 'provide-prepared').length, 1);
     await settle();
-    assert.equal(s.records.state.live, 0);
+    assert.equal(s.records.control.live(), 0);
   } finally { await s.close(); }
 });
 
@@ -277,7 +279,7 @@ test('shutdown closes open deliveries: a quiet one ends, one still being sent is
     hold = false; release();
     assert.equal((await pending).status, 200, 'the held read still completes for its client');
     await settle();
-    assert.equal(s.records.state.live, 0);
+    assert.equal(s.records.control.live(), 0);
   } finally { hold = false; release?.(); await s.close(); }
 });
 
@@ -337,7 +339,7 @@ test('a terminal the ledger cannot take at the close keeps its identity and is r
     assert.equal((await s.frame(2)).status, 200);
     await until(() => s.records.entries.length === 4, 'the new delivery\'s pair');
     await settle();
-    assert.equal(s.records.state.live, 0, 'every record work was ended');
+    assert.equal(s.records.control.live(), 0, 'every record work was ended');
     assert.equal(s.background.live(), 0, 'no retry task left running');
   } finally { await s.close(); }
 });
@@ -357,7 +359,7 @@ test('shutdown makes a pending terminal\'s last attempt: recorded when the ledge
     assert.equal(byAction(s.records.entries, 'transfer-ended').length, 1, 'the shutdown recorded the pending terminal');
     assert.equal(s.records.entries[1].event.relatedEventId, s.records.entries[0].event.eventId);
     await settle();
-    assert.equal(s.records.state.live, 0);
+    assert.equal(s.records.control.live(), 0);
   } finally { await s.close(); }
   // The ledger is still down at the stop: the attempt is made and fails; nothing is appended later and nothing claims the pair complete.
   const s2 = await stack();
@@ -376,4 +378,80 @@ test('shutdown makes a pending terminal\'s last attempt: recorded when the ledge
     assert.equal(s2.records.entries.length, 1, 'no attempt after the shutdown invents a late terminal');
     assert.equal(s2.background.live(), 0);
   } finally { await s2.close(); }
+});
+
+/** The product's shutdown consumers around the recorder: installed Nest's application context (its close runs every
+ * onModuleDestroy, then every beforeApplicationShutdown, then onApplicationShutdown) and the real EmrNestLifecycle over
+ * a runtime double that owns this stack's real background registry and real record port control, as EmrRuntime does.
+ * Nest's logger is captured so the recorder's shutdown lines can be read; the console logger is restored afterwards. */
+async function nestShutdown(s) {
+  let closedAdmission;
+  const admissionClosed = new Promise(resolve => { closedAdmission = resolve; });
+  const runtime = { background: s.background,
+    control: { close() { s.records.control.close(); closedAdmission(); }, live: () => s.records.control.live(), drained: () => s.records.control.drained() },
+    async stop() { await s.background.drained(); await s.records.control.drained(); } };
+  class ShutdownModule {}
+  Module({ providers: [{ provide: StudyImageDeliveryRecorder, useValue: s.recorder }, { provide: EmrNestLifecycle, useValue: new EmrNestLifecycle(runtime) }] })(ShutdownModule);
+  const lines = [];
+  const capture = { log() {}, warn(message) { lines.push('warn ' + message); }, error(message) { lines.push('error ' + message); }, debug() {}, verbose() {} };
+  const app = await NestFactory.createApplicationContext(ShutdownModule, { logger: capture });
+  let stopped = false;
+  const close = async () => { try { await app.close(); } finally { stopped = true; } };
+  const done = async () => { if (!stopped) await close().catch(() => {}); Logger.overrideLogger(new ConsoleLogger()); };
+  return { close, admissionClosed, lines, done };
+}
+
+test('graceful Nest shutdown closes record admission after the stop began: a delivery still being prepared, or whose first terminal attempt was in flight, still completes its pair', async () => {
+  // (a) A read was admitted and its provide-prepared append is inside the store when the process stops. Nest runs the
+  // recorder's onModuleDestroy, then EmrNestLifecycle closes admission; only then does the append complete.
+  const s = await stack();
+  let release, entered;
+  const held = new Promise(resolve => { release = resolve; }), started = new Promise(resolve => { entered = resolve; });
+  const append = s.records.store.append;
+  s.records.store.append = async (event, ...rest) => { if (event.action === 'provide-prepared') { entered(); await held; } return append(event, ...rest); };
+  const nest = await nestShutdown(s);
+  try {
+    const read = s.frame(1);
+    await started;
+    const stopping = nest.close();
+    await nest.admissionClosed;
+    // A read that arrives after the stop began belongs to no delivery the stop will close: refused, nothing recorded.
+    const late = await s.frame(2);
+    assert.equal(late.status, 503);
+    assert.equal(JSON.parse(late.body.toString()).code, IMAGE_DELIVERY_UNAVAILABLE.code);
+    release();
+    const response = await read;
+    await stopping;
+    assert.equal(response.status, 200, 'the read admitted before the stop completes for its client');
+    assert.deepEqual(s.records.entries.map(e => e.event.action), ['provide-prepared', 'transfer-aborted'], 'the pair is complete; the response was still being sent at the stop');
+    assert.equal(s.records.entries[1].event.relatedEventId, s.records.entries[0].event.eventId);
+    assert.equal(s.records.control.live(), 0, 'every record work, the one reserved for the stop included, was ended');
+    assert.deepEqual(nest.lines.filter(line => line.startsWith('error')), [], 'a complete shutdown reports no pending terminal');
+  } finally { release(); await nest.done(); await s.close(); }
+  // (b) The delivery closed at the idle gap and its first terminal attempt is inside the store when the process stops;
+  // that attempt fails (one transient failure) after admission closed. The stop's own attempt records the same event.
+  const s2 = await stack();
+  let fail, terminalEntered, once = true;
+  const terminalStarted = new Promise(resolve => { terminalEntered = resolve; }), failure = new Promise((_, reject) => { fail = reject; });
+  const append2 = s2.records.store.append;
+  s2.records.store.append = async (event, ...rest) => {
+    if (event.action !== 'provide-prepared' && once) { once = false; terminalEntered(); await failure; }
+    return append2(event, ...rest);
+  };
+  const nest2 = await nestShutdown(s2);
+  try {
+    assert.equal((await s2.frame(1)).status, 200);
+    await terminalStarted;
+    const stopping = nest2.close();
+    await nest2.admissionClosed;
+    fail(new Error('synthetic single transient failure'));
+    await stopping;
+    assert.deepEqual(s2.records.entries.map(e => e.event.action), ['provide-prepared', 'transfer-ended'], 'the pair is complete');
+    assert.equal(s2.records.entries[1].event.relatedEventId, s2.records.entries[0].event.eventId);
+    assert.equal(s2.records.attempts.filter(a => a.action === 'transfer-ended').length, 1, 'the stop\'s attempt reached the store after the held one failed before it');
+    assert.equal(nest2.lines.filter(line => line.startsWith('warn')).length, 1, 'the failed in-flight attempt is reported once, as an attempt');
+    assert.deepEqual(nest2.lines.filter(line => line.startsWith('error')), [], 'nothing pending is reported');
+    assert.equal(s2.records.control.live(), 0);
+    assert.equal(s2.background.live(), 0);
+  } finally { fail(new Error('cleanup')); await nest2.done(); await s2.close(); }
 });

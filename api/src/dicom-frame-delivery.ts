@@ -9,7 +9,9 @@
  * The terminal is the honest aggregate of the delivery's responses: `transfer-ended` only when at least one image
  * response was sent to its end, `transfer-aborted` when none was (every read failed or was cut) or the process stops
  * while one is still being sent (review MG-10). A terminal the ledger cannot take at that moment keeps its identity
- * and is retried until it is durable or the process stops; it is never dropped for being late (review MG-09).
+ * and is retried until it is durable or the process stops; it is never dropped for being late (review MG-09). The
+ * stop reserves the ledger work of every terminal it still owes before record admission closes, so a delivery whose
+ * preparation or last retry is in flight when the process stops still completes its pair (review MG-09, round 4).
  *
  * The event is the formatVersion 1 image event the images/dicom-web delivery writes (emr-image/service.ts), through the
  * same record port: the study is its target (recordId = study UID, as that delivery names its study-level units) and the
@@ -74,6 +76,8 @@ interface Delivery {
   attempts: number;
   recording: Promise<void> | null;
   cancelRetry: (() => void) | null;
+  /** Ledger work the stop admitted for this delivery's terminal while admission was still open; used by the next attempt. */
+  reserved: EmrRecordWork | null;
 }
 
 const known = <T>(value: T) => ({ status: 'known' as const, value });
@@ -105,6 +109,8 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
   async admit(request: IncomingMessage, surface: string, studyUid: string): Promise<DeliveryLease> {
     let delivery: Delivery;
     try {
+      // A read admitted after the stop began would belong to a delivery the stop does not close: no pair, so no byte.
+      if (this.stopping) throw new ServiceUnavailableException(IMAGE_DELIVERY_UNAVAILABLE);
       const snapshot = this.requests.read(request);
       const key = JSON.stringify([snapshot.issuer, snapshot.subject, snapshot.binding.sessionRef, studyUid]);
       delivery = this.open.get(key) ?? this.start(key, request, surface, studyUid);
@@ -128,7 +134,7 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
 
   private start(key: string, request: IncomingMessage, surface: string, studyUid: string): Delivery {
     const delivery: Delivery = { key, studyUid, prepared: null as any, event: null, inflight: 0, served: 0, unserved: 0, timer: null, closed: false,
-      terminal: null, attempts: 0, recording: null, cancelRetry: null };
+      terminal: null, attempts: 0, recording: null, cancelRetry: null, reserved: null };
     delivery.prepared = this.prepare(request, surface, studyUid).then(event => { delivery.event = event; return event; });
     // A delivery that could not be recorded is no delivery: the next read asks the ledger again.
     delivery.prepared.catch(() => { if (this.open.get(key) === delivery) this.open.delete(key); });
@@ -220,18 +226,21 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
    * operations by event id and content, so an attempt whose COMMIT reply was lost is found, not duplicated. A failed
    * attempt is journaled by the store (B2 failure journal, with this event id) and retried here with backoff through
    * the background registry, whose timers the shutdown clears and whose running tasks it drains before the ledger
-   * disconnects. At shutdown no retry is scheduled: the last attempt is the one `onModuleDestroy` makes.
+   * disconnects. At shutdown no retry is scheduled: the last attempt is the one the stop makes, on the work it reserved.
    */
   private record(delivery: Delivery): Promise<void> {
     if (delivery.recording) return delivery.recording;
     if (delivery.cancelRetry) { delivery.cancelRetry(); delivery.cancelRetry = null; }
     const terminal = delivery.terminal!;
     const attempt = async () => {
-      // The work is taken before the first await: from onModuleDestroy this still precedes the port's close
-      // (EmrNestLifecycle closes it in beforeApplicationShutdown, after every onModuleDestroy).
+      // Work the stop reserved is used first: it was admitted while admission was open, and the port keeps admitted
+      // work through its close. Otherwise the work is taken here, before the first await.
       let work: EmrRecordWork;
-      try { work = this.records.begin(); }
-      catch (error) { this.defer(delivery, error); return; }
+      if (delivery.reserved) { work = delivery.reserved; delivery.reserved = null; }
+      else {
+        try { work = this.records.begin(); }
+        catch (error) { this.defer(delivery, error); return; }
+      }
       try {
         await this.append(work, terminal);
         this.closing.delete(delivery);
@@ -249,9 +258,10 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
     const terminal = delivery.terminal!, reason = error instanceof Error ? error.message : String(error);
     const delay = Math.min(TERMINAL_RETRY_MAX_MS, TERMINAL_RETRY_MS * 2 ** Math.min(delivery.attempts - 1, 16));
     if (this.stopping || this.background.quiesced) {
-      // The process is stopping: the pending pair is named here and in the store's failure journal; it is not complete.
-      this.logger.error(`image_delivery category=terminal_not_recorded_at_shutdown action=${terminal.action} event=${terminal.eventId} ` +
-        `prepared=${terminal.relatedEventId} attempts=${delivery.attempts} ${reason}`);
+      // No retry timer once the process stops: the stop's own last attempt follows (onModuleDestroy), and what it
+      // could not record is reported there with its event ids - this line names one attempt, not the pair's fate.
+      this.logger.warn(`image_delivery category=terminal_attempt_failed_at_shutdown action=${terminal.action} event=${terminal.eventId} ` +
+        `prepared=${terminal.relatedEventId} attempt=${delivery.attempts} ${reason}`);
       return;
     }
     this.logger.error(`image_delivery category=terminal_not_recorded action=${terminal.action} event=${terminal.eventId} ` +
@@ -263,14 +273,39 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
    * Every open delivery ends with the process; one still sending is aborted, a quiet one ended. Every terminal still
    * pending gets its last attempt now; one that still fails is logged with its event ids and stays in the store's
    * failure journal - the shutdown does not report it as a complete pair.
+   *
+   * Nest awaits every onModuleDestroy before any beforeApplicationShutdown, where EmrNestLifecycle closes record
+   * admission; the hooks of one module run concurrently, so nothing awaited here may be needed after that close.
+   * The ledger work of every terminal this stop may owe - open deliveries, still being prepared or not, and closed
+   * ones whose terminal is not durable yet - is therefore admitted synchronously, before the first await; the port
+   * keeps admitted work through its close, and the runtime's drain waits for it. A delivery that turns out to owe
+   * nothing (its preparation failed, or its in-flight attempt succeeded) returns the work unused.
    */
   onModuleDestroy(): void {
     this.stopping = true;
-    this.shutdown ??= (async () => {
+    this.shutdown ??= this.stop();
+  }
+
+  private stop(): Promise<void> {
+    const owed = new Set<Delivery>([...this.open.values(), ...this.closing]);
+    for (const delivery of owed) {
+      if (delivery.reserved) continue;
+      try { delivery.reserved = this.records.begin(); }
+      catch (error) {
+        this.logger.warn(`image_delivery category=terminal_work_not_reserved_at_shutdown study=${delivery.studyUid} ` + (error instanceof Error ? error.message : String(error)));
+      }
+    }
+    return (async () => {
       await Promise.allSettled([...this.open.values()].map(delivery => this.close(delivery)));
       // A retry that was mid-flight when the shutdown began settles first; whatever is still pending is attempted once more.
       await Promise.allSettled([...this.closing].map(delivery => delivery.recording ?? Promise.resolve()));
       await Promise.allSettled([...this.closing].map(delivery => this.record(delivery)));
+      for (const delivery of owed) if (delivery.reserved) { delivery.reserved.end(); delivery.reserved = null; }
+      for (const delivery of this.closing) {
+        const terminal = delivery.terminal!;
+        this.logger.error(`image_delivery category=terminal_not_recorded_at_shutdown action=${terminal.action} event=${terminal.eventId} ` +
+          `prepared=${terminal.relatedEventId} attempts=${delivery.attempts}`);
+      }
       if (this.closing.size) this.logger.error(`image_delivery category=terminals_pending_at_shutdown count=${this.closing.size}`);
     })();
   }
