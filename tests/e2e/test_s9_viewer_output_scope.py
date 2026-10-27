@@ -10,12 +10,19 @@ import re
 from PIL import Image
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 import uuid
 
 from playwright.sync_api import expect
+from pynetdicom.association import Association
 from test_viewer_job_print import ViewerJobPrintE2E
 from test_viewer_display_scope import ViewerDisplayScopeE2E
 from test_prior_selection import canvas_ready
+
+
+# Existing viewer-launch.js notices for a window that cannot be replaced yet.
+BUSY_WINDOW = '열린 대화상자를 닫은 뒤'
+DIRTY_WINDOW = '저장하지 않은 표식이나 작업 내용'
 
 
 class ServedViewerFlow:
@@ -33,6 +40,38 @@ class ServedViewerFlow:
         page.wait_for_function('''() => window.KinViewerUX &&
           !kinViewerHistoryWorkspaceState().busy && !kinViewerJobWorkspaceState().busy''')
         return work, page
+
+    # The rendered identity of every painted cell, read from the image the viewport draws.
+    def rendered(self, page):
+        return page.evaluate('''() => [...services.viewportGridService.getState().viewports.values()]
+          .sort((a,b)=>a.y-b.y||a.x-b.x).map(g=>{
+            const v=services.cornerstoneViewportService.getCornerstoneViewport(g.viewportId),image=v?.getCurrentImageId?.();
+            const m=image&&cornerstone.metaData.get('instance',image);
+            return m?{study:m.StudyInstanceUID,series:m.SeriesInstanceUID,sop:m.SOPInstanceUID,patient:m.PatientID}:null;
+          }).filter(Boolean)''')
+
+    def shows(self, page, fixture):
+        # A replaced viewport can exist before it has an image (for example while MPR is torn down).
+        page.wait_for_function('uid => [...services.viewportGridService.getState().viewports.keys()].some(id => services.cornerstoneViewportService.getCornerstoneViewport(id)?.getCurrentImageId?.()?.includes("/studies/"+uid+"/"))', arg=fixture.uid, timeout=45000)
+        expect(page.locator('.kin-viewer-identity[data-study="' + fixture.uid + '"]')).to_be_visible(timeout=45000)
+        page.wait_for_function('() => window.kinViewerJobWorkspaceState && !kinViewerJobWorkspaceState().busy && !kinViewerHistoryWorkspaceState().busy')
+
+    def open_from_worklist(self, work, page, fixture, refusal=None):
+        """The worklist Viewer action on an open viewer window: accepted, or refused with the existing notice."""
+        before, cells, toast = page.url, self.rendered(page), work.locator('#toast')
+        if refusal is not None:
+            # An earlier identical notice must have expired so the refusal below is this click's. The worklist
+            # is a background page here, where animation-frame polling is throttled: poll on a timer instead.
+            work.wait_for_function('''text => { const t = document.querySelector('#toast');
+              return !(t.classList.contains('show') && t.textContent.includes(text)); }''', arg=refusal, timeout=15000, polling=100)
+        # A caller holding a response selects first; the worklist search must not use up the client's 30 s request bound.
+        if work.locator('#rows tr.sel[data-uid="' + fixture.uid + '"]').count() != 1: self.select(work, fixture)
+        work.locator('#m-filmbox').click()
+        if refusal is None: return self.shows(page, fixture)
+        expect(toast).to_have_class(re.compile(r'\bshow\b'))
+        expect(toast).to_contain_text(refusal)
+        self.assertEqual(page.url, before)
+        self.assertEqual(self.rendered(page), cells)
 
     def evidence(self, page, name):
         folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/s9-u7/screens'))
@@ -114,34 +153,88 @@ class S9ViewerOutputScopeE2E(ServedViewerFlow, ViewerJobPrintE2E):
         for f in [current, prior]: self.assertEqual(self.report_rows(f), reports[f.uid])
         expect(work.locator('#findings')).to_have_value('U7 OUTPUT KEEP REPORT')
 
-    def test_output_02_late_preview_keeps_the_selected_target(self):
-        current = self.ct('U7O-' + uuid.uuid4().hex[:12], 'preview', '20260801')
-        work, page = self.served_viewer(current)
-        self.open_layout_tools(page)
+    def hold_preview(self, page, fixture):
         held = []
-        pattern = '**/api/studies/' + current.uid + '/viewer-jobs/preview'
+        pattern = '**/api/studies/' + fixture.uid + '/viewer-jobs/preview'
         page.route(pattern, lambda route: held.append((route, route.fetch())))
         self.click_job(page, 'Print Current View', '')
-        expect(page.locator('#kin-job-print')).to_be_visible()
-        page.wait_for_function('() => document.querySelector("#kin-job-print").open')
+        page.wait_for_function('() => document.querySelector("#kin-job-print")?.open')
         # Same response hold allowance as test_viewer_job_print.test_print_04.
         for _ in range(100):
             if held: break
             page.wait_for_timeout(50)
         self.assertTrue(held)
-        page.locator('#kin-job-print').get_by_role('button', name='닫기', exact=True).click()
+        return pattern, held
+
+    def assert_output_matches(self, page, fixture, absent):
+        status = page.locator('#kin-job-print [role=status]')
+        expect(status).to_contain_text('미리보기 내용을 확인', timeout=45000)
+        shown = self.rendered(page)
+        self.assertTrue(shown)
+        main = page.frame_locator('#kin-job-print iframe').locator('main')
+        for cell in shown:
+            # The output names the target the viewer actually draws now.
+            self.assertEqual((cell['study'], cell['patient']), (fixture.uid, fixture.patient_id))
+            expect(main).to_contain_text(cell['sop'])
+        expect(main).to_contain_text(fixture.uid)
+        expect(main).to_contain_text(fixture.patient_id)
+        for text in absent: expect(main).not_to_contain_text(text)
+
+    def test_output_02_late_preview_keeps_the_selected_target(self):
+        patient, name = 'U7O-' + uuid.uuid4().hex[:12], 'U7동명이인^출력확인'
+        send = Association.send_c_store
+        def named_ct(association, dataset, *args, **kwargs):
+            dataset.PatientName = name
+            return send(association, dataset, *args, **kwargs)
+        # Same-name fixtures are set in the real synthetic DICOM before C-STORE.
+        with patch.object(Association, 'send_c_store', named_ct):
+            current = self.ct(patient, 'preview current', '20260801')
+            prior = self.ct(patient, 'preview prior', '20260701')
+            other = self.ct('U7O-OTHER-' + uuid.uuid4().hex[:12], 'preview other', '20260801')
+        work, page = self.served_viewer(current)
+        self.open_layout_tools(page)
+
+        # 1. current -> comparison while the current preview is pending: the
+        # existing busy refusal keeps the window, then the answer shows current.
+        # Selecting a worklist row does not load it into the open viewer.
+        self.select(work, prior)
+        self.assertEqual({cell['study'] for cell in self.rendered(page)}, {current.uid})
+        pattern, held = self.hold_preview(page, current)
+        self.open_from_worklist(work, page, prior, BUSY_WINDOW)
         for route, response in held: route.fulfill(response=response)
         page.unroute(pattern)
+        self.assert_output_matches(page, current, [prior.uid])
+        self.evidence(page, 'output-preview-refused-prior-switch')
+        page.locator('#kin-job-print').get_by_role('button', name='닫기', exact=True).click()
+
+        # 2. Close a pending current preview, switch to the comparison, then let
+        # the old answer arrive. It is discarded; a new output names the prior.
+        pattern, held = self.hold_preview(page, current)
+        page.locator('#kin-job-print').get_by_role('button', name='닫기', exact=True).click()
         expect(page.locator('#kin-job-print')).not_to_be_visible()
-        self.choose(page, 0)
-        page.keyboard.press('ArrowDown')
+        self.open_from_worklist(work, page, prior)
+        for route, response in held: route.fulfill(response=response)
+        page.unroute(pattern)
+        page.wait_for_timeout(500)
+        self.assertEqual(page.locator('#kin-job-print[open]').count(), 0)
+        self.assertTrue(all(cell['study'] == prior.uid for cell in self.rendered(page)))
+        self.open_layout_tools(page)
         self.click_job(page, 'Print Current View', '')
-        expect(page.locator('#kin-job-print [role=status]')).to_contain_text('미리보기 내용을 확인', timeout=45000)
-        image = self.cells(page)[0]['image']
-        sop = image.split('/instances/')[1].split('/')[0]
-        expect(page.frame_locator('#kin-job-print iframe').locator('main')).to_contain_text(sop)
-        self.evidence(page, 'output-reopened-current-frame')
-        self.assertEqual(self.jobs(current), [])
+        self.assert_output_matches(page, prior, [current.uid])
+        self.evidence(page, 'output-late-preview-then-prior')
+
+        # 3. Same name, different patient: refused while the preview is open,
+        # and after a real tab switch the output carries only the new patient.
+        self.open_from_worklist(work, page, other, BUSY_WINDOW)
+        self.assert_output_matches(page, prior, [current.uid, other.patient_id])
+        page.locator('#kin-job-print').get_by_role('button', name='닫기', exact=True).click()
+        self.open_from_worklist(work, page, other)
+        expect(page.get_by_role('tablist', name='Patients').get_by_role('tab').filter(has_text=other.patient_id)).to_have_attribute('aria-selected', 'true')
+        self.open_layout_tools(page)
+        self.click_job(page, 'Print Current View', '')
+        self.assert_output_matches(page, other, [patient, prior.uid, current.uid])
+        self.evidence(page, 'output-same-name-other-patient')
+        for fixture in [current, prior, other]: self.assertEqual(self.jobs(fixture), [])
 
 
     def test_output_03_native_capture_is_a_local_image(self):

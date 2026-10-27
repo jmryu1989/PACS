@@ -1,13 +1,41 @@
-"""U7 W1-W3/W5: real saved receipts, loss recovery and dirty grid preservation."""
+"""U7 W1-W5: real saved receipts, loss recovery, and dirty/busy work kept across replacement paths."""
 import unittest
 import uuid
 from playwright.sync_api import expect
-from test_s9_viewer_output_scope import ServedViewerFlow
-from test_viewer_jobs import ViewerJobsE2E
+from test_s9_viewer_output_scope import ServedViewerFlow, BUSY_WINDOW, DIRTY_WINDOW
 from test_viewer_history import ViewerHistoryE2E
+# The MPR mark case needs the volume launch helpers; this family already contains ViewerJobsE2E.
+from test_volume_marks import VolumeMarksE2E
+
+# Existing guard notices: patient tabs (viewer-patient-tabs.js) and the series strip (viewer-series-strip.js).
+TAB_KEPT = '저장·편집을 마친 뒤 환자를 전환하세요'
+SERIES_KEPT = '미저장 작업을 저장하거나 편집을 마친 뒤 시리즈를 여세요'
 
 
-class S9ViewerUnsavedFlowE2E(ServedViewerFlow, ViewerJobsE2E):
+class S9ViewerUnsavedFlowE2E(ServedViewerFlow, VolumeMarksE2E):
+    def switch_tab(self, page, fixture, kept=False):
+        tabs = page.get_by_role('tablist', name='Patients')
+        tab = tabs.get_by_role('tab').filter(has_text=fixture.patient_id)
+        before, cells = page.url, self.rendered(page)
+        tab.click()
+        if not kept:
+            expect(tab).to_have_attribute('aria-selected', 'true')
+            return self.shows(page, fixture)
+        expect(page.locator('.kin-patient-tabs [role=status]')).to_contain_text(TAB_KEPT)
+        # The guard runs synchronously in the click; give a wrongly admitted switch time to show.
+        page.wait_for_timeout(500)
+        expect(tab).to_have_attribute('aria-selected', 'false')
+        self.assertEqual((page.url, self.rendered(page)), (before, cells))
+
+    def series_card(self, page, title):
+        return page.locator('.kin-series-card').filter(has_text=title)
+
+    def finding(self, page):
+        ViewerHistoryE2E.open_measurement_tools(self, page)
+        panel = page.locator('#kin-viewer-findings')
+        expect(panel.get_by_role('button', name='New Finding', exact=True)).to_be_enabled(timeout=45000)
+        return panel
+
     def test_unsaved_01_uncertain_job_receipt_and_same_request_retry(self):
         current = self.ct('U7W-' + uuid.uuid4().hex[:12], 'work', '20260801')
         work, page = self.served_viewer(current)
@@ -107,6 +135,148 @@ class S9ViewerUnsavedFlowE2E(ServedViewerFlow, ViewerJobsE2E):
         self.assertEqual(self.jobs(c), [])
         self.evidence(page, 'work-clean-patient-switch')
         self.evidence(other, 'work-other-window-kept')
+
+    def test_unsaved_04_dirty_and_busy_work_keeps_every_replacement_target(self):
+        patient = 'U7WD-' + uuid.uuid4().hex[:12]
+        a = self.multiple(patient, 'dirty current', '20260801')
+        prior = self.ct(patient, 'dirty prior', '20260701')
+        b = self.ct('U7WD-OTHER-' + uuid.uuid4().hex[:12], 'dirty other', '20260801')
+        work, page = self.served_viewer(a)
+        work.locator('#findings').fill('U7 DIRTY KEEP REPORT')
+        dialogs = []
+        def answer(dialog):
+            # Only the existing Frame Coverage confirm of a clean switch may ask; no refusal does.
+            dialogs.append(dialog.message)
+            dialog.accept()
+        page.on('dialog', answer)
+        # A second patient tab to switch to, then back to A while everything is clean.
+        self.open_from_worklist(work, page, b)
+        self.switch_tab(page, a)
+        self.assertEqual({cell['study'] for cell in self.rendered(page)}, {a.uid})
+        refusals = len(dialogs)
+
+        # Job title/description: patient tab, comparison (prior) and other-patient reuse are refused.
+        self.open_layout_tools(page)
+        title, description = page.get_by_label('Job Title', exact=True), page.get_by_label('Description', exact=True)
+        title.fill('U7 KEEP JOB TITLE')
+        description.fill('U7 KEEP JOB DESCRIPTION')
+        self.switch_tab(page, b, kept=True)
+        self.open_from_worklist(work, page, prior, DIRTY_WINDOW)
+        self.open_from_worklist(work, page, b, DIRTY_WINDOW)
+        self.series_card(page, 'D02E second series').click()
+        expect(page.get_by_text(SERIES_KEPT).first).to_be_visible()
+        self.assertEqual({cell['study'] for cell in self.rendered(page)}, {a.uid})
+        expect(title).to_have_value('U7 KEEP JOB TITLE')
+        expect(description).to_have_value('U7 KEEP JOB DESCRIPTION')
+        self.evidence(page, 'work-dirty-job-kept')
+
+        # A save in flight is busy: the same transitions wait for its real answer, which is
+        # released well inside the client's 30 s request limit (otherwise it reads as unknown).
+        path, held = '**/api/studies/' + a.uid + '/viewer-jobs', []
+        def hold(route):
+            if route.request.method != 'POST': return route.continue_()
+            held.append((route, route.fetch()))
+        page.route(path, hold)
+        page.locator('#kin-viewer-jobs').get_by_role('button', name='Save New Job', exact=True).first.click()
+        for _ in range(100):
+            if held: break
+            page.wait_for_timeout(50)
+        self.assertTrue(held)
+        self.assertTrue(page.evaluate('kinViewerJobWorkspaceState().busy'))
+        self.open_from_worklist(work, page, b, BUSY_WINDOW)
+        self.switch_tab(page, b, kept=True)
+        for route, response in held: route.fulfill(response=response)
+        page.unroute(path, hold)
+        expect(page.locator('#kin-viewer-jobs-status')).to_contain_text('저장했습니다', timeout=45000)
+        saved = self.jobs(a)
+        self.assertEqual([j['title'] for j in saved], ['U7 KEEP JOB TITLE'])
+        # Emptying the inputs is this window's explicit discard of what is now saved.
+        title.fill('')
+        description.fill('')
+        page.wait_for_function('() => !kinViewerJobWorkspaceState().dirty && !kinViewerJobWorkspaceState().busy')
+
+        # An unsaved viewer Finding (not the workspace report draft): kept until Discard Draft.
+        panel = self.finding(page)
+        panel.get_by_role('button', name='New Finding', exact=True).click()
+        row = panel.locator('article[data-saved=false]').last
+        row.get_by_label('Finding Title').fill('U7 KEEP FINDING')
+        row.get_by_label('Finding Text').fill('U7 viewer finding text')
+        page.wait_for_function('() => kinViewerHistoryWorkspaceState().dirty')
+        self.switch_tab(page, b, kept=True)
+        self.open_from_worklist(work, page, prior, DIRTY_WINDOW)
+        self.series_card(page, 'D02E second series').click()
+        expect(page.get_by_text(SERIES_KEPT).first).to_be_visible()
+        self.assertEqual({cell['study'] for cell in self.rendered(page)}, {a.uid})
+        expect(row.get_by_label('Finding Title')).to_have_value('U7 KEEP FINDING')
+        expect(row.get_by_label('Finding Text')).to_have_value('U7 viewer finding text')
+        self.evidence(page, 'work-dirty-finding-kept')
+        row.get_by_role('button', name='Discard Draft', exact=True).click()
+        page.wait_for_function('() => !kinViewerHistoryWorkspaceState().dirty && !kinViewerHistoryWorkspaceState().busy')
+        # Clean now: the series strip replaces the active cell's series without a question.
+        before = {cell['series'] for cell in self.rendered(page)}
+        self.series_card(page, 'D02E second series').click()
+        page.wait_for_function('''series => [...services.viewportGridService.getState().viewports.keys()].some(id => {
+          const image = services.cornerstoneViewportService.getCornerstoneViewport(id)?.getCurrentImageId?.();
+          return image && !series.includes(cornerstone.metaData.get('instance', image)?.SeriesInstanceUID);
+        })''', arg=sorted(before), timeout=45000)
+
+        # An unsaved Key Image: refused the same way, then saved with its own control.
+        ViewerHistoryE2E.open_measurement_tools(self, page)
+        page.get_by_role('button', name='Add Key Image', exact=True).click()
+        key = page.locator('#kin-viewer-history section[data-kind=key]').last
+        key.get_by_label('Key Title').fill('U7 KEEP KEY')
+        expect(key.locator('strong')).to_contain_text('Unsaved')
+        source = self.rendered(page)
+        self.switch_tab(page, b, kept=True)
+        self.open_from_worklist(work, page, prior, DIRTY_WINDOW)
+        self.assertEqual(self.rendered(page), source)
+        expect(key.get_by_label('Key Title')).to_have_value('U7 KEEP KEY')
+        key.get_by_role('button', name='Save', exact=True).click()
+        expect(key.locator('strong')).to_contain_text('Saved r1')
+        page.wait_for_function('() => !kinViewerHistoryWorkspaceState().dirty && !kinViewerJobWorkspaceState().dirty')
+        self.assertEqual(dialogs[refusals:], [])
+
+        # Clean: B, back to A, then the comparison study. The saved work reopens; the discarded draft does not.
+        self.switch_tab(page, b)
+        self.switch_tab(page, a)
+        ViewerHistoryE2E.open_measurement_tools(self, page)
+        reopened = page.locator('#kin-viewer-history section[data-kind=key]').filter(has_text='U7 KEEP KEY')
+        expect(reopened.locator('strong')).to_contain_text('Saved r1', timeout=45000)
+        expect(page.locator('#kin-viewer-findings')).not_to_contain_text('U7 KEEP FINDING')
+        self.open_layout_tools(page)
+        expect(page.locator('#kin-viewer-jobs')).to_contain_text('U7 KEEP JOB TITLE', timeout=45000)
+        self.evidence(page, 'work-saved-work-reopened')
+        self.open_from_worklist(work, page, prior)
+        self.assertEqual({cell['study'] for cell in self.rendered(page)}, {prior.uid})
+        self.assertEqual(self.jobs(a), saved)
+        self.assertEqual(self.jobs(prior), [])
+        # The worklist report box follows its selected study; A's draft is back when A is selected.
+        self.select(work, a)
+        expect(work.locator('#findings')).to_have_value('U7 DIRTY KEEP REPORT', timeout=20000)
+
+    def test_unsaved_05_unsaved_mpr_mark_keeps_the_window_until_reverted(self):
+        # Stored before the worklist loads, so its row is listed without a refresh.
+        b = self.ct('U7WM-OTHER-' + uuid.uuid4().hex[:12], 'mpr other', '20260801')
+        a, work, page = self.opened_projection()
+        dialogs = []
+        def answer(dialog):
+            dialogs.append(dialog.message)
+            dialog.accept()
+        page.on('dialog', answer)
+        marks = self.add_mark(page, 'U7 KEEP MPR POINT')
+        self.assertTrue(page.evaluate('() => kinMprMarks.dirty() && kinViewerJobWorkspaceState().dirty'))
+        self.open_from_worklist(work, page, b, DIRTY_WINDOW)
+        self.same_marks(page.evaluate('() => kinMprMarks.capture()'), marks)
+        expect(page.locator('.kin-mpr-marks-overlay [data-mark-id]')).to_have_count(len(marks['marks']) * 3)
+        self.assertEqual(dialogs, [])
+        # The served-source evidence() waits on stack-image contrast; MPR planes use the plain screen capture.
+        self.shot(page, 'work-dirty-mpr-mark-kept')
+        self.marks(page).get_by_role('button', name='Revert All Unsaved Annotations', exact=True).click()
+        self.assertFalse(page.evaluate('() => kinMprMarks.dirty()'))
+        self.open_from_worklist(work, page, b)
+        expect(page.get_by_role('tablist', name='Patients').get_by_role('tab').filter(has_text=b.patient_id)).to_have_attribute('aria-selected', 'true')
+        self.assertEqual({cell['study'] for cell in self.rendered(page)}, {b.uid})
+        self.assertEqual(self.jobs(a), [])
 
 
 def load_tests(loader, tests, pattern):
