@@ -102,11 +102,7 @@ class S9ViewerUnsavedFlowE2E(ServedViewerFlow, VolumePathE2E):
         """Press Save New Job and hold its answer after the real write; returns the release, which lands it and gives the sent body.
 
         The answer is released well inside the client's 30 s request limit (otherwise it reads as unknown)."""
-        path, held = '**/api/studies/' + fixture.uid + '/viewer-jobs', []
-        def hold(route):
-            if route.request.method != 'POST': return route.continue_()
-            held.append((route, route.fetch()))
-        router.route(path, hold)
+        held, land = self.hold_writes(router, '**/api/studies/' + fixture.uid + '/viewer-jobs')
         viewer.locator('#kin-viewer-jobs').get_by_role('button', name='Save New Job', exact=True).first.click()
         for _ in range(100):
             if held: break
@@ -114,8 +110,7 @@ class S9ViewerUnsavedFlowE2E(ServedViewerFlow, VolumePathE2E):
         self.assertTrue(held)
         self.assertTrue(viewer.evaluate('kinViewerJobWorkspaceState().busy'))
         def release():
-            for route, response in held: route.fulfill(response=response)
-            router.unroute(path, hold)
+            land()
             expect(viewer.locator('#kin-viewer-jobs-status')).to_contain_text('저장했습니다', timeout=45000)
             self.assertEqual(len(held), 1)
             return held[0][0].request.post_data_json
@@ -144,9 +139,10 @@ class S9ViewerUnsavedFlowE2E(ServedViewerFlow, VolumePathE2E):
         page.get_by_label('Description', exact=True).fill('U7 retained description')
         before = self.cells(page)
         path = '**/api/studies/' + current.uid + '/viewer-jobs'
-        sent = []
+        # The route stays registered (see hold_writes); `retry` passes the same-request retry on.
+        sent, retry = [], []
         def lost_receipt(route):
-            if route.request.method != 'POST': return route.continue_()
+            if retry or route.request.method != 'POST': return route.fallback()
             sent.append(route.request.post_data_json)
             response = route.fetch()
             self.assertEqual(response.status, 200)
@@ -160,10 +156,28 @@ class S9ViewerUnsavedFlowE2E(ServedViewerFlow, VolumePathE2E):
         self.assertEqual(self.cells(page), before)
         self.assertEqual([j['id'] for j in self.jobs(current)], [sent[0]['id']])
         self.evidence(page, 'unsaved-job-unknown-receipt')
-        page.unroute(path, lost_receipt)
+        retry.append(True)
         self.click_job(page, 'Retry Request', '저장했습니다')
         self.assertEqual([j['id'] for j in self.jobs(current)], [sent[0]['id']])
         expect(work.locator('#findings')).to_have_value('U7 WORK KEEP REPORT')
+
+        # A confirmed save whose list reload then fails stays reported as saved: an "unknown, retry" notice would
+        # invite a second Job for one that exists. Only the first list read after this Save is refused.
+        refused = []
+        def list_unavailable(route):
+            if refused or route.request.method != 'GET': return route.fallback()
+            refused.append(route.request.url)
+            route.fulfill(status=503, json={'message': 'Synthetic list unavailable'})
+        page.route(path + '?*', list_unavailable)
+        title.fill('U7 saved before the list')
+        self.click_job(page, 'Save New Job', '작업 목록을 새로 고치지 못했습니다')
+        expect(page.locator('#kin-viewer-jobs-status')).to_contain_text('비교 작업을 저장했습니다')
+        expect(page.locator('#kin-viewer-jobs-status')).not_to_contain_text('재시도')
+        self.assertEqual(len(refused), 1)
+        self.assertEqual(sorted(j['title'] for j in self.jobs(current)), ['U7 retained title', 'U7 saved before the list'])
+        expect(title).to_have_value('')
+        self.assertFalse(page.evaluate('kinViewerJobWorkspaceState().dirty'))
+        self.click_job(page, 'Refresh Jobs', '저장 작업 목록입니다')
 
     def test_unsaved_02_saved_key_edit_status_and_layout_preservation(self):
         current = self.ct('U7W-' + uuid.uuid4().hex[:12], 'key work', '20260801')
@@ -272,11 +286,7 @@ class S9ViewerUnsavedFlowE2E(ServedViewerFlow, VolumePathE2E):
 
         # A save in flight is busy: the same transitions wait for its real answer, which is
         # released well inside the client's 30 s request limit (otherwise it reads as unknown).
-        path, held = '**/api/studies/' + a.uid + '/viewer-jobs', []
-        def hold(route):
-            if route.request.method != 'POST': return route.continue_()
-            held.append((route, route.fetch()))
-        page.route(path, hold)
+        held, release = self.hold_writes(page, '**/api/studies/' + a.uid + '/viewer-jobs')
         page.locator('#kin-viewer-jobs').get_by_role('button', name='Save New Job', exact=True).first.click()
         for _ in range(100):
             if held: break
@@ -285,8 +295,7 @@ class S9ViewerUnsavedFlowE2E(ServedViewerFlow, VolumePathE2E):
         self.assertTrue(page.evaluate('kinViewerJobWorkspaceState().busy'))
         self.open_from_worklist(work, page, b, BUSY_WINDOW)
         self.switch_tab(page, b, kept=True)
-        for route, response in held: route.fulfill(response=response)
-        page.unroute(path, hold)
+        release()
         expect(page.locator('#kin-viewer-jobs-status')).to_contain_text('저장했습니다', timeout=45000)
         saved = self.jobs(a)
         self.assertEqual([j['title'] for j in saved], ['U7 KEEP JOB TITLE'])
@@ -407,11 +416,7 @@ class S9ViewerUnsavedFlowE2E(ServedViewerFlow, VolumePathE2E):
         expect(title).to_have_value('U7 KEEP NEXT TITLE')
 
         # Busy: a held Job save; the same step waits for its real answer (released inside the 30 s bound).
-        path, held = '**/api/studies/' + a.uid + '/viewer-jobs', []
-        def hold(route):
-            if route.request.method != 'POST': return route.continue_()
-            held.append((route, route.fetch()))
-        page.route(path, hold)
+        held, release = self.hold_writes(page, '**/api/studies/' + a.uid + '/viewer-jobs')
         page.locator('#kin-viewer-jobs').get_by_role('button', name='Save New Job', exact=True).first.click()
         for _ in range(100):
             if held: break
@@ -419,8 +424,7 @@ class S9ViewerUnsavedFlowE2E(ServedViewerFlow, VolumePathE2E):
         self.assertTrue(held)
         self.assertTrue(page.evaluate('kinViewerJobWorkspaceState().busy'))
         self.worklist_step(work, page, away, prior, BUSY_WINDOW)
-        for route, response in held: route.fulfill(response=response)
-        page.unroute(path, hold)
+        release()
         expect(page.locator('#kin-viewer-jobs-status')).to_contain_text('저장했습니다', timeout=45000)
         self.assertEqual([j['title'] for j in self.jobs(a)], ['U7 KEEP NEXT TITLE'])
         self.worklist_step(work, page, back, a)

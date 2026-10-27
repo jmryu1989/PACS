@@ -79,6 +79,23 @@ class ServedViewerFlow:
             work.locator('#m-filmbox').click()
         return self.worklist_action(work, page, fixture, click, refusal)
 
+    def hold_writes(self, router, pattern):
+        """Hold each POST to `pattern` after its real server write; returns (held, release). release() lands every held answer.
+
+        The route is never removed while the page lives. Removing the last route turns the page's request interception off
+        (CDP Fetch.disable), and Chromium never continues a request the page sends in that same instant: the Job list the
+        viewer reloads right after a saved receipt then hung until the viewer's own 30 s abort (opus-impl-u7-fix4 protocol
+        trace). Once released, the handler passes every request on."""
+        held, released = [], []
+        def hold(route):
+            if released or route.request.method != 'POST': return route.fallback()
+            held.append((route, route.fetch()))
+        router.route(pattern, hold)
+        def release():
+            released.append(True)
+            for route, response in held: route.fulfill(response=response)
+        return held, release
+
     def evidence(self, page, name):
         folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/s9-u7/screens'))
         folder.mkdir(parents=True, exist_ok=True)
@@ -160,9 +177,7 @@ class S9ViewerOutputScopeE2E(ServedViewerFlow, ViewerJobPrintE2E):
         expect(work.locator('#findings')).to_have_value('U7 OUTPUT KEEP REPORT')
 
     def hold_preview(self, page, fixture):
-        held = []
-        pattern = '**/api/studies/' + fixture.uid + '/viewer-jobs/preview'
-        page.route(pattern, lambda route: held.append((route, route.fetch())))
+        held, release = self.hold_writes(page, '**/api/studies/' + fixture.uid + '/viewer-jobs/preview')
         self.click_job(page, 'Print Current View', '')
         page.wait_for_function('() => document.querySelector("#kin-job-print")?.open')
         # Same response hold allowance as test_viewer_job_print.test_print_04.
@@ -170,7 +185,7 @@ class S9ViewerOutputScopeE2E(ServedViewerFlow, ViewerJobPrintE2E):
             if held: break
             page.wait_for_timeout(50)
         self.assertTrue(held)
-        return pattern, held
+        return release
 
     def assert_output_matches(self, page, fixture, absent):
         status = page.locator('#kin-job-print [role=status]')
@@ -205,22 +220,20 @@ class S9ViewerOutputScopeE2E(ServedViewerFlow, ViewerJobPrintE2E):
         # Selecting a worklist row does not load it into the open viewer.
         self.select(work, prior)
         self.assertEqual({cell['study'] for cell in self.rendered(page)}, {current.uid})
-        pattern, held = self.hold_preview(page, current)
+        release = self.hold_preview(page, current)
         self.open_from_worklist(work, page, prior, BUSY_WINDOW)
-        for route, response in held: route.fulfill(response=response)
-        page.unroute(pattern)
+        release()
         self.assert_output_matches(page, current, [prior.uid])
         self.evidence(page, 'output-preview-refused-prior-switch')
         page.locator('#kin-job-print').get_by_role('button', name='닫기', exact=True).click()
 
         # 2. Close a pending current preview, switch to the comparison, then let
         # the old answer arrive. It is discarded; a new output names the prior.
-        pattern, held = self.hold_preview(page, current)
+        release = self.hold_preview(page, current)
         page.locator('#kin-job-print').get_by_role('button', name='닫기', exact=True).click()
         expect(page.locator('#kin-job-print')).not_to_be_visible()
         self.open_from_worklist(work, page, prior)
-        for route, response in held: route.fulfill(response=response)
-        page.unroute(pattern)
+        release()
         page.wait_for_timeout(500)
         self.assertEqual(page.locator('#kin-job-print[open]').count(), 0)
         self.assertTrue(all(cell['study'] == prior.uid for cell in self.rendered(page)))

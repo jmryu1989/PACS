@@ -531,7 +531,8 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
       if (window.KinViewerSessionBoundary && !window.KinViewerSessionBoundary.active()) return;
       if (!live() || busy || !me) { if (outcome) outcome.message = busy ? '영상 작업 처리가 끝난 뒤 다시 저장하세요.' : '계정이나 화면을 확인할 수 없어 저장하지 않았습니다.'; return; }
       busy = true; refresh(); const ticket = ++serial, edit = editSerial, before = signature(action === 'saveMip'); status.textContent = '비교 작업 확인 중…';
-      let dispatched = false;
+      // `committed` names a write whose receipt was confirmed: a later failure (the list reload) cannot make it unknown again.
+      let dispatched = false, committed = null;
       try {
         await authenticate();
         if (action === 'list') { await load(); status.textContent = '현재 판독 대상의 저장 작업 목록입니다.'; return; }
@@ -586,6 +587,7 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
           // decided here, before the list refresh, so a refresh failure cannot turn a committed save into an error.
           const committedMip = [12, 13, 14, 15].includes(sent.snapshot?.version) && receipt?.id === sent.id && receipt?.snapshotVersion === sent.snapshot.version;
           const mipAction = action === 'saveMip' || action === 'retryMip';
+          committed = mipAction && committedMip ? 'MIP 작업을 저장했습니다.' : '비교 작업을 저장했습니다.';
           if (outcome) { outcome.state = committedMip ? 'saved' : 'not-saved'; outcome.sent = true; outcome.message = committedMip ? 'MIP 작업을 저장했습니다. 판독문과 원본 영상은 그대로입니다.' : 'MIP 작업 저장 응답을 확인할 수 없습니다. 작업 목록을 확인하세요.'; }
           if(sent.snapshot?.volume)window.kinMprMarks?.saved(sent.snapshot.marks||{version:1,visible:true,sync:true,marks:[]},sent.snapshot.volume);
           if(sent.snapshot?.volume)window.kinMprCurved?.saved(sent.snapshot.curved||null,sent.snapshot.volume);
@@ -601,7 +603,10 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
           await load(); status.textContent = mipAction && committedMip ? 'MIP 작업을 저장했습니다. 판독문과 원본 영상은 그대로입니다.' : '비교 작업을 저장했습니다. 판독문과 원본 영상은 그대로입니다.' + (action === 'saveAnnotations' ? ' 저장된 주석 이력도 함께 고정했습니다.' : '');
         }
       } catch (e) {
-        if (live()) { if (e.status >= 400 && e.status < 500) pending = null;
+        // A confirmed write has no request left to retry; "unknown, retry, inputs kept" would invite a second Job for one
+        // that exists.
+        if (live() && committed) status.textContent = committed + ' 작업 목록을 새로 고치지 못했습니다. Refresh Jobs로 목록을 확인하세요.';
+        else if (live()) { if (e.status >= 400 && e.status < 500) pending = null;
           status.textContent = (e.name === 'AbortError' ? '응답을 확인하지 못했습니다. 같은 요청을 재시도하세요.' : e.message) + ' 입력은 유지됩니다.'; }
         // A committed MIP save stays Saved when only the list refresh failed; a sent request whose body is still kept has
         // an unknown receipt (abort, timeout, 5xx); anything else was not saved.
