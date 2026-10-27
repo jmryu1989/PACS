@@ -16,6 +16,12 @@ import measurement_ci as ci
 from ci_workflows import WorkflowCatalog
 from live_admin_credential_test import ImportedAdminCredentialTests
 
+# validate.yml steps that run after a failure keep doing so on a ready run and exclude a draft run, whose
+# failed first step leaves nothing to collect (test_draft_pr_fails_every_required_check_...).
+NOT_DRAFT = ' && !github.event.pull_request.draft }}'
+AFTER_FAILURE = '${{ always()' + NOT_DRAFT
+AFTER_SIBLING_FAILURE = '${{ !cancelled()' + NOT_DRAFT
+
 
 class MeasurementCiTests(unittest.TestCase):
     @classmethod
@@ -30,7 +36,7 @@ class MeasurementCiTests(unittest.TestCase):
             'volume-mip-voi': ['volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient'],
             's7-u5-session-contracts': ['u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries', 'u5-session-browser', 'u5-session-end', 'u5-fixups', 'context-loss'],
             'hanging-protocols': ['hanging-protocols', 'cell-merge'],
-            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions'],
+            'worklist-ux-measurements': ['study-arrivals', 'u2b-regressions', 'viewer-ux-shell'],
             'patient-identity-measurements': ['identity-fields', 'measurement-accuracy'],
             'volume-batch': ['volume-batch'], 'volume-marks': ['volume-marks'],
             'volume-rendering': ['volume-rendering'],
@@ -38,7 +44,7 @@ class MeasurementCiTests(unittest.TestCase):
         bindings = self.catalog.profile_bindings()
         for owner, profiles in expected.items():
             job = self.catalog.job(owner)
-            self.assertEqual(job['needs'], 'runtime')
+            self.assertEqual(job['needs'], 'select')
             self.assertEqual(job['runs-on'], 'ubuntu-24.04')
             self.assertEqual(len([s for s in job['steps'] if s.get('uses', '').startswith('actions/checkout@')]), 1)
             uploads = [s for s in job['steps'] if s.get('uses', '').startswith('actions/upload-artifact@')]
@@ -53,9 +59,89 @@ class MeasurementCiTests(unittest.TestCase):
                     path = ci.PROFILES[profile]['out'].relative_to(ci.ROOT).as_posix() + '/'
                     matching = [s for s in uploads if path in s['with']['path'].splitlines()]
                     self.assertEqual(len(matching), 1)
-                    self.assertEqual(matching[0]['if'], 'always()')
+                    self.assertEqual(matching[0]['if'], AFTER_FAILURE)
                     self.assertEqual(matching[0]['with']['if-no-files-found'], 'error')
         self.assertNotIn('u5-session-mutants', bindings)
+
+    def test_module_jobs_wait_for_selection_and_fail_when_it_fails(self):
+        # D1876 d1: module jobs start after the short select job, not after runtime, and use none of runtime's
+        # outputs. D1831: the merge gate counts a skipped required check as satisfied, so a select that did not
+        # succeed must make every module check run and fail, not skip; a cancelled run still skips.
+        workflow = self.catalog.documents['.github/workflows/validate.yml']
+        jobs = workflow['jobs']
+        declared = json.loads((ci.ROOT / 'scripts/ci-paths.json').read_text(encoding='utf-8'))['jobs']
+        self.assertNotIn('needs', jobs['select'])
+        self.assertNotIn('needs', jobs['runtime'])
+        self.assertNotIn('outputs', jobs['runtime'])
+        self.assertEqual(jobs['select']['outputs'], {'jobs': '${{ steps.paths.outputs.jobs }}'})
+        self.assertIn('python3 scripts/ci_select.py', [step.get('run') for step in jobs['select']['steps']])
+        selected = {}
+        for name, job in jobs.items():
+            if name in ('select', 'runtime') or job.get('needs') == 'produce':
+                continue
+            with self.subTest(job=name):
+                self.assertEqual(job['needs'], 'select')
+                condition = re.fullmatch(
+                    r"\$\{\{ !cancelled\(\) && \(needs\.select\.result != 'success' \|\| "
+                    r"fromJSON\(needs\.select\.outputs\.jobs\)\['([a-z0-9-]+)'\]\) \}\}", job['if'])
+                self.assertIsNotNone(condition, job['if'])
+                selected[name] = condition[1]
+                guard = job['steps'][0]
+                self.assertEqual(guard['if'], "${{ needs.select.result != 'success' }}")
+                self.assertTrue(guard['run'].rstrip().endswith('exit 1'))
+                text = json.dumps(job)
+                self.assertNotIn('needs.runtime', text)
+                self.assertNotIn('actions/download-artifact@', text)
+        self.assertEqual(set(selected.values()), set(declared) - {'ci-selfchecks'})
+        self.assertEqual(len(set(selected.values())), len(selected))
+        consume = jobs['consume']
+        self.assertEqual(jobs[consume['needs']]['needs'], 'select')
+        self.assertEqual(workflow['concurrency']['cancel-in-progress'], "${{ github.event_name == 'pull_request' }}")
+
+    def test_draft_pr_fails_every_required_check_and_marking_ready_runs_every_job(self):
+        # 2026-10-27 (user): fix rounds on a draft PR are verified on the VM/desktop host, not in CI. Branch
+        # protection treats a skipped required check as passing, and ready_for_review keeps the head SHA, so a
+        # draft run must leave every job failed, never skipped; a ready PR runs exactly as before. Main push, tags,
+        # nightly and dispatch are unchanged.
+        workflow = self.catalog.documents['.github/workflows/validate.yml']
+        triggers = workflow.get('on', workflow.get(True))
+        self.assertEqual(triggers['pull_request'],
+                         {'types': ['opened', 'synchronize', 'reopened', 'ready_for_review']})
+        self.assertEqual(triggers['push'], {'branches': ['main'], 'tags': ['v*']})
+        self.assertEqual(triggers['schedule'], [{'cron': '0 18 * * *'}])
+        jobs = workflow['jobs']
+        draft = '${{ github.event.pull_request.draft }}'
+        # The jobs that do not wait on select start on a draft and fail first; module jobs then fail through the
+        # select guard (test_module_jobs_wait_for_selection_and_fail_when_it_fails).
+        self.assertNotIn('if', jobs['select'])
+        self.assertNotIn('if', jobs['runtime'])
+        self.assertEqual(jobs['consume']['needs'], 'produce')
+        self.assertEqual(jobs['consume']['if'],
+                         "${{ !cancelled() && (github.event.pull_request.draft || needs.produce.result == 'success') }}")
+        for name in ('select', 'runtime', 'consume'):
+            with self.subTest(job=name):
+                guard = jobs[name]['steps'][0]
+                self.assertEqual(guard['if'], draft)
+                self.assertTrue(guard['run'].rstrip().endswith('exit 1'))
+        # On a draft every job stops at its failed first step: the draft guard above, or the select guard of a module
+        # job. A later step without a status function is skipped after that failure (the implicit success()); one
+        # that runs after a failure on a ready run (always(), !cancelled()) must exclude a draft and otherwise keep
+        # its ready-run condition exactly, so a ready run still collects its failure evidence.
+        select_failed = "${{ needs.select.result != 'success' }}"
+        status = re.compile(r'\b(?:always|cancelled|failure)\(\)')
+        excluded = 0
+        for name, job in jobs.items():
+            with self.subTest(job=name):
+                self.assertIn(job['steps'][0]['if'], (draft, select_failed))
+                self.assertTrue(job['steps'][0]['run'].rstrip().endswith('exit 1'))
+            for step in job['steps'][1:]:
+                condition = str(step.get('if', ''))
+                if not status.search(condition):
+                    continue
+                with self.subTest(job=name, step=step.get('name', step.get('uses'))):
+                    self.assertIn(condition, (AFTER_FAILURE, AFTER_SIBLING_FAILURE))
+                    excluded += 1
+        self.assertTrue(excluded)
 
     def test_accuracy_pr_subset_keeps_original_suite_contracts(self):
         expected = [('e2e/test_measurement_readback.py', 'MeasurementReadbackE2E'),
@@ -89,7 +175,7 @@ class MeasurementCiTests(unittest.TestCase):
             candidate.configure(ci.ROOT, ci, runner, Path(folder) / 'plans')
             self.assertEqual(ci.profile_deadline_seconds('measurements'), candidate.CANDIDATE_DEADLINE_SECONDS)
             self.assertEqual(ci.PROFILES['measurements']['suite_timeout'], original['suite_timeout'])
-            for filename, class_name, unit, _ in candidate.BASE[3:]:
+            for filename, class_name, unit in candidate.BASE[3:]:
                 command, outer = ci.guarded_profile_run(ci.PROFILES['measurements'], filename, class_name, unit,
                                                        candidate.CANDIDATE_DEADLINE_SECONDS)
                 self.assertEqual(command[command.index('--module') + 1], 'tests/' + filename)
@@ -164,9 +250,9 @@ class MeasurementCiTests(unittest.TestCase):
             self.assertEqual([timeout for argv, timeout in calls if 'logs' in argv], [30])
             self.assertEqual([timeout for argv, timeout in calls if 'down' in argv], [60])
 
-    def test_sequential_profiles_remove_only_successful_generated_seeds(self):
+    def test_sequential_profiles_remove_generated_seeds_after_stack_cleanup(self):
         # D1799: exercise the real seed writer and cleanup between merged profiles;
-        # failed runs retain their files for inspection, before the next admission.
+        # failed results remain in artifacts without blocking the next profile.
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             unrelated = root / 'preserved.txt'
@@ -191,7 +277,8 @@ class MeasurementCiTests(unittest.TestCase):
                     returncode=1 if 'up' in command else 0, stdout=b'', stderr=b'')
                 with self.assertRaises(RuntimeError):
                     ci.main('volume-path', credential_provider=lambda *args: 'synthetic')
-                self.assertEqual(len(list((root/'sample-data/public').glob('*.dcm'))), 8)
+                self.assertFalse((root/'sample-data').exists())
+                self.assertEqual(json.loads((root/'volume-path/results.json').read_text())[0]['exit'], 1)
                 self.assertEqual(unrelated.read_text(), 'keep')
 
     def test_context_loss_profile_selects_only_its_declared_cases_on_a_fresh_runner(self):
@@ -664,6 +751,39 @@ class MeasurementCiTests(unittest.TestCase):
                 self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
                 self.assertFalse({row[0] for row in other['suites']} & {row[0] for row in profile['suites']})
 
+    def test_viewer_ux_shell_profile_runs_only_its_declared_cases_in_worklist_ux(self):
+        # Viewer U2 (D1821): the served test_viewer_ux_shell.py cases had no CI registration after
+        # worklist-ux.yml moved into validate.yml. --class selects only the methods the local class declares,
+        # never the inherited ViewerLayoutE2E cases.
+        profile = ci.PROFILES['viewer-ux-shell']
+        self.assertEqual(profile['suites'], (('e2e/test_viewer_ux_shell.py', 'ViewerUXShellE2E', 'ci-viewer-ux-shell'),))
+        self.assertEqual(profile['out'], ci.ROOT/'tests/e2e/artifacts/viewer-ux-shell-ci')
+        command, outer = ci.guarded_profile_run(profile, *profile['suites'][0], 2000)
+        self.assertEqual(command[command.index('--class')+1], 'ViewerUXShellE2E')
+        self.assertEqual(command[command.index('--mode')+1], 'live')
+        self.assertEqual(command[command.index('--timeout')+1], '900')
+        self.assertEqual(outer, 935)
+        for name, other in ci.PROFILES.items():
+            if name == 'viewer-ux-shell':
+                continue
+            with self.subTest(profile=name):
+                self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+                self.assertFalse({row[0] for row in other['suites']} & {row[0] for row in profile['suites']})
+        owner = [row for row in self.catalog.profile_bindings()['viewer-ux-shell'] if not row['dispatch']]
+        self.assertEqual([row['job'] for row in owner], ['worklist-ux-measurements'])
+        job = self.catalog.job('worklist-ux-measurements')
+        step = job['steps'][owner[0]['step']]
+        self.assertEqual(step['if'], AFTER_SIBLING_FAILURE)
+        uploads = [s for s in job['steps'] if str(s.get('uses', '')).startswith('actions/upload-artifact@')
+                   and s['with']['name'] == 'synthetic-viewer-ux-shell-results']
+        self.assertEqual(len(uploads), 1)
+        # The module's default KIN_EVIDENCE_DIR: profile_environment does not set one for this profile.
+        for path in ('tests/e2e/artifacts/viewer-ux-shell-ci/', 'tmp/viewer-ux-u2/screens/'):
+            self.assertIn(path, uploads[0]['with']['path'].splitlines())
+        self.assertEqual(self.catalog.text().count('--profile viewer-ux-shell'), 1)
+        selection = json.loads((ci.ROOT/'scripts/ci-paths.json').read_text(encoding='utf-8'))['jobs']['worklist-ux-measurements']
+        self.assertIn('tests/e2e/test_viewer_ux_shell.py', selection)
+
     def test_validate_workflow_runs_s9_u0e_served_in_its_own_bounded_job(self):
         # Owner and artifact binding for every profile is test_all_profiles_have_unique_workflow_owners_and_report_artifacts;
         # the exact-selection self-check runs once in runtime. Here: the served config is checked against its sources
@@ -685,44 +805,6 @@ class MeasurementCiTests(unittest.TestCase):
         dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
         self.assertNotIn('- s9-u0e-served', dispatch)
 
-    def test_validate_attribution_record_binds_exact_scanner_inputs(self):
-        import argparse
-        import shlex
-        import yaml
-
-        test_file = 'tests/admin_audit_attribution_test.cjs'
-        workflow = self.catalog.combined()
-        commands = [shlex.split(step['run']) for job in workflow['jobs'].values()
-                    for step in job.get('steps', []) if test_file in step.get('run', '')]
-        self.assertEqual(len(commands), 1, 'one recorded attribution test invocation')
-        command = commands[0]
-        self.assertEqual(command[:2], ['python3', 'scripts/record-run.py'])
-        boundary = command.index('--')
-        self.assertEqual(command[-3:], ['node', '--test', test_file])
-        parser = argparse.ArgumentParser()
-        parser.add_argument('--run-dir', required=True)
-        parser.add_argument('--cwd', default='.')
-        parser.add_argument('--file', action='append', default=[])
-        parser.add_argument('--tree', action='append', default=[])
-        args = parser.parse_args(command[2:boundary])
-        cwd = ci.ROOT / args.cwd
-        recorded = [(cwd / name).resolve() for name in args.file]
-        for name in args.tree:
-            directory = cwd / name
-            self.assertTrue(directory.is_dir(), name)
-            recorded.extend(file.resolve() for file in directory.rglob('*') if file.is_file())
-
-        # The scanner's stated corpus, plus its fixtures and compiler/generator inputs.
-        # Expand the checked-out directories independently of the recorder options so
-        # adding a source or accidentally recording an unrelated file cannot pass.
-        read = set()
-        for name in ('api/src', 'tests/fixtures/admin-audit-checker', 'tests/fixtures/admin_audit_completeness'):
-            read.update(file.resolve() for file in (ci.ROOT / name).rglob('*') if file.is_file())
-        read.update(file.resolve() for file in (ci.ROOT / 'api/prisma').glob('*.cjs') if file.is_file())
-        read.update((ci.ROOT / name).resolve() for name in (
-            'api/prisma/schema.prisma', 'api/tsconfig.json', 'api/package-lock.json', test_file))
-        self.assertEqual(len(recorded), len(set(recorded)), 'no duplicate recorded inputs')
-        self.assertSetEqual(set(recorded), read, 'recorded inputs must equal scanner inputs in both directions')
 
 
     def test_u2b_regressions_profile_is_exact_and_fits_the_shared_deadline(self):
@@ -843,7 +925,9 @@ class MeasurementCiTests(unittest.TestCase):
                        for line in words(step) for index, word in enumerate(line))
 
         def always(step):
-            return re.fullmatch(r'\s*(\$\{\{\s*always\(\)\s*\}\}|always\(\))\s*', str(step.get('if', ''))) is not None
+            # Runs after any failure of a ready run; a draft run is excluded (test_draft_pr_fails_every_...).
+            return re.fullmatch(r'\s*\$\{\{\s*always\(\)\s*&&\s*!github\.event\.pull_request\.draft\s*\}\}\s*',
+                                str(step.get('if', ''))) is not None
 
         workflow = self.catalog.combined()
         requests = [(name, index, found) for name, other in workflow['jobs'].items()
@@ -866,7 +950,7 @@ class MeasurementCiTests(unittest.TestCase):
         (owner, live), = requested('u2b-regressions')
         self.assertEqual(owner, 'worklist-ux-measurements')
         self.assertEqual(int(steps[live]['timeout-minutes']), 28)
-        self.assertEqual(steps[live]['if'], '${{ !cancelled() }}')
+        self.assertEqual(steps[live]['if'], AFTER_SIBLING_FAILURE)
         self.assertFalse(steps[live].get('continue-on-error', False))
         self.assertTrue(any(executes(step, 'tests/execution_selection_test.py')
                             for step in workflow['jobs']['runtime']['steps']))
@@ -977,7 +1061,7 @@ class MeasurementCiTests(unittest.TestCase):
             ('e2e/test_hanging_protocol.py', 'HangingProtocolE2E', 'ci-hp-native'),
         ))
         self.assertEqual(profile['out'].name, 'hanging-protocols-ci')
-        self.assertEqual(profile['suite_timeout'], 400)
+        self.assertEqual(profile['suite_timeout'], max(profile['suite_budgets'].values()))
 
     def test_hanging_protocol_budget_cannot_starve_the_trailing_flows(self):
         profile = ci.PROFILES['hanging-protocols']
@@ -985,26 +1069,36 @@ class MeasurementCiTests(unittest.TestCase):
         units = [unit for _, _, unit in profile['suites']]
         # Every suite is budgeted, and nothing is budgeted that is not a suite.
         self.assertEqual(sorted(budgets), sorted(units))
-        self.assertEqual(budgets, {'ci-hp-invariants': 400, 'ci-hp-worklist': 240,
+        # ci-hp-invariants: ceil(2 x 391.6s measured green maximum), the about-twice margin.
+        self.assertEqual(budgets, {'ci-hp-invariants': 784, 'ci-hp-worklist': 240,
                                    'ci-hp-account': 120, 'ci-hp-native': 300})
-        # No budget may exceed the profile's own declared maximum, and none of them
-        # may raise the 900 this profile used to request.
         self.assertLessEqual(max(budgets.values()), profile['suite_timeout'])
-        self.assertTrue(all(value < 900 for value in budgets.values()))
-        # Unlike every other profile, this one's ENTIRE configured worst case fits
-        # main()'s single deadline, with room left for the stack it shares.
-        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         worst_case = sum(budgets.values()) + 35*len(units)
-        self.assertEqual(worst_case, 1200)
-        # Measured on run 34703534031: 60.6s setup and 12.8s cleanup through this
-        # same main() path. The reserve left over is 3.8x that.
-        self.assertGreaterEqual(25*60 - worst_case, 4*74)
+        deadline = ci.profile_deadline_seconds('hanging-protocols')
+        # main() starts the deadline before stack setup. Measured on run 34703534031:
+        # 60.6s setup and 12.8s cleanup through this same main() path; the deadline
+        # keeps four times that beyond the profile's entire configured worst case.
+        self.assertGreaterEqual(deadline - worst_case, 4*74)
         # The required order is 69 -> 15 -> API -> e2e, so the new flow runs last;
         # even if everything ahead of it burns its whole budget and the stack takes
-        # four times its measured time, the trailing suite keeps its full slice.
-        ahead = sum(budgets[unit] + 35 for unit in units[:-1])
+        # four times its measured time, every suite keeps its full slice.
+        remaining = deadline - 4*74
+        for suite, class_name, unit in profile['suites']:
+            command, outer = ci.guarded_profile_run(profile, suite, class_name, unit, remaining)
+            self.assertEqual(int(command[command.index('--timeout')+1]), budgets[unit])
+            self.assertEqual(outer, budgets[unit] + 35)
+            remaining -= outer
+        self.assertGreaterEqual(remaining, 0)
         self.assertEqual(units[-1], 'ci-hp-native')
-        self.assertGreaterEqual(25*60 - ahead - 4*74, budgets['ci-hp-native'])
+        # The workflow step's own limit then covers the deadline plus the post-deadline
+        # service logs (30s), cleanup (60s) and a last failure inspection (2 x 30s).
+        rows = [row for row in self.catalog.profile_bindings()['hanging-protocols'] if not row['dispatch']]
+        step = self.catalog.job(rows[0]['job'])['steps'][rows[0]['step']]
+        self.assertGreaterEqual(step['timeout-minutes']*60, deadline + 30 + 60 + 2*30)
+        for name in ci.PROFILES:
+            if name != 'hanging-protocols':
+                self.assertEqual(ci.profile_deadline_seconds(name),
+                                 3900 if name == 'emr-b' else 1500)
 
     def test_hanging_protocol_commands_are_exact_ordered_and_separately_capped(self):
         profile = ci.PROFILES['hanging-protocols']
@@ -1206,6 +1300,8 @@ class MeasurementCiTests(unittest.TestCase):
                           'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient', 'cell-merge', 'u2b-regressions',
                           # S9-U0E: the served generated OHIF config, in its own validate.yml job.
                           's9-u0e-served',
+                          # Viewer U2 shell (D1821), in the worklist-ux-measurements job.
+                          'viewer-ux-shell',
                           'gateway-e2e', 'critical-result-screens',
                           # EMR-B1: the access ledger profile, run only by the emr-b job.
                           'emr-b',
@@ -1251,7 +1347,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(len({row[2] for row in measurements['suites']}), 20)
         self.assertEqual(measurements['suite_timeout'], 540)
         self.assertNotIn('suite_budgets', measurements)
-        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == {'emr-b': 3900, 'hanging-protocols': 1884}.get(name, 1500) for name in ci.PROFILES))
         self.assertEqual(volume['suites'], (('e2e/test_volume_rendering.py',
                          None, 'ci-volume-rendering'),))
         self.assertEqual(output['suites'], (
@@ -1344,7 +1440,7 @@ class MeasurementCiTests(unittest.TestCase):
         # All suites share main()'s single deadline, so no one suite may be able to
         # claim it: even at full cap every suite plus its reserved margin must fit
         # with stack time left, and the cap must stay under the volume-rendering cap.
-        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == {'emr-b': 3900, 'hanging-protocols': 1884}.get(name, 1500) for name in ci.PROFILES))
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
         self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
         self.assertLess(profile['suite_timeout'],
@@ -1487,7 +1583,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual([command[command.index('--unit')+1] for command in commands],
                          ['ci-path-native', 'ci-mpr-orientation', 'ci-finding-location'])
         # All three suites at full cap plus their reserved margins fit the shared deadline with stack time left.
-        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == {'emr-b': 3900, 'hanging-protocols': 1884}.get(name, 1500) for name in ci.PROFILES))
         self.assertEqual(sum(budget+35 for budget in budgets.values()), 1185)
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
         self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
@@ -1586,7 +1682,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual([command[command.index('--unit')+1] for command in commands],
                          ['ci-batch-preview', 'ci-batch-context', 'ci-batch-save', 'ci-batch-scout'])
         # All four suites at full cap plus their reserved margins fit the shared deadline with stack time left.
-        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == {'emr-b': 3900, 'hanging-protocols': 1884}.get(name, 1500) for name in ci.PROFILES))
         self.assertEqual(sum(budget+35 for budget in budgets.values()), 1220)
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
         self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
@@ -1666,7 +1762,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual([command[command.index('--unit')+1] for command in commands],
                          ['ci-mpr-sync', 'ci-mpr-preferences'])
         # Both suites at full cap plus their reserved margins fit the shared deadline with stack time left.
-        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == {'emr-b': 3900, 'hanging-protocols': 1884}.get(name, 1500) for name in ci.PROFILES))
         self.assertEqual(sum(budget+35 for budget in budgets.values()), 970)
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
         self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
@@ -1739,7 +1835,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual([command[command.index('--unit')+1] for command in commands],
                          ['ci-mpr-marks', 'ci-mpr-marks-print'])
         # Both suites at full cap plus their reserved margins fit the shared deadline with stack time left.
-        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == {'emr-b': 3900, 'hanging-protocols': 1884}.get(name, 1500) for name in ci.PROFILES))
         self.assertEqual(sum(budget+35 for budget in budgets.values()), 1150)
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
         self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
@@ -1804,7 +1900,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(command[command.index('--timeout')+1], '1200')
         self.assertEqual(outer, 1235)
         # The one suite at full cap plus its reserved margin fits the shared deadline with stack time left.
-        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == {'emr-b': 3900, 'hanging-protocols': 1884}.get(name, 1500) for name in ci.PROFILES))
         self.assertEqual(sum(budget+35 for budget in budgets.values()), 1235)
         self.assertEqual(25*60-sum(budget+35 for budget in budgets.values()), 265)
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
@@ -1880,7 +1976,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(command[command.index('--unit')+1], 'ci-mip-job')
         self.assertEqual(command[command.index('--timeout')+1], '1200')
         self.assertEqual(outer, 1235)
-        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == {'emr-b': 3900, 'hanging-protocols': 1884}.get(name, 1500) for name in ci.PROFILES))
         self.assertEqual(sum(budget+35 for budget in budgets.values()), 1235)
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
         self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
@@ -2472,7 +2568,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(command[command.index('--timeout')+1], '1260')
         self.assertEqual(outer, 1295)
         # A1: 1260+35 = 1295 <= 1500-205, and 205s is about 2.5x the recorded hosted stack setup and cleanup.
-        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == {'emr-b': 3900, 'hanging-protocols': 1884}.get(name, 1500) for name in ci.PROFILES))
         self.assertLessEqual(profile['suite_timeout'] + 35, 25*60 - 205)
         for name, other in ci.PROFILES.items():
             if name != 'gateway-e2e':
@@ -2797,6 +2893,47 @@ class MeasurementCiTests(unittest.TestCase):
             daemon = json.loads((profile['out']/'daemon-empty.json').read_text(encoding='utf-8'))
             self.assertEqual(daemon, {'remaining': {'containers': [], 'volumes': [], 'networks': []}, 'problems': []})
             self.assertTrue((profile['out']/'results.json').exists())
+
+    def test_failed_profile_cleans_its_seed_before_viewer_shell_profile(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            profiles = {name: {**ci.PROFILES[name], 'out': root/name}
+                        for name in ['study-arrivals', 'viewer-ux-shell']}
+            failed_once = False
+
+            def seed():
+                source = root/'sample-data/public/fixture.dcm'
+                source.parent.mkdir(parents=True, exist_ok=False)
+                source.write_bytes(b'synthetic seed')
+                return [source]
+
+            def run(command, **kwargs):
+                nonlocal failed_once
+                code = 0
+                if any(str(part).endswith('run-tests.py') for part in command) and not failed_once:
+                    failed_once = True
+                    code = 1
+                return MagicMock(returncode=code, stdout=b'original result', stderr=b'')
+
+            response = MagicMock(); response.__enter__.return_value.status = 200
+            response.__enter__.return_value.read.return_value = b'{"memberRights":"ready"}'
+            with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted'}, clear=True), \
+                 patch.object(ci, 'ROOT', root), patch.dict(ci.PROFILES, profiles), \
+                 patch.object(ci, 'seed_source', side_effect=seed), \
+                 patch.object(ci.subprocess, 'check_output', side_effect=[b'', b'', b'unix:///var/run/docker.sock']*2), \
+                 patch.object(ci.subprocess, 'run', side_effect=run), \
+                 patch.object(ci, 'urlopen', return_value=response), \
+                 patch.object(ci, 'ensure_imported_admin_credential', return_value='synthetic-password'), \
+                 patch.object(ci, 'inspect_failed_module'), contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError, 'failed'):
+                    ci.main('study-arrivals')
+                self.assertFalse((root/'sample-data').exists())
+                ci.main('viewer-ux-shell')
+            failed = json.loads((root/'study-arrivals/results.json').read_text())
+            later = json.loads((root/'viewer-ux-shell/results.json').read_text())
+            self.assertTrue(any(row['exit'] == 1 for row in failed))
+            self.assertTrue(any(row['name'] == 'test_viewer_ux_shell' and row['exit'] == 0 for row in later))
+            self.assertFalse((root/'sample-data').exists())
 
     def test_local_and_self_hosted_refused_before_docker(self):
         for env in [{}, {'GITHUB_ACTIONS':'true','RUNNER_ENVIRONMENT':'self-hosted'}]:

@@ -75,17 +75,19 @@ class EmailMonitorTests(unittest.TestCase):
         self.assertEqual(self.tick(now=NOW+600)['notification'], 'recovery')
         self.assertEqual([call.args[0]['kind'] for call in self.send.call_args_list], ['alert','alert','recovery'])
 
-    def test_05_daily_limit_persists_and_resets_next_utc_day(self):
+    def test_05_delivery_recovers_after_more_than_24_attempts_and_day_counter_resets(self):
         self.send.side_effect = OSError()
-        for index in range(mail.MAX_ATTEMPTS):
+        for index in range(25):
             now = NOW + index
             with self.assertRaises(OSError): self.tick(report(False, now=now), now)
-        with self.assertRaisesRegex(RuntimeError, 'limit'):
-            self.tick(report(False, now=NOW+25), NOW+25)
-        self.assertEqual(self.send.call_count, mail.MAX_ATTEMPTS)
+        pending = self.state()['pending']
         self.send.side_effect = None
+        self.assertEqual(self.tick(report(False, now=NOW+25), NOW+25)['notification'], 'alert')
+        self.assertEqual(self.send.call_count, 26)
+        self.assertEqual(self.send.call_args.args[0], pending)
+        self.assertIsNone(self.state()['pending'])
         next_day = (NOW // 86400 + 1) * 86400
-        self.tick(report(False, now=next_day), next_day)
+        self.assertEqual(self.tick(report(True, now=next_day), next_day)['notification'], 'recovery')
         self.assertEqual(self.state()['attempts'], 1)
 
     def test_06_bad_report_never_sends_or_changes_state(self):

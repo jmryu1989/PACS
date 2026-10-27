@@ -632,3 +632,29 @@ test('TEST-WSU-12 refusals keep rows, drafts and audits; an external resolution 
   w.resources = [A(), B()]; w.orthancDown = true;
   await rejects(w.pacs.readDraft(SPLIT, caller()), 503, 'STUDY_SOURCE_UNAVAILABLE');
 });
+
+// Viewer U2 lookup uses the same worklist/clinician scopes without archive paging.
+test('viewer UID lookup reads only requested sources and preserves scoped clinician projection', async () => {
+  const other = '2.25.800';
+  for (const clinician of [false, true]) {
+    const w = await world({ resources: [resource(NORMAL, 'VISIBLE'), resource(other, 'OTHER', { institution: 'OTHER' }), A(), B()],
+      states: [stateRow(NORMAL, { institutionId: 'hallym' }), stateRow(other, { institutionId: 'other' })] }).start();
+    const query = { uids: [NORMAL, other, SPLIT].join(',') };
+    const result = clinician ? await w.pacs.clinicianStudies(caller({ roles: ['clinician'] }), query)
+      : await w.pacs.listStudies(caller(), query);
+    assert.deepEqual(result.studies.map(row => row.uid), [NORMAL]);
+    assert.equal(result.studies[0].sourcePatientKey, 'hallym|VISIBLE');
+    assert.equal(result.notObserved, undefined);
+    assert.equal(result.orderReconciliation, undefined);
+    assert.equal(result.pagination, undefined);
+    assert.ok(w.orthanc.length > 0);
+    assert.ok(w.orthanc.every(call => call.path === '/dicom-web/studies' && call.uid === query.uids));
+    assert.deepEqual(w.unexpected, []);
+  }
+});
+
+test('viewer UID lookup retains the response-time institution recheck', async () => {
+  const w = await world({ resources: [resource(NORMAL, 'VISIBLE')], states: [stateRow(NORMAL, { institutionId: 'hallym' })] }).start();
+  w.hooks.find = (_arg, n, store) => { if (n === 2) store.states.get(NORMAL).institutionId = 'other'; };
+  await rejects(w.pacs.listStudies(caller(), { uids: NORMAL }), 409, 'STUDY_LIST_CHANGED');
+});

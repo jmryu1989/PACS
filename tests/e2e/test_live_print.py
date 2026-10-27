@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.request import Request
 import numpy as np
 from pypdf import PdfReader
+from viewer_tools import select_image_tool,display_transform
 from playwright.sync_api import expect
 from test_viewer_job_print import ViewerJobPrintE2E, canvas_ready, psql, literal
 from viewer_session import end_viewer
@@ -56,10 +57,11 @@ class LivePrintE2E(ViewerJobPrintE2E):
   patient='LIVEPRINT-'+uuid.uuid4().hex[:10];a=self.ct(patient,'current','20260801');b=self.ct(patient,'past','20260701');self.seed_report(a)
   p=self.launch_job([a,b]);self.grid(p,2);self.drag(p,'D03A current',0);self.drag(p,'D03A past',1);canvas_ready(p,2)
   self.choose(p,0);p.keyboard.press('ArrowDown');self.gesture(p,'Zoom',0,30);self.gesture(p,'Pan',30,20)
-  for key in ['2','r','h','v','i']:p.keyboard.press(key)
+  p.keyboard.press('2')
+  for action in ['r','h','v','i']:display_transform(p,action)
   self.choose(p,1);p.keyboard.press('1');p.wait_for_timeout(200)
   p.get_by_label('Job Title',exact=True).fill('미저장 제목');p.get_by_label('Description',exact=True).fill('미저장 설명')
-  expected=self.arrays(self.pngs(p));before=self.rows();originals=self.originals();paper=self.live_output(p)
+  expected=self.arrays(self.settled_pngs(p));before=self.rows();originals=self.originals();paper=self.live_output(p)
   actual=self.output_arrays(p,paper);self.assertEqual(len(actual),2)
   errors=[]
   for x,y in zip(expected,actual):
@@ -111,7 +113,7 @@ class LivePrintE2E(ViewerJobPrintE2E):
   f=self.ct('LIVEPRINT-'+uuid.uuid4().hex[:10],'current','20260801');p=self.launch_job([f]);self.grid(p,4)
   for index in [0,1,3]:self.drag(p,'D03A current',index)
   canvas_ready(p,3);self.choose(p,0)
-  p.locator('[data-cy="MeasurementTools-split-button-secondary"]').click();p.get_by_text('Annotation',exact=True).click()
+  select_image_tool(p, 'ArrowAnnotate')
   box=p.locator('.cornerstone-canvas').first.bounding_box();x,y=box['x']+box['width']*.47,box['y']+box['height']*.47
   p.mouse.move(x,y);p.mouse.down();p.mouse.move(x+45,y+28,steps=8);p.mouse.up()
   p.get_by_placeholder('Enter label').fill('보존할 미저장 표식');p.get_by_role('button',name='Save',exact=True).click()

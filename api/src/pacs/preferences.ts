@@ -295,9 +295,29 @@ export class PacsPreferences {
   }
 
   private shortcutPreferencesResult(owner: { institution: string; subject: string }, row: any) {
-    const invalid = !!row && !this.validShortcutBindings(row.bindings);
+    const { viewerSettings = null, ...workspace } = row?.bindings ?? {};
+    const hasWorkspace = Object.keys(workspace).length > 0;
+    const invalid = !!row && (hasWorkspace || viewerSettings === null) && !this.validShortcutBindings(workspace);
     return { owner: [owner.institution, owner.subject], revision: row?.revision ?? 0,
-      bindings: invalid ? null : row?.bindings ?? null, invalid };
+      bindings: hasWorkspace && !invalid ? workspace : null, invalid, viewerSettings };
+  }
+
+  private validViewerSettings(value: any) {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || ![1, 2].includes(value.version) ||
+        Object.keys(value).sort().join(',') !== 'bar,shortcuts,version' ||
+        !Array.isArray(value.bar) || new Set(value.bar).size !== value.bar.length ||
+        !value.shortcuts || typeof value.shortcuts !== 'object' || Array.isArray(value.shortcuts)) return false;
+    // IDs are native viewer tool names, never patient data or executable commands.
+    const id = (v: unknown) => typeof v === 'string' && /^[A-Za-z0-9_-]+$/.test(v);
+    if (!value.bar.every(id) || !Object.keys(value.shortcuts).every(id)) return false;
+    // Version 2 adds Shift with a letter (F8: Shift+H/V flip, Shift+L/R turn).
+    const pattern = value.version === 2 ? /^(?:[a-z0-9]|shift\+[a-z])$/ : /^[a-z0-9]$/;
+    const used = new Set();
+    return Object.values(value.shortcuts).every(key => {
+      if (key === null) return true;
+      if (typeof key !== 'string' || !pattern.test(key) || used.has(key)) return false;
+      used.add(key); return true;
+    });
   }
 
   async workspaceShortcuts(c: Caller) {
@@ -308,9 +328,11 @@ export class PacsPreferences {
 
   async saveWorkspaceShortcuts(body: any, c: Caller) {
     const owner = this.workspaceOwner(c);
+    const viewer = Object.prototype.hasOwnProperty.call(body ?? {}, 'viewerSettings');
     if (!body || typeof body !== 'object' || Array.isArray(body) ||
-        Object.keys(body).sort().join(',') !== 'bindings,expectedOwner,revision' ||
-        !this.validShortcutBindings(body.bindings) || !Number.isInteger(body.revision) || body.revision < 0 || body.revision >= 2147483647)
+        Object.keys(body).sort().join(',') !== (viewer ? 'expectedOwner,revision,viewerSettings' : 'bindings,expectedOwner,revision') ||
+        !(viewer ? this.validViewerSettings(body.viewerSettings) : this.validShortcutBindings(body.bindings)) ||
+        !Number.isInteger(body.revision) || body.revision < 0 || body.revision >= 2147483647)
       throw new BadRequestException('단축키 설정 형식을 확인하세요');
     if (JSON.stringify(body.expectedOwner) !== JSON.stringify([owner.institution, owner.subject]))
       throw new ConflictException('계정이 변경되었습니다. 다시 로그인하세요');
@@ -319,13 +341,17 @@ export class PacsPreferences {
       const row = await this.prisma.$transaction(async tx => {
         // Read in the same transaction; revision CAS still rejects a concurrent upgrade.
         const stored = await tx.workspaceShortcuts.findUnique({ where: { institution_subject: owner } });
+        const { viewerSettings, ...workspace } = (stored?.bindings as any) ?? {};
         const version = (stored?.bindings as any)?.version;
         const storedVersion = Number.isInteger(version) ? version : 1;
         // Invalid rows can be repaired at their current revision, as GET advertises.
-        if (this.validShortcutBindings(stored?.bindings) && storedVersion > (body.bindings.version ?? 1)) throw conflict();
-        if (body.revision === 0) return tx.workspaceShortcuts.create({ data: { ...owner, revision: 1, bindings: body.bindings } });
+        if (!viewer && this.validShortcutBindings(workspace) && storedVersion > (body.bindings.version ?? 1)) throw conflict();
+        // A viewer save and a workspace save each retain the other surface's settings.
+        const bindings = viewer ? { ...workspace, viewerSettings: body.viewerSettings } :
+          { ...body.bindings, ...(viewerSettings ? { viewerSettings } : {}) };
+        if (body.revision === 0) return tx.workspaceShortcuts.create({ data: { ...owner, revision: 1, bindings } });
         const changed = await tx.workspaceShortcuts.updateMany({ where: { ...owner, revision: body.revision },
-          data: { bindings: body.bindings, revision: { increment: 1 } } });
+          data: { bindings, revision: { increment: 1 } } });
         if (changed.count !== 1) throw conflict();
         return tx.workspaceShortcuts.findUnique({ where: { institution_subject: owner } });
       });

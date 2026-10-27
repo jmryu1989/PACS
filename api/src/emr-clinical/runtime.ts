@@ -75,7 +75,7 @@ export class ClinicalRuntime {
   }
 
   private async answer(work: EmrRecordWork, request: object, command: StoredClinicalCommand,
-    result: OperationResult | null, replay: boolean): Promise<OnlineClinicalOutcome> {
+    result: OperationResult | null, replay: boolean, prepare: OnlineClinicalWrite['prepare']): Promise<OnlineClinicalOutcome> {
     if (!result || result.outcome === 'pending') return unknown();
     if (result.outcome === 'negative') return { status: 'rejected', code: 'AppendNotCommitted' };
     const plan = command.plan;
@@ -85,6 +85,9 @@ export class ClinicalRuntime {
       const facts = await this.parts.context.facts(tx, request);
       await this.parts.context.study(tx, request, plan.version.studyId);
       if (facts.actor.identity.id !== plan.version.author.id || facts.actor.institutionId !== plan.version.actingInstitutionId) refuse('OwnerChanged');
+      // A replay skips the projector. Findings still need their owning reader's
+      // current comparison-lineage checks before returning the old source copy.
+      if (replay && plan.record === 'finding') await prepare(tx, facts);
       const stored = await this.parts.store.version(tx, plan.version.versionId);
       if (!stored || stored.operationId !== command.operationId || stored.plan.version.sha256 !== plan.version.sha256) refuse('ClinicalResultMismatch');
       if (plan.signing) {
@@ -122,7 +125,7 @@ export class ClinicalRuntime {
         const previous = await work.lookup(command.operationId);
         // Pending means the original may still own COMMIT. Only B2 settlement
         // can decide it; a timeout never authorizes another signature/projector.
-        if (previous) return await this.answer(work, request, command, previous, true);
+        if (previous) return await this.answer(work, request, command, previous, true, w.prepare);
       }
       const operation = await work.admit(command.event, undefined,
         { operationId: command.operationId, attemptId: command.attemptId });
@@ -143,7 +146,7 @@ export class ClinicalRuntime {
         await this.parts.store.append(tx, command, signature, response);
         return { kind: 'emr-clinical', id: plan.version.recordId, version: plan.version.versionId };
       });
-      return await this.answer(work, request, command, result, !created);
+      return await this.answer(work, request, command, result, !created, w.prepare);
     } catch (error) {
       if (error?.code === 'CommitUnknown') return unknown();
       throw error;
@@ -157,7 +160,7 @@ export class ClinicalRuntime {
         const input = await this.input(tx, request, w, { recordId: w.recordId, versionId: randomUUID() }, new Date().toISOString());
         return this.parts.store.command(tx, prepareClinicalWrite(input));
       });
-      return command ? await this.answer(work, request, command, await work.lookup(command.operationId), true) : null;
+      return command ? await this.answer(work, request, command, await work.lookup(command.operationId), true, w.prepare) : null;
     } catch (error) {
       if (error?.code === 'CommitUnknown') return unknown();
       throw error;

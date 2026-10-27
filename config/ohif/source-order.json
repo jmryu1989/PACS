@@ -8,6 +8,7 @@
     "frame-metadata.js",
     "sr-provenance.js",
     "navigation.js",
+    "mg-length.js",
     "history.js",
     "layout-model.js",
     "clinician-context.js",
@@ -29,7 +30,9 @@
     "series-recovery.js",
     "context-loss.js",
     "mammography-hanging.js",
+    "mg-reference-lines.js",
     "study-prefetch.js",
+    "viewer-ux.js",
     "configuration.js"
   ]
 }

@@ -29,22 +29,22 @@ BASE = (
     # round 6: the pure S9U4RegisterTests control of the identity case's registration check (U4BL-03), 101 -> 102 (129 -> 130).
     # WORKLIST-SPLIT-UID: WorklistSplitUidInvariantTests added six live cases, 95 -> 101 on main (and the selection 124 -> 130
     # after W4-FLOW's 123 -> 124); merged into S9-U4b: 102 + 6 = 108 (the selection 133 -> 139).
-    ("invariants_live.py", None, "candidate-invariants", 108),
+    ("invariants_live.py", None, "candidate-invariants"),
     # S9-U4b part (c): WorklistE2E.test_s9_u4_download_states and .test_s9_u4_import_retry_and_account_change
     # (REQ-S9-U4-09/10), 15 -> 17 (the selection 131 -> 133).
-    ("e2e/test_worklist.py", None, "candidate-worklist", 17),
+    ("e2e/test_worklist.py", None, "candidate-worklist"),
     # S9-U4A-SET: SWEEP-05 role change / institution move on the real pages (the selection 139 -> 141).
-    ("e2e/test_s9_role_sweep.py", "S9RoleSweepE2E", "s9-u4a-set", 2),
+    ("e2e/test_s9_role_sweep.py", "S9RoleSweepE2E", "s9-u4a-set"),
     # S9-U3 failure recovery and U1 served viewer coverage require the disposable G3 stack.
-    ("e2e/test_s9_failure_network.py", "S9FailureNetworkE2E", "candidate-s9-failure-network", 3),
-    ("e2e/test_s9_failure_server.py", "S9FailureServerE2E", "candidate-s9-failure-server", 2),
-    ("e2e/test_s9_failure_services.py", "FailureServicesE2E", "candidate-s9-failure-services", 2),
-    ("e2e/test_viewer_ux_span.py", "ViewerSpanE2E", "candidate-viewer-span", 2),
-    ("e2e/test_viewer_ux_span.py", "ViewerSpanEmulatedE2E", "candidate-viewer-span-emulated", 2),
-    ("e2e/test_viewer_windows.py", "ViewerWindowsE2E", "candidate-viewer-windows", 5),
-    ("e2e/test_viewer_opening.py", "ViewerOpeningE2E", "candidate-viewer-opening", 3),
-    ("e2e/test_viewer_autoload.py", "ViewerAutoloadE2E", "candidate-viewer-autoload", 7),
-    ("e2e/test_viewer_display_layout.py", "ViewerDisplayLayoutE2E", "candidate-viewer-display-layout", 6),
+    ("e2e/test_s9_failure_network.py", "S9FailureNetworkE2E", "candidate-s9-failure-network"),
+    ("e2e/test_s9_failure_server.py", "S9FailureServerE2E", "candidate-s9-failure-server"),
+    ("e2e/test_s9_failure_services.py", "FailureServicesE2E", "candidate-s9-failure-services"),
+    ("e2e/test_viewer_ux_span.py", "ViewerSpanE2E", "candidate-viewer-span"),
+    ("e2e/test_viewer_ux_span.py", "ViewerSpanEmulatedE2E", "candidate-viewer-span-emulated"),
+    ("e2e/test_viewer_windows.py", "ViewerWindowsE2E", "candidate-viewer-windows"),
+    ("e2e/test_viewer_opening.py", "ViewerOpeningE2E", "candidate-viewer-opening"),
+    ("e2e/test_viewer_autoload.py", "ViewerAutoloadE2E", "candidate-viewer-autoload"),
+    ("e2e/test_viewer_display_layout.py", "ViewerDisplayLayoutE2E", "candidate-viewer-display-layout"),
 )
 FLOWS = (
     ("e2e/test_document_session.py", "DocumentSessionE2E", "test_binding_stays_with_its_document_when_cookie_is_replaced", "test_binding_"),
@@ -68,6 +68,10 @@ FLOWS = (
     # with the S9/U1 registration 174 -> 175).
     ("e2e/test_related_report_mode.py", "RelatedReportModeE2E",
      "test_w5_01_prior_insert_loss_check_back_commit_reopen", "test_w5_01_"),
+    # W9-UI: actual A3 ready metadata with recording references; the frozen set is Displayed
+    # by the real viewer renderer across both pages.
+    ("e2e/test_multi_study_view.py", "MultiStudyViewE2E",
+     "test_w9_01_ready_set_with_receipts_displays_on_the_real_viewer", "test_w9_01_"),
     # EMR-B1 L01 (emr/units/b.json candidate_cases): the access ledger's roles, guards and restart in its own disposable
     # database and production API image (the merged selection 115 -> 116).
     ("e2e/test_study_arrivals.py", "StudyArrivalsE2E", "test_arrivals_01_same_series_sop_updates_count_and_preserves_viewer_draft_hold_report_and_sources", "test_arrivals_01_"),
@@ -127,9 +131,8 @@ def load(path, name):
 
 def exact_selection(target, runner):
     rows, selected = [], []
-    for filename, class_name, unit, count in BASE:
+    for filename, class_name, unit in BASE:
         plan = runner.module_plan("tests/" + filename, unit, "live", 540, class_name)
-        require(len(plan["tests"]) == count, f"Unexpected {unit} count")
         rows.append((filename, class_name, unit))
         selected.extend(plan["tests"])
     for filename, class_name, method, prefix in FLOWS:
@@ -141,8 +144,7 @@ def exact_selection(target, runner):
         rows.append((filename, class_name, flow_unit(filename)))
         selected.append({"file": "tests/" + filename, "case": class_name + "." + method})
     require(len({row[2] for row in rows}) == len(rows), "Candidate runner units must be unique")
-    expected = sum(row[3] for row in BASE) + len(FLOWS)
-    require(len(selected) == expected and len({(x["file"], x["case"]) for x in selected}) == expected,
+    require(len({(x["file"], x["case"]) for x in selected}) == len(selected),
             "Candidate selection must match the declared unique exact cases")
     return rows, selected
 

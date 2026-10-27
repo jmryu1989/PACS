@@ -2,6 +2,7 @@
 from viewer_session import end_viewer
 import json,unittest
 from pathlib import Path
+from viewer_tools import select_image_tool
 from playwright.sync_api import expect, TimeoutError as PlaywrightTimeout
 from test_volume_orientation import VolumeOrientationE2E
 
@@ -207,7 +208,7 @@ class VolumeCrosshairE2E(VolumeOrientationE2E):
   import math
   import numpy as np
   a,p,v=self.starting();original=self.originals();p.locator('#findings').fill('KEEP NATIVE ROTATE REPORT');errors=[];v.on('pageerror',lambda e:errors.append(str(e)))
-  v.locator('button[data-cy="Crosshairs"]').click();v.wait_for_function("()=>cornerstoneTools.ToolGroupManager.getToolGroup('mpr').getToolOptions('Crosshairs')?.mode==='Active'")
+  select_image_tool(v, 'Crosshairs');v.wait_for_function("()=>cornerstoneTools.ToolGroupManager.getToolGroup('mpr').getToolOptions('Crosshairs')?.mode==='Active'")
   active=v.evaluate('()=>services.viewportGridService.getState().activeViewportId')
   # Readiness is the product wrapper bound to this tool plus native rotation handles on the active plane;
   # otherwise the unwrapped native drag could stand in for the product path.

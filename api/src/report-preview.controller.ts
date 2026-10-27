@@ -19,8 +19,7 @@ export class ReportPreviewController {
 
   /**
    * S5-U1b clinician reads. They live here, beside the report preview, because both answer "what may this
-   * person read of the report"; the controller is already no-store (app.module adminNoStore) and under the
-   * StudyAccess interceptor. The worklist route GET studies stays denied for clinician-only.
+   * person read of the report"; the controller is already no-store (main.ts API middleware). The worklist route GET studies stays denied for clinician-only.
    */
   @Get('clinician/studies')
   clinicianStudies(@Query() query: any, @Req() req: any) {
@@ -35,7 +34,7 @@ export class ReportPreviewController {
 
   /**
    * S5-U3 patient timeline: the listed studies with the anchor's server patient key, paged (limit required, after verbatim).
-   * Here with the other clinician reads for the same no-store middleware and interceptor; pacs.controller.ts stays pinned.
+   * Here with the other clinician reads; pacs.controller.ts stays pinned.
    */
   @Get('clinician/studies/:uid/timeline')
   clinicianTimeline(@Param('uid') uid: string, @Query() query: any, @Req() req: any) {

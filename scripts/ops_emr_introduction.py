@@ -89,8 +89,6 @@ RESUME_ORDER = ("orthanc", "keycloak", "api", "proxy")
 VOLUMES = ("pg", "orthanc", "emr_access", "emr_state")
 PHASES = ("capture", "release", "introduce", "verify", "reopen", "rollback", "rollback_reopen", "seed", "receipt")
 RECEIPT_PHASES = ("seed", "capture", "introduce", "verify", "rollback", "rollback_reopen")
-RECEIPT_MAX_AGE = timedelta(days=7)
-CLOCK_SKEW = timedelta(minutes=5)
 HASH, SHA, IMAGE = pre.HASH, pre.SHA, pre.IMAGE
 NONCE = re.compile(r"[0-9a-f]{32}")
 UUID4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
@@ -874,8 +872,8 @@ def receipt_use_identity(receipt):
 
 def receipt_valid(receipt, plan, b0_manifest_sha256, production, *, now=None, b0_created_utc=None, used=(), bundle=None):
     """A local-restore receipt is the rehearsal's own run record, never an offsite claim. It is accepted only for the
-    production plan it names, on the rehearsal host that plan allows, for this production attempt's B0, within its
-    freshness window and once (used: the receipts this plan already admitted). Every rehearsal phase must carry its
+    production plan it names, on the rehearsal host that plan allows, for this production attempt's B0,
+    and once (used: the receipts this plan already admitted). Every rehearsal phase must carry its
     exact step list (all PASS), its request and its result file's hash; the artifacts it names (B0, B1 and its restore
     check, the probe, Bfail, the recovery volumes and the previous-version smoke over this plan's frame) must agree
     with each other. IRT2-01: and with the producer's own run - the bundle (its result files and journal, see
@@ -896,13 +894,8 @@ def receipt_valid(receipt, plan, b0_manifest_sha256, production, *, now=None, b0
     require(receipt["tool"] == plan["tool"], "Receipt was produced by another tool")
     require(receipt["host_key_sha256"] != production["host_key_sha256"], "Receipt was produced on the production host")
     require(receipt["host_key_sha256"] == plan["rehearsal_host"], "Receipt comes from a host the plan does not allow")
-    created, now = parse_utc(receipt["created_utc"]), now or utc_now()
-    # D12: created_utc is the rehearsal host's clock, now and the B0 time are production's; up to CLOCK_SKEW of difference
-    # between the two clocks is tolerated in both directions (receipt_clock records what was observed).
-    require(created <= now + CLOCK_SKEW, "Receipt is dated in the future")
-    require(now - created <= RECEIPT_MAX_AGE, "Receipt is stale")
-    if b0_created_utc is not None:
-        require(created >= parse_utc(b0_created_utc) - CLOCK_SKEW, "Receipt predates the B0 snapshot it rehearsed")
+    # Receipt validity follows the recorded inputs and versions, not the hosts' calendars.
+    parse_utc(receipt["created_utc"])
     phases = receipt["phases"]
     require(type(phases) is dict and set(phases) == set(RECEIPT_PHASES), "Receipt phases incomplete")
     requests = []
@@ -941,10 +934,9 @@ def receipt_valid(receipt, plan, b0_manifest_sha256, production, *, now=None, b0
 
 
 def receipt_clock(receipt, now, b0_created_utc=None):
-    """The clock facts of an accepted receipt (D12): how far its creation lies ahead of production's clock (0 when it is
-    not ahead) and how long after the B0 it rehearsed it was made (negative within the tolerated skew), in seconds."""
+    """Record clock differences for diagnosis without making them admission limits."""
     created = parse_utc(receipt["created_utc"])
-    facts = {"tolerance_s": int(CLOCK_SKEW.total_seconds()), "ahead_of_production_s": round(max(0.0, (created - now).total_seconds()), 3)}
+    facts = {"ahead_of_production_s": round(max(0.0, (created - now).total_seconds()), 3)}
     if b0_created_utc is not None:
         facts["after_b0_s"] = round((created - parse_utc(b0_created_utc)).total_seconds(), 3)
     return facts
@@ -6626,14 +6618,14 @@ def browser_smoke(spec):
             "refresh_token": tokens["refresh_token"], "subject": claims.get("sub"), "product_session": product}
 
 
-# The product's own session requests as its web documents send them (worklist-v0/hpacs-lite/auth.js: X-KIN-CSRF, and
-# X-KIN-Session once the document knows its session); GET /api/me without the binding is the product's bootstrap call.
-PRODUCT_ME_JS = ("async (sid) => { const kinSmokeSignal = () => { const left = (window.__kinSmokeDeadline || (Date.now()+60000))-Date.now(); if(left<=0) throw new Error('smoke deadline'); return AbortSignal.timeout(Math.ceil(left)); }; const h = {'X-KIN-CSRF': '1'}; if (sid) h['X-KIN-Session'] = sid;"
+# The product's own session requests as its web documents send them (worklist-v0/hpacs-lite/auth.js: X-KIN-Session
+# once the document knows its session); GET /api/me without the binding is the product's bootstrap call.
+PRODUCT_ME_JS = ("async (sid) => { const kinSmokeSignal = () => { const left = (window.__kinSmokeDeadline || (Date.now()+60000))-Date.now(); if(left<=0) throw new Error('smoke deadline'); return AbortSignal.timeout(Math.ceil(left)); }; const h = {}; if (sid) h['X-KIN-Session'] = sid;"
                  " const r = await fetch('/api/me', {headers: h, credentials: 'same-origin', cache: 'no-store', signal: kinSmokeSignal()});"
                  " let b = {}; try { b = await r.json(); } catch (e) {}"
                  " return {status: r.status, sid: typeof b.sessionId === 'string' && b.sessionId ? b.sessionId : null}; }")
 PRODUCT_LOGOUT_JS = ("async (sid) => { const kinSmokeSignal = () => { const left = (window.__kinSmokeDeadline || (Date.now()+60000))-Date.now(); if(left<=0) throw new Error('smoke deadline'); return AbortSignal.timeout(Math.ceil(left)); }; return (await fetch('/api/auth/logout', {method: 'POST', credentials: 'same-origin', signal: kinSmokeSignal(),"
-                     " headers: {'X-KIN-CSRF': '1', 'X-KIN-Session': sid}})).status; }")
+                     " headers: {'X-KIN-Session': sid}})).status; }")
 
 
 def sign_in(page, spec):
@@ -6696,15 +6688,15 @@ def product_session_check(page, spec):
     browser_stage(page, "a neutral page", lambda: page.goto(origin + "/auth/realms/kin/.well-known/openid-configuration",
                                                              wait_until="domcontentloaded", timeout=browser_timeout(60000)))
     logout = browser_stage(page, "the product logout", lambda: page.evaluate(PRODUCT_LOGOUT_JS, sid))
-    bound = session_replay(spec, {"Cookie": jar, "X-KIN-CSRF": "1", "X-KIN-Session": sid})
-    cookie_only = session_replay(spec, {"Cookie": jar, "X-KIN-CSRF": "1"})
+    bound = session_replay(spec, {"Cookie": jar, "X-KIN-Session": sid})
+    cookie_only = session_replay(spec, {"Cookie": jar})
     return {"signed_in": True, "logout_status": logout, "old_session_status": bound, "old_cookie_status": cookie_only, "screens": screens}
 
 
 SCREEN_CHECKS = ("worklist_row", "modality_rendered", "folders_loaded", "reading_workspace", "shortcuts_dialog", "viewer_rendered")
 # The signed-in document's own paged list (as study-pages.js asks for it): the plan's study and its patient ID and
 # modality, which stay in the browser (only booleans leave it).
-SCREEN_STUDY_JS = ("async ([uid, sid]) => { const kinSmokeSignal = () => { const left = (window.__kinSmokeDeadline || (Date.now()+60000))-Date.now(); if(left<=0) throw new Error('smoke deadline'); return AbortSignal.timeout(Math.ceil(left)); }; const h = {'X-KIN-CSRF': '1', 'X-KIN-Session': sid}; let after = null;"
+SCREEN_STUDY_JS = ("async ([uid, sid]) => { const kinSmokeSignal = () => { const left = (window.__kinSmokeDeadline || (Date.now()+60000))-Date.now(); if(left<=0) throw new Error('smoke deadline'); return AbortSignal.timeout(Math.ceil(left)); }; const h = {'X-KIN-Session': sid}; let after = null;"
                    " for (let n = 0; n < 500; n++) { const r = await fetch('/api/studies?limit=100' + (after ? '&after=' + encodeURIComponent(after) : ''),"
                    " {headers: h, credentials: 'same-origin', cache: 'no-store', signal: kinSmokeSignal()}); if (r.status !== 200) return {status: r.status};"
                    " const body = await r.json(); const row = (body.studies || []).find(s => s && s.uid === uid);"

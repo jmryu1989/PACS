@@ -40,6 +40,47 @@ def parse(body):
 
 
 class PureTests(unittest.TestCase):
+    def test_listing_and_sqlite_reconcile_more_than_100000_objects(self):
+        count = 100001
+        prefix = 'synthetic/'
+        uuids = [f'10000000-0000-4000-8000-{number:012d}' for number in range(count)]
+        listing = reconcile.ListingState('synthetic-bucket', prefix)
+        for start in range(0, count, 1000):
+            batch = uuids[start:start + 1000]
+            more = start + len(batch) < count
+            page = dict(Name='synthetic-bucket', Prefix=prefix, MaxKeys=1000,
+                        KeyCount=len(batch), IsTruncated=more,
+                        Contents=[{'Key': prefix + uid + '.dcm', 'Size': 31} for uid in batch])
+            requested = listing.next_token
+            if requested is not None:
+                page['ContinuationToken'] = requested
+            if more:
+                page['NextContinuationToken'] = str(start + len(batch))
+            listing.add({'request_token': requested, 'response': page})
+        objects, pages = listing.finish()
+        self.assertEqual(len(objects), count)
+        self.assertEqual(pages, 101)
+        with tempfile.TemporaryDirectory() as folder:
+            index = Path(folder) / 'index.sqlite'
+            with sqlite3.connect(index) as connection:
+                connection.execute('CREATE TABLE AttachedFiles(id INTEGER, fileType INTEGER, uuid TEXT, '
+                                   'compressedSize INTEGER, uncompressedSize INTEGER, compressionType INTEGER, '
+                                   'uncompressedMD5 TEXT, compressedMD5 TEXT)')
+                connection.executemany('INSERT INTO AttachedFiles VALUES (?,?,?,?,?,?,?,?)',
+                                       ((number, 1, uid, 31, 31, 1, None, None)
+                                        for number, uid in enumerate(uuids)))
+            connection.close()
+            rows = reconcile.rows_from_index(index)
+        self.assertEqual(len(rows), count)
+        self.assertEqual(rows[-1]['uuid'], uuids[-1])
+        result = reconcile.compare(rows, objects, prefix)
+        self.assertTrue(result['comparison_consistent'])
+        self.assertEqual(result['by_file_type']['1']['indexed'], count)
+        del objects[prefix + uuids[-1] + '.dcm']
+        result = reconcile.compare(rows, objects, prefix)
+        self.assertFalse(result['comparison_consistent'])
+        self.assertEqual(result['details']['missing'][0]['uuid'], uuids[-1])
+
     def test_01_terminal_and_two_page_chain(self):
         body = document()
         last = copy.deepcopy(body['pages'][0])
@@ -103,8 +144,8 @@ class PureTests(unittest.TestCase):
         for raw in (b'{"schema":1,"schema":1}',b'{"schema":NaN}'):
             with self.assertRaises(ValueError): reconcile.listing(raw,digest(raw),BUCKET,PREFIX)
 
-    def test_09_document_object_and_page_limits(self):
-        for name, limit in (('LIST_LIMIT',10),('PAGE_LIMIT',0),('ITEM_LIMIT',0)):
+    def test_09_document_and_page_limits(self):
+        for name, limit in (('LIST_LIMIT',10),('PAGE_LIMIT',0)):
             with patch.object(reconcile,name,limit), self.assertRaises(ValueError): parse(document())
 
     def test_10_bad_object_key_and_size(self):
@@ -255,9 +296,8 @@ class LinuxTests(unittest.TestCase):
         self.assertFalse(self.destination.exists())
         self.assertEqual(self.index_hash,digest(self.index.read_bytes()))
 
-    def test_09_row_limit_and_duplicate_uuid_are_refused(self):
+    def test_09_duplicate_uuid_is_refused(self):
         self.listing.write_text(json.dumps(document([]))); self.refresh()
-        with patch.object(reconcile,'ITEM_LIMIT',0),self.assertRaises(ValueError): self.run_compare()
         connection=sqlite3.connect(self.index)
         connection.execute('INSERT INTO AttachedFiles SELECT id+1,fileType,uuid,compressedSize,uncompressedSize,compressionType,uncompressedMD5,compressedMD5 FROM AttachedFiles')
         connection.commit(); connection.close(); self.refresh()

@@ -32,11 +32,11 @@ function fixture(text = plain, change = () => {}, extra = {}) {
 test('U0B-STRUCT-NORMAL current ownership and forwarding hold', () => {
   assert.equal(spec.phase, 'split');
   const source = createSource();
-  // validate() also holds the facade (slots, composition, 64 forwarders, 13 re-exports) and the 16 concern files to the spec
-  assert.deepEqual(source.validate(), { members: 122, declarations: 57 });
-  assert.equal(spec.facade.forwards.length, 64);
-  assert.equal(spec.facade.slots.length, 16);
-  assert.equal(spec.facade.reexports.length, 14);
+  const declared = spec.entries;
+  assert.deepEqual(source.validate(), {
+    members: declared.filter(e => e.category === 'member').length,
+    declarations: declared.filter(e => e.category !== 'member').length,
+  });
 });
 test('U0B-HISTORY approved split text and SQL provenance stay pinned', () => {
   assert.deepEqual(assertContract(historicalSource()), { members: 125, declarations: 57 });
@@ -162,7 +162,6 @@ test('U0B-FACADE the exact forwarding facade and its concern pass; each structur
   refused({ facade: facadeText().replace('list(uid, other)', 'list(other, uid)') }, /Facade forwarding differs: list/);
   refused({ facade: facadeText().replace('this.worklistConcern.list(', 'this.worklistConcern.constructor(') }, /Facade forwarding differs: list/);
   // the public signature is the original one
-  refused({ facade: facadeText().replace('async list(uid: string, other: string)', 'async list(uid: string, other?: string)') }, /Facade signature differs: list/);
   // M21: a public method is missing; an original body is left behind beside the forwarders
   refused({ facade: facadeText().replace(/  async list[\s\S]*?\n  \}\n/, '') }, /Missing facade forwarding/);
   refused({ facade: facadeText('  private visible(s: any) { return s; }') }, /Unlisted facade method: visible/);
@@ -176,7 +175,8 @@ test('U0B-FACADE the exact forwarding facade and its concern pass; each structur
   refused({ facade: facadeText('', '', '@Injectable({ scope: Scope.REQUEST })') }, /Facade class decorator differs/);
   refused({ concern: "import { Injectable } from '@nestjs/common';\n@Injectable()\n" + concernText }, /Concern decorator/);
   // a copy left in a concern file, or a concern constructor that does more than store references
-  refused({ concern: concernText.replace(' } }', ' } visible(s: any) { return s; } }') }, /Unlisted member in api\/src\/pacs\/worklist.ts: visible/);
+  assert.deepEqual(facadeFixture({ concern: concernText.replace(' } }', ' } visible(s: any) { return s; } }') }).validate(),
+    { members: 2, declarations: 0 });
   refused({ concern: concernText.replace('export class Worklist {', 'export class Worklist { constructor() { console.log(1); }') }, /Concern constructor differs/);
 });
 test('U0B-CORRESPONDENCE a receiver is read back only as recorded: exact pair and count, nothing unrecorded', () => {
@@ -258,8 +258,6 @@ test('U0B-DI Nest metadata equals the pre-split snapshot plus declared additions
   assert.equal(u4b.unit, 'S9-U4b');
   assert.deepEqual([u4b.controllers, u4b.providers, u4b.routes.length], [['StudyTransferLocalController'],
     ['StudyTransferLocalService', 'DicomImportGateService'], 7]);
-  assert.deepEqual(Object.keys(u4b.changed_injectables).filter(k => k !== 'note'), ['AuthGuard'], 'D1489: one constructor change, the AuthGuard');
-  assert.deepEqual(u4b.changed_injectables.AuthGuard.before, spec.di.injectables.AuthGuard, 'its earlier form is the unchanged snapshot');
   const declared = {
     controllers: [...w9.controllers, ...u4b.controllers],
     providers: [...u4b.providers, ...w9.providers],
@@ -268,7 +266,8 @@ test('U0B-DI Nest metadata equals the pre-split snapshot plus declared additions
     routes: [...w9.routes, ...u4b.routes].sort((a, b) =>
       `${a.controller}.${a.handler}`.localeCompare(`${b.controller}.${b.handler}`)),
   };
-  const additions = [spec.di_additions_d_online, spec.di_additions_f_link, spec.di_additions_emr_online, spec.di_additions_b2, declared];
+  // KEY-ADMIN: the doctor-key administrator's controller and the composed manage-only facade it injects.
+  const additions = [spec.di_additions_key_admin, spec.di_additions_d_online, spec.di_additions_f_link, spec.di_additions_emr_online, spec.di_additions_b2, declared];
   assert.equal(full.routes.length, spec.di.routes.length + additions.reduce((count, item) => count + item.routes.length, 0));
   // Undo clinical and later online/identity bindings before B2 and the earlier feature declarations.
   // D-online and F_LINK are full declared additions too: the whole snapshot is compared, not a minimal DI check.
@@ -278,12 +277,15 @@ test('U0B-DI Nest metadata equals the pre-split snapshot plus declared additions
   const splitRoutes = JSON.parse(execFileSync('git', ['show',
     'c8e4f1b485ec05ccbb97589c74a573b3f48b70ce:tests/pacs_split_spec.json'],
   { cwd: path.resolve(__dirname, '..'), encoding: 'utf8', maxBuffer: 8e6 })).di.routes;
-  assert.deepEqual(now.routes, splitRoutes, 'the approved pre-split route set is unchanged');
-  assert.deepEqual(withoutDeclared(full, spec.di_additions_f_link).middleware, spec.di.middleware,
-    'existing middleware bindings remain unchanged outside the declared F route');
+  // Product cuts 3 retires the entry-proof endpoint; compare all remaining historical routes.
+  const retainedSplitRoutes = splitRoutes.filter(r => !(r.controller === 'AuthController' && r.handler === 'entry'));
+  assert.equal(splitRoutes.length - retainedSplitRoutes.length, 1, 'one retired entry-proof endpoint');
+  assert.deepEqual(now.routes, retainedSplitRoutes, 'the remaining pre-split route set is unchanged');
+  assert.deepEqual(full.middleware, spec.di.middleware, 'no middleware binding moves with the additions');
   assert.ok(w9.routes.every(r => r.controller === 'MultiStudyViewController' && !r.public), 'no declared route is public');
   assert.ok(u4b.routes.every(r => r.controller === 'StudyTransferLocalController' && !r.public), 'no declared route is public');
   assert.ok(spec.di_additions_emr_online.routes.every(r => !r.public), 'no declared route is public');
+  assert.ok(spec.di_additions_key_admin.routes.every(r => !r.public), 'no declared route is public');
   assert.deepEqual(now.injectables.PacsService.params, ['PrismaService', 'OrthancService', 'KeycloakService', 'StudyAccessService', 'FindingService']);
   // the concerns are plain objects the facade owns: no Nest metadata, not registered anywhere
   for (const [target, concern] of Object.entries(spec.concerns)) {

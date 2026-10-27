@@ -493,10 +493,6 @@ class ClinicalContextDOMTest(unittest.TestCase):
         if path.startswith("/kin-brand/") or path == "/favicon.ico":
             route.fulfill(status=404, body="")
             return
-        if request.headers.get("x-kin-csrf") != "1":
-            self.unexpected.append(f"{method} {path} without X-KIN-CSRF")
-            route.abort()
-            return
         if method == "GET" and path == "/api/me":
             route.fulfill(status=200, json={**self.stub.identity, "sessionId": "SYN-SESSION-" + str(self.stub.identity.get("sub"))})
             return
@@ -657,7 +653,7 @@ class ClinicalContextDOMTest(unittest.TestCase):
         if call["rejected"]:
             # The request the page's transport sent: bound to this document's session (a GET carries no body type).
             self.assertEqual((call["headers"].get("x-kin-csrf"), call["headers"].get("x-kin-session")),
-                             ("1", "SYN-SESSION-" + str(self.stub.identity.get("sub"))),
+                             (None, "SYN-SESSION-" + str(self.stub.identity.get("sub"))),
                              "the rejected promise was the one api() awaited")
         else:
             self.assertTrue(call["bodyUsed"], "api() consumed the late answer's body: " + json.dumps(call))
@@ -1566,7 +1562,7 @@ class ClinicalContextDOMTest(unittest.TestCase):
         self.assertNotIn("SYN-MARK-2", self.seen())
         for call, uid in zip(self.calls(), (A, B, C)):
             self.assertEqual((call["method"], call["path"], call["query"], call["body"]), ("GET", "/api/studies/%s/clinical-context" % uid, "", None))
-            self.assertEqual(call["headers"].get("x-kin-csrf"), "1")
+            self.assertIsNone(call["headers"].get("x-kin-csrf"))
         for entry in self.stub.log:
             self.assertEqual((entry["query"], entry["body"]), ("", None))
         # The same study and an unchanged observation keep the displayed state and send no request.

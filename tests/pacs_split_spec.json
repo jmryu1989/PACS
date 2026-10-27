@@ -4852,208 +4852,167 @@
     "forwards": [
       {
         "name": "onModuleInit",
-        "slot": "institutionsConcern",
-        "signature_sha256": "99b114cdc8383ddeac8ef0b40b8446ca32d70563640ec32fbe605204fef7884c"
+        "slot": "institutionsConcern"
       },
       {
         "name": "institutionName",
-        "slot": "institutionsConcern",
-        "signature_sha256": "f9ce58841cda945e731ed0474d655a8abb35a761d1fd39a3baf7638271cef6ba"
+        "slot": "institutionsConcern"
       },
       {
         "name": "unassigned",
-        "slot": "institutionsConcern",
-        "signature_sha256": "55cb28d91c374b91099a553113b150e45621e2d5c3ff768f5b01f87016e32fef"
+        "slot": "institutionsConcern"
       },
       {
         "name": "assignInstitution",
-        "slot": "institutionsConcern",
-        "signature_sha256": "a8db4b4af7e01c91b933c6da22ad6397339ffe28239396b834e71a7db5d45553"
+        "slot": "institutionsConcern"
       },
       {
         "name": "colleagues",
-        "slot": "institutionsConcern",
-        "signature_sha256": "63fc6a5d3b6213100d561341677756324b4ecd9300a29a6f044f01b7badc987a"
+        "slot": "institutionsConcern"
       },
       {
         "name": "prefs",
-        "slot": "preferencesConcern",
-        "signature_sha256": "26e00ead0a49d4d0f12b65c600b2e569a9bb775f925d5b3f3b774ae61c8a7095"
+        "slot": "preferencesConcern"
       },
       {
         "name": "readingPreferences",
-        "slot": "preferencesConcern",
-        "signature_sha256": "1d9669145831ca2409fc64329cb2f0f9bf7378c40887a43e3f21dca9376f6224"
+        "slot": "preferencesConcern"
       },
       {
         "name": "saveReadingPreferences",
-        "slot": "preferencesConcern",
-        "signature_sha256": "a925ca7c348fc2b682c94900b9f51164dedc702537432154d9fbf8a3c66c98c1"
+        "slot": "preferencesConcern"
       },
       {
         "name": "hangingProtocols",
-        "slot": "preferencesConcern",
-        "signature_sha256": "2191904544b5076badc87a25054284cdf9a33f57f4bf8a3ab603c2eba0ea65ef"
+        "slot": "preferencesConcern"
       },
       {
         "name": "saveHangingProtocols",
-        "slot": "preferencesConcern",
-        "signature_sha256": "706366bb6052000f9fd3741d378d99e761d4092fd8958180f01a1fcae17e8f17"
+        "slot": "preferencesConcern"
       },
       {
         "name": "siteHangingProtocols",
-        "slot": "preferencesConcern",
-        "signature_sha256": "26995920521128a4ebb316aa09d638e0be09cb202111307dcfb82fc1d6d1d2ec"
+        "slot": "preferencesConcern"
       },
       {
         "name": "saveSiteHangingProtocols",
-        "slot": "preferencesConcern",
-        "signature_sha256": "5694a1a85abe62df1da90a53fe2e28a2590b1534e3ac9e119ff6b3a8fd5b5afe"
+        "slot": "preferencesConcern"
       },
       {
         "name": "workspaceShortcuts",
-        "slot": "preferencesConcern",
-        "signature_sha256": "d9a7e709df0744970311af1c58666ec0d68fe39fcc02c8eb033cb952a7e20e4f"
+        "slot": "preferencesConcern"
       },
       {
         "name": "saveWorkspaceShortcuts",
-        "slot": "preferencesConcern",
-        "signature_sha256": "e28540fd6be8aae90e9a3f7cc6618db60365b08790e9b293e6061476646e3d8c"
+        "slot": "preferencesConcern"
       },
       {
         "name": "readingAppearance",
-        "slot": "preferencesConcern",
-        "signature_sha256": "2f0a398f7c5b279fc8c221c14bbb2329eb196e929f58140a25e1aef787e18517"
+        "slot": "preferencesConcern"
       },
       {
         "name": "saveReadingAppearance",
-        "slot": "preferencesConcern",
-        "signature_sha256": "df74d997e4809483aa5b546559dec867293ebce4baa8d9641082f2860256870b"
+        "slot": "preferencesConcern"
       },
       {
         "name": "workspaceLayout",
-        "slot": "preferencesConcern",
-        "signature_sha256": "e9b1abdc8c0148d1dcac6f90b73323cf5b6bde76842d458d6ae1da1f621f93ec"
+        "slot": "preferencesConcern"
       },
       {
         "name": "writeWorkspaceLayout",
-        "slot": "preferencesConcern",
-        "signature_sha256": "f41952ad0e305c7266dde19773e4778ad690b68dbaa228f0826c51beee17abd2"
+        "slot": "preferencesConcern"
       },
       {
         "name": "worklistColumns",
-        "slot": "preferencesConcern",
-        "signature_sha256": "e591770737d47a0919e09e1ed8eb8ca74c50c8d63c239dcce3fee4287177df86"
+        "slot": "preferencesConcern"
       },
       {
         "name": "writeWorklistColumns",
-        "slot": "preferencesConcern",
-        "signature_sha256": "e17da025ec7098d7bafa312bdb26c8e1e2fa9060b17562bf69dfac4a479aded3"
+        "slot": "preferencesConcern"
       },
       {
         "name": "saveTemplate",
-        "slot": "preferencesConcern",
-        "signature_sha256": "f862d80dd750ff09e2da08fd041e811513ea96c73247268ea3f4371415690ff2"
+        "slot": "preferencesConcern"
       },
       {
         "name": "deleteTemplate",
-        "slot": "preferencesConcern",
-        "signature_sha256": "cd3204a911e3134db58780f368f40de78b52d68e3b6bb6c83c96493a8cf803a9"
+        "slot": "preferencesConcern"
       },
       {
         "name": "saveFilter",
-        "slot": "filtersConcern",
-        "signature_sha256": "bc91c652e2c790d70be375d028e1037751b9e1bfc9233abd920c6bcbd2036dd2"
+        "slot": "filtersConcern"
       },
       {
         "name": "setDefaultFilter",
-        "slot": "filtersConcern",
-        "signature_sha256": "3e1e8ac1a83bbb2d45db3ad96ae3427ce39c504c2dda67db05e623d4cfd756c0"
+        "slot": "filtersConcern"
       },
       {
         "name": "deleteFilter",
-        "slot": "filtersConcern",
-        "signature_sha256": "ce48b96920592bd140417daabb289264547ee652c90725a859c315aad320a5a5"
+        "slot": "filtersConcern"
       },
       {
         "name": "readFilterFolders",
-        "slot": "filtersConcern",
-        "signature_sha256": "550ace081681527a893103c1130d3211ef7583043c2837adf6489c6100cec68c"
+        "slot": "filtersConcern"
       },
       {
         "name": "writeFilterFolders",
-        "slot": "filtersConcern",
-        "signature_sha256": "a23226fac43e7394adc7e8c02ffc4cc137767049c3a9c7116ddbd33d5730d08e"
+        "slot": "filtersConcern"
       },
       {
         "name": "readSharedFilters",
-        "slot": "filtersConcern",
-        "signature_sha256": "b37d1bff20074f031893ea2390ba6610b799b5ba414109dc5c3538bb1ce57ea1"
+        "slot": "filtersConcern"
       },
       {
         "name": "writeSharedFilters",
-        "slot": "filtersConcern",
-        "signature_sha256": "fc0e3d4d011deacc6d995327c8257bb3f655250a7586fdc7ab258dc0c464836d"
+        "slot": "filtersConcern"
       },
       {
         "name": "copySharedFilters",
-        "slot": "filtersConcern",
-        "signature_sha256": "26273fa3328ded5084047b315e7f8723d6941e543de2548561f24ae1bfac68d1"
+        "slot": "filtersConcern"
       },
       {
         "name": "audits",
-        "slot": "auditConcern",
-        "signature_sha256": "a61f391d4c27588fa82129ce048605f0f307624f200407bbab71621d07ec3dee"
+        "slot": "auditConcern"
       },
       {
         "name": "adminMetrics",
-        "slot": "metricsConcern",
-        "signature_sha256": "2ea3ae76a4aad592598aa5989eb79feebe44e4f559d041d18abd5553ca65bfdf"
+        "slot": "metricsConcern"
       },
       {
         "name": "listStudies",
-        "slot": "worklistConcern",
-        "signature_sha256": "225f272802dd41b520b1f747ab266a4fe2d8a87d321b69c4786f58b348f758a4"
+        "slot": "worklistConcern"
       },
       {
         "name": "bootstrap",
-        "slot": "worklistConcern",
-        "signature_sha256": "73263069c3fa337bff8b44e6d4c871bd5f0a27553f3566b75ca0c09379284147"
+        "slot": "worklistConcern"
       },
       {
         "name": "authzDicom",
-        "slot": "dicomGatewayConcern",
-        "signature_sha256": "ec350f437b44cfa1a606365a8471cd7b21114c7fbffcc7f1bd5f5372d020fe07"
+        "slot": "dicomGatewayConcern"
       },
       {
         "name": "announceStudy",
-        "slot": "dicomGatewayConcern",
-        "signature_sha256": "5b58ba77ff42eb49805b196632f23dbb70ba2fabdb7a601e2483e5f59af32ebc"
+        "slot": "dicomGatewayConcern"
       },
       {
         "name": "gatewayReceipt",
-        "slot": "dicomGatewayConcern",
-        "signature_sha256": "0f635d1f937f089723fc63f17f319cdb74c6dbe8affea1d60a9ef1d1a08ef44d"
+        "slot": "dicomGatewayConcern"
       },
       {
         "name": "requestGatewayRetry",
-        "slot": "dicomGatewayConcern",
-        "signature_sha256": "91cd29216d8c623c60b09446cc41ac68899cf7dc83ae0644711f6197db32d043"
+        "slot": "dicomGatewayConcern"
       },
       {
         "name": "gatewayRetryRequests",
-        "slot": "dicomGatewayConcern",
-        "signature_sha256": "b348dc524acd8167e39f779673a3cc6b5b87adce1dffd7382cacf2e37c4a1770"
+        "slot": "dicomGatewayConcern"
       },
       {
         "name": "dicomLookup",
-        "slot": "dicomGatewayConcern",
-        "signature_sha256": "1f4047f066cf8b5a1c56a4b3602fbb996567c02f3e79ff122c36273c88668287"
+        "slot": "dicomGatewayConcern"
       },
       {
         "name": "patchState",
         "slot": "clinicalConcern",
-        "signature_sha256": "6e2ff4d84377b63791ef80dea12c52141493ea19a4b6e271265536f478f306c8",
         "implementation": {
           "file": "api/src/emr-clinical/pacs-routes.ts",
           "owner": "PacsClinicalRoutes",
@@ -5063,18 +5022,15 @@
       },
       {
         "name": "match",
-        "slot": "studyStateConcern",
-        "signature_sha256": "78d957298a9acbfda54e07ec2fa3967d1d420b5b585c618ca793df2e8484dc48"
+        "slot": "studyStateConcern"
       },
       {
         "name": "unmatch",
-        "slot": "studyStateConcern",
-        "signature_sha256": "f5a8566aca618651d080bbe29bf7306bfa3882f85b3d79a57dacbc622906e43e"
+        "slot": "studyStateConcern"
       },
       {
         "name": "removeState",
         "slot": "clinicalConcern",
-        "signature_sha256": "4dbbe19f2abd9ec49bd0192f3a1583fd6b4beccf714466d9d7fdbcc987437817",
         "implementation": {
           "file": "api/src/emr-clinical/pacs-routes.ts",
           "owner": "PacsClinicalRoutes",
@@ -5085,7 +5041,6 @@
       {
         "name": "techNote",
         "slot": "clinicalConcern",
-        "signature_sha256": "02b3c302eee7c82d8cea8476ec05ea83571225d1afacc36540f88116902da95e",
         "implementation": {
           "file": "api/src/emr-clinical/pacs-routes.ts",
           "owner": "PacsClinicalRoutes",
@@ -5096,7 +5051,6 @@
       {
         "name": "saveTechNote",
         "slot": "clinicalConcern",
-        "signature_sha256": "ff971cfc1c5b2533e27aab8b827acc201b3b33f7df06ca4fc81a594fd3c18a1e",
         "implementation": {
           "file": "api/src/emr-clinical/pacs-routes.ts",
           "owner": "PacsClinicalRoutes",
@@ -5106,58 +5060,47 @@
       },
       {
         "name": "hold",
-        "slot": "holdConcern",
-        "signature_sha256": "c7a48f6885b9d113da19f8a2379fd543169ba4117ac6de09d7f9759c4cbca1cf"
+        "slot": "holdConcern"
       },
       {
         "name": "release",
-        "slot": "holdConcern",
-        "signature_sha256": "b539ea3f120dceaf2416341a7b307c5741b74b062617ffa33f2aca0446ed4457"
+        "slot": "holdConcern"
       },
       {
         "name": "forceRelease",
-        "slot": "holdConcern",
-        "signature_sha256": "3aadd03dfc63821b21730d3ca211f8a4b95c154872b54f405c18383ec12ad411"
+        "slot": "holdConcern"
       },
       {
         "name": "clinicianStudies",
-        "slot": "clinicianConcern",
-        "signature_sha256": "5b02148fb047a09e63bc5fe6f77b35bd5a8aef9e5e32f211229bbb5d60383dd7"
+        "slot": "clinicianConcern"
       },
       {
         "name": "clinicianReportRead",
-        "slot": "clinicianConcern",
-        "signature_sha256": "789b07c90b870684db375e328ff3f95c6d3cdd5dbbc106640484488fd68e5eb7"
+        "slot": "clinicianConcern"
       },
       {
         "name": "clinicianViewerHead",
-        "slot": "clinicianConcern",
-        "signature_sha256": "963a6fb0d72afed9623e986c6c8e399144a1e060a47ab570e95dc857af732148"
+        "slot": "clinicianConcern"
       },
       {
         "name": "clinicianTimeline",
-        "slot": "clinicianConcern",
-        "signature_sha256": "f0ef2a47d67a293e0b909c2e132ed06bd9749a8ac132b321e42bf757ec7568ce"
+        "slot": "clinicianConcern"
       },
       {
         "name": "versions",
-        "slot": "reportEvidenceConcern",
-        "signature_sha256": "a853074223da023a1f797908fd51fa193d3f0cd241c77f49b4c864ee6b40545a"
+        "slot": "reportEvidenceConcern"
       },
       {
         "name": "reportCitations",
-        "slot": "reportEvidenceConcern",
-        "signature_sha256": "82b477b9c936d24b9945b111bacfb3d5deff67a523c32258dd9e9ef46d11f3f6"
+        "slot": "reportEvidenceConcern"
       },
       {
         "name": "reportStructure",
-        "slot": "reportEvidenceConcern",
-        "signature_sha256": "be74d55042c85af251d0881f8afe504435ecd84a3b4f71ff80a704603a0f6d69"
+        "slot": "reportEvidenceConcern"
       },
       {
         "name": "reportVersionCitations",
-        "slot": "reportEvidenceConcern",
-        "signature_sha256": "103aac9a524cfaff9a280fb5e1597acb2531b0641b2f0a5efe64235ad8d9d0c0"
+        "slot": "reportEvidenceConcern"
       },
       {
         "name": "readDraft",
@@ -5165,13 +5108,11 @@
       },
       {
         "name": "dictationGate",
-        "slot": "reportDraftConcern",
-        "signature_sha256": "0dac8988e166a9d2b3f07ef93927c3f73003de60778d936011a06a7b147bab5b"
+        "slot": "reportDraftConcern"
       },
       {
         "name": "dictationAudit",
-        "slot": "reportDraftConcern",
-        "signature_sha256": "43c293b711be39982d66258a3013ab85f53aa129a7647b13c52af91736aee116"
+        "slot": "reportDraftConcern"
       },
       {
         "name": "putReport",
@@ -5179,13 +5120,11 @@
       },
       {
         "name": "discardDraft",
-        "slot": "reportDraftConcern",
-        "signature_sha256": "9f8452acc11bba3fa3f9f248b5ed8e09ca817032795766039ebb074ceb794eba"
+        "slot": "reportDraftConcern"
       },
       {
         "name": "forceDiscardDrafts",
-        "slot": "reportDraftConcern",
-        "signature_sha256": "4eb142a074a0ffa164e040c432656d6a1c25829982ed8b85d2c3f058d18c5332"
+        "slot": "reportDraftConcern"
       },
       {
         "name": "commitReport",
@@ -5457,8 +5396,7 @@
       "ImageRequestService",
       "ClinicalContextService",
       "CriticalResultService",
-      "APP_GUARD=AuthGuard",
-      "APP_INTERCEPTOR=StudyAccessInterceptor"
+      "APP_GUARD=AuthGuard"
     ],
     "exports": [],
     "imports": [],
@@ -5835,42 +5773,9 @@
         "scope": null,
         "declared": [],
         "optional": []
-      },
-      "StudyAccessInterceptor": {
-        "params": [
-          "StudyAccessService"
-        ],
-        "scope": null,
-        "declared": [],
-        "optional": []
       }
     },
-    "middleware": [
-      {
-        "apply": [
-          "adminNoStore"
-        ],
-        "exclude": [],
-        "forRoutes": [
-          "AdminController",
-          "ViewerController",
-          "FindingController",
-          "ViewerJobController",
-          "ConnectController",
-          "ManualSrController",
-          "ReportPreviewController",
-          "FavoriteController",
-          "StudyTagsController",
-          "ReaderAssignmentController",
-          "ConsultationController",
-          "ClinicianQuestionController",
-          "ImageRequestController",
-          "ClinicalContextController",
-          "CriticalResultController",
-          "StudyAccessController"
-        ]
-      }
-    ],
+    "middleware": [],
     "routes": [
       {
         "controller": "AdminController",
@@ -5993,23 +5898,6 @@
           "4:2@2:\"code\":0",
           "4:3@3:\"state\":0",
           "4:4@4:\"error\":0"
-        ]
-      },
-      {
-        "controller": "AuthController",
-        "handler": "entry",
-        "method": "POST",
-        "paths": [
-          "auth|entry"
-        ],
-        "public": true,
-        "status": 200,
-        "headers": [],
-        "guards": [],
-        "interceptors": [],
-        "args": [
-          "0:0@0:null:0",
-          "1:1@1:null:0"
         ]
       },
       {
@@ -8318,30 +8206,6 @@
         "optional": []
       }
     },
-    "changed_injectables": {
-      "note": "D1489 (consult u4b-download-grant option A): the global AuthGuard gains StudyTransferLocalService, whose public grant check stands in for the session binding on the exact archive GET; di keeps the pre-split constructor and this delta is the only change",
-      "AuthGuard": {
-        "before": {
-          "params": [
-            "Reflector",
-            "AuthService"
-          ],
-          "scope": null,
-          "declared": [],
-          "optional": []
-        },
-        "after": {
-          "params": [
-            "Reflector",
-            "AuthService",
-            "StudyTransferLocalService"
-          ],
-          "scope": null,
-          "declared": [],
-          "optional": []
-        }
-      }
-    },
     "routes": [
       {
         "controller": "StudyTransferLocalController",
@@ -8521,6 +8385,10 @@
       "api/src/pacs/report-draft.ts"
     ]
   },
+  "viewer_ux": {
+    "note": "D73: viewer settings functionally extended preferences after the split. Preserve historical move proof; validate current owner/revision, readback and workspace/viewer preservation through workspace_shortcuts_v2_service_test.cjs, without pinning new private helpers.",
+    "changed_concerns": ["api/src/pacs/preferences.ts"]
+  },
   "emr_d_online": {
     "unit": "EMR-D online (D1824, 2464002)",
     "facade_signatures": [
@@ -8655,7 +8523,7 @@
     "controllers": [],
     "providers": [
       "OnlineImageService",
-      "ModuleAImageContextPending",
+      "OrthancImageCatalog",
       "ImageContextSource=factory",
       "AdminAccessReview"
     ],
@@ -8711,10 +8579,17 @@
         ],
         "optional": []
       },
-      "ModuleAImageContextPending": {
-        "params": [],
+      "OrthancImageCatalog": {
+        "params": [
+          "PrismaService",
+          "Object",
+          "Object"
+        ],
         "scope": null,
-        "declared": [],
+        "declared": [
+          "2:Symbol(RequestContextSource)",
+          "1:Symbol(CURRENT_CLINICAL_CONTEXT)"
+        ],
         "optional": []
       },
       "AdminAccessReview": {
@@ -8849,8 +8724,7 @@
         "before": {
           "params": [
             "Reflector",
-            "AuthService",
-            "StudyTransferLocalService"
+            "AuthService"
           ],
           "scope": null,
           "declared": [],
@@ -8860,12 +8734,11 @@
           "params": [
             "Reflector",
             "AuthService",
-            "StudyTransferLocalService",
             "Object"
           ],
           "scope": null,
           "declared": [
-            "3:Symbol(RequestContextCapture)"
+            "2:Symbol(RequestContextCapture)"
           ],
           "optional": []
         }
@@ -8874,16 +8747,7 @@
   },
   "di_additions_f_link": {
     "unit": "F_LINK",
-    "middleware_routes": [
-      {
-        "apply": [
-          "adminNoStore"
-        ],
-        "forRoutes": [
-          "EmrAuditController"
-        ]
-      }
-    ],
+    "middleware_routes": [],
     "controllers": [
       "EmrAuditController"
     ],
@@ -9088,24 +8952,80 @@
       }
     }
   },
+  "di_additions_key_admin": {
+    "unit": "key-management-entry",
+    "middleware_routes": [],
+    "controllers": [
+      "SigningKeyAdminController"
+    ],
+    "providers": [
+      "Symbol(EmrSigningKeyAdmin)=factory"
+    ],
+    "routes": [
+      {
+        "controller": "SigningKeyAdminController",
+        "handler": "change",
+        "method": "POST",
+        "paths": [
+          "/|admin/users/:id/signing-key"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "SigningKeyAdminController",
+        "handler": "read",
+        "method": "GET",
+        "paths": [
+          "/|admin/users/:id/signing-key"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      }
+    ],
+    "injectables": {
+      "SigningKeyAdminController": {
+        "params": [
+          "PrismaService",
+          "Object",
+          "Object"
+        ],
+        "scope": null,
+        "declared": [
+          "2:Symbol(EmrSigningKeyAdmin)",
+          "1:Symbol(RequestContextSource)"
+        ],
+        "optional": []
+      }
+    }
+  },
   "di_additions_d_online": {
     "unit": "EMR-D online routes",
     "controllers": [],
     "providers": [
-      "ModuleAClinicalSourcesPending",
+      "Symbol(CURRENT_CLINICAL_CONTEXT)=factory",
       "Symbol(OnlineClinicalServices)=factory",
       "Symbol(EMR_CLINICAL_ROUTES)=factory",
+      "Symbol(EMR_MANUAL_SR_SIGNING)=factory",
       "Symbol(EMR_NATIVE_REPORT_SIGNING)=factory"
     ],
     "routes": [],
-    "injectables": {
-      "ModuleAClinicalSourcesPending": {
-        "params": [],
-        "scope": null,
-        "declared": [],
-        "optional": []
-      }
-    },
+    "injectables": {},
     "changed_injectables": {
       "PacsService": {
         "before": {
@@ -9259,6 +9179,31 @@
           "optional": [
             1
           ]
+        }
+      },
+      "ManualSrService": {
+        "before": {
+          "params": [
+            "PrismaService",
+            "OrthancService",
+            "StudyAccessService"
+          ],
+          "scope": null,
+          "declared": [],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PrismaService",
+            "OrthancService",
+            "StudyAccessService",
+            "ManualSrSigning"
+          ],
+          "scope": null,
+          "declared": [
+            "3:Symbol(EMR_MANUAL_SR_SIGNING)"
+          ],
+          "optional": []
         }
       }
     }

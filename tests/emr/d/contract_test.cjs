@@ -450,6 +450,46 @@ test('TEST-D-02 versions_and_sr: a rewritten, dropped or reordered earlier versi
   refused(() => R.applyPlan(opened, stale), 'StaleRevision', 'a plan cannot be appended to another head');
 });
 
+test('TEST-D-02 versions_and_sr: a stored history replays to the step-by-step fold and is refused wherever the fold refuses it', () => {
+  // The store reads a unit back from its stored plans: the one-pass replay must give the unit the fold of applyPlan
+  // gives, and refuse every rewritten, dropped, reordered or forged history with the same code.
+  const histories = [];
+  const record = (history, unit, surface, a, body, extra) => {
+    const p = R.planClinicalWrite(input(surface, a, unit, body, extra));
+    history.push(JSON.parse(JSON.stringify(p)));
+    return R.applyPlan(unit, p);
+  };
+  const consult = [];
+  let unit = record(consult, null, 'consultation.create', r1,
+    { requestId: randomUUID(), expectedOwner: owner(r1), recipientSub: randomUUID(), reason: Q }, { recipientId: 'r2' });
+  unit = record(consult, unit, 'consultation.accept', r2, changeBody(r2, unit, 'accept', ''));
+  record(consult, unit, 'consultation.complete', r2, changeBody(r2, unit, 'complete', ANSWER));
+  const findingHistory = [];
+  let head = record(findingHistory, null, 'finding.create', r1, { requestId: randomUUID(), item: {} }, { content: SNAPSHOT });
+  for (let revision = 1; revision <= 4; revision++)
+    head = record(findingHistory, head, 'finding.edit', r1, { requestId: randomUUID(), expectedRevision: revision, action: 'edit', item: {} },
+      { content: SNAPSHOT.replace('8 mm', `${8 + revision} mm`) });
+  histories.push(consult, findingHistory);
+  const fold = list => list.reduce((u, p) => R.applyPlan(u, p), null);
+  const outcome = fn => { try { return { unit: fn() }; } catch (error) { return { refused: error.code ?? String(error) }; } };
+  for (const history of histories) assert.deepEqual(R.replayUnit(history), fold(history));
+  assert.equal(R.replayUnit([]), null);
+  const tampered = [
+    ['UnitHistoryBroken', list => { list[0].version.text = 'SYN 다른 원문'; }],
+    ['StaleRevision', list => { list.splice(1, 1); }],
+    ['StaleRevision', list => { list.reverse(); }],
+    ['UnitHistoryBroken', list => { list[1].projection.state = 'Closed'; }],
+    ['UnitHistoryBroken', list => { list[2].parties = { authorId: 'r9', recipientId: list[2].parties.recipientId }; }],
+    ['UnitHistoryBroken', list => { list[2].record = 'question'; }],
+    ['UnitHistoryBroken', list => { list[1].version.at = t(-10); }],
+  ];
+  for (const history of histories) for (const [code, change] of tampered) {
+    const list = structuredClone(history); change(list);
+    assert.deepEqual(outcome(() => fold(list)), { refused: code }, 'the fold refuses this history');
+    assert.deepEqual(outcome(() => R.replayUnit(list)), { refused: code }, 'and so does the replay');
+  }
+});
+
 test('TEST-D-02 versions_and_sr: a finding correction keeps the original and incorporates source copies, not the comparison link', () => {
   const item = measurement();
   const created = finding({ attachments: [item], navigation: ['1.2.840.99.7'] });

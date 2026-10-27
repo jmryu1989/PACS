@@ -11,7 +11,7 @@ Orthanc·NestJS/Prisma·PostgreSQL·Keycloak·nginx로 구성된 의료영상 �
 과거 작업지시의 다음 단계나 비차단 개선을 근거로 보류된 운영 강화·기관 확장을 자동 시작하지 않는다.
 진행 보고는 사용 가능한 업무·사용자 확인 상태·남은 조건·다음 한 묶음을 중심으로 쓰고, 내부 작업 번호는 근거 추적에 쓴다.
 
-지휘자는 범위와 작업 배정을 맡고, 구현자는 단위 지시서의 owned_paths 안에서 진단·구현하며 재위임하지 않는다. 구현과 검수는 서로 다른 모델 계열이 맡는다: Claude가 실질적으로 쓴 코드는 GPT가, GPT(Codex)가 쓴 코드는 Claude가 한 번 독립 검수한다. 어느 모델이 구현·검수하는지는 현행 사용자 모드를 따르며 이 파일에 고정하지 않는다. 제출 후보는 같은 최종 change_sha의 PR CI(G3 포함)와 그 교차 검수 판정을 거친다. 중간 보존 커밋 자체가 새 후보 라운드는 아니다. G3는 후보 SHA에서 `.github/workflows/candidate.yml`을 실행하는 후보 관문이다(§2). 상세 실행·병합 명령은 비공개 docs-repo의 cmdtools README에 둔다.
+지휘자는 범위와 작업 배정을 맡고, 구현자는 단위 지시서의 owned_paths 안에서 진단·구현하며 재위임하지 않는다. 구현과 검수는 서로 다른 모델 계열이 맡는다: Claude가 실질적으로 쓴 코드는 GPT가, GPT(Codex)가 쓴 코드는 Claude가 한 번 독립 검수한다. 어느 모델이 구현·검수하는지는 현행 사용자 모드를 따르며 이 파일에 고정하지 않는다. 제출 후보는 같은 최종 change_sha의 required CI와 그 교차 검수 판정을 거친다. 중간 보존 커밋 자체가 새 후보 라운드는 아니다. G3는 최종 후보 SHA에서 workflow_dispatch로 `.github/workflows/candidate.yml`을 실행하는 후보 관문이다(§2). 상세 실행·병합 명령은 비공개 docs-repo의 cmdtools README에 둔다.
 
 ## 개발 집중 방식
 
@@ -49,7 +49,7 @@ Orthanc·NestJS/Prisma·PostgreSQL·Keycloak·nginx로 구성된 의료영상 �
 | API 목록·판독·hold·권한 | `api/src/pacs.controller.ts`·`pacs.service.ts`(공개 facade)·`pacs/`(concern 지도 `pacs/README.md`: `access.ts`의 `visible()`·`need()`, `report-commit.ts`의 `commitReport`, `hold.ts`의 `hold`), `auth.guard.ts` | `tests/invariants_live.py`(라우트 선언표 `ROUTES`는 컨트롤러 데코레이터와 정확 일치해야 함), `tests/e2e/test_worklist.py`. 후보 선택 건수는 `tests/candidate_ci.py`의 선언에만 두고 실제 수집 목록과 정확히 일치해야 한다 |
 | API 기능별 | `favorite.*`·`study-tags.*`·`reader-assignment.*`·`viewer-job.*`·`manual-sr.*`·`connect.*`·`admin.*`·`report-preview.controller.ts`, `clinician-policy.ts`·`clinician-question.*`·`clinical-context*`·`critical-result*`·`image-request.*`·`consultation.*`·`study-access*`, 원본 조회 `orthanc.service.ts`·`study-page.ts`, 계정 `keycloak.service.ts` | 해당 `tests/e2e/test_<기능>.py`, `tests/*_live.py`, 역할·경로 행렬 `tests/clinician_policy_test.py`·`tests/clinician_policy_fixtures.json` |
 | DB | `api/prisma/schema.prisma`, `api/prisma/migrations/<시각>_<이름>/migration.sql` (`StudyState.preDocSub`·`preReviewerSub`: 판독 지정 주체) | migration을 추가하면 같은 커밋에서 `tests/production_image_test.py`의 기대 목록과 복원 fixture(`tests/ops_product_transfer_*.py`)를 갱신한다(2026-09-09 누락으로 CI `runtime` 12커밋 실패) |
-| 운영·CI | `.github/workflows/validate.yml`(build/runtime/measurements)·`candidate.yml`(G3, `tests/candidate_ci.py`)·`restore-*.yml`, `scripts/ops_*.py`, `docker-compose*.yml`, `proxy/` | `tests/ops_*_test.py`, `tests/production_image_test.py`, `tests/candidate_ci_test.py` |
+| 운영·CI | `.github/workflows/validate.yml`(build/runtime/measurements)·`candidate.yml`(G3, `tests/candidate_ci.py`), `scripts/ops_*.py`, `docker-compose*.yml`, `proxy/` | `tests/ops_*_test.py`, `tests/production_image_test.py`, `tests/candidate_ci_test.py` |
 | 시험 실행 통제 | `scripts/run-tests.py`·`tests/live_test_gate.py` | `tests/execution_guard_test.py`·`tests/execution_selection_test.py` |
 | 실행 기록 | `scripts/record-run.py` → 로컬 `tmp/<단위>/` → 비공개 `docs-repo/evidence/<단위>/` | `tests/record_run_test.py` |
 
@@ -108,7 +108,7 @@ LiveStack이 생성·정리하는 임시 클라이언트에만 사용하며 기�
 제품 동작은 컨테이너 스택에서 재현한다. 검증 단위는 사용자 업무와 전달 후보이며, 턴 종료나 중간 커밋 자체는 전체 검증의 사유가 아니다.
 
 - 전달 전 개발 중에는 변경 기능, 직접 영향을 받는 회귀, 필요한 빌드·구문 검사를 수행한다. 중간 보존 커밋마다 후보 시험 전량·독립 검수·제품 태그를 반복하지 않는다.
-- 제출 후보는 변경 종류와 관계없이 같은 최종 change_sha의 PR CI(G3 포함)와 교차 검수 판정을 거친다. G3(`.github/workflows/candidate.yml`)는 후보 SHA에서 `tests/candidate_ci.py`가 선언한 선택(아래 두 모듈과 누적 업무 흐름)을 실행하며, 선언과 실제 수집 목록이 정확히 일치해야 한다.
+- 제출 후보는 변경 종류와 관계없이 같은 최종 change_sha의 required CI와 교차 검수 판정을 거친다. G3(`.github/workflows/candidate.yml`)는 최종 후보 SHA에서 workflow_dispatch로 `tests/candidate_ci.py`가 선언한 선택(아래 두 모듈과 누적 업무 흐름)을 실행하며, 선언과 실제 수집 목록이 정확히 일치해야 한다.
 - 인증·권한·판독 상태 전이·원본/저장 보존·DB/migration을 바꾸면 해당 실패와 보존 경계를 즉시 검사한다. 공유 경로 변경, 영향 범위 불명확 또는 교차 기능 실패가 있으면 아래 두 후보 시험을 포함해 검증 범위를 넓힌다.
 - 의사에게 처음 전달할 때, 평가 후보를 교체할 때, 실제 배포 후보를 확정할 때는 **같은 최종 SHA**에서 아래 두 시험을 순차 실행한다. 누적 변경의 기능 통합·필요한 정확도 시험, 교차 검수의 미해결 차단 결함 0, 실제 CI도 필수다.
 - 완료한 시험은 근거 없이 반복하지 않는다. 시험 삭제·단언 약화·실패 생략으로 실행 비용을 줄이지 않는다. 현재 CI 구조와 실행 트리거는 유지하며, 이 실행 정책 변경을 CI 축소로 기록하지 않는다.
@@ -158,7 +158,7 @@ curl -sk https://localhost:9443/api/health
 ## 5. 커밋·검토·발행
 
 - 한 변경 목적씩 커밋하고 증상·원인·수정·실제 검증 결과를 적는다. 커밋 메시지에는 실제로 코드를 쓴 모델만 적는다. **커밋 직후 push**한다(전원 차단·계정 전환 때 작업 보존). 원격 SHA·태그 확인은 실제 제출·릴리스 때 한다. 중간 커밋마다 별도 게시·검수·제품 태그를 만들지 않는다.
-- 제출 후보는 문서·UI·시험 변경을 포함해 같은 최종 change_sha의 PR CI(G3 포함)와 교차 검수 판정을 거친 뒤에만 병합한다. `--admin` 병합과 force-push는 쓰지 않는다. 중간 보존 커밋은 후보 라운드가 아니며 최종 검증 완료나 검수 통과로 표시하지 않는다. 병합 명령은 비공개 docs-repo의 cmdtools README를 따른다.
+- 제출 후보는 문서·UI·시험 변경을 포함해 같은 최종 change_sha의 required CI와 교차 검수 판정을 거친 뒤에만 병합한다. `--admin` 병합과 force-push는 쓰지 않는다. 중간 보존 커밋은 후보 라운드가 아니며 최종 검증 완료나 검수 통과로 표시하지 않는다. 병합 명령은 비공개 docs-repo의 cmdtools README를 따른다.
 - 제출 후보의 최종 change_sha에서 검증하고 명령·실제 exit·선택된 시험·원문 로그를 보존한다. 실패·skip·미실행과 다른 SHA의 결과는 통과 증거로 대체하지 않는다. 작업 결과는 주문이 지정한 한 곳에 대상 SHA·실제 결과·남은 결함·원문 로그 경로로 남긴다. 긴 작업은 의미 있는 중간 산출물을 자기 경로만 커밋·push하여 보존하고, WIP·미검증 상태를 명시한다.
 - 의사 전달·평가 후보 교체·실제 배포 후보의 제품 릴리스는 선행 REQ/RISK/TEST 스펙과 같은 최종 SHA의 누적 검증·실제 CI·교차 검수 미해결 차단 결함 0, 실제 배포·backup/restore·rollback 확인을 연결한다. 통과 후 주석 태그를 즉시 push하고 원격 object/peeled와 태그 CI를 확인한다. 공유 태그는 재지정하지 않는다.
 - 비공개 스펙 SHA·검토/시험·발행 기록은 비공개 저장소에서 연결한다. 유효한 검토 진행 중 같은 범위의 중복 검토를 시작하지 않는다.

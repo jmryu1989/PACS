@@ -43,7 +43,6 @@ const P = require('/app/dist/critical-result-policy');
 const { CriticalResultService, CRITICAL_RESULT_AUDIT_ACTION } = require('/app/dist/critical-result.service');
 const { CriticalResultController } = require('/app/dist/critical-result.controller');
 const { StudyAccessService } = require('/app/dist/study-access.service');
-const { StudyAccessInterceptor } = require('/app/dist/study-access.interceptor');
 const { OWNER_ONLY_AUDIT_ACTIONS } = require('/app/dist/pacs.service');
 const { AUDIT_HIDDEN_STUDY_SCOPED, auditRule } = require('/app/dist/admin-audit');
 const { CLINICIAN_BUSINESS_ROUTES } = require('/app/dist/clinician-policy');
@@ -717,26 +716,15 @@ test('the received list pages by (createdAt, id) under a cursor bound to the Stu
   assert.equal((readBody(await w.svc.list(person('P'), { view: 'received' }))).items.length, 50);
 });
 
-test('SV13 a StudyAccess refusal after the commit leaves the applied write; the same requestId replays it', async () => {
-  for (const failure of ['409', '503']) {
+test('SV13 a committed write whose answer is lost replays with the same requestId', async () => {
     const w = await world();
     const v1 = await approved(w);
     const controller = new CriticalResultController(w.svc);
-    let mode = failure;
-    const access = { snapshot: async () => ({ revision: 1 }), unchanged: async () => {
-      if (mode === '409') throw new ConflictException({ code: 'STUDY_ACCESS_CHANGED', message: 'SYNTHETIC policy changed' });
-      if (mode === '503') throw new ServiceUnavailableException('SYNTHETIC policy read failed');
-    } };
-    const interceptor = new StudyAccessInterceptor(access);
     const request = c => ({ kind: 'member', institution: c.institution, sub: c.sub, actor: c.actor, roles: c.roles, displayName: c.name });
     const call = async (handler, c, ...args) => {
       const req = request(c);
-      const context = { switchToHttp: () => ({ getRequest: () => req }), getClass: () => CriticalResultController,
-        getHandler: () => CriticalResultController.prototype[handler] };
-      const next = { handle: () => from(controller[handler](...args.map(a => a === '$req' ? req : a))) };
-      return lastValueFrom(await interceptor.intercept(context, next));
+      return controller[handler](...args.map(a => a === '$req' ? req : a));
     };
-    const expected = failure === '409' ? code(409, 'STUDY_ACCESS_CHANGED') : code(503);
     const writes = [
       ['create', S(), [UID, '$req', createBody(S(), id(81), 'P', v1)], { records: 1, events: 1, receipts: 1, audits: 1 }],
       ['ack', person('P'), [id(81), '$req', ackBody(person('P'), id(82))], { records: 1, events: 2, receipts: 2, audits: 2 }],
@@ -745,18 +733,15 @@ test('SV13 a StudyAccess refusal after the commit leaves the applied write; the 
       ['cancel', S(), [id(84), '$req', cancelBody(S(), id(85))], { records: 3, events: 6, receipts: 5, audits: 6 }],
     ];
     for (const [handler, c, args, after] of writes) {
-      mode = failure;
-      await assert.rejects(call(handler, c, ...args), expected, handler + ' ' + failure);
+      await call(handler, c, ...args); // Drop the first answer, then retry the same request.
       const { updates, ...counts } = await w.count();
-      assert.deepEqual(counts, after, handler + ': the write committed before the refusal');
-      mode = 'pass';
+      assert.deepEqual(counts, after, handler + ': the write committed');
       const replay = await call(handler, c, ...args);
       assert.equal(replay.replayed, true, handler);
       assert.equal(replay.applied.requestId, args[2].requestId);
       const { updates: _u, ...same } = await w.count();
       assert.deepEqual(same, after, handler + ': the replay writes nothing');
     }
-  }
 });
 
 test('SV14 a delayed original create applies after its replay was refused; a delayed id-route write cannot outlive a terminal state', async () => {
@@ -901,29 +886,7 @@ test('lock failure only: a malformed policy read in the transaction and the post
   assert.deepEqual([refused.getStatus(), refused.getResponse()], studyAccessAnswer, 'StudyAccess\'s own answer for this row, unchanged');
   assert.equal(refused.getResponse().code, undefined);
   assert.deepEqual(await w.count(), { records: 0, events: 0, receipts: 0, audits: 0, updates: 0 });
-  // After the commit the interceptor's 503 stays code-less even when StudyAccess's cause is a DB timeout (SV13, section 8.1).
-  await w.base.$executeRaw`DELETE FROM "StudyAccessPolicy" WHERE subject = ${SUBS.S}`;
-  const controller = new CriticalResultController(w.svc);
-  let fail = true;
-  const timeout = Object.assign(new Error('SYN-DB-DETAIL canceling statement due to statement timeout'), { code: 'P2010', meta: { code: '57014' } });
-  const interceptor = new StudyAccessInterceptor({ snapshot: async () => ({ revision: 0 }), unchanged: async () => {
-    if (fail) throw new ServiceUnavailableException('SYNTHETIC policy read failed', { cause: timeout });
-  } });
-  const c = S(), req = { kind: 'member', institution: c.institution, sub: c.sub, actor: c.actor, roles: c.roles, displayName: c.name };
-  const context = { switchToHttp: () => ({ getRequest: () => req }), getClass: () => CriticalResultController,
-    getHandler: () => CriticalResultController.prototype.create };
-  const post = async () => lastValueFrom(await interceptor.intercept(context, { handle: () => from(controller.create(UID, req, createBody(c, id(311), 'P', v1))) }));
-  await assert.rejects(post(), e => {
-    assert.deepEqual([e.getStatus(), e.getResponse().code], [503, undefined]);
-    assert.ok(!DB_TEXT.test(JSON.stringify(e.getResponse())));
-    return true;
-  });
-  const { updates, ...committed } = await w.count();
-  assert.deepEqual(committed, { records: 1, events: 1, receipts: 1, audits: 1 }, 'the write committed before the refusal');
-  fail = false;
-  assert.equal((await post()).replayed, true);
-  const { updates: _u, ...same } = await w.count();
-  assert.deepEqual(same, committed, 'the replay writes nothing');
+
 });
 
 test('S-SU / C3: head moved after create is a stub with no message or body, ACK refused, supersede onto the new head', async () => {
@@ -1525,23 +1488,16 @@ test('TSV16 cancel and supersede judge the channel after the study row lock: a c
   await keep.committed();
 });
 
-test('TSV17 a tele create applied behind a post-commit StudyAccess refusal: after the channel closes the same request is 404, never a stored result (TC-07)', async () => {
+test('TSV17 a tele create whose committed answer was lost: after the channel closes the same request is 404, never a stored result (TC-07)', async () => {
   const w = await teleWorld();
   const v1 = await w.commit(TELE_UID, 'approve', { author: actorOf('S') });
   const controller = new CriticalResultController(w.svc);
-  let refuse = true;
-  const interceptor = new StudyAccessInterceptor({ snapshot: async () => ({ revision: 1 }), unchanged: async () => {
-    if (refuse) throw new ConflictException({ code: 'STUDY_ACCESS_CHANGED', message: 'SYNTHETIC policy changed' });
-  } });
   const c = S(), req = { kind: 'member', institution: c.institution, sub: c.sub, actor: c.actor, roles: c.roles, displayName: c.name };
-  const context = { switchToHttp: () => ({ getRequest: () => req }), getClass: () => CriticalResultController,
-    getHandler: () => CriticalResultController.prototype.create };
   const body = createBody(c, id(2071), 'KC', v1);
-  const post = async () => lastValueFrom(await interceptor.intercept(context, { handle: () => from(controller.create(TELE_UID, req, body)) }));
-  await assert.rejects(post(), code(409, 'STUDY_ACCESS_CHANGED'));
+  const post = () => controller.create(TELE_UID, req, body);
+  await post(); // The first answer is lost before the caller retries.
   const applied = await w.count();
-  assert.deepEqual(applied, { records: 1, events: 1, receipts: 1, audits: 1, updates: 0 }, 'the write committed before the refusal');
-  refuse = false;
+  assert.deepEqual(applied, { records: 1, events: 1, receipts: 1, audits: 1, updates: 0 }, 'the write committed');
   await w.tele(TELE_UID, null);
   await assert.rejects(post(), code(404, 'STUDY_NOT_FOUND'));
   assert.deepEqual(await w.count(), applied);

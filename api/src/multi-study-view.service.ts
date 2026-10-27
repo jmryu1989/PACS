@@ -5,9 +5,10 @@
  * access/identity contracts so their decisions cannot drift between consumers.
  * A denied member's serving source is never read. Keep the initial access decision;
  * D1764 removes the duplicate state/policy/source-tag rechecks, not that decision
- * or the returned UID and mixed-patient protections. The existing response
- * interceptor still owns its policy revision check. A1 records the selected
- * metadata under the request work and withholds it until every receipt is durable.
+ * or the returned UID and mixed-patient protections. PC3 also retires the outer
+ * policy-revision interceptor; subsequent requests apply the current policy.
+ * A1 records the selected metadata under the request work and withholds it until
+ * every receipt is durable.
  */
 import { BadRequestException, ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
 import { ViewingSetAccess } from './emr-viewing/viewing-set-access';

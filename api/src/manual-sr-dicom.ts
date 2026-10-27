@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
+import { mgGeometry } from './mg-geometry';
 
 export const SR_CLASS = '1.2.840.10008.5.1.4.1.1.88.33';
 const syntax = '1.2.840.10008.1.2.1';
@@ -34,9 +35,11 @@ function srPixels(raw: Buffer, rows: number, cols: number): (i: number) => numbe
 }
 
 export function srMeasurement(item: any, tags: any, pixels?: Buffer) {
+  const mg = item.kind === 'length' && mgGeometry(tags, item.frame);
   const p = item.points, origin = vector(tags.ImagePositionPatient), orientation = vector(tags.ImageOrientationPatient), spacing = vector(tags.PixelSpacing);
   const u = orientation.slice(0, 3), v = orientation.slice(3), uu = dot(u, u), vv = dot(v, v), uv = dot(u, v), det = uu * vv - uv * uv;
   const image = (point: number[]) => {
+    if (mg) return mg.imagePoint(point).map(n => n + .5);
     const d = sub(point, origin);
     // DICOM SCOORD starts at the upper-left pixel corner; world coordinates
     // describe pixel centers. This matches the pinned worldToImageCoords.
@@ -44,7 +47,7 @@ export function srMeasurement(item: any, tags: any, pixels?: Buffer) {
       (dot(d, v) * uu - dot(d, u) * uv) / det / spacing[0] + .5];
   };
   let values: number[], graphic = p;
-  if (item.kind === 'length') values = [norm(sub(p[1], p[0]))];
+  if (item.kind === 'length') values = [mg ? mg.length(p) : norm(sub(p[1], p[0]))];
   else if (item.kind === 'angle') {
     const a = sub(p[0], p[1]), b = sub(p[2], p[1]);
     values = [Math.acos(Math.max(-1, Math.min(1, dot(a, b) / norm(a) / norm(b)))) * 180 / Math.PI];
@@ -69,7 +72,8 @@ export function srMeasurement(item: any, tags: any, pixels?: Buffer) {
   if (!saved || saved.length !== values.length || values.some((n, i) => !Number.isFinite(n) ||
       Math.abs(n - saved[i]) > (i === 0 ? tolerance : i === 1 ? .001 : 0)))
     throw new ConflictException('재확인 필요: 원본으로 계산한 값이 저장한 측정과 다릅니다');
-  return { values, graphic: graphic.flatMap(image) };
+  if (mg && item.baseline?.calculator !== mg.calculator) invalid();
+  return { values, graphic: graphic.flatMap(image), ...(mg ? { basis: mg.label } : {}) };
 }
 
 const code = (CodeValue: string, CodeMeaning: string, CodingSchemeDesignator = 'DCM') => ({ CodeValue, CodingSchemeDesignator, CodeMeaning });
@@ -87,6 +91,7 @@ export function srDataset(id: string, studyUid: string, actor: string, authorSub
     const item = head.snapshot, tool = { length: 'Length', angle: 'Angle', ellipse: 'EllipticalROI' }[item.kind];
     const image = node('IMAGE', code('121324', 'Source image'), { ReferencedSOPSequence: {
       ReferencedSOPClassUID: tags.SOPClassUID, ReferencedSOPInstanceUID: item.sopUid,
+      ...(tags.NumberOfFrames !== undefined ? { ReferencedFrameNumber: item.frame } : {}),
     } }, 'SELECTED FROM');
     const coords = node('SCOORD', code('111030', 'Image Region'), {
       GraphicType: item.kind === 'ellipse' ? 'ELLIPSE' : 'POLYLINE', GraphicData: computed.graphic, ContentSequence: image,
@@ -99,7 +104,7 @@ export function srDataset(id: string, studyUid: string, actor: string, authorSub
     const contents = [
       node('TEXT', code('112039', 'Tracking Identifier'), { TextValue: 'KIN manual v1:' + tool }, 'HAS OBS CONTEXT'),
       node('UIDREF', code('112040', 'Tracking Unique Identifier'), { UID: srUid('measurement:' + head.id) }, 'HAS OBS CONTEXT'),
-      node('TEXT', code('121106', 'Comment'), { TextValue: srText(item.label || tool) + ' [revision ' + head.revision + ']' }),
+      node('TEXT', code('121106', 'Comment'), { TextValue: srText(item.label || tool) + ' [revision ' + head.revision + ']' + (computed.basis ? ' · ' + computed.basis : '') }),
       numeric(metric, computed.values[0], unit, { ContentSequence: coords }),
     ];
     if (item.kind === 'ellipse') {
@@ -139,7 +144,7 @@ export function srDataset(id: string, studyUid: string, actor: string, authorSub
       node('CODE', code('121049', 'Language of Content Item and Descendants'), { ConceptCodeSequence: code('en-US', 'English (United States)', 'RFC5646') }, 'HAS CONCEPT MOD'),
       node('CODE', code('121005', 'Observer Type'), { ConceptCodeSequence: code('121006', 'Person') }, 'HAS OBS CONTEXT'),
       node('PNAME', code('121008', 'Person Observer Name'), { PersonName: observerName(actor) }, 'HAS OBS CONTEXT'),
-      node('CODE', code('121058', 'Procedure reported'), { ConceptCodeSequence: code('P5-08000', 'Computed Tomography', 'SRT') }, 'HAS CONCEPT MOD'),
+      node('CODE', code('121058', 'Procedure reported'), { ConceptCodeSequence: entries.every(entry => entry.tags.Modality === 'MG') ? code('MG', 'Mammography', '99KIN') : code('P5-08000', 'Computed Tomography', 'SRT') }, 'HAS CONCEPT MOD'),
       node('CONTAINER', code('111028', 'Image Library'), { ContinuityOfContent: 'SEPARATE', ContentSequence: [
         node('CONTAINER', code('126200', 'Image Library Group'), { ContinuityOfContent: 'SEPARATE', ContentSequence:
           [...series.values()].flatMap(s => s.ReferencedSOPSequence.map(ref => node('IMAGE', code('121324', 'Source image'), { ReferencedSOPSequence: ref }))), }),

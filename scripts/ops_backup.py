@@ -4,9 +4,8 @@ Usage: python scripts/ops_backup.py backup --output <outside-repository-director
        python scripts/ops_backup.py rehearse <completed-backup-directory> [--wrapping-source <relocated-custody>]
        python scripts/ops_backup.py restore-wrapping <backup> --destination <new-secret-directory> [--source <relocated-custody>]
        python scripts/ops_backup.py rotate --root <backup-root> [--keep N] [--protect NAME ...] [--dry-run]
-The running write services pause during backup and are resumed in finally. A complete backup's AuditLog rows are then
-sealed into audit-checkpoint.json and the backup root's ledger (scripts/ops_audit_integrity.py; the root needs a one-time
-`ops_audit_integrity.py init`), and rehearse verifies its restored copy against that seal.
+The running write services pause during backup and are resumed in finally. New backups need no audit seal.
+For older archives that declare audit-checkpoint.json, rehearse still verifies the restored copy against that checkpoint.
 
 The EMR-introduction release mode (scripts/ops_emr_introduction.py) uses capture_held() instead of backup(): it captures a
 snapshot while the caller keeps every writer fenced and never resumes them itself (the release decides when they return).
@@ -172,6 +171,18 @@ class LockLease:
     token: str | None = None
     identity: tuple | None = None
 
+    def retain(self):
+        """Persist the inspection hold before a deployment can start mutating."""
+        self.verify()
+        token = 'retained:' + self.token.split(':', 1)[-1]
+        if token != self.token:
+            with self.path.open('w') as handle:
+                handle.write(token)
+                handle.flush()
+                os.fsync(handle.fileno())
+            self.token = token
+        self.retained = True
+
     def verify(self):
         if (self.path is None or self.path.is_symlink() or not self.path.is_file()
                 or (self.path.stat().st_dev, self.path.stat().st_ino) != self.identity
@@ -185,10 +196,43 @@ class LockLease:
 _operations_lease = ContextVar("operations_lease", default=None)
 
 
+def recover_process_lock(path):
+    """Recover an exited process's lock; legacy/retained operation holds need inspection."""
+    try:
+        before = path.read_text()
+        owner = before.partition(':')[0]
+        pid = int(owner)
+        if pid <= 0:
+            return
+        if os.name == 'nt':
+            import ctypes
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if handle:
+                code = ctypes.c_ulong()
+                try:
+                    if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value == 259:
+                        return
+                finally:
+                    ctypes.windll.kernel32.CloseHandle(handle)
+            elif ctypes.windll.kernel32.GetLastError() != 87:
+                return
+        else:
+            try:
+                os.kill(pid, 0)
+                return
+            except ProcessLookupError:
+                pass
+        if path.read_text() == before:
+            path.unlink()
+    except (FileNotFoundError, ValueError, PermissionError):
+        return
+
+
 @contextmanager
 def lock():
     path = ROOT / ".kin-ops.lock"
-    token = uuid.uuid4().hex
+    recover_process_lock(path)
+    token = str(os.getpid()) + ':' + uuid.uuid4().hex
     descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as handle:
         handle.write(token)
@@ -447,22 +491,6 @@ const {verifyRuntimeConnection}=require('/app/dist/emr-runtime/manifest');
     run(['docker', 'exec', 'kin-api', 'node', '-e', script], timeout=timeout)
 
 
-def seal_audit(directory, parent, manifest):
-    """Stage 'seal audit': after the writers resumed, seal the AuditLog rows of this complete snapshot's kin.dump. The
-    outcome goes to the manifest's existing backup_error ('audit integrity' for a finding, 'seal audit' for a failure),
-    which the unchanged monitor reports as backup_failed; the snapshot stays complete and restorable either way. A
-    failure that ended the verification carries its termination proof (cleanup), confirmed or not, into that record."""
-    # Imported here: the audit tool builds on this module's Docker, digest and lock helpers.
-    import ops_audit_integrity as audit
-    try:
-        audit.seal(directory, parent, manifest)
-    except Exception as error:
-        manifest["backup_error"] = {"stage": "seal audit", "type": type(error).__name__}
-        if getattr(error, "cleanup", None) is not None:
-            manifest["backup_error"]["cleanup"] = error.cleanup
-        audit.replace_json(directory / "manifest.json", manifest)
-
-
 def backup(output, ready_timeout=120):
     if not 1 <= ready_timeout <= 900:
         raise RuntimeError("Readiness timeout must be between 1 and 900 seconds")
@@ -615,10 +643,6 @@ def backup(output, ready_timeout=120):
                 manifest['ready'] = False
                 manifest['readiness_error'] = 'PostgreSQL ledger readiness failed after writer resume'
         write_json(directory / "manifest.json", manifest)
-        # The seal reads only the snapshot, so it runs after the writers resumed (it never lengthens the pause) and
-        # also when resume or readiness failed: a complete snapshot is sealed whenever it exists.
-        if manifest["complete"]:
-            seal_audit(directory, parent, manifest)
         # Even an unsuccessful resume must identify a complete recovery snapshot.
         print(json.dumps({"backup": str(directory), "complete": manifest["complete"],
                           "ready": manifest["ready"], "resume_failures": resume_failures,
@@ -628,9 +652,6 @@ def backup(output, ready_timeout=120):
             raise RuntimeError("Write services need recovery: " + ", ".join(resume_failures))
         if manifest["ready"] is False:
             raise RuntimeError("Backup preserved; application readiness needs recovery before deployment")
-    if manifest.get("backup_error"):
-        raise RuntimeError("Backup preserved; audit " + manifest["backup_error"]["stage"] + " needs an operator: "
-                           + manifest["backup_error"]["type"])
     return directory
 
 
@@ -1063,7 +1084,6 @@ INVENTORY_ATTRIBUTES = {
     "dependency": "type",
     "comment": "text",
 }
-VALUE_LIMIT_BYTES = 64 * 1024 * 1024
 
 
 def _object_address(catalog, oid, subid="0"):
@@ -1366,9 +1386,9 @@ def boundary_sql(system_only):
 def boundary_proof(container, catalog, image=None):
     """Observe template0 on a private physical copy; never enable connections on the source template.
 
-    A same-image initdb supplies the postgres/template/system baseline. The helper owns its tmpfs and has no source
+    A same-image initdb supplies the postgres/template/system baseline. The helper owns its temporary storage and has no source
     volume mounts. pg_basebackup is read-only with respect to logical source contents; its checkpoint/WAL activity is
-    explicit. v1 refuses clusters over 1 GiB before creating this bounded helper. No raw values/verifiers leave it.
+    explicit. The disposable helper uses disk for its private copy. No raw values/verifiers leave it.
     """
     import shlex
     import tempfile
@@ -1377,8 +1397,8 @@ def boundary_proof(container, catalog, image=None):
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
         _unsupported("PostgreSQL 이미지 digest를 확인하지 못했습니다")
     size = psql_json(container, "kin", "SELECT sum(pg_database_size(oid)) FROM pg_database;")
-    if type(size) is not int or not 0 < size <= 1024 ** 3:
-        _unsupported("v1 template 경계 조사 한도 1 GiB를 초과했습니다")
+    if type(size) is not int or size <= 0:
+        _unsupported("template 경계 조사에 필요한 DB 크기를 읽지 못했습니다")
     env = dict(line.split("=", 1) for line in info.get("Config", {}).get("Env", []) if "=" in line)
     password = env.get("POSTGRES_PASSWORD")
     if not password or "\x00" in password:
@@ -1423,8 +1443,7 @@ def boundary_proof(container, catalog, image=None):
     script += "pg_ctl -D /tmp/source -m fast -w stop >/dev/null\npg_ctl -D /tmp/fresh -m fast -w stop >/dev/null\n"
     with tempfile.TemporaryFile() as handle:
         handle.write(script.encode("utf-8")); handle.seek(0)
-        raw = temporary_run(["-i", "--network", "container:" + container, "--user", "postgres", "--memory", "3g",
-                             "--tmpfs", "/tmp:rw,nosuid,size=2g", "--tmpfs", "/var/lib/postgresql/data:rw,nosuid,size=1m",
+        raw = temporary_run(["-i", "--network", "container:" + container, "--user", "postgres", "--tmpfs", "/var/lib/postgresql/data:rw,nosuid,size=1m",
                              "--entrypoint", "sh", image, "-s"], input_file=handle, timeout=600)
     try:
         # json_agg of composite rows may emit embedded newlines. A psql row is one JSON document, not one line.
@@ -1799,7 +1818,7 @@ def value_rows(container, database, schema, table, user="kin"):
     """Private in-memory rows only. The command recorder keeps output hashes, never this response's contents.
 
     Text of each typed column is enclosed in a JSON array, retaining NULL, empty values, JSON text, bytea and embedded
-    separators exactly. Bound rows/cells/encoded bytes before materializing the result; a large source is refused.
+    separators exactly. Cardinality is checked for consistency with the materialized result.
     """
     columns = psql_json_stdin(container, database,
         "SET search_path=pg_catalog; SELECT coalesce(json_agg(a.attname ORDER BY a.attnum),'[]'::json) FROM pg_attribute a "
@@ -1814,8 +1833,8 @@ def value_rows(container, database, schema, table, user="kin"):
     size = psql_json_stdin(container, database, settings + "SELECT json_build_array(count(*),coalesce(sum(octet_length(("
                           + row + ")::text)),0)+2*count(*)+2) FROM " + relation + " t;", user)
     if (type(size) is not list or len(size) != 2 or any(type(n) is not int or n < 0 for n in size)
-            or size[0] > 100000 or size[0] * max(1, len(columns)) > 1000000 or size[1] > VALUE_LIMIT_BYTES):
-        _unsupported("값 비교의 측정된 row/cell/byte 한도를 초과했습니다")
+):
+        _unsupported("값 비교의 row/byte 수를 읽지 못했습니다")
     rows = psql_json_stdin(container, database, settings + "SELECT coalesce(jsonb_agg(" + row + "),'[]'::jsonb) FROM "
                           + relation + " t;", user)
     if (type(rows) is not list or len(rows) != size[0] or any(type(item) is not list or len(item) != len(columns)

@@ -272,45 +272,75 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
 
     # ---- H2 -----------------------------------------------------------------------------------
     def test_worklist_02_separate_windows_ambiguous_owner_unattached_reattach_and_close(self):
-        # D1861: until Module A supplies the fixed-version reader, this G3 entry checks
-        # refusal and retained input. MODULE-A-FINDING-READER restores the original
-        # separate-window navigation assertions with that reader (baseline dd88c321).
-        f = self.specimen(slices=3)
-        length = self.length_at(f, self.dicom(f)[0], '길이', 20)
+        f = self.specimen(slices=3); shown, _ = self.seed(f); sops = self.sops(f)
         original, rows = self.hashes(), self.owned_rows(f)
-        w = self.login(); self.observe(w)
+        w = self.login(); self.observe(w); w.on('dialog', lambda d: d.accept())
+        self.open_toolbar_group(w, '#image-opening-open')
+        w.locator('#image-opening-open').click(); expect(w.locator('#image-opening-dialog')).to_be_visible()
+        w.locator('#image-opening-done').click()
+        expect(w.locator('#image-opening-dialog')).to_be_hidden()
         one, studies = self.separate(w, f); self.assertEqual(studies, [f.uid])
-        self.open_measurement_tools(one)
-        title, text, traits = '저장 대기 소견', '별도 영상 창 입력 보존', '분엽상 경계'
-        row = self.compose(one, title, text, 'Link Length', characteristics=traits)
-        key = row.get_attribute('data-row-key')
-        first_body = None
-        for button in ('Save', 'Retry Request'):
-            with one.expect_response(lambda r: r.request.method == 'POST' and r.url.endswith('/findings')) as answer:
-                row.get_by_role('button', name=button, exact=True).click()
-            response = answer.value
-            self.assertEqual(response.status, 503, response.text())
-            self.assertEqual(response.json()['code'], 'ModuleAFixedVersionReaderPending')
-            if first_body is None: first_body = response.request.post_data
-            else: self.assertEqual(response.request.post_data, first_body)
-            sent = json.loads(response.request.post_data)
-            self.assertEqual(sent['item']['sources'], [dict(itemId=length['id'], revision=length['revision'])])
-            for reload in (False, True):
-                if reload:
-                    self.panel(one).get_by_role('button', name='Reload Findings', exact=True).click()
-                    row = self.panel(one).locator('article[data-row-key="'+key+'"]')
-                expect(row).to_have_attribute('data-saved', 'false')
-                expect(row.locator('[data-kin-message]')).to_have_text('저장 결과를 확인하지 못했습니다. 같은 요청 재시도로 결과를 확인하세요.')
-                expect(row.get_by_role('button', name='Retry Request', exact=True)).to_be_visible()
-                expect(row.get_by_label('Finding Title')).to_have_value(title)
-                expect(row.get_by_label('Finding Text')).to_have_value(text)
-                expect(row.get_by_label('Finding Characteristics', exact=True)).to_have_value(traits)
-                expect(row.locator('[data-kin-sources] [data-item-id]')).to_have_attribute('data-item-id', length['id'])
-                self.assertTrue(one.evaluate('()=>kinViewerFindingsState().dirty'))
-            self.assertEqual(self.findings(f), [])
-            self.assertEqual(self.owned_rows(f), rows)
-            self.assertEqual(base.psql(f"""SELECT count(*) FROM "AuditLog" WHERE target={literal(f.uid)} AND action LIKE 'finding.%'"""), ['0'])
-        self.assertEqual(self.hashes(), original)
+        panel = self.open_findings(w, f)
+        self.target(w, 'window'); expect(w.locator('#reading-findings-target')).to_have_text('이동 대상: 영상 창 1')
+        url = one.url
+        self.away(one, 2, sops[0])
+        self.go(w, shown['id'], 0)
+        one.wait_for_function(SHOWS, arg=sops[0])
+        expect(self.result(w, 'ok')).to_contain_text('영상 이동 확인 · 영상 창 1')
+        self.assertEqual(one.url, url)
+        # Another account's window is never commanded.
+        one.evaluate("()=>{window.__realOwner=kinViewerWindowOwner;window.kinViewerWindowOwner=()=>'[\"other\",\"owner\"]'}")
+        self.away(one, 2, sops[1]); image = one.evaluate(ACTIVE)
+        self.go(w, shown['id'], 1); self.result(w, 'owner')
+        self.assertEqual(one.evaluate(ACTIVE), image)
+        one.evaluate("()=>{window.kinViewerWindowOwner=window.__realOwner}")
+        # A second window of the same study makes the target ambiguous; neither window moves.
+        self.close_findings(w)
+        self.open_toolbar_group(w, '#viewer-windows-open')
+        w.locator('#viewer-windows-open').click(); expect(w.locator('#viewer-windows-dialog')).to_be_visible()
+        latest = w.locator('[data-window-index="0"][data-window-action="latest"]'); expect(latest).to_be_enabled(timeout=15000)
+        one.evaluate("window.__latestDocument='before'")
+        latest.click()
+        one.wait_for_function('() => !window.__latestDocument')
+        self.assertEqual(self.window_ready(one), [f.uid])
+        self.assertEqual(len(w.context.pages), 2)
+        # Existing pre-U1 windows still participate in target disambiguation.
+        from test_viewer_windows import retained_window
+        two = retained_window(w, f.uid, fresh_document=True)
+        two.on('dialog', lambda d: d.accept())
+        self.assertEqual(self.window_ready(two), [f.uid])
+        w.locator('#viewer-windows-done').click(); expect(w.locator('#viewer-windows-dialog')).to_be_hidden()
+        panel = self.open_findings(w, f)
+        self.target(w, 'ambiguous')
+        self.away(two, 2, sops[1])
+        images = [one.evaluate(ACTIVE), two.evaluate(ACTIVE)]
+        self.go(w, shown['id'], 1); self.result(w, 'ambiguous')
+        self.assertEqual([one.evaluate(ACTIVE), two.evaluate(ACTIVE)], images)
+        two.close()
+        self.target(w, 'window')
+        self.go(w, shown['id'], 1)
+        one.wait_for_function(SHOWS, arg=sops[1]); self.result(w, 'ok')
+        # After a worklist reload the window is known only by address: unattached until Open Image re-attaches it.
+        one.evaluate("()=>{window.__s2bMarker='kept'}")
+        w.reload(); expect(w.locator('#dbstat')).to_contain_text('DB Connected')
+        self.select(w, f)
+        panel = self.open_findings(w, f)
+        self.target(w, 'unattached')
+        self.go(w, shown['id'], 0)
+        self.result(w, 'unattached')
+        open_image = panel.get_by_role('button', name='Open Image', exact=True); expect(open_image).to_be_visible()
+        pages = len(w.context.pages)
+        open_image.click()
+        self.result(w, 'opening'); self.target(w, 'window')
+        self.assertEqual(len(w.context.pages), pages); self.assertEqual(one.evaluate('()=>window.__s2bMarker'), 'kept')
+        self.assertTrue(one.evaluate(SHOWS, sops[1]), 'Open Image did not navigate')
+        self.go(w, shown['id'], 0)
+        one.wait_for_function(SHOWS, arg=sops[0]); self.result(w, 'ok')
+        # A closed window leaves no target.
+        one.close()
+        self.target(w, 'no-viewer')
+        self.go(w, shown['id'], 0); self.result(w, 'no-viewer')
+        self.assertEqual(self.owned_rows(f), rows); self.assertEqual(self.hashes(), original)
 
     # ---- H3 -----------------------------------------------------------------------------------
     def test_worklist_03_scope_selection_newest_renavigation_open_image_and_session_end(self):

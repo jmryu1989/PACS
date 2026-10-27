@@ -1486,9 +1486,9 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
                    {"credentials":"same-origin","cache":"no-store","redirect":"error"}.items()),requests)
         body = self.server.body(entry["seq"])
         headers = entry["headers"]
-        u1 = {k: headers[k] for k in ("Content-Type", "X-KIN-CSRF", "Authorization", "Cookie", "Content-Length",
+        u1 = {k: headers[k] for k in ("Content-Type", "Authorization", "Cookie", "Content-Length",
                                       "Transfer-Encoding", "Sec-Fetch-Mode")}
-        u1_ok = (headers["Content-Type"] == "audio/wav" and headers["X-KIN-CSRF"] == "1" and headers["X-KIN-Session"] == "SYN-SESSION" and
+        u1_ok = (headers["Content-Type"] == "audio/wav" and headers["X-KIN-Session"] == "SYN-SESSION" and
                  headers["Authorization"] is None and entry["path"] == resolve(DICTATION_POST)[1] and
                  headers["Content-Length"] == str(len(body)))
         verdict = signal.judge(body, max_bytes)

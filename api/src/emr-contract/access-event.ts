@@ -506,7 +506,9 @@ function parseAuthEventV2(input: unknown): Readonly<AuthAccessEventV2> {
   const surface = string(v.surface);
   if (!authSurfaces(action, endCause).includes(surface)) throw new Error('Authentication fact does not belong to this surface');
   const cause = choice(v.cause, ['user-view', 'background-fetch', 'service-job']);
-  if (!surfaceCauses(surface).includes(cause)) throw new Error('Cause does not belong to the server surface');
+  // Stored entry events remain readable after the endpoint and proof mechanism are removed.
+  const causes: readonly CauseKind[] = action === 'auth.entry' ? ['user-view', 'background-fetch'] : surfaceCauses(surface);
+  if (!causes.includes(cause)) throw new Error('Cause does not belong to the server surface');
   const context = workContext(v.context, cause, true);
   const executor = choice(v.executor, ['member', 'service', 'unauthenticated']);
   const userId = factV2(v.userId, identity, ['not-authenticated', 'not-resolved'], []);

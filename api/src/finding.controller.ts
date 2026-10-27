@@ -38,8 +38,10 @@ export class FindingController {
   @Get('studies/:uid/findings')
   list(@Param('uid') uid: string, @Query() query: any, @Req() req: any, @Res({ passthrough: true }) res: any) {
     announce(res);
+    // A list row carries only the finding's current revision; its retained history is served by the
+    // revisions route, page by page.
     return clinicalRoutes(this.clinical).collection(req, 'GET studies/:uid/findings', 'finding',
-      tx => this.svc.list(uid, query, caller(req), undefined, requested(req), tx), uid);
+      tx => this.svc.list(uid, query, caller(req), undefined, requested(req), tx), uid, item => [item.revision]);
   }
 
   @Post('studies/:uid/findings')
@@ -53,7 +55,8 @@ export class FindingController {
   revisions(@Param('uid') uid: string, @Param('id') id: string, @Query() query: any, @Req() req: any, @Res({ passthrough: true }) res: any) {
     announce(res);
     return clinicalRoutes(this.clinical).read(req, 'finding', id,
-      tx => this.svc.list(uid, query, caller(req), id, requested(req), tx));
+      tx => this.svc.list(uid, query, caller(req), id, requested(req), tx), undefined, undefined,
+      page => (page as { revisions: { revision: number }[] }).revisions.map(r => r.revision));
   }
 
   @Post('studies/:uid/findings/:id/revisions')

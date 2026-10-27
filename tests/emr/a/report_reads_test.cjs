@@ -1,7 +1,7 @@
 'use strict';
 // MODULE_A A2 real boundary cells for the report history reads:
 //   GET studies/:uid/report/versions and GET studies/:uid/report/versions/:version/citations
-// through the production AppModule.withLedger (signed Guard, PacsController, PacsService, StudyAccessInterceptor and
+// through the production AppModule.withLedger (signed Guard, PacsController, PacsService and
 // A1's ViewingResponseInterceptor) on the accepted B2 PostgreSQL ledger, read back on an independent witness connection.
 // Only external collaborators are synthetic: the OIDC key endpoint, the Orthanc QIDO answer, and a TCP relay in front of
 // the ledger connection that loses one COMMIT reply. SQL locks and a fixture-owned CHECK constraint make the ordinary
@@ -433,7 +433,7 @@ test('A-HTTP-OUTCOME: a client that leaves before the COMMIT gets no body; the l
   assert.equal(answered, false);
 });
 
-test('A-HTTP-BODY: a policy change caught by the outer access check after preparation is an abort, never a transfer', async () => {
+test('A-HTTP-BODY: a policy change after preparation does not cancel the admitted read; the next request applies it and records nothing', async () => {
   const uid = await study();
   const sentinel = 'SYN-POLICY-BODY-' + randomUUID();
   await version(uid, 1, { findings: sentinel });
@@ -442,18 +442,25 @@ test('A-HTTP-BODY: a policy change caught by the outer access check after prepar
   try {
     const pending = call('/studies/' + encodeURIComponent(uid) + '/report/versions');
     await runtimeWaitsOnLock();
-    // The request already passed its own gates; StudyAccessInterceptor compares the policy snapshot after the handler.
-    // A policy row of another institution for this subject is the existing "needs institution review" scope change.
+    // The request already passed its own gates. A policy row of another institution for this subject is the existing
+    // "needs institution review" scope change. PC3 retired the outer policy-revision interceptor, so the admitted
+    // response ends under its original decision.
     await ctx.witness.studyAccessPolicy.create({ data: { institution: foreignInstitution, subject: sub, revision: 1,
       policy: { version: 1, restricted: true, startsAt: null, endsAt: null, rules: [] }, reason: 'SYN institution review',
       updatedBy: 'synthetic-admin' } });
     await hold.release();
-    const refused = await pending.done;
-    assert.equal(refused.status, 409, refused.text);
-    assert.equal(refused.body.code, 'STUDY_ACCESS_CHANGED');
-    assert.equal(refused.text.includes(sentinel), false);
+    const admitted = await pending.done;
+    assert.equal(admitted.status, 200, admitted.text);
+    const [row] = admitted.body;
+    assert.equal(row.findings, sentinel);
     const recorded = await settled(uid, 1);
-    assert.deepEqual(recorded.map(e => e.event.action), ['provide-prepared', 'transfer-aborted']);
+    assert.deepEqual(recorded.map(e => [e.event.action, e.event.action === 'provide-prepared' ? e.eventId : e.event.relatedEventId]),
+      [['provide-prepared', row.accessRef], ['transfer-ended', row.accessRef]]);
+    // The next request reads the new policy in its own gate: refused before preparation, no body, no record.
+    const next = await get('/studies/' + encodeURIComponent(uid) + '/report/versions');
+    assert.equal(next.status, 404, next.text);
+    assert.equal(next.text.includes(sentinel), false);
+    assert.equal((await events(uid)).length, recorded.length, 'the refused next request records nothing');
   } finally {
     await hold.release();
     await ctx.witness.studyAccessPolicy.deleteMany({ where: { institution: foreignInstitution, subject: sub } });

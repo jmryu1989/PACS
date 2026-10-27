@@ -1,12 +1,15 @@
 import { canReadPreliminary } from './preliminary-reader';
 import { StudyAccessService } from './study-access.service';
-import { Injectable, BadRequestException, ConflictException, ForbiddenException, ServiceUnavailableException, GoneException, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
+import { Injectable, BadRequestException, ConflictException, ForbiddenException, ServiceUnavailableException, GoneException, OnModuleInit, OnModuleDestroy, Logger, Inject } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomUUID, createHash } from 'node:crypto';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
 import { Caller } from './pacs.service';
 import { canonical, viewerJson, viewerUid, viewerUuid, verifyViewerReference, isManualMeasurement } from './viewer-input';
+import { LedgerFailure } from './emr-runtime/store';
+import { reconcileManualSr } from './emr-clinical/records';
+import { EMR_MANUAL_SR_SIGNING, ManualSrApprovalRefused, ManualSrSigning } from './emr-clinical/manual-sr';
 import { srDataset, srFile, srMeasurement } from './manual-sr-dicom';
 
 const denied = (): never => { throw new ForbiddenException('이 측정의 SR을 만들거나 저장할 수 없습니다'); };
@@ -32,7 +35,8 @@ export class ManualSrService implements OnModuleInit, OnModuleDestroy {
   private preparing = 0;
   private recoveryTimer: ReturnType<typeof setInterval>;
   private recovering = false;
-  constructor(private prisma: PrismaService, private orthanc: OrthancService, private studyAccess:StudyAccessService) {}
+  constructor(private prisma: PrismaService, private orthanc: OrthancService, private studyAccess:StudyAccessService,
+    @Inject(EMR_MANUAL_SR_SIGNING) private readonly signing: ManualSrSigning) {}
 
   onModuleInit() {
     // Reconciliation never initiates an upload. It attributes bytes already
@@ -50,7 +54,12 @@ export class ManualSrService implements OnModuleInit, OnModuleDestroy {
         orderBy: { nextCheckAt: 'asc' }, take: 4 });
       for (const row of rows) {
         await this.prisma.manualSr.updateMany({ where: { id: row.id, storedAt: null }, data: { nextCheckAt: new Date(Date.now() + 300000) } });
-        try { await this.reconcile(row); } catch { /* Keep the committed intent for a bounded later retry. */ }
+        try { await this.reconcile(row); } catch (error) {
+          // A retained approval that does not verify never will. Stop rescheduling
+          // it; the author's retry gets the same mapped refusal. Anything else
+          // keeps the committed intent for a bounded later retry.
+          if (error instanceof ManualSrApprovalRefused) await this.unschedule(row, error.code).catch(() => {});
+        }
       }
     } catch { /* Startup/migration or transient DB failures are retried on the next tick. */ }
     finally { this.recovering = false; }
@@ -63,13 +72,16 @@ export class ManualSrService implements OnModuleInit, OnModuleDestroy {
         await tx.$executeRaw`SET LOCAL statement_timeout = '5s'`;
         return work(tx);
       }, { maxWait: 4000, timeout: 8000 });
-    } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError) {
-        if (['P2002', 'P2003', 'P2034'].includes(error.code)) conflict();
-        if (['P2028', 'P2010'].includes(error.code)) throw new ServiceUnavailableException('SR 처리 결과를 확인하지 못했습니다. 같은 요청으로 다시 시도하세요');
-      }
-      throw error;
+    } catch (error) { return this.transactionError(error); }
+  }
+
+  private transactionError(error: unknown): never {
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      if (['P2002', 'P2003', 'P2034'].includes(error.code)) conflict();
+      if (['P2028', 'P2010'].includes(error.code)) throw new ServiceUnavailableException('SR 처리 결과를 확인하지 못했습니다. 같은 요청으로 다시 시도하세요');
     }
+    if (error instanceof LedgerFailure) throw new ServiceUnavailableException('SR 처리 결과를 확인하지 못했습니다. 같은 요청으로 다시 시도하세요');
+    throw error;
   }
 
   private async heads(db: PrismaService | Prisma.TransactionClient, uid: string, items: any[], c: Caller) {
@@ -144,16 +156,29 @@ export class ManualSrService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private async unschedule(row: any, code: string) {
+    await this.prisma.manualSr.updateMany({ where: { id: row.id, storedAt: null }, data: { nextCheckAt: null } });
+    this.logger.warn(`Manual SR ${row.id} approval refused (${code}); automatic reconciliation stopped`);
+  }
+
   private async reconcile(row: any, orthancId?: string) {
-    if (row.storedAt) return row;
     if (!row.attemptedAt || !row.dicom) return null;
+    await this.transaction(tx => this.signing.authorized(tx, row));
     if (!orthancId) orthancId = await this.orthanc.manualSrLocation(row.dataset.SOPInstanceUID, Buffer.from(row.dicom));
-    if (!orthancId) return null;
+    const observed = reconcileManualSr({ id: row.id, studyId: row.studyUid, authorId: row.authorSub,
+      createdAt: row.createdAt.toISOString(), attemptedAt: row.attemptedAt.toISOString(),
+      storedAt: row.storedAt?.toISOString() ?? null, bytesSha256: row.sha256, sopInstanceUid: row.dataset.SOPInstanceUID,
+      adoptedVersion: null, referencedBy: [], holdIds: [], orthanc: orthancId ? 'present' : 'absent',
+    }, orthancId ? { status: 'present', sopInstanceUid: row.dataset.SOPInstanceUID, sha256: row.sha256 } : { status: 'absent' });
+    if (observed.outcome === 'conflict') conflict();
+    if (observed.outcome === 'already-adopted') return row;
+    if (observed.outcome !== 'adopt') return null;
     return this.transaction(async tx => {
       const lockedRows = await tx.$queryRaw<any[]>`SELECT id FROM "ManualSr" WHERE id = ${row.id}::uuid FOR UPDATE`;
       if (!lockedRows.length) conflict();
       const locked = await tx.manualSr.findUnique({ where: { id: row.id } });
       if (locked.storedAt) return locked;
+      await this.signing.authorized(tx, locked);
       const saved = await tx.manualSr.update({ where: { id: row.id }, data: { storedAt: new Date(), orthancId, nextCheckAt: null } });
       await tx.auditLog.create({ data: { actor: row.authorActor, target: row.studyUid, action: 'manualSr.store',
         detail: JSON.stringify({ id: row.id, sha256: row.sha256, authorizedAt: row.attemptedAt }) } });
@@ -204,7 +229,7 @@ export class ManualSrService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  async store(uid: string, id: string, raw: Buffer, c: Caller) {
+  async store(uid: string, id: string, raw: Buffer, c: Caller, request?: object) {
     viewerUid(uid); viewerUuid(id);
     const body = viewerJson(raw); if (!body || Object.keys(body).length) throw new BadRequestException('저장할 SR 내용은 서버에서 확인합니다');
     const row = await this.prisma.manualSr.findUnique({ where: { id } });
@@ -216,25 +241,29 @@ export class ManualSrService implements OnModuleInit, OnModuleDestroy {
     await this.studyAccess.require(c,[uid]);
     if (recovered) return this.receipt(recovered);
     this.receipt(row);
-    const heads = await this.heads(this.prisma, uid, row.selection as any[], c);
-    await this.sources(uid, heads, false);
-    const intent = await this.transaction(async tx => {
-      await this.studyAccess.require(c,[uid],tx);
-      const [study] = await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`; access(study, c);
-      const current = await this.heads(tx, uid, row.selection as any[], c);
-      if (canonical(current.map(x => x.snapshot)) !== canonical(heads.map(x => x.snapshot))) conflict();
-      await tx.$queryRaw`SELECT id FROM "ManualSr" WHERE id = ${id}::uuid FOR UPDATE`;
-      const locked = await tx.manualSr.findUnique({ where: { id } });
-      if (!locked) conflict();
-      if (locked.storedAt || locked.attemptedAt) return locked;
-      this.receipt(locked);
-      const [budget] = await tx.$queryRaw<any[]>`SELECT COUNT(*)::int AS count, COALESCE(SUM(octet_length(dicom)),0)::int AS bytes FROM "ManualSr" WHERE "studyUid" = ${uid} AND "attemptedAt" IS NOT NULL`;
-      if (budget.count >= 128 || budget.bytes + row.dicom.length > 16777216) throw new ConflictException('이 검사의 저장 SR 보존 한도에 도달했습니다');
-      const attemptedAt = new Date();
-      const issued = await tx.manualSr.update({ where: { id }, data: { attemptedAt, nextCheckAt: new Date(Date.now() + 30000) } });
-      await tx.auditLog.create({ data: { actor: c.actor, target: uid, action: 'manualSr.store-intent', detail: JSON.stringify({ id, sha256: row.sha256, authorizedAt: attemptedAt }) } });
-      return issued;
-    });
+    let intent = row;
+    if (!row.attemptedAt) {
+      const heads = await this.heads(this.prisma, uid, row.selection as any[], c);
+      await this.sources(uid, heads, false);
+      intent = await this.signing.authorize(request, uid, async (tx, sign) => {
+        await this.studyAccess.require(c,[uid],tx);
+        const [study] = await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`; access(study, c);
+        const current = await this.heads(tx, uid, row.selection as any[], c);
+        if (canonical(current.map(x => x.snapshot)) !== canonical(heads.map(x => x.snapshot))) conflict();
+        await tx.$queryRaw`SELECT id FROM "ManualSr" WHERE id = ${id}::uuid FOR UPDATE`;
+        const locked = await tx.manualSr.findUnique({ where: { id } });
+        if (!locked) conflict();
+        if (locked.storedAt || locked.attemptedAt) { await this.signing.authorized(tx, locked); return locked; }
+        this.receipt(locked);
+        const [budget] = await tx.$queryRaw<any[]>`SELECT COUNT(*)::int AS count, COALESCE(SUM(octet_length(dicom)),0)::int AS bytes FROM "ManualSr" WHERE "studyUid" = ${uid} AND "attemptedAt" IS NOT NULL`;
+        if (budget.count >= 128 || budget.bytes + row.dicom.length > 16777216) throw new ConflictException('이 검사의 저장 SR 보존 한도에 도달했습니다');
+        const attemptedAt = new Date();
+        await sign(locked, attemptedAt);
+        const issued = await tx.manualSr.update({ where: { id }, data: { attemptedAt, nextCheckAt: new Date(Date.now() + 30000) } });
+        await tx.auditLog.create({ data: { actor: c.actor, target: uid, action: 'manualSr.store-intent', detail: JSON.stringify({ id, sha256: row.sha256, authorizedAt: attemptedAt }) } });
+        return issued;
+      }).catch(error => this.transactionError(error));
+    }
     if (intent.storedAt) return this.receipt(intent);
     // The committed authorization is the upload decision. Network I/O cannot
     // hold the clinical study lock or block unrelated reading/measurement work.

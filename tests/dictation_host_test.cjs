@@ -214,7 +214,7 @@ test('record -> stop -> one bounded request -> review; the report is untouched u
   assert.deepEqual({ method: call.init.method, credentials: call.init.credentials ?? "same-origin", cache: call.init.cache,
     redirect: call.init.redirect, headers: Object.fromEntries(new Headers(call.init.headers)) },
   { method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
-    headers: { 'content-type': 'audio/wav', 'x-kin-csrf': '1', 'x-kin-session': 'SYN-MODULE-SESSION' } });
+    headers: { 'content-type': 'audio/wav', 'x-kin-session': 'SYN-MODULE-SESSION' } });
   assert.equal(call.sent.toString('ascii', 0, 4), 'RIFF'); assert.equal(call.sent.length, 48);
   assert.deepEqual([...call.sent.subarray(44)], [1, 0, 255, 127]);
   assert.ok(call.init.body.every(b => b === 0), 'the page keeps no audio once fetch() has copied it');

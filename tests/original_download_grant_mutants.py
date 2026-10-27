@@ -1,10 +1,12 @@
 # coding: utf-8
-"""S9-U4b part (c) round 2, D1489: mutants of the original-download grant (consult u4b-download-grant DG-M01..M08).
+"""S9-U4b part (c) round 2, D1489: mutants of the original download (consult u4b-download-grant). The grant's admission
+mutants DG-M01..M07 retired with that admission (product cuts 3: the exact archive GET is a route-exact exemption from the
+binding header); DG-M08 (Sent without the server finish) runs against S9U4-B30's interrupted archive response.
 
 Each mutant is a one-off copy of api/src with one change in auth.guard.ts or study-transfer-local.service.ts, compiled by
 tests/service_test_loader.cjs (KIN_TEST_API_SRC selects the copy) and run against the one server case written for it in
-tests/study_transfer_local_server_test.cjs, whose Nest application puts the product's own AuthGuard in front (harness
-realGuard). A mutant is killed only when that case fails on an assertion (ERR_ASSERTION, no TypeError, no load error)
+tests/study_transfer_local_server_test.cjs. Its Nest application serves the product archive route; admission cases also
+use the product's AuthGuard (harness realGuard). A mutant is killed only when that case fails on an assertion (ERR_ASSERTION, no TypeError, no load error)
 within the bound; anything else is NOT PROVEN. The unchanged copy (baseline) must pass every named case first. The
 product tree is never written; the copies live under the --out directory and are removed after each run.
 
@@ -33,33 +35,10 @@ GUARD, SERVICE = "auth.guard.ts", "study-transfer-local.service.ts"
 
 # (id, file, old, new, case)
 MUTANTS = [
-    ("DG-M01-any-route-takes-a-grant", GUARD,
-     "this.reflector.get(PATH_METADATA, ctx.getHandler())) === ARCHIVE_ROUTE_KEY && this.transfer.archiveGrantPath(req, path);",
-     "this.reflector.get(PATH_METADATA, ctx.getHandler())) !== null;", "S9U4-B78"),
-    ("DG-M02-not-consumed", SERVICE,
-     "          download.archiveGrantUses.push({ ...bound, admittedAt: admission!.admittedAt, consumedAt: now.toISOString(), attemptId: attempt.attemptId });\n"
-     "          download.activeArchiveGrant = null;\n          checkDownloadRow({ ...op, status: 'sending', download });\n",
-     "", "S9U4-B79"),
-    ("DG-M03-no-session-binding", SERVICE,
-     "    if (grant.sessionRef !== sessionRef) throw authRefusal(", "    if (false) throw authRefusal(", "S9U4-B78"),
-    ("DG-M04-no-current-original-check", SERVICE,
-     "      await this.unchangedOriginals(uid, stored);\n      await this.storageRead(() => this.currentRights(c, 'download', uid, req), downloadStorage);\n    } catch (failure) { throw await refused(failure); }",
-     "      await this.storageRead(() => this.currentRights(c, 'download', uid, req), downloadStorage);\n    } catch (failure) { throw await refused(failure); }",
-     "S9U4-B80"),
-    ("DG-M05-expiry-boundary", SERVICE,
-     "if (now.getTime() >= Date.parse(active.expiresAt)) throw error(410", "if (now.getTime() > Date.parse(active.expiresAt)) throw error(410", "S9U4-B79"),
-    ("DG-M06-no-recheck-under-the-lock", SERVICE,
-     "          if (download.schemaVersion === 2 && download.archiveGrantUses.some((u: any) => u.grantId === admission.grantId))\n"
-     "            throw error(409, 'DOWNLOAD_GRANT_CONSUMED', TRANSFER_MESSAGES.grantConsumed);\n",
-     "", "S9U4-B79"),
-    ("DG-M07-wrong-header-rescued", GUARD,
-     "        const native = grant && this.auth.binding(req, sid) === 'missing';\n        if (!bootstrap && !native) this.auth.requireBinding(req, sid);",
-     "        const native = grant;\n        if (!bootstrap && !native) this.auth.requireBinding(req, sid);", "S9U4-B78"),
     ("DG-M08-sent-without-the-finish", SERVICE,
      "const state = t.stop === 'fenced' || !exact ? 'unconfirmed' : t.stop === 'aborted' || !finished ? 'incomplete' : 'sent';",
-     "const state = t.stop === 'fenced' ? 'unconfirmed' : 'sent';", "S9U4-B79"),
-    # U4C-05: the rights read again inside the consume transaction, under its lock - without it a right lost after the
-    # preflight still consumes the grant and opens an attempt with its intent.
+     "const state = t.stop === 'fenced' ? 'unconfirmed' : 'sent';", "S9U4-B30"),
+    # U4C-05: the rights read again under the attempt lock; without it a right lost after preflight opens an attempt.
     ("DG-M11-no-rights-under-the-consume-lock", SERVICE,
      "          if (process.env.AUTH_REQUIRED !== 'false') await this.memberRightsNow(tx, c, 'download');\n"
      "          await this.ownStudyLocked(tx, uid, c);\n",
@@ -74,10 +53,12 @@ MUTANTS = [
     ("S2b-no-route-uid-check-anywhere", SERVICE,
      ["        const { op, now, stored } = await this.lockDownload(tx, operationId);\n"
       "        if (!op || !this.ownsDownload(op, owner) || op.studyUid !== uid) throw",
-      "    try {\n      if (!op || !this.ownsDownload(op, owner) || op.studyUid !== uid) throw"],
+      "      if (!op || !this.ownsDownload(op, owner) || op.studyUid !== uid) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);\n"
+      "      await this.downloadStudyNow(uid, c);\n      // After the scope check"],
      ["        const { op, now, stored } = await this.lockDownload(tx, operationId);\n"
       "        if (!op || !this.ownsDownload(op, owner)) throw",
-      "    try {\n      if (!op || !this.ownsDownload(op, owner)) throw"], "S9U4-B85"),    # WORKLIST-SPLIT-UID hand-over (spec M-WSU-19): the download routes' current source check skipped - the replay and
+      "      if (!op || !this.ownsDownload(op, owner)) throw new NotFoundException(TRANSFER_MESSAGES.operationNotFound);\n"
+      "      await this.downloadStudyNow(uid, c);\n      // After the scope check"], "S9U4-B85"),    # WORKLIST-SPLIT-UID hand-over (spec M-WSU-19): the download routes' current source check skipped - the replay and
     # the start of an operation prepared before its Study UID became split would go on.
     ("M-WSU-19-download-source-check-skipped", SERVICE,
      "    this.studyAccess.assertUnsplitSource(c, uid);\n", "", "S9U4-B81"),

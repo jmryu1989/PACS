@@ -3,12 +3,13 @@
 from viewer_session import end_viewer
 import math,unittest
 import numpy as np
+from viewer_tools import select_image_tool
 from playwright.sync_api import expect
 from test_volume_crosshair import VolumeCrosshairE2E
 
 class VolumeGestureE2E(VolumeCrosshairE2E):
  def activate(self,v,id='mpr-axial'):
-  v.locator('button[data-cy="Crosshairs"]').click()
+  select_image_tool(v, 'Crosshairs')
   v.wait_for_function("()=>cornerstoneTools.ToolGroupManager.getToolGroup('mpr').getToolOptions('Crosshairs').mode==='Active'")
   v.evaluate("""id=>{window.gestureTool=cornerstoneTools.ToolGroupManager.getToolGroup('mpr').getToolInstance('Crosshairs');window.gestureVP=services.cornerstoneViewportService.getCornerstoneViewport(id);window.gestureEvents=[];gestureVP.element.addEventListener(cornerstoneTools.Enums.Events.MOUSE_DRAG,e=>gestureEvents.push({op:gestureTool.editData?.annotation.data.handles.activeOperation,previous:e.detail.lastPoints.world,current:e.detail.currentPoints.world,delta:e.detail.deltaPoints.world}),true)}""",id)
  def handles(self,v):

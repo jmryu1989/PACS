@@ -516,6 +516,36 @@ test('store keeps the draft on 409/503, records a stale source and lets Refresh 
   store.useLatest(e); assert.equal(e.head.revision, 3); assert.equal(e.latest, null); assert.equal(e.draft.title, '내 수정');
 });
 
+// A write the server settled as never committed (its B2 write failed after the request was prepared) answers
+// 503 AppendNotCommitted to every retry of that request ID. Retry Request then returns the draft to the doctor
+// and the next Save is a new request carrying the same content.
+test('store: Retry Request answered AppendNotCommitted keeps the draft and the next Save uses a new request ID', async () => {
+  let ids = 0;
+  const t = transport(); const { store } = makeStore(t, { uuid: () => `11111111-2222-4333-8444-${String(++ids).padStart(12, '0')}` });
+  const saved = t.head('f0000000-0000-4000-8000-000000000001', 1);
+  t.state.items = [saved];
+  store.syncHistory(history(A, [{ id: ITEM, revision: 2, hidden: false, referenceStatus: 'verified', working: false }])); await tick();
+  const e = store.state().entries.get(saved.id);
+  store.edit(e); store.updateDraft(e, { text: '보존할 수정' });
+  t.state.responses.push({ status: 503, body: { message: '소견 저장이 지연되었습니다. 같은 요청 ID로 다시 시도하세요' } });
+  assert.equal(await store.save(e, 'edit'), false);
+  const first = JSON.parse(e.pending.body);
+  t.state.responses.push({ status: 503, body: { code: 'AppendNotCommitted', message: '저장이 완료되지 않았습니다. 입력은 유지됩니다.' } });
+  assert.equal(await store.save(e), false);
+  const posts = () => t.log.filter(x => x.options.method === 'POST').map(x => x.body);
+  assert.equal(posts().pop().requestId, first.requestId, 'Retry Request replays the same request');
+  assert.equal(e.pending, null); assert.equal(e.editing, true); assert.equal(e.draft.text, '보존할 수정');
+  assert.ok(e.message.includes('새 요청'));
+  store.updateDraft(e, { title: '고칠 수 있음' });
+  assert.equal(e.draft.title, '고칠 수 있음', 'the draft is editable again');
+  t.state.responses.push({ status: 200, body: t.head(saved.id, 2) });
+  t.state.items = [t.head(saved.id, 2)];
+  assert.equal(await store.save(e, 'edit'), true);
+  const resent = posts().pop();
+  assert.notEqual(resent.requestId, first.requestId);
+  assert.deepEqual([resent.expectedRevision, resent.item.text, resent.item.sources], [first.expectedRevision, first.item.text, first.item.sources]);
+});
+
 test('store refuses writes for read-only sessions; a plain 401 is a failed request and 403 refuses only the study', async () => {
   const t = transport(); const { store } = makeStore(t);
   t.state.me = { sub: 'reader-1', kind: 'member', roles: ['technician'] };
@@ -2709,3 +2739,16 @@ for (const location of ['header', 'body']) for (const code of ['AUTH_SESSION_BUS
     assert.equal(reads(t, A, 'findings'), before); assert.equal(store.state().entries.get(e.id), e);
   });
 }
+
+// REQ-MG-LENGTH-READBACK -> RISK-MG-WRONG-BASIS: copied measurements retain their scale basis.
+test('MG length copied and live-head values carry the DICOM measurement basis', () => {
+  const format = require('../worklist-v0/hpacs-lite/finding-link-model.js').valueText;
+  for (const source of ['server-copy', 'live-head']) {
+    for (const [basis, label] of [['dbt', 'DBT PixelSpacing'], ['pixel', '원본 기준면'], ['ermf', '추정 보정'], ['detector', '검출기 기준']]) {
+      const value = format('length', 'kin-mg-length-v1:' + basis, [12.34], source);
+      assert.ok(value.includes('12.3 mm') && value.includes(label));
+    }
+  }
+  assert.ok(format('angle', 'kin-mg-length-v1:detector', [12], 'server-copy').includes('단위 미확인'));
+  assert.ok(format('length', 'kin-mg-length-v1:unknown', [12], 'server-copy').includes('단위 미확인'));
+});

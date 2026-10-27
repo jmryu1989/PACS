@@ -218,7 +218,7 @@
         const method = action === 'save' ? 'PUT' : action === 'clear' ? 'DELETE' : 'GET';
         const body = method === 'GET' ? undefined : { expectedOwner: identity, revision: serverRevision, ...(action === 'save' ? { columns: snapshot } : {}) };
         const r = await transport.request('/api/worklist-columns', { context:at, method, credentials: 'same-origin', cache: 'no-store',
-          headers: { 'Content-Type': 'application/json', 'X-KIN-CSRF': '1' }, body: body && JSON.stringify(body), signal });
+          headers: { 'Content-Type': 'application/json' }, body: body && JSON.stringify(body), signal });
         if (!active()) return;
         if (!r.ok) {
           const data = r.body; if (!active()) return;

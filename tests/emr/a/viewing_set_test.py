@@ -270,26 +270,31 @@ async function main() {
         WHERE usename='kin_runtime' AND wait_event_type='Lock' AND query LIKE '%append_operation%'`;
       return row.n > 0;
     });
-    const refusedUid = await study(), refusedPartner = await study();
+    const admittedUid = await study(), admittedPartner = await study();
+    const admittedInput = selection([admittedUid, admittedPartner]);
     await lock();
-    const refusedBody = send(selection([refusedUid, refusedPartner]));
+    const admittedBody = send(admittedInput);
     try {
       await waitAppend();
       await witness.studyAccessPolicy.create({ data: { institution: site, subject, revision: 1,
         reason: 'Synthetic ordinary policy edit', updatedBy: subject,
         policy: { version: 1, restricted: true, startsAt: null, endsAt: null, rules: [] } } });
       releaseLock(); await holding; holding = null;
-      const refused = await refusedBody;
-      assert.equal(refused.status, 409); assert.equal(refused.body.members, undefined);
-      for (const uid of [refusedUid, refusedPartner]) {
-        const recorded = await until(async () => { const e = await forUid(uid); return e.length === 2 && e; });
-        assert.deepEqual(recorded.map(e => e.action).sort(), ['provide-prepared', 'transfer-aborted']);
-      }
+      // PC3 retires the outer policy-revision interceptor. The already admitted
+      // response finishes under its original decision; the next request reads the new policy.
+      await verify(admittedInput, await admittedBody, [admittedUid, admittedPartner]);
+      const readCount = reads.length, eventCount = (await events()).length;
+      const next = await send(selection([admittedUid, admittedPartner]));
+      assert.equal(next.status, 200); assert.equal(next.body.scopeStatus, 'rejected');
+      assert.deepEqual(next.body.members, [admittedUid, admittedPartner].map((uid, ordinal) => ({
+        uid, ordinal, status: 'error', code: 'W9_MEMBER_UNAVAILABLE' })));
+      assert.equal(reads.length, readCount, 'the new policy refuses before a source read');
+      assert.equal((await events()).length, eventCount, 'the refused next request adds no receipt');
     } finally {
       releaseLock(); if (holding) await holding; holding = null;
       await witness.studyAccessPolicy.delete({ where: { institution_subject: { institution: site, subject } } });
     }
-    console.log('PASS existing outer policy interceptor refusal / selected metadata never consumed / aborted outcomes only');
+    console.log('PASS policy edit after admission / admitted response ends / next request refused without source read or receipt');
 
     for (const cause of ['close', 'deadline']) {
       console.log('BEGIN cancellation observation ' + cause);

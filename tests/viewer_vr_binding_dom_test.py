@@ -1291,12 +1291,12 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
         }""")
         self.assertEqual({'switched':True,'open':True,'covered':True,'views':0},result)
 
-    def test_session_both_access_requests_carry_binding_and_csrf_on_wire(self):
+    def test_session_both_access_requests_carry_binding_without_csrf_on_wire(self):
         page = self.page_with_vr();self.addCleanup(page.close);self.open_ready(page)
         wire = page.server_state['wire']
         self.assertEqual(['/api/me','/api/studies/study-1/viewer-jobs'], sorted(r['path'] for r in wire))
         for request in wire:
-            self.assertEqual('S1',request['session']);self.assertEqual('1',request['csrf'])
+            self.assertEqual('S1',request['session']);self.assertIsNone(request['csrf'])
 
     def test_session_bootstrap_member_and_jobs_envelope_open_vr(self):
         """REQ-S8-D-A/U5S-REQ-08 -> RISK-S8-FALSE-CLOSE/SESSION: real entry states."""
@@ -1311,9 +1311,9 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
                                      page.evaluate('sessionStates'))
                 self.open_ready(page)
                 wire=page.server_state['wire']
-                self.assertEqual({'path':'/api/me','session':None,'csrf':'1'},wire[0])
+                self.assertEqual({'path':'/api/me','session':None,'csrf':None},wire[0])
                 self.assertEqual(['/api/me','/api/studies/study-1/viewer-jobs'],sorted(r['path'] for r in wire[1:]))
-                self.assertTrue(all(r['session']=='S1' and r['csrf']=='1' for r in wire[1:]))
+                self.assertTrue(all(r['session']=='S1' and r['csrf'] is None for r in wire[1:]))
 
     def test_access_malformed_jobs_body_cannot_confirm_and_recovery_preserves_edits(self):
         """An HTTP 200 without the list envelope is not an access confirmation."""
@@ -1569,7 +1569,7 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
         self.assert_surface(page,False)
         self.assertEqual(6,len(records));self.assertEqual(before+1,page.evaluate("frameLog.filter(f=>f.drawn).length"))
         self.assertEqual('45',page.get_by_label('VR Opacity',exact=True).input_value())
-        for request in records:self.assertEqual('S1',request['session']);self.assertEqual('1',request['csrf'])
+        for request in records:self.assertEqual('S1',request['session']);self.assertIsNone(request['csrf'])
         print('NATIVE_BUSY',entries,flush=True)
 
 

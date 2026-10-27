@@ -37,7 +37,7 @@ test fails. Three kinds of evidence and nothing more:
      with the 104-row planning baseline and with the route matrix: every current route is public, a listed session or
      business row, or a denied row with a named basis, and every route added since the baseline has its own row.
   3. Source pins that guard, member console, Keycloak client and realm carry the same role list and that
-     the gate sits between the membership check and the CSRF rule in the guard.
+     the guard applies the gate after the membership check.
 
 D1816: the legacy source-provenance grammar excludes B2 replacement modules.
 All controller routes remain in the route/role matrix; B2 behavior uses real PG/HTTP tests.
@@ -1753,31 +1753,6 @@ class ClinicianPolicySpec(unittest.TestCase):
             "allowed_additions": sorted(declared),
         }, ensure_ascii=True, sort_keys=True))
 
-    def test_06_guard_source_pins(self):
-        guard = self.guard
-        self.assertIn("import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';", guard)
-        self.assertRegex(guard, r"import \{\s*APP_ROLES, CLINICIAN_ROUTE_DENIED, clinicianOnly, clinicianRouteAllowed, routeKey,?\s*\} from './clinician-policy';")
-        self.assertNotIn("new Set(['radiologist'", guard, "guard must not keep its own role literal")
-        self.assertIn("req.roles = ['radiologist', 'technician', 'admin'];", guard, "AUTH_REQUIRED=false dev roles unchanged (no clinician)")
-        self.assertIn("const isLogout = req.method === 'POST' && path === '/api/auth/logout';", guard)
-        self.assertIn("if (state !== 'APPROVED' && !isLogout)", guard)
-        membership = guard.index("code: state === 'PENDING' ? 'INSTITUTION_PENDING' : 'INSTITUTION_INVALID'")
-        gate = guard.index("req.clinicianOnly = clinicianOnly(req.roles);")
-        # S7-U5: the CSRF check is AuthService.requireCsrf; the guard's last call of it is the one every non-GET cookie
-        # request passes after the membership and clinician gates (the earlier one is the logout's own).
-        csrf = guard.rindex("this.auth.requireCsrf(req)")
-        returned = guard.rindex("return true;")
-        self.assertLess(membership, gate)
-        self.assertLess(gate, csrf)
-        self.assertLess(csrf, returned)
-        block = guard[gate:csrf]
-        self.assertRegex(block, r"if \(req\.clinicianOnly\) \{")
-        self.assertRegex(block, r"routeKey\(\s*this\.reflector\.get\(METHOD_METADATA, ctx\.getHandler\(\)\),\s*this\.reflector\.get\(PATH_METADATA, ctx\.getClass\(\)\),\s*this\.reflector\.get\(PATH_METADATA, ctx\.getHandler\(\)\),\s*\)")
-        self.assertRegex(block, r"if \(!clinicianRouteAllowed\(key\)\)\s*throw new ForbiddenException\(\{ code: CLINICIAN_ROUTE_DENIED \}\);")
-        self.assertNotIn("originalUrl", block, "the gate reads route metadata, not the request URL")
-        gateway_return = guard.index("req.kind = 'gateway';")
-        self.assertLess(gateway_return, membership, "gateway identities return before the member checks")
-
     def test_07_member_console_and_keycloak_client_share_the_role_list(self):
         # D73/D623: DB rows already hold PACS roles; the old row-filter string is no longer a contract.
         result = subprocess.run(["node", str(ROOT / "tests" / "admin_member_policy_test.cjs")],
@@ -1955,8 +1930,8 @@ class ClinicianPolicySpec(unittest.TestCase):
                     self.assertIn(names[1], HTTP_DECORATORS, path.name)
                     self.assertLessEqual(set(names[2:]), {"HttpCode", "Header"}, path.name)
                     found.append(path.name)
-        # health; the link logins and the callback; S7-U5's bound login starts (POST) and the entry of a login
-        self.assertEqual(sorted(found), ["auth.controller.ts"] * 6 + ["pacs.controller.ts"])
+        # health, link logins, callback, and bound POST login starts.
+        self.assertEqual(sorted(found), ["auth.controller.ts"] * 5 + ["pacs.controller.ts"])
 
     def test_12_inventory_readers_see_every_route_decorator_and_method(self):
         """S5-U1c D6 (RequestMethod members, unreadable decorators) and D8 (the invariants_live reader)."""
@@ -2692,7 +2667,7 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertEqual(len(baseline), MATRIX["counts"]["routes"])
         self.assertEqual({m + " " + p for (m, p), meta in baseline.items() if meta["public"]}, PUBLIC)
         tags, outside, app = API / "study-tags.controller.ts", API / "unlisted-routes.ts", API / "app.module.ts"
-        member, registered = "  @Get() read(", "StudyTransferLocalController],"
+        member, registered = "  @Get() read(", "controllers: ["
         self.assertEqual(sources[tags].count(member), 1)
         self.assertEqual(sources[app].count(registered), 1)
         self.assertTrue(sources[tags].endswith("}\n"))
@@ -2713,7 +2688,7 @@ class ClinicianPolicySpec(unittest.TestCase):
                    "const descriptor = Object.getOwnPropertyDescriptor(target, 'unlisted');\n"
                    "Put('write')(target, 'unlisted', descriptor);\nPublic()(target, 'unlisted', descriptor);\n")
         app_module = ("import { UnlistedController } from './unlisted-routes';\n"
-                      + sources[app].replace(registered, "StudyTransferLocalController, UnlistedController],"))
+                      + sources[app].replace(registered, "controllers: [UnlistedController, "))
 
         def names(source):
             return sorted({name for run in decorator_runs(source) for name, _start, _end in run["items"]})
@@ -2924,7 +2899,7 @@ class ClinicianPolicySpec(unittest.TestCase):
 
         tags, outside, helpers, app = (API / "study-tags.controller.ts", API / "unlisted-routes.ts",
                                        API / "route-helpers.ts", API / "app.module.ts")
-        member, registered = "  @Get() read(", "StudyTransferLocalController],"
+        member, registered = "  @Get() read(", "controllers: ["
         heading, constructor = "export class StudyTagsController {", "constructor(private service:StudyTagsService){}"
         for text in (member, heading, constructor):
             self.assertEqual(sources[tags].count(text), 1, text)
@@ -2933,7 +2908,7 @@ class ClinicianPolicySpec(unittest.TestCase):
 
         def register(name):
             return {app: f"import {{ {name} }} from './unlisted-routes';\n"
-                         + sources[app].replace(registered, f"StudyTransferLocalController, {name}],")}
+                         + sources[app].replace(registered, f"controllers: [{name}, ")}
 
         loader = "a module loader the binding check does not follow"
         sealed = "a sealed name or a form the source contract does not list"
@@ -3259,7 +3234,7 @@ class ClinicianPolicySpec(unittest.TestCase):
             return str(caught.exception)
 
         tags, outside, app = API / "study-tags.controller.ts", API / "unlisted-routes.ts", API / "app.module.ts"
-        member, registered = "  @Get() read(", "StudyTransferLocalController],"
+        member, registered = "  @Get() read(", "controllers: ["
         self.assertEqual(sources[tags].count(member), 1)
         self.assertEqual(sources[app].count(registered), 1)
         self.assertNotIn(outside, sources)
@@ -3281,7 +3256,7 @@ class ClinicianPolicySpec(unittest.TestCase):
                 outside, "UnlistedController", "Reflect.defineMetadata('path', 'unlisted', UnlistedController); ",
                 lambda text: {outside: "export class UnlistedController {\n  unlisted() { return {}; }\n}\n" + text,
                               app: "import { UnlistedController } from './unlisted-routes';\n"
-                                   + sources[app].replace(registered, "StudyTransferLocalController, UnlistedController],")}),
+                                   + sources[app].replace(registered, "controllers: [UnlistedController, ")}),
         }
         self.assertEqual(sorted(places), sorted(contract["places"]))
         # control: the reader at e33e040 opened a regex after '(,=:[!&|?{};+-*%<>~^', and each form puts '+', '-' or '}'
