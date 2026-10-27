@@ -3,7 +3,8 @@ window.KinViewerUXShortcuts = (() => {
   // F8 (2026-10-26): flips and turns take Shift so L and R stay Length and Rectangle.
   const defaults = { WindowLevel: 'w', Pan: 'p', Zoom: 'z', StackScroll: 's',
     Length: 'l', Angle: 'a', EllipticalROI: 'e', RectangleROI: 'r',
-    ArrowAnnotate: 't', invert: 'i', Cine: 'c', Crosshairs: 'x' };
+    ArrowAnnotate: 't', invert: 'i', Cine: 'c', Crosshairs: 'x',
+    flipHorizontal: 'shift+h', flipVertical: 'shift+v', 'rotate-left': 'shift+l', 'rotate-right': 'shift+r' };
   const editable = node => !!node?.closest?.('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"]');
   // A stored binding is one letter or digit, or Shift with one letter.
   const parse = text => {

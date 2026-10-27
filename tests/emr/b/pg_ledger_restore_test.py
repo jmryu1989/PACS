@@ -796,7 +796,8 @@ async function cli(env,args=[]){
   })().catch(error=>{res.writeHead(500);res.end();console.error(error);});});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   const origin='http://127.0.0.1:'+server.address().port;
-  const env={KC_ADMIN_URL:origin,KC_REALM:'synthetic',KC_ISSUER:origin+'/realms/synthetic',
+  // The deployed import checks effective database privileges only in production mode.
+  const env={DEPLOYMENT_MODE:'production',KC_ADMIN_URL:origin,KC_REALM:'synthetic',KC_ISSUER:origin+'/realms/synthetic',
     KC_CLIENT_ID:'synthetic-cli',KC_CLIENT_SECRET:require('node:crypto').randomBytes(24).toString('hex'),
     KIN_EMR_STATE_DIR:'/tmp/synthetic-cli-state'};
   const first=await cli(env);assert.equal(first.code,0,first.err);

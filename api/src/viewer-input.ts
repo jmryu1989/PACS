@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
+import { mgGeometry } from './mg-geometry';
 
 const invalid = (message = '표시 저장 입력이 올바르지 않습니다'): never => { throw new BadRequestException(message); };
 export const VIEWER_LIMITS = Object.freeze({ items: 512, revisions: 4096, bytes: 16 * 1024 * 1024, snapshot: 8192 });
@@ -138,10 +139,11 @@ export function viewerCommand(raw: Buffer, create: boolean): ViewerCommand {
     const count = item.kind === 'angle' ? 3 : item.kind === 'ellipse' ? 4 : 2;
     if (!Array.isArray(item.points) || item.points.length !== count || item.points.some(point =>
       !Array.isArray(point) || point.length !== 3 || point.some(n => typeof n !== 'number' || !Number.isFinite(n)))) invalid();
-    Object.assign(normalized, { frameOfReferenceUid: viewerUid(item.frameOfReferenceUid), label: text(item.label, 1000), points: item.points });
+    Object.assign(normalized, { frameOfReferenceUid: item.kind === 'length' && item.frameOfReferenceUid === null ? null : viewerUid(item.frameOfReferenceUid), label: text(item.label, 1000), points: item.points });
     if (isManualMeasurement(item.kind)) {
       object(item.baseline, ['calculator', 'values']);
-      if (item.baseline.calculator !== 'kin-native-manual-v1' || !Array.isArray(item.baseline.values) ||
+      if (!(item.baseline.calculator === 'kin-native-manual-v1' || item.kind === 'length' &&
+          ['dbt', 'pixel', 'ermf', 'detector'].some(b => item.baseline.calculator === 'kin-mg-length-v1:' + b)) || !Array.isArray(item.baseline.values) ||
           item.baseline.values.length !== (item.kind === 'ellipse' ? 5 : 1) ||
           item.baseline.values.some(n => typeof n !== 'number' || !Number.isFinite(n))) invalid('완료된 측정값이 필요합니다');
       normalized.baseline = item.baseline;
@@ -195,6 +197,22 @@ export function verifyViewerReference(studyUid: string, item: ViewerItemInput, t
   if (!tags || viewerUid(tags.StudyInstanceUID) !== studyUid || viewerUid(tags.SeriesInstanceUID) !== item.seriesUid ||
       viewerUid(tags.SOPInstanceUID) !== item.sopUid) invalid('영상 참조가 일치하지 않습니다');
   const sopClass = viewerUid(tags.SOPClassUID);
+  const mg = item.kind === 'length' && mgGeometry(tags, item.frame);
+  if (mg) {
+    if (mg.frameOfReferenceUid !== item.frameOfReferenceUid || item.baseline?.calculator !== mg.calculator)
+      invalid('MG 측정 원본과 보정 기준이 일치하지 않습니다');
+    const dot = (a: number[], b: number[]) => a.reduce((sum, n, i) => sum + n * b[i], 0);
+    const pn = item.viewPlaneNormal, up = item.viewUp;
+    const pnSize = pn && Math.sqrt(dot(pn, pn)), upSize = up && Math.sqrt(dot(up, up));
+    // The pinned camera preserves rounded MG direction cosines in viewUp. Compare
+    // directions after normalization; coordinates still undergo the source-plane check.
+    if (!(pnSize > 0) || !(upSize > 0) || Math.abs(dot(pn, up) / pnSize / upSize) > 1e-4 ||
+        Math.abs(Math.abs(dot(pn, mg.normal) / pnSize)-1) > 1e-4) invalid('측정 평면이 원본 영상과 일치하지 않습니다');
+    const length = mg.length(item.points);
+    if (length <= 1e-6 || !Number.isFinite(length) || !item.baseline?.values || Math.abs(length - item.baseline.values[0]) > .001)
+      invalid('MG 원본으로 계산한 길이와 저장값이 일치하지 않습니다');
+    return;
+  }
   if (!SINGLE.has(sopClass) && sopClass !== US_MULTI) invalid('지원하지 않는 영상 형식입니다');
   let frames = 1;
   if (tags.NumberOfFrames !== undefined) frames = metadataInteger(tags.NumberOfFrames);
@@ -212,7 +230,7 @@ export function verifyViewerReference(studyUid: string, item: ViewerItemInput, t
   let normal = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
   const norm = Math.sqrt(dot(normal, normal)); normal = normal.map(x => x / norm);
   if (isManualMeasurement(item.kind)) {
-    if (tags.Modality !== 'CT' || tags.PixelSpacingCalibrationType !== undefined) invalid('지원하지 않는 측정 보정입니다');
+    if (tags.Modality !== 'CT' || tags.PixelSpacingCalibrationType !== undefined || item.baseline?.calculator?.startsWith('kin-mg-length-v1:')) invalid('지원하지 않는 측정 보정입니다');
     const pn = item.viewPlaneNormal, up = item.viewUp;
     if (Math.max(Math.abs(dot(pn, pn) - 1), Math.abs(dot(up, up) - 1), Math.abs(dot(pn, up))) > 1e-4 ||
         Math.abs(Math.abs(dot(pn, normal)) - 1) > 1e-4) invalid('측정 평면이 원본 영상과 일치하지 않습니다');

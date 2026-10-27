@@ -1,11 +1,18 @@
 window.KinViewerUXToolbar = (() => {
   const frequent = ['WindowLevel', 'Pan', 'Zoom', 'StackScroll', 'Length', 'Angle', 'EllipticalROI'];
   const symbols = { WindowLevel: '◐', Pan: '✥', Zoom: '⌕', StackScroll: '↕', Length: '↔',
-    Angle: '∠', EllipticalROI: '◯', RectangleROI: '□', ArrowAnnotate: '↗', invert: '◑', Cine: '▷', Crosshairs: '⊕' };
-  // Keep independent preference fields when the U2 shortcut schema advances.
+    Angle: '∠', EllipticalROI: '◯', RectangleROI: '□', ArrowAnnotate: '↗', invert: '◑', Cine: '▷', Crosshairs: '⊕',
+    flipHorizontal: '⇆', flipVertical: '⇅', 'rotate-left': '↺', 'rotate-right': '↻' };
+  // The stock More Tools flips and turns one way each; F8 asks for both ways.
+  // A left turn is three right quarter turns: the stock counter-clockwise
+  // command asks a stack at 0 degrees for -90, which the viewport ignores.
+  const companions = [['flipHorizontal', 'flipVertical', 'Flip Vertical', 'Flip Vertically', 'flipViewportVertical'],
+    ['rotate-right', 'rotate-left', 'Rotate Left', 'Rotate -90', { commandName: 'rotateViewportCW', commandOptions: { rotation: 270 } }]];
+  // Version 1 offered no key for the flips and turns, so a null there is the
+  // old default rather than a cleared choice; version 2 gives them the F8 keys.
   const turns = ['flipHorizontal', 'flipVertical', 'rotate-left', 'rotate-right'];
   const upgrade = value => value?.version !== 1 ? value : { ...value, version: 2, shortcuts: { ...value.shortcuts,
-    ...Object.fromEntries(turns.filter(id => value.shortcuts[id] == null && window.KinViewerUXShortcuts.defaults[id]).map(id => [id, window.KinViewerUXShortcuts.defaults[id]])) } };
+    ...Object.fromEntries(turns.filter(id => value.shortcuts[id] == null).map(id => [id, window.KinViewerUXShortcuts.defaults[id]])) } };
   let cached = null;
   async function prepare(session) {
     if (session.state() === 'unconfirmed') await session.decide();
@@ -32,8 +39,9 @@ window.KinViewerUXToolbar = (() => {
     const active = () => !ended && !session.ended() && (initialOwner === 'null' || JSON.stringify(owner()) === initialOwner);
     const element = (tag, text, parent) => { const node = document.createElement(tag); if (text) node.textContent = text; parent?.append(node); return node; };
     const button = (text, parent, click) => { const node = element('button', text, parent); node.type = 'button'; node.onclick = click; return node; };
+    const keys = window.KinViewerUXShortcuts;
     const defaults = () => ({ version: 2, bar: [...frequent],
-      shortcuts: { ...Object.fromEntries([...catalog.keys()].map(id => [id, null])), ...window.KinViewerUXShortcuts.defaults } });
+      shortcuts: { ...Object.fromEntries([...catalog.keys()].map(id => [id, null])), ...keys.defaults } });
     record = cached && JSON.stringify(cached.owner) === initialOwner ? cached : null;
     loaded = !!record;
     preferences = upgrade(record?.viewerSettings) || defaults();
@@ -172,7 +180,7 @@ window.KinViewerUXToolbar = (() => {
         const check = element('input', '', row); check.type = 'checkbox'; check.checked = value.bar.includes(id);
         check.setAttribute('aria-label', 'Show ' + label(item)); checks.set(id, check);
         element('span', label(item), row);
-        const input = element('input', '', row); input.value = value.shortcuts[id] || ''; input.maxLength = 7;
+        const input = element('input', '', row); input.value = keys.display(value.shortcuts[id]); input.maxLength = 7;
         input.setAttribute('aria-label', label(item) + ' Shortcut'); input.autocomplete = 'off'; inputs.set(id, input);
         button('Clear', row, () => { input.value = ''; input.focus(); });
       }
@@ -210,8 +218,8 @@ window.KinViewerUXToolbar = (() => {
       const shortcuts = { ...preferences.shortcuts };
       const used = new Set(Object.entries(shortcuts).filter(([id, key]) => !inputs.has(id) && key).map(([, key]) => key));
       for (const [id, input] of inputs) {
-        const value = input.value.trim().toLowerCase();
-        if (value && (!/^(?:[a-z0-9]|shift\+[a-z])$/.test(value) || used.has(value))) { feedback.textContent = '단축키는 중복 없이 영문자·숫자 한 개 또는 Shift+영문자로 지정하세요.'; input.focus(); return; }
+        const value = input.value.trim() ? keys.parse(input.value) : '';
+        if (value === null || value && used.has(value)) { feedback.textContent = '단축키는 중복 없이 영문자·숫자 한 개 또는 Shift+영문자로 지정하세요.'; input.focus(); return; }
         shortcuts[id] = value || null; if (value) used.add(value);
       }
       const selected = [...checks].filter(([, check]) => check.checked).map(([id]) => id);
@@ -239,9 +247,16 @@ window.KinViewerUXToolbar = (() => {
     dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
     dialog.addEventListener('keydown', event => event.stopPropagation());
     function label(item) { return item.label || item.title || item.tooltip || item.id; }
+    // A companion follows its stock sibling's evaluated availability.
+    function props(id) {
+      const item = catalog.get(id);
+      if (!item?.sibling) return service.getButtonProps(id);
+      const sibling = service.getButtonProps(item.sibling);
+      return sibling && { id, label: item.label, tooltip: item.tooltip, commands: item.commands, disabled: !!sibling.disabled };
+    }
     function invoke(id) {
       if (!active() || document.body.classList.contains('kin-viewer-empty') || document.body.classList.contains('kin-patient-switching')) return false;
-      const item = service.getButtonProps(id); if (!item || item.disabled) return false;
+      const item = props(id); if (!item || item.disabled) return false;
       const states = [window.kinViewerHistoryWorkspaceState?.(), window.kinViewerJobWorkspaceState?.()];
       if (states.some(state => state?.busy)) {
         status.textContent = '영상 작업을 불러오는 중입니다. 완료 후 도구를 다시 선택하세요.';
@@ -257,10 +272,10 @@ window.KinViewerUXToolbar = (() => {
       const item = catalog.get(id), key = preferences.shortcuts[id];
       const node = button('', parent, () => { more.open = false; invoke(id); }); node.className = 'kin-ux-tool'; node.draggable = loaded && !saving;
       node.dataset.tool = id; node.setAttribute('aria-label', label(item));
-      node.title = label(item) + (key ? ' · ' + key.toUpperCase() : ' · 단축키 미지정') + ' — 끌어서 도구 위치를 바꿀 수 있습니다.';
-      if (key) node.setAttribute('aria-keyshortcuts', key.toUpperCase());
+      node.title = label(item) + (key ? ' · ' + keys.display(key) : ' · 단축키 미지정') + ' — 끌어서 도구 위치를 바꿀 수 있습니다.';
+      if (key) node.setAttribute('aria-keyshortcuts', keys.display(key));
       const icon = element('span', symbols[id] || label(item).split(' ').map(word => word[0]).slice(0, 2).join(''), node); icon.setAttribute('aria-hidden', 'true'); icon.className = 'kin-ux-tool-icon';
-      element('span', label(item), node); element('kbd', key?.toUpperCase() || '—', node);
+      element('span', label(item), node); element('kbd', keys.display(key) || '—', node);
       node.ondragstart = event => { if (saving || !loaded) { event.preventDefault(); return; } dragged = id; event.dataTransfer.setData('text/plain', id); event.dataTransfer.effectAllowed = 'move'; more.open = true; };
       node.ondragend = () => { dragged = null; };
       node.ondragover = event => { if (dragged) event.preventDefault(); };
@@ -281,9 +296,9 @@ window.KinViewerUXToolbar = (() => {
     }
     function refreshState() {
       for (const node of toolbar.querySelectorAll('[data-tool]')) {
-        const props = service.getButtonProps(node.dataset.tool);
-        node.disabled = !props || !!props.disabled;
-        if (props?.isActive !== undefined) node.setAttribute('aria-pressed', String(!!props.isActive));
+        const state = props(node.dataset.tool);
+        node.disabled = !state || !!state.disabled;
+        if (state?.isActive !== undefined) node.setAttribute('aria-pressed', String(!!state.isActive));
         else node.removeAttribute('aria-pressed');
       }
     }
@@ -354,6 +369,13 @@ window.KinViewerUXToolbar = (() => {
           if (!['ohif.radioGroup', 'ohif.splitButton'].includes(definition?.uiType) || !items.length || items.some(item => !item.commands)) continue;
           removed.add(id);
           for (const item of items) if (item.id && !next.has(item.id)) next.set(item.id, item);
+        }
+        // Companions stay in this toolbar only: registering buttons in the shared
+        // toolbar state during mode entry would notify every stock listener.
+        for (const [sibling, id, name, tooltip, commands] of companions) {
+          if (!next.has(sibling) || next.has(id)) continue;
+          const entries = [...next]; entries.splice(entries.findIndex(([key]) => key === sibling) + 1, 0, [id, { id, label: name, tooltip, commands, sibling }]);
+          next.clear(); entries.forEach(([key, value]) => next.set(key, value));
         }
         const changed = JSON.stringify([...next].map(([id, item]) => [id, label(item)])) !== JSON.stringify([...catalog].map(([id, item]) => [id, label(item)]));
         catalog.clear(); next.forEach((item, id) => catalog.set(id, item));

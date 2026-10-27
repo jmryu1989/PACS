@@ -4,6 +4,8 @@ window.KinViewerHangingSettings = (() => {
   const get = (settings, modality) => ({ ...defaults, ...settings?.hanging?.[modalities.includes(modality) ? modality : 'Other'] });
   const metadata = set => ({ ...set?.images?.[0], ...set });
   const text = value => String(value || '').toLowerCase().trim().replace(/[^\p{L}\p{N}]+/gu, ' ');
+  const seriesOrder = (a, b) => Number(a.SeriesNumber || 0) - Number(b.SeriesNumber || 0) ||
+    String(a.SeriesInstanceUID).localeCompare(String(b.SeriesInstanceUID));
   function rank(sets, origin, method = 'similar') {
     const source = metadata(origin);
     const plane = image => {
@@ -27,7 +29,7 @@ window.KinViewerHangingSettings = (() => {
     return sets.slice().sort((a, b) => {
       const x = score(a), y = score(b);
       for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] > y[i] ? -1 : 1;
-      return Number(a.SeriesNumber || 0) - Number(b.SeriesNumber || 0) || String(a.SeriesInstanceUID).localeCompare(String(b.SeriesInstanceUID));
+      return seriesOrder(a, b);
     });
   }
   function dimensions(value, comparing) {
@@ -103,16 +105,17 @@ window.KinViewerHangingSettings = (() => {
     let last = null, applying = false, ended = false;
     function wrapped(data, requested, options) {
       if (ended) return run.call(this, data, requested, options);
-      const current = data.displaySets.filter(d => d.StudyInstanceUID === opened[0] && d.images?.length);
+      const current = data.displaySets.filter(d => d.StudyInstanceUID === opened[0] && d.images?.length).sort(seriesOrder);
       const modality = current[0]?.Modality, settings = getSettings(), value = get(settings, modality);
       if (modality === 'MG' || !current.length || requested && !['default', '@ohif/hpCompare'].includes(requested)) return run.call(this, data, requested, options);
       last = { data, requested, options };
       if (!settings?.hanging?.[modalities.includes(modality) ? modality : 'Other']) return run.call(this, data, requested, options);
-      const prior = data.displaySets.filter(d => d.StudyInstanceUID === opened[1] && d.images?.length);
+      const prior = data.displaySets.filter(d => d.StudyInstanceUID === opened[1] && d.images?.length).sort(seriesOrder);
       if (value.layout === 'automatic' && !prior.length) return run.call(this, data, requested, options);
       const { rows, columns, priorFirst, vertical } = dimensions(value, !!prior.length);
-      const first = rank(current, current[0], value.seriesMatch)[0];
-      const ordered = [first, ...current.filter(d => d !== first)], cells = Array(rows * columns).fill(null);
+      // Match priors to the stable current series, never to the first metadata response.
+      const ordered = value.seriesMatch === 'largest' ? rank(current, current[0], 'largest') : current;
+      const first = ordered[0], cells = Array(rows * columns).fill(null);
       if (prior.length) {
         const split = vertical ? Math.floor(rows / 2) : Math.floor(columns / 2);
         let currentIndex = 0, priorIndex = 0;

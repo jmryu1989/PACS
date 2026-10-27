@@ -325,7 +325,10 @@
         changed:()=>startPolling()});
       worklistAlerts = KinWorklistAlerts.mount({button:$('#worklist-alerts-open'),owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key&&key.slice(KinViewerOpening.PREFIX.length);},refresh:()=>load(),available:()=>serverMode&&!offline});
       KinStudyAccessStatus.mount({button:$('#study-access-open'),session:()=>KinAuth.session(),refresh:async()=>(await load())===true});
-      multiSelection = KinWorklistSelection.mount({host:$('#worklist-selection'),tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,current:()=>selectedUid,open:uid=>select(uid,{openSelected:true}),compare:(uid,prior)=>openFilmbox(uid,prior)});
+      multiSelection = KinWorklistSelection.mount({host:$('#worklist-selection'),tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,current:()=>selectedUid,open:uid=>select(uid,{openSelected:true}),compare:(uid,prior)=>openFilmbox(uid,prior),
+        // W9: Open Selected Studies (toolbar, Selection Details); a changed selection closes its row menu.
+        openSet:set=>multiStudyView?.open({...set,session:work.session()}),changed:generation=>closeSelectionMenu(generation),
+        openBlocked:()=>!serverMode||offline||demoMode?'서버 연결과 로그인 상태를 확인한 뒤 다시 여세요.':!KinAuth.has('radiologist')?'여러 검사 열기는 판독의 권한이 필요합니다.':null});
       imagePreview = KinWorklistImagePreview.mount({owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api});
       imageThumbnails = window.KinWorklistImageThumbnails?.mount?.({host:$('#thumbwrap'),owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api,
         onPreview:value=>imagePreview?.open(value),onBack:()=>renderThumbs()}) || null;
@@ -337,6 +340,20 @@
         reveal:uid=>{const index=relatedRows.findIndex(row=>row.uid===uid);if(index>=0){relatedPage=Math.floor(index/50);renderRelated();}},
         activate:uid=>uid===selectedUid?returnToReportStudy():relatedActivate(uid,{focus:true})});
       mountViewerWindows();
+      // W9 multi-study view: one controller per document and session, mounted once the selection and the window manager
+      // exist. It reads the page's own gate, transport, Reading Target, W4 select and launcher; it ends with the session.
+      multiStudyView = KinMultiStudyView.mount({ host: $('#multi-study'), work,
+        context: () => ({ owner: KinViewerOpening.key(KinAuth.session()), session: work.session() }),
+        selection: () => { const set = multiSelection?.snapshot(); return set && { ...set, session: work.session() }; },
+        allowed: () => !!sess && serverMode && !demoMode && !offline,
+        target: () => selectedUid,
+        targetLabel: uid => { const s = studies.find(x => x.uid === uid); return s ? [s.name, s.id, s.date, s.modality, shownStudyDesc(s)].filter(Boolean).join(' · ') : null; },
+        relatedBlock: () => relatedMode.active() ? relatedMode.reason() : null, watch: [$('#related-mode')],
+        select: (uid, token) => select(uid, { deferViewer: true, viewingSet: token }),
+        resolve: (body, signal, at) => api('POST', '/studies/viewing-set/resolve', body, signal, at),
+        viewer: { reserve: reserveViewingSet, launch: launchViewingSet, release: releaseViewingSet, bindsTarget: viewingSetToWorkspace },
+        formatDate: fmtD,
+      });
       restoreWorkspace();
       // Optional display controls must not prevent loading clinical work.
       try {

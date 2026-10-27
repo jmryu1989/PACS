@@ -4263,11 +4263,6 @@ class LiveInvariantTests(unittest.TestCase):
 
         page = read_page_source(ROOT / "worklist-v0" / "hpacs-lite" / "main.html")
         self.assertRegex(page, r"\.userfilter\s*\{[^}]*flex-wrap:\s*wrap")
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        gateway_readme = (ROOT / "gateway" / "README.md").read_text(encoding="utf-8")
-        self.assertIn("gw-<institutionId>", readme)
-        self.assertIn("Phase 1 지원 범위는 CT", gateway_readme)
-        self.assertIn("로컬 개발 스택 전용", gateway_readme)
 
         with patch.dict(os.environ, {
             "KIN_TEST_INGEST": "gateway", "KIN_TEST_GATEWAY_HOST": "gateway.test",

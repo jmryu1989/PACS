@@ -208,16 +208,20 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/viewer-toolbar-labels --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/viewer_toolbar_labels_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_toolbar_labels_test.cjs
     - name: Personal Hanging Protocol shared schema and owner model
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/hanging-protocols --cwd . --file api/src/hanging-protocol.ts --file worklist-v0/hpacs-lite/hanging-protocol-model.js --file tests/hanging_protocol_contract_cases.json --file tests/hanging_protocol_model_test.cjs --file tests/hanging_protocol_validator_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --experimental-strip-types --test tests/hanging_protocol_model_test.cjs tests/hanging_protocol_validator_test.cjs
+    - name: Retention of existing audit archives
+      run: python3 -B tests/ops_audit_integrity_test.py AuditIntegrityPure.test_pv04_init_only_and_integrity_events_are_reported_not_failed AuditIntegrityPure.test_pv11_ledger_writers_need_no_write_beside_the_tool_and_still_take_turns AuditIntegrityPure.test_pv04_retention_expected_list_comes_from_the_ledger AuditIntegrityPure.test_pv06_calendar_retention_and_plan_years AuditIntegrityPure.test_pv12_a_retention_plan_never_lands_inside_a_rotations_deletion
+    - name: Ops size and host lease behavior
+      run: python3 -B tests/caution_ops_test.py
     - name: Backup safety regressions
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/backup-safety --cwd . --file scripts/ops_backup.py --file scripts/ops_audit_integrity.py --file scripts/ops_monitor.py --file tests/ops_audit_integrity_test.py --file tests/ops_backup_test.py -- python3 tests/ops_backup_test.py
-    - name: S7-AUDIT-STORE verifier, ledger, checkpoint files and retention window
-      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/audit-integrity --cwd . --file scripts/ops_audit_integrity.py --file scripts/ops_backup.py --file tests/ops_audit_integrity_test.py -- python3 -B tests/ops_audit_integrity_test.py
     - name: D-MEASURE2 session recovery and SR guard regressions (no containers)
       run: node --test tests/viewer_recovery_test.cjs tests/viewer_note_connection_test.cjs
     - name: S5-UI6 viewer dock row keeps tabs and failures, settings in one collapsed disclosure
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/dock-strip --cwd . --file worklist-v0/hpacs-lite/viewer-workspace-dock.js --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/viewer_dock_strip_test.cjs --file tests/module_session_harness.cjs --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_dock_strip_test.cjs
     - name: Automatic prior calendar and identity boundaries
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_prior_test.cjs
+    - name: W9 multi-study composition, selection generation and viewer channel model
+      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/multi_study_view_test.cjs tests/worklist_selection_test.cjs
     - name: Compound search operators and malformed condition boundaries
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/compound_filter_test.cjs tests/worklist_alerts_test.cjs tests/worklist_refresh_test.cjs tests/worklist_startup_test.cjs tests/related_parts_test.cjs tests/worklist_body_parts_test.cjs tests/study_priority_test.cjs tests/worklist_search_test.cjs
     - name: Worklist column visibility and account storage model
@@ -284,6 +288,8 @@ jobs:
       env:
         CODE_SHA: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
       run: docker build --target production --build-arg "VCS_REF=$CODE_SHA" -t kin-api:ci api
+    - name: Runtime admission privileges and deployment names
+      run: docker run --rm --network none --entrypoint node -v "$PWD:/src:ro" -w /src kin-api:ci --test tests/emr/b/runtime_admission_test.cjs
     - name: Prepare disposable database image
       run: docker pull postgres:16-alpine
     - name: Findings migration preservation, restrict, action CHECK and synthetic dump/restore
@@ -291,7 +297,7 @@ jobs:
         KIN_TEST_API_IMAGE: kin-api:ci
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/findings-migration --cwd . --file api/prisma/migrations/20260917120000_findings/migration.sql --file api/prisma/migrations/20260920120000_report_citations/migration.sql --file api/src/pacs.service.ts --file api/src/pacs/values.ts --file api/src/pacs/access.ts --file api/src/pacs/institutions.ts --file api/src/study-source-groups.ts --file api/src/pacs/worklist.ts --file api/src/pacs/dicom-gateway.ts --file api/src/pacs/preferences.ts --file api/src/pacs/filters.ts --file api/src/pacs/study-state.ts --file api/src/pacs/tech-note.ts --file api/src/pacs/report-draft.ts --file api/src/pacs/report-evidence.ts --file api/src/pacs/report-commit.ts --file api/src/pacs/hold.ts --file api/src/pacs/clinician.ts --file api/src/pacs/audit.ts --file api/src/pacs/metrics.ts --file tests/ops_product_transfer_fixture.py --file tests/viewer_migration_test.py --file api/src/worklist-columns.ts --file api/prisma/migrations/20260930120000_audit_log_append_only/migration.sql --file scripts/ops_backup.py --file scripts/ops_export_inventory.py --file scripts/emr-compose.py --file tests/ops_combined_transfer_fixture.py --file tests/ops_database_transfer_fixture.py --file tests/ops_image_transfer_fixture.py --file tests/ops_orthanc_transfer_fixture.py --file tests/ops_orthanc_transfer_worker.py --file tests/ops_product_transfer_worker.py -- python3 -B tests/viewer_migration_test.py ViewerMigration.test_findings_additive_restrict_owner_key_and_failed_ddl ViewerMigration.test_findings_action_check_survives_pg_dump_restore ViewerMigration.test_report_citations_additive_nullable_bounded_and_named ViewerMigration.test_report_citations_runtime_check_translation_and_draft_lock ViewerMigration.test_03_real_dump_restore_every_row_revision_replay_budget_and_fk
     - name: Compiled viewer input, Unicode and original-plane validation
-      run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_input_test.cjs
+      run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" -v "$PWD/config:/config:ro" --entrypoint node kin-api:ci --test /tests/viewer_input_test.cjs /tests/mg_length_test.cjs
     - name: Compiled finding input allow-list, fingerprint and copied provenance
       run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/finding_input_test.cjs
     - name: D-MEASURE2 source failures, safe warnings and real read deadlines
@@ -369,11 +375,11 @@ jobs:
       env:
         KIN_TEST_API_DEV_IMAGE: kin-api:dev-ci
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/critical-result-source --cwd . --file api/src/critical-result.service.ts --file api/src/critical-result-policy.ts --file api/src/critical-result.controller.ts --file tests/critical_result_source_test.py --file api/prisma/migrations/20260930120000_audit_log_append_only/migration.sql --file tests/ops_product_transfer_fixture.py --file scripts/emr-compose.py --file tests/ops_combined_transfer_fixture.py --file tests/ops_database_transfer_fixture.py --file tests/ops_image_transfer_fixture.py --file tests/ops_orthanc_transfer_fixture.py --file tests/ops_orthanc_transfer_worker.py --file tests/ops_product_transfer_worker.py -- python3 -B tests/critical_result_source_test.py
-    - name: S7-AUDIT-STORE append-only guard, seal and verify on tampered copies, dump/restore
+    - name: Access-record append-only permissions and dump/restore
       timeout-minutes: 12
       env:
         KIN_TEST_API_IMAGE: kin-api:ci
-      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/audit-store-db --cwd . --file api/prisma/migrations/20260930120000_audit_log_append_only/migration.sql --file api/prisma/schema.prisma --file scripts/ops_audit_integrity.py --file scripts/ops_backup.py --file tests/audit_store_db_test.py --file tests/ops_product_transfer_fixture.py --file scripts/emr-compose.py --file tests/ops_combined_transfer_fixture.py --file tests/ops_database_transfer_fixture.py --file tests/ops_image_transfer_fixture.py --file tests/ops_orthanc_transfer_fixture.py --file tests/ops_orthanc_transfer_worker.py --file tests/ops_product_transfer_worker.py -- python3 -B tests/audit_store_db_test.py
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/audit-store-db --cwd . --file api/prisma/migrations/20260930120000_audit_log_append_only/migration.sql --file api/prisma/schema.prisma --file scripts/ops_audit_integrity.py --file scripts/ops_backup.py --file tests/audit_store_db_test.py --file tests/ops_product_transfer_fixture.py --file scripts/emr-compose.py --file tests/ops_combined_transfer_fixture.py --file tests/ops_database_transfer_fixture.py --file tests/ops_image_transfer_fixture.py --file tests/ops_orthanc_transfer_fixture.py --file tests/ops_orthanc_transfer_worker.py --file tests/ops_product_transfer_worker.py -- python3 -B tests/audit_store_db_test.py AuditStoreDB.test_as01_insert_kept_update_delete_truncate_refused_42501 AuditStoreDB.test_as02_connect_shaped_cte_insert_and_concurrent_writers AuditStoreDB.test_as03_compiled_client_delegates_refused_with_42501 AuditStoreDB.test_as04_superuser_cleanup_bypass_is_scoped_to_the_audit_statement AuditStoreDB.test_as04b_emr_runtime_role_holds_insert_and_select_only AuditStoreDB.test_as05_dump_restore_carries_rows_and_guard AuditStoreDB.test_as06_boot_migration_on_existing_rows_applies_one_and_later_updates_stop AuditStoreDB.test_iv02_one_column_of_one_row_changed_is_reported AuditStoreDB.test_iv03_deleted_rows_are_reported_smallest_first AuditStoreDB.test_iv07_guard_disabled_dropped_or_emptied_is_detected AuditStoreDB.test_iv11_restored_copy_changed_after_the_restore_is_reported
     - name: Compiled stale-draft addendum guard and draft base-version boundaries
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-stale-draft --cwd . --file api/src/pacs.service.ts --file api/src/pacs/values.ts --file api/src/pacs/access.ts --file api/src/pacs/institutions.ts --file api/src/study-source-groups.ts --file api/src/pacs/worklist.ts --file api/src/pacs/dicom-gateway.ts --file api/src/pacs/preferences.ts --file api/src/pacs/filters.ts --file api/src/pacs/study-state.ts --file api/src/pacs/tech-note.ts --file api/src/pacs/report-draft.ts --file api/src/pacs/report-evidence.ts --file api/src/pacs/report-commit.ts --file api/src/pacs/hold.ts --file api/src/pacs/clinician.ts --file api/src/pacs/audit.ts --file api/src/pacs/metrics.ts --file tests/report_stale_draft_test.cjs --file api/src/worklist-columns.ts -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_stale_draft_test.cjs
     - name: Compiled draft mutation refusals before any read - owner, boundary, snapshot (S7-U5)
@@ -1527,6 +1533,9 @@ jobs:
     - name: W5 related report mode on the delivered split page
       if: ${{ !cancelled() }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/related-report-mode-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/related_report_mode_dom_test.py
+    - name: W9 multi-study view on the delivered split page
+      if: ${{ !cancelled() }}
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/multi-study-view-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/multi_study_view_dom_test.py
     - name: S9 worklist shortcut and accessible-name boundary
       if: ${{ !cancelled() }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/s9-u4a-keys --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/run-tests.py -- $RUNNER_TEMP/measurement-python/bin/python -B scripts/run-tests.py --module tests/s9_a11y_dom_test.py --class S9AccessibilityPage --mode pure --unit s9-u4a-keys

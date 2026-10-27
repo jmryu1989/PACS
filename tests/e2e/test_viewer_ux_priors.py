@@ -403,6 +403,9 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
         settings.get_by_label('MG Image Type', exact=True).select_option('conventional')
         saved = save(page, settings)
         self.assertEqual(saved['viewerSettings']['mammography'], {'layout':'current','kind':'conventional'})
+        turn_keys = {'flipHorizontal': 'shift+h', 'flipVertical': 'shift+v',
+                     'rotate-left': 'shift+l', 'rotate-right': 'shift+r'}
+        self.assertEqual({key: saved['viewerSettings']['shortcuts'][key] for key in turn_keys}, turn_keys)
         layout(page, False)
         self.evidence(page, 'mg-current-account-setting')
         fresh_work = self.login()
@@ -465,6 +468,8 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
         # A v1 account created before U2 must retain MG through the first v2 toolbar save.
         record = document_request(fresh, 'GET', '/api/workspace-shortcuts').json()
         legacy = {**record['viewerSettings'], 'version': 1, 'mammography': {'layout': 'current', 'kind': 'conventional'}}
+        # v1 could only store plain keys; its unassigned turn keys were null/absent.
+        legacy['shortcuts'] = {key: None if key in turn_keys else value for key, value in legacy['shortcuts'].items()}
         response = document_request(fresh, 'PUT', '/api/workspace-shortcuts', headers={'X-KIN-CSRF': '1'},
                                     data={'expectedOwner': record['owner'], 'revision': record['revision'], 'viewerSettings': legacy})
         self.assertEqual(response.status, 200)
@@ -481,6 +486,18 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
         self.assertEqual(persisted.status, 200)
         self.assertEqual(persisted.json()['viewerSettings']['version'], 2)
         self.assertEqual(persisted.json()['viewerSettings']['mammography'], legacy['mammography'])
+        self.assertEqual({key: persisted.json()['viewerSettings']['shortcuts'][key] for key in turn_keys}, turn_keys)
+        # Read the U3-written v2 record in a fresh document; test actual native actions.
+        migrated.reload(); layout(migrated, False)
+        migrated.wait_for_function('() => !kinViewerHistoryWorkspaceState().busy && !kinViewerJobWorkspaceState().busy')
+        view = '''() => {const v=services.cornerstoneViewportService.getCornerstoneViewport(
+          services.viewportGridService.getActiveViewportId()), c=v.getCamera();
+          return [!!c.flipHorizontal,!!c.flipVertical,(Math.round(v.getViewPresentation().rotation)%360+360)%360];}'''
+        for key, expected in [('Shift+H',[True,False,0]), ('Shift+V',[True,True,0]),
+                              ('Shift+H',[False,True,0]), ('Shift+V',[False,False,0]),
+                              ('Shift+L',[False,False,270]), ('Shift+R',[False,False,0])]:
+            migrated.keyboard.press(key)
+            migrated.wait_for_function('expected => JSON.stringify((' + view + ')()) === JSON.stringify(expected)', arg=expected)
         settings = editor(migrated)
         settings.get_by_label('MG Layout', exact=True).select_option('compare')
         settings.get_by_label('MG Image Type', exact=True).select_option('dbt')
@@ -619,6 +636,63 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
         folder.mkdir(parents=True, exist_ok=True)
         (folder / 'mg-reference-boundary.json').write_text(json.dumps(observations, indent=2), encoding='utf-8')
         self.evidence(page, 'mg-reference-comparison')
+
+
+    def test_priors_09_personal_layout_metadata_order(self):
+        # D1821 -> RISK-WRONG-SERIES -> TEST-VIEWER-U3-HANGING.
+        # Hold real series metadata responses, without replacing native services or DICOM.
+        patient = 'U3ORDER-' + uuid.uuid4().hex[:12]
+        current = self.multiple(patient, 'current', '20260801')
+        prior = self.multiple(patient, 'prior', '20250701')
+        work = self.login()
+        first_series = {}
+        for fixture in [current, prior]:
+            first_series[fixture.uid] = next(item['0020000E']['Value'][0] for item in self.metadata(work, fixture)
+                                             if int(item['00200011']['Value'][0]) == 1)
+        observations = []
+        for layout, fixtures, expected in [
+                ('1x2', [current], [[current.uid, 1], [current.uid, 2]]),
+                ('automatic', [current, prior], [[current.uid, 1], [prior.uid, 1]])]:
+            record = document_request(work, 'GET', '/api/workspace-shortcuts').json()
+            settings = {'version': 2, 'bar': ['Zoom'], 'shortcuts': {'Zoom': 'z'},
+                        'hanging': {'CT': {'layout': layout, 'priorPosition': 'right', 'seriesMatch': 'similar'}}}
+            reply = document_request(work, 'PUT', '/api/workspace-shortcuts', headers={'X-KIN-CSRF': '1'},
+                                     data={'expectedOwner': record['owner'], 'revision': record['revision'], 'viewerSettings': settings})
+            self.assertEqual(reply.status, 200)
+            for reverse in [False, True]:
+                fresh_work = self.login()
+                page = fresh_work.context.new_page()
+                page.on('dialog', lambda dialog: dialog.accept())
+                held = []
+                if reverse:
+                    def metadata_response(route):
+                        if any('/series/' + first_series[f.uid] + '/metadata' in route.request.url for f in fixtures):
+                            held.append(route)
+                        else:
+                            route.continue_()
+                    page.route('**/dicom-web/studies/**/metadata*', metadata_response)
+                page.goto(self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + ','.join(f.uid for f in fixtures))
+                if reverse:
+                    page.wait_for_function("uids => uids.every(uid => window.services?.displaySetService.getActiveDisplaySets().some(d => d.StudyInstanceUID===uid && Number(d.SeriesNumber)===2))",
+                                           arg=[f.uid for f in fixtures])
+                    self.assertEqual(len(held), len(fixtures))
+                    for route in held: route.continue_()
+                canvas_ready(page, 2)
+                page.wait_for_function("uids => uids.every(uid => services.displaySetService.getActiveDisplaySets().filter(d => d.StudyInstanceUID===uid).length===2)",
+                                       arg=[f.uid for f in fixtures])
+                state = """() => [...services.viewportGridService.getState().viewports.values()]
+                  .sort((a,b)=>a.y-b.y||a.x-b.x).map(c=>{
+                    const v=services.cornerstoneViewportService.getCornerstoneViewport(c.viewportId);
+                    const m=cornerstone.metaData.get('instance',v?.getCurrentImageId?.());
+                    return [m?.StudyInstanceUID,Number(m?.SeriesNumber)];})"""
+                page.wait_for_function('expected => JSON.stringify((' + state + ')()) === JSON.stringify(expected)', arg=expected)
+                order = page.evaluate('uid => services.displaySetService.getActiveDisplaySets().filter(d=>d.StudyInstanceUID===uid).map(d=>Number(d.SeriesNumber))', current.uid)
+                if reverse: self.assertEqual(order, [2, 1])
+                observations.append({'layout': layout, 'reversed': reverse, 'arrival': order, 'cells': page.evaluate(state)})
+                self.evidence(page, 'personal-layout-' + layout + ('-reversed' if reverse else '-normal'))
+                page.close(); fresh_work.context.close()
+        folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/viewer-ux-u3/screens'))
+        (folder / 'personal-layout-order.json').write_text(json.dumps(observations, indent=2), encoding='utf-8')
 
 
 def load_tests(loader, tests, pattern):

@@ -25,6 +25,8 @@ import zipfile
 import ci_candidate_evidence as evidence
 
 ROOT = Path(__file__).resolve().parents[1]
+# Load the CLI with the same sibling-module search path as `python scripts/g3_dispatch.py`.
+sys.path.insert(0, str(ROOT / 'scripts'))
 spec = importlib.util.spec_from_file_location('g3_dispatch', ROOT / 'scripts/g3_dispatch.py')
 dispatch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(dispatch)

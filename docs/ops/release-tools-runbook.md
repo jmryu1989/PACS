@@ -1,3 +1,78 @@
+# Clean installation (D1800)
+
+First installation uses a new site stack and its configured empty volumes. It does
+not call `ops_deploy_entry.py` with `mode=emr-introduction`: that mode is for an
+existing installation's conversion only. No conversion phase or rehearsal receipt
+is an admission condition for a clean install.
+
+1. Backup: preserve the selected installation configuration and signing wrapping
+   secrets before installation. For an existing stack, first run
+   `python3 scripts/ops_backup.py backup --output <backup-directory>` and keep the
+   resulting snapshot. A new empty site has no patient database to back up.
+2. Install and migrate under the existing operations lock. Keep one operator's
+   Python session open in the configured checkout for steps 2–4; do not launch
+   Compose outside that session. Before mutation, compare `socket.gethostname()`,
+   `git rev-parse HEAD`, `docker version` and `docker compose version` with the
+   selected site's host and approved release/version record. A mismatch stops the
+   install. Record those observed values, the selected SHA, configuration/secret
+   backup locations and the operator in the private release record.
+
+   ```python
+   # Start python3 interactively in the selected checkout.
+   import sys, socket
+   from pathlib import Path
+   sys.path.insert(0, 'scripts')
+   import ops_backup as ops
+   hold = ops.lock()
+   lease = hold.__enter__()  # held across installation, verification and rehearsal
+   ops.require_local_docker()
+   observed = {'host': socket.gethostname(), 'sha': ops.text(['git', 'rev-parse', 'HEAD']),
+               'docker': ops.text(['docker', 'version']),
+               'compose': ops.text(['docker', 'compose', 'version'])}
+   print(observed)  # compare to the selected site's release record before continuing
+   ```
+
+   After that comparison, set `record_path` to the private release record's path
+   outside the checkout, `record` to the observed values plus the operator and
+   backup locations, and `install_timeout` to the site's measured installation
+   hang timeout (seconds). Persist the hold before starting Compose:
+
+   ```python
+   lease.retain()
+   record['status'] = 'STARTED'
+   ops.write_json(record_path, record)
+   compose = ['docker', 'compose', '-f', 'docker-compose.yml', '-f', 'docker-compose.prod.yml']
+   ops.run(compose + ['up', '-d', '--build'], timeout=install_timeout)
+   ```
+
+   The API image runs `prisma migrate deploy`; do not use schema reset or db push.
+3. Verify in the same session: run `ops.run(compose + ['ps'])` and
+   `ops.run(['curl', '--fail', '--silent', '--show-error', '<configured-HTTPS-origin>/api/health'])`,
+   then perform the approved synthetic save/reopen and signing checks before
+   clinical handover. Save their actual outcomes in the release record.
+4. Backup and restore: after verification, take the **first populated backup**
+   with `ops.backup('<backup-directory>')` in this same locked session (the CLI
+   equivalent outside this session is `python3 scripts/ops_backup.py backup --output <backup-directory>`).
+   Record the exact snapshot directory printed by the backup, then run
+   `ops.rehearse(Path('<snapshot-directory>'))`, equivalent to
+   `python3 scripts/ops_backup.py rehearse <snapshot-directory>`. Follow the
+   wrapping custody recovery commands below as well. This exercises restore even
+   when the site had no database before installation.
+
+   Only after verification and rehearsal succeed, record their raw evidence paths
+   and `status=VERIFIED_AND_RESTORED` with `ops.write_json(record_path, record)`,
+   then set `lease.retained = False` and call `hold.__exit__(None, None, None)`.
+   On failure or interruption, keep the lock and a `NEEDS_ATTENTION` release
+   record; inspect the incomplete installation before releasing it. Preserve the
+   failed installation and restore the selected snapshot in the recovery
+   environment; never overwrite an existing site's volumes with a clean install.
+
+The first site's measured backup size and elapsed time are installation records;
+recheck them before a larger site or when the backup approaches the existing 600 s
+base-backup helper hang timeout; that timeout still needs the first-site measurement. Conversion commands remain available only when
+an existing installation actually needs conversion. This procedure does not claim
+an installation or restore was executed by this documentation change.
+
 # Online signing keys: backup and restore
 
 The per-doctor encrypted private keys are in `kin.emr_signing.private_key`;

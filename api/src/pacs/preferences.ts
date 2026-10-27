@@ -333,6 +333,7 @@ export class PacsPreferences {
     // IDs are native viewer tool names, never patient data or executable commands.
     const id = (v: unknown) => typeof v === 'string' && /^[A-Za-z0-9_-]+$/.test(v);
     if (!value.bar.every(id) || !Object.keys(value.shortcuts).every(id)) return false;
+    // Version 2 adds Shift with a letter (F8: Shift+H/V flip, Shift+L/R turn).
     const pattern = value.version === 2 ? /^(?:[a-z0-9]|shift\+[a-z])$/ : /^[a-z0-9]$/;
     const used = new Set();
     return Object.values(value.shortcuts).every(key => {

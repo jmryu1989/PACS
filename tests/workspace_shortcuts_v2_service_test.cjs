@@ -86,6 +86,20 @@ test('viewer toolbar and single keys roam per account without replacing workspac
     await assert.rejects(save(value,3),status(400));
   assert.deepEqual(f.snapshot(),before);
 });
+test('viewer settings v2 roam Shift letter keys; v1 stays single keys',async()=>{
+  // F8: Shift+H/V flip and Shift+L/R turn beside the single keys L (Length) and R (Rectangle).
+  const f=fixture(), save=(value,revision)=>f.service.saveWorkspaceShortcuts({expectedOwner:owner(caller),revision,viewerSettings:value},caller);
+  const first={version:1,bar:['Zoom'],shortcuts:{Zoom:'z',Length:'l',flipHorizontal:null}};
+  assert.deepEqual((await save(first,0)).viewerSettings,first);
+  const second={version:2,bar:['Zoom'],shortcuts:{Zoom:'z',Length:'l',RectangleROI:'r',flipHorizontal:'shift+h',flipVertical:'shift+v','rotate-left':'shift+l','rotate-right':'shift+r',invert:null}};
+  const saved=await save(second,1);
+  assert.deepEqual(saved.viewerSettings,second); assert.deepEqual(await f.service.workspaceShortcuts(caller),saved);
+  const before=f.snapshot();
+  for(const value of [{...second,version:1},{...second,version:3},{...second,shortcuts:{...second.shortcuts,flipVertical:'shift+h'}},
+    ...['Shift+H','H','shift+1','shift+','shift+hh','ctrl+h','shift+shift+h','alt+h'].map(key=>({...second,shortcuts:{Zoom:key}}))])
+    await assert.rejects(save(value,2),status(400));
+  assert.deepEqual(f.snapshot(),before);
+});
 test('v1 and v2 exact readback and client migration roundtrip through real facade',async()=>{
   for(const bindings of [v1(),v2(),{...v2(),finalize:null,image:null}]){
     const f=fixture();assert.deepEqual(await f.service.workspaceShortcuts(caller),{owner:owner(caller),revision:0,bindings:null,viewerSettings:null,invalid:false});

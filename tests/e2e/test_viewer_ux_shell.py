@@ -840,6 +840,110 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/viewer-ux-u2/screens')); folder.mkdir(parents=True, exist_ok=True)
         other.screenshot(path=str(folder / 'toolbar-roaming.png'))
 
+    def test_shell_15_flip_rotate_shift_keys(self):
+        # F8 (2026-10-26 reader answer): Shift+H/V flip, Shift+L/R turn; L and R stay Length and Rectangle.
+        fixture = self.multiple('U2TURN-' + uuid.uuid4().hex[:12], 'turn keys', '20260801')
+        work = self.login()
+        record = document_request(work, 'GET', '/api/workspace-shortcuts').json()
+        # A record saved by the first U2 viewer, which had no key for the flips and turns.
+        first = {'version': 1, 'bar': ['Zoom', 'Length', 'RectangleROI'],
+                 'shortcuts': {'Zoom': 'z', 'Length': 'l', 'RectangleROI': 'r', 'flipHorizontal': None, 'rotate-right': None}}
+        response = document_request(work, 'PUT', '/api/workspace-shortcuts', headers={'X-KIN-CSRF': '1'},
+                                    data=dict(expectedOwner=record['owner'], revision=record['revision'], viewerSettings=first))
+        self.assertEqual(response.status, 200)
+        page = self.launch(work, [fixture])
+        page.wait_for_function('() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false')
+        tools = page.get_by_role('region', name='Image Tools', exact=True)
+        bar = tools.get_by_role('toolbar', name='Frequent Tools')
+        expect(bar.get_by_role('button', name='Zoom', exact=True)).to_be_enabled()
+        keys = {'Flip Horizontal': 'Shift+H', 'Flip Vertical': 'Shift+V', 'Rotate Left': 'Shift+L', 'Rotate Right': 'Shift+R'}
+        tools.locator('summary').click()
+        more = tools.get_by_role('group', name='More Tools')
+        for name, key in keys.items():
+            button = more.get_by_role('button', name=name, exact=True)
+            expect(button).to_be_enabled()
+            expect(button).to_have_attribute('aria-keyshortcuts', key)
+            expect(button).to_have_attribute('title', name + ' · ' + key + ' — 끌어서 도구 위치를 바꿀 수 있습니다.')
+            expect(button.locator('kbd')).to_have_text(key)
+        folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/viewer-ux-u2/screens')); folder.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(folder / 'shift-flip-rotate-more.png'))
+        tools.locator('summary').click()
+        active_tool = '''() => services.toolGroupService.getToolGroupForViewport(
+          services.viewportGridService.getActiveViewportId()).getActivePrimaryMouseButtonTool()'''
+        view = '''() => {const v=services.cornerstoneViewportService.getCornerstoneViewport(
+          services.viewportGridService.getActiveViewportId()), c=v.getCamera();
+          return {h:!!c.flipHorizontal, v:!!c.flipVertical, rotation:(Math.round(v.getViewPresentation().rotation)%360+360)%360};}'''
+        def settle(expected, after):
+            try:
+                page.wait_for_function('expected => JSON.stringify((' + view + ')()) === JSON.stringify(expected)', arg=expected)
+            except Exception:
+                self.fail(after + ': expected ' + json.dumps(expected) + ', the viewer shows ' + json.dumps(page.evaluate(view)))
+        canvas = page.locator('[data-cy="viewport-pane"] canvas').first
+        canvas.click(position=dict(x=100, y=100))
+        start = page.evaluate(view)
+        self.assertEqual(start, {'h': False, 'v': False, 'rotation': 0})
+        turned = lambda degrees: dict(start, rotation=degrees)
+        # Rotate Left from 0 degrees is the case the stock counter-clockwise command leaves unturned.
+        for step, (key, expected) in enumerate([('Shift+R', turned(90)), ('Shift+L', start), ('Shift+L', turned(270)), ('Shift+R', start),
+                                                ('Shift+H', dict(start, h=True)), ('Shift+V', dict(start, h=True, v=True)),
+                                                ('Shift+H', dict(start, v=True)), ('Shift+V', start)]):
+            page.keyboard.press(key)
+            settle(expected, 'step %d %s' % (step + 1, key))
+        # With Caps Lock on, Shift+H reports a lower-case key; it is still Shift+H.
+        page.evaluate('''() => (document.activeElement || document.body).dispatchEvent(new KeyboardEvent('keydown',
+          {key:'h', code:'KeyH', shiftKey:true, bubbles:true, cancelable:true}))''')
+        settle(dict(start, h=True), 'Caps Lock Shift+H')
+        page.keyboard.press('Shift+H')
+        settle(start, 'Shift+H back')
+        # Plain L and R choose Length and Rectangle; the stock turn on those letters does not also run.
+        page.keyboard.press('l'); self.assertEqual(page.evaluate(active_tool), 'Length')
+        page.keyboard.press('r'); self.assertEqual(page.evaluate(active_tool), 'RectangleROI')
+        page.keyboard.press('h'); page.keyboard.press('v')
+        page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+        self.assertEqual(page.evaluate(view), start)
+        # Text fields keep the letters; no image changes while typing.
+        page.locator('#kin-workspace-dock nav button[aria-controls="kin-viewer-layout"]').click()
+        for label in ['Job Title', 'Description']:
+            field = page.locator('#kin-viewer-jobs').get_by_label(label, exact=True)
+            field.fill('')
+            for key in ['Shift+H', 'Shift+V', 'Shift+L', 'Shift+R', 'l', 'r']: field.press(key)
+            expect(field).to_have_value('HVLRlr')
+            page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+            self.assertEqual(page.evaluate(view), start)
+            self.assertEqual(page.evaluate(active_tool), 'RectangleROI')
+            field.fill('')
+        # The account editor shows and saves Shift keys; a v1 record is written back as v2.
+        page.get_by_role('button', name='Viewer Settings', exact=True).click()
+        dialog = page.get_by_role('dialog', name='Viewer Settings')
+        for name, key in keys.items():
+            expect(dialog.get_by_label(name + ' Shortcut', exact=True)).to_have_value(key)
+        rotate_left = dialog.get_by_label('Rotate Left Shortcut', exact=True)
+        revision = document_request(page, 'GET', '/api/workspace-shortcuts').json()['revision']
+        for wrong in ['Shift+1', 'Shift+H', 'Control+K']:
+            rotate_left.fill(wrong); dialog.get_by_role('button', name='Save', exact=True).click()
+            expect(dialog.get_by_role('status')).to_contain_text('Shift+영문자로 지정하세요')
+            expect(dialog).to_be_visible()
+        self.assertEqual(document_request(page, 'GET', '/api/workspace-shortcuts').json()['revision'], revision)
+        rotate_left.fill('shift+k')
+        dialog.get_by_role('button', name='Save', exact=True).click()
+        expect(dialog).not_to_be_visible()
+        saved = document_request(page, 'GET', '/api/workspace-shortcuts').json()['viewerSettings']
+        self.assertEqual(saved['version'], 2)
+        self.assertEqual({key: saved['shortcuts'][key] for key in ['flipHorizontal', 'flipVertical', 'rotate-left', 'rotate-right', 'Length', 'RectangleROI']},
+                         {'flipHorizontal': 'shift+h', 'flipVertical': 'shift+v', 'rotate-left': 'shift+k', 'rotate-right': 'shift+r',
+                          'Length': 'l', 'RectangleROI': 'r'})
+        tools.locator('summary').click()
+        expect(more.get_by_role('button', name='Rotate Left', exact=True)).to_have_attribute('aria-keyshortcuts', 'Shift+K')
+        tools.locator('summary').click()
+        # A click with Rectangle active would start a mark; return to Zoom first.
+        page.keyboard.press('z'); self.assertEqual(page.evaluate(active_tool), 'Zoom')
+        canvas.click(position=dict(x=100, y=100))
+        page.keyboard.press('Shift+L')
+        page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+        self.assertEqual(page.evaluate(view), start)
+        page.keyboard.press('Shift+K')
+        settle(turned(270), 'Shift+K')
+
 
 def load_tests(loader, tests, pattern):
     return unittest.TestSuite(ViewerUXShellE2E(name) for name in loader.getTestCaseNames(ViewerUXShellE2E)
