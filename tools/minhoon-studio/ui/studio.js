@@ -266,6 +266,9 @@
     try { await api('role', { json: { role: e.target.value } }); openScreen($('screen').value === 'viewer' ? 'viewer' : (e.target.value === 'clinician' ? '/worklist/hpacs-lite/clinician.html' : $('screen').value)); }
     catch (error) { alert(error.message); }
   };
+  $('model').onchange = async e => {
+    try { await api('model', { json: { choice: e.target.value } }); } catch (error) { alert(error.message); refreshState(); }
+  };
   $('logout').onclick = async () => { await api('logout', { method: 'POST' }).catch(() => {}); location.replace('/studio/login.html'); };
 
   const panel = $('panel');
@@ -425,7 +428,7 @@
     $('who').textContent = s.displayName;
     $('role').value = s.role;
     $('undo').disabled = !s.sandbox.undoable;
-    $('claude-state').textContent = s.claude.model ? `Claude ${s.claude.model}` : '';
+    if (s.claude.choice) $('model').value = s.claude.choice;
     return s;
   }
 

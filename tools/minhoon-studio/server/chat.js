@@ -90,8 +90,28 @@ class Chat {
     return { pending: this.pending, running: [...this.jobs.values()].filter(j => j.state === 'running').map(j => ({ id: j.id, mode: j.mode, user: j.user })) };
   }
 
+  // Per-person model choice (studio header): "fast" / "deep" map to config.claude.models; absent = config default.
+  modelFor(user) {
+    const prefs = readJsonFile(path.join(this.dataDir, 'user-prefs.json'), {});
+    const choice = prefs[user] && prefs[user].model;
+    const models = this.config.claude.models || {};
+    return { choice: choice && models[choice] ? choice : (this.config.claude.defaultChoice || null), models };
+  }
+
+  setModel(user, choice) {
+    const models = this.config.claude.models || {};
+    if (!models[choice]) return false;
+    const file = path.join(this.dataDir, 'user-prefs.json');
+    const prefs = readJsonFile(file, {});
+    prefs[user] = { ...(prefs[user] || {}), model: choice };
+    writeJsonAtomic(file, prefs);
+    return true;
+  }
+
   enqueue({ user, displayName, mode, text, context }) {
-    const job = { id: crypto.randomUUID().slice(0, 8), user, displayName, mode, text, context: context || {}, state: 'queued', t: { received: Date.now() } };
+    const { choice, models } = this.modelFor(user);
+    const job = { id: crypto.randomUUID().slice(0, 8), user, displayName, mode, text, context: context || {}, state: 'queued', t: { received: Date.now() },
+      model: choice ? models[choice] : null };
     this.jobs.set(job.id, job);
     this.log({ role: 'user', user, displayName, mode, text, jobId: job.id });
     this.pending++;
@@ -227,7 +247,7 @@ class Chat {
     if (mode === 'ask') {
       args.push('--add-dir', this.statusFeed.dir, path.join(this.dataDir, 'public'));
     }
-    const model = mode === 'ask' ? (this.config.claude.askModel || this.config.claude.model) : this.config.claude.model;
+    const model = job.model || (mode === 'ask' ? (this.config.claude.askModel || this.config.claude.model) : this.config.claude.model);
     if (model) args.push('--model', model);
     const effort = mode === 'ask' ? this.config.claude.askEffort : this.config.claude.effort;
     if (effort) args.push('--effort', effort);

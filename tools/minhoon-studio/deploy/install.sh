@@ -94,6 +94,8 @@ cat > "$ROOT/etc/config.json" <<JSON
     "configDirs": { "sdij": "$ROOT/claude-config/sdij", "admin": "$ROOT/claude-config/admin" },
     "account": "sdij",
     "model": null,
+    "models": { "fast": "sonnet", "deep": "opus" },
+    "defaultChoice": "fast",
     "shellTool": "Bash",
     "python": "python3",
     "turnTimeoutSec": 900,

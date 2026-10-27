@@ -156,7 +156,7 @@ async function main() {
         sandbox: { head: await sandbox.head(), base: await sandbox.base(), branch: await sandbox.branch(), changes: log.length,
           undoable: log.filter(c => c.trailers['Studio-Kind'] === 'change' && !c.reverted).length },
         mock: mock.describe(), viewer: dicomweb.available(), status: statusFeed.view().present ? { publishedAt: statusFeed.view().publishedAt, overdue: statusFeed.view().overdue } : null,
-        queue: chat.status(), claude: { account: chat.claudeConfigDir().account, model: config.claude.model || null },
+        queue: chat.status(), claude: { account: chat.claudeConfigDir().account, model: config.claude.model || null, ...chat.modelFor(user) },
       });
       return;
     }
@@ -192,6 +192,12 @@ async function main() {
       const body = await readJson(req, 4096);
       if (!mock.setRole(user, body.role)) { sendJson(res, 400, { error: 'unknown role' }); return; }
       sendJson(res, 200, { role: mock.role(user) });
+      return;
+    }
+    if (p === 'model' && method === 'POST') {
+      const body = await readJson(req, 4096);
+      if (!chat.setModel(user, String(body.choice || ''))) { sendJson(res, 400, { error: 'unknown model choice' }); return; }
+      sendJson(res, 200, chat.modelFor(user));
       return;
     }
     if (p === 'mock/reset' && method === 'POST') { mock.reset(); chat.log({ role: 'system', user, mode: 'edit', text: '합성 자료를 처음 상태로 되돌렸습니다.' }); broadcast({ type: 'reload', reason: 'mock-reset' }); sendJson(res, 200, { ok: true }); return; }

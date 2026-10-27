@@ -32,7 +32,12 @@
   <button id="missing" type="button" class="warn" hidden title="스튜디오에 아직 가짜 응답이 없는 요청">모의 응답 없음 <b>0</b></button>
   <button id="errors" type="button" class="warn" hidden title="왼쪽 화면에서 난 JavaScript 오류">화면 오류 <b>0</b></button>
   <span class="grow"></span>
-  <span id="claude-state" class="muted"></span>
+  <label class="field" title="꼼꼼하게: 판단·비판이 더 정확하고 느림(작은 수정 25~45초). 빠르게: 작은 화면 수정이 2~3배 빠름(8~20초).">Claude
+    <select id="model">
+      <option value="fast">빠르게 (Sonnet)</option>
+      <option value="deep">꼼꼼하게 (Opus)</option>
+    </select>
+  </label>
   <span id="who" class="muted"></span>
   <button id="logout" type="button">나가기</button>
 </header>
