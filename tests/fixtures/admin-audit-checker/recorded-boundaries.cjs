@@ -181,8 +181,11 @@ module.exports = async function recordedBoundaries() {
     resetPassword: async () => {}, setEnabled: async () => {} };
   const admin = new AdminController(new AdminService(db, kc, null, null), null, requests.source);
   const beforeCreate = transactionChecks;
+  // The plain (pending) create: since #259 an omitted verificationOverride means the face-to-face create, which needs
+  // an institution and roles and continues into the approval patch.
   const created = await invoke({ method: 'POST', route: 'admin/users', purpose: 'clinical' },
-    req => admin.create({ username: kcUser.username, email: kcUser.email, firstName: kcUser.firstName, lastName: kcUser.lastName }, req));
+    req => admin.create({ username: kcUser.username, email: kcUser.email, firstName: kcUser.firstName, lastName: kcUser.lastName,
+      verificationOverride: false }, req));
   assert.equal(created.id, kcUser.id);
   assert.equal(transactionChecks, beforeCreate + 1, 'create rechecks the captured request on its transaction');
   assert.equal(legacy.length, 1); assert.equal(legacy[0].action, 'admin.user.create');
