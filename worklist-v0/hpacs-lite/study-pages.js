@@ -26,21 +26,24 @@
       }
       // A list that changed between pages (server 409, or an offset/total that no longer continues the pages read so far)
       // would join two different lists: an urgent study arriving before the cursor goes missing from a list that reads as
-      // complete. Start again from the first page, at most twice (config/ohif/ct-sync.js), and only then say it changed.
+      // complete. Start again from the first page, quietly, for as long as one request may wait (timeoutMs) from the
+      // first change seen; a list still changing after that is reported as changed. No count: the poll waits while this
+      // read is busy, so the bound has to end it, and the request allowance is the time this read already grants.
       // A first page's 409 is a change the server saw inside one answer and is reported as before.
-      let restarts = 0;
+      let changedAt = null;
       const changedList = () => Object.assign(new Error('읽는 동안 검사 목록이 계속 바뀌었습니다. 새로고침하세요.'), { code:'STUDY_LIST_CHANGED' });
+      const recovering = () => changedAt === null || Date.now() - changedAt < timeoutMs;
       const restart = () => {
-        if (!work.commit(at,()=>{ restarts++; draft.rows = []; draft.total = null; draft.next = null; delete draft.observation; delete draft.identityIssues;
+        if (!work.commit(at,()=>{ changedAt ??= Date.now(); draft.rows = []; draft.total = null; draft.next = null; delete draft.observation; delete draft.identityIssues;
           state('검사 목록이 바뀌어 처음부터 다시 불러오는 중…'); })) throw Object.assign(new Error('목록 조회가 중단되었습니다.'),{stale:true});
       };
       try {
         while (draft.total === null || draft.next !== null) {
-          if (!restarts) work.commit(at,()=>state('검사 목록을 나누어 불러오는 중…'));
+          if (changedAt === null) work.commit(at,()=>state('검사 목록을 나누어 불러오는 중…'));
           let data;
           try { data = await get('/studies?limit=100' + (draft.next ? '&after=' + encodeURIComponent(draft.next) : '')); }
           catch (error) {
-            if (error?.code !== 'STUDY_LIST_CHANGED' || !draft.next || restarts >= 2 || !active()) throw error;
+            if (error?.code !== 'STUDY_LIST_CHANGED' || !draft.next || !recovering() || !active()) throw error;
             restart(); continue;
           }
           if (!active()) throw Object.assign(new Error('계정 또는 판독 작업이 바뀌어 목록 응답을 적용하지 않았습니다.'), { stale:true });
@@ -53,7 +56,7 @@
             || page.offset + rows.length > page.total
             || (page.next === null && page.offset + rows.length !== page.total)) throw Object.assign(new Error('목록 페이지 형식을 확인할 수 없습니다. 새로고침하세요.'),{stale:true});
           if (page.offset !== draft.rows.length || (draft.total !== null && page.total !== draft.total)) {
-            if (restarts >= 2) throw changedList();
+            if (!recovering()) throw changedList();
             restart(); continue;
           }
           let previous = draft.rows.at(-1)?.uid;

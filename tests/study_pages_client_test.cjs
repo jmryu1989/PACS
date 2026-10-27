@@ -95,23 +95,29 @@ test('an offset or total that no longer continues the pages read restarts; a lis
   assert.deepEqual((await client.read()).studies,rows.slice(0,101));
   assert.deepEqual(paths.map(p=>p.includes('after=')),[false,true,false,true]);
  }
+ // A list that keeps changing is read again for one request's allowance (timeoutMs) from the first change, then refused.
  for(const delta of [-1,1]){
-  const paths=[];
-  const client=create({identity:()=>owner,changed:()=>{},request:async path=>{
-   if(path==='/me')return me;paths.push(path);
+  const paths=[];let changedAt=null;
+  const client=create({identity:()=>owner,changed:()=>{},timeoutMs:40,request:async path=>{
+   if(path==='/me')return me;paths.push(path);await new Promise(r=>setTimeout(r,2));
    if(!path.includes('after=')){const first=page(0);first.pagination.total=101;first.pagination.next='n';return first;}
+   changedAt??=Date.now();
    return {studies:[rows[100]],pagination:{owner,limit:100,offset:100+delta,total:101+delta,next:null}};}});
   await assert.rejects(client.read(),e=>e.code==='STUDY_LIST_CHANGED');
-  assert.equal(paths.length,6);assert.equal(client.resumable,false);
+  assert.ok(Date.now()-changedAt>=40,'refused only after the allowance from the first change');
+  assert.ok(paths.length>=4&&paths.length%2===0,'read again from the first page, whole passes only: '+paths.length);
+  assert.equal(client.resumable,false);
  }
 });
-test('a continuation refused as changed is read again at most twice; a first page refusal is not retried',async()=>{
- const always=[];
- const changing=create({identity:()=>owner,changed:()=>{},request:async path=>{
-  if(path==='/me')return me;always.push(path.includes('after=')?'next':'first');
-  if(path.includes('after='))throw Object.assign(new Error('검사 목록이 바뀌었습니다.'),{status:409,code:'STUDY_LIST_CHANGED'});return page(0);}});
+test('a continuation refused as changed is read again for one request\'s allowance; a first page refusal is not retried',async()=>{
+ const always=[];let changedAt=null;
+ const changing=create({identity:()=>owner,changed:()=>{},timeoutMs:40,request:async path=>{
+  if(path==='/me')return me;always.push(path.includes('after=')?'next':'first');await new Promise(r=>setTimeout(r,2));
+  if(path.includes('after=')){changedAt??=Date.now();throw Object.assign(new Error('검사 목록이 바뀌었습니다.'),{status:409,code:'STUDY_LIST_CHANGED'});}return page(0);}});
  await assert.rejects(changing.read(),e=>e.code==='STUDY_LIST_CHANGED');
- assert.deepEqual(always,['first','next','first','next','first','next']);assert.equal(changing.resumable,false);
+ assert.ok(Date.now()-changedAt>=40,'refused only after the allowance from the first change');
+ assert.ok(always.length>=4&&always.every((step,i)=>step===(i%2?'next':'first')),always.join());
+ assert.equal(changing.resumable,false);
  let calls=0;
  const firstRefused=create({identity:()=>owner,changed:()=>{},request:async path=>{
   if(path==='/me')return me;calls++;throw Object.assign(new Error('검사 접근 범위가 바뀌었습니다.'),{status:409,code:'STUDY_LIST_CHANGED'});}});
