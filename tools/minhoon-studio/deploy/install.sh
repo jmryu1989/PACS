@@ -66,7 +66,10 @@ chown -R root:root "$ROOT/assets"; chmod -R a+rX "$ROOT/assets"
 echo "== sandbox (product tree at main $BASE_SHA; created once, then kept)"
 if [ ! -d "$ROOT/sandbox/.git" ]; then
   install -d -o studio -g studio "$ROOT/sandbox"
-  sudo -u studio -H env HOME="$ROOT/home" python3 "$ROOT/app/deploy/make-sandbox.py" --archive "$BUNDLE/base.tar" --sha "$BASE_SHA" --out "$ROOT/sandbox"
+  # The bundle folder is the uploader's private directory; give studio its own copy of the archive.
+  install -o studio -g studio -m 600 "$BUNDLE/base.tar" "$ROOT/home/base.tar"
+  sudo -u studio -H env HOME="$ROOT/home" python3 "$ROOT/app/deploy/make-sandbox.py" --archive "$ROOT/home/base.tar" --sha "$BASE_SHA" --out "$ROOT/sandbox"
+  rm -f "$ROOT/home/base.tar"
 fi
 install -d -o studio -g studio "$ROOT/sandbox-read"
 
