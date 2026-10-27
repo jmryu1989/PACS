@@ -5500,9 +5500,9 @@ class HostOps:
                 "ordinary_entry": self.ordinary_entry_kept()}
 
     def backup_readiness(self, intro):
-        """The daily backup of the introduced release seals each set into the backup root's audit ledger
-        (ops_audit_integrity); without a readable ledger every daily backup would end in backup_error. That is a gate
-        failure here, never a silent pass. The ledger is initialised once (G09) before the capture takes the lock."""
+        """The existing conversion reopen gate still requires the ledger initialised at G09.
+        Daily backups no longer seal sets or require this ledger; this check is a retained conversion
+        condition, not a daily-backup prerequisite or a clean-install gate."""
         import ops_audit_integrity as audit
         try:
             ledger = audit.read_ledger(Path(intro.plan["backup_root"]))

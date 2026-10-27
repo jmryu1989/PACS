@@ -1086,12 +1086,12 @@ def alarm_of(checkpoint):
 
 
 def seal(directory, root, manifest):
-    """Seal a complete backup's AuditLog (stage 'seal audit' of ops_backup.backup, which holds the operations lock and
-    calls this after the writers resumed); the seal itself holds the root's ledger lock, so it never runs beside an init
+    """Legacy seal helper for retained-archive compatibility; daily ops_backup.backup no longer calls it.
+    The seal itself holds the root's ledger lock, so it never runs beside an init
     or a plan. The digests come from the snapshot's kin.dump in the isolated verifier; the
     live database is never contacted. Commit order: checkpoint file -> manifest declaration (with backup_error
     'audit integrity' when a finding is recorded) -> ledger seal. Returns the alarm type or None; failures raise and the
-    caller records them as backup_error 'seal audit'."""
+    legacy caller records them as backup_error 'seal audit'."""
     directory, root = Path(directory), Path(root)
     target = directory / CHECKPOINT
     if directory.is_symlink() or target.exists() or target.is_symlink():

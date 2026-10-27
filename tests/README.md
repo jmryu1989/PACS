@@ -738,33 +738,19 @@ python scripts/ops_audit_integrity.py verify --container kin-db --database kin -
 python scripts/ops_audit_integrity.py retention "$env:USERPROFILE/backups/kin-pacs"   # 월 1회 이상 점검(D195)
 ```
 
-- 봉인: `backup`은 writer 정지 구간에 뜬 `kin.dump`가 완성되고 writer 재개·준비 확인이 끝난 뒤(실패해도) 그 덤프의 AuditLog 행을
-  격리 검증 DB에서 digest로 만들어 백업 폴더의 `audit-checkpoint.json`(0600)에 쓰고, manifest의 `sha256`·`bytes`에 선언한 뒤(형식 1 그대로)
-  백업 부모의 `audit-ledger.json`에 덧붙인다(K → manifest → 장부 순서). 정지 시간은 늘지 않고 봉인은 `kin-db`에 명령을 보내지 않는다.
-- 장부를 쓰는 `init`·`plan`·봉인과 `rotate`의 삭제 구간은 백업 부모 안의 장부 잠금(`.kin-audit-ledger.lock`, 0600, 소유자만 해제)으로
-  한 번에 하나만 돈다. 도구 폴더에는 쓰지 않으므로 보호 설치(`/opt/kin-deploy`, root 0755)를 백업 부모 소유 계정으로 실행해도 된다.
-  봉인(`backup` 안)과 rotation은 운영 잠금 → 장부 잠금 순서로만 잡고 `init`·`plan`은 장부 잠금만 잡는다. 어느 쪽도 기다리지 않고,
-  죽은 실행이 남긴 잠금은 지우거나 건너뛰지 않고 계속 거절한다(RT-P3-LEDGER-LOCK·P3R1-01, `ops_audit_integrity_test.py` PV-11·PV-12).
-  경합했을 때의 결과는 진입점마다 다르다:
-  - `init`·`plan` CLI: 종료코드 2(`{"error": "Refused"}`), 장부·백업 부모는 그대로다.
-  - 봉인(`ops_audit_integrity.seal`): `Refused`를 올리고 체크포인트·manifest 선언·장부를 쓰지 않는다. `backup` CLI는 이를 실패로 남긴다:
-    완성된 백업 폴더는 지우지 않고 그 manifest에 `backup_error = {"stage": "seal audit", "type": "Refused"}`를 기록하며 종료코드 1이다
-    (봉인되지 않은 그 세트는 rotation에서 `audit-undeclared`가 아니라 일반 세대로 판단된다; 다음 백업 전에 원인을 확인한다).
-  - `rotate`(단독 또는 `backup` 뒤): 아무것도 삭제·이름변경하지 않고 실패(종료코드 1)한다. 보존기간 변경(`plan`)은 rotation의 마지막
-    보존 판정→이름변경→삭제 사이에 끼어들 수 없으므로, 성공한 `plan`의 새 기간 안의 세트를 그 rotation이 지우지 않는다.
-- 읽기 전용 `verify`·`retention`은 잠금을 잡지도 깨지도 않는다. 단 `retention`은 진행 중인 봉인 전체의 일관된 snapshot이 아니다:
-  봉인이 manifest 선언을 쓴 뒤 장부에 덧붙이기 전 사이에 조회하면 그 세트를 `uncommitted`로 보고(종료코드 1)하고, 봉인이 끝난 뒤 같은
-  조회는 종료코드 0이다(P3R1-04, P3 이전부터의 관측 한계). 백업 실행 시각과 겹친 `retention`의 `uncommitted`는 백업이 끝난 뒤 다시
-  조회해 판정하고, 다시 조회해도 남을 때만 중단된 봉인으로 다룬다. `verify`는 고정된 체크포인트와 내보내기를 읽으므로 해당하지 않는다.
-- 장부가 없으면 봉인하지 않는다(자동으로 처음부터 시작하지 않음): manifest `backup_error = {"stage": "seal audit", "type": "LedgerMissing"}`,
-  종료코드 1. 선언된 체크포인트가 있는 부모의 `init`은 거절되고 `init --after-loss --reason <사유>`만 기록과 함께 새 장부를 만든다.
-- 이전 봉인과 행이 다르거나(과거 사건: `previous_verification` failed/unverifiable), 이번 덤프의 가드가 무력하거나 표 모양이 다르면(현재 결함)
-  새 체크포인트를 쓰고 manifest `backup_error = {"stage": "audit integrity", ...}`, `complete: true`, 종료코드 1. 봉인 실패는
-  `{"stage": "seal audit", ...}`. 무변경 `ops_monitor`가 이 manifest를 `backup_failed`로 알린다. 그 스냅숏은 복원 입력으로 계속 쓰이고
-  내보내기 inventory만 거절한다.
-- `rehearse`는 복원·행수 확인 뒤 **자기가 복원한 `kin`의 내보내기**를 새 격리 검증 DB에서 봉인과 비교한다(스냅숏 파일을 다시 읽지 않는다).
-  `rehearsal-*.json`의 `audit`: 봉인 없는 옛 백업은 `"not_sealed"`, 봉인된 백업은 `verified`와 보고. 과거 사건만 있는 스냅숏은 성공하고
-  그 기록을 옮겨 적으며, 복원본의 행 차이·가드 무력·표 모양 발견·입력 오류는 success false, 종료코드 1이다.
+- 새 일일 `backup`은 봉인·체크포인트·장부를 만들거나 요구하지 않는다. 아래 장부·체크포인트 설명은 과거 보관본에 적용한다.
+- 과거 봉인 보관본은 `audit-checkpoint.json`과 manifest 선언, 백업 부모의 `audit-ledger.json`을 함께 보존한다.
+  `init`·`plan`과 `rotate`의 보존 판정·삭제는 장부 잠금으로 직렬화된다. 잠금 경합 시 `init`·`plan`은 종료코드 2,
+  `rotate`는 종료코드 1이며 삭제하지 않는다. 죽은 실행이 남긴 잠금은 점검 후 처리한다.
+- 읽기 전용 `verify`·`retention`은 잠금을 잡지도 깨지도 않는다. 과거 중단된 봉인의 manifest와 장부가 일치하지 않으면
+  `retention`은 `uncommitted`로 보고한다. 선언된 체크포인트가 있는 부모의 `init`은 거절되고,
+  `init --after-loss --reason <사유>`만 기록과 함께 새 장부를 만든다.
+- 과거 manifest의 `backup_error`는 그대로 보존되며 `ops_monitor`는 `backup_failed`로 알린다.
+  그 스냅숏은 복원 입력으로 계속 쓰이고 내보내기 inventory만 거절한다.
+- `rehearse`는 체크포인트가 선언된 과거 보관본에 한해 **자기가 복원한 `kin`의 내보내기**를 격리 검증 DB에서 비교한다.
+  `rehearsal-*.json`의 `audit`: 새 백업을 포함해 봉인 없는 백업은 `"not_sealed"`, 봉인된 백업은 `verified`와 보고.
+  과거 사건만 있는 스냅숏은 성공하고 그 기록을 옮겨 적으며, 복원본의 행 차이·가드 무력·표 모양 발견·입력 오류는
+  success false, 종료코드 1이다.
 - 내보내기·전송·검증은 함께 한 시간(3600초) 안에 끝나야 한다. 넘기거나 `pg_dump`·검증기 한쪽이 실패하면 그 실행이 가진 것을 모두
   끝내고(정리 예산 15초를 함께 쓴다) 입력 오류다(`verify` 2, 봉인 `seal audit`, rehearse 실패 기록) — 잠금을 기다리는 `pg_dump`가
   백업·리허설과 운영 잠금을 붙잡아 두지 않는다. 이름 붙인 DB(`verify --container`, rehearse 복원본)의 내보내기는 대상 컨테이너 안의 원격
@@ -1634,8 +1620,8 @@ argv, environment names, input hash, exit/timeout, output hashes). Production's 
 local-restore receipt that a rehearsal of exactly that production plan and B0 produced on the plan's rehearsal host
 (per-phase steps and result hashes, B0/B1/Bfail/recovery/previous-version smoke cross-checked, at most seven days old;
 `verify-receipt --bundle` re-checks the run directory); external backup stays OFF and no offsite receipt is claimed.
-Reopen requires the executor's browser-level smoke record and a readable audit ledger at the backup root (for
-retained archives; current daily backups do not create seals).
+Reopen requires the executor's browser-level smoke record and a readable audit ledger at the backup root. This is an existing conversion gate; current daily backups do not
+require a ledger or create seals.
 
 The target manifest names the host's own wiring instead of tolerating drift: `declared_overlays` (a compose file
 outside the checkout, e.g. `/etc/kin-deploy/overlays/docker-compose.halo-reports.yml`, its sha256, service and binds)
