@@ -315,7 +315,7 @@ class ReportObservationBrowser(base.WorklistE2E):
 
     def test_a5_06_an_answer_drawn_in_a_background_tab_is_reported_once_visible(self):
         target, first, _ = self.three()
-        page = self.sign_in(self.tab_browser())
+        page = self.login_page(self.tab_browser())
         # The reader's second tab in the same window.
         other = page.context.new_page()
         other.bring_to_front()

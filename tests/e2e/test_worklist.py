@@ -168,10 +168,13 @@ class WorklistE2E(unittest.TestCase):
     def login(self, actor="doctor"):
         context = self.browser.new_context(ignore_https_errors=True, viewport={"width": 1600, "height": 1050})
         self.contexts.append(context)
-        return self.sign_in(context.new_page(), actor)
+        return self.login_page(context.new_page(), actor)
 
-    def sign_in(self, page, actor="doctor"):
-        """The real login form in a fresh tab `page` (of this suite's browser or another one), up to the worklist."""
+    def login_page(self, page, actor="doctor"):
+        """The real login form in a fresh tab `page` (of this suite's browser or another one), up to the worklist.
+
+        Not named sign_in: suites built on this class bind WorkspacePersistenceE2E.sign_in(context, actor) under that
+        name, and login() must not dispatch into it."""
         page.set_default_timeout(20000)
         page.goto(self.stack.proxy + "/")
         stage = "username"
