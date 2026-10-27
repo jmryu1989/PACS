@@ -1,9 +1,14 @@
 """U7 W1-W5: real saved receipts, loss recovery, and dirty/busy work kept across replacement paths."""
+import json
 import unittest
 import uuid
 from playwright.sync_api import expect
 from test_s9_viewer_output_scope import ServedViewerFlow, BUSY_WINDOW, DIRTY_WINDOW
 from test_viewer_history import ViewerHistoryE2E
+from test_viewer_ux_priors import ViewerUXPriorsE2E
+from test_context_loss import LOSS
+from test_prior_selection import canvas_ready
+from viewer_tools import select_image_tool
 # The MPR mark, curve and path cases need the volume launch and drawing helpers; this family already
 # contains VolumeMarksE2E and ViewerJobsE2E.
 from test_volume_curved import SLOPE, PLACE
@@ -12,6 +17,26 @@ from test_volume_path import VolumePathE2E
 # Existing guard notices: patient tabs (viewer-patient-tabs.js) and the series strip (viewer-series-strip.js).
 TAB_KEPT = '저장·편집을 마친 뒤 환자를 전환하세요'
 SERIES_KEPT = '미저장 작업을 저장하거나 편집을 마친 뒤 시리즈를 여세요'
+# Existing refusals of the other replacement consumers while a save is in flight: Hanging Protocol
+# (viewer-hanging-protocol.js), cell merge (viewer-cell-merge.js), the in-viewer Studies panel
+# (viewer-prior-controller.js), renderer-loss Reload Viewer (viewer-context-loss.js) and the
+# embedded reading workspace (reading-workspace.js).
+HP_KEPT = '저장하지 않은 영상 작업이 있어 배치를 변경하지 않았습니다'
+MERGE_KEPT = '저장 또는 영상 작업이 끝난 뒤 다시 시도하세요'
+PRIOR_KEPT = '현재 영상은 유지합니다'
+RELOAD_KEPT = '진행 중인 작업이 끝난 뒤 다시 시도하세요'
+WORKSPACE_KEPT = '영상의 저장·복원 또는 상태 확인 중입니다'
+# One personal rule that would replace the grid with the second CT series (draft only, never saved).
+HP_RULE = '77777777-7777-4777-8777-777777777777'
+HP_RULES = {'version': 1, 'activeRuleId': HP_RULE, 'rules': [{
+    'id': HP_RULE, 'name': 'U7 Second Series', 'enabled': True,
+    'match': {'modality': 'CT', 'retrieveAE': None, 'bodyPart': None, 'description': {'operator': 'contains', 'value': 'D03A'}},
+    'selectors': [{'alias': 'Current', 'role': 'current', 'historical': False, 'modality': 'CT', 'retrieveAE': None,
+                   'bodyPart': None, 'description': None, 'laterality': None, 'order': 'ascending', 'occurrence': 2}],
+    'layout': {'rows': 1, 'cols': 1, 'cells': ['Current']}}]}
+SERIES_ORDER = '''expected => { const cells=[...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x);
+  return cells.length===expected.length && cells.every((g,i)=>{ const v=services.cornerstoneViewportService.getCornerstoneViewport(g.viewportId),
+    image=v?.getCurrentImageId?.(); return image && cornerstone.metaData.get('instance',image)?.SeriesInstanceUID===expected[i]; }); }'''
 SECOND = 'D02E second series'
 SHOWS_SERIES = '''series => [...services.viewportGridService.getState().viewports.keys()].some(id => {
   const image = services.cornerstoneViewportService.getCornerstoneViewport(id)?.getCurrentImageId?.();
@@ -72,6 +97,42 @@ class S9ViewerUnsavedFlowE2E(ServedViewerFlow, VolumePathE2E):
             # A wrongly admitted reuse would navigate after the notice; read the window again a little later.
             page.wait_for_timeout(500)
             self.assertEqual((page.url, self.rendered(page)), before)
+
+    def hold_job_save(self, router, viewer, fixture):
+        """Press Save New Job and hold its answer after the real write; returns the release, which lands it and gives the sent body.
+
+        The answer is released well inside the client's 30 s request limit (otherwise it reads as unknown)."""
+        path, held = '**/api/studies/' + fixture.uid + '/viewer-jobs', []
+        def hold(route):
+            if route.request.method != 'POST': return route.continue_()
+            held.append((route, route.fetch()))
+        router.route(path, hold)
+        viewer.locator('#kin-viewer-jobs').get_by_role('button', name='Save New Job', exact=True).first.click()
+        for _ in range(100):
+            if held: break
+            router.wait_for_timeout(50)
+        self.assertTrue(held)
+        self.assertTrue(viewer.evaluate('kinViewerJobWorkspaceState().busy'))
+        def release():
+            for route, response in held: route.fulfill(response=response)
+            router.unroute(path, hold)
+            expect(viewer.locator('#kin-viewer-jobs-status')).to_contain_text('저장했습니다', timeout=45000)
+            self.assertEqual(len(held), 1)
+            return held[0][0].request.post_data_json
+        return release
+
+    def stored_cells(self, fixture, sent):
+        """The stored Job named by the held request, as the study/series/SOP of each cell it recorded."""
+        response = self.stack.request('GET', f'/studies/{fixture.uid}/viewer-jobs/{sent["id"]}', 'doctor')
+        self.assertEqual(response.status, 200, response.text)
+        return [(cell['study'], cell['series'], cell['sop']) for cell in response.body['snapshot']['cells'] if cell]
+
+    def activate(self, page, index):
+        # The Pan tool is selected first, so this click only makes the cell active.
+        box = page.locator('[data-cy=viewport-grid] > div').nth(index).bounding_box()
+        page.mouse.click(box['x'] + box['width'] * .5, box['y'] + box['height'] * .3)
+        page.wait_for_function('''i => services.viewportGridService.getActiveViewportId() === [...services.viewportGridService.getState().viewports.values()]
+          .sort((a,b)=>a.y-b.y||a.x-b.x)[i].viewportId''', arg=index)
 
     def test_unsaved_01_uncertain_job_receipt_and_same_request_retry(self):
         current = self.ct('U7W-' + uuid.uuid4().hex[:12], 'work', '20260801')
@@ -452,6 +513,185 @@ class S9ViewerUnsavedFlowE2E(ServedViewerFlow, VolumePathE2E):
         self.open_from_worklist(work, page, b)
         self.assertEqual({cell['study'] for cell in self.rendered(page)}, {b.uid})
         self.assertEqual(self.jobs(a), [])
+
+    def test_unsaved_09_held_job_save_through_every_in_viewer_replacement(self):
+        """Every in-viewer consumer that can replace the shown images, tried while a real Job save is in flight.
+
+        Guarded consumers refuse and keep the screen. Unguarded native ones may proceed, but the held save
+        must still store what was shown at its click and keep the typed work until it lands."""
+        patient = 'U7WB-' + uuid.uuid4().hex[:12]
+        a = self.multiple(patient, 'busy current', '20260801')
+        self.ct(patient, 'busy prior', '20260701')
+        work, page = self.served_viewer(a)
+        work.locator('#findings').fill('U7 BUSY KEEP REPORT')
+        dialogs = []
+        def answer(dialog):
+            dialogs.append(dialog.message)
+            dialog.accept()
+        page.on('dialog', answer)
+        series = self.series_uids(work, a)
+        first_title = next(description for description in series if description != SECOND)
+        first, second = series[first_title], series[SECOND]
+        cells = lambda shown: [(cell['study'], cell['series'], cell['sop']) for cell in shown]
+
+        # Clean set-up, without questions: a saved arrow on the second series is the Go to Image target,
+        # a Recent Layout keeps the two series swapped, and the reading grid is first | second.
+        self.series_card(page, SECOND).click()
+        page.wait_for_function(SERIES_ORDER, arg=[second], timeout=45000)
+        ViewerHistoryE2E.open_measurement_tools(self, page)
+        arrow = ViewerHistoryE2E.draw(self, page, 'U7 BUSY GO TO')
+        arrow.get_by_role('button', name='Save', exact=True).click()
+        expect(arrow).to_contain_text('저장 완료')
+        saved_arrow = ViewerHistoryE2E.saved(self, a)
+        select_image_tool(page, 'Pan')
+        self.series_card(page, first_title).click()
+        page.wait_for_function(SERIES_ORDER, arg=[first], timeout=45000)
+        self.grid(page, 2)
+        self.drag(page, SECOND, 0)
+        self.drag(page, first_title, 1)
+        page.wait_for_function(SERIES_ORDER, arg=[second, first], timeout=45000)
+        self.action(page, '저장', '저장했습니다')
+        self.drag(page, first_title, 0)
+        self.drag(page, SECOND, 1)
+        page.wait_for_function(SERIES_ORDER, arg=[first, second], timeout=45000)
+        self.open_layout_tools(page)
+        expect(page.get_by_role('heading', name='Hanging Protocols', exact=True)).to_be_visible(timeout=45000)
+        page.locator('#kin-hp-import').set_input_files({'name': 'u7-busy-rules.json', 'mimeType': 'application/json',
+                                                        'buffer': json.dumps(HP_RULES).encode('utf-8')})
+        expect(page.locator('#kin-hp-status')).to_contain_text('초안으로 가져왔습니다')
+        expect(page.locator('#kin-cell-merge')).to_be_visible(timeout=45000)
+        self.activate(page, 0)
+        # The imported rule's selector editor has Description fields of its own.
+        jobs = page.locator('#kin-viewer-jobs')
+        title, description = jobs.get_by_label('Job Title', exact=True), jobs.get_by_label('Description', exact=True)
+        self.assertEqual(dialogs, [])
+
+        # Save 1 held: the guarded consumers refuse and keep the screen and the typed work.
+        title.fill('U7 BUSY FIRST')
+        description.fill('U7 busy first description')
+        source = self.rendered(page)
+        release = self.hold_job_save(page, page, a)
+        self.refuse_series(page)
+        for control in ('#kin-hp-apply', '#kin-hp-next'):
+            page.locator(control).click()
+            expect(page.locator('#kin-hp-status')).to_contain_text(HP_KEPT)
+            page.wait_for_timeout(500)
+            self.assertEqual(self.rendered(page), source)
+        page.locator('#kin-cell-merge [data-cell-merge="maximize"]').click()
+        expect(page.locator('#kin-cell-merge [role=status]')).to_contain_text(MERGE_KEPT)
+        self.assertEqual(page.evaluate('services.viewportGridService.getState().viewports.size'), 2)
+        studies = ViewerUXPriorsE2E.studies(self, page)
+        studies.get_by_role('button', name='D03A busy prior', exact=True).click()
+        expect(studies).to_contain_text(PRIOR_KEPT, timeout=20000)
+        self.assertEqual(self.rendered(page), source)
+        expect(title).to_have_value('U7 BUSY FIRST')
+        expect(description).to_have_value('U7 busy first description')
+        self.evidence(page, 'work-busy-save-guarded-replacements-kept')
+        sent = release()
+        self.assertEqual([j['title'] for j in self.jobs(a)], ['U7 BUSY FIRST'])
+        self.assertEqual(self.stored_cells(a, sent), cells(source))
+        # The landed save clears its own inputs; nothing else is unsaved now.
+        page.wait_for_function('() => !kinViewerJobWorkspaceState().dirty && !kinViewerHistoryWorkspaceState().dirty')
+
+        # Save 2 held: Restore Job waits; Go to Image, a native thumbnail drop, Restore Recent Layout and the
+        # Layout menu proceed. Each keeps the typed work, and the save stores the screen of its click.
+        self.activate(page, 0)
+        title.fill('U7 BUSY SECOND')
+        source = self.rendered(page)
+        release = self.hold_job_save(page, page, a)
+        expect(page.locator('#kin-viewer-jobs').get_by_role('button', name='Restore Job', exact=True).first).to_be_disabled()
+        ViewerHistoryE2E.open_measurement_tools(self, page)
+        page.locator('#kin-viewer-history section[data-kind=arrow]').filter(has_text='U7 BUSY GO TO') \
+            .get_by_role('button', name='Go to Image', exact=True).click()
+        page.wait_for_function(SERIES_ORDER, arg=[second, second], timeout=20000)
+        self.drag(page, first_title, 0)
+        page.wait_for_function(SERIES_ORDER, arg=[first, second], timeout=20000)
+        self.action(page, '복원', '적용했습니다')
+        page.wait_for_function(SERIES_ORDER, arg=[second, first], timeout=20000)
+        self.grid(page, 1)
+        page.wait_for_function(SERIES_ORDER, arg=[second], timeout=20000)
+        expect(title).to_have_value('U7 BUSY SECOND')
+        self.assertTrue(page.evaluate('kinViewerJobWorkspaceState().busy'))
+        self.assertEqual(dialogs, [])
+        sent = release()
+        self.assertEqual(sorted(j['title'] for j in self.jobs(a)), ['U7 BUSY FIRST', 'U7 BUSY SECOND'])
+        self.assertEqual(self.stored_cells(a, sent), cells(source))
+        self.assertEqual(ViewerHistoryE2E.saved(self, a), saved_arrow)
+        page.wait_for_function('() => !kinViewerJobWorkspaceState().dirty && !kinViewerHistoryWorkspaceState().dirty')
+        self.evidence(page, 'work-busy-save-native-replacements-landed')
+
+        # Save 3 held: after a real renderer loss, Reload Viewer waits; once the save lands it reloads.
+        self.open_layout_tools(page)
+        title.fill('U7 BUSY THIRD')
+        source = self.rendered(page)
+        release = self.hold_job_save(page, page, a)
+        document = page.evaluate('performance.timeOrigin')
+        page.evaluate(LOSS)
+        recovery = page.locator('section[aria-label="Viewer Recovery"]').last
+        expect(recovery).to_be_visible(timeout=20000)
+        recovery.get_by_role('button', name='Reload Viewer', exact=True).click()
+        expect(recovery.get_by_role('status')).to_contain_text(RELOAD_KEPT)
+        self.assertEqual(page.evaluate('performance.timeOrigin'), document)
+        expect(title).to_have_value('U7 BUSY THIRD')
+        self.assertEqual(dialogs, [])
+        sent = release()
+        self.assertEqual(self.stored_cells(a, sent), cells(source))
+        page.wait_for_function('() => !kinViewerJobWorkspaceState().dirty && !kinViewerJobWorkspaceState().busy')
+        # Clean now: the same button reloads this viewer, which lists the three saved Jobs and the saved arrow.
+        recovery.get_by_role('button', name='Reload Viewer', exact=True).click()
+        page.wait_for_function('previous => performance.timeOrigin !== previous', arg=document, timeout=60000)
+        canvas_ready(page, 1)
+        self.open_layout_tools(page)
+        for saved_title in ('U7 BUSY FIRST', 'U7 BUSY SECOND', 'U7 BUSY THIRD'):
+            expect(page.locator('#kin-viewer-jobs')).to_contain_text(saved_title, timeout=45000)
+        ViewerHistoryE2E.open_measurement_tools(self, page)
+        expect(page.locator('#kin-viewer-history section[data-kind=arrow]').filter(has_text='U7 BUSY GO TO')).to_have_count(1, timeout=45000)
+        expect(work.locator('#findings')).to_have_value('U7 BUSY KEEP REPORT')
+        self.evidence(page, 'work-busy-save-reload-reopened')
+
+    def test_unsaved_10_embedded_workspace_waits_for_a_held_job_save(self):
+        a = self.ct('U7WE-' + uuid.uuid4().hex[:12], 'embedded busy', '20260801')
+        b = self.ct('U7WE-OTHER-' + uuid.uuid4().hex[:12], 'embedded other', '20260801')
+        self.seed_report(a)
+        self.seed_report(b)
+        work = self.login()
+        work.set_viewport_size(dict(width=1680, height=1100))
+        dialogs = []
+        def answer(dialog):
+            dialogs.append(dialog.message)
+            dialog.accept()
+        work.on('dialog', answer)
+        frame = self.workspace(work, a, count=1)
+        frame.get_by_role('button', name='Comparison', exact=True).click()
+        title = frame.get_by_label('Job Title', exact=True)
+        title.fill('U7 EMBEDDED BUSY TITLE')
+        source = self.rendered(frame)
+        release = self.hold_job_save(work, frame, a)
+        # Selecting another study asks the workspace to replace its viewer while the save is in flight.
+        self.choose(work, b)
+        expect(work.locator('#reading-target')).to_contain_text(b.uid)
+        expect(work.locator('#reading-status')).to_contain_text(WORKSPACE_KEPT)
+        # A save in flight offers no discard.
+        expect(work.get_by_role('button', name='Discard Viewer Changes & Open', exact=True)).to_be_hidden()
+        self.assertEqual(self.rendered(frame), source)
+        expect(title).to_have_value('U7 EMBEDDED BUSY TITLE')
+        work.get_by_role('button', name='Return to Previous Viewer', exact=True).click()
+        expect(work.locator('#reading-target')).to_contain_text(a.uid)
+        expect(work.locator('#reading-frame')).to_be_visible()
+        self.assertEqual(self.rendered(frame), source)
+        self.assertEqual(dialogs, [])
+        self.shot(work, 'work-busy-save-embedded-kept')
+        sent = release()
+        self.assertEqual([j['title'] for j in self.jobs(a)], ['U7 EMBEDDED BUSY TITLE'])
+        self.assertEqual(self.stored_cells(a, sent), [(c['study'], c['series'], c['sop']) for c in source])
+        frame.wait_for_function('() => !kinViewerJobWorkspaceState().dirty && !kinViewerJobWorkspaceState().busy')
+        # Clean now: the same selection replaces the embedded viewer.
+        self.choose(work, b)
+        expect(work.locator('#reading-status')).to_have_text('영상 작업공간 연결됨', timeout=60000)
+        replaced = work.locator('#reading-frame').element_handle().content_frame()
+        canvas_ready(replaced, 1)
+        self.assertEqual({cell['study'] for cell in self.rendered(replaced)}, {b.uid})
+        self.assertEqual(self.jobs(b), [])
 
 
 def load_tests(loader, tests, pattern):

@@ -165,9 +165,12 @@ PROFILES = {
         'project_prefix': 'kin-s9-u7-ci-',
         # S9-U7 output scope, identity and unsaved work on the served worklist -> OHIF flow. Each module's
         # load_tests is the allowlist (test_output_*, test_identity_flow_*, test_unsaved_*), so no class is
-        # passed and no inherited case runs. 400s per suite is a hang ceiling, not an estimate:
-        # (400+35)*3 = 1305s of the shared 1500s deadline leaves 195s for setup and cleanup.
+        # passed and no inherited case runs. The caps are hang ceilings, not estimates. The unsaved-work suite
+        # holds real saves through every replacement consumer and runs about 330s locally (output about 100-170s,
+        # identity about 80-95s), so each suite gets its own cap: (320+35)+(240+35)+(700+35) = 1365s of the
+        # shared 1500s deadline leaves 135s for a stack whose local setup and cleanup take about 45s.
         'suite_timeout': 400,
+        'suite_budgets': {'ci-s9-u7-output': 320, 'ci-s9-u7-identity': 240, 'ci-s9-u7-work': 700},
         'suites': (('e2e/test_s9_viewer_output_scope.py', None, 'ci-s9-u7-output'),
                    ('e2e/test_s9_viewer_identity_flow.py', None, 'ci-s9-u7-identity'),
                    ('e2e/test_s9_viewer_unsaved_flow.py', None, 'ci-s9-u7-work')),

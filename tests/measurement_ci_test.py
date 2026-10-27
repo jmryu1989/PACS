@@ -745,8 +745,15 @@ class MeasurementCiTests(unittest.TestCase):
             self.assertNotIn('--class', command)
             self.assertEqual(command[command.index('--mode')+1], 'live')
             self.assertEqual(command[command.index('--module')+1], 'tests/' + suite[0])
-        self.assertLessEqual(len(profile['suites']) * (profile['suite_timeout'] + 35),
+        # Every suite has its own cap; together with the supervisor margins they fit the shared deadline.
+        budgets = profile['suite_budgets']
+        self.assertEqual(sorted(budgets), sorted(row[2] for row in profile['suites']))
+        self.assertLessEqual(sum(budgets[row[2]] + 35 for row in profile['suites']),
                              ci.profile_deadline_seconds('s9-u7-served'))
+        for suite in profile['suites']:
+            command, outer = ci.guarded_profile_run(profile, *suite, ci.profile_deadline_seconds('s9-u7-served'))
+            self.assertEqual(command[command.index('--timeout')+1], str(budgets[suite[2]]))
+            self.assertEqual(outer, budgets[suite[2]] + 35)
         owner = [row for row in self.catalog.profile_bindings()['s9-u7-served'] if not row['dispatch']]
         self.assertEqual([row['job'] for row in owner], ['worklist-ux-measurements'])
         self.assertEqual(self.catalog.text().count('--profile s9-u7-served'), 1)
@@ -1100,7 +1107,7 @@ class MeasurementCiTests(unittest.TestCase):
         # budgets are asserted in test_volume_mpr_profile_is_exact_bounded_and_isolated.
         # volume-slab opted in as the second MPR suite group; see its own exact test.
         for name, profile in ci.PROFILES.items():
-            if name in ('hanging-protocols', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient'):
+            if name in ('hanging-protocols', 's9-u7-served', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient'):
                 self.assertIn('suite_budgets', profile)
                 continue
             with self.subTest(profile=name):
