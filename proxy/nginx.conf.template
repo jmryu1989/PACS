@@ -283,6 +283,21 @@ server {
         include /etc/nginx/snippets/orthanc-basic-auth.conf;
     }
 
+    # MG-LOADING (Minhoon P0, 2026-10-27): the viewer's frame reads and the series strip's previews go to the API's
+    # range reader (api/src/dicom-frame.service.ts). Measured cause: Orthanc reads and MD5-checks the whole 1 GB DBT
+    # file for every frame (2-3.5 s each, serialized). The API runs the same gate as /kin-authz itself, so no
+    # auth_request here; it relays to Orthanc what it cannot serve directly. Buffering off: a 17 MB frame streams
+    # as it is read instead of being spooled to a temp file first. Regex locations win over the prefix ones below.
+    location ~ ^/dicom-web/studies/[0-9.]+/series/[0-9.]+/instances/[0-9.]+/frames/[0-9,]+$ {
+        limit_except GET HEAD { deny all; }
+        proxy_buffering off;
+        proxy_pass http://api:3000/api$request_uri;
+    }
+    location ~ ^/instances/[0-9a-f-]+/preview$ {
+        limit_except GET HEAD { deny all; }
+        proxy_pass http://api:3000/api$request_uri;
+    }
+
     # 4242만 닫아도 STOW-RS가 열려 있으면 HTTPS로 영상을 쓸 수 있다.
     # 조회도 먼저 API의 토큰 검증을 통과해야 Orthanc 자격증명을 대신 붙인다.
     location /dicom-web/ {

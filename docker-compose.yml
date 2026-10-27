@@ -257,6 +257,9 @@ services:
       ORTHANC_URL: http://orthanc:8042
       ORTHANC_USER: admin
       ORTHANC_PASS: ${ORTHANC_PASS:?ORTHANC_PASS를 .env에 설정하세요}
+      # MG-LOADING: 뷰어 프레임 읽기는 API가 Orthanc 저장소의 파일을 읽기 전용으로 range 읽기한다(api/src/dicom-frame.service.ts).
+      # 없으면 Orthanc에 그대로 중계한다(1 GB DBT 한 프레임마다 전체 파일 읽기·MD5 검증으로 2~3.5초).
+      KIN_ORTHANC_STORAGE: /var/lib/orthanc/db
     ports:
       - "3000:3000"
     depends_on:
@@ -274,6 +277,7 @@ services:
       - ./api/src:/app/src
       - ./api/prisma:/app/prisma
       - emr-state:/var/lib/kin-emr
+      - orthanc-db:/var/lib/orthanc/db:ro   # MG-LOADING 프레임 range 읽기 전용. 쓰기·삭제 경로는 없다.
 
 volumes:
   orthanc-db:

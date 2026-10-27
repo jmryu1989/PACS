@@ -8952,6 +8952,77 @@
       }
     }
   },
+  "di_additions_mg_loading": {
+    "unit": "S9-MG-LOADING",
+    "note": "MG-LOADING (Minhoon P0, 2026-10-27): the viewer's WADO-RS frame reads and series-strip previews answered by the API's range reader behind the DICOMweb gate (dicom-frame.controller.ts, dicom-frame.service.ts); two routes nginx routes to the API. U0B-DI compares the snapshot minus exactly these.",
+    "middleware_routes": [],
+    "controllers": [
+      "DicomFrameController"
+    ],
+    "providers": [
+      "DicomFrameService"
+    ],
+    "routes": [
+      {
+        "controller": "DicomFrameController",
+        "handler": "preview",
+        "method": "GET",
+        "paths": [
+          "/|instances/:id/preview"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "1:2@2:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "DicomFrameController",
+        "handler": "read",
+        "method": "GET",
+        "paths": [
+          "/|dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:4@4:null:0",
+          "1:5@5:null:0",
+          "5:0@0:\"study\":0",
+          "5:1@1:\"series\":0",
+          "5:2@2:\"sop\":0",
+          "5:3@3:\"frames\":0"
+        ]
+      }
+    ],
+    "injectables": {
+      "DicomFrameController": {
+        "params": [
+          "DicomFrameService",
+          "PacsService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "DicomFrameService": {
+        "params": [
+          "OrthancService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      }
+    }
+  },
   "di_additions_key_admin": {
     "unit": "key-management-entry",
     "middleware_routes": [],
