@@ -13,18 +13,23 @@ window.KinViewerUXToolbar = (() => {
   const turns = ['flipHorizontal', 'flipVertical', 'rotate-left', 'rotate-right'];
   const upgrade = value => value?.version !== 1 ? value : { ...value, version: 2, shortcuts: { ...value.shortcuts,
     ...Object.fromEntries(turns.filter(id => value.shortcuts[id] == null).map(id => [id, window.KinViewerUXShortcuts.defaults[id]])) } };
-  let cached = null;
+  let cached = null, preparedFailure = null;
   async function prepare(session) {
     if (session.state() === 'unconfirmed') await session.decide();
     if (!session.writer() || session.ended()) return;
     const owner = JSON.stringify(session.owner());
+    cached = null; preparedFailure = null;
     try {
       const response = await fetch('/api/workspace-shortcuts', { credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(10000) });
       if (window.KinSessionTransport.refusal(response)) throw window.KinSessionTransport.responseError(response);
-      if (!response.ok) return;
+      if (!response.ok) throw new Error('설정을 불러오지 못했습니다. 연결을 확인한 뒤 다시 불러오세요.');
       const record = await response.json();
-      if (!session.ended() && JSON.stringify(session.owner()) === owner && JSON.stringify(record.owner) === owner) cached = record;
-    } catch (_) { /* The mounted toolbar exposes Reload Settings; images remain available. */ }
+      if (JSON.stringify(record.owner) !== owner) throw new Error('계정이 변경되었습니다. 뷰어를 다시 여세요.');
+      if (!session.ended() && JSON.stringify(session.owner()) === owner) cached = record;
+    } catch (_) {
+      if (!session.ended() && JSON.stringify(session.owner()) === owner)
+        preparedFailure = { owner, message: '설정을 불러오지 못했습니다. 연결을 확인한 뒤 다시 불러오세요.' };
+    }
     window.kinMammographyHanging?.registerPreferenceProvider(() =>
       JSON.stringify(cached?.owner) === JSON.stringify(session.owner()) ? cached?.viewerSettings?.mammography || { layout: 'compare', kind: null } : null);
   }
@@ -101,7 +106,7 @@ window.KinViewerUXToolbar = (() => {
     mgInputs.get('priorPosition').onchange = updateMGGridChoices;
     const hanging = window.KinViewerHangingSettings, hangingInputs = new Map();
     const hangingSection = element('fieldset', '', dialog); element('legend', 'Hanging & Layout', hangingSection);
-    element('p', '모달리티별 기본 배치와 비교 위치를 계정에 저장합니다. Series 메뉴에서 비교 시리즈를 직접 바꿀 수 있습니다.', hangingSection);
+    element('p', '모달리티별 기본 배치와 비교 위치를 계정에 저장합니다. Automatic은 기존 Hanging Protocol의 배치를 사용합니다. 지정한 프로토콜과 유방영상 배치는 유지됩니다. Series 메뉴에서 비교 시리즈를 직접 바꿀 수 있습니다.', hangingSection);
     for (const modality of hanging.modalities) {
       const group = element('fieldset', '', hangingSection); element('legend', modality, group);
       const fields = new Map(); hangingInputs.set(modality, fields);
@@ -229,7 +234,7 @@ window.KinViewerUXToolbar = (() => {
         const value = typeof fallback === 'number' ? Number(mgInputs.get(key).value) : mgInputs.get(key).value;
         if (value !== fallback) next.mammography[key] = value;
       }
-      next.hanging = {};
+      next.hanging = { ...preferences.hanging };
       for (const [modality, fields] of hangingInputs) {
         const rows = Number(fields.get('rows').value), columns = Number(fields.get('columns').value);
         let layout = fields.get('layout').value;
@@ -239,8 +244,11 @@ window.KinViewerUXToolbar = (() => {
           }
           layout = rows + 'x' + columns;
         }
-        next.hanging[modality] = { layout, priorPosition: fields.get('priorPosition').value, seriesMatch: fields.get('seriesMatch').value };
+        const value = { layout, priorPosition: fields.get('priorPosition').value, seriesMatch: fields.get('seriesMatch').value };
+        if (preferences.hanging?.[modality] || Object.entries(value).some(([key, field]) => field !== hanging.defaults[key]))
+          next.hanging[modality] = value;
       }
+      if (!Object.keys(next.hanging).length) delete next.hanging;
       if (await save(next)) close(); else feedback.textContent = status.textContent;
     });
     button('Cancel', dialog, close);
@@ -336,7 +344,7 @@ window.KinViewerUXToolbar = (() => {
       status.textContent = '계정 설정을 불러오는 중…';
       try {
         const data = await request(); if (!active() || sequence !== loadSequence) return;
-        record = cached = data; preferences = upgrade(data.viewerSettings) || defaults(); loaded = true; retry.hidden = true;
+        record = cached = data; preparedFailure = null; preferences = upgrade(data.viewerSettings) || defaults(); loaded = true; retry.hidden = true;
         status.textContent = '계정 설정 · 다른 PC에서도 적용됩니다.';
       } catch (error) { if (active() && sequence === loadSequence) { status.textContent = error.message; retry.hidden = false; } }
       if (active() && sequence === loadSequence) { render(); saveMammography(); }
@@ -409,7 +417,12 @@ window.KinViewerUXToolbar = (() => {
       if (slot) slot.replaceChildren(toolbar); else if (strip) strip.before(toolbar);
     }
     refresh(); const observer = new MutationObserver(refresh); observer.observe(document.getElementById('root'), { childList: true, subtree: true });
-    render(); if (!loaded) load();
+    render();
+    if (!loaded) {
+      // Expose the pre-registration read failure instead of silently reading twice.
+      if (preparedFailure?.owner === initialOwner) { status.textContent = preparedFailure.message; retry.hidden = false; }
+      else load();
+    }
     return { invoke, bindings: () => preferences.shortcuts, dispose() {
       if (ended) return; ended = true; abort.abort(); observer.disconnect(); window.removeEventListener('pointerdown', trackPointer, true); toolbar.remove(); settings.remove(); dialog.remove();
       subscription.unsubscribe();
@@ -419,5 +432,5 @@ window.KinViewerUXToolbar = (() => {
       nativeStyle.remove();
     } };
   }
-  return { mount, prepare, clear() { cached = null; } };
+  return { mount, prepare, clear() { cached = null; preparedFailure = null; } };
 })();

@@ -266,7 +266,7 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         viewer.get_by_label("Name").dispatch_event("change")
         viewer.get_by_label("Alias (ASCII letter, then letters/numbers/_/-)").fill("Current_Main")
         viewer.get_by_label("Alias (ASCII letter, then letters/numbers/_/-)").dispatch_event("change")
-        viewer.get_by_label("Grid").select_option("2x2")
+        viewer.get_by_role("group", name="Cell Layout · Vacancy leaves the cell empty", exact=True).get_by_label("Grid").select_option("2x2")
         viewer.get_by_role("button", name="Add Selector", exact=True).click()
         expect(viewer.locator("#kin-hp-save-local")).to_be_enabled(); viewer.locator("#kin-hp-save-local").click()
         expect(viewer.locator("#kin-hp-status")).to_contain_text("이 브라우저")

@@ -652,7 +652,7 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
         observations = []
         for layout, fixtures, expected in [
                 ('1x2', [current], [[current.uid, 1], [current.uid, 2]]),
-                ('automatic', [current, prior], [[current.uid, 1], [prior.uid, 1]])]:
+                ('1x2', [current, prior], [[current.uid, 1], [prior.uid, 1]])]:
             record = document_request(work, 'GET', '/api/workspace-shortcuts').json()
             settings = {'version': 2, 'bar': ['Zoom'], 'shortcuts': {'Zoom': 'z'},
                         'hanging': {'CT': {'layout': layout, 'priorPosition': 'right', 'seriesMatch': 'similar'}}}

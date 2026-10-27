@@ -107,11 +107,13 @@ window.KinViewerHangingSettings = (() => {
       if (ended) return run.call(this, data, requested, options);
       const current = data.displaySets.filter(d => d.StudyInstanceUID === opened[0] && d.images?.length).sort(seriesOrder);
       const modality = current[0]?.Modality, settings = getSettings(), value = get(settings, modality);
-      if (modality === 'MG' || !current.length || requested && !['default', '@ohif/hpCompare'].includes(requested)) return run.call(this, data, requested, options);
+      last = null;
+      // Mammography and explicitly requested protocols own their image selection.
+      if (current.some(set => set.Modality === 'MG') || !current.length || requested && requested !== 'default') return run.call(this, data, requested, options);
       last = { data, requested, options };
       if (!settings?.hanging?.[modalities.includes(modality) ? modality : 'Other']) return run.call(this, data, requested, options);
       const prior = data.displaySets.filter(d => d.StudyInstanceUID === opened[1] && d.images?.length).sort(seriesOrder);
-      if (value.layout === 'automatic' && !prior.length) return run.call(this, data, requested, options);
+      if (value.layout === 'automatic') return run.call(this, data, requested, options);
       const { rows, columns, priorFirst, vertical } = dimensions(value, !!prior.length);
       // Match priors to the stable current series, never to the first metadata response.
       const ordered = value.seriesMatch === 'largest' ? rank(current, current[0], 'largest') : current;
