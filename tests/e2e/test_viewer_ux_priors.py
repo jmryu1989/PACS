@@ -700,6 +700,17 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
         patient = 'U3WL-' + uuid.uuid4().hex[:12]
         current = self.multiple(patient, 'current', '20260801')
         prior = self.multiple(patient, 'prior', '20250701')
+        account = self.login()
+
+        def without_layouts():
+            # Earlier cases leave their own CT layouts on the shared synthetic account.
+            record = document_request(account, 'GET', '/api/workspace-shortcuts').json()
+            if not (record['viewerSettings'] or {}).get('hanging'): return
+            reply = document_request(account, 'PUT', '/api/workspace-shortcuts', headers={'X-KIN-CSRF': '1'},
+                                     data={'expectedOwner': record['owner'], 'revision': record['revision'],
+                                           'viewerSettings': {k: v for k, v in record['viewerSettings'].items() if k != 'hanging'}})
+            self.assertEqual(reply.status, 200)
+        without_layouts()
         work, page = self.open_viewer(current)
         page.get_by_role('button', name='Viewer Settings', exact=True).click()
         settings = page.get_by_role('dialog', name='Viewer Settings', exact=True)
@@ -736,6 +747,7 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
           services.viewportGridService.getState().layout.numCols]''')
         self.assertEqual(grid, [2, 1])
         self.evidence(viewer, 'worklist-comparison-personal-layout')
+        without_layouts()
 
 
 def load_tests(loader, tests, pattern):
