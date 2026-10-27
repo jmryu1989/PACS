@@ -68,9 +68,13 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     let comparisonLookups = 0;
     const lockedLookups = [];
     // Orthanc's change log as the catalog's follower reads it: `?last` for where to start, then pages after `since`.
+    // The follower takes its start at its first poll, not at startup; `followerStarted` settles once it has asked.
     const changes = [];
+    let followerStarted;
+    const followerStart = new Promise(resolve => { followerStarted = resolve; });
     archive = require('node:http').createServer(async (req, res) => {
       const url = new URL(req.url, 'http://synthetic'), json = value => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(value)); };
+      if (url.pathname === '/changes' && url.searchParams.has('last')) followerStarted();
       if (url.pathname === '/changes') return json(url.searchParams.has('last')
         ? { Changes: changes.slice(-1), Done: true, Last: changes.length }
         : { Changes: changes.filter(change => change.Seq > Number(url.searchParams.get('since'))), Done: true, Last: changes.length });
@@ -387,6 +391,11 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
       [[sha(original), [{ number: 1, bytes: frameBytes.length, sha256: sha(frameBytes) }]]]);
     storedFile = 'synthetic-file-4';
     const readsBeforeFollow = fileReads, framesBeforeFollow = frameReads.length;
+    // A study that became stable before the follower's start is left to its first opening (by design). On a fast host
+    // this test reaches here inside the first poll interval (B4, 2026-10-28), so the change is logged after that start.
+    const started = await Promise.race([followerStart.then(() => true),
+      new Promise(resolve => setTimeout(resolve, 120000, false).unref())]);
+    assert.ok(started, 'the follower read where the change log ends');
     changes.push({ Seq: changes.length + 1, ChangeType: 'StableStudy', ResourceType: 'Study', ID: studyResource });
     // The same hang bound the D fixture gives its archive source to start (online_live.py, 120 s).
     for (const until = Date.now() + 120000; !(await kept('synthetic-file-4')).length;) {
