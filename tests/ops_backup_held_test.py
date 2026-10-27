@@ -130,7 +130,7 @@ class FakeHost:
             return json.dumps(self.objects(args[args.index("-d") + 1]))
         if "datname='keycloak'" in joined:
             return "0:1"
-        if "n.nspname='public'" in joined:
+        if "FROM pg_largeobject_metadata" in joined:
             return "0"
         if "pg_database_size" in joined:
             return "4096"
@@ -540,8 +540,9 @@ class FakeCluster:
             return json.dumps(self.objects.get(database, {"schemas": [], "relations": [], "functions": [], "default_acl": []}))
         if "datname='keycloak'" in joined:
             return "%d:%d" % ("keycloak" in self.databases, "kin" in self.databases)
-        if "n.nspname='public'" in joined:
-            return str(len((self.objects.get("kin") or {}).get("relations", [])))
+        if "FROM pg_largeobject_metadata" in joined:
+            database = args[args.index("-d") + 1]
+            return str(len((self.objects.get(database) or {}).get("relations", [])))
         raise AssertionError("unexpected command " + joined[:80])
 
     def run(self, args, *, output=None, input_file=None, timeout=600, check=True):
@@ -551,8 +552,8 @@ class FakeCluster:
                 database = args[args.index("-d") + 1]
                 return SimpleNamespace(returncode=0, stdout=json.dumps(self.objects.get(database, inventory(database))).encode(), stderr=b"")
             self.apply(input_file.read().decode())
-        elif "DROP DATABASE kin WITH (FORCE);" in args:
-            self.databases.pop("kin")
+        elif "psql" in args and args[-1].startswith("DROP DATABASE "):
+            self.databases.pop(args[-1].split()[2])
         elif "pg_restore" in args:
             database = Path(input_file.name).name.split(".")[0]
             self.databases[database] = dict(next(item for item in self.snapshot["databases"] if item["name"] == database))
@@ -642,6 +643,26 @@ class ExactRestoreTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "not a fresh cluster"):
                 self.restore(cluster, directory)
 
+
+    def test_restore_accepts_empty_install_databases_and_preserves_populated_targets(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory, catalog = self.snapshot(folder)
+            for initialized_keycloak in (False, True):
+                with self.subTest(initialized_keycloak=initialized_keycloak):
+                    cluster = FakeCluster(catalog)
+                    if initialized_keycloak:
+                        cluster.databases["keycloak"] = dict(catalog["databases"][0])
+                    self.restore(cluster, directory)
+                    self.assertEqual(cluster.objects, catalog["objects"])
+            for database in ("kin", "keycloak"):
+                with self.subTest(populated=database):
+                    cluster = FakeCluster(catalog)
+                    cluster.databases["keycloak"] = dict(catalog["databases"][0])
+                    cluster.objects[database] = {"relations": [{"name": "public.Existing"}]}
+                    before = json.dumps([cluster.catalog(), cluster.objects], sort_keys=True)
+                    with self.assertRaisesRegex(RuntimeError, "not a fresh cluster"):
+                        self.restore(cluster, directory)
+                    self.assertEqual(json.dumps([cluster.catalog(), cluster.objects], sort_keys=True), before)
 
     def test_03_a_restore_that_loses_a_column_grant_is_refused(self):
         """D22: column privileges are part of the compared catalog; a restore without one is refused."""

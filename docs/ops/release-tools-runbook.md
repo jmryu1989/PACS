@@ -45,10 +45,47 @@ is an admission condition for a clean install.
    ops.run(compose + ['up', '-d', '--build'], timeout=install_timeout)
    ```
 
-   The API image runs `prisma migrate deploy`; do not use schema reset or db push.
+   PostgreSQL initializes both `kin` and `keycloak` on the new empty data volume;
+   the init SQL does not run again on an existing volume. The API image runs
+   `prisma migrate deploy`; do not use schema reset or db push.
 3. Verify in the same session: run `ops.run(compose + ['ps'])` and
-   `ops.run(['curl', '--fail', '--silent', '--show-error', '<configured-HTTPS-origin>/api/health'])`,
-   then perform the approved synthetic save/reopen and signing checks before
+   check both the API and the Keycloak realm through the configured HTTPS origin:
+
+   ```python
+   import subprocess, time
+   origin = '<configured-HTTPS-origin>'  # no trailing slash
+   readiness_timeout = 91
+   deadline = time.monotonic() + readiness_timeout
+   last_error = None
+   while True:
+       try:
+           for path in ['/api/health', '/auth/realms/kin/.well-known/openid-configuration']:
+               remaining = deadline - time.monotonic()
+               if remaining <= 0:
+                   raise TimeoutError('HTTPS readiness deadline reached')
+               ops.run(['curl', '--fail', '--silent', '--show-error',
+                        '--max-time', str(remaining), origin + path], timeout=remaining)
+           break
+       except (RuntimeError, subprocess.TimeoutExpired, TimeoutError) as error:
+           last_error = error
+       remaining = deadline - time.monotonic()
+       if remaining <= 0:
+           raise RuntimeError(f'Installation unverified: HTTPS readiness failed within '
+                              f'{readiness_timeout}s at {path}; inspect service logs') from last_error
+       time.sleep(min(3, remaining))
+   ```
+
+   The initial 91 s bound is `ceil(2 × max(41.7, 45.3))`: twice the slower
+   clean-install readiness measured on the laptop for PR #258, rounded up to
+   whole seconds. The 3 s polling interval matches those measurements. Record
+   the site's elapsed readiness time and recheck this bound before a larger
+   site; it is an installation wait, not a clinical performance requirement.
+   Both requests must succeed. A running container and `/api/health` with
+   `auth:true` alone do not establish that Keycloak has started: `auth` describes
+   the API's authentication configuration. If either request fails, inspect the
+   service logs and keep the installation unverified. After correcting the cause,
+   repeat this bounded check and preserve the first failure in the release record.
+   Then perform the approved synthetic save/reopen and signing checks before
    clinical handover. Save their actual outcomes in the release record.
 4. Backup and restore: after verification, take the **first populated backup**
    with `ops.backup('<backup-directory>')` in this same locked session (the CLI

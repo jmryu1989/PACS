@@ -722,9 +722,10 @@ class SyntheticStack:
                 host_ops.cmd([*command, "up", "-d", "--no-deps", "--no-build", "--pull", "never", role],
                              env=host_ops.compose_env, mutating=True, timeout=300)
                 if role == "db":
-                    # As the product's installation does (tests/measurement_ci.py): Keycloak's database is created once.
+                    # Previous releases predate the install init SQL; newer source releases already create keycloak.
                     host_ops.db_ready(120, "Source database did not start")
-                    host_ops.cmd(["docker", "exec", self.target["containers"]["db"], "createdb", "-U", "kin", "keycloak"])
+                    if not host_ops.psql("SELECT 1 FROM pg_database WHERE datname='keycloak'", "postgres").strip():
+                        host_ops.cmd(["docker", "exec", self.target["containers"]["db"], "createdb", "-U", "kin", "keycloak"])
             host_ops.api_health(member_rights=False)
         return host_ops
 
