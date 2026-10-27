@@ -112,6 +112,9 @@ class FakeHost:
         changed = getattr(self, "value_changes", {}).get(database, {}).get(schema + "." + table)
         return ["id", "body"], [["1", "changed" if changed else "before"], ["2", None]]
 
+    def digest(self, container, database, schema, table, user="kin"):
+        return ops.value_digest((database, schema, "table", table, None), *self.values(container, database, schema, table, user))
+
     def text(self, args, **kwargs):
         self.commands.append(list(args))
         joined = " ".join(args)
@@ -194,6 +197,7 @@ class FakeHost:
                 patch.object(ops, "run", side_effect=self.run), patch.object(ops, "temporary_run", side_effect=self.temporary), \
                 patch.object(ops, "boundary_proof", return_value={"fixture": "private PG16 baseline"}), \
                 patch.object(ops, "value_rows", side_effect=self.values), \
+                patch.object(ops, "value_table_digest", side_effect=self.digest), \
                 patch.object(ops, "counts", return_value={"public.Report": 2}), \
                 patch.object(ops, "emr_catalog", return_value={"synthetic": "emr catalog"}), contextlib.redirect_stdout(io.StringIO()):
             yield
@@ -1134,6 +1138,34 @@ k.privateKey,'synthetic-doctor-key','wrap-1',Buffer.from(Array.from({length:32},
             before = ops.value_catalog(source)
             self.ok(source, '''UPDATE a."b.c" SET "x.y"='changed';''', database)
             self.assertNotEqual(ops.value_catalog(source), before)
+
+    def test_r3_streamed_table_digest_equals_the_digest_of_the_materialized_rows(self):
+        """The comparison of a live database never aggregates a table (2026-10-27 reaudit R3), yet its digest must be the
+        one value_digest gives the same rows, or a capture and its restore (or an older values.json) stop comparing."""
+        source = self.start()
+        self.ok(source, "CREATE DATABASE keycloak OWNER kin;")
+        # Characters JSON escapes, the COPY escape character, non-ASCII, NULL against empty, duplicates, a byte-order
+        # difference from code-point order, a zero-column table and more rows than one COPY buffer.
+        self.ok(source, r'''CREATE TABLE public.mixed(id int, body text, data jsonb, raw bytea, at timestamptz);
+            INSERT INTO public.mixed VALUES
+              (1, E'tab\there\nnew\rline\\back "quote" \x01\x1f\x7f', '{"k": "v\\u0000x"}', '\x00ff', '2026-10-27 01:02:03+09'),
+              (2, '', NULL, '', NULL), (3, NULL, '[]', NULL, 'infinity'), (3, NULL, '[]', NULL, 'infinity'),
+              (4, '한글 é ﬀ 😀', '"é"', '\x5c5c', '2026-01-01'), (5, '\', 'null', '\x5c', NULL), (6, 'a', NULL, NULL, NULL), (6, 'Z', NULL, NULL, NULL);
+            INSERT INTO public.mixed SELECT 100 + n, repeat(md5(n::text), n % 7), NULL, NULL, NULL FROM generate_series(1, 20000) n;
+            CREATE TABLE public.empty(x text); CREATE TABLE public.nocolumns(); INSERT INTO public.nocolumns DEFAULT VALUES;
+            INSERT INTO public.nocolumns DEFAULT VALUES;''')
+        for table in ("mixed", "empty", "nocolumns"):
+            with self.subTest(table=table):
+                columns, rows = ops.value_rows(source, "kin", "public", table)
+                self.assertEqual(ops.value_table_digest(source, "kin", "public", table),
+                                 ops.value_digest(("kin", "public", "table", table, None), columns, rows))
+        self.assertEqual(ops.value_table_digest(source, "kin", "public", "mixed")["count"], 20008)
+        self.assertEqual(ops.value_table_digest(source, "kin", "public", "nocolumns")["count"], 2)
+        columns, rows = ops.value_rows(source, "kin", "public", "mixed")
+        self.assertIn(["5", "\\", "null", "\\x5c", None], rows)
+        before = ops.value_catalog(source)
+        self.ok(source, "UPDATE public.mixed SET body='\\' WHERE body='Z';")
+        self.assertNotEqual(ops.value_catalog(source), before)
 
     def test_r4_literal_values_and_restore_are_independent_of_session_string_defaults(self):
         """Stored GUCs remain intact while private SQL transports quoted/backslash/Unicode data literally."""

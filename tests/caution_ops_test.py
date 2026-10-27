@@ -15,17 +15,68 @@ import live_test_gate as gate
 
 
 class OpsBoundaryTests(unittest.TestCase):
-    def test_value_comparison_accepts_more_than_old_row_cell_and_byte_limits(self):
+    def test_value_comparison_accepts_more_than_old_row_and_cell_limits(self):
         columns = ['c' + str(n) for n in range(11)]
-        rows = [[str(n)] * len(columns) for n in range(100001)]
-        with patch.object(backup, 'psql_json_stdin', side_effect=[columns, [len(rows), 70 * 1024 * 1024], rows]):
+        rows = sorted(([str(n)] * len(columns) for n in range(100001)), key=backup._value_encoded)
+        def run(args, *, output=None, input_file=None, timeout=600, check=True):
+            for row in rows:
+                output.write(backup._value_encoded(row) + b'\n')
+        with patch.object(backup, 'value_columns', return_value=columns), patch.object(backup, 'run', side_effect=run):
+            digest = backup.value_table_digest('synthetic', 'kin', 'public', 'Synthetic')
             actual_columns, actual_rows = backup.value_rows('synthetic', 'kin', 'public', 'Synthetic')
+        self.assertEqual(digest, backup.value_digest(('kin', 'public', 'table', 'Synthetic', None), columns, rows))
+        self.assertEqual(digest['count'], 100001)
         self.assertEqual(actual_columns, columns)
-        self.assertEqual(actual_rows[-1], ['100000'] * 11)
-        self.assertEqual(len(actual_rows), len(rows))
-        with patch.object(backup, 'psql_json_stdin', side_effect=[columns, [len(rows), 70 * 1024 * 1024], rows[:-1]]):
-            with self.assertRaises(backup.RestoreAdmissionError):
-                backup.value_rows('synthetic', 'kin', 'public', 'Synthetic')
+        self.assertEqual(actual_rows, rows)
+
+    def test_racing_startup_never_removes_a_live_owner_lock(self):
+        """2026-10-27 reaudit M19-b: two startups saw one dead owner and the slower one deleted the lock the faster one
+        had just taken. A complete second startup is run at every step of the first one's recovery; whatever it gets,
+        a lock it acquired must still be its own afterwards, and the first startup must then refuse."""
+        child = subprocess.Popen([sys.executable, '-c', 'pass'])
+        child.wait(timeout=30)
+        code = (backup.recover_process_lock.__code__, backup._recover_dead_owner.__code__)
+        steps = 0
+        while True:
+            with tempfile.TemporaryDirectory() as folder:
+                lock = Path(folder) / 'operation.lock'
+                lock.write_text(str(child.pid) + ':dead')
+                seen, outcome = [0], {}
+                def trace(frame, event, arg):
+                    if frame.f_code in code and event == 'line':
+                        seen[0] += 1
+                        if seen[0] == steps + 1 and not outcome:
+                            backup.recover_process_lock(lock)
+                            try:
+                                descriptor = os.open(str(lock), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                            except FileExistsError:
+                                outcome['second'] = None
+                            else:
+                                os.write(descriptor, (str(os.getpid()) + ':second').encode())
+                                os.close(descriptor)
+                                outcome['second'] = str(os.getpid()) + ':second'
+                    return trace
+                sys.settrace(trace)
+                try:
+                    backup.recover_process_lock(lock)
+                finally:
+                    sys.settrace(None)
+                if not outcome:
+                    break
+                with self.subTest(step=steps):
+                    try:
+                        descriptor = os.open(str(lock), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    except FileExistsError:
+                        first = False
+                    else:
+                        os.close(descriptor)
+                        first = True
+                    if outcome['second'] is not None:
+                        self.assertFalse(first)
+                        self.assertEqual(lock.read_text(), outcome['second'])
+                    self.assertEqual([p.name for p in Path(folder).iterdir() if p != lock], [])
+                steps += 1
+        self.assertGreater(steps, 3)
 
     def test_exited_process_lock_recovers_but_live_and_retained_locks_stay(self):
         child = subprocess.Popen([sys.executable, '-c', 'pass'])
