@@ -721,14 +721,18 @@ Linux의 root Docker helper가 호스트 파일 소유권을 바꾸지 않도록
 이 단계의 서버 내부 백업은 오프사이트 재해복구가 아니다. Gateway queue·인증서·Docker 이미지
 오프사이트 보관과 보존/암호화 정책은 별도다. 스크립트 자체가 cron을 설치하거나 오래된 백업을 삭제하지 않는다.
 
-### Run C — 접속기록(AuditLog) 봉인·검증·보존 (S7-AUDIT-STORE)
+### Run C — 기존 접속기록(AuditLog) 봉인 보관본 검증·보존 (S7-AUDIT-STORE)
+
+현재 일일 `ops_backup.py backup`은 봉인·`audit-checkpoint.json` 생성을 하지 않는다.
+`rehearse`는 체크포인트를 선언한 과거 보관본만 봉인과 대조한다. 아래 봉인 생성·실패 기록은
+과거 방식의 설명이며 새 백업의 설치 조건이나 실패 조건이 아니다.
 
 ```powershell
 # 백업 부모마다 처음 한 번(운영자가 기록을 남기며): 봉인 장부 audit-ledger.json을 만든다. 보존 연수 기본 2
 python scripts/ops_audit_integrity.py init "$env:USERPROFILE/backups/kin-pacs"
 # 기관 내부 관리계획이 2년보다 길면 올린다(내리지 못함)
 python scripts/ops_audit_integrity.py plan "$env:USERPROFILE/backups/kin-pacs" --years 3
-# 이후 백업·리허설은 위와 같다: backup이 봉인하고 rehearse가 복원본을 봉인과 대조한다
+# 아래 검증은 체크포인트가 있는 과거 보관본에만 적용한다. 새 일일 백업은 봉인하지 않는다.
 python scripts/ops_audit_integrity.py verify --backup <백업-디렉터리>
 python scripts/ops_audit_integrity.py verify --container kin-db --database kin --user kin --checkpoint <백업-디렉터리>/audit-checkpoint.json
 python scripts/ops_audit_integrity.py retention "$env:USERPROFILE/backups/kin-pacs"   # 월 1회 이상 점검(D195)
@@ -1630,8 +1634,8 @@ argv, environment names, input hash, exit/timeout, output hashes). Production's 
 local-restore receipt that a rehearsal of exactly that production plan and B0 produced on the plan's rehearsal host
 (per-phase steps and result hashes, B0/B1/Bfail/recovery/previous-version smoke cross-checked, at most seven days old;
 `verify-receipt --bundle` re-checks the run directory); external backup stays OFF and no offsite receipt is claimed.
-Reopen requires the executor's browser-level smoke record and a readable audit ledger at the backup root (the
-introduced release's daily backup seals into it).
+Reopen requires the executor's browser-level smoke record and a readable audit ledger at the backup root (for
+retained archives; current daily backups do not create seals).
 
 The target manifest names the host's own wiring instead of tolerating drift: `declared_overlays` (a compose file
 outside the checkout, e.g. `/etc/kin-deploy/overlays/docker-compose.halo-reports.yml`, its sha256, service and binds)
@@ -2561,9 +2565,9 @@ REQ-S5-U5a-CLINICIAN-ROLE-ROUNDTRIP → RISK-S5-U5a-SILENT-ROLE-DROP/LABEL-RULE 
 ### S7-AUDIT-STORE 접속기록 추가 전용 저장·봉인·보존 (REQ-S7-AUDIT-STORE → RISK-S7-AUDIT-TAMPER/RISK-S7-AUDIT-LOSS → TEST-S7-AUDIT-STORE-DB·PURE)
 - 설계: Astra가 사전 검수한 진단(PACS-docs main dcf0b3e `evidence/s7-audit-store-20260930/diagnosis/`, S7-AUDIT-STORE-DIAG-C-R-001 ACCEPT)과 지휘 결정 D281(OP-1 a 트리거, OP-2 i DB 밖 봉인 체크포인트, OP-3 a 봉인 계속·보고, OP-4 a 합성 스택 1회)·D288(OP-5 a)을 따른다. S7-U5 진단의 DEP-RET(RA-1~RA-5)이며 보존 사실은 FACT-S7-RETENTION(D195: 2년 이상)이다. api/src·schema.prisma는 바꾸지 않았다(D-NW 입력 불변).
 - 가드(RA-1): migration `20260930120000_audit_log_append_only`의 트리거가 모든 역할(런타임 역할 `kin` = 소유자·슈퍼유저 포함)의 AuditLog `UPDATE`·`DELETE`·`TRUNCATE`를 SQLSTATE `42501`로 거절한다. `INSERT`·`SELECT`는 그대로이고 INSERT 트리거는 없다. 트리거는 스키마 객체라 백업·rehearse·제품 이전 복원(`--no-privileges`)을 따라간다. AuditLog 행을 바꿔야 하는 뒤 migration은 이 가드를 어떻게 다루는지 스스로 적고 검토받는다.
-- 봉인·검증(RA-2, RA-3, `scripts/ops_audit_integrity.py`): 판정 값(행 digest, 가드 탐침, 표 모양)은 모두 **격리 검증 DB**에서 계산한다 — 기록된 이미지 ID로 새로 띄운 `--network none` 컨테이너(소유 label, 끝나면 삭제)에 내보내기(백업의 `kin.dump`, 또는 이름 붙인 DB의 `pg_dump -Fc`)를 넣고, AuditLog `TABLE`·`TABLE DATA` 목차 항목만 복원한 행 DB에서 고정 여섯 열(`id, at, actor, action, target, detail`)의 digest를 읽은 뒤, 따로 스키마만 복원한 DB에서 가드(합성 행의 UPDATE·DELETE·TRUNCATE가 42501인지)와 모양(보통 표, 상속·다른 스키마의 같은 이름 relation·열 형식·중복 id)을 본다. 라이브 DB나 rehearse 복원본이 계산하거나 돌려준 값은 쓰지 않는다. 내보내기 시작부터 전송·검증 종료까지 한 제한 시간(evaluate의 `timeout`, 기본 3600초)이 걸린다 — 그 안에 끝나지 않거나 한쪽(내보내는 `pg_dump`·검증기)이 실패하면 그때부터 정리 예산 15초 안에 로컬 docker 클라이언트, 대상 컨테이너 안의 원격 내보내기(그 실행의 `pg_dump`·세션), 검증기 컨테이너, 전송 스레드를 끝내고 입력 오류로 돌려주며, 호출자(verify exit 2, 봉인 `seal audit`, rehearse 실패 기록)의 실패 경로에 종료 증명(`cleanup`: 실행 식별자, 대상 컨테이너 ID·DB·역할·세션 이름, 원인, 관측 시각, 단계별 결과와 새 관측, 경과 시간, `confirmed`)을 함께 남긴다. 원격 내보내기(SPEC-F01 (b) 보강): 실행마다 다시 쓰지 않는 식별자를 만들어 세션 이름 `kin-audit-export-<식별자>`(49바이트, 서버 한도 63 안 — 증명에 서버의 `max_identifier_length`와 관측한 세션 이름이 있다)와 대상 컨테이너 ID·DB·역할에 묶는다. 시작 전에 같은 컨테이너에 그 실행의 watchdog을 띄우고(`pg_dump`가 `statement_timeout`을 스스로 0으로 바꿔 세션 설정은 수명 한도가 되지 못한다), 취소는 그 실행 표시 파일을 먼저 쓰고(늦게 시작된 같은 실행은 접속하지 않는다) `docker exec`가 시작한 그 실행의 프로세스만 끝낸 뒤 내보낸 역할 그대로 그 이름·DB·역할의 세션을 끝내고, 다시 관측해 그 이름의 세션(어느 역할이든)과 프로세스가 없을 때만 확인으로 적는다. 컨테이너 안에서 부모를 잃은 프로세스는 postmaster 자식이 되어 신호로 죽으면 서버가 모든 세션을 재시작하므로(IV-DB-18) 그런 프로세스에는 신호를 보내지 않고 세션만 끝낸다. 잠금을 기다리는 `pg_dump`는 서버 안에서도 같은 시각에 끝나고(`--lock-wait-timeout`), 호출자가 사라지면 watchdog이 실행 수명(남은 시간 + 15초)에 같은 취소를 한다. 감시 루프는 한 번의 관측(내보내기·검증기 종료 상태, 전송 진행·완료)으로 판단하고 그 관측에서 실행 중인 프로세스만 deadline 안에서 기다린다(F03): 전송이 끝나기 전 검증기의 exit 0은 성공이 아니고, deadline이 지나는 사이 끝난 관측은 종료 코드로 판단한다. 체크포인트 `audit-checkpoint.json`은 백업 폴더에, 봉인 장부 `audit-ledger.json`은 백업 부모에 있고(0600, 덧붙임 전용·원자 교체, 명시 `init`만, 커밋 순서 K → manifest → 장부, 끊긴 봉인의 복구) 둘 다 id·digest·개수·폴더 이름만 담는다.
+- 과거 봉인 보관본 검증(RA-2, RA-3, `scripts/ops_audit_integrity.py`): 현재 일일 `backup`은 봉인하거나 `audit-checkpoint.json`을 쓰지 않는다. 아래 봉인·장부 설명은 기존 보관본에 해당한다. 판정 값(행 digest, 가드 탐침, 표 모양)은 모두 **격리 검증 DB**에서 계산한다 — 기록된 이미지 ID로 새로 띄운 `--network none` 컨테이너(소유 label, 끝나면 삭제)에 내보내기(백업의 `kin.dump`, 또는 이름 붙인 DB의 `pg_dump -Fc`)를 넣고, AuditLog `TABLE`·`TABLE DATA` 목차 항목만 복원한 행 DB에서 고정 여섯 열(`id, at, actor, action, target, detail`)의 digest를 읽은 뒤, 따로 스키마만 복원한 DB에서 가드(합성 행의 UPDATE·DELETE·TRUNCATE가 42501인지)와 모양(보통 표, 상속·다른 스키마의 같은 이름 relation·열 형식·중복 id)을 본다. 라이브 DB나 rehearse 복원본이 계산하거나 돌려준 값은 쓰지 않는다. 내보내기 시작부터 전송·검증 종료까지 한 제한 시간(evaluate의 `timeout`, 기본 3600초)이 걸린다 — 그 안에 끝나지 않거나 한쪽(내보내는 `pg_dump`·검증기)이 실패하면 그때부터 정리 예산 15초 안에 로컬 docker 클라이언트, 대상 컨테이너 안의 원격 내보내기(그 실행의 `pg_dump`·세션), 검증기 컨테이너, 전송 스레드를 끝내고 입력 오류로 돌려주며, 호출자(verify exit 2, 봉인 `seal audit`, rehearse 실패 기록)의 실패 경로에 종료 증명(`cleanup`: 실행 식별자, 대상 컨테이너 ID·DB·역할·세션 이름, 원인, 관측 시각, 단계별 결과와 새 관측, 경과 시간, `confirmed`)을 함께 남긴다. 원격 내보내기(SPEC-F01 (b) 보강): 실행마다 다시 쓰지 않는 식별자를 만들어 세션 이름 `kin-audit-export-<식별자>`(49바이트, 서버 한도 63 안 — 증명에 서버의 `max_identifier_length`와 관측한 세션 이름이 있다)와 대상 컨테이너 ID·DB·역할에 묶는다. 시작 전에 같은 컨테이너에 그 실행의 watchdog을 띄우고(`pg_dump`가 `statement_timeout`을 스스로 0으로 바꿔 세션 설정은 수명 한도가 되지 못한다), 취소는 그 실행 표시 파일을 먼저 쓰고(늦게 시작된 같은 실행은 접속하지 않는다) `docker exec`가 시작한 그 실행의 프로세스만 끝낸 뒤 내보낸 역할 그대로 그 이름·DB·역할의 세션을 끝내고, 다시 관측해 그 이름의 세션(어느 역할이든)과 프로세스가 없을 때만 확인으로 적는다. 컨테이너 안에서 부모를 잃은 프로세스는 postmaster 자식이 되어 신호로 죽으면 서버가 모든 세션을 재시작하므로(IV-DB-18) 그런 프로세스에는 신호를 보내지 않고 세션만 끝낸다. 잠금을 기다리는 `pg_dump`는 서버 안에서도 같은 시각에 끝나고(`--lock-wait-timeout`), 호출자가 사라지면 watchdog이 실행 수명(남은 시간 + 15초)에 같은 취소를 한다. 감시 루프는 한 번의 관측(내보내기·검증기 종료 상태, 전송 진행·완료)으로 판단하고 그 관측에서 실행 중인 프로세스만 deadline 안에서 기다린다(F03): 전송이 끝나기 전 검증기의 exit 0은 성공이 아니고, deadline이 지나는 사이 끝난 관측은 종료 코드로 판단한다. 체크포인트 `audit-checkpoint.json`은 백업 폴더에, 봉인 장부 `audit-ledger.json`은 백업 부모에 있고(0600, 덧붙임 전용·원자 교체, 명시 `init`만, 커밋 순서 K → manifest → 장부, 끊긴 봉인의 복구) 둘 다 id·digest·개수·폴더 이름만 담는다.
 - 검증 V(exit 0/1/2): 봉인된 행의 변경·삭제·끼어듦, 지금 판정하는 내보내기의 가드 무력·모양 발견이 하나라도 있으면 1, 입력 오류는 2. 체크포인트의 `previous_verification`(봉인 때 이전 체크포인트와의 대조, 과거 사건)은 exit에 들어가지 않고 보고에 옮겨진다.
-- 복원 검증(RA-4): `ops_backup.py rehearse`는 복원·행수 확인 뒤 자기 복원본 `kin`의 내보내기를 새 격리 검증 DB에서 봉인과 대조한다. 덤프·manifest·체크포인트가 정상이어도 복원본만 달라지면 실패다. 과거 사건만 있는 스냅숏은 성공, 스냅숏 자신의 가드·모양 결함은 실패(복원 입력으로는 계속 허용).
+- 복원 검증(RA-4): `ops_backup.py rehearse`는 복원·행수 확인 뒤, 입력 보관본이 `audit-checkpoint.json`을 선언한 경우에만 자기 복원본 `kin`의 내보내기를 새 격리 검증 DB에서 봉인과 대조한다. 새 미봉인 백업은 `audit: not_sealed`로 기록한다. 덤프·manifest·체크포인트가 정상이어도 복원본만 달라지면 실패다. 과거 사건만 있는 스냅숏은 성공, 스냅숏 자신의 가드·모양 결함은 실패(복원 입력으로는 계속 허용).
 - 보존(RA-5): 봉인마다 `retain_until` = 생성 시각의 달력 N년 뒤(N = 장부의 보존 연수, 기본 2, `plan`으로 올리기만). `retention`이 장부를 기준으로 기한 안의 폴더·체크포인트·덤프 유실(중간·최신·연속 최신·전체), 오래된 최신 봉인, 장부에 없는 체크포인트(뒤에 봉인이 몇 번 이어져도 복구로 장부에 들어가기 전까지), 재초기화 구간을 1로, 장부 없음은 2로 보고하고 두 종류의 무결성 사건(과거 사건·현재 결함)을 알린다. 제품은 백업·체크포인트·장부를 지우지 않는다.
 - 운영 신호: 봉인 실패·장부 없음은 manifest `backup_error.stage = "seal audit"`, 불일치·이전 검증 불가·가드 무력·모양 발견은 `"audit integrity"`(둘 다 `complete: true`, 종료코드 1). 무변경 `scripts/ops_monitor.py`가 `backup_failed`를 낸다. 명령 절차는 위 "Run C — 접속기록(AuditLog) 봉인·검증·보존".
 - 시험:

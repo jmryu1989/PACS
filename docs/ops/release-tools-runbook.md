@@ -45,10 +45,23 @@ is an admission condition for a clean install.
    ops.run(compose + ['up', '-d', '--build'], timeout=install_timeout)
    ```
 
-   The API image runs `prisma migrate deploy`; do not use schema reset or db push.
+   PostgreSQL initializes both `kin` and `keycloak` on the new empty data volume;
+   the init SQL does not run again on an existing volume. The API image runs
+   `prisma migrate deploy`; do not use schema reset or db push.
 3. Verify in the same session: run `ops.run(compose + ['ps'])` and
-   `ops.run(['curl', '--fail', '--silent', '--show-error', '<configured-HTTPS-origin>/api/health'])`,
-   then perform the approved synthetic save/reopen and signing checks before
+   check both the API and the Keycloak realm through the configured HTTPS origin:
+
+   ```python
+   origin = '<configured-HTTPS-origin>'  # no trailing slash
+   for path in ['/api/health', '/auth/realms/kin/.well-known/openid-configuration']:
+       ops.run(['curl', '--fail', '--silent', '--show-error', origin + path])
+   ```
+
+   Both requests must succeed. A running container and `/api/health` with
+   `auth:true` alone do not establish that Keycloak has started: `auth` describes
+   the API's authentication configuration. If either request fails, inspect the
+   service logs, keep the installation unverified, and repeat after it is ready.
+   Then perform the approved synthetic save/reopen and signing checks before
    clinical handover. Save their actual outcomes in the release record.
 4. Backup and restore: after verification, take the **first populated backup**
    with `ops.backup('<backup-directory>')` in this same locked session (the CLI

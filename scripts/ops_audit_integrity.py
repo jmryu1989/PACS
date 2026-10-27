@@ -7,8 +7,9 @@ Usage: python scripts/ops_audit_integrity.py init <backup-root> [--years N]
        python scripts/ops_audit_integrity.py verify --backup <backup-directory> [--checkpoint FILE]
        python scripts/ops_audit_integrity.py verify --container NAME --database DB --user ROLE --checkpoint FILE
        python scripts/ops_audit_integrity.py retention <backup-root> [--as-of UTC] [--max-age HOURS]
-The seal runs inside `ops_backup.py backup` over the dump taken while the writers were stopped; there is no standalone seal
-of a live database. verify and retention print one JSON line and exit 0 (verified), 1 (integrity failure) or 2 (input
+Daily `ops_backup.py backup` no longer seals or writes audit-checkpoint.json. These tools retain verification and retention
+of older sealed archives; `ops_backup.py rehearse` verifies a checkpoint only when the archive declares one.
+verify and retention print one JSON line and exit 0 (verified), 1 (integrity failure) or 2 (input
 error: neither a pass nor an integrity claim). Every verdict value is computed from an export inside a new networkless
 PostgreSQL container started from a recorded image; nothing the exporting server computes or returns is trusted. Row
 content never leaves that container: checkpoints, the ledger and reports carry ids, digests, counts and folder names.
