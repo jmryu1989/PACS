@@ -8,7 +8,7 @@ import type { AccessEvent } from '../emr-contract/access-event';
 import { newAuditLinkId, parseAccessEvent } from '../emr-contract/access-event';
 import { refuse } from '../emr-contract/validation';
 import { BackgroundWork, EMR_BACKGROUND_WORK } from '../emr-runtime/background-work';
-import { EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS, boundEmrStatements } from '../emr-runtime/limits';
+import { EMR_PENDING_LIMIT, EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS, boundEmrStatements } from '../emr-runtime/limits';
 import { EMR_RECORD_PORT, EmrRecordPort, EmrRecordWork } from '../emr-runtime/record-port';
 import { REQUEST_CONTEXT_SOURCE, RequestContextSource, RequestFacts } from '../emr-runtime/request-context';
 import { OrthancService } from '../orthanc.service';
@@ -31,6 +31,8 @@ const sourceChanged = (error: any) => error instanceof ConflictException || SOUR
 /** What a delivery was opened with, kept to compare every later response's current facts against it. */
 interface DeliveryFacts { facts: CurrentImageFacts; work: EmrRecordWork }
 interface Opener { request: any; manifest: ImageManifest; facts: RequestFacts }
+/** A closed delivery's rows that no transaction has retained yet. */
+interface Unretained { deliveryEventId: string; rows: UnstoredObservation[] }
 
 function sameAuthority(current: CurrentImageFacts, opened: CurrentImageFacts, manifest: ImageManifest): boolean {
   return current.actor.identity.id === opened.actor.identity.id && current.actor.identity.issuer === opened.actor.identity.issuer &&
@@ -61,11 +63,18 @@ export class OnlineImageService implements BeforeApplicationShutdown {
     });
   }
 
-  /** Idle deliveries close now; one with responses in flight closes when they end, before the ledger drains. Rows an
-   * earlier closing could not retain get one more transaction here; what still fails is reported with its delivery. */
+  /** Idle deliveries close now; one with responses in flight closes when they end, before the ledger drains. Each
+   * closing first retries the rows earlier closings could not retain, on its own ledger work. Rows still held get one
+   * more transaction here if the record port still admits work: Nest runs the ledger's own shutdown hook beside this
+   * one and it closes the port, so usually it does not. What is still held is named here; its failure is already
+   * journaled against its delivery (retainPending). */
   async beforeApplicationShutdown(): Promise<void> {
     await this.deliveries.closeAll();
-    await this.retainPending();
+    if (this.unretained.length) {
+      let work: EmrRecordWork | null = null;
+      try { work = this.records.begin(); } catch { /* the port is closed: the rows are named below */ }
+      if (work) try { await this.retainPending(work); } finally { work.end(); }
+    }
     for (const entry of this.unretained) console.error('[EMR-E] image observations not retained at shutdown', JSON.stringify({
       deliveryEventId: entry.deliveryEventId, responses: entry.rows.map(row => [row.kind, row.link.eventId, row.link.requestId]) }));
   }
@@ -176,12 +185,14 @@ export class OnlineImageService implements BeforeApplicationShutdown {
    * operation, on its ledger transaction: the terminal event exists only if every response's facts are retained, and
    * a retention failure is the admitted operation's own rollback (B2 journals it against the terminal event, whose
    * payload names the delivery), not a silently closed record (R244-GPT-02). A delivery whose ending has no v1 action
-   * retains its rows on a ledger transaction of its own. Rows a closing could not retain stay with this service and
-   * are retried before the next close and at shutdown (retainPending): the entry is retired, the facts are not. */
+   * retains its rows on a ledger transaction of its own. A failure no admitted operation accounts for (no connection,
+   * no terminal action, a retry) is journaled by B2 against the delivery's own event (failureEvent). Rows a closing
+   * could not retain stay with this service and are retried at the next closing and at shutdown (retainPending): the
+   * entry is retired, the facts are not. */
   private async closeDelivery(delivery: OpenedDelivery<DeliveryFacts>, outcome: DeliveryOutcome, closing: DeliveryClosing): Promise<void> {
     const { work } = delivery.facts;
     try {
-      await this.retainPending();
+      await this.retainPending(work);
       const rows = [...outcome.unstored];
       if (closing === null && !rows.length) return;
       const followup: AccessEvent | null = closing === null ? null : parseAccessEvent({ ...delivery.event, eventId: randomUUID(),
@@ -195,39 +206,43 @@ export class OnlineImageService implements BeforeApplicationShutdown {
             await retain();
             return { kind: 'emr-image', id: delivery.event.eventId, version: delivery.prepared.manifestSha256 };
           });
-        });
+        }, undefined, delivery.event.eventId);
       } catch (error) {
-        if (rows.length) this.keepUnretained(delivery.event.eventId, rows, error);
+        if (rows.length) this.hold([{ deliveryEventId: delivery.event.eventId, rows }], error, false);
         throw error;
       }
     } finally { work.end(); }
   }
 
-  /** Rows of closed deliveries that no closing transaction has retained yet, oldest first. Bounded: a store that
-   * refuses for longer than this holds is reported, not swallowed into memory. */
-  private readonly unretained: { deliveryEventId: string; rows: UnstoredObservation[] }[] = [];
-  private static readonly UNRETAINED_LIMIT = 1024;
-  private keepUnretained(deliveryEventId: string, rows: UnstoredObservation[], error: unknown): void {
-    this.unretained.push({ deliveryEventId, rows });
-    let held = this.unretained.reduce((n, entry) => n + entry.rows.length, 0);
-    while (held > OnlineImageService.UNRETAINED_LIMIT && this.unretained.length > 1) {
+  /** Rows of closed deliveries that no closing transaction has retained yet, oldest first. At most EMR_PENDING_LIMIT
+   * deliveries (D1770's first-site pending bound): the record port admits no more deliveries' work at once, and each
+   * held entry is one such delivery's rows. Beyond it the oldest is dropped and named; its failure is already
+   * journaled against its delivery, so the record shows its facts were not written (R244-GPT-08). */
+  private readonly unretained: Unretained[] = [];
+  /** Entries a closing's own transaction could not retain join the end; entries a retry could not retain return to
+   * the front, ahead of any a concurrent closing added meanwhile. */
+  private hold(entries: Unretained[], error: unknown, retried: boolean): void {
+    if (retried) this.unretained.unshift(...entries); else this.unretained.push(...entries);
+    while (this.unretained.length > EMR_PENDING_LIMIT) {
       const dropped = this.unretained.shift()!;
-      held -= dropped.rows.length;
       console.error('[EMR-E] image observations dropped: retention refused beyond the held bound', JSON.stringify({
         deliveryEventId: dropped.deliveryEventId, responses: dropped.rows.map(row => [row.kind, row.link.eventId, row.link.requestId]) }));
     }
-    console.error('[EMR-E] image observations held for a later retention', JSON.stringify({ deliveryEventId, rows: rows.length,
-      cause: (error as any)?.code ?? (error as any)?.message ?? String(error) }));
+    console.error('[EMR-E] image observations held for a later retention', JSON.stringify({
+      deliveries: entries.map(entry => [entry.deliveryEventId, entry.rows.length]), cause: (error as any)?.code ?? (error as any)?.message ?? String(error) }));
   }
-  /** One ledger transaction per held delivery; what still fails stays held, in order. */
-  private async retainPending(): Promise<void> {
+  /** One ledger transaction per held delivery on the given work, oldest first; B2 journals a failure against that
+   * delivery's event. The first failure ends the pass and the rest stay held in order: with the database unreachable,
+   * each further attempt would only wait out its own connection timeout. */
+  private async retainPending(work: EmrRecordWork): Promise<void> {
     const held = this.unretained.splice(0);
-    for (const entry of held) {
+    while (held.length) {
+      const entry = held[0];
       try {
-        const work = this.records.begin();
-        try { await work.transactionWithRecords(async tx => { for (const row of entry.rows) await this.evidence.retain(tx, row); }); }
-        finally { work.end(); }
-      } catch { this.unretained.push(entry); }
+        await work.transactionWithRecords(async tx => { for (const row of entry.rows) await this.evidence.retain(tx, row); },
+          undefined, entry.deliveryEventId);
+      } catch (error) { this.hold(held, error, true); return; }
+      held.shift();
     }
   }
 }

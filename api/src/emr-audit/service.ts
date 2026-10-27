@@ -158,13 +158,18 @@ export class EmrAuditService {
       const ids = [...new Set([...page.changes.rows, ...page.views.rows].flatMap(r => [r.eventId, ...(r.relatedEventId ? [r.relatedEventId] : [])]))];
       // E's primary/index keys are UUIDs; other B1 event IDs have no E facts.
       const imageIds = ids.filter(id => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id));
-      // E keeps one copy of each study-manifest body and a preparation names it; earlier rows hold their own copy.
+      // E keeps one copy of each study-manifest body and a preparation names it (source_manifest_body); earlier rows
+      // hold their own copy (source_manifest). The page carries each named body once, by its digest: joined onto every
+      // preparation, a 200-response CT page repeated the whole-study body 200 times (R244-GPT-04).
       // A study delivery's one ledger event covers every response row that names it (delivery_event_id); a row written
       // before study deliveries is its own ledger event.
       const prepared = imageIds.length ? await tx.$queryRaw<any[]>`SELECT p.event_id::text,p.delivery_event_id::text,p.request_id,
-        COALESCE(p.source_manifest,m.body) AS source_manifest,p.response_manifest,p.staging_copies FROM emr_image.preparation p
-        LEFT JOIN emr_image.source_manifest m ON m.body_sha256=p.source_manifest_body
+        p.source_manifest,p.source_manifest_body,p.response_manifest,p.staging_copies FROM emr_image.preparation p
         WHERE p.event_id=ANY(${imageIds}::uuid[]) OR p.delivery_event_id=ANY(${imageIds}::uuid[])` : [];
+      const named = [...new Set(prepared.map(p => p.source_manifest_body).filter((sha): sha is string => typeof sha === 'string'))];
+      const sourceManifests: Record<string, unknown> = {};
+      if (named.length) for (const row of await tx.$queryRaw<{ body_sha256: string; body: unknown }[]>`SELECT body_sha256,body
+        FROM emr_image.source_manifest WHERE body_sha256=ANY(${named}::text[])`) sourceManifests[row.body_sha256] = row.body;
       const responseIds = [...new Set([...imageIds, ...prepared.map(p => p.event_id)])];
       // An observation names its delivery record itself (since 20261027150000): a response whose preparation failed
       // has no preparation row, and its copy observation is found from the record all the same.
@@ -182,7 +187,7 @@ export class EmrAuditService {
       const event = F.investigationLedgerEvent(page.changes), viewEvent = F.investigationLedgerEvent(page.views);
       const targets = [...new Map([...event.targets, ...viewEvent.targets].map(t => [JSON.stringify(t), t])).values()];
       await this.recorded(record, ctx, event.action, targets, changes.planId);
-      return { ...page, images };
+      return { ...page, images, sourceManifests };
     }); } catch (error) {
       if (error?.code === 'P2028' || error?.meta?.code === '57014') F.ledgerReadFailure(error);
       throw error;

@@ -3079,8 +3079,8 @@ of the delivery's terminal operation on its ledger transaction, before the termi
 cause; a closing the ledger refuses is that operation's journaled rollback and its rows are kept for the next close or
 shutdown. `node --test tests/emr/e/delivery_test.cjs` (compiled `api/dist`) checks that lifecycle with stand-in hooks;
 `node --test tests/emr/e/service_retention_test.cjs` (compiled `api/dist`, the real ledger store's transaction path over
-a synthetic SQL port) checks the split-UID refusal, the retention before the terminal append and the journaled failed
-closing with its later retention; the real-PG `stream_pg_test.cjs` case drives the service against the ledger and
+a synthetic SQL port) checks the split-UID refusal, the retention before the terminal append, the journaled failed closing (also one that
+gets no ledger connection, and a failed retry, journaled against the delivery's event) with its later retention; the real-PG `stream_pg_test.cjs` case drives the service against the ledger and
 checks its events, the refused patient change and split UID, and the late-retained row.
 `python -B scripts/run-tests.py --module tests/e2e/test_image_route.py --mode live --unit e-route --timeout 1800`
 runs on the served stack: one frame through HTTPS is one recorded delivery, and the served OHIF CT series

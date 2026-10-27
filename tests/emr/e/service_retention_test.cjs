@@ -57,7 +57,9 @@ async function harness() {
 
   // The ledger: the real store's transaction path over a synthetic SQL port. `ledger.refuseRetention` makes the
   // observation insert fail on the ledger transaction, as an unreachable database would.
-  const ledger = { refuseRetention: false, journal: [], admitted: [], appended: [], retained: [], calls: [] };
+  // `ledger.refuseConnection` refuses the transaction's connection before its callback, as an exhausted or unreachable
+  // pool does (Prisma P2024).
+  const ledger = { refuseRetention: false, refuseConnection: false, journal: [], admitted: [], appended: [], retained: [], calls: [] };
   const tx = {
     async $executeRaw(parts, ...values) {
       const sql = parts.join('?');
@@ -77,7 +79,10 @@ async function harness() {
     },
   };
   const ledgerDb = {
-    $transaction: fn => fn(tx),
+    $transaction: async fn => {
+      if (ledger.refuseConnection) throw Object.assign(new Error('Timed out fetching a new connection from the connection pool'), { code: 'P2024' });
+      return fn(tx);
+    },
     async $queryRaw(parts, ...values) {
       const sql = parts.join('?');
       if (sql.includes('admit_operation')) { ledger.admitted.push({ operationId: values[0], event: JSON.parse(values[2]) }); return [{ id: values[0] }]; }
@@ -87,7 +92,7 @@ async function harness() {
   const store = new AccessLedgerStore(ledgerDb, { async record(cause, eventId, operationId) { ledger.journal.push({ cause, eventId, operationId }); return 'database'; } });
   const events = [];
   const records = { begin() { return {
-    transactionWithRecords: (fn, options) => store.transactionWithRecords(fn, options),
+    transactionWithRecords: (fn, options, failureEvent) => store.transactionWithRecords(fn, options, failureEvent),
     admit: async event => ({ event, operationId: event.eventId }),
     transaction: async (operation, fn) => { const result = await fn(tx); events.push(operation.event); return { outcome: 'committed', result }; },
     confirm: async x => ({ eventId: x.eventId, durableAt: new Date().toISOString() }), end() {},
@@ -197,11 +202,12 @@ test('a closing whose retention the ledger refuses is a journaled rollback of th
     h.ledger.refuseRetention = true;
     await h.service.beforeApplicationShutdown();
     // B2 accounted the failure against the terminal operation, whose admitted event names the delivery.
-    assert.equal(h.ledger.journal.length, 1, 'one journal entry for the failed closing');
     assert.equal(h.ledger.journal[0].cause, 'business-rollback');
     const terminal = h.ledger.admitted.find(a => a.operationId === h.ledger.journal[0].operationId);
     assert.ok(terminal, 'the journaled operation is the admitted terminal operation');
     assert.deepEqual([terminal.event.eventId, terminal.event.action, terminal.event.relatedEventId], [h.ledger.journal[0].eventId, 'transfer-ended', served.delivery]);
+    // The shutdown's retention-only retry failed too: journaled against the delivery's own event (R244-GPT-02).
+    assert.deepEqual(h.ledger.journal.slice(1), [{ cause: 'business-rollback', eventId: served.delivery, operationId: null }]);
     assert.deepEqual(h.ledger.appended, [], 'no terminal event without the response\'s facts');
     assert.deepEqual(h.ledger.retained, []);
     assert.ok(errors.some(line => line.includes('held for a later retention') && line.includes(served.delivery)), errors.join('\n'));
@@ -214,6 +220,30 @@ test('a closing whose retention the ledger refuses is a journaled rollback of th
     assert.deepEqual(h.ledger.retained.map(r => [r.kind, r.response, r.delivery, r.retainedAfter]), [['transport', served.response, served.delivery, 'SyntheticAppPoolWriteFailure']]);
     assert.ok(typeof h.ledger.retained[0].request === 'string' && h.ledger.retained[0].request.length > 0);
     assert.deepEqual(h.ledger.appended, [], 'the failed terminal event is not re-invented by the retry');
+    assert.equal(h.ledger.journal.length, 2, 'a retry that succeeds adds no failure');
     assert.ok(!errors.some(line => line.includes('not retained at shutdown')), errors.join('\n'));
+  } finally { console.error = consoleError; await h.stop(); }
+});
+
+test('a closing that gets no ledger connection is journaled against its delivery before any operation is admitted; the rows are kept', async () => {
+  const h = await harness();
+  const errors = [];
+  const consoleError = console.error;
+  console.error = (...args) => errors.push(args.join(' '));
+  try {
+    h.app.refuseTransport = 1;
+    const served = await h.send();
+    assert.equal(served.status, 200);
+    h.ledger.refuseConnection = true;
+    await h.service.beforeApplicationShutdown();
+    assert.deepEqual(h.ledger.admitted, [], 'no terminal operation was admitted');
+    // The closing and the shutdown's retry each failed before a transaction began; both name the delivery.
+    assert.deepEqual(h.ledger.journal, [0, 1].map(() => ({ cause: 'ledger-unreachable', eventId: served.delivery, operationId: null })));
+    assert.deepEqual([h.ledger.retained, h.ledger.appended], [[], []]);
+    assert.ok(errors.some(line => line.includes('not retained at shutdown') && line.includes(served.response)), errors.join('\n'));
+    h.ledger.refuseConnection = false;
+    await h.service.beforeApplicationShutdown();
+    assert.deepEqual(h.ledger.retained.map(r => [r.kind, r.response, r.delivery]), [['transport', served.response, served.delivery]]);
+    assert.equal(h.ledger.journal.length, 2);
   } finally { console.error = consoleError; await h.stop(); }
 });

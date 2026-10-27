@@ -341,8 +341,8 @@ test('E real B2 COMMIT gates fixed HTTP bodies, ranges, multipart, failures and 
     assert.deepEqual(await readdir(staging), []);
 
     // R244-02: every committed preparation above came from the one study manifest. Its exact body is kept once, and
-    // each preparation still yields that body, as the audit reader reads it (emr-audit/service.ts); each names a
-    // delivery record that the ledger holds.
+    // each preparation still yields that body through the digest it names (the audit reader returns each named body once
+    // per page, emr-audit/service.ts); each names a delivery record that the ledger holds.
     const kept = await witness.$queryRaw`SELECT body FROM emr_image.source_manifest`;
     assert.equal(kept.length, 1, 'one kept copy of the study manifest, not one per delivered response');
     assert.deepEqual(kept[0].body, JSON.parse(JSON.stringify(manifest)));

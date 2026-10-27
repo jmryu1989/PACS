@@ -200,7 +200,11 @@ if(process.argv.includes('--serve')){
     assert.equal(imageFacts.deliveryEventId,image.deliveryEventId);
     assert.equal(imageFacts.preparation.response_manifest.studyManifestSha256,image.sha256);
     assert.equal(imageFacts.preparation.response_manifest.deliveryEventId,image.deliveryEventId);
-    assert.equal(imageFacts.preparation.source_manifest.sha256,image.sha256,'the study manifest the delivery was prepared from');
+    const sourceManifest=imageFacts.preparation.source_manifest??page.sourceManifests[imageFacts.preparation.source_manifest_body];
+    assert.equal(sourceManifest.sha256,image.sha256,'the study manifest the delivery was prepared from');
+    // Each study-manifest body comes once with the page, however many responses name it (R244-GPT-04).
+    assert.deepEqual(Object.keys(page.sourceManifests),[imageFacts.preparation.source_manifest_body]);
+    assert.ok(page.images.every(i=>!i.preparation||i.preparation.source_manifest===null),'no response repeats the body');
     assert.ok(imageFacts.observations.some(o=>o.kind==='transport'));
     assert.ok(imageFacts.observations.some(o=>o.kind==='copies'));
     // R244-GPT-03: a response of the same record whose preparation failed (the source's object belongs to another
@@ -383,6 +387,12 @@ async function imageDelivery(port,db,actor,study,servers){
   const source=createServer((req,res)=>{
     const json=value=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify(value));};
     if(req.url==='/tools/lookup')return json([{Type:'Instance',ID:'11111111-22222222-33333333-44444444-55555555'}]);
+    // The study's current identity, read per response (E: R244-GPT-01). A patient correction in the archive changes
+    // the study's PatientID with the object's.
+    if(req.url.startsWith('/dicom-web/studies?')){
+      const asked=new URL(req.url,'http://archive').searchParams.get('StudyInstanceUID');
+      return json(asked===studyUid?[{'0020000D':{vr:'UI',Value:[studyUid]},'00100020':{vr:'LO',Value:[sourcePatientId]}}]:[]);
+    }
     if(req.url.endsWith('/simplified-tags'))return json({StudyInstanceUID:studyUid,SeriesInstanceUID:seriesUid,SOPInstanceUID:sop,SOPClassUID:manifest.objects[0].sopClassUid,NumberOfFrames:'1',PatientID:sourcePatientId});
     if(req.url.endsWith('/header'))return json({'0002,0010':{Value:ts}});
     if(req.url.endsWith('/file'))return res.end(original);

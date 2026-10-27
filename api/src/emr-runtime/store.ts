@@ -89,13 +89,18 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
    * Admission uses a short separate connection before each effect. The outer
    * transaction already owns an append lane: taking a second lane here could
    * deadlock a saturated pool. Its two connection reserve services admission
-   * and settlement. No callback is retried after a lost COMMIT response. */
+   * and settlement. No callback is retried after a lost COMMIT response.
+   * failureEvent: an already recorded event whose facts this transaction writes. A failure that no operation of this
+   * transaction accounts for (admission capacity, no connection, the callback's own SQL, a lost COMMIT) is journaled
+   * against that event, as an operation's failure is against its own: the event's record then shows that facts it
+   * names were not written, even if the process ends before a retry (R244-GPT-02). */
   async transactionWithRecords<T>(work: (tx: Prisma.TransactionClient, record: RecordMutation) => Promise<T>,
-    transactionOptions = options): Promise<T> {
+    transactionOptions = options, failureEvent?: string): Promise<T> {
     const operations: { operation: AdmittedOperation; expected?: 'committed' | 'negative' }[] = [];
-    let value: T, returned = false, wroteOutcome = false;
+    let value: T, entered = false, returned = false, wroteOutcome = false;
     try {
       return await admitAppend(this.db, this.poolSize, () => this.db.$transaction(async tx => {
+        entered = true;
         await boundEmrStatements(tx);
         const record: RecordMutation = async (event, effect) => {
           const operation = await this.admitSql(event);
@@ -138,6 +143,9 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
         const outcome = await this.settle(tracked.operation.operationId);
         if (!tracked.expected || outcome?.outcome !== tracked.expected) resolved = false;
       }
+      if (failureEvent !== undefined && !operations.length)
+        await this.journal.record(returned ? 'commit-unknown' : entered ? 'business-rollback' :
+          (error as Error | null)?.message === 'EmrAdmissionCapacity' ? 'capacity' : 'ledger-unreachable', string(failureEvent), null);
       if (resolved) return value;
       if (returned) throw new LedgerFailure('CommitUnknown');
       throw error;
@@ -279,14 +287,15 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
    * or keeps; names are never a key), so an id this process already obtained from the database stays that member's
    * id for as long as the database does. A request of an established member therefore takes no append lane here:
    * under a viewer's burst of frames this admission queued 222 ms median per request behind the lanes
-   * (R244-02 profile, run e-route-diag-fable-20261027a). A database restored to an older copy requires a restart. */
+   * (R244-02 profile, run e-route-diag-fable-20261027a). A database restored to an older copy requires a restart.
+   * The map has no bound of its own: it holds a subset of the database's own identity bindings, which are kept for the
+   * database's lifetime, one per verified account or service subject that has acted here (R244-GPT-08). */
   async resolveRequestIdentity(issuer: string, subject: string): Promise<string> {
     const key = JSON.stringify([string(issuer), string(subject)]);
     const established = this.identities.get(key);
     if (established) return established;
     const id = await admitAppend(this.db, this.poolSize, () => this.db.$transaction(
       tx => this.resolveIdentity(tx, issuer, subject), options));
-    if (this.identities.size >= 4096) this.identities.clear();
     this.identities.set(key, id);
     return id;
   }
