@@ -23,7 +23,7 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
     const panel = document.createElement('details'); panel.id = 'kin-viewer-jobs'; panel.open = true;
     const text = (tag, value, host = panel) => { const e = document.createElement(tag); e.textContent = value; host.append(e); return e; };
     text('summary', 'Saved Comparison Jobs');
-    text('p', '영상 위치·표시·배치를 저장합니다. 미저장 표식은 먼저 저장하세요.');
+    text('p', '현재 뷰어의 영상 위치·표시·배치를 판독 대상 검사의 서버 작업으로 저장합니다. DICOM 원본·판독문 저장이나 화면 이미지 다운로드가 아닙니다. 미저장 표식은 먼저 저장하세요.');
     const help = document.createElement('details'); panel.append(help); text('summary', 'Annotation Help', help);
     text('p', '주석 함께 저장은 선택 프레임의 서버 저장 주석 이력을 고정합니다. 복원은 최신 주석, 출력은 고정한 주석을 사용하며 실제 크기 출력은 아닙니다.', help);
     const field = (label, tag, max) => { const l = text('label', label), e = document.createElement(tag); e.maxLength = max; e.setAttribute('aria-label', label); e.style.cssText = 'display:block;width:100%;color:#111;background:#fff'; l.append(e); return e; };
@@ -576,6 +576,12 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
           }
           if (!pending) throw new Error('재시도할 요청이 없습니다.');
           const sent=JSON.parse(pending.body);dispatched=true;const receipt=await api(pending.url, { method: 'POST', body: pending.body });
+          const savedId = sent.id || pending.url.split('/').at(-2);
+          // A successful HTTP status without this request's receipt leaves the
+          // outcome unknown. Keep the same request and all local work for retry.
+          if (receipt?.id !== savedId || receipt?.studyUid !== studies[0] || !Number.isInteger(receipt?.revision) ||
+              (sent.snapshot ? receipt.snapshotVersion !== sent.snapshot.version || receipt.revision < 1 : receipt.revision !== sent.expectedRevision + 1))
+            throw new Error('저장 응답을 확인하지 못했습니다. 같은 요청을 재시도하세요.');
           // A MIP Job is Saved only for this very body: the committed summary names the sent id and its version, 12 or 13. That is
           // decided here, before the list refresh, so a refresh failure cannot turn a committed save into an error.
           const committedMip = [12, 13, 14, 15].includes(sent.snapshot?.version) && receipt?.id === sent.id && receipt?.snapshotVersion === sent.snapshot.version;

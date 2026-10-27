@@ -109,7 +109,7 @@ const kinViewerToolbarLabels = (() => {
     Pan: ['Pan', '이동'],
     TrackballRotate: ['3D Rotate', '3D 회전(볼륨에서만 동작)'],
     WindowLevel: ['Window / Level', '창/레벨 조절(드래그)'],
-    Capture: ['Capture', '현재 화면을 PNG로 저장(검사 저장 아님)'],
+    Capture: ['Capture', '선택한 영상 칸의 화면 이미지 다운로드 · DICOM 원본·서버 작업 저장 아님 · 식별정보가 포함될 수 있습니다. Image Text/Images Only는 익명화가 아닙니다.'],
     Layout: ['Layout', '화면 배치'],
     Crosshairs: ['Crosshairs', 'MPR 교차선(3D/MPR에서만 동작)'],
     MoreTools: ['More Tools', '기타 도구'],
@@ -180,7 +180,10 @@ const kinViewerToolbarLabels = (() => {
       put(element, 'data-kin-tool-label', found.id);
     }
   }
-  return { PRIMARY, ITEMS, TOGGLES, entry, apply };
+  function outputScope(scope) {
+    for (const button of scope.querySelectorAll('[data-tool="Capture"]')) put(button, 'title', PRIMARY.Capture[1]);
+  }
+  return { PRIMARY, ITEMS, TOGGLES, entry, apply, outputScope };
 })();
 
 /** Product branding only; loaded-image identity owns clinical window titles. */
@@ -1916,7 +1919,11 @@ function kinCreateViewerHistory() {
     function row(e) {
       if (!e.element) { e.element = document.createElement('section'); e.element.style.cssText = 'border-top:1px solid #405777;margin-top:8px;padding-top:8px'; list.append(e.element); }
       const el = e.element; el.replaceChildren(); el.dataset.itemId = e.head?.id || ''; el.dataset.kind = e.draft.kind;
-      text(el, 'strong', names[e.draft.kind] + ' · ' + (e.head ? 'Saved r' + e.head.revision : 'Unsaved') + (e.head?.hidden ? ' · Hidden' : ''));
+      const sourceUnverified = manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified';
+      const stateLabel = e.busy ? 'Saving' : e.pending ? 'Unverified' : hasWork(e) || !e.head ? 'Unsaved' :
+        sourceUnverified ? 'Unverified' : 'Saved r' + e.head.revision;
+      text(el, 'strong', names[e.draft.kind] + ' · ' + stateLabel + (e.head?.hidden ? ' · Hidden' : ''));
+      if (e.head && stateLabel !== 'Saved r' + e.head.revision) text(el, 'div', '서버 저장 이력 r' + e.head.revision + ' · 현재 수정·원본 확인 상태와는 별개입니다.');
       // The clinician projection carries no author (clinician-policy.ts clinicianViewerItem).
       if (e.head) text(el, 'div', readOnly() ? 'Read-only' : e.head.authorActor + (writable(e) ? ' · My Item' : ' · Read-only'));
       if (e.editing) {
@@ -1939,7 +1946,6 @@ function kinCreateViewerHistory() {
         text(held, 'p', '프레임 ' + e.heldDraft.frame + ' · 아직 저장되지 않은 내용입니다.');
       }
       button(el, 'Go to Image', () => navigate(e));
-      const sourceUnverified = manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified';
       // Recheck and remeasure belong to the writer; a read-only row keeps the "재확인 필요" message hydrate() writes.
       if (sourceUnverified && !e.head.hidden && writer()) {
         text(el, 'p', '저장 이력과 현재 원본 확인은 별개입니다. 이 항목만 다시 확인할 수 있습니다. 원본이 바뀐 경우 새 뷰어에서 다시 측정하세요. 이 창의 수정과 기존 저장 이력은 유지됩니다.');
@@ -2118,6 +2124,7 @@ function kinCreateViewerHistory() {
       if (!ended && kinViewerSession.ended()) end();
       closeAuthoring();
       if (ended) return;
+      kinViewerToolbarLabels.outputScope(document);
       const r = current();
       if (r && r.study !== scope) {
         park(); reset('검사 확인 중…'); scope = r.study; me = null;
@@ -3408,8 +3415,26 @@ function kinCreateViewerFindings() {
 
 function kinCreateViewerTechNote() {
   let ready, current, prepare, epoch=0, active=false, state='stopped';
+  let identity, identityReady, prepareIdentity, identityServices;
+  function stopIdentity(){identity?.dispose();identity=null;}
+  function connectIdentity(){
+    if(!active||!kinViewerSession.readOnly()||identity||!prepareIdentity)return;
+    const ticket=epoch;
+    prepareIdentity().then(module=>{
+      if(!active||ticket!==epoch||!kinViewerSession.readOnly()||identity)return;
+      // Patient identification also belongs to read-only viewing. It does not
+      // require mounting the writer's Tech Note, clipboard or volume tools.
+      identity=module.mount({services:identityServices,resolve:()=>null,
+        owner:()=>kinViewerSession.owner(),allowed:()=>active&&kinViewerSession.readOnly(),
+        studies:(new URLSearchParams(location.search).get('StudyInstanceUIDs')||'').split(',').filter(Boolean)});
+    }).catch(()=>{
+      if(!active||ticket!==epoch)return;
+      const status=document.querySelector('#kin-viewer-layout-status');
+      if(status)status.textContent='환자 식별 표시를 연결하지 못했습니다. 영상 정보 표시에서 환자와 검사를 확인하세요.';
+    });
+  }
   // The bridge follows the verified role; document disposal belongs to the page boundary.
-  kinViewerSession.onChange(next=>{if(next==='writer'){connect();return;}epoch++;if(active)state=next;if(next==='read-only'){current?.stop();current=null;}});
+  kinViewerSession.onChange(next=>{if(next==='writer'){stopIdentity();connect();return;}epoch++;if(active)state=next;if(next==='read-only'){current?.stop();current=null;connectIdentity();}else stopIdentity();});
   function connect() {
     if(!active||state==='loading'||state==='ready'||!kinViewerSession.writer())return;
     const ticket=epoch;state='loading';
@@ -3431,6 +3456,9 @@ function kinCreateViewerTechNote() {
       const timer=setTimeout(fail,20000);
       script.onload=()=>{clearTimeout(timer);resolve();};script.onerror=fail;document.head.append(script);
     });
+    identityServices=servicesManager.services;
+    prepareIdentity=()=>window.KinViewerIdentity?Promise.resolve(window.KinViewerIdentity):
+      identityReady||(identityReady=load('viewer-identity.js').then(()=>window.KinViewerIdentity).catch(error=>{identityReady=null;throw error;}));
     const standalone=window.top===window;
     if(standalone){const css=document.createElement('link');css.rel='stylesheet';css.href='/worklist/hpacs-lite/tech-note.css';document.head.append(css);}
     prepare=()=>ready||(ready=(standalone&&typeof window.KinTechNote!=='function'?load('tech-note.js'):Promise.resolve())
@@ -3466,8 +3494,8 @@ function kinCreateViewerTechNote() {
   },onModeEnter(){if(!prepare)return;epoch++;active=true;state='unconfirmed';const ticket=epoch;
     // S5-U2b: Tech notes are a technician record the clinician allowlist neither reads nor writes. The bridge connects only
     // after a /me answered writer; until an answer it stays 'unconfirmed', and 'read-only'/'refused' never connect.
-    kinViewerSession.decide().then(session=>{if(!active||ticket!==epoch)return;if(session==='writer')connect();else state=session;});
-  },onModeExit(){epoch++;active=false;state='stopped';current?.stop();current=null;}};
+    kinViewerSession.decide().then(session=>{if(!active||ticket!==epoch)return;if(session==='writer')connect();else{state=session;if(session==='read-only')connectIdentity();}});
+  },onModeExit(){epoch++;active=false;state='stopped';stopIdentity();current?.stop();current=null;}};
 }
 
 function kinCreateFrameCoverage() {

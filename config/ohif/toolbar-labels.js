@@ -11,7 +11,7 @@ const kinViewerToolbarLabels = (() => {
     Pan: ['Pan', '이동'],
     TrackballRotate: ['3D Rotate', '3D 회전(볼륨에서만 동작)'],
     WindowLevel: ['Window / Level', '창/레벨 조절(드래그)'],
-    Capture: ['Capture', '현재 화면을 PNG로 저장(검사 저장 아님)'],
+    Capture: ['Capture', '선택한 영상 칸의 화면 이미지 다운로드 · DICOM 원본·서버 작업 저장 아님 · 식별정보가 포함될 수 있습니다. Image Text/Images Only는 익명화가 아닙니다.'],
     Layout: ['Layout', '화면 배치'],
     Crosshairs: ['Crosshairs', 'MPR 교차선(3D/MPR에서만 동작)'],
     MoreTools: ['More Tools', '기타 도구'],
@@ -82,5 +82,8 @@ const kinViewerToolbarLabels = (() => {
       put(element, 'data-kin-tool-label', found.id);
     }
   }
-  return { PRIMARY, ITEMS, TOGGLES, entry, apply };
+  function outputScope(scope) {
+    for (const button of scope.querySelectorAll('[data-tool="Capture"]')) put(button, 'title', PRIMARY.Capture[1]);
+  }
+  return { PRIMARY, ITEMS, TOGGLES, entry, apply, outputScope };
 })();
