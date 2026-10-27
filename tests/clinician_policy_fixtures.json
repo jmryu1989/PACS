@@ -7,11 +7,13 @@
   "business_routes": ["POST emr-audit/roster/:grantId", "POST emr-audit/investigations", "POST emr-audit/exports", "POST emr-audit/requests", "POST emr-audit/issuances", "POST emr-audit/issuances/:id/issue", "POST emr-audit/issuances/:id/delivery", "GET emr-audit/requests/:id", "POST emr-audit/requests/:id/extend", "POST emr-audit/requests/:id/resolve", "GET images/dicom-web", "HEAD images/dicom-web", "POST studies/:uid/viewer-context-events", "GET authz/dicom", "POST dicom/lookup", "GET studies/:uid/viewer-items", "GET clinician/studies", "GET clinician/studies/:uid/report", "GET clinician/studies/:uid/timeline",
     "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
     "GET image-requests", "GET image-requests/:id", "GET studies/:uid/image-requests", "POST studies/:uid/image-requests", "POST image-requests/:id",
-    "GET critical-results", "GET critical-results/:id", "POST critical-results/:id/ack"],
+    "GET critical-results", "GET critical-results/:id", "POST critical-results/:id/ack",
+    "GET image-relay/*"],
   "allowed_additions": ["POST emr-audit/roster/:grantId", "POST emr-audit/investigations", "POST emr-audit/exports", "POST emr-audit/requests", "POST emr-audit/issuances", "POST emr-audit/issuances/:id/issue", "POST emr-audit/issuances/:id/delivery", "GET emr-audit/requests/:id", "POST emr-audit/requests/:id/extend", "POST emr-audit/requests/:id/resolve", "GET images/dicom-web", "HEAD images/dicom-web", "GET clinician/studies", "GET clinician/studies/:uid/report", "GET clinician/studies/:uid/timeline",
     "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
     "GET image-requests", "GET image-requests/:id", "GET studies/:uid/image-requests", "POST studies/:uid/image-requests", "POST image-requests/:id",
-    "GET critical-results", "GET critical-results/:id", "POST critical-results/:id/ack", "POST studies/:uid/viewer-context-events"],
+    "GET critical-results", "GET critical-results/:id", "POST critical-results/:id/ack", "POST studies/:uid/viewer-context-events",
+    "GET image-relay/*"],
   "must_stay_denied": [
     "GET studies", "GET bootstrap", "GET prefs", "GET audit", "GET studies/:uid/report-preview",
     "GET studies/:uid/report/versions", "GET studies/:uid/report/citations", "GET studies/:uid/report/structure",
@@ -80,6 +82,7 @@
     {"method": 0, "controller": "/", "handler": "studies/:uid/viewer-items", "key": "GET studies/:uid/viewer-items", "allowed": true},
     {"method": 1, "controller": "/", "handler": "studies/:uid/viewer-items", "key": "POST studies/:uid/viewer-items", "allowed": false},
     {"method": 0, "controller": "/", "handler": "studies/:uid/viewer-items/:id/revisions", "key": "GET studies/:uid/viewer-items/:id/revisions", "allowed": false},
+    {"method": 0, "controller": "image-relay", "handler": "*", "key": "GET image-relay/*", "allowed": true},
     {"method": 0, "controller": "/", "handler": "clinician/studies", "key": "GET clinician/studies", "allowed": true},
     {"method": 0, "controller": "/", "handler": "/clinician/studies/:uid/report/", "key": "GET clinician/studies/:uid/report", "allowed": true},
     {"method": 0, "controller": "/", "handler": "clinician/studies/:uid/timeline", "key": "GET clinician/studies/:uid/timeline", "allowed": true},
@@ -156,7 +159,7 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 160, "public": 6, "session": 2, "business": 33, "denied": 119},
+    "counts": {"routes": 161, "public": 6, "session": 2, "business": 34, "denied": 119},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
@@ -232,6 +235,7 @@
       ]
     },
     "post_baseline": {
+      "GET image-relay/*": {"decision": "business", "unit": "S9-MG-08", "commit": null, "basis": "the existing image reads (worklist preview/thumbnail rendered frames, report and print pixel reads, strip preview, pdf, WADO-RS frames, rendered, bulk data) nginx now routes to the API relay (image-relay.controller.ts) instead of straight to Orthanc; the handler runs authzDicom, the same gate GET authz/dicom runs, before any byte, and records the study delivery (D1877) first; pixels and the plain descriptions authz/dicom already admitted, no report or writer field; declared in allowed_additions"},
       "POST studies/:uid/viewer-context-events": {"decision": "business", "unit": "S8-CTX", "commit": "56e19e0", "basis": "finite diagnostic event after image permission and institution admission; server attributes the audit row; declared in allowed_additions"},
       "POST studies/viewing-set/resolve": {"decision": "denied", "unit": "W9-API", "commit": "f83948e", "basis": "radiologist multi-study viewing of the own institution: the ordered same-patient viewing set's admission and minimal source metadata (need radiologist, admin passes; every member visible, owned, not tele, StudyAccess); a clinician-only member neither resolves nor records display"},
       "POST studies/:uid/view-observations": {"decision": "denied", "unit": "emr-module-a-a4", "commit": null, "basis": "the browser's display report of a report version or version evidence this member was provided (MODULE_A A4): the gates of GET studies/:uid/report/versions (owning or tele institution, StudyAccess, preliminary readability); a clinician-only member reads no report history and reports no display of it"},
@@ -296,7 +300,7 @@
     "rule": "S5-U1c D6: every @Name( in a controller is either an HTTP route decorator the inventory reads or one of these; any other name (a WebDAV route decorator of a later Nest, @RequestMapping, @Version, a custom route wrapper) fails the pure test until it is classified here or read by the inventory"
   },
   "outside_decorators": {
-    "classified": ["Injectable", "Module", "Inject"],
+    "classified": ["Injectable", "Module", "Inject", "Optional"],
     "rule": "S5-U1c-F03: every api/src .ts file that is not *.controller.ts is read by the controllers' lexer and decorator runs inside the inventory, so test_05 fails on it. A route decorator, @Controller(), @RequestMapping() or @Public() there is refused (both inventories open *.controller.ts only), as is a shape the runs cannot read, such call text in a comment or literal, and any decorator name not listed here (an alias or a wrapper could declare a route) until it is classified here."
   },
   "decorator_bindings": {
@@ -749,7 +753,8 @@
         "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "CRITICAL_RESULT_NOT_FOUND"}
       }
     },
-    "pending_routes": {"GET images/dicom-web": "NOT_RUN: REQUEST_FACTS #211 authoritative identity, patient/source/decoder and StudyAccess adapters; E online_live.py separately checks the registered unavailable seam.", "HEAD images/dicom-web": "NOT_RUN: REQUEST_FACTS #211 authoritative identity, patient/source/decoder and StudyAccess adapters; E online_live.py separately checks the registered unavailable seam.",
+    "pending_routes": {"GET image-relay/*": "NOT_RUN: in LiveStack the clinician image reads it carries (/instances/{id}/preview) are the existing rows of clinician_read_live.py through nginx; the gate is authzDicom (its own live rows above); served proof on the synthetic mgxa stack is tmp/image-delivery-record (2026-10-28).",
+    "GET images/dicom-web": "NOT_RUN: REQUEST_FACTS #211 authoritative identity, patient/source/decoder and StudyAccess adapters; E online_live.py separately checks the registered unavailable seam.", "HEAD images/dicom-web": "NOT_RUN: REQUEST_FACTS #211 authoritative identity, patient/source/decoder and StudyAccess adapters; E online_live.py separately checks the registered unavailable seam.",
     "POST emr-audit/roster/:grantId": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",
     "POST emr-audit/investigations": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",
     "POST emr-audit/exports": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",

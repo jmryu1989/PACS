@@ -8952,6 +8952,69 @@
       }
     }
   },
+  "di_additions_mg08": {
+    "unit": "S9-MG-08",
+    "note": "MG-08 (D1877(2), 2026-10-28): the existing image reads nginx used to send straight to Orthanc behind auth_request (worklist previews/thumbnails, report and print pixel reads, strip previews, pdf, WADO-RS frames, rendered, bulk data) pass the API relay (image-relay.controller.ts), which runs the DICOMweb gate and records the study delivery pair (image-delivery-record.ts) through the record port, the request context, the current clinical context and the background work registry before any byte. U0B-DI compares the snapshot minus exactly these.",
+    "middleware_routes": [],
+    "controllers": [
+      "ImageRelayController"
+    ],
+    "providers": [
+      "StudyImageDeliveryRecorder"
+    ],
+    "routes": [
+      {
+        "controller": "ImageRelayController",
+        "handler": "read",
+        "method": "GET",
+        "paths": [
+          "image-relay|*"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "1:1@1:null:0"
+        ]
+      }
+    ],
+    "injectables": {
+      "ImageRelayController": {
+        "params": [
+          "PacsService",
+          "OrthancService",
+          "StudyImageDeliveryRecorder"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "StudyImageDeliveryRecorder": {
+        "params": [
+          "Object",
+          "Object",
+          "Object",
+          "Object",
+          "OrthancService",
+          "Number"
+        ],
+        "scope": null,
+        "declared": [
+          "5:Symbol(ImageDeliveryIdleMs)",
+          "3:Symbol(EmrBackgroundWork)",
+          "2:Symbol(CURRENT_CLINICAL_CONTEXT)",
+          "1:Symbol(RequestContextSource)",
+          "0:Symbol(EmrRecordPort)"
+        ],
+        "optional": [
+          5
+        ]
+      }
+    }
+  },
   "di_additions_key_admin": {
     "unit": "key-management-entry",
     "middleware_routes": [],

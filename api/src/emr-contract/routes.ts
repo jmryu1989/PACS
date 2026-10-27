@@ -167,6 +167,18 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['GET studies/:uid/original-downloads/:operationId'] },
   { kinds: ['delivery-receipt', 'study-metadata'], operation: 'write', causes: ['user-view'],
     routes: ['POST admin/dicom-import/:operationId/files/:index/recovery'] },
+  // MG-08 (D1877(2)): the image reads nginx used to send straight to Orthanc behind authz/dicom (the external surfaces
+  // below) now pass the API's relay (image-relay.controller.ts): worklist previews and thumbnails, report and print pixel
+  // reads, strip previews, encapsulated PDFs, WADO-RS frames, rendered, bulk data and whole objects, plus the plain
+  // descriptions (QIDO, metadata, tags) the relay passes without a delivery. Read as the person looks and ahead of it, so
+  // both causes are real. Admission is authzDicom's; the study delivery's pair is image-delivery-record.ts's.
+  { kinds: ['image', 'external-sr-seg', 'pdf', 'thumbnail', 'key-image', 'study-metadata'], operation: 'read',
+    causes: ['user-view', 'background-fetch'], routes: ['GET image-relay/*'] },
+  // MODULE_A A4 (#261): the browser reports that it displayed a report version (or its evidence) this member was
+  // provided; the server appends that provision's own client-shown follow-up - an access-audit entry about the stored
+  // report targets, under the provision's surface - and writes no clinical record. The report is the person's view.
+  { kinds: ['access-audit'], operation: 'write', causes: ['user-view'],
+    routes: ['POST studies/:uid/view-observations'] },
 ];
 
 const routeEntries = groups.flatMap(({ routes, ...contract }) => routes.map(route => [route, contract] as const));

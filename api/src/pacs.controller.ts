@@ -3,6 +3,7 @@ import { PacsService, Caller, DraftRequestFacts } from './pacs.service';
 import { REQUEST_CONTEXT_SOURCE, RequestContextSource } from './emr-runtime/request-context';
 import { Public } from './auth.guard';
 import { AuthService } from './auth.service';
+import { imageRead } from './image-relay.controller';
 
 /**
  * URL의 `:id`를 정수로. **`+id`를 그대로 쓰면 안 된다.**
@@ -91,11 +92,12 @@ export class PacsController {
   @Get('authz/dicom')
   @HttpCode(204)
   authzDicom(@Req() req: any) {
-    return this.svc.authzDicom(
-      String(req.headers['x-original-uri'] ?? ''),
-      String(req.headers['x-original-method'] ?? req.method ?? ''),
-      caller(req),
-    );
+    const uri = String(req.headers['x-original-uri'] ?? ''), method = String(req.headers['x-original-method'] ?? req.method ?? '');
+    // MG-08: auth_request admits a read but never sees it delivered. Image reads go to the API's recorded relay
+    // (image-relay.controller.ts); one reaching this admission (an exact-study GET, a stale proxy) gets no image byte.
+    if (['GET', 'HEAD'].includes(method.toUpperCase()) && imageRead(uri.split('?')[0]))
+      throw new ForbiddenException('영상은 열람 기록 경로로만 제공합니다');
+    return this.svc.authzDicom(uri, method, caller(req));
   }
 
   /** Gateway가 바이트를 보내기 전에 자격증명의 기관으로 Study 소유권을 고정한다. */
