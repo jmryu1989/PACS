@@ -197,11 +197,36 @@ _operations_lease = ContextVar("operations_lease", default=None)
 
 
 def recover_process_lock(path):
-    """Recover an exited process's lock; legacy/retained operation holds need inspection."""
+    """Recover an exited process's lock; legacy/retained operation holds need inspection.
+
+    Two startups can both see the same dead owner. Without serialization the slower one deletes the lock the faster one
+    has just created for a live run (the 2026-10-27 reaudit's live_owner_lock_lost). Recovery therefore runs only under
+    an exclusive guard, so no other recovery can unlink. The guard does not stop the owner read: it may release normally
+    and exit after its PID is read, and a startup that skipped recovery may then take the absent lock (#262 review
+    R262-1). The lock is therefore read again after the owner is found dead and unlinked only if it still holds that
+    owner's token. From then on nothing can replace it: its owner is dead, a normal acquisition cannot replace an
+    existing lock and no other recovery runs. A guard already present (another recovery, or one that died mid-way)
+    skips recovery and the acquisition then refuses.
+    """
+    guard = path.with_name(path.name + ".recovery")
     try:
-        before = path.read_text()
-        owner = before.partition(':')[0]
-        pid = int(owner)
+        descriptor = os.open(str(guard), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except (FileExistsError, PermissionError):
+        return
+    try:
+        try:
+            os.write(descriptor, str(os.getpid()).encode("ascii"))
+        finally:
+            os.close(descriptor)
+        _recover_dead_owner(path)
+    finally:
+        guard.unlink()
+
+
+def _recover_dead_owner(path):
+    try:
+        owner = path.read_text()
+        pid = int(owner.partition(':')[0])
         if pid <= 0:
             return
         if os.name == 'nt':
@@ -222,8 +247,9 @@ def recover_process_lock(path):
                 return
             except ProcessLookupError:
                 pass
-        if path.read_text() == before:
-            path.unlink()
+        if path.read_text() != owner:
+            return
+        path.unlink()
     except (FileNotFoundError, ValueError, PermissionError):
         return
 
@@ -1814,12 +1840,7 @@ def psql_json_stdin(container, database, sql, user="kin", timeout=1800):
     return json.loads(result.stdout.decode("utf-8").strip())
 
 
-def value_rows(container, database, schema, table, user="kin"):
-    """Private in-memory rows only. The command recorder keeps output hashes, never this response's contents.
-
-    Text of each typed column is enclosed in a JSON array, retaining NULL, empty values, JSON text, bytea and embedded
-    separators exactly. Cardinality is checked for consistency with the materialized result.
-    """
+def value_columns(container, database, schema, table, user="kin"):
     columns = psql_json_stdin(container, database,
         "SET search_path=pg_catalog; SELECT coalesce(json_agg(a.attname ORDER BY a.attnum),'[]'::json) FROM pg_attribute a "
         "JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace "
@@ -1827,35 +1848,98 @@ def value_rows(container, database, schema, table, user="kin"):
         + _sql_literal(schema) + " AND c.relname=" + _sql_literal(table) + ";", user)
     if type(columns) is not list or any(type(name) is not str for name in columns) or len(set(columns)) != len(columns):
         _unsupported("값 비교의 column 목록을 읽지 못했습니다")
+    return columns
+
+
+def _value_encoded(value):
+    """The row encoding value_digest frames: compact JSON, non-ASCII kept, UTF-8."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _stream_values(container, database, schema, table, columns, user, *, ordered):
+    """Yield (encoded, row) for every row of one table without aggregating it anywhere.
+
+    #252 removed the invented row/cell/byte caps but left one jsonb_agg of the whole table in the source backend and its
+    whole text in the psql client and in this process (2026-10-27 reaudit R3). COPY streams rows from the backend
+    through psql into a file, and only one row is decoded here at a time, so no bound is needed. The server builds
+    value_digest's exact row encoding (to_json escapes the same characters as json.dumps; NULL is null) and, when
+    ordered, sorts by its UTF-8 bytes (external sort, spilling to disk past work_mem), the order value_digest sorts in.
+    Every row is checked to be that canonical encoding and, when ordered, not to precede the previous one, so a
+    differing server encoding or order refuses the comparison instead of producing an incomparable digest.
+    """
+    import tempfile
     relation = _identifier(schema) + "." + _identifier(table)
-    row = "jsonb_build_array(" + ",".join("t." + _identifier(name) + "::text" for name in columns) + ")"
-    settings = PROJECTION_SETTINGS + "SET search_path=pg_catalog; SET statement_timeout='180s'; "
-    size = psql_json_stdin(container, database, settings + "SELECT json_build_array(count(*),coalesce(sum(octet_length(("
-                          + row + ")::text)),0)+2*count(*)+2) FROM " + relation + " t;", user)
-    if (type(size) is not list or len(size) != 2 or any(type(n) is not int or n < 0 for n in size)
-):
-        _unsupported("값 비교의 row/byte 수를 읽지 못했습니다")
-    rows = psql_json_stdin(container, database, settings + "SELECT coalesce(jsonb_agg(" + row + "),'[]'::jsonb) FROM "
-                          + relation + " t;", user)
-    if (type(rows) is not list or len(rows) != size[0] or any(type(item) is not list or len(item) != len(columns)
-            or any(value is not None and type(value) is not str for value in item) for item in rows)):
-        _unsupported("값 조회 중 row/column 범위가 달라졌습니다")
-    return columns, rows
+    encoding = "'['" + "".join((" || ',' || " if index else " || ") + "coalesce(to_json(t." + _identifier(name)
+                               + "::text)::text,'null')" for index, name in enumerate(columns)) + " || ']'"
+    query = "SELECT e FROM (SELECT " + encoding + " AS e FROM " + relation + " t) s" + (" ORDER BY convert_to(e,'UTF8')" if ordered else "")
+    sql = (PROJECTION_SETTINGS + "SET search_path=pg_catalog; SET statement_timeout='180s';\n"
+           "COPY (" + query + ") TO STDOUT;\n")
+    with tempfile.TemporaryFile() as statement, tempfile.TemporaryFile() as output:
+        statement.write(sql.encode("utf-8"))
+        statement.flush()
+        statement.seek(0)
+        run(_pg_command(container, "psql", interactive=True) + ["-X", "-U", user, "-d", database, "-v", "ON_ERROR_STOP=1", "-qAt", "-f", "-"],
+            input_file=statement, output=output, timeout=1800)
+        output.seek(0)
+        previous = None
+        for line in output:
+            # The encoding has no raw tab/newline/carriage return (JSON escapes them), so COPY's text format only
+            # doubles each backslash. A lone backslash would mean another escape and is refused.
+            if not line.endswith(b"\n"):
+                _unsupported("값 조회 출력이 행 경계에서 끝나지 않았습니다")
+            parts = line[:-1].split(b"\\\\")
+            if any(b"\\" in part for part in parts):
+                _unsupported("값 조회 출력의 escape 형식이 다릅니다")
+            encoded = b"\\".join(parts)
+            try:
+                row = json.loads(encoded.decode("utf-8"))
+            except ValueError:
+                _unsupported("값 조회 출력이 JSON 행이 아닙니다")
+            if (type(row) is not list or len(row) != len(columns) or any(value is not None and type(value) is not str for value in row)
+                    or _value_encoded(row) != encoded or (ordered and previous is not None and encoded < previous)):
+                _unsupported("값 조회 중 row/column 범위 또는 순서가 달라졌습니다")
+            if ordered:
+                previous = encoded
+            yield encoded, row
+
+
+def value_rows(container, database, schema, table, user="kin"):
+    """Private in-memory rows only, for callers that rebuild or inspect rows. The command recorder keeps output hashes,
+    never this response's contents.
+
+    Text of each typed column is enclosed in a JSON array, retaining NULL, empty values, JSON text, bytea and embedded
+    separators exactly.
+    """
+    columns = value_columns(container, database, schema, table, user)
+    return columns, [row for _, row in _stream_values(container, database, schema, table, columns, user, ordered=False)]
+
+
+def _digest_record(key, columns, encoded_rows):
+    digest_value = hashlib.sha256()
+    count = 0
+    for value in encoded_rows:
+        digest_value.update(str(len(value)).encode("ascii") + b":" + value)
+        count += 1
+    return {"key": list(key), "columns": list(columns), "count": count, "sha256": digest_value.hexdigest()}
 
 
 def value_digest(key, columns, rows):
     """Length-framed UTF-8 arrays make row boundaries and duplicate multiplicity unambiguous."""
-    values = sorted(json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode("utf-8") for row in rows)
-    digest_value = hashlib.sha256()
-    for value in values:
-        digest_value.update(str(len(value)).encode("ascii") + b":" + value)
-    return {"key": list(key), "columns": list(columns), "count": len(values), "sha256": digest_value.hexdigest()}
+    return _digest_record(key, columns, sorted(_value_encoded(row) for row in rows))
+
+
+def value_table_digest(container, database, schema, table, user="kin"):
+    """value_digest of one table, computed while its server-sorted rows stream past: memory stays one row."""
+    columns = value_columns(container, database, schema, table, user)
+    return _digest_record((database, schema, "table", table, None), columns,
+                          (encoded for encoded, _ in _stream_values(container, database, schema, table, columns, user, ordered=True)))
 
 
 def value_catalog(container, user="kin", transform=None):
-    """All columns/rows of both databases, with structured keys and a bounded private in-memory comparison.
+    """All columns/rows of both databases, with structured keys; each table's digest is computed as its rows stream.
 
-    An internal clone transform may compute a precise expected projection before mutation. Actual observations always
+    An internal clone transform may compute a precise expected projection before mutation; only that path holds a
+    table's rows, and only on the clone. Actual observations (including restore_admission on the live database) always
     use transform=None. A table name is never an exemption from residual comparison.
     """
     out = {"version": RESTORE_INVENTORY, "tables": []}
@@ -1872,10 +1956,11 @@ def value_catalog(container, user="kin", transform=None):
             if key in seen:
                 _unsupported("table 식별자가 중복됐습니다")
             seen.add(key)
-            columns, rows = value_rows(container, database, schema, table, user)
-            if transform is not None:
-                rows = transform(key, columns, rows)
-            out["tables"].append(value_digest(key, columns, rows))
+            if transform is None:
+                out["tables"].append(value_table_digest(container, database, schema, table, user))
+            else:
+                columns, rows = value_rows(container, database, schema, table, user)
+                out["tables"].append(value_digest(key, columns, transform(key, columns, rows)))
     out["tables"].sort(key=lambda row: row["key"][:4])
     return values_valid(out)
 
