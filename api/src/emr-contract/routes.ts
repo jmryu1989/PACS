@@ -181,7 +181,8 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
   // kinds as `orthanc-instance-preview`. The viewer fetches them as the person looks and ahead of it (prefetch), so
   // both causes are real. Admission is authzDicom's; the D1877 pair per study delivery (provide-prepared before the
   // first byte, a terminal when the delivery ends) is recorded on whichever of the two routes opens the delivery, by
-  // dicom-frame-delivery.ts, with the study as the `image` target.
+  // image-delivery-record.ts (the relay's recorder, so one opening is one pair across both), with the study as the
+  // `image` target.
   { kinds: ['image', 'external-sr-seg'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames'] },
   { kinds: ['thumbnail', 'image', 'key-image'], operation: 'read', causes: ['user-view', 'background-fetch'],

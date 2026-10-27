@@ -1,6 +1,7 @@
 'use strict';
 /* MG-08 (D1877): the study delivery's 열람 record on the API's image path, at the served HTTP boundary. A real
- * node:http server runs the real DicomFrameController, DicomFrameService, StudyImageDeliveryRecorder, request-context
+ * node:http server runs the real DicomFrameController, DicomFrameService, StudyImageDeliveryRecorder (the shared
+ * image-delivery-record.ts the relay also uses), request-context
  * capture, current clinical context (identity, StudyAccess, patient link), StudyAccessService, PacsAccess and the
  * DICOMweb gate; the access ledger is the real record port (createRecordPort: admission close and drain as in the
  * product) over an in-memory store that runs the real event parser and mints real receipts, the Orthanc index is a
@@ -28,9 +29,9 @@ const { NestFactory } = require('/app/node_modules/@nestjs/core');
 const { createBackgroundWorkRegistry } = require('/app/dist/emr-runtime/background-work.js');
 const { createRecordPort } = require('/app/dist/emr-runtime/record-port.js');
 const { EmrNestLifecycle } = require('/app/dist/emr-runtime/nest-lifecycle.js');
-const { DicomFrameController } = require('/app/dist/dicom-frame.controller.js');
+const { DicomFrameController, FRAMES_SURFACE, PREVIEW_SURFACE } = require('/app/dist/dicom-frame.controller.js');
 const { DicomFrameService } = require('/app/dist/dicom-frame.service.js');
-const { StudyImageDeliveryRecorder, IMAGE_DELIVERY_UNAVAILABLE, FRAMES_SURFACE, PREVIEW_SURFACE } = require('/app/dist/dicom-frame-delivery.js');
+const { StudyImageDeliveryRecorder, IMAGE_DELIVERY_UNAVAILABLE } = require('/app/dist/image-delivery-record.js');
 const { createRequestContext } = require('/app/dist/emr-runtime/request-context.js');
 const { createRequestIngress } = require('/app/dist/emr-runtime/request-ingress.js');
 const { mintDurableReceipt } = require('/app/dist/emr-runtime/contract.js');
@@ -101,7 +102,7 @@ async function stack(options = {}) {
   const clinical = createCurrentClinicalContext(prisma, contexts.source, orthanc, studyAccess);
   // The runtime's background registry, as app.module provides it: terminal retries are its timers and tasks.
   const background = createBackgroundWorkRegistry();
-  const recorder = new StudyImageDeliveryRecorder(records.port, contexts.source, clinical, orthanc, background.work, IDLE_MS);
+  const recorder = new StudyImageDeliveryRecorder(records.port, contexts.source, clinical, background.work, orthanc, IDLE_MS);
   const service = new DicomFrameService(orthanc);
   const controller = new DicomFrameController(service, { authzDicom: (...args) => gate.authzDicom(...args) }, orthanc, recorder);
   const observations = [];

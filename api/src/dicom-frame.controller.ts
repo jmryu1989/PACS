@@ -2,13 +2,14 @@
  * MG-LOADING: the viewer's WADO-RS frame reads and series-strip previews, routed here by nginx (proxy/nginx.conf.template)
  * instead of straight to Orthanc. The DICOMweb gate is the same one nginx's auth_request runs for every other image
  * read (PacsService.authzDicom): institution, StudyAccess and the split-UID check, with the viewer's session binding
- * already enforced by the guard. The study delivery's 열람 record (dicom-frame-delivery.ts, D1877) is durable before
- * any byte; bytes are then served by DicomFrameService (direct range read or Orthanc relay).
+ * already enforced by the guard. The study delivery's 열람 record (image-delivery-record.ts, D1877) is durable before
+ * any byte; bytes are then served by DicomFrameService (direct range read or Orthanc relay). The recorder is the one the
+ * image relay uses, so the frames, previews and relayed reads of one opening share one pair.
  */
 import { BadRequestException, Controller, Get, Param, Req, Res } from '@nestjs/common';
 import { DicomFrameService } from './dicom-frame.service';
-import { FRAMES_SURFACE, PREVIEW_SURFACE, StudyImageDeliveryRecorder } from './dicom-frame-delivery';
-import type { DeliveryLease } from './dicom-frame-delivery';
+import { StudyImageDeliveryRecorder } from './image-delivery-record';
+import type { DeliveryLease } from './image-delivery-record';
 import { OrthancService } from './orthanc.service';
 import { Caller, PacsService } from './pacs.service';
 import { parseFrameList } from './dicom-frame-layout';
@@ -17,6 +18,9 @@ const member = (req: any): Caller => ({ sub: req.sub, actor: req.actor, roles: r
   institution: req.institution ?? null, kind: req.kind ?? 'member' });
 const UID = /^[0-9.]{1,64}$/;
 const ORTHANC_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/;
+/** The surface of the delivery's access events when one of these two routes opens it. */
+export const FRAMES_SURFACE = 'GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames';
+export const PREVIEW_SURFACE = 'GET instances/:id/preview';
 
 function requestOrigin(req: any): string {
   const proto = String(req.headers?.['x-forwarded-proto'] ?? req.protocol ?? 'https').split(',')[0].trim();
