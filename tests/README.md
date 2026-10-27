@@ -3074,6 +3074,10 @@ interruption and staging-copy facts. It does not prove native OHIF display. The
 registered `GET`/`HEAD images/dicom-web?target=...` route uses the current D context
 and the Orthanc source catalog. `tests/emr/d/routes_pg_test.cjs` covers that wiring
 through HTTP and PostgreSQL, including fixed finding copies and current patient scope.
+The catalog keeps each stored file's digests in `emr_image.object_digest`, keyed by Orthanc
+instance and `FileUuid`, from the opening that read them or from its follower of Orthanc's
+change log once a study is stable; the same test checks that an opening which finds the listed
+file's row reads no original for its manifest and that a row naming other bytes is refused by delivery.
 The deployment supplies `KIN_EMR_IMAGE_ASSET_CATALOG`: a JSON file with
 `viewer: {id, version, files: [...]}` and `decoders: {native: {version, files: [...]}, ...}`.
 Files are relative to that inventory; the reader hashes their actual bytes. Decoder

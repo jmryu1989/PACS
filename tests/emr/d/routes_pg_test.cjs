@@ -67,8 +67,13 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     // concurrent write to that study never waits behind an archive call. Each comparison lookup probes the lock.
     let comparisonLookups = 0;
     const lockedLookups = [];
+    // Orthanc's change log as the catalog's follower reads it: `?last` for where to start, then pages after `since`.
+    const changes = [];
     archive = require('node:http').createServer(async (req, res) => {
       const url = new URL(req.url, 'http://synthetic'), json = value => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(value)); };
+      if (url.pathname === '/changes') return json(url.searchParams.has('last')
+        ? { Changes: changes.slice(-1), Done: true, Last: changes.length }
+        : { Changes: changes.filter(change => change.Seq > Number(url.searchParams.get('since'))), Done: true, Last: changes.length });
       if (url.pathname === '/dicom-web/studies') {
         const uid = url.searchParams.get('StudyInstanceUID');
         if (uid === imageUid && beforeIdentity) await beforeIdentity();
@@ -368,7 +373,39 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     assert.deepEqual(multiframe[0].frames.map(f => [f.number, f.sha256]),
       [0, 1, 2].map(n => [n + 1, require('node:crypto').createHash('sha256').update(frameData(n)).digest('hex')]));
     frameCount = 1; storedFile = 'synthetic-file-2';
-    const question = { requestId: randomUUID(), expectedOwner: owner('clinician'), body: '합성 질문 원문' };
+    // Cold first opening (#248 follow-up): each stored file's digests are kept in emr_image.object_digest, by the
+    // opening that read them or by the follower once the study is stable. An opening that finds the listed file's row
+    // reads no original or frame for its manifest (no process memory is involved); delivery still reads what it serves.
+    const sha = bytes => require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+    const kept = file => db.$queryRaw`SELECT sha256, frames FROM emr_image.object_digest WHERE instance_id=${objectResource} AND file_uuid=${file}`;
+    assert.deepEqual((await kept('synthetic-file-1')).map(row => [row.sha256, row.frames]),
+      [[sha(original), [{ number: 1, bytes: frameBytes.length, sha256: sha(frameBytes) }]]]);
+    storedFile = 'synthetic-file-4';
+    const readsBeforeFollow = fileReads, framesBeforeFollow = frameReads.length;
+    changes.push({ Seq: changes.length + 1, ChangeType: 'StableStudy', ResourceType: 'Study', ID: studyResource });
+    // The same hang bound the D fixture gives its archive source to start (online_live.py, 120 s).
+    for (const until = Date.now() + 120000; !(await kept('synthetic-file-4')).length;) {
+      assert.ok(Date.now() < until, 'the follower kept the stable study');
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    assert.deepEqual([fileReads - readsBeforeFollow, frameReads.length - framesBeforeFollow], [1, 1], 'the follower read the file and its frame once');
+    const readsBeforeCold = fileReads, framesBeforeCold = frameReads.length;
+    const cold = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
+    assert.equal(cold.status, 200); assert.ok(Buffer.from(await cold.arrayBuffer()).includes(original));
+    assert.deepEqual([fileReads - readsBeforeCold, frameReads.length - framesBeforeCold], [repeatedReads, 0],
+      'the first opening of the followed file reads only what it delivers');
+    // A kept row is no delivery check of its own: a row naming other bytes builds a manifest the delivery refuses.
+    storedFile = 'synthetic-file-5';
+    await db.$executeRaw`INSERT INTO emr_image.object_digest (instance_id, file_uuid, sop_instance_uid, transfer_syntax_uid, bytes, sha256, frames)
+      VALUES (${objectResource}, ${storedFile}, ${sopUid}, '1.2.840.10008.1.2.1', ${original.length}::bigint, ${'0'.repeat(64)},
+        ${JSON.stringify([{ number: 1, bytes: frameBytes.length, sha256: sha(frameBytes) }])}::jsonb)`;
+    const preparedBeforeWrong = (await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n;
+    const wrong = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
+    const wrongBody = Buffer.from(await wrong.arrayBuffer());
+    assert.notEqual(wrong.status, 200); assert.equal(wrongBody.includes(original), false);
+    assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n, preparedBeforeWrong);
+    storedFile = 'synthetic-file-2';
+    const question ={ requestId: randomUUID(), expectedOwner: owner('clinician'), body: '합성 질문 원문' };
     const created = await send('clinician', 'POST', `/studies/${uid}/questions`, question);
     const signature = created.emr.signature;
     assert.equal(signature.registration.kid, clinical.keys.get(members.clinician.sub).kid);
