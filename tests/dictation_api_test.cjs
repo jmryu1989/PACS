@@ -7,6 +7,7 @@ const transport = require('/app/dist/asr-destination');
 const { AsrService, asrConfiguration, ASR_ENGINE_PIN, ASR_MODEL_PIN, ASR_RESPONSE_CAP } = require('/app/dist/asr.service');
 const { DictationController, dictationDisconnect } = require('/app/dist/dictation.controller');
 const { dictationParser } = require('/app/dist/dictation-parser');
+const { DICTATION_AUDIO_DEFAULT_BYTES, DICTATION_WAV_MAX_BYTES } = require('/app/dist/dictation-audio');
 const { PacsService } = require('/app/dist/pacs.service');
 const originalFetch = transport.asrFetch;
 const originalEnv = { ...process.env };
@@ -32,11 +33,28 @@ function channel() {
 test('configuration is optional, strictly pinned, bounded and keeps URL private', () => {
   delete process.env.KIN_ASR_URL; assert.equal(new AsrService().capability().available, false);
   configure(); assert.equal(asrConfiguration().available, true); assert.equal('url' in new AsrService().capability(), false);
-  for (const [name, value] of [['KIN_ASR_MAX_BYTES', '1048577'], ['KIN_ASR_TIMEOUT_MS', '240001'],
+  for (const [name, value] of [['KIN_ASR_MAX_BYTES', String(DICTATION_WAV_MAX_BYTES + 1)], ['KIN_ASR_MAX_BYTES', '45'],
+    ['KIN_ASR_MAX_BYTES', '6m'], ['KIN_ASR_TIMEOUT_MS', '240001'],
     ['KIN_ASR_MODEL', 'unattested'], ['KIN_ASR_ENGINE', 'other'], ['KIN_ASR_URL', 'http://user:secret@engine/inference'],
     ['KIN_ASR_URL', 'http://engine/inference?patient=secret'], ['KIN_ASR_URL', 'file:///inference'], ['KIN_ASR_LANGUAGE', 'detect_language']]) {
     configure({ KIN_ASR_MAX_BYTES: '1048576', [name]: value }); assert.equal(asrConfiguration().available, false, name);
   }
+});
+test('C13: the size limit is a setting: 180 s by default, raised or lowered by the site up to the WAV format', () => {
+  configure(); delete process.env.KIN_ASR_MAX_BYTES;
+  assert.equal(DICTATION_AUDIO_DEFAULT_BYTES, 180 * 32000 + 44);
+  assert.equal(new AsrService().capability().maxBytes, DICTATION_AUDIO_DEFAULT_BYTES);
+  for (const value of ['46', '1048576', String(10 * 60 * 32000 + 44), String(DICTATION_WAV_MAX_BYTES)]) {
+    configure({ KIN_ASR_MAX_BYTES: value });
+    assert.deepEqual([asrConfiguration().available, new AsrService().capability().maxBytes], [true, Number(value)], value);
+  }
+  // Compose hands an unset .env entry over as an empty string: every optional value then takes its default.
+  configure({ KIN_ASR_MAX_BYTES: '', KIN_ASR_TIMEOUT_MS: '', KIN_ASR_LANGUAGE: '' });
+  const capability = new AsrService().capability();
+  assert.deepEqual([capability.available, capability.maxBytes, capability.timeoutMs, capability.languagePin],
+    [true, DICTATION_AUDIO_DEFAULT_BYTES, 120000, 'auto']);
+  configure({ KIN_ASR_URL: '', KIN_ASR_ENGINE: '', KIN_ASR_MODEL: '' });
+  assert.equal(new AsrService().capability().available, false, 'an empty URL is dictation off, not an error');
 });
 test('multipart allowlist, exact WAV identity, exact transcript including trailing LF', async () => {
   configure(); const bytes = wav(); const text = ' 합성 검사\r\n'; let called = 0;
@@ -55,7 +73,7 @@ test('multipart allowlist, exact WAV identity, exact transcript including traili
 test('invalid audio and pre-aborted channel never reach upstream', async () => {
   configure(); transport.asrFetch = async () => assert.fail('upstream reached'); const svc = new AsrService();
   await assert.rejects(svc.transcribe(Buffer.from('invalid'), signal()), code('DICTATION_AUDIO_INVALID'));
-  await assert.rejects(svc.transcribe(Buffer.alloc(1048577), signal()), code('DICTATION_AUDIO_TOO_LARGE'));
+  await assert.rejects(svc.transcribe(Buffer.alloc(DICTATION_AUDIO_DEFAULT_BYTES + 1), signal()), code('DICTATION_AUDIO_TOO_LARGE'));
   const abort = new AbortController(); abort.abort();
   await assert.rejects(svc.transcribe(wav(), abort.signal), code('DICTATION_ENGINE_FAILED'));
 });
@@ -167,8 +185,12 @@ test('route parser produces exact bytes, bounds before buffering, rejects encodi
     const bad = await parse(Buffer.from('SECRET'), headers); assert.equal(bad.req.dictationError.code, 'DICTATION_AUDIO_INVALID');
     assert.equal(bad.req._body, true); assert.equal(bad.req.body.length, 0);
   }
-  const large = await parse(Buffer.alloc(1048577)); assert.equal(large.req.dictationError.code, 'DICTATION_AUDIO_TOO_LARGE');
+  const large = await parse(Buffer.alloc(DICTATION_AUDIO_DEFAULT_BYTES + 1)); assert.equal(large.req.dictationError.code, 'DICTATION_AUDIO_TOO_LARGE');
   assert.equal(large.req.body.length, 0);
+  // A site's raised limit is the parser's limit: the same body is read whole, and one byte more is refused.
+  configure({ KIN_ASR_MAX_BYTES: String(DICTATION_AUDIO_DEFAULT_BYTES + 1) });
+  assert.equal((await parse(Buffer.alloc(DICTATION_AUDIO_DEFAULT_BYTES + 1))).req.body.length, DICTATION_AUDIO_DEFAULT_BYTES + 1);
+  assert.equal((await parse(Buffer.alloc(DICTATION_AUDIO_DEFAULT_BYTES + 2))).req.dictationError.code, 'DICTATION_AUDIO_TOO_LARGE');
   const unrelated = await parse(wav(), {}, '/api/studies/1.2/report'); assert.equal(unrelated.req.body, undefined);
 });
 
