@@ -31,8 +31,11 @@ class StudyPagesLive(LiveInvariantTests):
     def test_pages_02_collection_change_and_invalid_query_rejected(self):
         with self.stack.fixture(),self.stack.fixture():
             first=self.page();cursor=first.body['pagination']['next'];self.assertIsNotNone(cursor)
+            # M11-a: a study arriving between pages refuses the continuation, wherever its UID sorts.
             with self.stack.fixture():
-                changed=self.page(after=cursor);self.assert_status(changed,200);self.assertTrue(all(row['uid'] > first.body['studies'][-1]['uid'] for row in changed.body['studies']))
+                changed=self.page(after=cursor);self.assert_status(changed,409);self.assertEqual(changed.body['code'],'STUDY_LIST_CHANGED')
+            # The fixture is gone again: the same visible set continues the same cursor.
+            self.assert_status(self.page(after=cursor),200)
             for query in ['limit=0','limit=101','limit=01','limit=1&limit=2','after=bad','limit=1&other=x']:
                 self.assert_status(self.stack.request('GET','/studies?'+query,'doctor'),400)
     def test_pages_03_preliminary_and_personal_draft_visibility_unchanged(self):

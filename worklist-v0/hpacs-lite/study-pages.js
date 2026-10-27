@@ -24,10 +24,25 @@
         try { return await request(path, ownController.signal,at); }
         finally { clearTimeout(timer); }
       }
+      // A list that changed between pages (server 409, or an offset/total that no longer continues the pages read so far)
+      // would join two different lists: an urgent study arriving before the cursor goes missing from a list that reads as
+      // complete. Start again from the first page, at most twice (config/ohif/ct-sync.js), and only then say it changed.
+      // A first page's 409 is a change the server saw inside one answer and is reported as before.
+      let restarts = 0;
+      const changedList = () => Object.assign(new Error('읽는 동안 검사 목록이 계속 바뀌었습니다. 새로고침하세요.'), { code:'STUDY_LIST_CHANGED' });
+      const restart = () => {
+        if (!work.commit(at,()=>{ restarts++; draft.rows = []; draft.total = null; draft.next = null; delete draft.observation; delete draft.identityIssues;
+          state('검사 목록이 바뀌어 처음부터 다시 불러오는 중…'); })) throw Object.assign(new Error('목록 조회가 중단되었습니다.'),{stale:true});
+      };
       try {
         while (draft.total === null || draft.next !== null) {
-          work.commit(at,()=>state('검사 목록을 나누어 불러오는 중…'));
-          const data = await get('/studies?limit=100' + (draft.next ? '&after=' + encodeURIComponent(draft.next) : ''));
+          if (!restarts) work.commit(at,()=>state('검사 목록을 나누어 불러오는 중…'));
+          let data;
+          try { data = await get('/studies?limit=100' + (draft.next ? '&after=' + encodeURIComponent(draft.next) : '')); }
+          catch (error) {
+            if (error?.code !== 'STUDY_LIST_CHANGED' || !draft.next || restarts >= 2 || !active()) throw error;
+            restart(); continue;
+          }
           if (!active()) throw Object.assign(new Error('계정 또는 판독 작업이 바뀌어 목록 응답을 적용하지 않았습니다.'), { stale:true });
           const page = data?.pagination, rows = data?.studies;
           if (page && !same(page.owner,owner)) throw Object.assign(new Error('목록 계정이 바뀌었습니다.'),{ownerChanged:true});
@@ -37,6 +52,10 @@
             || (page.next !== null && (rows.length !== 100 || page.next === draft.next))
             || page.offset + rows.length > page.total
             || (page.next === null && page.offset + rows.length !== page.total)) throw Object.assign(new Error('목록 페이지 형식을 확인할 수 없습니다. 새로고침하세요.'),{stale:true});
+          if (page.offset !== draft.rows.length || (draft.total !== null && page.total !== draft.total)) {
+            if (restarts >= 2) throw changedList();
+            restart(); continue;
+          }
           let previous = draft.rows.at(-1)?.uid;
           for (const row of rows) {
             if (!row || typeof row.uid !== 'string' || !row.uid || (previous !== undefined && row.uid <= previous)

@@ -263,7 +263,8 @@
 
   /**
    * 한 쪽을 받아들이기 전의 모양 검사(study-pages.js와 같은 조건, 임상의 응답에는 owner 칸이 없다).
-   * 새 검사·삭제로 offset과 total은 바뀔 수 있다. UID 순서와 각 페이지 자체의 형식은 확인한다.
+   * offset이 받은 개수와 다르거나 total이 바뀌면 쪽 사이에 목록이 바뀐 것이다 — 이어 붙이면 앞쪽에 새로 들어온 검사가
+   * 빠진 목록이 전부로 보인다. 그때는 moved 표시를 단 STUDY_LIST_CHANGED로 던져 readPages가 처음부터 다시 읽게 한다.
    */
   function checkPage(data, loaded, total, after) {
     const page = data && data.pagination;
@@ -276,6 +277,8 @@
       || page.offset + rows.length > page.total
       || (page.next === null && page.offset + rows.length !== page.total);
     if (bad) throw new Error('목록 페이지 형식을 확인할 수 없습니다. 새로고침하세요.');
+    if (page.offset !== loaded.length || (total !== null && page.total !== total))
+      throw Object.assign(new Error('읽는 동안 검사 목록이 계속 바뀌었습니다. 새로고침하세요.'), { code: 'STUDY_LIST_CHANGED', moved: true });
     let previous = loaded.length ? loaded[loaded.length - 1].uid : null;
     for (const row of rows) {
       if (!row || typeof row !== 'object' || typeof row.uid !== 'string' || !row.uid || (previous !== null && row.uid <= previous)
@@ -284,6 +287,37 @@
       previous = row.uid;
     }
     return page;
+  }
+
+  /**
+   * 쪽 사이에 목록이 바뀌면(이어받기 값이 409 STUDY_LIST_CHANGED를 받거나 checkPage가 moved를 던지면) 받은 쪽을 버리고
+   * 처음부터 다시 읽는다. 많아야 두 번(config/ohif/ct-sync.js와 같다) — 계속 바뀌면 그때 실패로 알린다. 첫 쪽의 409는
+   * 한 번의 답 안에서 서버가 본 변경이라 그대로 알린다. take는 받아들이기 전의 쪽마다, progress는 다음 쪽이 남을 때,
+   * reset은 다시 읽기 전마다 부른다.
+   */
+  async function readPages(path, fresh, { take, progress, reset }) {
+    for (let restarts = 0; ; restarts++) {
+      const loaded = [];
+      let total = null;
+      let after = null;
+      try {
+        do {
+          const data = await request(path + (after === null ? '' : `&after=${encodeURIComponent(after)}`));
+          if (!fresh()) return null;
+          const page = checkPage(data, loaded, total, after);
+          take(data, page);
+          loaded.push(...data.studies);
+          total = page.total;
+          after = page.next;
+          if (after !== null) progress(loaded.length, total);
+        } while (after !== null);
+        return loaded;
+      } catch (error) {
+        if (!fresh()) return null;
+        if (error.code !== 'STUDY_LIST_CHANGED' || !(error.moved || after !== null) || restarts >= 2) throw error;
+        reset();
+      }
+    }
   }
 
   function listFresh(mine) {
@@ -315,22 +349,17 @@
     studies = [];
     tbody.replaceChildren();
     setListState('loading', TEXT.listLoading);
-    const loaded = [];
-    let total = null;
-    let after = null;
     let issues = [];
     try {
-      do {
-        const data = await request(`/clinician/studies?limit=${PAGE_LIMIT}` + (after === null ? '' : `&after=${encodeURIComponent(after)}`));
-        if (!listFresh(mine)) return;
-        const page = checkPage(data, loaded, total, after);
-        loaded.push(...data.studies);
-        total = page.total;
-        after = page.next;
+      const loaded = await readPages(`/clinician/studies?limit=${PAGE_LIMIT}`, () => listFresh(mine), {
         // WORKLIST-SPLIT-UID: the completing page names the studies excluded as unresolved (UID and code only).
-        if (after === null && Array.isArray(data.identityIssues)) issues = data.identityIssues.filter(issue => issue && typeof issue.uid === 'string');
-        if (after !== null) setListState('loading', `${TEXT.listLoading} (${loaded.length} / ${total})`);
-      } while (after !== null);
+        take: (data, page) => {
+          if (page.next === null && Array.isArray(data.identityIssues)) issues = data.identityIssues.filter(issue => issue && typeof issue.uid === 'string');
+        },
+        progress: (count, total) => setListState('loading', `${TEXT.listLoading} (${count} / ${total})`),
+        reset: () => { issues = []; setListState('loading', TEXT.listLoading); },
+      });
+      if (loaded === null) return;
       // 목록을 읽는 사이 이 브라우저의 세션이 다른 계정으로 바뀌었으면 머리글의 사람과 목록의 주인이 다르다.
       const me = await request('/me');
       if (!listFresh(mine)) return;
@@ -1729,22 +1758,14 @@
     resetTimelineBody();
     $('#timeline-retry').disabled = false;
     setTimelineState('loading', TIMELINE.loading);
-    const loaded = [];
-    let total = null;
-    let after = null;
     let head = null;
     try {
-      do {
-        const data = await request(`/clinician/studies/${encodeURIComponent(uid)}/timeline?limit=${PAGE_LIMIT}`
-          + (after === null ? '' : `&after=${encodeURIComponent(after)}`));
-        if (!timelineFresh(mine, uid)) return;
-        const page = checkPage(data, loaded, total, after);
-        head = readTimelinePage(uid, data, head);
-        loaded.push(...data.studies);
-        total = page.total;
-        after = page.next;
-        if (after !== null) setTimelineState('loading', `${TIMELINE.loading} (${loaded.length} / ${total})`);
-      } while (after !== null);
+      const loaded = await readPages(`/clinician/studies/${encodeURIComponent(uid)}/timeline?limit=${PAGE_LIMIT}`, () => timelineFresh(mine, uid), {
+        take: data => { head = readTimelinePage(uid, data, head); },
+        progress: (count, total) => setTimelineState('loading', `${TIMELINE.loading} (${count} / ${total})`),
+        reset: () => { head = null; setTimelineState('loading', TIMELINE.loading); },
+      });
+      if (loaded === null) return;
       // 검사 하나로는 같다·다르다가 나올 수 없다. 그런 답은 다른 묶음의 관계를 실어 온 것이다.
       if (!loaded.some(row => row.uid === uid) || (head.patientKey === null && loaded.length !== 1)
           || (loaded.length < 2 && (head.birth !== 'not_comparable' || head.sex !== 'not_comparable')))

@@ -1119,10 +1119,19 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    */
   async finishCallback(req: any, res: any, query: { code?: string; state?: string; error?: string; actionStatus?: string }): Promise<CallbackResult> {
     const { code, state, error } = query;
-    if ((!code || !state) && await this.hasSession(req)) return { kind: 'work' };
     const flows = this.pendingFlows(req);
     const found = state ? flows.find(flow => flow.name === this.pendingName(state)) : undefined;
     const own: Flow | null = found?.pending && found.pending.state === state ? found as Flow : null;
+    // The password action grants no product session: its code is never exchanged and the working document's
+    // session/cookie stay as they were. The tab only reports Keycloak's own outcome so the user knows which password holds.
+    // Recognised before the active-session shortcut: Keycloak's error answer carries state but no code, and would otherwise
+    // send the popup to another worklist with no outcome while leaving this flow's cookie behind.
+    if (own?.live && own.pending.action === 'UPDATE_PASSWORD') {
+      this.expirePending(res, own.name);
+      const status = query.actionStatus;
+      return { kind: 'password', status: !error && (status === 'success' || status === 'cancelled') ? status : 'error' };
+    }
+    if ((!code || !state) && await this.hasSession(req)) return { kind: 'work' };
     if (own) this.expirePending(res, own.name);
 
     if (!own?.live) {
@@ -1146,12 +1155,6 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     }
 
     const flow = own.pending;
-    // The password action grants no product session: its code is never exchanged and the working document's
-    // session/cookie stay as they were. The tab only reports Keycloak's own outcome so the user knows which password holds.
-    if (flow.action === 'UPDATE_PASSWORD') {
-      const status = query.actionStatus;
-      return { kind: 'password', status: !error && (status === 'success' || status === 'cancelled') ? status : 'error' };
-    }
     if (error) {
       // probe의 login_required: 이 브라우저에 끝낼 SSO가 없다. 마지막 단계로 간다.
       if (flow.phase === 'probe' && error === 'login_required')
