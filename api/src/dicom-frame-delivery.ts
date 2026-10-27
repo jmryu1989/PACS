@@ -10,8 +10,9 @@
  * response was sent to its end, `transfer-aborted` when none was (every read failed or was cut) or the process stops
  * while one is still being sent (review MG-10). A terminal the ledger cannot take at that moment keeps its identity
  * and is retried until it is durable or the process stops; it is never dropped for being late (review MG-09). The
- * stop reserves the ledger work of every terminal it still owes before record admission closes, so a delivery whose
- * preparation or last retry is in flight when the process stops still completes its pair (review MG-09, round 4).
+ * stop reserves the ledger work of every terminal it still owes before record admission closes and keeps it until its
+ * own last attempt is over, so a delivery whose preparation or last retry is in flight when the process stops still
+ * completes its pair, also when the attempt that runs on the reservation first fails (review MG-09, rounds 4-5).
  *
  * The event is the formatVersion 1 image event the images/dicom-web delivery writes (emr-image/service.ts), through the
  * same record port: the study is its target (recordId = study UID, as that delivery names its study-level units) and the
@@ -76,7 +77,11 @@ interface Delivery {
   attempts: number;
   recording: Promise<void> | null;
   cancelRetry: (() => void) | null;
-  /** Ledger work the stop admitted for this delivery's terminal while admission was still open; used by the next attempt. */
+  /**
+   * Ledger work the stop admitted for this delivery's terminal while admission was still open. It stays the
+   * delivery's through every attempt of the stop - an attempt that fails on it does not end it - and the stop ends it
+   * once its last attempt is over.
+   */
   reserved: EmrRecordWork | null;
 }
 
@@ -234,9 +239,12 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
     const terminal = delivery.terminal!;
     const attempt = async () => {
       // Work the stop reserved is used first: it was admitted while admission was open, and the port keeps admitted
-      // work through its close. Otherwise the work is taken here, before the first await.
+      // work through its close. It is not ended here - the attempt that runs on it may be the one before the stop's
+      // last, and after admission closed no new work could replace it; the stop ends it after that last attempt
+      // (review MG-09, round 5). Work taken here, before the first await, is this attempt's alone and ends with it.
+      const reserved = delivery.reserved;
       let work: EmrRecordWork;
-      if (delivery.reserved) { work = delivery.reserved; delivery.reserved = null; }
+      if (reserved) work = reserved;
       else {
         try { work = this.records.begin(); }
         catch (error) { this.defer(delivery, error); return; }
@@ -247,7 +255,7 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
         this.logger.log(`image_delivery outcome=${terminal.action === 'transfer-ended' ? 'ended' : 'aborted'} responses=${delivery.served + delivery.unserved} ` +
           `unserved=${delivery.unserved} attempts=${delivery.attempts + 1}`);
       } catch (error) { this.defer(delivery, error); }
-      finally { work.end(); }
+      finally { if (!reserved) work.end(); }
     };
     delivery.recording = attempt().finally(() => { delivery.recording = null; });
     return delivery.recording;
@@ -278,8 +286,9 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
    * admission; the hooks of one module run concurrently, so nothing awaited here may be needed after that close.
    * The ledger work of every terminal this stop may owe - open deliveries, still being prepared or not, and closed
    * ones whose terminal is not durable yet - is therefore admitted synchronously, before the first await; the port
-   * keeps admitted work through its close, and the runtime's drain waits for it. A delivery that turns out to owe
-   * nothing (its preparation failed, or its in-flight attempt succeeded) returns the work unused.
+   * keeps admitted work through its close, and the runtime's drain waits for it. The reservation is ended here, once,
+   * after the stop's last attempt - whether that attempt used it, an earlier attempt failed on it, or the delivery
+   * turned out to owe nothing (its preparation failed, or its in-flight attempt succeeded).
    */
   onModuleDestroy(): void {
     this.stopping = true;

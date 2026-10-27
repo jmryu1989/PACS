@@ -11,7 +11,8 @@
  * succeeded (MG-10); a terminal the ledger cannot take at the close is retried as the same event until durable, and the
  * shutdown makes a last attempt without inventing one (MG-09); a graceful Nest shutdown (installed Nest's application
  * context close, the real EmrNestLifecycle closing admission) still records the terminal of a delivery whose
- * preparation or whose first terminal attempt was in flight when admission closed (MG-09, round 4). The PostgreSQL
+ * preparation or whose first terminal attempt was in flight when admission closed (MG-09, round 4), and of one whose
+ * first terminal attempt was made during the stop and failed once (MG-09, round 5). The PostgreSQL
  * ledger itself is proven in tests/emr/a (real PG). D73: behaviour at the boundary, no product source text. Synthetic
  * values only; 127.0.0.1 only. */
 const { STUDY_UID, SERIES_UID, SOP_UID, INSTANCE_ID, STUDY_ID, syntheticObject, stubOrthanc } = require('./dicom_frame_fixture.cjs');
@@ -454,4 +455,42 @@ test('graceful Nest shutdown closes record admission after the stop began: a del
     assert.equal(s2.records.control.live(), 0);
     assert.equal(s2.background.live(), 0);
   } finally { fail(new Error('cleanup')); await nest2.done(); await s2.close(); }
+});
+
+test('graceful Nest shutdown: a terminal whose first attempt was made during the stop and failed once is still recorded by the stop\'s last attempt', async () => {
+  // The delivery is still being prepared when the process stops (as in (a) above); after admission closed, its terminal
+  // is attempted on the work the stop reserved and that attempt fails once - the store takes everything after it. The
+  // stop's last attempt must still reach the store: nothing before it may end the reserved work (GPT review of 1b9e0f8).
+  const s = await stack();
+  let release, entered;
+  const held = new Promise(resolve => { release = resolve; }), started = new Promise(resolve => { entered = resolve; });
+  // Every terminal append the store was asked for, the failed one included (it fails here, before the fixture's own
+  // attempts list sees it).
+  const terminals = [];
+  const append = s.records.store.append;
+  s.records.store.append = async (event, ...rest) => {
+    if (event.action === 'provide-prepared') { entered(); await held; }
+    else if (terminals.push(event.eventId) === 1) throw new Error('synthetic single transient terminal failure');
+    return append(event, ...rest);
+  };
+  const nest = await nestShutdown(s);
+  try {
+    const read = s.frame(1);
+    await started;
+    const stopping = nest.close();
+    await nest.admissionClosed;
+    release();
+    const response = await read;
+    await stopping;
+    assert.equal(response.status, 200);
+    assert.deepEqual(s.records.entries.map(e => e.event.action), ['provide-prepared', 'transfer-aborted'], 'the pair is complete after one failed terminal attempt during the stop');
+    assert.equal(s.records.entries[1].event.relatedEventId, s.records.entries[0].event.eventId);
+    assert.equal(terminals.length, 2, 'the failed attempt and the stop\'s last attempt both reached the store');
+    assert.equal(terminals[0], terminals[1], 'the same terminal event, not a new one');
+    assert.equal(s.records.attempts.filter(a => a.action === 'transfer-aborted').length, 1, 'the store holds the one that succeeded');
+    assert.equal(nest.lines.filter(line => line.startsWith('warn')).length, 1, 'the failed attempt is reported once, as an attempt');
+    assert.deepEqual(nest.lines.filter(line => line.startsWith('error')), [], 'nothing pending is reported');
+    assert.equal(s.records.control.live(), 0, 'the reserved work was ended after the last attempt');
+    assert.equal(s.background.live(), 0);
+  } finally { release(); await nest.done(); await s.close(); }
 });
