@@ -133,7 +133,7 @@ class FixtureShapeTests(unittest.TestCase):
         self.assertEqual(built["resampler"]["phase_normalization"], "unit-sum")
         self.assertEqual(len(built["resampler"]["sha256"]), 64)
         self.assertEqual(built["source"]["format"]["sample_rate"], 22050)
-        self.assertEqual(built["fixture"]["max_bytes"], 1048576)
+        self.assertEqual(built["fixture"]["max_bytes"], 180 * 32000 + 44)
 
     def test_05_already_canonical_rate_passes_samples_through_unchanged(self):
         samples = sine(1000, 16000, 0.1)

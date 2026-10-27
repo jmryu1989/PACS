@@ -30,7 +30,7 @@ import sys
 TARGET_SAMPLE_RATE = 16000
 TARGET_CHANNELS = 1
 TARGET_BITS = 16
-WAV_MAX_BYTES = 1_048_576
+WAV_MAX_BYTES = 180 * 32_000 + 44   # DICTATION_AUDIO_DEFAULT_BYTES: the unconfigured limit
 CANONICAL_HEADER_BYTES = 44
 
 # Windowed-sinc parameters. `ZERO_CROSSINGS` is the half-width of the kernel measured in

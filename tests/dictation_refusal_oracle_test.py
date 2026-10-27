@@ -223,7 +223,7 @@ class OracleTests(unittest.TestCase):
                          (hashlib.sha256(wave).hexdigest(), hashlib.sha256(other).hexdigest()))
         changed = [i for i in range(46) if wave[i] != other[i]]
         self.assertTrue(changed and set(changed) <= set(range(24, 32)), changed)   # only the two rate fields
-        self.assertEqual((len(big), set(big)), (1048577, {0}))
+        self.assertEqual((len(big), set(big)), (180 * 32000 + 44 + 1, {0}))   # one over the unconfigured 180 s limit
         # Same bytes as the existing REPORT battery's dictation call (invariants_live.call_report_route).
         self.assertIn('struct.pack("<IHHIIHH", 16, 1, 1, 16000, 32000, 2, 16)', source("tests/invariants_live.py"))
 
@@ -245,7 +245,7 @@ class OracleTests(unittest.TestCase):
 
     @staticmethod
     def capability(**changes):
-        cap = {"available": False, "maxBytes": 1048576, "timeoutMs": 120000, "languagePin": "auto",
+        cap = {"available": False, "maxBytes": 180 * 32000 + 44, "timeoutMs": 120000, "languagePin": "auto",
                "enginePin": PIN, "modelPin": "ggml-small@sha256:" + "0" * 64}
         cap.update(changes)
         return cap

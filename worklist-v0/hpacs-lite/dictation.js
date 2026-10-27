@@ -10,7 +10,9 @@
 (function () {
   'use strict';
   const TEXT_CAP = 16384;          // JS UTF-16 code units, identical to the server's ASR_TEXT_CAP
-  const MAX_WAV_BYTES = 1048576;   // the server's code ceiling; bootstrap may lower it, never raise it
+  // The largest file RIFF's 32-bit size field can describe. The real limit is the server's bootstrap
+  // maxBytes (KIN_ASR_MAX_BYTES); this only refuses a value the wire format cannot carry.
+  const MAX_WAV_BYTES = 0xffffffff + 8;
   const MAX_TIMEOUT_MS = 240000;
   const CLIENT_MARGIN_MS = 5000;
   // A 16384-unit string escaped as \uXXXX is 98304 characters; this bound is only against a body
@@ -19,6 +21,15 @@
   const REFUSAL_CHARS = 8192;
   const LABEL_CHARS = 256;
   const ACTIVE = new Set(['requesting-permission', 'recording', 'uploading', 'review']);
+  // Answers after which the same recording may still succeed: the engine, its one slot, the proxy, the identity
+  // provider or the session store comes back. The run then keeps its recording for Retry instead of ending. Judged by
+  // the HTTP status, not by a list of codes, so a 5xx from any layer in front of the engine (AUTH_IDP_UNAVAILABLE,
+  // AUTH_STORAGE_FAILURE, an nginx 502) is held too; the 409 AUTH_SESSION_BUSY is the session store's own "try again".
+  // An engine that is not configured at all, and a refusal of this person, this study or these bytes (4xx), end it.
+  function transient(status, code) {
+    if (code === 'DICTATION_NOT_CONFIGURED') return false;
+    return status === 429 || (status >= 500 && status <= 599) || (status === 409 && code === 'AUTH_SESSION_BUSY');
+  }
 
   const TITLES = Object.freeze({
     browser: '이 브라우저 환경에서는 녹음할 수 없습니다 — 보안 연결(HTTPS)과 마이크 기능이 필요합니다',
@@ -69,6 +80,7 @@
     stopping: '녹음을 마무리하는 중입니다',
     uploading: '인식을 요청하는 중입니다 — 판독문은 아직 바뀌지 않았습니다',
     capped: '최대 녹음 길이에 도달해 녹음을 멈췄습니다 — 인식을 요청하는 중입니다',
+    held: ' — 녹음은 이 화면에 남아 있고 판독문은 그대로입니다. 다시 보내려면 Retry, 버리려면 Cancel을 누르세요',
     review: '받아쓴 글을 확인하세요 — Insert를 눌러야 판독문에 들어갑니다',
     inserted: '받아쓴 글을 판독문에 넣었습니다',
     placementStale: '본문이 고정한 뒤 바뀌었습니다 — Insert를 누르면 넣지 않고 위치를 다시 고정하라고 안내합니다',
@@ -209,6 +221,14 @@
       if (detail) extra = { seq: session.snapshot().asrSeq, text: detail };
       emit();
     }
+    /** The request's own outcome: a transient one holds the recording for Retry (the session stays in
+     * uploading under the same pin); any other is the run's one failure. */
+    function settle(cur, held, reason, detail) {
+      if (run !== cur) return;
+      if (!held || !cur.audio) { failRun(cur, reason, detail); return; }
+      cur.held = { reason, detail: detail || null };
+      emit();
+    }
     function remember(field) {
       const live = context(field);
       pinned = live && typeof live.value === 'string' ? live.value : null;
@@ -236,7 +256,7 @@
         return;
       }
       const cur = { at, token: r.token, abort: new AbortController(), capture: null, timer: null, wav: null,
-        stopping: false, auto: false, timedOut: false, meta: null };
+        stopping: false, auto: false, timedOut: false, meta: null, held: null };
       run = cur;
       remember(session.snapshot().pin.field);
       try {
@@ -293,20 +313,21 @@
         const pending = transport.request(url, { context: at, read: 'response', deadlineMs: 0, method: 'POST', credentials: 'same-origin', cache: 'no-store',
           redirect: 'error', headers: { 'Content-Type': 'audio/wav' },
           body: bytes, signal: abort.signal });
-        // Clear the transmitted buffer; the run owns one RAM copy until its reply or cancellation.
+        // Clear the transmitted buffer; the run owns one RAM copy until a final reply, Cancel, a study
+        // change or page exit. A transient failure keeps that copy for Retry.
         zero(bytes);
         res = await pending;
         if (run !== cur) return;
         raw = await res.text();
       } catch (_) {
-        work.commit(at, () => { failRun(cur, timedOut ? 'client-timeout' : 'network'); });
+        work.commit(at, () => { settle(cur, true, timedOut ? 'client-timeout' : 'network'); });
         return;
       } finally {
         zero(bytes); timers.clear(timer); if (cur.timer === timer) cur.timer = null;
       }
       if (run !== cur) return;
       work.commit(at, () => {
-      if (!res.ok) { const f = refusal(res.status, raw); failRun(cur, f.code, f.message); return; }
+      if (!res.ok) { const f = refusal(res.status, raw); settle(cur, transient(res.status, f.code), f.code, f.message); return; }
       const value = readResponse(raw);
       if (!value) { failRun(cur, 'invalid-response'); return; }
       const problem = transcriptProblem(value.text);
@@ -318,6 +339,13 @@
     }
 
     function stop() { if (run) finish(run); }
+
+    /** Sends the held recording again under the same pin. The editor checks of refresh() kept running meanwhile. */
+    function retry() {
+      const cur = run;
+      if (!cur || !cur.held || !cur.audio || session.snapshot().state !== 'uploading' || gate()) return;
+      work.commit(cur.at, () => { if (run === cur && cur.held) { cur.held = null; void send(cur); } });
+    }
 
     async function insert() {
       const at = work.capture('editor'); if (!work.admits(at)) return null;
@@ -398,7 +426,8 @@
       const v = { state: s.state, asrSeq: s.asrSeq, serverAvailable: server.available, browser, active,
         block: null, visible: false, status: '', text: '', placement: '', meta: '', metaTitle: '',
         needsRepin: s.needsRepin, pending: s.pending, cleanupFailed: s.cleanupFailed, stopping: false,
-        controls: { stop: 'hidden', cancel: 'hidden', repin: 'hidden', insert: 'hidden', close: 'hidden' } };
+        held: s.state === 'uploading' && !!(cur && cur.held),
+        controls: { stop: 'hidden', cancel: 'hidden', retry: 'hidden', repin: 'hidden', insert: 'hidden', close: 'hidden' } };
       if (capable() && !active) v.block = gate();
       // A session the capability withdrawal ended says so; the plain unavailable default stays silent.
       const terminal = ['failed', 'cancelled'].includes(s.state) || (s.state === 'inserted' && s.cleanupFailed) ||
@@ -412,6 +441,11 @@
         v.status = v.stopping ? STATUS.stopping
           : STATUS.recording(Math.floor(((server.available ? server.maxBytes : MAX_WAV_BYTES) - 44) / 32000));
         v.controls.stop = v.stopping ? 'disabled' : 'enabled'; v.controls.cancel = 'enabled';
+      } else if (v.held) {
+        // Offline is the one barrier left here (refresh() ends the run for an editor change); Retry waits for it.
+        const blocked = gate();
+        v.status = failureMessage(cur.held.reason, cur.held.detail) + STATUS.held + (blocked ? ' · ' + String(blocked) : '');
+        v.controls.retry = blocked ? 'disabled' : 'enabled'; v.controls.cancel = 'enabled';
       } else if (s.state === 'uploading') {
         v.status = cur && cur.auto ? STATUS.capped : STATUS.uploading;
         v.controls.stop = 'disabled'; v.controls.cancel = 'enabled';
@@ -459,14 +493,14 @@
             onFailure: code => { work.commit(resumedAt, () => { failRun(cur, captureReason(code)); }); } });
           if (snap.state === 'requesting-permission') void beginCapture(cur, resumedAt);
           else if (snap.state === 'recording' && cur.stopping) void completeStop(cur, resumedAt);
-          else if (snap.state === 'uploading' && cur.audio) void send(cur);
+          else if (snap.state === 'uploading' && cur.audio && !cur.held) void send(cur);
         } else if (resumeStart) void start();
         resumeStart = false;
         emit();
       } else if (reason === 'lifecycle' && state !== 'active') { cancel('page-exit'); listeners.clear(); }
     });
     return Object.freeze({
-      view, refresh, setServerCapability, start, stop, insert, repin, fieldClicked, cancel, close,
+      view, refresh, setServerCapability, start, stop, retry, insert, repin, fieldClicked, cancel, close,
       pageExit: () => cancel('page-exit'),
       redraw: emit,
       snapshot: () => session.snapshot(),
@@ -485,9 +519,10 @@
     // The unavailable title is the markup's own text, never a second copy of it (DI-13).
     const unavailableTitle = el.button.getAttribute('title');
     let paneFocus = false, lastState = null;
-    const names = ['stop', 'cancel', 'repin', 'insert', 'close'];
+    const names = ['stop', 'cancel', 'retry', 'repin', 'insert', 'close'];
     function primary(v) {
       if (v.controls.stop === 'enabled') return el.stop;
+      if (v.controls.retry === 'enabled') return el.retry;
       if (v.state === 'review') return el.text;
       if (v.controls.cancel === 'enabled') return el.cancel;
       if (v.controls.close === 'enabled') return el.close;
@@ -513,8 +548,10 @@
         el[name].hidden = mode === 'hidden';
         el[name].disabled = mode !== 'enabled';
       }
-      const advanced = v.state !== lastState;
-      lastState = v.state;
+      // A held recording is its own step: focus moves to Retry, so a second Enter does not land on Cancel.
+      const step = v.held ? 'held' : v.state;
+      const advanced = step !== lastState;
+      lastState = step;
       if (!v.visible) { paneFocus = false; return; }
       // Following the pane's own step keeps a second Enter from landing on Cancel by accident. A
       // control that just became disabled or hidden may still hold focus; that counts as lost.
@@ -539,6 +576,7 @@
     });
     el.stop.addEventListener('click', () => controller.stop());
     el.cancel.addEventListener('click', () => controller.cancel());
+    el.retry.addEventListener('click', () => controller.retry());
     el.repin.addEventListener('click', () => { controller.repin(); });
     el.close.addEventListener('click', () => { controller.close(); if (hooks.closed) hooks.closed(); });
     el.insert.addEventListener('click', async () => {
