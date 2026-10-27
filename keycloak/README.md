@@ -18,8 +18,10 @@ user profile의 `email`·`firstName`·`lastName`을 관리자 전용 편집(`edi
 만든다. 필수 동작을 끄는 것은 가입 폼에 영향이 없다(`tests/e2e/test_caution_app.py`가 가입 입력과 본인 변경 거절을 함께 확인).
 
 `requiredActions`를 렐름 파일에 적으면 Keycloak은 기본 목록을 넣지 않고 적힌 것만 만든다(`delete_account`만 따로 더한다).
-그래서 파일에는 26.7.3의 기본 목록 전체를 두고 위 둘만 `enabled:false`로 둔다. Keycloak을 올릴 때는 새 기본 동작이
-빠지지 않았는지 관리 콘솔 Authentication → Required actions(또는 `GET /admin/realms/kin/authentication/unregistered-required-actions`)로 확인한다.
+그래서 파일에는 26.7.3의 기본 목록을 두고 위 둘만 `enabled:false`로 둔다. 기본에서도 꺼진 `UPDATE_EMAIL`(이메일 변경 동작)은
+넣지 않아 미등록으로 남는다 — 쓸 수 없다는 점은 같다. Keycloak을 올릴 때는 새 기본 동작이 빠지지 않았는지 관리 콘솔
+Authentication → Required actions(또는 `GET /admin/realms/kin/authentication/unregistered-required-actions`, 지금은
+`UPDATE_EMAIL` 하나만 나온다)로 확인한다.
 
 **기존 설치(import가 적용되지 않는다):** 관리 콘솔 → `kin` 렐름 → Authentication → Required actions에서
 `Update Profile`과 `Verify Profile`의 Enabled를 끈다. Admin REST로는 각 동작을
