@@ -482,8 +482,11 @@ class ReportObservationBrowser(base.WorklistE2E):
         self.assertEqual(event["userId"]["value"]["subject"], self.stack.user_ids["doctor2"])
         provided = self.provisions(source.uid)[event["relatedEventId"]]
         self.assertEqual(provided["userId"]["value"]["subject"], self.stack.user_ids["doctor2"], "its own provision")
-        second = sent[mark[0]:]
-        self.assertTrue(second)
+        # The ledger can show the entry before Playwright has delivered the page's request event to this thread, so the
+        # second account's own acknowledged report is awaited in the page's traffic too.
+        second = self.wait_ledger(page, lambda: sent[mark[0]:], lambda v: any(item["status"] == 200 for item in v),
+                                  "the second account's report in the page's traffic")
+        self.assertIn(event["eventId"], [item["body"]["eventId"] for item in second])
         self.assertNotIn(dropped[0]["eventId"], [item["body"]["eventId"] for item in second])
         self.assertNotIn(dropped[0]["accessRef"], [item["body"]["accessRef"] for item in second])
         self.settle(page)
