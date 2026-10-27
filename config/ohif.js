@@ -4387,6 +4387,56 @@ function kinCreateStudyPrefetch() {
   }
   return { id: 'kin.study-prefetch', onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
+
+// OHIF's study browser searches priors by MRN. Patient IDs are local to an
+// institution, so resolve them through the same source patient key as Related.
+// Each resulting UID still uses the ordinary scoped DICOMweb query.
+function kinCreateStudySearch() {
+  let extensions, stop;
+  function mount() {
+    stop?.();
+    const studies = extensions.getActiveDataSource()[0].query.studies;
+    const original = studies.search, search = location.search;
+    const opened = new URLSearchParams(search).get('StudyInstanceUIDs')?.split(',') || [];
+    let ended = false;
+    const controller = new AbortController();
+    const session = kinViewerOnEnd(() => { ended = true; controller.abort(); });
+    const live = () => !ended && location.search === search;
+    const current = () => { if (!live()) throw new Error('검사 조회가 종료되었습니다.'); };
+    // OHIF repeats the patient lookup for each opened study. Share the list only
+    // within this mode/session; each UID query still checks current access.
+    let listing;
+    const readList = () => listing ||= (async () => {
+      const response = await fetch('/api/studies', { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
+      if (!response.ok) throw new Error('이전 검사 목록을 확인하지 못했습니다 (HTTP ' + response.status + ').');
+      return response.json();
+    })().catch(error => { listing = null; throw error; });
+    const wrapped = async function (params) {
+      if (!params?.patientId || params.studyInstanceUid) return original.call(this, params);
+      current();
+      const list = await readList();
+      current();
+      const keys = new Set(list.studies.filter(row => opened.includes(row.uid) && row.id === params.patientId && row.sourcePatientKey)
+        .map(row => row.sourcePatientKey));
+      // The stock MRN request does not identify which opened study asked it.
+      // Keep its current-study fallback when two institutions reuse that MRN.
+      if (keys.size > 1) throw new Error('기관별 환자 식별이 달라 이전 검사를 하나로 묶을 수 없습니다.');
+      if (keys.size === 0) throw new Error('열린 검사의 환자 식별을 확인하지 못했습니다.');
+      const rows = list.studies.filter(row => row.id === params.patientId && keys.has(row.sourcePatientKey));
+      const results = [];
+      for (const row of rows) {
+        current();
+        results.push(...await original.call(this, { ...params, studyInstanceUid: row.uid, disableWildcard: true }));
+      }
+      current();
+      return results;
+    };
+    studies.search = wrapped;
+    stop = () => { ended = true; controller.abort(); session.close(); if (studies.search === wrapped) studies.search = original; };
+  }
+  return { id: 'kin.study-search', preRegistration({ extensionManager }) { extensions = extensionManager; },
+    onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
+}
 // The stock mode owns the grid and Cornerstone elements. This extension owns
 // only its chrome and removes it when that mode or document ends.
 function kinCreateViewerUX() {
@@ -4482,7 +4532,7 @@ function kinCreateMultiStudyStrip() {
 }
 
 window.config = {
-  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateViewerUX(), kinCreateMultiStudyStrip()],
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateStudySearch(), kinCreateViewerUX(), kinCreateMultiStudyStrip()],
   // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
   // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
   kinThreeDCursor: { enabled: false },
