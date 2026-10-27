@@ -156,7 +156,9 @@ def load_and_login(args, directory):
             try:
                 page.locator('#username').fill('mgxa-doctor')
                 page.locator('#password').fill(credentials['DOCTOR_PASSWORD'])
-                page.locator('#kc-login').click()
+                # Submit with the normal keyboard path: desktop Chromium can
+                # stall its click-stability wait on this static login page.
+                page.locator('#password').press('Enter')
             except Exception:
                 raise RuntimeError('Synthetic doctor login form failed (credential omitted)') from None
             page.wait_for_url('**/worklist/hpacs-lite/main.html')
