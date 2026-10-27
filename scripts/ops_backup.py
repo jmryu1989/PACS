@@ -201,9 +201,12 @@ def recover_process_lock(path):
 
     Two startups can both see the same dead owner. Without serialization the slower one deletes the lock the faster one
     has just created for a live run (the 2026-10-27 reaudit's live_owner_lock_lost). Recovery therefore runs only under
-    an exclusive guard: while it is held no other recovery can unlink, a normal acquisition cannot replace an existing
-    lock, and the dead owner cannot release it, so the content read under the guard is the content unlinked. A guard
-    already present (another recovery, or one that died mid-way) skips recovery and the acquisition then refuses.
+    an exclusive guard, so no other recovery can unlink. The guard does not stop the owner read: it may release normally
+    and exit after its PID is read, and a startup that skipped recovery may then take the absent lock (#262 review
+    R262-1). The lock is therefore read again after the owner is found dead and unlinked only if it still holds that
+    owner's token. From then on nothing can replace it: its owner is dead, a normal acquisition cannot replace an
+    existing lock and no other recovery runs. A guard already present (another recovery, or one that died mid-way)
+    skips recovery and the acquisition then refuses.
     """
     guard = path.with_name(path.name + ".recovery")
     try:
@@ -222,7 +225,8 @@ def recover_process_lock(path):
 
 def _recover_dead_owner(path):
     try:
-        pid = int(path.read_text().partition(':')[0])
+        owner = path.read_text()
+        pid = int(owner.partition(':')[0])
         if pid <= 0:
             return
         if os.name == 'nt':
@@ -243,6 +247,8 @@ def _recover_dead_owner(path):
                 return
             except ProcessLookupError:
                 pass
+        if path.read_text() != owner:
+            return
         path.unlink()
     except (FileNotFoundError, ValueError, PermissionError):
         return

@@ -718,7 +718,8 @@ k.privateKey,'synthetic-doctor-key','wrap-1',Buffer.from(Array.from({length:32},
             for database in ("kin", "keycloak"):
                 with (snapshot / (database + ".dump")).open("wb") as handle:
                     ops.run(["docker", "exec", source, "pg_dump", "-U", "kin", "-d", database, "-Fc"], output=handle)
-            with sqlite3.connect(root / "index") as db:
+            # The connection's own context only ends the transaction; an open handle keeps Windows from removing the folder.
+            with contextlib.closing(sqlite3.connect(root / "index")) as db, db:
                 db.execute("CREATE TABLE AttachedFiles(uuid TEXT, compressedSize INTEGER)")
             with tarfile.open(snapshot / "orthanc.tgz", "w:gz") as archive:
                 archive.add(root / "index", arcname="index")
