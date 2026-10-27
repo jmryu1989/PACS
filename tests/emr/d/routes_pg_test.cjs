@@ -61,7 +61,7 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
       '0020000E': { Value: [seriesUid] }, '00080018': { Value: [sopUid] },
       '00080016': { Value: ['1.2.840.10008.5.1.4.1.1.2'] }, '00080008': { Value: ['ORIGINAL', 'PRIMARY'] } };
     let catalogPatient = 'synthetic:' + imageUid, fileReads = 0, beforeIdentity = null, storedFile = 'synthetic-file-1';
-    let frameCount = 1, holdFrame = null;
+    let frameCount = 1, holdFrame = null, failFile = 0;
     const frameReads = [], frameData = n => n === 0 ? frameBytes : Buffer.alloc(512, 11 + n);
     // FIND-248-F3: a finding's comparison identity is read before its write locks the anchor study row, so a
     // concurrent write to that study never waits behind an archive call. Each comparison lookup probes the lock.
@@ -100,6 +100,8 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
       if (url.pathname.endsWith('/simplified-tags')) return json({ StudyInstanceUID: imageUid, SeriesInstanceUID: seriesUid,
         SOPInstanceUID: sopUid, SOPClassUID: header['00080016'].Value[0], NumberOfFrames: String(frameCount) });
       if (url.pathname.endsWith('/header')) return json({ '0002,0010': { Value: '1.2.840.10008.1.2.1' } });
+      // A temporary archive outage: the next `failFile` stored-file reads answer 503.
+      if (url.pathname.endsWith('/file') && failFile > 0) { failFile--; res.statusCode = 503; res.end(); return; }
       if (url.pathname.endsWith('/file')) { fileReads++; res.end(original); return; }
       const frame = url.pathname.match(/\/frames\/(\d+)\/raw$/);
       if (frame && Number(frame[1]) < frameCount) {
@@ -144,7 +146,10 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
         { provide: product('emr-runtime/background-work').EMR_BACKGROUND_WORK, useValue: runtime.background.work },
         { provide: APP_GUARD, useClass: product('auth.guard').AuthGuard },
         { provide: product('study-transfer-local.service').StudyTransferLocalService, useValue: {} }] })(HttpFixture);
-    app = await NestFactory.create(HttpFixture, { logger: ['error'], rawBody: true });
+    // Warnings are what an operator reads; errors still go to the test's stderr.
+    const warnings = [];
+    app = await NestFactory.create(HttpFixture, { rawBody: true, logger: { log() {}, debug() {}, verbose() {},
+      warn: message => warnings.push(String(message)), error: (...args) => console.error(...args) } });
     app.setGlobalPrefix('api'); await app.listen(0, '127.0.0.1');
     const origin = await app.getUrl();
     const send = async (name, method, route, body, expected = method === 'GET' || method === 'PATCH' ? 200 : 201) => {
@@ -394,6 +399,26 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     assert.equal(cold.status, 200); assert.ok(Buffer.from(await cold.arrayBuffer()).includes(original));
     assert.deepEqual([fileReads - readsBeforeCold, frameReads.length - framesBeforeCold], [repeatedReads, 0],
       'the first opening of the followed file reads only what it delivers');
+    // A stable study the follower cannot read now is reported, not taken for digested, and its first opening reads
+    // it. A study removed before the follower reached it is expected and stays quiet; the log names neither.
+    storedFile = 'synthetic-file-6'; failFile = 1;
+    const warnedBefore = warnings.length, readsBeforeOutage = fileReads;
+    changes.push({ Seq: changes.length + 1, ChangeType: 'StableStudy', ResourceType: 'Study', ID: '44444444-44444444-44444444-44444444-44444444' });
+    changes.push({ Seq: changes.length + 1, ChangeType: 'StableStudy', ResourceType: 'Study', ID: studyResource });
+    for (const until = Date.now() + 120000; warnings.length === warnedBefore;) {
+      assert.ok(Date.now() < until, 'the follower reported the study it could not read');
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    assert.equal(failFile, 0);
+    const reported = warnings.slice(warnedBefore);
+    assert.equal(reported.length, 1, JSON.stringify(reported));
+    assert.match(reported[0], /ImageSourceUnavailable/);
+    for (const name of [studyResource, objectResource, imageUid, 'synthetic:', storedFile]) assert.equal(reported[0].includes(name), false, name);
+    assert.equal((await kept('synthetic-file-6')).length, 0, 'nothing is kept for the study not read');
+    const afterOutage = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
+    assert.equal(afterOutage.status, 200); assert.ok(Buffer.from(await afterOutage.arrayBuffer()).includes(original));
+    assert.equal(fileReads - readsBeforeOutage, 1 + repeatedReads, 'the first opening reads the file the follower could not');
+    assert.equal((await kept('synthetic-file-6')).length, 1);
     // A kept row is no delivery check of its own: a row naming other bytes builds a manifest the delivery refuses.
     storedFile = 'synthetic-file-5';
     await db.$executeRaw`INSERT INTO emr_image.object_digest (instance_id, file_uuid, sop_instance_uid, transfer_syntax_uid, bytes, sha256, frames)

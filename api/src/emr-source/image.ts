@@ -82,24 +82,8 @@ function declaredFrames(header: any): number {
   return count;
 }
 
-/** The spec of the cold first opening (#248) fixes four archive objects read at a time: the two full reads of each
- * object are the cost, and one object after another multiplies it by the object count. */
-const OBJECTS_READ_AT_ONCE = 4;
 /** The gateway agent's `/changes` defaults (POLL_SECONDS 2, limit 100), the one consumer of Orthanc's change log here. */
 const CHANGES_POLL_MS = 2000, CHANGES_PAGE = 100;
-
-async function bounded<T>(items: readonly T[], limit: number, work: (item: T) => Promise<void>) {
-  let next = 0, failure: { error: unknown } | null = null;
-  // After a failure no further object starts; those already reading finish or see the request's abort.
-  const lane = async () => {
-    while (!failure && next < items.length) {
-      const item = items[next++];
-      try { await work(item); } catch (error) { failure ??= { error }; }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
-  if (failure) throw failure.error;
-}
 
 /** Read-only Orthanc catalog. No metadata supplied by the browser establishes
  * the patient, object version, frame digest or source provenance. */
@@ -125,13 +109,16 @@ export class OrthancImageCatalog implements ImageCatalogSource, OnModuleInit, On
   }
   onModuleDestroy() { this.stopFollowing?.(); }
 
-  private async response(path: string, signal: AbortSignal, body?: string) {
+  private async request(path: string, signal: AbortSignal, body?: string) {
     const user = process.env.ORTHANC_USER, pass = process.env.ORTHANC_PASS;
     if (!user || !pass) unavailable('ImageSourceUnavailable');
-    const response = await fetch((process.env.ORTHANC_URL ?? 'http://orthanc:8042').replace(/\/$/, '') + path, {
+    return fetch((process.env.ORTHANC_URL ?? 'http://orthanc:8042').replace(/\/$/, '') + path, {
       method: body === undefined ? 'GET' : 'POST', body, signal, redirect: 'error',
       headers: { Authorization: 'Basic ' + Buffer.from(user + ':' + pass).toString('base64'), 'Accept-Encoding': 'identity' },
     });
+  }
+  private async response(path: string, signal: AbortSignal, body?: string) {
+    const response = await this.request(path, signal, body);
     if (!response.ok || !response.body) { await response.body?.cancel(); unavailable('ImageSourceUnavailable'); }
     return response;
   }
@@ -169,8 +156,10 @@ export class OrthancImageCatalog implements ImageCatalogSource, OnModuleInit, On
     return { transferSyntaxUid: meta?.['0002,0010']?.Value, ...stored.original, frames };
   }
 
-  /** Each listed object's digests: the kept row of the stored file it is now, else read from the archive, a few
-   * objects at a time. `read` names the objects whose digests were read here and are not kept yet. */
+  /** Each listed object's digests: the kept row of the stored file it is now, else read from the archive. `read`
+   * names the objects whose digests were read here and are not kept yet. Objects are read one after another: no
+   * measurement on our hosts sets how many archive reads may share the archive's disk and the delivery reads, so
+   * the kept rows, not parallel reads, take the second read out of a first opening. */
   private async fileDigests(objects: readonly ListedObject[], signal: AbortSignal) {
     const found = new Map<string, FileDigests>(), wanted = objects.filter(object => object.file);
     const rows = wanted.length ? await this.db.$queryRaw<any[]>`SELECT instance_id, file_uuid, sop_instance_uid,
@@ -186,7 +175,7 @@ export class OrthancImageCatalog implements ImageCatalogSource, OnModuleInit, On
         frames: row.frames.map((f: any) => ({ number: f.number, bytes: f.bytes, sha256: f.sha256 })) });
     }
     const read = objects.filter(object => !found.has(object.instanceId));
-    await bounded(read, OBJECTS_READ_AT_ONCE, async object => { found.set(object.instanceId, await this.objectDigests(object, signal)); });
+    for (const object of read) found.set(object.instanceId, await this.objectDigests(object, signal));
     return { found, read };
   }
 
@@ -227,8 +216,14 @@ export class OrthancImageCatalog implements ImageCatalogSource, OnModuleInit, On
         if (!Array.isArray(page?.Changes) || !Number.isSafeInteger(last)) unavailable('ImageSourceUnavailable');
         for (const change of page.Changes) {
           if (change?.ChangeType !== 'StableStudy') continue;
-          // One study that cannot be read now (removed, replaced meanwhile) is left to its first opening.
-          try { await this.digestStudy(change.ID, signal); } catch { signal.throwIfAborted(); }
+          // A study that cannot be read now is left to its first opening, which reads its objects; the follower does
+          // not retry it. Only a study removed meanwhile is expected; any other failure (an archive outage, the digest
+          // table not readable) is reported so it is not taken for a digested study. The log names no study or patient.
+          try { await this.digestStudy(change.ID, signal); } catch (error: any) {
+            signal.throwIfAborted();
+            if (!(await this.removed(change.ID, signal)))
+              this.logger.warn(`Stable study not digested (${error?.response?.code ?? error?.name ?? 'error'}); its first opening reads its objects`);
+          }
         }
         this.since = Math.max(this.since, last);
         if (page.Done !== false) break;
@@ -240,6 +235,15 @@ export class OrthancImageCatalog implements ImageCatalogSource, OnModuleInit, On
       if (!this.followFailing) this.logger.warn(`Archive change log not readable (${error?.response?.code ?? error?.name ?? 'error'}); first openings read their objects`);
       this.followFailing = true;
     }
+  }
+
+  /** Whether Orthanc no longer has the study: it answers 404 for a removed resource. Any other answer, or none, is not a removal. */
+  private async removed(orthancId: unknown, signal: AbortSignal) {
+    try {
+      const response = await this.request(`/studies/${this.resource(orthancId)}`, signal);
+      await response.body?.cancel();
+      return response.status === 404;
+    } catch { signal.throwIfAborted(); return false; }
   }
 
   private async digestStudy(orthancId: unknown, signal: AbortSignal) {
