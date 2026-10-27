@@ -1,0 +1,77 @@
+:root {
+  --bg: #0d1117; --panel: #161b22; --line: #30363d; --text: #e6edf3; --muted: #8b949e;
+  --accent: #2f81f7; --warn: #d29922; --bad: #f85149; --good: #3fb950; --chat-width: 440px;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.5 "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; }
+button, select, textarea, input { font: inherit; color: inherit; }
+button { background: #21262d; border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; }
+button.warn { border-color: var(--warn); color: var(--warn); }
+select { background: #21262d; border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; }
+.muted { color: var(--muted); }
+.grow { flex: 1; }
+
+.bar { display: flex; align-items: center; gap: 10px; height: 46px; padding: 0 12px; background: var(--panel); border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; }
+.brand { font-size: 15px; }
+.badge { background: #3d2e00; color: #f2cc60; border: 1px solid #6e5400; border-radius: 10px; padding: 1px 8px; font-size: 12px; }
+.field { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+
+#layout { display: flex; height: calc(100% - 46px); }
+.mirror { position: relative; flex: 1; min-width: 320px; background: #000; }
+.mirror iframe { width: 100%; height: 100%; border: 0; display: block; background: #0b0f14; }
+.banner { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 2; display: flex; gap: 10px; align-items: center; background: #1c2d4a; border: 1px solid var(--accent); padding: 6px 12px; border-radius: 8px; }
+#splitter { width: 6px; cursor: col-resize; background: var(--line); }
+#splitter:hover { background: var(--accent); }
+
+.chat { width: var(--chat-width); min-width: 300px; max-width: 70vw; display: flex; flex-direction: column; background: var(--panel); }
+.tabs { display: flex; border-bottom: 1px solid var(--line); }
+.tabs button { flex: 1; border: 0; border-radius: 0; background: transparent; padding: 10px; font-weight: 600; color: var(--muted); }
+.tabs button.on { color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
+.job-line { padding: 6px 12px; font-size: 13px; background: #1c2d4a; border-bottom: 1px solid var(--line); }
+.job-line .tools { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+#messages { flex: 1; overflow-y: auto; list-style: none; margin: 0; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.msg { max-width: 92%; padding: 8px 11px; border-radius: 10px; background: #21262d; word-break: break-word; }
+.msg .who { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+.msg .text { white-space: pre-wrap; }
+.msg.user { align-self: flex-end; background: #1f3a63; }
+.msg.system { align-self: center; background: transparent; border: 1px dashed var(--line); color: var(--muted); font-size: 13px; }
+.msg.live { border: 1px solid var(--accent); }
+.msg.failed { border: 1px solid var(--bad); }
+.msg .meta { margin-top: 6px; font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.msg .meta button { font-size: 12px; padding: 1px 7px; }
+.msg .mode { font-size: 10px; border: 1px solid var(--line); border-radius: 8px; padding: 0 5px; margin-left: 4px; }
+.msg code { background: #0d1117; padding: 0 4px; border-radius: 4px; }
+.applied { color: var(--good); }
+
+#composer { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--line); }
+#composer textarea { flex: 1; resize: vertical; min-height: 60px; max-height: 40vh; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+#composer button { align-self: stretch; padding: 0 16px; background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.actions { display: flex; gap: 6px; padding: 8px 10px 10px; flex-wrap: wrap; align-items: center; }
+.more { position: relative; }
+.more summary { cursor: pointer; color: var(--muted); list-style: none; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; }
+.more .menu { position: absolute; bottom: 34px; right: 0; display: flex; flex-direction: column; gap: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px; z-index: 5; min-width: 170px; }
+
+dialog { width: min(980px, 92vw); max-height: 86vh; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 0; }
+dialog::backdrop { background: rgba(0, 0, 0, .6); }
+dialog header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); }
+dialog h2 { margin: 0; font-size: 16px; }
+#panel-body { padding: 12px 16px; overflow: auto; max-height: calc(86vh - 56px); }
+#panel-body pre { white-space: pre-wrap; word-break: break-word; background: var(--bg); padding: 10px; border-radius: 6px; font-size: 12px; }
+#panel-body table { border-collapse: collapse; width: 100%; font-size: 13px; }
+#panel-body td, #panel-body th { border-bottom: 1px solid var(--line); padding: 5px 6px; text-align: left; vertical-align: top; }
+#panel-body h3 { margin: 16px 0 6px; font-size: 14px; }
+.tag { font-size: 11px; border-radius: 8px; padding: 0 6px; border: 1px solid var(--line); }
+.tag.est { color: var(--warn); border-color: var(--warn); }
+
+.login-page { display: grid; place-items: center; }
+.login-card { width: min(380px, 92vw); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 24px; display: flex; flex-direction: column; gap: 12px; }
+.login-card h1 { margin: 0; font-size: 20px; }
+.login-card label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); }
+.login-card input { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+.login-card button { background: var(--accent); border-color: var(--accent); color: #fff; padding: 8px; font-weight: 600; }
+.error { color: var(--bad); min-height: 1.5em; margin: 0; }

@@ -1,0 +1,138 @@
+'use strict';
+// The daily digest for the commander ("오늘 끝" or ~60 minutes idle): Minhoon's requests in his words, what changed
+// (commits + patch), disagreements and forwarded questions, 501s the screens hit, timings and model usage.
+// Written to data/public/digests/ — Minhoon can open the same file; nothing in it is hidden from him.
+const fs = require('fs');
+const path = require('path');
+const { readJsonl, maskSecrets, today, writeJsonAtomic } = require('./util');
+
+function pct(values, p) {
+  const v = values.filter(x => Number.isFinite(x)).sort((a, b) => a - b);
+  if (!v.length) return null;
+  return v[Math.min(v.length - 1, Math.floor((p / 100) * v.length))];
+}
+
+const sec = ms => (Number.isFinite(ms) ? `${(ms / 1000).toFixed(1)}초` : '—');
+const cell = s => String(s == null ? '' : s).replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>');
+
+// A digest covers everything since the previous one (not a calendar day): a session that runs past midnight stays in
+// one handoff with its commits. The file is named by the KST day it is written; a second one that day gets "-2", ...
+async function writeDigest({ dataDir, sandbox, reason = 'manual', by = null }) {
+  const stateFile = path.join(dataDir, 'digest-state.json');
+  const prev = readJsonFileSafe(stateFile);
+  const since = prev.lastAt || '1970-01-01T00:00:00.000Z';
+  const writtenAt = new Date().toISOString();
+  const dir = path.join(dataDir, 'public', 'digests');
+  fs.mkdirSync(dir, { recursive: true });
+  let day = today();
+  for (let n = 2; fs.existsSync(path.join(dir, `${day}.md`)); n++) day = `${today()}-${n}`;
+  const inDay = e => e && e.t && e.t > since && e.t <= writtenAt;
+  const chat = readJsonl(path.join(dataDir, 'chat.jsonl')).filter(inDay);
+  const metrics = readJsonl(path.join(dataDir, 'metrics.jsonl')).filter(inDay);
+  const usage = readJsonl(path.join(dataDir, 'usage.jsonl')).filter(inDay);
+  const records = readJsonl(path.join(dataDir, 'public', 'records.jsonl')).filter(inDay);
+  const missing = readJsonl(path.join(dataDir, 'missing.jsonl')).filter(inDay);
+  const log = (await sandbox.log()).filter(c => new Date(c.time).toISOString() > since);
+  const reloads = new Map(metrics.filter(m => m.kind === 'reload-ready').map(m => [m.jobId, m]));
+  const edits = metrics.filter(m => m.kind !== 'reload-ready');
+
+  const requests = chat.filter(e => e.role === 'user').map(u => {
+    const answers = chat.filter(e => e.jobId === u.jobId && e.role !== 'user');
+    const last = answers[answers.length - 1] || {};
+    const metric = edits.find(m => m.jobId === u.jobId);
+    const reload = reloads.get(u.jobId);
+    const t = metric ? metric.timings : {};
+    return {
+      t: u.t, user: u.user, mode: u.mode, request: u.text, answer: last.text || '', jobId: u.jobId,
+      outcome: last.meta && last.meta.loginRequired ? 'login-required' : last.meta && last.meta.failed ? 'failed'
+        : last.meta && last.meta.changed ? 'applied' : u.mode === 'ask' ? 'answered' : 'no-change',
+      sha: last.meta && last.meta.sha, files: last.meta && last.meta.files,
+      totalToReloadSentMs: t.totalToReloadSentMs, claudeMs: t.claudeMs, buildMs: t.buildMs,
+      lastEditToReloadSentMs: t.lastEditToReloadSentMs, reloadMs: reload ? reload.reloadMs : null,
+      editToReadyMs: Number.isFinite(t.lastEditToReloadSentMs) && reload ? t.lastEditToReloadSentMs + reload.reloadMs : null,
+    };
+  });
+  const applied = requests.filter(r => r.outcome === 'applied');
+  const tokens = usage.reduce((acc, u) => {
+    const x = u.usage || {};
+    acc.input += x.input_tokens || 0; acc.output += x.output_tokens || 0;
+    acc.cacheRead += x.cache_read_input_tokens || 0; acc.cacheWrite += x.cache_creation_input_tokens || 0;
+    acc.cost += u.costUsdReported || 0; if (u.model) acc.models.add(u.model);
+    return acc;
+  }, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set() });
+  const missingCount = new Map();
+  for (const m of missing) { const k = `${m.method} ${m.path.replace(/\/[0-9.]{8,}(?=\/|$)/g, '/:uid')}`; missingCount.set(k, (missingCount.get(k) || 0) + 1); }
+  const patch = await sandbox.diffSinceBase();
+  const stat = await sandbox.diffStatSinceBase();
+  const head = await sandbox.head();
+  const base = await sandbox.base();
+  const branch = await sandbox.branch();
+
+  const sinceLast = prev.lastHead ? await sandbox.git(['diff', '--stat', `${prev.lastHead}..HEAD`]).then(r => r.stdout) : stat;
+  const summary = {
+    day, reason, by, since, writtenAt, branch, base, head, previousHead: prev.lastHead || null,
+    counts: { requests: requests.length, edits: requests.filter(r => r.mode === 'edit').length, applied: applied.length,
+      questions: requests.filter(r => r.mode === 'ask').length, reverts: log.filter(c => c.trailers['Studio-Kind'] === 'revert').length,
+      disagreements: records.filter(r => r.kind === 'disagreement').length, forwarded: records.filter(r => r.kind === 'question').length },
+    timing: {
+      editToReadyP50Ms: pct(applied.map(r => r.editToReadyMs), 50), editToReadyP90Ms: pct(applied.map(r => r.editToReadyMs), 90),
+      totalP50Ms: pct(applied.map(r => r.totalToReloadSentMs), 50), totalP90Ms: pct(applied.map(r => r.totalToReloadSentMs), 90),
+    },
+    usage: { models: [...tokens.models], inputTokens: tokens.input, outputTokens: tokens.output, cacheReadTokens: tokens.cacheRead,
+      cacheWriteTokens: tokens.cacheWrite, costUsdReportedByCli: Math.round(tokens.cost * 10000) / 10000,
+      costNote: 'CLI가 보고한 API 단가 환산값이다. 구독(sdij) 계정 사용이라 실제 청구액이 아니다.' },
+    requests, records, commits: log, missing: [...missingCount].map(([k, n]) => ({ request: k, count: n })),
+  };
+
+  const lines = [];
+  lines.push(`# 민훈 스튜디오 하루 인계 — ${day}`, '');
+  lines.push(`- 작성: ${summary.writtenAt} (${reason}${by ? `, ${by}` : ''}) · 범위: 지난 인계(${since === '1970-01-01T00:00:00.000Z' ? '처음' : since}) 이후`);
+  lines.push(`- 샌드박스: \`${branch}\` · base \`${base.slice(0, 12)}\` · head \`${head.slice(0, 12)}\``);
+  lines.push(`- 요청 ${summary.counts.requests}건 (바꾸기 ${summary.counts.edits}, 적용 ${summary.counts.applied}, 물어보기 ${summary.counts.questions}) · 되돌림 ${summary.counts.reverts} · 이견 ${summary.counts.disagreements} · 넘긴 질문 ${summary.counts.forwarded}`);
+  lines.push(`- 반영 시간(마지막 수정→거울 준비) p50 ${sec(summary.timing.editToReadyP50Ms)} · p90 ${sec(summary.timing.editToReadyP90Ms)}; 요청→새로고침 신호 p50 ${sec(summary.timing.totalP50Ms)} · p90 ${sec(summary.timing.totalP90Ms)}`);
+  lines.push(`- 사용량: ${summary.usage.models.join(', ') || '—'} · 입력 ${tokens.input} / 출력 ${tokens.output} / 캐시 읽기 ${tokens.cacheRead} / 캐시 쓰기 ${tokens.cacheWrite} 토큰 · CLI 환산 $${summary.usage.costUsdReportedByCli} (${summary.usage.costNote})`, '');
+  lines.push('## 요청 (원문)', '', '| 시각 | 누구 | 탭 | 요청 | 결과 | 커밋 | 반영 |', '|---|---|---|---|---|---|---|');
+  for (const r of requests) {
+    lines.push(`| ${r.t.slice(11, 19)} | ${cell(r.user)} | ${r.mode === 'ask' ? '물어보기' : '바꾸기'} | ${cell(r.request)} | ${r.outcome} | ${r.sha ? '`' + r.sha.slice(0, 8) + '`' : ''} | ${r.mode === 'edit' && r.outcome === 'applied' ? `${sec(r.editToReadyMs)} (전체 ${sec(r.totalToReloadSentMs)})` : ''} |`);
+  }
+  lines.push('', '## 스튜디오 답 (요약 원문)', '');
+  for (const r of requests) lines.push(`- **${r.t.slice(11, 19)} ${r.user}** — ${cell(r.request).slice(0, 200)}`, `  - ${cell(r.answer).slice(0, 1200)}`);
+  lines.push('', '## 이견 (비판·거절)', '');
+  const disagreements = records.filter(r => r.kind === 'disagreement');
+  if (!disagreements.length) lines.push('없음');
+  else {
+    lines.push('| 시각 | 누구 | 방아쇠 | 요청 | 스튜디오 근거 | 대안 | 처리 | 근거 위치 |', '|---|---|---|---|---|---|---|---|');
+    for (const d of disagreements) lines.push(`| ${d.t.slice(11, 19)} | ${cell(d.user)} | ${cell(d.trigger)} | ${cell(d.request)} | ${cell(d.objection)} | ${cell(d.alternative)} | ${cell(d.action)} | ${cell(d.evidence)} |`);
+  }
+  lines.push('', '## 지휘자/정모 님께 넘긴 질문', '');
+  const questions = records.filter(r => r.kind === 'question');
+  if (!questions.length) lines.push('없음');
+  for (const q of questions) lines.push(`- (${q.t.slice(11, 19)}, ${q.user}, 대상 ${q.for || '?'}) ${cell(q.question)} — ${cell(q.why || '')}`);
+  lines.push('', '## 커밋 (지난 인계 이후)', '');
+  if (!log.length) lines.push('없음');
+  for (const c of log) lines.push(`- \`${c.sha.slice(0, 8)}\` ${c.trailers['Studio-Kind'] || ''} ${cell(c.subject)}${c.reverted ? ' (뒤에 되돌림)' : ''} — ${c.files.join(', ')}`);
+  lines.push('', '## 모의 응답이 없어 501이 난 요청', '');
+  if (!summary.missing.length) lines.push('없음');
+  for (const m of summary.missing) lines.push(`- ${m.request} ×${m.count}`);
+  lines.push('', '## 지난 인계 이후 변경', '', '```', sinceLast.trim() || '(변경 없음)', '```');
+  lines.push('', '## 브랜치 전체 변경 (base 대비)', '', '```', stat.trim() || '(변경 없음)', '```', '', `전체 patch: \`${day}.patch\` (base 대비 누적).`, '');
+  lines.push('_스튜디오 시안은 제품 이력이 아니다. 지휘자가 필요한 diff를 골라 실제 백엔드 기준으로 다시 검토·시험한다(D2·D3)._');
+
+  fs.writeFileSync(path.join(dir, `${day}.md`), maskSecrets(lines.join('\n')) + '\n');
+  writeJsonAtomic(path.join(dir, `${day}.json`), JSON.parse(maskSecrets(JSON.stringify(summary))));
+  fs.writeFileSync(path.join(dir, `${day}.patch`), patch);
+  writeJsonAtomic(stateFile, { lastAt: writtenAt, lastHead: head, lastDay: day });
+  return { day, file: path.join(dir, `${day}.md`), summary };
+}
+
+function readJsonFileSafe(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return {}; }
+}
+
+function listDigests(dataDir) {
+  const dir = path.join(dataDir, 'public', 'digests');
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir).filter(f => f.endsWith('.md')).map(f => f.slice(0, -3)).sort().reverse();
+}
+
+module.exports = { writeDigest, listDigests };

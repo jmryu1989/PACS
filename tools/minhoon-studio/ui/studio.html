@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>민훈 스튜디오</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="studio.css">
+</head>
+<body>
+<header class="bar">
+  <strong class="brand">민훈 스튜디오</strong>
+  <span class="badge" title="실제 환자 자료가 아닌 합성 자료와 공개 표본 영상으로 화면만 시험합니다.">합성 자료 · Studio</span>
+  <label class="field">화면
+    <select id="screen">
+      <option value="/worklist/hpacs-lite/main.html">Worklist · 판독</option>
+      <option value="/worklist/hpacs-lite/clinician.html">Clinician</option>
+      <option value="/worklist/hpacs-lite/admin.html">Admin</option>
+      <option value="/worklist/hpacs-lite/index.html">Login 화면</option>
+      <option value="viewer">Viewer (CT 표본)</option>
+    </select>
+  </label>
+  <label class="field" title="모의 로그인 계정의 역할입니다. 역할·잠금 규칙 중 일부는 아직 미결 질문입니다.">역할
+    <select id="role">
+      <option value="radiologist">판독의 (radiologist)</option>
+      <option value="technician">기사 (technician)</option>
+      <option value="clinician">임상의 (clinician)</option>
+      <option value="admin">관리자 (admin)</option>
+    </select>
+  </label>
+  <button id="reload" type="button" title="왼쪽 화면을 다시 불러옵니다">새로고침</button>
+  <button id="missing" type="button" class="warn" hidden title="스튜디오에 아직 가짜 응답이 없는 요청">모의 응답 없음 <b>0</b></button>
+  <button id="errors" type="button" class="warn" hidden title="왼쪽 화면에서 난 JavaScript 오류">화면 오류 <b>0</b></button>
+  <span class="grow"></span>
+  <span id="claude-state" class="muted"></span>
+  <span id="who" class="muted"></span>
+  <button id="logout" type="button">나가기</button>
+</header>
+<main id="layout">
+  <section class="mirror">
+    <div id="mirror-banner" class="banner" hidden>
+      <span>새 버전이 준비됐어요. 입력 중이라 자동으로 바꾸지 않았습니다.</span>
+      <button id="apply-now" type="button">지금 보기</button>
+    </div>
+    <iframe id="mirror" title="제품 화면 거울 (합성 자료)" src="about:blank"></iframe>
+  </section>
+  <div id="splitter" role="separator" aria-orientation="vertical" title="끌어서 폭 조절"></div>
+  <aside class="chat">
+    <nav class="tabs" role="tablist">
+      <button type="button" role="tab" data-mode="edit" class="on" aria-selected="true">바꾸기</button>
+      <button type="button" role="tab" data-mode="ask" aria-selected="false">물어보기</button>
+    </nav>
+    <div id="job-line" class="job-line" hidden></div>
+    <ol id="messages" aria-live="polite"></ol>
+    <form id="composer">
+      <textarea id="input" rows="3" placeholder="예) 판독문 입력칸을 더 크게 해 주세요"></textarea>
+      <button type="submit" id="send">보내기</button>
+    </form>
+    <footer class="actions">
+      <button id="undo" type="button" title="가장 최근에 적용한 변경을 되돌립니다(git revert)">되돌리기</button>
+      <button id="changes" type="button" title="적용한 변경 목록과 내용">기록</button>
+      <button id="status" type="button" title="개발 현황(status.json)">현황</button>
+      <button id="done" type="button" title="오늘 요청과 변경을 정리해 지휘자에게 넘깁니다">오늘 끝</button>
+      <details class="more">
+        <summary>더보기</summary>
+        <div class="menu">
+          <button id="digests" type="button">지난 인계 보기</button>
+          <button id="records" type="button">이견·넘긴 질문</button>
+          <button id="metrics" type="button">반영 시간 기록</button>
+          <button id="claude" type="button">Claude 상태</button>
+          <button id="reset-mock" type="button">합성 자료 처음으로</button>
+        </div>
+      </details>
+    </footer>
+  </aside>
+</main>
+<dialog id="panel">
+  <header><h2 id="panel-title"></h2><button type="button" id="panel-close">닫기</button></header>
+  <div id="panel-body"></div>
+</dialog>
+<script src="studio.js"></script>
+</body>
+</html>
