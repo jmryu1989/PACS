@@ -438,6 +438,8 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/dictation-host --cwd . --file worklist-v0/hpacs-lite/dictation.js --file worklist-v0/hpacs-lite/dictation-session.js --file worklist-v0/hpacs-lite/dictation-capture.js --file tests/dictation_host_test.cjs --file tests/module_session_harness.cjs --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/dictation_host_test.cjs
     - name: Compiled volume job command and volume mark boundary models
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/volume-api-models --cwd . --file tests/viewer_volume_job_test.cjs --file tests/viewer_volume_marks_test.cjs --file tests/study_query_scope_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_volume_job_test.cjs /tests/viewer_volume_marks_test.cjs /tests/study_query_scope_test.cjs
+    - name: Spaced original-frame measurements and verified SR readback
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/planar-measurements --cwd . --tree api/src --tree config/ohif --file tests/planar_measurement_test.cjs --file tests/mg_length_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src --entrypoint node kin-api:ci --test tests/planar_measurement_test.cjs tests/mg_length_test.cjs
     - name: Observe an isolated real restart loop
       run: python3 tests/ops_monitor_container_test.py
     - name: Production image migration, startup and refusal checks

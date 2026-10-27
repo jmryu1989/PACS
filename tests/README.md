@@ -3082,3 +3082,11 @@ SR/SEG/PDF receipt evidence or processor-agreement facts remain unavailable.
 Nginx/served OHIF and derived PDF/preview/thumbnail snapshots remain unconnected.
 
 REQ-MG-LENGTH-SCALE/FRAME/READBACK → RISK-MG-WRONG-SCALE/FRAME/BASIS → TEST-MG-LENGTH-BOUNDARY: `mg_length_test.cjs` checks DBT frame/shared geometry, Synthetic 2D and FFDM spacing precedence, detector/ERMF/source-plane labels, no-spacing refusal, saved baseline and SR frame/coordinates. PixelSpacing takes precedence; otherwise projection spacing is ImagerPixelSpacing / supplied ERMF or explicitly detector-based. Source: user/Minhoon 2026-10-26; DICOM PS3.3 §10.7. Real served public-sample draw/save/reopen/SR evidence is recorded separately; pure tests do not constitute physician acceptance.
+
+### Imaging scope after D1819/D1821
+
+`gateway/agent/test_agent.py` covers a 30 MiB object sent alone through the disk-backed STOW writer. `study_transfer_local_server_test.cjs` covers the real import parser, 30 MiB MG storage/readback and multiframe XA; `study_transfer_local_dom_test.py` covers automatic operation splitting for 101 selected files. `original_archive_test.cjs` covers ZIP64 planning and writing 65,536 entries; `KIN_ZIP64_ARCHIVE` optionally retains that archive for an independent standard-reader check.
+
+REQ-MANUAL-SPACED-MODALITIES → RISK-WRONG-SCALE-OR-UNITS → `planar_measurement_test.cjs`: MR/DX/US/XA/MG length, angle and planar area use source spacing, preserve the selected frame and measurement basis, and verify saved values before SR export. Non-CT area carries no HU statistics. MG Length retains PR #246's geometry and `mg_length_test.cjs`. Arbitrary reconstructed planes do not become fictitious original SOP/frame references.
+
+`cine_budget_test.cjs` and `cine_lifecycle_test.cjs` check current cache/heap headroom, cancellation and playback; `ct_sync_test.cjs` and `viewer_ct_sync_test.cjs` retain patient/FoR/orientation checks without modality/frame-count gates. `emr/e/contract_test.cjs` includes a complete 2401-frame DBT manifest. `viewer_caution_dom_test.py` serves the shipped layout and loader extensions over synthetic HTTP to check merged MG/MR/DX layout restoration and in-mode Retry. Native rendering, physical accuracy and sustained cine memory remain separate synthetic stack/PC validation.

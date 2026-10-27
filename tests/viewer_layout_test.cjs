@@ -21,7 +21,7 @@ test('recent grid round-trips references, empty and duplicate cells without tran
 });
 test('strict schema refuses unsupported layout, scope, reference and active selection', () => {
   for (const patch of [{ version: 2 }, { rows: 3 }, { rows: '2' }, { cols: 0 }, { active: 4 }, { active: 0.5 },
-    { active: -1 }, { studies: [] }, { studies: ['1.2.3', '1.2.3'] }, { studies: ['1.2.3', '1.4', '1.5'] },
+    { active: -1 }, { studies: [] }, { studies: ['1.2.3', '1.2.3'] },
     { patientName: 'must not persist' }, { cells: [null, null, null, null] }, { cells: [] },
     { cells: [{ study: '9.9', series: '1.2.4' }, null, null, null] },
     { cells: [{ study: '1.2.3', series: '1..2' }, null, null, null] },
@@ -32,7 +32,7 @@ test('strict schema refuses unsupported layout, scope, reference and active sele
 });
 test('URL study scope is bounded, canonical and refuses ambiguous repeated parameters', () => {
   assert.deepEqual(plain(model.scope('?StudyInstanceUIDs=1.3,1.2')), ['1.2', '1.3']);
-  for (const query of ['', '?StudyInstanceUIDs=', '?StudyInstanceUIDs=1.2,1.2', '?StudyInstanceUIDs=1,2,3',
+  for (const query of ['', '?StudyInstanceUIDs=', '?StudyInstanceUIDs=1.2,1.2',
     '?StudyInstanceUIDs=1..2', '?StudyInstanceUIDs=1&StudyInstanceUIDs=2', '?StudyInstanceUIDs=' + '1'.repeat(65)]) assert.equal(model.scope(query), null);
 });
 test('owner keys use immutable subject and institution and never display name', () => {

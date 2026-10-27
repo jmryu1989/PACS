@@ -15,6 +15,19 @@ function response(status, body, bad = false) {
 }
 
 function pageDefaults(sandbox, send = sandbox.fetch, source = config) {
+  // Keep supplied lightweight document doubles usable for module connection notices.
+  // Their visual/click behavior is exercised on the served browser boundary.
+  const document = sandbox.document;
+  if (document) {
+    document.getElementById ||= id => document.querySelector?.('#' + id) || null;
+    document.body ||= { children: [], append(...nodes) { this.children.push(...nodes); } };
+    const create = document.createElement?.bind(document);
+    if (create) document.createElement = (...args) => {
+      const element = create(...args);
+      element.append ||= function (...nodes) { (this.children ||= []).push(...nodes); };
+      return element;
+    };
+  }
   const window = sandbox.window || sandbox;
   sandbox.window = window;
   const gate = gates.create(); let announce;

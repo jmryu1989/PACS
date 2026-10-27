@@ -2,6 +2,7 @@
   "sources": [
     "branding-defaults.js",
     "session.js",
+    "tool-retry.js",
     "toolbar-labels.js",
     "branding.js",
     "stack-precision.js",
@@ -9,6 +10,7 @@
     "sr-provenance.js",
     "navigation.js",
     "mg-length.js",
+    "planar-geometry.js",
     "history.js",
     "layout-model.js",
     "clinician-context.js",

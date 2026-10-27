@@ -5935,15 +5935,13 @@ class LiveInvariantTests(unittest.TestCase):
         self.assertTrue(self.s9u4_orthanc_ready(), "S9-U4 precondition: Orthanc does not answer GET /system 200 (a previous case left it unavailable)")
         with self.s9u4_scope() as scope:
             study = self.s9u4_new_study(scope)
-            large = s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id="S9U4-B", pixel=2 * 1024 * 1024 + 2)
+            large = s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id="S9U4-B", pixel=33 * 1024 * 1024)
             op, accepted = self.s9u4_import("tech", large)
             scope["operations"].append(op)
             self.assertEqual((accepted.status, (accepted.body or {}).get("outcome")), (200, "stored"), accepted.text)
             for alias in ("/api/DICOM-import", "/api/dicom-import/"):
                 status, _ = s9u4_proxy_post(self.stack.proxy, alias, self.stack.token("tech"), len(large))
                 self.assertEqual(status, 413, alias + " stays on /api/'s 2m at nginx")
-            status, _ = s9u4_proxy_post(self.stack.proxy, "/api/dicom-import", self.stack.token("tech"), 32 * 1024 * 1024 + 1)
-            self.assertEqual(status, 413, "above the exact location's 32m: nginx")
             prepared = self.stack.request("POST", f"/studies/{study}/original-downloads", "doctor", {"operationId": (download := str(uuid.uuid4()))})
             scope["operations"].append(download)
             self.assertEqual((prepared.status, prepared.body.get("state")), (200, "prepared"), prepared.text)

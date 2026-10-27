@@ -10,8 +10,8 @@ window.kinRenderVolumeJobPrint=async function({snapshot,api,bytes,signal,check})
   const list=value=>Array.isArray(value)?value.map(Number):String(value).split('\\').map(Number);
   const near=(a,b)=>a.length===b.length&&a.every((n,i)=>Number.isFinite(n)&&Math.abs(n-b[i])<.001);
   const read=async path=>JSON.parse(new TextDecoder().decode(await bytes(path,signal,524288,budget)));
-  const budget={bytes:0},slices=new Array(reference.sops.length);let next=0;
-  if(slices.length<2)fail();if(slices.length>256)throw Error('출력 CT 원본은 최대 256장까지 지원합니다.');
+  const budget={bytes:0,limit:core.cache.getBytesAvailable()},slices=new Array(reference.sops.length);let next=0;
+  if(slices.length<2)fail();
   await Promise.all(Array.from({length:Math.min(4,slices.length)},async()=>{
     while(next<slices.length){
       const index=next++,sop=reference.sops[index];check();
@@ -24,8 +24,12 @@ window.kinRenderVolumeJobPrint=async function({snapshot,api,bytes,signal,check})
         tags.SOPClassUID!=='1.2.840.10008.5.1.4.1.1.2'||tags.Modality!=='CT'||Number(tags.NumberOfFrames??1)!==1||Number(tags.SamplesPerPixel)!==1||tags.PhotometricInterpretation!=='MONOCHROME2'||
         ![rows,columns].every(n=>Number.isInteger(n)&&n>=2)||
         Number(tags.BitsAllocated)!==16||!Number.isInteger(Number(tags.BitsStored))||Number(tags.BitsStored)<1||Number(tags.BitsStored)>16||Number(tags.HighBit)!==Number(tags.BitsStored)-1||![0,1].includes(Number(tags.PixelRepresentation)))fail();
-      if(rows>8192||columns>8192||rows*columns*slices.length>16777216)throw Error('출력 CT 원본 크기가 한도를 초과했습니다(한 변 8192, 전체 16,777,216 화소).');
-      const raw=await bytes(path+'/frames/0/'+(signed?'image-int16':'image-uint16'),signal,8388608,budget,'image/x-portable-arbitrarymap');
+      // Private output needs Float32 CPU pixels and the volume texture. Check the
+      // viewer's current capacity before reading all source pixels, not a slice quota.
+      const volumeBytes=rows*columns*slices.length*Float32Array.BYTES_PER_ELEMENT;
+      if(!Number.isSafeInteger(volumeBytes))fail();
+      if(core.cache.getBytesAvailable()<volumeBytes*2)throw Error('출력용 CT 메모리가 부족합니다. 다른 검사를 닫고 다시 확인하세요.');
+      const raw=await bytes(path+'/frames/0/'+(signed?'image-int16':'image-uint16'),signal,rows*columns*2+512,budget,'image/x-portable-arbitrarymap');
       if((await read(path+'/attachments/dicom/info')).UncompressedMD5?.toLowerCase()!==digest)throw Error('출력 준비 중 원본이 변경되었습니다.');check();
       const header=/^P7\nWIDTH (\d+)\nHEIGHT (\d+)\nDEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\nENDHDR\n/.exec(new TextDecoder().decode(raw.subarray(0,512)));
       if(!header||Number(header[1])!==columns||Number(header[2])!==rows||raw.length!==header[0].length+rows*columns*2)fail();
