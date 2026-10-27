@@ -11,11 +11,11 @@ window.KinConsultations = function(app) {
       <p id="co-count"></p><div id="co-list"></div><button id="co-more" type="button" hidden>Load More</button>
       <button id="co-filter" type="button">Show These Requests in Worklist</button></section>
     <section aria-label="Consultation details"><h3 id="co-heading">Select a Request</h3><p id="co-study"></p>
-      <div id="co-create" hidden><label>Consultant <select id="co-reader"></select></label><label>Reason <textarea id="co-reason" maxlength="2000" rows="5"></textarea></label>
+      <div id="co-create" hidden><label>Consultant <select id="co-reader"></select></label><label>Reason <textarea id="co-reason" rows="5"></textarea></label>
         <button id="co-send" type="button">Send Request</button></div>
       <div id="co-detail" hidden><p id="co-participants"></p><p id="co-current-state"></p><h4>Request Reason</h4><pre id="co-original"></pre>
         <h4>Reply / Cancellation Reason</h4><pre id="co-answer"></pre><button id="co-open-study" type="button">Open Study</button>
-        <label>Reply or Cancellation Reason <textarea id="co-note" maxlength="2000" rows="5"></textarea></label>
+        <label>Reply or Cancellation Reason <textarea id="co-note" rows="5"></textarea></label>
         <div class="consultation-actions"><button id="co-accept" type="button">Accept</button><button id="co-complete" type="button">Complete with Reply</button><button id="co-cancel-request" type="button">Cancel Request</button></div></div>
     </section></div><p id="co-status" role="status" aria-live="polite"></p>
     <footer><button id="co-retry" type="button" hidden>Retry Same Request</button><button id="co-close" type="button">Close</button></footer>`;
@@ -127,13 +127,13 @@ window.KinConsultations = function(app) {
   }
   $('send').onclick=()=>{
     if(busy||pending||!same()||!createUid)return;
-    if(!$('reader').value||!$('reason').value.trim()){$('status').textContent='수신자와 의뢰 사유를 입력하세요.';return;}
+    if(!$('reader').value){$('status').textContent='수신자를 선택하세요. 사유는 선택입니다.';return;}
     const id=crypto.randomUUID();pending={id,uid:createUid,path:'/studies/'+encodeURIComponent(createUid)+'/consultations',
       body:{expectedOwner:owner,requestId:id,recipientSub:$('reader').value,reason:$('reason').value}};send();
   };
   for(const [control,action] of [['accept','accept'],['complete','complete'],['cancel-request','cancel']])$(control).onclick=()=>{
     if(busy||pending||!same()||!row)return;const note=action==='accept'?'':$('note').value;
-    if(action!=='accept'&&!note.trim()){$('status').textContent='답변 또는 취소 사유를 입력하세요.';return;}
+    if(action==='complete'&&!note.trim()){$('status').textContent='답변 또는 취소 사유를 입력하세요.';return;}
     pending={id:row.id,uid:row.studyUid,path:'/consultations/'+encodeURIComponent(row.id),body:{expectedOwner:owner,requestId:crypto.randomUUID(),revision:row.revision,action,note}};send();
   };
   function close(force=false) {

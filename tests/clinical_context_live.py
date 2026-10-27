@@ -64,7 +64,7 @@ DENIED = FIXTURES["denied_code"]
 HALLYM, KIN = "한림병원", "KIN 판독센터"
 # Contract S7-U4p uxr-trace.json (docs fc7680b): the closed response keys and the forbidden key names (sections 3.1, 9.1).
 RESPONSE_KEYS = {"kind", "recordId", "version", "author", "recordedAt", "observedAt", "state", "reason", "sourceLabel",
-                 "truncated", "items", "access", "institutionName", "techNoteVersion", "schema", "uid", "patientKey", "anchor",
+                 "nextCursor", "truncated", "items", "access", "institutionName", "techNoteVersion", "schema", "uid", "patientKey", "anchor",
                  "identity", "conflict", "birth", "sex", "sections", "priorReports", "history", "requestTags", "checked",
                  "techNote", "date", "modalities", "description", "studyUid", "study", "report", "action", "findings",
                  "conclusion", "recommendation", "provenance", "accession", "reading", "rs", "signed", "reportVersion", "tag",

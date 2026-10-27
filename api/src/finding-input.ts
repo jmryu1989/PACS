@@ -4,16 +4,8 @@ import { canonical, viewerJson, viewerUuid } from './viewer-input';
 
 const invalid = (message = '소견 입력이 올바르지 않습니다'): never => { throw new BadRequestException(message); };
 
-// Per-study lifetime bound enforced under the StudyState write lock (never recovered by hiding):
-// min(revisions x snapshot, bytes) = min(4096 x 65536, 16 MiB) = 16 MiB, the viewer history order.
-// A snapshot holds at most title 200 + text 4000 code points and 8 copied sources whose labels are
-// bounded by the viewer's own 1000 code points; 3- and 4-byte UTF-8 maxima fit, only control-character
-// saturated text can reach the 64 KiB cap and is then refused, not truncated.
-// Version 2 adds up to 1000 code points of characteristics: 8 worst printable item sources then reach
-// 60,640 bytes in jsonb spacing, and a saved job copy is smaller than an item copy. The 64 KiB cap stays
-// authoritative and a larger snapshot is refused, never truncated.
-export const FINDING_LIMITS = Object.freeze({ findings: 256, revisions: 4096, bytes: 16 * 1024 * 1024,
-  snapshot: 65536, history: 1000, sources: 8, title: 200, text: 4000 });
+// Bound individual snapshots, never the number of retained versions or linked sources.
+export const FINDING_LIMITS = Object.freeze({ snapshot: 65536, title: 200, text: 4000 });
 export const FINDING_CHARACTERISTICS = 1000;
 // Saved Comparison Job snapshot versions a finding may link, each with its validator, restorer and hosted
 // suite. A later version stays unlinkable until it is added here and to the viewer's allowlist.
@@ -77,7 +69,6 @@ export function findingCommand(raw: Buffer, create: boolean): FindingCommand {
   const action = create ? 'create' : body.action;
   if (!['create', 'edit', 'hide', 'restore'].includes(action) || (!create && action === 'create')) invalid();
   const reason = text(body.reason === undefined ? '' : body.reason, 1000);
-  if ((action === 'hide' || action === 'restore') ? !reason.trim() : reason !== '') invalid('숨김/복원에는 사유가 필요합니다');
   const item = body.item;
   const version: 1 | 2 = item && typeof item === 'object' && !Array.isArray(item) && item.schemaVersion === 2 ? 2 : 1;
   if (version === 2) object(item, ['schemaVersion', 'title', 'text', 'characteristics', 'sources'], ['primary']);
@@ -85,7 +76,7 @@ export function findingCommand(raw: Buffer, create: boolean): FindingCommand {
     object(item, ['schemaVersion', 'title', 'text', 'sources'], ['primary']);
     if (item.schemaVersion !== 1) invalid();
   }
-  if (!Array.isArray(item.sources) || item.sources.length < 1 || item.sources.length > FINDING_LIMITS.sources) invalid('소견에는 1~8개의 저장 표식을 연결합니다');
+  if (!Array.isArray(item.sources) || item.sources.length < 1) invalid('소견에는 저장 표식을 하나 이상 연결합니다');
   const seen = new Set<string>();
   const sources: FindingRef[] = item.sources.map((source: any) => reference(source, version, seen));
   const primary = item.primary === undefined ? 0 : item.primary;

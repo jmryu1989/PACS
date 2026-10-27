@@ -92,7 +92,7 @@ export class ViewerJobService {
   }
   private async annotations(tx: any, snapshot: any, sources: Map<string, any>) {
     const refs = snapshot.annotations;
-    if (!Array.isArray(refs) || refs.length > 64 || new Set(refs.map(r => r.id)).size !== refs.length)
+    if (!Array.isArray(refs) || new Set(refs.map(r => r.id)).size !== refs.length)
       throw new ConflictException('저장 주석 이력을 확인할 수 없습니다');
     if (!refs.length) return [];
     const revisions = await tx.viewerRevision.findMany({
@@ -100,7 +100,6 @@ export class ViewerJobService {
       include: { item: { select: { studyUid: true, authorActor: true } } },
     });
     const byRef = new Map(revisions.map(r => [r.itemId + '/' + r.revision, r]));
-    let size = 2;
     const result = refs.map(ref => {
       const revision: any = byRef.get(ref.id + '/' + ref.revision), item = revision?.snapshot;
       const cell = snapshot.cells.find(c => c && c.study === ref.study && c.sop === item?.sopUid && c.series === item?.seriesUid && c.frame === item?.frame);
@@ -110,8 +109,6 @@ export class ViewerJobService {
       if (isManualMeasurement(item.kind) && item.sourceDigest !== cell.sourceDigest)
         throw new ConflictException(`주석 ${ref.id} (r${ref.revision})의 측정 원본이 달라졌습니다. 해당 영상을 비교에서 제외하거나 영상만 저장하세요. 주석을 포함하려면 저장 당시 원본이 복구되어야 합니다`);
       const expanded = { ...ref, authorActor: revision.item.authorActor, at: revision.at.toISOString(), item };
-      size += Buffer.byteLength(canonical(expanded)) + (size === 2 ? 0 : 1);
-      if (size > 262144) throw new ConflictException('비교 작업 주석 용량 한도를 초과했습니다. 주석이 더 적은 영상으로 구성하거나 영상만 저장하세요');
       return expanded;
     });
     return result;
@@ -123,9 +120,8 @@ export class ViewerJobService {
       AND: [{ OR: snapshot.cells.filter(Boolean).map(c => ({ studyUid: c.study, AND: [
         { snapshot: { path: ['sopUid'], equals: c.sop } }, { snapshot: { path: ['seriesUid'], equals: c.series } },
         { snapshot: { path: ['frame'], equals: c.frame } }] })) },
-        { OR: annotationKinds.map(kind => ({ snapshot: { path: ['kind'], equals: kind } })) }] }, orderBy: { id: 'asc' }, take: 65,
+        { OR: annotationKinds.map(kind => ({ snapshot: { path: ['kind'], equals: kind } })) }] }, orderBy: { id: 'asc' },
       select: { id: true, studyUid: true, revision: true } });
-    if (heads.length > 64) throw new ConflictException('비교 작업에는 주석64개까지 함께 저장할 수 있습니다');
     const frozen = { ...snapshot, annotations: heads.map(h => ({ id: h.id, study: h.studyUid, revision: h.revision })) };
     await this.annotations(tx, frozen, sources);
     return frozen;
@@ -143,7 +139,7 @@ export class ViewerJobService {
     if (Object.keys(q).some(k => !['mine', 'includeHidden'].includes(k)) || Object.values(q).some(v => !['true', 'false'].includes(v as string))) throw new BadRequestException('목록 조건이 올바르지 않습니다');
     return this.transaction(async tx => {
       const [parent] = await this.parents(tx, [uid], c);
-      const jobs = await tx.viewerJob.findMany({ where: { studyUid: uid, ...(q.mine === 'true' ? { authorSub: c.sub } : {}), ...(q.includeHidden === 'true' ? {} : { hidden: false }) }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 200 });
+      const jobs = await tx.viewerJob.findMany({ where: { studyUid: uid, ...(q.mine === 'true' ? { authorSub: c.sub } : {}), ...(q.includeHidden === 'true' ? {} : { hidden: false }) }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] });
       const refs = [...new Set(jobs.flatMap(j => j.studies))];
       const parents = await tx.studyState.findMany({ where: { uid: { in: refs } } });
       const byUid = new Map(parents.map(s => [s.uid, s]));
@@ -223,7 +219,6 @@ export class ViewerJobService {
         return summary(replay);
       }
       if (known) conflict();
-      if (await tx.viewerJob.count({ where: { studyUid: uid } }) >= 200) throw new ConflictException('검사별 비교 작업 저장 한도에 도달했습니다');
       const frozen = snapshot.version === 3 ? await this.freezeAnnotations(tx, snapshot, sources) : snapshot;
       const now = new Date();
       const j = await tx.viewerJob.create({ data: { id: b.id, studyUid: uid, authorSub: c.sub, authorActor: c.actor, studies: b.snapshot.studies,
@@ -246,8 +241,7 @@ export class ViewerJobService {
       this.sameInstitution(await this.parents(tx, head.studies, c, true));
       const j = await tx.viewerJob.findUnique({ where: { id } });
       if (!j || j.studyUid !== uid || j.authorSub !== c.sub) deny();
-      if (j.revision !== b.expectedRevision || j.revision >= 1000) conflict();
-      if (j.hidden !== b.hidden ? !b.reason.trim() : b.reason !== '') throw new BadRequestException('숨김/복원에는 사유가 필요합니다');
+      if (j.revision !== b.expectedRevision) conflict();
       const next = await tx.viewerJob.update({ where: { id }, data: { title: b.title, description: b.description, hidden: b.hidden, revision: { increment: 1 }, updatedAt: new Date() } });
       await this.history(tx, next, b.reason, c); return summary(next);
     });

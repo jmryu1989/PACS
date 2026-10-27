@@ -242,10 +242,7 @@ export class ViewerService {
       // orphan budget if any subsequent history/audit/request write fails.
       await tx.viewerStorageBudget.upsert({ where: { studyUid: uid }, update: {},
         create: { studyUid: uid, itemCount: 0, revisionCount: 0, payloadBytes: 0 } });
-      const budgets = await tx.$queryRaw<any[]>`SELECT * FROM "ViewerStorageBudget" WHERE "studyUid" = ${uid} FOR UPDATE`;
-      const budget = budgets[0], added = head ? 0 : 1;
-      if (budget.itemCount + added > VIEWER_LIMITS.items || budget.revisionCount + 1 > VIEWER_LIMITS.revisions ||
-          budget.payloadBytes + bytes > VIEWER_LIMITS.bytes) storageLimit();
+      const added = head ? 0 : 1;
       const now = new Date(), revision = head ? head.revision + 1 : 1;
       // Prisma's JSON number serialization can differ from JSON.stringify for
       // fractional world coordinates. Use the exact JSON counted above for both

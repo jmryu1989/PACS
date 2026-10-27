@@ -237,7 +237,7 @@ test('the union carries the head, removes only what was named, and keeps head by
 });
 
 test('the insert shape refuses what it cannot bound and silently drops what the server must write', () => {
-  for (const bad of [{ field: 'notes' }, { field: 'findings', findingId: '' }, { sourceIndex: 8 }, { sourceIndex: -1 },
+  for (const bad of [{ field: 'notes' }, { field: 'findings', findingId: '' }, { sourceIndex: -1 },
     { findingRevision: 0 }, { insertedText: '   ' }, { insertedText: '' }, { expectedLinkState: '' }])
     assert.throws(() => citation.citationInsertInput({ ...INSERT, ...bad }), citation.CitationInputError, JSON.stringify(bad));
   assert.throws(() => citation.citationInsertInput({ ...INSERT, insertedText: 'ㄱ'.repeat(1400) }), citation.CitationInputError);
@@ -303,7 +303,7 @@ test('every insertion refusal answers before anything is written', async () => {
     ['a sentence that is not in the field', { insertedText: '없는 줄' }, 409, READABLE],
     ['a fragment of a line', { insertedText: '결절' }, 409, READABLE],
     ['the wrong field', { field: 'conclusion' }, 409, READABLE],
-    ['an out of range source index', { sourceIndex: 8 }, 400, READABLE],
+    ['an out of range source index', { sourceIndex: 8 }, 409, READABLE],
     ['an unknown field name', { field: 'notes' }, 400, READABLE],
     ['a blank sentence', { insertedText: ' \n ' }, 400, READABLE],
   ];

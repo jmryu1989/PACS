@@ -106,7 +106,7 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261015013945_import_operation/migration.sql',
               'api/prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql',
               'api/prisma/migrations/20261023180000_emr_pg_ledger/migration.sql', 'api/prisma/migrations/20261023200000_emr_server_signing/migration.sql', 'api/prisma/migrations/20261024120000_emr_d_online/migration.sql', 'api/prisma/migrations/20261025000000_emr_e_online/migration.sql', 'api/prisma/migrations/20261025120000_access_review/migration.sql', 'api/prisma/migrations/20261025120000_auth_flow_subtraction/migration.sql', 'api/prisma/migrations/20261025150000_emr_f_link/migration.sql', 'api/prisma/migrations/20261026120000_assignment_access_stream/migration.sql', 'api/prisma/migrations/20261026180000_emr_signing_key_admin/migration.sql', 'api/prisma/migrations/20261026210000_emr_e_source_manifest/migration.sql', 'api/prisma/migrations/20261027090000_emr_e_study_delivery/migration.sql', 'api/prisma/migrations/20261027150000_emr_e_observation_delivery/migration.sql',
-              'api/prisma/migrations/20261027180000_emr_image_object_digest/migration.sql']
+              'api/prisma/migrations/20261027180000_emr_image_object_digest/migration.sql', 'api/prisma/migrations/20261027230000_caution_app_limits/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and

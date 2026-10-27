@@ -383,7 +383,7 @@ test('draftProblem refuses empty, duplicate, overlong and unlinked drafts', () =
   assert.equal(model.draftProblem({ ...ok, title: '', text: ' ' }), '제목 또는 본문을 입력하세요.');
   assert.equal(model.draftProblem({ ...ok, sources: [] }), '저장한 표식을 하나 이상 연결하세요.');
   assert.equal(model.draftProblem({ ...ok, sources: [ok.sources[0], ok.sources[0]] }), '같은 표식을 두 번 연결할 수 없습니다.');
-  assert.equal(model.draftProblem({ ...ok, sources: Array.from({ length: 9 }, (_, i) => ({ itemId: ITEM.slice(0, -1) + i, revision: 1 })) }), '표식은 최대 8개까지 연결할 수 있습니다.');
+  assert.equal(model.draftProblem({ ...ok, sources: Array.from({ length: 9 }, (_, i) => ({ itemId: ITEM.slice(0, -1) + i, revision: 1 })) }), null);
   assert.equal(model.draftProblem({ ...ok, sources: [{ itemId: 'x', revision: 1 }] }), '연결한 표식의 저장 정보를 확인하세요.');
   assert.equal(model.draftProblem({ ...ok, title: '😀'.repeat(201) }), '제목은 200자 이하여야 합니다.');
   assert.equal(model.draftProblem({ ...ok, title: '😀'.repeat(200) }), null);
