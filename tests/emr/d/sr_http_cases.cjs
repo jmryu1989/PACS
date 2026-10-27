@@ -172,7 +172,7 @@ module.exports = async ({ db, orthanc, send, uid, members, records }) => {
   orthanc.studyIdentityResources = async id => {
     if (id === uid) lockFree.push(await free(db.$queryRaw`SELECT uid FROM "StudyState" WHERE uid=${uid} FOR UPDATE NOWAIT`) &&
       await free(db.$queryRaw`SELECT id FROM "ManualSr" WHERE id=${observedSr.id}::uuid FOR UPDATE NOWAIT`));
-    return identities(id);
+    return identities.call(orthanc, id);
   };
   try { assert.equal((await store(observedSr)).stored, true); } finally { orthanc.studyIdentityResources = identities; }
   assert.ok(lockFree.length > 0 && lockFree.every(Boolean), 'no Orthanc identity read while the SR store holds its locks');
@@ -181,7 +181,7 @@ module.exports = async ({ db, orthanc, send, uid, members, records }) => {
   // that signs nothing and records no intent.
   const moved = await prepare(), movedUploads = uploads;
   orthanc.studyIdentityResources = async id => id === uid
-    ? [{ '0020000D': { Value: [uid] }, '00100020': { Value: ['synthetic:other-patient'] } }] : identities(id);
+    ? [{ '0020000D': { Value: [uid] }, '00100020': { Value: ['synthetic:other-patient'] } }] : identities.call(orthanc, id);
   try { assert.equal((await store(moved, 409)).code, 'ManualSrPatientChanged'); } finally { orthanc.studyIdentityResources = identities; }
   assert.equal((await versions(moved.id)).length, 0);
   assert.equal((await db.manualSr.findUnique({ where: { id: moved.id } })).attemptedAt, null);
