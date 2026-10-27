@@ -42,7 +42,7 @@ def source(name):
 # The contract's sentences (section 3), one per row. A Korean particle after a version number follows how the number is
 # read: written out per version (v1 일, v2 이, v3 삼, v4 사), not computed, so a wrong rule in the screen cannot pass.
 RO = {1: 'v1로', 2: 'v2로', 3: 'v3으로', 4: 'v4로'}
-GWA = {1: 'v1과', 2: 'v2와', 3: 'v3과'}
+GWA = {1: 'v1과', 2: 'v2와', 3: 'v3과', 4: 'v4와'}
 EUL = {1: 'v1을', 2: 'v2를', 3: 'v3을'}
 def opened(v): return f'마지막으로 확인한 메모는 v{v}입니다.' if v else '마지막으로 확인한 메모가 없습니다.'
 DIFFERS, SAME = '현재 입력은 마지막 확인본과 다릅니다.', '현재 입력은 마지막 확인본과 같습니다.'
@@ -100,7 +100,7 @@ class NoteApi:
                     return (200, note) if same else (400, None)
         if body['baseVersion'] != len(self.notes):
             return 409, None
-        if self.notes and (not reason or self.notes[-1]['text'] == body['text']):
+        if self.notes and self.notes[-1]['text'] == body['text']:
             return 400, None
         if not self.notes and not body['text'].strip():
             return 400, None
@@ -340,31 +340,25 @@ class Vectors:
         self.assertEqual((body['baseVersion'], body['text'], body['reason']), (1, 'SYN v2', '  SYN dose corrected  '))
         self.assertRegex(body['attemptId'], UUID4)
         self.assertEqual(self.api.notes[-1]['attemptId'], body['attemptId'])
-        # The receipt changes no input: text and the reason as typed stay; the state is clean.
-        expect(self.note).to_have_value('SYN v2'); expect(self.reason).to_have_value('  SYN dose corrected  ')
+        # The receipt keeps the note and clears the reason so it cannot be reused silently.
+        expect(self.note).to_have_value('SYN v2'); expect(self.reason).to_have_value('')
         self.assertEqual(self.state(), {'dirty': False, 'busy': False, 'unknown': False})
         self.assertEqual(self.api.calls.count('POST'), 1)
         self.page.keyboard.press('Escape'); self.assertEqual(self.dialogs, [])
 
-    def test_T04_an_edit_needs_its_own_reason_and_a_used_reason_is_used(self):
+    def test_T04_reason_is_optional_and_is_not_reused_by_the_next_edit(self):
         self.opened_with('SYN v1')
-        self.edit('SYN v2')
-        self.save()
-        expect(self.status).to_have_text(NEED_REASON)
-        expect(self.reason).to_be_focused()
-        self.assertEqual(self.api.posts, [])
-        self.reason.fill('SYN R1'); self.save()
+        self.edit('SYN v2'); self.save()
         expect(self.status).to_have_text(saved(2))
-        # The reason of a saved attempt is used: the next edit needs a reason typed for it (the box keeps the text).
-        self.edit('SYN v3'); self.save()
-        expect(self.status).to_have_text('앞선 입력은 v2로 저장되었으며 ' + NEED_REASON)
-        expect(self.reason).to_have_value('SYN R1')
-        self.assertEqual(len(self.api.posts), 1)
-        # Typing the same words again is a new reason for this edit.
-        self.reason.fill(''); self.reason.fill('SYN R1'); self.save()
+        self.edit('SYN v3', 'SYN R1'); self.save()
         expect(self.status).to_have_text(saved(3))
-        self.assertEqual(self.posts_of('reason'), ['SYN R1', 'SYN R1'])
-        self.assertNotEqual(*self.posts_of('attemptId'))
+        expect(self.reason).to_have_value('')
+        self.edit('SYN v4'); self.save()
+        expect(self.status).to_have_text(saved(4))
+        self.edit('SYN v5', 'SYN R1'); self.save()
+        expect(self.status).to_have_text('입력이 v5로 저장되었습니다.')
+        self.assertEqual(self.posts_of('reason'), ['', 'SYN R1', '', 'SYN R1'])
+        self.assertEqual(len(set(self.posts_of('attemptId'))), 4)
 
     def test_T04_an_earlier_save_is_said_even_after_a_later_other_save(self):
         self.lost_first_write('abort-commit')
@@ -372,20 +366,19 @@ class Vectors:
         self.reload()
         expect(self.status).to_have_text(mine_then_other(2, 3))
         self.note.fill('SYN v4 mine'); self.save()
-        expect(self.status).to_have_text(f'앞선 입력은 {RO[2]} 저장되었으며 ' + NEED_REASON)
-        self.assertEqual(len(self.api.posts), 1)
+        expect(self.status).to_have_text(saved(4))
+        self.assertEqual(self.posts_of('reason'), ['SYN R1', ''])
 
     def test_T04_a_reason_retyped_before_the_resend_is_used_by_it(self):
-        # The same words typed again before the resend of the same request: that input is carried by the resend and used
-        # up when it is saved, so the next edit still needs a reason typed for it.
+        # A resend carries the same reason; after its receipt the next edit starts with no reason.
         self.lost_first_write('abort')
         self.reason.fill(''); self.reason.fill('SYN R1')
         self.save()
         expect(self.status).to_have_text(saved(2))
         self.assertEqual(len(set(self.posts_of('attemptId'))), 1)
         self.note.fill('SYN v3 mine'); self.save()
-        expect(self.status).to_have_text(f'앞선 입력은 {RO[2]} 저장되었으며 ' + NEED_REASON)
-        self.assertEqual(len(self.api.posts), 2)
+        expect(self.status).to_have_text(saved(3))
+        self.assertEqual(self.posts_of('reason'), ['SYN R1', 'SYN R1', ''])
 
     def test_T05_a_blank_first_note_is_not_sent(self):
         self.open()
@@ -571,12 +564,12 @@ class Vectors:
         self.lost_first_write('abort-commit')
         self.reload()
         expect(self.status).to_have_text(earlier(2))
-        expect(self.note).to_have_value('SYN v2 mine'); expect(self.reason).to_have_value('SYN R1')
+        expect(self.note).to_have_value('SYN v2 mine'); expect(self.reason).to_have_value('')
         self.assertEqual(self.state(), {'dirty': False, 'busy': False, 'unknown': False})
-        # Its reason is used: a further edit needs a new one.
+        # A later edit does not repeat the settled attempt's reason.
         self.edit('SYN v3'); self.save()
-        expect(self.status).to_have_text('앞선 입력은 v2로 저장되었으며 ' + NEED_REASON)
-        self.assertEqual(len(self.api.posts), 1)
+        expect(self.status).to_have_text(saved(3))
+        self.assertEqual(self.posts_of('reason'), ['SYN R1', ''])
 
     def test_T15_a_different_reason_after_the_settled_attempt_is_said_unsaved(self):
         self.lost_first_write('abort-commit')
@@ -609,8 +602,7 @@ class Vectors:
         self.assertEqual(self.state(), {'dirty': True, 'busy': False, 'unknown': False})
         self.assertEqual(self.api.calls.count('HISTORY'), 1)
         self.note.fill('SYN v3 theirs')
-        self.assertTrue(self.state()['dirty'], 'a reason typed for this edit that differs from v3''s is still input')
-        self.reason.fill('')
+        expect(self.reason).to_have_value('')
         self.assertFalse(self.state()['dirty'], 'input equal to the last confirmed version is clean')
 
     def test_T16_matching_id_without_ownership_is_not_my_save(self):
@@ -633,13 +625,12 @@ class Vectors:
         self.assertEqual(self.posts_of('baseVersion'), [1, 2])
         self.assertEqual(self.state(), {'dirty': False, 'busy': False, 'unknown': False})
 
-    def test_T18_without_a_new_reason_the_followup_waits(self):
+    def test_T18_without_a_new_reason_the_followup_saves_without_a_reason(self):
         self.lost_first_write('abort-commit')
         self.note.fill('SYN v3 mine'); self.save()
-        expect(self.status).to_have_text(followup_reason(2))
-        expect(self.reason).to_be_focused()
-        self.assertEqual(len(self.api.posts), 1)
-        self.assertTrue(self.state()['dirty'])
+        expect(self.status).to_have_text(saved(3))
+        self.assertEqual(self.posts_of('reason'), ['SYN R1', ''])
+        self.assertFalse(self.state()['dirty'])
 
     def test_T18_another_save_found_stops_the_followup(self):
         self.lost_first_write('abort-commit')
@@ -761,7 +752,7 @@ class Vectors:
         self.press('History'); self.idle()
         expect(self.status).to_have_text(HISTORY)
         expect(self.page.locator('#tech-note-meta')).to_contain_text('v2 ·')
-        expect(self.note).to_have_value('SYN v2 mine'); expect(self.reason).to_have_value('SYN R1')
+        expect(self.note).to_have_value('SYN v2 mine'); expect(self.reason).to_have_value('')
         self.assertEqual(self.state(), {'dirty': False, 'busy': False, 'unknown': False})
         self.save(); expect(self.status).to_have_text(unchanged(2))
         self.assertEqual(len(self.api.posts), 1)
@@ -773,7 +764,7 @@ class Vectors:
         self.api.foreign('SYN v3 theirs')
         self.press('History'); self.idle()
         expect(self.page.locator('#tech-note-meta')).to_contain_text('v3 ·')
-        expect(self.note).to_have_value('SYN v2 mine'); expect(self.reason).to_have_value('SYN R1')
+        expect(self.note).to_have_value('SYN v2 mine'); expect(self.reason).to_have_value('')
         self.assertEqual(self.state(), {'dirty': True, 'busy': False, 'unknown': False})
         self.answers.append(False); self.press('Close')
         self.assertEqual(self.dialogs, [CLOSE_Q])
@@ -782,11 +773,12 @@ class Vectors:
         self.api.post_modes = [409]; self.reason.fill('SYN R2'); self.save()
         expect(self.status).to_have_text(other_found(3))
         self.reason.fill(''); self.save()
-        expect(self.status).to_have_text('앞선 입력은 v2로 저장되었으며 이번 수정의 사유를 입력하세요.')
-        self.note.fill('SYN v3 theirs'); self.save()
-        expect(self.status).to_have_text(unchanged(3))
+        expect(self.status).to_have_text(saved(4))
+        self.assertEqual(self.posts_of('reason'), ['SYN R1', 'SYN R2', ''])
+        self.save()
+        expect(self.status).to_have_text(unchanged(4))
         self.assertFalse(self.state()['dirty'])
-        self.assertEqual(self.posts_of('baseVersion'), [1, 3])
+        self.assertEqual(self.posts_of('baseVersion'), [1, 3, 3])
 
     def test_T23_older_history_cannot_move_last_confirmed_back(self):
         self.opened_with('SYN v1')
@@ -794,7 +786,7 @@ class Vectors:
         self.api.history_modes = ['missing']  # first page is stale/incomplete: only v1 is returned
         self.press('History'); self.idle()
         expect(self.page.locator('#tech-note-meta')).to_contain_text('v2 ·')
-        expect(self.note).to_have_value('SYN v2 mine'); expect(self.reason).to_have_value('SYN R1')
+        expect(self.note).to_have_value('SYN v2 mine'); expect(self.reason).to_have_value('')
         self.assertFalse(self.state()['dirty'])
         self.save(); expect(self.status).to_have_text(unchanged(2))
         self.assertEqual(len(self.api.posts), 1)

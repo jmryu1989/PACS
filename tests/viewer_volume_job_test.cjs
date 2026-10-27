@@ -509,8 +509,8 @@ test('a job beyond the former 200 count keeps its snapshot and a later revision 
  assert.equal(revised.expectedRevision,1001);
 });
 
-test('saved comparison retains and restores every annotation past 64 and 65',async()=>{
- const annotations=Array.from({length:66},(_,n)=>({itemId:`00000000-0000-4000-8000-${String(n+1).padStart(12,'0')}`,revision:1,at:new Date(0),
+test('saved comparison retains annotations beyond the former count and storage caps',async()=>{
+ const annotations=Array.from({length:200},(_,n)=>({itemId:`00000000-0000-4000-8000-${String(n+1).padStart(12,'0')}`,revision:1,at:new Date(0),
    item:{studyUid:volume.study,authorActor:'SYN'},snapshot:{schemaVersion:1,kind:'arrow',seriesUid:volume.series,sopUid:volume.sops[0],frame:1,
    frameOfReferenceUid:'2.25.6',label:'SYN',points:[[0,0,0],[1,1,0]]}}));
  const {db,jobs}=jobService({annotations});
@@ -519,9 +519,9 @@ test('saved comparison retains and restores every annotation past 64 and 65',asy
  const s={version:3,studies:[volume.study],rows:1,cols:1,active:0,cells:[frame]};
  await jobs.create(volume.study,jobBody(s),caller);
  const restored=await jobs.get(volume.study,jobId,caller);
- assert.equal(restored.annotations.length,66);
+ assert.equal(restored.annotations.length,200);
  assert.deepEqual(restored.annotations.map(a=>a.id),annotations.map(a=>a.itemId));
- assert.equal(JSON.parse(db.store.jobs.get(jobId).snapshot).annotations.length,66);
+ assert.equal(JSON.parse(db.store.jobs.get(jobId).snapshot).annotations.length,200);
 });
 test('saved comparison listing includes the 201st job',async()=>{
  const {db,jobs}=jobService();

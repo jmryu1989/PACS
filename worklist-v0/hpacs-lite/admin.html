@@ -306,7 +306,7 @@
           <label><input type="checkbox" name="role" value="admin">관리자</label>
           <label><input type="checkbox" name="role" value="clinician">임상의</label>
         </fieldset>
-        <label class="full check"><input type="checkbox" name="verificationOverride">대면 확인</label>
+        <p class="full">대면 확인 후 승인합니다. 이메일 검증 여부는 승인 기록에 남습니다.</p>
       </div>
       <div class="dialog-actions">
         <button type="button" data-close="membership-dialog">Cancel</button>
@@ -524,7 +524,6 @@
           label.append(input, document.createTextNode(role));
           fieldset.append(label);
         });
-        form.elements.verificationOverride.checked = false;
         $("#membership-dialog").showModal();
       }
 
@@ -728,8 +727,6 @@
           setDialogMessage("#membership-message", "변경된 내용이 없어 저장하지 않았습니다.");
           return;
         }
-        // 이메일 검증 예외는 승인·자격 변경에 붙는 표시일 뿐 그 자체로는 변경이 아니다.
-        if (form.elements.verificationOverride.checked) body.verificationOverride = true;
         $("#membership-dialog").close();
         state.editing = null;
         await mutate(base, body);

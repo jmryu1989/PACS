@@ -108,6 +108,9 @@ server {
     include /etc/nginx/snippets/hsts.conf;
     include /etc/nginx/snippets/keycloak-admin-guards.conf;
 
+    # Self-service opens the password action; account identity changes stay in member administration.
+    location ~* ^/auth/realms/kin/account { return 404; }
+
     # Optional, administrator-owned auxiliary routes. Empty on installations
     # without workflow collection; no credentials or captured data live here.
     include /etc/nginx/workflow/*.conf;

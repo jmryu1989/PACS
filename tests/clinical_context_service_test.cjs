@@ -867,10 +867,13 @@ test('CC-S12 an anchor without PatientID: prior and history not_configured/no_pa
 // ── CC-S13 closed shape ──
 
 test('CC-S13 the closed keys are exactly the contract response keys, and every violation is refused', async () => {
+  assert.deepEqual([...new Set(Object.values(policy.CLINICAL_CONTEXT_KEYS).flat())].sort(), [...RESPONSE_KEYS].sort());
   const answer = await ok(fullWorld(), reader);
   assert.deepEqual([...deepKeys(answer)].sort(), [...RESPONSE_KEYS].sort(), 'an all-present answer uses every key and no other');
   const broken = (edit) => { const copy = structuredClone(answer); edit(copy); return policy.clinicalContextShapeError(copy); };
   assert.notEqual(broken(a => { a.order = null; }), null);
+  assert.notEqual(broken(a => { delete a.nextCursor; }), null);
+  assert.notEqual(broken(a => { a.nextCursor = 'invalid'; }), null);
   assert.notEqual(broken(a => { a.sections.history.items[0].ward = 'x'; }), null);
   assert.notEqual(broken(a => { a.sections.orders = { state: 'absent' }; }), null);
   assert.notEqual(broken(a => { a.schema = 'kin.clinical-context/2'; }), null);

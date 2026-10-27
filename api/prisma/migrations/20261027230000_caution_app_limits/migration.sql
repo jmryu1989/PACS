@@ -20,7 +20,7 @@ ALTER TABLE "ViewerJob" DROP CONSTRAINT "ViewerJob_bounds";
 ALTER TABLE "ViewerJob" ADD CONSTRAINT "ViewerJob_bounds" CHECK (
   cardinality("studies") BETWEEN 1 AND 2 AND array_position("studies", NULL) IS NULL
   AND "studies"[1] = "studyUid" AND (cardinality("studies") = 1 OR "studies"[1] <> "studies"[2])
-  AND "revision" > 0 AND octet_length("snapshot"::text) <= 20000);
+  AND "revision" > 0);
 ALTER TABLE "ViewerJobRevision" DROP CONSTRAINT "ViewerJobRevision_bounds";
 ALTER TABLE "ViewerJobRevision" ADD CONSTRAINT "ViewerJobRevision_bounds" CHECK ("revision" > 0);
 ALTER TABLE "StudyQuestion" DROP CONSTRAINT "StudyQuestion_revision_check";

@@ -28,7 +28,6 @@ window.KinTechNote = function (app) {
   const $ = id => d.querySelector('#tech-note-' + id);
   let uid = null, seq = 0, busy = false, ended = false, writable = false, cursor = null, opener, openerDocument, innerOpener;
   let L = null, basis = 0, attempts = [], reasonGeneration = 0, interruptedRead = false, interruptedHistory = null, beforePreparation = null;
-  const usedReasons = new Set();
   // Korean particles after a version number follow how its last digit is read (0 영·십·백, 1 일, 2 이, 3 삼, …):
   // "v2로·v3으로", "v1과·v2와", "v1을·v2를".
   const ro = v => `v${v}${/[036]$/.test(v) ? '으로' : '로'}`;
@@ -55,7 +54,9 @@ window.KinTechNote = function (app) {
     for (const a of attempts) {
       if (a.outcome === 'saved' || revision.version !== a.base + 1) continue;
       if (revision.attemptId === a.id && revision.isOwnAttempt === true) {
-        a.outcome = 'saved'; a.version = revision.version; for (const g of a.generations) usedReasons.add(g);
+        a.outcome = 'saved'; a.version = revision.version;
+        // Clear only the reason carried by this saved attempt; a later typed reason belongs to the next edit.
+        if (a.generations.has(reasonGeneration)) { $('reason').value = ''; ++reasonGeneration; }
       } else a.outcome = 'not-saved';
     }
   }
@@ -324,7 +325,7 @@ window.KinTechNote = function (app) {
       else if (dirty() && !confirm('현재 입력이 마지막 확인본과 다른데 입력을 버리고 닫을까요?')) return;
     }
     const closedUid = uid;
-    ++seq; uid = null; busy = false; writable = false; L = null; basis = 0; attempts = []; usedReasons.clear();
+    ++seq; uid = null; busy = false; writable = false; L = null; basis = 0; attempts = [];
     interruptedRead = false; interruptedHistory = null; beforePreparation = null;
     $('text').value = $('reason').value = ''; ++reasonGeneration; $('history-items').replaceChildren(); $('target').textContent = $('meta').textContent = ''; status('');
     if (d.open) d.close();
@@ -372,7 +373,7 @@ window.KinTechNote = function (app) {
   }, open(study) {
     if (work.state()!=='active' || ended || d.open || !study || !app.allowed()) return;
     uid = study.uid; opener = document.activeElement; cursor = null; $('more').hidden = true;
-    openerDocument = innerOpener = null; L = null; basis = 0; attempts = []; usedReasons.clear();
+    openerDocument = innerOpener = null; L = null; basis = 0; attempts = [];
     try {
       if (opener?.tagName === 'IFRAME') { openerDocument = opener.contentDocument; innerOpener = openerDocument?.activeElement; }
     } catch (_) { /* Only same-origin iframe focus can be retained. */ }

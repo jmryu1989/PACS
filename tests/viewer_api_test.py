@@ -299,10 +299,11 @@ class ViewerAPI(unittest.TestCase):
                 self.assertEqual([r.status for r in responses],[200,200])
                 self.assertEqual(self.call(body=command),receipt)
                 self.create()
-                latest=self.call('GET',path=self.path+'/'+head['id'])
+                latest=next(item for item in self.call('GET')['items'] if item['id']==head['id'])
                 hidden,_=self.revise(latest,'hide',reason='')
-                self.assertTrue(hidden['hidden'])
+                self.assertTrue(hidden['item']['hidden'])
                 head,_=self.revise(hidden,'restore',reason='')
+                self.assertFalse(head['item']['hidden'])
             finally:
                 psql(f'UPDATE "ViewerStorageBudget" SET "itemCount"={saved["itemCount"]}, "revisionCount"={saved["revisionCount"]}, "payloadBytes"={saved["payloadBytes"]} WHERE "studyUid"={literal(self.uid)}')
         name='viewer_fault_'+uuid.uuid4().hex

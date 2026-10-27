@@ -1815,7 +1815,7 @@ class BffInvariantTests(unittest.TestCase):
         self.assertIn('href="/api/auth/login"', source)
         self.assertIn('${msg("continueToKin")}', source)
 
-    def test_member_unverified_email_cannot_be_approved(self) -> None:
+    def test_member_explicit_email_verification_requirement_is_respected(self) -> None:
         username = "kin-test-unverified-" + uuid.uuid4().hex[:12]
         created = self.admin("POST", "/users", {
             "username": username, "enabled": True, "emailVerified": False,
@@ -1827,7 +1827,7 @@ class BffInvariantTests(unittest.TestCase):
         try:
             blocked = self.stack.request(
                 "PATCH", f"/admin/users/{quote(str(created.body))}", "jmryu",
-                {"approvalState": "APPROVED", "institution": "hallym", "roles": ["radiologist"]},
+                {"approvalState": "APPROVED", "institution": "hallym", "roles": ["radiologist"], "verificationOverride": False},
             )
             self.assertEqual(blocked.status, 400, blocked.text)
             self.assertEqual(
@@ -2063,7 +2063,7 @@ class BffInvariantTests(unittest.TestCase):
                     if user.get("username") == username:
                         self.delete_member(user["id"])
 
-    def test_member_verification_override_is_the_single_audited_bypass(self) -> None:
+    def test_member_unverified_email_default_approval_is_audited(self) -> None:
         username = "kin-test-unverified-" + uuid.uuid4().hex[:12]
         created = self.admin("POST", "/users", {
             "username": username, "enabled": True, "emailVerified": False,

@@ -15,7 +15,7 @@ class StudyPagesLive(LiveInvariantTests):
                 self.assertEqual(body['pagination']['total'],len(result));return result
         self.fail('pagination did not terminate')
     def test_pages_01_collection_matches_legacy_and_tenant_scope(self):
-        with self.stack.fixture() as a,self.stack.fixture('KIN 판독센터') as other:
+        with self.stack.fixture() as a,self.stack.fixture(),self.stack.fixture('KIN 판독센터') as other:
             self.assert_status(self.commit(a,'doctor','save',0),201)
             for actor in ['doctor','doctor2','jmryu','kdoctor','tech']:
                 legacy=self.stack.request('GET','/studies',actor);self.assert_status(legacy,200)
@@ -29,7 +29,7 @@ class StudyPagesLive(LiveInvariantTests):
                 self.assert_status(self.page(after=token),409)
             self.assert_status(self.page(after=cursor,limit=2),409)
     def test_pages_02_collection_change_and_invalid_query_rejected(self):
-        with self.stack.fixture():
+        with self.stack.fixture(),self.stack.fixture():
             first=self.page();cursor=first.body['pagination']['next'];self.assertIsNotNone(cursor)
             with self.stack.fixture():
                 changed=self.page(after=cursor);self.assert_status(changed,200);self.assertTrue(all(row['uid'] > first.body['studies'][-1]['uid'] for row in changed.body['studies']))

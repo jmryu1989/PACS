@@ -103,7 +103,7 @@ type Phase = 'plain' | 'probe' | 'fresh';
 type PendingLogin = {
   state: string; verifier: string; issuedAt: number;
   phase: Phase; reason: Reason | null; prompt: 'login' | 'create' | null; restarts: number;
-  memberSub?: string; rightsVersion?: number;
+  memberSub?: string; rightsVersion?: number; action?: 'UPDATE_PASSWORD';
 };
 type Flow = { name: string; pending: PendingLogin; live: boolean };
 type Session = {
@@ -939,11 +939,11 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 평범한 로그인·가입 시작은 같은 의도의 probe 단계로 시작한다.
    */
   private startFlow(
-    req: any, res: any, want: { phase: Phase; reason: Reason | null; prompt: 'login' | 'create' | null; restarts?: number; memberSub?: string; rightsVersion?: number },
+    req: any, res: any, want: { phase: Phase; reason: Reason | null; prompt: 'login' | 'create' | null; restarts?: number; memberSub?: string; rightsVersion?: number; action?: 'UPDATE_PASSWORD' },
   ): string {
     const flows = this.pendingFlows(req);
     let { phase, reason, prompt } = want;
-    if (phase === 'plain') {
+    if (phase === 'plain' && !want.action) {
       const intent = flows.find(flow => flow.live && flow.pending!.reason);
       if (intent) {
         phase = 'probe';
@@ -960,7 +960,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     const verifier = randomBytes(32).toString('base64url');
     const state = randomBytes(32).toString('base64url') + (restarts > 0 ? RESTARTED : '');
     const challenge = createHash('sha256').update(verifier).digest('base64url');
-    const pending: PendingLogin = { state, verifier, issuedAt: Date.now(), phase, reason, prompt, restarts, memberSub: want.memberSub, rightsVersion: want.rightsVersion };
+    const pending: PendingLogin = { state, verifier, issuedAt: Date.now(), phase, reason, prompt, restarts, memberSub: want.memberSub, rightsVersion: want.rightsVersion, action: want.action };
     this.appendCookie(res, `${this.pendingName(state)}=${encodeURIComponent(this.signPending(pending))}; Path=/api/auth; `
       + `HttpOnly; Secure; SameSite=Lax; Max-Age=${PENDING_COOKIE_SECONDS}`);
 
@@ -974,6 +974,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       code_challenge: challenge,
       code_challenge_method: 'S256',
     });
+    if (want.action) query.set('kc_action', want.action);
     // probe는 화면 없이 SSO만 알아낸다. fresh는 자격 입력을 요구한다(앞의 SSO가 끝났으므로 이름을 칠 수 있는 폼이다).
     if (phase === 'probe') query.set('prompt', 'none');
     else if (prompt) query.set('prompt', prompt);
@@ -983,11 +984,13 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   /**
    * 링크로 여는 로그인·가입(GET). **아무 세션도 끝내지 않는다** — 결속 없는 GET이 세션을 끝내면 다른 문서가 쓰고 있는
    * 로그인이 링크 한 번에 사라진다. 살아 있는 세션의 쿠키가 있으면 흐름을 시작하지 않고 null을 준다(그 세션을 바꾸는
-   * 로그인은 아래의 POST가 한다). 주소의 매개변수는 의도를 정하지 못한다: 재인증 의도는 CSRF로 보호된 POST만 시작한다.
+   * 로그인은 아래의 POST가 한다). 비밀번호 동작은 세션을 바꾸지 않고 열며, 재인증 의도는 POST만 시작한다.
    */
-  async beginLogin(req: any, res: any, prompt?: 'create'): Promise<string | null> {
-    if (await this.hasSession(req)) return null;
-    return this.startFlow(req, res, { phase: 'plain', reason: null, prompt: prompt ?? null });
+  async beginLogin(req: any, res: any, prompt?: 'create', action?: 'UPDATE_PASSWORD'): Promise<string | null> {
+    const active = await this.hasSession(req);
+    if (active && !action) return null;
+    // Password self-service keeps the working session. An expired session first follows normal login.
+    return this.startFlow(req, res, { phase: 'plain', reason: null, prompt: prompt ?? null, action: active ? action : undefined });
   }
 
   /**
@@ -1140,6 +1143,9 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     }
 
     const flow = own.pending;
+    // This action grants no product session and makes no claim about completion (the user may cancel).
+    // Keep the existing document's session/cookie; normal login handles a session that ended while it was open.
+    if (flow.action === 'UPDATE_PASSWORD') return { kind: 'work' };
     if (error) {
       // probe의 login_required: 이 브라우저에 끝낼 SSO가 없다. 마지막 단계로 간다.
       if (flow.phase === 'probe' && error === 'login_required')

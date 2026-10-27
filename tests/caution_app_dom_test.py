@@ -174,7 +174,7 @@ class CautionAppDOM(unittest.TestCase):
 
     def test_password_path_and_unavailable_commands(self):
         expect(self.page.get_by_role('link', name='Change Password')).to_have_attribute(
-            'href', '/auth/realms/kin/account/account-security/signing-in')
+            'href', '/api/auth/login?action=UPDATE_PASSWORD')
         for selector in ['#b-except', '#t-desc']:
             expect(self.page.locator(selector)).to_be_hidden()
         expect(self.page.get_by_role('button', name='Split Exam')).to_have_count(0)

@@ -1,6 +1,6 @@
 # Keycloak 렐름 (개발용)
 
-첫 기관의 기본 회원 생성은 관리자가 대면 확인 후 기관·역할을 지정하는 방식이다. `verifyEmail`은 기본 false이며 병원에서 이메일 검증을 선택하면 렐름에서 켤 수 있다. 이메일 미검증 자체는 회원 승인을 막지 않는다. 사용자는 업무 화면의 **Change Password**에서 Keycloak 계정 콘솔로 들어가 비밀번호를 직접 변경한다. 계정별 실패 잠금과 유휴 종료 설정은 유지한다.
+첫 기관의 기본 회원 생성은 관리자가 대면 확인 후 기관·역할을 지정하는 방식이다. `verifyEmail`은 기본 false이며 병원에서 이메일 검증을 선택하면 렐름에서 켤 수 있다. 이메일 미검증 자체는 회원 승인을 막지 않는다. 사용자는 업무 화면의 **Change Password**에서 Keycloak의 `UPDATE_PASSWORD` 동작만 열어 비밀번호를 직접 변경한다. 계정 콘솔은 열지 않으며 이메일·이름 등 감사 식별 정보는 관리자가 변경한다. 기존 설치는 API와 nginx·업무 화면을 함께 갱신한다(렐름 재import 불필요). [Keycloak AIA](https://www.keycloak.org/docs/26.7.0/server_admin/#_application_initiated_actions) 경로는 완료·취소 후 기존 업무 세션으로 돌아오고 새 제품 세션을 만들지 않는다. 계정별 실패 잠금과 유휴 종료 설정은 유지한다.
 
 기존 렐름은 import 파일 변경으로 갱신되지 않는다. 기존 설치의 선택적 이메일 검증은 Keycloak 관리 콘솔 Realm settings에서 적용하며 SMTP는 이메일 검증·메일 재설정을 선택할 때만 필요하다.
 

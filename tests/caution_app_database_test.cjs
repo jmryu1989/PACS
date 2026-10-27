@@ -36,6 +36,14 @@ test('retained histories, nine sources and question closure pass the former life
         reason:message,reply:message,cancelReason:'',state:'Completed',revision:1,changedBy:'Synthetic',creationFingerprint:'0'.repeat(64),
         lastRequest:randomUUID(),lastFingerprint:'0'.repeat(64)}});
       assert.equal(consult.reply,message);
+      // Frozen annotation references are server-derived, so their total is not a user payload bound.
+      const frozen={version:3,studies:[uid],rows:1,cols:1,active:0,cells:[null],
+        annotations:Array.from({length:200},()=>({id:randomUUID(),study:uid,revision:1}))};
+      assert.ok(Buffer.byteLength(JSON.stringify(frozen))>20000);
+      const job=await tx.viewerJob.create({data:{id:randomUUID(),studyUid:uid,authorSub:'synthetic',authorActor:'Synthetic',
+        studies:[uid],fingerprint:'0'.repeat(64),snapshot:frozen,title:'SYN',description:'',revision:1,updatedAt:new Date()}});
+      assert.deepEqual((await tx.viewerJob.findUnique({where:{id:job.id}})).snapshot,frozen);
+
     });
   } finally { await db.$disconnect(); }
 });

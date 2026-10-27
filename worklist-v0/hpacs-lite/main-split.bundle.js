@@ -1536,7 +1536,7 @@
       $("#holdbar").style.display = held ? "flex" : "none";
       $("#holdmsg").textContent = held ? `✎ ${heldTitle} — 잠금이 풀리면 이어서 판독할 수 있습니다` : "";
       $("#deferbar").style.display = s?.rs === "H" ? "flex" : "none";
-      $("#defermsg").textContent = s?.rs === "H" ? `⏸ On Hold — ${s.holdReason ?? ""}` : "";
+      $("#defermsg").textContent = s?.rs === "H" ? `⏸ On Hold${s.holdReason ? ' — ' + s.holdReason : ''}` : "";
       // 남의 예비 판독은 읽지도 쓰지도 못한다. 서버가 막지만 회색으로 보이는 편이 낫다 —
       // 눌러보고 거절당하는 건 "왜 안 되지"를 만들고, 회색은 "내 것이 아니구나"를 만든다.
       const locked = !!appState[selectedUid]?.prelimHidden;
@@ -1894,6 +1894,7 @@
       ];
       render(); refreshRight();
     }
+
 
     /**
      * 날짜 퀵필터. "최근 N일" — **양쪽 끝을 다 본다.**
@@ -6943,7 +6944,7 @@
     function announceCommit(uid, action, reason, lateText) {
       const done = {
         save: "임시 저장했습니다 (RS: T)",
-        defer: `보류했습니다 (RS: H) — ${reason}`,
+        defer: `보류했습니다 (RS: H)${reason ? ' — ' + reason : ''}`,
         approve: "판독문을 승인했습니다 (RS: A)",
         addendum: "추가기재를 저장했습니다 — 이전 승인본은 그대로 남습니다",
         reset: "판독을 취소했습니다 (RS: W). 사유가 이력에 기록됐습니다",
@@ -7461,6 +7462,7 @@
       if (a.ward) s.ward = a.ward;
       if (a.reqHosp && !s.institutionName) s.reqHosp = a.reqHosp;
     }
+
 
     // ══════════ 동시 판독 점유 (교훈 §2) ══════════
     // 점유는 **열람이 아니라 쓰기**로 시작한다. 검사를 열어보는 건 흔한 일이고,

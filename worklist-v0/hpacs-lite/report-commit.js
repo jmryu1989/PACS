@@ -71,7 +71,7 @@
     function announceCommit(uid, action, reason, lateText) {
       const done = {
         save: "임시 저장했습니다 (RS: T)",
-        defer: `보류했습니다 (RS: H) — ${reason}`,
+        defer: `보류했습니다 (RS: H)${reason ? ' — ' + reason : ''}`,
         approve: "판독문을 승인했습니다 (RS: A)",
         addendum: "추가기재를 저장했습니다 — 이전 승인본은 그대로 남습니다",
         reset: "판독을 취소했습니다 (RS: W). 사유가 이력에 기록됐습니다",

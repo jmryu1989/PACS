@@ -43,7 +43,7 @@
   });
   const SECTION_KEYS = ['state', 'reason', 'sourceLabel', 'observedAt', 'truncated', 'items'];
   const KEYS = Object.freeze({
-    answer: ['schema', 'uid', 'observedAt', 'patientKey', 'anchor', 'identity', 'sections'],
+    answer: ['schema', 'uid', 'observedAt', 'patientKey', 'anchor', 'identity', 'sections', 'nextCursor'],
     anchor: ['access', 'institutionName', 'techNoteVersion'],
     identity: ['conflict', 'birth', 'sex'],
     sections: SECTIONS,
@@ -248,8 +248,8 @@
   /** null when the answer has exactly the closed shape of §9.1 and its value rules, otherwise the path and the rule broken. */
   function shapeError(value) {
     try {
-      const answer = keysExactly(value, Object.prototype.hasOwnProperty.call(value ?? {}, 'nextCursor') ? [...KEYS.answer, 'nextCursor'] : KEYS.answer, 'answer');
-      check(answer.nextCursor === undefined || answer.nextCursor === null || typeof answer.nextCursor === 'string' && /^[0-9]+$/.test(answer.nextCursor), 'nextCursor', 'invalid continuation');
+      const answer = keysExactly(value, KEYS.answer, 'answer');
+      check(answer.nextCursor === null || typeof answer.nextCursor === 'string' && /^[0-9]+$/.test(answer.nextCursor), 'nextCursor', 'invalid continuation');
       check(answer.schema === SCHEMA, 'schema', 'not this schema');
       check(studyUid(answer.uid), 'uid', 'not a study UID');
       check(instant(answer.observedAt), 'observedAt', 'not an ISO instant');

@@ -82,7 +82,7 @@ const CONTEXT_REASONS: Readonly<Record<ContextSectionName, { not_configured: rea
  */
 const SECTION_KEYS = ['state', 'reason', 'sourceLabel', 'observedAt', 'truncated', 'items'];
 export const CLINICAL_CONTEXT_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  answer: ['schema', 'uid', 'observedAt', 'patientKey', 'anchor', 'identity', 'sections'],
+  answer: ['schema', 'uid', 'observedAt', 'patientKey', 'anchor', 'identity', 'sections', 'nextCursor'],
   anchor: ['access', 'institutionName', 'techNoteVersion'],
   identity: ['conflict', 'birth', 'sex'],
   sections: [...CONTEXT_SECTION_NAMES],
@@ -570,8 +570,8 @@ function contextSectionShapeError(name: ContextSectionName, value: unknown, cont
 /** 답 전체의 모양(§9.1). 위반이면 경로와 이유, 아니면 null. 서버는 이 확인을 통과한 답만 보낸다. */
 export function clinicalContextShapeError(value: unknown): string | null {
   try {
-    const answer = keysExactly(value, Object.prototype.hasOwnProperty.call(value ?? {}, 'nextCursor') ? [...CLINICAL_CONTEXT_KEYS.answer, 'nextCursor'] : CLINICAL_CONTEXT_KEYS.answer, 'answer');
-      check(answer.nextCursor === undefined || answer.nextCursor === null || typeof answer.nextCursor === 'string' && /^[0-9]+$/.test(answer.nextCursor), 'nextCursor', 'invalid continuation');
+    const answer = keysExactly(value, CLINICAL_CONTEXT_KEYS.answer, 'answer');
+    check(answer.nextCursor === null || typeof answer.nextCursor === 'string' && /^[0-9]+$/.test(answer.nextCursor), 'nextCursor', 'invalid continuation');
     check(answer.schema === CLINICAL_CONTEXT_SCHEMA, 'schema', 'not this schema');
     check(studyUid(answer.uid), 'uid', 'not a study UID');
     check(instant(answer.observedAt), 'observedAt', 'not an ISO instant');
@@ -608,7 +608,7 @@ export function clinicalContextAnswer(parts: { nextCursor?: string | null; uid: 
     sections[name] = contextSectionShapeError(name, section, context) === null ? section
       : contextSection(name, 'failed', 'source_invalid', parts.observedAt);
   }
-  const answer = { ...(parts.nextCursor !== undefined ? { nextCursor: parts.nextCursor } : {}), schema: CLINICAL_CONTEXT_SCHEMA, uid: parts.uid, observedAt: parts.observedAt, patientKey: parts.patientKey,
+  const answer = { nextCursor: parts.nextCursor ?? null, schema: CLINICAL_CONTEXT_SCHEMA, uid: parts.uid, observedAt: parts.observedAt, patientKey: parts.patientKey,
     anchor: { ...parts.anchor }, identity: { ...parts.identity }, sections };
   const error = clinicalContextShapeError(answer);
   if (error) throw new Error('clinical context answer is not the closed shape: ' + error);

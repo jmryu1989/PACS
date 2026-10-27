@@ -322,7 +322,7 @@ export class ImageRequestService {
   }
 
   /**
-   * #11 상태 변경. accept는 빈 note, close·decline·cancel은 1~2,000자 note. 처리 동작은 technician·admin, 취소는
+   * #11 상태 변경. accept는 빈 note, cancel은 선택 사유, close·decline은 1~2,000자 note. 처리 동작은 technician·admin, 취소는
    * 요청한 임상의 또는 admin이다. 동작별 역할은 body의 action을 읽은 뒤 트랜잭션 전에 판정한다.
    */
   async change(id: string, c: RequestCaller, b: any, transaction?: Prisma.TransactionClient) {
@@ -330,7 +330,7 @@ export class ImageRequestService {
     if (!holds(c, CLINICIAN_ROLE) && !staff(c)) throw roleRequired();
     if (!exactKeys(b, ['requestId', 'expectedOwner', 'revision', 'action', 'note']) || !uuid(b.requestId) || !revision(b.revision)
       || !IMAGE_REQUEST_ACTIONS.includes(b.action) || (b.action === 'accept' ? b.note !== '' : b.action === 'cancel' ? typeof b.note !== 'string' || b.note.length > IMAGE_REQUEST_TEXT_MAX : !text(b.note, IMAGE_REQUEST_TEXT_MAX)))
-      throw invalid('요청 ID·기준 revision·동작과 note를 확인하세요(accept는 빈 note, 그 밖은 1~2,000자)');
+      throw invalid('요청 ID·기준 revision·동작과 note를 확인하세요(accept는 빈 note, cancel 사유는 선택, close·decline은 1~2,000자)');
     if (b.action === 'cancel' ? !holds(c, CLINICIAN_ROLE) && !holds(c, ADMIN) : !staff(c)) throw roleRequired();
     this.expectOwner(c, b);
     if (!uuid(id)) throw requestMissing();

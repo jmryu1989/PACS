@@ -100,7 +100,7 @@ export class ConsultationService {
   async create(uid:string,c:Caller,b:any,transaction?:Prisma.TransactionClient) {
     this.member(c);
     if (!object(b) || Object.keys(b).sort().join()!=='expectedOwner,reason,recipientSub,requestId'
-      || !uuid(b.requestId) || !uuid(b.recipientSub) || !optionalText(b.reason)) throw new BadRequestException('수신자를 선택하고 의뢰 사유는 2,000자 이내로 입력하세요');
+      || !uuid(b.requestId) || !uuid(b.recipientSub) || !optionalText(b.reason)) throw new BadRequestException('요청 ID와 수신자를 확인하고 의뢰 사유는 문자열로 입력하세요(선택 사항)');
     if (JSON.stringify(b.expectedOwner)!==JSON.stringify([c.institution,c.sub])) throw conflict();
     const id=b.requestId.toLowerCase(), recipientSub=b.recipientSub;
     const mark=fingerprint({uid,institution:c.institution,subject:c.sub,recipientSub,reason:b.reason});

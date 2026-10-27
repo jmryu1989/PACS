@@ -9,14 +9,13 @@ from test_worklist import WorklistE2E, expect
 class CautionAppE2E(WorklistE2E):
     def test_account_password_change(self):
         page = self.login('doctor')
+        before = self.stack.request('GET', '/me', 'doctor').body
+        session = next(c['value'] for c in page.context.cookies() if c['name'] == 'kin_sid')
         with page.expect_popup() as popup:
             page.get_by_role('link', name='Change Password').click()
         account = popup.value
         account.wait_for_load_state('domcontentloaded')
         expect(account.locator('body')).not_to_contain_text('404 Not Found')
-        update = account.get_by_role('button', name=re.compile(r'^(Update|업데이트|변경)$'))
-        expect(update.first).to_be_visible(timeout=30000)
-        update.first.click()
         password = 'SYN-' + secrets.token_hex(16) + 'aA1!'
         try:
             expect(account.locator('#password-new, #password').first).to_be_visible()
@@ -33,11 +32,19 @@ class CautionAppE2E(WorklistE2E):
             folder.mkdir(parents=True, exist_ok=True)
             account.screenshot(path=str(folder / 'password-form-failed.png'))
             raise RuntimeError('Synthetic password form: ' + type(error).__name__ + '; ' + account.locator('body').inner_text()) from None
-        account.wait_for_url('**/account/**', timeout=30000)
+        account.wait_for_url('**/worklist/hpacs-lite/main.html', timeout=30000)
+        self.assertEqual(next(c['value'] for c in page.context.cookies() if c['name'] == 'kin_sid'), session)
+        for path in ('/auth/realms/kin/account', '/auth/realms/kin/account/personal-info'):
+            self.assertEqual(account.request.get(self.stack.proxy + path).status, 404)
         self.stack.passwords['doctor'] = password
         # A fresh browser must authenticate with the changed password.
         renewed = self.login('doctor')
         expect(renewed.locator('#dbstat')).to_contain_text('DB Connected')
+        self.stack.tokens.pop('doctor', None)
+        after = self.stack.request('GET', '/me', 'doctor').body
+        for field in ('sub', 'actor', 'displayName'):
+            self.assertTrue(before[field], field)
+            self.assertEqual(after[field], before[field], field)
         folder = Path(__file__).parent / 'artifacts' / 'caution-app'
         folder.mkdir(parents=True, exist_ok=True)
         account.screenshot(path=str(folder / 'password-changed.png'))

@@ -18,12 +18,12 @@ export class AuthController {
 
   /**
    * 링크로 여는 로그인. 어떤 세션도 끝내지 않는다 — 살아 있는 세션의 쿠키가 있으면 Keycloak으로 보내지 않고 입구로
-   * 돌려보낸다. 주소의 매개변수로는 재인증을 청할 수 없다: 그 의도는 CSRF로 보호된 POST만 시작한다.
+   * 돌려보낸다. 비밀번호 변경은 기존 세션을 유지한 채 Keycloak 동작만 연다. 재인증 의도는 POST만 시작한다.
    */
   @Public()
   @Get('login')
-  async login(@Req() req: any, @Res() res: any) {
-    const url = await this.auth.beginLogin(req, res);
+  async login(@Req() req: any, @Res() res: any, @Query('action') action?: string) {
+    const url = await this.auth.beginLogin(req, res, undefined, action === 'UPDATE_PASSWORD' ? action : undefined);
     res.redirect(302, url ?? `${this.origin()}/worklist/hpacs-lite/index.html?auth_error=session_active`);
   }
 

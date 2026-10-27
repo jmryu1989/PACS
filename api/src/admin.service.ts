@@ -265,6 +265,8 @@ export class AdminService {
       } catch (error) { preReadError = error; }
     }
 
+    // Record the approval that happened, including the default path without a checkbox.
+    const verificationOverride = approvalMutation && identity?.emailVerified === false && body?.verificationOverride !== false;
     const work = facts.request.work;
     try {
       const issuer = facts.actor.issuer;
@@ -315,7 +317,7 @@ export class AdminService {
           const after = this.row(await tx.memberRights.findUnique({ where: { sub: id } }));
           const audit = await tx.auditLog.create({ data: { at: new Date(event.occurredAt),
             actor: c.actor, action: `admin.user.${action}`, target: id,
-            detail: JSON.stringify({ before, after, verificationOverride: body?.verificationOverride === true }) } });
+            detail: JSON.stringify({ before, after, verificationOverride }) } });
           const change = approvalMutation ? await tx.providerChange.create({ data: {
             kind: 'credentials', target: id, sub: id, generation: after.version, state: 'unknown', createdAt: new Date(),
           } }) : null;
@@ -329,7 +331,7 @@ export class AdminService {
     } catch (error) {
       if (error === preReadError) throw error;
       await this.audit(c.actor, 'admin.user.patch.failed', id, {
-        before, after: null, verificationOverride: body?.verificationOverride === true, failed: true,
+        before, after: null, verificationOverride, failed: true,
       });
       if (lockWaitExceeded(error))
         throw new ConflictException({ code: 'MEMBER_BUSY', message: '다른 요청이 회원 상태를 변경하고 있습니다. 잠시 후 다시 시도하세요' });
