@@ -60,7 +60,9 @@ DB) is not used, read or changed; the unit cannot see the Docker socket or `/etc
    ```
    If `auth login` does not print a URL on your terminal, start the same command without `auth login …` (interactive
    `claude`) and type `/login`, then `/exit`. No restart is needed; the next chat request uses it. The credential stays
-   in `claude-config/sdij` (studio-only).
+   in `claude-config/sdij` (studio-only). Then prove the confinement on this host once:
+   `sudo bash /opt/minhoon-studio/app/deploy/verify-claude.sh` (throwaway folder; expects the in-scope edit applied,
+   the `api/` edit denied, the builder run, `python3 -c` and `git status` denied).
 3. **Passwords:** `sudo cat /root/minhoon-studio-passwords.txt` and hand Minhoon his line directly (not in a chat).
    Rotate both: `sudo bash /opt/minhoon-studio/app/deploy/install.sh <bundle> --rotate-passwords`.
 4. **Later, switch to the admin Claude account:** log in once with `CLAUDE_CONFIG_DIR=/opt/minhoon-studio/claude-config/admin`
