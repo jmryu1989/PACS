@@ -249,10 +249,11 @@ the evidence, scrolling back adds nothing, reopening is new events on new
 provisions; 05 a report the first account never delivered is not sent after
 Log Out and a second account's login, whose display names its own provision;
 06 an answer drawn in a background tab is reported only once visible.
-Playwright 1.60 Chromium keeps every page visible, headless and headed (measured:
-another page, a second tab in the same window, a minimized window, focus
-emulation off; headed on Windows and under `xvfb-run` on the VM), so 06 reports
-itself skipped (NOT_RUN) there; 07 a Source drawn while Unmatched Studies covers the page is
+Playwright keeps the pages of the contexts it makes visible (it turns on focus
+emulation for each), so 06 starts the same Playwright Chromium build itself and
+signs in through that browser's first tab, reached with
+`connect_over_cdp(no_defaults=True)`: there the tab behind the reader's second
+tab is really `hidden` (measured headless and headed); 07 a Source drawn while Unmatched Studies covers the page is
 reported as one event only after the reader closes it. The 1800-second hang timeout is the one
 AGENTS.md gives the candidate worklist suite.
 

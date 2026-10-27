@@ -19,17 +19,22 @@ Cases:
   05 Account switch: a report the first account never delivered is not sent under the second account; the second
      account's display names its own provision.
   06 A Source answer drawn while the reader's tab is in the background is reported only once the tab is visible again.
-     Playwright's Chromium keeps every page visible, headless or headed (measured), so there this case reports itself
-     skipped (NOT_RUN); it runs as written in a browser that hides a background tab.
+     Playwright keeps the pages of its own contexts visible (focus emulation), so this case signs in through the first
+     tab of a Chromium started for it and reached with connect_over_cdp(no_defaults=True), where a tab behind another
+     tab is really hidden.
   07 A Source answer drawn while Unmatched Studies (a class-based modal) covers the page is reported once the reader
      closes the modal, as the same single event.
 """
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
 import uuid
@@ -261,19 +266,62 @@ class ReportObservationBrowser(base.WorklistE2E):
         self.assertEqual(len(shown), 2)
         self.evidence(page, "late", first=shown, second=self.shown(second.uid))
 
+    def tab_browser(self):
+        """The first tab of a Chromium of its own, in which a tab behind another tab is hidden as in a person's browser.
+
+        Playwright turns on focus emulation for every page of the contexts it makes, which keeps each one "visible"
+        (measured, Playwright 1.60: headless and headed, another page, a second tab, a minimized window). A browser's
+        own default context reached through connect_over_cdp(no_defaults=True) is left as the browser runs it, so its
+        background tab is "hidden". The same Playwright Chromium build is started here; visibility is not emulated and
+        nothing is injected into the page.
+        """
+        profile = Path(tempfile.mkdtemp(prefix="kin-a5-tabs-"))
+        self.addCleanup(shutil.rmtree, profile, True)
+        # The arguments Playwright's own launch gives this suite that matter here: the stack's self-signed HTTPS entry
+        # (ignore_https_errors), the sandbox off as Playwright launches it, software WebGL (--enable-unsafe-swiftshader).
+        args = [self.pw.chromium.executable_path, f"--user-data-dir={profile}", "--remote-debugging-port=0",
+                "--no-first-run", "--no-default-browser-check", "--ignore-certificate-errors", "--no-sandbox",
+                "--enable-unsafe-swiftshader", "--window-size=1600,1050", "about:blank"]
+        if os.environ.get("KIN_E2E_HEADED") != "1":
+            args.insert(1, "--headless=new")
+        process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        def stop():
+            process.terminate()
+            try:
+                process.wait(15)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(15)
+        self.addCleanup(stop)
+        # Port 0: the browser picks a free port and writes it to DevToolsActivePort in its profile.
+        port_file, deadline = profile / "DevToolsActivePort", time.monotonic() + 30
+        while not (port_file.exists() and port_file.read_text().strip()):
+            if process.poll() is not None or time.monotonic() >= deadline:
+                self.fail(f"the tab browser did not start (exit {process.poll()})")
+            time.sleep(0.1)
+        browser = self.pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port_file.read_text().split()[0]}", no_defaults=True)
+        self.addCleanup(browser.close)
+        return browser.contexts[0].pages[0]
+
+    @staticmethod
+    def wait_visibility(page, state, timeout=15):
+        # Read directly: a hidden tab runs no rendering steps, so frame-driven waits are not used.
+        deadline = time.monotonic() + timeout
+        while page.evaluate("document.visibilityState") != state:
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"the tab never became {state}")
+            time.sleep(0.05)
+
     def test_a5_06_an_answer_drawn_in_a_background_tab_is_reported_once_visible(self):
         target, first, _ = self.three()
-        page = self.login()
+        page = self.sign_in(self.tab_browser())
+        # The reader's second tab in the same window.
         other = page.context.new_page()
         other.bring_to_front()
-        hidden = page.evaluate("document.visibilityState")
+        self.wait_visibility(page, "hidden")
         page.bring_to_front()
-        if hidden != "hidden":
-            other.close()
-            # Measured with Playwright 1.60 Chromium: headless (shell and channel "chromium", 2026-10-27) and headed
-            # (Windows, and xvfb-run on Linux, 2026-10-28) - another page, a second tab in the same window, a minimized
-            # window, with or without focus emulation - all leave document.visibilityState "visible".
-            self.skipTest("NOT_RUN: this Playwright browser keeps a background page visible (headless and headed)")
+        self.wait_visibility(page, "visible")
         sent = self.reports(page)
         held = []
         release = self.hold(page, first.uid, held)
@@ -281,20 +329,46 @@ class ReportObservationBrowser(base.WorklistE2E):
         page.locator(f'#relrows tr[data-uid="{first.uid}"] td').first.click()
         expect(page.locator("#related-mode")).to_be_visible()
         self.wait_ledger(page, lambda: held, lambda v: len(v) == 1, "the held Source read")
+        # The reader switches to the other tab; the held answer arrives and is drawn there in the background.
         other.bring_to_front()
-        self.assertEqual(page.evaluate("document.visibilityState"), "hidden")
+        self.wait_visibility(page, "hidden")
         route, answer = held[0]
+        provided = answer.json()[0]["accessRef"]
         route.fulfill(response=answer)
         release()
         self.text_in_background(page, '#related-mode [data-related-source="findings"]', "SYN A5 FIRST SOURCE")
+        # A report would go out within the page's own task after the draw; two seconds of wall clock give it every
+        # chance, and A4 records a report in milliseconds on this stack.
+        time.sleep(2)
+        hidden = {"visibilityState": page.evaluate("document.visibilityState"),
+                  "findings": page.evaluate("s => document.querySelector(s)?.textContent",
+                                            '#related-mode [data-related-source="findings"]'),
+                  "sent": [item["body"] for item in sent], "shown": self.shown(first.uid)}
+        self.assertEqual(hidden["visibilityState"], "hidden")
         self.assertEqual(sent, [], "an answer drawn in a background tab is not a display")
-        self.assertEqual(self.shown(first.uid), [])
+        self.assertEqual(hidden["shown"], [])
+        # The screen shows the other tab; the page's own state is the JSON (a hidden tab paints no frame to capture).
+        self.evidence(other, "background-other-tab-front", hidden=hidden)
+        # The page's clock just before the reader returns: the display report must be later.
         before = page.evaluate("new Date().toISOString()")
+
         page.bring_to_front()
-        other.close()
+        self.wait_visibility(page, "visible")
         shown = self.wait_ledger(page, lambda: self.shown(first.uid), lambda v: len(v) == 1, "the display once visible")
-        self.assertGreaterEqual(shown[0]["occurredAt"], before, "reported when the tab became visible")
-        self.evidence(page, "background", shown=shown)
+        self.wait_ledger(page, lambda: sent, lambda v: len(v) == 1 and v[0]["status"] == 200, "the acknowledgement")
+        event = shown[0]
+        self.assertEqual(event["relatedEventId"], provided, "the display names the read the background tab drew")
+        self.assertEqual(self.target(event), ("report-version", "1"))
+        self.assertEqual(event["targets"], self.provisions(first.uid)[provided]["targets"])
+        self.assertEqual(event["userId"]["value"]["subject"], self.stack.user_ids["doctor"])
+        self.assertEqual(sent[0]["body"], {"accessRef": provided, "eventId": event["eventId"], "shownAt": event["occurredAt"]})
+        self.assertGreaterEqual(event["occurredAt"], before,"reported when the tab became visible, not when drawn")
+        self.settle(page)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(len(self.shown(first.uid)), 1)
+        self.evidence(page, "background-visible", shown=shown, before=before)
+        other.close()
+
     def history_rows_on_screen(self, page):
         return page.evaluate("""() => {
           const list = document.querySelector('#hist-body').getBoundingClientRect();
