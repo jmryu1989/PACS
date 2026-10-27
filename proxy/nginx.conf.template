@@ -285,19 +285,10 @@ server {
     # 이 정규식이 숫자·점·쉼표·빗금만 통과시키므로 query 구분자가 섞일 수 없고, proxy_pass에 변수가 있으면 원 요청의 query는
     # 붙지 않는다. 전송 끝과 중단을 API가 실제 연결에서 관측하도록 버퍼링하지 않는다(E-03). 메타데이터·렌더링·썸네일 같은
     # 파생 표현과 Gateway STOW는 아래 기존 경로 그대로다.
-    location ~ ^/dicom-web/studies/[0-9.]+/series/[0-9.]+/instances/[0-9.]+/frames/[0-9]+(,[0-9]+)*$ {
-        limit_except GET HEAD { deny all; }
-        proxy_buffering off;
-        # Connection을 비워야 upstream keepalive가 된다. 이 location이 proxy_set_header를 두므로 서버 수준의 것을 그대로 다시 둔다.
-        proxy_set_header Connection        "";
-        proxy_set_header Host              $http_host;
-        proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $remote_addr;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-Host  $http_host;
-        proxy_set_header X-Forwarded-Port  ${PUBLIC_PORT};
-        proxy_pass http://kin_api_image/api/images/dicom-web?target=$uri;
-    }
+    # 이 location은 15-kin-config.envsh가 쓴다: E의 manifest는 배포된 뷰어/디코더 자산 목록(KIN_EMR_IMAGE_ASSET_CATALOG)을
+    # 고정해야 하므로, 그 목록을 주지 않은 설치에서는 이 location이 비어 있고 프레임 요청은 아래 /dicom-web/ 경로
+    # (authz 부요청 뒤 Orthanc)로 그대로 간다. 목록 없이 E로 보내면 뷰어는 503만 받고 영상을 보여주지 못한다.
+    include /etc/nginx/snippets/image-frames.conf;
 
     # 검사 UID를 경로에 박은 STOW만 Gateway에 연다. UID 없는 POST는 아래 읽기 전용
     # location에 남아 403이고, API authz가 announce 선행과 기관 일치를 다시 확인한다.

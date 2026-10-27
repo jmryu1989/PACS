@@ -93,8 +93,11 @@ class Upstream(http.server.BaseHTTPRequestHandler):
 class Proxy:
     """One nginx over the rendered repository configuration in a temporary prefix."""
 
-    def __init__(self, mode, upstream_port, raw_request_log=False):
+    def __init__(self, mode, upstream_port, raw_request_log=False, deployment=None):
+        """deployment: what the compose service gives the proxy container beyond ports, mode and the Orthanc credential
+        (today KIN_EMR_IMAGE_ASSET_CATALOG, which turns the E image route on). Nothing of it is read from this process."""
         self.mode = mode
+        self.deployment = dict(deployment or {})
         self.dir = Path(tempfile.mkdtemp(prefix="kin-proxy-grant-"))
         for sub in ("conf", "snippets", "workflow", "logs", "temp"):
             (self.dir / sub).mkdir()
@@ -137,6 +140,8 @@ class Proxy:
         else:
             env.update(PUBLIC_PORT="9443")
             env.pop("SERVER_NAME", None)
+        env.pop("KIN_EMR_IMAGE_ASSET_CATALOG", None)
+        env.update(self.deployment)
         if not shutil.which("base64", path=env.get("PATH")):
             # A host sh without coreutils' base64 (Windows MinGit): a stand-in with the same output, for the Orthanc header.
             shim = self.dir / "shim"

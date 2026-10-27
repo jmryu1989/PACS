@@ -87,3 +87,31 @@ printf '%s\n' \
   'location = /auth/realms/master { return 404; }' \
   'location ^~ /auth/realms/master/ { return 404; }' \
   > "$SNIPPET_DIR/keycloak-admin-guards.conf"
+
+# EMR-E 영상 경계(E_ROUTE). 뷰어의 WADO-RS 프레임 요청을 API의 E 경로(images/dicom-web)로 보내는 location은 배포가
+# 뷰어/디코더 자산 목록(KIN_EMR_IMAGE_ASSET_CATALOG, API와 같은 값)을 줄 때만 쓴다: E의 manifest는 그 목록의 실제
+# 바이트를 고정해야 하고, 목록 없는 API는 프레임마다 503 ImageAssetCatalogUnavailable만 답해 새 설치의 뷰어가 영상을
+# 보여주지 못한다(batch-2 B1). 목록이 없으면 이 파일은 비어 있고 프레임 요청은 기존 /dicom-web/ 경로(authz 부요청 뒤
+# Orthanc)로 간다. 켜졌을 때의 규칙: API가 지금의 접근을 확인하고 보낼 바이트를 고정해 B2 provide-prepared 기록과 함께
+# 확정한 뒤에만 첫 byte를 쓴다. target은 nginx가 정규화한 $uri뿐이다(정규식이 숫자·점·쉼표·빗금만 통과시키므로 query
+# 구분자가 섞일 수 없고, proxy_pass에 변수가 있으면 원 요청의 query는 붙지 않는다). 전송 끝과 중단을 API가 실제 연결에서
+# 관측하도록 버퍼링하지 않는다(E-03). Connection을 비워야 upstream keepalive가 되며, location의 proxy_set_header가 서버
+# 수준의 것을 가리므로 같은 헤더를 다시 둔다.
+if [ -n "${KIN_EMR_IMAGE_ASSET_CATALOG:-}" ]; then
+  printf '%s\n' \
+    'location ~ ^/dicom-web/studies/[0-9.]+/series/[0-9.]+/instances/[0-9.]+/frames/[0-9]+(,[0-9]+)*$ {' \
+    '    limit_except GET HEAD { deny all; }' \
+    '    proxy_buffering off;' \
+    '    proxy_set_header Connection        "";' \
+    '    proxy_set_header Host              $http_host;' \
+    '    proxy_set_header X-Real-IP         $remote_addr;' \
+    '    proxy_set_header X-Forwarded-For   $remote_addr;' \
+    '    proxy_set_header X-Forwarded-Proto https;' \
+    '    proxy_set_header X-Forwarded-Host  $http_host;' \
+    "    proxy_set_header X-Forwarded-Port  $PUBLIC_PORT;" \
+    '    proxy_pass http://kin_api_image/api/images/dicom-web?target=$uri;' \
+    '}' \
+    > "$SNIPPET_DIR/image-frames.conf"
+else
+  : > "$SNIPPET_DIR/image-frames.conf"
+fi

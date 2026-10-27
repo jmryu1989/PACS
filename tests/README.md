@@ -3081,10 +3081,14 @@ IDs follow the existing E transfer-syntax catalog. Missing deployment assets, ex
 SR/SEG/PDF receipt evidence or processor-agreement facts remain unavailable.
 Derived PDF/preview/thumbnail/metadata snapshots remain unconnected.
 
-E_ROUTE puts the viewer's WADO-RS frame requests on that route. `python -B tests/proxy_image_route_test.py`
-(real nginx from PATH or `KIN_PROXY_NGINX`, as `proxy_grant_log_test.py`) checks that frame GET/HEAD reach only
-`/api/images/dicom-web?target=<normalized path>` with the session headers and the proxy's peer address, that writes
-are refused, and that metadata, rendered frames and the Gateway STOW keep authz -> Orthanc.
+E_ROUTE puts the viewer's WADO-RS frame requests on that route in a deployment that gives the proxy the same
+`KIN_EMR_IMAGE_ASSET_CATALOG` value as the API (docker-compose passes one `.env` value to both; the proxy's
+`15-kin-config.envsh` writes the frame location only then). The stock compose gives none: E's manifest cannot be built
+without the catalog, so there the frame route stays authz -> Orthanc and a fresh install shows its images.
+`python -B tests/proxy_image_route_test.py` (real nginx from PATH or `KIN_PROXY_NGINX`, as `proxy_grant_log_test.py`)
+checks both renderings: with the catalog, frame GET/HEAD reach only `/api/images/dicom-web?target=<normalized path>`
+with the session headers and the proxy's peer address, writes are refused, and metadata, rendered frames and the
+Gateway STOW keep authz -> Orthanc; without it, frames take authz -> Orthanc and nothing reaches the E image route.
 `node --test tests/emr/e/manifest_reuse_test.cjs` (compiled `api/dist`) checks that one study manifest serves the
 study's frame requests and is rebuilt or forgotten when the request or source no longer matches it, and that a study
 or series request (retrieve, query, metadata) reads the catalog again so an object that arrived since is selected.
@@ -3113,7 +3117,8 @@ route and the E route. A slice counts as reaching the viewer when the browser re
 the viewer holds its image: the pinned viewer's streaming loader stops reading at Content-Length, and the browser
 then sometimes cancels a response it already received whole (`net::ERR_ABORTED`, printed as `FRAME_REQUEST_FAILED`).
 A third case retrieves a series and its study through `GET /api/images/dicom-web` after a
-frame and one later arrival, and expects every stored object. It passes only with a deployed viewer/decoder asset catalog
-(`KIN_EMR_IMAGE_ASSET_CATALOG`, above).
+frame and one later arrival, and expects every stored object. The suite runs against a stack whose api and proxy
+services were given a deployed viewer/decoder asset catalog (`KIN_EMR_IMAGE_ASSET_CATALOG`, above); on the stock
+compose the frames never reach E and its record assertions cannot hold.
 
 REQ-MG-LENGTH-SCALE/FRAME/READBACK → RISK-MG-WRONG-SCALE/FRAME/BASIS → TEST-MG-LENGTH-BOUNDARY: `mg_length_test.cjs` checks DBT frame/shared geometry, Synthetic 2D and FFDM spacing precedence, detector/ERMF/source-plane labels, no-spacing refusal, saved baseline and SR frame/coordinates. PixelSpacing takes precedence; otherwise projection spacing is ImagerPixelSpacing / supplied ERMF or explicitly detector-based. Source: user/Minhoon 2026-10-26; DICOM PS3.3 §10.7. Real served public-sample draw/save/reopen/SR evidence is recorded separately; pure tests do not constitute physician acceptance.
