@@ -1616,10 +1616,10 @@ jobs:
         retention-days: 7
     - name: Viewer U3 served prior images and read-only reports
       timeout-minutes: 28
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: '"$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile viewer-ux-priors'
     - name: Viewer U3 synthetic served evidence
-      if: always()
+      if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: synthetic-viewer-ux-priors
