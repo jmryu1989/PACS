@@ -172,6 +172,8 @@ jobs:
     - name: TypeScript for the report harness fixture projection
       timeout-minutes: 5
       run: npm ci --prefix api --ignore-scripts --no-audit --no-fund
+    - name: Keycloak institution roster continuation
+      run: node --test tests/keycloak_member_paging_test.cjs
     - name: CI registry and exact suite selection (once)
       if: ${{ fromJSON(steps.paths.outputs.jobs)['ci-selfchecks'] }}
       run: |
@@ -389,6 +391,7 @@ jobs:
         done
         python3 -c 'import sys; sys.path.insert(0, "tests"); from ops_product_transfer_fixture import provision; provision(sys.argv[1])' "$db"
         python3 scripts/record-run.py --run-dir tmp/runtime-ci/tech-note-attempt --cwd . --file api/src/pacs.service.ts --file api/src/pacs/values.ts --file api/src/pacs/access.ts --file api/src/pacs/institutions.ts --file api/src/study-source-groups.ts --file api/src/pacs/worklist.ts --file api/src/pacs/dicom-gateway.ts --file api/src/pacs/preferences.ts --file api/src/pacs/filters.ts --file api/src/pacs/study-state.ts --file api/src/pacs/tech-note.ts --file api/src/pacs/report-draft.ts --file api/src/pacs/report-evidence.ts --file api/src/pacs/report-commit.ts --file api/src/pacs/hold.ts --file api/src/pacs/clinician.ts --file api/src/pacs/audit.ts --file api/src/pacs/metrics.ts --file api/src/pacs.controller.ts --file api/src/study-access.service.ts --file api/src/admin-audit.ts --file api/prisma/schema.prisma --file api/prisma/migrations/20261006000000_tech_note_attempt_id/migration.sql --file tests/tech_note_attempt_service_test.cjs --file tests/ops_product_transfer_fixture.py --file scripts/emr-compose.py -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_TECH_NOTE_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_tech_note_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/tech_note_attempt_service_test.cjs
+        python3 scripts/record-run.py --run-dir tmp/runtime-ci/caution-app-database --cwd . --tree api/prisma --file tests/caution_app_database_test.cjs -- timeout 180 docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_CAUTION_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_tech_note_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/caution_app_database_test.cjs
     - name: Build the development target for the TypeScript-parser source check
       run: docker build --target development -t kin-api:dev-ci api
     - name: S7-U1a critical result sources read the report only through ReportVersion rows
@@ -438,6 +441,8 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/dictation-host --cwd . --file worklist-v0/hpacs-lite/dictation.js --file worklist-v0/hpacs-lite/dictation-session.js --file worklist-v0/hpacs-lite/dictation-capture.js --file tests/dictation_host_test.cjs --file tests/module_session_harness.cjs --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/dictation_host_test.cjs
     - name: Compiled volume job command and volume mark boundary models
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/volume-api-models --cwd . --file tests/viewer_volume_job_test.cjs --file tests/viewer_volume_marks_test.cjs --file tests/study_query_scope_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_volume_job_test.cjs /tests/viewer_volume_marks_test.cjs /tests/study_query_scope_test.cjs
+    - name: Compiled study page cursor and password action callback
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/page-cursor-password-callback --cwd . --file api/src/study-page.ts --file api/src/auth.service.ts --file api/src/auth.controller.ts --file tests/study_page_test.cjs --file tests/auth_password_callback_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/study_page_test.cjs /tests/auth_password_callback_test.cjs
     - name: Observe an isolated real restart loop
       run: python3 tests/ops_monitor_container_test.py
     - name: Production image migration, startup and refusal checks

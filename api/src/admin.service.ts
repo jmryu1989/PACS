@@ -150,7 +150,7 @@ export class AdminService {
     const lastName = text(body?.lastName, 'lastName', 128);
     if (body?.verificationOverride !== undefined && typeof body.verificationOverride !== 'boolean')
       throw new BadRequestException('verificationOverride는 boolean이어야 합니다');
-    const verificationOverride = body?.verificationOverride === true;
+    const verificationOverride = body?.verificationOverride !== false;
     if (!verificationOverride && (body?.institution !== undefined || body?.roles !== undefined))
       throw new BadRequestException('기관·역할을 함께 지정하려면 verificationOverride:true가 필요합니다');
     if (verificationOverride && (body?.institution === undefined || body?.roles === undefined))
@@ -261,11 +261,13 @@ export class AdminService {
       try {
         identity ??= approvalMutation ? await this.managed(id)
           : await this.managed(id, within(300)).catch(() => null);
-        if (approvalMutation && !identity!.emailVerified && body?.verificationOverride !== true)
+        if (approvalMutation && !identity!.emailVerified && body?.verificationOverride === false)
           throw new BadRequestException('이메일 검증이 끝나지 않은 사용자는 승인할 수 없습니다');
       } catch (error) { preReadError = error; }
     }
 
+    // Record the approval that happened, including the default path without a checkbox.
+    const verificationOverride = approvalMutation && identity?.emailVerified === false && body?.verificationOverride !== false;
     const work = facts.request.work;
     try {
       const issuer = facts.actor.issuer;
@@ -316,7 +318,7 @@ export class AdminService {
           const after = this.row(await tx.memberRights.findUnique({ where: { sub: id } }));
           const audit = await tx.auditLog.create({ data: { at: new Date(event.occurredAt),
             actor: c.actor, action: `admin.user.${action}`, target: id,
-            detail: JSON.stringify({ before, after, verificationOverride: body?.verificationOverride === true }) } });
+            detail: JSON.stringify({ before, after, verificationOverride }) } });
           const change = approvalMutation ? await tx.providerChange.create({ data: {
             kind: 'credentials', target: id, sub: id, generation: after.version, state: 'unknown', createdAt: new Date(),
           } }) : null;
@@ -330,7 +332,7 @@ export class AdminService {
     } catch (error) {
       if (error === preReadError) throw error;
       await this.audit(c.actor, 'admin.user.patch.failed', id, {
-        before, after: null, verificationOverride: body?.verificationOverride === true, failed: true,
+        before, after: null, verificationOverride, failed: true,
       });
       if (lockWaitExceeded(error))
         throw new ConflictException({ code: 'MEMBER_BUSY', message: '다른 요청이 회원 상태를 변경하고 있습니다. 잠시 후 다시 시도하세요' });

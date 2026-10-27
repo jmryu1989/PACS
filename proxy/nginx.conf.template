@@ -1,9 +1,6 @@
 # KIN 리버스 프록시 — 브라우저가 보는 출처를 하나로 모은다.
 # PUBLIC_PORT 계열만 envsubst한다. $host·$request_uri 같은 nginx 변수는 런타임까지 남아야 한다.
 
-limit_req_zone $binary_remote_addr zone=kin_registration:10m rate=10r/m;
-limit_req_zone $binary_remote_addr zone=kin_token:10m rate=30r/m;
-limit_req_status 429;
 
 # S9-U4b 원본 archive(D1489)의 접근 기록: 메서드·정규화한 경로·상태·바이트·시각뿐이다. 그 GET의 query에는 일회용
 # 다운로드 grant가 있으므로 $request·$request_uri·$args·$http_referer·Cookie·Authorization은 쓰지 않는다.
@@ -114,7 +111,9 @@ server {
     # Keycloak 계정 콘솔(S7-U5 A018). 제품은 이 화면을 쓰지 않고 어디에서도 가리키지 않는다. 열어 두면 Keycloak 자신의
     # SSO만으로 열려 제품의 콜백(끝내기로 한 세션을 막는 자리)을 지나지 않는다 — 제품이 세션을 끝낸 뒤 인증 서버의 종료가
     # 확인되기 전의 틈에 다음 사람이 앞사람의 계정 화면에 닿는다. 로그인·가입·비밀번호 재설정·필수 동작
-    # (login-actions, protocol/openid-connect)과 테마 자산(resources)은 다른 경로라 영향이 없다.
+    # (login-actions, protocol/openid-connect — Change Password의 UPDATE_PASSWORD 동작 포함)과 테마 자산(resources)은
+    # 다른 경로라 영향이 없다. 접속기록 신원(이메일·이름)의 다른 본인 수정 길은 렐름이 UPDATE_PROFILE·VERIFY_PROFILE을
+    # 꺼서 닫는다(keycloak/README.md).
     # 정확 경로 둘이 아니라 대소문자를 가리지 않는 정규식 하나다(SEA-F05): `account;x=1`(행렬 매개변수 — Keycloak의 경로
     # 대조는 무시한다), `account/…`, `ACCOUNT`, 그리고 nginx가 대조 전에 정규화하는 %-인코딩(`%61ccount`)·겹친 빗금·`/./`·
     # `/../` 표기가 모두 여기서 끝난다. 이 경로 아래에는 prefix `^~` location이 없으므로 정규식이 `/auth/`보다 먼저 맞는다.
@@ -160,10 +159,9 @@ server {
         limit_except GET HEAD { deny all; }
     }
 
-    # 가입 신청은 BFF가 state·PKCE를 만든 뒤 Keycloak으로 보낸다. 진입점과 실제 등록
-    # 제출을 같은 제한 구역에 넣어 새 계정 생성 입력면을 양쪽에서 막는다.
+    # 가입 신청은 BFF가 state·PKCE를 만든 뒤 Keycloak으로 보낸다. IP별 요청 수 제한은 두지 않는다: 병원의 여러 사용자가
+    # 한 IP를 공유한다. 가입한 계정은 관리자 승인 전에는 업무 권한이 없고, 계정별 로그인 실패 잠금은 렐름 설정에 남는다.
     location = /api/auth/register {
-        limit_req zone=kin_registration burst=5 nodelay;
         client_max_body_size 2m;
         proxy_pass http://api:3000;
     }
@@ -200,7 +198,6 @@ server {
     }
 
     location = /auth/realms/kin/login-actions/registration {
-        limit_req zone=kin_registration burst=5 nodelay;
         proxy_pass http://keycloak:8080;
         proxy_buffer_size       16k;
         proxy_buffers        8  16k;
@@ -208,7 +205,6 @@ server {
     }
 
     location = /auth/realms/kin/protocol/openid-connect/token {
-        limit_req zone=kin_token burst=10 nodelay;
         proxy_pass http://keycloak:8080;
         proxy_buffer_size       16k;
         proxy_buffers        8  16k;

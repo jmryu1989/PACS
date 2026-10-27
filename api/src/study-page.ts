@@ -1,8 +1,10 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 
-// Bind continuation to the caller and list snapshot; access is checked on every page.
-const conflict = () => new ConflictException({ code: 'STUDY_LIST_CHANGED', message: '검사 목록 또는 이어받기 유효기간이 바뀌었습니다. 새로고침하세요.' });
+// Bind continuation to the caller and the visible UID set. A study arriving before the cursor would otherwise be skipped
+// while the last page still reads as the whole list; the client restarts from the first page on this 409.
+// No expiry: elapsed time alone does not change the list.
+const conflict = () => new ConflictException({ code: 'STUDY_LIST_CHANGED', message: '검사 목록이 바뀌었습니다. 새로고침하세요.' });
 export function studyPageQuery(query: any, owner: string[]) {
   if (!query || Object.keys(query).length === 0) return null;
   if (Object.keys(query).some(k => !['limit','after'].includes(k)) || typeof query.limit !== 'string'
@@ -11,15 +13,15 @@ export function studyPageQuery(query: any, owner: string[]) {
     throw new BadRequestException('목록 페이지 요청 형식이 잘못되었습니다');
   }
   const size = Number(query.limit);
-  if (query.after === undefined) return { size, after: '', stamp: null as string | null, expires: Date.now() + 300000 };
+  if (query.after === undefined) return { size, after: '', stamp: null as string | null };
   try {
     const payload = query.after;
     if (!/^[A-Za-z0-9_-]+$/.test(payload)) throw conflict();
     const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    if (data.v !== 1 || JSON.stringify(data.owner) !== JSON.stringify(owner) || data.size !== size
-      || !Number.isSafeInteger(data.expires) || data.expires < Date.now() || typeof data.after !== 'string'
-      || typeof data.stamp !== 'string') throw conflict();
-    return { size, after: data.after, stamp: data.stamp, expires: data.expires };
+    // v1 (stamp + expiry) and v2 (no stamp) cursors predate this shape; they restart from the first page.
+    if (data.v !== 3 || JSON.stringify(data.owner) !== JSON.stringify(owner) || data.size !== size
+      || typeof data.after !== 'string' || typeof data.stamp !== 'string') throw conflict();
+    return { size, after: data.after as string, stamp: data.stamp as string };
   } catch { throw conflict(); }
 }
 
@@ -32,7 +34,7 @@ export function studyPageSlice<T>(rows: T[], uid: (row: T) => string, page: Retu
   const picked = sorted.slice(start, start + page.size);
   let next: string | null = null;
   if (start + picked.length < sorted.length) {
-    const payload = Buffer.from(JSON.stringify({ v:1, owner, size:page.size, after:uid(picked[picked.length-1]), stamp, expires:page.expires })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({ v:3, owner, size:page.size, after:uid(picked[picked.length-1]), stamp })).toString('base64url');
     next = payload;
   }
   return { rows:picked, pagination:{ owner:owner.slice(0,2), next, total:sorted.length, offset:start, limit:page.size } };

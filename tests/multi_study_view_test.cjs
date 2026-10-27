@@ -38,7 +38,8 @@ test('selection copies visible order, moves only included reading target, and ne
   assert.deepEqual(frozen, ids);
   const twenty = Array.from({ length: 20 }, (_, i) => `1.2.${i}`);
   assert.equal(orderedSelection(twenty).length, 20);
-  for (const invalid of [[], ids.slice(0, 1), [...ids, ids[0]], [...twenty, '1.2.20'], ['1.2', '1.02'], ['1.2', 'bad']])
+  assert.equal(orderedSelection([...twenty, '1.2.20']).length, 21);
+  for (const invalid of [[], ids.slice(0, 1), [...ids, ids[0]], ['1.2', '1.02'], ['1.2', 'bad']])
     assert.equal(orderedSelection(invalid), null);
 });
 
@@ -94,7 +95,7 @@ test('wire error members preserve each code and contain no cached identity or ac
 });
 
 test('all fixed pages keep the odd member and re-resolve frozen N after filtering and clearing selection', () => {
-  for (const count of [3, 5, 20]) {
+  for (const count of [3, 5, 20, 21]) {
     const all = Array.from({ length: count }, (_, i) => `1.2.${i}`), f = fixture(all), first = admit(f);
     f.select([]);
     for (let page = 0; page < Math.ceil(count / 2); page++) {

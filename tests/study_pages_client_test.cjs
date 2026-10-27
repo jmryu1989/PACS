@@ -60,3 +60,70 @@ test('request timeout retains retry checkpoint and explicit cancel alone pauses 
  await assert.rejects(client.read(),e=>e.name==='AbortError');assert.equal(client.resumable,true);assert.equal(client.paused,false);
  client.cancel();assert.equal(client.paused,true);client.clear();assert.equal(client.paused,false);
 });
+
+// M11-a: a list that changes between pages is read again from the first page, never joined into a "complete" list that
+// is missing a study. `listed` stands in for the server's visible set; its cursor carries that set like study-page.ts.
+const server=listed=>{
+ const log=[];
+ const request=async path=>{
+  if(path==='/me')return me;
+  const after=new URL('http://local'+path).searchParams.get('after'),set=listed.map(r=>r.uid).join();log.push(after===null?'first':'next');
+  let start=0;
+  if(after!==null){const cursor=JSON.parse(after);if(cursor.set!==set)throw Object.assign(new Error('검사 목록이 바뀌었습니다.'),{status:409,code:'STUDY_LIST_CHANGED'});start=cursor.offset;}
+  const studies=listed.slice(start,start+100),more=start+studies.length<listed.length;
+  return {studies,pagination:{owner,limit:100,offset:start,total:listed.length,next:more?JSON.stringify({set,offset:start+100}):null},identityIssues:[]};
+ };
+ return {log,request};
+};
+test('an urgent arrival before the cursor between pages restarts the read and is in the completed list',async()=>{
+ const listed=rows.slice(1,102).map(r=>({...r})),urgent={uid:rows[0].uid,state:{em:'E'}},{log,request}=server(listed),states=[];
+ const client=create({identity:()=>owner,changed:s=>states.push(s),request:async path=>{
+  if(log.length===1&&path!=='/me')listed.unshift(urgent);return request(path);}});
+ const result=await client.read();
+ assert.equal(result.studies.length,102);assert.ok(result.studies.some(r=>r.uid===urgent.uid&&r.state.em==='E'));
+ assert.deepEqual(log,['first','next','first','next']);
+ assert.equal(states.at(-1).message,'');assert.equal(client.resumable,false);
+});
+test('an offset or total that no longer continues the pages read restarts; a list that keeps changing is refused, never partial',async()=>{
+ for(const delta of [-1,1]){
+  const first=page(0),last={studies:[rows[100]],pagination:{owner,limit:100,offset:100+delta,total:101+delta,next:null}};
+  first.pagination.total=101;first.pagination.next='n';
+  const whole=[page(0),{studies:[rows[100]],pagination:{owner,limit:100,offset:100,total:101,next:null}}];
+  whole[0].pagination.total=101;whole[0].pagination.next='n';
+  const replies=[first,last,...whole],paths=[];
+  const client=create({identity:()=>owner,changed:()=>{},request:async path=>{if(path==='/me')return me;paths.push(path);return replies.shift();}});
+  assert.deepEqual((await client.read()).studies,rows.slice(0,101));
+  assert.deepEqual(paths.map(p=>p.includes('after=')),[false,true,false,true]);
+ }
+ for(const delta of [-1,1]){
+  const paths=[];
+  const client=create({identity:()=>owner,changed:()=>{},request:async path=>{
+   if(path==='/me')return me;paths.push(path);
+   if(!path.includes('after=')){const first=page(0);first.pagination.total=101;first.pagination.next='n';return first;}
+   return {studies:[rows[100]],pagination:{owner,limit:100,offset:100+delta,total:101+delta,next:null}};}});
+  await assert.rejects(client.read(),e=>e.code==='STUDY_LIST_CHANGED');
+  assert.equal(paths.length,6);assert.equal(client.resumable,false);
+ }
+});
+test('a continuation refused as changed is read again at most twice; a first page refusal is not retried',async()=>{
+ const always=[];
+ const changing=create({identity:()=>owner,changed:()=>{},request:async path=>{
+  if(path==='/me')return me;always.push(path.includes('after=')?'next':'first');
+  if(path.includes('after='))throw Object.assign(new Error('검사 목록이 바뀌었습니다.'),{status:409,code:'STUDY_LIST_CHANGED'});return page(0);}});
+ await assert.rejects(changing.read(),e=>e.code==='STUDY_LIST_CHANGED');
+ assert.deepEqual(always,['first','next','first','next','first','next']);assert.equal(changing.resumable,false);
+ let calls=0;
+ const firstRefused=create({identity:()=>owner,changed:()=>{},request:async path=>{
+  if(path==='/me')return me;calls++;throw Object.assign(new Error('검사 접근 범위가 바뀌었습니다.'),{status:409,code:'STUDY_LIST_CHANGED'});}});
+ await assert.rejects(firstRefused.read(),e=>e.code==='STUDY_LIST_CHANGED');assert.equal(calls,1);
+});
+test('a resumed read whose cursor no longer matches the list starts from the first page',async()=>{
+ const listed=rows.slice(1).map(r=>({...r})),{log,request}=server(listed);let fail=true;
+ const client=create({identity:()=>owner,changed:()=>{},request:async path=>{
+  if(path!=='/me'&&log.length===1&&fail){fail=false;log.push('lost');throw new Error('offline');}return request(path);}});
+ await assert.rejects(client.read({epoch:0}));assert.equal(client.resumable,true);
+ listed.unshift({...rows[0]});
+ const result=await client.read({resume:true,epoch:0});
+ assert.deepEqual(result.studies.map(r=>r.uid),rows.map(r=>r.uid));
+ assert.deepEqual(log,['first','lost','next','first','next','next']);
+});

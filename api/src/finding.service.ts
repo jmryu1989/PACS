@@ -436,7 +436,6 @@ export class FindingService {
         if (head.authorSub !== c.sub) denied();
         if (head.revision !== command.expectedRevision) conflict();
         if ((command.action === 'hide' && head.hidden) || (command.action === 'restore' && !head.hidden)) conflict();
-        if (head.revision + 1 > FINDING_LIMITS.history) storageLimit();
         // Version rule: an edit may promote version 1 to 2 but never write version 1 over version 2, whose
         // characteristics and job copies a shipped client cannot carry. Hide and restore keep the head's
         // version; on version 2 they also keep its content exactly.
@@ -505,16 +504,6 @@ export class FindingService {
       const sizes = await tx.$queryRaw<{ bytes: number }[]>`SELECT octet_length(convert_to(${serialized}::jsonb::text, 'UTF8')) AS bytes`;
       const bytes = sizes[0].bytes;
       if (bytes > FINDING_LIMITS.snapshot) storageLimit();
-      // Lifetime counts under the parent lock; revisions are append-only so the aggregate is the
-      // lifetime figure and hiding never recovers budget. They count every finding of this study,
-      // including those this caller cannot read, and the refusal names no finding or count.
-      const [usage] = await tx.$queryRaw<any[]>`SELECT
-        (SELECT count(*)::int FROM "Finding" WHERE "studyUid" = ${uid}) AS findings,
-        (SELECT count(*)::int FROM "FindingRevision" r JOIN "Finding" f ON f.id = r."findingId" WHERE f."studyUid" = ${uid}) AS revisions,
-        (SELECT COALESCE(sum(r."payloadBytes"), 0)::bigint FROM "FindingRevision" r JOIN "Finding" f ON f.id = r."findingId" WHERE f."studyUid" = ${uid}) AS bytes`;
-      const added = head ? 0 : 1;
-      if (usage.findings + added > FINDING_LIMITS.findings || usage.revisions + 1 > FINDING_LIMITS.revisions ||
-          Number(usage.bytes) + bytes > FINDING_LIMITS.bytes) storageLimit();
       const now = new Date(), revision = head ? head.revision + 1 : 1;
       // Preparation reads the same locked sources and limits as commit. It cannot
       // publish a finding before its signed D version and B2 event commit together.

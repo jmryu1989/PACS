@@ -280,6 +280,9 @@
         <label>이메일<input name="email" type="email" required maxlength="254" autocomplete="off"></label>
         <label>성<input name="lastName" required maxlength="128" autocomplete="off"></label>
         <label>이름<input name="firstName" required maxlength="128" autocomplete="off"></label>
+        <label>Institution<input name="institution" list="institution-options" required maxlength="128"></label>
+        <label>Role<select name="role" required><option value="">Select Role</option><option value="radiologist">Radiologist</option><option value="clinician">Clinician</option><option value="technician">Technician</option><option value="admin">Admin</option></select></label>
+        <p>대면 확인 후 기관과 역할을 지정합니다. 이메일 검증은 필수가 아닙니다.</p>
       </div>
       <div class="dialog-actions">
         <button type="button" data-close="create-dialog">Cancel</button>
@@ -303,7 +306,7 @@
           <label><input type="checkbox" name="role" value="admin">관리자</label>
           <label><input type="checkbox" name="role" value="clinician">임상의</label>
         </fieldset>
-        <label class="full check"><input type="checkbox" name="verificationOverride">대면 확인으로 이메일 검증 예외 승인</label>
+        <p class="full">대면 확인 후 승인합니다. 이메일 검증 여부는 승인 기록에 남습니다.</p>
       </div>
       <div class="dialog-actions">
         <button type="button" data-close="membership-dialog">Cancel</button>
@@ -527,7 +530,6 @@
           label.append(input, document.createTextNode(role));
           fieldset.append(label);
         });
-        form.elements.verificationOverride.checked = false;
         $("#membership-dialog").showModal();
       }
 
@@ -690,6 +692,7 @@
           const created = await request("POST", "/admin/users", {
             username: values.get("username"), email: values.get("email"),
             firstName: values.get("firstName"), lastName: values.get("lastName"),
+            institution: values.get("institution"), roles: [values.get("role")],
           });
           if (KinConsoleSession.ended()) return;
           form.reset();
@@ -731,8 +734,6 @@
           setDialogMessage("#membership-message", "변경된 내용이 없어 저장하지 않았습니다.");
           return;
         }
-        // 이메일 검증 예외는 승인·자격 변경에 붙는 표시일 뿐 그 자체로는 변경이 아니다.
-        if (form.elements.verificationOverride.checked) body.verificationOverride = true;
         $("#membership-dialog").close();
         state.editing = null;
         await mutate(base, body);
