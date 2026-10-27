@@ -108,7 +108,15 @@ server {
     include /etc/nginx/snippets/hsts.conf;
     include /etc/nginx/snippets/keycloak-admin-guards.conf;
 
-    # Self-service opens the password action; account identity changes stay in member administration.
+    # Keycloak 계정 콘솔(S7-U5 A018). 제품은 이 화면을 쓰지 않고 어디에서도 가리키지 않는다. 열어 두면 Keycloak 자신의
+    # SSO만으로 열려 제품의 콜백(끝내기로 한 세션을 막는 자리)을 지나지 않는다 — 제품이 세션을 끝낸 뒤 인증 서버의 종료가
+    # 확인되기 전의 틈에 다음 사람이 앞사람의 계정 화면에 닿는다. 로그인·가입·비밀번호 재설정·필수 동작
+    # (login-actions, protocol/openid-connect — Change Password의 UPDATE_PASSWORD 동작 포함)과 테마 자산(resources)은
+    # 다른 경로라 영향이 없다. 접속기록 신원(이메일·이름)의 다른 본인 수정 길은 렐름이 UPDATE_PROFILE·VERIFY_PROFILE을
+    # 꺼서 닫는다(keycloak/README.md).
+    # 정확 경로 둘이 아니라 대소문자를 가리지 않는 정규식 하나다(SEA-F05): `account;x=1`(행렬 매개변수 — Keycloak의 경로
+    # 대조는 무시한다), `account/…`, `ACCOUNT`, 그리고 nginx가 대조 전에 정규화하는 %-인코딩(`%61ccount`)·겹친 빗금·`/./`·
+    # `/../` 표기가 모두 여기서 끝난다. 이 경로 아래에는 prefix `^~` location이 없으므로 정규식이 `/auth/`보다 먼저 맞는다.
     location ~* ^/auth/realms/kin/account { return 404; }
 
     # Optional, administrator-owned auxiliary routes. Empty on installations
@@ -151,8 +159,8 @@ server {
         limit_except GET HEAD { deny all; }
     }
 
-    # 가입 신청은 BFF가 state·PKCE를 만든 뒤 Keycloak으로 보낸다. 진입점과 실제 등록
-    # 제출을 같은 제한 구역에 넣어 새 계정 생성 입력면을 양쪽에서 막는다.
+    # 가입 신청은 BFF가 state·PKCE를 만든 뒤 Keycloak으로 보낸다. IP별 요청 수 제한은 두지 않는다: 병원의 여러 사용자가
+    # 한 IP를 공유한다. 가입한 계정은 관리자 승인 전에는 업무 권한이 없고, 계정별 로그인 실패 잠금은 렐름 설정에 남는다.
     location = /api/auth/register {
         client_max_body_size 2m;
         proxy_pass http://api:3000;
@@ -207,11 +215,6 @@ server {
     location /auth/ {
         # Keycloak 로그인 템플릿은 단일 favicon.ico 링크만 낸다. 테마 템플릿을
         # 복제하지 않고 그 링크만 J1 SVG + 32px PNG 폴백으로 확장한다.
-        # Local proxy headers replace server inheritance; retain the public origin for account session checks.
-        proxy_set_header Host              $http_host;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-Host  $http_host;
-        proxy_set_header X-Forwarded-Port  ${PUBLIC_PORT};
         proxy_set_header Accept-Encoding "";
         # 이 location이 자기 proxy_set_header를 두므로 서버 수준의 것은 물려받지 않는다(S7-U5 A007): 접속지를 여기서
         # 다시 정하지 않으면 클라이언트가 보낸 X-Real-IP·X-Forwarded-For가 그대로 Keycloak에 닿는다. 프록시가 본 주소로

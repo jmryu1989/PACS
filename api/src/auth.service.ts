@@ -132,7 +132,10 @@ export type CallbackResult =
   | { kind: 'entered'; sid: string; proof: string; document: 'main.html' | 'clinician.html' }
   | { kind: 'redirect'; location: string }
   | { kind: 'work' }
+  | { kind: 'password'; status: PasswordActionStatus }
   | { kind: 'landing'; error: string };
+/** Keycloak AIA의 `kc_action_status`. 모르는 값·error 콜백은 `error`다 — 바뀌었다고도 안 바뀌었다고도 말하지 않는다. */
+export type PasswordActionStatus = 'success' | 'cancelled' | 'error';
 /**
  * refresh 교환의 답. `refused`는 Keycloak이 **그 refresh token을 거절했다고 답한 것**(400 invalid_grant: 만료·철회)뿐이다.
  * 연결 실패·시간 초과·5xx·읽지 못한 답·검증하지 못한 새 토큰은 `unavailable`이다 — 세션이 끝났다는 증거가 아니다.
@@ -1114,7 +1117,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 성공한 로그인은 세션과 함께 **진입 증명**을 만든다(U5S-REQ-09): 콜백이 이동시키는 그 문서가 "방금 이 로그인을 한
    * 문서"임을 한 번 보일 수 있는 값이다. 저장하는 것은 해시와 만료뿐이고, 원문은 이동 주소의 fragment로만 나간다.
    */
-  async finishCallback(req: any, res: any, query: { code?: string; state?: string; error?: string }): Promise<CallbackResult> {
+  async finishCallback(req: any, res: any, query: { code?: string; state?: string; error?: string; actionStatus?: string }): Promise<CallbackResult> {
     const { code, state, error } = query;
     if ((!code || !state) && await this.hasSession(req)) return { kind: 'work' };
     const flows = this.pendingFlows(req);
@@ -1143,9 +1146,12 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     }
 
     const flow = own.pending;
-    // This action grants no product session and makes no claim about completion (the user may cancel).
-    // Keep the existing document's session/cookie; normal login handles a session that ended while it was open.
-    if (flow.action === 'UPDATE_PASSWORD') return { kind: 'work' };
+    // The password action grants no product session: its code is never exchanged and the working document's
+    // session/cookie stay as they were. The tab only reports Keycloak's own outcome so the user knows which password holds.
+    if (flow.action === 'UPDATE_PASSWORD') {
+      const status = query.actionStatus;
+      return { kind: 'password', status: !error && (status === 'success' || status === 'cancelled') ? status : 'error' };
+    }
     if (error) {
       // probe의 login_required: 이 브라우저에 끝낼 SSO가 없다. 마지막 단계로 간다.
       if (flow.phase === 'probe' && error === 'login_required')

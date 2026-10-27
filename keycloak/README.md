@@ -1,8 +1,31 @@
 # Keycloak 렐름 (개발용)
 
-첫 기관의 기본 회원 생성은 관리자가 대면 확인 후 기관·역할을 지정하는 방식이다. `verifyEmail`은 기본 false이며 병원에서 이메일 검증을 선택하면 렐름에서 켤 수 있다. 이메일 미검증 자체는 회원 승인을 막지 않는다. 사용자는 업무 화면의 **Change Password**에서 Keycloak의 `UPDATE_PASSWORD` 동작만 열어 비밀번호를 직접 변경한다. 계정 콘솔은 열지 않으며 이메일·이름 등 감사 식별 정보는 관리자가 변경한다. 기존 설치는 API와 nginx·업무 화면을 함께 갱신한다(렐름 재import 불필요). [Keycloak AIA](https://www.keycloak.org/docs/26.7.0/server_admin/#_application_initiated_actions) 경로는 완료·취소 후 기존 업무 세션으로 돌아오고 새 제품 세션을 만들지 않는다. 계정별 실패 잠금과 유휴 종료 설정은 유지한다.
+첫 기관의 기본 회원 생성은 관리자가 대면 확인 후 기관·역할을 지정하는 방식이다. `verifyEmail`은 기본 false이며 병원에서 이메일 검증을 선택하면 렐름에서 켤 수 있다. 이메일 미검증 자체는 회원 승인을 막지 않는다. 사용자는 업무 화면의 **Change Password**에서 Keycloak의 `UPDATE_PASSWORD` 동작만 열어 비밀번호를 직접 변경한다. 계정 콘솔은 열지 않으며 이메일·이름 등 감사 식별 정보는 관리자가 변경한다. 기존 설치는 API와 nginx·업무 화면을 함께 갱신한다(렐름 재import 불필요). [Keycloak AIA](https://www.keycloak.org/docs/26.7.0/server_admin/#_application_initiated_actions) 경로는 완료·취소·실패를 그 탭에 한국어로 알리고(`kc_action_status`), 새 제품 세션을 만들지 않으며 업무 화면의 세션은 그대로 둔다. 계정별 실패 잠금과 유휴 종료 설정은 유지한다.
 
 기존 렐름은 import 파일 변경으로 갱신되지 않는다. 기존 설치의 선택적 이메일 검증은 Keycloak 관리 콘솔 Realm settings에서 적용하며 SMTP는 이메일 검증·메일 재설정을 선택할 때만 필요하다.
+
+## 접속기록 신원은 관리자만 바꾼다 (의료법 제23조④ 접속기록)
+
+API는 토큰의 `email`을 접속기록·판독·질의의 actor로, `firstName`·`lastName`을 표시 이름으로 쓴다. 가입한 뒤의 사용자가 이 값을
+스스로 바꾸면 같은 사람의 기록이 본인이 고른 신원으로 남는다. Keycloak에서 로그인한 사용자가 프로필을 고치는 길은 셋이다:
+계정 콘솔·계정 REST(`/realms/kin/account…`, nginx가 404로 닫는다), 주소에 `kc_action=UPDATE_PROFILE`을 붙인 필수 동작,
+프로필이 불완전할 때 뜨는 `VERIFY_PROFILE`. 그래서 렐름은 `UPDATE_PROFILE`·`VERIFY_PROFILE` 필수 동작을 **끈다**
+(`kin-realm.json`의 `requiredActions`). `verifyEmail=false`(이메일 확인이 실패 장벽이던 이전 설정이 빠졌다)인 지금은 이것이
+본인 변경을 막는 자리다. 이메일·이름 변경은 회원 관리(Admin API)로만 한다.
+
+user profile의 `email`·`firstName`·`lastName`을 관리자 전용 편집(`edit: [admin]`)으로 바꾸는 방법은 쓰지 않는다:
+26.7.3에서 가입(REGISTRATION)도 사용자 문맥이라, 그 설정은 가입 폼에서 이메일·이름을 빼고 actor가 될 이메일 없이 계정을
+만든다. 필수 동작을 끄는 것은 가입 폼에 영향이 없다(`tests/e2e/test_caution_app.py`가 가입 입력과 본인 변경 거절을 함께 확인).
+
+`requiredActions`를 렐름 파일에 적으면 Keycloak은 기본 목록을 넣지 않고 적힌 것만 만든다(`delete_account`만 따로 더한다).
+그래서 파일에는 26.7.3의 기본 목록 전체를 두고 위 둘만 `enabled:false`로 둔다. Keycloak을 올릴 때는 새 기본 동작이
+빠지지 않았는지 관리 콘솔 Authentication → Required actions(또는 `GET /admin/realms/kin/authentication/unregistered-required-actions`)로 확인한다.
+
+**기존 설치(import가 적용되지 않는다):** 관리 콘솔 → `kin` 렐름 → Authentication → Required actions에서
+`Update Profile`과 `Verify Profile`의 Enabled를 끈다. Admin REST로는 각 동작을
+`GET /admin/realms/kin/authentication/required-actions/{UPDATE_PROFILE|VERIFY_PROFILE}`로 읽어 `enabled:false`로 `PUT`한다.
+렐름 재import·사용자 변경은 필요 없다. 끈 뒤 로그인한 시험 계정으로 `kc_action=UPDATE_PROFILE` 주소를 열어 이메일이 바뀌지
+않는지 확인한다.
 
 `kin-realm.json`은 빈 Keycloak PostgreSQL DB를 처음 띄울 때만 들어간다
 (`start-dev --import-realm`, 운영은 `start --import-realm`; 둘 다 아래 세션 캐시 옵션을 함께 준다).
@@ -58,7 +81,7 @@ Keycloak 자체 DB migration이 있는 minor 업그레이드다. 업그레이드
 
 - SMTP: `smtp.gmail.com:587`, STARTTLS, 인증 사용
 - 발신 주소: `no-reply@koreaimagingnetwork.com`
-- 렐름 정책: `verifyEmail=true`, `resetPasswordAllowed=true`
+- 렐름 정책: `verifyEmail=false`(병원 선택 시 켠다), `resetPasswordAllowed=true`
 - 이메일 언어: 기본 한국어(`kin-email`), 필요 시 영어 선택
 - SMTP 앱 비밀번호는 사용자가 무표시 입력으로 라이브 렐름에만 넣는다.
 
@@ -78,8 +101,8 @@ password=<SMTP_APP_PASSWORD>
 
 자기 가입은 `registrationAllowed=true`이지만 프론트가 Keycloak 등록 주소를 직접 만들지 않는다.
 `/api/auth/register`가 state·PKCE·pending 쿠키를 만든 다음 `prompt=create`로 넘기는 경로만
-사용한다. 가입 직후에는 기관·업무 역할이 없어 승인 대기 상태이며, 이메일 검증을 마친 계정만
-관리자가 승인할 수 있다.
+사용한다. 가입 직후에는 기관·업무 역할이 없어 승인 대기 상태이며, 관리자가 대면 확인 후 승인한다
+(이메일 미검증 승인은 감사 기록에 남는다).
 
 비밀번호는 최소 8자리만 요구하고 12자리·문자 조합을 강제하지 않는다. 세션 유휴 4시간과
 5회 실패 잠금은 HPACS가 2025년 6월에야 넣은 정책이다

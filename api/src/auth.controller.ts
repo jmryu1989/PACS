@@ -1,6 +1,20 @@
 import { Body, Controller, Get, HttpCode, Post, Query, Req, Res } from '@nestjs/common';
-import { AuthService, markAuthCode } from './auth.service';
+import { AuthService, markAuthCode, PasswordActionStatus } from './auth.service';
 import { Public } from './auth.guard';
+
+const PASSWORD_NOTICES: Record<PasswordActionStatus, string> = {
+  success: '비밀번호를 변경했습니다. 다음 로그인부터 새 비밀번호를 사용합니다. 업무 화면의 로그인은 그대로 유지됩니다.',
+  cancelled: '비밀번호 변경을 취소했습니다. 비밀번호는 바뀌지 않았습니다.',
+  error: '비밀번호 변경을 마치지 못했습니다. 변경 여부를 확인하지 못했으니 Change Password를 다시 열거나 관리자에게 문의하세요.',
+};
+
+/** 고정 문장만 싣는 결과 문서. 스크립트가 없어 CSP와 무관하고, 업무 문서를 하나 더 열지 않는다. */
+function passwordResultPage(status: PasswordActionStatus): string {
+  return '<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>Change Password</title>'
+    + '<meta name="viewport" content="width=device-width, initial-scale=1"></head><body>'
+    + `<h1>Change Password</h1><p>${PASSWORD_NOTICES[status]}</p>`
+    + '<p>이 탭을 닫고 업무 화면으로 돌아가세요.</p></body></html>';
+}
 
 @Controller('auth')
 export class AuthController {
@@ -65,11 +79,12 @@ export class AuthController {
     @Query('code') code?: string,
     @Query('state') state?: string,
     @Query('error') error?: string,
+    @Query('kc_action_status') actionStatus?: string,
   ) {
     const pages = `${this.origin()}/worklist/hpacs-lite`;
     let result;
     try {
-      result = await this.auth.finishCallback(req, res, { code, state, error });
+      result = await this.auth.finishCallback(req, res, { code, state, error, actionStatus });
     } catch {
       result = { kind: 'landing' as const, error: 'login_failed' };
     }
@@ -81,6 +96,8 @@ export class AuthController {
       res.redirect(302, result.location);
     } else if (result.kind === 'work') {
       res.redirect(302, `${pages}/main.html`);
+    } else if (result.kind === 'password') {
+      res.status(200).type('html').set('Cache-Control', 'no-store').send(passwordResultPage(result.status));
     } else {
       res.redirect(302, `${pages}/index.html?auth_error=${encodeURIComponent(result.error)}`);
     }
