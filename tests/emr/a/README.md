@@ -194,3 +194,63 @@ They do not prove that a page displayed anything; the served renderer is A5.
 The route's EMR route classification (`api/src/emr-contract/routes.ts`) is
 outside A4's paths and is handed to its owner; until it lands,
 `tests/emr_contract_test.cjs` TEST-EMR-01-A reports the unclassified route.
+
+## A5 served report display reports
+
+`worklist-v0/hpacs-lite/report-view-observation.js` (a classic script main.html
+tags after `related-report-mode.js`, before the bundle; Orthanc serves the
+mounted directory through nginx's existing `/worklist/` location, so the proxy
+needed no change) decides when a provided report is displayed and sends A4's
+`POST studies/:uid/view-observations` through the page's own `api()` and the
+work context of the read that provided it. Two surfaces use it:
+
+- Related Source (`related-report.js`): of the rows A2 provided, only the
+  version the Source shows (`#prior-report-content` or the mode's text) is
+  reported, naming that row's `accessRef`.
+- Report History (`report-history.js`): each version row is reported once it
+  is on screen in the scrolled list; Show Citations reports the evidence block
+  of an answer drawn as that version's evidence (`report-evidence`).
+
+Displayed means: the page's own freshness check of that read still holds
+(request sequence, selection, open History, work context), the document is
+visible, and a node is connected, outside `[hidden]`/`[inert]` and any open
+modal, rendered, and inside the viewport (IntersectionObserver). An arrived
+answer, a row outside the list's viewport or a discarded A->B->A answer is not
+a display. One event per opening and stored version: an opening is one Source
+selection or one History opening; the page's re-read of the same Source on a
+list refresh is the same display, another Source (even before it draws) or a
+reopened History is a new one. The event keeps its ID and display time, so a
+resend after a lost acknowledgement is the same event (A4 replays it). A resend
+happens only at an existing chance (a re-render, the node coming on screen, the
+tab becoming visible); no timer, backoff or queue. 400/403/404/409 stay
+refused, an ended session ends it, anything else stays unconfirmed. A failed
+report never removes the shown text and asks the doctor nothing. The page keeps
+no report body cache: every opening reads again, so a reopened History is new
+provisions with new display events.
+
+The live suite runs on the real stack (HTTPS entry, BFF login, API, ledger);
+the witness reads `emr_access.access_entry` back through the stack's database
+container. Playwright only holds or drops external transport (a held version
+read, a dropped acknowledgement); nothing is injected into the page:
+
+```sh
+python scripts/run-tests.py --module tests/emr/a/report_observation_browser_test.py --mode live --unit module-a-05-browser --timeout 1800
+```
+
+Cases: 01 Related shows v2 of a Source with v1/v2 provided, reports only v2,
+Back and re-entry add nothing; 02 a dropped acknowledgement is resent as the
+same event at re-entry, one ledger entry; 03 A->B->A with a held read of A:
+the late answer is never reported, B shown again is a new display; 04 History
+reports only rows on screen, scrolling reports the rest, Show Citations reports
+the evidence, scrolling back adds nothing, reopening is new events on new
+provisions; 05 a report the first account never delivered is not sent after
+Log Out and a second account's login, whose display names its own provision;
+06 an answer drawn in a background tab is reported only once visible. Headless
+Chromium keeps every page visible (measured with Playwright 1.60: another page,
+a minimized window and a second tab), so 06 reports itself skipped there
+(NOT_RUN) and needs a headed browser. The 1800-second hang timeout is the one
+AGENTS.md gives the candidate worklist suite.
+
+Candidate selection: `tests/candidate_ci.py` FLOWS runs case 01 on the G3
+candidate stack (one flow per file). Cases 02-06 are selected by the command
+above only.

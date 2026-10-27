@@ -94,6 +94,7 @@ DECIDED_REGIONS = (
     ('W5-UI Phase A: Related-mode reason lines', '#cvr-sent-mode-reason, #cvr-inbox-mode-reason', 'node', None),
     ('W5-UI Phase B: Related Report mode', '#related-mode', 'tree', None),
     ('W5-UI Phase B', 'link[href="related-report-mode.css"], script[src="related-report-mode.js"]', 'node', None),
+    ('MODULE_A A5: report display reports', 'script[src="report-view-observation.js"]', 'node', None),
     ('S9-U4b D1486/D1617/D1668: DICOM Transfer', '#study-transfer', 'tree', None),
     ('S9-U4b D1486', '#t-import, style:has(+ #study-transfer), script[src="study-transfer-local.js"]', 'node', None),
     ('EMR-D #219: clinical signing facts', 'script[src="clinical-signature.js"]', 'node', None),
