@@ -9724,6 +9724,9 @@
         document.body.style.setProperty('--workspace-rail-width', clampPanel(geometry.rail ?? 220, 160, Math.max(160, innerWidth / 3)) + 'px');
         $('#rail-collapse')?.setAttribute('aria-expanded', String(!geometry.railCollapsed));
       }
+      // Before any measuring below: a hidden report window panel changes the heights and widths measured there.
+      const panelClasses = KinWorkspaceLayout.panelClasses(geometry?.hiddenPanels || [], $('.s-template').style.display !== 'none');
+      for (const [name, on] of Object.entries(panelClasses)) document.body.classList.toggle(name, on);
       const left = $(".left"), related = $(".related-p"), top = $(".rw"), prior = $(".related-list-pane");
       left.style[portrait ? "height" : "width"] = "";
       related.style[portrait ? "height" : "width"] = "";
@@ -11414,7 +11417,53 @@
     // fixed window, and so do the first rendered rows.
     for (const node of [...$('.related-list-pane').children, $('#relrows'), $('.left > .grid thead'), $('#rows'),
       ...[...$('.left').children].filter(child => !child.matches('.grid, #worklist-folders-panel'))]) workspaceObserver.observe(node);
+    // ── Panel Settings (Minhoon 2026-10-27 item 9) ──
+    // Which report window panels stay on screen. Kept in the same layout record as the rail and panel sizes, so
+    // Account Layout carries it to another browser and Reset Layout shows every panel again. Display only: the panels
+    // and their content stay in the document; AI Report / Image Report remain the placeholder tabs.
+    const panelDialog = document.createElement('dialog');
+    panelDialog.id = 'panel-settings-dialog'; panelDialog.setAttribute('aria-labelledby', 'panel-settings-title');
+    panelDialog.innerHTML = `<h2 id="panel-settings-title">Panel Settings</h2>
+      <p>판독 창 위쪽 패널을 보이거나 숨깁니다. 숨긴 패널의 자리는 옆 패널과 관련 검사·판독문 영역이 씁니다.
+      Study Panel과 판독 화면의 검사 정보 열기에서는 모든 패널을 볼 수 있습니다.</p>
+      <fieldset><legend>Show Panels</legend>${[['thumbnail', 'Thumbnail'], ['aiReport', 'AI Report'], ['imageReport', 'Image Report'],
+        ['clinical', 'Clinical Information'], ['template', 'Reading Template']].map(([key, label]) =>
+        `<label${key === 'aiReport' || key === 'imageReport' ? ' title="추후 구현 탭입니다. 표시 여부만 정합니다."' : ''}><input type="checkbox" data-panel="${key}"> ${label}</label>`).join('')}</fieldset>
+      <p>이 브라우저에 계정별로 기억합니다. 다른 기기에서는 View &gt; Account Layout으로 계정에 저장하고 불러오세요.</p>
+      <p id="panel-settings-status" role="status"></p>
+      <footer><button type="button" id="panel-settings-show-all">Show All Panels</button><button type="button" id="panel-settings-close">Close</button></footer>`;
+    document.body.append(panelDialog);
+    const hiddenPanelsNow = () => workspaceState.workspace?.hiddenPanels?.slice() || [];
+    function renderPanelSettings() {
+      const hidden = hiddenPanelsNow(), editable = workspaceEditable();
+      for (const input of panelDialog.querySelectorAll('input[data-panel]')) { input.checked = !hidden.includes(input.dataset.panel); input.disabled = !editable; }
+      $('#panel-settings-show-all').disabled = !editable || !hidden.length;
+    }
+    function choosePanels(hidden) {
+      if (!workspaceEditable()) { renderPanelSettings(); return; }
+      const next = KinWorkspaceLayout.withHiddenPanels(workspaceState, KinWorkspaceLayout.PANELS.filter(key => hidden.includes(key)));
+      if (!next) { $('#panel-settings-status').textContent = '패널 설정을 확인할 수 없습니다. Reset Layout으로 기본 배치를 사용할 수 있습니다.'; return; }
+      // The dialog says the outcome itself: rewriting the toolbar status line would wrap it in narrow windows and move
+      // the list and the work area under the reader (W3R7-04, as for Study Panel choices).
+      workspaceState = next; applyLayout(); saveWorkspace(true); renderPanelSettings();
+      $('#panel-settings-status').textContent = workspaceLocalKept ? '패널 표시를 기억했습니다 · 이 브라우저'
+        : '패널 표시를 이 창에만 적용했습니다. 브라우저에 저장하지 못했습니다.';
+    }
+    panelDialog.querySelector('fieldset').addEventListener('change', event => {
+      const input = event.target.closest('input[data-panel]'); if (!input) return;
+      const hidden = hiddenPanelsNow().filter(key => key !== input.dataset.panel);
+      choosePanels(input.checked ? hidden : [...hidden, input.dataset.panel]);
+    });
+    $('#panel-settings-show-all').addEventListener('click', () => choosePanels([]));
+    $('#panel-settings-close').addEventListener('click', () => panelDialog.close());
+    panelDialog.addEventListener('close', () => { const opener = $('#panel-settings-open'); if (!opener.disabled) opener.focus({ preventScroll: true }); });
+    $('#panel-settings-open').addEventListener('click', () => {
+      if (!workspaceEditable() || panelDialog.open) return;
+      $('#panel-settings-status').textContent = ''; renderPanelSettings(); panelDialog.showModal();
+      panelDialog.querySelector('input[data-panel]').focus();
+    });
     function stopWorkspaceLayout() {
+      if (panelDialog.open) panelDialog.close();
       workspaceEnded = true; workspaceGeneration++;
       workspaceDragCancel?.(); workspaceObserver.disconnect(); cancelAnimationFrame(splitFrame); splitFrame = 0;
       window.removeEventListener('resize', applyLayout);

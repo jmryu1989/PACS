@@ -195,6 +195,9 @@
         document.body.style.setProperty('--workspace-rail-width', clampPanel(geometry.rail ?? 220, 160, Math.max(160, innerWidth / 3)) + 'px');
         $('#rail-collapse')?.setAttribute('aria-expanded', String(!geometry.railCollapsed));
       }
+      // Before any measuring below: a hidden report window panel changes the heights and widths measured there.
+      const panelClasses = KinWorkspaceLayout.panelClasses(geometry?.hiddenPanels || [], $('.s-template').style.display !== 'none');
+      for (const [name, on] of Object.entries(panelClasses)) document.body.classList.toggle(name, on);
       const left = $(".left"), related = $(".related-p"), top = $(".rw"), prior = $(".related-list-pane");
       left.style[portrait ? "height" : "width"] = "";
       related.style[portrait ? "height" : "width"] = "";

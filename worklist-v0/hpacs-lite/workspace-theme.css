@@ -1,0 +1,133 @@
+/* Work page palette (Minhoon 2026-10-27 item 11): the worklist and the report editor use the five colours that
+   viewer-ux-theme.css gives the viewer. Background #212121, panels #2d2d2d, primary text #e3e3e3, secondary text
+   #b4b4b4, selected/active #8ab4c8. Sky blue marks selection, focus and accents only, never running text; status
+   colours (RS, TS, EM, holds, draft/critical notices) keep their meaning colours. Lines and soft fills are those five
+   colours at an alpha, so no sixth colour is introduced. A reader's saved text colour (Appearance & Tools, Columns)
+   still wins: its Default resolves to --kin-text, its other choices are fixed values that this file does not touch.
+   Loaded last so equal selectors here win over main.html and the panel stylesheets. */
+:root {
+  --kin-bg: #212121;
+  --kin-panel: #2d2d2d;
+  --kin-panel2: #2d2d2d;
+  --kin-text: #e3e3e3;
+  --kin-muted: #b4b4b4;
+  --kin-dim: #b4b4b4;
+  --kin-link: #8ab4c8;
+  --kin-accent: #8ab4c8;
+  --kin-line: #b4b4b426;
+  --kin-line2: #b4b4b440;
+  --kin-border: #b4b4b440;
+  --kin-row-sel: #8ab4c833;
+  --kin-row-hover: #e3e3e30d;
+  --kin-focus-ring: #8ab4c833;
+  --kin-btn: #8ab4c8;
+}
+
+/* Data text is not an accent: Accession No and the shown study line read as text. */
+.left .grid td.acc { color: var(--kin-text); }
+#related-current, .prior-report-head .meta { color: var(--kin-muted); }
+.brand span { color: var(--kin-muted); }
+/* The session's institution and roles are text (an inline colour in main.html, hence !important). */
+.session-who #roles { color: var(--kin-muted) !important; }
+
+/* Primary actions sit on the accent with dark text (light text on #8ab4c8 is unreadable). */
+.rbtns .approve, .rfoot2 .approve, .modal .foot .ok { background: var(--kin-accent); color: var(--kin-bg); border-color: var(--kin-accent); }
+.qf button.on, .toolbar-menu[open] > summary { color: var(--kin-text); background: var(--kin-row-sel); border-color: var(--kin-accent); }
+#b-monitor { border-color: var(--kin-accent); color: var(--kin-text); background: var(--kin-panel); }
+.menubar .item:active, .ctx div:hover { background: var(--kin-row-sel); color: var(--kin-text); }
+.tabs > div:active, .rtabs div:active, .reltabs div:active { color: var(--kin-accent); background: var(--kin-panel); }
+.ctx div:not(.dis):active, tbody tr:active td, thead th:active { background: var(--kin-row-sel); }
+.thumbs img:active { outline-color: var(--kin-accent); }
+.redit textarea:focus { border-color: var(--kin-accent); }
+#worklist-pages :focus-visible, #column-manager :focus-visible { outline-color: var(--kin-accent); }
+
+/* Shared tables outside the worklist grid (Related Exam, templates, dialogs). */
+th, td { border-color: var(--kin-line); }
+thead th { background: var(--kin-panel); color: var(--kin-muted); }
+thead tr.filters th { background: var(--kin-panel); }
+tbody tr:hover td { background: var(--kin-row-hover); }
+tbody tr.sel td { background: var(--kin-row-sel); }
+.empty { color: var(--kin-muted); }
+
+/* Report window band: thumbnails, clinical information, reading templates. The image well stays black. */
+.rw section { border-color: var(--kin-line2); }
+.thumb-card { background: var(--kin-bg); border-color: var(--kin-line2); }
+.thumb-number, .thumb-preview, .thumb-full { color: var(--kin-text); }
+.thumb-description, .thumb-images-view > p { color: var(--kin-muted); }
+.thumb-images-toolbar select, .tpl-opts select, .tpl-search input { background: var(--kin-bg); color: var(--kin-text); border-color: var(--kin-line2); }
+.tpl-opts { background: var(--kin-panel); color: var(--kin-muted); }
+.tpl-filter-status, .clinical, .s-clinical .clinical-context, .clinical-context .cc-note, .clinical-context .cc-source { color: var(--kin-muted); }
+.clinical-context .cc-section-head { color: var(--kin-text); }
+.s-clinical .clinical-context { border-top-color: var(--kin-line2); }
+.clinical-context .cc-state, .clinical-context .cc-badge { border-color: var(--kin-line2); }
+.clinical-context-head h4, #clinical-context-scope, .clinical td:first-child { color: var(--kin-muted); }
+
+/* Related Exam and the prior report beside the editor. */
+.reltabs button, .related-filter button { background: var(--kin-panel); border-color: var(--kin-line2); color: var(--kin-muted); }
+.reltabs label { color: var(--kin-muted); }
+.prior-report-value { background: var(--kin-bg); }
+
+/* Report editor and the rows under it. */
+.redit label { color: var(--kin-muted); }
+.recnote, #citelist { background: var(--kin-panel); border-top-color: var(--kin-line2); color: var(--kin-text); }
+#recnote-text, #citelist h5 { color: var(--kin-text); }
+#citelist .cite-note { color: var(--kin-muted); }
+#citelist .cite-entry { border-bottom-color: var(--kin-line); }
+#dictation-pane { background: var(--kin-panel); border-top-color: var(--kin-accent); color: var(--kin-text); }
+#dictation-text { background: var(--kin-bg); border-color: var(--kin-line2); color: var(--kin-text); }
+#dictation-place, #dictation-meta { color: var(--kin-muted); }
+
+/* Context menu, modals, toast and report history. */
+.ctx, #toast, .leftnote { background: var(--kin-panel); border-color: var(--kin-line2); color: var(--kin-text); }
+#toast.info, .leftnote { border-left-color: var(--kin-accent); }
+.ctx hr { border-top-color: var(--kin-line2); }
+.ctx div.dis, .ctx div.dis:hover { color: var(--kin-muted); }
+.modal .box { background: var(--kin-panel); border-color: var(--kin-line2); }
+.modal .box h3, .modal .foot { background: var(--kin-bg); color: var(--kin-text); }
+.modal .body label, .modal .note, .stalecols h5 { color: var(--kin-muted); }
+.modal .body input, .modal .body select, .modal .tplbody textarea, .stalecols pre, .hist pre { background: var(--kin-bg); border-color: var(--kin-line2); color: var(--kin-text); }
+.modal .foot button { background: var(--kin-panel); border-color: var(--kin-line2); color: var(--kin-text); }
+#cite-preview-target, #cite-preview-source, #stale-msg, .stalecols h4, .vh b, .vcite h5 { color: var(--kin-text); }
+.stalecols section, #tpl-source, #tpl-preview-target { border-color: var(--kin-line2); }
+.vh, .vcite p { color: var(--kin-muted); }
+.ver { border-left-color: var(--kin-line2); }
+.vcite { border-left-color: var(--kin-line); }
+.tele-tag { border-color: var(--kin-accent); color: var(--kin-text); }
+
+/* Dialogs created by page scripts (their <style> is appended after this file, hence the html prefix). */
+html #reading-appearance-dialog, #panel-settings-dialog { background: var(--kin-panel); color: var(--kin-text); border: 1px solid var(--kin-line2); }
+html #reading-appearance-dialog select, html #reading-appearance-dialog button { background: var(--kin-bg); color: var(--kin-text); border-color: var(--kin-line2); }
+#panel-settings-dialog { width: 420px; max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); overflow: auto; box-sizing: border-box; border-radius: 8px; padding: 20px; font-size: 14px; }
+#panel-settings-dialog::backdrop { background: #0009; }
+#panel-settings-dialog h2 { margin: 0 0 12px; font-size: 18px; }
+#panel-settings-dialog p { color: var(--kin-muted); line-height: 1.5; }
+#panel-settings-dialog fieldset { border: 1px solid var(--kin-line2); border-radius: 6px; }
+#panel-settings-dialog label { display: block; margin: 8px 0; cursor: pointer; }
+#panel-settings-dialog input { accent-color: var(--kin-accent); }
+#panel-settings-dialog footer { display: flex; gap: 12px; justify-content: flex-end; }
+#panel-settings-dialog button { font: inherit; padding: 6px 10px; background: var(--kin-bg); color: var(--kin-text); border: 1px solid var(--kin-line2); border-radius: 4px; cursor: pointer; }
+#panel-settings-dialog button:disabled { opacity: .5; cursor: default; }
+#panel-settings-dialog :focus-visible { outline: 2px solid var(--kin-accent); outline-offset: 2px; }
+dialog.kin-logout { background: var(--kin-panel); color: var(--kin-text); border-color: var(--kin-line2); }
+dialog.kin-logout::backdrop { background: var(--kin-bg); }
+dialog.kin-logout button { color: var(--kin-text); background: var(--kin-bg); border-color: var(--kin-line2); }
+.kin-closed-note { color: var(--kin-muted); }
+
+/* Reading layout (reading-workspace.css): bars, target lines, the list overlay and the findings drawer. The image
+   frame and its well stay black. */
+#reading-bar, #reading-report-target { background: var(--kin-panel); border-color: var(--kin-line2); }
+#reading-findings-nav:not(:empty) { background: var(--kin-panel); }
+#reading-target, #reading-report-target { color: var(--kin-text); }
+#reading-position, #reading-shortcut-help, #reading-shortcuts, #reading-images, #reading-status, .clinical-scope,
+#reading-findings-status, #reading-findings-target, #reading-findings .reading-findings-meta { color: var(--kin-muted); }
+body.reading .right, body.reading .related-p, #reading-findings article { border-color: var(--kin-line2); }
+body.reading.reading-list-open .split > .left { background: var(--kin-bg); border-right-color: var(--kin-line2); }
+body.reading .reading-panel-separator { background: var(--kin-bg); }
+.reading-panel-separator::after { background: var(--kin-line2); }
+.reading-panel-separator:hover::after, .reading-panel-separator:focus-visible::after { background: var(--kin-accent); }
+#m-reading { color: var(--kin-text); background: var(--kin-row-sel); border-color: var(--kin-accent); }
+#reading-findings { background: var(--kin-panel); color: var(--kin-text); border-color: var(--kin-line2); }
+#reading-findings button { background: var(--kin-bg); border-color: var(--kin-line2); color: var(--kin-text); }
+#reading-shortcut-help > summary:focus-visible, body.reading .prior-report-pane:focus-visible, body.reading #reading-frame:focus-visible,
+body.reading #clinical:focus-visible, #reading-findings button:focus-visible, #reading-findings input:focus-visible,
+.reading-panel-separator:focus-visible { outline-color: var(--kin-accent); }

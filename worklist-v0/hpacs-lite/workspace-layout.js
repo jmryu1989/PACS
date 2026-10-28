@@ -31,13 +31,27 @@
     }
     return clean;
   }
+  // Report window panels the reader hid in Panel Settings (Minhoon 2026-10-27 item 9). Sparse like studyPanel: a
+  // record without the field shows every panel, so records written before it need no migration.
+  const PANELS = Object.freeze(['thumbnail', 'aiReport', 'imageReport', 'clinical', 'template']);
+  function normalizeHidden(value) {
+    if (!Array.isArray(value) || new Set(value).size !== value.length || value.some(k => !PANELS.includes(k))) return null;
+    return PANELS.filter(k => value.includes(k));
+  }
+  function withHiddenPanels(value, hidden) {
+    const clean = toVersion3(value), panels = normalizeHidden(hidden);
+    if (!clean || !panels) return null;
+    const workspace = { ...clean.workspace };
+    if (panels.length) workspace.hiddenPanels = panels; else delete workspace.hiddenPanels;
+    return normalize({ ...clean, workspace });
+  }
   function normalizeV3(value) {
     if (Object.keys(value).some(k => !['version', 'mode', 'portrait', 'landscape', 'reading', 'workspace'].includes(k))) return null;
     const legacy = normalize({ version: 2, mode: value.mode, portrait: value.portrait,
       landscape: value.landscape, reading: value.reading });
     const workspace = value.workspace, clean = workspaceDefaults();
     if (!legacy || !object(workspace) || Object.keys(clean).some(k => !Object.hasOwn(workspace, k))
-        || Object.keys(workspace).some(k => !Object.hasOwn(clean, k) && k !== 'studyPanel') || workspace.version !== 1
+        || Object.keys(workspace).some(k => !Object.hasOwn(clean, k) && !['studyPanel', 'hiddenPanels'].includes(k)) || workspace.version !== 1
         || typeof workspace.railCollapsed !== 'boolean'
         || !['images', 'info', 'templates'].includes(workspace.studyPanelTab)) return null;
     for (const name of ['rail', 'worklist', 'related', 'prior']) {
@@ -54,6 +68,11 @@
       const studyPanel = normalizeStudyPanel(workspace.studyPanel);
       if (!studyPanel) return null;
       if (Object.keys(studyPanel).length) clean.studyPanel = studyPanel;
+    }
+    if (Object.hasOwn(workspace, 'hiddenPanels')) {
+      const hidden = normalizeHidden(workspace.hiddenPanels);
+      if (!hidden) return null;
+      if (hidden.length) clean.hiddenPanels = hidden;
     }
     return { ...legacy, version: 3, workspace: clean };
   }
@@ -140,7 +159,19 @@
     try { storage.removeItem(owner); return true; }
     catch (_) { return false; }
   }
-  const api = { PREFIX, defaults, normalize, withReading, workspaceDefaults, toVersion3, withStudyPanel, mergeLoaded, key, read, write, remove };
+  const hiddenPanels = value => normalize(value)?.workspace?.hiddenPanels?.slice() || [];
+  // The body classes main.html's Panel Settings rules read. The band (and its separator) empties only when every panel
+  // it would show is hidden; `templateShown` is the mode's own choice (Technician never shows templates).
+  function panelClasses(hidden, templateShown = true) {
+    const off = key => hidden.includes(key), classes = {};
+    for (const key of PANELS) classes['kin-hide-' + key] = off(key);
+    classes['kin-panels-trimmed'] = PANELS.some(off);
+    classes['kin-report-window-empty'] = off('thumbnail') && off('aiReport') && off('imageReport') && off('clinical')
+      && (off('template') || !templateShown);
+    return classes;
+  }
+  const api = { PREFIX, PANELS, defaults, normalize, withReading, workspaceDefaults, toVersion3, withStudyPanel,
+    withHiddenPanels, hiddenPanels, panelClasses, mergeLoaded, key, read, write, remove };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.KinWorkspaceLayout = api;
 })(globalThis);

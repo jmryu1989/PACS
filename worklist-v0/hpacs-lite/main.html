@@ -195,6 +195,21 @@
     .clinical-context .cc-body { white-space: pre-wrap; margin: 0 0 3px 8px; }
     #clinical-context-scope { margin: 4px 0 0; color: #667; }
     .s-template { flex: 1; }
+    /* Panel Settings (Minhoon 2026-10-27 item 9; workspace-panels.js sets the body classes). A hidden panel's
+       width goes to the panels beside it, and with none left the band and its separator go, so the Related/report row
+       takes the height. The reading layout opens this band only on request, so it shows every panel there; the Study
+       Panel drawer, an explicit open, does too. !important beats the inline display that the mode switch writes. */
+    body:not(.reading).kin-hide-thumbnail .rw > .s-thumb > .thumbwrap,
+    body:not(.reading).kin-hide-thumbnail .rw > .s-thumb > .rtabs > [data-panel="thumbnail"],
+    body:not(.reading).kin-hide-aiReport .rw > .s-thumb > .rtabs > [data-panel="aiReport"],
+    body:not(.reading).kin-hide-imageReport .rw > .s-thumb > .rtabs > [data-panel="imageReport"],
+    body:not(.reading).kin-hide-thumbnail.kin-hide-aiReport.kin-hide-imageReport .rw > .s-thumb,
+    body:not(.reading).kin-hide-clinical .rw > .s-clinical,
+    body:not(.reading).kin-hide-template .rw > .s-template,
+    body:not(.reading).kin-report-window-empty .right > .rw,
+    body:not(.reading).kin-report-window-empty #resize-top { display: none !important; }
+    body:not(.reading).kin-hide-thumbnail .rw > .s-thumb { width: auto; flex: none; }
+    body:not(.reading).kin-panels-trimmed .rw > section { flex-grow: 1; }
     .tpl-opts { display: flex; gap: 8px; padding: 3px 8px; background: #171c25; color: #8892a4; font-size: 11px; flex: none; flex-wrap: wrap; }
     .tpl-opts select { max-width: 145px; min-width: 0; background: #14181f; color: #cdd3dc; border: 1px solid #3a4356; font: inherit; }
     .tpl-filter-status { padding: 3px 8px; color: #aab2c0; font-size: 11px; flex: none; overflow-wrap: anywhere; }
@@ -454,6 +469,9 @@
       body.portrait:not(.reading) .s-thumb { height: 340px; }
       body.portrait:not(.reading) .s-clinical { height: 180px; }
       body.portrait:not(.reading) .s-template { height: 240px; }
+      /* The stacked band is the sum of its fixed panel heights; a hidden panel gives its height back. */
+      body.portrait:not(.reading).kin-panels-trimmed .rw { height: auto !important; }
+      body.portrait:not(.reading).kin-hide-thumbnail .s-thumb { height: auto; }
     }
 
     /* ── 모달 (Modify Exam) ── */
@@ -1136,6 +1154,7 @@
   <link rel="stylesheet" href="reading-workspace.css">
   <link rel="stylesheet" href="related-report-mode.css">
   <link rel="stylesheet" href="multi-study-view.css">
+  <link rel="stylesheet" href="workspace-theme.css">
 </head>
 <body>
 
@@ -1249,6 +1268,7 @@
           <button class="chip" id="layout-toggle" title="자동·세로 고정·가로 고정 순서로 전환">Layout: Auto</button>
           <button class="chip" id="study-panel-open" type="button" aria-expanded="false" aria-controls="study-panel-host" title="영상·검사 정보·상용구 패널을 엽니다.">Study Panel</button>
           <span id="study-panel-status" role="status" lang="ko"></span>
+          <button class="chip" id="panel-settings-open" type="button" aria-haspopup="dialog" title="Thumbnail·AI Report·Image Report·Clinical Information·Reading Template 패널을 보이거나 숨깁니다.">Panels</button>
           <button class="chip" id="columnsettings">Columns</button>
           <button class="chip" id="reading-appearance-open" type="button" disabled>Appearance &amp; Tools</button>
           <button class="chip" id="layout-reset" title="이 계정의 현재 브라우저 배치를 초기화합니다">Reset Layout</button>
@@ -1369,9 +1389,9 @@
       <div class="rw">
         <section class="s-thumb">
           <div class="rtabs">
-            <div class="on">Thumbnail</div>
-            <div title="추후 구현">AI Report</div>
-            <div title="추후 구현">Image Report</div>
+            <div class="on" data-panel="thumbnail">Thumbnail</div>
+            <div title="추후 구현" data-panel="aiReport">AI Report</div>
+            <div title="추후 구현" data-panel="imageReport">Image Report</div>
           </div>
           <div class="thumbwrap" id="thumbwrap">
             <div style="color:#556;padding:20px;text-align:center">검사를 선택하세요</div>

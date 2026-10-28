@@ -287,3 +287,53 @@ test('D1160-M4: the largest record with every Study Panel choice stays within th
   assert.equal(layout.write(s, k, value), true);
   assert.deepEqual(layout.read(s, k).state.workspace.studyPanel, { landscape: full, portrait: full });
 });
+
+// Minhoon 2026-10-27 item 9 (Panel Settings): a hidden panel gives its space back without leaving an empty band, and
+// the record survives the layout's own writes and an account Load -> TEST-WSPACE-PANELS-03..05.
+const v3 = () => layout.toVersion3(layout.defaults());
+
+test('TEST-WSPACE-PANELS-03 withHiddenPanels keeps a fixed order, drops the field when empty, and keeps other choices', () => {
+  const base = layout.withStudyPanel(v3(), 'landscape', { width: 420 });
+  const hidden = layout.withHiddenPanels(base, ['template', 'thumbnail']);
+  assert.deepEqual(hidden.workspace.hiddenPanels, ['thumbnail', 'template']);
+  assert.deepEqual(hidden.workspace.studyPanel, { landscape: { width: 420 } });
+  assert.deepEqual(layout.hiddenPanels(hidden), ['thumbnail', 'template']);
+  // A later Study Panel or reading write retains the hidden panels.
+  assert.deepEqual(layout.withStudyPanel(hidden, 'portrait', { text: 1 }).workspace.hiddenPanels, ['thumbnail', 'template']);
+  assert.deepEqual(layout.withReading(hidden, hidden.reading).workspace.hiddenPanels, ['thumbnail', 'template']);
+  assert.equal(Object.hasOwn(layout.withHiddenPanels(hidden, []).workspace, 'hiddenPanels'), false);
+  for (const bad of [['template', 'template'], ['Related'], 'template', null]) assert.equal(layout.withHiddenPanels(base, bad), null);
+  // Legacy records show every panel and upgrade only when the reader chooses.
+  assert.deepEqual(layout.hiddenPanels(layout.defaults()), []);
+  assert.equal(layout.withHiddenPanels(layout.defaults(), ['clinical']).version, 3);
+});
+
+test('TEST-WSPACE-PANELS-04 the account Load of an older record keeps the hidden panels of the current layout', () => {
+  const current = layout.withHiddenPanels(v3(), ['clinical']);
+  const loaded = layout.mergeLoaded(current, { version: 1, mode: 'landscape', portrait: {}, landscape: { main: 640 } });
+  assert.deepEqual(loaded.workspace.hiddenPanels, ['clinical']);
+  assert.equal(loaded.landscape.main, 640);
+  // A v3 record from the account is the reader's saved choice, including no hidden panel.
+  assert.deepEqual(layout.hiddenPanels(layout.mergeLoaded(current, v3())), []);
+});
+
+test('TEST-WSPACE-PANELS-05 panelClasses: the band empties only when every shown panel is hidden', () => {
+  const cases = [
+    [[], true, []],
+    [['template'], true, ['kin-hide-template', 'kin-panels-trimmed']],
+    [['thumbnail', 'aiReport', 'imageReport', 'clinical'], true,
+      ['kin-hide-thumbnail', 'kin-hide-aiReport', 'kin-hide-imageReport', 'kin-hide-clinical', 'kin-panels-trimmed']],
+    [['thumbnail', 'aiReport', 'imageReport', 'clinical', 'template'], true,
+      ['kin-hide-thumbnail', 'kin-hide-aiReport', 'kin-hide-imageReport', 'kin-hide-clinical', 'kin-hide-template', 'kin-panels-trimmed', 'kin-report-window-empty']],
+    // Technician never shows templates, so hiding the other panels empties the band.
+    [['thumbnail', 'aiReport', 'imageReport', 'clinical'], false,
+      ['kin-hide-thumbnail', 'kin-hide-aiReport', 'kin-hide-imageReport', 'kin-hide-clinical', 'kin-panels-trimmed', 'kin-report-window-empty']],
+    // A placeholder tab left visible keeps the band.
+    [['thumbnail', 'imageReport', 'clinical', 'template'], true,
+      ['kin-hide-thumbnail', 'kin-hide-imageReport', 'kin-hide-clinical', 'kin-hide-template', 'kin-panels-trimmed']],
+  ];
+  for (const [hidden, templateShown, expected] of cases) {
+    const on = Object.entries(layout.panelClasses(hidden, templateShown)).filter(([, value]) => value).map(([name]) => name);
+    assert.deepEqual(on.sort(), [...expected].sort(), JSON.stringify(hidden));
+  }
+});
