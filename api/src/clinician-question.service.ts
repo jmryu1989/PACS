@@ -302,7 +302,6 @@ export class ClinicianQuestionService {
     }, false, transaction);
   }
 
-  /** #5 답변 또는 추가 질문. 종류는 서버가 정한다: 작성자면 followup(clinician), 아니면 answer(radiologist). */
   private validateReply(id: string, c: QuestionCaller, b: any) {
     this.member(c);
     if (!holds(c, CLINICIAN_ROLE) && !holds(c, RADIOLOGIST)) throw roleRequired();
@@ -319,26 +318,34 @@ export class ClinicianQuestionService {
     return author;
   }
 
-  /** Resolve a write target with write permissions, rather than the single-record read. Revision and
-   * state stay with the write, so a retry of an applied request still reaches its replay. */
-  private async prepareTarget(id: string, c: QuestionCaller, admit: (row: any) => void) {
+  /** Resolve a write target with write permissions, rather than the single-record read, in the write's
+   * own order: visibility, then the request ID's receipt, then the role rules. Revision and state stay
+   * with the write, so a retry of an applied request still reaches its replay. */
+  private async prepareTarget(id: string, c: QuestionCaller, b: any, mark: string, admit: (row: any) => void) {
     await this.studyAccess.prepare(c);
     return this.run(c, async tx => {
       const { row } = await this.question(tx, id.toLowerCase(), c, this.scope(c), false);
-      admit(row);
+      const receipt = await tx.studyQuestionEntry.findUnique({ where: { id: b.requestId.toLowerCase() } });
+      // A request ID used elsewhere is refused here; the clinical record keys its receipts per actor and would not see it.
+      if (receipt) this.replay(receipt, mark, row.id, c); else admit(row);
       return row.studyUid as string;
     }, true);
   }
 
-  async prepareReply(id: string, c: QuestionCaller, b: any) {
-    this.validateReply(id, c, b);
-    return this.prepareTarget(id, c, row => this.replyAuthor(row, c));
+  private replyMark(id: string, c: QuestionCaller, b: any) {
+    return fingerprint({ id: id.toLowerCase(), institution: c.institution, subject: c.sub, revision: b.revision, action: 'reply', body: b.body });
   }
 
+  async prepareReply(id: string, c: QuestionCaller, b: any) {
+    this.validateReply(id, c, b);
+    return this.prepareTarget(id, c, b, this.replyMark(id, c, b), row => this.replyAuthor(row, c));
+  }
+
+  /** #5 답변 또는 추가 질문. 종류는 서버가 정한다: 작성자면 followup(clinician), 아니면 answer(radiologist). */
   async reply(id: string, c: QuestionCaller, b: any, transaction?: Prisma.TransactionClient) {
     this.validateReply(id, c, b);
     const questionId = id.toLowerCase(), requestId = b.requestId.toLowerCase(), scope = this.scope(c);
-    const mark = fingerprint({ id: questionId, institution: c.institution, subject: c.sub, revision: b.revision, action: 'reply', body: b.body });
+    const mark = this.replyMark(id, c, b);
     await this.studyAccess.prepare(c);
     return this.run(c, async tx => {
       const { row, rs } = await this.question(tx, questionId, c, scope, true);
@@ -356,7 +363,6 @@ export class ClinicianQuestionService {
     }, false, transaction);
   }
 
-  /** #6 닫기. 작성자(clinician)는 사유를 비울 수 있고, 판독의·관리자가 남의 질문을 닫을 때는 사유가 필요하다. */
   private validateClose(id: string, c: QuestionCaller, b: any) {
     this.member(c);
     if (!holds(c, CLINICIAN_ROLE) && !holds(c, RADIOLOGIST) && !holds(c, ADMIN)) throw roleRequired();
@@ -376,15 +382,20 @@ export class ClinicianQuestionService {
     throw actionForbidden();
   }
 
-  async prepareClose(id: string, c: QuestionCaller, b: any) {
-    this.validateClose(id, c, b);
-    return this.prepareTarget(id, c, row => this.closeRole(row, c, b));
+  private closeMark(id: string, c: QuestionCaller, b: any) {
+    return fingerprint({ id: id.toLowerCase(), institution: c.institution, subject: c.sub, revision: b.revision, action: 'close', note: b.note });
   }
 
+  async prepareClose(id: string, c: QuestionCaller, b: any) {
+    this.validateClose(id, c, b);
+    return this.prepareTarget(id, c, b, this.closeMark(id, c, b), row => this.closeRole(row, c, b));
+  }
+
+  /** #6 닫기. 작성자(clinician)는 사유를 비울 수 있고, 판독의·관리자가 남의 질문을 닫을 때는 사유가 필요하다. */
   async close(id: string, c: QuestionCaller, b: any, transaction?: Prisma.TransactionClient) {
     this.validateClose(id, c, b);
     const questionId = id.toLowerCase(), requestId = b.requestId.toLowerCase(), scope = this.scope(c);
-    const mark = fingerprint({ id: questionId, institution: c.institution, subject: c.sub, revision: b.revision, action: 'close', note: b.note });
+    const mark = this.closeMark(id, c, b);
     await this.studyAccess.prepare(c);
     return this.run(c, async tx => {
       const { row, rs } = await this.question(tx, questionId, c, scope, true);

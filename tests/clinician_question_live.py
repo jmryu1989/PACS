@@ -252,7 +252,12 @@ class ClinicianQuestionLive(unittest.TestCase):
 
     def read(self, user, qid):
         result = self.check(self.stack.request("GET", f"/questions/{quote(qid)}", user), 200)
-        self.assertEqual(sorted(result.body), ["item", "owner"])
+        # D1828: the read also names the clinical record versions it served (EMR-D).
+        self.assertEqual(sorted(result.body), ["emr", "item", "owner"])
+        self.assertEqual(result.body["emr"]["recordId"], qid.lower())
+        self.assertEqual(result.body["emr"]["studyId"], result.body["item"]["studyUid"])
+        self.assertEqual([entry["revision"] for entry in result.body["emr"]["signatures"]],
+                         list(range(1, result.body["item"]["revision"] + 1)))
         self.assertEqual(sorted(result.body["item"]), THREAD_KEYS)
         return result.body["item"]
 
@@ -452,8 +457,11 @@ class ClinicianQuestionLive(unittest.TestCase):
         self.assertEqual(psql(f'SELECT count(*) FROM "StudyQuestion" WHERE "studyUid"={lit(f.uid)}'), ["0"])
         created = self.check(self.stack.request("POST", path, "clinician", base), 201)
         sub, actor = self.stack.user_ids["clinician"], self.stack.actor("clinician")
-        self.assertEqual(sorted(created.body), ["applied", "owner", "replayed"])
+        self.assertEqual(sorted(created.body), ["applied", "emr", "owner", "replayed"])
         self.assertEqual((created.body["owner"], created.body["replayed"]), (["hallym", sub], False))
+        # D1828: the write's EMR-D receipt travels with the service's own answer.
+        self.assertEqual(created.body["emr"]["replayed"], created.body["replayed"])
+        self.assertTrue(created.body["emr"]["access"]["eventId"])
         applied = created.body["applied"]
         self.assertEqual(sorted(applied), APPLIED_KEYS)
         self.assertEqual((applied["id"], applied["requestId"], applied["entry"]), (base["requestId"], base["requestId"],
