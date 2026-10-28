@@ -3,8 +3,9 @@
  * instead of straight to Orthanc. The DICOMweb gate is the same one nginx's auth_request runs for every other image
  * read (PacsService.authzDicom): institution, StudyAccess and the split-UID check, with the viewer's session binding
  * already enforced by the guard. The study delivery's 열람 record (image-delivery-record.ts, D1877), naming the patient
- * the gate observed for the request, is durable before any byte; bytes are then served by DicomFrameService (direct
- * range read or Orthanc relay). The recorder is the one the image relay uses, so the frames, previews and relayed reads
+ * the gate observed for the request and the archive's revision the recorder read, is durable before any byte; bytes are
+ * then served by DicomFrameService (direct range read or Orthanc relay; a relay after a failed direct attempt first
+ * confirms the lease, C8). The recorder is the one the image relay uses, so the frames, previews and relayed reads
  * of one opening share one pair.
  */
 import { BadRequestException, Controller, Get, Param, Req, Res } from '@nestjs/common';
@@ -69,7 +70,7 @@ export class DicomFrameController {
     const lease = await this.deliveries.lease(req, FRAMES_SURFACE, uri, () => archiveRead(admitted));
     await lifetime(req, res, lease, signal => this.frames.serveFrames({ studyUid: study, seriesUid: series, sopUid: sop, frames: list,
       accept: req.headers?.accept, acceptEncoding: req.headers?.['accept-encoding'], head: req.method === 'HEAD',
-      origin: requestOrigin(req) }, res, signal));
+      origin: requestOrigin(req) }, res, signal, lease ? () => lease.confirm() : undefined));
   }
 
   @Get('instances/:id/preview')
@@ -79,6 +80,6 @@ export class DicomFrameController {
     // The gate resolves the object's study; the preview is a read of that study's delivery.
     const admitted = await this.pacs.authzDicom(uri, 'GET', member(req));
     const lease = await this.deliveries.lease(req, PREVIEW_SURFACE, uri, () => archiveRead(admitted));
-    await lifetime(req, res, lease, signal => this.frames.servePreview(id, res, signal));
+    await lifetime(req, res, lease, signal => this.frames.servePreview(id, res, signal, lease ? () => lease.confirm() : undefined));
   }
 }

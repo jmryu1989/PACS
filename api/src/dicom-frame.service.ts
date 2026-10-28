@@ -109,9 +109,12 @@ export class DicomFrameService {
 
   /**
    * `signal` is the request's lifetime (the controller aborts it when the client goes away): it ends the index
-   * lookups and a relayed Orthanc read; the direct read watches the response itself.
+   * lookups and a relayed Orthanc read; the direct read watches the response itself. `confirm` is the caller's check
+   * that the archive is still what the request's record names (DeliveryLease.confirm): a relay that follows a direct
+   * read attempt selects the source again after awaited reads of the index and the file, so no byte of it goes out
+   * before that check passes. A relay chosen at once is the source the record was just found current for.
    */
-  async serveFrames(request: FrameRequest, target: RelayTarget, signal?: AbortSignal): Promise<void> {
+  async serveFrames(request: FrameRequest, target: RelayTarget, signal?: AbortSignal, confirm?: () => Promise<void>): Promise<void> {
     const path = `/dicom-web/studies/${request.studyUid}/series/${request.seriesUid}/instances/${request.sopUid}/frames/${request.frames.join(',')}`;
     const accept = request.accept || 'multipart/related; type="application/octet-stream"; transfer-syntax=*';
     const object = (await this.directReads()) ? await this.stored(request.sopUid, signal) : null;
@@ -123,13 +126,14 @@ export class DicomFrameService {
     // file that has since changed size (replaced, truncated) is no longer the object the index describes.
     if (!layout || !directReadServes(accept, object!.facts.transferSyntax!) ||
         request.frames.some(frame => frameRange(layout, frame) === null) || !(await this.sameFile(object!, filePath))) {
+      if (object) await confirm?.();
       await this.orthanc.relay(path, accept, target, signal, request.origin);
       return;
     }
     // The file is opened before any header goes out: a file that cannot be opened is Orthanc's to answer.
     let handle: FileHandle | undefined;
     try { handle = await fs.open(filePath, 'r'); }
-    catch { this.forget(object!.id); await this.orthanc.relay(path, accept, target, signal, request.origin); return; }
+    catch { this.forget(object!.id); await confirm?.(); await this.orthanc.relay(path, accept, target, signal, request.origin); return; }
     const locationBase = `${request.origin}/dicom-web/studies/${request.studyUid}/series/${request.seriesUid}/instances/${request.sopUid}`;
     const multipart = multipartFrames(randomUUID() + '-' + randomUUID().slice(0, 23), locationBase, object!.facts.transferSyntax!, layout.frameBytes);
     const gzip = acceptsGzip(request.acceptEncoding);
@@ -190,8 +194,9 @@ export class DicomFrameService {
     } finally { await handle.close().catch(() => {}); }
   }
 
-  /** The series strip's preview of one object; Orthanc's renderer answers objects the direct reader does not serve. */
-  async servePreview(id: string, target: RelayTarget, signal?: AbortSignal): Promise<void> {
+  /** The series strip's preview of one object; Orthanc's renderer answers objects the direct reader does not serve.
+   * `confirm` as for serveFrames: before a relay that follows a direct read attempt. */
+  async servePreview(id: string, target: RelayTarget, signal?: AbortSignal, confirm?: () => Promise<void>): Promise<void> {
     if (!ORTHANC_ID.test(id)) throw new NotFoundException('영상을 찾을 수 없습니다');
     const object = (await this.directReads()) ? await this.storedById(id, signal) : null;
     let png: Buffer | null = null;
@@ -202,7 +207,11 @@ export class DicomFrameService {
         png = previewPng(await this.readRange(object.id, filePath, range.start, range.end), object.facts, { maxSide: PREVIEW_SIDE });
       }
     }
-    if (!png) { await this.orthanc.relay(`/instances/${id}/preview`, 'image/png', target, signal); return; }
+    if (!png) {
+      if (object) await confirm?.();
+      await this.orthanc.relay(`/instances/${id}/preview`, 'image/png', target, signal);
+      return;
+    }
     target.status(200);
     target.setHeader('Content-Type', 'image/png');
     target.setHeader('Content-Length', String(png.length));

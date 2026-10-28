@@ -58,15 +58,15 @@ export class OnlineImageService {
       // its reads take: the frame reader, the preview and the relay record into the same one (image-delivery-record.ts).
       // A response joins it - opening it, provide-prepared durable, when it is the session's first read of the study -
       // before any source read; a HEAD or a description takes no lease and is answered under no record. The delivery is
-      // bound to this manifest, its patient and version: a delivery of another manifest or patient is never this
-      // response's record (R244-GPT-FIX7-01).
+      // bound to this manifest's patient, the archive's current revision of the study and this manifest's digest: a
+      // delivery of another patient, revision or manifest is never this response's record (R244-GPT-FIX7-01/FIX9-02).
       lease = await this.deliveries.lease(request, ONLINE_IMAGE_SURFACE, target.split('?')[0],
-        () => ({ studyUid: manifest.studyUid, patient: manifest.patient, version: manifest.sha256 }));
+        () => ({ studyUid: manifest.studyUid, patient: manifest.patient, manifest: manifest.sha256 }));
       let served = false;
       const unstored: UnstoredObservation[] = [];
       try {
         const result = await sendOnlineImage({ evidence: this.evidence, source: this.orthanc.imageSource(), stagingDirectory }, {
-          manifest, delivery: lease && { ...lease.record, manifestSha256: lease.binding?.version ?? null }, requestId: facts.requestId,
+          manifest, delivery: lease && { ...lease.record, manifestSha256: lease.binding.manifest }, requestId: facts.requestId,
           // A row the application connection refused is the delivery's to write (release below).
           unstored: row => unstored.push(row),
           // This response's current access check before any source read: identity, institution scope, StudyAccess

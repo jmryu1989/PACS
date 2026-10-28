@@ -556,13 +556,18 @@ export class OrthancService {
   /**
    * MG-08: the archive's own revision of one study - its Orthanc resource and the LastUpdate stamp Orthanc advances
    * for every instance stored into or removed from the study - which the study delivery's 열람 record names as the
-   * version of what it delivers (image-delivery-record.ts). A UID two study resources answer has no one revision.
+   * version of what it delivers (image-delivery-record.ts). A UID two study resources answer has no one revision: the
+   * recorder reads this for every image read, before the study's other reads, so it answers with the archive reader's
+   * own refusals (studyPatientIdentity: no resource is no study, two resources is the split UID), not a generic 503.
    */
   async studyRevision(uid: string, signal?: AbortSignal): Promise<{ id: string; lastUpdate: string }> {
     if (typeof uid !== 'string' || !/^[0-9.]{1,64}$/.test(uid)) throw new BadRequestException('검사 식별자가 올바르지 않습니다');
     const found = await this.viewerJson('/tools/lookup', uid, signal);
-    const studies = Array.isArray(found) ? found.filter(x => x?.Type === 'Study' && typeof x.ID === 'string' && ORTHANC_RESOURCE_ID.test(x.ID)) : [];
-    if (studies.length !== 1) throw new ServiceUnavailableException('원본 검사를 하나로 확인할 수 없습니다');
+    if (!Array.isArray(found)) throw new ServiceUnavailableException('원본 검사를 하나로 확인할 수 없습니다');
+    const studies = found.filter(x => x?.Type === 'Study');
+    if (!studies.length) throw new NotFoundException('검사가 없습니다.');
+    if (studies.length > 1) throw new ConflictException({ code: STUDY_IDENTITY_UNRESOLVED, message: STUDY_IDENTITY_UNRESOLVED_MESSAGE });
+    if (typeof studies[0].ID !== 'string' || !ORTHANC_RESOURCE_ID.test(studies[0].ID)) throw new ServiceUnavailableException('원본 검사를 하나로 확인할 수 없습니다');
     const study = await this.viewerJson(`/studies/${studies[0].ID}`, undefined, signal);
     const lastUpdate = study?.LastUpdate;
     if (typeof lastUpdate !== 'string' || !/^\d{8}T\d{6}$/.test(lastUpdate)) throw new ServiceUnavailableException('원본 검사의 갱신 시각을 확인할 수 없습니다');

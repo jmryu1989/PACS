@@ -15,7 +15,9 @@
  * shutdown makes a last attempt without inventing one (MG-09); a graceful Nest shutdown (installed Nest's application
  * context close, the real EmrNestLifecycle closing admission) still records the terminal of a delivery whose
  * preparation or whose first terminal attempt was in flight when admission closed (MG-09, round 4), and of one whose
- * first terminal attempt was made during the stop and failed once (MG-09, round 5). The PostgreSQL
+ * first terminal attempt was made during the stop and failed once (MG-09, round 5); a relay fallback that follows a
+ * direct read attempt sends no byte when the archive no longer holds the revision or patient its record names (C8 of
+ * the shared recorder contract, R244-GPT-FIX9-01). The PostgreSQL
  * ledger itself is proven in tests/emr/a (real PG). D73: behaviour at the boundary, no product source text. Synthetic
  * values only; 127.0.0.1 only. */
 const { STUDY_UID, SERIES_UID, SOP_UID, INSTANCE_ID, STUDY_ID, syntheticObject, stubOrthanc } = require('./dicom_frame_fixture.cjs');
@@ -211,7 +213,6 @@ test('open: frames and the preview of one study by one session are served under 
     assert.equal(byAction(s.records.entries, 'transfer-ended')[1].event.relatedEventId, second.eventId);
     await settle();
     assert.equal(s.records.control.live(), 0, 'every record work was ended');
-    assert.equal(s.orthanc.calls.filter(c => c[0] === 'revision').length, 2, 'the study revision is read once per delivery');
   } finally { await s.close(); }
 });
 
@@ -297,6 +298,33 @@ test('shutdown closes open deliveries once their responses have: a quiet one at 
   } finally { hold = false; release?.(); await s.close(); }
 });
 
+test('C8: a relay fallback after a direct read attempt confirms the record first; an archive changed meanwhile gets no byte of it', async () => {
+  for (const change of ['revision', 'patient']) {
+    // The archive changes while the frame reader reads the index for its direct attempt, after the delivery was admitted.
+    let lastUpdate = '20261028T090000', patient = 'SYN-PID-1';
+    const s = await stack({ orthanc: orthanc => { const facts = orthanc.frameFacts.bind(orthanc), identity = orthanc.studyIdentityResources.bind(orthanc);
+      return {
+        studyRevision: async uid => { orthanc.calls.push(['revision', uid]); return { id: STUDY_ID, lastUpdate }; },
+        studyIdentityResources: async uid => (await identity(uid)).map(row => ({ ...row, '00100020': { vr: 'LO', Value: [patient] } })),
+        frameFacts: async id => { if (change === 'revision') lastUpdate = '20261028T090100'; else patient = 'SYN-PID-2'; return facts(id); },
+      }; } });
+    try {
+      // Frame 9 is past the object's five: the direct attempt falls back to Orthanc.
+      const refused = await s.frame(9);
+      assert.equal(refused.status, 409, change);
+      assert.equal(JSON.parse(refused.body.toString()).code, 'ImageCurrentStudyChanged', change);
+      assert.deepEqual(s.orthanc.calls.filter(c => c[0] === 'relay'), [], `${change}: the fallback relayed nothing`);
+      assert.ok(s.observations.every(o => o.firstByte === null), `${change}: no image byte`);
+      await until(() => byAction(s.records.entries, 'transfer-aborted').length === 1, `${change}: the outdated delivery ends at once, aborted`);
+      if (change === 'revision') {
+        // The next read is the newer revision's delivery.
+        assert.equal((await s.frame(1)).status, 200);
+        const versions = byAction(s.records.entries, 'provide-prepared').map(e => e.event.targets[0].versionId.value);
+        assert.deepEqual(versions, [`orthanc-study:${STUDY_ID}@20261028T090000`, `orthanc-study:${STUDY_ID}@20261028T090100`]);
+      }
+    } finally { await s.close(); }
+  }
+});
 test('a delivery that provided no image closes as transfer-aborted, never succeeded: a source read that failed with 503, a relayed refusal', async () => {
   // Every read of the study fails at the source after the preparation was recorded: a 503 with no image byte.
   const failing = () => ({ relay: async () => { throw new ServiceUnavailableException('synthetic Orthanc temporarily unavailable'); } });

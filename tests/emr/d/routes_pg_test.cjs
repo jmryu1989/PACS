@@ -315,9 +315,10 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     // catalog's own reuse and partial-read rules below are what each request meets.
     const imageUrl = origin + '/api/images/dicom-web?target=' + encodeURIComponent(`/dicom-web/studies/${imageUid}/series/${seriesUid}`);
     // R244-GPT-FIX7-04: the study moves to another institution while the member's first image request waits at its
-    // recording boundary - during the delivery record's own archive read, after the catalog and the record's clinical
-    // read admitted the request. No image byte of the moved study leaves, no response is prepared, and the record that
-    // opened before the move never ends as a successful transfer.
+    // recording boundary - during the delivery record's own archive read (the archive's revision of the study), after
+    // the catalog admitted the request. The opening's current facts are read after that revision, so they find the
+    // move (the shared recorder contract): no image byte of the moved study leaves, no response is prepared, and no
+    // record of the moved request is opened, nor any ending as a successful transfer.
     const [{ since: movedSince }] = await db.$queryRaw`SELECT clock_timestamp() AS since`;
     let moved = false;
     atRecording = async () => { await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: receiver } }); moved = true; };
@@ -327,20 +328,11 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     assert.notEqual(inFlight.status, 200, inFlightBody.toString().slice(0, 200));
     assert.equal(inFlightBody.includes(original), false, 'no image byte of the moved study');
     assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n, 0, 'no response was prepared');
+    const movedRecords = (await db.$queryRaw`SELECT e.payload::jsonb AS event FROM emr_access.access_entry e
+      WHERE e.recorded_at >= ${movedSince} ORDER BY e.sequence`).map(r => r.event)
+      .filter(e => e.targets.some(t => t.kind === 'image' && t.recordId?.value === imageUid));
+    assert.deepEqual(movedRecords.map(e => e.action), [], 'the opening\'s current read refused the moved study: no record was opened');
     await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: hospital } });
-    let opened = [], closings = [];
-    for (let i = 0; i < 100; i++) {
-      const rows = (await db.$queryRaw`SELECT e.payload::jsonb AS event FROM emr_access.access_entry e
-        WHERE e.recorded_at >= ${movedSince} ORDER BY e.sequence`).map(r => r.event)
-        .filter(e => e.targets.some(t => t.kind === 'image' && t.recordId?.value === imageUid));
-      opened = rows.filter(e => e.action === 'provide-prepared'); closings = rows.filter(e => e.action !== 'provide-prepared');
-      if (opened.length && closings.length >= opened.length) break;
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
-    assert.equal(opened.length, 1, 'the record opened on the facts read before the move');
-    assert.equal(opened[0].managingInstitution.value, hospital);
-    assert.deepEqual(closings.map(e => [e.action, e.result, e.relatedEventId]), [['transfer-aborted', 'aborted', opened[0].eventId]],
-      'no record of the moved request ends as a successful transfer');
     const imageResponse = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });    assert.equal(imageResponse.status, 200, await (imageResponse.status === 200 ? Promise.resolve('') : imageResponse.text()));
     const bodyBytes = Buffer.from(await imageResponse.arrayBuffer());
     assert.ok(bodyBytes.includes(original));

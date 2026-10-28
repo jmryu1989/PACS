@@ -17,14 +17,18 @@
  * API (emr-image/service.ts) - takes its lease through `lease()`, so the reads of one opening across routes share one
  * pair and one rule decides what counts as a delivery (R244-GPT-FIX6-01/02: E had its own pair and counted a HEAD).
  *
- * Every read names the patient whose bytes it serves (DeliveryTarget): E its manifest's, the frame reader, preview and
- * relay the patient their DICOMweb gate observed in the archive for this very request (`archiveRead`; the gate's own
- * per-request source read, no second one). A read never joins a delivery whose record names another patient: the open
- * one is retired - it ends with its own responses - and the read opens its own, whose opening reads the study's patient
- * again on the ledger transaction (R244-GPT-FIX7-01/FIX8-01: F attributes a delivery's image rows to the patient its
- * event names). E's reads are bound to their manifest as well (DeliveryBinding). Facts a response could not write on its
- * own connection are owed by the delivery and written on the terminal's own transaction at the latest, so a closing
- * event never exists without them (R244-GPT-02, OwedFacts).
+ * A delivery is bound to what its bytes are of (DeliveryBinding, the shared recorder contract of #244): the patient P -
+ * E's manifest's, or for the frame reader, preview and relay the one their DICOMweb gate observed in the archive for
+ * this very request (`archiveRead`) - and the archive's current revision R of the study, read for every lease, plus E's
+ * manifest digest M once an E read joined. A read joins the open delivery of its member session (K) only when P and R
+ * are the delivery's and M does not differ; otherwise that delivery is superseded - it ends with its own responses -
+ * and the read opens its own. The opening decides on the current facts read once, on the ledger transaction, after R
+ * was read: identity, institution, StudyAccess and the study's patient (R244-GPT-FIX7-01/FIX8-01/FIX9-02: F attributes
+ * a delivery's image rows to the patient its event names, and the event names one revision). A read that waited for
+ * the opening receipt is served only once the archive still holds P and R after it, and no read is served by a
+ * delivery that was retired while it waited (R244-GPT-FIX9-01). Facts a response could not write on its own connection
+ * are owed by the delivery and written on the terminal's own transaction at the latest, so a closing event never exists
+ * without them (R244-GPT-02, OwedFacts).
  *
  * A terminal the ledger cannot take at that moment keeps its identity and operation and is offered again until it is
  * durable or the process stops; it is never dropped for being late (MG-09). The stop refuses new deliveries from its
@@ -39,7 +43,7 @@ import { ConflictException, ForbiddenException, HttpException, Inject, Injectabl
 import type { BeforeApplicationShutdown, OnModuleDestroy } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
-import type { AccessEventV1, AccessTarget, DurableAccessReceipt, PatientLinkSnapshot } from './emr-contract/access-event';
+import type { AccessEventV1, DurableAccessReceipt, PatientLinkSnapshot } from './emr-contract/access-event';
 import { newAuditLinkId, parseAccessEvent } from './emr-contract/access-event';
 import type { ClinicalContextSource } from './emr-clinical/runtime';
 import { CURRENT_CLINICAL_CONTEXT, studyPatientLink } from './emr-clinical/startup';
@@ -64,10 +68,12 @@ export const DEFAULT_IMAGE_DELIVERY_IDLE_MS = 120_000;
 export const IMAGE_DELIVERY_UNAVAILABLE = Object.freeze({ code: 'IMAGE_DELIVERY_RECORD_UNAVAILABLE',
   message: '영상 열람 기록을 저장하지 못해 영상을 보낼 수 없습니다. 잠시 후 다시 시도하세요.' });
 const CONTEXT_UNAVAILABLE = Object.freeze({ code: 'ImageRequestContextUnavailable', message: '영상의 현재 접근 권한을 확인할 수 없습니다' });
-const BINDING_OUTDATED = Object.freeze({ code: 'ImageCurrentStudyChanged', message: '검사의 현재 환자 정보가 바뀌었습니다. 영상을 다시 열어 주세요.' });
+const PATIENT_OUTDATED = Object.freeze({ code: 'ImageCurrentStudyChanged', message: '검사의 현재 환자 정보가 바뀌었습니다. 영상을 다시 열어 주세요.' });
+const REVISION_OUTDATED = Object.freeze({ code: 'ImageCurrentStudyChanged', message: '검사 영상이 갱신되었습니다. 영상을 다시 열어 주세요.' });
 /** The read serves another patient than the study's current one (E's manifest is outdated, or the study was corrected
- * after the read's gate looked): no record is opened for its bytes. E rebuilds its manifest on this answer (service.ts). */
-class StudyChanged extends ConflictException { constructor() { super(BINDING_OUTDATED); } }
+ * after the read's gate looked), or a source the route selected again no longer is the revision its record names: no
+ * byte goes out under that record. E rebuilds its manifest on this answer (service.ts). */
+class StudyChanged extends ConflictException { constructor(revision = false) { super(revision ? REVISION_OUTDATED : PATIENT_OUTDATED); } }
 
 const UID = '[0-9.]{1,64}';
 // QIDO answers and DICOMweb metadata: attributes and BulkDataURIs, never the pixel data itself.
@@ -94,12 +100,17 @@ export interface DeliveryRecord { event: Readonly<AccessEventV1>; receipt: Reado
 /**
  * What one image read serves: its study, the patient its bytes are of and, for a route that serves the objects of one
  * verified manifest (E), that manifest's digest. A route that reads the archive as it is (the frame reader, the preview,
- * the relay) has no version: its patient is the one its gate observed for the request (`archiveRead`).
+ * the relay) has no manifest: its patient is the one its gate observed for the request (`archiveRead`). The archive's
+ * revision is not the route's to name; the recorder reads it for every lease.
  */
-export interface DeliveryTarget { studyUid: string; patient: PatientLinkSnapshot; version: string | null }
+export interface DeliveryTarget { studyUid: string; patient: PatientLinkSnapshot; manifest: string | null }
 
-/** The manifest a delivery records, once a read of one (E) opened or joined it: its patient and digest. */
-export interface DeliveryBinding { patient: PatientLinkSnapshot; version: string }
+/**
+ * What a delivery records and serves: the patient, the archive's revision of the study its event names
+ * (`orthanc-study:<resource>@<LastUpdate>`), and E's manifest digest once an E read opened or joined it. The digest is a
+ * witness of E's bytes, kept in E's own rows, not another name of the revision; a delivery's first one stays.
+ */
+export interface DeliveryBinding { readonly patient: PatientLinkSnapshot; readonly revision: string; readonly manifest: string | null }
 
 /**
  * The target of a read that serves the archive as it is: the study and the patient the DICOMweb gate observed in the
@@ -109,7 +120,7 @@ export interface DeliveryBinding { patient: PatientLinkSnapshot; version: string
 export function archiveRead(admitted: AdmittedStudy | undefined): DeliveryTarget {
   if (!admitted) throw new ForbiddenException('열람 권한이 없습니다');
   if (!admitted.sourcePatientId) throw new NotFoundException('검사가 없습니다.');
-  return { studyUid: admitted.studyUid, patient: studyPatientLink(admitted.managingInstitutionId, admitted.sourcePatientId), version: null };
+  return { studyUid: admitted.studyUid, patient: studyPatientLink(admitted.managingInstitutionId, admitted.sourcePatientId), manifest: null };
 }
 
 /**
@@ -124,23 +135,27 @@ export interface OwedFacts { write(tx: EmrRecordTransaction): Promise<void>; rea
  * Held by one image response of a delivery. `served` is true only for a response that sent its image completely with a
  * success status; an error answer, a relay failure or a response cut short is not a served image (MG-10). `record` is
  * the delivery's durable provide-prepared event, for a route that keeps per-response rows naming it (E), and `binding`
- * the manifest the delivery records, if any. `retire` ends the delivery for a route that found its binding outdated (E
- * forgetting its manifest): it closes once its responses have, and the next read opens a new one. A lease is released
- * exactly once, when its response has ended: the delivery cannot close before (not even at the stop).
+ * what the delivery records. `confirm` is for a route that selects its source again after its first choice failed (the
+ * frame reader's relay fallback): before a byte of the new choice, the archive must still hold the patient and revision
+ * the record names, or the read is refused and the delivery retired. `retire` ends the delivery for a route that found
+ * its binding outdated (E forgetting its manifest): it closes once its responses have, and the next read opens a new
+ * one. A lease is released exactly once, when its response has ended: the delivery cannot close before (not even at the
+ * stop).
  */
 export interface DeliveryLease {
   readonly record: DeliveryRecord;
-  readonly binding: DeliveryBinding | null;
+  readonly binding: DeliveryBinding;
+  confirm(): Promise<void>;
   release(served: boolean, owed?: OwedFacts): void;
   retire(): void;
 }
 
 interface Delivery {
   key: string; studyUid: string;
-  /** The manifest this delivery records: its opening read's, or the first manifest read's it was found current for. */
-  binding: DeliveryBinding | null;
-  /** The archive's current revision, re-read once when a manifest read finds this delivery unbound. */
-  revision: Promise<string> | null;
+  /** What it records: its opening read's patient and revision, and the first manifest an E read served under it. */
+  binding: DeliveryBinding;
+  /** What the archive held once the opening receipt was durable, for the reads that waited on it (admit()). */
+  held: Promise<Held> | null;
   /** Resolves once the provide-prepared event is durable; rejects when it could not be recorded. */
   prepared: Promise<DeliveryRecord>;
   event: Readonly<AccessEventV1> | null;
@@ -173,11 +188,12 @@ interface Delivery {
   reserved: EmrRecordWork | null;
 }
 
+/** What the archive holds against a delivery's binding: the same, a newer revision of the same patient's study, another patient. */
+type Held = 'current' | 'revision' | 'patient';
 const known = <T>(value: T) => ({ status: 'known' as const, value });
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const samePatient = (a: PatientLinkSnapshot, b: PatientLinkSnapshot) =>
   a.linkId === b.linkId && a.patientId === b.patientId && a.assigningAuthority === b.assigningAuthority;
-const sameBinding = (a: DeliveryBinding, b: DeliveryBinding) => a.version === b.version && samePatient(a.patient, b.patient);
 const revisionId = (revision: { id: string; lastUpdate: string }) => `orthanc-study:${revision.id}@${revision.lastUpdate}`;
 /** The ledger settled an append as not recorded (B2 settles a rolled-back operation negative): its event ID can never
  * commit, so the next offer is a new event. */
@@ -223,30 +239,38 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
   /**
    * The delivery this request belongs to, with its provide-prepared event durable. The first request of a member
    * session for a study records the event; the requests that arrive while it is being recorded wait for the same
-   * receipt; later ones find the open delivery. Resolves only after the receipt - the caller sends no byte before. A
-   * read never joins a delivery whose record names another patient, or (E) another manifest: that one is retired - it
-   * ends with its own responses - and the read opens its own, so no event names a patient or version other than the
-   * one whose bytes it covers.
+   * receipt; later ones find the open delivery. Resolves only after the receipt - the caller sends no byte before.
+   *
+   * Every lease reads the archive's revision of the study now; with the patient the route names (and E's manifest) it
+   * is what this read's bytes are of. A read joins only a delivery recording exactly that patient and revision whose
+   * manifest, if it has one, is the read's: any other open one is superseded - retired, it ends with its own responses -
+   * and the read opens its own, so no event names a patient or revision other than the one whose bytes it covers
+   * (R244-GPT-FIX9-02). A read that waited for an opening receipt had its patient and revision observed before an
+   * unbounded wait: it is served only once the archive still holds them after the receipt, and only by a delivery that
+   * is still open. A read whose patient is no longer the study's is refused; one whose study only has a newer revision
+   * takes the delivery of that revision (R244-GPT-FIX9-01).
    */
   private async admit(request: IncomingMessage, surface: string, target: DeliveryTarget): Promise<DeliveryLease> {
     for (;;) {
-      let delivery: Delivery, opened = false;
+      let key: string, binding: DeliveryBinding, delivery: Delivery | undefined, opened = false;
       try {
         // Another provider's shutdown may still be running while the port admits work; a read let in now would open a
         // delivery the stop has already passed over, a pair without its end. No pair, so no byte.
         if (this.stopping) throw new ServiceUnavailableException(IMAGE_DELIVERY_UNAVAILABLE);
         const snapshot = this.requests.read(request);
-        const key = JSON.stringify([snapshot.issuer, snapshot.subject, snapshot.binding.sessionRef, target.studyUid]);
+        key = JSON.stringify([snapshot.issuer, snapshot.subject, snapshot.binding.sessionRef, target.studyUid]);
+        binding = { patient: target.patient, revision: await this.revision(target.studyUid), manifest: target.manifest };
+        if (this.stopping) throw new ServiceUnavailableException(IMAGE_DELIVERY_UNAVAILABLE);
         delivery = this.open.get(key);
-        if (!delivery) { delivery = this.start(key, request, surface, target); opened = true; }
+        if (delivery && !this.joins(delivery, binding)) { this.retire(delivery); delivery = undefined; }
+        if (!delivery) { delivery = this.start(key, target.studyUid, request, surface, binding); opened = true; }
       } catch (error) { throw this.unavailable(error); }
       if (delivery.timer) { clearTimeout(delivery.timer); delivery.timer = null; }
       delivery.inflight++;
-      let record: DeliveryRecord, bound: boolean;
-      try {
-        record = await delivery.prepared;
-        bound = await this.bind(delivery, target);
-      } catch (error) {
+      const waited = delivery.event === null;
+      let record: DeliveryRecord;
+      try { record = await delivery.prepared; }
+      catch (error) {
         delivery.inflight--;
         if (delivery.event) this.settle(delivery);
         // Another read's opening found the study's patient changed from the one that read serves; this read's own
@@ -254,36 +278,87 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
         if (!opened && error instanceof StudyChanged) continue;
         throw this.unavailable(error);
       }
-      if (!bound) {
-        this.retire(delivery);
-        delivery.inflight--;
-        this.settle(delivery);
-        continue;
+      let held: Held = 'current';
+      if (waited && !delivery.retired) {
+        // One archive read after the receipt answers for every read that waited on it: they serve the same binding.
+        try { held = await (delivery.held ??= this.holds(delivery)); }
+        catch (error) { this.drop(delivery); throw this.unavailable(error); }
+        if (held !== 'current') this.retire(delivery);
       }
+      if (held === 'patient') { this.drop(delivery); throw new StudyChanged(); }
+      // Retired while this read waited (superseded, forgotten by E, or just found outdated): no byte under it; the read
+      // asks again with the archive as it is now.
+      if (delivery.retired || delivery.closed) { this.drop(delivery); continue; }
       let released = false;
-      return { record, binding: delivery.binding, retire: () => this.retire(delivery), release: (served, owed) => {
-        if (released) return;
-        released = true;
-        // Owed before this release can close the delivery: its terminal is then written with them.
-        if (owed) delivery.owed.push(owed);
-        delivery.inflight--;
-        if (served) delivery.served++; else delivery.unserved++;
-        this.settle(delivery);
-        // Every response of a delivery that owes facts offers them again (they wait for no later trigger).
-        if (delivery.owed.length) {
-          if (delivery.closed) this.closing.add(delivery);
-          void this.record(delivery);
-        }
-      } };
+      const lease = delivery;
+      return { record, binding: lease.binding, retire: () => this.retire(lease), confirm: () => this.confirm(lease),
+        release: (served, owed) => {
+          if (released) return;
+          released = true;
+          // Owed before this release can close the delivery: its terminal is then written with them.
+          if (owed) lease.owed.push(owed);
+          lease.inflight--;
+          if (served) lease.served++; else lease.unserved++;
+          this.settle(lease);
+          // Every response of a delivery that owes facts offers them again (they wait for no later trigger).
+          if (lease.owed.length) {
+            if (lease.closed) this.closing.add(lease);
+            void this.record(lease);
+          }
+        } };
     }
   }
 
-  private start(key: string, request: IncomingMessage, surface: string, target: DeliveryTarget): Delivery {
-    const binding = target.version === null ? null : { patient: target.patient, version: target.version };
-    const delivery: Delivery = { key, studyUid: target.studyUid, binding, revision: null, prepared: null as any, event: null,
+  /** The archive's revision of the study now, as the delivery's event names it. */
+  private async revision(studyUid: string): Promise<string> {
+    return revisionId(await this.orthanc.studyRevision(studyUid));
+  }
+
+  /**
+   * Whether a read of `binding` may join this open delivery: the same patient and revision, and no other manifest. A
+   * read of the archive as it is has no manifest and joins on its patient and revision alone, never as a wildcard. The
+   * first E read of a delivery a read of the archive opened is found current by that same comparison and registers its
+   * manifest; another manifest later supersedes it.
+   */
+  private joins(delivery: Delivery, binding: DeliveryBinding): boolean {
+    const recorded = delivery.binding;
+    if (!samePatient(recorded.patient, binding.patient) || recorded.revision !== binding.revision) return false;
+    if (binding.manifest === null || recorded.manifest === binding.manifest) return true;
+    if (recorded.manifest !== null) return false;
+    delivery.binding = { ...recorded, manifest: binding.manifest };
+    return true;
+  }
+
+  /**
+   * What the archive holds now against what the delivery records: the same, a newer revision of the same patient's
+   * study, or another patient. Read from the archive itself, never from the open record (R244-GPT-FIX9-01).
+   */
+  private async holds(delivery: Delivery): Promise<Held> {
+    const [revision, patientId] = await Promise.all([this.revision(delivery.studyUid),
+      this.orthanc.studyPatientIdentity(delivery.studyUid)]);
+    if (patientId !== delivery.binding.patient.patientId) return 'patient';
+    return revision === delivery.binding.revision ? 'current' : 'revision';
+  }
+
+  /** A lease's check before a byte of a source its route selected again (DeliveryLease.confirm). */
+  private async confirm(delivery: Delivery): Promise<void> {
+    const held = await this.holds(delivery);
+    if (held === 'current') return;
+    this.retire(delivery);
+    throw new StudyChanged(held === 'revision');
+  }
+
+  /** A read that will not be served under this delivery gives back the place it took. */
+  private drop(delivery: Delivery): void {
+    delivery.inflight--;
+    this.settle(delivery);
+  }
+
+  private start(key: string, studyUid: string, request: IncomingMessage, surface: string, binding: DeliveryBinding): Delivery {
+    const delivery: Delivery = { key, studyUid, binding, held: null, prepared: null as any, event: null,
       inflight: 0, served: 0, unserved: 0, timer: null, retired: false, closed: false, onClose: null, unsettled: false,
       owed: [], terminal: null, ended: false, attempts: 0, recording: null, reoffer: false, cancelRetry: null, reserved: null };
-    delivery.prepared = this.prepare(request, surface, target).then(record => { delivery.event = record.event; return record; });
+    delivery.prepared = this.prepare(request, surface, delivery.studyUid, binding).then(record => { delivery.event = record.event; return record; });
     // A delivery that could not be recorded is no delivery: the next read asks the ledger again; retired, it has nothing
     // to close, and a stop waiting for it has nothing to wait for.
     delivery.prepared.catch(() => {
@@ -296,20 +371,21 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
     return delivery;
   }
 
-  private async prepare(request: IncomingMessage, surface: string, target: DeliveryTarget): Promise<DeliveryRecord> {
+  /**
+   * The opening's current facts, read once on the ledger's transaction after the lease read the archive's revision:
+   * identity, institution, StudyAccess and the study's patient, as the images/dicom-web delivery reads them
+   * (ProductionImageContext). They decide the opening - a study the member may no longer see is refused here with the
+   * answer the clinical routes give, and a study whose patient is not the one the read serves opens no record - and the
+   * event names them with the revision the lease read, not a second read of it.
+   */
+  private async prepare(request: IncomingMessage, surface: string, studyUid: string, binding: DeliveryBinding): Promise<DeliveryRecord> {
     const work = this.records.begin();
     try {
-      const at = new Date().toISOString(), studyUid = target.studyUid;
-      // Current identity, institution, StudyAccess and the study's patient are read on the ledger's transaction, as the
-      // images/dicom-web delivery reads them (ProductionImageContext.current); a study the member may not see is refused
-      // here with the same answer the clinical routes give.
+      const at = new Date().toISOString();
       const { facts, study } = await work.transactionWithRecords(async tx => ({
         facts: await this.clinical.facts(tx, request), study: await this.clinical.study(tx, request, studyUid) }));
       if (facts.actor.kind !== 'member') throw new ServiceUnavailableException(CONTEXT_UNAVAILABLE);
-      // The study's patient now must be the one the read serves (its manifest's, or the one its gate observed): no record
-      // is opened for another patient's bytes.
-      if (!samePatient(study.patient, target.patient)) throw new StudyChanged();
-      const revision = await this.orthanc.studyRevision(studyUid);
+      if (!samePatient(study.patient, binding.patient)) throw new StudyChanged();
       const event = parseAccessEvent({ formatVersion: 1, surface, eventId: randomUUID(),
         userId: known(facts.actor.identity), rolesAtTime: known(facts.actor.roles), actingInstitution: known(facts.actor.institutionId),
         managingInstitution: known(study.managingInstitutionId), occurredAt: at, trustedProxyIp: facts.ip,
@@ -318,35 +394,10 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
         // display is the client's own report, not this event.
         cause: 'background-fetch', context: { basis: 'background-fetch', studyId: studyUid, relatedStudyId: null, reason: null },
         executor: 'member', targets: [{ kind: 'image', patientLinkSnapshot: known(study.patient), studyId: known(studyUid),
-          recordId: known(studyUid), versionId: known(revisionId(revision)) }],
+          recordId: known(studyUid), versionId: known(binding.revision) }],
         action: 'provide-prepared', result: 'prepared', requestId: facts.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null }) as Readonly<AccessEventV1>;
       return { event, receipt: await this.append(work, event, randomUUID()) };
     } finally { work.end(); }
-  }
-
-  /**
-   * Whether a read of `target` may be served under this prepared delivery. Its record must name the patient whose bytes
-   * the read serves, whichever route opened it; for a read of the archive as it is that is all. A manifest read (E)
-   * also needs the delivery to record that manifest: an unbound one - opened by a read of the archive - becomes this
-   * manifest's when the archive's revision its record names is still the current one (one re-read per delivery, shared
-   * by the reads that wait on it). Otherwise the read opens its own.
-   */
-  private async bind(delivery: Delivery, target: DeliveryTarget): Promise<boolean> {
-    const recorded = delivery.event.targets.find((t): t is AccessTarget => t.kind === 'image');
-    const patient = recorded?.patientLinkSnapshot, version = recorded?.versionId;
-    if (patient?.status !== 'known' || !samePatient(patient.value, target.patient)) return false;
-    if (target.version === null) return true;
-    const binding: DeliveryBinding = { patient: target.patient, version: target.version };
-    if (!delivery.binding) {
-      if (version?.status !== 'known') return false;
-      const revision = delivery.revision ??= this.orthanc.studyRevision(delivery.studyUid).then(revisionId);
-      let current: string;
-      try { current = await revision; }
-      catch (error) { if (delivery.revision === revision) delivery.revision = null; throw error; }
-      if (current !== version.value) return false;
-      delivery.binding ??= binding;
-    }
-    return sameBinding(delivery.binding, binding);
   }
 
   /**

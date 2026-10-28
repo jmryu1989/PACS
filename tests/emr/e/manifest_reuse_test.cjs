@@ -236,7 +236,9 @@ test('simultaneous frames of a kept study do not wait on their own B2 append lan
       await settle(); appended.push(parseAccessEvent(event).action); return mintDurableReceipt(parseAccessEvent(event).eventId, new Date().toISOString());
     }), end() {} }) };
   const registry = load('emr-runtime/background-work').createBackgroundWorkRegistry();
-  const orthanc = { ...noSourceRead, studyRevision: async () => ({ id: 'synthetic', lastUpdate: '20261028T120000' }) };
+  // The archive as the recorder reads it for every lease and, after the opening receipt, again: one revision, the manifest's patient.
+  const orthanc = { ...noSourceRead, studyRevision: async () => ({ id: 'synthetic', lastUpdate: '20261028T120000' }),
+    studyPatientIdentity: async () => built.patient.patientId };
   const recorder = new StudyImageDeliveryRecorder(records, requests, clinical, registry.work, orthanc);
   process.env.KIN_EMR_STATE_DIR = require('node:os').tmpdir();
   const service = new OnlineImageService(context, {}, orthanc, requests, checkPool(), recorder);

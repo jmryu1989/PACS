@@ -39,13 +39,17 @@ const IDLE_MS = 150;
 async function harness() {
   const actor = { id: randomUUID(), issuer: 'synthetic', subject: 'doctor' };
   const patient = { linkId: JSON.stringify(['synthetic-hospital', 'PATIENT-A']), patientId: 'PATIENT-A', assigningAuthority: 'synthetic-hospital' };
-  const manifest = buildImageManifest({ formatVersion: 1, studyUid: uid, managingInstitution: 'synthetic-hospital', patient,
+  // The catalog's manifest; `remanifest` makes its next answer another manifest version of the same objects (another
+  // viewer pin: a different digest, the same bytes).
+  const build = viewerVersion => buildImageManifest({ formatVersion: 1, studyUid: uid, managingInstitution: 'synthetic-hospital', patient,
     builtAt: new Date().toISOString(), expected: { series: 1, objects: 1 }, pages: [{ cursor: null, next: null, objects: [{
       studyUid: uid, seriesUid: series, sopInstanceUid: sop, sopClassUid: '1.2.840.10008.5.1.4.1.1.7.2', transferSyntaxUid: ts,
       imageType: ['ORIGINAL', 'PRIMARY'], bytes: 2048, sha256: hash(Buffer.alloc(2048, 37)), declaredFrameCount: 1,
       frames: [{ number: 1, bytes: frame.length, sha256: hash(frame) }], provenance: { kind: 'device', receiptEventId: null },
       derivation: { kind: 'original' }, mammography: null, timing: null }] }], referencedObjects: [],
-    decoderCatalog: { native: { version: 'synthetic', sha256: hash('decoder') } }, viewer: { id: 'synthetic', version: 'fixture', sha256: hash('viewer') } });
+    decoderCatalog: { native: { version: 'synthetic', sha256: hash('decoder') } }, viewer: { id: 'synthetic', version: viewerVersion, sha256: hash('viewer') } });
+  const manifest = build('fixture');
+  let current = manifest;
   const archive = { rawReads: 0, fileReads: 0, revision: '20261028T120000' };
   const source = createServer(async (req, res) => {
     let body = ''; for await (const chunk of req) body += chunk;
@@ -82,7 +86,7 @@ async function harness() {
   const scope = { studyId: uid, managingInstitutionId: 'synthetic-hospital', teleInstitutionId: null };
   const clinical = { facts: async () => facts, scope: async () => scope, study: async () => ({ ...scope, patient }) };
   const context = new ProductionImageContext(clinical, {
-    manifest: async () => manifest,
+    manifest: async () => current,
     delivery: async (_tx, _request, _facts, _study, at) => ({ accountGeneration: 1, provision: E.checkProvisionBasis({ relation: 'same-institution', at,
       managingInstitution: 'synthetic-hospital', recipient: null, studyUid: uid, purpose: null, basis: null, agreement: null, auditBefore: null }) }),
   });
@@ -126,7 +130,8 @@ async function harness() {
     return { status: r.status, body: Buffer.from(await r.arrayBuffer()) };
   };
   const stop = async () => { await recorder.beforeApplicationShutdown(); registry.quiesce(); await close(server); await close(source); };
-  return { send, relayed, ledger, rows, archive, stop, staging: path.join(process.env.KIN_EMR_STATE_DIR, 'image-staging') };
+  const remanifest = version => { current = build(version); return current.sha256; };
+  return { send, relayed, ledger, rows, archive, stop, remanifest, manifest, staging: path.join(process.env.KIN_EMR_STATE_DIR, 'image-staging') };
 }
 
 test('E\'s frames and the relay\'s reads of one session are one study delivery pair', async () => {
@@ -232,8 +237,33 @@ test('E joins the delivery a relay read opened when it names E\'s patient at the
     for (let i = 0; i < 10 && !h.ledger.entries.some(e => e.event.relatedEventId === relayOpened.eventId); i++) await sleep(10);
     assert.deepEqual(h.ledger.entries.filter(e => e.event.relatedEventId === relayOpened.eventId).map(e => [e.event.action, e.event.result]),
       [['transfer-ended', 'succeeded']], 'the relay\'s delivery ended at once, as what it served');
-    // The relay's next read joins E's delivery: an unbound read joins whichever delivery of the study is open.
+    // The relay's next read joins E's delivery: it names the same patient at the same revision (it has no manifest of
+    // its own, and that is no wildcard).
     assert.equal((await h.relayed(`/instances/${INSTANCE}/file`)).status, 200);
     assert.equal(h.ledger.entries.filter(e => e.event.action === 'provide-prepared').length, 3);
+    // After the archive changed the study again, the relay's read does not join E's delivery of the earlier revision.
+    h.archive.revision = '20261028T123000';
+    assert.equal((await h.relayed(`/instances/${INSTANCE}/file`)).status, 200);
+    const prepared = h.ledger.entries.filter(e => e.event.action === 'provide-prepared').map(e => e.event);
+    assert.deepEqual(prepared.map(e => e.targets[0].versionId.value).slice(-2),
+      [`orthanc-study:${STUDY}@20261028T121500`, `orthanc-study:${STUDY}@20261028T123000`]);
+  } finally { await h.stop(); }
+});
+
+test('a response of another manifest version supersedes the delivery of the first one; each response row names the delivery of the manifest it served (R244-GPT-FIX9-02)', async () => {
+  const h = await harness();
+  try {
+    const first = await h.send(FRAME);
+    assert.equal(first.status, 200);
+    // The catalog now answers another version of the study's manifest; a series request reads it (frames keep theirs).
+    assert.notEqual(h.remanifest('fixture-2'), h.manifest.sha256);
+    const whole = await h.send(`/dicom-web/studies/${uid}/series/${series}`);
+    assert.equal(whole.status, 200, whole.body.toString().slice(0, 200));
+    assert.notEqual(whole.event, first.event, 'another manifest is another delivery');
+    for (let i = 0; i < 20 && !h.ledger.entries.some(e => e.event.relatedEventId === first.event); i++) await sleep(10);
+    assert.deepEqual(h.ledger.entries.filter(e => e.event.relatedEventId === first.event).map(e => e.event.action), ['transfer-ended'],
+      'the superseded delivery ended by what it served');
+    assert.deepEqual(h.rows.preparations.map(p => p.delivery), [first.event, whole.event], 'each response row names its own manifest\'s delivery');
+    assert.equal(h.ledger.entries.filter(e => e.event.action === 'provide-prepared').length, 2);
   } finally { await h.stop(); }
 });

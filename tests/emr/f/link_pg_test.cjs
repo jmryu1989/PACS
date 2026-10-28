@@ -332,6 +332,7 @@ if(process.argv.includes('--serve')){
 
     await futureHold(port,db,witness,identities.auditor,copy);
     await scaling(witness,ok,query,patient,identities.doctor);
+    await sharedDeliveryPatients(port,witness,ok,query,doctor,sourceServers);
 
     await app.close();await start();
     const reopened=await ok('auditor','POST',`issuances/${encodeURIComponent(prepared.issuanceId)}/issue`);
@@ -442,6 +443,71 @@ async function imageDelivery(port,db,actor,study,servers){
   assert.equal((await pending).status,409,'the source refuses the object of another patient as a changed original');
   sourcePatientId=study.patient.patientId;
   return{eventId:responseId,deliveryEventId:eventId,sha256:manifest.sha256,failedEventId};
+}
+
+/* I8 of the shared study delivery recorder contract (#244), read by F on the real ledger: the shipped recorder and image
+ * relay write the deliveries (no event built here). A whole-study read for patient A; a patient correction in the
+ * archive (another patient resource under the same Study UID, a new revision); a read for patient B. Each delivery's
+ * pair names the patient whose bytes it covered, and F's patient filter finds each pair under that patient only. */
+async function sharedDeliveryPatients(port,witness,ok,query,doctor,servers){
+  const {StudyImageDeliveryRecorder}=load('image-delivery-record'),{ImageRelayController}=load('image-relay.controller');
+  const {OrthancService}=load('orthanc.service'),{createBackgroundWorkRegistry}=load('emr-runtime/background-work');
+  const {studyPatientLink}=load('emr-clinical/startup');
+  const studyUid='2.25.903',institution=doctor.institutionId;
+  const archive={patientId:'SYNTHETIC-F-A',resource:'aaaaaaaa-11111111-22222222-33333333-44444444',lastUpdate:'20261028T100000'};
+  const source=createServer((req,res)=>{
+    let body='';req.on('data',chunk=>{body+=chunk;});
+    req.on('end',()=>{
+      const json=value=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify(value));};
+      const url=new URL(req.url,'http://archive');
+      if(url.pathname==='/tools/lookup')return json(body.trim()===studyUid?[{Type:'Study',ID:archive.resource}]:[]);
+      if(url.pathname===`/studies/${archive.resource}`)return json({ID:archive.resource,LastUpdate:archive.lastUpdate});
+      if(url.pathname==='/dicom-web/studies'&&url.searchParams.get('StudyInstanceUID')===studyUid)
+        return json([{'0020000D':{vr:'UI',Value:[studyUid]},'00100020':{vr:'LO',Value:[archive.patientId]}}]);
+      if(url.pathname===`/dicom-web/studies/${studyUid}`){
+        res.setHeader('Content-Type','multipart/related; type="application/dicom"; boundary=b');
+        return res.end(`--b\r\nContent-Type: application/dicom\r\n\r\nSYNTHETIC-IMAGE:${archive.patientId}\r\n--b--`);
+      }
+      res.statusCode=404;json({});
+    });
+  });
+  servers.push(source);process.env.ORTHANC_URL=await listen(source);
+  const orthanc=new OrthancService(),registry=createBackgroundWorkRegistry();
+  const requests={read:()=>({issuer:doctor.identity.issuer,subject:doctor.identity.subject,binding:{method:'session',sessionRef:'authref:f-shared-delivery'}})};
+  // The current facts the recorder reads on the ledger transaction when a delivery opens: the member and the study's
+  // patient now (D's current context reads that from the archive; here the archive stand-in's current patient).
+  const clinical={facts:async()=>({actor:{identity:doctor.identity,kind:'member',roles:['radiologist'],institutionId:institution,signingRegistrationId:null},
+      requestId:randomUUID(),ip:known({address:'127.0.0.1',source:'trusted-proxy'})}),
+    study:async()=>({studyId:studyUid,managingInstitutionId:institution,teleInstitutionId:null,patient:studyPatientLink(institution,archive.patientId)})};
+  const recorder=new StudyImageDeliveryRecorder(port,requests,clinical,registry.work,orthanc,60000);
+  // The DICOMweb gate's per-request observation of the study: its institution and current patient.
+  const relay=new ImageRelayController({authzDicom:async()=>({studyUid,managingInstitutionId:institution,sourcePatientId:archive.patientId})},orthanc,recorder);
+  const server=createServer(async(req,res)=>{
+    req.originalUrl='/api/image-relay'+req.url;res.status=code=>{res.statusCode=code;return res;};
+    try{await relay.read(req,res);}catch(error){if(!res.headersSent){res.statusCode=error?.status??500;res.end();}else res.destroy();}
+  });servers.push(server);
+  const endpoint=await listen(server);
+  const read=async()=>{const r=await fetch(endpoint+`/dicom-web/studies/${studyUid}`);return {status:r.status,body:Buffer.from(await r.arrayBuffer()).toString()};};
+  const first=await read();
+  Object.assign(archive,{patientId:'SYNTHETIC-F-B',resource:'bbbbbbbb-11111111-22222222-33333333-44444444',lastUpdate:'20261028T100500'});
+  const second=await read();
+  assert.deepEqual([first.status,first.body.includes('SYNTHETIC-IMAGE:SYNTHETIC-F-A'),second.status,second.body.includes('SYNTHETIC-IMAGE:SYNTHETIC-F-B')],[200,true,200,true]);
+  await recorder.beforeApplicationShutdown();registry.quiesce();
+  const events=(await witness.$queryRaw`SELECT event_id::text AS id,payload::jsonb AS event FROM emr_access.access_entry
+    WHERE payload::jsonb#>>'{targets,0,studyId,value}'=${studyUid} ORDER BY sequence`).map(r=>({id:r.id,action:r.event.action,
+      patient:r.event.targets[0].patientLinkSnapshot.value.patientId,version:r.event.targets[0].versionId.value}));
+  assert.deepEqual(events.map(e=>[e.action,e.patient,e.version]),[
+    ['provide-prepared','SYNTHETIC-F-A','orthanc-study:aaaaaaaa-11111111-22222222-33333333-44444444@20261028T100000'],
+    ['transfer-ended','SYNTHETIC-F-A','orthanc-study:aaaaaaaa-11111111-22222222-33333333-44444444@20261028T100000'],
+    ['provide-prepared','SYNTHETIC-F-B','orthanc-study:bbbbbbbb-11111111-22222222-33333333-44444444@20261028T100500'],
+    ['transfer-ended','SYNTHETIC-F-B','orthanc-study:bbbbbbbb-11111111-22222222-33333333-44444444@20261028T100500']],
+    'each delivery\'s pair names the patient and revision whose bytes it covered');
+  const ids=new Set(events.map(e=>e.id));
+  for(const patientId of ['SYNTHETIC-F-A','SYNTHETIC-F-B']){
+    const page=await ok('auditor','POST','investigations',{...query,patient:{patientId,assigningAuthority:institution}});
+    assert.deepEqual(page.views.rows.filter(r=>ids.has(r.eventId)).map(r=>r.eventId).sort(),
+      events.filter(e=>e.patient===patientId).map(e=>e.id).sort(),`F's ${patientId} filter finds that patient's delivery pair, not the other's`);
+  }
 }
 
 async function reportProducer(port,witness,doctor,study,wrap){

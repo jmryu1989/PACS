@@ -435,11 +435,22 @@ test('E image service: the shared study delivery record per member session and s
   // observation insert; a response's rows are written after its body ended, so a case waits for the previous
   // response's rows before arming this.)
   let refuseObservationWrites = 0, refuseObservationCode = 'SyntheticAppPoolWriteFailure';
+  // A case may also hold transport inserts in flight (`holdTransports`) until it releases them, refused then as a pool
+  // failure whose code `heldCode` names per response: the response's socket is done, its row is not.
+  let holdTransports = 0, releaseHeld = null, heldCode = () => 'SyntheticAppPoolWriteFailure';
+  const heldTransports = [], heldReleased = new Promise(resolve => { releaseHeld = resolve; });
   const applicationExecuteRaw = db.$executeRaw.bind(db);
   db.$executeRaw = (parts, ...values) => {
-    if (refuseObservationWrites > 0 && parts.join('?').includes('INSERT INTO emr_image.observation') && values[3] === 'transport') {
-      refuseObservationWrites--;
-      return Promise.reject(Object.assign(new Error('synthetic application pool failure'), { code: refuseObservationCode }));
+    if (parts.join('?').includes('INSERT INTO emr_image.observation') && values[3] === 'transport') {
+      if (holdTransports > 0) {
+        holdTransports--;
+        heldTransports.push(values[0]);
+        return heldReleased.then(() => Promise.reject(Object.assign(new Error('synthetic application pool failure'), { code: heldCode(values[0]) })));
+      }
+      if (refuseObservationWrites > 0) {
+        refuseObservationWrites--;
+        return Promise.reject(Object.assign(new Error('synthetic application pool failure'), { code: refuseObservationCode }));
+      }
     }
     return applicationExecuteRaw(parts, ...values);
   };
@@ -608,7 +619,50 @@ test('E image service: the shared study delivery record per member session and s
     const heldRow = await witness.$queryRaw`SELECT delivery_event_id::text AS delivery, retained_after FROM emr_image.observation
       WHERE event_id=${heldResponse}::uuid AND kind='transport'`;
     assert.deepEqual(heldRow.map(r => [r.delivery, r.retained_after]), [[heldId, 'SyntheticLedgerRefusal']]);
-    // Shutdown closes whatever is still open, before the ledger drains.
+    // The shared recorder contract (I5-I7) on the real ledger: three deliveries of other sessions whose only responses
+    // have sent their answers - one served whole, two answered 416 (no image served) - but are still writing their
+    // transport rows when the stop begins. The stop gives none a closing event while its response owns the row. Once the
+    // application connection refuses the rows they are owed, and a closing event commits only with the row it owes, on
+    // the closing's own transaction: transfer-ended for the served one, transfer-aborted for the first 416; for the
+    // second 416 the ledger refuses the row as well (the synthetic trigger), so neither its row nor its aborted closing
+    // exists - the closing's admitted operation rolled back, journaled - and the stop leaves it unsettled.
+    holdTransports = 3;
+    const atStop = [];
+    for (const [session, range] of [['authref:session-stop-ended', undefined], ['authref:session-stop-aborted', 'bytes=999999999-'],
+      ['authref:session-stop-refused', 'bytes=999999999-']]) {
+      const answer = await frame(1, { 'x-synthetic-session': session, ...(range ? { Range: range } : {}) });
+      await answer.arrayBuffer();
+      atStop.push({ status: answer.status, delivery: answer.headers.get('x-kin-image-event'), response: answer.headers.get('x-kin-image-response') });
+    }
+    assert.deepEqual(atStop.map(a => a.status), [200, 416, 416]);
+    for (let i = 0; i < 100 && heldTransports.length < 3; i++) await sleep(20);
+    assert.deepEqual([...heldTransports].sort(), atStop.map(a => a.response).sort(), 'the three responses are writing their transport rows');
+    assert.equal(new Set(atStop.map(a => a.delivery)).size, 3);
+    heldCode = response => response === atStop[2].response ? 'SyntheticLedgerRefusal' : 'SyntheticAppPoolWriteFailure';
+    await witness.$executeRawUnsafe(`CREATE FUNCTION public.synthetic_refuse_retention() RETURNS trigger LANGUAGE plpgsql
+      AS $$ BEGIN RAISE EXCEPTION 'SyntheticLedgerRefusal'; END $$`);
+    await witness.$executeRawUnsafe(`CREATE TRIGGER synthetic_refuse_retention BEFORE INSERT ON emr_image.observation FOR EACH ROW
+      WHEN (NEW.retained_after = 'SyntheticLedgerRefusal') EXECUTE FUNCTION public.synthetic_refuse_retention()`);
+    const [{ since: stopSince }] = await witness.$queryRaw`SELECT clock_timestamp() AS since`;
+    const stopping = recorder.beforeApplicationShutdown();
+    await sleep(500);
+    for (const { delivery } of atStop) assert.deepEqual(await closings(delivery), [], 'no closing event while its response still owns its row');
+    releaseHeld();
+    await stopping;
+    await witness.$executeRawUnsafe('DROP TRIGGER synthetic_refuse_retention ON emr_image.observation');
+    await witness.$executeRawUnsafe('DROP FUNCTION public.synthetic_refuse_retention()');
+    const settled = async ({ delivery, response }) => ({
+      closing: (await closings(delivery)).map(c => [c.action, c.result]),
+      rows: (await witness.$queryRaw`SELECT delivery_event_id::text AS delivery, retained_after FROM emr_image.observation
+        WHERE event_id=${response}::uuid AND kind='transport'`).map(r => [r.delivery, r.retained_after]) });
+    assert.deepEqual(await settled(atStop[0]), { closing: [['transfer-ended', 'succeeded']], rows: [[atStop[0].delivery, 'SyntheticAppPoolWriteFailure']] },
+      'the served delivery ends with the row its response handed over');
+    assert.deepEqual(await settled(atStop[1]), { closing: [['transfer-aborted', 'aborted']], rows: [[atStop[1].delivery, 'SyntheticAppPoolWriteFailure']] },
+      'a delivery that served no image ends aborted, and that closing carries its owed row too');
+    assert.deepEqual(await settled(atStop[2]), { closing: [], rows: [] }, 'a row the ledger refuses leaves no closing event either');
+    const stopFailures = await witness.$queryRaw`SELECT cause, event_id, operation_id::text AS operation FROM emr_access.failure_entry
+      WHERE occurred_at >= ${stopSince} AND operation_id IS NOT NULL`;
+    assert.ok(stopFailures.some(f => f.cause === 'business-rollback'), 'the refused closing\'s admitted operation rolled back, journaled: ' + JSON.stringify(stopFailures));    // Shutdown closes whatever is still open, before the ledger drains.
     await recorder.beforeApplicationShutdown();
     registry.quiesce();
     control.close();

@@ -5,8 +5,8 @@
  * to go from nginx straight to Orthanc after `auth_request`, which admits a read but cannot see it delivered, so no
  * study delivery record existed for them. nginx now routes them here. The handler runs the same DICOMweb gate
  * (PacsService.authzDicom: institution, StudyAccess, split UID), takes the study delivery's lease for the study and
- * patient the gate observed - its provide-prepared event durable before any byte, naming that patient
- * (image-delivery-record.ts) - and relays Orthanc's answer unchanged (status, media type,
+ * patient the gate observed - its provide-prepared event durable before any byte, naming that patient and the archive's
+ * revision the recorder read for this lease (image-delivery-record.ts) - and relays Orthanc's answer unchanged (status, media type,
  * body; the query carries rendering and windowing as before). Descriptions without the image (QIDO, DICOMweb metadata,
  * DICOM tags) are not deliveries of the image and keep the plain gate; the auth_request route refuses every image read
  * (pacs.controller.ts), so an image byte has no unrecorded way out.
