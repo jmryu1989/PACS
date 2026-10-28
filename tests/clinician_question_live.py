@@ -232,6 +232,17 @@ class ClinicianQuestionLive(unittest.TestCase):
         self.assertEqual(result.status, status, result.text[:500])
         if expected_code is not None:
             self.assertEqual(code(result), expected_code, result.text[:500])
+        if status == 200 and isinstance(result.body, dict) and "entries" in result.body.get("item", {}):
+            # Also cover the delayed response in Q15: D must name only the
+            # versions this snapshot serves, even when newer writes have committed.
+            item, emr = result.body["item"], result.body["emr"]
+            self.assertEqual(sorted(result.body), ["emr", "item", "owner"])
+            self.assertEqual(emr["recordId"], item["id"])
+            self.assertEqual(emr["studyId"], item["studyUid"])
+            self.assertEqual([entry["revision"] for entry in emr["signatures"]],
+                             [entry["seq"] for entry in item["entries"]])
+            self.assertEqual([entry["revision"] for entry in emr["signatures"]],
+                             list(range(1, item["revision"] + 1)))
         return result
 
     def ask(self, user, uid, body="SYNTHETIC question", rid=None, expect=201, expected_code=None):
@@ -252,12 +263,7 @@ class ClinicianQuestionLive(unittest.TestCase):
 
     def read(self, user, qid):
         result = self.check(self.stack.request("GET", f"/questions/{quote(qid)}", user), 200)
-        # D1828: the read also names the clinical record versions it served (EMR-D).
-        self.assertEqual(sorted(result.body), ["emr", "item", "owner"])
         self.assertEqual(result.body["emr"]["recordId"], qid.lower())
-        self.assertEqual(result.body["emr"]["studyId"], result.body["item"]["studyUid"])
-        self.assertEqual([entry["revision"] for entry in result.body["emr"]["signatures"]],
-                         list(range(1, result.body["item"]["revision"] + 1)))
         self.assertEqual(sorted(result.body["item"]), THREAD_KEYS)
         return result.body["item"]
 

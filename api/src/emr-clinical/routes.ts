@@ -1,6 +1,9 @@
 import { BadRequestException, ConflictException, NotFoundException, ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
+import type { AccessEventV1 } from '../emr-contract/access-event';
+import type { EmrRecordWork } from '../emr-runtime/record-port';
+import type { BusinessReference } from '../emr-runtime/store';
 import { ContractError, refuse } from '../emr-contract/validation';
 import { READ_ROUTES, ClinicalRecord, SurfaceKey } from './contract';
 import type { ClinicalWritePlan } from './records';
@@ -29,6 +32,22 @@ export const ASSIGNMENT_CLOSE_SURFACE = 'server:reader-assignment-close';
  * signed version. A lost response returns the stored result, never a re-project. */
 export class ClinicalRoutes {
   constructor(readonly parts: ClinicalRuntimeParts, private readonly sources: ClinicalRouteSources) {}
+  /** The response and its immutable D versions share one snapshot. B2 admits each
+   * read event on another connection, so its newly admitted operation must be
+   * recorded after this snapshot, in B2's ordinary transaction. No body is
+   * returned until those exact served references have been durably recorded. */
+  private async snapshotRead<T>(work: EmrRecordWork,
+    read: (tx: Prisma.TransactionClient, record: (event: AccessEventV1, reference: BusinessReference) => void) => Promise<T>): Promise<T> {
+    const records: { event: AccessEventV1; reference: BusinessReference }[] = [];
+    const value = await work.transactionWithRecords(async tx => {
+      await tx.$executeRaw`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`;
+      return read(tx, (event, reference) => { records.push({ event, reference }); });
+    });
+    return work.transactionWithRecords(async (_tx, record) => {
+      for (const entry of records) await record(entry.event, async () => entry.reference);
+      return value;
+    });
+  }
   /** Allocation can also be closed by a study operation. Read its actual
    * projection revision, including that close, rather than a previous receipt. */
   async assignment<T extends { revision: number }>(request: object, uid: string,
@@ -108,7 +127,7 @@ export class ClinicalRoutes {
     served?: (item: ListedRecord) => readonly number[]): Promise<T> {
     const work = this.parts.records.begin();
     try {
-      return await work.transactionWithRecords(async (tx, record) => {
+      return await this.snapshotRead(work, async (tx, record) => {
         const facts = await this.parts.context.facts(tx, request);
         const response = await read(tx);
         const scope = studyId === undefined ? null : await this.parts.context.scope(tx, request, studyId);
@@ -126,14 +145,14 @@ export class ClinicalRoutes {
           if (!head) refuse('ClinicalHistoryUnavailable');
           const versions = wanted ? servedVersions(stored, wanted) : stored;
           verifySigned(this.parts.signer, versions);
-          await record({ formatVersion: 1, surface, eventId: randomUUID(),
+          record({ formatVersion: 1, surface, eventId: randomUUID(),
             userId: known(facts.actor.identity), rolesAtTime: known(facts.actor.roles),
             actingInstitution: known(facts.actor.institutionId), managingInstitution: known(study.managingInstitutionId),
             occurredAt: new Date().toISOString(), trustedProxyIp: facts.ip, cause: 'user-view',
             context: { basis: 'worklist', studyId: study.studyId, relatedStudyId: null, reason: null },
             executor: 'member', targets: versions.map(v => v.plan.access.target), action: 'provide-prepared', result: 'prepared',
             requestId: facts.requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null },
-          async () => ({ kind: 'emr-clinical', id: item.id, version: head.plan.version.versionId }));
+          { kind: 'emr-clinical', id: item.id, version: head.plan.version.versionId });
         }
         return response;
       }).catch(routeError);
@@ -151,12 +170,24 @@ export class ClinicalRoutes {
     surface = READ_ROUTES[recordType], served?: (value: T) => readonly number[]): Promise<T> {
     const work = this.parts.records.begin();
     try {
-      return await work.transactionWithRecords(async (tx, record) => {
+      return await this.snapshotRead(work, async (tx, record) => {
         const facts = await this.parts.context.facts(tx, request);
         const first = await this.parts.store.unit(tx, recordType, recordId);
+        let study: Awaited<ReturnType<ClinicalRuntimeParts['context']['scope']>> | null = null;
+        try {
+          if (first) study = await this.parts.context.scope(tx, request, first.studyId);
+        } catch (error) {
+          // The owning service supplies its own missing/role refusal (including
+          // QUESTION_NOT_FOUND); a scope refusal must not replace that response.
+          if (error instanceof NotFoundException) await read(tx);
+          throw error;
+        }
+        // Access waits must not hold up another doctor's write to this record.
+        // Keep the record lock before service row locks (Tech Note's StudyState),
+        // as writers do. The service, report anchor and D history still share
+        // the snapshot established before the access wait.
         if (first) await this.parts.store.lockUnit(tx, recordType, recordId);
         const response = await read(tx);
-        const study = first ? await this.parts.context.scope(tx, request, first.studyId) : null;
         const { unit, versions: stored } = first ? await this.parts.store.history(tx, recordType, recordId) : { unit: null, versions: [] };
         if (!unit && !empty?.(response)) refuse('ClinicalHistoryUnavailable');
         const versions = served && unit ? servedVersions(stored, served(response)) : stored;
@@ -165,7 +196,7 @@ export class ClinicalRoutes {
         if (unit && study && versions.length) {
           // The real service read above owns its existing role/party/tele and
           // source-lineage checks. Recording evidence must not change them.
-          await record({ formatVersion: 1, surface, eventId: randomUUID(),
+          record({ formatVersion: 1, surface, eventId: randomUUID(),
             userId: known(facts.actor.identity), rolesAtTime: known(facts.actor.roles),
             actingInstitution: known(facts.actor.institutionId), managingInstitution: known(study.managingInstitutionId),
             occurredAt: new Date().toISOString(), trustedProxyIp: facts.ip,
@@ -173,7 +204,7 @@ export class ClinicalRoutes {
             executor: 'member', targets: versions.map(v => v.plan.access.target), action: 'provide-prepared', result: 'prepared',
             requestId: facts.requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null },
           // The latest served version names the page, which need not hold the current head.
-          async () => ({ kind: 'emr-clinical', id: recordId, version: versions[versions.length - 1].plan.version.versionId }));
+          { kind: 'emr-clinical', id: recordId, version: versions[versions.length - 1].plan.version.versionId });
         }
         return { ...response, emr: { recordId, studyId: unit?.studyId ?? null,
           signatures: versions.map(v => ({ versionId: v.plan.version.versionId, revision: v.plan.version.sequence,
