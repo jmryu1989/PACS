@@ -13,7 +13,8 @@
  * background schedule and at shutdown (MG-09); under the installed Nest shutdown with the real EmrNestLifecycle and
  * record port, a delivery in preparation or a terminal offer in flight when admission closes still completes its pair
  * after one failed offer, and a read after the recorder stopped gets 503 with no image (MG-09); whole-study GET is a
- * recorded delivery and HEAD none; the auth_request admission refuses every image read so none can bypass the relay.
+ * recorded delivery and HEAD none; a viewer frame the frame reader (the real DicomFrameController/DicomFrameService on the
+ * same recorder, no storage mount) relays to Orthanc carries the public origin as the relay's does (review INT-02); the auth_request admission refuses every image read so none can bypass the relay.
  * The PostgreSQL ledger itself is proven in tests/emr/a (real PG); nginx routing is the served stack run. D73: behaviour
  * at the boundary, no product source text. Synthetic values only; 127.0.0.1 only. */
 require('./service_test_loader.cjs');
@@ -146,23 +147,32 @@ async function stack() {
   const background = createBackgroundWorkRegistry();
   const recorder = new StudyImageDeliveryRecorder(records.port, contexts.source, clinical, background.work, orthanc, IDLE_MS);
   const controller = new ImageRelayController({ authzDicom: (...args) => gate.authzDicom(...args) }, orthanc, recorder);
+  // The viewer's frame reader on the same recorder, on an installation without the storage mount: it relays every frame.
+  const { DicomFrameController } = require('/app/dist/dicom-frame.controller.js');
+  const { DicomFrameService } = require('/app/dist/dicom-frame.service.js');
+  const storage = process.env.KIN_ORTHANC_STORAGE;
+  delete process.env.KIN_ORTHANC_STORAGE;
+  const reader = new DicomFrameController(new DicomFrameService(orthanc), { authzDicom: (...args) => gate.authzDicom(...args) }, orthanc, recorder);
+  if (storage !== undefined) process.env.KIN_ORTHANC_STORAGE = storage;
   const observations = [];
   const server = http.createServer(async (req, res) => {
-    // nginx: `location /instances/ { proxy_pass http://api:3000/api/image-relay/instances/; }` (and /dicom-web/).
-    req.originalUrl = '/api/image-relay' + req.url;
+    // nginx: the frame regex location proxies to `http://api:3000/api$request_uri` (the frame reader); every other image
+    // read goes `location /instances/ { proxy_pass http://api:3000/api/image-relay/instances/; }` (and /dicom-web/).
+    const frames = /^\/api\/dicom-web\/studies\/([0-9.]+)\/series\/([0-9.]+)\/instances\/([0-9.]+)\/frames\/([0-9,]+)$/.exec(req.url);
+    if (!frames) req.originalUrl = '/api/image-relay' + req.url;
     req.sub = req.headers['x-synthetic-sub'] ?? 'syn-doctor-sub'; req.actor = req.sub; req.roles = ['radiologist'];
     req.institution = req.headers['x-synthetic-site'] ?? SITE; req.kind = 'member';
     res.status = code => { res.statusCode = code; return res; };
     contexts.capture.capture(req, res, { issuer: ISSUER, subject: req.sub, roles: req.roles, institution: req.institution, rightsVersion: 1,
       binding: { method: 'session', sessionRef: req.headers['x-synthetic-session'] ?? 'authref:session-a' } },
-      { method: 'GET', route: 'image-relay/*', purpose: 'clinical' }, async () => {});
+      { method: 'GET', route: frames ? 'dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames' : 'image-relay/*', purpose: 'clinical' }, async () => {});
     const observation = { path: req.url, firstByte: null };
     observations.push(observation);
     const write = res.write.bind(res), end = res.end.bind(res);
     const first = () => { observation.firstByte ??= records.entries.map(e => e.event.action); };
     res.write = (chunk, ...rest) => { if (chunk?.length) first(); return write(chunk, ...rest); };
     res.end = (chunk, ...rest) => { if (chunk?.length && res.statusCode === 200) first(); return end(chunk, ...rest); };
-    try { await controller.read(req, res); }
+    try { if (frames) await reader.read(frames[1], frames[2], frames[3], frames[4], req, res); else await controller.read(req, res); }
     catch (error) {
       if (res.headersSent) { res.destroy(); return; }
       res.statusCode = error instanceof HttpException ? error.getStatus() : 500;
@@ -274,6 +284,19 @@ test('MG-08 one study delivery across worklist, report and viewer reads; reload 
     assert.deepEqual(ended.targets, prepared.targets);
     assert.equal((await s.get(s.routes.thumbnail)).status, 200);
     assert.deepEqual(actions(s.records), ['provide-prepared', 'transfer-ended', 'provide-prepared'], 'a reload after the gap is a new pair');
+  } finally { await s.close(); }
+});
+
+test('MG-08 a viewer frame the frame reader passes to Orthanc keeps the public origin, as the relay does', async () => {
+  // Review INT-02: Orthanc names a multipart answer's parts (Content-Location) from the forwarded origin.
+  const s = await stack();
+  try {
+    const headers = { Accept: 'multipart/related; type="application/octet-stream"', 'X-Forwarded-Proto': 'https', 'X-Forwarded-Host': 'pacs.example:9443' };
+    const viaReader = await s.get('/api' + s.routes.frame, headers), viaRelay = await s.get(s.routes.frame, headers);
+    for (const r of [viaReader, viaRelay]) { assert.equal(r.status, 200); assert.deepEqual(r.body, FRAME, 'Orthanc\'s frame, unchanged'); }
+    assert.deepEqual(s.source.imageCalls().map(c => [c.path, c.forwarded]), [[s.routes.frame, ['https', 'pacs.example:9443']], [s.routes.frame, ['https', 'pacs.example:9443']]],
+      'both paths ask Orthanc with the origin the browser used');
+    assert.deepEqual(actions(s.records), ['provide-prepared'], 'one study delivery across the frame reader and the relay');
   } finally { await s.close(); }
 });
 

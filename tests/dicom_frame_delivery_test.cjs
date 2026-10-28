@@ -9,7 +9,8 @@
  * with it). Asserted: no image byte before the provide-prepared event is durable; one pair per study delivery (open,
  * reload within the idle gap, reload after it); a ledger that cannot record answers 503 with no body; refusals of the
  * gate leave no record; shutdown closes open deliveries; a delivery that provided no image closes as aborted, not
- * succeeded (MG-10); a terminal the ledger cannot take at the close is retried as the same event until durable, and the
+ * succeeded (MG-10), and a HEAD - answered behind the gate - neither opens a delivery nor makes one whose relayed read
+ * (the real ImageRelayController on the same recorder) failed a provided one (review INT-01); a terminal the ledger cannot take at the close is retried as the same event until durable, and the
  * shutdown makes a last attempt without inventing one (MG-09); a graceful Nest shutdown (installed Nest's application
  * context close, the real EmrNestLifecycle closing admission) still records the terminal of a delivery whose
  * preparation or whose first terminal attempt was in flight when admission closed (MG-09, round 4), and of one whose
@@ -32,6 +33,7 @@ const { EmrNestLifecycle } = require('/app/dist/emr-runtime/nest-lifecycle.js');
 const { DicomFrameController, FRAMES_SURFACE, PREVIEW_SURFACE } = require('/app/dist/dicom-frame.controller.js');
 const { DicomFrameService } = require('/app/dist/dicom-frame.service.js');
 const { StudyImageDeliveryRecorder, IMAGE_DELIVERY_UNAVAILABLE } = require('/app/dist/image-delivery-record.js');
+const { ImageRelayController } = require('/app/dist/image-relay.controller.js');
 const { createRequestContext } = require('/app/dist/emr-runtime/request-context.js');
 const { createRequestIngress } = require('/app/dist/emr-runtime/request-ingress.js');
 const { mintDurableReceipt } = require('/app/dist/emr-runtime/contract.js');
@@ -105,6 +107,8 @@ async function stack(options = {}) {
   const recorder = new StudyImageDeliveryRecorder(records.port, contexts.source, clinical, background.work, orthanc, IDLE_MS);
   const service = new DicomFrameService(orthanc);
   const controller = new DicomFrameController(service, { authzDicom: (...args) => gate.authzDicom(...args) }, orthanc, recorder);
+  // The other image reads of the same study, which nginx sends to the relay; app.module gives both controllers one recorder.
+  const relay = new ImageRelayController({ authzDicom: (...args) => gate.authzDicom(...args) }, orthanc, recorder);
   const observations = [];
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
@@ -114,15 +118,18 @@ async function stack(options = {}) {
     res.status = code => { res.statusCode = code; return res; };
     const preview = /^\/instances\/([0-9a-f-]+)\/preview$/.exec(url.pathname);
     const frames = /^\/dicom-web\/studies\/([^/]+)\/series\/([^/]+)\/instances\/([^/]+)\/frames\/([^/]+)$/.exec(url.pathname);
+    const relayed = url.pathname.startsWith('/api/image-relay/');
+    if (relayed) req.originalUrl = req.url;
     contexts.capture.capture(req, res, { issuer: ISSUER, subject: req.sub, roles: req.roles, institution: req.institution, rightsVersion: 1,
       binding: { method: 'session', sessionRef: req.headers['x-synthetic-session'] ?? 'authref:session-a' } },
-      { method: 'GET', route: preview ? 'instances/:id/preview' : 'dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames', purpose: 'clinical' }, async () => {});
+      { method: 'GET', route: relayed ? 'image-relay/*' : preview ? 'instances/:id/preview' : 'dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames', purpose: 'clinical' }, async () => {});
     const observation = { path: url.pathname, firstByte: null, status: null };
     observations.push(observation);
     const write = res.write.bind(res);
     res.write = (...args) => { observation.firstByte ??= { entries: records.entries.length, at: process.hrtime.bigint() }; return write(...args); };
     try {
-      if (preview) await controller.preview(preview[1], req, res);
+      if (relayed) await relay.read(req, res);
+      else if (preview) await controller.preview(preview[1], req, res);
       else if (frames) await controller.read(frames[1], frames[2], frames[3], frames[4], req, res);
       else { res.statusCode = 404; res.end(); }
     } catch (error) {
@@ -134,8 +141,8 @@ async function stack(options = {}) {
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
-  const get = async (route, headers = {}) => {
-    const response = await fetch(origin + route, { headers: { Connection: 'close', ...headers } });
+  const get = async (route, headers = {}, method = 'GET') => {
+    const response = await fetch(origin + route, { method, headers: { Connection: 'close', ...headers } });
     return { status: response.status, headers: response.headers, body: Buffer.from(await response.arrayBuffer()) };
   };
   const frame = (n, headers) => get(`/dicom-web/studies/${STUDY_UID}/series/${SERIES_UID}/instances/${SOP_UID}/frames/${n}`, { Accept: ACCEPT, ...headers });
@@ -313,6 +320,37 @@ test('a delivery that provided no image closes as transfer-aborted, never succee
     await until(() => s3.records.entries.length === 2, 'the delivery did not close');
     assert.deepEqual([s3.records.entries[1].event.action, s3.records.entries[1].event.result], ['transfer-ended', 'succeeded']);
   } finally { await s3.close(); }
+});
+
+test('a HEAD of a frame or preview is answered behind the gate but is no delivery: beside a failed relayed read of the study, the delivery still closes aborted', async () => {
+  // Review INT-01. The frame reader serves frame 1 and the preview from storage; every read relayed to Orthanc fails.
+  const failing = () => ({ relay: async (_path, _accept, target) => {
+    target.status(500); target.setHeader('content-type', 'application/json'); target.end('{"error":"synthetic source unavailable"}');
+  } });
+  const thumbnail = `/api/image-relay/instances/${INSTANCE_ID}/frames/0/rendered`;
+  for (const [name, route, accept, type] of [
+    ['frame', `/dicom-web/studies/${STUDY_UID}/series/${SERIES_UID}/instances/${SOP_UID}/frames/1`, ACCEPT, /^multipart\/related/],
+    ['preview', `/instances/${INSTANCE_ID}/preview`, 'image/png', /^image\/png$/]]) {
+    const s = await stack({ orthanc: failing });
+    try {
+      assert.equal((await s.get(route, { Accept: accept, 'x-synthetic-site': 'site-b' }, 'HEAD')).status, 403, name + ': HEAD keeps the gate');
+      const head = await s.get(route, { Accept: accept }, 'HEAD');
+      assert.deepEqual([head.status, head.body.length], [200, 0], name + ': HEAD is answered with headers only');
+      assert.match(head.headers.get('content-type'), type);
+      await wait(IDLE_MS * 2);
+      assert.deepEqual(s.records.attempts, [], name + ': a HEAD alone records nothing');
+      // The same study's thumbnail through the relay fails at the source; a HEAD before and after it serves no image.
+      assert.equal((await s.get(thumbnail)).status, 500);
+      assert.equal((await s.get(route, { Accept: accept }, 'HEAD')).status, 200);
+      await until(() => s.records.entries.length === 2, name + ': the delivery did not close');
+      assert.deepEqual(s.records.entries.map(e => [e.event.action, e.event.result]),
+        [['provide-prepared', 'prepared'], ['transfer-aborted', 'aborted']], name + ': no image was served, so no succeeded transfer');
+      await wait(IDLE_MS * 2);
+      assert.equal(s.records.entries.length, 2, name + ': nothing after the pair');
+      await settle();
+      assert.equal(s.records.control.live(), 0);
+    } finally { await s.close(); }
+  }
 });
 
 test('a terminal the ledger cannot take at the close keeps its identity and is retried as the same event until it is durable', async () => {

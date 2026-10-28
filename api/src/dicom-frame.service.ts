@@ -123,13 +123,13 @@ export class DicomFrameService {
     // file that has since changed size (replaced, truncated) is no longer the object the index describes.
     if (!layout || !directReadServes(accept, object!.facts.transferSyntax!) ||
         request.frames.some(frame => frameRange(layout, frame) === null) || !(await this.sameFile(object!, filePath))) {
-      await this.orthanc.relay(path, accept, target, signal);
+      await this.orthanc.relay(path, accept, target, signal, request.origin);
       return;
     }
     // The file is opened before any header goes out: a file that cannot be opened is Orthanc's to answer.
     let handle: FileHandle | undefined;
     try { handle = await fs.open(filePath, 'r'); }
-    catch { this.forget(object!.id); await this.orthanc.relay(path, accept, target, signal); return; }
+    catch { this.forget(object!.id); await this.orthanc.relay(path, accept, target, signal, request.origin); return; }
     const locationBase = `${request.origin}/dicom-web/studies/${request.studyUid}/series/${request.seriesUid}/instances/${request.sopUid}`;
     const multipart = multipartFrames(randomUUID() + '-' + randomUUID().slice(0, 23), locationBase, object!.facts.transferSyntax!, layout.frameBytes);
     const gzip = acceptsGzip(request.acceptEncoding);
