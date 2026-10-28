@@ -728,6 +728,29 @@ test('SPLIT-13 one institution cache serves every concern; an unknown sending ho
   assert.ok((await w.worklist.listStudies(RAD_A)).studies.some(r => r.uid === later));
   assert.deepEqual(JSON.parse(w.audits('study.arrived').find(a => a.target === later).detail), { institutionId: INST_A, via: 'device', aet: 'SYN_CT_7' });
 });
+// ── A-027 (D1881): the institution GET audit records each returned row to ──
+
+test('A-027 GET audit records every returned row to the institution its own statement selected; a row without one refuses the response', async () => {
+  const w = world();
+  await w.boot();
+  const s = w.study();
+  // The statement's own projection: a legacy row (no recorded institution) carries the study's current owner, a
+  // recorded-institution row its recorded one.
+  w.db.handlers.unshift([/^SELECT a\.\*, CASE .* FROM "AuditLog" a LEFT JOIN "StudyState" s/, () => [
+    { id: 7, action: 'study.arrived', target: s.uid, detail: '{"institutionId":null}', managingInstitution: INST_A },
+    { id: 8, action: 'reader.assignment', target: s.uid, detail: JSON.stringify({ institution: INST_B }), managingInstitution: INST_B }]]);
+  const read = await w.audit.auditRead(s.uid, 10, ADMIN_A);
+  assert.deepEqual(read.managing, [INST_A, INST_B]);
+  assert.deepEqual(read.rows.map(r => Object.keys(r).includes('managingInstitution')), [false, false], 'the response rows are unchanged');
+  assert.deepEqual(await w.audit.audits(s.uid, 10, ADMIN_A), read.rows);
+  w.db.handlers.shift();
+  const { studyAuditRead } = require('/app/dist/emr-viewing/consumer-read');
+  const response = studyAuditRead(read);
+  assert.equal(response.json, JSON.stringify(read.rows));
+  assert.deepEqual(response.sources.map(x => [x.managingInstitution, x.target.kind, x.target.recordId.value, x.target.studyId.value]),
+    [[INST_A, 'access-audit', '7', s.uid], [INST_B, 'access-audit', '8', s.uid]]);
+  assert.throws(() => studyAuditRead({ rows: read.rows, managing: [INST_A, null] }), e => e.getStatus?.() === 503);
+});
 // ── SPLIT-14 evidence: readability of citations and the CHECK backstop (M16, M17) ──
 
 test('SPLIT-14 a citation is shown only while its finding is readable; a database CHECK on citations or structure becomes its named 409', async () => {
