@@ -172,6 +172,113 @@ def viewer_checks(viewer, chat, product):
     record("V4 Esc leaves picking in the viewer; the chat's 고르기 turns every window off; Alt+G and the corner 고르기 work in the viewer",
            esc_off and all_off and alt_on and not shield_on(viewer), {"escOff": esc_off, "allOff": all_off, "altOn": alt_on})
 
+def stored_picks(page): return page.evaluate('JSON.parse(sessionStorage.getItem("studio-viewer-picks") || "[]")')
+def chip_titles(chat): return [chips(chat).nth(i).get_attribute("title") or "" for i in range(chips(chat).count())]
+def page_of(page): return page.evaluate("location.pathname + location.search")
+def in_view(page, r): return bool(r) and r["width"] >= 8 and r["x"] >= 0 and r["y"] >= 0 and r["x"] + r["width"] <= page.evaluate("innerWidth") and r["y"] + r["height"] <= page.evaluate("innerHeight")
+def picking_everywhere(chat, *pages):
+    # The chat's 고르기 toggles every window together: at most two presses turn them all on.
+    for _ in range(2):
+        if all(shield_on(p) for p in pages): return
+        chat.click("#pick"); settle(chat, 700)
+
+def viewer_window_checks(viewer, own, chat, product):
+    """GPT review of ef23fc1: F1 inactive viewport picks, F2 two viewer popups at once, F3 one pick limit over every window.
+    `viewer` is the studio's viewer popup, `own` the worklist's comparison viewer (double-click), both real OHIF."""
+    own.wait_for_selector("canvas", timeout=30000); settle(own, 2500)
+    # F1: the comparison viewer as the worklist opens it (no layout set by the test); the first viewport is active.
+    expected = own.evaluate('''() => [...document.querySelectorAll("[data-viewport-uid] canvas")].filter(n => n.getBoundingClientRect().width > 0).map(n => {
+        const id = n.closest("[data-viewport-uid]").getAttribute("data-viewport-uid"); const s = window.services;
+        const ds = s.displaySetService.getDisplaySetByUID(s.viewportGridService.getState().viewports.get(id).displaySetInstanceUIDs[0]);
+        return { id, series: ds.SeriesInstanceUID, study: ds.StudyInstanceUID, modality: ds.Modality }; })''')
+    active = lambda: own.evaluate("window.services.viewportGridService.getState().activeViewportId")
+    active0 = active()
+    pane_attrs = lambda: own.evaluate('''() => [...document.querySelectorAll('[data-cy="viewport-pane"]')].map(p => [p.className, p.getAttribute("style")])''')
+    panes0 = pane_attrs()
+    own.evaluate('''() => { window.__ohif = { pointer: 0 }; const root = document.getElementById("root");
+        for (const t of ["pointerdown", "mousedown", "click"]) root.addEventListener(t, () => window.__ohif.pointer++, true); }''')
+    picking_everywhere(chat, own); own.wait_for_selector(".pick-shield", state="visible", timeout=5000)
+    for ex in expected:
+        r = own.locator(f'[data-viewport-uid="{ex["id"]}"] canvas').first.bounding_box()
+        own.mouse.move(r["x"] + r["width"] / 3, r["y"] + r["height"] / 3); settle(own, 150)  # hover over the pane first
+        click_at(own, own.locator(f'[data-viewport-uid="{ex["id"]}"] canvas').first)
+    picks = stored_picks(own)
+    got = [p.get("image") or {} for p in picks]
+    named = len(expected) >= 2 and len(picks) == len(expected) and all(
+        g.get("viewportId") == ex["id"] and g.get("seriesInstanceUID") == ex["series"] and g.get("studyInstanceUID") == ex["study"]
+        and g.get("modality") == ex["modality"] and re.match(r"^\d+/\d+$", g.get("slice") or "") for g, ex in zip(got, expected))
+    panes1 = pane_attrs()
+    record("F1 every viewport pick in the worklist's comparison viewer (active and inactive) names its own image; OHIF stays unactivated and untouched",
+           named and active() == active0 and own.evaluate("window.__ohif.pointer") == 0 and panes1 == panes0,
+           {"expected": expected, "images": got, "selectors": [p.get("selector") for p in picks], "active": [active0, active()],
+            "ohifPointer": own.evaluate("window.__ohif.pointer"), "panesBefore": panes0, "panesAfter": panes1})
+    own.screenshot(path=str(OUT / "f1-inactive-viewport-picks.png"))
+    chat.click("#picks-clear"); settle(chat, 500)
+
+    # F2: the studio's viewer and the worklist's viewer pick at once; removing and closing touch only one window.
+    picking_everywhere(chat, viewer, own)
+    click_at(viewer, viewer.locator("canvas").first); settle(chat, 500); n1 = chips(chat).count()
+    click_at(own, own.locator("canvas").first); settle(chat, 600); n2 = chips(chat).count()
+    text = chat.inner_text("#chips")
+    record("F2 picks from two viewer popups both stay in the chat, each window named",
+           n1 == 1 and n2 == 2 and "영상 창 1" in text and "영상 창 2" in text and len(stored_picks(viewer)) == 1 and len(stored_picks(own)) == 1,
+           {"afterFirst": n1, "afterSecond": n2, "chips": text})
+    chat.screenshot(path=str(OUT / "f2-two-viewers.png"))
+    own_page = page_of(own)
+    mine = [i for i, t in enumerate(chip_titles(chat)) if own_page in t]
+    if mine: chips(chat).nth(mine[0]).locator("button.x").click(); settle(chat, 600)
+    record("F2 removing one viewer's chip removes only that viewer's pick",
+           len(mine) == 1 and chips(chat).count() == 1 and len(stored_picks(own)) == 0 and len(stored_picks(viewer)) == 1,
+           {"ownChip": mine, "chips": chips(chat).count(), "own": len(stored_picks(own)), "viewer": len(stored_picks(viewer))})
+    click_at(own, own.locator("canvas").first); settle(chat, 600); before_close = chips(chat).count()
+    own.close(); settle(chat, 800)
+    titles = chip_titles(chat)
+    record("F2 closing one viewer popup keeps the other viewer's picks",
+           before_close == 2 and len(titles) == 1 and page_of(viewer) in titles[0] and len(stored_picks(viewer)) == 1,
+           {"beforeClose": before_close, "chips": titles})
+    chat.click("#picks-clear"); settle(chat, 500)
+
+    # F3: 6 cells in the product window, then the viewer is filled up: the 13th pick is refused where it is clicked.
+    picking_everywhere(chat, product, viewer)
+    f = frame(product)
+    cells = f.locator("#rows tr[data-uid] td:visible").all()
+    cells = [n for n in cells if in_view(product, n.bounding_box())]
+    for node in cells[:6]: click_at(product, node)
+    settle(chat, 600); product_n = chips(chat).count()
+    targets = [viewer.locator("canvas").first] + viewer.locator("#root button:visible").all()
+    targets = [n for n in targets if in_view(viewer, n.bounding_box())]
+    for node in targets[:6]: click_at(viewer, node); settle(viewer, 150)
+    settle(chat, 600); full_n = chips(chat).count()
+    if len(targets) > 6: click_at(viewer, targets[6]); settle(chat, 600)  # the 13th, in the viewer
+    viewer_hint = viewer.locator(".pick-hint").inner_text()
+    if len(cells) > 6: click_at(product, cells[6]); settle(chat, 600)  # and in the product window
+    if not (len(targets) > 6 and len(cells) > 6): record("F3 fixture has a 13th element in each window", False, {"cells": len(cells), "viewerTargets": len(targets)})
+    product_hint = product.locator(".pick-hint").inner_text()
+    record("F3 one limit of 12 over the product window and the viewer: a 13th pick in either is refused and said there",
+           product_n == 6 and full_n == 12 and chips(chat).count() == 12 and len(stored_picks(viewer)) == 6 and "12개까지" in viewer_hint and "12개까지" in product_hint,
+           {"product": product_n, "full": full_n, "after13th": chips(chat).count(), "viewerHint": viewer_hint, "productHint": product_hint})
+    chat.screenshot(path=str(OUT / "f3-pick-limit.png"))
+    sent = {}
+    def on_chat(route):
+        sent.update(json.loads(route.request.post_data or "{}")); route.fulfill(status=200, content_type="application/json", body='{"ok": true}')
+    chat.route("**/studio-api/chat", on_chat)
+    chat.fill("#input", "이것들을 같은 크기로"); chat.press("#input", "Enter"); settle(chat, 1200)
+    chat.unroute("**/studio-api/chat")
+    (OUT / "f3-request.json").write_text(json.dumps(sent, ensure_ascii=False, indent=2), encoding="utf-8")
+    consumer = subprocess.run(["node", "-e", "const fs = require('fs'); const { Chat } = require('./tools/minhoon-studio/server/chat');"
+                               " const b = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));"
+                               " process.stdout.write(Chat.prototype.contextLines.call({}, { context: b.context, displayName: 'check', user: 'check' }));",
+                               str(OUT / "f3-request.json")], cwd=REPO, capture_output=True, text=True, encoding="utf-8", timeout=60)
+    consumed = len(re.findall(r"^\d+\. <", consumer.stdout, re.M))
+    sent_n = len(((sent.get("context") or {}).get("picks")) or [])
+    record("F3 every chip shown reaches the request and the real Chat.contextLines consumer", sent_n == 12 and consumed == 12 and consumer.returncode == 0,
+           {"sent": sent_n, "consumed": consumed, "exit": consumer.returncode})
+    over = chat.evaluate('''async () => { const r = await fetch("/studio-api/chat", { method: "POST", headers: { "Content-Type": "application/json", "X-Studio": "1" },
+        body: JSON.stringify({ mode: "ask", text: "13", context: { picks: Array.from({ length: 13 }, (_, i) => ({ tag: "td", selector: "#c" + i })) } }) });
+        return { status: r.status, body: await r.json() }; }''')
+    record("F3 the chat route refuses 13 picks instead of cutting them", over["status"] == 400 and "12개까지" in (over["body"].get("error") or ""), over)
+    if shield_on(viewer) or shield_on(product): chat.click("#pick"); settle(chat, 500)
+
 def suggestion_boundaries(browser):
     """먼저 제안하기 at its browser boundaries, without a real Claude turn (review d90ea5f F1, F2, F7).
 
@@ -525,7 +632,6 @@ try:
         reopen.select_option("#screen", "viewer"); settle(reopen, 800)
         record("V1 choosing Viewer again reuses the open viewer window", len(ctx.pages) == pages_before, {"pagesBefore": pages_before, "pagesAfter": len(ctx.pages)})
         if a.ohif: viewer_checks(viewer, reopen, product)
-        viewer.close()
         # V2: the worklist's own viewer launch (double-click) is the product's popup, unchanged inside the studio.
         reopen.select_option("#screen", "/worklist/hpacs-lite/main.html"); rows_ready(product); settle(product, 800)
         f = frame(product)
@@ -541,9 +647,11 @@ try:
                 reloaded = wait_loads(own, n + 1); settle(own, 2500)
                 record("V2 the worklist's own viewer popup has 고르기 and reloads once after a studio reset", reloaded and count_loads(own) == n + 1,
                        {"loads": count_loads(own) - n, "status": s})
-            own.close()
+                viewer_window_checks(viewer, own, reopen, product)
+            if not own.is_closed(): own.close()
         except Exception as e:
-            record("V2 the worklist's double-click opens the product's own viewer popup", False, {"error": repr(e)})
+            record("V2 / F1-F3 viewer popup checks ran to the end", False, {"error": repr(e), "trace": traceback.format_exc()[-1500:]})
+        viewer.close()
 
         # A1: role 관리자 opens admin.html in the product tab with no redirect; the showcase card does the same.
         reopen.select_option("#role", "admin"); on_admin(product); settle(product, 2000)

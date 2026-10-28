@@ -15,7 +15,7 @@ const { StaticServer, ISOLATION } = require('./static');
 const { DicomWeb } = require('./dicomweb');
 const { Mock } = require('./mock');
 const { Sandbox } = require('./sandbox');
-const { Chat } = require('./chat');
+const { Chat, MAX_PICKS } = require('./chat');
 const { StatusFeed } = require('./status');
 const { writeDigest, listDigests, DIGEST_ID } = require('./digest');
 const { buildAndCheck } = require('./build');
@@ -185,6 +185,8 @@ async function main() {
       const body = await readJson(req, 256 * 1024);
       const text = String(body.text || '').trim();
       if (!text) { sendJson(res, 400, { error: '내용이 비었습니다.' }); return; }
+      const picked = body.context && Array.isArray(body.context.picks) ? body.context.picks.length : 0;
+      if (picked > MAX_PICKS) { sendJson(res, 400, { error: `고른 곳이 ${picked}개입니다. 한 번에 ${MAX_PICKS}개까지 보낼 수 있습니다.` }); return; }
       touch();
       const job = chat.enqueue({ user, displayName: session.displayName, mode: body.mode === 'ask' ? 'ask' : 'edit', text, context: { ...(body.context || {}), role: mock.role(user) } });
       // A request of his own ends a preview in this browser: the reload after his edit must show his screen.

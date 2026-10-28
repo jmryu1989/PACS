@@ -9,14 +9,21 @@
 // the pointer.
 (() => {
   const { el } = window.Studio;
+  // One request carries at most this many picks, counted over every window (product and viewer popups together):
+  // the chat sends what it shows, so the limit is applied where he picks, not by cutting the list later.
   const MAX_PICKS = 12;
+  const HINT = '고르기: 바꿀 곳을 클릭하세요 · 여러 개 가능 · 다시 클릭하면 빼기 · Esc 모두 지우기';
+  const FULL = `한 번에 ${MAX_PICKS}개까지 고를 수 있습니다(제품 화면과 영상 창을 합해서). 하나를 빼고 다시 고르세요.`;
 
-  window.StudioPick = function StudioPick(target, { meta = () => ({}), onChange = () => {}, onMode = () => {}, idPrefix = 'p' } = {}) {
+  // room(): how many picks this window may hold now (MAX_PICKS less those held by the other windows).
+  // inner(node, x, y): the element the page means at that point, when hit-testing stops at a frame around it.
+  window.StudioPick = function StudioPick(target, { meta = () => ({}), onChange = () => {}, onMode = () => {}, idPrefix = 'p',
+    room = () => MAX_PICKS, inner = node => node } = {}) {
     const self = target === window;
     const layer = el('div', 'pick-layer');
     const shield = el('div', 'pick-shield');
     const hover = el('div', 'pick-box hover');
-    const hint = el('div', 'pick-hint', '고르기: 바꿀 곳을 클릭하세요 · 여러 개 가능 · 다시 클릭하면 빼기 · Esc 모두 지우기');
+    const hint = el('div', 'pick-hint', HINT);
     shield.hidden = true; hover.hidden = true; hint.hidden = true;
     for (const node of [layer, shield, hint]) node.dataset.studio = '';
     // Focusable, so pick mode can take the keyboard away from the product (Space/Enter would press a focused button).
@@ -37,7 +44,7 @@
       if (!d) return null;
       const r = offset();
       const node = d.elementsFromPoint(x - r.left, y - r.top).find(n => !studioOwn(n));
-      return node && node !== d.documentElement && node !== d.body ? node : null;
+      return node && node !== d.documentElement && node !== d.body ? inner(node, x - r.left, y - r.top) : null;
     }
 
     // Only the part of the node the product actually shows is outlined: a cell scrolled out of the worklist must not
@@ -104,13 +111,21 @@
       picks.forEach(resolve); // a click right after a reload must find the pick it repeats, not add a second one
       const existing = picks.findIndex(p => p.node === node);
       if (existing >= 0) { picks[existing].box.remove(); picks.splice(existing, 1); emit(); return; }
-      if (picks.length >= MAX_PICKS) return;
+      if (picks.length >= Math.min(MAX_PICKS, room())) { full(); return; }
       const box = el('div', 'pick-box picked');
       layer.append(box);
       const id = `${idPrefix}${++seq}`;
       picks.push({ id, node, box, desc: { id, ...describe(node, meta(node)) } });
       emit();
       repaint();
+    }
+
+    // A click past the limit says so where he clicked, instead of doing nothing.
+    let fullTimer = 0;
+    function full() {
+      hint.textContent = FULL; hint.classList.add('full');
+      clearTimeout(fullTimer);
+      fullTimer = setTimeout(() => { hint.textContent = HINT; hint.classList.remove('full'); }, 3000);
     }
 
     function remove(id) {
@@ -314,4 +329,5 @@
   }
 
   window.StudioPick.selectorFor = selectorFor;
+  window.StudioPick.MAX = MAX_PICKS;
 })();

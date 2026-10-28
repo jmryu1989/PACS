@@ -486,8 +486,9 @@ function splitRecords(text) {
   return { text: maskSecrets(clean), records };
 }
 
-// Elements picked in the product window ("이거"): what Claude needs to find them in the code. The browser sends at
-// most 12; long fields are cut so a picked text block cannot crowd out the request.
+// Elements picked in the product window ("이거"): what Claude needs to find them in the code. The browser lets him
+// pick at most 12 over all windows and the chat route refuses more (server.js), so the cap below never drops a pick
+// he saw; long fields are cut so a picked text block cannot crowd out the request.
 const MAX_PICKS = 12;
 const short = (value, n) => { const s = String(value == null ? '' : value).replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 const num = v => (Number.isFinite(Number(v)) ? Math.round(Number(v)) : '?');
@@ -533,4 +534,4 @@ function toolSummary(name, input, cwd) {
   }
 }
 
-module.exports = { Chat, splitRecords, toolSummary, visiblePart, turnFailed, pickLines };
+module.exports = { Chat, splitRecords, toolSummary, visiblePart, turnFailed, pickLines, MAX_PICKS };

@@ -165,64 +165,94 @@
     }
   }
 
-  // ── picks (chips above the input): the product window's, then the viewer popup's ──
-  const pickSets = { product: [], viewer: [] };
-  function setPicks(picks, from = 'product') {
-    pickSets[from] = picks;
-    state.picks = [...pickSets.product, ...pickSets.viewer];
+  // ── picks (chips above the input): the product window's, then each viewer popup's (in the order they were first
+  // heard). Every window is told how many the others hold, so the one limit (StudioPick.MAX) is kept where he picks
+  // and everything shown here is what is sent. ──
+  const MAX_PICKS = window.StudioPick.MAX;
+  const pickSets = { product: [], viewers: new Map() }; // viewer window id -> its picks
+  const pickCounts = () => {
+    const counts = { product: pickSets.product.length };
+    for (const [win, picks] of pickSets.viewers) counts[`viewer:${win}`] = picks.length;
+    return counts;
+  };
+  function setPicks(picks, from = 'product', win = '') {
+    if (from === 'viewer') pickSets.viewers.set(win, picks); else pickSets.product = picks;
+    const many = [...pickSets.viewers.values()].filter(list => list.length).length > 1;
+    const all = pickSets.product.map(p => [p, 'product', '', '']);
+    let n = 0;
+    for (const [w, list] of pickSets.viewers) {
+      if (!list.length) continue;
+      n++;
+      for (const p of list) all.push([p, 'viewer', w, many ? ` ${n}` : '']);
+    }
+    state.picks = all.map(([p]) => p);
     const chips = $('chips');
     chips.replaceChildren();
-    const all = [...pickSets.product.map(p => [p, 'product']), ...pickSets.viewer.map(p => [p, 'viewer'])];
-    all.forEach(([p, source], i) => {
+    all.forEach(([p, source, w, which], i) => {
       const chip = el('span', p.lost ? 'chip lost' : 'chip');
       chip.title = `${p.selector}\n${p.page || ''}${p.lost ? `\n지금 ${source === 'viewer' ? '영상 창' : '제품 화면'}에서 이 요소를 찾을 수 없습니다(목록이 바뀌었거나 다른 화면). 빼고 다시 골라 주세요.` : ''}`;
       const image = p.image && p.image.seriesDescription ? ` · ${p.image.seriesDescription}${p.image.slice ? ` ${p.image.slice}` : ''}` : '';
-      chip.append(el('b', '', String(i + 1)), `${source === 'viewer' ? ' 영상 창' : ''} ${p.tag} ${p.text ? `"${p.text.length > 28 ? p.text.slice(0, 27) + '…' : p.text}"` : ''}${image}`);
+      chip.append(el('b', '', String(i + 1)), `${source === 'viewer' ? ` 영상 창${which}` : ''} ${p.tag} ${p.text ? `"${p.text.length > 28 ? p.text.slice(0, 27) + '…' : p.text}"` : ''}${image}`);
       if (p.lost) chip.append(el('span', 'lost-note', ' · 화면에서 찾을 수 없음'));
       const x = el('button', 'x', '×'); x.type = 'button'; x.title = '빼기';
-      x.onclick = () => (source === 'viewer' ? viewer.pickRemove(p.id) : target.pickRemove(p.id));
+      x.onclick = () => (source === 'viewer' ? viewer.pickRemove(p.id, w) : target.pickRemove(p.id));
       chip.append(x);
       chips.append(chip);
     });
+    // Two windows picking at the same moment can pass the limit together: said here, and sending waits for one less.
+    $('picks-over').hidden = all.length <= MAX_PICKS;
+    $('picks-over').textContent = ` · ${all.length}개: 한 번에 ${MAX_PICKS}개까지 보낼 수 있습니다. ${all.length - MAX_PICKS}개를 빼 주세요.`;
     $('picks').hidden = !all.length;
+    viewer.counts(pickCounts());
   }
   function clearPicks() { target.pickClear(); viewer.pickClear(); }
   $('picks-clear').onclick = () => clearPicks();
 
+  const viewerPicking = () => [...viewerWins.values()].some(v => v.pickActive);
   function setPickMode(on, from = 'product') {
-    if (from === 'viewer') viewerState.pickActive = on; else state.product.pickActive = on;
-    const any = state.product.pickActive || viewerState.pickActive;
+    if (from !== 'viewer') state.product.pickActive = on;
+    const any = state.product.pickActive || viewerPicking();
     $('pick').classList.toggle('on', any);
     $('pick').textContent = any ? '고르는 중' : '고르기';
   }
 
-  // ── the viewer popup: OHIF with the studio's viewer-studio.js (static.js adds it), in both layouts. It is reached
-  // over the channel, not through a window handle, so a refreshed or reopened chat still reloads and picks in it. ──
-  const viewerState = { seen: 0, pickActive: false };
+  // ── the viewer popups: OHIF with the studio's viewer-studio.js (static.js adds it), in both layouts. They are
+  // reached over the channel, not through window handles, so a refreshed or reopened chat still reloads and picks in
+  // them. Each popup names itself (win): closing one drops only its own picks. ──
+  const viewerWins = new Map(); // win -> { seen, pickActive }
   const viewer = (() => {
     const bc = channel();
     const post = message => { if (bc) bc.postMessage({ from: 'chat', ...message }); };
     if (bc) bc.onmessage = ({ data: m }) => {
       if (!m || m.from !== 'viewer') return;
-      if (m.type === 'viewer-bye') { viewerState.seen = 0; setPicks([], 'viewer'); setPickMode(false, 'viewer'); return; }
-      viewerState.seen = Date.now();
-      if (Array.isArray(m.picks)) setPicks(m.picks, 'viewer');
-      if ('pickActive' in m && !!m.pickActive !== viewerState.pickActive) setPickMode(!!m.pickActive, 'viewer');
+      const w = typeof m.win === 'string' ? m.win : '';
+      if (m.type === 'viewer-bye') {
+        viewerWins.delete(w); pickSets.viewers.delete(w);
+        setPicks(pickSets.product); setPickMode(state.product.pickActive);
+        return;
+      }
+      const v = viewerWins.get(w) || { seen: 0, pickActive: false };
+      viewerWins.set(w, v);
+      v.seen = Date.now();
+      if (Array.isArray(m.picks)) setPicks(m.picks, 'viewer', w);
+      if ('pickActive' in m && !!m.pickActive !== v.pickActive) { v.pickActive = !!m.pickActive; setPickMode(state.product.pickActive); }
     };
     setInterval(() => post({ type: 'viewer-hb' }), 2000);
     post({ type: 'viewer-ping' });
     return {
-      connected: () => Date.now() - viewerState.seen < 5000,
+      connected: () => [...viewerWins.values()].some(v => Date.now() - v.seen < 5000),
       reload: nonce => post({ type: 'viewer-reload', nonce }),
       pick: on => post({ type: 'viewer-pick', on }),
-      pickRemove: id => post({ type: 'viewer-pick-remove', id }),
+      pickRemove: (id, w) => post({ type: 'viewer-pick-remove', id, win: w }),
       pickClear: () => post({ type: 'viewer-picks-clear' }),
+      // Read by the product window and every viewer popup (the same channel): how many the other windows hold.
+      counts: counts => post({ type: 'pick-counts', counts }),
     };
   })();
 
   // 고르기 from the chat: every open product window picks. With the viewer open the product window is not brought
   // forward — it would cover the viewer popup he is about to pick in.
-  function togglePick(on = !(state.product.pickActive || viewerState.pickActive)) {
+  function togglePick(on = !(state.product.pickActive || viewerPicking())) {
     if (viewer.connected()) {
       viewer.pick(on);
       if (target.connected()) target.pick(on, false);
@@ -247,6 +277,7 @@
     });
     let reopen = false;
     const pick = window.StudioPick($('mirror'), {
+      room: () => MAX_PICKS - [...pickSets.viewers.values()].reduce((n, list) => n + list.length, 0),
       meta: () => ({ screen: $('screen').selectedOptions[0] && $('screen').selectedOptions[0].textContent, role: state.me && state.me.role }),
       onChange: setPicks,
       // Picking needs the whole product visible: the chat steps aside and comes back with the picks.
@@ -408,6 +439,7 @@
   async function sendMessage() {
     const text = input.value.trim();
     if (!text) return;
+    if (state.picks.length > MAX_PICKS) { alert(`고른 곳이 ${state.picks.length}개입니다. 한 번에 ${MAX_PICKS}개까지 보낼 수 있으니 ${state.picks.length - MAX_PICKS}개를 빼고 보내 주세요.`); return; }
     const product = await target.context();
     const picks = state.picks.map(({ id, ...rest }) => rest);
     const context = { page: product.page, study: product.study, errors: product.errors || [], picks,

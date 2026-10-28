@@ -22,7 +22,9 @@
     onLoad: () => post({ type: 'state', ...snapshot() }),
     heldField: () => pick.heldField(),
   });
+  let others = 0; // picks held by the viewer popups (the chat's pick-counts): one limit over every window
   const pick = window.StudioPick($('product'), {
+    room: () => window.StudioPick.MAX - others,
     meta: () => ({ screen: screenLabel(), role: me.role }),
     onChange: picks => post({ type: 'picks', picks }),
     onMode: on => { $('pick').classList.toggle('on', on); post({ type: 'pick-mode', on }); },
@@ -102,6 +104,7 @@
       setTimeout(() => post({ type: 'focused', ask: m.ask, ok: document.hasFocus() }), 300);
     } else if (m.type === 'pick-remove') pick.remove(m.id);
     else if (m.type === 'picks-clear') pick.clear();
+    else if (m.type === 'pick-counts' && m.counts) others = Object.entries(m.counts).reduce((n, [k, c]) => (k === 'product' ? n : n + (Number(c) || 0)), 0);
   };
 
   // Connection dot: green while a studio chat window is heard from (it sends a heartbeat every 2 s).

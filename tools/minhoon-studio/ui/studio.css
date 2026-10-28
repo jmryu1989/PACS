@@ -82,6 +82,7 @@ button.link { background: transparent; border: 0; color: var(--muted); text-deco
 .chip .x { border: 0; background: transparent; padding: 0 4px; line-height: 1; }
 .chip.lost { border-style: dashed; opacity: .8; }
 .chip .lost-note { color: #f0883e; font-size: 11px; }
+#picks-over { color: #f0883e; }
 #composer { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--line); }
 #composer textarea { flex: 1; resize: vertical; min-height: 60px; max-height: 40vh; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
 #composer #send { align-self: stretch; padding: 0 16px; background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }

@@ -7,15 +7,45 @@
 (() => {
   const { channel, el, isShortcut, PICK_KEY } = window.Studio;
   const bc = channel();
-  const post = message => { if (bc) bc.postMessage({ from: 'viewer', ...message }); };
+  // Several viewer popups can be open at once (the studio's and the worklist's): each is its own window to the chat,
+  // so its picks, pick mode and closing touch only its own chips. Kept for the tab's life, so a reload is the same
+  // window.
+  const WIN_KEY = 'studio-viewer-window';
+  let win = null;
+  try { win = sessionStorage.getItem(WIN_KEY); } catch { win = null; }
+  if (!win) {
+    win = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    try { sessionStorage.setItem(WIN_KEY, win); } catch { /* storage off: a reload is a new window */ }
+  }
+  const post = message => { if (bc) bc.postMessage({ from: 'viewer', win, ...message }); };
   document.documentElement.classList.add('studio-viewer');
-  let role = null, chatSeen = 0;
+  let role = null, chatSeen = 0, others = 0;
+
+  // OHIF keeps an inactive viewport's content out of hit-testing (pointer-events-none on its data-cy="viewport-pane",
+  // so the first click only activates it): the hit lands on the pane's frame. For that one synchronous look the pane
+  // is let in, so a pick on the second image is that image as on the active one, and OHIF is not activated.
+  const GRID = '[data-cy="viewport-grid"]', PANE = '[data-cy="viewport-pane"]';
+  const studioOwn = n => !!(n && n.closest && n.closest('[data-studio]'));
+  function inner(node, x, y) {
+    const grid = node.closest(GRID);
+    if (!grid || node.closest(PANE)) return node;
+    let pane = null;
+    for (let a = node; a && a !== grid; a = a.parentElement) {
+      const panes = a.querySelectorAll(PANE);
+      if (panes.length) { if (panes.length === 1) pane = panes[0]; break; }
+    }
+    if (!pane) return node; // between panes
+    const before = pane.getAttribute('style');
+    pane.style.pointerEvents = 'auto';
+    try { return document.elementsFromPoint(x, y).find(n => pane.contains(n) && !studioOwn(n)) || node; }
+    finally { if (before === null) pane.removeAttribute('style'); else pane.setAttribute('style', before); }
+  }
 
   // Which image a picked element belongs to: OHIF's viewport (data-viewport-uid) and, from OHIF's own services,
   // the series it shows and the slice. Outside a viewport (toolbar, side panels) there is none.
   function imageOf(node) {
     try {
-      const pane = node.closest('[data-cy="viewport-pane"]');
+      const pane = node.closest(PANE);
       const element = node.closest('[data-viewport-uid]') || (pane && pane.querySelector('[data-viewport-uid]'));
       if (!element) return null;
       const viewportId = element.getAttribute('data-viewport-uid');
@@ -47,6 +77,8 @@
   const KEEP = 'studio-viewer-picks';
   const pick = window.StudioPick(window, {
     idPrefix: 'v',
+    inner,
+    room: () => window.StudioPick.MAX - others,
     meta: node => ({ screen: 'Viewer', role, image: imageOf(node) }),
     onChange: picks => {
       try { sessionStorage.setItem(KEEP, JSON.stringify(picks)); } catch { /* storage off */ }
@@ -85,8 +117,9 @@
     if (m.type === 'viewer-ping') hello();
     else if (m.type === 'viewer-reload') reloadOnce(m.nonce);
     else if (m.type === 'viewer-pick' && typeof m.on === 'boolean') { pick.toggle(m.on); post({ type: 'viewer-pick-mode', pickActive: pick.active }); }
-    else if (m.type === 'viewer-pick-remove') pick.remove(m.id);
-    else if (m.type === 'viewer-picks-clear') pick.clear();
+    else if (m.type === 'viewer-pick-remove' && m.win === win) pick.remove(m.id);
+    else if (m.type === 'viewer-picks-clear' && (!m.win || m.win === win)) pick.clear();
+    else if (m.type === 'pick-counts' && m.counts) others = Object.entries(m.counts).reduce((n, [k, c]) => (k === `viewer:${win}` ? n : n + (Number(c) || 0)), 0);
   };
 
   function paintLink() {
