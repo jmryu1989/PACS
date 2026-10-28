@@ -495,13 +495,19 @@ async function sharedDeliveryPatients(port,witness,ok,query,doctor,servers){
   await recorder.beforeApplicationShutdown();registry.quiesce();
   const events=(await witness.$queryRaw`SELECT event_id::text AS id,payload::jsonb AS event FROM emr_access.access_entry
     WHERE payload::jsonb#>>'{targets,0,studyId,value}'=${studyUid} ORDER BY sequence`).map(r=>({id:r.id,action:r.event.action,
-      patient:r.event.targets[0].patientLinkSnapshot.value.patientId,version:r.event.targets[0].versionId.value}));
-  assert.deepEqual(events.map(e=>[e.action,e.patient,e.version]),[
-    ['provide-prepared','SYNTHETIC-F-A','orthanc-study:aaaaaaaa-11111111-22222222-33333333-44444444@20261028T100000'],
-    ['transfer-ended','SYNTHETIC-F-A','orthanc-study:aaaaaaaa-11111111-22222222-33333333-44444444@20261028T100000'],
-    ['provide-prepared','SYNTHETIC-F-B','orthanc-study:bbbbbbbb-11111111-22222222-33333333-44444444@20261028T100500'],
-    ['transfer-ended','SYNTHETIC-F-B','orthanc-study:bbbbbbbb-11111111-22222222-33333333-44444444@20261028T100500']],
+      related:r.event.relatedEventId,patient:r.event.targets[0].patientLinkSnapshot.value.patientId,version:r.event.targets[0].versionId.value}));
+  // The superseded delivery's closing is offered as it closes, beside the next one's opening: their ledger order is not
+  // fixed (VM run opus-244-fix10-vm-1029b saw A's closing after B's opening). What each pair names is.
+  assert.deepEqual(events.map(e=>[e.patient,e.action,e.version]).sort((a,b)=>a.join().localeCompare(b.join())),[
+    ['SYNTHETIC-F-A','provide-prepared','orthanc-study:aaaaaaaa-11111111-22222222-33333333-44444444@20261028T100000'],
+    ['SYNTHETIC-F-A','transfer-ended','orthanc-study:aaaaaaaa-11111111-22222222-33333333-44444444@20261028T100000'],
+    ['SYNTHETIC-F-B','provide-prepared','orthanc-study:bbbbbbbb-11111111-22222222-33333333-44444444@20261028T100500'],
+    ['SYNTHETIC-F-B','transfer-ended','orthanc-study:bbbbbbbb-11111111-22222222-33333333-44444444@20261028T100500']],
     'each delivery\'s pair names the patient and revision whose bytes it covered');
+  for(const patientId of ['SYNTHETIC-F-A','SYNTHETIC-F-B']){
+    const [opened,closed]=['provide-prepared','transfer-ended'].map(action=>events.find(e=>e.patient===patientId&&e.action===action));
+    assert.equal(closed.related,opened.id,`${patientId}'s closing event closes ${patientId}'s opening`);
+  }
   const ids=new Set(events.map(e=>e.id));
   for(const patientId of ['SYNTHETIC-F-A','SYNTHETIC-F-B']){
     const page=await ok('auditor','POST','investigations',{...query,patient:{patientId,assigningAuthority:institution}});
