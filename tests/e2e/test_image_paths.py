@@ -108,6 +108,7 @@ FAILING_CELLS = [
 # Every other location of the rendered configuration and why it carries no image byte. A location absent here fails (a).
 NO_IMAGE = {
     "/": "the HTTP server's redirect to HTTPS, and the HTTPS server's 404 for every unlisted path",
+    "= /": "the root's redirect to the worklist page",
     "~* ^/auth/realms/kin/account": "Keycloak's account console, answered 404",
     "= /auth/admin": "Keycloak administration, answered 404", "^~ /auth/admin/": "Keycloak administration, answered 404",
     "= /auth/realms/master": "Keycloak master realm, answered 404", "^~ /auth/realms/master/": "Keycloak master realm, answered 404",

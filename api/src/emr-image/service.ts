@@ -139,7 +139,8 @@ export class OnlineImageService implements BeforeApplicationShutdown {
       try { work = this.records.begin(); } catch { return; }
       try { while (await this.retainPending(work) && this.unretained.length); }
       finally { work.end(); }
-    })().finally(() => { this.retaining = null; });
+    })().catch(error => { console.error('[EMR-E] image observation retention failed', (error as any)?.message ?? String(error)); })
+      .finally(() => { this.retaining = null; });
     return this.retaining;
   }
   /** One ledger transaction per held entry, oldest first, written with the first failure's cause (store.ts retain); B2
