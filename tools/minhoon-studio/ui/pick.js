@@ -14,10 +14,12 @@
     const hover = el('div', 'pick-box hover');
     const hint = el('div', 'pick-hint', '고르기: 바꿀 곳을 클릭하세요 · 여러 개 가능 · 다시 클릭하면 빼기 · Esc 모두 지우기');
     shield.hidden = true; hover.hidden = true; hint.hidden = true;
+    // Focusable, so pick mode can take the keyboard away from the product (Space/Enter would press a focused button).
+    shield.tabIndex = -1;
     layer.append(hover);
     document.body.append(layer, shield, hint);
 
-    const picks = []; // { id, node, desc, box }
+    const picks = []; // { id, node, desc, box, missingSince }
     let active = false, seq = 0, frame = 0;
 
     const doc = () => { try { return iframe.contentDocument; } catch { return null; } };
@@ -39,15 +41,33 @@
       Object.assign(box.style, { left: `${o.left + r.left}px`, top: `${o.top + r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
     }
 
-    // Outlines follow scrolling and re-layout; after a reload the old nodes are gone, so look them up again.
+    // A pick belongs to a node of the product document now shown. After a reload the old node still exists, but in
+    // the old document; after a re-render (sorting the list) it is replaced. Either way it is looked up again by its
+    // selector. A positional selector (:nth-of-type) only rebinds to an element with the same visible text, so a
+    // re-sorted list never moves a pick onto another study; until it is found again the pick is shown as lost.
+    function resolve(p) {
+      const d = doc();
+      if (p.node && p.node.isConnected && p.node.ownerDocument === d) return;
+      let found = null;
+      try { found = d ? d.querySelector(p.desc.selector) : null; } catch { found = null; }
+      if (found && /:nth-of-type\(/.test(p.desc.selector) && p.desc.text && visibleText(found) !== p.desc.text) found = null;
+      p.node = found;
+    }
+
+    // A reloading list has no rows for a moment: a pick counts as lost only once the page has settled without it.
+    const LOST_AFTER_MS = 1500;
     function paint() {
       frame = 0;
+      const d = doc(), now = Date.now();
+      let changed = false;
       for (const p of picks) {
-        if (!p.node || !p.node.isConnected) {
-          try { p.node = doc() && doc().querySelector(p.desc.selector); } catch { p.node = null; }
-        }
+        resolve(p);
+        if (p.node) p.missingSince = 0; else if (!p.missingSince) p.missingSince = now;
+        const lost = !p.node && !!d && d.readyState === 'complete' && now - p.missingSince > LOST_AFTER_MS;
+        if (lost !== !!p.desc.lost) { p.desc.lost = lost; changed = true; }
         place(p.box, p.node);
       }
+      if (changed) emit();
       if (active || picks.length) frame = requestAnimationFrame(paint);
     }
     const repaint = () => { if (!frame) frame = requestAnimationFrame(paint); };
@@ -58,6 +78,7 @@
     }
 
     function add(node) {
+      picks.forEach(resolve); // a click right after a reload must find the pick it repeats, not add a second one
       const existing = picks.findIndex(p => p.node === node);
       if (existing >= 0) { picks[existing].box.remove(); picks.splice(existing, 1); emit(); return; }
       if (picks.length >= MAX_PICKS) return;
@@ -80,12 +101,25 @@
       emit();
     }
 
-    function setActive(on) {
-      active = !!on;
+    function fit() {
       const r = offset();
       Object.assign(shield.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+    }
+
+    // onMode only on a real change: a resize while picking must not look like a second "picking started".
+    function setActive(on) {
+      on = !!on;
+      fit();
+      if (on === active) return;
+      active = on;
       shield.hidden = !active; hint.hidden = !active;
-      if (!active) hover.hidden = true;
+      // The keyboard moves to the shield, so a focused product button cannot be pressed with Space/Enter while
+      // picking; the product keeps its own focused element, so typing is still noticed and focus returns after.
+      if (active) shield.focus({ preventScroll: true });
+      else {
+        hover.hidden = true;
+        if (document.activeElement === shield) { try { iframe.contentWindow.focus(); } catch { /* navigating */ } }
+      }
       onMode(active);
       repaint();
     }
@@ -105,11 +139,18 @@
       }
       try { iframe.contentWindow.scrollBy(e.deltaX, e.deltaY); } catch { /* navigating */ }
     }, { passive: false });
-    window.addEventListener('resize', () => { if (active) setActive(true); });
+    window.addEventListener('resize', () => { if (active) fit(); });
 
     // Esc while picking clears every pick and leaves pick mode. Outside pick mode Esc stays the product's.
+    // While picking, plain keys meant for the product (focus can come back, e.g. a reloaded page that focuses a
+    // field) are kept from it; Alt/Ctrl chords pass so the studio shortcuts still work.
     function onKey(e) {
-      if (e.key === 'Escape' && active) { e.preventDefault(); e.stopPropagation(); clear(); setActive(false); return true; }
+      if (!active) return false;
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); clear(); setActive(false); return true; }
+      const where = e.target && (e.target.ownerDocument || e.target);
+      if ((where !== document || e.target === shield) && !e.altKey && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault(); e.stopPropagation(); shield.focus({ preventScroll: true }); return true;
+      }
       return false;
     }
 
@@ -157,7 +198,11 @@
   // Shortest selector that still finds exactly this element: an id if there is one, else tag + a telling attribute
   // + up to two classes, climbing to an ancestor with an id, with :nth-of-type only where siblings look alike.
   // State classes (sel, on, active, …) are left out so the selector survives a click elsewhere.
+  // A study row is named by its data-uid (the study itself), never by its position, so the selector still means the
+  // same study after the list is sorted or filtered; its classes (st-<report state>) change with the study and are
+  // left out.
   const STATE_CLASS = /^(sel|selected|on|off|active|hover|focus|focused|open|closed|show|hidden|disabled|is-.*|has-.*)$/;
+  const IDENTITY = ['data-uid'];
   const ATTRS = ['data-mode', 'data-col', 'data-key', 'data-action', 'data-tab', 'name', 'aria-label', 'role', 'type'];
   function selectorFor(node) {
     const d = node.ownerDocument;
@@ -166,7 +211,9 @@
     let n = node;
     while (n && n.nodeType === 1 && n !== d.documentElement && n !== d.body && parts.length < 8) {
       let part;
+      const identity = !n.id && IDENTITY.find(a => n.getAttribute(a) && n.getAttribute(a).length < 120);
       if (n.id) part = `#${CSS.escape(n.id)}`;
+      else if (identity) part = `${n.tagName.toLowerCase()}[${identity}="${CSS.escape(n.getAttribute(identity))}"]`;
       else {
         part = n.tagName.toLowerCase();
         const attr = ATTRS.find(a => n.hasAttribute(a) && n.getAttribute(a).length < 60);
@@ -175,7 +222,7 @@
       }
       parts.unshift(part);
       if (unique(parts.join(' > '))) return parts.join(' > ');
-      if (!n.id && n.parentElement) {
+      if (!n.id && !identity && n.parentElement) {
         const same = [...n.parentElement.children].filter(c => c.tagName === n.tagName);
         if (same.length > 1) {
           parts[0] = `${part}:nth-of-type(${same.indexOf(n) + 1})`;

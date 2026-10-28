@@ -43,7 +43,12 @@ async function main() {
   }
   fs.mkdirSync(path.join(config.paths.data, 'public'), { recursive: true });
   const clients = new Set();
+  // Each reload event gets its own id: every chat tab relays it to the product window, which reloads once per id.
+  // Without it two mock resets (no sha, no job) looked like one event and the second never reloaded the screen.
+  let eventSeq = 0;
+  const started = Date.now().toString(36);
   const broadcast = event => {
+    if (event.type === 'reload') event = { ...event, eventId: `${started}-${++eventSeq}` };
     const data = `data: ${JSON.stringify(event)}\n\n`;
     for (const res of clients) res.write(data);
   };

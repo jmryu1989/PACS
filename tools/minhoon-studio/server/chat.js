@@ -480,6 +480,7 @@ function pickLines(picks) {
     if (p.page) parts.push(`페이지 ${short(p.page, 200)}${p.screen ? ` (${short(p.screen, 40)})` : ''}`);
     if (p.role) parts.push(`역할 ${short(p.role, 20)}`);
     if (style.font || style.color) parts.push(`글자 ${short(style.font, 30)} 색 ${short(style.color, 40)} 배경 ${short(style.background, 40)}`);
+    if (p.lost === true) parts.push('보낼 때 화면에서 찾을 수 없었음(목록이 바뀌었을 수 있음): 위 정보는 고를 때 기준');
     return parts.join(' · ');
   });
   return `[선택한 화면 요소 — 요청의 "이거·여기·이것들"은 아래 요소다. selector는 실행 중 DOM 기준이라 코드에서는 id·class·글자로 찾는다]\n${lines.join('\n')}`;

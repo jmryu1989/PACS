@@ -44,6 +44,7 @@ button.link { background: transparent; border: 0; color: var(--muted); text-deco
 .pick-box.picked { outline: 2px solid #f0883e; background: rgba(240, 136, 62, .12); }
 .pick-box.picked::after { content: attr(data-n); position: absolute; left: -2px; top: -20px; background: #f0883e; color: #111; font-size: 11px; font-weight: 600; padding: 0 6px; border-radius: 4px; white-space: nowrap; }
 .pick-shield { position: fixed; z-index: 36; cursor: crosshair; background: transparent; }
+.pick-shield:focus { outline: none; }
 .pick-hint { position: fixed; top: 8px; left: 50%; transform: translateX(-50%); z-index: 41; pointer-events: none; background: #3d2200; border: 1px solid #f0883e; color: #ffd8b5; padding: 4px 12px; border-radius: 8px; font-size: 13px; }
 
 /* 두 창: this window is the chat only. 한 창: the product fills it and the chat slides over the right edge. */
@@ -80,6 +81,8 @@ button.link { background: transparent; border: 0; color: var(--muted); text-deco
 .chip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; background: #2d1d0c; border: 1px solid #f0883e; border-radius: 12px; padding: 1px 4px 1px 8px; }
 .chip b { color: #f0883e; }
 .chip .x { border: 0; background: transparent; padding: 0 4px; line-height: 1; }
+.chip.lost { border-style: dashed; opacity: .8; }
+.chip .lost-note { color: #f0883e; font-size: 11px; }
 #composer { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--line); }
 #composer textarea { flex: 1; resize: vertical; min-height: 60px; max-height: 40vh; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
 #composer #send { align-self: stretch; padding: 0 16px; background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }

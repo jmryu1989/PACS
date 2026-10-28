@@ -124,8 +124,9 @@
           state.timings[ev.id] = `요청→적용 ${(ev.timings.totalToReloadSentMs / 1000).toFixed(1)}초`;
         }
       } else if (ev.type === 'reload') {
-        // The same nonce from every studio tab of this browser, so the product window reloads once.
-        target.reload({ reason: ev.reason, jobId: ev.jobId || null, sha: ev.sha || null }, `${ev.reason}|${ev.sha || ''}|${ev.jobId || ''}`);
+        // Every studio tab of this browser relays the same server event with the same nonce, so the product window
+        // reloads once per event; two separate events (two resets) are two reloads.
+        target.reload({ reason: ev.reason, jobId: ev.jobId || null, sha: ev.sha || null }, ev.eventId || `${ev.reason}|${ev.sha || ''}|${ev.jobId || ''}`);
         refreshState().catch(() => {});
       } else if (ev.type === 'missing') {
         if (!state.missing.some(m => m.method === ev.method && m.path === ev.path)) state.missing.push(ev);
@@ -154,9 +155,10 @@
     const chips = $('chips');
     chips.replaceChildren();
     picks.forEach((p, i) => {
-      const chip = el('span', 'chip');
-      chip.title = `${p.selector}\n${p.page || ''}`;
+      const chip = el('span', p.lost ? 'chip lost' : 'chip');
+      chip.title = `${p.selector}\n${p.page || ''}${p.lost ? '\n지금 제품 화면에서 이 요소를 찾을 수 없습니다(목록이 바뀌었거나 다른 화면). 빼고 다시 골라 주세요.' : ''}`;
       chip.append(el('b', '', String(i + 1)), ` ${p.tag} ${p.text ? `"${p.text.length > 28 ? p.text.slice(0, 27) + '…' : p.text}"` : ''}`);
+      if (p.lost) chip.append(el('span', 'lost-note', ' · 화면에서 찾을 수 없음'));
       const x = el('button', 'x', '×'); x.type = 'button'; x.title = '빼기';
       x.onclick = () => target.pickRemove(p.id);
       chip.append(x);
@@ -230,11 +232,21 @@
     const post = message => { if (bc) bc.postMessage({ from: 'chat', ...message }); };
     const replies = new Map();
     let ref = null;
+    let pickWanted = 0; // when 고르기 was asked for with no product window: start it as soon as the window answers
+    let linkHint = null; // { text, until }: a short note in the connection line
     if (bc) bc.onmessage = ({ data: m }) => {
       if (!m || m.from !== 'product') return;
       const p = state.product;
       p.seen = m.type === 'bye' ? 0 : Date.now();
+      if (m.type !== 'bye' && pickWanted) {
+        if (Date.now() - pickWanted < 30000) post({ type: 'pick', on: true });
+        pickWanted = 0;
+      }
       if ('page' in m) { p.page = m.page; p.study = m.study; }
+      // The controls describe what the product window shows, whichever chat tab changed it.
+      if (typeof m.screen === 'string' && [...$('screen').options].some(o => o.value === m.screen)) $('screen').value = m.screen;
+      if (m.role && [...$('role').options].some(o => o.value === m.role)) { $('role').value = m.role; if (state.me) state.me.role = m.role; }
+      if (m.type === 'focused' && !m.ok && m.ask === focusAsk) linkHint = { text: '제품 화면은 이미 열려 있습니다. 작업 표시줄에서 "… — 스튜디오" 창을 눌러 주세요.', until: Date.now() + 8000 };
       if (Array.isArray(m.errors)) setErrors(m.errors);
       if (Array.isArray(m.picks)) setPicks(m.picks);
       if ('pickActive' in m) setPickMode(!!m.pickActive);
@@ -251,13 +263,24 @@
     function paintLink() {
       const on = connected();
       $('link-dot').classList.toggle('on', on);
-      $('link-text').textContent = on ? `제품 화면 연결됨${state.product.page ? ' · ' + state.product.page.split('?')[0].split('/').pop() : ''}` : '제품 화면이 열려 있지 않습니다';
+      $('link-text').textContent = on && linkHint && Date.now() < linkHint.until ? linkHint.text
+        : on ? `제품 화면 연결됨${state.product.page ? ' · ' + state.product.page.split('?')[0].split('/').pop() : ''}` : '제품 화면이 열려 있지 않습니다';
       $('open-product').textContent = on ? '제품 화면 앞으로' : '제품 화면 열기';
       $('open-product').classList.toggle('attention', !on);
     }
 
     // A fixed window name: an open product window is reused (and brought forward) instead of opening a second one.
+    // A product window this tab did not open (another chat tab, or this tab before a reload) answers on the channel
+    // but window.open cannot reach it from here — it would open a second product window — so it is asked to come
+    // forward itself, and if the browser does not allow that the chat says where it is.
+    let focusAsk = '';
     function openProduct() {
+      if (ref && !ref.closed) { try { ref.focus(); } catch { /* not ours */ } return ref; }
+      if (connected()) {
+        focusAsk = Math.random().toString(36).slice(2);
+        post({ type: 'focus', ask: focusAsk });
+        return null;
+      }
       let w = null;
       try { w = window.open('', PRODUCT_WINDOW, `popup,width=${Math.min(screen.availWidth, 1920)},height=${screen.availHeight}`); } catch { w = null; }
       if (!w) { alert('브라우저가 새 창을 막았습니다. 주소창 오른쪽의 팝업 차단 표시에서 이 사이트를 허용해 주세요.'); return null; }
@@ -285,9 +308,13 @@
         post({ type: 'context', ask });
       }),
       pick: on => {
-        if (!connected()) { openProduct(); return; }
+        if (!connected()) {
+          if (on === false) return;
+          pickWanted = openProduct() ? Date.now() : 0;
+          return;
+        }
         post({ type: 'pick', on });
-        if (on !== false && ref && !ref.closed) { try { ref.focus(); } catch { /* not ours */ } }
+        if (on === true || (on === undefined && !state.product.pickActive)) openProduct(); // bring it forward to pick in
       },
       pickRemove: id => post({ type: 'pick-remove', id }),
       pickClear: () => post({ type: 'picks-clear' }),

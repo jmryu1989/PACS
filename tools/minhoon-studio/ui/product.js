@@ -31,9 +31,12 @@
     return { ...mirror.context(), picks: pick.list(), pickActive: pick.active, screen: me.screen, role: me.role };
   }
 
+  // The chosen screen is remembered as chosen (Worklist), not as shown for the role (Clinician), so switching the
+  // role back after a reload returns to the Worklist.
   function open(screen, role) {
     if (role) me.role = role;
     me.screen = screen || me.screen;
+    store.set('studio-screen', me.screen);
     mirror.open(screenForRole(me.screen, me.role));
   }
 
@@ -58,8 +61,12 @@
       if (m.nonce && seen.has(m.nonce)) return;
       if (m.nonce) seen.set(m.nonce, now);
       mirror.request(m.ev || {});
-    } else if (m.type === 'pick') pick.toggle(m.on);
-    else if (m.type === 'pick-remove') pick.remove(m.id);
+    } else if (m.type === 'pick') { pick.toggle(m.on); post({ type: 'pick-mode', on: pick.active }); }
+    else if (m.type === 'focus') {
+      // Asked by a chat tab that has no handle to this window; browsers may refuse a focus without a click here.
+      try { window.focus(); } catch { /* refused */ }
+      setTimeout(() => post({ type: 'focused', ask: m.ask, ok: document.hasFocus() }), 300);
+    } else if (m.type === 'pick-remove') pick.remove(m.id);
     else if (m.type === 'picks-clear') pick.clear();
   };
 
