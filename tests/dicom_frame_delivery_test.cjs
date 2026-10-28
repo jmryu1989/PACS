@@ -7,7 +7,9 @@
  * product) over an in-memory store that runs the real event parser and mints real receipts, the Orthanc index is a
  * stub over one synthetic stored object, authentication is an explicit synthetic input (the guard's capture is called
  * with it). Asserted: no image byte before the provide-prepared event is durable; one pair per study delivery (open,
- * reload within the idle gap, reload after it); a ledger that cannot record answers 503 with no body; refusals of the
+ * reload within the idle gap, reload after it); D1880: a memory preload is a background-fetch transfer of its own and
+ * never the opening, and the viewer's opening records its own user-view 열람 before its first byte, also inside the
+ * preload's idle gap; a ledger that cannot record answers 503 with no body; refusals of the
  * gate leave no record; shutdown closes open deliveries; a delivery that provided no image closes as aborted, not
  * succeeded (MG-10), and a HEAD - answered behind the gate - neither opens a delivery nor makes one whose relayed read
  * (the real ImageRelayController on the same recorder) failed a provided one (review INT-01); a terminal the ledger cannot take at the close is retried as the same event until durable, and the
