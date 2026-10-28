@@ -47,7 +47,11 @@ class TechNoteE2E(WorklistE2E):
   for body in [dict(text='x',reason='',baseVersion=-1),dict(text='x',reason='',baseVersion=3,author='forged'),dict(text='x'*10001,reason='',baseVersion=3)]:
    self.assertEqual(self.stack.request('POST',path,'tech',body).status,400)
   self.assertEqual(self.stack.request('GET',path+'/history?before=bad','tech').status,400)
-  self.assertEqual(self.write(f,'\ud800',3,'bad unicode').status,400)
+  for text,reason in [('\ud800','bad unicode'),('invalid reason','\udfff')]:
+   with self.subTest(text=repr(text),reason=repr(reason)):
+    rejected=self.write(f,text,3,reason)
+    self.assertEqual(rejected.status,400,rejected.text)
+  self.assertEqual(self.stack.request('GET',path,'tech').body['note']['version'],3)
   self.assertEqual(psql(f'''SELECT to_jsonb(t)::text FROM "StudyState" t WHERE uid='{f.uid}' '''),before)
   self.assertEqual(psql(f'''SELECT count(*) FROM "ReportVersion" WHERE uid='{f.uid}' '''),['0'])
 
@@ -58,8 +62,10 @@ class TechNoteE2E(WorklistE2E):
   remote=self.stack.request('GET',path,'kadmin');self.assertEqual(remote.status,200,remote.text)
   self.assertFalse(remote.body['writable']);self.assertEqual(remote.body['note']['text'],'SYNTHETIC owner note')
   self.assertEqual(self.write(f,'remote modification',1,'not allowed',actor='kadmin').status,403)
-  # Synthetic immutable rows exercise the bounded history cursor without 50 UI writes.
-  psql(f'''INSERT INTO "TechNoteRevision" ("studyUid",version,text,reason,author,"authorSub","institutionId") SELECT '{f.uid}',n,'SYNTHETIC history','paging','SYNTHETIC-tech','SYNTHETIC-sub','hallym' FROM generate_series(2,52) n''')
+  # The served history requires the clinical version and its projection from the same write.
+  for version in range(2,53):
+   saved=self.write(f,'SYNTHETIC history '+str(version),version-1,'paging')
+   self.assertEqual(saved.status,201,saved.text)
   first=self.stack.request('GET',path+'/history','doctor').body
   self.assertEqual(len(first['items']),50);self.assertEqual(first['nextBefore'],3)
   last=self.stack.request('GET',path+'/history?before=3','doctor').body

@@ -171,6 +171,11 @@ function clientBody(spec: SurfaceSpec, input: unknown, actor: ActorFacts) {
 }
 
 type Text = { text: string | null; reason: string | null; reasonSource: 'stated' | 'work-context' | null };
+/** Text the client or service supplied is input: UTF-16 that cannot be stored is a contract
+ * refusal (400 on every write path), not an unexpected error that would answer 500. */
+function storableText(value: string, allowEmpty = false): string {
+  try { return string(value, allowEmpty); } catch { return refuse('TextRefused'); }
+}
 function textFor(rule: TextRule, b: Record<string, any>, spec: SurfaceSpec, content: string | null, opening: boolean,
   context: Readonly<WorkContext> | null): Text {
   const field = spec.textField === null ? undefined : b[spec.textField];
@@ -181,7 +186,7 @@ function textFor(rule: TextRule, b: Record<string, any>, spec: SurfaceSpec, cont
       // inside the author's own work context the server binds (D-18/D734); only an out-of-context amendment asks for one.
       const reason = b[spec.reasonField];
       if (typeof field !== 'string' || typeof reason !== 'string' || content !== null) refuse('RequestShapeRefused');
-      string(field, true); string(reason, true);
+      storableText(field, true); storableText(reason, true);
       if (opening && !field.trim()) refuse('TextRequired');
       if (opening || reason.trim()) return { text: field, reason: reason.trim() || null, reasonSource: reason.trim() ? 'stated' : null };
       if (context) return { text: field, reason: `work-context:${context.kind}:${context.referenceId}`, reasonSource: 'work-context' };
@@ -189,16 +194,16 @@ function textFor(rule: TextRule, b: Record<string, any>, spec: SurfaceSpec, cont
     }
     case 'none': if (content !== null) refuse('TextRefused'); return stated(null);
     case 'empty': if (field !== '' || content !== null) refuse('TextRefused'); return stated(null);
-    case 'optional': if (typeof field !== 'string' || content !== null) refuse('TextRequired'); string(field, true);
+    case 'optional': if (typeof field !== 'string' || content !== null) refuse('TextRequired'); storableText(field, true);
       return stated(field === '' ? null : field);
-    case 'required': if (typeof field !== 'string' || !field.trim() || content !== null) refuse('TextRequired'); string(field);
+    case 'required': if (typeof field !== 'string' || !field.trim() || content !== null) refuse('TextRequired'); storableText(field);
       return stated(field);
     case 'server': {
       if (typeof content !== 'string' || !content.trim()) refuse('TextRequired');
-      string(content);
+      storableText(content);
       const given = own(b, 'reason') ? b.reason : '';
       if (typeof given !== 'string') refuse('RequestShapeRefused');
-      string(given, true);
+      storableText(given, true);
       if (!spec.contextReason) {
         if (given !== '') refuse('TextRefused');
         return { text: content, reason: null, reasonSource: null };
