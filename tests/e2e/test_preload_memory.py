@@ -107,14 +107,19 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
 
     def panel(self, p):
         """The preload panel as the reader sees it: uid -> [status, progress, note]."""
-        return p.evaluate("""() => Object.fromEntries([...document.querySelectorAll('#preload-panel tbody tr')]
-            .map(tr => [tr.dataset.uid, [...tr.cells].slice(1, 4).map(td => td.textContent)]))""")
+        return p.evaluate("""() => {
+            const heads = [...document.querySelectorAll('#preload-panel thead th')].map(th => th.textContent);
+            const at = name => heads.indexOf(name);
+            return Object.fromEntries([...document.querySelectorAll('#preload-panel tbody tr')]
+                .map(tr => [tr.dataset.uid, ['Status', 'Progress', 'Note'].map(name => tr.cells[at(name)].textContent)]));
+        }""")
 
     def wait_status(self, p, uid, pattern, timeout=120000):
         try:
             p.wait_for_function("""([uid, pattern]) => {
+                const at = [...document.querySelectorAll('#preload-panel thead th')].findIndex(th => th.textContent === 'Status');
                 const tr = document.querySelector(`#preload-panel tbody tr[data-uid="${uid}"]`);
-                return tr && new RegExp(pattern).test(tr.cells[1].textContent);
+                return tr && at >= 0 && new RegExp(pattern).test(tr.cells[at].textContent);
             }""", arg=[uid, pattern], timeout=timeout)
         except Exception:
             print('PANEL', json.dumps(self.panel(p), ensure_ascii=False), flush=True)
@@ -127,8 +132,10 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
         return float(match.group(1)), float(match.group(2)), text
 
     def events(self, uid):
+        """The study's image-delivery 열람 events (D1877 pairs); report and draft reads of the study are other events."""
         rows = base.psql("SELECT sequence::text || ' ' || payload FROM emr_access.access_entry "
-                         "WHERE payload::jsonb->'targets'->0->'studyId'->>'value'='" + uid + "' ORDER BY sequence")
+                         "WHERE payload::jsonb->'targets'->0->'studyId'->>'value'='" + uid + "' "
+                         "AND payload::jsonb->'targets'->0->>'kind'='image' ORDER BY sequence")
         return [(int(r.split(' ', 1)[0]), json.loads(r.split(' ', 1)[1])) for r in rows]
 
     def wait_terminal(self, uid):
@@ -213,7 +220,7 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
             self.assertLess(time.monotonic(), deadline, 'no 열람 record after the opening of a preloaded study')
             time.sleep(1)
         opened = [e for s, e in self.events(b.uid) if s > closed and e['action'] == 'provide-prepared']
-        print('OPEN RECORD', json.dumps(opened, ensure_ascii=False)[:600], flush=True)
+        print('OPEN RECORD', json.dumps([[e['surface'], e['action'], e['occurredAt'], e['cause']] for e in opened]), flush=True)
         for index in (b.slices // 2, b.slices - 1):
             shown = self.stack_index(viewer, index)
             self.assertEqual(shown['drawn'], shown['target'], shown)

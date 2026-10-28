@@ -66,7 +66,7 @@
     const memory = document.createElement('p');
     memory.setAttribute('role', 'status');
     const table = document.createElement('table');
-    table.innerHTML = '<thead><tr><th>Study</th><th>Status</th><th>Progress</th><th>Note</th><th></th></tr></thead><tbody></tbody>';
+    table.innerHTML = '<thead><tr><th>Study</th><th>Status</th><th></th><th>Progress</th><th>Note</th></tr></thead><tbody></tbody>';
     const actions = document.createElement('p');
     const clear = document.createElement('button');
     clear.type = 'button'; clear.className = 'chip'; clear.textContent = 'Clear All'; clear.id = 'preload-clear';
@@ -95,9 +95,10 @@
         const cell = text => { const td = document.createElement('td'); td.textContent = text; tr.append(td); return td; };
         cell(s.label || s.uid);
         cell(s.status + (s.open ? ' (Open)' : ''));
+        // Retry beside the status, so it stays in view however long the note is.
+        const act = cell('');
         cell(s.total ? `${s.done}/${s.total}` : '');
         cell(s.reason || '');
-        const act = cell('');
         if (s.status === 'Failed' || s.status === 'Evicted') {
           const retry = document.createElement('button');
           retry.type = 'button'; retry.className = 'chip'; retry.textContent = 'Retry';
