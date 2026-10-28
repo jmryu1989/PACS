@@ -9071,7 +9071,6 @@
         "params": [
           "DicomFrameService",
           "PacsService",
-          "OrthancService",
           "StudyImageDeliveryRecorder"
         ],
         "scope": null,

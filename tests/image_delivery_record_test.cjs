@@ -12,9 +12,12 @@
  * (MG-10); a terminal the ledger cannot take is retained as the same event and offered again until durable, on the
  * background schedule and at shutdown (MG-09); under the installed Nest shutdown with the real EmrNestLifecycle and
  * record port, a delivery in preparation or a terminal offer in flight when admission closes still completes its pair
- * after one failed offer, and a read after the recorder stopped gets 503 with no image (MG-09); whole-study GET is a
+ * after one failed offer - closed by what its read served, once that read ended (R244-GPT-FIX8-02) - and a read after
+ * the recorder stopped gets 503 with no image (MG-09); whole-study GET is a
  * recorded delivery and HEAD none; a viewer frame the frame reader (the real DicomFrameController/DicomFrameService on the
- * same recorder, no storage mount) relays to Orthanc carries the public origin as the relay's does (review INT-02); the auth_request admission refuses every image read so none can bypass the relay.
+ * same recorder, no storage mount) relays to Orthanc carries the public origin as the relay's does (review INT-02); the auth_request admission refuses every image read so none can bypass the relay;
+ * after a patient correction under the same study and session, the relay and the frame reader serve the corrected
+ * patient's bytes only under a record naming that patient and the archive's new revision (R244-GPT-FIX8-01).
  * The PostgreSQL ledger itself is proven in tests/emr/a (real PG); nginx routing is the served stack run. D73: behaviour
  * at the boundary, no product source text. Synthetic values only; 127.0.0.1 only. */
 require('./service_test_loader.cjs');
@@ -75,7 +78,9 @@ function ledger(parseAccessEvent, mintDurableReceipt, createRecordPort) {
 
 /** A synthetic Orthanc: the lookups the gate and the record read, and the image representations the consumers read. */
 async function syntheticOrthanc() {
-  const calls = [], behaviour = { image: 'ok' };
+  // `patient` and `revision` are the archive's current study: a patient correction changes both, and the image bytes
+  // then carry the corrected patient's marker.
+  const calls = [], behaviour = { image: 'ok', patient: 'SYN-PID-1', revision: '20261028T090000' };
   const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', c => { body += c; });
@@ -85,6 +90,7 @@ async function syntheticOrthanc() {
         forwarded: [req.headers['x-forwarded-proto'], req.headers['x-forwarded-host']] });
       const json = value => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(value)); };
       const image = (type, bytes) => {
+        if (behaviour.patient !== 'SYN-PID-1') bytes = Buffer.concat([bytes, Buffer.from('SYNTHETIC-PATIENT:' + behaviour.patient)]);
         if (behaviour.image === 'error') { res.statusCode = 500; return json({ Message: 'synthetic failure' }); }
         res.setHeader('Content-Type', type); res.setHeader('Content-Length', String(bytes.length));
         if (behaviour.image === 'cut') { res.write(bytes.subarray(0, 64)); setTimeout(() => res.destroy(), 20); return; }
@@ -92,9 +98,9 @@ async function syntheticOrthanc() {
       };
       if (p === `/instances/${INSTANCE_ID}/study`) return json({ ID: STUDY_ID, MainDicomTags: { StudyInstanceUID: STUDY_UID } });
       if (p === '/tools/lookup' && req.method === 'POST') return json(body === STUDY_UID ? [{ Type: 'Study', ID: STUDY_ID }] : []);
-      if (p === `/studies/${STUDY_ID}`) return json({ ID: STUDY_ID, LastUpdate: '20261028T090000' });
+      if (p === `/studies/${STUDY_ID}`) return json({ ID: STUDY_ID, LastUpdate: behaviour.revision });
       if (p === '/dicom-web/studies' && url.searchParams.get('StudyInstanceUID') === STUDY_UID)
-        return json([{ '0020000D': { vr: 'UI', Value: [STUDY_UID] }, '00100020': { vr: 'LO', Value: ['SYN-PID-1'] }, '00080080': { vr: 'LO', Value: ['SYN HOSPITAL A'] } }]);
+        return json([{ '0020000D': { vr: 'UI', Value: [STUDY_UID] }, '00100020': { vr: 'LO', Value: [behaviour.patient] }, '00080080': { vr: 'LO', Value: ['SYN HOSPITAL A'] } }]);
       if (p === `/instances/${INSTANCE_ID}/simplified-tags`) return json({ StudyInstanceUID: STUDY_UID, Rows: '2' });
       if (p === `/dicom-web/studies/${STUDY_UID}/metadata`) return json([{ '0020000D': { vr: 'UI', Value: [STUDY_UID] } }]);
       if (p === `/instances/${INSTANCE_ID}/frames/0/rendered`) return image('image/png', PNG);
@@ -152,7 +158,7 @@ async function stack() {
   const { DicomFrameService } = require('/app/dist/dicom-frame.service.js');
   const storage = process.env.KIN_ORTHANC_STORAGE;
   delete process.env.KIN_ORTHANC_STORAGE;
-  const reader = new DicomFrameController(new DicomFrameService(orthanc), { authzDicom: (...args) => gate.authzDicom(...args) }, orthanc, recorder);
+  const reader = new DicomFrameController(new DicomFrameService(orthanc), { authzDicom: (...args) => gate.authzDicom(...args) }, recorder);
   if (storage !== undefined) process.env.KIN_ORTHANC_STORAGE = storage;
   const observations = [];
   const server = http.createServer(async (req, res) => {
@@ -409,8 +415,8 @@ test('MG-09 shutdown: a delivery still being prepared when admission closes gets
       const response = await read;
       await stopping;
       assert.equal(response.status, 200, 'a read admitted before the stop is served');
-      // It was still being sent when the stop closed its delivery: aborted, never ended.
-      assertPair(s, 'transfer-aborted', failFirst ? 2 : 1);
+      // The stop waited for the read to end (R244-GPT-FIX8-02): its delivery closes by what it served.
+      assertPair(s, 'transfer-ended', failFirst ? 2 : 1);
       assert.equal(s.records.control.live(), 0, 'every ledger work the stop took was ended');
       assert.deepEqual(logs.filter(([, m]) => /terminal_not_recorded_at_shutdown/.test(m)), [], String(failFirst));
     } finally { release(); await s.close(); }
@@ -484,6 +490,31 @@ test('MG-08 shutdown closes an open delivery: a quiet one by what it served', as
     await s.recorder.beforeApplicationShutdown();
     assert.deepEqual(actions(s.records), ['provide-prepared', 'transfer-ended']);
   } finally { await s.close(); }
+});
+
+test('R244-GPT-FIX8-01 after a patient correction, the relay and the frame reader serve the corrected patient only under a record naming that patient', async () => {
+  for (const route of ['relay', 'frame reader']) {
+    const s = await stack();
+    try {
+      const url = route === 'relay' ? s.routes.thumbnail : '/api' + s.routes.frame;
+      assert.equal((await s.get(url)).status, 200, route);
+      // The archive's study now names another patient (same Study UID, same member session, inside the idle gap).
+      Object.assign(s.source.behaviour, { patient: 'SYN-PID-2', revision: '20261028T090100' });
+      const second = await s.get(url);
+      assert.equal(second.status, 200, route);
+      assert.ok(second.body.includes(Buffer.from('SYNTHETIC-PATIENT:SYN-PID-2')), 'the corrected patient\'s bytes');
+      assert.equal(s.observations.at(-1).firstByte.filter(action => action === 'provide-prepared').length, 2,
+        `${route}: a record of its own was durable before the corrected patient's first byte`);
+      await s.recorder.beforeApplicationShutdown();
+      const events = s.records.entries.map(e => e.event);
+      const opened = events.filter(e => e.action === 'provide-prepared');
+      assert.deepEqual(opened.map(e => [e.targets[0].patientLinkSnapshot.value.patientId, e.targets[0].versionId.value]),
+        [['SYN-PID-1', `orthanc-study:${STUDY_ID}@20261028T090000`], ['SYN-PID-2', `orthanc-study:${STUDY_ID}@20261028T090100`]], route);
+      for (const prepared of opened)
+        assert.deepEqual(events.filter(e => e.relatedEventId === prepared.eventId).map(e => e.action), ['transfer-ended'],
+          `${route}: each patient's delivery is closed by its own terminal`);
+    } finally { await s.close(); }
+  }
 });
 
 test('MG-08 classification: image representations are deliveries, descriptions are not', () => {

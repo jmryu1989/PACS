@@ -2,15 +2,15 @@
  * MG-LOADING: the viewer's WADO-RS frame reads and series-strip previews, routed here by nginx (proxy/nginx.conf.template)
  * instead of straight to Orthanc. The DICOMweb gate is the same one nginx's auth_request runs for every other image
  * read (PacsService.authzDicom): institution, StudyAccess and the split-UID check, with the viewer's session binding
- * already enforced by the guard. The study delivery's 열람 record (image-delivery-record.ts, D1877) is durable before
- * any byte; bytes are then served by DicomFrameService (direct range read or Orthanc relay). The recorder is the one the
- * image relay uses, so the frames, previews and relayed reads of one opening share one pair.
+ * already enforced by the guard. The study delivery's 열람 record (image-delivery-record.ts, D1877), naming the patient
+ * the gate observed for the request, is durable before any byte; bytes are then served by DicomFrameService (direct
+ * range read or Orthanc relay). The recorder is the one the image relay uses, so the frames, previews and relayed reads
+ * of one opening share one pair.
  */
 import { BadRequestException, Controller, Get, Param, Req, Res } from '@nestjs/common';
 import { DicomFrameService } from './dicom-frame.service';
-import { StudyImageDeliveryRecorder } from './image-delivery-record';
+import { archiveRead, StudyImageDeliveryRecorder } from './image-delivery-record';
 import type { DeliveryLease } from './image-delivery-record';
-import { OrthancService } from './orthanc.service';
 import { Caller, PacsService } from './pacs.service';
 import { parseFrameList } from './dicom-frame-layout';
 
@@ -55,7 +55,7 @@ function lifetime(req: any, res: any, lease: DeliveryLease | null, work: (signal
 @Controller()
 export class DicomFrameController {
   constructor(private readonly frames: DicomFrameService, private readonly pacs: PacsService,
-    private readonly orthanc: OrthancService, private readonly deliveries: StudyImageDeliveryRecorder) {}
+    private readonly deliveries: StudyImageDeliveryRecorder) {}
 
   @Get('dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames')
   async read(@Param('study') study: string, @Param('series') series: string, @Param('sop') sop: string,
@@ -64,9 +64,9 @@ export class DicomFrameController {
     const list = parseFrameList(frames);
     if (!list) throw new BadRequestException('프레임 번호가 올바르지 않습니다');
     const uri = `/dicom-web/studies/${study}/series/${series}/instances/${sop}/frames/${frames}`;
-    await this.pacs.authzDicom(uri, 'GET', member(req));
+    const admitted = await this.pacs.authzDicom(uri, 'GET', member(req));
     // HEAD sends no image byte, so it is no delivery (image-delivery-record.ts lease()).
-    const lease = await this.deliveries.lease(req, FRAMES_SURFACE, uri, () => study);
+    const lease = await this.deliveries.lease(req, FRAMES_SURFACE, uri, () => archiveRead(admitted));
     await lifetime(req, res, lease, signal => this.frames.serveFrames({ studyUid: study, seriesUid: series, sopUid: sop, frames: list,
       accept: req.headers?.accept, acceptEncoding: req.headers?.['accept-encoding'], head: req.method === 'HEAD',
       origin: requestOrigin(req) }, res, signal));
@@ -76,9 +76,9 @@ export class DicomFrameController {
   async preview(@Param('id') id: string, @Req() req: any, @Res() res: any) {
     if (!ORTHANC_ID.test(id)) throw new BadRequestException('영상 식별자가 올바르지 않습니다');
     const uri = `/instances/${id}/preview`;
-    await this.pacs.authzDicom(uri, 'GET', member(req));
-    // The gate just resolved (and cached) the object's study; the preview is a read of that study's delivery.
-    const lease = await this.deliveries.lease(req, PREVIEW_SURFACE, uri, () => this.orthanc.instanceStudyUid(id));
+    // The gate resolves the object's study; the preview is a read of that study's delivery.
+    const admitted = await this.pacs.authzDicom(uri, 'GET', member(req));
+    const lease = await this.deliveries.lease(req, PREVIEW_SURFACE, uri, () => archiveRead(admitted));
     await lifetime(req, res, lease, signal => this.frames.servePreview(id, res, signal));
   }
 }

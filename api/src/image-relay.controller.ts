@@ -4,14 +4,15 @@
  * image representations of `/dicom-web/` (WADO-RS frames, rendered, thumbnail, bulk data, whole-object retrieve) - used
  * to go from nginx straight to Orthanc after `auth_request`, which admits a read but cannot see it delivered, so no
  * study delivery record existed for them. nginx now routes them here. The handler runs the same DICOMweb gate
- * (PacsService.authzDicom: institution, StudyAccess, split UID), takes the study delivery's lease - its provide-prepared
- * event durable before any byte (image-delivery-record.ts) - and relays Orthanc's answer unchanged (status, media type,
+ * (PacsService.authzDicom: institution, StudyAccess, split UID), takes the study delivery's lease for the study and
+ * patient the gate observed - its provide-prepared event durable before any byte, naming that patient
+ * (image-delivery-record.ts) - and relays Orthanc's answer unchanged (status, media type,
  * body; the query carries rendering and windowing as before). Descriptions without the image (QIDO, DICOMweb metadata,
  * DICOM tags) are not deliveries of the image and keep the plain gate; the auth_request route refuses every image read
  * (pacs.controller.ts), so an image byte has no unrecorded way out.
  */
-import { Controller, ForbiddenException, Get, NotFoundException, Req, Res } from '@nestjs/common';
-import { StudyImageDeliveryRecorder } from './image-delivery-record';
+import { Controller, Get, NotFoundException, Req, Res } from '@nestjs/common';
+import { archiveRead, StudyImageDeliveryRecorder } from './image-delivery-record';
 import { OrthancService } from './orthanc.service';
 import { Caller, PacsService } from './pacs.service';
 
@@ -41,9 +42,9 @@ export class ImageRelayController {
     const target = relayTarget(String(req.originalUrl ?? req.url ?? ''));
     if (!target) throw new NotFoundException('영상 경로가 올바르지 않습니다');
     const uri = target.path + target.query;
-    await this.pacs.authzDicom(uri, req.method, member(req));
+    const admitted = await this.pacs.authzDicom(uri, req.method, member(req));
     // A HEAD or a description is no delivery (image-delivery-record.ts lease()).
-    const lease = await this.deliveries.lease(req, IMAGE_RELAY_SURFACE, target.path, () => this.studyOf(target.path));
+    const lease = await this.deliveries.lease(req, IMAGE_RELAY_SURFACE, target.path, () => archiveRead(admitted));
     const abort = new AbortController();
     const stop = () => { if (!res.writableFinished) abort.abort(); };
     let relayed = false;
@@ -67,14 +68,5 @@ export class ImageRelayController {
       // A served image is a relayed success answer the client received in full; Orthanc's error answers are not.
       if (lease) void closed.then(() => lease.release(relayed && res.writableFinished === true && res.statusCode >= 200 && res.statusCode < 300));
     }
-  }
-
-  /** The gate has just resolved (and cached) the same study; an image read always names it. */
-  private async studyOf(path: string): Promise<string> {
-    const study = /^\/dicom-web\/studies\/([0-9.]+)(?:\/|$)/.exec(path)?.[1];
-    if (study) return study;
-    const instance = /^\/instances\/([0-9a-f-]+)(?:\/|$)/.exec(path)?.[1];
-    if (instance) return this.orthanc.instanceStudyUid(instance);
-    throw new ForbiddenException('열람 권한이 없습니다');
   }
 }

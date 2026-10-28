@@ -5,9 +5,10 @@
 // (so B2's own rollback accounting and journal calls are the real ones), in-memory application rows, and the study
 // delivery's record from the recorder every image route shares. R244-GPT-01 (split UID), R244-GPT-FIX7-01 (a delivery
 // is the record of one manifest's patient and version: a corrected patient's bytes never go out under the previous
-// patient's record) and R244-GPT-02 / FIX7-02 (a row the application connection refused is never dropped: the delivery
-// owes it, offers it on a ledger transaction of its own - journaled against its record when that fails - and writes its
-// closing event only on one transaction with it).
+// patient's record; FIX8-01: also through the relay on the same recorder, whose gate names the patient it observed) and
+// R244-GPT-02 / FIX7-02 / FIX8-02 (a row the application connection refused is never dropped: the delivery owes it,
+// offers it on a ledger transaction of its own - journaled against its record when that fails - and writes its closing
+// event only on one transaction with it, also at the stop, which waits for a response still handing its rows over).
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const path = require('node:path');
@@ -19,6 +20,7 @@ const api = process.env.KIN_E_API || path.resolve(__dirname, '../../../api');
 const load = name => require(path.join(api, 'dist', name));
 const { buildImageManifest } = load('emr-image/manifest');
 const { OnlineImageService } = load('emr-image/service');
+const { ImageRelayController } = load('image-relay.controller');
 const { ProductionImageContext } = load('emr-image/context');
 const { OrthancService } = load('orthanc.service');
 const { StudyImageDeliveryRecorder } = load('image-delivery-record');
@@ -67,6 +69,8 @@ async function harness({ idleMs } = {}) {
       SOPClassUID: manifest.objects[0].sopClassUid, NumberOfFrames: '1', PatientID: archive.patientId });
     if (req.url.endsWith('/header')) return json({ '0002,0010': { Value: ts } });
     if (req.url.endsWith('/frames/0/raw')) { archive.rawReads++; return res.end(frame); }
+    // A rendering the relay reads: the archive's current patient's image.
+    if (req.url.endsWith('/rendered')) { res.setHeader('Content-Type', 'application/octet-stream'); return res.end(Buffer.from('synthetic-image:' + archive.patientId)); }
     res.writeHead(404); res.end();
   });
   process.env.ORTHANC_URL = await listen(source); process.env.ORTHANC_USER = 'synthetic'; process.env.ORTHANC_PASS = 'synthetic';
@@ -130,13 +134,14 @@ async function harness({ idleMs } = {}) {
     end() {},
   }; } };
   // The application connection: E's own rows and the response's bounded check transaction; `app.refuseTransport`
-  // refuses the next transport-observation insert.
-  const app = { refuseTransport: 0, preparations: [], observations: [], checks: 0 };
+  // refuses the next transport-observation insert; `app.beforeTransport` holds that insert (the response's body is out).
+  const app = { refuseTransport: 0, beforeTransport: null, preparations: [], observations: [], checks: 0 };
   const db = { async $executeRaw(parts, ...values) {
     const sql = parts.join('?');
     if (sql.startsWith('SET LOCAL')) return 0;
     if (sql.includes('INSERT INTO emr_image.preparation')) app.preparations.push({ response: values[0], delivery: values[1] });
     else if (sql.includes('INSERT INTO emr_image.observation')) {
+      if (values[3] === 'transport' && app.beforeTransport) await app.beforeTransport();
       if (values[3] === 'transport' && app.refuseTransport > 0) { app.refuseTransport--; throw Object.assign(new Error('SyntheticAppPoolWriteFailure'), { code: 'SyntheticAppPoolWriteFailure' }); }
       app.observations.push({ response: values[0], delivery: values[1], kind: values[3] });
     }
@@ -160,17 +165,25 @@ async function harness({ idleMs } = {}) {
   const recorder = new StudyImageDeliveryRecorder(records, requests, clinical, registry.work, orthanc, idleMs);
   // The check pool stand-in is the application stand-in: one in-memory port answers both.
   const service = new OnlineImageService(context, db, orthanc, requests, db, recorder);
+  // The relay on the same recorder; its gate admits the read and names what it observed in the archive for it, as
+  // PacsDicomGateway.authzDicom does with its per-request source read: the study and its current patient.
+  const relay = new ImageRelayController({ authzDicom: async () => ({ studyUid: uid, managingInstitutionId: 'synthetic-hospital', sourcePatientId: archive.patientId }) },
+    orthanc, recorder);
   const target = `/dicom-web/studies/${uid}/series/${series}/instances/${sop}/frames/1`;
   let settled, lastError = null;
   const server = createServer(async (req, res) => {
-    try { await service.send(req, res, target); }
+    res.status = code => { res.statusCode = code; return res; };
+    try {
+      if (req.url.startsWith('/api/image-relay/')) { req.originalUrl = req.url; await relay.read(req, res); }
+      else await service.send(req, res, target);
+    }
     catch (e) { lastError = e; if (!res.headersSent) { res.statusCode = e.status ?? 503; res.end(JSON.stringify(e.getResponse?.() ?? { code: e.code })); } }
     finally { settled(); }
   });
   const endpoint = await listen(server);
-  const send = async () => {
+  const send = async (route = '/') => {
     const done = new Promise(resolve => settled = resolve);
-    const r = await fetch(endpoint);
+    const r = await fetch(endpoint + route);
     const bytes = Buffer.from(await r.arrayBuffer());
     await done;
     return { status: r.status, hasFrame: bytes.includes(frame), body: bytes, delivery: r.headers.get('x-kin-image-event'), response: r.headers.get('x-kin-image-response') };
@@ -184,7 +197,7 @@ async function harness({ idleMs } = {}) {
     manifest = buildImageManifest(manifestInput());
   };
   return { send, archive, ledger, app, events, service, shutdown, stop, replacePatient, manifest: () => manifest,
-    builds: () => manifestBuilds, lastError: () => lastError };
+    builds: () => manifestBuilds, lastError: () => lastError, relayPath: `/api/image-relay/dicom-web/studies/${uid}/rendered` };
 }
 
 /** What the recorder's logger printed while `work` ran (Nest's console logger writes to stdout and stderr). */
@@ -340,4 +353,99 @@ test('a retention that gets no ledger connection is journaled against the delive
     await h.shutdown();
     assert.deepEqual(h.events.map(e => e.action), ['provide-prepared', 'transfer-ended']);
   } finally { await h.stop(); }
+});
+
+test('after a patient correction the relay serves the corrected patient only under a record naming that patient, also when E opened the delivery (R244-GPT-FIX8-01)', async () => {
+  for (const opener of ['E', 'relay']) {
+    const h = await harness();
+    try {
+      assert.equal((await h.send(opener === 'E' ? '/' : h.relayPath)).status, 200, opener);
+      await until(() => h.events.length === 1, 'the opening is recorded');
+      h.replacePatient('PATIENT-B');
+      const second = await h.send(h.relayPath);
+      assert.deepEqual([second.status, second.body.toString()], [200, 'synthetic-image:PATIENT-B'], opener);
+      await h.shutdown();
+      const opened = h.events.filter(e => e.action === 'provide-prepared');
+      assert.deepEqual(opened.map(e => [e.targets[0].patientLinkSnapshot.value.patientId, e.targets[0].versionId.value]),
+        [['PATIENT-A', `orthanc-study:${STUDY}@20261028T120000`], ['PATIENT-B', `orthanc-study:${STUDY}@20261028T120100`]], opener);
+      for (const prepared of opened)
+        assert.deepEqual(h.events.filter(e => e.relatedEventId === prepared.eventId).map(e => e.action), ['transfer-ended'], opener);
+    } finally { await h.stop(); }
+  }
+});
+
+/** Holds E's next transport-row insert - written after the response's image body - until `release()`. */
+function holdTransport(h) {
+  let release, entered;
+  const held = new Promise(resolve => { release = resolve; }), reached = new Promise(resolve => { entered = resolve; });
+  h.app.beforeTransport = async () => { h.app.beforeTransport = null; entered(); await held; };
+  return { reached, release: () => release() };
+}
+
+test('the stop waits for a response still writing its rows: the closing event is written with the row it hands over (R244-GPT-FIX8-02)', async () => {
+  const h = await harness();
+  const transport = holdTransport(h);
+  try {
+    h.app.refuseTransport = 1;
+    const pending = h.send();
+    await transport.reached;
+    const stopping = h.shutdown();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.deepEqual(h.events.map(e => e.action), ['provide-prepared'], 'no closing event while the response still owns its rows');
+    transport.release();
+    const served = await pending;
+    await stopping;
+    assert.equal(served.status, 200);
+    assert.deepEqual(h.events.map(e => [e.action, e.relatedEventId]), [['provide-prepared', null], ['transfer-ended', served.delivery]]);
+    assert.deepEqual(h.ledger.retained.map(r => [r.kind, r.response, r.delivery, r.retainedAfter]),
+      [['transport', served.response, served.delivery, 'SyntheticAppPoolWriteFailure']]);
+    assert.deepEqual(h.ledger.journal, []);
+  } finally { transport.release(); await h.stop(); }
+});
+
+test('the stop waits for a response still writing its rows: a row the ledger cannot retain leaves no closing event, journaled and named (R244-GPT-FIX8-02)', async () => {
+  const h = await harness();
+  const transport = holdTransport(h);
+  try {
+    h.app.refuseTransport = 1;
+    h.ledger.refuseRetention = true;
+    const pending = h.send();
+    await transport.reached;
+    let served;
+    const printed = await logged(async () => {
+      const stopping = h.shutdown();
+      transport.release();
+      served = await pending;
+      await stopping;
+    });
+    assert.equal(served.status, 200);
+    assert.deepEqual(h.ledger.retained, []);
+    assert.deepEqual(h.events.map(e => e.action), ['provide-prepared'], 'no closing event without the row it covers');
+    assert.ok(h.ledger.journal.length >= 1 && h.ledger.journal.every(j => j.cause === 'business-rollback' && j.eventId !== served.delivery),
+      JSON.stringify(h.ledger.journal));
+    assert.match(printed, new RegExp(`terminal_not_recorded_at_shutdown[^\\n]*prepared=${served.delivery}`));
+    assert.match(printed, new RegExp(`facts_not_written_at_shutdown[^\\n]*${served.response}`));
+  } finally { transport.release(); await h.stop(); }
+});
+
+test('a response still in flight when the drain allowance ends leaves its delivery without a closing event (R244-GPT-FIX8-02)', async () => {
+  const h = await harness();
+  const transport = holdTransport(h);
+  try {
+    h.app.refuseTransport = 1;
+    h.ledger.refuseRetention = true;
+    const pending = h.send();
+    await transport.reached;
+    // The stop does not wait past the shutdown's drain allowance (SHUTDOWN_DRAIN_MS, 10 s).
+    const printed = await logged(() => h.shutdown());
+    assert.match(printed, /delivery_unsettled_at_shutdown[^\n]*inflight=1/);
+    transport.release();
+    const served = await pending;
+    await until(() => h.ledger.journal.length === 1, 'the late row\'s own offer is journaled');
+    assert.equal(served.status, 200);
+    assert.deepEqual(h.ledger.retained, []);
+    assert.deepEqual(h.ledger.journal, [{ cause: 'business-rollback', eventId: served.delivery, operationId: null }]);
+    assert.deepEqual(h.events.map(e => e.action), ['provide-prepared'],
+      'no closing event: what the delivery served and owes was not known when the process stopped');
+  } finally { transport.release(); await h.stop(); }
 });

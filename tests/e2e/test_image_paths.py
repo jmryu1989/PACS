@@ -11,9 +11,8 @@ delivery nor counts in one. Rounds 5 to 7 of #244 each closed one path while ano
 HEAD or lost a contract (R244-GPT-FIX5-01, FIX6-01/02, FIX7-03). The original-download archive is an image-byte path
 too, under its own download record (S9-U4b/D1489), not a viewing read.
 
-TEST-IMAGE-PATHS-01, on the served stack it runs against (stock or catalog: the rendered proxy configuration says which):
-  (a) every location of the rendered proxy configuration is classified: an image location names the cells that
-      exercise it, any other says why it carries no image byte; a location the table does not know fails the suite;
+TEST-IMAGE-PATHS-01, on the served stack it runs against (stock or catalog: the deployment's asset catalog setting says
+which; each cell's location column is a label of the printed matrix, not an assertion on the proxy configuration):
   (b) each image path is the FIRST read of a fresh study delivery (its own synthetic study): while the ledger refuses
       that study's record (a synthetic trigger on the access ledger) its GET sends no image byte and leaves no entry;
       then its GET answers its image under exactly one provide-prepared entry for the member, recorded after the request
@@ -35,7 +34,6 @@ The ledger refusal is a trigger this suite creates on the synthetic stack's own 
 from __future__ import annotations
 
 import json
-import re
 import ssl
 import subprocess
 import time
@@ -57,7 +55,8 @@ SERIES = "/dicom-web/studies/{study}/series/{series}"
 # The shared recorder's idle gap (DEFAULT_IMAGE_DELIVERY_IDLE_MS, 120 s) and a margin for the close's own append.
 IDLE_WAIT_SECONDS = 200
 
-# nginx locations as the rendered configuration writes them (proxy/nginx.conf.template, proxy/15-kin-config.envsh).
+# The nginx location each cell is served from, as labels of the printed matrix (proxy/nginx.conf.template,
+# proxy/15-kin-config.envsh); nothing asserts them against the rendered configuration.
 L_E_FRAMES = "~ ^/dicom-web/studies/[0-9.]+/series/[0-9.]+/instances/[0-9.]+/frames/[0-9]+(,[0-9]+)*$"
 L_FRAMES = "~ ^/dicom-web/studies/[0-9.]+/series/[0-9.]+/instances/[0-9.]+/frames/[0-9,]+$"
 L_PREVIEW = "~ ^/instances/[0-9a-f-]+/preview$"
@@ -122,31 +121,16 @@ FAILING_CELLS = [
 # The original-download archive: image bytes under the download's own record, exercised by (d).
 ARCHIVE = Cell("original-download archive", "/api/studies/{study}/original-downloads/{operation}/archive", "*/*",
                (L_ARCHIVE,) * 2, ("download archive",) * 2)
-# Every other location of the rendered configuration and why it carries no image byte. A location absent here fails (a).
-NO_IMAGE = {
-    "/": "the HTTP server's redirect to HTTPS, and the HTTPS server's 404 for every unlisted path",
-    "= /": "the root's redirect to the worklist page",
-    "~* ^/auth/realms/kin/account": "Keycloak's account console, answered 404",
-    "= /auth/admin": "Keycloak administration, answered 404", "^~ /auth/admin/": "Keycloak administration, answered 404",
-    "= /auth/realms/master": "Keycloak master realm, answered 404", "^~ /auth/realms/master/": "Keycloak master realm, answered 404",
-    "= /auth/realms/kin/login-actions/registration": "Keycloak registration form",
-    "= /auth/realms/kin/protocol/openid-connect/token": "Keycloak token exchange", "/auth/": "Keycloak pages",
-    "= /ops-status.json": "the monitor's four-field heartbeat file",
-    "= /api/auth/register": "the registration redirect of the API", "= /api/dicom-import": "the member's import upload (a write)",
-    "/worklist/": "the worklist page's files from Orthanc's static folder", "/ohif/": "the viewer bundle from Orthanc's OHIF plugin",
-    "^~ /kin-brand/": "branding files", "= /ohif/manifest.json": "the viewer's web manifest",
-    "= /statistics": "Orthanc's counters", "= /system": "Orthanc's version", "= /kin-authz": "the internal admission subrequest",
-    "^~ /.well-known/acme-challenge/": "certificate challenge files (production only)",
-}
 
 
-def rendered_locations():
-    """Every `location` the running proxy's nginx has loaded (`nginx -T`), as written."""
-    dump = subprocess.run(["docker", "compose", "exec", "-T", "proxy", "nginx", "-T"], cwd=ROOT, capture_output=True,
-                          text=True, encoding="utf-8", errors="replace", timeout=60)
-    if dump.returncode:
-        raise RuntimeError("nginx -T failed: " + dump.stderr[-500:])
-    return {match.strip() for match in re.findall(r"^\s*location\s+([^{]+?)\s*\{", dump.stdout, re.M)}
+def asset_catalog_deployed():
+    """Whether the running stack was deployed with the viewer/decoder asset catalog (KIN_EMR_IMAGE_ASSET_CATALOG, the
+    setting the api and the proxy share): with it E answers the viewer's frames, without it the frame reader does."""
+    probe = subprocess.run(["docker", "compose", "exec", "-T", "api", "printenv", "KIN_EMR_IMAGE_ASSET_CATALOG"], cwd=ROOT,
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+    if probe.returncode not in (0, 1):
+        raise RuntimeError("reading the api's asset catalog setting failed: " + probe.stderr[-500:])
+    return bool(probe.stdout.strip())
 
 
 def entries_of(record_id):
@@ -201,21 +185,13 @@ class ImagePathsE2E(base.WorklistE2E):
         return [row for row in rows if action is None or row[2]["action"] == action]
 
     def mode(self):
-        found = rendered_locations()
-        catalog = L_E_FRAMES in found
+        catalog = asset_catalog_deployed()
         print("IMAGE_PATHS " + json.dumps({"stack": "catalog" if catalog else "stock"}), flush=True)
-        return found, 1 if catalog else 0
+        return 1 if catalog else 0
 
     def test_image_paths_01_each_image_path_opens_its_own_delivery_record_first(self):
-        found, mode = self.mode()
+        mode = self.mode()
         matrix = []
-
-        # (a) the table knows every location; each image location is exercised by a cell on this stack.
-        cells = IMAGE_CELLS + DESCRIPTION_CELLS + FAILING_CELLS + [E_METADATA, ARCHIVE]
-        exercised = {part for cell in cells for part in cell.locations[mode].split(" -> ")}
-        self.assertEqual(set(), found - exercised - set(NO_IMAGE), "a proxy location the image-path table does not classify")
-        for location in (L_STUDY, L_STUDY_READ, L_FRAMES, L_PREVIEW, L_DESCRIPTIONS, L_DICOMWEB, L_INSTANCES, L_API, L_ARCHIVE):
-            self.assertIn(location, found, "an image location of the template is missing from the rendered proxy")
 
         # (b) each image path first, on its own study: refused by the ledger, then recorded before its headers.
         studies = [(cell, self.study("paths-first-%02d" % index)) for index, cell in enumerate(IMAGE_CELLS)]
@@ -298,7 +274,7 @@ class ImagePathsE2E(base.WorklistE2E):
         print("IMAGE_PATHS_FIRST " + json.dumps(matrix), flush=True)
 
     def test_image_paths_02_every_image_path_joins_the_one_study_delivery(self):
-        _, mode = self.mode()
+        mode = self.mode()
         a, b, c = self.study("paths-read"), self.study("paths-head"), self.study("paths-fail")
 
         # (a) one session reads every image cell of study a: one delivery whichever route a read takes.

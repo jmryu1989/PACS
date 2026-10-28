@@ -58,10 +58,10 @@ export class OnlineImageService {
       // its reads take: the frame reader, the preview and the relay record into the same one (image-delivery-record.ts).
       // A response joins it - opening it, provide-prepared durable, when it is the session's first read of the study -
       // before any source read; a HEAD or a description takes no lease and is answered under no record. The delivery is
-      // bound to this manifest, its patient and version: a delivery of another manifest is never this response's record
-      // (R244-GPT-FIX7-01).
-      lease = await this.deliveries.lease(request, ONLINE_IMAGE_SURFACE, target.split('?')[0], () => manifest.studyUid,
-        { patient: manifest.patient, version: manifest.sha256 });
+      // bound to this manifest, its patient and version: a delivery of another manifest or patient is never this
+      // response's record (R244-GPT-FIX7-01).
+      lease = await this.deliveries.lease(request, ONLINE_IMAGE_SURFACE, target.split('?')[0],
+        () => ({ studyUid: manifest.studyUid, patient: manifest.patient, version: manifest.sha256 }));
       let served = false;
       const unstored: UnstoredObservation[] = [];
       try {

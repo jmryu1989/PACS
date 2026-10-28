@@ -10,6 +10,7 @@ import { REQUEST_CONTEXT_SOURCE, RequestContextSource, RequestWorkContext } from
 import { EMR_RECORD_PORT, EmrRecordPort } from '../emr-runtime/record-port';
 import { FileWrappingSecrets } from '../emr-signature/server-keys';
 import type { RequestIdentityPort, RequestIdentity, WrappingSecrets } from '../emr-signature/server-contract';
+import type { PatientLinkSnapshot } from '../emr-contract/access-event';
 import { EMR_NATIVE_REPORT_SIGNING } from '../emr-report/native-signing';
 import { EMR_CLINICAL_ROUTES, ClinicalRouteSources } from './routes';
 import { EMR_MANUAL_SR_SIGNING } from './manual-sr';
@@ -79,6 +80,12 @@ export function configuredWrappingSecrets(env: NodeJS.ProcessEnv = process.env):
 
 export const CURRENT_CLINICAL_CONTEXT = Symbol('CURRENT_CLINICAL_CONTEXT');
 
+/** The link a study's current original patient is named by: the patient ID under the study's managing institution. The
+ * current-study read below and the image routes' gate observation (image-delivery-record.ts) name a patient by it. */
+export function studyPatientLink(managingInstitutionId: string, patientId: string): PatientLinkSnapshot {
+  return { linkId: JSON.stringify([managingInstitutionId, patientId]), patientId, assigningAuthority: managingInstitutionId };
+}
+
 export function createCurrentClinicalContext(prisma: PrismaService, requests: RequestContextSource,
   orthanc: OrthancService, studyAccess: StudyAccessService): ClinicalContextSource {
   const identity = onlineRequestIdentity(requests);
@@ -119,8 +126,7 @@ export function createCurrentClinicalContext(prisma: PrismaService, requests: Re
       // WORKLIST-SPLIT-UID: the rule (no resource, two patient resources, unreadable patient) is the archive reader's
       // studyPatientIdentity, which E's per-response source check applies as well.
       const patientId = await orthanc.studyPatientIdentity(uid);
-      return { ...current, patient: { linkId: JSON.stringify([current.managingInstitutionId, patientId]),
-        patientId, assigningAuthority: current.managingInstitutionId } };
+      return { ...current, patient: studyPatientLink(current.managingInstitutionId, patientId) };
     },
   };
   return context;

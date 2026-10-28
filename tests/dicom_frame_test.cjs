@@ -614,11 +614,12 @@ test('controller: the request\'s lifetime signal reaches the service and aborts 
   const seen = [], leases = [];
   const service = { serveFrames: async (req, res, signal) => { seen.push(['frames', signal]); await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })); },
     servePreview: async (id, res, signal) => { seen.push(['preview', signal]); } };
-  const pacs = { authzDicom: async () => {} };
-  const orthanc = { instanceStudyUid: async () => '1.2.3' };
+  // The gate admits the read and names the study and the patient it observed for it.
+  const pacs = { authzDicom: async () => ({ studyUid: '1.2.3', managingInstitutionId: 'site-a', sourcePatientId: 'SYN-PID-1' }) };
   // The delivery recorder's admission is awaited before the service is called; its lease is released with the response's close.
-  const deliveries = { lease: async (req, surface, path, study) => { const lease = { surface, study: await study(), released: null }; leases.push(lease); return { release: finished => { lease.released = finished; } }; } };
-  const controller = new DicomFrameController(service, pacs, orthanc, deliveries);
+  const deliveries = { lease: async (req, surface, path, target) => { const { studyUid, patient } = await target();
+    const lease = { surface, study: studyUid, patient: patient.patientId, released: null }; leases.push(lease); return { release: finished => { lease.released = finished; } }; } };
+  const controller = new DicomFrameController(service, pacs, deliveries);
   const req = Object.assign(new PassThrough(), { method: 'GET', headers: {}, sub: 'synthetic-doctor', institution: 'site-a' });
   const res = relayTarget();
   const reading = controller.read('1.2.3', '1.2.3.4', '1.2.3.4.5', '1', req, res);
@@ -633,7 +634,7 @@ test('controller: the request\'s lifetime signal reaches the service and aborts 
   // A response that finished normally does not abort its own signal on the close that follows the end.
   const res2 = relayTarget();
   const service2 = { servePreview: async (id, r, signal) => { r.end(); await new Promise(resolve => setTimeout(resolve, 10)); seen.push(['preview-signal', signal.aborted]); } };
-  await new DicomFrameController(service2, pacs, orthanc, deliveries).preview('3fc2d51f-e3bbd38a-db69114e-eef254ef-fcc4744b', req, res2);
+  await new DicomFrameController(service2, pacs, deliveries).preview('3fc2d51f-e3bbd38a-db69114e-eef254ef-fcc4744b', req, res2);
   assert.deepEqual(seen.at(-1), ['preview-signal', false]);
   await new Promise(resolve => setTimeout(resolve, 10));
   assert.deepEqual([leases[1].surface, leases[1].study, leases[1].released], ['GET instances/:id/preview', '1.2.3', true]);
@@ -641,7 +642,7 @@ test('controller: the request\'s lifetime signal reaches the service and aborts 
   // socket, which is no image served (MG-10). The lease waits for that close rather than deciding at the failure.
   const res3 = relayTarget();
   const failing = { servePreview: async () => { throw new Error('synthetic source failure'); } };
-  await assert.rejects(new DicomFrameController(failing, pacs, orthanc, deliveries).preview('3fc2d51f-e3bbd38a-db69114e-eef254ef-fcc4744b', req, res3), /synthetic source failure/);
+  await assert.rejects(new DicomFrameController(failing, pacs, deliveries).preview('3fc2d51f-e3bbd38a-db69114e-eef254ef-fcc4744b', req, res3), /synthetic source failure/);
   assert.equal(leases[2].released, null, 'undecided until the response closes');
   res3.status(503); res3.end('{"code":"synthetic"}');
   await new Promise(resolve => setTimeout(resolve, 10));
@@ -649,16 +650,16 @@ test('controller: the request\'s lifetime signal reaches the service and aborts 
   // A relayed non-success answer (Orthanc's 404 for a frame it does not have) finishes the socket and is no image either.
   const res4 = relayTarget();
   const relayed = { servePreview: async (id, r) => { r.status(404); r.end('no such frame'); } };
-  await new DicomFrameController(relayed, pacs, orthanc, deliveries).preview('3fc2d51f-e3bbd38a-db69114e-eef254ef-fcc4744b', req, res4);
+  await new DicomFrameController(relayed, pacs, deliveries).preview('3fc2d51f-e3bbd38a-db69114e-eef254ef-fcc4744b', req, res4);
   await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(leases[3].released, false);
   // The 17-frame list the review sent (MG-07) is a request like any other, not a 400.
   const service3 = { serveFrames: async (request) => { seen.push(['list', request.frames.length]); } };
-  await new DicomFrameController(service3, pacs, orthanc, deliveries).read('1.2.3', '1.2.3.4', '1.2.3.4.5', Array.from({ length: 17 }, (_, i) => i + 1).join(','), req, relayTarget());
+  await new DicomFrameController(service3, pacs, deliveries).read('1.2.3', '1.2.3.4', '1.2.3.4.5', Array.from({ length: 17 }, (_, i) => i + 1).join(','), req, relayTarget());
   assert.deepEqual(seen.at(-1), ['list', 17]);
   // No admission, no service call: a recorder that refuses leaves the gate's refusal in place and sends nothing.
   const refusing = { lease: async () => { throw new Error('ledger down'); } };
   const service4 = { serveFrames: async () => { seen.push(['served-without-record']); } };
-  await assert.rejects(new DicomFrameController(service4, pacs, orthanc, refusing).read('1.2.3', '1.2.3.4', '1.2.3.4.5', '1', req, relayTarget()), /ledger down/);
+  await assert.rejects(new DicomFrameController(service4, pacs, refusing).read('1.2.3', '1.2.3.4', '1.2.3.4.5', '1', req, relayTarget()), /ledger down/);
   assert.ok(!seen.some(s => s[0] === 'served-without-record'));
 });

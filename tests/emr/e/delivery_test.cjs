@@ -105,7 +105,9 @@ async function harness() {
   // app.module gives every image route the one recorder.
   const recorder = new StudyImageDeliveryRecorder(port, requests, clinical, registry.work, orthanc, IDLE_MS);
   const service = new OnlineImageService(context, db, orthanc, requests, db, recorder);
-  const relay = new ImageRelayController({ authzDicom: async () => {} }, orthanc, recorder);
+  // The gate admits the relayed read and names what it observed in the archive: the study and its current patient.
+  const relay = new ImageRelayController({ authzDicom: async () => ({ studyUid: uid, managingInstitutionId: 'synthetic-hospital', sourcePatientId: 'PATIENT-A' }) },
+    orthanc, recorder);
   const server = createServer(async (req, res) => {
     res.status = code => { res.statusCode = code; return res; };
     try {
