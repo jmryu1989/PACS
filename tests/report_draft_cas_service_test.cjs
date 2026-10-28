@@ -53,6 +53,7 @@ Object.assign(process.env, { KC_ISSUER: 'https://syn.test/auth/realms/kin', KC_A
 
 const { PacsService } = require('/app/dist/pacs.service');
 const { AuthService } = require('/app/dist/auth.service');
+const { PresenceService } = require('/app/dist/presence.service');
 const { StudyAccessService } = require('/app/dist/study-access.service');
 const { AppModule } = require('/app/dist/app.module');
 const { STRUCTURE_CATALOG, renderItem } = require('/app/dist/report-structure');
@@ -257,7 +258,7 @@ async function world() {
   w.app = build();
   /** A new process: nothing of the old one's memory, the same database. */
   w.restart = () => { w.app = build(); };
-  w.auth = new AuthService(recorder, undefined, ledger, background.work);
+  w.auth = new AuthService(recorder, undefined, ledger, background.work, new PresenceService(recorder, null));
   ledgerCleanup.push(async () => {
     await w.auth.onModuleDestroy(); background.quiesce(); await background.drained();
     control.close(); await control.drained(); await journal.close();

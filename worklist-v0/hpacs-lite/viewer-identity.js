@@ -60,25 +60,52 @@ window.KinViewerIdentity=(()=>{
     });
     bind();return()=>{stop();dispose();};
   }
+  function presence(){
+    const viewerId=crypto.randomUUID();
+    let sequence=0,uids=[],signature='',attempted='',busy=false,closed=false,paused=false;
+    // Bootstrap cadence; successful answers carry the server's lease policy.
+    let heartbeatMs=5000,nextBeat=0;
+    const send=(shown,keepalive=false)=>fetch('/api/presence',{method:'POST',credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},keepalive,
+      ...(!keepalive?{signal:AbortSignal.timeout(2*heartbeatMs)}:{}),
+      body:JSON.stringify({viewerId,sequence:++sequence,uids:shown})});
+    async function pump(){
+      if(closed||paused||busy||signature===attempted&&Date.now()<nextBeat)return;
+      busy=true;const at=signature,shown=uids.slice();nextBeat=Date.now()+heartbeatMs;attempted=at;
+      try{const response=await send(shown);if(response.ok){const policy=await response.json();heartbeatMs=policy.heartbeatMs;}}
+      catch(_){}finally{busy=false;if(!closed&&!paused&&signature!==at)pump();}
+    }
+    function hide(){if(closed)return;paused=true;send([],true).catch(()=>{});}
+    function show(){if(closed)return;paused=false;attempted='';nextBeat=0;pump();}
+    window.addEventListener('pagehide',hide);window.addEventListener('pageshow',show);window.addEventListener('online',show);
+    return {update(studies){uids=[...new Set(studies)].sort();signature=JSON.stringify(uids);pump();},
+      close(){if(closed)return;hide();closed=true;window.removeEventListener('pagehide',hide);window.removeEventListener('pageshow',show);window.removeEventListener('online',show);}};
+  }
   function mount({services,resolve,owner,allowed,studies}){
     const work=window.KinWorkContext;
     const guarded=fn=>{const at=work.capture('document');return(...args)=>work.commit(at,()=>fn(...args));};
-    const bound=JSON.stringify(owner());let value=read(bound),ended=false,observing=false;const labels=new Map(),loading=new Map(),titles=new Map();
+    const bound=JSON.stringify(owner());let value=read(bound),ended=false,observing=false;const labels=new Map(),loading=new Map(),titles=new Map(),displayed=new Map(),viewing=presence();
     const neutral='판독 뷰어 — KOREA IMAGING NETWORK';let frame;try{frame=window.frameElement;}catch(_){}
     function setTitle(title){if(document.title!==title)document.title=title;if(frame?.isConnected&&frame.contentWindow===window)frame.title=title===neutral?'영상 뷰어':title;}
     function syncTitle(){setTitle(titles.get(services.viewportGridService.getState().activeViewportId)||neutral);}
     const text=v=>v&&typeof v==='object'?String(v.Alphabetic??v.Ideographic??v.Phonetic??''):String(v??'');
-    function clear(){for(const e of labels.values())e.remove();labels.clear();titles.clear();setTitle(neutral);}
+    function clear(){for(const e of labels.values())e.remove();labels.clear();titles.clear();displayed.clear();setTitle(neutral);}
     function refresh(wanted){
       try{
         if(ended||!observing||!allowed()||JSON.stringify(owner())!==bound){clear();return;}
         const ids=new Set(services.viewportGridService.getState().viewports.keys());
+        for(const id of displayed.keys())if(!ids.has(id))displayed.delete(id);
         for(const [id,e] of labels)if(!ids.has(id)){e.remove();labels.delete(id);titles.delete(id);}
         for(const id of loading.keys())if(!ids.has(id))loading.delete(id);
         for(const id of ids){
           if(typeof wanted==='string'&&wanted!==id)continue;
+          displayed.delete(id);
           if(loading.has(id)){labels.get(id)?.remove();labels.delete(id);titles.delete(id);continue;}
           const v=services.cornerstoneViewportService.getCornerstoneViewport(id);
+          // The rendered-source boundary also covers dynamically added volumes;
+          // presence does not depend on the patient's label preferences or text.
+          const rendered=window.KinViewerInfoBar?.identity(services,id);
+          if(rendered?.instance?.StudyInstanceUID)displayed.set(id,rendered.instance.StudyInstanceUID);
           let current=resolve(id),dynamic=false;
           // A comparison chosen in the served Study menu need not be in the
           // opening URL. Reuse the shell's rendered-image identity for that
@@ -91,6 +118,7 @@ window.KinViewerIdentity=(()=>{
           }
           const m=current&&window.cornerstone.metaData.get('instance',current.image);
           if(!current||!dynamic&&!studies.includes(current.uid)||!m||!v?.element||v.viewportStatus!==window.cornerstone.Enums.ViewportStatus.RENDERED||m.StudyInstanceUID!==current.uid||m.SeriesInstanceUID!==current.series||m.SOPInstanceUID!==current.sop||typeof m.PatientID!=='string'||!m.PatientID.trim()||m.PatientID.length>64||(current.study.id&&current.study.id!==m.PatientID)){labels.get(id)?.remove();labels.delete(id);titles.delete(id);continue;}
+          displayed.set(id,current.uid);
           let e=labels.get(id);if(!e||e.parentNode!==v.element){e?.remove();e=document.createElement('div');e.className='kin-viewer-identity';v.element.append(e);labels.set(id,e);}
           const role=current.uid===studies[0]?'current':'prior',general=value[role],modality=typeof m.Modality==='string'&&modalities.includes(m.Modality.trim().toUpperCase())?m.Modality.trim().toUpperCase():'',p=modality&&general.overrides[modality]||general;
           e.dataset.role=role;e.dataset.study=current.uid;e.dataset.modality=modality;e.dataset.profile=modality&&general.overrides[modality]?'override':'general';
@@ -124,7 +152,7 @@ window.KinViewerIdentity=(()=>{
           if(overlap){primary.textContent=[...groups.values()].flat().join(' · ');for(const group of e.querySelectorAll('.kin-viewer-identity-group'))group.remove();place(e,p.position,true);}
         }
         syncTitle();
-      }catch(_){clear();}
+      }catch(_){clear();}finally{viewing.update(displayed.values());}
     }
     // Clear before a replacement can paint; validate after the native state
     // update. A changed stack refreshes only its own label, not every volume.
@@ -168,7 +196,7 @@ window.KinViewerIdentity=(()=>{
       if(event.reason==='cancel'||event.reason==='lifecycle'&&event.state==='active'){bind();refresh();}
       else if(event.reason==='lifecycle'&&event.state!=='preparing')dispose();
     });
-    function dispose(){ended=true;clearInterval(timer);unsubscribe();removeNative();stop();loading.clear();clear();}
+    function dispose(){ended=true;viewing.close();clearInterval(timer);unsubscribe();removeNative();stop();loading.clear();clear();}
     bind();refresh();return {dispose};
   }
   return {positions:[...positions],modalities:[...modalities],defaults,normalize,read,publish,subscribe,mount};
