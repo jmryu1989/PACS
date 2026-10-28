@@ -15,6 +15,17 @@ function isStudyLookupKey(value: unknown): value is string {
 /** What a source consumer may do with the owned body: read it. The owner keeps the reader itself. */
 type SourceReader = { read(): Promise<ReadableStreamReadResult<Uint8Array>> };
 
+/** The part of an HTTP response `relay()` writes: the Express response of the viewer read it answers. */
+export interface RelayTarget {
+  status(code: number): unknown;
+  setHeader(name: string, value: string): unknown;
+  write(chunk: Uint8Array): boolean;
+  end(): unknown;
+  once(event: 'close' | 'drain' | 'error', listener: () => void): unknown;
+  off(event: 'close' | 'drain' | 'error', listener: () => void): unknown;
+  readonly destroyed?: boolean;
+}
+
 // S7-U4a header reads put an Orthanc resource id into a path: only Orthanc's own id shape passes.
 const ORTHANC_RESOURCE_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/;
 function orthancResourceId(value: unknown): string {
@@ -523,6 +534,105 @@ export class OrthancService {
       if (!res.ok) throw new ServiceUnavailableException(`Orthanc HTTP ${res.status}`);
       return OrthancService.jsonBody(res, read, owned);
     }, (e: any) => new ServiceUnavailableException(`Orthanc에 연결할 수 없습니다: ${e?.message}`));
+  }
+
+  /**
+   * MG-LOADING: what the direct frame reader (dicom-frame.service.ts) needs to know about one stored object. The
+   * simplified tags name the object and its frame geometry; the attachment info gives the stored file's identity and
+   * sizes; the two metadata values are the transfer syntax and the pixel data offset Orthanc records at ingestion.
+   * A missing PixelDataOffset is `null` (an encapsulated or unindexed object): the caller then leaves it to Orthanc.
+   */
+  async frameFacts(id: string, signal?: AbortSignal): Promise<{ tags: any; attachment: any; transferSyntax: string | null; pixelDataOffset: string | null }> {
+    const rid = orthancResourceId(id);
+    const [tags, attachment, transferSyntax, pixelDataOffset] = await Promise.all([
+      this.viewerJson(`/instances/${rid}/simplified-tags`, undefined, signal, CONTEXT_READ_LIMIT),
+      this.viewerJson(`/instances/${rid}/attachments/dicom/info`, undefined, signal),
+      this.viewerText(`/instances/${rid}/metadata/TransferSyntax`, signal),
+      this.viewerText(`/instances/${rid}/metadata/PixelDataOffset`, signal),
+    ]);
+    return { tags, attachment, transferSyntax, pixelDataOffset };
+  }
+
+  /**
+   * MG-08: the archive's own revision of one study - its Orthanc resource and the LastUpdate stamp Orthanc advances
+   * for every instance stored into or removed from the study - which the study delivery's 열람 record names as the
+   * version of what it delivers (image-delivery-record.ts). A UID two study resources answer has no one revision.
+   */
+  async studyRevision(uid: string, signal?: AbortSignal): Promise<{ id: string; lastUpdate: string }> {
+    if (typeof uid !== 'string' || !/^[0-9.]{1,64}$/.test(uid)) throw new BadRequestException('검사 식별자가 올바르지 않습니다');
+    const found = await this.viewerJson('/tools/lookup', uid, signal);
+    const studies = Array.isArray(found) ? found.filter(x => x?.Type === 'Study' && typeof x.ID === 'string' && ORTHANC_RESOURCE_ID.test(x.ID)) : [];
+    if (studies.length !== 1) throw new ServiceUnavailableException('원본 검사를 하나로 확인할 수 없습니다');
+    const study = await this.viewerJson(`/studies/${studies[0].ID}`, undefined, signal);
+    const lastUpdate = study?.LastUpdate;
+    if (typeof lastUpdate !== 'string' || !/^\d{8}T\d{6}$/.test(lastUpdate)) throw new ServiceUnavailableException('원본 검사의 갱신 시각을 확인할 수 없습니다');
+    return { id: studies[0].ID, lastUpdate };
+  }
+
+  /** A short text value of the Orthanc REST API (instance metadata); a 404 is `null`, any other failure throws. */
+  private async viewerText(path: string, signal?: AbortSignal, limit = 4096): Promise<string | null> {
+    const bounds = OrthancService.readLimit(signal), bound = bounds.signal;
+    try {
+      return await this.withSourceResponse(path, { method: 'GET', redirect: 'error', headers: { Authorization: this.auth } },
+        bound, async (response, read, owned) => {
+          if (response.status === 404) return null;
+          if (!response.ok || !response.body) throw new Error('response');
+          const reader = read(), chunks: Uint8Array[] = []; let total = 0;
+          for (let part = await reader.read(); !part.done; part = await reader.read()) {
+            total += part.value.byteLength;
+            if (total > limit) throw new Error('limit');
+            chunks.push(part.value);
+          }
+          owned.throwIfAborted();
+          return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
+        });
+    } catch { throw new ViewerSourceUnavailable(); }
+    finally { bounds.release(); }
+  }
+
+  /**
+   * Orthanc's own answer to an image read (status, media type, body) copied to the API's response: the image reads nginx
+   * routes to the API so their study delivery is recorded first (image-relay.controller.ts), and the viewer reads the direct frame
+   * reader (dicom-frame.service.ts) does not serve itself. Backpressure follows the client. The response's own lifetime is
+   * the source owner's signal, joined with the caller's: a client that goes away while the headers or a body chunk are
+   * still pending aborts the Orthanc fetch and cancels its reader at once (the owner's `stop`), instead of leaving the
+   * request open until Orthanc happens to produce the next bytes. The caller has set no headers and writes nothing else.
+   * `origin` is the public origin the browser used: Orthanc's DICOMweb answers name their parts (Content-Location) from
+   * the forwarded host, as they did when nginx proxied to Orthanc, instead of from the internal `orthanc:8042`.
+   */
+  async relay(path: string, accept: string, target: RelayTarget, signal?: AbortSignal, origin?: string): Promise<void> {
+    const forwarded = /^(https?):\/\/([A-Za-z0-9.:\-\[\]]{1,255})$/.exec(origin ?? '');
+    const lifetime = new AbortController(), stop = () => lifetime.abort();
+    if (signal?.aborted || target.destroyed) lifetime.abort();
+    else { signal?.addEventListener('abort', stop, { once: true }); target.once('close', stop); target.once('error', stop); }
+    const settled = () => new Promise<void>(resolve => {
+      const done = () => { for (const event of ['drain', 'close', 'error'] as const) target.off(event, done); resolve(); };
+      for (const event of ['drain', 'close', 'error'] as const) target.once(event, done);
+    });
+    try {
+      await this.withSourceResponse(path, { method: 'GET', redirect: 'error',
+        headers: { Authorization: this.auth, Accept: accept, 'Accept-Encoding': 'identity',
+          ...(forwarded ? { 'X-Forwarded-Proto': forwarded[1], 'X-Forwarded-Host': forwarded[2] } : {}) } }, lifetime.signal,
+      async (response, read, owned) => {
+        target.status(response.status);
+        for (const name of ['content-type', 'content-length']) {
+          const value = response.headers.get(name);
+          if (value) target.setHeader(name, value);
+        }
+        if (!response.body) { target.end(); return; }
+        const reader = read();
+        for (let part = await reader.read(); !part.done; part = await reader.read()) {
+          owned.throwIfAborted();
+          if (!target.write(part.value)) await settled();
+          owned.throwIfAborted();
+        }
+        owned.throwIfAborted();
+        target.end();
+      }, (e: any) => new ServiceUnavailableException(`Orthanc에 연결할 수 없습니다: ${e?.message}`));
+    } finally {
+      signal?.removeEventListener('abort', stop);
+      target.off('close', stop); target.off('error', stop);
+    }
   }
 
   /** 썸네일 경로(/instances/{id})의 기관 관문용. 실패는 던진다 — 관문에서 403이 된다. */

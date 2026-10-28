@@ -125,6 +125,13 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "auth/logout"): Route(Kind.NEITHER),
     ("GET", "me"): Route(Kind.NEITHER),
     ("GET", "authz/dicom"): Route(Kind.TENANT),
+    # MG-08: the image reads nginx routes to the API relay behind the same DICOMweb gate as authz/dicom; the study
+    # delivery is recorded before any byte (image-relay.controller.ts, image-delivery-record.ts).
+    ("GET", "image-relay/*"): Route(Kind.TENANT),
+    # MG-LOADING: the viewer's frame reads and series-strip previews answered by the API's range reader (or relayed to
+    # Orthanc) behind the same DICOMweb gate as authz/dicom; nginx routes /dicom-web/.../frames/N and /instances/{id}/preview here.
+    ("GET", "dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames"): Route(Kind.TENANT),
+    ("GET", "instances/:id/preview"): Route(Kind.TENANT),
     ("POST", "gateway/announce"): Route(Kind.TENANT),
     ("POST", "gateway/receipt"): Route(Kind.TENANT),
     ("GET", "gateway/retry-requests"): Route(Kind.TENANT),

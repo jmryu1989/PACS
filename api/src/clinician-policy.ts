@@ -60,6 +60,10 @@ export const CLINICIAN_BUSINESS_ROUTES: readonly string[] = Object.freeze([
   'POST studies/:uid/image-requests', 'POST image-requests/:id',
   // S7-U1a — 중요 결과 수신(받은 목록·한 건·명시 ACK). 발신·취소·대체·후보·검사별 목록은 clinician-only에게 계속 거절한다.
   'GET critical-results', 'GET critical-results/:id', 'POST critical-results/:id/ack',
+  // MG-08: image reads routed by nginx to the recorded API relay, behind the same gate as authz/dicom.
+  'GET image-relay/*',
+  // MG-LOADING: viewer frame bytes and strip previews come through the API behind the same gate as authz/dicom.
+  'GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames', 'GET instances/:id/preview',
 ]);
 
 export const CLINICIAN_ALLOWED_ROUTES: ReadonlySet<string> =
