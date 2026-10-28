@@ -33,6 +33,11 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['GET health'] },
   { kinds: ['system-operation'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET admin/metrics', 'GET admin/held-sources'] },
+  // Transient staff viewing presence is operational state, not a patient record or proof of record delivery.
+  { kinds: ['system-operation'], operation: 'read', causes: ['user-view', 'background-fetch'],
+    routes: ['GET presence'] },
+  { kinds: ['system-operation'], operation: 'write', causes: ['user-view', 'background-fetch'],
+    routes: ['POST presence'] },
   { kinds: ['authentication-session'], operation: 'auth', causes: ['user-view'],
     routes: ['GET auth/login', 'GET auth/register', 'GET auth/callback', 'POST auth/logout', 'POST auth/login', 'POST auth/register'] },
   { kinds: ['identity-access', 'authentication-session'], operation: 'read', causes: ['user-view', 'background-fetch'],

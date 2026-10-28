@@ -162,12 +162,12 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 164, "public": 6, "session": 2, "business": 36, "denied": 120},
+    "counts": {"routes": 166, "public": 6, "session": 2, "business": 36, "denied": 122},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
       "multi_study_view": "radiologist multi-study viewing of the own institution (W9-LITE): the same-patient viewing set's admission read (need radiologist, admin passes; owning institution, no tele, StudyAccess for every member); a clinician-only member neither resolves a viewing set nor records its display.",
-      "operations": "technologist and reader operations: tech notes, reader assignment and candidates, Preliminary colleagues, order match/unmatch.",
+      "operations": "technologist and reader operations: tech notes, reader assignment and candidates, Preliminary colleagues, transient viewing presence, order match/unmatch.",
       "workspace": "the caller's reading-workspace state, personal or site-shared (prefs, filters, favorites, templates, columns, layout, shortcuts, appearance, reading preferences, hanging protocols, study tags) and the caller's own StudyAccess status. No clinician screen uses them before S5-U2a.",
       "admin": "member console, study-access administration, doctor signing keys, audit, the held-study alert and sending device / InstitutionName registration, and operations metrics (need admin).",
       "consultation": "consultations and consultation candidates; the clinician question contract is S5-U4p/U4a, denied until then.",
@@ -196,6 +196,7 @@
         "POST studies/viewing-set/resolve"
       ],
       "operations": [
+        "GET presence", "POST presence",
         "GET studies/:uid/tech-note", "POST studies/:uid/tech-note", "GET studies/:uid/tech-note/history",
         "GET reader-candidates", "GET studies/:uid/reader-assignment", "POST studies/:uid/reader-assignment",
         "GET colleagues", "POST match", "POST unmatch"
@@ -242,6 +243,8 @@
       "POST studies/:uid/assign": {"unit": "D1882-held-unknown-source", "basis": "no per-study assignment of an unknown sending hospital; only a device or InstitutionName registration confirmed with the hospital attaches held studies"}
     },
     "post_baseline": {
+      "GET presence": {"decision": "denied", "unit": "emr-p-viewing-fix1", "commit": null, "basis": "transient staff-name presence for visible studies in the caller's institution; clinician-only users are excluded by the approved viewing-presence scope"},
+      "POST presence": {"decision": "denied", "unit": "emr-p-viewing-fix1", "commit": null, "basis": "session-bound transient viewing-presence update; clinician-only users are excluded by the approved viewing-presence scope"},
       "GET image-relay/*": {"decision": "business", "unit": "S9-MG-08", "commit": null, "basis": "the existing image reads (worklist preview/thumbnail rendered frames, report and print pixel reads, strip preview, pdf, WADO-RS frames, rendered, bulk data) nginx now routes to the API relay (image-relay.controller.ts) instead of straight to Orthanc; the handler runs authzDicom, the same gate GET authz/dicom runs, before any byte, and records the study delivery (D1877) first; pixels and the plain descriptions authz/dicom already admitted, no report or writer field; declared in allowed_additions"},
       "POST studies/:uid/viewer-context-events": {"decision": "business", "unit": "S8-CTX", "commit": "56e19e0", "basis": "finite diagnostic event after image permission and institution admission; server attributes the audit row; declared in allowed_additions"},
       "GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames": {"decision": "business", "unit": "S9-MG-LOADING", "commit": null, "basis": "the viewer's WADO-RS frame bytes, routed from nginx to the API's range reader (dicom-frame.service.ts); the handler runs authzDicom, the same gate GET authz/dicom runs for every other image read, before any byte; pixels only, no report or writer field; declared in allowed_additions"},
