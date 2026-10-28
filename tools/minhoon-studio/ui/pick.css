@@ -22,3 +22,5 @@ html.studio-viewer .pick-shield { z-index: 2147483610; }
 /* Bottom centre: OHIF's dock buttons sit in the bottom corners, the middle of that bar is free. */
 html.studio-viewer .studio-widget { z-index: 2147483620; left: 50%; transform: translateX(-50%); }
 html.studio-viewer .pick-hint { z-index: 2147483630; }
+/* Set only during one synchronous elementsFromPoint (viewer-studio.js): an inactive viewport is hit-tested too. */
+html.studio-viewer.studio-hit [data-cy="viewport-pane"] { pointer-events: auto !important; }

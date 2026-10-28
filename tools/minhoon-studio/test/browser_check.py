@@ -176,6 +176,7 @@ def stored_picks(page): return page.evaluate('JSON.parse(sessionStorage.getItem(
 def chip_titles(chat): return [chips(chat).nth(i).get_attribute("title") or "" for i in range(chips(chat).count())]
 def page_of(page): return page.evaluate("location.pathname + location.search")
 def in_view(page, r): return bool(r) and r["width"] >= 8 and r["x"] >= 0 and r["y"] >= 0 and r["x"] + r["width"] <= page.evaluate("innerWidth") and r["y"] + r["height"] <= page.evaluate("innerHeight")
+def click_xy(page, r): page.mouse.click(r["x"] + r["width"] / 2, r["y"] + r["height"] / 2); settle(page, 200)
 def picking_everywhere(chat, *pages):
     # The chat's 고르기 toggles every window together: at most two presses turn them all on.
     for _ in range(2):
@@ -239,19 +240,19 @@ def viewer_window_checks(viewer, own, chat, product):
     chat.click("#picks-clear"); settle(chat, 500)
 
     # F3: 6 cells in the product window, then the viewer is filled up: the 13th pick is refused where it is clicked.
+    rows_ready(product); settle(product, 800)
     picking_everywhere(chat, product, viewer)
-    f = frame(product)
-    cells = f.locator("#rows tr[data-uid] td:visible").all()
-    cells = [n for n in cells if in_view(product, n.bounding_box())]
-    for node in cells[:6]: click_at(product, node)
+    # Where to click is read once, from what is on screen now (a locator re-read later could meet a re-rendered list).
+    cells = [r for r in (n.bounding_box() for n in frame(product).locator("#rows tr[data-uid] td:visible").all()) if in_view(product, r)]
+    for r in cells[:6]: click_xy(product, r)
     settle(chat, 600); product_n = chips(chat).count()
     targets = [viewer.locator("canvas").first] + viewer.locator("#root button:visible").all()
-    targets = [n for n in targets if in_view(viewer, n.bounding_box())]
-    for node in targets[:6]: click_at(viewer, node); settle(viewer, 150)
+    targets = [r for r in (n.bounding_box() for n in targets) if in_view(viewer, r)]
+    for r in targets[:6]: click_xy(viewer, r); settle(viewer, 150)
     settle(chat, 600); full_n = chips(chat).count()
-    if len(targets) > 6: click_at(viewer, targets[6]); settle(chat, 600)  # the 13th, in the viewer
+    if len(targets) > 6: click_xy(viewer, targets[6]); settle(chat, 600)  # the 13th, in the viewer
     viewer_hint = viewer.locator(".pick-hint").inner_text()
-    if len(cells) > 6: click_at(product, cells[6]); settle(chat, 600)  # and in the product window
+    if len(cells) > 6: click_xy(product, cells[6]); settle(chat, 600)  # and in the product window
     if not (len(targets) > 6 and len(cells) > 6): record("F3 fixture has a 13th element in each window", False, {"cells": len(cells), "viewerTargets": len(targets)})
     product_hint = product.locator(".pick-hint").inner_text()
     record("F3 one limit of 12 over the product window and the viewer: a 13th pick in either is refused and said there",
@@ -651,6 +652,11 @@ try:
             if not own.is_closed(): own.close()
         except Exception as e:
             record("V2 / F1-F3 viewer popup checks ran to the end", False, {"error": repr(e), "trace": traceback.format_exc()[-1500:]})
+            # Leave no window picking, so the checks after this one still reach the product.
+            for _ in range(2):
+                if shield_on(product) or shield_on(viewer): reopen.click("#pick"); settle(reopen, 700)
+            try: own.close()
+            except Exception: pass  # never opened, or already closed
         viewer.close()
 
         # A1: role 관리자 opens admin.html in the product tab with no redirect; the showcase card does the same.

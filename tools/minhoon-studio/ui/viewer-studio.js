@@ -22,8 +22,9 @@
   let role = null, chatSeen = 0, others = 0;
 
   // OHIF keeps an inactive viewport's content out of hit-testing (pointer-events-none on its data-cy="viewport-pane",
-  // so the first click only activates it): the hit lands on the pane's frame. For that one synchronous look the pane
-  // is let in, so a pick on the second image is that image as on the active one, and OHIF is not activated.
+  // so the first click only activates it): the hit lands on the pane's frame. For that one synchronous look the panes
+  // are let in by a class on the studio's own <html> (pick.css), so a pick on the second image is that image as on the
+  // active one, OHIF is not activated and none of its elements is written to.
   const GRID = '[data-cy="viewport-grid"]', PANE = '[data-cy="viewport-pane"]';
   const studioOwn = n => !!(n && n.closest && n.closest('[data-studio]'));
   function inner(node, x, y) {
@@ -35,10 +36,10 @@
       if (panes.length) { if (panes.length === 1) pane = panes[0]; break; }
     }
     if (!pane) return node; // between panes
-    const before = pane.getAttribute('style');
-    pane.style.pointerEvents = 'auto';
+    const root = document.documentElement;
+    root.classList.add('studio-hit');
     try { return document.elementsFromPoint(x, y).find(n => pane.contains(n) && !studioOwn(n)) || node; }
-    finally { if (before === null) pane.removeAttribute('style'); else pane.setAttribute('style', before); }
+    finally { root.classList.remove('studio-hit'); }
   }
 
   // Which image a picked element belongs to: OHIF's viewport (data-viewport-uid) and, from OHIF's own services,
