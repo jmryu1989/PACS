@@ -365,6 +365,19 @@ test('TEST-D-01 clinical_vs_operational: a radiographer signs their own Tech Not
   refused(() => R.planClinicalRead({ actor: rTele, unit: written, scope: 'current' }), 'NotFound', 'Part 1 serves no other institution');
 });
 
+test('TEST-D-01 text that cannot be stored is a contract refusal on every text rule, so the route answers 400 rather than 500', () => {
+  // A lone surrogate is client input; an untyped Error here reached the client as 500 (nightly test_note_01).
+  const note = (unit, text, reason) => ({ baseVersion: unit ? unit.revision : 0, text, reason, attemptId: randomUUID() });
+  refused(() => plan('tech-note.write', tech, null, note(null, 'SYN \ud800', '')), 'TextRefused', 'replace: the text');
+  const written = R.applyPlan(null, plan('tech-note.write', tech, null, note(null, 'SYN 메모', '')));
+  refused(() => plan('tech-note.write', tech, written, note(written, 'SYN 수정', 'SYN \udfff')), 'TextRefused', 'replace: the reason');
+  refused(() => plan('question.create', c1, null, qBody(c1, 'SYN \ud800 질문')), 'TextRefused', 'required: a question body');
+  const opened = step(null, 'question.create', c1, qBody(c1));
+  refused(() => plan('question.close', c1, opened, closeBody(c1, opened, 'SYN \udc00')), 'TextRefused', 'optional: a closing note');
+  refused(() => plan('image-request.create', c1, null, { requestId: randomUUID(), expectedOwner: owner(c1), kind: 'external-image',
+    counterparty: 'SYN 외부병원', counterpartyInstitutionId: null, reason: 'SYN \ud83d' }), 'TextRefused', 'required: an image request reason');
+});
+
 test('TEST-D-01 clinical_vs_operational: body claims of authority are refused and server facts alone decide the class', () => {
   for (const field of ['author', 'verified', 'recordKind', 'signed', 'clinicalEntry', 'institutionId', 'signer']) {
     refused(() => plan('question.create', c1, null, { ...qBody(c1), [field]: field === 'author' ? who('r1') : true }), 'AuthorityFieldRefused',

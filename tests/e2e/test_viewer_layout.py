@@ -30,7 +30,9 @@ class ViewerLayoutE2E(ThumbnailSeriesE2E):
         }))''')
 
     def drag(self,page,description,index):
-        page.locator('[draggable=true]').filter(has_text=description).drag_to(page.locator('[data-cy=viewport-grid] > div').nth(index))
+        # This helper exercises the native Studies thumbnails. The horizontal
+        # strip now offers the same series as a second draggable control.
+        page.locator('[draggable=true]:not(.kin-series-card)').filter(has_text=description).drag_to(page.locator('[data-cy=viewport-grid] > div').nth(index))
 
     def identity(self,page,expected):
         page.wait_for_function('''expected=>{
