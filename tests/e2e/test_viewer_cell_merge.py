@@ -301,6 +301,17 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         fixture, page = self.quad()
         self.square_cells(page)
         originals = self.originals(); rows = self.report_rows(fixture)
+        # Unsaved work rides through the failed reconstruction below: an arrow, never saved, in the
+        # cell the deviating layout reshapes. Its points, text and source image are compared after recovery.
+        self.choose(page, 1)
+        self.select_annotation_tool(page)
+        self.draw_annotation(page, 1, 'CM4UNSAVED')
+        select_image_tool(page, 'Pan')
+        drawn = self.annotations(page)
+        self.assertEqual(1, len(drawn))
+        page.wait_for_function('()=>kinViewerHistoryWorkspaceState().dirty')
+        unsaved = page.locator('#kin-viewer-history section[data-kind=arrow]').last
+        expect(unsaved.locator('strong')).to_contain_text('Unsaved')
         before_geometry = self.geometry(page); before = self.snap(page)
         # An empty cell cannot become the surviving cell of a merge.
         self.click_pane(page, 2)
@@ -348,6 +359,10 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         for old, item in zip(before, self.snap(page)):
             self.assertEqual(old['image'], item['image']); self.assertEqual(old['camera'], item['camera'])
             self.assertEqual(old['properties'], item['properties'])
+        # The unsaved arrow came back with the rolled-back cells: same points, text and referenced image, still Unsaved.
+        self.assertEqual(drawn, self.annotations(page))
+        self.assertTrue(page.evaluate('kinViewerHistoryWorkspaceState().dirty'))
+        expect(unsaved.locator('strong')).to_contain_text('Unsaved')
         # No merge record survived the rollback, and the panel is usable rather than locked.
         expect(self.merge_button(page, 'restore')).to_be_disabled()
         expect(self.merge_button(page, 'maximize')).to_be_enabled()
@@ -359,6 +374,7 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         expect(page.locator('#kin-cell-merge [role=status]')).to_contain_text('되돌렸습니다', timeout=30000)
         page.wait_for_function('()=>services.viewportGridService.getState().viewports.size===4', timeout=30000)
         self.assertEqual(before_geometry, self.geometry(page))
+        self.assertEqual(drawn, self.annotations(page))
         self.assertEqual(rows, self.report_rows(fixture)); self.assertEqual(originals, self.originals())
 
 

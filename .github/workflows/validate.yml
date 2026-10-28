@@ -1654,6 +1654,21 @@ jobs:
           tmp/viewer-ux-u2/screens/
         if-no-files-found: error
         retention-days: 7
+    - name: Isolated declared S9-U7 output, identity and unsaved-work tests
+      timeout-minutes: 28
+      run: |
+        "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile s9-u7-served
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+    - name: Sanitized synthetic S9-U7 served evidence
+      if: ${{ always() && !github.event.pull_request.draft }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-s9-u7-served-results
+        path: |
+          tests/e2e/artifacts/s9-u7-served-ci/
+          tmp/s9-u7/screens/
+        if-no-files-found: error
+        retention-days: 7
     - name: Worklist folder multi-selection and shortcut module contract
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/worklist-folder-tree --cwd . --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file worklist-v0/hpacs-lite/compound-filter.js --file tests/worklist_folder_tree_test.cjs --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-editor-frame.js --file worklist-v0/hpacs-lite/main-split.bundle.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/saved-filter-manager.js --file worklist-v0/hpacs-lite/page-boot.js --file worklist-v0/hpacs-lite/session-end.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_folder_tree_test.cjs
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
