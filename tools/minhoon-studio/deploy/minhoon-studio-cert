@@ -17,5 +17,6 @@ install -o root -g studio -m 640 "$LINEAGE/privkey.pem" "$DEST/privkey.pem.new"
 mv -f "$DEST/fullchain.pem.new" "$DEST/fullchain.pem"
 mv -f "$DEST/privkey.pem.new" "$DEST/privkey.pem"
 
-# The server reads the certificate at start. A paused studio (README "Pause") stays stopped.
-if systemctl is-active --quiet minhoon-studio; then systemctl restart minhoon-studio; fi
+# The server reads the certificate at start. A paused studio (README "Pause") stays stopped. install.sh restarts the
+# studio itself once the new unit and config are in place (a restart here would start the new app under the old unit).
+if [ -z "${MINHOON_STUDIO_NO_RESTART:-}" ] && systemctl is-active --quiet minhoon-studio; then systemctl restart minhoon-studio; fi

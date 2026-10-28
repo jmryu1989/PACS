@@ -84,7 +84,7 @@ if [ -f "$LE_LINEAGE/fullchain.pem" ]; then
   # renewal (owner decision 2026-10-28). The certbot lineage and its renewal config are left as they are.
   echo "   Let's Encrypt $HOSTNAME_PUBLIC (deploy hook minhoon-studio-cert)"
   install -o root -g root -m 755 "$ROOT/app/deploy/minhoon-studio-cert" /etc/letsencrypt/renewal-hooks/deploy/minhoon-studio-cert
-  /etc/letsencrypt/renewal-hooks/deploy/minhoon-studio-cert
+  MINHOON_STUDIO_NO_RESTART=1 /etc/letsencrypt/renewal-hooks/deploy/minhoon-studio-cert
   TLS_CERT=$ROOT/etc/tls/fullchain.pem; TLS_KEY=$ROOT/etc/tls/privkey.pem
 else
   echo "   self-signed (no $LE_LINEAGE on this host)"
