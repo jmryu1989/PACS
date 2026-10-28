@@ -60,7 +60,7 @@ export function canonicalPayload(input: unknown): Buffer {
   const identities = attachments.map(a => JSON.stringify([a.kind, a.recordId, a.versionId]));
   if (new Set(identities).size !== identities.length) throw new Error('Duplicate attachment reference');
   const reason = v.reason === null ? null : string(v.reason, true);
-  if (action === 'cancel' && (reason === null || !reason.trim())) throw new Error('Cancellation reason required');
+  if (v.recordKind === 'report-version' && action === 'cancel' && (reason === null || !reason.trim())) throw new Error('Cancellation reason required');
   const payload: SignaturePayload = {
     formatVersion: 'emr-signature/1', text, patient: patientLink(v.patient), studyId: string(v.studyId),
     managingInstitutionId: string(v.managingInstitutionId), actingInstitutionId: string(v.actingInstitutionId),
