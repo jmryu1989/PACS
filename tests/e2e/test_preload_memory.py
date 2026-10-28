@@ -315,7 +315,7 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
         viewer.wait_for_function(TAB_SHOWN)
         mark = len(seen)
         self.assertTrue(viewer.evaluate('href => kinViewerOpenPatient(href)', '/ohif/viewer?StudyInstanceUIDs=' + a.uid))
-        time.sleep(3)
+        viewer.wait_for_timeout(3000)   # Playwright's request events are dispatched while it waits, not in time.sleep
         self.assertEqual([s for s in seen[mark:] if s[0] == a.uid], [], 'a same-scope Open reads nothing')
         self.assertEqual(len(self.opens(a.uid)), 1, 'a same-scope Open is no new opening')
         viewer.close(run_before_unload=True)
@@ -359,16 +359,24 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
         self.wait_opens(d.uid, 1)
         # O2 at the re-entry: while the ledger cannot take A's new root, its live read waits and the tab does not
         # switch - A's pixels, which this document may still hold, are not shown; once the root is durable it switches.
-        # The viewer is already loaded, so the hold stands between this opening and its root only.
+        # The viewer is already loaded, so the hold stands between this opening and its root only. The ledger's own
+        # transaction gives up after 15 s (EMR_TX_TIMEOUT_MS), so the hold ends well before that. The waits are
+        # Playwright's: its request events are dispatched only while it waits (runs 1029a/1029b waited in time.sleep and
+        # never saw a read).
         before, done = len(seen), len(self.finished)
         held = self.hold_ledger()
         try:
             viewer.evaluate('href => { window.__kinSwitch = kinViewerOpenPatient(href); }', '/ohif/viewer?StudyInstanceUIDs=' + a.uid)
-            deadline = time.monotonic() + 20
+            deadline = time.monotonic() + 8
             while not [s for s in seen[before:] if s[0] == a.uid]:
-                self.assertLess(time.monotonic(), deadline, 'the re-entry\'s live read was not sent')
-                time.sleep(.2)
-            time.sleep(5)
+                if time.monotonic() > deadline:
+                    print('REENTRY NOT SENT', json.dumps(viewer.evaluate("""async () => ({
+                        switched: await Promise.race([window.__kinSwitch, new Promise(r => setTimeout(() => r('pending'), 100))]),
+                        status: document.querySelector('.kin-patient-tabs [role=status]')?.textContent ?? null })"""),
+                        ensure_ascii=False), flush=True)
+                    self.fail('the re-entry\'s live read was not sent')
+                viewer.wait_for_timeout(200)
+            viewer.wait_for_timeout(5000)
             waiting = [s for s in seen[before:] if s[0] == a.uid]
             self.assertEqual([r[1] for r in waiting], [None], 'one live read, no memory, no check: %r' % waiting)
             self.assertNotIn(a.uid, self.finished[done:], 'the live read waits for its root')
@@ -411,15 +419,18 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
                             'the preload delivery itself is recorded as the fetch it is')
 
         # 2a. O2, first opening: E is opened while the ledger takes no record. No image body of E arrives and nothing is
-        # drawn - from the network or from the worker's memory - and no root exists. The viewer's other recorded reads
-        # (findings, draft) wait on the same ledger, so whether E's check read is sent yet is recorded, not asserted
-        # (run opus-preload-fix2-1029a: not within 40 s); the re-entry hold in 1d isolates the root. Once the ledger
-        # takes records again, E shows from one check and then memory, with exactly one root.
+        # drawn - from the network or from the worker's memory - and no root exists. A fresh viewer has more to load
+        # than the re-entry in 1d, which isolates the root, so whether E's check read is sent while held is recorded,
+        # not asserted; the hold ends before the ledger's own 15 s transaction limit. Once the ledger takes records
+        # again, E shows from one check and then memory, with exactly one root.
         before = len(seen)
         held = self.hold_ledger()
         try:
             viewer = self.open_viewer(p, e_study)
-            time.sleep(15)
+            deadline = time.monotonic() + 8
+            while not [s for s in seen[before:] if s[0] == e_study.uid] and time.monotonic() < deadline:
+                viewer.wait_for_timeout(200)
+            if [s for s in seen[before:] if s[0] == e_study.uid]: viewer.wait_for_timeout(5000)
             waiting = [s for s in seen[before:] if s[0] == e_study.uid]
             self.assertTrue(all(r[1] == 'check' for r in waiting), waiting)
             self.assertNotIn(e_study.uid, self.finished, 'no image body before the root is durable')
