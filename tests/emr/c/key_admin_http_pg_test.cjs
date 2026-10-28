@@ -66,6 +66,7 @@ test('admin creates, rotates and retires a doctor key over HTTP; the doctor appr
     class HttpFixture {}
     Module({ controllers: [product('signing-key-admin.controller').SigningKeyAdminController, product('pacs.controller').PacsController],
       providers: [PrismaService, product('pacs.service').PacsService, product('auth.service').AuthService,
+        product('presence.service').PresenceService,
         ...product('emr-clinical/startup').startupClinicalProviders,
         { provide: REQUEST_CONTEXT_CAPTURE, useValue: requests.capture }, { provide: REQUEST_CONTEXT_SOURCE, useValue: requests.source },
         { provide: product('orthanc.service').OrthancService, useValue: orthanc },

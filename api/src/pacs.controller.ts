@@ -1,3 +1,4 @@
+import { PresenceService } from './presence.service';
 import { ForbiddenException, BadRequestException, Body, Controller, Delete, Get, Header, HttpCode, Inject, Param, Patch, Post, Put, Query, Req } from '@nestjs/common';
 import { PacsService, Caller, DraftRequestFacts } from './pacs.service';
 import { REQUEST_CONTEXT_SOURCE, RequestContextSource } from './emr-runtime/request-context';
@@ -52,7 +53,7 @@ const draftSession = (req: any): string | null => (req.authMethod === 'session' 
 @Controller()
 export class PacsController {
   constructor(private svc: PacsService, private auth: AuthService,
-    @Inject(REQUEST_CONTEXT_SOURCE) private readonly requests: RequestContextSource) {}
+    @Inject(REQUEST_CONTEXT_SOURCE) private readonly requests: RequestContextSource, private presence: PresenceService) {}
 
   private withDraftFacts<T>(req: any, task: (facts: DraftRequestFacts) => Promise<T>): Promise<T> {
     return this.requests.withWork(req, async request => {
@@ -66,6 +67,19 @@ export class PacsController {
         await request.requireCurrent();
       }
     });
+  }
+
+  @Get('presence')
+  @Header('Cache-Control', 'no-store')
+  viewingPresence(@Req() req: any, @Query('uids') uids?: string) {
+    return this.presence.read(caller(req), uids ? uids.split(',') : []);
+  }
+
+  @Post('presence')
+  @Header('Cache-Control', 'no-store')
+  updateViewingPresence(@Req() req: any, @Body() body: any) {
+    return this.presence.update(caller(req), draftSession(req), req.sessionId ?? null,
+      req.displayName ?? req.actor, body);
   }
 
   @Public()

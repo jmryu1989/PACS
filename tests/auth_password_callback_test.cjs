@@ -8,6 +8,7 @@ Object.assign(process.env, { PUBLIC_ORIGIN: 'https://synthetic.invalid', KC_ISSU
   KIN_COOKIE_SECRET: 'synthetic-cookie-secret-for-the-password-callback-test-only' });
 delete process.env.KC_JWKS_URL;
 const { AuthService } = require('/app/dist/auth.service');
+const { PresenceService } = require('/app/dist/presence.service');
 const { AuthController } = require('/app/dist/auth.controller');
 
 const db = { authSession: { findUnique: async () => ({ sub: 'synthetic-user', lastSeenAt: new Date(), rightsVersion: 0 }) },
@@ -24,7 +25,7 @@ const cookies = res => [res.headers['Set-Cookie'] ?? []].flat();
 const NOTICE = { success: '비밀번호를 변경했습니다', cancelled: '비밀번호 변경을 취소했습니다', error: '비밀번호 변경을 마치지 못했습니다' };
 
 async function passwordCallback({ code, error, status }) {
-  const service = new AuthService(db, unused, unused, unused), controller = new AuthController(service);
+  const service = new AuthService(db, unused, unused, unused, new PresenceService(db, null)), controller = new AuthController(service);
   const req = { headers: { cookie: 'kin_sid=synthetic-session' } }, start = response();
   const url = new URL(await service.beginLogin(req, start, undefined, 'UPDATE_PASSWORD'));
   const pending = cookies(start).map(v => v.split(';')[0]);
@@ -53,7 +54,7 @@ for (const [name, query, outcome] of [
 }
 
 test('an ordinary callback without code or state while signed in still returns to the worklist', async () => {
-  const controller = new AuthController(new AuthService(db, unused, unused, unused)), res = response();
+  const controller = new AuthController(new AuthService(db, unused, unused, unused, new PresenceService(db, null))), res = response();
   await controller.callback({ headers: { cookie: 'kin_sid=synthetic-session' } }, res, undefined, undefined, 'access_denied', undefined);
   assert.deepEqual([res.statusCode, res.location], [302, 'https://synthetic.invalid/worklist/hpacs-lite/main.html']);
 });
