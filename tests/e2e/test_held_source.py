@@ -7,7 +7,8 @@ registers, for the own institution, a device or a spelling confirmed with the ho
 the API; the held studies attach to that institution, the attach is audited, and the institution's members then list
 them. A-027: GET audit records each returned row to the study's current institution in the EMR ledger.
 A held study's device is read on its current instances: an instance from a second device after the first answer keeps
-it held when the first device is registered. A spelling with a comma has its registration action. A row with no owner
+it held when the first device is registered. A spelling with a comma, and one with " / " in it, has its registration
+action; the slash spelling registers through the real page. A row with no owner
 opens for nobody through the DICOMweb gate, a tele value on it included, for the radiologist and the admin.
 
 Synthetic only: single-instance studies (one study gains a second instance) with run-unique UIDs, AE titles and InstitutionName texts. Cleanup deletes
@@ -37,7 +38,7 @@ from send_cstore import DEFAULT_SOURCE, public_ct_series  # noqa: E402
 
 def quoted(values):
     for value in values:
-        if not re.fullmatch(r"[A-Za-z0-9._ -]+", value):
+        if not re.fullmatch(r"[A-Za-z0-9._ /-]+", value):
             raise RuntimeError("Refusing an unexpected synthetic value in SQL")
     return ",".join("'" + value + "'" for value in values)
 
@@ -196,12 +197,14 @@ class HeldSourceE2E(WorklistE2E):
         run = uuid.uuid4().hex[:10].upper()
         first, second, third = "KA" + run, "KB" + run, "KC" + run
         unknown, comma_name = "SYNTHETIC MOVED " + run, "SYNTHETIC HOSPITAL, MAIN " + run
-        moved, comma = generate_uid(), generate_uid()
+        slash_name = "SYNTHETIC CLINIC / EAST " + run
+        moved, comma, slash = generate_uid(), generate_uid(), generate_uid()
         owner = self.owner()
         source, base = public_ct_series(DEFAULT_SOURCE, 1)[0]
-        self.own_cleanup(owner, [moved, comma], [first], [])
+        self.own_cleanup(owner, [moved, comma, slash], [first], [slash_name])
         self.send(base, moved, first, unknown, "HELD-M-" + run)
         self.send(base, comma, third, comma_name, "HELD-C-" + run)
+        self.send(base, slash, third, slash_name, "HELD-L-" + run)
 
         def groups():
             alert = self.stack.request("GET", "/admin/held-sources", "jmryu")
@@ -220,11 +223,22 @@ class HeldSourceE2E(WorklistE2E):
         self.assertEqual(psql(f'SELECT count(*) FROM "StudyState" WHERE uid={quoted([moved])} AND "institutionId" IS NULL;'), ["1"])
         self.assertNotIn(moved, self.listed("doctor"))
 
-        # A held spelling with a comma and no device has its registration action on the real page.
+        # A held spelling with a comma and no device has its registration action on the real page; so does one
+        # hospital's own name with " / " in it, and registering it there attaches its study.
         page = self.login("jmryu")
         page.goto(self.stack.proxy + "/worklist/hpacs-lite/admin.html#held-sources")
         row = page.locator("#held-rows tr", has_text=comma_name)
         expect(row.get_by_role("button", name="Register Name")).to_be_enabled()
+        self.assertIn([slash_name], [g["institutionNames"] for g in self.stack.request("GET", "/admin/held-sources", "jmryu").body["groups"]])
+        register = page.locator("#held-rows tr", has_text=slash_name).get_by_role("button", name="Register Name")
+        expect(register).to_be_enabled()
+        register.click()
+        expect(page.locator("#held-dialog-target")).to_contain_text(f'"{slash_name}"')
+        page.locator("#held-form input[name=confirmation]").fill("SYNTHETIC phone check " + run)
+        page.locator("#held-form button[type=submit]").click()
+        expect(page.locator("#held-message")).to_contain_text("1건")
+        expect(page.locator("#held-rows tr", has_text=slash_name)).to_have_count(0)
+        self.assertIn(slash, self.listed("doctor"))
 
         # A row with no owner opens for nobody through the real DICOMweb gate, a tele value on it included.
         psql(f'UPDATE "StudyState" SET "teleInstitutionId"={quoted([owner])} WHERE uid={quoted([moved])} AND "institutionId" IS NULL;')

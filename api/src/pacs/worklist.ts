@@ -163,15 +163,17 @@ export class PacsWorklist {
     need(c.roles, 'admin', '수신 보류 알림 조회');
     const me = inst(c);
     const { sources, byUid } = await this.observeArrivals();
-    const groups = new Map<string, { device: string | null; institutionText: string; count: number; firstArrival: string; lastArrival: string }>();
+    const groups = new Map<string, { device: string | null; institutionText: string; institutionNames: string[]; count: number; firstArrival: string; lastArrival: string }>();
     for (const uid of sources.uids) {
       const state = byUid.get(uid);
       if (!state || state.institutionId != null) continue;
       const device = await this.sendingDevice(uid);
-      const text = [...new Set(sources.byUid.get(uid)!.map(st => OrthancService.tag(st, '00080080').trim()))].sort().join(' / ');
-      const at = new Date(state.createdAt).toISOString(), key = JSON.stringify([device, text]);
+      // The distinct spellings travel as a list: a hospital's own name may contain " / ", so the joined display text
+      // cannot tell one spelling from several.
+      const names = [...new Set(sources.byUid.get(uid)!.map(st => OrthancService.tag(st, '00080080').trim()))].sort();
+      const at = new Date(state.createdAt).toISOString(), key = JSON.stringify([device, names]);
       const group = groups.get(key);
-      if (!group) groups.set(key, { device, institutionText: text, count: 1, firstArrival: at, lastArrival: at });
+      if (!group) groups.set(key, { device, institutionText: names.join(' / '), institutionNames: names, count: 1, firstArrival: at, lastArrival: at });
       else Object.assign(group, { count: group.count + 1, firstArrival: at < group.firstArrival ? at : group.firstArrival,
         lastArrival: at > group.lastArrival ? at : group.lastArrival });
     }

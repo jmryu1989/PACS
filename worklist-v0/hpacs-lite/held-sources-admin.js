@@ -48,6 +48,7 @@
   function draw(result) {
     const groups = Array.isArray(result?.groups) ? result.groups : null;
     if (!groups || groups.some(g => !g || !Number.isInteger(g.count) || typeof g.institutionText !== 'string' ||
+        !Array.isArray(g.institutionNames) || g.institutionNames.some(n => typeof n !== 'string') ||
         !(g.device === null || typeof g.device === 'string'))) throw new Error('format');
     const total = groups.reduce((n, g) => n + g.count, 0);
     state(total ? 'retry_requested' : 'observed', total ? `Held ${total}` : 'None Held');
@@ -70,9 +71,11 @@
         actions.append(button);
       };
       if (group.device) add('Register Device', 'device', group.device, '');
-      if (group.institutionText)
-        add('Register Name', 'alias', group.institutionText, group.institutionText.includes(' / ')
-          ? '표기가 여럿인 기관명은 등록할 수 없습니다. 수신 장비 등록으로 연결하세요.' : '');
+      // The server's list decides multiplicity; a " / " inside one hospital's own spelling is still one spelling.
+      const names = group.institutionNames;
+      if (names.length > 1)
+        add('Register Name', 'alias', group.institutionText, '표기가 여럿인 기관명은 등록할 수 없습니다. 수신 장비 등록으로 연결하세요.');
+      else if (names[0]) add('Register Name', 'alias', names[0], '');
       return tr;
     });
     $('#held-rows').replaceChildren(...rows);
