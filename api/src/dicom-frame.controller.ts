@@ -21,6 +21,14 @@ const ORTHANC_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/;
 /** The surface of the delivery's access events when one of these two routes opens it. */
 export const FRAMES_SURFACE = 'GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames';
 export const PREVIEW_SURFACE = 'GET instances/:id/preview';
+/** The archive's revision of the study a preload read was served under (see `DicomFrameController.revision`). */
+export const REVISION_HEADER = 'X-KIN-Study-Revision';
+
+/** `store`: the preload store's read (stored form, revision); `check`: the viewer's opening read of a held study (revision). */
+function preloadMode(req: any): 'store' | 'check' | null {
+  const value = String(req.headers?.['x-kin-preload'] ?? '').trim().toLowerCase();
+  return value === 'store' || value === 'check' ? value : null;
+}
 
 function requestOrigin(req: any): string {
   const proto = String(req.headers?.['x-forwarded-proto'] ?? req.protocol ?? 'https').split(',')[0].trim();
@@ -74,10 +82,29 @@ export class DicomFrameController {
     if (!list) throw new BadRequestException('프레임 번호가 올바르지 않습니다');
     const uri = `/dicom-web/studies/${study}/series/${series}/instances/${sop}/frames/${frames}`;
     await this.pacs.authzDicom(uri, 'GET', member(req));
+    const preload = preloadMode(req);
+    if (preload) await this.revision(study, preload, res);
     const lease = await this.admit(req, FRAMES_SURFACE, async () => study);
     await lifetime(req, res, lease, signal => this.frames.serveFrames({ studyUid: study, seriesUid: series, sopUid: sop, frames: list,
       accept: req.headers?.accept, acceptEncoding: req.headers?.['accept-encoding'], head: req.method === 'HEAD',
-      origin: requestOrigin(req) }, res, signal));
+      origin: requestOrigin(req), stored: preload === 'store' }, res, signal));
+  }
+
+  /**
+   * D1880 memory-only preload. A frame the preload store holds reaches the screen without passing this gate again, so
+   * the store keeps the archive's revision of the study its bytes were read under, and the viewer's first read of a
+   * held study is a live read (`check`) that answers the current one; a different revision - an object stored into or
+   * removed from the study since, Orthanc's LastUpdate - discards the held bytes. Both reads are ordinary frame reads:
+   * the gate above and the study delivery's 열람 record (D1877) are the same as for any other frame, so the `check` read
+   * at opening records the opening even when every later frame comes from memory. A stored read with no revision is
+   * refused (nothing to check it against later); a check read without one is served, and the viewer, seeing no match,
+   * stays live.
+   */
+  private async revision(study: string, mode: 'store' | 'check', res: any): Promise<void> {
+    try {
+      const { id, lastUpdate } = await this.orthanc.studyRevision(study);
+      res.setHeader(REVISION_HEADER, `orthanc-study:${id}@${lastUpdate}`);
+    } catch (error) { if (mode === 'store') throw error; }
   }
 
   @Get('instances/:id/preview')

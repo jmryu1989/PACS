@@ -33,7 +33,17 @@ export interface FrameRequest {
   accept: string | undefined; acceptEncoding: string | undefined; head: boolean;
   /** Origin the viewer addressed; Content-Location of each part is spelled against it. */
   origin: string;
+  /**
+   * D1880 memory-only preload: the worklist's preload store keeps frames as the gzip bytes this reader produces (7.7x
+   * smaller than the frame, fable-design-preload-memory-20261027 §2.2). A browser decodes `Content-Encoding: gzip` before
+   * any script sees the body, so the stored form is the gzip stream as the body itself (`application/gzip`) with the
+   * multipart type it decodes to in `X-KIN-Part-Type`. A relayed object keeps Orthanc's answer unchanged.
+   */
+  stored?: boolean;
 }
+
+/** The decoded body's media type of a stored-form (preload) frame answer. */
+export const PART_TYPE_HEADER = 'X-KIN-Part-Type';
 
 interface StoredObject {
   id: string; uuid: string; facts: FrameFacts; studyUid: string; seriesUid: string;
@@ -132,11 +142,14 @@ export class DicomFrameService {
     catch { this.forget(object!.id); await this.orthanc.relay(path, accept, target, signal, request.origin); return; }
     const locationBase = `${request.origin}/dicom-web/studies/${request.studyUid}/series/${request.seriesUid}/instances/${request.sopUid}`;
     const multipart = multipartFrames(randomUUID() + '-' + randomUUID().slice(0, 23), locationBase, object!.facts.transferSyntax!, layout.frameBytes);
-    const gzip = acceptsGzip(request.acceptEncoding);
+    const gzip = request.stored === true || acceptsGzip(request.acceptEncoding);
     target.status(200);
-    target.setHeader('Content-Type', multipart.contentType);
+    if (request.stored) {
+      target.setHeader('Content-Type', 'application/gzip');
+      target.setHeader(PART_TYPE_HEADER, multipart.contentType);
+    } else target.setHeader('Content-Type', multipart.contentType);
     target.setHeader('Vary', 'Accept-Encoding');
-    if (gzip) target.setHeader('Content-Encoding', 'gzip');
+    if (gzip && !request.stored) target.setHeader('Content-Encoding', 'gzip');
     else target.setHeader('Content-Length', String(multipart.contentLength(request.frames, layout.frameBytes)));
     if (request.head) { await handle.close().catch(() => {}); target.end(); return; }
     const out = gzip ? createGzip({ level: GZIP_LEVEL }) : target;

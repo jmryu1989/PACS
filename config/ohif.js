@@ -35,7 +35,7 @@ const KIN_VIEWER_EXPECTED_SESSION = (() => {
 // The first extension sets the page defaults before shared modules and data sources start work.
 function kinCreateSessionBoundary() {
   return { id: 'kin.session-boundary', async preRegistration() {
-    for (const name of ['work-context.js', 'session-transport.js', 'viewer-resources.js', 'viewer-session.js']) {
+    for (const name of ['work-context.js', 'session-transport.js', 'viewer-resources.js', 'viewer-preload.js', 'viewer-session.js']) {
       await new Promise((resolve, reject) => {
         const script = document.createElement('script');
         script.src = '/worklist/hpacs-lite/' + name;

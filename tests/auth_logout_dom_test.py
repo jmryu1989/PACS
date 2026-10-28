@@ -99,6 +99,10 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/study-priority.js",
     "worklist-v0/hpacs-lite/worklist-alerts.js",
     "worklist-v0/hpacs-lite/study-access-status.js",
+    # D1880: the Preload queue (main.html tags it before worklist-selection.js) and the SharedWorker it starts.
+    "worklist-v0/hpacs-lite/preload-queue.js",
+    "worklist-v0/hpacs-lite/preload-worker.js",
+    "worklist-v0/hpacs-lite/preload-store.js",
     "worklist-v0/hpacs-lite/worklist-selection.js",
     "worklist-v0/hpacs-lite/worklist-image-preview.js",
     "worklist-v0/hpacs-lite/worklist-image-thumbnails.js",

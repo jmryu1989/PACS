@@ -114,7 +114,10 @@
       if (failure.status === 401 && failure.code === 'AUTH_SESSION_ENDED' ||
           [403, 409].includes(failure.status) && failure.code === 'AUTH_SESSION_MISMATCH') end();
     }
-    const transport = win.KinSessionTransport.page({ fetch: originalFetch, authFailure });
+    // D1880: under the transport (admitted and bound first), frames of a preloaded study may come from memory once the
+    // study passed its live check in this document (viewer-preload.js).
+    const send = win.KinViewerPreload ? win.KinViewerPreload.attach(win, originalFetch) : originalFetch;
+    const transport = win.KinSessionTransport.page({ fetch: send, authFailure });
     // S7-U5 session end: auth.js keeps the end record of each session under that session's own key
     // (`kin-session-end:<session>`, or the cookie `kin-session-end.<session>` when localStorage takes no write).
     // One reader for both copies, the later of the two as auth.js reads them. A viewer ends on the record of ITS OWN

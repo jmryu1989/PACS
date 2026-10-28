@@ -266,6 +266,60 @@ test('serveFrames: gzip when the client accepts it, decoding to the same multipa
   });
 });
 
+test('serveFrames: the preload stored form is the gzip stream itself, typed application/gzip, naming the multipart it decodes to', async () => {
+  await withService(async (service) => {
+    const plain = target();
+    await service.serveFrames(request(), plain);
+    const expected = await plain.result();
+    // With or without Accept-Encoding: a browser would decode Content-Encoding before the preload store sees the bytes.
+    for (const acceptEncoding of [undefined, 'gzip, deflate, br']) {
+      const t = target();
+      await service.serveFrames(request({ stored: true, acceptEncoding }), t);
+      const { status, headers, body } = await t.result();
+      assert.equal(status, 200);
+      assert.equal(headers['content-type'], 'application/gzip');
+      assert.equal(headers['content-encoding'], undefined);
+      const unbounded = type => type.replace(/boundary=[^;]+/, '');
+      assert.equal(unbounded(headers['x-kin-part-type']), unbounded(expected.headers['content-type']), 'the type the plain answer has');
+      const decoded = zlib.gunzipSync(body);
+      assert.equal(decoded.length, expected.body.length);
+      const boundary = /boundary=([^;]+)/.exec(headers['x-kin-part-type'])[1];
+      assert.ok(decoded.toString('latin1').startsWith('--' + boundary + '\r\n'), 'the part type names the decoded body\'s boundary');
+    }
+  });
+});
+
+test('controller: a preload read answers the study\'s archive revision; a stored read without one is refused before any lease', async () => {
+  const calls = [], leases = [];
+  const service = { serveFrames: async (req, res) => { calls.push(req); res.statusCode = 200; res.end(); } };
+  const pacs = { authzDicom: async () => {} };
+  let revisionFails = false;
+  const orthanc = { studyRevision: async uid => { calls.push(['revision', uid]); if (revisionFails) throw new Error('two study resources'); return { id: 'abc', lastUpdate: '20261028T101010' }; } };
+  const deliveries = { admit: async (req, surface, study) => { leases.push(study); return { release() {} }; } };
+  const controller = new DicomFrameController(service, pacs, orthanc, deliveries);
+  const read = async preload => {
+    const req = Object.assign(new PassThrough(), { method: 'GET', headers: preload ? { 'x-kin-preload': preload } : {}, sub: 'synthetic-doctor' });
+    const res = relayTarget(), headers = {};
+    const set = res.setHeader.bind(res);
+    res.setHeader = (k, v) => { headers[k.toLowerCase()] = v; return set(k, v); };
+    await controller.read('1.2.3', '1.2.3.4', '1.2.3.4.5', '1', req, res);
+    return headers;
+  };
+  assert.equal((await read('store'))['x-kin-study-revision'], 'orthanc-study:abc@20261028T101010');
+  assert.equal(calls.at(-1).stored, true);
+  assert.equal((await read('check'))['x-kin-study-revision'], 'orthanc-study:abc@20261028T101010');
+  assert.equal(calls.at(-1).stored, false);
+  calls.length = 0;
+  assert.equal((await read(null))['x-kin-study-revision'], undefined);
+  assert.deepEqual(calls.filter(c => Array.isArray(c)), [], 'an ordinary read asks the archive nothing more');
+  assert.equal(calls.at(-1).stored, false);
+  assert.equal(leases.length, 3, 'every read, preload or not, takes the study delivery lease (D1877)');
+  revisionFails = true;
+  assert.equal((await read('check'))['x-kin-study-revision'], undefined, 'a check read is served; the viewer sees no match and stays live');
+  await assert.rejects(read('store'), /two study resources/);
+  assert.equal(leases.length, 4, 'the refused stored read opened no delivery');
+});
+
 test('serveFrames: a client that goes away mid-stream ends the read as a failure, never as an unhandled rejection', async () => {
   // Observed 2026-10-27 on the synthetic stack: the viewer page closed during a gzip thumbnail read and the API process
   // exited 1 from the delivery pipeline's unobserved rejection. The read itself must still fail (nothing pretends to finish).
