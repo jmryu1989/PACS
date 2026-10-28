@@ -168,16 +168,32 @@ class WorklistE2E(unittest.TestCase):
     def login(self, actor="doctor"):
         context = self.browser.new_context(ignore_https_errors=True, viewport={"width": 1600, "height": 1050})
         self.contexts.append(context)
-        page = context.new_page()
+        return self.login_page(context.new_page(), actor)
+
+    def login_page(self, page, actor="doctor"):
+        """The real login form in a fresh tab `page` (of this suite's browser or another one), up to the worklist.
+
+        Not named sign_in: suites built on this class bind WorkspacePersistenceE2E.sign_in(context, actor) under that
+        name, and login() must not dispatch into it."""
         page.set_default_timeout(20000)
         page.goto(self.stack.proxy + "/")
+        stage = "username"
         try:
             page.locator("#username").fill(self.stack.username(actor))
+            stage = "password"
             page.locator("#password").fill(self.stack.passwords[actor])
+            stage = "submit"
             page.locator("#kc-login").click()
-        except Exception:
-            # Playwright's call log can include fill() values; never print credentials.
-            raise RuntimeError("Real BFF login form could not be submitted") from None
+        except Exception as error:
+            # Playwright's call log can include fill() values; never print credentials. The stage, the error class and
+            # where the browser stood are enough to tell a form that never came from one that was refused.
+            where = urlsplit(page.url)
+            try:
+                title = page.title()[:80]
+            except Exception as unreadable:
+                title = type(unreadable).__name__
+            raise RuntimeError(f"Real BFF login form could not be submitted at {stage}: {type(error).__name__}; "
+                               f"page {where.netloc}{where.path} title {title!r}") from None
         page.wait_for_url("**/worklist/hpacs-lite/main.html", timeout=30000)
         expect(page.locator("#dbstat")).to_contain_text("DB Connected")
         expect(page.locator("#roles")).to_contain_text("technician" if actor == "tech" else "radiologist")
