@@ -195,10 +195,15 @@
         document.body.style.setProperty('--workspace-rail-width', clampPanel(geometry.rail ?? 220, 160, Math.max(160, innerWidth / 3)) + 'px');
         $('#rail-collapse')?.setAttribute('aria-expanded', String(!geometry.railCollapsed));
       }
-      // Before any measuring below: a hidden report window panel changes the heights and widths measured there.
-      const panelClasses = KinWorkspaceLayout.panelClasses(geometry?.hiddenPanels || [], $('.s-template').style.display !== 'none');
-      for (const [name, on] of Object.entries(panelClasses)) document.body.classList.toggle(name, on);
       const left = $(".left"), related = $(".related-p"), top = $(".rw"), prior = $(".related-list-pane");
+      // Before any measuring below: the workflow mode and the hidden panels decide the band's panels and their columns.
+      // Each column is its share of the shown shares; the last takes the remainder, as Template always has, so the
+      // default band paints to the same sub-pixel as the percentage widths it replaces.
+      const band = KinWorkspaceLayout.reportWindow(mode, geometry?.hiddenPanels || []);
+      for (const [name, on] of Object.entries(band.classes)) document.body.classList.toggle(name, on);
+      const shares = band.content.reduce((sum, p) => sum + p.share, 0);
+      top.style.setProperty('--kin-rw-columns', band.content.map((p, i) => i === band.content.length - 1 ? 'minmax(0, 1fr)'
+        : `${100 * p.share / shares}%`).join(' ') || 'minmax(0, 1fr)');
       left.style[portrait ? "height" : "width"] = "";
       related.style[portrait ? "height" : "width"] = "";
       top.style.height = "";

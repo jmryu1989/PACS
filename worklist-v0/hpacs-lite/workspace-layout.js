@@ -160,20 +160,33 @@
     catch (_) { return false; }
   }
   const hiddenPanels = value => normalize(value)?.workspace?.hiddenPanels?.slice() || [];
-  // The body classes main.html's Panel Settings rules read. The band (and its separator) empties only when every panel
-  // it would show is hidden; with only the placeholder tabs left it shrinks to their strip. `templateShown` is the mode's
-  // own choice (Technician never shows templates).
-  function panelClasses(hidden, templateShown = true) {
-    const off = key => hidden.includes(key), classes = {};
-    for (const key of PANELS) classes['kin-hide-' + key] = off(key);
-    classes['kin-panels-trimmed'] = PANELS.some(off);
-    const noContent = off('thumbnail') && off('clinical') && (off('template') || !templateShown);
-    classes['kin-report-window-empty'] = noContent && off('aiReport') && off('imageReport');
-    classes['kin-report-window-tabs'] = noContent && !classes['kin-report-window-empty'];
-    return classes;
+  // The report window band's one allocation (W-SPACE layout contract 2026-10-29). Each workflow mode has its content
+  // panels with the shares it has always painted (main.html: Thumbnail 34%, Clinical 30%, Template the rest; Technician
+  // drops Template and gives Clinical 66%). A shown panel's width is its share of the shares still shown, so hiding one
+  // gives its width only to the others, in proportion. AI Report / Image Report are placeholder tabs: they own no
+  // column, and with Thumbnail hidden they are a full-width strip above the content row. Two separate width authorities
+  // (a fixed flex share against the mode's inline 66%) let a placeholder toggle shrink Technician's Clinical (WS-05).
+  const MODE_PANELS = Object.freeze({
+    Radiology: Object.freeze([['thumbnail', 34], ['clinical', 30], ['template', 36]]),
+    Technician: Object.freeze([['thumbnail', 34], ['clinical', 66]]),
+  });
+  const PLACEHOLDERS = Object.freeze(['aiReport', 'imageReport']);
+  // `hidden` is the reader's choice and is never edited here: a panel the mode lacks stays chosen for the other mode.
+  function reportWindow(mode, hidden = []) {
+    const off = new Set(hidden);
+    const content = (MODE_PANELS[mode] || MODE_PANELS.Radiology).filter(([key]) => !off.has(key)).map(([key, share]) => ({ key, share }));
+    const tabs = PLACEHOLDERS.filter(key => !off.has(key));
+    const strip = !content.some(p => p.key === 'thumbnail') && tabs.length > 0;
+    const state = content.length ? 'content' : strip ? 'tabs' : 'empty';
+    const classes = {};
+    for (const key of PANELS) classes['kin-hide-' + key] = PLACEHOLDERS.includes(key) ? off.has(key) : !content.some(p => p.key === key);
+    classes['kin-report-window-strip'] = strip;
+    classes['kin-report-window-tabs'] = state === 'tabs';
+    classes['kin-report-window-empty'] = state === 'empty';
+    return { content, tabs, strip, state, classes };
   }
   const api = { PREFIX, PANELS, defaults, normalize, withReading, workspaceDefaults, toVersion3, withStudyPanel,
-    withHiddenPanels, hiddenPanels, panelClasses, mergeLoaded, key, read, write, remove };
+    withHiddenPanels, hiddenPanels, reportWindow, mergeLoaded, key, read, write, remove };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.KinWorkspaceLayout = api;
 })(globalThis);

@@ -2,8 +2,13 @@
 
 REQ (feedback.md items 9/10/11) -> RISK: a hidden panel leaves its space empty or comes back after a reload / under
 another account; a dragged column order is lost or changes what the list filters and sorts; the palette overwrites a
-reader's saved text colour; hiding one panel narrows another that is still shown; a band holding only placeholder tabs
-keeps its height -> TEST-WSPACE-DOM-01..06.
+reader's saved text colour -> TEST-WSPACE-DOM-01..04.
+
+REQ Minhoon-20261027/item-9 under the W-SPACE layout contract (2026-10-29) -> RISK-WSPACE-WIDTH / -PREFERENCE / -EMPTY
+-> TEST-WSPACE-G1..G5, each for Radiology and Technician at 1920x1080, 1024x768 and 768x1024, plus the 600/601 px
+stacked boundary, the 840x768 selected-study sheet and the Study Panel drawer. Expected widths come from the contract
+(each mode's shipped shares: Radiology 34 : 30 : 36, Technician 34 : 66) and the band's measured width, never from the
+product's resolver. Tolerances are the existing ones: 0.5 CSS px for widths, 1 CSS px for strip and returned heights.
 
 The real main.html and its assets are served; only HTTP answers are synthetic (study_panel_page_dom_test.WorkspaceSite).
 Every assertion reads public controls, geometry, computed colours and the stored preferences. No product instrumentation.
@@ -35,6 +40,61 @@ BAND = '''() => { const r = s => { const n = document.querySelector(s); if (!n |
 def shown(band):
     """Which parts of the band are on screen, and its tabs."""
     return {k: band[k] is not None for k in ('rw', 'thumb', 'clinical', 'template', 'thumbwrap', 'separator')} | {'tabs': band['tabs']}
+
+
+MODES = ('Radiology', 'Technician')
+# The contract's per-mode content shares (main.html first paint: Thumbnail 34%, Clinical 30%, Template the rest;
+# Technician hides Template and gives Clinical 66%). AI Report / Image Report are placeholder tabs and own no column.
+SHARES = {'Radiology': {'thumbnail': 34, 'clinical': 30, 'template': 36}, 'Technician': {'thumbnail': 34, 'clinical': 66}}
+LABELS = {'thumbnail': 'Thumbnail', 'aiReport': 'AI Report', 'imageReport': 'Image Report',
+          'clinical': 'Clinical Information', 'template': 'Reading Template'}
+PLACEHOLDERS = ('aiReport', 'imageReport')
+# The band's usable inline extent (its border box less borders and a scrollbar) next to every measured rectangle.
+GEOM = '''() => { const q = s => document.querySelector(s), r = n => { if (!n || !n.getClientRects().length) return null;
+  const b = n.getBoundingClientRect(); return [b.x, b.y, b.width, b.height]; }, rw = q('.right > .rw');
+  return { usable: rw && rw.getClientRects().length ? rw.getBoundingClientRect().width - (rw.offsetWidth - rw.clientWidth) : null,
+    rw: r(rw), thumb: r(q('.rw > .s-thumb')), thumbwrap: r(q('.rw .thumbwrap')), clinical: r(q('.rw > .s-clinical')),
+    template: r(q('.rw > .s-template')), rtabs: r(q('.rw .rtabs')), separator: r(q('#resize-top')), workrow: r(q('.workrow')),
+    report: r(q('.report-p')), order: r(q('.order-p')), split: r(q('.split')), listEdge: r(q('#resize-main')),
+    mode: q('.tabs > div.on')?.dataset.tab, viewport: [innerWidth, innerHeight],
+    tabs: [...document.querySelectorAll('.rw .rtabs > div')].filter(n => n.getClientRects().length).map(n => n.textContent) }; }'''
+
+
+def content(g):
+    """The content panels on screen and their widths; an `.s-thumb` holding only tabs is not Thumbnail content."""
+    out = {}
+    if g['thumbwrap']:
+        out['thumbnail'] = g['thumb'][2]
+    for key in ('clinical', 'template'):
+        if g[key]:
+            out[key] = g[key][2]
+    return out
+
+
+def stacked(g):
+    """main.html's very narrow portrait branch (max-width: 600px): every panel takes the band's full width."""
+    width, height = g['viewport']
+    return width <= 600 and height > width
+
+
+class FilterSite(WorkspaceSite):
+    """A WorkspaceSite whose account has one saved search that opens the Technician list."""
+    SAVED = {'id': 'syn-technician', 'name': 'SYN Technician', 'mode': 'Technician', 'cols': {}, 'quick': '', 'days': 0}
+
+    def api(self, route, request, method, path, query):
+        # The bootstrap list and the personal search collection that replaces it after start-up.
+        if method == 'GET' and path in ('/api/bootstrap', '/api/filter-folders'):
+            saved = self.SAVED
+
+            class Answer:   # the base fixture's bootstrap answer, with the saved search added
+                def fulfill(self, **kwargs):
+                    kwargs['json'] = {**kwargs['json'], 'filters': [saved]}
+                    return route.fulfill(**kwargs)
+
+                def __getattr__(self, name):
+                    return getattr(route, name)
+            return super().api(Answer(), request, method, path, query)
+        return super().api(route, request, method, path, query)
 
 
 class WSpaceDOM(unittest.TestCase):
@@ -100,6 +160,78 @@ class WSpaceDOM(unittest.TestCase):
         """With the band gone the Related/report row starts at the top of the work column (stacked: under the list)."""
         top = band['listEdge'][1] + band['listEdge'][3] if portrait else band['split'][1]
         self.assertAlmostEqual(top, band['workrow'][1], delta=1)
+
+    # ── W-SPACE layout contract helpers ──
+    def set_panels(self, page, changes):
+        """Panel Settings: set each named checkbox (key -> shown), close the dialog and View, then measure."""
+        dialog = self.panels(page)
+        for key, on in changes.items():
+            dialog.get_by_label(LABELS[key], exact=True).set_checked(on)
+            expect(dialog.locator('#panel-settings-status')).to_have_text('패널 표시를 기억했습니다 · 이 브라우저')
+        dialog.get_by_role('button', name='Close', exact=True).click()
+        expect(dialog).to_be_hidden()
+        page.locator('#toolbar-view > summary').click()
+        settle(page)
+        return page.evaluate(GEOM)
+
+    def show_all(self, page):
+        dialog = self.panels(page)
+        dialog.get_by_role('button', name='Show All Panels', exact=True).click()
+        dialog.get_by_role('button', name='Close', exact=True).click()
+        expect(dialog).to_be_hidden()
+        page.locator('#toolbar-view > summary').click()
+        settle(page)
+        return page.evaluate(GEOM)
+
+    @staticmethod
+    def switch(page, mode):
+        """The public workflow tab."""
+        page.locator(f'.tabs > div[data-tab="{mode}"]').click()
+        expect(page.locator(f'.tabs > div[data-tab="{mode}"]')).to_have_class('on')
+        settle(page)
+        return page.evaluate(GEOM)
+
+    @staticmethod
+    def stored(page):
+        return page.evaluate('(key) => JSON.parse(localStorage.getItem(key))', KEY)
+
+    def assert_allocation(self, g, mode, visible, msg=''):
+        """Invariants 1/2: the shown content is exactly the mode's available panels the reader did not hide; side by
+        side each takes the band's usable width times its share of the shown shares, stacked each takes it whole; the
+        placeholder tabs alone are a full-width strip above the content."""
+        info = f'{msg} {mode} {g}'
+        self.assertEqual(mode, g['mode'], info)
+        widths = content(g)
+        self.assertEqual(set(visible), set(widths), info)
+        if not widths:
+            return
+        usable, left, right = g['usable'], g['rw'][0], g['rw'][0] + g['rw'][2]
+        total = sum(SHARES[mode][k] for k in widths)
+        for key, width in widths.items():
+            expected = usable if stacked(g) else usable * SHARES[mode][key] / total
+            self.assertAlmostEqual(expected, width, delta=0.5, msg=f'{key}: {info}')
+            box = g['thumb' if key == 'thumbnail' else key]
+            self.assertGreaterEqual(box[0], left - 0.5, info)
+            self.assertLessEqual(box[0] + box[2], right + 0.5, info)
+            self.assertGreater(box[3], 0, info)
+        if 'thumbnail' not in widths and g['tabs']:
+            self.assertAlmostEqual(usable, g['thumb'][2], delta=1, msg=f'strip width: {info}')
+            self.assertAlmostEqual(g['rtabs'][3], g['thumb'][3], delta=1, msg=f'strip height: {info}')
+            for key in widths:
+                self.assertGreaterEqual(g[key][1], g['thumb'][1] + g['thumb'][3] - 0.5, f'{key} under the strip: {info}')
+
+    def assert_same_content(self, a, b, msg=''):
+        """The same visible content at the same position and width (0.5 px)."""
+        self.assertEqual(set(content(a)), set(content(b)), msg)
+        self.assertAlmostEqual(a['usable'], b['usable'], delta=0.5, msg=msg)
+        for key in content(a):
+            box = 'thumb' if key == 'thumbnail' else key
+            self.assertAlmostEqual(a[box][0], b[box][0], delta=0.5, msg=f'{key} x: {msg}')
+            self.assertAlmostEqual(a[box][2], b[box][2], delta=0.5, msg=f'{key} width: {msg}')
+
+    def receiver(self, g):
+        """The work column below the band: the report in Radiology, the order list in Technician."""
+        return g['order'] if g['mode'] == 'Technician' else g['report']
 
     def test_wspace_dom_01_each_panel_hides_its_space_returns_and_reload_keeps_it(self):
         for width, height in SIZES:
@@ -169,8 +301,10 @@ class WSpaceDOM(unittest.TestCase):
     def test_wspace_dom_02_account_layout_carries_hidden_panels_and_another_account_sees_all(self):
         site = WorkspaceSite()
         page = self.open(site)
+        self.drag_top(page, 30)   # TEST-WSPACE-G4: a saved band height travels with the hidden panels
         self.set_panel(page, 'Reading Template', False)
         self.set_panel(page, 'Thumbnail', False)
+        saved = page.evaluate(GEOM)
         self.view(page)
         menu = page.locator('#workspace-server-menu')
         if menu.get_attribute('open') is None:
@@ -194,6 +328,13 @@ class WSpaceDOM(unittest.TestCase):
         band = other.evaluate(BAND)
         self.assertIsNone(band['template'])
         self.assertIsNone(band['thumbwrap'])
+        loaded = other.evaluate(GEOM)
+        self.assertEqual(self.stored(page)['landscape'], self.stored(other)['landscape'])
+        self.assertEqual(saved['rw'][3], loaded['rw'][3])
+        self.assert_same_content(saved, loaded, 'account Load')
+        # The loaded mask in Technician: Template is unavailable there anyway, Thumbnail stays hidden.
+        self.assert_allocation(self.switch(other, 'Technician'), 'Technician', ['clinical'], 'loaded, Technician')
+        self.assertEqual(['thumbnail', 'template'], self.stored(other)['workspace']['hiddenPanels'])
         # A different account in this browser has its own record: nothing hidden.
         second = WorkspaceSite()
         second.login_as = auth.RAD_OTHER
@@ -202,89 +343,305 @@ class WSpaceDOM(unittest.TestCase):
         self.assertIsNotNone(band['template'])
         self.assertIsNotNone(band['thumbwrap'])
 
-    def test_wspace_dom_05_hiding_one_panel_never_narrows_another_shown_panel(self):
-        """From the first paint, each of the five panels alone: the panels still shown keep at least their width, the
-        band keeps its height while a content panel remains, and showing the panel again returns the first paint."""
-        content = {'Thumbnail': 'thumbwrap', 'Clinical Information': 'clinical', 'Reading Template': 'template'}
-        for width, height in SIZES:
-            site = WorkspaceSite()
-            page = self.open(site, width, height)
-            start = page.evaluate(BAND)
-            for label in ('Thumbnail', 'AI Report', 'Image Report', 'Clinical Information', 'Reading Template'):
-                with self.subTest(size=f'{width}x{height}', hidden=label):
-                    # Shown again before any assertion, so every case starts from the first paint.
-                    band = self.set_panel(page, label, False)
-                    back = self.set_panel(page, label, True)
-                    self.assertEqual(shown(start), shown(back))
-                    for key in ('thumb', 'clinical', 'template'):
-                        self.assertEqual([start[key][0], start[key][2]], [back[key][0], back[key][2]], key)
-                    self.assertEqual(start['rw'][3], band['rw'][3])
-                    self.assertEqual(start['workrow'], band['workrow'])
-                    for key in ('thumb', 'clinical', 'template'):
-                        if content.get(label) == key:
-                            self.assertIsNone(band[key])
-                        elif key == 'thumb' and label == 'Thumbnail':
-                            self.assertLess(band[key][2], start[key][2])   # the tab strip only
-                        else:
-                            self.assertGreaterEqual(band[key][2], start[key][2] - 0.5, key)
-                    if label in content:   # its width went to the panels still shown (at 1024 the tab strip frees ~18 px)
-                        shown_now = [k for k in ('thumb', 'clinical', 'template') if band[k] and not (k == 'thumb' and label == 'Thumbnail')]
-                        for key in shown_now:
-                            self.assertGreater(band[key][2], start[key][2] + 2, key)
-                    else:   # a placeholder tab gives up no panel width
-                        for key in ('thumb', 'clinical', 'template'):
-                            self.assertAlmostEqual(start[key][2], band[key][2], delta=0.5, msg=key)
-                    total = sum(band[k][2] for k in ('thumb', 'clinical', 'template') if band[k])
-                    self.assertAlmostEqual(band['rw'][2], total, delta=2)
-            page.screenshot(path=str(OUT / f'panels-each-restored-{width}x{height}.png'))
+    def test_wspace_g1_placeholder_toggles_never_move_content(self):
+        """TEST-WSPACE-G1 (RISK-WSPACE-WIDTH, invariant 1): AI Report / Image Report, one, the other or both, with
+        Thumbnail shown and hidden, and Technician's unavailable Reading Template, leave every content panel where it was;
+        a state restored from storage paints the same."""
+        for mode in MODES:
+            for width, height in SIZES:
+                with self.subTest(mode=mode, size=f'{width}x{height}'):
+                    site = WorkspaceSite()
+                    page = self.open(site, width, height)
+                    self.switch(page, mode)
+                    for hidden in ([], ['thumbnail']):
+                        base = self.set_panels(page, {'thumbnail': False}) if hidden else page.evaluate(GEOM)
+                        visible = [k for k in SHARES[mode] if k not in hidden]
+                        self.assert_allocation(base, mode, visible, 'base')
+                        for tabs in (['aiReport'], ['imageReport'], ['aiReport', 'imageReport']):
+                            g = self.set_panels(page, {k: False for k in tabs})
+                            self.assert_allocation(g, mode, visible, f'{hidden} {tabs} hidden')
+                            self.assert_same_content(base, g, f'{mode} {hidden} {tabs} hidden')
+                            again = self.set_panels(page, {k: True for k in tabs})
+                            self.assert_same_content(base, again, f'{mode} {hidden} {tabs} shown again')
+                    page.screenshot(path=str(OUT / f'g1-{mode}-thumbnail-hidden-{width}x{height}.png'))
+                    base = self.set_panels(page, {'thumbnail': True})
+                    if mode == 'Technician':
+                        # Technician has no Reading Template: the reader's choice for it moves nothing here.
+                        g = self.set_panels(page, {'template': False})
+                        self.assertEqual(base['rw'], g['rw'])
+                        self.assert_same_content(base, g, 'template preference in Technician')
+                        self.assertEqual(['template'], self.stored(page)['workspace']['hiddenPanels'])
+                        self.set_panels(page, {'template': True})
+                    # A stored state: Thumbnail and AI Report hidden, then a reload in this mode.
+                    live = self.set_panels(page, {'thumbnail': False, 'aiReport': False})
+                    self.reload(page, site)
+                    again = self.switch(page, mode)
+                    self.assert_allocation(again, mode, [k for k in SHARES[mode] if k != 'thumbnail'], 'stored')
+                    self.assert_same_content(live, again, f'{mode} stored state')
+                    self.assertEqual(['Image Report'], again['tabs'])
 
-    def test_wspace_dom_06_placeholder_tabs_alone_give_the_band_height_to_the_row_and_keep_the_stored_height(self):
+    def test_wspace_g2_a_hidden_content_panel_gives_its_width_only_to_the_others(self):
+        """TEST-WSPACE-G2 (RISK-WSPACE-WIDTH, invariant 2): each available content panel alone, then one after another
+        until one is left: the survivors share the band in the mode's proportions, fill it and never narrow."""
+        for mode in MODES:
+            for width, height in SIZES:
+                with self.subTest(mode=mode, size=f'{width}x{height}'):
+                    page = self.open(WorkspaceSite(), width, height)
+                    start = self.switch(page, mode)
+                    available = list(SHARES[mode])
+                    self.assert_allocation(start, mode, available, 'start')
+                    for gone in available:
+                        g = self.set_panels(page, {gone: False})
+                        survivors = [k for k in available if k != gone]
+                        self.assert_allocation(g, mode, survivors, f'{gone} hidden')
+                        for key in survivors:
+                            self.assertGreater(content(g)[key], content(start)[key] + (-0.5 if stacked(g) else 0.5), f'{mode} {gone} {key}')
+                        self.assertAlmostEqual(g['usable'], sum(content(g).values()), delta=1)
+                        # The band keeps its height while content remains (stacked: the hidden panel's height goes).
+                        if not stacked(g):
+                            self.assertEqual(start['rw'][3], g['rw'][3])
+                        self.assert_same_content(start, self.set_panels(page, {gone: True}), f'{mode} {gone} shown again')
+                    previous, hidden = start, []
+                    for gone in available[:-1]:
+                        hidden.append(gone)
+                        g = self.set_panels(page, {gone: False})
+                        survivors = [k for k in available if k not in hidden]
+                        self.assert_allocation(g, mode, survivors, f'{hidden} hidden')
+                        for key in survivors:
+                            self.assertGreaterEqual(content(g)[key], content(previous)[key] - 0.5, f'{mode} {hidden} {key}')
+                        previous = g
+                    # The one survivor has the band and its own scroll box, not a clipped control row.
+                    last = available[-1]
+                    self.assertAlmostEqual(previous['usable'], content(previous)[last], delta=0.5)
+                    overflow = page.evaluate('''() => { const n = document.querySelector('.rw > .s-clinical');
+                      return n ? [getComputedStyle(n).overflowY, n.scrollWidth - n.clientWidth] : null; }''')
+                    if overflow:
+                        self.assertEqual('auto', overflow[0])
+                        self.assertLessEqual(overflow[1], 1)
+                    page.screenshot(path=str(OUT / f'g2-{mode}-one-left-{width}x{height}.png'))
+
+    def test_wspace_g3_showing_and_mode_round_trips_restore_the_same_layout(self):
+        """TEST-WSPACE-G3 (RISK-WSPACE-WIDTH, invariant 3): A->B->A both ways with a real hidden preference, hide order,
+        showing each panel, Show All Panels, and the saved-search route to Technician."""
         for width, height in SIZES:
             with self.subTest(size=f'{width}x{height}'):
-                site = WorkspaceSite()
+                site = FilterSite()
                 page = self.open(site, width, height)
-                portrait = height > width
-                # A reader-chosen band height first: dragging the separator stores it.
-                grip = page.locator('#resize-top').bounding_box()
-                x, y = grip['x'] + grip['width'] / 2, grip['y'] + grip['height'] / 2
-                page.mouse.move(x, y)
-                page.mouse.down()
-                page.mouse.move(x, y + 15, steps=4)
-                page.mouse.move(x, y + 30, steps=4)
-                page.mouse.up()
+                r0 = page.evaluate(GEOM)
+                t0 = self.switch(page, 'Technician')
+                self.assert_allocation(t0, 'Technician', ['thumbnail', 'clinical'], 't0')
+                self.assert_same_content(r0, self.switch(page, 'Radiology'), 'Radiology after Technician')
+                # The saved search's mode change paints what the tab does.
+                page.locator('#toolbar-filters > summary').click()
+                page.locator('#chips button[data-i]', has_text=FilterSite.SAVED['name']).click()
+                expect(page.locator('.tabs > div[data-tab="Technician"]')).to_have_class('on')
+                page.locator('#toolbar-filters > summary').click()   # its open menu takes toolbar height
                 settle(page)
-                start = page.evaluate(BAND)
-                axis = 'portrait' if portrait else 'landscape'
-                stored = page.evaluate('(key) => JSON.parse(localStorage.getItem(key))', KEY)[axis]['top']
-                self.assertIsNotNone(stored)
-                for label in ('Thumbnail', 'Clinical Information', 'Reading Template'):
-                    band = self.set_panel(page, label, False)
-                self.assertEqual(['AI Report', 'Image Report'], band['tabs'])
-                self.assertIsNone(band['thumbwrap'])
-                # The band is its tab strip, without the separator, and the strip spans the band.
+                self.assert_same_content(t0, page.evaluate(GEOM), 'saved search to Technician')
+                self.switch(page, 'Radiology')
+                # A real hidden preference survives both directions and returns the same geometry.
+                r1 = self.set_panels(page, {'template': False, 'aiReport': False})
+                self.assert_allocation(r1, 'Radiology', ['thumbnail', 'clinical'], 'r1')
+                t1 = self.switch(page, 'Technician')
+                self.assert_allocation(t1, 'Technician', ['thumbnail', 'clinical'], 't1')
+                self.assert_same_content(t0, t1, 'Technician with Template hidden')
+                self.assertEqual(['aiReport', 'template'], self.stored(page)['workspace']['hiddenPanels'])
+                dialog = self.panels(page)
+                expect(dialog.get_by_label('Reading Template', exact=True)).not_to_be_checked()
+                dialog.get_by_role('button', name='Close', exact=True).click()
+                page.locator('#toolbar-view > summary').click()
+                settle(page)
+                self.assert_same_content(r1, self.switch(page, 'Radiology'), 'R -> T -> R')
+                t2 = self.switch(page, 'Technician')
+                self.switch(page, 'Radiology')
+                self.assert_same_content(t2, self.switch(page, 'Technician'), 'T -> R -> T')
+                self.assertEqual(['aiReport', 'template'], self.stored(page)['workspace']['hiddenPanels'])
+                self.switch(page, 'Radiology')
+                self.show_all(page)
+                # Hide order has no lasting effect; showing a panel returns the set's own layout.
+                only_clinical = self.set_panels(page, {'clinical': False})
+                a = self.set_panels(page, {'thumbnail': False})
+                self.show_all(page)
+                self.set_panels(page, {'thumbnail': False})
+                b = self.set_panels(page, {'clinical': False})
+                self.assert_same_content(a, b, 'hide order')
+                self.assert_allocation(b, 'Radiology', ['template'], 'thumbnail and clinical hidden')
+                self.assert_same_content(only_clinical, self.set_panels(page, {'thumbnail': True}), 'Thumbnail shown again')
+                back = self.show_all(page)
+                self.assert_same_content(r0, back, 'Show All Panels')
+                self.assertEqual(shown(r0), shown(back))
+                # A portrait band without a stored height yields to the prior report line by the toolbar's height (D383),
+                # and the applied search adds its name line to the toolbar.
+                if width > height:
+                    self.assertEqual(r0['rw'][3], back['rw'][3])
+
+    def drag_top(self, page, dy):
+        grip = page.locator('#resize-top').bounding_box()
+        x, y = grip['x'] + grip['width'] / 2, grip['y'] + grip['height'] / 2
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x, y + dy / 2, steps=4)
+        page.mouse.move(x, y + dy, steps=4)
+        page.mouse.up()
+        settle(page)
+
+    def test_wspace_g4_saved_geometry_stays_the_readers_intent(self):
+        """TEST-WSPACE-G4 (RISK-WSPACE-PREFERENCE, invariant 4): a dragged and a keyed band height survive hiding,
+        showing, a mode switch, a reload and a smaller window; nothing rendered is written back to the record."""
+        for mode in MODES:
+            for width, height in SIZES:
+                with self.subTest(mode=mode, size=f'{width}x{height}'):
+                    site = WorkspaceSite()
+                    page = self.open(site, width, height)
+                    self.switch(page, mode)
+                    axis = 'portrait' if height > width else 'landscape'
+                    self.drag_top(page, 30)
+                    self.assertIsNotNone(self.stored(page)[axis]['top'])
+                    dragged = page.evaluate(GEOM)['rw'][3]
+                    # The key moves the separator from where it is drawn (a tight portrait window clamps the drag).
+                    page.locator('#resize-top').focus()
+                    page.keyboard.press('ArrowUp')
+                    settle(page)
+                    record = self.stored(page)
+                    self.assertAlmostEqual(dragged - 10, record[axis]['top'], delta=1)
+                    sizes = {a: record[a] for a in ('portrait', 'landscape')}
+                    start = page.evaluate(GEOM)
+                    self.assertAlmostEqual(record[axis]['top'], start['rw'][3], delta=1)
+                    available = list(SHARES[mode])
+                    self.set_panels(page, {available[1]: False})
+                    self.set_panels(page, {k: False for k in available})   # tabs only
+                    other = 'Technician' if mode == 'Radiology' else 'Radiology'
+                    self.switch(page, other)
+                    self.switch(page, mode)
+                    self.assertEqual(sizes, {a: self.stored(page)[a] for a in sizes})
+                    self.reload(page, site)
+                    self.switch(page, mode)
+                    back = self.show_all(page)
+                    self.assertEqual(start['rw'][3], back['rw'][3])
+                    self.assert_same_content(start, back, 'reload and Show All')
+                    self.assertEqual(sizes, {a: self.stored(page)[a] for a in sizes})
+                    # A smaller window clamps for now; the original window returns the saved geometry.
+                    page.set_viewport_size({'width': int(width * 0.8), 'height': int(height * 0.8)})
+                    settle(page)
+                    page.set_viewport_size({'width': width, 'height': height})
+                    settle(page)
+                    again = page.evaluate(GEOM)
+                    self.assertEqual(start['rw'][3], again['rw'][3])
+                    self.assert_same_content(start, again, 'smaller window and back')
+                    self.assertEqual(sizes, {a: self.stored(page)[a] for a in sizes})
+
+    def test_wspace_g5_tabs_only_and_empty_band_return_their_height(self):
+        """TEST-WSPACE-G5 (RISK-WSPACE-EMPTY, invariant 5): with every content panel the mode can show hidden the band is
+        the tab strip without a separator; without tabs it is gone; the report (Radiology) or order list (Technician)
+        gets the height, or the stacked row moves up; showing content returns the saved height."""
+        for mode in MODES:
+            for width, height in SIZES:
+                with self.subTest(mode=mode, size=f'{width}x{height}'):
+                    site = WorkspaceSite()
+                    page = self.open(site, width, height)
+                    self.switch(page, mode)
+                    portrait = height > width
+                    axis = 'portrait' if portrait else 'landscape'
+                    self.drag_top(page, 30)
+                    start = page.evaluate(GEOM)
+                    stored = self.stored(page)[axis]['top']
+                    self.assertIsNotNone(stored)
+                    band = self.set_panels(page, {k: False for k in SHARES[mode]})
+                    self.assertEqual(['AI Report', 'Image Report'], band['tabs'])
+                    self.assertIsNone(band['thumbwrap'])
+                    self.assertAlmostEqual(band['rw'][3], band['rtabs'][3], delta=1)
+                    self.assertAlmostEqual(band['rw'][2], band['rtabs'][2], delta=1)
+                    self.assertIsNone(band['separator'])
+                    freed = start['rw'][3] + start['separator'][3] - band['rw'][3]
+                    if not portrait:
+                        self.assertAlmostEqual(self.receiver(band)[3], self.receiver(start)[3] + freed, delta=1)
+                    else:
+                        self.assertAlmostEqual(band['workrow'][1], start['workrow'][1] - freed, delta=1)
+                    self.assertEqual(start['split'], band['split'])
+                    page.screenshot(path=str(OUT / f'g5-{mode}-tabs-only-{width}x{height}.png'))
+                    gone = self.set_panels(page, {k: False for k in PLACEHOLDERS})
+                    self.assertIsNone(gone['rw'])
+                    self.assertIsNone(gone['separator'])
+                    freed = start['rw'][3] + start['separator'][3]
+                    if not portrait:
+                        self.assertAlmostEqual(self.receiver(gone)[3], self.receiver(start)[3] + freed, delta=1)
+                    else:
+                        self.assertAlmostEqual(gone['workrow'][1], start['workrow'][1] - freed, delta=1)
+                    self.assert_row_on_top(gone, portrait)
+                    self.assertEqual(stored, self.stored(page)[axis]['top'])
+                    self.reload(page, site)
+                    self.switch(page, mode)
+                    self.assertIsNone(page.evaluate(GEOM)['rw'])
+                    back = self.set_panels(page, {'clinical': True})
+                    self.assertEqual(start['rw'][3], back['rw'][3])
+                    self.assertIsNotNone(back['separator'])
+                    self.assertEqual(stored, self.stored(page)[axis]['top'])
+
+    def test_wspace_g_responsive_600_601_and_the_selected_study_sheet(self):
+        """The contract's responsive consumers of G1/G2/G5: at 600 px the stacked panels are full width and the band is
+        exactly the shown panels (Technician has no Template height); at 601 px the shares apply; the 840x768
+        selected-study sheet keeps its compact band for content and only the strip when tabs alone are left."""
+        for mode in MODES:
+            for width in (600, 601):
+                with self.subTest(mode=mode, size=f'{width}x1024'):
+                    page = self.open(WorkspaceSite(), width, 1024)
+                    g = self.switch(page, mode)
+                    self.assertEqual(width == 600, stacked(g))
+                    self.assert_allocation(g, mode, list(SHARES[mode]), 'start')
+                    if stacked(g):
+                        parts = sum(g[k][3] for k in ('thumb', 'clinical', 'template') if g[k])
+                        self.assertAlmostEqual(parts, g['rw'][3], delta=1)
+                    tabs = self.set_panels(page, {'aiReport': False})
+                    self.assert_same_content(g, tabs, 'AI Report hidden')
+                    self.assertEqual(g['rw'][3], tabs['rw'][3])
+                    hidden = self.set_panels(page, {'thumbnail': False})
+                    self.assert_allocation(hidden, mode, [k for k in SHARES[mode] if k != 'thumbnail'], 'thumbnail hidden')
+                    if stacked(hidden):
+                        parts = sum(hidden[k][3] for k in ('thumb', 'clinical', 'template') if hidden[k])
+                        self.assertAlmostEqual(parts, hidden['rw'][3], delta=1)
+                    page.screenshot(path=str(OUT / f'g-responsive-{mode}-{width}x1024.png'))
+            with self.subTest(mode=mode, size='840x768 selected'):
+                site = WorkspaceSite()
+                page = self.open(site, 840, 768)
+                self.switch(page, mode)
+                page.locator('#rows tr[data-uid]').first.click()
+                settle(page)
+                g = page.evaluate(GEOM)
+                self.assert_allocation(g, mode, list(SHARES[mode]), 'compact sheet')
+                band = self.set_panels(page, {k: False for k in SHARES[mode]})
                 self.assertAlmostEqual(band['rw'][3], band['rtabs'][3], delta=1)
-                self.assertAlmostEqual(band['rw'][2], band['rtabs'][2], delta=1)
                 self.assertIsNone(band['separator'])
-                freed = start['rw'][3] + start['separator'][3] - band['rw'][3]
-                self.assertGreater(freed, 100)
-                if not portrait:
-                    self.assertAlmostEqual(band['workrow'][3], start['workrow'][3] + freed, delta=1)
-                    self.assertAlmostEqual(band['report'][3], start['report'][3] + freed, delta=1)
-                else:   # stacked: the row moves up by that height
-                    self.assertAlmostEqual(band['workrow'][1], start['workrow'][1] - freed, delta=1)
-                self.assertEqual(start['split'], band['split'])
-                page.screenshot(path=str(OUT / f'panels-tabs-only-{width}x{height}.png'))
-                record = page.evaluate('(key) => JSON.parse(localStorage.getItem(key))', KEY)
-                self.assertEqual(stored, record[axis]['top'])
-                self.assertEqual(['thumbnail', 'clinical', 'template'], record['workspace']['hiddenPanels'])
-                # A reload keeps the strip; a content panel shown again takes the stored band height back.
-                self.reload(page, site)
-                again = page.evaluate(BAND)
-                self.assertAlmostEqual(again['rw'][3], again['rtabs'][3], delta=1)
-                back = self.set_panel(page, 'Clinical Information', True)
-                self.assertEqual(start['rw'][3], back['rw'][3])
-                self.assertIsNotNone(back['separator'])
-                self.assertEqual(stored, page.evaluate('(key) => JSON.parse(localStorage.getItem(key))', KEY)[axis]['top'])
+                gone = self.set_panels(page, {k: False for k in PLACEHOLDERS})
+                self.assertIsNone(gone['rw'])
+                back = self.show_all(page)
+                self.assertAlmostEqual(g['rw'][3], back['rw'][3], delta=1)
+                self.assert_same_content(g, back, 'compact sheet Show All')
+
+    def test_wspace_g_study_panel_drawer_keeps_its_own_presentation(self):
+        """The drawer shows the shared nodes whole whatever the band hides, and closing it returns them to the band's
+        current mode and hidden panels."""
+        for mode in MODES:
+            with self.subTest(mode=mode):
+                page = self.open(WorkspaceSite(), 1920, 1080)
+                self.switch(page, mode)
+                before = self.set_panels(page, {'thumbnail': False, 'aiReport': False})
+                page.keyboard.press('Control+Alt+5')
+                drawer = page.get_by_role('complementary', name='Study Panel', exact=True)
+                expect(drawer).to_be_visible()
+                drawer.get_by_role('tab', name='Images', exact=True).click()
+                expect(drawer.get_by_role('tab', name='Images', exact=True)).to_have_attribute('aria-selected', 'true')
+                inside = page.evaluate('''() => { const t = document.querySelector('#study-panel-host .s-thumb');
+                  const w = t?.querySelector('.thumbwrap'), h = document.querySelector('#study-panel-host');
+                  return t && [w.getClientRects().length > 0, t.getBoundingClientRect().width, h.querySelector('.study-panel').clientWidth]; }''')
+                self.assertTrue(inside[0], 'Thumbnail content in the drawer')
+                self.assertLessEqual(inside[1], inside[2] + 0.5)
+                drawer.get_by_role('button', name='Close', exact=True).click()
+                expect(drawer).to_have_count(0)
+                settle(page)
+                after = page.evaluate(GEOM)
+                self.assert_allocation(after, mode, [k for k in SHARES[mode] if k != 'thumbnail'], 'after the drawer')
+                self.assert_same_content(before, after, 'drawer closed')
+                self.assertEqual(['Image Report'], after['tabs'])
 
     def column_order(self, page):
         return page.locator('#heads th').all_inner_texts()

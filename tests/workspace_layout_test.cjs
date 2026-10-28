@@ -317,29 +317,55 @@ test('TEST-WSPACE-PANELS-04 the account Load of an older record keeps the hidden
   assert.deepEqual(layout.hiddenPanels(layout.mergeLoaded(current, v3())), []);
 });
 
-test('TEST-WSPACE-PANELS-05 panelClasses: the band empties only when every shown panel is hidden', () => {
-  const cases = [
-    [[], true, []],
-    [['template'], true, ['kin-hide-template', 'kin-panels-trimmed']],
-    [['thumbnail', 'aiReport', 'imageReport', 'clinical'], true,
-      ['kin-hide-thumbnail', 'kin-hide-aiReport', 'kin-hide-imageReport', 'kin-hide-clinical', 'kin-panels-trimmed']],
-    [['thumbnail', 'aiReport', 'imageReport', 'clinical', 'template'], true,
-      ['kin-hide-thumbnail', 'kin-hide-aiReport', 'kin-hide-imageReport', 'kin-hide-clinical', 'kin-hide-template', 'kin-panels-trimmed', 'kin-report-window-empty']],
-    // Technician never shows templates, so hiding the other panels empties the band.
-    [['thumbnail', 'aiReport', 'imageReport', 'clinical'], false,
-      ['kin-hide-thumbnail', 'kin-hide-aiReport', 'kin-hide-imageReport', 'kin-hide-clinical', 'kin-panels-trimmed', 'kin-report-window-empty']],
-    // A placeholder tab left visible keeps the band as its tab strip only.
-    [['thumbnail', 'imageReport', 'clinical', 'template'], true,
-      ['kin-hide-thumbnail', 'kin-hide-imageReport', 'kin-hide-clinical', 'kin-hide-template', 'kin-panels-trimmed', 'kin-report-window-tabs']],
-    [['thumbnail', 'clinical', 'template'], true,
-      ['kin-hide-thumbnail', 'kin-hide-clinical', 'kin-hide-template', 'kin-panels-trimmed', 'kin-report-window-tabs']],
-    [['thumbnail', 'clinical'], false,
-      ['kin-hide-thumbnail', 'kin-hide-clinical', 'kin-panels-trimmed', 'kin-report-window-tabs']],
-    // Reading Template still shown: a real panel keeps the band's height.
-    [['thumbnail', 'clinical'], true, ['kin-hide-thumbnail', 'kin-hide-clinical', 'kin-panels-trimmed']],
-  ];
-  for (const [hidden, templateShown, expected] of cases) {
-    const on = Object.entries(layout.panelClasses(hidden, templateShown)).filter(([, value]) => value).map(([name]) => name);
-    assert.deepEqual(on.sort(), [...expected].sort(), JSON.stringify(hidden));
+// The W-SPACE layout contract (2026-10-29): the shares are the modes' shipped first paint, a placeholder tab never
+// changes the content allocation, and the band's state follows the panels the mode can show.
+test('TEST-WSPACE-PANELS-05 reportWindow: mode shares, placeholders own no column, band state from effective content', () => {
+  const fractions = (mode, hidden) => {
+    const { content } = layout.reportWindow(mode, hidden), sum = content.reduce((s, p) => s + p.share, 0);
+    return Object.fromEntries(content.map(p => [p.key, p.share / sum]));
+  };
+  assert.deepEqual(fractions('Radiology', []), { thumbnail: 0.34, clinical: 0.30, template: 0.36 });
+  assert.deepEqual(fractions('Technician', []), { thumbnail: 0.34, clinical: 0.66 });
+  for (const mode of ['Radiology', 'Technician']) {
+    for (const content of [[], ['thumbnail'], ['clinical'], ['template'], ['thumbnail', 'clinical']]) {
+      const base = fractions(mode, content);
+      for (const tabs of [['aiReport'], ['imageReport'], ['aiReport', 'imageReport']]) {
+        assert.deepEqual(fractions(mode, [...content, ...tabs]), base, `${mode} ${content} ${tabs}`);
+      }
+    }
+    // A hidden content panel's share goes to the others in proportion: no survivor narrows.
+    const all = fractions(mode, []);
+    for (const gone of Object.keys(all)) {
+      const rest = fractions(mode, [gone]);
+      for (const [key, value] of Object.entries(rest)) assert.ok(value > all[key], `${mode} ${gone} ${key}`);
+      for (const key of Object.keys(rest)) {
+        for (const other of Object.keys(rest)) assert.ok(Math.abs(rest[key] / rest[other] - all[key] / all[other]) < 1e-12);
+      }
+    }
   }
+  // Technician cannot show Template; the reader's Template choice changes nothing there and is not edited.
+  const hidden = ['template'];
+  assert.deepEqual(layout.reportWindow('Technician', hidden), layout.reportWindow('Technician', []));
+  assert.deepEqual(hidden, ['template']);
+  const cases = [
+    ['Radiology', [], 'content', false],
+    ['Radiology', ['thumbnail'], 'content', true],
+    ['Radiology', ['thumbnail', 'aiReport', 'imageReport'], 'content', false],
+    ['Radiology', ['thumbnail', 'clinical', 'template'], 'tabs', true],
+    ['Radiology', ['thumbnail', 'imageReport', 'clinical', 'template'], 'tabs', true],
+    ['Radiology', ['thumbnail', 'aiReport', 'imageReport', 'clinical', 'template'], 'empty', false],
+    ['Radiology', ['thumbnail', 'aiReport', 'imageReport', 'clinical'], 'content', false],
+    ['Technician', ['thumbnail', 'clinical'], 'tabs', true],
+    ['Technician', ['thumbnail', 'aiReport', 'imageReport', 'clinical'], 'empty', false],
+  ];
+  for (const [mode, off, state, strip] of cases) {
+    const band = layout.reportWindow(mode, off);
+    assert.equal(band.state, state, `${mode} ${off}`);
+    assert.equal(band.strip, strip, `${mode} ${off}`);
+    assert.equal(band.classes['kin-report-window-tabs'], state === 'tabs');
+    assert.equal(band.classes['kin-report-window-empty'], state === 'empty');
+    assert.equal(band.classes['kin-report-window-strip'], strip);
+  }
+  assert.equal(layout.reportWindow('Technician', []).classes['kin-hide-template'], true);
+  assert.equal(layout.reportWindow('Radiology', []).classes['kin-hide-template'], false);
 });
