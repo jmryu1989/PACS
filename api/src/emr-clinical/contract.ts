@@ -114,7 +114,7 @@ export const CLINICAL_SURFACES = freeze({
     textField: 'note', text: 'required', revisionField: 'revision', action: 'complete', act: 'additional-entry',
     paths: [{ relation: 'recipient', role: 'radiologist', capacity: C, kind: 'consultation' }], from: PENDING, to: 'Completed' },
   'consultation.cancel': { ...base, record: 'consultation', model: 'StudyConsultation', route: 'POST consultations/:id', opens: false, client: reply,
-    textField: 'note', text: 'required', revisionField: 'revision', action: 'cancel', act: 'additional-entry', cancel: true,
+    textField: 'note', text: 'optional', revisionField: 'revision', action: 'cancel', act: 'additional-entry', cancel: true,
     paths: [{ relation: 'author', role: 'radiologist', capacity: C, kind: 'consultation' }, { relation: 'any', role: 'admin', capacity: S, kind: 'consultation' }],
     from: PENDING, to: 'Cancelled' },
   // image-request.service.ts:282 create, :325 change. The request stays in the patient register (5 years); the requesting
@@ -136,7 +136,7 @@ export const CLINICAL_SURFACES = freeze({
     paths: [{ relation: 'any', role: 'technician', capacity: S, kind: 'image-request' }, { relation: 'any', role: 'admin', capacity: S, kind: 'image-request' }],
     from: PENDING, to: 'Declined' },
   'image-request.cancel': { ...base, record: 'image-request', model: 'StudyImageRequest', route: 'POST image-requests/:id', opens: false, client: reply,
-    textField: 'note', text: 'required', revisionField: 'revision', action: 'cancel', act: 'additional-entry', cancel: true, marksClinicalEntry: true,
+    textField: 'note', text: 'optional', revisionField: 'revision', action: 'cancel', act: 'additional-entry', cancel: true, marksClinicalEntry: true,
     paths: [{ relation: 'author', role: 'clinician', capacity: C, kind: 'image-request' }, { relation: 'any', role: 'admin', capacity: S, kind: 'image-request' }],
     from: PENDING, to: 'Cancelled' },
   // finding.service.ts:364 write; finding-input.ts:74 command keys. The recorded text is the server's canonical

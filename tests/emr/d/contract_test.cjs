@@ -33,6 +33,7 @@ const A = require(path.join(ASRC, 'classification.ts'));
 const E = require(path.join(ASRC, 'access-event.ts'));
 const Routes = require(path.join(ASRC, 'routes.ts'));
 const S = require(path.join(ASRC, 'signature.ts'));
+const ServerCrypto = require(path.join(ASRC, '../emr-signature/server-crypto.ts'));
 const C = require(path.join(DSRC, 'contract.ts'));
 const R = require(path.join(DSRC, 'records.ts'));
 const V = require(path.join(ASRC, 'validation.ts'));
@@ -429,6 +430,52 @@ test('TEST-D-01 clinical_vs_operational: planned kinds belong to the A route and
   assert.equal(plans[3].signing.action, 'cancel');
   assert.equal(plans[3].signing.reason, 'SYN 불필요', 'a cancellation is signed with its reason');
 });
+
+for (const [surface, author, create] of [
+  ['image-request.cancel', c1, imageRequest], ['consultation.cancel', r1, consultation],
+]) {
+  test(`TEST-D-01 optional cancellation: ${surface} accepts an empty note and its signature payload accepts a null reason`, () => {
+    const unit = create();
+    const p = plan(surface, author, unit, changeBody(author, unit, 'cancel', ''));
+    const next = R.applyPlan(unit, p);
+    assert.equal(next.state, 'Cancelled');
+    assert.equal(next.revision, unit.revision + 1);
+    assert.deepEqual(next.versions.slice(0, -1), unit.versions);
+    assert.equal(p.version.reason, null);
+    assert.equal(p.access.action, 'cancel');
+    // Empty workflow changes keep their existing unsigned classification. Separately exercise C's real signing
+    // boundary: accepting a null cancellation reason must not depend on a stand-in signature port.
+    assert.equal(p.version.entry, 'state-change');
+    assert.equal(p.signing, null);
+    const content = {
+      formatVersion: 'emr-signature/1', text: { kind: 'clinical-entry', body: '' }, patient: p.version.patient,
+      studyId: p.version.studyId, managingInstitutionId: p.version.managingInstitutionId,
+      actingInstitutionId: p.version.actingInstitutionId, recordKind: p.version.kind,
+      recordId: p.version.recordId, versionId: p.version.versionId, author: author.identity, signer: author.identity,
+      identityRegistrationId: author.signingRegistrationId, action: 'cancel',
+      previousVersion: p.version.previousVersion, attachments: [], reason: null,
+    };
+    const key = ServerCrypto.generateServerKeyPair();
+    const signed = ServerCrypto.signServerPayload(content, 'synthetic-cancel-key', key.privateKey);
+    const inspected = S.inspectSignatureEnvelope(signed.envelope);
+    const payload = JSON.parse(inspected.payloadBytes.toString('utf8'));
+    assert.equal(payload.reason, null);
+    assert.equal(payload.recordKind, p.version.kind);
+    assert.equal(payload.action, 'cancel');
+    assert.equal(require('node:crypto').verify('sha256',
+      Buffer.from(signed.envelope.protected + '.' + signed.envelope.payload, 'ascii'),
+      { key: require('node:crypto').createPublicKey({ key: key.publicKey, format: 'jwk' }), dsaEncoding: 'ieee-p1363' },
+      Buffer.from(signed.envelope.signature, 'base64url')), true);
+    for (const reason of [null, '', '   ']) {
+      assert.throws(() => ServerCrypto.signServerPayload({ ...content, recordKind: 'report-version',
+        text: { kind: 'report', findings: '', conclusion: '', recommendation: '' }, reason },
+      'synthetic-cancel-key', key.privateKey), /Cancellation reason required/);
+    }
+    assert.doesNotThrow(() => ServerCrypto.signServerPayload({ ...content, recordKind: 'report-version',
+      text: { kind: 'report', findings: '', conclusion: '', recommendation: '' }, reason: 'SYN correction' },
+    'synthetic-cancel-key', key.privateKey));
+  });
+}
 
 // ---------------- TEST-D-02 versions_and_sr ----------------
 
