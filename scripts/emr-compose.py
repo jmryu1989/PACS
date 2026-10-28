@@ -174,7 +174,10 @@ def compose_shape(root, problems):
     papi, pmigrate = pservices.get("api") or {}, pservices.get("api-migrate") or {}
     if (pmigrate.get("build") or {}).get("target") != "production":
         problem(problems, "prod-migration-not-production-image")
-    if list(papi.get("volumes") or []) != ["emr-state:/var/lib/kin-emr"]:
+    # The production api mounts the EMR-B1 protected state volume (read-write) and, since MG-LOADING (#272), Orthanc's
+    # storage as a read-only named volume for the frame range reads (api/src/dicom-frame.service.ts): no host path, no
+    # write path. Anything else on that service is a problem.
+    if list(papi.get("volumes") or []) != ["emr-state:/var/lib/kin-emr", "orthanc-db:/var/lib/orthanc/db:ro"]:
         problem(problems, "prod-api-state-volume")
 
 

@@ -54,6 +54,13 @@ function stubOrthanc(object, over = {}) {
       calls.push(['identity', uid]);
       return uid === object.tags.StudyInstanceUID ? [{ '0020000D': { vr: 'UI', Value: [uid] }, '00100020': { vr: 'LO', Value: ['SYN-PID-1'] }, '00080080': { vr: 'LO', Value: ['SYN HOSPITAL A'] } }] : [];
     },
+    // The current clinical context reads the study's one patient through the archive reader's rule
+    // (OrthancService.studyPatientIdentity, #244: no resource is no study, two patient resources is a split UID).
+    async studyPatientIdentity(uid) {
+      const resources = await this.studyIdentityResources(uid);
+      if (resources.length !== 1) { const error = new Error(resources.length ? 'STUDY_IDENTITY_UNRESOLVED' : '검사가 없습니다.'); error.status = resources.length ? 409 : 404; throw error; }
+      return resources[0]['00100020'].Value[0];
+    },
   };
 }
 

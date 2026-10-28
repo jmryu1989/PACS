@@ -13,8 +13,11 @@ STOW keep their existing routes.
 
 The E route exists only in a deployment that gives the proxy the viewer/decoder asset catalog value E's manifest
 needs (KIN_EMR_IMAGE_ASSET_CATALOG, the same value the API reads). The stock docker-compose gives none, and there the
-frame route is the one before E_ROUTE (authorization subrequest, then Orthanc): a fresh install shows its images instead
-of E's 503 for every frame (batch-2 B1). Both renderings are asserted.
+frame route is the API's frame range reader (MG-LOADING, api/src/dicom-frame.controller.ts): the API runs the DICOMweb
+gate itself and records the study delivery (api/src/image-delivery-record.ts) before the first byte, so a fresh install
+shows its images (batch-2 B1) without an unrecorded frame path (D1877, 의료법 제23조④; R244-GPT-FIX5-01: the
+authorization-subrequest-then-Orthanc detour is reached by no frame request in either rendering). Both renderings are
+asserted.
 
 nginx and sh come from PATH or from KIN_PROXY_NGINX / KIN_PROXY_SH (a host without them fails here; it is never a skip).
 """
@@ -32,7 +35,12 @@ from proxy_grant_log_test import Proxy  # noqa: E402
 STUDY, SERIES, SOP = "1.2.826.0.1.3680043.8.498.1", "1.2.826.0.1.3680043.8.498.2", "1.2.826.0.1.3680043.8.498.3"
 INSTANCE = f"/dicom-web/studies/{STUDY}/series/{SERIES}/instances/{SOP}"
 E_ROUTE = "/api/images/dicom-web?target="
+# Without the catalog: the API's frame range reader, given the request line as written (MG-LOADING); the recorded relay
+# for the other image representations (MG-08).
+FRAME_READER = "/api"
+RELAY = "/api/image-relay"
 AUTHZ = "/api/authz/dicom"
+ORTHANC_BASIC = "Basic " + base64.b64encode(b"syn-user:syn-pass").decode()
 
 
 class Recorder(http.server.BaseHTTPRequestHandler):
@@ -147,19 +155,28 @@ class ImageRouteTests(unittest.TestCase):
                 self.assertEqual([], seen)
 
     def test_derived_representations_and_stow_keep_their_routes(self):
-        # Metadata and rendered frames are derived representations (E_DISPLAY): authorization subrequest, then Orthanc.
-        for target in (f"{INSTANCE}/metadata", f"{INSTANCE}/frames/1/rendered", f"/dicom-web/studies/{STUDY}/series/{SERIES}/metadata",
+        # Descriptions without the image (DICOMweb metadata, the QIDO study query): authorization subrequest, then Orthanc.
+        for target in (f"{INSTANCE}/metadata", f"/dicom-web/studies/{STUDY}/series/{SERIES}/metadata",
                        f"/dicom-web/studies?StudyInstanceUID={STUDY}"):
             with self.subTest(target=target):
                 status, _, seen = self.send("GET", target)
                 self.assertEqual(200, status)
                 self.assertEqual([("GET", AUTHZ), ("GET", target)], [(m, p) for m, p, _ in seen])
                 self.assertEqual(target, seen[0][2].get("x-original-uri"))
+                self.assertEqual(ORTHANC_BASIC, seen[1][2].get("authorization"))
+        # A rendered frame is an image representation: the API's recorded relay (MG-08), no authorization subrequest and
+        # no Orthanc credential from the proxy.
+        rendered = f"{INSTANCE}/frames/1/rendered"
+        status, _, seen = self.send("GET", rendered)
+        self.assertEqual(200, status)
+        self.assertEqual([("GET", RELAY + rendered)], [(m, p) for m, p, _ in seen])
+        self.assertIsNone(seen[0][2].get("authorization"))
         # The Gateway's study-UID STOW still goes to Orthanc after the authorization subrequest.
         status, _, seen = self.send("POST", f"/dicom-web/studies/{STUDY}", body=b"dicom")
         self.assertEqual(200, status)
         self.assertEqual([("GET", AUTHZ), ("POST", f"/dicom-web/studies/{STUDY}")], [(m, p) for m, p, _ in seen])
         self.assertEqual("POST", seen[0][2].get("x-original-method"))
+        self.assertEqual(ORTHANC_BASIC, seen[1][2].get("authorization"))
 
 
 class ProductionImageRouteTests(ImageRouteTests):
@@ -174,46 +191,65 @@ class ProductionImageRouteTests(ImageRouteTests):
 
 class WithoutAssetCatalogImageRouteTests(ImageRouteTests):
     """A deployment without the viewer/decoder asset catalog (the stock docker-compose): E cannot build a manifest
-    there, so the frame route is the one before E_ROUTE (authorization subrequest, then Orthanc) and the viewer shows
-    its images; the E image route is reached by nothing. Writes and the derived representations are as with E."""
+    there, so a frame request reaches only the API's frame range reader, which runs the DICOMweb gate itself and records
+    the study delivery before the first byte (no authorization subrequest, no Orthanc credential from the proxy, no byte
+    from Orthanc without the API in between); the E image route is reached by nothing. Writes and the derived
+    representations are as with E."""
     deployment = {}
 
-    def assertDirectRoute(self, method, target):
-        status, data, seen = self.send(method, target)
+    def assertFrameReaderRoute(self, method, target, headers=None):
+        status, data, seen = self.send(method, target, headers)
         self.assertEqual(200, status, target)
-        self.assertEqual([("GET", AUTHZ), (method, target)], [(m, p) for m, p, _ in seen],
-                         "without the catalog a frame request takes the existing authorization-then-Orthanc route")
-        self.assertEqual(target, seen[0][2].get("x-original-uri"))
-        self.assertEqual(method, seen[0][2].get("x-original-method"))
+        self.assertEqual([(method, FRAME_READER + target)], [(m, p) for m, p, _ in seen],
+                         "without the catalog a frame request reaches only the API's recorded frame reader, as written")
+        self.assertIsNone(seen[0][2].get("authorization"), "the proxy adds no Orthanc credential on the API route")
         self.assertEqual(b"" if method == "HEAD" else b"FRAME", data)
-        self.assertEqual(seen[1][2].get("authorization"), "Basic " + base64.b64encode(b"syn-user:syn-pass").decode())
+        return seen[0][2]
 
     def test_frame_requests_reach_the_e_boundary_with_the_exact_target(self):
         for frames in ("1", "2", "1,2,3", "10"):
             with self.subTest(frames=frames):
-                self.assertDirectRoute("GET", f"{INSTANCE}/frames/{frames}")
-        self.assertDirectRoute("HEAD", f"{INSTANCE}/frames/1")
+                self.assertFrameReaderRoute("GET", f"{INSTANCE}/frames/{frames}")
+        self.assertFrameReaderRoute("HEAD", f"{INSTANCE}/frames/1")
 
     def test_request_and_session_headers_reach_the_boundary_and_the_peer_is_the_proxy_view(self):
-        status, _, seen = self.send("GET", f"{INSTANCE}/frames/1", {"Cookie": "kin_sid=synthetic-session",
-                                                                    "X-KIN-Session": "authref:synthetic"})
-        self.assertEqual(200, status)
-        self.assertEqual([AUTHZ, f"{INSTANCE}/frames/1"], [p for _, p, _ in seen])
-        self.assertEqual("kin_sid=synthetic-session", seen[0][2].get("cookie"))
-        self.assertEqual("authref:synthetic", seen[0][2].get("x-kin-session"))
+        sent = {"Cookie": "kin_sid=synthetic-session", "X-KIN-Session": "authref:synthetic",
+                "Accept": 'multipart/related; type="application/octet-stream"; transfer-syntax=*',
+                "X-Real-IP": "203.0.113.9", "X-Forwarded-For": "203.0.113.9"}
+        got = self.assertFrameReaderRoute("GET", f"{INSTANCE}/frames/1", sent)
+        self.assertEqual("kin_sid=synthetic-session", got.get("cookie"))
+        self.assertEqual("authref:synthetic", got.get("x-kin-session"))
+        self.assertEqual(sent["Accept"], got.get("accept"))
+        self.assertEqual("127.0.0.1", got.get("x-real-ip"))
+        self.assertEqual("127.0.0.1", got.get("x-forwarded-for"))
+        self.assertEqual(self.host, got.get("host"))
+        self.assertEqual("https", got.get("x-forwarded-proto"))
 
     def test_spellings_nginx_normalizes_reach_the_boundary_canonical(self):
-        # The existing route hands Orthanc the request as written (a proxy_pass without a URI part); only E's target
-        # is the normalized path.
-        status, _, seen = self.send("GET", f"{INSTANCE}/frames/1%2C2")
-        self.assertEqual(200, status)
-        self.assertEqual([AUTHZ, f"{INSTANCE}/frames/1%2C2"], [p for _, p, _ in seen])
+        # The frame reader is handed the request line as written; the API's own route parsing names the frames. A query
+        # travels with it (the reader has no query of its own); the normalized spellings are matched by nginx and arrive
+        # as sent.
+        for target in (f"{INSTANCE}/frames/1%2C2", f"{INSTANCE}/frames/1?accept=x",
+                       f"/dicom-web/studies/{STUDY}/series/{SERIES}//instances/{SOP}/frames/1"):
+            with self.subTest(target=target):
+                self.assertFrameReaderRoute("GET", target)
 
-    def test_e_image_route_is_reached_by_nothing(self):
-        for target in (f"{INSTANCE}/frames/1", f"{INSTANCE}/metadata", f"/dicom-web/studies/{STUDY}/series/{SERIES}/metadata"):
+    def test_no_frame_request_reaches_e_or_the_authorization_detour(self):
+        # Neither E (no manifest without the catalog) nor the authorization-subrequest-then-Orthanc route (whose 204 is
+        # no delivery record) answers a frame request; the one request the upstream sees is the API's own.
+        for target in (f"{INSTANCE}/frames/1", f"{INSTANCE}/frames/1,2", f"{INSTANCE}/frames/1%2C2"):
+            for method in ("GET", "HEAD"):
+                with self.subTest(target=target, method=method):
+                    status, _, seen = self.send(method, target)
+                    self.assertEqual(200, status)
+                    self.assertEqual(1, len(seen))
+                    self.assertFalse([p for _, p, _ in seen if p.startswith("/api/images/") or p.startswith(AUTHZ)], target)
+                    self.assertTrue(seen[0][1].startswith(FRAME_READER + "/dicom-web/"), seen[0][1])
+        # The descriptions keep the detour; a rendered frame keeps the relay.
+        for target in (f"{INSTANCE}/metadata", f"/dicom-web/studies/{STUDY}/series/{SERIES}/metadata"):
             with self.subTest(target=target):
                 _, _, seen = self.send("GET", target)
-                self.assertFalse([p for _, p, _ in seen if p.startswith("/api/images/")], target)
+                self.assertEqual([AUTHZ, target], [p for _, p, _ in seen])
 
 
 def load_tests(loader, tests, pattern):

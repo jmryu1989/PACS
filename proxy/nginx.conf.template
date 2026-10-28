@@ -292,8 +292,10 @@ server {
     # 붙지 않는다. 전송 끝과 중단을 API가 실제 연결에서 관측하도록 버퍼링하지 않는다(E-03). 메타데이터·렌더링·썸네일 같은
     # 파생 표현과 Gateway STOW는 아래 기존 경로 그대로다.
     # 이 location은 15-kin-config.envsh가 쓴다: E의 manifest는 배포된 뷰어/디코더 자산 목록(KIN_EMR_IMAGE_ASSET_CATALOG)을
-    # 고정해야 하므로, 그 목록을 주지 않은 설치에서는 이 location이 비어 있고 프레임 요청은 아래 /dicom-web/ 경로
-    # (authz 부요청 뒤 Orthanc)로 그대로 간다. 목록 없이 E로 보내면 뷰어는 503만 받고 영상을 보여주지 못한다.
+    # 고정해야 하므로, 그 목록을 주지 않은 설치에서는 이 location이 비어 있고 프레임 요청은 아래의 다음 프레임 location
+    # (MG-LOADING: API의 프레임 range 읽기, 같은 관문과 image-delivery-record.ts의 열람 기록 뒤에 첫 byte)으로 간다. 목록
+    # 없이 E로 보내면 뷰어는 503만 받고 영상을 보여주지 못하고, authz 부요청 뒤 Orthanc 직결은 기록 없는 byte다(D1877).
+    # 두 location 중 먼저 쓰인 이 쪽이 정규식 순서로 이기므로 목록이 있으면 E, 없으면 range 읽기다.
     include /etc/nginx/snippets/image-frames.conf;
 
     # 검사 UID를 경로에 박은 STOW만 Gateway에 연다. UID 없는 POST는 아래 읽기 전용
