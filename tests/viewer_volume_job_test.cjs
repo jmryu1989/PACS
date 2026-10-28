@@ -548,3 +548,10 @@ test('a version 14/15 display is held to the original frame of reference and the
  assert.equal(command(outside).snapshot.version,15,'syntactically valid');
  assert.throws(()=>verifyVolumeReference(outside,tags,'SYNTHETIC'),e=>e.getStatus?.()===400);
 });
+
+test('a complete volume above 256 originals can be saved and source-verified',()=>{
+ const s=structuredClone(snapshot);s.volume.sops=Array.from({length:257},(_,i)=>'2.25.'+(1000+i));
+ const originals=s.volume.sops.map((sop,i)=>({...tags[0],SOPInstanceUID:sop,ImagePositionPatient:'0\\0\\'+i}));
+ assert.equal(command(s).snapshot.volume.sops.length,257);
+ assert.match(verifyVolumeReference(s,originals,'SYNTHETIC'),/^[a-f0-9]{64}$/);
+});

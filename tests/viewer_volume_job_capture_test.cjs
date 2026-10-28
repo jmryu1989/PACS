@@ -1846,3 +1846,15 @@ test('a restore that finishes releases the hold itself and leaves nothing for th
     assert.equal(x.tool.onResetCamera,later);
   }finally{x.dispose();}
 });
+
+test('a loaded 257-slice volume reaches the real job capture boundary',()=>{
+ const saved=[...SOPS],loaded=volume.framesLoaded;
+ try {
+  SOPS.splice(0,SOPS.length,...Array.from({length:257},(_,i)=>'1.2.'+(1000+i)));
+  imageIds.splice(0,imageIds.length,...SOPS.map(sop=>'image:'+sop));volume.framesLoaded=imageIds.length;
+  const result=world(1,3,PLANES).capture();
+  assert.equal(result.volume.sops.length,257);assert.equal(result.volume.sops.at(-1),'1.2.1256');
+ } finally {
+  SOPS.splice(0,SOPS.length,...saved);imageIds.splice(0,imageIds.length,...SOPS.map(sop=>'image:'+sop));volume.framesLoaded=loaded;
+ }
+});

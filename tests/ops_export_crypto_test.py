@@ -38,6 +38,21 @@ class PlatformTests(unittest.TestCase):
         for digest in ('0'*64, hashlib.sha256(raw).hexdigest(), '--unsafe'):
             with self.assertRaises(ValueError): crypto.parse_receipt(raw, digest)
 
+    def test_receipt_accepts_exports_above_previous_total_limit(self):
+        size = 512 * 1024**3 + 1
+        body = dict(schema=1, source_git_sha='1' * 40,
+                    plaintext={'bytes': size, 'sha256': '2' * 64},
+                    ciphertext={'bytes': size + 1024, 'sha256': '3' * 64},
+                    **{field: '4' * 64 for field in ('inventory_sha256', 'verifier_sha256',
+                        'wrapper_sha256', 'age_sha256', 'recipient_sha256')})
+        raw = crypto.encode(body)
+        self.assertEqual(crypto.parse_receipt(raw, hashlib.sha256(raw).hexdigest()), body)
+        for invalid in (0, -1, True):
+            body['plaintext']['bytes'] = invalid
+            raw = crypto.encode(body)
+            with self.subTest(size=invalid), self.assertRaises(ValueError):
+                crypto.parse_receipt(raw, hashlib.sha256(raw).hexdigest())
+
     def test_04_cli_errors_do_not_echo_paths(self):
         result = subprocess.run([sys.executable, str(Path(crypto.__file__)), 'seal', '--source', 'PRIVATE_SENTINEL',
             '--destination', 'PRIVATE_SENTINEL', '--age', 'PRIVATE_SENTINEL', '--recipient', 'bad',
@@ -351,7 +366,7 @@ class CryptoTests(unittest.TestCase):
         # The format used by the actual pack path must support the inventory
         # size boundary. Header-only checks do not claim huge-payload capacity.
         self.assertEqual(header[257:265], tarfile.GNU_MAGIC)
-        for size in (2**33-1, 2**33, inventory.FILE_LIMIT):
+        for size in (2**33-1, 2**33, 128 * 1024**3 + 1):
             info = tarfile.TarInfo('snapshot/orthanc.tgz')
             info.size = size
             encoded = info.tobuf(format=tarfile.GNU_FORMAT)
@@ -360,11 +375,6 @@ class CryptoTests(unittest.TestCase):
             self.assertEqual((decoded.name, decoded.size, decoded.type), (info.name, size, tarfile.REGTYPE))
         with tarfile.open(target, 'r:') as archive:
             self.assertTrue(all(row.type == tarfile.REGTYPE and not row.pax_headers for row in archive))
-        oversized = json.loads((self.source/'inventory.json').read_bytes())
-        oversized['files']['snapshot/orthanc.tgz']['bytes'] = inventory.FILE_LIMIT+1
-        raw = crypto.encode(oversized)
-        with self.assertRaises(ValueError):
-            inventory.parse_inventory(raw, hashlib.sha256(raw).hexdigest())
 
 
 if __name__ == '__main__':

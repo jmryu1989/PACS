@@ -5,6 +5,7 @@ Only new, owned synthetic CT studies are created and cleaned through the local g
 """
 from __future__ import annotations
 
+import os
 import hashlib
 import re
 import time
@@ -31,7 +32,7 @@ def synthetic_ct(stack, patient, label, date, slices=16, body_part=None):
     stack.active[uid] = fixture
     ae = AE(ae_title="HALLYM_CT")
     ae.add_requested_context(CTImageStorage, ExplicitVRLittleEndian)
-    assoc = ae.associate("127.0.0.1", 4242, ae_title="KINLAB")
+    assoc = ae.associate("127.0.0.1", int(os.environ.get("KIN_TEST_DICOM_PORT", "4242")), ae_title="KINLAB")
     if not assoc.is_established:
         raise RuntimeError("Local synthetic CT association failed")
     try:
