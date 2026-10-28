@@ -77,7 +77,7 @@ export class PacsTechNote {
    * write behaves as before. The id lookup runs after the permission, institution and study-lock checks and before the
    * version check, in the same transaction as the revision and its audit row.
    */
-  async saveTechNote(uid: string, body: any, c: Caller, transaction?: Prisma.TransactionClient) {
+  private validateWrite(body: any) {
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => !['baseVersion', 'text', 'reason', 'attemptId'].includes(k)) ||
         !Number.isInteger(body.baseVersion) || body.baseVersion < 0 || body.baseVersion >= 2147483646 ||
         typeof body.text !== 'string' || body.text.length > 10000 || body.text.includes('\0') ||
@@ -86,6 +86,20 @@ export class PacsTechNote {
       throw new BadRequestException('메모·수정 사유·기준 버전을 확인하세요');
     if (/[\uD800-\uDFFF]/u.test(body.text) || /[\uD800-\uDFFF]/u.test(body.reason))
       throw new BadRequestException('잘못된 문자 인코딩입니다');
+  }
+
+  /** Admission precedes clinical signing; the write repeats scope under its own transaction. */
+  async prepareWrite(uid: string, body: any, c: Caller) {
+    this.validateWrite(body);
+    await this.studyAccess.prepare(c, [uid]);
+    await this.prisma.$transaction(async tx => {
+      await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+      await this.noteScope(tx, uid, c, true);
+    }, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 }).catch(noteTransactionError);
+  }
+
+  async saveTechNote(uid: string, body: any, c: Caller, transaction?: Prisma.TransactionClient) {
+    this.validateWrite(body);
     const attemptId: string | null = body.attemptId ?? null, reason = body.reason.trim();
     const reused = () => new BadRequestException('이 저장 시도 ID는 다른 요청에 이미 사용되었습니다. 메모를 다시 확인하세요');
     await this.studyAccess.prepare(c,[uid]);

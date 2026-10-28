@@ -110,8 +110,8 @@ export class ClinicalRoutes {
     try {
       return await work.transactionWithRecords(async (tx, record) => {
         const facts = await this.parts.context.facts(tx, request);
-        const scope = studyId === undefined ? null : await this.parts.context.scope(tx, request, studyId);
         const response = await read(tx);
+        const scope = studyId === undefined ? null : await this.parts.context.scope(tx, request, studyId);
         if (!response.items) refuse('ClinicalListUnavailable');
         const known = <V>(value: V) => ({ status: 'known' as const, value });
         for (const item of response.items) {
@@ -154,9 +154,9 @@ export class ClinicalRoutes {
       return await work.transactionWithRecords(async (tx, record) => {
         const facts = await this.parts.context.facts(tx, request);
         const first = await this.parts.store.unit(tx, recordType, recordId);
-        const study = first ? await this.parts.context.scope(tx, request, first.studyId) : null;
         if (first) await this.parts.store.lockUnit(tx, recordType, recordId);
         const response = await read(tx);
+        const study = first ? await this.parts.context.scope(tx, request, first.studyId) : null;
         const { unit, versions: stored } = first ? await this.parts.store.history(tx, recordType, recordId) : { unit: null, versions: [] };
         if (!unit && !empty?.(response)) refuse('ClinicalHistoryUnavailable');
         const versions = served && unit ? servedVersions(stored, served(response)) : stored;
@@ -208,7 +208,13 @@ function routeError(error: unknown, surface?: SurfaceKey): never {
   if (!(error instanceof ContractError)) throw error;
   const codes = { OwnerChanged: 'OWNER_CHANGED', RequestIdReused: 'REQUEST_ID_REUSED' };
   const changed = error.code === 'StaleRevision' || error.code === 'StateTransitionRefused';
-  const code = codes[error.code] ?? (changed && surface?.startsWith('question.') ? 'QUESTION_CHANGED' : error.code);
+  // The clinical ledger uses shared refusal codes; callers still consume the image-request API's vocabulary.
+  const imageCodes = { UnitExists: 'REQUEST_ID_REUSED', StaleRevision: 'IMAGE_REQUEST_CHANGED',
+    StateTransitionRefused: 'IMAGE_REQUEST_STATE', AuthorityFieldRefused: 'IMAGE_REQUEST_INPUT_INVALID',
+    RequestShapeRefused: 'IMAGE_REQUEST_INPUT_INVALID', TextRequired: 'IMAGE_REQUEST_INPUT_INVALID',
+    TextRefused: 'IMAGE_REQUEST_INPUT_INVALID', ReasonRequired: 'IMAGE_REQUEST_INPUT_INVALID' };
+  const code = codes[error.code] ?? (surface?.startsWith('image-request.') ? imageCodes[error.code] : undefined) ??
+    (changed && surface?.startsWith('question.') ? 'QUESTION_CHANGED' : error.code);
   const body = { code, message: '임상 기록을 처리하지 못했습니다. 입력을 유지하고 대상과 현재 상태를 확인하세요.' };
   if (error.code === 'NotFound') throw new NotFoundException(body);
   if (['ActorPathRefused', 'ServiceActorRefused', 'OnlineDoctorApprovalRequired'].includes(error.code)) throw new ForbiddenException(body);

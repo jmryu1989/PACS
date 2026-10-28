@@ -315,7 +315,13 @@ class ClinicianReadLive(unittest.TestCase):
         for _ in range(1000):
             query = "?limit=100" + ("&after=" + quote(after, safe="") if after else "")
             page = self.call("GET", "/clinician/studies" + query, user).body
-            self.assertEqual(sorted(page), sorted(C["list_paged_response_keys"]))
+            # WORKLIST-SPLIT-UID (#180, D1492): excluded identities are a separate, narrow list.
+            self.assertEqual(sorted(page), sorted(C["list_paged_response_keys"] + ["identityIssues"]))
+            self.assertIsInstance(page["identityIssues"], list)
+            for issue in page["identityIssues"]:
+                self.assertEqual(sorted(issue), ["code", "uid"])
+                self.assertEqual(issue["code"], "STUDY_IDENTITY_UNRESOLVED")
+                self.assertNotIn(issue["uid"], [row["uid"] for row in page["studies"]])
             pagination = page["pagination"]
             self.assertEqual(sorted(pagination), sorted(C["pagination_keys"]))
             total = pagination["total"] if total is None else total
@@ -488,7 +494,12 @@ class ClinicianReadLive(unittest.TestCase):
             # COUNT-LEAK / TENANT-UID: the clinician sees exactly the studies the same institution's worklist sees.
             self.assertEqual(set(listed), self.worklist_uids("doctor"))
             unpaged = self.call("GET", "/clinician/studies", "clinician").body
-            self.assertEqual(sorted(unpaged), sorted(C["list_response_keys"]))
+            self.assertEqual(sorted(unpaged), sorted(C["list_response_keys"] + ["identityIssues"]))
+            self.assertIsInstance(unpaged["identityIssues"], list)
+            for issue in unpaged["identityIssues"]:
+                self.assertEqual(sorted(issue), ["code", "uid"])
+                self.assertEqual(issue["code"], "STUDY_IDENTITY_UNRESOLVED")
+                self.assertNotIn(issue["uid"], [row["uid"] for row in unpaged["studies"]])
             self.assertEqual({r["uid"] for r in unpaged["studies"]}, set(listed))
             self.assert_clean(unpaged, "unpaged clinician list")
             other = self.clinician_rows("kclinician")
