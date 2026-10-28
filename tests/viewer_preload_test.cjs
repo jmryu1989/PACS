@@ -7,7 +7,8 @@
 // opening (opening contract 2026-10-29): one per document, a new one for studies shown again (patient tab, back/forward
 // return) - each read live for it before what the document still holds can show, whatever form showed it (a frame, also
 // queried, a rendering, a document, a preview; an object related to its study by the server's answer) - and none for
-// business calls; the worker hears the viewer is busy until the answer's body has ended.
+// business calls; an answer to a read asked before its study was opened again is never handed on under the new opening
+// before that opening's own read; the worker hears the viewer is busy until the answer's body has ended.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { attach } = require('../worklist-v0/hpacs-lite/viewer-preload.js');
@@ -499,4 +500,99 @@ test('review R2 of f455ba2: the API\'s own image routes name the opening as the 
   assert.equal(held.sent[0].headers.get('X-KIN-Preload'), 'check');
   assert.equal(await (await held.fetch(api(2), bound())).text(), 'held 1 ' + new URL(frameUrl(2)).pathname, 'then from memory');
   assert.equal(held.sent.length, 1);
+});
+
+/** A network whose first read waits for `release()`; each answer says the opening it was read under. */
+function holdingFirst({ names = true, revision = null } = {}) {
+  let release, first = true;
+  const gate = new Promise(resolve => { release = resolve; });
+  const network = async (url, init) => {
+    if (first) { first = false; await gate; }
+    const object = /\/instances\/([0-9a-f-]+)\//.exec(new URL(url).pathname)?.[1];
+    return new Response('live ' + new Headers(init.headers).get('X-KIN-View-Opening'), { headers: { 'Content-Type': PART,
+      ...(object && names ? { 'X-KIN-Study-UID': STUDY } : {}), ...(revision ? { 'X-KIN-Study-Revision': revision } : {}) } });
+  };
+  return { network, release: () => release() };
+}
+
+test('review R1 of 137c2b7: a first read still unanswered when its study is opened again (A -> B -> A) is not handed on - it is read again under the new opening, and that answer is the one shown; with and without a worker, whatever the form', async () => {
+  const OTHER = '1.2.840.9.2';
+  const forms = [frameUrl(1), frameUrl(1) + '?accept=x', objectUrl('frames/1/rendered'), objectUrl('preview')];
+  for (const shared of [false, true]) for (const url of forms) for (const names of [true, false]) {
+    if (!names && !url.includes('/instances/')) continue;
+    const label = `${shared ? 'worker' : 'no worker'} ${new URL(url).pathname}${new URL(url).search}${names ? '' : ' (answer names no study)'}`;
+    const net = holdingFirst({ names });
+    const s = setup({ shared, studies: [STUDY], network: net.network });
+    const pending = s.fetch(url, bound());
+    await tick();
+    const first = openingOf(s.sent[0]);
+    (await s.fetch.reenter([OTHER])).commit();
+    (await s.fetch.reenter([STUDY])).commit();
+    assert.equal(s.sent.length, 1, label + ': nothing of the study answered yet, nothing to read on entry');
+    net.release();
+    const answer = await pending;
+    assert.equal(s.sent.length, 2, label + ': the earlier opening\'s answer is read again');
+    assert.equal(s.sent[1].url, url, label);
+    const next = openingOf(s.sent[1]);
+    assert.ok(next && next !== first, label + ': under the new opening');
+    assert.equal(await answer.text(), 'live ' + next, label + ': the answer handed on is the new opening\'s read');
+    await (await s.fetch(frameUrl(2), bound())).text();
+    assert.equal(openingOf(s.sent.at(-1)), next, label + ': the study\'s later reads name the same opening');
+    if (shared) assert.equal(s.posted.filter(m => m.type === 'busy').at(-1).busy, false, label + ': the dropped answer ends its reading');
+  }
+  // Only left (A -> B), or an entry never committed: the study keeps its opening, and its late answer is handed on.
+  for (const enter of [[OTHER], [STUDY]]) for (const shared of [false, true]) {
+    const net = holdingFirst();
+    const s = setup({ shared, studies: [STUDY], network: net.network });
+    const pending = s.fetch(frameUrl(1), bound());
+    await tick();
+    const entry = await s.fetch.reenter(enter);
+    if (enter[0] === OTHER) entry.commit();
+    net.release();
+    assert.equal(await (await pending).text(), 'live ' + openingOf(s.sent[0]));
+    assert.equal(s.sent.length, 1, `${enter} ${shared}: no read again`);
+  }
+});
+
+test('review R1 of 137c2b7: a study whose earlier read is answered while its entry reads other studies is read for the entry too, before it resolves', async () => {
+  const OTHER = '1.2.840.9.2';
+  let releaseFirst, releaseEntry;
+  const firstGate = new Promise(resolve => { releaseFirst = resolve; }), entryGate = new Promise(resolve => { releaseEntry = resolve; });
+  const s = setup({ shared: false, studies: [STUDY, OTHER], network: async (url, init) => {
+    const opening = new Headers(init.headers).get('X-KIN-View-Opening');
+    if (url === frameUrl(1)) { if (s.sent.length === 1) await firstGate; }
+    else if (s.sent.length > 2) await entryGate;
+    return new Response('live ' + opening, { headers: { 'Content-Type': PART } });
+  } });
+  const pending = s.fetch(frameUrl(1), bound());                     // STUDY's first read, unanswered
+  await s.fetch(frameUrl(1, OTHER), bound());                        // OTHER shown
+  const entering = s.fetch.reenter([STUDY, OTHER]);
+  await tick();
+  assert.deepEqual(s.sent.slice(2).map(r => r.url), [frameUrl(1, OTHER)], 'the study shown is read for the entry');
+  releaseFirst();
+  await pending;                                                     // answered under the scope still shown: STUDY shows now
+  releaseEntry();
+  assert.ok(await entering);
+  const reads = s.sent.slice(2);
+  assert.deepEqual(reads.map(r => r.url), [frameUrl(1, OTHER), frameUrl(1)], 'then STUDY too, before the entry resolved');
+  assert.equal(openingOf(reads[1]), openingOf(reads[0]));
+  assert.notEqual(openingOf(reads[0]), openingOf(s.sent[0]));
+});
+
+test('review R1 of 137c2b7: memory answers of a held study in flight across its new opening are not handed on before that opening\'s own check', async () => {
+  const net = holdingFirst({ revision: 'rev-now' });
+  const s = setup({ held: { [STUDY]: { revision: 'rev-now', session: 'sess-1' } }, studies: [STUDY], network: net.network });
+  const reads = [1, 2, 3].map(n => s.fetch(frameUrl(n), bound()));    // 1 checks; 2 and 3 wait for that check
+  await tick();
+  assert.equal(s.sent.length, 1);
+  const first = openingOf(s.sent[0]);
+  (await s.fetch.reenter([STUDY])).commit();
+  net.release();
+  const texts = await Promise.all(reads.map(async r => (await r).text()));
+  assert.equal(s.sent.length, 2, 'one check for the new opening');
+  assert.equal(s.sent[1].headers.get('X-KIN-Preload'), 'check');
+  const next = openingOf(s.sent[1]);
+  assert.ok(next && next !== first);
+  assert.deepEqual(texts.map(t => t.split(' ')[0]).sort(), ['held', 'held', 'live'], 'the new check\'s answer, then memory');
+  assert.ok(texts.includes('live ' + next), 'no answer of the earlier check is handed on');
 });

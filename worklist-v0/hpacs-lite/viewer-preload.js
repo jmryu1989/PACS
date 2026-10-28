@@ -18,7 +18,8 @@
  *     study showed here is any image read of it that succeeded - a frame (also with a query), a rendering, a document, a
  *     preview, from the worker's memory or the network; whether the worker could answer it decides nothing. A read of a
  *     stored object (`/instances/{id}/...`) names no study: its answer does (`X-KIN-Study-UID`), and an answer that
- *     does not leaves the read standing for the studies shown when it was made;
+ *     does not leaves the read standing for the studies shown when it was made. A read still unanswered when its study
+ *     is opened again belongs to the earlier opening: its answer is not handed on but read again under the new one;
  *   · focus, scrolling, cine, a layout change, a repeated or retried read, the server closing an idle delivery and a
  *     preload are none: they keep the opening, and a preload has none at all. A read of a study shown before the scope
  *     changed keeps that study's opening.
@@ -91,48 +92,70 @@
       for (const [name, value] of Object.entries(extra)) headers.set(name, value);
       return { ...init, headers };
     }
+    // The entry sequence: how many new openings this document took (`commit`), and the one that last opened each study.
+    let entries = 0;
+    const entered = new Map();
+    /**
+     * What a read is asked under: the opening it names now, the entry sequence, the studies shown. Null for a new
+     * opening's own read (`reenter`), which names its opening itself.
+     */
+    const asking = (path, init) => new win.Headers(init.headers).has(OPENING) ? null
+      : { opening: openingOf(studyOf(path)), asked: entries, studies: scope() };
+
     // What this document showed of each study: its last frame read (the kind the check reads), else its last other image
     // read. A failed read showed nothing. An object read no answer placed stands for the studies shown when it was made.
     const shown = new Map(), unplaced = new Map();
-    /** `opening`: the one the read named for the scope, null for a new opening's own read (`reenter`). */
-    function answered(response, path, url, init, opening) {
+    function answered(response, path, url, init, ask) {
       if (!response?.ok || !isGet(init) || DESCRIPTION.test(path)) return response;
       const object = OBJECT.exec(path)?.[1], named = response.headers.get(NAMED_STUDY);
       if (object && named && STUDY_UID.test(named)) objects.set(object, named);
+      const uid = studyOf(path);
+      // Asked before its study was opened again, the read belongs to the earlier opening; its pixels must not show under
+      // the new one before that opening's own read is recorded. Its answer is dropped and the read sent again, naming the
+      // study's opening now - that answer is the one handed on (a memory answer gets the new opening's check first).
+      if (ask && (uid ? [uid] : ask.studies).some(study => (entered.get(study) ?? 0) > ask.asked)) {
+        response.body?.cancel().catch(() => {});
+        return preloadFetch(url, init);
+      }
       const read = { url: String(typeof url === 'string' || url instanceof URL ? url : url.url),
         accept: new win.Headers(init.headers).get('Accept'), frame: FRAME.test(path) };
-      const uid = studyOf(path);
-      if (!uid) { unplaced.set(read.url, { ...read, studies: scope() }); return response; }
+      if (!uid) { if (ask) unplaced.set(read.url, { ...read, studies: ask.studies }); return response; }
       unplaced.delete(read.url);
       // A study first placed by this answer keeps the opening its read was sent under, as a study named in its path does.
-      if (opening && !openings.has(uid)) openings.set(uid, opening);
+      if (ask && !openings.has(uid)) openings.set(uid, ask.opening);
       if (read.frame || !shown.get(uid)?.frame) shown.set(uid, read);
       return response;
     }
-    /** The read's own opening header (a new opening's read), else the opening it will name now. */
-    const namedOpening = (path, init) => new win.Headers(init.headers).has(OPENING) ? null : openingOf(studyOf(path));
 
     /**
      * A new opening of `uids`. Each of them this document has shown before is read live for it first - its 열람 is then
      * recorded before the pixels this document still holds can show again; a study never shown here has no such pixels,
-     * and its own first read records it. The opening is taken by `commit()` when the scope is shown; an entry abandoned
-     * before that leaves every opening as it was. Null when an opening could not be recorded: the scope is not shown.
+     * and its own first read records it. One whose earlier read is answered while these are read has pixels then, and is
+     * read too; one answered later is read again by `answered`. The opening is taken by `commit()` when the scope is
+     * shown; an entry abandoned before that leaves every opening as it was. Null when an opening could not be recorded:
+     * the scope is not shown.
      */
     async function reenter(uids, signal) {
-      const next = win.crypto.randomUUID(), wanted = [...new Set(uids)];
-      const reads = new Set(wanted.map(uid => shown.get(uid)).filter(Boolean));
-      for (const read of unplaced.values()) if (read.studies.some(uid => wanted.includes(uid))) reads.add(read);
-      for (const read of reads) {
+      const next = win.crypto.randomUUID(), wanted = [...new Set(uids)], done = new Set();
+      // The reads still owed: one per study shown (keyed by the study), and each object read standing for one (by URL).
+      const owed = () => [...wanted.filter(uid => shown.has(uid)).map(uid => [uid, shown.get(uid)]),
+        ...[...unplaced].filter(([, read]) => read.studies.some(uid => wanted.includes(uid)))].filter(([key]) => !done.has(key));
+      for (let reads = owed(); reads.length; reads = owed()) for (const [key, read] of reads) {
+        done.add(key);
         try {
           const headers = { [OPENING]: next, ...(read.accept ? { Accept: read.accept } : {}) };
           const response = await win.fetch(read.url, { headers, signal });
           await response.arrayBuffer();
           if (!response.ok) return null;
         } catch (_) { return null; }
+        // An object read its answer now places was read for its study.
+        const placed = studyOf(route(target(read.url)) ?? '');
+        if (placed) done.add(placed);
       }
       return { commit() {
         // The next frame read of a held study checks the copy again, for this opening.
-        for (const uid of wanted) { openings.set(uid, next); checks.delete(uid); }
+        entries++;
+        for (const uid of wanted) { openings.set(uid, next); entered.set(uid, entries); checks.delete(uid); }
         scopeOpening = next;
       } };
     }
@@ -168,10 +191,10 @@
       read = (url, init) => {
         const path = route(target(url));
         if (!path) return send(url, init);
-        const opening = namedOpening(path, init);
-        return send(url, viewed(init, studyOf(path))).then(response => answered(response, path, url, init, opening));
+        const ask = asking(path, init);
+        return send(url, viewed(init, studyOf(path))).then(response => answered(response, path, url, init, ask));
       };
-    } else read = withWorker(win, send, { target, route, frameStudy, studyOf, viewed, answered, namedOpening, checks });
+    } else read = withWorker(win, send, { target, route, frameStudy, studyOf, viewed, answered, asking, checks });
 
     function preloadFetch(url, init = {}) { return read(url, init); }
     preloadFetch.reenter = reenter;
@@ -179,7 +202,7 @@
   }
 
   /** The preload worker's memory under the viewer's reads (see the head of this file). */
-  function withWorker(win, send, { target, route, frameStudy, studyOf, viewed, answered, namedOpening, checks }) {
+  function withWorker(win, send, { target, route, frameStudy, studyOf, viewed, answered, asking, checks }) {
     let port = null, broken = false, nextId = 0, inflight = 0;
     const pending = new Map(), opened = new Set();
 
@@ -298,8 +321,8 @@
     return function (url, init) {
       const parsed = target(url), path = route(parsed);
       if (!path) return send(url, init);
-      const opening = namedOpening(path, init);
-      return read(parsed, path, url, init).then(response => answered(response, path, url, init, opening));
+      const ask = asking(path, init);
+      return read(parsed, path, url, init).then(response => answered(response, path, url, init, ask));
     };
   }
 
