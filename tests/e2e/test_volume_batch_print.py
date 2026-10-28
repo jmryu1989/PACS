@@ -79,7 +79,7 @@ class VolumeBatchPrintE2E(VolumeBatchScoutE2E):
   self.launch(fresh,[a]);self.ready(fresh);paper=self.open_batch_print(fresh);self.assertEqual(self.print_pixels(paper),expected);self.assertEqual(fresh.evaluate('devicePixelRatio'),1.25)
  def test_batch_print_07_signed_negative_pixels_and_rescale(self):
   phantom=projection.phantom
-  with patch.object(projection,'phantom',side_effect=lambda stack,intercept,constant:phantom(stack,-100,constant,signed=True)):a,p,v=self.batch_start()
+  with patch.object(projection,'phantom',side_effect=lambda stack,intercept,constant,**sample:phantom(stack,-100,constant,signed=True,**sample)):a,p,v=self.batch_start()
   v.evaluate('()=>{projectionVP.setProperties({voiRange:{lower:-1124,upper:-124}});projectionVP.render()}');self.project(v,3,20);v.wait_for_function('()=>Math.abs(projectionPixel()-128)<=3');self.make_batch(v,offset=1,interval=1,count=3);expected=self.pixels(v);self.save_volume(v)
   paper=self.open_batch_print(v);self.assertEqual(self.print_pixels(paper),expected);expect(paper.locator('main')).to_contain_text('VOI -1124 ~ -124');self.assertEqual(len(self.jobs(a)),1)
  def test_batch_print_11_minip_vertical_flip(self):
