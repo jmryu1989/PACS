@@ -118,7 +118,8 @@ class Chat {
     const job = { id: crypto.randomUUID().slice(0, 8), user, displayName, mode, text, context: context || {}, state: 'queued', t: { received: Date.now() },
       model: choice ? models[choice] : null };
     this.jobs.set(job.id, job);
-    this.log({ role: 'user', user, displayName, mode, text, jobId: job.id });
+    const picks = pickLabels(job.context.picks);
+    this.log({ role: 'user', user, displayName, mode, text, jobId: job.id, ...(picks.length ? { meta: { picks } } : {}) });
     this.pending++;
     const emit = (state, extra = {}) => { job.state = state; this.broadcast({ type: 'job', id: job.id, mode, user, state, ...extra }); };
     emit('queued', { position: this.pending });
@@ -161,6 +162,8 @@ class Chat {
     if (c.role) lines.push(`[모의 로그인 역할] ${c.role}`);
     if (Array.isArray(c.errors) && c.errors.length) lines.push(`[거울 화면의 최근 JS 오류]\n${c.errors.slice(-5).join('\n')}`);
     if (Array.isArray(c.missing) && c.missing.length) lines.push(`[스튜디오 모의 응답이 없어 501이 난 요청]\n${c.missing.slice(-8).join('\n')}`);
+    const picked = pickLines(c.picks);
+    if (picked) lines.push(picked);
     return lines.join('\n');
   }
 
@@ -215,7 +218,7 @@ class Chat {
     }
     const commit = await this.sandbox.commit({
       subject: job.text.split('\n')[0] || '(빈 요청)',
-      body: `${job.text}\n\n--- Claude ---\n${text}`.slice(0, 6000),
+      body: `${job.text}${pickLines(job.context.picks) ? `\n\n${pickLines(job.context.picks)}` : ''}\n\n--- Claude ---\n${text}`.slice(0, 6000),
       trailers: { 'Studio-Kind': 'change', 'Studio-User': job.user, 'Studio-Request': job.id, 'Studio-Model': result.model || 'default' },
     });
     job.t.committed = Date.now();
@@ -461,6 +464,32 @@ function splitRecords(text) {
   return { text: maskSecrets(clean), records };
 }
 
+// Elements picked in the product window ("이거"): what Claude needs to find them in the code. The browser sends at
+// most 12; long fields are cut so a picked text block cannot crowd out the request.
+const MAX_PICKS = 12;
+const short = (value, n) => { const s = String(value == null ? '' : value).replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+const num = v => (Number.isFinite(Number(v)) ? Math.round(Number(v)) : '?');
+
+function pickLines(picks) {
+  if (!Array.isArray(picks) || !picks.length) return '';
+  const lines = picks.slice(0, MAX_PICKS).map((p, i) => {
+    p = p && typeof p === 'object' ? p : {};
+    const box = p.box || {}, view = p.viewport || {}, style = p.style || {};
+    const parts = [`${i + 1}. <${short(p.tag, 20) || '?'}> "${short(p.text, 120)}"`, `selector: ${short(p.selector, 300)}`,
+      `위치 x=${num(box.x)} y=${num(box.y)} ${num(box.w)}×${num(box.h)} (화면 ${num(view.w)}×${num(view.h)})`];
+    if (p.page) parts.push(`페이지 ${short(p.page, 200)}${p.screen ? ` (${short(p.screen, 40)})` : ''}`);
+    if (p.role) parts.push(`역할 ${short(p.role, 20)}`);
+    if (style.font || style.color) parts.push(`글자 ${short(style.font, 30)} 색 ${short(style.color, 40)} 배경 ${short(style.background, 40)}`);
+    return parts.join(' · ');
+  });
+  return `[선택한 화면 요소 — 요청의 "이거·여기·이것들"은 아래 요소다. selector는 실행 중 DOM 기준이라 코드에서는 id·class·글자로 찾는다]\n${lines.join('\n')}`;
+}
+
+function pickLabels(picks) {
+  if (!Array.isArray(picks)) return [];
+  return picks.slice(0, MAX_PICKS).map(p => (p && typeof p === 'object' ? `${short(p.tag, 20)} "${short(p.text, 40)}"` : '?'));
+}
+
 function toolSummary(name, input, cwd) {
   const rel = p => (typeof p === 'string' ? path.relative(cwd, path.resolve(cwd, p)).replace(/\\/g, '/') : '');
   switch (name) {
@@ -474,4 +503,4 @@ function toolSummary(name, input, cwd) {
   }
 }
 
-module.exports = { Chat, splitRecords, toolSummary, visiblePart, turnFailed };
+module.exports = { Chat, splitRecords, toolSummary, visiblePart, turnFailed, pickLines };

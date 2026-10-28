@@ -9,7 +9,7 @@ const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { Sandbox, ALLOWED } = require('../server/sandbox');
-const { Chat } = require('../server/chat');
+const { Chat, pickLines } = require('../server/chat');
 const { StatusFeed } = require('../server/status');
 const { writeDigest, listDigests, DIGEST_ID } = require('../server/digest');
 const { buildAndCheck } = require('../server/build');
@@ -100,6 +100,39 @@ test('an edit turn reads the same status summary a question does (critique trigg
   chat.enqueue({ user: 'minhoon', displayName: '민훈', mode: 'edit', text: 'Related Report를 기본으로 접어 주세요' });
   await idle(chat);
   assert.match(prompts[0], /SYNTH-DECISION-7/);
+});
+
+test('elements picked in the product reach Claude with the request, the chat entry and the change record', async () => {
+  const sandbox = new Sandbox({ dir: repo({ 'scripts/main-split-order.json': ORDER }) });
+  await sandbox.check();
+  const { chat } = chatFor(sandbox);
+  const prompts = [];
+  chat.claude = async (job, mode, prompt) => { prompts.push({ mode, prompt }); if (mode === 'edit') write(sandbox.dir, PAGE, '<p>v1</p>\n'); return cliResult({ sawResult: true, exitCode: 0, text: '옮겼습니다.' }); };
+  const pick = (text, selector, x) => ({ tag: 'button', text, selector, box: { x, y: 880, w: 96, h: 30 }, viewport: { w: 1920, h: 1040 },
+    page: '/worklist/hpacs-lite/main.html', screen: 'Worklist · 판독', role: 'radiologist', style: { font: '13px 600', color: 'rgb(255, 255, 255)', background: 'rgb(31, 111, 235)' } });
+  const picks = [pick('Approve', '#reading-actions > button.approve', 1500), pick('Save', '#reading-actions > button.save', 1400)];
+  chat.enqueue({ user: 'minhoon', displayName: '민훈', mode: 'edit', text: '이 둘을 오른쪽 끝으로', context: { picks } });
+  chat.enqueue({ user: 'minhoon', displayName: '민훈', mode: 'ask', text: '이거 왜 여기 있어요?', context: { picks: picks.slice(0, 1) } });
+  await idle(chat);
+  const edit = prompts.find(p => p.mode === 'edit').prompt;
+  assert.match(edit, /1\. <button> "Approve" · selector: #reading-actions > button\.approve · 위치 x=1500 y=880 96×30 \(화면 1920×1040\)/);
+  assert.match(edit, /2\. <button> "Save"/);
+  assert.match(edit, /역할 radiologist/);
+  assert.match(prompts.find(p => p.mode === 'ask').prompt, /"Approve"/);
+  const asked = chat.history().find(e => e.role === 'user' && e.mode === 'edit');
+  assert.deepStrictEqual(asked.meta.picks, ['button "Approve"', 'button "Save"']);
+  const [commit] = await sandbox.log();
+  assert.match(await sandbox.show(commit.sha), /#reading-actions > button\.save/);
+});
+
+test('picked descriptions are capped and cut, and anything that is not a list adds nothing', () => {
+  const many = Array.from({ length: 30 }, (_, i) => ({ tag: 'td', text: 'x'.repeat(500), selector: `#rows > tr:nth-of-type(${i + 1})` }));
+  const text = pickLines(many);
+  assert.strictEqual(text.split('\n').length, 1 + 12);
+  assert.ok(!text.includes('x'.repeat(121)));
+  assert.strictEqual(pickLines(undefined), '');
+  assert.strictEqual(pickLines('#approve'), '');
+  assert.match(pickLines([null]), /1\. <\?>/);
 });
 
 test('an older change is undone only together with the later changes built on it, and the result is checked', async () => {

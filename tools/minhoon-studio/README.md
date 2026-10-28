@@ -1,23 +1,27 @@
 # Minhoon studio (Phase 1)
 
-A web page for Minhoon (radiologist) and the owner. **Left:** the real PACS screens (worklist-v0/hpacs-lite, the
-report editor, clinician/admin pages, the pinned OHIF viewer with `config/ohif`) running against a **synthetic** mock
-API. **Right:** a Korean chat with the Claude Code CLI that edits those screens; the mirror reloads within seconds of
-the edit. It is not the PACS and holds no patient data: 16 invented patients, 19 studies, and nine public CC BY TCIA
+A web page for Minhoon (radiologist) and the owner. **Product window:** the real PACS screens (worklist-v0/hpacs-lite,
+the report editor, clinician/admin pages, the pinned OHIF viewer with `config/ohif`) at their real size, running
+against a **synthetic** mock API. **Chat window:** a Korean chat with the Claude Code CLI that edits those screens; the
+product window reloads by itself within seconds of the edit. It is not the PACS and holds no patient data: 16 invented patients, 19 studies, and nine public CC BY TCIA
 sample studies for the images (identity tags replaced at serve time with the synthetic ones; pixels unchanged;
 `assets/dicomweb/ATTRIBUTION.md` lists collections, DOIs and licences).
 
 Design decisions: `evidence/studio-design-final-20261027.md` (D1–D11). Phase 1 = login, mirror (reading workflow
 deep, other screens browsable), 바꾸기 (edit) + 되돌리기 (undo = `git revert`), critique (D4), 물어보기 (Q&A from
-`status.json` + the repo), daily digest. Point-and-click, captures, prototypes with proactive previews and A/B are
-Phase 2/3.
+`status.json` + the repo), daily digest. Added 2026-10-28: two windows / overlay, point-and-click, the
+"할 수 있는 것" showcase. Captures, proactive previews and A/B are Phase 2/3.
 
 ## What Minhoon sees
 
 | Area | What it does |
 |---|---|
+| 보기: 두 창 (default) | `studio.html` is the chat only (portrait monitor); "제품 화면 열기" opens `product.html` as a popup named `minhoon-studio-product` (maximise it on the landscape monitor). Clicking again reuses and brings forward the same window. The product window has no studio bar, only a small fixed corner widget (connection dot + 고르기). The chat shows "제품 화면 연결됨 / 열려 있지 않습니다". The two windows talk over a same-origin `BroadcastChannel` (`minhoon-studio`): screen/role changes, reload after an applied change or undo, picks, heartbeat. |
+| 보기: 한 창 (겹쳐 보기) | Single monitor: the product fills the window; the chat slides over the right edge (corner button "스튜디오" or Alt+S) and hides again without resizing the product. The choice is remembered per browser. |
+| 고르기 (Alt+G) | Pick mode in the product: the element under the mouse is outlined; a click selects it ("선택됨 N"), several allowed, clicking again removes one, Esc clears all. A transparent shield takes the clicks, so the product's own buttons are never pressed. Picks (selector, visible text, box, page, screen, role, font/colours) show as removable chips above the input and go to Claude with the next message ("이거 오른쪽으로"); the commit message records them. Agentation's pattern, written fresh (no code copied). |
+| 할 수 있는 것 | Example cards shown on a person's first visit in a browser and from the tab bar; a click fills the input (or opens 기록 / points at the role selector / 오늘 끝). |
 | 화면 / 역할 | Pick Worklist·판독, Clinician, Admin, Login 화면, or Viewer; switch the mock login role (radiologist/technician/clinician/admin). Some role and lock rules are still open questions, so a role's screen is a prototype view, not a decision. |
-| 바꾸기 | "판독문 입력칸을 더 크게" → Claude edits the front-end in the sandbox → build + syntax check → commit → mirror reloads and reselects the same study. Bad requests get a short evidence-first objection; patient-safety/legal ones are refused and a safe alternative is built (D4). |
+| 바꾸기 | "판독문 입력칸을 더 크게" → Claude edits the front-end in the sandbox → build + syntax check → commit → product window reloads and reselects the same study (an edit that lands while he types in the product waits behind "지금 보기"). Bad requests get a short evidence-first objection; patient-safety/legal ones are refused and a safe alternative is built (D4). |
 | 물어보기 | Read-only answers about the product and development status, with sources. Unknown dates/decisions are not guessed; the question is forwarded to the commander. |
 | 되돌리기 / 기록 | Undo the newest change, or any listed change; view each change's diff. An older change is undone together with the still-applied changes made after it (they were built on it; the studio asks first). Every undo is rebuilt and checked like an edit; if the check fails nothing is undone. |
 | 현황 | The commander's `status.json` (everything except live secrets). |

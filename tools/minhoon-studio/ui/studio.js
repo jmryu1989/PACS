@@ -1,29 +1,24 @@
 'use strict';
-// The studio page: left = the product screens (same-origin iframe), right = the Korean chat.
+// The studio chat window. Two layouts (per browser, remembered):
+//  - 두 창 (default): this window is chat only; the product runs in its own window (product.html) at its real size
+//    and is driven over the same-origin BroadcastChannel (open screen, reload after a change/undo, picks).
+//  - 한 창 (겹쳐 보기): the product fills this window and the chat slides over it without resizing it.
 // All text from the server is rendered with textContent; chat and file content are never treated as markup.
 (() => {
+  const { api, store, el, channel, screenForRole, isShortcut, SCREENS, DEFAULT_SCREEN, PRODUCT_WINDOW, PICK_KEY, CHAT_KEY } = window.Studio;
   const $ = id => document.getElementById(id);
-  const mirror = $('mirror');
   const messages = $('messages');
   const input = $('input');
-  const state = { mode: 'edit', me: null, live: new Map(), errors: [], missing: [], pendingReload: null, jobsWaiting: new Set() };
-  const VIEWER_STUDY = '2.25.202610270003';
+  const layout = store.get('studio-layout', 'two') === 'overlay' ? 'overlay' : 'two';
+  document.body.dataset.layout = layout;
+  const state = { mode: 'edit', me: null, live: new Map(), errors: [], missing: [], picks: [], jobsWaiting: new Set(), timings: {},
+    product: { seen: 0, page: '', study: null, errors: [], pickActive: false } };
   const PLACEHOLDER = {
-    edit: '예) 판독문 입력칸을 더 크게 해 주세요 / Approve 버튼을 오른쪽 끝으로 옮겨 주세요',
+    edit: '예) 판독문 입력칸을 더 크게 해 주세요 / (고르기로 버튼을 찍고) 이거 오른쪽 끝으로 옮겨 주세요',
     ask: '예) Related Report는 어떻게 동작해요? / 제 피드백 3번은 어디까지 됐어요?',
   };
 
-  async function api(path, options = {}) {
-    const init = { ...options, headers: { ...(options.headers || {}) } };
-    if (options.json !== undefined) { init.method = init.method || 'POST'; init.body = JSON.stringify(options.json); init.headers['Content-Type'] = 'application/json'; }
-    if (init.method && init.method !== 'GET') init.headers['X-Studio'] = '1';
-    const res = await fetch('/studio-api/' + path, init);
-    if (res.status === 401) { location.replace('/studio/login.html'); throw new Error('login'); }
-    const type = res.headers.get('content-type') || '';
-    const body = type.includes('json') ? await res.json() : await res.text();
-    if (!res.ok) { const error = new Error((body && body.error) || res.statusText); error.body = body; throw error; }
-    return body;
-  }
+  for (const [value, label] of SCREENS) { const o = el('option', '', label); o.value = value; $('screen').append(o); }
 
   // ── tiny safe formatter: newlines kept by CSS, **bold** and `code` only ──
   function richText(text) {
@@ -34,20 +29,13 @@
     while ((m = re.exec(s))) {
       if (m.index > last) frag.append(s.slice(last, m.index));
       const token = m[0];
-      const el = document.createElement(token.startsWith('**') ? 'strong' : 'code');
-      el.textContent = token.startsWith('**') ? token.slice(2, -2) : token.slice(1, -1);
-      frag.append(el);
+      const node = document.createElement(token.startsWith('**') ? 'strong' : 'code');
+      node.textContent = token.startsWith('**') ? token.slice(2, -2) : token.slice(1, -1);
+      frag.append(node);
       last = m.index + token.length;
     }
     if (last < s.length) frag.append(s.slice(last));
     return frag;
-  }
-
-  function el(tag, cls, text) {
-    const node = document.createElement(tag);
-    if (cls) node.className = cls;
-    if (text !== undefined) node.textContent = text;
-    return node;
   }
 
   function scrollDown() { messages.scrollTop = messages.scrollHeight; }
@@ -65,11 +53,12 @@
     text.append(richText(entry.text));
     li.append(who, text);
     const meta = entry.meta || {};
+    if (entry.role === 'user' && Array.isArray(meta.picks) && meta.picks.length) li.append(el('div', 'meta', `고른 곳: ${meta.picks.join(', ')}`));
     if (entry.role === 'assistant' && meta.changed && meta.sha) {
       const row = el('div', 'meta');
       row.append(el('span', 'applied', '반영됨'));
       if (meta.files) row.append(el('span', '', meta.files.filter(f => !/bundle\.js$|config\/ohif\.js$/.test(f)).map(f => f.split('/').pop()).join(', ')));
-      const timing = state.timings && state.timings[entry.jobId];
+      const timing = state.timings[entry.jobId];
       if (timing) row.append(el('span', '', timing));
       const view = el('button', '', '변경 보기'); view.type = 'button'; view.onclick = () => showChange(meta.sha);
       const undo = el('button', '', '되돌리기'); undo.type = 'button'; undo.onclick = () => doUndo(meta.sha);
@@ -130,14 +119,13 @@
           li.querySelector('.text').textContent = ev.text || '…';
           scrollDown();
         } else if (ev.state === 'tool') {
-          const li = liveBubble(ev.id, ev.mode);
-          li.querySelector('.tools').textContent = ev.summary;
+          liveBubble(ev.id, ev.mode).querySelector('.tools').textContent = ev.summary;
         } else if (ev.state === 'applied' && ev.timings) {
-          state.timings = state.timings || {};
           state.timings[ev.id] = `요청→적용 ${(ev.timings.totalToReloadSentMs / 1000).toFixed(1)}초`;
         }
       } else if (ev.type === 'reload') {
-        requestReload(ev);
+        // The same nonce from every studio tab of this browser, so the product window reloads once.
+        target.reload({ reason: ev.reason, jobId: ev.jobId || null, sha: ev.sha || null }, `${ev.reason}|${ev.sha || ''}|${ev.jobId || ''}`);
         refreshState().catch(() => {});
       } else if (ev.type === 'missing') {
         if (!state.missing.some(m => m.method === ev.method && m.path === ev.path)) state.missing.push(ev);
@@ -149,104 +137,187 @@
     source.onerror = () => { /* EventSource reconnects by itself */ };
   }
 
-  // ── mirror ──
-  function selectedStudy() {
-    try {
-      const doc = mirror.contentDocument;
-      const tr = doc && doc.querySelector('#rows tr.sel');
-      if (!tr) return null;
-      const cells = [...tr.querySelectorAll('td')].map(td => td.textContent.trim()).filter(Boolean).slice(0, 6).join(' · ');
-      return { uid: tr.dataset.uid, label: cells };
-    } catch { return null; }
+  function setErrors(errors) {
+    state.errors = errors;
+    $('errors').hidden = !errors.length; $('errors').querySelector('b').textContent = errors.length;
   }
 
-  function typing() {
-    try {
-      const active = mirror.contentDocument && mirror.contentDocument.activeElement;
-      return !!active && (active.tagName === 'TEXTAREA' || (active.tagName === 'INPUT' && /text|search/.test(active.type)) || active.isContentEditable);
-    } catch { return false; }
+  function noteReload(info) {
+    if (info.jobId && state.timings[info.jobId]) {
+      state.timings[info.jobId] += info.readyKind !== 'timeout' ? ` · 화면 새로고침 ${(info.reloadMs / 1000).toFixed(1)}초` : ' · 화면 준비 시간 초과';
+    }
   }
 
-  function watchMirror() {
-    try {
-      const win = mirror.contentWindow;
-      if (!win || win.__studioWatched) return;
-      win.__studioWatched = true;
-      win.addEventListener('error', e => pushError(`${e.message} (${(e.filename || '').split('/').pop()}:${e.lineno})`));
-      win.addEventListener('unhandledrejection', e => pushError(`unhandled: ${e.reason && e.reason.message ? e.reason.message : e.reason}`));
-    } catch { /* about:blank or navigating */ }
+  // ── picks (chips above the input) ──
+  function setPicks(picks) {
+    state.picks = picks;
+    const chips = $('chips');
+    chips.replaceChildren();
+    picks.forEach((p, i) => {
+      const chip = el('span', 'chip');
+      chip.title = `${p.selector}\n${p.page || ''}`;
+      chip.append(el('b', '', String(i + 1)), ` ${p.tag} ${p.text ? `"${p.text.length > 28 ? p.text.slice(0, 27) + '…' : p.text}"` : ''}`);
+      const x = el('button', 'x', '×'); x.type = 'button'; x.title = '빼기';
+      x.onclick = () => target.pickRemove(p.id);
+      chip.append(x);
+      chips.append(chip);
+    });
+    $('picks').hidden = !picks.length;
+  }
+  $('picks-clear').onclick = () => target.pickClear();
+
+  function setPickMode(on) {
+    state.product.pickActive = on;
+    $('pick').classList.toggle('on', on);
+    $('pick').textContent = on ? '고르는 중' : '고르기';
   }
 
-  function pushError(text) {
-    state.errors.push(text);
-    if (state.errors.length > 20) state.errors.shift();
-    $('errors').hidden = false; $('errors').querySelector('b').textContent = state.errors.length;
-  }
+  // ── the product: in this window (overlay) or in the product window (two windows) ──
+  let target;
+  if (layout === 'overlay') target = overlayTarget();
+  else target = productWindowTarget();
 
-  function requestReload(ev) {
-    if (typing() && ev.reason === 'edit') { state.pendingReload = ev; $('mirror-banner').hidden = false; return; }
-    reloadMirror(ev);
-  }
-
-  // Reload and measure until the screen is usable again (the worklist rows are back, not just DOMContentLoaded),
-  // then put the same study back in focus.
-  function reloadMirror(ev = {}) {
-    $('mirror-banner').hidden = true;
-    state.pendingReload = null;
-    const keep = selectedStudy();
-    const started = performance.now();
-    const onLoad = () => {
-      mirror.removeEventListener('load', onLoad);
-      watchMirror();
-      const deadline = started + 30000;
-      const poll = () => {
-        let doc; try { doc = mirror.contentDocument; } catch { doc = null; }
-        const isList = doc && /main\.html/.test(doc.location.pathname);
-        const ready = doc && doc.readyState === 'complete' && (!isList || doc.querySelector('#rows tr[data-uid]'));
-        if (ready || performance.now() > deadline) {
-          const reloadMs = Math.round(performance.now() - started);
-          if (ev.jobId) api('metrics/reload', { json: { jobId: ev.jobId, reloadMs, readyKind: ready ? (isList ? 'rows' : 'load') : 'timeout' } }).catch(() => {});
-          if (ev.jobId && state.timings && state.timings[ev.jobId]) state.timings[ev.jobId] += ready ? ` · 화면 새로고침 ${(reloadMs / 1000).toFixed(1)}초` : ' · 화면 준비 시간 초과';
-          if (keep && isList) {
-            const row = doc.querySelector(`#rows tr[data-uid="${CSS.escape(keep.uid)}"]`);
-            if (row) row.click();
-          }
-          return;
-        }
-        setTimeout(poll, 50);
-      };
-      poll();
+  function overlayTarget() {
+    $('studio').classList.add('overlay');
+    const mirror = window.StudioMirror($('mirror'), {
+      onErrors: setErrors,
+      onPending: ev => { $('mirror-banner').hidden = !ev; },
+      onReloaded: noteReload,
+      onWindow: win => win.addEventListener('keydown', keys, true),
+    });
+    let reopen = false;
+    const pick = window.StudioPick($('mirror'), {
+      meta: () => ({ screen: $('screen').selectedOptions[0] && $('screen').selectedOptions[0].textContent, role: state.me && state.me.role }),
+      onChange: setPicks,
+      // Picking needs the whole product visible: the chat steps aside and comes back with the picks.
+      onMode: on => {
+        setPickMode(on);
+        $('pick-local').classList.toggle('on', on);
+        if (on) { reopen = overlayOpen(); setOverlay(false); } else if (reopen) setOverlay(true);
+      },
+    });
+    $('pick-local').onclick = () => pick.toggle();
+    $('apply-now').onclick = () => mirror.applyPending();
+    const overlayOpen = () => $('studio').classList.contains('open');
+    function setOverlay(open) {
+      $('studio').classList.toggle('open', open);
+      $('overlay-open').hidden = open;
+      store.set('studio-overlay-open', open ? '1' : '0');
+      if (open) input.focus();
+    }
+    $('overlay-open').onclick = () => setOverlay(true);
+    $('overlay-close').onclick = () => setOverlay(false);
+    setOverlay(store.get('studio-overlay-open', '1') === '1');
+    function keys(e) {
+      if (pick.onKey(e)) return;
+      if (isShortcut(e, PICK_KEY)) { e.preventDefault(); e.stopPropagation(); pick.toggle(); }
+      else if (isShortcut(e, CHAT_KEY)) { e.preventDefault(); e.stopPropagation(); setOverlay(!overlayOpen()); }
+    }
+    window.addEventListener('keydown', keys, true);
+    return {
+      open: (screen, role) => mirror.open(screenForRole(screen, role)),
+      reload: ev => mirror.request(ev),
+      manualReload: () => mirror.reload(),
+      context: async () => mirror.context(),
+      pick: on => pick.toggle(on),
+      pickRemove: id => pick.remove(id),
+      pickClear: () => pick.clear(),
     };
-    mirror.addEventListener('load', onLoad);
-    try { mirror.contentWindow.location.reload(); } catch { mirror.src = mirror.src; }
   }
 
-  function openScreen(value) {
-    state.errors = []; $('errors').hidden = true;
-    mirror.src = value === 'viewer' ? `/ohif/viewer?StudyInstanceUIDs=${VIEWER_STUDY}` : value;
-    localStorage.setItem('studio-screen', value);
+  function productWindowTarget() {
+    const bc = channel();
+    const post = message => { if (bc) bc.postMessage({ from: 'chat', ...message }); };
+    const replies = new Map();
+    let ref = null;
+    if (bc) bc.onmessage = ({ data: m }) => {
+      if (!m || m.from !== 'product') return;
+      const p = state.product;
+      p.seen = m.type === 'bye' ? 0 : Date.now();
+      if ('page' in m) { p.page = m.page; p.study = m.study; }
+      if (Array.isArray(m.errors)) setErrors(m.errors);
+      if (Array.isArray(m.picks)) setPicks(m.picks);
+      if ('pickActive' in m) setPickMode(!!m.pickActive);
+      if (m.type === 'pick-mode') setPickMode(m.on);
+      if (m.type === 'reloaded') noteReload(m);
+      if (m.type === 'context' && replies.has(m.ask)) { replies.get(m.ask)(m); replies.delete(m.ask); }
+      paintLink();
+    };
+    // Heartbeat both ways; the product window answers a ping at once, so the status is right within a second.
+    setInterval(() => { post({ type: 'hb' }); paintLink(); }, 2000);
+    post({ type: 'ping' });
+
+    function connected() { return Date.now() - state.product.seen < 5000; }
+    function paintLink() {
+      const on = connected();
+      $('link-dot').classList.toggle('on', on);
+      $('link-text').textContent = on ? `제품 화면 연결됨${state.product.page ? ' · ' + state.product.page.split('?')[0].split('/').pop() : ''}` : '제품 화면이 열려 있지 않습니다';
+      $('open-product').textContent = on ? '제품 화면 앞으로' : '제품 화면 열기';
+      $('open-product').classList.toggle('attention', !on);
+    }
+
+    // A fixed window name: an open product window is reused (and brought forward) instead of opening a second one.
+    function openProduct() {
+      let w = null;
+      try { w = window.open('', PRODUCT_WINDOW, `popup,width=${Math.min(screen.availWidth, 1920)},height=${screen.availHeight}`); } catch { w = null; }
+      if (!w) { alert('브라우저가 새 창을 막았습니다. 주소창 오른쪽의 팝업 차단 표시에서 이 사이트를 허용해 주세요.'); return null; }
+      let blank = false;
+      try { blank = w.location.href === 'about:blank'; } catch { blank = false; }
+      if (blank) w.location.href = '/studio/product.html';
+      try { w.focus(); } catch { /* another window */ }
+      ref = w;
+      return w;
+    }
+    $('open-product').onclick = () => openProduct();
+    paintLink();
+
+    return {
+      open: (screen, role) => post({ type: 'open', screen, role }),
+      reload: (ev, nonce) => post({ type: 'reload', ev, nonce }),
+      manualReload: () => post({ type: 'reload', ev: { reason: 'manual' }, nonce: `manual|${Date.now()}|${Math.random()}` }),
+      // Ask the product window for its page and selected study right now; fall back to the last heartbeat.
+      context: () => new Promise(resolve => {
+        const fallback = { page: state.product.page, study: state.product.study, errors: state.errors.slice(-5) };
+        if (!connected()) { resolve(fallback); return; }
+        const ask = Math.random().toString(36).slice(2);
+        const timer = setTimeout(() => { replies.delete(ask); resolve(fallback); }, 500);
+        replies.set(ask, m => { clearTimeout(timer); resolve({ page: m.page, study: m.study, errors: (m.errors || []).slice(-5) }); });
+        post({ type: 'context', ask });
+      }),
+      pick: on => {
+        if (!connected()) { openProduct(); return; }
+        post({ type: 'pick', on });
+        if (on !== false && ref && !ref.closed) { try { ref.focus(); } catch { /* not ours */ } }
+      },
+      pickRemove: id => post({ type: 'pick-remove', id }),
+      pickClear: () => post({ type: 'picks-clear' }),
+    };
   }
-  mirror.addEventListener('load', watchMirror);
+
+  // Alt+G from the chat window starts picking in the product (two windows) or here (overlay; handled above).
+  if (layout === 'two') window.addEventListener('keydown', e => { if (isShortcut(e, PICK_KEY)) { e.preventDefault(); target.pick(); } });
+  $('pick').onclick = () => target.pick(!state.product.pickActive);
 
   // ── chat ──
   function setMode(mode) {
     state.mode = mode;
-    for (const b of document.querySelectorAll('.tabs button')) { b.classList.toggle('on', b.dataset.mode === mode); b.setAttribute('aria-selected', String(b.dataset.mode === mode)); }
+    for (const b of document.querySelectorAll('.tabs button[data-mode]')) { b.classList.toggle('on', b.dataset.mode === mode); b.setAttribute('aria-selected', String(b.dataset.mode === mode)); }
     input.placeholder = PLACEHOLDER[mode];
   }
-  for (const b of document.querySelectorAll('.tabs button')) b.onclick = () => setMode(b.dataset.mode);
+  for (const b of document.querySelectorAll('.tabs button[data-mode]')) b.onclick = () => setMode(b.dataset.mode);
 
   async function sendMessage() {
     const text = input.value.trim();
     if (!text) return;
-    let page = '';
-    try { page = mirror.contentWindow.location.pathname + mirror.contentWindow.location.search; } catch { /* navigating */ }
-    const study = selectedStudy();
-    const context = { page, study: study ? `${study.uid} (${study.label})` : null, errors: state.errors.slice(-5),
+    const product = await target.context();
+    const picks = state.picks.map(({ id, ...rest }) => rest);
+    const context = { page: product.page, study: product.study, errors: product.errors || [], picks,
       missing: state.missing.slice(-8).map(m => `${m.method} ${m.path}`) };
     input.value = '';
-    try { await api('chat', { json: { mode: state.mode, text, context } }); }
-    catch (error) { input.value = text; alert('보내지 못했습니다: ' + error.message); }
+    try {
+      await api('chat', { json: { mode: state.mode, text, context } });
+      if (picks.length) target.pickClear();
+    } catch (error) { input.value = text; alert('보내지 못했습니다: ' + error.message); }
   }
   $('composer').addEventListener('submit', e => { e.preventDefault(); sendMessage(); });
   input.addEventListener('keydown', e => {
@@ -267,16 +338,21 @@
     }
   }
   $('undo').onclick = () => doUndo();
-  $('apply-now').onclick = () => reloadMirror(state.pendingReload || {});
-  $('reload').onclick = () => reloadMirror();
+  $('reload').onclick = () => target.manualReload();
+  function openScreen(value) {
+    store.set('studio-screen', value);
+    target.open(value, state.me && state.me.role);
+  }
   $('screen').onchange = e => openScreen(e.target.value);
   $('role').onchange = async e => {
-    try { await api('role', { json: { role: e.target.value } }); openScreen($('screen').value === 'viewer' ? 'viewer' : (e.target.value === 'clinician' ? '/worklist/hpacs-lite/clinician.html' : $('screen').value)); }
+    try { await api('role', { json: { role: e.target.value } }); if (state.me) state.me.role = e.target.value; openScreen($('screen').value); }
     catch (error) { alert(error.message); }
   };
   $('model').onchange = async e => {
     try { await api('model', { json: { choice: e.target.value } }); } catch (error) { alert(error.message); refreshState(); }
   };
+  $('layout').value = layout;
+  $('layout').onchange = e => { store.set('studio-layout', e.target.value); location.reload(); };
   $('logout').onclick = async () => { await api('logout', { method: 'POST' }).catch(() => {}); location.replace('/studio/login.html'); };
 
   const panel = $('panel');
@@ -294,7 +370,7 @@
     openPanel('변경 내용', body => body.append(el('pre', '', patch)));
   }
 
-  $('changes').onclick = async () => {
+  async function showChanges() {
     const log = await api('changes');
     openPanel('적용한 변경 (최근 순)', body => {
       if (!log.length) { body.append(el('p', 'muted', '아직 적용한 변경이 없습니다.')); return; }
@@ -313,19 +389,16 @@
       }
       body.append(table);
     });
-  };
+  }
+  $('changes').onclick = showChanges;
 
-  function renderValue(value, depth = 0) {
+  function renderValue(value) {
     if (value === null || value === undefined) return el('span', 'muted', '—');
-    if (typeof value !== 'object') {
-      const s = String(value);
-      const span = el('span', '', s);
-      return span;
-    }
+    if (typeof value !== 'object') return el('span', '', String(value));
     if (Array.isArray(value)) {
       if (!value.length) return el('span', 'muted', '없음');
       const ul = el('ul');
-      for (const item of value) { const li = el('li'); li.append(renderValue(item, depth + 1)); ul.append(li); }
+      for (const item of value) { const li = el('li'); li.append(renderValue(item)); ul.append(li); }
       return ul;
     }
     const box = el('div');
@@ -333,7 +406,7 @@
       const line = el('div');
       const key = el('b', '', k + ': ');
       if (/eta|estimate|forecast/i.test(k)) key.append(el('span', 'tag est', '추정'));
-      line.append(key, renderValue(v, depth + 1));
+      line.append(key, renderValue(v));
       box.append(line);
     }
     return box;
@@ -344,8 +417,7 @@
     openPanel('개발 현황 (status.json)', body => {
       if (!view.present) { body.append(el('p', 'muted', view.message)); return; }
       body.append(el('p', view.overdue ? 'error' : 'muted', `발행 ${view.publishedAt} · ${view.ageHours}시간 전${view.overdue ? ' · 다음 예정 발행이 지났습니다(갱신 지연)' : ''}`));
-      const s = view.status;
-      for (const [key, value] of Object.entries(s)) {
+      for (const [key, value] of Object.entries(view.status)) {
         if (['published_at', 'next_publication'].includes(key)) continue;
         body.append(el('h3', '', key));
         body.append(renderValue(value));
@@ -373,7 +445,7 @@
     openPanel('이견·넘긴 질문', body => {
       if (!list.length) { body.append(el('p', 'muted', '아직 없습니다.')); return; }
       for (const r of list.slice().reverse()) {
-        const box = el('div'); box.style.borderBottom = '1px solid var(--line)'; box.style.padding = '6px 0';
+        const box = el('div', 'record');
         box.append(el('div', 'muted', `${new Date(r.t).toLocaleString('ko-KR')} · ${r.user} · ${r.kind === 'disagreement' ? '이견' : r.kind === 'question' ? '넘긴 질문' : r.kind}`));
         box.append(renderValue(Object.fromEntries(Object.entries(r).filter(([k]) => !['t', 'user', 'kind', 'jobId', 'mode'].includes(k)))));
         body.append(box);
@@ -414,24 +486,54 @@
     body.append(el('p', 'muted', '이 요청들은 501(스튜디오 미지원)로 답했습니다. 필요하면 바꾸기에서 "이 화면에 가짜 자료를 넣어 주세요"라고 말하면 됩니다.'));
     body.append(renderValue(state.missing.map(m => `${m.method} ${m.path}`)));
   });
-  $('errors').onclick = () => openPanel('왼쪽 화면의 JavaScript 오류', body => body.append(renderValue(state.errors)));
+  $('errors').onclick = () => openPanel('제품 화면의 JavaScript 오류', body => body.append(renderValue(state.errors)));
 
-  // ── splitter ──
-  const splitter = $('splitter');
-  const saved = Number(localStorage.getItem('studio-chat-width'));
-  if (saved > 280) document.documentElement.style.setProperty('--chat-width', saved + 'px');
-  splitter.addEventListener('pointerdown', e => {
-    splitter.setPointerCapture(e.pointerId);
-    mirror.style.pointerEvents = 'none';
-    const move = ev => {
-      const width = Math.max(300, Math.min(window.innerWidth * 0.7, window.innerWidth - ev.clientX));
-      document.documentElement.style.setProperty('--chat-width', width + 'px');
-      localStorage.setItem('studio-chat-width', String(Math.round(width)));
-    };
-    const up = () => { splitter.removeEventListener('pointermove', move); mirror.style.pointerEvents = ''; };
-    splitter.addEventListener('pointermove', move);
-    splitter.addEventListener('pointerup', up, { once: true });
-  });
+  // ── 스튜디오로 할 수 있는 것: example cards; a click fills the input (he presses send) or points at the control ──
+  function flash(node) { node.classList.add('flash'); node.focus(); setTimeout(() => node.classList.remove('flash'), 2400); }
+  const SHOWCASE = [
+    { title: '가리키고 말하기', body: '고르기를 누르고 제품 화면에서 버튼·칸을 클릭한 뒤 "이거"라고 말하면 정확히 그것을 고칩니다. 클릭해도 그 버튼은 눌리지 않습니다.',
+      mode: 'edit', text: '이거 조금 더 크게, 오른쪽 끝으로 옮겨 주세요', pick: true },
+    { title: '여러 곳을 한 번에', body: '여러 개를 연달아 고르면 한 번에 같이 바꿉니다. 다시 클릭하면 빠지고, Esc는 모두 지웁니다.',
+      mode: 'edit', text: '이것들을 같은 크기와 같은 색으로 맞춰 주세요', pick: true },
+    { title: '모든 화면을 한꺼번에', body: '색·글꼴·글자 크기·간격을 Worklist, Clinician, Admin, Login 화면에 한 번에 적용합니다.',
+      mode: 'edit', text: 'Worklist, Clinician, Admin, Login 화면 모두 기본 글자를 한 단계 키우고 줄 간격을 조금 넓혀 주세요' },
+    { title: '예전 변경 하나만 되돌리기', body: '기록에서 아무 변경이나 골라 되돌립니다. 그 뒤에 쌓인 변경이 있으면 먼저 물어봅니다.',
+      action: () => showChanges() },
+    { title: '"왜 이렇게 되어 있어?"', body: '어느 화면이든 이유를 물으면 코드와 결정 기록에서 근거를 찾아 출처와 함께 답합니다. 근거가 없으면 "미확인"이라고 말합니다.',
+      mode: 'ask', text: 'Related Report는 왜 지금처럼 동작해요? 근거(코드·결정)도 알려 주세요' },
+    { title: '개발 현황 묻기', body: '작업 묶음, 날짜(추정은 추정이라고), 비용·사용량, 선생님 답을 기다리는 것을 현황 자료에서 답합니다. 자료에 없는 날짜는 지어내지 않고 지휘자에게 넘깁니다.',
+      mode: 'ask', text: '제 피드백 12건은 지금 어디까지 왔어요? 저한테 답을 기다리는 것도 있어요?' },
+    { title: '새 기능 시안을 바로', body: '없는 기능을 말하면 가짜 자료로 움직이는 시안을 그 자리에서 만들어 제품 화면에 띄웁니다. 실제 서버 작업은 지휘자 검토 뒤입니다.',
+      mode: 'edit', text: 'Worklist 위쪽에 "오늘 내 판독" 개수를 보여 주는 작은 카운터를 새로 만들어 주세요. 가짜 자료로 시안만요' },
+    { title: '역할 바꿔 보기', body: '역할을 임상의·관리자·기사로 바꾸면 그 사람이 보는 화면으로 바로 바뀝니다.',
+      action: () => flash($('role')) },
+    { title: 'AI가 근거를 대고 반대', body: '환자 안전이나 법에 걸리는 요청은 이유를 먼저 말하고, 같은 목적을 안전하게 이루는 대안을 만들어 보여 줍니다. 이견은 지휘자에게 기록됩니다.',
+      mode: 'edit', text: 'Worklist에서 환자 이름(Name) 열을 없애 주세요. 공간이 아까워요' },
+    { title: '하루 인계', body: '"오늘 끝"을 누르면(또는 1시간 쉬면) 오늘 요청·변경·이견·넘긴 질문이 정리되어 지휘자가 가져갑니다.',
+      action: () => flash($('done')) },
+  ];
+  function showShowcase() {
+    openPanel('스튜디오로 할 수 있는 것', body => {
+      body.append(el('p', 'muted', '카드를 누르면 예시 문장이 입력칸에 들어갑니다. 고쳐서 보내기만 누르세요. 마음에 안 들면 언제든 되돌리기.'));
+      const grid = el('div', 'cards');
+      for (const card of SHOWCASE) {
+        const b = el('button', 'card'); b.type = 'button';
+        b.append(el('strong', '', card.title), el('span', '', card.body));
+        if (card.text) b.append(el('em', '', `"${card.text}"`));
+        b.onclick = () => {
+          panel.close();
+          if (card.action) { card.action(); return; }
+          setMode(card.mode);
+          input.value = card.text;
+          input.focus();
+          if (card.pick) target.pick(true);
+        };
+        grid.append(b);
+      }
+      body.append(grid);
+    });
+  }
+  $('showcase').onclick = showShowcase;
 
   async function refreshState() {
     const s = await api('state');
@@ -446,15 +548,20 @@
   (async () => {
     setMode('edit');
     const s = await refreshState();
-    const screen = localStorage.getItem('studio-screen') || '/worklist/hpacs-lite/main.html';
+    const screen = store.get('studio-screen', DEFAULT_SCREEN);
     $('screen').value = screen;
-    openScreen(s.role === 'clinician' && screen.includes('main.html') ? '/worklist/hpacs-lite/clinician.html' : screen);
+    if (layout === 'overlay') target.open(screen, s.role);
     const history = await api('history');
     for (const entry of history) renderEntry(entry);
     connect();
     setInterval(() => refreshState().catch(() => {}), 30000);
     if (!history.length) {
-      renderEntry({ role: 'system', mode: 'edit', t: new Date().toISOString(), text: '왼쪽은 실제 PACS 화면을 합성 자료로 띄운 것입니다. 바꾸기 탭에서 "이 버튼을 오른쪽으로" 처럼 말하면 몇 초~1분 안에 왼쪽 화면이 바뀝니다. 마음에 안 들면 되돌리기를 누르세요. 물어보기 탭에서는 제품과 개발 현황을 물을 수 있습니다.' });
+      renderEntry({ role: 'system', mode: 'edit', t: new Date().toISOString(), text: layout === 'two'
+        ? '제품 화면은 따로 뜬 창에서 실제 크기로 보입니다("제품 화면 열기"). 여기 바꾸기에서 "이 버튼을 오른쪽으로" 처럼 말하거나, 고르기로 화면을 찍고 "이거"라고 말하면 몇 초~1분 안에 제품 화면이 바뀝니다. 마음에 안 들면 되돌리기. 물어보기에서는 제품과 개발 현황을 물을 수 있습니다.'
+        : '제품 화면 위에 대화가 겹쳐 열립니다(Alt+S로 열고 닫기, 제품 화면 크기는 그대로). 바꾸기에서 말하거나 고르기로 화면을 찍고 "이거"라고 말하면 제품 화면이 바뀝니다. 마음에 안 들면 되돌리기.' });
     }
+    // First visit of this person in this browser: show what the studio can do.
+    const seenKey = `studio-showcase-seen:${s.user}`;
+    if (!store.get(seenKey)) { store.set(seenKey, '1'); showShowcase(); }
   })().catch(error => { if (error.message !== 'login') alert('스튜디오를 열지 못했습니다: ' + error.message); });
 })();

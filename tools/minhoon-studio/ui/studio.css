@@ -15,22 +15,49 @@ select { background: #21262d; border: 1px solid var(--line); border-radius: 6px;
 .muted { color: var(--muted); }
 .grow { flex: 1; }
 
-.bar { display: flex; align-items: center; gap: 10px; height: 46px; padding: 0 12px; background: var(--panel); border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+button.link { background: transparent; border: 0; color: var(--muted); text-decoration: underline; padding: 0 4px; }
+
+.bar { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 4px 12px; background: var(--panel); border-bottom: 1px solid var(--line); white-space: nowrap; flex-wrap: wrap; }
 .brand { font-size: 15px; }
 .badge { background: #3d2e00; color: #f2cc60; border: 1px solid #6e5400; border-radius: 10px; padding: 1px 8px; font-size: 12px; }
 .field { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.product-link { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: #10161f; }
+.product-link button.attention { animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { box-shadow: 0 0 0 4px rgba(47, 129, 247, .35); } }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #6e7681; flex: none; }
+.dot.on { background: var(--good); }
 
-#layout { display: flex; height: calc(100% - 46px); }
-.mirror { position: relative; flex: 1; min-width: 320px; background: #000; }
-.mirror iframe { width: 100%; height: 100%; border: 0; display: block; background: #0b0f14; }
-.banner { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 2; display: flex; gap: 10px; align-items: center; background: #1c2d4a; border: 1px solid var(--accent); padding: 6px 12px; border-radius: 8px; }
-#splitter { width: 6px; cursor: col-resize; background: var(--line); }
-#splitter:hover { background: var(--accent); }
+/* The product fills its window (product window, or the studio window in overlay mode); nothing studio-side takes
+   layout space from it: every studio control on top of it is position: fixed. */
+.product-page { overflow: hidden; }
+.full-product { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; display: block; background: #0b0f14; }
+.banner { position: fixed; top: 8px; left: 50%; transform: translateX(-50%); z-index: 40; display: flex; gap: 10px; align-items: center; background: #1c2d4a; border: 1px solid var(--accent); padding: 6px 12px; border-radius: 8px; }
+.studio-widget { position: fixed; left: 6px; bottom: 6px; z-index: 40; display: flex; align-items: center; gap: 5px; padding: 2px 4px 2px 6px; border-radius: 10px; background: rgba(13, 17, 23, .6); opacity: .55; font-size: 11px; }
+.studio-widget:hover, .studio-widget:has(.on) { opacity: 1; }
+.studio-widget button { font-size: 11px; padding: 0 6px; line-height: 18px; }
+.studio-widget button.on, .pick-btn.on { background: #b35900; border-color: #f0883e; color: #fff; }
+.pick-layer { position: fixed; inset: 0; pointer-events: none; z-index: 35; }
+.pick-box { position: fixed; pointer-events: none; border-radius: 3px; }
+.pick-box.hover { outline: 2px dashed var(--accent); background: rgba(47, 129, 247, .12); }
+.pick-box.picked { outline: 2px solid #f0883e; background: rgba(240, 136, 62, .12); }
+.pick-box.picked::after { content: attr(data-n); position: absolute; left: -2px; top: -20px; background: #f0883e; color: #111; font-size: 11px; font-weight: 600; padding: 0 6px; border-radius: 4px; white-space: nowrap; }
+.pick-shield { position: fixed; z-index: 36; cursor: crosshair; background: transparent; }
+.pick-hint { position: fixed; top: 8px; left: 50%; transform: translateX(-50%); z-index: 41; pointer-events: none; background: #3d2200; border: 1px solid #f0883e; color: #ffd8b5; padding: 4px 12px; border-radius: 8px; font-size: 13px; }
 
-.chat { width: var(--chat-width); min-width: 300px; max-width: 70vw; display: flex; flex-direction: column; background: var(--panel); }
+/* 두 창: this window is the chat only. 한 창: the product fills it and the chat slides over the right edge. */
+.studio-page[data-layout="two"] .overlay-only, .studio-page[data-layout="overlay"] .two-only { display: none !important; }
+.studio { display: flex; flex-direction: column; height: 100%; background: var(--panel); }
+.studio.overlay { position: fixed; top: 0; right: 0; bottom: 0; width: min(var(--chat-width), 100vw); z-index: 50; box-shadow: -8px 0 24px rgba(0, 0, 0, .55); border-left: 1px solid var(--line); transform: translateX(105%); transition: transform .18s ease-out; }
+.studio.overlay.open { transform: none; }
+.overlay-open { position: fixed; right: 8px; bottom: 8px; z-index: 45; background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; opacity: .85; }
+.overlay-open:hover { opacity: 1; }
+
 .tabs { display: flex; border-bottom: 1px solid var(--line); }
 .tabs button { flex: 1; border: 0; border-radius: 0; background: transparent; padding: 10px; font-weight: 600; color: var(--muted); }
 .tabs button.on { color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
+.tabs .showcase-btn { flex: none; color: #f2cc60; font-weight: 500; }
 .job-line { padding: 6px 12px; font-size: 13px; background: #1c2d4a; border-bottom: 1px solid var(--line); }
 .job-line .tools { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
@@ -48,9 +75,22 @@ select { background: #21262d; border: 1px solid var(--line); border-radius: 6px;
 .msg code { background: #0d1117; padding: 0 4px; border-radius: 4px; }
 .applied { color: var(--good); }
 
+.picks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 10px 0; border-top: 1px solid var(--line); font-size: 12px; }
+#chips { display: contents; }
+.chip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; background: #2d1d0c; border: 1px solid #f0883e; border-radius: 12px; padding: 1px 4px 1px 8px; }
+.chip b { color: #f0883e; }
+.chip .x { border: 0; background: transparent; padding: 0 4px; line-height: 1; }
 #composer { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--line); }
 #composer textarea { flex: 1; resize: vertical; min-height: 60px; max-height: 40vh; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
-#composer button { align-self: stretch; padding: 0 16px; background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+#composer #send { align-self: stretch; padding: 0 16px; background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+#composer .pick-btn { align-self: stretch; padding: 0 10px; }
+.flash { outline: 3px solid #f2cc60 !important; outline-offset: 2px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.card { display: flex; flex-direction: column; gap: 6px; text-align: left; padding: 12px; border-radius: 10px; background: #1b222c; }
+.card strong { font-size: 15px; }
+.card span { color: var(--muted); font-size: 13px; }
+.card em { color: #9ecbff; font-style: normal; font-size: 13px; }
+.record { border-bottom: 1px solid var(--line); padding: 6px 0; }
 .actions { display: flex; gap: 6px; padding: 8px 10px 10px; flex-wrap: wrap; align-items: center; }
 .more { position: relative; }
 .more summary { cursor: pointer; color: var(--muted); list-style: none; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; }
