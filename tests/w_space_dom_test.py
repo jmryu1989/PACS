@@ -22,6 +22,7 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import multi_study_view_dom_test as multi  # noqa: E402
 import study_panel_page_dom_test as dom  # noqa: E402
 from study_panel_page_dom_test import KEY, RASTER, WorkspaceSite, auth, settle, wait_startup  # noqa: E402
 
@@ -576,6 +577,60 @@ class WSpaceDOM(unittest.TestCase):
                     self.assertEqual(start['rw'][3], back['rw'][3])
                     self.assertIsNotNone(back['separator'])
                     self.assertEqual(stored, self.stored(page)[axis]['top'])
+
+    def test_wspace_g5_multi_study_keeps_the_tab_strip(self):
+        """TEST-WSPACE-G5 for the contract's named Multi-Study consumer (WS-06): two studies opened with Open Selected
+        Studies, then every content panel hidden. Its composition and work-row floor press on the band in a short window;
+        the placeholder tabs stay a readable full-width strip, the band is gone without them, Show All returns it."""
+        for width, height in SIZES:
+            with self.subTest(size=f'{width}x{height}'):
+                site = multi.W9Site()
+                context = self.browser.new_context(viewport={'width': width, 'height': height})
+                context.route('**/*', lambda route, request, s=site: s.handle(route, request))
+                page = context.new_page()
+                errors = []
+                page.on('pageerror', lambda e: errors.append(str(e)))
+                page.on('dialog', lambda d: d.accept())
+                self.addCleanup(context.close)
+                self.addCleanup(lambda e=errors: self.assertEqual([], e))
+                self.addCleanup(lambda s=site: self.assertEqual([], s.violations))
+                page.goto(auth.MAIN_URL)
+                expect(page.locator('#rows')).to_contain_text(multi.ALPHA)
+                settle(page)
+                site.viewer_owner = page.evaluate(
+                    '() => KinViewerOpening.key(KinAuth.session()).slice(KinViewerOpening.PREFIX.length)')
+                for uid in page.locator('#rows tr[data-uid]').evaluate_all('rows => rows.slice(0, 2).map(r => r.dataset.uid)'):
+                    page.locator(f'#rows tr[data-uid="{uid}"]').click(modifiers=['Control'])
+                page.locator('#multi-selection-open-set').click()
+                expect(page.locator('#multi-study')).to_be_visible()
+                settle(page)
+                start = page.evaluate(GEOM)
+                self.assert_allocation(start, 'Radiology', list(SHARES['Radiology']), 'Multi-Study')
+                for left in (['AI Report', 'Image Report'], ['Image Report']):
+                    hide = {k: False for k in SHARES['Radiology']} if len(left) == 2 else {'aiReport': False}
+                    band = self.set_panels(page, hide)
+                    info = f'Multi-Study {left} {band}'
+                    self.assertEqual(left, band['tabs'], info)
+                    self.assertIsNone(band['thumbwrap'], info)
+                    self.assertIsNone(band['separator'], info)
+                    self.assertGreater(band['rtabs'][3], 0, info)
+                    self.assertAlmostEqual(band['rw'][3], band['rtabs'][3], delta=1, msg=info)
+                    self.assertAlmostEqual(band['rw'][2], band['rtabs'][2], delta=1, msg=info)
+                    # The labels are what is drawn at their own centres, not the Multi-Study heading under them.
+                    hits = page.evaluate('''() => [...document.querySelectorAll('.rw .rtabs > div')]
+                      .filter(n => n.getClientRects().length).map(n => { const b = n.getBoundingClientRect();
+                        return document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2)?.closest('.rtabs > div')?.textContent ?? null; })''')
+                    self.assertEqual(left, hits, info)
+                page.screenshot(path=str(OUT / f'g5-multi-study-tabs-only-{width}x{height}.png'))
+                gone = self.set_panels(page, {'imageReport': False})
+                self.assertIsNone(gone['rw'])
+                self.assertIsNone(gone['separator'])
+                back = self.show_all(page)
+                self.assert_same_content(start, back, 'Multi-Study Show All')
+                page.locator('#multi-study-close').click()
+                expect(page.locator('#multi-study')).to_be_hidden()
+                settle(page)
+                self.assert_allocation(page.evaluate(GEOM), 'Radiology', list(SHARES['Radiology']), 'Multi-Study closed')
 
     def test_wspace_g_responsive_600_601_and_the_selected_study_sheet(self):
         """The contract's responsive consumers of G1/G2/G5: at 600 px the stacked panels are full width and the band is

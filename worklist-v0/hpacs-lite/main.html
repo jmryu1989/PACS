@@ -216,8 +216,9 @@
     body:not(.reading).kin-report-window-empty #resize-top,
     body:not(.reading).kin-report-window-tabs #resize-top { display: none !important; }
     /* Only placeholder tabs left: the band is the tab strip, its height goes to the row below, and the stored band height
-       stays in the record for when a panel comes back (WS-02). The compact and Multi-Study floors are for content. */
-    body:not(.reading).kin-report-window-tabs .right > .rw { height: auto !important; min-height: 0 !important; }
+       stays in the record for when a panel comes back (WS-02). The compact and Multi-Study floors are for content, and
+       the strip does not yield height either: under Multi-Study's composition a shrinking band clipped it to 0 (WS-06). */
+    body:not(.reading).kin-report-window-tabs .right > .rw { height: auto !important; min-height: 0 !important; flex: none !important; }
     /* The choice has no effect there, and the reading toolbar's View row (92px, G-LIVE-GEO) must stay one line. */
     body.reading #panel-settings-open { display: none; }
     .tpl-opts { display: flex; gap: 8px; padding: 3px 8px; background: #171c25; color: #8892a4; font-size: 11px; flex: none; flex-wrap: wrap; }
