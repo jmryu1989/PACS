@@ -9373,5 +9373,46 @@
         ]
       }
     ]
+  },
+  "di_additions_cold_catalog": {
+    "unit": "EMR-E cold first opening (#248 follow-up)",
+    "note": "OrthancImageCatalog follows Orthanc's change log on the EMR background-work registry, so its constructor takes that registry. No controller, provider or route is added.",
+    "middleware_routes": [],
+    "controllers": [],
+    "providers": [],
+    "routes": [],
+    "injectables": {},
+    "changed_injectables": {
+      "OrthancImageCatalog": {
+        "before": {
+          "params": [
+            "PrismaService",
+            "Object",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "2:Symbol(RequestContextSource)",
+            "1:Symbol(CURRENT_CLINICAL_CONTEXT)"
+          ],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PrismaService",
+            "Object",
+            "Object",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "3:Symbol(EmrBackgroundWork)",
+            "2:Symbol(RequestContextSource)",
+            "1:Symbol(CURRENT_CLINICAL_CONTEXT)"
+          ],
+          "optional": []
+        }
+      }
+    }
   }
 }
