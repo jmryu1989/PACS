@@ -149,8 +149,9 @@ export class DicomFrameService {
       target.setHeader(PART_TYPE_HEADER, multipart.contentType);
     } else target.setHeader('Content-Type', multipart.contentType);
     target.setHeader('Vary', 'Accept-Encoding');
-    if (gzip && !request.stored) target.setHeader('Content-Encoding', 'gzip');
-    else target.setHeader('Content-Length', String(multipart.contentLength(request.frames, layout.frameBytes)));
+    // Only the identity body has a length known before it is written; the gzip stream (encoded or stored) has none.
+    if (!gzip) target.setHeader('Content-Length', String(multipart.contentLength(request.frames, layout.frameBytes)));
+    else if (!request.stored) target.setHeader('Content-Encoding', 'gzip');
     if (request.head) { await handle.close().catch(() => {}); target.end(); return; }
     const out = gzip ? createGzip({ level: GZIP_LEVEL }) : target;
     const delivery = gzip ? pipeline(out as any, target as any) : Promise.resolve();

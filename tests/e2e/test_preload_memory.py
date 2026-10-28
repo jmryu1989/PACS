@@ -111,10 +111,14 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
             .map(tr => [tr.dataset.uid, [...tr.cells].slice(1, 4).map(td => td.textContent)]))""")
 
     def wait_status(self, p, uid, pattern, timeout=120000):
-        p.wait_for_function("""([uid, pattern]) => {
-            const tr = document.querySelector(`#preload-panel tbody tr[data-uid="${uid}"]`);
-            return tr && new RegExp(pattern).test(tr.cells[1].textContent);
-        }""", arg=[uid, pattern], timeout=timeout)
+        try:
+            p.wait_for_function("""([uid, pattern]) => {
+                const tr = document.querySelector(`#preload-panel tbody tr[data-uid="${uid}"]`);
+                return tr && new RegExp(pattern).test(tr.cells[1].textContent);
+            }""", arg=[uid, pattern], timeout=timeout)
+        except Exception:
+            print('PANEL', json.dumps(self.panel(p), ensure_ascii=False), flush=True)
+            raise
 
     def memory(self, p):
         text = p.locator('#preload-panel [role="status"]').text_content()
