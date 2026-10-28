@@ -40,10 +40,16 @@
     $('preview-banner').hidden = !preview;
     $('preview-title').textContent = preview ? preview.title : '';
   }
+  // Leaving the preview here: this window and an open viewer (it may run the preview's config/ohif) show the studio
+  // screen again.
+  function previewEnded() {
+    mirror.reload({ reason: 'preview-end' });
+    post({ type: 'viewer-reload', nonce: `preview-end|${Date.now()}|${Math.random()}` });
+  }
   $('preview-stop').onclick = async () => {
     await api('suggestions/preview/stop', { method: 'POST' }).catch(() => {});
     setPreview(null); post({ type: 'preview', id: null });
-    mirror.reload({ reason: 'preview-end' });
+    previewEnded();
   };
   $('preview-apply').onclick = async () => {
     if (!preview) return;
@@ -53,8 +59,8 @@
       const r = await api(`suggestions/${id}/apply`, { json: {} });
       setPreview(null); post({ type: 'preview', id: null, applied: id });
       // Applied from the preview: the studio's reload event shows it. Rebuilt as an edit: show the screen as it is now.
-      if (r.via === 'edit') mirror.reload({ reason: 'preview-end' });
-    } catch (error) { alert(error.message); setPreview(null); mirror.reload({ reason: 'preview-end' }); }
+      if (r.via === 'edit') previewEnded();
+    } catch (error) { alert(error.message); setPreview(null); previewEnded(); }
     finally { $('preview-apply').disabled = false; }
   };
 

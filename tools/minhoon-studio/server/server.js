@@ -158,7 +158,9 @@ async function main() {
     let m;
     if (p === 'events' && method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-      res.write(`data: ${JSON.stringify({ type: 'hello', head: await sandbox.head(), queue: chat.status() })}\n\n`);
+      // The suggestion state comes with the first event (and again on every reconnect): a tab opened while a request
+      // runs or someone types must not show the card until the next change.
+      res.write(`data: ${JSON.stringify({ type: 'hello', head: await sandbox.head(), queue: chat.status(), suggest: suggestions.state(req) })}\n\n`);
       clients.add(res);
       // A chat tab names itself on its event stream; its presence (typing or not) ends when the stream closes.
       const tab = String(url.searchParams.get('tab') || '').slice(0, 40);

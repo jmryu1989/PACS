@@ -136,7 +136,8 @@ class Chat {
     this.log({ role: 'user', user, displayName, mode, text, jobId: job.id, ...(picks.length ? { meta: { picks } } : {}) });
     this.pending++;
     this.onActivity(job);
-    const emit =(state, extra = {}) => { job.state = state; this.broadcast({ type: 'job', id: job.id, mode, user, state, ...extra }); };
+    // The final state, its commit and its failure stay on the job for whoever waits on it (a suggestion's 적용).
+    const emit = (state, extra = {}) => { job.state = state; if (state === 'failed') job.error = String(extra.error || 'failed'); this.broadcast({ type: 'job', id: job.id, mode, user, state, ...extra }); };
     emit('queued', { position: this.pending });
     const work = async () => {
       try {
@@ -238,6 +239,7 @@ class Chat {
       trailers: { 'Studio-Kind': 'change', 'Studio-User': job.user, 'Studio-Request': job.id, 'Studio-Model': result.model || 'default' },
     });
     job.t.committed = Date.now();
+    job.sha = commit.sha;
     this.log({ role: 'assistant', mode: 'edit', jobId: job.id, text, meta: { changed: true, sha: commit.sha, files: commit.files, blocked, steps: check && check.steps, records: records.map(r => r.kind) } });
     job.t.reloadSent = Date.now();
     this.metric(job, { ok: true, changed: true, sha: commit.sha, files: commit.files, result });

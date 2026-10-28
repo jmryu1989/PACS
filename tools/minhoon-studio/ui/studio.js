@@ -14,7 +14,8 @@
   document.body.dataset.layout = layout;
   const state = { mode: 'edit', me: null, live: new Map(), errors: [], missing: [], picks: [], jobsWaiting: new Set(), timings: {},
     product: { seen: 0, page: '', study: null, errors: [], pickActive: false, typing: false },
-    suggestion: null, previewing: null, previewClick: null, suggestAsked: false, seen: new Set() };
+    suggestion: null, previewing: null, previewClick: null, suggestAsked: false, seen: new Set(),
+    rev: 0, activity: { pending: 0, typing: [] } };
   // This tab's name on the event stream and in presence reports (the server prepares a suggestion only while no tab
   // reports typing).
   const TAB = Math.random().toString(36).slice(2, 12);
@@ -143,6 +144,10 @@
         refreshState();
       } else if (ev.type === 'suggestion') {
         suggestionEvent(ev);
+      } else if (ev.type === 'activity') {
+        if (fresh(ev.rev)) { state.activity = ev.activity; renderSuggestion(); }
+      } else if (ev.type === 'hello' && ev.suggest) {
+        applySuggestionState(ev.suggest);
       }
     };
     source.onerror = () => { /* EventSource reconnects by itself */ };
@@ -308,7 +313,8 @@
       if (m.type === 'focused' && !m.ok && m.ask === focusAsk) linkHint = { text: '제품 화면은 이미 열려 있습니다. "… — 스튜디오" 탭을 눌러 주세요.', until: Date.now() + 8000 };
       if (Array.isArray(m.errors)) setErrors(m.errors);
       if ('typing' in m && !!m.typing !== p.typing) { p.typing = !!m.typing; typingChanged(); }
-      if (m.type === 'preview' && !m.id && state.previewing) { state.previewing = null; renderSuggestion(); }
+      // Ended from the product window's banner (it reloads itself and the viewer).
+      if (m.type === 'preview' && !m.id && state.previewing) { transitioned(); state.previewing = null; renderSuggestion(); }
       if (Array.isArray(m.picks)) setPicks(m.picks);
       if ('pickActive' in m) setPickMode(!!m.pickActive);
       if (m.type === 'pick-mode') setPickMode(m.on);
@@ -672,8 +678,33 @@
   }
   $('showcase').onclick = showShowcase;
 
-  // ── 먼저 제안하기: one suggestion at a time, shown only while he is not typing and no change is running ──
+  // ── 먼저 제안하기: one suggestion at a time, shown only while nobody types in any studio tab and no request is
+  // queued or running: the server's queue and typing tabs (sent with the first event, every snapshot and every
+  // change), plus this tab's own typing, which it knows before the server does ──
   function typingNow() { return !!input.value.trim() || !!state.product.typing; }
+  function studioBusy() {
+    const a = state.activity;
+    return typingNow() || a.pending > 0 || a.typing.some(tab => tab !== TAB);
+  }
+  // Server snapshots carry the server's change number: one older than what this tab already shows is dropped.
+  function fresh(rev) {
+    if (typeof rev !== 'number') return true;
+    if (rev < state.rev) return false;
+    state.rev = rev;
+    return true;
+  }
+  // A snapshot asked for before this tab's own preview, answer or apply finished is older than it (the server answers
+  // in any order): only the newest request may apply its answer (review d90ea5f F7: a late presence answer brought a
+  // declined card back).
+  let snapSeq = 0, appliedSeq = 0;
+  function transitioned() { appliedSeq = ++snapSeq; }
+  async function readSuggestions(request) {
+    const mine = ++snapSeq;
+    const s = await request();
+    if (mine < appliedSeq) return;
+    appliedSeq = mine;
+    applySuggestionState(s);
+  }
   let lastTyping = null;
   function typingChanged() {
     renderSuggestion();
@@ -683,11 +714,12 @@
     lastTyping = typingNow();
     const product = state.product;
     try {
-      applySuggestionState(await api('presence', { json: { tab: TAB, typing: lastTyping, page: product.page || '', study: product.study || '', role: $('role').value } }));
+      await readSuggestions(() => api('presence', { json: { tab: TAB, typing: lastTyping, page: product.page || '', study: product.study || '', role: $('role').value } }));
     } catch { /* the next report */ }
   }
   function applySuggestionState(s) {
-    if (!s) return;
+    if (!s || !fresh(s.rev)) return;
+    if (s.activity) state.activity = s.activity;
     state.suggestion = s.current && ['ready', 'preparing'].includes(s.current.status) ? s.current : null;
     if (state.previewing && s.previewing !== state.previewing) endPreviewHere();
     else if (s.previewing && state.suggestion && !state.previewing) {
@@ -698,12 +730,13 @@
   }
   function suggestionEvent(ev) {
     const item = ev.item;
-    if (!item) return;
+    if (!item || !fresh(ev.rev)) return;
+    if (ev.activity) state.activity = ev.activity;
     if (['ready', 'preparing'].includes(item.status)) {
       state.suggestion = item;
       if (item.status === 'ready') state.suggestAsked = false;
-      // Rebuilt on top of a change made meanwhile: the preview on screen is the old one.
-      if (ev.rebased && state.previewing === item.id) target.reload({ reason: 'preview-rebased' }, `preview-rebased|${item.id}|${Date.now()}`);
+      // Rebuilt on top of a change made meanwhile: the preview on screen (product and viewer) is the old one.
+      if (ev.rebased && state.previewing === item.id) reloadBoth({ reason: 'preview-rebased' }, `preview-rebased|${item.id}|${ev.rev}`);
     } else {
       if (state.suggestion && state.suggestion.id === item.id) state.suggestion = null;
       if (state.previewing === item.id) endPreviewHere();
@@ -721,8 +754,9 @@
   function renderSuggestion() {
     const s = state.suggestion;
     const ready = !!s && s.status === 'ready';
-    // Never while he types or a change runs (D5); a preview he opened stays reachable.
-    const show = ready && (state.previewing === s.id || (!typingNow() && !state.jobsWaiting.size));
+    // Never while anyone types or a request runs (D5), also during a preview: its banner in the product window keeps
+    // 원래대로 and 적용 reachable.
+    const show = ready && !studioBusy();
     $('suggest').hidden = !show;
     if (state.suggestAsked && !ready) { $('suggest-wait').textContent = '다음 제안을 준비하고 있어요…'; $('suggest-wait').hidden = false; }
     else if (ready) $('suggest-wait').hidden = true;
@@ -748,15 +782,20 @@
     if (!s || s.status !== 'ready') return;
     const clicked = Date.now();
     try { await api(`suggestions/${s.id}/preview`, { json: {} }); } catch (error) { alert(error.message); return; }
+    transitioned();
     state.previewing = s.id;
     target.preview({ id: s.id, title: s.title });
     renderSuggestion();
     $('suggest-note').textContent = '미리보기 여는 중…';
+    // An open viewer is served from the preview copy too (config/ohif) once it reloads.
+    viewer.reload(`preview|${s.id}|${clicked}`);
     if (target.connected()) {
       state.previewClick = { id: s.id, clicked };
       target.reload({ reason: 'preview' }, `preview|${s.id}|${clicked}`);
     } else { $('suggest-note').textContent = ''; target.show(); } // the product window opens on the preview (its banner says so)
   }
+  // The product window and an open viewer show the same copy: both reload when it changes.
+  function reloadBoth(ev, nonce) { target.reload(ev, nonce); viewer.reload(nonce); }
   // The product window reports the preview's screen as usable: click -> usable is what he waits for.
   function previewShown(info) {
     const click = state.previewClick;
@@ -773,23 +812,25 @@
   // The server has already cleared (or no longer honours) this browser's preview: show the real screen again.
   function endPreviewHere() {
     if (!state.previewing) return;
+    transitioned();
     state.previewing = null;
     state.previewClick = null;
     $('suggest-note').textContent = '';
     target.preview(null);
-    target.reload({ reason: 'preview-end' }, `preview-end|${Date.now()}|${Math.random()}`);
+    reloadBoth({ reason: 'preview-end' }, `preview-end|${Date.now()}|${Math.random()}`);
     renderSuggestion();
   }
   async function applySuggestion(id) {
     $('suggest-apply').disabled = true;
     try {
       const r = await api(`suggestions/${id}/apply`, { json: {} });
+      transitioned();
       const wasPreviewing = state.previewing === id;
       state.previewing = null; state.previewClick = null; $('suggest-note').textContent = '';
       target.preview(null);
       // Applied from the preview: the studio's reload event shows it. Rebuilt as an edit: leave the preview now.
       if (r.via === 'edit') {
-        if (wasPreviewing) target.reload({ reason: 'preview-end' }, `preview-end|${Date.now()}`);
+        if (wasPreviewing) reloadBoth({ reason: 'preview-end' }, `preview-end|${Date.now()}|${Math.random()}`);
         renderEntry({ role: 'system', mode: 'edit', t: new Date().toISOString(), text: '그사이 화면이 바뀌어 미리 만든 그대로는 맞지 않습니다. 같은 제안을 지금 화면에 다시 만들고 있습니다.' });
       }
     } catch (error) { alert(error.message); }
@@ -800,7 +841,10 @@
     if (!s) return;
     try {
       await api(`suggestions/${s.id}/answer`, { json: { answer } });
+      transitioned();
       if (answer === 'skipped') state.suggestAsked = true;
+      // Answered here: gone from this card now, whatever the event stream or an older snapshot says later.
+      if (state.suggestion && state.suggestion.id === s.id) state.suggestion = null;
       endPreviewHere();
     } catch (error) { alert(error.message); }
     renderSuggestion();
@@ -809,7 +853,7 @@
     if (state.suggestion && state.suggestion.status === 'ready') { renderSuggestion(); if (!$('suggest').hidden) flash($('suggest')); return; }
     state.suggestAsked = true;
     renderSuggestion();
-    try { applySuggestionState(await api('suggestions/next', { json: {} })); } catch (error) { alert(error.message); }
+    try { await readSuggestions(() => api('suggestions/next', { json: {} })); } catch (error) { alert(error.message); }
   }
 
   // A state answer carries the role as it was when the request started; a role the product window reported or he
@@ -837,7 +881,7 @@
     const history = await api('history');
     for (const entry of history) renderEntry(entry);
     connect();
-    applySuggestionState(await api('suggestions').catch(() => null));
+    await readSuggestions(() => api('suggestions')).catch(() => {});
     setInterval(() => refreshState().catch(() => {}), 30000);
     if (!history.length) {
       renderEntry({ role: 'system', mode: 'edit', t: new Date().toISOString(), text: layout === 'two'

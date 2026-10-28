@@ -81,6 +81,16 @@ test('a suggestion is grounded only by feedback it quotes as written and files t
   assert.strictEqual(parseSuggestion('블록 없음').error, 'no-block');
 });
 
+test('a feedback ground must quote the item it names (review d90ea5f F3)', () => {
+  const ground = g => parseSuggestion(block({ ...SUGGESTION, grounds: [g] }), { feedback: FEEDBACK });
+  const otherItem = ground({ kind: 'feedback', ref: '8', quote: 'Sky blue is for selected states and accents, not body text.' });
+  assert.strictEqual(otherItem.error, 'ungrounded', 'item 8 does not say what item 11 says');
+  assert.strictEqual(ground({ kind: 'feedback', ref: '8' }).error, 'ungrounded', 'no quote');
+  assert.strictEqual(ground({ kind: 'feedback', ref: '8', quote: '  ' }).error, 'ungrounded', 'an empty quote');
+  assert.strictEqual(ground({ kind: 'feedback', ref: '8', quote: 'put Clinical Context beside the editor' }).suggestion.grounds[0].ref, '8');
+  assert.strictEqual(ground({ kind: 'feedback', ref: '11', quote: 'Colours.' }).suggestion.grounds.length, 1, 'the item title is part of the item');
+});
+
 test('nothing is prepared while he types, while a request runs, or with no studio open; then exactly one is', async () => {
   let release;
   const { s, chat, prompts } = await setup();
@@ -218,8 +228,90 @@ test('적용 after a conflicting change builds the same request as an ordinary e
   chat.claude = async (job, mode, prompt) => { if (mode === 'edit') asked.push(job.text); return real(job, mode, prompt); };
   const r = await s.apply(item.id, { user: 'minhoon', displayName: '민훈' });
   assert.strictEqual(r.via, 'edit');
+  assert.strictEqual(s.items().find(i => i.id === item.id).status, 'applying', 'not applied before the edit has run');
   await settle(s);
   assert.match(asked[0], /본문 글자색을 #e3e3e3로/);
+  const [commit] = await sandbox.log();
+  const after = s.items().find(i => i.id === item.id);
+  assert.strictEqual(after.status, 'applied');
+  assert.strictEqual(after.sha, commit.sha, 'applied names the commit the edit made');
+});
+
+test('적용 whose fallback edit fails or changes nothing is recorded as that, not as applied (review d90ea5f F4)', async () => {
+  for (const [name, edit, status] of [['failed', () => cli({ exitCode: 1, sawResult: false }), 'apply-failed'], ['no change', () => cli({ text: '바꿀 것이 없습니다.' }), 'apply-no-change']]) {
+    const { s, sandbox, chat, data } = await setup();
+    s.presence('tab1', 'minhoon', { typing: false });
+    await settle(s);
+    const item = s.current();
+    write(sandbox.dir, CSS, 'body { color: #b4b4b4; }\n.row { padding: 2px; }\n');
+    await sandbox.commit({ subject: 'same line', trailers: { 'Studio-Kind': 'change', 'Studio-User': 'minhoon' } });
+    const head = await sandbox.head();
+    const real = chat.claude;
+    chat.claude = async (job, mode, prompt) => (mode === 'edit' ? edit() : real(job, mode, prompt));
+    assert.strictEqual((await s.apply(item.id, { user: 'minhoon', displayName: '민훈' })).via, 'edit');
+    await settle(s);
+    assert.strictEqual(await sandbox.head(), head, `${name}: the screen did not change`);
+    const after = s.items().find(i => i.id === item.id);
+    assert.strictEqual(after.status, status, name);
+    const events = readJsonl(path.join(data, 'public', 'suggestions.jsonl')).filter(e => e.id === item.id).map(e => e.event);
+    assert.ok(!events.includes('applied'), `${name}: no applied event (${events})`);
+    const d = await writeDigest({ dataDir: data, sandbox });
+    assert.strictEqual(d.summary.suggestions.find(r => r.id === item.id).outcome, status, `${name}: digest row`);
+    assert.strictEqual(d.summary.counts.suggestionsApplied, 0, `${name}: digest count`);
+  }
+});
+
+test('answered suggestions are remembered however many attempts follow (review d90ea5f F5)', async () => {
+  const { s } = await setup();
+  s.presence('tab1', 'minhoon', { typing: false });
+  await settle(s);
+  const first = s.current();
+  s.answer(first.id, 'declined', 'minhoon');
+  await settle(s);
+  // Many prepares that produced nothing (the actual cut is 300 attempts).
+  const items = s.items();
+  for (let n = 0; n < 320; n++) items.push({ id: `f${String(n).padStart(7, '0')}`, t: new Date().toISOString(), status: 'failed', error: 'claude-failed' });
+  s.save(items);
+  const kept = s.items();
+  assert.ok(kept.length <= 302, 'attempt history is still trimmed');
+  assert.ok(s.remembered(kept).some(i => i.id === first.id), 'the declined one is still remembered');
+  assert.strictEqual(s.repeats(SUGGESTION, kept), true, 'and the same idea counts as a repeat');
+});
+
+test('the digest counts applied suggestions (review d90ea5f F6)', async () => {
+  const { s, sandbox, data } = await setup();
+  s.presence('tab1', 'minhoon', { typing: false });
+  await settle(s);
+  const item = s.current();
+  await s.apply(item.id, { user: 'minhoon', displayName: '민훈' });
+  await settle(s);
+  const d = await writeDigest({ dataDir: data, sandbox });
+  assert.strictEqual(d.summary.suggestions.find(r => r.id === item.id).outcome, 'applied');
+  assert.strictEqual(d.summary.counts.suggestionsApplied, 1);
+  assert.match(fs.readFileSync(d.file, 'utf8'), /먼저 한 제안 \d+건 · 적용 1건/);
+});
+
+test('every tab learns who is typing and whether a request is queued, with a change number (review d90ea5f F1, F7)', async () => {
+  const { s, chat, events } = await setup();
+  s.enabled = false; // only the activity is looked at here
+  const rev0 = s.state().rev;
+  s.presence('tab1', 'minhoon', { typing: false });
+  s.presence('tab2', 'owner', { typing: true });
+  const typed = events.filter(e => e.type === 'activity').pop();
+  assert.deepStrictEqual(typed.activity.typing, ['tab2']);
+  assert.ok(typed.rev > rev0);
+  let release;
+  const gate = new Promise(r => { release = r; });
+  chat.claude = async () => { await gate; return cli({ text: '답' }); };
+  chat.enqueue({ user: 'minhoon', displayName: '민훈', mode: 'ask', text: '질문' });
+  const queued = s.state();
+  assert.strictEqual(queued.activity.pending, 1, 'a snapshot (also a newly opened tab) says a request runs');
+  assert.ok(queued.rev > typed.rev);
+  release();
+  while (chat.pending) await new Promise(r => setTimeout(r, 10));
+  assert.strictEqual(events.filter(e => e.type === 'activity').pop().activity.pending, 0);
+  s.dropTab('tab2');
+  assert.deepStrictEqual(events.filter(e => e.type === 'activity').pop().activity.typing, [], 'a closed tab no longer types');
 });
 
 test('the digest lists every suggestion with its grounds, timings and his answer', async () => {

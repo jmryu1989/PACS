@@ -125,7 +125,7 @@ async function writeDigestNow({ dataDir, sandbox, reason = 'manual', by = null, 
       reloadTimeouts: requests.filter(r => r.reloadTimedOut).length, lateReloads: lateReloads.length,
       reverts: log.filter(c => c.trailers['Studio-Kind'] === 'revert').length,
       disagreements: records.filter(r => r.kind === 'disagreement').length, forwarded: records.filter(r => r.kind === 'question').length,
-      suggestions: suggestions.filter(s => s.prepared).length, suggestionsApplied: suggestions.filter(s => s.answer === 'applied').length },
+      suggestions: suggestions.filter(s => s.prepared).length, suggestionsApplied: suggestions.filter(s => s.outcome === 'applied').length },
     suggestionTiming: {
       prepareP50Ms: pct(suggestions.map(s => s.prepareMs), 50),
       previewClickToReadyP50Ms: pct(suggestions.flatMap(s => s.previewMs), 50), previewClickToReadyP90Ms: pct(suggestions.flatMap(s => s.previewMs), 90),
@@ -196,7 +196,9 @@ async function writeDigestNow({ dataDir, sandbox, reason = 'manual', by = null, 
 }
 
 // One row per suggestion with any event since the last handoff (prepared, shown, previewed, answered, set aside).
-const ANSWER_LABELS = { applied: '적용', declined: '됐어요', skipped: '다른 제안', stale: '화면이 바뀌어 버림', failed: '만들기 실패', none: '근거 있는 제안 없음', interrupted: '재시작에 끊김' };
+// The last of these events is the row's outcome ('applying' until the edit an 적용 fell back to settles).
+const ANSWER_LABELS = { applied: '적용', declined: '됐어요', skipped: '다른 제안', stale: '화면이 바뀌어 버림', failed: '만들기 실패', none: '근거 있는 제안 없음', interrupted: '재시작에 끊김',
+  applying: '적용 중', 'apply-failed': '적용 실패', 'apply-no-change': '적용했지만 바뀐 것 없음' };
 function suggestionRows(events, since) {
   const byId = new Map();
   for (const e of events) {

@@ -7,7 +7,8 @@ on a free local port and drives the served studio.html / product.html in headles
 PATH). Only test-side observers are added (an iframe load counter in the product window, a click counter in the
 product frame, a hook on the chat's EventSource, load/pointer/key counters in the viewer popup, the admin answers
 read off the network, and one chat send answered by the test so its picks can be read without a Claude turn); no
-product or studio code is replaced. Writes <out>/results.json and
+product or studio code is replaced. The 먼저 제안하기 boundaries (P1-P3) run on a second studio server with one
+seeded ready suggestion, where only the external Claude CLI is a --require double. Writes <out>/results.json and
 screenshots; exit 1 if any check fails. Adapted from the GPT functional review scripts of 9f4437c.
 """
 import argparse, json, os, pathlib, re, socket, subprocess, sys, time, traceback, urllib.request
@@ -170,6 +171,151 @@ def viewer_checks(viewer, chat, product):
     viewer.locator(".studio-widget button").click(); settle(viewer, 300)
     record("V4 Esc leaves picking in the viewer; the chat's 고르기 turns every window off; Alt+G and the corner 고르기 work in the viewer",
            esc_off and all_off and alt_on and not shield_on(viewer), {"escOff": esc_off, "allOff": all_off, "altOn": alt_on})
+
+def suggestion_boundaries(browser):
+    """먼저 제안하기 at its browser boundaries, without a real Claude turn (review d90ea5f F1, F2, F7).
+
+    A second studio server on a copy of the sandbox holds one ready suggestion whose preview copy changes main.html and
+    config/ohif.js (config/ohif.js sets window.__studioPreviewMark, so the viewer shows which copy it runs). Preparing is
+    off. Only the external Claude CLI is replaced (a --require double that answers once a hold file is removed), so a
+    real request can be kept queued; the writer queue, presence, events and every page are the real ones.
+    """
+    import shutil
+    R = OUT / "suggest-boundaries"
+    if R.exists(): shutil.rmtree(R, ignore_errors=True)
+    R.mkdir(parents=True)
+    def git(cwd, *args): return subprocess.check_output(["git", *args], cwd=cwd, text=True, encoding="utf-8").strip()
+    subprocess.run(["git", "clone", "-q", "--shared", "--no-checkout", str(OUT / "sandbox"), str(R / "sandbox")], check=True, timeout=120)
+    git(R / "sandbox", "config", "core.autocrlf", "false"); git(R / "sandbox", "checkout", "-q", "-b", "synthetic-check", "studio-base")
+    base = git(R / "sandbox", "rev-parse", "HEAD")
+    git(R / "sandbox", "worktree", "add", "-q", "--detach", str(R / "sandbox-preview"), "HEAD")
+    with (R / "sandbox-preview/worklist-v0/hpacs-lite/main.html").open("a", encoding="utf-8") as fh: fh.write("\n<!-- SYNTHETIC_PREVIEW -->\n")
+    with (R / "sandbox-preview/config/ohif.js").open("a", encoding="utf-8") as fh: fh.write("\nwindow.__studioPreviewMark = 'P1';\n")
+    git(R / "sandbox-preview", "add", "worklist-v0/hpacs-lite/main.html", "config/ohif.js")
+    git(R / "sandbox-preview", "-c", "user.name=Synthetic check", "-c", "user.email=check@synthetic.invalid", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "synthetic preview")
+    prev = git(R / "sandbox-preview", "rev-parse", "HEAD")
+    for d in ["data/public", "empty-claude", "empty-dicomweb"]: (R / d).mkdir(parents=True, exist_ok=True)
+    item = {"id": "5a5a5a5a", "key": "synthetic-preview", "kind": "improve", "title": "Synthetic preview", "why": "synthetic check", "status": "ready",
+            "baseSha": base, "previewSha": prev, "files": ["worklist-v0/hpacs-lite/main.html"], "grounds": [{"kind": "screen", "ref": "worklist-v0/hpacs-lite/main.html"}],
+            "request": "synthetic", "t": "2026-10-28T00:00:00Z"}
+    (R / "data/suggestions.json").write_text(json.dumps({"items": [item]}), encoding="utf-8")
+    ohif = a.ohif
+    if not ohif:
+        # No OHIF build given: a stand-in index that loads the served config like OHIF's own index does.
+        ohif = str(R / "ohif-stand-in"); pathlib.Path(ohif).mkdir()
+        (R / "ohif-stand-in/index.html").write_text('<!doctype html><html><head><script src="./app-config.js"></script></head><body><div id="root">viewer stand-in</div></body></html>', encoding="utf-8")
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0)); sport = s.getsockname()[1]
+    cfg = {"listen": {"host": "127.0.0.1", "port": sport}, "suggest": {"enabled": False},
+           "paths": {"sandbox": str(R / "sandbox"), "sandboxRead": str(R / "sandbox-read"), "sandboxPreview": str(R / "sandbox-preview"), "data": str(R / "data"),
+                     "knowledge": str(STUDIO / "knowledge-seed"), "ohifDist": ohif, "dicomweb": a.dicomweb or str(R / "empty-dicomweb")},
+           "claude": {"bin": str(R / "unavailable-claude"), "account": "synthetic", "configDirs": {"synthetic": str(R / "empty-claude")},
+                      "python": "python", "shellTool": "PowerShell", "models": {"fast": "stub", "deep": "stub"}, "defaultChoice": "fast"}}
+    (R / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+    hold = R / "hold"
+    (R / "cli-double.cjs").write_text(
+        "const fs = require('fs'); const { Chat } = require(" + json.dumps(str(STUDIO / "server/chat.js")) + ");\n"
+        "Chat.prototype.claude = async function () { while (fs.existsSync(" + json.dumps(str(hold)) + ")) await new Promise(r => setTimeout(r, 100));\n"
+        "  return { text: 'synthetic answer', model: 'stub', sawResult: true, exitCode: 0, t: { spawn: Date.now(), done: Date.now() }, tools: [], edits: [], denials: [] }; };\n", encoding="utf-8")
+    subprocess.run(["node", server_js, "set-password", USER, "Synthetic check", "--config", str(R / "config.json")], input=PASSWORD + "\n", text=True, check=True, timeout=60, cwd=REPO)
+    slog = (R / "server.log").open("w", encoding="utf-8")
+    srv = subprocess.Popen(["node", "--require", str(R / "cli-double.cjs"), server_js, "--config", str(R / "config.json")], cwd=REPO, stdout=slog, stderr=subprocess.STDOUT)
+    url = f"http://127.0.0.1:{sport}"
+    try:
+        for _ in range(100):
+            try: urllib.request.urlopen(url + "/studio/login.html", timeout=1); break
+            except Exception: time.sleep(0.1)
+        ctx = browser.new_context(viewport={"width": 1500, "height": 950})
+        p = ctx.new_page()
+        p.goto(url + "/studio/login.html"); p.fill("[name=user]", USER); p.fill("[name=password]", PASSWORD); p.click("button[type=submit]"); p.wait_for_url("**/studio/studio.html")
+        p.locator("#panel[open]").wait_for(); p.click("#panel-close")
+        def card(page): return page.locator("#suggest").is_visible()
+        def card_becomes(page, want, timeout=5000): return wait_until(page, lambda: card(page) == want, timeout)
+        card_becomes(p, True, 10000)
+        with ctx.expect_page() as q: p.click("#open-product")
+        product = q.value; rows_ready(product)
+        with ctx.expect_page() as q: p.select_option("#screen", "viewer")
+        viewer = q.value; count_loads(viewer); viewer.wait_for_load_state("load"); viewer.wait_for_selector(".studio-widget", timeout=30000); settle(viewer, 1500)
+        def mark():
+            viewer.wait_for_function("() => !!window.config", timeout=30000)
+            return viewer.evaluate("window.__studioPreviewMark || null")
+        def served_main(): return "SYNTHETIC_PREVIEW" in product.evaluate('async () => (await fetch("/worklist/hpacs-lite/main.html", { cache: "no-store" })).text()')
+
+        # F2: the open viewer follows preview entry and both ways out (chat card, product banner).
+        n = count_loads(viewer); mark0 = mark()
+        p.click("#suggest-preview"); product.locator("#preview-banner:not([hidden])").wait_for(timeout=10000)
+        entered = wait_loads(viewer, n + 1); mark1 = mark() if entered else None
+        settle(viewer, 1500)
+        record("P2 미리보기 reloads an open viewer once, which then runs the preview copy (config/ohif)", mark0 is None and entered and count_loads(viewer) == n + 1 and mark1 == "P1" and served_main(),
+               {"markBefore": mark0, "viewerLoads": count_loads(viewer) - n, "markInPreview": mark1})
+
+        # F1: typing during a preview hides the card; the product window's banner keeps 원래대로/적용 reachable.
+        p.fill("#input", "입력 중"); settle(p, 400)
+        typing_hidden = not card(p); banner = product.locator("#preview-banner").is_visible()
+        p.screenshot(path=str(R / "p1-typing-during-preview.png"))
+        p.fill("#input", ""); back = card_becomes(p, True)
+        record("P1 typing during a preview hides the card; the preview banner stays; the card returns after", typing_hidden and banner and back,
+               {"hiddenWhileTyping": typing_hidden, "bannerWhileTyping": banner, "cardBack": back})
+
+        n = count_loads(viewer)
+        product.click("#preview-stop"); left = wait_loads(viewer, n + 1); mark2 = mark() if left else "not reloaded"; settle(viewer, 1500)
+        record("P2 원래대로 in the product banner reloads the open viewer once, back to the studio copy", left and count_loads(viewer) == n + 1 and mark2 is None and not served_main(),
+               {"viewerLoads": count_loads(viewer) - n, "markAfter": mark2})
+        n = count_loads(viewer)
+        p.click("#suggest-preview"); product.locator("#preview-banner:not([hidden])").wait_for(timeout=10000); wait_loads(viewer, n + 1); mark()
+        n = count_loads(viewer)
+        p.click("#suggest-preview"); left = wait_loads(viewer, n + 1); mark3 = mark() if left else "not reloaded"; settle(viewer, 1500)
+        record("P2 원래대로 on the chat card reloads the open viewer once, back to the studio copy", left and count_loads(viewer) == n + 1 and mark3 is None and not product.locator("#preview-banner").is_visible(),
+               {"viewerLoads": count_loads(viewer) - n, "markAfter": mark3})
+
+        # F1: typing in another studio tab hides the card in this one.
+        second = ctx.new_page(); second.goto(url + "/studio/studio.html"); card_becomes(second, True, 10000)
+        second.fill("#input", "다른 탭에서 입력"); other_hidden = card_becomes(p, False)
+        second.fill("#input", ""); other_back = card_becomes(p, True)
+        record("P1 typing in another studio tab hides the card in this tab, and it returns after", other_hidden and other_back, {"hidden": other_hidden, "back": other_back})
+        second.close()
+
+        # F1: a queued/running request hides the card in this tab and in a tab opened while it runs.
+        hold.write_text("hold", encoding="utf-8")
+        status = p.evaluate('async () => (await fetch("/studio-api/chat", { method: "POST", headers: { "Content-Type": "application/json", "X-Studio": "1" }, body: JSON.stringify({ mode: "ask", text: "synthetic held question" }) })).status')
+        running_hidden = card_becomes(p, False)
+        fresh_tab = ctx.new_page(); fresh_tab.goto(url + "/studio/studio.html"); fresh_tab.locator("#messages li").first.wait_for(timeout=10000); settle(fresh_tab, 1500)
+        queue = fresh_tab.evaluate('async () => (await (await fetch("/studio-api/state")).json()).queue')
+        fresh_hidden = not card(fresh_tab)
+        fresh_tab.screenshot(path=str(R / "p1-new-tab-during-request.png"))
+        hold.unlink()
+        back_both = card_becomes(fresh_tab, True, 10000) and card_becomes(p, True, 10000)
+        record("P1 a running request hides the card in this tab and in a tab opened while it runs; both show it again when it ends",
+               status == 202 and running_hidden and fresh_hidden and queue["pending"] >= 1 and back_both,
+               {"chatStatus": status, "hiddenHere": running_hidden, "hiddenInNewTab": fresh_hidden, "queueSeenByNewTab": queue, "backAfter": back_both})
+        fresh_tab.close()
+
+        # F7: a presence answer that was already on its way when 됐어요 was pressed does not bring the card back. The
+        # server's genuine answer is fetched at once and delivered after the answer (test-side delay only).
+        held = {"route": None, "response": None}
+        def delay(route):
+            if held["route"] is None and json.loads(route.request.post_data or "{}").get("typing"):
+                held["response"] = route.fetch(); held["route"] = route
+            else: route.continue_()
+        p.route("**/studio-api/presence", delay)
+        p.fill("#input", "잠깐 입력"); wait_until(p, lambda: held["route"] is not None, 5000)
+        p.fill("#input", ""); card_becomes(p, True)
+        p.click("#suggest-no"); answered_hidden = card_becomes(p, False)
+        late = held["route"]
+        if late: late.fulfill(response=held["response"])
+        settle(p, 1500)
+        server_now = p.evaluate('async () => (await (await fetch("/studio-api/suggestions")).json()).current')
+        record("P3 a late presence answer does not bring back a suggestion answered 됐어요", late is not None and answered_hidden and not card(p) and server_now is None,
+               {"held": late is not None, "hiddenAfterAnswer": answered_hidden, "visibleAfterLateAnswer": card(p), "serverCurrent": server_now})
+        p.unroute("**/studio-api/presence")
+        ctx.close()
+    finally:
+        if hold.exists(): hold.unlink()
+        if os.name == "nt": subprocess.run(["taskkill", "/T", "/F", "/PID", str(srv.pid)], capture_output=True)
+        srv.terminate()
+        try: srv.wait(timeout=10)
+        except subprocess.TimeoutExpired: srv.kill(); srv.wait(timeout=10)
+        slog.close()
 
 log = (OUT / "server.log").open("w", encoding="utf-8")
 server = subprocess.Popen(["node", server_js, "--config", str(OUT / "config.json")], cwd=REPO, stdout=log, stderr=subprocess.STDOUT)
@@ -531,7 +677,6 @@ try:
                 p = OUT / root / rel
                 return p.read_bytes().decode("utf-8") if p.exists() else None
             def card_visible(): return chat.locator("#suggest").is_visible()
-            def fake(ev): chat.evaluate('e => window.__sources[0].onmessage({ data: JSON.stringify(e) })', ev)
             def wait_ready(not_ids, timeout_s=900, ask=True):
                 deadline, asked = time.time() + timeout_s, 0
                 while time.time() < deadline:
@@ -564,17 +709,16 @@ try:
             chat.fill("#input", "입력 중인 문장"); settle(chat, 300)
             hidden_typing = not card_visible()
             chat.fill("#input", ""); settle(chat, 300)
-            fake({"type": "job", "id": "check-run", "mode": "edit", "user": USER, "state": "running"}); settle(chat, 200)
-            hidden_running = not card_visible()
-            fake({"type": "job", "id": "check-run", "mode": "edit", "user": USER, "state": "done"}); settle(chat, 200)
+            # A request running hides it too: checked in P1 with a real queued request (the card follows the server's
+            # queue, so a job event made up in this page would not be the real boundary).
             f = frame(product)
             f.locator(f'#rows tr[data-uid="{FIRST_UID}"]').click(); settle(product, 700)
             f.locator("textarea:visible").first.focus(); settle(product, 2600)
             hidden_product_typing = not card_visible()
             f.evaluate("() => document.activeElement && document.activeElement.blur()"); settle(product, 2600)
-            record("S2 the card stays out of the way while he types (chat or product) or a change runs, and comes back after",
-                   hidden_typing and hidden_running and hidden_product_typing and card_visible(),
-                   {"hiddenWhileTypingInChat": hidden_typing, "hiddenWhileRunning": hidden_running, "hiddenWhileTypingInProduct": hidden_product_typing, "backAfter": card_visible()})
+            record("S2 the card stays out of the way while he types (chat or product), and comes back after",
+                   hidden_typing and hidden_product_typing and card_visible(),
+                   {"hiddenWhileTypingInChat": hidden_typing, "hiddenWhileTypingInProduct": hidden_product_typing, "backAfter": card_visible()})
 
             files = [x for x in cur["files"] if x.startswith("worklist-v0/")]
             sug_files = sug(chat)["current"]["files"]
@@ -659,6 +803,7 @@ try:
                {"openBefore": opened, "hiddenWhilePicking": hidden_while_picking, "openAfter": reopen.locator("#studio.open").count() == 1})
         reopen.screenshot(path=str(OUT / "f8-overlay-after-resize.png"))
         reopen.evaluate("() => localStorage.setItem('studio-layout', 'two')")
+        suggestion_boundaries(browser)
         browser.close()
 except Exception as e:
     traceback.print_exc(); checks.append({"name": "harness completion", "pass": False, "error": repr(e)})

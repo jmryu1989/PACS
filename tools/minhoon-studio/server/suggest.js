@@ -20,15 +20,22 @@ const PREVIEW_PATHS = ['worklist-v0/hpacs-lite/', 'config/ohif/', 'config/ohif.j
 const SOURCE_PATHS = ['worklist-v0/hpacs-lite/', 'config/ohif/'];
 const BLOCK_RE = /<studio-suggestion>([\s\S]*?)<\/studio-suggestion>/g;
 const GROUND_KINDS = new Set(['screen', 'feedback', 'practice']);
-const OPEN = new Set(['preparing', 'ready']);
-const ANSWERED = new Set(['applied', 'declined', 'skipped']);
+// 'applying': 적용 was pressed but the preview no longer fit, so the same request runs as an ordinary edit; the
+// suggestion stays open until that edit settles (review d90ea5f F4: it used to be "applied" on enqueue).
+const OPEN = new Set(['preparing', 'ready', 'applying']);
+const ANSWERED = new Set(['applied', 'declined', 'skipped', 'apply-failed', 'apply-no-change']);
+// What he has answered, or seen before the screen moved on: never offered again.
+const remembered = i => !!i.title && (ANSWERED.has(i.status) || (i.status === 'stale' && !!i.seenAt));
+// Attempt history kept in suggestions.json; answered ones are kept beyond it (review d90ea5f F5).
+const KEEP_ATTEMPTS = 300;
 const COOKIE = 'mstudio_preview';
 const norm = s => String(s == null ? '' : s).replace(/[*_`>#]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
 const oneLine = (s, n) => { const t = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
 
 // The last <studio-suggestion> block of a turn, checked: a title, a request and at least one ground that holds up.
-// Feedback grounds must name an existing item and quote it as written; a screen ground that names a file must name
-// one that exists. A suggestion whose grounds all fail is not offered (it would be an unsupported claim).
+// Feedback grounds must name an existing item and quote that item as written (a quote from another item, or none,
+// would show a citation that does not say what the card claims); a screen ground that names a file must name one
+// that exists. A suggestion whose grounds all fail is not offered (it would be an unsupported claim).
 function parseSuggestion(text, { feedback = '', fileExists = () => true } = {}) {
   const blocks = [...String(text || '').matchAll(BLOCK_RE)];
   if (!blocks.length) return { error: 'no-block' };
@@ -39,15 +46,15 @@ function parseSuggestion(text, { feedback = '', fileExists = () => true } = {}) 
   const title = oneLine(value.title, 120), request = String(value.request || '').trim().slice(0, 2000);
   if (!title || !request) return { error: 'incomplete' };
   const items = feedbackItems(feedback);
-  const plain = norm(feedback);
   const grounds = [], dropped = [];
   for (const g of Array.isArray(value.grounds) ? value.grounds.slice(0, 6) : []) {
     const kind = g && String(g.kind || '');
     const ref = oneLine(g && g.ref, 200), quote = oneLine(g && g.quote, 300);
     let ok = GROUND_KINDS.has(kind) && !!ref;
     if (ok && kind === 'feedback') {
-      const n = Number((ref.match(/\d+/) || [])[0]);
-      ok = items.has(n) && (!quote || plain.includes(norm(quote)));
+      // Checked on the whole quote as written (the shown one is cut at 300 characters).
+      const n = Number((ref.match(/\d+/) || [])[0]), said = norm(g.quote);
+      ok = !!said && items.has(n) && norm(items.get(n)).includes(said);
     } else if (ok && kind === 'screen') {
       const file = ref.match(/^([\w./-]+\.(?:js|html|css|json))(?::\d+)?/);
       ok = !file || fileExists(file[1]);
@@ -60,10 +67,16 @@ function parseSuggestion(text, { feedback = '', fileExists = () => true } = {}) 
   return { suggestion: { key, kind: value.kind === 'critique' ? 'critique' : 'improve', title, why: oneLine(value.why, 600), grounds, dropped, request } };
 }
 
-// Numbered items of the feedback file ("1. **MG loading …**", "10. **Worklist columns.**").
+// Numbered items of the feedback file ("1. **MG loading …**", "10. **Worklist columns.**"): number -> the item's
+// text, from its line up to the next numbered line.
 function feedbackItems(text) {
-  const out = new Set();
-  for (const m of String(text || '').matchAll(/^\s*(\d{1,3})\.\s/gm)) out.add(Number(m[1]));
+  const out = new Map();
+  let current = null;
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const m = line.match(/^\s*(\d{1,3})\.\s/);
+    if (m) { current = Number(m[1]); out.set(current, ''); }
+    if (current !== null) out.set(current, `${out.get(current)}\n${line}`);
+  }
   return out;
 }
 
@@ -85,24 +98,37 @@ class Suggestions {
     this.preparing = null;
     this.previewHead = null; // the preview copy's checked-out commit when it holds a finished preview
     this.waitForActivity = false; // after a prepare that produced nothing: the next request or answer lifts it
+    // Every change of what a card depends on (the suggestion, who is typing, the request queue) takes the next number,
+    // and every snapshot carries it: a browser drops an answer older than what it already shows (a late presence
+    // answer brought a declined card back, review d90ea5f F7). Starts at the clock so a restart never goes backwards.
+    this.rev = Date.now();
     chat.dirs.suggest = previewDir;
-    chat.onActivity = () => { this.waitForActivity = false; };
-    chat.onSettled = job => { if (job.mode === 'edit') this.followHead().catch(e => console.error('suggestion rebase failed', e)); this.maybePrepare('settled'); };
+    chat.onActivity = () => { this.waitForActivity = false; this.activityChanged(); };
+    chat.onSettled = job => {
+      this.activityChanged();
+      if (job.context && job.context.suggestion) this.settleApply(job);
+      if (job.mode === 'edit') this.followHead().catch(e => console.error('suggestion rebase failed', e));
+      this.maybePrepare('settled');
+    };
   }
 
   async init() {
     await this.sandbox.worktree(this.previewDir);
     const items = this.items();
-    // A prepare cut off by a restart never finished; a ready one is kept only if its preview commit still exists.
+    // A prepare or an 적용 rebuild cut off by a restart never finished; a ready one is kept only if its preview
+    // commit still exists.
     for (const item of items.filter(i => OPEN.has(i.status))) {
-      if (item.status === 'preparing') this.close(item, 'interrupted');
+      if (item.status !== 'ready') this.close(item, 'interrupted');
       else if (!(await this.checkoutPreview(item.previewSha))) this.close(item, 'stale');
     }
     this.save(items);
   }
 
   items() { return readJsonFile(this.file, { items: [] }).items; }
-  save(items) { writeJsonAtomic(this.file, { items: items.slice(-300) }); }
+  save(items) {
+    const cut = items.length - KEEP_ATTEMPTS;
+    writeJsonAtomic(this.file, { items: items.filter((item, n) => n >= cut || remembered(item)) });
+  }
   current() { return this.items().find(i => OPEN.has(i.status)) || null; }
   // Read, change and write one suggestion with no await in between: an answer given while a preview was being
   // rebuilt must not be overwritten by a list read before it (seen in the real-browser run of this change).
@@ -127,15 +153,30 @@ class Suggestions {
       prepareMs: item.prepareMs ?? null, asked: !!item.asked, reason: item.reason || null, error: item.error || null };
   }
 
+  notify(item, extra = {}) {
+    this.broadcast({ type: 'suggestion', item: this.view(item), rev: ++this.rev, activity: this.activity(), ...extra });
+  }
+
   // ── who is here and typing (each chat tab reports; a tab that closes its event stream is gone) ──
+  // The card hides while anyone types in any studio tab or any request is queued or running (D5), so every tab is
+  // told, including one opened meanwhile (it gets this in its first event and in every state answer).
+  activity() {
+    return { pending: this.chat.pending, typing: [...this.tabs].filter(([, t]) => t.typing).map(([tab]) => tab) };
+  }
+  activityChanged() { this.broadcast({ type: 'activity', activity: this.activity(), rev: ++this.rev }); }
   presence(tab, user, info = {}) {
     if (!tab) return;
-    const was = this.typing();
+    const was = this.typing(), before = this.activity().typing.join();
     this.tabs.set(tab, { user, typing: !!info.typing, page: oneLine(info.page, 300), study: oneLine(info.study, 300), role: oneLine(info.role, 30), at: Date.now() });
+    if (this.activity().typing.join() !== before) this.activityChanged();
     if (was && !this.typing()) this.maybePrepare('typing-stopped');
     else this.maybePrepare('presence');
   }
-  dropTab(tab) { this.tabs.delete(tab); }
+  dropTab(tab) {
+    const was = this.tabs.get(tab);
+    this.tabs.delete(tab);
+    if (was && was.typing) { this.activityChanged(); this.maybePrepare('typing-stopped'); }
+  }
   typing() { return [...this.tabs.values()].some(t => t.typing); }
   latestTab() { return [...this.tabs.values()].sort((a, b) => b.at - a.at)[0] || null; }
 
@@ -182,7 +223,7 @@ class Suggestions {
     const items = this.items();
     const item = { id: crypto.randomUUID().slice(0, 8), t: new Date().toISOString(), status: 'preparing', reason, asked, forUser: tab.user || null, model: this.model() };
     items.push(item); this.save(items);
-    this.broadcast({ type: 'suggestion', item: this.view(item) });
+    this.notify(item);
     const started = Date.now();
     const result = await this.underLock(async () => {
       const head = await this.sandbox.publishedHead();
@@ -222,7 +263,7 @@ class Suggestions {
       });
       this.event(stored, 'prepared', { key: stored.key, kind: stored.kind, why: stored.why, grounds: stored.grounds, request: stored.request,
         dropped: stored.dropped, files: stored.files, prepareMs, claudeMs: result.claudeMs, buildMs: result.buildMs, reason, asked, model: stored.model });
-      this.broadcast({ type: 'suggestion', item: this.view(stored) });
+      this.notify(stored);
       // A change applied while this one was being built moved the screen on: bring the preview up to it. Not awaited:
       // an answer given meanwhile must be able to start the next suggestion (it queues behind this on the lock).
       this.followHead().catch(e => console.error('suggestion rebase failed', e));
@@ -235,14 +276,12 @@ class Suggestions {
       this.close(s, result.none ? 'none' : 'failed', { error: result.error || null, why: result.why || null, errors: result.errors || null,
         dropped: result.dropped || null, prepareMs, claudeMs: result.claudeMs ?? null, reason, asked });
     });
-    this.broadcast({ type: 'suggestion', item: this.view(stored) });
+    this.notify(stored);
   }
 
   // What he has answered, or seen before the screen moved on, is not offered again (same key or same title). A
   // suggestion that failed to build was never in front of him, so the idea stays available.
-  remembered(items) {
-    return items.filter(i => i.title && (ANSWERED.has(i.status) || (i.status === 'stale' && i.seenAt)));
-  }
+  remembered(items) { return items.filter(remembered); }
   repeats(s, items) {
     return this.remembered(items).some(i => i.key === s.key || norm(i.title) === norm(s.title));
   }
@@ -257,7 +296,8 @@ class Suggestions {
       return `- ${e.t.slice(11, 16)}Z ${e.displayName || e.user} (${e.mode === 'ask' ? '물어보기' : '바꾸기'}, ${outcome}) ${oneLine(e.text, 300)}`;
     });
     const done = this.remembered(items).slice(-40)
-      .map(i => `- [${i.key}] ${i.title} — ${{ applied: '적용함', declined: '됐어요(거절)', skipped: '다른 제안으로 넘김', stale: '보여 줬지만 화면이 바뀌어 버림' }[i.status] || i.status}`);
+      .map(i => `- [${i.key}] ${i.title} — ${{ applied: '적용함', declined: '됐어요(거절)', skipped: '다른 제안으로 넘김', stale: '보여 줬지만 화면이 바뀌어 버림',
+        'apply-failed': '적용을 눌렀지만 다시 만들기 실패', 'apply-no-change': '적용을 눌렀지만 바뀐 것 없음' }[i.status] || i.status}`);
     const feedback = this.feedbackText();
     return [
       '[스튜디오 먼저 제안하기 — 선생님의 요청이 아님. 개선안 하나를 골라 이 미리보기 사본에서 만든다]',
@@ -320,9 +360,9 @@ class Suggestions {
       if (commit) {
         this.previewHead = commit.sha;
         this.event(stored, 'rebased', { baseSha: head });
-        this.broadcast({ type: 'suggestion', item: this.view(stored), rebased: true });
+        this.notify(stored, { rebased: true });
       } else {
-        this.broadcast({ type: 'suggestion', item: this.view(stored) });
+        this.notify(stored);
         this.maybePrepare('stale');
       }
     });
@@ -337,7 +377,7 @@ class Suggestions {
   answer(id, answer, user) {
     const item = this.mutate(id, s => (s.status === 'ready' ? this.close(s, answer, { by: user, answer }) : false));
     if (!item) return { error: '이 제안은 이미 끝났습니다.' };
-    this.broadcast({ type: 'suggestion', item: this.view(item) });
+    this.notify(item);
     this.waitForActivity = false;
     // 다른 제안 asks for the next one now; 됐어요 lets the next one come when he is idle again.
     this.maybePrepare(answer === 'skipped' ? 'next' : 'answered', { asked: answer === 'skipped' });
@@ -357,7 +397,8 @@ class Suggestions {
 
   // 적용: the preview's source change lands on the studio branch through the writer queue, rebuilt and checked like
   // an edit; it is then an ordinary change (기록, 되돌리기). If it no longer applies to the screen as it is now, the
-  // studio Claude builds the same request there as an ordinary edit.
+  // studio Claude builds the same request there as an ordinary edit, and the suggestion is applied only when that
+  // edit changes the screen (settleApply).
   apply(id, { user, displayName }) {
     const run = this.chat.queue.then(() => this.applyNow(id, { user, displayName }));
     this.chat.queue = run.catch(() => {});
@@ -370,14 +411,16 @@ class Suggestions {
     const started = Date.now();
     if ((await this.sandbox.changes()).length) await this.sandbox.discardAll();
     const changed = await this.land(this.sandbox, await this.sourcePatch(item));
-    // Applied is what happened, whatever answer arrived while it ran (the change is on the branch).
-    const finish = extra => this.mutate(id, s => { if (s.status === 'ready') this.close(s, 'applied', { by: user, answer: 'applied', ...extra }); else this.event(s, 'applied', { by: user, ...extra }); });
     if (!changed) {
-      const stored = finish({ via: 'edit' });
-      this.broadcast({ type: 'suggestion', item: this.view(stored) });
+      // Runs after this (the writer queue is busy with this apply until it returns), so it cannot settle first.
       const job = this.chat.enqueue({ user, displayName, mode: 'edit', text: `[제안 적용] ${item.title}\n${item.request}`, context: { suggestion: id } });
+      const extra = { by: user, via: 'edit', jobId: job.id };
+      const stored = this.mutate(id, s => { if (s.status === 'ready') Object.assign(s, { status: 'applying', ...extra }); this.event(s, 'applying', extra); });
+      if (stored) this.notify(stored);
       return { via: 'edit', jobId: job.id };
     }
+    // Applied is what happened, whatever answer arrived while it ran (the change is on the branch).
+    const finish = extra => this.mutate(id, s => { if (s.status === 'ready') this.close(s, 'applied', { by: user, answer: 'applied', ...extra }); else this.event(s, 'applied', { by: user, ...extra }); });
     const jobId = `s-${id}`;
     const commit = await this.sandbox.commit({
       subject: `제안: ${item.title}`,
@@ -385,7 +428,7 @@ class Suggestions {
       trailers: { 'Studio-Kind': 'change', 'Studio-User': user, 'Studio-Request': jobId, 'Studio-Suggestion': id, 'Studio-Model': item.model || 'default' },
     });
     const stored = finish({ via: 'preview', sha: commit.sha, applyMs: Date.now() - started });
-    this.broadcast({ type: 'suggestion', item: this.view(stored) });
+    this.notify(stored);
     this.chat.log({ role: 'user', user, displayName, mode: 'edit', text: `제안 적용: ${stored.title}`, jobId, meta: { suggestion: id } });
     this.chat.log({ role: 'assistant', mode: 'edit', jobId, text: `${stored.why}\n(미리 만들어 둔 제안을 그대로 적용했습니다. 되돌리기로 언제든 뺄 수 있습니다.)`,
       meta: { changed: true, sha: commit.sha, files: commit.files, suggestion: id } });
@@ -393,6 +436,19 @@ class Suggestions {
     this.waitForActivity = false;
     this.maybePrepare('applied');
     return { via: 'preview', sha: commit.sha };
+  }
+
+  // The ordinary edit an 적용 fell back to has finished: applied only if it changed the screen; otherwise what
+  // happened (failed, or nothing changed) is what is recorded.
+  settleApply(job) {
+    const id = job.context.suggestion;
+    const outcome = job.state === 'applied' ? 'applied' : job.state === 'done' ? 'apply-no-change' : 'apply-failed';
+    const extra = { by: job.user, via: 'edit', jobId: job.id, ...(job.sha ? { sha: job.sha } : {}), ...(outcome === 'apply-failed' ? { error: job.error || 'failed' } : {}) };
+    const stored = this.mutate(id, s => {
+      if (s.status === 'applying' && s.jobId === job.id) this.close(s, outcome, outcome === 'applied' ? { ...extra, answer: 'applied' } : extra);
+      else this.event(s, outcome, extra);
+    });
+    if (stored) this.notify(stored);
   }
 
   // ── the preview in a browser: a cookie names the suggestion; the mirror serves the preview copy for it ──
@@ -409,7 +465,7 @@ class Suggestions {
 
   state(req) {
     const item = this.current();
-    return { current: this.view(item), previewing: req ? this.previewing(req) : null, enabled: this.enabled };
+    return { current: this.view(item), previewing: req ? this.previewing(req) : null, enabled: this.enabled, rev: this.rev, activity: this.activity() };
   }
 }
 

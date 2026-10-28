@@ -78,6 +78,8 @@
 
   const hello = () => post({ type: 'viewer-hello', picks: pick.list(), pickActive: pick.active, page: location.pathname + location.search });
   if (bc) bc.onmessage = ({ data: m }) => {
+    // The product window's preview banner (원래대로, 적용 rebuilt as an edit) ends a preview this viewer may show.
+    if (m && m.from === 'product' && m.type === 'viewer-reload') { reloadOnce(m.nonce); return; }
     if (!m || m.from !== 'chat') return;
     chatSeen = Date.now(); paintLink();
     if (m.type === 'viewer-ping') hello();
