@@ -404,6 +404,7 @@ async function imageDelivery(port,db,actor,study,servers){
   const authorization={studyUid,institution:study.managingInstitutionId,accountGeneration:1};
   // The study delivery's access record (the shared image-delivery-record.ts pair): one provide-prepared image event for
   // the study, durable before the response is prepared; the response names it and is not its own ledger event.
+  // The delivery is bound to this manifest, as the service's lease hands it to the stream (R244-GPT-FIX7-01).
   const prepared=E.prepareDelivery(manifest,E.parseImageRequest('GET',target),{eventId:responseId,deliveryEventId:eventId,at,cause:'user-view',opening:null,authorization,provision});
   const event=parseAccessEvent({formatVersion:1,surface:'GET images/dicom-web',eventId,userId:known(actor),rolesAtTime:known(['radiologist']),
     actingInstitution:known(study.managingInstitutionId),managingInstitution:known(study.managingInstitutionId),occurredAt:at,trustedProxyIp:known({address:'127.0.0.1',source:'trusted-proxy'}),
@@ -420,7 +421,7 @@ async function imageDelivery(port,db,actor,study,servers){
   let finish,current=prepared;const settled=()=>new Promise((resolve,reject)=>finish={resolve,reject});
   const server=createServer(async(req,res)=>{
     try{await sendOnlineImage({evidence:new PgImageEvidenceStore(db),source:new OrthancService().imageSource(),stagingDirectory:staging},
-      {manifest,delivery:{event,receipt},prepare:async()=>current,requestId:randomUUID(),response:res,signal:new AbortController().signal});finish.resolve();}
+      {manifest,delivery:{event,receipt,manifestSha256:manifest.sha256},prepare:async()=>current,requestId:randomUUID(),response:res,signal:new AbortController().signal});finish.resolve();}
     catch(error){res.statusCode=500;res.end();finish.reject(error);}
   });servers.push(server);
   const endpoint=await listen(server);

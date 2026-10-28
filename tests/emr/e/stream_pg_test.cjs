@@ -97,7 +97,8 @@ async function openDelivery(port, cause = 'user-view') {
     const result = await work.transaction(operation, async () => ({ kind: 'emr-image', id: eventId, version: manifest.sha256 }));
     assert.equal(result.outcome, 'committed');
     const receipt = await work.confirm({ provisional: true, operationId: operation.operationId, eventId });
-    return { event, receipt };
+    // The delivery the service's lease hands the stream: bound to this manifest (image-delivery-record.ts).
+    return { event, receipt, manifestSha256: manifest.sha256 };
   } finally { work.end(); }
 }
 
@@ -302,6 +303,18 @@ test('E real B2 COMMIT gates fixed HTTP bodies, ranges, multipart, failures and 
       assert.equal(sent.error?.code, code, `${method} ${suffix}`);
       assert.deepEqual([sent.answer.status, sent.answer.body.length, state.sourceReads], [503, 0, reads]);
     }
+    // R244-GPT-FIX7-01: a record bound to another manifest version, or naming another patient than this manifest's, is
+    // not the record of these bytes: refused before any source read.
+    const otherPatient = { ...delivery, event: { ...delivery.event, targets: delivery.event.targets.map(t => ({ ...t,
+      patientLinkSnapshot: known({ ...patient, patientId: 'SYNTHETIC-OTHER', linkId: 'synthetic-other-link' }) })) } };
+    const bound = delivery;
+    for (const other of [{ ...delivery, manifestSha256: hash('another manifest') }, otherPatient]) {
+      const reads = state.sourceReads;
+      await begin('', 'GET', { delivery: other }); sent = await request();
+      assert.equal(sent.error?.code, 'ImageEventMismatch');
+      assert.deepEqual([sent.answer.status, sent.answer.body.length, state.sourceReads], [503, 0, reads]);
+    }
+    delivery = bound;
     // A response whose cause differs from its delivery's record is another access, not this one.
     await begin('', 'GET', { cause: 'background-fetch' });
     sent = await request(); assert.equal(sent.answer.status, 503); assert.equal(sent.answer.body.length, 0);
@@ -421,12 +434,12 @@ test('E image service: the shared study delivery record per member session and s
   // a pool failure would, while the ledger's own transactions are untouched. (The kind is the fourth parameter of the
   // observation insert; a response's rows are written after its body ended, so a case waits for the previous
   // response's rows before arming this.)
-  let refuseObservationWrites = 0;
+  let refuseObservationWrites = 0, refuseObservationCode = 'SyntheticAppPoolWriteFailure';
   const applicationExecuteRaw = db.$executeRaw.bind(db);
   db.$executeRaw = (parts, ...values) => {
     if (refuseObservationWrites > 0 && parts.join('?').includes('INSERT INTO emr_image.observation') && values[3] === 'transport') {
       refuseObservationWrites--;
-      return Promise.reject(Object.assign(new Error('synthetic application pool failure'), { code: 'SyntheticAppPoolWriteFailure' }));
+      return Promise.reject(Object.assign(new Error('synthetic application pool failure'), { code: refuseObservationCode }));
     }
     return applicationExecuteRaw(parts, ...values);
   };
@@ -443,7 +456,7 @@ test('E image service: the shared study delivery record per member session and s
   const checks = new ImageCheckDatabase();
   const orthanc = new OrthancService();
   const recorder = new StudyImageDeliveryRecorder(port, requests, clinical, registry.work, orthanc, IDLE_MS);
-  const service = new OnlineImageService(port, context, db, orthanc, requests, checks, recorder);
+  const service = new OnlineImageService(context, db, orthanc, requests, checks, recorder);
   const server = createServer((req, res) => {
     req.requestId = randomUUID();
     if (req.headers['x-synthetic-session']) sessions.set(req, req.headers['x-synthetic-session']);
@@ -515,20 +528,28 @@ test('E image service: the shared study delivery record per member session and s
     assert.equal(next.headers.get('x-kin-image-event'), freshId, 'the session\'s next frame joins its open record');
     // R244-GPT-01: a patient correction in the archive (same UIDs and pixels, another PatientID) between two frames of
     // one record: the response is refused before any body read, serves no bytes, and the kept manifest is forgotten so
-    // the next request rebuilds it from the current study.
+    // the next request rebuilds it from the current study. The record of the forgotten manifest ends with it, as what it
+    // served (R244-GPT-FIX7-01); the rebuilt manifest's bytes are under a record of their own.
+    const closedAs = async id => {
+      for (let i = 0; i < 100 && !(await closings(id)).length; i++) await sleep(50);
+      return (await closings(id)).map(c => [c.action, c.result]);
+    };
     const buildsBefore = manifestBuilds, readsBeforeCorrection = state.sourceReads;
     state.patientId = 'SYNTHETIC-OTHER';
     const corrected = await frame(1); assert.equal(corrected.status, 409); assert.equal((await corrected.arrayBuffer()).byteLength, 0);
     assert.equal(corrected.headers.get('x-kin-image-response'), null, 'no response row was prepared for another patient\'s object');
     assert.equal(state.sourceReads, readsBeforeCorrection, 'the body of another patient\'s object is not read');
+    assert.deepEqual(await closedAs(freshId), [['transfer-ended', 'succeeded']], 'the record of the forgotten manifest is closed with it');
     state.patientId = undefined;
     const rebuilt = await frame(1); assert.equal(rebuilt.status, 200); await rebuilt.arrayBuffer();
     assert.equal(manifestBuilds, buildsBefore + 1, 'the manifest was forgotten and rebuilt after the correction');
+    const rebuiltId = rebuilt.headers.get('x-kin-image-event');
+    assert.notEqual(rebuiltId, freshId);
     await rowsOf(rebuilt.headers.get('x-kin-image-response'), 2);
     // R244-GPT-01 (split UID): a second patient's resource arrives under the same Study UID between two frames while
     // the selected object, its patient and its pixels are unchanged. The study's current identity is read for the
     // response and the product's own refusal answers (STUDY_IDENTITY_UNRESOLVED, as D's current-study read), before
-    // any body read; the kept manifest is forgotten.
+    // any body read; the kept manifest is forgotten, and its record closed.
     const buildsBeforeSplit = manifestBuilds, readsBeforeSplit = state.sourceReads, studyReadsBefore = state.studyReads ?? 0;
     state.split = true;
     const split = await frame(2); assert.equal(split.status, 409); assert.equal((await split.arrayBuffer()).byteLength, 0);
@@ -536,9 +557,11 @@ test('E image service: the shared study delivery record per member session and s
     assert.equal(split.headers.get('x-kin-image-response'), null, 'no response row was prepared under the unresolved study');
     assert.equal(state.sourceReads, readsBeforeSplit, 'no body read while the study names two patients');
     assert.ok((state.studyReads ?? 0) > studyReadsBefore, 'the study identity was read for the response');
+    assert.deepEqual(await closedAs(rebuiltId), [['transfer-ended', 'succeeded']]);
     state.split = false;
     const afterSplit = await frame(2); assert.equal(afterSplit.status, 200); await afterSplit.arrayBuffer();
     assert.equal(manifestBuilds, buildsBeforeSplit + 1, 'the manifest was forgotten and rebuilt after the split');
+    const currentId = afterSplit.headers.get('x-kin-image-event');
     await rowsOf(afterSplit.headers.get('x-kin-image-response'), 2);
     // R244-GPT-02: the application connection refuses a response's transport row. The response ended all the same
     // (HTTP 200, every byte); its facts are written on a ledger transaction of their own after the response, naming the
@@ -547,7 +570,7 @@ test('E image service: the shared study delivery record per member session and s
     const late = await frame(2); assert.equal(late.status, 200); assert.ok(Buffer.from(await late.arrayBuffer()).includes(frames[1]));
     assert.equal(refuseObservationWrites, 0, 'the synthetic pool failure was consumed by the transport write');
     const lateResponse = late.headers.get('x-kin-image-response');
-    assert.equal(late.headers.get('x-kin-image-event'), freshId);
+    assert.equal(late.headers.get('x-kin-image-event'), currentId);
     let retained = [];
     for (let i = 0; i < 100 && !retained.length; i++) {
       retained = await witness.$queryRaw`SELECT delivery_event_id::text AS delivery, request_id, retained_after, body->'wire' AS wire
@@ -555,16 +578,42 @@ test('E image service: the shared study delivery record per member session and s
       if (!retained.length) await sleep(50);
     }
     assert.equal(retained.length, 1, 'the refused transport row was retained after the response');
-    assert.deepEqual([retained[0].delivery, retained[0].retained_after], [freshId, 'SyntheticAppPoolWriteFailure']);
+    assert.deepEqual([retained[0].delivery, retained[0].retained_after], [currentId, 'SyntheticAppPoolWriteFailure']);
     assert.deepEqual([retained[0].wire.terminal, retained[0].wire.bytesWritten === retained[0].wire.plannedBytes], ['transfer-ended', true]);
-    assert.equal((await closings(freshId)).length, 0, 'the record is still open');
-    // Shutdown closes the open record now, before the ledger drains.
+    // R244-GPT-FIX7-02 on the real ledger: the ledger refuses that retention too (a synthetic trigger refuses the row this
+    // case's failure names). The delivery owes the row: while it cannot be written there is no closing event - each
+    // closing offer is its admitted operation's rollback, journaled against its own event - and the closing that commits
+    // carries the row on its own transaction.
+    await witness.$executeRawUnsafe(`CREATE FUNCTION public.synthetic_refuse_retention() RETURNS trigger LANGUAGE plpgsql
+      AS $$ BEGIN RAISE EXCEPTION 'SyntheticLedgerRefusal'; END $$`);
+    await witness.$executeRawUnsafe(`CREATE TRIGGER synthetic_refuse_retention BEFORE INSERT ON emr_image.observation FOR EACH ROW
+      WHEN (NEW.retained_after = 'SyntheticLedgerRefusal') EXECUTE FUNCTION public.synthetic_refuse_retention()`);
+    const [{ since }] = await witness.$queryRaw`SELECT clock_timestamp() AS since`;
+    refuseObservationCode = 'SyntheticLedgerRefusal'; refuseObservationWrites = 1;
+    const held = await frame(1); assert.equal(held.status, 200); await held.arrayBuffer();
+    const heldId = held.headers.get('x-kin-image-event'), heldResponse = held.headers.get('x-kin-image-response');
+    const failures = () => witness.$queryRaw`SELECT cause, event_id, operation_id::text FROM emr_access.failure_entry WHERE occurred_at >= ${since} ORDER BY occurred_at`;
+    let journaled = [];
+    for (let i = 0; i < 200 && !journaled.some(f => f.operation_id); i++) { journaled = await failures(); if (!journaled.some(f => f.operation_id)) await sleep(50); }
+    assert.ok(journaled.some(f => f.event_id === heldId && f.operation_id === null && f.cause === 'business-rollback'), 'the response\'s own offer: journaled against the record');
+    const closingFailures = journaled.filter(f => f.operation_id);
+    assert.ok(closingFailures.length && closingFailures.every(f => f.cause === 'business-rollback' && f.event_id !== heldId), JSON.stringify(journaled));
+    assert.deepEqual(await closings(heldId), [], 'no closing event while the row it covers is refused');
+    assert.equal((await witness.$queryRaw`SELECT 1 FROM emr_image.observation WHERE event_id=${heldResponse}::uuid AND kind='transport'`).length, 0);
+    await witness.$executeRawUnsafe('DROP TRIGGER synthetic_refuse_retention ON emr_image.observation');
+    await witness.$executeRawUnsafe('DROP FUNCTION public.synthetic_refuse_retention()');
+    assert.deepEqual(await closedAs(heldId), [['transfer-ended', 'succeeded']], 'the next closing offer commits with the row');
+    const [closing] = await closings(heldId);
+    assert.ok(!closingFailures.some(f => f.event_id === closing.eventId), 'a refused closing event is never reused');
+    const heldRow = await witness.$queryRaw`SELECT delivery_event_id::text AS delivery, retained_after FROM emr_image.observation
+      WHERE event_id=${heldResponse}::uuid AND kind='transport'`;
+    assert.deepEqual(heldRow.map(r => [r.delivery, r.retained_after]), [[heldId, 'SyntheticLedgerRefusal']]);
+    // Shutdown closes whatever is still open, before the ledger drains.
     await recorder.beforeApplicationShutdown();
-    await service.beforeApplicationShutdown();
     registry.quiesce();
     control.close();
     await Promise.race([control.drained(), sleep(5000).then(() => { throw new Error('ledger work left open by a delivery'); })]);
-    assert.deepEqual((await closings(freshId)).map(c => [c.action, c.result]), [['transfer-ended', 'succeeded']],
+    assert.deepEqual(await closedAs(currentId), [['transfer-ended', 'succeeded']],
       'the viewing\'s record ends as provided: a refused response does not abort it');
   } finally {
     await close(server); await close(source);

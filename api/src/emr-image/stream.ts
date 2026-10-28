@@ -67,8 +67,8 @@ export interface OnlineImageBoundary {
 }
 /** The durable access record a response is provided under: the study delivery's provide-prepared event and its B2
  * receipt, from the recorder every image route shares (image-delivery-record.ts, D1877: one pair per study delivery of
- * a member session, whichever routes its reads take). */
-export interface OnlineImageDelivery { event: Readonly<AccessEvent>; receipt: DurableAccessReceipt }
+ * a member session, whichever routes its reads take), and the manifest digest that delivery is bound to. */
+export interface OnlineImageDelivery { event: Readonly<AccessEvent>; receipt: DurableAccessReceipt; manifestSha256: string | null }
 export interface ImageSendResult {
   manifest: ImageResponseManifest; observations: readonly TransferObservation[];
   terminal: 'transfer-ended' | 'transfer-aborted' | 'transfer-unknown';
@@ -143,16 +143,19 @@ function bodyPlan(items: Staged[], manifest: ImageManifest, range: string | unde
   return { status, headers, segments, length };
 }
 
-/** The study delivery's record: a v1 provide-prepared image event naming this study at the manifest's managing
- * institution, and the ledger's receipt of that same event. */
+/** The study delivery's record: a v1 provide-prepared image event naming this study and this manifest's patient at its
+ * managing institution, the ledger's receipt of that same event, and a delivery bound to this manifest version - so
+ * the bytes written under the record are of the patient and version it names (R244-GPT-FIX7-01). */
 function checkedDelivery(manifest: ImageManifest, delivery: OnlineImageDelivery) {
   const event = parseAccessEvent(delivery.event);
   if (event.formatVersion !== 1 || event.action !== 'provide-prepared' || event.result !== 'prepared' ||
-      delivery.receipt?.eventId !== event.eventId ||
+      delivery.receipt?.eventId !== event.eventId || delivery.manifestSha256 !== manifest.sha256 ||
       event.managingInstitution.status !== 'known' || event.managingInstitution.value !== manifest.managingInstitution ||
       !event.targets.some(target => target.kind === 'image' && 'recordId' in target &&
         target.studyId.status === 'known' && target.studyId.value === manifest.studyUid &&
-        target.recordId.status === 'known' && target.recordId.value === manifest.studyUid)) refuse('ImageEventMismatch');
+        target.recordId.status === 'known' && target.recordId.value === manifest.studyUid &&
+        target.patientLinkSnapshot.status === 'known' &&
+        JSON.stringify(target.patientLinkSnapshot.value) === JSON.stringify(manifest.patient))) refuse('ImageEventMismatch');
   return event;
 }
 /** This response's plan: of this manifest version, named under the delivery's record as its own response (under its

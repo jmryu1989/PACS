@@ -1,11 +1,13 @@
 'use strict';
-// E_ROUTE study-identity refusal and observation retention at the service boundary (api/src/emr-image/service.ts,
-// orthanc.service.ts imageSource): compiled product code, a synthetic Orthanc over real local HTTP, the real
-// AccessLedgerStore.transactionWithRecords over a synthetic SQL port (so B2's own rollback accounting and journal calls
-// are the real ones), in-memory application rows, and the study delivery's record from the recorder every image route
-// shares (image-delivery-record.ts). R244-GPT-01 (split UID) and R244-GPT-02 (a row the application connection refused
-// is never dropped: it is retained on a ledger transaction of its own, journaled against the delivery's record when that
-// fails too, and kept for the next offer).
+// E_ROUTE study-identity refusal, manifest binding and observation retention at the service boundary
+// (api/src/emr-image/service.ts, orthanc.service.ts imageSource, image-delivery-record.ts): compiled product code, a
+// synthetic Orthanc over real local HTTP, the real AccessLedgerStore.transactionWithRecords over a synthetic SQL port
+// (so B2's own rollback accounting and journal calls are the real ones), in-memory application rows, and the study
+// delivery's record from the recorder every image route shares. R244-GPT-01 (split UID), R244-GPT-FIX7-01 (a delivery
+// is the record of one manifest's patient and version: a corrected patient's bytes never go out under the previous
+// patient's record) and R244-GPT-02 / FIX7-02 (a row the application connection refused is never dropped: the delivery
+// owes it, offers it on a ledger transaction of its own - journaled against its record when that fails - and writes its
+// closing event only on one transaction with it).
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const path = require('node:path');
@@ -29,37 +31,40 @@ const hash = v => createHash('sha256').update(v).digest('hex');
 const known = value => ({ status: 'known', value });
 const listen = server => new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${server.address().port}`)));
 const close = server => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); });
-const until = async (condition, what) => {
-  for (let i = 0; i < 200 && !condition(); i++) await new Promise(resolve => setTimeout(resolve, 10));
+const until = async (condition, what, tries = 200) => {
+  for (let i = 0; i < tries && !condition(); i++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.ok(condition(), what);
 };
 const uid = '2.25.701', series = uid + '.1', sop = series + '.1', frame = Buffer.alloc(1024, 11), ts = '1.2.840.10008.1.2.1';
 const STUDY = '66666666-77777777-88888888-99999999-aaaaaaaa';
+const patientOf = id => ({ linkId: JSON.stringify(['synthetic-hospital', id]), patientId: id, assigningAuthority: 'synthetic-hospital' });
 
-/** One service over synthetic ports. `archive` and `ledger` are the knobs a case turns. */
-async function harness() {
+/** One service over synthetic ports. `archive` and `ledger` are the knobs a case turns; `replacePatient` is a patient
+ * correction of the study in the archive and the clinical context (same UIDs and pixels, another PatientID). */
+async function harness({ idleMs } = {}) {
   const actor = { id: randomUUID(), issuer: 'synthetic', subject: 'doctor' };
-  const patient = { linkId: JSON.stringify(['synthetic-hospital', 'PATIENT-A']), patientId: 'PATIENT-A', assigningAuthority: 'synthetic-hospital' };
-  const manifest = buildImageManifest({ formatVersion: 1, studyUid: uid, managingInstitution: 'synthetic-hospital', patient,
+  let patient = patientOf('PATIENT-A');
+  const manifestInput = () => ({ formatVersion: 1, studyUid: uid, managingInstitution: 'synthetic-hospital', patient,
     builtAt: new Date().toISOString(), expected: { series: 1, objects: 1 }, pages: [{ cursor: null, next: null, objects: [{
       studyUid: uid, seriesUid: series, sopInstanceUid: sop, sopClassUid: '1.2.840.10008.5.1.4.1.1.7.2', transferSyntaxUid: ts,
       imageType: ['ORIGINAL', 'PRIMARY'], bytes: 2048, sha256: hash(Buffer.alloc(2048, 37)), declaredFrameCount: 1,
       frames: [{ number: 1, bytes: frame.length, sha256: hash(frame) }], provenance: { kind: 'device', receiptEventId: null },
       derivation: { kind: 'original' }, mammography: null, timing: null }] }], referencedObjects: [],
     decoderCatalog: { native: { version: 'synthetic', sha256: hash('decoder') } }, viewer: { id: 'synthetic', version: 'fixture', sha256: hash('viewer') } });
-  const archive = { split: false, rawReads: 0, studyReads: 0 };
+  let manifest = buildImageManifest(manifestInput());
+  const archive = { split: false, rawReads: 0, studyReads: 0, patientId: 'PATIENT-A', revision: '20261028T120000' };
   const source = createServer(async (req, res) => {
     let body = ''; for await (const chunk of req) body += chunk;
     const json = v => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(v)); };
     if (req.url === '/tools/lookup') return json(body.trim() === uid ? [{ Type: 'Study', ID: STUDY }] : [{ Type: 'Instance', ID: '11111111-22222222-33333333-44444444-55555555' }]);
-    if (req.url === `/studies/${STUDY}`) return json({ ID: STUDY, LastUpdate: '20261028T120000' });
+    if (req.url === `/studies/${STUDY}`) return json({ ID: STUDY, LastUpdate: archive.revision });
     if (req.url.startsWith('/dicom-web/studies?StudyInstanceUID=')) {
       archive.studyReads++;
       const row = id => ({ '0020000D': { vr: 'UI', Value: [uid] }, '00100020': { vr: 'LO', Value: [id] } });
-      return json(archive.split ? [row('PATIENT-A'), row('PATIENT-B')] : [row('PATIENT-A')]);
+      return json(archive.split ? [row('PATIENT-A'), row('PATIENT-B')] : [row(archive.patientId)]);
     }
     if (req.url.endsWith('/simplified-tags')) return json({ StudyInstanceUID: uid, SeriesInstanceUID: series, SOPInstanceUID: sop,
-      SOPClassUID: manifest.objects[0].sopClassUid, NumberOfFrames: '1', PatientID: 'PATIENT-A' });
+      SOPClassUID: manifest.objects[0].sopClassUid, NumberOfFrames: '1', PatientID: archive.patientId });
     if (req.url.endsWith('/header')) return json({ '0002,0010': { Value: ts } });
     if (req.url.endsWith('/frames/0/raw')) { archive.rawReads++; return res.end(frame); }
     res.writeHead(404); res.end();
@@ -68,34 +73,61 @@ async function harness() {
   process.env.KIN_EMR_STATE_DIR = await mkdtemp(path.join(os.tmpdir(), 'emr-e-retention-'));
 
   // The ledger: the real store's transaction path over a synthetic SQL port. `ledger.refuseRetention` makes the
-  // observation insert fail on the ledger transaction, as an unreachable database would.
-  // `ledger.refuseConnection` refuses the transaction's connection before its callback, as an exhausted or unreachable
-  // pool does (Prisma P2024). The delivery record's own appends (`events`) are an in-memory store with the ledger's
-  // receipt rule.
-  const ledger = { refuseRetention: false, refuseConnection: false, journal: [], retained: [], calls: [] };
-  const tx = {
-    async $executeRaw(parts, ...values) {
-      const sql = parts.join('?');
-      if (sql.startsWith('SET LOCAL')) return 0;
-      if (!sql.includes('INSERT INTO emr_image.observation')) throw new Error('unexpected ledger-transaction SQL: ' + sql.slice(0, 60));
-      ledger.calls.push('retain');
-      if (ledger.refuseRetention) throw Object.assign(new Error('SyntheticLedgerUnavailable'), { code: 'SyntheticLedgerUnavailable' });
-      ledger.retained.push({ response: values[0], delivery: values[1], request: values[2], kind: values[3], body: JSON.parse(values[4]), retainedAfter: values[5] });
-      return 1;
-    },
-  };
+  // observation insert fail on a ledger transaction, as an unreachable database would; a transaction's rows count as
+  // retained only when it commits. `ledger.refuseConnection` refuses the transaction's connection before its callback,
+  // as an exhausted or unreachable pool does (Prisma P2024).
+  const ledger = { refuseRetention: false, refuseConnection: false, journal: [], retained: [] };
   const ledgerDb = {
     $transaction: async fn => {
       if (ledger.refuseConnection) throw Object.assign(new Error('Timed out fetching a new connection from the connection pool'), { code: 'P2024' });
-      return fn(tx);
+      const rows = [];
+      const tx = { async $executeRaw(parts, ...values) {
+        const sql = parts.join('?');
+        if (sql.startsWith('SET LOCAL')) return 0;
+        if (!sql.includes('INSERT INTO emr_image.observation')) throw new Error('unexpected ledger-transaction SQL: ' + sql.slice(0, 60));
+        if (ledger.refuseRetention) throw Object.assign(new Error('SyntheticLedgerUnavailable'), { code: 'SyntheticLedgerUnavailable' });
+        rows.push({ response: values[0], delivery: values[1], request: values[2], kind: values[3], body: JSON.parse(values[4]), retainedAfter: values[5] });
+        return 1;
+      } };
+      const value = await fn(tx);
+      ledger.retained.push(...rows);
+      return value;
     },
   };
-  const store = new AccessLedgerStore(ledgerDb, { async record(cause, eventId, operationId) { ledger.journal.push({ cause, eventId, operationId }); return 'database'; } });
-  const events = [];
+  const journal = { async record(cause, eventId, operationId) { ledger.journal.push({ cause, eventId, operationId }); return 'database'; } };
+  const store = new AccessLedgerStore(ledgerDb, journal);
+  // The record's own appends (`events`) are an in-memory store with the ledger's receipt rule. An admitted operation
+  // with an effect is B2's (store.ts transaction): the effect and the entry commit on one ledger transaction or neither;
+  // a failed effect is journaled against the operation's event and the operation settles negative - that event can
+  // never commit.
+  const events = [], operations = new Map();
+  const result = (operationId, op) => ({ operationId, eventId: op.event.eventId, outcome: op.outcome });
   const records = { begin() { return {
     transactionWithRecords: (fn, options, failureEvent) => store.transactionWithRecords(fn, options, failureEvent),
     append: async event => { const parsed = parseAccessEvent(event); events.push(parsed); return mintDurableReceipt(parsed.eventId, new Date().toISOString()); },
-    lookup: async () => null, end() {},
+    admit: async (event, _served, keys) => {
+      const parsed = parseAccessEvent(event);
+      if (!operations.has(keys.operationId)) operations.set(keys.operationId, { event: parsed, outcome: 'pending' });
+      return { operationId: keys.operationId, attemptId: keys.attemptId, event: parsed };
+    },
+    transaction: async (operation, effect) => {
+      const op = operations.get(operation.operationId);
+      if (op.outcome !== 'pending') return result(operation.operationId, op);
+      try { await ledgerDb.$transaction(tx => effect(tx)); }
+      catch (error) {
+        ledger.journal.push({ cause: 'business-rollback', eventId: op.event.eventId, operationId: operation.operationId });
+        op.outcome = 'negative';
+        throw error;
+      }
+      op.outcome = 'committed'; events.push(op.event);
+      return result(operation.operationId, op);
+    },
+    confirm: async ({ operationId, eventId }) => {
+      if (operations.get(operationId)?.outcome !== 'committed') throw new Error('AppendNotCommitted');
+      return mintDurableReceipt(eventId, new Date().toISOString());
+    },
+    lookup: async operationId => operations.has(operationId) ? result(operationId, operations.get(operationId)) : null,
+    end() {},
   }; } };
   // The application connection: E's own rows and the response's bounded check transaction; `app.refuseTransport`
   // refuses the next transport-observation insert.
@@ -125,9 +157,9 @@ async function harness() {
   const requests = { read: () => ({ issuer: actor.issuer, subject: actor.subject, binding }),
     facts: async () => ({ actor, institution: 'synthetic-hospital', rightsVersion: 1, roles: ['radiologist'], binding, ingress: facts.ip, requestId: randomUUID() }) };
   const orthanc = new OrthancService();
-  const recorder = new StudyImageDeliveryRecorder(records, requests, clinical, registry.work, orthanc);
+  const recorder = new StudyImageDeliveryRecorder(records, requests, clinical, registry.work, orthanc, idleMs);
   // The check pool stand-in is the application stand-in: one in-memory port answers both.
-  const service = new OnlineImageService(records, context, db, orthanc, requests, db, recorder);
+  const service = new OnlineImageService(context, db, orthanc, requests, db, recorder);
   const target = `/dicom-web/studies/${uid}/series/${series}/instances/${sop}/frames/1`;
   let settled, lastError = null;
   const server = createServer(async (req, res) => {
@@ -143,10 +175,25 @@ async function harness() {
     await done;
     return { status: r.status, hasFrame: bytes.includes(frame), body: bytes, delivery: r.headers.get('x-kin-image-event'), response: r.headers.get('x-kin-image-response') };
   };
-  // The stop as Nest runs it: the recorder ends the open delivery, then E names or retains what it still holds.
-  const shutdown = async () => { await recorder.beforeApplicationShutdown(); await service.beforeApplicationShutdown(); };
+  // The stop as Nest runs it: the recorder ends every delivery and offers what each still owes. E holds nothing.
+  const shutdown = () => recorder.beforeApplicationShutdown();
   const stop = async () => { registry.quiesce(); await close(server); await close(source); };
-  return { send, archive, ledger, app, events, service, shutdown, stop, builds: () => manifestBuilds, lastError: () => lastError };
+  const replacePatient = id => {
+    patient = patientOf(id);
+    archive.patientId = id; archive.revision = '20261028T120100';
+    manifest = buildImageManifest(manifestInput());
+  };
+  return { send, archive, ledger, app, events, service, shutdown, stop, replacePatient, manifest: () => manifest,
+    builds: () => manifestBuilds, lastError: () => lastError };
+}
+
+/** What the recorder's logger printed while `work` ran (Nest's console logger writes to stdout and stderr). */
+async function logged(work) {
+  const lines = [], out = process.stdout.write, err = process.stderr.write;
+  process.stdout.write = (chunk, ...rest) => { lines.push(String(chunk)); return out.call(process.stdout, chunk, ...rest); };
+  process.stderr.write = (chunk, ...rest) => { lines.push(String(chunk)); return err.call(process.stderr, chunk, ...rest); };
+  try { await work(); } finally { process.stdout.write = out; process.stderr.write = err; }
+  return lines.join('');
 }
 
 test('the check pool is the application database with a bound of its own', () => {
@@ -157,7 +204,7 @@ test('the check pool is the application database with a bound of its own', () =>
     String(EMR_IMAGE_CHECK_POOL_SIZE), 'the application pool\'s own bound does not carry over');
 });
 
-test('a second patient resource under the study UID refuses the response as unresolved, before any body read, and forgets the manifest', async () => {
+test('a second patient resource under the study UID refuses the response as unresolved, before any body read, and forgets the manifest with its delivery', async () => {
   const h = await harness();
   try {
     const first = await h.send();
@@ -172,12 +219,39 @@ test('a second patient resource under the study UID refuses the response as unre
     assert.equal(h.archive.rawReads, reads, 'no body read');
     assert.ok(h.archive.studyReads >= 2, 'the study identity is read per response');
     assert.equal(h.app.preparations.length, 1);
+    // The forgotten manifest's delivery ends with it, as what it served.
+    await until(() => h.events.length === 2, 'the delivery of the forgotten manifest is closed');
+    assert.deepEqual(h.events.map(e => [e.action, e.relatedEventId]), [['provide-prepared', null], ['transfer-ended', first.delivery]]);
     h.archive.split = false;
     const again = await h.send();
-    assert.deepEqual([again.status, again.hasFrame, again.delivery === first.delivery], [200, true, true], 'the record of the viewing continues once the study is one patient again');
+    assert.deepEqual([again.status, again.hasFrame], [200, true]);
+    assert.notEqual(again.delivery, first.delivery, 'the rebuilt manifest opens its own record');
     assert.equal(h.builds(), builds + 1, 'the kept manifest was forgotten and rebuilt from the current study');
     await h.shutdown();
-    assert.deepEqual(h.events.map(e => [e.action, e.relatedEventId]), [['provide-prepared', null], ['transfer-ended', first.delivery]]);
+    assert.deepEqual(h.events.map(e => [e.action, e.relatedEventId]),
+      [['provide-prepared', null], ['transfer-ended', first.delivery], ['provide-prepared', null], ['transfer-ended', again.delivery]]);
+  } finally { await h.stop(); }
+});
+
+test('a corrected patient\'s image is never served under the record of the previous patient and revision (R244-GPT-FIX7-01)', async () => {
+  const h = await harness();
+  try {
+    const first = await h.send();
+    assert.deepEqual([first.status, first.hasFrame], [200, true]);
+    h.replacePatient('PATIENT-B');
+    const outdated = await h.send();
+    assert.deepEqual([outdated.status, outdated.hasFrame, outdated.delivery], [409, false, null], 'the kept manifest of the previous patient is refused');
+    await until(() => h.events.length === 2, 'the previous patient\'s delivery is closed with its manifest');
+    const second = await h.send();
+    assert.deepEqual([second.status, second.hasFrame], [200, true]);
+    assert.notEqual(second.delivery, first.delivery, 'the corrected patient\'s bytes are under a record of their own');
+    await h.shutdown();
+    const targets = id => h.events.find(e => e.eventId === id).targets.map(t => [t.patientLinkSnapshot.value.patientId, t.versionId.value]);
+    assert.deepEqual(targets(first.delivery), [['PATIENT-A', `orthanc-study:${STUDY}@20261028T120000`]]);
+    assert.deepEqual(targets(second.delivery), [['PATIENT-B', `orthanc-study:${STUDY}@20261028T120100`]]);
+    assert.deepEqual(h.events.map(e => [e.action, e.relatedEventId]),
+      [['provide-prepared', null], ['transfer-ended', first.delivery], ['provide-prepared', null], ['transfer-ended', second.delivery]]);
+    assert.deepEqual(h.app.preparations.map(p => p.delivery), [first.delivery, second.delivery], 'each response row names the record of its own patient');
   } finally { await h.stop(); }
 });
 
@@ -197,11 +271,8 @@ test('a refused row is retained on a ledger transaction of its own after the res
   } finally { await h.stop(); }
 });
 
-test('a retention the ledger refuses is journaled against the delivery\'s record; the rows are kept and retained by a later offer', async () => {
+test('a delivery whose refused rows cannot be retained has no closing event; the stop names them (R244-GPT-FIX7-02)', async () => {
   const h = await harness();
-  const errors = [];
-  const consoleError = console.error;
-  console.error = (...args) => errors.push(args.join(' '));
   try {
     h.app.refuseTransport = 1;
     h.ledger.refuseRetention = true;
@@ -210,29 +281,45 @@ test('a retention the ledger refuses is journaled against the delivery\'s record
     await until(() => h.ledger.journal.length === 1, 'the failed retention is journaled');
     // B2 accounted the failure against the delivery's own record: no operation was admitted for it.
     assert.deepEqual(h.ledger.journal, [{ cause: 'business-rollback', eventId: served.delivery, operationId: null }]);
+    const printed = await logged(() => h.shutdown());
     assert.deepEqual(h.ledger.retained, []);
-    await until(() => errors.some(line => line.includes('held for a later retention') && line.includes(served.delivery)), errors.join('\n'));
-    // The stop's own offer fails too: the rows are named, not dropped.
-    await h.shutdown();
-    assert.equal(h.ledger.journal.length, 2);
-    assert.ok(errors.some(line => line.includes('not retained at shutdown') && line.includes(served.response)), 'a shutdown that still cannot retain names the rows');
-    // The database is back: the next offer retains the held rows under their own record and request.
-    const reported = errors.length;
+    assert.deepEqual(h.events.map(e => e.action), ['provide-prepared'], 'no closing event without the rows it covers');
+    // Each closing offer was the admitted operation's own rollback, journaled against its event; a refused one is never
+    // offered again under the same event.
+    const closings = h.ledger.journal.slice(1);
+    assert.ok(closings.length >= 1 && closings.every(j => j.cause === 'business-rollback' && j.operationId && j.eventId !== served.delivery), JSON.stringify(h.ledger.journal));
+    assert.equal(new Set(closings.map(j => j.eventId)).size, closings.length);
+    assert.match(printed, new RegExp(`terminal_not_recorded_at_shutdown[^\\n]*prepared=${served.delivery}`));
+    assert.match(printed, new RegExp(`facts_not_written_at_shutdown[^\\n]*${served.response}`), 'the stop names the rows it could not write');
+  } finally { await h.stop(); }
+});
+
+test('the closing event is written on one transaction with the rows its delivery still owes, once the ledger takes them', async () => {
+  const h = await harness({ idleMs: 50 });
+  try {
+    h.app.refuseTransport = 1;
+    h.ledger.refuseRetention = true;
+    const served = await h.send();
+    assert.equal(served.status, 200);
+    // The response's own offer, then the idle close's: both refused, and no closing event.
+    await until(() => h.ledger.journal.length >= 2, 'the closing offer with the owed rows was refused');
+    assert.deepEqual(h.events.map(e => e.action), ['provide-prepared']);
+    const refusedClosing = h.ledger.journal[1];
     h.ledger.refuseRetention = false;
-    await h.service.beforeApplicationShutdown();
-    errors.splice(0, reported);
-    assert.deepEqual(h.ledger.retained.map(r => [r.kind, r.response, r.delivery, r.retainedAfter]), [['transport', served.response, served.delivery, 'SyntheticAppPoolWriteFailure']]);
-    assert.ok(typeof h.ledger.retained[0].request === 'string' && h.ledger.retained[0].request.length > 0);
-    assert.equal(h.ledger.journal.length, 2, 'a retry that succeeds adds no failure');
-    assert.ok(!errors.some(line => line.includes('not retained at shutdown')), errors.join('\n'));
-  } finally { console.error = consoleError; await h.stop(); }
+    // The next offer of the close (the background retry) is a new event of the same pair, with the rows.
+    await until(() => h.events.length === 2, 'the closing event is recorded once the rows are', 400);
+    const [, closing] = h.events;
+    assert.deepEqual([closing.action, closing.relatedEventId], ['transfer-ended', served.delivery]);
+    assert.notEqual(closing.eventId, refusedClosing.eventId, 'the refused closing event is not reused');
+    assert.deepEqual(h.ledger.retained.map(r => [r.kind, r.response, r.delivery, r.retainedAfter]),
+      [['transport', served.response, served.delivery, 'SyntheticAppPoolWriteFailure']]);
+    await h.shutdown();
+    assert.equal(h.events.length, 2);
+  } finally { await h.stop(); }
 });
 
 test('a retention that gets no ledger connection is journaled against the delivery\'s record; the rows are kept for the next response', async () => {
   const h = await harness();
-  const errors = [];
-  const consoleError = console.error;
-  console.error = (...args) => errors.push(args.join(' '));
   try {
     const opened = await h.send();
     assert.equal(opened.status, 200);
@@ -251,5 +338,6 @@ test('a retention that gets no ledger connection is journaled against the delive
     assert.deepEqual(h.ledger.retained.map(r => [r.kind, r.response, r.delivery]), [['transport', served.response, served.delivery]]);
     assert.equal(h.ledger.journal.length, 1);
     await h.shutdown();
-  } finally { console.error = consoleError; await h.stop(); }
+    assert.deepEqual(h.events.map(e => e.action), ['provide-prepared', 'transfer-ended']);
+  } finally { await h.stop(); }
 });

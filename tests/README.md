@@ -3110,16 +3110,22 @@ for the member, that another institution's member gets no bytes and adds no entr
 closes the pair after the idle gap (about two minutes on the frame reader) with nothing recorded per frame; it prints the
 record's surface (`FRAME_RECORD`) and asserts the record's content, not the route's name.
 REQ-IMAGE-PATHS-ONE-RECORD(의료법 제23조④, D1877: one pair per study delivery; HEAD is no delivery) →
-RISK-IMAGE-PATH-SECOND-RECORDER-OR-HEAD-COUNTED (R244-GPT-FIX5-01, R244-GPT-FIX6-01/02) → TEST-IMAGE-PATHS-01:
-`python -B scripts/run-tests.py --module tests/e2e/test_image_paths.py --mode live --unit image-paths --timeout 900`
-walks the whole image-path table on the served stack it runs against (stock or catalog, read from the rendered proxy):
-it fails on any `location` of `nginx -T` the table does not classify (image cells or a no-image reason), so a later
-path is either in the table or the suite fails; one session GETs every image cell of one study (viewer frame, strip
-preview, worklist thumbnail, DICOMweb rendering, whole study, object retrieve, original object, the frame reader /
-preview / relay under `/api/`, E's image API) and the study has exactly one provide-prepared entry, recorded after the
-first request left and before its response headers arrived, and one transfer-ended entry after the idle gap; HEADs and
-descriptions add none; HEADs alone on a second study leave no entry; on a third study HEADs beside admitted-then-refused
-GETs close as transfer-aborted. It prints `IMAGE_PATHS_MATRIX` (cell, location, route, method, status, bytes).
+RISK-IMAGE-PATH-SECOND-RECORDER-OR-HEAD-COUNTED (R244-GPT-FIX5-01, R244-GPT-FIX6-01/02, FIX7-03) → TEST-IMAGE-PATHS-01/02:
+`python -B scripts/run-tests.py --module tests/e2e/test_image_paths.py --mode live --unit image-paths --timeout 1500`
+walks the whole image-path table on the served stack it runs against (stock or catalog, read from the rendered proxy).
+01 fails on any `location` of `nginx -T` the table does not classify (image cells or a no-image reason), so a later
+path is either in the table or the suite fails; then each image cell (viewer frame, strip preview, worklist thumbnail,
+DICOMweb rendering, whole study, series and object retrieve, original object, the frame reader / preview / relay under
+`/api/`, E's frame, object, series and study retrieve) is the first read of its own synthetic study: while a synthetic
+trigger on the stack's access ledger refuses that study's record, the GET sends no image byte and leaves no entry; then
+the GET answers its image under exactly one provide-prepared entry, recorded after the request left and before its
+response headers arrived (a cell that answers no image on that stack leaves no entry either time). Descriptions (QIDO,
+metadata, tags, E's metadata) as first reads open nothing; the original-download archive answers HEAD 405 with no record
+and its GET only after its own durable download record, without opening a viewing delivery. 02 checks the joining: one
+session GETs every image cell of one study and the study has exactly one provide-prepared entry and one transfer-ended
+entry after the idle gap; HEADs and descriptions add none; HEADs alone on a second study leave no entry; on a third
+study HEADs beside admitted-then-refused GETs close as transfer-aborted. They print `IMAGE_PATHS_FIRST` and
+`IMAGE_PATHS_MATRIX` (cell, location, route, method, status, bytes).
 `node --test tests/emr/e/manifest_reuse_test.cjs` (compiled `api/dist`) checks that one study manifest serves the
 study's frame requests and is rebuilt or forgotten when the request or source no longer matches it, and that a study
 or series request (retrieve, query, metadata) reads the catalog again so an object that arrived since is selected.
@@ -3133,17 +3139,23 @@ its fixed representation, transport and copy facts in `emr_image` rows naming th
 (`X-KIN-Image-Event` is the record, `X-KIN-Image-Response` the row); a HEAD is answered from the same checked source
 under no record, with no row and no staging copy. The source reads the study's current identity (the same read as D's
 current study: no resource, two patient resources, the one patient) and the object's current PatientID on every
-response and compares both with the manifest's; a row the application connection refused is written on a ledger
-transaction of its own after the response with the first failure's cause, and a retention the ledger refuses is
-journaled against the delivery's record with the rows kept for the next offer or the shutdown.
+response and compares both with the manifest's; a row the application connection refused is owed by the delivery: it
+is written on a ledger transaction of its own after the response with the first failure's cause, a retention the
+ledger refuses is journaled against the delivery's record, and the delivery's closing event is written only on one
+transaction with the rows it still owes (R244-GPT-FIX7-02). A delivery is bound to the manifest it serves: a corrected
+patient's bytes open a record of their own, and a forgotten manifest's delivery ends with it (R244-GPT-FIX7-01).
 `node --test tests/emr/e/delivery_test.cjs` (compiled `api/dist`, the real recorder and relay on one synthetic
-Orthanc) checks that E's frames and the relay's reads of one session are one pair, that a HEAD alone records and keeps
+Orthanc) checks that E's frames and the relay's reads of one session are one pair (E joins the relay's delivery only at the
+archive's revision it names), that a HEAD alone records and keeps
 nothing and beside a failed GET leaves the delivery aborted, that descriptions take no lease, and that an unrecordable
 ledger answers 503 before any source read; `node --test tests/emr/e/service_retention_test.cjs` (compiled `api/dist`,
-the real ledger store's transaction path over a synthetic SQL port) checks the split-UID refusal, the retention after
-the response, the journaled failed retention (also one that gets no ledger connection) with its later retention; the
+the real ledger store's transaction path over a synthetic SQL port) checks the split-UID refusal, the corrected patient
+under a record of its own, the retention after the response, the journaled failed retention (also one that gets no
+ledger connection), no closing event while the rows are refused and the closing written with them afterwards; the
 real-PG `stream_pg_test.cjs` case drives the service and the shared recorder against the ledger and checks its events,
-the HEAD with no record, the refused patient change and split UID, and the late-retained row.
+the HEAD with no record, the record bound to another manifest or patient refused at the byte boundary, the refused
+patient change and split UID with their deliveries closed, the late-retained row, and (a trigger refusing the ledger
+retention) no closing event until a later closing commits with the row.
 `python -B scripts/run-tests.py --module tests/e2e/test_image_route.py --mode live --unit e-route --timeout 1800`
 runs on the served stack: one frame through HTTPS is one recorded delivery, and the served OHIF CT series
 (`KIN_E_ROUTE_SLICES`, default 200, `KIN_E_ROUTE_MATRIX`, default 512) records every received frame once; it prints

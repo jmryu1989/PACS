@@ -65,7 +65,8 @@
       "tests/e2e/test_image_route.py:ImageRouteE2E.test_route_01_one_frame_through_https_is_one_recorded_delivery",
       "tests/e2e/test_image_route.py:ImageRouteE2E.test_route_02_served_viewer_ct_series_every_received_frame_recorded_once",
       "tests/e2e/test_image_route.py:ImageRouteE2E.test_route_03_study_and_series_retrieve_answer_with_an_object_that_arrived_after_a_frame",
-      "tests/e2e/test_image_paths.py:ImagePathsE2E.test_image_paths_01_every_image_path_records_the_one_study_delivery"
+      "tests/e2e/test_image_paths.py:ImagePathsE2E.test_image_paths_01_each_image_path_opens_its_own_delivery_record_first",
+      "tests/e2e/test_image_paths.py:ImagePathsE2E.test_image_paths_02_every_image_path_joins_the_one_study_delivery"
     ],
     "acceptance_limit": "actual B2 transaction and shipped E migration/evidence store plus synthetic Orthanc protocol; served nginx/OHIF acceptance needs the Module A context binding (source-readers) and the deployed viewer/decoder asset catalog",
     "ci": {
@@ -90,7 +91,8 @@
         "test_fixed_image_http",
         "proxy_image_route_test",
         "test_route_01_one_frame_through_https_is_one_recorded_delivery",
-        "test_image_paths_01_every_image_path_records_the_one_study_delivery"
+        "test_image_paths_01_each_image_path_opens_its_own_delivery_record_first",
+        "test_image_paths_02_every_image_path_joins_the_one_study_delivery"
       ]
     },
     "E-03": {

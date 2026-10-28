@@ -165,7 +165,7 @@ test('the image service rebuilds after a source/current-study change, not after 
     async manifest() { reads++; return built; },
     async recheck() { throw answer; },
   };
-  const service = new OnlineImageService({}, context, {}, noSourceRead,
+  const service = new OnlineImageService(context, {}, noSourceRead,
     { facts: async () => ({ roles: [], binding: {}, actor: {} }) }, checkPool(), noRecord);
   const send = async n => {
     const request = Object.assign(new EventEmitter(), { method: 'GET', headers: {} });
@@ -192,7 +192,7 @@ test('the image service reads the catalog for each study or series request, betw
   let reads = 0;
   const context = { async manifest() { reads++; return manifest(3); },
     async recheck() { throw new ForbiddenException('synthetic stop at the access check'); } };
-  const service = new OnlineImageService({}, context, {}, noSourceRead, { facts: async () => ({ roles: [], binding: {}, actor: {} }) }, checkPool(), noRecord);
+  const service = new OnlineImageService(context, {}, noSourceRead, { facts: async () => ({ roles: [], binding: {}, actor: {} }) }, checkPool(), noRecord);
   const send = target => service.send(Object.assign(new EventEmitter(), { method: 'GET', headers: {} }),
     Object.assign(new EventEmitter(), { writableFinished: false }), target);
   const seen = [];
@@ -239,7 +239,7 @@ test('simultaneous frames of a kept study do not wait on their own B2 append lan
   const orthanc = { ...noSourceRead, studyRevision: async () => ({ id: 'synthetic', lastUpdate: '20261028T120000' }) };
   const recorder = new StudyImageDeliveryRecorder(records, requests, clinical, registry.work, orthanc);
   process.env.KIN_EMR_STATE_DIR = require('node:os').tmpdir();
-  const service = new OnlineImageService(records, context, {}, orthanc, requests, checkPool(), recorder);
+  const service = new OnlineImageService(context, {}, orthanc, requests, checkPool(), recorder);
   const send = n => service.send(Object.assign(new EventEmitter(), { method: 'GET', headers: {} }),
     Object.assign(new EventEmitter(), { writableFinished: false }),
     `/dicom-web/studies/${STUDY}/series/${SERIES}/instances/${sop(n)}/frames/1`);

@@ -61,7 +61,7 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
       '0020000E': { Value: [seriesUid] }, '00080018': { Value: [sopUid] },
       '00080016': { Value: ['1.2.840.10008.5.1.4.1.1.2'] }, '00080008': { Value: ['ORIGINAL', 'PRIMARY'] } };
     let catalogPatient = 'synthetic:' + imageUid, fileReads = 0, storedFile = 'synthetic-file-1';
-    let frameCount = 1, holdFrame = null;
+    let frameCount = 1, holdFrame = null, atRecording = null;
     const frameReads = [], frameData = n => n === 0 ? frameBytes : Buffer.alloc(512, 11 + n);
     // FIND-248-F3: a finding's comparison identity is read before its write locks the anchor study row, so a
     // concurrent write to that study never waits behind an archive call. Each comparison lookup probes the lock.
@@ -86,6 +86,8 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
           : body === sopUid ? [{ Type: 'Instance', ID: objectResource }] : []);
       }
       // LastUpdate: the archive's revision of the study, which the study delivery's record names (image-delivery-record.ts).
+      // The study delivery record's own archive read (its revision); a case may run a step while the request waits on it.
+      if (url.pathname === `/studies/${studyResource}` && atRecording) { const step = atRecording; atRecording = null; await step(); }
       if ([`/studies/${studyResource}`, `/studies/${comparisonResource}`].includes(url.pathname)) return json({
         MainDicomTags: { StudyInstanceUID: url.pathname.endsWith(comparisonResource) ? comparisonUid : imageUid },
         PatientMainDicomTags: { PatientID: 'synthetic:' + imageUid }, LastUpdate: '20261028T120000' });
@@ -140,6 +142,8 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
         { provide: StudyAccessService, useFactory: prisma => new StudyAccessService(prisma, orthanc, keycloak), inject: [PrismaService] },
         { provide: product('emr-runtime/record-port').EMR_RECORD_PORT, useValue: runtime.port },
         { provide: product('emr-runtime/background-work').EMR_BACKGROUND_WORK, useValue: runtime.background.work },
+        // A short idle gap, so a delivery's end is observed within the case (DEFAULT_IMAGE_DELIVERY_IDLE_MS is two minutes).
+        { provide: product('image-delivery-record').IMAGE_DELIVERY_IDLE_MS, useValue: 400 },
         { provide: APP_GUARD, useClass: product('auth.guard').AuthGuard },
         { provide: product('study-transfer-local.service').StudyTransferLocalService, useValue: {} }] })(HttpFixture);
     app = await NestFactory.create(HttpFixture, { logger: ['error'], rawBody: true });
@@ -310,8 +314,34 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     // every request (R244-01: a request naming one object may be served from the kept study manifest instead), so the
     // catalog's own reuse and partial-read rules below are what each request meets.
     const imageUrl = origin + '/api/images/dicom-web?target=' + encodeURIComponent(`/dicom-web/studies/${imageUid}/series/${seriesUid}`);
-    const imageResponse = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
-    assert.equal(imageResponse.status, 200, await (imageResponse.status === 200 ? Promise.resolve('') : imageResponse.text()));
+    // R244-GPT-FIX7-04: the study moves to another institution while the member's first image request waits at its
+    // recording boundary - during the delivery record's own archive read, after the catalog and the record's clinical
+    // read admitted the request. No image byte of the moved study leaves, no response is prepared, and the record that
+    // opened before the move never ends as a successful transfer.
+    const [{ since: movedSince }] = await db.$queryRaw`SELECT clock_timestamp() AS since`;
+    let moved = false;
+    atRecording = async () => { await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: receiver } }); moved = true; };
+    const inFlight = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
+    const inFlightBody = Buffer.from(await inFlight.arrayBuffer());
+    assert.ok(moved, 'the study moved while the request was at its recording boundary');
+    assert.notEqual(inFlight.status, 200, inFlightBody.toString().slice(0, 200));
+    assert.equal(inFlightBody.includes(original), false, 'no image byte of the moved study');
+    assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n, 0, 'no response was prepared');
+    await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: hospital } });
+    let opened = [], closings = [];
+    for (let i = 0; i < 100; i++) {
+      const rows = (await db.$queryRaw`SELECT e.payload::jsonb AS event FROM emr_access.access_entry e
+        WHERE e.recorded_at >= ${movedSince} ORDER BY e.sequence`).map(r => r.event)
+        .filter(e => e.targets.some(t => t.kind === 'image' && t.recordId?.value === imageUid));
+      opened = rows.filter(e => e.action === 'provide-prepared'); closings = rows.filter(e => e.action !== 'provide-prepared');
+      if (opened.length && closings.length >= opened.length) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    assert.equal(opened.length, 1, 'the record opened on the facts read before the move');
+    assert.equal(opened[0].managingInstitution.value, hospital);
+    assert.deepEqual(closings.map(e => [e.action, e.result, e.relatedEventId]), [['transfer-aborted', 'aborted', opened[0].eventId]],
+      'no record of the moved request ends as a successful transfer');
+    const imageResponse = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });    assert.equal(imageResponse.status, 200, await (imageResponse.status === 200 ? Promise.resolve('') : imageResponse.text()));
     const bodyBytes = Buffer.from(await imageResponse.arrayBuffer());
     assert.ok(bodyBytes.includes(original));
     const firstReads = fileReads;
