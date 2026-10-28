@@ -250,8 +250,9 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
       served: 0, unserved: 0, timer: null, retired: false, closed: false, owed: [], terminal: null, ended: false, attempts: 0,
       recording: null, reoffer: false, cancelRetry: null, reserved: null };
     delivery.prepared = this.prepare(request, surface, studyUid, binding).then(record => { delivery.event = record.event; return record; });
-    // A delivery that could not be recorded is no delivery: the next read asks the ledger again.
-    delivery.prepared.catch(() => { if (this.open.get(key) === delivery) this.open.delete(key); });
+    // A delivery that could not be recorded is no delivery: the next read asks the ledger again; retired, it has nothing
+    // to close.
+    delivery.prepared.catch(() => { if (this.open.get(key) === delivery) this.open.delete(key); this.retiring.delete(delivery); });
     this.open.set(key, delivery);
     return delivery;
   }
