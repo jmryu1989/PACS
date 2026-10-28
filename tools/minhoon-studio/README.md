@@ -31,8 +31,16 @@ deep, other screens browsable), 바꾸기 (edit) + 되돌리기 (undo = `git rev
 ## Server layout (pacs.koreaimagingnetwork.com, 61.109.239.207)
 
 Everything is under `/opt/minhoon-studio`, run by the system user `studio` as the systemd unit `minhoon-studio`
-on **port 8443** with a self-signed certificate. The deployed PACS (nginx 80/443, Docker stack, Orthanc, Keycloak,
-DB) is not used, read or changed; the unit cannot see the Docker socket or `/etc/nginx`.
+on **port 8443** with the host's Let's Encrypt certificate for `pacs.koreaimagingnetwork.com` (owner decision
+2026-10-28). The deployed PACS (nginx 80/443, Docker stack, Orthanc, Keycloak, DB) is not used, read or changed; the
+unit cannot see the Docker socket or `/etc/nginx`.
+
+Certificate: certbot keeps renewing the existing lineage unchanged. The deploy hook
+`/etc/letsencrypt/renewal-hooks/deploy/minhoon-studio-cert` (source `deploy/minhoon-studio-cert`, installed by
+`install.sh`) copies `fullchain.pem` + `privkey.pem` to `etc/tls/` (root:studio 0640) after each renewal of that
+lineage and restarts the studio if it is running (a paused studio stays stopped). Copy by hand any time:
+`sudo /etc/letsencrypt/renewal-hooks/deploy/minhoon-studio-cert`. On a host without that lineage `install.sh` falls
+back to a self-signed certificate in `tls/`.
 
 | Path | Owner | Content |
 |---|---|---|
@@ -46,6 +54,8 @@ DB) is not used, read or changed; the unit cannot see the Docker socket or `/etc
 | `knowledge/status.json` | root | the commander's status feed (read-only for the service) |
 | `data/` | studio | users/sessions (hashes only), chat, metrics, usage, mock state, `public/digests/`, `public/records.jsonl` |
 | `etc/config.json`, `etc/studio.env` | root | config; `STUDIO_CLAUDE_ACCOUNT=admin` switches the Claude login |
+| `etc/tls/` | root:studio 0750, files 0640 | copy of the Let's Encrypt fullchain + key (deploy hook) |
+| `tls/` | studio | self-signed fallback (unused while `etc/tls/` is configured) |
 | `/root/minhoon-studio-passwords.txt` | root, 0600 | the two studio passwords (never printed by the installer) |
 
 ## Owner: one-time steps
@@ -73,9 +83,10 @@ DB) is not used, read or changed; the unit cannot see the Docker socket or `/etc
    (same commands as step 2), then `echo STUDIO_CLAUDE_ACCOUNT=admin | sudo tee /opt/minhoon-studio/etc/studio.env`
    and `sudo systemctl restart minhoon-studio`.
 
-URL: `https://61.109.239.207:8443/` (the browser warns once about the self-signed certificate). Prefer the IP: with
-the PACS hostname the browser also sends the PACS cookies to port 8443 (cookies are not port-scoped); the studio
-ignores them and never logs cookies, but the IP keeps them apart entirely.
+URL: `https://pacs.koreaimagingnetwork.com:8443/` (no certificate warning). `https://61.109.239.207:8443/` still
+works but the browser warns, because the certificate names only the hostname. With the hostname the browser sends
+the PACS cookies to port 8443 and the studio cookie `mstudio_sid` to the PACS (cookies are not port-scoped); each
+side ignores the other's cookie by name and the studio never logs cookies.
 
 ## Commander
 

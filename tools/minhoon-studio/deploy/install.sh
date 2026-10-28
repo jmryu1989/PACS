@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Install or update the Minhoon studio on a host that also runs the deployed PACS.
 # It creates the system user `studio`, everything under /opt/minhoon-studio, one systemd unit and one root-only
-# password file. It never touches Docker, nginx, Orthanc, Keycloak, the PACS database or ports 80/443.
+# password file, plus one certbot deploy hook that copies the host's Let's Encrypt certificate for the studio.
+# It never touches Docker, nginx, Orthanc, Keycloak, the PACS database, ports 80/443 or the certbot renewal config.
 #
 #   sudo bash install.sh <bundle-dir>            # bundle-dir holds app.tgz base.tar assets-ohif.tgz assets-dicomweb.tgz BASE_SHA
 #   sudo bash install.sh <bundle-dir> --rotate-passwords
@@ -76,18 +77,30 @@ install -d -o studio -g studio "$ROOT/sandbox-read"
 echo "== knowledge feed (the commander replaces status.json; seeded once)"
 [ -f "$ROOT/knowledge/status.json" ] || install -o root -g root -m 644 "$ROOT/app/knowledge-seed/status.json" "$ROOT/knowledge/status.json"
 
-echo "== TLS (self-signed, studio only; the PACS certificates are not used)"
-if [ ! -f "$ROOT/tls/cert.pem" ]; then
-  openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$HOSTNAME_PUBLIC" \
-    -addext "subjectAltName=DNS:$HOSTNAME_PUBLIC,IP:$IP_PUBLIC" -keyout "$ROOT/tls/key.pem" -out "$ROOT/tls/cert.pem" 2>/dev/null
-  chown studio:studio "$ROOT/tls/key.pem" "$ROOT/tls/cert.pem"; chmod 600 "$ROOT/tls/key.pem"
+echo "== TLS"
+LE_LINEAGE=/etc/letsencrypt/live/$HOSTNAME_PUBLIC
+if [ -f "$LE_LINEAGE/fullchain.pem" ]; then
+  # Browser-trusted: the host's Let's Encrypt certificate for the hostname, copied by a deploy hook after each
+  # renewal (owner decision 2026-10-28). The certbot lineage and its renewal config are left as they are.
+  echo "   Let's Encrypt $HOSTNAME_PUBLIC (deploy hook minhoon-studio-cert)"
+  install -o root -g root -m 755 "$ROOT/app/deploy/minhoon-studio-cert" /etc/letsencrypt/renewal-hooks/deploy/minhoon-studio-cert
+  /etc/letsencrypt/renewal-hooks/deploy/minhoon-studio-cert
+  TLS_CERT=$ROOT/etc/tls/fullchain.pem; TLS_KEY=$ROOT/etc/tls/privkey.pem
+else
+  echo "   self-signed (no $LE_LINEAGE on this host)"
+  if [ ! -f "$ROOT/tls/cert.pem" ]; then
+    openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$HOSTNAME_PUBLIC" \
+      -addext "subjectAltName=DNS:$HOSTNAME_PUBLIC,IP:$IP_PUBLIC" -keyout "$ROOT/tls/key.pem" -out "$ROOT/tls/cert.pem" 2>/dev/null
+    chown studio:studio "$ROOT/tls/key.pem" "$ROOT/tls/cert.pem"; chmod 600 "$ROOT/tls/key.pem"
+  fi
+  TLS_CERT=$ROOT/tls/cert.pem; TLS_KEY=$ROOT/tls/key.pem
 fi
 
 echo "== config"
 cat > "$ROOT/etc/config.json" <<JSON
 {
   "listen": { "host": "0.0.0.0", "port": $PORT },
-  "tls": { "cert": "$ROOT/tls/cert.pem", "key": "$ROOT/tls/key.pem" },
+  "tls": { "cert": "$TLS_CERT", "key": "$TLS_KEY" },
   "paths": {
     "sandbox": "$ROOT/sandbox", "sandboxRead": "$ROOT/sandbox-read", "data": "$ROOT/data",
     "ohifDist": "$ROOT/assets/ohif", "dicomweb": "$ROOT/assets/dicomweb", "knowledge": "$ROOT/knowledge"
@@ -114,7 +127,7 @@ echo "== studio passwords (root-only file; never printed)"
 if [ ! -f "$PASSFILE" ] || [ "$ROTATE" = "--rotate-passwords" ]; then
   umask 077
   P1=$(openssl rand -base64 18 | tr '+/' 'xy'); P2=$(openssl rand -base64 18 | tr '+/' 'xy')
-  printf 'Minhoon studio logins (https://%s:%s/ or https://%s:%s/)\nminhoon  %s\nowner    %s\n' "$IP_PUBLIC" "$PORT" "$HOSTNAME_PUBLIC" "$PORT" "$P1" "$P2" > "$PASSFILE"
+  printf 'Minhoon studio logins (https://%s:%s/ or https://%s:%s/)\nminhoon  %s\nowner    %s\n' "$HOSTNAME_PUBLIC" "$PORT" "$IP_PUBLIC" "$PORT" "$P1" "$P2" > "$PASSFILE"
   chmod 600 "$PASSFILE"; chown root:root "$PASSFILE"
   printf '%s' "$P1" | sudo -u studio "$ROOT/node/bin/node" "$ROOT/app/server/server.js" set-password minhoon "민훈" --config "$ROOT/etc/config.json"
   printf '%s' "$P2" | sudo -u studio "$ROOT/node/bin/node" "$ROOT/app/server/server.js" set-password owner "정모" --config "$ROOT/etc/config.json"
