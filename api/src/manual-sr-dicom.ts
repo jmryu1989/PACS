@@ -1,3 +1,4 @@
+import { planarGeometry } from './planar-geometry';
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { mgGeometry } from './mg-geometry';
@@ -35,6 +36,15 @@ function srPixels(raw: Buffer, rows: number, cols: number): (i: number) => numbe
 }
 
 export function srMeasurement(item: any, tags: any, pixels?: Buffer) {
+  if (item.baseline?.calculator?.startsWith('kin-planar-manual-v1:')) {
+    const geometry = planarGeometry(tags, item.frame), value = geometry.measure(item.kind, item.points);
+    if (geometry.calculator !== item.baseline.calculator || Math.abs(value - item.baseline.values[0]) > (item.kind === 'ellipse' ? .01 : .001))
+      throw new ConflictException('재확인 필요: 원본으로 계산한 값이 저장한 측정과 다릅니다');
+    let points = item.points;
+    if (item.kind === 'ellipse' && geometry.measure('length', points.slice(0, 2)) < geometry.measure('length', points.slice(2)))
+      points = [points[2], points[3], points[0], points[1]];
+    return { values: [value], graphic: points.flatMap(point => geometry.imagePoint(point).map(n => n + .5)), basis: geometry.label };
+  }
   const mg = item.kind === 'length' && mgGeometry(tags, item.frame);
   const p = item.points, origin = vector(tags.ImagePositionPatient), orientation = vector(tags.ImageOrientationPatient), spacing = vector(tags.PixelSpacing);
   const u = orientation.slice(0, 3), v = orientation.slice(3), uu = dot(u, u), vv = dot(v, v), uv = dot(u, v), det = uu * vv - uv * uv;
@@ -107,7 +117,7 @@ export function srDataset(id: string, studyUid: string, actor: string, authorSub
       node('TEXT', code('121106', 'Comment'), { TextValue: srText(item.label || tool) + ' [revision ' + head.revision + ']' + (computed.basis ? ' · ' + computed.basis : '') }),
       numeric(metric, computed.values[0], unit, { ContentSequence: coords }),
     ];
-    if (item.kind === 'ellipse') {
+    if (item.kind === 'ellipse' && computed.values.length === 5) {
       // Planar ROI measurements share a TID1410 image region. The region is a
       // sibling of the statistics, which avoids copying the same shape once
       // per numeric value and is understood by the pinned SR renderer.
@@ -127,6 +137,12 @@ export function srDataset(id: string, studyUid: string, actor: string, authorSub
     const refs = series.get(tags.SeriesInstanceUID).ReferencedSOPSequence;
     if (!refs.some((x: any) => x.ReferencedSOPInstanceUID === tags.SOPInstanceUID)) refs.push({ ReferencedSOPClassUID: tags.SOPClassUID, ReferencedSOPInstanceUID: tags.SOPInstanceUID });
   }
+  const modalities = [...new Set(entries.map(entry => entry.tags.Modality))];
+  const modality = modalities.length === 1 ? modalities[0] : null;
+  const modalityNames = { MG: 'Mammography', MR: 'Magnetic resonance imaging', DX: 'Digital radiography',
+    US: 'Ultrasound', XA: 'X-ray angiography' };
+  const procedure = modality === 'CT' ? code('P5-08000', 'Computed Tomography', 'SRT') :
+    modalityNames[modality] ? code(modality, modalityNames[modality], '99KIN') : code('IMAGING', 'Imaging', '99KIN');
   const dataset: any = {
     SpecificCharacterSet: 'ISO_IR 192', SOPClassUID: SR_CLASS, SOPInstanceUID: srUid('report:' + id), StudyInstanceUID: studyUid,
     SeriesInstanceUID: srUid('manual-series:' + studyUid + ':' + authorSub), Modality: 'SR', Manufacturer: 'KIN',
@@ -144,7 +160,7 @@ export function srDataset(id: string, studyUid: string, actor: string, authorSub
       node('CODE', code('121049', 'Language of Content Item and Descendants'), { ConceptCodeSequence: code('en-US', 'English (United States)', 'RFC5646') }, 'HAS CONCEPT MOD'),
       node('CODE', code('121005', 'Observer Type'), { ConceptCodeSequence: code('121006', 'Person') }, 'HAS OBS CONTEXT'),
       node('PNAME', code('121008', 'Person Observer Name'), { PersonName: observerName(actor) }, 'HAS OBS CONTEXT'),
-      node('CODE', code('121058', 'Procedure reported'), { ConceptCodeSequence: entries.every(entry => entry.tags.Modality === 'MG') ? code('MG', 'Mammography', '99KIN') : code('P5-08000', 'Computed Tomography', 'SRT') }, 'HAS CONCEPT MOD'),
+      node('CODE', code('121058', 'Procedure reported'), { ConceptCodeSequence: procedure }, 'HAS CONCEPT MOD'),
       node('CONTAINER', code('111028', 'Image Library'), { ContinuityOfContent: 'SEPARATE', ContentSequence: [
         node('CONTAINER', code('126200', 'Image Library Group'), { ContinuityOfContent: 'SEPARATE', ContentSequence:
           [...series.values()].flatMap(s => s.ReferencedSOPSequence.map(ref => node('IMAGE', code('121324', 'Source image'), { ReferencedSOPSequence: ref }))), }),

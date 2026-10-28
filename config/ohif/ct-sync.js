@@ -14,9 +14,8 @@ const kinCTSyncModel = (() => {
   function match(source, target) {
     const deny = reason => ({ reason, index: -1 });
     if (!source?.patient || source.patient !== target?.patient) return deny('같은 환자를 확인할 수 없습니다');
-    if (!source.classic || !target.classic) return deny('일반 CT 스택만 위치 동기할 수 있습니다');
     const a = source.planes?.[source.index], planes = target.planes;
-    if (!a?.frameOfReferenceUID || !Array.isArray(planes) || planes.length < 2 || planes.length > 2000 ||
+    if (!a?.frameOfReferenceUID || !Array.isArray(planes) || planes.length < 1 ||
         planes.some(p => !p?.frameOfReferenceUID || p.frameOfReferenceUID !== a.frameOfReferenceUID)) return deny('좌표계가 다르거나 없습니다');
     const n = normal(a), t = normal(planes[0]);
     if (!n || !t || Math.abs(dot(n, t)) < 1 - 1e-6) return deny('영상 방향 또는 위치가 맞지 않습니다');
@@ -25,7 +24,6 @@ const kinCTSyncModel = (() => {
       const pn = normal(p);
       if (!pn || Math.abs(dot(pn, t)) < 1 - 1e-6) return deny('영상 방향 또는 위치가 맞지 않습니다');
       const d = sub(p.imagePositionPatient, origin), z = dot(d, t);
-      if (Math.sqrt(dot(d, d) - Math.min(dot(d, d), z*z)) > eps) return deny('기울어진 스택은 위치 동기하지 않습니다');
       values.push(z);
     }
     const sorted = [...values].sort((a, b) => a - b), gaps = sorted.slice(1).map((x, i) => x - sorted[i]);
@@ -35,7 +33,7 @@ const kinCTSyncModel = (() => {
     // Preserve native nearest-position and stable first-index tie behavior, but refuse large gaps.
     let index = 0;
     for (let i = 1; i < values.length; i++) if (Math.abs(values[i]-z) < Math.abs(values[index]-z) - 1e-9) index = i;
-    if (Math.abs(values[index]-z) > Math.min(...gaps) / 2 + eps) return deny('대상 영상 위치 사이에 큰 공백이 있습니다');
+    if (Math.abs(values[index]-z) > gaps.reduce((min, gap) => Math.min(min, gap), Infinity) / 2 + eps) return deny('대상 영상 위치 사이에 큰 공백이 있습니다');
     return { index, reason: '' };
   }
   return { match };
@@ -180,11 +178,10 @@ function kinCreateCTSync() {
       if (!v || !g || v.getRenderingEngine().id !== info.renderingEngineId) return null;
       const ids = v.getImageIds?.() || [], sets = g.displaySetInstanceUIDs || [];
       const d = sets.length === 1 && services.displaySetService.getDisplaySetByUID(sets[0]);
-      const classic = v.type === 'stack' && d?.Modality === 'CT' && d?.SOPClassUID === '1.2.840.10008.5.1.4.1.1.2' &&
-        d.images?.length === ids.length && d.images.every(i => i.SOPClassUID === '1.2.840.10008.5.1.4.1.1.2') &&
-        ids.length > 1 && ids.length <= 2000 && ids.every(id => id.includes('/studies/'+d.StudyInstanceUID+'/series/'+d.SeriesInstanceUID+'/'));
-      return { v, ids, study: d?.StudyInstanceUID, patient: null, classic, index: v.getCurrentImageIdIndex?.(),
-        planes: classic ? ids.map(id => core.metaData.get('imagePlaneModule', id)) : [],
+      const stack = v.type === 'stack' && d && ids.length > 1 &&
+        ids.every(id => id.includes('/studies/'+d.StudyInstanceUID+'/series/'+d.SeriesInstanceUID+'/'));
+      return { v, ids, study: d?.StudyInstanceUID, patient: null, stack, index: v.getCurrentImageIdIndex?.(),
+        planes: stack ? ids.map(id => core.metaData.get('imagePlaneModule', id)) : [],
         signature: JSON.stringify([sets, ids, v.getCurrentImageId?.()]) };
     }
     const current = (info, before) => before && view(info)?.signature === before.signature;
@@ -226,7 +223,7 @@ function kinCreateCTSync() {
               if (m.index >= 0) core.utilities.spatialRegistrationMetadataProvider.add([targets[i].viewportId, sourceInfo.viewportId], [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]);
             });
             const denied = matches.find(m => m.index < 0);
-            say(denied ? '위치 동기 제한: '+denied.reason : '같은 좌표계의 CT 위치 동기');
+            say(denied ? '위치 동기 제한: '+denied.reason : '같은 좌표계의 스택 위치 동기');
             return fire.call(sync, sourceInfo, event);
           } catch (error) {
             // Session termination is owned by the page transport and gate.

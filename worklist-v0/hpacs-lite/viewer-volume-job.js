@@ -45,7 +45,7 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
   function source(v) {
     if(v?.type!=='orthographic'||v.getActors().length!==1)fail();
     const volume=cornerstone.cache.getVolume(v.getVolumeId()),images=volume?.imageIds;
-    if(!volume?.loadStatus?.loaded||!Array.isArray(images)||images.length<2||images.length>256||volume.framesLoaded!==images.length)fail();
+    if(!volume?.loadStatus?.loaded||!Array.isArray(images)||images.length<2||volume.framesLoaded!==images.length)fail();
     const refs=images.map(id=>cornerstone.metaData.get('instance',id)),first=refs[0];
     if(!first||!studies.includes(first.StudyInstanceUID)||refs.some(m=>!m||m.StudyInstanceUID!==first.StudyInstanceUID||m.SeriesInstanceUID!==first.SeriesInstanceUID||m.PatientID!==first.PatientID||m.SOPClassUID!=='1.2.840.10008.5.1.4.1.1.2'||m.Modality!=='CT'||Number(m.SamplesPerPixel)!==1||m.PhotometricInterpretation!=='MONOCHROME2'))fail();
     const sops=refs.map(m=>m.SOPInstanceUID);if(new Set(sops).size!==sops.length)fail();

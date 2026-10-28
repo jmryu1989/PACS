@@ -36,7 +36,7 @@ BLOCK_IDS = {
     'X': ('X-1', 'X-2', 'X-3', 'X-4'),
 }
 
-BUDGET = 24 * 1024 * 1024       # the agent's body limit at BYTE_BUDGET_MIB=24 (agent.py:148-160)
+BUDGET = 24 * 1024 * 1024       # the agent's batching target at BYTE_BUDGET_MIB=24
 NEAR_LIMIT = 20 * 1024 * 1024   # R3: a batch that uses the budget, not a token one
 BACKOFF = 90                    # A1: flat test backoff; a request after study.retry + 90 s has no retry state to pull
 RECEIPT_LAG = 100               # A1: BACKOFF_MAX 90 bounds the flush of the final receipt after an outage (O-3)
@@ -45,9 +45,9 @@ QUIET = 18                      # F-8: 3 x (StableAge 5 + poll 1); a bounded win
 IN_FLIGHT_TAIL = 12             # a request already in flight at reconnect ends by the 10 s HTTP timeout plus one poll
 LOG_KEYS = frozenset(('at', 'event', 'uid', 'batch', 'sops', 'failed', 'bytes', 'attempt', 'afterSeconds', 'error',
                       'status', 'code', 'pending', 'byteBudget'))
-OUTAGE_ERRORS = ('token request ConnectionError', 'cloud request ConnectionError')
+# Disconnecting an established cloud socket can time out instead of failing to connect (VM fix1-y).
+OUTAGE_ERRORS = ('token request ConnectionError', 'cloud request ConnectionError', 'cloud request ReadTimeout')
 STALL_ERROR = 'cloud request ReadTimeout'
-F01_ERROR = 'single DICOM instance exceeds byte budget'
 INSTITUTION = 'KIN 판독센터'
 RESOLVE = {'kin-cloud': True, 'kin-api': False, 'kin-db': False, 'kin-keycloak': False, 'kin-orthanc': False}
 OWNED_COUNTS = ('orthanc_studies', 'StudyState', 'GatewayReceipt', 'GatewayRetryRequest', 'AuditLog')
@@ -107,9 +107,9 @@ def converged(local, cloud, count):
     return len(local) == len(set(local)) == count and len(cloud) == len(set(cloud)) and set(cloud) == set(local)
 
 
-def failed_receipt(row, local):
+def completed_receipt(row, local):
     return (row['phase'], row['errorCode'], row['successCount'], row['localCount']) == (
-        'failed', 'instance_exceeds_budget', 0, local)
+        'complete', None, local, local)
 
 
 # ── setup ─────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -318,30 +318,28 @@ def _f1(s, t, d, e):
 def _f2(s, t, d, e):
     block = s['F']
     seen = pick(e, uid=block['uid'], after=block['big']['t_send'], before=block['normal']['t_send'])
-    return ([item['error'] for item in named(seen, 'study.failed')] == [F01_ERROR]
-            and not named(seen, 'batch.stored') and block['status']['phase'] == 'failed')
+    return (not named(seen, 'study.failed')
+            and [(item['sops'], item['failed']) for item in named(seen, 'batch.stored')] == [(1, 0)]
+            and [item['sops'] for item in named(seen, 'study.complete')] == [1] and block['status']['phase'] == 'complete')
 
 
 def _f3(s, t, d, e):
-    return failed_receipt(s['F']['db_receipt'], 1)
+    return completed_receipt(s['F']['db_receipt'], 1)
 
 
 def _f4(s, t, d, e):
     block = s['F']
-    absent = block['list']['not_observed']
-    # A4: the zero-delivered study's list shape belongs to S4-F01V; a receipt on the absent item is recorded as data
-    # (receipt_projection_present) and never judged here. The empty cloud is F-6's.
-    return block['list']['in_studies'] is False and absent['uid'] == block['uid'] and absent['origin'] == 'gateway'
+    return block['list']['in_studies'] is True and block['list']['not_observed'] is None
 
 
 def _f5(s, t, d, e):
     block = s['F']
-    return (block['request'] == {'status': 409, 'code': 'GATEWAY_RETRY_UNSUPPORTED_F01'}
+    return (block['request'] == {'status': 409, 'code': 'GATEWAY_RETRY_NOT_RETRY'}
             and block['request_rows'] == 0 and block['request_audits'] == 0)
 
 
 def _f6(s, t, d, e):
-    return s['F']['cloud'] == []
+    return converged(s['F']['local'], s['F']['cloud'], 1)
 
 
 def _f7(s, t, d, e):
@@ -349,9 +347,9 @@ def _f7(s, t, d, e):
     normal = block['normal']
     seen = pick(e, uid=block['uid'], after=normal['t_send'], before=block['quiet']['t_start'])
     return (cstore_ok(normal['cstore'], 1) and len(named(seen, 'study.queued')) == 1
-            and [item['error'] for item in named(seen, 'study.failed')] == [F01_ERROR]
-            and not named(seen, 'batch.stored') and failed_receipt(normal['db_receipt'], 2)
-            and normal['cloud'] == [] and normal['audit'].count('study.announce') == 1)
+            and not named(seen, 'study.failed')
+            and sum(item['sops'] for item in named(seen, 'batch.stored')) == 1 and completed_receipt(normal['db_receipt'], 2)
+            and converged(normal['local'], normal['cloud'], 2) and normal['audit'].count('study.announce') == 1)
 
 
 def _f8(s, t, d, e):
@@ -369,7 +367,7 @@ def _x1(s, t, d, e):
     studies = s['X']['studies']
     return (all(converged(studies[key]['local'], studies[key]['cloud'], count)
                 for key, count in (('N', 2), ('B', 95), ('R', 2)))
-            and studies['F']['cloud'] == [])
+            and converged(studies['F']['local'], studies['F']['cloud'], 2))
 
 
 def _x2(s, t, d, e):
