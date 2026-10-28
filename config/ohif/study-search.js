@@ -22,9 +22,19 @@ function kinCreateStudySearch() {
       if (!response.ok) throw new Error('이전 검사 목록을 확인하지 못했습니다 (HTTP ' + response.status + ').');
       return response.json();
     })().catch(error => { listing = null; throw error; });
+    // /api/studies is the radiology list; a clinician-only session is refused it (api/src/clinician-policy.ts) and keeps the
+    // stock scoped MRN search. An account not yet confirmed either way does not read that list or merge by MRN.
+    const role = async () => {
+      const now = kinViewerSession.state();
+      return now === 'unconfirmed' ? kinViewerSession.decide() : now;
+    };
     const wrapped = async function (params) {
       if (!params?.patientId || params.studyInstanceUid) return original.call(this, params);
       current();
+      const verdict = await role();
+      current();
+      if (verdict === 'read-only') return original.call(this, params);
+      if (verdict !== 'writer') throw new Error('계정을 확인하지 못해 이전 검사를 찾지 않았습니다.');
       const list = await readList();
       current();
       const keys = new Set(list.studies.filter(row => opened.includes(row.uid) && row.id === params.patientId && row.sourcePatientKey)

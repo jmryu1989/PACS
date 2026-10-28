@@ -12073,7 +12073,7 @@
     });
     let ctxSelection = null;
     function showSelectionMenu(e, set) {
-      showCtx(e, [{ label: "Open Selected Studies", dis: set.studyUids.length > KinWorklistSelection.SET_LIMITS.max,
+      showCtx(e, [{ label: "Open Selected Studies",
         act: () => { ctxSelection = null; multiStudyView?.open(set); } }], null, null);
       ctxSelection = { items: ctxItems, generation: set.generation };
     }
