@@ -105,7 +105,7 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql',
               'api/prisma/migrations/20261015013945_import_operation/migration.sql',
               'api/prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql',
-              'api/prisma/migrations/20261023180000_emr_pg_ledger/migration.sql', 'api/prisma/migrations/20261023200000_emr_server_signing/migration.sql', 'api/prisma/migrations/20261024120000_emr_d_online/migration.sql', 'api/prisma/migrations/20261025000000_emr_e_online/migration.sql', 'api/prisma/migrations/20261025120000_access_review/migration.sql', 'api/prisma/migrations/20261025120000_auth_flow_subtraction/migration.sql', 'api/prisma/migrations/20261025150000_emr_f_link/migration.sql', 'api/prisma/migrations/20261026120000_assignment_access_stream/migration.sql', 'api/prisma/migrations/20261026180000_emr_signing_key_admin/migration.sql', 'api/prisma/migrations/20261027230000_caution_app_limits/migration.sql']
+              'api/prisma/migrations/20261023180000_emr_pg_ledger/migration.sql', 'api/prisma/migrations/20261023200000_emr_server_signing/migration.sql', 'api/prisma/migrations/20261024120000_emr_d_online/migration.sql', 'api/prisma/migrations/20261025000000_emr_e_online/migration.sql', 'api/prisma/migrations/20261025120000_access_review/migration.sql', 'api/prisma/migrations/20261025120000_auth_flow_subtraction/migration.sql', 'api/prisma/migrations/20261025150000_emr_f_link/migration.sql', 'api/prisma/migrations/20261026120000_assignment_access_stream/migration.sql', 'api/prisma/migrations/20261026180000_emr_signing_key_admin/migration.sql', 'api/prisma/migrations/20261027230000_caution_app_limits/migration.sql', 'api/prisma/migrations/20261028120000_held_unknown_source/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -211,7 +211,7 @@ def expected_rows(uid):
     rows['TechNoteRevision'] = [dict(studyUid=uid, version=1, text='SYNTHETIC tech note', reason='', author='SYNTHETIC-tech', authorSub='SYNTHETIC-sub', institutionId='SYNTHETIC-hospital', createdAt=STAMP, attemptId=None),
         dict(studyUid=uid, version=2, text='SYNTHETIC tech note v2', reason='SYNTHETIC correction', author='SYNTHETIC-tech', authorSub='SYNTHETIC-sub', institutionId='SYNTHETIC-hospital', createdAt=STAMP, attemptId='00000000-0000-4000-8000-000000000d01')]
     rows['Institution'] = [dict(id='SYNTHETIC-'+kind, name='SYNTHETIC '+kind, type=kind,
-        dicomNames='SYNTHETIC', createdAt=STAMP) for kind in ('hospital', 'tele')]
+        dicomNames='SYNTHETIC', dicomAets='', createdAt=STAMP) for kind in ('hospital', 'tele')]
     rows['StudyState'] = [dict(uid=uid, institutionId='SYNTHETIC-hospital', teleInstitutionId='SYNTHETIC-tele',
         origin='dicom', rs='R', holdReason=None, ss='Verified', em='N', ts='none', matched='U', ward='',
         reqHosp='SYNTHETIC', repDoc='SYNTHETIC-reader', confirm=None, preDoc=None, preReviewer=None, preDocSub="SYNTHETIC-author-sub", preReviewerSub="SYNTHETIC-reviewer-sub",

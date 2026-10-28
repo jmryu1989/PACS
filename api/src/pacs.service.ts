@@ -96,14 +96,6 @@ export class PacsService implements OnModuleInit {
     return this.institutionsConcern.institutionName(id);
   }
 
-  async unassigned(c: Caller) {
-    return this.institutionsConcern.unassigned(c);
-  }
-
-  async assignInstitution(uid: string, institutionId: string, c: Caller) {
-    return this.institutionsConcern.assignInstitution(uid, institutionId, c);
-  }
-
   async colleagues(c: Caller) {
     return this.institutionsConcern.colleagues(c);
   }
@@ -215,6 +207,10 @@ export class PacsService implements OnModuleInit {
     return this.auditConcern.audits(uid, take, c);
   }
 
+  async auditRead(uid: string | undefined, take: number, c: Caller) {
+    return this.auditConcern.auditRead(uid, take, c);
+  }
+
   // ── metrics (api/src/pacs/metrics.ts) ──
   async adminMetrics(c: Caller) {
     return this.metricsConcern.adminMetrics(c);
@@ -223,6 +219,18 @@ export class PacsService implements OnModuleInit {
   // ── worklist (api/src/pacs/worklist.ts) ──
   async readStudies(c: Caller, query?: any) {
     return this.worklistConcern.readStudies(c, query);
+  }
+
+  async heldSources(c: Caller) {
+    return this.worklistConcern.heldSources(c);
+  }
+
+  async registerSourceDevice(body: any, c: Caller) {
+    return this.worklistConcern.registerSourceDevice(body, c);
+  }
+
+  async registerInstitutionAlias(body: any, c: Caller) {
+    return this.worklistConcern.registerInstitutionAlias(body, c);
   }
 
   async listStudies(c: Caller, query?: any) {

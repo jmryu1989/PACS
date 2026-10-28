@@ -60,6 +60,8 @@ function world({ resources = [], states = [], policy = null, institutions = INST
     w.orthanc.push({ method, path: u.pathname, uid: u.searchParams.get('StudyInstanceUID'), inTx: w.inTx > 0 });
     if (w.orthancDown) throw new TypeError('fetch failed');
     if (method === 'POST' && u.pathname === '/tools/find') {
+      // D1882 sending-device read: these synthetic studies have no instance with a recorded calling AE.
+      if (JSON.parse(init.body).Level === 'Instance') return json([]);
       const asked = JSON.parse(init.body).RequestedTags;
       const tags = r => ({ StudyInstanceUID: r.uid, InstitutionName: r.institution, PatientID: r.patientId, StudyDate: r.date,
         ModalitiesInStudy: r.modalities.join('\\'), AccessionNumber: r.accession });
@@ -548,7 +550,7 @@ test('TEST-WSU-08 a source observation is per request: an earlier single answer 
 });
 
 // ── TEST-WSU-09 derived projections (M-WSU-04) ──
-test('TEST-WSU-09 a split UID is observed, has no order pairing or reconciliation, and is not restored by bootstrap or unassigned', async () => {
+test('TEST-WSU-09 a split UID is observed, has no order pairing or reconciliation, and is not restored by bootstrap or the held alert', async () => {
   // SPLIT is linked to order O-S; 2.25.901 is an unlinked split whose two resources carry ACC-4 (first) and ACC-5 (last).
   const OPEN = '2.25.901';
   const w = await world({ resources: [A({ accession: 'ACC-1' }), B({ accession: 'ACC-2' }), resource(NORMAL, 'SYN-PID-N', { accession: 'ACC-3' }),
@@ -581,17 +583,14 @@ test('TEST-WSU-09 a split UID is observed, has no order pairing or reconciliatio
   const lean = await w.pacs.bootstrap(caller(), { states: 'omit' });
   assert.deepEqual(lean.states, {});
 
-  // Unassigned: a split is not two assignable patients, and its assignment is refused without a write.
-  const orphan = await world({ resources: [A({ institution: 'UNKNOWN' }), B({ institution: 'UNKNOWN' }), resource(NORMAL, 'SYN-PID-N', { institution: 'UNKNOWN' })] }).start();
-  await orphan.pacs.listStudies(caller());
-  const admin = caller({ roles: ['admin'] });
-  assert.deepEqual((await orphan.pacs.unassigned(admin)).studies.map(s => s.uid), [NORMAL]);
-  const writes = orphan.writes.length;
-  await rejects(orphan.pacs.assignInstitution(SPLIT, 'hallym', admin), 409, 'STUDY_IDENTITY_UNRESOLVED');
-  assert.equal(orphan.writes.length, writes);
-  assert.equal(orphan.states.get(SPLIT).institutionId, null);
-  await orphan.pacs.assignInstitution(NORMAL, 'hallym', admin);
-  assert.equal(orphan.states.get(NORMAL).institutionId, 'hallym');
+  // D1882: an unknown sending hospital is held. A split UID is held like any other study and reaches no list; the operator
+  // alert counts each held UID once by its raw text and names no UID, and nothing assigns a study one by one.
+  const held = await world({ resources: [A({ institution: 'UNKNOWN' }), B({ institution: 'UNKNOWN' }), resource(NORMAL, 'SYN-PID-N', { institution: 'UNKNOWN' })] }).start();
+  assert.deepEqual((await held.pacs.listStudies(caller())).studies, []);
+  const alert = await held.pacs.heldSources(caller({ roles: ['admin'] }));
+  assert.deepEqual(alert.groups.map(g => [g.device, g.institutionText, g.count]), [[null, 'UNKNOWN', 2]]);
+  assert.equal([SPLIT, NORMAL, 'SYN-PID'].some(fact => JSON.stringify(alert).includes(fact)), false, 'no study or patient fact');
+  assert.deepEqual([held.states.get(SPLIT).institutionId, held.states.get(NORMAL).institutionId], [null, null]);
 });
 test('TEST-WSU-09 the clinician list and timeline count the normal set and carry only UID+code issues', async () => {
   const w = await world({ resources: [A(), B(), resource(NORMAL, 'SYN-PID-N'), resource('2.25.101', 'SYN-PID-N')] }).start();

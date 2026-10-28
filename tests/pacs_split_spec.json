@@ -197,54 +197,6 @@
       }
     },
     {
-      "id": "member:unassigned:MethodDeclaration",
-      "category": "member",
-      "name": "unassigned",
-      "kind": "MethodDeclaration",
-      "target": "api/src/pacs/institutions.ts",
-      "live": {
-        "file": "api/src/pacs/institutions.ts",
-        "owner": "PacsInstitutions",
-        "name": "unassigned",
-        "kind": "MethodDeclaration"
-      },
-      "baseline": {
-        "text_sha256": "c2d2d34779b7dfca7c4cbcd9e71f8cd6aadd5fd23372f6b3d358ea48985e212d",
-        "sql": []
-      }
-    },
-    {
-      "id": "member:assignInstitution:MethodDeclaration",
-      "category": "member",
-      "name": "assignInstitution",
-      "kind": "MethodDeclaration",
-      "target": "api/src/pacs/institutions.ts",
-      "live": {
-        "file": "api/src/pacs/institutions.ts",
-        "owner": "PacsInstitutions",
-        "name": "assignInstitution",
-        "kind": "MethodDeclaration"
-      },
-      "baseline": {
-        "text_sha256": "3ef1a9bee903ba2d609b89a85435eb30eb3604ec7e829885788d090d8971fe0c",
-        "sql": []
-      },
-      "correspondence": {
-        "receivers": [
-          {
-            "field": "access",
-            "member": "myDraft",
-            "count": 1
-          },
-          {
-            "field": "access",
-            "member": "scopeWrite",
-            "count": 1
-          }
-        ]
-      }
-    },
-    {
       "id": "member:metricsTimeoutMs:PropertyDeclaration",
       "category": "member",
       "name": "metricsTimeoutMs",
@@ -4859,14 +4811,6 @@
         "slot": "institutionsConcern"
       },
       {
-        "name": "unassigned",
-        "slot": "institutionsConcern"
-      },
-      {
-        "name": "assignInstitution",
-        "slot": "institutionsConcern"
-      },
-      {
         "name": "colleagues",
         "slot": "institutionsConcern"
       },
@@ -4975,6 +4919,16 @@
         "slot": "auditConcern"
       },
       {
+        "name": "auditRead",
+        "slot": "auditConcern",
+        "implementation": {
+          "file": "api/src/pacs/audit.ts",
+          "owner": "PacsAudit",
+          "name": "auditRead",
+          "kind": "MethodDeclaration"
+        }
+      },
+      {
         "name": "adminMetrics",
         "slot": "metricsConcern"
       },
@@ -4985,6 +4939,36 @@
           "file": "api/src/pacs/worklist.ts",
           "owner": "PacsWorklist",
           "name": "readStudies",
+          "kind": "MethodDeclaration"
+        }
+      },
+      {
+        "name": "heldSources",
+        "slot": "worklistConcern",
+        "implementation": {
+          "file": "api/src/pacs/worklist.ts",
+          "owner": "PacsWorklist",
+          "name": "heldSources",
+          "kind": "MethodDeclaration"
+        }
+      },
+      {
+        "name": "registerSourceDevice",
+        "slot": "worklistConcern",
+        "implementation": {
+          "file": "api/src/pacs/worklist.ts",
+          "owner": "PacsWorklist",
+          "name": "registerSourceDevice",
+          "kind": "MethodDeclaration"
+        }
+      },
+      {
+        "name": "registerInstitutionAlias",
+        "slot": "worklistConcern",
+        "implementation": {
+          "file": "api/src/pacs/worklist.ts",
+          "owner": "PacsWorklist",
+          "name": "registerInstitutionAlias",
           "kind": "MethodDeclaration"
         }
       },
@@ -6773,24 +6757,6 @@
       },
       {
         "controller": "PacsController",
-        "handler": "assign",
-        "method": "POST",
-        "paths": [
-          "/|studies/:uid/assign"
-        ],
-        "public": null,
-        "status": null,
-        "headers": [],
-        "guards": [],
-        "interceptors": [],
-        "args": [
-          "0:2@2:null:0",
-          "3:1@1:null:0",
-          "5:0@0:\"uid\":0"
-        ]
-      },
-      {
-        "controller": "PacsController",
         "handler": "audit",
         "method": "GET",
         "paths": [
@@ -7646,22 +7612,6 @@
       },
       {
         "controller": "PacsController",
-        "handler": "unassigned",
-        "method": "GET",
-        "paths": [
-          "/|unassigned"
-        ],
-        "public": null,
-        "status": null,
-        "headers": [],
-        "guards": [],
-        "interceptors": [],
-        "args": [
-          "0:0@0:null:0"
-        ]
-      },
-      {
-        "controller": "PacsController",
         "handler": "unmatch",
         "method": "POST",
         "paths": [
@@ -8347,7 +8297,7 @@
       }
     ]
   },
-  "allocation_sha256": "4affecaecb385eeda40deb5efd0afe0dfa5f545746c029086815f1a28271eb81",
+  "allocation_sha256": "77594daafccfcd0106acce76d208a4f0e4955e2bdd087cbce280da275d90d0fd",
   "w5_api": {
     "unit": "W5-API",
     "decision": "D1460",
@@ -8397,7 +8347,9 @@
   },
   "viewer_ux": {
     "note": "D73: viewer settings functionally extended preferences after the split. Preserve historical move proof; validate current owner/revision, readback and workspace/viewer preservation through workspace_shortcuts_v2_service_test.cjs, without pinning new private helpers.",
-    "changed_concerns": ["api/src/pacs/preferences.ts"]
+    "changed_concerns": [
+      "api/src/pacs/preferences.ts"
+    ]
   },
   "emr_d_online": {
     "unit": "EMR-D online (D1824, 2464002)",
@@ -9234,6 +9186,66 @@
         "handler": "login",
         "added": [
           "4:2@2:\"action\":0"
+        ]
+      }
+    ]
+  },
+  "di_additions_held": {
+    "unit": "held-unknown-source",
+    "decision": "D1882",
+    "note": "The operator alert of held studies and the two registrations (sending device, InstitutionName spelling) on the existing AdminController; PacsController unassigned/assign are retired (pacs_split_test.cjs).",
+    "controllers": [],
+    "providers": [],
+    "injectables": {},
+    "routes": [
+      {
+        "controller": "AdminController",
+        "handler": "heldSources",
+        "method": "GET",
+        "paths": [
+          "admin|held-sources"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "AdminController",
+        "handler": "registerAlias",
+        "method": "POST",
+        "paths": [
+          "admin|institution-aliases"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "AdminController",
+        "handler": "registerDevice",
+        "method": "POST",
+        "paths": [
+          "admin|source-devices"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
         ]
       }
     ]

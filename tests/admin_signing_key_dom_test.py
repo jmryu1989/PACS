@@ -30,7 +30,7 @@ ORIGIN = "https://signing-keys.test"
 PAGE_PATH = "/worklist/hpacs-lite/admin.html"
 SCRIPTS = {"/worklist/hpacs-lite/" + name: lf_text(HPACS / name) for name in (
     "auth.js", "work-context.js", "session-transport.js", "study-access-admin.js", "signing-key-admin.js",
-    "admin-access-review.js")}
+    "admin-access-review.js", "held-sources-admin.js")}
 INSTITUTION = "SYN-INST-A"
 ME = {"sub": "SYN-ADMIN-SUB", "user": "syn-admin", "displayName": "SYN Admin", "roles": ["admin"],
       "institution": INSTITUTION, "sessionId": "SYN-SESSION-ADMIN"}

@@ -3,7 +3,7 @@ import { PacsService, Caller, DraftRequestFacts } from './pacs.service';
 import { REQUEST_CONTEXT_SOURCE, RequestContextSource } from './emr-runtime/request-context';
 import { Public } from './auth.guard';
 import { AuthService } from './auth.service';
-import { bootstrapRead } from './emr-viewing/consumer-read';
+import { bootstrapRead, studyAuditRead } from './emr-viewing/consumer-read';
 
 /**
  * URL의 `:id`를 정수로. **`+id`를 그대로 쓰면 안 된다.**
@@ -255,18 +255,6 @@ export class PacsController {
     return this.svc.readStudies(caller(req), query);
   }
 
-  /** 기관을 못 알아본 검사 — 관리자 전용 통로. 워크리스트에는 안 섞인다 */
-  @Get('unassigned')
-  unassigned(@Req() req: any) {
-    return this.svc.unassigned(caller(req));
-  }
-
-  /** 미배정 검사를 기관에 배정 (고아를 집에 보내는 것만 한다 — 기관 이동은 아니다) */
-  @Post('studies/:uid/assign')
-  assign(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
-    return this.svc.assignInstitution(uid, String(body?.institutionId ?? ''), caller(req));
-  }
-
   /** S4-U4 Now Retry 요청. 본문은 비어 있어야 하고 묶을 영수증은 서버가 정한다. 200은 "저장됨"이지 "재시도됨"이 아니다. */
   @Post('studies/:uid/gateway-retry')
   @HttpCode(200)
@@ -397,13 +385,13 @@ export class PacsController {
   }
 
   @Get('audit')
-  audit(@Req() req: any, @Query('uid') uid?: string, @Query('take') take?: string) {
+  async audit(@Req() req: any, @Query('uid') uid?: string, @Query('take') take?: string) {
     let n = 100;
     if (take !== undefined) {
       n = Number(take);
       if (!Number.isInteger(n) || n < 1 || n > 500)
         throw new BadRequestException(`잘못된 take입니다: ${take} (1~500 정수)`);
     }
-    return this.svc.audits(uid, n, caller(req));
+    return studyAuditRead(await this.svc.auditRead(uid, n, caller(req)));
   }
 }

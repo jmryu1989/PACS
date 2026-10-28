@@ -234,8 +234,6 @@ ROUTES: dict[tuple[str, str], Route] = {
     # S5-U3 임상의 환자 타임라인. 본문 없이 검사 행·판독 상태만 싣는 기관·원격판독 경계 읽기라 TENANT다(viewer-items와 같은 분류).
     # 경계는 tests/clinician_timeline_live.py가 실제 스택에서 본다.
     ("GET", "clinician/studies/:uid/timeline"): Route(Kind.TENANT),
-    ("GET", "unassigned"): Route(Kind.TENANT),
-    ("POST", "studies/:uid/assign"): Route(Kind.TENANT),
     ("PATCH", "studies/:uid"): Route(Kind.REPORT, "patch"),
     ("PUT", "studies/:uid/report"): Route(Kind.REPORT, "draft-put"),
     ("POST", "studies/:uid/dictation"): Route(Kind.REPORT, "dictation"),
@@ -268,6 +266,9 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "admin/users/:id/reset-password"): Route(Kind.NEITHER),
     # S5-U6b 운영 지표: admin 전용, 기관 범위 합계(visible 경계)만 싣는 읽기다.
     ("GET", "admin/metrics"): Route(Kind.TENANT),
+    ("GET", "admin/held-sources"): Route(Kind.TENANT),
+    ("POST", "admin/source-devices"): Route(Kind.TENANT),
+    ("POST", "admin/institution-aliases"): Route(Kind.TENANT),
     # S5-U5b 감사·보안 기록: admin 전용, 행을 쓸 때 남은 기관으로 귀속한 행만 싣는 읽기다(tests/admin_audit_live.py).
     ("GET", "admin/audit"): Route(Kind.TENANT),
     # S9-U4b 자기 기관 DICOM 반입·원본 다운로드(계약 S9-U4p §6): 소유 기관·StudyAccess 경계와 작업 소유(issuer·sub·기관·kind)는
@@ -3363,8 +3364,8 @@ class LiveInvariantTests(unittest.TestCase):
                 ("POST", "/unmatch", {"uid": fixture.uid}, "technician"),
                 ("DELETE", path, None, "technician"),
                 ("DELETE", path + "/draft/force", None, "admin"),
-                ("GET", "/unassigned", None, "admin"),
-                ("POST", path + "/assign", {"institutionId": "hallym"}, "admin"),
+                ("GET", "/admin/held-sources", None, "admin"),
+                ("POST", "/admin/source-devices", {"value": "SYN-NOT-REGISTERED", "confirmation": "SYNTHETIC"}, "admin"),
             ):
                 with self.subTest(route=(method, suffix)):
                     result = self.stack.request(method, suffix, "doctor", body)

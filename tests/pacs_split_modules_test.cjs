@@ -257,7 +257,9 @@ const BUILT_IN = [
   [/^SELECT octet_length\(convert_to\(\?::jsonb::text, 'UTF8'\)\) AS bytes$/, ([text]) => [{ bytes: Buffer.byteLength(String(text), 'utf8') }]],
   [/FROM "TechNoteRevision" n JOIN "StudyState" s/, () => []],
   [/FROM "ReportVersion" v JOIN "StudyState" s ON s.uid = v.uid WHERE v.action = 'approve'/, () => []],
-  [/^SELECT a\.\* FROM "AuditLog" a LEFT JOIN "StudyState" s/, () => []],
+  [/^SELECT a\.\*, CASE .* FROM "AuditLog" a LEFT JOIN "StudyState" s/, () => []],
+  [/^SELECT id, name, "dicomNames", "dicomAets" FROM "Institution" ORDER BY id FOR UPDATE$/,
+    (_p, t) => sorted(t.institution ?? [], { id: 'asc' }).map(r => ({ dicomAets: '', ...copy(r) }))],
   [/^SELECT s\.uid, s\."institutionId", s\."teleInstitutionId", s\.rs, s\."repDoc", s\.confirm, COALESCE\(r\.version, 0\) AS version, v\.action FROM "StudyState" s/,
     ([uids], t) => uids.values.map(uid => {
       const s = (t.studyState ?? []).find(r => r.uid === uid);
@@ -296,6 +298,8 @@ function orthancDouble() {
   const o = { rows: [], statisticsAnswer: null,
     async studies() { return copy(o.rows); },
     async studyIdentities() { return copy(o.rows); },
+    devices: {},   // D1882: the calling AE title Orthanc recorded per study UID
+    async sendingDevice(uid) { return o.devices[uid] ?? null; },
     async studiesByUid(uids) { return copy(o.rows.filter(r => uids.includes(r['0020000D'].Value[0]))); },
     async statistics() { if (o.statisticsAnswer instanceof Error) throw o.statisticsAnswer; return o.statisticsAnswer; },
     async instanceStudyUid() { throw new Error('double: not used'); },
@@ -672,9 +676,9 @@ test('SPLIT-12 the list and the boot bundle carry own and tele-received studies 
   assert.deepEqual(Object.keys(other.states).sort(), [foreign.uid, tele.uid].sort());
 });
 
-// ── SPLIT-13 institutions: one cache, the seed at start, the orphan path ──
+// ── SPLIT-13 institutions: one cache, the seed at start, the held path (D1882) ──
 
-test('SPLIT-13 one institution cache serves every concern; unknown DICOM names stay unassigned; an orphan is assigned once, by an administrator', async () => {
+test('SPLIT-13 one institution cache serves every concern; an unknown sending hospital is held until a registration the admin confirmed attaches it', async () => {
   const w = world();
   await w.boot();
   assert.equal(w.institutions.resolveInstitution(' syn b center '), INST_B);
@@ -688,14 +692,42 @@ test('SPLIT-13 one institution cache serves every concern; unknown DICOM names s
   const log = console.log; console.log = () => {};
   try { await w.institutions.onModuleInit(); } finally { console.log = log; }
   assert.equal((await w.studyState.patchState(s.uid, { ts: 'wait', teleTo: 'syn-c' }, RAD_A)).teleInstitutionId, 'syn-c');
-  const orphan = w.study({ institutionId: null });
-  await refused(() => w.institutions.assignInstitution(orphan.uid, INST_A, RAD_A), 403);
-  const assigned = await w.institutions.assignInstitution(orphan.uid, INST_A, ADMIN_A);
-  assert.deepEqual([assigned.institutionId, assigned.reqHosp], [INST_A, 'SYN A']);
-  await refused(() => w.institutions.assignInstitution(orphan.uid, INST_B, ADMIN_A), 400);
-  assert.deepEqual(w.audits('study.assign').map(a => a.target), [orphan.uid]);
+  // Neither the name nor the device is known: held, in nobody's list, the alert names device and raw text only.
+  const byDevice = uidOf(), bySpelling = uidOf();
+  w.orthanc.rows = [qido(byDevice, 'SYN UNKNOWN SITE'), qido(bySpelling, 'Syn A Hosp.')];
+  w.orthanc.devices = { [byDevice]: 'SYN_CT_7', [bySpelling]: null };
+  for (const c of [RAD_A, ADMIN_A, RAD_B]) assert.deepEqual((await w.worklist.listStudies(c)).studies.map(r => r.uid), [], c.actor);
+  assert.deepEqual(w.db.rows('studyState').filter(r => [byDevice, bySpelling].includes(r.uid)).map(r => r.institutionId), [null, null]);
+  await refused(() => w.worklist.heldSources(RAD_A), 403);
+  const alert = await w.worklist.heldSources(ADMIN_B);
+  assert.deepEqual(alert.groups.map(g => [g.device, g.institutionText, g.count]).sort(),
+    [[null, 'Syn A Hosp.', 1], ['SYN_CT_7', 'SYN UNKNOWN SITE', 1]]);
+  assert.ok(!JSON.stringify(alert).includes(byDevice) && !JSON.stringify(alert).includes('PID-'), 'no study or patient fact');
+  // Registrations: admin only, own institution only, a confirmation is required, one value names one institution.
+  await refused(() => w.worklist.registerSourceDevice({ value: 'SYN_CT_7', confirmation: 'SYN phone' }, RAD_A), 403);
+  await refused(() => w.worklist.registerSourceDevice({ value: 'SYN_CT_7', confirmation: '' }, ADMIN_A), 400);
+  await refused(() => w.worklist.registerSourceDevice({ value: 'SYN,CT', confirmation: 'SYN phone' }, ADMIN_A), 400);
+  const device = await w.worklist.registerSourceDevice({ value: ' SYN_CT_7 ', confirmation: 'SYN phone with A radiology' }, ADMIN_A);
+  assert.deepEqual([device.institutionId, device.changed, device.attached], [INST_A, true, 1]);
+  await refused(() => w.worklist.registerSourceDevice({ value: 'SYN_CT_7', confirmation: 'SYN' }, ADMIN_B), 409);
+  assert.deepEqual((await w.worklist.registerSourceDevice({ value: 'SYN_CT_7', confirmation: 'again' }, ADMIN_A)).changed, false);
+  const spelling = await w.worklist.registerInstitutionAlias({ value: 'Syn A Hosp.', confirmation: 'SYN mail from A' }, ADMIN_A);
+  assert.deepEqual([spelling.changed, spelling.attached], [true, 1]);
+  assert.equal(w.institutions.resolveInstitution('SYN A HOSP.'), INST_A, 'the cache serves the new spelling');
+  assert.deepEqual((await w.worklist.listStudies(RAD_A)).studies.map(r => r.uid).sort(), [byDevice, bySpelling].sort());
+  assert.deepEqual((await w.worklist.listStudies(RAD_B)).studies, []);
+  assert.deepEqual(w.audits('study.attach').map(a => [a.target, JSON.parse(a.detail)]).sort(),
+    [[byDevice, { institutionId: INST_A, via: 'device', aet: 'SYN_CT_7' }], [bySpelling, { institutionId: INST_A, via: 'alias' }]].sort());
+  assert.deepEqual(w.audits('institution.device.register').map(a => JSON.parse(a.detail)),
+    [{ institution: INST_A, value: 'SYN_CT_7', confirmation: 'SYN phone with A radiology' }]);
+  assert.deepEqual((await w.worklist.heldSources(ADMIN_B)).groups, []);
+  // The next arrival from the registered device is attached at first sight; its arrival row says why.
+  const later = uidOf();
+  w.orthanc.rows.push(qido(later, ''));
+  w.orthanc.devices[later] = 'SYN_CT_7';
+  assert.ok((await w.worklist.listStudies(RAD_A)).studies.some(r => r.uid === later));
+  assert.deepEqual(JSON.parse(w.audits('study.arrived').find(a => a.target === later).detail), { institutionId: INST_A, via: 'device', aet: 'SYN_CT_7' });
 });
-
 // ── SPLIT-14 evidence: readability of citations and the CHECK backstop (M16, M17) ──
 
 test('SPLIT-14 a citation is shown only while its finding is readable; a database CHECK on citations or structure becomes its named 409', async () => {

@@ -70,6 +70,26 @@ export class AdminController {
   }
 
   /**
+   * D1882 수신 보류 알림. 보낸 병원을 모르는 검사를 장비·기관명 원문·도착 시각·건수로만 묶는다(환자·검사 정보 없음).
+   * 등록 두 경로는 병원과 확인한 장비(AE Title)·기관명 표기를 관리자 자기 기관에 등록하고, 그로써 정해진 보류 검사를
+   * 붙인다. admin 역할·기관 판정은 서비스(need·inst)가 한다.
+   */
+  @Get('held-sources')
+  heldSources(@Req() req: any) {
+    return this.pacs.heldSources(caller(req));
+  }
+
+  @Post('source-devices')
+  registerDevice(@Body() body: any, @Req() req: any) {
+    return this.pacs.registerSourceDevice(body, caller(req));
+  }
+
+  @Post('institution-aliases')
+  registerAlias(@Body() body: any, @Req() req: any) {
+    return this.pacs.registerInstitutionAlias(body, caller(req));
+  }
+
+  /**
    * S5-U5b 감사·보안 기록. admin 역할, 행을 쓸 때 남은 기관으로 정하는 귀속, 쪽을 자르기 전의 거르기와 봉인한
    * 다음 쪽 값은 서비스(admin-audit.ts)가 판정한다. clinician-only는 guard 기본 거절이다.
    */

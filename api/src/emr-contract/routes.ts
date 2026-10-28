@@ -32,7 +32,7 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
   { kinds: ['system-operation'], operation: 'read', causes: ['user-view', 'service-job'],
     routes: ['GET health'] },
   { kinds: ['system-operation'], operation: 'read', causes: ['user-view', 'background-fetch'],
-    routes: ['GET admin/metrics'] },
+    routes: ['GET admin/metrics', 'GET admin/held-sources'] },
   { kinds: ['authentication-session'], operation: 'auth', causes: ['user-view'],
     routes: ['GET auth/login', 'GET auth/register', 'GET auth/callback', 'POST auth/logout', 'POST auth/login', 'POST auth/register'] },
   { kinds: ['identity-access', 'authentication-session'], operation: 'read', causes: ['user-view', 'background-fetch'],
@@ -51,9 +51,11 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
   { kinds: ['study-metadata'], operation: 'write', causes: ['service-job'],
     routes: ['POST gateway/announce'] },
   { kinds: ['study-metadata'], operation: 'read', causes: ['user-view', 'background-fetch'],
-    routes: ['GET unassigned', 'GET clinician/studies', 'GET clinician/studies/:uid/timeline'] },
-  { kinds: ['study-metadata'], operation: 'write', causes: ['user-view'],
-    routes: ['POST studies/:uid/assign'] },
+    routes: ['GET clinician/studies', 'GET clinician/studies/:uid/timeline'] },
+  // D1882: an administrator's confirmed sending device or InstitutionName spelling; the held studies it now decides are
+  // attached by the server's own registration (StudyState owner), never by a per-study choice.
+  { kinds: ['institution', 'study-metadata'], operation: 'write', causes: ['user-view'],
+    routes: ['POST admin/source-devices', 'POST admin/institution-aliases'] },
   { kinds: ['delivery-receipt'], operation: 'write', causes: ['service-job'],
     routes: ['POST gateway/receipt'] },
   { kinds: ['delivery-receipt'], operation: 'read', causes: ['service-job'],
