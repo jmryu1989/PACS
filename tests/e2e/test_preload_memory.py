@@ -173,13 +173,17 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
         self.limit(p, 2)
         if not p.locator('.left').is_visible(): p.get_by_role('button', name='Worklist', exact=True).click()
         p.locator('#quick').fill(patient)
-        for f in (a, b, c):
-            row = p.locator(f'#rows tr[data-uid="{f.uid}"]')
-            expect(row).to_be_visible()
-            row.click(modifiers=['Control'])
-        expect(p.locator('#multi-selection-count')).to_have_text('Selected: 3')
-        p.locator('#multi-selection-preload').click()
-        expect(p.locator('#preload-panel')).to_be_visible()
+        # The queue follows the reader's row order, which the worklist's sort decides (run 1028c listed A last). The
+        # small study A is queued by itself first, then B and C in one multi-selection, so A is the head of the queue.
+        for group in ((a,), (b, c)):
+            if p.locator('#multi-selection-clear').is_enabled(): p.locator('#multi-selection-clear').click()
+            for f in group:
+                row = p.locator(f'#rows tr[data-uid="{f.uid}"]')
+                expect(row).to_be_visible()
+                row.click(modifiers=['Control'])
+            expect(p.locator('#multi-selection-count')).to_have_text('Selected: %d' % len(group))
+            p.locator('#multi-selection-preload').click()
+            expect(p.locator('#preload-panel')).to_be_visible()
         p.locator('#preload-panel > summary').click()
 
         # 1. Open A as soon as it is Ready, while B and C are still queued or loading.
