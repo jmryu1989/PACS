@@ -608,6 +608,27 @@ try:
         product.wait_for_function('document.querySelector("#product").contentWindow.location.pathname.endsWith("main.html")', timeout=10000)
         record("E1 role roundtrip after a chat reload returns to the Worklist", chat.input_value("#screen").endswith("main.html"), {"product": frame(product).url, "screen": chat.input_value("#screen")})
 
+        # R1 of 527cae9: 관리자, then 방사선사 before the first answer is back. The server's genuine answer to the first
+        # choice is fetched at once and handed back only after the second choice (test-side delay only).
+        rows_ready(product); settle(product, 800)
+        held = []
+        def hold_first(route):
+            if not held: held.append((route, route.fetch()))
+            else: route.continue_()
+        chat.route("**/studio-api/role", hold_first)
+        chat.select_option("#role", "admin"); wait_until(chat, lambda: len(held) == 1, 5000)
+        chat.select_option("#role", "technician"); settle(chat, 2500)  # product reports naming the old role arrive meanwhile
+        during = chat.input_value("#role")
+        if held: held[0][0].fulfill(response=held[0][1])
+        server_role = lambda: chat.evaluate('async () => (await (await fetch("/studio-api/state")).json()).role')
+        wait_until(chat, lambda: server_role() == "technician", 10000); rows_ready(product); settle(product, 2500)
+        after = {"selected": chat.input_value("#role"), "server": server_role(), "screen": chat.input_value("#screen"), "product": product_path(product)}
+        record("R1 the latest role choice stands when an earlier choice's answer arrives after it (server, controls and product window)",
+               len(held) == 1 and during == "technician" and after["selected"] == after["server"] == "technician" and after["product"].endswith("main.html") and after["screen"].endswith("main.html"),
+               {"held": len(held), "selectedWhileHeld": during, "after": after})
+        chat.unroute("**/studio-api/role")
+        chat.select_option("#role", "radiologist"); rows_ready(product); settle(product, 800)
+
         # F4: a chat reopened in a fresh tab brings the connected product forward instead of opening a second one.
         chat.close()
         reopen = ctx.new_page(); reopen.goto(BASE + "/studio/studio.html"); reopen.wait_for_function('document.querySelector("#link-dot").classList.contains("on")')

@@ -501,15 +501,24 @@
   // (clinician maps to its own home).
   // While the change is on its way, a product report from before it (a snapshot still naming the old role) must not
   // put the old role back: the screen opens with the role chosen here, and the product's next report agrees.
+  // Choices made in quick succession go to the server one after another, so it ends on the last one; an earlier
+  // choice's answer then changes nothing here (it would reopen the screen with a role he already left).
   $('role').onchange = async e => {
-    const role = e.target.value;
+    const role = e.target.value, ask = ++roleAsk;
     roleSeq++; roleChanging++;
+    const sent = roleSent.then(() => api('role', { json: { role } }));
+    roleSent = sent.catch(() => {});
     try {
-      await api('role', { json: { role } }); roleSeq++; if (state.me) state.me.role = role;
+      await sent;
+      if (ask !== roleAsk) return;
+      roleSeq++; if (state.me) state.me.role = role;
       if (role === 'admin') $('screen').value = ADMIN_SCREEN;
       else if ($('screen').value === ADMIN_SCREEN) $('screen').value = DEFAULT_SCREEN;
       openScreen($('screen').value, role);
-    } catch (error) { alert(error.message); }
+    } catch (error) {
+      if (ask !== roleAsk) return;
+      alert(error.message); refreshState();
+    }
     finally { roleChanging--; }
   };
   $('model').onchange = async e => {
@@ -893,7 +902,7 @@
 
   // A state answer carries the role as it was when the request started; a role the product window reported or he
   // chose meanwhile (another tab may have changed it) is newer and stays.
-  let roleSeq = 0, roleChanging = 0;
+  let roleSeq = 0, roleChanging = 0, roleAsk = 0, roleSent = Promise.resolve();
   async function refreshState() {
     const seq = roleSeq;
     const s = await api('state');
