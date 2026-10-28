@@ -72,7 +72,7 @@ if [ ! -d "$ROOT/sandbox/.git" ]; then
   sudo -u studio -H env HOME="$ROOT/home" python3 "$ROOT/app/deploy/make-sandbox.py" --archive "$ROOT/home/base.tar" --sha "$BASE_SHA" --out "$ROOT/sandbox"
   rm -f "$ROOT/home/base.tar"
 fi
-install -d -o studio -g studio "$ROOT/sandbox-read"
+install -d -o studio -g studio "$ROOT/sandbox-read" "$ROOT/sandbox-preview"
 
 echo "== knowledge feed (the commander replaces status.json; seeded once)"
 [ -f "$ROOT/knowledge/status.json" ] || install -o root -g root -m 644 "$ROOT/app/knowledge-seed/status.json" "$ROOT/knowledge/status.json"
@@ -102,8 +102,9 @@ cat > "$ROOT/etc/config.json" <<JSON
   "listen": { "host": "0.0.0.0", "port": $PORT },
   "tls": { "cert": "$TLS_CERT", "key": "$TLS_KEY" },
   "paths": {
-    "sandbox": "$ROOT/sandbox", "sandboxRead": "$ROOT/sandbox-read", "data": "$ROOT/data",
-    "ohifDist": "$ROOT/assets/ohif", "dicomweb": "$ROOT/assets/dicomweb", "knowledge": "$ROOT/knowledge"
+    "sandbox": "$ROOT/sandbox", "sandboxRead": "$ROOT/sandbox-read", "sandboxPreview": "$ROOT/sandbox-preview", "data": "$ROOT/data",
+    "ohifDist": "$ROOT/assets/ohif", "dicomweb": "$ROOT/assets/dicomweb", "knowledge": "$ROOT/knowledge",
+    "feedback": "$ROOT/knowledge/minhoon-feedback.md"
   },
   "claude": {
     "bin": "$ROOT/bin/claude",

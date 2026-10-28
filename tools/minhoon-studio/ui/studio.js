@@ -13,7 +13,11 @@
   const layout = store.get('studio-layout', 'two') === 'overlay' ? 'overlay' : 'two';
   document.body.dataset.layout = layout;
   const state = { mode: 'edit', me: null, live: new Map(), errors: [], missing: [], picks: [], jobsWaiting: new Set(), timings: {},
-    product: { seen: 0, page: '', study: null, errors: [], pickActive: false } };
+    product: { seen: 0, page: '', study: null, errors: [], pickActive: false, typing: false },
+    suggestion: null, previewing: null, previewClick: null, suggestAsked: false, seen: new Set() };
+  // This tab's name on the event stream and in presence reports (the server prepares a suggestion only while no tab
+  // reports typing).
+  const TAB = Math.random().toString(36).slice(2, 12);
   const PLACEHOLDER = {
     edit: '예) 판독문 입력칸을 더 크게 해 주세요 / (고르기로 버튼을 찍고) 이거 오른쪽 끝으로 옮겨 주세요',
     ask: '예) Related Report는 어떻게 동작해요? / 제 피드백 3번은 어디까지 됐어요?',
@@ -93,9 +97,10 @@
     if (['applied', 'done', 'failed'].includes(ev.state)) {
       state.jobsWaiting.delete(ev.id);
       if (!state.jobsWaiting.size) { jobLine.hidden = true; clearInterval(tick); tick = null; }
+      renderSuggestion();
       return;
     }
-    state.jobsWaiting.add(ev.id);
+    if (!state.jobsWaiting.has(ev.id)) { state.jobsWaiting.add(ev.id); renderSuggestion(); }
     jobLine.hidden = false;
     jobLine.dataset.label = label;
     jobLine.dataset.started = jobLine.dataset.started && state.jobsWaiting.size > 1 ? jobLine.dataset.started : String(Date.now());
@@ -109,7 +114,7 @@
 
   // ── events from the server ──
   function connect() {
-    const source = new EventSource('/studio-api/events');
+    const source = new EventSource('/studio-api/events?tab=' + TAB);
     source.onmessage = event => {
       let ev; try { ev = JSON.parse(event.data); } catch { return; }
       if (ev.type === 'chat') renderEntry(ev.entry);
@@ -135,6 +140,8 @@
         $('missing').hidden = false; $('missing').querySelector('b').textContent = state.missing.length;
       } else if (ev.type === 'digest') {
         refreshState();
+      } else if (ev.type === 'suggestion') {
+        suggestionEvent(ev);
       }
     };
     source.onerror = () => { /* EventSource reconnects by itself */ };
@@ -146,6 +153,7 @@
   }
 
   function noteReload(info) {
+    if (info.reason === 'preview') previewShown(info);
     if (info.jobId && state.timings[info.jobId]) {
       state.timings[info.jobId] += info.readyKind !== 'timeout' ? ` · 화면 새로고침 ${(info.reloadMs / 1000).toFixed(1)}초` : ' · 화면 준비 시간 초과';
     }
@@ -219,8 +227,13 @@
       else if (isShortcut(e, CHAT_KEY)) { e.preventDefault(); e.stopPropagation(); setOverlay(!overlayOpen()); }
     }
     window.addEventListener('keydown', keys, true);
+    $('preview-stop').onclick = () => stopPreview();
+    $('preview-apply').onclick = () => { if (state.previewing) applySuggestion(state.previewing); };
+    setInterval(() => { const now = mirror.typing(); if (now !== state.product.typing) { state.product.typing = now; typingChanged(); } }, 2000);
     return {
       show: () => setOverlay(false),
+      preview: p => { $('preview-banner').hidden = !p; $('preview-title').textContent = p ? p.title : ''; },
+      connected: () => true,
       open: (screen, role) => mirror.open(screenForRole(screen, role)),
       reload: ev => mirror.request(ev),
       manualReload: () => mirror.reload(),
@@ -249,9 +262,11 @@
       if ('page' in m) { p.page = m.page; p.study = m.study; }
       // The controls describe what the product window shows, whichever chat tab changed it.
       if (typeof m.screen === 'string' && [...$('screen').options].some(o => o.value === m.screen)) $('screen').value = m.screen;
-      if (m.role && [...$('role').options].some(o => o.value === m.role)) { $('role').value = m.role; if (state.me) state.me.role = m.role; }
+      if (m.role && [...$('role').options].some(o => o.value === m.role)) { roleSeq++; $('role').value = m.role; if (state.me) state.me.role = m.role; }
       if (m.type === 'focused' && !m.ok && m.ask === focusAsk) linkHint = { text: '제품 화면은 이미 열려 있습니다. "… — 스튜디오" 탭을 눌러 주세요.', until: Date.now() + 8000 };
       if (Array.isArray(m.errors)) setErrors(m.errors);
+      if ('typing' in m && !!m.typing !== p.typing) { p.typing = !!m.typing; typingChanged(); }
+      if (m.type === 'preview' && !m.id && state.previewing) { state.previewing = null; renderSuggestion(); }
       if (Array.isArray(m.picks)) setPicks(m.picks);
       if ('pickActive' in m) setPickMode(!!m.pickActive);
       if (m.type === 'pick-mode') setPickMode(m.on);
@@ -302,6 +317,8 @@
 
     return {
       show: () => openProduct(),
+      preview: p => post({ type: 'preview', id: p ? p.id : null, title: p ? p.title : '' }),
+      connected,
       open: (screen, role) => post({ type: 'open', screen, role }),
       reload: (ev, nonce) => post({ type: 'reload', ev, nonce }),
       manualReload: () => post({ type: 'reload', ev: { reason: 'manual' }, nonce: `manual|${Date.now()}|${Math.random()}` }),
@@ -348,11 +365,14 @@
     const context = { page: product.page, study: product.study, errors: product.errors || [], picks,
       missing: state.missing.slice(-8).map(m => `${m.method} ${m.path}`) };
     input.value = '';
+    typingChanged();
     try {
       await api('chat', { json: { mode: state.mode, text, context } });
       if (picks.length) target.pickClear();
+      endPreviewHere(); // the server ended this browser's preview: his own request is about his screen
     } catch (error) { input.value = text; alert('보내지 못했습니다: ' + error.message); }
   }
+  input.addEventListener('input', () => typingChanged());
   $('composer').addEventListener('submit', e => { e.preventDefault(); sendMessage(); });
   input.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendMessage(); }
@@ -360,7 +380,7 @@
 
   // ── actions ──
   async function doUndo(sha, withLater = false) {
-    try { await api('undo', { json: { ...(sha ? { sha } : {}), withLater } }); refreshState(); }
+    try { await api('undo', { json: { ...(sha ? { sha } : {}), withLater } }); endPreviewHere(); refreshState(); }
     catch (error) {
       const body = error.body || {};
       if (body.code === 'later-changes' && body.later && !withLater) {
@@ -404,8 +424,9 @@
   // (clinician maps to its own home).
   $('role').onchange = async e => {
     const role = e.target.value;
+    roleSeq++;
     try {
-      await api('role', { json: { role } }); if (state.me) state.me.role = role;
+      await api('role', { json: { role } }); roleSeq++; if (state.me) state.me.role = role;
       if (role === 'admin') $('screen').value = ADMIN_SCREEN;
       else if ($('screen').value === ADMIN_SCREEN) $('screen').value = DEFAULT_SCREEN;
       openScreen($('screen').value);
@@ -574,6 +595,8 @@
       action: () => tryAdmin() },
     { title: 'AI가 근거를 대고 반대', body: '환자 안전이나 법에 걸리는 요청은 이유를 먼저 말하고, 같은 목적을 안전하게 이루는 대안을 만들어 보여 줍니다. 이견은 지휘자에게 기록됩니다.',
       mode: 'edit', text: 'Worklist에서 환자 이름(Name) 열을 없애 주세요. 공간이 아까워요' },
+    { title: '먼저 제안하기', body: '쉬는 동안(입력·변경 중이 아닐 때) 스튜디오가 지금 화면·최근 요청·선생님 피드백을 보고 개선안이나 비판 하나를 근거와 함께 미리 만들어 둡니다. "제안: …" 줄에서 미리보기(한 번 누르면 제품 화면에 바로), 적용(기록에 남고 되돌리기 가능), 다른 제안, 됐어요. 넘긴 제안은 다시 내지 않고, 모든 제안과 답은 하루 인계에 실립니다.',
+      action: () => askSuggestion() },
     { title: '하루 인계', body: '"오늘 끝"을 누르면(또는 1시간 쉬면) 오늘 요청·변경·이견·넘긴 질문이 정리되어 지휘자가 가져갑니다.',
       action: () => flash($('done')) },
   ];
@@ -610,8 +633,154 @@
   }
   $('showcase').onclick = showShowcase;
 
+  // ── 먼저 제안하기: one suggestion at a time, shown only while he is not typing and no change is running ──
+  function typingNow() { return !!input.value.trim() || !!state.product.typing; }
+  let lastTyping = null;
+  function typingChanged() {
+    renderSuggestion();
+    if (typingNow() !== lastTyping) reportPresence();
+  }
+  async function reportPresence() {
+    lastTyping = typingNow();
+    const product = state.product;
+    try {
+      applySuggestionState(await api('presence', { json: { tab: TAB, typing: lastTyping, page: product.page || '', study: product.study || '', role: $('role').value } }));
+    } catch { /* the next report */ }
+  }
+  function applySuggestionState(s) {
+    if (!s) return;
+    state.suggestion = s.current && ['ready', 'preparing'].includes(s.current.status) ? s.current : null;
+    if (state.previewing && s.previewing !== state.previewing) endPreviewHere();
+    else if (s.previewing && state.suggestion && !state.previewing) {
+      state.previewing = s.previewing; // opened in another tab of this browser, or before a reload
+      target.preview({ id: state.suggestion.id, title: state.suggestion.title });
+    }
+    renderSuggestion();
+  }
+  function suggestionEvent(ev) {
+    const item = ev.item;
+    if (!item) return;
+    if (['ready', 'preparing'].includes(item.status)) {
+      state.suggestion = item;
+      if (item.status === 'ready') state.suggestAsked = false;
+      // Rebuilt on top of a change made meanwhile: the preview on screen is the old one.
+      if (ev.rebased && state.previewing === item.id) target.reload({ reason: 'preview-rebased' }, `preview-rebased|${item.id}|${Date.now()}`);
+    } else {
+      if (state.suggestion && state.suggestion.id === item.id) state.suggestion = null;
+      if (state.previewing === item.id) endPreviewHere();
+      if (state.suggestAsked && ['none', 'failed'].includes(item.status)) {
+        state.suggestAsked = false;
+        $('suggest-wait').textContent = item.status === 'none' ? '지금은 근거 있는 제안이 없어요. 화면을 더 쓰시면 다시 찾아볼게요.'
+          : `제안을 만들지 못했어요(${item.error || '오류'}). 하루 인계에 기록했습니다.`;
+        $('suggest-wait').hidden = false;
+        setTimeout(() => { if (!state.suggestAsked) $('suggest-wait').hidden = true; }, 8000);
+      }
+    }
+    renderSuggestion();
+  }
+  const GROUND = { screen: '화면', feedback: '피드백', practice: '판독 관행' };
+  function renderSuggestion() {
+    const s = state.suggestion;
+    const ready = !!s && s.status === 'ready';
+    // Never while he types or a change runs (D5); a preview he opened stays reachable.
+    const show = ready && (state.previewing === s.id || (!typingNow() && !state.jobsWaiting.size));
+    $('suggest').hidden = !show;
+    if (state.suggestAsked && !ready) { $('suggest-wait').textContent = '다음 제안을 준비하고 있어요…'; $('suggest-wait').hidden = false; }
+    else if (ready) $('suggest-wait').hidden = true;
+    if (!show) return;
+    $('suggest-title').textContent = s.title;
+    $('suggest-title').title = s.title;
+    const grounds = (s.grounds || []).map(g => `- ${GROUND[g.kind] || g.kind} ${g.ref}${g.quote ? ` "${g.quote}"` : ''}`);
+    $('suggest-detail').textContent = `${s.kind === 'critique' ? '[비판] ' : ''}${s.why || ''}\n근거:\n${grounds.join('\n')}`
+      + (s.files && s.files.length ? `\n바뀌는 파일: ${s.files.map(f => f.split('/').pop()).join(', ')}` : '');
+    const previewing = state.previewing === s.id;
+    $('suggest-preview').textContent = previewing ? '원래대로' : '미리보기';
+    $('suggest-preview').classList.toggle('on', previewing);
+    if (!state.seen.has(s.id)) { state.seen.add(s.id); api(`suggestions/${s.id}/seen`, { json: {} }).catch(() => {}); }
+  }
+  $('suggest-why').onclick = () => { $('suggest-detail').hidden = !$('suggest-detail').hidden; };
+  $('suggest-preview').onclick = () => (state.previewing ? stopPreview() : startPreview());
+  $('suggest-apply').onclick = () => { if (state.suggestion) applySuggestion(state.suggestion.id); };
+  $('suggest-next').onclick = () => answerSuggestion('skipped');
+  $('suggest-no').onclick = () => answerSuggestion('declined');
+
+  async function startPreview() {
+    const s = state.suggestion;
+    if (!s || s.status !== 'ready') return;
+    const clicked = Date.now();
+    try { await api(`suggestions/${s.id}/preview`, { json: {} }); } catch (error) { alert(error.message); return; }
+    state.previewing = s.id;
+    target.preview({ id: s.id, title: s.title });
+    renderSuggestion();
+    $('suggest-note').textContent = '미리보기 여는 중…';
+    if (target.connected()) {
+      state.previewClick = { id: s.id, clicked };
+      target.reload({ reason: 'preview' }, `preview|${s.id}|${clicked}`);
+    } else { $('suggest-note').textContent = ''; target.show(); } // the product window opens on the preview (its banner says so)
+  }
+  // The product window reports the preview's screen as usable: click -> usable is what he waits for.
+  function previewShown(info) {
+    const click = state.previewClick;
+    if (!click) return;
+    state.previewClick = null;
+    const clickToReadyMs = Date.now() - click.clicked;
+    $('suggest-note').textContent = info.readyKind === 'timeout' ? '미리보기 화면 준비 시간 초과' : `미리보기 ${(clickToReadyMs / 1000).toFixed(1)}초`;
+    api(`suggestions/${click.id}/preview-ready`, { json: { clickToReadyMs, reloadMs: info.reloadMs, readyKind: info.readyKind } }).catch(() => {});
+  }
+  async function stopPreview() {
+    await api('suggestions/preview/stop', { method: 'POST' }).catch(() => {});
+    endPreviewHere();
+  }
+  // The server has already cleared (or no longer honours) this browser's preview: show the real screen again.
+  function endPreviewHere() {
+    if (!state.previewing) return;
+    state.previewing = null;
+    state.previewClick = null;
+    $('suggest-note').textContent = '';
+    target.preview(null);
+    target.reload({ reason: 'preview-end' }, `preview-end|${Date.now()}|${Math.random()}`);
+    renderSuggestion();
+  }
+  async function applySuggestion(id) {
+    $('suggest-apply').disabled = true;
+    try {
+      const r = await api(`suggestions/${id}/apply`, { json: {} });
+      const wasPreviewing = state.previewing === id;
+      state.previewing = null; state.previewClick = null; $('suggest-note').textContent = '';
+      target.preview(null);
+      // Applied from the preview: the studio's reload event shows it. Rebuilt as an edit: leave the preview now.
+      if (r.via === 'edit') {
+        if (wasPreviewing) target.reload({ reason: 'preview-end' }, `preview-end|${Date.now()}`);
+        renderEntry({ role: 'system', mode: 'edit', t: new Date().toISOString(), text: '그사이 화면이 바뀌어 미리 만든 그대로는 맞지 않습니다. 같은 제안을 지금 화면에 다시 만들고 있습니다.' });
+      }
+    } catch (error) { alert(error.message); }
+    finally { $('suggest-apply').disabled = false; renderSuggestion(); }
+  }
+  async function answerSuggestion(answer) {
+    const s = state.suggestion;
+    if (!s) return;
+    try {
+      await api(`suggestions/${s.id}/answer`, { json: { answer } });
+      if (answer === 'skipped') state.suggestAsked = true;
+      endPreviewHere();
+    } catch (error) { alert(error.message); }
+    renderSuggestion();
+  }
+  async function askSuggestion() {
+    if (state.suggestion && state.suggestion.status === 'ready') { renderSuggestion(); if (!$('suggest').hidden) flash($('suggest')); return; }
+    state.suggestAsked = true;
+    renderSuggestion();
+    try { applySuggestionState(await api('suggestions/next', { json: {} })); } catch (error) { alert(error.message); }
+  }
+
+  // A state answer carries the role as it was when the request started; a role the product window reported or he
+  // chose meanwhile (another tab may have changed it) is newer and stays.
+  let roleSeq = 0;
   async function refreshState() {
+    const seq = roleSeq;
     const s = await api('state');
+    reportPresence();
+    if (seq !== roleSeq && state.me) s.role = state.me.role;
     state.me = s;
     $('who').textContent = s.displayName;
     $('role').value = s.role;
@@ -629,6 +798,7 @@
     const history = await api('history');
     for (const entry of history) renderEntry(entry);
     connect();
+    applySuggestionState(await api('suggestions').catch(() => null));
     setInterval(() => refreshState().catch(() => {}), 30000);
     if (!history.length) {
       renderEntry({ role: 'system', mode: 'edit', t: new Date().toISOString(), text: layout === 'two'

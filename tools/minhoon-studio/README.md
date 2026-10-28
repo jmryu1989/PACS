@@ -11,7 +11,8 @@ Design decisions: `evidence/studio-design-final-20261027.md` (D1–D11). Phase 1
 deep, other screens browsable), 바꾸기 (edit) + 되돌리기 (undo = `git revert`), critique (D4), 물어보기 (Q&A from
 `status.json` + the repo), daily digest. Added 2026-10-28: two windows / overlay, point-and-click, the
 "할 수 있는 것" showcase; the product window as an ordinary tab and the viewer as the product's popup; the admin
-console against the mock. Captures, proactive previews and A/B are Phase 2/3.
+console against the mock; 먼저 제안하기 (Phase 2, proactive suggestions with pre-built previews). Captures and A/B are
+Phase 2/3.
 
 ## What Minhoon sees
 
@@ -25,6 +26,7 @@ console against the mock. Captures, proactive previews and A/B are Phase 2/3.
 | Admin (`server/mock-admin.js`) | Members (list, Create Member + temporary password, Approve / Change Membership with the unverified-email refusal and the in-person override, Revoke Approval, Suspend / Activate, Temp Password, version conflict and self rules), Signing Key (create / rotate / retire with the expected key), Study Access (modes, rules, revision, replayed request), Gateway Status (three synthetic receipts on finished readings: received, retry with Now Retry, failed F-01), Operations (the eleven metrics from the synthetic worklist), Audit / Security (seeded rows plus every studio admin change and report commit, paged) and Access Review (time range, file filter, paged). Not in the studio, said on screen: Email Reset Link (no mail server) and a study-access restriction on the studio person's own account. Synthetic members only; 합성 자료 초기화 resets them. |
 | 바꾸기 | "판독문 입력칸을 더 크게" → Claude edits the front-end in the sandbox → build + syntax check → commit → product window reloads and reselects the same study (an edit that lands while he types in the product waits behind "지금 보기"). Bad requests get a short evidence-first objection; patient-safety/legal ones are refused and a safe alternative is built (D4). |
 | 물어보기 | Read-only answers about the product and development status, with sources. Unknown dates/decisions are not guessed; the question is forwarded to the commander. |
+| 먼저 제안하기 (`server/suggest.js`, `claude/suggest-system.md`) | While no chat tab reports typing (chat input, or a text field in the product) and no request is queued or running, the studio Claude (the "deep" model) reads the screen he is on, his last requests, his feedback (`knowledge/minhoon-feedback.md`) and the suggestions already answered, picks ONE improvement or criticism and builds it in `sandbox-preview/` (a git worktree of the sandbox; front-end only, no `studio-mock/`). The server checks the grounds (a feedback ground must name an existing item and quote it as written; a screen ground naming a file must name one that exists; a named reading practice is accepted), builds and syntax-checks it like an edit and commits it to `refs/studio-preview/<id>`. The chat shows one card "제안: …" (근거 opens the reason and grounds) with 미리보기 / 적용 / 다른 제안 / 됐어요; it hides while he types or a change runs. 미리보기 sets a cookie for this browser only, so the product window (and viewer) is served from the preview copy with one reload and a "미리보기 … 아직 적용하지 않은 제안" banner; 원래대로 ends it, and so does any request or undo of his own. 적용 applies the preview's source diff to the studio branch through the writer queue, rebuilds and checks it and commits it as an ordinary change (`Studio-Suggestion` trailer; 기록 and 되돌리기 work as for any change); if the screen moved on so that it no longer applies, the same request runs as an ordinary edit. A change made while a suggestion is open rebuilds its preview on top (or sets it aside when it no longer fits). Answered suggestions (and ones he saw before they were set aside) are not offered again. No frequency cap (D5: measure, then tune): one suggestion is open at a time and the next is prepared only after it is answered; a turn that finds nothing or fails waits for his next request or answer. Every suggestion, the card being shown, each preview (click → screen usable) and his answer go to `data/public/suggestions.jsonl` and the digest section "스튜디오가 먼저 한 제안과 답"; the Claude usage of each suggestion turn is in `usage.jsonl` (mode `suggest`). |
 | 되돌리기 / 기록 | Undo the newest change, or any listed change; view each change's diff. An older change is undone together with the still-applied changes made after it (they were built on it; the studio asks first). Every undo is rebuilt and checked like an edit; if the check fails nothing is undone. |
 | 현황 | The commander's `status.json` (everything except live secrets). |
 | 오늘 끝 | Writes the digest now (also written after ~60 idle minutes). |
@@ -52,8 +54,10 @@ back to a self-signed certificate in `tls/`.
 | `claude-config/sdij`, `claude-config/admin` | studio | the two Claude logins (CLAUDE_CONFIG_DIR); empty until the owner logs in |
 | `sandbox/` | studio | git repo: product tree at main `studio-base` + studio commits on `studio/minhoon-YYYYMMDD` |
 | `sandbox-read/` | studio | detached copy the 물어보기 Claude reads |
+| `sandbox-preview/` | studio | detached copy where 먼저 제안하기 builds its previews (`refs/studio-preview/<id>`) |
 | `assets/ohif`, `assets/dicomweb` | root | pinned OHIF build; static DICOMweb samples |
 | `knowledge/status.json` | root | the commander's status feed (read-only for the service) |
+| `knowledge/minhoon-feedback.md` | root | Minhoon's feedback the suggestions are grounded in (installed by the commander, not in this repo) |
 | `data/` | studio | users/sessions (hashes only), chat, metrics, usage, mock state, `public/digests/`, `public/records.jsonl` |
 | `etc/config.json`, `etc/studio.env` | root | config; `STUDIO_CLAUDE_ACCOUNT=admin` switches the Claude login |
 | `etc/tls/` | root:studio 0750, files 0640 | copy of the Let's Encrypt fullchain + key (deploy hook) |
@@ -97,6 +101,9 @@ side ignores the other's cookie by name and the studio never logs cookies.
   "추정", `usage`) and install it:
   `scp status.json ubuntu@61.109.239.207:/tmp/ && ssh ubuntu@61.109.239.207 'sudo install -m 644 /tmp/status.json /opt/minhoon-studio/knowledge/status.json'`.
   The page shows "갱신 지연" once `next_publication` has passed.
+- **Publish Minhoon's feedback** (what 먼저 제안하기 grounds its suggestions in), the same way:
+  `sudo install -m 644 /tmp/minhoon-feedback.md /opt/minhoon-studio/knowledge/minhoon-feedback.md`. Without it the
+  suggestions still work from the screen, his requests and reading practice; feedback grounds are then refused.
 - **Collect the digest:** `ssh ubuntu@61.109.239.207 'sudo tar -C /opt/minhoon-studio/data/public -czf - digests records.jsonl' > studio-digests.tgz`
   (`<day>.md` for people, `<day>.json` with requests/timings/usage, `<day>.patch` = cumulative diff vs main).
 - **Collect the branch as commits:** `ssh ubuntu@61.109.239.207 'sudo -u studio git -C /opt/minhoon-studio/sandbox bundle create - studio-base..HEAD' > studio.bundle`
@@ -161,11 +168,12 @@ python tools/minhoon-studio/dev/build_dicomweb_store.py                         
 python tools/minhoon-studio/deploy/make-sandbox.py --repo . --sha <main sha> --out <run>/sandbox
 # config: copy deploy/install.sh's config block with Windows paths, "shellTool": "PowerShell", "python": "python"
 node tools/minhoon-studio/server/server.js --config <run>/config.json                        # http://127.0.0.1:8443
-node --test --test-force-exit tools/minhoon-studio/test/studio.test.js tools/minhoon-studio/test/flow.test.js
+node --test --test-force-exit tools/minhoon-studio/test/studio.test.js tools/minhoon-studio/test/flow.test.js tools/minhoon-studio/test/suggest.test.js
 ```
 (`--test-force-exit`: a chat job keeps an hour-long cleanup timer, which would otherwise hold the test process open.)
 Real-browser check of the chat/product window boundary (throwaway synthetic sandbox, Python Playwright, node on PATH):
 `python tools/minhoon-studio/test/browser_check.py --out <folder> [--ohif <ohif-dist> --dicomweb <store>] [--headed]`
 (`--headed` drives the installed Chrome in real windows and also compares the window chrome height of the product tab
-with the chat tab).
+with the chat tab). `--claude <claude.exe> --claude-config <logged-in CLAUDE_CONFIG_DIR> --feedback <feedback.md>` adds
+the 먼저 제안하기 checks with real suggestions (three suggestion turns; the run then takes several minutes).
 `dev/capture_fixtures.py` records what the screens ask a **synthetic** fixture stack, to refresh the mock shapes.

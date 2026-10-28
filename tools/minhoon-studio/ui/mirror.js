@@ -99,7 +99,7 @@
     }
 
     return {
-      iframe, open, reload, request, page, selectedStudy,
+      iframe, open, reload, request, page, selectedStudy, typing,
       applyPending: () => reload(state.pending || {}),
       errors: () => state.errors.slice(),
       context() {

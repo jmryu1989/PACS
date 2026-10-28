@@ -14,6 +14,11 @@
   <span>새 버전이 준비됐어요. 입력 중이라 자동으로 바꾸지 않았습니다.</span>
   <button id="apply-now" type="button">지금 보기</button>
 </div>
+<div id="preview-banner" class="banner preview overlay-only" hidden>
+  <span><b>미리보기</b> 아직 적용하지 않은 제안입니다: <span id="preview-title"></span></span>
+  <button id="preview-apply" type="button" class="primary" title="이 제안을 스튜디오 화면에 적용합니다(기록에 남고 되돌리기 가능).">적용</button>
+  <button id="preview-stop" type="button" title="미리보기를 닫고 지금 화면으로 돌아갑니다.">원래대로</button>
+</div>
 <div class="studio-widget overlay-only">
   <button id="pick-local" type="button" title="고르기 (Alt+G): 바꿀 곳을 클릭해 대화에 붙입니다. 클릭해도 화면의 버튼은 눌리지 않습니다.">고르기</button>
 </div>
@@ -69,6 +74,22 @@
   </nav>
   <div id="job-line" class="job-line" hidden></div>
   <ol id="messages" aria-live="polite"></ol>
+  <div id="suggest" class="suggest" hidden>
+    <div class="suggest-line">
+      <span class="suggest-label">제안:</span>
+      <span id="suggest-title" class="suggest-title"></span>
+      <button id="suggest-why" type="button" class="link" title="왜 이 제안인지, 근거(화면 요소·피드백 항목·판독 관행)">근거</button>
+    </div>
+    <div id="suggest-detail" class="suggest-detail" hidden></div>
+    <div class="suggest-actions">
+      <button id="suggest-preview" type="button" title="미리 만들어 둔 화면을 제품 화면에 바로 띄웁니다(아직 적용 안 됨).">미리보기</button>
+      <button id="suggest-apply" type="button" class="primary" title="적용하면 기록에 남고 되돌리기로 뺄 수 있습니다.">적용</button>
+      <button id="suggest-next" type="button" title="이 제안은 넘기고 다른 제안을 준비합니다(넘긴 제안은 다시 내지 않음).">다른 제안</button>
+      <button id="suggest-no" type="button" title="이 제안은 하지 않습니다(다시 내지 않음).">됐어요</button>
+      <span id="suggest-note" class="muted"></span>
+    </div>
+  </div>
+  <div id="suggest-wait" class="suggest-wait muted" hidden>다음 제안을 준비하고 있어요…</div>
   <div id="picks" class="picks" hidden>
     <span class="muted">고른 곳 (다음 메시지와 함께 보냄):</span>
     <span id="chips"></span>

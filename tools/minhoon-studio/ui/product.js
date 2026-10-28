@@ -29,8 +29,34 @@
   });
 
   function snapshot() {
-    return { ...mirror.context(), picks: pick.list(), pickActive: pick.active, screen: me.screen, role: me.role };
+    return { ...mirror.context(), picks: pick.list(), pickActive: pick.active, screen: me.screen, role: me.role, typing: mirror.typing(), preview };
   }
+
+  // A suggestion preview in this browser (the server serves the preview copy while its cookie is set): the banner says
+  // so, so a preview is never mistaken for the applied screen. 적용 / 원래대로 work from here as from the chat card.
+  let preview = null; // { id, title }
+  function setPreview(p) {
+    preview = p && p.id ? { id: p.id, title: p.title || '' } : null;
+    $('preview-banner').hidden = !preview;
+    $('preview-title').textContent = preview ? preview.title : '';
+  }
+  $('preview-stop').onclick = async () => {
+    await api('suggestions/preview/stop', { method: 'POST' }).catch(() => {});
+    setPreview(null); post({ type: 'preview', id: null });
+    mirror.reload({ reason: 'preview-end' });
+  };
+  $('preview-apply').onclick = async () => {
+    if (!preview) return;
+    const id = preview.id;
+    $('preview-apply').disabled = true;
+    try {
+      const r = await api(`suggestions/${id}/apply`, { json: {} });
+      setPreview(null); post({ type: 'preview', id: null, applied: id });
+      // Applied from the preview: the studio's reload event shows it. Rebuilt as an edit: show the screen as it is now.
+      if (r.via === 'edit') mirror.reload({ reason: 'preview-end' });
+    } catch (error) { alert(error.message); setPreview(null); mirror.reload({ reason: 'preview-end' }); }
+    finally { $('preview-apply').disabled = false; }
+  };
 
   // The chosen screen is remembered as chosen (Worklist), not as shown for the role (Clinician), so switching the
   // role back after a reload returns to the Worklist.
@@ -62,7 +88,8 @@
       if (m.nonce && seen.has(m.nonce)) return;
       if (m.nonce) seen.set(m.nonce, now);
       mirror.request(m.ev || {});
-    } else if (m.type === 'pick') { pick.toggle(m.on); post({ type: 'pick-mode', on: pick.active }); }
+    } else if (m.type === 'preview') setPreview(m.id ? m : null);
+    else if (m.type === 'pick') { pick.toggle(m.on); post({ type: 'pick-mode', on: pick.active }); }
     else if (m.type === 'focus') {
       // Asked by a chat tab that has no handle to this window; browsers may refuse a focus without a click here.
       try { window.focus(); } catch { /* refused */ }
@@ -77,11 +104,13 @@
     $('link').classList.toggle('on', on);
     $('link').title = on ? '스튜디오 대화 창과 연결됨: 바꾼 내용이 이 창에 바로 반영됩니다.' : '스튜디오 대화 창과 연결 안 됨: 대화 창(스튜디오)을 열어 두세요.';
   }
-  setInterval(() => { paintLink(); post({ type: 'hb' }); }, 2000);
+  setInterval(() => { paintLink(); post({ type: 'hb', typing: mirror.typing() }); }, 2000);
   window.addEventListener('pagehide', () => post({ type: 'bye' }));
 
   (async () => {
     try { const s = await api('state'); me.role = s.role; } catch (error) { if (error.message === 'login') return; }
+    // A preview opened before this window (re)loaded is still on: the cookie outlives the page.
+    try { const s = await api('suggestions'); if (s.previewing && s.current && s.current.id === s.previewing) setPreview(s.current); } catch { /* no banner */ }
     open(me.screen, me.role);
     post({ type: 'hello', ...snapshot() });
     paintLink();

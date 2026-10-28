@@ -29,7 +29,7 @@ LimitNOFILE=4096
 # Confinement: the studio writes only its own folders and cannot touch the PACS stack, Docker or nginx.
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/opt/minhoon-studio/data /opt/minhoon-studio/sandbox /opt/minhoon-studio/sandbox-read /opt/minhoon-studio/claude-config /opt/minhoon-studio/home
+ReadWritePaths=/opt/minhoon-studio/data /opt/minhoon-studio/sandbox /opt/minhoon-studio/sandbox-read /opt/minhoon-studio/sandbox-preview /opt/minhoon-studio/claude-config /opt/minhoon-studio/home
 ReadOnlyPaths=/opt/minhoon-studio/knowledge
 InaccessiblePaths=-/var/run/docker.sock -/run/docker.sock -/etc/nginx -/var/lib/docker -/root
 ProtectHome=yes

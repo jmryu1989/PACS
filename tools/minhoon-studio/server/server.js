@@ -19,6 +19,7 @@ const { Chat } = require('./chat');
 const { StatusFeed } = require('./status');
 const { writeDigest, listDigests, DIGEST_ID } = require('./digest');
 const { buildAndCheck } = require('./build');
+const { Suggestions } = require('./suggest');
 
 function loadConfig(argv) {
   const i = argv.indexOf('--config');
@@ -55,7 +56,9 @@ async function main() {
   const auth = new Auth(config.paths.data);
   const sandbox = new Sandbox({ dir: config.paths.sandbox, readDir: config.paths.sandboxRead });
   await sandbox.check();
-  const statics = new StaticServer({ sandbox: config.paths.sandbox, ohifDist: config.paths.ohifDist, uiDir: path.join(__dirname, '../ui') });
+  let suggestions = null;
+  const statics = new StaticServer({ sandbox: config.paths.sandbox, ohifDist: config.paths.ohifDist, uiDir: path.join(__dirname, '../ui'),
+    previewRoot: req => (suggestions ? suggestions.previewRoot(req) : null) });
   const dicomweb = new DicomWeb(config.paths.dicomweb);
   const missingFile = path.join(config.paths.data, 'missing.jsonl');
   const mock = new Mock({
@@ -64,6 +67,11 @@ async function main() {
   });
   const statusFeed = new StatusFeed(config.paths.knowledge);
   const chat = new Chat({ config, sandbox, dataDir: config.paths.data, broadcast, statusFeed });
+  // The preview copy lives beside the sandbox unless configured (install.sh creates it for the studio user).
+  suggestions = new Suggestions({ config, sandbox, chat, dataDir: config.paths.data, statusFeed, broadcast,
+    previewDir: config.paths.sandboxPreview || path.join(path.dirname(config.paths.sandbox), 'sandbox-preview'),
+    feedbackFile: config.paths.feedback || path.join(config.paths.knowledge, 'minhoon-feedback.md') });
+  await suggestions.init();
   let lastActivity = Date.now(), lastDigest = 0;
   const touch = () => { lastActivity = Date.now(); };
 
@@ -140,6 +148,9 @@ async function main() {
     send(res, 404, 'not found', { ...ISOLATION, 'Content-Type': 'text/plain; charset=utf-8' });
   };
 
+  // Clears this browser's preview cookie when it has one (an answer, an apply, his own request or undo).
+  const endPreview = req => (suggestions.previewId(req) ? { 'Set-Cookie': suggestions.clearCookie(!!config.tls) } : undefined);
+
   async function studioApi(req, res, url, session) {
     const p = url.pathname.slice('/studio-api/'.length);
     const user = session.user;
@@ -149,8 +160,10 @@ async function main() {
       res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
       res.write(`data: ${JSON.stringify({ type: 'hello', head: await sandbox.head(), queue: chat.status() })}\n\n`);
       clients.add(res);
+      // A chat tab names itself on its event stream; its presence (typing or not) ends when the stream closes.
+      const tab = String(url.searchParams.get('tab') || '').slice(0, 40);
       const ping = setInterval(() => res.write(': ping\n\n'), 25e3);
-      req.on('close', () => { clearInterval(ping); clients.delete(res); });
+      req.on('close', () => { clearInterval(ping); clients.delete(res); if (tab) suggestions.dropTab(tab); });
       return;
     }
     if (p === 'state' && method === 'GET') {
@@ -172,7 +185,8 @@ async function main() {
       if (!text) { sendJson(res, 400, { error: '내용이 비었습니다.' }); return; }
       touch();
       const job = chat.enqueue({ user, displayName: session.displayName, mode: body.mode === 'ask' ? 'ask' : 'edit', text, context: { ...(body.context || {}), role: mock.role(user) } });
-      sendJson(res, 202, { jobId: job.id });
+      // A request of his own ends a preview in this browser: the reload after his edit must show his screen.
+      sendJson(res, 202, { jobId: job.id }, endPreview(req));
       return;
     }
     if (p === 'undo' && method === 'POST') {
@@ -188,7 +202,9 @@ async function main() {
       chat.log({ role: 'system', user, displayName: session.displayName, mode: 'edit', text: `되돌림: ${names.join(' / ')}`,
         meta: { sha: result.sha, reverted: result.reverted.sha, undone: result.undone.map(i => i.sha) } });
       broadcast({ type: 'reload', reason: 'undo', sha: result.sha });
-      sendJson(res, 200, { sha: result.sha, reverted: result.reverted, undone: result.undone.map(i => ({ sha: i.sha, subject: i.subject })) });
+      chat.onActivity();
+      suggestions.followHead().catch(e => console.error('suggestion rebase failed', e));
+      sendJson(res, 200, { sha: result.sha, reverted: result.reverted, undone: result.undone.map(i => ({ sha: i.sha, subject: i.subject })) }, endPreview(req));
       return;
     }
     if (p === 'changes' && method === 'GET') { sendJson(res, 200, await sandbox.log()); return; }
@@ -212,6 +228,53 @@ async function main() {
     }
     if (p === 'mock/reset' && method === 'POST') { mock.reset(); chat.log({ role: 'system', user, mode: 'edit', text: '합성 자료를 처음 상태로 되돌렸습니다.' }); broadcast({ type: 'reload', reason: 'mock-reset' }); sendJson(res, 200, { ok: true }); return; }
     if (p === 'status' && method === 'GET') { sendJson(res, 200, statusFeed.view()); return; }
+    // ── 먼저 제안하기 ──
+    if (p === 'suggestions' && method === 'GET') { sendJson(res, 200, suggestions.state(req)); return; }
+    if (p === 'presence' && method === 'POST') {
+      const body = await readJson(req, 16 * 1024);
+      suggestions.presence(String(body.tab || '').slice(0, 40), user, body);
+      sendJson(res, 200, suggestions.state(req));
+      return;
+    }
+    if (p === 'suggestions/next' && method === 'POST') {
+      const current = suggestions.current();
+      if (current && current.status === 'ready') suggestions.answer(current.id, 'skipped', user);
+      else { chat.onActivity(); suggestions.maybePrepare('asked', { asked: true }); }
+      sendJson(res, 200, suggestions.state(req), endPreview(req));
+      return;
+    }
+    if (p === 'suggestions/preview/stop' && method === 'POST') {
+      const id = suggestions.previewId(req);
+      if (id) suggestions.noted(id, 'preview-closed', { by: user });
+      sendJson(res, 200, { ok: true }, endPreview(req) || {});
+      return;
+    }
+    if ((m = p.match(/^suggestions\/([0-9a-f]{8})\/(seen|preview|preview-ready|answer|apply)$/)) && method === 'POST') {
+      const [, id, action] = m;
+      const body = await readJson(req, 16 * 1024);
+      if (action === 'seen') { suggestions.noted(id, 'shown', { by: user }); sendJson(res, 200, { ok: true }); return; }
+      if (action === 'preview-ready') {
+        suggestions.noted(id, 'preview-ready', { by: user, clickToReadyMs: Number(body.clickToReadyMs), reloadMs: Number(body.reloadMs), readyKind: String(body.readyKind || '') });
+        sendJson(res, 200, { ok: true }); return;
+      }
+      if (action === 'preview') {
+        if (!suggestions.ready(id)) { sendJson(res, 409, { error: '이 제안은 이미 끝났습니다.' }); return; }
+        suggestions.noted(id, 'previewed', { by: user });
+        sendJson(res, 200, { previewing: id }, { 'Set-Cookie': suggestions.cookie(id, !!config.tls) });
+        return;
+      }
+      touch();
+      if (action === 'answer') {
+        const answer = body.answer === 'skipped' ? 'skipped' : body.answer === 'declined' ? 'declined' : null;
+        if (!answer) { sendJson(res, 400, { error: 'unknown answer' }); return; }
+        const r = suggestions.answer(id, answer, user);
+        sendJson(res, r.error ? 409 : 200, r, endPreview(req));
+        return;
+      }
+      const r = await suggestions.apply(id, { user, displayName: session.displayName });
+      sendJson(res, r.error ? 409 : 200, r, endPreview(req));
+      return;
+    }
     if (p === 'missing' && method === 'GET') { sendJson(res, 200, readJsonl(missingFile, 200)); return; }
     if (p === 'records' && method === 'GET') { sendJson(res, 200, readJsonl(path.join(config.paths.data, 'public', 'records.jsonl'), 300)); return; }
     if (p === 'metrics' && method === 'GET') { sendJson(res, 200, readJsonl(path.join(config.paths.data, 'metrics.jsonl'), 500)); return; }

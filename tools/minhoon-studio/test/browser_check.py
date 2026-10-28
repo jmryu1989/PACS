@@ -8,7 +8,7 @@ PATH). Only test-side observers are added (an iframe load counter in the product
 product frame, a hook on the chat's EventSource); no product or studio code is replaced. Writes <out>/results.json and
 screenshots; exit 1 if any check fails. Adapted from the GPT functional review scripts of 9f4437c.
 """
-import argparse, json, pathlib, socket, subprocess, sys, time, traceback, urllib.request
+import argparse, json, os, pathlib, socket, subprocess, sys, time, traceback, urllib.request
 from playwright.sync_api import sync_playwright
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -21,6 +21,9 @@ ap.add_argument("--sha", default="HEAD")
 ap.add_argument("--ohif", help="pinned OHIF build (dev/extract_ohif.py); without it the viewer window shows the 'not installed' page")
 ap.add_argument("--dicomweb", help="static DICOMweb samples (dev/build_dicomweb_store.py)")
 ap.add_argument("--headed", action="store_true", help="installed Chrome in a real window: also compares the window chrome height of the two tabs")
+ap.add_argument("--claude", help="real Claude Code CLI: runs the 먼저 제안하기 checks (real suggestions, preview timing, apply/undo, answers)")
+ap.add_argument("--claude-config", help="CLAUDE_CONFIG_DIR of a logged-in account for --claude")
+ap.add_argument("--feedback", help="Minhoon's feedback file the suggestions read (default: none)")
 a = ap.parse_args()
 OUT = pathlib.Path(a.out).resolve()
 OUT.mkdir(parents=True, exist_ok=True)
@@ -45,6 +48,10 @@ config = {"listen": {"host": "127.0.0.1", "port": port},
                     "knowledge": str(STUDIO / "knowledge-seed"), "ohifDist": a.ohif or str(OUT / "empty-ohif"), "dicomweb": a.dicomweb or str(OUT / "empty-dicomweb")},
           "claude": {"bin": str(OUT / "unavailable-claude"), "account": "synthetic", "configDirs": {"synthetic": str(OUT / "empty-claude")},
                      "python": "python", "shellTool": "PowerShell", "models": {"fast": "stub", "deep": "stub"}, "defaultChoice": "fast"}}
+if a.claude:
+    config["claude"].update({"bin": a.claude, "configDirs": {"synthetic": a.claude_config}, "models": {"fast": "sonnet", "deep": "opus"}, "turnTimeoutSec": 900})
+if a.feedback:
+    config["paths"]["feedback"] = a.feedback
 (OUT / "config.json").write_text(json.dumps(config), encoding="utf-8")
 server_js = str(STUDIO / "server/server.js")
 subprocess.run(["node", server_js, "set-password", USER, "Synthetic check", "--config", str(OUT / "config.json")],
@@ -372,6 +379,132 @@ try:
         f.locator("main").screenshot(path=str(OUT / "a2-admin-main.png"))
         reopen.select_option("#role", "radiologist"); rows_ready(product)
 
+        # S: 먼저 제안하기 with the real Claude CLI — prepared while idle in its own copy, one card, hidden while he types
+        # or a change runs, previewed in one click (timed), applied as an undoable change, answers remembered, digest.
+        if a.claude:
+            chat = reopen
+            def git_out(*args): return subprocess.check_output(["git", *args], cwd=OUT / "sandbox", text=True, encoding="utf-8").strip()
+            def sug(page): return page.evaluate('async () => (await fetch("/studio-api/suggestions")).json()')
+            def served(page, rel): return page.evaluate('async u => { const r = await fetch(u, { cache: "no-store" }); return r.ok ? await r.text() : null; }', "/worklist/" + rel[len("worklist-v0/"):])
+            def disk(root, rel):
+                p = OUT / root / rel
+                return p.read_bytes().decode("utf-8") if p.exists() else None
+            def card_visible(): return chat.locator("#suggest").is_visible()
+            def fake(ev): chat.evaluate('e => window.__sources[0].onmessage({ data: JSON.stringify(e) })', ev)
+            def wait_ready(not_ids, timeout_s=900, ask=True):
+                deadline, asked = time.time() + timeout_s, 0
+                while time.time() < deadline:
+                    cur = sug(chat).get("current")
+                    if cur and cur["status"] == "ready" and cur["id"] not in not_ids: return cur, asked
+                    if not cur and ask and asked < 3:
+                        # Nothing open and nothing being prepared (an earlier turn found nothing): ask as he would.
+                        chat.click("#showcase"); chat.locator("#panel[open]").wait_for()
+                        chat.locator(".card").filter(has=chat.locator("strong", has_text="먼저 제안하기")).click(); asked += 1
+                    time.sleep(3)
+                return None, asked
+            chat.click("#showcase"); chat.locator("#panel[open]").wait_for()
+            record("S0 the showcase has the '먼저 제안하기' card", chat.locator(".card strong", has_text="먼저 제안하기").count() == 1)
+            chat.click("#panel-close")
+            if product.evaluate("typeof window.__loads") != "number":
+                product.evaluate('() => { window.__loads = 0; document.querySelector("#product").addEventListener("load", () => window.__loads++); }')
+            head0 = git_out("rev-parse", "HEAD")
+            t0 = time.time()
+            cur, asked = wait_ready(set())
+            if not cur:
+                record("S1 a suggestion is prepared while idle (real Claude)", False, {"asked": asked, "events": [json.loads(l) for l in (OUT / "data/public/suggestions.jsonl").read_text(encoding="utf-8").splitlines()] if (OUT / "data/public/suggestions.jsonl").exists() else []})
+                raise RuntimeError("no suggestion became ready")
+            chat.wait_for_selector("#suggest:not([hidden])", timeout=10000)
+            record("S1 a grounded suggestion is prepared while idle in its own copy and shown as one card; the studio screen is untouched",
+                   len(cur["grounds"]) >= 1 and git_out("rev-parse", "HEAD") == head0 and chat.inner_text("#suggest-title") == cur["title"],
+                   {"title": cur["title"], "kind": cur["kind"], "why": cur["why"], "grounds": cur["grounds"], "files": cur["files"], "prepareMs": cur["prepareMs"],
+                    "askedViaShowcase": asked, "waitedS": round(time.time() - t0, 1)})
+            chat.click("#suggest-why"); chat.screenshot(path=str(OUT / "s1-card.png")); chat.click("#suggest-why")
+
+            chat.fill("#input", "입력 중인 문장"); settle(chat, 300)
+            hidden_typing = not card_visible()
+            chat.fill("#input", ""); settle(chat, 300)
+            fake({"type": "job", "id": "check-run", "mode": "edit", "user": USER, "state": "running"}); settle(chat, 200)
+            hidden_running = not card_visible()
+            fake({"type": "job", "id": "check-run", "mode": "edit", "user": USER, "state": "done"}); settle(chat, 200)
+            f = frame(product)
+            f.locator(f'#rows tr[data-uid="{FIRST_UID}"]').click(); settle(product, 700)
+            f.locator("textarea:visible").first.focus(); settle(product, 2600)
+            hidden_product_typing = not card_visible()
+            f.evaluate("() => document.activeElement && document.activeElement.blur()"); settle(product, 2600)
+            record("S2 the card stays out of the way while he types (chat or product) or a change runs, and comes back after",
+                   hidden_typing and hidden_running and hidden_product_typing and card_visible(),
+                   {"hiddenWhileTypingInChat": hidden_typing, "hiddenWhileRunning": hidden_running, "hiddenWhileTypingInProduct": hidden_product_typing, "backAfter": card_visible()})
+
+            files = [x for x in cur["files"] if x.startswith("worklist-v0/")]
+            sug_files = sug(chat)["current"]["files"]
+            main_text = {x: disk("sandbox", x) for x in files}
+            prev_text = {x: disk("sandbox-preview", x) for x in files}
+            samples = []
+            for i in range(3):
+                before = loads(product); started = time.time()
+                chat.click("#suggest-preview")
+                product.wait_for_function(f"window.__loads > {before}", timeout=30000); rows_ready(product)
+                harness_ms = round((time.time() - started) * 1000)
+                chat.wait_for_function('document.querySelector("#suggest-note").textContent.includes("초")', timeout=30000)
+                s = {"note": chat.inner_text("#suggest-note"), "harnessClickToRowsMs": harness_ms, "banner": product.locator("#preview-banner").is_visible(),
+                     "bannerTitle": product.inner_text("#preview-title"), "servedPreview": all(served(product, x) == prev_text[x] for x in files)}
+                if i == 0: product.screenshot(path=str(OUT / "s3-preview.png"))
+                if i < 2:
+                    before = loads(product)
+                    chat.click("#suggest-preview")  # 원래대로
+                    product.wait_for_function(f"window.__loads > {before}", timeout=30000); rows_ready(product); settle(product, 300)
+                    s["afterStopServedMain"] = all(served(product, x) == main_text[x] for x in files)
+                    s["bannerAfterStop"] = product.locator("#preview-banner").is_visible()
+                samples.append(s)
+                settle(chat, 500)
+            record("S3 미리보기 shows the pre-built preview in the product window in one click (banner says it is not applied); 원래대로 shows the studio screen again",
+                   bool(files) and all(s["banner"] and s["servedPreview"] for s in samples) and all(s.get("afterStopServedMain") and not s.get("bannerAfterStop") for s in samples[:2]),
+                   {"files": sug_files, "samples": samples})
+
+            before = loads(product)
+            product.click("#preview-apply")
+            product.wait_for_function(f"window.__loads > {before}", timeout=60000); rows_ready(product); settle(product, 800)
+            sha = git_out("log", "-1", "--format=%H")
+            sid = git_out("log", "-1", "--format=%(trailers:key=Studio-Suggestion,valueonly,separator=%x2C)")
+            kind = git_out("log", "-1", "--format=%(trailers:key=Studio-Kind,valueonly,separator=%x2C)")
+            applied_msg = chat.locator("#messages li.assistant").last
+            record("S4 적용 (from the preview banner) lands the change on the studio branch as an ordinary change; the screen shows it without the preview",
+                   sid.strip() == cur["id"] and kind.strip() == "change" and all(served(product, x) == prev_text[x] for x in files)
+                   and not product.locator("#preview-banner").is_visible() and applied_msg.locator("button", has_text="되돌리기").count() == 1,
+                   {"sha": sha, "trailer": sid, "kind": kind, "message": applied_msg.inner_text()[:300]})
+            before = loads(product)
+            applied_msg.locator("button", has_text="되돌리기").click()
+            product.wait_for_function(f"window.__loads > {before}", timeout=60000); rows_ready(product); settle(product, 500)
+            record("S4 되돌리기 takes the applied suggestion back out", all(served(product, x) == main_text[x] for x in files), {"head": git_out("log", "-1", "--format=%s")})
+
+            cur2, _ = wait_ready({cur["id"]}, ask=True)
+            cur3 = None
+            if cur2:
+                chat.wait_for_selector("#suggest:not([hidden])", timeout=10000)
+                chat.click("#suggest-next")
+                settle(chat, 300)
+                waiting = chat.locator("#suggest-wait").is_visible()
+                cur3, _ = wait_ready({cur["id"], cur2["id"]}, ask=True)
+            if cur3:
+                chat.wait_for_selector("#suggest:not([hidden])", timeout=10000)
+                chat.click("#suggest-no"); settle(chat, 1000)
+            titles = [c and c["title"] for c in (cur, cur2, cur3)]
+            after = sug(chat).get("current")
+            # 됐어요 closes this one; the next one may start preparing at once (he is idle), never the same one again.
+            record("S5 다른 제안 and 됐어요 each lead to a different suggestion; none repeats an answered one",
+                   bool(cur2 and cur3) and len(set(titles)) == 3 and len({c["id"] for c in (cur, cur2, cur3) if c}) == 3 and not card_visible()
+                   and (after is None or (after["status"] == "preparing" and after["id"] not in {cur["id"], cur2["id"], cur3["id"]})),
+                   {"titles": titles, "waitingLineShown": cur2 is not None and waiting, "after": after})
+            day = chat.evaluate('async () => (await (await fetch("/studio-api/digest", { method: "POST", headers: { "X-Studio": "1" } })).json()).day')
+            md = chat.evaluate('async d => (await fetch("/studio-api/digests/" + d)).text()', day)
+            (OUT / "s6-digest.md").write_text(md, encoding="utf-8")
+            section = md.split("## 스튜디오가 먼저 한 제안과 답", 1)[1].split("\n## ", 1)[0] if "## 스튜디오가 먼저 한 제안과 답" in md else ""
+            record("S6 the digest lists each suggestion with its grounds, preview timings and his answer",
+                   all(t and t.replace("|", "\\|")[:20] in section for t in titles) and "| 적용 |" in section and "| 다른 제안 |" in section and "| 됐어요 |" in section,
+                   {"day": day, "section": section[:3000]})
+            events = [json.loads(l) for l in (OUT / "data/public/suggestions.jsonl").read_text(encoding="utf-8").splitlines()]
+            (OUT / "suggestion-events.json").write_text(json.dumps(events, ensure_ascii=False, indent=2), encoding="utf-8")
+
         # F8: overlay — a resize while picking keeps "reopen the chat when picking ends".
         product.close(); settle(reopen, 300)
         reopen.select_option("#layout", "overlay"); reopen.wait_for_function('document.body.dataset.layout === "overlay"'); rows_ready(reopen, "#mirror"); settle(reopen, 400)
@@ -389,6 +522,8 @@ try:
 except Exception as e:
     traceback.print_exc(); checks.append({"name": "harness completion", "pass": False, "error": repr(e)})
 finally:
+    # On Windows the Claude CLI children of the server outlive a plain terminate: end the whole tree.
+    if os.name == "nt": subprocess.run(["taskkill", "/T", "/F", "/PID", str(server.pid)], capture_output=True)
     server.terminate()
     try: server.wait(timeout=10)
     except subprocess.TimeoutExpired: server.kill(); server.wait(timeout=10)

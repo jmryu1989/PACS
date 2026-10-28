@@ -11,14 +11,17 @@ const path = require('path');
 const ALLOWED = ['worklist-v0/hpacs-lite/', 'config/ohif/', 'config/ohif.js', 'studio-mock/'];
 const IDENTITY = ['-c', 'user.name=Minhoon Studio', '-c', 'user.email=studio@minhoon-studio.local', '-c', 'commit.gpgsign=false'];
 
-function allowed(file) {
-  return ALLOWED.some(prefix => (prefix.endsWith('/') ? file.startsWith(prefix) : file === prefix));
+function allowed(file, list = ALLOWED) {
+  return list.some(prefix => (prefix.endsWith('/') ? file.startsWith(prefix) : file === prefix));
 }
 
 class Sandbox {
-  constructor({ dir, readDir }) {
+  // allowedPaths: where a commit may land (the preview copy of a suggestion leaves studio-mock out: the mock API
+  // reads the main sandbox only, so a preview could not show a mock change).
+  constructor({ dir, readDir, allowedPaths = ALLOWED }) {
     this.dir = dir;
     this.readDir = readDir;
+    this.allowedPaths = allowedPaths;
     this.readers = 0;
     this.readStale = true;
     this.readHead = null;
@@ -46,12 +49,16 @@ class Sandbox {
   async check() {
     if (!fs.existsSync(path.join(this.dir, '.git'))) throw new Error(`sandbox ${this.dir} is not a git repository (run deploy/make-sandbox.py)`);
     await this.ok(['rev-parse', '--verify', 'studio-base']);
-    if (this.readDir && !fs.existsSync(path.join(this.readDir, '.git'))) {
-      await this.ok(['worktree', 'prune']);
-      await this.ok(['worktree', 'add', '--detach', '--force', this.readDir, 'HEAD']);
-    }
+    if (this.readDir) await this.worktree(this.readDir);
     this.published = await this.head();
     await this.syncReadTree();
+  }
+
+  // A detached working copy of this repository (same objects and refs), created once.
+  async worktree(dir) {
+    if (fs.existsSync(path.join(dir, '.git'))) return;
+    await this.ok(['worktree', 'prune']);
+    await this.ok(['worktree', 'add', '--detach', '--force', dir, 'HEAD']);
   }
 
   async head() { return (await this.ok(['rev-parse', 'HEAD'])).trim(); }
@@ -75,7 +82,7 @@ class Sandbox {
 
   // Put back every change outside the allowed paths; returns what was put back.
   async discardOutside() {
-    const blocked = (await this.changes()).filter(e => !allowed(e.file));
+    const blocked = (await this.changes()).filter(e => !this.allows(e.file));
     for (const entry of blocked) await this.restore(entry);
     return blocked.map(e => e.file);
   }
@@ -90,10 +97,13 @@ class Sandbox {
     await this.git(['checkout', 'HEAD', '--', entry.file]);
   }
 
+  allows(file) { return allowed(file, this.allowedPaths); }
+  presentAllowed() { return this.allowedPaths.filter(p => fs.existsSync(path.join(this.dir, p))); }
+
   async commit({ subject, body = '', trailers = {} }) {
-    const changed = (await this.changes()).filter(e => allowed(e.file));
+    const changed = (await this.changes()).filter(e => this.allows(e.file));
     if (!changed.length) return null;
-    await this.ok(['add', '-A', '--', ...ALLOWED.filter(p => fs.existsSync(path.join(this.dir, p)))]);
+    await this.ok(['add', '-A', '--', ...this.presentAllowed()]);
     const message = [subject.replace(/\s+/g, ' ').slice(0, 120), '', body.trim(), '',
       ...Object.entries(trailers).map(([k, v]) => `${k}: ${String(v).replace(/\s+/g, ' ')}`)].join('\n');
     await this.ok([...IDENTITY, 'commit', '-q', '-F', '-'], { input: message });
@@ -161,8 +171,8 @@ class Sandbox {
         return { error: '되돌린 결과가 빌드/문법 검사를 통과하지 못해 되돌리지 않았습니다. 화면은 그대로입니다.', errors: check.errors };
       }
       // The builders may regenerate an artifact (bundle, OHIF config); it belongs to the last revert commit.
-      if ((await this.changes()).some(e => allowed(e.file))) {
-        await this.ok(['add', '-A', '--', ...ALLOWED.filter(p => fs.existsSync(path.join(this.dir, p)))]);
+      if ((await this.changes()).some(e => this.allows(e.file))) {
+        await this.ok(['add', '-A', '--', ...this.presentAllowed()]);
         await this.ok([...IDENTITY, 'commit', '-q', '--amend', '--no-edit']);
       }
     }

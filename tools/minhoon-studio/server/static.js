@@ -59,8 +59,11 @@ const OHIF_INDEX_REWRITES = [
 const COMPRESSIBLE = /^(text\/|application\/(json|javascript|wasm|manifest\+json|xml)|image\/svg)/;
 
 class StaticServer {
-  constructor({ sandbox, ohifDist, uiDir }) {
+  // previewRoot(req): the folder to serve the product front-end from for this request (a suggestion's preview copy
+  // while this browser previews it), or null for the sandbox.
+  constructor({ sandbox, ohifDist, uiDir, previewRoot = () => null }) {
     this.sandbox = sandbox;
+    this.previewRoot = previewRoot;
     this.ohifDist = ohifDist;
     this.uiDir = uiDir;
     this.gzipCache = new Map(); // file -> {key, data}
@@ -70,17 +73,18 @@ class StaticServer {
   // Returns true when the request was handled.
   handle(req, res, url) {
     const p = url.pathname;
-    if (p.startsWith('/worklist/')) return this.file(req, res, safeJoin(path.join(this.sandbox, 'worklist-v0'), p.slice('/worklist/'.length)), { fresh: true });
-    if (p.startsWith('/kin-brand/')) return this.file(req, res, safeJoin(path.join(this.sandbox, 'proxy/branding'), p.slice('/kin-brand/'.length)), { fresh: true });
-    if (p === '/ohif/manifest.json') return this.file(req, res, path.join(this.sandbox, 'proxy/branding/viewer-manifest.json'), { fresh: true, type: 'application/manifest+json' });
-    if (p === '/ohif/app-config.js') return this.appConfig(req, res);
+    const product = () => this.previewRoot(req) || this.sandbox;
+    if (p.startsWith('/worklist/')) return this.file(req, res, safeJoin(path.join(product(), 'worklist-v0'), p.slice('/worklist/'.length)), { fresh: true });
+    if (p.startsWith('/kin-brand/')) return this.file(req, res, safeJoin(path.join(product(), 'proxy/branding'), p.slice('/kin-brand/'.length)), { fresh: true });
+    if (p === '/ohif/manifest.json') return this.file(req, res, path.join(product(), 'proxy/branding/viewer-manifest.json'), { fresh: true, type: 'application/manifest+json' });
+    if (p === '/ohif/app-config.js') return this.appConfig(req, res, product());
     if (p === '/ohif' || p.startsWith('/ohif/')) return this.ohif(req, res, p);
     if (p.startsWith('/studio/')) return this.file(req, res, safeJoin(this.uiDir, p.slice('/studio/'.length)), { fresh: true });
     return false;
   }
 
-  appConfig(req, res) {
-    const file = path.join(this.sandbox, 'config/ohif.js');
+  appConfig(req, res, root) {
+    const file = path.join(root, 'config/ohif.js');
     let body;
     try { body = fs.readFileSync(file, 'utf8'); } catch { send(res, 404, 'config/ohif.js missing in sandbox', ISOLATION); return true; }
     this.respond(req, res, Buffer.from(body + '\n' + OHIF_DATASOURCE_SUFFIX), 'text/javascript; charset=utf-8', { 'Cache-Control': 'no-store' });

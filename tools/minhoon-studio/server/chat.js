@@ -30,6 +30,11 @@ class Chat {
     this.usageFile = path.join(dataDir, 'usage.jsonl');
     this.metricsFile = path.join(dataDir, 'metrics.jsonl');
     this.recordsFile = path.join(dataDir, 'public', 'records.jsonl');
+    // Working folder per mode; the suggestion engine adds 'suggest' (its own preview copy of the sandbox).
+    this.dirs = { edit: sandbox.dir, ask: sandbox.readDir };
+    // Hooks for the suggestion engine: a request arrived (he is active), a request finished.
+    this.onActivity = () => {};
+    this.onSettled = () => {};
     this.writeSettings();
   }
 
@@ -68,13 +73,22 @@ class Chat {
         deny: ['Edit', 'Write', ...secretReads, ...blockedTools, `${shell}`],
       },
     };
+    // A suggestion is built in its own preview copy under the edit rules, without the mock API folder: the mock
+    // reads the main sandbox only, so a preview could not show a mock change.
+    const suggest = { permissions: { ...edit.permissions,
+      allow: edit.permissions.allow.filter(rule => rule !== 'Edit(studio-mock/**)'),
+      deny: [...edit.permissions.deny, 'Edit(studio-mock/**)'] } };
     this.settingsDir = path.join(this.dataDir, 'claude');
     writeJsonAtomic(path.join(this.settingsDir, 'settings-edit.json'), edit);
     writeJsonAtomic(path.join(this.settingsDir, 'settings-ask.json'), ask);
+    writeJsonAtomic(path.join(this.settingsDir, 'settings-suggest.json'), suggest);
     const prompt = fs.readFileSync(path.join(__dirname, '../claude/edit-system.md'), 'utf8')
       .replace('{{SHELL_COMMANDS}}', this.shellCommands().map(c => '`' + c + '`').join(', '));
     fs.writeFileSync(path.join(this.settingsDir, 'edit-system.md'), prompt);
     fs.copyFileSync(path.join(__dirname, '../claude/ask-system.md'), path.join(this.settingsDir, 'ask-system.md'));
+    // The suggestion Claude keeps every edit rule (the critique list, the product rules) and adds how to pick one.
+    fs.writeFileSync(path.join(this.settingsDir, 'suggest-system.md'),
+      `${prompt}\n\n${fs.readFileSync(path.join(__dirname, '../claude/suggest-system.md'), 'utf8')}`);
   }
 
   history(limit = 300) { return readJsonl(this.chatFile, limit); }
@@ -121,7 +135,8 @@ class Chat {
     const picks = pickLabels(job.context.picks);
     this.log({ role: 'user', user, displayName, mode, text, jobId: job.id, ...(picks.length ? { meta: { picks } } : {}) });
     this.pending++;
-    const emit = (state, extra = {}) => { job.state = state; this.broadcast({ type: 'job', id: job.id, mode, user, state, ...extra }); };
+    this.onActivity(job);
+    const emit =(state, extra = {}) => { job.state = state; this.broadcast({ type: 'job', id: job.id, mode, user, state, ...extra }); };
     emit('queued', { position: this.pending });
     const work = async () => {
       try {
@@ -134,6 +149,7 @@ class Chat {
       } finally {
         this.pending--;
         setTimeout(() => this.jobs.delete(job.id), 3600e3);
+        this.onSettled(job);
       }
     };
     // Questions never write, so they do not wait behind edits. Edits are strictly one at a time (one writer).
@@ -279,7 +295,7 @@ class Chat {
   claude(job, mode, prompt, emit) {
     const { account, dir } = this.claudeConfigDir();
     const session = this.sessionFor(job.user, mode);
-    const cwd = mode === 'ask' ? this.sandbox.readDir : this.sandbox.dir;
+    const cwd = this.dirs[mode];
     const shell = this.config.claude.shellTool;
     const args = ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
       '--restricted', '--permission-mode', 'dontAsk', '--permission-prompts', 'none',
@@ -291,9 +307,13 @@ class Chat {
     args.push('--add-dir', this.statusFeed.dir, path.join(this.dataDir, 'public'));
     const model = job.model || (mode === 'ask' ? (this.config.claude.askModel || this.config.claude.model) : this.config.claude.model);
     if (model) args.push('--model', model);
-    const effort = mode === 'ask' ? this.config.claude.askEffort : this.config.claude.effort;
+    const effort = mode === 'ask' ? this.config.claude.askEffort
+      : mode === 'suggest' ? (this.config.claude.suggestEffort || this.config.claude.effort) : this.config.claude.effort;
     if (effort) args.push('--effort', effort);
-    let sessionId = session.id;
+    // A suggestion turn starts fresh: its copy is reset and its prompt carries everything it needs, while a resumed
+    // session re-reads every earlier suggestion turn (measured: CLI-reported cost 1.50 -> 1.91 -> 2.32 USD per turn).
+    const fresh = mode === 'suggest';
+    let sessionId = fresh ? null : session.id;
     if (sessionId) args.push('--resume', sessionId);
     else { sessionId = crypto.randomUUID(); args.push('--session-id', sessionId); }
 
@@ -369,7 +389,7 @@ class Chat {
         out.loginRequired = /log ?in|\/login|not logged|invalid api key|authenticat|oauth|credential/i.test(failure) && (!out.text || out.isError);
         out.stderrTail = maskSecrets(stderr.trim().split('\n').slice(-3).join(' '));
         out.error = out.loginRequired ? failure.slice(-500) : null;
-        if (out.sessionId && !out.loginRequired && code === 0) this.rememberSession(session.key, out.sessionId);
+        if (fresh) { /* nothing to remember */ } else if (out.sessionId && !out.loginRequired && code === 0) this.rememberSession(session.key, out.sessionId);
         else if (session.id && code !== 0 && /session|resume|conversation/i.test(stderr)) {
           // A lost or broken session: forget it so the next request starts fresh instead of failing again.
           this.rememberSession(session.key, null);

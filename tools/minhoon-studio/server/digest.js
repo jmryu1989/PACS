@@ -108,6 +108,7 @@ async function writeDigestNow({ dataDir, sandbox, reason = 'manual', by = null, 
     acc.cost += u.costUsdReported || 0; if (u.model) acc.models.add(u.model);
     return acc;
   }, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: new Set() });
+  const suggestions = suggestionRows(readJsonl(path.join(dataDir, 'public', 'suggestions.jsonl')).filter(upTo), since);
   const missingCount = new Map();
   for (const m of missing) { const k = `${m.method} ${m.path.replace(/\/[0-9.]{8,}(?=\/|$)/g, '/:uid')}`; missingCount.set(k, (missingCount.get(k) || 0) + 1); }
   const patch = await sandbox.diffSinceBase(head);
@@ -123,7 +124,13 @@ async function writeDigestNow({ dataDir, sandbox, reason = 'manual', by = null, 
       failed: counted.filter(r => ['failed', 'interrupted', 'login-required'].includes(r.outcome)).length,
       reloadTimeouts: requests.filter(r => r.reloadTimedOut).length, lateReloads: lateReloads.length,
       reverts: log.filter(c => c.trailers['Studio-Kind'] === 'revert').length,
-      disagreements: records.filter(r => r.kind === 'disagreement').length, forwarded: records.filter(r => r.kind === 'question').length },
+      disagreements: records.filter(r => r.kind === 'disagreement').length, forwarded: records.filter(r => r.kind === 'question').length,
+      suggestions: suggestions.filter(s => s.prepared).length, suggestionsApplied: suggestions.filter(s => s.answer === 'applied').length },
+    suggestionTiming: {
+      prepareP50Ms: pct(suggestions.map(s => s.prepareMs), 50),
+      previewClickToReadyP50Ms: pct(suggestions.flatMap(s => s.previewMs), 50), previewClickToReadyP90Ms: pct(suggestions.flatMap(s => s.previewMs), 90),
+    },
+    suggestions,
     timing: {
       editToReadyP50Ms: pct(applied.map(r => r.editToReadyMs), 50), editToReadyP90Ms: pct(applied.map(r => r.editToReadyMs), 90),
       totalP50Ms: pct(applied.map(r => r.totalToReloadSentMs), 50), totalP90Ms: pct(applied.map(r => r.totalToReloadSentMs), 90),
@@ -140,6 +147,7 @@ async function writeDigestNow({ dataDir, sandbox, reason = 'manual', by = null, 
   lines.push(`- 샌드박스: \`${branch}\` · base \`${base.slice(0, 12)}\` · head \`${head.slice(0, 12)}\``);
   lines.push(`- 요청 ${summary.counts.requests}건 (바꾸기 ${summary.counts.edits}, 적용 ${summary.counts.applied}, 물어보기 ${summary.counts.questions}, 실패·중단 ${summary.counts.failed}, 진행 중 ${summary.counts.pending}) · 되돌림 ${summary.counts.reverts} · 이견 ${summary.counts.disagreements} · 넘긴 질문 ${summary.counts.forwarded}`);
   lines.push(`- 반영 시간(마지막 수정→거울 준비) p50 ${sec(summary.timing.editToReadyP50Ms)} · p90 ${sec(summary.timing.editToReadyP90Ms)}; 요청→새로고침 신호 p50 ${sec(summary.timing.totalP50Ms)} · p90 ${sec(summary.timing.totalP90Ms)}${summary.counts.reloadTimeouts ? ` · 화면 준비 시간 초과 ${summary.counts.reloadTimeouts}건(시간 통계에서 뺌)` : ''}`);
+  if (suggestions.length) lines.push(`- 스튜디오가 먼저 한 제안 ${summary.counts.suggestions}건 · 적용 ${summary.counts.suggestionsApplied}건 (아래 "먼저 한 제안과 답")`);
   if (pending.length) lines.push(`- 진행 중이던 요청 ${pending.length}건은 답이 나오면 다음 인계에 다시 실립니다.`);
   if (lateReloads.length) lines.push(`- 지난 인계 뒤에 화면 준비 결과가 도착한 요청 ${lateReloads.length}건을 표에 다시 실었습니다(요청 건수는 지난 인계에 셌음).`);
   lines.push(`- 사용량: ${summary.usage.models.join(', ') || '—'} · 입력 ${tokens.input} / 출력 ${tokens.output} / 캐시 읽기 ${tokens.cacheRead} / 캐시 쓰기 ${tokens.cacheWrite} 토큰 · CLI 환산 $${summary.usage.costUsdReportedByCli} (${summary.usage.costNote})`, '');
@@ -156,6 +164,15 @@ async function writeDigestNow({ dataDir, sandbox, reason = 'manual', by = null, 
   else {
     lines.push('| 시각 | 누구 | 방아쇠 | 요청 | 스튜디오 근거 | 대안 | 처리 | 근거 위치 |', '|---|---|---|---|---|---|---|---|');
     for (const d of disagreements) lines.push(`| ${d.t.slice(11, 19)} | ${cell(d.user)} | ${cell(d.trigger)} | ${cell(d.request)} | ${cell(d.objection)} | ${cell(d.alternative)} | ${cell(d.action)} | ${cell(d.evidence)} |`);
+  }
+  lines.push('', '## 스튜디오가 먼저 한 제안과 답', '');
+  if (!suggestions.length) lines.push('없음');
+  else {
+    lines.push(`준비 시간 p50 ${sec(summary.suggestionTiming.prepareP50Ms)} · 미리보기 클릭→화면 p50 ${sec(summary.suggestionTiming.previewClickToReadyP50Ms)} · p90 ${sec(summary.suggestionTiming.previewClickToReadyP90Ms)}`, '');
+    lines.push('| 준비 | 제안 | 근거 | 준비 시간 | 보여 줌 | 미리보기(클릭→화면) | 답 | 누가 |', '|---|---|---|---|---|---|---|---|');
+    for (const s of suggestions) {
+      lines.push(`| ${(s.preparedAt || s.t || '').slice(11, 19)} | ${cell(s.title || `(${s.outcome})`)} | ${cell((s.grounds || []).map(g => `${g.kind} ${g.ref}${g.quote ? ` "${g.quote}"` : ''}`).join(' / '))} | ${sec(s.prepareMs)} | ${s.shownAt ? s.shownAt.slice(11, 19) : '—'} | ${s.previewMs.length ? s.previewMs.map(sec).join(', ') : '—'} | ${cell(s.answerLabel)} | ${cell(s.by || '')} |`);
+    }
   }
   lines.push('', '## 지휘자/정모 님께 넘긴 질문', '');
   const questions = records.filter(r => r.kind === 'question');
@@ -176,6 +193,37 @@ async function writeDigestNow({ dataDir, sandbox, reason = 'manual', by = null, 
   fs.writeFileSync(path.join(dir, `${day}.patch`), patch);
   writeJsonAtomic(stateFile, { lastAt: writtenAt, lastHead: head, lastDay: day, pending });
   return { day, file: path.join(dir, `${day}.md`), summary };
+}
+
+// One row per suggestion with any event since the last handoff (prepared, shown, previewed, answered, set aside).
+const ANSWER_LABELS = { applied: '적용', declined: '됐어요', skipped: '다른 제안', stale: '화면이 바뀌어 버림', failed: '만들기 실패', none: '근거 있는 제안 없음', interrupted: '재시작에 끊김' };
+function suggestionRows(events, since) {
+  const byId = new Map();
+  for (const e of events) {
+    if (!byId.has(e.id)) byId.set(e.id, []);
+    byId.get(e.id).push(e);
+  }
+  const rows = [];
+  for (const [id, list] of byId) {
+    if (!list.some(e => e.t > since)) continue;
+    const prepared = list.find(e => e.event === 'prepared');
+    const closed = [...list].reverse().find(e => ANSWER_LABELS[e.event]);
+    const shown = list.find(e => e.event === 'shown');
+    const row = {
+      id, t: list[0].t, title: (prepared && prepared.title) || (closed && closed.title) || null, prepared: !!prepared,
+      preparedAt: prepared ? prepared.t : null, kind: prepared ? prepared.kind : null, why: prepared ? prepared.why : null,
+      grounds: prepared ? prepared.grounds : [], request: prepared ? prepared.request : null, files: prepared ? prepared.files : [],
+      prepareMs: prepared ? prepared.prepareMs : (closed ? closed.prepareMs ?? null : null), model: prepared ? prepared.model : null,
+      shownAt: shown ? shown.t : null, previews: list.filter(e => e.event === 'previewed').length,
+      previewMs: list.filter(e => e.event === 'preview-ready' && e.readyKind !== 'timeout' && Number.isFinite(e.clickToReadyMs)).map(e => e.clickToReadyMs),
+      previewTimeouts: list.filter(e => e.event === 'preview-ready' && e.readyKind === 'timeout').length,
+      outcome: closed ? closed.event : 'open', by: closed ? closed.by || null : null, via: closed ? closed.via || null : null,
+      sha: closed ? closed.sha || null : null, error: closed ? closed.error || null : null,
+    };
+    row.answerLabel = row.outcome === 'open' ? '아직 답 없음' : `${ANSWER_LABELS[row.outcome]}${row.via === 'edit' ? ' (화면이 바뀌어 다시 만듦)' : ''}${row.error ? ` (${row.error})` : ''}`;
+    rows.push(row);
+  }
+  return rows;
 }
 
 function readJsonFileSafe(file) {
