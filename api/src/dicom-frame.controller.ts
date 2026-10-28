@@ -4,12 +4,13 @@
  * read (PacsService.authzDicom): institution, StudyAccess and the split-UID check, with the viewer's session binding
  * already enforced by the guard. The study delivery's 열람 record (image-delivery-record.ts, D1877), naming the patient
  * the gate observed for the request and the archive's revision the recorder read, is durable before any byte; bytes are
- * then served by DicomFrameService (direct range read or Orthanc relay; a relay after a failed direct attempt first
- * confirms the lease, C8). The recorder is the one the image relay uses, so the frames, previews and relayed reads
- * of one opening share one pair.
+ * then served by DicomFrameService, which takes the lease once it selected the object (direct range read, checked
+ * against the lease's patient) or relays to Orthanc (confirmed against the lease once Orthanc answered, C8). The
+ * recorder is the one the image relay uses, so the frames, previews and relayed reads of one opening share one pair.
  */
 import { BadRequestException, Controller, Get, Param, Req, Res } from '@nestjs/common';
 import { DicomFrameService } from './dicom-frame.service';
+import type { TakeLease } from './dicom-frame.service';
 import { archiveRead, StudyImageDeliveryRecorder } from './image-delivery-record';
 import type { DeliveryLease } from './image-delivery-record';
 import { Caller, PacsService } from './pacs.service';
@@ -39,17 +40,19 @@ function requestOrigin(req: any): string {
  * The lease learns whether an image was served, not whether the socket finished: a service that failed (its error
  * answer is written after it, by the exception filter, and finishes the socket too) or a relayed non-success answer
  * from Orthanc is no image (review MG-10). Both facts - the service's outcome and the response's close - may arrive
- * in either order, so the lease is released when the second one does. A HEAD has no lease (the recorder's `lease`).
+ * in either order, so the lease is released when the second one does. The service takes the lease through `take` once
+ * it selected its source (TakeLease); a HEAD has none (the recorder's `lease`).
  */
-function lifetime(req: any, res: any, lease: DeliveryLease | null, work: (signal: AbortSignal) => Promise<void>): Promise<void> {
+function lifetime(req: any, res: any, take: TakeLease, work: (signal: AbortSignal, lease: TakeLease) => Promise<void>): Promise<void> {
   const abort = new AbortController();
-  let outcome: boolean | null = null, closed = false;
+  let lease: DeliveryLease | null = null, outcome: boolean | null = null, closed = false;
   const release = () => { if (lease && closed && outcome !== null) lease.release(outcome && res.writableFinished === true && res.statusCode < 400); };
   const stop = () => { if (!res.writableFinished) abort.abort(); };
   const onClose = () => { stop(); closed = true; release(); };
   req.once?.('aborted', stop);
   if (res.destroyed || res.closed) onClose(); else res.once?.('close', onClose);
-  return work(abort.signal).then(() => { outcome = true; }, error => { outcome = false; throw error; })
+  return work(abort.signal, async () => (lease = await take()))
+    .then(() => { outcome = true; }, error => { outcome = false; throw error; })
     .finally(() => { req.off?.('aborted', stop); release(); });
 }
 
@@ -67,10 +70,10 @@ export class DicomFrameController {
     const uri = `/dicom-web/studies/${study}/series/${series}/instances/${sop}/frames/${frames}`;
     const admitted = await this.pacs.authzDicom(uri, 'GET', member(req));
     // HEAD sends no image byte, so it is no delivery (image-delivery-record.ts lease()).
-    const lease = await this.deliveries.lease(req, FRAMES_SURFACE, uri, () => archiveRead(admitted));
-    await lifetime(req, res, lease, signal => this.frames.serveFrames({ studyUid: study, seriesUid: series, sopUid: sop, frames: list,
-      accept: req.headers?.accept, acceptEncoding: req.headers?.['accept-encoding'], head: req.method === 'HEAD',
-      origin: requestOrigin(req) }, res, signal, lease ? () => lease.confirm() : undefined));
+    await lifetime(req, res, () => this.deliveries.lease(req, FRAMES_SURFACE, uri, () => archiveRead(admitted)),
+      (signal, lease) => this.frames.serveFrames({ studyUid: study, seriesUid: series, sopUid: sop, frames: list,
+        accept: req.headers?.accept, acceptEncoding: req.headers?.['accept-encoding'], head: req.method === 'HEAD',
+        origin: requestOrigin(req) }, res, signal, lease));
   }
 
   @Get('instances/:id/preview')
@@ -79,7 +82,7 @@ export class DicomFrameController {
     const uri = `/instances/${id}/preview`;
     // The gate resolves the object's study; the preview is a read of that study's delivery.
     const admitted = await this.pacs.authzDicom(uri, 'GET', member(req));
-    const lease = await this.deliveries.lease(req, PREVIEW_SURFACE, uri, () => archiveRead(admitted));
-    await lifetime(req, res, lease, signal => this.frames.servePreview(id, res, signal, lease ? () => lease.confirm() : undefined));
+    await lifetime(req, res, () => this.deliveries.lease(req, PREVIEW_SURFACE, uri, () => archiveRead(admitted)),
+      (signal, lease) => this.frames.servePreview(id, res, signal, lease));
   }
 }

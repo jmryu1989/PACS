@@ -15,9 +15,10 @@
  * shutdown makes a last attempt without inventing one (MG-09); a graceful Nest shutdown (installed Nest's application
  * context close, the real EmrNestLifecycle closing admission) still records the terminal of a delivery whose
  * preparation or whose first terminal attempt was in flight when admission closed (MG-09, round 4), and of one whose
- * first terminal attempt was made during the stop and failed once (MG-09, round 5); a relay fallback that follows a
- * direct read attempt sends no byte when the archive no longer holds the revision or patient its record names (C8 of
- * the shared recorder contract, R244-GPT-FIX9-01). The PostgreSQL
+ * first terminal attempt was made during the stop and failed once (MG-09, round 5); a relay fallback copies Orthanc's
+ * answer only once the archive still holds the revision and patient its record names: a newer revision is asked again
+ * under that revision's record, another patient gets no byte (C8 of the shared recorder contract, R244-GPT-FIX9-01/
+ * FIX10-01). The PostgreSQL
  * ledger itself is proven in tests/emr/a (real PG). D73: behaviour at the boundary, no product source text. Synthetic
  * values only; 127.0.0.1 only. */
 const { STUDY_UID, SERIES_UID, SOP_UID, INSTANCE_ID, STUDY_ID, syntheticObject, stubOrthanc } = require('./dicom_frame_fixture.cjs');
@@ -107,7 +108,10 @@ async function stack(options = {}) {
   const clinical = createCurrentClinicalContext(prisma, contexts.source, orthanc, studyAccess);
   // The runtime's background registry, as app.module provides it: terminal retries are its timers and tasks.
   const background = createBackgroundWorkRegistry();
-  const recorder = new StudyImageDeliveryRecorder(records.port, contexts.source, clinical, background.work, orthanc, IDLE_MS);
+  // The image check pool every lease reads its current facts on (emr-image/check-db.ts): here one synthetic
+  // transaction over the same in-memory rows.
+  const checks = { $transaction: async work => work({ ...records.tx, $executeRaw: async () => 0 }) };
+  const recorder = new StudyImageDeliveryRecorder(records.port, contexts.source, clinical, background.work, orthanc, IDLE_MS, checks);
   const service = new DicomFrameService(orthanc);
   const controller = new DicomFrameController(service, { authzDicom: (...args) => gate.authzDicom(...args) }, recorder);
   // The other image reads of the same study, which nginx sends to the relay; app.module gives both controllers one recorder.
@@ -298,33 +302,86 @@ test('shutdown closes open deliveries once their responses have: a quiet one at 
   } finally { hold = false; release?.(); await s.close(); }
 });
 
-test('C8: a relay fallback after a direct read attempt confirms the record first; an archive changed meanwhile gets no byte of it', async () => {
+test('C8: a relay fallback is confirmed once Orthanc answered; a newer revision is asked again under its own record, another patient gets no byte', async () => {
+  const [R0, R1] = ['20261028T090000', '20261028T090100'].map(at => `orthanc-study:${STUDY_ID}@${at}`);
   for (const change of ['revision', 'patient']) {
-    // The archive changes while the frame reader reads the index for its direct attempt, after the delivery was admitted.
-    let lastUpdate = '20261028T090000', patient = 'SYN-PID-1';
-    const s = await stack({ orthanc: orthanc => { const facts = orthanc.frameFacts.bind(orthanc), identity = orthanc.studyIdentityResources.bind(orthanc);
+    let lastUpdate = '20261028T090000', patient = 'SYN-PID-1', changed = false;
+    const s = await stack({ orthanc: orthanc => { const identity = orthanc.studyIdentityResources.bind(orthanc), relay = orthanc.relay.bind(orthanc);
       return {
         studyRevision: async uid => { orthanc.calls.push(['revision', uid]); return { id: STUDY_ID, lastUpdate }; },
         studyIdentityResources: async uid => (await identity(uid)).map(row => ({ ...row, '00100020': { vr: 'LO', Value: [patient] } })),
-        frameFacts: async id => { if (change === 'revision') lastUpdate = '20261028T090100'; else patient = 'SYN-PID-2'; return facts(id); },
+        // Orthanc selects what it answers when the relayed request reaches it: here once after the archive changed, after
+        // the delivery was admitted. Its answer is copied only once the relay's `selected` check passes (OrthancService.relay).
+        relay: async (path, accept, target, signal, origin, selected) => {
+          if (!changed) { changed = true; if (change === 'revision') lastUpdate = '20261028T090100'; else patient = 'SYN-PID-2'; }
+          do orthanc.calls.push(['answered', path]); while (!(await selected()));
+          return relay(path, accept, target);
+        },
       }; } });
     try {
       // Frame 9 is past the object's five: the direct attempt falls back to Orthanc.
-      const refused = await s.frame(9);
-      assert.equal(refused.status, 409, change);
-      assert.equal(JSON.parse(refused.body.toString()).code, 'ImageCurrentStudyChanged', change);
-      assert.deepEqual(s.orthanc.calls.filter(c => c[0] === 'relay'), [], `${change}: the fallback relayed nothing`);
-      assert.ok(s.observations.every(o => o.firstByte === null), `${change}: no image byte`);
-      await until(() => byAction(s.records.entries, 'transfer-aborted').length === 1, `${change}: the outdated delivery ends at once, aborted`);
-      if (change === 'revision') {
-        // The next read is the newer revision's delivery.
-        assert.equal((await s.frame(1)).status, 200);
-        const versions = byAction(s.records.entries, 'provide-prepared').map(e => e.event.targets[0].versionId.value);
-        assert.deepEqual(versions, [`orthanc-study:${STUDY_ID}@20261028T090000`, `orthanc-study:${STUDY_ID}@20261028T090100`]);
+      const answer = await s.frame(9);
+      if (change === 'patient') {
+        assert.equal(answer.status, 409);
+        assert.equal(JSON.parse(answer.body.toString()).code, 'ImageCurrentStudyChanged');
+        assert.deepEqual(s.orthanc.calls.filter(c => c[0] === 'relay'), [], 'the answer of the corrected patient was not copied');
+        assert.ok(s.observations.every(o => o.firstByte === null), 'no image byte');
+        await until(() => byAction(s.records.entries, 'transfer-aborted').length === 1, 'the outdated delivery ends at once, aborted');
+      } else {
+        // Orthanc's answer may be of either revision: it is dropped unread, and Orthanc is asked again under the record of
+        // the revision the archive holds now, durable before the first byte.
+        assert.equal(answer.status, 200);
+        assert.equal(s.orthanc.calls.filter(c => c[0] === 'answered').length, 2);
+        const opened = byAction(s.records.entries, 'provide-prepared');
+        assert.deepEqual(opened.map(e => e.event.targets[0].versionId.value), [R0, R1]);
+        assert.ok(s.records.entries.slice(0, s.observations[0].firstByte.entries).includes(opened[1]), 'the first byte followed the newer revision\'s record');
+        await until(() => s.records.entries.length === 4, 'both deliveries closed');
+        assert.deepEqual(s.records.entries.filter(e => e.event.action !== 'provide-prepared').map(e => [e.event.targets[0].versionId.value, e.event.action]),
+          [[R0, 'transfer-aborted'], [R1, 'transfer-ended']]);
       }
     } finally { await s.close(); }
   }
 });
+test('R244-GPT-FIX10-01 the direct reader serves an object only under a record of its patient: an index cache from before a correction is selected again, an object of another patient gets no byte', async () => {
+  const B_ID = 'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee', B_STUDY = 'bbbbbbbb-cccccccc-dddddddd-eeeeeeee-ffffffff';
+  const B_UUID = 'a447e43e-7a12-4de9-af18-9ceb86847e05';
+  for (const objectPatient of ['SYN-PID-2', 'SYN-PID-3']) {
+    let patient = 'SYN-PID-1';
+    const s = await stack({ orthanc: orthanc => { const identity = orthanc.studyIdentityResources.bind(orthanc), facts = orthanc.frameFacts.bind(orthanc);
+      return {
+        // A patient correction gives the study and its objects new archive resources, as Orthanc's do.
+        studyRevision: async uid => { orthanc.calls.push(['revision', uid]); return { id: patient === 'SYN-PID-1' ? STUDY_ID : B_STUDY, lastUpdate: '20261028T090000' }; },
+        studyIdentityResources: async uid => (await identity(uid)).map(row => ({ ...row, '00100020': { vr: 'LO', Value: [patient] } })),
+        lookupInstance: async sop => { orthanc.calls.push(['lookup', sop]); return [{ Type: 'Instance', ID: patient === 'SYN-PID-1' ? INSTANCE_ID : B_ID }]; },
+        frameFacts: async id => { const f = await facts(id); return id !== B_ID ? f : { ...f, tags: { ...f.tags, PatientID: objectPatient }, attachment: { ...f.attachment, Uuid: B_UUID } }; },
+      }; } });
+    try {
+      // The corrected object's stored file: the same layout, its own pixels.
+      const storage = path.dirname(path.dirname(path.dirname(s.object.filePath)));
+      const bFile = Buffer.from(s.object.file), bPixels = Buffer.alloc(s.object.frameBytes, 0x6b);
+      bPixels.copy(bFile, s.object.offset + 12);
+      fs.mkdirSync(path.join(storage, B_UUID.slice(0, 2), B_UUID.slice(2, 4)), { recursive: true });
+      fs.writeFileSync(path.join(storage, B_UUID.slice(0, 2), B_UUID.slice(2, 4), B_UUID), bFile);
+      assert.equal((await s.frame(1)).status, 200);   // the reader's index cache now names patient A's object for the SOP
+      patient = 'SYN-PID-2';
+      const answer = await s.frame(1);
+      await s.recorder.beforeApplicationShutdown();
+      const pairs = byAction(s.records.entries, 'provide-prepared').map(p => [p.event.targets[0].patientLinkSnapshot.value.patientId,
+        s.records.entries.filter(e => e.event.relatedEventId === p.event.eventId).map(e => e.event.action)]);
+      if (objectPatient === 'SYN-PID-2') {
+        assert.equal(answer.status, 200);
+        assert.ok(answer.body.includes(bPixels), 'the corrected object, selected again, under the corrected patient\'s record');
+        assert.deepEqual(pairs, [['SYN-PID-1', ['transfer-ended']], ['SYN-PID-2', ['transfer-ended']]]);
+      } else {
+        assert.equal(answer.status, 409);
+        assert.equal(JSON.parse(answer.body.toString()).code, 'ImageCurrentStudyChanged');
+        assert.ok(!answer.body.includes(bPixels));
+        assert.deepEqual(pairs, [['SYN-PID-1', ['transfer-ended']], ['SYN-PID-2', ['transfer-aborted']]]);
+      }
+    } finally { await s.close(); }
+  }
+});
+
 test('a delivery that provided no image closes as transfer-aborted, never succeeded: a source read that failed with 503, a relayed refusal', async () => {
   // Every read of the study fails at the source after the preparation was recorded: a 503 with no image byte.
   const failing = () => ({ relay: async () => { throw new ServiceUnavailableException('synthetic Orthanc temporarily unavailable'); } });

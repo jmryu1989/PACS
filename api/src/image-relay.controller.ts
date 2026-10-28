@@ -6,7 +6,8 @@
  * study delivery record existed for them. nginx now routes them here. The handler runs the same DICOMweb gate
  * (PacsService.authzDicom: institution, StudyAccess, split UID), takes the study delivery's lease for the study and
  * patient the gate observed - its provide-prepared event durable before any byte, naming that patient and the archive's
- * revision the recorder read for this lease (image-delivery-record.ts) - and relays Orthanc's answer unchanged (status, media type,
+ * revision the recorder read for this lease (image-delivery-record.ts) - and, once the archive still holds them after
+ * Orthanc chose its answer, relays that answer unchanged (status, media type,
  * body; the query carries rendering and windowing as before). Descriptions without the image (QIDO, DICOMweb metadata,
  * DICOM tags) are not deliveries of the image and keep the plain gate; the auth_request route refuses every image read
  * (pacs.controller.ts), so an image byte has no unrecorded way out.
@@ -57,7 +58,9 @@ export class ImageRelayController {
     const first = (name: string) => String(req.headers?.[name] ?? '').split(',')[0].trim();
     const origin = `${first('x-forwarded-proto')}://${first('x-forwarded-host')}`;
     try {
-      await this.orthanc.relay(uri, String(req.headers?.accept ?? '*/*'), res, abort.signal, origin);
+      // Orthanc selects what it answers when the request reaches it, after the lease read the study: the answer is
+      // copied only once the archive still holds the patient and revision the record names (C6/C7, I3).
+      await this.orthanc.relay(uri, String(req.headers?.accept ?? '*/*'), res, abort.signal, origin, lease ? () => lease.confirm() : undefined);
       relayed = true;
     } catch (error) {
       // After the headers a JSON error cannot follow; cutting the connection is the truthful end of a partial image.

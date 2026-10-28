@@ -35,7 +35,9 @@ function syntheticObject(dir, shape = {}) {
   const filePath = path.join(dir, uuid.slice(0, 2), uuid.slice(2, 4), uuid);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, file);
-  const tags = { StudyInstanceUID: STUDY_UID, SeriesInstanceUID: SERIES_UID, SOPInstanceUID: SOP_UID, Rows: String(rows), Columns: String(columns),
+  // The index's simplified tags carry the object's PatientID, as Orthanc's do: the frame reader serves an object only
+  // under a delivery of that patient.
+  const tags = { StudyInstanceUID: STUDY_UID, SeriesInstanceUID: SERIES_UID, SOPInstanceUID: SOP_UID, PatientID: 'SYN-PID-1', Rows: String(rows), Columns: String(columns),
     BitsAllocated: '16', SamplesPerPixel: '1', NumberOfFrames: String(frames), PhotometricInterpretation: 'MONOCHROME2', PixelRepresentation: '0', ...extraTags };
   return { uuid, id: INSTANCE_ID, file, frameBytes, offset, tags, filePath,
     attachment: { Uuid: uuid, UncompressedSize: file.length, CompressedSize: file.length, ContentType: 1 } };

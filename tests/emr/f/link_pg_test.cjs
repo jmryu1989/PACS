@@ -474,12 +474,13 @@ async function sharedDeliveryPatients(port,witness,ok,query,doctor,servers){
   servers.push(source);process.env.ORTHANC_URL=await listen(source);
   const orthanc=new OrthancService(),registry=createBackgroundWorkRegistry();
   const requests={read:()=>({issuer:doctor.identity.issuer,subject:doctor.identity.subject,binding:{method:'session',sessionRef:'authref:f-shared-delivery'}})};
-  // The current facts the recorder reads on the ledger transaction when a delivery opens: the member and the study's
-  // patient now (D's current context reads that from the archive; here the archive stand-in's current patient).
+  // The current facts the recorder reads for every lease on a check transaction (here a client of the same synthetic
+  // database): the member and the study's patient now (D's current context reads that from the archive; here the
+  // archive stand-in's current patient).
   const clinical={facts:async()=>({actor:{identity:doctor.identity,kind:'member',roles:['radiologist'],institutionId:institution,signingRegistrationId:null},
       requestId:randomUUID(),ip:known({address:'127.0.0.1',source:'trusted-proxy'})}),
     study:async()=>({studyId:studyUid,managingInstitutionId:institution,teleInstitutionId:null,patient:studyPatientLink(institution,archive.patientId)})};
-  const recorder=new StudyImageDeliveryRecorder(port,requests,clinical,registry.work,orthanc,60000);
+  const recorder=new StudyImageDeliveryRecorder(port,requests,clinical,registry.work,orthanc,60000,db);
   // The DICOMweb gate's per-request observation of the study: its institution and current patient.
   const relay=new ImageRelayController({authzDicom:async()=>({studyUid,managingInstitutionId:institution,sourcePatientId:archive.patientId})},orthanc,recorder);
   const server=createServer(async(req,res)=>{

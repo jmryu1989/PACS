@@ -106,8 +106,8 @@ async function harness() {
   }, $transaction(fn) { return fn(db); } };
   const registry = createBackgroundWorkRegistry();
   const orthanc = new OrthancService();
-  // app.module gives every image route the one recorder.
-  const recorder = new StudyImageDeliveryRecorder(port, requests, clinical, registry.work, orthanc, IDLE_MS);
+  // app.module gives every image route the one recorder; its leases read their current facts on the same check pool.
+  const recorder = new StudyImageDeliveryRecorder(port, requests, clinical, registry.work, orthanc, IDLE_MS, db);
   const service = new OnlineImageService(context, db, orthanc, requests, db, recorder);
   // The gate admits the relayed read and names what it observed in the archive: the study and its current patient.
   const relay = new ImageRelayController({ authzDicom: async () => ({ studyUid: uid, managingInstitutionId: 'synthetic-hospital', sourcePatientId: 'PATIENT-A' }) },

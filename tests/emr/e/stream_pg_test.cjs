@@ -422,13 +422,14 @@ test('E image service: the shared study delivery record per member session and s
     return { actor: { identity: doctor, kind: 'member', roles: ['radiologist'], institutionId: 'synthetic-hospital', signingRegistrationId: null },
       requestId: request.requestId, ip: known({ address: '127.0.0.1', source: 'trusted-proxy' }), accountGeneration: 1, provision: provision(at) };
   };
-  // The delivery's record reads D's current study once, when it opens; each response re-checks identity, scope, access
-  // and provision without the archive read.
+  // Each response's lease reads its current facts once - identity, D's current study - and decides E's provision from
+  // them on the same check transaction (`rechecks` counts those decisions); a response without a lease re-checks.
   const clinical = { async facts(_tx, request) { return facts(request, new Date().toISOString()); },
     async study() { return { studyId: studyUid, managingInstitutionId: 'synthetic-hospital', teleInstitutionId: null, patient }; } };
   const context = {
     async manifest() { manifestBuilds++; return manifest; },
     async recheck(_tx, request, _manifest, at) { rechecks++; return facts(request, at); },
+    async provision(_tx, request, { at }) { rechecks++; const current = facts(request, at); return { accountGeneration: current.accountGeneration, provision: current.provision }; },
   };
   // The application connection E writes its rows on: a case makes it refuse the next transport-observation insert, as
   // a pool failure would, while the ledger's own transactions are untouched. (The kind is the fourth parameter of the
@@ -466,7 +467,7 @@ test('E image service: the shared study delivery record per member session and s
   const { ImageCheckDatabase } = load('emr-image/check-db');
   const checks = new ImageCheckDatabase();
   const orthanc = new OrthancService();
-  const recorder = new StudyImageDeliveryRecorder(port, requests, clinical, registry.work, orthanc, IDLE_MS);
+  const recorder = new StudyImageDeliveryRecorder(port, requests, clinical, registry.work, orthanc, IDLE_MS, checks);
   const service = new OnlineImageService(context, db, orthanc, requests, checks, recorder);
   const server = createServer((req, res) => {
     req.requestId = randomUUID();

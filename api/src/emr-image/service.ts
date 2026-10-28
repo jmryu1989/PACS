@@ -11,6 +11,7 @@ import { PrismaService } from '../prisma.service';
 import { ImageCheckDatabase } from './check-db';
 import { parseImageRequest, prepareDelivery } from './contract';
 import { ImageContextSource } from './context';
+import type { ImageProvision } from './context';
 import type { ImageManifest } from './manifest';
 import { ManifestReuse } from './manifest-reuse';
 import { PgImageEvidenceStore } from './store';
@@ -44,7 +45,7 @@ export class OnlineImageService {
     const abort = new AbortController();
     const stop = () => { if (!response.writableFinished) abort.abort(); };
     request.once('aborted', stop); response.once('close', stop);
-    let kept: ImageManifest | undefined, lease: DeliveryLease | null = null;
+    let kept: ImageManifest | undefined, lease: DeliveryLease<ImageProvision> | null = null;
     try {
       const manifest = kept = await this.manifests.manifest(image, () => this.context.manifest(request, image, abort.signal), abort.signal);
       // The request's member identity is resolved once, under its own append admission. Left to the first current()
@@ -60,31 +61,39 @@ export class OnlineImageService {
       // before any source read; a HEAD or a description takes no lease and is answered under no record. The delivery is
       // bound to this manifest's patient, the archive's current revision of the study and this manifest's digest: a
       // delivery of another patient, revision or manifest is never this response's record (R244-GPT-FIX7-01/FIX9-02).
-      lease = await this.deliveries.lease(request, ONLINE_IMAGE_SURFACE, target.split('?')[0],
-        () => ({ studyUid: manifest.studyUid, patient: manifest.patient, manifest: manifest.sha256 }));
+      // The lease's current facts - read once for it, after the revision, on the image check pool - carry E's provision
+      // decided on their own transaction (R244-GPT-FIX10-02).
+      const held = lease = await this.deliveries.lease(request, ONLINE_IMAGE_SURFACE, target.split('?')[0],
+        () => ({ studyUid: manifest.studyUid, patient: manifest.patient, manifest: manifest.sha256,
+          provision: (tx, current) => this.context.provision(tx, request, current) }));
       let served = false;
       const unstored: UnstoredObservation[] = [];
       try {
         const result = await sendOnlineImage({ evidence: this.evidence, source: this.orthanc.imageSource(), stagingDirectory }, {
-          manifest, delivery: lease && { ...lease.record, manifestSha256: lease.binding.manifest }, requestId: facts.requestId,
+          manifest, delivery: held && { ...held.record, manifestSha256: held.binding.manifest }, requestId: facts.requestId,
           // A row the application connection refused is the delivery's to write (release below).
           unstored: row => unstored.push(row),
-          // This response's current access check before any source read: identity, institution scope, StudyAccess
-          // and provision (context.ts recheck), on one bounded transaction of E's own check pool (check-db.ts: the
-          // same database and role as the ledger's and the application's). A response appends nothing, and the
-          // ledger's four append lanes bound append work: with the check inside a lane, four lanes over the check's
-          // hold time capped a series at about 27 frames/s however the identity was resolved (fix-3 sample a, run
-          // e-route-fix3-fable-20261027a). The delivery's opening and closing (the records) keep their lanes. The
-          // archive's current study and object identity are compared by the source and the stream.
-          prepare: async () => this.checks.$transaction(async tx => {
-            await boundEmrStatements(tx);
-            const at = new Date().toISOString();
-            const current = await this.context.recheck(tx, request, manifest, at);
-            return prepareDelivery(manifest, image, { eventId: randomUUID(), ...(lease ? { deliveryEventId: lease.record.event.eventId } : {}),
-              at, cause: 'background-fetch', opening: null,
-              authorization: { studyUid: image.studyUid, institution: current.actor.institutionId, accountGeneration: current.accountGeneration },
+          // This response's current access decision before any source read: identity, institution scope, StudyAccess
+          // and provision - its lease's (above), or for a response without one (a HEAD) context.ts recheck - each on
+          // one bounded transaction of the image check pool (check-db.ts: the same database and role as the ledger's
+          // and the application's). A response appends nothing, and the ledger's four append lanes bound append
+          // work: with the check inside a lane, four lanes over the check's hold time capped a series at about 27
+          // frames/s however the identity was resolved (fix-3 sample a, run e-route-fix3-fable-20261027a). The
+          // delivery's opening and closing (the records) keep their lanes. The archive's current study and object
+          // identity are compared by the source and the stream.
+          prepare: async () => {
+            const current = held ? { at: held.current.at, institution: held.current.facts.actor.institutionId, ...held.current.provision }
+              : await this.checks.$transaction(async tx => {
+                await boundEmrStatements(tx);
+                const at = new Date().toISOString();
+                const checked = await this.context.recheck(tx, request, manifest, at);
+                return { at, institution: checked.actor.institutionId, accountGeneration: checked.accountGeneration, provision: checked.provision };
+              }, { maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_TX_TIMEOUT_MS });
+            return prepareDelivery(manifest, image, { eventId: randomUUID(), ...(held ? { deliveryEventId: held.record.event.eventId } : {}),
+              at: current.at, cause: 'background-fetch', opening: null,
+              authorization: { studyUid: image.studyUid, institution: current.institution, accountGeneration: current.accountGeneration },
               provision: current.provision });
-          }, { maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_TX_TIMEOUT_MS }),
+          },
           response, signal: abort.signal, range: request.headers.range });
         // Served: the image answered whole with a success status (MG-10); a 416 or a cut-short response is not.
         served = result.terminal === 'transfer-ended' && response.statusCode >= 200 && response.statusCode < 300;

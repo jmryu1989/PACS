@@ -162,8 +162,9 @@ async function harness({ idleMs } = {}) {
   const requests = { read: () => ({ issuer: actor.issuer, subject: actor.subject, binding }),
     facts: async () => ({ actor, institution: 'synthetic-hospital', rightsVersion: 1, roles: ['radiologist'], binding, ingress: facts.ip, requestId: randomUUID() }) };
   const orthanc = new OrthancService();
-  const recorder = new StudyImageDeliveryRecorder(records, requests, clinical, registry.work, orthanc, idleMs);
-  // The check pool stand-in is the application stand-in: one in-memory port answers both.
+  // The check pool stand-in is the application stand-in: one in-memory port answers both, for the recorder's leases
+  // (their current facts) and E's responses without one.
+  const recorder = new StudyImageDeliveryRecorder(records, requests, clinical, registry.work, orthanc, idleMs, db);
   const service = new OnlineImageService(context, db, orthanc, requests, db, recorder);
   // The relay on the same recorder; its gate admits the read and names what it observed in the archive for it, as
   // PacsDicomGateway.authzDicom does with its per-request source read: the study and its current patient.

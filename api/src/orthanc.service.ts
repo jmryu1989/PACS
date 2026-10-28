@@ -604,8 +604,13 @@ export class OrthancService {
    * request open until Orthanc happens to produce the next bytes. The caller has set no headers and writes nothing else.
    * `origin` is the public origin the browser used: Orthanc's DICOMweb answers name their parts (Content-Location) from
    * the forwarded host, as they did when nginx proxied to Orthanc, instead of from the internal `orthanc:8042`.
+   * `selected` runs once Orthanc has answered - it has chosen what its body is of - and before anything of that answer
+   * is copied: the image routes confirm there that the archive still holds what their record names
+   * (DeliveryLease.confirm). A refusal cancels Orthanc's answer unread; `false` (the record moved to the archive's newer
+   * revision) cancels it unread and asks Orthanc again.
    */
-  async relay(path: string, accept: string, target: RelayTarget, signal?: AbortSignal, origin?: string): Promise<void> {
+  async relay(path: string, accept: string, target: RelayTarget, signal?: AbortSignal, origin?: string,
+    selected?: () => Promise<boolean>): Promise<void> {
     const forwarded = /^(https?):\/\/([A-Za-z0-9.:\-\[\]]{1,255})$/.exec(origin ?? '');
     const lifetime = new AbortController(), stop = () => lifetime.abort();
     if (signal?.aborted || target.destroyed) lifetime.abort();
@@ -615,16 +620,21 @@ export class OrthancService {
       for (const event of ['drain', 'close', 'error'] as const) target.once(event, done);
     });
     try {
-      await this.withSourceResponse(path, { method: 'GET', redirect: 'error',
+      for (let again = true; again;) again = await this.withSourceResponse(path, { method: 'GET', redirect: 'error',
         headers: { Authorization: this.auth, Accept: accept, 'Accept-Encoding': 'identity',
           ...(forwarded ? { 'X-Forwarded-Proto': forwarded[1], 'X-Forwarded-Host': forwarded[2] } : {}) } }, lifetime.signal,
       async (response, read, owned) => {
+        if (selected) {
+          const current = await selected();
+          owned.throwIfAborted();
+          if (!current) return true;
+        }
         target.status(response.status);
         for (const name of ['content-type', 'content-length']) {
           const value = response.headers.get(name);
           if (value) target.setHeader(name, value);
         }
-        if (!response.body) { target.end(); return; }
+        if (!response.body) { target.end(); return false; }
         const reader = read();
         for (let part = await reader.read(); !part.done; part = await reader.read()) {
           owned.throwIfAborted();
@@ -633,6 +643,7 @@ export class OrthancService {
         }
         owned.throwIfAborted();
         target.end();
+        return false;
       }, (e: any) => new ServiceUnavailableException(`Orthanc에 연결할 수 없습니다: ${e?.message}`));
     } finally {
       signal?.removeEventListener('abort', stop);

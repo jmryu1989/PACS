@@ -83,13 +83,15 @@ function ledger(parseAccessEvent, mintDurableReceipt, createRecordPort) {
 /** A synthetic Orthanc: the lookups the gate and the record read, and the image representations the consumers read. */
 async function syntheticOrthanc() {
   // `patient` and `revision` are the archive's current study: a patient correction changes both, and the image bytes
-  // then carry the corrected patient's marker.
-  const calls = [], behaviour = { image: 'ok', patient: 'SYN-PID-1', revision: '20261028T090000' };
+  // then carry the corrected patient's marker. `beforeRead(path)` runs as a request reaches the archive, before it
+  // answers: a change made there lands as the archive handles that very request.
+  const calls = [], behaviour = { image: 'ok', patient: 'SYN-PID-1', revision: '20261028T090000', beforeRead: null };
   const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', c => { body += c; });
-    req.on('end', () => {
+    req.on('end', async () => {
       const url = new URL(req.url, 'http://127.0.0.1'), p = url.pathname;
+      if (behaviour.beforeRead) await behaviour.beforeRead(p);
       calls.push({ method: req.method, path: p, query: url.search, accept: req.headers.accept,
         forwarded: [req.headers['x-forwarded-proto'], req.headers['x-forwarded-host']] });
       const json = value => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(value)); };
@@ -155,7 +157,10 @@ async function stack({ idleMs = IDLE_MS } = {}) {
   const contexts = createRequestContext(createRequestIngress({ proxyPeers: [] }), records.port);
   const clinical = createCurrentClinicalContext(prisma, contexts.source, orthanc, studyAccess);
   const background = createBackgroundWorkRegistry();
-  const recorder = new StudyImageDeliveryRecorder(records.port, contexts.source, clinical, background.work, orthanc, idleMs);
+  // The image check pool every lease reads its current facts on (emr-image/check-db.ts): here one synthetic
+  // transaction over the same in-memory rows.
+  const checks = { $transaction: async work => work({ ...records.tx, $executeRaw: async () => 0 }) };
+  const recorder = new StudyImageDeliveryRecorder(records.port, contexts.source, clinical, background.work, orthanc, idleMs, checks);
   const controller = new ImageRelayController({ authzDicom: (...args) => gate.authzDicom(...args) }, orthanc, recorder);
   // The viewer's frame reader on the same recorder, on an installation without the storage mount: it relays every frame.
   const { DicomFrameController } = require('/app/dist/dicom-frame.controller.js');
@@ -606,6 +611,64 @@ test('R244-GPT-FIX9-01 reads waiting for an opening whose study got a newer revi
       assert.equal(observation.firstByte.filter(action => action === 'provide-prepared').length, 2,
         `${observation.path}: its first byte followed the current revision's record`);
   } finally { release(); await s.close(); }
+});
+
+test('R244-GPT-FIX10-01 the source Orthanc selects after the lease is bound to it: a corrected patient gets no byte, a newer revision is asked again under its own record', async () => {
+  for (const route of ['relay', 'frame reader']) for (const change of ['patient', 'revision']) {
+    const s = await stack();
+    try {
+      const url = route === 'relay' ? s.routes.study : '/api' + s.routes.frame;
+      const source = route === 'relay' ? s.routes.study : s.routes.frame;
+      // The archive changes as it handles the image request itself - after the lease read the study, once.
+      s.source.behaviour.beforeRead = async p => {
+        if (p !== source) return;
+        s.source.behaviour.beforeRead = null;
+        if (change === 'patient') Object.assign(s.source.behaviour, { patient: 'SYN-PID-2', revision: '20261028T090100' });
+        else s.source.behaviour.revision = '20261028T090100';
+      };
+      const answer = await s.get(url);
+      await s.recorder.beforeApplicationShutdown();
+      const label = `${route} ${change}`;
+      if (change === 'patient') {
+        assert.equal(answer.status, 409, label);
+        assert.equal(JSON.parse(answer.body.toString()).code, 'ImageCurrentStudyChanged', label);
+        assert.deepEqual(s.observations.map(o => o.firstByte), [null], `${label}: no byte of the corrected patient's image`);
+        assert.deepEqual(openings(s.records).map(o => [o.patient, o.version, o.terminals]), [['SYN-PID-1', REVISION_1, ['transfer-aborted']]], label);
+      } else {
+        // Orthanc's first answer may be of either revision: it is dropped unread, and the archive is asked again under the
+        // newer revision's record, durable before the first byte.
+        assert.equal(answer.status, 200, label);
+        assert.equal(s.source.imageCalls().length, 2, label);
+        assert.deepEqual(openings(s.records).map(o => [o.patient, o.version, o.terminals]),
+          [['SYN-PID-1', REVISION_1, ['transfer-aborted']], ['SYN-PID-1', REVISION_2, ['transfer-ended']]], label);
+        assert.equal(s.observations[0].firstByte.filter(action => action === 'provide-prepared').length, 2, label);
+      }
+    } finally { await s.close(); }
+  }
+});
+
+test('R244-GPT-FIX10-02 every lease decides on current facts read after the revision: a study moved to another institution meanwhile is refused to a read that would join the open delivery', async () => {
+  for (const route of ['relay', 'frame reader']) for (const open of [false, true]) {
+    const s = await stack({ idleMs: 60_000 });
+    try {
+      const url = route === 'relay' ? s.routes.study : '/api' + s.routes.frame;
+      if (open) assert.equal((await s.get(url)).status, 200);
+      const before = s.source.imageCalls().length;
+      // The study is moved to another institution while the lease reads the archive's revision (an ordinary
+      // reassignment): the gate admitted the read before it.
+      s.source.behaviour.beforeRead = async p => {
+        if (!p.startsWith('/studies/')) return;
+        s.source.behaviour.beforeRead = null;
+        for (const [uid, state] of s.states) s.states.set(uid, { ...state, institutionId: 'site-b' });
+      };
+      const answer = await s.get(url);
+      await s.recorder.beforeApplicationShutdown();
+      const label = `${route} open=${open}`;
+      assert.equal(answer.status, 404, label);
+      assert.equal(s.source.imageCalls().length, before, `${label}: the archive was not asked for the image`);
+      assert.deepEqual(openings(s.records).map(o => o.terminals), open ? [['transfer-ended']] : [], label);
+    } finally { await s.close(); }
+  }
 });
 
 test('the delivery key is the member session: another subject or another session of the study opens its own delivery', async () => {

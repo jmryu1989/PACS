@@ -207,8 +207,8 @@ test('the image service reads the catalog for each study or series request, betw
 
 test('simultaneous frames of a kept study do not wait on their own B2 append lanes', async () => {
   // The real B2 admission: a few append lanes shared FIFO by every transaction on one client. Resolving a request's
-  // member identity takes a lane of its own; the study delivery's opening (the shared recorder's record transaction
-  // and append) takes lanes too, once for the burst, while the other frames wait for its receipt.
+  // member identity takes a lane of its own; the study delivery's opening (the shared recorder's append) takes a lane
+  // too, once for the burst, while the other frames wait for its receipt.
   const { admitAppend } = load('emr-runtime/admission');
   const { StudyImageDeliveryRecorder } = load('image-delivery-record');
   const { mintDurableReceipt } = load('emr-runtime/contract');
@@ -220,9 +220,14 @@ test('simultaneous frames of a kept study do not wait on their own B2 append lan
     if (!materialized.has(request)) materialized.set(request, admitAppend(client, poolSize, async () => { await settle(); return { roles: [], binding: {}, actor: {} }; }));
     return materialized.get(request);
   }, read: () => ({ issuer: 'synthetic', subject: 'doctor', binding: { method: 'session', sessionRef: 'synthetic-session' } }) };
+  // Each frame's lease decides on its current facts (identity included) and E's provision on the image check pool,
+  // never inside a lane; the frames stop at their first source read, after the burst's one opening.
+  const { checkProvisionBasis } = load('emr-image/contract');
   const context = {
     async manifest() { return built; },
-    async recheck(_tx, request) { await requests.facts(request); throw new ForbiddenException('synthetic stop after the access check'); },
+    async provision(_tx, request, { at, study }) { await requests.facts(request); return { accountGeneration: 1, provision: checkProvisionBasis({
+      relation: 'same-institution', at, managingInstitution: study.managingInstitutionId, studyUid: study.studyId, recipient: null,
+      purpose: null, basis: null, agreement: null, auditBefore: null }) }; },
   };
   const actor = { id: randomUUID(), issuer: 'synthetic', subject: 'doctor' };
   const clinical = {
@@ -237,11 +242,12 @@ test('simultaneous frames of a kept study do not wait on their own B2 append lan
     }), end() {} }) };
   const registry = load('emr-runtime/background-work').createBackgroundWorkRegistry();
   // The archive as the recorder reads it for every lease and, after the opening receipt, again: one revision, the manifest's patient.
-  const orthanc = { ...noSourceRead, studyRevision: async () => ({ id: 'synthetic', lastUpdate: '20261028T120000' }),
-    studyPatientIdentity: async () => built.patient.patientId };
-  const recorder = new StudyImageDeliveryRecorder(records, requests, clinical, registry.work, orthanc);
+  const orthanc = { imageSource: () => ({ async copy() { throw new ForbiddenException('synthetic stop at the first source read'); } }),
+    studyRevision: async () => ({ id: 'synthetic', lastUpdate: '20261028T120000' }), studyPatientIdentity: async () => built.patient.patientId };
+  const recorder = new StudyImageDeliveryRecorder(records, requests, clinical, registry.work, orthanc, undefined, checkPool());
   process.env.KIN_EMR_STATE_DIR = require('node:os').tmpdir();
-  const service = new OnlineImageService(context, {}, orthanc, requests, checkPool(), recorder);
+  // E's own rows (preparation, the failed copy) on an application connection that takes them.
+  const service = new OnlineImageService(context, { $executeRaw: async () => 1 }, orthanc, requests, checkPool(), recorder);
   const send = n => service.send(Object.assign(new EventEmitter(), { method: 'GET', headers: {} }),
     Object.assign(new EventEmitter(), { writableFinished: false }),
     `/dicom-web/studies/${STUDY}/series/${SERIES}/instances/${sop(n)}/frames/1`);
@@ -250,7 +256,7 @@ test('simultaneous frames of a kept study do not wait on their own B2 append lan
   const outcome = await Promise.race([Promise.allSettled(sends).then(results => results),
     new Promise(resolve => setTimeout(() => resolve('waiting on its own lanes'), 3000))]);
   assert.notEqual(outcome, 'waiting on its own lanes');
-  assert.ok(outcome.every(result => result.status === 'rejected' && result.reason instanceof ForbiddenException));
+  assert.ok(outcome.every(result => result.status === 'rejected'));
   assert.deepEqual(appended, ['provide-prepared'], 'the burst opened one study delivery');
   await recorder.beforeApplicationShutdown();
   assert.deepEqual(appended, ['provide-prepared', 'transfer-aborted'], 'nothing of it was served');
