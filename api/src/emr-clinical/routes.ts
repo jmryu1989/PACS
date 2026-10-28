@@ -32,17 +32,22 @@ export const ASSIGNMENT_CLOSE_SURFACE = 'server:reader-assignment-close';
  * signed version. A lost response returns the stored result, never a re-project. */
 export class ClinicalRoutes {
   constructor(readonly parts: ClinicalRuntimeParts, private readonly sources: ClinicalRouteSources) {}
-  /** The response and its immutable D versions share one snapshot. B2 admits each
+  /** Snapshot readers share their response and immutable D versions. Locking
+   * readers retain ReadCommitted: their record and service locks keep the served
+   * versions coherent without rejecting a concurrent StudyState update. B2 admits each
    * read event on another connection, so its newly admitted operation must be
    * recorded after this snapshot, in B2's ordinary transaction. No body is
    * returned until those exact served references have been durably recorded. */
   private async snapshotRead<T>(work: EmrRecordWork,
-    read: (tx: Prisma.TransactionClient, record: (event: AccessEventV1, reference: BusinessReference) => void) => Promise<T>): Promise<T> {
+    read: (tx: Prisma.TransactionClient, record: (event: AccessEventV1, reference: BusinessReference) => void) => Promise<T>,
+    isolation: 'RepeatableRead' | 'ReadCommitted' = 'RepeatableRead'): Promise<T> {
     const records: { event: AccessEventV1; reference: BusinessReference }[] = [];
     const value = await work.transactionWithRecords(async tx => {
-      await tx.$executeRaw`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`;
+      if (isolation === 'RepeatableRead') await tx.$executeRaw`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`;
+      else await tx.$executeRaw`SET TRANSACTION ISOLATION LEVEL READ COMMITTED`;
       return read(tx, (event, reference) => { records.push({ event, reference }); });
     });
+    if (!records.length) return value;
     return work.transactionWithRecords(async (_tx, record) => {
       for (const entry of records) await record(entry.event, async () => entry.reference);
       return value;
@@ -182,13 +187,16 @@ export class ClinicalRoutes {
           if (error instanceof NotFoundException) await read(tx);
           throw error;
         }
-        // Access waits must not hold up another doctor's write to this record.
-        // Keep the record lock before service row locks (Tech Note's StudyState),
-        // as writers do. The service, report anchor and D history still share
-        // the snapshot established before the access wait.
-        if (first) await this.parts.store.lockUnit(tx, recordType, recordId);
+        // Tech Note's ReadCommitted read needs the record lock before its
+        // StudyState lock, as writers do. Snapshot readers need no record lock:
+        // their source preparation must not hold up another doctor's write.
+        if (first && recordType === 'tech-note') await this.parts.store.lockUnit(tx, recordType, recordId);
         const response = await read(tx);
-        const { unit, versions: stored } = first ? await this.parts.store.history(tx, recordType, recordId) : { unit: null, versions: [] };
+        // A first Tech Note may commit after the initial unit lookup. Its
+        // service's StudyState lock keeps the returned note and history together.
+        const { unit, versions: stored } = first || recordType === 'tech-note'
+          ? await this.parts.store.history(tx, recordType, recordId) : { unit: null, versions: [] };
+        if (unit && !study) study = await this.parts.context.scope(tx, request, unit.studyId);
         if (!unit && !empty?.(response)) refuse('ClinicalHistoryUnavailable');
         const versions = served && unit ? servedVersions(stored, served(response)) : stored;
         verifySigned(this.parts.signer, versions);
@@ -212,7 +220,7 @@ export class ClinicalRoutes {
             // signing facts, not additional bodies outside this read's result.
             signature: v.signature ? { signedAt: v.signature.signedAt, payloadSha256: v.signature.payloadSha256,
               kid: v.signature.registration.kid, signer: v.signature.registration.doctor.identity } : null })) } };
-      }).catch(routeError);
+      }, recordType === 'tech-note' ? 'ReadCommitted' : 'RepeatableRead').catch(routeError);
     } finally { work.end(); }
   }
 }

@@ -990,7 +990,8 @@ class ClinicianQuestionLive(unittest.TestCase):
 
     def test_q15_thread_read_is_one_snapshot(self) -> None:
         """Astra S5-U4a-F01. The thread read (#2) and the study's thread list (#3) of the clinician wait on the clinician's
-        study-access lock, the first query of their transaction. RepeatableRead fixed the snapshot before that wait, so
+        study-access lock after the clinical boundary reads request facts (and the thread's record unit). RepeatableRead
+        fixed the snapshot before that wait and the projection read; these snapshot reads take no record lock, so
         an answer, a close and a report reset committed through the product routes meanwhile reach neither answer: both
         are the moment before, whole. A read taking a snapshot per statement answers the moment after instead."""
         f = self.study()
