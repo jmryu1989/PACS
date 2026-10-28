@@ -23,7 +23,7 @@ export function jobCommand(raw: Buffer, create: boolean): any {
   keys(b, create ? ['id', 'title', 'description', 'snapshot'] : ['expectedRevision', 'title', 'description', 'hidden', 'reason']);
   text(b.title, 120); if (!b.title.trim()) invalid(); text(b.description, 2000);
   if (!create) {
-    number(b.expectedRevision, 1, 1000); if (!Number.isInteger(b.expectedRevision) || typeof b.hidden !== 'boolean') invalid();
+    number(b.expectedRevision, 1, Number.MAX_SAFE_INTEGER); if (!Number.isInteger(b.expectedRevision) || typeof b.hidden !== 'boolean') invalid();
     text(b.reason, 1000); return b;
   }
   viewerUuid(b.id);

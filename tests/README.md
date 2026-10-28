@@ -1,5 +1,12 @@
 # 살아 있는 불변조건 테스트
 
+일상 업무 제한 완화(caution-app): `caution_app_dom_test.py`는 이름 초안·확인 없는 복사·계정 링크·SR 부분 표시를,
+`clinical_context_service_test.cjs`/`clinical_context_dom_test.py`는 이전 판독·이력 이어읽기를 검사한다.
+`keycloak_member_paging_test.cjs`는 1,000명 이후 사용자 조회를, `viewer_volume_job_test.cjs`는 201번째 작업과 66개 주석의 보존을 검사한다.
+`caution_app_database_test.cjs`와 `tech_note_attempt_service_test.cjs`의 합성 PostgreSQL 실행은 종전 누적 한도 이후 이력·긴 글 저장을 확인한다.
+질문·협진·Tech Note의 글자 수 제한과 질문 100항목 제한은 제거한다. Reset/Addendum 사유·다른 작성자의 질문 닫기 사유·덮어쓰기 확인은 유지한다.
+실제 Keycloak 비밀번호 변경과 동일 IP 요청은 `scripts/run-tests.py --module tests/e2e/test_caution_app.py --class CautionAppE2E --mode live --unit caution-app-real-password --timeout 600`으로 격리 합성 스택에서 확인한다.
+
 REQ-VIEWER-REFERENCE-PLANE → RISK-VIEWER-REFERENCE-PLANE → TEST-VIEWER-REFERENCE-PLANE (2026-10-26 사용자 F1/F3/F4/F5 수정 지시): 모든 modality의 Reference Lines는 두 pane의 비어 있지 않은 StudyInstanceUID·FrameOfReferenceUID가 일치할 때만 허용한다. Stack은 현재 표시 프레임의 저장된 IOP/IPP를 요구한다. 재구성 MPR은 현재 이미지 ID가 없어도 표시 volume의 원본 프레임들이 저장된 IOP/IPP와 동일 study/FoR를 가지며 volume viewport의 FoR와 일치하면 허용한다. 실제 교차 평면과 선은 native volume camera/renderer가 계산한다. MG는 추가로 양쪽 MG·동일 R/L 조건(REQ-MG-03 → RISK-MG-FALSE-ANATOMY → TEST-MG-REFERENCE-LINES)을 유지한다. 일반 위험은 무관한 좌표계/기본 대체 평면의 잘못된 위치 안내 또는 유효한 CT/MR MPR 위치 안내의 소실이다. `node --test tests/viewer_reference_lines_test.cjs`는 stack·volume/stack·MPR 양방향, 저장 plane 누락, study/FoR 불일치, 교체·스크롤·재진입을 검사한다. 실제 제공 OHIF에서 MG·CT/MR stack·CT axial/sagittal/coronal MPR의 Reference Lines와 제거/복귀를 별도로 확인한다. 순수 시험의 native 호출만으로 영상 정확성이나 실제 화면 검증을 대체하지 않는다.
 
 REQ-S7-U5-DB-RIGHTS (D621/D623) → RISK-STALE-CREDENTIAL / RISK-LOST-REVOCATION → `auth_session_service_test.cjs`: DB 차단·권한 버전·새 인증·CAS·commit 경계, R10-05/06/09와 sid 종료 U1–5/9. Migration은 46개, 복원 표는 51개다. `20261007170000_member_db_rights` 적용 후 트래픽과 회원 변경을 멈춘 상태에서 `node prisma/import-member-rights.cjs`를 실행한다. 모든 realm 회원과 기존 세션을 이관하며 기존 provider-disabled/미확인 회원 변경은 차단으로 보존한다. 이관 실패·누락은 JWT 권한으로 대체하지 않는다. 외부 realm 사전 대조와 실제 이관은 배포 관문이다. 기존 disabled 회원의 일회성 legacy enable과 운영자 `--retry-roster` 복구는 core다. B01–B08 명부 수렴·회원 provider 조정 장치는 U5b에 남는다. 정상 회원 진입에는 새 클릭·prompt·관리 API 조회를 추가하지 않는다. 아래 과거 S7-U5 전체 코스 설명 중 회원 provider 격리·15초 Activate·U5E-13/14/17~20/22~27 기대는 `fable/s7-u5b-20261007`에 보류되며 core 완료 근거가 아니다. core의 U5E-15는 차단 중 거절·명령 후 새 인증·옛 권한 거절을 검사한다. 실제 realm 이관, core 권한 fixture를 반영한 live/CE1–4, 새 SHA PR CI·G3·독립 검수는 최종 전달 관문이다. 배포 유의(D631): round 3 `e3d16b5` 이전 빌드로 이미 realm 가져오기를 끝낸 DB가 있으면 트래픽 전에 `MemberRights.newAuthAfter`를 `MemberRightsImport.completedAt`으로 보정한다(새 코드는 marker가 있으면 가져오기를 건너뛰므로 자동 보정되지 않는다; 2026-10-07 확인 기준 그런 DB는 없다).
@@ -227,6 +234,8 @@ REQ-S3-R14-INPUT-COMPAT → RISK-S3-R14-LOST-DICTATED-TEXT/DUPLICATED-DICTATED-T
 
 REQ-S3-ASR-U5-AUTHZ/PARITY/INERT/ORDER/INPUT/SESSION/PROOF → RISK-U5-WEAKER-COPY/TENANT/PRELIM-LEAK/OVER-REFUSAL/SIDE-EFFECT/HOLD-TOUCH/ORDER-LEAK/INPUT-DRIFT/CSRF/GATEWAY/FALSE-PROOF → TEST-S3-ASR-U5-LIVE·TEST-S3-ASR-U5-ORACLE: 받아쓰기 경로 `POST /api/studies/:uid/dictation`이 **판독문 초안 저장과 같은 사람을 같은 답으로 거절하고 같은 사람을 들여보내는지** 실스택에서 본다. 기존 REPORT 배터리는 이 경로에 `<500`만 본다. `invariants_live.py`의 여덟 시험 `test_dictation_u5_01`~`08`(T7만 `BffInvariantTests`)이 fixture 여덟 개에서 26건(거절 12·입력 4·대조 10)을 부른다: 역할, 기관(원격판독 수신 기관은 입장), 남의 살아 있는 점유 `REPORT_HELD`(점유자·만료 점유는 입장), 촬영 중 비응급(응급은 입장), 예비 판독 제3자(작성자·지정 상급자는 입장), StudyState 없는 uid, 인증 없음, 게이트웨이(정확한 경로 거절 본문은 `validGateway`를 지난 뒤에만 나온다), 쿠키의 위조 세션(`인증 세션이 없습니다`), 그리고 권한 거절이 파서가 미뤄 둔 400/413보다 **먼저** 답하는지. 거절은 정확한 상태·본문, 그 uid의 감사 행 **0**(action 무관), `Report`·`ReportDraft`·`ReportVersion` 행과 `StudyState` 행이 **그 호출 바로 앞뒤로** 같음, `Cache-Control: no-store`, 응답에 fixture 비밀 없음으로 판정하고 같은 시험의 대조가 통과해야 센다. 엔진이 없는 CI에서 503 `DICTATION_NOT_CONFIGURED`는 **입장 증인일 뿐 거절의 증거가 아니다** — 대조와 입력 거절은 `dictation.request` 한 행(행위자 = 호출자, 키는 정확히 `bytes·seconds·ms·engine·outcome`, 전사문 없음)을 남긴다. 점유 만료(`backdate_hold`)·Verify·원격판독 지정은 사례 사이의 선언된 준비 단계이고 다음 사례의 직전 스냅숏에 들어간다. DB 관측은 스냅숏마다 합성 SELECT 한 번, 사례당 두 번이다. 판정표·기대 본문·문제 태그는 `.env`를 읽지 않는 stdlib 모듈 `tests/dictation_refusal_oracle.py`에 있다. `python -B tests/dictation_refusal_oracle_test.py`(hanging-protocols 잡의 기록 단계)는 26 벡터와 **정확한 태그 집합**을 요구하는 돌연변이로 판정기를 검사하고, 기대 문구를 `api/src`의 해당 줄에, 실스택 시험의 배선(사례 순서·키·A1/A3/A4/A5)을 AST로 고정한다. 실스택 로그에는 시험마다 `U5-PRECONDITION`, 호출마다 `U5-CASE`, 끝에 `U5-SUMMARY` 한 줄이 남으며 본문·토큰·비밀·오디오는 찍지 않는다. 선택 고정값은 `invariants_live` 71 → **79**, worklist 15는 그대로다. 이름 붙은 잔여: 추론 뒤 재관문 거절의 감사 outcome이 `DICTATION_ENGINE_FAILED`로 남음(DQ4, 별도 `api/src` 단위), 제한된 검사 접근 정책 404는 받아쓰기·`putReport` 모두 실스택 미관측(DQ5), 설정된 엔진이 필요한 200·BUSY·TIMEOUT·재관문은 컴파일 수준만, nginx 2 MB 초과 413 미관측, admin 전용(판독의 아님) 신원 없음. **실스택 여덟 건은 아직 실행되지 않았다 — 첫 실행은 호스티드 후보 CI다.**
 
+REQ-S3-ASR-FIRST-PATH → RISK-S3-R14-LOST-DICTATED-TEXT → TEST-ASR-FIRST-SITE (Part 1 re-plan "받아쓰기 첫 사이트 구성·품질·복구 확인", census C13·C24, 2026-10-27): `tests/e2e/test_dictation_first_site.py`(`--class DictationFirstSiteE2E`)가 첫 사이트가 설정하는 대로의 받아쓰기를 실제 served page에서 본다 — CI fixture의 고정 whisper.cpp 엔진·ggml-small을 Compose 서비스 `asr`로, 점 있는 병원식 DNS 별칭(`asr.radiology.kin-hospital.internal`)을 `KIN_ASR_URL`로 두고, 크기 상한·시간 제한은 비워 기본값을 잰다. 01 설정 capability와 기본 상한(180초, 5,760,044 byte)에서 스스로 멈춘 녹음의 wire 크기·전사까지 시간·감사 행·합성 인식 점수(`tests/dictation_first_site_passage.py`, eSpeak 영어), Insert·Save·재열람; 02 이름은 풀리고 엔진 프로세스만 내려간 경우(연결 거절) 녹음이 Retry로 남고 쓰던 초안이 화면·서버 초안에 그대로이며 엔진이 돌아오면 같은 byte가 전사됨; 03 엔진이 멈춘(pause) 경우 기본 시간 제한으로 끝나는 동안 판독의가 계속 쓰고, 재개 뒤 Retry; 04 Compose 엔진 컨테이너 정지(이름이 안 풀림)도 설정 오류가 아니라 Retry 대상. 엔진 컨테이너는 api 서비스의 Compose project label로 찾으며 이름을 고정하지 않는다. heavy host 전용(엔진 빌드·모델 내려받기)이며 CI 프로파일에는 없다. 주장하지 않는 것: 실제 판독의 음성·한국어·첫 사이트 엔진 장비·의사 수용 — `docs/ops/dictation-first-site.md`의 NOT_RUN.
+
 프론트엔드·UI/UX와 필수 API를 통합한 뒤 의사에게 평가 후보를 전달한다. 전달 전 중간 버전은 사용자가 사용하지 않는다. 전달 뒤에는 의사 피드백과 단일 병원 도입용 백엔드 준비를 병행하되, 평가 버전·데이터를 안정적으로 유지하고 백엔드는 별도 브랜치·환경에서 작업한다. 의사 재확인과 운영 검증 후 배포하며 병원 간 Connect 확장은 보류한다.
 
 | 시점 또는 변경 | 실행할 검증 |
@@ -340,7 +349,7 @@ DB 복원은 `python tests/viewer_migration_test.py ViewerMigration.test_03_real
 소견 기록/정확한 영상 이동(S2-A): `python tests/finding_api_test.py` (13개, 8~10은 S2-B2 서버, 11·12는 S2-L, 13은 S3-U2a 인용 백엔드)와 `python tests/e2e/test_finding_navigation.py` (8개, 7은 S2-B2 화면, 8은 S2-C).
 저장한 표식 1~8개를 같은 검사 안에서 소견에 연결하고 서버가 식별·판·수치·digest를 복사한다. 클라이언트가 보낸
 수치/종류/digest 거절, 같은 요청 ID 재시도의 동일 결과, 다른 본문 409, 동시 편집 하나만 200, 부모 잠금 대기 중 바뀐 표식판의
-409, 잠금 지연 503 후 재시도, 검사당 256개·누적 4096판·16MiB와 소견당 1000판 한도, 기관/P 지정/작성자/서비스 토큰 경계,
+409, 잠금 지연 503 후 재시도, 검사당 256개·누적 4096판·16MiB와 소견당 1000판의 종전 한도를 넘는 저장·이력 보존, 기관/P 지정/작성자/서비스 토큰 경계,
 표식 수정→Revised(수치는 저장 당시 값)·숨김→Hidden·미존재→Missing, 본문 수정 시 기존 사본 바이트 유지, 명시적 Refresh Link의 새 판,
 승인 후 소견 편집이 판독 행을 바꾸지 않음을 검사한다. 브라우저 시험은 새 로그인 뒤 목록·Go to Image가 실제 저장 SOP/프레임을
 `getCurrentImageId`로 증명하고 표식 강조, 응답 유실 재시도, 두 창 충돌, 같은 문서의 mode 재진입(A→B→A) 뒤 늦은 목록 폐기,
@@ -728,46 +737,36 @@ Linux의 root Docker helper가 호스트 파일 소유권을 바꾸지 않도록
 이 단계의 서버 내부 백업은 오프사이트 재해복구가 아니다. Gateway queue·인증서·Docker 이미지
 오프사이트 보관과 보존/암호화 정책은 별도다. 스크립트 자체가 cron을 설치하거나 오래된 백업을 삭제하지 않는다.
 
-### Run C — 접속기록(AuditLog) 봉인·검증·보존 (S7-AUDIT-STORE)
+### Run C — 기존 접속기록(AuditLog) 봉인 보관본 검증·보존 (S7-AUDIT-STORE)
+
+현재 일일 `ops_backup.py backup`은 봉인·`audit-checkpoint.json` 생성을 하지 않는다.
+`rehearse`는 체크포인트를 선언한 과거 보관본만 봉인과 대조한다. 아래 봉인 생성·실패 기록은
+과거 방식의 설명이며 새 백업의 설치 조건이나 실패 조건이 아니다.
 
 ```powershell
 # 백업 부모마다 처음 한 번(운영자가 기록을 남기며): 봉인 장부 audit-ledger.json을 만든다. 보존 연수 기본 2
 python scripts/ops_audit_integrity.py init "$env:USERPROFILE/backups/kin-pacs"
 # 기관 내부 관리계획이 2년보다 길면 올린다(내리지 못함)
 python scripts/ops_audit_integrity.py plan "$env:USERPROFILE/backups/kin-pacs" --years 3
-# 이후 백업·리허설은 위와 같다: backup이 봉인하고 rehearse가 복원본을 봉인과 대조한다
+# 아래 검증은 체크포인트가 있는 과거 보관본에만 적용한다. 새 일일 백업은 봉인하지 않는다.
 python scripts/ops_audit_integrity.py verify --backup <백업-디렉터리>
 python scripts/ops_audit_integrity.py verify --container kin-db --database kin --user kin --checkpoint <백업-디렉터리>/audit-checkpoint.json
 python scripts/ops_audit_integrity.py retention "$env:USERPROFILE/backups/kin-pacs"   # 월 1회 이상 점검(D195)
 ```
 
-- 봉인: `backup`은 writer 정지 구간에 뜬 `kin.dump`가 완성되고 writer 재개·준비 확인이 끝난 뒤(실패해도) 그 덤프의 AuditLog 행을
-  격리 검증 DB에서 digest로 만들어 백업 폴더의 `audit-checkpoint.json`(0600)에 쓰고, manifest의 `sha256`·`bytes`에 선언한 뒤(형식 1 그대로)
-  백업 부모의 `audit-ledger.json`에 덧붙인다(K → manifest → 장부 순서). 정지 시간은 늘지 않고 봉인은 `kin-db`에 명령을 보내지 않는다.
-- 장부를 쓰는 `init`·`plan`·봉인과 `rotate`의 삭제 구간은 백업 부모 안의 장부 잠금(`.kin-audit-ledger.lock`, 0600, 소유자만 해제)으로
-  한 번에 하나만 돈다. 도구 폴더에는 쓰지 않으므로 보호 설치(`/opt/kin-deploy`, root 0755)를 백업 부모 소유 계정으로 실행해도 된다.
-  봉인(`backup` 안)과 rotation은 운영 잠금 → 장부 잠금 순서로만 잡고 `init`·`plan`은 장부 잠금만 잡는다. 어느 쪽도 기다리지 않고,
-  죽은 실행이 남긴 잠금은 지우거나 건너뛰지 않고 계속 거절한다(RT-P3-LEDGER-LOCK·P3R1-01, `ops_audit_integrity_test.py` PV-11·PV-12).
-  경합했을 때의 결과는 진입점마다 다르다:
-  - `init`·`plan` CLI: 종료코드 2(`{"error": "Refused"}`), 장부·백업 부모는 그대로다.
-  - 봉인(`ops_audit_integrity.seal`): `Refused`를 올리고 체크포인트·manifest 선언·장부를 쓰지 않는다. `backup` CLI는 이를 실패로 남긴다:
-    완성된 백업 폴더는 지우지 않고 그 manifest에 `backup_error = {"stage": "seal audit", "type": "Refused"}`를 기록하며 종료코드 1이다
-    (봉인되지 않은 그 세트는 rotation에서 `audit-undeclared`가 아니라 일반 세대로 판단된다; 다음 백업 전에 원인을 확인한다).
-  - `rotate`(단독 또는 `backup` 뒤): 아무것도 삭제·이름변경하지 않고 실패(종료코드 1)한다. 보존기간 변경(`plan`)은 rotation의 마지막
-    보존 판정→이름변경→삭제 사이에 끼어들 수 없으므로, 성공한 `plan`의 새 기간 안의 세트를 그 rotation이 지우지 않는다.
-- 읽기 전용 `verify`·`retention`은 잠금을 잡지도 깨지도 않는다. 단 `retention`은 진행 중인 봉인 전체의 일관된 snapshot이 아니다:
-  봉인이 manifest 선언을 쓴 뒤 장부에 덧붙이기 전 사이에 조회하면 그 세트를 `uncommitted`로 보고(종료코드 1)하고, 봉인이 끝난 뒤 같은
-  조회는 종료코드 0이다(P3R1-04, P3 이전부터의 관측 한계). 백업 실행 시각과 겹친 `retention`의 `uncommitted`는 백업이 끝난 뒤 다시
-  조회해 판정하고, 다시 조회해도 남을 때만 중단된 봉인으로 다룬다. `verify`는 고정된 체크포인트와 내보내기를 읽으므로 해당하지 않는다.
-- 장부가 없으면 봉인하지 않는다(자동으로 처음부터 시작하지 않음): manifest `backup_error = {"stage": "seal audit", "type": "LedgerMissing"}`,
-  종료코드 1. 선언된 체크포인트가 있는 부모의 `init`은 거절되고 `init --after-loss --reason <사유>`만 기록과 함께 새 장부를 만든다.
-- 이전 봉인과 행이 다르거나(과거 사건: `previous_verification` failed/unverifiable), 이번 덤프의 가드가 무력하거나 표 모양이 다르면(현재 결함)
-  새 체크포인트를 쓰고 manifest `backup_error = {"stage": "audit integrity", ...}`, `complete: true`, 종료코드 1. 봉인 실패는
-  `{"stage": "seal audit", ...}`. 무변경 `ops_monitor`가 이 manifest를 `backup_failed`로 알린다. 그 스냅숏은 복원 입력으로 계속 쓰이고
-  내보내기 inventory만 거절한다.
-- `rehearse`는 복원·행수 확인 뒤 **자기가 복원한 `kin`의 내보내기**를 새 격리 검증 DB에서 봉인과 비교한다(스냅숏 파일을 다시 읽지 않는다).
-  `rehearsal-*.json`의 `audit`: 봉인 없는 옛 백업은 `"not_sealed"`, 봉인된 백업은 `verified`와 보고. 과거 사건만 있는 스냅숏은 성공하고
-  그 기록을 옮겨 적으며, 복원본의 행 차이·가드 무력·표 모양 발견·입력 오류는 success false, 종료코드 1이다.
+- 새 일일 `backup`은 봉인·체크포인트·장부를 만들거나 요구하지 않는다. 아래 장부·체크포인트 설명은 과거 보관본에 적용한다.
+- 과거 봉인 보관본은 `audit-checkpoint.json`과 manifest 선언, 백업 부모의 `audit-ledger.json`을 함께 보존한다.
+  `init`·`plan`과 `rotate`의 보존 판정·삭제는 장부 잠금으로 직렬화된다. 잠금 경합 시 `init`·`plan`은 종료코드 2,
+  `rotate`는 종료코드 1이며 삭제하지 않는다. 죽은 실행이 남긴 잠금은 점검 후 처리한다.
+- 읽기 전용 `verify`·`retention`은 잠금을 잡지도 깨지도 않는다. 과거 중단된 봉인의 manifest와 장부가 일치하지 않으면
+  `retention`은 `uncommitted`로 보고한다. 선언된 체크포인트가 있는 부모의 `init`은 거절되고,
+  `init --after-loss --reason <사유>`만 기록과 함께 새 장부를 만든다.
+- 과거 manifest의 `backup_error`는 그대로 보존되며 `ops_monitor`는 `backup_failed`로 알린다.
+  그 스냅숏은 복원 입력으로 계속 쓰이고 내보내기 inventory만 거절한다.
+- `rehearse`는 체크포인트가 선언된 과거 보관본에 한해 **자기가 복원한 `kin`의 내보내기**를 격리 검증 DB에서 비교한다.
+  `rehearsal-*.json`의 `audit`: 새 백업을 포함해 봉인 없는 백업은 `"not_sealed"`, 봉인된 백업은 `verified`와 보고.
+  과거 사건만 있는 스냅숏은 성공하고 그 기록을 옮겨 적으며, 복원본의 행 차이·가드 무력·표 모양 발견·입력 오류는
+  success false, 종료코드 1이다.
 - 내보내기·전송·검증은 함께 한 시간(3600초) 안에 끝나야 한다. 넘기거나 `pg_dump`·검증기 한쪽이 실패하면 그 실행이 가진 것을 모두
   끝내고(정리 예산 15초를 함께 쓴다) 입력 오류다(`verify` 2, 봉인 `seal audit`, rehearse 실패 기록) — 잠금을 기다리는 `pg_dump`가
   백업·리허설과 운영 잠금을 붙잡아 두지 않는다. 이름 붙인 DB(`verify --container`, rehearse 복원본)의 내보내기는 대상 컨테이너 안의 원격
@@ -1637,8 +1636,8 @@ argv, environment names, input hash, exit/timeout, output hashes). Production's 
 local-restore receipt that a rehearsal of exactly that production plan and B0 produced on the plan's rehearsal host
 (per-phase steps and result hashes, B0/B1/Bfail/recovery/previous-version smoke cross-checked, at most seven days old;
 `verify-receipt --bundle` re-checks the run directory); external backup stays OFF and no offsite receipt is claimed.
-Reopen requires the executor's browser-level smoke record and a readable audit ledger at the backup root (the
-introduced release's daily backup seals into it).
+Reopen requires the executor's browser-level smoke record and a readable audit ledger at the backup root. This is an existing conversion gate; current daily backups do not
+require a ledger or create seals.
 
 The target manifest names the host's own wiring instead of tolerating drift: `declared_overlays` (a compose file
 outside the checkout, e.g. `/etc/kin-deploy/overlays/docker-compose.halo-reports.yml`, its sha256, service and binds)
@@ -1779,7 +1778,7 @@ POST는 `requestId` UUID와 완전한 `item`을 받으며 revision 추가는 `ex
 항목 kind/Study/Series/SOP/frame/FoR은 변경할 수 없다. 삭제한 계정·철회된 작성자의
 항목을 다른 사람에게 넘기거나 대신 숨기는 기능은 없어 해당 이력은 읽기전용으로 남는다.
 
-검사당 lifetime512항목/4096revision/16MiB와 snapshot8KiB를 적용한다.
+검사당 lifetime512항목/4096revision/16MiB 제한은 제거하며, 기존 이력을 보존하고 snapshot8KiB 검증은 유지한다.
 bytes는 PostgreSQL jsonb::text의 UTF-8이며 전체 디스크 사용량 상한은 아니다.
 숨김은 용량을 반환하지 않는다. revision/bytes가 가득 차면 숨김/복원도409
 `VIEWER_STORAGE_LIMIT`이다. 항목 개수만 가득 찼을 때는 추가 identity를 만들지 않는
@@ -1939,9 +1938,9 @@ digest 결함은 이번 실행의 저장 참조에만 주입하고 완전한 sna
 ### Bounded study transfers and related pages
 
 REQ-D01-PAGE-TRANSFER → RISK-TENANT-LEAK/STALE-REPORT/PARTIAL-LIST/UNBOUNDED-DOM → TEST-D01-PAGE-TRANSFER.
-`node --test tests/study_pages_client_test.cjs` covers checkpoint retry, final identity failure, malformed order, stale epochs, cancellation, superseded requests and request timeout. `tests/study_page_test.cjs` runs against the built API module inside the container and checks signed owner/size/expiry/membership cursors and legacy query-less behavior. `python tests/study_pages_live.py` checks actual tenant sets, draft/report visibility and cursor refusal in three cases.
+`node --test tests/study_pages_client_test.cjs` covers checkpoint retry, final identity failure, malformed order, stale epochs, cancellation, superseded requests and request timeout. `tests/study_page_test.cjs` runs against the built API module inside the container and checks owner/size/membership-stamp cursors (no expiry) and legacy query-less behavior. `python tests/study_pages_live.py` checks actual tenant sets, draft/report visibility and cursor refusal in three cases.
 `python tests/e2e/test_study_page_transfer.py` checks atomic replacement after a failed page, explicit resume/cancel, 50-row related pages, owner logout, automatic poll recovery/two-failure offline detection and a completion-to-application commit race. The 201-row response is a browser fixture variant backed by two selectable studies; it is not a server scale benchmark. Existing related/search regressions and sequential69→14 cover shared paths.
-The API slices only the already-authorized list and rechecks page access before response. Each request allows60seconds; signed cursors expire after5minutes or process restart. A cancelled batch waits for explicit user action; a transient failure allows the next automatic poll to fetch fresh pages. Explicit resume may retain earlier row states until the next refresh. Membership changes reject the batch; continuous arrivals may repeatedly restart it. Orthanc enumeration, initial bootstrap and the complete browser array remain whole-list operations. Hospital-scale performance and point-in-time state snapshots are unverified.
+The API slices only the already-authorized list and rechecks page access before response. Each request allows60seconds; cursors carry the sorted visible UID set's SHA-256 stamp and do not expire. A cancelled batch waits for explicit user action; a transient failure allows the next automatic poll to fetch fresh pages. Explicit resume may retain earlier row states until the next refresh. A membership change between pages (409 `STUDY_LIST_CHANGED`, or an offset/total that does not continue the pages read) restarts the batch from the first page, quietly, for as long as one request may wait (the same 60 seconds) from the first change seen, so an arrival before the cursor is never left out of a list shown as complete; a list still changing after that ends as `STUDY_LIST_CHANGED` with the last complete list kept and the next poll reading again. `clinician.js` list and timeline reads follow the same rule. Orthanc enumeration, initial bootstrap and the complete browser array remain whole-list operations. Hospital-scale performance and point-in-time state snapshots are unverified.
 
 
 ### Initial query scope
@@ -2568,9 +2567,9 @@ REQ-S5-U5a-CLINICIAN-ROLE-ROUNDTRIP → RISK-S5-U5a-SILENT-ROLE-DROP/LABEL-RULE 
 ### S7-AUDIT-STORE 접속기록 추가 전용 저장·봉인·보존 (REQ-S7-AUDIT-STORE → RISK-S7-AUDIT-TAMPER/RISK-S7-AUDIT-LOSS → TEST-S7-AUDIT-STORE-DB·PURE)
 - 설계: Astra가 사전 검수한 진단(PACS-docs main dcf0b3e `evidence/s7-audit-store-20260930/diagnosis/`, S7-AUDIT-STORE-DIAG-C-R-001 ACCEPT)과 지휘 결정 D281(OP-1 a 트리거, OP-2 i DB 밖 봉인 체크포인트, OP-3 a 봉인 계속·보고, OP-4 a 합성 스택 1회)·D288(OP-5 a)을 따른다. S7-U5 진단의 DEP-RET(RA-1~RA-5)이며 보존 사실은 FACT-S7-RETENTION(D195: 2년 이상)이다. api/src·schema.prisma는 바꾸지 않았다(D-NW 입력 불변).
 - 가드(RA-1): migration `20260930120000_audit_log_append_only`의 트리거가 모든 역할(런타임 역할 `kin` = 소유자·슈퍼유저 포함)의 AuditLog `UPDATE`·`DELETE`·`TRUNCATE`를 SQLSTATE `42501`로 거절한다. `INSERT`·`SELECT`는 그대로이고 INSERT 트리거는 없다. 트리거는 스키마 객체라 백업·rehearse·제품 이전 복원(`--no-privileges`)을 따라간다. AuditLog 행을 바꿔야 하는 뒤 migration은 이 가드를 어떻게 다루는지 스스로 적고 검토받는다.
-- 봉인·검증(RA-2, RA-3, `scripts/ops_audit_integrity.py`): 판정 값(행 digest, 가드 탐침, 표 모양)은 모두 **격리 검증 DB**에서 계산한다 — 기록된 이미지 ID로 새로 띄운 `--network none` 컨테이너(소유 label, 끝나면 삭제)에 내보내기(백업의 `kin.dump`, 또는 이름 붙인 DB의 `pg_dump -Fc`)를 넣고, AuditLog `TABLE`·`TABLE DATA` 목차 항목만 복원한 행 DB에서 고정 여섯 열(`id, at, actor, action, target, detail`)의 digest를 읽은 뒤, 따로 스키마만 복원한 DB에서 가드(합성 행의 UPDATE·DELETE·TRUNCATE가 42501인지)와 모양(보통 표, 상속·다른 스키마의 같은 이름 relation·열 형식·중복 id)을 본다. 라이브 DB나 rehearse 복원본이 계산하거나 돌려준 값은 쓰지 않는다. 내보내기 시작부터 전송·검증 종료까지 한 제한 시간(evaluate의 `timeout`, 기본 3600초)이 걸린다 — 그 안에 끝나지 않거나 한쪽(내보내는 `pg_dump`·검증기)이 실패하면 그때부터 정리 예산 15초 안에 로컬 docker 클라이언트, 대상 컨테이너 안의 원격 내보내기(그 실행의 `pg_dump`·세션), 검증기 컨테이너, 전송 스레드를 끝내고 입력 오류로 돌려주며, 호출자(verify exit 2, 봉인 `seal audit`, rehearse 실패 기록)의 실패 경로에 종료 증명(`cleanup`: 실행 식별자, 대상 컨테이너 ID·DB·역할·세션 이름, 원인, 관측 시각, 단계별 결과와 새 관측, 경과 시간, `confirmed`)을 함께 남긴다. 원격 내보내기(SPEC-F01 (b) 보강): 실행마다 다시 쓰지 않는 식별자를 만들어 세션 이름 `kin-audit-export-<식별자>`(49바이트, 서버 한도 63 안 — 증명에 서버의 `max_identifier_length`와 관측한 세션 이름이 있다)와 대상 컨테이너 ID·DB·역할에 묶는다. 시작 전에 같은 컨테이너에 그 실행의 watchdog을 띄우고(`pg_dump`가 `statement_timeout`을 스스로 0으로 바꿔 세션 설정은 수명 한도가 되지 못한다), 취소는 그 실행 표시 파일을 먼저 쓰고(늦게 시작된 같은 실행은 접속하지 않는다) `docker exec`가 시작한 그 실행의 프로세스만 끝낸 뒤 내보낸 역할 그대로 그 이름·DB·역할의 세션을 끝내고, 다시 관측해 그 이름의 세션(어느 역할이든)과 프로세스가 없을 때만 확인으로 적는다. 컨테이너 안에서 부모를 잃은 프로세스는 postmaster 자식이 되어 신호로 죽으면 서버가 모든 세션을 재시작하므로(IV-DB-18) 그런 프로세스에는 신호를 보내지 않고 세션만 끝낸다. 잠금을 기다리는 `pg_dump`는 서버 안에서도 같은 시각에 끝나고(`--lock-wait-timeout`), 호출자가 사라지면 watchdog이 실행 수명(남은 시간 + 15초)에 같은 취소를 한다. 감시 루프는 한 번의 관측(내보내기·검증기 종료 상태, 전송 진행·완료)으로 판단하고 그 관측에서 실행 중인 프로세스만 deadline 안에서 기다린다(F03): 전송이 끝나기 전 검증기의 exit 0은 성공이 아니고, deadline이 지나는 사이 끝난 관측은 종료 코드로 판단한다. 체크포인트 `audit-checkpoint.json`은 백업 폴더에, 봉인 장부 `audit-ledger.json`은 백업 부모에 있고(0600, 덧붙임 전용·원자 교체, 명시 `init`만, 커밋 순서 K → manifest → 장부, 끊긴 봉인의 복구) 둘 다 id·digest·개수·폴더 이름만 담는다.
+- 과거 봉인 보관본 검증(RA-2, RA-3, `scripts/ops_audit_integrity.py`): 현재 일일 `backup`은 봉인하거나 `audit-checkpoint.json`을 쓰지 않는다. 아래 봉인·장부 설명은 기존 보관본에 해당한다. 판정 값(행 digest, 가드 탐침, 표 모양)은 모두 **격리 검증 DB**에서 계산한다 — 기록된 이미지 ID로 새로 띄운 `--network none` 컨테이너(소유 label, 끝나면 삭제)에 내보내기(백업의 `kin.dump`, 또는 이름 붙인 DB의 `pg_dump -Fc`)를 넣고, AuditLog `TABLE`·`TABLE DATA` 목차 항목만 복원한 행 DB에서 고정 여섯 열(`id, at, actor, action, target, detail`)의 digest를 읽은 뒤, 따로 스키마만 복원한 DB에서 가드(합성 행의 UPDATE·DELETE·TRUNCATE가 42501인지)와 모양(보통 표, 상속·다른 스키마의 같은 이름 relation·열 형식·중복 id)을 본다. 라이브 DB나 rehearse 복원본이 계산하거나 돌려준 값은 쓰지 않는다. 내보내기 시작부터 전송·검증 종료까지 한 제한 시간(evaluate의 `timeout`, 기본 3600초)이 걸린다 — 그 안에 끝나지 않거나 한쪽(내보내는 `pg_dump`·검증기)이 실패하면 그때부터 정리 예산 15초 안에 로컬 docker 클라이언트, 대상 컨테이너 안의 원격 내보내기(그 실행의 `pg_dump`·세션), 검증기 컨테이너, 전송 스레드를 끝내고 입력 오류로 돌려주며, 호출자(verify exit 2, 봉인 `seal audit`, rehearse 실패 기록)의 실패 경로에 종료 증명(`cleanup`: 실행 식별자, 대상 컨테이너 ID·DB·역할·세션 이름, 원인, 관측 시각, 단계별 결과와 새 관측, 경과 시간, `confirmed`)을 함께 남긴다. 원격 내보내기(SPEC-F01 (b) 보강): 실행마다 다시 쓰지 않는 식별자를 만들어 세션 이름 `kin-audit-export-<식별자>`(49바이트, 서버 한도 63 안 — 증명에 서버의 `max_identifier_length`와 관측한 세션 이름이 있다)와 대상 컨테이너 ID·DB·역할에 묶는다. 시작 전에 같은 컨테이너에 그 실행의 watchdog을 띄우고(`pg_dump`가 `statement_timeout`을 스스로 0으로 바꿔 세션 설정은 수명 한도가 되지 못한다), 취소는 그 실행 표시 파일을 먼저 쓰고(늦게 시작된 같은 실행은 접속하지 않는다) `docker exec`가 시작한 그 실행의 프로세스만 끝낸 뒤 내보낸 역할 그대로 그 이름·DB·역할의 세션을 끝내고, 다시 관측해 그 이름의 세션(어느 역할이든)과 프로세스가 없을 때만 확인으로 적는다. 컨테이너 안에서 부모를 잃은 프로세스는 postmaster 자식이 되어 신호로 죽으면 서버가 모든 세션을 재시작하므로(IV-DB-18) 그런 프로세스에는 신호를 보내지 않고 세션만 끝낸다. 잠금을 기다리는 `pg_dump`는 서버 안에서도 같은 시각에 끝나고(`--lock-wait-timeout`), 호출자가 사라지면 watchdog이 실행 수명(남은 시간 + 15초)에 같은 취소를 한다. 감시 루프는 한 번의 관측(내보내기·검증기 종료 상태, 전송 진행·완료)으로 판단하고 그 관측에서 실행 중인 프로세스만 deadline 안에서 기다린다(F03): 전송이 끝나기 전 검증기의 exit 0은 성공이 아니고, deadline이 지나는 사이 끝난 관측은 종료 코드로 판단한다. 체크포인트 `audit-checkpoint.json`은 백업 폴더에, 봉인 장부 `audit-ledger.json`은 백업 부모에 있고(0600, 덧붙임 전용·원자 교체, 명시 `init`만, 커밋 순서 K → manifest → 장부, 끊긴 봉인의 복구) 둘 다 id·digest·개수·폴더 이름만 담는다.
 - 검증 V(exit 0/1/2): 봉인된 행의 변경·삭제·끼어듦, 지금 판정하는 내보내기의 가드 무력·모양 발견이 하나라도 있으면 1, 입력 오류는 2. 체크포인트의 `previous_verification`(봉인 때 이전 체크포인트와의 대조, 과거 사건)은 exit에 들어가지 않고 보고에 옮겨진다.
-- 복원 검증(RA-4): `ops_backup.py rehearse`는 복원·행수 확인 뒤 자기 복원본 `kin`의 내보내기를 새 격리 검증 DB에서 봉인과 대조한다. 덤프·manifest·체크포인트가 정상이어도 복원본만 달라지면 실패다. 과거 사건만 있는 스냅숏은 성공, 스냅숏 자신의 가드·모양 결함은 실패(복원 입력으로는 계속 허용).
+- 복원 검증(RA-4): `ops_backup.py rehearse`는 복원·행수 확인 뒤, 입력 보관본이 `audit-checkpoint.json`을 선언한 경우에만 자기 복원본 `kin`의 내보내기를 새 격리 검증 DB에서 봉인과 대조한다. 새 미봉인 백업은 `audit: not_sealed`로 기록한다. 덤프·manifest·체크포인트가 정상이어도 복원본만 달라지면 실패다. 과거 사건만 있는 스냅숏은 성공, 스냅숏 자신의 가드·모양 결함은 실패(복원 입력으로는 계속 허용).
 - 보존(RA-5): 봉인마다 `retain_until` = 생성 시각의 달력 N년 뒤(N = 장부의 보존 연수, 기본 2, `plan`으로 올리기만). `retention`이 장부를 기준으로 기한 안의 폴더·체크포인트·덤프 유실(중간·최신·연속 최신·전체), 오래된 최신 봉인, 장부에 없는 체크포인트(뒤에 봉인이 몇 번 이어져도 복구로 장부에 들어가기 전까지), 재초기화 구간을 1로, 장부 없음은 2로 보고하고 두 종류의 무결성 사건(과거 사건·현재 결함)을 알린다. 제품은 백업·체크포인트·장부를 지우지 않는다.
 - 운영 신호: 봉인 실패·장부 없음은 manifest `backup_error.stage = "seal audit"`, 불일치·이전 검증 불가·가드 무력·모양 발견은 `"audit integrity"`(둘 다 `complete: true`, 종료코드 1). 무변경 `scripts/ops_monitor.py`가 `backup_failed`를 낸다. 명령 절차는 위 "Run C — 접속기록(AuditLog) 봉인·검증·보존".
 - 시험:

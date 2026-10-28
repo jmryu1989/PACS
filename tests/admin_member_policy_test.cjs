@@ -18,9 +18,10 @@ const { KeycloakService } = require('../api/src/keycloak.service.ts');
     emailVerified: true, approved: true, suspended: false, institution: 'synthetic-hospital', roles: ['admin'], version: 1 };
   const caller = { sub: 'synthetic-admin', actor: 'synthetic-admin', roles: ['admin'] };
   let writes = 0, changed;
+  const audits = [];
   const db = { memberRights: { findUnique: async () => member, updateMany: async ({data}) => { writes++; changed = data; return {count:1}; } },
     authSession: { findMany: async () => [], deleteMany: async () => ({count:0}) },
-    auditLog: { create: async () => ({}), findFirst: async () => null }, providerChange: { create: async () => ({id:1}), findFirst: async () => null },
+    auditLog: { create: async ({data}) => { audits.push(data); return {}; }, findFirst: async () => null }, providerChange: { create: async () => ({id:1}), findFirst: async () => null },
     $executeRaw: async () => 0, $queryRaw: async () => [{boundary:new Date()}] };
   db.$transaction = async work => work(db);
   const kc = { institutions: async () => ['synthetic-hospital'], getUser: async () => ({id:member.sub,emailVerified:true}) };
@@ -48,6 +49,15 @@ const { KeycloakService } = require('../api/src/keycloak.service.ts');
   await patch({roles:['clinician','radiologist']});
   assert.deepEqual(changed.roles,['clinician','radiologist']);
   assert.equal(events.length,5,'each successful rights change reaches the ledger transaction');
+  assert.equal(JSON.parse(audits.at(-1).detail).verificationOverride, false);
+  kc.getUser = async () => ({id:member.sub,emailVerified:false});
+  await patch({roles:['clinician']});
+  assert.deepEqual(changed.roles,['clinician'], 'face-to-face approval does not require verified email');
+  assert.equal(JSON.parse(audits.at(-1).detail).verificationOverride, true);
+  await patch({roles:['clinician'],verificationOverride:true});
+  assert.equal(JSON.parse(audits.at(-1).detail).verificationOverride, true);
+  await assert.rejects(patch({roles:['clinician'],verificationOverride:false}),e=>e.getStatus()===400);
+  kc.getUser = async () => ({id:member.sub,emailVerified:true});
   for (const invalid of [[],['gateway'],['invented'],['clinician','invented']]) {
     const before=writes;
     await assert.rejects(patch({roles:invalid}),e=>e.getStatus()===400);

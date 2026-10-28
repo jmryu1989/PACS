@@ -7,8 +7,9 @@ Usage: python scripts/ops_audit_integrity.py init <backup-root> [--years N]
        python scripts/ops_audit_integrity.py verify --backup <backup-directory> [--checkpoint FILE]
        python scripts/ops_audit_integrity.py verify --container NAME --database DB --user ROLE --checkpoint FILE
        python scripts/ops_audit_integrity.py retention <backup-root> [--as-of UTC] [--max-age HOURS]
-The seal runs inside `ops_backup.py backup` over the dump taken while the writers were stopped; there is no standalone seal
-of a live database. verify and retention print one JSON line and exit 0 (verified), 1 (integrity failure) or 2 (input
+Daily `ops_backup.py backup` no longer seals or writes audit-checkpoint.json. These tools retain verification and retention
+of older sealed archives; `ops_backup.py rehearse` verifies a checkpoint only when the archive declares one.
+verify and retention print one JSON line and exit 0 (verified), 1 (integrity failure) or 2 (input
 error: neither a pass nor an integrity claim). Every verdict value is computed from an export inside a new networkless
 PostgreSQL container started from a recorded image; nothing the exporting server computes or returns is trusted. Row
 content never leaves that container: checkpoints, the ledger and reports carry ids, digests, counts and folder names.
@@ -1085,12 +1086,12 @@ def alarm_of(checkpoint):
 
 
 def seal(directory, root, manifest):
-    """Seal a complete backup's AuditLog (stage 'seal audit' of ops_backup.backup, which holds the operations lock and
-    calls this after the writers resumed); the seal itself holds the root's ledger lock, so it never runs beside an init
+    """Legacy seal helper for retained-archive compatibility; daily ops_backup.backup no longer calls it.
+    The seal itself holds the root's ledger lock, so it never runs beside an init
     or a plan. The digests come from the snapshot's kin.dump in the isolated verifier; the
     live database is never contacted. Commit order: checkpoint file -> manifest declaration (with backup_error
     'audit integrity' when a finding is recorded) -> ledger seal. Returns the alarm type or None; failures raise and the
-    caller records them as backup_error 'seal audit'."""
+    legacy caller records them as backup_error 'seal audit'."""
     directory, root = Path(directory), Path(root)
     target = directory / CHECKPOINT
     if directory.is_symlink() or target.exists() or target.is_symlink():

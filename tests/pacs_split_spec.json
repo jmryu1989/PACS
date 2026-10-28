@@ -4979,6 +4979,16 @@
         "slot": "metricsConcern"
       },
       {
+        "name": "readStudies",
+        "slot": "worklistConcern",
+        "implementation": {
+          "file": "api/src/pacs/worklist.ts",
+          "owner": "PacsWorklist",
+          "name": "readStudies",
+          "kind": "MethodDeclaration"
+        }
+      },
+      {
         "name": "listStudies",
         "slot": "worklistConcern"
       },
@@ -9343,5 +9353,25 @@
         }
       }
     }
+  },
+  "caution_app": {
+    "unit": "Caution census app (#259)",
+    "note": "Change Password opens Keycloak's UPDATE_PASSWORD action on the signed-in session: GET auth/login takes the literal action and GET auth/callback reads kc_action_status (auth.controller.ts). Both routes stay public; nothing else changes.",
+    "route_args": [
+      {
+        "controller": "AuthController",
+        "handler": "callback",
+        "added": [
+          "4:5@5:\"kc_action_status\":0"
+        ]
+      },
+      {
+        "controller": "AuthController",
+        "handler": "login",
+        "added": [
+          "4:2@2:\"action\":0"
+        ]
+      }
+    ]
   }
 }

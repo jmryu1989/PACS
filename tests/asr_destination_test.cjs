@@ -24,8 +24,9 @@ function wav() {
   b.write('data', 36); b.writeUInt32LE(4, 40); return b;
 }
 function boundary(t, answers = [{ address: '172.20.0.7', family: 4 }], status = 200) {
-  const wire = [], logs = [], lookups = [];
+  const wire = [], logs = [], warnings = [], lookups = [];
   t.mock.method(Logger, 'error', (...args) => logs.push(args));
+  t.mock.method(Logger, 'warn', (...args) => warnings.push(args));
   t.mock.method(global, 'fetch', async () => assert.fail('uncontrolled fetch'));
   t.mock.method(dns, 'lookup', (host, options, callback) => {
     lookups.push(host);
@@ -50,14 +51,17 @@ function boundary(t, answers = [{ address: '172.20.0.7', family: 4 }], status = 
     return req;
   }
   t.mock.method(http, 'request', request); t.mock.method(https, 'request', request);
-  return { wire, logs, lookups };
+  return { wire, logs, warnings, lookups };
 }
 const refused = error => error.getResponse().code === 'DICTATION_NOT_CONFIGURED';
+const engineFailed = error => error.getResponse().code === 'DICTATION_ENGINE_FAILED';
 const transcribe = () => new AsrService().transcribe(wav(), new AbortController().signal);
 
-test('D20-local: service names and every allowed IP range preserve inference', async t => {
+test('D20-local: service names, hospital DNS names and every allowed IP range preserve inference', async t => {
   const b = boundary(t);
-  const hosts = ['engine', 'kin-asr-engine-u3', '10.0.0.1', '10.255.255.254', '172.16.0.1', '172.31.255.254',
+  // C24: a hospital-internal FQDN is a name like a compose label; the socket's lookup decides (D20-dns).
+  const hosts = ['engine', 'kin-asr-engine-u3', 'asr.radiology.hospital.internal', 'whisper01.pacs.example-hospital.kr',
+    'asr_1.lan', '10.0.0.1', '10.255.255.254', '172.16.0.1', '172.31.255.254',
     '192.168.0.1', '127.0.0.1', '169.254.1.2', '[::1]', '[fc00::1]', '[fdff::1]', '[fe80::1]',
     '[febf::1]', '[::ffff:192.168.1.2]'];
   for (const scheme of ['http', 'https']) for (const host of hosts) {
@@ -83,10 +87,11 @@ test('D20-public: public, boundary, mapped and normalized IPs refuse before send
   assert.equal(b.lookups.length, 0);
 });
 
-test('D20-url: public names, suffix and credential/port/path tricks fail closed', async t => {
+test('D20-url: malformed names and credential/port/path tricks fail closed', async t => {
   const b = boundary(t);
-  for (const url of ['https://speech.example/inference', 'http://engine.example/inference',
-    'http://engine.local/inference', 'http://engine./inference', 'http://user:secret@engine/inference',
+  for (const url of ['http://engine./inference', 'http://engine..local/inference', 'http://.engine/inference',
+    `http://${'a'.repeat(64)}.local/inference`, `http://${'a.'.repeat(127)}a/inference`,
+    'http://user:secret@engine/inference',
     'http://10.0.0.1@public.example/inference', 'http://public.example@10.0.0.1/inference',
     'http://engine:0/inference', 'http://engine:65536/inference', 'http://engine:80:443/inference',
     'http://engine/inference?secret', 'http://engine/inference#secret', 'http://engine/inference?',
@@ -103,16 +108,35 @@ test('D20-url: public names, suffix and credential/port/path tricks fail closed'
   assert.equal(logged.includes('secret'), false, 'operator log leaked configuration contents');
 });
 
-test('D20-dns: a compose-shaped name resolving to public or mixed addresses sends nothing', async t => {
-  for (const answers of [[{ address: '8.8.8.8', family: 4 }],
-    [{ address: '10.0.0.1', family: 4 }, { address: '2001:4860::1', family: 6 }],
-    [], new Error('synthetic DNS failure')]) {
-    const b = boundary(t, answers); config('https://engine:8443/inference');
-    await assert.rejects(transcribe(), refused);
-    assert.equal(b.wire.length, 0, 'DNS refusal sent audio');
-    assert.ok(b.logs.length > 0, 'missing operator configuration error');
+test('D20-dns: a service or hospital name resolving to public or mixed addresses sends nothing', async t => {
+  for (const url of ['https://engine:8443/inference', 'https://asr.radiology.hospital.internal:8443/inference',
+    'http://speech.example/inference'])
+    for (const answers of [[{ address: '8.8.8.8', family: 4 }],
+      [{ address: '10.0.0.1', family: 4 }, { address: '2001:4860::1', family: 6 }]]) {
+      const b = boundary(t, answers); config(url);
+      assert.equal(asrConfiguration().available, true, 'a name alone is a candidate, decided at connect');
+      await assert.rejects(transcribe(), refused);
+      assert.equal(b.wire.length, 0, 'DNS refusal sent audio');
+      assert.ok(b.logs.length > 0, 'missing operator configuration error');
+      t.mock.restoreAll();
+    }
+});
+
+test('D20-dns-absent: a name with no address now (engine stopped, DNS outage) is an engine failure, not a configuration error', async t => {
+  const failure = Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' });
+  for (const answers of [[], failure]) {
+    const b = boundary(t, answers); config('https://asr.radiology.hospital.internal:8443/inference');
+    await assert.rejects(transcribe(), engineFailed);
+    assert.equal(b.wire.length, 0, 'an unresolved name sent audio');
+    assert.equal(b.logs.length, 0, 'not a configuration error');
+    assert.equal(b.warnings.length, 1, 'the operator sees one engine failure line');
+    assert.match(JSON.stringify(b.warnings), /ENOTFOUND/);
     t.mock.restoreAll();
   }
+  // The same name answering again is used at once: no state survives the failure.
+  const back = boundary(t); config('https://asr.radiology.hospital.internal:8443/inference');
+  assert.equal((await transcribe()).text, ' 합성 판독\n');
+  assert.equal(back.wire.length, 1);
 });
 
 test('D20-pin: socket receives checked DNS answers once and rechecks on the next request', async t => {

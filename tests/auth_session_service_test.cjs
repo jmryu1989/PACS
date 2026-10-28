@@ -3801,14 +3801,16 @@ test('CORE_COMMAND_DB_CLOCK rights boundary uses transaction DB time despite app
 });
 
 // D640: REQ-S7-U5-DB-RIGHTS/AUDIT -> RISK-REFUSAL-AUDIT/REMOTE-LOCK/IDENTITY-REWIND -> CORE_R10 / ASTRA below.
-test('CORE_R10_UNVERIFIED refusal precedes the command: 400, zero audit or rights change; override is the sole audited bypass',async t=>{
+// #259 (caution census): an unverified email no longer blocks approval by default; the approval is recorded as the
+// override. An administrator who declines it (verificationOverride:false) is still refused before the command.
+test('CORE_R10_UNVERIFIED a declined override is refused before the command: 400, zero audit or rights change; the default approval is the audited override',async t=>{
   const w=await world(t),m='syn-r10-unverified',{admin}=await coreSetup(w,m,'Approve');
   kc.members[m].emailVerified=false;const before=await w.base.memberRights.findUnique({where:{sub:m}});
-  const refused=await r10Patch(admin,m,coreBody('Approve'));assert.equal(refused.status,400);
+  const refused=await r10Patch(admin,m,{...coreBody('Approve'),verificationOverride:false});assert.equal(refused.status,400);
   assert.equal(await w.base.auditLog.count({where:{target:m}}),0);
   assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before);
   assert.equal(await w.base.providerChange.count(),0);
-  const allowed=await r10Patch(admin,m,{...coreBody('Approve'),verificationOverride:true});assert.equal(allowed.status,200);
+  const allowed=await r10Patch(admin,m,coreBody('Approve'));assert.equal(allowed.status,200);
   const rows=await w.base.auditLog.findMany({where:{target:m,action:'admin.user.approve'}});
   assert.equal(rows.length,1);assert.equal(JSON.parse(rows[0].detail).verificationOverride,true);
   await coreSettled(w,m);await w.finish('CORE_R10_UNVERIFIED');

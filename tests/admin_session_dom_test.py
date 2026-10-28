@@ -486,6 +486,8 @@ class PageSessionDOMTest(unittest.TestCase):
                         for name,value in {'username':'syn-new','email':'syn@local.test','firstName':'SYN','lastName':'New'}.items():
                             self.page.locator('#create-form [name='+name+']').fill(value)
                         self.hold('/api/admin/users',cut,{'temporaryPassword':'SYN late secret'})
+                        self.page.locator('#create-form [name=institution]').fill('SYN-INST-A')
+                        self.page.locator('#create-form [name=role]').select_option('radiologist')
                         self.page.locator('#create-form button[type=submit]').click()
                     else:
                         self.hold(path+'/reset-password',cut,{'temporaryPassword':'SYN late secret'})

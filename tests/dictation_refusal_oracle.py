@@ -21,7 +21,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-MAX_BYTES = 1_048_576          # api/src/dictation-audio.ts DICTATION_AUDIO_MAX_BYTES
+MAX_BYTES = 180 * 32_000 + 44  # the unconfigured limit, api/src/dictation-audio.ts DICTATION_AUDIO_DEFAULT_BYTES
 SAMPLE_RATE = 16_000
 WAV_SHA256 = "156075e2635b9b2c186258f4db987ed9fbdfb727f49e5eac4b9a126aefbdf727"
 WAV_44100_SHA256 = "48f304b4730189540fb9a2b9c8d05d6aba5e55b1375efbd9e2ef28ed544a9743"
@@ -163,7 +163,7 @@ def wav(rate: int = SAMPLE_RATE) -> bytes:
 
 
 def oversized(max_bytes: int = MAX_BYTES) -> bytes:
-    return bytes(max_bytes + 1)   # one over the route cap, far under nginx's 2 MB (A9 stays out)
+    return bytes(max_bytes + 1)   # one over the route limit, under the proxy's 32m dictation bound (A9 stays out)
 
 
 PIN_RE = re.compile(r"^export const ASR_ENGINE_PIN = '([^'\r\n]+)';\r?$", re.M)

@@ -11,7 +11,11 @@ window.KinStudyTags=function(app){
   const same=()=>work.state()==='active'&&!ended&&d.open&&app.allowed()&&JSON.stringify(owner)===JSON.stringify(app.identity());
   const catalog=()=>state?.catalogs.find(x=>x.scope===scope),tag=()=>catalog()?.tags.find(x=>x.id===selected);
   const manages=()=>scope==='personal'||state?.canManageInstitution===true;
-  const dirty=()=>!!$('new').value||!!tag()&&$('name').value!==tag().name;
+  // Scope and account keep unrelated name drafts separate; nothing is persisted before Save.
+  const names=new Map(),newNames=new Map();let draftOwner=null;
+  const nameKey=()=>scope+':'+selected;
+  $('name').oninput=()=>{if(selected)names.set(nameKey(),$('name').value);};
+  $('new').oninput=()=>newNames.set(scope,$('new').value);
   const label=uid=>{const s=app.study(uid);return s?[s.name,s.id,s.date,s.desc,uid].filter(Boolean).join(' · '):uid;};
   const message=text=>$('status').textContent=text;
   function controls(){d.querySelectorAll('button,input,select').forEach(x=>x.disabled=busy||!!pending||!same());
@@ -26,8 +30,8 @@ window.KinStudyTags=function(app){
     state=value;app.changed(value);
   }
   function draw(preserve=false){const previous=selected;if(!tag())selected=catalog()?.tags[0]?.id??null;$('scope').value=scope;$('list').replaceChildren();
-    for(const t of catalog()?.tags??[]){const b=document.createElement('button');b.type='button';b.dataset.tagId=t.id;b.textContent=t.name+' · '+t.uids.length+'건'+(current&&t.uids.includes(current)?' · 선택 검사에 부여됨':'');b.setAttribute('aria-pressed',String(t.id===selected));b.onclick=()=>{if(t.id!==selected&&dirty()&&!confirm('저장하지 않은 태그 이름 입력을 버릴까요?'))return;$('new').value='';selected=t.id;draw();};$('list').append(b);}
-    const t=tag();if(!preserve||previous!==selected)$('name').value=t?.name??'';$('current').textContent=current?'대상 검사 · '+label(current):'목록에서 검사를 먼저 선택하세요.';
+    for(const t of catalog()?.tags??[]){const b=document.createElement('button');b.type='button';b.dataset.tagId=t.id;b.textContent=t.name+' · '+t.uids.length+'건'+(current&&t.uids.includes(current)?' · 선택 검사에 부여됨':'');b.setAttribute('aria-pressed',String(t.id===selected));b.onclick=()=>{selected=t.id;draw();};$('list').append(b);}
+    const t=tag();if(!preserve||previous!==selected)$('name').value=names.get(nameKey())??t?.name??'';$('new').value=newNames.get(scope)??'';$('current').textContent=current?'대상 검사 · '+label(current):'목록에서 검사를 먼저 선택하세요.';
     $('assigned').textContent=t&&current?(t.uids.includes(current)?'이 검사에 부여된 태그입니다.':'이 검사에는 아직 부여되지 않았습니다.'):'태그를 선택하세요.';
     $('count').textContent=t?'접근 가능한 검사 '+t.uids.length+'건'+(t.unavailable?' · 접근 불가 '+t.unavailable+'건':''):'';controls();}
   async function request(method,body,at){abort=new AbortController();const local=abort,timer=setTimeout(()=>local.abort(),12000);try{return await app.api(method,'/study-tags',body,local.signal,at);}finally{clearTimeout(timer);if(abort===local)abort=null;}}
@@ -39,23 +43,22 @@ window.KinStudyTags=function(app){
   async function command(action,extra={}){
     const at=work.capture('document');if(busy||pending||!same()||!catalog())return;
     if(['add','remove'].includes(action)&&current!==app.current()){current=app.current();draw(true);message('선택 검사가 바뀌었습니다. 대상을 확인하고 다시 누르세요.');return;}
-    if(action==='create'&&tag()&&$('name').value!==tag().name&&!confirm('저장하지 않은 태그 이름 변경을 버리고 새 태그를 만들까요?'))return;
     pending={expectedOwner:owner,scope,revision:catalog().revision,requestId:crypto.randomUUID(),tagId:action==='create'?crypto.randomUUID():selected,action,...extra};await send();}
   async function send(){
     const at=work.capture('document');if(busy||!pending||!same())return;const ticket=++seq,body=pending;busy=true;controls();message('태그 변경을 저장하는 중…');
     try{const value=await request('POST',body,at);
-      work.commit(at,()=>{if(ticket!==seq||!same())return;adopt(value);pending=null;if(body.action==='create'){selected=body.tagId;$('new').value='';}draw(['add','remove'].includes(body.action));message('저장되었습니다.');});}
+      work.commit(at,()=>{if(ticket!==seq||!same())return;adopt(value);pending=null;if(['rename','delete'].includes(body.action))names.delete(body.scope+':'+body.tagId);if(body.action==='create'){selected=body.tagId;newNames.delete(body.scope);$('new').value='';}draw(['add','remove'].includes(body.action));message('저장되었습니다.');});}
     catch(e){work.commit(at,()=>{if(ticket===seq&&same()){if([400,403,404,409].includes(e.status))pending=null;message('저장 확인 실패: '+e.message+(pending?' · 같은 요청을 다시 시도하거나 최신 목록을 읽으세요.':' · 입력을 확인하거나 최신 목록을 읽으세요.')+' 입력은 유지했습니다.');}});}
     finally{work.commit(at,()=>{if(ticket===seq){busy=false;controls();}});}}
   async function apply(){
-    const at=work.capture('document');if(busy||pending||!same()||!tag()||dirty()&&!confirm('저장하지 않은 태그 이름 입력을 버리고 목록을 볼까요?'))return;const ticket=++seq,wanted=selected;busy=true;controls();
+    const at=work.capture('document');if(busy||pending||!same()||!tag())return;const ticket=++seq,wanted=selected;busy=true;controls();
     try{const value=await request('GET',undefined,at);
       work.commit(at,()=>{if(ticket!==seq||!same())return;adopt(value);if(!catalog().tags.some(x=>x.id===wanted))throw new Error('태그가 삭제되었습니다');app.apply(value,scope,wanted);busy=false;const focus=opener;close(true);if(focus?.isConnected)focus.focus();});}
     catch(e){work.commit(at,()=>{if(ticket===seq&&same())message('태그 목록 적용 실패: '+e.message);});}finally{work.commit(at,()=>{if(ticket===seq){busy=false;controls();}});}}
-  function close(force=false){if(!force&&(busy||pending&&!confirm('처리 결과를 아직 확인하지 못했습니다. 닫고 다시 열어 결과를 확인할까요?')||!pending&&dirty()&&!confirm('저장하지 않은 태그 이름 입력을 버리고 닫을까요?')))return;
+  function close(force=false){if(!force&&(busy||pending&&!confirm('처리 결과를 아직 확인하지 못했습니다. 닫고 다시 열어 결과를 확인할까요?')))return;
     ++seq;abort?.abort();abort=null;busy=false;pending=null;owner=state=current=selected=null;$('list').replaceChildren();$('new').value=$('name').value='';$('current').textContent=$('assigned').textContent=$('count').textContent='';message('');if(d.open)d.close();if(!force&&opener?.isConnected)opener.focus();opener=null;}
-  function end(){ended=true;close(true);app.ended();}
-  $('scope').onchange=()=>{const next=$('scope').value;if(dirty()&&!confirm('저장하지 않은 태그 이름 입력을 버리고 범위를 바꿀까요?')){$('scope').value=scope;return;}scope=next;selected=null;$('new').value='';draw();};
+  function end(){ended=true;names.clear();newNames.clear();draftOwner=null;close(true);app.ended();}
+  $('scope').onchange=()=>{scope=$('scope').value;selected=null;draw();};
   $('create').onclick=()=>command('create',{name:$('new').value});$('rename').onclick=()=>command('rename',{name:$('name').value});$('delete').onclick=()=>{if(tag()&&confirm('태그와 검사 연결만 삭제합니다. 원검사와 판독문은 유지됩니다. 계속할까요?'))command('delete');};
   $('add').onclick=()=>command('add',{uid:current});$('remove').onclick=()=>command('remove',{uid:current});$('apply').onclick=apply;$('retry').onclick=send;$('reload').onclick=load;$('close').onclick=()=>close();d.addEventListener('cancel',e=>{e.preventDefault();close();});
   work.onInvalidate(event=>{
@@ -63,5 +66,5 @@ window.KinStudyTags=function(app){
     if(event.reason==='cancel'){const interrupted=busy;++seq;busy=false;controls();if(d.open&&(interrupted||!state))load();}
   });
   window.addEventListener('pagehide',end);
-  return {open(){if(ended||d.open||!app.allowed())return;owner=app.identity();if(!owner)return;scope='personal';current=app.current();opener=document.activeElement;d.showModal();draw();load();}};
+  return {open(){if(ended||d.open||!app.allowed())return;owner=app.identity();if(!owner)return;const key=JSON.stringify(owner);if(draftOwner!==key){names.clear();newNames.clear();draftOwner=key;}scope='personal';current=app.current();opener=document.activeElement;d.showModal();draw();load();}};
 };

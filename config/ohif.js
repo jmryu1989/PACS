@@ -614,7 +614,6 @@ function kinCreateSRProvenance() {
       }
     }
     walk(instance?.ContentSequence, null);
-    if (incomplete) groups.clear();
     groups.incomplete = incomplete; return groups;
   };
   function mount() {
@@ -1719,7 +1718,7 @@ function kinCreateViewerHistory() {
         do {
           const page = await api(path() + '?includeHidden=true&limit=100' + (recheck ? '&recheck=' + encodeURIComponent(recheck) : '') + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {}, ticket);
           if (!asked(ticket, seq, 'author')) return;
-          if (!Array.isArray(page.items) || heads.length + page.items.length > 512 || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
+          if (!Array.isArray(page.items) || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
           heads.push(...page.items); cursor = page.nextCursor;
         } while (cursor);
         if (!asked(ticket, seq, 'author')) return;
@@ -1769,20 +1768,20 @@ function kinCreateViewerHistory() {
     async function readOnlyLoad(ticket, seq) {
       if (!valid(ticket) || seq !== readSequence) return;
       const study = scope, heads = [];
-      let cursor = null, version = null, withheld = false, pages = 0;
+      let cursor = null, version = null, withheld = false;
       dropRows(); panel.dataset.readOnly = 'loading'; toolbar();
       try {
         do {
           const page = await api(path() + '?limit=100' + (cursor === null ? '' : '&cursor=' + encodeURIComponent(cursor)), {}, ticket);
           if (!asked(ticket, seq, 'final')) return;
-          if (++pages > 6 || !page || page.uid !== study || typeof page.final !== 'boolean') throw new Error('Invalid page');
+          if (!page || page.uid !== study || typeof page.final !== 'boolean') throw new Error('Invalid page');
           if (!page.final) {
             if (cursor !== null || page.items !== null || page.nextCursor !== null) throw new Error('Invalid page');
             withheld = true; break;
           }
           const next = page.nextCursor;
           if (!Number.isSafeInteger(page.reportVersion) || page.reportVersion < 1 || (version !== null && page.reportVersion !== version) ||
-              !Array.isArray(page.items) || page.items.length > 100 || heads.length + page.items.length > 512 ||
+              !Array.isArray(page.items) || page.items.length > 100 ||
               !page.items.every(h => h && typeof h === 'object' && typeof h.id === 'string' && h.id && Number.isSafeInteger(h.revision) &&
                 h.item && typeof h.item === 'object' && Object.hasOwn(names, h.item.kind)) ||
               !(next === null || typeof next === 'string' && next.length > 0 && next.length <= 512 && next !== cursor)) throw new Error('Invalid page');
@@ -2057,8 +2056,8 @@ function kinCreateViewerHistory() {
         else if (e.editing) button(el, 'Save', () => save(e, 'edit'), !!e.busy || !!e.latest || !!sourceUnverified);
         else if (!e.head?.hidden) button(el, 'Edit', () => { e.editing = true; lock(e, false); row(e); }, manual(e.draft.kind) && e.head?.referenceStatus !== 'verified');
         if (e.head && !e.editing && !e.pending) button(el, e.head.hidden ? 'Restore' : 'Hide', () => {
-          const reason = window.prompt((e.head.hidden ? '복원' : '숨김') + ' 사유');
-          if (reason?.trim()) save(e, e.head.hidden ? 'restore' : 'hide', reason);
+          const reason = window.prompt((e.head.hidden ? '복원' : '숨김') + ' 사유 (선택)');
+          if (reason !== null) save(e, e.head.hidden ? 'restore' : 'hide', reason);
         }, !!e.busy);
         if (e.latest && !e.pending) button(el, 'Use Latest & Keep Changes', () => {
           e.head = e.latest; e.latest = null;
@@ -4562,6 +4561,66 @@ function kinCreateStudyPrefetch() {
   }
   return { id: 'kin.study-prefetch', onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
+
+// OHIF's study browser searches priors by MRN. Patient IDs are local to an
+// institution, so resolve them through the same source patient key as Related.
+// Each resulting UID still uses the ordinary scoped DICOMweb query.
+function kinCreateStudySearch() {
+  let extensions, stop;
+  function mount() {
+    stop?.();
+    const studies = extensions.getActiveDataSource()[0].query.studies;
+    const original = studies.search, search = location.search;
+    const opened = new URLSearchParams(search).get('StudyInstanceUIDs')?.split(',') || [];
+    let ended = false;
+    const controller = new AbortController();
+    const session = kinViewerOnEnd(() => { ended = true; controller.abort(); });
+    const live = () => !ended && location.search === search;
+    const current = () => { if (!live()) throw new Error('검사 조회가 종료되었습니다.'); };
+    // OHIF repeats the patient lookup for each opened study. Share the list only
+    // within this mode/session; each UID query still checks current access.
+    let listing;
+    const readList = () => listing ||= (async () => {
+      const response = await fetch('/api/studies', { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
+      if (!response.ok) throw new Error('이전 검사 목록을 확인하지 못했습니다 (HTTP ' + response.status + ').');
+      return response.json();
+    })().catch(error => { listing = null; throw error; });
+    // /api/studies is the radiology list; a clinician-only session is refused it (api/src/clinician-policy.ts) and keeps the
+    // stock scoped MRN search. An account not yet confirmed either way does not read that list or merge by MRN.
+    const role = async () => {
+      const now = kinViewerSession.state();
+      return now === 'unconfirmed' ? kinViewerSession.decide() : now;
+    };
+    const wrapped = async function (params) {
+      if (!params?.patientId || params.studyInstanceUid) return original.call(this, params);
+      current();
+      const verdict = await role();
+      current();
+      if (verdict === 'read-only') return original.call(this, params);
+      if (verdict !== 'writer') throw new Error('계정을 확인하지 못해 이전 검사를 찾지 않았습니다.');
+      const list = await readList();
+      current();
+      const keys = new Set(list.studies.filter(row => opened.includes(row.uid) && row.id === params.patientId && row.sourcePatientKey)
+        .map(row => row.sourcePatientKey));
+      // The stock MRN request does not identify which opened study asked it.
+      // Keep its current-study fallback when two institutions reuse that MRN.
+      if (keys.size > 1) throw new Error('기관별 환자 식별이 달라 이전 검사를 하나로 묶을 수 없습니다.');
+      if (keys.size === 0) throw new Error('열린 검사의 환자 식별을 확인하지 못했습니다.');
+      const rows = list.studies.filter(row => row.id === params.patientId && keys.has(row.sourcePatientKey));
+      const results = [];
+      for (const row of rows) {
+        current();
+        results.push(...await original.call(this, { ...params, studyInstanceUid: row.uid, disableWildcard: true }));
+      }
+      current();
+      return results;
+    };
+    studies.search = wrapped;
+    stop = () => { ended = true; controller.abort(); session.close(); if (studies.search === wrapped) studies.search = original; };
+  }
+  return { id: 'kin.study-search', preRegistration({ extensionManager }) { extensions = extensionManager; },
+    onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
+}
 // The stock mode owns the grid and Cornerstone elements. This extension owns
 // only its chrome and removes it when that mode or document ends.
 function kinCreateViewerUX() {
@@ -4749,7 +4808,7 @@ function kinCreateMultiStudyStrip() {
 }
 
 window.config = {
-  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateViewerUX(), kinCreateViewerPrior(), kinCreateMultiStudyStrip()],
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateStudySearch(), kinCreateViewerUX(), kinCreateViewerPrior(), kinCreateMultiStudyStrip()],
   // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
   // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
   kinThreeDCursor: { enabled: false },

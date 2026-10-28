@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { mgGeometry } from './mg-geometry';
 
 const invalid = (message = '표시 저장 입력이 올바르지 않습니다'): never => { throw new BadRequestException(message); };
-export const VIEWER_LIMITS = Object.freeze({ items: 512, revisions: 4096, bytes: 16 * 1024 * 1024, snapshot: 8192 });
+export const VIEWER_LIMITS = Object.freeze({ snapshot: 8192 });
 
 // JSON.parse has already discarded duplicate object keys. Parse the bounded original
 // bytes so two differently interpreted commands cannot share one idempotency key.
@@ -126,7 +126,6 @@ export function viewerCommand(raw: Buffer, create: boolean): ViewerCommand {
   const action = create ? 'create' : body.action;
   if (!['create', 'edit', 'hide', 'restore'].includes(action) || (!create && action === 'create')) invalid();
   const reason = text(body.reason === undefined ? '' : body.reason, 1000);
-  if ((action === 'hide' || action === 'restore') ? !reason.trim() : reason !== '') invalid('숨김/복원에는 사유가 필요합니다');
   const item = body.item;
   const common = ['schemaVersion', 'kind', 'seriesUid', 'sopUid', 'frame'];
   if (item?.kind === 'arrow') object(item, [...common, 'frameOfReferenceUid', 'label', 'points']);

@@ -24,20 +24,41 @@
         try { return await request(path, ownController.signal,at); }
         finally { clearTimeout(timer); }
       }
+      // A list that changed between pages (server 409, or an offset/total that no longer continues the pages read so far)
+      // would join two different lists: an urgent study arriving before the cursor goes missing from a list that reads as
+      // complete. Start again from the first page, quietly, for as long as one request may wait (timeoutMs) from the
+      // first change seen; a list still changing after that is reported as changed. No count: the poll waits while this
+      // read is busy, so the bound has to end it, and the request allowance is the time this read already grants.
+      // A first page's 409 is a change the server saw inside one answer and is reported as before.
+      let changedAt = null;
+      const changedList = () => Object.assign(new Error('읽는 동안 검사 목록이 계속 바뀌었습니다. 새로고침하세요.'), { code:'STUDY_LIST_CHANGED' });
+      const recovering = () => changedAt === null || Date.now() - changedAt < timeoutMs;
+      const restart = () => {
+        if (!work.commit(at,()=>{ changedAt ??= Date.now(); draft.rows = []; draft.total = null; draft.next = null; delete draft.observation; delete draft.identityIssues;
+          state('검사 목록이 바뀌어 처음부터 다시 불러오는 중…'); })) throw Object.assign(new Error('목록 조회가 중단되었습니다.'),{stale:true});
+      };
       try {
         while (draft.total === null || draft.next !== null) {
-          work.commit(at,()=>state('검사 목록을 나누어 불러오는 중…'));
-          const data = await get('/studies?limit=100' + (draft.next ? '&after=' + encodeURIComponent(draft.next) : ''));
+          if (changedAt === null) work.commit(at,()=>state('검사 목록을 나누어 불러오는 중…'));
+          let data;
+          try { data = await get('/studies?limit=100' + (draft.next ? '&after=' + encodeURIComponent(draft.next) : '')); }
+          catch (error) {
+            if (error?.code !== 'STUDY_LIST_CHANGED' || !draft.next || !recovering() || !active()) throw error;
+            restart(); continue;
+          }
           if (!active()) throw Object.assign(new Error('계정 또는 판독 작업이 바뀌어 목록 응답을 적용하지 않았습니다.'), { stale:true });
           const page = data?.pagination, rows = data?.studies;
           if (page && !same(page.owner,owner)) throw Object.assign(new Error('목록 계정이 바뀌었습니다.'),{ownerChanged:true});
           if (!page || !same(page.owner,owner) || !Array.isArray(rows) || rows.length > 100 || page.limit !== 100
-            || page.offset !== draft.rows.length || !Number.isSafeInteger(page.total) || page.total < 0
-            || (draft.total !== null && page.total !== draft.total)
+            || !Number.isSafeInteger(page.offset) || page.offset < 0 || !Number.isSafeInteger(page.total) || page.total < 0
             || !(page.next === null || typeof page.next === 'string' && page.next.length > 0 && page.next.length <= 4096)
             || (page.next !== null && (rows.length !== 100 || page.next === draft.next))
-            || draft.rows.length + rows.length > page.total
-            || (page.next === null && draft.rows.length + rows.length !== page.total)) throw Object.assign(new Error('목록 페이지 형식을 확인할 수 없습니다. 새로고침하세요.'),{stale:true});
+            || page.offset + rows.length > page.total
+            || (page.next === null && page.offset + rows.length !== page.total)) throw Object.assign(new Error('목록 페이지 형식을 확인할 수 없습니다. 새로고침하세요.'),{stale:true});
+          if (page.offset !== draft.rows.length || (draft.total !== null && page.total !== draft.total)) {
+            if (!recovering()) throw changedList();
+            restart(); continue;
+          }
           let previous = draft.rows.at(-1)?.uid;
           for (const row of rows) {
             if (!row || typeof row.uid !== 'string' || !row.uid || (previous !== undefined && row.uid <= previous)

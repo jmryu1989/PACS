@@ -224,7 +224,7 @@ model GatewayRetryRequest {
 model TechNoteRevision {
   studyUid String
   version Int
-  text String @db.VarChar(10000)
+  text String @db.Text
   reason String @db.VarChar(1000)
   author String
   authorSub String
@@ -799,9 +799,9 @@ model StudyConsultation {
   recipientSub String @db.VarChar(256)
   recipientActor String @db.VarChar(256)
   recipientName String @db.VarChar(256)
-  reason String @db.VarChar(2000)
-  reply String? @db.VarChar(2000)
-  cancelReason String? @db.VarChar(2000)
+  reason String @db.Text
+  reply String? @db.Text
+  cancelReason String? @db.Text
   state String @db.VarChar(16)
   revision Int
   changedBy String @db.VarChar(256)
@@ -850,7 +850,7 @@ model StudyQuestionEntry {
   question StudyQuestion @relation(fields: [questionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   seq Int
   kind String @db.VarChar(16)
-  body String @db.VarChar(2000)
+  body String @db.Text
   authorSub String @db.VarChar(256)
   authorActor String @db.VarChar(256)
   authorName String @db.VarChar(256)

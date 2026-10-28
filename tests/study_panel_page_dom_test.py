@@ -81,6 +81,14 @@ HIDE_W4 = "() => document.querySelector('#b-approve-next')?.style.setProperty('v
 # the W9 cases (multi_study_view_dom_test.py).
 HIDE_W9 = """() => [...document.querySelectorAll('#worklist-selection button')]
   .find(b => b.textContent === 'Open Selected Studies')?.style.setProperty('display', 'none')"""
+# #259 caution census (307cd3c, the user-approved census): three commands that were never available leave the page -
+# the Reading Template's 'Study Description (준비 중)' option, Except and Split Exam (hidden, still in the DOM). The option
+# shortened the Reading Template line, so in stacked windows the work area below it moved. A decided difference: the
+# first-paint comparisons apply the same removal to the baseline tree before measuring (HIDE_CENSUS; on the current page
+# they are already hidden) and compare every other box and pixel with it. Their absence is caution_app_dom_test's case.
+HIDE_CENSUS = """() => { document.querySelector('#t-desc')?.closest('label')?.setAttribute('hidden', '');
+  document.querySelector('#b-except')?.setAttribute('hidden', '');
+  [...document.querySelectorAll('button')].find(b => b.textContent === 'Split Exam')?.setAttribute('hidden', ''); }"""
 SCROLLER = '''() => { const r = document.querySelector('.redit').getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; }'''
 # Below the scroller in its column: the footer and each notice (a notice section's first row is its bar; an opened
 # notice pane scrolls inside its own height cap).
@@ -1240,6 +1248,7 @@ class StudyPanelPageDOM(unittest.TestCase):
             expect(page.locator('#rows')).to_contain_text(auth.PATIENT)
             wait_startup(page, site)
             page.evaluate(HIDE_W9)   # W9-UI decided difference, see HIDE_W9
+            page.evaluate(HIDE_CENSUS)   # #259 caution census decided difference, see HIDE_CENSUS
             settle(page)
             facts = page.evaluate("""(names) => ({focus:document.activeElement.id || document.activeElement.tagName,
               panels:names.map(s=>{
@@ -1330,6 +1339,8 @@ class StudyPanelPageDOM(unittest.TestCase):
         #   leaves it (w6_moved, w6_regions) and stays reachable (assert_w6_reachable).
         # - W9-UI (HIDE_W9 above): the Selected toolbar's Open Selected Studies
         #   button is taken out of the layout before anything is measured (HIDE_W9).
+        # - #259 caution census (HIDE_CENSUS above): its removed commands are hidden in the baseline
+        #   too before anything is measured.
         # Pixels count as equal within ANTIALIAS (16/255 per channel), not exact.
         current = auth.ROOT
         pictures = Path(os.environ.get('KIN_W3_PILOT_DIR', ROOT / 'tmp/w3-land/pilot')) / 'first-paint'
