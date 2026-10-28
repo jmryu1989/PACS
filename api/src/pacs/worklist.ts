@@ -58,7 +58,7 @@ export class PacsWorklist {
    *
    * D1882: 보낸 병원은 병원과 확인한 사실로만 정한다 — 등록된 InstitutionName 표기, 그것이 없으면 등록된 수신 장비.
    * 둘 다 맞지 않는 검사는 보류(institutionId null)다: 아무도 열지 못하고 어느 목록에도 없다. 장비·표기가 등록되면
-   * 다음 관측에서 이 자리가 붙인다. 장비는 기관명이 맞지 않는 검사에만 묻는다(Orthanc 조회 한 번, 캐시).
+   * 다음 관측에서 이 자리가 붙인다. 장비는 기관명이 맞지 않는 검사에만 묻는다(관측마다 수신 상태를 다시 읽고, 바뀌었을 때만 장비를 다시 읽는다).
    * Re-check before a second site: a device two hospitals share (joint screening centre, mobile unit) needs name or order
    * evidence, not the device alone.
    */
@@ -74,6 +74,8 @@ export class PacsWorklist {
         resolved = this.institutions.resolveDevice(device);
       }
       if (cur && !resolved) continue;
+      // Decided once: a held answer is no longer needed (a split UID's announcement reads its own again).
+      if (resolved) this.devices.delete(uid);
       // The audit row says which confirmed fact decided the hospital; an arrival keeps its old detail when the name did.
       const byDevice = resolved && device ? { via: 'device', aet: device } : null;
       const reread = () => this.prisma.studyState.findUnique({ where: { uid }, ...(select ? { select } : {}) });
@@ -118,26 +120,36 @@ export class PacsWorklist {
   }
 
   /**
-   * Sending device per study UID. The calling AE of a stored instance never changes, so one Orthanc read per held UID.
-   * A failed read is "not observed" for this pass and is asked again next time: it keeps the study held and never
-   * fails the institution's whole list.
+   * Sending device per study UID. A stored instance's calling AE never changes, but the study gains instances, possibly
+   * from another device, so an answer holds only under the arrival stamp read before it (stamp first: an instance that
+   * lands between the two reads makes the next stamp differ, never a stale match). A failed read is "not observed" for
+   * this pass and is asked again next time: it keeps the study held and never fails the institution's whole list.
    */
-  private readonly devices = new Map<string, string | null>();
+  private readonly devices = new Map<string, { stamp: string; device: string | null }>();
   private async sendingDevice(uid: string) {
-    if (this.devices.has(uid)) return this.devices.get(uid)!;
-    let device: string | null;
-    try { device = await this.orthanc.sendingDevice(uid); } catch { return null; }
-    if (this.devices.size >= 50000) this.devices.clear();   // 단순 상한(instanceStudyUid 캐시와 같은 방식)
-    this.devices.set(uid, device);
+    let stamp: string | null, device: string | null;
+    try {
+      stamp = await this.orthanc.studyArrivalStamp(uid);
+      if (stamp === null) { this.devices.delete(uid); return null; }
+      const known = this.devices.get(uid);
+      if (known?.stamp === stamp) return known.device;
+      device = await this.orthanc.sendingDevice(uid);
+    } catch { return null; }
+    this.devices.set(uid, { stamp, device });
     return device;
   }
 
-  /** Observes the archive once and runs the registration above over every UID; the held rows are those still null. */
+  /**
+   * Observes the archive once and runs the registration above over every UID; the held rows are those still null.
+   * The device answers kept are those of UIDs this observation still holds or announces, so the cache is the held set.
+   */
   private async observeArrivals() {
     const sources = groupSources(await this.orthanc.studyIdentities(), st => OrthancService.tag(st, '0020000D'));
     const select = { uid: true, institutionId: true, createdAt: true } as const;
     const byUid = new Map<string, any>((await this.prisma.studyState.findMany({ select })).map(s => [s.uid, s]));
     await this.registerArrivals(sources, byUid, select);
+    for (const uid of this.devices.keys())
+      if (!sources.byUid.has(uid) || (byUid.get(uid)?.institutionId != null && sources.byUid.get(uid)!.length === 1)) this.devices.delete(uid);
     return { sources, byUid };
   }
 

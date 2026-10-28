@@ -60,11 +60,12 @@ function world({ resources = [], states = [], policy = null, institutions = INST
     w.orthanc.push({ method, path: u.pathname, uid: u.searchParams.get('StudyInstanceUID'), inTx: w.inTx > 0 });
     if (w.orthancDown) throw new TypeError('fetch failed');
     if (method === 'POST' && u.pathname === '/tools/find') {
-      // D1882 sending-device read: the calling AE Orthanc recorded on each instance; none unless a case sets w.devices.
-      if (JSON.parse(init.body).Level === 'Instance') {
-        const device = w.devices?.[JSON.parse(init.body).Query.StudyInstanceUID];
-        return json(device ? w.resources.filter(r => r.uid === JSON.parse(init.body).Query.StudyInstanceUID).map(() => ({ Type: 'Instance', Metadata: { RemoteAET: device } })) : []);
-      }
+      // D1882 sending-device read: the calling AE Orthanc recorded on each instance (w.devices[uid]: one title, or one per
+      // instance); none unless a case sets it. The arrival stamp counts those instances, as Orthanc's would change.
+      const find = JSON.parse(init.body), titles = [].concat(w.devices?.[find.Query.StudyInstanceUID] ?? []);
+      if (find.Level === 'Instance') return json(titles.map(title => ({ Type: 'Instance', Metadata: { RemoteAET: title } })));
+      if (find.Query.StudyInstanceUID) return json(w.resources.filter(r => r.uid === find.Query.StudyInstanceUID).map(r => ({ Type: 'Study',
+        ID: 'syn-' + r.patientId, Metadata: { LastUpdate: '20261001T000000' }, RequestedTags: { NumberOfStudyRelatedInstances: String(titles.length || 1) } })));
       const asked = JSON.parse(init.body).RequestedTags;
       const tags = r => ({ StudyInstanceUID: r.uid, InstitutionName: r.institution, PatientID: r.patientId, StudyDate: r.date,
         ModalitiesInStudy: r.modalities.join('\\'), AccessionNumber: r.accession });
@@ -607,6 +608,31 @@ test('TEST-WSU-09 D1882 a split UID attached by its registered device is announc
   assert.deepEqual(listed.identityIssues, [{ uid: SPLIT, code: 'STUDY_IDENTITY_UNRESOLVED' }]);
   assert.deepEqual(listed.studies.map(r => r.uid), [NORMAL]);
   assert.equal((await w.pacs.listStudies(caller({ institution: 'center' }))).identityIssues?.length ?? 0, 0, 'never on another institution behalf');
+});
+test('TEST-WSU-09 D1882 a held study is decided on its current instances: a second device after the first answer keeps it held', async () => {
+  const institutions = INSTITUTIONS.map(i => ({ ...i, dicomAets: '' }));
+  const w = await world({ resources: [resource(NORMAL, 'SYN-PID-N', { institution: 'UNKNOWN' })], institutions }).start();
+  const admin = caller({ roles: ['admin'] });
+  w.devices = { [NORMAL]: ['SYN_CT_A'] };
+  assert.deepEqual((await w.pacs.heldSources(admin)).groups.map(g => g.device), ['SYN_CT_A']);
+  w.devices[NORMAL].push('SYN_CT_B');
+  // The hospital confirms SYN_CT_A afterwards; the study it no longer solely sent stays held.
+  institutions[0].dicomAets = 'SYN_CT_A';
+  await w.start();
+  assert.deepEqual(uidsOf(await w.pacs.listStudies(caller())), []);
+  assert.equal(w.states.get(NORMAL).institutionId, null);
+  assert.deepEqual((await w.pacs.heldSources(admin)).groups.map(g => g.device), [null]);
+});
+test('TEST-WSU-09 D1882 a row with no owner opens for nobody through the DICOM gate, a tele value on it included', async () => {
+  for (const [owner, opens] of [[null, false], ['center', true]]) {
+    const w = await world({ resources: [resource(NORMAL, 'SYN-PID-N', { institution: 'UNKNOWN' })],
+      states: [stateRow(NORMAL, { institutionId: owner, teleInstitutionId: 'hallym' })] }).start();
+    for (const roles of [['radiologist'], ['admin']]) {
+      const gate = w.pacs.authzDicom('/dicom-web/studies/' + NORMAL + '/metadata', 'GET', caller({ roles }));
+      if (opens) await gate; else await rejects(gate, 403);
+      assert.equal(uidsOf(await w.pacs.listStudies(caller({ roles }))).includes(NORMAL), opens, `${owner} ${roles}`);
+    }
+  }
 });test('TEST-WSU-09 the clinician list and timeline count the normal set and carry only UID+code issues', async () => {
   const w = await world({ resources: [A(), B(), resource(NORMAL, 'SYN-PID-N'), resource('2.25.101', 'SYN-PID-N')] }).start();
   const clinician = caller({ roles: ['clinician'], actor: 'clinician-1', sub: 'sub-clinician' });

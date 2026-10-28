@@ -300,6 +300,9 @@ function orthancDouble() {
     async studyIdentities() { return copy(o.rows); },
     devices: {},   // D1882: the calling AE title Orthanc recorded per study UID
     async sendingDevice(uid) { return o.devices[uid] ?? null; },
+    // An arriving instance changes a study's stamp; a case sets `stamps[uid]` when one arrives.
+    stamps: {},
+    async studyArrivalStamp(uid) { return o.rows.some(r => r['0020000D'].Value[0] === uid) ? String(o.stamps[uid] ?? 0) : null; },
     async studiesByUid(uids) { return copy(o.rows.filter(r => uids.includes(r['0020000D'].Value[0]))); },
     async statistics() { if (o.statisticsAnswer instanceof Error) throw o.statisticsAnswer; return o.statisticsAnswer; },
     async instanceStudyUid() { throw new Error('double: not used'); },
@@ -706,7 +709,7 @@ test('SPLIT-13 one institution cache serves every concern; an unknown sending ho
   // Registrations: admin only, own institution only, a confirmation is required, one value names one institution.
   await refused(() => w.worklist.registerSourceDevice({ value: 'SYN_CT_7', confirmation: 'SYN phone' }, RAD_A), 403);
   await refused(() => w.worklist.registerSourceDevice({ value: 'SYN_CT_7', confirmation: '' }, ADMIN_A), 400);
-  await refused(() => w.worklist.registerSourceDevice({ value: 'SYN,CT', confirmation: 'SYN phone' }, ADMIN_A), 400);
+  await refused(() => w.worklist.registerSourceDevice({ value: 'SYN_CT_7_17_CHARS', confirmation: 'SYN phone' }, ADMIN_A), 400);
   const device = await w.worklist.registerSourceDevice({ value: ' SYN_CT_7 ', confirmation: 'SYN phone with A radiology' }, ADMIN_A);
   assert.deepEqual([device.institutionId, device.changed, device.attached], [INST_A, true, 1]);
   await refused(() => w.worklist.registerSourceDevice({ value: 'SYN_CT_7', confirmation: 'SYN' }, ADMIN_B), 409);
@@ -727,6 +730,35 @@ test('SPLIT-13 one institution cache serves every concern; an unknown sending ho
   w.orthanc.devices[later] = 'SYN_CT_7';
   assert.ok((await w.worklist.listStudies(RAD_A)).studies.some(r => r.uid === later));
   assert.deepEqual(JSON.parse(w.audits('study.arrived').find(a => a.target === later).detail), { institutionId: INST_A, via: 'device', aet: 'SYN_CT_7' });
+});
+
+test('SPLIT-13 a held study is decided on its current instances, and a spelling with a comma registers as one value', async () => {
+  const w = world();
+  await w.boot();
+  const moved = uidOf(), comma = uidOf();
+  w.orthanc.rows = [qido(moved, 'SYN UNKNOWN SITE'), qido(comma, 'SYN Hospital, Main')];
+  w.orthanc.devices = { [moved]: 'SYN_CT_8', [comma]: null };
+  const groups = async () => (await w.worklist.heldSources(ADMIN_A)).groups.map(g => [g.device, g.institutionText]).sort();
+  assert.deepEqual(await groups(), [[null, 'SYN Hospital, Main'], ['SYN_CT_8', 'SYN UNKNOWN SITE']]);
+  // An instance from another device arrives after the first answer: the study no longer has one sending device, so the
+  // first device's registration does not attach it.
+  w.orthanc.devices[moved] = null;
+  w.orthanc.stamps[moved] = 'second instance';
+  assert.equal((await w.worklist.registerSourceDevice({ value: 'SYN_CT_8', confirmation: 'SYN phone' }, ADMIN_A)).attached, 0);
+  assert.equal(w.db.rows('studyState').find(r => r.uid === moved).institutionId, null);
+  assert.deepEqual(await groups(), [[null, 'SYN Hospital, Main'], [null, 'SYN UNKNOWN SITE']]);
+  assert.deepEqual((await w.worklist.listStudies(RAD_A)).studies, []);
+  // A spelling the hospital sends with a comma is one registered value, never two fragments, here and in the import gate.
+  const spelling = await w.worklist.registerInstitutionAlias({ value: 'SYN Hospital, Main', confirmation: 'SYN mail' }, ADMIN_A);
+  assert.deepEqual([spelling.changed, spelling.attached], [true, 1]);
+  assert.equal(w.institutions.resolveInstitution('syn hospital, main'), INST_A);
+  for (const fragment of ['SYN Hospital', 'Main']) assert.equal(w.institutions.resolveInstitution(fragment), null, fragment);
+  assert.equal(w.institutions.resolveInstitution('SYN A HOSPITAL'), INST_A, 'the earlier spelling still resolves');
+  assert.deepEqual((await w.worklist.listStudies(RAD_A)).studies.map(r => r.uid), [comma]);
+  const { issuerInstitutions } = require('/app/dist/dicom-import-gate.service');
+  const stored = w.db.rows('institution').filter(r => r.id === INST_A);
+  assert.deepEqual([...issuerInstitutions('SYN Hospital, Main', stored)], [INST_A]);
+  assert.deepEqual([...issuerInstitutions('Main', stored)], []);
 });
 // ── A-027 (D1881): the institution GET audit records each returned row to ──
 

@@ -111,8 +111,8 @@ model Institution {
   id         String   @id                     // "hallym", "kin-center"
   name       String                           // 화면에 보이는 이름
   type       String   @default("hospital")    // hospital | reading-center
-  dicomNames String   @default("")            // InstitutionName 별칭, 콤마 구분
-  /// D1882: 병원과 확인해 관리자가 등록한 수신 장비(C-STORE calling AE Title), 콤마 구분. 기관명이 맞지 않는 검사는
+  dicomNames String   @default("")            // InstitutionName 별칭, 콤마 구분(값 안의 쉼표·역슬래시는 \로 이스케이프, api/src/institution-values.ts)
+  /// D1882: 병원과 확인해 관리자가 등록한 수신 장비(C-STORE calling AE Title), dicomNames와 같은 목록 형식. 기관명이 맞지 않는 검사는
   /// 이 장비로만 보낸 병원을 정하고, 둘 다 맞지 않으면 보류한다.
   dicomAets  String   @default("")
   createdAt  DateTime @default(now())

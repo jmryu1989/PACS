@@ -27,7 +27,7 @@
   function failure(error, writing) {
     if (error?.status === 403) return writing ? '이 계정으로는 등록할 수 없습니다.' : '이 계정으로는 보류 검사 알림을 조회할 수 없습니다.';
     if (error?.status === 409) return '이미 다른 기관에 등록된 값입니다. 병원과 다시 확인하세요.';
-    if (error?.status === 400) return '입력을 확인하세요. 쉼표 없이 장비 AE Title은 16자, 기관명 표기는 128자, 병원 확인 내용은 500자 이내입니다.';
+    if (error?.status === 400) return '입력을 확인하세요. 장비 AE Title은 16자 이내이고 병원과 확인한 내용이 필요합니다.';
     if (error?.status === 503) return '서버가 바쁘거나 원본 조회가 지연되었습니다. 잠시 후 다시 시도하세요.';
     return writing ? '등록 결과를 확인하지 못했습니다. Refresh로 현재 상태를 확인하세요.' : '보류 검사 알림을 불러오지 못했습니다.';
   }
@@ -71,8 +71,8 @@
       };
       if (group.device) add('Register Device', 'device', group.device, '');
       if (group.institutionText)
-        add('Register Name', 'alias', group.institutionText, group.institutionText.includes(',') || group.institutionText.includes(' / ')
-          ? '쉼표가 들었거나 표기가 여럿인 기관명은 등록할 수 없습니다. 수신 장비 등록으로 연결하세요.' : '');
+        add('Register Name', 'alias', group.institutionText, group.institutionText.includes(' / ')
+          ? '표기가 여럿인 기관명은 등록할 수 없습니다. 수신 장비 등록으로 연결하세요.' : '');
       return tr;
     });
     $('#held-rows').replaceChildren(...rows);
@@ -80,7 +80,8 @@
     $('#held-empty').hidden = !!rows.length;
   }
 
-  async function refresh() {
+  // `outcome`: a registration's result, kept on screen through the refresh that follows it.
+  async function refresh(outcome = '') {
     if (KinConsoleSession.ended()) return;
     const mine = ++seq;
     $('#held-refresh').disabled = true;
@@ -92,10 +93,10 @@
     try {
       if (error) throw error;
       draw(result);
-      message('');
+      message(outcome);
     } catch (e) {
       state('query_failed', 'Unknown');
-      message(failure(e === error ? error : null, false));
+      message([outcome, failure(e === error ? error : null, false)].filter(Boolean).join(' '));
     }
   }
 
@@ -125,9 +126,10 @@
       const result = await request('POST', kind === 'device' ? '/admin/source-devices' : '/admin/institution-aliases', { value, confirmation });
       if (KinConsoleSession.ended()) return;
       $('#held-dialog').close();
-      message(result?.changed === false ? '이미 이 기관에 등록된 값입니다.'
-        : `등록했습니다. 보류 검사 ${Number.isInteger(result?.attached) ? result.attached : 0}건이 이 기관에 연결되었습니다.`);
-      void refresh();
+      const outcome = result?.changed === false ? '이미 이 기관에 등록된 값입니다.'
+        : `등록했습니다. 보류 검사 ${Number.isInteger(result?.attached) ? result.attached : 0}건이 이 기관에 연결되었습니다.`;
+      message(outcome);
+      void refresh(outcome);
     } catch (error) {
       if (KinConsoleSession.ended()) return;
       $('#held-dialog-message').textContent = failure(error, true);
@@ -147,7 +149,7 @@
     message('');
     if ($('#held-dialog').open) $('#held-dialog').close();
   });
-  $('#held-refresh').addEventListener('click', refresh);
+  $('#held-refresh').addEventListener('click', () => refresh());
   $('#held-form').addEventListener('submit', submit);
   $('#held-cancel').addEventListener('click', () => $('#held-dialog').close());
   // Enabled only for the session the Members console accepts; arriving from the worklist alert reads it at once.

@@ -9,12 +9,10 @@ import type { PrismaService } from '../prisma.service';
 import type { OrthancService } from '../orthanc.service';
 import type { KeycloakService } from '../keycloak.service';
 import { SEED_INSTITUTIONS, SEED_ORDERS } from '../seed';
+import { institutionValues as names, withInstitutionValue } from '../institution-values';
 import { dump } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
-
-/** A comma-separated registration column (dicomNames, dicomAets) as its trimmed, non-empty values. */
-const names = (value: unknown): string[] => String(value ?? '').split(',').map(s => s.trim()).filter(Boolean);
 
 export class PacsInstitutions {
   constructor(
@@ -104,12 +102,12 @@ export class PacsInstitutions {
     const me = inst(c);
     const value = typeof body?.value === 'string' ? body.value.trim() : '';
     const confirmation = typeof body?.confirmation === 'string' ? body.confirmation.trim() : '';
-    // Both lists are comma-separated (dicomNames already was); AE titles are at most 16 characters (PS3.5 VR AE).
-    if (!value || value.includes(',') || (kind === 'device' ? value.length > 16 : value.length > 128))
-      throw new BadRequestException(kind === 'device' ? '장비 AE Title을 확인하세요(쉼표 없이 16자 이내).'
-        : '기관명 표기를 확인하세요(쉼표 없이 128자 이내). 쉼표가 든 표기는 수신 장비 등록으로 연결하세요.');
-    if (!confirmation || confirmation.length > 500)
-      throw new BadRequestException('병원과 확인한 내용(누구와 언제)을 500자 이내로 적으세요.');
+    // AE titles are at most 16 characters (PS3.5 VR AE). A spelling and the confirmation are as long as the hospital's
+    // own text; the request body limit is their only bound. A comma is stored escaped (institution-values.ts).
+    if (!value || (kind === 'device' && value.length > 16))
+      throw new BadRequestException(kind === 'device' ? '장비 AE Title을 확인하세요(16자 이내).' : '기관명 표기를 확인하세요.');
+    if (!confirmation)
+      throw new BadRequestException('병원과 확인한 내용(누구와 언제)을 적으세요.');
     const field = kind === 'device' ? 'dicomAets' : 'dicomNames';
     const same = (row: any) => kind === 'device' ? names(row[field]).includes(value)
       : [row.id, row.name, ...names(row[field])].some(name => name.toLowerCase() === value.toLowerCase());
@@ -122,7 +120,7 @@ export class PacsInstitutions {
         throw new ConflictException({ code: 'SOURCE_REGISTERED_ELSEWHERE',
           message: '이미 다른 기관에 등록된 값입니다. 병원과 다시 확인하세요.' });
       if (same(own)) return false;
-      await tx.institution.update({ where: { id: me }, data: { [field]: [...names(own[field]), value].join(',') } });
+      await tx.institution.update({ where: { id: me }, data: { [field]: withInstitutionValue(own[field], value) } });
       await tx.auditLog.create({ data: { actor: c.actor || 'unknown',
         action: kind === 'device' ? 'institution.device.register' : 'institution.alias.register',
         target: me, detail: dump({ institution: me, value, confirmation }) } });

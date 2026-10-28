@@ -6,8 +6,11 @@ raw InstitutionName text, the arrival times and a count, and nothing about a pat
 registers, for the own institution, a device or a spelling confirmed with the hospital, through the real admin page and
 the API; the held studies attach to that institution, the attach is audited, and the institution's members then list
 them. A-027: GET audit records each returned row to the study's current institution in the EMR ledger.
+A held study's device is read on its current instances: an instance from a second device after the first answer keeps
+it held when the first device is registered. A spelling with a comma has its registration action. A row with no owner
+opens for nobody through the DICOMweb gate, a tele value on it included, for the radiologist and the admin.
 
-Synthetic only: two single-instance studies with run-unique UIDs, AE titles and InstitutionName texts. Cleanup deletes
+Synthetic only: single-instance studies (one study gains a second instance) with run-unique UIDs, AE titles and InstitutionName texts. Cleanup deletes
 exactly those Orthanc studies, their StudyState and AuditLog rows, the registration audit rows and restores the
 institution's registration columns. The API keeps the run-unique registrations in its cache until it restarts; they
 name values no other suite sends.
@@ -25,6 +28,8 @@ from pynetdicom import AE
 
 from test_worklist import WorklistE2E
 from invariants_live import AUDIT_GUARD_OFF, AUDIT_GUARD_ON, ROOT, psql
+from access_assertions import permission_denied
+from document_session import document_request
 
 sys.path.insert(0, str(ROOT / "scripts"))
 from send_cstore import DEFAULT_SOURCE, public_ct_series  # noqa: E402
@@ -63,42 +68,52 @@ class HeldSourceE2E(WorklistE2E):
         self.assertEqual(result.status, 200, result.text)
         return {row["uid"]: row for row in result.body["studies"]}
 
+    def owner(self):
+        me = self.stack.request("GET", "/me", "jmryu")
+        self.assertEqual(me.status, 200, me.text)
+        self.assertEqual(self.stack.request("GET", "/me", "doctor").body["institution"], me.body["institution"],
+                         "this suite needs the admin and the radiologist in one institution")
+        return me.body["institution"]
+
+    def own_cleanup(self, owner, uids, devices, spellings):
+        """Removes exactly this run's studies, their rows and audit rows, and this run's registration values."""
+        before = psql(f'SELECT "dicomNames" || chr(31) || "dicomAets" FROM "Institution" WHERE id={quoted([owner])};')
+        self.assertEqual(len(before), 1)
+
+        def cleanup():
+            self.close_contexts()
+            self.contexts = []
+            for uid in uids:
+                found = self.stack._orthanc_request("POST", "/tools/lookup", uid.encode())
+                for item in found.body if found.status == 200 else []:
+                    if item.get("Type") == "Study":
+                        self.assertEqual(self.stack._orthanc_request("DELETE", "/studies/" + item["ID"]).status, 200)
+            listed = quoted(uids)
+            psql('BEGIN; DELETE FROM "StudyState" WHERE uid IN (' + listed + '); ' + AUDIT_GUARD_OFF +
+                 ' DELETE FROM "AuditLog" WHERE target IN (' + listed + ') OR (action LIKE \'institution.%.register\' AND detail::jsonb->>\'value\' IN (' +
+                 quoted([*devices, *spellings]) + ')); ' + AUDIT_GUARD_ON + ' COMMIT;')
+            # Only this run's values leave the registration columns; whatever else they hold stays as it was.
+            names, aets = "\"dicomNames\"", "\"dicomAets\""
+            for value in spellings:
+                names = f"array_to_string(array_remove(string_to_array({names}, ','), {quoted([value])}), ',')"
+            for value in devices:
+                aets = f"array_to_string(array_remove(string_to_array({aets}, ','), {quoted([value])}), ',')"
+            psql(f'UPDATE "Institution" SET "dicomNames"={names}, "dicomAets"={aets} WHERE id={quoted([owner])};')
+            restored = psql(f'SELECT "dicomNames" || chr(31) || "dicomAets" FROM "Institution" WHERE id={quoted([owner])};')
+            self.assertEqual(restored, before)
+            self.assertEqual(psql('SELECT count(*) FROM "StudyState" WHERE uid IN (' + listed + ');'), ["0"])
+
+        self.addCleanup(cleanup)
+
     def test_held_01_unknown_source_is_held_until_a_confirmed_registration_attaches_it(self):
         run = uuid.uuid4().hex[:10].upper()
         device, other = "KH" + run, "KN" + run          # AE titles: at most 16 characters
         unknown, spelling = "SYNTHETIC UNKNOWN " + run, "SYNTHETIC SPELLING " + run
         by_device, by_spelling = generate_uid(), generate_uid()
         patients = ["HELD-D-" + run, "HELD-S-" + run]
-        me = self.stack.request("GET", "/me", "jmryu")
-        self.assertEqual(me.status, 200, me.text)
-        owner = me.body["institution"]
-        self.assertEqual(self.stack.request("GET", "/me", "doctor").body["institution"], owner,
-                         "this suite needs the admin and the radiologist in one institution")
-        before = psql(f'SELECT "dicomNames" || chr(31) || "dicomAets" FROM "Institution" WHERE id={quoted([owner])};')
-        self.assertEqual(len(before), 1)
+        owner = self.owner()
         source, base = public_ct_series(DEFAULT_SOURCE, 1)[0]
-
-        def cleanup():
-            self.close_contexts()
-            self.contexts = []
-            for uid in (by_device, by_spelling):
-                found = self.stack._orthanc_request("POST", "/tools/lookup", uid.encode())
-                for item in found.body if found.status == 200 else []:
-                    if item.get("Type") == "Study":
-                        self.assertEqual(self.stack._orthanc_request("DELETE", "/studies/" + item["ID"]).status, 200)
-            uids = quoted([by_device, by_spelling])
-            psql('BEGIN; DELETE FROM "StudyState" WHERE uid IN (' + uids + '); ' + AUDIT_GUARD_OFF +
-                 ' DELETE FROM "AuditLog" WHERE target IN (' + uids + ') OR (action LIKE \'institution.%.register\' AND detail::jsonb->>\'value\' IN (' +
-                 quoted([device, spelling]) + ')); ' + AUDIT_GUARD_ON + ' COMMIT;')
-            # Only this run's values leave the registration columns; whatever else they hold stays as it was.
-            psql('UPDATE "Institution" SET "dicomNames"=array_to_string(array_remove(string_to_array("dicomNames", \',\'), ' +
-                 quoted([spelling]) + '), \',\'), "dicomAets"=array_to_string(array_remove(string_to_array("dicomAets", \',\'), ' +
-                 quoted([device]) + '), \',\') WHERE id=' + quoted([owner]) + ';')
-            restored = psql(f'SELECT "dicomNames" || chr(31) || "dicomAets" FROM "Institution" WHERE id={quoted([owner])};')
-            self.assertEqual(restored, before)
-            self.assertEqual(psql('SELECT count(*) FROM "StudyState" WHERE uid IN (' + uids + ');'), ["0"])
-
-        self.addCleanup(cleanup)
+        self.own_cleanup(owner, [by_device, by_spelling], [device], [spelling])
         self.send(base, by_device, device, unknown, patients[0])
         self.send(base, by_spelling, other, spelling, patients[1])
 
@@ -133,9 +148,13 @@ class HeldSourceE2E(WorklistE2E):
         expect(page.locator("#held-dialog")).to_be_visible()
         expect(page.locator("#held-dialog-target")).to_contain_text(device)
         page.locator("#held-form input[name=confirmation]").fill("SYNTHETIC phone check " + run)
-        page.locator("#held-form button[type=submit]").click()
-        expect(page.locator("#held-message")).to_contain_text("1건")
+        with page.expect_response(lambda r: r.url.endswith("/api/admin/held-sources") and r.request.method == "GET") as refreshed:
+            page.locator("#held-form button[type=submit]").click()
+        self.assertEqual(refreshed.value.status, 200)
+        # After the refresh that follows the registration has drawn, the outcome is still on screen.
         expect(page.locator("#held-rows tr", has_text=device)).to_have_count(0)
+        expect(page.locator("#held-rows tr", has_text=spelling)).to_have_count(1)
+        expect(page.locator("#held-message")).to_contain_text("1건")
 
         doctor = self.listed("doctor")
         self.assertIn(by_device, doctor)
@@ -172,6 +191,48 @@ class HeldSourceE2E(WorklistE2E):
                         f"AND e.payload::jsonb->>'surface' = 'GET audit' AND t.record_id IN ({quoted(ids)});")
         self.assertGreaterEqual(len(managing), len(ids))
         self.assertEqual(set(managing), {owner})
+
+    def test_held_02_current_instances_decide_a_comma_spelling_registers_and_no_owner_opens_nothing(self):
+        run = uuid.uuid4().hex[:10].upper()
+        first, second, third = "KA" + run, "KB" + run, "KC" + run
+        unknown, comma_name = "SYNTHETIC MOVED " + run, "SYNTHETIC HOSPITAL, MAIN " + run
+        moved, comma = generate_uid(), generate_uid()
+        owner = self.owner()
+        source, base = public_ct_series(DEFAULT_SOURCE, 1)[0]
+        self.own_cleanup(owner, [moved, comma], [first], [])
+        self.send(base, moved, first, unknown, "HELD-M-" + run)
+        self.send(base, comma, third, comma_name, "HELD-C-" + run)
+
+        def groups():
+            alert = self.stack.request("GET", "/admin/held-sources", "jmryu")
+            self.assertEqual(alert.status, 200, alert.text)
+            return {(g["device"], g["institutionText"]) for g in alert.body["groups"]}
+
+        # The first answer names the first device. Another device then sends an instance of the same study: the study no
+        # longer has one sending device, and registering the first device does not attach it.
+        self.assertIn((first, unknown), groups())
+        self.send(base, moved, second, unknown, "HELD-M-" + run)
+        self.assertIn((None, unknown), groups())
+        registered = self.stack.request("POST", "/admin/source-devices", "jmryu",
+                                        {"value": first, "confirmation": "SYNTHETIC phone " + run})
+        self.assertIn(registered.status, (200, 201), registered.text)
+        self.assertEqual([registered.body["changed"], registered.body["attached"]], [True, 0])
+        self.assertEqual(psql(f'SELECT count(*) FROM "StudyState" WHERE uid={quoted([moved])} AND "institutionId" IS NULL;'), ["1"])
+        self.assertNotIn(moved, self.listed("doctor"))
+
+        # A held spelling with a comma and no device has its registration action on the real page.
+        page = self.login("jmryu")
+        page.goto(self.stack.proxy + "/worklist/hpacs-lite/admin.html#held-sources")
+        row = page.locator("#held-rows tr", has_text=comma_name)
+        expect(row.get_by_role("button", name="Register Name")).to_be_enabled()
+
+        # A row with no owner opens for nobody through the real DICOMweb gate, a tele value on it included.
+        psql(f'UPDATE "StudyState" SET "teleInstitutionId"={quoted([owner])} WHERE uid={quoted([moved])} AND "institutionId" IS NULL;')
+        self.assertEqual(psql(f'SELECT count(*) FROM "StudyState" WHERE uid={quoted([moved])} AND "institutionId" IS NULL '
+                              f'AND "teleInstitutionId"={quoted([owner])};'), ["1"])
+        for actor, viewer in (("jmryu", page), ("doctor", self.login("doctor"))):
+            permission_denied(self, document_request(viewer, "GET", f"{self.stack.proxy}/dicom-web/studies/{moved}/metadata"))
+            self.assertNotIn(moved, self.listed(actor))
 
 
 def load_tests(loader, tests, pattern):

@@ -19,6 +19,7 @@ import { PrismaService } from './prisma.service';
 import type { DicomReadResult } from './dicom-part10-reader';
 import { DICOM_READER_MESSAGES } from './dicom-part10-reader';
 import { birthKey, nameKey, sexKey } from './study-identity';
+import { institutionValues } from './institution-values';
 
 export const IMPORT_MIGRATION = '20261015013945_import_operation';
 /** One object per request (contract 4): 24 MiB. */
@@ -456,7 +457,7 @@ export function issuerInstitutions(value: string, institutions: readonly Institu
   const key = value.trim().toLowerCase();
   const found = new Set<string>();
   for (const row of institutions) {
-    const names = [row.id, row.name, ...String(row.dicomNames ?? '').split(',')].map(name => String(name).trim().toLowerCase()).filter(Boolean);
+    const names = [row.id, row.name, ...institutionValues(row.dicomNames)].map(name => String(name).trim().toLowerCase()).filter(Boolean);
     if (names.includes(key)) found.add(row.id);
   }
   return found;
