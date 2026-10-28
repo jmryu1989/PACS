@@ -552,7 +552,8 @@ export class OrthancService {
    * reader (dicom-frame.service.ts) does not serve itself. Backpressure follows the client. The response's own lifetime is
    * the source owner's signal, joined with the caller's: a client that goes away while the headers or a body chunk are
    * still pending aborts the Orthanc fetch and cancels its reader at once (the owner's `stop`), instead of leaving the
-   * request open until Orthanc happens to produce the next bytes. The caller has set no headers and writes nothing else.
+   * request open until Orthanc happens to produce the next bytes. The caller sets no header but the study it recorded
+   * (image-delivery-record.ts `RECORDED_STUDY_HEADER`) and writes nothing else.
    * `origin` is the public origin the browser used: Orthanc's DICOMweb answers name their parts (Content-Location) from
    * the forwarded host, as they did when nginx proxied to Orthanc, instead of from the internal `orthanc:8042`.
    */

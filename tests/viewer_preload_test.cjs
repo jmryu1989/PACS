@@ -3,10 +3,11 @@
 // -> TEST-MG-PRELOAD-VIEWER: the viewer's fetch under its session transport (worklist-v0/hpacs-lite/viewer-preload.js).
 // No held frame reaches the viewer before the study's live check read for its current opening (gate + 열람 record on
 // the server, revision compared here), and only from the copy that check was made against; a changed or refused study
-// is dropped and read live. Every image read the viewer sends names its opening (opening contract 2026-10-29): one per
-// document, a new one for studies shown again (patient tab, back/forward return) - read live for it before what the
-// document still holds can show - and none for business calls; the worker hears the viewer is busy until the answer's
-// body has ended.
+// is dropped and read live. Every image read the viewer sends - by a public image route or the API's own - names its
+// opening (opening contract 2026-10-29): one per document, a new one for studies shown again (patient tab, back/forward
+// return) - each read live for it before what the document still holds can show, whatever form showed it (a frame, also
+// queried, a rendering, a document, a preview; an object related to its study by the server's answer) - and none for
+// business calls; the worker hears the viewer is busy until the answer's body has ended.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { attach } = require('../worklist-v0/hpacs-lite/viewer-preload.js');
@@ -333,12 +334,15 @@ test('reenter: a study this document showed is read live for the new opening bef
     'the entered studies and the scope\'s unnamed reads take the new opening; a late read of a study left keeps its own');
 });
 
-test('reenter: a read that fails or is refused answers null and changes nothing; an entry never committed changes nothing', async () => {
+test('reenter: a read that fails or is refused answers null and changes nothing; an entry never committed changes nothing; a study whose reads all failed showed nothing and is not read', async () => {
   let status = 503;
   const { fetch, sent } = setup({ network: async url => new Response('x ' + url, { status, headers: { 'Content-Type': PART } }) });
+  assert.equal((await fetch(frameUrl(1), bound())).status, 503);
+  assert.ok(await fetch.reenter([STUDY]), 'nothing of the study showed here: its own first read records it');
+  assert.equal(sent.length, 1, 'no read again for a study whose only read failed');
   status = 200;
   await fetch(frameUrl(1), bound());
-  const first = openingOf(sent[0]);
+  const first = openingOf(sent.at(-1));
   for (const failing of [503, 401]) {
     status = failing;
     assert.equal(await fetch.reenter([STUDY]), null, String(failing));
@@ -347,9 +351,11 @@ test('reenter: a read that fails or is refused answers null and changes nothing;
   assert.ok(await fetch.reenter([STUDY]), 'recorded, but the tab never showed');
   await fetch(frameUrl(2), bound());
   assert.equal(openingOf(sent.at(-1)), first, 'the opening is unchanged');
-  const thrown = setup({ network: async () => { throw new TypeError('network'); } });
-  await assert.rejects(thrown.fetch(frameUrl(1), bound()));
-  assert.equal(await thrown.fetch.reenter([STUDY]), null);
+  let cut = false;
+  const thrown = setup({ network: async url => { if (cut) throw new TypeError('network'); return new Response('x ' + url, { headers: { 'Content-Type': PART } }); } });
+  await thrown.fetch(frameUrl(1), bound());
+  cut = true;
+  assert.equal(await thrown.fetch.reenter([STUDY]), null, 'a read that does not reach the server records nothing');
 });
 
 test('back/forward: the kept page is hidden on leaving and shown only after the return\'s opening is recorded; when it cannot be, it stays hidden with a Retry', async () => {
@@ -385,4 +391,112 @@ test('back/forward: the kept page is hidden on leaving and shown only after the 
   assert.ok(next && next !== first && openingOf(reads[0]) !== first);
   await s.fetch(frameUrl(2), bound());
   assert.deepEqual([s.sent.at(-1).headers.get('X-KIN-Preload'), openingOf(s.sent.at(-1))], ['check', next], 'the held copy is checked for the return');
+});
+
+const OBJECT_ID = '0a1b2c3d-4e5f6071-8293a4b5-c6d7e8f9-0a1b2c3d', OTHER_OBJECT = '1b2c3d4e-5f607182-93a4b5c6-d7e8f90a-1b2c3d4e';
+const objectUrl = (kind, id = OBJECT_ID) => `${ORIGIN}/instances/${id}/${kind}`;
+/** The server's image answers: an answer of a stored object names the study it recorded (`studyOf` the object ID). */
+const answering = (studyOf = () => STUDY) => async url => {
+  const object = /\/instances\/([0-9a-f-]+)\//.exec(new URL(url).pathname)?.[1];
+  return new Response('live ' + url, { headers: { 'Content-Type': PART, ...(object ? { 'X-KIN-Study-UID': studyOf(object) } : {}) } });
+};
+
+test('review R1 of f455ba2: a study shown only by a queried frame, a rendering, a document or a preview is read live again for a new opening, and for a back/forward return before the kept page shows - with and without a worker', async () => {
+  const forms = [frameUrl(1) + '?accept=x', frameUrl(1).replace('/frames/1', '/rendered'), objectUrl('pdf'), objectUrl('preview'),
+    objectUrl('frames/1/rendered?width=64')];
+  for (const shared of [false, true]) for (const url of forms) {
+    const label = `${shared ? 'worker' : 'no worker'} ${new URL(url).pathname}${new URL(url).search}`;
+    const s = setup({ shared, studies: [STUDY], page: true, network: answering() });
+    assert.equal((await s.fetch(url, bound())).status, 200);
+    const first = openingOf(s.sent[0]), root = s.win.document.documentElement;
+    const entry = await s.fetch.reenter([STUDY]);
+    assert.ok(entry, label);
+    assert.equal(s.sent.length, 2, label + ': one live read before the scope shows');
+    const again = s.sent[1];
+    assert.equal(again.url, url, label + ': the read that showed the study');
+    assert.equal(again.headers.get('X-KIN-Preload'), null, label);
+    const next = openingOf(again);
+    assert.ok(next && next !== first, label + ': named with the new opening');
+    entry.commit();
+    s.listeners.pagehide({ persisted: true });
+    assert.equal(root.style.visibility, 'hidden', label);
+    s.listeners.pageshow({ persisted: true });
+    await tick();
+    assert.equal(s.sent.length, 3, label + ': the return reads it live again');
+    assert.equal(s.sent[2].url, url, label);
+    assert.ok(![first, next, null].includes(openingOf(s.sent[2])), label + ': under the return\'s own opening');
+    assert.equal(root.style.visibility, '', label + ': shown once that read was answered');
+  }
+});
+
+test('review R1 of f455ba2: an object\'s answer relates it to its study - each study of a scope is read again for its own entry only, a study keeps its opening, and its frame read is the one read again', async () => {
+  const OTHER = '1.2.840.9.2';
+  const s = setup({ shared: false, studies: [STUDY, OTHER], network: answering(id => id === OBJECT_ID ? STUDY : OTHER) });
+  await s.fetch(objectUrl('pdf'), bound());                                 // STUDY's document
+  await s.fetch(objectUrl('preview', OTHER_OBJECT), bound());               // OTHER's preview
+  const first = openingOf(s.sent[0]);
+  const entry = await s.fetch.reenter([OTHER]);
+  assert.deepEqual(s.sent.slice(2).map(r => r.url), [objectUrl('preview', OTHER_OBJECT)], 'only the entered study is read again');
+  const next = openingOf(s.sent[2]);
+  entry.commit();
+  await s.fetch(objectUrl('pdf'), bound());
+  await s.fetch(objectUrl('preview', OTHER_OBJECT), bound());
+  assert.deepEqual(s.sent.slice(3).map(openingOf), [first, next], 'a late read of the study left keeps its opening');
+  // A study shown by a frame and by its preview: the frame is read again, once.
+  const f = setup({ shared: false, network: answering() });
+  await f.fetch(frameUrl(1), bound());
+  await f.fetch(objectUrl('preview'), bound());
+  await f.fetch.reenter([STUDY]);
+  assert.deepEqual(f.sent.slice(2).map(r => r.url), [frameUrl(1)]);
+  // An object read no answer placed stands for the studies shown when it was made.
+  const u = setup({ shared: false, studies: [STUDY], network: async url => new Response('x ' + url, { headers: { 'Content-Type': 'application/pdf' } }) });
+  await u.fetch(objectUrl('pdf'), bound());
+  await u.fetch.reenter([OTHER]);
+  assert.equal(u.sent.length, 1, 'not for another study');
+  await u.fetch.reenter([STUDY]);
+  assert.deepEqual(u.sent.slice(1).map(r => r.url), [objectUrl('pdf')]);
+  // Descriptions show no pixels: never the read a new opening reads again.
+  const d = setup({ shared: false, network: answering() });
+  await d.fetch(`${ORIGIN}/dicom-web/studies/${STUDY}/metadata`, bound());
+  await d.fetch(objectUrl('tags'), bound());
+  assert.ok(await d.fetch.reenter([STUDY]));
+  assert.equal(d.sent.length, 2, 'nothing read again');
+});
+
+test('back/forward: the kept page also reads again a study it showed beside its address\'s (a comparison read under the scope)', async () => {
+  const PRIOR = '1.2.840.9.4';
+  const s = setup({ shared: false, studies: [STUDY], page: true });
+  await s.fetch(frameUrl(1), bound());
+  await s.fetch(frameUrl(1, PRIOR), bound());
+  s.listeners.pagehide({ persisted: true });
+  s.listeners.pageshow({ persisted: true });
+  await tick();
+  assert.deepEqual(s.sent.slice(2).map(r => r.url).sort(), [frameUrl(1), frameUrl(1, PRIOR)].sort());
+  assert.equal(s.win.document.documentElement.style.visibility, '');
+});
+
+test('review R2 of f455ba2: the API\'s own image routes name the opening as the public ones do, with and without a worker, and a held study read by them is checked first; business calls under /api name none', async () => {
+  const api = n => frameUrl(n).replace('/dicom-web/', '/api/dicom-web/');
+  for (const shared of [false, true]) {
+    const s = setup({ shared, network: answering() });
+    const reads = [frameUrl(1), api(2), frameUrl(3).replace('/dicom-web/', '/api/image-relay/dicom-web/'),
+      `${ORIGIN}/api/image-relay/instances/${OBJECT_ID}/frames/0/rendered`, `${ORIGIN}/api/instances/${OBJECT_ID}/preview`];
+    for (const url of reads) assert.equal((await s.fetch(url, bound())).status, 200);
+    await s.fetch(`${ORIGIN}/api/me`, bound());
+    await s.fetch(`${ORIGIN}/api/dicom/lookup`, { method: 'POST', headers: new Headers({ 'X-KIN-Session': 'sess-1', 'Content-Type': 'application/json' }), body: '{}' });
+    const names = s.sent.map(openingOf);
+    assert.ok(names[0]);
+    assert.deepEqual(names, [...Array(reads.length).fill(names[0]), null, null], shared ? 'worker' : 'no worker');
+    // Read by an API route only, the study is read again for a new opening.
+    const r = setup({ shared, network: answering() });
+    await r.fetch(`${ORIGIN}/api/image-relay/instances/${OBJECT_ID}/pdf`, bound());
+    await r.fetch.reenter([STUDY]);
+    assert.equal(r.sent.length, 2);
+    assert.ok(openingOf(r.sent[1]) && openingOf(r.sent[1]) !== openingOf(r.sent[0]));
+  }
+  const held = setup({ held: { [STUDY]: { revision: 'rev-now', session: 'sess-1' } } });
+  await held.fetch(api(1), bound());
+  assert.equal(held.sent[0].headers.get('X-KIN-Preload'), 'check');
+  assert.equal(await (await held.fetch(api(2), bound())).text(), 'held 1 ' + new URL(frameUrl(2)).pathname, 'then from memory');
+  assert.equal(held.sent.length, 1);
 });

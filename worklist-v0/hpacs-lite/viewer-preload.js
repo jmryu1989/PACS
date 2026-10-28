@@ -5,14 +5,20 @@
  * fetch, under the transport, so a request reaches it only after the transport admitted it for the live session and
  * bound it (`X-KIN-Session`).
  *
- * Openings. Every image read this viewer sends names the opening it belongs to (`X-KIN-View-Opening`), and the server
- * records the first read of each opening of a study as that opening's 열람 (user-view), durable before its first byte
- * (image-delivery-record.ts). An opening is an entry into a study, known only to this document's memory:
+ * Openings. Every image read this viewer sends - by the public image routes or the API's own (`/api/dicom-web/`,
+ * `/api/image-relay/`, `/api/instances/`), which read the same images - names the opening it belongs to
+ * (`X-KIN-View-Opening`), and the server records the first read of each opening of a study as that opening's 열람
+ * (user-view), durable before its first byte (image-delivery-record.ts). Business calls name none. An opening is an entry
+ * into a study, known only to this document's memory:
  *   · this document - a new window or tab, a reload, a typed URL - is a new opening of every study it shows;
  *   · a patient tab showing studies again (`reenter`, viewer-patient-tabs.js) and a return to this page from the
  *     browser's back/forward cache are new openings of the studies they show. Pixels this document still holds from an
- *     earlier visit - the image cache, the page the browser kept - could show without any read, so each such study is
- *     read live for the new opening first, and only then is the scope shown;
+ *     earlier visit - the image cache, a document or preview it keeps, the page the browser kept - could show without
+ *     any read, so each such study is read live for the new opening first, and only then is the scope shown. What a
+ *     study showed here is any image read of it that succeeded - a frame (also with a query), a rendering, a document, a
+ *     preview, from the worker's memory or the network; whether the worker could answer it decides nothing. A read of a
+ *     stored object (`/instances/{id}/...`) names no study: its answer does (`X-KIN-Study-UID`), and an answer that
+ *     does not leaves the read standing for the studies shown when it was made;
  *   · focus, scrolling, cine, a layout change, a repeated or retried read, the server closing an idle delivery and a
  *     preload are none: they keep the opening, and a preload has none at all. A read of a study shown before the scope
  *     changed keeps that study's opening.
@@ -35,10 +41,17 @@
 (function (root) {
   'use strict';
   const WORKER_URL = '/worklist/hpacs-lite/preload-worker.js', WORKER_NAME = 'kin-preload';
-  const FRAME = /^\/dicom-web\/studies\/([0-9.]{1,64})\/series\/[0-9.]{1,64}\/instances\/[0-9.]{1,64}\/frames\/[0-9]+$/;
-  const MEDIA = /^\/(?:dicom-web|instances)\//;
-  const STUDY = /^\/dicom-web\/studies\/([0-9.]{1,64})(?:\/|$)/;
-  const OPENING = 'X-KIN-View-Opening';
+  // An image route by its public path: the API serves the same reads under its own prefixes.
+  const ROUTE = /^(?:\/api(?:\/image-relay)?)?(\/(?:dicom-web|instances)\/.*)$/;
+  const UID = '[0-9.]{1,64}';
+  const FRAME = new RegExp(`^/dicom-web/studies/(${UID})/series/${UID}/instances/${UID}/frames/[0-9]+$`);
+  const STUDY = new RegExp(`^/dicom-web/studies/(${UID})(?:/|$)`), STUDY_UID = new RegExp(`^${UID}$`);
+  const OBJECT = /^\/instances\/([0-9a-f-]{1,64})\//;
+  // QIDO, DICOMweb metadata, Orthanc's tags and attachment info describe the images without them: no pixels, no 열람
+  // (image-relay.controller.ts `imageRead`), so never the read a new opening reads again.
+  const DESCRIPTION = new RegExp(`^/dicom-web/(?:studies|series|instances|studies/${UID}/(?:series|instances|series/${UID}/instances)` +
+    `|studies/${UID}(?:/series/${UID}(?:/instances/${UID})?)?/metadata)$|^/instances/[0-9a-f-]+/(?:tags|simplified-tags|header|attachments/dicom/info)$`);
+  const OPENING = 'X-KIN-View-Opening', NAMED_STUDY = 'X-KIN-Study-UID';
   const CHANGED = '열 때 확인한 검사 정보가 미리 받을 때와 달라 미리 받은 영상을 버렸습니다.';
   const DENIED = '열 때 검사 접근이 거절되어 미리 받은 영상을 버렸습니다.';
   const UNRECORDED = '영상 열람 기록을 저장하지 못해 영상을 다시 표시하지 않았습니다. 연결을 확인한 뒤 다시 시도하세요.';
@@ -53,16 +66,20 @@
         return parsed.origin === win.location.origin ? parsed : null;
       } catch (_) { return null; }
     }
+    /** The image route a request reads, by its public path; null for anything else (business calls). */
+    const route = url => url ? ROUTE.exec(url.pathname)?.[1] ?? null : null;
+    const isGet = init => String(init.method || 'GET').toUpperCase() === 'GET';
     /** The study of a WADO-RS frame GET without a query - the reads the worker can answer - else null. */
-    const frameStudy = (url, init) => url && !url.search && String(init.method || 'GET').toUpperCase() === 'GET'
-      ? FRAME.exec(url.pathname)?.[1] ?? null : null;
-    /** The study a DICOMweb read names, whatever its form; an `/instances/` read names none here (the server knows it). */
-    const studyOf = url => STUDY.exec(url.pathname)?.[1] ?? null;
+    const frameStudy = (url, path, init) => !url.search && isGet(init) ? FRAME.exec(path)?.[1] ?? null : null;
+    // The study each stored object belongs to, as the server named it in an image answer of that object.
+    const objects = new Map();
+    /** The study a read names: in its path, or for a stored object's read the study an earlier answer named for it. */
+    const studyOf = path => STUDY.exec(path)?.[1] ?? objects.get(OBJECT.exec(path)?.[1]) ?? null;
 
     // The opening of the scope shown now, and each study's opening once this document read it: a study keeps its
     // opening when the scope moves on, so its late reads never open it again under the next scope's opening.
     let scopeOpening = win.crypto.randomUUID();
-    const openings = new Map(), lastRead = new Map(), checks = new Map();
+    const openings = new Map(), checks = new Map();
     function openingOf(uid) {
       if (!uid) return scopeOpening;
       if (!openings.has(uid)) openings.set(uid, scopeOpening);
@@ -74,10 +91,26 @@
       for (const [name, value] of Object.entries(extra)) headers.set(name, value);
       return { ...init, headers };
     }
-    function remember(uid, url, init) {
-      if (uid) lastRead.set(uid, { url: String(typeof url === 'string' || url instanceof URL ? url : url.url),
-        accept: new win.Headers(init.headers).get('Accept') });
+    // What this document showed of each study: its last frame read (the kind the check reads), else its last other image
+    // read. A failed read showed nothing. An object read no answer placed stands for the studies shown when it was made.
+    const shown = new Map(), unplaced = new Map();
+    /** `opening`: the one the read named for the scope, null for a new opening's own read (`reenter`). */
+    function answered(response, path, url, init, opening) {
+      if (!response?.ok || !isGet(init) || DESCRIPTION.test(path)) return response;
+      const object = OBJECT.exec(path)?.[1], named = response.headers.get(NAMED_STUDY);
+      if (object && named && STUDY_UID.test(named)) objects.set(object, named);
+      const read = { url: String(typeof url === 'string' || url instanceof URL ? url : url.url),
+        accept: new win.Headers(init.headers).get('Accept'), frame: FRAME.test(path) };
+      const uid = studyOf(path);
+      if (!uid) { unplaced.set(read.url, { ...read, studies: scope() }); return response; }
+      unplaced.delete(read.url);
+      // A study first placed by this answer keeps the opening its read was sent under, as a study named in its path does.
+      if (opening && !openings.has(uid)) openings.set(uid, opening);
+      if (read.frame || !shown.get(uid)?.frame) shown.set(uid, read);
+      return response;
     }
+    /** The read's own opening header (a new opening's read), else the opening it will name now. */
+    const namedOpening = (path, init) => new win.Headers(init.headers).has(OPENING) ? null : openingOf(studyOf(path));
 
     /**
      * A new opening of `uids`. Each of them this document has shown before is read live for it first - its 열람 is then
@@ -87,9 +120,9 @@
      */
     async function reenter(uids, signal) {
       const next = win.crypto.randomUUID(), wanted = [...new Set(uids)];
-      for (const uid of wanted) {
-        const read = lastRead.get(uid);
-        if (!read) continue;
+      const reads = new Set(wanted.map(uid => shown.get(uid)).filter(Boolean));
+      for (const read of unplaced.values()) if (read.studies.some(uid => wanted.includes(uid))) reads.add(read);
+      for (const read of reads) {
         try {
           const headers = { [OPENING]: next, ...(read.accept ? { Accept: read.accept } : {}) };
           const response = await win.fetch(read.url, { headers, signal });
@@ -115,7 +148,9 @@
     }
     async function returned() {
       notice?.remove(); notice = null;
-      const entry = await reenter(scope());
+      // The kept page shows the studies of its address and any other it read under the scope it shows (a comparison).
+      const here = [...openings].filter(([, opening]) => opening === scopeOpening).map(([uid]) => uid);
+      const entry = await reenter([...scope(), ...here]);
       if (entry) { entry.commit(); if (page()) page().style.visibility = ''; return; }
       const doc = win.document;
       notice = doc.createElement('section'); notice.setAttribute('role', 'alert');
@@ -131,12 +166,12 @@
     let read;
     if (typeof win.SharedWorker !== 'function') {
       read = (url, init) => {
-        const parsed = target(url);
-        if (!parsed || !MEDIA.test(parsed.pathname)) return send(url, init);
-        remember(frameStudy(parsed, init), url, init);
-        return send(url, viewed(init, studyOf(parsed)));
+        const path = route(target(url));
+        if (!path) return send(url, init);
+        const opening = namedOpening(path, init);
+        return send(url, viewed(init, studyOf(path))).then(response => answered(response, path, url, init, opening));
       };
-    } else read = withWorker(win, send, { target, frameStudy, studyOf, viewed, remember, checks });
+    } else read = withWorker(win, send, { target, route, frameStudy, studyOf, viewed, answered, namedOpening, checks });
 
     function preloadFetch(url, init = {}) { return read(url, init); }
     preloadFetch.reenter = reenter;
@@ -144,7 +179,7 @@
   }
 
   /** The preload worker's memory under the viewer's reads (see the head of this file). */
-  function withWorker(win, send, { target, frameStudy, studyOf, viewed, remember, checks }) {
+  function withWorker(win, send, { target, route, frameStudy, studyOf, viewed, answered, namedOpening, checks }) {
     let port = null, broken = false, nextId = 0, inflight = 0;
     const pending = new Map(), opened = new Set();
 
@@ -253,15 +288,18 @@
       if (inflight > 0) post({ type: 'busy', busy: true });
     });
 
-    return function (url, init) {
-      const parsed = target(url);
-      if (!parsed || !MEDIA.test(parsed.pathname)) return send(url, init);
+    function read(parsed, path, url, init) {
       // A new opening's own live read (`reenter`) names its opening already: never from memory, never a check.
       if (new win.Headers(init.headers).has(OPENING)) return broken ? send(url, init) : network(url, init);
-      const uid = frameStudy(parsed, init);
-      remember(uid, url, init);
-      if (uid && !broken) return frame(uid, parsed.pathname, url, init);
-      return broken ? send(url, viewed(init, studyOf(parsed))) : network(url, viewed(init, studyOf(parsed)));
+      const uid = frameStudy(parsed, path, init);
+      if (uid && !broken) return frame(uid, path, url, init);
+      return broken ? send(url, viewed(init, studyOf(path))) : network(url, viewed(init, studyOf(path)));
+    }
+    return function (url, init) {
+      const parsed = target(url), path = route(parsed);
+      if (!path) return send(url, init);
+      const opening = namedOpening(path, init);
+      return read(parsed, path, url, init).then(response => answered(response, path, url, init, opening));
     };
   }
 

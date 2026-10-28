@@ -13,7 +13,8 @@
  * has exactly one user-view root - a fresh reopen inside the previous opening's idle gap too - its reads share its
  * delivery and no other opening or unnamed read joins it, the idle gap retires the delivery and not the opening (a later
  * read is a background-fetch delivery of its own referring to the root, with its own terminal), and a retry after a lost
- * COMMIT reply, a restart, or a root the ledger settled negative never yields a second root; a ledger that cannot record answers 503 with no body; refusals of the
+ * COMMIT reply, a restart, or a root the ledger settled negative never yields a second root, and an image answer of a
+ * stored object names the study its opening recorded; a ledger that cannot record answers 503 with no body; refusals of the
  * gate leave no record; shutdown closes open deliveries; a delivery that provided no image closes as aborted, not
  * succeeded (MG-10), and a HEAD - answered behind the gate - neither opens a delivery nor makes one whose relayed read
  * (the real ImageRelayController on the same recorder) failed a provided one (review INT-01); a terminal the ledger cannot take at the close is retried as the same event until durable, and the
@@ -418,6 +419,25 @@ test('the gate refuses before any record; another session of the same member is 
     assert.equal(prepared.length, 2, 'one delivery per member session and study');
     assert.deepEqual(new Set(prepared.map(p => p.event.userId.value.id)).size, 1, 'the same member');
     await until(() => byAction(s.records.entries, 'transfer-ended').length === 2, 'both deliveries end');
+  } finally { await s.close(); }
+});
+
+test('review R1 of f455ba2: an image answer of a stored object names the study its opening recorded, so the viewer can read that study again for a new opening; a description, a HEAD and a refusal name none', async () => {
+  const s = await stack();
+  try {
+    const study = answer => answer.headers.get('x-kin-study-uid');
+    const preview = await s.preview(opening('syn-viewer-a'));
+    const rendered = await s.get(`/api/image-relay/instances/${INSTANCE_ID}/frames/0/rendered`, opening('syn-viewer-a'));
+    assert.deepEqual([preview.status, rendered.status], [200, 200]);
+    assert.deepEqual([study(preview), study(rendered)], [STUDY_UID, STUDY_UID]);
+    const roots = prepared(s, 'user-view');
+    assert.equal(roots.length, 1);
+    assert.equal(roots[0].event.targets[0].studyId.value, STUDY_UID, 'the study named is the one the opening recorded');
+    assert.equal(study(await s.get(`/api/image-relay/instances/${INSTANCE_ID}/tags`, opening('syn-viewer-a'))), null, 'a description');
+    assert.equal(study(await s.get(`/instances/${INSTANCE_ID}/preview`, {}, 'HEAD')), null, 'a HEAD');
+    const refused = await s.preview({ 'x-synthetic-site': 'site-b', ...opening('syn-viewer-b') });
+    assert.deepEqual([refused.status, study(refused)], [403, null], 'a refusal');
+    assert.equal(byAction(s.records.entries, 'provide-prepared').length, 1, 'none of them recorded anything');
   } finally { await s.close(); }
 });
 

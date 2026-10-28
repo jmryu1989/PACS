@@ -8,7 +8,7 @@
  */
 import { BadRequestException, Controller, Get, Param, Req, Res } from '@nestjs/common';
 import { DicomFrameService } from './dicom-frame.service';
-import { FETCH_USE, PRELOAD_USE, StudyImageDeliveryRecorder, readUse } from './image-delivery-record';
+import { FETCH_USE, PRELOAD_USE, RECORDED_STUDY_HEADER, StudyImageDeliveryRecorder, readUse } from './image-delivery-record';
 import type { DeliveryLease, DeliveryUse } from './image-delivery-record';
 import { OrthancService } from './orthanc.service';
 import { Caller, PacsService } from './pacs.service';
@@ -121,7 +121,9 @@ export class DicomFrameController {
     if (!ORTHANC_ID.test(id)) throw new BadRequestException('영상 식별자가 올바르지 않습니다');
     await this.pacs.authzDicom(`/instances/${id}/preview`, 'GET', member(req));
     // The gate just resolved (and cached) the object's study; the preview is a read of that study's delivery.
-    const lease = await this.admit(req, PREVIEW_SURFACE, () => this.orthanc.instanceStudyUid(id), readUse(req));
+    let study = '';
+    const lease = await this.admit(req, PREVIEW_SURFACE, async () => (study = await this.orthanc.instanceStudyUid(id)), readUse(req));
+    if (lease) res.setHeader(RECORDED_STUDY_HEADER, study);
     await lifetime(req, res, lease, signal => this.frames.servePreview(id, res, signal));
   }
 }

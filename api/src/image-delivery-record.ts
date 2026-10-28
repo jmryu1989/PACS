@@ -88,6 +88,14 @@ export function readUse(request: IncomingMessage): DeliveryUse {
 }
 
 /**
+ * The study an image answer was recorded for, on the routes whose path names a stored object rather than its study
+ * (`/instances/{id}/...`: a rendering, a document, a preview). The viewer relates such a read to the study it shows, so a
+ * new opening of that study reads it live again before what the document still holds of it can show (viewer-preload.js
+ * `reenter`). The server's own resolution of the object, the one its record names; the viewer sends it nowhere.
+ */
+export const RECORDED_STUDY_HEADER = 'X-KIN-Study-UID';
+
+/**
  * The ledger operation of an opening's root, attempt `attempt`. Derived from the opening (member, session, study,
  * opening ID), so whether the root exists is the ledger's answer - after the opening's delivery closed, after a lost
  * COMMIT reply, after a restart. The ledger binds one event to one operation and keeps a negative outcome final, so an

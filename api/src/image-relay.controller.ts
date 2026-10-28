@@ -6,12 +6,14 @@
  * study delivery record existed for them. nginx now routes them here. The handler runs the same DICOMweb gate
  * (PacsService.authzDicom: institution, StudyAccess, split UID), takes the study delivery's lease - its provide-prepared
  * event durable before any byte (image-delivery-record.ts) - and relays Orthanc's answer unchanged (status, media type,
- * body; the query carries rendering and windowing as before). Descriptions without the image (QIDO, DICOMweb metadata,
+ * body; the query carries rendering and windowing as before), naming the study it recorded (`RECORDED_STUDY_HEADER`, for
+ * the viewer's openings). Descriptions without the image (QIDO, DICOMweb metadata,
  * DICOM tags) are not deliveries of the image and keep the plain gate; the auth_request route refuses every image read
  * (pacs.controller.ts), so an image byte has no unrecorded way out.
  */
 import { Controller, ForbiddenException, Get, NotFoundException, Req, Res } from '@nestjs/common';
-import { StudyImageDeliveryRecorder, readUse } from './image-delivery-record';
+import { RECORDED_STUDY_HEADER, StudyImageDeliveryRecorder, readUse } from './image-delivery-record';
+import type { DeliveryLease } from './image-delivery-record';
 import { OrthancService } from './orthanc.service';
 import { Caller, PacsService } from './pacs.service';
 
@@ -61,8 +63,12 @@ export class ImageRelayController {
     const uri = target.path + target.query;
     await this.pacs.authzDicom(uri, req.method, member(req));
     // HEAD sends no image byte (Node drops the body), so it is no delivery.
-    const lease = req.method === 'GET' && imageRead(target.path)
-      ? await this.deliveries.admit(req, IMAGE_RELAY_SURFACE, await this.studyOf(target.path), readUse(req)) : null;
+    let lease: DeliveryLease | null = null;
+    if (req.method === 'GET' && imageRead(target.path)) {
+      const study = await this.studyOf(target.path);
+      lease = await this.deliveries.admit(req, IMAGE_RELAY_SURFACE, study, readUse(req));
+      res.setHeader(RECORDED_STUDY_HEADER, study);
+    }
     const abort = new AbortController();
     const stop = () => { if (!res.writableFinished) abort.abort(); };
     let relayed = false;
