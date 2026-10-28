@@ -16,7 +16,16 @@ export class ClinicianQuestionController {
   @Get('questions') list(@Req() r: any, @Query() q: any) { return clinicalRoutes(this.clinical).collection(r, 'GET questions', 'question', tx => this.service.list(caller(r), q, tx), undefined, head); }
   @Get('questions/:id') read(@Param('id') id: string, @Req() r: any) {return clinicalRoutes(this.clinical).read(r, 'question', id.toLowerCase(), tx => this.service.read(id, caller(r), tx));}
   @Get('studies/:uid/questions') forStudy(@Param('uid') uid: string, @Req() r: any) { return clinicalRoutes(this.clinical).collection(r, 'GET studies/:uid/questions', 'question', tx => this.service.forStudy(uid, caller(r), tx), uid, head); }
-  @Post('studies/:uid/questions') async create(@Param('uid') uid: string, @Req() r: any, @Body() b: any) { return clinicalRoutes(this.clinical).write(r, { surface: 'question.create', studyId: uid, recordId: typeof b?.requestId === 'string' ? b.requestId.toLowerCase() : null, body: b }, tx => this.service.create(uid, caller(r), b, tx)); }
-  @Post('questions/:id/entries') async reply(@Param('id') id: string, @Req() r: any, @Body() b: any) { return clinicalRoutes(this.clinical).write(r, { surface: 'question.reply', studyId: (await this.service.read(id, caller(r))).item.studyUid, recordId: id.toLowerCase(), body: b }, tx => this.service.reply(id, caller(r), b, tx)); }
-  @Post('questions/:id/close') async close(@Param('id') id: string, @Req() r: any, @Body() b: any) { return clinicalRoutes(this.clinical).write(r, { surface: 'question.close', studyId: (await this.service.read(id, caller(r))).item.studyUid, recordId: id.toLowerCase(), body: b }, tx => this.service.close(id, caller(r), b, tx)); }
+  @Post('studies/:uid/questions') async create(@Param('uid') uid: string, @Req() r: any, @Body() b: any) {
+    await this.service.prepareCreate(uid, caller(r), b);
+    return clinicalRoutes(this.clinical).write(r, { surface: 'question.create', studyId: uid, recordId: b.requestId.toLowerCase(), body: b }, tx => this.service.create(uid, caller(r), b, tx));
+  }
+  @Post('questions/:id/entries') async reply(@Param('id') id: string, @Req() r: any, @Body() b: any) {
+    const studyId = await this.service.prepareReply(id, caller(r), b);
+    return clinicalRoutes(this.clinical).write(r, { surface: 'question.reply', studyId, recordId: id.toLowerCase(), body: b }, tx => this.service.reply(id, caller(r), b, tx));
+  }
+  @Post('questions/:id/close') async close(@Param('id') id: string, @Req() r: any, @Body() b: any) {
+    const studyId = await this.service.prepareClose(id, caller(r), b);
+    return clinicalRoutes(this.clinical).write(r, { surface: 'question.close', studyId, recordId: id.toLowerCase(), body: b }, tx => this.service.close(id, caller(r), b, tx));
+  }
 }
