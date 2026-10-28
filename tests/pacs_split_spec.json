@@ -8397,9 +8397,7 @@
   },
   "viewer_ux": {
     "note": "D73: viewer settings functionally extended preferences after the split. Preserve historical move proof; validate current owner/revision, readback and workspace/viewer preservation through workspace_shortcuts_v2_service_test.cjs, without pinning new private helpers.",
-    "changed_concerns": [
-      "api/src/pacs/preferences.ts"
-    ]
+    "changed_concerns": ["api/src/pacs/preferences.ts"]
   },
   "emr_d_online": {
     "unit": "EMR-D online (D1824, 2464002)",
@@ -9375,6 +9373,47 @@
         ]
       }
     ]
+  },
+  "di_additions_cold_catalog": {
+    "unit": "EMR-E cold first opening (#248 follow-up)",
+    "note": "OrthancImageCatalog follows Orthanc's change log on the EMR background-work registry, so its constructor takes that registry. No controller, provider or route is added.",
+    "middleware_routes": [],
+    "controllers": [],
+    "providers": [],
+    "routes": [],
+    "injectables": {},
+    "changed_injectables": {
+      "OrthancImageCatalog": {
+        "before": {
+          "params": [
+            "PrismaService",
+            "Object",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "2:Symbol(RequestContextSource)",
+            "1:Symbol(CURRENT_CLINICAL_CONTEXT)"
+          ],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PrismaService",
+            "Object",
+            "Object",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "3:Symbol(EmrBackgroundWork)",
+            "2:Symbol(RequestContextSource)",
+            "1:Symbol(CURRENT_CLINICAL_CONTEXT)"
+          ],
+          "optional": []
+        }
+      }
+    }
   },
   "di_additions_presence": {
     "unit": "p-viewing-api",

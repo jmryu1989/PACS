@@ -212,6 +212,20 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
         self.seed_report(x, 'approve', findings='Body X')
         self.seed_report(y, 'approve', findings='Body Y')
         work, page = self.open_viewer(a)
+        initial_a = self.cells(page)[0]['image']
+        a_reference = next(ref for ref in self.fixture_refs(page, a)
+                           if '/series/' + ref['series'] + '/' in initial_a)
+        restored_a = dict(a_reference, sops=[next(sop for sop in a_reference['sops']
+                                                if '/instances/' + sop + '/' not in initial_a)])
+        # A canvas can still show the departing patient or the new route's
+        # initial image. A saved noninitial frame identifies the restored view.
+        page.evaluate('''async sop => {
+          const id = services.viewportGridService.getState().activeViewportId;
+          const viewport = services.cornerstoneViewportService.getCornerstoneViewport(id);
+          const index = viewport.getImageIds().findIndex(image => image.includes('/instances/' + sop + '/'));
+          await viewport.setImageIdIndex(index); viewport.render();
+        }''', restored_a['sops'][0])
+        self.identity(page, [restored_a])
         report = self.report_panel(page)
         panel = self.studies(page)
         def release(held):
@@ -256,12 +270,12 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
         self.select(work, b); work.locator('#m-filmbox').click()
         tabs = page.get_by_role('tablist', name='Patients')
         expect(tabs.get_by_role('tab')).to_have_count(2, timeout=45000)
-        canvas_ready(page, 1)
+        self.identity(page, [self.fixture_refs(page, b)[0]])
         expect(report).not_to_be_visible()
         expect(panel).not_to_be_visible()
         page.wait_for_function('!kinViewerHistoryWorkspaceState().busy && !kinViewerJobWorkspaceState().busy')
         tabs.get_by_role('tab').filter(has_text=patient).click()
-        canvas_ready(page, 1)
+        self.identity(page, [restored_a])
         release(held)
         expect(report).not_to_be_visible()
         panel = self.studies(page)

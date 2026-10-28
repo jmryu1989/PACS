@@ -35,6 +35,9 @@ MAIN_PATH = Path(os.environ.get("KIN_HISTORY_CITATION_MAIN", ROOT / "worklist-v0
 MAIN = read_page_source(MAIN_PATH)
 CITATION_JS = (ROOT / "worklist-v0" / "hpacs-lite" / "report-citation.js").read_text(encoding="utf-8")
 PAPER_JS = (ROOT / "worklist-v0" / "hpacs-lite" / "report-preview.js").read_text(encoding="utf-8")
+# MODULE_A A5: the history block reports the rows it displays through the shipped display-report module (main.html tags it
+# before the bundle). These stubbed answers carry no accessRef, so it sends nothing here; the live suite owns that path.
+VIEWS_JS = (ROOT / "worklist-v0" / "hpacs-lite" / "report-view-observation.js").read_text(encoding="utf-8")
 
 UID = "1.2.3"
 SERVER_ACTOR = "server-actor@kin"
@@ -121,6 +124,9 @@ CITATIONJS
 PAPERJS
 </script>
 <script>
+VIEWSJS
+</script>
+<script>
 WORKCONTEXT
 const $ = s => document.querySelector(s);
 const esc = v => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
@@ -187,6 +193,7 @@ def harness():
             .replace("HISTHTML", HIST_HTML)
             .replace("CITATIONJS", CITATION_JS)
             .replace("PAPERJS", PAPER_JS)
+            .replace("VIEWSJS", VIEWS_JS)
             .replace("DISPLAYACTORFN", DISPLAY_ACTOR_FN)
             .replace("HISTORYBLOCK", fixture_block(MAIN_PATH, HISTORY_FIXTURE, "HISTORY_BLOCK"))
             .replace("SESSIONACTOR", SESSION_ACTOR)
