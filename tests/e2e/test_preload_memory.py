@@ -248,7 +248,7 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
         self.wait_status(p, c.uid, '^Ready', timeout=300000)
         # B and C are fully preloaded and not opened: their preload is a transfer, not an opening.
         for f in (b, c):
-            self.assertEqual(self.opens(f.uid), [], 'never-opened preload of %s has no opening record' % f.label)
+            self.assertEqual(self.opens(f.uid), [], 'never-opened preload of %s has no opening record' % f.uid)
             self.assertTrue(any(e['action'] == 'provide-prepared' and e['cause'] == 'background-fetch' for _, e in self.events(f.uid)),
                             'the preload delivery itself is recorded as the fetch it is')
         closed = self.wait_terminal(b.uid)
