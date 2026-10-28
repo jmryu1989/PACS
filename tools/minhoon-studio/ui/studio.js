@@ -186,6 +186,7 @@
       onPending: ev => { $('mirror-banner').hidden = !ev; },
       onReloaded: noteReload,
       onWindow: win => win.addEventListener('keydown', keys, true),
+      heldField: () => pick.heldField(),
     });
     let reopen = false;
     const pick = window.StudioPick($('mirror'), {

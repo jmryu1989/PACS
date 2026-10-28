@@ -101,6 +101,26 @@ try:
                {"saveClicks": f.evaluate("window.__saveClicks"), "picking": shield_on(product), "focus": product.evaluate("document.activeElement.className")})
         product.keyboard.press("Escape"); settle(product, 200)
 
+        # F9: an edit that arrives while he is typing waits for Apply Now even when picking has taken the keyboard.
+        area = f.locator("textarea:visible").first
+        sample = "Synthetic unsent typing sample"
+        area.fill(sample); area.focus(); settle(product, 150)
+        field_id = area.get_attribute("id")
+        before = loads(product)
+        product.keyboard.press("Alt+KeyG"); settle(product, 200)
+        chat.evaluate('e => window.__sources[0].onmessage({ data: JSON.stringify(e) })', {"type": "reload", "reason": "edit", "sha": "check-typing", "jobId": "check-typing", "eventId": "check-typing-1"})
+        settle(product, 1000)
+        pending = product.locator("#pending").is_visible()
+        record("F9 an edit while typing stays deferred when picking has the keyboard", shield_on(product) and pending and loads(product) == before,
+               {"field": field_id, "picking": shield_on(product), "pending": pending, "loads": loads(product) - before})
+        product.keyboard.press("Escape"); settle(product, 200)
+        back = f.evaluate("() => ({ id: document.activeElement && document.activeElement.id, value: document.activeElement && document.activeElement.value })")
+        record("F9 leaving pick mode gives the keyboard back to the field with the text", back["id"] == field_id and back["value"] == sample, back)
+        product.click("#apply-now"); product.wait_for_function(f"window.__loads > {before}"); rows_ready(product)
+        product.wait_for_function('() => document.querySelector("#product").contentDocument.querySelector("#b-save")', timeout=10000); settle(product, 1500)
+        record("F9 Apply Now reloads the deferred edit once", loads(product) - before == 1 and not product.locator("#pending").is_visible(), {"loads": loads(product) - before})
+        f = frame(product)
+
         # Pointer picks never reach the product.
         f.evaluate('() => { window.__pointer = 0; for (const t of ["pointerdown", "mousedown", "click"]) document.addEventListener(t, () => window.__pointer++, true); }')
         product.click("#pick"); click_at(product, f.locator("#b-save")); click_at(product, f.locator("#b-approve"))
@@ -129,6 +149,22 @@ try:
         f.locator("th[data-key=name]").click(); f.locator("th[data-key=name]").click(); settle(product, 600)
         order = f.evaluate('() => [...document.querySelectorAll("#rows tr[data-uid]")].map(r => r.dataset.uid)')
         cell = f.locator(f'#rows tr[data-uid="{FIRST_UID}"] > td').nth(idx)
+        # E2: after the sort the cell sits below the scrolling list's visible part; its outline must stay inside the list.
+        view = f.evaluate(f'''() => {{
+            const cell = document.querySelectorAll('#rows tr[data-uid="{FIRST_UID}"] > td')[{idx}];
+            let list = cell.parentElement;
+            while (list && !/(auto|scroll)/.test(getComputedStyle(list).overflowY)) list = list.parentElement;
+            const r = list.getBoundingClientRect();
+            return {{ cell: cell.getBoundingClientRect().toJSON(), list: {{ top: r.top + list.clientTop, bottom: r.top + list.clientTop + list.clientHeight }} }};
+        }}''')
+        off = product.evaluate('() => document.querySelector("#product").getBoundingClientRect().toJSON()')
+        b = boxes(product)
+        clipped = view["cell"]["bottom"] > view["list"]["bottom"] or view["cell"]["top"] < view["list"]["top"]
+        inside = len(b) == 1 and (b[0]["hidden"] or (b[0]["y"] >= off["y"] + view["list"]["top"] - 1 and b[0]["y"] + b[0]["height"] <= off["y"] + view["list"]["bottom"] + 1))
+        record("E2 a picked cell scrolled out of the list leaves no outline over the controls below", clipped and inside,
+               {"cellOutsideList": clipped, "cellInFrame": view["cell"], "listInFrame": view["list"], "frame": off, "box": b})
+        product.screenshot(path=str(OUT / "e2-scrolled-out.png"))
+        cell.scroll_into_view_if_needed(); settle(product, 300)
         b = boxes(product); cell_r = cell.bounding_box()
         record("F2 the picked Name cell follows its study after sorting", "data-uid" in selector and order[0] != FIRST_UID and len(b) == 1 and near(b[0], cell_r)
                and "lost" not in (chips(chat).first.get_attribute("class") or ""),
@@ -139,6 +175,35 @@ try:
         chat.wait_for_function('() => { const c = document.querySelector("#chips .chip"); return c && c.classList.contains("lost"); }', timeout=5000)
         b = boxes(product)
         record("F2 a pick whose study is gone shows as lost, not on another row", len(b) == 1 and b[0]["hidden"], {"chip": chat.inner_text("#chips"), "box": b})
+        chat.click("#picks-clear"); settle(chat, 300)
+
+        # F2: a CT cell picked while the search shows one study stays on that study when other CT studies come back.
+        rows = f.evaluate('() => [...document.querySelectorAll("#rows tr[data-uid]")].map(r => ({ uid: r.dataset.uid, cells: [...r.children].map(c => c.innerText.trim()) }))')
+        ct = [r for r in rows if "CT" in r["cells"]]
+        target = next(r for r in reversed(ct) if sum(x["cells"][idx] == r["cells"][idx] for x in rows) == 1)
+        ct_idx = target["cells"].index("CT")
+        f.locator("#quick").fill(target["cells"][idx]); f.locator("#quick").press("Enter"); settle(product, 800)
+        shown_rows = f.locator("#rows tr[data-uid]").count()
+        cell = f.locator(f'#rows tr[data-uid="{target["uid"]}"] > td').nth(ct_idx); cell.scroll_into_view_if_needed()
+        product.click("#pick"); click_at(product, cell); product.keyboard.press("Alt+KeyG"); settle(product, 200)
+        selector = chips(chat).first.get_attribute("title").split("\n")[0]
+        def picked_study():
+            # Which study the outline is drawn on: the row under the outline's centre, read in the product frame.
+            box = boxes(product)[0]; off = product.evaluate('() => document.querySelector("#product").getBoundingClientRect().toJSON()')
+            if box["hidden"]: return None
+            return f.evaluate('([x, y]) => { const n = document.elementFromPoint(x, y); const tr = n && n.closest("tr[data-uid]"); return tr ? tr.dataset.uid : n && n.tagName; }',
+                              [box["x"] - off["x"] + box["width"] / 2, box["y"] - off["y"] + box["height"] / 2])
+        for step, act in [("the search is cleared", lambda: f.locator("#clearfilter").click()), ("the CT folder lists every CT study", lambda: f.get_by_text("CT (4)", exact=True).click())]:
+            act(); settle(product, 1800)
+            listed = f.locator("#rows tr[data-uid]").count()
+            present = f.locator(f'#rows tr[data-uid="{target["uid"]}"]').count() == 1
+            if present:
+                f.locator(f'#rows tr[data-uid="{target["uid"]}"] > td').nth(ct_idx).scroll_into_view_if_needed(); settle(product, 300)
+            on = picked_study(); lost = "lost" in (chips(chat).first.get_attribute("class") or "")
+            record(f"F2 a cell picked in a filtered list stays on its study when {step}",
+                   shown_rows == 1 and listed > 1 and "data-uid" in selector and (on == target["uid"] if present else (on is None and lost)),
+                   {"study": target["uid"], "selector": selector, "rowsWhenPicked": shown_rows, "rowsNow": listed, "outlineOn": on, "lost": lost})
+        product.screenshot(path=str(OUT / "f2-filter-cleared-ct-folder.png"))
         chat.click("#picks-clear"); settle(chat, 300)
 
         # F5 + F7: two chat tabs; screen/role follow the product in both; each reset reloads once.

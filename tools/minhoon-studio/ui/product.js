@@ -20,6 +20,7 @@
     onWindow: win => win.addEventListener('keydown', keys, true),
     onTitle: title => { document.title = `${title} — 스튜디오`; },
     onLoad: () => post({ type: 'state', ...snapshot() }),
+    heldField: () => pick.heldField(),
   });
   const pick = window.StudioPick($('product'), {
     meta: () => ({ screen: screenLabel(), role: me.role }),

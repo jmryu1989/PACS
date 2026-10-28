@@ -20,9 +20,10 @@
       } catch { return null; }
     }
 
+    // hooks.heldField: the product field picking took the keyboard from, which is still where he is typing.
     function typing() {
       try {
-        const active = doc() && doc().activeElement;
+        const active = (hooks.heldField && hooks.heldField()) || (doc() && doc().activeElement);
         return !!active && (active.tagName === 'TEXTAREA' || (active.tagName === 'INPUT' && /text|search/.test(active.type)) || active.isContentEditable);
       } catch { return false; }
     }

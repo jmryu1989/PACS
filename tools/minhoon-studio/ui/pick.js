@@ -33,10 +33,26 @@
       return node && node !== d.documentElement && node !== d.body ? node : null;
     }
 
+    // Only the part of the node the product actually shows is outlined: a cell scrolled out of the worklist must not
+    // leave an outline over the buttons below the list.
+    function shown(node) {
+      const d = node.ownerDocument, win = d.defaultView;
+      const r = node.getBoundingClientRect();
+      // The viewport stands in for <html>/<body>, whose overflow scrolls the page rather than clipping it.
+      let left = Math.max(r.left, 0), top = Math.max(r.top, 0), right = Math.min(r.right, win.innerWidth), bottom = Math.min(r.bottom, win.innerHeight);
+      for (let a = node.parentElement; a && a !== d.body && a !== d.documentElement && right > left && bottom > top; a = a.parentElement) {
+        const cs = win.getComputedStyle(a);
+        if (cs.overflowX === 'visible' && cs.overflowY === 'visible') continue;
+        const c = a.getBoundingClientRect(), x = c.left + a.clientLeft, y = c.top + a.clientTop;
+        left = Math.max(left, x); top = Math.max(top, y); right = Math.min(right, x + a.clientWidth); bottom = Math.min(bottom, y + a.clientHeight);
+      }
+      return right > left && bottom > top ? { left, top, width: right - left, height: bottom - top } : null;
+    }
+
     function place(box, node) {
       if (!node || !node.isConnected) { box.hidden = true; return; }
-      const r = node.getBoundingClientRect(), o = offset();
-      if (!r.width && !r.height) { box.hidden = true; return; }
+      const r = shown(node), o = offset();
+      if (!r) { box.hidden = true; return; }
       box.hidden = false;
       Object.assign(box.style, { left: `${o.left + r.left}px`, top: `${o.top + r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
     }
@@ -106,19 +122,36 @@
       Object.assign(shield.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
     }
 
+    // The keyboard moves to the shield, so a focused product button cannot be pressed with Space/Enter while
+    // picking. Chromium then reports <body> as the product's focused element, so the field he was typing in is
+    // remembered: an edit still waits for "지금 보기" instead of wiping the text, and focus goes back to it after.
+    let held = null;
+    function holdKeyboard() {
+      const d = doc(), now = d && d.activeElement;
+      if (now && now !== d.body && now !== d.documentElement) held = now;
+      shield.focus({ preventScroll: true });
+    }
+    function heldField() {
+      return held && held.isConnected && held.ownerDocument === doc() ? held : null;
+    }
+
     // onMode only on a real change: a resize while picking must not look like a second "picking started".
     function setActive(on) {
       on = !!on;
       fit();
       if (on === active) return;
       active = on;
+      // Read before hiding: a hidden shield has already given focus up to <body>.
+      const hadKeyboard = document.activeElement === shield;
       shield.hidden = !active; hint.hidden = !active;
-      // The keyboard moves to the shield, so a focused product button cannot be pressed with Space/Enter while
-      // picking; the product keeps its own focused element, so typing is still noticed and focus returns after.
-      if (active) shield.focus({ preventScroll: true });
+      if (active) { held = null; holdKeyboard(); }
       else {
         hover.hidden = true;
-        if (document.activeElement === shield) { try { iframe.contentWindow.focus(); } catch { /* navigating */ } }
+        const back = heldField();
+        held = null;
+        if (hadKeyboard) {
+          try { if (back) back.focus({ preventScroll: true }); else iframe.contentWindow.focus(); } catch { /* navigating */ }
+        }
       }
       onMode(active);
       repaint();
@@ -149,7 +182,7 @@
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); clear(); setActive(false); return true; }
       const where = e.target && (e.target.ownerDocument || e.target);
       if ((where !== document || e.target === shield) && !e.altKey && !e.ctrlKey && !e.metaKey) {
-        e.preventDefault(); e.stopPropagation(); shield.focus({ preventScroll: true }); return true;
+        e.preventDefault(); e.stopPropagation(); holdKeyboard(); return true;
       }
       return false;
     }
@@ -157,6 +190,8 @@
     return {
       toggle: on => setActive(on === undefined ? !active : on),
       get active() { return active; },
+      // The product field that had the keyboard before picking took it (null outside pick mode).
+      heldField: () => (active ? heldField() : null),
       remove, clear, onKey,
       list: () => picks.map(p => p.desc),
     };
@@ -200,18 +235,22 @@
   // State classes (sel, on, active, …) are left out so the selector survives a click elsewhere.
   // A study row is named by its data-uid (the study itself), never by its position, so the selector still means the
   // same study after the list is sorted or filtered; its classes (st-<report state>) change with the study and are
-  // left out.
+  // left out. Anything inside a study row always names that row: a filtered list can make "the 18th cell" unique
+  // for a moment, and once the filter is cleared it would mean another study's cell.
   const STATE_CLASS = /^(sel|selected|on|off|active|hover|focus|focused|open|closed|show|hidden|disabled|is-.*|has-.*)$/;
   const IDENTITY = ['data-uid'];
   const ATTRS = ['data-mode', 'data-col', 'data-key', 'data-action', 'data-tab', 'name', 'aria-label', 'role', 'type'];
   function selectorFor(node) {
     const d = node.ownerDocument;
-    const unique = sel => { try { return d.querySelectorAll(sel).length === 1; } catch { return false; } };
+    const count = (sel, scope = d) => { try { return scope.querySelectorAll(sel).length; } catch { return 0; } };
+    const identityOf = n => !n.id && IDENTITY.find(a => n.getAttribute(a) && n.getAttribute(a).length < 120);
+    let owner = node;
+    while (owner && owner.nodeType === 1 && !identityOf(owner)) owner = owner.parentElement;
     const parts = [];
     let n = node;
     while (n && n.nodeType === 1 && n !== d.documentElement && n !== d.body && parts.length < 8) {
       let part;
-      const identity = !n.id && IDENTITY.find(a => n.getAttribute(a) && n.getAttribute(a).length < 120);
+      const identity = identityOf(n);
       if (n.id) part = `#${CSS.escape(n.id)}`;
       else if (identity) part = `${n.tagName.toLowerCase()}[${identity}="${CSS.escape(n.getAttribute(identity))}"]`;
       else {
@@ -221,12 +260,15 @@
         part += [...n.classList].filter(c => !STATE_CLASS.test(c) && c.length < 40).slice(0, 2).map(c => '.' + CSS.escape(c)).join('');
       }
       parts.unshift(part);
-      if (unique(parts.join(' > '))) return parts.join(' > ');
+      // Below the study row, uniqueness is judged inside that row and the climb always goes on up to it.
+      const inside = owner && n !== owner;
+      const unique = sel => count(sel, inside ? owner : d) === 1;
+      if (!inside && unique(parts.join(' > '))) return parts.join(' > ');
       if (!n.id && !identity && n.parentElement) {
         const same = [...n.parentElement.children].filter(c => c.tagName === n.tagName);
-        if (same.length > 1) {
+        if (same.length > 1 && !unique(parts.join(' > '))) {
           parts[0] = `${part}:nth-of-type(${same.indexOf(n) + 1})`;
-          if (unique(parts.join(' > '))) return parts.join(' > ');
+          if (!inside && unique(parts.join(' > '))) return parts.join(' > ');
         }
       }
       n = n.parentElement;
