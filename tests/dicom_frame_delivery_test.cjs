@@ -214,6 +214,47 @@ test('open: frames and the preview of one study by one session are served under 
   } finally { await s.close(); }
 });
 
+test('D1880: a memory preload is a transfer and never the opening; the opening records its own 열람 before its first byte, also inside the preload\'s idle gap', async () => {
+  const STORE = { 'x-kin-preload': 'store' }, CHECK = { 'x-kin-preload': 'check', 'x-kin-image-use': 'view' }, VIEW = { 'x-kin-image-use': 'view' };
+  const prepared = (s, cause) => byAction(s.records.entries, 'provide-prepared').filter(e => e.event.cause === cause);
+  const s = await stack();
+  try {
+    // The worklist preloads the study: its reads are one background-fetch delivery; nothing of it is an opening.
+    assert.deepEqual((await Promise.all([s.frame(1, STORE), s.frame(2, STORE)])).map(a => a.status), [200, 200]);
+    assert.equal(prepared(s, 'background-fetch').length, 1);
+    assert.equal(prepared(s, 'user-view').length, 0, 'a preload that is not opened has no opening record');
+    // The reader opens it at once, well inside the preload delivery's idle gap: the check read does not join the
+    // preload's delivery; it records the opening, durable before its first byte.
+    const before = s.observations.length;
+    assert.equal((await s.frame(1, CHECK)).status, 200);
+    const opened = prepared(s, 'user-view');
+    assert.equal(opened.length, 1, 'exactly one opening record');
+    const check = s.observations[before];
+    assert.ok(check.firstByte && opened[0].at < check.firstByte.at, 'the opening record preceded the check read\'s first byte');
+    assert.deepEqual(opened[0].event.context, { basis: 'worklist', studyId: STUDY_UID, relatedStudyId: null, reason: null });
+    assert.equal(opened[0].event.surface, FRAMES_SURFACE);
+    assert.equal(statutoryAct(opened[0].event), '열람');
+    // The viewer's later reads and a strip preview of the study belong to the opening; more preload reads to the preload.
+    assert.deepEqual((await Promise.all([s.frame(2, VIEW), s.preview(), s.frame(3, STORE)])).map(a => a.status), [200, 200, 200]);
+    assert.equal(byAction(s.records.entries, 'provide-prepared').length, 2, 'no further record: two deliveries, two prepared events');
+    await until(() => byAction(s.records.entries, 'transfer-ended').length === 2, 'both deliveries close');
+    const ended = byAction(s.records.entries, 'transfer-ended').map(e => e.event);
+    assert.deepEqual(new Set(ended.map(e => e.relatedEventId)), new Set(byAction(s.records.entries, 'provide-prepared').map(e => e.event.eventId)));
+    assert.deepEqual(ended.map(e => e.cause).sort(), ['background-fetch', 'user-view']);
+    // An opening after the gap is a new opening record of its own.
+    assert.equal((await s.frame(4, VIEW)).status, 200);
+    assert.equal(prepared(s, 'user-view').length, 2);
+    await until(() => s.records.entries.length === 6, 'the second opening\'s pair');
+  } finally { await s.close(); }
+  // A strip preview of the study just before the opening does not stand for it either.
+  const s2 = await stack();
+  try {
+    assert.equal((await s2.preview()).status, 200);
+    assert.equal((await s2.frame(1, VIEW)).status, 200);
+    assert.deepEqual(byAction(s2.records.entries, 'provide-prepared').map(e => e.event.cause), ['background-fetch', 'user-view']);
+  } finally { await s2.close(); }
+});
+
 test('reload inside the idle gap continues the open delivery; the terminal follows the last response, not the first', async () => {
   const s = await stack();
   try {

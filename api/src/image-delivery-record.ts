@@ -3,8 +3,8 @@
  * every access to the electronic record; D1877 fixed its grain for images at one pair of access events per study
  * delivery - `provide-prepared` before the first byte, `transfer-ended`/`transfer-aborted` when the delivery ends - not
  * one per image request (a worklist preview strip or one viewer opening is tens to thousands of requests). A delivery is
- * the stream of image reads of one study by one member session; it closes after an idle gap without a read, and the next
- * read opens a new pair. No image byte leaves before the `provide-prepared` event is durable in the access ledger; a
+ * the stream of image reads of one study by one member session for one use (`DeliveryUse`: a viewer's opening, the memory
+ * preload, other fetches); it closes after an idle gap without a read, and the next read opens a new pair. No image byte leaves before the `provide-prepared` event is durable in the access ledger; a
  * ledger that cannot record answers 503 with no image byte.
  *
  * The event is the formatVersion 1 image event the images/dicom-web delivery writes (emr-image/service.ts), through the
@@ -55,8 +55,23 @@ const CONTEXT_UNAVAILABLE = Object.freeze({ code: 'ImageRequestContextUnavailabl
  */
 export interface DeliveryLease { release(served: boolean): void }
 
+/**
+ * D1880: what a read is for, which decides the delivery it joins. `view`: the viewer reads it to show the study (the
+ * opening's 열람, `user-view`). `preload`: the worklist's memory preload reads it ahead of any opening; a preload that is
+ * never opened is a transfer, not an opening, so it never joins or stands for a view delivery and a view never joins it.
+ * `fetch`: any other image read (strip previews, relayed reads); it belongs to the study's open view delivery when there
+ * is one, else to a background-fetch delivery of its own.
+ */
+export type DeliveryUse = 'view' | 'preload' | 'fetch';
+
+/** The header the viewer marks its image reads with (`view`, viewer-preload.js); any other read is a `fetch`. */
+export const IMAGE_USE_HEADER = 'X-KIN-Image-Use';
+export function viewerUse(request: IncomingMessage): 'view' | 'fetch' {
+  return String(request.headers?.['x-kin-image-use'] ?? '').trim().toLowerCase() === 'view' ? 'view' : 'fetch';
+}
+
 interface Delivery {
-  key: string; studyUid: string;
+  key: string; studyUid: string; use: 'view' | 'preload' | 'fetch';
   /** Resolves once the provide-prepared event is durable; rejects when it could not be recorded. */
   prepared: Promise<Readonly<AccessEventV1>>;
   event: Readonly<AccessEventV1> | null;
@@ -103,15 +118,16 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
    * session for a study records the event; the requests that arrive while it is being recorded wait for the same
    * receipt; later ones find the open delivery. Resolves only after the receipt - the caller sends no byte before.
    */
-  async admit(request: IncomingMessage, surface: string, studyUid: string): Promise<DeliveryLease> {
+  async admit(request: IncomingMessage, surface: string, studyUid: string, use: DeliveryUse = 'fetch'): Promise<DeliveryLease> {
     let delivery: Delivery;
     try {
       // Another provider's shutdown may still be running while the port admits work; a read let in now would open a
       // delivery the stop has already passed over, a pair without its end. No pair, so no byte.
       if (this.stopping) throw new ServiceUnavailableException(IMAGE_DELIVERY_UNAVAILABLE);
       const snapshot = this.requests.read(request);
-      const key = JSON.stringify([snapshot.issuer, snapshot.subject, snapshot.binding.sessionRef, studyUid]);
-      delivery = this.open.get(key) ?? this.start(key, request, surface, studyUid);
+      const key = (kind: DeliveryUse) => JSON.stringify([snapshot.issuer, snapshot.subject, snapshot.binding.sessionRef, studyUid, kind]);
+      const kind: DeliveryUse = use === 'fetch' && this.open.has(key('view')) ? 'view' : use;
+      delivery = this.open.get(key(kind)) ?? this.start(key(kind), kind, request, surface, studyUid);
     } catch (error) { throw this.unavailable(error); }
     if (delivery.timer) { clearTimeout(delivery.timer); delivery.timer = null; }
     delivery.inflight++;
@@ -130,17 +146,17 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
     } };
   }
 
-  private start(key: string, request: IncomingMessage, surface: string, studyUid: string): Delivery {
-    const delivery: Delivery = { key, studyUid, prepared: null as any, event: null, inflight: 0, served: 0, unserved: 0,
+  private start(key: string, use: DeliveryUse, request: IncomingMessage, surface: string, studyUid: string): Delivery {
+    const delivery: Delivery = { key, studyUid, use, prepared: null as any, event: null, inflight: 0, served: 0, unserved: 0,
       timer: null, closed: false, terminal: null, attempts: 0, recording: null, cancelRetry: null, reserved: null };
-    delivery.prepared = this.prepare(request, surface, studyUid).then(event => { delivery.event = event; return event; });
+    delivery.prepared = this.prepare(request, surface, studyUid, use).then(event => { delivery.event = event; return event; });
     // A delivery that could not be recorded is no delivery: the next read asks the ledger again.
     delivery.prepared.catch(() => { if (this.open.get(key) === delivery) this.open.delete(key); });
     this.open.set(key, delivery);
     return delivery;
   }
 
-  private async prepare(request: IncomingMessage, surface: string, studyUid: string): Promise<Readonly<AccessEventV1>> {
+  private async prepare(request: IncomingMessage, surface: string, studyUid: string, use: DeliveryUse): Promise<Readonly<AccessEventV1>> {
     const work = this.records.begin();
     try {
       const at = new Date().toISOString();
@@ -154,10 +170,12 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
       const event = parseAccessEvent({ formatVersion: 1, surface, eventId: randomUUID(),
         userId: known(facts.actor.identity), rolesAtTime: known(facts.actor.roles), actingInstitution: known(facts.actor.institutionId),
         managingInstitution: known(study.managingInstitutionId), occurredAt: at, trustedProxyIp: facts.ip,
-        // Image reads come as the person looks and ahead of it (prefetch, strips); which a request is cannot be told here,
-        // so the delivery is recorded as the fetch it is (as images/dicom-web records its deliveries). The person's
-        // display is the client's own report, not this event.
-        cause: 'background-fetch', context: { basis: 'background-fetch', studyId: studyUid, relatedStudyId: null, reason: null },
+        // A viewer's read is the opening of the study (D1880: the 열람 is recorded when the study is opened, also when its
+        // bytes then come from the preload memory); it is opened from the reading worklist. Every other read - strips,
+        // relayed reads, the memory preload - is recorded as the fetch it is (as images/dicom-web records its deliveries).
+        ...(use === 'view'
+          ? { cause: 'user-view', context: { basis: 'worklist', studyId: studyUid, relatedStudyId: null, reason: null } }
+          : { cause: 'background-fetch', context: { basis: 'background-fetch', studyId: studyUid, relatedStudyId: null, reason: null } }),
         executor: 'member', targets: [{ kind: 'image', patientLinkSnapshot: known(study.patient), studyId: known(studyUid),
           recordId: known(studyUid), versionId: known(`orthanc-study:${revision.id}@${revision.lastUpdate}`) }],
         action: 'provide-prepared', result: 'prepared', requestId: facts.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null }) as Readonly<AccessEventV1>;

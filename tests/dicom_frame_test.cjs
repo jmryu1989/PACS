@@ -327,10 +327,10 @@ test('controller: a preload read answers the study\'s archive revision; a stored
   const pacs = { authzDicom: async () => {} };
   let revisionFails = false;
   const orthanc = { studyRevision: async uid => { calls.push(['revision', uid]); if (revisionFails) throw new Error('two study resources'); return { id: 'abc', lastUpdate: '20261028T101010' }; } };
-  const deliveries = { admit: async (req, surface, study) => { leases.push(study); return { release() {} }; } };
+  const deliveries = { admit: async (req, surface, study, use) => { leases.push([study, use]); return { release() {} }; } };
   const controller = new DicomFrameController(service, pacs, orthanc, deliveries);
-  const read = async preload => {
-    const req = Object.assign(new PassThrough(), { method: 'GET', headers: preload ? { 'x-kin-preload': preload } : {}, sub: 'synthetic-doctor' });
+  const read = async (preload, extra = {}) => {
+    const req = Object.assign(new PassThrough(), { method: 'GET', headers: { ...(preload ? { 'x-kin-preload': preload } : {}), ...extra }, sub: 'synthetic-doctor' });
     const res = relayTarget(), headers = {};
     const set = res.setHeader.bind(res);
     res.setHeader = (k, v) => { headers[k.toLowerCase()] = v; return set(k, v); };
@@ -345,11 +345,14 @@ test('controller: a preload read answers the study\'s archive revision; a stored
   assert.equal((await read(null))['x-kin-study-revision'], undefined);
   assert.deepEqual(calls.filter(c => Array.isArray(c)), [], 'an ordinary read asks the archive nothing more');
   assert.equal(calls.at(-1).stored, false);
-  assert.equal(leases.length, 3, 'every read, preload or not, takes the study delivery lease (D1877)');
+  await read(null, { 'x-kin-image-use': 'view' });
+  // Every read takes the study delivery lease (D1877); the preload's is its own delivery, the check and the viewer's
+  // reads are the opening (D1880), anything else is a fetch.
+  assert.deepEqual(leases.map(l => l[1]), ['preload', 'view', 'fetch', 'view']);
   revisionFails = true;
   assert.equal((await read('check'))['x-kin-study-revision'], undefined, 'a check read is served; the viewer sees no match and stays live');
   await assert.rejects(read('store'), /two study resources/);
-  assert.equal(leases.length, 4, 'the refused stored read opened no delivery');
+  assert.equal(leases.length, 5, 'the refused stored read opened no delivery');
 });
 
 test('serveFrames: a client that goes away mid-stream ends the read as a failure, never as an unhandled rejection', async () => {

@@ -11,7 +11,7 @@
  * (pacs.controller.ts), so an image byte has no unrecorded way out.
  */
 import { Controller, ForbiddenException, Get, NotFoundException, Req, Res } from '@nestjs/common';
-import { StudyImageDeliveryRecorder } from './image-delivery-record';
+import { StudyImageDeliveryRecorder, viewerUse } from './image-delivery-record';
 import { OrthancService } from './orthanc.service';
 import { Caller, PacsService } from './pacs.service';
 
@@ -62,7 +62,7 @@ export class ImageRelayController {
     await this.pacs.authzDicom(uri, req.method, member(req));
     // HEAD sends no image byte (Node drops the body), so it is no delivery.
     const lease = req.method === 'GET' && imageRead(target.path)
-      ? await this.deliveries.admit(req, IMAGE_RELAY_SURFACE, await this.studyOf(target.path)) : null;
+      ? await this.deliveries.admit(req, IMAGE_RELAY_SURFACE, await this.studyOf(target.path), viewerUse(req)) : null;
     const abort = new AbortController();
     const stop = () => { if (!res.writableFinished) abort.abort(); };
     let relayed = false;

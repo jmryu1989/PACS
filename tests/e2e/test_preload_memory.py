@@ -4,10 +4,17 @@ RISK-PRELOAD-OOM-REPORT-LOSS -> TEST-MG-PRELOAD-SERVED.
 
 D1880 memory-only preload on the served stack, real browser: Preload on a worklist multi-selection, one study opened
 while the others still load, frames after the opening check served from the worker's memory (no network read), the
-store's memory within the budget the browser reported, nothing in Cache Storage / IndexedDB / OPFS, a fresh 열람 record
-(provide-prepared) when a preloaded study is opened after its preload delivery closed, and a study changed after
-preload dropped at opening and read live. Synthetic studies only; the SharedWorker's own fetches are not visible to
+store's memory within the budget, nothing in Cache Storage / IndexedDB / OPFS. 열람 (D1880 "each open still records
+열람"): a preloaded study that is not opened has no opening record (its preload is a background-fetch transfer), and
+each opening - right after the preload, or after the preload's delivery closed - has exactly one user-view
+provide-prepared of its own. With a viewer open, Clear All and Retry under a new revision: the viewer's next read does
+not take the new copy from memory; it is read live, then checked, and only then served from memory. The viewer's
+reading stays busy for the worker until the image body has ended (the page's real streams). A study changed after
+preload is dropped at opening and read live. Synthetic studies only; the SharedWorker's own fetches are not visible to
 Playwright (measured: neither context.route nor request events see them), so the worker is observed through the panel.
+
+The stack's site setting KIN_PRELOAD_MEMORY_SHARE must be set (a synthetic share, e.g. 0.25): without it preload is
+off by design and every study fails with that reason.
 """
 import json
 import re
@@ -138,6 +145,24 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
                          "AND payload::jsonb->'targets'->0->>'kind'='image' ORDER BY sequence")
         return [(int(r.split(' ', 1)[0]), json.loads(r.split(' ', 1)[1])) for r in rows]
 
+    def opens(self, uid):
+        """The study's opening records: user-view provide-prepared (a viewer's read). Preload reads are background-fetch."""
+        return [(s, e) for s, e in self.events(uid) if e['action'] == 'provide-prepared' and e['cause'] == 'user-view']
+
+    def wait_opens(self, uid, count, after=0):
+        deadline = time.monotonic() + 30
+        while len([1 for s, _ in self.opens(uid) if s > after]) < count:
+            self.assertLess(time.monotonic(), deadline, 'no opening record for %s' % uid)
+            time.sleep(1)
+        return [e for s, e in self.opens(uid) if s > after]
+
+    def viewer_read(self, viewer, url):
+        """One frame read through the viewer page's own fetch: its session transport and preload seam, as the image loader reads."""
+        return viewer.evaluate("""async url => {
+            const r = await fetch(url, { headers: { Accept: 'multipart/related; type="application/octet-stream"; transfer-syntax=*' } });
+            return { status: r.status, length: (await r.arrayBuffer()).byteLength };
+        }""", url)
+
     def wait_terminal(self, uid):
         deadline = time.monotonic() + DELIVERY_CLOSE_WAIT
         while time.monotonic() < deadline:
@@ -148,7 +173,8 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
 
     def observe(self, context):
         seen = []
-        context.on('request', lambda r: seen.append((FRAME.search(r.url.split('?')[0]).group(1), r.headers.get('x-kin-preload'), r.url))
+        context.on('request', lambda r: seen.append((FRAME.search(r.url.split('?')[0]).group(1), r.headers.get('x-kin-preload'), r.url,
+                                                     r.headers.get('x-kin-image-use')))
                    if r.method == 'GET' and FRAME.search(r.url.split('?')[0]) else None)
         return seen
 
@@ -190,11 +216,17 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
         self.wait_status(p, a.uid, '^Ready')
         at_open = self.panel(p)
         print('PANEL AT OPEN', json.dumps(at_open, ensure_ascii=False), flush=True)
+        self.assertEqual(self.opens(a.uid), [], 'a preloaded study not opened yet has no opening record')
         before = len(seen)
         viewer = self.separate(p, a)
         canvas_ready(viewer, 1)
         reads = [s for s in seen[before:] if s[0] == a.uid]
         self.assertEqual([r[1] for r in reads], ['check'], 'one live check read opens a held study: %r' % reads)
+        self.assertEqual([r[3] for r in reads], ['view'], 'the check read is the viewer\'s opening read')
+        # Opened right after its preload, inside the preload delivery's idle gap: its own opening record, exactly one.
+        opened = self.wait_opens(a.uid, 1)
+        self.assertEqual(len(opened), 1, opened)
+        print('OPEN RECORD A', json.dumps([[e['surface'], e['cause'], e['context']['basis'], e['occurredAt']] for e in opened]), flush=True)
         for index in range(1, a.slices):
             shown = self.stack_index(viewer, index)
             self.assertEqual(shown['drawn'], shown['target'], shown)
@@ -214,17 +246,20 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
         # 2. B, opened after its preload delivery closed: the opening has its own 열람 record (D1877), from memory.
         self.wait_status(p, b.uid, '^Ready', timeout=300000)
         self.wait_status(p, c.uid, '^Ready', timeout=300000)
+        # B and C are fully preloaded and not opened: their preload is a transfer, not an opening.
+        for f in (b, c):
+            self.assertEqual(self.opens(f.uid), [], 'never-opened preload of %s has no opening record' % f.label)
+            self.assertTrue(any(e['action'] == 'provide-prepared' and e['cause'] == 'background-fetch' for _, e in self.events(f.uid)),
+                            'the preload delivery itself is recorded as the fetch it is')
         closed = self.wait_terminal(b.uid)
+        self.assertEqual(self.opens(b.uid), [])
         before = len(seen)
         viewer = self.separate(p, b)
         canvas_ready(viewer, 1)
         self.assertEqual([s[1] for s in seen[before:] if s[0] == b.uid], ['check'])
-        deadline = time.monotonic() + 30
-        while not [s for s, e in self.events(b.uid) if s > closed and e['action'] == 'provide-prepared']:
-            self.assertLess(time.monotonic(), deadline, 'no 열람 record after the opening of a preloaded study')
-            time.sleep(1)
-        opened = [e for s, e in self.events(b.uid) if s > closed and e['action'] == 'provide-prepared']
-        print('OPEN RECORD', json.dumps([[e['surface'], e['action'], e['occurredAt'], e['cause']] for e in opened]), flush=True)
+        opened = self.wait_opens(b.uid, 1, after=closed)
+        self.assertEqual(len(opened), 1, opened)
+        print('OPEN RECORD B', json.dumps([[e['surface'], e['cause'], e['context']['basis'], e['occurredAt']] for e in opened]), flush=True)
         for index in (b.slices // 2, b.slices - 1):
             shown = self.stack_index(viewer, index)
             self.assertEqual(shown['drawn'], shown['target'], shown)
@@ -234,7 +269,57 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
         self.assertLessEqual(used, budget, text)
         for page in (p, viewer):
             self.assertEqual(page.evaluate(STORAGE), {'caches': [], 'indexedDB': [], 'opfs': []})
+
+        # 2b. With B's viewer still open: Clear All, B changes, Retry under its new revision. The viewer must not take
+        # the new copy from memory under its earlier check: the next read goes live, a new check follows, then memory.
+        urls = viewer.evaluate("""() => cornerstone.getEnabledElements().map(e => e.viewport).find(v => v.type === 'stack')
+            .getImageIds().map(id => id.replace(/^wadors:/, ''))""")
+        mark = len(seen)
+        self.assertEqual(self.viewer_read(viewer, urls[1])['status'], 200)
+        self.assertEqual([s for s in seen[mark:] if s[0] == b.uid], [], 'before the change: from memory')
+        p.locator('#preload-clear').click()
+        self.wait_status(p, b.uid, '^Evicted')
+        store_slices(self.stack, b.uid, b.series, b.frame, patient, 'B', b.date, 1, 1024, start=b.slices)
+        for f in (b, c):
+            p.locator(f'#preload-panel tbody tr[data-uid="{f.uid}"] button', has_text='Retry').click()
+        self.wait_status(p, b.uid, '^Ready', timeout=300000)
+        self.assertEqual(self.panel(p)[b.uid][1], '%d/%d' % (b.slices + 1, b.slices + 1), 'the new copy holds the changed study')
+        mark = len(seen)
+        self.assertEqual(self.viewer_read(viewer, urls[2])['status'], 200)
+        after_retry = [s for s in seen[mark:] if s[0] == b.uid]
+        self.assertEqual([s[1] for s in after_retry], [None], 'the new copy is not used under the earlier check: read live')
+        mark = len(seen)
+        self.assertEqual(self.viewer_read(viewer, urls[3])['status'], 200)
+        self.assertEqual([s[1] for s in seen[mark:] if s[0] == b.uid], ['check'], 'the new copy gets its own live check')
+        mark = len(seen)
+        self.assertEqual(self.viewer_read(viewer, urls[4])['status'], 200)
+        self.assertEqual([s for s in seen[mark:] if s[0] == b.uid], [], 'after its check, the new copy is used')
+
+        # 2c. Reading priority: the viewer stays busy for the preload worker until an image body has ended, in this
+        # page's own streams (the module the viewer runs, a scripted worker port to watch its messages).
+        busy = viewer.evaluate("""async () => {
+            const posted = [];
+            class Port { start() {} postMessage(m) { posted.push(m); } }
+            class Worker { constructor() { this.port = new Port(); } }
+            let controller;
+            const body = new ReadableStream({ start(c) { controller = c; } });
+            const win = { location: window.location, SharedWorker: Worker, Headers, Response, ReadableStream, addEventListener() {} };
+            const read = window.KinViewerPreload.attach(win, async () => new Response(body, { status: 200 }));
+            const answer = await read(location.origin + '/dicom-web/studies/1.2.3/metadata', { headers: {} });
+            const states = () => posted.filter(m => m.type === 'busy').map(m => m.busy);
+            const atHeaders = states();
+            const reader = answer.body.getReader();
+            controller.enqueue(new Uint8Array([1, 2, 3]));
+            await reader.read();
+            await new Promise(r => setTimeout(r, 50));
+            const midBody = states();
+            controller.close();
+            await reader.read();
+            return { atHeaders, midBody, atEnd: states() };
+        }""")
+        self.assertEqual(busy, {'atHeaders': [True], 'midBody': [True], 'atEnd': [True, False]}, busy)
         viewer.close(run_before_unload=True)
+        self.wait_status(p, c.uid, '^Ready', timeout=300000)
 
         # 3. C changed after it was preloaded (one more object stored): the opening check drops it and the viewer reads live.
         store_slices(self.stack, c.uid, c.series, c.frame, patient, 'C', c.date, 1, 1024, start=c.slices)

@@ -17,11 +17,13 @@ function fill(store, uid, count, bytes, revision = 'r1') {
   assert.equal(store.ready(uid), true);
 }
 
-test('budget comes from the memory the browser reports; no report, no preload', () => {
-  assert.equal(budgetFor(8), Math.floor(0.15 * 8 * GB));
-  assert.equal(budgetFor(16), Math.floor(0.15 * 16 * GB));
-  assert.equal(budgetFor(32), 4 * GB, 'the design ceiling (4 GB) holds above about 26 GB');
-  for (const none of [undefined, null, 0, -1, NaN, '8']) assert.equal(budgetFor(none), null);
+test('budget is the memory the browser reports times the share the site set; no report or no share, no preload', () => {
+  // Synthetic shares: the product has none of its own (no measured source); the site sets it.
+  assert.equal(budgetFor(8, 0.25), 2 * GB);
+  assert.equal(budgetFor(0.25, 0.5), Math.floor(0.125 * GB));
+  assert.equal(budgetFor(32, 0.5), 16 * GB, 'no ceiling of the product\'s own on top of the browser\'s report');
+  for (const none of [undefined, null, 0, -1, NaN, '8']) assert.equal(budgetFor(none, 0.25), null, String(none));
+  for (const share of [undefined, null, 0, -0.1, 1.5, NaN, '0.2']) assert.equal(budgetFor(8, share), null, String(share));
   const store = create(null);
   store.add([{ uid: '1.1' }]);
   store.start('1.1', 1);
@@ -103,7 +105,7 @@ test('held frames are answered by path and revision; failed, evicted and cleared
   const store = create(1000);
   store.add([{ uid: '1.1', label: 'SYN-1 · Synthetic' }, { uid: '1.2' }]);
   fill(store, '1.1', 2, 10, 'rev-A');
-  assert.deepEqual(store.held('1.1'), { revision: 'rev-A', status: STATUS.ready });
+  assert.deepEqual(store.held('1.1'), { revision: 'rev-A', status: STATUS.ready, copy: 1 });
   assert.equal(store.frame(path('1.1', 2)).data.byteLength, 10);
   assert.equal(store.frame(path('1.1', 3)), null);
   assert.equal(store.held('1.2'), null, 'queued with nothing fetched is not held');
@@ -127,6 +129,51 @@ test('Retry puts a failed or evicted study at the head of the queue; a held one 
   fill(store, '1.3', 1, 10);
   assert.deepEqual(store.add([{ uid: '1.3' }, { uid: '1.4' }]), ['1.4']);
   assert.equal(status(store, '1.3').status, STATUS.ready);
+});
+
+test('a study that could not fit even alone does not wait for memory; one that could fit once others go waits', () => {
+  const store = create(100);
+  store.add([{ uid: '1.1' }, { uid: '1.2' }, { uid: '1.3' }]);
+  store.start('1.1', 3);
+  assert.equal(store.put('1.1', path('1.1', 1), frame(40), 'r1'), 'stored');
+  assert.equal(store.put('1.1', path('1.1', 2), frame(40), 'r1'), 'stored');
+  assert.equal(store.put('1.1', path('1.1', 3), frame(40), 'r1'), 'oversize', '120 bytes can never fit in 100');
+  assert.equal(status(store, '1.1').waiting, false, 'not parked for memory');
+  store.fail('1.1', 'too large');
+  assert.equal(store.used(), 0, 'its partial bytes go with the failure');
+  assert.equal(store.next().uid, '1.2', 'the queue goes on');
+  // 1.2 is Ready and not read yet (it may not be evicted); 1.3 fits alone but not beside it: it waits.
+  fill(store, '1.2', 1, 60);
+  store.start('1.3', 1);
+  assert.equal(store.put('1.3', path('1.3'), frame(50), 'r1'), 'full');
+  assert.equal(status(store, '1.3').waiting, true);
+});
+
+test('a study whose frames so far project past the whole budget fails instead of waiting beside a study not read yet', () => {
+  const store = create(100);
+  store.add([{ uid: '1.1' }, { uid: '1.2' }, { uid: '1.3' }]);
+  fill(store, '1.1', 1, 50);                    // Ready, not read yet: it may not be evicted
+  store.start('1.2', 10);
+  for (let n = 1; n <= 4; n++) assert.equal(store.put('1.2', path('1.2', n), frame(12), 'r1'), 'stored');
+  // 5 frames of 12 projected over 10 frames is 120 > 100: no room the reader could free would ever be enough.
+  assert.equal(store.put('1.2', path('1.2', 5), frame(12), 'r1'), 'oversize');
+  store.fail('1.2', 'too large');
+  // A study that would fit once 1.1 goes still waits for that.
+  store.start('1.3', 10);
+  for (let n = 1; n <= 9; n++) assert.equal(store.put('1.3', path('1.3', n), frame(5), 'r1'), 'stored');
+  assert.equal(store.put('1.3', path('1.3', 10), frame(6), 'r1'), 'full', '45 + 6 fits alone; 1.1 holds the rest');
+});
+
+test('each fetch of a study is its own copy: one fetched again after Clear All is another copy', () => {
+  const store = create(1000);
+  store.add([{ uid: '1.1' }]);
+  fill(store, '1.1', 1, 10);
+  const first = store.held('1.1').copy;
+  store.clear('cleared');
+  assert.equal(store.held('1.1'), null);
+  assert.equal(store.retry('1.1'), true);
+  fill(store, '1.1', 1, 10);
+  assert.notEqual(store.held('1.1').copy, first);
 });
 
 test('a study larger than the whole budget is refused from its first frames', () => {
