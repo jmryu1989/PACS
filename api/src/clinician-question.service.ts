@@ -265,14 +265,25 @@ export class ClinicianQuestionService {
     }, true, transaction);
   }
 
-  /** #4 질문 등록. 작성자·기관·역할 표지는 토큰에서만 오고 body에는 정확히 세 키만 받는다. */
-  async create(uid: string, c: QuestionCaller, b: any, transaction?: Prisma.TransactionClient) {
+  private validateCreate(uid: string, c: QuestionCaller, b: any) {
     this.member(c);
     if (!holds(c, CLINICIAN_ROLE)) throw roleRequired();
     if (!studyUid(uid)) throw invalid('검사 UID를 확인하세요');
     if (!exactKeys(b, ['requestId', 'expectedOwner', 'body']) || !uuid(b.requestId) || !text(b.body))
       throw invalid('요청 ID와 1~2,000자의 질문을 입력하세요');
     this.expectOwner(c, b);
+  }
+
+  /** Keep the question's input/role/scope refusals ahead of the clinical record adapter. */
+  async prepareCreate(uid: string, c: QuestionCaller, b: any) {
+    this.validateCreate(uid, c, b);
+    await this.studyAccess.prepare(c, [uid]);
+    await this.run(c, tx => this.study(tx, uid, c, false, studyMissing), true);
+  }
+
+  /** #4 질문 등록. 작성자·기관·역할 표지는 토큰에서만 오고 body에는 정확히 세 키만 받는다. */
+  async create(uid: string, c: QuestionCaller, b: any, transaction?: Prisma.TransactionClient) {
+    this.validateCreate(uid, c, b);
     const requestId = b.requestId.toLowerCase();
     const mark = fingerprint({ uid, institution: c.institution, subject: c.sub, body: b.body });
     await this.studyAccess.prepare(c, [uid]);
@@ -292,13 +303,40 @@ export class ClinicianQuestionService {
   }
 
   /** #5 답변 또는 추가 질문. 종류는 서버가 정한다: 작성자면 followup(clinician), 아니면 answer(radiologist). */
-  async reply(id: string, c: QuestionCaller, b: any, transaction?: Prisma.TransactionClient) {
+  private validateReply(id: string, c: QuestionCaller, b: any) {
     this.member(c);
     if (!holds(c, CLINICIAN_ROLE) && !holds(c, RADIOLOGIST)) throw roleRequired();
     if (!exactKeys(b, ['requestId', 'expectedOwner', 'revision', 'body']) || !uuid(b.requestId) || !revision(b.revision) || !text(b.body))
       throw invalid('요청 ID·기준 revision과 1~2,000자의 내용을 입력하세요');
     this.expectOwner(c, b);
     if (!uuid(id)) throw questionMissing();
+  }
+
+  /** 작성자 여부는 바뀌지 않으므로 revision·상태와 달리 기록 전에 판정한다. */
+  private replyAuthor(row: any, c: QuestionCaller) {
+    const author = row.authorSub === c.sub;
+    if (author ? !holds(c, CLINICIAN_ROLE) : !holds(c, RADIOLOGIST)) throw actionForbidden();
+    return author;
+  }
+
+  /** Resolve a write target with write permissions, rather than the single-record read. Revision and
+   * state stay with the write, so a retry of an applied request still reaches its replay. */
+  private async prepareTarget(id: string, c: QuestionCaller, admit: (row: any) => void) {
+    await this.studyAccess.prepare(c);
+    return this.run(c, async tx => {
+      const { row } = await this.question(tx, id.toLowerCase(), c, this.scope(c), false);
+      admit(row);
+      return row.studyUid as string;
+    }, true);
+  }
+
+  async prepareReply(id: string, c: QuestionCaller, b: any) {
+    this.validateReply(id, c, b);
+    return this.prepareTarget(id, c, row => this.replyAuthor(row, c));
+  }
+
+  async reply(id: string, c: QuestionCaller, b: any, transaction?: Prisma.TransactionClient) {
+    this.validateReply(id, c, b);
     const questionId = id.toLowerCase(), requestId = b.requestId.toLowerCase(), scope = this.scope(c);
     const mark = fingerprint({ id: questionId, institution: c.institution, subject: c.sub, revision: b.revision, action: 'reply', body: b.body });
     await this.studyAccess.prepare(c);
@@ -309,8 +347,7 @@ export class ClinicianQuestionService {
       if (row.revision !== b.revision) throw changed();
       if (row.state === 'Closed') throw closedError();
       if (!['Open', 'Answered'].includes(row.state)) throw stateError();
-      const author = row.authorSub === c.sub;
-      if (author ? !holds(c, CLINICIAN_ROLE) : !holds(c, RADIOLOGIST)) throw actionForbidden();
+      const author = this.replyAuthor(row, c);
       // 마지막 한 칸은 닫기 몫이다. 답변·추가 질문이 100칸을 모두 채우면 그 스레드는 닫을 수 없게 된다.
       if (row.entryCount >= QUESTION_ENTRY_LIMIT - 1) throw entryLimit();
       return this.apply(tx, c, row, rs, requestId, mark, author
@@ -320,13 +357,32 @@ export class ClinicianQuestionService {
   }
 
   /** #6 닫기. 작성자(clinician)는 사유를 비울 수 있고, 판독의·관리자가 남의 질문을 닫을 때는 사유가 필요하다. */
-  async close(id: string, c: QuestionCaller, b: any, transaction?: Prisma.TransactionClient) {
+  private validateClose(id: string, c: QuestionCaller, b: any) {
     this.member(c);
     if (!holds(c, CLINICIAN_ROLE) && !holds(c, RADIOLOGIST) && !holds(c, ADMIN)) throw roleRequired();
     if (!exactKeys(b, ['requestId', 'expectedOwner', 'revision', 'note']) || !uuid(b.requestId) || !revision(b.revision)
       || b.note !== '' && !text(b.note)) throw invalid('요청 ID·기준 revision과 2,000자 이하의 사유를 확인하세요');
     this.expectOwner(c, b);
     if (!uuid(id)) throw questionMissing();
+  }
+
+  private closeRole(row: any, c: QuestionCaller, b: any) {
+    const author = row.authorSub === c.sub;
+    if (author && holds(c, CLINICIAN_ROLE)) return 'clinician';
+    if (!author && (holds(c, RADIOLOGIST) || holds(c, ADMIN))) {
+      if (b.note === '') throw invalid('작성자가 아닌 사람이 질문을 닫을 때는 사유를 입력하세요');
+      return holds(c, RADIOLOGIST) ? RADIOLOGIST : ADMIN;
+    }
+    throw actionForbidden();
+  }
+
+  async prepareClose(id: string, c: QuestionCaller, b: any) {
+    this.validateClose(id, c, b);
+    return this.prepareTarget(id, c, row => this.closeRole(row, c, b));
+  }
+
+  async close(id: string, c: QuestionCaller, b: any, transaction?: Prisma.TransactionClient) {
+    this.validateClose(id, c, b);
     const questionId = id.toLowerCase(), requestId = b.requestId.toLowerCase(), scope = this.scope(c);
     const mark = fingerprint({ id: questionId, institution: c.institution, subject: c.sub, revision: b.revision, action: 'close', note: b.note });
     await this.studyAccess.prepare(c);
@@ -337,13 +393,7 @@ export class ClinicianQuestionService {
       if (row.revision !== b.revision) throw changed();
       if (row.state === 'Closed') throw closedError();
       if (!['Open', 'Answered'].includes(row.state)) throw stateError();
-      const author = row.authorSub === c.sub;
-      let role: string;
-      if (author && holds(c, CLINICIAN_ROLE)) role = 'clinician';
-      else if (!author && (holds(c, RADIOLOGIST) || holds(c, ADMIN))) {
-        if (b.note === '') throw invalid('작성자가 아닌 사람이 질문을 닫을 때는 사유를 입력하세요');
-        role = holds(c, RADIOLOGIST) ? RADIOLOGIST : ADMIN;
-      } else throw actionForbidden();
+      const role = this.closeRole(row, c, b);
       if (row.entryCount >= QUESTION_ENTRY_LIMIT) throw entryLimit();
       return this.apply(tx, c, row, rs, requestId, mark, { action: 'close', kind: 'close', to: 'Closed', role, body: b.note });
     }, false, transaction);

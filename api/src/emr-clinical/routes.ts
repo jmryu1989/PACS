@@ -208,13 +208,19 @@ function routeError(error: unknown, surface?: SurfaceKey): never {
   if (!(error instanceof ContractError)) throw error;
   const codes = { OwnerChanged: 'OWNER_CHANGED', RequestIdReused: 'REQUEST_ID_REUSED' };
   const changed = error.code === 'StaleRevision' || error.code === 'StateTransitionRefused';
-  // The clinical ledger uses shared refusal codes; callers still consume the image-request API's vocabulary.
-  const imageCodes = { UnitExists: 'REQUEST_ID_REUSED', StaleRevision: 'IMAGE_REQUEST_CHANGED',
-    StateTransitionRefused: 'IMAGE_REQUEST_STATE', AuthorityFieldRefused: 'IMAGE_REQUEST_INPUT_INVALID',
-    RequestShapeRefused: 'IMAGE_REQUEST_INPUT_INVALID', TextRequired: 'IMAGE_REQUEST_INPUT_INVALID',
-    TextRefused: 'IMAGE_REQUEST_INPUT_INVALID', ReasonRequired: 'IMAGE_REQUEST_INPUT_INVALID' };
-  const code = codes[error.code] ?? (surface?.startsWith('image-request.') ? imageCodes[error.code] : undefined) ??
-    (changed && surface?.startsWith('question.') ? 'QUESTION_CHANGED' : error.code);
+  // The clinical ledger uses shared refusal codes; callers still consume each API's own vocabulary
+  // (clinician.js, study-image-requests.js, study-questions.js). A question's thread states are
+  // Open/Answered/Closed and D admits only Open/Answered, so a refused transition is a closed thread.
+  const input = (invalid: string) => Object.fromEntries(['AuthorityFieldRefused', 'RequestShapeRefused', 'TextRequired',
+    'TextRefused', 'ReasonRequired'].map(c => [c, invalid]));
+  const vocabulary = {
+    'image-request.': { UnitExists: 'REQUEST_ID_REUSED', StaleRevision: 'IMAGE_REQUEST_CHANGED',
+      StateTransitionRefused: 'IMAGE_REQUEST_STATE', ...input('IMAGE_REQUEST_INPUT_INVALID') },
+    'question.': { UnitExists: 'REQUEST_ID_REUSED', StaleRevision: 'QUESTION_CHANGED',
+      StateTransitionRefused: 'QUESTION_CLOSED', ...input('QUESTION_INPUT_INVALID') },
+  };
+  const own = Object.entries(vocabulary).find(([prefix]) => surface?.startsWith(prefix))?.[1];
+  const code = codes[error.code] ?? own?.[error.code] ?? error.code;
   const body = { code, message: '임상 기록을 처리하지 못했습니다. 입력을 유지하고 대상과 현재 상태를 확인하세요.' };
   if (error.code === 'NotFound') throw new NotFoundException(body);
   if (['ActorPathRefused', 'ServiceActorRefused', 'OnlineDoctorApprovalRequired'].includes(error.code)) throw new ForbiddenException(body);

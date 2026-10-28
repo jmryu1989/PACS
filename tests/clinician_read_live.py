@@ -315,15 +315,19 @@ class ClinicianReadLive(unittest.TestCase):
         for _ in range(1000):
             query = "?limit=100" + ("&after=" + quote(after, safe="") if after else "")
             page = self.call("GET", "/clinician/studies" + query, user).body
-            # WORKLIST-SPLIT-UID (#180, D1492): excluded identities are a separate, narrow list.
-            self.assertEqual(sorted(page), sorted(C["list_paged_response_keys"] + ["identityIssues"]))
-            self.assertIsInstance(page["identityIssues"], list)
-            for issue in page["identityIssues"]:
-                self.assertEqual(sorted(issue), ["code", "uid"])
-                self.assertEqual(issue["code"], "STUDY_IDENTITY_UNRESOLVED")
-                self.assertNotIn(issue["uid"], [row["uid"] for row in page["studies"]])
             pagination = page["pagination"]
             self.assertEqual(sorted(pagination), sorted(C["pagination_keys"]))
+            # WORKLIST-SPLIT-UID (#180, D1492; tests/README.md): excluded identities are a separate,
+            # narrow list sent only on the page that completes the list, never on an earlier page.
+            completing = pagination["next"] is None
+            self.assertEqual(sorted(page), sorted(C["list_paged_response_keys"] + (["identityIssues"] if completing else [])))
+            if completing:
+                self.assertIsInstance(page["identityIssues"], list)
+                listed = [row["uid"] for row in rows + page["studies"]]
+                for issue in page["identityIssues"]:
+                    self.assertEqual(sorted(issue), ["code", "uid"])
+                    self.assertEqual(issue["code"], "STUDY_IDENTITY_UNRESOLVED")
+                    self.assertNotIn(issue["uid"], listed)
             total = pagination["total"] if total is None else total
             self.assertEqual(pagination["total"], total)
             self.assertEqual(pagination["offset"], len(rows))
