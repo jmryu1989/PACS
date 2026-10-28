@@ -243,11 +243,10 @@ function frameStructure(h: DicomJson, sop: string): void {
     if (!v || !v.length) fail('frame-count-absent');
     if (v.length !== 1) fail('frame-count-range');
     n = numbers(h, '00280008')[0];
-    if (!Number.isInteger(n) || n < 1 || n > 2000) fail('frame-count-range');
+    if (!Number.isSafeInteger(n) || n < 1) fail('frame-count-range');
   }
   const shared = valuesOf(h, '52009229'), frames = valuesOf(h, '52009230');
   if (shared && shared.length > 1) fail('shared-functional-groups');
-  if (frames && frames.length > 2000) fail('frame-count-range');
   if (sop === BTO && (!frames || frames.length !== n)) fail('per-frame-count');
 }
 function laterality(h: DicomJson, frames: DicomJson[]): { value: string | null; conflict: boolean } {
@@ -360,7 +359,7 @@ function classifyBto(h: DicomJson): Base {
   const nf = valuesOf(h, '00280008');
   if (!nf || !nf.length) fail('frame-count-absent');
   const n = numbers(h, '00280008')[0];
-  if (!Number.isInteger(n) || n < 1 || n > 2000) fail('frame-count-range');
+  if (!Number.isSafeInteger(n) || n < 1) fail('frame-count-range');
   const sharedItems = itemsOf(h, '52009229') ?? [], perFrame = itemsOf(h, '52009230');
   if (sharedItems.length > 1) fail('shared-functional-groups');
   const shared = sharedItems[0] ?? {};
@@ -480,7 +479,6 @@ function extractSources(h: DicomJson): MgDeclaredSource[] {
   sequence(h, '00189507').forEach((a, ai) => read(sequence(a, '00082112'), `XRay3DAcquisitionSequence[${ai}]/`));
   sequence(h, '00089124').forEach((dv, di) => read(sequence(dv, '00082112'), `DerivationImageSequence[${di}]/`));
   for (const [tag, name] of [['52009229', 'SharedFunctionalGroupsSequence'], ['52009230', 'PerFrameFunctionalGroupsSequence']]) {
-    if ((valuesOf(h, tag)?.length ?? 0) > 2000) fail('frame-count-range');
     sequence(h, tag).forEach((g, gi) => sequence(g, '00089124').forEach((dv, di) =>
       read(sequence(dv, '00082112'), `${name}[${gi}]/DerivationImageSequence[${di}]/`)));
   }

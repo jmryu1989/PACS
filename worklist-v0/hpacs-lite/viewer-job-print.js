@@ -129,7 +129,8 @@
     try { while (true) {
       let part; try { part = await reader.read(); } catch (error) { if (signal?.aborted) throw error; throw new Error(SOURCE_READ_FAILED); }
       if (part.done) break; size += part.value.length; budget.bytes += part.value.length;
-      if (size > max || budget.bytes > 67108864) throw new Error('출력 원본 용량 한도를 초과했습니다.'); chunks.push(part.value); }
+      // A caller whose shared limit is the viewer's free memory names that cause, so the notice tells the reader what to close.
+      if (size > max || budget.bytes > (budget.limit ?? 67108864)) throw new Error(size <= max && budget.exceeded || '출력 원본 용량 한도를 초과했습니다.'); chunks.push(part.value); }
     } finally { await reader.cancel().catch(() => {}); }
     return new Uint8Array(await new Blob(chunks).arrayBuffer());
   }

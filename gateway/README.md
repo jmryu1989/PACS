@@ -4,16 +4,15 @@
 현재 범위는 병원 → 자기 KIN 테넌트 수신뿐이며, KIN 영상을 원내로 가져오는 Import 방향은
 Transfer 수신 API가 추가되는 후속 커밋 전에는 열지 않는다.
 
-**Phase 1 지원 범위는 CT다.** 단일 DICOM 인스턴스가 24 MiB를 넘는 다중 프레임 유방
-토모신테시스·XA/US 시네는 자동 재시도하지 않고 `failed`로 남긴다. 해당 경로의 업로드 상한과
-전송 방식이 별도로 승인되기 전에는 이 Gateway로 보내지 않는다.
+MG·DBT·XA/US 시네를 포함한 DICOM 원본을 전송한다. 큰 단일 인스턴스도 분할하지 않고
+하나의 STOW part로 보내며, 전송 본문은 임시 파일에 스트리밍하여 준비한다.
 
 ## 설치
 
 1. `.env.example`을 `.env`로 복사하고 실제 값을 채운다. `.env`와 SQLite 큐는 커밋하지 않는다.
 2. Keycloak에서 `gw-<institutionId>` confidential client를 만들고 client credentials를 켠다.
    서비스 계정은 해당 기관 그룹 하나와 realm 역할 `gateway` 하나만 가져야 한다.
-3. `orthanc.json`의 `DicomModalities`를 실제 원내 송신 AE Title 화이트리스트로 바꾼다.
+3. `orthanc.json`의 `DicomModalities`를 해당 병원의 실제 송신 AE Title 설정으로 바꾼다.
 4. 이 디렉터리에서 `docker compose up -d --build`를 실행한다.
 
 원내 장비는 Gateway 호스트의 `${GW_DICOM_PORT}`와 AE Title `KINGW`로 보낸다. Gateway의
@@ -27,7 +26,7 @@ docker compose exec gw-agent python /app/agent.py status
 ```
 
 에이전트는 `StableStudy`를 `/changes`로 감지하고 SQLite에 큐를 먼저 남긴다. 검사마다 announce한
-뒤 DICOM 인스턴스를 HTTP 본문 최대 24 MiB 묶음으로 직접 STOW한다. 응답의 실패 SOP만 남겨
+뒤 DICOM 인스턴스를 설정된 목표 크기로 묶어 직접 STOW한다. 목표보다 큰 객체는 단독 요청으로 보낸다. 응답의 실패 SOP만 남겨
 지수 백오프로 재시도하며, 완료 조건은 로컬 SOP 집합과 성공 SOP 집합의 정확한 일치다. 같은
 Study가 다시 stable이 되면 완료 큐를 재개해 늦게 온 인스턴스의 차분만 보낸다.
 `status`의 `failed`는 같은 바이트로 재시도해도 성공할 수 없는 영구 실패 수다. 각 행의

@@ -1301,7 +1301,7 @@ class MeasurementCiTests(unittest.TestCase):
                           # S9-U0E: the served generated OHIF config, in its own validate.yml job.
                           's9-u0e-served',
                           # Viewer U2 shell (D1821), in the worklist-ux-measurements job.
-                          'viewer-ux-shell',
+                          'viewer-ux-shell', 'viewer-ux-priors',
                           'gateway-e2e', 'critical-result-screens',
                           # EMR-B1: the access ledger profile, run only by the emr-b job.
                           'emr-b',

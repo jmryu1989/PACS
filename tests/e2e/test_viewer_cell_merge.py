@@ -276,11 +276,10 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         self.assertEqual(1, len(self.geometry(page)))
         self.assertNotEqual(annotated, self.geometry(page)[0][0])
         self.assertEqual(drawn, self.annotations(page))
-        # The merged screen keeps the existing persistence refusal, unchanged.
+        # A merged layout is saved with its actual pane geometry.
         save = page.get_by_role('button', name='Save Recent Layout', exact=True)
         expect(save).to_be_enabled(); save.click()
-        # config/ohif.js:1479 already refuses a grid whose cell count is not rows*cols.
-        expect(page.locator('#kin-viewer-layout-status')).to_contain_text('1·2·4화면의 일반 CT 배치만 저장할 수 있습니다')
+        expect(page.locator('#kin-viewer-layout-status')).to_contain_text('저장했습니다')
         self.assertEqual(1, page.evaluate('services.viewportGridService.getState().viewports.size'))
         self.merge_button(page, 'restore').click()
         page.wait_for_function('()=>services.viewportGridService.getState().viewports.size===4', timeout=30000)
@@ -290,6 +289,12 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         expect(work.locator('#findings')).to_have_value(values['findings'])
         self.assertEqual(self.stack.actor('doctor'), self.state(fixture)['holder'])
         self.assertEqual(rows, self.report_rows(fixture)); self.assertEqual(originals, self.originals())
+        # Restore the saved merged screen after returning to the original grid.
+        self.action(page, '복원', '적용했습니다')
+        page.wait_for_function('()=>services.viewportGridService.getState().viewports.size===1', timeout=30000)
+        self.loaded(page, 1)
+        self.assertEqual([0, 0, 1, 1], self.geometry(page)[0][1:5])
+        self.assertEqual(drawn, self.annotations(page))
         self.shot(page, 'cell-merge-measurements')
 
     def test_cell_merge_04_unloaded_cell_and_failed_layout_change_nothing(self):
@@ -485,12 +490,10 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         # The measurement drawn on the plane this maximize destroyed is not on screen at all.
         self.assertNotIn(displaced, [row[0] for row in self.geometry(page)])
         self.assertEqual(drawn, self.annotations(page))
-        # The merged plane screen keeps the existing persistence refusal, unchanged: a grid
-        # whose cell count is not rows*cols is still refused by config/ohif.js:1479, which
-        # this unit never touches. Merged plane geometry is not saved by anything.
+        # The plane type and merged geometry are persisted too.
         save = page.get_by_role('button', name='Save Recent Layout', exact=True)
         expect(save).to_be_enabled(); save.click()
-        expect(page.locator('#kin-viewer-layout-status')).to_contain_text('1·2·4화면의 일반 CT 배치만 저장할 수 있습니다')
+        expect(page.locator('#kin-viewer-layout-status')).to_contain_text('저장했습니다')
         self.assertEqual(1, page.evaluate('services.viewportGridService.getState().viewports.size'))
         # The clinician moves the enlarged plane while they read it.
         self.gesture_on(page, 'Pan', anchor, 55, 30)

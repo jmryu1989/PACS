@@ -2,6 +2,7 @@
 """D02E: preserve thumbnail Study/Series identity through real pinned OHIF opening."""
 from __future__ import annotations
 
+import os
 import copy
 import io
 import json
@@ -28,7 +29,7 @@ class ThumbnailSeriesE2E(previous.ReturnToCurrentE2E):
         originals=[dcmread(io.BytesIO(self.stack.orthanc_bytes('/instances/'+x['ID']+'/file'))) for x in instances]
         new_series=generate_uid();ae=AE(ae_title="HALLYM_CT")
         ae.add_requested_context(CTImageStorage,ExplicitVRLittleEndian)
-        assoc=ae.associate("127.0.0.1",4242,ae_title="KINLAB");self.assertTrue(assoc.is_established)
+        assoc=ae.associate("127.0.0.1",int(os.environ.get("KIN_TEST_DICOM_PORT","4242")),ae_title="KINLAB");self.assertTrue(assoc.is_established)
         try:
             for original in originals:
                 data=copy.deepcopy(original);data.SeriesInstanceUID=new_series;data.SeriesNumber=2
