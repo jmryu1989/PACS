@@ -210,6 +210,8 @@
     body:not(.reading).kin-report-window-empty #resize-top { display: none !important; }
     body:not(.reading).kin-hide-thumbnail .rw > .s-thumb { width: auto; flex: none; }
     body:not(.reading).kin-panels-trimmed .rw > section { flex-grow: 1; }
+    /* The choice has no effect there, and the reading toolbar's View row (92px, G-LIVE-GEO) must stay one line. */
+    body.reading #panel-settings-open { display: none; }
     .tpl-opts { display: flex; gap: 8px; padding: 3px 8px; background: #171c25; color: #8892a4; font-size: 11px; flex: none; flex-wrap: wrap; }
     .tpl-opts select { max-width: 145px; min-width: 0; background: #14181f; color: #cdd3dc; border: 1px solid #3a4356; font: inherit; }
     .tpl-filter-status { padding: 3px 8px; color: #aab2c0; font-size: 11px; flex: none; overflow-wrap: anywhere; }
