@@ -1,10 +1,12 @@
 'use strict';
 // REQ-MG-PRELOAD-MEM -> RISK-PRELOAD-STALE-IDENTITY / RISK-PRELOAD-UNRECORDED-VIEW / RISK-PRELOAD-CROSS-SESSION
 // -> TEST-MG-PRELOAD-VIEWER: the viewer's fetch under its session transport (worklist-v0/hpacs-lite/viewer-preload.js).
-// No held frame reaches the viewer before the study's live check read in this document (gate + 열람 record on the
-// server, revision compared here), and only from the copy that check was made against; a changed or refused study is
-// dropped and read live. Every image read the viewer sends is marked as the viewer's (the opening's 열람, D1880), and the
-// worker hears the viewer is busy until the answer's body has ended.
+// No held frame reaches the viewer before the study's live check read for its current opening (gate + 열람 record on
+// the server, revision compared here), and only from the copy that check was made against; a changed or refused study
+// is dropped and read live. Every image read the viewer sends names its opening (opening contract 2026-10-29): one per
+// document, a new one for studies shown again (patient tab, back/forward return) - read live for it before what the
+// document still holds can show - and none for business calls; the worker hears the viewer is busy until the answer's
+// body has ended.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { attach } = require('../worklist-v0/hpacs-lite/viewer-preload.js');
@@ -17,7 +19,7 @@ const bound = (extra = {}) => ({ method: 'GET', headers: new Headers({ 'X-KIN-Se
 
 /** A window with a scripted preload worker: `held` maps study -> { revision, session, copy }; frames answer their path
  * from the held copy only, as preload-worker.js does (another copy: `stale`). */
-function setup({ held = {}, network, shared = true } = {}) {
+function setup({ held = {}, network, shared = true, studies = null, page = false } = {}) {
   const posted = [], sent = [];
   class FakeSharedWorker {
     constructor(url, options) {
@@ -37,16 +39,35 @@ function setup({ held = {}, network, shared = true } = {}) {
       } };
     }
   }
-  const listeners = {};
-  const win = { location: { origin: ORIGIN, href: ORIGIN + '/ohif/viewer' }, SharedWorker: shared ? FakeSharedWorker : undefined,
-    Headers, Response, ReadableStream,
-    addEventListener: (type, run) => { listeners[type] = run; } };
+  // Every listener of a type runs (the module and its worker part both listen to pagehide/pageshow).
+  const handlers = {}, listeners = {};
+  const win = { location: { origin: ORIGIN, href: ORIGIN + '/ohif/viewer' + (studies ? '?StudyInstanceUIDs=' + studies.join(',') : '') },
+    SharedWorker: shared ? FakeSharedWorker : undefined, Headers, Response, ReadableStream, crypto: globalThis.crypto,
+    document: page ? fakeDocument() : undefined,
+    addEventListener: (type, run) => { (handlers[type] ??= []).push(run); listeners[type] = event => handlers[type].forEach(h => h(event)); } };
   const send = async (url, init) => {
     sent.push({ url, init, headers: new Headers(init.headers) });
     return network ? network(url, init) : new Response('live ' + url, { headers: { 'Content-Type': PART, 'X-KIN-Study-Revision': 'rev-now' } });
   };
-  return { fetch: attach(win, send), posted, sent, listeners };
+  const preloadFetch = attach(win, send);
+  // The page's own fetch: the session transport binds the request, then this module reads it (viewer-session.js).
+  win.fetch = (url, init = {}) => {
+    const headers = new Headers(init.headers); headers.set('X-KIN-Session', 'sess-1');
+    return preloadFetch(url, { ...init, headers });
+  };
+  return { fetch: preloadFetch, posted, sent, listeners, win };
 }
+
+/** Enough of a document for the back/forward return: the root's style, an alert with a button. */
+function fakeDocument() {
+  const element = tag => ({ tag, children: [], style: {}, attributes: {}, textContent: '', onclick: null,
+    setAttribute(name, value) { this.attributes[name] = value; }, append(...nodes) { this.children.push(...nodes); },
+    remove() { body.children.splice(body.children.indexOf(this), 1); } });
+  const body = element('body');
+  return { documentElement: element('html'), body, createElement: element };
+}
+const openingOf = s => s.headers.get('X-KIN-View-Opening');
+const tick = () => new Promise(resolve => setTimeout(resolve, 5));
 
 test('a study the worker does not hold is read live, unchanged', async () => {
   const { fetch, sent, posted } = setup();
@@ -54,9 +75,10 @@ test('a study the worker does not hold is read live, unchanged', async () => {
   assert.equal(await answer.text(), 'live ' + frameUrl(1));
   assert.equal(sent.length, 1);
   assert.equal(sent[0].headers.get('X-KIN-Preload'), null);
-  assert.equal(sent[0].headers.get('X-KIN-Image-Use'), 'view', 'the viewer\'s read is the opening\'s, not a fetch');
+  assert.match(openingOf(sent[0]) ?? '', /^[0-9a-f-]{36}$/, 'the viewer\'s read names its opening, not a fetch');
   await fetch(frameUrl(2), bound());
   assert.equal(sent.length, 2, 'later frames of a study not held stay live');
+  assert.equal(openingOf(sent[1]), openingOf(sent[0]), 'the reads of one opening name the same one');
   assert.equal(posted.filter(m => m.type === 'query').length, 1, 'the worker is asked once per study and document');
 });
 
@@ -66,7 +88,7 @@ test('a held study: the first frame read is the live check, then frames come fro
   assert.equal(await first.text(), 'live ' + frameUrl(1), 'the check read\'s own answer is the first frame');
   assert.equal(sent.length, 1);
   assert.equal(sent[0].headers.get('X-KIN-Preload'), 'check');
-  assert.equal(sent[0].headers.get('X-KIN-Image-Use'), 'view', 'the check read is the opening read');
+  assert.ok(openingOf(sent[0]), 'the check read names the opening it records');
   assert.equal(sent[0].headers.get('X-KIN-Session'), 'sess-1', 'the transport\'s binding is kept');
   assert.ok(posted.some(m => m.type === 'open' && m.uid === STUDY));
   const second = await fetch(frameUrl(2), bound());
@@ -248,11 +270,119 @@ test('a copy fetched again after Clear All or Retry is never shown under the ear
   assert.equal(await (await fetch(frameUrl(8), bound())).text(), 'live ' + frameUrl(8));
 });
 
-test('without a SharedWorker every image read still goes out marked as the viewer\'s; business calls are not marked', async () => {
+test('without a SharedWorker every image read still names its opening; business calls name none', async () => {
   const { fetch, sent } = setup({ shared: false });
   await fetch(frameUrl(1), bound());
   await fetch(`${ORIGIN}/dicom-web/studies/${STUDY}/metadata`, bound());
   await fetch(`${ORIGIN}/api/me`, bound());
-  assert.deepEqual(sent.map(s => s.headers.get('X-KIN-Image-Use')), ['view', 'view', null]);
+  const [frame, metadata, business] = sent.map(openingOf);
+  assert.ok(frame);
+  assert.deepEqual([metadata, business], [frame, null]);
   assert.ok(sent.every(s => s.headers.get('X-KIN-Session') === 'sess-1'));
+});
+
+test('review R1: every image read of one document names one opening - queried renderings too; another document of the same session is another opening, also of a study it reads from memory', async () => {
+  const held = { [STUDY]: { revision: 'rev-now', session: 'sess-1' } };
+  const a = setup({ held });
+  await a.fetch(frameUrl(1), bound());                                     // the check read
+  await a.fetch(frameUrl(2), bound());                                     // from memory
+  await a.fetch(frameUrl(2) + '?accept=x', bound());                       // a query: live, never from memory
+  await a.fetch(`${ORIGIN}/instances/0a1b2c3d-4e5f6071-8293a4b5-c6d7e8f9-0a1b2c3d/frames/1/rendered?width=64`, bound());
+  await a.fetch(`${ORIGIN}/api/me`, bound());
+  const names = a.sent.map(openingOf);
+  assert.deepEqual(names.slice(0, 3), Array(3).fill(names[0]), 'one opening for every image read of the document');
+  assert.equal(names[3], null, 'business calls name none');
+  a.listeners.pagehide();
+  // The viewer closed and the study opened again at once, in a fresh document: a new opening, with its own check.
+  const b = setup({ held });
+  await b.fetch(frameUrl(1), bound());
+  assert.equal(b.sent[0].headers.get('X-KIN-Preload'), 'check');
+  assert.ok(openingOf(b.sent[0]) && openingOf(b.sent[0]) !== names[0], 'the reopen is another opening');
+});
+
+test('reenter: a study this document showed is read live for the new opening before anything shows, never from memory; one not shown here is not read; commit makes it the study\'s opening and its held copy is checked again', async () => {
+  const OTHER = '1.2.840.9.2', LEFT = '1.2.840.9.3';
+  const { fetch, sent } = setup({ held: { [STUDY]: { revision: 'rev-now', session: 'sess-1' } } });
+  await fetch(frameUrl(1), bound());
+  await fetch(frameUrl(2), bound());
+  await fetch(frameUrl(1, LEFT), bound());                                 // a study of the scope being left
+  const first = openingOf(sent[0]);
+  assert.equal(sent.length, 2, 'the check read and the live study only');
+  const entry = await fetch.reenter([STUDY, OTHER]);
+  assert.ok(entry);
+  const barrier = sent.slice(2);
+  assert.equal(barrier.length, 1, 'one live read, of the study shown before; the other has no pixels here to show');
+  assert.equal(barrier[0].url, frameUrl(2), 'its last frame read');
+  assert.equal(barrier[0].headers.get('X-KIN-Preload'), null);
+  assert.equal(barrier[0].headers.get('X-KIN-Session'), 'sess-1', 'bound by the session transport');
+  assert.equal(barrier[0].headers.get('Accept'), PART);
+  const next = openingOf(barrier[0]);
+  assert.ok(next && next !== first);
+  // Until the scope is shown, the current opening holds.
+  await fetch(frameUrl(3), bound());
+  assert.equal(sent.length, 3, 'still from memory under the earlier check');
+  entry.commit();
+  await fetch(frameUrl(4), bound());
+  assert.deepEqual([sent[3].headers.get('X-KIN-Preload'), openingOf(sent[3])], ['check', next], 'checked again for the new opening');
+  await fetch(frameUrl(5), bound());
+  assert.equal(sent.length, 4, 'then from memory');
+  await fetch(frameUrl(1, OTHER), bound());
+  await fetch(frameUrl(2, LEFT), bound());
+  await fetch(`${ORIGIN}/instances/0a1b2c3d-4e5f6071-8293a4b5-c6d7e8f9-0a1b2c3d/preview`, bound());
+  assert.deepEqual(sent.slice(4).map(openingOf), [next, first, next],
+    'the entered studies and the scope\'s unnamed reads take the new opening; a late read of a study left keeps its own');
+});
+
+test('reenter: a read that fails or is refused answers null and changes nothing; an entry never committed changes nothing', async () => {
+  let status = 503;
+  const { fetch, sent } = setup({ network: async url => new Response('x ' + url, { status, headers: { 'Content-Type': PART } }) });
+  status = 200;
+  await fetch(frameUrl(1), bound());
+  const first = openingOf(sent[0]);
+  for (const failing of [503, 401]) {
+    status = failing;
+    assert.equal(await fetch.reenter([STUDY]), null, String(failing));
+  }
+  status = 200;
+  assert.ok(await fetch.reenter([STUDY]), 'recorded, but the tab never showed');
+  await fetch(frameUrl(2), bound());
+  assert.equal(openingOf(sent.at(-1)), first, 'the opening is unchanged');
+  const thrown = setup({ network: async () => { throw new TypeError('network'); } });
+  await assert.rejects(thrown.fetch(frameUrl(1), bound()));
+  assert.equal(await thrown.fetch.reenter([STUDY]), null);
+});
+
+test('back/forward: the kept page is hidden on leaving and shown only after the return\'s opening is recorded; when it cannot be, it stays hidden with a Retry', async () => {
+  let status = 200;
+  const s = setup({ studies: [STUDY], page: true, held: { [STUDY]: { revision: 'rev-now', session: 'sess-1' } },
+    network: async url => new Response('live ' + url, { status, headers: { 'Content-Type': PART, 'X-KIN-Study-Revision': 'rev-now' } }) });
+  await s.fetch(frameUrl(1), bound());
+  const first = openingOf(s.sent[0]), root = s.win.document.documentElement;
+  s.listeners.pagehide({ persisted: false });
+  assert.equal(root.style.visibility, undefined, 'a page that is not kept is not touched');
+  s.listeners.pageshow({ persisted: false });
+  await tick();
+  assert.equal(s.sent.length, 1, 'an ordinary show is no return');
+  s.listeners.pagehide({ persisted: true });
+  assert.equal(root.style.visibility, 'hidden');
+  status = 503;
+  s.listeners.pageshow({ persisted: true });
+  await tick();
+  assert.equal(root.style.visibility, 'hidden', 'no record, no pixels');
+  const [alert] = s.win.document.body.children;
+  assert.equal(alert.attributes.role, 'alert');
+  assert.match(alert.children[0].textContent, /열람 기록/);
+  const retry = alert.children[1];
+  assert.equal(retry.textContent, 'Retry');
+  status = 200;
+  retry.onclick();
+  await tick();
+  assert.equal(root.style.visibility, '', 'shown after the return\'s opening was recorded');
+  assert.equal(s.win.document.body.children.length, 0, 'the notice is gone');
+  const reads = s.sent.slice(1);
+  assert.deepEqual(reads.map(r => r.headers.get('X-KIN-Preload')), [null, null], 'live reads, never from memory');
+  const next = openingOf(reads[1]);
+  assert.ok(next && next !== first && openingOf(reads[0]) !== first);
+  await s.fetch(frameUrl(2), bound());
+  assert.deepEqual([s.sent.at(-1).headers.get('X-KIN-Preload'), openingOf(s.sent.at(-1))], ['check', next], 'the held copy is checked for the return');
 });

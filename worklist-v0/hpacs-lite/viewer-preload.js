@@ -1,20 +1,30 @@
-/* D1880 memory-only preload, viewer side (design fable-design-preload-memory-20261027 §4.1 item 3, §4.5, §4.6).
+/* D1880 memory-only preload, viewer side (design fable-design-preload-memory-20261027 §4.1 item 3, §4.5, §4.6), and the
+ * viewer's openings of a study (opening contract consult-preload-opening-contract-20261029).
  *
  * The viewer's session transport sends every protected request through one fetch (viewer-session.js); this wraps that
  * fetch, under the transport, so a request reaches it only after the transport admitted it for the live session and
- * bound it (`X-KIN-Session`). Every image read this viewer sends to the network is marked `X-KIN-Image-Use: view`: it
- * opens the study for the person, and the server records that opening's 열람 (user-view) apart from the memory preload's
- * own transfer of the study (image-delivery-record.ts DeliveryUse) - a preload that is never opened is never an opening,
- * and an opening right after a preload is still recorded, before its first byte. A WADO-RS frame read of a study the
- * preload worker holds is answered from the worker's memory - but never before the study passed one live read in this
- * document:
+ * bound it (`X-KIN-Session`).
  *
+ * Openings. Every image read this viewer sends names the opening it belongs to (`X-KIN-View-Opening`), and the server
+ * records the first read of each opening of a study as that opening's 열람 (user-view), durable before its first byte
+ * (image-delivery-record.ts). An opening is an entry into a study, known only to this document's memory:
+ *   · this document - a new window or tab, a reload, a typed URL - is a new opening of every study it shows;
+ *   · a patient tab showing studies again (`reenter`, viewer-patient-tabs.js) and a return to this page from the
+ *     browser's back/forward cache are new openings of the studies they show. Pixels this document still holds from an
+ *     earlier visit - the image cache, the page the browser kept - could show without any read, so each such study is
+ *     read live for the new opening first, and only then is the scope shown;
+ *   · focus, scrolling, cine, a layout change, a repeated or retried read, the server closing an idle delivery and a
+ *     preload are none: they keep the opening, and a preload has none at all. A read of a study shown before the scope
+ *     changed keeps that study's opening.
+ *
+ * Preload memory. A WADO-RS frame read of a study the preload worker holds is answered from the worker's memory - but
+ * never before the study passed one live read for its current opening:
  *   · the first frame read of a held study goes to the network as it is, marked `X-KIN-Preload: check`. It passes the
  *     same gate as every frame read (institution, StudyAccess, split UID), records the opening, and the server answers
  *     the archive's current revision of the study. Only when that equals the revision the held copy was read under do
  *     later frames come from memory - from that copy only: the worker refuses a frame of another copy (one fetched again
  *     after Clear All or Retry), and the viewer checks again before it takes any of the new one. Otherwise the held
- *     study is dropped (Evicted) and the viewer stays on the network.
+ *     study is dropped (Evicted) and the viewer stays on the network. A new opening of the study checks again.
  *   · the worker answers only for the session that filled it; any other session reads from the network.
  *   · anything else - metadata, a frame of a study not held, a frame the worker has not fetched yet, a request with a
  *     query - goes to the network unchanged.
@@ -27,33 +37,116 @@
   const WORKER_URL = '/worklist/hpacs-lite/preload-worker.js', WORKER_NAME = 'kin-preload';
   const FRAME = /^\/dicom-web\/studies\/([0-9.]{1,64})\/series\/[0-9.]{1,64}\/instances\/[0-9.]{1,64}\/frames\/[0-9]+$/;
   const MEDIA = /^\/(?:dicom-web|instances)\//;
+  const STUDY = /^\/dicom-web\/studies\/([0-9.]{1,64})(?:\/|$)/;
+  const OPENING = 'X-KIN-View-Opening';
   const CHANGED = '열 때 확인한 검사 정보가 미리 받을 때와 달라 미리 받은 영상을 버렸습니다.';
   const DENIED = '열 때 검사 접근이 거절되어 미리 받은 영상을 버렸습니다.';
+  const UNRECORDED = '영상 열람 기록을 저장하지 못해 영상을 다시 표시하지 않았습니다. 연결을 확인한 뒤 다시 시도하세요.';
   // A status whose answer has no body (fetch spec "null body status"): nothing to wait for after its headers.
   const NULL_BODY = [101, 103, 204, 205, 304];
 
   function attach(win, send) {
-    /** The same-origin path of a request without a query, else null. */
-    function pathOf(url) {
+    /** The same-origin URL of a request, else null. */
+    function target(url) {
       try {
-        const target = new URL(typeof url === 'string' || url instanceof URL ? url : url.url, win.location.href);
-        return target.origin === win.location.origin && !target.search ? target.pathname : null;
+        const parsed = new URL(typeof url === 'string' || url instanceof URL ? url : url.url, win.location.href);
+        return parsed.origin === win.location.origin ? parsed : null;
       } catch (_) { return null; }
     }
-    /** The study of a WADO-RS frame GET, else null. */
-    const frameStudy = (path, init) => path && String(init.method || 'GET').toUpperCase() === 'GET' ? FRAME.exec(path)?.[1] ?? null : null;
-    function viewed(init, extra = {}) {
+    /** The study of a WADO-RS frame GET without a query - the reads the worker can answer - else null. */
+    const frameStudy = (url, init) => url && !url.search && String(init.method || 'GET').toUpperCase() === 'GET'
+      ? FRAME.exec(url.pathname)?.[1] ?? null : null;
+    /** The study a DICOMweb read names, whatever its form; an `/instances/` read names none here (the server knows it). */
+    const studyOf = url => STUDY.exec(url.pathname)?.[1] ?? null;
+
+    // The opening of the scope shown now, and each study's opening once this document read it: a study keeps its
+    // opening when the scope moves on, so its late reads never open it again under the next scope's opening.
+    let scopeOpening = win.crypto.randomUUID();
+    const openings = new Map(), lastRead = new Map(), checks = new Map();
+    function openingOf(uid) {
+      if (!uid) return scopeOpening;
+      if (!openings.has(uid)) openings.set(uid, scopeOpening);
+      return openings.get(uid);
+    }
+    function viewed(init, uid, extra = {}) {
       const headers = new win.Headers(init.headers);
-      headers.set('X-KIN-Image-Use', 'view');
+      if (!headers.has(OPENING)) headers.set(OPENING, openingOf(uid));
       for (const [name, value] of Object.entries(extra)) headers.set(name, value);
       return { ...init, headers };
     }
-
-    if (typeof win.SharedWorker !== 'function') {
-      return (url, init = {}) => MEDIA.test(pathOf(url) || '') ? send(url, viewed(init)) : send(url, init);
+    function remember(uid, url, init) {
+      if (uid) lastRead.set(uid, { url: String(typeof url === 'string' || url instanceof URL ? url : url.url),
+        accept: new win.Headers(init.headers).get('Accept') });
     }
+
+    /**
+     * A new opening of `uids`. Each of them this document has shown before is read live for it first - its 열람 is then
+     * recorded before the pixels this document still holds can show again; a study never shown here has no such pixels,
+     * and its own first read records it. The opening is taken by `commit()` when the scope is shown; an entry abandoned
+     * before that leaves every opening as it was. Null when an opening could not be recorded: the scope is not shown.
+     */
+    async function reenter(uids, signal) {
+      const next = win.crypto.randomUUID(), wanted = [...new Set(uids)];
+      for (const uid of wanted) {
+        const read = lastRead.get(uid);
+        if (!read) continue;
+        try {
+          const headers = { [OPENING]: next, ...(read.accept ? { Accept: read.accept } : {}) };
+          const response = await win.fetch(read.url, { headers, signal });
+          await response.arrayBuffer();
+          if (!response.ok) return null;
+        } catch (_) { return null; }
+      }
+      return { commit() {
+        // The next frame read of a held study checks the copy again, for this opening.
+        for (const uid of wanted) { openings.set(uid, next); checks.delete(uid); }
+        scopeOpening = next;
+      } };
+    }
+
+    // A return from the back/forward cache is a new opening of the studies the page shows: what the browser kept stays
+    // hidden from the moment the page is left until the return's opening is recorded. A plain visibility change is not
+    // a return and keeps the opening.
+    let notice = null;
+    const page = () => win.document?.documentElement ?? null;
+    function scope() {
+      try { return (new URL(win.location.href).searchParams.get('StudyInstanceUIDs') || '').split(',').filter(Boolean); }
+      catch (_) { return []; }
+    }
+    async function returned() {
+      notice?.remove(); notice = null;
+      const entry = await reenter(scope());
+      if (entry) { entry.commit(); if (page()) page().style.visibility = ''; return; }
+      const doc = win.document;
+      notice = doc.createElement('section'); notice.setAttribute('role', 'alert');
+      notice.style.cssText = 'visibility:visible;position:fixed;inset:30% 20% auto;z-index:10000;background:#18212b;color:white;padding:24px';
+      const text = doc.createElement('p'); text.textContent = UNRECORDED;
+      const retry = doc.createElement('button'); retry.type = 'button'; retry.textContent = 'Retry';
+      retry.onclick = () => { void returned(); };
+      notice.append(text, retry); doc.body.append(notice);
+    }
+    win.addEventListener('pagehide', event => { if (event?.persisted && page()) page().style.visibility = 'hidden'; });
+    win.addEventListener('pageshow', event => { if (event?.persisted) void returned(); });
+
+    let read;
+    if (typeof win.SharedWorker !== 'function') {
+      read = (url, init) => {
+        const parsed = target(url);
+        if (!parsed || !MEDIA.test(parsed.pathname)) return send(url, init);
+        remember(frameStudy(parsed, init), url, init);
+        return send(url, viewed(init, studyOf(parsed)));
+      };
+    } else read = withWorker(win, send, { target, frameStudy, studyOf, viewed, remember, checks });
+
+    function preloadFetch(url, init = {}) { return read(url, init); }
+    preloadFetch.reenter = reenter;
+    return preloadFetch;
+  }
+
+  /** The preload worker's memory under the viewer's reads (see the head of this file). */
+  function withWorker(win, send, { target, frameStudy, studyOf, viewed, remember, checks }) {
     let port = null, broken = false, nextId = 0, inflight = 0;
-    const pending = new Map(), studies = new Map(), opened = new Set();
+    const pending = new Map(), opened = new Set();
 
     function connect() {
       if (port || broken) return port;
@@ -108,16 +201,16 @@
       return new win.Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
     }
 
-    /** The study's check: null when nothing is held, else the live check read's own response. */
+    /** The study's check for its current opening: null when nothing is held, else the live check read's own response. */
     function check(uid, session, url, init) {
       const entry = { state: 'checking', done: null, copy: null };
-      studies.set(uid, entry);
+      checks.set(uid, entry);
       entry.done = (async () => {
         const { held } = await ask({ type: 'query', uid, session });
         if (!held?.revision) { entry.state = 'live'; return null; }
         let response;
-        try { response = await network(url, viewed(init, { 'X-KIN-Preload': 'check' })); }
-        catch (error) { studies.delete(uid); throw error; }   // cut or failed: the next frame read checks again
+        try { response = await network(url, viewed(init, uid, { 'X-KIN-Preload': 'check' })); }
+        catch (error) { if (checks.get(uid) === entry) checks.delete(uid); throw error; }   // cut or failed: the next frame read checks again
         const now = response.headers.get('X-KIN-Study-Revision');
         if (response.ok && now === held.revision) {
           entry.state = 'held'; entry.copy = held.copy;
@@ -135,36 +228,40 @@
 
     async function frame(uid, path, url, init) {
       const session = new win.Headers(init.headers).get('X-KIN-Session');
-      const entry = studies.get(uid);
+      const entry = checks.get(uid);
       if (!entry) {
         const response = await check(uid, session, url, init);
-        return response || network(url, viewed(init));
+        return response || network(url, viewed(init, uid));
       }
       if (entry.state === 'checking') { try { await entry.done; } catch (_) {} }
       if (entry.state === 'held' && !init.signal?.aborted) {
         const { bytes, partType, stale } = await ask({ type: 'frame', path, session, copy: entry.copy });
         if (bytes) return new win.Response(bytes, { status: 200, headers: { 'Content-Type': partType } });
         // The worker now holds another copy of the study than the one checked: none of it before a check of its own.
-        if (stale && studies.get(uid) === entry) studies.delete(uid);
+        if (stale && checks.get(uid) === entry) checks.delete(uid);
       }
-      return network(url, viewed(init));
+      return network(url, viewed(init, uid));
     }
 
     // A window leaving releases its studies (they may be evicted once no viewer shows them) and its busy mark; a page
     // restored from the back/forward cache shows them again.
     win.addEventListener('pagehide', () => { if (port) post({ type: 'bye' }); });
     win.addEventListener('pageshow', event => {
-      if (!event.persisted || !port) return;
+      if (!event?.persisted || !port) return;
       post({ type: 'hello', role: 'viewer' });
       for (const uid of opened) post({ type: 'open', uid });
       if (inflight > 0) post({ type: 'busy', busy: true });
     });
 
-    return function preloadFetch(url, init = {}) {
-      const path = pathOf(url), uid = frameStudy(path, init);
-      if (uid && !broken) return frame(uid, path, url, init);
-      if (!path || !MEDIA.test(path)) return send(url, init);
-      return broken ? send(url, viewed(init)) : network(url, viewed(init));
+    return function (url, init) {
+      const parsed = target(url);
+      if (!parsed || !MEDIA.test(parsed.pathname)) return send(url, init);
+      // A new opening's own live read (`reenter`) names its opening already: never from memory, never a check.
+      if (new win.Headers(init.headers).has(OPENING)) return broken ? send(url, init) : network(url, init);
+      const uid = frameStudy(parsed, init);
+      remember(uid, url, init);
+      if (uid && !broken) return frame(uid, parsed.pathname, url, init);
+      return broken ? send(url, viewed(init, studyOf(parsed))) : network(url, viewed(init, studyOf(parsed)));
     };
   }
 

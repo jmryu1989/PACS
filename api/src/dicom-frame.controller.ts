@@ -8,7 +8,7 @@
  */
 import { BadRequestException, Controller, Get, Param, Req, Res } from '@nestjs/common';
 import { DicomFrameService } from './dicom-frame.service';
-import { StudyImageDeliveryRecorder, viewerUse } from './image-delivery-record';
+import { FETCH_USE, PRELOAD_USE, StudyImageDeliveryRecorder, readUse } from './image-delivery-record';
 import type { DeliveryLease, DeliveryUse } from './image-delivery-record';
 import { OrthancService } from './orthanc.service';
 import { Caller, PacsService } from './pacs.service';
@@ -30,10 +30,12 @@ function preloadMode(req: any): 'store' | 'check' | null {
   return value === 'store' || value === 'check' ? value : null;
 }
 
-/** The delivery a frame read joins (image-delivery-record.ts `DeliveryUse`); a check read is a viewer's opening read. */
+/**
+ * The delivery a frame read joins (image-delivery-record.ts `DeliveryUse`): the preload store's read is the preload's
+ * transfer; every other read - the viewer's check read included - belongs to the opening it names, if it names one.
+ */
 function frameUse(req: any, preload: 'store' | 'check' | null): DeliveryUse {
-  if (preload === 'store') return 'preload';
-  return preload === 'check' ? 'view' : viewerUse(req);
+  return preload === 'store' ? PRELOAD_USE : readUse(req);
 }
 
 function requestOrigin(req: any): string {
@@ -76,7 +78,7 @@ export class DicomFrameController {
    * study's delivery nor counts as an image served in it, where a 200 HEAD would turn a delivery whose relayed reads
    * all failed into a provided one (review INT-01).
    */
-  private admit(req: any, surface: string, study: () => Promise<string>, use: DeliveryUse = 'fetch'): Promise<DeliveryLease | null> {
+  private admit(req: any, surface: string, study: () => Promise<string>, use: DeliveryUse = FETCH_USE): Promise<DeliveryLease | null> {
     return req.method === 'GET' ? study().then(uid => this.deliveries.admit(req, surface, uid, use)) : Promise.resolve(null);
   }
 
@@ -102,7 +104,7 @@ export class DicomFrameController {
    * held study is a live read (`check`) that answers the current one; a different revision - an object stored into or
    * removed from the study since, Orthanc's LastUpdate - discards the held bytes. Both reads pass the gate above as any
    * other frame; the store's reads are a preload delivery of their own (a transfer, never an opening), and the `check`
-   * read is a viewer's opening read, so it records the opening's 열람 (D1877, D1880) before its first byte even when
+   * read names the viewer's opening, so it records that opening's 열람 (D1877, D1880) before its first byte even when
    * every later frame comes from memory and a preload of the study was delivered moments before. A stored read with no revision is
    * refused (nothing to check it against later); a check read without one is served, and the viewer, seeing no match,
    * stays live.
@@ -119,7 +121,7 @@ export class DicomFrameController {
     if (!ORTHANC_ID.test(id)) throw new BadRequestException('영상 식별자가 올바르지 않습니다');
     await this.pacs.authzDicom(`/instances/${id}/preview`, 'GET', member(req));
     // The gate just resolved (and cached) the object's study; the preview is a read of that study's delivery.
-    const lease = await this.admit(req, PREVIEW_SURFACE, () => this.orthanc.instanceStudyUid(id), viewerUse(req));
+    const lease = await this.admit(req, PREVIEW_SURFACE, () => this.orthanc.instanceStudyUid(id), readUse(req));
     await lifetime(req, res, lease, signal => this.frames.servePreview(id, res, signal));
   }
 }

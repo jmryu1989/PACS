@@ -337,22 +337,25 @@ test('controller: a preload read answers the study\'s archive revision; a stored
     await controller.read('1.2.3', '1.2.3.4', '1.2.3.4.5', '1', req, res);
     return headers;
   };
-  assert.equal((await read('store'))['x-kin-study-revision'], 'orthanc-study:abc@20261028T101010');
+  const OPENING = { 'x-kin-view-opening': 'syn-opening-0001' };
+  assert.equal((await read('store', OPENING))['x-kin-study-revision'], 'orthanc-study:abc@20261028T101010');
   assert.equal(calls.at(-1).stored, true);
-  assert.equal((await read('check'))['x-kin-study-revision'], 'orthanc-study:abc@20261028T101010');
+  assert.equal((await read('check', OPENING))['x-kin-study-revision'], 'orthanc-study:abc@20261028T101010');
   assert.equal(calls.at(-1).stored, false);
   calls.length = 0;
   assert.equal((await read(null))['x-kin-study-revision'], undefined);
   assert.deepEqual(calls.filter(c => Array.isArray(c)), [], 'an ordinary read asks the archive nothing more');
   assert.equal(calls.at(-1).stored, false);
-  await read(null, { 'x-kin-image-use': 'view' });
-  // Every read takes the study delivery lease (D1877); the preload's is its own delivery, the check and the viewer's
-  // reads are the opening (D1880), anything else is a fetch.
-  assert.deepEqual(leases.map(l => l[1]), ['preload', 'view', 'fetch', 'view']);
+  await read(null, OPENING);
+  await read(null, { 'x-kin-view-opening': 'bad opening!' });
+  // Every read takes the study delivery lease (D1877); the preload's is its own delivery whatever it names, the check
+  // and the viewer's reads belong to the opening they name (D1880), anything else - a malformed name too - is a fetch.
+  const view = { kind: 'view', opening: 'syn-opening-0001' };
+  assert.deepEqual(leases.map(l => l[1]), [{ kind: 'preload' }, view, { kind: 'fetch' }, view, { kind: 'fetch' }]);
   revisionFails = true;
-  assert.equal((await read('check'))['x-kin-study-revision'], undefined, 'a check read is served; the viewer sees no match and stays live');
+  assert.equal((await read('check', OPENING))['x-kin-study-revision'], undefined, 'a check read is served; the viewer sees no match and stays live');
   await assert.rejects(read('store'), /two study resources/);
-  assert.equal(leases.length, 5, 'the refused stored read opened no delivery');
+  assert.equal(leases.length, 6, 'the refused stored read opened no delivery');
 });
 
 test('serveFrames: a client that goes away mid-stream ends the read as a failure, never as an unhandled rejection', async () => {
