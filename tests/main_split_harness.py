@@ -403,9 +403,14 @@ TRACE_SCRIPT = r"""(() => {
     Object.defineProperty(window, name, { ...d, value: proxy });
   };
   for (const name of ['EventTarget', 'BroadcastChannel', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'Worker',
-    'SharedWorker', 'FileReader', 'Notification', 'MediaRecorder', 'MediaStream', 'AudioContext', 'OfflineAudioContext',
+    'FileReader', 'Notification', 'MediaRecorder', 'MediaStream', 'AudioContext', 'OfflineAudioContext',
     'MediaSource', 'RTCPeerConnection', 'Image', 'Audio', 'Option'])
     construct(name, (obj, fr) => create(obj, obj instanceof Element ? kindOf(obj) : name, 'new ' + name, fr));
+  // A shared worker is reached through the port it is created with (the preload queue's onmessage is set on it).
+  construct('SharedWorker', (worker, fr) => {
+    create(worker, 'SharedWorker', 'new SharedWorker', fr);
+    create(worker.port, 'MessagePort', 'SharedWorker.port', fr, worker, 'port');
+  });
   construct('AudioWorkletNode', (node, fr) => {
     create(node, 'AudioWorkletNode', 'new AudioWorkletNode', fr);
     create(node.port, 'MessagePort', 'AudioWorkletNode.port', fr, node, 'port');
