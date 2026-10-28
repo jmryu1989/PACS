@@ -221,7 +221,9 @@ export class PacsWorklist {
       const resources = sources.byUid.get(uid)!, state = byUid.get(uid);
       if (!state || !this.access.visible(state, me) || !resources.every(st => this.studyAccess.matches(access, uid, st))) continue;
       if (resources.length === 1) normal.push(resources[0]);
-      else if (state.institutionId != null && resources.every(st => resolvedOf(st) === state.institutionId)) issues.push(uid);
+      // D1882: a UID attached by its registered sending device is announced on the same terms (every resource came from it).
+      else if (state.institutionId != null && (resources.every(st => resolvedOf(st) === state.institutionId)
+        || this.institutions.resolveDevice(await this.sendingDevice(uid)) === state.institutionId)) issues.push(uid);
     }
     const window = studyPageSlice(normal, st => OrthancService.tag(st, '0020000D'), page, owner);
     const pageUids = window.rows.map(st => OrthancService.tag(st, '0020000D'));

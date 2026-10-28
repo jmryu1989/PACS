@@ -60,8 +60,11 @@ function world({ resources = [], states = [], policy = null, institutions = INST
     w.orthanc.push({ method, path: u.pathname, uid: u.searchParams.get('StudyInstanceUID'), inTx: w.inTx > 0 });
     if (w.orthancDown) throw new TypeError('fetch failed');
     if (method === 'POST' && u.pathname === '/tools/find') {
-      // D1882 sending-device read: these synthetic studies have no instance with a recorded calling AE.
-      if (JSON.parse(init.body).Level === 'Instance') return json([]);
+      // D1882 sending-device read: the calling AE Orthanc recorded on each instance; none unless a case sets w.devices.
+      if (JSON.parse(init.body).Level === 'Instance') {
+        const device = w.devices?.[JSON.parse(init.body).Query.StudyInstanceUID];
+        return json(device ? w.resources.filter(r => r.uid === JSON.parse(init.body).Query.StudyInstanceUID).map(() => ({ Type: 'Instance', Metadata: { RemoteAET: device } })) : []);
+      }
       const asked = JSON.parse(init.body).RequestedTags;
       const tags = r => ({ StudyInstanceUID: r.uid, InstitutionName: r.institution, PatientID: r.patientId, StudyDate: r.date,
         ModalitiesInStudy: r.modalities.join('\\'), AccessionNumber: r.accession });
@@ -592,7 +595,19 @@ test('TEST-WSU-09 a split UID is observed, has no order pairing or reconciliatio
   assert.equal([SPLIT, NORMAL, 'SYN-PID'].some(fact => JSON.stringify(alert).includes(fact)), false, 'no study or patient fact');
   assert.deepEqual([held.states.get(SPLIT).institutionId, held.states.get(NORMAL).institutionId], [null, null]);
 });
-test('TEST-WSU-09 the clinician list and timeline count the normal set and carry only UID+code issues', async () => {
+test('TEST-WSU-09 D1882 a split UID attached by its registered device is announced to its owner like one attached by name', async () => {
+  const institutions = INSTITUTIONS.map(i => i.id === 'hallym' ? { ...i, dicomAets: 'SYN_CT_9' } : { ...i, dicomAets: '' });
+  const held = await world({ resources: [A({ institution: 'UNKNOWN' }), B({ institution: 'UNKNOWN' }), resource(NORMAL, 'SYN-PID-N')], institutions }).start();
+  const before = await held.pacs.listStudies(caller());
+  assert.equal('identityIssues' in before && before.identityIssues.length > 0, false, 'without a registered device the UID is held: nobody is told');
+  const w = await world({ resources: [A({ institution: 'UNKNOWN' }), B({ institution: 'UNKNOWN' }), resource(NORMAL, 'SYN-PID-N')], institutions }).start();
+  w.devices = { [SPLIT]: 'SYN_CT_9' };
+  const listed = await w.pacs.listStudies(caller());
+  assert.equal(w.states.get(SPLIT).institutionId, 'hallym');
+  assert.deepEqual(listed.identityIssues, [{ uid: SPLIT, code: 'STUDY_IDENTITY_UNRESOLVED' }]);
+  assert.deepEqual(listed.studies.map(r => r.uid), [NORMAL]);
+  assert.equal((await w.pacs.listStudies(caller({ institution: 'center' }))).identityIssues?.length ?? 0, 0, 'never on another institution behalf');
+});test('TEST-WSU-09 the clinician list and timeline count the normal set and carry only UID+code issues', async () => {
   const w = await world({ resources: [A(), B(), resource(NORMAL, 'SYN-PID-N'), resource('2.25.101', 'SYN-PID-N')] }).start();
   const clinician = caller({ roles: ['clinician'], actor: 'clinician-1', sub: 'sub-clinician' });
   const response = await w.pacs.clinicianStudies(clinician);
