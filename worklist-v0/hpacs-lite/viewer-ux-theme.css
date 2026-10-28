@@ -119,3 +119,18 @@ body.kin-viewer-ux #root :has(> .kin-viewer-series-strip) { min-width: 0; }
 .kin-ux-setting-row span { flex: 1; }
 .kin-ux-setting-row input:not([type=checkbox]) { width: 3em; }
 .kin-ux-toolbar button:focus-visible, .kin-ux-toolbar summary:focus-visible, .kin-ux-settings :focus-visible { outline: 2px solid var(--kin-accent); outline-offset: -2px; }
+/* A series drop replaces exactly the highlighted cell. */
+.kin-series-drop-target { outline: 2px dashed #8ab4c8; outline-offset: -2px; }
+.kin-series-drop-over { outline-style: solid; background: #2d2d2d; }
+.kin-series-drop-target::after {
+  content: attr(data-kin-series-drop); position: absolute; inset: auto 0 0;
+  z-index: 20; padding: .5em; text-align: center; color: #e3e3e3;
+  background: #212121; pointer-events: none;
+}
+.kin-series-drop-over::after { color: #212121; background: #8ab4c8; }
+.kin-series-load {
+  position: absolute; inset: auto 0 0; z-index: 21;
+  pointer-events: auto;
+  display: flex; align-items: center; justify-content: center; gap: .5em;
+  padding: .5em; color: #e3e3e3; background: #212121;
+}
