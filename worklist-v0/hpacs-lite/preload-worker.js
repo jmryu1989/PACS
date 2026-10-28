@@ -105,14 +105,16 @@ async function download(study, mine) {
   const live = () => mine === epoch;
   controller = new AbortController();
   const signal = controller.signal;
-  store.start(uid);
+  if (!store.start(uid)) return 'gone';
   broadcast();
   const metadata = await (await get(`/dicom-web/studies/${uid}/metadata`, { Accept: 'application/dicom+json' }, signal)).json()
     .catch(error => { throw error instanceof Stop ? error : new Stop(MESSAGES.malformed); });
+  if (!live()) return 'gone';
   const list = objects(metadata);
   if (!list.length) throw new Stop(MESSAGES.empty);
   const { first, rest } = framePaths(uid, list);
-  store.start(uid, first.length + rest.length);
+  // Cleared, removed or dropped by a viewer while the metadata was read: nothing more of it.
+  if (!store.start(uid, first.length + rest.length)) return 'gone';
   let firstBytes = 0;
   for (const [index, path] of [...first, ...rest].entries()) {
     await idle();
@@ -188,7 +190,9 @@ function release(port) {
 }
 
 async function handle(port, message) {
-  const info = ports.get(port);
+  // A window that said goodbye and came back (back/forward cache) is a port again.
+  let info = ports.get(port);
+  if (!info) { info = { role: null, busy: false, opens: new Map() }; ports.set(port, info); }
   const reply = (value, transfer = []) => port.postMessage({ type: 'reply', id: message.id, ...value }, transfer);
   switch (message?.type) {
     case 'hello':

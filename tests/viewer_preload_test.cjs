@@ -109,6 +109,15 @@ test('a refused opening drops the held study; a server failure keeps it but show
   }
 });
 
+test('a check read the archive could not answer a revision for stays live and keeps the held copy', async () => {
+  const { fetch, sent, posted } = setup({ held: { [STUDY]: { revision: 'rev-now', session: 'sess-1' } },
+    network: async url => new Response('live ' + url, { headers: { 'Content-Type': PART } }) });
+  assert.equal((await fetch(frameUrl(1), bound())).status, 200);
+  assert.ok(!posted.some(m => m.type === 'evict' || m.type === 'open'));
+  await fetch(frameUrl(2), bound());
+  assert.equal(sent.length, 2, 'nothing from memory without a matching revision');
+});
+
 test('a check read that is cut is asked again by the next frame read', async () => {
   let fail = true;
   const { fetch, sent, posted } = setup({ held: { [STUDY]: { revision: 'rev-now', session: 'sess-1' } },

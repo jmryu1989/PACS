@@ -37,6 +37,7 @@
         if (event.reason === 'lifecycle' && !['active', 'preparing'].includes(event.state)) port?.postMessage({ type: 'session', session: null });
       });
       root.addEventListener('pagehide', () => port?.postMessage({ type: 'bye' }));
+      root.addEventListener('pageshow', event => { if (event.persisted) port?.postMessage({ type: 'hello', role: 'list' }); });
     } catch (_) { broken = true; port = null; }
     return port;
   }

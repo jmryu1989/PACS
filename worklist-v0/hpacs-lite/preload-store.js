@@ -84,9 +84,10 @@
       next() {
         return [...studies.values()].filter(s => s.status === STATUS.queued && !s.waiting).sort((a, b) => a.seq - b.seq)[0] || null;
       },
+      /** Fetching begins or goes on; false when the study was cleared, removed or failed meanwhile. */
       start(uid, total) {
         const study = studies.get(uid);
-        if (!study) return false;
+        if (!study || ![STATUS.queued, STATUS.downloading].includes(study.status)) return false;
         study.status = STATUS.downloading; study.reason = null; study.waiting = false;
         if (Number.isInteger(total) && total > 0) study.total = total;
         return true;

@@ -76,13 +76,16 @@
         let response;
         try { response = await network(url, { ...init, headers }); }
         catch (error) { studies.delete(uid); throw error; }   // cut or failed: the next frame read checks again
-        if (response.ok && response.headers.get('X-KIN-Study-Revision') === held.revision) {
+        const now = response.headers.get('X-KIN-Study-Revision');
+        if (response.ok && now === held.revision) {
           entry.state = 'held';
           opened.add(uid);
           post({ type: 'open', uid });
         } else {
+          // No revision answered (the archive could not say) proves nothing either way: live now, the held copy stays.
           entry.state = 'live';
-          if (response.ok || [403, 404].includes(response.status)) post({ type: 'evict', uid, reason: response.ok ? CHANGED : DENIED });
+          if (response.ok && now) post({ type: 'evict', uid, reason: CHANGED });
+          else if ([403, 404].includes(response.status)) post({ type: 'evict', uid, reason: DENIED });
         }
         return response;
       })();

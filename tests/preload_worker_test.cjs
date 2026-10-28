@@ -165,6 +165,24 @@ test('a session that ended on the server empties the store; a new session never 
   assert.equal(statusOf(list, OTHER).status, 'Evicted');
 });
 
+test('Clear All while a study\'s metadata is read leaves it Evicted; a window that said goodbye can come back', async () => {
+  const { requests, connect, hold } = boot();
+  const list = connect();
+  list.send({ type: 'hello', role: 'list' });
+  const release = hold();
+  list.send({ type: 'add', session: 'sess-1', studies: [{ uid: STUDY }] });
+  await until(() => requests.length === 1, 'metadata read started');
+  list.send({ type: 'clear' });
+  release();
+  for (let i = 0; i < 20; i++) await tick();
+  assert.equal(statusOf(list, STUDY).status, 'Evicted');
+  assert.equal(requests.length, 1, 'no frame read after the clear');
+  list.send({ type: 'bye' });
+  list.send({ type: 'hello', role: 'list' });
+  list.send({ type: 'retry', uid: STUDY });
+  await until(() => statusOf(list, STUDY)?.status === 'Ready', 'Ready after coming back');
+});
+
 test('a refused, missing or changing study fails with a reason and Retry; a browser without memory facts gets no preload', async () => {
   let revision = 0;
   const { connect } = boot({ respond: async (url) => {
