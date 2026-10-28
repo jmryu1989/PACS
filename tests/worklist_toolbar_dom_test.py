@@ -109,6 +109,8 @@ FOLDER_ENTRY_IDS = ['worklist-folders-toggle']
 # W3 adds a drawer opener and change-only status inside View. The historical
 # regrouping byte proof below stays pinned; current IDs still must be unique.
 STUDY_PANEL_ENTRY_IDS = ['study-panel-open', 'study-panel-status']
+# W-SPACE (Minhoon 2026-10-27 item 9) adds the Panel Settings opener beside them, inside View's This Browser section.
+PANEL_SETTINGS_ENTRY_IDS = ['panel-settings-open']
 GROUP_IDS = ['toolbar-search', 'toolbar-filters', 'toolbar-refresh', 'toolbar-refresh-menu', 'toolbar-view',
              'toolbar-more', 'toolbar-status']
 # Where every base toolbar id now lives. Primary groups are always in view; menus are <details>.
@@ -424,8 +426,9 @@ class WorklistToolbarStructureTest(unittest.TestCase):
                 self.assertEqual(1, self.text.count(f'id="{key}"'), key)
         toolbar = ids_in(self.parts['toolbar'])
         self.assertEqual(len(toolbar), len(set(toolbar)))
-        self.assertEqual(set(BASE_TOOLBAR_IDS) | set(GIVEN_IDS) | set(GROUP_IDS) | set(FOLDER_ENTRY_IDS) | set(STUDY_PANEL_ENTRY_IDS), set(toolbar))
-        for key in list(GIVEN_IDS) + GROUP_IDS + FOLDER_ENTRY_IDS + STUDY_PANEL_ENTRY_IDS:
+        self.assertEqual(set(BASE_TOOLBAR_IDS) | set(GIVEN_IDS) | set(GROUP_IDS) | set(FOLDER_ENTRY_IDS) | set(STUDY_PANEL_ENTRY_IDS)
+                         | set(PANEL_SETTINGS_ENTRY_IDS), set(toolbar))
+        for key in list(GIVEN_IDS) + GROUP_IDS + FOLDER_ENTRY_IDS + STUDY_PANEL_ENTRY_IDS + PANEL_SETTINGS_ENTRY_IDS:
             self.assertEqual(1, self.text.count(f'id="{key}"'), key)
         # The declared groups account for every base id exactly once.
         declared = [i for ids in list(PRIMARY.values()) + list(MENUS.values()) for i in ids]
