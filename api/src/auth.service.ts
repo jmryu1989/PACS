@@ -1,3 +1,4 @@
+import { PresenceService } from './presence.service';
 import { BackgroundWork, EMR_BACKGROUND_WORK, backgroundRetryDelayMs } from './emr-runtime/background-work';
 import {
   HttpException, Inject, Injectable, InternalServerErrorException, Logger,
@@ -139,7 +140,8 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
 
   constructor(private prisma: PrismaService, private keycloak: KeycloakService,
     @Inject(EMR_RECORD_PORT) private readonly ledger: EmrRecordPort,
-    @Inject(EMR_BACKGROUND_WORK) private readonly background: BackgroundWork) {}
+    @Inject(EMR_BACKGROUND_WORK) private readonly background: BackgroundWork,
+    private readonly presence: PresenceService) {}
 
   private async withAccessRecords<T>(claims: { issuer: string; subject: string; actor: string },
     body: (tx: EmrRecordTransaction, record: RecordMutation, user: { status: 'known'; value: ImmutableIdentity }) => Promise<T>,
@@ -443,13 +445,17 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       };
       let issuer: string | undefined;
       try { issuer = decodeJwt(session.accessToken).iss; } catch { /* Keep the missing original identity explicit. */ }
-      if (issuer) return await this.withAccessRecords({ issuer, subject: session.sub, actor: this.storedIdentity(session).actor }, end,
-        { maxWait: 4000, timeout: 8000 });
+      const completed = (result: EndResult) => {
+        if (result.ended) this.presence.endUser(session.sub);
+        return result;
+      };
+      if (issuer) return completed(await this.withAccessRecords({ issuer, subject: session.sub, actor: this.storedIdentity(session).actor }, end,
+        { maxWait: 4000, timeout: 8000 }));
       // An unreadable stored token must not prevent ending its existing session.
       // Keep its auditRef and the projection's stored subject; never guess an issuer.
       const work = this.ledger.begin();
-      try { return await work.transactionWithRecords((tx, record) => end(tx, record, { status: 'unresolved', reason: 'not-resolved' }),
-        { maxWait: 4000, timeout: 8000 }); }
+      try { return completed(await work.transactionWithRecords((tx, record) => end(tx, record, { status: 'unresolved', reason: 'not-resolved' }),
+        { maxWait: 4000, timeout: 8000 })); }
       finally { work.end(); }
     } catch (error: any) {
       if (lockWaitExceeded(error)) throw this.conflict();
