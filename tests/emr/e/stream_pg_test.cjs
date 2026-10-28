@@ -503,6 +503,8 @@ test('E image service: the shared study delivery record per member session and s
       WHERE delivery_event_id=${deliveryId}::uuid ORDER BY recorded_at`;
     assert.deepEqual(rows.map(r => r.event_id).sort(), [...responseIds].sort());
     assert.ok(rows.every(r => r.delivery === deliveryId && /^[0-9a-f-]{36}$/.test(r.request_id)));
+    // Socket completion precedes observation persistence (I5); inspect the rows after each response hands them over.
+    await Promise.all(responseIds.map(id => rowsOf(id, 2)));
     const transports = await witness.$queryRaw`SELECT event_id::text, body->'wire' AS wire FROM emr_image.observation WHERE kind='transport'
       AND event_id=ANY(${responseIds}::uuid[])`;
     assert.equal(transports.length, 6);

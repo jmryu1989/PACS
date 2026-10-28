@@ -45,7 +45,7 @@
     unverified: '이동했습니다. 원본을 확인하지 못해 표식을 그리지 않습니다(재확인 필요).',
     missing: '이동했습니다. 표식이 현재 목록에 없어 그리지 않습니다.',
   };
-  const LIMITS = Object.freeze({ sources: 8, title: 200, text: 4000, findings: 256 });
+  const LIMITS = Object.freeze({ title: 200, text: 4000 });
   const uuid = s => typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s);
   const uid = s => typeof s === 'string' && s.length <= 64 && /^[0-9]+(?:\.[0-9]+)+$/.test(s);
   const revision = n => Number.isSafeInteger(n) && n >= 1 && n <= 2147483647;
@@ -239,18 +239,20 @@
       if (!Array.isArray(values)) return '';
       list = Array.from({ length: values.length }, (_, i) => { const n = values[i]; return typeof n === 'number' ? n : null; });
     } catch (_) { return UNVERIFIED + '?'; }
-    const arity = typeof kind === 'string' && Object.prototype.hasOwnProperty.call(ARITY, kind) ? ARITY[kind] : 0;
+    const planar = typeof calculator === 'string' && /^kin-planar-manual-v1:(pixel|detector|ermf|dbt)$/.test(calculator);
+    const arity = planar ? 1 : typeof kind === 'string' && Object.prototype.hasOwnProperty.call(ARITY, kind) ? ARITY[kind] : 0;
     if (!list.length && !arity) return '';
     const mgBasis = kind === 'length' && typeof calculator === 'string' && ({
       'kin-mg-length-v1:dbt': 'DBT PixelSpacing', 'kin-mg-length-v1:pixel': 'PixelSpacing · 원본 기준면',
       'kin-mg-length-v1:ermf': 'ImagerPixelSpacing / ERMF · 추정 보정', 'kin-mg-length-v1:detector': 'ImagerPixelSpacing · 검출기 기준',
     })[calculator];
-    const known = mgBasis && ['server-copy', 'live-head'].includes(provenance) || (provenance === 'server-copy' ? calculator === CALCULATOR
+    const known = planar && ['server-copy', 'live-head'].includes(provenance) || mgBasis && ['server-copy', 'live-head'].includes(provenance) || (provenance === 'server-copy' ? calculator === CALCULATOR
       : provenance === 'live-head' ? calculator === undefined || calculator === CALCULATOR : false);
     const exact = known && list.length === arity && list.every(n => finite(n) && Math.abs(n) < 1e21) &&
-      (kind !== 'ellipse' || (Number.isSafeInteger(list[4]) && list[4] >= 0));
+      (kind !== 'ellipse' || planar || (Number.isSafeInteger(list[4]) && list[4] >= 0));
     if (!exact) return UNVERIFIED + list.map(decimal).join(' / ');
     const [a, b, c, d] = list.map(decimal);
+    if (planar) return (kind === 'ellipse' ? '면적 ' : '') + a + (kind === 'angle' ? '°' : kind === 'ellipse' ? ' mm²' : ' mm') + ' · ' + ({ pixel: 'PixelSpacing', detector: 'ImagerPixelSpacing · 검출기 기준', ermf: 'ImagerPixelSpacing / ERMF · 추정 보정', dbt: 'DBT PixelSpacing' })[calculator.split(':')[1]];
     if (kind === 'length') return a + ' mm' + (mgBasis ? ' · ' + mgBasis : '');
     if (kind === 'angle') return a + '°';
     return '면적 ' + a + ' mm² · 평균 ' + b + ' HU · 최소 ' + c + ' HU · 최대 ' + d + ' HU · 화소 수 ' + String(list[4]);
@@ -396,7 +398,6 @@
   function draftProblem(draft) {
     if (!draft) return '작성 내용이 없습니다.';
     if (!Array.isArray(draft.sources) || draft.sources.length < 1) return '저장한 표식을 하나 이상 연결하세요.';
-    if (draft.sources.length > LIMITS.sources) return '표식은 최대 ' + LIMITS.sources + '개까지 연결할 수 있습니다.';
     if (draft.sources.some(s => !validPair(s))) return '연결한 표식의 저장 정보를 확인하세요.';
     if (new Set(draft.sources.map(pairIdentity)).size !== draft.sources.length) return '같은 표식을 두 번 연결할 수 없습니다.';
     if ([...String(draft.title ?? '')].length > LIMITS.title) return '제목은 ' + LIMITS.title + '자 이하여야 합니다.';
@@ -682,7 +683,7 @@
         do {
           const page = await api(path() + '?includeHidden=true&limit=100' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {}, ticket, false, workAt);
           if (seq !== s.readSequence) return;
-          if (!page || !Array.isArray(page.items) || heads.length + page.items.length > LIMITS.findings || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
+          if (!page || !Array.isArray(page.items) || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
           heads.push(...page.items); cursor = page.nextCursor;
         } while (cursor);
         if (!valid(ticket) || seq !== s.readSequence) return;
@@ -753,7 +754,7 @@
         do {
           const page = await api('/studies/' + study + '/viewer-items?limit=100' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {}, ticket, true, workAt);
           if (!current()) return;
-          if (!page || !Array.isArray(page.items) || items.length + page.items.length > 512 || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
+          if (!page || !Array.isArray(page.items) || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
           items.push(...page.items); cursor = page.nextCursor;
         } while (cursor);
         const heads = items.map(item => comparisonHead(item, study)).filter(h => !h.hidden);
@@ -828,7 +829,6 @@
       if (s.entries.get(e.id) !== e || !e.editing || e.busy || e.pending || !uuid(jobId) || (markId !== undefined && !uuid(markId))) return false;
       const index = e.draft.sources.findIndex(x => isJobPair(x) && x.jobId === jobId && (x.markId || undefined) === markId);
       if (index >= 0) { e.draft.sources.splice(index, 1); if (e.draft.primary >= e.draft.sources.length) e.draft.primary = 0; notify(); return true; }
-      if (e.draft.sources.length >= LIMITS.sources) return false;
       const shown = shownJob();
       let pair = null;
       if (markId !== undefined) {
@@ -855,7 +855,6 @@
       if (s.entries.get(e.id) !== e || !e.editing || e.busy || e.pending) return false;
       const index = e.draft.sources.findIndex(x => x.itemId === itemId);
       if (index >= 0) { e.draft.sources.splice(index, 1); if (e.draft.primary >= e.draft.sources.length) e.draft.primary = 0; notify(); return true; }
-      if (e.draft.sources.length >= LIMITS.sources) return false;
       if (study === undefined || study === s.scope) {
         const head = s.heads.get(itemId);
         if (!anchorLive() || !head || head.hidden || head.working) return false;

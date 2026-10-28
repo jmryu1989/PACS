@@ -80,6 +80,16 @@ else
   : > "$SNIPPET_DIR/hsts.conf"
 fi
 
+# 받아쓰기 location의 본문 상한. API가 KIN_ASR_MAX_BYTES로 정확히 강제하므로 여기서는 그 값이 지나가게만 한다:
+# 설정값이 /api/dicom-import와 같은 32m보다 크면 그 값, 아니면 32m. 숫자가 아닌 값은 API가 설정 오류로 알리고
+# 받아쓰기만 꺼지므로, 프록시는 그 때문에 기동을 멈추지 않는다(다른 업무까지 멈추게 하지 않는다).
+DICTATION_BODY=32m
+case "${KIN_ASR_MAX_BYTES:-}" in
+  ''|*[!0-9]*) ;;
+  *) if [ "${#KIN_ASR_MAX_BYTES}" -le 15 ] && [ "$KIN_ASR_MAX_BYTES" -gt 33554432 ]; then DICTATION_BODY="$KIN_ASR_MAX_BYTES"; fi ;;
+esac
+printf 'client_max_body_size %s;\n' "$DICTATION_BODY" > "$SNIPPET_DIR/dictation-body.conf"
+
 # 개발 프록시도 외부 진입점이 될 수 있다. 배포 모드와 관계없이 관리 표면을 숨긴다.
 printf '%s\n' \
   'location = /auth/admin { return 404; }' \

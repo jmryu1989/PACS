@@ -133,12 +133,13 @@ def asset_catalog_deployed():
     return bool(probe.stdout.strip())
 
 
-def entries_of(record_id):
+def entries_of(record_id, *, image_only=False):
     """(event_id, recorded_at epoch seconds, payload) of the access entries whose targets name the record `record_id`."""
     quoted([record_id])
+    target = " AND target_kind = 'image'" if image_only else ""
     rows = psql("SELECT e.event_id || E'\\t' || extract(epoch FROM e.recorded_at)::text || E'\\t' || e.payload "
                 "FROM emr_access.access_entry e WHERE e.entry_id IN "
-                f"(SELECT entry_id FROM emr_access.access_target WHERE record_id = '{record_id}') ORDER BY e.sequence;")
+                f"(SELECT entry_id FROM emr_access.access_target WHERE record_id = '{record_id}'{target}) ORDER BY e.sequence;")
     return [(row.split("\t", 2)[0], float(row.split("\t", 2)[1]), json.loads(row.split("\t", 2)[2])) for row in rows]
 
 
@@ -176,11 +177,12 @@ class ImagePathsE2E(base.WorklistE2E):
         for name, template in (("q_frame", FRAME), ("q_object", OBJECT), ("q_series", SERIES),
                                ("q_study", "/dicom-web/studies/{study}"), ("q_metadata", "/dicom-web/studies/{study}/metadata")):
             values[name] = quote(template.format(**values), safe="")
-        self.assertEqual([], self.member_entries(values["study"]), "a study nobody has read has no access entry")
+        self.assertEqual([], self.member_entries(values["study"]), "a fresh study has no image delivery entry")
         return values
 
     def member_entries(self, uid, action=None):
-        rows = entries_of(uid)
+        # A5 also records the fixture's administrator reading study metadata; these assertions cover image deliveries.
+        rows = entries_of(uid, image_only=True)
         self.assertTrue(all(p["userId"]["value"]["subject"] == self.stack.user_ids["doctor"] for _, _, p in rows), rows)
         return [row for row in rows if action is None or row[2]["action"] == action]
 

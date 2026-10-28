@@ -1,5 +1,5 @@
 import { Injectable, HttpException, Logger } from '@nestjs/common';
-import { inspectDictationWav, DICTATION_AUDIO_MAX_BYTES } from './dictation-audio';
+import { inspectDictationWav, DICTATION_AUDIO_DEFAULT_BYTES, DICTATION_WAV_MAX_BYTES } from './dictation-audio';
 import { asrDestination, asrFetch, AsrDestinationError } from './asr-destination';
 
 // Configured attribution labels, not runtime image/model attestation (U3).
@@ -10,22 +10,23 @@ export const ASR_RESPONSE_CAP = 131072;
 export function dictationError(code: string, status = 503) {
   return new HttpException({ code, message: code }, status);
 }
+// Compose passes an unset .env entry (`${KIN_ASR_MAX_BYTES:-}`) as an empty string: that is "not set".
 function limit(raw: string | undefined, fallback: number, min: number, max: number) {
-  if (raw === undefined) return fallback;
+  if (raw === undefined || raw === '') return fallback;
   const n = /^\d+$/.test(raw) ? Number(raw) : NaN;
   return Number.isSafeInteger(n) && n >= min && n <= max ? n : null;
 }
 export function asrConfiguration(env = process.env) {
-  const maxBytes = limit(env.KIN_ASR_MAX_BYTES, DICTATION_AUDIO_MAX_BYTES, 46, DICTATION_AUDIO_MAX_BYTES);
+  const maxBytes = limit(env.KIN_ASR_MAX_BYTES, DICTATION_AUDIO_DEFAULT_BYTES, 46, DICTATION_WAV_MAX_BYTES);
   const timeoutMs = limit(env.KIN_ASR_TIMEOUT_MS, 120000, 1, 240000);
-  const languagePin = env.KIN_ASR_LANGUAGE ?? 'auto';
+  const languagePin = env.KIN_ASR_LANGUAGE || 'auto';
   const url = asrDestination(env.KIN_ASR_URL);
-  if (env.KIN_ASR_URL && !url) Logger.error('KIN_ASR_URL 설정 오류: 배포 내부 서비스명 또는 사설·로컬 IP의 /inference 주소만 허용합니다. 받아쓰기를 사용할 수 없습니다.', 'AsrService');
+  if (env.KIN_ASR_URL && !url) Logger.error('KIN_ASR_URL 설정 오류: 내부 서비스명·병원 내부 DNS 이름 또는 사설·로컬 IP의 /inference 주소만 허용합니다. 받아쓰기를 사용할 수 없습니다.', 'AsrService');
   const available = !!(url && ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password &&
     !url.search && !url.hash && url.pathname === '/inference' &&
     env.KIN_ASR_ENGINE === ASR_ENGINE_PIN && env.KIN_ASR_MODEL === ASR_MODEL_PIN &&
     /^(?:auto|[a-z]{2,3})$/.test(languagePin) && maxBytes !== null && timeoutMs !== null);
-  return { available, url: available ? url.href : null, maxBytes: maxBytes ?? DICTATION_AUDIO_MAX_BYTES,
+  return { available, url: available ? url.href : null, maxBytes: maxBytes ?? DICTATION_AUDIO_DEFAULT_BYTES,
     timeoutMs: timeoutMs ?? 120000, languagePin, enginePin: ASR_ENGINE_PIN, modelPin: ASR_MODEL_PIN };
 }
 
@@ -81,9 +82,13 @@ export class AsrService {
         languagePin: config.languagePin, seconds: audio.seconds };
     } catch (error) {
       if (error instanceof AsrDestinationError) {
-        Logger.error('KIN_ASR_URL 설정 오류: 서비스명의 DNS 주소가 없거나 내부 대역이 아닙니다. 음성 전송을 거절했습니다.', 'AsrService');
+        Logger.error('KIN_ASR_URL 설정 오류: 이름이 내부 대역이 아닌 주소로 해석됩니다. 음성 전송을 거절했습니다.', 'AsrService');
         throw dictationError('DICTATION_NOT_CONFIGURED');
       }
+      // The operator's only trace of an engine that is down or slow (a reader who left is not one); the cause
+      // code carries no audio or text.
+      const cause = typeof error?.code === 'string' && /^E[A-Z_]{1,40}$/.test(error.code) ? error.code : 'response';
+      if (!disconnected.aborted) Logger.warn(`음성 인식기 요청 실패: ${timedOut ? 'timeout' : cause}`, 'AsrService');
       throw dictationError(timedOut ? 'DICTATION_TIMEOUT' : 'DICTATION_ENGINE_FAILED');
     } finally {
       clearTimeout(timer);

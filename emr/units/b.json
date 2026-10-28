@@ -200,7 +200,9 @@
       "20261026180000_emr_signing_key_admin",
       "20261026210000_emr_e_source_manifest",
       "20261027090000_emr_e_study_delivery",
-      "20261027150000_emr_e_observation_delivery"
+      "20261027150000_emr_e_observation_delivery",
+      "20261027180000_emr_image_object_digest",
+      "20261027230000_caution_app_limits"
     ],
     "latest_before": "20261016120000_related_report_insert_receipt",
     "historic_b1": "unchanged"

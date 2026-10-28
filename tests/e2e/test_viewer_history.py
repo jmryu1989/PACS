@@ -111,10 +111,13 @@ class ViewerHistoryE2E(ThumbnailRequestsE2E):
         p.get_by_role('button',name='Add Key Image',exact=True).click();row=p.locator('#kin-viewer-history section[data-kind=key]')
         row.get_by_label('Key Title').fill('응답 유실');row.get_by_role('button',name='Save',exact=True).click()
         expect(row).to_contain_text('저장 결과를 확인하지 못했습니다');self.assertEqual(len(self.saved(f)),1)
+        expect(row.locator('strong')).to_contain_text('Unverified')
         p.unroute('**/viewer-items',lost)
         p.on('request',lambda r:seen.append(r.post_data) if r.method=='POST' and r.url.endswith('/viewer-items') else None)
         row.get_by_role('button',name='Retry Request').click();expect(row).to_contain_text('저장 완료');self.assertEqual(seen[0],seen[1]);self.assertEqual(len(self.saved(f)),1)
+        expect(row.locator('strong')).to_contain_text('Saved r1')
         head=self.saved(f)[0];row.get_by_role('button',name='Edit',exact=True).click();row.get_by_label('Key Title').fill('내 수정 보존')
+        expect(row.locator('strong')).to_contain_text('Unsaved')
         command=dict(requestId=str(uuid.uuid4()),expectedRevision=1,action='edit',item={k:v for k,v in head['item'].items() if k!='hidden'});command['item']['title']='다른 창 수정'
         self.assertEqual(self.stack.request('POST','/studies/'+f.uid+'/viewer-items/'+head['id']+'/revisions','doctor',command).status,200)
         row.get_by_role('button',name='Save',exact=True).click();expect(row).to_contain_text('서버에 다른 판')
@@ -125,6 +128,7 @@ class ViewerHistoryE2E(ThumbnailRequestsE2E):
         def unavailable(r):r.fulfill(status=503,content_type='application/json',body='{"message":"synthetic unavailable"}')
         p.route('**/viewer-items/*/revisions',unavailable)
         row.get_by_role('button',name='Save',exact=True).click();expect(row).to_contain_text('저장 결과를 확인하지 못했습니다')
+        expect(row.locator('strong')).to_contain_text('Unverified')
         expect(row.get_by_label('Key Title')).to_have_value('503 보존');p.unroute('**/viewer-items/*/revisions',unavailable)
         row.get_by_role('button',name='Retry Request').click();expect(row).to_contain_text('Saved r4')
         budget=base.psql('SELECT "revisionCount" FROM "ViewerStorageBudget" WHERE "studyUid"='+literal(f.uid))[0]

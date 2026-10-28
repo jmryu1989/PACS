@@ -25,7 +25,7 @@ test('strict DTO and Unicode code point limits', () => {
     { ...body, item: { ...item, label: '😀'.repeat(1001) } }, { ...body, item: { ...item, points: [[0, 0, 0]] } },
     { ...body, item: { ...item, frame: 0 } }, { ...body, item: { ...item, frame: 1.1 } },
     { ...body, item: { ...item, frame: true } }, { ...body, item: { ...item, schemaVersion: 2 } }]) reject(() => v.viewerCommand(raw(bad), true));
-  reject(() => v.viewerCommand(raw({ ...body, expectedRevision: 1, action: 'hide' }), false));
+  assert.equal(v.viewerCommand(raw({ ...body, expectedRevision: 1, action: 'hide' }), false).reason, '');
   assert.equal(v.viewerCommand(raw({ ...body, expectedRevision: 1, action: 'hide', reason: '사유' }), false).action, 'hide');
 });
 test('canonical command semantic equality and significant text/array order', () => {

@@ -1,4 +1,3 @@
-import { FINDING_LIMITS } from './finding-input';
 
 /**
  * 판독문 인용의 **순수 규칙** — 줄 블록 일치, 존재 상태, 유지·제거 목록, 한도.
@@ -233,8 +232,8 @@ export function citationInsertInput(value: any): ReportCitationInsert {
     throw new CitationInputError('insert.findingId가 필요합니다');
   if (!isIndex(value.findingRevision) || value.findingRevision < 1)
     throw new CitationInputError('insert.findingRevision은 1 이상의 정수여야 합니다');
-  if (!isIndex(value.sourceIndex) || value.sourceIndex >= FINDING_LIMITS.sources)
-    throw new CitationInputError(`insert.sourceIndex는 0..${FINDING_LIMITS.sources - 1} 여야 합니다`);
+  if (!isIndex(value.sourceIndex))
+    throw new CitationInputError('insert.sourceIndex는 0 이상의 정수여야 합니다');
   if (!isPlainString(value.insertedText) || !value.insertedText)
     throw new CitationInputError('insert.insertedText가 필요합니다');
   if (Buffer.byteLength(value.insertedText, 'utf8') > REPORT_CITATION_LIMITS.insertedText)

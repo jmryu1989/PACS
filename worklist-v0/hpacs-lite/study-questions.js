@@ -44,7 +44,7 @@
         inboxReady: (n, more) => `질문 ${n}건을 최신순으로 표시합니다.${more ? ' More로 이어서 읽습니다.' : ''}`,
         notListed: '이 검사는 지금 워크리스트에 없어 열 수 없습니다. 목록을 새로고침하거나 검색 조건을 바꾸세요.',
         unlisted: '워크리스트에 없는 검사',
-        noText: '1~2,000자의 내용을 입력하세요.',
+        noText: '내용을 입력하세요.',
         sending: '보내는 중입니다…',
         saved: '저장했습니다.',
         replayed: '이미 저장된 요청입니다. 서버가 처음 저장한 결과를 돌려주었습니다.',
@@ -84,7 +84,7 @@
       const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
       const STUDY = /^\d+(?:\.\d+)+$/;
       const CURSOR = /^[A-Za-z0-9_-]{1,256}$/;
-      const TIMEOUT_MS = 60000, TEXT_MAX = 2000;
+      const TIMEOUT_MS = 60000;
       let ended = false, lock = null;
       // 나가 있는 질문 요청. 세션이 끝나면(end) 모두 멈춘다 — 답은 번호로도 버려지지만 끝난 세션의 응답을 기다리지 않는다.
       const inflight = new Set();
@@ -221,7 +221,7 @@
         if (!item || typeof item !== 'object' || item.id !== id) throw new Error(TEXT.malformed);
         // 다른 검사의 질문이면 판독 대상 곁에 열지 않고 그 이유를 보인다(Inbox에서 고른 질문도 이 단건 읽기로 확인한다).
         if (item.studyUid !== target) throw new Error(TEXT.otherStudy);
-        if (!STATES.includes(item.state) || !who(item.author) || !Array.isArray(item.entries) || !item.entries.length || item.entries.length > 100
+        if (!STATES.includes(item.state) || !who(item.author) || !Array.isArray(item.entries) || !item.entries.length
             || item.revision !== item.entries.length || item.entryCount !== item.entries.length || !anchor(item.current)
             || (item.state === 'Closed') !== (!!item.closed && typeof item.closed === 'object'))
           throw new Error(TEXT.malformed);
@@ -447,7 +447,6 @@
         field.dataset.field = '';
         if (spec.multiline) field.rows = 3;
         else field.type = 'text';
-        field.maxLength = TEXT_MAX;
         field.setAttribute('aria-describedby', hintId);
         field.addEventListener('input', () => {
           if (!attempts.has(key)) drafts.set(key, field.value);
@@ -515,7 +514,7 @@
         const who = owner();
         if (ended || lock !== null || target !== uid || attempts.has(key) || !loaded || !who) return;
         const value = field.value;
-        if (!(action === 'close' && value === '') && (!value.trim() || value.length > TEXT_MAX)) {
+        if (!(action === 'close' && value === '') && (!value.trim())) {
           setNote(noteKey, 'failed', TEXT.noText);
           return;
         }

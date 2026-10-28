@@ -30,7 +30,9 @@ class ViewerLayoutE2E(ThumbnailSeriesE2E):
         }))''')
 
     def drag(self,page,description,index):
-        page.locator('[draggable=true]').filter(has_text=description).drag_to(page.locator('[data-cy=viewport-grid] > div').nth(index))
+        # This helper exercises the native Studies thumbnails. The horizontal
+        # strip now offers the same series as a second draggable control.
+        page.locator('[draggable=true]:not(.kin-series-card)').filter(has_text=description).drag_to(page.locator('[data-cy=viewport-grid] > div').nth(index))
 
     def identity(self,page,expected):
         page.wait_for_function('''expected=>{
@@ -185,8 +187,8 @@ class ViewerLayoutE2E(ThumbnailSeriesE2E):
         records=self.records(page);key=next(iter(records));raw=records[key];before=self.cells(page)
         for value,message in [('{','손상'),(' '*8193,'손상'),(json.dumps(dict(json.loads(raw),version=99)),'손상')]:
             page.evaluate('([k,v])=>localStorage.setItem(k,v)',[key,value]);self.action(page,'복원',message);self.assertEqual(self.cells(page),before)
-        missing=json.loads(raw);missing['cells'][0]['series']='1.2.826.0.1.3680043.10.543.99999'
-        page.evaluate('([k,v])=>localStorage.setItem(k,v)',[key,json.dumps(missing)]);self.action(page,'복원','시리즈를 찾을 수 없거나');self.assertEqual(self.cells(page),before)
+        missing=json.loads(raw);missing['cells'][0]['sets'][0]['series']='1.2.826.0.1.3680043.10.543.99999'
+        page.evaluate('([k,v])=>localStorage.setItem(k,v)',[key,json.dumps(missing)]);self.action(page,'복원','현재 배치를 유지합니다');self.assertEqual(self.cells(page),before)
         page.evaluate('([k,v])=>localStorage.setItem(k,v)',[key,raw])
         page.evaluate("() => {window.originalLayoutSet=Storage.prototype.setItem;Storage.prototype.setItem=function(){throw new DOMException('blocked','QuotaExceededError');};}")
         self.action(page,'저장','저장소를 사용할 수 없습니다');self.assertEqual(self.cells(page),before);self.assertEqual(self.records(page),records)
@@ -195,18 +197,23 @@ class ViewerLayoutE2E(ThumbnailSeriesE2E):
         page.evaluate('() => {Storage.prototype.setItem=originalLayoutSet;}')
         # Current display-set ambiguity is refused before any grid mutation. The display set shown twice is the saved
         # cell's own series (the order of the active display sets is the order their metadata arrived, not a contract).
-        saved=json.loads(raw)['cells'][0]
+        saved=json.loads(raw)['cells'][0]['sets'][0]
         page.evaluate('''s => {window.originalSets=services.displaySetService.getActiveDisplaySets;
           services.displaySetService.getActiveDisplaySets=function(){const a=originalSets.call(this);
             const d=a.find(x=>x.StudyInstanceUID===s.study&&x.SeriesInstanceUID===s.series);
             if(!d)throw Error('saved series is not displayed');return [...a,d];};}''',saved)
-        self.action(page,'복원','시리즈를 찾을 수 없거나');self.assertEqual(self.cells(page),before)
+        self.action(page,'복원','현재 배치를 유지합니다');self.assertEqual(self.cells(page),before)
         page.evaluate('() => {services.displaySetService.getActiveDisplaySets=originalSets;}')
-        page.evaluate('''() => {window.originalViewportGetter=services.cornerstoneViewportService.getCornerstoneViewport;
-          services.cornerstoneViewportService.getCornerstoneViewport=function(...args){const v=originalViewportGetter.apply(this,args);return v&&new Proxy(v,{get(t,k){return k==='type'?'volume':Reflect.get(t,k);}});};}''')
-        self.action(page,'복원','일반 CT 화면에서');self.assertEqual(self.records(page),records)
-        page.evaluate('() => {services.cornerstoneViewportService.getCornerstoneViewport=originalViewportGetter;}')
-        self.assertEqual(self.cells(page),before)
+        # A previously saved v1 document still restores through the real viewer.
+        # Native MPR/merged layouts are covered by test_viewer_cell_merge; no fake viewport type gate remains.
+        current=json.loads(raw)
+        legacy={k:current[k] for k in ['studies','rows','cols','active']}
+        legacy.update(version=1,cells=[{k:cell['sets'][0][k] for k in ['study','series']} if cell['sets'] else None for cell in current['cells']])
+        references={ref['series']:ref for ref in self.fixture_refs(page,f)}
+        page.evaluate('([k,v])=>localStorage.setItem(k,v)',[key,json.dumps(legacy)])
+        self.grid(page,4);self.action(page,'복원','적용했습니다')
+        self.identity(page,[references[cell['series']] if cell else None for cell in legacy['cells']])
+        page.evaluate('([k,v])=>localStorage.setItem(k,v)',[key,raw])
         self.launch(page,[other]);before=self.cells(page);self.action(page,'복원','다른 검사의 배치');self.assertEqual(self.cells(page),before);self.assertEqual(self.records(page),records)
         self.assertEqual(self.originals(),originals)
 

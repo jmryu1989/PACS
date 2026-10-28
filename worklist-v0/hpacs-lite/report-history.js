@@ -20,6 +20,14 @@
       historyReads.clear();
       $("#hist-body").replaceChildren();
       $("#histmodal").classList.remove("show");
+      // A5: this opening's display reports end with it (the next opening is a new display, even of the same versions).
+      KinReportViews.end("history");
+    }
+    /** A5: one shown version row or evidence block of this opening, reported as displayed only while it is on screen. */
+    function historyShown(key, uid, epoch, at, accessRef, node) {
+      KinReportViews.watch("history", epoch, key, { uid, accessRef, nodes: [node],
+        live: () => work.admits(at) && historyLive(epoch, uid),
+        report: body => api("POST", `/studies/${encodeURIComponent(uid)}/view-observations`, body, undefined, at) });
     }
     /**
      * 답은 **그 판 하나**에 대한 것인가. 존재 상태는 서버가 그 판 자신의 본문에 대해 계산해
@@ -94,6 +102,8 @@
       historyReads.delete(version);
       button.disabled = false;
       historyCitationBlock(host, state, state === "ok" ? answer : null);
+      // Only an answer drawn as this version's evidence is its display; an unknown or refused block shows no evidence.
+      if (state === "ok") historyShown("report-evidence:" + version, uid, epoch, at, answer.accessRef, host.firstElementChild);
     }
     async function showHistory() {
       const uid = selectedUid;
@@ -102,6 +112,7 @@
       const epoch = ++historyEpoch;
       historyUid = uid;
       historyReads.clear();
+      KinReportViews.end("history");
       $("#histmodal").classList.add("show");
       box.innerHTML = "<div style='color:#667;padding:10px'>불러오는 중…</div>";
       if (!serverMode) {
@@ -138,6 +149,11 @@
           const host = button.closest(".ver")?.querySelector(".vcite-host");
           if (!Number.isSafeInteger(version) || version < 1 || !host) { button.remove(); continue; }
           button.addEventListener("click", () => loadHistoryCitations(uid, version, host, button));
+        }
+        // A5: every row was provided; a row is displayed only once the reader has it on screen (scrolling the list shows more).
+        for (const row of box.querySelectorAll(".ver")) {
+          const v = list.find(item => String(item.version) === row.dataset.version);
+          if (v) historyShown("report-version:" + v.version, uid, epoch, at, v.accessRef, row);
         }
       } catch (e) {
         // 늦게 온 **실패**도 새 열람의 목록을 오류 문구로 덮지 않는다.

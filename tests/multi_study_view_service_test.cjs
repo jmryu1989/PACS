@@ -207,12 +207,11 @@ const noWrites = (w, label = 'a resolve writes nothing') => {
 
 test('W9API-01 T18 A-01: every malformed selection is the one 400 with no database, source or record call', async () => {
   const [s1, s2] = [study(), study()];
-  const many = Array.from({ length: 21 }, (_, i) => '2.25.77' + i);
   const raws = {
     'extra key': body(ids([s1, s2]), { owner: 'syn' }),
     'missing key': Buffer.from(JSON.stringify({ compositionId: COMPOSITION, generation: 1, requestId: REQUEST, studyUids: ids([s1, s2]) })),
     'duplicate JSON key': Buffer.from(`{"compositionId":"${COMPOSITION}","compositionId":"${COMPOSITION}","generation":1,"requestId":"${REQUEST}","studyUids":["${s1.uid}","${s2.uid}"],"expectedSourcePatientKey":null}`),
-    'one UID': body([s1.uid]), 'twenty-one UIDs': body(many), 'duplicate UID': body([s1.uid, s1.uid]),
+    'one UID': body([s1.uid]), 'duplicate UID': body([s1.uid, s1.uid]),
     'UID with letters': body([s1.uid, '2.25.abc']), 'UID over 64': body([s1.uid, '2.25.' + '1'.repeat(64)]), 'UID not a string': body([s1.uid, 7]),
     'composition not v4': body(ids([s1, s2]), { compositionId: '7b0c1f3a-2d4e-1f60-8a1b-2c3d4e5f6a7b' }),
     'composition upper case': body(ids([s1, s2]), { compositionId: COMPOSITION.toUpperCase() }),
@@ -230,12 +229,13 @@ test('W9API-01 T18 A-01: every malformed selection is the one 400 with no databa
     assert.deepEqual([w.calls.states.length, w.calls.reads.length, w.calls.identity.length, w.access.selected.length], [0, 0, 0, 0],
       label + ': refused before any read');
   }
-  // the bounds themselves are accepted: 2 and 20 members, generation 2^31-1, a bounded expected key
-  const twenty = Array.from({ length: 20 }, () => study());
-  const w = world(twenty);
-  const answer = await opens(resolveFor(w, reader(), body(ids(twenty), { generation: 2147483647, expectedSourcePatientKey: A + '|SYN-PID-1' })),
-    'twenty members are a valid selection');
-  assert.deepEqual([answer.generation, answer.members.length, answer.scopeStatus], [2147483647, 20, 'ready']);
+  // the bounds themselves are accepted: 2 members and more (#259 removed the 20-member cap, so 21 open), generation
+  // 2^31-1, a bounded expected key
+  const members = Array.from({ length: 21 }, () => study());
+  const w = world(members);
+  const answer = await opens(resolveFor(w, reader(), body(ids(members), { generation: 2147483647, expectedSourcePatientKey: A + '|SYN-PID-1' })),
+    'twenty-one members are a valid selection');
+  assert.deepEqual([answer.generation, answer.members.length, answer.scopeStatus], [2147483647, 21, 'ready']);
 });
 
 test('W9API-02 T03 A-01: only radiologist (admin passes) resolves; the role refusal comes before input and every read', async () => {

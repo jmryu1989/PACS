@@ -1,3 +1,5 @@
+import { LocalReadResponse } from '../emr-viewing/local-read';
+import { consumerSource } from '../emr-viewing/consumer-read';
 /*
  * DICOMweb 경로의 기관 관문, SOP lookup, Gateway의 수신 예고·전송 영수증·Now Retry 요청과 그 목록.
  * PacsService가 만들어 소유하는 평범한 객체다(Nest provider가 아니다). 생성자는 참조만 저장한다.
@@ -313,7 +315,8 @@ export class PacsDicomGateway {
     await this.studyAccess.require(c,[actualUid]);
     // WORKLIST-SPLIT-UID: inside the caller's scope, a UID two patient resources answer is refused by its code.
     await this.studyAccess.prepareSourceIdentity(c, [actualUid]);
-    this.studyAccess.assertUnsplitSource(c, actualUid);
-    return { id: instances[0].ID };
+    const identity = this.studyAccess.assertUnsplitSource(c, actualUid);
+    return new LocalReadResponse({ id: instances[0].ID },
+      [consumerSource('study-metadata', actualUid, study.institutionId, instances[0].ID, null, [], identity)]);
   }
 }

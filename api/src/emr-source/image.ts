@@ -1,4 +1,4 @@
-import { Inject, Injectable, ServiceUnavailableException } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
@@ -8,6 +8,7 @@ import { ClinicalContextSource, ClinicalRequestFacts } from '../emr-clinical/run
 import { CURRENT_CLINICAL_CONTEXT } from '../emr-clinical/startup';
 import { StudyFacts } from '../emr-clinical/contract';
 import { REQUEST_CONTEXT_SOURCE, RequestContextSource } from '../emr-runtime/request-context';
+import { BackgroundWork, EMR_BACKGROUND_WORK } from '../emr-runtime/background-work';
 import { EmrRecordTransaction } from '../emr-runtime/record-port';
 import { CurrentImageFacts, ImageCatalogSource } from '../emr-image/context';
 import { checkProvisionBasis, ImageRequest } from '../emr-image/contract';
@@ -66,28 +67,58 @@ export async function deployedImageAssets(file = process.env.KIN_EMR_IMAGE_ASSET
 
 type Digest = { bytes: number; sha256: string };
 type StoredDigests = { file: string; original?: Digest; frames: Map<number, Digest> };
+/** What a manifest takes from one stored file: its transfer syntax and the digests of its bytes and frames. */
+type FileDigests = Digest & { transferSyntaxUid: unknown; frames: FrameDigest[] };
+/** One listed archive object as a build reads it: the stored file it is now, and the frames its header declares. */
+type ListedObject = { instanceId: string; file: string | null; sop: unknown; frameCount: number };
+
+const pixelFormat = (header: any) => {
+  const format = SOP_CLASSES[value(header, '00080016')]?.format ?? 'unsupported';
+  return { format, pixel: format === 'image' || format === 'segmentation' };
+};
+function declaredFrames(header: any): number {
+  const count = pixelFormat(header).pixel ? Number(value(header, '00280008') ?? 1) : 0;
+  if (!Number.isSafeInteger(count) || count < 0) unavailable('ImageFrameCountUnreadable');
+  return count;
+}
+
+/** The gateway agent's `/changes` defaults (POLL_SECONDS 2, limit 100), the one consumer of Orthanc's change log here. */
+const CHANGES_POLL_MS = 2000, CHANGES_PAGE = 100;
 
 /** Read-only Orthanc catalog. No metadata supplied by the browser establishes
  * the patient, object version, frame digest or source provenance. */
 @Injectable()
-export class OrthancImageCatalog implements ImageCatalogSource {
-  /** Digests of each archive object's stored file, kept as each one completes. Orthanc writes a changed object to
-   * a new file, so a digest never stands for other bytes; a request that ends part-way through a large multiframe
-   * object leaves its finished frames for the next one. One entry per archive object: a new file replaces it.
-   * Delivery still hashes the bytes it stages. */
+export class OrthancImageCatalog implements ImageCatalogSource, OnModuleInit, OnModuleDestroy {
+  /** Digests of a stored file still being read, kept as each part completes: a request that ends part-way through
+   * a large multiframe object leaves its finished frames for the next one. Once a build or the change follower
+   * keeps the file's row in emr_image.object_digest the entry is dropped. Delivery still hashes the bytes it stages. */
   private readonly digests = new Map<string, StoredDigests>();
+  private readonly logger = new Logger('OrthancImageCatalog');
+  private stopFollowing?: () => void;
+  private since: number | null = null;
+  private followFailing = false;
 
   constructor(private readonly db: PrismaService,
     @Inject(CURRENT_CLINICAL_CONTEXT) private readonly clinical: ClinicalContextSource,
-    @Inject(REQUEST_CONTEXT_SOURCE) private readonly requests: RequestContextSource) {}
+    @Inject(REQUEST_CONTEXT_SOURCE) private readonly requests: RequestContextSource,
+    @Inject(EMR_BACKGROUND_WORK) private readonly background: BackgroundWork) {}
 
-  private async response(path: string, signal: AbortSignal, body?: string) {
+  onModuleInit() {
+    // Digests are made when a study has arrived (StableStudy), not when a reader first opens it.
+    this.stopFollowing = this.background.every('emr-image.objectDigests', CHANGES_POLL_MS, signal => this.follow(signal));
+  }
+  onModuleDestroy() { this.stopFollowing?.(); }
+
+  private async request(path: string, signal: AbortSignal, body?: string) {
     const user = process.env.ORTHANC_USER, pass = process.env.ORTHANC_PASS;
     if (!user || !pass) unavailable('ImageSourceUnavailable');
-    const response = await fetch((process.env.ORTHANC_URL ?? 'http://orthanc:8042').replace(/\/$/, '') + path, {
+    return fetch((process.env.ORTHANC_URL ?? 'http://orthanc:8042').replace(/\/$/, '') + path, {
       method: body === undefined ? 'GET' : 'POST', body, signal, redirect: 'error',
       headers: { Authorization: 'Basic ' + Buffer.from(user + ':' + pass).toString('base64'), 'Accept-Encoding': 'identity' },
     });
+  }
+  private async response(path: string, signal: AbortSignal, body?: string) {
+    const response = await this.request(path, signal, body);
     if (!response.ok || !response.body) { await response.body?.cancel(); unavailable('ImageSourceUnavailable'); }
     return response;
   }
@@ -107,9 +138,8 @@ export class OrthancImageCatalog implements ImageCatalogSource {
     if (typeof id !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/.test(id)) unavailable('ImageSourceUnavailable');
     return id as string;
   }
-  private async objectDigests(instance: any, instanceId: string, frameCount: number, signal: AbortSignal):
-    Promise<Digest & { frames: FrameDigest[] }> {
-    const file = typeof instance.FileUuid === 'string' && instance.FileUuid ? instance.FileUuid : null;
+  private async objectDigests({ instanceId, file, frameCount }: ListedObject, signal: AbortSignal): Promise<FileDigests> {
+    const meta = await this.json(`/instances/${instanceId}/header`, signal);
     // Without a stored-file identity nothing tells a later request that the bytes are the same; nothing is kept.
     let stored: StoredDigests = { file: '', frames: new Map() };
     if (file) {
@@ -123,7 +153,122 @@ export class OrthancImageCatalog implements ImageCatalogSource {
       if (!done) stored.frames.set(frame, done = await this.digest(`/instances/${instanceId}/frames/${frame}/raw`, signal));
       frames.push({ number: frame + 1, ...done });
     }
-    return { ...stored.original, frames };
+    return { transferSyntaxUid: meta?.['0002,0010']?.Value, ...stored.original, frames };
+  }
+
+  /** Each listed object's digests: the kept row of the stored file it is now, else read from the archive. `read`
+   * names the objects whose digests were read here and are not kept yet. Objects are read one after another: no
+   * measurement on our hosts sets how many archive reads may share the archive's disk and the delivery reads, so
+   * the kept rows, not parallel reads, take the second read out of a first opening. */
+  private async fileDigests(objects: readonly ListedObject[], signal: AbortSignal) {
+    const found = new Map<string, FileDigests>(), wanted = objects.filter(object => object.file);
+    const rows = wanted.length ? await this.db.$queryRaw<any[]>`SELECT instance_id, file_uuid, sop_instance_uid,
+        transfer_syntax_uid, bytes, sha256, frames FROM emr_image.object_digest
+      WHERE (instance_id, file_uuid) IN (SELECT * FROM unnest(${wanted.map(o => o.instanceId)}::text[], ${wanted.map(o => o.file)}::text[]))` : [];
+    const byId = new Map(wanted.map(object => [object.instanceId, object]));
+    for (const row of rows) {
+      const object = byId.get(row.instance_id);
+      // A row stands only for what this build would read itself: the same stored file, SOP instance and declared frames.
+      if (!object || row.file_uuid !== object.file || row.sop_instance_uid !== object.sop || !Array.isArray(row.frames) ||
+          row.frames.length !== object.frameCount || row.frames.some((f: any, i: number) => f?.number !== i + 1)) continue;
+      found.set(object.instanceId, { transferSyntaxUid: row.transfer_syntax_uid, bytes: Number(row.bytes), sha256: row.sha256,
+        frames: row.frames.map((f: any) => ({ number: f.number, bytes: f.bytes, sha256: f.sha256 })) });
+    }
+    const read = objects.filter(object => !found.has(object.instanceId));
+    for (const object of read) found.set(object.instanceId, await this.objectDigests(object, signal));
+    return { found, read };
+  }
+
+  /** Keeps the digests of stored files read here. Called only after a re-list shows each file still listed; a row
+   * that cannot be kept leaves the next opening to read the file again, it never changes this one. */
+  private async keep(objects: readonly ListedObject[], found: ReadonlyMap<string, FileDigests>) {
+    const rows = objects.flatMap(object => {
+      const digests = found.get(object.instanceId);
+      return object.file && typeof object.sop === 'string' && typeof digests?.transferSyntaxUid === 'string'
+        ? [{ instance_id: object.instanceId, file_uuid: object.file, sop_instance_uid: object.sop,
+          transfer_syntax_uid: digests.transferSyntaxUid, bytes: digests.bytes, sha256: digests.sha256, frames: digests.frames }] : [];
+    });
+    if (!rows.length) return;
+    try {
+      await this.db.$executeRaw`INSERT INTO emr_image.object_digest
+          (instance_id, file_uuid, sop_instance_uid, transfer_syntax_uid, bytes, sha256, frames)
+        SELECT * FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS r(instance_id text, file_uuid text,
+          sop_instance_uid text, transfer_syntax_uid text, bytes bigint, sha256 text, frames jsonb)
+        ON CONFLICT (instance_id, file_uuid) DO NOTHING`;
+      for (const row of rows) if (this.digests.get(row.instance_id)?.file === row.file_uuid) this.digests.delete(row.instance_id);
+    } catch (error: any) {
+      this.logger.warn(`Object digests not kept (${error?.code ?? error?.name ?? 'storage'}); the next opening reads them again`);
+    }
+  }
+
+  /** One page loop over Orthanc's change log from where this process started following it. A study that arrived
+   * while no API process followed the log is read by its first opening instead, which keeps the rows then. */
+  private async follow(signal: AbortSignal) {
+    try {
+      if (this.since === null) {
+        const last = Number((await this.json('/changes?last', signal))?.Last);
+        if (!Number.isSafeInteger(last) || last < 0) unavailable('ImageSourceUnavailable');
+        this.since = last;
+      }
+      for (;;) {
+        const page = await this.json(`/changes?since=${this.since}&limit=${CHANGES_PAGE}`, signal);
+        const last = Number(page?.Last);
+        if (!Array.isArray(page?.Changes) || !Number.isSafeInteger(last)) unavailable('ImageSourceUnavailable');
+        for (const change of page.Changes) {
+          if (change?.ChangeType !== 'StableStudy') continue;
+          // A study that cannot be read now is left to its first opening, which reads its objects; the follower does
+          // not retry it. Only a study removed meanwhile is expected; any other failure (an archive outage, the digest
+          // table not readable) is reported so it is not taken for a digested study. The log names no study or patient.
+          try { await this.digestStudy(change.ID, signal); } catch (error: any) {
+            signal.throwIfAborted();
+            if (!(await this.removed(change.ID, signal)))
+              this.logger.warn(`Stable study not digested (${error?.response?.code ?? error?.name ?? 'error'}); its first opening reads its objects`);
+          }
+        }
+        this.since = Math.max(this.since, last);
+        if (page.Done !== false) break;
+      }
+      if (this.followFailing) this.logger.log('Following the archive change log again');
+      this.followFailing = false;
+    } catch (error: any) {
+      if (signal.aborted) return;
+      if (!this.followFailing) this.logger.warn(`Archive change log not readable (${error?.response?.code ?? error?.name ?? 'error'}); first openings read their objects`);
+      this.followFailing = true;
+    }
+  }
+
+  /** Whether Orthanc no longer has the study: it answers 404 for a removed resource. Any other answer, or none, is not a removal. */
+  private async removed(orthancId: unknown, signal: AbortSignal) {
+    try {
+      const response = await this.request(`/studies/${this.resource(orthancId)}`, signal);
+      await response.body?.cancel();
+      return response.status === 404;
+    } catch { signal.throwIfAborted(); return false; }
+  }
+
+  private async digestStudy(orthancId: unknown, signal: AbortSignal) {
+    const id = this.resource(orthancId);
+    const uid = (await this.json(`/studies/${id}`, signal))?.MainDicomTags?.StudyInstanceUID;
+    if (typeof uid !== 'string' || !uid) unavailable('ImageStudyUnresolved');
+    const listed = await this.json(`/studies/${id}/instances`, signal);
+    const headers = await this.json(`/dicom-web/studies/${encodeURIComponent(uid)}/metadata`, signal);
+    if (!Array.isArray(listed) || !Array.isArray(headers)) unavailable('ImageCatalogIncomplete');
+    const objects: ListedObject[] = [];
+    for (const instance of listed) {
+      const sop = instance?.MainDicomTags?.SOPInstanceUID, file = instance?.FileUuid;
+      const candidates = headers.filter(header => value(header, '00080018') === sop);
+      // What the opening would refuse is not digested ahead of it; the opening refuses it by its own checks.
+      if (candidates.length !== 1 || typeof file !== 'string' || !file) continue;
+      let frameCount: number;
+      try { frameCount = declaredFrames(candidates[0]); } catch { continue; }
+      objects.push({ instanceId: this.resource(instance.ID), file, sop, frameCount });
+    }
+    const { found, read } = await this.fileDigests(objects, signal);
+    const after = await this.json(`/studies/${id}/instances`, signal);
+    if (!Array.isArray(after)) unavailable('ImageCatalogChanged');
+    // Only files still listed after their reads are kept: a digest read while its object was replaced may be of the new file.
+    await this.keep(read.filter(object => after.some(row => row?.ID === object.instanceId && row?.FileUuid === object.file)), found);
+    for (const object of read) this.digests.delete(object.instanceId);
   }
 
   async manifest(request: object, image: ImageRequest, signal: AbortSignal) {
@@ -145,21 +290,30 @@ export class OrthancImageCatalog implements ImageCatalogSource {
     if (!Array.isArray(listed) || !listed.length) unavailable('ImageCatalogIncomplete');
     const headers = await this.json(`/dicom-web/studies/${encodeURIComponent(image.studyUid)}/metadata`, signal);
     if (!Array.isArray(headers) || headers.length !== listed.length) unavailable('ImageCatalogIncomplete');
-    const objects: ManifestObjectInput[] = [];
-    for (const instance of listed) {
+    // Every check that needs no archive object comes first, so a refused study costs no object read.
+    const planned = listed.map(instance => {
       const instanceId = this.resource(instance.ID), sop = instance.MainDicomTags?.SOPInstanceUID;
       const candidates = headers.filter(header => value(header, '00080018') === sop);
       if (candidates.length !== 1) unavailable('ImageCatalogIncomplete');
-      const header = candidates[0], seriesUid = value(header, '0020000E'), sopClassUid = value(header, '00080016');
+      const header = candidates[0];
       if (value(header, '0020000D') !== study.studyId || value(header, '00100020') !== study.patient.patientId)
         unavailable('ImageCurrentStudyChanged');
-      const meta = await this.json(`/instances/${instanceId}/header`, signal);
-      const transferSyntaxUid = meta?.['0002,0010']?.Value;
-      const format = SOP_CLASSES[sopClassUid]?.format ?? 'unsupported';
-      const pixel = format === 'image' || format === 'segmentation';
-      const declaredFrameCount = pixel ? Number(value(header, '00280008') ?? 1) : 0;
-      if (!Number.isSafeInteger(declaredFrameCount) || declaredFrameCount < 0) unavailable('ImageFrameCountUnreadable');
-      const { frames, ...original } = await this.objectDigests(instance, instanceId, declaredFrameCount, signal);
+      const object: ListedObject = { instanceId, sop, frameCount: declaredFrames(header),
+        file: typeof instance.FileUuid === 'string' && instance.FileUuid ? instance.FileUuid : null };
+      const refs = (header['00082112']?.Value ?? []).map((item: any) => {
+        const target = headers.find(h => value(h, '00080018') === value(item, '00081155'));
+        // Do not manufacture a study/series for an unresolved outside reference.
+        if (!target) unavailable('ImageDerivedSourceUnavailable');
+        return { studyUid: value(target, '0020000D'), seriesUid: value(target, '0020000E'), sopInstanceUid: value(target, '00080018') };
+      });
+      return { object, header, refs };
+    });
+    const { found: digested, read } = await this.fileDigests(planned.map(p => p.object), signal);
+    const objects: ManifestObjectInput[] = [];
+    for (const { object: { instanceId, sop, frameCount: declaredFrameCount }, header, refs } of planned) {
+      const seriesUid = value(header, '0020000E'), sopClassUid = value(header, '00080016');
+      const { format, pixel } = pixelFormat(header);
+      const { frames, transferSyntaxUid, ...original } = digested.get(instanceId)!;
       let provenance: Provenance = { kind: 'device', receiptEventId: null };
       if (['structured-report', 'segmentation', 'encapsulated-pdf'].includes(format)) {
         const manual = format === 'structured-report' ? await this.db.manualSr.findFirst({
@@ -169,14 +323,9 @@ export class OrthancImageCatalog implements ImageCatalogSource {
         provenance = manual ? { kind: 'product-authored', recordId: manual.id } : { kind: 'unestablished' };
       }
       const imageType = pixel ? header['00080008']?.Value ?? null : null;
-      const refs = (header['00082112']?.Value ?? []).map((item: any) => {
-        const target = headers.find(h => value(h, '00080018') === value(item, '00081155'));
-        // Do not manufacture a study/series for an unresolved outside reference.
-        if (!target) unavailable('ImageDerivedSourceUnavailable');
-        return { studyUid: value(target, '0020000D'), seriesUid: value(target, '0020000E'), sopInstanceUid: value(target, '00080018') };
-      });
       const family = SOP_CLASSES[sopClassUid]?.family;
-      objects.push({ studyUid: image.studyUid, seriesUid, sopInstanceUid: sop, sopClassUid, transferSyntaxUid,
+      // The manifest checks these values as it did when each was read here; a kept row is the same file's read.
+      objects.push({ studyUid: image.studyUid, seriesUid, sopInstanceUid: sop as string, sopClassUid, transferSyntaxUid: transferSyntaxUid as string,
         ...original, declaredFrameCount, frames, provenance, imageType,
         derivation: !pixel ? { kind: 'not-image' } : imageType?.[0] === 'ORIGINAL' ? { kind: 'original' }
           : imageType?.[0] === 'DERIVED' ? { kind: 'derived', sources: refs } : { kind: 'unknown' },
@@ -192,6 +341,7 @@ export class OrthancImageCatalog implements ImageCatalogSource {
       for (const instance of listed) this.digests.delete(instance.ID);
       unavailable('ImageCatalogChanged');
     }
+    await this.keep(read, digested);
     return buildImageManifest({ formatVersion: 1, studyUid: image.studyUid,
       managingInstitution: study.managingInstitutionId, patient: study.patient, builtAt: new Date().toISOString(),
       expected: { series: new Set(objects.map(o => o.seriesUid)).size, objects: objects.length },

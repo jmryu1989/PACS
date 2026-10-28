@@ -33,7 +33,6 @@ class TechNoteE2E(WorklistE2E):
   self.assertEqual(r.body['note']['version'],1)
   self.assertNotIn('authorSub',r.body['note']);self.assertNotIn('institutionId',r.body['note'])
   self.assertEqual(r.body['note']['author'],self.stack.username('tech')+'@local.test' if '@' not in self.stack.username('tech') else self.stack.username('tech'))
-  self.assertEqual(self.write(f,'edit',1).status,400)
   self.assertEqual(self.write(f,'stale',0,'stale').status,409)
   # Two requests based on the same version cannot silently overwrite each other.
   with ThreadPoolExecutor(2) as pool:
@@ -44,10 +43,14 @@ class TechNoteE2E(WorklistE2E):
   self.assertEqual([n['version'] for n in history],[3,2,1])
   self.assertEqual(history[-1]['text'],'<script>SYNTHETIC & first</script>')
   self.assertEqual(self.stack.request('DELETE','/studies/'+f.uid,'tech').status,409)
-  for body in [dict(text='x',reason='',baseVersion=-1),dict(text='x',reason='',baseVersion=3,author='forged'),dict(text='x'*10001,reason='',baseVersion=3)]:
+  for body in [dict(text='x',reason='',baseVersion=-1),dict(text='x',reason='',baseVersion=3,author='forged')]:
    self.assertEqual(self.stack.request('POST',path,'tech',body).status,400)
   self.assertEqual(self.stack.request('GET',path+'/history?before=bad','tech').status,400)
-  self.assertEqual(self.write(f,'\ud800',3,'bad unicode').status,400)
+  for text,reason in [('\ud800','bad unicode'),('invalid reason','\udfff')]:
+   with self.subTest(text=repr(text),reason=repr(reason)):
+    rejected=self.write(f,text,3,reason)
+    self.assertEqual(rejected.status,400,rejected.text)
+  self.assertEqual(self.stack.request('GET',path,'tech').body['note']['version'],3)
   self.assertEqual(psql(f'''SELECT to_jsonb(t)::text FROM "StudyState" t WHERE uid='{f.uid}' '''),before)
   self.assertEqual(psql(f'''SELECT count(*) FROM "ReportVersion" WHERE uid='{f.uid}' '''),['0'])
 
@@ -58,8 +61,10 @@ class TechNoteE2E(WorklistE2E):
   remote=self.stack.request('GET',path,'kadmin');self.assertEqual(remote.status,200,remote.text)
   self.assertFalse(remote.body['writable']);self.assertEqual(remote.body['note']['text'],'SYNTHETIC owner note')
   self.assertEqual(self.write(f,'remote modification',1,'not allowed',actor='kadmin').status,403)
-  # Synthetic immutable rows exercise the bounded history cursor without 50 UI writes.
-  psql(f'''INSERT INTO "TechNoteRevision" ("studyUid",version,text,reason,author,"authorSub","institutionId") SELECT '{f.uid}',n,'SYNTHETIC history','paging','SYNTHETIC-tech','SYNTHETIC-sub','hallym' FROM generate_series(2,52) n''')
+  # The served history requires the clinical version and its projection from the same write.
+  for version in range(2,53):
+   saved=self.write(f,'SYNTHETIC history '+str(version),version-1,'paging')
+   self.assertEqual(saved.status,201,saved.text)
   first=self.stack.request('GET',path+'/history','doctor').body
   self.assertEqual(len(first['items']),50);self.assertEqual(first['nextBefore'],3)
   last=self.stack.request('GET',path+'/history?before=3','doctor').body
@@ -103,13 +108,17 @@ class TechNoteE2E(WorklistE2E):
   expect(p.locator('#tech-note-text')).to_have_value('SYNTHETIC revised')
   # S8-CTX T08: the read still shows v1, so Save sends the same attempt (same id) once more.
   p.unroute('**/tech-note');p.locator('#tech-note-save').click();expect(p.locator('#tech-note-status')).to_have_text('입력이 v2로 저장되었습니다.')
-  p.locator('#tech-note-history').click();expect(p.locator('#tech-note-history-items section')).to_have_count(2)
+  expect(p.locator('#tech-note-reason')).to_have_value('')
+  p.locator('#tech-note-text').fill('SYNTHETIC revised without reason');p.locator('#tech-note-save').click()
+  expect(p.locator('#tech-note-status')).to_have_text('입력이 v3으로 저장되었습니다.')
+  self.assertEqual(self.stack.request('GET',self.path(f),'tech').body['note']['reason'],'')
+  p.locator('#tech-note-history').click();expect(p.locator('#tech-note-history-items section')).to_have_count(3)
   expect(p.locator('#tech-note-history-items')).to_contain_text('<b>literal</b>')
   self.assertEqual(p.locator('#tech-note-history-items b').count(),0)
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);p.screenshot(path=str(folder/'tech-note-history.png'))
   reader=self.login();self.select(reader,f);reader.locator('#tech-note-open').click()
   expect(reader.locator('#tech-note-status')).to_contain_text('읽기 전용')
-  expect(reader.locator('#tech-note-save')).to_be_disabled();expect(reader.locator('#tech-note-text')).to_have_value('SYNTHETIC revised')
+  expect(reader.locator('#tech-note-save')).to_be_disabled();expect(reader.locator('#tech-note-text')).to_have_value('SYNTHETIC revised without reason')
   p.locator('#tech-note-text').fill('UNSAVED');p.once('dialog',lambda d:d.dismiss());p.locator('#tech-note-close').click()
   expect(p.locator('#tech-note-dialog')).to_be_visible()
   end_document(p)

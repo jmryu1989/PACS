@@ -67,7 +67,7 @@
     KinDictation.mount(dictation, {
       button: $("#b-dictate"), pane: $("#dictation-pane"), status: $("#dictation-status"),
       text: $("#dictation-text"), place: $("#dictation-place"), meta: $("#dictation-meta"),
-      stop: $("#dictation-stop"), cancel: $("#dictation-cancel"), repin: $("#dictation-repin"),
+      stop: $("#dictation-stop"), cancel: $("#dictation-cancel"), retry: $("#dictation-retry"), repin: $("#dictation-repin"),
       insert: $("#dictation-insert"), close: $("#dictation-close"),
     }, {
       inserted: field => {

@@ -700,9 +700,6 @@ test('S9U4-B02 the reader codes and the per-file checks before any reservation: 
     ['DICOM_MALFORMED', dicom({ study }).subarray(0, 300), 400],
     ['PATIENT_ID_UNREADABLE', dicom({ study, id: 'SYN\u0001ID' }), 400],
     ['PATIENT_ID_MISSING', dicom({ study, id: '' }), 400],
-    ['MODALITY_NOT_IMPORTABLE', dicom({ study, modality: 'MG' }), 400],
-    ['MODALITY_NOT_IMPORTABLE', dicom({ study, modality: 'US', frames: '12' }), 400],
-    ['MODALITY_NOT_IMPORTABLE', dicom({ study, modality: 'XA', frames: '30' }), 400],
     ['MODALITY_NOT_IMPORTABLE', dicom({ study, modality: 'NM' }), 400],
     ['STUDY_UID_MISMATCH', dicom({ study }), 409, uid()],
     ['PATIENT_ISSUER_CONFLICT', dicom({ study, issuer: 'SYN B' }), 409],
@@ -717,10 +714,6 @@ test('S9U4-B02 the reader codes and the per-file checks before any reservation: 
     const again = await h.send(bytes, { id, index, expect });
     assert.deepEqual([again.status, again.body.code, h.s.writes], [status, code, writes], code + ' replays with zero writes');
   }
-  const modality = await h.send(dicom({ study, modality: 'MG' }), { id: randomUUID() });
-  assert.equal(modality.body.message, '유방촬영 영상은 아직 직접 반입할 수 없습니다.');
-  assert.equal((await h.send(dicom({ study, modality: 'US', frames: '2' }), { id: randomUUID() })).body.message, '초음파 동영상은 아직 직접 반입할 수 없습니다.');
-  assert.equal((await h.send(dicom({ study, modality: 'XA', frames: '2' }), { id: randomUUID() })).body.message, '혈관조영 동영상은 아직 직접 반입할 수 없습니다.');
   assert.equal([...h.s.ops.values()].filter(r => r.kind !== 'import').length, 0, 'no reservation');
   assert.equal(h.s.states.size, 0, 'no StudyState');
   assert.equal(posts(h.orthanc), 0);
@@ -1271,12 +1264,12 @@ test('S9U4-B20 request-level refusals: roles, credential kind, institution, subj
   assert.deepEqual((await sendRaw(bytes, { 'content-type': 'application/dicom', 'content-encoding': 'gzip' })).body.code, 'IMPORT_CONTENT_TYPE_UNSUPPORTED');
   const audited = h.s.audits.length;
   const over = await sendRaw(Buffer.alloc(25165825), { 'content-type': 'application/dicom' });
-  assert.deepEqual([over.status, over.body.code], [413, 'DICOM_IMPORT_TOO_LARGE']);
-  assert.equal(h.s.audits.length, audited, 'a request-level refusal has no file result and no audit row');
+  assert.deepEqual([over.status, over.body.code], [400, 'DICOM_NOT_PART10']);
+  assert.equal(h.s.audits.length, audited + 1, 'the accepted body reaches the reader and its refusal is audited');
   const exact = await sendRaw(Buffer.alloc(25165824), { 'content-type': 'application/dicom' });
   assert.deepEqual([exact.status, exact.body.code], [400, 'DICOM_NOT_PART10'], 'exactly 24 MiB passes the parser and reaches the reader');
   const upper = await sendRaw(Buffer.alloc(25165825), { 'content-type': 'application/dicom' }, '/api/DICOM-import');
-  assert.deepEqual([upper.status, upper.body.code], [413, 'DICOM_IMPORT_TOO_LARGE'], 'a case variant reaches the same handler and the same bound');
+  assert.deepEqual([upper.status, upper.body.code], [400, 'DICOM_NOT_PART10'], 'a case variant reaches the same handler and the same bound');
   const slash = await sendRaw(bytes, { 'content-type': 'application/dicom' }, '/api/dicom-import/');
   assert.deepEqual([slash.status, slash.body.code], [400, 'IMPORT_REQUEST_INVALID'], 'the trailing-slash variant never takes a raw body');
   assert.equal((await h.request('POST', '/api/dicom-import', { as: null, raw: bytes, headers: { 'content-type': 'application/dicom' } })).status, 401);
@@ -1341,7 +1334,7 @@ test('S9U4-B22 storage failures: an intent that cannot commit is 503 IMPORT_STOR
   // A refusal whose result audit cannot be committed is 503 too, and is not replayed as a success.
   const h2 = await harness();
   h2.s.auditFailure = data => data.action === 'dicom.import.result';
-  const refused = await h2.send(dicom({ study: uid(), modality: 'MG' }));
+  const refused = await h2.send(dicom({ study: uid(), modality: 'NM' }));
   assert.deepEqual([refused.status, refused.body.code, h2.s.ops.size], [503, 'IMPORT_STORAGE_UNAVAILABLE', 0]);
 });
 
@@ -1690,7 +1683,7 @@ test('S9U4-B29 download refusals before byte 1: roles, foreign/tele study 404, M
   h.orthanc.fault = call => (call.path.endsWith('/attachments/dicom/info') ? { status: 500 } : null);
   assert.deepEqual((await prepare(h, study)).body.code, 'MANIFEST_INCOMPLETE');
   h.orthanc.fault = call => (call.path === '/tools/find' ? { raw: JSON.stringify(Array.from({ length: 65534 }, (_, n) => ('0000000' + n.toString(16)).slice(-8) + '-00000000-00000000-00000000-00000000')) } : null);
-  assert.deepEqual((await prepare(h, study)).body.code, 'ARCHIVE_TOO_LARGE');
+  assert.deepEqual((await prepare(h, study)).body.code, 'MANIFEST_INCOMPLETE');
   h.orthanc.fault = null;
   const id = randomUUID();
   assert.equal((await prepare(h, study, id)).status, 200);
@@ -2316,7 +2309,7 @@ test('S9U4-B40 status GETs check the role, the institution, the study ownership 
   h.s.states.set(foreign, { uid: foreign, institutionId: 'inst-b', teleInstitutionId: 'inst-a', origin: 'gateway' });
   const refusals = randomUUID();
   assert.equal((await h.send(dicom({ study: foreign }), { id: refusals, index: 0 })).body.code, 'STUDY_OWNERSHIP_CONFLICT');
-  assert.equal((await h.send(dicom({ study: foreign, modality: 'MG' }), { id: refusals, index: 1 })).body.code, 'MODALITY_NOT_IMPORTABLE');
+  assert.equal((await h.send(dicom({ study: foreign, modality: 'NM' }), { id: refusals, index: 1 })).body.code, 'MODALITY_NOT_IMPORTABLE');
   const own404 = await h.request('GET', '/api/dicom-import/' + refusals);
   assert.deepEqual([own404.status, own404.body.files.map(f => f.code)], [200, ['STUDY_OWNERSHIP_CONFLICT', 'MODALITY_NOT_IMPORTABLE']]);
   // The download status: StudyAccess and the institution now, else the same 404 as no operation (ASTRA-01).
@@ -2634,7 +2627,7 @@ test('S9U4-B45 a file result keeps what is already known (ASTRA-12, ASTRA-14): t
   const study = uid(), series = study + '.1';
   const first = await h.send(dicom({ study, series }));
   // ASTRA-12: an MG file of a known study - its UIDs stay with the refusal and its audit row.
-  const mg = dicom({ study, series, modality: 'MG' });
+  const mg = dicom({ study, series, modality: 'NM' });
   const refused = await h.send(mg, { id: first.id, index: 1, as: { ...TECH, actor: 'renamed@synthetic.test' } });
   assert.deepEqual([refused.body.code, refused.body.studyUid, refused.body.seriesUid, !!refused.body.sopUid], ['MODALITY_NOT_IMPORTABLE', study, series, true]);
   const entry = h.s.file(first.id, 1);
@@ -2646,7 +2639,7 @@ test('S9U4-B45 a file result keeps what is already known (ASTRA-12, ASTRA-14): t
   // U4BB-18: the same bytes again replay the mammography sentence; GET gives the table's general description.
   const replay = await h.send(mg, { id: first.id, index: 1 });
   assert.equal(replay.body.message, refused.body.message);
-  assert.equal(replay.body.message, '유방촬영 영상은 아직 직접 반입할 수 없습니다.');
+  assert.equal(replay.body.message, '이 종류의 영상은 아직 직접 반입할 수 없습니다.');
   const status = await h.request('GET', '/api/dicom-import/' + first.id);
   assert.equal(status.body.files[1].message, '이 종류의 영상은 아직 직접 반입할 수 없습니다.');
   // A file the reader refused has no UIDs and its row targets the operation.
@@ -5130,4 +5123,15 @@ test('PC3 native archive GET refused before supply is byte 0 with no attempt (ma
   delete h.s.ops.get(id3).download.archiveGrantNote;
   h.s.ops.get(id3).download.schemaVersion = 3;
   assert.equal((await boundStatus(h, study3, id3, 'sid-r1')).body.code, 'MANIFEST_STORE_INVALID', 'an unknown version is never read as another');
+});
+
+// D1819 / C05: a realistic large MG object crosses the real parser, member gate and stored-byte readback.
+test('C05 large MG and multiframe XA import without the retired 24 MiB gate', async () => {
+  const h = await harness();
+  for (const source of [{ modality: 'MG', sopClass: '1.2.840.10008.5.1.4.1.1.1.2', pixel: 30 * 1024 * 1024 },
+                        { modality: 'XA', sopClass: '1.2.840.10008.5.1.4.1.1.12.1', frames: '2401' }]) {
+    const bytes = dicom({ study: uid(), ...source }), result = await h.send(bytes, { id: randomUUID() });
+    assert.equal(result.status, 200, JSON.stringify(result.body)); assert.equal(result.body.outcome, 'stored');
+    assert.equal(result.body.bytes, bytes.length);
+  }
 });

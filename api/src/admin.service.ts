@@ -17,6 +17,7 @@ import { PrismaService } from './prisma.service';
 import { StudyAccessService } from './study-access.service';
 import { sessionEndEvent } from './emr-runtime/auth-events';
 import type { RequestWorkContext } from './emr-runtime/request-context';
+import { adminAuditRead } from './emr-viewing/consumer-read';
 
 export type AdminRequestFacts = RightsRequestFacts & { request: RequestWorkContext };
 
@@ -149,7 +150,7 @@ export class AdminService {
     const lastName = text(body?.lastName, 'lastName', 128);
     if (body?.verificationOverride !== undefined && typeof body.verificationOverride !== 'boolean')
       throw new BadRequestException('verificationOverride는 boolean이어야 합니다');
-    const verificationOverride = body?.verificationOverride === true;
+    const verificationOverride = body?.verificationOverride !== false;
     if (!verificationOverride && (body?.institution !== undefined || body?.roles !== undefined))
       throw new BadRequestException('기관·역할을 함께 지정하려면 verificationOverride:true가 필요합니다');
     if (verificationOverride && (body?.institution === undefined || body?.roles === undefined))
@@ -260,11 +261,13 @@ export class AdminService {
       try {
         identity ??= approvalMutation ? await this.managed(id)
           : await this.managed(id, within(300)).catch(() => null);
-        if (approvalMutation && !identity!.emailVerified && body?.verificationOverride !== true)
+        if (approvalMutation && !identity!.emailVerified && body?.verificationOverride === false)
           throw new BadRequestException('이메일 검증이 끝나지 않은 사용자는 승인할 수 없습니다');
       } catch (error) { preReadError = error; }
     }
 
+    // Record the approval that happened, including the default path without a checkbox.
+    const verificationOverride = approvalMutation && identity?.emailVerified === false && body?.verificationOverride !== false;
     const work = facts.request.work;
     try {
       const issuer = facts.actor.issuer;
@@ -315,7 +318,7 @@ export class AdminService {
           const after = this.row(await tx.memberRights.findUnique({ where: { sub: id } }));
           const audit = await tx.auditLog.create({ data: { at: new Date(event.occurredAt),
             actor: c.actor, action: `admin.user.${action}`, target: id,
-            detail: JSON.stringify({ before, after, verificationOverride: body?.verificationOverride === true }) } });
+            detail: JSON.stringify({ before, after, verificationOverride }) } });
           const change = approvalMutation ? await tx.providerChange.create({ data: {
             kind: 'credentials', target: id, sub: id, generation: after.version, state: 'unknown', createdAt: new Date(),
           } }) : null;
@@ -329,7 +332,7 @@ export class AdminService {
     } catch (error) {
       if (error === preReadError) throw error;
       await this.audit(c.actor, 'admin.user.patch.failed', id, {
-        before, after: null, verificationOverride: body?.verificationOverride === true, failed: true,
+        before, after: null, verificationOverride, failed: true,
       });
       if (lockWaitExceeded(error))
         throw new ConflictException({ code: 'MEMBER_BUSY', message: '다른 요청이 회원 상태를 변경하고 있습니다. 잠시 후 다시 시도하세요' });
@@ -401,7 +404,7 @@ export class AdminService {
       if (!cursor) throw new ConflictException({ code: 'ADMIN_AUDIT_CURSOR_EXPIRED',
         message: '이어받기 유효기간이 지났거나 서버가 다시 시작되었습니다. 처음부터 다시 조회하세요.' });
     }
-    let read: { top: number; observedAt: string; rows: any[]; total: number; last: number | null };
+    let read: { top: number; observedAt: string; rows: any[]; ids: number[]; total: number; last: number | null };
     try {
       const top = cursor ? cursor.top
         : (await this.prisma.auditLog.findFirst({ orderBy: { id: 'desc' }, select: { id: true } }))?.id ?? 0;
@@ -422,9 +425,9 @@ export class AdminService {
       throw new ServiceUnavailableException({ code: 'ADMIN_AUDIT_UNAVAILABLE', message: '감사 기록을 읽지 못했습니다. 잠시 후 다시 조회하세요.' });
     }
     await this.studyAccess.unchanged(c, access);
-    return {
+    return adminAuditRead({
       institutionId: me, observedAt: read.observedAt, total: read.total, rows: read.rows,
       next: read.last === null ? null : sealAuditCursor(AUDIT_CURSOR_KEY, owner, { top: read.top, after: read.last }),
-    };
+    }, read.ids);
   }
 }

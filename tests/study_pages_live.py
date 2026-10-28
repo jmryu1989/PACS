@@ -15,7 +15,7 @@ class StudyPagesLive(LiveInvariantTests):
                 self.assertEqual(body['pagination']['total'],len(result));return result
         self.fail('pagination did not terminate')
     def test_pages_01_collection_matches_legacy_and_tenant_scope(self):
-        with self.stack.fixture() as a,self.stack.fixture('KIN 판독센터') as other:
+        with self.stack.fixture() as a,self.stack.fixture(),self.stack.fixture('KIN 판독센터') as other:
             self.assert_status(self.commit(a,'doctor','save',0),201)
             for actor in ['doctor','doctor2','jmryu','kdoctor','tech']:
                 legacy=self.stack.request('GET','/studies',actor);self.assert_status(legacy,200)
@@ -29,10 +29,13 @@ class StudyPagesLive(LiveInvariantTests):
                 self.assert_status(self.page(after=token),409)
             self.assert_status(self.page(after=cursor,limit=2),409)
     def test_pages_02_collection_change_and_invalid_query_rejected(self):
-        with self.stack.fixture():
-            cursor=self.page().body['pagination']['next'];self.assertIsNotNone(cursor)
+        with self.stack.fixture(),self.stack.fixture():
+            first=self.page();cursor=first.body['pagination']['next'];self.assertIsNotNone(cursor)
+            # M11-a: a study arriving between pages refuses the continuation, wherever its UID sorts.
             with self.stack.fixture():
                 changed=self.page(after=cursor);self.assert_status(changed,409);self.assertEqual(changed.body['code'],'STUDY_LIST_CHANGED')
+            # The fixture is gone again: the same visible set continues the same cursor.
+            self.assert_status(self.page(after=cursor),200)
             for query in ['limit=0','limit=101','limit=01','limit=1&limit=2','after=bad','limit=1&other=x']:
                 self.assert_status(self.stack.request('GET','/studies?'+query,'doctor'),400)
     def test_pages_03_preliminary_and_personal_draft_visibility_unchanged(self):

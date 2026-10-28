@@ -40,7 +40,7 @@ def fixture():
     product = dict(migrations=MIGRATIONS, study_uid=UID, catalog=catalog,
                    rows=transfer.expected_rows(UID), sequences=transfer.expected_sequences(),
                    emr=dict(catalog=emr_catalog(), rows=transfer.expected_emr_rows(),
-                       image=dict(catalog=dict(tables=['observation', 'preparation', 'source_manifest']), rows=transfer.expected_image_rows(),
+                       image=dict(catalog=dict(tables=['object_digest', 'observation', 'preparation', 'source_manifest']), rows=transfer.expected_image_rows(),
                            sequence=dict(last_value=3, is_called=True)),
                        audit=dict(catalog=dict(tables=sorted(transfer.expected_audit_rows())), rows=transfer.expected_audit_rows(),
                            sequences={table: dict(last_value=1, is_called=True) for table in ('roster_event', 'issuance_event', 'request_event')})))

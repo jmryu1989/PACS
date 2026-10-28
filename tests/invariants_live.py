@@ -1814,7 +1814,7 @@ class BffInvariantTests(unittest.TestCase):
         self.assertIn('href="/api/auth/login"', source)
         self.assertIn('${msg("continueToKin")}', source)
 
-    def test_member_unverified_email_cannot_be_approved(self) -> None:
+    def test_member_explicit_email_verification_requirement_is_respected(self) -> None:
         username = "kin-test-unverified-" + uuid.uuid4().hex[:12]
         created = self.admin("POST", "/users", {
             "username": username, "enabled": True, "emailVerified": False,
@@ -1826,7 +1826,7 @@ class BffInvariantTests(unittest.TestCase):
         try:
             blocked = self.stack.request(
                 "PATCH", f"/admin/users/{quote(str(created.body))}", "jmryu",
-                {"approvalState": "APPROVED", "institution": "hallym", "roles": ["radiologist"]},
+                {"approvalState": "APPROVED", "institution": "hallym", "roles": ["radiologist"], "verificationOverride": False},
             )
             self.assertEqual(blocked.status, 400, blocked.text)
             self.assertEqual(
@@ -1981,7 +1981,7 @@ class BffInvariantTests(unittest.TestCase):
                 usernames.append(username)
                 return {"username": username, "email": username + "@local.test", "firstName": "KIN", "lastName": "Create", **extra}
 
-            plain = self.stack.request("POST", "/admin/users", "jmryu", body_for("kin-test-create-" + uuid.uuid4().hex[:10]))
+            plain = self.stack.request("POST", "/admin/users", "jmryu", body_for("kin-test-create-" + uuid.uuid4().hex[:10], verificationOverride=False))
             self.assertEqual(plain.status, 201, plain.text)
             created.append(plain.body["id"])
             self.assertEqual(
@@ -1992,7 +1992,7 @@ class BffInvariantTests(unittest.TestCase):
 
             override = self.stack.request("POST", "/admin/users", "jmryu", body_for(
                 "kin-test-create-" + uuid.uuid4().hex[:10],
-                verificationOverride=True, institution="hallym", roles=["radiologist"],
+                institution="hallym", roles=["radiologist"],
             ))
             self.assertEqual(override.status, 201, override.text)
             created.append(override.body["id"])
@@ -2003,7 +2003,7 @@ class BffInvariantTests(unittest.TestCase):
             self.assertEqual((self.admin_row(override.body["username"])["institution"], override.body["roles"]), ("hallym", ["radiologist"]))
 
             rejected = (
-                (body_for("kin-test-create-" + uuid.uuid4().hex[:10], institution="hallym"), "verificationOverride"),
+                (body_for("kin-test-create-" + uuid.uuid4().hex[:10], institution="hallym"), "roles"),
                 ({"username": "kin-test-create-" + uuid.uuid4().hex[:10], "email": "a@local.test", "firstName": "KIN"}, "lastName"),
                 (body_for("service-account-kin-test-" + uuid.uuid4().hex[:6]), "서비스 계정"),
             )
@@ -2062,7 +2062,7 @@ class BffInvariantTests(unittest.TestCase):
                     if user.get("username") == username:
                         self.delete_member(user["id"])
 
-    def test_member_verification_override_is_the_single_audited_bypass(self) -> None:
+    def test_member_unverified_email_default_approval_is_audited(self) -> None:
         username = "kin-test-unverified-" + uuid.uuid4().hex[:12]
         created = self.admin("POST", "/users", {
             "username": username, "enabled": True, "emailVerified": False,
@@ -2075,13 +2075,13 @@ class BffInvariantTests(unittest.TestCase):
         try:
             path = f"/admin/users/{quote(user_id)}"
             approve = {"approvalState": "APPROVED", "enabled": True, "institution": "hallym", "roles": ["radiologist"]}
-            self.assertEqual(self.stack.request("PATCH", path, "jmryu", approve).status, 400)
+            self.assertEqual(self.stack.request("PATCH", path, "jmryu", {**approve, "verificationOverride": False}).status, 400)
             self.assertEqual(self.stack.request("PATCH", path, "jmryu", {**approve, "verificationOverride": "yes"}).status, 400)
             self.assertEqual(self.stack.request("PATCH", path, "jmryu", {"verificationOverride": True}).status, 400)
             self.assertEqual(self.stack.request("PATCH", path, "jmryu", {"enabled": True, "verificationOverride": True}).status, 400)
             self.assertEqual(user_audit(user_id), [])
 
-            ok = self.stack.request("PATCH", path, "jmryu", {**approve, "verificationOverride": True})
+            ok = self.stack.request("PATCH", path, "jmryu", approve)
             self.assertEqual(ok.status, 200, ok.text)
             self.assertEqual(
                 (ok.body["approvalState"], ok.body["institution"], ok.body["emailVerified"], ok.body["enabled"]),
@@ -3394,12 +3394,10 @@ class LiveInvariantTests(unittest.TestCase):
             korders = self.stack.request("GET", "/bootstrap", "kdoctor").body["orders"]
             self.assertEqual(next(order for order in korders if order["oid"] == koid)["matched"], "U")
 
-    def test_defer_requires_reason_and_records_unoccupied_h(self) -> None:
+    def test_defer_records_reason_and_unoccupied_h(self) -> None:
+        # #259 caution census (A9): a Defer reason is optional; a reason that is given is kept on H, its version and audit.
         with self.stack.fixture() as fixture:
             path = f"/studies/{quote(fixture.uid)}"
-            result = self.stack.request("POST", path + "/report/commit", "doctor", {"action": "defer", "reason": " "})
-            self.assert_status(result, 400)
-            self.assertEqual(result.body["message"], "보류에는 사유가 필요합니다")
             self.assert_status(self.stack.request("POST", path + "/hold", "doctor"), 201)
             result = self.stack.request("POST", path + "/report/commit", "doctor", {
                 "action": "defer", "reason": "prior 없음", "baseVersion": 0, "findings": fixture.secret,
@@ -5729,7 +5727,8 @@ class LiveInvariantTests(unittest.TestCase):
             self.assertEqual(self.stack.request("GET", f"/dicom-import/{op}", "jmryu").status, 404)
             self.assertEqual(self.s9u4_import("tech", s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id="S9U4-O"),
                                               op=op)[1].body["code"], "OPERATION_CONTENT_CONFLICT")
-            rejected_op, rejected = self.s9u4_import("tech", s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id="S9U4-O", modality="MG"))
+            # MG and XA are importable since D1819/D1821 (dicom-import-gate modalityRefusal); NM stays outside Part 1.
+            rejected_op, rejected = self.s9u4_import("tech", s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id="S9U4-O", modality="NM"))
             scope["operations"].append(rejected_op)
             self.assertEqual((rejected.status, rejected.body["outcome"], rejected.body["code"]), (400, "rejected", "MODALITY_NOT_IMPORTABLE"))
             unregistered = self.s9u4_new_study(scope)
@@ -5942,15 +5941,13 @@ class LiveInvariantTests(unittest.TestCase):
         self.assertTrue(self.s9u4_orthanc_ready(), "S9-U4 precondition: Orthanc does not answer GET /system 200 (a previous case left it unavailable)")
         with self.s9u4_scope() as scope:
             study = self.s9u4_new_study(scope)
-            large = s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id="S9U4-B", pixel=2 * 1024 * 1024 + 2)
+            large = s9u4_dicom(study=study, series=study + ".1", sop=s9u4_uid(), patient_id="S9U4-B", pixel=33 * 1024 * 1024)
             op, accepted = self.s9u4_import("tech", large)
             scope["operations"].append(op)
             self.assertEqual((accepted.status, (accepted.body or {}).get("outcome")), (200, "stored"), accepted.text)
             for alias in ("/api/DICOM-import", "/api/dicom-import/"):
                 status, _ = s9u4_proxy_post(self.stack.proxy, alias, self.stack.token("tech"), len(large))
                 self.assertEqual(status, 413, alias + " stays on /api/'s 2m at nginx")
-            status, _ = s9u4_proxy_post(self.stack.proxy, "/api/dicom-import", self.stack.token("tech"), 32 * 1024 * 1024 + 1)
-            self.assertEqual(status, 413, "above the exact location's 32m: nginx")
             prepared = self.stack.request("POST", f"/studies/{study}/original-downloads", "doctor", {"operationId": (download := str(uuid.uuid4()))})
             scope["operations"].append(download)
             self.assertEqual((prepared.status, prepared.body.get("state")), (200, "prepared"), prepared.text)

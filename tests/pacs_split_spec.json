@@ -4979,6 +4979,16 @@
         "slot": "metricsConcern"
       },
       {
+        "name": "readStudies",
+        "slot": "worklistConcern",
+        "implementation": {
+          "file": "api/src/pacs/worklist.ts",
+          "owner": "PacsWorklist",
+          "name": "readStudies",
+          "kind": "MethodDeclaration"
+        }
+      },
+      {
         "name": "listStudies",
         "slot": "worklistConcern"
       },
@@ -8387,7 +8397,9 @@
   },
   "viewer_ux": {
     "note": "D73: viewer settings functionally extended preferences after the split. Preserve historical move proof; validate current owner/revision, readback and workspace/viewer preservation through workspace_shortcuts_v2_service_test.cjs, without pinning new private helpers.",
-    "changed_concerns": ["api/src/pacs/preferences.ts"]
+    "changed_concerns": [
+      "api/src/pacs/preferences.ts"
+    ]
   },
   "emr_d_online": {
     "unit": "EMR-D online (D1824, 2464002)",
@@ -9345,7 +9357,7 @@
   },
   "di_additions_e_route": {
     "unit": "EMR-E E_ROUTE study delivery (#244)",
-    "note": "OnlineImageService resolves the request's member identity once, runs each response's access check on E's own check pool and records each study delivery through the recorder every image route shares (MG-08 StudyImageDeliveryRecorder, fix round 7: no second recorder in E), so its constructor takes the request context, ImageCheckDatabase (emr-image/check-db.ts), which is registered as a provider, and that recorder; the recorder writes the rows a response could not, so E no longer takes the record port (fix round 8). No controller or route is added.",
+    "note": "OnlineImageService resolves the request's member identity once and shares the study delivery recorder with every image route. ImageCheckDatabase is registered as a provider: the recorder uses it for each lease's current facts, which its opening and E preparation both consume, while E retains its check-pool dependency for HEAD. E takes the request context and recorder instead of the record port; the recorder writes rows a response could not retain. No controller or route is added.",
     "middleware_routes": [],
     "controllers": [],
     "providers": [
@@ -9387,6 +9399,81 @@
           "scope": null,
           "declared": [
             "3:Symbol(RequestContextSource)"
+          ],
+          "optional": []
+        }
+      },
+      "StudyImageDeliveryRecorder": {
+        "before": {
+          "params": ["Object", "Object", "Object", "Object", "OrthancService", "Number"],
+          "scope": null,
+          "declared": ["5:Symbol(ImageDeliveryIdleMs)", "3:Symbol(EmrBackgroundWork)", "2:Symbol(CURRENT_CLINICAL_CONTEXT)", "1:Symbol(RequestContextSource)", "0:Symbol(EmrRecordPort)"],
+          "optional": [5]
+        },
+        "after": {
+          "params": ["Object", "Object", "Object", "Object", "OrthancService", "Number", "ImageCheckDatabase"],
+          "scope": null,
+          "declared": ["5:Symbol(ImageDeliveryIdleMs)", "3:Symbol(EmrBackgroundWork)", "2:Symbol(CURRENT_CLINICAL_CONTEXT)", "1:Symbol(RequestContextSource)", "0:Symbol(EmrRecordPort)"],
+          "optional": [5]
+        }
+      }
+    }
+  },
+  "caution_app": {
+    "unit": "Caution census app (#259)",
+    "note": "Change Password opens Keycloak's UPDATE_PASSWORD action on the signed-in session: GET auth/login takes the literal action and GET auth/callback reads kc_action_status (auth.controller.ts). Both routes stay public; nothing else changes.",
+    "route_args": [
+      {
+        "controller": "AuthController",
+        "handler": "callback",
+        "added": [
+          "4:5@5:\"kc_action_status\":0"
+        ]
+      },
+      {
+        "controller": "AuthController",
+        "handler": "login",
+        "added": [
+          "4:2@2:\"action\":0"
+        ]
+      }
+    ]
+  },
+  "di_additions_cold_catalog": {
+    "unit": "EMR-E cold first opening (#248 follow-up)",
+    "note": "OrthancImageCatalog follows Orthanc's change log on the EMR background-work registry, so its constructor takes that registry. No controller, provider or route is added.",
+    "middleware_routes": [],
+    "controllers": [],
+    "providers": [],
+    "routes": [],
+    "injectables": {},
+    "changed_injectables": {
+      "OrthancImageCatalog": {
+        "before": {
+          "params": [
+            "PrismaService",
+            "Object",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "2:Symbol(RequestContextSource)",
+            "1:Symbol(CURRENT_CLINICAL_CONTEXT)"
+          ],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PrismaService",
+            "Object",
+            "Object",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "3:Symbol(EmrBackgroundWork)",
+            "2:Symbol(RequestContextSource)",
+            "1:Symbol(CURRENT_CLINICAL_CONTEXT)"
           ],
           "optional": []
         }

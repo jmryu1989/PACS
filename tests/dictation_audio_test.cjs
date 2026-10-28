@@ -4,7 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
 const modulePath = process.env.KIN_DICTATION_AUDIO_MODULE || '/app/dist/dictation-audio';
-const { inspectDictationWav, DICTATION_AUDIO_MAX_BYTES } = require(modulePath);
+const { inspectDictationWav, DICTATION_AUDIO_DEFAULT_BYTES, DICTATION_WAV_MAX_BYTES } = require(modulePath);
 
 function wav(dataBytes = 4, extended = false) {
   const offset = extended ? 46 : 44;
@@ -33,12 +33,18 @@ test('accepts PCM WAVEFORMATEX with zero extension and accounts for the longer h
   assert.equal(r.ok, true); assert.equal(r.dataOffset, 46); assert.equal(r.byteLength, 48);
   assert.equal(r.seconds, 1 / 16000);
 });
-test('the full WAV byte cap includes the header and cannot be raised by configuration', () => {
-  assert.equal(DICTATION_AUDIO_MAX_BYTES, 1048576);
-  const exact = wav(1048576 - 44), r = inspectDictationWav(exact);
-  assert.equal(r.ok, true); assert.equal(r.seconds, (1048576 - 44) / 32000);
-  refused(wav(1048576 - 42), 'too-large');
-  assert.equal(inspectDictationWav(wav(), 1048577).reason, 'invalid-limit');
+test('the byte limit includes the header: 180 s by default, and a site may set it up to the RIFF size field', () => {
+  assert.equal(DICTATION_AUDIO_DEFAULT_BYTES, 180 * 32000 + 44);
+  const exact = wav(DICTATION_AUDIO_DEFAULT_BYTES - 44), r = inspectDictationWav(exact);
+  assert.equal(r.ok, true); assert.equal(r.seconds, 180);
+  refused(wav(DICTATION_AUDIO_DEFAULT_BYTES - 42), 'too-large');
+  // C13: a raised setting admits the longer recording; it is the caller's limit, not a code ceiling.
+  const tenMinutes = 10 * 60 * 32000 + 44;
+  assert.equal(inspectDictationWav(wav(tenMinutes - 44), tenMinutes).seconds, 600);
+  assert.equal(inspectDictationWav(wav(tenMinutes - 42), tenMinutes).reason, 'too-large');
+  assert.equal(DICTATION_WAV_MAX_BYTES, 0xffffffff + 8);
+  assert.equal(inspectDictationWav(wav(), DICTATION_WAV_MAX_BYTES).ok, true);
+  assert.equal(inspectDictationWav(wav(), DICTATION_WAV_MAX_BYTES + 1).reason, 'invalid-limit');
   assert.equal(inspectDictationWav(wav(), 46).reason, 'too-large');
   assert.equal(inspectDictationWav(wav(2), 46).ok, true);
 });

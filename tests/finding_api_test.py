@@ -365,7 +365,8 @@ class FindingAPI(unittest.TestCase):
             self.call(body=self.finding_body([dict(itemId=length['id'], revision=1, **forged)]), status=400)
         self.call(body=self.finding_body([length, length]), status=400)
         self.call(body=self.finding_body([]), status=400)
-        self.call(body=self.finding_body([dict(itemId=str(uuid.uuid4()), revision=1) for _ in range(9)]), status=400)
+        # #259 removed the 8-source cap: nine sources pass the shape check and unknown ones are refused by the lookup.
+        self.call(body=self.finding_body([dict(itemId=str(uuid.uuid4()), revision=1) for _ in range(9)]), status=404)
         self.call(body=self.finding_body([length], primary=1), status=400)
         self.call(body=self.finding_body([length], title='x'*201), status=400)
         self.call(body={**self.finding_body([length]), 'author': 'forged'}, status=400)
@@ -552,7 +553,7 @@ class FindingAPI(unittest.TestCase):
         count = int(psql(f'SELECT count(*) FROM "Finding" WHERE "studyUid"={uid}')[0])
         seed_findings(256-count)
         try:
-            refused = self.call(body=self.finding_body([length]), status=409); self.assertEqual(refused['code'], 'FINDING_STORAGE_LIMIT')
+            created = self.call(body=self.finding_body([length])); self.assertEqual(created['revision'], 1)
             self.assert_finding_replay(self.call(body=command), head)
             hidden, _ = self.revise(self.current(head), 'hide', reason='한도 내 숨김')
             self.assertTrue(hidden['hidden'])
@@ -560,7 +561,7 @@ class FindingAPI(unittest.TestCase):
         revisions = int(psql(f'SELECT count(*) FROM "FindingRevision" r JOIN "Finding" f ON f.id=r."findingId" WHERE f."studyUid"={uid}')[0])
         seed_revisions(4096-revisions)
         try:
-            refused = self.call(body=self.finding_body([length]), status=409); self.assertEqual(refused['code'], 'FINDING_STORAGE_LIMIT')
+            created = self.call(body=self.finding_body([length])); self.assertEqual(created['revision'], 1)
             self.assert_finding_replay(self.call(body=command), head)
         finally: unseed()
         # Fill the lifetime byte budget with 60 000-byte filler snapshots (under the 65 536-byte cap), then
@@ -572,13 +573,15 @@ class FindingAPI(unittest.TestCase):
         if remaining > 500: seed_revisions(1, 'x'*(remaining-(row_bytes-60000)-100))
         self.assertLess(16*1024*1024-used_bytes(), 200)
         try:
-            refused = self.call(body=self.finding_body([length]), status=409); self.assertEqual(refused['code'], 'FINDING_STORAGE_LIMIT')
+            created = self.call(body=self.finding_body([length])); self.assertEqual(created['revision'], 1)
             self.assert_finding_replay(self.call(body=command), head)
         finally: unseed()
         psql(f'UPDATE "Finding" SET revision=1000 WHERE id={literal(head["id"])}::uuid')
         try:
+            # #259 removed the 1000-revision history cap (FINDING_LIMITS keeps only per-snapshot bounds). A head revision
+            # moved outside the clinical write path is not built upon: D's online version ledger answers StaleRevision.
             current = self.current(head); current['revision'] = 1000
-            refused, _ = self.revise(current, 'restore', reason='재개', status=409); self.assertEqual(refused['code'], 'FINDING_STORAGE_LIMIT')
+            refused, _ = self.revise(current, 'restore', reason='', status=409); self.assertEqual(refused['code'], 'StaleRevision')
         finally: psql(f'UPDATE "Finding" SET revision=(SELECT max(revision) FROM "FindingRevision" WHERE "findingId"={literal(head["id"])}::uuid) WHERE id={literal(head["id"])}::uuid')
         # An audit fault rolls the whole write back.
         name = 'finding_fault_'+uuid.uuid4().hex
@@ -1074,8 +1077,8 @@ class FindingAPI(unittest.TestCase):
                 (SELECT COALESCE(sum(r."payloadBytes"),0) FROM "FindingRevision" r JOIN "Finding" f ON f.id=r."findingId" WHERE f."studyUid"={uid})''')[0].split()]
         findings, revisions, used = usage()
         count = 256-findings
-        # One seeded finding at the 1000-revision history cap; the others share the lifetime revision budget up to 8 short
-        # of it, and every seeded snapshot is sized so the byte budget ends about 20 KiB short: only the finding count refuses.
+        # Recreate the former lifetime boundaries to verify continued writes and history paging.
+        # One finding has 1000 revisions; the others fill the old count and byte budgets.
         budget = 4096-revisions-8-1000
         each, extra = divmod(budget, count-1)
         overhead = max(int(psql(f"SELECT octet_length(convert_to({seeded_snapshot(s)}::jsonb::text,'UTF8'))")[0]) for s in (prior.uid, self.uid))
@@ -1100,11 +1103,15 @@ class FindingAPI(unittest.TestCase):
         self.assertEqual(totals[:2], [256, 4096-8])
         # Study uids may differ by a few digits in length, so rows of the shorter one are a little smaller.
         self.assertGreater(totals[2], 16*1024*1024-64000); self.assertLessEqual(totals[2], 16*1024*1024-20000)
-        # Refusals only ever insert, so full Finding/audit rows plus revision totals prove nothing was written.
-        seeded_before = self.state(tables=('Finding', 'AuditLog'))
-        refused = self.stack.request('POST', self.path, 'xauthor', self.finding_body([x]))
-        self.assertEqual((refused.status, refused.body), (409, dict(code='FINDING_STORAGE_LIMIT', message='소견 저장 한도에 도달했습니다')))
-        self.assertEqual((self.state(tables=('Finding', 'AuditLog')), usage()), (seeded_before, totals))
+        # Crossing the former lifetime count keeps all prior heads and revisions.
+        seeded_ids = psql(f'SELECT id FROM "Finding" WHERE "studyUid"={uid} ORDER BY id')
+        created = self.call(user='xauthor', body=self.finding_body([x]))
+        self.assertEqual(created['revision'], 1)
+        after_ids = psql(f'SELECT id FROM "Finding" WHERE "studyUid"={uid} ORDER BY id')
+        self.assertEqual(set(after_ids), set(seeded_ids) | {created['id']})
+        after_usage = usage()
+        self.assertEqual(after_usage[:2], [totals[0]+1, totals[1]+1])
+        self.assertGreater(after_usage[2], totals[2])
         readable = psql(f'''SELECT f.id FROM "Finding" f WHERE f."studyUid"={uid} AND NOT EXISTS (SELECT 1 FROM "FindingRevision" r,
             jsonb_array_elements(r.snapshot->'sources') s WHERE r."findingId"=f.id AND s.value->>'studyUid'<>{uid}) ORDER BY f.id''')
         self.assertIn(own['id'], readable); self.assertGreater(len(readable), 100); self.assertLess(len(readable), 200)
