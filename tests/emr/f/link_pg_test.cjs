@@ -480,7 +480,7 @@ async function sharedDeliveryPatients(port,witness,ok,query,doctor,servers){
   const clinical={facts:async()=>({actor:{identity:doctor.identity,kind:'member',roles:['radiologist'],institutionId:institution,signingRegistrationId:null},
       requestId:randomUUID(),ip:known({address:'127.0.0.1',source:'trusted-proxy'})}),
     study:async()=>({studyId:studyUid,managingInstitutionId:institution,teleInstitutionId:null,patient:studyPatientLink(institution,archive.patientId)})};
-  const recorder=new StudyImageDeliveryRecorder(port,requests,clinical,registry.work,orthanc,60000,db);
+  const recorder=new StudyImageDeliveryRecorder(port,requests,clinical,registry.work,orthanc,60000,witness);
   // The DICOMweb gate's per-request observation of the study: its institution and current patient.
   const relay=new ImageRelayController({authzDicom:async()=>({studyUid,managingInstitutionId:institution,sourcePatientId:archive.patientId})},orthanc,recorder);
   const server=createServer(async(req,res)=>{
