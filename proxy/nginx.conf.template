@@ -169,8 +169,8 @@ server {
     }
 
     location = /api/dicom-import {
-        # 반입 객체 24 MiB(API가 정확히 강제)와 헤더 여유. 나머지 /api/는 2m 그대로.
-        client_max_body_size 32m;
+        # DICOM 객체는 크기로 거절하지 않는다. 나머지 /api/는 2m 그대로.
+        client_max_body_size 0;
         proxy_pass http://api:3000;
     }
 
@@ -276,6 +276,7 @@ server {
     # 검사 UID를 경로에 박은 STOW만 Gateway에 연다. UID 없는 POST는 아래 읽기 전용
     # location에 남아 403이고, API authz가 announce 선행과 기관 일치를 다시 확인한다.
     location ~ ^/dicom-web/studies/[0-9.]+$ {
+        client_max_body_size 0;
         limit_except GET HEAD POST { deny all; }
         auth_request /kin-authz;
         auth_request_set $kin_auth_code $upstream_http_x_kin_auth_code;

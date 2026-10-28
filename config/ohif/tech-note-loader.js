@@ -5,6 +5,7 @@ function kinCreateViewerTechNote() {
   kinViewerSession.onChange(next=>{if(next==='writer'){connect();return;}epoch++;if(active)state=next;if(next==='read-only'){current?.stop();current=null;}});
   function connect() {
     if(!active||state==='loading'||state==='ready'||!kinViewerSession.writer())return;
+    kinToolRetry('kin-note-retry');
     const ticket=epoch;state='loading';
     prepare().then(extension=>{
       if(!active||ticket!==epoch)return;
@@ -14,7 +15,7 @@ function kinCreateViewerTechNote() {
     }).catch(e=>{
       if(!active||ticket!==epoch)return;
       state='failed';
-      if(window.top===window){const p=document.querySelector('#kin-viewer-layout-status');if(p)p.textContent='Tech 메모 화면을 연결하지 못했습니다. 영상 작업을 저장한 뒤 뷰어를 다시 여세요.';}
+      kinToolRetry('kin-note-retry', 'Tech 메모 화면을 연결하지 못했습니다.', connect);
     });
   }
   return {id:'kin.viewer-tech-note',preRegistration({servicesManager}) {
@@ -60,5 +61,5 @@ function kinCreateViewerTechNote() {
     // S5-U2b: Tech notes are a technician record the clinician allowlist neither reads nor writes. The bridge connects only
     // after a /me answered writer; until an answer it stays 'unconfirmed', and 'read-only'/'refused' never connect.
     kinViewerSession.decide().then(session=>{if(!active||ticket!==epoch)return;if(session==='writer')connect();else state=session;});
-  },onModeExit(){epoch++;active=false;state='stopped';current?.stop();current=null;}};
+  },onModeExit(){kinToolRetry('kin-note-retry');epoch++;active=false;state='stopped';current?.stop();current=null;}};
 }

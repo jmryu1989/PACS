@@ -943,7 +943,14 @@ class ViewerContextLossDOMTest(unittest.TestCase):
                   await extension.preRegistration({servicesManager:{services:{}}});
                   extension.onModeEnter();document.getElementById('parent-report').value='viewer started';
                 }''')
-                expect(p.get_by_role('status')).to_have_text('영상 복구 도구를 연결하지 못했습니다. 영상 작업을 저장한 뒤 뷰어를 다시 여세요.')
+                retry = p.locator('#kin-context-retry').get_by_role('button', name='Retry', exact=True)
+                expect(retry).to_be_visible()
+                # Retry the same page after the dependency recovers; no mode reload.
+                self.context.unroute(BASE + '/worklist/hpacs-lite/viewer-context-loss.js', module)
+                p.evaluate('''() => { window.KinViewerContextLoss={create(){return {start(){window.recovered=true},stop(){}}}}; }''')
+                retry.click()
+                p.wait_for_function('()=>window.recovered===true')
+                expect(p.locator('#kin-context-retry')).to_have_count(0)
                 expect(p.locator('#parent-report')).to_have_value('viewer started')
                 self.context.unroute(BASE + '/worklist/hpacs-lite/viewer-context-loss.js', module)
         self.assertEqual(self.errors, [])

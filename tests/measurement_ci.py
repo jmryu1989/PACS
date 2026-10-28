@@ -30,6 +30,13 @@ SUITE_CLASSES = ['ViewerAPI', 'MeasurementReadbackE2E', 'MeasurementPanelE2E',
                  'CineE2E', 'VolumeCineE2E',
                  'FindingAPI', 'FindingNavigationE2E', 'FindingWorklistE2E', 'DictationLiveE2E']
 PROFILES = {
+    'viewer-ux-priors': {
+        'out': ROOT / 'tests/e2e/artifacts/viewer-ux-priors-ci',
+        'project_prefix': 'kin-viewer-ux-priors-ci-',
+        # Retain the measured run-4 served plan hang allowance (all five U3 cases).
+        'suite_timeout': 900,
+        'suites': (('e2e/test_viewer_ux_priors.py', 'ViewerUXPriorsE2E', 'ci-viewer-ux-priors'),),
+    },
     'context-loss': {
         'out': ROOT / 'tests/e2e/artifacts/context-loss-ci',
         'project_prefix': 'kin-context-loss-ci-',
