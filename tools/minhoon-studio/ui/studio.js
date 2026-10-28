@@ -340,7 +340,7 @@
       if ('page' in m) { p.page = m.page; p.study = m.study; }
       // The controls describe what the product window shows, whichever chat tab changed it.
       if (typeof m.screen === 'string' && [...$('screen').options].some(o => o.value === m.screen)) $('screen').value = m.screen;
-      if (m.role && [...$('role').options].some(o => o.value === m.role)) { roleSeq++; $('role').value = m.role; if (state.me) state.me.role = m.role; }
+      if (m.role && !roleChanging && [...$('role').options].some(o => o.value === m.role)) { roleSeq++; $('role').value = m.role; if (state.me) state.me.role = m.role; }
       if (m.type === 'focused' && !m.ok && m.ask === focusAsk) linkHint = { text: '제품 화면은 이미 열려 있습니다. "… — 스튜디오" 탭을 눌러 주세요.', until: Date.now() + 8000 };
       if (Array.isArray(m.errors)) setErrors(m.errors);
       if ('typing' in m && !!m.typing !== p.typing) { p.typing = !!m.typing; typingChanged(); }
@@ -475,9 +475,9 @@
   $('reload').onclick = () => target.manualReload();
   // The role comes from the control, not from state.me: right after a chat reload the product window may answer
   // (and the role may be changed) before the first state read has finished.
-  function openScreen(value) {
+  function openScreen(value, role = $('role').value || (state.me && state.me.role)) {
     store.set('studio-screen', value);
-    target.open(value, $('role').value || (state.me && state.me.role));
+    target.open(value, role);
   }
 
   // The product never shows its viewer inside the worklist window: viewer-launch.js opens it as a sized popup
@@ -499,15 +499,18 @@
   };
   // Admin opens the admin screen and leaving admin goes back to the worklist; otherwise the chosen screen stays
   // (clinician maps to its own home).
+  // While the change is on its way, a product report from before it (a snapshot still naming the old role) must not
+  // put the old role back: the screen opens with the role chosen here, and the product's next report agrees.
   $('role').onchange = async e => {
     const role = e.target.value;
-    roleSeq++;
+    roleSeq++; roleChanging++;
     try {
       await api('role', { json: { role } }); roleSeq++; if (state.me) state.me.role = role;
       if (role === 'admin') $('screen').value = ADMIN_SCREEN;
       else if ($('screen').value === ADMIN_SCREEN) $('screen').value = DEFAULT_SCREEN;
-      openScreen($('screen').value);
+      openScreen($('screen').value, role);
     } catch (error) { alert(error.message); }
+    finally { roleChanging--; }
   };
   $('model').onchange = async e => {
     try { await api('model', { json: { choice: e.target.value } }); } catch (error) { alert(error.message); refreshState(); }
@@ -890,7 +893,7 @@
 
   // A state answer carries the role as it was when the request started; a role the product window reported or he
   // chose meanwhile (another tab may have changed it) is newer and stays.
-  let roleSeq = 0;
+  let roleSeq = 0, roleChanging = 0;
   async function refreshState() {
     const seq = roleSeq;
     const s = await api('state');
