@@ -38,7 +38,7 @@ function requestOrigin(req: any): string {
  * The lease learns whether an image was served, not whether the socket finished: a service that failed (its error
  * answer is written after it, by the exception filter, and finishes the socket too) or a relayed non-success answer
  * from Orthanc is no image (review MG-10). Both facts - the service's outcome and the response's close - may arrive
- * in either order, so the lease is released when the second one does. A HEAD has no lease (see `admit` below).
+ * in either order, so the lease is released when the second one does. A HEAD has no lease (the recorder's `lease`).
  */
 function lifetime(req: any, res: any, lease: DeliveryLease | null, work: (signal: AbortSignal) => Promise<void>): Promise<void> {
   const abort = new AbortController();
@@ -57,15 +57,6 @@ export class DicomFrameController {
   constructor(private readonly frames: DicomFrameService, private readonly pacs: PacsService,
     private readonly orthanc: OrthancService, private readonly deliveries: StudyImageDeliveryRecorder) {}
 
-  /**
-   * HEAD sends no image byte (Node drops the body), so it is no delivery, as in the image relay: it neither opens the
-   * study's delivery nor counts as an image served in it, where a 200 HEAD would turn a delivery whose relayed reads
-   * all failed into a provided one (review INT-01).
-   */
-  private admit(req: any, surface: string, study: () => Promise<string>): Promise<DeliveryLease | null> {
-    return req.method === 'GET' ? study().then(uid => this.deliveries.admit(req, surface, uid)) : Promise.resolve(null);
-  }
-
   @Get('dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames')
   async read(@Param('study') study: string, @Param('series') series: string, @Param('sop') sop: string,
       @Param('frames') frames: string, @Req() req: any, @Res() res: any) {
@@ -74,7 +65,8 @@ export class DicomFrameController {
     if (!list) throw new BadRequestException('프레임 번호가 올바르지 않습니다');
     const uri = `/dicom-web/studies/${study}/series/${series}/instances/${sop}/frames/${frames}`;
     await this.pacs.authzDicom(uri, 'GET', member(req));
-    const lease = await this.admit(req, FRAMES_SURFACE, async () => study);
+    // HEAD sends no image byte, so it is no delivery (image-delivery-record.ts lease()).
+    const lease = await this.deliveries.lease(req, FRAMES_SURFACE, uri, () => study);
     await lifetime(req, res, lease, signal => this.frames.serveFrames({ studyUid: study, seriesUid: series, sopUid: sop, frames: list,
       accept: req.headers?.accept, acceptEncoding: req.headers?.['accept-encoding'], head: req.method === 'HEAD',
       origin: requestOrigin(req) }, res, signal));
@@ -83,9 +75,10 @@ export class DicomFrameController {
   @Get('instances/:id/preview')
   async preview(@Param('id') id: string, @Req() req: any, @Res() res: any) {
     if (!ORTHANC_ID.test(id)) throw new BadRequestException('영상 식별자가 올바르지 않습니다');
-    await this.pacs.authzDicom(`/instances/${id}/preview`, 'GET', member(req));
+    const uri = `/instances/${id}/preview`;
+    await this.pacs.authzDicom(uri, 'GET', member(req));
     // The gate just resolved (and cached) the object's study; the preview is a read of that study's delivery.
-    const lease = await this.admit(req, PREVIEW_SURFACE, () => this.orthanc.instanceStudyUid(id));
+    const lease = await this.deliveries.lease(req, PREVIEW_SURFACE, uri, () => this.orthanc.instanceStudyUid(id));
     await lifetime(req, res, lease, signal => this.frames.servePreview(id, res, signal));
   }
 }

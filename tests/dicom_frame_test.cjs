@@ -617,7 +617,7 @@ test('controller: the request\'s lifetime signal reaches the service and aborts 
   const pacs = { authzDicom: async () => {} };
   const orthanc = { instanceStudyUid: async () => '1.2.3' };
   // The delivery recorder's admission is awaited before the service is called; its lease is released with the response's close.
-  const deliveries = { admit: async (req, surface, study) => { const lease = { surface, study, released: null }; leases.push(lease); return { release: finished => { lease.released = finished; } }; } };
+  const deliveries = { lease: async (req, surface, path, study) => { const lease = { surface, study: await study(), released: null }; leases.push(lease); return { release: finished => { lease.released = finished; } }; } };
   const controller = new DicomFrameController(service, pacs, orthanc, deliveries);
   const req = Object.assign(new PassThrough(), { method: 'GET', headers: {}, sub: 'synthetic-doctor', institution: 'site-a' });
   const res = relayTarget();
@@ -657,7 +657,7 @@ test('controller: the request\'s lifetime signal reaches the service and aborts 
   await new DicomFrameController(service3, pacs, orthanc, deliveries).read('1.2.3', '1.2.3.4', '1.2.3.4.5', Array.from({ length: 17 }, (_, i) => i + 1).join(','), req, relayTarget());
   assert.deepEqual(seen.at(-1), ['list', 17]);
   // No admission, no service call: a recorder that refuses leaves the gate's refusal in place and sends nothing.
-  const refusing = { admit: async () => { throw new Error('ledger down'); } };
+  const refusing = { lease: async () => { throw new Error('ledger down'); } };
   const service4 = { serveFrames: async () => { seen.push(['served-without-record']); } };
   await assert.rejects(new DicomFrameController(service4, pacs, orthanc, refusing).read('1.2.3', '1.2.3.4', '1.2.3.4.5', '1', req, relayTarget()), /ledger down/);
   assert.ok(!seen.some(s => s[0] === 'served-without-record'));

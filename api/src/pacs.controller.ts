@@ -3,7 +3,7 @@ import { PacsService, Caller, DraftRequestFacts } from './pacs.service';
 import { REQUEST_CONTEXT_SOURCE, RequestContextSource } from './emr-runtime/request-context';
 import { Public } from './auth.guard';
 import { AuthService } from './auth.service';
-import { imageRead } from './image-relay.controller';
+import { imageRead } from './image-delivery-record';
 
 /**
  * URL의 `:id`를 정수로. **`+id`를 그대로 쓰면 안 된다.**

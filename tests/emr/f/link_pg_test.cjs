@@ -402,9 +402,8 @@ async function imageDelivery(port,db,actor,study,servers){
   const provision=E.checkProvisionBasis({relation:'same-institution',at,managingInstitution:study.managingInstitutionId,
     recipient:null,studyUid,purpose:null,basis:null,agreement:null,auditBefore:null});
   const authorization={studyUid,institution:study.managingInstitutionId,accountGeneration:1};
-  // The study delivery's access record (E delivery.ts): one provide-prepared event for the manifest version, durable
-  // before the response is prepared; the response names it and is not its own ledger event.
-  const studyPlan=E.prepareDelivery(manifest,E.parseImageRequest('GET',`/dicom-web/studies/${studyUid}`),{eventId,at,cause:'user-view',opening:null,authorization,provision});
+  // The study delivery's access record (the shared image-delivery-record.ts pair): one provide-prepared image event for
+  // the study, durable before the response is prepared; the response names it and is not its own ledger event.
   const prepared=E.prepareDelivery(manifest,E.parseImageRequest('GET',target),{eventId:responseId,deliveryEventId:eventId,at,cause:'user-view',opening:null,authorization,provision});
   const event=parseAccessEvent({formatVersion:1,surface:'GET images/dicom-web',eventId,userId:known(actor),rolesAtTime:known(['radiologist']),
     actingInstitution:known(study.managingInstitutionId),managingInstitution:known(study.managingInstitutionId),occurredAt:at,trustedProxyIp:known({address:'127.0.0.1',source:'trusted-proxy'}),
@@ -420,8 +419,8 @@ async function imageDelivery(port,db,actor,study,servers){
   const staging=path.join(process.env.KIN_F_SPOOL,'staging');await mkdir(staging,{recursive:true});
   let finish,current=prepared;const settled=()=>new Promise((resolve,reject)=>finish={resolve,reject});
   const server=createServer(async(req,res)=>{
-    try{await sendOnlineImage({records:port,evidence:new PgImageEvidenceStore(db),source:new OrthancService().imageSource(),stagingDirectory:staging},
-      {manifest,delivery:{event,receipt,prepared:studyPlan},prepare:async()=>current,requestId:randomUUID(),response:res,signal:new AbortController().signal});finish.resolve();}
+    try{await sendOnlineImage({evidence:new PgImageEvidenceStore(db),source:new OrthancService().imageSource(),stagingDirectory:staging},
+      {manifest,delivery:{event,receipt},prepare:async()=>current,requestId:randomUUID(),response:res,signal:new AbortController().signal});finish.resolve();}
     catch(error){res.statusCode=500;res.end();finish.reject(error);}
   });servers.push(server);
   const endpoint=await listen(server);

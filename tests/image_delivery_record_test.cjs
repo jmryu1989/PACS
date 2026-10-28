@@ -487,7 +487,7 @@ test('MG-08 shutdown closes an open delivery: a quiet one by what it served', as
 });
 
 test('MG-08 classification: image representations are deliveries, descriptions are not', () => {
-  const { imageRead } = require('/app/dist/image-relay.controller.js');
+  const { imageRead } = require('/app/dist/image-delivery-record.js');
   const I = '/instances/' + INSTANCE_ID, S = '/dicom-web/studies/' + STUDY_UID, SE = S + '/series/' + SERIES_UID, O = SE + '/instances/' + SOP_UID;
   for (const path of [I + '/frames/0/rendered', I + '/image-uint16', I + '/frames/0/image-int16', I + '/preview', I + '/pdf', I + '/file',
     I + '/rendered', I + '/content/7fe0-0010', I, O + '/frames/1', O + '/frames/1/rendered', O + '/rendered', O + '/thumbnail', O,

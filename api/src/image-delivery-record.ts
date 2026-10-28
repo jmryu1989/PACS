@@ -11,9 +11,11 @@
  * same record port: the study is its target (recordId = study UID, as that delivery names its study-level units) and the
  * archive's own revision of the study is its version. Identity, institution, StudyAccess and the patient link come from
  * the current clinical context (emr-clinical/startup.ts), read on the ledger transaction as every other access record's
- * are; nothing the browser sends is a fact here. Admission (institution, StudyAccess, split UID) is the caller's DICOMweb
- * gate and runs before this recorder. This recorder is route-neutral: every API image route takes its lease here, so the
- * reads of one opening across routes share one pair.
+ * are; nothing the browser sends is a fact here. Admission (institution, StudyAccess, split UID) is the caller's gate and
+ * runs before this recorder. This recorder is route-neutral and the only one: every API route that answers image bytes -
+ * the frame reader and preview (dicom-frame.controller.ts), the recorded relay (image-relay.controller.ts) and E's image
+ * API (emr-image/service.ts) - takes its lease through `lease()`, so the reads of one opening across routes share one
+ * pair and one rule decides what counts as a delivery (R244-GPT-FIX6-01/02: E had its own pair and counted a HEAD).
  *
  * A terminal the ledger cannot take at that moment keeps its identity and operation and is offered again until it is
  * durable or the process stops; it is never dropped for being late (MG-09). The stop refuses new deliveries from its
@@ -25,7 +27,7 @@ import { HttpException, Inject, Injectable, Logger, Optional, ServiceUnavailable
 import type { BeforeApplicationShutdown, OnModuleDestroy } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
-import type { AccessEventV1 } from './emr-contract/access-event';
+import type { AccessEventV1, DurableAccessReceipt } from './emr-contract/access-event';
 import { newAuditLinkId, parseAccessEvent } from './emr-contract/access-event';
 import type { ClinicalContextSource } from './emr-clinical/runtime';
 import { CURRENT_CLINICAL_CONTEXT } from './emr-clinical/startup';
@@ -49,16 +51,39 @@ export const IMAGE_DELIVERY_UNAVAILABLE = Object.freeze({ code: 'IMAGE_DELIVERY_
   message: '영상 열람 기록을 저장하지 못해 영상을 보낼 수 없습니다. 잠시 후 다시 시도하세요.' });
 const CONTEXT_UNAVAILABLE = Object.freeze({ code: 'ImageRequestContextUnavailable', message: '영상의 현재 접근 권한을 확인할 수 없습니다' });
 
+const UID = '[0-9.]{1,64}';
+// QIDO answers and DICOMweb metadata: attributes and BulkDataURIs, never the pixel data itself.
+const DICOMWEB_DESCRIPTION = new RegExp(`^/dicom-web/(?:studies|series|instances|studies/${UID}/(?:series|instances|series/${UID}/instances)` +
+  `|studies/${UID}(?:/series/${UID}(?:/instances/${UID})?)?/metadata)$`);
+// The header reads the print and volume consumers make before their image read: Orthanc's tag dumps leave binary
+// values out, and the attachment info is the stored file's size and digest.
+const INSTANCE_DESCRIPTION = /^\/instances\/[0-9a-f-]+\/(?:tags|simplified-tags|header|attachments\/dicom\/info)$/;
+
+/**
+ * True for a read whose answer carries the stored object's image: pixels, a rendering, an encapsulated document or the
+ * whole object. Anything under the two image roots that is not a named description counts, so a representation added
+ * later is recorded rather than missed. `path` is the DICOMweb or Orthanc path without its query.
+ */
+export function imageRead(path: string): boolean {
+  if (path.startsWith('/instances/')) return !INSTANCE_DESCRIPTION.test(path);
+  if (path.startsWith('/dicom-web/')) return !DICOMWEB_DESCRIPTION.test(path);
+  return false;
+}
+
+/** The delivery's provide-prepared event and the ledger's durable receipt of it: what a response is provided under. */
+export interface DeliveryRecord { event: Readonly<AccessEventV1>; receipt: Readonly<DurableAccessReceipt> }
+
 /**
  * Held by one image response of a delivery. `served` is true only for a response that sent its image completely with a
- * success status; an error answer, a relay failure or a response cut short is not a served image (MG-10).
+ * success status; an error answer, a relay failure or a response cut short is not a served image (MG-10). `record` is
+ * the delivery's durable provide-prepared event, for a route that keeps per-response rows naming it (E).
  */
-export interface DeliveryLease { release(served: boolean): void }
+export interface DeliveryLease { readonly record: DeliveryRecord; release(served: boolean): void }
 
 interface Delivery {
   key: string; studyUid: string;
   /** Resolves once the provide-prepared event is durable; rejects when it could not be recorded. */
-  prepared: Promise<Readonly<AccessEventV1>>;
+  prepared: Promise<DeliveryRecord>;
   event: Readonly<AccessEventV1> | null;
   inflight: number; served: number; unserved: number;
   timer: ReturnType<typeof setTimeout> | null;
@@ -99,11 +124,23 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
   }
 
   /**
+   * The lease of one response to an image route, or null for a response that delivers no image: a HEAD (no body; Node
+   * drops it) and a description (QIDO, DICOMweb metadata, tags; `imageRead`). Neither opens a delivery nor counts in
+   * one - a 200 HEAD beside reads that all failed would turn an aborted delivery into a provided one (review INT-01,
+   * R244-GPT-FIX6-01). Every image route asks here with its request path, so the rule is this one, not each route's.
+   * `study` names the study the route's gate has just resolved; it is only asked for a delivery.
+   */
+  async lease(request: IncomingMessage, surface: string, path: string, study: () => string | Promise<string>): Promise<DeliveryLease | null> {
+    if (request.method !== 'GET' || !imageRead(path)) return null;
+    return this.admit(request, surface, await study());
+  }
+
+  /**
    * The delivery this request belongs to, with its provide-prepared event durable. The first request of a member
    * session for a study records the event; the requests that arrive while it is being recorded wait for the same
    * receipt; later ones find the open delivery. Resolves only after the receipt - the caller sends no byte before.
    */
-  async admit(request: IncomingMessage, surface: string, studyUid: string): Promise<DeliveryLease> {
+  private async admit(request: IncomingMessage, surface: string, studyUid: string): Promise<DeliveryLease> {
     let delivery: Delivery;
     try {
       // Another provider's shutdown may still be running while the port admits work; a read let in now would open a
@@ -115,13 +152,14 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
     } catch (error) { throw this.unavailable(error); }
     if (delivery.timer) { clearTimeout(delivery.timer); delivery.timer = null; }
     delivery.inflight++;
-    try { await delivery.prepared; }
+    let record: DeliveryRecord;
+    try { record = await delivery.prepared; }
     catch (error) {
       delivery.inflight--;
       throw this.unavailable(error);
     }
     let released = false;
-    return { release: served => {
+    return { record, release: served => {
       if (released) return;
       released = true;
       delivery.inflight--;
@@ -133,14 +171,14 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
   private start(key: string, request: IncomingMessage, surface: string, studyUid: string): Delivery {
     const delivery: Delivery = { key, studyUid, prepared: null as any, event: null, inflight: 0, served: 0, unserved: 0,
       timer: null, closed: false, terminal: null, attempts: 0, recording: null, cancelRetry: null, reserved: null };
-    delivery.prepared = this.prepare(request, surface, studyUid).then(event => { delivery.event = event; return event; });
+    delivery.prepared = this.prepare(request, surface, studyUid).then(record => { delivery.event = record.event; return record; });
     // A delivery that could not be recorded is no delivery: the next read asks the ledger again.
     delivery.prepared.catch(() => { if (this.open.get(key) === delivery) this.open.delete(key); });
     this.open.set(key, delivery);
     return delivery;
   }
 
-  private async prepare(request: IncomingMessage, surface: string, studyUid: string): Promise<Readonly<AccessEventV1>> {
+  private async prepare(request: IncomingMessage, surface: string, studyUid: string): Promise<DeliveryRecord> {
     const work = this.records.begin();
     try {
       const at = new Date().toISOString();
@@ -161,8 +199,7 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
         executor: 'member', targets: [{ kind: 'image', patientLinkSnapshot: known(study.patient), studyId: known(studyUid),
           recordId: known(studyUid), versionId: known(`orthanc-study:${revision.id}@${revision.lastUpdate}`) }],
         action: 'provide-prepared', result: 'prepared', requestId: facts.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null }) as Readonly<AccessEventV1>;
-      await this.append(work, event, randomUUID());
-      return event;
+      return { event, receipt: await this.append(work, event, randomUUID()) };
     } finally { work.end(); }
   }
 
@@ -171,7 +208,7 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
    * stored result. Offering the same event under the same operation again is the ledger's exact retry (one operation per
    * event ID), so a terminal can be offered until it is taken without ever becoming two records.
    */
-  private async append(work: EmrRecordWork, event: Readonly<AccessEventV1>, operationId: string): Promise<void> {
+  private async append(work: EmrRecordWork, event: Readonly<AccessEventV1>, operationId: string): Promise<Readonly<DurableAccessReceipt>> {
     let receipt: unknown;
     try { receipt = await work.append(event, undefined, { operationId, attemptId: randomUUID() }); }
     catch (error) {
@@ -180,6 +217,7 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
       receipt = await work.confirm({ provisional: true, operationId, eventId: event.eventId });
     }
     if (!isDurableReceipt(receipt) || receipt.eventId !== event.eventId) throw new Error('ImageDeliveryReceiptRefused');
+    return receipt;
   }
 
   private unavailable(error: unknown): Error {
@@ -209,7 +247,7 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
     if (delivery.timer) { clearTimeout(delivery.timer); delivery.timer = null; }
     if (this.open.get(delivery.key) === delivery) this.open.delete(delivery.key);
     if (delivery.event) return this.finish(delivery, delivery.event);
-    return delivery.prepared.then(event => this.finish(delivery, event), () => undefined);
+    return delivery.prepared.then(record => this.finish(delivery, record.event), () => undefined);
   }
 
   /**

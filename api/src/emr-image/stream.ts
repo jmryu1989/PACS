@@ -44,8 +44,8 @@ export interface ImageCopy {
 export interface ObservationLink { eventId: string; deliveryEventId: string; requestId: string }
 export interface TransportWire { bytesWritten: number; plannedBytes: number; terminal: 'transfer-ended' | 'transfer-aborted' | 'transfer-unknown' }
 /** An observation the store refused on the response's own path (R244-GPT-02). The response is over and its bytes are
- * what they were; the fact must not be dropped, so the delivery keeps it and writes it on its own ledger transaction
- * when it closes, before the terminal event. */
+ * what they were; the fact must not be dropped, so the caller keeps it and writes it on a ledger transaction of its
+ * own (service.ts), journaled against the delivery's record when that fails too. */
 export interface UnstoredObservation {
   kind: 'transport' | 'copies'; link: ObservationLink;
   body: { observations: readonly TransferObservation[]; wire: TransportWire } | readonly ImageCopy[]; error: unknown;
@@ -65,18 +65,20 @@ export interface ImageEvidenceStore {
 export interface OnlineImageBoundary {
   evidence: ImageEvidenceStore; source: ImageSource; stagingDirectory: string;
 }
-/** The durable access record a response is provided under: the study delivery's provide-prepared event, its B2
- * receipt and the plan of everything the delivery may carry (delivery.ts). */
-export interface OnlineImageDelivery { event: Readonly<AccessEvent>; receipt: DurableAccessReceipt; prepared: PreparedDelivery }
+/** The durable access record a response is provided under: the study delivery's provide-prepared event and its B2
+ * receipt, from the recorder every image route shares (image-delivery-record.ts, D1877: one pair per study delivery of
+ * a member session, whichever routes its reads take). */
+export interface OnlineImageDelivery { event: Readonly<AccessEvent>; receipt: DurableAccessReceipt }
 export interface ImageSendResult {
   manifest: ImageResponseManifest; observations: readonly TransferObservation[];
   terminal: 'transfer-ended' | 'transfer-aborted' | 'transfer-unknown';
   copies: readonly ImageCopy[]; observationStored: boolean; observationError: unknown | null;
-  /** The rows the store refused on this response's path; the caller's delivery retains them when it closes. */
+  /** The rows the store refused on this response's path; the caller retains them later (service.ts). */
   unstored: readonly UnstoredObservation[];
   bytesWritten: number;
 }
-type Staged = { path: string; unit: DeliveryUnit; representation: ImageRepresentation };
+/** path: the staged copy the body is sent from; null for a response that sends none (a HEAD). */
+type Staged = { path: string | null; unit: DeliveryUnit; representation: ImageRepresentation };
 type Segment = { buffer: Buffer } | { item: Staged; start: number; end: number };
 
 function header(value: string): string {
@@ -141,51 +143,40 @@ function bodyPlan(items: Staged[], manifest: ImageManifest, range: string | unde
   return { status, headers, segments, length };
 }
 
-/** The study delivery's own record: E's v1 provide-prepared event for this manifest version, naming the study
- * record of every kind the delivery may carry, and a receipt of that same event. */
+/** The study delivery's record: a v1 provide-prepared image event naming this study at the manifest's managing
+ * institution, and the ledger's receipt of that same event. */
 function checkedDelivery(manifest: ImageManifest, delivery: OnlineImageDelivery) {
-  const p = delivery.prepared;
-  judgeDelivery([{ prepared: p, observations: [] }]);
   const event = parseAccessEvent(delivery.event);
-  if (event.formatVersion !== 1 || p.manifestSha256 !== manifest.sha256 || p.studyUid !== manifest.studyUid ||
-      event.eventId !== p.eventId || p.deliveryEventId !== p.eventId || event.action !== 'provide-prepared' || event.result !== 'prepared' ||
+  if (event.formatVersion !== 1 || event.action !== 'provide-prepared' || event.result !== 'prepared' ||
+      delivery.receipt?.eventId !== event.eventId ||
       event.managingInstitution.status !== 'known' || event.managingInstitution.value !== manifest.managingInstitution ||
-      event.actingInstitution.status !== 'known' || event.actingInstitution.value !== p.receiver.institution ||
-      event.cause !== p.cause || delivery.receipt.eventId !== event.eventId) refuse('ImageEventMismatch');
-  const kinds = new Set(p.units.map(u => u.recordKind));
-  if (!event.targets.length || event.targets.length !== kinds.size) refuse('ImageEventMismatch');
-  for (const target of event.targets) {
-    if (!('patientLinkSnapshot' in target)) refuse('ImageEventMismatch');
-    const { recordId, studyId, versionId, patientLinkSnapshot, kind } = target;
-    if (studyId.status !== 'known' || studyId.value !== manifest.studyUid || recordId.status !== 'known' || recordId.value !== manifest.studyUid ||
-        versionId.status !== 'known' || versionId.value !== manifest.sha256 || !kinds.delete(kind) ||
-        patientLinkSnapshot.status !== 'known' || JSON.stringify(patientLinkSnapshot.value) !== JSON.stringify(manifest.patient)) refuse('ImageEventMismatch');
-  }
-  return { p, event };
+      !event.targets.some(target => target.kind === 'image' && 'recordId' in target &&
+        target.studyId.status === 'known' && target.studyId.value === manifest.studyUid &&
+        target.recordId.status === 'known' && target.recordId.value === manifest.studyUid)) refuse('ImageEventMismatch');
+  return event;
 }
-/** This response's plan belongs to that delivery: same manifest version, same receiver, units the delivery's
- * record covers (an object of the manifest, of a kind the record names). */
-function checkedResponse(manifest: ImageManifest, delivery: PreparedDelivery, p: PreparedDelivery) {
+/** This response's plan: of this manifest version, named under the delivery's record as its own response (under its
+ * own ID when there is no record). D1877 at the byte boundary: a response that writes an image body is provided only
+ * under the delivery's durable record, and one that delivers none - a HEAD, a description (study-metadata only) - is
+ * never counted under one, whichever caller prepared it. */
+function checkedResponse(manifest: ImageManifest, event: Readonly<AccessEvent> | null, p: PreparedDelivery) {
   judgeDelivery([{ prepared: p, observations: [] }]);
-  const r = p.receiver, d = delivery.receiver;
-  if (p.deliveryEventId !== delivery.eventId || p.eventId === delivery.eventId || p.manifestSha256 !== manifest.sha256 ||
-      p.studyUid !== manifest.studyUid || p.managingInstitution !== delivery.managingInstitution || p.cause !== delivery.cause ||
-      r.relation !== d.relation || r.institution !== d.institution || r.accountGeneration !== d.accountGeneration ||
-      r.openingId !== d.openingId || r.sequence !== d.sequence) refuse('ImageEventMismatch');
-  const kinds = new Set(delivery.units.map(u => u.recordKind));
-  for (const unit of p.units) {
-    if (!kinds.has(unit.recordKind)) refuse('ImageEventMismatch');
-    if (unit.sopInstanceUid !== null && !delivery.units.some(u => u.sopInstanceUid === unit.sopInstanceUid)) refuse('ImageEventMismatch');
-  }
+  if (p.manifestSha256 !== manifest.sha256 || p.studyUid !== manifest.studyUid) refuse('ImageEventMismatch');
+  if (event === null ? p.deliveryEventId !== p.eventId :
+    p.deliveryEventId !== event.eventId || p.eventId === event.eventId || p.cause !== event.cause) refuse('ImageEventMismatch');
+  const delivers = p.body && p.units.some(unit => unit.recordKind !== 'study-metadata');
+  if (delivers !== (event !== null)) refuse(event ? 'ImageNoDeliveryUnderRecord' : 'ImageDeliveryRecordRequired');
   return p;
 }
 
 /** Check the current caller once (the caller's bounded transaction) before any source read, stage and hash the exact
  * selected units, store their fixed representation under the delivery's durable record, then write only those same
- * files. A later Orthanc replacement can neither change the body nor borrow its earlier receipt. */
+ * files. A later Orthanc replacement can neither change the body nor borrow its earlier receipt. A response under no
+ * record (`delivery` null: a HEAD) reads and checks its source the same way to answer the same headers, but keeps no
+ * staging copy and no row: it sends no image byte and is no delivery (image-delivery-record.ts). */
 export async function sendOnlineImage(boundary: OnlineImageBoundary, input: {
   manifest: ImageManifest;
-  delivery: OnlineImageDelivery;
+  delivery: OnlineImageDelivery | null;
   /** The current caller's access check for this response, on one bounded transaction the caller owns, before any
    * source read; it returns this response's plan under the delivery's record. */
   prepare(): Promise<PreparedDelivery>;
@@ -196,7 +187,7 @@ export async function sendOnlineImage(boundary: OnlineImageBoundary, input: {
   response: ServerResponse; signal: AbortSignal; range?: string;
 }): Promise<ImageSendResult> {
   const manifest = verifiedManifest(input.manifest);
-  const { p: deliveryPlan } = checkedDelivery(manifest, input.delivery);
+  const record = input.delivery === null ? null : checkedDelivery(manifest, input.delivery);
   const controller = new AbortController(), stop = () => controller.abort();
   const { response } = input;
   let finished = false, directory: string | undefined, saved = false;
@@ -222,21 +213,22 @@ export async function sendOnlineImage(boundary: OnlineImageBoundary, input: {
   try {
     signal.throwIfAborted();
     // No source body is read before the current caller's access check for this response.
-    p = checkedResponse(manifest, deliveryPlan, await input.prepare());
-    directory = await mkdtemp(join(boundary.stagingDirectory, 'emr-image-'));
+    p = checkedResponse(manifest, record, await input.prepare());
+    // Only a response that sends the body keeps the staged copy it sends from.
+    if (record) directory = await mkdtemp(join(boundary.stagingDirectory, 'emr-image-'));
     for (const unit of p.units) {
       signal.throwIfAborted();
-      const path = join(directory, `${staged.length}.body`), file = await open(path, 'wx');
-      const copy: ImageCopy = { location: path, kind: 'staging', eventId: p.eventId, unit: unit.key,
-        bytes: null, sha256: null, state: 'present' };
-      copies.push(copy);
+      const path = directory ? join(directory, `${staged.length}.body`) : null, file = path ? await open(path, 'wx') : null;
+      const copy: ImageCopy | null = path ? { location: path, kind: 'staging', eventId: p.eventId, unit: unit.key,
+        bytes: null, sha256: null, state: 'present' } : null;
+      if (copy) copies.push(copy);
       const digest = createHash('sha256'); let bytes = 0;
       let source: Awaited<ReturnType<ImageSource['copy']>>;
       try {
         source = await boundary.source.copy(manifest, p, unit, async chunk => {
           signal.throwIfAborted();
           let offset = 0;
-          while (offset < chunk.byteLength) {
+          while (file && offset < chunk.byteLength) {
             const written = await file.write(chunk, offset, chunk.byteLength - offset);
             if (!written.bytesWritten) refuse('ImageStagingFailed');
             offset += written.bytesWritten;
@@ -245,9 +237,9 @@ export async function sendOnlineImage(boundary: OnlineImageBoundary, input: {
           if (!Number.isSafeInteger(bytes) || unit.expectedBytes !== null && bytes > unit.expectedBytes) refuse('ImageSourceMismatch');
         }, signal);
         signal.throwIfAborted();
-      } finally { await file.close(); }
+      } finally { await file?.close(); }
       const sha256 = digest.digest('hex');
-      copy.bytes = bytes; copy.sha256 = sha256;
+      if (copy) { copy.bytes = bytes; copy.sha256 = sha256; }
       // The archive's current patient identity of this object against the manifest's, on every response: the delivery
       // opened on D's study read, and the bytes' digests say nothing about whom the record names.
       if (source.patientId !== manifest.patient.patientId) refuse('ImageSourcePatientChanged');
@@ -271,16 +263,21 @@ export async function sendOnlineImage(boundary: OnlineImageBoundary, input: {
       representations: staged.map(s => s.representation) };
     responseManifest = freeze({ ...core, sha256: createHash('sha256').update(JSON.stringify(core)).digest('hex') });
     signal.throwIfAborted();
-    await boundary.evidence.prepared(responseManifest, manifest, copies, input.requestId);
+    if (record) await boundary.evidence.prepared(responseManifest, manifest, copies, input.requestId);
     saved = true;
     signal.throwIfAborted();
-    observations.push({ stage: 'provide-prepared', receipt: input.delivery.receipt });
-    if (p.body) observations.push(...staged.map(s => ({ stage: 'unit-length' as const, unit: s.unit.key, length: s.representation.bytes })));
+    if (record) {
+      observations.push({ stage: 'provide-prepared', receipt: input.delivery!.receipt });
+      observations.push(...staged.map(s => ({ stage: 'unit-length' as const, unit: s.unit.key, length: s.representation.bytes })));
+    }
     response.statusCode = plan.status;
     for (const [key, value] of Object.entries(plan.headers)) response.setHeader(key, value);
-    response.setHeader('X-KIN-Image-Event', p.deliveryEventId);
-    response.setHeader('X-KIN-Image-Response', p.eventId);
-    response.setHeader('X-KIN-Image-Manifest', responseManifest.sha256);
+    // The record and the response row exist only for a delivery; a HEAD names neither.
+    if (record) {
+      response.setHeader('X-KIN-Image-Event', p.deliveryEventId);
+      response.setHeader('X-KIN-Image-Response', p.eventId);
+      response.setHeader('X-KIN-Image-Manifest', responseManifest.sha256);
+    }
     const write = (bytes: Buffer): Promise<void> => new Promise((resolve, reject) => {
       if (signal.aborted || response.destroyed) { reject(new Error('ImageTransferAborted')); return; }
       const abort = () => reject(new Error('ImageTransferAborted'));
@@ -294,7 +291,7 @@ export async function sendOnlineImage(boundary: OnlineImageBoundary, input: {
       if ('buffer' in segment) await write(segment.buffer);
       else if (segment.end > segment.start) {
         let cursor = segment.start;
-        const reader = createReadStream(segment.item.path, { start: cursor, end: segment.end - 1, signal });
+        const reader = createReadStream(segment.item.path!, { start: cursor, end: segment.end - 1, signal });
         for await (const chunk of reader) {
           const data = chunk as Buffer;
           await write(data);
@@ -319,9 +316,9 @@ export async function sendOnlineImage(boundary: OnlineImageBoundary, input: {
   } finally {
     const wire: TransportWire = { bytesWritten: wireBytes, plannedBytes, terminal };
     try {
-      if (saved) {
+      if (saved && record) {
         // What E observed on its own connection, per response. An unconfirmed process/socket ending is kept as that
-        // fact; the delivery's own access record (delivery.ts) is closed from these observations.
+        // fact; the delivery's record is closed by its recorder from what each response's lease reports.
         observations.push({ stage: terminal });
         await boundary.evidence.transferred(link(), observations, wire);
         observationStored = true;

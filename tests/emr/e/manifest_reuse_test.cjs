@@ -21,8 +21,10 @@ const { ContractError } = load('emr-contract/validation');
 const { ConflictException, ForbiddenException } = require(path.join(api, 'node_modules/@nestjs/common'));
 
 const hash = value => createHash('sha256').update(value).digest('hex');
-// The service's owned-timer registry for study deliveries (delivery.ts); these cases stop at the access check.
-const background = () => load('emr-runtime/background-work').createBackgroundWorkRegistry().work;
+// The response's check pool (check-db.ts) as a transaction stand-in; these cases stop at the access check inside it.
+const checkPool = () => ({ $transaction: fn => fn({ $executeRaw: async () => 0 }) });
+// The shared study delivery recorder stands aside where a case stops at the access check before any record is named.
+const noRecord = { lease: async () => null };
 const STUDY = '2.25.7101', SERIES = STUDY + '.1';
 const sop = n => SERIES + '.' + n;
 function manifest(count, frames = 1, study = STUDY) {
@@ -161,11 +163,10 @@ test('the image service rebuilds after a source/current-study change, not after 
   let reads = 0, answer;
   const context = {
     async manifest() { reads++; return built; },
-    async current() { throw answer; },
+    async recheck() { throw answer; },
   };
-  const records = { begin: () => ({ transactionWithRecords: fn => fn({}), end() {} }) };
-  const service = new OnlineImageService(records, context, {}, noSourceRead,
-    { facts: async () => ({ roles: [], binding: {}, actor: {} }) }, background());
+  const service = new OnlineImageService({}, context, {}, noSourceRead,
+    { facts: async () => ({ roles: [], binding: {}, actor: {} }) }, checkPool(), noRecord);
   const send = async n => {
     const request = Object.assign(new EventEmitter(), { method: 'GET', headers: {} });
     const response = Object.assign(new EventEmitter(), { writableFinished: false });
@@ -190,9 +191,8 @@ test('the image service reads the catalog for each study or series request, betw
   process.env.KIN_EMR_STATE_DIR = require('node:os').tmpdir();
   let reads = 0;
   const context = { async manifest() { reads++; return manifest(3); },
-    async current() { throw new ForbiddenException('synthetic stop at the access check'); } };
-  const records = { begin: () => ({ transactionWithRecords: fn => fn({}), end() {} }) };
-  const service = new OnlineImageService(records, context, {}, noSourceRead, { facts: async () => ({ roles: [], binding: {}, actor: {} }) }, background());
+    async recheck() { throw new ForbiddenException('synthetic stop at the access check'); } };
+  const service = new OnlineImageService({}, context, {}, noSourceRead, { facts: async () => ({ roles: [], binding: {}, actor: {} }) }, checkPool(), noRecord);
   const send = target => service.send(Object.assign(new EventEmitter(), { method: 'GET', headers: {} }),
     Object.assign(new EventEmitter(), { writableFinished: false }), target);
   const seen = [];
@@ -207,22 +207,39 @@ test('the image service reads the catalog for each study or series request, betw
 
 test('simultaneous frames of a kept study do not wait on their own B2 append lanes', async () => {
   // The real B2 admission: a few append lanes shared FIFO by every transaction on one client. Resolving a request's
-  // member identity takes a lane of its own; the production context resolves it lazily at its first current().
+  // member identity takes a lane of its own; the study delivery's opening (the shared recorder's record transaction
+  // and append) takes lanes too, once for the burst, while the other frames wait for its receipt.
   const { admitAppend } = load('emr-runtime/admission');
+  const { StudyImageDeliveryRecorder } = load('image-delivery-record');
+  const { mintDurableReceipt } = load('emr-runtime/contract');
+  const { parseAccessEvent } = load('emr-contract/access-event');
   const client = {}, poolSize = 6, built = manifest(40);
   const settle = () => new Promise(resolve => setImmediate(resolve));
   const materialized = new WeakMap();
   const requests = { facts(request) {
     if (!materialized.has(request)) materialized.set(request, admitAppend(client, poolSize, async () => { await settle(); return { roles: [], binding: {}, actor: {} }; }));
     return materialized.get(request);
-  } };
+  }, read: () => ({ issuer: 'synthetic', subject: 'doctor', binding: { method: 'session', sessionRef: 'synthetic-session' } }) };
   const context = {
     async manifest() { return built; },
-    async current(_tx, request) { await requests.facts(request); throw new ForbiddenException('synthetic stop after the access check'); },
+    async recheck(_tx, request) { await requests.facts(request); throw new ForbiddenException('synthetic stop after the access check'); },
   };
-  const records = { begin: () => ({ transactionWithRecords: fn => admitAppend(client, poolSize, async () => { await settle(); return fn({}); }), end() {} }) };
+  const actor = { id: randomUUID(), issuer: 'synthetic', subject: 'doctor' };
+  const clinical = {
+    async facts(_tx, request) { await requests.facts(request); return { actor: { identity: actor, kind: 'member', roles: ['radiologist'], institutionId: 'synthetic-hospital' },
+      requestId: randomUUID(), ip: { status: 'known', value: { address: '127.0.0.1', source: 'request-peer' } } }; },
+    async study() { return { studyId: STUDY, managingInstitutionId: 'synthetic-hospital', patient: built.patient }; },
+  };
+  const appended = [];
+  const records = { begin: () => ({ transactionWithRecords: fn => admitAppend(client, poolSize, async () => { await settle(); return fn({}); }),
+    append: event => admitAppend(client, poolSize, async () => {
+      await settle(); appended.push(parseAccessEvent(event).action); return mintDurableReceipt(parseAccessEvent(event).eventId, new Date().toISOString());
+    }), end() {} }) };
+  const registry = load('emr-runtime/background-work').createBackgroundWorkRegistry();
+  const orthanc = { ...noSourceRead, studyRevision: async () => ({ id: 'synthetic', lastUpdate: '20261028T120000' }) };
+  const recorder = new StudyImageDeliveryRecorder(records, requests, clinical, registry.work, orthanc);
   process.env.KIN_EMR_STATE_DIR = require('node:os').tmpdir();
-  const service = new OnlineImageService(records, context, {}, noSourceRead, requests, background());
+  const service = new OnlineImageService(records, context, {}, orthanc, requests, checkPool(), recorder);
   const send = n => service.send(Object.assign(new EventEmitter(), { method: 'GET', headers: {} }),
     Object.assign(new EventEmitter(), { writableFinished: false }),
     `/dicom-web/studies/${STUDY}/series/${SERIES}/instances/${sop(n)}/frames/1`);
@@ -232,4 +249,7 @@ test('simultaneous frames of a kept study do not wait on their own B2 append lan
     new Promise(resolve => setTimeout(() => resolve('waiting on its own lanes'), 3000))]);
   assert.notEqual(outcome, 'waiting on its own lanes');
   assert.ok(outcome.every(result => result.status === 'rejected' && result.reason instanceof ForbiddenException));
+  assert.deepEqual(appended, ['provide-prepared'], 'the burst opened one study delivery');
+  await recorder.beforeApplicationShutdown();
+  assert.deepEqual(appended, ['provide-prepared', 'transfer-aborted'], 'nothing of it was served');
 });

@@ -1,21 +1,22 @@
 # coding: utf-8
 """EMR-E E_ROUTE: the viewer's image frames over the served nginx -> API E boundary -> Orthanc path (E-01/E-02/E-03/E-05).
 
-The access record of viewing (의료법 제23조④) is the study delivery: one durable B2 provide-prepared entry for one
-requester's continuous viewing of one study manifest version, closed by one terminal entry; every frame response
-names that record (X-KIN-Image-Event) and keeps its own fixed representation and transport facts in E's rows under its
-own ID (X-KIN-Image-Response). See api/src/emr-image/delivery.ts.
+The access record of viewing (의료법 제23조④) is the study delivery of a member session: one durable B2 provide-prepared
+entry, closed by one terminal entry after the idle gap, shared by every image route the session reads the study through
+(api/src/image-delivery-record.ts); every frame response names that record (X-KIN-Image-Event) and keeps its own fixed
+representation and transport facts in E's rows under its own ID (X-KIN-Image-Response).
 
 TEST-E-ROUTE-01 one frame through the public HTTPS entry: the exact stored frame bytes, sent only under one durable B2
   provide-prepared entry naming the study record, with the response's fixed representation naming that entry and its
-  transport/copy observations; a HEAD of the same viewing joins the same record; the record is closed by one
-  transfer-ended entry after the viewing; a member of another institution gets no bytes and leaves no provide entry.
+  transport/copy observations; a HEAD of the same viewing is no delivery (no record named, no row, no entry); the
+  record is closed by one transfer-ended entry after the idle gap; a member of another institution gets no bytes and
+  leaves no provide entry.
 TEST-E-ROUTE-02 the served OHIF viewer opens a synthetic CT series twice (the first opening after arrival, then again
   from a fresh browser): every slice reaches the viewer (the browser read its frame response to the end, or the viewer
   holds its image), every frame response names a durable provide entry of this study for this member, each opening
   (its own session) has its own record, every frame the browser read to the end has exactly one response row naming
-  its record and was written whole (E-03), and each record is closed by at most one terminal entry that follows what E
-  observed on that record's responses. E observes its own connection to nginx: a frame nginx took whole and the
+  its record and was written whole (E-03), and each record is closed by one transfer-ended entry after the idle gap.
+  E observes its own connection to nginx: a frame nginx took whole and the
   page dropped afterwards is an ended transfer, never a viewed one. The pinned viewer's streaming frame loader stops
   reading at Content-Length without reading the end of the stream, and the browser then sometimes cancels a response it
   received whole (net::ERR_ABORTED, every byte received, no page abort; runs e-route-diag3/diag4-opus-20261026a): such
@@ -224,17 +225,17 @@ class ImageRouteE2E(base.WorklistE2E):
         kinds = psql(f"SELECT kind FROM emr_image.observation WHERE event_id = '{response_id}'::uuid ORDER BY sequence;")
         self.assertEqual(["transport", "copies"], kinds)
 
-        # HEAD is the same prepared representation without a body, a second response of the same viewing's record.
+        # HEAD answers the same headers without a body and is no delivery: it names no record and adds no row or entry.
+        preparations = psql(f"SELECT count(*) FROM emr_image.preparation WHERE delivery_event_id = '{event}'::uuid;")
+        study_entries = f"e.entry_id IN (SELECT entry_id FROM emr_access.access_target WHERE record_id = '{fixture.uid}')"
         status, head, body = self.frame(path, "doctor", "HEAD")
         self.assertEqual((200, b""), (status, body))
-        head_response = head.get("x-kin-image-response")
-        self.assertEqual(event, head.get("x-kin-image-event"), "a frame of the same viewing joins the open record")
-        self.assertTrue(head_response and head_response != response_id)
-        quoted([head_response])
-        self.assertEqual([event], psql(f"SELECT delivery_event_id::text FROM emr_image.preparation WHERE event_id = '{head_response}'::uuid;"))
+        self.assertEqual((None, None), (head.get("x-kin-image-event"), head.get("x-kin-image-response")))
+        self.assertEqual(preparations, psql(f"SELECT count(*) FROM emr_image.preparation WHERE delivery_event_id = '{event}'::uuid;"))
+        self.assertEqual([event], [e for e, _ in entries(study_entries)])
 
-        # The viewing over, the record is closed by one terminal entry: both responses ended whole.
-        ended = self.wait_entries(f"e.payload::jsonb->>'relatedEventId' = '{event}'", 1)
+        # The viewing over (the shared recorder's idle gap), the record is closed by one terminal entry.
+        ended = self.wait_entries(f"e.payload::jsonb->>'relatedEventId' = '{event}'", 1, seconds=200)
         self.assertEqual([("transfer-ended", "succeeded")], [(p["action"], p["result"]) for _, p in ended])
 
         # Another institution's member: no bytes, no E event, no provide entry naming this study for that member.
@@ -343,24 +344,15 @@ class ImageRouteE2E(base.WorklistE2E):
                 # Ended means E wrote the whole planned response to its connection, whatever the page did later.
                 self.assertEqual(wire[response]["plannedBytes"], wire[response]["bytesWritten"], wire.get(response))
                 self.assertEqual("transfer-ended", wire[response]["terminal"])
-        # The viewing over, each record is closed by at most one terminal entry that follows what E observed on all of
-        # the record's responses (not only the ones the browser finished): any aborted response makes it aborted, an
-        # unconfirmed ending leaves it without a v1 terminal action, otherwise it ended.
+        # The viewing over (the shared recorder's idle gap), each record is closed by exactly one terminal entry: the
+        # delivery ended, since its responses sent their images whole (above); a response cut short among them does not
+        # make the viewing unprovided.
         closings = {}
-        for _, payload in self.wait_entries(f"e.payload::jsonb->>'relatedEventId' IN ({quoted(deliveries)})", len(deliveries), seconds=40):
+        for _, payload in self.wait_entries(f"e.payload::jsonb->>'relatedEventId' IN ({quoted(deliveries)})", len(deliveries), seconds=200):
             closings.setdefault(payload["relatedEventId"], []).append((payload["action"], payload["result"]))
-        observed = {}
-        for row in psql("SELECT p.delivery_event_id::text || E'\\t' || (o.body->'wire'->>'terminal') FROM emr_image.preparation p "
-                        "JOIN emr_image.observation o ON o.event_id = p.event_id AND o.kind = 'transport' "
-                        f"WHERE p.delivery_event_id IN ({quoted(deliveries)});"):
-            delivery, terminal = row.split("\t")
-            observed.setdefault(delivery, []).append(terminal)
         for delivery in deliveries:
             with self.subTest(delivery=delivery):
-                terminals = observed.get(delivery, [])
-                expected = ([("transfer-aborted", "aborted")] if "transfer-aborted" in terminals
-                            else [] if "transfer-unknown" in terminals else [("transfer-ended", "succeeded")])
-                self.assertEqual(expected, closings.get(delivery, []), terminals)
+                self.assertEqual([("transfer-ended", "succeeded")], closings.get(delivery, []))
 
     def test_route_03_study_and_series_retrieve_answer_with_an_object_that_arrived_after_a_frame(self):
         fixture, series, sops, study = ct_series(self.stack, "arrival", 2, 64)

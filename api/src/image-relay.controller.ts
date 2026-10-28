@@ -17,24 +17,6 @@ import { Caller, PacsService } from './pacs.service';
 
 export const IMAGE_RELAY_SURFACE = 'GET image-relay/*';
 const PREFIX = '/api/image-relay';
-const UID = '[0-9.]{1,64}';
-// QIDO answers and DICOMweb metadata: attributes and BulkDataURIs, never the pixel data itself.
-const DICOMWEB_DESCRIPTION = new RegExp(`^/dicom-web/(?:studies|series|instances|studies/${UID}/(?:series|instances|series/${UID}/instances)` +
-  `|studies/${UID}(?:/series/${UID}(?:/instances/${UID})?)?/metadata)$`);
-// The header reads the print and volume consumers make before their image read: Orthanc's tag dumps leave binary
-// values out, and the attachment info is the stored file's size and digest.
-const INSTANCE_DESCRIPTION = /^\/instances\/[0-9a-f-]+\/(?:tags|simplified-tags|header|attachments\/dicom\/info)$/;
-
-/**
- * True for a read whose answer carries the stored object's image: pixels, a rendering, an encapsulated document or the
- * whole object. Anything under the two image roots that is not a named description counts, so a representation added
- * later is recorded rather than missed.
- */
-export function imageRead(path: string): boolean {
-  if (path.startsWith('/instances/')) return !INSTANCE_DESCRIPTION.test(path);
-  if (path.startsWith('/dicom-web/')) return !DICOMWEB_DESCRIPTION.test(path);
-  return false;
-}
 
 /** The original path and query nginx appended to the relay prefix; anything but a plain image-root path is no route. */
 function relayTarget(url: string): { path: string; query: string } | null {
@@ -60,9 +42,8 @@ export class ImageRelayController {
     if (!target) throw new NotFoundException('영상 경로가 올바르지 않습니다');
     const uri = target.path + target.query;
     await this.pacs.authzDicom(uri, req.method, member(req));
-    // HEAD sends no image byte (Node drops the body), so it is no delivery.
-    const lease = req.method === 'GET' && imageRead(target.path)
-      ? await this.deliveries.admit(req, IMAGE_RELAY_SURFACE, await this.studyOf(target.path)) : null;
+    // A HEAD or a description is no delivery (image-delivery-record.ts lease()).
+    const lease = await this.deliveries.lease(req, IMAGE_RELAY_SURFACE, target.path, () => this.studyOf(target.path));
     const abort = new AbortController();
     const stop = () => { if (!res.writableFinished) abort.abort(); };
     let relayed = false;
