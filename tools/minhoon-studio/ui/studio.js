@@ -5,7 +5,8 @@
 //  - 한 창 (겹쳐 보기): the product fills this window and the chat slides over it without resizing it.
 // All text from the server is rendered with textContent; chat and file content are never treated as markup.
 (() => {
-  const { api, store, el, channel, screenForRole, isShortcut, SCREENS, DEFAULT_SCREEN, PRODUCT_WINDOW, PICK_KEY, CHAT_KEY } = window.Studio;
+  const { api, store, el, channel, productScreen, screenForRole, viewerRect, isShortcut, SCREENS, DEFAULT_SCREEN, ADMIN_SCREEN,
+    PRODUCT_WINDOW, VIEWER_WINDOW, VIEWER_URL, PICK_KEY, CHAT_KEY } = window.Studio;
   const $ = id => document.getElementById(id);
   const messages = $('messages');
   const input = $('input');
@@ -127,6 +128,7 @@
         // Every studio tab of this browser relays the same server event with the same nonce, so the product window
         // reloads once per event; two separate events (two resets) are two reloads.
         target.reload({ reason: ev.reason, jobId: ev.jobId || null, sha: ev.sha || null }, ev.eventId || `${ev.reason}|${ev.sha || ''}|${ev.jobId || ''}`);
+        reloadViewer();
         refreshState().catch(() => {});
       } else if (ev.type === 'missing') {
         if (!state.missing.some(m => m.method === ev.method && m.path === ev.path)) state.missing.push(ev);
@@ -218,6 +220,7 @@
     }
     window.addEventListener('keydown', keys, true);
     return {
+      show: () => setOverlay(false),
       open: (screen, role) => mirror.open(screenForRole(screen, role)),
       reload: ev => mirror.request(ev),
       manualReload: () => mirror.reload(),
@@ -247,7 +250,7 @@
       // The controls describe what the product window shows, whichever chat tab changed it.
       if (typeof m.screen === 'string' && [...$('screen').options].some(o => o.value === m.screen)) $('screen').value = m.screen;
       if (m.role && [...$('role').options].some(o => o.value === m.role)) { $('role').value = m.role; if (state.me) state.me.role = m.role; }
-      if (m.type === 'focused' && !m.ok && m.ask === focusAsk) linkHint = { text: '제품 화면은 이미 열려 있습니다. 작업 표시줄에서 "… — 스튜디오" 창을 눌러 주세요.', until: Date.now() + 8000 };
+      if (m.type === 'focused' && !m.ok && m.ask === focusAsk) linkHint = { text: '제품 화면은 이미 열려 있습니다. "… — 스튜디오" 탭을 눌러 주세요.', until: Date.now() + 8000 };
       if (Array.isArray(m.errors)) setErrors(m.errors);
       if (Array.isArray(m.picks)) setPicks(m.picks);
       if ('pickActive' in m) setPickMode(!!m.pickActive);
@@ -271,6 +274,8 @@
     }
 
     // A fixed window name: an open product window is reused (and brought forward) instead of opening a second one.
+    // No window features: the product is used in an ordinary Chrome tab (tab strip, bookmarks bar), so the studio
+    // opens it the same way and shows the same height; he drags the tab to the landscape monitor and maximises it.
     // A product window this tab did not open (another chat tab, or this tab before a reload) answers on the channel
     // but window.open cannot reach it from here — it would open a second product window — so it is asked to come
     // forward itself, and if the browser does not allow that the chat says where it is.
@@ -283,7 +288,7 @@
         return null;
       }
       let w = null;
-      try { w = window.open('', PRODUCT_WINDOW, `popup,width=${Math.min(screen.availWidth, 1920)},height=${screen.availHeight}`); } catch { w = null; }
+      try { w = window.open('', PRODUCT_WINDOW); } catch { w = null; }
       if (!w) { alert('브라우저가 새 창을 막았습니다. 주소창 오른쪽의 팝업 차단 표시에서 이 사이트를 허용해 주세요.'); return null; }
       let blank = false;
       try { blank = w.location.href === 'about:blank'; } catch { blank = false; }
@@ -296,6 +301,7 @@
     paintLink();
 
     return {
+      show: () => openProduct(),
       open: (screen, role) => post({ type: 'open', screen, role }),
       reload: (ev, nonce) => post({ type: 'reload', ev, nonce }),
       manualReload: () => post({ type: 'reload', ev: { reason: 'manual' }, nonce: `manual|${Date.now()}|${Math.random()}` }),
@@ -367,14 +373,43 @@
   }
   $('undo').onclick = () => doUndo();
   $('reload').onclick = () => target.manualReload();
+  // The role comes from the control, not from state.me: right after a chat reload the product window may answer
+  // (and the role may be changed) before the first state read has finished.
   function openScreen(value) {
     store.set('studio-screen', value);
-    target.open(value, state.me && state.me.role);
+    target.open(value, $('role').value || (state.me && state.me.role));
   }
-  $('screen').onchange = e => openScreen(e.target.value);
+
+  // The product never shows its viewer inside the worklist window: viewer-launch.js opens it as a sized popup
+  // (popup=yes, the last viewer rectangle or the default one). The Viewer choice opens the same kind of window; the
+  // product window keeps its screen. Picking works in the product window only.
+  let viewerRef = null;
+  function openViewer() {
+    if (viewerRef && !viewerRef.closed) { try { viewerRef.focus(); } catch { /* not ours */ } return; }
+    const r = viewerRect();
+    let w = null;
+    try { w = window.open(VIEWER_URL, VIEWER_WINDOW, `popup=yes,width=${r.width},height=${r.height},left=${r.left},top=${r.top},resizable=yes,scrollbars=yes`); } catch { w = null; }
+    if (!w) { alert('브라우저가 영상 창을 막았습니다. 주소창 오른쪽의 팝업 차단 표시에서 이 사이트를 허용해 주세요.'); return; }
+    viewerRef = w;
+  }
+  function reloadViewer() {
+    try { if (viewerRef && !viewerRef.closed) viewerRef.location.reload(); } catch { /* closed meanwhile */ }
+  }
+  $('screen').onchange = e => {
+    if (e.target.value !== 'viewer') { openScreen(e.target.value); return; }
+    e.target.value = productScreen(store.get('studio-screen', DEFAULT_SCREEN));
+    openViewer();
+  };
+  // Admin opens the admin screen and leaving admin goes back to the worklist; otherwise the chosen screen stays
+  // (clinician maps to its own home).
   $('role').onchange = async e => {
-    try { await api('role', { json: { role: e.target.value } }); if (state.me) state.me.role = e.target.value; openScreen($('screen').value); }
-    catch (error) { alert(error.message); }
+    const role = e.target.value;
+    try {
+      await api('role', { json: { role } }); if (state.me) state.me.role = role;
+      if (role === 'admin') $('screen').value = ADMIN_SCREEN;
+      else if ($('screen').value === ADMIN_SCREEN) $('screen').value = DEFAULT_SCREEN;
+      openScreen($('screen').value);
+    } catch (error) { alert(error.message); }
   };
   $('model').onchange = async e => {
     try { await api('model', { json: { choice: e.target.value } }); } catch (error) { alert(error.message); refreshState(); }
@@ -535,11 +570,23 @@
       mode: 'edit', text: 'Worklist 위쪽에 "오늘 내 판독" 개수를 보여 주는 작은 카운터를 새로 만들어 주세요. 가짜 자료로 시안만요' },
     { title: '역할 바꿔 보기', body: '역할을 임상의·관리자·기사로 바꾸면 그 사람이 보는 화면으로 바로 바뀝니다.',
       action: () => flash($('role')) },
+    { title: '관리자 화면 둘러보기', body: '역할을 관리자로 바꾸고 Admin 화면을 엽니다. 회원 승인·역할·임시 비밀번호, 서명 키, 열람 제한, 게이트웨이, 운영 지표, 감사 기록을 합성 자료로 직접 눌러 볼 수 있습니다.',
+      action: () => tryAdmin() },
     { title: 'AI가 근거를 대고 반대', body: '환자 안전이나 법에 걸리는 요청은 이유를 먼저 말하고, 같은 목적을 안전하게 이루는 대안을 만들어 보여 줍니다. 이견은 지휘자에게 기록됩니다.',
       mode: 'edit', text: 'Worklist에서 환자 이름(Name) 열을 없애 주세요. 공간이 아까워요' },
     { title: '하루 인계', body: '"오늘 끝"을 누르면(또는 1시간 쉬면) 오늘 요청·변경·이견·넘긴 질문이 정리되어 지휘자가 가져갑니다.',
       action: () => flash($('done')) },
   ];
+  // The product window is opened inside the click (a later open would be blocked); a window that loads before the
+  // role change lands still gets the admin screen from the remembered screen and the open message that follows.
+  function tryAdmin() {
+    store.set('studio-screen', ADMIN_SCREEN);
+    $('screen').value = ADMIN_SCREEN;
+    target.show();
+    $('role').value = 'admin';
+    $('role').onchange({ target: $('role') });
+  }
+
   function showShowcase() {
     openPanel('스튜디오로 할 수 있는 것', body => {
       body.append(el('p', 'muted', '카드를 누르면 예시 문장이 입력칸에 들어갑니다. 고쳐서 보내기만 누르세요. 마음에 안 들면 언제든 되돌리기.'));
@@ -576,7 +623,7 @@
   (async () => {
     setMode('edit');
     const s = await refreshState();
-    const screen = store.get('studio-screen', DEFAULT_SCREEN);
+    const screen = productScreen(store.get('studio-screen', DEFAULT_SCREEN));
     $('screen').value = screen;
     if (layout === 'overlay') target.open(screen, s.role);
     const history = await api('history');
@@ -585,7 +632,7 @@
     setInterval(() => refreshState().catch(() => {}), 30000);
     if (!history.length) {
       renderEntry({ role: 'system', mode: 'edit', t: new Date().toISOString(), text: layout === 'two'
-        ? '제품 화면은 따로 뜬 창에서 실제 크기로 보입니다("제품 화면 열기"). 여기 바꾸기에서 "이 버튼을 오른쪽으로" 처럼 말하거나, 고르기로 화면을 찍고 "이거"라고 말하면 몇 초~1분 안에 제품 화면이 바뀝니다. 마음에 안 들면 되돌리기. 물어보기에서는 제품과 개발 현황을 물을 수 있습니다.'
+        ? '"제품 화면 열기"를 누르면 제품 화면이 새 탭으로 열립니다(실제 제품처럼 탭·북마크바가 있는 보통 Chrome 창). 그 탭을 가로 모니터로 끌어다 놓고 최대화하세요. 여기 바꾸기에서 "이 버튼을 오른쪽으로" 처럼 말하거나, 고르기로 화면을 찍고 "이거"라고 말하면 몇 초~1분 안에 제품 화면이 바뀝니다. 마음에 안 들면 되돌리기. 물어보기에서는 제품과 개발 현황을 물을 수 있습니다.'
         : '제품 화면 위에 대화가 겹쳐 열립니다(Alt+S로 열고 닫기, 제품 화면 크기는 그대로). 바꾸기에서 말하거나 고르기로 화면을 찍고 "이거"라고 말하면 제품 화면이 바뀝니다. 마음에 안 들면 되돌리기.' });
     }
     // First visit of this person in this browser: show what the studio can do.

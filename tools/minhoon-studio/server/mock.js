@@ -2,12 +2,14 @@
 // The studio's mock PACS API. Synthetic data only (studio-mock/dataset.json in the sandbox) plus a persisted
 // mock state (drafts, reports, versions, prefs) so a reload or a restart returns the same screen (decision D6).
 // The reading workflow (worklist -> select -> draft/autosave -> Save/Approve/Prelim/Defer/Reset/Addendum ->
-// Related Exam/Related Report -> history) follows the real API contract closely; other screens get enough to
-// render and navigate. Every route without a mock answers 501 STUDIO_NOT_SUPPORTED — never a catch-all 200.
+// Related Exam/Related Report -> history) follows the real API contract closely, and so does the admin console
+// (mock-admin.js); other screens get enough to render and navigate. Every route without a mock answers 501
+// STUDIO_NOT_SUPPORTED — never a catch-all 200.
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { send, sendJson, readJson, readJsonFile, writeJsonAtomic, today } = require('./util');
+const adminMock = require('./mock-admin');
 
 const ISO = () => new Date().toISOString();
 const REVISION = /^([^:\s]+):(\d+)$/;
@@ -155,7 +157,7 @@ class Mock {
     const note = st.techNotes[st.techNotes.length - 1];
     return {
       uid: s.uid, techNote: { version: note ? note.version : 0, present: !!(note && note.text) },
-      readerAssignment: { revision: 0, reader: null }, gatewayReceipt: null, orderIdentity: null,
+      readerAssignment: { revision: 0, reader: null }, gatewayReceipt: adminMock.receiptFor(this, s.uid, me), orderIdentity: null,
       count: s.count, series: s.series, acc: s.acc, id: s.patient.id, sourcePatientKey: `${s.institutionId}|${s.patient.id}`,
       name: s.patient.name, birth: s.patient.birth.replace(/-/g, ''), date: s.date, sex: s.patient.sex, modality: s.modality,
       desc: s.desc, institutionName: s.institutionName, tele: s.tele, state: this.toClient(s.uid, me),
@@ -305,16 +307,9 @@ class Mock {
     }
     if ((m = p.match(/^\/api\/clinician\/studies\/([0-9.]+)\/timeline$/)) && method === 'GET') return this.timeline(m[1], me, q);
 
-    // ── admin ──
-    if (p === '/api/admin/users' && method === 'GET') {
-      const users = [
-        { id: 'studio-minhoon', username: 'minhoon@studio.invalid', name: 'MINHOON', email: 'minhoon@studio.invalid', institution: 'kin-center', roles: ['radiologist'], approvalState: 'approved', enabled: true, version: 1, rosterUnconfirmed: false },
-        ...(this.seed.colleagues || []).map((c, i) => ({ id: c.id, username: c.username, name: c.name, email: c.username, institution: 'kin-center', roles: ['radiologist'], approvalState: 'approved', enabled: true, version: 1, rosterUnconfirmed: false })),
-        { id: 'studio-tech', username: 'tech.choi@studio.invalid', name: 'CHOI TECH', email: 'tech.choi@studio.invalid', institution: 'hallym', roles: ['technician'], approvalState: 'approved', enabled: true, version: 1, rosterUnconfirmed: false },
-        { id: 'studio-pending', username: 'new.doctor@studio.invalid', name: 'NEW DOCTOR', email: 'new.doctor@studio.invalid', institution: 'hallym', roles: [], approvalState: 'pending', enabled: true, version: 1, rosterUnconfirmed: true },
-      ];
-      return ok({ page: Number(q.get('page') || 1), pageSize: 50, total: users.length, pendingCount: 1, users });
-    }
+    // ── admin console (members, signing key, study access, Gateway retry, Operations, Audit, Access Review) ──
+    const admin = adminMock.route(this, method, p, q, body, me);
+    if (admin) return admin;
 
     // ── per study ──
     if ((m = p.match(/^\/api\/studies\/([0-9.]+)(\/.*)?$/))) return this.studyRoute(method, m[1], m[2] || '', q, body, me);
@@ -657,6 +652,7 @@ class Mock {
     delete this.state.holds[uid];
     const row = this.draftRow(st, me);
     st.drafts[me.sub] = { n: row.n + 1, present: false, snapshot: null, updatedAt: null };
+    adminMock.noteCommit(this, me, this.byUid.get(uid), action, version, reason || null);
     this.save();
     return { status: 200, body: { ...this.envelope(uid, me), state: this.toClient(uid, me), signature: null } };
   }

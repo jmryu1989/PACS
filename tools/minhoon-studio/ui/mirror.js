@@ -3,7 +3,7 @@
 // measure until the screen is usable again, keep the selected study, collect the screen's JavaScript errors.
 // Used by the product window (two-window mode) and by the studio window itself (overlay mode).
 (() => {
-  const { api, screenUrl } = window.Studio;
+  const { api } = window.Studio;
 
   window.StudioMirror = function StudioMirror(iframe, hooks = {}) {
     const state = { errors: [], pending: null };
@@ -55,7 +55,7 @@
     // The caller remembers the chosen screen; this value may already be mapped for the role (Clinician).
     function open(value) {
       state.errors = []; call('onErrors', []);
-      iframe.src = screenUrl(value);
+      iframe.src = value;
     }
 
     // Reload and measure until the screen is usable again (the worklist rows are back, not just DOMContentLoaded),

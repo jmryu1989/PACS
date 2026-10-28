@@ -18,6 +18,9 @@ REPO = STUDIO.parent.parent
 ap = argparse.ArgumentParser()
 ap.add_argument("--out", required=True)
 ap.add_argument("--sha", default="HEAD")
+ap.add_argument("--ohif", help="pinned OHIF build (dev/extract_ohif.py); without it the viewer window shows the 'not installed' page")
+ap.add_argument("--dicomweb", help="static DICOMweb samples (dev/build_dicomweb_store.py)")
+ap.add_argument("--headed", action="store_true", help="installed Chrome in a real window: also compares the window chrome height of the two tabs")
 a = ap.parse_args()
 OUT = pathlib.Path(a.out).resolve()
 OUT.mkdir(parents=True, exist_ok=True)
@@ -39,7 +42,7 @@ with socket.socket() as s:
 for folder in ["empty-ohif", "empty-dicomweb", "empty-claude", "data"]: (OUT / folder).mkdir(exist_ok=True)
 config = {"listen": {"host": "127.0.0.1", "port": port},
           "paths": {"sandbox": str(OUT / "sandbox"), "sandboxRead": str(OUT / "sandbox-read"), "data": str(OUT / "data"),
-                    "knowledge": str(STUDIO / "knowledge-seed"), "ohifDist": str(OUT / "empty-ohif"), "dicomweb": str(OUT / "empty-dicomweb")},
+                    "knowledge": str(STUDIO / "knowledge-seed"), "ohifDist": a.ohif or str(OUT / "empty-ohif"), "dicomweb": a.dicomweb or str(OUT / "empty-dicomweb")},
           "claude": {"bin": str(OUT / "unavailable-claude"), "account": "synthetic", "configDirs": {"synthetic": str(OUT / "empty-claude")},
                      "python": "python", "shellTool": "PowerShell", "models": {"fast": "stub", "deep": "stub"}, "defaultChoice": "fast"}}
 (OUT / "config.json").write_text(json.dumps(config), encoding="utf-8")
@@ -64,6 +67,13 @@ def login(page):
     page.click("button[type=submit]"); page.wait_for_url("**/studio/studio.html")
 def post_api(page, path):
     return page.evaluate('async p => { const r = await fetch("/studio-api/" + p, { method: "POST", headers: { "Content-Type": "application/json", "X-Studio": "1" }, body: "{}" }); return r.status; }', path)
+# BarProp.visible is false for a popup (HTML "is popup"); outer-inner height is the window chrome (tab strip, toolbar, bookmarks).
+def bars(page):
+    return page.evaluate("() => ({ toolbar: window.toolbar.visible, menubar: window.menubar.visible, locationbar: window.locationbar.visible, chrome: window.outerHeight - window.innerHeight, outer: [window.outerWidth, window.outerHeight] })")
+def product_path(page): return page.evaluate('document.querySelector("#product").contentWindow.location.pathname')
+def on_admin(page): page.wait_for_function('() => { const d = document.querySelector("#product").contentDocument; return d && d.location.pathname.endsWith("admin.html") && d.querySelector("#users td.username"); }', timeout=15000)
+def member_row(f, name): return f.locator("#users tr").filter(has_text=name)
+def row_action(f, name, label): member_row(f, name).locator("td.actions button", has_text=label).first.click()
 
 log = (OUT / "server.log").open("w", encoding="utf-8")
 server = subprocess.Popen(["node", server_js, "--config", str(OUT / "config.json")], cwd=REPO, stdout=log, stderr=subprocess.STDOUT)
@@ -72,8 +82,8 @@ try:
         try: urllib.request.urlopen(BASE + "/studio/login.html", timeout=1); break
         except Exception: time.sleep(0.1)
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context(viewport={"width": 1800, "height": 1000})
+        browser = p.chromium.launch(channel="chrome", headless=False) if a.headed else p.chromium.launch(headless=True)
+        ctx = browser.new_context(no_viewport=True) if a.headed else browser.new_context(viewport={"width": 1800, "height": 1000})
         ctx.add_init_script("(() => { const Native = window.EventSource; window.__sources = []; window.EventSource = class extends Native { constructor(...x) { super(...x); window.__sources.push(this); } }; })()")
         chat = ctx.new_page(); login(chat)
 
@@ -87,6 +97,17 @@ try:
         record("F3 pick card opens the product window and starts picking", shield_on(product), {"chatPickButton": chat.inner_text("#pick")})
         product.keyboard.press("Escape"); settle(product, 200)
         record("F3 Esc leaves the started pick mode", not shield_on(product))
+
+        # W1: the product window is an ordinary browser tab like the chat (not a popup without tab strip/bookmarks).
+        pb, cb = bars(product), bars(chat)
+        record("W1 the product window opens as an ordinary tab (toolbar/menubar/locationbar visible, same window chrome as the chat tab)",
+               pb["toolbar"] and pb["menubar"] and pb["locationbar"] and (not a.headed or pb["chrome"] == cb["chrome"]),
+               {"product": pb, "chat": cb, "headed": a.headed})
+        product.screenshot(path=str(OUT / "w1-product-tab.png"))
+        pages_before = len(ctx.pages)
+        chat.click("#open-product"); settle(chat, 800)
+        record("W2 '제품 화면 앞으로' from the opener tab reuses the same product tab", len(ctx.pages) == pages_before
+               and sum(pg.url.endswith("product.html") for pg in ctx.pages) == 1, {"pagesBefore": pages_before, "pagesAfter": len(ctx.pages)})
 
         product.evaluate('() => { window.__loads = 0; document.querySelector("#product").addEventListener("load", () => window.__loads++); }')
         f = frame(product)
@@ -244,6 +265,112 @@ try:
         reopen.click("#open-product"); settle(reopen, 1200)
         record("F4 reopened chat reuses the product window", len(ctx.pages) == pages_before and sum(pg.url.endswith("product.html") for pg in ctx.pages) == 1,
                {"pagesBefore": pages_before, "pagesAfter": len(ctx.pages), "linkText": reopen.inner_text("#link-text")})
+
+        # V1: the Viewer choice opens the viewer the way the product does (a sized popup), not inside the product tab.
+        shown = product_path(product)
+        with ctx.expect_page() as popup:
+            reopen.select_option("#screen", "viewer")
+        viewer = popup.value; viewer.wait_for_load_state()
+        vb = bars(viewer)
+        record("V1 the Viewer choice opens a popup viewer window; the product tab keeps its screen",
+               "/ohif/viewer" in viewer.url and not vb["toolbar"] and product_path(product) == shown and reopen.input_value("#screen") != "viewer",
+               {"url": viewer.url, "viewer": vb, "productScreen": product_path(product), "select": reopen.input_value("#screen")})
+        if a.ohif:
+            try: viewer.wait_for_selector("canvas", timeout=30000); settle(viewer, 3000)
+            except Exception as e: record("V1 viewer renders a canvas", False, {"error": repr(e)})
+        viewer.screenshot(path=str(OUT / "v1-viewer-popup.png"))
+        pages_before = len(ctx.pages)
+        reopen.select_option("#screen", "viewer"); settle(reopen, 800)
+        record("V1 choosing Viewer again reuses the open viewer window", len(ctx.pages) == pages_before, {"pagesBefore": pages_before, "pagesAfter": len(ctx.pages)})
+        viewer.close()
+        # V2: the worklist's own viewer launch (double-click) is the product's popup, unchanged inside the studio.
+        reopen.select_option("#screen", "/worklist/hpacs-lite/main.html"); rows_ready(product); settle(product, 800)
+        f = frame(product)
+        try:
+            with ctx.expect_page(timeout=15000) as popup:
+                f.locator(f'#rows tr[data-uid="{FIRST_UID}"]').dblclick()
+            own = popup.value; own.wait_for_load_state()
+            ob = bars(own)
+            record("V2 the worklist's double-click opens the product's own viewer popup", not ob["toolbar"], {"url": own.url, "viewer": ob})
+            own.close()
+        except Exception as e:
+            record("V2 the worklist's double-click opens the product's own viewer popup", False, {"error": repr(e)})
+
+        # A1: role 관리자 opens admin.html in the product tab with no redirect; the showcase card does the same.
+        reopen.select_option("#role", "admin"); on_admin(product); settle(product, 2000)
+        record("A1 role 관리자 opens Admin (no redirect to the worklist) and lists members",
+               product_path(product).endswith("admin.html") and reopen.input_value("#screen").endswith("admin.html"),
+               {"product": product_path(product), "members": frame(product).locator("#users td.username").count()})
+        reopen.select_option("#role", "radiologist")
+        product.wait_for_function('document.querySelector("#product").contentWindow.location.pathname.endsWith("main.html")', timeout=10000)
+        record("A1 leaving 관리자 returns the product to the worklist", reopen.input_value("#screen").endswith("main.html"), {"product": product_path(product)})
+        reopen.click("#showcase"); reopen.locator("#panel[open]").wait_for()
+        reopen.locator(".card").filter(has=reopen.locator("strong", has_text="관리자 화면 둘러보기")).click()
+        on_admin(product); settle(product, 1500)
+        record("A1 the '관리자 화면 둘러보기' card switches the role to 관리자 and opens Admin",
+               reopen.input_value("#role") == "admin" and product_path(product).endswith("admin.html"), {"role": reopen.input_value("#role"), "product": product_path(product)})
+
+        # A2: the admin screens work against the studio mock.
+        f = frame(product)
+        def dialog_text(sel): return f.locator(sel).inner_text()
+        row_action(f, "PARK RESIDENT", "Approve")
+        form = f.locator("#membership-form"); form.locator("[name=institution]").fill("kin-center")
+        form.locator('input[name=role][value=radiologist]').check(); form.locator("button[type=submit]").click(); settle(product, 800)
+        refused = f.locator("#message").inner_text()
+        row_action(f, "PARK RESIDENT", "Approve")
+        form.locator("[name=institution]").fill("kin-center"); form.locator('input[name=role][value=radiologist]').check()
+        form.locator("[name=verificationOverride]").check(); form.locator("button[type=submit]").click(); settle(product, 1000)
+        record("A2 Approve Member: unverified email refused, in-person override approves", "이메일" in refused and "APPROVED" in member_row(f, "PARK RESIDENT").inner_text(),
+               {"refused": refused, "row": member_row(f, "PARK RESIDENT").inner_text()})
+        row_action(f, "NEW DOCTOR", "Temp Password"); settle(product, 600)
+        temp = dialog_text("#temporary-password")
+        record("A2 Temp Password shows a one-time password", f.locator("#password-dialog[open]").count() == 1 and len(temp) >= 12, {"length": len(temp)})
+        f.locator("#close-password").click()
+        row_action(f, "NEW DOCTOR", "Email Reset Link"); settle(product, 600)
+        record("A2 Email Reset Link says the studio has no mail server (no silent success)", "스튜디오 미지원" in f.locator("#message").inner_text(), {"message": f.locator("#message").inner_text()})
+        row_action(f, "JUNG LOCUM", "Activate"); settle(product, 800)
+        record("A2 Activate a suspended member", "SUSPENDED" not in member_row(f, "JUNG LOCUM").inner_text(), {"row": member_row(f, "JUNG LOCUM").inner_text()})
+        row_action(f, "HAN MINSU", "Signing Key")
+        key = f.locator("#signing-key-dialog"); key.locator("[data-status]").filter(has_text="No Active Key").wait_for(timeout=5000)
+        key.locator("[name=reason]").fill("synthetic check"); key.locator('[data-action="provision"]').click(); settle(product, 800)
+        record("A2 Signing Key: create a key for a technician", "Created" in key.locator("[data-status]").inner_text() and key.locator("[data-rows] tr").count() == 1,
+               {"status": key.locator("[data-status]").inner_text()})
+        key.locator("[name=reason]").fill("synthetic rotate"); key.locator('[data-action="replace"]').click(); settle(product, 800)
+        record("A2 Signing Key: rotate keeps the retired key listed", "Rotated" in key.locator("[data-status]").inner_text() and key.locator("[data-rows] tr").count() == 2,
+               {"status": key.locator("[data-status]").inner_text()})
+        product.screenshot(path=str(OUT / "a2-signing-key.png"))
+        key.locator("[data-close]").click()
+        row_action(f, "HAN MINSU", "Study Access")
+        acc = f.locator("#study-access-dialog"); acc.locator("[data-status]").filter(has_text="Revision 0").wait_for(timeout=5000)
+        acc.locator("[name=mode]").select_option("rules"); acc.locator("[data-add]").click()
+        acc.locator('[data-field="modalities"]').fill("CT, MR"); acc.locator("[name=reason]").fill("synthetic check"); acc.locator("[data-save]").click(); settle(product, 800)
+        record("A2 Study Access: save a Matching Studies rule", "Saved · Revision 1" in acc.locator("[data-status]").inner_text(), {"status": acc.locator("[data-status]").inner_text()})
+        acc.locator("[data-reload]").click(); settle(product, 600)
+        record("A2 Study Access: Reload shows the saved rule", "Revision 1" in acc.locator("[data-status]").inner_text() and acc.locator('[data-field="modalities"]').input_value() == "CT, MR",
+               {"status": acc.locator("[data-status]").inner_text()})
+        acc.locator("[data-close]").click()
+        f.locator("#gateway-refresh").click(); f.locator("#gateway-rows li").first.wait_for(timeout=10000); settle(product, 400)
+        retry = f.locator("#gateway-rows li button:visible", has_text="Now Retry")
+        has_retry = retry.count() == 1
+        if has_retry: retry.click(); settle(product, 800)
+        record("A2 Gateway Status lists the receipts and Now Retry stores a request", f.locator("#gateway-rows li").count() >= 2 and has_retry
+               and "Retry Requested" in f.locator("#gateway-rows").inner_text(), {"state": f.locator("#gateway-list-state").inner_text(), "counts": f.locator("#gateway-counts").inner_text()})
+        f.locator("#metrics-refresh").click(); f.locator("#metrics-rows tr").first.wait_for(timeout=10000); settle(product, 300)
+        metric_states = f.evaluate('() => [...document.querySelectorAll("#metrics-rows tr")].map(r => r.children[1].textContent)')
+        record("A2 Operations shows all eleven metrics, none unreadable except the sourceless one", f.locator("#metrics-rows tr").count() == 11
+               and f.locator("#metrics-state").inner_text().startswith("Observed") and metric_states.count("Unobservable") == 1, {"states": metric_states})
+        f.locator("#audit-refresh").click(); f.locator("#audit-rows tr").first.wait_for(timeout=10000); settle(product, 300)
+        audit_text = f.locator("#audit-rows").inner_text()
+        record("A2 Audit / Security lists this session's member changes", "admin.user.approve" in audit_text and "study.access" in audit_text
+               and f.locator("#audit-state").inner_text().startswith("Loaded"), {"state": f.locator("#audit-state").inner_text(), "counts": f.locator("#audit-counts").inner_text()})
+        utc = lambda d: time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() + d))
+        f.locator("#access-review-from").fill(utc(-86400)); f.locator("#access-review-until").fill(utc(3600)); f.locator("#access-review-load").click()
+        f.wait_for_function('() => ["Loaded", "Partial", "No Events", "Query Failed"].includes(document.querySelector("#access-review-state").textContent)', timeout=10000)
+        record("A2 Access Review loads the day's access events", f.locator("#access-review-state").inner_text() in ("Loaded", "Partial") and f.locator("#access-review-rows tr").count() >= 3,
+               {"state": f.locator("#access-review-state").inner_text(), "rows": f.locator("#access-review-rows tr").count()})
+        product.screenshot(path=str(OUT / "a2-admin.png"), full_page=True)
+        f.locator("main").screenshot(path=str(OUT / "a2-admin-main.png"))
+        reopen.select_option("#role", "radiologist"); rows_ready(product)
 
         # F8: overlay — a resize while picking keeps "reopen the chat when picking ends".
         product.close(); settle(reopen, 300)

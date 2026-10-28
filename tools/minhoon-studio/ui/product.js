@@ -3,10 +3,10 @@
 // over the shared BroadcastChannel — open a screen, reload after an applied change or undo, pick elements — and
 // this window reports back its page, selected study, JavaScript errors, picks and reload timings.
 (() => {
-  const { api, store, channel, screenForRole, isShortcut, SCREENS, DEFAULT_SCREEN, PICK_KEY } = window.Studio;
+  const { api, store, channel, productScreen, screenForRole, isShortcut, SCREENS, DEFAULT_SCREEN, PICK_KEY } = window.Studio;
   const $ = id => document.getElementById(id);
   const bc = channel();
-  const me = { role: null, screen: store.get('studio-screen', DEFAULT_SCREEN) };
+  const me = { role: null, screen: productScreen(store.get('studio-screen', DEFAULT_SCREEN)) };
   const seen = new Map(); // reload nonce -> time, so two chat tabs relaying the same event reload once
   let chatSeen = 0;
 
@@ -36,7 +36,7 @@
   // role back after a reload returns to the Worklist.
   function open(screen, role) {
     if (role) me.role = role;
-    me.screen = screen || me.screen;
+    me.screen = screen ? productScreen(screen) : me.screen;
     store.set('studio-screen', me.screen);
     mirror.open(screenForRole(me.screen, me.role));
   }

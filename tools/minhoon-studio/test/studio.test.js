@@ -83,7 +83,81 @@ async function call(mock, method, url, body) {
 test('mock answers unknown routes with nothing (the server turns that into 501), never a catch-all 200', async () => {
   const mock = mockFor();
   assert.strictEqual(await call(mock, 'GET', '/api/does-not-exist'), null);
-  assert.strictEqual(await call(mock, 'POST', '/api/admin/users'), null);
+  assert.strictEqual(await call(mock, 'DELETE', '/api/admin/users/studio-kim-jiho'), null);
+});
+
+function adminCall(mock, method, url, body) {
+  mock.setRole('minhoon', 'admin');
+  return call(mock, method, url, body);
+}
+
+test('admin members: approve needs a verified email or the in-person box, a stale version is refused, self rules hold', async () => {
+  const mock = mockFor();
+  const list = (await adminCall(mock, 'GET', '/api/admin/users?page=1')).body;
+  assert.strictEqual(list.pageSize, 25);
+  assert.ok(list.users.every(u => ['APPROVED', 'PENDING'].includes(u.approvalState)));
+  assert.strictEqual(list.pendingCount, list.users.filter(u => u.approvalState === 'PENDING').length);
+  const unverified = list.users.find(u => u.approvalState === 'PENDING' && !u.emailVerified);
+  const approve = { approvalState: 'APPROVED', institution: 'kin-center', roles: ['radiologist'], version: unverified.version };
+  assert.strictEqual((await adminCall(mock, 'PATCH', `/api/admin/users/${unverified.id}`, approve)).status, 400);
+  const done = await adminCall(mock, 'PATCH', `/api/admin/users/${unverified.id}`, { ...approve, verificationOverride: true });
+  assert.strictEqual(done.status, 200);
+  assert.strictEqual(done.body.approvalState, 'APPROVED');
+  const stale = await adminCall(mock, 'PATCH', `/api/admin/users/${unverified.id}`, { enabled: false, version: done.body.version - 1 });
+  assert.strictEqual(stale.status, 409); assert.strictEqual(stale.body.code, 'MEMBER_VERSION_CONFLICT');
+  const self = list.users.find(u => u.id === 'studio-minhoon');
+  assert.strictEqual((await adminCall(mock, 'PATCH', '/api/admin/users/studio-minhoon', { enabled: false, version: self.version })).status, 400);
+  const created = await adminCall(mock, 'POST', '/api/admin/users', { username: 'synthetic.new', email: 'synthetic.new@studio.invalid', firstName: 'A', lastName: 'B' });
+  assert.strictEqual(created.status, 200); assert.ok(created.body.temporaryPassword); assert.strictEqual(created.body.approvalState, 'PENDING');
+  assert.strictEqual((await adminCall(mock, 'POST', `/api/admin/users/${created.body.id}/reset-password`, { mode: 'email' })).status, 501);
+  // Each change is in the audit list, newest first, with the member snapshot fields only (no email).
+  const audit = (await adminCall(mock, 'GET', '/api/admin/audit?limit=2')).body;
+  assert.strictEqual(audit.rows.length, 2); assert.ok(audit.next);
+  assert.ok(audit.rows.every(r => r.rule !== 'member_snapshots' || !('email' in (r.detail.after || {}))));
+  const more = (await adminCall(mock, 'GET', `/api/admin/audit?limit=2&after=${encodeURIComponent(audit.next)}`)).body;
+  assert.notDeepStrictEqual(more.rows, audit.rows);
+  mock.setRole('minhoon', 'radiologist');
+  assert.strictEqual((await call(mock, 'GET', '/api/admin/users')).status, 403);
+});
+
+test('admin signing key and study access follow expected-kid and revision rules', async () => {
+  const mock = mockFor();
+  const id = 'studio-han-tech';
+  const view = (await adminCall(mock, 'GET', `/api/admin/users/${id}/signing-key`)).body;
+  assert.strictEqual(view.current, null);
+  const made = await adminCall(mock, 'POST', `/api/admin/users/${id}/signing-key`, { action: 'provision', expectedKid: null, reason: 'synthetic' });
+  assert.strictEqual(made.status, 200); assert.ok(made.body.current);
+  const wrong = await adminCall(mock, 'POST', `/api/admin/users/${id}/signing-key`, { action: 'replace', expectedKid: '00000000-0000-4000-8000-000000000000', reason: 'x' });
+  assert.strictEqual(wrong.status, 409);
+  const rotated = (await adminCall(mock, 'POST', `/api/admin/users/${id}/signing-key`, { action: 'replace', expectedKid: made.body.current, reason: 'x' })).body;
+  assert.notStrictEqual(rotated.current, made.body.current);
+  assert.strictEqual(rotated.keys.find(k => k.kid === made.body.current).status, 'revoked');
+  const access = (await adminCall(mock, 'GET', `/api/admin/users/${id}/study-access`)).body;
+  assert.deepStrictEqual(access.owner, ['kin-center', 'studio-minhoon']);
+  const policy = { version: 1, restricted: true, startsAt: null, endsAt: null, rules: [{ patientId: null, modalities: ['CT'], dateFrom: null, dateTo: null, studyUids: [] }] };
+  const save = { expectedOwner: access.owner, revision: access.revision, policy, reason: 'synthetic', requestId: 'r-1' };
+  const saved = await adminCall(mock, 'POST', `/api/admin/users/${id}/study-access`, save);
+  assert.strictEqual(saved.body.revision, access.revision + 1);
+  assert.strictEqual((await adminCall(mock, 'POST', `/api/admin/users/${id}/study-access`, save)).body.replayed, true);
+  assert.strictEqual((await adminCall(mock, 'POST', `/api/admin/users/${id}/study-access`, { ...save, requestId: 'r-2' })).status, 409);
+  const events = (await adminCall(mock, 'GET', `/api/admin/audit?report=access&from=${encodeURIComponent(new Date(Date.now() - 3600e3).toISOString())}&until=${encodeURIComponent(new Date(Date.now() + 60e3).toISOString())}&downloads=all`)).body;
+  assert.ok(events.rows.some(e => e.surface === 'POST admin/users/:id/study-access'));
+});
+
+test('admin gateway receipts are own-study only and Now Retry answers only a retry receipt, once', async () => {
+  const mock = mockFor();
+  const list = (await adminCall(mock, 'GET', '/api/studies')).body;
+  const withReceipt = list.studies.filter(s => s.gatewayReceipt);
+  assert.ok(withReceipt.length >= 2);
+  assert.ok(withReceipt.every(s => !s.tele));
+  const retry = withReceipt.find(s => s.gatewayReceipt.phase === 'retry');
+  const first = await adminCall(mock, 'POST', `/api/studies/${retry.uid}/gateway-retry`, {});
+  assert.strictEqual(first.body.result, 'requested');
+  assert.strictEqual((await adminCall(mock, 'POST', `/api/studies/${retry.uid}/gateway-retry`, {})).body.result, 'already_requested');
+  const other = withReceipt.find(s => s.gatewayReceipt.phase !== 'retry');
+  assert.strictEqual((await adminCall(mock, 'POST', `/api/studies/${other.uid}/gateway-retry`, {})).status, 409);
+  const metrics = (await adminCall(mock, 'GET', '/api/admin/metrics')).body;
+  assert.strictEqual(new Set(metrics.metrics.map(r => r.key)).size, 11);
 });
 
 test('worklist page follows the client contract: owner, limit, ascending uids, total', async () => {
