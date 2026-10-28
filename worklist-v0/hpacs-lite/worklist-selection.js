@@ -23,8 +23,9 @@
       generation:()=>generation
     };
   }
-  // The W9 viewing API's own wire bound (multi-study-view.service.ts VIEWING_SET_LIMITS: 2-20); never truncated here.
-  const SET_LIMITS=Object.freeze({min:2,max:20});
+  // The W9 viewing API's own wire bound (multi-study-view.service.ts VIEWING_SET_LIMITS.minMembers); the server has no upper
+  // member count (removed by the caution census), so the page sets none either. Never truncated here.
+  const SET_LIMITS=Object.freeze({min:2});
   function comparison(rows,current){
     if(rows.length!==2||!rows[0].sourcePatientKey||rows[0].sourcePatientKey!==rows[1].sourcePatientKey)return null;
     return rows[1].uid===current?[rows[1].uid,rows[0].uid]:rows.map(s=>s.uid);
@@ -53,7 +54,6 @@
     // A count outside the API's bound disables the action with the reason; the server still decides everything else.
     function setBlock(count){
       if(count<SET_LIMITS.min)return '여러 검사 열기는 2개 이상 선택해야 합니다.';
-      if(count>SET_LIMITS.max)return '같은 환자의 검사를 2개에서 20개까지 선택하세요. 중복 검사는 포함할 수 없습니다.';
       return options.openBlocked?.()||null;
     }
     function runOpenSet(){const s=snapshot();if(!s||setBlock(s.studyUids.length))return;dialog?.open&&dialog.close();options.openSet(s);}

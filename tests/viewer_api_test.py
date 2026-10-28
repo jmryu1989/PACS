@@ -283,8 +283,9 @@ class ViewerAPI(unittest.TestCase):
         self.call(body=changed,path=self.path+'/'+str(uuid.uuid4())+'/revisions',status=409)
         self.call(method='GET',path=self.path+'/'+str(uuid.uuid4())+'/revisions',status=404)
 
-    def test_06_quota_last_slot_bytes_and_rollback(self):
+    def test_06_former_quota_boundaries_and_rollback(self):
         head,command=self.create()
+        receipt=copy.deepcopy(head)
         for field,last in [('itemCount',511),('revisionCount',4095),('payloadBytes',16777216)]:
             # Boundary counters are seeded only on this owned fixture. Other tests
             # establish the exact increment-to-revision sum from real API writes.
@@ -295,12 +296,14 @@ class ViewerAPI(unittest.TestCase):
             try:
                 with ThreadPoolExecutor(2) as pool:
                     responses=list(pool.map(lambda _:self.stack.request('POST',self.path,'doctor',dict(requestId=str(uuid.uuid4()),item=self.key)),range(2)))
-                self.assertEqual(sorted(r.status for r in responses),[200,409])
-                self.assertEqual(next(r for r in responses if r.status==409).body['code'],'VIEWER_STORAGE_LIMIT')
-                before=self.snapshot();self.assertEqual(self.call(body=command),head)
-                self.create(status=409);self.assertEqual(self.snapshot(),before)
-                if field!='itemCount':
-                    self.revise(head,'hide',reason='사유',status=409);self.assertEqual(self.snapshot(),before)
+                self.assertEqual([r.status for r in responses],[200,200])
+                self.assertEqual(self.call(body=command),receipt)
+                self.create()
+                latest=next(item for item in self.call('GET')['items'] if item['id']==head['id'])
+                hidden,_=self.revise(latest,'hide',reason='')
+                self.assertTrue(hidden['item']['hidden'])
+                head,_=self.revise(hidden,'restore',reason='')
+                self.assertFalse(head['item']['hidden'])
             finally:
                 psql(f'UPDATE "ViewerStorageBudget" SET "itemCount"={saved["itemCount"]}, "revisionCount"={saved["revisionCount"]}, "payloadBytes"={saved["payloadBytes"]} WHERE "studyUid"={literal(self.uid)}')
         name='viewer_fault_'+uuid.uuid4().hex

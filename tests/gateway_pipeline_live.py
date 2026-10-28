@@ -9,12 +9,12 @@ This module only records what it observes. tests/gateway_pipeline_judge.py decid
 here and again offline over the uploaded evidence. Requirement -> risk -> test (contract sections 1 and 4):
   R1  C-STORE reaches the worklist as Unverified, K = M = N    silent loss or wrong owner            N-1..N-5
   R2  a late instance sends only the delta                     duplicate or lost SOP                 N-6, B-4
-  R3  bodies stay within 24 MiB and near-limit bodies pass     body refused or split wrongly         B-1, B-4
+  R3  batching targets 24 MiB; larger objects pass alone       body refused or split wrongly         B-1, B-4
   R4  outage: hospital receive continues, retry, recovery      false progress, lost instances        B-2, B-4, B-5
   R5  graceful and crash restart keep rows, SOPs and epoch     a lost queue is a refused new epoch   B-3, B-5, R-3, R-4, R-10
   R6  Now Retry reaches the poll and pulls next_at forward     a request that is never applied       R-5..R-9
   R7  no duplicate rows after any re-send                      duplicates after retry or crash       R-8, X-1
-  R8  F-01 boundary: failed, refused, bounded re-evaluation    retry storm or hidden failure         F-1..F-8
+  R8  a large object arrives, then a late slice converges     retry storm or hidden failure         F-1..F-8
   R9  agent logs carry UIDs and counts only                    patient data in logs                  X-4
   R10 producer stops before the consumer is cleaned            recreated rows, leftover resources    T-1..T-5
   R11 bound sources, exact selection, offline re-judgement     an unbound or partial pass            S-1, S-2, X-5
@@ -362,7 +362,7 @@ class GatewayPipelineLive(unittest.TestCase):
     def db_receipt(self, uid, local):
         rows = [json.loads(row) for row in
                 psql('SELECT to_jsonb(t)::text FROM "GatewayReceipt" t WHERE "studyUid"=%s' % lit(uid))]
-        if len(rows) == 1 and rows[0]['phase'] == 'failed' and rows[0]['localCount'] == local:
+        if len(rows) == 1 and rows[0]['phase'] == 'complete' and rows[0]['localCount'] == local:
             return {key: rows[0][key] for key in ('phase', 'errorCode', 'successCount', 'localCount', 'epoch', 'seq')}
         return None
 
@@ -560,9 +560,9 @@ class GatewayPipelineLive(unittest.TestCase):
             block['big'] = big = {'t_send': now()}
             big['cstore'] = self.cstore(study, self.big, 1, 0)
             self.sent(big['cstore'], 1, 'F-1')
-            self.wait_event('F-2 study.failed', deadline, event='study.failed', uid=uid, after=big['t_send'])
+            self.wait_event('F-2 study.complete', deadline, event='study.complete', uid=uid, after=big['t_send'])
             block['status'] = self.status_row(uid)
-            block['db_receipt'] = self.until('F-3 failed receipt 0/1', deadline, lambda: self.db_receipt(uid, 1))
+            block['db_receipt'] = self.until('F-3 complete receipt 1/1', deadline, lambda: self.db_receipt(uid, 1))
             block['list'] = self.observed(uid)
             answer = self.stack.request('POST', '/studies/%s/gateway-retry' % quote(uid), 'ktech')
             block['request'] = {'status': answer.status,
@@ -570,14 +570,16 @@ class GatewayPipelineLive(unittest.TestCase):
             block['request_rows'] = self.retry_rows(uid)
             block['request_audits'] = self.audits(uid).count('gateway.retry.request')
             block['cloud'] = self.cloud_sops(uid)
-            # F-7: an in-budget slice to the same study is blocked with it (characterization, F-01 stays HOLD).
+            block['local'] = self.local_sops(uid)
+            # F-7: a later small slice joins the already delivered large object.
             block['normal'] = normal = {'t_send': now()}
             normal['cstore'] = self.cstore(study, self.small, 1, 1)
             self.sent(normal['cstore'], 1, 'F-7')
-            self.wait_event('F-7 study.failed', deadline, event='study.failed', uid=uid, after=normal['t_send'])
+            self.wait_event('F-7 study.complete', deadline, event='study.complete', uid=uid, after=normal['t_send'])
             block['quiet'] = quiet = {'t_start': now()}
-            normal['db_receipt'] = self.until('F-7 failed receipt 0/2', deadline, lambda: self.db_receipt(uid, 2))
+            normal['db_receipt'] = self.until('F-7 complete receipt 2/2', deadline, lambda: self.db_receipt(uid, 2))
             normal['cloud'], normal['audit'] = self.cloud_sops(uid), self.audits(uid)
+            normal['local'] = self.local_sops(uid)
             # F-8: a bounded window of three StableAge-plus-poll periods, not a proof of never.
             time.sleep(max(0.0, judge.stamp(quiet['t_start']) + judge.QUIET + 1 - time.time()))
             quiet['t_end'] = now()

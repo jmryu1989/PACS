@@ -23,7 +23,7 @@ export function jobCommand(raw: Buffer, create: boolean): any {
   keys(b, create ? ['id', 'title', 'description', 'snapshot'] : ['expectedRevision', 'title', 'description', 'hidden', 'reason']);
   text(b.title, 120); if (!b.title.trim()) invalid(); text(b.description, 2000);
   if (!create) {
-    number(b.expectedRevision, 1, 1000); if (!Number.isInteger(b.expectedRevision) || typeof b.hidden !== 'boolean') invalid();
+    number(b.expectedRevision, 1, Number.MAX_SAFE_INTEGER); if (!Number.isInteger(b.expectedRevision) || typeof b.hidden !== 'boolean') invalid();
     text(b.reason, 1000); return b;
   }
   viewerUuid(b.id);
@@ -100,7 +100,7 @@ function validateJobSnapshot(s: any) {
   if (volume) {
     keys(s.volume, ['study', 'series', 'sops']);
     if (!s.studies.includes(s.volume.study)) invalid(); viewerUid(s.volume.series);
-    if (!Array.isArray(s.volume.sops) || s.volume.sops.length < 2 || s.volume.sops.length > 256 || new Set(s.volume.sops).size !== s.volume.sops.length) invalid();
+    if (!Array.isArray(s.volume.sops) || s.volume.sops.length < 2 || new Set(s.volume.sops).size !== s.volume.sops.length) invalid();
     s.volume.sops.forEach(viewerUid);
   }
   const grid = mixed ? MIXED_LAYOUTS : VOLUME_LAYOUTS;

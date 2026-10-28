@@ -784,6 +784,33 @@ class MeasurementCiTests(unittest.TestCase):
         selection = json.loads((ci.ROOT/'scripts/ci-paths.json').read_text(encoding='utf-8'))['jobs']['worklist-ux-measurements']
         self.assertIn('tests/e2e/test_viewer_ux_shell.py', selection)
 
+    def test_s9_u7_served_profile_runs_its_three_allowlisted_modules_in_worklist_ux(self):
+        # S9-U7 orders 02/03/04 name these served flows; worklist-ux.yml is now validate.yml's
+        # worklist-ux-measurements job. No class is passed: each module's load_tests is the allowlist.
+        profile = ci.PROFILES['s9-u7-served']
+        self.assertEqual([row[0] for row in profile['suites']],
+                         ['e2e/test_s9_viewer_output_scope.py', 'e2e/test_s9_viewer_identity_flow.py',
+                          'e2e/test_s9_viewer_unsaved_flow.py'])
+        for suite in profile['suites']:
+            command, outer = ci.guarded_profile_run(profile, *suite, ci.profile_deadline_seconds('s9-u7-served'))
+            self.assertNotIn('--class', command)
+            self.assertEqual(command[command.index('--mode')+1], 'live')
+            self.assertEqual(command[command.index('--module')+1], 'tests/' + suite[0])
+        # Every suite has its own cap; together with the supervisor margins they fit the shared deadline.
+        budgets = profile['suite_budgets']
+        self.assertEqual(sorted(budgets), sorted(row[2] for row in profile['suites']))
+        self.assertLessEqual(sum(budgets[row[2]] + 35 for row in profile['suites']),
+                             ci.profile_deadline_seconds('s9-u7-served'))
+        for suite in profile['suites']:
+            command, outer = ci.guarded_profile_run(profile, *suite, ci.profile_deadline_seconds('s9-u7-served'))
+            self.assertEqual(command[command.index('--timeout')+1], str(budgets[suite[2]]))
+            self.assertEqual(outer, budgets[suite[2]] + 35)
+        owner = [row for row in self.catalog.profile_bindings()['s9-u7-served'] if not row['dispatch']]
+        self.assertEqual([row['job'] for row in owner], ['worklist-ux-measurements'])
+        self.assertEqual(self.catalog.text().count('--profile s9-u7-served'), 1)
+        selection = json.loads((ci.ROOT/'scripts/ci-paths.json').read_text(encoding='utf-8'))['jobs']['worklist-ux-measurements']
+        self.assertIn('tests/e2e/test_s9_viewer_*.py', selection)
+
     def test_validate_workflow_runs_s9_u0e_served_in_its_own_bounded_job(self):
         # Owner and artifact binding for every profile is test_all_profiles_have_unique_workflow_owners_and_report_artifacts;
         # the exact-selection self-check runs once in runtime. Here: the served config is checked against its sources
@@ -1143,7 +1170,7 @@ class MeasurementCiTests(unittest.TestCase):
         # budgets are asserted in test_volume_mpr_profile_is_exact_bounded_and_isolated.
         # volume-slab opted in as the second MPR suite group; see its own exact test.
         for name, profile in ci.PROFILES.items():
-            if name in ('hanging-protocols', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient'):
+            if name in ('hanging-protocols', 's9-u7-served', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient'):
                 self.assertIn('suite_budgets', profile)
                 continue
             with self.subTest(profile=name):
@@ -1301,7 +1328,9 @@ class MeasurementCiTests(unittest.TestCase):
                           # S9-U0E: the served generated OHIF config, in its own validate.yml job.
                           's9-u0e-served',
                           # Viewer U2 shell (D1821), in the worklist-ux-measurements job.
-                          'viewer-ux-shell',
+                          'viewer-ux-shell', 'viewer-ux-priors',
+                          # S9-U7 served output, identity and unsaved-work flows, in the same job.
+                          's9-u7-served',
                           'gateway-e2e', 'critical-result-screens',
                           # EMR-B1: the access ledger profile, run only by the emr-b job.
                           'emr-b',

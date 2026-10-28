@@ -269,7 +269,7 @@
     // require before they trust a plane.
     function planeVolumeSops(viewport){
       const native=root.cornerstone,volume=native?.cache?.getVolume?.(viewport.getVolumeId?.()),ids=volume?.imageIds;
-      if(!volume?.loadStatus?.loaded||!Array.isArray(ids)||ids.length<2||ids.length>256||volume.framesLoaded!==ids.length)return null;
+      if(!volume?.loadStatus?.loaded||!Array.isArray(ids)||ids.length<2||volume.framesLoaded!==ids.length)return null;
       const sops=ids.map(id=>native?.metaData?.get?.('instance',id)?.SOPInstanceUID);
       return sops.every(value=>typeof value==='string'&&value)&&new Set(sops).size===sops.length?sops:null;
     }

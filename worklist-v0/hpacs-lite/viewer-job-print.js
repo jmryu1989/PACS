@@ -129,7 +129,8 @@
     try { while (true) {
       let part; try { part = await reader.read(); } catch (error) { if (signal?.aborted) throw error; throw new Error(SOURCE_READ_FAILED); }
       if (part.done) break; size += part.value.length; budget.bytes += part.value.length;
-      if (size > max || budget.bytes > 67108864) throw new Error('출력 원본 용량 한도를 초과했습니다.'); chunks.push(part.value); }
+      // A caller whose shared limit is the viewer's free memory names that cause, so the notice tells the reader what to close.
+      if (size > max || budget.bytes > (budget.limit ?? 67108864)) throw new Error(size <= max && budget.exceeded || '출력 원본 용량 한도를 초과했습니다.'); chunks.push(part.value); }
     } finally { await reader.cancel().catch(() => {}); }
     return new Uint8Array(await new Blob(chunks).arrayBuffer());
   }
@@ -150,6 +151,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
   const reconstructed = version => [4, 5, 6, 12, 13, 14, 15].includes(version), mipOutput = version => [12, 13, 14, 15].includes(version);
   const mipBatchPage = version => version === 13 || version === 15;
   const MIP_NOTE = '저장한 조건과 전체 CT 원본으로 다시 계산한 출력입니다 · 화면 미리보기가 아닙니다 · 실제 크기 아님 · 조작성 평가 가능·진단 품질 미검증';
+  const OUTPUT_NOTE = '인쇄/PDF에는 환자·검사 식별정보가 포함됩니다. Image Text/Images Only는 화면 표시 설정이며 익명화가 아닙니다. 영상 픽셀에도 식별정보가 포함될 수 있습니다. DICOM 원본 다운로드가 아니며 검사·판독문·작업을 저장하지 않습니다.';
   const mipModel = () => { const model = window.KinVolumeMipOutput; if (typeof model?.timer !== 'function' || typeof model?.saved !== 'function') throw new Error('MIP 출력 도구를 불러오지 못했습니다. 다시 확인하세요.'); return model; };
   // S3-U5. Refusing is the only honest answer when the citation wording itself
   // is missing: every other outcome is phrased inside that library, so printing
@@ -173,6 +175,8 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
   dialog.style.cssText = 'width:min(1100px,94vw);height:90vh;padding:16px;background:#18212b;color:white';
   const heading = el('h2', '저장한 비교 영상 출력', dialog);
   const caption = el('p', '저장 당시 영상 범위와 밝기입니다. 실제 크기 아님.', dialog);
+  const outputScope = el('p', '', dialog);
+  el('p', OUTPUT_NOTE, dialog);
   const status = el('p', '', dialog); status.setAttribute('role', 'status');
   const reportSource = el('select', undefined, dialog); reportSource.setAttribute('aria-label', '함께 출력할 판독문');
   for (const value of ['none', 'saved']) {
@@ -184,9 +188,11 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
   function addEditorOptions(comparison) {
     const usable = !!editor && editor.available();
     const draft = el('option', identity.optionLabel('editor'), reportSource); draft.value = 'editor'; draft.disabled = !usable;
+    if (!usable) draft.title = linkText('missing');
     if (comparison) {
       const pair = el('option', identity.optionLabel('editor-prior', comparison), reportSource);
       pair.value = 'editor-prior'; pair.disabled = !usable;
+      if (!usable) pair.title = linkText('missing');
     }
   }
   function syncReportOptions(data) {
@@ -220,7 +226,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
   document.body.append(dialog);
   let serial = 0, controller, current, ready, outputWindow, urls = [], edits = [], controlJob = null, dirtyControls = false;
   const defaultEdit = () => ({ zoom: 100, x: 0, y: 0, window: null });
-  function clear() { controller?.abort(); controller = null; ready = null; controls.disabled = true; printButton.disabled = true; paper.srcdoc = ''; urls.forEach(URL.revokeObjectURL); urls = []; if (outputWindow && !outputWindow.closed) outputWindow.close(); outputWindow = null; }
+  function clear() { controller?.abort(); controller = null; ready = null; outputScope.textContent = ''; controls.disabled = true; printButton.disabled = true; paper.srcdoc = ''; urls.forEach(URL.revokeObjectURL); urls = []; if (outputWindow && !outputWindow.closed) outputWindow.close(); outputWindow = null; }
   function close() { serial++; clear(); current = null; edits = []; controlJob = null; selection.value = 'all'; dirtyControls = false; refresh.disabled = reportSource.disabled = false; if (outputWindow && !outputWindow.closed) outputWindow.close(); outputWindow = null; dialog.close(); }
   function syncControls() {
     const values = controlJob?.snapshot.cells.map((cell, index) => cell ? edits[index] || defaultEdit() : null).filter(Boolean) || [];
@@ -475,7 +481,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
     const annotations = job.annotations, refs = job.snapshot.annotations;
     if (job.snapshot.version !== 3) { if (annotations !== undefined || refs !== undefined) throw new Error('출력 주석 형식이 일치하지 않습니다.'); return; }
     const refuse = () => { throw new Error('저장 주석 전체를 확인할 수 없습니다. 다시 확인하세요.'); };
-    if (!Array.isArray(annotations) || !Array.isArray(refs) || annotations.length > 64 || refs.length !== annotations.length ||
+    if (!Array.isArray(annotations) || !Array.isArray(refs) || refs.length !== annotations.length ||
         new Set(annotations.map(a => a.id)).size !== annotations.length || new Set(refs.map(r => r.id)).size !== refs.length) refuse();
     for (const a of annotations) {
       const item = a.item, count = { arrow: 2, length: 2, angle: 3, ellipse: 4 }[item?.kind];
@@ -592,6 +598,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
     if(batchOutput&&job.snapshot.batch)intro(el('p',`Job ${job.id} · ${job.snapshot.batch.count} planes · Interval ${job.snapshot.batch.interval} mm · ${job.snapshot.batch.reverse?'Reverse':'Forward'}`,main));
     const summary = summaryText(identities, data.reports);
     intro(el('p', summary, main));
+    intro(el('p', OUTPUT_NOTE, main));
     for (const [reportIndex, entry] of data.reports.entries()) {
       const report = entry.report, identity = identities.find(s => s.uid === entry.uid), section = el('section', undefined, main);
       section.className = 'report'; section.dataset.reportUid = entry.uid; section.dataset.printPage = pageName(reportIndex);
@@ -736,6 +743,8 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
         caption.textContent=mipJob?MIP_NOTE+'.':(item.snapshot?'처음 선택한 현재 평면을 재구성하며 Job·표식·판독문을 저장하지 않습니다.':'저장한 생성 조건과 전체 CT 원본으로 저장한 평면을 재구성합니다.')+' 현재 영상·판독 입력은 유지합니다. 실제 크기 아님.';
       }else for (const [index, cell] of snapshot.cells.entries()) { valid(ticket, signal); images.push(cell ? await render(cell, ticket, signal, budget, cellAnnotations(data.job, cell), outputEdits[index]) : null); }
       const latest = await state(item, signal, reportChoice); valid(ticket, signal); if (!equal(latest, data)) throw new Error('작업 또는 검사 정보·판독문이 변경되었습니다. 다시 확인하세요.');
+      outputScope.textContent = '출력 대상: ' + (batchOutput?.frames.length ?? snapshot.cells.filter(Boolean).length) + '개 영상 · ' +
+        data.identities.map(study => `${study.name} (${study.id}) · ${identity.dateText(study)} · Study ${study.uid}`).join(' / ');
       ready = { data, reportChoice, html: html(data, images, outputEdits,batchOutput) }; paper.srcdoc = ready.html; printButton.disabled = !supportsIdentity();
       syncReportOptions(data);
       const selected = selection.value; selection.replaceChildren(); el('option', '전체 영상 셀', selection).value = 'all';

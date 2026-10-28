@@ -4979,6 +4979,16 @@
         "slot": "metricsConcern"
       },
       {
+        "name": "readStudies",
+        "slot": "worklistConcern",
+        "implementation": {
+          "file": "api/src/pacs/worklist.ts",
+          "owner": "PacsWorklist",
+          "name": "readStudies",
+          "kind": "MethodDeclaration"
+        }
+      },
+      {
         "name": "listStudies",
         "slot": "worklistConcern"
       },
@@ -9338,6 +9348,67 @@
           "scope": null,
           "declared": [
             "3:Symbol(EMR_MANUAL_SR_SIGNING)"
+          ],
+          "optional": []
+        }
+      }
+    }
+  },
+  "caution_app": {
+    "unit": "Caution census app (#259)",
+    "note": "Change Password opens Keycloak's UPDATE_PASSWORD action on the signed-in session: GET auth/login takes the literal action and GET auth/callback reads kc_action_status (auth.controller.ts). Both routes stay public; nothing else changes.",
+    "route_args": [
+      {
+        "controller": "AuthController",
+        "handler": "callback",
+        "added": [
+          "4:5@5:\"kc_action_status\":0"
+        ]
+      },
+      {
+        "controller": "AuthController",
+        "handler": "login",
+        "added": [
+          "4:2@2:\"action\":0"
+        ]
+      }
+    ]
+  },
+  "di_additions_cold_catalog": {
+    "unit": "EMR-E cold first opening (#248 follow-up)",
+    "note": "OrthancImageCatalog follows Orthanc's change log on the EMR background-work registry, so its constructor takes that registry. No controller, provider or route is added.",
+    "middleware_routes": [],
+    "controllers": [],
+    "providers": [],
+    "routes": [],
+    "injectables": {},
+    "changed_injectables": {
+      "OrthancImageCatalog": {
+        "before": {
+          "params": [
+            "PrismaService",
+            "Object",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "2:Symbol(RequestContextSource)",
+            "1:Symbol(CURRENT_CLINICAL_CONTEXT)"
+          ],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PrismaService",
+            "Object",
+            "Object",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "3:Symbol(EmrBackgroundWork)",
+            "2:Symbol(RequestContextSource)",
+            "1:Symbol(CURRENT_CLINICAL_CONTEXT)"
           ],
           "optional": []
         }

@@ -28,7 +28,7 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
       // resizes. Binding-only reads never repair readiness or accept a rebound.
       if(!requireRenderReady&&views.some(v=>!v.element?.isConnected||cornerstone.getEnabledElement(v.element)?.viewport!==v))return null;
       const volume=cornerstone.cache.getVolume(views[0].getVolumeId());
-      if(!volume?.loadStatus?.loaded||volume.framesLoaded!==volume.imageIds?.length||volume.imageIds.length>256||volume.imageIds.length<2||views.some(v=>cornerstone.cache.getVolume(v.getVolumeId())!==volume))return null;
+      if(!volume?.loadStatus?.loaded||volume.framesLoaded!==volume.imageIds?.length||volume.imageIds.length<2||views.some(v=>cornerstone.cache.getVolume(v.getVolumeId())!==volume))return null;
       if(cells.some(c=>c.displaySetInstanceUIDs?.length!==1||services.displaySetService.getDisplaySetByUID(c.displaySetInstanceUIDs[0])?.StudyInstanceUID!==source.uid||services.displaySetService.getDisplaySetByUID(c.displaySetInstanceUIDs[0])?.SeriesInstanceUID!==source.series||services.displaySetService.getDisplaySetByUID(c.displaySetInstanceUIDs[0])?.Modality!=='CT'))return null;
       if(requireRenderReady&&views.some((v,i)=>{const c=v.getCanvas();return !c?.clientWidth||!c?.clientHeight||Math.abs(c.width-Math.floor(c.clientWidth*devicePixelRatio))>1||Math.abs(c.height-Math.floor(c.clientHeight*devicePixelRatio))>1;}))return null;
       if(requireRenderReady&&cells.some(c=>!c.isReady)){

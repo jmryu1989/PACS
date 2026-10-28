@@ -77,15 +77,29 @@ export class PacsTechNote {
    * write behaves as before. The id lookup runs after the permission, institution and study-lock checks and before the
    * version check, in the same transaction as the revision and its audit row.
    */
-  async saveTechNote(uid: string, body: any, c: Caller, transaction?: Prisma.TransactionClient) {
+  private validateWrite(body: any) {
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => !['baseVersion', 'text', 'reason', 'attemptId'].includes(k)) ||
         !Number.isInteger(body.baseVersion) || body.baseVersion < 0 || body.baseVersion >= 2147483646 ||
-        typeof body.text !== 'string' || body.text.length > 10000 || body.text.includes('\0') ||
+        typeof body.text !== 'string' || body.text.includes('\0') ||
         typeof body.reason !== 'string' || body.reason.length > 1000 || body.reason.includes('\0') ||
         body.attemptId !== undefined && typeof body.attemptId !== 'string')
       throw new BadRequestException('메모·수정 사유·기준 버전을 확인하세요');
     if (/[\uD800-\uDFFF]/u.test(body.text) || /[\uD800-\uDFFF]/u.test(body.reason))
       throw new BadRequestException('잘못된 문자 인코딩입니다');
+  }
+
+  /** Admission precedes clinical signing; the write repeats scope under its own transaction. */
+  async prepareWrite(uid: string, body: any, c: Caller) {
+    this.validateWrite(body);
+    await this.studyAccess.prepare(c, [uid]);
+    await this.prisma.$transaction(async tx => {
+      await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+      await this.noteScope(tx, uid, c, true);
+    }, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 }).catch(noteTransactionError);
+  }
+
+  async saveTechNote(uid: string, body: any, c: Caller, transaction?: Prisma.TransactionClient) {
+    this.validateWrite(body);
     const attemptId: string | null = body.attemptId ?? null, reason = body.reason.trim();
     const reused = () => new BadRequestException('이 저장 시도 ID는 다른 요청에 이미 사용되었습니다. 메모를 다시 확인하세요');
     await this.studyAccess.prepare(c,[uid]);
@@ -104,7 +118,6 @@ export class PacsTechNote {
       }
       const prev = await tx.techNoteRevision.findFirst({ where: { studyUid: uid }, orderBy: { version: 'desc' } });
       if ((prev?.version ?? 0) !== body.baseVersion) throw new ConflictException('메모가 변경되었습니다. 이력을 확인한 뒤 다시 작성하세요');
-      if (prev && !reason) throw new BadRequestException('수정·비우기에는 사유가 필요합니다');
       if (!prev && !body.text.trim()) throw new BadRequestException('메모 내용을 입력하세요');
       if (prev?.text === body.text) throw new BadRequestException('변경된 내용이 없습니다');
       const note = noteForCaller(await tx.techNoteRevision.create({ data: { studyUid: uid, version: body.baseVersion + 1,

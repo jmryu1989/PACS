@@ -11,6 +11,8 @@ export interface LocalReadSource {
   managingInstitution: string;
   /** Path in the serialized response to the exact portion this target provides. */
   path: readonly (string | number)[];
+  /** Flattened responses can provide several records in one object. Hash only this record's returned fields. */
+  fields?: readonly string[];
   cause: 'user-view' | 'background-fetch';
   context?: Readonly<WorkContext>;
 }
@@ -34,6 +36,8 @@ export class LocalReadResponse {
           throw new Error('Local read target is absent from the selected response');
         part = part[key];
       }
+      if (source.fields) part = Object.fromEntries(source.fields.filter(key => Object.prototype.hasOwnProperty.call(part, key))
+        .map(key => [key, part[key]]));
       return { ...structuredClone(source), target: { ...structuredClone(source.target),
         projectionSha256: createHash('sha256').update(JSON.stringify(part)).digest('hex') } };
     }));

@@ -364,11 +364,22 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
         # Playwright's: its request events are dispatched only while it waits (runs 1029a/1029b waited in time.sleep and
         # never saw a read).
         before, done = len(seen), len(self.finished)
-        held = self.hold_ledger()
+        # Patient resolution now records its own worklist read. Let that real lookup finish before holding the
+        # image admission; locking the whole ledger before navigation would stop resolve(), not the opening root.
+        held = None
+        reentry_route = re.compile(r'/dicom-web/studies/' + re.escape(a.uid) + r'/series/.+/frames/[0-9]+(?:\?.*)?$')
+
+        def hold_opening(route):
+            nonlocal held
+            if held is None:
+                held = self.hold_ledger()
+            route.continue_()
+
+        viewer.route(reentry_route, hold_opening)
         try:
             viewer.evaluate('href => { window.__kinSwitch = kinViewerOpenPatient(href); }', '/ohif/viewer?StudyInstanceUIDs=' + a.uid)
             deadline = time.monotonic() + 8
-            while not [s for s in seen[before:] if s[0] == a.uid]:
+            while held is None or not [s for s in seen[before:] if s[0] == a.uid]:
                 if time.monotonic() > deadline:
                     print('REENTRY NOT SENT', json.dumps(viewer.evaluate("""async () => ({
                         switched: await Promise.race([window.__kinSwitch, new Promise(r => setTimeout(() => r('pending'), 100))]),
@@ -383,7 +394,9 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
             self.assertEqual(self.ids(viewer), [d.uid], 'D stays on screen while A\'s root is not durable')
             self.assertEqual(len(self.opens(a.uid)), 3, 'no root yet')
         finally:
-            self.release_ledger(held)
+            viewer.unroute(reentry_route, hold_opening)
+            if held is not None:
+                self.release_ledger(held)
         self.assertTrue(viewer.evaluate('window.__kinSwitch'), 'the switch completes once the root is durable')
         canvas_ready(viewer, 1)
         self.assertEqual(self.ids(viewer), [a.uid])

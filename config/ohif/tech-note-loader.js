@@ -1,10 +1,29 @@
 
 function kinCreateViewerTechNote() {
   let ready, current, prepare, epoch=0, active=false, state='stopped';
+  let identity, identityReady, prepareIdentity, identityServices;
+  function stopIdentity(){identity?.dispose();identity=null;}
+  function connectIdentity(){
+    if(!active||!kinViewerSession.readOnly()||identity||!prepareIdentity)return;
+    const ticket=epoch;
+    prepareIdentity().then(module=>{
+      if(!active||ticket!==epoch||!kinViewerSession.readOnly()||identity)return;
+      // Patient identification also belongs to read-only viewing. It does not
+      // require mounting the writer's Tech Note, clipboard or volume tools.
+      identity=module.mount({services:identityServices,resolve:()=>null,
+        owner:()=>kinViewerSession.owner(),allowed:()=>active&&kinViewerSession.readOnly(),
+        studies:(new URLSearchParams(location.search).get('StudyInstanceUIDs')||'').split(',').filter(Boolean)});
+    }).catch(()=>{
+      if(!active||ticket!==epoch)return;
+      const status=document.querySelector('#kin-viewer-layout-status');
+      if(status)status.textContent='환자 식별 표시를 연결하지 못했습니다. 영상 정보 표시에서 환자와 검사를 확인하세요.';
+    });
+  }
   // The bridge follows the verified role; document disposal belongs to the page boundary.
-  kinViewerSession.onChange(next=>{if(next==='writer'){connect();return;}epoch++;if(active)state=next;if(next==='read-only'){current?.stop();current=null;}});
+  kinViewerSession.onChange(next=>{if(next==='writer'){stopIdentity();connect();return;}epoch++;if(active)state=next;if(next==='read-only'){current?.stop();current=null;connectIdentity();}else stopIdentity();});
   function connect() {
     if(!active||state==='loading'||state==='ready'||!kinViewerSession.writer())return;
+    kinToolRetry('kin-note-retry');
     const ticket=epoch;state='loading';
     prepare().then(extension=>{
       if(!active||ticket!==epoch)return;
@@ -14,7 +33,7 @@ function kinCreateViewerTechNote() {
     }).catch(e=>{
       if(!active||ticket!==epoch)return;
       state='failed';
-      if(window.top===window){const p=document.querySelector('#kin-viewer-layout-status');if(p)p.textContent='Tech 메모 화면을 연결하지 못했습니다. 영상 작업을 저장한 뒤 뷰어를 다시 여세요.';}
+      kinToolRetry('kin-note-retry', 'Tech 메모 화면을 연결하지 못했습니다.', connect);
     });
   }
   return {id:'kin.viewer-tech-note',preRegistration({servicesManager}) {
@@ -24,6 +43,9 @@ function kinCreateViewerTechNote() {
       const timer=setTimeout(fail,20000);
       script.onload=()=>{clearTimeout(timer);resolve();};script.onerror=fail;document.head.append(script);
     });
+    identityServices=servicesManager.services;
+    prepareIdentity=()=>window.KinViewerIdentity?Promise.resolve(window.KinViewerIdentity):
+      identityReady||(identityReady=load('viewer-identity.js').then(()=>window.KinViewerIdentity).catch(error=>{identityReady=null;throw error;}));
     const standalone=window.top===window;
     if(standalone){const css=document.createElement('link');css.rel='stylesheet';css.href='/worklist/hpacs-lite/tech-note.css';document.head.append(css);}
     prepare=()=>ready||(ready=(standalone&&typeof window.KinTechNote!=='function'?load('tech-note.js'):Promise.resolve())
@@ -59,6 +81,6 @@ function kinCreateViewerTechNote() {
   },onModeEnter(){if(!prepare)return;epoch++;active=true;state='unconfirmed';const ticket=epoch;
     // S5-U2b: Tech notes are a technician record the clinician allowlist neither reads nor writes. The bridge connects only
     // after a /me answered writer; until an answer it stays 'unconfirmed', and 'read-only'/'refused' never connect.
-    kinViewerSession.decide().then(session=>{if(!active||ticket!==epoch)return;if(session==='writer')connect();else state=session;});
-  },onModeExit(){epoch++;active=false;state='stopped';current?.stop();current=null;}};
+    kinViewerSession.decide().then(session=>{if(!active||ticket!==epoch)return;if(session==='writer')connect();else{state=session;if(session==='read-only')connectIdentity();}});
+  },onModeExit(){kinToolRetry('kin-note-retry');epoch++;active=false;state='stopped';stopIdentity();current?.stop();current=null;}};
 }

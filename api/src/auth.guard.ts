@@ -17,6 +17,11 @@ export const Public = () => SetMetadata('public', true);
 
 type MemberState = 'PENDING' | 'APPROVED' | 'INVALID';
 const KIN_ROLES = new Set([...APP_ROLES, 'gateway']);
+/**
+ * 브라우저의 DICOM 읽기가 닿는 API 경로: nginx auth_request(`authz/dicom`), MG-08 기록 중계(`image-relay/*`),
+ * MG-LOADING 프레임 범위 읽기와 strip 미리보기. 셋 다 같은 보호 경로의 답이므로 결속 거절 상태를 하나로 맞춘다.
+ */
+const DICOM_LOCATION = /^\/api\/(?:authz\/dicom|image-relay\/|dicom-web\/studies\/[0-9.]+\/series\/[0-9.]+\/instances\/[0-9.]+\/frames\/|instances\/[0-9a-f-]+\/preview$)/;
 
 /** 회원콘솔과 가드가 공유하는 두 축 중 승인 상태의 단일 판정표. */
 export function memberState(groups: string[], roles: string[]): MemberState {
@@ -63,10 +68,12 @@ export class AuthGuard implements CanActivate {
    * 프록시의 DICOM 인증 서브요청(`GET authz/dicom`)은 401과 403만 원 요청에 전달할 수 있다 — 그 밖의 상태는 500이 된다
    * (U5S-REQ-12). 그래서 그 경로에서만 결속 누락(428)·다른 세션(409) 같은 `AUTH_*` 거절을 403으로 낸다. 어느 거절인지는
    * `X-KIN-Auth-Code` 헤더가 말하고, 코드 없는 403은 평범한 열람 거절이다.
+   * 영상 바이트를 API가 직접 내는 DICOM 경로(MG-08 기록 중계 `image-relay/*`, MG-LOADING 프레임·미리보기)도 브라우저에게는
+   * 같은 보호 경로다. 같은 경로가 어느 쪽에서 답하든 거절 상태가 다르지 않도록 여기서도 같은 403으로 낸다.
    */
   private subrequestAnswer(req: any, error: any) {
     const path = String(req.originalUrl ?? '').split('?')[0];
-    if (path !== '/api/authz/dicom' || typeof error?.getStatus !== 'function') return error;
+    if (!DICOM_LOCATION.test(path) || typeof error?.getStatus !== 'function') return error;
     const status = error.getStatus(), body = error.getResponse();
     const code = body && typeof body === 'object' ? (body as any).code : undefined;
     if (status === 401 || status === 403 || typeof code !== 'string' || !code.startsWith('AUTH_')) return error;

@@ -3137,11 +3137,13 @@ def remove_profile(path, seconds=15):
     require(not Path(path).exists(), "The browser profile could not be removed")
 
 
-def engine_transport(command, request, timeout, *, cwd, env):
+def engine_transport(command, request, timeout, *, cwd, env, output=None):
     """Keep the HTTP connection open through its response/upgrade before half-closing exec input.
 
     Closing dial-stdio stdin together with the request cancels Docker Desktop's named-pipe proxy before the
     HTTP handler starts. A single owned CLI carries the handshake and stream; its deadline includes reaping.
+    output: a successful (101/200) response body is written there as it arrives instead of being returned, so an
+    exec's output (a whole table's COPY on restore admission, #262 review R262-2) is never held here.
     """
     import threading
     tree = _ProcessTree(command, cwd=cwd, env=env) if os.name == "nt" else None
@@ -3160,13 +3162,20 @@ def engine_transport(command, request, timeout, *, cwd, env):
                     return process.stdout
             response = http.client.HTTPResponse(PipeSocket())
             response.begin()
+            def receive(read):
+                if output is None or response.status not in (101, 200):
+                    return read()
+                for chunk in iter(lambda: read(65536), b""):
+                    output.write(chunk)
+                return b""
             if response.status == 101:
                 process.stdin.write(payload[length:])
                 process.stdin.flush()
                 process.stdin.close()
-                body = response.fp.read()
+                # http.client gives an upgraded response no body; the stream is the rest of the connection.
+                body = receive(response.fp.read1 if output is not None else response.fp.read)
             else:
-                body = response.read()
+                body = receive(response.read)
                 process.stdin.close()
             result.append((f"HTTP/1.1 {response.status} response\r\nContent-Length: {len(body)}\r\n\r\n").encode() + body)
         except BaseException as error:
@@ -3231,7 +3240,7 @@ class Runner:
             if self.owner:
                 identity = {"user": self.owner["uid"], "group": self.owner["gid"], "extra_groups": []}
         if args[:3] == ["docker", "system", "dial-stdio"]:
-            return engine_transport(command, input, timeout, cwd=self.cwd, env=environment)
+            return engine_transport(command, input, timeout, cwd=self.cwd, env=environment, output=output)
         if os.name == "nt":
             # Docker's Compose plugin inherits the CLI's pipes. subprocess.run's Windows timeout kills only the
             # CLI and then drains those pipes without a deadline; keep both processes in the existing Job boundary.
@@ -3463,6 +3472,37 @@ class ComposeEntry:
         return pointer
 
 
+class ExecFrames:
+    """Decode an attached exec's multiplexed stream (8-byte header: channel, three zero bytes, payload size) as it
+    arrives: stdout goes to its sink piece by piece and only stderr is kept, so the output is never held whole here."""
+    def __init__(self, stdout):
+        self.stdout, self.stderr = stdout, bytearray()
+        self.header, self.channel, self.remaining = b"", None, 0
+
+    def write(self, data):
+        view = memoryview(data)
+        while view:
+            if self.remaining:
+                piece = bytes(view[:self.remaining])
+                if self.channel == 1:
+                    self.stdout.write(piece)
+                else:
+                    self.stderr.extend(piece)
+                self.remaining -= len(piece)
+                view = view[len(piece):]
+                continue
+            take = 8 - len(self.header)
+            self.header += bytes(view[:take])
+            view = view[take:]
+            if len(self.header) == 8:
+                require(self.header[0] in (1, 2) and self.header[1:4] == b"\0\0\0", "Docker exec 출력 framing이 잘못됐습니다")
+                self.channel, self.remaining, self.header = self.header[0], int.from_bytes(self.header[4:8], "big"), b""
+        return len(data)
+
+    def close(self):
+        require(not self.header and not self.remaining, "Docker exec 출력이 잘렸습니다")
+
+
 class EngineExec:
     """Use an Engine exec instance, never the container's aggregate exec list, as the worker identity.
 
@@ -3472,12 +3512,15 @@ class EngineExec:
     def __init__(self, runner):
         self.runner = runner
 
-    def request(self, method, path, body=None, *, stream=None, timeout=60, missing=False):
+    def request(self, method, path, body=None, *, stream=None, timeout=60, missing=False, output=None):
+        """stream: exec input; the attached exec's (stdout, stderr) is returned, stdout being None when it went to output."""
         payload = canonical(body) if body is not None else b""
         headers = (f"{method} /v1.45{path} HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\n"
                    f"Content-Length: {len(payload)}\r\n" +
                    ("Connection: Upgrade\r\nUpgrade: tcp\r\n" if stream is not None else "Connection: close\r\n") + "\r\n")
-        result = self.runner(["docker", "system", "dial-stdio"], input=headers.encode() + payload + (stream or b""), timeout=timeout)
+        frames = ExecFrames(output if output is not None else io.BytesIO()) if stream is not None else None
+        result = self.runner(["docker", "system", "dial-stdio"], input=headers.encode() + payload + (stream or b""), timeout=timeout,
+                             **({"output": frames} if frames is not None else {}))
         require(result.returncode == 0, "Docker Engine 전송을 완료하지 못했습니다")
         class ResponseSocket:
             def makefile(self, *args):
@@ -3489,15 +3532,10 @@ class EngineExec:
         require(response.status in (101, 200, 201), "Docker Engine 요청이 거절됐습니다")
         if stream is None:
             return decode(response.read())
-        raw = response.fp.read() if response.status == 101 else response.read()
-        channels = {1: bytearray(), 2: bytearray()}
-        while raw:
-            require(len(raw) >= 8 and raw[0] in channels and raw[1:4] == b"\0\0\0", "Docker exec 출력 framing이 잘못됐습니다")
-            size = int.from_bytes(raw[4:8], "big")
-            require(len(raw) >= size + 8, "Docker exec 출력이 잘렸습니다")
-            channels[raw[0]].extend(raw[8:8 + size])
-            raw = raw[8 + size:]
-        return bytes(channels[1]), bytes(channels[2])
+        # A transport that streamed the body leaves nothing here; one that returned it is decoded the same way.
+        frames.write(response.fp.read() if response.status == 101 else response.read())
+        frames.close()
+        return (None if output is not None else frames.stdout.getvalue()), bytes(frames.stderr)
 
     def inspect(self, identity, *, missing=False, timeout=20):
         require(type(identity) is str and HASH.fullmatch(identity), "Docker exec 신원이 잘못됐습니다")
@@ -3727,17 +3765,16 @@ class HostOps:
         require(type(created.get("Id")) is str and HASH.fullmatch(created["Id"]), "Engine exec ID 응답이 잘못됐습니다")
         worker["exec_id"] = created["Id"]
         self.intro.save()
+        # stdout reaches output as it arrives, like a plain CLI's; a caller still acts only after the exit checks below.
         stdout, stderr = engine.request("POST", "/exec/" + worker["exec_id"] + "/start", {"Detach": False, "Tty": False},
                                         stream=input if input is not None else (stdin.read() if stdin else b""),
-                                        timeout=max(0.01, end - time.monotonic()))
+                                        timeout=max(0.01, end - time.monotonic()), output=output)
         observed_exec = engine.inspect(worker["exec_id"], timeout=max(0.01, end - time.monotonic()))
         worker["exec_observation"] = {key: observed_exec.get(key) for key in ("ID", "ContainerID", "Running", "ExitCode")}
         self.intro.save()
         require(observed_exec.get("Running") is False and type(observed_exec.get("ExitCode")) is int,
                 "등록 exec의 실제 종료를 확인하지 못했습니다")
-        if output is not None:
-            output.write(stdout)
-        return subprocess.CompletedProcess(args, observed_exec["ExitCode"], None if output else stdout, stderr)
+        return subprocess.CompletedProcess(args, observed_exec["ExitCode"], stdout, stderr)
 
     def register_worker(self, kind, resource, timeout, *, mutating=False):
         require(self.intro is not None, "작업 등록에 실행 문맥이 필요합니다")
@@ -5500,9 +5537,9 @@ class HostOps:
                 "ordinary_entry": self.ordinary_entry_kept()}
 
     def backup_readiness(self, intro):
-        """The daily backup of the introduced release seals each set into the backup root's audit ledger
-        (ops_audit_integrity); without a readable ledger every daily backup would end in backup_error. That is a gate
-        failure here, never a silent pass. The ledger is initialised once (G09) before the capture takes the lock."""
+        """The existing conversion reopen gate still requires the ledger initialised at G09.
+        Daily backups no longer seal sets or require this ledger; this check is a retained conversion
+        condition, not a daily-backup prerequisite or a clean-install gate."""
         import ops_audit_integrity as audit
         try:
             ledger = audit.read_ledger(Path(intro.plan["backup_root"]))

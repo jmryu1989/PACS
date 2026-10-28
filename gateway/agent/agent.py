@@ -13,6 +13,9 @@ import re
 import signal
 import sqlite3
 import time
+import math
+import tempfile
+from contextlib import contextmanager
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,7 +43,7 @@ class PermanentGatewayError(GatewayError):
 # holds a space). test_agent.py enumerates the constructors by AST and fails on a template missing here.
 GATEWAY_ERROR_CODES = {
     "missing environment: {}": "configuration",
-    "BYTE_BUDGET_MIB must be > 0 and <= 24": "configuration",
+    "BYTE_BUDGET_MIB must be finite and > 0": "configuration",
     "local Orthanc {}": "local_orthanc_unreachable",
     "local Orthanc HTTP {}": "local_orthanc_http",
     "local study lookup count={}": "local_study_lookup",
@@ -145,8 +148,8 @@ class Config:
     @classmethod
     def from_env(cls) -> "Config":
         budget_mib = float(os.environ.get("BYTE_BUDGET_MIB", "24"))
-        if budget_mib <= 0 or budget_mib > 24:
-            raise GatewayError("BYTE_BUDGET_MIB must be > 0 and <= 24")
+        if not math.isfinite(budget_mib) or budget_mib <= 0:
+            raise GatewayError("BYTE_BUDGET_MIB must be finite and > 0")
         return cls(
             orthanc_url=required("LOCAL_ORTHANC_URL").rstrip("/"),
             orthanc_user=required("LOCAL_ORTHANC_USER"),
@@ -451,8 +454,13 @@ class Orthanc:
         normalized.sort(key=lambda item: item["sop"])
         return orthanc_id, detail, normalized
 
-    def file(self, instance_id: str) -> bytes:
-        return self.request("GET", f"/instances/{instance_id}/file").content
+    def copy_file(self, instance_id: str, sink) -> int:
+        size = 0
+        with self.request("GET", f"/instances/{instance_id}/file", stream=True) as response:
+            for chunk in response.iter_content(chunk_size=65536):
+                sink.write(chunk)
+                size += len(chunk)
+        return size
 
 
 class Cloud:
@@ -496,7 +504,11 @@ class Cloud:
 
     def request(self, method: str, path: str, *, timeout: float | None = None, **kwargs: Any) -> requests.Response:
         base_headers = dict(kwargs.pop("headers", {}))
+        body = kwargs.get("data")
+        start = body.tell() if hasattr(body, "seek") else None
         for index in range(2):
+            if start is not None:
+                body.seek(start)
             headers = dict(base_headers)
             headers["Authorization"] = "Bearer " + self.token(force=index == 1)
             try:
@@ -564,8 +576,6 @@ def plan_batches(instances: list[dict[str, Any]], budget: int) -> list[list[dict
     used = 128
     for item in instances:
         estimated = int(item["size"]) + 512
-        if estimated + 128 > budget:
-            raise PermanentGatewayError("single DICOM instance exceeds byte budget")
         if current and used + estimated > budget:
             batches.append(current)
             current = []
@@ -577,19 +587,21 @@ def plan_batches(instances: list[dict[str, Any]], budget: int) -> list[list[dict
     return batches
 
 
-def multipart(parts: list[tuple[str, bytes]], budget: int) -> tuple[bytes, str]:
+@contextmanager
+def multipart(instances, copy_file):
+    """Spool each STOW batch to disk; a large multiframe object stays one DICOM part."""
     boundary = "kin-gateway-" + uuid.uuid4().hex
-    body = bytearray()
-    for _sop, content in parts:
-        body.extend(f"--{boundary}\r\n".encode("ascii"))
-        body.extend(b"Content-Type: application/dicom\r\n")
-        body.extend(f"Content-Length: {len(content)}\r\n\r\n".encode("ascii"))
-        body.extend(content)
-        body.extend(b"\r\n")
-    body.extend(f"--{boundary}--\r\n".encode("ascii"))
-    if len(body) > budget:
-        raise GatewayError("multipart body exceeds byte budget")
-    return bytes(body), f'multipart/related; type="application/dicom"; boundary={boundary}'
+    with tempfile.TemporaryFile() as body:
+        for item in instances:
+            body.write(f"--{boundary}\r\nContent-Type: application/dicom\r\n\r\n".encode("ascii"))
+            size = copy_file(item["id"], body)
+            if size != item["size"]:
+                raise GatewayError("local instance metadata incomplete")
+            body.write(b"\r\n")
+        body.write(f"--{boundary}--\r\n".encode("ascii"))
+        size = body.tell()
+        body.seek(0)
+        yield body, f'multipart/related; type="application/dicom"; boundary={boundary}', size
 
 
 def retry_request_uids(response: requests.Response) -> list[str] | None:
@@ -761,9 +773,8 @@ class Agent:
         batches = plan_batches(pending, self.config.byte_budget)
         for batch_index, batch in enumerate(batches, int(row["batch_index"]) + 1):
             self.queue.phase(uid, "sending", batch_index)
-            parts = [(item["sop"], self.orthanc.file(item["id"])) for item in batch]
-            body, content_type = multipart(parts, self.config.byte_budget)
-            failures = self.cloud.stow(uid, body, content_type)
+            with multipart(batch, self.orthanc.copy_file) as (body, content_type, body_size):
+                failures = self.cloud.stow(uid, body, content_type)
             batch_sops = {item["sop"] for item in batch}
             unknown = failures - batch_sops
             if unknown:
@@ -772,7 +783,7 @@ class Agent:
             self.queue.counts(uid, len(local_sops), len(self.queue.successes(uid) & local_sops))
             log(
                 "batch.stored", uid=uid, batch=batch_index, sops=len(batch),
-                failed=len(failures), bytes=len(body),
+                failed=len(failures), bytes=body_size,
             )
             if failures:
                 raise GatewayError(f"STOW failed SOP count={len(failures)}")

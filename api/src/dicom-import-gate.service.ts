@@ -21,14 +21,17 @@ import { DICOM_READER_MESSAGES } from './dicom-part10-reader';
 import { birthKey, nameKey, sexKey } from './study-identity';
 
 export const IMPORT_MIGRATION = '20261015013945_import_operation';
-/** One object per request (contract 4): 24 MiB. */
-export const IMPORT_OBJECT_LIMIT = 25165824;
 /** Files of one import operation are indexed 0-99 (a screen selects at most 100). */
 export const IMPORT_FILE_SLOTS = 100;
 
 const LEASE_MS = 30000;
 const RENEW_MS = 10000;
 const READ_TIMEOUT_MS = 5000;
+// First-site synthetic DBT, Orthanc 24.12.0: 647 MiB POST took 10.4 s on desktop
+// (VM: 8.3 s; 1,001 MiB POST 11.9 s, GET+SHA 9.3 s). Preserve the metadata
+// allowance and add transfer time at the slowest measured rate, without a size cap.
+// Re-measure on a larger site's storage before deployment.
+const objectTimeout = (bytes: number) => READ_TIMEOUT_MS + Math.ceil(bytes * 10400 / (647 * 1024 * 1024));
 const INIT_BUDGET_MS = 240000;
 const SMALL_LIMIT = 262144;
 const CONTEXT_LIMIT = 16777216;
@@ -87,9 +90,6 @@ export const OUTCOME_ANSWERS = Object.freeze({
 
 /** 4.7 lean list (D1161; D1244 keeps it). The Korean texts are the contract's. */
 const MODALITY_NOTICES = Object.freeze({
-  usCine: '초음파 동영상은 아직 직접 반입할 수 없습니다.',
-  xaCine: '혈관조영 동영상은 아직 직접 반입할 수 없습니다.',
-  mammography: '유방촬영 영상은 아직 직접 반입할 수 없습니다.',
   other: '이 종류의 영상은 아직 직접 반입할 수 없습니다.',
 });
 const SINGLE_FRAME_ALWAYS = new Set(['CT', 'MR', 'CR', 'DX', 'SR', 'KO', 'PR', 'SEG', 'DOC']);
@@ -269,7 +269,7 @@ function checkAttempt(a: unknown, generation: number, last: boolean): a is Impor
 function checkEntry(e: unknown, seen: { indexes: Set<number>; attempts: Set<string> }): e is ImportFileEntry {
   if (!exactKeys(e, ENTRY_KEYS)) return false;
   if (!count(e.index, IMPORT_FILE_SLOTS - 1) || seen.indexes.has(e.index) || !(typeof e.sha256 === 'string' && HEX64.test(e.sha256))
-      || !count(e.bytes, IMPORT_OBJECT_LIMIT) || !(e.expectedStudyUid === null || uidText(e.expectedStudyUid))
+      || !count(e.bytes, Number.MAX_SAFE_INTEGER) || !(e.expectedStudyUid === null || uidText(e.expectedStudyUid))
       || !outcomeWithCode(e.outcome, e.code) || !(e.identity === null || oneOf(e.identity, ['new-study', 'matched', 'not_comparable']))
       || !(e.writeDisposition === null || oneOf(e.writeDisposition, ['pre-write', 'may-have-written']))
       || (e.writeDisposition === 'may-have-written' && e.outcome !== 'rejected') || !storedTime(e.at) || !Array.isArray(e.attempts))
@@ -386,7 +386,7 @@ export function checkClaimRow(row: any): any {
   } else if (owner && row.kind === 'sop-claim' && exactKeys(claim, SOP_CLAIM_KEYS)) {
     ok = claim.schemaVersion === 1 && uidText(claim.sopUid) && row.claimKey === sopKey(claim.sopUid) && claim.studyUid === row.studyUid
       && uidText(claim.seriesUid) && claim.institutionId === row.institutionId && text(claim.patientId, 256) && text(claim.issuerInstitutionId, 256)
-      && typeof claim.sha256 === 'string' && HEX64.test(claim.sha256) && count(claim.bytes, IMPORT_OBJECT_LIMIT) && storedTime(claim.createdAt)
+      && typeof claim.sha256 === 'string' && HEX64.test(claim.sha256) && count(claim.bytes, Number.MAX_SAFE_INTEGER) && storedTime(claim.createdAt)
       && (claim.heldByAttemptId === null || (typeof claim.heldByAttemptId === 'string' && UUID_TEXT.test(claim.heldByAttemptId)));
   }
   if (!ok) throw new StoredFormatError('claim ' + (row?.claimKey ?? row?.id ?? '?'));
@@ -465,11 +465,8 @@ export function issuerInstitutions(value: string, institutions: readonly Institu
 /** 4.7: null when the modality is importable in Part 1, else the Korean notice. */
 export function modalityRefusal(modality: string | null, frames: number | null): string | null {
   const value = (modality ?? '').trim().toUpperCase();
-  const multiFrame = (frames ?? 1) > 1;
   if (SINGLE_FRAME_ALWAYS.has(value)) return null;
-  if (value === 'US') return multiFrame ? MODALITY_NOTICES.usCine : null;
-  if (value === 'XA') return multiFrame ? MODALITY_NOTICES.xaCine : null;
-  if (value === 'MG') return MODALITY_NOTICES.mammography;
+  if (['US', 'XA', 'MG'].includes(value)) return null;
   return MODALITY_NOTICES.other;
 }
 
@@ -1628,16 +1625,16 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * One request with a 5 s deadline to body EOF and a byte cap; the body is returned only for a 200. A transport failure
+   * Metadata uses a 5 s deadline; original transfers add their measured size allowance to body EOF; the body is returned only for a 200. A transport failure
    * carries whether it ended in the connect phase (4.4); upstream text never leaves this function.
    */
   private async orthancCall(method: 'GET' | 'POST', path: string, body: string | Uint8Array | undefined, limit: number,
-    signal?: AbortSignal, contentType = 'text/plain', onChunk?: (chunk: Uint8Array) => boolean): Promise<{ status: number; bytes: Buffer }> {
+    signal?: AbortSignal, contentType = 'text/plain', onChunk?: (chunk: Uint8Array) => boolean, timeoutMs = READ_TIMEOUT_MS): Promise<{ status: number; bytes: Buffer }> {
     const { base, auth } = this.orthancConfig();
     const controller = new AbortController();
     let timedOut = false, reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     const abort = () => { controller.abort(); void reader?.cancel().catch(() => undefined); };
-    const timer = setTimeout(() => { timedOut = true; abort(); }, READ_TIMEOUT_MS);
+    const timer = setTimeout(() => { timedOut = true; abort(); }, timeoutMs);
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
     try {
@@ -1706,7 +1703,7 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
         const part = chunk.byteLength > room ? chunk.subarray(0, room) : chunk;
         hash.update(part); read += part.byteLength;
         return read <= length;
-      });
+      }, objectTimeout(length));
       const tags = await this.orthancJson('GET', `/instances/${id}/simplified-tags`, undefined, CONTEXT_LIMIT);
       if (!tags || typeof tags !== 'object' || Array.isArray(tags)) return { kind: 'failed' };
       for (const key of ['PatientID', 'StudyInstanceUID', 'SeriesInstanceUID', 'SOPInstanceUID'])
@@ -1720,7 +1717,7 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
   /** 4.5 step 2: one POST /instances of the original bytes; only a connect-phase failure is a certain no-write. */
   private async postInstance(bytes: Buffer): Promise<{ kind: 'ok'; id: string; status: string } | { kind: 'certain-no-write' } | { kind: 'unknown' }> {
     let answer: { status: number; bytes: Buffer };
-    try { answer = await this.orthancCall('POST', '/instances', new Uint8Array(bytes), POST_ANSWER_LIMIT, undefined, 'application/dicom'); }
+    try { answer = await this.orthancCall('POST', '/instances', bytes, POST_ANSWER_LIMIT, undefined, 'application/dicom', undefined, objectTimeout(bytes.length)); }
     catch (error: any) { return error instanceof OrthancFailure && (error as any).connect ? { kind: 'certain-no-write' } : { kind: 'unknown' }; }
     try {
       const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(answer.bytes));
@@ -1733,10 +1730,10 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
   // ── reads the original download composes (contract 5.2) ──
 
   /** The study's instance ids (Expand false, one bounded read); null when Orthanc could not be read. */
-  async studyInstanceIds(studyUid: string, limit: number): Promise<string[] | null> {
+  async studyInstanceIds(studyUid: string): Promise<string[] | null> {
     try {
       const ids = await this.orthancJson('POST', '/tools/find', JSON.stringify({ Level: 'Instance', Query: { StudyInstanceUID: studyUid },
-        Limit: limit, Expand: false }), CONTEXT_LIMIT);
+        Expand: false }), CONTEXT_LIMIT);
       if (!Array.isArray(ids) || ids.some(id => typeof id !== 'string' || !ORTHANC_ID.test(id)) || new Set(ids).size !== ids.length) return null;
       return ids;
     } catch { return null; }

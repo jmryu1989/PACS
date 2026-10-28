@@ -135,7 +135,7 @@
       if (!camera || !Array.isArray(actors) || actors.length !== 1) return null;
       const volumeId = viewport.getVolumeId?.(), volume = volumeOf(viewport), imageIds = volume?.imageIds;
       if (typeof volumeId !== 'string' || !volumeId || !volume?.loadStatus?.loaded || !Array.isArray(imageIds) ||
-          imageIds.length < 2 || imageIds.length > 256 || volume.framesLoaded !== imageIds.length) return null;
+          imageIds.length < 2 || volume.framesLoaded !== imageIds.length) return null;
       const sops = imageIds.map(id => { try { return native?.metaData?.get?.('instance', id)?.SOPInstanceUID; } catch (_) { return null; } });
       if (!sops.every(value => typeof value === 'string' && value) || new Set(sops).size !== sops.length) return null;
       // The requested orientation is authoritative; a camera the Crosshairs tool has rotated

@@ -112,6 +112,9 @@ class FakeHost:
         changed = getattr(self, "value_changes", {}).get(database, {}).get(schema + "." + table)
         return ["id", "body"], [["1", "changed" if changed else "before"], ["2", None]]
 
+    def digest(self, container, database, schema, table, user="kin"):
+        return ops.value_digest((database, schema, "table", table, None), *self.values(container, database, schema, table, user))
+
     def text(self, args, **kwargs):
         self.commands.append(list(args))
         joined = " ".join(args)
@@ -127,7 +130,7 @@ class FakeHost:
             return json.dumps(self.objects(args[args.index("-d") + 1]))
         if "datname='keycloak'" in joined:
             return "0:1"
-        if "n.nspname='public'" in joined:
+        if "FROM pg_largeobject_metadata" in joined:
             return "0"
         if "pg_database_size" in joined:
             return "4096"
@@ -194,6 +197,7 @@ class FakeHost:
                 patch.object(ops, "run", side_effect=self.run), patch.object(ops, "temporary_run", side_effect=self.temporary), \
                 patch.object(ops, "boundary_proof", return_value={"fixture": "private PG16 baseline"}), \
                 patch.object(ops, "value_rows", side_effect=self.values), \
+                patch.object(ops, "value_table_digest", side_effect=self.digest), \
                 patch.object(ops, "counts", return_value={"public.Report": 2}), \
                 patch.object(ops, "emr_catalog", return_value={"synthetic": "emr catalog"}), contextlib.redirect_stdout(io.StringIO()):
             yield
@@ -536,8 +540,9 @@ class FakeCluster:
             return json.dumps(self.objects.get(database, {"schemas": [], "relations": [], "functions": [], "default_acl": []}))
         if "datname='keycloak'" in joined:
             return "%d:%d" % ("keycloak" in self.databases, "kin" in self.databases)
-        if "n.nspname='public'" in joined:
-            return str(len((self.objects.get("kin") or {}).get("relations", [])))
+        if "FROM pg_largeobject_metadata" in joined:
+            database = args[args.index("-d") + 1]
+            return str(len((self.objects.get(database) or {}).get("relations", [])))
         raise AssertionError("unexpected command " + joined[:80])
 
     def run(self, args, *, output=None, input_file=None, timeout=600, check=True):
@@ -547,8 +552,8 @@ class FakeCluster:
                 database = args[args.index("-d") + 1]
                 return SimpleNamespace(returncode=0, stdout=json.dumps(self.objects.get(database, inventory(database))).encode(), stderr=b"")
             self.apply(input_file.read().decode())
-        elif "DROP DATABASE kin WITH (FORCE);" in args:
-            self.databases.pop("kin")
+        elif "psql" in args and args[-1].startswith("DROP DATABASE "):
+            self.databases.pop(args[-1].split()[2])
         elif "pg_restore" in args:
             database = Path(input_file.name).name.split(".")[0]
             self.databases[database] = dict(next(item for item in self.snapshot["databases"] if item["name"] == database))
@@ -639,6 +644,26 @@ class ExactRestoreTests(unittest.TestCase):
                 self.restore(cluster, directory)
 
 
+    def test_restore_accepts_empty_install_databases_and_preserves_populated_targets(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory, catalog = self.snapshot(folder)
+            for initialized_keycloak in (False, True):
+                with self.subTest(initialized_keycloak=initialized_keycloak):
+                    cluster = FakeCluster(catalog)
+                    if initialized_keycloak:
+                        cluster.databases["keycloak"] = dict(catalog["databases"][0])
+                    self.restore(cluster, directory)
+                    self.assertEqual(cluster.objects, catalog["objects"])
+            for database in ("kin", "keycloak"):
+                with self.subTest(populated=database):
+                    cluster = FakeCluster(catalog)
+                    cluster.databases["keycloak"] = dict(catalog["databases"][0])
+                    cluster.objects[database] = {"relations": [{"name": "public.Existing"}]}
+                    before = json.dumps([cluster.catalog(), cluster.objects], sort_keys=True)
+                    with self.assertRaisesRegex(RuntimeError, "not a fresh cluster"):
+                        self.restore(cluster, directory)
+                    self.assertEqual(json.dumps([cluster.catalog(), cluster.objects], sort_keys=True), before)
+
     def test_03_a_restore_that_loses_a_column_grant_is_refused(self):
         """D22: column privileges are part of the compared catalog; a restore without one is refused."""
         with tempfile.TemporaryDirectory() as folder:
@@ -714,7 +739,8 @@ k.privateKey,'synthetic-doctor-key','wrap-1',Buffer.from(Array.from({length:32},
             for database in ("kin", "keycloak"):
                 with (snapshot / (database + ".dump")).open("wb") as handle:
                     ops.run(["docker", "exec", source, "pg_dump", "-U", "kin", "-d", database, "-Fc"], output=handle)
-            with sqlite3.connect(root / "index") as db:
+            # The connection's own context only ends the transaction; an open handle keeps Windows from removing the folder.
+            with contextlib.closing(sqlite3.connect(root / "index")) as db, db:
                 db.execute("CREATE TABLE AttachedFiles(uuid TEXT, compressedSize INTEGER)")
             with tarfile.open(snapshot / "orthanc.tgz", "w:gz") as archive:
                 archive.add(root / "index", arcname="index")
@@ -1134,6 +1160,34 @@ k.privateKey,'synthetic-doctor-key','wrap-1',Buffer.from(Array.from({length:32},
             before = ops.value_catalog(source)
             self.ok(source, '''UPDATE a."b.c" SET "x.y"='changed';''', database)
             self.assertNotEqual(ops.value_catalog(source), before)
+
+    def test_r3_streamed_table_digest_equals_the_digest_of_the_materialized_rows(self):
+        """The comparison of a live database never aggregates a table (2026-10-27 reaudit R3), yet its digest must be the
+        one value_digest gives the same rows, or a capture and its restore (or an older values.json) stop comparing."""
+        source = self.start()
+        self.ok(source, "CREATE DATABASE keycloak OWNER kin;")
+        # Characters JSON escapes, the COPY escape character, non-ASCII, NULL against empty, duplicates, a byte-order
+        # difference from code-point order, a zero-column table and more rows than one COPY buffer.
+        self.ok(source, r'''CREATE TABLE public.mixed(id int, body text, data jsonb, raw bytea, at timestamptz);
+            INSERT INTO public.mixed VALUES
+              (1, E'tab\there\nnew\rline\\back "quote" \x01\x1f\x7f', '{"k": "v\\u0000x"}', '\x00ff', '2026-10-27 01:02:03+09'),
+              (2, '', NULL, '', NULL), (3, NULL, '[]', NULL, 'infinity'), (3, NULL, '[]', NULL, 'infinity'),
+              (4, '한글 é ﬀ 😀', '"é"', '\x5c5c', '2026-01-01'), (5, '\', 'null', '\x5c', NULL), (6, 'a', NULL, NULL, NULL), (6, 'Z', NULL, NULL, NULL);
+            INSERT INTO public.mixed SELECT 100 + n, repeat(md5(n::text), n % 7), NULL, NULL, NULL FROM generate_series(1, 20000) n;
+            CREATE TABLE public.empty(x text); CREATE TABLE public.nocolumns(); INSERT INTO public.nocolumns DEFAULT VALUES;
+            INSERT INTO public.nocolumns DEFAULT VALUES;''')
+        for table in ("mixed", "empty", "nocolumns"):
+            with self.subTest(table=table):
+                columns, rows = ops.value_rows(source, "kin", "public", table)
+                self.assertEqual(ops.value_table_digest(source, "kin", "public", table),
+                                 ops.value_digest(("kin", "public", "table", table, None), columns, rows))
+        self.assertEqual(ops.value_table_digest(source, "kin", "public", "mixed")["count"], 20008)
+        self.assertEqual(ops.value_table_digest(source, "kin", "public", "nocolumns")["count"], 2)
+        columns, rows = ops.value_rows(source, "kin", "public", "mixed")
+        self.assertIn(["5", "\\", "null", "\\x5c", None], rows)
+        before = ops.value_catalog(source)
+        self.ok(source, "UPDATE public.mixed SET body='\\' WHERE body='Z';")
+        self.assertNotEqual(ops.value_catalog(source), before)
 
     def test_r4_literal_values_and_restore_are_independent_of_session_string_defaults(self):
         """Stored GUCs remain intact while private SQL transports quoted/backslash/Unicode data literally."""

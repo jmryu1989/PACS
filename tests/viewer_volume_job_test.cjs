@@ -437,7 +437,9 @@ function fakeDatabase(options={}){
  const pick=(row,select)=>Object.fromEntries(Object.keys(row).filter(k=>!select||select[k]).map(k=>[k,k==='snapshot'?engineJson(JSON.parse(row.snapshot)):row[k]]));
  const client=s=>({
   studyState:{findMany:async()=>[parentStudy]},
-  viewerJob:{findUnique:async({where,select})=>s.jobs.has(where.id)?pick(s.jobs.get(where.id),select):null,count:async()=>options.count??s.jobs.size,
+  viewerItem:{findMany:async({take})=>(options.annotations||[]).slice(0,take).map(r=>({id:r.itemId,studyUid:r.item.studyUid,revision:r.revision}))},
+  viewerRevision:{findMany:async()=>options.annotations||[]},
+  viewerJob:{findMany:async({take})=>[...s.jobs.values()].slice(0,take).map(r=>pick(r)),findUnique:async({where,select})=>s.jobs.has(where.id)?pick(s.jobs.get(where.id),select):null,count:async()=>options.count??s.jobs.size,
    create:async({data,select})=>{if(s.jobs.has(data.id))throw new Error('duplicate id');const row={hidden:false,createdAt:new Date(0),...data,snapshot:JSON.stringify(engineJson(data.snapshot))};s.jobs.set(data.id,row);return pick(row,select);}},
   viewerJobRevision:{create:async({data})=>{s.revisions.push(data);}},
   auditLog:{create:async({data})=>{if(options.failAudit)throw new Error('audit unavailable');s.audit.push(data);}},
@@ -489,12 +491,43 @@ test('a created version 4, 11, 12 or 13 Job stores and restores every snapshot n
   assert.equal(db.log.filter(q=>q.sql.startsWith('UPDATE')).length,1);
  }
 });
-test('a Job whose snapshot write, history or limit fails leaves no Job, history or audit',async()=>{
- for(const options of [{updateRows:0},{failAudit:true},{count:200}]){
+test('a Job whose snapshot write or history fails leaves no Job, history or audit',async()=>{
+ for(const options of [{updateRows:0},{failAudit:true}]){
   const {db,jobs}=jobService(options);
   await assert.rejects(jobs.create(volume.study,jobBody(exactJob(11)),caller));
   assert.deepEqual([db.store.jobs.size,db.store.revisions.length,db.store.audit.length],[0,0,0],JSON.stringify(options));
  }
+});
+
+test('a job beyond the former 200 count keeps its snapshot and a later revision is accepted',async()=>{
+ const {db,jobs}=jobService({count:200});
+ const created=await jobs.create(volume.study,jobBody(exactJob(11)),caller);
+ assert.equal(created.revision,1);
+ assert.equal((await jobs.get(volume.study,jobId,caller)).snapshot.version,11);
+ assert.equal(db.store.revisions.length,1);
+ const revised=jobCommand(Buffer.from(JSON.stringify({title:'SYN',description:'',expectedRevision:1001,hidden:true,reason:''})),false);
+ assert.equal(revised.expectedRevision,1001);
+});
+
+test('saved comparison retains annotations beyond the former count and storage caps',async()=>{
+ const annotations=Array.from({length:200},(_,n)=>({itemId:`00000000-0000-4000-8000-${String(n+1).padStart(12,'0')}`,revision:1,at:new Date(0),
+   item:{studyUid:volume.study,authorActor:'SYN'},snapshot:{schemaVersion:1,kind:'arrow',seriesUid:volume.series,sopUid:volume.sops[0],frame:1,
+   frameOfReferenceUid:'2.25.6',label:'SYN',points:[[0,0,0],[1,1,0]]}}));
+ const {db,jobs}=jobService({annotations});
+ const frame={...structuredClone(cell),sop:volume.sops[0],frame:1};delete frame.projection;
+ frame.camera.focalPoint=[0,0,0];frame.camera.position=[0,0,100];
+ const s={version:3,studies:[volume.study],rows:1,cols:1,active:0,cells:[frame]};
+ await jobs.create(volume.study,jobBody(s),caller);
+ const restored=await jobs.get(volume.study,jobId,caller);
+ assert.equal(restored.annotations.length,200);
+ assert.deepEqual(restored.annotations.map(a=>a.id),annotations.map(a=>a.itemId));
+ assert.equal(JSON.parse(db.store.jobs.get(jobId).snapshot).annotations.length,200);
+});
+test('saved comparison listing includes the 201st job',async()=>{
+ const {db,jobs}=jobService();
+ for(let n=0;n<201;n++)db.store.jobs.set(String(n),{id:String(n),studyUid:volume.study,studies:[volume.study],authorSub:caller.sub,snapshot:'{}'});
+ const listed=await jobs.list(volume.study,{},caller);
+ assert.equal(listed.jobs.length,201);
 });
 
 /* A11-ORIENT-1 V6: versions 14/15 on the compiled server. Each version names exactly one algorithm and exactly one key set, so
@@ -547,4 +580,11 @@ test('a version 14/15 display is held to the original frame of reference and the
  const outside=directionBatchJob();outside.mip.voiSlab={center:[15.5,15.5,5+2e-6],normal:[0,0,1],pivot:[15.5,15.5,1],thickness:6};
  assert.equal(command(outside).snapshot.version,15,'syntactically valid');
  assert.throws(()=>verifyVolumeReference(outside,tags,'SYNTHETIC'),e=>e.getStatus?.()===400);
+});
+
+test('a complete volume above 256 originals can be saved and source-verified',()=>{
+ const s=structuredClone(snapshot);s.volume.sops=Array.from({length:257},(_,i)=>'2.25.'+(1000+i));
+ const originals=s.volume.sops.map((sop,i)=>({...tags[0],SOPInstanceUID:sop,ImagePositionPatient:'0\\0\\'+i}));
+ assert.equal(command(s).snapshot.volume.sops.length,257);
+ assert.match(verifyVolumeReference(s,originals,'SYNTHETIC'),/^[a-f0-9]{64}$/);
 });

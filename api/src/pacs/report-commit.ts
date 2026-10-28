@@ -101,8 +101,6 @@ export class PacsReportCommit {
     if (action === 'reset' && !String(body.reason ?? '').trim())
       throw new BadRequestException('판독 취소에는 사유가 필요합니다');
     if (action === 'defer') {
-      if (!String(body.reason ?? '').trim())
-        throw new BadRequestException('보류에는 사유가 필요합니다');
       if (prev.rs === 'P')
         throw new BadRequestException('예비 판독(RS: P)은 보류할 수 없습니다 — 승인 또는 취소만 가능합니다');
       if (prev.rs === 'A')

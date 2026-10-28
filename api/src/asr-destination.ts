@@ -18,15 +18,18 @@ function isInternalAsrAddress(address: string) {
   return !!family && internal.check(address, family === 4 ? 'ipv4' : 'ipv6');
 }
 
+// Any DNS name: a compose service label or a hospital's internal FQDN alike (C24). The name is only
+// a candidate, never a suffix-based trust rule; its actual addresses are checked by the socket's
+// lookup below, with no second lookup.
+const DNS_NAME = /^(?=.{1,253}$)[a-z0-9_-]{1,63}(?:\.[a-z0-9_-]{1,63})*$/;
+
 export function asrDestination(raw: string | undefined): URL | null {
   if (!raw || !/^https?:\/\//.test(raw) || /[\s\\?#]/.test(raw)) return null;
   try {
     const url = new URL(raw);
     const host = url.hostname.replace(/^\[|\]$/g, '');
     if (url.username || url.password || url.pathname !== '/inference' || url.port === '0') return null;
-    // A single DNS label is a compose-local candidate, never a suffix-based trust rule.
-    // Its actual addresses are checked by the socket's lookup below, with no second lookup.
-    if (isIP(host) ? !isInternalAsrAddress(host) : !/^[a-z][a-z0-9_-]{0,62}$/.test(host)) return null;
+    if (isIP(host) ? !isInternalAsrAddress(host) : !DNS_NAME.test(host)) return null;
     return url;
   } catch { return null; }
 }
@@ -50,7 +53,13 @@ export async function asrFetch(url: string, options: RequestInit): Promise<Respo
       headers: { 'content-type': serialized.headers.get('content-type'), 'content-length': body.length },
       lookup: (host, opts, callback) => {
         dns.lookup(host, { all: true, verbatim: true }, (error, addresses) => {
-          if (error || !addresses?.length || addresses.some(item => !isInternalAsrAddress(item.address))) {
+          // A name with no address is an engine that is not there now (a stopped container, a DNS
+          // outage), not a configuration fault: it fails like a refused connection and may come back.
+          if (error || !addresses?.length) {
+            callback(error ?? Object.assign(new Error('ASR host has no address'), { code: 'ENOTFOUND' }), undefined, undefined);
+            return;
+          }
+          if (addresses.some(item => !isInternalAsrAddress(item.address))) {
             callback(new AsrDestinationError(), undefined, undefined);
             return;
           }

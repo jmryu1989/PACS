@@ -229,10 +229,13 @@ function withoutDeclared(now, declared) {
   return { ...now, controllers: take(now.controllers, declared.controllers), providers: take(now.providers, declared.providers), injectables, middleware,
     routes: now.routes.filter(r => !declaredRoutes.includes(routeKey(r))) };
 }
-/** W5-API (D1460): the snapshot minus exactly the declared added parameter decorators (spec.w5_api.route_args) - each present once. */
+/** W5-API (D1460) and the caution app's Change Password (#259): the snapshot minus exactly the declared added parameter
+ * decorators (spec.w5_api.route_args, spec.caution_app.route_args) - each present once. */
 function withoutW5Arguments(now) {
-  const declared = spec.w5_api.route_args;
-  assert.deepEqual(declared.map(change => `${change.controller}.${change.handler}`), ['PacsController.draft']);
+  assert.deepEqual(spec.w5_api.route_args.map(change => `${change.controller}.${change.handler}`), ['PacsController.draft']);
+  assert.deepEqual(spec.caution_app.route_args.map(change => `${change.controller}.${change.handler}`),
+    ['AuthController.callback', 'AuthController.login']);
+  const declared = [...spec.w5_api.route_args, ...spec.caution_app.route_args];
   return { ...now, routes: now.routes.map(route => {
     const change = declared.find(item => item.controller === route.controller && item.handler === route.handler);
     if (!change) return route;
@@ -269,7 +272,8 @@ test('U0B-DI Nest metadata equals the pre-split snapshot plus declared additions
   // KEY-ADMIN: the doctor-key administrator's controller and the composed manage-only facade it injects.
   // MG-08: the recorded image relay (one wildcard route, one controller) and the study delivery recorder.
   // MG-LOADING: the viewer's frame/preview reads through the API's range reader (two routes, one controller, one service).
-  const additions = [spec.di_additions_mg_loading, spec.di_additions_mg08, spec.di_additions_key_admin, spec.di_additions_d_online, spec.di_additions_f_link, spec.di_additions_emr_online, spec.di_additions_b2, declared];
+  // The cold-catalog constructor change is taken back first: E's own declaration pins the earlier constructor.
+  const additions = [spec.di_additions_cold_catalog, spec.di_additions_mg_loading, spec.di_additions_mg08, spec.di_additions_key_admin, spec.di_additions_d_online, spec.di_additions_f_link, spec.di_additions_emr_online, spec.di_additions_b2, declared];
   assert.equal(full.routes.length, spec.di.routes.length + additions.reduce((count, item) => count + item.routes.length, 0));
   // Undo clinical and later online/identity bindings before B2 and the earlier feature declarations.
   // D-online and F_LINK are full declared additions too: the whole snapshot is compared, not a minimal DI check.

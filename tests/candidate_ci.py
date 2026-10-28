@@ -72,6 +72,10 @@ FLOWS = (
     # by the real viewer renderer across both pages.
     ("e2e/test_multi_study_view.py", "MultiStudyViewE2E",
      "test_w9_01_ready_set_with_receipts_displays_on_the_real_viewer", "test_w9_01_"),
+    # MODULE_A A5: the served Related Source reports only the stored version it shows, read back as the provision's
+    # client-shown entry in emr_access (the module's other cases run by its own command, tests/emr/a/README.md).
+    ("emr/a/report_observation_browser_test.py", "ReportObservationBrowser",
+     "test_a5_01_related_source_reports_only_the_shown_version_once", "test_a5_01_"),
     # EMR-B1 L01 (emr/units/b.json candidate_cases): the access ledger's roles, guards and restart in its own disposable
     # database and production API image (the merged selection 115 -> 116).
     ("e2e/test_study_arrivals.py", "StudyArrivalsE2E", "test_arrivals_01_same_series_sop_updates_count_and_preserves_viewer_draft_hold_report_and_sources", "test_arrivals_01_"),
