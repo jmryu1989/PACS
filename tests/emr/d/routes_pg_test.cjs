@@ -60,8 +60,8 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const header = { ...resource(imageUid, 'synthetic:' + imageUid),
       '0020000E': { Value: [seriesUid] }, '00080018': { Value: [sopUid] },
       '00080016': { Value: ['1.2.840.10008.5.1.4.1.1.2'] }, '00080008': { Value: ['ORIGINAL', 'PRIMARY'] } };
-    let catalogPatient = 'synthetic:' + imageUid, fileReads = 0, beforeIdentity = null, storedFile = 'synthetic-file-1';
-    let frameCount = 1, holdFrame = null, failFile = 0;
+    let catalogPatient = 'synthetic:' + imageUid, fileReads = 0, storedFile = 'synthetic-file-1';
+    let frameCount = 1, holdFrame = null, atRecording = null, failFile = 0;
     const frameReads = [], frameData = n => n === 0 ? frameBytes : Buffer.alloc(512, 11 + n);
     // FIND-248-F3: a finding's comparison identity is read before its write locks the anchor study row, so a
     // concurrent write to that study never waits behind an archive call. Each comparison lookup probes the lock.
@@ -80,7 +80,6 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
         : { Changes: changes.filter(change => change.Seq > Number(url.searchParams.get('since'))), Done: true, Last: changes.length });
       if (url.pathname === '/dicom-web/studies') {
         const uid = url.searchParams.get('StudyInstanceUID');
-        if (uid === imageUid && beforeIdentity) await beforeIdentity();
         return json(!uid ? [] : uid === splitUid ? [resource(uid, 'synthetic:split-a'), resource(uid, 'synthetic:split-b')]
           : [resource(uid, 'synthetic:' + (uid === comparisonUid ? imageUid : uid))]);
       }
@@ -95,14 +94,18 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
           : body === comparisonUid ? [{ Type: 'Study', ID: comparisonResource }]
           : body === sopUid ? [{ Type: 'Instance', ID: objectResource }] : []);
       }
+      // LastUpdate: the archive's revision of the study, which the study delivery's record names (image-delivery-record.ts).
+      // The study delivery record's own archive read (its revision); a case may run a step while the request waits on it.
+      if (url.pathname === `/studies/${studyResource}` && atRecording) { const step = atRecording; atRecording = null; await step(); }
       if ([`/studies/${studyResource}`, `/studies/${comparisonResource}`].includes(url.pathname)) return json({
         MainDicomTags: { StudyInstanceUID: url.pathname.endsWith(comparisonResource) ? comparisonUid : imageUid },
-        PatientMainDicomTags: { PatientID: 'synthetic:' + imageUid } });
+        PatientMainDicomTags: { PatientID: 'synthetic:' + imageUid }, LastUpdate: '20261028T120000' });
       if (url.pathname === `/studies/${studyResource}/instances`) return json([{ ID: objectResource, FileUuid: storedFile, MainDicomTags: { SOPInstanceUID: sopUid } }]);
       if (url.pathname.endsWith('/metadata')) return json([{ ...header, '00100020': { Value: [catalogPatient] },
         ...(frameCount > 1 ? { '00280008': { Value: [frameCount] } } : {}) }]);
+      // The stored object's own header, PatientID included: E compares it with the manifest's patient on every response.
       if (url.pathname.endsWith('/simplified-tags')) return json({ StudyInstanceUID: imageUid, SeriesInstanceUID: seriesUid,
-        SOPInstanceUID: sopUid, SOPClassUID: header['00080016'].Value[0], NumberOfFrames: String(frameCount) });
+        SOPInstanceUID: sopUid, SOPClassUID: header['00080016'].Value[0], NumberOfFrames: String(frameCount), PatientID: 'synthetic:' + imageUid });
       if (url.pathname.endsWith('/header')) return json({ '0002,0010': { Value: '1.2.840.10008.1.2.1' } });
       // A temporary archive outage: the next `failFile` stored-file reads answer 503.
       if (url.pathname.endsWith('/file') && failFile > 0) { failFile--; res.statusCode = 503; res.end(); return; }
@@ -137,7 +140,9 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const requests = createRequestContext(createRequestIngress({ proxyPeers: ['127.0.0.1'] }), runtime.port);
     Module({ controllers: services.map(n => product(n + '.controller')[className(n) + 'Controller']),
       providers: [PrismaService, ...services.map(n => product(n + '.service')[className(n) + 'Service']),
-        product('emr-image/service').OnlineImageService, product('emr-source/image').OrthancImageCatalog,
+        // E's image service with its own check pool and the study delivery recorder every image route shares (app.module).
+        product('emr-image/service').OnlineImageService, product('emr-image/check-db').ImageCheckDatabase,
+        product('image-delivery-record').StudyImageDeliveryRecorder, product('emr-source/image').OrthancImageCatalog,
         { provide: product('emr-image/context').ImageContextSource,
           inject: [product('emr-clinical/startup').CURRENT_CLINICAL_CONTEXT, product('emr-source/image').OrthancImageCatalog],
           useFactory: (clinical, catalog) => new (product('emr-image/context').ProductionImageContext)(clinical, catalog) },
@@ -149,6 +154,8 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
         { provide: StudyAccessService, useFactory: prisma => new StudyAccessService(prisma, orthanc, keycloak), inject: [PrismaService] },
         { provide: product('emr-runtime/record-port').EMR_RECORD_PORT, useValue: runtime.port },
         { provide: product('emr-runtime/background-work').EMR_BACKGROUND_WORK, useValue: runtime.background.work },
+        // A short idle gap, so a delivery's end is observed within the case (DEFAULT_IMAGE_DELIVERY_IDLE_MS is two minutes).
+        { provide: product('image-delivery-record').IMAGE_DELIVERY_IDLE_MS, useValue: 400 },
         { provide: APP_GUARD, useClass: product('auth.guard').AuthGuard },
         { provide: product('study-transfer-local.service').StudyTransferLocalService, useValue: {} }] })(HttpFixture);
     // Warnings are what an operator reads; errors still go to the test's stderr.
@@ -318,10 +325,30 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const fixedCopy = JSON.parse(exactCommand.body).projection.fixedSources[0].row.snapshot;
     assert.deepEqual([fixedCopy.baseline.values, fixedCopy.points[0][0]], [[exactValue], exactValue]);
     // The registered image route reads real HTTP catalog/object/frame bodies and
-    // persists the exact preparation/transport evidence through PostgreSQL B2.
-    const imageUrl = origin + '/api/images/dicom-web?target=' + encodeURIComponent(`/dicom-web/studies/${imageUid}/series/${seriesUid}/instances/${sopUid}`);
-    const imageResponse = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
-    assert.equal(imageResponse.status, 200, await (imageResponse.status === 200 ? Promise.resolve('') : imageResponse.text()));
+    // persists the exact preparation/transport evidence through PostgreSQL B2. A series retrieve reads the catalog on
+    // every request (R244-01: a request naming one object may be served from the kept study manifest instead), so the
+    // catalog's own reuse and partial-read rules below are what each request meets.
+    const imageUrl = origin + '/api/images/dicom-web?target=' + encodeURIComponent(`/dicom-web/studies/${imageUid}/series/${seriesUid}`);
+    // R244-GPT-FIX7-04: the study moves to another institution while the member's first image request waits at its
+    // recording boundary - during the delivery record's own archive read (the archive's revision of the study), after
+    // the catalog admitted the request. The opening's current facts are read after that revision, so they find the
+    // move (the shared recorder contract): no image byte of the moved study leaves, no response is prepared, and no
+    // record of the moved request is opened, nor any ending as a successful transfer.
+    const [{ since: movedSince }] = await db.$queryRaw`SELECT clock_timestamp() AS since`;
+    let moved = false;
+    atRecording = async () => { await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: receiver } }); moved = true; };
+    const inFlight = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
+    const inFlightBody = Buffer.from(await inFlight.arrayBuffer());
+    assert.ok(moved, 'the study moved while the request was at its recording boundary');
+    assert.notEqual(inFlight.status, 200, inFlightBody.toString().slice(0, 200));
+    assert.equal(inFlightBody.includes(original), false, 'no image byte of the moved study');
+    assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n, 0, 'no response was prepared');
+    const movedRecords = (await db.$queryRaw`SELECT e.payload::jsonb AS event FROM emr_access.access_entry e
+      WHERE e.recorded_at >= ${movedSince} ORDER BY e.sequence`).map(r => r.event)
+      .filter(e => e.targets.some(t => t.kind === 'image' && t.recordId?.value === imageUid));
+    assert.deepEqual(movedRecords.map(e => e.action), [], 'the opening\'s current read refused the moved study: no record was opened');
+    await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: hospital } });
+    const imageResponse = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });    assert.equal(imageResponse.status, 200, await (imageResponse.status === 200 ? Promise.resolve('') : imageResponse.text()));
     const bodyBytes = Buffer.from(await imageResponse.arrayBuffer());
     assert.ok(bodyBytes.includes(original));
     const firstReads = fileReads;
@@ -335,7 +362,8 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const rewrittenImage = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
     assert.equal(rewrittenImage.status, 200); await rewrittenImage.arrayBuffer();
     assert.equal(fileReads - firstReads - repeatedReads, firstReads);
-    const preparations = await db.$queryRaw`SELECT source_manifest, response_manifest FROM emr_image.preparation`;
+    const preparations = await db.$queryRaw`SELECT COALESCE(p.source_manifest, m.body) AS source_manifest, p.response_manifest FROM emr_image.preparation p
+      LEFT JOIN emr_image.source_manifest m ON m.body_sha256 = p.source_manifest_body`;
     assert.equal(preparations.length, 3);
     assert.equal(new Set(preparations.map(p => JSON.stringify(p.source_manifest.objects))).size, 1, 'the same fixed object version each time');
     const observed = preparations[0].source_manifest;
@@ -352,15 +380,16 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     assert.equal((await changedPatient.json()).code, 'ImageCurrentStudyChanged');
     assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n, 3);
     catalogPatient = 'synthetic:' + imageUid;
-    let identityReads = 0;
-    beforeIdentity = async () => {
-      if (++identityReads === 2) await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: receiver } });
-    };
+    // A study moved to another institution after the member's delivery opened is refused for the next request before
+    // any source read (the catalog's and the response's own current study and scope reads); no row, no byte.
+    await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: receiver } });
+    const readsBeforeMove = fileReads;
     const movedStudy = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
-    assert.equal(movedStudy.status, 503);
-    assert.equal((await movedStudy.json()).code, 'ImageCurrentStudyChanged');
+    const movedBody = Buffer.from(await movedStudy.arrayBuffer());
+    assert.equal(movedStudy.status, 404, movedBody.toString().slice(0, 200));
+    assert.equal(movedBody.includes(original), false);
+    assert.equal(fileReads, readsBeforeMove, 'the moved study\'s source is not read');
     assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n, 3);
-    beforeIdentity = null;
     await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: hospital } });
     // R248-FIX3-01: the catalog has no deadline or size refusal of its own. A requester that leaves while a
     // multiframe object is being read keeps the frames already finished; the next request reads only the rest.
@@ -377,7 +406,8 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     assert.equal(resumed.status, 200, await (resumed.status === 200 ? resumed.arrayBuffer().then(() => '') : resumed.text()));
     assert.deepEqual(frameReads, [0, 1, 2, 2], 'only the unfinished frame is read again');
     assert.equal(fileReads - readsBeforePartial, 1 + repeatedReads, 'the stored file is digested once, then delivered');
-    const multiframe = (await db.$queryRaw`SELECT source_manifest FROM emr_image.preparation`)
+    const multiframe = (await db.$queryRaw`SELECT COALESCE(p.source_manifest, m.body) AS source_manifest FROM emr_image.preparation p
+      LEFT JOIN emr_image.source_manifest m ON m.body_sha256 = p.source_manifest_body`)
       .map(p => p.source_manifest.objects[0]).filter(o => o.frames.length === 3);
     assert.equal(multiframe.length, 1);
     assert.deepEqual(multiframe[0].frames.map(f => [f.number, f.sha256]),

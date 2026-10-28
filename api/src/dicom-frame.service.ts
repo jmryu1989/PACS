@@ -18,6 +18,8 @@ import { OrthancService } from './orthanc.service';
 import type { RelayTarget } from './orthanc.service';
 import { acceptsGzip, directReadServes, FrameFacts, FrameLayout, frameLayout, frameRange, multipartFrames,
   pixelDataHeaderMatches, previewPng, tagNumber } from './dicom-frame-layout';
+import { StudyChanged } from './image-delivery-record';
+import type { DeliveryLease } from './image-delivery-record';
 
 const ORTHANC_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -35,8 +37,13 @@ export interface FrameRequest {
   origin: string;
 }
 
+/** The study delivery's lease of a read, taken once its object is selected; null for a read that delivers no image (HEAD). */
+export type TakeLease = () => Promise<DeliveryLease | null>;
+
 interface StoredObject {
   id: string; uuid: string; facts: FrameFacts; studyUid: string; seriesUid: string;
+  /** The object's PatientID in the archive's index (exact text, as E's source and D's study read compare it). */
+  patientId: string;
   /** The layout once the stored file was found, sized and its pixel data header checked; null means relay. */
   layout: FrameLayout | null;
 }
@@ -109,27 +116,38 @@ export class DicomFrameService {
 
   /**
    * `signal` is the request's lifetime (the controller aborts it when the client goes away): it ends the index
-   * lookups and a relayed Orthanc read; the direct read watches the response itself.
+   * lookups and a relayed Orthanc read; the direct read watches the response itself. `lease` takes the request's study
+   * delivery lease once the object is selected, so the revision the lease reads follows the selection and the file is
+   * read after it: an object of the lease's patient that is still stored then is of that revision (I3). An object the
+   * index cache names for another patient (the study was corrected since it was cached) is selected again from the
+   * archive; that selection follows the lease's revision read, so it is served only once the archive still holds that
+   * revision (DeliveryLease.confirm), and one that is still another patient's is refused. A relay - no direct read, or
+   * one that fell through to Orthanc (C8) - is Orthanc's own selection, confirmed once Orthanc answered.
    */
-  async serveFrames(request: FrameRequest, target: RelayTarget, signal?: AbortSignal): Promise<void> {
+  async serveFrames(request: FrameRequest, target: RelayTarget, signal?: AbortSignal, lease?: TakeLease): Promise<void> {
     const path = `/dicom-web/studies/${request.studyUid}/series/${request.seriesUid}/instances/${request.sopUid}/frames/${request.frames.join(',')}`;
     const accept = request.accept || 'multipart/related; type="application/octet-stream"; transfer-syntax=*';
-    const object = (await this.directReads()) ? await this.stored(request.sopUid, signal) : null;
-    // The URL's hierarchy must be the object's own: a study the caller may read never names another study's object.
-    if (object && (object.studyUid !== request.studyUid || object.seriesUid !== request.seriesUid))
-      throw new NotFoundException('요청한 검사·시리즈에 그 영상이 없습니다');
+    let object = (await this.directReads()) ? this.within(await this.stored(request.sopUid, signal), request) : null;
+    const held = (await lease?.()) ?? null;
+    if (object && held && object.patientId !== held.binding.patient.patientId) {
+      this.located.delete(request.sopUid);
+      object = this.within(await this.stored(request.sopUid, signal), request);
+      if (object.patientId !== held.binding.patient.patientId) throw new StudyChanged();
+      await held.confirm();
+    }
+    const confirm = held ? () => held.confirm() : undefined;
     const layout = object?.layout ?? null, filePath = object ? this.filePath(object.uuid) : '';
     // The description was checked against the file once; the file is checked again for this request, since a stored
     // file that has since changed size (replaced, truncated) is no longer the object the index describes.
     if (!layout || !directReadServes(accept, object!.facts.transferSyntax!) ||
         request.frames.some(frame => frameRange(layout, frame) === null) || !(await this.sameFile(object!, filePath))) {
-      await this.orthanc.relay(path, accept, target, signal, request.origin);
+      await this.orthanc.relay(path, accept, target, signal, request.origin, confirm);
       return;
     }
     // The file is opened before any header goes out: a file that cannot be opened is Orthanc's to answer.
     let handle: FileHandle | undefined;
     try { handle = await fs.open(filePath, 'r'); }
-    catch { this.forget(object!.id); await this.orthanc.relay(path, accept, target, signal, request.origin); return; }
+    catch { this.forget(object!.id); await this.orthanc.relay(path, accept, target, signal, request.origin, confirm); return; }
     const locationBase = `${request.origin}/dicom-web/studies/${request.studyUid}/series/${request.seriesUid}/instances/${request.sopUid}`;
     const multipart = multipartFrames(randomUUID() + '-' + randomUUID().slice(0, 23), locationBase, object!.facts.transferSyntax!, layout.frameBytes);
     const gzip = acceptsGzip(request.acceptEncoding);
@@ -190,10 +208,14 @@ export class DicomFrameService {
     } finally { await handle.close().catch(() => {}); }
   }
 
-  /** The series strip's preview of one object; Orthanc's renderer answers objects the direct reader does not serve. */
-  async servePreview(id: string, target: RelayTarget, signal?: AbortSignal): Promise<void> {
+  /** The series strip's preview of one object; Orthanc's renderer answers objects the direct reader does not serve.
+   * `lease` as for serveFrames. The URL names the object itself, so one of another patient than the lease's is not an
+   * image of the study's current patient: it is refused, not selected again. */
+  async servePreview(id: string, target: RelayTarget, signal?: AbortSignal, lease?: TakeLease): Promise<void> {
     if (!ORTHANC_ID.test(id)) throw new NotFoundException('영상을 찾을 수 없습니다');
     const object = (await this.directReads()) ? await this.storedById(id, signal) : null;
+    const held = (await lease?.()) ?? null;
+    if (object && held && object.patientId !== held.binding.patient.patientId) throw new StudyChanged();
     let png: Buffer | null = null;
     if (object?.layout) {
       const filePath = this.filePath(object.uuid);
@@ -202,7 +224,10 @@ export class DicomFrameService {
         png = previewPng(await this.readRange(object.id, filePath, range.start, range.end), object.facts, { maxSide: PREVIEW_SIDE });
       }
     }
-    if (!png) { await this.orthanc.relay(`/instances/${id}/preview`, 'image/png', target, signal); return; }
+    if (!png) {
+      await this.orthanc.relay(`/instances/${id}/preview`, 'image/png', target, signal, undefined, held ? () => held.confirm() : undefined);
+      return;
+    }
     target.status(200);
     target.setHeader('Content-Type', 'image/png');
     target.setHeader('Content-Length', String(png.length));
@@ -212,6 +237,13 @@ export class DicomFrameService {
 
   private filePath(uuid: string): string {
     return join(this.storage, uuid.slice(0, 2), uuid.slice(2, 4), uuid);
+  }
+
+  /** The URL's hierarchy must be the object's own: a study the caller may read never names another study's object. */
+  private within(object: StoredObject, request: FrameRequest): StoredObject {
+    if (object.studyUid !== request.studyUid || object.seriesUid !== request.seriesUid)
+      throw new NotFoundException('요청한 검사·시리즈에 그 영상이 없습니다');
+    return object;
   }
 
   /** The stored file is still the one the index describes (same size); otherwise its description is dropped. */
@@ -342,6 +374,7 @@ export class DicomFrameService {
       } catch { layout = null; }
       if (!layout) this.logger.warn('frame_reader category=layout_mismatch');
     }
-    return { id, uuid: uuid ?? '', facts, layout, studyUid: tags.StudyInstanceUID, seriesUid: tags.SeriesInstanceUID };
+    return { id, uuid: uuid ?? '', facts, layout, studyUid: tags.StudyInstanceUID, seriesUid: tags.SeriesInstanceUID,
+      patientId: typeof indexed.PatientID === 'string' ? indexed.PatientID : '' };
   }
 }

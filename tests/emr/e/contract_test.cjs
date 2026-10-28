@@ -37,6 +37,7 @@ const CASES = [
   'TEST-E-01 delivery_states R6 an unknown append is re-read by its event ID and only a found receipt allows the body',
   'TEST-E-01 delivery_states R7 a range without its own hash verification leaves the unit unverified even beside a verified range',
   'TEST-E-01 delivery_states R8 ranges sent to another account generation, opening, institution or relation never complete one provision',
+  'TEST-E-01 delivery_states R9 a response under a study delivery is provided on that record\'s receipt, never on its own ID or another record\'s; one receiver\'s ranges still resume across records',
   'TEST-E-02 manifest_sources A1 every held object keeps SOP, frames, bytes, hash, origin, source and MG/DBT/XA facts under one content digest',
   'TEST-E-02 manifest_sources A2 identical relisting collapses and an unknown format stays listed but undeliverable while the study opens',
   'TEST-E-02 manifest_sources A3 XA frame order and the stored timing are kept as stored and only reported as verified or not',
@@ -418,6 +419,38 @@ def('TEST-E-01 delivery_states R8', () => {
     { relation: 'same-institution', institution: INSTITUTION, accountGeneration: 1, openingId: 'open-A', sequence: 1 }]);
   // An opening of one account generation is not served on another generation's 204.
   refused(() => prepare(m, target, { opening: openA, accountGeneration: 2 }), 'AuthorizationScopeMismatch');
+});
+def('TEST-E-01 delivery_states R9', () => {
+  const m = build(), target = `/dicom-web/studies/${STUDY}/series/${S(STUDY, 1)}/instances/${S(STUDY, 1)}.1`;
+  // A response on its own record is its own delivery; one under a study delivery names that record.
+  const own = prepare(m, target);
+  assert.equal(own.deliveryEventId, own.eventId);
+  const study = prepare(m, `/dicom-web/studies/${STUDY}`, { eventId: 'evt-study-delivery' });
+  assert.equal(study.deliveryEventId, study.eventId);
+  const under = (opts = {}) => E.prepareDelivery(m, E.parseImageRequest('GET', target), { eventId: `evt-${++eventCounter}`, deliveryEventId: study.eventId,
+    cause: 'user-view', at: T1, authorization: { studyUid: STUDY, institution: INSTITUTION, accountGeneration: GENERATION },
+    provision: sameInstitution(STUDY), opening: null, ...opts });
+  const a = under(), u = a.units[0];
+  assert.equal(a.deliveryEventId, 'evt-study-delivery');
+  const onRecord = { stage: 'provide-prepared', receipt: { eventId: 'evt-study-delivery', durableAt: T1 } };
+  // The bytes are provided on the study delivery's durable receipt; the response's own ID has no receipt of its own.
+  assert.equal(allowed(() => E.judgeDelivery([{ prepared: a, observations: [onRecord, wrote(u, 0, 5000), ended] }])).outcome, 'complete');
+  refused(() => E.judgeDelivery([{ prepared: a, observations: [receipt(a), wrote(u, 0, 5000), ended] }]), 'DurabilityReceiptMismatch');
+  assert.equal(allowed(() => E.judgeDelivery([{ prepared: a, observations: [receipt(study), wrote(u, 0, 5000), ended] }])).outcome, 'complete',
+    'the study delivery\'s own plan and its responses share one receipt');
+  // Two responses of one record resume one provision, and so do one receiver's responses of two records (each
+  // provided on its own record's receipt), as a resumed range pair of two standalone records did before (A2).
+  const b = under();
+  assert.equal(E.judgeDelivery([{ prepared: a, observations: [onRecord, wrote(u, 0, 3000), ended] },
+    { prepared: b, observations: [onRecord, wrote(b.units[0], 3000, 5000), ended] }]).outcome, 'complete');
+  const other = under({ deliveryEventId: 'evt-other-delivery' });
+  const otherRecord = { stage: 'provide-prepared', receipt: { eventId: 'evt-other-delivery', durableAt: T1 } };
+  assert.equal(allowed(() => E.judgeDelivery([{ prepared: a, observations: [onRecord, wrote(u, 0, 3000), ended] },
+    { prepared: other, observations: [otherRecord, wrote(other.units[0], 3000, 5000), ended] }])).outcome, 'complete');
+  refused(() => E.judgeDelivery([{ prepared: a, observations: [onRecord, wrote(u, 0, 3000), ended] },
+    { prepared: other, observations: [onRecord, wrote(other.units[0], 3000, 5000), ended] }]), 'DurabilityReceiptMismatch');
+  // The record reference is a string naming an event; a blank one or a non-string is refused.
+  for (const bad of ['', null, 7]) assert.throws(() => under({ deliveryEventId: bad }));
 });
 
 // ── TEST-E-02 manifest_sources ──────────────────────────────────────────────────────────────────────────────────

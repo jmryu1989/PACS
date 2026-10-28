@@ -239,16 +239,20 @@ export interface OpeningRef { openingId: string; accountGeneration: number; sequ
 export interface DeliveryReceiver {
   relation: ProvisionRelation; institution: string; accountGeneration: number; openingId: string | null; sequence: number | null;
 }
+/** deliveryEventId: the durable provide-prepared access record this response belongs to. A study delivery (one
+ * 의료법 제23조④ 열람 record for one requester's continuous viewing of one manifest version) covers many responses;
+ * a response prepared on its own record names itself. */
 export interface PreparedDelivery {
-  formatVersion: 1; eventId: string; manifestSha256: string; studyUid: string; managingInstitution: string; request: ImageRequest;
+  formatVersion: 1; eventId: string; deliveryEventId: string; manifestSha256: string; studyUid: string; managingInstitution: string; request: ImageRequest;
   body: boolean; cause: CauseKind; relation: ProvisionRelation; opening: OpeningRef | null; receiver: DeliveryReceiver; preparedAt: string;
   units: readonly DeliveryUnit[]; excluded: readonly { sopInstanceUid: string; reason: string }[];
 }
 /** authorization: C's verdict for this request (study, acting institution, the caller's account generation).
- * opening: the viewer opening the request serves (null for a device or service load that serves no opening). */
+ * opening: the viewer opening the request serves (null for a device or service load that serves no opening).
+ * deliveryEventId: the study delivery's record when the response joins one; absent, the response is its own record. */
 export interface DeliveryContext {
   eventId: string; cause: CauseKind; at: string; authorization: { studyUid: string; institution: string; accountGeneration: number };
-  provision: ProvisionDecision; opening: OpeningRef | null;
+  provision: ProvisionDecision; opening: OpeningRef | null; deliveryEventId?: string;
 }
 const prepared = new WeakSet<object>();
 const deliverable = (o: ManifestObject) => o.unsupported === null;
@@ -260,8 +264,11 @@ const derivedUnit = (key: string, sopInstanceUid: string | null, frame: number |
 
 export function prepareDelivery(manifestInput: ImageManifest, requestInput: ImageRequest, context: DeliveryContext): Readonly<PreparedDelivery> {
   const manifest = verifiedManifest(manifestInput);
-  const c = object(context, ['eventId', 'cause', 'at', 'authorization', 'provision', 'opening']);
+  const keys = ['eventId', 'cause', 'at', 'authorization', 'provision', 'opening'];
+  const joined = !!context && typeof context === 'object' && Object.prototype.hasOwnProperty.call(context, 'deliveryEventId');
+  const c = object(context, joined ? [...keys, 'deliveryEventId'] : keys);
   const eventId = string(c.eventId), cause = choice(c.cause, ['user-view', 'background-fetch', 'service-job'] as const), preparedAt = utc(c.at);
+  const deliveryEventId = joined ? string(c.deliveryEventId) : eventId;
   let opening: OpeningRef = null;
   if (c.opening !== null) {
     const o = object(c.opening, ['openingId', 'accountGeneration', 'sequence']);
@@ -330,7 +337,7 @@ export function prepareDelivery(manifestInput: ImageManifest, requestInput: Imag
       break;
     default: refuse('ImagePathRefused');
   }
-  const result = freeze({ formatVersion: 1 as const, eventId, manifestSha256: manifest.sha256, studyUid: manifest.studyUid, managingInstitution: manifest.managingInstitution,
+  const result = freeze({ formatVersion: 1 as const, eventId, deliveryEventId, manifestSha256: manifest.sha256, studyUid: manifest.studyUid, managingInstitution: manifest.managingInstitution,
     request, body: request.method === 'GET', cause, relation: provision.relation, opening, receiver, preparedAt, units, excluded });
   prepared.add(result);
   return result;
@@ -404,8 +411,9 @@ export function judgeDelivery(responses: readonly { prepared: PreparedDelivery; 
       if (stage === 'authorized') { const o = object(raw, ['stage', 'status']); if (o.status !== 204 || durable) refuse('ObservationOrderInvalid'); continue; }
       if (stage === 'provide-prepared') {
         if (durable) refuse('ObservationOrderInvalid');
+        // The receipt is the durable access record the bytes are provided under: the response's own, or its study delivery's.
         const receipt = object(object(raw, ['stage', 'receipt']).receipt, ['eventId', 'durableAt']);
-        if (receipt.eventId !== p.eventId) refuse('DurabilityReceiptMismatch');
+        if (receipt.eventId !== p.deliveryEventId) refuse('DurabilityReceiptMismatch');
         utc(receipt.durableAt); durable = true; continue;
       }
       if (stage === 'transfer-ended' || stage === 'transfer-aborted' || stage === 'transfer-unknown') {

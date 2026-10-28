@@ -1,33 +1,72 @@
+import { createHash } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
-import type { EmrRecordTransaction } from '../emr-runtime/record-port';
 import type { ImageManifest } from './manifest';
 import type { TransferObservation } from './contract';
-import type { ImageCopy, ImageEvidenceStore, ImageResponseManifest } from './stream';
+import type { ImageCopy, ImageEvidenceStore, ImageResponseManifest, ObservationLink, TransportWire, UnstoredObservation } from './stream';
 
-/** Detail rows use the same connection as B2's provide/transfer operation.
- * No row here decides whether an operation committed: that belongs to B2. */
+// The exact JSON of a built study manifest and the digest that names it, made once per manifest: the frames of a
+// kept manifest (manifest-reuse.ts) share one object. `stored` remembers that this process already wrote the body
+// (ON CONFLICT DO NOTHING keeps a restart or a second process from writing it twice).
+const bodies = new WeakMap<ImageManifest, { text: string; sha256: string; stored: boolean }>();
+function body(source: ImageManifest) {
+  let kept = bodies.get(source);
+  if (!kept) {
+    const text = JSON.stringify(source);
+    kept = { text, sha256: createHash('sha256').update(text).digest('hex'), stored: false };
+    bodies.set(source, kept);
+  }
+  return kept;
+}
+/** A connection that can run the observation insert: the application pool, or the delivery's ledger transaction. */
+type Writer = Pick<PrismaClient, '$executeRaw'>;
+/** The cause kept with a row written late: the first failure's code or message, never its stack or query. */
+function reason(error: unknown): string {
+  const e = error as { code?: unknown; message?: unknown } | null;
+  const text = typeof e?.code === 'string' ? e.code : typeof e?.message === 'string' ? e.message : String(error);
+  return text.slice(0, 200);
+}
+
+/** E's own rows: each response's fixed representation, transport and copy facts, naming the B2 access record of its
+ * study delivery and its HTTP request. They are written on the application's connection, durable (synchronous commit)
+ * before the first byte; the ledger's append lanes carry only the delivery's own events. A row the application
+ * connection refused is written by retain() on the delivery's ledger transaction when it closes. No row here decides
+ * whether an access record committed: that belongs to B2. */
 export class PgImageEvidenceStore implements ImageEvidenceStore {
   constructor(private readonly db: PrismaClient) {}
 
-  async prepared(tx: EmrRecordTransaction, manifest: ImageResponseManifest,
-    source: ImageManifest, copies: readonly ImageCopy[]): Promise<void> {
-    await tx.$executeRaw`INSERT INTO emr_image.preparation
-      (event_id, study_uid, source_manifest, response_manifest, staging_copies)
-      VALUES (${manifest.eventId}::uuid, ${manifest.studyUid}::text,
-        ${JSON.stringify(source)}::jsonb, ${JSON.stringify(manifest)}::jsonb,
-        ${JSON.stringify(copies)}::jsonb)`;
+  async prepared(manifest: ImageResponseManifest, source: ImageManifest, copies: readonly ImageCopy[], requestId: string): Promise<void> {
+    // The study manifest's exact body is kept once and each preparation names it (R244-02): a copy per response
+    // repeated the whole-study body, about 160 KB for a 200-slice CT, for every frame.
+    const kept = body(source);
+    if (!kept.stored) {
+      await this.db.$executeRaw`INSERT INTO emr_image.source_manifest (body_sha256, study_uid, body)
+        VALUES (${kept.sha256}, ${source.studyUid}, ${kept.text}::jsonb) ON CONFLICT (body_sha256) DO NOTHING`;
+      kept.stored = true;
+    }
+    await this.db.$executeRaw`INSERT INTO emr_image.preparation
+      (event_id, delivery_event_id, request_id, study_uid, source_manifest_body, response_manifest, staging_copies)
+      VALUES (${manifest.eventId}::uuid, ${manifest.deliveryEventId}::uuid, ${requestId}, ${manifest.studyUid}::text, ${kept.sha256},
+        ${JSON.stringify(manifest)}::jsonb, ${JSON.stringify(copies)}::jsonb)`;
   }
 
-  async transferred(tx: EmrRecordTransaction, eventId: string,
-    observations: readonly TransferObservation[],
-    wire: Parameters<ImageEvidenceStore['transferred']>[3]): Promise<void> {
-    await tx.$executeRaw`INSERT INTO emr_image.observation (event_id, kind, body)
-      VALUES (${eventId}::uuid, 'transport', ${JSON.stringify({ observations, wire })}::jsonb)`;
+  async transferred(link: ObservationLink, observations: readonly TransferObservation[], wire: TransportWire): Promise<void> {
+    await observe(this.db, link, 'transport', { observations, wire }, null);
   }
 
-  async copiesRemoved(eventId: string, copies: readonly ImageCopy[]): Promise<void> {
-    // Cleanup is recorded even if the preparation transaction rolled back.
-    await this.db.$executeRaw`INSERT INTO emr_image.observation (event_id, kind, body)
-      VALUES (${eventId}::uuid, 'copies', ${JSON.stringify(copies)}::jsonb)`;
+  async copiesRemoved(link: ObservationLink, copies: readonly ImageCopy[]): Promise<void> {
+    // Cleanup is recorded even if the preparation failed; the delivery link is how a failed preparation's copy
+    // observation is found from its record (there is no preparation row to follow).
+    await observe(this.db, link, 'copies', copies, null);
   }
+
+  /** The row the application connection refused, written on the closing delivery's ledger transaction with the first
+   * failure's cause, so that an investigation sees both the facts and that they were retained late. */
+  async retain(tx: Writer, row: UnstoredObservation): Promise<void> {
+    await observe(tx, row.link, row.kind, row.body, reason(row.error));
+  }
+}
+
+async function observe(writer: Writer, link: ObservationLink, kind: UnstoredObservation['kind'], body: unknown, retainedAfter: string | null) {
+  await writer.$executeRaw`INSERT INTO emr_image.observation (event_id, delivery_event_id, request_id, kind, body, retained_after)
+    VALUES (${link.eventId}::uuid, ${link.deliveryEventId}::uuid, ${link.requestId}, ${kind}, ${JSON.stringify(body)}::jsonb, ${retainedAfter})`;
 }

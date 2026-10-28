@@ -35,7 +35,9 @@ function syntheticObject(dir, shape = {}) {
   const filePath = path.join(dir, uuid.slice(0, 2), uuid.slice(2, 4), uuid);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, file);
-  const tags = { StudyInstanceUID: STUDY_UID, SeriesInstanceUID: SERIES_UID, SOPInstanceUID: SOP_UID, Rows: String(rows), Columns: String(columns),
+  // The index's simplified tags carry the object's PatientID, as Orthanc's do: the frame reader serves an object only
+  // under a delivery of that patient.
+  const tags = { StudyInstanceUID: STUDY_UID, SeriesInstanceUID: SERIES_UID, SOPInstanceUID: SOP_UID, PatientID: 'SYN-PID-1', Rows: String(rows), Columns: String(columns),
     BitsAllocated: '16', SamplesPerPixel: '1', NumberOfFrames: String(frames), PhotometricInterpretation: 'MONOCHROME2', PixelRepresentation: '0', ...extraTags };
   return { uuid, id: INSTANCE_ID, file, frameBytes, offset, tags, filePath,
     attachment: { Uuid: uuid, UncompressedSize: file.length, CompressedSize: file.length, ContentType: 1 } };
@@ -53,6 +55,13 @@ function stubOrthanc(object, over = {}) {
     async studyIdentityResources(uid) {
       calls.push(['identity', uid]);
       return uid === object.tags.StudyInstanceUID ? [{ '0020000D': { vr: 'UI', Value: [uid] }, '00100020': { vr: 'LO', Value: ['SYN-PID-1'] }, '00080080': { vr: 'LO', Value: ['SYN HOSPITAL A'] } }] : [];
+    },
+    // The current clinical context reads the study's one patient through the archive reader's rule
+    // (OrthancService.studyPatientIdentity, #244: no resource is no study, two patient resources is a split UID).
+    async studyPatientIdentity(uid) {
+      const resources = await this.studyIdentityResources(uid);
+      if (resources.length !== 1) { const error = new Error(resources.length ? 'STUDY_IDENTITY_UNRESOLVED' : '검사가 없습니다.'); error.status = resources.length ? 409 : 404; throw error; }
+      return resources[0]['00100020'].Value[0];
     },
   };
 }

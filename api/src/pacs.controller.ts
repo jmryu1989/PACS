@@ -4,7 +4,7 @@ import { PacsService, Caller, DraftRequestFacts } from './pacs.service';
 import { REQUEST_CONTEXT_SOURCE, RequestContextSource } from './emr-runtime/request-context';
 import { Public } from './auth.guard';
 import { AuthService } from './auth.service';
-import { imageRead } from './image-relay.controller';
+import { imageRead } from './image-delivery-record';
 import { bootstrapRead } from './emr-viewing/consumer-read';
 
 /**
@@ -113,7 +113,8 @@ export class PacsController {
     // no image byte.
     if (['GET', 'HEAD'].includes(method.toUpperCase()) && imageRead(uri.split('?')[0]))
       throw new ForbiddenException('영상은 열람 기록 경로로만 제공합니다');
-    return this.svc.authzDicom(uri, method, caller(req));
+    // The gate's observation of the study (its patient) is for the API's own image routes, never an admission's answer.
+    return this.svc.authzDicom(uri, method, caller(req)).then(() => undefined);
   }
 
   /** Gateway가 바이트를 보내기 전에 자격증명의 기관으로 Study 소유권을 고정한다. */

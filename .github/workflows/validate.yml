@@ -831,7 +831,17 @@ jobs:
         node api/node_modules/typescript/bin/tsc -p api/tsconfig.json --incremental false
         export KIN_B2R_NODE="$(command -v node)"
         export KIN_B2R_PRISMA_CLI="$PWD/api/node_modules/prisma/build/index.js"
-        python3 scripts/record-run.py --run-dir tmp/emr-e-ci/online-pg --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --tree api/src/emr-contract --tree tests/emr/e --tree api/prisma --file api/src/connect.controller.ts --file api/src/app.module.ts --file api/src/orthanc.service.ts --file emr/units/e.json --file tests/emr/b/pg_ledger_restore_test.py -- python3 -B scripts/run-tests.py --module tests/emr/e/online_live.py --class OnlineImagePg --mode live --unit emr-e-online --timeout 600
+        python3 scripts/record-run.py --run-dir tmp/emr-e-ci/online-pg --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --tree api/src/emr-contract --tree tests/emr/e --tree api/prisma --file api/src/connect.controller.ts --file api/src/app.module.ts --file api/src/image-delivery-record.ts --file api/src/orthanc.service.ts --file emr/units/e.json --file tests/emr/b/pg_ledger_restore_test.py -- python3 -B scripts/run-tests.py --module tests/emr/e/online_live.py --class OnlineImagePg --mode live --unit emr-e-online --timeout 600
+    - name: E_ROUTE one study manifest serves its frame requests (compiled by the previous step)
+      run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/manifest-reuse --cwd . --tree api/src/emr-image --tree api/src/emr-contract --file api/src/image-delivery-record.ts --file tests/emr/e/manifest_reuse_test.cjs -- node --test --test-reporter=tap tests/emr/e/manifest_reuse_test.cjs
+    - name: E_ROUTE frames share the study delivery record of every image route; a HEAD or a description records nothing (compiled above)
+      run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/delivery --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --file api/src/image-delivery-record.ts --file api/src/image-relay.controller.ts --file api/src/orthanc.service.ts --file tests/emr/e/delivery_test.cjs -- node --test --test-reporter=tap tests/emr/e/delivery_test.cjs
+    - name: E_ROUTE a split study UID refuses the response; a refused row is retained on its own ledger transaction or kept for a later retention (compiled above)
+      run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/service-retention --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --file api/src/image-delivery-record.ts --file api/src/orthanc.service.ts --file tests/emr/e/service_retention_test.cjs -- node --test --test-reporter=tap tests/emr/e/service_retention_test.cjs
+    - name: E_ROUTE viewer frame requests reach the E boundary through the real nginx configuration
+      run: |
+        command -v nginx >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq nginx; }
+        python3 scripts/record-run.py --run-dir tmp/emr-e-ci/nginx-route --cwd . --file proxy/nginx.conf.template --file proxy/15-kin-config.envsh --file tests/proxy_grant_log_test.py --file tests/proxy_image_route_test.py -- python3 -B tests/proxy_image_route_test.py
     - name: Raw run evidence
       if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

@@ -12,9 +12,16 @@
  * (MG-10); a terminal the ledger cannot take is retained as the same event and offered again until durable, on the
  * background schedule and at shutdown (MG-09); under the installed Nest shutdown with the real EmrNestLifecycle and
  * record port, a delivery in preparation or a terminal offer in flight when admission closes still completes its pair
- * after one failed offer, and a read after the recorder stopped gets 503 with no image (MG-09); whole-study GET is a
+ * after one failed offer - closed by what its read served, once that read ended (R244-GPT-FIX8-02) - and a read after
+ * the recorder stopped gets 503 with no image (MG-09); whole-study GET is a
  * recorded delivery and HEAD none; a viewer frame the frame reader (the real DicomFrameController/DicomFrameService on the
- * same recorder, no storage mount) relays to Orthanc carries the public origin as the relay's does (review INT-02); the auth_request admission refuses every image read so none can bypass the relay.
+ * same recorder, no storage mount) relays to Orthanc carries the public origin as the relay's does (review INT-02); the auth_request admission refuses every image read so none can bypass the relay;
+ * after a patient correction under the same study and session, the relay and the frame reader serve the corrected
+ * patient's bytes only under a record naming that patient and the archive's new revision (R244-GPT-FIX8-01); a newer
+ * revision of the same patient's study is recorded by a delivery of that revision, and A->B->A opens three deliveries,
+ * never reviving the first (R244-GPT-FIX9-02); a correction while the opening receipt waits sends no byte of the
+ * corrected patient under the previous record, and a revision change while it waits serves the waiting reads under the
+ * new revision's delivery, not the retired one (R244-GPT-FIX9-01); another subject or session is its own delivery.
  * The PostgreSQL ledger itself is proven in tests/emr/a (real PG); nginx routing is the served stack run. D73: behaviour
  * at the boundary, no product source text. Synthetic values only; 127.0.0.1 only. */
 require('./service_test_loader.cjs');
@@ -75,16 +82,21 @@ function ledger(parseAccessEvent, mintDurableReceipt, createRecordPort) {
 
 /** A synthetic Orthanc: the lookups the gate and the record read, and the image representations the consumers read. */
 async function syntheticOrthanc() {
-  const calls = [], behaviour = { image: 'ok' };
+  // `patient` and `revision` are the archive's current study: a patient correction changes both, and the image bytes
+  // then carry the corrected patient's marker. `beforeRead(path)` runs as a request reaches the archive, before it
+  // answers: a change made there lands as the archive handles that very request.
+  const calls = [], behaviour = { image: 'ok', patient: 'SYN-PID-1', revision: '20261028T090000', beforeRead: null };
   const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', c => { body += c; });
-    req.on('end', () => {
+    req.on('end', async () => {
       const url = new URL(req.url, 'http://127.0.0.1'), p = url.pathname;
+      if (behaviour.beforeRead) await behaviour.beforeRead(p);
       calls.push({ method: req.method, path: p, query: url.search, accept: req.headers.accept,
         forwarded: [req.headers['x-forwarded-proto'], req.headers['x-forwarded-host']] });
       const json = value => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(value)); };
       const image = (type, bytes) => {
+        if (behaviour.patient !== 'SYN-PID-1') bytes = Buffer.concat([bytes, Buffer.from('SYNTHETIC-PATIENT:' + behaviour.patient)]);
         if (behaviour.image === 'error') { res.statusCode = 500; return json({ Message: 'synthetic failure' }); }
         res.setHeader('Content-Type', type); res.setHeader('Content-Length', String(bytes.length));
         if (behaviour.image === 'cut') { res.write(bytes.subarray(0, 64)); setTimeout(() => res.destroy(), 20); return; }
@@ -92,9 +104,9 @@ async function syntheticOrthanc() {
       };
       if (p === `/instances/${INSTANCE_ID}/study`) return json({ ID: STUDY_ID, MainDicomTags: { StudyInstanceUID: STUDY_UID } });
       if (p === '/tools/lookup' && req.method === 'POST') return json(body === STUDY_UID ? [{ Type: 'Study', ID: STUDY_ID }] : []);
-      if (p === `/studies/${STUDY_ID}`) return json({ ID: STUDY_ID, LastUpdate: '20261028T090000' });
+      if (p === `/studies/${STUDY_ID}`) return json({ ID: STUDY_ID, LastUpdate: behaviour.revision });
       if (p === '/dicom-web/studies' && url.searchParams.get('StudyInstanceUID') === STUDY_UID)
-        return json([{ '0020000D': { vr: 'UI', Value: [STUDY_UID] }, '00100020': { vr: 'LO', Value: ['SYN-PID-1'] }, '00080080': { vr: 'LO', Value: ['SYN HOSPITAL A'] } }]);
+        return json([{ '0020000D': { vr: 'UI', Value: [STUDY_UID] }, '00100020': { vr: 'LO', Value: [behaviour.patient] }, '00080080': { vr: 'LO', Value: ['SYN HOSPITAL A'] } }]);
       if (p === `/instances/${INSTANCE_ID}/simplified-tags`) return json({ StudyInstanceUID: STUDY_UID, Rows: '2' });
       if (p === `/dicom-web/studies/${STUDY_UID}/metadata`) return json([{ '0020000D': { vr: 'UI', Value: [STUDY_UID] } }]);
       if (p === `/instances/${INSTANCE_ID}/frames/0/rendered`) return image('image/png', PNG);
@@ -111,7 +123,7 @@ async function syntheticOrthanc() {
 }
 
 /** The whole served path over the synthetic Orthanc. */
-async function stack() {
+async function stack({ idleMs = IDLE_MS } = {}) {
   const source = await syntheticOrthanc();
   const previous = { url: process.env.ORTHANC_URL, user: process.env.ORTHANC_USER, pass: process.env.ORTHANC_PASS };
   Object.assign(process.env, { ORTHANC_URL: source.origin, ORTHANC_USER: 'syn', ORTHANC_PASS: 'syn' });
@@ -145,14 +157,17 @@ async function stack() {
   const contexts = createRequestContext(createRequestIngress({ proxyPeers: [] }), records.port);
   const clinical = createCurrentClinicalContext(prisma, contexts.source, orthanc, studyAccess);
   const background = createBackgroundWorkRegistry();
-  const recorder = new StudyImageDeliveryRecorder(records.port, contexts.source, clinical, background.work, orthanc, IDLE_MS);
+  // The image check pool every lease reads its current facts on (emr-image/check-db.ts): here one synthetic
+  // transaction over the same in-memory rows.
+  const checks = { $transaction: async work => work({ ...records.tx, $executeRaw: async () => 0 }) };
+  const recorder = new StudyImageDeliveryRecorder(records.port, contexts.source, clinical, background.work, orthanc, idleMs, checks);
   const controller = new ImageRelayController({ authzDicom: (...args) => gate.authzDicom(...args) }, orthanc, recorder);
   // The viewer's frame reader on the same recorder, on an installation without the storage mount: it relays every frame.
   const { DicomFrameController } = require('/app/dist/dicom-frame.controller.js');
   const { DicomFrameService } = require('/app/dist/dicom-frame.service.js');
   const storage = process.env.KIN_ORTHANC_STORAGE;
   delete process.env.KIN_ORTHANC_STORAGE;
-  const reader = new DicomFrameController(new DicomFrameService(orthanc), { authzDicom: (...args) => gate.authzDicom(...args) }, orthanc, recorder);
+  const reader = new DicomFrameController(new DicomFrameService(orthanc), { authzDicom: (...args) => gate.authzDicom(...args) }, recorder);
   if (storage !== undefined) process.env.KIN_ORTHANC_STORAGE = storage;
   const observations = [];
   const server = http.createServer(async (req, res) => {
@@ -409,8 +424,8 @@ test('MG-09 shutdown: a delivery still being prepared when admission closes gets
       const response = await read;
       await stopping;
       assert.equal(response.status, 200, 'a read admitted before the stop is served');
-      // It was still being sent when the stop closed its delivery: aborted, never ended.
-      assertPair(s, 'transfer-aborted', failFirst ? 2 : 1);
+      // The stop waited for the read to end (R244-GPT-FIX8-02): its delivery closes by what it served.
+      assertPair(s, 'transfer-ended', failFirst ? 2 : 1);
       assert.equal(s.records.control.live(), 0, 'every ledger work the stop took was ended');
       assert.deepEqual(logs.filter(([, m]) => /terminal_not_recorded_at_shutdown/.test(m)), [], String(failFirst));
     } finally { release(); await s.close(); }
@@ -486,8 +501,193 @@ test('MG-08 shutdown closes an open delivery: a quiet one by what it served', as
   } finally { await s.close(); }
 });
 
+test('R244-GPT-FIX8-01 after a patient correction, the relay and the frame reader serve the corrected patient only under a record naming that patient', async () => {
+  for (const route of ['relay', 'frame reader']) {
+    const s = await stack();
+    try {
+      const url = route === 'relay' ? s.routes.thumbnail : '/api' + s.routes.frame;
+      assert.equal((await s.get(url)).status, 200, route);
+      // The archive's study now names another patient (same Study UID, same member session, inside the idle gap).
+      Object.assign(s.source.behaviour, { patient: 'SYN-PID-2', revision: '20261028T090100' });
+      const second = await s.get(url);
+      assert.equal(second.status, 200, route);
+      assert.ok(second.body.includes(Buffer.from('SYNTHETIC-PATIENT:SYN-PID-2')), 'the corrected patient\'s bytes');
+      assert.equal(s.observations.at(-1).firstByte.filter(action => action === 'provide-prepared').length, 2,
+        `${route}: a record of its own was durable before the corrected patient's first byte`);
+      await s.recorder.beforeApplicationShutdown();
+      const events = s.records.entries.map(e => e.event);
+      const opened = events.filter(e => e.action === 'provide-prepared');
+      assert.deepEqual(opened.map(e => [e.targets[0].patientLinkSnapshot.value.patientId, e.targets[0].versionId.value]),
+        [['SYN-PID-1', `orthanc-study:${STUDY_ID}@20261028T090000`], ['SYN-PID-2', `orthanc-study:${STUDY_ID}@20261028T090100`]], route);
+      for (const prepared of opened)
+        assert.deepEqual(events.filter(e => e.relatedEventId === prepared.eventId).map(e => e.action), ['transfer-ended'],
+          `${route}: each patient's delivery is closed by its own terminal`);
+    } finally { await s.close(); }
+  }
+});
+
+/** The patient and revision each provide-prepared event names, in order, and each one's terminals. */
+const openings = records => {
+  const events = records.entries.map(e => e.event);
+  return events.filter(e => e.action === 'provide-prepared').map(e => ({ eventId: e.eventId, patient: e.targets[0].patientLinkSnapshot.value.patientId,
+    version: e.targets[0].versionId.value, terminals: events.filter(t => t.relatedEventId === e.eventId).map(t => t.action) }));
+};
+const REVISION_1 = `orthanc-study:${STUDY_ID}@20261028T090000`, REVISION_2 = `orthanc-study:${STUDY_ID}@20261028T090100`;
+
+test('R244-GPT-FIX9-02 a newer archive revision of the same patient\'s study is recorded by a delivery of that revision; A->B->A never revives the first delivery', async () => {
+  for (const route of ['relay', 'frame reader']) {
+    // An idle gap longer than the case: every new opening below is the binding's, none an idle close.
+    const s = await stack({ idleMs: 60_000 });
+    try {
+      const url = route === 'relay' ? s.routes.study : '/api' + s.routes.frame;
+      assert.equal((await s.get(url)).status, 200, route);
+      // The archive stored into the study between two completed reads (same patient, same session, inside the idle gap).
+      s.source.behaviour.revision = '20261028T090100';
+      assert.equal((await s.get(url)).status, 200, route);
+      assert.equal(s.observations.at(-1).firstByte.filter(action => action === 'provide-prepared').length, 2,
+        `${route}: the new revision's record was durable before its first byte`);
+      // A correction to patient B and back to A, each between completed reads.
+      s.source.behaviour.patient = 'SYN-PID-2';
+      assert.equal((await s.get(url)).status, 200, route);
+      s.source.behaviour.patient = 'SYN-PID-1';
+      assert.equal((await s.get(url)).status, 200, route);
+      await s.recorder.beforeApplicationShutdown();
+      const opened = openings(s.records);
+      assert.deepEqual(opened.map(o => [o.patient, o.version]), [['SYN-PID-1', REVISION_1], ['SYN-PID-1', REVISION_2],
+        ['SYN-PID-2', REVISION_2], ['SYN-PID-1', REVISION_2]], `${route}: one opening per patient and revision served`);
+      assert.equal(new Set(opened.map(o => o.eventId)).size, 4, `${route}: A after B is a new delivery, not the first one again`);
+      assert.deepEqual(opened.map(o => o.terminals), [['transfer-ended'], ['transfer-ended'], ['transfer-ended'], ['transfer-ended']], route);
+    } finally { await s.close(); }
+  }
+});
+
+test('R244-GPT-FIX9-01 a patient correction while the opening receipt waits sends no byte of the corrected patient under the previous record', async () => {
+  for (const route of ['relay', 'frame reader']) {
+    const s = await stack();
+    let release = () => {};
+    try {
+      const url = route === 'relay' ? s.routes.study : '/api' + s.routes.frame;
+      let entered;
+      const held = new Promise(resolve => { release = resolve; }), reached = new Promise(resolve => { entered = resolve; });
+      s.records.state.before = async event => { if (event.action === 'provide-prepared') { s.records.state.before = null; entered(); await held; } };
+      const pending = s.get(url);
+      await reached;   // the gate observed patient A; the opening's receipt is not durable yet
+      Object.assign(s.source.behaviour, { patient: 'SYN-PID-2', revision: '20261028T090100' });
+      release();
+      const refused = await pending;
+      assert.equal(refused.status, 409, route);
+      assert.equal(JSON.parse(refused.body.toString()).code, 'ImageCurrentStudyChanged', route);
+      assert.deepEqual(s.source.imageCalls(), [], `${route}: no image byte was read for the outdated record`);
+      // The next read is admitted for patient B and served under a record of its own.
+      const corrected = await s.get(url);
+      assert.equal(corrected.status, 200, route);
+      assert.ok(corrected.body.includes(Buffer.from('SYNTHETIC-PATIENT:SYN-PID-2')));
+      await s.recorder.beforeApplicationShutdown();
+      assert.deepEqual(openings(s.records).map(o => [o.patient, o.version, o.terminals]),
+        [['SYN-PID-1', REVISION_1, ['transfer-aborted']], ['SYN-PID-2', REVISION_2, ['transfer-ended']]], route);
+    } finally { release(); await s.close(); }
+  }
+});
+
+test('R244-GPT-FIX9-01 reads waiting for an opening whose study got a newer revision meanwhile are served under that revision\'s delivery, not the retired one', async () => {
+  const s = await stack();
+  let release = () => {};
+  try {
+    let entered;
+    const held = new Promise(resolve => { release = resolve; }), reached = new Promise(resolve => { entered = resolve; });
+    s.records.state.before = async event => { if (event.action === 'provide-prepared') { s.records.state.before = null; entered(); await held; } };
+    const first = s.get(s.routes.thumbnail);
+    await reached;
+    const second = s.get(s.routes.report);   // joins the opening while its receipt waits
+    await wait(50);
+    s.source.behaviour.revision = '20261028T090100';
+    release();
+    const answers = await Promise.all([first, second]);
+    assert.deepEqual(answers.map(a => a.status), [200, 200]);
+    await s.recorder.beforeApplicationShutdown();
+    assert.deepEqual(openings(s.records).map(o => [o.version, o.terminals]),
+      [[REVISION_1, ['transfer-aborted']], [REVISION_2, ['transfer-ended']]], 'the retired delivery served nothing; both reads count in the current one');
+    for (const observation of s.observations.slice(0, 2))
+      assert.equal(observation.firstByte.filter(action => action === 'provide-prepared').length, 2,
+        `${observation.path}: its first byte followed the current revision's record`);
+  } finally { release(); await s.close(); }
+});
+
+test('R244-GPT-FIX10-01 the source Orthanc selects after the lease is bound to it: a corrected patient gets no byte, a newer revision is asked again under its own record', async () => {
+  for (const route of ['relay', 'frame reader']) for (const change of ['patient', 'revision']) {
+    const s = await stack();
+    try {
+      const url = route === 'relay' ? s.routes.study : '/api' + s.routes.frame;
+      const source = route === 'relay' ? s.routes.study : s.routes.frame;
+      // The archive changes as it handles the image request itself - after the lease read the study, once.
+      s.source.behaviour.beforeRead = async p => {
+        if (p !== source) return;
+        s.source.behaviour.beforeRead = null;
+        if (change === 'patient') Object.assign(s.source.behaviour, { patient: 'SYN-PID-2', revision: '20261028T090100' });
+        else s.source.behaviour.revision = '20261028T090100';
+      };
+      const answer = await s.get(url);
+      await s.recorder.beforeApplicationShutdown();
+      const label = `${route} ${change}`;
+      if (change === 'patient') {
+        assert.equal(answer.status, 409, label);
+        assert.equal(JSON.parse(answer.body.toString()).code, 'ImageCurrentStudyChanged', label);
+        assert.deepEqual(s.observations.map(o => o.firstByte), [null], `${label}: no byte of the corrected patient's image`);
+        assert.deepEqual(openings(s.records).map(o => [o.patient, o.version, o.terminals]), [['SYN-PID-1', REVISION_1, ['transfer-aborted']]], label);
+      } else {
+        // Orthanc's first answer may be of either revision: it is dropped unread, and the archive is asked again under the
+        // newer revision's record, durable before the first byte.
+        assert.equal(answer.status, 200, label);
+        assert.equal(s.source.imageCalls().length, 2, label);
+        assert.deepEqual(openings(s.records).map(o => [o.patient, o.version, o.terminals]),
+          [['SYN-PID-1', REVISION_1, ['transfer-aborted']], ['SYN-PID-1', REVISION_2, ['transfer-ended']]], label);
+        assert.equal(s.observations[0].firstByte.filter(action => action === 'provide-prepared').length, 2, label);
+      }
+    } finally { await s.close(); }
+  }
+});
+
+test('R244-GPT-FIX10-02 every lease decides on current facts read after the revision: a study moved to another institution meanwhile is refused to a read that would join the open delivery', async () => {
+  for (const route of ['relay', 'frame reader']) for (const open of [false, true]) {
+    const s = await stack({ idleMs: 60_000 });
+    try {
+      const url = route === 'relay' ? s.routes.study : '/api' + s.routes.frame;
+      if (open) assert.equal((await s.get(url)).status, 200);
+      const before = s.source.imageCalls().length;
+      // The study is moved to another institution while the lease reads the archive's revision (an ordinary
+      // reassignment): the gate admitted the read before it.
+      s.source.behaviour.beforeRead = async p => {
+        if (!p.startsWith('/studies/')) return;
+        s.source.behaviour.beforeRead = null;
+        for (const [uid, state] of s.states) s.states.set(uid, { ...state, institutionId: 'site-b' });
+      };
+      const answer = await s.get(url);
+      await s.recorder.beforeApplicationShutdown();
+      const label = `${route} open=${open}`;
+      assert.equal(answer.status, 404, label);
+      assert.equal(s.source.imageCalls().length, before, `${label}: the archive was not asked for the image`);
+      assert.deepEqual(openings(s.records).map(o => o.terminals), open ? [['transfer-ended']] : [], label);
+    } finally { await s.close(); }
+  }
+});
+
+test('the delivery key is the member session: another subject or another session of the study opens its own delivery', async () => {
+  const s = await stack({ idleMs: 60_000 });
+  try {
+    // Inside the idle gap: the same session's second read joins, the other subject's and the other session's do not.
+    const answers = await Promise.all([s.get(s.routes.thumbnail), s.get(s.routes.report),
+      s.get(s.routes.thumbnail, { 'X-Synthetic-Sub': 'syn-other-doctor-sub' }), s.get(s.routes.thumbnail, { 'X-Synthetic-Session': 'authref:session-b' })]);
+    assert.deepEqual(answers.map(a => a.status), [200, 200, 200, 200]);
+    await s.recorder.beforeApplicationShutdown();
+    const prepared = s.records.entries.filter(e => e.event.action === 'provide-prepared').map(e => e.event);
+    assert.equal(prepared.length, 3, 'three member sessions, three deliveries; the same session\'s second read joined its first');
+    prepared.sort((a, b) => a.userId.value.subject.localeCompare(b.userId.value.subject));
+    assert.deepEqual(prepared.map(e => e.userId.value.subject), ['syn-doctor-sub', 'syn-doctor-sub', 'syn-other-doctor-sub']);
+  } finally { await s.close(); }
+});
+
 test('MG-08 classification: image representations are deliveries, descriptions are not', () => {
-  const { imageRead } = require('/app/dist/image-relay.controller.js');
+  const { imageRead } = require('/app/dist/image-delivery-record.js');
   const I = '/instances/' + INSTANCE_ID, S = '/dicom-web/studies/' + STUDY_UID, SE = S + '/series/' + SERIES_UID, O = SE + '/instances/' + SOP_UID;
   for (const path of [I + '/frames/0/rendered', I + '/image-uint16', I + '/frames/0/image-int16', I + '/preview', I + '/pdf', I + '/file',
     I + '/rendered', I + '/content/7fe0-0010', I, O + '/frames/1', O + '/frames/1/rendered', O + '/rendered', O + '/thumbnail', O,
