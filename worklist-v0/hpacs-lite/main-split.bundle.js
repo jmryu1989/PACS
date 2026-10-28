@@ -466,7 +466,7 @@
     KinDictation.mount(dictation, {
       button: $("#b-dictate"), pane: $("#dictation-pane"), status: $("#dictation-status"),
       text: $("#dictation-text"), place: $("#dictation-place"), meta: $("#dictation-meta"),
-      stop: $("#dictation-stop"), cancel: $("#dictation-cancel"), repin: $("#dictation-repin"),
+      stop: $("#dictation-stop"), cancel: $("#dictation-cancel"), retry: $("#dictation-retry"), repin: $("#dictation-repin"),
       insert: $("#dictation-insert"), close: $("#dictation-close"),
     }, {
       inserted: field => {
@@ -1536,7 +1536,7 @@
       $("#holdbar").style.display = held ? "flex" : "none";
       $("#holdmsg").textContent = held ? `✎ ${heldTitle} — 잠금이 풀리면 이어서 판독할 수 있습니다` : "";
       $("#deferbar").style.display = s?.rs === "H" ? "flex" : "none";
-      $("#defermsg").textContent = s?.rs === "H" ? `⏸ On Hold — ${s.holdReason ?? ""}` : "";
+      $("#defermsg").textContent = s?.rs === "H" ? `⏸ On Hold${s.holdReason ? ' — ' + s.holdReason : ''}` : "";
       // 남의 예비 판독은 읽지도 쓰지도 못한다. 서버가 막지만 회색으로 보이는 편이 낫다 —
       // 눌러보고 거절당하는 건 "왜 안 되지"를 만들고, 회색은 "내 것이 아니구나"를 만든다.
       const locked = !!appState[selectedUid]?.prelimHidden;
@@ -1894,6 +1894,7 @@
       ];
       render(); refreshRight();
     }
+
 
     /**
      * 날짜 퀵필터. "최근 N일" — **양쪽 끝을 다 본다.**
@@ -6958,7 +6959,7 @@
     function announceCommit(uid, action, reason, lateText) {
       const done = {
         save: "임시 저장했습니다 (RS: T)",
-        defer: `보류했습니다 (RS: H) — ${reason}`,
+        defer: `보류했습니다 (RS: H)${reason ? ' — ' + reason : ''}`,
         approve: "판독문을 승인했습니다 (RS: A)",
         addendum: "추가기재를 저장했습니다 — 이전 승인본은 그대로 남습니다",
         reset: "판독을 취소했습니다 (RS: W). 사유가 이력에 기록됐습니다",
@@ -7412,7 +7413,7 @@
     $("#b-approve-next").addEventListener("click", approveAndNext);
     $("#b-addendum").addEventListener("click", () => commitReport("addendum"));
     let reasonResolve = null;
-    function askReason({ title, choices }) {
+    function askReason({ title, choices, optional = false }) {
       if (reasonResolve) reasonResolve(null);
       const modal = $("#reasonmodal"), extra = $("#reason-extra"), ok = $("#reason-ok");
       $("#reason-title").textContent = title;
@@ -7422,10 +7423,12 @@
       const value = () => {
         const choice = modal.querySelector('input[name="reason-choice"]:checked')?.value;
         const detail = extra.value.trim();
-        if (!choice || (choice === "기타" && !detail) || detail.length > 200) return null;
+        if (detail.length > 200) return null;
+        if (!choice) return optional ? detail : null;
+        if (choice === "기타" && !detail && !optional) return null;
         return detail ? `${choice} — ${detail}` : choice;
       };
-      const update = () => { ok.disabled = !value(); };
+      const update = () => { ok.disabled = value() === null; };
       update();
       modal.classList.add("show");
       return new Promise(resolve => {
@@ -7440,7 +7443,7 @@
         modal.oninput = modal.onchange = update;
         modal.onkeydown = e => { if (e.key === "Escape") finish(null); };
         $("#reason-cancel").onclick = () => finish(null);
-        ok.onclick = () => { const reason = value(); if (reason) finish(reason); };
+        ok.onclick = () => { const reason = value(); if (reason !== null) finish(reason); };
       });
     }
     $("#b-unread").addEventListener("click", async () => {
@@ -7453,8 +7456,8 @@
     });
     $("#b-defer").addEventListener("click", async () => {
       const uid = selectedUid, at = work.capture("study");
-      const reason = await askReason({ title: "판독 보류 사유", choices: ["prior 없음", "임상정보 부족", "영상 불량", "재촬영 필요", "기타"] });
-      if (!reason || uid !== selectedUid || !work.admits(at)) return;
+      const reason = await askReason({ title: "Defer (Optional Reason)", optional: true, choices: ["prior 없음", "임상정보 부족", "영상 불량", "재촬영 필요", "기타"] });
+      if (reason === null || uid !== selectedUid || !work.admits(at)) return;
       commitReport("defer", reason);
     });
 
@@ -7474,6 +7477,7 @@
       if (a.ward) s.ward = a.ward;
       if (a.reqHosp && !s.institutionName) s.reqHosp = a.reqHosp;
     }
+
 
     // ══════════ 동시 판독 점유 (교훈 §2) ══════════
     // 점유는 **열람이 아니라 쓰기**로 시작한다. 검사를 열어보는 건 흔한 일이고,
@@ -10040,7 +10044,9 @@
       const retry = node('button', model.TEXT.retry, 'chip');
       retry.type = 'button';
       retry.hidden = true;
-      status.after(retry);
+      const next = node('button', 'Next Page', 'chip'); next.type = 'button';
+      next.addEventListener('click', () => { if (answer?.nextCursor && !loading) start(shownUid, answer.nextCursor); });
+      status.after(retry, next);
       // shownUid: the study the panel is for (null = hidden). A request is one generation of seq; only the newest may paint.
       let ended = false, seq = 0, controller = null, loading = false, shownUid = null;
       let answer = null, stale = {}, failure = null, observation = null;
@@ -10070,6 +10076,7 @@
         refresh.disabled = !visible || loading;
         retry.disabled = loading;
         retry.hidden = true;
+        next.hidden = !visible || !answer?.nextCursor; next.disabled = loading;
         status.replaceChildren();
         status.title = '';
         conflict.replaceChildren();
@@ -10133,7 +10140,7 @@
         if (!loading) line(model.summary(answer, stale, failure));
       }
 
-      function start(uid) {
+      function start(uid, cursor) {
         if (controller) controller.abort();
         const mine = ++seq, who = owner(), own = new AbortController();
         controller = own;
@@ -10141,7 +10148,7 @@
         paint();
         // 이 읽기를 시작한 작업 문맥. 답도 실패도 그것이 그대로일 때만 이 패널에 닿는다.
         const at = work.capture('document');
-        read(uid, own.signal, at).then(value => settle(mine, uid, who, value, null, at), error => settle(mine, uid, who, null, error, at));
+        read(uid, own.signal, at, cursor).then(value => settle(mine, uid, who, value, null, at), error => settle(mine, uid, who, null, error, at));
       }
       function settle(mine, uid, who, value, error, at) {
         // 로그아웃 준비·그 취소 뒤에 온 답은 아무것도 그리지 않는다. 그 읽기가 세운 대기 표시만 내려 두고(자기 것만),
@@ -10242,7 +10249,7 @@
         allowed: () => !!sess && serverMode && !demoMode && !offline && (KinAuth.has('radiologist') || KinAuth.has('admin')),
         target: () => viewed()?.uid ?? null,
         owner: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution ?? null, s.sub ?? null] : null; },
-        read: (uid, signal, at) => api('GET', '/studies/' + encodeURIComponent(uid) + '/clinical-context', undefined, signal, at),
+        read: (uid, signal, at, cursor) => api('GET', '/studies/' + encodeURIComponent(uid) + '/clinical-context' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''), undefined, signal, at),
         actor: value => displayActor(value) });
     } catch (_) { toast('Clinical Context 패널을 준비하지 못했습니다. 판독 작업은 계속할 수 있습니다.', 'err'); }
 
@@ -10328,7 +10335,7 @@
         inboxReady: (n, more) => `질문 ${n}건을 최신순으로 표시합니다.${more ? ' More로 이어서 읽습니다.' : ''}`,
         notListed: '이 검사는 지금 워크리스트에 없어 열 수 없습니다. 목록을 새로고침하거나 검색 조건을 바꾸세요.',
         unlisted: '워크리스트에 없는 검사',
-        noText: '1~2,000자의 내용을 입력하세요.',
+        noText: '내용을 입력하세요.',
         sending: '보내는 중입니다…',
         saved: '저장했습니다.',
         replayed: '이미 저장된 요청입니다. 서버가 처음 저장한 결과를 돌려주었습니다.',
@@ -10368,7 +10375,7 @@
       const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
       const STUDY = /^\d+(?:\.\d+)+$/;
       const CURSOR = /^[A-Za-z0-9_-]{1,256}$/;
-      const TIMEOUT_MS = 60000, TEXT_MAX = 2000;
+      const TIMEOUT_MS = 60000;
       let ended = false, lock = null;
       // 나가 있는 질문 요청. 세션이 끝나면(end) 모두 멈춘다 — 답은 번호로도 버려지지만 끝난 세션의 응답을 기다리지 않는다.
       const inflight = new Set();
@@ -10505,7 +10512,7 @@
         if (!item || typeof item !== 'object' || item.id !== id) throw new Error(TEXT.malformed);
         // 다른 검사의 질문이면 판독 대상 곁에 열지 않고 그 이유를 보인다(Inbox에서 고른 질문도 이 단건 읽기로 확인한다).
         if (item.studyUid !== target) throw new Error(TEXT.otherStudy);
-        if (!STATES.includes(item.state) || !who(item.author) || !Array.isArray(item.entries) || !item.entries.length || item.entries.length > 100
+        if (!STATES.includes(item.state) || !who(item.author) || !Array.isArray(item.entries) || !item.entries.length
             || item.revision !== item.entries.length || item.entryCount !== item.entries.length || !anchor(item.current)
             || (item.state === 'Closed') !== (!!item.closed && typeof item.closed === 'object'))
           throw new Error(TEXT.malformed);
@@ -10731,7 +10738,6 @@
         field.dataset.field = '';
         if (spec.multiline) field.rows = 3;
         else field.type = 'text';
-        field.maxLength = TEXT_MAX;
         field.setAttribute('aria-describedby', hintId);
         field.addEventListener('input', () => {
           if (!attempts.has(key)) drafts.set(key, field.value);
@@ -10799,7 +10805,7 @@
         const who = owner();
         if (ended || lock !== null || target !== uid || attempts.has(key) || !loaded || !who) return;
         const value = field.value;
-        if (!(action === 'close' && value === '') && (!value.trim() || value.length > TEXT_MAX)) {
+        if (!(action === 'close' && value === '') && (!value.trim())) {
           setNote(noteKey, 'failed', TEXT.noText);
           return;
         }
@@ -12098,7 +12104,7 @@
     });
     let ctxSelection = null;
     function showSelectionMenu(e, set) {
-      showCtx(e, [{ label: "Open Selected Studies", dis: set.studyUids.length > KinWorklistSelection.SET_LIMITS.max,
+      showCtx(e, [{ label: "Open Selected Studies",
         act: () => { ctxSelection = null; multiStudyView?.open(set); } }], null, null);
       ctxSelection = { items: ctxItems, generation: set.generation };
     }

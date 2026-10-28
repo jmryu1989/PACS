@@ -684,7 +684,7 @@ function kinCreateViewerHistory() {
         do {
           const page = await api(path() + '?includeHidden=true&limit=100' + (recheck ? '&recheck=' + encodeURIComponent(recheck) : '') + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {}, ticket);
           if (!asked(ticket, seq, 'author')) return;
-          if (!Array.isArray(page.items) || heads.length + page.items.length > 512 || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
+          if (!Array.isArray(page.items) || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
           heads.push(...page.items); cursor = page.nextCursor;
         } while (cursor);
         if (!asked(ticket, seq, 'author')) return;
@@ -734,20 +734,20 @@ function kinCreateViewerHistory() {
     async function readOnlyLoad(ticket, seq) {
       if (!valid(ticket) || seq !== readSequence) return;
       const study = scope, heads = [];
-      let cursor = null, version = null, withheld = false, pages = 0;
+      let cursor = null, version = null, withheld = false;
       dropRows(); panel.dataset.readOnly = 'loading'; toolbar();
       try {
         do {
           const page = await api(path() + '?limit=100' + (cursor === null ? '' : '&cursor=' + encodeURIComponent(cursor)), {}, ticket);
           if (!asked(ticket, seq, 'final')) return;
-          if (++pages > 6 || !page || page.uid !== study || typeof page.final !== 'boolean') throw new Error('Invalid page');
+          if (!page || page.uid !== study || typeof page.final !== 'boolean') throw new Error('Invalid page');
           if (!page.final) {
             if (cursor !== null || page.items !== null || page.nextCursor !== null) throw new Error('Invalid page');
             withheld = true; break;
           }
           const next = page.nextCursor;
           if (!Number.isSafeInteger(page.reportVersion) || page.reportVersion < 1 || (version !== null && page.reportVersion !== version) ||
-              !Array.isArray(page.items) || page.items.length > 100 || heads.length + page.items.length > 512 ||
+              !Array.isArray(page.items) || page.items.length > 100 ||
               !page.items.every(h => h && typeof h === 'object' && typeof h.id === 'string' && h.id && Number.isSafeInteger(h.revision) &&
                 h.item && typeof h.item === 'object' && Object.hasOwn(names, h.item.kind)) ||
               !(next === null || typeof next === 'string' && next.length > 0 && next.length <= 512 && next !== cursor)) throw new Error('Invalid page');
@@ -899,8 +899,8 @@ function kinCreateViewerHistory() {
         const lines = [];
         if (Number.isFinite(s.area)) lines.push('Area: ' + number(s.area) + ' ' + s.areaUnit);
         if (s.modalityUnit === 'HU') {
-          for (const [name, value] of [['Mean', s.mean], ['Min', min], ['Max', s.max]])
-            if (Number.isFinite(value)) lines.push(name + ': ' + (name === 'Mean' ? number(value) : value) + ' HU');
+          for (const [name, value] of [['Mean', s.mean], ['SD', s.stdDev], ['Min', min], ['Max', s.max]])
+            if (Number.isFinite(value)) lines.push(name + ': ' + (['Mean', 'SD'].includes(name) ? number(value) : value) + ' HU');
         }
         return lines;
       } };
@@ -983,7 +983,12 @@ function kinCreateViewerHistory() {
     function row(e) {
       if (!e.element) { e.element = document.createElement('section'); e.element.style.cssText = 'border-top:1px solid #405777;margin-top:8px;padding-top:8px'; list.append(e.element); }
       const el = e.element; el.replaceChildren(); el.dataset.itemId = e.head?.id || ''; el.dataset.kind = e.draft.kind;
-      text(el, 'strong', names[e.draft.kind] + ' · ' + (e.head ? 'Saved r' + e.head.revision : 'Unsaved') + (e.head?.hidden ? ' · Hidden' : ''));
+      const sourceUnverified = manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified';
+      // Saved names the server revision; an edit, a save in flight or an unknown answer is not that revision.
+      // Source verification keeps its own 재확인 필요 line below, so a saved item stays Saved r<n>.
+      const stateLabel = e.busy ? 'Saving' : e.pending ? 'Unverified' : hasWork(e) || !e.head ? 'Unsaved' : 'Saved r' + e.head.revision;
+      text(el, 'strong', names[e.draft.kind] + ' · ' + stateLabel + (e.head?.hidden ? ' · Hidden' : ''));
+      if (e.head && stateLabel !== 'Saved r' + e.head.revision) text(el, 'div', '서버 저장 이력 r' + e.head.revision + ' · 현재 수정·저장 결과와는 별개입니다.');
       // The clinician projection carries no author (clinician-policy.ts clinicianViewerItem).
       if (e.head) text(el, 'div', readOnly() ? 'Read-only' : e.head.authorActor + (writable(e) ? ' · My Item' : ' · Read-only'));
       if (e.editing) {
@@ -1006,7 +1011,6 @@ function kinCreateViewerHistory() {
         text(held, 'p', '프레임 ' + e.heldDraft.frame + ' · 아직 저장되지 않은 내용입니다.');
       }
       button(el, 'Go to Image', () => navigate(e));
-      const sourceUnverified = manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified';
       // Recheck and remeasure belong to the writer; a read-only row keeps the "재확인 필요" message hydrate() writes.
       if (sourceUnverified && !e.head.hidden && writer()) {
         text(el, 'p', '저장 이력과 현재 원본 확인은 별개입니다. 이 항목만 다시 확인할 수 있습니다. 원본이 바뀐 경우 새 뷰어에서 다시 측정하세요. 이 창의 수정과 기존 저장 이력은 유지됩니다.');
@@ -1022,8 +1026,8 @@ function kinCreateViewerHistory() {
         else if (e.editing) button(el, 'Save', () => save(e, 'edit'), !!e.busy || !!e.latest || !!sourceUnverified);
         else if (!e.head?.hidden) button(el, 'Edit', () => { e.editing = true; lock(e, false); row(e); }, manual(e.draft.kind) && e.head?.referenceStatus !== 'verified');
         if (e.head && !e.editing && !e.pending) button(el, e.head.hidden ? 'Restore' : 'Hide', () => {
-          const reason = window.prompt((e.head.hidden ? '복원' : '숨김') + ' 사유');
-          if (reason?.trim()) save(e, e.head.hidden ? 'restore' : 'hide', reason);
+          const reason = window.prompt((e.head.hidden ? '복원' : '숨김') + ' 사유 (선택)');
+          if (reason !== null) save(e, e.head.hidden ? 'restore' : 'hide', reason);
         }, !!e.busy);
         if (e.latest && !e.pending) button(el, 'Use Latest & Keep Changes', () => {
           e.head = e.latest; e.latest = null;
@@ -1185,6 +1189,7 @@ function kinCreateViewerHistory() {
       if (!ended && kinViewerSession.ended()) end();
       closeAuthoring();
       if (ended) return;
+      kinViewerToolbarLabels.outputScope(document);
       const r = current();
       if (r && r.study !== scope) {
         park(); reset('검사 확인 중…'); scope = r.study; me = null;

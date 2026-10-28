@@ -285,11 +285,12 @@ export type AuditSource = (below: number | null, take: number) => Promise<AuditL
  * 작은 id의 보이는 행 중 앞 `limit`개를 담는다. 숨긴 행은 total·쪽 경계·다음 쪽 여부 어디에도 들어가지 않는다
  * (RISK-S5-U5b-HIDDEN-COUNT). 원천 실패는 그대로 던진다 — 빈 목록으로 바꾸지 않는다(RISK-S5-U5b-FAILURE-AS-EMPTY).
  * `last`는 다음 쪽이 있을 때만 이 쪽 마지막 행의 id이며 응답에 그대로 나가지 않는다(서비스가 봉인한다).
+ * `ids`는 담은 행의 id(같은 순서)로, 서버의 열람 기록에만 쓰고 응답에 싣지 않는다.
  */
 export async function readAuditPage(source: AuditSource, reader: string,
     page: { after: number | null; limit: number; batch?: number }) {
   const batch = page.batch ?? 1000;
-  const rows: AuditProjection[] = [];
+  const rows: AuditProjection[] = [], ids: number[] = [];
   let below: number | null = null, previous = Infinity, total = 0, last: number | null = null, more = false;
   for (;;) {
     const chunk = await source(below, batch);
@@ -302,13 +303,13 @@ export async function readAuditPage(source: AuditSource, reader: string,
       if (!shown) continue;
       total++;
       if (page.after !== null && row.id >= page.after) continue;
-      if (rows.length < page.limit) { rows.push(shown); last = row.id; }
+      if (rows.length < page.limit) { rows.push(shown); ids.push(row.id); last = row.id; }
       else more = true;
     }
     if (chunk.length < batch) break;
     below = previous;
   }
-  return { rows, total, last: more ? last : null };
+  return { rows, ids, total, last: more ? last : null };
 }
 
 /** 다음 쪽 값. 행 id를 읽을 수 있게 내보내면 id 사이의 틈이 숨긴 행의 수를 알려 준다 — 그래서 암호화한다. */

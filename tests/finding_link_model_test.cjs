@@ -194,7 +194,7 @@ class Element extends EventTarget {
 const flush = async () => { for (let i = 0; i < 12; i++) await new Promise(setImmediate); };
 async function mounted(options) {
   const o = options || {};
-  const document = new EventTarget(); document.body = new Element('body'); document.createElement = tag => new Element(tag);
+  const document = new EventTarget(); document.body = new Element('body'); document.createElement = tag => new Element(tag); document.querySelectorAll = selector => document.body.querySelectorAll(selector);
   document.querySelector = selector => document.body.all().find(e => selector === '#' + e.id) || null;
   document.createTextNode = value => { const node = new Element('#text'); node.textContent = value; return node; };
   const window = new EventTarget(), annotations = new Map();
@@ -383,7 +383,7 @@ test('draftProblem refuses empty, duplicate, overlong and unlinked drafts', () =
   assert.equal(model.draftProblem({ ...ok, title: '', text: ' ' }), '제목 또는 본문을 입력하세요.');
   assert.equal(model.draftProblem({ ...ok, sources: [] }), '저장한 표식을 하나 이상 연결하세요.');
   assert.equal(model.draftProblem({ ...ok, sources: [ok.sources[0], ok.sources[0]] }), '같은 표식을 두 번 연결할 수 없습니다.');
-  assert.equal(model.draftProblem({ ...ok, sources: Array.from({ length: 9 }, (_, i) => ({ itemId: ITEM.slice(0, -1) + i, revision: 1 })) }), '표식은 최대 8개까지 연결할 수 있습니다.');
+  assert.equal(model.draftProblem({ ...ok, sources: Array.from({ length: 9 }, (_, i) => ({ itemId: ITEM.slice(0, -1) + i, revision: 1 })) }), null);
   assert.equal(model.draftProblem({ ...ok, sources: [{ itemId: 'x', revision: 1 }] }), '연결한 표식의 저장 정보를 확인하세요.');
   assert.equal(model.draftProblem({ ...ok, title: '😀'.repeat(201) }), '제목은 200자 이하여야 합니다.');
   assert.equal(model.draftProblem({ ...ok, title: '😀'.repeat(200) }), null);
@@ -1558,7 +1558,7 @@ test('store anchor refusal: its text follows the viewer history at the answer, n
 
 /* The whole history extension and the Findings section in a two-viewport comparison viewer. */
 async function paired() {
-  const document = new EventTarget(); document.body = new Element('body'); document.createElement = tag => new Element(tag);
+  const document = new EventTarget(); document.body = new Element('body'); document.createElement = tag => new Element(tag); document.querySelectorAll = selector => document.body.querySelectorAll(selector);
   document.querySelector = selector => document.body.all().find(e => selector === '#' + e.id) || null;
   document.createTextNode = value => { const node = new Element('#text'); node.textContent = value; return node; };
   const window = new EventTarget(), annotations = new Map();
@@ -1961,7 +1961,7 @@ const VO = 'e0000000-0000-4000-8000-000000000009';
 const PL = 'e0000000-0000-4000-8000-00000000b001', PN = 'e0000000-0000-4000-8000-00000000b002', PC = 'e0000000-0000-4000-8000-00000000b003';
 const PD = 'e0000000-0000-4000-8000-00000000b004';
 async function valueViewer() {
-  const document = new EventTarget(); document.body = new Element('body'); document.createElement = tag => new Element(tag);
+  const document = new EventTarget(); document.body = new Element('body'); document.createElement = tag => new Element(tag); document.querySelectorAll = selector => document.body.querySelectorAll(selector);
   document.querySelector = selector => document.body.all().find(e => selector === '#' + e.id) || null;
   document.createTextNode = value => { const node = new Element('#text'); node.textContent = value; return node; };
   const host = new Element('div'); host.id = 'kin-viewer-history'; document.body.append(host);
@@ -2403,7 +2403,7 @@ test('S2-L2b continuation: once, after the first authorized list, only for the e
 
 /* The shipped Findings section with a version 2 finding holding a characteristics line, a 3D point and a saved view. */
 async function locationViewer({ schemaHeader = '2', modelOverride } = {}) {
-  const document = new EventTarget(); document.body = new Element('body'); document.createElement = tag => new Element(tag);
+  const document = new EventTarget(); document.body = new Element('body'); document.createElement = tag => new Element(tag); document.querySelectorAll = selector => document.body.querySelectorAll(selector);
   document.querySelector = selector => document.body.all().find(e => selector === '#' + e.id) || null;
   document.createTextNode = value => { const node = new Element('#text'); node.textContent = value; return node; };
   const host = new Element('div'); host.id = 'kin-viewer-history'; document.body.append(host);
@@ -2580,7 +2580,7 @@ test('mounted continuation: the one-use nonce is consumed once; a missing record
     const store = new Map(stored ? [[stored[0], stored[1]]] : []);
     const saved = globalThis.__kinStorage;
     const viewer = await (async () => {
-      const document = new EventTarget(); document.body = new Element('body'); document.createElement = tag => new Element(tag);
+      const document = new EventTarget(); document.body = new Element('body'); document.createElement = tag => new Element(tag); document.querySelectorAll = selector => document.body.querySelectorAll(selector);
       document.querySelector = selector => document.body.all().find(e => selector === '#' + e.id) || null;
       document.createTextNode = value => { const node = new Element('#text'); node.textContent = value; return node; };
       const host = new Element('div'); host.id = 'kin-viewer-history'; document.body.append(host);

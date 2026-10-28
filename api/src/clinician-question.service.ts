@@ -16,8 +16,6 @@ import type { Caller } from './pacs.service';
  * StudyAccessService.prepare()가 권한 판정을 위해 트랜잭션·잠금 전에 할 뿐이다(§4.1).
  */
 export const QUESTION_AUDIT_ACTION = 'study.question';
-const QUESTION_BODY_MAX = 2000;
-const QUESTION_ENTRY_LIMIT = 100;
 const QUESTION_PAGE = 50;
 const RADIOLOGIST = 'radiologist';
 const ADMIN = 'admin';
@@ -34,7 +32,7 @@ type Step = { action: string; kind: string; to: string; role: string; body: stri
 const fingerprint = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const object = (value: any) => !!value && typeof value === 'object' && !Array.isArray(value);
 const exactKeys = (value: any, keys: string[]) => object(value) && Object.keys(value).sort().join(',') === [...keys].sort().join(',');
-const text = (value: any) => typeof value === 'string' && value.trim().length > 0 && value.length <= QUESTION_BODY_MAX && !CONTROL.test(value);
+const text = (value: any) => typeof value === 'string' && value.trim().length > 0 && !CONTROL.test(value);
 const uuid = (value: any) => typeof value === 'string' && UUID.test(value);
 const studyUid = (value: any) => typeof value === 'string' && value.length <= 64 && STUDY_UID.test(value);
 const revision = (value: any) => Number.isInteger(value) && value >= 1 && value < 2147483647;
@@ -53,7 +51,6 @@ const reused = () => new ConflictException(error('REQUEST_ID_REUSED', '다른 �
 const changed = () => new ConflictException(error('QUESTION_CHANGED', '질문이 변경되었습니다. 다시 불러온 뒤 확인하세요'));
 const closedError = () => new ConflictException(error('QUESTION_CLOSED', '닫힌 질문에는 더 쓸 수 없습니다'));
 const stateError = () => new ConflictException(error('QUESTION_STATE', '지금 상태에서 할 수 없는 질문 동작입니다'));
-const entryLimit = () => new ConflictException(error('QUESTION_ENTRY_LIMIT', '질문 스레드의 항목 수 상한에 도달했습니다'));
 const busy = () => new ServiceUnavailableException(error('QUESTION_BUSY', '질문 처리 중입니다. 같은 요청으로 다시 시도하세요'));
 
 @Injectable()
@@ -355,8 +352,6 @@ export class ClinicianQuestionService {
       if (row.state === 'Closed') throw closedError();
       if (!['Open', 'Answered'].includes(row.state)) throw stateError();
       const author = this.replyAuthor(row, c);
-      // 마지막 한 칸은 닫기 몫이다. 답변·추가 질문이 100칸을 모두 채우면 그 스레드는 닫을 수 없게 된다.
-      if (row.entryCount >= QUESTION_ENTRY_LIMIT - 1) throw entryLimit();
       return this.apply(tx, c, row, rs, requestId, mark, author
         ? { action: 'followup', kind: 'followup', to: 'Open', role: 'clinician', body: b.body }
         : { action: 'answer', kind: 'answer', to: 'Answered', role: RADIOLOGIST, body: b.body });
@@ -405,7 +400,6 @@ export class ClinicianQuestionService {
       if (row.state === 'Closed') throw closedError();
       if (!['Open', 'Answered'].includes(row.state)) throw stateError();
       const role = this.closeRole(row, c, b);
-      if (row.entryCount >= QUESTION_ENTRY_LIMIT) throw entryLimit();
       return this.apply(tx, c, row, rs, requestId, mark, { action: 'close', kind: 'close', to: 'Closed', role, body: b.note });
     }, false, transaction);
   }

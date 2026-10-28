@@ -33,7 +33,6 @@ class TechNoteE2E(WorklistE2E):
   self.assertEqual(r.body['note']['version'],1)
   self.assertNotIn('authorSub',r.body['note']);self.assertNotIn('institutionId',r.body['note'])
   self.assertEqual(r.body['note']['author'],self.stack.username('tech')+'@local.test' if '@' not in self.stack.username('tech') else self.stack.username('tech'))
-  self.assertEqual(self.write(f,'edit',1).status,400)
   self.assertEqual(self.write(f,'stale',0,'stale').status,409)
   # Two requests based on the same version cannot silently overwrite each other.
   with ThreadPoolExecutor(2) as pool:
@@ -44,7 +43,7 @@ class TechNoteE2E(WorklistE2E):
   self.assertEqual([n['version'] for n in history],[3,2,1])
   self.assertEqual(history[-1]['text'],'<script>SYNTHETIC & first</script>')
   self.assertEqual(self.stack.request('DELETE','/studies/'+f.uid,'tech').status,409)
-  for body in [dict(text='x',reason='',baseVersion=-1),dict(text='x',reason='',baseVersion=3,author='forged'),dict(text='x'*10001,reason='',baseVersion=3)]:
+  for body in [dict(text='x',reason='',baseVersion=-1),dict(text='x',reason='',baseVersion=3,author='forged')]:
    self.assertEqual(self.stack.request('POST',path,'tech',body).status,400)
   self.assertEqual(self.stack.request('GET',path+'/history?before=bad','tech').status,400)
   for text,reason in [('\ud800','bad unicode'),('invalid reason','\udfff')]:
@@ -109,13 +108,17 @@ class TechNoteE2E(WorklistE2E):
   expect(p.locator('#tech-note-text')).to_have_value('SYNTHETIC revised')
   # S8-CTX T08: the read still shows v1, so Save sends the same attempt (same id) once more.
   p.unroute('**/tech-note');p.locator('#tech-note-save').click();expect(p.locator('#tech-note-status')).to_have_text('입력이 v2로 저장되었습니다.')
-  p.locator('#tech-note-history').click();expect(p.locator('#tech-note-history-items section')).to_have_count(2)
+  expect(p.locator('#tech-note-reason')).to_have_value('')
+  p.locator('#tech-note-text').fill('SYNTHETIC revised without reason');p.locator('#tech-note-save').click()
+  expect(p.locator('#tech-note-status')).to_have_text('입력이 v3으로 저장되었습니다.')
+  self.assertEqual(self.stack.request('GET',self.path(f),'tech').body['note']['reason'],'')
+  p.locator('#tech-note-history').click();expect(p.locator('#tech-note-history-items section')).to_have_count(3)
   expect(p.locator('#tech-note-history-items')).to_contain_text('<b>literal</b>')
   self.assertEqual(p.locator('#tech-note-history-items b').count(),0)
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);p.screenshot(path=str(folder/'tech-note-history.png'))
   reader=self.login();self.select(reader,f);reader.locator('#tech-note-open').click()
   expect(reader.locator('#tech-note-status')).to_contain_text('읽기 전용')
-  expect(reader.locator('#tech-note-save')).to_be_disabled();expect(reader.locator('#tech-note-text')).to_have_value('SYNTHETIC revised')
+  expect(reader.locator('#tech-note-save')).to_be_disabled();expect(reader.locator('#tech-note-text')).to_have_value('SYNTHETIC revised without reason')
   p.locator('#tech-note-text').fill('UNSAVED');p.once('dialog',lambda d:d.dismiss());p.locator('#tech-note-close').click()
   expect(p.locator('#tech-note-dialog')).to_be_visible()
   end_document(p)

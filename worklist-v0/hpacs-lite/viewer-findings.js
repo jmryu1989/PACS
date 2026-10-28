@@ -291,7 +291,7 @@ window.kinViewerFindings = function (services, model) {
         } else if (e.head && !e.head.hidden && !store.pairBlocked(e)) button(el, 'Edit', () => store.edit(e), !!e.busy);
         if (e.head && !editing && !e.pending && !store.pairBlocked(e)) button(el, e.head.hidden ? 'Restore' : 'Hide', () => {
           const reason = window.prompt((e.head.hidden ? '복원' : '숨김') + ' 사유');
-          if (reason?.trim()) store.save(e, e.head.hidden ? 'restore' : 'hide', reason);
+          if (reason !== null) store.save(e, e.head.hidden ? 'restore' : 'hide', reason);
         }, !!e.busy);
         if (e.latest && !e.pending) button(el, 'Use Latest & Keep Changes', () => store.useLatest(e), !!e.busy);
       }

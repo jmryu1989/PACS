@@ -255,7 +255,18 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
     def test_shell_09_settings_failure_keeps_default_tools(self):
         fixture = self.multiple('U2-' + uuid.uuid4().hex[:12], 'settings failure', '20260801')
         page = self.login()
-        page.route('**/api/workspace-shortcuts', lambda route: route.fulfill(status=503, content_type='application/json', body='{}'), times=1)
+        failed_settings = False
+        def settings(route):
+            nonlocal failed_settings
+            if not failed_settings:
+                failed_settings = True
+                route.fulfill(status=503, content_type='application/json', body='{}')
+            else:
+                route.continue_()
+        # Expiring the last route disables Chromium interception while OHIF's
+        # mode chunks start loading, which can leave those requests unfinished.
+        # Keep routing active; Reload Settings still reaches the real server.
+        page.route('**/api/workspace-shortcuts', settings)
         page = self.launch(page, [fixture])
         page.locator('#kin-workspace-dock nav button[aria-controls="kin-viewer-layout"]').click()
         retry = page.get_by_role('button', name='Reload Settings', exact=True)

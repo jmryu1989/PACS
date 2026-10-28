@@ -65,9 +65,10 @@ services:
     ports: !reset []
     # 이미지 안에 빌드된 JS·Prisma 스키마만 쓴다. 운영에서 호스트 파일을 덮으면
     # 배포한 이미지와 실제 실행 코드가 달라져 재현 가능한 롤백이 사라진다.
-    # 남는 마운트는 EMR-B1 보호 상태 볼륨(원장 seal·실패 저널) 하나뿐이며 호스트 경로가 아니다.
+    # 쓰기 마운트는 EMR-B1 보호 상태 볼륨(원장 seal·실패 저널) 하나뿐이고, 그 밖에는 읽기 전용 이름 볼륨만 둔다. 호스트 경로는 없다.
     volumes: !override
       - emr-state:/var/lib/kin-emr
+      - orthanc-db:/var/lib/orthanc/db:ro   # MG-LOADING: the API's read-only frame range reads (docker-compose.yml api)
     logging: *bounded-logging
 
 # Only the HTTPS proxy joins this auxiliary network from the PACS stack.

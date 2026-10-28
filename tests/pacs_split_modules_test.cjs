@@ -1,4 +1,6 @@
 'use strict';
+// Read the selected wire body; HTTP/PG publication is covered by emr/a/report_reads_test.cjs.
+const readBody = value => JSON.parse(value.json);
 const nativeSigning = { sign: async () => ({ fixture: 'native-signature' }) };
 
 // B2 consumer fixture only: these existing pure suites exercise business/CAS rules.
@@ -705,7 +707,7 @@ test('SPLIT-14 a citation is shown only while its finding is readable; a databas
   w.db.seed('reportVersion', { uid: s.uid, version: 1, action: 'approve', findings: 'line one\nline two', conclusion: '', recommendation: '',
     author: RAD_A.actor, citations: [entry('c-1', 'f-readable', 'line one'), entry('c-2', 'f-hidden', 'line two')] });
   w.findings.readable.add('f-readable');
-  const read = await w.evidence.reportCitations(s.uid, RAD_A);
+  const read = readBody(await w.evidence.reportCitations(s.uid, RAD_A));
   assert.equal(read.head.length, 2);
   assert.equal(read.head[0].insertedText, 'line one');
   assert.deepEqual(read.head[1], { cid: 'c-2', field: 'findings', insertedAt: '2026-10-01T00:00:00.000Z', insertedBy: RAD_A.actor, state: 'source-unavailable' });
@@ -748,9 +750,9 @@ test('SPLIT-16 the clinician list is the worklist narrowed; a report state that 
   w.db.seed('reportVersion', { uid: s.uid, version: 1, action: 'approve', findings: 'final', conclusion: '', recommendation: '', author: RAD_A.actor });
   w.orthanc.rows = [qido(s.uid, 'SYN A HOSPITAL')];
   await refused(() => w.clinician.clinicianStudies(RAD_A), 403);
-  const list = await w.clinician.clinicianStudies(CLIN_A);
+  const list = readBody(await w.clinician.clinicianStudies(CLIN_A));
   assert.deepEqual(list.studies.map(r => r.uid), [s.uid]);
-  const read = await w.clinician.clinicianReportRead(s.uid, CLIN_A);
+  const read = readBody(await w.clinician.clinicianReportRead(s.uid, CLIN_A));
   assert.equal(read.report.final, true);
   assert.equal(await w.clinician.clinicianViewerHead(s.uid, CLIN_A), 1);
   // an addendum by another signer lands between the list and its snapshot statement

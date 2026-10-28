@@ -64,7 +64,7 @@ HOLD_SECONDS = 25
 # Session states a started run never leaves by itself (dictation-session.js ACTIVE is the complement).
 TERMINAL_STATES = ("failed", "cancelled", "unavailable", "inserted")
 SMALL_CAP = 32044                           # 16000 frames: the CAP-03 worklet cap
-FULL_FRAMES = 524266                        # floor((1048576 - 44) / 2), dictation-worklet.js:8
+FULL_FRAMES = 524266                        # floor((1048576 - 44) / 2): this file's CAPABILITY maxBytes, as dictation-capture.js derives it
 WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 LOGGED_HEADERS = ("Content-Type", "Content-Length", "Transfer-Encoding", "X-KIN-CSRF", "Authorization", "Cookie",
                   "X-KIN-Session", "Origin", "Sec-Fetch-Dest", "Sec-Fetch-Mode", "Sec-Fetch-Site")
@@ -502,7 +502,8 @@ PROBES = {
     "state": "() => dictation.snapshot().state",
     "controller": "() => typeof dictation === 'object' && dictation !== null && typeof dictation.snapshot === 'function'",
     "strings": "() => ({ uploading: KinDictation.STATUS.uploading, capped: KinDictation.STATUS.capped,"
-               " reasons: KinDictation.REASONS })",
+               " held: KinDictation.STATUS.held, reasons: KinDictation.REASONS })",
+    "held": "() => dictation.view().held === true",
     "fixed": "s => s.toFixed(1)",
     "put": "([f, p]) => { put(f, p); return true; }",
     "expected": "([v, t, s, e]) => expected(v, t, s, e)",
@@ -1714,9 +1715,12 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             case.wait_js("recorded_for", 1000, "1.0 s after the worklet node", while_active=True)
             case.page.click("#dictation-stop", timeout=case.left_ms())
             entry = self.post_entry(case, held=False)
-            case.wait_state("failed", "failed")
+            # An engine failure is transient: the recording waits for Retry (first-site recovery), the
+            # microphone is already released and the report is untouched.
+            case.wait_js("held", None, "the recording held for Retry", while_active=True)
             value = case.snap()
-            self.failed_with(case, value, "DICTATION_ENGINE_FAILED")
+            case.check("pane held DICTATION_ENGINE_FAILED", value["pane"]["status"] ==
+                       case.strings["reasons"]["DICTATION_ENGINE_FAILED"] + case.strings["held"], value["pane"]["status"])
             self.tracks_ended(case, "tracks-ended", value)
             case.unchanged("report-unchanged", value)
             body, verdict, u1_ok, reasons = self.upload(case, entry, CAPABILITY["maxBytes"])

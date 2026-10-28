@@ -353,7 +353,7 @@ export interface OfflineAccessEventV2 {
 }
 /** Local source observations do not assert a formal PatientLink or a signed/retained record. */
 export interface LocalReadTarget {
-  kind: 'study-metadata' | 'report-version' | 'report-evidence';
+  kind: 'study-metadata' | 'report-version' | 'report-evidence' | 'report-head' | 'private-draft' | 'key-image' | 'measurement' | 'comparison-layout' | 'comparison-description' | 'order' | 'critical-result' | 'study-organization' | 'access-audit';
   studyId: EvidenceFact<string>;
   recordId: EvidenceFact<string>;
   versionId: EvidenceFact<string>;
@@ -450,12 +450,16 @@ export function parseLocalReadEvent(input: unknown): Readonly<LocalReadAccessEve
   if (!Array.isArray(v.targets) || !v.targets.length) throw new Error('Actual local targets required');
   const targets = v.targets.map(value => {
     const t = object(value, ['kind', 'studyId', 'recordId', 'versionId', 'sourcePatientId', 'sourceInstitution', 'projectionSha256']);
-    const kind = choice(t.kind, ['study-metadata', 'report-version', 'report-evidence']);
+    const kind = choice(t.kind, ['study-metadata', 'report-version', 'report-evidence', 'report-head', 'private-draft',
+      'key-image', 'measurement', 'comparison-layout', 'comparison-description', 'order', 'critical-result', 'study-organization',
+      'access-audit']);
     if (!kinds.includes(kind)) throw new Error('Target kind does not belong to the server route');
-    const versionId = kind === 'study-metadata' ? observed(t.versionId) : required(t.versionId, v => string(v));
+    // An AuditLog row is append-only (no revision) and its target is not always a study.
+    const versionId = kind === 'study-metadata' || kind === 'comparison-layout' || kind === 'order' || kind === 'access-audit'
+      ? observed(t.versionId) : required(t.versionId, v => string(v));
     if (action === 'client-shown' && kind !== 'report-version' && kind !== 'report-evidence')
       throw new Error('Client display reporting requires a stored report target');
-    return { kind, studyId: required(t.studyId, v => string(v)), recordId: required(t.recordId, v => string(v)),
+    return { kind, studyId: kind === 'order' || kind === 'study-organization' || kind === 'access-audit' ? observed(t.studyId) : required(t.studyId, v => string(v)), recordId: required(t.recordId, v => string(v)),
       versionId, sourcePatientId: observed(t.sourcePatientId), sourceInstitution: observed(t.sourceInstitution),
       projectionSha256: sha256(t.projectionSha256) };
   });

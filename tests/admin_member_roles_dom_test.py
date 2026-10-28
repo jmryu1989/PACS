@@ -174,13 +174,12 @@ SHIPPED_BODY = (
     "        if (institution !== base.institution) body.institution = institution;\n"
     "        if (!sameRoles(roles, base.roles)) body.roles = roles;\n"
 )
-# The PATCH body of admin.html:452-457 before S5-U5a and :482-487 at c59e039, the same four fields.
+# Recreate the earlier full-body defect using the fields still present in the membership form.
 FULL_BODY = (
     "        const body = {\n"
     "          approvalState: \"APPROVED\",\n"
     "          institution: form.elements.institution.value,\n"
     "          roles,\n"
-    "          verificationOverride: form.elements.verificationOverride.checked,\n"
     "        };\n"
 )
 
@@ -366,9 +365,6 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
     def set_institution(self, value):
         self.page.locator('#membership-form input[name="institution"]').fill(value)
 
-    def set_override(self, on):
-        self.page.locator('#membership-form input[name="verificationOverride"]').set_checked(on)
-
     # ── cases ──
     def test_01_unchanged_save_sends_nothing_and_the_role_set_survives(self):
         # S5-U5a-F01: patchUser isolates the member (sessions deleted, Keycloak logout) on any approval or
@@ -399,7 +395,6 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
         self.set_institution(f"  {INSTITUTION}  ")
         self.set_role("clinician", False)
         self.set_role("clinician", True)
-        self.set_override(True)
         self.save_unchanged()
         self.cancel()
 
@@ -465,9 +460,7 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
         self.assertEqual(("Approve Member", "", [], []), (seen["title"], seen["institution"], seen["checked"], seen["unmanaged"]))
         self.set_institution(INSTITUTION)
         self.page.get_by_role("checkbox", name="임상의", exact=True).check()
-        self.set_override(True)
-        self.assertEqual({"approvalState": "APPROVED", "institution": INSTITUTION, "roles": ["clinician"],
-                          "verificationOverride": True}, self.save())
+        self.assertEqual({"approvalState": "APPROVED", "institution": INSTITUTION, "roles": ["clinician"]}, self.save())
         expect(self.row("syn-pending").locator("td").nth(4)).to_have_text("APPROVED")
         expect(self.roles_cell("syn-pending")).to_have_text("clinician")
         expect(self.page.locator("#pending-badge")).to_have_text("Pending 0")
@@ -549,7 +542,6 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
           secretWarning: document.querySelector('.secret-warning').textContent,
           legend: document.querySelector('#membership-roles legend').textContent,
           roleLabels: [...document.querySelectorAll('#membership-roles input[name="role"]')].map(i => i.parentElement.textContent),
-          override: document.querySelector('input[name="verificationOverride"]').parentElement.textContent,
           headers: [...document.querySelector('#users').closest('table').querySelectorAll('thead th')].map(th => th.textContent),
           invalid: document.querySelector('#users .warning')?.textContent ?? null})""")
         self.assertEqual({
@@ -557,7 +549,6 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
             "secretWarning": "이 창을 닫으면 다시 볼 수 없습니다. 안전한 방법으로 회원에게 전달하세요.",
             "legend": "역할",
             "roleLabels": ["판독의", "방사선사", "관리자", "임상의"],
-            "override": "대면 확인으로 이메일 검증 예외 승인",
             "headers": ["아이디", "이름 / 이메일", "기관", "역할", "상태", "작업"],
             "invalid": "기관·역할 설정을 확인하세요",
         }, kept)
@@ -640,11 +631,10 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
                          (self.user("syn-legacy")["institution"], self.user("syn-legacy")["roles"]))
         expect(self.row("syn-legacy").locator("td").nth(2)).to_have_text("SYN-INST-C")
 
-        # The e-mail override rides on an APPROVED member's edit; approvalState is not sent again.
+        # An APPROVED member's institution edit does not send approvalState again.
         self.open_membership("syn-clinician")
         self.set_institution("SYN-INST-B")
-        self.set_override(True)
-        self.assertEqual({"institution": "SYN-INST-B", "verificationOverride": True}, self.save())
+        self.assertEqual({"institution": "SYN-INST-B"}, self.save())
         self.assertEqual(("SYN-INST-B", ["clinician"]),
                          (self.user("syn-clinician")["institution"], self.user("syn-clinician")["roles"]))
         self.assertEqual(3, len(self.patches))
@@ -654,8 +644,7 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
         # The expected outputs are the defect (S5-U5a-F01), asserted exactly.
         self.load(self.variants["full-body"])
         self.open_membership("syn-clinician")
-        self.assertEqual({"approvalState": "APPROVED", "institution": INSTITUTION, "roles": ["clinician"],
-                          "verificationOverride": False}, self.save(), "full-body: an unchanged Save is a PATCH")
+        self.assertEqual({"approvalState": "APPROVED", "institution": INSTITUTION, "roles": ["clinician"]}, self.save(), "full-body: an unchanged Save is a PATCH")
         self.user("syn-mixed")["roles"] = ["clinician", "radiologist", "technician"]
         self.open_membership("syn-mixed")
         self.set_institution("SYN-INST-B")

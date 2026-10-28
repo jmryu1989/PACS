@@ -60,6 +60,10 @@ export const CLINICIAN_BUSINESS_ROUTES: readonly string[] = Object.freeze([
   'POST studies/:uid/image-requests', 'POST image-requests/:id',
   // S7-U1a — 중요 결과 수신(받은 목록·한 건·명시 ACK). 발신·취소·대체·후보·검사별 목록은 clinician-only에게 계속 거절한다.
   'GET critical-results', 'GET critical-results/:id', 'POST critical-results/:id/ack',
+  // MG-08: image reads routed by nginx to the recorded API relay, behind the same gate as authz/dicom.
+  'GET image-relay/*',
+  // MG-LOADING: viewer frame bytes and strip previews come through the API behind the same gate as authz/dicom.
+  'GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames', 'GET instances/:id/preview',
 ]);
 
 export const CLINICIAN_ALLOWED_ROUTES: ReadonlySet<string> =
@@ -228,7 +232,7 @@ export function clinicianViewerPinned(before: unknown, read: unknown, after: unk
  * (없으면 뒤에서 가린다). 다음 쪽은 이어받기 값이 실어 온 판(started)과 지금 머리 판이 **같은 확정 판**일 때만 이어진다.
  * 요청 하나 안의 고정(clinicianViewerPinned)만으로는 쪽 사이의 재승인·addendum·reset을 보지 못한다: 옛 이어받기로 새 판의
  * 다음 쪽을 받으면 두 판의 항목이 한 연쇄로 합쳐져 어느 승인 시점에도 없던 목록이 된다. 머리 판이 없어졌어도(reset) 거절이다 —
- * 가린 답(items null)을 다음 쪽으로 주면 목록 끝과 구분되지 않는다. 통과한 판 하나를 listFinal과 마지막 검사가 함께 쓴다.
+ * 가린 답(items null)을 다음 쪽으로 주면 목록 끝과 구분되지 않는다. 통과한 판 하나를 selectFinal과 마지막 검사가 함께 쓴다.
  */
 export function clinicianViewerContinues(started: number | null, head: unknown): boolean {
   return started === null || (Number.isSafeInteger(head) && (head as number) > 0 && head === started);

@@ -507,14 +507,20 @@ test('TEST-S8-NOTE-SVR-13 the first note must not be blank: the server refuses w
   assert.equal((await w.store.audits(uid)).length, 0);
 });
 
-test('TEST-S8-NOTE-SVR-14 an edit with an id still needs a reason and a changed text; a refusal writes nothing', async () => {
+test('TEST-S8-NOTE-SVR-14 an edit with an id allows an optional reason and still needs changed text; a refusal writes nothing', async () => {
   const w = await world(), uid = await w.study();
   assert.equal((await w.save(uid, body(0, 'SYN v1'))).status, 200);
-  assert.equal((await w.save(uid, body(1, 'SYN v2', '   '))).status, 400);
-  assert.equal((await w.save(uid, body(1, 'SYN v1', 'R'))).status, 400);
+  assert.equal((await w.save(uid, body(1, 'SYN v2', '   '))).status, 200);
+  assert.equal((await w.save(uid, body(2, 'SYN v2', 'R'))).status, 400);
   assert.equal((await w.save(uid, body(0, 'SYN stale', 'R'))).status, 409);
-  assert.equal((await w.store.rows(uid)).length, 1);
-  assert.equal((await w.store.audits(uid)).length, 1);
+  assert.equal((await w.store.rows(uid)).length, 2);
+  assert.equal((await w.store.audits(uid)).length, 2);
 });
 
 test('storage of this run', () => { process.stderr.write('S8-NOTE-SVR storage: ' + (PG ? 'postgresql' : 'stand-in (logic only)') + '\n'); });
+
+test('a note beyond the former 10000-character cap is stored and re-read without truncation',async()=>{
+ const w=await world(),uid=await w.study(),text='SYN'.repeat(4000);
+ assert.equal((await w.save(uid,body(0,text))).status,200);
+ assert.equal((await w.store.rows(uid))[0].text,text);
+});

@@ -130,7 +130,18 @@ Known observations to carry into review:
   DA `1994.10.16`. Its viewer-jobs, viewer-items and findings calls return 400.
   It can support local decoding/cine observations, but cannot validate a complete
   worklist/report/save/reopen workflow. Do not rewrite the public original to hide this.
-- Patient-ID prior search has returned 403. Capture it with the other refusals.
+- The pinned OHIF Patient-ID prior search previously returned 403 because the
+  proxy accepts a single study UID. The viewer now resolves the opened study's
+  source patient key through the scoped worklist, then queries each matching UID.
+  The acceptance records those actual study-browser requests and checks that all
+  imported same-patient studies were retrieved; any HTTP failure remains a failure.
+
+The toolbar checks use the served Image Tools controls and wait for their public
+readiness before recording the default scale. The Length check waits for its row
+to show Saved r1 and reads that exact persisted item through the authenticated API.
+This avoids Chromium inspector response-body loss during large DBT loads without
+treating HTTP 200 as proof of persistence. Reopening and downloaded-SR comparisons
+still run against the original DICOM geometry.
 
 Still required outside this tool: doctor/equipment/date/version feedback,
 grayscale/physical 1:1, tissue coverage, full DBT traversal and pane independence,

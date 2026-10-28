@@ -78,8 +78,19 @@ window.KinViewerIdentity=(()=>{
         for(const id of ids){
           if(typeof wanted==='string'&&wanted!==id)continue;
           if(loading.has(id)){labels.get(id)?.remove();labels.delete(id);titles.delete(id);continue;}
-          const current=resolve(id),m=current&&window.cornerstone.metaData.get('instance',current.image),v=services.cornerstoneViewportService.getCornerstoneViewport(id);
-          if(!current||!m||!v?.element||v.viewportStatus!==window.cornerstone.Enums.ViewportStatus.RENDERED||!studies.includes(current.uid)||m.StudyInstanceUID!==current.uid||m.SeriesInstanceUID!==current.series||m.SOPInstanceUID!==current.sop||typeof m.PatientID!=='string'||!m.PatientID.trim()||m.PatientID.length>64||(current.study.id&&current.study.id!==m.PatientID)){labels.get(id)?.remove();labels.delete(id);titles.delete(id);continue;}
+          const v=services.cornerstoneViewportService.getCornerstoneViewport(id);
+          let current=resolve(id),dynamic=false;
+          // A comparison chosen in the served Study menu need not be in the
+          // opening URL. Reuse the shell's rendered-image identity for that
+          // stack, without mounting its writer actions or changing the editor.
+          if(!current&&v?.type==='stack'){
+            const loaded=window.KinViewerInfoBar?.identity(services,id),m=loaded?.instance;
+            const reference=m&&kinViewerImageReference(v.getCurrentImageId());
+            if(reference)current={uid:reference.study,series:reference.seriesUid,sop:reference.sopUid,
+              image:v.getCurrentImageId(),study:{id:text(loaded.set.PatientID)}},dynamic=true;
+          }
+          const m=current&&window.cornerstone.metaData.get('instance',current.image);
+          if(!current||!dynamic&&!studies.includes(current.uid)||!m||!v?.element||v.viewportStatus!==window.cornerstone.Enums.ViewportStatus.RENDERED||m.StudyInstanceUID!==current.uid||m.SeriesInstanceUID!==current.series||m.SOPInstanceUID!==current.sop||typeof m.PatientID!=='string'||!m.PatientID.trim()||m.PatientID.length>64||(current.study.id&&current.study.id!==m.PatientID)){labels.get(id)?.remove();labels.delete(id);titles.delete(id);continue;}
           let e=labels.get(id);if(!e||e.parentNode!==v.element){e?.remove();e=document.createElement('div');e.className='kin-viewer-identity';v.element.append(e);labels.set(id,e);}
           const role=current.uid===studies[0]?'current':'prior',general=value[role],modality=typeof m.Modality==='string'&&modalities.includes(m.Modality.trim().toUpperCase())?m.Modality.trim().toUpperCase():'',p=modality&&general.overrides[modality]||general;
           e.dataset.role=role;e.dataset.study=current.uid;e.dataset.modality=modality;e.dataset.profile=modality&&general.overrides[modality]?'override':'general';

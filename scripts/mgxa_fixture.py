@@ -106,8 +106,6 @@ def setup(args, directory):
     run(['docker', 'build', '--target', 'production', '--build-arg', 'VCS_REF='+facts['head_sha'],
          '-t', image, str(ROOT/'api')], args.timeout)
     cmd = command(directory, project)
-    run(cmd+['up', '-d', '--wait', 'db'], args.timeout, env=env)
-    run(cmd+['exec', '-T', 'db', 'createdb', '-U', 'kin', 'keycloak'], args.timeout, env=env)
     run(cmd+['up', '-d', '--build'], args.timeout, env=env)
     session = requests.Session()
     session.trust_env = False
@@ -158,7 +156,9 @@ def load_and_login(args, directory):
             try:
                 page.locator('#username').fill('mgxa-doctor')
                 page.locator('#password').fill(credentials['DOCTOR_PASSWORD'])
-                page.locator('#kc-login').click()
+                # Submit with the normal keyboard path: desktop Chromium can
+                # stall its click-stability wait on this static login page.
+                page.locator('#password').press('Enter')
             except Exception:
                 raise RuntimeError('Synthetic doctor login form failed (credential omitted)') from None
             page.wait_for_url('**/worklist/hpacs-lite/main.html')

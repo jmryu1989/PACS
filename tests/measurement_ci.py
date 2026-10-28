@@ -160,6 +160,21 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_viewer_ux_shell.py', 'ViewerUXShellE2E', 'ci-viewer-ux-shell'),),
     },
+    's9-u7-served': {
+        'out': ROOT / 'tests/e2e/artifacts/s9-u7-served-ci',
+        'project_prefix': 'kin-s9-u7-ci-',
+        # S9-U7 output scope, identity and unsaved work on the served worklist -> OHIF flow. Each module's
+        # load_tests is the allowlist (test_output_*, test_identity_flow_*, test_unsaved_*), so no class is
+        # passed and no inherited case runs. The caps are hang ceilings, not estimates. The unsaved-work suite
+        # holds real saves through every replacement consumer and runs about 330s locally (output about 100-170s,
+        # identity about 80-95s), so each suite gets its own cap: (320+35)+(240+35)+(700+35) = 1365s of the
+        # shared 1500s deadline leaves 135s for a stack whose local setup and cleanup take about 45s.
+        'suite_timeout': 400,
+        'suite_budgets': {'ci-s9-u7-output': 320, 'ci-s9-u7-identity': 240, 'ci-s9-u7-work': 700},
+        'suites': (('e2e/test_s9_viewer_output_scope.py', None, 'ci-s9-u7-output'),
+                   ('e2e/test_s9_viewer_identity_flow.py', None, 'ci-s9-u7-identity'),
+                   ('e2e/test_s9_viewer_unsaved_flow.py', None, 'ci-s9-u7-work')),
+    },
     'display-scope': {
         'out': ROOT / 'tests/e2e/artifacts/display-scope-ci',
         'project_prefix': 'kin-display-scope-ci-',
@@ -810,10 +825,6 @@ def main(profile_name, credential_provider=None):
     try:
         seeded = seed_source() or []
         run('database', compose+['up','-d','--wait','db'])
-        # The image's temporary initdb server only listens on its local socket.
-        run('database-tcp', compose+['exec','-T','db','sh','-c',
-            'for n in $(seq 1 60); do pg_isready -h 127.0.0.1 -U kin && exit 0; sleep 1; done; exit 1'], timeout=70)
-        run('keycloak-database', compose+['exec','-T','db','createdb','-U','kin','keycloak'])
         run('stack', compose+['up','-d','--build'], timeout=900)
         for path in ['/api/health','/auth/realms/kin/.well-known/openid-configuration']:
             ready_by = min(time.monotonic()+180, deadline)

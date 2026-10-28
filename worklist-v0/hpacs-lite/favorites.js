@@ -13,8 +13,10 @@ window.KinFavorites = function (app) {
   let owner=null,state=null,selected=null,current=null,seq=0,busy=false,pending=null,abort=null,ended=false,opener=null,viewUid=null;
   const same=()=>work.state()==='active'&&!ended&&d.open&&app.allowed()&&JSON.stringify(owner)===JSON.stringify(app.identity());
   const folder=()=>state?.folders.find(f=>f.id===selected);
-  const renamed=()=>!!folder()&&$('name').value!==folder().name;
-  const dirty=()=>!!$('new-name').value||renamed();
+  // Keep unsaved names within this account's open document when navigating away.
+  const names=new Map();let draftOwner=null,newName='';
+  $('name').oninput=()=>{if(selected)names.set(selected,$('name').value);};
+  $('new-name').oninput=()=>{newName=$('new-name').value;};
   const label=uid=>{const s=app.study(uid);return s?[s.name,s.id,s.date,s.desc,uid].filter(Boolean).join(' · '):'현재 불러온 목록에 없는 검사 · '+uid;};
   function controls(){
     d.querySelectorAll('button,input,select').forEach(el=>el.disabled=busy||!!pending);
@@ -38,8 +40,8 @@ window.KinFavorites = function (app) {
     const previous=selected;
     if(!folder())selected=state?.folders[0]?.id??null;
     $('folders').replaceChildren();
-    for(const f of state?.folders??[]){const b=button(f.name+' · '+f.uids.length+'건',()=>{if(f.id!==selected&&renamed()&&!confirm('저장하지 않은 폴더 이름 변경을 버릴까요?'))return;selected=f.id;draw();},$('folders'));b.dataset.folderId=f.id;b.setAttribute('aria-pressed',String(f.id===selected));}
-    const f=folder();if(!preserve||previous!==selected)$('name').value=f?.name??'';
+    for(const f of state?.folders??[]){const b=button(f.name+' · '+f.uids.length+'건',()=>{selected=f.id;draw();},$('folders'));b.dataset.folderId=f.id;b.setAttribute('aria-pressed',String(f.id===selected));}
+    const f=folder();if(!preserve||previous!==selected)$('name').value=names.get(selected)??f?.name??'';
     $('links').replaceChildren();$('count').textContent=f?`접근 가능한 링크 ${f.uids.length}건`+(f.unavailable?` · 접근 불가 ${f.unavailable}건`:''):'폴더를 만들거나 선택하세요.';
     for(const uid of f?.uids??[]){const row=document.createElement('div');row.className='favorite-link';row.dataset.uid=uid;
       const text=document.createElement('span');text.textContent=label(uid);row.append(text);
@@ -59,7 +61,6 @@ window.KinFavorites = function (app) {
     const at=work.capture('document');
     if(busy||pending||!same()||!state)return;
     if(action==='add'&&current!==app.current()){current=app.current();draw(true);message('선택 검사가 바뀌었습니다. 추가할 검사를 확인하고 다시 누르세요.');return;}
-    if(action==='create'&&renamed()&&!confirm('저장하지 않은 폴더 이름 변경을 버리고 새 폴더를 만들까요?'))return;
     pending={expectedOwner:owner,revision:state.revision,requestId:crypto.randomUUID(),folderId:action==='create'?crypto.randomUUID():selected,action,...extra};
     await send();
   }
@@ -69,7 +70,8 @@ window.KinFavorites = function (app) {
     try{const value=await request('POST',body,undefined,at);
       work.commit(at,()=>{if(ticket!==seq||!same())return;adopt(value);pending=null;
       if(body.action==='view'){viewUid=null;$('view-editor').hidden=true;$('view-choice').replaceChildren();}
-      if(body.action==='create'){selected=body.folderId;$('new-name').value='';}draw();message('저장되었습니다.');});}
+      if(['rename','delete'].includes(body.action))names.delete(body.folderId);
+      if(body.action==='create'){selected=body.folderId;newName='';$('new-name').value='';}draw();message('저장되었습니다.');});}
     catch(e){work.commit(at,()=>{if(ticket===seq&&same()){
 
       if([400,403,404,409].includes(e.status))pending=null;
@@ -79,7 +81,7 @@ window.KinFavorites = function (app) {
   }
   async function editView(uid){
     const at=work.capture('document');
-    if(busy||pending||!same()||dirty()&&!confirm('저장하지 않은 폴더 이름 입력을 버리고 보기 상태를 고를까요?'))return;
+    if(busy||pending||!same())return;
     const ticket=++seq,wanted=selected;busy=true;controls();message('저장 보기 목록을 확인하는 중…');
     try{const value=await request('GET',undefined,undefined,at);if(ticket!==seq||!same())return;if(!work.commit(at,()=>adopt(value)))return;
       if(!state.folders.find(f=>f.id===wanted)?.uids.includes(uid))throw new Error('폴더에서 제거된 검사입니다');
@@ -94,7 +96,7 @@ window.KinFavorites = function (app) {
   }
   async function openView(uid){
     const at=work.capture('document');
-    if(busy||pending||!same()||dirty()&&!confirm('저장하지 않은 폴더 이름 입력을 버리고 저장 보기를 열까요?'))return;
+    if(busy||pending||!same())return;
     const ticket=++seq,wanted=selected;busy=true;controls();message('저장 보기의 원본과 접근 권한을 확인하는 중…');
     try{const value=await request('GET',undefined,undefined,at);if(ticket!==seq||!same())return;if(!work.commit(at,()=>adopt(value)))return;
       const f=state.folders.find(f=>f.id===wanted),id=f?.views?.[uid];
@@ -108,7 +110,7 @@ window.KinFavorites = function (app) {
   }
   async function applyFolder(){
     const at=work.capture('document');
-    if(busy||pending||!same()||!folder()||dirty()&&!confirm('저장하지 않은 폴더 이름 입력을 버리고 목록을 볼까요?'))return;
+    if(busy||pending||!same()||!folder())return;
     const ticket=++seq,wanted=selected;busy=true;controls();message('폴더를 확인하는 중…');
     try{const value=await request('GET',undefined,undefined,at);
       work.commit(at,()=>{if(ticket!==seq||!same())return;adopt(value);
@@ -119,7 +121,7 @@ window.KinFavorites = function (app) {
   }
   async function choose(uid){
     const at=work.capture('document');
-    if(busy||pending||!same()||dirty()&&!confirm('저장하지 않은 폴더 이름 입력을 버리고 검사를 선택할까요?'))return;const ticket=++seq,wanted=selected;busy=true;controls();
+    if(busy||pending||!same())return;const ticket=++seq,wanted=selected;busy=true;controls();
     try{const value=await request('GET',undefined,undefined,at);
       work.commit(at,()=>{if(ticket!==seq||!same())return;adopt(value);
       if(!state.folders.find(f=>f.id===wanted)?.uids.includes(uid)||!app.study(uid)){draw();message('이 검사를 지금 열 수 없습니다. 목록을 새로고침하거나 접근 권한을 확인하세요.');return;}
@@ -129,7 +131,6 @@ window.KinFavorites = function (app) {
   }
   function close(force=false){
     if(!force&&(busy||pending&&!confirm('처리 결과를 아직 확인하지 못했습니다. 닫은 뒤 다시 열어 최신 목록을 확인하세요. 닫을까요?')))return;
-    if(!force&&!pending&&dirty()&&!confirm('저장하지 않은 폴더 이름 입력을 버리고 닫을까요?'))return;
     ++seq;abort?.abort();abort=null;busy=false;pending=null;state=null;owner=null;current=null;selected=null;
     viewUid=null;$('view-editor').hidden=true;$('view-choice').replaceChildren();
     $('folders').replaceChildren();$('links').replaceChildren();$('current').textContent=$('count').textContent='';$('name').value=$('new-name').value='';message('');
@@ -142,11 +143,11 @@ window.KinFavorites = function (app) {
   $('apply').onclick=applyFolder;
   $('add').onclick=()=>command('add',{uid:current});$('retry').onclick=send;$('reload').onclick=load;$('close').onclick=()=>close();
   d.addEventListener('cancel',e=>{e.preventDefault();close();});
-  function end(){ended=true;close(true);app.ended?.();}
+  function end(){ended=true;names.clear();newName='';draftOwner=null;close(true);app.ended?.();}
   work.onInvalidate(event=>{
     if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state))end();
     if(event.reason==='cancel'){const interrupted=busy;++seq;busy=false;controls();if(d.open&&(interrupted||!state))load();}
   });
   window.addEventListener('pagehide',end);
-  return {open(){if(ended||d.open||!app.allowed())return;owner=app.identity();if(!owner)return;current=app.current();opener=document.activeElement;d.showModal();draw();load();}};
+  return {open(){if(ended||d.open||!app.allowed())return;owner=app.identity();if(!owner)return;const key=JSON.stringify(owner);if(draftOwner!==key){names.clear();newName='';draftOwner=key;}$('new-name').value=newName;current=app.current();opener=document.activeElement;d.showModal();draw();load();}};
 };

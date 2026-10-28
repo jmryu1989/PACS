@@ -120,7 +120,9 @@ const kinViewerToolbarLabels = (() => {
     Pan: ['Pan', '이동'],
     TrackballRotate: ['3D Rotate', '3D 회전(볼륨에서만 동작)'],
     WindowLevel: ['Window / Level', '창/레벨 조절(드래그)'],
-    Capture: ['Capture', '현재 화면을 PNG로 저장(검사 저장 아님)'],
+    // The pinned download form passes 'jpg'/'png' to canvas.toDataURL, which only knows MIME types, so every
+    // choice writes PNG bytes; a jpg choice changes the file name only.
+    Capture: ['Capture', '선택한 영상 칸의 화면을 PNG 이미지로 다운로드 · File Type을 jpg로 두어도 파일 내용은 PNG입니다 · DICOM 원본·판독문·서버 작업 저장 아님 · 식별정보가 포함될 수 있습니다. Image Text/Images Only는 익명화가 아닙니다.'],
     Layout: ['Layout', '화면 배치'],
     Crosshairs: ['Crosshairs', 'MPR 교차선(3D/MPR에서만 동작)'],
     MoreTools: ['More Tools', '기타 도구'],
@@ -191,7 +193,15 @@ const kinViewerToolbarLabels = (() => {
       put(element, 'data-kin-tool-label', found.id);
     }
   }
-  return { PRIMARY, ITEMS, TOGGLES, entry, apply };
+  // The Viewer-UX toolbar owns its button title (name, shortcut, drag hint); the output meaning goes in front of it.
+  function outputScope(scope) {
+    const meaning = PRIMARY.Capture[1];
+    for (const button of scope.querySelectorAll('[data-tool="Capture"]')) {
+      const title = button.getAttribute('title') || '';
+      if (!title.startsWith(meaning)) put(button, 'title', meaning + (title ? ' · ' + title : ''));
+    }
+  }
+  return { PRIMARY, ITEMS, TOGGLES, entry, apply, outputScope };
 })();
 
 /** Product branding only; loaded-image identity owns clinical window titles. */
@@ -614,7 +624,6 @@ function kinCreateSRProvenance() {
       }
     }
     walk(instance?.ContentSequence, null);
-    if (incomplete) groups.clear();
     groups.incomplete = incomplete; return groups;
   };
   function mount() {
@@ -1719,7 +1728,7 @@ function kinCreateViewerHistory() {
         do {
           const page = await api(path() + '?includeHidden=true&limit=100' + (recheck ? '&recheck=' + encodeURIComponent(recheck) : '') + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {}, ticket);
           if (!asked(ticket, seq, 'author')) return;
-          if (!Array.isArray(page.items) || heads.length + page.items.length > 512 || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
+          if (!Array.isArray(page.items) || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
           heads.push(...page.items); cursor = page.nextCursor;
         } while (cursor);
         if (!asked(ticket, seq, 'author')) return;
@@ -1769,20 +1778,20 @@ function kinCreateViewerHistory() {
     async function readOnlyLoad(ticket, seq) {
       if (!valid(ticket) || seq !== readSequence) return;
       const study = scope, heads = [];
-      let cursor = null, version = null, withheld = false, pages = 0;
+      let cursor = null, version = null, withheld = false;
       dropRows(); panel.dataset.readOnly = 'loading'; toolbar();
       try {
         do {
           const page = await api(path() + '?limit=100' + (cursor === null ? '' : '&cursor=' + encodeURIComponent(cursor)), {}, ticket);
           if (!asked(ticket, seq, 'final')) return;
-          if (++pages > 6 || !page || page.uid !== study || typeof page.final !== 'boolean') throw new Error('Invalid page');
+          if (!page || page.uid !== study || typeof page.final !== 'boolean') throw new Error('Invalid page');
           if (!page.final) {
             if (cursor !== null || page.items !== null || page.nextCursor !== null) throw new Error('Invalid page');
             withheld = true; break;
           }
           const next = page.nextCursor;
           if (!Number.isSafeInteger(page.reportVersion) || page.reportVersion < 1 || (version !== null && page.reportVersion !== version) ||
-              !Array.isArray(page.items) || page.items.length > 100 || heads.length + page.items.length > 512 ||
+              !Array.isArray(page.items) || page.items.length > 100 ||
               !page.items.every(h => h && typeof h === 'object' && typeof h.id === 'string' && h.id && Number.isSafeInteger(h.revision) &&
                 h.item && typeof h.item === 'object' && Object.hasOwn(names, h.item.kind)) ||
               !(next === null || typeof next === 'string' && next.length > 0 && next.length <= 512 && next !== cursor)) throw new Error('Invalid page');
@@ -1934,8 +1943,8 @@ function kinCreateViewerHistory() {
         const lines = [];
         if (Number.isFinite(s.area)) lines.push('Area: ' + number(s.area) + ' ' + s.areaUnit);
         if (s.modalityUnit === 'HU') {
-          for (const [name, value] of [['Mean', s.mean], ['Min', min], ['Max', s.max]])
-            if (Number.isFinite(value)) lines.push(name + ': ' + (name === 'Mean' ? number(value) : value) + ' HU');
+          for (const [name, value] of [['Mean', s.mean], ['SD', s.stdDev], ['Min', min], ['Max', s.max]])
+            if (Number.isFinite(value)) lines.push(name + ': ' + (['Mean', 'SD'].includes(name) ? number(value) : value) + ' HU');
         }
         return lines;
       } };
@@ -2018,7 +2027,12 @@ function kinCreateViewerHistory() {
     function row(e) {
       if (!e.element) { e.element = document.createElement('section'); e.element.style.cssText = 'border-top:1px solid #405777;margin-top:8px;padding-top:8px'; list.append(e.element); }
       const el = e.element; el.replaceChildren(); el.dataset.itemId = e.head?.id || ''; el.dataset.kind = e.draft.kind;
-      text(el, 'strong', names[e.draft.kind] + ' · ' + (e.head ? 'Saved r' + e.head.revision : 'Unsaved') + (e.head?.hidden ? ' · Hidden' : ''));
+      const sourceUnverified = manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified';
+      // Saved names the server revision; an edit, a save in flight or an unknown answer is not that revision.
+      // Source verification keeps its own 재확인 필요 line below, so a saved item stays Saved r<n>.
+      const stateLabel = e.busy ? 'Saving' : e.pending ? 'Unverified' : hasWork(e) || !e.head ? 'Unsaved' : 'Saved r' + e.head.revision;
+      text(el, 'strong', names[e.draft.kind] + ' · ' + stateLabel + (e.head?.hidden ? ' · Hidden' : ''));
+      if (e.head && stateLabel !== 'Saved r' + e.head.revision) text(el, 'div', '서버 저장 이력 r' + e.head.revision + ' · 현재 수정·저장 결과와는 별개입니다.');
       // The clinician projection carries no author (clinician-policy.ts clinicianViewerItem).
       if (e.head) text(el, 'div', readOnly() ? 'Read-only' : e.head.authorActor + (writable(e) ? ' · My Item' : ' · Read-only'));
       if (e.editing) {
@@ -2041,7 +2055,6 @@ function kinCreateViewerHistory() {
         text(held, 'p', '프레임 ' + e.heldDraft.frame + ' · 아직 저장되지 않은 내용입니다.');
       }
       button(el, 'Go to Image', () => navigate(e));
-      const sourceUnverified = manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified';
       // Recheck and remeasure belong to the writer; a read-only row keeps the "재확인 필요" message hydrate() writes.
       if (sourceUnverified && !e.head.hidden && writer()) {
         text(el, 'p', '저장 이력과 현재 원본 확인은 별개입니다. 이 항목만 다시 확인할 수 있습니다. 원본이 바뀐 경우 새 뷰어에서 다시 측정하세요. 이 창의 수정과 기존 저장 이력은 유지됩니다.');
@@ -2057,8 +2070,8 @@ function kinCreateViewerHistory() {
         else if (e.editing) button(el, 'Save', () => save(e, 'edit'), !!e.busy || !!e.latest || !!sourceUnverified);
         else if (!e.head?.hidden) button(el, 'Edit', () => { e.editing = true; lock(e, false); row(e); }, manual(e.draft.kind) && e.head?.referenceStatus !== 'verified');
         if (e.head && !e.editing && !e.pending) button(el, e.head.hidden ? 'Restore' : 'Hide', () => {
-          const reason = window.prompt((e.head.hidden ? '복원' : '숨김') + ' 사유');
-          if (reason?.trim()) save(e, e.head.hidden ? 'restore' : 'hide', reason);
+          const reason = window.prompt((e.head.hidden ? '복원' : '숨김') + ' 사유 (선택)');
+          if (reason !== null) save(e, e.head.hidden ? 'restore' : 'hide', reason);
         }, !!e.busy);
         if (e.latest && !e.pending) button(el, 'Use Latest & Keep Changes', () => {
           e.head = e.latest; e.latest = null;
@@ -2220,6 +2233,7 @@ function kinCreateViewerHistory() {
       if (!ended && kinViewerSession.ended()) end();
       closeAuthoring();
       if (ended) return;
+      kinViewerToolbarLabels.outputScope(document);
       const r = current();
       if (r && r.study !== scope) {
         park(); reset('검사 확인 중…'); scope = r.study; me = null;
@@ -3557,8 +3571,26 @@ function kinCreateViewerFindings() {
 
 function kinCreateViewerTechNote() {
   let ready, current, prepare, epoch=0, active=false, state='stopped';
+  let identity, identityReady, prepareIdentity, identityServices;
+  function stopIdentity(){identity?.dispose();identity=null;}
+  function connectIdentity(){
+    if(!active||!kinViewerSession.readOnly()||identity||!prepareIdentity)return;
+    const ticket=epoch;
+    prepareIdentity().then(module=>{
+      if(!active||ticket!==epoch||!kinViewerSession.readOnly()||identity)return;
+      // Patient identification also belongs to read-only viewing. It does not
+      // require mounting the writer's Tech Note, clipboard or volume tools.
+      identity=module.mount({services:identityServices,resolve:()=>null,
+        owner:()=>kinViewerSession.owner(),allowed:()=>active&&kinViewerSession.readOnly(),
+        studies:(new URLSearchParams(location.search).get('StudyInstanceUIDs')||'').split(',').filter(Boolean)});
+    }).catch(()=>{
+      if(!active||ticket!==epoch)return;
+      const status=document.querySelector('#kin-viewer-layout-status');
+      if(status)status.textContent='환자 식별 표시를 연결하지 못했습니다. 영상 정보 표시에서 환자와 검사를 확인하세요.';
+    });
+  }
   // The bridge follows the verified role; document disposal belongs to the page boundary.
-  kinViewerSession.onChange(next=>{if(next==='writer'){connect();return;}epoch++;if(active)state=next;if(next==='read-only'){current?.stop();current=null;}});
+  kinViewerSession.onChange(next=>{if(next==='writer'){stopIdentity();connect();return;}epoch++;if(active)state=next;if(next==='read-only'){current?.stop();current=null;connectIdentity();}else stopIdentity();});
   function connect() {
     if(!active||state==='loading'||state==='ready'||!kinViewerSession.writer())return;
     kinToolRetry('kin-note-retry');
@@ -3581,6 +3613,9 @@ function kinCreateViewerTechNote() {
       const timer=setTimeout(fail,20000);
       script.onload=()=>{clearTimeout(timer);resolve();};script.onerror=fail;document.head.append(script);
     });
+    identityServices=servicesManager.services;
+    prepareIdentity=()=>window.KinViewerIdentity?Promise.resolve(window.KinViewerIdentity):
+      identityReady||(identityReady=load('viewer-identity.js').then(()=>window.KinViewerIdentity).catch(error=>{identityReady=null;throw error;}));
     const standalone=window.top===window;
     if(standalone){const css=document.createElement('link');css.rel='stylesheet';css.href='/worklist/hpacs-lite/tech-note.css';document.head.append(css);}
     prepare=()=>ready||(ready=(standalone&&typeof window.KinTechNote!=='function'?load('tech-note.js'):Promise.resolve())
@@ -3616,8 +3651,8 @@ function kinCreateViewerTechNote() {
   },onModeEnter(){if(!prepare)return;epoch++;active=true;state='unconfirmed';const ticket=epoch;
     // S5-U2b: Tech notes are a technician record the clinician allowlist neither reads nor writes. The bridge connects only
     // after a /me answered writer; until an answer it stays 'unconfirmed', and 'read-only'/'refused' never connect.
-    kinViewerSession.decide().then(session=>{if(!active||ticket!==epoch)return;if(session==='writer')connect();else state=session;});
-  },onModeExit(){kinToolRetry('kin-note-retry');epoch++;active=false;state='stopped';current?.stop();current=null;}};
+    kinViewerSession.decide().then(session=>{if(!active||ticket!==epoch)return;if(session==='writer')connect();else{state=session;if(session==='read-only')connectIdentity();}});
+  },onModeExit(){kinToolRetry('kin-note-retry');epoch++;active=false;state='stopped';stopIdentity();current?.stop();current=null;}};
 }
 
 function kinCreateFrameCoverage() {
@@ -4562,10 +4597,70 @@ function kinCreateStudyPrefetch() {
   }
   return { id: 'kin.study-prefetch', onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
+
+// OHIF's study browser searches priors by MRN. Patient IDs are local to an
+// institution, so resolve them through the same source patient key as Related.
+// Each resulting UID still uses the ordinary scoped DICOMweb query.
+function kinCreateStudySearch() {
+  let extensions, stop;
+  function mount() {
+    stop?.();
+    const studies = extensions.getActiveDataSource()[0].query.studies;
+    const original = studies.search, search = location.search;
+    const opened = new URLSearchParams(search).get('StudyInstanceUIDs')?.split(',') || [];
+    let ended = false;
+    const controller = new AbortController();
+    const session = kinViewerOnEnd(() => { ended = true; controller.abort(); });
+    const live = () => !ended && location.search === search;
+    const current = () => { if (!live()) throw new Error('검사 조회가 종료되었습니다.'); };
+    // OHIF repeats the patient lookup for each opened study. Share the list only
+    // within this mode/session; each UID query still checks current access.
+    let listing;
+    const readList = () => listing ||= (async () => {
+      const response = await fetch('/api/studies', { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
+      if (!response.ok) throw new Error('이전 검사 목록을 확인하지 못했습니다 (HTTP ' + response.status + ').');
+      return response.json();
+    })().catch(error => { listing = null; throw error; });
+    // /api/studies is the radiology list; a clinician-only session is refused it (api/src/clinician-policy.ts) and keeps the
+    // stock scoped MRN search. An account not yet confirmed either way does not read that list or merge by MRN.
+    const role = async () => {
+      const now = kinViewerSession.state();
+      return now === 'unconfirmed' ? kinViewerSession.decide() : now;
+    };
+    const wrapped = async function (params) {
+      if (!params?.patientId || params.studyInstanceUid) return original.call(this, params);
+      current();
+      const verdict = await role();
+      current();
+      if (verdict === 'read-only') return original.call(this, params);
+      if (verdict !== 'writer') throw new Error('계정을 확인하지 못해 이전 검사를 찾지 않았습니다.');
+      const list = await readList();
+      current();
+      const keys = new Set(list.studies.filter(row => opened.includes(row.uid) && row.id === params.patientId && row.sourcePatientKey)
+        .map(row => row.sourcePatientKey));
+      // The stock MRN request does not identify which opened study asked it.
+      // Keep its current-study fallback when two institutions reuse that MRN.
+      if (keys.size > 1) throw new Error('기관별 환자 식별이 달라 이전 검사를 하나로 묶을 수 없습니다.');
+      if (keys.size === 0) throw new Error('열린 검사의 환자 식별을 확인하지 못했습니다.');
+      const rows = list.studies.filter(row => row.id === params.patientId && keys.has(row.sourcePatientKey));
+      const results = [];
+      for (const row of rows) {
+        current();
+        results.push(...await original.call(this, { ...params, studyInstanceUid: row.uid, disableWildcard: true }));
+      }
+      current();
+      return results;
+    };
+    studies.search = wrapped;
+    stop = () => { ended = true; controller.abort(); session.close(); if (studies.search === wrapped) studies.search = original; };
+  }
+  return { id: 'kin.study-search', preRegistration({ extensionManager }) { extensions = extensionManager; },
+    onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
+}
 // The stock mode owns the grid and Cornerstone elements. This extension owns
 // only its chrome and removes it when that mode or document ends.
 function kinCreateViewerUX() {
-  let services, dispose, toolbar, shortcuts, generation = 0, ready;
+  let services, dispose, toolbar, shortcuts, mouse, generation = 0, ready;
   const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-hanging-settings.js', 'viewer-ux-toolbar.js', 'viewer-ux-shell.js'];
   // The theme fixes the chrome rows' heights. It is loaded once per document,
   // before the first mount, and stays: a stylesheet attached per mount and
@@ -4593,7 +4688,7 @@ function kinCreateViewerUX() {
       document.head.append(script);
     })), stylesheet()).catch(error => { ready = null; throw error; });
   }
-  function stop() { generation++; dispose?.(); dispose = null; }
+  function stop() { generation++; dispose?.(); dispose = null; mouse?.dispose(); mouse = null; }
   return {
     id: 'kin.viewer-ux',
     async preRegistration({ servicesManager }) {
@@ -4615,6 +4710,7 @@ function kinCreateViewerUX() {
     },
     onModeEnter() {
       stop();
+      if (!kinViewerSession.ended()) mouse = kinStackMouse(services);
       if (window.top !== window || !shortcuts) return;
       const ticket = generation;
       if (kinViewerSession.ended()) return;
@@ -4630,6 +4726,68 @@ function kinCreateViewerUX() {
     },
     onModeExit: stop,
   };
+}
+
+// Stack defaults belong to its native tool group. MPR groups keep their own
+// bindings; selecting a tool only replaces the primary binding, leaving wheel
+// scroll and right-button windowing available while drawing or zooming.
+function kinStackMouse(services) {
+  const cs = window.cornerstone, tools = window.cornerstoneTools;
+  const initialized = new WeakSet(), subscriptions = [];
+  const primary = tools.Enums.MouseBindings.Primary;
+  const secondary = tools.Enums.MouseBindings.Secondary;
+  const wheel = tools.Enums.MouseBindings.Wheel;
+  let ended = false, frame;
+  function groupFor(viewport) {
+    return viewport?.type === 'stack' && tools.ToolGroupManager.getToolGroupForViewport(viewport.id, viewport.renderingEngineId);
+  }
+  function refresh() {
+    frame = null;
+    if (ended || kinViewerSession.ended()) return;
+    for (const id of services.viewportGridService.getState().viewports.keys()) {
+      const viewport = services.cornerstoneViewportService.getCornerstoneViewport(id), group = groupFor(viewport);
+      if (!group || initialized.has(group) || !group.hasTool('StackScroll') || !group.hasTool('WindowLevel')) continue;
+      if (group.getViewportsInfo().some(info => {
+        const view = cs.getRenderingEngine(info.renderingEngineId)?.getViewport(info.viewportId);
+        return view && view.type !== 'stack';
+      })) continue;
+      const bindings = [primary, secondary, wheel].map(mouseButton => ({ mouseButton }));
+      for (const [name, options] of Object.entries(group.toolOptions)) {
+        if (options.bindings?.some(binding => !binding.modifierKey && bindings.some(b => b.mouseButton === binding.mouseButton)))
+          group.setToolPassive(name, { removeAllBindings: bindings });
+      }
+      group.setToolActive('StackScroll', { bindings: [{ mouseButton: primary }, { mouseButton: wheel }] });
+      group.setToolActive('WindowLevel', { bindings: [{ mouseButton: secondary }] });
+      initialized.add(group);
+      services.toolbarService.refreshToolbarState?.({ viewportId: id });
+    }
+  }
+  function schedule() { if (!ended && !frame) frame = requestAnimationFrame(refresh); }
+  for (const service of [services.viewportGridService, services.cornerstoneViewportService]) {
+    for (const event of Object.values(service.EVENTS || {})) subscriptions.push(service.subscribe(event, schedule));
+  }
+  const enabled = cs.Enums.Events.ELEMENT_ENABLED;
+  cs.eventTarget.addEventListener(enabled, schedule);
+  const controller = {
+    deselect(name) {
+      const viewport = services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId());
+      const group = groupFor(viewport);
+      if (!group || name === 'StackScroll' || group.getActivePrimaryMouseButtonTool() !== name) return false;
+      group.setToolPassive(name);
+      group.setToolActive('StackScroll', { bindings: [{ mouseButton: primary }, { mouseButton: wheel }] });
+      services.toolbarService.refreshToolbarState?.({ viewportId: viewport.id });
+      return true;
+    },
+    dispose() {
+      ended = true; cancelAnimationFrame(frame);
+      subscriptions.forEach(subscription => subscription.unsubscribe());
+      cs.eventTarget.removeEventListener(enabled, schedule);
+      if (window.kinViewerStackMouse === controller) delete window.kinViewerStackMouse;
+    },
+  };
+  window.kinViewerStackMouse = controller;
+  schedule();
+  return controller;
 }
 // U3 consumes the U2 document/viewport context. The native data source still
 // owns DICOM loading and display-set creation; reports are API reads only.
@@ -4749,7 +4907,7 @@ function kinCreateMultiStudyStrip() {
 }
 
 window.config = {
-  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateViewerUX(), kinCreateViewerPrior(), kinCreateMultiStudyStrip()],
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateStudySearch(), kinCreateViewerUX(), kinCreateViewerPrior(), kinCreateMultiStudyStrip()],
   // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
   // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
   kinThreeDCursor: { enabled: false },

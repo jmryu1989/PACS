@@ -369,7 +369,7 @@ class AdminAuditLive(unittest.TestCase):
     def test_02_member_history_is_attributed_at_write_time(self) -> None:
         username = f"kin-test-{uuid.uuid4().hex[:12]}-u5b-m"
         created = self.stack.request("POST", "/admin/users", "u5b-admin-a", {
-            "username": username, "email": username + "@local.test", "firstName": "KIN", "lastName": "u5b-m"})
+            "username": username, "email": username + "@local.test", "firstName": "KIN", "lastName": "u5b-m", "verificationOverride": False})
         self.assertEqual(created.status, 201, f"member create: {created.status}")   # the body carries a temporary password
         member = created.body["id"]
         self.assertTrue(UUID.fullmatch(member))

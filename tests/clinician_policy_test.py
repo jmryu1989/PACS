@@ -1613,10 +1613,12 @@ def manifest_routes():
 
 
 def ts_array(source, name):
-    match = re.search(rf"export const {re.escape(name)}\b[^=]*=\s*Object\.freeze\(\[(.*?)\]\);", source, re.S)
-    if match is None:
-        raise AssertionError(f"{name} is not a frozen literal array")
-    return re.findall(r"'([^']*)'", match.group(1))
+    """The string elements of `export const <name> = Object.freeze([...])`, read by the TypeScript parser: prose in a
+    comment between the elements (an apostrophe included) is not an element (MG-08 IDR-04)."""
+    found = COMPILER.request({"frozenArraySource": source, "name": name})["frozen_array"]
+    if found is None:
+        raise AssertionError(f"{name} is not a frozen literal array of strings")
+    return found
 
 
 class ClinicianPolicySpec(unittest.TestCase):
@@ -1797,27 +1799,16 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertIn("return !state || CLINICIAN_LIST_PINS.some(key => (state[key] ?? null) !== (seen[key] ?? null));", self.policy)
         self.assertNotIn("head.version === state.version", self.policy, "the worklist row's own version never pins a head")
         # viewer items: clinician-only branch pinned to ONE signed version (S5-U1b-F01), not a boolean asked twice:
-        # gate -> items read in the same statement as the signed head of that version -> gate again, all compared
-        self.assertIn("return clinicianOnly(c.roles) ? this.clinicianItems(uid, query, c) : this.svc.list(uid, query, c);", viewer)
-        branch = viewer[viewer.index("private async clinicianItems("):]
-        branch = branch[:branch.index("\n  }")]
-        steps = ("const version = await this.pacs.clinicianViewerHead(uid, c);",
-                 "if (version === null) return clinicianViewerWithheld(uid);",
-                 "const result = await this.svc.listFinal(uid, continued ? { ...rest, cursor: continued.after } : rest, c, version);",
-                 "if (!clinicianViewerPinned(version, result.finalVersion, await this.pacs.clinicianViewerHead(uid, c))) throw changed();",
-                 "return clinicianViewerPage(uid, version, result, VIEWER_CURSOR_KEY);")
-        positions = [branch.index(step) for step in steps]
-        self.assertEqual(positions, sorted(positions), "gate, pinned read, gate+compare, answer — in this order")
-        self.assertIn("new ConflictException({ code: CLINICIAN_VIEWER_CHANGED, message });", viewer)
-        self.assertEqual(branch.count("clinicianViewerHead(uid, c)"), 2)
-        self.assertNotIn("this.svc.list(", branch, "the clinician path never reads items without the signed head")
+        # gate -> items read in the same statement as the signed head of that version -> gate again, all compared.
+        # D73: the order, the 409 on any changed version, the withheld answer and the mixed/legacy path are run on the real
+        # controller in U0B-CLINICIAN-VIEWER (assert_behaviour above), not pinned as controller statements.
         for source in (viewer,):
             self.assertNotIn("clinicianViewerFinal", source, "a boolean gate cannot see reset -> re-approve")
         self.assertRegex(self.policy, r"return Number\.isSafeInteger\(before\) && \(before as number\) > 0 && read === before && after === before;")
         self.assertEqual(re.search(r"export const CLINICIAN_VIEWER_CHANGED = '([A-Z_]+)';", self.policy).group(1),
                          contract["viewer_changed_code"])
         # the signed head and the items are one SQL statement: the head CTE, its column and the item filter
-        listed = items[items.index("async listFinal("):items.index("async write(")]
+        listed = items[items.index("selectFinal(uid: string"):items.index("async write(")]
         for fragment in ('SELECT r.version FROM "Report" r',
                          'JOIN "StudyState" s ON s.uid = r.uid',
                          'JOIN "ReportVersion" v ON v.uid = r.uid AND v.version = r.version',
@@ -1831,7 +1822,6 @@ class ClinicianPolicySpec(unittest.TestCase):
         for fragment in ("${signedHead}", "${signedColumn}", "WHERE (${page.includeHidden} OR NOT i.hidden) ${signedItems}"):
             self.assertIn(fragment, statement, fragment)
         self.assertIn("if (!Number.isSafeInteger(final) || final < 1) denied();", listed)
-        self.assertIn("return this.read(uid, query, c, id, null);", items, "the legacy list keeps the unsigned statement")
         # report-preview returns bodies at every RS; clinician-only is refused before any read
         guard_at = preview.index("if (clinicianOnly(caller.roles)) throw new ForbiddenException({ code: CLINICIAN_ROUTE_DENIED });")
         self.assertLess(guard_at, preview.index("this.prisma.studyState.findUnique"))
@@ -1851,22 +1841,21 @@ class ClinicianPolicySpec(unittest.TestCase):
         branch = viewer[viewer.index("private async clinicianItems("):]
         branch = branch[:branch.index("\n  }")]
         # the continuation is judged before the gate, and the gate's head is compared with its version before anything
-        # is read or withheld; the one version that passes is the pin of listFinal and of the last check
+        # is read or withheld; the one version that passes is the pin of the final-items selection and of the last check.
+        # D73: the steps after the withhold are run on the real controller in U0B-CLINICIAN-VIEWER (a signed continuation
+        # reaches the read only as its verified boundary, a forged one is refused before the gate), not pinned as statements.
+        assert_behaviour('pacs_source_behavior_test.cjs', '^U0B-CLINICIAN-VIEWER')
         steps = ("const page = clinicianViewerQuery(query);",
                  "const { cursor, ...rest } = page;",
                  "const continued = cursor === undefined ? null : clinicianViewerContinuation(VIEWER_CURSOR_KEY, uid, cursor);",
                  "if (cursor !== undefined && !continued) throw changed(",
                  "const version = await this.pacs.clinicianViewerHead(uid, c);",
                  "if (!clinicianViewerContinues(continued?.version ?? null, version)) throw changed();",
-                 "if (version === null) return clinicianViewerWithheld(uid);",
-                 "const result = await this.svc.listFinal(uid, continued ? { ...rest, cursor: continued.after } : rest, c, version);",
-                 "if (!clinicianViewerPinned(version, result.finalVersion, await this.pacs.clinicianViewerHead(uid, c))) throw changed();",
-                 "return clinicianViewerPage(uid, version, result, VIEWER_CURSOR_KEY);")
+                 "if (version === null) return clinicianViewerWithheld(uid);")
         positions = [branch.index(step) for step in steps]
-        self.assertEqual(positions, sorted(positions), "verify continuation, gate, compare, withhold, pinned read, recheck, answer")
+        self.assertEqual(positions, sorted(positions), "verify continuation, gate, compare, withhold")
         # the caller's cursor never reaches the item read; only the verified boundary does, and every answer is signed
         self.assertEqual(branch.count("cursor: continued.after"), 1)
-        self.assertNotIn("listFinal(uid, page,", branch)
         self.assertEqual(branch.count("VIEWER_CURSOR_KEY"), 2)
         # policy: signed {v, uid, version, after}; HMAC-SHA256 compared in constant time over canonical base64url; key >= 32 bytes
         for fragment in (
@@ -1888,10 +1877,9 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertIn("return { uid, final: true, reportVersion: version, items,", self.policy)
         self.assertIn("return { uid, final: false, items: null, nextCursor: null };", self.policy)
         self.assertEqual(sorted(contract["viewer_page_keys"]), sorted(contract["viewer_withheld_keys"] + ["reportVersion"]))
-        # the radiologist path is untouched: the unsigned statement and the bare item id as its cursor
-        self.assertIn("return clinicianOnly(c.roles) ? this.clinicianItems(uid, query, c) : this.svc.list(uid, query, c);", viewer)
-        self.assertIn("return this.read(uid, query, c, id, null);", items)
-        self.assertIn("return { items, nextCursor: pageRow.rows.length > page.limit ? items[items.length - 1].id : null,", items)
+        # the radiologist path is untouched: mixed and legacy roles reach the existing read (U0B-CLINICIAN-VIEWER), whose
+        # cursor stays the bare item id
+        self.assertIn("nextCursor: pageRow.rows.length > page.limit ? items[items.length - 1].id : null,", items)
 
     def test_11_decorator_runs_attribute_public_to_the_handler_it_decorates(self):
         """S5-U1c D5. The S5-U1a reading gave a @Public() found between two route decorators to the later route."""
@@ -2000,13 +1988,13 @@ class ClinicianPolicySpec(unittest.TestCase):
         # clinicianOnly() is the one narrowing predicate, at the listed sites; a role-presence test would narrow a mixed user
         sites = {
             "auth.guard.ts": "req.clinicianOnly = clinicianOnly(req.roles);",
-            "viewer.controller.ts": "return clinicianOnly(c.roles) ? this.clinicianItems(uid, query, c) : this.svc.list(uid, query, c);",
             "report-preview.controller.ts": "if (clinicianOnly(caller.roles)) throw new ForbiddenException({ code: CLINICIAN_ROUTE_DENIED });",
         }
-        # D73 (AGENTS.md section 1-B): the three remaining statement pins above are S9-U0f carry-over and no precedent. A site added
-        # since is named here by file and call count only; what its call does is checked by running the compiled code in
-        # the named test cases (for S7-U4a, the real controller in CC-S02: clinician-only refused before any read, mixed
-        # users admitted). PACS provenance uses the installed TypeScript Program through pacs_source.
+        # D73 (AGENTS.md section 1-B): the two remaining statement pins above are S9-U0f carry-over and no precedent. A site added
+        # or changed since is named here by file and call count only; what its call does is checked by running the compiled
+        # code in the named test cases (for S7-U4a, the real controller in CC-S02: clinician-only refused before any read, mixed
+        # users admitted; for the viewer items, U0B-CLINICIAN-VIEWER). PACS provenance uses the installed TypeScript Program
+        # through pacs_source.
         behaviour_sites = dict(FIXTURES["role_composition"]["behaviour_checked_sites"])
         pacs = FIXTURES["role_composition"]["pacs_entry_site"]
         location = source_query('entry', pacs['entry'])['file'].removeprefix('api/src/')
@@ -2508,7 +2496,7 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertEqual(used["./auth.guard"], 2, "auth.controller.ts and pacs.controller.ts import Public")
         public_export(sources)
         tags, outside = API / "study-tags.controller.ts", API / "unlisted-routes.ts"
-        handler_at = "  @Get() read("
+        handler_at = "  @Get() async read("
         self.assertEqual(sources[tags].count(handler_at), 1)
 
         def tagged(imports, handler):
@@ -2667,7 +2655,7 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertEqual(len(baseline), MATRIX["counts"]["routes"])
         self.assertEqual({m + " " + p for (m, p), meta in baseline.items() if meta["public"]}, PUBLIC)
         tags, outside, app = API / "study-tags.controller.ts", API / "unlisted-routes.ts", API / "app.module.ts"
-        member, registered = "  @Get() read(", "controllers: ["
+        member, registered = "  @Get() async read(", "controllers: ["
         self.assertEqual(sources[tags].count(member), 1)
         self.assertEqual(sources[app].count(registered), 1)
         self.assertTrue(sources[tags].endswith("}\n"))
@@ -2899,7 +2887,7 @@ class ClinicianPolicySpec(unittest.TestCase):
 
         tags, outside, helpers, app = (API / "study-tags.controller.ts", API / "unlisted-routes.ts",
                                        API / "route-helpers.ts", API / "app.module.ts")
-        member, registered = "  @Get() read(", "controllers: ["
+        member, registered = "  @Get() async read(", "controllers: ["
         heading, constructor = "export class StudyTagsController {", "constructor(private service:StudyTagsService){}"
         for text in (member, heading, constructor):
             self.assertEqual(sources[tags].count(text), 1, text)
@@ -3234,7 +3222,7 @@ class ClinicianPolicySpec(unittest.TestCase):
             return str(caught.exception)
 
         tags, outside, app = API / "study-tags.controller.ts", API / "unlisted-routes.ts", API / "app.module.ts"
-        member, registered = "  @Get() read(", "controllers: ["
+        member, registered = "  @Get() async read(", "controllers: ["
         self.assertEqual(sources[tags].count(member), 1)
         self.assertEqual(sources[app].count(registered), 1)
         self.assertNotIn(outside, sources)

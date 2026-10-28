@@ -447,14 +447,17 @@ class ClinicianRequestLive(unittest.TestCase):
         _, admin_cancel = self.change("hadmin", r6, 1, "cancel", note="SYNTHETIC R02 admin cancel")
         self.assertEqual(self.shape(admin_cancel), ("cancel", "Requested", "Cancelled", 2))
         self.assertEqual(self.read("tech", r6)["handler"]["actor"], admin)
-        # the note rule: accept takes '', every other action 1..2000 characters that are not blank
+        # Acceptance has no note; cancellation is optional; close/decline still require their record.
         _, seventh = self.make("clinician2", f.uid, kind="external-image")
         r7 = seventh.body["applied"]["id"]
         for user, action, note in (("tech", "accept", "SYNTHETIC not empty"), ("tech", "close", ""), ("tech", "decline", "   "),
-                                   ("clinician2", "cancel", ""), ("tech", "close", "S" * 2001)):
+                                   ("tech", "close", "S" * 2001)):
             with self.subTest(note=action + ":" + str(len(note))):
                 self.change(user, r7, 1, action, note=note, expect=400, expected_code="IMAGE_REQUEST_INPUT_INVALID")
         self.assertEqual(self.ledger(f.uid, r7), (1, 1, 1))
+        _, cancelled = self.change('clinician2', r7, 1, 'cancel', note='')
+        self.assertEqual(self.shape(cancelled), ('cancel', 'Requested', 'Cancelled', 2))
+        self.assertEqual(self.ledger(f.uid, r7), (2, 2, 2))
         for rid, revision in ((r1, 3), (r2, 2), (r3, 3), (r4, 2), (r5, 3), (r6, 2)):
             with self.subTest(ledger=rid):
                 self.assertEqual(self.ledger(f.uid, rid), (revision, revision, revision))

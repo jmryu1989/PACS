@@ -5,12 +5,15 @@ class KinDictationProcessor extends AudioWorkletProcessor {
     const maxFrames = options.processorOptions?.maxFrames;
     this.done = false;
     this.frames = 0;
-    if (sampleRate !== 16000 || !Number.isSafeInteger(maxFrames) || maxFrames < 1 || maxFrames > 524266) {
+    // 2147483629 frames is the largest data chunk a 32-bit RIFF size can describe; the configured
+    // limit is the real one. A buffer this browser cannot allocate is a failed capture, not a crash.
+    const valid = sampleRate === 16000 && Number.isSafeInteger(maxFrames) && maxFrames >= 1 && maxFrames <= 2147483629;
+    try { this.pcm = valid ? new Uint8Array(maxFrames * 2) : null; } catch (_) { this.pcm = null; }
+    if (!this.pcm) {
       this.done = true;
       this.port.postMessage({ type: 'error' });
       return;
     }
-    this.pcm = new Uint8Array(maxFrames * 2);
     this.view = new DataView(this.pcm.buffer);
     this.port.onmessage = ({ data }) => {
       if (data?.type === 'stop') this.finish();

@@ -724,6 +724,24 @@ class ClinicalContextDOMTest(unittest.TestCase):
         own = self.own_text(self.panel()["text"], answer)
         self.assertIsNone(AVOIDED.search(own), own)
 
+    def test_c12_next_page_reads_the_continuation_and_refresh_starts_over(self):
+        self.open_reader()
+        first = copy.deepcopy(VALID["A-TRUNC"])
+        first["nextCursor"] = "1"
+        self.show(A, raw=json.dumps(first), status=200)
+        second = copy.deepcopy(VALID["A-ONE"])
+        second["nextCursor"] = None
+        self.answer(A, raw=json.dumps(second), status=200)
+        self.page.get_by_role("region", name="Clinical Context").get_by_role("button", name="Next Page").click()
+        self.settle()
+        calls = self.js("synCallView")
+        self.assertEqual(calls[-1]["query"], "?cursor=1")
+        expect(self.page.get_by_role("region", name="Clinical Context").get_by_role("button", name="Next Page")).to_have_count(0)
+        self.answer(A, raw=json.dumps(first), status=200)
+        self.refresh_button().click()
+        self.settle()
+        self.assertEqual(self.js("synCallView")[-1]["query"], "")
+
     def test_cd01_counts_follow_the_items_and_truncated_adds_a_plus(self):
         self.open_reader()
         self.show(A, vector="A-ONE")

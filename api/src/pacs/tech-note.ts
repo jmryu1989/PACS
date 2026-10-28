@@ -80,7 +80,7 @@ export class PacsTechNote {
   private validateWrite(body: any) {
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => !['baseVersion', 'text', 'reason', 'attemptId'].includes(k)) ||
         !Number.isInteger(body.baseVersion) || body.baseVersion < 0 || body.baseVersion >= 2147483646 ||
-        typeof body.text !== 'string' || body.text.length > 10000 || body.text.includes('\0') ||
+        typeof body.text !== 'string' || body.text.includes('\0') ||
         typeof body.reason !== 'string' || body.reason.length > 1000 || body.reason.includes('\0') ||
         body.attemptId !== undefined && typeof body.attemptId !== 'string')
       throw new BadRequestException('메모·수정 사유·기준 버전을 확인하세요');
@@ -118,7 +118,6 @@ export class PacsTechNote {
       }
       const prev = await tx.techNoteRevision.findFirst({ where: { studyUid: uid }, orderBy: { version: 'desc' } });
       if ((prev?.version ?? 0) !== body.baseVersion) throw new ConflictException('메모가 변경되었습니다. 이력을 확인한 뒤 다시 작성하세요');
-      if (prev && !reason) throw new BadRequestException('수정·비우기에는 사유가 필요합니다');
       if (!prev && !body.text.trim()) throw new BadRequestException('메모 내용을 입력하세요');
       if (prev?.text === body.text) throw new BadRequestException('변경된 내용이 없습니다');
       const note = noteForCaller(await tx.techNoteRevision.create({ data: { studyUid: uid, version: body.baseVersion + 1,

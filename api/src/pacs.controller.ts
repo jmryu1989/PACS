@@ -3,6 +3,8 @@ import { PacsService, Caller, DraftRequestFacts } from './pacs.service';
 import { REQUEST_CONTEXT_SOURCE, RequestContextSource } from './emr-runtime/request-context';
 import { Public } from './auth.guard';
 import { AuthService } from './auth.service';
+import { imageRead } from './image-relay.controller';
+import { bootstrapRead } from './emr-viewing/consumer-read';
 
 /**
  * URL의 `:id`를 정수로. **`+id`를 그대로 쓰면 안 된다.**
@@ -91,11 +93,13 @@ export class PacsController {
   @Get('authz/dicom')
   @HttpCode(204)
   authzDicom(@Req() req: any) {
-    return this.svc.authzDicom(
-      String(req.headers['x-original-uri'] ?? ''),
-      String(req.headers['x-original-method'] ?? req.method ?? ''),
-      caller(req),
-    );
+    const uri = String(req.headers['x-original-uri'] ?? ''), method = String(req.headers['x-original-method'] ?? req.method ?? '');
+    // MG-08: auth_request admits a read but never sees it delivered. Image reads go to the API's recorded relay
+    // (image-relay.controller.ts), the exact-study GET/HEAD included; one reaching this admission (a stale proxy) gets
+    // no image byte.
+    if (['GET', 'HEAD'].includes(method.toUpperCase()) && imageRead(uri.split('?')[0]))
+      throw new ForbiddenException('영상은 열람 기록 경로로만 제공합니다');
+    return this.svc.authzDicom(uri, method, caller(req));
   }
 
   /** Gateway가 바이트를 보내기 전에 자격증명의 기관으로 Study 소유권을 고정한다. */
@@ -240,8 +244,8 @@ export class PacsController {
 
   @Get('bootstrap')
   @Header('Cache-Control', 'no-store')
-  bootstrap(@Req() req: any, @Query() query: any) {
-    return this.svc.bootstrap(caller(req), query);
+  async bootstrap(@Req() req: any, @Query() query: any) {
+    return bootstrapRead(await this.svc.bootstrap(caller(req), query), req.actor, req.institution);
   }
 
   /**
@@ -250,8 +254,8 @@ export class PacsController {
    */
   @Get('studies')
   @Header('Cache-Control', 'no-store')
-  studies(@Req() req: any, @Query() query: any) {
-    return this.svc.listStudies(caller(req), query);
+  async studies(@Req() req: any, @Query() query: any) {
+    return this.svc.readStudies(caller(req), query);
   }
 
   /** 기관을 못 알아본 검사 — 관리자 전용 통로. 워크리스트에는 안 섞인다 */

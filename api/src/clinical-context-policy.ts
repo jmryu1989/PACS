@@ -82,7 +82,7 @@ const CONTEXT_REASONS: Readonly<Record<ContextSectionName, { not_configured: rea
  */
 const SECTION_KEYS = ['state', 'reason', 'sourceLabel', 'observedAt', 'truncated', 'items'];
 export const CLINICAL_CONTEXT_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  answer: ['schema', 'uid', 'observedAt', 'patientKey', 'anchor', 'identity', 'sections'],
+  answer: ['schema', 'uid', 'observedAt', 'patientKey', 'anchor', 'identity', 'sections', 'nextCursor'],
   anchor: ['access', 'institutionName', 'techNoteVersion'],
   identity: ['conflict', 'birth', 'sex'],
   sections: [...CONTEXT_SECTION_NAMES],
@@ -571,6 +571,7 @@ function contextSectionShapeError(name: ContextSectionName, value: unknown, cont
 export function clinicalContextShapeError(value: unknown): string | null {
   try {
     const answer = keysExactly(value, CLINICAL_CONTEXT_KEYS.answer, 'answer');
+    check(answer.nextCursor === null || typeof answer.nextCursor === 'string' && /^[0-9]+$/.test(answer.nextCursor), 'nextCursor', 'invalid continuation');
     check(answer.schema === CLINICAL_CONTEXT_SCHEMA, 'schema', 'not this schema');
     check(studyUid(answer.uid), 'uid', 'not a study UID');
     check(instant(answer.observedAt), 'observedAt', 'not an ISO instant');
@@ -597,7 +598,7 @@ export function clinicalContextShapeError(value: unknown): string | null {
  * R8 조립(R7이 통과한 뒤에만 부른다). 모양 확인에 걸린 구역은 항목 없이 failed/source_invalid로 바꾼다 — 한 구역 안에서 일부
  * 항목만 싣고 성공이라 하지 않는다(부분 성공은 구역 단위뿐). 그 뒤에도 답이 닫힌 모양이 아니면 보내지 않고 던진다.
  */
-export function clinicalContextAnswer(parts: { uid: string; observedAt: string; patientKey: string | null;
+export function clinicalContextAnswer(parts: { nextCursor?: string | null; uid: string; observedAt: string; patientKey: string | null;
   anchor: { access: ContextAccess; institutionName: string; techNoteVersion: number };
   identity: { conflict: boolean; birth: string; sex: string }; sections: Record<ContextSectionName, any> }) {
   const context = { uid: parts.uid, anchor: parts.anchor, patientKey: parts.patientKey };
@@ -607,7 +608,7 @@ export function clinicalContextAnswer(parts: { uid: string; observedAt: string; 
     sections[name] = contextSectionShapeError(name, section, context) === null ? section
       : contextSection(name, 'failed', 'source_invalid', parts.observedAt);
   }
-  const answer = { schema: CLINICAL_CONTEXT_SCHEMA, uid: parts.uid, observedAt: parts.observedAt, patientKey: parts.patientKey,
+  const answer = { nextCursor: parts.nextCursor ?? null, schema: CLINICAL_CONTEXT_SCHEMA, uid: parts.uid, observedAt: parts.observedAt, patientKey: parts.patientKey,
     anchor: { ...parts.anchor }, identity: { ...parts.identity }, sections };
   const error = clinicalContextShapeError(answer);
   if (error) throw new Error('clinical context answer is not the closed shape: ' + error);
