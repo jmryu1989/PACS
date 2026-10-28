@@ -56,6 +56,12 @@ const OHIF_INDEX_REWRITES = [
   ['<title>OHIF Viewer</title>', '<title>판독 뷰어 — KOREA IMAGING NETWORK (Studio)</title>'],
 ];
 
+// The studio's part of the viewer popup (ui/viewer-studio.js: 고르기 and the studio's reloads). The viewer is OHIF
+// at the top level of its own popup, opened by the studio or by the worklist, so there is no studio page around it
+// to carry this; added only to the studio's copy of the page, never to the product.
+const STUDIO_VIEWER_TAGS = '<link rel="stylesheet" href="/studio/pick.css"/><script src="/studio/shared.js"></script>'
+  + '<script src="/studio/pick.js"></script><script src="/studio/viewer-studio.js"></script>';
+
 const COMPRESSIBLE = /^(text\/|application\/(json|javascript|wasm|manifest\+json|xml)|image\/svg)/;
 
 class StaticServer {
@@ -102,6 +108,7 @@ class StaticServer {
       let html;
       try { html = fs.readFileSync(file, 'utf8'); } catch { send(res, 503, 'Viewer — Prototype pending: OHIF build is not installed in this studio', ISOLATION); return true; }
       for (const [from, to] of OHIF_INDEX_REWRITES) html = html.split(from).join(to);
+      html = html.includes('</body>') ? html.replace('</body>', `${STUDIO_VIEWER_TAGS}</body>`) : html + STUDIO_VIEWER_TAGS;
       this.respond(req, res, Buffer.from(html), 'text/html; charset=utf-8', { 'Cache-Control': 'no-store' });
       return true;
     }

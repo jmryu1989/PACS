@@ -132,8 +132,9 @@
       } else if (ev.type === 'reload') {
         // Every studio tab of this browser relays the same server event with the same nonce, so the product window
         // reloads once per event; two separate events (two resets) are two reloads.
-        target.reload({ reason: ev.reason, jobId: ev.jobId || null, sha: ev.sha || null }, ev.eventId || `${ev.reason}|${ev.sha || ''}|${ev.jobId || ''}`);
-        reloadViewer();
+        const nonce = ev.eventId || `${ev.reason}|${ev.sha || ''}|${ev.jobId || ''}`;
+        target.reload({ reason: ev.reason, jobId: ev.jobId || null, sha: ev.sha || null }, nonce);
+        viewer.reload(nonce);
         refreshState().catch(() => {});
       } else if (ev.type === 'missing') {
         if (!state.missing.some(m => m.method === ev.method && m.path === ev.path)) state.missing.push(ev);
@@ -159,29 +160,70 @@
     }
   }
 
-  // ── picks (chips above the input) ──
-  function setPicks(picks) {
-    state.picks = picks;
+  // ── picks (chips above the input): the product window's, then the viewer popup's ──
+  const pickSets = { product: [], viewer: [] };
+  function setPicks(picks, from = 'product') {
+    pickSets[from] = picks;
+    state.picks = [...pickSets.product, ...pickSets.viewer];
     const chips = $('chips');
     chips.replaceChildren();
-    picks.forEach((p, i) => {
+    const all = [...pickSets.product.map(p => [p, 'product']), ...pickSets.viewer.map(p => [p, 'viewer'])];
+    all.forEach(([p, source], i) => {
       const chip = el('span', p.lost ? 'chip lost' : 'chip');
-      chip.title = `${p.selector}\n${p.page || ''}${p.lost ? '\n지금 제품 화면에서 이 요소를 찾을 수 없습니다(목록이 바뀌었거나 다른 화면). 빼고 다시 골라 주세요.' : ''}`;
-      chip.append(el('b', '', String(i + 1)), ` ${p.tag} ${p.text ? `"${p.text.length > 28 ? p.text.slice(0, 27) + '…' : p.text}"` : ''}`);
+      chip.title = `${p.selector}\n${p.page || ''}${p.lost ? `\n지금 ${source === 'viewer' ? '영상 창' : '제품 화면'}에서 이 요소를 찾을 수 없습니다(목록이 바뀌었거나 다른 화면). 빼고 다시 골라 주세요.` : ''}`;
+      const image = p.image && p.image.seriesDescription ? ` · ${p.image.seriesDescription}${p.image.slice ? ` ${p.image.slice}` : ''}` : '';
+      chip.append(el('b', '', String(i + 1)), `${source === 'viewer' ? ' 영상 창' : ''} ${p.tag} ${p.text ? `"${p.text.length > 28 ? p.text.slice(0, 27) + '…' : p.text}"` : ''}${image}`);
       if (p.lost) chip.append(el('span', 'lost-note', ' · 화면에서 찾을 수 없음'));
       const x = el('button', 'x', '×'); x.type = 'button'; x.title = '빼기';
-      x.onclick = () => target.pickRemove(p.id);
+      x.onclick = () => (source === 'viewer' ? viewer.pickRemove(p.id) : target.pickRemove(p.id));
       chip.append(x);
       chips.append(chip);
     });
-    $('picks').hidden = !picks.length;
+    $('picks').hidden = !all.length;
   }
-  $('picks-clear').onclick = () => target.pickClear();
+  function clearPicks() { target.pickClear(); viewer.pickClear(); }
+  $('picks-clear').onclick = () => clearPicks();
 
-  function setPickMode(on) {
-    state.product.pickActive = on;
-    $('pick').classList.toggle('on', on);
-    $('pick').textContent = on ? '고르는 중' : '고르기';
+  function setPickMode(on, from = 'product') {
+    if (from === 'viewer') viewerState.pickActive = on; else state.product.pickActive = on;
+    const any = state.product.pickActive || viewerState.pickActive;
+    $('pick').classList.toggle('on', any);
+    $('pick').textContent = any ? '고르는 중' : '고르기';
+  }
+
+  // ── the viewer popup: OHIF with the studio's viewer-studio.js (static.js adds it), in both layouts. It is reached
+  // over the channel, not through a window handle, so a refreshed or reopened chat still reloads and picks in it. ──
+  const viewerState = { seen: 0, pickActive: false };
+  const viewer = (() => {
+    const bc = channel();
+    const post = message => { if (bc) bc.postMessage({ from: 'chat', ...message }); };
+    if (bc) bc.onmessage = ({ data: m }) => {
+      if (!m || m.from !== 'viewer') return;
+      if (m.type === 'viewer-bye') { viewerState.seen = 0; setPicks([], 'viewer'); setPickMode(false, 'viewer'); return; }
+      viewerState.seen = Date.now();
+      if (Array.isArray(m.picks)) setPicks(m.picks, 'viewer');
+      if ('pickActive' in m && !!m.pickActive !== viewerState.pickActive) setPickMode(!!m.pickActive, 'viewer');
+    };
+    setInterval(() => post({ type: 'viewer-hb' }), 2000);
+    post({ type: 'viewer-ping' });
+    return {
+      connected: () => Date.now() - viewerState.seen < 5000,
+      reload: nonce => post({ type: 'viewer-reload', nonce }),
+      pick: on => post({ type: 'viewer-pick', on }),
+      pickRemove: id => post({ type: 'viewer-pick-remove', id }),
+      pickClear: () => post({ type: 'viewer-picks-clear' }),
+    };
+  })();
+
+  // 고르기 from the chat: every open product window picks. With the viewer open the product window is not brought
+  // forward — it would cover the viewer popup he is about to pick in.
+  function togglePick(on = !(state.product.pickActive || viewerState.pickActive)) {
+    if (viewer.connected()) {
+      viewer.pick(on);
+      if (target.connected()) target.pick(on, false);
+      return;
+    }
+    target.pick(on);
   }
 
   // ── the product: in this window (overlay) or in the product window (two windows) ──
@@ -331,14 +373,14 @@
         replies.set(ask, m => { clearTimeout(timer); resolve({ page: m.page, study: m.study, errors: (m.errors || []).slice(-5) }); });
         post({ type: 'context', ask });
       }),
-      pick: on => {
+      pick: (on, forward = true) => {
         if (!connected()) {
           if (on === false) return;
           pickWanted = openProduct() ? Date.now() : 0;
           return;
         }
         post({ type: 'pick', on });
-        if (on === true || (on === undefined && !state.product.pickActive)) openProduct(); // bring it forward to pick in
+        if (forward && (on === true || (on === undefined && !state.product.pickActive))) openProduct(); // bring it forward to pick in
       },
       pickRemove: id => post({ type: 'pick-remove', id }),
       pickClear: () => post({ type: 'picks-clear' }),
@@ -346,8 +388,8 @@
   }
 
   // Alt+G from the chat window starts picking in the product (two windows) or here (overlay; handled above).
-  if (layout === 'two') window.addEventListener('keydown', e => { if (isShortcut(e, PICK_KEY)) { e.preventDefault(); target.pick(); } });
-  $('pick').onclick = () => target.pick(!state.product.pickActive);
+  if (layout === 'two') window.addEventListener('keydown', e => { if (isShortcut(e, PICK_KEY)) { e.preventDefault(); togglePick(); } });
+  $('pick').onclick = () => togglePick();
 
   // ── chat ──
   function setMode(mode) {
@@ -368,7 +410,7 @@
     typingChanged();
     try {
       await api('chat', { json: { mode: state.mode, text, context } });
-      if (picks.length) target.pickClear();
+      if (picks.length) clearPicks();
       endPreviewHere(); // the server ended this browser's preview: his own request is about his screen
     } catch (error) { input.value = text; alert('보내지 못했습니다: ' + error.message); }
   }
@@ -402,7 +444,7 @@
 
   // The product never shows its viewer inside the worklist window: viewer-launch.js opens it as a sized popup
   // (popup=yes, the last viewer rectangle or the default one). The Viewer choice opens the same kind of window; the
-  // product window keeps its screen. Picking works in the product window only.
+  // product window keeps its screen. Reloads and picks reach the viewer over the channel (viewer above).
   let viewerRef = null;
   function openViewer() {
     if (viewerRef && !viewerRef.closed) { try { viewerRef.focus(); } catch { /* not ours */ } return; }
@@ -411,9 +453,6 @@
     try { w = window.open(VIEWER_URL, VIEWER_WINDOW, `popup=yes,width=${r.width},height=${r.height},left=${r.left},top=${r.top},resizable=yes,scrollbars=yes`); } catch { w = null; }
     if (!w) { alert('브라우저가 영상 창을 막았습니다. 주소창 오른쪽의 팝업 차단 표시에서 이 사이트를 허용해 주세요.'); return; }
     viewerRef = w;
-  }
-  function reloadViewer() {
-    try { if (viewerRef && !viewerRef.closed) viewerRef.location.reload(); } catch { /* closed meanwhile */ }
   }
   $('screen').onchange = e => {
     if (e.target.value !== 'viewer') { openScreen(e.target.value); return; }
@@ -575,7 +614,7 @@
   // ── 스튜디오로 할 수 있는 것: example cards; a click fills the input (he presses send) or points at the control ──
   function flash(node) { node.classList.add('flash'); node.focus(); setTimeout(() => node.classList.remove('flash'), 2400); }
   const SHOWCASE = [
-    { title: '가리키고 말하기', body: '고르기를 누르고 제품 화면에서 버튼·칸을 클릭한 뒤 "이거"라고 말하면 정확히 그것을 고칩니다. 클릭해도 그 버튼은 눌리지 않습니다.',
+    { title: '가리키고 말하기', body: '고르기를 누르고 제품 화면이나 영상 창에서 버튼·칸·영상을 클릭한 뒤 "이거"라고 말하면 정확히 그것을 고칩니다. 클릭해도 그 버튼은 눌리지 않습니다.',
       mode: 'edit', text: '이거 조금 더 크게, 오른쪽 끝으로 옮겨 주세요', pick: true },
     { title: '여러 곳을 한 번에', body: '여러 개를 연달아 고르면 한 번에 같이 바꿉니다. 다시 클릭하면 빠지고, Esc는 모두 지웁니다.',
       mode: 'edit', text: '이것들을 같은 크기와 같은 색으로 맞춰 주세요', pick: true },
@@ -624,7 +663,7 @@
           setMode(card.mode);
           input.value = card.text;
           input.focus();
-          if (card.pick) target.pick(true);
+          if (card.pick) togglePick(true);
         };
         grid.append(b);
       }

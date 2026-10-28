@@ -90,6 +90,10 @@ function seed(mock) {
     event(admin, { at: ago(2 * 3600e3), actor: kim, surface: 'POST studies/:uid/original-download', action: 'download', result: 'prepared', statutoryAct: '열람',
       targets: [studyTarget(read, 'dicom-study')], cause: '외부 협진 의뢰' });
   }
+  // Both logs page in record order (audit id, access-log sequence = position) like the product: the seed is put in the
+  // order its synthetic times say it was recorded.
+  admin.audit.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0)).forEach((row, i) => { row.id = i + 1; });
+  admin.access.sort((a, b) => (a.recordedAt < b.recordedAt ? -1 : a.recordedAt > b.recordedAt ? 1 : 0));
   return admin;
 }
 
@@ -308,19 +312,27 @@ function studyAccess(mock, admin, id, method, body, me) {
   if (method === 'GET') return ok({ owner, subject: id, revision: stored.revision, policy: stored.policy, needsInstitutionReview: false,
     reason: stored.reason, updatedBy: stored.updatedBy, updatedAt: stored.updatedAt });
   if (id === me.sub) return err(501, '스튜디오는 지금 쓰는 사람 자신의 검사 접근 제한을 적용하지 않습니다(스튜디오 미지원). 다른 회원으로 해 보세요.', 'STUDIO_NOT_SUPPORTED');
+  // The checks and their order are study-access.service.ts write(): request shape, owner, policy, replay, revision.
   const changed = () => err(409, '다른 관리자가 먼저 접근 조건을 바꿨습니다. Reload로 현재 설정을 확인하세요', 'STUDY_ACCESS_CHANGED');
-  if (JSON.stringify(body.expectedOwner) !== JSON.stringify(owner)) return changed();
-  if (typeof body.requestId !== 'string' || !body.requestId) return err(400, 'requestId가 필요합니다');
-  const fingerprint = JSON.stringify([id, body.revision, body.policy, body.reason]);
-  const seen = admin.requests[body.requestId];
+  const b = body;
+  if (!b || typeof b !== 'object' || Array.isArray(b) || Object.keys(b).sort().join() !== 'expectedOwner,policy,reason,requestId,revision'
+    || typeof b.requestId !== 'string' || !UUID.test(b.requestId) || !Number.isInteger(b.revision) || b.revision < 0 || b.revision >= 2147483646
+    || typeof b.reason !== 'string' || !b.reason.trim() || b.reason.length > 2000 || /[\u0000-\u001f\u007f]/.test(b.reason)) {
+    return err(400, '접근 조건·기준 버전·변경 사유를 확인하세요');
+  }
+  if (JSON.stringify(b.expectedOwner) !== JSON.stringify(owner)) return changed();
+  let policy;
+  try { policy = normalizeAccessPolicy(b.policy); } catch { return err(400, '검사 접근 조건 형식을 확인하세요'); }
+  const request = b.requestId.toLowerCase();
+  const fingerprint = JSON.stringify([me.institution, id, me.sub, b.revision, policy, b.reason]);
+  const seen = admin.requests[request];
   if (seen) return seen.fingerprint === fingerprint ? ok({ owner, subject: id, revision: seen.revision, replayed: true })
-    : err(409, '같은 요청 번호가 다른 내용으로 다시 쓰였습니다', 'STUDY_ACCESS_REQUEST_REUSED');
-  if (body.revision !== stored.revision) return changed();
-  const reason = reasonText(body.reason);
-  const policy = checkPolicy(body.policy);
+    : err(409, '다른 변경에 사용된 요청 ID입니다. 현재 설정을 확인하세요', 'STUDY_ACCESS_REQUEST_REUSED');
+  if (b.revision !== stored.revision) return changed();
+  const reason = b.reason;
   const revision = stored.revision + 1;
   admin.studyAccess[id] = { revision, reason, updatedBy: me.actor, updatedAt: ISO(), policy };
-  admin.requests[body.requestId] = { fingerprint, revision };
+  admin.requests[request] = { fingerprint, revision };
   audit(admin, { at: ISO(), actor: me.actor, action: 'study.access', target: id, rule: 'field:detail.institution',
     detail: { institution: me.institution, subject: id, revision, restricted: policy.restricted, reason } });
   event(admin, { at: ISO(), actor: actorOf(me), surface: 'POST admin/users/:id/study-access', action: 'modify', result: 'succeeded',
@@ -329,23 +341,52 @@ function studyAccess(mock, admin, id, method, body, me) {
   return ok({ owner, subject: id, revision, replayed: false });
 }
 
-function checkPolicy(p) {
-  const bad = message => { throw err(400, message); };
-  const instant = v => (v === null ? null : typeof v === 'string' && Number.isFinite(Date.parse(v)) ? new Date(v).toISOString() : bad('시각 형식이 올바르지 않습니다'));
-  if (!p || p.version !== 1 || typeof p.restricted !== 'boolean' || !Array.isArray(p.rules)) bad('접근 조건 형식이 올바르지 않습니다');
-  if (!p.restricted) return { version: 1, restricted: false, startsAt: null, endsAt: null, rules: [] };
-  const startsAt = instant(p.startsAt ?? null), endsAt = instant(p.endsAt ?? null);
-  if (startsAt && endsAt && startsAt >= endsAt) bad('종료 시각은 시작 시각보다 뒤여야 합니다');
-  if (p.rules.length > 10) bad('조건은 최대 10개입니다');
-  if (p.rules.length === 1 && p.rules[0] && p.rules[0].all === true) return { version: 1, restricted: true, startsAt, endsAt, rules: [{ all: true }] };
-  const rules = p.rules.map(r => {
-    if (!r || typeof r !== 'object' || r.all) bad('조건 형식이 올바르지 않습니다');
-    const rule = { patientId: r.patientId || null, modalities: Array.isArray(r.modalities) ? r.modalities.filter(Boolean).map(String) : [],
-      dateFrom: r.dateFrom || null, dateTo: r.dateTo || null, studyUids: Array.isArray(r.studyUids) ? r.studyUids.filter(Boolean).map(String) : [] };
-    if (!rule.patientId && !rule.modalities.length && !rule.dateFrom && !rule.dateTo && !rule.studyUids.length) bad('빈 조건은 저장할 수 없습니다');
-    return rule;
+// api/src/study-access-policy.ts normalizeAccessPolicy, line for line: a form mistake the product refuses (a reversed
+// date range, a mistyped UID, a modality twice) must not look saved in the studio.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function normalizeAccessPolicy(v) {
+  const invalid = () => { throw new Error('검사 접근 조건 형식을 확인하세요'); };
+  const record = x => !!x && typeof x === 'object' && !Array.isArray(x);
+  const keys = (x, expected) => Object.keys(x).sort().join(',') === [...expected].sort().join(',');
+  const validUid = x => typeof x === 'string' && x.length <= 64 && /^\d+(?:\.\d+)+$/.test(x);
+  const date = x => {
+    if (x === null) return null;
+    if (typeof x !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(x) || x < '1900-01-01' || x > '2199-12-31') invalid();
+    const time = Date.parse(x + 'T00:00:00.000Z');
+    if (!Number.isFinite(time) || new Date(time).toISOString().slice(0, 10) !== x) invalid();
+    return x;
+  };
+  const instant = x => {
+    if (x === null) return null;
+    if (typeof x !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(x)) invalid();
+    const time = Date.parse(x);
+    if (!Number.isFinite(time) || new Date(time).toISOString() !== x) invalid();
+    date(x.slice(0, 10));
+    return x;
+  };
+  if (!record(v) || !keys(v, ['version', 'restricted', 'startsAt', 'endsAt', 'rules']) || v.version !== 1 || typeof v.restricted !== 'boolean'
+    || !Array.isArray(v.rules) || v.rules.length > 10) invalid();
+  const startsAt = instant(v.startsAt), endsAt = instant(v.endsAt);
+  if (startsAt && endsAt && startsAt >= endsAt) invalid();
+  let count = 0;
+  const rules = v.rules.map(r => {
+    if (!record(r)) invalid();
+    if (keys(r, ['all']) && r.all === true) return { all: true };
+    if (!keys(r, ['patientId', 'modalities', 'dateFrom', 'dateTo', 'studyUids'])) invalid();
+    if (r.patientId !== null && (typeof r.patientId !== 'string' || !r.patientId.trim() || r.patientId.length > 256 || /[\u0000-\u001f\u007f]/.test(r.patientId))) invalid();
+    if (!Array.isArray(r.modalities) || r.modalities.length > 32 || r.modalities.some(x => typeof x !== 'string' || !/^[A-Z0-9_]{1,16}$/.test(x))) invalid();
+    if (!Array.isArray(r.studyUids) || r.studyUids.length > 1000 || r.studyUids.some(x => !validUid(x))) invalid();
+    if (new Set(r.modalities).size !== r.modalities.length || new Set(r.studyUids).size !== r.studyUids.length) invalid();
+    count += r.studyUids.length; if (count > 1000) invalid();
+    const dateFrom = date(r.dateFrom), dateTo = date(r.dateTo);
+    if (dateFrom && dateTo && dateFrom > dateTo) invalid();
+    if (r.patientId === null && !r.modalities.length && !dateFrom && !dateTo && !r.studyUids.length) invalid();
+    return { patientId: r.patientId === null ? null : r.patientId.trim(), modalities: [...r.modalities].sort(), dateFrom, dateTo, studyUids: [...r.studyUids].sort() };
   });
-  return { version: 1, restricted: true, startsAt, endsAt, rules };
+  if (!v.restricted && (rules.length || startsAt || endsAt)) invalid();
+  if (rules.length > 1 && rules.some(r => 'all' in r)) invalid();
+  if (new Set(rules.map(r => JSON.stringify(r))).size !== rules.length) invalid();
+  return { version: 1, restricted: v.restricted, startsAt, endsAt, rules };
 }
 
 // ── Gateway ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -417,16 +458,21 @@ function auditPage(admin, q, me) {
   if ([...q.keys()].some(k => k !== 'limit' && k !== 'after')) return err(400, '감사 조회 조건이 올바르지 않습니다', 'ADMIN_AUDIT_QUERY_INVALID');
   const limit = q.has('limit') ? Number(q.get('limit')) : 25;
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) return err(400, 'limit는 1~100이어야 합니다', 'ADMIN_AUDIT_QUERY_INVALID');
-  let offset = 0;
+  // admin.service.ts auditEvents: the first page fixes the newest id (top); later pages continue below the last id
+  // served, so a change made meanwhile neither repeats a row nor moves the total.
+  let c = null;
   if (q.has('after')) {
-    const c = uncursor(q.get('after'));
-    if (!c || c.sub !== me.sub || !Number.isInteger(c.offset)) return err(409, '이어보기 위치가 만료되었습니다. 다시 조회하세요', 'ADMIN_AUDIT_CURSOR_EXPIRED');
-    offset = c.offset;
+    c = uncursor(q.get('after'));
+    if (!c || c.sub !== me.sub || !Number.isInteger(c.top) || !Number.isInteger(c.after)) {
+      return err(409, '이어받기 유효기간이 지났거나 서버가 다시 시작되었습니다. 처음부터 다시 조회하세요.', 'ADMIN_AUDIT_CURSOR_EXPIRED');
+    }
   }
-  const all = admin.audit.slice().sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : b.id - a.id));
-  const rows = all.slice(offset, offset + limit).map(({ id, ...r }) => r);
-  return ok({ institutionId: me.institution, observedAt: ISO(), total: all.length, rows,
-    next: offset + limit < all.length ? cursor({ sub: me.sub, offset: offset + limit }) : null });
+  const top = c ? c.top : admin.audit.reduce((max, row) => Math.max(max, row.id), 0);
+  const all = admin.audit.filter(row => row.id <= top).sort((a, b) => b.id - a.id);
+  const rest = c ? all.filter(row => row.id < c.after) : all;
+  const page = rest.slice(0, limit);
+  return ok({ institutionId: me.institution, observedAt: ISO(), total: all.length, rows: page.map(({ id, ...r }) => r),
+    next: rest.length > limit ? cursor({ sub: me.sub, top, after: page[page.length - 1].id }) : null });
 }
 
 function accessReview(admin, q, me) {
@@ -434,19 +480,28 @@ function accessReview(admin, q, me) {
   if ([...q.keys()].some(k => !allowed.includes(k)) || !['all', 'files'].includes(q.get('downloads'))) return err(400, '조회 조건이 올바르지 않습니다');
   const from = q.get('from'), until = q.get('until');
   if (!Number.isFinite(Date.parse(from)) || !Number.isFinite(Date.parse(until)) || Date.parse(from) >= Date.parse(until)) return err(400, '시작보다 뒤인 종료 시각을 지정하세요');
-  let offset = 0;
+  // admin-access-review.ts: newest first in record order (sequence = position in the append-only log); the first page
+  // fixes the newest sequence (top) and the next page continues before the last one served.
+  let c = null;
   if (q.has('after')) {
-    const c = uncursor(q.get('after'));
-    if (!c || c.from !== from || c.until !== until || c.downloads !== q.get('downloads') || !Number.isInteger(c.offset)) return err(400, '이어보기 위치가 조회 조건과 맞지 않습니다');
-    offset = c.offset;
+    c = uncursor(q.get('after'));
+    if (!c || c.from !== from || c.until !== until || c.downloads !== q.get('downloads') || c.institution !== me.institution
+      || !Number.isInteger(c.top) || !Number.isInteger(c.before) || c.before > c.top) return err(400, '이어보기 위치가 조회 조건과 맞지 않습니다');
   }
   const lo = Date.parse(from), hi = Date.parse(until);
-  const all = admin.access.filter(e => Date.parse(e.occurredAt) >= lo && Date.parse(e.occurredAt) < hi)
-    .filter(e => q.get('downloads') !== 'files' || FILE_ACTIONS.includes(e.action))
-    .sort((a, b) => (a.occurredAt < b.occurredAt ? 1 : -1));
+  const top = c ? c.top : admin.access.length;
+  const below = c ? c.before : top + 1;
+  const rest = [];
+  for (let seq = Math.min(top, below - 1); seq >= 1; seq--) {
+    const e = admin.access[seq - 1];
+    if (!e || Date.parse(e.occurredAt) < lo || Date.parse(e.occurredAt) >= hi) continue;
+    if (q.get('downloads') === 'files' && !FILE_ACTIONS.includes(e.action)) continue;
+    rest.push({ seq, e });
+  }
   const size = 25;
-  return ok({ institutionId: me.institution, from, until, observedAt: ISO(), rows: all.slice(offset, offset + size),
-    next: offset + size < all.length ? cursor({ from, until, downloads: q.get('downloads'), offset: offset + size }) : null });
+  const page = rest.slice(0, size);
+  return ok({ institutionId: me.institution, from, until, observedAt: ISO(), rows: page.map(r => r.e),
+    next: rest.length > size ? cursor({ top, before: page[page.length - 1].seq, from, until, downloads: q.get('downloads'), institution: me.institution }) : null });
 }
 
 // A committed reading in the mock leaves the same audit and access rows the product's commitReport does.

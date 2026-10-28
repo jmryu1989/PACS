@@ -4,16 +4,21 @@
 // the pointer events: picking a button does not press it. The element under the pointer is found with the iframe
 // document's elementFromPoint, outlined, and described (stable selector, visible text, box, page, role) for Claude.
 // Highlights live in the studio page, not in the product DOM, so the product's layout and CSS are untouched.
+// The viewer popup is OHIF itself (a top-level page, not a frame the studio owns): there the same shield covers the
+// whole window (target = window), and the studio's own elements, marked data-studio, are skipped when looking under
+// the pointer.
 (() => {
   const { el } = window.Studio;
   const MAX_PICKS = 12;
 
-  window.StudioPick = function StudioPick(iframe, { meta = () => ({}), onChange = () => {}, onMode = () => {} } = {}) {
+  window.StudioPick = function StudioPick(target, { meta = () => ({}), onChange = () => {}, onMode = () => {}, idPrefix = 'p' } = {}) {
+    const self = target === window;
     const layer = el('div', 'pick-layer');
     const shield = el('div', 'pick-shield');
     const hover = el('div', 'pick-box hover');
     const hint = el('div', 'pick-hint', '고르기: 바꿀 곳을 클릭하세요 · 여러 개 가능 · 다시 클릭하면 빼기 · Esc 모두 지우기');
     shield.hidden = true; hover.hidden = true; hint.hidden = true;
+    for (const node of [layer, shield, hint]) node.dataset.studio = '';
     // Focusable, so pick mode can take the keyboard away from the product (Space/Enter would press a focused button).
     shield.tabIndex = -1;
     layer.append(hover);
@@ -22,14 +27,16 @@
     const picks = []; // { id, node, desc, box, missingSince }
     let active = false, seq = 0, frame = 0;
 
-    const doc = () => { try { return iframe.contentDocument; } catch { return null; } };
-    const offset = () => iframe.getBoundingClientRect();
+    const doc = () => { if (self) return document; try { return target.contentDocument; } catch { return null; } };
+    const win = () => (self ? window : target.contentWindow);
+    const offset = () => (self ? { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight } : target.getBoundingClientRect());
+    const studioOwn = n => !!(n && n.closest && n.closest('[data-studio]'));
 
     function nodeAt(x, y) {
       const d = doc();
       if (!d) return null;
       const r = offset();
-      const node = d.elementFromPoint(x - r.left, y - r.top);
+      const node = d.elementsFromPoint(x - r.left, y - r.top).find(n => !studioOwn(n));
       return node && node !== d.documentElement && node !== d.body ? node : null;
     }
 
@@ -100,7 +107,8 @@
       if (picks.length >= MAX_PICKS) return;
       const box = el('div', 'pick-box picked');
       layer.append(box);
-      picks.push({ id: `p${++seq}`, node, box, desc: { id: `p${seq}`, ...describe(node, iframe, meta()) } });
+      const id = `${idPrefix}${++seq}`;
+      picks.push({ id, node, box, desc: { id, ...describe(node, meta(node)) } });
       emit();
       repaint();
     }
@@ -128,7 +136,7 @@
     let held = null;
     function holdKeyboard() {
       const d = doc(), now = d && d.activeElement;
-      if (now && now !== d.body && now !== d.documentElement) held = now;
+      if (now && now !== d.body && now !== d.documentElement && !studioOwn(now)) held = now;
       shield.focus({ preventScroll: true });
     }
     function heldField() {
@@ -150,7 +158,7 @@
         const back = heldField();
         held = null;
         if (hadKeyboard) {
-          try { if (back) back.focus({ preventScroll: true }); else iframe.contentWindow.focus(); } catch { /* navigating */ }
+          try { if (back) back.focus({ preventScroll: true }); else if (self) shield.blur(); else target.contentWindow.focus(); } catch { /* navigating */ }
         }
       }
       onMode(active);
@@ -161,16 +169,25 @@
     shield.addEventListener('pointerleave', () => { hover.hidden = true; });
     shield.addEventListener('click', e => { e.preventDefault(); const node = nodeAt(e.clientX, e.clientY); if (node) add(node); });
     shield.addEventListener('contextmenu', e => e.preventDefault());
-    // The shield would otherwise stop scrolling: scroll whatever is under the pointer.
+    // On the viewer page the shield shares the document with the product: its pointer events would bubble to the
+    // viewer's document listeners (tools, menus that close on an outside click). They stop at the shield.
+    if (self) {
+      for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'auxclick', 'contextmenu', 'pointermove', 'mousemove', 'touchstart', 'touchend']) {
+        shield.addEventListener(type, e => e.stopPropagation());
+      }
+    }
+    // The shield would otherwise stop scrolling: scroll whatever is under the pointer. Wheel over an image is not
+    // passed on: in the viewer it would page through the slices, which is the viewer's own button-free action.
     shield.addEventListener('wheel', e => {
       e.preventDefault();
+      e.stopPropagation();
       let node = nodeAt(e.clientX, e.clientY);
       while (node && node.nodeType === 1) {
         const cs = node.ownerDocument.defaultView.getComputedStyle(node);
         if (/(auto|scroll)/.test(cs.overflowY + cs.overflowX) && (node.scrollHeight > node.clientHeight || node.scrollWidth > node.clientWidth)) { node.scrollBy(e.deltaX, e.deltaY); return; }
         node = node.parentElement;
       }
-      try { iframe.contentWindow.scrollBy(e.deltaX, e.deltaY); } catch { /* navigating */ }
+      try { win().scrollBy(e.deltaX, e.deltaY); } catch { /* navigating */ }
     }, { passive: false });
     window.addEventListener('resize', () => { if (active) fit(); });
 
@@ -181,14 +198,32 @@
       if (!active) return false;
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); clear(); setActive(false); return true; }
       const where = e.target && (e.target.ownerDocument || e.target);
-      if ((where !== document || e.target === shield) && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      // Viewer page: everything but the studio's own controls is the product.
+      const forProduct = self ? e.target === shield || !studioOwn(e.target) : where !== document || e.target === shield;
+      if (forProduct && !e.altKey && !e.ctrlKey && !e.metaKey) {
         e.preventDefault(); e.stopPropagation(); holdKeyboard(); return true;
       }
       return false;
     }
 
+    // Picks kept from before this page reloaded (the viewer reloads its whole page): found again by their selector,
+    // shown as lost until they are.
+    function restore(descs) {
+      for (const desc of Array.isArray(descs) ? descs : []) {
+        if (!desc || typeof desc.id !== 'string' || typeof desc.selector !== 'string' || picks.length >= MAX_PICKS) continue;
+        const box = el('div', 'pick-box picked');
+        layer.append(box);
+        picks.push({ id: desc.id, node: null, box, desc: { ...desc, lost: false }, missingSince: 0 });
+        const n = Number(desc.id.slice(idPrefix.length));
+        if (Number.isInteger(n) && n > seq) seq = n;
+      }
+      emit();
+      repaint();
+    }
+
     return {
       toggle: on => setActive(on === undefined ? !active : on),
+      restore,
       get active() { return active; },
       // The product field that had the keyboard before picking took it (null outside pick mode).
       heldField: () => (active ? heldField() : null),
@@ -198,7 +233,7 @@
   };
 
   // ── description sent to Claude ──
-  function describe(node, iframe, meta) {
+  function describe(node, meta) {
     const win = node.ownerDocument.defaultView;
     const r = node.getBoundingClientRect();
     const cs = win.getComputedStyle(node);
@@ -212,6 +247,7 @@
       viewport: { w: win.innerWidth, h: win.innerHeight },
       style: { font: `${cs.fontSize} ${cs.fontWeight}`, color: cs.color, background: cs.backgroundColor },
       page, screen: meta.screen || null, role: meta.role || null,
+      ...(meta.image ? { image: meta.image } : {}),
     };
   }
 
@@ -238,7 +274,8 @@
   // left out. Anything inside a study row always names that row: a filtered list can make "the 18th cell" unique
   // for a moment, and once the filter is cleared it would mean another study's cell.
   const STATE_CLASS = /^(sel|selected|on|off|active|hover|focus|focused|open|closed|show|hidden|disabled|is-.*|has-.*)$/;
-  const IDENTITY = ['data-uid'];
+  // In the viewer the same holds for a viewport (OHIF's data-viewport-uid): a pick stays on its viewport.
+  const IDENTITY = ['data-uid', 'data-viewport-uid'];
   const ATTRS = ['data-mode', 'data-col', 'data-key', 'data-action', 'data-tab', 'name', 'aria-label', 'role', 'type'];
   function selectorFor(node) {
     const d = node.ownerDocument;

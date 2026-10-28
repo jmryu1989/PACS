@@ -11,6 +11,7 @@ const { Mock } = require('../server/mock');
 const { allowed } = require('../server/sandbox');
 const { splitRecords, visiblePart } = require('../server/chat');
 const { inlineScripts, syntaxError } = require('../server/build');
+const crypto = require('crypto');
 
 const SEED = path.join(__dirname, '../sandbox-seed');
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'mstudio-'));
@@ -135,13 +136,84 @@ test('admin signing key and study access follow expected-kid and revision rules'
   const access = (await adminCall(mock, 'GET', `/api/admin/users/${id}/study-access`)).body;
   assert.deepStrictEqual(access.owner, ['kin-center', 'studio-minhoon']);
   const policy = { version: 1, restricted: true, startsAt: null, endsAt: null, rules: [{ patientId: null, modalities: ['CT'], dateFrom: null, dateTo: null, studyUids: [] }] };
-  const save = { expectedOwner: access.owner, revision: access.revision, policy, reason: 'synthetic', requestId: 'r-1' };
+  const save = { expectedOwner: access.owner, revision: access.revision, policy, reason: 'synthetic', requestId: crypto.randomUUID() };
   const saved = await adminCall(mock, 'POST', `/api/admin/users/${id}/study-access`, save);
   assert.strictEqual(saved.body.revision, access.revision + 1);
   assert.strictEqual((await adminCall(mock, 'POST', `/api/admin/users/${id}/study-access`, save)).body.replayed, true);
-  assert.strictEqual((await adminCall(mock, 'POST', `/api/admin/users/${id}/study-access`, { ...save, requestId: 'r-2' })).status, 409);
+  assert.strictEqual((await adminCall(mock, 'POST', `/api/admin/users/${id}/study-access`, { ...save, requestId: crypto.randomUUID() })).status, 409);
   const events = (await adminCall(mock, 'GET', `/api/admin/audit?report=access&from=${encodeURIComponent(new Date(Date.now() - 3600e3).toISOString())}&until=${encodeURIComponent(new Date(Date.now() + 60e3).toISOString())}&downloads=all`)).body;
   assert.ok(events.rows.some(e => e.surface === 'POST admin/users/:id/study-access'));
+});
+
+// The rules of api/src/study-access-policy.ts normalizeAccessPolicy and study-access.service.ts write(), as the
+// admin form sends them: what the product refuses is refused, and nothing is stored.
+test('admin study access refuses what the product refuses: reversed dates, a mistyped UID, a modality twice', async () => {
+  const mock = mockFor();
+  const id = 'studio-han-tech';
+  const url = `/api/admin/users/${id}/study-access`;
+  const before = (await adminCall(mock, 'GET', url)).body;
+  const rule = extra => ({ patientId: null, modalities: [], dateFrom: null, dateTo: null, studyUids: [], ...extra });
+  const send = (rules, extra = {}) => adminCall(mock, 'POST', url, { expectedOwner: before.owner, revision: before.revision, reason: '외부 판독 계약',
+    requestId: crypto.randomUUID(), policy: { version: 1, restricted: true, startsAt: null, endsAt: null, rules }, ...extra });
+  for (const [what, rules] of [['reversed dates', [rule({ dateFrom: '2026-10-28', dateTo: '2026-10-01' })]],
+    ['a mistyped UID', [rule({ studyUids: ['1.2..3'] })]], ['CT twice', [rule({ modalities: ['CT', 'CT'] })]],
+    ['a lower-case modality', [rule({ modalities: ['ct'] })]], ['a date that does not exist', [rule({ dateFrom: '2026-02-30' })]],
+    ['an empty rule', [rule({})]], ['the same rule twice', [rule({ modalities: ['CT'] }), rule({ modalities: ['CT'] })]],
+    ['all studies next to another rule', [{ all: true }, rule({ modalities: ['CT'] })]]]) {
+    const out = await send(rules);
+    assert.strictEqual(out.status, 400, what);
+    assert.strictEqual(out.body.message, '검사 접근 조건 형식을 확인하세요', what);
+  }
+  const timed = (startsAt, endsAt) => adminCall(mock, 'POST', url, { expectedOwner: before.owner, revision: before.revision, reason: 'x', requestId: crypto.randomUUID(),
+    policy: { version: 1, restricted: true, startsAt, endsAt, rules: [{ all: true }] } });
+  assert.strictEqual((await timed('2026-10-28T00:00:00.000Z', '2026-10-01T00:00:00.000Z')).status, 400);
+  assert.strictEqual((await send([rule({ modalities: ['CT'] })], { reason: '   ' })).status, 400);
+  assert.strictEqual((await send([rule({ modalities: ['CT'] })], { requestId: 'r-1' })).status, 400);
+  assert.deepStrictEqual((await adminCall(mock, 'GET', url)).body, before);
+  // A valid rule is stored the way the product stores it: modalities and UIDs sorted, the patient id trimmed.
+  const ok = await send([rule({ patientId: ' P-1 ', modalities: ['MR', 'CT'], studyUids: ['1.2.3', '1.2.10'], dateFrom: '2026-10-01', dateTo: '2026-10-28' })]);
+  assert.strictEqual(ok.status, 200);
+  assert.deepStrictEqual((await adminCall(mock, 'GET', url)).body.policy.rules,
+    [{ patientId: 'P-1', modalities: ['CT', 'MR'], dateFrom: '2026-10-01', dateTo: '2026-10-28', studyUids: ['1.2.10', '1.2.3'] }]);
+});
+
+// admin.service.ts auditEvents and admin-access-review.ts: the first page fixes the newest record, the next page
+// continues below the last one served. A change made between the pages neither repeats a row nor moves the total.
+test('admin Audit and Access Review Load More never repeat a record after a change in between', async () => {
+  const mock = mockFor();
+  const id = 'studio-han-tech';
+  const url = `/api/admin/users/${id}/study-access`;
+  const owner = (await adminCall(mock, 'GET', url)).body.owner;
+  let revision = (await adminCall(mock, 'GET', url)).body.revision;
+  const change = async () => {
+    const out = await adminCall(mock, 'POST', url, { expectedOwner: owner, revision, reason: `change ${revision}`, requestId: crypto.randomUUID(),
+      policy: revision % 2 ? { version: 1, restricted: false, startsAt: null, endsAt: null, rules: [] } : { version: 1, restricted: true, startsAt: null, endsAt: null, rules: [{ all: true }] } });
+    assert.strictEqual(out.status, 200);
+    revision = out.body.revision;
+  };
+  for (let i = 0; i < 30; i++) await change();
+  const key = row => JSON.stringify(row);
+
+  const first = (await adminCall(mock, 'GET', '/api/admin/audit?limit=5')).body;
+  const everything = (await adminCall(mock, 'GET', '/api/admin/audit?limit=100')).body.rows.map(key);
+  await change();
+  const second = (await adminCall(mock, 'GET', `/api/admin/audit?limit=5&after=${encodeURIComponent(first.next)}`)).body;
+  assert.strictEqual(second.total, first.total);
+  assert.deepStrictEqual([...first.rows, ...second.rows].map(key), everything.slice(0, 10));
+  assert.strictEqual(new Set([...first.rows, ...second.rows].map(key)).size, 10);
+
+  const range = `report=access&from=${encodeURIComponent(new Date(Date.now() - 86400e3).toISOString())}&until=${encodeURIComponent(new Date(Date.now() + 3600e3).toISOString())}&downloads=all`;
+  const page1 = (await adminCall(mock, 'GET', `/api/admin/audit?${range}`)).body;
+  assert.strictEqual(page1.rows.length, 25); assert.ok(page1.next);
+  await change();
+  const page2 = (await adminCall(mock, 'GET', `/api/admin/audit?${range}&after=${encodeURIComponent(page1.next)}`)).body;
+  const ids = [...page1.rows, ...page2.rows].map(e => e.eventId);
+  assert.strictEqual(new Set(ids).size, ids.length);
+  assert.ok(page2.rows.length > 0);
+  // Newest first in record order: the event made between the pages is on neither page.
+  const newest = (await adminCall(mock, 'GET', `/api/admin/audit?${range}`)).body.rows[0];
+  assert.ok(!ids.includes(newest.eventId));
+  assert.ok(page1.rows.every((e, i, all) => i === 0 || e.recordedAt <= all[i - 1].recordedAt));
 });
 
 test('admin gateway receipts are own-study only and Now Retry answers only a retry receipt, once', async () => {

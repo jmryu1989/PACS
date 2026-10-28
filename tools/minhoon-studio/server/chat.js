@@ -499,6 +499,12 @@ function pickLines(picks) {
       `위치 x=${num(box.x)} y=${num(box.y)} ${num(box.w)}×${num(box.h)} (화면 ${num(view.w)}×${num(view.h)})`];
     if (p.page) parts.push(`페이지 ${short(p.page, 200)}${p.screen ? ` (${short(p.screen, 40)})` : ''}`);
     if (p.role) parts.push(`역할 ${short(p.role, 20)}`);
+    // Picked in the viewer popup (OHIF): which image the element belongs to.
+    const image = p.image && typeof p.image === 'object' ? p.image : null;
+    if (image) {
+      parts.push(`영상 창 viewport ${short(image.viewportId, 40) || '?'}${image.seriesInstanceUID ? ` · 시리즈 ${short(image.seriesNumber, 8)} ${short(image.seriesDescription, 60)} (${short(image.modality, 8)}, ${short(image.seriesInstanceUID, 80)})` : ''}`
+        + `${image.slice ? ` · 영상 ${short(image.slice, 20)}` : ''}${image.studyInstanceUID ? ` · 검사 ${short(image.studyInstanceUID, 80)}` : ''}`);
+    }
     if (style.font || style.color) parts.push(`글자 ${short(style.font, 30)} 색 ${short(style.color, 40)} 배경 ${short(style.background, 40)}`);
     if (p.lost === true) parts.push('보낼 때 화면에서 찾을 수 없었음(목록이 바뀌었을 수 있음): 위 정보는 고를 때 기준');
     return parts.join(' · ');
@@ -508,7 +514,8 @@ function pickLines(picks) {
 
 function pickLabels(picks) {
   if (!Array.isArray(picks)) return [];
-  return picks.slice(0, MAX_PICKS).map(p => (p && typeof p === 'object' ? `${short(p.tag, 20)} "${short(p.text, 40)}"` : '?'));
+  return picks.slice(0, MAX_PICKS).map(p => (p && typeof p === 'object'
+    ? `${short(p.tag, 20)} "${short(p.text, 40)}"${p.image && typeof p.image === 'object' ? ` (Viewer ${short(p.image.viewportId, 20)})` : ''}` : '?'));
 }
 
 function toolSummary(name, input, cwd) {

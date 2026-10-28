@@ -5,10 +5,12 @@ usage: python tools/minhoon-studio/test/browser_check.py --out <folder> [--sha <
 Builds a throwaway synthetic sandbox (deploy/make-sandbox.py), sets a throwaway login, starts the real studio server
 on a free local port and drives the served studio.html / product.html in headless Chromium (Python Playwright; node on
 PATH). Only test-side observers are added (an iframe load counter in the product window, a click counter in the
-product frame, a hook on the chat's EventSource); no product or studio code is replaced. Writes <out>/results.json and
+product frame, a hook on the chat's EventSource, load/pointer/key counters in the viewer popup, the admin answers
+read off the network, and one chat send answered by the test so its picks can be read without a Claude turn); no
+product or studio code is replaced. Writes <out>/results.json and
 screenshots; exit 1 if any check fails. Adapted from the GPT functional review scripts of 9f4437c.
 """
-import argparse, json, os, pathlib, socket, subprocess, sys, time, traceback, urllib.request
+import argparse, json, os, pathlib, re, socket, subprocess, sys, time, traceback, urllib.request
 from playwright.sync_api import sync_playwright
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -81,6 +83,93 @@ def product_path(page): return page.evaluate('document.querySelector("#product")
 def on_admin(page): page.wait_for_function('() => { const d = document.querySelector("#product").contentDocument; return d && d.location.pathname.endsWith("admin.html") && d.querySelector("#users td.username"); }', timeout=15000)
 def member_row(f, name): return f.locator("#users tr").filter(has_text=name)
 def row_action(f, name, label): member_row(f, name).locator("td.actions button", has_text=label).first.click()
+
+LOADS = {}
+def count_loads(page):
+    # Test-side observer: document loads of a top-level page (the viewer popup reloads its whole page).
+    if id(page) not in LOADS:
+        LOADS[id(page)] = [0]
+        page.on("load", lambda _p, c=LOADS[id(page)]: c.__setitem__(0, c[0] + 1))
+    return LOADS[id(page)][0]
+def wait_until(page, fn, timeout=15000):
+    end = time.time() + timeout / 1000
+    while time.time() < end:
+        if fn(): return True
+        page.wait_for_timeout(100)
+    return fn()
+def wait_loads(page, n, timeout=15000): return wait_until(page, lambda: count_loads(page) >= n, timeout)
+
+def viewer_checks(viewer, chat, product):
+    """The viewer popup: review F1 of 60130f6 (reloads after a chat refresh) and Minhoon's 2026-10-28 request (고르기)."""
+    viewer.wait_for_selector("canvas", timeout=30000); viewer.wait_for_selector(".studio-widget", timeout=10000); settle(viewer, 2000)
+    count_loads(viewer)
+    chat.reload(); chat.wait_for_function('document.querySelector("#link-dot").classList.contains("on")'); settle(chat, 2500)
+    n = count_loads(viewer); s = post_api(chat, "mock/reset")
+    reloaded = wait_loads(viewer, n + 1); settle(viewer, 2500)
+    record("V3 after the chat tab is refreshed a studio reset still reloads the open viewer, once", reloaded and count_loads(viewer) == n + 1,
+           {"loads": count_loads(viewer) - n, "status": s})
+    second = chat.context.new_page(); second.goto(BASE + "/studio/studio.html")
+    second.wait_for_function('document.querySelector("#link-dot").classList.contains("on")'); settle(second, 2500)
+    viewer.wait_for_selector("canvas", timeout=30000)
+    n = count_loads(viewer); post_api(chat, "mock/reset"); wait_loads(viewer, n + 1); settle(viewer, 3000)
+    record("V3 with two chat tabs open one reset reloads the viewer once", count_loads(viewer) == n + 1, {"loads": count_loads(viewer) - n})
+    second.close()
+
+    # V4: 고르기 in the viewer. Observers only (test side): OHIF's root counts pointer events, the document counts keys.
+    viewer.wait_for_selector("canvas", timeout=30000); settle(viewer, 3000)
+    viewer.evaluate('''() => { window.__ohif = { pointer: 0, keys: 0 }; const root = document.getElementById("root");
+        for (const t of ["pointerdown", "mousedown", "click", "wheel"]) root.addEventListener(t, () => window.__ohif.pointer++, true);
+        document.addEventListener("keydown", () => window.__ohif.keys++, true); }''')
+    slice_at = lambda: viewer.evaluate('() => window.services.cornerstoneViewportService.getCornerstoneViewport("default").getCurrentImageIdIndex()')
+    # Setup through OHIF's own service: the multi-slice series in the viewport, so a wheel that got through would move it.
+    viewer.evaluate('''() => { const s = window.services; const many = s.displaySetService.getActiveDisplaySets().find(d => (d.numImageFrames || d.images?.length || 0) > 1);
+        s.viewportGridService.setDisplaySetsForViewport({ viewportId: "default", displaySetInstanceUIDs: [many.displaySetInstanceUID] }); }''')
+    settle(viewer, 3000)
+    canvas = viewer.locator("canvas").first; c = canvas.bounding_box()
+    viewer.mouse.move(c["x"] + c["width"] / 2, c["y"] + c["height"] / 2); before_wheel = slice_at(); viewer.mouse.wheel(0, 400); settle(viewer, 800)
+    s0 = slice_at()
+    wheel_works = s0 != before_wheel
+    viewer.evaluate("window.__ohif = { pointer: 0, keys: 0 }")
+    chat.click("#pick")
+    viewer.wait_for_selector(".pick-shield", state="visible", timeout=5000)
+    click_at(viewer, viewer.locator("#root button:visible").nth(1))
+    click_at(viewer, canvas)
+    viewer.mouse.move(c["x"] + c["width"] / 2, c["y"] + c["height"] / 2)
+    viewer.mouse.wheel(0, 400); viewer.keyboard.press("ArrowDown"); viewer.keyboard.press("PageDown"); settle(viewer, 800)
+    ohif = viewer.evaluate("window.__ohif")
+    chip_text = chat.inner_text("#chips")
+    record("V4 picking in the viewer: two picks reach the chat; no click, wheel or key reaches OHIF; the slice stays",
+           wheel_works and chips(chat).count() == 2 and ohif == {"pointer": 0, "keys": 0} and slice_at() == s0 and "영상 창" in chip_text,
+           {"chips": chip_text, "ohif": ohif, "wheelOutsidePicking": [before_wheel, s0], "sliceWhilePicking": [s0, slice_at()]})
+    viewer.screenshot(path=str(OUT / "v4-viewer-picks.png"))
+    n = count_loads(viewer); post_api(chat, "mock/reset"); wait_loads(viewer, n + 1)
+    viewer.wait_for_selector("canvas", timeout=30000); settle(viewer, 4000)
+    vb = boxes(viewer)
+    lost = [chips(chat).nth(i).get_attribute("class") for i in range(chips(chat).count())]
+    record("V4 viewer picks survive the viewer's reload and are drawn on the reloaded page", chips(chat).count() == 2 and not any("lost" in (x or "") for x in lost)
+           and len(vb) == 2 and not any(b["hidden"] for b in vb), {"chips": lost, "boxes": vb})
+    sent = {}
+    def on_chat(route):
+        sent["body"] = json.loads(route.request.post_data or "{}")
+        route.fulfill(status=200, content_type="application/json", body='{"ok": true}')
+    chat.route("**/studio-api/chat", on_chat)
+    chat.fill("#input", "이거 영상 창에서 확인"); chat.press("#input", "Enter"); settle(chat, 1200)
+    chat.unroute("**/studio-api/chat")
+    picks = ((sent.get("body") or {}).get("context") or {}).get("picks") or []
+    image = picks[1].get("image") if len(picks) == 2 else None
+    record("V4 the request carries the viewer picks with their viewport, series and slice",
+           bool(image) and image.get("viewportId") == "default" and bool(image.get("seriesInstanceUID")) and bool(re.match(r"^\d+/\d+$", image.get("slice") or ""))
+           and all(p.get("page", "").startswith("/ohif/viewer") for p in picks), {"picks": picks})
+    settle(viewer, 600)
+    record("V4 sending clears the viewer picks", chips(chat).count() == 0 and len(boxes(viewer)) == 0, {"chips": chips(chat).count(), "boxes": boxes(viewer)})
+    viewer.keyboard.press("Escape"); settle(viewer, 300)
+    esc_off = not shield_on(viewer)
+    chat.click("#pick"); settle(chat, 800)
+    all_off = not shield_on(product) and not shield_on(viewer) and chat.inner_text("#pick") == "고르기"
+    viewer.keyboard.press("Alt+KeyG"); settle(viewer, 300); alt_on = shield_on(viewer)
+    viewer.locator(".studio-widget button").click(); settle(viewer, 300)
+    record("V4 Esc leaves picking in the viewer; the chat's 고르기 turns every window off; Alt+G and the corner 고르기 work in the viewer",
+           esc_off and all_off and alt_on and not shield_on(viewer), {"escOff": esc_off, "allOff": all_off, "altOn": alt_on})
 
 log = (OUT / "server.log").open("w", encoding="utf-8")
 server = subprocess.Popen(["node", server_js, "--config", str(OUT / "config.json")], cwd=REPO, stdout=log, stderr=subprocess.STDOUT)
@@ -289,6 +378,7 @@ try:
         pages_before = len(ctx.pages)
         reopen.select_option("#screen", "viewer"); settle(reopen, 800)
         record("V1 choosing Viewer again reuses the open viewer window", len(ctx.pages) == pages_before, {"pagesBefore": pages_before, "pagesAfter": len(ctx.pages)})
+        if a.ohif: viewer_checks(viewer, reopen, product)
         viewer.close()
         # V2: the worklist's own viewer launch (double-click) is the product's popup, unchanged inside the studio.
         reopen.select_option("#screen", "/worklist/hpacs-lite/main.html"); rows_ready(product); settle(product, 800)
@@ -299,6 +389,12 @@ try:
             own = popup.value; own.wait_for_load_state()
             ob = bars(own)
             record("V2 the worklist's double-click opens the product's own viewer popup", not ob["toolbar"], {"url": own.url, "viewer": ob})
+            if a.ohif:
+                own.wait_for_selector(".studio-widget", timeout=15000); settle(own, 2500)
+                n = count_loads(own); s = post_api(reopen, "mock/reset")
+                reloaded = wait_loads(own, n + 1); settle(own, 2500)
+                record("V2 the worklist's own viewer popup has 고르기 and reloads once after a studio reset", reloaded and count_loads(own) == n + 1,
+                       {"loads": count_loads(own) - n, "status": s})
             own.close()
         except Exception as e:
             record("V2 the worklist's double-click opens the product's own viewer popup", False, {"error": repr(e)})
@@ -355,6 +451,16 @@ try:
         acc.locator("[data-reload]").click(); settle(product, 600)
         record("A2 Study Access: Reload shows the saved rule", "Revision 1" in acc.locator("[data-status]").inner_text() and acc.locator('[data-field="modalities"]').input_value() == "CT, MR",
                {"status": acc.locator("[data-status]").inner_text()})
+        # A3 (review F2 of 60130f6): a rule the product refuses (reversed dates) is refused here too, and nothing is saved.
+        acc.locator("[data-add]").click()
+        acc.locator('[data-field="dateFrom"]').last.fill("2026-10-28"); acc.locator('[data-field="dateTo"]').last.fill("2026-10-01")
+        acc.locator("[name=reason]").fill("synthetic reversed range"); acc.locator("[data-save]").click(); settle(product, 800)
+        refused = acc.locator("[data-status]").inner_text()
+        product.once("dialog", lambda d: d.accept())  # Reload asks before dropping the unsaved rule
+        acc.locator("[data-reload]").click(); settle(product, 600)
+        record("A3 Study Access: a reversed date range is refused as the product refuses it, and Revision 1 stays", "검사 접근 조건 형식을 확인하세요" in refused
+               and "Saved" not in refused and "Revision 1" in acc.locator("[data-status]").inner_text() and acc.locator('[data-field="dateFrom"]').count() == 1,
+               {"save": refused, "afterReload": acc.locator("[data-status]").inner_text()})
         acc.locator("[data-close]").click()
         f.locator("#gateway-refresh").click(); f.locator("#gateway-rows li").first.wait_for(timeout=10000); settle(product, 400)
         retry = f.locator("#gateway-rows li button:visible", has_text="Now Retry")
@@ -376,7 +482,42 @@ try:
         record("A2 Access Review loads the day's access events", f.locator("#access-review-state").inner_text() in ("Loaded", "Partial") and f.locator("#access-review-rows tr").count() >= 3,
                {"state": f.locator("#access-review-state").inner_text(), "rows": f.locator("#access-review-rows tr").count()})
         product.screenshot(path=str(OUT / "a2-admin.png"), full_page=True)
-        f.locator("main").screenshot(path=str(OUT / "a2-admin-main.png"))
+        f.locator("main").screenshot(path=str(OUT / "a2-admin-main.png"))  # before A4's 80 rows make it too tall to capture
+
+        # A4 (review F3 of 60130f6): Load More after a change made between the pages repeats no record. More than a
+        # page of synthetic records is made through the served mock API; the answers are read off the network (test side).
+        change_js = '''async n => { const url = "/api/admin/users/studio-han-tech/study-access";
+            for (let i = 0; i < n; i++) { const cur = await (await fetch(url)).json();
+              const policy = (cur.revision + i) % 2 ? { version: 1, restricted: false, startsAt: null, endsAt: null, rules: [] }
+                : { version: 1, restricted: true, startsAt: null, endsAt: null, rules: [{ all: true }] };
+              const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expectedOwner: cur.owner,
+                revision: cur.revision, policy, reason: "synthetic page filler", requestId: crypto.randomUUID() }) });
+              if (!r.ok) throw new Error("filler " + r.status); } }'''
+        f.evaluate(change_js, 30)
+        answers = []
+        def grab(resp):
+            if "/api/admin/audit" in resp.url and resp.request.method == "GET":
+                try: answers.append((resp.url, resp.json()))
+                except Exception: pass
+        product.on("response", grab)
+        f.locator("#audit-refresh").click(); wait_until(product, lambda: len(answers) >= 1); settle(product, 500)
+        f.evaluate(change_js, 1)
+        f.locator("#audit-more").click(); wait_until(product, lambda: len(answers) >= 2); settle(product, 800)
+        a1, a2 = answers[0][1], answers[1][1]
+        keys = [json.dumps(r, sort_keys=True) for r in a1["rows"] + a2["rows"]]
+        record("A4 Audit Load More after a change in between: no repeated record, same total, every row shown",
+               len(a1["rows"]) == 25 and len(a2["rows"]) > 0 and len(set(keys)) == len(keys) and a2["total"] == a1["total"]
+               and f.locator("#audit-rows tr").count() == len(keys), {"pages": [len(a1["rows"]), len(a2["rows"])], "unique": len(set(keys)),
+               "total": [a1["total"], a2["total"]], "shown": f.locator("#audit-rows tr").count()})
+        answers.clear()
+        f.locator("#access-review-load").click(); wait_until(product, lambda: len(answers) >= 1); settle(product, 500)
+        f.evaluate(change_js, 1)
+        f.locator("#access-review-more").click(); wait_until(product, lambda: len(answers) >= 2); settle(product, 800)
+        ids = [e["eventId"] for _, page in answers[:2] for e in page["rows"]]
+        record("A4 Access Review Load More after a change in between: no repeated event, every row shown",
+               len(answers[0][1]["rows"]) == 25 and len(ids) > 25 and len(set(ids)) == len(ids) and f.locator("#access-review-rows tr").count() == len(ids),
+               {"pages": [len(p["rows"]) for _, p in answers[:2]], "unique": len(set(ids)), "shown": f.locator("#access-review-rows tr").count()})
+        product.remove_listener("response", grab)
         reopen.select_option("#role", "radiologist"); rows_ready(product)
 
         # S: 먼저 제안하기 with the real Claude CLI — prepared while idle in its own copy, one card, hidden while he types
