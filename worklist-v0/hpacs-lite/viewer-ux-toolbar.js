@@ -274,6 +274,7 @@ window.KinViewerUXToolbar = (() => {
         return false;
       }
       try {
+        if (window.kinViewerStackMouse?.deselect(id)) { refreshState(); return true; }
         service.recordInteraction({ ...item, itemId: id });
         return true;
       } catch (error) { status.textContent = error.message || '현재 영상에서 도구를 사용할 수 없습니다.'; return false; }

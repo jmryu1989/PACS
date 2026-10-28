@@ -1943,8 +1943,8 @@ function kinCreateViewerHistory() {
         const lines = [];
         if (Number.isFinite(s.area)) lines.push('Area: ' + number(s.area) + ' ' + s.areaUnit);
         if (s.modalityUnit === 'HU') {
-          for (const [name, value] of [['Mean', s.mean], ['Min', min], ['Max', s.max]])
-            if (Number.isFinite(value)) lines.push(name + ': ' + (name === 'Mean' ? number(value) : value) + ' HU');
+          for (const [name, value] of [['Mean', s.mean], ['SD', s.stdDev], ['Min', min], ['Max', s.max]])
+            if (Number.isFinite(value)) lines.push(name + ': ' + (['Mean', 'SD'].includes(name) ? number(value) : value) + ' HU');
         }
         return lines;
       } };
@@ -4660,7 +4660,7 @@ function kinCreateStudySearch() {
 // The stock mode owns the grid and Cornerstone elements. This extension owns
 // only its chrome and removes it when that mode or document ends.
 function kinCreateViewerUX() {
-  let services, dispose, toolbar, shortcuts, generation = 0, ready;
+  let services, dispose, toolbar, shortcuts, mouse, generation = 0, ready;
   const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-hanging-settings.js', 'viewer-ux-toolbar.js', 'viewer-ux-shell.js'];
   // The theme fixes the chrome rows' heights. It is loaded once per document,
   // before the first mount, and stays: a stylesheet attached per mount and
@@ -4688,7 +4688,7 @@ function kinCreateViewerUX() {
       document.head.append(script);
     })), stylesheet()).catch(error => { ready = null; throw error; });
   }
-  function stop() { generation++; dispose?.(); dispose = null; }
+  function stop() { generation++; dispose?.(); dispose = null; mouse?.dispose(); mouse = null; }
   return {
     id: 'kin.viewer-ux',
     async preRegistration({ servicesManager }) {
@@ -4710,6 +4710,7 @@ function kinCreateViewerUX() {
     },
     onModeEnter() {
       stop();
+      if (!kinViewerSession.ended()) mouse = kinStackMouse(services);
       if (window.top !== window || !shortcuts) return;
       const ticket = generation;
       if (kinViewerSession.ended()) return;
@@ -4725,6 +4726,68 @@ function kinCreateViewerUX() {
     },
     onModeExit: stop,
   };
+}
+
+// Stack defaults belong to its native tool group. MPR groups keep their own
+// bindings; selecting a tool only replaces the primary binding, leaving wheel
+// scroll and right-button windowing available while drawing or zooming.
+function kinStackMouse(services) {
+  const cs = window.cornerstone, tools = window.cornerstoneTools;
+  const initialized = new WeakSet(), subscriptions = [];
+  const primary = tools.Enums.MouseBindings.Primary;
+  const secondary = tools.Enums.MouseBindings.Secondary;
+  const wheel = tools.Enums.MouseBindings.Wheel;
+  let ended = false, frame;
+  function groupFor(viewport) {
+    return viewport?.type === 'stack' && tools.ToolGroupManager.getToolGroupForViewport(viewport.id, viewport.renderingEngineId);
+  }
+  function refresh() {
+    frame = null;
+    if (ended || kinViewerSession.ended()) return;
+    for (const id of services.viewportGridService.getState().viewports.keys()) {
+      const viewport = services.cornerstoneViewportService.getCornerstoneViewport(id), group = groupFor(viewport);
+      if (!group || initialized.has(group) || !group.hasTool('StackScroll') || !group.hasTool('WindowLevel')) continue;
+      if (group.getViewportsInfo().some(info => {
+        const view = cs.getRenderingEngine(info.renderingEngineId)?.getViewport(info.viewportId);
+        return view && view.type !== 'stack';
+      })) continue;
+      const bindings = [primary, secondary, wheel].map(mouseButton => ({ mouseButton }));
+      for (const [name, options] of Object.entries(group.toolOptions)) {
+        if (options.bindings?.some(binding => !binding.modifierKey && bindings.some(b => b.mouseButton === binding.mouseButton)))
+          group.setToolPassive(name, { removeAllBindings: bindings });
+      }
+      group.setToolActive('StackScroll', { bindings: [{ mouseButton: primary }, { mouseButton: wheel }] });
+      group.setToolActive('WindowLevel', { bindings: [{ mouseButton: secondary }] });
+      initialized.add(group);
+      services.toolbarService.refreshToolbarState?.({ viewportId: id });
+    }
+  }
+  function schedule() { if (!ended && !frame) frame = requestAnimationFrame(refresh); }
+  for (const service of [services.viewportGridService, services.cornerstoneViewportService]) {
+    for (const event of Object.values(service.EVENTS || {})) subscriptions.push(service.subscribe(event, schedule));
+  }
+  const enabled = cs.Enums.Events.ELEMENT_ENABLED;
+  cs.eventTarget.addEventListener(enabled, schedule);
+  const controller = {
+    deselect(name) {
+      const viewport = services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId());
+      const group = groupFor(viewport);
+      if (!group || name === 'StackScroll' || group.getActivePrimaryMouseButtonTool() !== name) return false;
+      group.setToolPassive(name);
+      group.setToolActive('StackScroll', { bindings: [{ mouseButton: primary }, { mouseButton: wheel }] });
+      services.toolbarService.refreshToolbarState?.({ viewportId: viewport.id });
+      return true;
+    },
+    dispose() {
+      ended = true; cancelAnimationFrame(frame);
+      subscriptions.forEach(subscription => subscription.unsubscribe());
+      cs.eventTarget.removeEventListener(enabled, schedule);
+      if (window.kinViewerStackMouse === controller) delete window.kinViewerStackMouse;
+    },
+  };
+  window.kinViewerStackMouse = controller;
+  schedule();
+  return controller;
 }
 // U3 consumes the U2 document/viewport context. The native data source still
 // owns DICOM loading and display-set creation; reports are API reads only.
