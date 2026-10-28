@@ -42,7 +42,7 @@ class MammographyHangingE2E(WorklistE2E):
         finally:
             super().tearDown()
 
-    def phantom(self, patient, prior=False, uncertain=False, xa=False, dbt=False):
+    def phantom(self, patient, prior=False, uncertain=False, xa=False, dbt=False, reference_frame=None):
         uid = generate_uid()
         fixture = Fixture(uid, patient, "한림병원", "jmryu", "MG-FOLLOWUP-SYNTHETIC")
         self.stack.active[uid] = fixture
@@ -51,7 +51,7 @@ class MammographyHangingE2E(WorklistE2E):
             sop_class = '1.2.840.10008.5.1.4.1.1.13.1.3'
         ae = AE(ae_title='HALLYM_CT')
         ae.add_requested_context(sop_class, ExplicitVRLittleEndian)
-        assoc = ae.associate('127.0.0.1', 4242, ae_title='KINLAB')
+        assoc = ae.associate('127.0.0.1', int(os.environ.get('KIN_TEST_DICOM_PORT', '4242')), ae_title='KINLAB')
         self.assertTrue(assoc.is_established)
         try:
             for index, (view, side) in enumerate([('CC', 'R')] if xa else [(v, s) for v in ['CC', 'MLO'] for s in ['R', 'L']]):
@@ -108,7 +108,7 @@ class MammographyHangingE2E(WorklistE2E):
                         ds.NumberOfFrames = 3
                         ds.ImageType = ['ORIGINAL', 'PRIMARY', 'VOLUME', 'NONE']
                         ds.VolumetricProperties, ds.VolumeBasedCalculationTechnique = 'VOLUME', 'NONE'
-                        ds.FrameOfReferenceUID = generate_uid()
+                        ds.FrameOfReferenceUID = reference_frame or generate_uid()
                         directions = {'A': [0, -1, 0], 'P': [0, 1, 0], 'L': [1, 0, 0],
                                       'R': [-1, 0, 0], 'H': [0, 0, 1], 'F': [0, 0, -1]}
                         row, column = [directions[v] for v in ds.PatientOrientation]

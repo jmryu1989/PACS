@@ -402,7 +402,9 @@ class ClinicianPolicyLive(unittest.TestCase):
         elif route == "GET studies/:uid/viewer-items":
             self.assertEqual(body, {"uid": uid, "final": False, "items": None, "nextCursor": None})
         elif route == "GET clinician/studies":
-            self.assertEqual(sorted(body), sorted(READ["list_response_keys"]))
+            # WORKLIST-SPLIT-UID (#180, D1492): the unpaged answer completes the list and names its excluded identities.
+            self.assertEqual(sorted(body), sorted(READ["list_response_keys"] + ["identityIssues"]))
+            self.assertIsInstance(body["identityIssues"], list)
             self.assertIn(uid, {row["uid"] for row in body["studies"]})
         elif route == "GET clinician/studies/:uid/report":
             self.assertEqual(body, {"uid": uid, "report": {"final": False, "rs": "W"}, "keys": None})
@@ -416,7 +418,9 @@ class ClinicianPolicyLive(unittest.TestCase):
             self.assertIn(qid, {item["id"] for item in body["items"]})
             self.assertEqual({item["author"]["actor"] for item in body["items"]}, {clinician}, "view=mine is the caller's own")
         elif route == "GET questions/:id":
-            self.assertEqual(sorted(body), ["item", "owner"])
+            # D1828: a single clinical record read names the EMR-D versions it served.
+            self.assertEqual(sorted(body), ["emr", "item", "owner"])
+            self.assertEqual(body["emr"]["recordId"], qid.lower())
             self.assertEqual((body["item"]["id"], body["item"]["studyUid"], body["item"]["author"]["actor"]), (qid, uid, clinician))
         elif route == "GET studies/:uid/questions":
             self.assertEqual(sorted(body), ["items", "owner"])
@@ -427,7 +431,8 @@ class ClinicianPolicyLive(unittest.TestCase):
             self.assertIn(qid, {item["id"] for item in body["items"]})
             self.assertEqual({item["requester"]["actor"] for item in body["items"]}, {clinician}, "view=mine is the caller's own")
         elif route == "GET image-requests/:id":
-            self.assertEqual(sorted(body), ["item", "owner"])
+            self.assertEqual(sorted(body), ["emr", "item", "owner"])
+            self.assertEqual(body["emr"]["recordId"], qid.lower())
             self.assertEqual((body["item"]["id"], body["item"]["studyUid"], body["item"]["requester"]["actor"]), (qid, uid, clinician))
         elif route == "GET studies/:uid/image-requests":
             self.assertEqual(sorted(body), ["items", "owner"])
@@ -456,8 +461,13 @@ class ClinicianPolicyLive(unittest.TestCase):
                      "POST image-requests/:id": (qid, "cancel", "Requested", "Cancelled", sent.get("revision", 0) + 1),
                      "POST critical-results/:id/ack": (qid, "ack", "created", "acknowledged", sent.get("revision", 0) + 1)}
             self.assertIn(route, steps, "no positive check for " + route)
+            # D1828: a write recorded through EMR-D (questions, image requests) also returns its receipt.
+            clinical = route.startswith(("POST studies/:uid/questions", "POST questions/", "POST studies/:uid/image-requests",
+                                         "POST image-requests/"))
             self.assertEqual((sorted(body), body["owner"], body["replayed"]),
-                             (["applied", "owner", "replayed"], sent["expectedOwner"], False))
+                             (["applied", *(["emr"] if clinical else []), "owner", "replayed"], sent["expectedOwner"], False))
+            if clinical:
+                self.assertEqual(body["emr"]["replayed"], False)
             applied = body["applied"]
             self.assertEqual((applied["requestId"], applied["studyUid"]), (sent["requestId"], uid))
             self.assertEqual((applied["id"], applied["action"], applied["from"], applied["to"], applied["revision"]), steps[route])

@@ -4150,6 +4150,8 @@
     let relatedReportSeq = 0;
 
     function clearRelatedReport(message = "Related Exam을 선택하세요") {
+      // A5: the Source opening ends with its text; a later read of any Source is a new display.
+      KinReportViews.end("related");
       $("#prior-report-meta").textContent = "";
       $("#prior-report-meta").title = "";
       $("#prior-report-status").textContent = message;
@@ -4196,6 +4198,8 @@
       const uid = s.uid;
       const currentUid = selectedUid;
       const seq = ++relatedReportSeq;
+      // A5: another Source ends the shown Source's opening now; a re-read of the same Source continues it.
+      KinReportViews.open("related", uid);
       // 이 읽기의 답·실패가 이전 판독문 칸에 닿는 자리는 이 읽기를 시작한 문맥과 요청 번호·선택을 함께 지난다.
       const at = work.capture("study");
       const stale = () => !work.admits(at) || seq !== relatedReportSeq || uid !== relatedUid || selectedUid !== currentUid;
@@ -4226,11 +4230,15 @@
         const restricted = e?.status === 403 || e?.status === 404;
         $("#prior-report-status").textContent = restricted
           ? "이 판독문을 볼 권한이 없습니다 (Access Restricted)" : `판독문 조회 실패: ${e.message}`;
+        KinReportViews.end("related");
         shown({ state: restricted ? "restricted" : "failed" });
         return;
       }
       if (stale()) return;
-      if (!report) { $("#prior-report-status").textContent = "판독문 없음"; shown({ state: "none" }); return; }
+      if (!report) {
+        KinReportViews.end("related");
+        $("#prior-report-status").textContent = "판독문 없음"; shown({ state: "none" }); return;
+      }
       $("#prior-report-meta").textContent =
         `${relatedReportMeta(s)} · 판독의 ${displayActor(report.author) || "-"}`;
       $("#prior-report-meta").title = $("#prior-report-meta").textContent;
@@ -4243,6 +4251,13 @@
       shown({ state: "ready", version: Number.isSafeInteger(report.version) ? report.version : null, action: report.action ?? null,
         author: displayActor(report.author) || null, at: typeof report.at === "string" ? report.at.replace("T", " ").slice(0, 16) : null,
         texts: { findings: report.findings ?? "", conclusion: report.conclusion ?? "", recommendation: report.recommendation ?? "" } });
+      // A5: only the version this Source shows is displayed (the read provided every version row). Its display report names
+      // this read's provision; a re-read of the same Source and version (every list refresh) is the same display.
+      const key = "report-version:" + report.version;
+      KinReportViews.end("related", [key]);
+      KinReportViews.watch("related", uid, key, { uid, accessRef: report.accessRef,
+        nodes: [$("#prior-report-content"), document.querySelector("#related-mode .related-mode-body")], live: () => !stale(),
+        report: body => api("POST", `/studies/${encodeURIComponent(uid)}/view-observations`, body, undefined, at) });
     }
 
     function returnToReportStudy() {
@@ -8425,6 +8440,14 @@
       historyReads.clear();
       $("#hist-body").replaceChildren();
       $("#histmodal").classList.remove("show");
+      // A5: this opening's display reports end with it (the next opening is a new display, even of the same versions).
+      KinReportViews.end("history");
+    }
+    /** A5: one shown version row or evidence block of this opening, reported as displayed only while it is on screen. */
+    function historyShown(key, uid, epoch, at, accessRef, node) {
+      KinReportViews.watch("history", epoch, key, { uid, accessRef, nodes: [node],
+        live: () => work.admits(at) && historyLive(epoch, uid),
+        report: body => api("POST", `/studies/${encodeURIComponent(uid)}/view-observations`, body, undefined, at) });
     }
     /**
      * 답은 **그 판 하나**에 대한 것인가. 존재 상태는 서버가 그 판 자신의 본문에 대해 계산해
@@ -8499,6 +8522,8 @@
       historyReads.delete(version);
       button.disabled = false;
       historyCitationBlock(host, state, state === "ok" ? answer : null);
+      // Only an answer drawn as this version's evidence is its display; an unknown or refused block shows no evidence.
+      if (state === "ok") historyShown("report-evidence:" + version, uid, epoch, at, answer.accessRef, host.firstElementChild);
     }
     async function showHistory() {
       const uid = selectedUid;
@@ -8507,6 +8532,7 @@
       const epoch = ++historyEpoch;
       historyUid = uid;
       historyReads.clear();
+      KinReportViews.end("history");
       $("#histmodal").classList.add("show");
       box.innerHTML = "<div style='color:#667;padding:10px'>불러오는 중…</div>";
       if (!serverMode) {
@@ -8543,6 +8569,11 @@
           const host = button.closest(".ver")?.querySelector(".vcite-host");
           if (!Number.isSafeInteger(version) || version < 1 || !host) { button.remove(); continue; }
           button.addEventListener("click", () => loadHistoryCitations(uid, version, host, button));
+        }
+        // A5: every row was provided; a row is displayed only once the reader has it on screen (scrolling the list shows more).
+        for (const row of box.querySelectorAll(".ver")) {
+          const v = list.find(item => String(item.version) === row.dataset.version);
+          if (v) historyShown("report-version:" + v.version, uid, epoch, at, v.accessRef, row);
         }
       } catch (e) {
         // 늦게 온 **실패**도 새 열람의 목록을 오류 문구로 덮지 않는다.

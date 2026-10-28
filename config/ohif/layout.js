@@ -87,29 +87,33 @@ function kinCreateViewerLayout() {
       const state = grid.getState();
       return JSON.stringify([state.layout, state.activeViewportId, ordered(state).map(v => [v.viewportId, v.x, v.y, v.width, v.height, v.displaySetInstanceUIDs])]);
     };
+    function reference(d) {
+      return { study: d.StudyInstanceUID, series: d.SeriesInstanceUID, handler: d.SOPClassHandlerId || '',
+        sops: [...new Set((d.images || [d.instance || d]).map(i => i.SOPInstanceUID).filter(Boolean))].sort() };
+    }
     function resolve(cell) {
       if (!cell) return null;
-      const matches = ds.getActiveDisplaySets().filter(d => d.StudyInstanceUID === cell.study && d.SeriesInstanceUID === cell.series);
-      // Split series and non-stack objects cannot be silently replaced with a default display set.
-      if (matches.length !== 1 || matches[0].Modality !== 'CT' || !(matches[0].images?.length) ||
-          !matches[0].images.every(i => i.SOPClassUID === '1.2.840.10008.5.1.4.1.1.2')) throw new Error('시리즈를 찾을 수 없거나 지원하지 않는 영상입니다. 현재 배치를 유지합니다.');
+      const matches = ds.getActiveDisplaySets().filter(d => d.StudyInstanceUID === cell.study && d.SeriesInstanceUID === cell.series &&
+        (!cell.sops || JSON.stringify(reference(d)) === JSON.stringify(cell)));
+      if (matches.length !== 1) throw new Error('저장한 영상 구성을 찾을 수 없습니다. 현재 배치를 유지합니다.');
       return matches[0].displaySetInstanceUID;
     }
     function capture() {
-      const state = grid.getState(), views = ordered(state), { numRows: rows, numCols: cols, layoutType } = state.layout;
-      if (layoutType !== 'grid' || views.length !== rows * cols) throw new Error('1·2·4화면의 일반 CT 배치만 저장할 수 있습니다.');
-      const cells = views.map((v, i) => {
-        if (Math.abs(v.x - (i % cols) / cols) > 1e-6 || Math.abs(v.y - Math.floor(i / cols) / rows) > 1e-6 ||
-            Math.abs(v.width - 1 / cols) > 1e-6 || Math.abs(v.height - 1 / rows) > 1e-6) throw new Error('병합 또는 특수 배치는 저장할 수 없습니다.');
-        const ids = v.displaySetInstanceUIDs || [];
-        if (!ids.length) return null;
-        if (ids.length !== 1 || cs.getCornerstoneViewport(v.viewportId)?.type !== 'stack') throw new Error('일반 CT 스택만 저장할 수 있습니다.');
-        const d = ds.getDisplaySetByUID(ids[0]), cell = { study: d?.StudyInstanceUID, series: d?.SeriesInstanceUID };
-        if (!studies.includes(cell.study) || resolve(cell) !== ids[0] || !cs.getCornerstoneViewport(v.viewportId)?.getCurrentImageId?.()) throw new Error('영상 로딩이 끝난 뒤 다시 저장하세요.');
-        return cell;
+      const state = grid.getState(), views = ordered(state), { numRows: rows, numCols: cols } = state.layout;
+      const cells = views.map(v => {
+        const refs = (v.displaySetInstanceUIDs || []).map(id => {
+          const d = ds.getDisplaySetByUID(id);
+          if (!d || !studies.includes(d.StudyInstanceUID)) throw new Error('영상 로딩이 끝난 뒤 다시 저장하세요.');
+          const ref = reference(d);
+          if (resolve(ref) !== id) throw new Error('표시 영상의 구성을 확인할 수 없습니다.');
+          return ref;
+        });
+        const { viewportId, ...viewportOptions } = v.viewportOptions || {};
+        return { x: v.x, y: v.y, width: v.width, height: v.height, sets: refs,
+          viewportOptions, displaySetOptions: v.displaySetOptions || refs.map(() => ({})) };
       });
-      const value = model.normalize({ version: 1, studies, rows, cols, active: views.findIndex(v => v.viewportId === state.activeViewportId), cells });
-      if (!value) throw new Error('1·2·4화면의 일반 CT 배치만 저장할 수 있습니다.');
+      const value = model.normalize({ version: 2, studies, rows, cols, active: views.findIndex(v => v.viewportId === state.activeViewportId), cells });
+      if (!value) throw new Error('현재 화면의 배치를 확인할 수 없습니다.');
       return value;
     }
     async function run(action) {
@@ -125,14 +129,17 @@ function kinCreateViewerLayout() {
         if (action === 'save') { model.write(localStorage, key, capture()); status.textContent = '최근 배치를 이 브라우저에 저장했습니다.'; }
         else if (action === 'remove') { localStorage.removeItem(key); status.textContent = '이 계정의 최근 배치를 삭제했습니다. 현재 화면은 유지됩니다.'; }
         else {
-          if (ordered(grid.getState()).some(v => v.displaySetInstanceUIDs?.length && cs.getCornerstoneViewport(v.viewportId)?.type !== 'stack')) throw new Error('일반 CT 화면에서 배치를 복원하세요. 현재 화면은 유지됩니다.');
           const value = model.read(localStorage, key);
           if (!value) throw new Error('이 계정에서 저장한 최근 배치가 없습니다.');
           if (JSON.stringify(value.studies) !== JSON.stringify(studies)) throw new Error('다른 검사의 배치입니다. 저장한 검사를 먼저 여세요.');
-          const sets = value.cells.map(resolve), ids = value.cells.map(() => 'kin-layout-' + crypto.randomUUID());
+          const cells = value.version === 2 ? value.cells : value.cells.map((ref, i) => ({
+            x: i % value.cols / value.cols, y: Math.floor(i / value.cols) / value.rows, width: 1 / value.cols, height: 1 / value.rows,
+            sets: ref ? [ref] : [], viewportOptions: { viewportType: 'stack', toolGroupId: 'default' }, displaySetOptions: [{}] }));
+          const sets = cells.map(cell => cell.sets.map(resolve)), ids = cells.map(() => 'kin-layout-' + crypto.randomUUID());
           await grid.setLayout({ numRows: value.rows, numCols: value.cols, activeViewportId: ids[value.active], isHangingProtocolLayout: false,
-            findOrCreateViewport: index => ({ displaySetInstanceUIDs: sets[index] ? [sets[index]] : [], displaySetOptions: [{}],
-              viewportOptions: { viewportId: ids[index], viewportType: 'stack', toolGroupId: 'default', allowUnmatchedView: true } }) });
+            layoutOptions: cells.map(({ x, y, width, height }) => ({ x, y, width, height })),
+            findOrCreateViewport: index => ({ displaySetInstanceUIDs: sets[index], displaySetOptions: cells[index].displaySetOptions,
+              viewportOptions: { ...cells[index].viewportOptions, viewportId: ids[index], allowUnmatchedView: true } }) });
           if (live()) status.textContent = '저장한 시리즈 배치를 적용했습니다. 영상 로딩 상태를 확인하세요.';
         }
       } catch (error) {
@@ -162,7 +169,7 @@ function kinCreateViewerLayout() {
       if (kinViewerSession.readOnly()) { readOnlyPanel(); return; }
       status.textContent = '현재 검사의 배치를 직접 저장하거나 복원하세요.'; await mountProtocols();
     }).catch(error => { if (live()) status.textContent = error?.message || '계정 정보를 확인할 수 없습니다. 뷰어를 다시 여세요.'; }).finally(refresh);
-    else status.textContent = '현재 검사 1~2개의 일반 CT 배치만 지원합니다.';
+    else status.textContent = '현재 검사의 식별 정보를 확인할 수 없습니다.';
     stop = () => { unwatch(); unwatchEnd(); end();  channel?.close(); panel.remove(); };
   }
   return { id: 'kin.viewer-layout', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };

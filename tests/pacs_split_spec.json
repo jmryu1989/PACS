@@ -8914,6 +8914,142 @@
       }
     }
   },
+  "di_additions_mg08": {
+    "unit": "S9-MG-08",
+    "note": "MG-08 (D1877(2), 2026-10-28): the existing image reads nginx used to send straight to Orthanc behind auth_request (worklist previews/thumbnails, report and print pixel reads, strip previews, pdf, WADO-RS frames, rendered, bulk data) pass the API relay (image-relay.controller.ts), which runs the DICOMweb gate and records the study delivery pair (image-delivery-record.ts) through the record port, the request context, the current clinical context and the background work registry before any byte. U0B-DI compares the snapshot minus exactly these.",
+    "middleware_routes": [],
+    "controllers": [
+      "ImageRelayController"
+    ],
+    "providers": [
+      "StudyImageDeliveryRecorder"
+    ],
+    "routes": [
+      {
+        "controller": "ImageRelayController",
+        "handler": "read",
+        "method": "GET",
+        "paths": [
+          "image-relay|*"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "1:1@1:null:0"
+        ]
+      }
+    ],
+    "injectables": {
+      "ImageRelayController": {
+        "params": [
+          "PacsService",
+          "OrthancService",
+          "StudyImageDeliveryRecorder"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "StudyImageDeliveryRecorder": {
+        "params": [
+          "Object",
+          "Object",
+          "Object",
+          "Object",
+          "OrthancService",
+          "Number"
+        ],
+        "scope": null,
+        "declared": [
+          "5:Symbol(ImageDeliveryIdleMs)",
+          "3:Symbol(EmrBackgroundWork)",
+          "2:Symbol(CURRENT_CLINICAL_CONTEXT)",
+          "1:Symbol(RequestContextSource)",
+          "0:Symbol(EmrRecordPort)"
+        ],
+        "optional": [
+          5
+        ]
+      }
+    }
+  },
+  "di_additions_mg_loading": {
+    "unit": "S9-MG-LOADING",
+    "note": "MG-LOADING (Minhoon P0, 2026-10-27): the viewer's WADO-RS frame reads and series-strip previews answered by the API's range reader behind the DICOMweb gate (dicom-frame.controller.ts, dicom-frame.service.ts); two routes nginx routes to the API. Its study delivery record is the shared StudyImageDeliveryRecorder (image-delivery-record.ts), declared with di_additions_mg08; the controller injects it. U0B-DI compares the snapshot minus exactly these.",
+    "middleware_routes": [],
+    "controllers": [
+      "DicomFrameController"
+    ],
+    "providers": [
+      "DicomFrameService"
+    ],
+    "routes": [
+      {
+        "controller": "DicomFrameController",
+        "handler": "preview",
+        "method": "GET",
+        "paths": [
+          "/|instances/:id/preview"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "1:2@2:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "DicomFrameController",
+        "handler": "read",
+        "method": "GET",
+        "paths": [
+          "/|dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:4@4:null:0",
+          "1:5@5:null:0",
+          "5:0@0:\"study\":0",
+          "5:1@1:\"series\":0",
+          "5:2@2:\"sop\":0",
+          "5:3@3:\"frames\":0"
+        ]
+      }
+    ],
+    "injectables": {
+      "DicomFrameController": {
+        "params": [
+          "DicomFrameService",
+          "PacsService",
+          "OrthancService",
+          "StudyImageDeliveryRecorder"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "DicomFrameService": {
+        "params": [
+          "OrthancService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      }
+    }
+  },
   "di_additions_key_admin": {
     "unit": "key-management-entry",
     "middleware_routes": [],
@@ -9249,5 +9385,46 @@
         ]
       }
     ]
+  },
+  "di_additions_cold_catalog": {
+    "unit": "EMR-E cold first opening (#248 follow-up)",
+    "note": "OrthancImageCatalog follows Orthanc's change log on the EMR background-work registry, so its constructor takes that registry. No controller, provider or route is added.",
+    "middleware_routes": [],
+    "controllers": [],
+    "providers": [],
+    "routes": [],
+    "injectables": {},
+    "changed_injectables": {
+      "OrthancImageCatalog": {
+        "before": {
+          "params": [
+            "PrismaService",
+            "Object",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "2:Symbol(RequestContextSource)",
+            "1:Symbol(CURRENT_CLINICAL_CONTEXT)"
+          ],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PrismaService",
+            "Object",
+            "Object",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "3:Symbol(EmrBackgroundWork)",
+            "2:Symbol(RequestContextSource)",
+            "1:Symbol(CURRENT_CLINICAL_CONTEXT)"
+          ],
+          "optional": []
+        }
+      }
+    }
   }
 }

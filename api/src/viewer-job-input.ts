@@ -100,7 +100,7 @@ function validateJobSnapshot(s: any) {
   if (volume) {
     keys(s.volume, ['study', 'series', 'sops']);
     if (!s.studies.includes(s.volume.study)) invalid(); viewerUid(s.volume.series);
-    if (!Array.isArray(s.volume.sops) || s.volume.sops.length < 2 || s.volume.sops.length > 256 || new Set(s.volume.sops).size !== s.volume.sops.length) invalid();
+    if (!Array.isArray(s.volume.sops) || s.volume.sops.length < 2 || new Set(s.volume.sops).size !== s.volume.sops.length) invalid();
     s.volume.sops.forEach(viewerUid);
   }
   const grid = mixed ? MIXED_LAYOUTS : VOLUME_LAYOUTS;

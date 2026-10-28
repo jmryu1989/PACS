@@ -105,7 +105,10 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql',
               'api/prisma/migrations/20261015013945_import_operation/migration.sql',
               'api/prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql',
-              'api/prisma/migrations/20261023180000_emr_pg_ledger/migration.sql', 'api/prisma/migrations/20261023200000_emr_server_signing/migration.sql', 'api/prisma/migrations/20261024120000_emr_d_online/migration.sql', 'api/prisma/migrations/20261025000000_emr_e_online/migration.sql', 'api/prisma/migrations/20261025120000_access_review/migration.sql', 'api/prisma/migrations/20261025120000_auth_flow_subtraction/migration.sql', 'api/prisma/migrations/20261025150000_emr_f_link/migration.sql', 'api/prisma/migrations/20261026120000_assignment_access_stream/migration.sql', 'api/prisma/migrations/20261026180000_emr_signing_key_admin/migration.sql', 'api/prisma/migrations/20261027230000_caution_app_limits/migration.sql', 'api/prisma/migrations/20261028120000_held_unknown_source/migration.sql']
+              'api/prisma/migrations/20261023180000_emr_pg_ledger/migration.sql', 'api/prisma/migrations/20261023200000_emr_server_signing/migration.sql', 'api/prisma/migrations/20261024120000_emr_d_online/migration.sql', 'api/prisma/migrations/20261025000000_emr_e_online/migration.sql', 'api/prisma/migrations/20261025120000_access_review/migration.sql', 'api/prisma/migrations/20261025120000_auth_flow_subtraction/migration.sql', 'api/prisma/migrations/20261025150000_emr_f_link/migration.sql', 'api/prisma/migrations/20261026120000_assignment_access_stream/migration.sql', 'api/prisma/migrations/20261026180000_emr_signing_key_admin/migration.sql',
+              'api/prisma/migrations/20261027180000_emr_image_object_digest/migration.sql',
+              'api/prisma/migrations/20261027230000_caution_app_limits/migration.sql',
+              'api/prisma/migrations/20261028120000_held_unknown_source/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -749,7 +752,12 @@ def expected_image_rows():
             selections=[dict(unit=copy['unit'], start=0, end=2)])), staging_copies=[copy], recorded_at=at)],
         observation=[dict(sequence=1, event_id=event, kind='transport',
             body=dict(wire=dict(bytesWritten=2, plannedBytes=2, terminal='transfer-ended'), observations=[]), recorded_at=at),
-            dict(sequence=2, event_id=event, kind='copies', body=[dict(copy, state='removed')], recorded_at=at)])
+            dict(sequence=2, event_id=event, kind='copies', body=[dict(copy, state='removed')], recorded_at=at)],
+        # A kept stored-file digest: a restore that dropped it would only make the next first opening read the file again,
+        # so the row is compared like every other one rather than left to that slower path.
+        object_digest=[dict(instance_id='00000000-00000000-00000000-00000000-0000e701', file_uuid='synthetic-stored-file',
+            sop_instance_uid='2.25.701.1.1', transfer_syntax_uid='1.2.840.10008.1.2.1', bytes=4, sha256='3'*64,
+            frames=[dict(number=1, bytes=2, sha256='4'*64)], recorded_at=at)])
 
 
 def observe_image(name, db):
@@ -759,14 +767,14 @@ def observe_image(name, db):
     return dict(catalog=inventory.parse(psql(name, db, catalog_sql)),
         rows={table: inventory.parse(psql(name, db,
             'SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text COLLATE "C"), \'[]\'::jsonb) FROM emr_image.'+table+' t'))
-            for table in ('preparation', 'observation')},
+            for table in expected_image_rows()},
         sequence=inventory.parse(psql(name, db,
             "SELECT jsonb_build_object('last_value',last_value,'is_called',is_called) FROM emr_image.observation_sequence_seq")))
 
 
 def image_contract(image):
     require(type(image) is dict and set(image) == {'catalog', 'rows', 'sequence'})
-    require(image['catalog']['tables'] == ['observation', 'preparation'])
+    require(image['catalog']['tables'] == sorted(expected_image_rows()))
     require(canonical(sorted_rows(image['rows'])) == canonical(sorted_rows(expected_image_rows())))
     require(image['sequence'] == dict(last_value=2, is_called=True))
 

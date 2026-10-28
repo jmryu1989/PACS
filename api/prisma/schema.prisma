@@ -1077,3 +1077,5 @@ model ImportOperation {
 
 // EMR E: SQL-owned emr_image.preparation/observation retain fixed manifests and
 // transport/staging facts (20261025000000_emr_e_online), on the B2 connection.
+// emr_image.object_digest keeps each stored archive file's digests for the catalog
+// (20261027180000_emr_image_object_digest), on the application connection.

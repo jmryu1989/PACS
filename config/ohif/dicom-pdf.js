@@ -142,14 +142,14 @@ function kinCreateDicomPdf() {
     if (!ready) ready = new Promise((resolve, reject) => {
       const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/viewer-dicom-pdf.js';
       const finish = error => { clearTimeout(timer); script.onload = script.onerror = null; script.remove(); error ? reject(error) : resolve(window.KinDicomPdf); };
-      const timer = setTimeout(() => finish(new Error('원본 PDF 도구 연결 시간이 지났습니다. 뷰어를 다시 여세요.')), 10000);
+      const timer = setTimeout(() => finish(new Error('원본 PDF 도구 연결 시간이 지났습니다. 다시 시도하세요.')), 10000);
       script.onload = () => finish(window.KinDicomPdf?.create ? null : new Error('원본 PDF 도구를 확인할 수 없습니다.'));
-      script.onerror = () => finish(new Error('원본 PDF 도구를 불러오지 못했습니다. 뷰어를 다시 여세요.'));
+      script.onerror = () => finish(new Error('원본 PDF 도구를 불러오지 못했습니다. 다시 시도하세요.'));
       document.head.append(script);
     }).catch(error => { ready = null; throw error; });
     return ready;
   }
-  return { id: 'kin.source-pdf', preRegistration({ servicesManager, extensionManager }) {
+  const extension = { id: 'kin.source-pdf', preRegistration({ servicesManager, extensionManager }) {
     services = servicesManager.services;
     if (extensionManager) { viewportGuard = kinDicomPdfViewportGuard(extensionManager, { onSessionEnd: retire,
       onFailure: (error, value, pdfUrl) => { nativeErrors.set(value, { pdfUrl, error }); current?.nativeFailure?.(error, value, pdfUrl); },
@@ -157,6 +157,7 @@ function kinCreateDicomPdf() {
     }); if (!viewportGuard.install()) throw new Error('원본 PDF 화면을 안전하게 연결하지 못했습니다. 뷰어를 다시 여세요.'); }
   },
     onModeEnter() {
+      kinToolRetry('kin-pdf-retry');
       if (viewportGuard && !viewportGuard.ownsWrapper() && !viewportGuard.install()) { const status = document.querySelector('#kin-viewer-layout-status'); if (status) status.textContent = '원본 PDF 화면을 안전하게 연결하지 못했습니다. 뷰어를 다시 여세요.'; return; }
       viewportGuard?.activate();
       const ticket = ++epoch; current?.stop(); current = null;
@@ -164,9 +165,10 @@ function kinCreateDicomPdf() {
         nativeFailureFor: (value, pdfUrl) => { const saved = nativeErrors.get(value); return saved?.pdfUrl === pdfUrl ? saved.error : null; },
         onRetry: (value, pdfUrl) => viewportGuard?.retry(value, pdfUrl)
       }); current.mount(); } }).catch(error => {
-        if (ticket === epoch) { const status = document.querySelector('#kin-viewer-layout-status'); if (status) status.textContent = error.message; }
+        if (ticket === epoch) kinToolRetry('kin-pdf-retry', error.message, () => extension.onModeEnter());
       });
     },
-    onModeExit() { viewportGuard?.deactivate(); retire(); },
+    onModeExit() { kinToolRetry('kin-pdf-retry'); viewportGuard?.deactivate(); retire(); },
   };
+  return extension;
 }

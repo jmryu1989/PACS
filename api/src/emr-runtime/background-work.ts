@@ -85,5 +85,14 @@ export function createBackgroundWorkRegistry(): BackgroundWorkControl {
   });
 }
 
+/**
+ * The delay before retry `attempt` (1-based) of background work that waits on a dependency to come back: 1 s doubling
+ * to a 30 s cap. Chosen for the member-rights import after hosted CI run 37564131708 (Keycloak still starting, S7-U5
+ * round 4): an outage of seconds costs one quick retry and a long one a retry every 30 s, never a tight loop.
+ */
+export function backgroundRetryDelayMs(attempt: number): number {
+  return Math.min(30000, 1000 * 2 ** Math.min(Math.max(attempt, 1) - 1, 5));
+}
+
 /** The runtime supplies the same work registry to its Nest providers. */
 export const EMR_BACKGROUND_WORK: unique symbol = Symbol('EmrBackgroundWork');

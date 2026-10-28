@@ -422,7 +422,7 @@ jobs:
     - name: S9-U4b compiled minimal Part-10 reader over the D1172 allow-list and refusal vectors
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/s9-u4b-part10-reader --cwd . --file api/src/dicom-part10-reader.ts --file tests/dicom_part10_reader_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/dicom_part10_reader_test.cjs
     - name: S9-U4b compiled whole-original archive manifest, ZIP32 plan and streaming writer
-      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/s9-u4b-original-archive --cwd . --file api/src/original-archive.ts --file tests/original_archive_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/original_archive_test.cjs
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/s9-u4b-original-archive --cwd . --file api/src/original-archive.ts --file tests/original_archive_test.cjs -- docker run --rm --network none --read-only --tmpfs /tmp:rw,size=64m -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/original_archive_test.cjs
     - name: S9-U4b compiled import gate, import/download routes and raw parser over a recording store and a fake Orthanc
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/s9-u4b-transfer-server --cwd . --file api/src/dicom-import-gate.service.ts --file api/src/study-transfer-local.controller.ts --file api/src/study-transfer-local.service.ts --file api/src/study-transfer-local-parser.ts --file api/src/dicom-part10-reader.ts --file api/src/original-archive.ts --file api/src/study-access.service.ts --file api/src/study-access-policy.ts --file api/src/pacs/access.ts --file api/src/pacs/values.ts --file api/src/member-rights.ts --file api/src/clinician-policy.ts --file api/src/study-identity.ts --file api/src/order-reconciliation.ts --file api/src/prisma.service.ts --file api/src/orthanc.service.ts --file api/src/keycloak.service.ts --file api/src/viewer-source-warning.ts --file api/prisma/schema.prisma --file api/src/auth.guard.ts --file api/src/auth.service.ts --file api/src/study-source-groups.ts --file tests/study_transfer_local_server_test.cjs --file tests/service_test_loader.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/study_transfer_local_server_test.cjs
     - name: S5-U6b compiled admin metrics rows and route over a fake store, and the page model that reads them
@@ -441,6 +441,8 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/dictation-host --cwd . --file worklist-v0/hpacs-lite/dictation.js --file worklist-v0/hpacs-lite/dictation-session.js --file worklist-v0/hpacs-lite/dictation-capture.js --file tests/dictation_host_test.cjs --file tests/module_session_harness.cjs --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/dictation_host_test.cjs
     - name: Compiled volume job command and volume mark boundary models
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/volume-api-models --cwd . --file tests/viewer_volume_job_test.cjs --file tests/viewer_volume_marks_test.cjs --file tests/study_query_scope_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_volume_job_test.cjs /tests/viewer_volume_marks_test.cjs /tests/study_query_scope_test.cjs
+    - name: Spaced original-frame measurements and verified SR readback
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/planar-measurements --cwd . --tree api/src --tree config/ohif --file tests/planar_measurement_test.cjs --file tests/mg_length_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src --entrypoint node kin-api:ci --test tests/planar_measurement_test.cjs tests/mg_length_test.cjs
     - name: Compiled study page cursor and password action callback
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/page-cursor-password-callback --cwd . --file api/src/study-page.ts --file api/src/auth.service.ts --file api/src/auth.controller.ts --file tests/study_page_test.cjs --file tests/auth_password_callback_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/study_page_test.cjs /tests/auth_password_callback_test.cjs
     - name: Observe an isolated real restart loop
@@ -1504,6 +1506,12 @@ jobs:
     - name: W9 viewing-set resolve and access-event contract
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w9-viewing-set-service --cwd . --tree api/src --file api/prisma/schema.prisma --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/multi_study_view_service_test.cjs -- node --test tests/multi_study_view_service_test.cjs
+    - name: MG-08 study image delivery record on the relayed image reads
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/mg08-image-delivery-record --cwd . --tree api/src --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/image_delivery_record_test.cjs -- node --test tests/image_delivery_record_test.cjs
+    - name: MG-LOADING frame range reader contract
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/mg-loading-frame-reader --cwd . --tree api/src --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/dicom_frame_fixture.cjs --file tests/dicom_frame_test.cjs --file tests/dicom_frame_delivery_test.cjs -- node --test tests/dicom_frame_test.cjs tests/dicom_frame_delivery_test.cjs
     - name: Keep pinned browser dependencies independent of unused Chrome APT repository
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: |
@@ -1617,6 +1625,20 @@ jobs:
           tmp/u2b-regressions-ci/
         if-no-files-found: error
         retention-days: 7
+    - name: Viewer U3 served prior images and read-only reports
+      timeout-minutes: 28
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: '"$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile viewer-ux-priors'
+    - name: Viewer U3 synthetic served evidence
+      if: ${{ always() && !github.event.pull_request.draft }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-viewer-ux-priors
+        path: |
+          tests/e2e/artifacts/viewer-ux-priors-ci/
+          tmp/viewer-ux-u3/
+        if-no-files-found: error
+        retention-days: 7
     - name: Isolated declared Viewer U2 shell tests
       timeout-minutes: 28
       run: |
@@ -1630,6 +1652,21 @@ jobs:
         path: |
           tests/e2e/artifacts/viewer-ux-shell-ci/
           tmp/viewer-ux-u2/screens/
+        if-no-files-found: error
+        retention-days: 7
+    - name: Isolated declared S9-U7 output, identity and unsaved-work tests
+      timeout-minutes: 28
+      run: |
+        "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile s9-u7-served
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+    - name: Sanitized synthetic S9-U7 served evidence
+      if: ${{ always() && !github.event.pull_request.draft }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-s9-u7-served-results
+        path: |
+          tests/e2e/artifacts/s9-u7-served-ci/
+          tmp/s9-u7/screens/
         if-no-files-found: error
         retention-days: 7
     - name: Worklist folder multi-selection and shortcut module contract

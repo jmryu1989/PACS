@@ -272,7 +272,10 @@ test('U0B-DI Nest metadata equals the pre-split snapshot plus declared additions
   };
   // KEY-ADMIN: the doctor-key administrator's controller and the composed manage-only facade it injects.
   // D1882 (held-unknown-source): the held-source alert and the two registrations on the existing AdminController.
-  const additions = [spec.di_additions_held, spec.di_additions_key_admin, spec.di_additions_d_online, spec.di_additions_f_link, spec.di_additions_emr_online, spec.di_additions_b2, declared];
+  // MG-08: the recorded image relay (one wildcard route, one controller) and the study delivery recorder.
+  // MG-LOADING: the viewer's frame/preview reads through the API's range reader (two routes, one controller, one service).
+  // The cold-catalog constructor change is taken back first: E's own declaration pins the earlier constructor.
+  const additions = [spec.di_additions_held, spec.di_additions_cold_catalog, spec.di_additions_mg_loading, spec.di_additions_mg08, spec.di_additions_key_admin, spec.di_additions_d_online, spec.di_additions_f_link, spec.di_additions_emr_online, spec.di_additions_b2, declared];
   assert.equal(full.routes.length, spec.di.routes.length + additions.reduce((count, item) => count + item.routes.length, 0));
   // Undo clinical and later online/identity bindings before B2 and the earlier feature declarations.
   // D-online and F_LINK are full declared additions too: the whole snapshot is compared, not a minimal DI check.
@@ -294,6 +297,8 @@ test('U0B-DI Nest metadata equals the pre-split snapshot plus declared additions
   assert.ok(spec.di_additions_emr_online.routes.every(r => !r.public), 'no declared route is public');
   assert.ok(spec.di_additions_key_admin.routes.every(r => !r.public), 'no declared route is public');
   assert.ok(spec.di_additions_held.routes.every(r => r.controller === 'AdminController' && !r.public), 'no declared route is public');
+  assert.ok(spec.di_additions_mg08.routes.every(r => r.controller === 'ImageRelayController' && !r.public), 'no declared route is public');
+  assert.ok(spec.di_additions_mg_loading.routes.every(r => r.controller === 'DicomFrameController' && !r.public), 'no declared route is public');
   assert.deepEqual(now.injectables.PacsService.params, ['PrismaService', 'OrthancService', 'KeycloakService', 'StudyAccessService', 'FindingService']);
   // the concerns are plain objects the facade owns: no Nest metadata, not registered anywhere
   for (const [target, concern] of Object.entries(spec.concerns)) {

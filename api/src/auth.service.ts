@@ -1,4 +1,4 @@
-import { BackgroundWork, EMR_BACKGROUND_WORK } from './emr-runtime/background-work';
+import { BackgroundWork, EMR_BACKGROUND_WORK, backgroundRetryDelayMs } from './emr-runtime/background-work';
 import {
   HttpException, Inject, Injectable, InternalServerErrorException, Logger,
   OnModuleDestroy, OnModuleInit, UnauthorizedException,
@@ -178,7 +178,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`Member rights import attempt ${attempt}: ready`);
       if (outcome?.publication) await outcome.publication;
     } catch (error: any) {
-      const delay = Math.min(30000, 1000 * 2 ** Math.min(attempt - 1, 5));
+      const delay = backgroundRetryDelayMs(attempt);
       this.logger.warn(`Member rights import attempt ${attempt}: ${error?.message ?? 'storage/provider failure'}; retry in ${delay}ms`);
       if (!this.stopping && !signal.aborted) {
         this.cancelImportRetry = this.background.schedule('auth.importRights', delay, next => this.importRights(attempt + 1, next));

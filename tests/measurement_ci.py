@@ -30,6 +30,13 @@ SUITE_CLASSES = ['ViewerAPI', 'MeasurementReadbackE2E', 'MeasurementPanelE2E',
                  'CineE2E', 'VolumeCineE2E',
                  'FindingAPI', 'FindingNavigationE2E', 'FindingWorklistE2E', 'DictationLiveE2E']
 PROFILES = {
+    'viewer-ux-priors': {
+        'out': ROOT / 'tests/e2e/artifacts/viewer-ux-priors-ci',
+        'project_prefix': 'kin-viewer-ux-priors-ci-',
+        # Retain the measured run-4 served plan hang allowance (all five U3 cases).
+        'suite_timeout': 900,
+        'suites': (('e2e/test_viewer_ux_priors.py', 'ViewerUXPriorsE2E', 'ci-viewer-ux-priors'),),
+    },
     'context-loss': {
         'out': ROOT / 'tests/e2e/artifacts/context-loss-ci',
         'project_prefix': 'kin-context-loss-ci-',
@@ -152,6 +159,21 @@ PROFILES = {
         # worklist-ux-measurements job. One suite at the single-suite 900s ceiling, not an estimate.
         'suite_timeout': 900,
         'suites': (('e2e/test_viewer_ux_shell.py', 'ViewerUXShellE2E', 'ci-viewer-ux-shell'),),
+    },
+    's9-u7-served': {
+        'out': ROOT / 'tests/e2e/artifacts/s9-u7-served-ci',
+        'project_prefix': 'kin-s9-u7-ci-',
+        # S9-U7 output scope, identity and unsaved work on the served worklist -> OHIF flow. Each module's
+        # load_tests is the allowlist (test_output_*, test_identity_flow_*, test_unsaved_*), so no class is
+        # passed and no inherited case runs. The caps are hang ceilings, not estimates. The unsaved-work suite
+        # holds real saves through every replacement consumer and runs about 330s locally (output about 100-170s,
+        # identity about 80-95s), so each suite gets its own cap: (320+35)+(240+35)+(700+35) = 1365s of the
+        # shared 1500s deadline leaves 135s for a stack whose local setup and cleanup take about 45s.
+        'suite_timeout': 400,
+        'suite_budgets': {'ci-s9-u7-output': 320, 'ci-s9-u7-identity': 240, 'ci-s9-u7-work': 700},
+        'suites': (('e2e/test_s9_viewer_output_scope.py', None, 'ci-s9-u7-output'),
+                   ('e2e/test_s9_viewer_identity_flow.py', None, 'ci-s9-u7-identity'),
+                   ('e2e/test_s9_viewer_unsaved_flow.py', None, 'ci-s9-u7-work')),
     },
     'display-scope': {
         'out': ROOT / 'tests/e2e/artifacts/display-scope-ci',

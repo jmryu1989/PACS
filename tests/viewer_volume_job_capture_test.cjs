@@ -555,11 +555,12 @@ async function mipSaveWorld(){
   append:(...items)=>{children.push(...items);},prepend:(...items)=>{children.unshift(...items);},insertBefore:item=>{children.push(item);},
   replaceChildren:(...items)=>{children.splice(0,children.length,...items);},setAttribute(){},remove(){},querySelector:selector=>children.find(c=>c.tagName===selector)||null};};
  const layout=element('details');layout.append(element('summary'));
+// A created Job's receipt is the API summary (viewer-job.service.ts summary): id, studyUid, revision and snapshotVersion.
  const jobs='/api/studies/'+STUDY+'/viewer-jobs';
  const fetch=async(url,options={})=>{
   let body=null;
   if(url==='/api/me')body={kind:'member',institution:'I1',sub:'u1',roles:['radiologist']};
-  else if(url===jobs&&options.method==='POST'){const sent=JSON.parse(options.body);posts.push(sent);body={id:sent.id,snapshotVersion:sent.snapshot.version};}
+  else if(url===jobs&&options.method==='POST'){const sent=JSON.parse(options.body);posts.push(sent);body={id:sent.id,studyUid:STUDY,revision:1,snapshotVersion:sent.snapshot.version};}
   else if(url.startsWith(jobs+'?'))body={jobs:[]};
   return sessionResponse(body?200:404,body);};
  const sandbox={document:{createElement:element,head:element('head'),querySelector:selector=>selector==='#kin-viewer-layout'?layout:null,addEventListener(){},removeEventListener(){}},
@@ -895,7 +896,7 @@ async function batchSaveWorld(){
    const sent=JSON.parse(options.body);posts.push(sent);
    if(!rows.some(row=>row.id===sent.id))rows.push({id:sent.id,title:sent.title,description:'',snapshotVersion:sent.snapshot.version,hidden:false,authorActor:'dr.synthetic',authorSub:'u1',createdAt:0,revision:1});
    if(network.lose){network.lose=false;const error=new Error('receipt lost after commit');error.name='AbortError';throw error;}
-   body={id:sent.id,snapshotVersion:sent.snapshot.version};
+   body={id:sent.id,studyUid:STUDY,revision:1,snapshotVersion:sent.snapshot.version};
   }else if(url.startsWith(jobs+'?'))body={jobs:rows.map(row=>({...row}))};
   return sessionResponse(body?200:404,body);};
  const sandbox={document:{createElement:element,head:element('head'),querySelector:selector=>selector==='#kin-viewer-layout'?layout:null,addEventListener(){},removeEventListener(){}},
@@ -1845,4 +1846,16 @@ test('a restore that finishes releases the hold itself and leaves nothing for th
     x.boundary.end();
     assert.equal(x.tool.onResetCamera,later);
   }finally{x.dispose();}
+});
+
+test('a loaded 257-slice volume reaches the real job capture boundary',()=>{
+ const saved=[...SOPS],loaded=volume.framesLoaded;
+ try {
+  SOPS.splice(0,SOPS.length,...Array.from({length:257},(_,i)=>'1.2.'+(1000+i)));
+  imageIds.splice(0,imageIds.length,...SOPS.map(sop=>'image:'+sop));volume.framesLoaded=imageIds.length;
+  const result=world(1,3,PLANES).capture();
+  assert.equal(result.volume.sops.length,257);assert.equal(result.volume.sops.at(-1),'1.2.1256');
+ } finally {
+  SOPS.splice(0,SOPS.length,...saved);imageIds.splice(0,imageIds.length,...SOPS.map(sop=>'image:'+sop));volume.framesLoaded=loaded;
+ }
 });

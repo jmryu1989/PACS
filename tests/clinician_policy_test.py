@@ -1613,10 +1613,12 @@ def manifest_routes():
 
 
 def ts_array(source, name):
-    match = re.search(rf"export const {re.escape(name)}\b[^=]*=\s*Object\.freeze\(\[(.*?)\]\);", source, re.S)
-    if match is None:
-        raise AssertionError(f"{name} is not a frozen literal array")
-    return re.findall(r"'([^']*)'", match.group(1))
+    """The string elements of `export const <name> = Object.freeze([...])`, read by the TypeScript parser: prose in a
+    comment between the elements (an apostrophe included) is not an element (MG-08 IDR-04)."""
+    found = COMPILER.request({"frozenArraySource": source, "name": name})["frozen_array"]
+    if found is None:
+        raise AssertionError(f"{name} is not a frozen literal array of strings")
+    return found
 
 
 class ClinicianPolicySpec(unittest.TestCase):
