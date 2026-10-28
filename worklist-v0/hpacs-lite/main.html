@@ -207,9 +207,19 @@
     body:not(.reading).kin-hide-clinical .rw > .s-clinical,
     body:not(.reading).kin-hide-template .rw > .s-template,
     body:not(.reading).kin-report-window-empty .right > .rw,
-    body:not(.reading).kin-report-window-empty #resize-top { display: none !important; }
+    body:not(.reading).kin-report-window-empty #resize-top,
+    body:not(.reading).kin-report-window-tabs #resize-top { display: none !important; }
     body:not(.reading).kin-hide-thumbnail .rw > .s-thumb { width: auto; flex: none; }
-    body:not(.reading).kin-panels-trimmed .rw > section { flex-grow: 1; }
+    /* Each panel starts from its first-paint share and grows by that share, so only the width a hidden panel gives up is
+       divided; growing all three equally took most of it from Reading Template, whose own share is flex space (WS-01). */
+    .s-thumb { --kin-panel-share: 34; }
+    .s-clinical { --kin-panel-share: 30; }
+    .s-template { --kin-panel-share: 36; }
+    body:not(.reading).kin-panels-trimmed .rw > section { flex: var(--kin-panel-share) 1 calc(var(--kin-panel-share) * 1%); }
+    /* Only placeholder tabs left: the band is the tab strip, its height goes to the row below, and the stored band height
+       stays in the record for when a panel comes back (WS-02). */
+    body:not(.reading).kin-report-window-tabs .right > .rw { height: auto !important; }
+    body:not(.reading).kin-report-window-tabs .rw > .s-thumb { flex: auto; }
     /* The choice has no effect there, and the reading toolbar's View row (92px, G-LIVE-GEO) must stay one line. */
     body.reading #panel-settings-open { display: none; }
     .tpl-opts { display: flex; gap: 8px; padding: 3px 8px; background: #171c25; color: #8892a4; font-size: 11px; flex: none; flex-wrap: wrap; }

@@ -2,7 +2,8 @@
 
 REQ (feedback.md items 9/10/11) -> RISK: a hidden panel leaves its space empty or comes back after a reload / under
 another account; a dragged column order is lost or changes what the list filters and sorts; the palette overwrites a
-reader's saved text colour -> TEST-WSPACE-DOM-01..04.
+reader's saved text colour; hiding one panel narrows another that is still shown; a band holding only placeholder tabs
+keeps its height -> TEST-WSPACE-DOM-01..06.
 
 The real main.html and its assets are served; only HTTP answers are synthetic (study_panel_page_dom_test.WorkspaceSite).
 Every assertion reads public controls, geometry, computed colours and the stored preferences. No product instrumentation.
@@ -27,7 +28,7 @@ SIZES = ((1920, 1080), (1024, 768), (768, 1024))
 BAND = '''() => { const r = s => { const n = document.querySelector(s); if (!n || !n.getClientRects().length) return null;
   const b = n.getBoundingClientRect(); return [b.x, b.y, b.width, b.height]; };
   return { rw: r('.right > .rw'), thumb: r('.rw > .s-thumb'), clinical: r('.rw > .s-clinical'), template: r('.rw > .s-template'),
-    thumbwrap: r('.rw .thumbwrap'), separator: r('#resize-top'), workrow: r('.workrow'), report: r('.report-p'), split: r('.split'), list: r('.left'), listEdge: r('#resize-main'),
+    thumbwrap: r('.rw .thumbwrap'), rtabs: r('.rw .rtabs'), separator: r('#resize-top'), workrow: r('.workrow'), report: r('.report-p'), split: r('.split'), list: r('.left'), listEdge: r('#resize-main'),
     tabs: [...document.querySelectorAll('.rw .rtabs > div')].filter(n => n.getClientRects().length).map(n => n.textContent) }; }'''
 
 
@@ -200,6 +201,90 @@ class WSpaceDOM(unittest.TestCase):
         band = page.evaluate(BAND)
         self.assertIsNotNone(band['template'])
         self.assertIsNotNone(band['thumbwrap'])
+
+    def test_wspace_dom_05_hiding_one_panel_never_narrows_another_shown_panel(self):
+        """From the first paint, each of the five panels alone: the panels still shown keep at least their width, the
+        band keeps its height while a content panel remains, and showing the panel again returns the first paint."""
+        content = {'Thumbnail': 'thumbwrap', 'Clinical Information': 'clinical', 'Reading Template': 'template'}
+        for width, height in SIZES:
+            site = WorkspaceSite()
+            page = self.open(site, width, height)
+            start = page.evaluate(BAND)
+            for label in ('Thumbnail', 'AI Report', 'Image Report', 'Clinical Information', 'Reading Template'):
+                with self.subTest(size=f'{width}x{height}', hidden=label):
+                    # Shown again before any assertion, so every case starts from the first paint.
+                    band = self.set_panel(page, label, False)
+                    back = self.set_panel(page, label, True)
+                    self.assertEqual(shown(start), shown(back))
+                    for key in ('thumb', 'clinical', 'template'):
+                        self.assertEqual([start[key][0], start[key][2]], [back[key][0], back[key][2]], key)
+                    self.assertEqual(start['rw'][3], band['rw'][3])
+                    self.assertEqual(start['workrow'], band['workrow'])
+                    for key in ('thumb', 'clinical', 'template'):
+                        if content.get(label) == key:
+                            self.assertIsNone(band[key])
+                        elif key == 'thumb' and label == 'Thumbnail':
+                            self.assertLess(band[key][2], start[key][2])   # the tab strip only
+                        else:
+                            self.assertGreaterEqual(band[key][2], start[key][2] - 0.5, key)
+                    if label in content:   # its width went to the panels still shown (at 1024 the tab strip frees ~18 px)
+                        shown_now = [k for k in ('thumb', 'clinical', 'template') if band[k] and not (k == 'thumb' and label == 'Thumbnail')]
+                        for key in shown_now:
+                            self.assertGreater(band[key][2], start[key][2] + 2, key)
+                    else:   # a placeholder tab gives up no panel width
+                        for key in ('thumb', 'clinical', 'template'):
+                            self.assertAlmostEqual(start[key][2], band[key][2], delta=0.5, msg=key)
+                    total = sum(band[k][2] for k in ('thumb', 'clinical', 'template') if band[k])
+                    self.assertAlmostEqual(band['rw'][2], total, delta=2)
+            page.screenshot(path=str(OUT / f'panels-each-restored-{width}x{height}.png'))
+
+    def test_wspace_dom_06_placeholder_tabs_alone_give_the_band_height_to_the_row_and_keep_the_stored_height(self):
+        for width, height in SIZES:
+            with self.subTest(size=f'{width}x{height}'):
+                site = WorkspaceSite()
+                page = self.open(site, width, height)
+                portrait = height > width
+                # A reader-chosen band height first: dragging the separator stores it.
+                grip = page.locator('#resize-top').bounding_box()
+                x, y = grip['x'] + grip['width'] / 2, grip['y'] + grip['height'] / 2
+                page.mouse.move(x, y)
+                page.mouse.down()
+                page.mouse.move(x, y + 15, steps=4)
+                page.mouse.move(x, y + 30, steps=4)
+                page.mouse.up()
+                settle(page)
+                start = page.evaluate(BAND)
+                axis = 'portrait' if portrait else 'landscape'
+                stored = page.evaluate('(key) => JSON.parse(localStorage.getItem(key))', KEY)[axis]['top']
+                self.assertIsNotNone(stored)
+                for label in ('Thumbnail', 'Clinical Information', 'Reading Template'):
+                    band = self.set_panel(page, label, False)
+                self.assertEqual(['AI Report', 'Image Report'], band['tabs'])
+                self.assertIsNone(band['thumbwrap'])
+                # The band is its tab strip, without the separator, and the strip spans the band.
+                self.assertAlmostEqual(band['rw'][3], band['rtabs'][3], delta=1)
+                self.assertAlmostEqual(band['rw'][2], band['rtabs'][2], delta=1)
+                self.assertIsNone(band['separator'])
+                freed = start['rw'][3] + start['separator'][3] - band['rw'][3]
+                self.assertGreater(freed, 100)
+                if not portrait:
+                    self.assertAlmostEqual(band['workrow'][3], start['workrow'][3] + freed, delta=1)
+                    self.assertAlmostEqual(band['report'][3], start['report'][3] + freed, delta=1)
+                else:   # stacked: the row moves up by that height
+                    self.assertAlmostEqual(band['workrow'][1], start['workrow'][1] - freed, delta=1)
+                self.assertEqual(start['split'], band['split'])
+                page.screenshot(path=str(OUT / f'panels-tabs-only-{width}x{height}.png'))
+                record = page.evaluate('(key) => JSON.parse(localStorage.getItem(key))', KEY)
+                self.assertEqual(stored, record[axis]['top'])
+                self.assertEqual(['thumbnail', 'clinical', 'template'], record['workspace']['hiddenPanels'])
+                # A reload keeps the strip; a content panel shown again takes the stored band height back.
+                self.reload(page, site)
+                again = page.evaluate(BAND)
+                self.assertAlmostEqual(again['rw'][3], again['rtabs'][3], delta=1)
+                back = self.set_panel(page, 'Clinical Information', True)
+                self.assertEqual(start['rw'][3], back['rw'][3])
+                self.assertIsNotNone(back['separator'])
+                self.assertEqual(stored, page.evaluate('(key) => JSON.parse(localStorage.getItem(key))', KEY)[axis]['top'])
 
     def column_order(self, page):
         return page.locator('#heads th').all_inner_texts()

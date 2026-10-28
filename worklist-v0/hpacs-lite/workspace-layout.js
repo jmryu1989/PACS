@@ -161,13 +161,15 @@
   }
   const hiddenPanels = value => normalize(value)?.workspace?.hiddenPanels?.slice() || [];
   // The body classes main.html's Panel Settings rules read. The band (and its separator) empties only when every panel
-  // it would show is hidden; `templateShown` is the mode's own choice (Technician never shows templates).
+  // it would show is hidden; with only the placeholder tabs left it shrinks to their strip. `templateShown` is the mode's
+  // own choice (Technician never shows templates).
   function panelClasses(hidden, templateShown = true) {
     const off = key => hidden.includes(key), classes = {};
     for (const key of PANELS) classes['kin-hide-' + key] = off(key);
     classes['kin-panels-trimmed'] = PANELS.some(off);
-    classes['kin-report-window-empty'] = off('thumbnail') && off('aiReport') && off('imageReport') && off('clinical')
-      && (off('template') || !templateShown);
+    const noContent = off('thumbnail') && off('clinical') && (off('template') || !templateShown);
+    classes['kin-report-window-empty'] = noContent && off('aiReport') && off('imageReport');
+    classes['kin-report-window-tabs'] = noContent && !classes['kin-report-window-empty'];
     return classes;
   }
   const api = { PREFIX, PANELS, defaults, normalize, withReading, workspaceDefaults, toVersion3, withStudyPanel,

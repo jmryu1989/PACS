@@ -328,9 +328,15 @@ test('TEST-WSPACE-PANELS-05 panelClasses: the band empties only when every shown
     // Technician never shows templates, so hiding the other panels empties the band.
     [['thumbnail', 'aiReport', 'imageReport', 'clinical'], false,
       ['kin-hide-thumbnail', 'kin-hide-aiReport', 'kin-hide-imageReport', 'kin-hide-clinical', 'kin-panels-trimmed', 'kin-report-window-empty']],
-    // A placeholder tab left visible keeps the band.
+    // A placeholder tab left visible keeps the band as its tab strip only.
     [['thumbnail', 'imageReport', 'clinical', 'template'], true,
-      ['kin-hide-thumbnail', 'kin-hide-imageReport', 'kin-hide-clinical', 'kin-hide-template', 'kin-panels-trimmed']],
+      ['kin-hide-thumbnail', 'kin-hide-imageReport', 'kin-hide-clinical', 'kin-hide-template', 'kin-panels-trimmed', 'kin-report-window-tabs']],
+    [['thumbnail', 'clinical', 'template'], true,
+      ['kin-hide-thumbnail', 'kin-hide-clinical', 'kin-hide-template', 'kin-panels-trimmed', 'kin-report-window-tabs']],
+    [['thumbnail', 'clinical'], false,
+      ['kin-hide-thumbnail', 'kin-hide-clinical', 'kin-panels-trimmed', 'kin-report-window-tabs']],
+    // Reading Template still shown: a real panel keeps the band's height.
+    [['thumbnail', 'clinical'], true, ['kin-hide-thumbnail', 'kin-hide-clinical', 'kin-panels-trimmed']],
   ];
   for (const [hidden, templateShown, expected] of cases) {
     const on = Object.entries(layout.panelClasses(hidden, templateShown)).filter(([, value]) => value).map(([name]) => name);
