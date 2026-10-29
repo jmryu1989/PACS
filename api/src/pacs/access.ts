@@ -70,8 +70,11 @@ export class PacsAccess {
    * 이 검사를 이 기관이 다룰 수 있는가.
    *  - 소유 기관이면 된다
    *  - 원격판독을 받은 기관이어도 된다  ← **기관 경계를 넘는 유일한 통로**
+   *  - 소유 기관이 없는 검사(보낸 병원 미확인 보류, D1882)는 누구도 다루지 못한다. 원격판독 값이 남아 있어도 같다:
+   *    원격판독은 소유 기관이 보낸 것이라 소유 기관 없이는 성립하지 않는다.
    */
   visible(s: any, institution: string) {
+    if (s.institutionId == null) return false;
     return s.institutionId === institution || s.teleInstitutionId === institution;
   }
 

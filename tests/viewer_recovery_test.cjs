@@ -16,7 +16,11 @@ class Element extends EventTarget {
   setAttribute(k, v) { this.attributes[k] = v; }
   get isConnected() { return this.tagName === 'body' || !!this.parent?.isConnected; }
   all() { return [this, ...this.children.flatMap(c => c.all())]; }
-  querySelectorAll(selector) { assert.equal(selector, '[data-kin-sr]'); return this.all().filter(e => e.dataset.kinSr); }
+  // The history scan also reads the toolbar's Capture entries (U7A output meaning); this isolated panel has none.
+  querySelectorAll(selector) {
+    if (selector === '[data-tool="Capture"]') return this.all().filter(e => e.dataset.tool === 'Capture');
+    assert.equal(selector, '[data-kin-sr]'); return this.all().filter(e => e.dataset.kinSr);
+  }
   click() { if (!this.disabled) this.dispatchEvent(new Event('click')); }
 }
 const flush = async () => { for (let i = 0; i < 12; i++) await new Promise(setImmediate); };
@@ -27,6 +31,7 @@ const head = (id = 'a', revision = 1, title = 'server', hidden = false) => ({ id
   } });
 async function harness() {
   const document = new EventTarget(); document.body = new Element('body'); document.createElement = tag => new Element(tag);
+  document.querySelectorAll = selector => document.body.querySelectorAll(selector);
   const window = new EventTarget(), annotations = new Map(), commands = new Map();
   const gate = gates.create(); let announce;
   gate.follow({ onLifecycle(listener) { announce = listener; listener({ state: 'active', session: 'S1' }); } });

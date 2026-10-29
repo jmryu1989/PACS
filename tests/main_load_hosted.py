@@ -325,6 +325,8 @@ def assert_script_requests(baseline, candidate, *, landing=False):
         expected[("GET", "/worklist/hpacs-lite/study-transfer-local.js", "")] += 1
         # W5 Phase B: the Related Report mode's standalone script (main.html tags it before the bundle).
         expected[("GET", "/worklist/hpacs-lite/related-report-mode.js", "")] += 1
+        # MODULE_A A5: the report display reports' standalone script (main.html tags it after the Related Report mode's).
+        expected[("GET", "/worklist/hpacs-lite/report-view-observation.js", "")] += 1
         # W9-UI: the Multi-Study View controller's standalone script (main.html tags it after the Related Report mode's).
         expected[("GET", "/worklist/hpacs-lite/multi-study-view.js", "")] += 1
     actual = Counter(map(tuple, candidate))
@@ -754,8 +756,9 @@ def visit(stack, browser_context, clock_start, patient, metadata):
         assert static and all(r["protocol"] == "h2" for r in static), "static protocol mismatch"
         scripts = [r for r in static if urlparse(r["url"]).path.endswith(".js")]
         # The candidate side's scripts: the expected requests above, one each (S9-U4b part (c) added study-transfer-local.js;
-        # W5 Phase B related-report-mode.js: main.html's script tags 61 -> 62; W9-UI multi-study-view.js: 62 -> 63).
-        assert len(scripts) == (63 if stack.side == "candidate" else 56), "execution request count"
+        # W5 Phase B related-report-mode.js: main.html's script tags 61 -> 62; W9-UI multi-study-view.js: 62 -> 63;
+        # MODULE_A A5 report-view-observation.js: 63 -> 64).
+        assert len(scripts) == (64 if stack.side == "candidate" else 56), "execution request count"
         assert all(urlparse(r["url"]).netloc == urlparse(stack.origin).netloc for r in scripts), "script-src 'self' compatibility"
         document = next(r for r in wire if r["name"] == "main.html")
         result["csp"] = {"header": document["headers"].get("content-security-policy"),

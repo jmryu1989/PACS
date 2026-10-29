@@ -33,6 +33,7 @@ export class PacsClinicalRoutes {
   }
 
   async saveTechNote(uid: string, body: any, c: Caller, request: object) {
+    await this.notes.prepareWrite(uid, body, c);
     // Older pages have no attempt ID. Give this operation its own identity while
     // preserving the projection's legacy null attempt and version-conflict rule.
     const onlineBody = body && typeof body === 'object' && !('attemptId' in body) ? { ...body, attemptId: randomUUID() } : body;

@@ -310,8 +310,31 @@ export class PacsPreferences {
   }
 
   private validViewerSettings(value: any) {
-    if (!value || typeof value !== 'object' || Array.isArray(value) || ![1, 2].includes(value.version) ||
-        Object.keys(value).sort().join(',') !== 'bar,shortcuts,version' ||
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const { mammography, hanging, ...tools } = value;
+    if (Object.prototype.hasOwnProperty.call(value, 'mammography')) {
+      const options = { viewOrder: ['CC-MLO', 'MLO-CC'], sideOrder: ['R-L', 'L-R'],
+        priorPosition: ['right', 'left', 'bottom', 'top'], currentColumns: [1, 2, 4], compareColumns: [1, 2, 4, 8] };
+      if (!mammography || typeof mammography !== 'object' || Array.isArray(mammography) ||
+          !['compare', 'current'].includes(mammography.layout) ||
+          ![null, 'conventional', 'generated2d', 'dbt'].includes(mammography.kind) ||
+          Object.keys(mammography).some(key => !['kind', 'layout', ...Object.keys(options)].includes(key)) ||
+          Object.entries(options).some(([key, choices]) => key in mammography && !(choices as any[]).includes(mammography[key]))) return false;
+      const vertical = ['top', 'bottom'].includes(mammography.priorPosition || 'right');
+      if (vertical ? mammography.compareColumns === 8 : mammography.compareColumns === 1) return false;
+    }
+    if (Object.prototype.hasOwnProperty.call(value, 'hanging')) {
+      if (!hanging || typeof hanging !== 'object' || Array.isArray(hanging) ||
+          Object.entries(hanging).some(([modality, raw]) => {
+            const v: any = raw;
+            return !['CT', 'MR', 'XA', 'Other'].includes(modality) || !v || typeof v !== 'object' || Array.isArray(v) ||
+              Object.keys(v).sort().join(',') !== 'layout,priorPosition,seriesMatch' ||
+              !(v.layout === 'automatic' || typeof v.layout === 'string' && /^[1-9]\d*x[1-9]\d*$/.test(v.layout) &&
+                Number.isSafeInteger(v.layout.split('x').map(Number).reduce((a, b) => a * b, 1))) ||
+              !['right', 'left', 'bottom', 'top'].includes(v.priorPosition) || !['similar', 'number', 'largest'].includes(v.seriesMatch);
+          })) return false;
+    }
+    if (![1, 2].includes(value.version) || Object.keys(tools).sort().join(',') !== 'bar,shortcuts,version' ||
         !Array.isArray(value.bar) || new Set(value.bar).size !== value.bar.length ||
         !value.shortcuts || typeof value.shortcuts !== 'object' || Array.isArray(value.shortcuts)) return false;
     // IDs are native viewer tool names, never patient data or executable commands.

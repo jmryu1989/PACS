@@ -15,9 +15,9 @@ import { need, inst } from './pacs/access';
 import type { Caller } from './pacs/access';
 import { rightsAllow } from './member-rights';
 import { readDicomPart10 } from './dicom-part10-reader';
-import { canonicalManifest, parseCanonicalManifest, planArchive, writeArchive, ORIGINAL_ARCHIVE_LIMITS, ORIGINAL_ARCHIVE_MESSAGES } from './original-archive';
+import { canonicalManifest, parseCanonicalManifest, planArchive, writeArchive, ORIGINAL_ARCHIVE_MESSAGES } from './original-archive';
 import type { ArchiveObjectResult, ManifestObjectInput, OriginalManifest } from './original-archive';
-import { DicomImportGateService, IMPORT_OBJECT_LIMIT, IMPORT_FILE_SLOTS, IMPORT_STORAGE_MESSAGE, StoredFormatError, exactKeys, precheckFile, storedTime } from './dicom-import-gate.service';
+import { DicomImportGateService, IMPORT_FILE_SLOTS, IMPORT_STORAGE_MESSAGE, StoredFormatError, exactKeys, precheckFile, storedTime } from './dicom-import-gate.service';
 import type { ImportOwner } from './dicom-import-gate.service';
 import type { RequestWorkContext } from './emr-runtime/request-context';
 import type { EmrRecordTransaction } from './emr-runtime/record-port';
@@ -76,7 +76,7 @@ export const TRANSFER_MESSAGES = Object.freeze({
   subject: '검증된 사용자 식별값이 없어 반입·다운로드 작업을 열 수 없습니다.',
   issuer: '인증 발급자 설정이 없어 반입·다운로드 작업을 열 수 없습니다. 관리자에게 알려 주세요.',
   request: '작업 번호(UUID), 파일 번호(0~99)와 검사 식별값 형식을 확인하세요.',
-  tooLarge: '한 파일은 24 MiB(25,165,824 bytes)까지 반입할 수 있습니다. 이 파일은 저장되지 않았습니다.',
+  tooLarge: '파일 본문을 읽지 못했습니다. 서버 저장 공간과 메모리를 확인한 뒤 다시 시도하세요.',
   contentType: 'DICOM 파일 한 개를 application/dicom으로, 압축 없이 보내야 합니다.',
   downloadRole: '원본 다운로드는 radiologist 또는 technician 권한이 필요합니다',
   recoveryRole: '반입 결과 확인은 admin 권한이 필요합니다',
@@ -345,7 +345,6 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
       : parsed.status === 415 ? TRANSFER_MESSAGES.contentType : TRANSFER_MESSAGES.request);
     if (!Buffer.isBuffer(req.body)) throw error(400, 'IMPORT_REQUEST_INVALID', TRANSFER_MESSAGES.request);
     const bytes: Buffer = req.body;
-    if (bytes.length > IMPORT_OBJECT_LIMIT) throw error(413, 'DICOM_IMPORT_TOO_LARGE', TRANSFER_MESSAGES.tooLarge);
     const sha256 = createHash('sha256').update(bytes).digest('hex');
     // Every read before the intent maps a storage failure to 503 IMPORT_STORAGE_UNAVAILABLE (4.8); refusals keep their own.
     const institutions = await this.storageRead(() => this.gate.institutions(), importStorage);
@@ -604,12 +603,11 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
 
   /**
    * One complete reading of the study's originals: every instance id (Expand false) with its Study/Series/SOP UIDs and its
-   * stored size/MD5. 'failed' when any read fails or answers outside its form; 'tooMany' above the ZIP32 object bound.
+   * stored size/MD5. 'failed' when any read fails or answers outside its form.
    */
-  private async readOriginals(uid: string): Promise<{ kind: 'read'; objects: ManifestObjectInput[]; sourcePatientIds: (string | null)[] } | { kind: 'failed' } | { kind: 'tooMany' }> {
-    const ids = await this.gate.studyInstanceIds(uid, ORIGINAL_ARCHIVE_LIMITS.maxDicomObjects + 1);
+  private async readOriginals(uid: string): Promise<{ kind: 'read'; objects: ManifestObjectInput[]; sourcePatientIds: (string | null)[] } | { kind: 'failed' }> {
+    const ids = await this.gate.studyInstanceIds(uid);
     if (!ids) return { kind: 'failed' };
-    if (ids.length > ORIGINAL_ARCHIVE_LIMITS.maxDicomObjects) return { kind: 'tooMany' };
     const objects: ManifestObjectInput[] = [];
     const sourcePatientIds = new Set<string | null>();
     for (const orthancId of ids) {
@@ -626,12 +624,11 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
   /**
    * 5.2 step 2: the originals read twice, completely (enumeration and every object's UIDs, size and MD5), and the manifest
    * made only when both readings are the same set with the same values (order alone may differ). Empty, unreadable,
-   * malformed or changed between the two readings is MANIFEST_INCOMPLETE; more objects than ZIP32 allows ARCHIVE_TOO_LARGE.
+   * malformed or changed between the two readings is MANIFEST_INCOMPLETE. ZIP64 carries large inventories.
    */
   private async preparedManifest(uid: string) {
     const incomplete = { ok: false as const, code: 'MANIFEST_INCOMPLETE', message: ORIGINAL_ARCHIVE_MESSAGES.MANIFEST_INCOMPLETE };
     const first = await this.readOriginals(uid);
-    if (first.kind === 'tooMany') return { ok: false as const, code: 'ARCHIVE_TOO_LARGE', message: ORIGINAL_ARCHIVE_MESSAGES.ARCHIVE_TOO_LARGE };
     if (first.kind === 'failed' || first.objects.length === 0) return incomplete;
     const second = await this.readOriginals(uid);
     if (second.kind !== 'read' || sameSet(first.objects) !== sameSet(second.objects)) return incomplete;

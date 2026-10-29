@@ -1,6 +1,6 @@
 /* W9 viewing composition. The resolve reply authorizes fresh metadata only;
  * this model never promotes it to image-display evidence or selects a report.
- * Wire limits are those of multi-study-view.service.ts (2–20 members).
+ * Wire limits are those of multi-study-view.service.ts (at least two members).
  */
 (function (root) {
   'use strict';
@@ -17,7 +17,7 @@
   const DISPLAY_TIMEOUT_MS = 45000;
 
   function orderedSelection(studyUids, readingUid) {
-    if (!Array.isArray(studyUids) || studyUids.length < 2 || studyUids.length > 20 ||
+    if (!Array.isArray(studyUids) || studyUids.length < 2 ||
         studyUids.some(value => !uid(value)) || new Set(studyUids).size !== studyUids.length) return null;
     return studyUids.includes(readingUid)
       ? [readingUid, ...studyUids.filter(value => value !== readingUid)] : [...studyUids];
@@ -76,7 +76,7 @@
     const code = error.code, status = error.status;
     const state = (name, message, retry) => ({ status: name, code: code || null, message, retry });
     if (code === 'W9_SELECTION_INVALID') return state('Selection Invalid',
-      '같은 환자의 검사를 2개에서 20개까지 선택하세요. 중복 검사는 포함할 수 없습니다.', false);
+      '같은 환자의 검사를 2개 이상 선택하세요. 중복 검사는 포함할 수 없습니다.', false);
     if (code === 'W9_PATIENT_MISMATCH') return state('Context Changed',
       '원본 환자 ID가 다른 검사는 함께 열 수 없습니다. 선택 목록을 확인하세요.', false);
     if (code === 'W9_CONTEXT_CHANGED') return state('Context Changed',

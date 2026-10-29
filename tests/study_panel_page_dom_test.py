@@ -96,6 +96,22 @@ def with_palette(tree, current):
     page.write_bytes(raw.replace(b'</head>', b'  <link rel="stylesheet" href="workspace-theme.css">\n</head>'))
 
 
+# D1880 memory-only preload (PR #277, Minhoon P0 item 1): a decided difference of the same kind. The Selected toolbar gains
+# Preload, disabled at first paint, and its status panel (closed and hidden while nothing is queued); main.html adds
+# preload-queue.js (both declared regions of study_panel_size_dom_test.py, DECIDED_REGIONS). The first-paint comparisons
+# take the button out of the layout where it stands (HIDE_PRELOAD, display none) and compare every other box and pixel
+# with the baseline; its own place and behaviour are the preload cases (e2e/test_preload_memory.py). The list floor with
+# the toolbar's extra line stays this module's case (W3R-09, test_stacked_list_shows_header_and_one_whole_row).
+HIDE_PRELOAD = """() => [...document.querySelectorAll('#worklist-selection button')]
+  .find(b => b.textContent === 'Preload')?.style.setProperty('display', 'none')"""
+# #259 caution census (307cd3c, the user-approved census): three commands that were never available leave the page -
+# the Reading Template's 'Study Description (준비 중)' option, Except and Split Exam (hidden, still in the DOM). The option
+# shortened the Reading Template line, so in stacked windows the work area below it moved. A decided difference: the
+# first-paint comparisons apply the same removal to the baseline tree before measuring (HIDE_CENSUS; on the current page
+# they are already hidden) and compare every other box and pixel with it. Their absence is caution_app_dom_test's case.
+HIDE_CENSUS = """() => { document.querySelector('#t-desc')?.closest('label')?.setAttribute('hidden', '');
+  document.querySelector('#b-except')?.setAttribute('hidden', '');
+  [...document.querySelectorAll('button')].find(b => b.textContent === 'Split Exam')?.setAttribute('hidden', ''); }"""
 SCROLLER = '''() => { const r = document.querySelector('.redit').getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; }'''
 # Below the scroller in its column: the footer and each notice (a notice section's first row is its bar; an opened
 # notice pane scrolls inside its own height cap).
@@ -1255,6 +1271,8 @@ class StudyPanelPageDOM(unittest.TestCase):
             expect(page.locator('#rows')).to_contain_text(auth.PATIENT)
             wait_startup(page, site)
             page.evaluate(HIDE_W9)   # W9-UI decided difference, see HIDE_W9
+            page.evaluate(HIDE_PRELOAD)   # D1880 preload decided difference, see HIDE_PRELOAD
+            page.evaluate(HIDE_CENSUS)   # #259 caution census decided difference, see HIDE_CENSUS
             settle(page)
             facts = page.evaluate("""(names) => ({focus:document.activeElement.id || document.activeElement.tagName,
               panels:names.map(s=>{
@@ -1345,6 +1363,9 @@ class StudyPanelPageDOM(unittest.TestCase):
         #   leaves it (w6_moved, w6_regions) and stays reachable (assert_w6_reachable).
         # - W9-UI (HIDE_W9 above): the Selected toolbar's Open Selected Studies
         #   button is taken out of the layout before anything is measured (HIDE_W9).
+        # - D1880 preload (HIDE_PRELOAD above): the same for the toolbar's Preload button.
+        # - #259 caution census (HIDE_CENSUS above): its removed commands are hidden in the baseline
+        #   too before anything is measured.
         # Pixels count as equal within ANTIALIAS (16/255 per channel), not exact.
         current = auth.ROOT
         pictures = Path(os.environ.get('KIN_W3_PILOT_DIR', ROOT / 'tmp/w3-land/pilot')) / 'first-paint'

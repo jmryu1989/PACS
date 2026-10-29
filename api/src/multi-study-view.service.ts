@@ -33,7 +33,7 @@ export const W9_LOAD_FAILED = 'W9_LOAD_FAILED';
 export const VIEWING_SET_SURFACE = 'POST studies/viewing-set/resolve';
 // deadlineMs: the one resolve deadline (spec §3). servedReadCutMs: the served reads stop there, keeping a fixed
 // 1000 ms reserve of the same 10 s for the durable receipt (9000/1000 split, D1558).
-export const VIEWING_SET_LIMITS = Object.freeze({ minMembers: 2, maxMembers: 20, concurrentReads: 4, deadlineMs: 10000,
+export const VIEWING_SET_LIMITS = Object.freeze({ minMembers: 2, concurrentReads: 4, deadlineMs: 10000,
   servedReadCutMs: 9000 });
 // A member opens with the owner's own images only: no tele channel in either direction, and a tele state that is closed.
 const LOCAL_TELE_STATES = ['none', 'cancelled', 'fail'];
@@ -42,7 +42,7 @@ const BODY_KEYS = 'compositionId,expectedSourcePatientKey,generation,requestId,s
 
 const refusal = (Exception: new (body: object) => Error, code: string, message: string) => new Exception({ code, message });
 const selectionInvalid = () => refusal(BadRequestException, W9_SELECTION_INVALID,
-  '같은 환자의 검사를 2개에서 20개까지 선택하세요. 중복 검사는 포함할 수 없습니다.');
+  '같은 환자의 검사를 2개 이상 선택하세요. 중복 검사는 포함할 수 없습니다.');
 const viewForbidden = () => refusal(ForbiddenException, W9_VIEW_FORBIDDEN, '여러 검사 열기는 판독의 권한이 필요합니다.');
 const patientMismatch = () => refusal(ConflictException, W9_PATIENT_MISMATCH,
   '원본 환자 ID가 다른 검사는 함께 열 수 없습니다. 선택 목록을 확인하세요.');
@@ -78,7 +78,7 @@ function selection(raw: unknown): Selection {
   const { compositionId, generation, requestId, studyUids, expectedSourcePatientKey: expected } = body;
   if (typeof compositionId !== 'string' || !UUID4.test(compositionId) || typeof requestId !== 'string' || !UUID4.test(requestId)
       || !Number.isSafeInteger(generation) || generation < 1 || generation > 2147483647
-      || !Array.isArray(studyUids) || studyUids.length < VIEWING_SET_LIMITS.minMembers || studyUids.length > VIEWING_SET_LIMITS.maxMembers
+      || !Array.isArray(studyUids) || studyUids.length < VIEWING_SET_LIMITS.minMembers
       || new Set(studyUids).size !== studyUids.length)
     throw selectionInvalid();
   try { studyUids.forEach(uid => viewerUid(uid)); } catch { throw selectionInvalid(); }

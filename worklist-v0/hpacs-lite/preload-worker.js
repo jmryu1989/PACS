@@ -7,6 +7,9 @@
  * delivery (D1877) as any other image read - and keeps them in preload-store.js. A viewer that opens a held study checks
  * it live first (viewer-preload.js) and then takes frames from here instead of the network.
  *
+ * The worker's reads are the preload's own delivery (`X-KIN-Preload: store`): a transfer recorded as the fetch it is,
+ * never an opening - the 열람 of a preloaded study is recorded when a viewer opens it (viewer-preload.js, D1880).
+ *
  * Reading comes first: while a viewer is loading images from the network, the queue does not start another fetch.
  * Every request carries the session the worklist gave; a store filled under one session is never handed to another,
  * and a session that ended empties it.
@@ -18,6 +21,8 @@ const FRAME_ACCEPT = 'multipart/related; type="application/octet-stream"; transf
 const ENDED_CODES = ['AUTH_SESSION_ENDED', 'AUTH_SESSION_MISMATCH'];
 const MESSAGES = Object.freeze({
   unavailable: '이 브라우저가 메모리 크기를 알려 주지 않아 미리 받기를 할 수 없습니다.',
+  unset: '이 기관에서 미리 받기에 쓸 메모리 비율을 아직 정하지 않아 미리 받기를 할 수 없습니다. 관리자에게 문의하세요.',
+  settings: '미리 받기 설정을 서버에서 읽지 못했습니다. 다시 시도하세요.',
   ended: '세션이 끝나 미리 받은 영상을 비웠습니다.',
   cleared: '미리 받은 영상을 비웠습니다.',
   denied: '검사 접근이 거절되었습니다. 접근 권한을 확인하세요.',
@@ -30,15 +35,19 @@ const MESSAGES = Object.freeze({
   malformed: '서버 응답을 해석하지 못했습니다. 다시 시도하세요.',
 });
 
-const store = self.KinPreloadStore.create(self.KinPreloadStore.budgetFor(self.navigator?.deviceMemory));
+// The budget waits for the site's share (/api/me `preloadMemoryShare`, per session); until then nothing is fetched.
+const store = self.KinPreloadStore.create(null);
 const ports = new Map();   // port -> { role, busy, opens: Map(uid -> count) }
 let session = null, epoch = 0, running = false, controller = null;
+// The session's preload prerequisites: a promise of null (budget set) or the reason preload cannot run. A failed read
+// of the setting is not kept, so the next Preload or Retry asks again.
+let settings = null, unavailable = null;
 let idleWaiters = [];
 
 class Stop extends Error { constructor(reason) { super(reason); this.reason = reason; } }
 
 function broadcast() {
-  const state = { type: 'state', session, ...store.snapshot() };
+  const state = { type: 'state', session, unavailable, ...store.snapshot() };
   for (const [port, info] of ports) if (info.role === 'list') { try { port.postMessage(state); } catch (_) {} }
 }
 
@@ -52,6 +61,7 @@ function clearAll(reason, next = null) {
   epoch++;
   controller?.abort();
   store.clear(reason);
+  if (session !== next) { settings = null; unavailable = null; store.setBudget(null); }
   session = next;
   // A fetch loop parked behind a viewer that never said it finished (a crashed window) ends here too.
   const waiters = idleWaiters; idleWaiters = []; for (const run of waiters) run();
@@ -75,6 +85,37 @@ async function get(url, headers, signal) {
   if (response.status === 404) throw new Stop(MESSAGES.missing);
   if (response.status === 429 || response.status >= 500) throw new Stop(MESSAGES.busy);
   throw new Stop(`요청을 완료하지 못했습니다(${response.status}).`);
+}
+
+/**
+ * Whether this worker can preload for the session: the browser must report its memory and the site must have set the
+ * share (budget = share x reported memory, preload-store.js). Resolves to null when it can, else to the reason.
+ */
+function prerequisites() {
+  if (settings) return settings;
+  const mine = session;
+  const asked = (async () => {
+    const memory = self.navigator?.deviceMemory;
+    if (!(typeof memory === 'number' && memory > 0)) return MESSAGES.unavailable;
+    let share;
+    try {
+      const response = await fetch('/api/me', { headers: { 'X-KIN-Session': mine, Accept: 'application/json' },
+        cache: 'no-store', credentials: 'same-origin' });
+      if (!response.ok) throw new Error(String(response.status));
+      share = (await response.json())?.preloadMemoryShare;
+    } catch (_) { return MESSAGES.settings; }
+    if (session !== mine) return MESSAGES.ended;
+    const budget = self.KinPreloadStore.budgetFor(memory, share);
+    store.setBudget(budget);
+    return budget === null ? MESSAGES.unset : null;
+  })().then(reason => {
+    // Only the browser's memory report cannot change while this worker lives; anything else is asked again next time.
+    if (reason && reason !== MESSAGES.unavailable && settings === asked) settings = null;
+    if (session === mine) unavailable = reason;
+    return reason;
+  });
+  settings = asked;
+  return asked;
 }
 
 const tag = (item, key) => item?.[key]?.Value?.[0];
@@ -137,6 +178,7 @@ async function download(study, mine) {
     if (!type || !/^multipart\/related\b/i.test(type)) throw new Stop(MESSAGES.malformed);
     const outcome = store.put(uid, path, Object.freeze({ data, gzip, type }), revision);
     if (outcome === 'changed') throw new Stop(MESSAGES.changed);
+    if (outcome === 'oversize') throw new Stop(MESSAGES.size);
     if (outcome === 'gone') return 'gone';
     if (outcome === 'full') return 'full';
     if (index < first.length) {
@@ -204,9 +246,10 @@ async function handle(port, message) {
       // A store filled under another session is never handed to this one.
       if (session !== message.session) clearAll(MESSAGES.cleared, message.session);
       const list = Array.isArray(message.studies) ? message.studies.filter(s => typeof s?.uid === 'string' && /^[0-9.]{1,64}$/.test(s.uid)) : [];
-      store.add(list.map(s => ({ uid: s.uid, label: typeof s.label === 'string' ? s.label.slice(0, 200) : null })));
-      if (store.budget() === null) for (const s of list) store.fail(s.uid, MESSAGES.unavailable);
+      const added = store.add(list.map(s => ({ uid: s.uid, label: typeof s.label === 'string' ? s.label.slice(0, 200) : null })));
       broadcast();
+      const mine = epoch, reason = await prerequisites();
+      if (reason) { if (mine === epoch) for (const uid of added) store.fail(uid, reason); broadcast(); return; }
       void pump();
       return;
     }
@@ -214,9 +257,16 @@ async function handle(port, message) {
       // The worklist's session changed or ended: nothing held under the old one stays.
       if (session !== null && message.session !== session) clearAll(MESSAGES.ended, null);
       return;
-    case 'retry':
+    case 'retry': {
+      // Retry asks again whether this worker can preload at all; while it cannot, the study stays Failed with the reason
+      // rather than showing a queue that will never move.
+      const known = store.snapshot().studies.find(s => s.uid === message.uid);
+      if (!known || !['Failed', 'Evicted'].includes(known.status)) return;
+      const reason = session ? await prerequisites() : MESSAGES.ended;
+      if (reason) { store.fail(message.uid, reason); broadcast(); return; }
       if (store.retry(message.uid)) { broadcast(); void pump(); }
       return;
+    }
     case 'remove':
       store.remove(message.uid);
       if (store.wake()) void pump();
@@ -227,11 +277,14 @@ async function handle(port, message) {
       return;
     case 'query': {
       const held = session && message.session === session ? store.held(message.uid) : null;
-      reply({ held: held && held.revision ? { revision: held.revision } : null });
+      reply({ held: held && held.revision ? { revision: held.revision, copy: held.copy } : null });
       return;
     }
     case 'frame': {
-      const frame = session && message.session === session ? store.frame(message.path) : null;
+      // Only from the copy the viewer checked: another copy (fetched again after Clear All or Retry) waits for its own check.
+      const held = session && message.session === session ? store.held(self.KinPreloadStore.studyOfPath(message.path)) : null;
+      if (held && held.copy !== message.copy) { reply({ bytes: null, stale: true }); return; }
+      const frame = held ? store.frame(message.path) : null;
       if (!frame) { reply({ bytes: null }); return; }
       try { const bytes = await decoded(frame); reply({ bytes, partType: frame.type }, [bytes]); }
       catch (_) { reply({ bytes: null }); }

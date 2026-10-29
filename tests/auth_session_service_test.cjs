@@ -482,6 +482,7 @@ const summary = rows => rows.map(r => [r.action, r.detail.cause ?? r.detail.outc
 // ── a world: one empty database state, a fresh fake Keycloak state, two service instances ──
 
 const { AuthService } = require('/app/dist/auth.service');
+const { PresenceService } = require('/app/dist/presence.service');
 const { AccessLedgerStore } = require('/app/dist/emr-runtime/store');
 const { FailureJournal, FailureSpool } = require('/app/dist/emr-runtime/failure-journal');
 const { createRecordPort } = require('/app/dist/emr-runtime/record-port');
@@ -637,7 +638,7 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
     const journal = new FailureJournal(prisma, new FailureSpool(spool));
     const { port: ledger, control } = createRecordPort(new AccessLedgerStore(prisma, journal));
     const background = createBackgroundWorkRegistry();
-    const service = new AuthService(prisma, new KeycloakService(), ledger, background.work);
+    const service = new AuthService(prisma, new KeycloakService(), ledger, background.work, new PresenceService(prisma, null));
     t.after(async () => {
       await service.onModuleDestroy(); background.quiesce(); await background.drained(); control.close(); await control.drained(); await journal.close();
       fs.rmSync(spool, { recursive: true });
@@ -2923,7 +2924,7 @@ test('CORE-R2-BOOT API starts during realm outage; retries indefinitely with cap
     assert.equal(await w.base.memberRightsImport.count(),0,'marker invisible before commit');
     failedCommit=true;throw new Error('synthetic failure after marker before commit');
   });
-  const service=new AuthService(w.I1.prisma,provider,w.I1.ledger,w.I1.background.work); t.after(()=>service.onModuleDestroy());
+  const service=new AuthService(w.I1.prisma,provider,w.I1.ledger,w.I1.background.work,new PresenceService(w.I1.prisma,null)); t.after(()=>service.onModuleDestroy());
   // Only the import scheduler is controlled: no network/readiness sleeps are elided.
   const schedule=()=>{global.setTimeout=(fn,ms,...args)=>{if(![1000,2000,4000,8000,16000,30000].includes(ms))return realTimer(fn,ms,...args);delays.push(ms);queued.push(fn);return {unref(){}};};};
   const flush=async()=>{for(let i=0;i<100;i++)await new Promise(resolve=>setImmediate(resolve));};
@@ -2954,7 +2955,7 @@ test('CORE-R2-BOOT API starts during realm outage; retries indefinitely with cap
   assert.equal((await w.call(w.I1,'get',{bearer:old.access})).status,401);
   w.tick(1000);const fresh=await w.issue(m+'-fresh',{sub:m,authTime:Math.floor(Date.now()/1000)});
   assert.ok((await login(w,w.I2,fresh)).done.newSid);
-  const restart=new AuthService(w.base,{listUsers:async()=>{calls++;throw Error('must skip provider');}},w.I1.ledger,w.I1.background.work);
+  const restart=new AuthService(w.base,{listUsers:async()=>{calls++;throw Error('must skip provider');}},w.I1.ledger,w.I1.background.work,new PresenceService(w.base,null));
   t.after(()=>restart.onModuleDestroy());await restart.onModuleInit();await flush();assert.equal(calls,11);
   const logs=await w.finish('CORE-R2-BOOT');
   assert.ok(logs.some(([,line])=>line.includes('synthetic realm unreachable')),'retry reason is logged');
@@ -2963,7 +2964,7 @@ test('CORE-R2-BOOT API starts during realm outage; retries indefinitely with cap
 test('CORE-R2-IMPORTED existing realm-v1 starts while the member admin API is down', async t => {
   const w=await world(t);let read=false,calls=0;
   w.observe({inst:'I1',scope:'root',model:'memberRightsImport',method:'findUnique',phase:'after'},()=>{read=true;});
-  const service=new AuthService(w.I1.prisma,{listUsers:async()=>{calls++;throw Error('synthetic realm down');}},w.I1.ledger,w.I1.background.work);
+  const service=new AuthService(w.I1.prisma,{listUsers:async()=>{calls++;throw Error('synthetic realm down');}},w.I1.ledger,w.I1.background.work,new PresenceService(w.I1.prisma,null));
   t.after(()=>service.onModuleDestroy());await service.onModuleInit();
   await w.until('import read or provider attempt completed',async()=>read||calls>0);
   // The stub fails synchronously, so draining this completed read's continuations settles the import attempt too.
@@ -3801,14 +3802,16 @@ test('CORE_COMMAND_DB_CLOCK rights boundary uses transaction DB time despite app
 });
 
 // D640: REQ-S7-U5-DB-RIGHTS/AUDIT -> RISK-REFUSAL-AUDIT/REMOTE-LOCK/IDENTITY-REWIND -> CORE_R10 / ASTRA below.
-test('CORE_R10_UNVERIFIED refusal precedes the command: 400, zero audit or rights change; override is the sole audited bypass',async t=>{
+// #259 (caution census): an unverified email no longer blocks approval by default; the approval is recorded as the
+// override. An administrator who declines it (verificationOverride:false) is still refused before the command.
+test('CORE_R10_UNVERIFIED a declined override is refused before the command: 400, zero audit or rights change; the default approval is the audited override',async t=>{
   const w=await world(t),m='syn-r10-unverified',{admin}=await coreSetup(w,m,'Approve');
   kc.members[m].emailVerified=false;const before=await w.base.memberRights.findUnique({where:{sub:m}});
-  const refused=await r10Patch(admin,m,coreBody('Approve'));assert.equal(refused.status,400);
+  const refused=await r10Patch(admin,m,{...coreBody('Approve'),verificationOverride:false});assert.equal(refused.status,400);
   assert.equal(await w.base.auditLog.count({where:{target:m}}),0);
   assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before);
   assert.equal(await w.base.providerChange.count(),0);
-  const allowed=await r10Patch(admin,m,{...coreBody('Approve'),verificationOverride:true});assert.equal(allowed.status,200);
+  const allowed=await r10Patch(admin,m,coreBody('Approve'));assert.equal(allowed.status,200);
   const rows=await w.base.auditLog.findMany({where:{target:m,action:'admin.user.approve'}});
   assert.equal(rows.length,1);assert.equal(JSON.parse(rows[0].detail).verificationOverride,true);
   await coreSettled(w,m);await w.finish('CORE_R10_UNVERIFIED');

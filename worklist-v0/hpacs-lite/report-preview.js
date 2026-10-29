@@ -393,8 +393,7 @@
       const at = work.capture('study'), ownedUrls = [];
       const s = session; if (!s?.data || !work.admits(at)) return;
       request?.abort(); releaseImages(); status.textContent = '출력할 내용을 확인하고 있습니다…';
-      const keys = selectedKeys(), selection = keys.map(k => k.id); count.textContent = `${keys.length}장 선택 · 한 번에 최대32장`;
-      if (keys.length > 32) { status.textContent = '키 이미지를32장 이하로 선택하세요.'; return; }
+      const keys = selectedKeys(), selection = keys.map(k => k.id); count.textContent = `${keys.length}장 선택`;
       const selectionEpoch = ++s.selectionEpoch;
       try {
         if (geometryDirty) throw new Error('키 확대·이동 입력을 적용하거나 원래 범위로 되돌리세요.');

@@ -92,7 +92,8 @@ test('U0B CommonJS export-assignment members resolve through installed Node decl
 for (const [field, value] of [['name', 'gatewayReceiptt'], ['kind', 'PropertyDeclaration'],
   ['id', 'member:gatewayReceiptt:MethodDeclaration'], ['category', 'declaration'], ['live.kind', undefined]]) {
   test(`U0B-R02 spec ${field} must describe the resolved declaration`, () => {
-    assert.deepEqual(createSource().validate(), { members: 122, declarations: 57 });
+    // D1882 retired unassigned and assignInstitution from PacsInstitutions (122 -> 120).
+    assert.deepEqual(createSource().validate(), { members: 120, declarations: 57 });
     const wrong = structuredClone(spec);
     const entry = wrong.entries.find(item => item.name === 'gatewayReceipt');
     if (field === 'live.kind') delete entry.live.kind;
@@ -229,10 +230,13 @@ function withoutDeclared(now, declared) {
   return { ...now, controllers: take(now.controllers, declared.controllers), providers: take(now.providers, declared.providers), injectables, middleware,
     routes: now.routes.filter(r => !declaredRoutes.includes(routeKey(r))) };
 }
-/** W5-API (D1460): the snapshot minus exactly the declared added parameter decorators (spec.w5_api.route_args) - each present once. */
+/** W5-API (D1460) and the caution app's Change Password (#259): the snapshot minus exactly the declared added parameter
+ * decorators (spec.w5_api.route_args, spec.caution_app.route_args) - each present once. */
 function withoutW5Arguments(now) {
-  const declared = spec.w5_api.route_args;
-  assert.deepEqual(declared.map(change => `${change.controller}.${change.handler}`), ['PacsController.draft']);
+  assert.deepEqual(spec.w5_api.route_args.map(change => `${change.controller}.${change.handler}`), ['PacsController.draft']);
+  assert.deepEqual(spec.caution_app.route_args.map(change => `${change.controller}.${change.handler}`),
+    ['AuthController.callback', 'AuthController.login']);
+  const declared = [...spec.w5_api.route_args, ...spec.caution_app.route_args];
   return { ...now, routes: now.routes.map(route => {
     const change = declared.find(item => item.controller === route.controller && item.handler === route.handler);
     if (!change) return route;
@@ -267,9 +271,11 @@ test('U0B-DI Nest metadata equals the pre-split snapshot plus declared additions
       `${a.controller}.${a.handler}`.localeCompare(`${b.controller}.${b.handler}`)),
   };
   // KEY-ADMIN: the doctor-key administrator's controller and the composed manage-only facade it injects.
+  // D1882 (held-unknown-source): the held-source alert and the two registrations on the existing AdminController.
   // MG-08: the recorded image relay (one wildcard route, one controller) and the study delivery recorder.
   // MG-LOADING: the viewer's frame/preview reads through the API's range reader (two routes, one controller, one service).
-  const additions = [spec.di_additions_mg_loading, spec.di_additions_mg08, spec.di_additions_key_admin, spec.di_additions_d_online, spec.di_additions_f_link, spec.di_additions_emr_online, spec.di_additions_b2, declared];
+  // The E_ROUTE and then cold-catalog constructor changes are taken back first: E's own declaration pins the earlier constructor.
+  const additions = [spec.di_additions_presence, spec.di_additions_held, spec.di_additions_e_route, spec.di_additions_cold_catalog, spec.di_additions_mg_loading, spec.di_additions_mg08, spec.di_additions_key_admin, spec.di_additions_d_online, spec.di_additions_f_link, spec.di_additions_emr_online, spec.di_additions_b2, declared];
   assert.equal(full.routes.length, spec.di.routes.length + additions.reduce((count, item) => count + item.routes.length, 0));
   // Undo clinical and later online/identity bindings before B2 and the earlier feature declarations.
   // D-online and F_LINK are full declared additions too: the whole snapshot is compared, not a minimal DI check.
@@ -279,15 +285,18 @@ test('U0B-DI Nest metadata equals the pre-split snapshot plus declared additions
   const splitRoutes = JSON.parse(execFileSync('git', ['show',
     'c8e4f1b485ec05ccbb97589c74a573b3f48b70ce:tests/pacs_split_spec.json'],
   { cwd: path.resolve(__dirname, '..'), encoding: 'utf8', maxBuffer: 8e6 })).di.routes;
-  // Product cuts 3 retires the entry-proof endpoint; compare all remaining historical routes.
-  const retainedSplitRoutes = splitRoutes.filter(r => !(r.controller === 'AuthController' && r.handler === 'entry'));
-  assert.equal(splitRoutes.length - retainedSplitRoutes.length, 1, 'one retired entry-proof endpoint');
+  // Product cuts 3 retires the entry-proof endpoint, and D1882 the admin view of institution-less studies with its per-study
+  // assignment; compare all remaining historical routes.
+  const retired = [['AuthController', 'entry'], ['PacsController', 'unassigned'], ['PacsController', 'assign']];
+  const retainedSplitRoutes = splitRoutes.filter(r => !retired.some(([controller, handler]) => r.controller === controller && r.handler === handler));
+  assert.equal(splitRoutes.length - retainedSplitRoutes.length, retired.length, 'each retired endpoint was a historical route');
   assert.deepEqual(now.routes, retainedSplitRoutes, 'the remaining pre-split route set is unchanged');
   assert.deepEqual(full.middleware, spec.di.middleware, 'no middleware binding moves with the additions');
   assert.ok(w9.routes.every(r => r.controller === 'MultiStudyViewController' && !r.public), 'no declared route is public');
   assert.ok(u4b.routes.every(r => r.controller === 'StudyTransferLocalController' && !r.public), 'no declared route is public');
   assert.ok(spec.di_additions_emr_online.routes.every(r => !r.public), 'no declared route is public');
   assert.ok(spec.di_additions_key_admin.routes.every(r => !r.public), 'no declared route is public');
+  assert.ok(spec.di_additions_held.routes.every(r => r.controller === 'AdminController' && !r.public), 'no declared route is public');
   assert.ok(spec.di_additions_mg08.routes.every(r => r.controller === 'ImageRelayController' && !r.public), 'no declared route is public');
   assert.ok(spec.di_additions_mg_loading.routes.every(r => r.controller === 'DicomFrameController' && !r.public), 'no declared route is public');
   assert.deepEqual(now.injectables.PacsService.params, ['PrismaService', 'OrthancService', 'KeycloakService', 'StudyAccessService', 'FindingService']);

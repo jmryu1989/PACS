@@ -68,10 +68,12 @@ export class ClinicalContextService {
     private pacs: PacsService) {}
 
   async read(uid: string, query: any, c: Caller) {
-    // R1 입력: path UID 하나. query 키는 하나도 받지 않는다 — 조건을 받는 읽기가 아니다.
-    const input = () => new BadRequestException({ code: CLINICAL_CONTEXT_INPUT_INVALID, message: '검사 UID를 확인하세요. 이 조회는 다른 조건을 받지 않습니다' });
+    // Cursor changes the response window; every page repeats the same access and signed-report checks.
+    const input = () => new BadRequestException({ code: CLINICAL_CONTEXT_INPUT_INVALID, message: '검사 UID와 이어읽기 cursor를 확인하세요' });
     try { viewerUid(uid); } catch { throw input(); }
-    if (query != null && (typeof query !== 'object' || Object.keys(query).length > 0)) throw input();
+    if (query != null && (typeof query !== 'object' || Object.keys(query).some(key => key !== 'cursor'))) throw input();
+    const cursor = query?.cursor === undefined ? 0 : Number(query.cursor);
+    if (!Number.isSafeInteger(cursor) || cursor < 0 || (query?.cursor !== undefined && !/^[0-9]+$/.test(query.cursor))) throw input();
 
     // R2 호출자(R-CTX-ANCHOR (1)(2)(4)). clinician-only는 guard와 controller가 이미 CLINICIAN_ROUTE_DENIED로 끝냈다.
     const refusal = clinicalContextCallerRefusal(c);
@@ -94,7 +96,7 @@ export class ClinicalContextService {
     const [studies, requestTags] = await Promise.all([this.readStudies(uid), this.readRequestTags(uid)]);
 
     // R6 DB 한 번(RepeatableRead). 여기서 읽은 값이 §6.2 고정값이다.
-    const read = await this.snapshot(uid, c, access, entered, studies).catch(busyOr);
+    const read = await this.snapshot(uid, c, access, entered, studies, cursor).catch(busyOr);
 
     // R7(a) 트랜잭션 밖 SQL 문장 하나로 고정값을 다시 읽는다. StudyAccess revision은 검사별 변경으로 오르지 않는다(F-54).
     const rows = await this.recheck(uid, contextPinnedUids(read.pins)).catch(busyOr);
@@ -117,14 +119,15 @@ export class ClinicalContextService {
       history = contextSection('history', 'not_configured', 'no_patient_key', null);
     } else {
       const bodies = new Map<number, any>(read.bodies.map((body: any) => [body.id, body]));
-      history = contextReadSection('history', read.members.slice(0, CONTEXT_HISTORY_LIMIT)
-        .map(member => contextHistoryItem(member, institutionName, anchorKeys, read.readAt)), read.readAt, read.members.length > CONTEXT_HISTORY_LIMIT);
+      history = contextReadSection('history', read.members.slice(cursor * CONTEXT_HISTORY_LIMIT, (cursor + 1) * CONTEXT_HISTORY_LIMIT)
+        .map(member => contextHistoryItem(member, institutionName, anchorKeys, read.readAt)), read.readAt, read.members.length > (cursor + 1) * CONTEXT_HISTORY_LIMIT);
       priorReports = contextReadSection('priorReports', read.shown
-        .map(member => contextPriorItem(member, bodies.get(member.head.id), anchorKeys, read.readAt)), read.readAt, read.signed > CONTEXT_PRIOR_LIMIT);
+        .map(member => contextPriorItem(member, bodies.get(member.head.id), anchorKeys, read.readAt)), read.readAt, read.signed > (cursor + 1) * CONTEXT_PRIOR_LIMIT);
     }
     const techNote = contextReadSection('techNote', read.note ? [contextTechNoteItem(uid, read.note, read.readAt)] : [], read.readAt);
     return clinicalContextAnswer({
       uid, observedAt, patientKey: read.patientKey,
+      nextCursor: history.truncated || priorReports.truncated ? String(cursor + 1) : null,
       anchor: { access: read.access, institutionName, techNoteVersion: read.note?.version ?? 0 },
       identity: contextIdentity(studies.kind === 'read' ? [anchorKeys, ...read.members.map(member => contextIdentityKeys(member.source))] : []),
       sections: { priorReports, history, requestTags, techNote },
@@ -171,7 +174,7 @@ export class ClinicalContextService {
    * 몫(상한 안)인 머리 판에서만 읽는다 — 서명 전 본문(P·T 포함)은 이 요청이 메모리로도 가져오지 않는다.
    */
   private snapshot(uid: string, c: Caller, access: AccessSnapshot,
-    entered: { institutionId: string | null; teleInstitutionId: string | null }, studies: StudiesRead) {
+    entered: { institutionId: string | null; teleInstitutionId: string | null }, studies: StudiesRead, cursor: number) {
     const me = c.institution as string;
     const candidates = studies.kind === 'read' ? studies.candidates : [];
     return this.prisma.$transaction(async tx => {
@@ -205,7 +208,7 @@ export class ClinicalContextService {
         head: headOf.get(member.source.uid)?.version === versionOf.get(member.source.uid) ? headOf.get(member.source.uid) : null }));
       members.sort((a, b) => contextOrder(a.source, b.source));
       const signed = members.filter(contextSigned);
-      const shown = signed.slice(0, CONTEXT_PRIOR_LIMIT);
+      const shown = signed.slice(cursor * CONTEXT_PRIOR_LIMIT, (cursor + 1) * CONTEXT_PRIOR_LIMIT);
       const bodies = shown.length ? await tx.reportVersion.findMany({ where: { id: { in: shown.map(member => member.head.id) } },
         select: { id: true, findings: true, conclusion: true, recommendation: true } }) : [];
       const note = await tx.techNoteRevision.findFirst({ where: { studyUid: uid }, orderBy: { version: 'desc' },

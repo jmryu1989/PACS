@@ -3,7 +3,12 @@
  */
 (function () {
   'use strict';
-  const MAX_BYTES = 1048576;
+  // The largest file RIFF's 32-bit size field can describe. The deployment's limit (bootstrap maxBytes,
+  // KIN_ASR_MAX_BYTES) is the real one; this only refuses values the format itself cannot carry.
+  const MAX_BYTES = 0xffffffff + 8;
+  // A caller that names no limit gets the server's unconfigured one (api/src/dictation-audio.ts), never a
+  // format-sized buffer: the worklet allocates its whole capture buffer up front.
+  const DEFAULT_BYTES = 180 * 32000 + 44;
   function encodeWav(pcm, maxBytes = MAX_BYTES) {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 46 || maxBytes > MAX_BYTES ||
         !(pcm instanceof Uint8Array) || !(pcm.buffer instanceof ArrayBuffer) ||
@@ -22,7 +27,7 @@
     return env.isSecureContext === true && typeof env.navigator?.mediaDevices?.getUserMedia === 'function' &&
       typeof env.AudioContext === 'function' && typeof env.AudioWorkletNode === 'function';
   }
-  function createCapture({ env = globalThis, maxBytes = MAX_BYTES, onComplete = () => {}, onFailure = () => {} } = {}) {
+  function createCapture({ env = globalThis, maxBytes = DEFAULT_BYTES, onComplete = () => {}, onFailure = () => {} } = {}) {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 46 || maxBytes > MAX_BYTES) throw new Error('DICTATION_AUDIO_INVALID');
     let state = 'idle', context, stream, source, node, result, stopTimer, settle;
     let trackListeners = [];
@@ -115,7 +120,7 @@
     }
     return { start, stop, cancel, pause, resume, get state() { return state; } };
   }
-  const api = Object.freeze({ MAX_BYTES, encodeWav, available, createCapture });
+  const api = Object.freeze({ MAX_BYTES, DEFAULT_BYTES, encodeWav, available, createCapture });
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (typeof window !== 'undefined') window.KinDictationCapture = api;
 })();

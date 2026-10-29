@@ -28,7 +28,11 @@ dialog must be present and closed in every count, so it cannot leave the count b
 
 Decided differences in the node counts (PR #231 fix round, 2026-10-27, by D73 §14): each decision that adds to or
 removes from the first paint is declared once, as the region it owns, in DECIDED_REGIONS - W6-PAGE-22 (D1300), W4-LAND,
-W5-UI Phases A and B, S9-U4b (D1486/D1617/D1668), EMR-D #219, W9-UI and the opened panel's round-7 controls (Text Size,
+W5-UI Phases A and B, S9-U4b (D1486/D1617/D1668), EMR-D #219, W9-UI, the dictation first site's hidden Retry button,
+#259's Change Password link (in the closed Session details menu: a node, never drawn) and Clinical Context Next Page,
+D1882's removed Unmatched Studies dialog (#276: a closed modal, never drawn; its replacement Held Studies is admin.html's),
+D1880's Preload (#277: the Selected toolbar's button, taken out of the layout like W9's by HIDE_PRELOAD, its status
+panel, hidden while nothing is queued, and its script), and the opened panel's round-7 controls (Text Size,
 its row, Default, the edge). The counts of those regions are derived from that declaration in each served tree
 (decided_nodes) and never pinned; every element outside them is compared exactly, at first paint and with the panel
 open. What a feature builds inside its own declared region is that feature's own cases' (e.g. study_transfer_local,
@@ -47,7 +51,7 @@ from playwright.sync_api import expect, sync_playwright
 import study_panel_page_dom_test as dom
 from study_panel_page_dom_test import KEY, RASTER, ROOT, VISIBLE, WorkspaceSite, auth, cover, picture_difference, settle, wait_startup
 from study_panel_page_dom_test import W6_REPORT_FIELDS, assert_w6_reachable, w6_facts, w6_moved, w6_regions
-from study_panel_page_dom_test import HIDE_W4, HIDE_W9
+from study_panel_page_dom_test import HIDE_PRELOAD, HIDE_W4, HIDE_W9
 
 # Round 6 as finished (a94f2e2 product tree + the r6c test/README commit): the default this round must keep.
 R6 = 'ea2a0379cc3dc0482ee3887940f875fe34ce773c'
@@ -94,6 +98,7 @@ DECIDED_REGIONS = (
     ('W5-UI Phase A: Related-mode reason lines', '#cvr-sent-mode-reason, #cvr-inbox-mode-reason', 'node', None),
     ('W5-UI Phase B: Related Report mode', '#related-mode', 'tree', None),
     ('W5-UI Phase B', 'link[href="related-report-mode.css"], script[src="related-report-mode.js"]', 'node', None),
+    ('MODULE_A A5: report display reports', 'script[src="report-view-observation.js"]', 'node', None),
     ('S9-U4b D1486/D1617/D1668: DICOM Transfer', '#study-transfer', 'tree', None),
     ('S9-U4b D1486', '#t-import, style:has(+ #study-transfer), script[src="study-transfer-local.js"]', 'node', None),
     ('EMR-D #219: clinical signing facts', 'script[src="clinical-signature.js"]', 'node', None),
@@ -101,6 +106,13 @@ DECIDED_REGIONS = (
     ('W9-UI', '#multi-selection-open-set, link[href="multi-study-view.css"], script[src="multi-study-view.js"]', 'node', None),
     ('W-SPACE item 9: Panel Settings', '#panel-settings-dialog', 'tree', None),
     ('W-SPACE items 9/11', '#panel-settings-open, link[href="workspace-theme.css"]', 'node', None),
+    ('Dictation first site: Retry (docs/ops/dictation-first-site.md)', '#dictation-retry', 'node', None),
+    ('#259 caution census: Change Password (Session details)', 'a[href="/api/auth/login?action=UPDATE_PASSWORD"]', 'node', None),
+    ('#259 caution census: Clinical Context Next Page', '#clinical-context-status ~ button', 'node', 'Next Page'),
+    ('D1882 #276: the removed Unmatched Studies dialog (held studies reach no list)', '#unmodal', 'tree', None),
+    ('D1880 #277: Preload in the Selected toolbar', '#worklist-selection button', 'node', 'Preload'),
+    ('D1880 #277: the preload status panel (hidden while nothing is queued)', '#worklist-selection > details', 'tree', None),
+    ('D1880 #277', 'script[src="preload-queue.js"]', 'node', None),
     ('D1160 round 7: Text Size', STUDY_PANEL + ' select[aria-label="Text Size"]', 'tree', None),
     ('D1160 round 7: the controls row', STUDY_PANEL + ' :has(> select[aria-label="Text Size"])', 'node', None),
     ('D1160 round 7: Default', STUDY_PANEL + ' button', 'node', 'Default'),
@@ -253,6 +265,7 @@ class StudyPanelSizeDOM(unittest.TestCase):
             expect(page.locator('#rows tr[data-uid]')).to_have_count(2)
             wait_startup(page, site)
             page.evaluate(HIDE_W9)   # W9-UI decided difference (study_panel_page_dom_test.py HIDE_W9)
+            page.evaluate(HIDE_PRELOAD)   # D1880 decided difference (study_panel_page_dom_test.py HIDE_PRELOAD)
             settle(page)
             facts = {'first_paint_nodes': nodes_outside_shortcuts(page), 'decided_first_paint_nodes': decided_nodes(page)}
             self.click_row(page, 0, f'{width}x{height}')

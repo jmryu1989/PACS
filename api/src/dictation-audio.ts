@@ -3,7 +3,12 @@
  * No metadata/ancillary chunks are forwarded to an eventual engine. This is a
  * bounded capture wire format, not a general-purpose WAV upload/import parser.
  */
-export const DICTATION_AUDIO_MAX_BYTES = 1_048_576;
+/** The largest file RIFF's 32-bit size field can describe: a limit of the format, not a policy. */
+export const DICTATION_WAV_MAX_BYTES = 0xffff_ffff + 8;
+/** The size limit when KIN_ASR_MAX_BYTES is unset: 180 s of the capture format (16 kHz mono PCM16 =
+ * 32,000 bytes/s) plus its 44-byte header. A 180 s capture was recorded, sent and transcribed end to
+ * end on the synthetic stack (docs/ops/dictation-first-site.md); a site sets its own value. */
+export const DICTATION_AUDIO_DEFAULT_BYTES = 180 * 32_000 + 44;
 const DICTATION_SAMPLE_RATE = 16_000;
 
 type DictationAudioInspection =
@@ -13,11 +18,11 @@ type DictationAudioInspection =
 
 export function inspectDictationWav(
   input: unknown,
-  byteLimit: number = DICTATION_AUDIO_MAX_BYTES,
+  byteLimit: number = DICTATION_AUDIO_DEFAULT_BYTES,
 ): DictationAudioInspection {
-  // A deployment may lower the total request ceiling, never raise the code ceiling.
+  // The deployment's total request limit (KIN_ASR_MAX_BYTES), bounded only by the format itself.
   // 46 bytes is the smallest accepted header plus one complete PCM16 sample.
-  if (!Number.isSafeInteger(byteLimit) || byteLimit < 46 || byteLimit > DICTATION_AUDIO_MAX_BYTES) {
+  if (!Number.isSafeInteger(byteLimit) || byteLimit < 46 || byteLimit > DICTATION_WAV_MAX_BYTES) {
     return { ok: false, reason: 'invalid-limit' };
   }
   if (!(input instanceof Uint8Array) || !(input.buffer instanceof ArrayBuffer)) {

@@ -172,6 +172,8 @@ jobs:
     - name: TypeScript for the report harness fixture projection
       timeout-minutes: 5
       run: npm ci --prefix api --ignore-scripts --no-audit --no-fund
+    - name: Keycloak institution roster continuation
+      run: node --test tests/keycloak_member_paging_test.cjs
     - name: CI registry and exact suite selection (once)
       if: ${{ fromJSON(steps.paths.outputs.jobs)['ci-selfchecks'] }}
       run: |
@@ -319,7 +321,7 @@ jobs:
         KIN_TEST_API_IMAGE: kin-api:ci
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/findings-migration --cwd . --file api/prisma/migrations/20260917120000_findings/migration.sql --file api/prisma/migrations/20260920120000_report_citations/migration.sql --file api/src/pacs.service.ts --file api/src/pacs/values.ts --file api/src/pacs/access.ts --file api/src/pacs/institutions.ts --file api/src/study-source-groups.ts --file api/src/pacs/worklist.ts --file api/src/pacs/dicom-gateway.ts --file api/src/pacs/preferences.ts --file api/src/pacs/filters.ts --file api/src/pacs/study-state.ts --file api/src/pacs/tech-note.ts --file api/src/pacs/report-draft.ts --file api/src/pacs/report-evidence.ts --file api/src/pacs/report-commit.ts --file api/src/pacs/hold.ts --file api/src/pacs/clinician.ts --file api/src/pacs/audit.ts --file api/src/pacs/metrics.ts --file tests/ops_product_transfer_fixture.py --file tests/viewer_migration_test.py --file api/src/worklist-columns.ts --file api/prisma/migrations/20260930120000_audit_log_append_only/migration.sql --file scripts/ops_backup.py --file scripts/ops_export_inventory.py --file scripts/emr-compose.py --file tests/ops_combined_transfer_fixture.py --file tests/ops_database_transfer_fixture.py --file tests/ops_image_transfer_fixture.py --file tests/ops_orthanc_transfer_fixture.py --file tests/ops_orthanc_transfer_worker.py --file tests/ops_product_transfer_worker.py -- python3 -B tests/viewer_migration_test.py ViewerMigration.test_findings_additive_restrict_owner_key_and_failed_ddl ViewerMigration.test_findings_action_check_survives_pg_dump_restore ViewerMigration.test_report_citations_additive_nullable_bounded_and_named ViewerMigration.test_report_citations_runtime_check_translation_and_draft_lock ViewerMigration.test_03_real_dump_restore_every_row_revision_replay_budget_and_fk
     - name: Compiled viewer input, Unicode and original-plane validation
-      run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" -v "$PWD/config:/config:ro" --entrypoint node kin-api:ci --test /tests/viewer_input_test.cjs /tests/mg_length_test.cjs
+      run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" -v "$PWD/config:/config:ro" --entrypoint node kin-api:ci --test /tests/viewer_input_test.cjs /tests/mg_length_test.cjs /tests/viewer_study_search_test.cjs
     - name: Compiled finding input allow-list, fingerprint and copied provenance
       run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/finding_input_test.cjs
     - name: D-MEASURE2 source failures, safe warnings and real read deadlines
@@ -391,6 +393,7 @@ jobs:
         done
         python3 -c 'import sys; sys.path.insert(0, "tests"); from ops_product_transfer_fixture import provision; provision(sys.argv[1])' "$db"
         python3 scripts/record-run.py --run-dir tmp/runtime-ci/tech-note-attempt --cwd . --file api/src/pacs.service.ts --file api/src/pacs/values.ts --file api/src/pacs/access.ts --file api/src/pacs/institutions.ts --file api/src/study-source-groups.ts --file api/src/pacs/worklist.ts --file api/src/pacs/dicom-gateway.ts --file api/src/pacs/preferences.ts --file api/src/pacs/filters.ts --file api/src/pacs/study-state.ts --file api/src/pacs/tech-note.ts --file api/src/pacs/report-draft.ts --file api/src/pacs/report-evidence.ts --file api/src/pacs/report-commit.ts --file api/src/pacs/hold.ts --file api/src/pacs/clinician.ts --file api/src/pacs/audit.ts --file api/src/pacs/metrics.ts --file api/src/pacs.controller.ts --file api/src/study-access.service.ts --file api/src/admin-audit.ts --file api/prisma/schema.prisma --file api/prisma/migrations/20261006000000_tech_note_attempt_id/migration.sql --file tests/tech_note_attempt_service_test.cjs --file tests/ops_product_transfer_fixture.py --file scripts/emr-compose.py -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_TECH_NOTE_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_tech_note_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/tech_note_attempt_service_test.cjs
+        python3 scripts/record-run.py --run-dir tmp/runtime-ci/caution-app-database --cwd . --tree api/prisma --file tests/caution_app_database_test.cjs -- timeout 180 docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_CAUTION_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_tech_note_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/caution_app_database_test.cjs
     - name: Build the development target for the TypeScript-parser source check
       run: docker build --target development -t kin-api:dev-ci api
     - name: S7-U1a critical result sources read the report only through ReportVersion rows
@@ -421,7 +424,7 @@ jobs:
     - name: S9-U4b compiled minimal Part-10 reader over the D1172 allow-list and refusal vectors
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/s9-u4b-part10-reader --cwd . --file api/src/dicom-part10-reader.ts --file tests/dicom_part10_reader_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/dicom_part10_reader_test.cjs
     - name: S9-U4b compiled whole-original archive manifest, ZIP32 plan and streaming writer
-      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/s9-u4b-original-archive --cwd . --file api/src/original-archive.ts --file tests/original_archive_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/original_archive_test.cjs
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/s9-u4b-original-archive --cwd . --file api/src/original-archive.ts --file tests/original_archive_test.cjs -- docker run --rm --network none --read-only --tmpfs /tmp:rw,size=64m -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/original_archive_test.cjs
     - name: S9-U4b compiled import gate, import/download routes and raw parser over a recording store and a fake Orthanc
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/s9-u4b-transfer-server --cwd . --file api/src/dicom-import-gate.service.ts --file api/src/study-transfer-local.controller.ts --file api/src/study-transfer-local.service.ts --file api/src/study-transfer-local-parser.ts --file api/src/dicom-part10-reader.ts --file api/src/original-archive.ts --file api/src/study-access.service.ts --file api/src/study-access-policy.ts --file api/src/pacs/access.ts --file api/src/pacs/values.ts --file api/src/member-rights.ts --file api/src/clinician-policy.ts --file api/src/study-identity.ts --file api/src/order-reconciliation.ts --file api/src/prisma.service.ts --file api/src/orthanc.service.ts --file api/src/keycloak.service.ts --file api/src/viewer-source-warning.ts --file api/prisma/schema.prisma --file api/src/auth.guard.ts --file api/src/auth.service.ts --file api/src/study-source-groups.ts --file tests/study_transfer_local_server_test.cjs --file tests/service_test_loader.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/study_transfer_local_server_test.cjs
     - name: S5-U6b compiled admin metrics rows and route over a fake store, and the page model that reads them
@@ -440,6 +443,10 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/dictation-host --cwd . --file worklist-v0/hpacs-lite/dictation.js --file worklist-v0/hpacs-lite/dictation-session.js --file worklist-v0/hpacs-lite/dictation-capture.js --file tests/dictation_host_test.cjs --file tests/module_session_harness.cjs --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/dictation_host_test.cjs
     - name: Compiled volume job command and volume mark boundary models
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/volume-api-models --cwd . --file tests/viewer_volume_job_test.cjs --file tests/viewer_volume_marks_test.cjs --file tests/study_query_scope_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_volume_job_test.cjs /tests/viewer_volume_marks_test.cjs /tests/study_query_scope_test.cjs
+    - name: Spaced original-frame measurements and verified SR readback
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/planar-measurements --cwd . --tree api/src --tree config/ohif --file tests/planar_measurement_test.cjs --file tests/mg_length_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src --entrypoint node kin-api:ci --test tests/planar_measurement_test.cjs tests/mg_length_test.cjs
+    - name: Compiled study page cursor and password action callback
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/page-cursor-password-callback --cwd . --file api/src/study-page.ts --file api/src/auth.service.ts --file api/src/auth.controller.ts --file tests/study_page_test.cjs --file tests/auth_password_callback_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/study_page_test.cjs /tests/auth_password_callback_test.cjs
     - name: Observe an isolated real restart loop
       run: python3 tests/ops_monitor_container_test.py
     - name: Production image migration, startup and refusal checks
@@ -826,7 +833,17 @@ jobs:
         node api/node_modules/typescript/bin/tsc -p api/tsconfig.json --incremental false
         export KIN_B2R_NODE="$(command -v node)"
         export KIN_B2R_PRISMA_CLI="$PWD/api/node_modules/prisma/build/index.js"
-        python3 scripts/record-run.py --run-dir tmp/emr-e-ci/online-pg --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --tree api/src/emr-contract --tree tests/emr/e --tree api/prisma --file api/src/connect.controller.ts --file api/src/app.module.ts --file api/src/orthanc.service.ts --file emr/units/e.json --file tests/emr/b/pg_ledger_restore_test.py -- python3 -B scripts/run-tests.py --module tests/emr/e/online_live.py --class OnlineImagePg --mode live --unit emr-e-online --timeout 600
+        python3 scripts/record-run.py --run-dir tmp/emr-e-ci/online-pg --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --tree api/src/emr-contract --tree tests/emr/e --tree api/prisma --file api/src/connect.controller.ts --file api/src/app.module.ts --file api/src/image-delivery-record.ts --file api/src/orthanc.service.ts --file emr/units/e.json --file tests/emr/b/pg_ledger_restore_test.py -- python3 -B scripts/run-tests.py --module tests/emr/e/online_live.py --class OnlineImagePg --mode live --unit emr-e-online --timeout 600
+    - name: E_ROUTE one study manifest serves its frame requests (compiled by the previous step)
+      run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/manifest-reuse --cwd . --tree api/src/emr-image --tree api/src/emr-contract --file api/src/image-delivery-record.ts --file tests/emr/e/manifest_reuse_test.cjs -- node --test --test-reporter=tap tests/emr/e/manifest_reuse_test.cjs
+    - name: E_ROUTE frames share the study delivery record of every image route; a HEAD or a description records nothing (compiled above)
+      run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/delivery --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --file api/src/image-delivery-record.ts --file api/src/image-relay.controller.ts --file api/src/orthanc.service.ts --file tests/emr/e/delivery_test.cjs -- node --test --test-reporter=tap tests/emr/e/delivery_test.cjs
+    - name: E_ROUTE a split study UID refuses the response; a refused row is retained on its own ledger transaction or kept for a later retention (compiled above)
+      run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/service-retention --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --file api/src/image-delivery-record.ts --file api/src/orthanc.service.ts --file tests/emr/e/service_retention_test.cjs -- node --test --test-reporter=tap tests/emr/e/service_retention_test.cjs
+    - name: E_ROUTE viewer frame requests reach the E boundary through the real nginx configuration
+      run: |
+        command -v nginx >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq nginx; }
+        python3 scripts/record-run.py --run-dir tmp/emr-e-ci/nginx-route --cwd . --file proxy/nginx.conf.template --file proxy/15-kin-config.envsh --file tests/proxy_grant_log_test.py --file tests/proxy_image_route_test.py -- python3 -B tests/proxy_image_route_test.py
     - name: Raw run evidence
       if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -1620,6 +1637,20 @@ jobs:
           tmp/u2b-regressions-ci/
         if-no-files-found: error
         retention-days: 7
+    - name: Viewer U3 served prior images and read-only reports
+      timeout-minutes: 28
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: '"$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile viewer-ux-priors'
+    - name: Viewer U3 synthetic served evidence
+      if: ${{ always() && !github.event.pull_request.draft }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-viewer-ux-priors
+        path: |
+          tests/e2e/artifacts/viewer-ux-priors-ci/
+          tmp/viewer-ux-u3/
+        if-no-files-found: error
+        retention-days: 7
     - name: Isolated declared Viewer U2 shell tests
       timeout-minutes: 28
       run: |
@@ -1633,6 +1664,21 @@ jobs:
         path: |
           tests/e2e/artifacts/viewer-ux-shell-ci/
           tmp/viewer-ux-u2/screens/
+        if-no-files-found: error
+        retention-days: 7
+    - name: Isolated declared S9-U7 output, identity and unsaved-work tests
+      timeout-minutes: 28
+      run: |
+        "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile s9-u7-served
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+    - name: Sanitized synthetic S9-U7 served evidence
+      if: ${{ always() && !github.event.pull_request.draft }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-s9-u7-served-results
+        path: |
+          tests/e2e/artifacts/s9-u7-served-ci/
+          tmp/s9-u7/screens/
         if-no-files-found: error
         retention-days: 7
     - name: Worklist folder multi-selection and shortcut module contract

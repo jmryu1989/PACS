@@ -294,50 +294,20 @@ test('A-PLAN: sizes, offsets, O, C and T equal the contract arithmetic recompute
   assert.throws(() => planArchive({ ...JSON.parse(EXPECTED_CANONICAL), objects: JSON.parse(EXPECTED_CANONICAL).objects.reverse() }), TypeError);
 });
 
-test('A-LIMITS: 65,533 DICOM objects plan; 65,534 and 65,535 are refused before byte 1', () => {
-  const objects = n => Array.from({ length: n }, (_, i) =>
-    ({ orthancId: `o${i}`, seriesUid: '2.25.8', sopUid: `2.25.8.${String(i).padStart(5, '0')}`, bytes: 3, md5: '0'.repeat(32) }));
-  const max = canonicalManifest(STUDY, objects(65_533));
-  const planned = planArchive(max.manifest);
-  assert.equal(planned.ok, true);
-  const expected = independentPlan(STUDY, max.manifest.objects);
-  assert.equal(planned.plan.entryCount, 65_534);
-  assert.equal(planned.plan.totalSize, Number(expected.T));
-  for (const n of [65_534, 65_535]) {
-    const refused = planArchive(canonicalManifest(STUDY, objects(n)).manifest);
-    assert.equal(refused.ok, false, String(n));
-    assert.equal(refused.code, 'ARCHIVE_TOO_LARGE');
-    assert.equal(refused.message, TOO_LARGE_MESSAGE);
-  }
+test('ZIP64 accepts entry counts beyond ZIP32', () => {
+  const objects = Array.from({length: 65535}, (_, i) => ({ orthancId: 'i' + i, seriesUid: '2.25.6', sopUid: '2.25.6.' + (i + 1), bytes: 1, md5: '0'.repeat(32) }));
+  const result = planArchive(canonicalManifest(STUDY, objects).manifest);
+  assert.equal(result.ok, true); assert.equal(result.plan.entryCount, 65536); assert.equal(result.plan.zip64, true);
 });
 
-test('A-4GIB: payload, offsets and total stay below 0xFFFFFFFF; T = 0xFFFFFFFE plans, 0xFFFFFFFF does not', () => {
-  const one = bytes => canonicalManifest(STUDY, [{ orthancId: 'big', seriesUid: '2.25.6', sopUid: '2.25.6.1', bytes, md5: '0'.repeat(32) }]).manifest;
-  const refusedFor = manifest => {
+test('ZIP64 plans large objects and offsets without allocating the payload', () => {
+  for (const bytes of [0xfffffffe, 0xffffffff, 0x100000000, 8 * 1024 ** 3]) {
+    const manifest = canonicalManifest(STUDY, [{ orthancId: 'big', seriesUid: '2.25.6', sopUid: '2.25.6.1', bytes, md5: '0'.repeat(32) }]).manifest;
     const result = planArchive(manifest);
-    assert.equal(result.ok, false);
-    assert.equal(result.code, 'ARCHIVE_TOO_LARGE');
-    assert.equal(result.message, TOO_LARGE_MESSAGE);
-  };
-  refusedFor(one(0xffffffff)); // s_i itself
-  refusedFor(one(0xfffffffe)); // fits alone, but not with its headers
-  // The exact edge: find s with T(s) = 0xFFFFFFFE using the contract formula (M has the same digit count throughout).
-  const base = 1_000_000_000;
-  const baseT = independentPlan(STUDY, one(base).objects).T;
-  const edge = base + Number(0xfffffffen - baseT);
-  assert.equal(independentPlan(STUDY, one(edge).objects).T, 0xfffffffen);
-  const atEdge = planArchive(one(edge));
-  assert.equal(atEdge.ok, true);
-  assert.equal(atEdge.plan.totalSize, 0xfffffffe);
-  refusedFor(one(edge + 1)); // T = 0xFFFFFFFF
-  // Raw payload below 4 GiB, overhead above the limit.
-  const two = canonicalManifest(STUDY, [
-    { orthancId: 'p', seriesUid: '2.25.6', sopUid: '2.25.6.1', bytes: 0x80000000, md5: '0'.repeat(32) },
-    { orthancId: 'q', seriesUid: '2.25.6', sopUid: '2.25.6.2', bytes: 0x7fffffff - 100, md5: '0'.repeat(32) },
-  ]).manifest;
-  assert.ok(two.objects.reduce((sum, o) => sum + BigInt(o.bytes), 0n) < 0x100000000n);
-  assert.ok(independentPlan(STUDY, two.objects).T >= LIMIT);
-  refusedFor(two);
+    assert.equal(result.ok, true); assert.equal(result.plan.zip64, true);
+    assert.ok(result.plan.totalSize > bytes); assert.ok(Number.isSafeInteger(result.plan.totalSize));
+    assert.ok(result.plan.entries[1].localOffset > bytes);
+  }
 });
 
 test('A-WRITE: the archive is exactly T bytes of STORE entries, descriptors, central directory and end record', async () => {
@@ -876,4 +846,25 @@ test('A-SINK-CLOSE-PENDING-SOURCE: a receiver that goes away while source() is p
   assert.equal(result.bytesWritten, 0);
   assert.equal(late.destroyed, true);
   assert.equal(out.finished(), false);
+});
+
+// ZIP64 interoperability is checked by Python's independent archive reader, without a multi-GiB allocation.
+test('ZIP64 writer emits an archive readable by a standard reader above 65535 entries', async () => {
+  const fs = require('node:fs'), os = require('node:os');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-zip64-')), file = path.join(directory, 'originals.zip');
+  try {
+    const payload = Buffer.from('x');
+    const objects = Array.from({length: 65535}, (_, i) => ({orthancId: 'i'+i, seriesUid: '2.25.6', sopUid: '2.25.6.'+(i+1), bytes: 1, md5: md5(payload)}));
+    const planned = planArchive(canonicalManifest(STUDY, objects).manifest); assert.equal(planned.ok, true);
+    const result = await writeArchive({plan: planned.plan, source: (_object, _index, adopt) => adopt(Readable.from([payload])), sink: fs.createWriteStream(file)});
+    assert.equal(result.state, 'finished', JSON.stringify({reason: result.reason, bytes: result.bytesWritten}));
+    const handle = fs.openSync(file, 'r'), tail = Buffer.alloc(98);
+    try { fs.readSync(handle, tail, 0, 98, fs.statSync(file).size - 98); } finally { fs.closeSync(handle); }
+    assert.equal(tail.readUInt32LE(0), 0x06064b50); assert.equal(tail.readBigUInt64LE(24), 65536n);
+    assert.equal(tail.readUInt32LE(56), 0x07064b50); assert.equal(tail.readUInt16LE(84), 65535);
+    if (process.env.KIN_ZIP64_ARCHIVE) fs.copyFileSync(file, process.env.KIN_ZIP64_ARCHIVE);
+  } finally {
+    assert.equal(path.dirname(path.resolve(directory)), path.resolve(os.tmpdir()));
+    fs.rmSync(directory, {recursive:true, force:true});
+  }
 });

@@ -143,6 +143,8 @@ function tool(el,id,{active=false,items=null}={}){
 }
 // The pinned longitudinal mode's primary section, and the list items of its two split buttons (clinician_viewer_dom_test.py
 // PRIMARY_SECTION / toolbarButtons).
+// U7A O1: Capture's description states the actual output (PNG bytes) and what it is not; wording is free.
+const captureMeaning=text=>assert.ok(['PNG','DICOM 원본','서버 작업 저장 아님','익명화가 아닙니다'].every(part=>text.includes(part)),'Capture states its output scope: '+text);
 const SECTION=['MeasurementTools','Zoom','Pan','TrackballRotate','WindowLevel','Capture','Layout','Crosshairs','MoreTools'];
 const MEASURE_ITEMS=['Length','Bidirectional','ArrowAnnotate','EllipticalROI','RectangleROI','CircleROI','PlanarFreehandROI','SplineROI','LivewireContour'];
 const MORE_ITEMS=['Reset','rotate-right','flipHorizontal','ImageSliceSync','ReferenceLines','ImageOverlayViewer','StackScroll','invert','Probe',
@@ -190,7 +192,7 @@ test('names: every tool of the pinned toolbar is read by an English name and exp
   }
   assert.deepEqual(primaryNames(h).map(([id,name])=>[id,name]),SECTION.map(id=>[id,NAMES[id]]),'the nine names, in the viewer\'s order');
   const title=id=>byCy(h,id).getAttribute('title');
-  assert.equal(title('Capture'),'현재 화면을 PNG로 저장(검사 저장 아님)');
+  captureMeaning(title('Capture'));
   assert.equal(title('Crosshairs'),'MPR 교차선(3D/MPR에서만 동작)');
   assert.equal(title('TrackballRotate'),'3D 회전(볼륨에서만 동작)');
   assert.equal(title('WindowLevel'),'창/레벨 조절(드래그) · 사용 중');
@@ -279,7 +281,7 @@ test('mount: names, Korean descriptions and a pressed state for tool buttons; id
   assert.equal(nativePressed.hasAttribute('data-kin-pressed'),false);
   assert.deepEqual(seen('TrackballRotate'),['3D Rotate','3D 회전(볼륨에서만 동작)','false']);
   assert.deepEqual(seen('Crosshairs'),['Crosshairs','MPR 교차선(3D/MPR에서만 동작)','false']);
-  assert.deepEqual(seen('Capture'),['Capture','현재 화면을 PNG로 저장(검사 저장 아님)',null],'an action has no pressed state');
+  {const [name,description,pressed]=seen('Capture');assert.equal(name,'Capture');captureMeaning(description);assert.equal(pressed,null,'an action has no pressed state');}
   assert.deepEqual(seen('Layout'),['Layout','화면 배치',null]);
   assert.deepEqual(seen('MeasurementTools-split-button-primary'),['Measurements','측정 도구','false']);
   assert.deepEqual(seen('MeasurementTools-split-button-secondary'),['Measurements Menu','측정 도구 목록 열기',null]);

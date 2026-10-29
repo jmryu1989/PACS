@@ -4,6 +4,8 @@
     let relatedReportSeq = 0;
 
     function clearRelatedReport(message = "Related Exam을 선택하세요") {
+      // A5: the Source opening ends with its text; a later read of any Source is a new display.
+      KinReportViews.end("related");
       $("#prior-report-meta").textContent = "";
       $("#prior-report-meta").title = "";
       $("#prior-report-status").textContent = message;
@@ -50,6 +52,8 @@
       const uid = s.uid;
       const currentUid = selectedUid;
       const seq = ++relatedReportSeq;
+      // A5: another Source ends the shown Source's opening now; a re-read of the same Source continues it.
+      KinReportViews.open("related", uid);
       // 이 읽기의 답·실패가 이전 판독문 칸에 닿는 자리는 이 읽기를 시작한 문맥과 요청 번호·선택을 함께 지난다.
       const at = work.capture("study");
       const stale = () => !work.admits(at) || seq !== relatedReportSeq || uid !== relatedUid || selectedUid !== currentUid;
@@ -80,11 +84,15 @@
         const restricted = e?.status === 403 || e?.status === 404;
         $("#prior-report-status").textContent = restricted
           ? "이 판독문을 볼 권한이 없습니다 (Access Restricted)" : `판독문 조회 실패: ${e.message}`;
+        KinReportViews.end("related");
         shown({ state: restricted ? "restricted" : "failed" });
         return;
       }
       if (stale()) return;
-      if (!report) { $("#prior-report-status").textContent = "판독문 없음"; shown({ state: "none" }); return; }
+      if (!report) {
+        KinReportViews.end("related");
+        $("#prior-report-status").textContent = "판독문 없음"; shown({ state: "none" }); return;
+      }
       $("#prior-report-meta").textContent =
         `${relatedReportMeta(s)} · 판독의 ${displayActor(report.author) || "-"}`;
       $("#prior-report-meta").title = $("#prior-report-meta").textContent;
@@ -97,6 +105,13 @@
       shown({ state: "ready", version: Number.isSafeInteger(report.version) ? report.version : null, action: report.action ?? null,
         author: displayActor(report.author) || null, at: typeof report.at === "string" ? report.at.replace("T", " ").slice(0, 16) : null,
         texts: { findings: report.findings ?? "", conclusion: report.conclusion ?? "", recommendation: report.recommendation ?? "" } });
+      // A5: only the version this Source shows is displayed (the read provided every version row). Its display report names
+      // this read's provision; a re-read of the same Source and version (every list refresh) is the same display.
+      const key = "report-version:" + report.version;
+      KinReportViews.end("related", [key]);
+      KinReportViews.watch("related", uid, key, { uid, accessRef: report.accessRef,
+        nodes: [$("#prior-report-content"), document.querySelector("#related-mode .related-mode-body")], live: () => !stale(),
+        report: body => api("POST", `/studies/${encodeURIComponent(uid)}/view-observations`, body, undefined, at) });
     }
 
     function returnToReportStudy() {

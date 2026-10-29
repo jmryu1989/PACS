@@ -20,6 +20,7 @@ test('actual HTTP report approval/reset and ledger failure preserve exact versio
   const { EMR_BACKGROUND_WORK } = product('emr-runtime/background-work');
   const { PrismaService } = product('prisma.service');
   const { AuthService } = product('auth.service');
+  const { PresenceService } = product('presence.service');
   const { AuthGuard } = product('auth.guard');
   const { PacsController } = product('pacs.controller');
   const { PacsService } = product('pacs.service');
@@ -59,7 +60,7 @@ test('actual HTTP report approval/reset and ledger failure preserve exact versio
     const { createRequestContext, REQUEST_CONTEXT_CAPTURE, REQUEST_CONTEXT_SOURCE } = product('emr-runtime/request-context');
     const { createRequestIngress } = product('emr-runtime/request-ingress');
     const requests = createRequestContext(createRequestIngress({ proxyPeers: ['127.0.0.1'] }), runtime.port);
-    Module({ controllers: [PacsController], providers: [PrismaService, PacsService, AuthService, ...clinical.providers,
+    Module({ controllers: [PacsController], providers: [PrismaService, PacsService, AuthService, PresenceService, ...clinical.providers,
       { provide: REQUEST_CONTEXT_CAPTURE, useValue: requests.capture }, { provide: REQUEST_CONTEXT_SOURCE, useValue: requests.source },
       { provide: OrthancService, useValue: orthanc }, { provide: KeycloakService, useValue: {} },
       { provide: FindingService, useValue: {} },

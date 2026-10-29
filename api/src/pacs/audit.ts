@@ -42,6 +42,22 @@ export class PacsAudit {
    * null이면 NULL이 되어 행이 빠진다(닫힌 쪽). 같은 시각의 행은 id로 순서를 고정한다.
    */
   async audits(uid: string | undefined, take: number, c: Caller) {
+    return (await this.auditRead(uid, take, c)).rows;
+  }
+
+  /**
+   * A-027 (D1881): the rows of `audits()` and, per row, the institution its read is recorded to. A row that recorded
+   * its institution (OWNER_ONLY_AUDIT_ACTIONS, INSTITUTION_AUDIT_ACTIONS) is that institution's (D7). Every other row
+   * - the legacy rows written before an institution was stored on them - stays as it is, and this read of it is
+   * recorded to the study's current StudyState.institutionId, taken by the same statement that selected the row (never
+   * re-read afterwards and never the reader's own institution).
+   */
+  async auditRead(uid: string | undefined, take: number, c: Caller) {
+    const selected: any[] = await this.selectAudits(uid, take, c);
+    return { rows: selected.map(({ managingInstitution, ...row }) => row), managing: selected.map(row => row.managingInstitution ?? null) };
+  }
+
+  private async selectAudits(uid: string | undefined, take: number, c: Caller): Promise<any[]> {
     const me = inst(c);
     const limit = Math.min(take, 500);
     if (uid) {
@@ -57,7 +73,9 @@ export class PacsAudit {
         // Keycloak 사용자 id)이 이 통로로 새어 나갔다. 회원 감사 조회가 필요해지면 admin 전용 경로로 만든다.
         if (!prev || !this.access.visible(prev, me)) throw new NotFoundException('검사를 찾을 수 없습니다');
         await this.studyAccess.require(c, [uid], tx);
-        return tx.$queryRaw`SELECT a.* FROM "AuditLog" a LEFT JOIN "StudyState" s ON s.uid = a.target
+        return tx.$queryRaw<any[]>`SELECT a.*, CASE WHEN a.action = ANY(${OWNER_ONLY_AUDIT_ACTIONS}::text[]) OR a.action = ANY(${INSTITUTION_AUDIT_ACTIONS}::text[])
+            THEN (a.detail::jsonb ->> 'institution') ELSE s."institutionId" END AS "managingInstitution"
+          FROM "AuditLog" a LEFT JOIN "StudyState" s ON s.uid = a.target
           WHERE a.target = ${uid}
             AND CASE WHEN a.action = ANY(${OWNER_ONLY_AUDIT_ACTIONS}::text[])
                      THEN s."institutionId" = ${me} AND (a.detail::jsonb ->> 'institution') = ${me}
@@ -74,7 +92,9 @@ export class PacsAudit {
     const allowed = [...await this.studyAccess.allowed(c,mine.map(s=>s.uid))];
     // S7-U3a-R-001-F01: the institution boundary is checked again in the statement that reads the entries, so the entries
     // of a study whose tele channel closed after `mine` was read are left out, the close's own included.
-    return this.prisma.$queryRaw`SELECT a.* FROM "AuditLog" a LEFT JOIN "StudyState" s ON s.uid = a.target
+    return this.prisma.$queryRaw<any[]>`SELECT a.*, CASE WHEN a.action = ANY(${OWNER_ONLY_AUDIT_ACTIONS}::text[]) OR a.action = ANY(${INSTITUTION_AUDIT_ACTIONS}::text[])
+            THEN (a.detail::jsonb ->> 'institution') ELSE s."institutionId" END AS "managingInstitution"
+          FROM "AuditLog" a LEFT JOIN "StudyState" s ON s.uid = a.target
       WHERE a.target = ANY(${allowed}::text[])
         AND (s."institutionId" = ${me} OR s."teleInstitutionId" = ${me})
         AND CASE WHEN a.action = ANY(${OWNER_ONLY_AUDIT_ACTIONS}::text[])

@@ -121,7 +121,7 @@ class DailyCluster:
             return json.dumps(self.catalog())
         if "datname='keycloak'" in joined:
             return "%d:%d" % ("keycloak" in self.restored_databases, "kin" not in self.restored_databases)
-        if "n.nspname='public'" in joined:
+        if "FROM pg_largeobject_metadata" in joined:
             return "0"
         raise AssertionError("unexpected rehearsal query " + joined[:80])
 

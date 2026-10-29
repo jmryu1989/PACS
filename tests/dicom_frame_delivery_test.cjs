@@ -7,14 +7,24 @@
  * product) over an in-memory store that runs the real event parser and mints real receipts, the Orthanc index is a
  * stub over one synthetic stored object, authentication is an explicit synthetic input (the guard's capture is called
  * with it). Asserted: no image byte before the provide-prepared event is durable; one pair per study delivery (open,
- * reload within the idle gap, reload after it); a ledger that cannot record answers 503 with no body; refusals of the
- * gate leave no record; shutdown closes open deliveries; a delivery that provided no image closes as aborted, not
+ * reads naming no opening within the idle gap, after it); D1880: a memory preload is a background-fetch transfer of its
+ * own and never the opening, and the viewer's opening records its own user-view 열람 before its first byte, also inside
+ * the preload's idle gap; the opening contract (consult-preload-opening-contract-20261029): every new opening of a study
+ * has exactly one user-view root - a fresh reopen inside the previous opening's idle gap too - its reads share its
+ * delivery and no other opening or unnamed read joins it, the idle gap retires the delivery and not the opening (a later
+ * read is a background-fetch delivery of its own referring to the root, with its own terminal), and a retry after a lost
+ * COMMIT reply, a restart, or a root the ledger settled negative never yields a second root, and an image answer of a
+ * stored object names the study its opening recorded; a ledger that cannot record answers 503 with no body; refusals of the
+ * gate leave no record; shutdown closes open deliveries after their responses end; a delivery that provided no image closes as aborted, not
  * succeeded (MG-10), and a HEAD - answered behind the gate - neither opens a delivery nor makes one whose relayed read
  * (the real ImageRelayController on the same recorder) failed a provided one (review INT-01); a terminal the ledger cannot take at the close is retried as the same event until durable, and the
  * shutdown makes a last attempt without inventing one (MG-09); a graceful Nest shutdown (installed Nest's application
  * context close, the real EmrNestLifecycle closing admission) still records the terminal of a delivery whose
  * preparation or whose first terminal attempt was in flight when admission closed (MG-09, round 4), and of one whose
- * first terminal attempt was made during the stop and failed once (MG-09, round 5). The PostgreSQL
+ * first terminal attempt was made during the stop and failed once (MG-09, round 5); a relay fallback copies Orthanc's
+ * answer only once the archive still holds the revision and patient its record names: a newer revision is asked again
+ * under that revision's record, another patient gets no byte (C8 of the shared recorder contract, R244-GPT-FIX9-01/
+ * FIX10-01). The PostgreSQL
  * ledger itself is proven in tests/emr/a (real PG). D73: behaviour at the boundary, no product source text. Synthetic
  * values only; 127.0.0.1 only. */
 const { STUDY_UID, SERIES_UID, SOP_UID, INSTANCE_ID, STUDY_ID, syntheticObject, stubOrthanc } = require('./dicom_frame_fixture.cjs');
@@ -52,22 +62,37 @@ function identityOf(issuer, subject) {
 }
 
 /** The real record port (admission close, per-work end, drain) over an in-memory store with the ledger's semantics:
- * durable receipts only for stored events, append-only. `attempts` is every append the store saw, failed ones included
- * (what the real store's B2 failure journal would hold). `control.live()` is the number of record works not ended. */
+ * durable receipts only for stored events, append-only, one event per operation. `attempts` is every append the store
+ * saw, failed ones included (what the real store's B2 failure journal would hold). `control.live()` is the number of
+ * record works not ended. Two ledger outcomes the PostgreSQL store produces, on request: `state.settleNegative` - an
+ * append that fails while `failing` is settled negative (a rolled-back transaction the store settles; final for its
+ * operation); `state.loseReply` - the next append commits but its reply is lost, and so is the next lookup's. */
 function ledger() {
-  const entries = [], attempts = [], state = { failing: false };
+  const entries = [], attempts = [], negatives = new Map(), state = { failing: false, settleNegative: false, loseReply: false, lookupLost: false };
   const tx = {};
   const find = operationId => entries.find(e => e.operationId === operationId);
   const store = {
     async append(event, served, keys) {
       const parsed = parseAccessEvent(event);   // the store's canonicalPayload runs this same parser
       attempts.push({ eventId: parsed.eventId, action: parsed.action, occurredAt: parsed.occurredAt, failed: state.failing });
-      if (state.failing) throw new Error('LedgerUnreachable');
+      const operationId = keys?.operationId ?? randomUUID(), bound = find(operationId) ?? negatives.get(operationId);
+      if (bound && (bound.event?.eventId ?? bound.eventId) !== parsed.eventId) throw new Error('AccessEventIdConflict');
+      if (negatives.has(operationId)) throw new Error('AppendNotCommitted');
+      if (state.failing) {
+        if (state.settleNegative) negatives.set(operationId, { eventId: parsed.eventId });
+        throw new Error('LedgerUnreachable');
+      }
       const storedAt = new Date().toISOString();
-      entries.push({ event: parsed, operationId: keys?.operationId ?? randomUUID(), storedAt, at: process.hrtime.bigint() });
+      entries.push({ event: parsed, operationId, storedAt, at: process.hrtime.bigint() });
+      if (state.loseReply) { state.loseReply = false; state.lookupLost = true; throw new Error('CommitReplyLost'); }
       return mintDurableReceipt(parsed.eventId, storedAt);
     },
-    async lookup(operationId) { const e = find(operationId); return e ? { operationId, eventId: e.event.eventId, outcome: 'committed', durableAt: e.storedAt, result: null, entries: [] } : null; },
+    async lookup(operationId) {
+      if (state.lookupLost) { state.lookupLost = false; throw new Error('LedgerUnreachable'); }
+      if (negatives.has(operationId)) return { operationId, eventId: negatives.get(operationId).eventId, outcome: 'negative', durableAt: null, result: null, entries: [] };
+      const e = find(operationId);
+      return e ? { operationId, eventId: e.event.eventId, outcome: 'committed', durableAt: e.storedAt, result: null, entries: [] } : null;
+    },
     async confirm(appended) { const e = find(appended.operationId); if (!e) throw new Error('CommitUnknown'); return mintDurableReceipt(e.event.eventId, e.storedAt); },
     async transactionWithRecords(work) { return work(tx, async (event, effect) => effect()); },
     async resolveRequestIdentity(issuer, subject) { return identityOf(issuer, subject); },
@@ -104,11 +129,19 @@ async function stack(options = {}) {
   const clinical = createCurrentClinicalContext(prisma, contexts.source, orthanc, studyAccess);
   // The runtime's background registry, as app.module provides it: terminal retries are its timers and tasks.
   const background = createBackgroundWorkRegistry();
-  const recorder = new StudyImageDeliveryRecorder(records.port, contexts.source, clinical, background.work, orthanc, IDLE_MS);
+  // Every lease uses the check pool over the fixture's current synthetic rows, including after restart.
+  const checks = { $transaction: async work => work({ ...records.tx, $executeRaw: async () => 0 }) };
   const service = new DicomFrameService(orthanc);
-  const controller = new DicomFrameController(service, { authzDicom: (...args) => gate.authzDicom(...args) }, orthanc, recorder);
-  // The other image reads of the same study, which nginx sends to the relay; app.module gives both controllers one recorder.
-  const relay = new ImageRelayController({ authzDicom: (...args) => gate.authzDicom(...args) }, orthanc, recorder);
+  let recorder, controller, relay;
+  // A new API process over the same ledger: the recorder and its controllers start empty, the ledger keeps what it holds.
+  const restart = () => {
+    recorder = new StudyImageDeliveryRecorder(records.port, contexts.source, clinical, background.work, orthanc, IDLE_MS, checks);
+    controller = new DicomFrameController(service, { authzDicom: (...args) => gate.authzDicom(...args) }, recorder);
+    // The other image reads of the same study, which nginx sends to the relay; app.module gives both controllers one recorder.
+    relay = new ImageRelayController({ authzDicom: (...args) => gate.authzDicom(...args) }, orthanc, recorder);
+    return recorder;
+  };
+  restart();
   const observations = [];
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
@@ -155,7 +188,8 @@ async function stack(options = {}) {
     if (previousStorage === undefined) delete process.env.KIN_ORTHANC_STORAGE; else process.env.KIN_ORTHANC_STORAGE = previousStorage;
     fs.rmSync(dir, { recursive: true, force: true });
   };
-  return { object, orthanc, records, recorder, background, observations, get, frame, preview, close, states };
+  return { object, orthanc, records, get recorder() { return recorder; }, background, observations, get, frame, preview, close, states,
+    restart };
 }
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -210,11 +244,217 @@ test('open: frames and the preview of one study by one session are served under 
     assert.equal(byAction(s.records.entries, 'transfer-ended')[1].event.relatedEventId, second.eventId);
     await settle();
     assert.equal(s.records.control.live(), 0, 'every record work was ended');
-    assert.equal(s.orthanc.calls.filter(c => c[0] === 'revision').length, 2, 'the study revision is read once per delivery');
   } finally { await s.close(); }
 });
 
-test('reload inside the idle gap continues the open delivery; the terminal follows the last response, not the first', async () => {
+/** The viewer's marks: the opening a read belongs to (viewer-preload.js), and the preload's own reads. */
+const opening = id => ({ 'x-kin-view-opening': id });
+const prepared = (s, cause) => byAction(s.records.entries, 'provide-prepared').filter(e => e.event.cause === cause);
+
+test('D1880: a memory preload is a transfer and never the opening; the opening records its own 열람 before its first byte, also inside the preload\'s idle gap', async () => {
+  const STORE = { 'x-kin-preload': 'store' }, CHECK = { 'x-kin-preload': 'check', ...opening('syn-opening-a1') }, VIEW = opening('syn-opening-a1');
+  const s = await stack();
+  try {
+    // The worklist preloads the study: its reads are one background-fetch delivery; nothing of it is an opening.
+    assert.deepEqual((await Promise.all([s.frame(1, STORE), s.frame(2, STORE)])).map(a => a.status), [200, 200]);
+    assert.equal(prepared(s, 'background-fetch').length, 1);
+    assert.equal(prepared(s, 'user-view').length, 0, 'a preload that is not opened has no opening record');
+    // The reader opens it at once, well inside the preload delivery's idle gap: the check read does not join the
+    // preload's delivery; it records the opening, durable before its first byte.
+    const before = s.observations.length;
+    assert.equal((await s.frame(1, CHECK)).status, 200);
+    const opened = prepared(s, 'user-view');
+    assert.equal(opened.length, 1, 'exactly one opening record');
+    const check = s.observations[before];
+    assert.ok(check.firstByte && opened[0].at < check.firstByte.at, 'the opening record preceded the check read\'s first byte');
+    assert.deepEqual(opened[0].event.context, { basis: 'worklist', studyId: STUDY_UID, relatedStudyId: null, reason: null });
+    assert.equal(opened[0].event.surface, FRAMES_SURFACE);
+    assert.equal(statutoryAct(opened[0].event), '열람');
+    // The viewer's later reads and its strip preview of the study belong to the opening; more preload reads to the preload.
+    assert.deepEqual((await Promise.all([s.frame(2, VIEW), s.preview(VIEW), s.frame(3, STORE)])).map(a => a.status), [200, 200, 200]);
+    assert.equal(byAction(s.records.entries, 'provide-prepared').length, 2, 'no further record: two deliveries, two prepared events');
+    await until(() => byAction(s.records.entries, 'transfer-ended').length === 2, 'both deliveries close');
+    const ended = byAction(s.records.entries, 'transfer-ended').map(e => e.event);
+    assert.deepEqual(new Set(ended.map(e => e.relatedEventId)), new Set(byAction(s.records.entries, 'provide-prepared').map(e => e.event.eventId)));
+    assert.deepEqual(ended.map(e => e.cause).sort(), ['background-fetch', 'user-view']);
+    // Another opening after the gap is a new opening record of its own.
+    assert.equal((await s.frame(4, opening('syn-opening-a2'))).status, 200);
+    assert.equal(prepared(s, 'user-view').length, 2);
+    await until(() => s.records.entries.length === 6, 'the second opening\'s pair');
+  } finally { await s.close(); }
+  // A strip preview of the study just before the opening does not stand for it either.
+  const s2 = await stack();
+  try {
+    assert.equal((await s2.preview()).status, 200);
+    assert.equal((await s2.frame(1, VIEW)).status, 200);
+    assert.deepEqual(byAction(s2.records.entries, 'provide-prepared').map(e => e.event.cause), ['background-fetch', 'user-view']);
+  } finally { await s2.close(); }
+});
+
+test('preload store/check answers the revision its actual bytes were recorded under; unavailable source revision refuses both before bytes or a record', async () => {
+  let unavailable = false;
+  const s = await stack({ orthanc: orthanc => {
+    const revision = orthanc.studyRevision.bind(orthanc);
+    return { studyRevision: async uid => { if (unavailable) throw new Error('two study resources'); return revision(uid); } };
+  } });
+  try {
+    const view = opening('syn-opening-0001');
+    const store = await s.frame(1, { 'x-kin-preload': 'store', ...view });
+    const check = await s.frame(1, { 'x-kin-preload': 'check', ...view });
+    const ordinary = await s.frame(1);
+    assert.deepEqual([store.status, check.status, ordinary.status], [200, 200, 200]);
+    assert.equal(store.headers.get('content-type'), 'application/gzip');
+    assert.match(check.headers.get('content-type'), /^multipart\/related/);
+    const records = byAction(s.records.entries, 'provide-prepared');
+    assert.equal(store.headers.get('x-kin-study-revision'), records[0].event.targets[0].versionId.value);
+    assert.equal(check.headers.get('x-kin-study-revision'), records[1].event.targets[0].versionId.value);
+    assert.equal(ordinary.headers.get('x-kin-study-revision'), null);
+    assert.deepEqual(records.map(e => e.event.cause), ['background-fetch', 'user-view', 'background-fetch']);
+    assert.equal((await s.frame(2, view)).status, 200);
+    assert.equal((await s.frame(2, { 'x-kin-view-opening': 'bad opening!' })).status, 200);
+    assert.equal(byAction(s.records.entries, 'provide-prepared').length, 3, 'view and unnamed fetch keep their own deliveries');
+    unavailable = true;
+    for (const mode of ['store', 'check']) {
+      const failed = await s.frame(1, { 'x-kin-preload': mode, ...view });
+      assert.equal(failed.status, 503);
+      assert.equal(failed.headers.get('x-kin-study-revision'), null);
+      assert.equal(s.observations.at(-1).firstByte, null);
+    }
+    assert.equal(byAction(s.records.entries, 'provide-prepared').length, 3, 'no source revision means no new record or image');
+  } finally { await s.close(); }
+});
+
+test('opening contract O1/O4: a fresh opening inside the previous opening\'s idle gap has its own root; one opening\'s concurrent first reads share one; a read naming no opening never joins one', async () => {
+  // Review R1 of 4c602f2: viewer A closed, the study opened again in a fresh viewer B within A's idle gap.
+  const s = await stack();
+  try {
+    const first = s.observations.length;
+    const a = await Promise.all([s.frame(1, opening('syn-viewer-a')), s.frame(2, opening('syn-viewer-a')), s.preview(opening('syn-viewer-a'))]);
+    assert.deepEqual(a.map(r => r.status), [200, 200, 200]);
+    assert.equal(prepared(s, 'user-view').length, 1, 'one root for the three first reads of one opening');
+    const b = s.observations.length;
+    assert.equal((await s.frame(1, opening('syn-viewer-b'))).status, 200);
+    const roots = prepared(s, 'user-view');
+    assert.equal(roots.length, 2, 'the fresh reopen inside the gap is an opening of its own');
+    assert.ok(roots[1].at < s.observations[b].firstByte.at, 'its root was durable before its first byte');
+    for (const observation of s.observations.slice(first, b)) assert.ok(roots[0].at < observation.firstByte.at);
+    // A worklist thumbnail-like read naming no opening: its own background-fetch delivery, joining neither opening.
+    assert.equal((await s.frame(3)).status, 200);
+    assert.deepEqual(byAction(s.records.entries, 'provide-prepared').map(e => [e.event.cause, e.event.relatedEventId]),
+      [['user-view', null], ['user-view', null], ['background-fetch', null]]);
+    // A HEAD naming an opening is no delivery.
+    assert.equal((await s.get(`/dicom-web/studies/${STUDY_UID}/series/${SERIES_UID}/instances/${SOP_UID}/frames/1`, { Accept: ACCEPT, ...opening('syn-viewer-c') }, 'HEAD')).status, 200);
+    await until(() => byAction(s.records.entries, 'transfer-ended').length === 3, 'the three deliveries close');
+    await wait(IDLE_MS * 2);
+    assert.equal(s.records.entries.length, 6, 'three pairs; the HEAD added nothing');
+    const preparedIds = byAction(s.records.entries, 'provide-prepared').map(e => e.event.eventId);
+    assert.deepEqual(byAction(s.records.entries, 'transfer-ended').map(e => e.event.relatedEventId).sort(), [...preparedIds].sort(),
+      'every terminal closes its own delivery');
+  } finally { await s.close(); }
+});
+
+test('opening contract O4: the idle gap retires the delivery, not the opening - a later read of the same opening is a delivery of its own referring to the root, with its own terminal', async () => {
+  const s = await stack();
+  try {
+    const O = opening('syn-viewer-a');
+    assert.equal((await s.frame(1, O)).status, 200);
+    await until(() => byAction(s.records.entries, 'transfer-ended').length === 1, 'the first delivery closes after the gap');
+    const [root] = prepared(s, 'user-view').map(e => e.event);
+    const later = s.observations.length;
+    assert.deepEqual((await Promise.all([s.frame(2, O), s.preview(O)])).map(a => a.status), [200, 200]);
+    assert.equal(prepared(s, 'user-view').length, 1, 'still one root for the opening');
+    const continued = prepared(s, 'background-fetch');
+    assert.equal(continued.length, 1, 'one delivery for the later reads of the opening');
+    assert.equal(continued[0].event.relatedEventId, root.eventId, 'it refers to the opening\'s root');
+    assert.deepEqual(continued[0].event.context, { basis: 'background-fetch', studyId: STUDY_UID, relatedStudyId: null, reason: null });
+    for (const observation of s.observations.slice(later)) assert.ok(continued[0].at < observation.firstByte.at, 'durable before its bytes');
+    await until(() => byAction(s.records.entries, 'transfer-ended').length === 2, 'the later delivery closes');
+    assert.deepEqual(byAction(s.records.entries, 'transfer-ended').map(e => e.event.relatedEventId), [root.eventId, continued[0].event.eventId],
+      'each delivery has its own terminal');
+    await settle();
+    assert.equal(s.records.control.live(), 0);
+  } finally { await s.close(); }
+});
+
+test('R277M2-01: concurrent first frames of one opening survive a revision change while its root is being written', async () => {
+  // Exercise both append orders from the reviewer's reproduction: PG's first INSERT holds the operation, whereas
+  // the in-memory ledger can commit a later append first. Neither order may refuse a frame or add another root.
+  for (const order of ['first-commits-first', 'second-commits-first']) {
+    let lastUpdate = '20261028T090000', release;
+    const s = await stack({ orthanc: o => ({ studyRevision: async uid => {
+      o.calls.push(['revision', uid]); return { id: STUDY_ID, lastUpdate };
+    } }) });
+    try {
+      const append = s.records.store.append.bind(s.records.store);
+      let started, n = 0, firstDone;
+      const writing = new Promise(resolve => { started = resolve; });
+      const held = new Promise(resolve => { release = resolve; });
+      s.records.store.append = async (event, served, keys) => {
+        const mine = ++n;
+        if (mine === 1) {
+          started(); await held;
+          firstDone = append(event, served, keys); return firstDone;
+        }
+        if (mine === 2 && order === 'first-commits-first') {
+          await held; await firstDone.catch(() => {});
+        }
+        return append(event, served, keys);
+      };
+      const O = opening('syn-revision-race-opening');
+      const first = s.frame(1, O);
+      await writing;
+      lastUpdate = '20261028T090100';
+      const second = s.frame(2, O);
+      await wait(300); // The reviewer's append window lets both HTTP reads reach the recorder.
+      assert.ok(s.observations.every(o => !o.firstByte), 'no image before the root is durable');
+      release();
+      const answers = await Promise.all([first, second]);
+      assert.deepEqual(answers.map(a => a.status), [200, 200], order);
+      assert.ok(answers.every(a => a.body.length > 0 && /^multipart\/related/.test(a.headers.get('content-type'))), 'both reads carry image bytes');
+      const prepared = byAction(s.records.entries, 'provide-prepared');
+      const roots = prepared.filter(e => e.event.cause === 'user-view');
+      assert.equal(roots.length, 1, order + ': one root for the opening');
+      const continued = prepared.filter(e => e.event.cause === 'background-fetch');
+      assert.equal(continued.length, 1, 'the newer revision has one continuation');
+      assert.equal(continued[0].event.relatedEventId, roots[0].event.eventId);
+      assert.equal(continued[0].event.targets[0].versionId.value, `orthanc-study:${STUDY_ID}@${lastUpdate}`);
+      for (const observation of s.observations) {
+        assert.ok(continued[0].at < observation.firstByte.at, 'both images follow the current revision\'s durable record');
+      }
+      await s.recorder.beforeApplicationShutdown();
+    } finally { release?.(); await s.close(); }
+  }
+});
+
+test('opening contract O2: the root is the ledger\'s - a retry after a lost COMMIT reply, a restart, or a root settled negative never adds a second root, and no byte leaves before a durable record', async () => {
+  const s = await stack();
+  try {
+    const O = opening('syn-viewer-a');
+    // The root commits, but its reply and the recovery lookup are lost: no image, no second root on the retry.
+    s.records.state.loseReply = true;
+    const lost = await s.frame(1, O);
+    assert.equal(lost.status, 503);
+    assert.equal(s.observations.at(-1).firstByte, null, 'no image byte while the record is unconfirmed');
+    assert.equal((await s.frame(1, O)).status, 200);
+    assert.equal(prepared(s, 'user-view').length, 1, 'the committed root is the opening\'s only root');
+    assert.equal(prepared(s, 'background-fetch')[0].event.relatedEventId, prepared(s, 'user-view')[0].event.eventId);
+    // The process restarts (its open deliveries closed by the stop); the same opening reads again: still one root.
+    await s.recorder.beforeApplicationShutdown();
+    s.restart();
+    assert.equal((await s.frame(2, O)).status, 200);
+    assert.equal(prepared(s, 'user-view').length, 1, 'a restart adds no root to an opening');
+    assert.deepEqual(prepared(s, 'background-fetch').map(e => e.event.relatedEventId), Array(2).fill(prepared(s, 'user-view')[0].event.eventId));
+    // Another opening whose root the ledger settled negative: refused without a byte, then offered again - one root.
+    s.records.state.failing = true; s.records.state.settleNegative = true;
+    assert.equal((await s.frame(1, opening('syn-viewer-b'))).status, 503);
+    s.records.state.failing = false; s.records.state.settleNegative = false;
+    assert.equal((await s.frame(1, opening('syn-viewer-b'))).status, 200);
+    assert.equal(prepared(s, 'user-view').length, 2, 'the negative attempt is no root; the next attempt is the opening\'s one root');
+    await s.recorder.beforeApplicationShutdown();
+  } finally { await s.close(); }
+});
+
+test('reads naming no opening (worklist, report) inside the idle gap continue their open delivery; the terminal follows the last response, not the first', async () => {
   const s = await stack();
   try {
     assert.equal((await s.frame(1)).status, 200);
@@ -269,7 +509,26 @@ test('the gate refuses before any record; another session of the same member is 
   } finally { await s.close(); }
 });
 
-test('shutdown closes open deliveries: a quiet one ends, one still being sent is aborted, and nothing stays open', async () => {
+test('review R1 of f455ba2: an image answer of a stored object names the study its opening recorded, so the viewer can read that study again for a new opening; a description, a HEAD and a refusal name none', async () => {
+  const s = await stack();
+  try {
+    const study = answer => answer.headers.get('x-kin-study-uid');
+    const preview = await s.preview(opening('syn-viewer-a'));
+    const rendered = await s.get(`/api/image-relay/instances/${INSTANCE_ID}/frames/0/rendered`, opening('syn-viewer-a'));
+    assert.deepEqual([preview.status, rendered.status], [200, 200]);
+    assert.deepEqual([study(preview), study(rendered)], [STUDY_UID, STUDY_UID]);
+    const roots = prepared(s, 'user-view');
+    assert.equal(roots.length, 1);
+    assert.equal(roots[0].event.targets[0].studyId.value, STUDY_UID, 'the study named is the one the opening recorded');
+    assert.equal(study(await s.get(`/api/image-relay/instances/${INSTANCE_ID}/tags`, opening('syn-viewer-a'))), null, 'a description');
+    assert.equal(study(await s.get(`/instances/${INSTANCE_ID}/preview`, {}, 'HEAD')), null, 'a HEAD');
+    const refused = await s.preview({ 'x-synthetic-site': 'site-b', ...opening('syn-viewer-b') });
+    assert.deepEqual([refused.status, study(refused)], [403, null], 'a refusal');
+    assert.equal(byAction(s.records.entries, 'provide-prepared').length, 1, 'none of them recorded anything');
+  } finally { await s.close(); }
+});
+
+test('shutdown closes open deliveries once their responses have: a quiet one at once, one still being sent when it ends (R244-GPT-FIX8-02)', async () => {
   let hold = false, release = null;
   const s = await stack({ orthanc: orthanc => { const relay = orthanc.relay.bind(orthanc); return { relay: async (...args) => {
     if (hold) await new Promise(resolve => { release = resolve; });
@@ -282,14 +541,101 @@ test('shutdown closes open deliveries: a quiet one ends, one still being sent is
     const pending = s.frame(9, { 'x-synthetic-session': 'authref:session-b' });
     await until(() => byAction(s.records.entries, 'provide-prepared').length === 2 && release !== null, 'B was not admitted before its read');
     s.recorder.onModuleDestroy();
-    await s.recorder.beforeApplicationShutdown();
-    const terminals = s.records.entries.filter(e => e.event.action !== 'provide-prepared').map(e => e.event.action).sort();
-    assert.deepEqual(terminals, ['transfer-aborted', 'transfer-ended']);
+    const stopping = s.recorder.beforeApplicationShutdown();
+    await until(() => byAction(s.records.entries, 'transfer-ended').length === 1, 'the quiet delivery ends at once');
+    await wait(IDLE_MS * 3);
+    assert.equal(s.records.entries.length, 3, 'no terminal for B while its response is still being sent');
     hold = false; release();
-    assert.equal((await pending).status, 200, 'the held read still completes for its client');
+    assert.equal((await pending).status, 200, 'the held read completes for its client');
+    await stopping;
+    const terminals = s.records.entries.filter(e => e.event.action !== 'provide-prepared').map(e => e.event.action);
+    assert.deepEqual(terminals, ['transfer-ended', 'transfer-ended'], 'B ends by what it served, after its response did');
     await settle();
     assert.equal(s.records.control.live(), 0);
   } finally { hold = false; release?.(); await s.close(); }
+});
+
+test('C8: a relay fallback is confirmed once Orthanc answered; a newer revision is asked again under its own record, another patient gets no byte', async () => {
+  const [R0, R1] = ['20261028T090000', '20261028T090100'].map(at => `orthanc-study:${STUDY_ID}@${at}`);
+  for (const change of ['revision', 'patient']) {
+    let lastUpdate = '20261028T090000', patient = 'SYN-PID-1', changed = false;
+    const s = await stack({ orthanc: orthanc => { const identity = orthanc.studyIdentityResources.bind(orthanc), relay = orthanc.relay.bind(orthanc);
+      return {
+        studyRevision: async uid => { orthanc.calls.push(['revision', uid]); return { id: STUDY_ID, lastUpdate }; },
+        studyIdentityResources: async uid => (await identity(uid)).map(row => ({ ...row, '00100020': { vr: 'LO', Value: [patient] } })),
+        // Orthanc selects what it answers when the relayed request reaches it: here once after the archive changed, after
+        // the delivery was admitted. Its answer is copied only once the relay's `selected` check passes (OrthancService.relay).
+        relay: async (path, accept, target, signal, origin, selected) => {
+          if (!changed) { changed = true; if (change === 'revision') lastUpdate = '20261028T090100'; else patient = 'SYN-PID-2'; }
+          do orthanc.calls.push(['answered', path]); while (!(await selected()));
+          return relay(path, accept, target);
+        },
+      }; } });
+    try {
+      // Frame 9 is past the object's five: the direct attempt falls back to Orthanc.
+      const answer = await s.frame(9, { 'x-kin-preload': 'check', ...opening('syn-fallback-opening') });
+      if (change === 'patient') {
+        assert.equal(answer.status, 409);
+        assert.equal(JSON.parse(answer.body.toString()).code, 'ImageCurrentStudyChanged');
+        assert.deepEqual(s.orthanc.calls.filter(c => c[0] === 'relay'), [], 'the answer of the corrected patient was not copied');
+        assert.ok(s.observations.every(o => o.firstByte === null), 'no image byte');
+        await until(() => byAction(s.records.entries, 'transfer-aborted').length === 1, 'the outdated delivery ends at once, aborted');
+      } else {
+        // Orthanc's answer may be of either revision: it is dropped unread, and Orthanc is asked again under the record of
+        // the revision the archive holds now, durable before the first byte.
+        assert.equal(answer.status, 200);
+        assert.equal(s.orthanc.calls.filter(c => c[0] === 'answered').length, 2);
+        const opened = byAction(s.records.entries, 'provide-prepared');
+        assert.deepEqual(opened.map(e => e.event.targets[0].versionId.value), [R0, R1]);
+        assert.equal(answer.headers.get('x-kin-study-revision'), R1, 'the check names the revision selected again, not the discarded one');
+        assert.deepEqual(opened.map(e => e.event.cause), ['user-view', 'background-fetch']);
+        assert.equal(opened[1].event.relatedEventId, opened[0].event.eventId, 'source revision changes keep this opening root');
+        assert.ok(s.records.entries.slice(0, s.observations[0].firstByte.entries).includes(opened[1]), 'the first byte followed the newer revision\'s record');
+        await until(() => s.records.entries.length === 4, 'both deliveries closed');
+        assert.deepEqual(s.records.entries.filter(e => e.event.action !== 'provide-prepared').map(e => [e.event.targets[0].versionId.value, e.event.action]),
+          [[R0, 'transfer-aborted'], [R1, 'transfer-ended']]);
+      }
+    } finally { await s.close(); }
+  }
+});
+test('R244-GPT-FIX10-01 the direct reader serves an object only under a record of its patient: an index cache from before a correction is selected again, an object of another patient gets no byte', async () => {
+  const B_ID = 'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee', B_STUDY = 'bbbbbbbb-cccccccc-dddddddd-eeeeeeee-ffffffff';
+  const B_UUID = 'a447e43e-7a12-4de9-af18-9ceb86847e05';
+  for (const objectPatient of ['SYN-PID-2', 'SYN-PID-3']) {
+    let patient = 'SYN-PID-1';
+    const s = await stack({ orthanc: orthanc => { const identity = orthanc.studyIdentityResources.bind(orthanc), facts = orthanc.frameFacts.bind(orthanc);
+      return {
+        // A patient correction gives the study and its objects new archive resources, as Orthanc's do.
+        studyRevision: async uid => { orthanc.calls.push(['revision', uid]); return { id: patient === 'SYN-PID-1' ? STUDY_ID : B_STUDY, lastUpdate: '20261028T090000' }; },
+        studyIdentityResources: async uid => (await identity(uid)).map(row => ({ ...row, '00100020': { vr: 'LO', Value: [patient] } })),
+        lookupInstance: async sop => { orthanc.calls.push(['lookup', sop]); return [{ Type: 'Instance', ID: patient === 'SYN-PID-1' ? INSTANCE_ID : B_ID }]; },
+        frameFacts: async id => { const f = await facts(id); return id !== B_ID ? f : { ...f, tags: { ...f.tags, PatientID: objectPatient }, attachment: { ...f.attachment, Uuid: B_UUID } }; },
+      }; } });
+    try {
+      // The corrected object's stored file: the same layout, its own pixels.
+      const storage = path.dirname(path.dirname(path.dirname(s.object.filePath)));
+      const bFile = Buffer.from(s.object.file), bPixels = Buffer.alloc(s.object.frameBytes, 0x6b);
+      bPixels.copy(bFile, s.object.offset + 12);
+      fs.mkdirSync(path.join(storage, B_UUID.slice(0, 2), B_UUID.slice(2, 4)), { recursive: true });
+      fs.writeFileSync(path.join(storage, B_UUID.slice(0, 2), B_UUID.slice(2, 4), B_UUID), bFile);
+      assert.equal((await s.frame(1)).status, 200);   // the reader's index cache now names patient A's object for the SOP
+      patient = 'SYN-PID-2';
+      const answer = await s.frame(1);
+      await s.recorder.beforeApplicationShutdown();
+      const pairs = byAction(s.records.entries, 'provide-prepared').map(p => [p.event.targets[0].patientLinkSnapshot.value.patientId,
+        s.records.entries.filter(e => e.event.relatedEventId === p.event.eventId).map(e => e.event.action)]);
+      if (objectPatient === 'SYN-PID-2') {
+        assert.equal(answer.status, 200);
+        assert.ok(answer.body.includes(bPixels), 'the corrected object, selected again, under the corrected patient\'s record');
+        assert.deepEqual(pairs, [['SYN-PID-1', ['transfer-ended']], ['SYN-PID-2', ['transfer-ended']]]);
+      } else {
+        assert.equal(answer.status, 409);
+        assert.equal(JSON.parse(answer.body.toString()).code, 'ImageCurrentStudyChanged');
+        assert.ok(!answer.body.includes(bPixels));
+        assert.deepEqual(pairs, [['SYN-PID-1', ['transfer-ended']], ['SYN-PID-2', ['transfer-aborted']]]);
+      }
+    } finally { await s.close(); }
+  }
 });
 
 test('a delivery that provided no image closes as transfer-aborted, never succeeded: a source read that failed with 503, a relayed refusal', async () => {
@@ -463,7 +809,8 @@ test('graceful Nest shutdown closes record admission after the stop began: a del
     const response = await read;
     await stopping;
     assert.equal(response.status, 200, 'the read admitted before the stop completes for its client');
-    assert.deepEqual(s.records.entries.map(e => e.event.action), ['provide-prepared', 'transfer-aborted'], 'the pair is complete; the response was still being sent at the stop');
+    assert.deepEqual(s.records.entries.map(e => e.event.action), ['provide-prepared', 'transfer-ended'],
+      'the pair is complete: the stop waited for the response and closed it by what it served (R244-GPT-FIX8-02)');
     assert.equal(s.records.entries[1].event.relatedEventId, s.records.entries[0].event.eventId);
     assert.equal(s.records.control.live(), 0, 'every record work, the one reserved for the stop included, was ended');
     assert.deepEqual(nest.lines.filter(line => line.startsWith('error')), [], 'a complete shutdown reports no pending terminal');
@@ -522,11 +869,11 @@ test('graceful Nest shutdown: a terminal whose first attempt was made during the
     const response = await read;
     await stopping;
     assert.equal(response.status, 200);
-    assert.deepEqual(s.records.entries.map(e => e.event.action), ['provide-prepared', 'transfer-aborted'], 'the pair is complete after one failed terminal attempt during the stop');
+    assert.deepEqual(s.records.entries.map(e => e.event.action), ['provide-prepared', 'transfer-ended'], 'the pair is complete after one failed terminal attempt during the stop');
     assert.equal(s.records.entries[1].event.relatedEventId, s.records.entries[0].event.eventId);
     assert.equal(terminals.length, 2, 'the failed attempt and the stop\'s last attempt both reached the store');
     assert.equal(terminals[0], terminals[1], 'the same terminal event, not a new one');
-    assert.equal(s.records.attempts.filter(a => a.action === 'transfer-aborted').length, 1, 'the store holds the one that succeeded');
+    assert.equal(s.records.attempts.filter(a => a.action === 'transfer-ended').length, 1, 'the store holds the one that succeeded');
     assert.equal(nest.lines.filter(line => line.startsWith('warn')).length, 1, 'the failed attempt is reported once, as an attempt');
     assert.deepEqual(nest.lines.filter(line => line.startsWith('error')), [], 'nothing pending is reported');
     assert.equal(s.records.control.live(), 0, 'the reserved work was ended after the last attempt');

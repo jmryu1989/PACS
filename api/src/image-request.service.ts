@@ -282,7 +282,7 @@ export class ImageRequestService {
    * #10 요청 등록. 요청자·기관·역할 표지는 토큰에서만 오고 body에는 정확히 여섯 키만 받는다. 상대 기관 id는 키가
    * 반드시 있고 값은 null 또는 등록된 다른 기관이다. 같은 검사·종류·요청자의 활성 요청은 하나다(OQ-7 a).
    */
-  async create(uid: string, c: RequestCaller, b: CreateRequest, transaction?: Prisma.TransactionClient) {
+  private validateCreate(uid: string, c: RequestCaller, b: CreateRequest) {
     this.member(c);
     if (!holds(c, CLINICIAN_ROLE)) throw roleRequired();
     if (!studyUid(uid)) throw invalid('검사 UID를 확인하세요');
@@ -292,6 +292,17 @@ export class ImageRequestService {
       throw invalid('요청 ID·종류, 1~256자의 상대 기관과 1~2,000자의 사유를 입력하세요');
     if (b.counterpartyInstitutionId === c.institution) throw counterpartyInvalid();
     this.expectOwner(c, b);
+  }
+
+  /** Keep the request's input/role/scope refusals ahead of the clinical record adapter. */
+  async prepareCreate(uid: string, c: RequestCaller, b: CreateRequest) {
+    this.validateCreate(uid, c, b);
+    await this.studyAccess.prepare(c, [uid]);
+    await this.run(c, tx => this.study(tx, uid, c, false, studyMissing), true);
+  }
+
+  async create(uid: string, c: RequestCaller, b: CreateRequest, transaction?: Prisma.TransactionClient) {
+    this.validateCreate(uid, c, b);
     const requestId = b.requestId.toLowerCase();
     const mark = fingerprint({ uid, institution: c.institution, subject: c.sub, kind: b.kind, counterparty: b.counterparty,
       counterpartyInstitutionId: b.counterpartyInstitutionId, reason: b.reason });
@@ -322,18 +333,33 @@ export class ImageRequestService {
   }
 
   /**
-   * #11 상태 변경. accept는 빈 note, close·decline·cancel은 1~2,000자 note. 처리 동작은 technician·admin, 취소는
+   * #11 상태 변경. accept는 빈 note, cancel은 선택 사유, close·decline은 1~2,000자 note. 처리 동작은 technician·admin, 취소는
    * 요청한 임상의 또는 admin이다. 동작별 역할은 body의 action을 읽은 뒤 트랜잭션 전에 판정한다.
    */
-  async change(id: string, c: RequestCaller, b: any, transaction?: Prisma.TransactionClient) {
+  private validateChange(id: string, c: RequestCaller, b: any) {
     this.member(c);
     if (!holds(c, CLINICIAN_ROLE) && !staff(c)) throw roleRequired();
     if (!exactKeys(b, ['requestId', 'expectedOwner', 'revision', 'action', 'note']) || !uuid(b.requestId) || !revision(b.revision)
-      || !IMAGE_REQUEST_ACTIONS.includes(b.action) || (b.action === 'accept' ? b.note !== '' : !text(b.note, IMAGE_REQUEST_TEXT_MAX)))
-      throw invalid('요청 ID·기준 revision·동작과 note를 확인하세요(accept는 빈 note, 그 밖은 1~2,000자)');
+      || !IMAGE_REQUEST_ACTIONS.includes(b.action) || (b.action === 'accept' ? b.note !== '' : b.action === 'cancel' ? typeof b.note !== 'string' || b.note.length > IMAGE_REQUEST_TEXT_MAX : !text(b.note, IMAGE_REQUEST_TEXT_MAX)))
+      throw invalid('요청 ID·기준 revision·동작과 note를 확인하세요(accept는 빈 note, cancel 사유는 선택, close·decline은 1~2,000자)');
     if (b.action === 'cancel' ? !holds(c, CLINICIAN_ROLE) && !holds(c, ADMIN) : !staff(c)) throw roleRequired();
     this.expectOwner(c, b);
     if (!uuid(id)) throw requestMissing();
+  }
+
+  /** Resolve a write target with write permissions, rather than the single-record read scope. */
+  async prepareChange(id: string, c: RequestCaller, b: any) {
+    this.validateChange(id, c, b);
+    await this.studyAccess.prepare(c);
+    return this.run(c, async tx => {
+      const row = await this.request(tx, id.toLowerCase(), c, this.scope(c), false);
+      if (b.action === 'cancel' && row.requesterSub !== c.sub && !holds(c, ADMIN)) throw actionForbidden();
+      return row.studyUid as string;
+    }, true);
+  }
+
+  async change(id: string, c: RequestCaller, b: any, transaction?: Prisma.TransactionClient) {
+    this.validateChange(id, c, b);
     const imageRequestId = id.toLowerCase(), requestId = b.requestId.toLowerCase(), scope = this.scope(c);
     const mark = fingerprint({ id: imageRequestId, institution: c.institution, subject: c.sub, revision: b.revision, action: b.action, note: b.note });
     const step = TRANSITIONS[b.action];
