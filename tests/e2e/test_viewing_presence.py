@@ -64,6 +64,8 @@ class ViewingPresenceE2E(ServedViewerFlow, ViewerUXPriorsE2E):
         names = sorted(document_request(p, 'GET', self.stack.api + '/me').json()['displayName'] for p in [work, second])
         self.until(work, lambda: self.names(current), names)
         self.assertEqual(self.presence([current], 'kdoctor')['studies'], {})
+        repeated = self.stack.request('GET', '/presence?uids=' + current.uid + '&uids=' + prior.uid, 'doctor')
+        self.assertEqual(repeated.status, 400, repeated.text)
         self.studies(viewer).get_by_role('button', name='D03A presence prior', exact=True).click()
         canvas_ready(viewer, 2)
         self.until(work, lambda: self.names(prior), [document_request(work, 'GET', self.stack.api + '/me').json()['displayName']])

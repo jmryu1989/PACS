@@ -367,6 +367,38 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
         self.page.locator('#membership-form input[name="institution"]').fill(value)
 
     # ── cases ──
+    def test_held_multiple_spellings_register_only_the_explicitly_confirmed_name(self):
+        names = ['SYN North / East', 'SYN <South>']
+        writes = []
+        def held(route):
+            route.fulfill(json={"institution": {"id": INSTITUTION}, "groups": [{
+                "count": 1, "device": None, "institutionText": ' / '.join(names), "institutionNames": names,
+                "reason": "unknown_source", "sourceUnregistered": True,
+                "firstArrival": "2026-10-29", "lastArrival": "2026-10-29"}]})
+        def register(route):
+            writes.append(route.request.post_data_json)
+            if len(writes) == 1:
+                route.fulfill(json={"changed": True, "attached": 0})
+            else:
+                route.fulfill(status=409, json={"code": "SOURCE_REGISTERED_ELSEWHERE"})
+        self.page.route('**/api/admin/held-sources', held)
+        self.page.route('**/api/admin/institution-aliases', register)
+        self.load()
+        self.page.locator('#held-refresh').click()
+        for index, name in enumerate(names):
+            self.page.get_by_role('button', name='Register Name: ' + name, exact=True).click()
+            expect(self.page.locator('#held-dialog-target')).to_contain_text('"' + name + '"')
+            self.page.locator('#held-form input[name=confirmation]').fill('SYN phone confirmation')
+            self.page.locator('#held-form button[type=submit]').click()
+            if index == 0:
+                expect(self.page.locator('#held-dialog')).not_to_be_visible()
+                expect(self.page.locator('#held-message')).to_contain_text('0건')
+            else:
+                expect(self.page.locator('#held-dialog-message')).to_contain_text('다른 기관')
+                expect(self.page.locator('#held-dialog')).to_be_visible()
+        self.assertEqual(writes, [{"value": name, "confirmation": 'SYN phone confirmation'} for name in names])
+        self.assertEqual(self.page.locator('#held-rows img, #held-rows south').count(), 0)
+
     def test_01_unchanged_save_sends_nothing_and_the_role_set_survives(self):
         # S5-U5a-F01: patchUser isolates the member (sessions deleted, Keycloak logout) on any approval or
         # membership field, so a Save that changes nothing must not send one.

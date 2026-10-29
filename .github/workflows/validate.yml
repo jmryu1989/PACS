@@ -304,6 +304,8 @@ jobs:
         docker run --rm --network none --read-only --user nginx --entrypoint sh kin-proxy:ci -c 'test -r /usr/share/nginx/html/kin-brand/kin-favicon-32.png && test -r /usr/share/nginx/html/kin-brand/kin-emblem-j1.svg && test -r /etc/nginx/templates/default.conf.template'
     - name: Reproduce a private deployment checkout
       run: chmod -R go-rwx api
+    - name: Viewer stack mouse and strip failure boundaries
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/viewer-stack-mouse --cwd . --file config/ohif.js --file config/ohif/viewer-ux.js --file tests/viewer_stack_mouse_test.cjs --file tests/viewer_strip_failure_test.cjs --file worklist-v0/hpacs-lite/viewer-patient-tabs.js --file worklist-v0/hpacs-lite/viewer-series-strip.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_stack_mouse_test.cjs tests/viewer_strip_failure_test.cjs
     - name: OHIF generated configuration matches ordered sources
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/ohif-config-check --cwd . --file scripts/build-ohif-config.py --tree config/ohif --file config/ohif.js -- python3 scripts/build-ohif-config.py --check
     - name: OHIF builder byte and stale-output boundaries
@@ -1664,6 +1666,7 @@ jobs:
         path: |
           tests/e2e/artifacts/viewer-ux-shell-ci/
           tmp/viewer-ux-u2/screens/
+          tmp/viewer-tools/
         if-no-files-found: error
         retention-days: 7
     - name: Isolated declared S9-U7 output, identity and unsaved-work tests
