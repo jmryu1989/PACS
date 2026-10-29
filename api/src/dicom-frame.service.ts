@@ -1,9 +1,9 @@
 /*
- * MG-LOADING (Minhoon P0, 2026-10-27): the viewer's WADO-RS frame reads and the series-strip previews of uncompressed
- * originals, served as byte ranges of the stored file instead of Orthanc's whole-file read (dicom-frame-layout.ts
+ * MG-LOADING (Minhoon P0): WADO-RS frames (native or supported encapsulated codecs) and uncompressed series-strip
+ * previews, served as byte ranges of the stored file instead of Orthanc's whole-file read (dicom-frame-layout.ts
  * records the measurement). The API reads Orthanc's storage directory read-only (KIN_ORTHANC_STORAGE, the compose
  * mount of the orthanc-db volume) and never writes, lists or deletes there; every object is still located through
- * Orthanc's index, and an object the reader cannot prove uncompressed and intact is relayed to Orthanc unchanged.
+ * Orthanc's index. If its frame boundaries cannot be established, it is relayed to Orthanc unchanged.
  * Authorization is the caller's: the controller runs the same DICOMweb gate nginx's auth_request runs (authzDicom).
  * Response hygiene headers (nosniff, Cache-Control: no-store) are the proxy's and the API middleware's, as for every
  * other API answer.
@@ -17,7 +17,8 @@ import { createGzip } from 'node:zlib';
 import { OrthancService } from './orthanc.service';
 import type { RelayTarget } from './orthanc.service';
 import { acceptsGzip, directReadServes, FrameFacts, FrameLayout, frameLayout, frameRange, multipartFrames,
-  pixelDataHeaderMatches, previewPng, tagNumber } from './dicom-frame-layout';
+  frameRanges, pixelDataHeaderMatches, previewPng, tagNumber } from './dicom-frame-layout';
+import { ENCAPSULATED_MEDIA, encapsulatedLayout } from './dicom-frame-encapsulated';
 import { REVISION_HEADER, StudyChanged } from './image-delivery-record';
 import type { DeliveryLease } from './image-delivery-record';
 
@@ -153,10 +154,11 @@ export class DicomFrameService {
       return current;
     } : undefined;
     const layout = object?.layout ?? null, filePath = object ? this.filePath(object.uuid) : '';
+    const mediaType = layout?.encapsulated ? ENCAPSULATED_MEDIA.get(object!.facts.transferSyntax!)! : 'application/octet-stream';
     // The description was checked against the file once; the file is checked again for this request, since a stored
     // file that has since changed size (replaced, truncated) is no longer the object the index describes.
-    if (!layout || !directReadServes(accept, object!.facts.transferSyntax!) ||
-        request.frames.some(frame => frameRange(layout, frame) === null) || !(await this.sameFile(object!, filePath))) {
+    if (!layout || !directReadServes(accept, object!.facts.transferSyntax!, mediaType) ||
+        request.frames.some(frame => frameRanges(layout, frame) === null) || !(await this.sameFile(object!, filePath))) {
       await this.orthanc.relay(path, accept, target, signal, request.origin, confirm);
       return;
     }
@@ -165,8 +167,10 @@ export class DicomFrameService {
     try { handle = await fs.open(filePath, 'r'); }
     catch { this.forget(object!.id); await this.orthanc.relay(path, accept, target, signal, request.origin, confirm); return; }
     const locationBase = `${request.origin}/dicom-web/studies/${request.studyUid}/series/${request.seriesUid}/instances/${request.sopUid}`;
-    const multipart = multipartFrames(randomUUID() + '-' + randomUUID().slice(0, 23), locationBase, object!.facts.transferSyntax!, layout.frameBytes);
-    const gzip = request.stored === true || acceptsGzip(request.acceptEncoding);
+    const frameSize = (frame: number) => frameRanges(layout, frame)!.reduce((size, range) => size + range.end - range.start + 1, 0);
+    const multipart = multipartFrames(randomUUID() + '-' + randomUUID().slice(0, 23), locationBase, object!.facts.transferSyntax!, frameSize, mediaType);
+    // Recompressing a codec stream spends CPU without reducing the payload. The preload envelope still requires gzip.
+    const gzip = request.stored === true || (!layout.encapsulated && acceptsGzip(request.acceptEncoding));
     revision();
     target.status(200);
     if (request.stored) {
@@ -198,11 +202,10 @@ export class DicomFrameService {
     };
     try {
       for (const frame of request.frames) {
-        const range = frameRange(layout, frame)!;
         await write(multipart.partHead(frame));
         // Every byte of the frame is counted: a file that ends early (EOF is not an error to the OS) must not end as
         // a complete part, because a shorter payload would still parse as a frame and display as one.
-        for (let position = range.start; position <= range.end;) {
+        for (const range of frameRanges(layout, frame)!) for (let position = range.start; position <= range.end;) {
           const wanted = Math.min(CHUNK_BYTES, range.end - position + 1), chunk = Buffer.allocUnsafe(wanted);
           let filled = 0;
           while (filled < wanted) {
@@ -238,7 +241,7 @@ export class DicomFrameService {
     const held = (await lease?.()) ?? null;
     if (object && held && object.patientId !== held.binding.patient.patientId) throw new StudyChanged();
     let png: Buffer | null = null;
-    if (object?.layout) {
+    if (object?.layout && !object.layout.encapsulated) {
       const filePath = this.filePath(object.uuid);
       if (await this.sameFile(object, filePath)) {
         const range = frameRange(object.layout, 1)!;
@@ -394,6 +397,26 @@ export class DicomFrameService {
         if (stat.size !== facts.fileSize || !pixelDataHeaderMatches(header, layout)) layout = null;
       } catch { layout = null; }
       if (!layout) this.logger.warn('frame_reader category=layout_mismatch');
+    }
+    if (!layout && uuid && ENCAPSULATED_MEDIA.has(facts.transferSyntax!)) {
+      let handle: FileHandle | undefined;
+      try {
+        handle = await fs.open(this.filePath(uuid), 'r');
+        if ((await handle.stat()).size === facts.fileSize) layout = await encapsulatedLayout(facts, async (start, length) => {
+          const bytes = Buffer.alloc(length);
+          let filled = 0;
+          while (filled < length) {
+            signal?.throwIfAborted();
+            const result = await handle!.read(bytes, filled, length - filled, start + filled);
+            if (!result.bytesRead) throw new ShortRead();
+            filled += result.bytesRead;
+          }
+          return bytes;
+        }, signal);
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        this.logger.warn('frame_reader category=encapsulated_layout_mismatch');
+      } finally { await handle?.close().catch(() => {}); }
     }
     return { id, uuid: uuid ?? '', facts, layout, studyUid: tags.StudyInstanceUID, seriesUid: tags.SeriesInstanceUID,
       patientId: typeof indexed.PatientID === 'string' ? indexed.PatientID : '' };

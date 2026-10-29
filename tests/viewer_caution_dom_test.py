@@ -83,6 +83,70 @@ class ViewerCautionDOM(unittest.TestCase):
             retry.click(); self.page.wait_for_function('window.connected === 1')
             expect(retry).to_have_count(0)
             self.page.evaluate('ext.onModeExit()'); self.page.unroute(route)
+
+    def test_known_image_rejections_are_specific_and_do_not_reach_the_global_boundary(self):
+        self.script('image-load-status')
+        self.page.evaluate("""() => {
+          window.currentImage='wadors:'+location.origin+'/dicom-web/studies/1/series/2/instances/3/frames/1';
+          const element=document.createElement('div');document.body.append(element);
+          window.cornerstone={cache:{getImage:()=>null},Enums:{Events:{IMAGE_LOAD_FAILED:'failed',IMAGE_LOAD_ERROR:'decode',IMAGE_LOADED:'loaded',STACK_NEW_IMAGE:'stack',VIEWPORT_NEW_IMAGE_SET:'set'}},
+            eventTarget:new EventTarget(),getRenderingEngines:()=>[{getViewports:()=>[{element,getCurrentImageId:()=>currentImage}]}]};
+          window.messages=[];window.boundaryErrors=[];window.sourceConfig={acceptHeader:['original']};
+          window.config={acceptHeader:['multipart/related; type=image/jp2; transfer-syntax=*']};
+          window.ext=kinCreateImageLoadStatus();
+          ext.preRegistration({extensionManager:{getActiveDataSource:()=>[{getConfig:()=>sourceConfig}]},servicesManager:{services:{
+            uiNotificationService:{show:message=>messages.push(message)},viewportGridService:{EVENTS:{GRID_STATE_CHANGED:'grid'},subscribe:()=>({unsubscribe(){}})}
+          }}});
+          // The pinned ui-next boundary subscribes in bubble phase. Known image rejections must be handled before it.
+          window.addEventListener('unhandledrejection',e=>boundaryErrors.push(e.reason));
+          window.addEventListener('error',e=>boundaryErrors.push(e.error));
+          ext.onModeEnter();
+          window.fail=(error,type='failed')=>cornerstone.eventTarget.dispatchEvent(new CustomEvent(type,{detail:{imageId:currentImage,error}}));
+          window.reject=error=>window.dispatchEvent(new PromiseRejectionEvent('unhandledrejection',{reason:error,promise:Promise.resolve(),cancelable:true}));
+          window.renderError=error=>window.dispatchEvent(new ErrorEvent('error',{error,cancelable:true}));
+        }""")
+        self.assertEqual(self.page.evaluate('sourceConfig.acceptHeader'), ['multipart/related; type=image/jp2; transfer-syntax=*'])
+        for error, expected in [('{status:401}', '로그인'), ('{status:403}', '접근 권한'), ('{status:404}', '프레임이 없습니다'),
+                                ("{status:503,response:{code:'IMAGE_DELIVERY_RECORD_UNAVAILABLE',message:'영상 열람 기록을 저장하지 못해 영상을 보낼 수 없습니다.'}}", '열람 기록'),
+                                ('{status:409}', '변경되었습니다'), ('{status:416}', '프레임 번호'), ('{status:503}', '영상 서버'),
+                                ('{status:0}', '전송이 끊겼'), ("new Error('CACHE_SIZE_EXCEEDED')", '메모리'),
+                                ("new Error('JPEG 2000 decoder failed')", '압축 영상'), ("'JPEG-LS decoder failed'", '압축 영상'),
+                                ("new DOMException('cancelled','AbortError')", '요청이 취소'), ("new DOMException('timeout','TimeoutError')", '시간이 초과')]:
+            self.page.evaluate(f"()=>{{window.latest={error};fail(latest);reject(latest);renderError(latest)}}")
+            expect(self.page.get_by_role('alert')).to_contain_text(expected)
+        self.assertEqual(self.page.evaluate('boundaryErrors.length'), 0)
+        self.page.evaluate("reject(new Error('unrelated render failure'))")
+        self.assertEqual(self.page.evaluate('boundaryErrors.length'), 1, 'unknown errors retain upstream diagnostics')
+        self.page.evaluate("cornerstone.eventTarget.dispatchEvent(new CustomEvent('loaded',{detail:{imageId:currentImage}}))")
+        expect(self.page.get_by_role('alert')).to_have_count(0)
+        self.page.evaluate("reject(new Error('Couldn\\'t retrieve '+currentImage.slice(7)+' got status 504'))")
+        expect(self.page.get_by_role('alert')).to_contain_text('HTTP 504')
+        self.assertEqual(self.page.evaluate('boundaryErrors.length'), 1)
+        self.page.evaluate("""()=>{const error={status:503,request:{}};
+          window.dispatchEvent(new CustomEvent('kin-series-metadata-failed',{detail:{error,message:'영상 정보를 한 번 다시 요청했지만 불러오지 못했습니다(HTTP 503).'}}));
+          reject(error)}""")
+        self.assertEqual(self.page.evaluate('boundaryErrors.length'), 1, 'metadata recovery already supplied the terminal reason')
+        # An empty successful response would spin forever in the pinned streaming loader; truncated multipart
+        # must reject, and complete bytes must pass unchanged. This exercises the real browser ReadableStream.
+        route = '**/dicom-web/studies/1/series/2/instances/3/frames/1'
+        for payload, complete in [('', False), ('--fixture\r\nContent-Type: image/jp2\r\n\r\nbytes', False),
+                                  ('--fixture\r\nContent-Type: image/jp2\r\n\r\nbytes\r\n--fixture--\r\n', True)]:
+            self.page.route(route, lambda r: r.fulfill(status=200, content_type='multipart/related; boundary=fixture', body=payload))
+            result = self.page.evaluate("""async()=>{try{return {body:await (await fetch(currentImage.slice(7))).text()}}
+              catch(error){fail(error);reject(error);return {error:error.message}}}""")
+            if complete:
+                self.assertEqual(result, {'body': payload})
+            else:
+                self.assertIn('error', result, 'incomplete transport must reject before decode')
+                expect(self.page.get_by_role('alert')).to_contain_text('프레임이 완전하지 않습니다')
+            self.page.unroute(route)
+        self.assertEqual(self.page.evaluate('boundaryErrors.length'), 1)
+        if os.environ.get('KIN_MG_ERROR_SCREENSHOT'):
+            self.page.screenshot(path=os.environ['KIN_MG_ERROR_SCREENSHOT'])
+        self.page.evaluate("ext.onModeExit();reject(latest)")
+        expect(self.page.get_by_role('alert')).to_have_count(0)
+        self.assertEqual(self.page.evaluate('boundaryErrors.length'), 2)
+        self.assertEqual(self.page.evaluate('sourceConfig.acceptHeader'), ['original'])
     def test_mixed_modality_merged_layout_round_trips_all_cells(self):
         self.page.evaluate('document.body.replaceChildren()')
         self.script('layout-model'); self.script('layout')

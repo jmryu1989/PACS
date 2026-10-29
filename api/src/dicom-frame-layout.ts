@@ -35,12 +35,15 @@ export interface FrameFacts {
   fileSize: number; storedSize: number;
 }
 
+export interface FrameSpan { start: number; end: number }
 export interface FrameLayout {
   /** Bytes of the pixel data element header in front of the first frame: 12 explicit VR (OB/OW), 8 implicit VR. */
   headerLength: 8 | 12;
   frameBytes: number;
   numberOfFrames: number;
   firstFrameOffset: number;
+  /** Compressed frame payloads, excluding the BOT and Item headers. */
+  encapsulated?: FrameSpan[][];
 }
 
 const positiveInteger = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
@@ -92,9 +95,17 @@ export function pixelDataHeaderMatches(header: Buffer, layout: FrameLayout): boo
 
 /** The byte range of one 1-based frame inside the stored file, or null outside the object. */
 export function frameRange(layout: FrameLayout, frame: number): { start: number; end: number } | null {
+  if (layout.encapsulated) return null;
   if (!positiveInteger(frame) || frame > layout.numberOfFrames) return null;
   const start = layout.firstFrameOffset + (frame - 1) * layout.frameBytes;
   return { start, end: start + layout.frameBytes - 1 };
+}
+
+export function frameRanges(layout: FrameLayout, frame: number): FrameSpan[] | null {
+  if (!positiveInteger(frame) || frame > layout.numberOfFrames) return null;
+  if (layout.encapsulated) return layout.encapsulated[frame - 1];
+  const range = frameRange(layout, frame);
+  return range ? [range] : null;
 }
 
 /**
@@ -154,14 +165,14 @@ function acceptEntries(header: string): AcceptEntry[] {
  * leaves the request to Orthanc, which can answer it. No Accept header means no preference (PS3.18 §8.7.3.3.1: the
  * stored octet-stream).
  */
-export function directReadServes(accept: unknown, storedSyntax: string): boolean {
+export function directReadServes(accept: unknown, storedSyntax: string, mediaType = 'application/octet-stream'): boolean {
   if (typeof accept !== 'string' || !accept.trim()) return true;
   let ours: { rank: number; q: number } | null = null, elsewhere = 0;
   for (const entry of acceptEntries(accept)) {
     const type = entry.params.get('type'), syntax = entry.params.get('transfer-syntax');
     const range = entry.type === '*/*' ? 0 : entry.type === 'multipart/*' ? 1 : entry.type === 'multipart/related' ? 2 : -1;
     let rank = -1;
-    if (range >= 0 && !(type !== undefined && type !== '*/*' && type !== 'application/octet-stream')       // parts of another media type
+    if (range >= 0 && !(type !== undefined && type !== '*/*' && type !== mediaType)       // parts of another media type
         && !(syntax !== undefined && syntax !== '*' && syntax !== storedSyntax))                           // another syntax: transcoding
       rank = range * 3 + (type !== undefined && type !== '*/*' ? 1 : 0) + (syntax !== undefined && syntax !== '*' ? 1 : 0);
     if (rank < 0) { elsewhere = Math.max(elsewhere, entry.q); continue; }
@@ -202,16 +213,18 @@ export interface MultipartFrames {
   contentLength(frames: number[], frameBytes: number): number;
 }
 
-export function multipartFrames(boundary: string, locationBase: string, transferSyntax: string, frameBytes: number): MultipartFrames {
+export function multipartFrames(boundary: string, locationBase: string, transferSyntax: string,
+    frameBytes: number | ((frame: number) => number), mediaType = 'application/octet-stream'): MultipartFrames {
   if (!/^[0-9a-f-]{20,70}$/.test(boundary)) throw new Error('boundary');
   const partTail = Buffer.from('\r\n', 'latin1'), closing = Buffer.from(`--${boundary}--\r\n`, 'latin1');
   const partHead = (frame: number) => Buffer.from(
     `--${boundary}\r\nContent-Location: ${locationBase}/frames/${frame}\r\n` +
-    `Content-Type: application/octet-stream; transfer-syntax=${transferSyntax}\r\nContent-Length: ${frameBytes}\r\nMIME-Version: 1.0\r\n\r\n`, 'latin1');
+    `Content-Type: ${mediaType}; transfer-syntax=${transferSyntax}\r\nContent-Length: ${typeof frameBytes === 'number' ? frameBytes : frameBytes(frame)}\r\nMIME-Version: 1.0\r\n\r\n`, 'latin1');
   return {
-    contentType: `multipart/related; type="application/octet-stream; transfer-syntax=${transferSyntax}"; boundary=${boundary}`,
+    contentType: `multipart/related; type="${mediaType}; transfer-syntax=${transferSyntax}"; boundary=${boundary}`,
     partHead, partTail, closing,
-    contentLength: (frames, bytes) => frames.reduce((sum, frame) => sum + partHead(frame).length + bytes + partTail.length, 0) + closing.length,
+    contentLength: (frames, bytes) => frames.reduce((sum, frame) => sum + partHead(frame).length +
+      (typeof frameBytes === 'function' ? frameBytes(frame) : bytes) + partTail.length, 0) + closing.length,
   };
 }
 

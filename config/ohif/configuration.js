@@ -46,6 +46,10 @@ window.config = {
   maxNumberOfWebWorkers: 3,
   // below flag is for performance reasons, but it might not work for all servers
   omitQuotationForMultipartRequest: true,
+  // Offer native frame codecs explicitly so the archive can pass through compressed MG/DBT without transcoding.
+  acceptHeader: ['multipart/related; type=application/octet-stream; transfer-syntax=*',
+    'multipart/related; type=image/jpeg; transfer-syntax=*', 'multipart/related; type=image/jls; transfer-syntax=*',
+    'multipart/related; type=image/jp2; transfer-syntax=*', 'multipart/related; type=image/dicom-rle; transfer-syntax=*'],
   showWarningMessageForCrossOrigin: true,
   showCPUFallbackMessage: true,
   showLoadingIndicator: true,
