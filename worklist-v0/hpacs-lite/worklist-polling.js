@@ -1,9 +1,75 @@
-
-
+    // Presence follows the viewer heartbeat, independently of the optional list refresh.
+    let viewingTimer = null, viewingRequest = null, viewingSequence = 0, viewingScope = '';
+    function paintViewing() {
+      const index = shownColumns().findIndex(c => c.k === 'viewing');
+      if (index < 0) return;
+      for (const row of $('#rows').querySelectorAll('tr[data-uid]'))
+        if (row.cells[index]) row.cells[index].textContent = viewingNames.get(row.dataset.uid) || '';
+    }
+    function clearViewing() {
+      ++viewingSequence;
+      viewingRequest?.abort(); viewingRequest = null;
+      viewingNames.clear(); paintViewing();
+    }
+    function stopViewing() {
+      clearInterval(viewingTimer); viewingTimer = null;
+      viewingScope = ''; clearViewing();
+    }
+    function syncViewingRows() {
+      const scope = serverMode && !demoMode && !offline && shownColumns().some(c => c.k === 'viewing')
+        ? JSON.stringify([...$('#rows').querySelectorAll('tr[data-uid]')].map(row => row.dataset.uid)) : '';
+      if (scope === viewingScope) return;
+      clearViewing(); viewingScope = scope;
+      if (scope) void refreshViewing();
+    }
+    async function refreshViewing() {
+      if (!serverMode || demoMode || offline || document.hidden || !viewingScope || viewingRequest) return;
+      const at = work.capture('document');
+      if (!work.admits(at)) { clearViewing(); return; }
+      const sequence = ++viewingSequence, scope = viewingScope, uids = JSON.parse(scope);
+      if (!uids.length) return;
+      const controller = new AbortController(); viewingRequest = controller;
+      // A stalled read must not leave names on screen indefinitely.
+      const timeout = setTimeout(() => {
+        if (sequence === viewingSequence) clearViewing();
+      }, 5000);
+      const live = () => sequence === viewingSequence && scope === viewingScope && work.admits(at);
+      try {
+        const requests = [];
+        // Keep each GET below the proxy's request-line bound even with long DICOM UIDs.
+        for (let i = 0; i < uids.length; i += 50)
+          requests.push(api('GET', '/presence?uids=' + encodeURIComponent(uids.slice(i, i + 50).join(',')),
+            undefined, controller.signal, at));
+        const replies = await Promise.all(requests);
+        if (!live()) return;
+        viewingNames.clear();
+        for (const reply of replies) for (const [uid, people] of Object.entries(reply.studies || {})) {
+          if (!uids.includes(uid) || !Array.isArray(people)) continue;
+          const names = people.filter(person => typeof person?.name === 'string' && person.name).map(person => person.name);
+          if (names.length) viewingNames.set(uid, 'Viewing: ' + names.join(', '));
+        }
+        paintViewing();
+      } catch (_) {
+        if (live()) { viewingNames.clear(); paintViewing(); }
+      } finally {
+        clearTimeout(timeout);
+        if (sequence === viewingSequence) viewingRequest = null;
+      }
+    }
+    onCommonEnd(stopViewing);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) clearViewing(); else void refreshViewing();
+    });
+    window.addEventListener('pagehide', stopViewing);
     // 다른 사람이 잡거나 놓은 걸 보려면 주기적으로 확인해야 한다.
     // 기본 30초. 간격 변경은 진행 중인 이전 조회도 무효화한다.
     let poll = null, pollGeneration = 0;
     function startPolling() {
+      stopViewing();
+      if (serverMode && !demoMode && !offline) {
+        syncViewingRows();
+        viewingTimer = setInterval(() => { syncViewingRows(); void refreshViewing(); }, 5000);
+      }
       clearInterval(poll); poll = null;
       const generation = ++pollGeneration;
       const seconds = worklistRefresh?.seconds() ?? 30;
