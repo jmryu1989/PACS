@@ -1,11 +1,28 @@
-/* W5 Related Report mode (design v5 section 1.4/1.7). The mode takes the editor's place in the report column; the editor
-   host keeps its nodes, text and Undo while it is hidden and inert. Both the Workspace and body.reading use these rules. */
+/* W5 Related Report mode (design v5 section 1.4/1.7). Minhoon item 8 (2026-10-27): the mode opens inside the Related
+   panel, in the place of its plain Related Report view, so one related report is shown at a time and the editor stays on
+   screen beside it. The editor host keeps its nodes, text and Undo and is only inert while the mode holds it. The pane
+   is as tall as the reader sized it (44px at its 900x600 floor, where the plain view shows its head and one line): the
+   title row (Back) is compact and the text region below it keeps at least one line and scrolls itself; the Insert row
+   stays at the bottom when the pane has room for it, and in a shorter pane the mode scrolls to it. Sticky title and
+   Insert rows covered that one line at the floor. Both the Workspace and body.reading use these rules. */
 #related-mode[hidden], .redit[hidden], .related-mode-section[hidden] { display: none !important; }
-#related-mode { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 6px; padding: 6px 10px 8px;
+.prior-report-pane:has(> #related-mode:not([hidden])) > :is(.prior-report-head, .prior-report-body) { display: none; }
+#related-mode { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; padding: 0 10px;
   overflow: auto; border-top: 2px solid #c98a2b; background: var(--kin-panel, #161b24); color: var(--kin-text, #dfe5ee); }
-.related-mode-head, .related-mode-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; flex: none; }
+.related-mode-head, .related-mode-foot { display: flex; align-items: center; gap: 6px 8px; flex: none; }
+.related-mode-head { padding: 2px 0; }
+#related-mode .related-mode-head button { padding: 1px 8px; }
+.related-mode-foot { padding: 4px 0 6px; }
+.related-mode-scroll { flex: 1 1 auto; min-height: 20px; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
 .related-mode-head .spacer, .related-mode-foot .spacer { flex: 1; }
-#related-mode-title { margin: 0; font-size: 13px; font-weight: 600; }
+/* One line each in a short pane: the role sentence stays for assistive technology (the Source card's READ ONLY badge and
+   note say it on screen), and the status line is cut with its whole text in its tooltip. */
+.related-mode-head, .related-mode-foot { flex-wrap: nowrap; }
+.related-mode-role { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+#related-mode-status { flex: 1 1 0; width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.related-mode-foot .spacer { display: none; }
+#related-mode button { flex: none; white-space: nowrap; }
+#related-mode-title { margin: 0; padding: 0; font-size: 13px; font-weight: 600; }
 #related-mode-title:focus-visible, #related-mode button:focus-visible, #related-insert-dialog :focus-visible {
   outline: 2px solid #93c5fd; outline-offset: 2px; }
 .related-mode-role { color: #c3cad6; font-size: 11px; }
@@ -24,7 +41,8 @@
 .related-mode-badge { display: inline-block; margin-top: 4px; padding: 1px 6px; border: 1px solid #d29a3a; border-radius: 3px;
   color: #f0c27a; font-weight: 600; letter-spacing: .04em; }
 .related-mode-note { margin-top: 3px; color: #c3cad6; }
-.related-mode-body { flex: 1 1 auto; min-height: 90px; overflow: auto; }
+.related-mode-body { flex: none; }
+.related-mode-state { margin: 4px 0; color: var(--kin-text, #dfe5ee); overflow-wrap: anywhere; }
 .related-mode-section h4 { margin: 4px 0 2px; color: var(--kin-muted, #9fb0c8); font-size: 11px; font-weight: normal; }
 /* Read-only text that can be selected and copied: never an input, never focusable for editing. */
 .related-mode-text { min-height: 20px; padding: 5px 7px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text;
@@ -40,4 +58,3 @@
   border: 1px solid var(--kin-line2, #3a4356); background: var(--kin-bg, #10151d); font: inherit; }
 #related-insert-error { color: #ff9a9a; }
 .related-insert-actions { display: flex; justify-content: flex-end; gap: 8px; }
-body.reading #related-mode { min-height: 180px; }
