@@ -50,7 +50,8 @@ class HeldMeasurementE2E(MeasurementReadbackE2E):
         artifacts=Path(__file__).parent/'artifacts';artifacts.mkdir(exist_ok=True)
         p.screenshot(path=str(artifacts/'D04-held-preview.png'))
         saved=self.durable(f); writes=[]
-        p.on('request',lambda request:writes.append(request.url) if request.method in ['POST','PATCH','DELETE'] else None)
+        p.on('request',lambda request:writes.append(request.url)
+            if request.method in ['POST','PUT','PATCH','DELETE'] and '/viewer-items' in request.url else None)
         discard=row.get_by_role('button',name='Discard Held Changes',exact=True)
         self.guard(p,True)
         p.once('dialog',lambda dialog:dialog.dismiss());discard.click()
@@ -158,7 +159,8 @@ class HeldMeasurementE2E(MeasurementReadbackE2E):
         row=p.locator('#kin-viewer-history section[data-item-id="'+head['id']+'"]')
         other=self.draw_length(p);other.get_by_label('Annotation Text').fill('다른 미저장 항목')
         saved=self.durable(f);writes=[]
-        p.on('request',lambda request:writes.append(request.url) if request.method in ['POST','PATCH','DELETE'] else None)
+        p.on('request',lambda request:writes.append(request.url)
+            if request.method in ['POST','PUT','PATCH','DELETE'] and '/viewer-items' in request.url else None)
         p.once('dialog',lambda dialog:dialog.accept())
         row.get_by_role('button',name='Discard Held Changes',exact=True).click()
         expect(row).to_contain_text('재확인 필요');expect(row).not_to_contain_text('Held Changes')
@@ -191,7 +193,9 @@ class HeldMeasurementE2E(MeasurementReadbackE2E):
         row.get_by_role('button',name='Use Latest & Keep Changes').click()
         row.get_by_text('Held Changes',exact=True).click()
         expect(row).to_contain_text(label)
-        expect(row).to_contain_text('Saved r4');self.guard(p,True)
+        expect(row).to_contain_text('Unsaved')
+        expect(row).to_contain_text('서버 저장 이력 r4')
+        expect(row).not_to_contain_text('Saved r4');self.guard(p,True)
         # The next current head is visible: keeping the same held edit must
         # restore it for editing instead of editing an old saved draft.
         self.remote_revision(f,'restore')
