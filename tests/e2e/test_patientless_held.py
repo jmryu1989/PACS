@@ -67,7 +67,13 @@ class PatientlessHeldE2E(HeldSourceE2E):
         admin.goto(self.stack.proxy + '/worklist/hpacs-lite/admin.html#held-sources')
         row = admin.locator('#held-rows tr', has_text=unknown)
         expect(row).to_contain_text('Patient Not Identified')
-        expect(row).to_contain_text('원본 영상의 PatientID')
+        held = self.stack.request('GET', '/admin/held-sources', 'jmryu')
+        self.assertEqual(held.status, 200, held.text)
+        groups = [group for group in held.body['groups']
+                  if group['device'] == device and group['institutionText'] == unknown]
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]['reason'], 'patient_not_identified')
+        self.assertEqual(groups[0]['count'], 1)
         row.get_by_role('button', name='Register Device').click()
         admin.locator('#held-form input[name=confirmation]').fill('SYNTHETIC source confirmed ' + run)
         admin.locator('#held-form button[type=submit]').click()
@@ -91,16 +97,21 @@ class PatientlessHeldE2E(HeldSourceE2E):
         for name, page in [('doctor-held', doctor), ('clinician-held', clinician), ('held', admin)]:
             page.screenshot(path=str(out / (name + '.png')), full_page=True)
 
-        # Simulate the sending site's corrected source replacing exactly this owned synthetic study.
+        # A corrected resend coexists with the blank resource until the archive administrator removes it.
         found = self.stack._orthanc_request('POST', '/tools/lookup', missing.encode()).body
         studies = [r['ID'] for r in found if r['Type'] == 'Study']
         self.assertEqual(len(studies), 1)
         current = self.stack._orthanc_request('GET', '/studies/' + studies[0]).body
         self.assertEqual(current['MainDicomTags']['StudyInstanceUID'], missing)
         self.assertEqual(current['PatientMainDicomTags'].get('PatientID', ''), '')
-        self.assertEqual(self.stack._orthanc_request('DELETE', '/studies/' + studies[0]).status, 200)
         corrected = 'CORRECTED-' + run
         self.send(base, missing, device, 'HALLYM', corrected)
+        found = self.stack._orthanc_request('POST', '/tools/lookup', missing.encode()).body
+        self.assertEqual(len([r for r in found if r['Type'] == 'Study']), 2)
+        self.assertNotIn(missing, self.listed('doctor'))
+        admin.get_by_role('button', name='Refresh Held Studies').click()
+        expect(admin.locator('#held-rows tr', has_text='HALLYM')).to_contain_text('Patient Not Identified')
+        self.assertEqual(self.stack._orthanc_request('DELETE', '/studies/' + studies[0]).status, 200)
         admin.get_by_role('button', name='Refresh Held Studies').click()
         expect(admin.locator('#held-rows tr', has_text='HALLYM')).to_have_count(0)
         expect(admin.locator('#held-rows tr', has_text=unknown)).to_contain_text('Patient Not Identified')

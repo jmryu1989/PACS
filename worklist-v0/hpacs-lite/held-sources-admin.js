@@ -64,7 +64,7 @@
       const actions = cell(tr, '');
       if (group.reason === 'patient_not_identified') {
         const guidance = document.createElement('p');
-        guidance.textContent = '송신 병원에서 환자를 확인하여 원본 영상의 PatientID를 등록·보정한 뒤 Refresh Held Studies로 다시 확인하세요. 화면 표시값만 수정해서는 해제되지 않습니다. 끝내 환자를 확인하지 못한 검사는 판독하지 않고 정리 대상으로 남깁니다.';
+        guidance.textContent = '송신 병원에서 환자를 확인해 PatientID를 보정·재전송한 뒤 아카이브 관리자가 PatientID가 비어 있는 기존 사본을 제거해야 합니다. 이후 Refresh Held Studies로 확인하세요. 환자를 확인하지 못한 검사는 판독하지 않습니다.';
         actions.append(guidance);
       }
       if (group.sourceUnregistered === false) return tr;

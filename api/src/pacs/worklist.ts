@@ -435,11 +435,11 @@ export class PacsWorklist {
     for (const st of qido) {
       const uid = OrthancService.tag(st, '0020000D');
       if (!uid) return null;
-      if (observed.has(uid)) unresolved.add(uid);
+      if (observed.has(uid) || !this.patientIdentified([st])) unresolved.add(uid);
       observed.set(uid, st);
     }
-    // WORKLIST-SPLIT-UID: a UID two patient resources answer has no accession of its own (either row's would be a
-    // representative). It is neither a pairing candidate nor a linked order's reconciled study; the rest go on.
+    // A split UID has no single source accession; a patientless study stays held. Neither can be a pairing
+    // candidate or a linked order's reconciled study.
     for (const uid of unresolved) observed.delete(uid);
     return reconcileOrders({ me, restricted: access.policy.restricted, orders,
       links: links.filter(s => !unresolved.has(s.uid)), observed,
