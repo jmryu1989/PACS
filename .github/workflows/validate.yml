@@ -1523,7 +1523,7 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/mg08-image-delivery-record --cwd . --tree api/src --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/image_delivery_record_test.cjs -- node --test tests/image_delivery_record_test.cjs
     - name: MG-LOADING frame range reader contract
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
-        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/mg-loading-frame-reader --cwd . --tree api/src --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/dicom_frame_fixture.cjs --file tests/dicom_frame_test.cjs --file tests/dicom_frame_compressed_test.cjs --file tests/dicom_frame_delivery_test.cjs -- node --test tests/dicom_frame_test.cjs tests/dicom_frame_compressed_test.cjs tests/dicom_frame_delivery_test.cjs
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/mg-loading-frame-reader --cwd . --tree api/src --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/dicom_frame_fixture.cjs --file tests/dicom_frame_test.cjs --file tests/dicom_frame_compressed_test.cjs --file tests/dicom_frame_delivery_test.cjs -- node --test tests/dicom_frame_test.cjs tests/dicom_frame_compressed_test.cjs tests/dicom_frame_delivery_test.cjs
     - name: Keep pinned browser dependencies independent of unused Chrome APT repository
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: |
