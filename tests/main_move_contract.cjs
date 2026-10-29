@@ -84,6 +84,8 @@ function historicalPage(dir) {
 // A page that declares the frame's page adapter has none of these three, and the adapter's own declarations
 // have one owner like every other. Historical byte/statement proofs above stay fixed.
 const RETIRED_BY_REPORT_FRAME = ['caretFields', 'noteCaret', 'forgetCaret'];
+// D1882 removed the admin view of institution-less studies and its per-study assignment (page-boot.js).
+const RETIRED_BY_HELD_SOURCE = ['showUnassigned'];
 const REPORT_FRAME_DECLARATIONS = { reportFrame: 'report-editor.js', reportOpening: 'report-editor.js',
   reportFrameEnded: 'report-editor.js', mountReportFrame: 'report-editor.js', onReportField: 'report-editor.js' };
 function currentHomes(page) {
@@ -104,6 +106,10 @@ function currentHomes(page) {
   for (const original of spec.modules) for (const name of original.statements) {
     if (/Statement after /.test(name)) continue;
     const matches = homes.filter(home => home.name === name);
+    if (RETIRED_BY_HELD_SOURCE.includes(name)) {
+      assert.equal(matches.length, 0, `Retired by D1882: ${name}`);
+      continue;
+    }
     if (frame && RETIRED_BY_REPORT_FRAME.includes(name)) {
       assert.equal(matches.length, 0, `Retired by the report frame: ${name}`);
       continue;
