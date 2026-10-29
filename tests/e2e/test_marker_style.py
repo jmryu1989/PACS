@@ -17,20 +17,24 @@ from test_viewer_history import ViewerHistoryE2E
 from viewer_tools import select_image_tool
 from workspace_roaming_support import cleanup_workspace
 
-# The Length mark as drawn: its own SVG nodes (the drawing helper keys every node it draws by the annotation UID),
-# their stroke colour/width, the colour of its value text, and the pointer-feedback colours the viewer uses now.
+# The Length mark as drawn: its own SVG nodes, their stroke colour/width, the colour of its value text, and the
+# pointer-feedback colours the viewer uses now. Only the mark's main line carries a data-id in the DOM; the
+# tools' public SVG node cache (cornerstoneTools.state.svgNodeCache, per viewport, keyed by annotation UID and
+# drawn part) names all of them, the value text and its link line included.
 DRAWN = '''() => {
   const ct = cornerstoneTools, a = ct.annotation.state.getAllAnnotations().find(a => a.metadata.toolName === 'Length');
   const style = ct.annotation.config.style.getDefaultToolStyles().global || {};
   const out = {uid: a?.annotationUID || null, highlighted: !!a?.highlighted, selected: !!(a && ct.annotation.selection.isAnnotationSelected?.(a.annotationUID)),
     locked: !!(a && ct.annotation.locking.isAnnotationLocked?.(a.annotationUID)), feedback: [style.colorHighlighted, style.colorSelected].filter(Boolean),
     own: a && ct.annotation.locking.isAnnotationLocked?.(a.annotationUID) ? style.colorLocked : style.color,
-    keyed: 0, shapes: [], texts: []};
+    keyed: [], shapes: [], texts: []};
   if (!a) return out;
-  const roots = [...document.querySelectorAll('svg.svg-layer [data-id]')].filter(e => e.getAttribute('data-id').includes(a.annotationUID)), nodes = new Set();
-  out.keyed = roots.length;
-  for (const r of roots) { nodes.add(r); r.querySelectorAll('*').forEach(n => nodes.add(n)); }
-  if (!roots.length) document.querySelectorAll('svg.svg-layer *').forEach(n => nodes.add(n));
+  const nodes = new Set();
+  for (const canvas of Object.values(ct.state?.svgNodeCache || {})) for (const [key, entry] of Object.entries(canvas || {})) {
+    const root = entry?.domRef;
+    if (!key.includes(a.annotationUID) || !root?.isConnected) continue;
+    out.keyed.push(key); nodes.add(root); root.querySelectorAll('*').forEach(n => nodes.add(n));
+  }
   for (const e of nodes) {
     if (e.tagName === 'text') { if (e.textContent.trim()) out.texts.push({fill: e.getAttribute('fill'), text: e.textContent}); continue; }
     if (e.closest('text') || !e.hasAttribute('stroke') || e.getAttribute('stroke') === 'none') continue;
@@ -85,12 +89,14 @@ class MarkerStyleE2E(ViewerHistoryE2E):
         page.evaluate('''() => { cornerstoneTools.annotation.selection.deselectAnnotation?.();
             for (const engine of cornerstone.getRenderingEngines()) for (const v of engine.getViewports())
               try { cornerstoneTools.utilities.triggerAnnotationRender(v.element); } catch (_) { v.render(); } }''')
-        return self.until(page, SOLID + '.length > 0 && d.shapes.every(s => !d.feedback.includes(s.stroke))', label)
+        return self.until(page, SOLID + '.length > 0 && d.texts.length > 0 && d.shapes.every(s => !d.feedback.includes(s.stroke)) && '
+                          'd.texts.every(t => !d.feedback.includes(t.fill))', label)
 
     def wait_drawn(self, page, color, width, label):
         # color None: the viewer's own colour for the mark's state (a saved mark reloaded in another window is locked).
         return self.until(page, SOLID + '.length > 0 && ' + SOLID + '.every(s => s.stroke === (arg[0] ?? d.own)) && Math.max(...' + SOLID +
-                          '.map(s => s.width)) === arg[1]', label, arg=[color, width], timeout=15000)
+                          '.map(s => s.width)) === arg[1] && d.texts.length > 0 && (arg[0] === null || d.texts.every(t => t.fill === arg[0]))',
+                          label, arg=[color, width], timeout=15000)
 
     def test_marker_style_01_open_windows_redraw_and_records_stay(self):
         folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/marker-style'))

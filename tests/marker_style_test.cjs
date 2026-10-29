@@ -5,7 +5,7 @@
  * account appearance without letting an older client erase them. Assertions are on the drawn style,
  * the stored choice and the service's public answers. The served viewer check is
  * tests/e2e/test_marker_style.py. */
-const test=require('node:test'),assert=require('node:assert/strict');
+const test=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs'),path=require('node:path');
 const markers=require('../worklist-v0/hpacs-lite/marker-style.js');
 if(!require('node:fs').existsSync('/app/dist/pacs'))require('./service_test_loader.cjs');
 const {PacsService}=require('/app/dist/pacs.service');
@@ -87,6 +87,46 @@ test('an open viewer redraws all its marks at once on a change and ignores anoth
   again.dispose();
   b.win.dispatchEvent(new CustomEvent('kin-marker-style-change',{detail:{owner:OWNER,value:{version:1,color:'red',width:'thick'}}}));
   assert.deepEqual(v.styles(),BASELINE,'a disposed mount follows nothing');
+});
+
+// The real viewer session (config/ohif/clinician-context.js) and marker extension (config/ohif/marker-style.js)
+// in one realm; the window, /me and Cornerstone are synthetic.
+function viewerDocument(){
+  const b=browser(),v=viewer(),me=[];
+  const realm=vm.createContext({window:b.win,Promise,JSON,Error,Set,Map,Object,Array,
+    fetch:()=>me.length?Promise.resolve(me.shift()):Promise.reject(Error('network down'))});
+  b.win.KinMarkerStyle=markers;b.win.cornerstoneTools=v.tools;b.win.cornerstone=v.cornerstone;
+  for(const file of ['clinician-context.js','marker-style.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'../config/ohif',file),'utf8'),realm,{filename:file});
+  return {...b,...v,me,session:vm.runInContext('kinViewerSession',realm),extension:vm.runInContext('kinCreateMarkerStyle()',realm)};
+}
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+const reader={kind:'member',institution:'hospital',sub:'reader',roles:['radiologist']};
+
+test('a viewer whose first /me failed follows the choice once a later answer names the account',async()=>{
+  const d=viewerDocument();
+  markers.publish(OWNER,{version:1,color:'red',width:'thick'});
+  d.extension.onModeEnter();await settle();
+  assert.deepEqual(d.styles(),BASELINE,'no account yet: the viewer style stays');
+  // Another extension's later /me (history retries on focus) settles the role for this open viewer.
+  d.session.note(reader);await settle();
+  assert.equal(d.styles().global.color,'rgb(255, 64, 64)');assert.equal(Number(d.styles().global.lineWidth),3);
+  markers.publish(OWNER,{version:1,color:'cyan',width:'standard'});
+  assert.equal(d.styles().global.color,'rgb(0, 255, 255)','later changes follow without reopening the viewer');
+  d.extension.onModeExit();
+  markers.publish(OWNER,{version:1,color:'white',width:'thick'});
+  assert.equal(d.styles().global.color,'rgb(0, 255, 255)','after mode exit nothing follows');
+});
+
+test('a mode exit before the late answer leaves the viewer style alone',async()=>{
+  const d=viewerDocument();
+  markers.publish(OWNER,{version:1,color:'magenta',width:'thick'});
+  d.extension.onModeEnter();await settle();d.extension.onModeExit();
+  d.session.note(reader);await settle();
+  assert.deepEqual(d.styles(),BASELINE);
+  // The next mode entry starts with the stored choice at once: the owner is known now.
+  d.extension.onModeEnter();await settle();
+  assert.equal(d.styles().global.color,'rgb(255, 0, 255)');
+  d.extension.onModeExit();
 });
 
 test('a viewer without the style registry draws as before',()=>{

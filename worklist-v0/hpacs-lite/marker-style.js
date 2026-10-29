@@ -54,6 +54,13 @@
     }
     return result;
   }
+  // For marks drawn outside Cornerstone (the manual MPR 3D annotations): the chosen colour, or null
+  // for the painter's own, and the factor for its own line width.
+  function look(value){const clean=normalize(value)||defaults();return {color:colorOf[clean.color],factor:factorOf[clean.width]};}
+  // The choice this document's viewer draws with, so those painters show the same as Cornerstone's marks.
+  // Like the style registry it stays after a mount ends; null before any mount.
+  let applied=null;
+  const current=()=>applied&&{...applied};
   // The viewer's style before any choice, kept per style registry for the document's life:
   // a later mount must not mistake an earlier choice for the viewer's own style.
   const baselines=new WeakMap();
@@ -71,10 +78,11 @@
       const clean=normalize(value)||defaults(),signature=JSON.stringify(clean);
       if(ended||signature===shown)return;
       try{registry.setDefaultToolStyles(styles(baseline,clean));shown=signature;}catch(_){return;}
-      redraw();
+      applied=clean;redraw();
+      host().dispatchEvent?.(new CustomEvent('kin-marker-style-shown',{detail:{...clean}}));
     }
     apply(read(owner));const stop=subscribe(owner,apply);
     return {value:()=>shown&&JSON.parse(shown),dispose(){if(ended)return;ended=true;stop();}};
   }
-  return {colors:colors.map(([id,label])=>[id,label]),widths:widths.map(([id,label])=>[id,label]),defaults,normalize,key,read,publish,subscribe,styles,mount};
+  return {colors:colors.map(([id,label])=>[id,label]),widths:widths.map(([id,label])=>[id,label]),defaults,normalize,key,read,publish,subscribe,styles,look,current,mount};
 });
