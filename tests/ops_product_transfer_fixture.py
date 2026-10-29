@@ -763,7 +763,8 @@ def expected_image_rows():
     # written since 20261027090000 names the study delivery's access record (B2 event) and its HTTP request; the earlier
     # row is its own record (delivery_event_id and request_id NULL).
     delivery, request = '00000000-0000-4000-8000-0000000e00d1', '00000000-0000-4000-8000-0000000e00a1'
-    return dict(source_manifest=[dict(body_sha256='4'*64, study_uid='2.25.701', body=source, recorded_at=at)],
+    return dict(expiring_delivery_link=[dict(delivery_event_id=delivery, opening_event_id=event)],
+        source_manifest=[dict(body_sha256='4'*64, study_uid='2.25.701', body=source, recorded_at=at)],
         preparation=[dict(event_id=event, delivery_event_id=None, request_id=None, study_uid='2.25.701',
         source_manifest=dict(studyUid='2.25.701', patient=dict(linkId='synthetic-link', patientId='SYNTHETIC-E', assigningAuthority='synthetic')),
         source_manifest_body=None,

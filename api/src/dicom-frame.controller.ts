@@ -11,8 +11,8 @@
 import { BadRequestException, Controller, Get, Param, Req, Res } from '@nestjs/common';
 import { DicomFrameService } from './dicom-frame.service';
 import type { TakeLease } from './dicom-frame.service';
-import { archiveRead, StudyImageDeliveryRecorder } from './image-delivery-record';
-import type { DeliveryLease } from './image-delivery-record';
+import { archiveRead, PRELOAD_USE, RECORDED_STUDY_HEADER, StudyImageDeliveryRecorder, readUse } from './image-delivery-record';
+import type { DeliveryLease, DeliveryUse } from './image-delivery-record';
 import { Caller, PacsService } from './pacs.service';
 import { parseFrameList } from './dicom-frame-layout';
 
@@ -23,6 +23,21 @@ const ORTHANC_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/;
 /** The surface of the delivery's access events when one of these two routes opens it. */
 export const FRAMES_SURFACE = 'GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames';
 export const PREVIEW_SURFACE = 'GET instances/:id/preview';
+export { REVISION_HEADER } from './image-delivery-record';
+
+/** `store`: the preload store's read (stored form, revision); `check`: the viewer's opening read of a held study (revision). */
+function preloadMode(req: any): 'store' | 'check' | null {
+  const value = String(req.headers?.['x-kin-preload'] ?? '').trim().toLowerCase();
+  return value === 'store' || value === 'check' ? value : null;
+}
+
+/**
+ * The delivery a frame read joins (image-delivery-record.ts `DeliveryUse`): the preload store's read is the preload's
+ * transfer; every other read - the viewer's check read included - belongs to the opening it names, if it names one.
+ */
+function frameUse(req: any, preload: 'store' | 'check' | null): DeliveryUse {
+  return preload === 'store' ? PRELOAD_USE : readUse(req);
+}
 
 function requestOrigin(req: any): string {
   const proto = String(req.headers?.['x-forwarded-proto'] ?? req.protocol ?? 'https').split(',')[0].trim();
@@ -69,11 +84,12 @@ export class DicomFrameController {
     if (!list) throw new BadRequestException('프레임 번호가 올바르지 않습니다');
     const uri = `/dicom-web/studies/${study}/series/${series}/instances/${sop}/frames/${frames}`;
     const admitted = await this.pacs.authzDicom(uri, 'GET', member(req));
+    const preload = preloadMode(req);
     // HEAD sends no image byte, so it is no delivery (image-delivery-record.ts lease()).
-    await lifetime(req, res, () => this.deliveries.lease(req, FRAMES_SURFACE, uri, () => archiveRead(admitted)),
+    await lifetime(req, res, () => this.deliveries.lease(req, FRAMES_SURFACE, uri, () => archiveRead(admitted), frameUse(req, preload)),
       (signal, lease) => this.frames.serveFrames({ studyUid: study, seriesUid: series, sopUid: sop, frames: list,
         accept: req.headers?.accept, acceptEncoding: req.headers?.['accept-encoding'], head: req.method === 'HEAD',
-        origin: requestOrigin(req) }, res, signal, lease));
+        origin: requestOrigin(req), stored: preload === 'store', revision: preload !== null }, res, signal, lease));
   }
 
   @Get('instances/:id/preview')
@@ -82,7 +98,11 @@ export class DicomFrameController {
     const uri = `/instances/${id}/preview`;
     // The gate resolves the object's study; the preview is a read of that study's delivery.
     const admitted = await this.pacs.authzDicom(uri, 'GET', member(req));
-    await lifetime(req, res, () => this.deliveries.lease(req, PREVIEW_SURFACE, uri, () => archiveRead(admitted)),
+    await lifetime(req, res, async () => {
+      const lease = await this.deliveries.lease(req, PREVIEW_SURFACE, uri, () => archiveRead(admitted));
+      if (lease) res.setHeader(RECORDED_STUDY_HEADER, admitted!.studyUid);
+      return lease;
+    },
       (signal, lease) => this.frames.servePreview(id, res, signal, lease));
   }
 }
