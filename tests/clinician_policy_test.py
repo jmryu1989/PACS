@@ -1727,7 +1727,12 @@ class ClinicianPolicySpec(unittest.TestCase):
         # every route added since the 104-row baseline has its own row with decision, unit, commit and basis
         added = sorted(keys - BASELINE)
         removed = sorted(BASELINE - keys)
-        self.assertEqual(removed, [], "a baseline route disappeared; re-check the planning inventory")
+        # a baseline route may only disappear by a declared retirement (D1882: GET unassigned, POST studies/:uid/assign)
+        retired = MATRIX.get("retired_since_baseline", {})
+        self.assertEqual(removed, sorted(retired), "a baseline route disappeared without a retired_since_baseline row")
+        for key, row in sorted(retired.items()):
+            self.assertEqual(set(row), {"unit", "basis"}, key)
+            self.assertGreater(len(row["basis"].strip()), 20, key)
         post = MATRIX["post_baseline"]
         self.assertEqual(sorted(post), added, "exactly the routes added since the baseline carry a post_baseline row")
         where = {**{r: "public" for r in PUBLIC}, **{r: "session" for r in SESSION}, **{r: "business" for r in BUSINESS},
@@ -1739,7 +1744,8 @@ class ClinicianPolicySpec(unittest.TestCase):
                 if row["commit"] is not None:
                     self.assertRegex(row["commit"], r"^[0-9a-f]{7,40}$")
                 # a stage unit (S<n>-) or a UX-stage workflow unit (W<n>-, which has no stage number; W9-API)
-                self.assertRegex(row["unit"], r"^(?:[SW][0-9]-|emr-)")
+                # a stage unit, a UX-stage workflow unit, an EMR unit or a unit named by its user decision (D1882-)
+                self.assertRegex(row["unit"], r"^(?:[SW][0-9]-|emr-|D[0-9]+-)")
                 self.assertGreater(len(row["basis"].strip()), 20)
                 self.assertEqual(allowed(key), row["decision"] in ("session", "business"))
         declared = set(FIXTURES["allowed_additions"])

@@ -327,15 +327,15 @@ class ClinicianPolicyLive(unittest.TestCase):
                 self.assertIn("clinician", me.body["roles"])
                 prefs = self.stack.request("GET", "/prefs", user)
                 self.assertEqual(prefs.status, 200, prefs.text)
-                unassigned = self.stack.request("GET", "/unassigned", user)
-                self.assertEqual(unassigned.status, 403, unassigned.text)
-                self.assertNotEqual(unassigned.body.get("code"), DENIED, "existing need(admin) decides, not the clinician gate")
-        admin = self.stack.request("GET", "/unassigned", "clinician-admin")
+                held = self.stack.request("GET", "/admin/held-sources", user)
+                self.assertEqual(held.status, 403, held.text)
+                self.assertNotEqual(held.body.get("code"), DENIED, "existing need(admin) decides, not the clinician gate")
+        admin = self.stack.request("GET", "/admin/held-sources", "clinician-admin")
         self.assertEqual(admin.status, 200, admin.text)
         for user, status in (("doctor", 403), ("tech", 403), ("jmryu", 200)):
             with self.subTest(user=user):
                 self.assertEqual(self.stack.request("GET", "/prefs", user).status, 200)
-                result = self.stack.request("GET", "/unassigned", user)
+                result = self.stack.request("GET", "/admin/held-sources", user)
                 self.assertEqual(result.status, status, result.text)
                 if status == 403:
                     self.assertNotEqual(result.body.get("code"), DENIED)
