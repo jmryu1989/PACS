@@ -1,7 +1,7 @@
 // The stock mode owns the grid and Cornerstone elements. This extension owns
 // only its chrome and removes it when that mode or document ends.
 function kinCreateViewerUX() {
-  let services, dispose, toolbar, shortcuts, mouse, generation = 0, ready;
+  let services, dispose, toolbar, shortcuts, mouse, resize, generation = 0, ready;
   const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-hanging-settings.js', 'viewer-ux-toolbar.js', 'viewer-ux-shell.js'];
   // The theme fixes the chrome rows' heights. It is loaded once per document,
   // before the first mount, and stays: a stylesheet attached per mount and
@@ -29,7 +29,7 @@ function kinCreateViewerUX() {
       document.head.append(script);
     })), stylesheet()).catch(error => { ready = null; throw error; });
   }
-  function stop() { generation++; dispose?.(); dispose = null; mouse?.dispose(); mouse = null; }
+  function stop() { generation++; dispose?.(); dispose = null; mouse?.dispose(); mouse = null; resize?.(); resize = null; }
   return {
     id: 'kin.viewer-ux',
     async preRegistration({ servicesManager }) {
@@ -51,7 +51,10 @@ function kinCreateViewerUX() {
     },
     onModeEnter() {
       stop();
-      if (!kinViewerSession.ended()) mouse = kinStackMouse(services);
+      if (!kinViewerSession.ended()) {
+        mouse = kinStackMouse(services);
+        resize = kinStackResize(services.cornerstoneViewportService);
+      }
       if (window.top !== window || !shortcuts) return;
       const ticket = generation;
       if (kinViewerSession.ended()) return;
@@ -66,6 +69,35 @@ function kinCreateViewerUX() {
       }
     },
     onModeExit: stop,
+  };
+}
+
+// OHIF's resize restores a stack's current frame through setViewReference ->
+// scroll. That rewinds a pending scroll's target while its debounce/load can
+// still finish: the next key then selects the frame already shown, and the
+// native Loading indicator never receives another STACK_NEW_IMAGE. Resizing
+// restores the camera, not the slice; explicit navigation keeps its reference.
+function kinStackResize(service) {
+  const resize = service.performResize, present = service.setPresentations;
+  if (typeof resize !== 'function' || typeof present !== 'function') return;
+  let resizing = 0;
+  const resized = function (...args) {
+    resizing++;
+    try { return resize.apply(this, args); }
+    finally { resizing--; }
+  };
+  const presented = function (id, presentations, ...args) {
+    if (resizing && this.getCornerstoneViewport(id)?.type === 'stack' && presentations?.positionPresentation) {
+      presentations = { ...presentations,
+        positionPresentation: { ...presentations.positionPresentation, viewReference: undefined } };
+    }
+    return present.call(this, id, presentations, ...args);
+  };
+  service.performResize = resized;
+  service.setPresentations = presented;
+  return () => {
+    if (service.performResize === resized) service.performResize = resize;
+    if (service.setPresentations === presented) service.setPresentations = present;
   };
 }
 
