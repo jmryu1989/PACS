@@ -60,7 +60,7 @@ if(process.argv.includes('--serve')){
   let app,endpoint,runtime,port;
   const sourceServers=[];
   try{
-  await witness.memberRightsImport.create({data:{id:'realm-v1'}});
+  await witness.memberRightsImport.upsert({where:{id:'realm-v1'},create:{id:'realm-v1'},update:{}});
   for(const subject of ['officer','auditor','doctor','admin','other']){
     const roles=[['admin','officer'].includes(subject)?'admin':subject==='doctor'?'radiologist':'clinician'];
     const institution=subject==='other'?'synthetic-other':'synthetic-hospital';
@@ -331,7 +331,7 @@ if(process.argv.includes('--serve')){
     await ok('auditor','POST',`requests/${unavailable.request.requestId}/resolve`,{outcome:'withdrawn',evidenceId:'withdrawn-without-copy'});
 
     await futureHold(port,db,witness,identities.auditor,copy);
-    await scaling(witness,ok,query,patient,identities.doctor);
+    await scaling(witness,ok,query,patient,recordId);
     await sharedDeliveryPatients(port,witness,ok,query,doctor,sourceServers);
 
     await app.close();await start();
@@ -599,9 +599,11 @@ async function futureHold(port,db,witness,auditor,copy) {
   } finally {global.Date=NativeDate;}
 }
 
-async function scaling(witness,ok,query,patient,actor) {
+async function scaling(witness,ok,query,patient,recordId) {
   const measurements=[];
-  const [template]=await witness.$queryRaw`SELECT payload FROM emr_access.access_entry WHERE stream='history' ORDER BY sequence LIMIT 1`;
+  const [template]=await witness.$queryRaw`SELECT e.payload FROM emr_access.access_entry e WHERE e.stream='history'
+    AND EXISTS (SELECT FROM emr_access.access_target t WHERE t.entry_id=e.entry_id AND t.record_id=${recordId})
+    ORDER BY e.sequence LIMIT 1`;
   // Seed legal B1 rows through its actual admission/append functions; all data belongs to this disposable fixture.
   for (const count of [1000,1000,2000,4000,2000]) {
     const payload=template.payload.replaceAll("'","''");
