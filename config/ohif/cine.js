@@ -34,9 +34,36 @@ function kinCineNext(index, first, last, mode, direction, loop) {
 }
 
 function kinCreateCine() {
-  let services, dispose;
+  let services, extensions, dispose;
   function mount() {
     dispose?.();
+    // OHIF's stack handler only copies FrameTime into this millisecond playback
+    // hint. Supply the preferred DICOM rate before native cine initializes both
+    // its FPS control and playback state; never rewrite the instance metadata.
+    const handlerId = '@ohif/extension-default.sopClassHandlerModule.stack';
+    const handler = extensions.getModuleEntry(handlerId);
+    const nativeDisplaySets = handler.getDisplaySetsFromSeries;
+    function sourceRate(displaySet) {
+      const instance = displaySet.instances?.[0];
+      if (!(Number(instance?.NumberOfFrames) > 1)) return;
+      for (const value of [instance.RecommendedDisplayFrameRate, instance.CineRate]) {
+        const rate = typeof value === 'number' || typeof value === 'string' ? Number(value) : NaN;
+        if (Number.isFinite(rate) && rate > 0) {
+          displaySet.FrameRate = 1000 / rate;
+          return;
+        }
+      }
+      // Preserve OHIF's existing FrameTime conversion and its no-rate default.
+    }
+    const createDisplaySets = function (...args) {
+      const displaySets = nativeDisplaySets.apply(this, args);
+      displaySets.forEach(sourceRate);
+      return displaySets;
+    };
+    handler.getDisplaySetsFromSeries = createDisplaySets;
+    services.displaySetService.getActiveDisplaySets().forEach(ds => {
+      if (ds.SOPClassHandlerId === handlerId) sourceRate(ds);
+    });
     const core = window.cornerstone, cine = services.cineService, grid = services.viewportGridService;
     const nativePlay = cine.playClip, nativeStop = cine.stopClip;
     const records = new Map(), subscriptions = [], listeners = [];
@@ -291,7 +318,9 @@ function kinCreateCine() {
 
     try { channel = kinViewerOnEnd(end); } catch (_) {}
     const timer = setInterval(render, 250); selected = grid.getActiveViewportId(); render();
-    dispose = () => { end(); clearInterval(timer); listeners.forEach(off => off()); subscriptions.forEach(s => s.unsubscribe()); channel?.close(); cine.playClip = nativePlay; cine.stopClip = nativeStop; panel.remove(); };
+    dispose = () => { end(); clearInterval(timer); listeners.forEach(off => off()); subscriptions.forEach(s => s.unsubscribe()); channel?.close(); cine.playClip = nativePlay; cine.stopClip = nativeStop; panel.remove();
+      if (handler.getDisplaySetsFromSeries === createDisplaySets) handler.getDisplaySetsFromSeries = nativeDisplaySets;
+    };
   }
-  return { id: 'kin.cine', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { dispose?.(); dispose = null; } };
+  return { id: 'kin.cine', preRegistration({ servicesManager, extensionManager }) { services = servicesManager.services; extensions = extensionManager; }, onModeEnter: mount, onModeExit() { dispose?.(); dispose = null; } };
 }
