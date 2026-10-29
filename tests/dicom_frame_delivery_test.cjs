@@ -376,6 +376,56 @@ test('opening contract O4: the idle gap retires the delivery, not the opening - 
   } finally { await s.close(); }
 });
 
+test('R277M2-01: concurrent first frames of one opening survive a revision change while its root is being written', async () => {
+  // Exercise both append orders from the reviewer's reproduction: PG's first INSERT holds the operation, whereas
+  // the in-memory ledger can commit a later append first. Neither order may refuse a frame or add another root.
+  for (const order of ['first-commits-first', 'second-commits-first']) {
+    let lastUpdate = '20261028T090000', release;
+    const s = await stack({ orthanc: o => ({ studyRevision: async uid => {
+      o.calls.push(['revision', uid]); return { id: STUDY_ID, lastUpdate };
+    } }) });
+    try {
+      const append = s.records.store.append.bind(s.records.store);
+      let started, n = 0, firstDone;
+      const writing = new Promise(resolve => { started = resolve; });
+      const held = new Promise(resolve => { release = resolve; });
+      s.records.store.append = async (event, served, keys) => {
+        const mine = ++n;
+        if (mine === 1) {
+          started(); await held;
+          firstDone = append(event, served, keys); return firstDone;
+        }
+        if (mine === 2 && order === 'first-commits-first') {
+          await held; await firstDone.catch(() => {});
+        }
+        return append(event, served, keys);
+      };
+      const O = opening('syn-revision-race-opening');
+      const first = s.frame(1, O);
+      await writing;
+      lastUpdate = '20261028T090100';
+      const second = s.frame(2, O);
+      await wait(300); // The reviewer's append window lets both HTTP reads reach the recorder.
+      assert.ok(s.observations.every(o => !o.firstByte), 'no image before the root is durable');
+      release();
+      const answers = await Promise.all([first, second]);
+      assert.deepEqual(answers.map(a => a.status), [200, 200], order);
+      assert.ok(answers.every(a => a.body.length > 0 && /^multipart\/related/.test(a.headers.get('content-type'))), 'both reads carry image bytes');
+      const prepared = byAction(s.records.entries, 'provide-prepared');
+      const roots = prepared.filter(e => e.event.cause === 'user-view');
+      assert.equal(roots.length, 1, order + ': one root for the opening');
+      const continued = prepared.filter(e => e.event.cause === 'background-fetch');
+      assert.equal(continued.length, 1, 'the newer revision has one continuation');
+      assert.equal(continued[0].event.relatedEventId, roots[0].event.eventId);
+      assert.equal(continued[0].event.targets[0].versionId.value, `orthanc-study:${STUDY_ID}@${lastUpdate}`);
+      for (const observation of s.observations) {
+        assert.ok(continued[0].at < observation.firstByte.at, 'both images follow the current revision\'s durable record');
+      }
+      await s.recorder.beforeApplicationShutdown();
+    } finally { release?.(); await s.close(); }
+  }
+});
+
 test('opening contract O2: the root is the ledger\'s - a retry after a lost COMMIT reply, a restart, or a root settled negative never adds a second root, and no byte leaves before a durable record', async () => {
   const s = await stack();
   try {

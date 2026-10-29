@@ -534,6 +534,10 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
         const prepared = event(false, null);
         return { event: prepared, receipt: await this.append(work, prepared, randomUUID()) };
       }
+      // A newer binding may retire this opening's delivery while its root is still being written. Let that attempt
+      // settle before asking the ledger for the root; otherwise an invisible/pending root races a second append.
+      // A failed attempt is resolved by the same lookup below, not inherited as this delivery's failure.
+      await Promise.allSettled([...this.retiring].filter(delivery => delivery.key === key).map(delivery => delivery.prepared));
       for (let attempt = 0; ; attempt++) {
         const operationId = rootOperation(key, attempt);
         const stored = await work.lookup(operationId);
