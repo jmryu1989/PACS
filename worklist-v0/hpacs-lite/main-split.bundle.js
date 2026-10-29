@@ -9803,6 +9803,12 @@
           // Grow by whole pixels: the work area below moves down unchanged, keeping
           // the sub-pixel position each of its lines and borders had at first paint.
           if (short > 0) left.style.minHeight = left.getBoundingClientRect().height + Math.ceil(short) + "px";
+          // Controls that wrap to more lines than the column holds overflow it with
+          // the list already at 0 px; part of that first grow goes to the overflow, so
+          // grow again by what the list still misses (row 0 was cut at 768x1024 once
+          // the Selected toolbar wrapped to a third line).
+          const still = need - grid.getBoundingClientRect().height;
+          if (short > 0 && still > 0.5) left.style.minHeight = left.getBoundingClientRect().height + Math.ceil(still) + "px";
         } else {
           listFloor = need + (narrow && rows.length > 1 ? rowHeight(1) : 0);
           keepListFloor();
