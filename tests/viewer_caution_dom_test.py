@@ -4,6 +4,7 @@ import functools
 import http.server
 import json
 import os
+import re
 import threading
 import unittest
 from pathlib import Path
@@ -25,6 +26,130 @@ class ViewerCautionDOM(unittest.TestCase):
         self.page.evaluate("document.body.replaceChildren(); document.body.innerHTML='<p id=kin-viewer-layout-status></p>'")
     def tearDown(self): self.page.close()
     def script(self, name): self.page.add_script_tag(url=f'/config/ohif/{name}.js')
+    def test_product_csp_allows_wasm_but_blocks_javascript_eval_in_page_and_worker(self):
+        policies = re.findall(r'add_header Content-Security-Policy "([^"]+)" always;',
+                              (ROOT / 'proxy/nginx.conf.template').read_text(encoding='utf-8'))
+        self.assertEqual(len(policies), 1)
+        policy = policies[0]
+        directives = {parts[0]: parts[1:] for directive in policy.split(';') if (parts := directive.split())}
+        self.assertIn("'wasm-unsafe-eval'", directives['script-src'])
+        for name, sources in directives.items():
+            self.assertNotIn("'unsafe-eval'", sources)
+            if name != 'script-src':
+                self.assertNotIn("'wasm-unsafe-eval'", sources)
+        # Execute from served scripts: Playwright's evaluate bypasses CSP and cannot prove this contract.
+        probe = """async function probe() {
+          const result = {};
+          try {
+            const {instance} = await WebAssembly.instantiate(new Uint8Array([
+              0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,3,2,1,0,
+              7,10,1,6,97,110,115,119,101,114,0,0,10,6,1,4,0,65,42,11]));
+            result.wasm = instance.exports.answer();
+          } catch(error) { result.wasmError = error.message; }
+          try { result.eval = eval('6 * 7'); } catch(error) { result.evalBlocked = error.name; }
+          try { result.dynamic = new Function('return 42')(); } catch(error) { result.dynamicBlocked = error.name; }
+          return result;
+        }
+        """
+        page_script = probe + """
+          window.probeDone = Promise.all([probe(), new Promise((resolve, reject) => {
+            const worker = new Worker('/csp-worker.js');
+            worker.onmessage = e => {worker.terminate(); resolve(e.data)};
+            worker.onerror = e => {worker.terminate(); reject(new Error(e.message))};
+          })]);
+        """
+        fixtures = {
+            '/csp-check.html': ('text/html', '<script src="/csp-page.js"></script>'),
+            '/csp-page.js': ('application/javascript', page_script),
+            '/csp-worker.js': ('application/javascript', probe + 'probe().then(result => postMessage(result));'),
+        }
+        for path, (mime, body) in fixtures.items():
+            self.page.route('**' + path, lambda route, request, mime=mime, body=body: route.fulfill(
+                content_type=mime, body=body, headers={'Content-Security-Policy': policy}))
+        response = self.page.goto(f'http://127.0.0.1:{self.server.server_port}/csp-check.html')
+        self.assertEqual(response.headers['content-security-policy'], policy)
+        result = self.page.evaluate('probeDone')
+        self.assertEqual(result, [{'wasm': 42, 'evalBlocked': 'EvalError', 'dynamicBlocked': 'EvalError'}] * 2)
+
+    def test_empty_decoder_result_is_a_failed_frame_before_cache_and_recovers(self):
+        self.script('image-load-status')
+        self.page.evaluate("""() => {
+          const element = document.createElement('div'); document.body.append(element);
+          window.currentImage = 'wadors:frame-a'; window.images = new Map(); window.messages = [];
+          window.accepted = []; window.failedImages = []; window.pending = [];
+          window.workerManager = {executeTask(...args) {
+            if (this !== workerManager) throw Error('lost worker manager');
+            window.taskArgs = args;
+            return new Promise((resolve, reject) => pending.push({resolve, reject}));
+          }};
+          window.originalTask = workerManager.executeTask;
+          window.cornerstone = {getWebWorkerManager:()=>workerManager, cache:{getImage:id=>images.get(id)},
+            Enums:{Events:{IMAGE_LOAD_FAILED:'failed',IMAGE_LOADED:'loaded',STACK_NEW_IMAGE:'stack',VIEWPORT_NEW_IMAGE_SET:'set'}},
+            eventTarget:new EventTarget(),getRenderingEngines:()=>[{getViewports:()=>[{element,getCurrentImageId:()=>currentImage}]}]};
+          window.ext = kinCreateImageLoadStatus();
+          ext.preRegistration({servicesManager:{services:{uiNotificationService:{show:m=>messages.push(m)},
+            viewportGridService:{EVENTS:{GRID_STATE_CHANGED:'grid'},subscribe:(name,refresh)=>{
+              window.refreshGrid=refresh;return {unsubscribe(){}};
+            }}}}});
+          ext.onModeEnter();
+          // Consumer contract: only a fulfilled decode can become an image/cache entry. Rejections retain
+          // the caller's image identity and flow through the loader's existing failure event.
+          window.loadFrame = async imageId => {
+            try {
+              const frame = await workerManager.executeTask('dicomImageLoader','decodeTask',
+                {imageFrame:{rows:2,columns:2},pixelData:new Uint8Array([1]),options:{}}, {priority:3});
+              images.set(imageId,frame);accepted.push(imageId);
+              cornerstone.eventTarget.dispatchEvent(new CustomEvent('loaded',{detail:{imageId}}));
+              return {ok:true};
+            } catch(error) {
+              failedImages.push(imageId);
+              cornerstone.eventTarget.dispatchEvent(new CustomEvent('failed',{detail:{imageId,error}}));
+              window.dispatchEvent(new PromiseRejectionEvent('unhandledrejection',
+                {reason:error,promise:Promise.resolve(),cancelable:true}));
+              return {ok:false};
+            }
+          };
+        }""")
+        for frame in ['{rows:0,columns:0,pixelData:new Float32Array()}',
+                      '{rows:0,columns:2,pixelData:new Uint16Array(4)}',
+                      '{rows:2,columns:0,pixelData:new Uint16Array(4)}',
+                      '{rows:2,columns:2,pixelData:new Uint16Array()}',
+                      '{rows:2,columns:2}', 'null']:
+            with self.subTest(frame=frame):
+                result = self.page.evaluate(f"""async()=>{{const load=loadFrame(currentImage);
+                  pending.shift().resolve({frame});return await load}}""")
+                self.assertEqual(result, {'ok': False})
+                self.assertEqual(self.page.evaluate('images.size + accepted.length'), 0)
+                expect(self.page.get_by_role('alert')).to_contain_text('해독 결과가 비어 있거나 불완전')
+        self.assertIn('해독 결과가 비어 있거나 불완전', self.page.evaluate('messages[0].message'))
+        # Complete pixels, including all-zero images, pass by identity. No intensity-based corruption heuristic.
+        for pixels in ['new Uint8Array(4)', 'new Int16Array([0,1,-1,2])',
+                       'new Float32Array([0,.5,1,2])', 'new Uint8Array(12)', 'new Uint8Array(16)']:
+            result = self.page.evaluate(f"""async()=>{{
+              const frame={{rows:2,columns:2,pixelData:{pixels}}}; const load=loadFrame(currentImage);
+              pending.shift().resolve(frame);const result=await load;
+              return {{...result,unchanged:images.get(currentImage)===frame,priority:taskArgs[3].priority}};
+            }}""")
+            self.assertEqual(result, {'ok': True, 'unchanged': True, 'priority': 3})
+            expect(self.page.get_by_role('alert')).to_have_count(0)
+        # A bad prefetch does not cover another displayed image or an already successful retry of that image.
+        self.page.evaluate("""async()=>{const load=loadFrame('wadors:frame-b');
+          pending.shift().resolve({rows:0,columns:0,pixelData:new Float32Array()});await load}""")
+        expect(self.page.get_by_role('alert')).to_have_count(0)
+        self.page.evaluate("currentImage='wadors:frame-b';refreshGrid()")
+        expect(self.page.get_by_role('alert')).to_contain_text('해독 결과가 비어 있거나 불완전')
+        self.page.evaluate("""async()=>{currentImage='wadors:frame-a';refreshGrid();
+          const load=loadFrame(currentImage);pending.shift().resolve({rows:0,columns:0,pixelData:new Float32Array()});await load}""")
+        expect(self.page.get_by_role('alert')).to_have_count(0)
+        # Other worker methods/results are untouched; exit restores ownership even after repeated mode entry.
+        self.assertTrue(self.page.evaluate("""async()=>{const value={};
+          const result=workerManager.executeTask('otherWorker','decodeTask');pending.shift().resolve(value);
+          return await result===value}"""))
+        self.page.evaluate("ext.onModeExit();ext.onModeEnter();ext.onModeExit()")
+        self.assertTrue(self.page.evaluate('workerManager.executeTask===originalTask'))
+        self.page.evaluate("ext.onModeEnter();workerManager.executeTask=()=>Promise.resolve('later owner');ext.onModeExit()")
+        self.assertEqual(self.page.evaluate('workerManager.executeTask()'), 'later owner')
+
     def test_pixel_failure_explanation_follows_the_displayed_image_and_mode(self):
         self.script('image-load-status')
         self.page.evaluate("""() => {
@@ -115,6 +240,10 @@ class ViewerCautionDOM(unittest.TestCase):
                                 ("new TypeError('Load failed')", '전송이 끊겼'),
                                 ("new TypeError('Cannot read properties of undefined')", '계속되면 관리자에게 문의하세요'),
                                 ("new Error('JPEG 2000 decoder failed')", '압축 영상'), ("'JPEG-LS decoder failed'", '압축 영상'),
+                                ("'Empty decoded image frame'", '해독 결과가 비어 있거나 불완전'),
+                                ("new EvalError(\"Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval' is not an allowed source of script\")", '뷰어 보안 정책'),
+                                ("new WebAssembly.CompileError(\"WebAssembly.compile(): Refused to compile or instantiate WebAssembly module because 'unsafe-eval' is not an allowed source of script\")", '뷰어 보안 정책'),
+                                ("\"Refused to compile WebAssembly module under Content Security Policy\"", '뷰어 보안 정책'),
                                 ("new DOMException('cancelled','AbortError')", '요청이 취소'), ("new DOMException('timeout','TimeoutError')", '시간이 초과')]:
             self.page.evaluate(f"()=>{{window.latest={error};fail(latest);reject(latest);renderError(latest)}}")
             expect(self.page.get_by_role('alert')).to_contain_text(expected)

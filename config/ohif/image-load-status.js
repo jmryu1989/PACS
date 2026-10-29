@@ -23,6 +23,10 @@ function kinCreateImageLoadStatus() {
     const message = String(error?.message ?? error ?? '');
     if (message === 'CACHE_SIZE_EXCEEDED' || /Array buffer allocation failed|Invalid typed array length|out of memory/i.test(message))
       return '영상 표시 메모리가 부족합니다. 사용하지 않는 영상 창을 닫고 검사를 다시 여세요.';
+    if (error?.name === 'EvalError' || /WebAssembly|\bwasm\b|content security policy|unsafe-eval/i.test(message))
+      return '압축 영상 프레임을 해독하지 못했습니다. 뷰어 보안 정책과 WebAssembly 디코더 설정을 관리자에게 확인해 주세요.';
+    if (error?.code === 'IMAGE_DECODE_EMPTY' || /empty decoded image frame/i.test(message))
+      return '압축 영상 프레임의 해독 결과가 비어 있거나 불완전합니다. 원본 파일 손상과 압축 형식을 관리자에게 확인해 주세요.';
     if (/transfer syntax|decode|decoder|codestream/i.test(message))
       return '압축 영상 프레임을 해독하지 못했습니다. 원본의 압축 형식과 파일 손상을 관리자에게 확인해 주세요.';
     if (error?.name === 'TimeoutError' || /timeout|timed out/i.test(message))
@@ -43,6 +47,22 @@ function kinCreateImageLoadStatus() {
     };
     const responses = new Map(), requests = new Map(), originalFetch = window.fetch;
     let active = true, sequence = 0;
+    // Reject at the worker result boundary, before createImage/cache/IMAGE_LOADED can turn a corrupt codestream
+    // into a successful blank frame. The loader's existing rejection path supplies the affected imageId.
+    const workerManager = core.getWebWorkerManager?.(), executeTask = workerManager?.executeTask;
+    const checkedDecode = function (workerName, methodName, ...args) {
+      const result = executeTask.call(this, workerName, methodName, ...args);
+      if (!active || workerName !== 'dicomImageLoader' || methodName !== 'decodeTask') return result;
+      return result.then(frame => {
+        if (!(frame?.rows > 0 && frame?.columns > 0 && frame?.pixelData?.length > 0)) {
+          const error = new Error('Empty decoded image frame');
+          error.code = 'IMAGE_DECODE_EMPTY';
+          throw error;
+        }
+        return frame;
+      });
+    };
+    if (executeTask) workerManager.executeTask = checkedDecode;
     // Orthanc supplies the data source configuration. The pinned loader reads that object on every beforeSend,
     // not window.config.acceptHeader. Restore it on mode exit, keeping any later owner's changes intact.
     const configurations = [];
@@ -197,6 +217,7 @@ function kinCreateImageLoadStatus() {
     stop = () => {
       active = false;
       if (window.fetch === observedFetch) window.fetch = originalFetch;
+      if (workerManager?.executeTask === checkedDecode) workerManager.executeTask = executeTask;
       core.eventTarget.removeEventListener(events.IMAGE_LOAD_FAILED, failed);
       if (events.IMAGE_LOAD_ERROR) core.eventTarget.removeEventListener(events.IMAGE_LOAD_ERROR, failed);
       core.eventTarget.removeEventListener(events.IMAGE_LOADED, loaded);
