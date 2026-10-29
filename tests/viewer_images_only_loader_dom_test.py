@@ -37,7 +37,8 @@ def extract_function(source, name):
     raise ValueError(name)
 
 
-FACTORY = extract_function(CONFIG, "kinCreateImagesOnly") + ";window.imagesOnlyExtension=kinCreateImagesOnly();"
+# Load the delivered config together with its shared loader dependencies.
+FACTORY = CONFIG + ";window.imagesOnlyExtension=kinCreateImagesOnly();"
 HARNESS = """<!doctype html><html><head></head><body>
 <main id="kin-viewer-layout"></main><p id="kin-viewer-layout-status"></p>
 <script>
@@ -163,8 +164,12 @@ class ViewerImagesOnlyLoaderDOMTest(unittest.TestCase):
             page.evaluate("enterImagesOnly()")
             page.wait_for_function("()=>imagesOnlyCalls.mounts===1")
             page.evaluate("enterImagesOnly()")
-            expect(page.locator("#kin-viewer-layout-status")).to_have_text("Images Only 패널을 연결하지 못했습니다.")
+            expect(page.get_by_text("Images Only 패널을 연결하지 못했습니다.", exact=True)).to_be_visible()
+            expect(page.get_by_role("button", name="Retry", exact=True)).to_be_visible()
             self.assertEqual({"creates": 2, "mounts": 2, "stops": [1, 2]}, page.evaluate("imagesOnlyCalls"))
+            page.evaluate("KinViewerImagesOnly.create=()=>({mount:()=>true,stop(){}})")
+            page.get_by_role("button", name="Retry", exact=True).click()
+            expect(page.get_by_role("button", name="Retry", exact=True)).to_have_count(0)
         finally:
             page.close()
 

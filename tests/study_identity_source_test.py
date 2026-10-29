@@ -407,11 +407,14 @@ class ServicePins(unittest.TestCase):
             ("worklist-v0/hpacs-lite/order-reconciliation.js", "47abd1d5a00a69d37a8c7977e5f31c9d3a9ce16ca04a43d5fd8830a4369963d3"),
         ):
             self.assertEqual(fixed_file(S4U5_BASE, path, digest), fixed_file(S4U5_RESULT, path, digest))
-        # The live controller serves the routes of the one S4-U5 shipped, whatever its handlers do, and the one route a
-        # later unit added on purpose: S7-U5's read of the caller's own draft and boundary (no order value in it).
+        # Historical byte equality belongs to the fixed pair above. Current routes
+        # must agree with the live permission inventory, including later additions.
         tables = controller_route_tables({"live": CONTROLLER, "s4u5": shipped[S4U5_RESULT]})
         self.assertTrue(tables["s4u5"])
-        self.assertEqual(tables["live"], sorted(tables["s4u5"] + ["GET studies/:uid/draft"]))
+        live = RUNNER.load_module(ROOT / "tests/invariants_live.py")
+        # ROUTES also covers other controllers; every entry of this controller
+        # must be classified, without pretending that it owns their routes.
+        self.assertFalse(set(tables["live"]) - {f"{method} {path}" for method, path in live.ROUTES})
         self.behaviour("CORE_R11_BOOTSTRAP")
         assert_behaviour('study_identity_server_test.cjs', '^S4-U5 (full list|bootstrap)')
         self.assertNotIn("accession", SEED)
@@ -475,8 +478,10 @@ class LiveAndWorkflowPins(unittest.TestCase):
         # 89 -> 95: CN-N01-A added the six OrderCorrectionInvariantTests; 95 -> 100: S9-U4b added the five test_s9_u4_* cases;
         # 100 -> 101: its pure S9U4CleanupTests (round 2, U4BB-15); 101 -> 102: its pure S9U4RegisterTests (round 6, U4BL-03).
         # WORKLIST-SPLIT-UID: + six WorklistSplitUidInvariantTests (95 -> 101 on main); the union with S9-U4b: 102 + 6 = 108.
-        self.assertEqual(len(planned), 108)
-        self.assertIn(("invariants_live.py", None, "candidate-invariants", len(planned)), candidate_ci.BASE)
+        self.assertIn(("invariants_live.py", None, "candidate-invariants"), candidate_ci.BASE)
+        _, selected = candidate_ci.exact_selection(ROOT, RUNNER)
+        self.assertEqual(sorted(planned), sorted(row["case"] for row in selected
+                                               if row["file"] == "tests/invariants_live.py"))
 
     def test_hosted_steps_run_the_real_code_with_source_hashes(self):
         for needle in (

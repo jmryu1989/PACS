@@ -259,6 +259,9 @@ const studyPriority = { get: () => false };
 // W5 (order-list-store.js): the page's Related Report mode binding and the base-rule marker, declared as the page
 // declares them; null = no mode asset (the sliced region holds no Related Report mode).
 let relatedMode = null;
+// The sliced study move shares the page's optional multi-study controller binding.
+// This dictation fixture stays in the single-study report mode.
+let multiStudyView = null;
 const RELATED_BASE = Object.freeze({ base: true });
 const KinAuth = { has: () => true, logout: async () => { logouts += 1; } };
 const reportPreview = { close() {} };
