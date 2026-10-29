@@ -244,6 +244,8 @@ jobs:
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_prior_test.cjs
     - name: W9 multi-study composition, selection generation and viewer channel model
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/multi_study_view_test.cjs tests/worklist_selection_test.cjs
+    - name: D1880 memory-only preload store, worker and viewer opening check
+      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/preload_store_test.cjs tests/preload_worker_test.cjs tests/viewer_preload_test.cjs
     - name: Compound search operators and malformed condition boundaries
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/compound_filter_test.cjs tests/worklist_alerts_test.cjs tests/worklist_refresh_test.cjs tests/worklist_startup_test.cjs tests/related_parts_test.cjs tests/worklist_body_parts_test.cjs tests/study_priority_test.cjs tests/worklist_search_test.cjs
     - name: Worklist column visibility and account storage model

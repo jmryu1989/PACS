@@ -266,6 +266,61 @@ test('serveFrames: gzip when the client accepts it, decoding to the same multipa
   });
 });
 
+test('serveFrames: the preload stored form is the gzip stream itself, typed application/gzip, naming the multipart it decodes to', async () => {
+  await withService(async (service) => {
+    const plain = target();
+    await service.serveFrames(request(), plain);
+    const expected = await plain.result();
+    // With or without Accept-Encoding: a browser would decode Content-Encoding before the preload store sees the bytes.
+    for (const acceptEncoding of [undefined, 'gzip, deflate, br']) {
+      const t = target();
+      await service.serveFrames(request({ stored: true, acceptEncoding }), t);
+      const { status, headers, body } = await t.result();
+      assert.equal(status, 200);
+      assert.equal(headers['content-type'], 'application/gzip');
+      assert.equal(headers['content-encoding'], undefined);
+      // A declared length would be the decoded multipart's; a client then waits for bytes that never come (VM run
+      // opus-preload-mem-1028a: every stored read ended "upstream prematurely closed").
+      assert.equal(headers['content-length'], undefined);
+      const unbounded = type => type.replace(/boundary=[^;]+/, '');
+      assert.equal(unbounded(headers['x-kin-part-type']), unbounded(expected.headers['content-type']), 'the type the plain answer has');
+      const decoded = zlib.gunzipSync(body);
+      assert.equal(decoded.length, expected.body.length);
+      const boundary = /boundary=([^;]+)/.exec(headers['x-kin-part-type'])[1];
+      assert.ok(decoded.toString('latin1').startsWith('--' + boundary + '\r\n'), 'the part type names the decoded body\'s boundary');
+    }
+  });
+});
+
+test('serveFrames: a stored-form answer arrives complete over a real HTTP/1.1 connection (chunked, no declared length)', async () => {
+  const http = require('node:http');
+  await withService(async (service) => {
+    const plain = target();
+    await service.serveFrames(request({ frames: [1] }), plain);
+    const expected = (await plain.result()).body;
+    const server = http.createServer((req, res) => {
+      res.status = code => { res.statusCode = code; return res; };
+      service.serveFrames(request({ frames: [1], stored: true, acceptEncoding: req.headers['accept-encoding'] }), res).catch(() => {});
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const answer = await new Promise((resolve, reject) => {
+        http.get({ host: '127.0.0.1', port: server.address().port, path: '/frame', headers: { 'Accept-Encoding': 'gzip' } }, res => {
+          const chunks = [];
+          res.on('data', c => chunks.push(c));
+          res.on('end', () => resolve({ res, body: Buffer.concat(chunks) }));
+          res.on('error', reject);
+        }).on('error', reject);
+      });
+      assert.equal(answer.res.complete, true);
+      assert.equal(answer.res.headers['transfer-encoding'], 'chunked');
+      assert.equal(answer.res.headers['content-type'], 'application/gzip');
+      assert.ok(zlib.gunzipSync(answer.body).subarray(0, 2).equals(Buffer.from('--')));
+      assert.equal(zlib.gunzipSync(answer.body).length, expected.length);
+    } finally { server.closeAllConnections?.(); server.close(); }
+  });
+});
+
 test('serveFrames: a client that goes away mid-stream ends the read as a failure, never as an unhandled rejection', async () => {
   // Observed 2026-10-27 on the synthetic stack: the viewer page closed during a gzip thumbnail read and the API process
   // exited 1 from the delivery pipeline's unobserved rejection. The read itself must still fail (nothing pretends to finish).
