@@ -499,12 +499,13 @@ class WSpaceDOM(unittest.TestCase):
                     self.drag_top(page, 30)
                     self.assertIsNotNone(self.stored(page)[axis]['top'])
                     dragged = page.evaluate(GEOM)['rw'][3]
-                    # The key moves the separator from where it is drawn (a tight portrait window clamps the drag).
+                    # The key moves from the drawn separator, respecting the existing 140 px drag minimum.
+                    # Preload's list floor can leave a tight portrait band already at that minimum.
                     page.locator('#resize-top').focus()
                     page.keyboard.press('ArrowUp')
                     settle(page)
                     record = self.stored(page)
-                    self.assertAlmostEqual(dragged - 10, record[axis]['top'], delta=1)
+                    self.assertAlmostEqual(max(140, dragged - 10), record[axis]['top'], delta=1)
                     sizes = {a: record[a] for a in ('portrait', 'landscape')}
                     start = page.evaluate(GEOM)
                     self.assertAlmostEqual(record[axis]['top'], start['rw'][3], delta=1)

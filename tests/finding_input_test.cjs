@@ -16,21 +16,20 @@ test('strict allow-list: copied provenance fields from the client are rejected',
   for (const bad of [{ ...body, author: 'forged' }, { ...body, item: { ...item, hidden: true } }, { ...body, item: { ...item, links: [] } },
     { ...body, item: { ...item, schemaVersion: 2 } }, { ...body, item: { ...item, sources: [] } },
     { ...body, item: { ...item, sources: [{ itemId: ID, revision: 2 }, { itemId: ID, revision: 3 }] } },
-    { ...body, item: { ...item, sources: Array.from({ length: 9 }, (_, i) => ({ itemId: ID.slice(0, -1) + i, revision: 1 })) } },
     { ...body, item: { ...item, sources: [{ itemId: 'not-a-uuid', revision: 1 }] } }, { ...body, item: { ...item, sources: [{ itemId: ID, revision: 0 }] } },
     { ...body, item: { ...item, sources: [{ itemId: ID, revision: 1.5 }] } }, { ...body, item: { ...item, sources: [{ itemId: ID, revision: '1' }] } },
     { ...body, item: { ...item, primary: 1 } }, { ...body, item: { ...item, primary: -1 } }, { ...body, item: { ...item, title: 7 } },
     { ...body, item: { ...item, title: '😀'.repeat(201) } }, { ...body, item: { ...item, text: 'x'.repeat(4001) } },
     { ...body, item: { ...item, text: '\u0000' } }, { ...body, requestId: 'x' }]) reject(() => f.findingCommand(raw(bad), true));
   assert.equal([...f.findingCommand(raw({ ...body, item: { ...item, title: '😀'.repeat(200) } }), true).item.title].length, 200);
-  assert.equal(f.findingCommand(raw({ ...body, item: { ...item, sources: Array.from({ length: 8 }, (_, i) => ({ itemId: ID.slice(0, -1) + i, revision: 1 })), primary: 7 } }), true).item.primary, 7);
+  assert.equal(f.findingCommand(raw({ ...body, item: { ...item, sources: Array.from({ length: 9 }, (_, i) => ({ itemId: ID.slice(0, -1) + i, revision: 1 })), primary: 8 } }), true).item.primary, 8);
 });
 
-test('revision commands need expectedRevision, an action and a reason only for hide/restore', () => {
+test('revision commands need expectedRevision, an action; reasons are optional', () => {
   reject(() => f.findingCommand(raw(body), false));
   reject(() => f.findingCommand(raw({ ...body, expectedRevision: 1, action: 'create' }), false));
-  reject(() => f.findingCommand(raw({ ...body, expectedRevision: 1, action: 'hide' }), false));
-  reject(() => f.findingCommand(raw({ ...body, expectedRevision: 1, action: 'edit', reason: '사유' }), false));
+  assert.equal(f.findingCommand(raw({ ...body, expectedRevision: 1, action: 'hide' }), false).reason, '');
+  assert.equal(f.findingCommand(raw({ ...body, expectedRevision: 1, action: 'edit', reason: '사유' }), false).reason, '사유');
   reject(() => f.findingCommand(raw({ ...body, expectedRevision: 0, action: 'edit' }), false));
   const hide = f.findingCommand(raw({ ...body, expectedRevision: 3, action: 'hide', reason: '사유' }), false);
   assert.equal(hide.action, 'hide'); assert.equal(hide.expectedRevision, 3); assert.equal(hide.reason, '사유');
@@ -66,7 +65,6 @@ test('page queries fail closed and copySource/linkState follow the contract', ()
   assert.equal(f.linkState(source, { ...head, hidden: true, revision: 5 }), 'hidden');
   assert.equal(f.linkState(source, null), 'missing');
   assert.equal(f.linkState(source, { ...head, studyUid: '2.25.9' }), 'missing');
-  assert.deepEqual(f.FINDING_LIMITS, { findings: 256, revisions: 4096, bytes: 16777216, snapshot: 65536, history: 1000, sources: 8, title: 200, text: 4000 });
 });
 
 test('S2-B2 comparison studies: distinct, anchor excluded, stable order, a missing uid never names a study', () => {
@@ -121,7 +119,7 @@ test('S2-L1 version 2: required characteristics, item and job references, and ev
     'same saved view twice': v2({ sources: [{ jobId: JOB, revision: 1 }, { jobId: JOB, revision: 2 }] }),
     'same point twice': v2({ sources: [{ jobId: JOB, revision: 1, markId: MARK }, { jobId: JOB, revision: 2, markId: MARK }] }),
     'unknown version': { ...v2(), schemaVersion: 3 }, 'extra key': v2({ laterality: 'L' }),
-    'nine sources': v2({ sources: Array.from({ length: 9 }, (_, i) => ({ jobId: JOB, revision: 1, markId: MARK.slice(0, -1) + i })) }) }))
+    }))
     reject(() => f.findingCommand(raw({ requestId: REQ, item: bad }), true), 400);
   // One job may be linked as its saved view and as each of its points.
   assert.equal(f.findingCommand(raw({ requestId: REQ, item: v2({ sources: [{ jobId: JOB, revision: 1 }, { jobId: JOB, revision: 1, markId: MARK }, { jobId: JOB, revision: 1, markId: MARK2 }] }) }), true).item.sources.length, 3);
@@ -150,7 +148,6 @@ test('S2-L1 R7: characteristics count code points like title and text; 1000 astr
   assert.equal(f.findingCommand(raw({ requestId: REQ, item: v2({ characteristics: '가'.repeat(1000) }) }), true).item.characteristics.length, 1000);
   reject(() => f.findingCommand(raw({ requestId: REQ, item: v2({ characteristics: 'x'.repeat(1001) }) }), true));
   // The shipped limits object is unchanged; the version 2 bound is its own constant.
-  assert.deepEqual(f.FINDING_LIMITS, { findings: 256, revisions: 4096, bytes: 16777216, snapshot: 65536, history: 1000, sources: 8, title: 200, text: 4000 });
 });
 
 const jobRow = extra => Object.assign({ id: JOB, studyUid: X, studies: [X, P], hidden: false, revision: 4, title: '비교 위치', authorActor: 'Reader' }, extra);

@@ -2,7 +2,7 @@
  * The whole-original download archive of one study (S9-U4p contract §5.2, R3 persistent format).
  *
  * Three pure pieces the download service composes: the canonical preparation manifest (the persisted string whose
- * SHA-256 binds an operation), the exact ZIP32 pre-computation that refuses an oversize archive before byte 1, and a
+ * SHA-256 binds an operation), the exact ZIP32/ZIP64 pre-computation that refuses an oversize archive before byte 1, and a
  * streaming STORE writer that hashes every object while it passes and never closes a short or mismatching archive as
  * a successful ZIP. No Orthanc client, no timers and no database here: the caller supplies one Readable per object,
  * the response as the sink, a gate that approves and makes every sink write, and hooks for its no-progress timer and
@@ -57,6 +57,7 @@ export interface ArchiveEntryPlan {
 }
 
 export interface ArchivePlan {
+  zip64: boolean;
   studyUid: string;
   objects: readonly ManifestObject[];
   /** DICOM entries in manifest order, then manifest.json. */
@@ -154,11 +155,7 @@ export interface WriteArchiveOptions {
 export const ORIGINAL_ARCHIVE_MANIFEST_NAME = 'manifest.json';
 
 export const ORIGINAL_ARCHIVE_LIMITS = Object.freeze({
-  /** Every s_i, local offset, O, C and T must stay strictly below this (no ZIP64, no 0xFFFFFFFF sentinel). */
-  uint32Exclusive: 0xffffffff,
-  /** N = DICOM objects + manifest.json must stay strictly below this (no 0xFFFF sentinel). */
-  entriesExclusive: 65535,
-  maxDicomObjects: 65533,
+  // ZIP file names use a UInt16 byte length in both ZIP32 and ZIP64.
   maxNameBytes: 65535,
 });
 
@@ -263,7 +260,7 @@ const tooLarge = (reason: ArchiveTooLargeReason): ArchivePlanResult =>
   ({ ok: false, code: 'ARCHIVE_TOO_LARGE', reason, message: ORIGINAL_ARCHIVE_MESSAGES.ARCHIVE_TOO_LARGE });
 
 /**
- * The exact ZIP32 layout of the archive, computed in BigInt before byte 1 (§5.2 "ZIP32 정확 사전 계산"). The input
+ * The exact ZIP32/ZIP64 layout of the archive, computed in BigInt before byte 1. The input
  * must be a canonical manifest (from canonicalManifest or parseCanonicalManifest); anything else is a programming error.
  */
 export function planArchive(manifest: OriginalManifest): ArchivePlanResult {
@@ -272,9 +269,8 @@ export function planArchive(manifest: OriginalManifest): ArchivePlanResult {
     o && typeof o === 'object' ? { orthancId: o.orthancId, seriesUid: o.seriesUid, sopUid: o.sopUid, bytes: o.bytes, md5: o.md5 } : o));
   if (!check.ok || JSON.stringify(manifest) !== check.manifestCanonical) throw new TypeError('planArchive needs a canonical manifest');
   const { studyUid, objects } = check.manifest;
-  const limit = BigInt(ORIGINAL_ARCHIVE_LIMITS.uint32Exclusive);
+  const limit = BigInt(Number.MAX_SAFE_INTEGER);
   const entryCount = objects.length + 1;
-  if (entryCount >= ORIGINAL_ARCHIVE_LIMITS.entriesExclusive) return tooLarge('too-many-entries');
 
   const manifestSize = Buffer.byteLength(finalManifestText(studyUid, objects, objects.map(() => ZERO_SHA256)), 'utf8');
   const layout: { name: string; nameBytes: number; size: bigint; offset: bigint; object: ManifestObject | null }[] = [];
@@ -289,22 +285,24 @@ export function planArchive(manifest: OriginalManifest): ArchivePlanResult {
     if (size >= limit) return tooLarge('entry-too-large');
     if (offset >= limit) return tooLarge('offset-too-large');
     layout.push({ name, nameBytes, size, offset, object });
-    offset += 30n + BigInt(nameBytes) + size + 16n;
-    central += 46n + BigInt(nameBytes);
+    const largeSize = size >= 0xffffffffn, largeOffset = offset >= 0xffffffffn;
+    offset += 30n + BigInt(nameBytes) + (largeSize ? 20n : 0n) + size + (largeSize ? 24n : 16n);
+    central += 46n + BigInt(nameBytes) + (largeSize || largeOffset ? 4n : 0n) + (largeSize ? 16n : 0n) + (largeOffset ? 8n : 0n);
   }
-  const total = offset + central + 22n;
+  const zip64 = entryCount >= 0xffff || offset >= 0xffffffffn || central >= 0xffffffffn || layout.some(e => e.size >= 0xffffffffn);
+  const total = offset + central + (zip64 ? 98n : 22n);
   if (offset >= limit) return tooLarge('offset-too-large');
   if (central >= limit) return tooLarge('central-directory-too-large');
   if (total >= limit) return tooLarge('archive-too-large');
 
-  // Every value is now below 2^32, so Number is exact from here on.
+  // Byte counters stay exact in JavaScript; ZIP64 fields are encoded as UInt64.
   const entries: ArchiveEntryPlan[] = layout.map(e => ({
     name: e.name,
     nameBytes: e.nameBytes,
     size: Number(e.size),
     localOffset: Number(e.offset),
-    localSize: Number(30n + BigInt(e.nameBytes) + e.size + 16n),
-    centralSize: 46 + e.nameBytes,
+    localSize: Number(30n + BigInt(e.nameBytes) + e.size + (e.size >= 0xffffffffn ? 44n : 16n)),
+    centralSize: 46 + e.nameBytes + (e.size >= 0xffffffffn || e.offset >= 0xffffffffn ? 4 : 0) + (e.size >= 0xffffffffn ? 16 : 0) + (e.offset >= 0xffffffffn ? 8 : 0),
     object: e.object,
   }));
   return {
@@ -318,6 +316,7 @@ export function planArchive(manifest: OriginalManifest): ArchivePlanResult {
       centralOffset: Number(offset),
       centralSize: Number(central),
       totalSize: Number(total),
+      zip64,
     }),
   };
 }
@@ -355,10 +354,11 @@ function crc32(bytes: Uint8Array, previous = 0) {
   return ~c >>> 0;
 }
 
-function localHeader(name: Buffer) {
-  const h = Buffer.alloc(30 + name.length);
+function localHeader(name: Buffer, size: number) {
+  const large = size >= 0xffffffff;
+  const h = Buffer.alloc(30 + name.length + (large ? 20 : 0));
   h.writeUInt32LE(LOCAL_FILE_HEADER, 0);
-  h.writeUInt16LE(VERSION, 4);
+  h.writeUInt16LE(large ? 45 : VERSION, 4);
   h.writeUInt16LE(FLAGS, 6);
   h.writeUInt16LE(STORE, 8);
   h.writeUInt16LE(DOS_TIME, 10);
@@ -366,15 +366,21 @@ function localHeader(name: Buffer) {
   // CRC-32 and both sizes stay zero here: bit 3 puts them in the data descriptor.
   h.writeUInt16LE(name.length, 26);
   name.copy(h, 30);
+  if (large) {
+    h.writeUInt32LE(0xffffffff, 18); h.writeUInt32LE(0xffffffff, 22); h.writeUInt16LE(20, 28);
+    const at = 30 + name.length; h.writeUInt16LE(1, at); h.writeUInt16LE(16, at + 2);
+    h.writeBigUInt64LE(BigInt(size), at + 4); h.writeBigUInt64LE(BigInt(size), at + 12);
+  }
   return h;
 }
 
 function dataDescriptor(crc: number, size: number) {
-  const d = Buffer.alloc(16);
+  const large = size >= 0xffffffff;
+  const d = Buffer.alloc(large ? 24 : 16);
   d.writeUInt32LE(DATA_DESCRIPTOR, 0);
   d.writeUInt32LE(crc, 4);
-  d.writeUInt32LE(size, 8);
-  d.writeUInt32LE(size, 12);
+  if (large) { d.writeBigUInt64LE(BigInt(size), 8); d.writeBigUInt64LE(BigInt(size), 16); }
+  else { d.writeUInt32LE(size, 8); d.writeUInt32LE(size, 12); }
   return d;
 }
 
@@ -383,32 +389,48 @@ function centralDirectory(plan: ArchivePlan, crcs: readonly number[]) {
   let at = 0;
   plan.entries.forEach((entry, index) => {
     const name = Buffer.from(entry.name, 'utf8');
+    const largeSize = entry.size >= 0xffffffff, largeOffset = entry.localOffset >= 0xffffffff;
+    const extra = entry.centralSize - 46 - name.length;
     out.writeUInt32LE(CENTRAL_DIRECTORY_HEADER, at);
     out.writeUInt16LE(VERSION, at + 4); // made by: 2.0, MS-DOS attribute compatibility (external attributes 0)
-    out.writeUInt16LE(VERSION, at + 6);
+    out.writeUInt16LE(extra ? 45 : VERSION, at + 6);
     out.writeUInt16LE(FLAGS, at + 8);
     out.writeUInt16LE(STORE, at + 10);
     out.writeUInt16LE(DOS_TIME, at + 12);
     out.writeUInt16LE(DOS_DATE, at + 14);
     out.writeUInt32LE(crcs[index], at + 16);
-    out.writeUInt32LE(entry.size, at + 20);
-    out.writeUInt32LE(entry.size, at + 24);
+    out.writeUInt32LE(largeSize ? 0xffffffff : entry.size, at + 20);
+    out.writeUInt32LE(largeSize ? 0xffffffff : entry.size, at + 24);
     out.writeUInt16LE(name.length, at + 28);
-    // extra, comment, disk number start, internal and external attributes stay zero.
-    out.writeUInt32LE(entry.localOffset, at + 42);
+    out.writeUInt16LE(extra, at + 30);
+    out.writeUInt32LE(largeOffset ? 0xffffffff : entry.localOffset, at + 42);
     name.copy(out, at + 46);
-    at += 46 + name.length;
+    if (extra) {
+      let pos = at + 46 + name.length;
+      out.writeUInt16LE(1, pos); out.writeUInt16LE(extra - 4, pos + 2); pos += 4;
+      if (largeSize) { out.writeBigUInt64LE(BigInt(entry.size), pos); out.writeBigUInt64LE(BigInt(entry.size), pos + 8); pos += 16; }
+      if (largeOffset) out.writeBigUInt64LE(BigInt(entry.localOffset), pos);
+    }
+    at += entry.centralSize;
   });
   return out;
 }
 
 function endOfCentralDirectory(plan: ArchivePlan) {
-  const e = Buffer.alloc(22);
-  e.writeUInt32LE(END_OF_CENTRAL_DIRECTORY, 0);
-  e.writeUInt16LE(plan.entryCount, 8);
-  e.writeUInt16LE(plan.entryCount, 10);
-  e.writeUInt32LE(plan.centralSize, 12);
-  e.writeUInt32LE(plan.centralOffset, 16);
+  const e = Buffer.alloc(plan.zip64 ? 98 : 22), at = plan.zip64 ? 76 : 0;
+  if (plan.zip64) {
+    e.writeUInt32LE(0x06064b50, 0); e.writeBigUInt64LE(44n, 4);
+    e.writeUInt16LE(45, 12); e.writeUInt16LE(45, 14);
+    e.writeBigUInt64LE(BigInt(plan.entryCount), 24); e.writeBigUInt64LE(BigInt(plan.entryCount), 32);
+    e.writeBigUInt64LE(BigInt(plan.centralSize), 40); e.writeBigUInt64LE(BigInt(plan.centralOffset), 48);
+    e.writeUInt32LE(0x07064b50, 56); e.writeBigUInt64LE(BigInt(plan.centralOffset + plan.centralSize), 64);
+    e.writeUInt32LE(1, 72);
+  }
+  e.writeUInt32LE(END_OF_CENTRAL_DIRECTORY, at);
+  e.writeUInt16LE(Math.min(plan.entryCount, 0xffff), at + 8);
+  e.writeUInt16LE(Math.min(plan.entryCount, 0xffff), at + 10);
+  e.writeUInt32LE(Math.min(plan.centralSize, 0xffffffff), at + 12);
+  e.writeUInt32LE(Math.min(plan.centralOffset, 0xffffffff), at + 16);
   return e;
 }
 
@@ -621,7 +643,7 @@ export async function writeArchive(options: WriteArchiveOptions): Promise<Archiv
         }
         const stream = handover.stream;
         if (!stream || handover.calls !== 1) throw new Stop(watch.failure() ?? 'source-error');
-        await put(localHeader(Buffer.from(entry.name, 'utf8')));
+        await put(localHeader(Buffer.from(entry.name, 'utf8'), entry.size));
         for await (const chunk of stream) {
           if (!(chunk instanceof Uint8Array)) throw new Stop('source-error');
           // Never read past manifest bytes + 1: one byte too many already proves a length mismatch.
@@ -675,7 +697,7 @@ export async function writeArchive(options: WriteArchiveOptions): Promise<Archiv
     const manifestBytes = Buffer.from(finalManifestText(plan.studyUid, plan.objects, objects.map(o => o.sha256)), 'utf8');
     if (written !== manifestEntry.localOffset || manifestBytes.length !== manifestEntry.size) throw new Stop('plan-mismatch');
     const manifestCrc = crc32(manifestBytes);
-    await put(localHeader(Buffer.from(manifestEntry.name, 'utf8')));
+    await put(localHeader(Buffer.from(manifestEntry.name, 'utf8'), manifestEntry.size));
     await put(manifestBytes);
     await put(dataDescriptor(manifestCrc, manifestBytes.length));
     crcs.push(manifestCrc);

@@ -2,7 +2,7 @@
  *
  * Preload on a multi-selection queues the selected studies in the preload SharedWorker (preload-worker.js); this panel
  * shows each one's status - Queued, Downloading, Ready, Failed, Evicted - with Retry, and the store's memory against the
- * budget the browser's reported memory allows. The images stay in that worker's memory only and are gone when the last
+ * budget (the browser's reported memory times the share the site set, preload-store.js). The images stay in that worker's memory only and are gone when the last
  * worklist or viewer window of this browser closes; nothing is written to the reading PC's disk (D1880).
  *
  * The worker serves one session: the worklist tells it the session it works for, and a session that ended or changed
@@ -85,8 +85,8 @@
       summary.textContent = 'Preload: ' + (['Downloading', 'Queued', 'Ready', 'Failed', 'Evicted']
         .filter(name => counts[name]).map(name => `${counts[name]} ${name}`).join(' · ') || '0');
       memory.textContent = state?.budget == null
-        ? '이 브라우저가 메모리 크기를 알려 주지 않아 미리 받기를 할 수 없습니다.'
-        : `메모리 ${gb(state.used)} / ${gb(state.budget)} GB (이 브라우저가 알려 준 메모리로 정한 한도). 디스크에는 저장하지 않습니다.`;
+        ? state?.unavailable || '미리 받기 메모리 한도를 확인하고 있습니다.'
+        : `메모리 ${gb(state.used)} / ${gb(state.budget)} GB (이 브라우저가 알려 준 메모리에 기관이 정한 비율을 곱한 한도). 디스크에는 저장하지 않습니다.`;
       const rows = table.tBodies[0];
       rows.replaceChildren();
       for (const s of list) {

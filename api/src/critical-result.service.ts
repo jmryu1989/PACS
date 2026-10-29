@@ -1,3 +1,4 @@
+import { criticalRead } from './emr-viewing/consumer-read';
 import { rightsUser, lockMemberRights } from './member-rights';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, HttpException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
@@ -209,7 +210,7 @@ export class CriticalResultService {
 
   /** 고정 판 행 자신의 본문. 판독 초안·현재 Report가 아니다. */
   private async pinnedBody(tx: any, uid: string, version: number) {
-    const rows: any[] = await tx.$queryRaw`SELECT findings,conclusion,recommendation FROM "ReportVersion" WHERE uid=${uid} AND version=${version}`;
+    const rows: any[] = await tx.$queryRaw`SELECT id,findings,conclusion,recommendation FROM "ReportVersion" WHERE uid=${uid} AND version=${version}`;
     return rows[0] ?? null;
   }
 
@@ -683,7 +684,7 @@ export class CriticalResultService {
       // 부류별 C5/R5: 고정 = 머리인데 C는 확정 원천이 아님, R은 P 짝 밖(§6.2). NULL이 행을 떨어뜨리지 않게 모든 항을 참/거짓으로 만든다.
       const rows: any[] = await tx.$queryRaw`SELECT cr.*,rb.id AS "replacedById",rb."sourceVersion" AS "replacedByVersion",s.ov,s.rs,
           s."preDoc",s."preReviewer",s."preDocSub",s."preReviewerSub",r.version AS "headVersion",hv.action AS "headAction",
-          pv.findings AS "pinFindings",pv.conclusion AS "pinConclusion",pv.recommendation AS "pinRecommendation"
+          pv.id AS "pinId",pv.findings AS "pinFindings",pv.conclusion AS "pinConclusion",pv.recommendation AS "pinRecommendation"
         FROM "CriticalResult" cr JOIN "StudyState" s ON s.uid=cr."studyUid" AND s."institutionId"=cr."institutionId"
         JOIN "ReportVersion" pv ON pv.uid=cr."studyUid" AND pv.version=cr."sourceVersion"
         LEFT JOIN "Report" r ON r.uid=cr."studyUid" LEFT JOIN "ReportVersion" hv ON hv.uid=r.uid AND hv.version=r.version
@@ -711,8 +712,8 @@ export class CriticalResultService {
     const nextCursor = rows.length > CRITICAL_RESULT_PAGE ? encodeCursor(last.createdAt, last.id, access.revision) : null;
     if (sent) {
       const delivery = await this.deliveries(c, page.map(row => ({ row, head: CriticalResultService.headOf(row), state: CriticalResultService.stateOf(row) })));
-      return { owner: this.owner(c), view: 'sent', items: page.map(row => senderView(row, CriticalResultService.headOf(row),
-        studyIdentity(row, row.ov), delivery.get(row.id) ?? null, row.replacedById ?? null)), nextCursor, pending };
+      return criticalRead({ owner: this.owner(c), view: 'sent', items: page.map(row => senderView(row, CriticalResultService.headOf(row),
+        studyIdentity(row, row.ov), delivery.get(row.id) ?? null, row.replacedById ?? null)), nextCursor, pending }, page);
     }
     const items = page.map(row => {
       const head = CriticalResultService.headOf(row), state = CriticalResultService.stateOf(row);
@@ -722,7 +723,7 @@ export class CriticalResultService {
         { findings: row.pinFindings, conclusion: row.pinConclusion, recommendation: row.pinRecommendation },
         this.replacementOf(next, { cls, state, head, actor: c.actor, sub: c.sub }));
     });
-    return { owner: this.owner(c), view: 'received', items, nextCursor, pending };
+    return criticalRead({ owner: this.owner(c), view: 'received', items, nextCursor, pending }, page);
   }
 
   /**
@@ -749,11 +750,11 @@ export class CriticalResultService {
       if (kase.view === null) throw recordMissing();
       const pinned = kase.view === 'full' ? await this.pinnedBody(tx, row.studyUid, row.sourceVersion) : null;
       const replacedBy = await this.replacement(tx, row, { cls, state, head, actor: c.actor, sub: c.sub });
-      return { sender: false as const, item: recipientView(row, kase, studyIdentity(row, state.ov), pinned, replacedBy) };
+      return { sender: false as const, row: { ...row, pinId: pinned?.id }, item: recipientView(row, kase, studyIdentity(row, state.ov), pinned, replacedBy) };
     }, true);
-    if (!out.sender) return { owner: this.owner(c), item: out.item };
+    if (!out.sender) return criticalRead({ owner: this.owner(c), item: out.item }, [out.row], true);
     const delivery = await this.deliveries(c, [{ row: out.row, head: out.head, state: out.state }]);
-    return { owner: this.owner(c), item: senderView(out.row, out.head, studyIdentity(out.row, out.state.ov), delivery.get(out.row.id) ?? null, out.replacedBy) };
+    return criticalRead({ owner: this.owner(c), item: senderView(out.row, out.head, studyIdentity(out.row, out.state.ov), delivery.get(out.row.id) ?? null, out.replacedBy) }, [out.row], true);
   }
 
   /**
@@ -775,7 +776,7 @@ export class CriticalResultService {
       // 받은 기록의 C5/R5는 검사 하나라 머리 판·부류가 행마다 같다: 고정 = 머리인 행을 이 조건이면 뺀다.
       const hide = cls === 'clinician' ? !clinicianFinal(state.rs, head) : !legacyReadable(state, c.actor, c.sub);
       const rows: any[] = await tx.$queryRaw`SELECT cr.*,rb.id AS "replacedById",rb."sourceVersion" AS "replacedByVersion",
-          pv.findings AS "pinFindings",pv.conclusion AS "pinConclusion",pv.recommendation AS "pinRecommendation"
+          pv.id AS "pinId",pv.findings AS "pinFindings",pv.conclusion AS "pinConclusion",pv.recommendation AS "pinRecommendation"
         FROM "CriticalResult" cr JOIN "ReportVersion" pv ON pv.uid=cr."studyUid" AND pv.version=cr."sourceVersion"
         LEFT JOIN "CriticalResult" rb ON rb."supersedesId"=cr.id
         WHERE cr."studyUid"=${uid} AND cr."institutionId"=${institution}
@@ -796,6 +797,6 @@ export class CriticalResultService {
       return recipientView(row, kase, study(row), { findings: row.pinFindings, conclusion: row.pinConclusion, recommendation: row.pinRecommendation },
         this.replacementOf(next, { cls, state: out.state, head: out.head, actor: c.actor, sub: c.sub }));
     });
-    return { owner: this.owner(c), uid, items };
+    return criticalRead({ owner: this.owner(c), uid, items }, out.rows);
   }
 }

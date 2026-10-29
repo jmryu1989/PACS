@@ -73,6 +73,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # in document order. CI-17 records exactly these with this file.
 SERVED_FILES = (
     "worklist-v0/hpacs-lite/admin-access-review.js",
+    "worklist-v0/hpacs-lite/held-sources-admin.js",
     "worklist-v0/hpacs-lite/index.html",
     "proxy/branding/kin-emblem-j1.svg",
     "proxy/branding/kin-favicon-32.png",
@@ -163,6 +164,7 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/study-access-admin.js",
     "worklist-v0/hpacs-lite/signing-key-admin.js",
     "worklist-v0/hpacs-lite/admin-access-review.js",
+    "worklist-v0/hpacs-lite/held-sources-admin.js",
     "worklist-v0/hpacs-lite/clinician.html",
     "worklist-v0/hpacs-lite/clinician.js",
 )
@@ -507,7 +509,7 @@ class Site:
         return route.fulfill(status=200, content_type=TYPES[Path(rel).suffix], body=(ROOT / rel).read_bytes())
 
     # Requests this unit's files send (auth.js, index.html, main.html's own script): each must name its session.
-    STRICT = re.compile(r"/api/(auth/logout|bootstrap|studies|prefs|colleagues|templates.*|filters.*|unassigned"
+    STRICT = re.compile(r"/api/(auth/logout|bootstrap|studies|prefs|colleagues|templates.*|filters.*"
                         r"|studies/[^/]+/(report|draft|hold|release|report/commit|report/citations|report/structure"
                         r"|report/versions.*|clinical-context|image-requests|questions|gateway-retry))$")
 
@@ -824,7 +826,8 @@ class LogoutDOMTest(unittest.TestCase):
                 posts.append(body)
                 if body['baseVersion'] != len(notes):
                     return route.fulfill(status=409, json={'message': 'SYN conflict'})
-                if body['text'] == notes[-1]['text'] or not body['reason'].strip():
+                # The served contract after the caution census (#259): an edit's reason is optional; an unchanged text is refused.
+                if body['text'] == notes[-1]['text']:
                     return route.fulfill(status=400, json={'message': 'SYN invalid edit'})
                 notes.append(dict(notes[-1], version=len(notes)+1, text=body['text'], reason=body['reason'].strip(), author='tech',
                                   attemptId=body['attemptId'], isOwnAttempt=True))
@@ -864,7 +867,7 @@ class LogoutDOMTest(unittest.TestCase):
                 self.assertEqual(self.dialogs, prompts + (['현재 입력이 마지막 확인본과 다른데 입력을 버리고 닫을까요?'] if corrected else []))
                 expect(self.page.locator('#findings')).to_be_editable()
 
-    def test_ctx_note_witness_before_foreign_revision_keeps_and_uses_up_the_confirmed_reason(self):
+    def test_ctx_note_witness_before_foreign_revision_uses_up_the_confirmed_reason(self):
         dialog, notes, posts = self.open_note_with_lost_receipt()
         notes.append(dict(notes[-1], version=3, text='SYN foreign v3', reason='foreign reason', author='other technician',
                           attemptId='99999999-9999-4999-8999-999999999999', isOwnAttempt=False))
@@ -872,16 +875,15 @@ class LogoutDOMTest(unittest.TestCase):
         save.click()
         expect(dialog.get_by_role('status')).to_have_text('앞선 입력은 v2로 저장되었고 마지막 확인본은 다른 저장인 v3입니다.')
         expect(dialog.get_by_label('Note', exact=True)).to_have_value('SYN B')
-        expect(reason).to_have_value('R1')  # S8-CTX: kept as typed, used up by the saved v2
-        save.click()
-        expect(dialog.get_by_role('status')).to_have_text('앞선 입력은 v2로 저장되었으며 이번 수정의 사유를 입력하세요.')
+        # #259 (caution census): the reason is optional, and the confirmed v2 used up the reason it carried, so it is
+        # cleared rather than carried into the next edit.
+        expect(reason).to_have_value('')
         self.assertEqual(len(posts), 1)
-        self.assertEqual(notes[-1]['text'], 'SYN foreign v3')
-        reason.fill('R2 after comparing v3')
         save.click()
         expect(dialog.get_by_role('status')).to_have_text('입력이 v4로 저장되었습니다.')
-        self.assertEqual({k: posts[-1][k] for k in ('baseVersion', 'text', 'reason')}, {'baseVersion': 3, 'text': 'SYN B', 'reason': 'R2 after comparing v3'})
+        self.assertEqual({k: posts[-1][k] for k in ('baseVersion', 'text', 'reason')}, {'baseVersion': 3, 'text': 'SYN B', 'reason': ''})
         self.assertEqual(len(posts), 2)
+        self.assertEqual(notes[-1]['reason'], '')
 
     def test_ctx_note_409_refusal_sentence_and_original_reload_confirmation(self):
         # S8-CTX T07: a 409 reads the latest at once; that read failing here leaves the refusal and the re-check owed.
@@ -2553,7 +2555,8 @@ class LogoutDOMTest(unittest.TestCase):
         expect(page.locator("#tech-note-status")).to_have_text(
             "앞선 입력은 v2로 저장되었습니다." if stored else "앞선 저장 결과는 아직 확인되지 않았으며 입력은 유지됩니다.")
         expect(page.locator("#tech-note-text")).to_have_value("SYN note before preparation")
-        expect(page.locator("#tech-note-reason")).to_have_value("  SYN correction  ")  # S8-CTX: no outcome changes the input
+        # #259 (caution census): a confirmed save uses up the reason it carried and clears it; an unconfirmed one keeps it.
+        expect(page.locator("#tech-note-reason")).to_have_value("" if stored else "  SYN correction  ")
         expect(page.locator("#tech-note-save")).to_be_enabled()
         if stored:
             page.fill("#tech-note-text", "SYN next edit")

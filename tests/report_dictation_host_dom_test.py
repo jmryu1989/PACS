@@ -28,7 +28,9 @@ import json
 import os
 import re
 import sys
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from report_page_contract import install_contract
@@ -290,6 +292,9 @@ const readingWorkspace = { active: () => false, selectionChanged() {} };
 const readingFindings = { sync() {} };
 const imageOpening = { snapshot: () => ({ autoLoad: false }) };
 window.confirm = message => { confirms.push(message); return false; };
+/* liveDictation: the dictation request goes over a real socket to the case's loopback server (HD-23). */
+const nativeFetch = window.fetch.bind(window);
+window.liveDictation = false;
 window.fetch = async (url, options = {}) => {
   const path = String(url).slice(API.length);
   if (path.endsWith("/dictation")) {
@@ -298,6 +303,10 @@ window.fetch = async (url, options = {}) => {
     const call = { method: options.method, path, headers: Object.fromEntries(new Headers(options.headers)), redirect: options.redirect,
       credentials: options.credentials || 'same-origin', cache: options.cache, bytes: Array.from(body), body, aborted: false };
     dictCalls.push(call);
+    if (liveDictation) {
+      options.signal.addEventListener("abort", () => { call.aborted = true; });
+      return nativeFetch(url, options).then(response => { call.headersArrived = true; return response; });
+    }
     return new Promise((resolve, reject) => {
       options.signal.addEventListener("abort", () => { call.aborted = true; reject(new DOMException("aborted", "AbortError")); });
       call.respond = (status, raw) => resolve({ status, ok: status >= 200 && status < 300, text: async () => raw,
@@ -370,7 +379,7 @@ window.snapshot = () => {
             text: $("#dictation-text").textContent, textHidden: $("#dictation-text").hidden,
             place: $("#dictation-place").textContent, meta: $("#dictation-meta").textContent,
             metaTitle: $("#dictation-meta").getAttribute("title"),
-            stop: hdControl("stop"), cancel: hdControl("cancel"), repin: hdControl("repin"),
+            stop: hdControl("stop"), cancel: hdControl("cancel"), retry: hdControl("retry"), repin: hdControl("repin"),
             insert: hdControl("insert"), close: hdControl("close") },
     button: { disabled: $("#b-dictate").disabled, title: $("#b-dictate").getAttribute("title"),
               text: $("#b-dictate").textContent.trim(), outer: $("#b-dictate").outerHTML },
@@ -381,6 +390,77 @@ window.snapshot = () => {
   };
 };
 </script></body></html>"""
+
+
+IDP_MESSAGE = "인증 서버에 연결하지 못해 요청을 처리하지 못했습니다. 로그인은 유지됩니다 — 잠시 뒤 다시 시도해 주십시오"
+
+
+class LoopbackServer:
+    """The harness page, its assets and the dictation route on a real loopback socket (HD-23). A Playwright route
+    answers a whole body at once; only a real server can send the headers and then stop the body."""
+
+    def __init__(self, case):
+        self.answers, self.release = [], threading.Event()
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *_):
+                pass
+
+            def head(self, status, body, mime, extra=()):
+                self.send_response(status)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(len(body)))
+                for name, value in extra:
+                    self.send_header(name, value)
+                self.end_headers()
+
+            def do_GET(self):
+                name = self.path.split("?")[0].rsplit("/", 1)[-1]
+                if name == "harness.html":
+                    body, mime = case.html.encode("utf-8"), "text/html; charset=utf-8"
+                elif name in ASSETS:
+                    body, mime = ASSETS[name].encode("utf-8"), "text/javascript; charset=utf-8"
+                else:
+                    body, mime = b"", "text/plain"
+                self.head(200 if body else 404, body, mime)
+                self.wfile.write(body)
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                answer = owner.answers.pop(0)
+                if answer == "idp":
+                    # What AuthService.idpUnavailable() sends: the code in the body and in X-KIN-Auth-Code.
+                    body = json.dumps({"code": "AUTH_IDP_UNAVAILABLE", "message": IDP_MESSAGE},
+                                      ensure_ascii=False).encode("utf-8")
+                    self.head(503, body, "application/json; charset=utf-8", [("X-KIN-Auth-Code", "AUTH_IDP_UNAVAILABLE")])
+                    self.wfile.write(body)
+                    return
+                body = reply(TRANSCRIPT).encode("utf-8")
+                self.head(200, body, "application/json; charset=utf-8")
+                if answer == "stall":
+                    self.wfile.write(body[:1])
+                    self.wfile.flush()
+                    owner.release.wait(60)
+                    try:
+                        self.wfile.write(body[1:])
+                    except OSError:
+                        pass  # the browser gave up on this body; that is the case's point
+                    self.close_connection = True
+                    return
+                self.wfile.write(body)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.origin = "http://127.0.0.1:%d" % self.server.server_port
+
+    def close(self):
+        self.release.set()
+        self.server.shutdown()
+        self.server.server_close()
 
 
 def default_state():
@@ -444,9 +524,10 @@ class ReportDictationHostDOMTest(unittest.TestCase):
         else:
             route.fulfill(status=404, body="")
 
-    def open(self, capability=CAPABILITY, origin=SECURE_ORIGIN, state=None, media="grant"):
+    def open(self, capability=CAPABILITY, origin=SECURE_ORIGIN, state=None, media="grant", routed=True):
         self.html = harness(state or default_state())
-        self.page.route(origin + "/**", self._route)
+        if routed:
+            self.page.route(origin + "/**", self._route)
         self.page.goto(origin + PAGE_PATH)
         self.opened = True
         self.page.wait_for_function("()=>typeof window.snapshot === 'function'")
@@ -564,8 +645,9 @@ class ReportDictationHostDOMTest(unittest.TestCase):
         markup = before["button"]["outer"]
         self.assertIn('title="%s"' % DICTATE_TITLE, markup)
         self.assertTrue(markup.endswith(">Dictate</button>"))
+        # A configured limit is the site's (C13); only a size the RIFF header cannot describe is malformed.
         for capability in (None, dict(CAPABILITY, available=False), dict(CAPABILITY, available="true"),
-                           dict(CAPABILITY, maxBytes=2000000), {"available": True}):
+                           dict(CAPABILITY, maxBytes=0xFFFFFFFF + 9), {"available": True}):
             if capability is not None:
                 self.page.evaluate("c => { dictation.setServerCapability(c); updateReportButtons(); }", capability)
             value = self.snap()
@@ -809,7 +891,8 @@ class ReportDictationHostDOMTest(unittest.TestCase):
     def test_hd11_server_refusals_without_json_and_route_codes_leave_the_report(self):
         for status, raw, key in ((413, "<html><body>413 Request Entity Too Large</body></html>",
                                   "DICTATION_AUDIO_TOO_LARGE"),
-                                 (503, '{"code":"DICTATION_BUSY","message":"DICTATION_BUSY"}', "DICTATION_BUSY"),
+                                 (503, '{"code":"DICTATION_NOT_CONFIGURED","message":"DICTATION_NOT_CONFIGURED"}',
+                                  "DICTATION_NOT_CONFIGURED"),
                                  (200, reply("x" * (TEXT_CAP + 1)), "transcript-too-long")):
             if self.opened:
                 self.tearDown()
@@ -822,6 +905,130 @@ class ReportDictationHostDOMTest(unittest.TestCase):
             self.assertEqual(self.page.evaluate("k => KinDictation.REASONS[k]", key) + UNCHANGED,
                              value["pane"]["status"])
             self.assertEqual([EXISTING, "", ""], value["text"])
+
+    # ── HD-21 ──────────────────────────────────────────────────────────────────────────────
+    def test_hd21_a_busy_or_absent_engine_holds_the_recording_and_retry_sends_it_again(self):
+        """First-site recovery on the page's own pane markup: the recording waits with Retry focused, the report
+        is untouched, Retry sends the same bytes, and the answer is reviewed and inserted as any other."""
+        self.open()
+        index = self.upload()
+        self.page.evaluate("([i, s, r]) => answer(i, s, r)",
+                           [index, 503, '{"code":"DICTATION_BUSY","message":"DICTATION_BUSY"}'])
+        self.page.wait_for_function("()=>dictation.view().held")
+        value = self.snap()
+        self.assertEqual("uploading", value["session"]["state"])
+        self.assertEqual(self.page.evaluate("KinDictation.REASONS.DICTATION_BUSY + KinDictation.STATUS.held"),
+                         value["pane"]["status"])
+        self.assertEqual({"hidden": False, "disabled": False}, value["pane"]["retry"])
+        self.assertEqual({"hidden": False, "disabled": False}, value["pane"]["cancel"])
+        self.assertTrue(value["pane"]["close"]["hidden"])
+        self.assertEqual("dictation-retry", value["focused"], "Retry, not Cancel, takes the next Enter")
+        self.assertEqual([EXISTING, "", ""], value["text"])
+        self.assertTrue(value["media"]["released"], "the microphone is not held while the recording waits")
+        self.page.keyboard.press("Enter")
+        self.page.wait_for_function("n => dictCalls.length === n", arg=index + 2)
+        value = self.snap()
+        self.assertEqual(value["dict"][index]["pcm"], value["dict"][index + 1]["pcm"], "the same recording")
+        self.assertTrue(value["dict"][index + 1]["zeroed"])
+        self.assertTrue(value["pane"]["retry"]["hidden"])
+        self.page.evaluate("([i, s, r]) => answer(i, s, r)", [index + 1, 200, reply(TRANSCRIPT)])
+        self.wait_state("review")
+        self.page.click("#dictation-insert")
+        self.wait_state("inserted")
+        self.assertIn(TRANSCRIPT, self.snap()["text"][0])
+
+    # ── HD-22 ──────────────────────────────────────────────────────────────────────────────
+    def test_hd22_any_transient_server_answer_holds_the_recording_and_a_refusal_ends_it(self):
+        """A recording survives every answer after which the same bytes may still succeed, whichever layer in
+        front of the engine gave it; a refusal of this person or these bytes still ends the run."""
+        transient = (
+            (503, json.dumps({"code": "AUTH_IDP_UNAVAILABLE", "message": IDP_MESSAGE}, ensure_ascii=False), IDP_MESSAGE),
+            (500, '{"code":"AUTH_STORAGE_FAILURE","message":"로그인 세션 정보를 저장소에서 처리하지 못했습니다."}',
+             "로그인 세션 정보를 저장소에서 처리하지 못했습니다."),
+            (409, '{"code":"AUTH_SESSION_BUSY","message":"다른 요청이 같은 로그인 세션을 바꾸고 있습니다."}',
+             "다른 요청이 같은 로그인 세션을 바꾸고 있습니다."),
+            (502, "<html><body>502 Bad Gateway</body></html>", "HTTP 502"),
+            (429, "", "HTTP 429"),
+        )
+        for status, raw, shown in transient:
+            with self.subTest(status=status, raw=raw[:40]):
+                if self.opened:
+                    self.tearDown()
+                    self.setUp()
+                self.open()
+                index = self.upload()
+                self.page.evaluate("([i, s, r]) => answer(i, s, r)", [index, status, raw])
+                self.page.wait_for_function("()=>dictation.view().held || dictation.snapshot().state === 'failed'")
+                value = self.snap()
+                self.assertEqual("uploading", value["session"]["state"], "the recording is held, not discarded")
+                self.assertIn(shown, value["pane"]["status"])
+                self.assertTrue(value["pane"]["status"].endswith(self.page.evaluate("KinDictation.STATUS.held")))
+                self.assertEqual({"hidden": False, "disabled": False}, value["pane"]["retry"])
+                self.assertEqual([EXISTING, "", ""], value["text"])
+                self.page.click("#dictation-retry")
+                self.page.wait_for_function("n => dictCalls.length === n", arg=index + 2)
+                value = self.snap()
+                self.assertEqual(value["dict"][index]["pcm"], value["dict"][index + 1]["pcm"], "the same recording")
+                self.page.evaluate("([i, s, r]) => answer(i, s, r)", [index + 1, 200, reply(TRANSCRIPT)])
+                self.wait_state("review")
+        for status, raw in ((403, '{"message":"이 검사에 대한 권한이 없습니다"}'),
+                            (400, '{"code":"DICTATION_AUDIO_INVALID","message":"DICTATION_AUDIO_INVALID"}')):
+            with self.subTest(status=status):
+                self.tearDown()
+                self.setUp()
+                self.open()
+                self.upload()
+                self.page.evaluate("([i, s, r]) => answer(i, s, r)", [0, status, raw])
+                self.wait_state("failed")
+                value = self.snap()
+                self.assertTrue(value["pane"]["retry"]["hidden"])
+                self.assertEqual([EXISTING, "", ""], value["text"])
+
+    # ── HD-23 ──────────────────────────────────────────────────────────────────────────────
+    def test_hd23_over_a_real_socket_a_stalled_body_and_a_sign_in_outage_keep_the_recording(self):
+        """The client's own deadline reaches an answer whose headers came and whose body stopped: the request is
+        cut, the recording is held for Retry, and the late rest of the body changes nothing. The real auth
+        boundary's 503 AUTH_IDP_UNAVAILABLE (code in body and header) holds it too; the third send is reviewed and
+        inserted after the text that was already there."""
+        server = LoopbackServer(self)
+        self.addCleanup(server.close)
+        # timeoutMs 1: the client deadline is CLIENT_MARGIN_MS (5 s) after the send, not 125 s.
+        self.open(capability={**CAPABILITY, "timeoutMs": 1}, origin=server.origin, routed=False)
+        self.page.evaluate("liveDictation = true")
+        server.answers[:] = ["stall", "idp", "ok"]
+        self.caret("findings", len(EXISTING))
+        index = self.upload()
+        self.page.wait_for_function("i => dictCalls[i].headersArrived === true", arg=index)
+        self.page.wait_for_function("()=>dictation.view().held || dictation.snapshot().state !== 'uploading'",
+                                    timeout=20000)
+        value = self.snap()
+        self.assertEqual("uploading", value["session"]["state"])
+        self.assertEqual(self.page.evaluate("KinDictation.REASONS['client-timeout'] + KinDictation.STATUS.held"),
+                         value["pane"]["status"])
+        self.assertTrue(value["dict"][index]["aborted"], "the stalled body was cut, not left open")
+        self.assertEqual({"hidden": False, "disabled": False}, value["pane"]["retry"])
+        server.release.set()
+        self.page.wait_for_timeout(500)
+        self.assertEqual("uploading", self.snap()["session"]["state"], "the late rest of the body is not a transcript")
+
+        self.page.click("#dictation-retry")
+        self.page.wait_for_function("()=>dictation.view().held || dictation.snapshot().state !== 'uploading'")
+        value = self.snap()
+        self.assertEqual("uploading", value["session"]["state"])
+        self.assertIn(IDP_MESSAGE, value["pane"]["status"])
+        self.assertEqual({"hidden": False, "disabled": False}, value["pane"]["retry"])
+        self.assertEqual(0, value["logouts"], "the login stays")
+
+        self.page.click("#dictation-retry")
+        self.wait_state("review")
+        value = self.snap()
+        self.assertEqual(3, len(value["dict"]) - index)
+        self.assertEqual(value["dict"][index]["pcm"], value["dict"][index + 2]["pcm"], "the same recording each time")
+        self.assertEqual([EXISTING, "", ""], value["text"])
+        self.page.click("#dictation-insert")
+        self.wait_state("inserted")
+        self.assertEqual(self.page.evaluate("([v, t, s]) => expected(v, t, s)", [EXISTING, TRANSCRIPT, len(EXISTING)]),
+                         self.snap()["text"][0])
 
     # ── HD-12 ──────────────────────────────────────────────────────────────────────────────
     def test_hd12_keyboard_reaches_every_step_and_an_arriving_answer_never_takes_focus(self):

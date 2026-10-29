@@ -52,7 +52,9 @@ test('admin creates, rotates and retires a doctor key over HTTP; the doctor appr
     for (const data of Object.values(members)) await db.memberRights.create({ data });
     await runtime.start(); ready = true;
     const resource = uid => ({ '0020000D': { Value: [uid] }, '00100020': { Value: ['synthetic:' + uid] } });
-    const orthanc = { studyIdentityResources: async uid => [resource(uid)], studyIdentities: async () => [] };
+    // Keep patient resolution on the product path while the archive resources remain synthetic.
+    const orthanc = { studyIdentityResources: async uid => [resource(uid)], studyIdentities: async () => [],
+      studyPatientIdentity: product('orthanc.service').OrthancService.prototype.studyPatientIdentity };
     const users = Object.values(members).map(m => ({ id: m.sub, username: m.username, email: m.email, firstName: m.name,
       enabled: true, groups: [m.institution], roles: m.roles }));
     const keycloak = { getUser: async sub => users.find(u => u.id === sub),
@@ -64,6 +66,7 @@ test('admin creates, rotates and retires a doctor key over HTTP; the doctor appr
     class HttpFixture {}
     Module({ controllers: [product('signing-key-admin.controller').SigningKeyAdminController, product('pacs.controller').PacsController],
       providers: [PrismaService, product('pacs.service').PacsService, product('auth.service').AuthService,
+        product('presence.service').PresenceService,
         ...product('emr-clinical/startup').startupClinicalProviders,
         { provide: REQUEST_CONTEXT_CAPTURE, useValue: requests.capture }, { provide: REQUEST_CONTEXT_SOURCE, useValue: requests.source },
         { provide: product('orthanc.service').OrthancService, useValue: orthanc },

@@ -232,6 +232,17 @@ class ClinicianQuestionLive(unittest.TestCase):
         self.assertEqual(result.status, status, result.text[:500])
         if expected_code is not None:
             self.assertEqual(code(result), expected_code, result.text[:500])
+        if status == 200 and isinstance(result.body, dict) and "entries" in result.body.get("item", {}):
+            # Also cover the delayed response in Q15: D must name only the
+            # versions this snapshot serves, even when newer writes have committed.
+            item, emr = result.body["item"], result.body["emr"]
+            self.assertEqual(sorted(result.body), ["emr", "item", "owner"])
+            self.assertEqual(emr["recordId"], item["id"])
+            self.assertEqual(emr["studyId"], item["studyUid"])
+            self.assertEqual([entry["revision"] for entry in emr["signatures"]],
+                             [entry["seq"] for entry in item["entries"]])
+            self.assertEqual([entry["revision"] for entry in emr["signatures"]],
+                             list(range(1, item["revision"] + 1)))
         return result
 
     def ask(self, user, uid, body="SYNTHETIC question", rid=None, expect=201, expected_code=None):
@@ -252,7 +263,7 @@ class ClinicianQuestionLive(unittest.TestCase):
 
     def read(self, user, qid):
         result = self.check(self.stack.request("GET", f"/questions/{quote(qid)}", user), 200)
-        self.assertEqual(sorted(result.body), ["item", "owner"])
+        self.assertEqual(result.body["emr"]["recordId"], qid.lower())
         self.assertEqual(sorted(result.body["item"]), THREAD_KEYS)
         return result.body["item"]
 
@@ -452,8 +463,11 @@ class ClinicianQuestionLive(unittest.TestCase):
         self.assertEqual(psql(f'SELECT count(*) FROM "StudyQuestion" WHERE "studyUid"={lit(f.uid)}'), ["0"])
         created = self.check(self.stack.request("POST", path, "clinician", base), 201)
         sub, actor = self.stack.user_ids["clinician"], self.stack.actor("clinician")
-        self.assertEqual(sorted(created.body), ["applied", "owner", "replayed"])
+        self.assertEqual(sorted(created.body), ["applied", "emr", "owner", "replayed"])
         self.assertEqual((created.body["owner"], created.body["replayed"]), (["hallym", sub], False))
+        # D1828: the write's EMR-D receipt travels with the service's own answer.
+        self.assertEqual(created.body["emr"]["replayed"], created.body["replayed"])
+        self.assertTrue(created.body["emr"]["access"]["eventId"])
         applied = created.body["applied"]
         self.assertEqual(sorted(applied), APPLIED_KEYS)
         self.assertEqual((applied["id"], applied["requestId"], applied["entry"]), (base["requestId"], base["requestId"],
@@ -976,7 +990,8 @@ class ClinicianQuestionLive(unittest.TestCase):
 
     def test_q15_thread_read_is_one_snapshot(self) -> None:
         """Astra S5-U4a-F01. The thread read (#2) and the study's thread list (#3) of the clinician wait on the clinician's
-        study-access lock, the first query of their transaction. RepeatableRead fixed the snapshot before that wait, so
+        study-access lock after the clinical boundary reads request facts (and the thread's record unit). RepeatableRead
+        fixed the snapshot before that wait and the projection read; these snapshot reads take no record lock, so
         an answer, a close and a report reset committed through the product routes meanwhile reach neither answer: both
         are the moment before, whole. A read taking a snapshot per statement answers the moment after instead."""
         f = self.study()

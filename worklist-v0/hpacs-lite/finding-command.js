@@ -7,7 +7,7 @@
   'use strict';
   const links = typeof module === 'object' && module.exports ? require('./finding-link-model.js') : root.kinFindingLinkModel;
   const VIEWER_REASONS = links.NAVIGATION_REASONS;
-  const LIST_LIMIT = links.LIMITS.findings, PAGE = 100;
+  const PAGE = 100;
   const uuid = s => typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s);
   const uid = s => typeof s === 'string' && s.length <= 64 && /^[0-9]+(?:\.[0-9]+)+$/.test(s);
   const count = n => Number.isSafeInteger(n) && n >= 1 && n <= 2147483647;
@@ -84,7 +84,7 @@
     // Version 1 is the shipped shape; version 2 adds the free-text characteristics and saved locations.
     const version = body.schemaVersion === undefined ? 1 : body.schemaVersion;
     if (![1, 2].includes(version) || (version === 2 && !text(body.characteristics))) throw INVALID;
-    if (!text(body.title) || !text(body.text) || !Array.isArray(sources) || sources.length < 1 || sources.length > links.LIMITS.sources ||
+    if (!text(body.title) || !text(body.text) || !Array.isArray(sources) || sources.length < 1 ||
         !Number.isSafeInteger(primary) || primary < 0 || primary >= sources.length) throw INVALID;
     const serverLinks = Array.isArray(item.links) ? item.links : [];
     // The server admits at most one comparison study per finding, a saved location's whole study set included.
@@ -163,7 +163,7 @@
           if (!current()) return false;
           pages++;
           const next = page && page.nextCursor;
-          if (!page || !Array.isArray(page.items) || items.length + page.items.length > LIST_LIMIT || pages > Math.ceil(LIST_LIMIT / PAGE) ||
+          if (!page || !Array.isArray(page.items) ||
               !(next === null || uuid(next)) || (next && cursors.has(next))) throw INVALID;
           items.push(...page.items);
           if (next) cursors.add(next);

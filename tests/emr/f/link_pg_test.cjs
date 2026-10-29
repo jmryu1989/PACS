@@ -60,7 +60,7 @@ if(process.argv.includes('--serve')){
   let app,endpoint,runtime,port;
   const sourceServers=[];
   try{
-  await witness.memberRightsImport.create({data:{id:'realm-v1'}});
+  await witness.memberRightsImport.upsert({where:{id:'realm-v1'},create:{id:'realm-v1'},update:{}});
   for(const subject of ['officer','auditor','doctor','admin','other']){
     const roles=[['admin','officer'].includes(subject)?'admin':subject==='doctor'?'radiologist':'clinician'];
     const institution=subject==='other'?'synthetic-other':'synthetic-hospital';
@@ -194,10 +194,25 @@ if(process.argv.includes('--serve')){
     const page=await ok('auditor','POST','investigations',{...query,patient:{patientId:patient.patientId,assigningAuthority:patient.assigningAuthority}});
     assert.ok(page.changes.rows.some(r=>r.action==='write'&&r.targets.some(t=>t.recordId.value===recordId)));
     assert.ok(page.changes.rows.some(r=>r.action==='cancel'&&r.targets.some(t=>t.versionId.value===second.receipt.versionId)));
+    // The ledger page names the study delivery's record; the response rows that name it come with it.
+    assert.ok(page.views.rows.some(r=>r.eventId===image.deliveryEventId));
     const imageFacts=page.images.find(i=>i.eventId===image.eventId);
+    assert.equal(imageFacts.deliveryEventId,image.deliveryEventId);
     assert.equal(imageFacts.preparation.response_manifest.studyManifestSha256,image.sha256);
+    assert.equal(imageFacts.preparation.response_manifest.deliveryEventId,image.deliveryEventId);
+    const sourceManifest=imageFacts.preparation.source_manifest??page.sourceManifests[imageFacts.preparation.source_manifest_body];
+    assert.equal(sourceManifest.sha256,image.sha256,'the study manifest the delivery was prepared from');
+    // Each study-manifest body comes once with the page, however many responses name it (R244-GPT-04).
+    assert.deepEqual(Object.keys(page.sourceManifests),[imageFacts.preparation.source_manifest_body]);
+    assert.ok(page.images.every(i=>!i.preparation||i.preparation.source_manifest===null),'no response repeats the body');
     assert.ok(imageFacts.observations.some(o=>o.kind==='transport'));
     assert.ok(imageFacts.observations.some(o=>o.kind==='copies'));
+    // R244-GPT-03: a response of the same record whose preparation failed (the source's object belongs to another
+    // patient now) has no preparation row; its copy observation is still found from the record.
+    const failed=page.images.find(i=>i.eventId===image.failedEventId);
+    assert.ok(failed,'the failed response is reachable from its record');
+    assert.deepEqual([failed.deliveryEventId,failed.preparation],[image.deliveryEventId,null]);
+    assert.deepEqual(failed.observations.map(o=>[o.kind,o.retained_after,o.body[0].state]),[['copies',null,'removed']]);
     assert.ok(!page.views.rows.some(r=>r.action==='client-shown'),'transport is not a display observation');
     const exported=await ok('auditor','POST','exports',{...query,recordId});assert.ok(exported.totalEntries>=2);
     const limited=await ok('auditor','POST','investigations',{...query,recordId,limit:1});
@@ -316,7 +331,8 @@ if(process.argv.includes('--serve')){
     await ok('auditor','POST',`requests/${unavailable.request.requestId}/resolve`,{outcome:'withdrawn',evidenceId:'withdrawn-without-copy'});
 
     await futureHold(port,db,witness,identities.auditor,copy);
-    await scaling(witness,ok,query,patient,identities.doctor);
+    await scaling(witness,ok,query,patient,recordId);
+    await sharedDeliveryPatients(port,witness,ok,query,doctor,sourceServers);
 
     await app.close();await start();
     const reopened=await ok('auditor','POST',`issuances/${encodeURIComponent(prepared.issuanceId)}/issue`);
@@ -368,34 +384,137 @@ async function imageDelivery(port,db,actor,study,servers){
       bytes:original.length,sha256:hash(original),declaredFrameCount:1,frames:[{number:1,bytes:original.length,sha256:hash(original)}],
       provenance:{kind:'device',receiptEventId:null},derivation:{kind:'original'},mammography:null,timing:null}]}],referencedObjects:[],
     decoderCatalog:{native:{version:'synthetic',sha256:hash('decoder')}},viewer:{id:'synthetic',version:'fixture',sha256:hash('viewer')}});
+  let sourcePatientId=study.patient.patientId;
   const source=createServer((req,res)=>{
     const json=value=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify(value));};
     if(req.url==='/tools/lookup')return json([{Type:'Instance',ID:'11111111-22222222-33333333-44444444-55555555'}]);
-    if(req.url.endsWith('/simplified-tags'))return json({StudyInstanceUID:studyUid,SeriesInstanceUID:seriesUid,SOPInstanceUID:sop,SOPClassUID:manifest.objects[0].sopClassUid,NumberOfFrames:'1'});
+    // The study's current identity, read per response (E: R244-GPT-01). A patient correction in the archive changes
+    // the study's PatientID with the object's.
+    if(req.url.startsWith('/dicom-web/studies?')){
+      const asked=new URL(req.url,'http://archive').searchParams.get('StudyInstanceUID');
+      return json(asked===studyUid?[{'0020000D':{vr:'UI',Value:[studyUid]},'00100020':{vr:'LO',Value:[sourcePatientId]}}]:[]);
+    }
+    if(req.url.endsWith('/simplified-tags'))return json({StudyInstanceUID:studyUid,SeriesInstanceUID:seriesUid,SOPInstanceUID:sop,SOPClassUID:manifest.objects[0].sopClassUid,NumberOfFrames:'1',PatientID:sourcePatientId});
     if(req.url.endsWith('/header'))return json({'0002,0010':{Value:ts}});
     if(req.url.endsWith('/file'))return res.end(original);
     res.writeHead(404);res.end();
   });servers.push(source);process.env.ORTHANC_URL=await listen(source);process.env.ORTHANC_USER='synthetic';process.env.ORTHANC_PASS=randomUUID();
-  const at=time(0),eventId=randomUUID(),target=`/dicom-web/studies/${studyUid}/series/${seriesUid}/instances/${sop}`;
-  const prepared=E.prepareDelivery(manifest,E.parseImageRequest('GET',target),{eventId,at,cause:'user-view',opening:null,
-    authorization:{studyUid,institution:study.managingInstitutionId,accountGeneration:1},provision:E.checkProvisionBasis({relation:'same-institution',at,managingInstitution:study.managingInstitutionId,
-      recipient:null,studyUid,purpose:null,basis:null,agreement:null,auditBefore:null})});
-  const event=parseAccessEvent({formatVersion:1,surface:'dicom-web-study-series-instance-frame',eventId,userId:known(actor),rolesAtTime:known(['radiologist']),
+  const at=time(0),eventId=randomUUID(),responseId=randomUUID(),target=`/dicom-web/studies/${studyUid}/series/${seriesUid}/instances/${sop}`;
+  const provision=E.checkProvisionBasis({relation:'same-institution',at,managingInstitution:study.managingInstitutionId,
+    recipient:null,studyUid,purpose:null,basis:null,agreement:null,auditBefore:null});
+  const authorization={studyUid,institution:study.managingInstitutionId,accountGeneration:1};
+  // The study delivery's access record (the shared image-delivery-record.ts pair): one provide-prepared image event for
+  // the study, durable before the response is prepared; the response names it and is not its own ledger event.
+  // The delivery is bound to this manifest, as the service's lease hands it to the stream (R244-GPT-FIX7-01).
+  const prepared=E.prepareDelivery(manifest,E.parseImageRequest('GET',target),{eventId:responseId,deliveryEventId:eventId,at,cause:'user-view',opening:null,authorization,provision});
+  const event=parseAccessEvent({formatVersion:1,surface:'GET images/dicom-web',eventId,userId:known(actor),rolesAtTime:known(['radiologist']),
     actingInstitution:known(study.managingInstitutionId),managingInstitution:known(study.managingInstitutionId),occurredAt:at,trustedProxyIp:known({address:'127.0.0.1',source:'trusted-proxy'}),
-    cause:'user-view',context:{basis:'worklist',studyId:null,relatedStudyId:null,reason:null},executor:'member',targets:[{kind:'image',patientLinkSnapshot:known(study.patient),studyId:known(studyUid),recordId:known(sop),versionId:known(manifest.sha256)}],
+    cause:'user-view',context:{basis:'worklist',studyId:null,relatedStudyId:null,reason:null},executor:'member',targets:[{kind:'image',patientLinkSnapshot:known(study.patient),studyId:known(studyUid),recordId:known(studyUid),versionId:known(manifest.sha256)}],
     action:'provide-prepared',result:'prepared',requestId:randomUUID(),auditLinkId:'audit:'+randomUUID(),relatedEventId:null});
+  const work=port.begin();let receipt;
+  try{
+    const operation=await work.admit(event,undefined,{operationId:eventId,attemptId:eventId});
+    const committed=await work.transaction(operation,async()=>({kind:'emr-image',id:eventId,version:manifest.sha256}));
+    assert.equal(committed.outcome,'committed');
+    receipt=await work.confirm({provisional:true,operationId:operation.operationId,eventId});
+  }finally{work.end();}
   const staging=path.join(process.env.KIN_F_SPOOL,'staging');await mkdir(staging,{recursive:true});
-  let finish;const settled=new Promise((resolve,reject)=>finish={resolve,reject});
+  let finish,current=prepared;const settled=()=>new Promise((resolve,reject)=>finish={resolve,reject});
   const server=createServer(async(req,res)=>{
-    try{await sendOnlineImage({records:port,evidence:new PgImageEvidenceStore(db),source:new OrthancService().imageSource(),stagingDirectory:staging,authorize:async()=>{}},
-      {manifest,prepared,event,response:res,signal:new AbortController().signal});finish.resolve();}
+    try{await sendOnlineImage({evidence:new PgImageEvidenceStore(db),source:new OrthancService().imageSource(),stagingDirectory:staging},
+      {manifest,delivery:{event,receipt,manifestSha256:manifest.sha256},prepare:async()=>current,requestId:randomUUID(),response:res,signal:new AbortController().signal});finish.resolve();}
     catch(error){res.statusCode=500;res.end();finish.reject(error);}
   });servers.push(server);
-  const response=await fetch(await listen(server));assert.equal(response.status,200);
+  const endpoint=await listen(server);
+  let pending=settled();
+  const response=await fetch(endpoint);assert.equal(response.status,200);
   assert.match(response.headers.get('content-type'),/^multipart\/related/);
+  assert.equal(response.headers.get('x-kin-image-event'),eventId);assert.equal(response.headers.get('x-kin-image-response'),responseId);
   const wire=Buffer.from(await response.arrayBuffer()), bodyStart=wire.indexOf('\r\n\r\n')+4;
-  assert.ok(bodyStart>=4);assert.equal(hash(wire.subarray(bodyStart,bodyStart+original.length)),hash(original));await settled;
-  return{eventId,sha256:manifest.sha256};
+  assert.ok(bodyStart>=4);assert.equal(hash(wire.subarray(bodyStart,bodyStart+original.length)),hash(original));await pending;
+  // A second response of the same record whose preparation fails: the archive now attributes the object to another
+  // patient (same UIDs, same bytes). No preparation row; the copy observation names the record (R244-GPT-01/03).
+  const failedEventId=randomUUID();
+  current=E.prepareDelivery(manifest,E.parseImageRequest('GET',target),{eventId:failedEventId,deliveryEventId:eventId,at,cause:'user-view',opening:null,authorization,provision});
+  sourcePatientId='SYNTHETIC-OTHER';
+  // The handler's rejection arrives while the fetch is in flight: observe it as a value at once, not as an unhandled rejection.
+  pending=settled().then(()=>{throw new Error('the changed patient was served');},error=>error);
+  const refused=await fetch(endpoint);assert.equal(refused.status,500);await refused.arrayBuffer();
+  assert.equal((await pending).status,409,'the source refuses the object of another patient as a changed original');
+  sourcePatientId=study.patient.patientId;
+  return{eventId:responseId,deliveryEventId:eventId,sha256:manifest.sha256,failedEventId};
+}
+
+/* I8 of the shared study delivery recorder contract (#244), read by F on the real ledger: the shipped recorder and image
+ * relay write the deliveries (no event built here). A whole-study read for patient A; a patient correction in the
+ * archive (another patient resource under the same Study UID, a new revision); a read for patient B. Each delivery's
+ * pair names the patient whose bytes it covered, and F's patient filter finds each pair under that patient only. */
+async function sharedDeliveryPatients(port,witness,ok,query,doctor,servers){
+  const {StudyImageDeliveryRecorder}=load('image-delivery-record'),{ImageRelayController}=load('image-relay.controller');
+  const {OrthancService}=load('orthanc.service'),{createBackgroundWorkRegistry}=load('emr-runtime/background-work');
+  const {studyPatientLink}=load('emr-clinical/startup');
+  const studyUid='2.25.903',institution=doctor.institutionId;
+  const archive={patientId:'SYNTHETIC-F-A',resource:'aaaaaaaa-11111111-22222222-33333333-44444444',lastUpdate:'20261028T100000'};
+  const source=createServer((req,res)=>{
+    let body='';req.on('data',chunk=>{body+=chunk;});
+    req.on('end',()=>{
+      const json=value=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify(value));};
+      const url=new URL(req.url,'http://archive');
+      if(url.pathname==='/tools/lookup')return json(body.trim()===studyUid?[{Type:'Study',ID:archive.resource}]:[]);
+      if(url.pathname===`/studies/${archive.resource}`)return json({ID:archive.resource,LastUpdate:archive.lastUpdate});
+      if(url.pathname==='/dicom-web/studies'&&url.searchParams.get('StudyInstanceUID')===studyUid)
+        return json([{'0020000D':{vr:'UI',Value:[studyUid]},'00100020':{vr:'LO',Value:[archive.patientId]}}]);
+      if(url.pathname===`/dicom-web/studies/${studyUid}`){
+        res.setHeader('Content-Type','multipart/related; type="application/dicom"; boundary=b');
+        return res.end(`--b\r\nContent-Type: application/dicom\r\n\r\nSYNTHETIC-IMAGE:${archive.patientId}\r\n--b--`);
+      }
+      res.statusCode=404;json({});
+    });
+  });
+  servers.push(source);process.env.ORTHANC_URL=await listen(source);
+  const orthanc=new OrthancService(),registry=createBackgroundWorkRegistry();
+  const requests={read:()=>({issuer:doctor.identity.issuer,subject:doctor.identity.subject,binding:{method:'session',sessionRef:'authref:f-shared-delivery'}})};
+  // The current facts the recorder reads for every lease on a check transaction (here a client of the same synthetic
+  // database): the member and the study's patient now (D's current context reads that from the archive; here the
+  // archive stand-in's current patient).
+  const clinical={facts:async()=>({actor:{identity:doctor.identity,kind:'member',roles:['radiologist'],institutionId:institution,signingRegistrationId:null},
+      requestId:randomUUID(),ip:known({address:'127.0.0.1',source:'trusted-proxy'})}),
+    study:async()=>({studyId:studyUid,managingInstitutionId:institution,teleInstitutionId:null,patient:studyPatientLink(institution,archive.patientId)})};
+  const recorder=new StudyImageDeliveryRecorder(port,requests,clinical,registry.work,orthanc,60000,witness);
+  // The DICOMweb gate's per-request observation of the study: its institution and current patient.
+  const relay=new ImageRelayController({authzDicom:async()=>({studyUid,managingInstitutionId:institution,sourcePatientId:archive.patientId})},orthanc,recorder);
+  const server=createServer(async(req,res)=>{
+    req.originalUrl='/api/image-relay'+req.url;res.status=code=>{res.statusCode=code;return res;};
+    try{await relay.read(req,res);}catch(error){if(!res.headersSent){res.statusCode=error?.status??500;res.end();}else res.destroy();}
+  });servers.push(server);
+  const endpoint=await listen(server);
+  const read=async()=>{const r=await fetch(endpoint+`/dicom-web/studies/${studyUid}`);return {status:r.status,body:Buffer.from(await r.arrayBuffer()).toString()};};
+  const first=await read();
+  Object.assign(archive,{patientId:'SYNTHETIC-F-B',resource:'bbbbbbbb-11111111-22222222-33333333-44444444',lastUpdate:'20261028T100500'});
+  const second=await read();
+  assert.deepEqual([first.status,first.body.includes('SYNTHETIC-IMAGE:SYNTHETIC-F-A'),second.status,second.body.includes('SYNTHETIC-IMAGE:SYNTHETIC-F-B')],[200,true,200,true]);
+  await recorder.beforeApplicationShutdown();registry.quiesce();
+  const events=(await witness.$queryRaw`SELECT event_id::text AS id,payload::jsonb AS event FROM emr_access.access_entry
+    WHERE payload::jsonb#>>'{targets,0,studyId,value}'=${studyUid} ORDER BY sequence`).map(r=>({id:r.id,action:r.event.action,
+      related:r.event.relatedEventId,patient:r.event.targets[0].patientLinkSnapshot.value.patientId,version:r.event.targets[0].versionId.value}));
+  // The superseded delivery's closing is offered as it closes, beside the next one's opening: their ledger order is not
+  // fixed (VM run opus-244-fix10-vm-1029b saw A's closing after B's opening). What each pair names is.
+  assert.deepEqual(events.map(e=>[e.patient,e.action,e.version]).sort((a,b)=>a.join().localeCompare(b.join())),[
+    ['SYNTHETIC-F-A','provide-prepared','orthanc-study:aaaaaaaa-11111111-22222222-33333333-44444444@20261028T100000'],
+    ['SYNTHETIC-F-A','transfer-ended','orthanc-study:aaaaaaaa-11111111-22222222-33333333-44444444@20261028T100000'],
+    ['SYNTHETIC-F-B','provide-prepared','orthanc-study:bbbbbbbb-11111111-22222222-33333333-44444444@20261028T100500'],
+    ['SYNTHETIC-F-B','transfer-ended','orthanc-study:bbbbbbbb-11111111-22222222-33333333-44444444@20261028T100500']],
+    'each delivery\'s pair names the patient and revision whose bytes it covered');
+  for(const patientId of ['SYNTHETIC-F-A','SYNTHETIC-F-B']){
+    const [opened,closed]=['provide-prepared','transfer-ended'].map(action=>events.find(e=>e.patient===patientId&&e.action===action));
+    assert.equal(closed.related,opened.id,`${patientId}'s closing event closes ${patientId}'s opening`);
+  }
+  const ids=new Set(events.map(e=>e.id));
+  for(const patientId of ['SYNTHETIC-F-A','SYNTHETIC-F-B']){
+    const page=await ok('auditor','POST','investigations',{...query,patient:{patientId,assigningAuthority:institution}});
+    assert.deepEqual(page.views.rows.filter(r=>ids.has(r.eventId)).map(r=>r.eventId).sort(),
+      events.filter(e=>e.patient===patientId).map(e=>e.id).sort(),`F's ${patientId} filter finds that patient's delivery pair, not the other's`);
+  }
 }
 
 async function reportProducer(port,witness,doctor,study,wrap){
@@ -480,9 +599,11 @@ async function futureHold(port,db,witness,auditor,copy) {
   } finally {global.Date=NativeDate;}
 }
 
-async function scaling(witness,ok,query,patient,actor) {
+async function scaling(witness,ok,query,patient,recordId) {
   const measurements=[];
-  const [template]=await witness.$queryRaw`SELECT payload FROM emr_access.access_entry WHERE stream='history' ORDER BY sequence LIMIT 1`;
+  const [template]=await witness.$queryRaw`SELECT e.payload FROM emr_access.access_entry e WHERE e.stream='history'
+    AND EXISTS (SELECT FROM emr_access.access_target t WHERE t.entry_id=e.entry_id AND t.record_id=${recordId})
+    ORDER BY e.sequence LIMIT 1`;
   // Seed legal B1 rows through its actual admission/append functions; all data belongs to this disposable fixture.
   for (const count of [1000,1000,2000,4000,2000]) {
     const payload=template.payload.replaceAll("'","''");

@@ -37,7 +37,7 @@ MESSAGES={'load':'출력 화면을 불러오지 못했습니다. 다시 누르�
  'gpu':'MIP 출력 셰이더를 GPU에서 확인하지 못했습니다.','average_shader':'MIP 출력 Raysum 평균 셰이더를 확인하지 못했습니다.','plane':'MIP 출력의 VOI Slab 평면을 적용하지 못했습니다.',
  'image':'MIP 출력 영상을 만들지 못했습니다.','memory':'MIP 출력 영상 용량 한도(32 MiB)를 초과했습니다.','context':'MIP 출력 GPU 문맥이 사라져 출력하지 않았습니다.',
  'size':'MIP 출력 영상 크기를 확인하지 못했습니다.','capability':'고정 뷰어에서 MIP 출력 기능을 확인하지 못했습니다.','average':'Raysum 평균 계산 모듈을 확인할 수 없어 출력하지 않았습니다.',
- 'capacity':'출력 CT 원본은 최대 256장까지 지원합니다.','mid_read':'출력 준비 중 원본이 변경되었습니다.','digest':'저장 당시 전체 원본과 달라 출력하지 않았습니다.',
+ 'mid_read':'출력 준비 중 원본이 변경되었습니다.','digest':'저장 당시 전체 원본과 달라 출력하지 않았습니다.',
  'frame_of_reference':'저장한 MIP 작업의 좌표계(Frame of Reference)가 출력 원본과 달라 출력하지 않았습니다.','outside':'저장한 VOI Slab이 출력 CT 볼륨과 겹치지 않아 출력하지 않았습니다.',
  'reproduce':'MIP 작업의 계산 방식을 이 뷰어가 재현할 수 없어 출력하지 않았습니다.','shape':'저장한 MIP 작업의 형식을 확인할 수 없어 출력하지 않았습니다.',
  'ready':'미리보기 내용을 확인','source_read':'출력 원본을 읽지 못했습니다. 다시 확인하세요.'}
@@ -451,12 +451,12 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
   self.assertTrue(v.evaluate(CONTEXT_FAULT));self.open_output(v,a,HELD,None);context_status=status.text_content()
   self.assertIn(context_status,(MESSAGES['context'],MESSAGES['frame'],MESSAGES['gpu']));self.refused(v,context_status)
   self.assertEqual(v.evaluate(TAKE)['faults'],['context']);v.evaluate('()=>{printAfterVerify=null}');self.refresh_output(v);v.evaluate(TAKE)
-  # More than 256 slices: the capacity message comes before any source lookup or pixel read.
+  # More than 256 entries reaches source reads; this forged duplicate manifest still fails its digest.
   row=next(r for r in self.jobs(a) if r['title']==PLAIN);pattern=f"**/api/studies/{a.uid}/viewer-jobs/{row['id']}"
   def many(route):
    response=route.fetch();value=response.json();sops=value['snapshot']['volume']['sops'];value['snapshot']['volume']['sops']=sops+[sops[-1]]*(257-len(sops));route.fulfill(response=response,json=value)
-  v.route(pattern,many);requests.clear();self.open_output(v,a,PLAIN,MESSAGES['capacity']);self.refused(v,MESSAGES['capacity'])
-  self.assertEqual([url for method,url in requests if '/api/dicom/lookup' in url or '/frames/0/image-' in url],[]);v.unroute(pattern,many)
+  v.route(pattern,many);requests.clear();self.open_output(v,a,PLAIN,MESSAGES['digest']);self.refused(v,MESSAGES['digest'])
+  self.assertTrue(any('/api/dicom/lookup' in url for method,url in requests));self.assertTrue(any('/frames/0/image-' in url for method,url in requests));v.unroute(pattern,many)
   # Missing tool: without kinPrepareVolumeAverage Raysum is refused while MIP still prints.
   v.evaluate('()=>{window.heldAverage=window.kinPrepareVolumeAverage;window.kinPrepareVolumeAverage=undefined}')
   self.open_output(v,a,HELD,MESSAGES['average']);self.refused(v,MESSAGES['average']);self.open_output(v,a,PLAIN)

@@ -37,7 +37,7 @@ const {
 const { DictationController } = require('/app/dist/dictation.controller');
 const { dictationParser } = require('/app/dist/dictation-parser');
 const { PacsService } = require('/app/dist/pacs.service');
-const { inspectDictationWav, DICTATION_AUDIO_MAX_BYTES } = require('/app/dist/dictation-audio');
+const { inspectDictationWav, DICTATION_AUDIO_DEFAULT_BYTES } = require('/app/dist/dictation-audio');
 
 const FIXTURE_DIR = process.env.KIN_ASR_FIXTURE_DIR || '/fixture';
 const OUT_DIR = process.env.KIN_ASR_OUT_DIR || '/out';
@@ -364,7 +364,7 @@ after(async () => {
     engine_url: ENGINE_URL, proxy_url: proxyUrl, study_uid: STUDY_UID,
     identity: { ...identity }, forbidden_values_count: FORBIDDEN_VALUES.length,
     pins: { enginePin: ASR_ENGINE_PIN, modelPin: ASR_MODEL_PIN, textCap: ASR_TEXT_CAP,
-      responseCap: ASR_RESPONSE_CAP, wavCap: DICTATION_AUDIO_MAX_BYTES, language: LANGUAGE },
+      responseCap: ASR_RESPONSE_CAP, wavCap: DICTATION_AUDIO_DEFAULT_BYTES, language: LANGUAGE },
     attestation_status: attestation && attestation.status,
     attested_engine_commit: attestation && attestation.engine_provenance
       && attestation.engine_provenance.source && attestation.engine_provenance.source.commit,
@@ -564,7 +564,7 @@ test('A-7 an oversize body is refused on its declared length and never reaches t
     // request has finished (lib/read.js dump + on-finished). The 413 is therefore observable only
     // after the whole body was sent, so the complete maxBytes + 1 body is sent here. A client that
     // stalls mid-body is a different case: see A-8.
-    const answer = await post({ bytes: Buffer.alloc(DICTATION_AUDIO_MAX_BYTES + 1) });
+    const answer = await post({ bytes: Buffer.alloc(DICTATION_AUDIO_DEFAULT_BYTES + 1) });
     process.env.KIN_ASR_URL = ENGINE_URL;
     await delay(200);
     finish(scenario, { answer: { status: answer.status, ms: answer.ms, code: answer.code,

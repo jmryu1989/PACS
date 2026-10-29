@@ -18,8 +18,8 @@ window.KinTechNote = function (app) {
   d.setAttribute('aria-labelledby', 'tech-note-title');
   d.innerHTML = `<h2 id="tech-note-title">Tech Note</h2>
     <div id="tech-note-target"></div><p>판독문·원본 영상과 별도로 저장됩니다. 촬영 기관의 방사선사·관리자가 작성하며 수정 전 내용은 이력에 남습니다.</p>
-    <div id="tech-note-meta"></div><label>Note<textarea id="tech-note-text" maxlength="10000" rows="7"></textarea></label>
-    <label>Reason for Change<input id="tech-note-reason" maxlength="1000"></label>
+    <div id="tech-note-meta"></div><label>Note<textarea id="tech-note-text" rows="7"></textarea></label>
+    <label>Reason for Change (Optional)<input id="tech-note-reason" maxlength="1000"></label>
     <div id="tech-note-status" role="status"></div><div class="tech-note-actions">
     <button id="tech-note-save" type="button">Save Note</button><button id="tech-note-reload" type="button">Reload Note</button>
     <button id="tech-note-history" type="button">History</button><button id="tech-note-close" type="button">Close</button></div>
@@ -28,7 +28,6 @@ window.KinTechNote = function (app) {
   const $ = id => d.querySelector('#tech-note-' + id);
   let uid = null, seq = 0, busy = false, ended = false, writable = false, cursor = null, opener, openerDocument, innerOpener;
   let L = null, basis = 0, attempts = [], reasonGeneration = 0, interruptedRead = false, interruptedHistory = null, beforePreparation = null;
-  const usedReasons = new Set();
   // Korean particles after a version number follow how its last digit is read (0 영·십·백, 1 일, 2 이, 3 삼, …):
   // "v2로·v3으로", "v1과·v2와", "v1을·v2를".
   const ro = v => `v${v}${/[036]$/.test(v) ? '으로' : '로'}`;
@@ -45,7 +44,6 @@ window.KinTechNote = function (app) {
   // none typed, not "erase the reason of the revision").
   const inputDiffers = () => text() !== Ltext() || (!!reason().trim() && reason().trim() !== Lreason());
   const dirty = () => inputDiffers() || unresolved().length > 0;
-  const reasonUsable = () => !!reason().trim() && !usedReasons.has(reasonGeneration);
   const conflict = () => !!L && L.version > basis && !mine(L);
   $('reason').addEventListener('input', () => { ++reasonGeneration; });
 
@@ -56,7 +54,9 @@ window.KinTechNote = function (app) {
     for (const a of attempts) {
       if (a.outcome === 'saved' || revision.version !== a.base + 1) continue;
       if (revision.attemptId === a.id && revision.isOwnAttempt === true) {
-        a.outcome = 'saved'; a.version = revision.version; for (const g of a.generations) usedReasons.add(g);
+        a.outcome = 'saved'; a.version = revision.version;
+        // Clear only the reason carried by this saved attempt; a later typed reason belongs to the next edit.
+        if (a.generations.has(reasonGeneration)) { $('reason').value = ''; ++reasonGeneration; }
       } else a.outcome = 'not-saved';
     }
   }
@@ -215,13 +215,6 @@ window.KinTechNote = function (app) {
     else if(ending==='refused') status((before?before+'이번 입력은 거절되어 유지됩니다':'이번 저장은 거절되어 입력을 유지합니다')+(result?.message?' ('+result.message+').':'.')+open);
     return ending;
   }
-  // T04 / T18: an edit of an existing note needs a reason typed for it; an earlier save of this edit is said with it.
-  function needReason(prior) {
-    const saved=latestSaved();
-    status(prior?`앞선 입력은 ${ro(prior.version)} 저장되었으며 현재 수정은 새 사유를 입력한 뒤 저장하세요.`:
-      (saved?`앞선 입력은 ${ro(saved.version)} 저장되었으며 이번 수정의 사유를 입력하세요.`:'이번 수정의 사유를 입력하세요.'));
-    $('reason').focus();
-  }
   /** A new attempt from the current input on `base` (T03, T09, T18 follow-up). Checks T04-T06 first. */
   async function fresh(base, sentence, prior = null) {
     if (Lv() === 0 && !text().trim()) { status('메모 내용을 입력하세요.'); $('text').focus(); return null; } // T05
@@ -230,7 +223,6 @@ window.KinTechNote = function (app) {
       status(`새 저장은 보내지 않았으며 본문은 마지막 확인한 ${gwa(Lv())} 같${reasonOnly ? '고 사유만의 변경은 저장되지 않습니다' : '습니다'}.`);
       return null;
     }
-    if (base > 0 && !reasonUsable()) { needReason(prior); return null; }
     return send(attempt(base), sentence, prior);
   }
   /** After 409 (T07): read; a different save found stops this click; my own earlier save allows the one follow-up.
@@ -310,7 +302,7 @@ window.KinTechNote = function (app) {
         learn(item); // T23: an id found in the history settles its attempt; the input stays
         const entry = document.createElement('section'), title = document.createElement('h3'), body = document.createElement('pre');
         title.textContent = `v${item.version} · ${item.author} · ${new Date(item.createdAt).toLocaleString()}`;
-        body.textContent = (item.text || '(메모 비움)') + '\n수정 사유: ' + (item.reason || '(최초 작성)');
+        body.textContent = (item.text || '(메모 비움)') + '\n수정 사유: ' + (item.reason || '(사유 없음)');
         entry.append(title, body);
         const signed = window.KinClinicalSignature?.(result.emr, item.version);
         if (signed) { const proof = document.createElement('p'); proof.textContent = signed; entry.append(proof); }
@@ -333,7 +325,7 @@ window.KinTechNote = function (app) {
       else if (dirty() && !confirm('현재 입력이 마지막 확인본과 다른데 입력을 버리고 닫을까요?')) return;
     }
     const closedUid = uid;
-    ++seq; uid = null; busy = false; writable = false; L = null; basis = 0; attempts = []; usedReasons.clear();
+    ++seq; uid = null; busy = false; writable = false; L = null; basis = 0; attempts = [];
     interruptedRead = false; interruptedHistory = null; beforePreparation = null;
     $('text').value = $('reason').value = ''; ++reasonGeneration; $('history-items').replaceChildren(); $('target').textContent = $('meta').textContent = ''; status('');
     if (d.open) d.close();
@@ -381,7 +373,7 @@ window.KinTechNote = function (app) {
   }, open(study) {
     if (work.state()!=='active' || ended || d.open || !study || !app.allowed()) return;
     uid = study.uid; opener = document.activeElement; cursor = null; $('more').hidden = true;
-    openerDocument = innerOpener = null; L = null; basis = 0; attempts = []; usedReasons.clear();
+    openerDocument = innerOpener = null; L = null; basis = 0; attempts = [];
     try {
       if (opener?.tagName === 'IFRAME') { openerDocument = opener.contentDocument; innerOpener = openerDocument?.activeElement; }
     } catch (_) { /* Only same-origin iframe focus can be retained. */ }

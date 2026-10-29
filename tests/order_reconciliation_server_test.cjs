@@ -49,10 +49,10 @@ async function start(svc,prisma,names){
   try{await svc.onModuleInit();}finally{console.log=log;if(saved.order)prisma.order=saved.order;else delete prisma.order;if(saved.institution)prisma.institution=saved.institution;else delete prisma.institution;}
   return svc;
 }
-async function setup({policies=()=>[],qido=QIDO,studies}={}){
-  const seq=[],identityArgs=[];let policyReads=0;
+async function setup({policies=()=>[],qido=QIDO,states=STATES,studies}={}){
+  const seq=[];let policyReads=0;
   const prisma={
-    studyState:{findMany:async arg=>{seq.push('state');let rows=structuredClone(STATES);
+    studyState:{findMany:async arg=>{seq.push('state');let rows=structuredClone(states);
       if(arg?.where?.uid)rows=rows.filter(s=>arg.where.uid.in.includes(s.uid));
       else if(arg?.where?.institutionId)rows=rows.filter(s=>s.institutionId===arg.where.institutionId);
       else if(arg?.where)throw new Error('unexpected where '+JSON.stringify(arg.where));
@@ -65,11 +65,13 @@ async function setup({policies=()=>[],qido=QIDO,studies}={}){
     $queryRaw:async(strings)=>{const sql=strings.join('?');if(sql.includes('StudyAccessPolicy')){seq.push('policy');return policies(++policyReads);}return [];},
   };
   const orthanc={studies:studies||(async()=>structuredClone(qido)),
-    studyIdentities:async(...args)=>{identityArgs.push(args);return structuredClone(qido).map(r=>({'0020000D':r['0020000D'],'00080080':r['00080080'],...(args[1]?{'00080050':r['00080050']}:{})}));},
+    studyIdentities:async(accessMetadata,accession)=>structuredClone(qido).map(r=>({'0020000D':r['0020000D'],'00080080':r['00080080'],
+      ...(accessMetadata?{'00100020':r['00100020'],'00080020':r['00080020'],'00080061':r['00080061']}:{}),
+      ...(accession?{'00080050':r['00080050']}:{})})),
     studiesByUid:async uids=>structuredClone(qido).filter(r=>uids.includes(r['0020000D'].Value[0]))};
   const svc=new PacsService(prisma,orthanc,{},new StudyAccessService(prisma,orthanc,{}));
   await start(svc,prisma,[{id:'hallym',name:'hallym'},{id:'kin-center',name:'kin-center'}]);
-  return {svc,seq,identityArgs};
+  return {svc,seq};
 }
 const HALLYM=[
   {oid:'O-9001',link:'unlinked',accession:'absent',candidates:[]},
@@ -86,14 +88,38 @@ test('S4-U2 full list: own tenant only, tele-received never pairs, seed not comp
   assert.deepEqual(r.notObserved.map(x=>x.uid),['2.25.14']);
 });
 
-test('S4-U2 paged list: only the completing page carries the answer; the enumeration asks for the accession',async()=>{
-  const {svc,identityArgs,seq}=await setup();
+test('S4-U2 paged list: only the completing page carries accession-based candidates',async()=>{
+  const {svc,seq}=await setup();
   const first=await svc.listStudies(caller,{limit:'1'});
   assert.ok(first.pagination.next);assert.equal('orderReconciliation' in first,false);assert.equal('notObserved' in first,false);
   assert.equal(seq.includes('order'),false,'no order read on a page that does not complete the list');
   const last=await svc.listStudies(caller,{limit:'1',after:first.pagination.next});
   assert.equal(last.pagination.next,null);assert.deepEqual(last.orderReconciliation,{source:'engineering_only',orders:HALLYM});
-  assert.deepEqual(identityArgs,[[false,true],[false,true]]);
+});
+
+test('D1887 patientless studies stay out of full/paged lists and accession-matching suggestions',async()=>{
+  const uid='2.25.15';
+  const identified={...structuredClone(QIDO[0]),'0020000D':{Value:[uid]}};
+  const states=[...STATES,{...STATES[0],uid}];
+  for(const patient of [undefined,'','   ']){
+    const held=structuredClone(identified);
+    if(patient===undefined)delete held['00100020'];else held['00100020']={Value:[patient]};
+    // A corrected resend may coexist with the old patientless resource, in either enumeration order.
+    for(const resources of [[held],[held,identified],[identified,held]]){
+      const {svc}=await setup({states,qido:[...QIDO,...resources]});
+      for(const query of [undefined,{limit:'1'}]){
+        let after;const listed=[];let answer;
+        do{
+          answer=await svc.listStudies(caller,query?{...query,after}:undefined);
+          listed.push(...answer.studies.map(s=>s.uid));
+          after=answer.pagination?.next;
+        }while(after);
+        assert.deepEqual(listed.sort(),['2.25.11','2.25.13']);
+        assert.deepEqual(answer.orderReconciliation,{source:'engineering_only',orders:HALLYM});
+        assert.deepEqual(answer.notObserved.map(s=>s.uid),['2.25.14'],'held is observed, not missing');
+      }
+    }
+  }
 });
 
 test('S4-U2 restricted caller receives zero unlinked orders and zero candidates',async()=>{

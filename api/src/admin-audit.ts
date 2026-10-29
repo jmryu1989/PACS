@@ -29,7 +29,10 @@ export type AuditFieldSource = 'detail.institutionId' | 'detail.by' | 'detail.in
 export const AUDIT_FIELD_RULES: Readonly<Record<string, AuditFieldSource>> = Object.freeze({
   "study.arrived": 'detail.institutionId',        // 생성 때의 소유 기관(system 동기화, null = 미배정)
   "study.announce": 'detail.institutionId',       // 생성 때의 소유 기관(Gateway 자격증명 기관)
-  "study.assign": 'detail.institutionId',         // 새로 배정한 소유 기관(재배정은 거절됨)
+  "study.assign": 'detail.institutionId',         // 새로 배정한 소유 기관(D1882로 경로는 없어졌고 옛 행만 남는다)
+  "study.attach": 'detail.institutionId',         // D1882: 등록된 장비·표기로 보류 검사가 붙은 소유 기관(system)
+  "institution.device.register": 'detail.institution',   // D1882: 수신 장비를 자기 기관에 등록한 관리자의 기관
+  "institution.alias.register": 'detail.institution',    // D1882: 기관명 표기를 자기 기관에 등록한 관리자의 기관
   "match": 'detail.by',                           // 호출 기관, 소유 기관만 매칭한다
   "unmatch": 'detail.by',
   "state.delete": 'detail.by',
@@ -285,11 +288,12 @@ export type AuditSource = (below: number | null, take: number) => Promise<AuditL
  * 작은 id의 보이는 행 중 앞 `limit`개를 담는다. 숨긴 행은 total·쪽 경계·다음 쪽 여부 어디에도 들어가지 않는다
  * (RISK-S5-U5b-HIDDEN-COUNT). 원천 실패는 그대로 던진다 — 빈 목록으로 바꾸지 않는다(RISK-S5-U5b-FAILURE-AS-EMPTY).
  * `last`는 다음 쪽이 있을 때만 이 쪽 마지막 행의 id이며 응답에 그대로 나가지 않는다(서비스가 봉인한다).
+ * `ids`는 담은 행의 id(같은 순서)로, 서버의 열람 기록에만 쓰고 응답에 싣지 않는다.
  */
 export async function readAuditPage(source: AuditSource, reader: string,
     page: { after: number | null; limit: number; batch?: number }) {
   const batch = page.batch ?? 1000;
-  const rows: AuditProjection[] = [];
+  const rows: AuditProjection[] = [], ids: number[] = [];
   let below: number | null = null, previous = Infinity, total = 0, last: number | null = null, more = false;
   for (;;) {
     const chunk = await source(below, batch);
@@ -302,13 +306,13 @@ export async function readAuditPage(source: AuditSource, reader: string,
       if (!shown) continue;
       total++;
       if (page.after !== null && row.id >= page.after) continue;
-      if (rows.length < page.limit) { rows.push(shown); last = row.id; }
+      if (rows.length < page.limit) { rows.push(shown); ids.push(row.id); last = row.id; }
       else more = true;
     }
     if (chunk.length < batch) break;
     below = previous;
   }
-  return { rows, total, last: more ? last : null };
+  return { rows, ids, total, last: more ? last : null };
 }
 
 /** 다음 쪽 값. 행 id를 읽을 수 있게 내보내면 id 사이의 틈이 숨긴 행의 수를 알려 준다 — 그래서 암호화한다. */

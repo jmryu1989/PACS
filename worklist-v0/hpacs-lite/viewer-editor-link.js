@@ -75,13 +75,14 @@ globalThis.kinViewerEditorLink = function (options) {
   let disposed = false;
   function available() {
     if (disposed || !target || !studies.length || !origin) return false;
-    try { return !!live() && !!owner(); } catch (_) { return false; }
+    try { return !target.closed && !!live() && !!owner(); } catch (_) { return false; }
   }
   function read(signal) {
     return new Promise((resolve, reject) => {
       let bound = null;
       try { const value = owner(); bound = value ? JSON.stringify(value) : null; } catch (_) { bound = null; }
       if (!available() || !bound) { resolve({ ok: false, reason: 'missing' }); return; }
+      const work = view.KinWorkContext, context = work?.capture('document');
       const request = view.crypto.randomUUID();
       const expected = { request, owner: bound, studies: studies.slice(), activeUid: studies[0] };
       const entry = { cancel: null };
@@ -101,6 +102,12 @@ globalThis.kinViewerEditorLink = function (options) {
         if (event.origin !== origin || event.source !== target) return;
         const data = event.data;
         if (!data || typeof data !== 'object' || data.type !== 'kin-editor-reply' || data.request !== request) return;
+        // The request can outlive a tab switch or a closed/rebound workspace.
+        // Recheck the existing document generation before accepting its body.
+        if (!available() || context && !work.admits(context)) { finish({ ok: false, reason: 'missing' }); return; }
+        let currentOwner = null;
+        try { currentOwner = JSON.stringify(owner()); } catch (_) {}
+        if (currentOwner !== bound) { finish({ ok: false, reason: 'session' }); return; }
         const checked = pure.validReply(data, expected);
         if (!checked.ok) { finish({ ok: false, reason: checked.reason }); return; }
         finish({ owner: expected.owner, uid: expected.activeUid, session: checked.session, editor: checked.editor });

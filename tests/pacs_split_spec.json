@@ -197,54 +197,6 @@
       }
     },
     {
-      "id": "member:unassigned:MethodDeclaration",
-      "category": "member",
-      "name": "unassigned",
-      "kind": "MethodDeclaration",
-      "target": "api/src/pacs/institutions.ts",
-      "live": {
-        "file": "api/src/pacs/institutions.ts",
-        "owner": "PacsInstitutions",
-        "name": "unassigned",
-        "kind": "MethodDeclaration"
-      },
-      "baseline": {
-        "text_sha256": "c2d2d34779b7dfca7c4cbcd9e71f8cd6aadd5fd23372f6b3d358ea48985e212d",
-        "sql": []
-      }
-    },
-    {
-      "id": "member:assignInstitution:MethodDeclaration",
-      "category": "member",
-      "name": "assignInstitution",
-      "kind": "MethodDeclaration",
-      "target": "api/src/pacs/institutions.ts",
-      "live": {
-        "file": "api/src/pacs/institutions.ts",
-        "owner": "PacsInstitutions",
-        "name": "assignInstitution",
-        "kind": "MethodDeclaration"
-      },
-      "baseline": {
-        "text_sha256": "3ef1a9bee903ba2d609b89a85435eb30eb3604ec7e829885788d090d8971fe0c",
-        "sql": []
-      },
-      "correspondence": {
-        "receivers": [
-          {
-            "field": "access",
-            "member": "myDraft",
-            "count": 1
-          },
-          {
-            "field": "access",
-            "member": "scopeWrite",
-            "count": 1
-          }
-        ]
-      }
-    },
-    {
       "id": "member:metricsTimeoutMs:PropertyDeclaration",
       "category": "member",
       "name": "metricsTimeoutMs",
@@ -4859,14 +4811,6 @@
         "slot": "institutionsConcern"
       },
       {
-        "name": "unassigned",
-        "slot": "institutionsConcern"
-      },
-      {
-        "name": "assignInstitution",
-        "slot": "institutionsConcern"
-      },
-      {
         "name": "colleagues",
         "slot": "institutionsConcern"
       },
@@ -4975,8 +4919,58 @@
         "slot": "auditConcern"
       },
       {
+        "name": "auditRead",
+        "slot": "auditConcern",
+        "implementation": {
+          "file": "api/src/pacs/audit.ts",
+          "owner": "PacsAudit",
+          "name": "auditRead",
+          "kind": "MethodDeclaration"
+        }
+      },
+      {
         "name": "adminMetrics",
         "slot": "metricsConcern"
+      },
+      {
+        "name": "readStudies",
+        "slot": "worklistConcern",
+        "implementation": {
+          "file": "api/src/pacs/worklist.ts",
+          "owner": "PacsWorklist",
+          "name": "readStudies",
+          "kind": "MethodDeclaration"
+        }
+      },
+      {
+        "name": "heldSources",
+        "slot": "worklistConcern",
+        "implementation": {
+          "file": "api/src/pacs/worklist.ts",
+          "owner": "PacsWorklist",
+          "name": "heldSources",
+          "kind": "MethodDeclaration"
+        }
+      },
+      {
+        "name": "registerSourceDevice",
+        "slot": "worklistConcern",
+        "implementation": {
+          "file": "api/src/pacs/worklist.ts",
+          "owner": "PacsWorklist",
+          "name": "registerSourceDevice",
+          "kind": "MethodDeclaration"
+        }
+      },
+      {
+        "name": "registerInstitutionAlias",
+        "slot": "worklistConcern",
+        "implementation": {
+          "file": "api/src/pacs/worklist.ts",
+          "owner": "PacsWorklist",
+          "name": "registerInstitutionAlias",
+          "kind": "MethodDeclaration"
+        }
       },
       {
         "name": "listStudies",
@@ -6763,24 +6757,6 @@
       },
       {
         "controller": "PacsController",
-        "handler": "assign",
-        "method": "POST",
-        "paths": [
-          "/|studies/:uid/assign"
-        ],
-        "public": null,
-        "status": null,
-        "headers": [],
-        "guards": [],
-        "interceptors": [],
-        "args": [
-          "0:2@2:null:0",
-          "3:1@1:null:0",
-          "5:0@0:\"uid\":0"
-        ]
-      },
-      {
-        "controller": "PacsController",
         "handler": "audit",
         "method": "GET",
         "paths": [
@@ -7636,22 +7612,6 @@
       },
       {
         "controller": "PacsController",
-        "handler": "unassigned",
-        "method": "GET",
-        "paths": [
-          "/|unassigned"
-        ],
-        "public": null,
-        "status": null,
-        "headers": [],
-        "guards": [],
-        "interceptors": [],
-        "args": [
-          "0:0@0:null:0"
-        ]
-      },
-      {
-        "controller": "PacsController",
         "handler": "unmatch",
         "method": "POST",
         "paths": [
@@ -8337,7 +8297,7 @@
       }
     ]
   },
-  "allocation_sha256": "4affecaecb385eeda40deb5efd0afe0dfa5f545746c029086815f1a28271eb81",
+  "allocation_sha256": "77594daafccfcd0106acce76d208a4f0e4955e2bdd087cbce280da275d90d0fd",
   "w5_api": {
     "unit": "W5-API",
     "decision": "D1460",
@@ -8387,7 +8347,9 @@
   },
   "viewer_ux": {
     "note": "D73: viewer settings functionally extended preferences after the split. Preserve historical move proof; validate current owner/revision, readback and workspace/viewer preservation through workspace_shortcuts_v2_service_test.cjs, without pinning new private helpers.",
-    "changed_concerns": ["api/src/pacs/preferences.ts"]
+    "changed_concerns": [
+      "api/src/pacs/preferences.ts"
+    ]
   },
   "emr_d_online": {
     "unit": "EMR-D online (D1824, 2464002)",
@@ -9071,7 +9033,6 @@
         "params": [
           "DicomFrameService",
           "PacsService",
-          "OrthancService",
           "StudyImageDeliveryRecorder"
         ],
         "scope": null,
@@ -9343,5 +9304,314 @@
         }
       }
     }
+  },
+  "di_additions_e_route": {
+    "unit": "EMR-E E_ROUTE study delivery (#244)",
+    "note": "OnlineImageService resolves the request's member identity once and shares the study delivery recorder with every image route. ImageCheckDatabase is registered as a provider: the recorder uses it for each lease's current facts, which its opening and E preparation both consume, while E retains its check-pool dependency for HEAD. E takes the request context and recorder instead of the record port; the recorder writes rows a response could not retain. No controller or route is added.",
+    "middleware_routes": [],
+    "controllers": [],
+    "providers": [
+      "ImageCheckDatabase"
+    ],
+    "routes": [],
+    "injectables": {
+      "ImageCheckDatabase": {
+        "params": [],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      }
+    },
+    "changed_injectables": {
+      "OnlineImageService": {
+        "before": {
+          "params": [
+            "Object",
+            "ImageContextSource",
+            "PrismaService",
+            "OrthancService"
+          ],
+          "scope": null,
+          "declared": [
+            "0:Symbol(EmrRecordPort)"
+          ],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "ImageContextSource",
+            "PrismaService",
+            "OrthancService",
+            "Object",
+            "ImageCheckDatabase",
+            "StudyImageDeliveryRecorder"
+          ],
+          "scope": null,
+          "declared": [
+            "3:Symbol(RequestContextSource)"
+          ],
+          "optional": []
+        }
+      },
+      "StudyImageDeliveryRecorder": {
+        "before": {
+          "params": ["Object", "Object", "Object", "Object", "OrthancService", "Number"],
+          "scope": null,
+          "declared": ["5:Symbol(ImageDeliveryIdleMs)", "3:Symbol(EmrBackgroundWork)", "2:Symbol(CURRENT_CLINICAL_CONTEXT)", "1:Symbol(RequestContextSource)", "0:Symbol(EmrRecordPort)"],
+          "optional": [5]
+        },
+        "after": {
+          "params": ["Object", "Object", "Object", "Object", "OrthancService", "Number", "ImageCheckDatabase"],
+          "scope": null,
+          "declared": ["5:Symbol(ImageDeliveryIdleMs)", "3:Symbol(EmrBackgroundWork)", "2:Symbol(CURRENT_CLINICAL_CONTEXT)", "1:Symbol(RequestContextSource)", "0:Symbol(EmrRecordPort)"],
+          "optional": [5]
+        }
+      }
+    }
+  },
+  "caution_app": {
+    "unit": "Caution census app (#259)",
+    "note": "Change Password opens Keycloak's UPDATE_PASSWORD action on the signed-in session: GET auth/login takes the literal action and GET auth/callback reads kc_action_status (auth.controller.ts). Both routes stay public; nothing else changes.",
+    "route_args": [
+      {
+        "controller": "AuthController",
+        "handler": "callback",
+        "added": [
+          "4:5@5:\"kc_action_status\":0"
+        ]
+      },
+      {
+        "controller": "AuthController",
+        "handler": "login",
+        "added": [
+          "4:2@2:\"action\":0"
+        ]
+      }
+    ]
+  },
+  "di_additions_held": {
+    "unit": "held-unknown-source",
+    "decision": "D1882",
+    "note": "The operator alert of held studies and the two registrations (sending device, InstitutionName spelling) on the existing AdminController; PacsController unassigned/assign are retired (pacs_split_test.cjs).",
+    "controllers": [],
+    "providers": [],
+    "injectables": {},
+    "routes": [
+      {
+        "controller": "AdminController",
+        "handler": "heldSources",
+        "method": "GET",
+        "paths": [
+          "admin|held-sources"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "AdminController",
+        "handler": "registerAlias",
+        "method": "POST",
+        "paths": [
+          "admin|institution-aliases"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "AdminController",
+        "handler": "registerDevice",
+        "method": "POST",
+        "paths": [
+          "admin|source-devices"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      }
+    ]
+  },
+  "di_additions_cold_catalog": {
+    "unit": "EMR-E cold first opening (#248 follow-up)",
+    "note": "OrthancImageCatalog follows Orthanc's change log on the EMR background-work registry, so its constructor takes that registry. No controller, provider or route is added.",
+    "middleware_routes": [],
+    "controllers": [],
+    "providers": [],
+    "routes": [],
+    "injectables": {},
+    "changed_injectables": {
+      "OrthancImageCatalog": {
+        "before": {
+          "params": [
+            "PrismaService",
+            "Object",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "2:Symbol(RequestContextSource)",
+            "1:Symbol(CURRENT_CLINICAL_CONTEXT)"
+          ],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PrismaService",
+            "Object",
+            "Object",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "3:Symbol(EmrBackgroundWork)",
+            "2:Symbol(RequestContextSource)",
+            "1:Symbol(CURRENT_CLINICAL_CONTEXT)"
+          ],
+          "optional": []
+        }
+      }
+    }
+  },
+  "di_additions_presence": {
+    "unit": "p-viewing-api",
+    "controllers": [],
+    "providers": [
+      "PresenceService"
+    ],
+    "injectables": {
+      "PresenceService": {
+        "params": [
+          "PrismaService",
+          "StudyAccessService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      }
+    },
+    "changed_injectables": {
+      "AuthService": {
+        "before": {
+          "params": [
+            "PrismaService",
+            "KeycloakService",
+            "Object",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "3:Symbol(EmrBackgroundWork)",
+            "2:Symbol(EmrRecordPort)"
+          ],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PrismaService",
+            "KeycloakService",
+            "Object",
+            "Object",
+            "PresenceService"
+          ],
+          "scope": null,
+          "declared": [
+            "3:Symbol(EmrBackgroundWork)",
+            "2:Symbol(EmrRecordPort)"
+          ],
+          "optional": []
+        }
+      },
+      "PacsController": {
+        "before": {
+          "params": [
+            "PacsService",
+            "AuthService",
+            "Object"
+          ],
+          "scope": null,
+          "declared": [
+            "2:Symbol(RequestContextSource)"
+          ],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "PacsService",
+            "AuthService",
+            "Object",
+            "PresenceService"
+          ],
+          "scope": null,
+          "declared": [
+            "2:Symbol(RequestContextSource)"
+          ],
+          "optional": []
+        }
+      }
+    },
+    "routes": [
+      {
+        "controller": "PacsController",
+        "handler": "updateViewingPresence",
+        "method": "POST",
+        "paths": [
+          "/|presence"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [
+          {
+            "name": "Cache-Control",
+            "value": "no-store"
+          }
+        ],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "viewingPresence",
+        "method": "GET",
+        "paths": [
+          "/|presence"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [
+          {
+            "name": "Cache-Control",
+            "value": "no-store"
+          }
+        ],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "4:1@1:\"uids\":0"
+        ]
+      }
+    ]
   }
 }

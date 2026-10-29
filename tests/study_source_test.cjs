@@ -93,7 +93,9 @@ test('cold and repeated orphan registration fetch only authorized page details',
  const svc=new PacsService(prisma,o,{},new StudyAccessService(prisma,o,{}));{const log=console.log;console.log=()=>{};try{await svc.onModuleInit();}finally{console.log=log;}}const caller={institution:'hallym',sub:'subject',actor:'doctor',roles:['radiologist'],kind:'member'};
  let out=await svc.listStudies(caller,{limit:'1'});assert.equal(out.studies[0].uid,'1');assert.equal(out.pagination.total,205);assert.deepEqual(requests,[['1']]);assert.equal(audits.length,206);assert.equal(rows.get('208').institutionId,null);assert.equal(out.studies[0].institutionName,'hallym');assert.equal(JSON.stringify(out).includes('unknown'),false);
  requests.length=0;out=await svc.listStudies(caller,{limit:'1'});assert.deepEqual(requests,[['1']]);assert.equal(audits.length,206);assert.equal(rows.get('208').institutionId,null);
- orphanName='hallym';requests.length=0;out=await svc.listStudies(caller,{limit:'1'});assert.equal(out.pagination.total,206);assert.equal(rows.get('208').institutionId,'hallym');assert.deepEqual(requests,[['1']]);assert.equal(audits.length,206);
+ orphanName='hallym';requests.length=0;out=await svc.listStudies(caller,{limit:'1'});assert.equal(out.pagination.total,206);assert.equal(rows.get('208').institutionId,'hallym');assert.deepEqual(requests,[['1']]);
+ // D1882: attaching the held study records the fact that decided its hospital, once.
+ assert.equal(audits.length,207);assert.deepEqual([audits.at(-1).data.action,audits.at(-1).data.target,JSON.parse(audits.at(-1).data.detail)],['study.attach','208',{institutionId:'hallym',via:'alias'}]);
 });
 
 test('institution metadata preserves Unicode and empty/absent values, rejects malformed shapes',async()=>{

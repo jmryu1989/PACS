@@ -1,8 +1,11 @@
 import type { BeforeApplicationShutdown, OnApplicationShutdown, OnModuleDestroy } from '@nestjs/common';
 import type { EmrRuntime } from './application';
 
+/** The existing v4 drain allowance: how long work still in flight may take to finish once the process stops (the image
+ * delivery recorder waits this long for its responses, image-delivery-record.ts). */
+export const SHUTDOWN_DRAIN_MS = 10000;
 // Existing v4 drain (10s) + cleanup (5s) allowance, now one shared deadline.
-const SHUTDOWN_MS = 15000;
+const SHUTDOWN_MS = SHUTDOWN_DRAIN_MS + 5000;
 export class EmrNestLifecycle implements BeforeApplicationShutdown, OnApplicationShutdown, OnModuleDestroy {
   private deadline: number | undefined;
   constructor(private readonly runtime: EmrRuntime) {}

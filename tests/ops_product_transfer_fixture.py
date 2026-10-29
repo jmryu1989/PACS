@@ -105,7 +105,22 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql',
               'api/prisma/migrations/20261015013945_import_operation/migration.sql',
               'api/prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql',
-              'api/prisma/migrations/20261023180000_emr_pg_ledger/migration.sql', 'api/prisma/migrations/20261023200000_emr_server_signing/migration.sql', 'api/prisma/migrations/20261024120000_emr_d_online/migration.sql', 'api/prisma/migrations/20261025000000_emr_e_online/migration.sql', 'api/prisma/migrations/20261025120000_access_review/migration.sql', 'api/prisma/migrations/20261025120000_auth_flow_subtraction/migration.sql', 'api/prisma/migrations/20261025150000_emr_f_link/migration.sql', 'api/prisma/migrations/20261026120000_assignment_access_stream/migration.sql', 'api/prisma/migrations/20261026180000_emr_signing_key_admin/migration.sql']
+              'api/prisma/migrations/20261023180000_emr_pg_ledger/migration.sql',
+              'api/prisma/migrations/20261023200000_emr_server_signing/migration.sql',
+              'api/prisma/migrations/20261024120000_emr_d_online/migration.sql',
+              'api/prisma/migrations/20261025000000_emr_e_online/migration.sql',
+              'api/prisma/migrations/20261025120000_access_review/migration.sql',
+              'api/prisma/migrations/20261025120000_auth_flow_subtraction/migration.sql',
+              'api/prisma/migrations/20261025150000_emr_f_link/migration.sql',
+              'api/prisma/migrations/20261026120000_assignment_access_stream/migration.sql',
+              'api/prisma/migrations/20261026180000_emr_signing_key_admin/migration.sql',
+              'api/prisma/migrations/20261026210000_emr_e_source_manifest/migration.sql',
+              'api/prisma/migrations/20261027090000_emr_e_study_delivery/migration.sql',
+              'api/prisma/migrations/20261027150000_emr_e_observation_delivery/migration.sql',
+              'api/prisma/migrations/20261027180000_emr_image_object_digest/migration.sql',
+              'api/prisma/migrations/20261027230000_caution_app_limits/migration.sql',
+              'api/prisma/migrations/20261028120000_held_unknown_source/migration.sql',
+              'api/prisma/migrations/20261029120000_emr_image_retention/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -211,7 +226,7 @@ def expected_rows(uid):
     rows['TechNoteRevision'] = [dict(studyUid=uid, version=1, text='SYNTHETIC tech note', reason='', author='SYNTHETIC-tech', authorSub='SYNTHETIC-sub', institutionId='SYNTHETIC-hospital', createdAt=STAMP, attemptId=None),
         dict(studyUid=uid, version=2, text='SYNTHETIC tech note v2', reason='SYNTHETIC correction', author='SYNTHETIC-tech', authorSub='SYNTHETIC-sub', institutionId='SYNTHETIC-hospital', createdAt=STAMP, attemptId='00000000-0000-4000-8000-000000000d01')]
     rows['Institution'] = [dict(id='SYNTHETIC-'+kind, name='SYNTHETIC '+kind, type=kind,
-        dicomNames='SYNTHETIC', createdAt=STAMP) for kind in ('hospital', 'tele')]
+        dicomNames='SYNTHETIC', dicomAets='', createdAt=STAMP) for kind in ('hospital', 'tele')]
     rows['StudyState'] = [dict(uid=uid, institutionId='SYNTHETIC-hospital', teleInstitutionId='SYNTHETIC-tele',
         origin='dicom', rs='R', holdReason=None, ss='Verified', em='N', ts='none', matched='U', ward='',
         reqHosp='SYNTHETIC', repDoc='SYNTHETIC-reader', confirm=None, preDoc=None, preReviewer=None, preDocSub="SYNTHETIC-author-sub", preReviewerSub="SYNTHETIC-reviewer-sub",
@@ -703,7 +718,7 @@ def seed_emr(name, db):
     for table, rows in expected_image_rows().items():
         for row in rows:
             execute(name, db, 'INSERT INTO emr_image.'+table+' OVERRIDING SYSTEM VALUE SELECT * FROM json_populate_record(NULL::emr_image.'+table+', '+sql_literal(json.dumps(row))+')')
-    execute(name, db, "DO $$ BEGIN PERFORM setval('emr_image.observation_sequence_seq', 2, true); END $$")
+    execute(name, db, "DO $$ BEGIN PERFORM setval('emr_image.observation_sequence_seq', 3, true); END $$")
     for table, rows in expected_audit_rows().items():
         for row in rows:
             execute(name, db, 'INSERT INTO emr_audit.'+table+' OVERRIDING SYSTEM VALUE SELECT * FROM json_populate_record(NULL::emr_audit.'+table+', '+sql_literal(json.dumps(row))+')')
@@ -739,17 +754,39 @@ def audit_contract(audit):
 
 
 def expected_image_rows():
-    event = '00000000-0000-4000-8000-0000000e0001'
+    event, named = '00000000-0000-4000-8000-0000000e0001', '00000000-0000-4000-8000-0000000e0002'
     at = '2026-10-25T00:00:00+00:00'
     copy = dict(location='/synthetic/image-staging/body', kind='staging', eventId=event,
                 unit='object:2.25.701.1.1', bytes=4, sha256='1'*64, state='present')
-    return dict(preparation=[dict(event_id=event, study_uid='2.25.701',
+    source = dict(studyUid='2.25.701', sha256='3'*64, patient=dict(linkId='synthetic-link', patientId='SYNTHETIC-E', assigningAuthority='synthetic'))
+    # Inserted in this order: a preparation written since 20261026210000 names the one kept study-manifest body, and one
+    # written since 20261027090000 names the study delivery's access record (B2 event) and its HTTP request; the earlier
+    # row is its own record (delivery_event_id and request_id NULL).
+    delivery, request = '00000000-0000-4000-8000-0000000e00d1', '00000000-0000-4000-8000-0000000e00a1'
+    return dict(expiring_delivery_link=[dict(delivery_event_id=delivery, opening_event_id=event)],
+        source_manifest=[dict(body_sha256='4'*64, study_uid='2.25.701', body=source, recorded_at=at)],
+        preparation=[dict(event_id=event, delivery_event_id=None, request_id=None, study_uid='2.25.701',
         source_manifest=dict(studyUid='2.25.701', patient=dict(linkId='synthetic-link', patientId='SYNTHETIC-E', assigningAuthority='synthetic')),
+        source_manifest_body=None,
         response_manifest=dict(eventId=event, sha256='2'*64, http=dict(status=206, plannedBytes=2,
-            selections=[dict(unit=copy['unit'], start=0, end=2)])), staging_copies=[copy], recorded_at=at)],
-        observation=[dict(sequence=1, event_id=event, kind='transport',
+            selections=[dict(unit=copy['unit'], start=0, end=2)])), staging_copies=[copy], recorded_at=at),
+            dict(event_id=named, delivery_event_id=delivery, request_id=request, study_uid='2.25.701', source_manifest=None, source_manifest_body='4'*64,
+                 response_manifest=dict(eventId=named, deliveryEventId=delivery, sha256='5'*64), staging_copies=[], recorded_at=at)],
+        # Observations: two of the earlier row (own record, no link columns), and one written since 20261027150000: the
+        # copy observation of a response whose preparation failed (no preparation row), naming its delivery record and
+        # request, written late with the cause of the refused first write. Restore must keep that link and cause.
+        observation=[dict(sequence=1, event_id=event, delivery_event_id=None, request_id=None, retained_after=None, kind='transport',
             body=dict(wire=dict(bytesWritten=2, plannedBytes=2, terminal='transfer-ended'), observations=[]), recorded_at=at),
-            dict(sequence=2, event_id=event, kind='copies', body=[dict(copy, state='removed')], recorded_at=at)])
+            dict(sequence=2, event_id=event, delivery_event_id=None, request_id=None, retained_after=None, kind='copies',
+                 body=[dict(copy, state='removed')], recorded_at=at),
+            dict(sequence=3, event_id='00000000-0000-4000-8000-0000000e0003', delivery_event_id=delivery, request_id='00000000-0000-4000-8000-0000000e00a2',
+                 retained_after='SyntheticObservationWriteRefused', kind='copies',
+                 body=[dict(copy, eventId='00000000-0000-4000-8000-0000000e0003', bytes=None, sha256=None, state='removed')], recorded_at=at)],
+        # A kept stored-file digest: a restore that dropped it would only make the next first opening read the file again,
+        # so the row is compared like every other one rather than left to that slower path.
+        object_digest=[dict(instance_id='00000000-00000000-00000000-00000000-0000e701', file_uuid='synthetic-stored-file',
+            sop_instance_uid='2.25.701.1.1', transfer_syntax_uid='1.2.840.10008.1.2.1', bytes=4, sha256='3'*64,
+            frames=[dict(number=1, bytes=2, sha256='4'*64)], recorded_at=at)])
 
 
 def observe_image(name, db):
@@ -759,16 +796,16 @@ def observe_image(name, db):
     return dict(catalog=inventory.parse(psql(name, db, catalog_sql)),
         rows={table: inventory.parse(psql(name, db,
             'SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text COLLATE "C"), \'[]\'::jsonb) FROM emr_image.'+table+' t'))
-            for table in ('preparation', 'observation')},
+            for table in expected_image_rows()},
         sequence=inventory.parse(psql(name, db,
             "SELECT jsonb_build_object('last_value',last_value,'is_called',is_called) FROM emr_image.observation_sequence_seq")))
 
 
 def image_contract(image):
     require(type(image) is dict and set(image) == {'catalog', 'rows', 'sequence'})
-    require(image['catalog']['tables'] == ['observation', 'preparation'])
+    require(image['catalog']['tables'] == sorted(expected_image_rows()))
     require(canonical(sorted_rows(image['rows'])) == canonical(sorted_rows(expected_image_rows())))
-    require(image['sequence'] == dict(last_value=2, is_called=True))
+    require(image['sequence'] == dict(last_value=3, is_called=True))
 
 
 def create_product(name, db, uid):

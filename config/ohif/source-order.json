@@ -2,6 +2,7 @@
   "sources": [
     "branding-defaults.js",
     "session.js",
+    "tool-retry.js",
     "toolbar-labels.js",
     "branding.js",
     "stack-precision.js",
@@ -9,6 +10,7 @@
     "sr-provenance.js",
     "navigation.js",
     "mg-length.js",
+    "planar-geometry.js",
     "history.js",
     "layout-model.js",
     "clinician-context.js",
@@ -28,11 +30,14 @@
     "three-d-cursor.js",
     "dicom-pdf.js",
     "series-recovery.js",
+    "image-load-status.js",
     "context-loss.js",
     "mammography-hanging.js",
     "mg-reference-lines.js",
     "study-prefetch.js",
+    "study-search.js",
     "viewer-ux.js",
+    "viewer-prior.js",
     "configuration.js"
   ]
 }

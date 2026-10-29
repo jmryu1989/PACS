@@ -122,7 +122,7 @@
       receipt.hidden = !s;
       if (!s) return;
       // Every worklist row passed the visible() boundary on the server, so axis A is `assigned` here;
-      // institution-less studies only appear in the admin Unmatched Studies list.
+      // a study whose sending hospital is unknown is held and reaches no list (D1882).
       const labels = KinStudyArrivals.receiptLabels({ assignment: "assigned",
         observation: KinStudyArrivals.studyObservation(studyObservationModel, s.uid), gateway: s.gatewayReceipt ?? null });
       $("#receipt-assignment").textContent = labels.assignment.text; $("#receipt-assignment").title = labels.assignment.title;

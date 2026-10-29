@@ -114,8 +114,8 @@
       if (failure.status === 401 && failure.code === 'AUTH_SESSION_ENDED' ||
           [403, 409].includes(failure.status) && failure.code === 'AUTH_SESSION_MISMATCH') end();
     }
-    // D1880: under the transport (admitted and bound first), frames of a preloaded study may come from memory once the
-    // study passed its live check in this document (viewer-preload.js).
+    // D1880: under the transport (admitted and bound first), every image read names its opening, and frames of a
+    // preloaded study may come from memory once the study passed its live check for that opening (viewer-preload.js).
     const send = win.KinViewerPreload ? win.KinViewerPreload.attach(win, originalFetch) : originalFetch;
     const transport = win.KinSessionTransport.page({ fetch: send, authFailure });
     // S7-U5 session end: auth.js keeps the end record of each session under that session's own key
@@ -544,6 +544,8 @@
       onState(run) { changes.add(run); run(gate.state()); return () => changes.delete(run); },
       // A006 (added): a module says what it holds unsaved - `read()` returns kind names, none when clean (see above).
       unsaved(read) { unsavedReaders.add(read); declareUnsaved(); return () => { unsavedReaders.delete(read); declareUnsaved(); }; },
+      // A new opening of studies this document shows again (viewer-preload.js `reenter`): null when it was not recorded.
+      reenter: (uids, signal) => send.reenter ? send.reenter(uids, signal) : Promise.resolve({ commit() {} }),
       authFailure,
     });
     win.KinViewerSessionBoundary = api;

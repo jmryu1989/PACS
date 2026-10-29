@@ -1,9 +1,11 @@
+import { PresenceService } from './presence.service';
 import { ForbiddenException, BadRequestException, Body, Controller, Delete, Get, Header, HttpCode, Inject, Param, Patch, Post, Put, Query, Req } from '@nestjs/common';
 import { PacsService, Caller, DraftRequestFacts } from './pacs.service';
 import { REQUEST_CONTEXT_SOURCE, RequestContextSource } from './emr-runtime/request-context';
 import { Public } from './auth.guard';
 import { AuthService } from './auth.service';
-import { imageRead } from './image-relay.controller';
+import { imageRead } from './image-delivery-record';
+import { bootstrapRead, studyAuditRead } from './emr-viewing/consumer-read';
 
 /**
  * URL의 `:id`를 정수로. **`+id`를 그대로 쓰면 안 된다.**
@@ -25,6 +27,17 @@ function numId(raw: string): number {
   if (!Number.isInteger(n) || n <= 0)
     throw new BadRequestException(`잘못된 id입니다: ${raw}`);
   return n;
+}
+
+/**
+ * D1880 memory-only preload: the share of the reading PC's reported memory the worklist's preload may hold, set by the
+ * site (`KIN_PRELOAD_MEMORY_SHARE`, 0 < share <= 1). No built-in value: none has a measured source yet, so the first site
+ * sets it from its own reading PCs, and without it preload stays off (worklist-v0/hpacs-lite/preload-store.js).
+ */
+function preloadMemoryShare(): number | null {
+  const raw = String(process.env.KIN_PRELOAD_MEMORY_SHARE ?? '').trim();
+  const share = raw ? Number(raw) : NaN;
+  return Number.isFinite(share) && share > 0 && share <= 1 ? share : null;
 }
 
 /**
@@ -51,7 +64,7 @@ const draftSession = (req: any): string | null => (req.authMethod === 'session' 
 @Controller()
 export class PacsController {
   constructor(private svc: PacsService, private auth: AuthService,
-    @Inject(REQUEST_CONTEXT_SOURCE) private readonly requests: RequestContextSource) {}
+    @Inject(REQUEST_CONTEXT_SOURCE) private readonly requests: RequestContextSource, private presence: PresenceService) {}
 
   private withDraftFacts<T>(req: any, task: (facts: DraftRequestFacts) => Promise<T>): Promise<T> {
     return this.requests.withWork(req, async request => {
@@ -65,6 +78,19 @@ export class PacsController {
         await request.requireCurrent();
       }
     });
+  }
+
+  @Get('presence')
+  @Header('Cache-Control', 'no-store')
+  viewingPresence(@Req() req: any, @Query('uids') uids?: string) {
+    return this.presence.read(caller(req), uids ? uids.split(',') : []);
+  }
+
+  @Post('presence')
+  @Header('Cache-Control', 'no-store')
+  updateViewingPresence(@Req() req: any, @Body() body: any) {
+    return this.presence.update(caller(req), draftSession(req), req.sessionId ?? null,
+      req.displayName ?? req.actor, body);
   }
 
   @Public()
@@ -85,7 +111,7 @@ export class PacsController {
   @Header('Cache-Control', 'no-store')
   me(@Req() req: any) {
     return { ...caller(req), user: req.actor, displayName: req.displayName ?? req.actor, sessionId: req.sessionId ?? null,
-      issuer: process.env.KC_ISSUER || null };
+      issuer: process.env.KC_ISSUER || null, preloadMemoryShare: preloadMemoryShare() };
   }
 
   /** nginx auth_request 전용. 204=통과, 403=기관 경계 밖. PHI 본문은 싣지 않는다. */
@@ -98,7 +124,8 @@ export class PacsController {
     // no image byte.
     if (['GET', 'HEAD'].includes(method.toUpperCase()) && imageRead(uri.split('?')[0]))
       throw new ForbiddenException('영상은 열람 기록 경로로만 제공합니다');
-    return this.svc.authzDicom(uri, method, caller(req));
+    // The gate's observation of the study (its patient) is for the API's own image routes, never an admission's answer.
+    return this.svc.authzDicom(uri, method, caller(req)).then(() => undefined);
   }
 
   /** Gateway가 바이트를 보내기 전에 자격증명의 기관으로 Study 소유권을 고정한다. */
@@ -243,8 +270,8 @@ export class PacsController {
 
   @Get('bootstrap')
   @Header('Cache-Control', 'no-store')
-  bootstrap(@Req() req: any, @Query() query: any) {
-    return this.svc.bootstrap(caller(req), query);
+  async bootstrap(@Req() req: any, @Query() query: any) {
+    return bootstrapRead(await this.svc.bootstrap(caller(req), query), req.actor, req.institution);
   }
 
   /**
@@ -253,20 +280,8 @@ export class PacsController {
    */
   @Get('studies')
   @Header('Cache-Control', 'no-store')
-  studies(@Req() req: any, @Query() query: any) {
-    return this.svc.listStudies(caller(req), query);
-  }
-
-  /** 기관을 못 알아본 검사 — 관리자 전용 통로. 워크리스트에는 안 섞인다 */
-  @Get('unassigned')
-  unassigned(@Req() req: any) {
-    return this.svc.unassigned(caller(req));
-  }
-
-  /** 미배정 검사를 기관에 배정 (고아를 집에 보내는 것만 한다 — 기관 이동은 아니다) */
-  @Post('studies/:uid/assign')
-  assign(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
-    return this.svc.assignInstitution(uid, String(body?.institutionId ?? ''), caller(req));
+  async studies(@Req() req: any, @Query() query: any) {
+    return this.svc.readStudies(caller(req), query);
   }
 
   /** S4-U4 Now Retry 요청. 본문은 비어 있어야 하고 묶을 영수증은 서버가 정한다. 200은 "저장됨"이지 "재시도됨"이 아니다. */
@@ -399,13 +414,13 @@ export class PacsController {
   }
 
   @Get('audit')
-  audit(@Req() req: any, @Query('uid') uid?: string, @Query('take') take?: string) {
+  async audit(@Req() req: any, @Query('uid') uid?: string, @Query('take') take?: string) {
     let n = 100;
     if (take !== undefined) {
       n = Number(take);
       if (!Number.isInteger(n) || n < 1 || n > 500)
         throw new BadRequestException(`잘못된 take입니다: ${take} (1~500 정수)`);
     }
-    return this.svc.audits(uid, n, caller(req));
+    return studyAuditRead(await this.svc.auditRead(uid, n, caller(req)));
   }
 }

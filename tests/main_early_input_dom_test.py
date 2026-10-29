@@ -334,17 +334,38 @@ class PreSite(h.Site):
         self.filters = [f for f in self.filters if f.get("id") != value]
         return route.fulfill(json={"ok": True})
 
-    def static(self, route, path):
+    def own_file(self, path):
+        """(content type, body) of a page file this origin answers itself, else None (the logout suite's table)."""
         name = path[len(h.BASE):] if path.startswith(h.BASE) else None
         if name and getattr(self, "historical_file", None):
-            return route.fulfill(status=200, content_type=h.TYPES[Path(name).suffix], body=self.historical_file(name))
+            return h.TYPES[Path(name).suffix], self.historical_file(name)
         if name and self.assets and (self.assets / name).is_file():
-            return route.fulfill(status=200, content_type=h.TYPES[Path(name).suffix], body=(self.assets / name).read_bytes())
+            return h.TYPES[Path(name).suffix], (self.assets / name).read_bytes()
         # The dictation's AudioWorklet module: a file of the page directory the logout suite's table does not list.
         if path == h.BASE + "dictation-worklet.js":
-            return route.fulfill(status=200, content_type="text/javascript; charset=utf-8",
-                                 body=(sh.PRODUCT_DIR / "dictation-worklet.js").read_bytes())
+            return "text/javascript; charset=utf-8", (sh.PRODUCT_DIR / "dictation-worklet.js").read_bytes()
+        return None
+
+    def static(self, route, path):
+        found = self.own_file(path)
+        if found:
+            return route.fulfill(status=200, content_type=found[0], body=found[1])
         return super().static(route, path)
+
+    def worker_file(self, method, url):
+        """What a worker of the page asks for itself (WorkerNetwork), answered as `static` answers the page: a GET of a
+        file of the page directory. Anything else - a call or another origin - is not answered here (None)."""
+        parsed = urlparse(url)
+        if method != "GET" or f"{parsed.scheme}://{parsed.netloc}" != h.ORIGIN or not parsed.path.startswith(h.BASE):
+            return None
+        found = self.own_file(parsed.path)
+        if found:
+            return found
+        rel = "worklist-v0/hpacs-lite/" + parsed.path[len(h.BASE):]
+        if rel not in h.SERVED_FILES:
+            return None
+        h.SERVED.add(rel)
+        return h.TYPES[Path(rel).suffix], (h.ROOT / rel).read_bytes()
 
     def answer_dictation(self, text):
         route = self.held_dictations.pop(0)
@@ -431,6 +452,11 @@ class Run:
         self.page = self.context.new_page()
         self.page.set_default_timeout(10000)
         self.errors, self.dialogs = [], []
+        # The page's SharedWorker gets its own files from this run's origin too (see sh.WorkerNetwork).
+        self.worker_requests = []
+        self.worker_network = sh.WorkerNetwork.of(case.browser)
+        self.worker_context = self.worker_network.register(self.context, self.page, self.worker_answer,
+                                                           self.worker_unanswered)
         self.page.on("pageerror", lambda error: self.errors.append(f"{error.name}: {error.message}"))
         self.page.on("console", self.on_console)
         self.page.on("dialog", self.on_dialog)
@@ -440,6 +466,19 @@ class Run:
             self.steps = Steps(self)
         self.closed = False
         self.page.goto(h.MAIN_URL, wait_until="commit")
+
+    def worker_answer(self, method, url):
+        record = {"method": method, "path": urlparse(url).path, "answered": False}
+        self.worker_requests.append(record)
+        try:
+            found = self.site.worker_file(method, url)
+        except Exception:  # noqa: BLE001 - e.g. a historical side without that file: reported as unanswered
+            found = None
+        record["answered"] = found is not None
+        return found
+
+    def worker_unanswered(self, method, url):
+        self.errors.append(f"worker request not answered by the synthetic origin: {method} {urlparse(url).path}")
 
     def on_console(self, message):
         # console.error calls of page code only (browser notices - resource loads, sandboxed frames - are not the
@@ -544,6 +583,7 @@ class Run:
             except PlaywrightError:
                 pass
         self.site.held_me, self.site.waiting, self.site.held_writes = None, [], []
+        self.worker_network.unregister(self.worker_context)
         try:
             self.context.close()
         except PlaywrightError:
@@ -581,6 +621,13 @@ class Steps:
         record = self.run.site.request_rows[request]
         return held_key(record["key"], holds)
 
+    def workers(self):
+        return self.run.page.evaluate("window.__kinTrace.workers()")
+
+    def starting(self):
+        """SharedWorkers of the page that have neither started nor failed yet (host I/O, like a fetch in flight)."""
+        return [w["object"] for w in self.workers() if w["outcome"] == "starting"]
+
     def drive(self, condition, what, limit_ms, holds=(), release=None, delivery_only=False):
         """`holds`: exact request keys that stay waiting (the case answers them later); `release(state)`: the schedule's
         own point to let a held body go (returns True when it released one)."""
@@ -593,7 +640,7 @@ class Steps:
                                      f"(virtual {self.virtual - start} ms)")
             run.delivery.pump()
             if delivery_only:
-                if condition():
+                if condition() and not self.starting():
                     self.phases.append({"phase": what, "virtual": self.virtual, "pending_timers": self.ledger()["timers"]})
                     return self.ledger()
                 # Script delivery is host I/O. It must never spend a virtual timer tick merely because the parser
@@ -607,7 +654,9 @@ class Steps:
                 continue
             state = self.ledger()
             waiting, flying = self.pending(state, holds)
-            if flying:
+            # A worker's start, like a fetch in flight, is waited for in host time: virtual time does not move past it,
+            # so its outcome reaches the page at the same point of the schedule on every side.
+            if flying or self.starting():
                 run.page.wait_for_timeout(5)
                 continue
             if release and release(state):
@@ -623,11 +672,11 @@ class Steps:
             self.virtual += step
 
     def settled(self, holds=()):
-        """Nothing waiting, in flight or held (asserted after every barrier)."""
+        """Nothing waiting, in flight, held or starting (asserted after every barrier)."""
         state = self.ledger()
         waiting, flying = self.pending(state, holds)
         return {"waiting": [urlparse(r.url).path for r in waiting], "in_flight": [f["path"] for f in flying],
-                "held_bodies": state["held"]}
+                "held_bodies": state["held"], "workers_starting": self.starting()}
 
     def rendered(self, what):
         """The app clock and the browser compositor have separate frame queues. An isolated world's native rAF
@@ -671,7 +720,9 @@ class Steps:
         """Everything of the run at the end of a phase, kept before anything is compared."""
         run = self.run
         return {"phase": phase, "status": status, "virtual_ms": self.virtual, "trace": run.trace(), "ledger": self.ledger(),
-                "site": [dict(item) for item in run.site.ledger], "screen": run.observe(), "errors": list(run.errors),
+                "site": [dict(item) for item in run.site.ledger],
+                "worker_requests": [dict(item) for item in run.worker_requests],
+                "screen": run.observe(), "errors": list(run.errors),
                 "dialogs": list(run.dialogs), "phases": list(self.phases), "holds": list(self.hold_events),
                 "inbox_badge": run.page.evaluate("document.getElementById('cvr-inbox-badge')?.innerText || null"),
                 "source": {"page": run.manifest["source"], "sha256": hashlib.sha256(run.delivery.body("main.html")).hexdigest(),
@@ -953,7 +1004,8 @@ class PreCase(unittest.TestCase):
             raws[name] = steps.raw(name)
             keep(name, raws[name])
             # The barrier's own guarantee, checked on its own: nothing of the phase is left over.
-            self.assertEqual({"waiting": [], "in_flight": [], "held_bodies": []}, left, f"{name}: the barrier left work behind")
+            self.assertEqual({"waiting": [], "in_flight": [], "held_bodies": [], "workers_starting": []}, left,
+                             f"{name}: the barrier left work behind")
 
         def retry_ready(previous=None):
             buttons = run.page.locator("#err button:not([disabled])")
@@ -1061,6 +1113,10 @@ class PreCase(unittest.TestCase):
                     comparison.update(dispatches=[len(o) for o in sent], dispatch_difference=sh.order_difference(*sent))
                 comparison["requests"] = [[(r["method"], r["path"], r["query"]) for r in side[name]["site"]]
                                           for side in (original, candidate)]
+                # Each SharedWorker's start (started/failed, in creation order) and what it asked the origin for.
+                comparison["workers"] = [[w["outcome"] for w in side[name]["trace"]["workers"]] for side in (original, candidate)]
+                comparison["worker_requests"] = [[(r["method"], r["path"], r["answered"]) for r in side[name]["worker_requests"]]
+                                                 for side in (original, candidate)]
             except sh.TraceInfraFailure as failure:
                 comparison["infra"] = str(failure)
                 sh.keep(base / name, "comparison.json", comparison)
@@ -1074,6 +1130,8 @@ class PreCase(unittest.TestCase):
             if dispatches:
                 self.assertEqual([], comparison["dispatch_difference"], f"{what} {name}: every dispatch in order")
             self.assertEqual(*comparison["requests"], f"{what} {name}: the same requests in the same order")
+            self.assertEqual(*comparison["workers"], f"{what} {name}: the same SharedWorker start outcomes")
+            self.assertEqual(*comparison["worker_requests"], f"{what} {name}: the same worker requests")
             self.assertEqual(original[name]["virtual_ms"], candidate[name]["virtual_ms"],
                              f"{what} {name}: the same virtual schedule")
 
@@ -2254,7 +2312,7 @@ class HarnessSelfChecks(PreCase):
         for order in (["first", "second"], ["first"], ["first", "second", "first"], ["second", "first"]):
             _, trace = TraceOracle.probe(self, body, args=order)
             records.append({"trace": trace, "since": max(d["seq"] for d in trace["dispatches"]),
-                            "site": [], "virtual_ms": 0})
+                            "site": [], "worker_requests": [], "virtual_ms": 0})
         for label, changed in zip(("missing", "extra", "reversed"), records[1:]):
             base, keeper = self.kept(event + "-" + label, "default", "probe")
             for side, raw in zip(("original", "candidate"), (records[0], changed)):
@@ -2390,7 +2448,8 @@ class HarnessSelfChecks(PreCase):
             _, trace = TraceOracle.probe(self, TraceOracle.ORDER.replace(
                 "for (const name of order) register(targets[name]);",
                 "for (const name of ['first', 'second']) register(targets[name]);"), args=order)
-            raw.append({"trace": trace, "since": max(d["seq"] for d in trace["dispatches"]), "site": [], "virtual_ms": 0})
+            raw.append({"trace": trace, "since": max(d["seq"] for d in trace["dispatches"]), "site": [],
+                        "worker_requests": [], "virtual_ms": 0})
         base, keeper = self.kept("full-dispatch-counterexample", "default", "probe")
         for side, record in zip(("original", "candidate"), raw):
             keeper(side)("input", record)

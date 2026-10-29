@@ -35,7 +35,6 @@ function kinCreateSRProvenance() {
       }
     }
     walk(instance?.ContentSequence, null);
-    if (incomplete) groups.clear();
     groups.incomplete = incomplete; return groups;
   };
   function mount() {

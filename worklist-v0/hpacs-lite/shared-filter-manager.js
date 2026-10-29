@@ -96,8 +96,7 @@
     });
     $('copy').addEventListener('click', () => {
       if (busy || !library || !options.personal()) return;
-      const from = $('source').value, selected = names(library.filters, from);
-      if (!confirm(`기관 폴더 "${from || '전체 모음'}"의 검색 ${selected.length}개와 하위·빈 폴더를 개인 "${$('destination').value}"로 복사할까요?\n${selected.join('\n')}\n이름 접두사: ${$('prefix').value || '(없음)'}\n기존 검색과 기본 검색은 바꾸지 않으며 자동 적용하지 않습니다.`)) return;
+      const from = $('source').value;
       const body = { expectedOwner: library.owner, revision: library.revision, personalRevision: options.personal().revision,
         from, to: $('destination').value, namePrefix: $('prefix').value };
       options.run(async (signal,at) => {

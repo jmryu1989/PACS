@@ -1,9 +1,10 @@
+import { planarGeometry } from './planar-geometry';
 import { BadRequestException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { mgGeometry } from './mg-geometry';
 
 const invalid = (message = '표시 저장 입력이 올바르지 않습니다'): never => { throw new BadRequestException(message); };
-export const VIEWER_LIMITS = Object.freeze({ items: 512, revisions: 4096, bytes: 16 * 1024 * 1024, snapshot: 8192 });
+export const VIEWER_LIMITS = Object.freeze({ snapshot: 8192 });
 
 // JSON.parse has already discarded duplicate object keys. Parse the bounded original
 // bytes so two differently interpreted commands cannot share one idempotency key.
@@ -125,7 +126,6 @@ export function viewerCommand(raw: Buffer, create: boolean): ViewerCommand {
   const action = create ? 'create' : body.action;
   if (!['create', 'edit', 'hide', 'restore'].includes(action) || (!create && action === 'create')) invalid();
   const reason = text(body.reason === undefined ? '' : body.reason, 1000);
-  if ((action === 'hide' || action === 'restore') ? !reason.trim() : reason !== '') invalid('숨김/복원에는 사유가 필요합니다');
   const item = body.item;
   const common = ['schemaVersion', 'kind', 'seriesUid', 'sopUid', 'frame'];
   if (item?.kind === 'arrow') object(item, [...common, 'frameOfReferenceUid', 'label', 'points']);
@@ -139,12 +139,12 @@ export function viewerCommand(raw: Buffer, create: boolean): ViewerCommand {
     const count = item.kind === 'angle' ? 3 : item.kind === 'ellipse' ? 4 : 2;
     if (!Array.isArray(item.points) || item.points.length !== count || item.points.some(point =>
       !Array.isArray(point) || point.length !== 3 || point.some(n => typeof n !== 'number' || !Number.isFinite(n)))) invalid();
-    Object.assign(normalized, { frameOfReferenceUid: item.kind === 'length' && item.frameOfReferenceUid === null ? null : viewerUid(item.frameOfReferenceUid), label: text(item.label, 1000), points: item.points });
+    Object.assign(normalized, { frameOfReferenceUid: isManualMeasurement(item.kind) && item.frameOfReferenceUid === null ? null : viewerUid(item.frameOfReferenceUid), label: text(item.label, 1000), points: item.points });
     if (isManualMeasurement(item.kind)) {
       object(item.baseline, ['calculator', 'values']);
-      if (!(item.baseline.calculator === 'kin-native-manual-v1' || item.kind === 'length' &&
+      if (!(item.baseline.calculator === 'kin-native-manual-v1' || ['dbt', 'pixel', 'ermf', 'detector'].some(b => item.baseline.calculator === 'kin-planar-manual-v1:' + b) || item.kind === 'length' &&
           ['dbt', 'pixel', 'ermf', 'detector'].some(b => item.baseline.calculator === 'kin-mg-length-v1:' + b)) || !Array.isArray(item.baseline.values) ||
-          item.baseline.values.length !== (item.kind === 'ellipse' ? 5 : 1) ||
+          item.baseline.values.length !== (item.kind === 'ellipse' && item.baseline.calculator === 'kin-native-manual-v1' ? 5 : 1) ||
           item.baseline.values.some(n => typeof n !== 'number' || !Number.isFinite(n))) invalid('완료된 측정값이 필요합니다');
       normalized.baseline = item.baseline;
       for (const key of ['viewPlaneNormal', 'viewUp']) {
@@ -197,6 +197,18 @@ export function verifyViewerReference(studyUid: string, item: ViewerItemInput, t
   if (!tags || viewerUid(tags.StudyInstanceUID) !== studyUid || viewerUid(tags.SeriesInstanceUID) !== item.seriesUid ||
       viewerUid(tags.SOPInstanceUID) !== item.sopUid) invalid('영상 참조가 일치하지 않습니다');
   const sopClass = viewerUid(tags.SOPClassUID);
+  if (isManualMeasurement(item.kind) && item.baseline?.calculator?.startsWith('kin-planar-manual-v1:')) {
+    const geometry = planarGeometry(tags, item.frame), pn = item.viewPlaneNormal, up = item.viewUp;
+    if (geometry.frameOfReferenceUid !== item.frameOfReferenceUid || geometry.calculator !== item.baseline.calculator)
+      invalid('측정 원본과 보정 기준이 일치하지 않습니다');
+    const dot = (a: number[], b: number[]) => a.reduce((s, n, i) => s + n * b[i], 0);
+    const size = (a: number[]) => Math.sqrt(dot(a, a));
+    if (!pn || !up || size(pn) <= 0 || size(up) <= 0 || Math.abs(dot(pn, up) / size(pn) / size(up)) > 1e-4 ||
+        Math.abs(Math.abs(dot(pn, geometry.normal) / size(pn)) - 1) > 1e-4) invalid('측정 평면이 원본 영상과 일치하지 않습니다');
+    const value = geometry.measure(item.kind, item.points);
+    if (Math.abs(value - item.baseline.values[0]) > (item.kind === 'ellipse' ? .01 : .001)) invalid('원본으로 계산한 측정값과 저장값이 일치하지 않습니다');
+    return;
+  }
   const mg = item.kind === 'length' && mgGeometry(tags, item.frame);
   if (mg) {
     if (mg.frameOfReferenceUid !== item.frameOfReferenceUid || item.baseline?.calculator !== mg.calculator)
