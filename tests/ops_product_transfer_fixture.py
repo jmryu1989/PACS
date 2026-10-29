@@ -120,7 +120,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261027180000_emr_image_object_digest/migration.sql',
               'api/prisma/migrations/20261027230000_caution_app_limits/migration.sql',
               'api/prisma/migrations/20261028120000_held_unknown_source/migration.sql',
-              'api/prisma/migrations/20261029120000_emr_image_retention/migration.sql']
+              'api/prisma/migrations/20261029120000_emr_image_retention/migration.sql',
+              'api/prisma/migrations/20261030120000_preload_cache_key/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -128,7 +129,7 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
 # W5-API (53 tables, 48 migrations with S9-U4b): ReportDraftInsertReceipt, its three synthetic rows (refused, applied,
 # discarded), one primary key, two checks, one index and the terminal guard's two triggers. Not measured on a stack when
 # written: estimated at about 6 KB of catalog and rows, well inside the cap above.
-TABLES = sorted(['ImportOperation', 'AuthSession', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'StudyState', 'Report', 'ReportVersion',
+TABLES = sorted(['PreloadCacheKey', 'ImportOperation', 'AuthSession', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'ReportDraftInsertReceipt', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
@@ -198,6 +199,9 @@ def insert_receipt_rows(uid):
 def expected_rows(uid):
     uid_contract(uid)
     rows = {name: [] for name in TABLES}
+    rows['PreloadCacheKey'] = [dict(id='00000000-0000-4000-8000-00000000090'+str(n),
+        institution='SYNTHETIC-hospital',sub='SYNTHETIC-sub',key='\\x'+'ab'*32 if n==1 else None,
+        createdAt=STAMP,lastIssuedAt=STAMP,retiredAt=None if n==1 else STAMP) for n in (1,2)]
     rows['ReadingAppearance'] = [dict(institution='SYNTHETIC-hospital',subject='SYNTHETIC-sub',revision=3,sizes=dict(version=3,list=16,current=18,prior=20,
         fonts=dict(version=1,list='sans',current='mono',prior='serif'),colors=dict(version=1,list='warm',current='white',prior='cool'),dock=dict(version=1,placement='top',panel=1)),updatedAt=STAMP)]
     rows['ReadingPreferences'] = [dict(institution='SYNTHETIC-hospital',subject='SYNTHETIC-sub',revision=2,autoNote=True,updatedAt=STAMP)]
@@ -814,7 +818,7 @@ def create_product(name, db, uid):
         execute(name, db, raw.decode())
     seed_emr(name, db)
     data = expected_rows(uid)
-    for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft', 'Order', 'UserFilter',
+    for table in ('PreloadCacheKey', 'Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft', 'Order', 'UserFilter',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',

@@ -29,15 +29,11 @@ function numId(raw: string): number {
   return n;
 }
 
-/**
- * D1880 memory-only preload: the share of the reading PC's reported memory the worklist's preload may hold, set by the
- * site (`KIN_PRELOAD_MEMORY_SHARE`, 0 < share <= 1). No built-in value: none has a measured source yet, so the first site
- * sets it from its own reading PCs, and without it preload stays off (worklist-v0/hpacs-lite/preload-store.js).
- */
-function preloadMemoryShare(): number | null {
-  const raw = String(process.env.KIN_PRELOAD_MEMORY_SHARE ?? '').trim();
-  const share = raw ? Number(raw) : NaN;
-  return Number.isFinite(share) && share > 0 && share <= 1 ? share : null;
+/** Site disk cap; no product default until the reading PC has been measured. */
+function preloadDiskGb(): number | null {
+  const raw = String(process.env.KIN_PRELOAD_DISK_GB ?? '').trim();
+  const gb = raw ? Number(raw) : NaN;
+  return Number.isFinite(gb) && gb > 0 && Number.isSafeInteger(Math.floor(gb * 1024 ** 3)) ? gb : null;
 }
 
 /**
@@ -111,7 +107,7 @@ export class PacsController {
   @Header('Cache-Control', 'no-store')
   me(@Req() req: any) {
     return { ...caller(req), user: req.actor, displayName: req.displayName ?? req.actor, sessionId: req.sessionId ?? null,
-      issuer: process.env.KC_ISSUER || null, preloadMemoryShare: preloadMemoryShare() };
+      issuer: process.env.KC_ISSUER || null, preloadDiskGb: preloadDiskGb() };
   }
 
   /** nginx auth_request 전용. 204=통과, 403=기관 경계 밖. PHI 본문은 싣지 않는다. */

@@ -1,14 +1,4 @@
-/* D1880 memory-only preload, worklist side (Minhoon P0 item 1; design fable-design-preload-memory-20261027 §4.1 item 4).
- *
- * Preload on a multi-selection queues the selected studies in the preload SharedWorker (preload-worker.js); this panel
- * shows each one's status - Queued, Downloading, Ready, Failed, Evicted - with Retry, and the store's memory against the
- * budget (the browser's reported memory times the share the site set, preload-store.js). The images stay in that worker's memory only and are gone when the last
- * worklist or viewer window of this browser closes; nothing is written to the reading PC's disk (D1880).
- *
- * The worker serves one session: the worklist tells it the session it works for, and a session that ended or changed
- * empties the store. Labels shown here are the worklist's own row text, kept in the worker's memory with the queue so a
- * reloaded worklist can show the queue again.
- */
+/* D1890: the existing preload panel, with encrypted disk usage and expiry. */
 (function (root) {
   'use strict';
   const WORKER_URL = '/worklist/hpacs-lite/preload-worker.js', WORKER_NAME = 'kin-preload';
@@ -30,7 +20,7 @@
       port.start();
       port.postMessage({ type: 'hello', role: 'list' });
       const work = root.KinWorkContext;
-      // A store filled under another login is emptied before this worklist shows or adds anything.
+      // Announce the session so the worker can silently restore its encrypted queue.
       const current = work?.session?.();
       if (current) port.postMessage({ type: 'session', session: current });
       work?.onInvalidate?.(event => {
@@ -60,20 +50,20 @@
     panel.id = 'preload-panel';
     const summary = document.createElement('summary');
     summary.className = 'chip';
-    summary.title = '미리 받은 검사의 상태를 펼칩니다. 영상은 이 브라우저 메모리에만 있고, 목록과 뷰어 창을 모두 닫으면 사라집니다.';
+    summary.title = '받은 뒤 72시간이 지나면 자동으로 지웁니다. 다른 계정으로는 읽을 수 없습니다.';
     const body = document.createElement('div');
     body.className = 'preload-panel-body';
-    const memory = document.createElement('p');
-    memory.setAttribute('role', 'status');
+    const storage = document.createElement('p');
+    storage.setAttribute('role', 'status');
     const table = document.createElement('table');
     table.innerHTML = '<thead><tr><th>Study</th><th>Status</th><th></th><th>Progress</th><th>Note</th></tr></thead><tbody></tbody>';
     const actions = document.createElement('p');
     const clear = document.createElement('button');
     clear.type = 'button'; clear.className = 'chip'; clear.textContent = 'Clear All'; clear.id = 'preload-clear';
-    clear.title = '미리 받은 영상을 모두 메모리에서 비웁니다.';
+    clear.title = '미리 받은 영상 사본을 저장소에서 모두 지웁니다.';
     clear.onclick = () => port?.postMessage({ type: 'clear' });
     actions.append(clear);
-    body.append(memory, table, actions);
+    body.append(storage, table, actions);
     panel.append(summary, body);
     host.append(panel);
 
@@ -84,9 +74,9 @@
       for (const s of list) counts[s.status] = (counts[s.status] || 0) + 1;
       summary.textContent = 'Preload: ' + (['Downloading', 'Queued', 'Ready', 'Failed', 'Evicted']
         .filter(name => counts[name]).map(name => `${counts[name]} ${name}`).join(' · ') || '0');
-      memory.textContent = state?.budget == null
-        ? state?.unavailable || '미리 받기 메모리 한도를 확인하고 있습니다.'
-        : `메모리 ${gb(state.used)} / ${gb(state.budget)} GB (이 브라우저가 알려 준 메모리에 기관이 정한 비율을 곱한 한도). 디스크에는 저장하지 않습니다.`;
+      storage.textContent = state?.budget == null
+        ? state?.unavailable || '미리 받기 저장 용량을 확인하고 있습니다.'
+        : `보관 ${gb(state.used)} / ${gb(state.budget)} GB · 받은 뒤 72시간이 지나면 자동으로 지웁니다. 다른 계정으로는 읽을 수 없습니다. 만료 항목은 표시하지 않으며, 실행 중 10분 이내 또는 다음 실행의 첫 응답 전에 지웁니다.`;
       const rows = table.tBodies[0];
       rows.replaceChildren();
       for (const s of list) {
@@ -94,7 +84,7 @@
         tr.dataset.uid = s.uid;
         const cell = text => { const td = document.createElement('td'); td.textContent = text; tr.append(td); return td; };
         cell(s.label || s.uid);
-        cell(s.status + (s.open ? ' (Open)' : ''));
+        cell(s.status + (s.status === 'Ready' && s.expiresAt ? ' · ' + new Date(s.expiresAt).toLocaleString() + '까지' : '') + (s.open ? ' (Open)' : ''));
         // Retry beside the status, so it stays in view however long the note is.
         const act = cell('');
         cell(s.total ? `${s.done}/${s.total}` : '');

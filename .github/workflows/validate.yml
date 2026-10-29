@@ -244,8 +244,8 @@ jobs:
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_prior_test.cjs
     - name: W9 multi-study composition, selection generation and viewer channel model
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/multi_study_view_test.cjs tests/worklist_selection_test.cjs
-    - name: D1880 memory-only preload store, worker and viewer opening check
-      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/preload_store_test.cjs tests/preload_worker_test.cjs tests/viewer_preload_test.cjs
+    - name: D1890 encrypted preload store, crypto, worker and viewer opening check
+      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/preload_store_test.cjs tests/preload_disk_test.cjs tests/preload_worker_test.cjs tests/viewer_preload_test.cjs
     - name: Compound search operators and malformed condition boundaries
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/compound_filter_test.cjs tests/worklist_alerts_test.cjs tests/worklist_refresh_test.cjs tests/worklist_startup_test.cjs tests/related_parts_test.cjs tests/worklist_body_parts_test.cjs tests/study_priority_test.cjs tests/worklist_search_test.cjs
     - name: Worklist column visibility and account storage model
@@ -1521,6 +1521,9 @@ jobs:
     - name: MG-08 study image delivery record on the relayed image reads
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/mg08-image-delivery-record --cwd . --tree api/src --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/image_delivery_record_test.cjs -- node --test tests/image_delivery_record_test.cjs
+    - name: D1890 session-bound preload key issue and retirement
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/preload-key --cwd . --tree api/src --file api/prisma/schema.prisma --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/preload_key_route_test.cjs -- node --test tests/preload_key_route_test.cjs
     - name: MG-LOADING frame range reader contract
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/mg-loading-frame-reader --cwd . --tree api/src --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/dicom_frame_fixture.cjs --file tests/dicom_frame_test.cjs --file tests/dicom_frame_delivery_test.cjs -- node --test tests/dicom_frame_test.cjs tests/dicom_frame_delivery_test.cjs
