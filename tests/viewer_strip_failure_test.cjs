@@ -18,6 +18,7 @@ class Element extends EventTarget {
   replaceChildren(...nodes) { for (const n of [...this.children]) n.remove(); this.append(...nodes); }
   matches(selector) {
     if (selector.startsWith('.')) return this.classList.contains(selector.slice(1));
+    if (selector === '[data-kin-ux-owned]') return Object.hasOwn(this.dataset, 'kinUxOwned');
     const attr = selector.match(/^\[([^=]+)=["']?([^"'\]]+)["']?\]$/);
     return attr ? this.attrs[attr[1]] === attr[2] : this.tag === selector;
   }
@@ -99,6 +100,8 @@ test('a failure evicted before the first refresh offers Retry and clears on succ
   f.card().onclick(); f.strip.refresh();
   const retry = f.pane.querySelectorAll('button').find(n => n.textContent === 'Retry');
   assert.ok(retry, 'fast native failure has a retry action without a cache promise');
+  f.strip.refresh(); await settle(); f.strip.refresh();
+  assert.ok(f.pane.querySelectorAll('button').includes(retry), 'Retry remains attached across refreshes before the click');
   await retry.onclick(); f.strip.refresh();
   assert.equal(f.pane.querySelectorAll('section').length, 0, 'successful image removes the loading/error notice');
   f.close();
@@ -111,4 +114,41 @@ test('late failures for a removed assignment and events after disposal do not sh
   assert.equal(f.pane.querySelectorAll('section').length, 0);
   f.close(); f.fail('frame-a');
   assert.equal(f.pane.querySelectorAll('section').length, 0);
+});
+
+test('shell ignores its chrome writes but refreshes for stock viewport changes in the same batch', () => {
+  const body = new Element('body'), root = new Element(), pane = new Element(), notice = new Element('section');
+  body.append(root); root.append(pane); notice.dataset.kinUxOwned = ''; pane.append(notice);
+  const document = new EventTarget();
+  Object.assign(document, { body, createElement: tag => new Element(tag), getElementById: () => root });
+  const frames = new Map(); let nextFrame = 0, observer, refreshes = 0, placements = 0;
+  const chrome = () => ({ refresh() { refreshes++; }, place() { placements++; }, adopt() {}, dispose() {} });
+  const window = {
+    KinViewerPatientTabs: { snapshot() {}, subscribe: () => () => {}, mount() {}, refresh() {}, dispose() {} },
+    KinViewerInfoBar: { mount: chrome }, KinViewerSeriesStrip: { mount: chrome },
+    cornerstone: { Enums: { Events: {} } },
+  };
+  const context = vm.createContext({ window, document,
+    requestAnimationFrame(fn) { frames.set(++nextFrame, fn); return nextFrame; },
+    cancelAnimationFrame(id) { frames.delete(id); },
+    MutationObserver: class { constructor(callback) { observer = callback; } observe() {} disconnect() {} },
+  });
+  vm.runInContext(fs.readFileSync('worklist-v0/hpacs-lite/viewer-ux-shell.js', 'utf8'), context);
+  const shell = window.KinViewerUXShell.mount({ services: {
+    viewportGridService: {}, displaySetService: {}, cornerstoneViewportService: {},
+  }, session: {} });
+  const flush = () => { for (const [id, fn] of [...frames]) { frames.delete(id); fn(); } };
+  flush(); const initial = refreshes;
+  const mutation = (target, addedNodes = [], removedNodes = []) => ({ target, addedNodes, removedNodes });
+  const ownWrites = [mutation(pane, [notice]), mutation(pane, [], [notice]), mutation(notice, [new Element('button')])];
+  observer(ownWrites); flush();
+  assert.equal(refreshes, initial, 'adding, removing and updating shell chrome does not schedule another refresh');
+  assert.equal(placements, 0, 'shell writes do not trigger chrome placement either');
+  const viewport = new Element('canvas');
+  observer([...ownWrites, mutation(pane, [viewport])]); flush();
+  assert.ok(refreshes > initial, 'stock viewport insertion still refreshes alongside shell mutations');
+  const afterInsert = refreshes;
+  observer([mutation(pane, [], [viewport])]); flush();
+  assert.ok(refreshes > afterInsert, 'stock viewport removal still refreshes');
+  shell.dispose();
 });

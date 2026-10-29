@@ -47,8 +47,12 @@ window.KinViewerSeriesStrip = (() => {
     }
     function showLoad(load, error) {
       if (!liveLoad(load)) return;
+      const unchanged = load.error === (error || null);
       load.error = error || null;
       const pane = panes().get(load.id); if (!pane) return;
+      // Refreshes must preserve the Retry node while a pointer/key action is
+      // in progress, and must not feed the shell observer with our own moves.
+      if (unchanged && load.notice?.parentElement === pane) return;
       const notice = load.notice ||= document.createElement('section');
       notice.className = 'kin-series-load'; notice.dataset.kinUxOwned = ''; notice.setAttribute('role', 'status');
       notice.replaceChildren();
@@ -59,7 +63,7 @@ window.KinViewerSeriesStrip = (() => {
         const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = 'Retry';
         retry.onclick = () => retryLoad(load); notice.append(retry);
       }
-      pane.append(notice);
+      if (notice.parentElement !== pane) pane.append(notice);
     }
     async function retryLoad(load) {
       if (!liveLoad(load) || !canReplace()) return;
