@@ -18,7 +18,7 @@ import { OrthancService } from './orthanc.service';
 import type { RelayTarget } from './orthanc.service';
 import { acceptsGzip, directReadServes, FrameFacts, FrameLayout, frameLayout, frameRange, multipartFrames,
   pixelDataHeaderMatches, previewPng, tagNumber } from './dicom-frame-layout';
-import { StudyChanged } from './image-delivery-record';
+import { REVISION_HEADER, StudyChanged } from './image-delivery-record';
 import type { DeliveryLease } from './image-delivery-record';
 
 const ORTHANC_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/;
@@ -35,8 +35,19 @@ export interface FrameRequest {
   accept: string | undefined; acceptEncoding: string | undefined; head: boolean;
   /** Origin the viewer addressed; Content-Location of each part is spelled against it. */
   origin: string;
+  /**
+   * D1880 memory-only preload: the worklist's preload store keeps frames as the gzip bytes this reader produces (7.7x
+   * smaller than the frame, fable-design-preload-memory-20261027 §2.2). A browser decodes `Content-Encoding: gzip` before
+   * any script sees the body, so the stored form is the gzip stream as the body itself (`application/gzip`) with the
+   * multipart type it decodes to in `X-KIN-Part-Type`. A relayed object keeps Orthanc's answer unchanged.
+   */
+  stored?: boolean;
+  /** A preload store/check needs the revision of the bytes actually selected by its lease. */
+  revision?: boolean;
 }
 
+/** The decoded body's media type of a stored-form (preload) frame answer. */
+export const PART_TYPE_HEADER = 'X-KIN-Part-Type';
 /** The study delivery's lease of a read, taken once its object is selected; null for a read that delivers no image (HEAD). */
 export type TakeLease = () => Promise<DeliveryLease | null>;
 
@@ -135,7 +146,12 @@ export class DicomFrameService {
       if (object.patientId !== held.binding.patient.patientId) throw new StudyChanged();
       await held.confirm();
     }
-    const confirm = held ? () => held.confirm() : undefined;
+    const revision = () => { if (request.revision && held) target.setHeader(REVISION_HEADER, held.binding.revision); };
+    const confirm = held ? async () => {
+      const current = await held.confirm();
+      if (current) revision();
+      return current;
+    } : undefined;
     const layout = object?.layout ?? null, filePath = object ? this.filePath(object.uuid) : '';
     // The description was checked against the file once; the file is checked again for this request, since a stored
     // file that has since changed size (replaced, truncated) is no longer the object the index describes.
@@ -150,12 +166,17 @@ export class DicomFrameService {
     catch { this.forget(object!.id); await this.orthanc.relay(path, accept, target, signal, request.origin, confirm); return; }
     const locationBase = `${request.origin}/dicom-web/studies/${request.studyUid}/series/${request.seriesUid}/instances/${request.sopUid}`;
     const multipart = multipartFrames(randomUUID() + '-' + randomUUID().slice(0, 23), locationBase, object!.facts.transferSyntax!, layout.frameBytes);
-    const gzip = acceptsGzip(request.acceptEncoding);
+    const gzip = request.stored === true || acceptsGzip(request.acceptEncoding);
+    revision();
     target.status(200);
-    target.setHeader('Content-Type', multipart.contentType);
+    if (request.stored) {
+      target.setHeader('Content-Type', 'application/gzip');
+      target.setHeader(PART_TYPE_HEADER, multipart.contentType);
+    } else target.setHeader('Content-Type', multipart.contentType);
     target.setHeader('Vary', 'Accept-Encoding');
-    if (gzip) target.setHeader('Content-Encoding', 'gzip');
-    else target.setHeader('Content-Length', String(multipart.contentLength(request.frames, layout.frameBytes)));
+    // Only the identity body has a length known before it is written; the gzip stream (encoded or stored) has none.
+    if (!gzip) target.setHeader('Content-Length', String(multipart.contentLength(request.frames, layout.frameBytes)));
+    else if (!request.stored) target.setHeader('Content-Encoding', 'gzip');
     if (request.head) { await handle.close().catch(() => {}); target.end(); return; }
     const out = gzip ? createGzip({ level: GZIP_LEVEL }) : target;
     const delivery = gzip ? pipeline(out as any, target as any) : Promise.resolve();

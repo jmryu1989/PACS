@@ -74,10 +74,13 @@ async function harness() {
     async append(event, _served, keys) {
       if (ledger.failing) throw new Error('SyntheticLedgerUnreachable');
       const parsed = parseAccessEvent(event), at = new Date().toISOString();
-      ledger.entries.push({ event: parsed, operationId: keys.operationId });
+      ledger.entries.push({ event: parsed, operationId: keys.operationId, storedAt: at });
       return mintDurableReceipt(parsed.eventId, at);
     },
-    async lookup() { return null; },
+    async lookup(operationId) {
+      const entry = ledger.entries.find(e => e.operationId === operationId);
+      return entry ? { operationId, eventId: entry.event.eventId, outcome: 'committed', durableAt: entry.storedAt, result: null, entries: [] } : null;
+    },
     async transactionWithRecords(work) { return work({}, async (_event, effect) => effect()); },
   };
   const { port } = createRecordPort(store);
@@ -125,8 +128,8 @@ async function harness() {
     const body = Buffer.from(await r.arrayBuffer());
     return { status: r.status, body, event: r.headers.get('x-kin-image-event'), response: r.headers.get('x-kin-image-response'), manifest: r.headers.get('x-kin-image-manifest') };
   };
-  const relayed = async (pathname, method = 'GET') => {
-    const r = await fetch(`${endpoint}/api/image-relay${pathname}`, { method });
+  const relayed = async (pathname, method = 'GET', headers = {}) => {
+    const r = await fetch(`${endpoint}/api/image-relay${pathname}`, { method, headers });
     return { status: r.status, body: Buffer.from(await r.arrayBuffer()) };
   };
   const stop = async () => { await recorder.beforeApplicationShutdown(); registry.quiesce(); await close(server); await close(source); };
@@ -157,6 +160,41 @@ test('E\'s frames and the relay\'s reads of one session are one study delivery p
     const ended = h.ledger.entries.filter(e => e.event.action === 'transfer-ended').map(e => e.event.relatedEventId).sort();
     assert.deepEqual(ended, [opened.eventId, other.event].sort(), 'each delivery closed once as ended after its idle gap');
     assert.equal(h.ledger.entries.length, 4);
+  } finally { await h.stop(); }
+});
+
+test('catalog E and relay keep one root per opening, separate preload, and name each continuation delivery in E response rows', async () => {
+  const h = await harness();
+  const view = { 'x-kin-view-opening': 'syn-catalog-viewer-a' };
+  const roots = () => h.ledger.entries.filter(e => e.event.action === 'provide-prepared' && e.event.cause === 'user-view');
+  try {
+    const preload = await h.send(FRAME, 'GET', { ...view, 'x-kin-preload': 'store' });
+    assert.equal(preload.status, 200);
+    assert.equal(roots().length, 0, 'preload never borrows or creates an opening');
+    const first = await h.send(FRAME, 'GET', view);
+    assert.equal(first.status, 200);
+    assert.ok(first.body.includes(frame));
+    assert.equal(roots().length, 1);
+    assert.equal(first.event, roots()[0].event.eventId);
+    assert.equal((await h.relayed(`/instances/${INSTANCE}/file`, 'GET', view)).status, 200);
+    assert.equal((await h.send(FRAME, 'GET', view)).event, first.event);
+    assert.equal(h.ledger.entries.filter(e => e.event.action === 'provide-prepared').length, 2);
+    await sleep(IDLE_MS + 200);
+    h.archive.revision = '20261028T120100';
+    const next = await h.send(FRAME, 'GET', view);
+    assert.equal(next.status, 200);
+    assert.notEqual(next.event, first.event);
+    assert.equal(roots().length, 1);
+    const continuation = h.ledger.entries.find(e => e.event.eventId === next.event).event;
+    assert.deepEqual([continuation.cause, continuation.relatedEventId, continuation.targets[0].versionId.value],
+      ['background-fetch', first.event, `orthanc-study:${STUDY}@20261028T120100`]);
+    assert.equal(h.rows.preparations.find(p => p.response === next.response).delivery, next.event);
+    const reopened = await h.send(FRAME, 'GET', { 'x-kin-view-opening': 'syn-catalog-viewer-b' });
+    assert.equal(reopened.status, 200);
+    assert.equal(roots().length, 2);
+    await sleep(IDLE_MS + 200);
+    for (const id of [preload.event, first.event, next.event, reopened.event])
+      assert.equal(h.ledger.entries.filter(e => e.event.action === 'transfer-ended' && e.event.relatedEventId === id).length, 1);
   } finally { await h.stop(); }
 });
 

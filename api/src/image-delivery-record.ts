@@ -3,9 +3,18 @@
  * every access to the electronic record; D1877 fixed its grain for images at one pair of access events per study
  * delivery - `provide-prepared` before the first byte, `transfer-ended`/`transfer-aborted` when the delivery ends - not
  * one per image request (a worklist preview strip or one viewer opening is tens to thousands of requests). A delivery is
- * the stream of image reads of one study by one member session; it closes after an idle gap without a read, and the next
- * read opens a new pair. No image byte leaves before the `provide-prepared` event is durable in the access ledger; a
+ * the stream of image reads of one study by one member session for one use (`DeliveryUse`: a viewer's opening, the memory
+ * preload, other fetches); it closes after an idle gap without a read, and the next read opens a new pair. No image byte leaves before the `provide-prepared` event is durable in the access ledger; a
  * ledger that cannot record answers 503 with no image byte.
+ *
+ * An opening is not a delivery (opening contract consult-preload-opening-contract-20261029, D1880 "each open still
+ * records 열람"). The viewer names each new entry into a study - a new document, a reload, a patient tab entered again,
+ * a back/forward return - with its own opening ID (`X-KIN-View-Opening`); the idle gap or the read's `view` marker never
+ * stood for that. Each opening has exactly one root: the first committed `user-view` provide-prepared of the opening.
+ * The idle gap retires the delivery, not the opening, so a later read of the same opening is a delivery of its own whose
+ * `background-fetch` provide-prepared refers to that root - one root per opening, one pair per delivery. The root's
+ * ledger operation is derived from the opening, so the ledger itself, not this process's memory, says whether the root
+ * exists: a delivery after the gap, a retry after a lost COMMIT reply, or a restart never adds a second root.
  *
  * The event is the formatVersion 1 image event the images/dicom-web delivery writes (emr-image/service.ts), through the
  * same record port: the study is its target (recordId = study UID, as that delivery names its study-level units) and the
@@ -45,7 +54,7 @@
 import { ConflictException, ForbiddenException, HttpException, Inject, Injectable, Logger, NotFoundException, Optional,
   ServiceUnavailableException } from '@nestjs/common';
 import type { BeforeApplicationShutdown, OnModuleDestroy } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { AccessEventV1, DurableAccessReceipt, PatientLinkSnapshot } from './emr-contract/access-event';
 import { newAuditLinkId, parseAccessEvent } from './emr-contract/access-event';
@@ -181,8 +190,52 @@ export interface DeliveryLease<P = unknown> {
   retire(): void;
 }
 
+/**
+ * What a read is for, which decides the delivery it joins. `view`: the viewer reads it to show the study for the opening
+ * it names; the reads of one opening share its delivery, and another opening - also by the same session, inside the
+ * idle gap - never joins it. `preload`: the worklist's memory preload reads it ahead of any opening; a preload that is
+ * never opened is a transfer, not an opening (D1880). `fetch`: any other image read (worklist thumbnails, report and
+ * print reads); a background-fetch delivery of its own, never part of an opening because one happens to be open.
+ */
+export type DeliveryUse = { kind: 'view'; opening: string } | { kind: 'preload' } | { kind: 'fetch' };
+export const PRELOAD_USE: DeliveryUse = Object.freeze({ kind: 'preload' });
+export const FETCH_USE: DeliveryUse = Object.freeze({ kind: 'fetch' });
+
+/**
+ * The header with which the viewer names the opening its image read belongs to (viewer-preload.js). The value is an
+ * opaque correlation the viewer keeps in its document's memory: it separates one entry from the next, it is no
+ * credential and no fact about the reader - identity, session, institution and access are the server's own.
+ */
+export const VIEW_OPENING_HEADER = 'X-KIN-View-Opening';
+const OPENING_ID = /^[A-Za-z0-9-]{8,64}$/;
+export function readUse(request: IncomingMessage): DeliveryUse {
+  const opening = String(request.headers?.['x-kin-view-opening'] ?? '').trim();
+  return OPENING_ID.test(opening) ? { kind: 'view', opening } : FETCH_USE;
+}
+
+/**
+ * The study an image answer was recorded for, on the routes whose path names a stored object rather than its study
+ * (`/instances/{id}/...`: a rendering, a document, a preview). The viewer relates such a read to the study it shows, so a
+ * new opening of that study reads it live again before what the document still holds of it can show (viewer-preload.js
+ * `reenter`). The server's own resolution of the object, the one its record names; the viewer sends it nowhere.
+ */
+export const RECORDED_STUDY_HEADER = 'X-KIN-Study-UID';
+/** The archive revision of the bytes a preload store/check is actually served under. */
+export const REVISION_HEADER = 'X-KIN-Study-Revision';
+
+/**
+ * The ledger operation of an opening's root, attempt `attempt`. Derived from the opening (member, session, study,
+ * opening ID), so whether the root exists is the ledger's answer - after the opening's delivery closed, after a lost
+ * COMMIT reply, after a restart. The ledger binds one event to one operation and keeps a negative outcome final, so an
+ * attempt the ledger settled negative is offered again as the next attempt.
+ */
+function rootOperation(opening: string, attempt: number): string {
+  const h = createHash('sha256').update(`kin-image-opening-root\n${opening}\n${attempt}`).digest('hex');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${(8 + (parseInt(h[16], 16) & 3)).toString(16)}${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+
 interface Delivery {
-  key: string; studyUid: string;
+  key: string; studyUid: string; use: DeliveryUse;
   /** What it records: its opening read's patient and revision, and the first manifest an E read served under it. */
   binding: DeliveryBinding;
   /** What the archive held once the opening receipt was durable, for the reads that waited on it (admit()). */
@@ -267,14 +320,14 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
    * it is only asked for a delivery.
    */
   async lease<P = null>(request: IncomingMessage, surface: string, path: string,
-    target: () => DeliveryTarget<P> | Promise<DeliveryTarget<P>>): Promise<DeliveryLease<P> | null> {
+    target: () => DeliveryTarget<P> | Promise<DeliveryTarget<P>>, use: DeliveryUse = readUse(request)): Promise<DeliveryLease<P> | null> {
     if (request.method !== 'GET' || !imageRead(path)) return null;
-    return this.admit(request, surface, await target());
+    return this.admit(request, surface, await target(), use);
   }
 
   /**
    * The delivery this request belongs to, with its provide-prepared event durable. The first request of a member
-   * session for a study records the event; the requests that arrive while it is being recorded wait for the same
+   * session for a study and use records the event; the requests that arrive while it is being recorded wait for the same
    * receipt; later ones find the open delivery. Resolves only after the receipt - the caller sends no byte before.
    *
    * Every lease reads the archive's revision of the study now; with the patient the route names (and E's manifest) it
@@ -288,8 +341,8 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
    * and only by a delivery that is still open. A read whose patient is no longer the study's is refused; one whose
    * study only has a newer revision takes the delivery of that revision (R244-GPT-FIX9-01).
    */
-  private async admit<P>(request: IncomingMessage, surface: string, target: DeliveryTarget<P>): Promise<DeliveryLease<P>> {
-    let place: Place<P> | null = await this.place(request, surface, target), released = false;
+  private async admit<P>(request: IncomingMessage, surface: string, target: DeliveryTarget<P>, use: DeliveryUse): Promise<DeliveryLease<P>> {
+    let place: Place<P> | null = await this.place(request, surface, target, use), released = false;
     const recorder = this;
     return {
       get record() { return place!.record; },
@@ -306,7 +359,7 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
         // archive holds now; its route selects again under that one.
         place = null;
         recorder.give(delivery, false);
-        place = await recorder.place(request, surface, target);
+        place = await recorder.place(request, surface, target, use);
         return false;
       },
       release: (served, owed) => {
@@ -331,7 +384,7 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
   }
 
   /** The admission of admit(): the delivery this read takes its place in, its durable record and the read's current facts. */
-  private async place<P>(request: IncomingMessage, surface: string, target: DeliveryTarget<P>): Promise<Place<P>> {
+  private async place<P>(request: IncomingMessage, surface: string, target: DeliveryTarget<P>, use: DeliveryUse): Promise<Place<P>> {
     for (;;) {
       let key: string, binding: DeliveryBinding, current: CurrentDeliveryFacts<P>, delivery: Delivery | undefined, opened = false;
       try {
@@ -339,7 +392,8 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
         // delivery the stop has already passed over, a pair without its end. No pair, so no byte.
         if (this.stopping) throw new ServiceUnavailableException(IMAGE_DELIVERY_UNAVAILABLE);
         const snapshot = this.requests.read(request);
-        key = JSON.stringify([snapshot.issuer, snapshot.subject, snapshot.binding.sessionRef, target.studyUid]);
+        key = JSON.stringify([snapshot.issuer, snapshot.subject, snapshot.binding.sessionRef, target.studyUid, use.kind,
+          use.kind === 'view' ? use.opening : null]);
         binding = { patient: target.patient, revision: await this.revision(target.studyUid), manifest: target.manifest };
         // An open delivery of another patient, revision or manifest is outdated by the archive whether or not this read
         // is let in: it is superseded before this read's own decision.
@@ -349,7 +403,7 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
         if (this.stopping) throw new ServiceUnavailableException(IMAGE_DELIVERY_UNAVAILABLE);
         delivery = this.open.get(key);
         if (delivery && !this.joins(delivery, binding)) { this.retire(delivery); delivery = undefined; }
-        if (!delivery) { delivery = this.start(key, target.studyUid, surface, binding, current); opened = true; }
+        if (!delivery) { delivery = this.start(key, target.studyUid, surface, binding, current, use); opened = true; }
       } catch (error) { throw this.unavailable(error); }
       if (delivery.timer) { clearTimeout(delivery.timer); delivery.timer = null; }
       delivery.inflight++;
@@ -440,11 +494,11 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
     this.settle(delivery);
   }
 
-  private start(key: string, studyUid: string, surface: string, binding: DeliveryBinding, current: CurrentDeliveryFacts): Delivery {
-    const delivery: Delivery = { key, studyUid, binding, held: null, prepared: null as any, event: null,
+  private start(key: string, studyUid: string, surface: string, binding: DeliveryBinding, current: CurrentDeliveryFacts, use: DeliveryUse): Delivery {
+    const delivery: Delivery = { key, studyUid, use, binding, held: null, prepared: null as any, event: null,
       inflight: 0, served: 0, unserved: 0, timer: null, retired: false, closed: false, onClose: null, unsettled: false,
       owed: [], terminal: null, ended: false, attempts: 0, recording: null, reoffer: false, cancelRetry: null, reserved: null };
-    delivery.prepared = this.prepare(surface, delivery.studyUid, binding, current).then(record => { delivery.event = record.event; return record; });
+    delivery.prepared = this.prepare(surface, delivery.studyUid, binding, current, use, key).then(record => { delivery.event = record.event; return record; });
     // A delivery that could not be recorded is no delivery: the next read asks the ledger again; retired, it has nothing
     // to close, and a stop waiting for it has nothing to wait for.
     delivery.prepared.catch(() => {
@@ -461,21 +515,46 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
    * The opening event, built from the current facts its lease decided on (current()) and the revision it read - not a
    * second read of either - and made durable.
    */
-  private async prepare(surface: string, studyUid: string, binding: DeliveryBinding, { facts, study }: CurrentDeliveryFacts): Promise<DeliveryRecord> {
+  private async prepare(surface: string, studyUid: string, binding: DeliveryBinding, { facts, study }: CurrentDeliveryFacts,
+    use: DeliveryUse, key: string): Promise<DeliveryRecord> {
     const work = this.records.begin();
     try {
       const at = new Date().toISOString();
-      const event = parseAccessEvent({ formatVersion: 1, surface, eventId: randomUUID(),
+      const event = (opening: boolean, root: string | null) => parseAccessEvent({ formatVersion: 1, surface, eventId: randomUUID(),
         userId: known(facts.actor.identity), rolesAtTime: known(facts.actor.roles), actingInstitution: known(facts.actor.institutionId),
         managingInstitution: known(study.managingInstitutionId), occurredAt: at, trustedProxyIp: facts.ip,
-        // Image reads come as the person looks and ahead of it (prefetch, strips); which a request is cannot be told here,
-        // so the delivery is recorded as the fetch it is (as images/dicom-web records its deliveries). The person's
-        // display is the client's own report, not this event.
-        cause: 'background-fetch', context: { basis: 'background-fetch', studyId: studyUid, relatedStudyId: null, reason: null },
+        // The opening's root is the 열람 of the study (D1880: recorded when the study is opened, also when its bytes then
+        // come from the preload memory); it is opened from the reading worklist. Every other delivery - a later one of the
+        // same opening, worklist thumbnails, report reads, the memory preload - is recorded as the fetch it is (as
+        // images/dicom-web records its deliveries), a later one of an opening referring to the opening's root.
+        ...(opening
+          ? { cause: 'user-view', context: { basis: 'worklist', studyId: studyUid, relatedStudyId: null, reason: null } }
+          : { cause: 'background-fetch', context: { basis: 'background-fetch', studyId: studyUid, relatedStudyId: null, reason: null } }),
         executor: 'member', targets: [{ kind: 'image', patientLinkSnapshot: known(study.patient), studyId: known(studyUid),
           recordId: known(studyUid), versionId: known(binding.revision) }],
-        action: 'provide-prepared', result: 'prepared', requestId: facts.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null }) as Readonly<AccessEventV1>;
-      return { event, receipt: await this.append(work, event, randomUUID()) };
+        action: 'provide-prepared', result: 'prepared', requestId: facts.requestId, auditLinkId: newAuditLinkId(), relatedEventId: root }) as Readonly<AccessEventV1>;
+      if (use.kind !== 'view') {
+        const prepared = event(false, null);
+        return { event: prepared, receipt: await this.append(work, prepared, randomUUID()) };
+      }
+      // A newer binding may retire this opening's delivery while its root is still being written. Let that attempt
+      // settle before asking the ledger for the root; otherwise an invisible/pending root races a second append.
+      // A failed attempt is resolved by the same lookup below, not inherited as this delivery's failure.
+      await Promise.allSettled([...this.retiring].filter(delivery => delivery.key === key).map(delivery => delivery.prepared));
+      for (let attempt = 0; ; attempt++) {
+        const operationId = rootOperation(key, attempt);
+        const stored = await work.lookup(operationId);
+        if (!stored) {
+          const root = event(true, null);
+          return { event: root, receipt: await this.append(work, root, operationId) };
+        }
+        if (stored.outcome === 'committed') {
+          const continued = event(false, stored.eventId);
+          return { event: continued, receipt: await this.append(work, continued, randomUUID()) };
+        }
+        // An unresolved root must settle before any bytes of this opening can be shown.
+        if (stored.outcome !== 'negative') throw new Error('ImageOpeningRootUnsettled');
+      }
     } finally { work.end(); }
   }
 
@@ -717,4 +796,3 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
     await this.shutdown;
   }
 }
-

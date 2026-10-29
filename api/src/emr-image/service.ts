@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { ServerResponse } from 'node:http';
 import { EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS, boundEmrStatements } from '../emr-runtime/limits';
 import { REQUEST_CONTEXT_SOURCE, RequestContextSource, RequestContextUnavailable } from '../emr-runtime/request-context';
-import { DeliveryLease, OwedFacts, StudyImageDeliveryRecorder } from '../image-delivery-record';
+import { DeliveryLease, OwedFacts, PRELOAD_USE, REVISION_HEADER, StudyImageDeliveryRecorder, readUse } from '../image-delivery-record';
 import { OrthancService } from '../orthanc.service';
 import { PrismaService } from '../prisma.service';
 import { ImageCheckDatabase } from './check-db';
@@ -63,9 +63,12 @@ export class OnlineImageService {
       // delivery of another patient, revision or manifest is never this response's record (R244-GPT-FIX7-01/FIX9-02).
       // The lease's current facts - read once for it, after the revision, on the image check pool - carry E's provision
       // decided on their own transaction (R244-GPT-FIX10-02).
+      const preload = String(request.headers['x-kin-preload'] ?? '').trim().toLowerCase();
+      const use = preload === 'store' ? PRELOAD_USE : readUse(request);
       const held = lease = await this.deliveries.lease(request, ONLINE_IMAGE_SURFACE, target.split('?')[0],
         () => ({ studyUid: manifest.studyUid, patient: manifest.patient, manifest: manifest.sha256,
-          provision: (tx, current) => this.context.provision(tx, request, current) }));
+          provision: (tx, current) => this.context.provision(tx, request, current) }), use);
+      if (held && (preload === 'store' || preload === 'check')) response.setHeader(REVISION_HEADER, held.binding.revision);
       let served = false;
       const unstored: UnstoredObservation[] = [];
       try {
@@ -90,7 +93,9 @@ export class OnlineImageService {
                 return { at, institution: checked.actor.institutionId, accountGeneration: checked.accountGeneration, provision: checked.provision };
               }, { maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_TX_TIMEOUT_MS });
             return prepareDelivery(manifest, image, { eventId: randomUUID(), ...(held ? { deliveryEventId: held.record.event.eventId } : {}),
-              at: current.at, cause: 'background-fetch', opening: null,
+              at: current.at, cause: held?.record.event.cause ?? 'background-fetch',
+              // Each opaque viewer ID names one entry; its continuation keeps that entry's sequence.
+              opening: held && use.kind === 'view' ? { openingId: use.opening, accountGeneration: current.accountGeneration, sequence: 1 } : null,
               authorization: { studyUid: image.studyUid, institution: current.institution, accountGeneration: current.accountGeneration },
               provision: current.provision });
           },

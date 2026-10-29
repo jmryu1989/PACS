@@ -6,7 +6,8 @@
  * whose relay and lookups reach a synthetic Orthanc HTTP server on 127.0.0.1. The access ledger is an in-memory port
  * that runs the real event parser and mints real receipts; authentication is an explicit synthetic input (the guard's
  * capture is called with it). Asserted: no image byte before the provide-prepared event is durable; one pair per study
- * delivery across routes (open, reload within the idle gap, reload after it); descriptions (tags, metadata) and HEAD
+ * delivery across routes (open, a read within the idle gap, a read after it); one viewer opening across the frame reader
+ * and the relay is one root, another opening its own (opening contract 2026-10-29); descriptions (tags, metadata) and HEAD
  * are no delivery; a ledger that cannot record answers 503 and Orthanc is never asked for the image; refusals of the
  * gate leave no record; a delivery whose only response failed or was cut short closes as aborted, not succeeded
  * (MG-10); a terminal the ledger cannot take is retained as the same event and offered again until durable, on the
@@ -282,7 +283,7 @@ test('MG-08 worklist thumbnail: one durable provide-prepared for the study befor
   } finally { await s.close(); }
 });
 
-test('MG-08 one study delivery across worklist, report and viewer reads; reload inside the gap shares it, after the gap opens a new pair', async () => {
+test('MG-08 one study delivery across worklist, report and frame reads naming no opening; a read inside the gap shares it, after the gap opens a new pair', async () => {
   const s = await stack();
   try {
     assert.equal((await s.get(s.routes.thumbnail)).status, 200);
@@ -312,6 +313,30 @@ test('MG-08 a viewer frame the frame reader passes to Orthanc keeps the public o
     assert.deepEqual(s.source.imageCalls().map(c => [c.path, c.forwarded]), [[s.routes.frame, ['https', 'pacs.example:9443']], [s.routes.frame, ['https', 'pacs.example:9443']]],
       'both paths ask Orthanc with the origin the browser used');
     assert.deepEqual(actions(s.records), ['provide-prepared'], 'one study delivery across the frame reader and the relay');
+  } finally { await s.close(); }
+});
+
+test('opening contract O4: one viewer opening spans the frame reader and the relay, by the API path and the public one; another opening of the study has its own root, and a read naming none joins neither', async () => {
+  const s = await stack();
+  try {
+    const O = { 'X-KIN-View-Opening': 'syn-viewer-a' }, accept = { Accept: 'multipart/related; type="application/octet-stream"' };
+    const reads = await Promise.all([s.get('/api' + s.routes.frame, { ...accept, ...O }), s.get(s.routes.frame, { ...accept, ...O }),
+      s.get(s.routes.thumbnail, O), s.get(s.routes.report, O)]);
+    assert.deepEqual(reads.map(r => r.status), [200, 200, 200, 200]);
+    for (const observation of s.observations) assert.deepEqual(observation.firstByte, ['provide-prepared'], 'the root was durable before each first byte');
+    const prepared = () => s.records.entries.filter(e => e.event.action === 'provide-prepared').map(e => e.event);
+    assert.deepEqual(prepared().map(e => e.cause), ['user-view'], 'one root for the opening across routes');
+    assert.equal((await s.get(s.routes.thumbnail, { 'X-KIN-View-Opening': 'syn-viewer-b' })).status, 200);
+    assert.equal((await s.get(s.routes.thumbnail)).status, 200);
+    assert.deepEqual(prepared().map(e => [e.cause, e.relatedEventId]), [['user-view', null], ['user-view', null], ['background-fetch', null]]);
+    // Descriptions and HEAD naming an opening are no delivery.
+    assert.equal((await s.get(s.routes.metadata, O)).status, 200);
+    assert.equal((await s.get(s.routes.thumbnail, O, 'HEAD')).status, 200);
+    const ended = () => s.records.entries.filter(e => e.event.action === 'transfer-ended').map(e => e.event.relatedEventId);
+    for (const end = Date.now() + 3000; ended().length < 3 && Date.now() < end;) await wait(10);
+    await wait(IDLE_MS * 2);
+    assert.equal(prepared().length, 3, 'no record for the description or the HEAD');
+    assert.deepEqual(ended().sort(), prepared().map(e => e.eventId).sort(), 'each delivery closed by its own terminal');
   } finally { await s.close(); }
 });
 
