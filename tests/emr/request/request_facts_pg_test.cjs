@@ -61,7 +61,9 @@ async function main() {
   const admissions = [];
   try {
     await witness.memberRightsImport.create({ data: { id: 'realm-v1' } });
-    for (const member of [sub, target, 'synthetic-admin-two']) await witness.memberRights.create({ data: {
+    // firstSeen acts once, in the cancelled request below, so its identity is first read there.
+    const firstSeen = 'synthetic-admin-first-seen';
+    for (const member of [sub, target, 'synthetic-admin-two', firstSeen]) await witness.memberRights.create({ data: {
       sub: member, username: member, email: member + '@example.test', name: 'Equal Display', emailVerified: true,
       approved: true, suspended: false, institution, roles: member === target ? ['radiologist'] : ['admin'],
     } });
@@ -217,14 +219,19 @@ async function main() {
     }, { timeout: 15000 }); // Existing B2 request-work SQL-wait harness bound.
     await locked.promise;
     let published = false;
+    // A member this process has not resolved yet: the (issuer, subject) -> member id binding is kept in the process
+    // once read (store.ts resolveRequestIdentity), so an established admin's request would not read the locked table
+    // at all and would be answered instead of waiting here.
     const cancelled = http.request(origin + '/api/admin/users/' + target, { method: 'PATCH',
-      headers: { authorization: 'Bearer ' + bearer, 'content-type': 'application/json', 'x-real-ip': '127.0.0.1' } },
+      headers: { authorization: 'Bearer ' + await token(firstSeen), 'content-type': 'application/json', 'x-real-ip': '127.0.0.1' } },
     response => { published = true; response.resume(); });
     cancelled.on('error', () => {}); cancelled.end(JSON.stringify({ enabled: false }));
-    for (;;) {
+    // Bounded by the blocker's own transaction timeout: past it the lock is gone and nothing can wait on it.
+    for (const until = Date.now() + 15000;;) {
       const [waiting] = await witness.$queryRaw`SELECT count(*)::int AS n FROM pg_stat_activity
         WHERE usename='kin_runtime' AND wait_event_type='Lock'`;
       if (waiting.n) break;
+      assert.ok(Date.now() < until, 'no request of the API waited on the locked identity table ' + JSON.stringify({ published }));
       await new Promise(resolve => setImmediate(resolve));
     }
     cancelled.destroy(); await disconnected.promise;

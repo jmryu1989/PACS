@@ -245,7 +245,11 @@
       "api/src/app.module.ts",
       "api/src/connect.controller.ts",
       "api/src/clinician-policy.ts",
-      "tests/ops_product_transfer_fixture.py"
+      "api/src/image-delivery-record.ts",
+      "api/src/image-relay.controller.ts",
+      "tests/ops_product_transfer_fixture.py",
+      "tests/proxy_image_route_test.py",
+      "tests/proxy_grant_log_test.py"
     ],
     "emr-f-contracts": [
       "api/Dockerfile*",

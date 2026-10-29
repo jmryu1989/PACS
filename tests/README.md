@@ -111,11 +111,11 @@ VR112-REQ-02 → VR112-RISK-02 → `tests/viewer_stack_restore_dom_test.py` (T01
 
 REQ-D-WORKSPACE-WINDOWS → RISK-D-WORKSPACE-IDENTITY/UNSAVED/STALE → TEST-VIEWER-WINDOW-MANAGER-DOM: `python tests/viewer_window_manager_dom_test.py` exercises the actual window-manager DOM handler and registry in isolated Chromium with synthetic window/session state and all network requests blocked. It checks pending navigation, changes during close confirmation, existing dirty/busy guards, normal close/focus, and neutral comparison identification. It does not start LiveStack or replace real OHIF/DICOM and physical-monitor verification. The existing measurements CI job runs this suite after installing the pinned browser dependencies and preserves its raw execution record separately.
 
-REQ-MG-08-IMAGE-DELIVERY-RECORD(의료법 제23조④, D1877(2)) → RISK-MG-IMAGE-WITHOUT-ACCESS-RECORD → TEST-MG-08-RELAY: `node --test tests/image_delivery_record_test.cjs`는 nginx가 이제 API 중계(`api/src/image-relay.controller.ts`)로 보내는 기존 영상 읽기(워크리스트 미리보기·썸네일 `frames/N/rendered`, 판독문·출력 `image-uint16`, WADO-RS frame)를 실제 node:http 서버에서 실제 중계 컨트롤러·`StudyImageDeliveryRecorder`(`api/src/image-delivery-record.ts`)·요청 문맥 capture·현재 임상 문맥·DICOMweb 관문과 합성 Orthanc HTTP 서버로 중계하는 실제 `OrthancService`로 돌린다(원장은 실제 사건 파서와 영수증을 쓰는 메모리 저장소를 실제 `createRecordPort`로 감싼 것, 인증은 명시된 합성 입력). 확인하는 계약: 한 회원 세션의 한 검사 전달(경로가 달라도 같은 전달, 유휴 간격 뒤 종료)마다 `provide-prepared` 한 건이 첫 영상 바이트 전에 durable이고 종결 한 건이 그 쌍을 닫는다; 렌더링 query·Accept는 Orthanc에 그대로 가고 바이트는 Orthanc의 것 그대로다; 태그·metadata 같은 기술과 HEAD는 관문만 지나고 전달 기록이 없다; 원장이 기록하지 못하면 503이고 Orthanc에 영상을 묻지 않는다; 관문 거절은 기록을 남기지 않는다; 성공한 영상 응답이 하나도 없는 전달(Orthanc 오류 답·중간 끊김)은 `transfer-aborted`다(MG-10); 원장이 받지 못한 종결은 같은 사건·같은 operation으로 보존돼 API의 백그라운드 재시도 간격(`backgroundRetryDelayMs`, 1초부터 두 배·30초 상한)으로 다시 제시되고 종료 때 한 번 더 제시된다(MG-09); 설치된 Nest `createApplicationContext().close()`와 실제 `EmrNestLifecycle`·기록 포트에서, 준비 중인 전달이나 진행 중인 종결 제시가 기록 접수가 닫힌 뒤 한 번 실패해도 쌍이 완성되고, 기록기가 멈춘 뒤의 읽기는 다른 provider가 아직 멈추는 중이어도 503이며 영상을 묻지 않는다(MG-09); 검사 전체 GET은 기록된 전달이고 HEAD는 기록이 없다; auth_request 관문(`GET authz/dicom`)은 모든 영상 읽기를 403으로 거절해 중계를 우회할 수 없다(nginx는 검사 UID 경로의 GET/HEAD도 중계로 보낸다). nginx 경로·PostgreSQL 원장·Keycloak 세션을 거친 확인은 합성 mgxa 스택 기록(`tmp/image-delivery-record/`, 2026-10-28)이다.
+REQ-MG-08-IMAGE-DELIVERY-RECORD(의료법 제23조④, D1877(2)) → RISK-MG-IMAGE-WITHOUT-ACCESS-RECORD → TEST-MG-08-RELAY: `node --test tests/image_delivery_record_test.cjs`는 nginx가 이제 API 중계(`api/src/image-relay.controller.ts`)로 보내는 기존 영상 읽기(워크리스트 미리보기·썸네일 `frames/N/rendered`, 판독문·출력 `image-uint16`, WADO-RS frame)를 실제 node:http 서버에서 실제 중계 컨트롤러·`StudyImageDeliveryRecorder`(`api/src/image-delivery-record.ts`)·요청 문맥 capture·현재 임상 문맥·DICOMweb 관문과 합성 Orthanc HTTP 서버로 중계하는 실제 `OrthancService`로 돌린다(원장은 실제 사건 파서와 영수증을 쓰는 메모리 저장소를 실제 `createRecordPort`로 감싼 것, 인증은 명시된 합성 입력). 확인하는 계약: 한 회원 세션의 한 검사 전달(경로가 달라도 같은 전달, 유휴 간격 뒤 종료)마다 `provide-prepared` 한 건이 첫 영상 바이트 전에 durable이고 종결 한 건이 그 쌍을 닫는다; 렌더링 query·Accept는 Orthanc에 그대로 가고 바이트는 Orthanc의 것 그대로다; 태그·metadata 같은 기술과 HEAD는 관문만 지나고 전달 기록이 없다; 원장이 기록하지 못하면 503이고 Orthanc에 영상을 묻지 않는다; 관문 거절은 기록을 남기지 않는다; 성공한 영상 응답이 하나도 없는 전달(Orthanc 오류 답·중간 끊김)은 `transfer-aborted`다(MG-10); 원장이 받지 못한 종결은 같은 사건·같은 operation으로 보존돼 API의 백그라운드 재시도 간격(`backgroundRetryDelayMs`, 1초부터 두 배·30초 상한)으로 다시 제시되고 종료 때 한 번 더 제시된다(MG-09); 설치된 Nest `createApplicationContext().close()`와 실제 `EmrNestLifecycle`·기록 포트에서, 준비 중인 전달이나 진행 중인 종결 제시가 기록 접수가 닫힌 뒤 한 번 실패해도 쌍이 완성되고(종료는 그 읽기가 끝나기를 기다려 제공한 대로 닫는다, R244-GPT-FIX8-02), 기록기가 멈춘 뒤의 읽기는 다른 provider가 아직 멈추는 중이어도 503이며 영상을 묻지 않는다(MG-09); 검사 전체 GET은 기록된 전달이고 HEAD는 기록이 없다; auth_request 관문(`GET authz/dicom`)은 모든 영상 읽기를 403으로 거절해 중계를 우회할 수 없다(nginx는 검사 UID 경로의 GET/HEAD도 중계로 보낸다); 같은 세션·같은 검사에서 환자 정정(환자와 Orthanc revision 변경) 뒤 중계와 frame reader는 정정된 환자의 바이트를 그 환자와 새 revision을 기록한 새 전달 아래에서만 보낸다(관문이 그 요청에서 관찰한 환자로 묶음, R244-GPT-FIX8-01). nginx 경로·PostgreSQL 원장·Keycloak 세션을 거친 확인은 합성 mgxa 스택 기록(`tmp/image-delivery-record/`, 2026-10-28)이다.
 
 REQ-MG-LOADING-FRAME → RISK-MG-FRAME-WRONG-BYTES/OTHER-STUDY/SLOW-OPEN → TEST-MG-FRAME: `node --test tests/dicom_frame_test.cjs`는 API의 프레임 range 읽기(`api/src/dicom-frame-layout.ts`·`dicom-frame.service.ts`)가 비압축 little-endian 프레임 배열만 직접 읽고(인덱스된 PixelDataOffset·파일 크기·Pixel Data 요소 머리의 길이 일치), 요청 URL의 검사·시리즈가 객체의 것과 다르면 404, 캡슐화·big-endian·transcoding 요청·다른 media type 요청(`type="image/jpeg"` 등)·범위 밖 프레임·마운트 없음은 Orthanc 중계임을 합성 저장 파일로 확인한다. 저장 파일이 기술된 크기와 달라졌으면 캐시된 기술로 서비스하지 않고, 전송 중 파일이 짧게 끝나면 multipart 본문을 완성하지 않고 전송을 끊는다(짧은 화소 데이터가 성공 응답이 되지 않음). 응답 모양(Orthanc DICOMweb과 같은 multipart/related 부분·Content-Length)·`Accept-Encoding` q값 협상(`gzip;q=0`은 identity)·HEAD·임의 길이의 프레임 목록도 같은 시험이다. strip preview PNG는 DICOM 회색조 파이프라인(BitsStored/HighBit 비트 배치와 부호, Rescale, LINEAR/LINEAR_EXACT 창, MONOCHROME1 반전)을 거치며, enhanced 다중 프레임 객체는 첫 프레임의 functional group(Pixel Value Transformation·Frame VOI LUT, shared 위에 per-frame)을 적용하고 Modality/VOI LUT 표·팔레트·SIGMOID·해석하지 않는 group 모양은 Orthanc 렌더러로 중계한다. Accept 협상은 실제로 내는 표현(multipart/related octet-stream, 저장 syntax)의 가장 구체적인 일치 항목 q값으로 판정하고(RFC 9110 §12.5.1) 그 외 표현 요청은 중계한다. 객체 기술(frameFacts)은 요청들이 공유하며 한 요청의 중단은 남은 요청의 읽기를 끊지 않는다. Orthanc 중계와 컨트롤러는 응답 close를 원본 읽기의 중단으로 전달한다(머리 대기·본문 대기 모두). 공용 fixture는 `tests/dicom_frame_fixture.cjs`다. 실제 화소·소요 시간은 합성 MG 스택 기록(`tmp/mg-loading/`, 2026-10-27; 수정 라운드 `tmp/mg-loading-fix1/`·`tmp/mg-loading-fix2/`, 2026-10-28)이며 LiveStack fixture에는 다중 프레임 객체가 없어 clinician 행렬은 `pending_routes`다.
 
-REQ-MG-LOADING-RECORD(의료법 제23조④, D1877(2)) → RISK-MG-IMAGE-WITHOUT-ACCESS-RECORD → TEST-MG-DELIVERY: `node --test tests/dicom_frame_delivery_test.cjs`는 실제 node:http 서버에서 실제 컨트롤러·프레임 서비스·`StudyImageDeliveryRecorder`(중계와 같은 `api/src/image-delivery-record.ts`)·요청 문맥 capture·현재 임상 문맥(신원·StudyAccess·환자 링크)·DICOMweb 관문을 돌리고, 접속기록 원장은 실제 record port(`createRecordPort`: 입장 닫힘·drain 의미 그대로)가 감싼 메모리 store(실제 사건 파서와 영수증), Orthanc 인덱스는 합성 저장 객체의 stub, 인증은 명시된 합성 입력이다. 확인하는 계약: 한 회원 세션의 한 검사 전달(프레임·preview 읽기의 흐름, 유휴 간격 뒤 종료)마다 `provide-prepared` 한 건이 첫 바이트 전에 durable이고 `transfer-ended`/`transfer-aborted` 한 건이 그 쌍을 닫는다(프레임마다가 아니다); 유휴 간격 안의 reload는 열린 전달 아래 서비스되고 간격 뒤의 reload는 새 쌍이다; 원장이 기록하지 못하면 503이고 영상 바이트는 0이다; 관문이 거절한 요청은 기록을 남기지 않는다; 종료 시 열린 전달은 닫힌다(전송 중이면 aborted). 종결 사건은 응답들의 정직한 집계다: 영상 응답이 하나라도 끝까지 전송됐을 때만 `transfer-ended`/succeeded이고, 준비 기록 뒤 모든 읽기가 실패(원본 읽기 실패의 503 오류 응답, 중계된 Orthanc 거절)했거나 끊긴 전달은 `transfer-aborted`/aborted다(오류 응답이 소켓을 끝까지 채웠어도 전송 성공이 아니다). 종료 시점에 원장이 종결 사건을 받지 못하면 그 사건은 같은 eventId·발생 시각(전달이 닫힌 시각)·같은 operation으로 보존되어 런타임 background 작업 레지스트리의 타이머로 재시도되고(`backgroundRetryDelayMs`, 1초부터 두 배·30초 상한), 원장이 돌아오면 같은 사건이 기록된다(같은 operation의 재제시는 원장의 정확한 재시도이므로 중복이 아니다); 프로세스 종료는 보류 중인 종결 사건을 한 번 더 시도하고, 그래도 실패하면 eventId를 로그에 남기고 쌍을 완료로 보고하지 않는다(실패한 append 자체는 store의 B2 failure journal에 남는다). 종료 순서: `onModuleDestroy`가 첫 await 전에 아직 빚진 종결 사건(열린 전달과 미기록 종결)의 원장 작업을 동기로 예약하고 그 예약은 종료의 마지막 시도가 끝난 뒤에 한 번 끝내므로(예약 위에서 실패한 시도가 예약을 끝내지 않는다), `EmrNestLifecycle`이 `beforeApplicationShutdown`에서 record 입장을 닫은 뒤에 준비 중이던 전달이나 마지막 재시도가 끝나도, 종료 중 첫 종결 시도가 한 번 실패해도 그 종결 사건은 기록된다 — 실제 Nest `createApplicationContext().close()`·실제 `EmrNestLifecycle`·실제 record port로 준비 append 중 종료, 첫 종결 시도 중 종료, 종료 중 첫 종결 시도의 1회 실패를 확인한다; 종료가 시작된 뒤 들어온 읽기는 503이다(닫아 줄 수 없는 전달은 열지 않는다). 대상은 `image` 종류의 검사(recordId=StudyInstanceUID, 환자 링크 스냅샷, Orthanc 검사 revision이 version)이며 PostgreSQL 원장 자체는 `tests/emr/a`가 실제 PG로 증명한다.
+REQ-MG-LOADING-RECORD(의료법 제23조④, D1877(2)) → RISK-MG-IMAGE-WITHOUT-ACCESS-RECORD → TEST-MG-DELIVERY: `node --test tests/dicom_frame_delivery_test.cjs`는 실제 node:http 서버에서 실제 컨트롤러·프레임 서비스·`StudyImageDeliveryRecorder`(중계와 같은 `api/src/image-delivery-record.ts`)·요청 문맥 capture·현재 임상 문맥(신원·StudyAccess·환자 링크)·DICOMweb 관문을 돌리고, 접속기록 원장은 실제 record port(`createRecordPort`: 입장 닫힘·drain 의미 그대로)가 감싼 메모리 store(실제 사건 파서와 영수증), Orthanc 인덱스는 합성 저장 객체의 stub, 인증은 명시된 합성 입력이다. 확인하는 계약: 한 회원 세션의 한 검사 전달(프레임·preview 읽기의 흐름, 유휴 간격 뒤 종료)마다 `provide-prepared` 한 건이 첫 바이트 전에 durable이고 `transfer-ended`/`transfer-aborted` 한 건이 그 쌍을 닫는다(프레임마다가 아니다); 유휴 간격 안의 reload는 열린 전달 아래 서비스되고 간격 뒤의 reload는 새 쌍이다; 원장이 기록하지 못하면 503이고 영상 바이트는 0이다; 관문이 거절한 요청은 기록을 남기지 않는다; 종료 시 열린 전달은 그 응답들이 끝난 뒤 닫힌다(조용한 전달은 즉시, 전송 중인 전달은 마지막 응답이 lease를 놓을 때 제공한 대로; 종료의 drain 허용 시간 `SHUTDOWN_DRAIN_MS`(기존 10초) 뒤에도 전송 중이면 종결 사건 없이 남기고 로그에 남긴다, R244-GPT-FIX8-02). 종결 사건은 응답들의 정직한 집계다: 영상 응답이 하나라도 끝까지 전송됐을 때만 `transfer-ended`/succeeded이고, 준비 기록 뒤 모든 읽기가 실패(원본 읽기 실패의 503 오류 응답, 중계된 Orthanc 거절)했거나 끊긴 전달은 `transfer-aborted`/aborted다(오류 응답이 소켓을 끝까지 채웠어도 전송 성공이 아니다). 종료 시점에 원장이 종결 사건을 받지 못하면 그 사건은 같은 eventId·발생 시각(전달이 닫힌 시각)·같은 operation으로 보존되어 런타임 background 작업 레지스트리의 타이머로 재시도되고(`backgroundRetryDelayMs`, 1초부터 두 배·30초 상한), 원장이 돌아오면 같은 사건이 기록된다(같은 operation의 재제시는 원장의 정확한 재시도이므로 중복이 아니다); 프로세스 종료는 보류 중인 종결 사건을 한 번 더 시도하고, 그래도 실패하면 eventId를 로그에 남기고 쌍을 완료로 보고하지 않는다(실패한 append 자체는 store의 B2 failure journal에 남는다). 종료 순서: `onModuleDestroy`가 첫 await 전에 아직 빚진 종결 사건(열린 전달과 미기록 종결)의 원장 작업을 동기로 예약하고 그 예약은 종료의 마지막 시도가 끝난 뒤에 한 번 끝내므로(예약 위에서 실패한 시도가 예약을 끝내지 않는다), `EmrNestLifecycle`이 `beforeApplicationShutdown`에서 record 입장을 닫은 뒤에 준비 중이던 전달이나 마지막 재시도가 끝나도, 종료 중 첫 종결 시도가 한 번 실패해도 그 종결 사건은 기록된다 — 실제 Nest `createApplicationContext().close()`·실제 `EmrNestLifecycle`·실제 record port로 준비 append 중 종료, 첫 종결 시도 중 종료, 종료 중 첫 종결 시도의 1회 실패를 확인한다; 종료가 시작된 뒤 들어온 읽기는 503이다(닫아 줄 수 없는 전달은 열지 않는다). 대상은 `image` 종류의 검사(recordId=StudyInstanceUID, 환자 링크 스냅샷, Orthanc 검사 revision이 version)이며 PostgreSQL 원장 자체는 `tests/emr/a`가 실제 PG로 증명한다.
 
 단위별 기록 스크립트를 새로 만들지 않고 Python 3.9+ 표준 라이브러리 기록기를 재사용한다.
 저장소 루트에서 `python scripts/record-run.py --run-dir <새-실행-폴더> --cwd . --file scripts/record-run.py --file tests/record_run_test.py -- python -B tests/record_run_test.py`로 실행한다.
@@ -3095,7 +3095,97 @@ The deployment supplies `KIN_EMR_IMAGE_ASSET_CATALOG`: a JSON file with
 Files are relative to that inventory; the reader hashes their actual bytes. Decoder
 IDs follow the existing E transfer-syntax catalog. Missing deployment assets, external
 SR/SEG/PDF receipt evidence or processor-agreement facts remain unavailable.
-Nginx/served OHIF and derived PDF/preview/thumbnail snapshots remain unconnected.
+Derived PDF/preview/thumbnail/metadata snapshots remain unconnected.
+
+E_ROUTE puts the viewer's WADO-RS frame requests on that route in a deployment that gives the proxy the same
+`KIN_EMR_IMAGE_ASSET_CATALOG` value as the API (docker-compose passes one `.env` value to both; the proxy's
+`15-kin-config.envsh` writes the frame location only then). The stock compose gives none: E's manifest cannot be built
+without the catalog, so there a frame request reaches the API's frame range reader (MG-LOADING,
+`api/src/dicom-frame.controller.ts`), which runs the DICOMweb gate itself and takes the study delivery's lease from the
+shared recorder (`api/src/image-delivery-record.ts`: provide-prepared durable before the first byte, one terminal after
+the idle gap), so a fresh install shows its images and no frame path sends a byte without the D1877 record (the earlier
+no-catalog route, authz -> Orthanc, did: R244-GPT-FIX5-01).
+`python -B tests/proxy_image_route_test.py` (real nginx from PATH or `KIN_PROXY_NGINX`, as `proxy_grant_log_test.py`)
+checks both renderings: with the catalog, frame GET/HEAD reach only `/api/images/dicom-web?target=<normalized path>`
+with the session headers and the proxy's peer address; without it, frame GET/HEAD reach only the API's frame reader
+(`/api` + the request line as written, no authorization subrequest, no Orthanc credential from the proxy) and nothing
+reaches the E image route or the authz -> Orthanc detour. In both, writes are refused before any upstream, DICOMweb
+metadata, the QIDO study query and the Gateway STOW keep authz -> Orthanc, and a rendered frame goes to the recorded
+relay (`/api/image-relay/...`, MG-08).
+REQ-E-ROUTE-RECORD(의료법 제23조④, D1877) → RISK-FRAME-WITHOUT-ACCESS-RECORD → TEST-FRAME-RECORD-01:
+`python -B scripts/run-tests.py --module tests/e2e/test_frame_delivery_record.py --mode live --unit frame-record --timeout 900`
+asserts, on the served stack whichever frame route it has (stock: the frame reader; with the catalog: E), that one frame
+GET through HTTPS answers the exact stored bytes under exactly one durable provide-prepared image event naming the study
+for the member, that another institution's member gets no bytes and adds no entry, and that one transfer-ended entry
+closes the pair after the idle gap (about two minutes on the frame reader) with nothing recorded per frame; it prints the
+record's surface (`FRAME_RECORD`) and asserts the record's content, not the route's name.
+REQ-IMAGE-PATHS-ONE-RECORD(의료법 제23조④, D1877: one pair per study delivery; HEAD is no delivery) →
+RISK-IMAGE-PATH-SECOND-RECORDER-OR-HEAD-COUNTED (R244-GPT-FIX5-01, R244-GPT-FIX6-01/02, FIX7-03) → TEST-IMAGE-PATHS-01/02:
+`python -B scripts/run-tests.py --module tests/e2e/test_image_paths.py --mode live --unit image-paths --timeout 1500`
+walks the whole image-path table on the served stack it runs against (stock or catalog, read from the api's
+`KIN_EMR_IMAGE_ASSET_CATALOG` setting; a cell's nginx location is a label of the printed matrix, not an assertion on the
+rendered configuration, R244-GPT-FIX8-03). In 01 each image cell (viewer frame, strip preview, worklist thumbnail,
+DICOMweb rendering, whole study, series and object retrieve, original object, the frame reader / preview / relay under
+`/api/`, E's frame, object, series and study retrieve) is the first read of its own synthetic study: while a synthetic
+trigger on the stack's access ledger refuses that study's record, the GET sends no image byte and leaves no entry; then
+the GET answers its image under exactly one provide-prepared entry, recorded after the request left and before its
+response headers arrived (a cell that answers no image on that stack leaves no entry either time). Descriptions (QIDO,
+metadata, tags, E's metadata) as first reads open nothing; the original-download archive answers HEAD 405 with no record
+and its GET only after its own durable download record, without opening a viewing delivery. 02 checks the joining: one
+session GETs every image cell of one study and the study has exactly one provide-prepared entry and one transfer-ended
+entry after the idle gap; HEADs and descriptions add none; HEADs alone on a second study leave no entry; on a third
+study HEADs beside admitted-then-refused GETs close as transfer-aborted. They print `IMAGE_PATHS_FIRST` and
+`IMAGE_PATHS_MATRIX` (cell, location, route, method, status, bytes).
+`node --test tests/emr/e/manifest_reuse_test.cjs` (compiled `api/dist`) checks that one study manifest serves the
+study's frame requests and is rebuilt or forgotten when the request or source no longer matches it, and that a study
+or series request (retrieve, query, metadata) reads the catalog again so an object that arrived since is selected.
+The access record of viewing (의료법 제23조④) is the study delivery of a member session, recorded by the one recorder
+every image route shares (`api/src/image-delivery-record.ts`): one B2 provide-prepared event per member session and
+study, durable before the delivery's first source read, closed by one terminal event after the idle gap or at
+shutdown; E's frames, the frame reader, the previews and the relay's reads of one session join the same pair, and a
+HEAD or a description takes no lease (`lease()`). Every read names the patient whose bytes it serves - E its manifest's,
+the frame reader, preview and relay the patient their DICOMweb gate observed in the archive for that request
+(`authzDicom`'s own per-request source read) - and never joins a delivery whose record names another patient: that one
+is retired and the read opens its own (R244-GPT-FIX8-01). At shutdown a delivery closes only once its responses have
+released their leases, so its terminal goes with the rows they hand over; one still sending after the drain allowance
+(`SHUTDOWN_DRAIN_MS`, 10 s) is left without a terminal and logged (R244-GPT-FIX8-02). Every E response checks the requester's current access on one
+bounded transaction of E's own check pool (`check-db.ts`, the same database and role) before its first byte and keeps
+its fixed representation, transport and copy facts in `emr_image` rows naming the record and the request
+(`X-KIN-Image-Event` is the record, `X-KIN-Image-Response` the row); a HEAD is answered from the same checked source
+under no record, with no row and no staging copy. The source reads the study's current identity (the same read as D's
+current study: no resource, two patient resources, the one patient) and the object's current PatientID on every
+response and compares both with the manifest's; a row the application connection refused is owed by the delivery: it
+is written on a ledger transaction of its own after the response with the first failure's cause, a retention the
+ledger refuses is journaled against the delivery's record, and the delivery's closing event is written only on one
+transaction with the rows it still owes (R244-GPT-FIX7-02). A delivery is bound to the manifest it serves: a corrected
+patient's bytes open a record of their own, and a forgotten manifest's delivery ends with it (R244-GPT-FIX7-01).
+`node --test tests/emr/e/delivery_test.cjs` (compiled `api/dist`, the real recorder and relay on one synthetic
+Orthanc) checks that E's frames and the relay's reads of one session are one pair (E joins the relay's delivery only at the
+archive's revision it names), that a HEAD alone records and keeps
+nothing and beside a failed GET leaves the delivery aborted, that descriptions take no lease, and that an unrecordable
+ledger answers 503 before any source read; `node --test tests/emr/e/service_retention_test.cjs` (compiled `api/dist`,
+the real ledger store's transaction path over a synthetic SQL port) checks the split-UID refusal, the corrected patient
+under a record of its own (also through the relay on the same recorder, after an E or a relay opening), the retention
+after the response, the journaled failed retention (also one that gets no ledger connection), no closing event while
+the rows are refused and the closing written with them afterwards, and the stop waiting for a response that is still
+writing its rows (closing written with the handed-over row; no closing when the ledger refuses it; no closing when the
+response outlives the drain allowance); the
+real-PG `stream_pg_test.cjs` case drives the service and the shared recorder against the ledger and checks its events,
+the HEAD with no record, the record bound to another manifest or patient refused at the byte boundary, the refused
+patient change and split UID with their deliveries closed, the late-retained row, and (a trigger refusing the ledger
+retention) no closing event until a later closing commits with the row.
+`python -B scripts/run-tests.py --module tests/e2e/test_image_route.py --mode live --unit e-route --timeout 1800`
+runs on the served stack: one frame through HTTPS is one recorded delivery, and the served OHIF CT series
+(`KIN_E_ROUTE_SLICES`, default 200, `KIN_E_ROUTE_MATRIX`, default 512) records every received frame once; it prints
+one `MEASURE` line (first render and all-frames time) before its assertions, so the same case times the direct
+route and the E route. A slice counts as reaching the viewer when the browser read its frame response to the end or
+the viewer holds its image: the pinned viewer's streaming loader stops reading at Content-Length, and the browser
+then sometimes cancels a response it already received whole (`net::ERR_ABORTED`, printed as `FRAME_REQUEST_FAILED`).
+A third case retrieves a series and its study through `GET /api/images/dicom-web` after a
+frame and one later arrival, and expects every stored object. The suite runs against a stack whose api and proxy
+services were given a deployed viewer/decoder asset catalog (`KIN_EMR_IMAGE_ASSET_CATALOG`, above); on the stock
+compose the frames never reach E and its E-specific assertions (`X-KIN-Image-Event`, `emr_image` rows) cannot hold
+there; the stock compose's frame record is `tests/e2e/test_frame_delivery_record.py` (above).
 
 D1821 / U3 fix 1: `viewerSettings.hanging` stores modality-specific default grids (including custom rows/columns), prior position, and series selection; optional MG fields store view/breast order, prior position and current/comparison grids. Automatic delegates to the stock or requested protocol, and unrelated settings saves leave unset modality preferences absent. Explicit protocols and studies containing MG retain their own hanging. `test_shell_03_toolbar_shortcuts_and_account_roaming` checks the rendered current/prior images after an unrelated Save, existing Automatic settings and an explicit Compare request. `test_priors_07_modality_layout_and_matching_series` checks fresh-login placement, series matching and one study-list read. `test_priors_06_mg_account_preferences` checks v1-to-v2 preservation through a toolbar save, DBT fallback and MG arrangement. `test_priors_08_mg_reference_lines_with_comparison` checks the merged reference-plane boundary on synthetic DBT. These extend REQ-VIEWER-U3-PRIORS/D1821 → RISK-WRONG-STUDY/PREFERENCE-LOSS and REQ-MG-03 → RISK-MG-FALSE-ANATOMY; physical monitor/physician acceptance remains separate.
 

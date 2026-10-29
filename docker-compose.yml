@@ -29,6 +29,9 @@ services:
       PUBLIC_PORT: ${PUBLIC_PORT:-9443}
       ORTHANC_USER: admin
       ORTHANC_PASS: ${ORTHANC_PASS:?ORTHANC_PASS를 .env에 설정하세요}
+      # EMR-E 영상 경계(E_ROUTE)는 API와 같은 자산 목록 값이 있을 때만 켠다(proxy/15-kin-config.envsh). 없으면 뷰어의
+      # 프레임 요청은 공용 기록기를 쓰는 API frame reader 경로다. 목록을 주는 배포는 api 서비스에 그 파일도 함께 마운트한다.
+      KIN_EMR_IMAGE_ASSET_CATALOG: ${KIN_EMR_IMAGE_ASSET_CATALOG:-}
       # 받아쓰기 location의 본문 상한을 API와 같은 설정에서 만든다(15-kin-config.envsh). 비워 두면 32m.
       KIN_ASR_MAX_BYTES: ${KIN_ASR_MAX_BYTES:-}
       # 공식 20-envsubst 스크립트가 nginx의 $host 같은 변수를 건드리지 못하게 한다.
@@ -237,6 +240,9 @@ services:
       DATABASE_URL: postgresql://kin_runtime:${KIN_EMR_RUNTIME_PASSWORD:?KIN_EMR_RUNTIME_PASSWORD를 .env에 설정하세요}@db:5432/kin
       # 원장 seal·보호 실패 저널: DB 밖의 이 서버 전용 볼륨(DB 역할은 쓸 수 없다).
       KIN_EMR_STATE_DIR: /var/lib/kin-emr
+      # EMR-E 뷰어/디코더 자산 목록(JSON, 컨테이너 안 경로; api/src/emr-source/image.ts). 배포가 그 파일을 마운트하고
+      # 이 값을 줄 때만 proxy가 프레임 요청을 E로 보낸다. 비어 있으면 E의 manifest는 503으로 거절하고 proxy는 E 경로를 쓰지 않는다.
+      KIN_EMR_IMAGE_ASSET_CATALOG: ${KIN_EMR_IMAGE_ASSET_CATALOG:-}
       KIN_REQUEST_PROXY_PEERS: proxy
       # 인증. iss는 브라우저가 보는 주소, JWKS는 도커 네트워크 안 주소 — 서로 다르다.
       AUTH_REQUIRED: "true"

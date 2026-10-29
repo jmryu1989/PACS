@@ -1,4 +1,4 @@
-/* REQ-B2R-02 -> pool starvation -> TX-01/02.
+/* REQ-B2R-02 -> pool starvation -> TX-01/02; a failure no admitted operation accounts for -> TX-03.
  * Observe transaction options at the Prisma boundary; source shape and the
  * location of an options literal do not determine the product contract. */
 const path=require('node:path'),fs=require('node:fs'),assert=require('node:assert/strict');
@@ -27,4 +27,21 @@ test('TX-02 a producer preserves its existing explicit business transaction limi
   const b=boundary(),w=b.port.begin(),options={maxWait:4000,timeout:120000}; // initial-import producer's existing limits
   try{await w.transactionWithRecords(async()=>null,options);assert.deepEqual(b.calls,[options]);}
   finally{w.end();b.control.close();await b.control.drained();}
+});
+test('TX-03 a failure no admitted operation accounts for is journaled against the event the transaction writes for',async()=>{
+  const event='22222222-2222-4222-8222-222222222222';
+  const tx={$executeRaw:async()=>0,$queryRaw:async()=>[]};
+  for(const [name,$transaction,work,cause] of [
+    ['no connection',async()=>{throw Object.assign(new Error('Timed out fetching a new connection'),{code:'P2024'});},async()=>0,'ledger-unreachable'],
+    ['the callback\'s own SQL',async body=>body(tx),async()=>{throw new Error('SyntheticInsertRefused');},'business-rollback'],
+    ['a lost COMMIT',async body=>{await body(tx);throw new Error('SyntheticCommitLost');},async()=>0,'commit-unknown'],
+  ]){
+    for(const failureEvent of [event,undefined]){
+      const journal=[],store=new AccessLedgerStore({$transaction},{record:async(...entry)=>{journal.push(entry);return 'database';}});
+      const {port,control}=createRecordPort(store),w=port.begin();
+      try{await assert.rejects(w.transactionWithRecords(work,undefined,failureEvent));}
+      finally{w.end();control.close();await control.drained();}
+      assert.deepEqual(journal,failureEvent?[[cause,event,null]]:[],name);
+    }
+  }
 });

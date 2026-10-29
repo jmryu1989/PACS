@@ -9033,7 +9033,6 @@
         "params": [
           "DicomFrameService",
           "PacsService",
-          "OrthancService",
           "StudyImageDeliveryRecorder"
         ],
         "scope": null,
@@ -9302,6 +9301,70 @@
             "3:Symbol(EMR_MANUAL_SR_SIGNING)"
           ],
           "optional": []
+        }
+      }
+    }
+  },
+  "di_additions_e_route": {
+    "unit": "EMR-E E_ROUTE study delivery (#244)",
+    "note": "OnlineImageService resolves the request's member identity once and shares the study delivery recorder with every image route. ImageCheckDatabase is registered as a provider: the recorder uses it for each lease's current facts, which its opening and E preparation both consume, while E retains its check-pool dependency for HEAD. E takes the request context and recorder instead of the record port; the recorder writes rows a response could not retain. No controller or route is added.",
+    "middleware_routes": [],
+    "controllers": [],
+    "providers": [
+      "ImageCheckDatabase"
+    ],
+    "routes": [],
+    "injectables": {
+      "ImageCheckDatabase": {
+        "params": [],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      }
+    },
+    "changed_injectables": {
+      "OnlineImageService": {
+        "before": {
+          "params": [
+            "Object",
+            "ImageContextSource",
+            "PrismaService",
+            "OrthancService"
+          ],
+          "scope": null,
+          "declared": [
+            "0:Symbol(EmrRecordPort)"
+          ],
+          "optional": []
+        },
+        "after": {
+          "params": [
+            "ImageContextSource",
+            "PrismaService",
+            "OrthancService",
+            "Object",
+            "ImageCheckDatabase",
+            "StudyImageDeliveryRecorder"
+          ],
+          "scope": null,
+          "declared": [
+            "3:Symbol(RequestContextSource)"
+          ],
+          "optional": []
+        }
+      },
+      "StudyImageDeliveryRecorder": {
+        "before": {
+          "params": ["Object", "Object", "Object", "Object", "OrthancService", "Number"],
+          "scope": null,
+          "declared": ["5:Symbol(ImageDeliveryIdleMs)", "3:Symbol(EmrBackgroundWork)", "2:Symbol(CURRENT_CLINICAL_CONTEXT)", "1:Symbol(RequestContextSource)", "0:Symbol(EmrRecordPort)"],
+          "optional": [5]
+        },
+        "after": {
+          "params": ["Object", "Object", "Object", "Object", "OrthancService", "Number", "ImageCheckDatabase"],
+          "scope": null,
+          "declared": ["5:Symbol(ImageDeliveryIdleMs)", "3:Symbol(EmrBackgroundWork)", "2:Symbol(CURRENT_CLINICAL_CONTEXT)", "1:Symbol(RequestContextSource)", "0:Symbol(EmrRecordPort)"],
+          "optional": [5]
         }
       }
     }
