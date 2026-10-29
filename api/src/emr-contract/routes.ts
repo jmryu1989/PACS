@@ -198,7 +198,6 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames'] },
   { kinds: ['thumbnail', 'image', 'key-image'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET instances/:id/preview'] },
-
 ];
 
 const routeEntries = groups.flatMap(({ routes, ...contract }) => routes.map(route => [route, contract] as const));

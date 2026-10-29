@@ -259,7 +259,13 @@
         }
       }
       workspaceWasNarrow = narrow;
-      if (sizes.top != null) top.style.height = clampPanel(sizes.top, 140, $(".right").getBoundingClientRect().height - 266) + "px";
+      const topMaximum = $(".right").getBoundingClientRect().height - 266;
+      if (sizes.top != null) {
+        // A tight column may keep its default band, but a taller window's saved
+        // height must still yield to this window's prior report line below.
+        const maximum = topMaximum < 140 ? top.getBoundingClientRect().height : topMaximum;
+        top.style.height = clampPanel(sizes.top, 140, maximum) + "px";
+      }
       const row = $(".workrow").getBoundingClientRect();
       if (sizes.related != null) related.style[portrait ? "height" : "width"] = clampPanel(sizes.related,
         portrait ? 286 : 220, portrait ? row.height - 186 : row.width - 366) + "px";
@@ -290,12 +296,13 @@
       }
       // The worklist floor must not push the prior report's first line out of a
       // stacked work area (D383). The report window band yields first, only as much
-      // as needed and never below its 140 px drag minimum; a stored size wins.
+      // as needed and never below its 140 px drag minimum. In a tight column even
+      // a stored band must yield, without overwriting the reader's saved height.
       // The pane's text is its plain view's body or, while Related Report mode stands in that view's place (Minhoon item 8),
       // the mode's text region: the one on screen is measured (a hidden one measures at the top of the window).
       const priorText = () => related.querySelector("#related-mode:not([hidden]) .related-mode-scroll")
         || related.querySelector(".prior-report-body");
-      if (portrait && !narrow && sizes.top == null && !document.body.classList.contains("reading")) {
+      if (portrait && !narrow && (sizes.top == null || topMaximum < 140) && !document.body.classList.contains("reading")) {
         const area = $(".right"), body = priorText(), style = getComputedStyle(body);
         const line = body.getBoundingClientRect().top + area.scrollTop + parseFloat(style.paddingTop) + 2 * parseFloat(style.fontSize);
         const over = line - area.getBoundingClientRect().bottom;

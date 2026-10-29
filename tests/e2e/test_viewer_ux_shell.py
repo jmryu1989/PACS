@@ -21,6 +21,7 @@ from test_prior_selection import canvas_ready
 from test_cine import CineE2E
 from test_display_controls import DisplayControlsE2E
 from document_session import document_request
+from network_faults import route_first
 
 
 class ViewerUXShellE2E(ViewerLayoutE2E):
@@ -34,6 +35,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
                     if '/ohif/viewer' not in page.url: continue
                     try:
                         name = 'failure-' + self._testMethodName + '-' + str(i) + '-' + str(j)
+                        (folder / (name + '-browser-errors.json')).write_text(json.dumps(getattr(self, 'browser_errors', []), indent=2), encoding='utf-8')
                         page.screenshot(path=str(folder / (name + '.png')))
                         (folder / (name + '.html')).write_text(page.content(), encoding='utf-8')
                         state = page.evaluate('''() => ({url:location.href, classes:document.body.className,
@@ -44,7 +46,6 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
                             image:services.cornerstoneViewportService.getCornerstoneViewport(c.viewportId)?.getCurrentImageId?.(),
                             camera:services.cornerstoneViewportService.getCornerstoneViewport(c.viewportId)?.getCamera?.()}))})''')
                         (folder / (name + '.json')).write_text(json.dumps(state, indent=2), encoding='utf-8')
-                        (folder / (name + '-browser-errors.json')).write_text(json.dumps(getattr(self, 'browser_errors', []), indent=2), encoding='utf-8')
                     except Exception as error: print('Viewer failure capture:', str(error)[:180], flush=True)
         super().tearDown()
 
@@ -136,7 +137,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         # A late patient lookup cannot win after selecting A again (A→B→A).
         page.wait_for_function('''() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false''')
         held = []
-        page.route('**/api/studies?*', lambda route: held.append(route), times=1)
+        route_first(page, '**/api/studies?*', lambda route: held.append(route))
         with page.expect_request(lambda request: request.url.split('?')[0].endswith('/api/studies')):
             tabs.get_by_role('tab').filter(has_text=b.patient_id).click()
         tabs.get_by_role('tab').filter(has_text=a.patient_id).click()
@@ -146,7 +147,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         expect(tabs.get_by_role('tab').filter(has_text=a.patient_id)).to_have_attribute('aria-selected','true')
         page.wait_for_function('expected => (' + display_state + ')() === expected', arg=before_display)
         held = []
-        page.route('**/api/studies?*', lambda route: held.append(route), times=1)
+        route_first(page, '**/api/studies?*', lambda route: held.append(route))
         with page.expect_request(lambda request: request.url.split('?')[0].endswith('/api/studies')):
             tabs.get_by_role('tab').filter(has_text=b.patient_id).click()
         tabs.get_by_role('button', name='Close D03A SYNTHETIC ' + b.patient_id, exact=True).click()
@@ -218,13 +219,20 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         fixture = self.multiple('U2-' + uuid.uuid4().hex[:12], 'lookup failure', '20260801')
         work = self.login()
         page = work.context.new_page()
-        page.route('**/api/studies?*', lambda route: route.fulfill(status=503, content_type='application/json', body='{}'), times=1)
+        route_first(page, '**/api/studies?*', lambda route: route.fulfill(status=503, content_type='application/json', body='{}'))
         page.goto(self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + fixture.uid)
         canvas_ready(page, 1)
         retry = page.get_by_role('button', name='Retry Patient', exact=True)
         expect(retry).to_be_visible()
         expect(page.locator('[data-cy="viewport-grid"]')).to_be_visible()
         self.assertFalse(page.evaluate("document.body.classList.contains('kin-viewer-empty')"))
+        strip = page.get_by_role('region', name='Series', exact=True)
+        other = strip.locator('button[aria-pressed="false"]').first
+        expect(other).to_be_visible()
+        previous = self.cells(page)[0]['image']
+        other.click()
+        page.wait_for_function('image => services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId()).getCurrentImageId() !== image', arg=previous)
+        canvas_ready(page, 1)
         before = self.cells(page)
         retry.click(); expect(retry).not_to_be_visible()
         expect(page.get_by_role('tablist', name='Patients')).to_contain_text(fixture.patient_id)
@@ -845,7 +853,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         dialog.get_by_role('button', name='Save', exact=True).focus()
         page.keyboard.press('p')
         self.assertEqual(page.evaluate(active_tool), 'Zoom')
-        page.route('**/api/workspace-shortcuts', lambda route: route.fulfill(status=503, body='Unavailable'), times=1)
+        route_first(page, '**/api/workspace-shortcuts', lambda route: route.fulfill(status=503, body='Unavailable'))
         dialog.get_by_role('button', name='Save', exact=True).click()
         expect(dialog).to_contain_text('계정 설정 응답을 읽지 못했습니다')
         expect(bar.get_by_role('button', name='Zoom', exact=True)).to_have_attribute('aria-keyshortcuts', 'J')

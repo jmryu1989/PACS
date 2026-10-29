@@ -73,6 +73,7 @@ export function srMeasurement(item: any, tags: any, pixels?: Buffer) {
       if (!Number.isFinite(n)) invalid(); sum += n; count++; min = Math.min(min, n); max = Math.max(max, n);
     }
     if (!count) invalid();
+    // SD is a display-only statistic, recomputed by the viewer on reopen; this SR baseline stores these five values.
     values = [Math.PI * ra * rb, sum / count, min, max, count];
     // ELLIPSE requires the major-axis pair before the minor-axis pair.
     graphic = ra >= rb ? p : [p[2], p[3], p[0], p[1]];

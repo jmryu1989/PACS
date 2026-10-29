@@ -267,7 +267,7 @@ export class ClinicianQuestionService {
     if (!holds(c, CLINICIAN_ROLE)) throw roleRequired();
     if (!studyUid(uid)) throw invalid('검사 UID를 확인하세요');
     if (!exactKeys(b, ['requestId', 'expectedOwner', 'body']) || !uuid(b.requestId) || !text(b.body))
-      throw invalid('요청 ID와 1~2,000자의 질문을 입력하세요');
+      throw invalid('요청 ID와 질문을 입력하세요');
     this.expectOwner(c, b);
   }
 
@@ -303,7 +303,7 @@ export class ClinicianQuestionService {
     this.member(c);
     if (!holds(c, CLINICIAN_ROLE) && !holds(c, RADIOLOGIST)) throw roleRequired();
     if (!exactKeys(b, ['requestId', 'expectedOwner', 'revision', 'body']) || !uuid(b.requestId) || !revision(b.revision) || !text(b.body))
-      throw invalid('요청 ID·기준 revision과 1~2,000자의 내용을 입력하세요');
+      throw invalid('요청 ID·기준 revision과 내용을 입력하세요');
     this.expectOwner(c, b);
     if (!uuid(id)) throw questionMissing();
   }
@@ -362,7 +362,7 @@ export class ClinicianQuestionService {
     this.member(c);
     if (!holds(c, CLINICIAN_ROLE) && !holds(c, RADIOLOGIST) && !holds(c, ADMIN)) throw roleRequired();
     if (!exactKeys(b, ['requestId', 'expectedOwner', 'revision', 'note']) || !uuid(b.requestId) || !revision(b.revision)
-      || b.note !== '' && !text(b.note)) throw invalid('요청 ID·기준 revision과 2,000자 이하의 사유를 확인하세요');
+      || b.note !== '' && !text(b.note)) throw invalid('요청 ID·기준 revision과 사유를 확인하세요');
     this.expectOwner(c, b);
     if (!uuid(id)) throw questionMissing();
   }
