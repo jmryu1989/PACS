@@ -30,6 +30,7 @@ Decided differences in the node counts (PR #231 fix round, 2026-10-27, by D73 §
 removes from the first paint is declared once, as the region it owns, in DECIDED_REGIONS - W6-PAGE-22 (D1300), W4-LAND,
 W5-UI Phases A and B, S9-U4b (D1486/D1617/D1668), EMR-D #219, W9-UI, the dictation first site's hidden Retry button,
 #259's Change Password link (in the closed Session details menu: a node, never drawn) and Clinical Context Next Page,
+D1882's removed Unmatched Studies dialog (#276: a closed modal, never drawn; its replacement Held Studies is admin.html's),
 and the opened panel's round-7 controls (Text Size,
 its row, Default, the edge). The counts of those regions are derived from that declaration in each served tree
 (decided_nodes) and never pinned; every element outside them is compared exactly, at first paint and with the panel
@@ -105,6 +106,7 @@ DECIDED_REGIONS = (
     ('Dictation first site: Retry (docs/ops/dictation-first-site.md)', '#dictation-retry', 'node', None),
     ('#259 caution census: Change Password (Session details)', 'a[href="/api/auth/login?action=UPDATE_PASSWORD"]', 'node', None),
     ('#259 caution census: Clinical Context Next Page', '#clinical-context-status ~ button', 'node', 'Next Page'),
+    ('D1882 #276: the removed Unmatched Studies dialog (held studies reach no list)', '#unmodal', 'tree', None),
     ('D1160 round 7: Text Size', STUDY_PANEL + ' select[aria-label="Text Size"]', 'tree', None),
     ('D1160 round 7: the controls row', STUDY_PANEL + ' :has(> select[aria-label="Text Size"])', 'node', None),
     ('D1160 round 7: Default', STUDY_PANEL + ' button', 'node', 'Default'),

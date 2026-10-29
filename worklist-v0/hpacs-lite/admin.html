@@ -202,6 +202,23 @@
       <p class="gateway-empty" id="gateway-empty" hidden></p>
     </section>
 
+    <section class="gateway" id="held-sources" aria-labelledby="held-title">
+      <div class="gateway-head">
+        <h2 id="held-title">Held Studies</h2>
+        <span class="gstate not_loaded" id="held-state" role="status">Not Loaded</span>
+        <div class="spacer"></div>
+        <button type="button" id="held-refresh" disabled>Refresh Held Studies</button>
+      </div>
+      <p class="gateway-hint">보낸 병원을 확인하지 못해 보류된 검사입니다. 기관명(InstitutionName)이 등록된 표기와 맞지 않고 보낸 장비도 등록되지 않았습니다. 보류 검사는 누구도 열 수 없고 어느 워크리스트에도 나오지 않습니다. 여기에는 환자·검사 정보 없이 장비·기관명 원문·도착 시각·건수만 보입니다. 병원에 연락해 장비 또는 기관명 표기가 이 기관의 것임을 확인한 뒤 등록하면, 해당 보류 검사와 앞으로 받을 검사가 이 기관에 연결됩니다. 연결은 되돌리는 경로가 없으니 확인한 뒤에만 등록하세요.</p>
+      <p class="message" id="held-message" role="alert"></p>
+      <div class="audit-table" id="held-wrap" hidden>
+        <table>
+          <thead><tr><th scope="col">Device (AE Title)</th><th scope="col">Institution Name (Raw)</th><th scope="col">First Arrival (UTC)</th><th scope="col">Last Arrival (UTC)</th><th scope="col">Count</th><th scope="col">Register</th></tr></thead>
+          <tbody id="held-rows"></tbody>
+        </table>
+      </div>
+      <p class="gateway-empty" id="held-empty" hidden>보류된 검사가 없습니다.</p>
+    </section>
     <section class="ops" id="metrics" aria-labelledby="metrics-title">
       <div class="ops-head">
         <h2 id="metrics-title">Operations</h2>
@@ -315,6 +332,20 @@
     </form>
   </dialog>
 
+  <dialog id="held-dialog">
+    <form class="dialog-body" id="held-form">
+      <h2 id="held-dialog-title">Register Device</h2>
+      <p id="held-dialog-target"></p>
+      <p class="message show" id="held-dialog-message" role="alert"></p>
+      <label>Hospital Confirmation<input name="confirmation" required maxlength="500" autocomplete="off"
+        placeholder="예: 2026-10-28 한림병원 영상의학과 홍길동 전화 확인"></label>
+      <p>병원 담당자와 누가·언제 확인했는지 적습니다. 등록 기록(감사로그)에 남습니다.</p>
+      <div class="dialog-actions">
+        <button type="button" id="held-cancel">Cancel</button>
+        <button type="submit" class="primary">Register</button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="password-dialog">
     <div class="dialog-body">
       <h2>Temporary Password</h2>
@@ -1647,5 +1678,6 @@
     })();
   </script>
   <script src="admin-access-review.js"></script>
+  <script src="held-sources-admin.js"></script>
 </body>
 </html>

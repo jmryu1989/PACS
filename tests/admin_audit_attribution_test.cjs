@@ -112,6 +112,11 @@ Object.assign(CONTRACT.field_rules, {"dicom.import.intent":{"source":"detail.ins
 // D1489: the archive grant's issue/refusal row is attributed the same way (vectors 51-52).
 CONTRACT.field_rules["original.download.grant"] = {"source":"detail.institutionId","meaning":IMPORT_MEANING};
 CONTRACT.field_rules["original.download.refused"] = {"source":"detail.institutionId","meaning":IMPORT_MEANING};
+/* D1882 held unknown source: a held study attached by a registered device or spelling records the owner it was attached
+ * to (system row), and a registration records the registering administrator's own institution. */
+Object.assign(CONTRACT.field_rules, {"study.attach":{"source":"detail.institutionId","meaning":"owner the held study was attached to (system)"},
+  "institution.device.register":{"source":"detail.institution","meaning":"registering administrator's institution"},
+  "institution.alias.register":{"source":"detail.institution","meaning":"registering administrator's institution"}});
 CONTRACT.synthetic_vectors.push(
   {"row":42,"action":"dicom.import.intent","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A member's import intent"},
   {"row":43,"action":"dicom.import.result","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A's unconfirmed file result: the admin finds operationId and index"},

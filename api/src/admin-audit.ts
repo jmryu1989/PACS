@@ -29,7 +29,10 @@ export type AuditFieldSource = 'detail.institutionId' | 'detail.by' | 'detail.in
 export const AUDIT_FIELD_RULES: Readonly<Record<string, AuditFieldSource>> = Object.freeze({
   "study.arrived": 'detail.institutionId',        // 생성 때의 소유 기관(system 동기화, null = 미배정)
   "study.announce": 'detail.institutionId',       // 생성 때의 소유 기관(Gateway 자격증명 기관)
-  "study.assign": 'detail.institutionId',         // 새로 배정한 소유 기관(재배정은 거절됨)
+  "study.assign": 'detail.institutionId',         // 새로 배정한 소유 기관(D1882로 경로는 없어졌고 옛 행만 남는다)
+  "study.attach": 'detail.institutionId',         // D1882: 등록된 장비·표기로 보류 검사가 붙은 소유 기관(system)
+  "institution.device.register": 'detail.institution',   // D1882: 수신 장비를 자기 기관에 등록한 관리자의 기관
+  "institution.alias.register": 'detail.institution',    // D1882: 기관명 표기를 자기 기관에 등록한 관리자의 기관
   "match": 'detail.by',                           // 호출 기관, 소유 기관만 매칭한다
   "unmatch": 'detail.by',
   "state.delete": 'detail.by',
