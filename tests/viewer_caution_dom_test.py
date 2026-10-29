@@ -26,18 +26,20 @@ class ViewerCautionDOM(unittest.TestCase):
         self.page.evaluate("document.body.replaceChildren(); document.body.innerHTML='<p id=kin-viewer-layout-status></p>'")
     def tearDown(self): self.page.close()
     def script(self, name): self.page.add_script_tag(url=f'/config/ohif/{name}.js')
-    def test_product_csp_allows_wasm_but_blocks_javascript_eval_in_page_and_worker(self):
+    def test_product_csp_allows_eval_only_in_the_decoder_worker(self):
         policies = re.findall(r'add_header Content-Security-Policy "([^"]+)" always;',
                               (ROOT / 'proxy/nginx.conf.template').read_text(encoding='utf-8'))
-        self.assertEqual(len(policies), 1)
         policy = policies[0]
+        worker_policy = next(p for p in policies if "'unsafe-eval'" in p.replace(';', ' ').split())
         directives = {parts[0]: parts[1:] for directive in policy.split(';') if (parts := directive.split())}
         self.assertIn("'wasm-unsafe-eval'", directives['script-src'])
         for name, sources in directives.items():
             self.assertNotIn("'unsafe-eval'", sources)
             if name != 'script-src':
                 self.assertNotIn("'wasm-unsafe-eval'", sources)
-        # Execute from served scripts: Playwright's evaluate bypasses CSP and cannot prove this contract.
+        # The real nginx response/path contract is covered by proxy_image_route_test.py. Here the browser
+        # enforces those policies on served scripts; Playwright's evaluate bypasses CSP and cannot prove it.
+        worker_path = '/ohif/1927.bundle.497fe7ce9f85fada0cc8.js'
         probe = """async function probe() {
           const result = {};
           try {
@@ -51,25 +53,36 @@ class ViewerCautionDOM(unittest.TestCase):
           return result;
         }
         """
-        page_script = probe + """
-          window.probeDone = Promise.all([probe(), new Promise((resolve, reject) => {
-            const worker = new Worker('/csp-worker.js');
+        worker_script = probe + 'probe().then(result => postMessage(result));'
+        page_script = probe + 'const decoderPath = ' + json.dumps(worker_path) + ';' + """
+          function runWorker(url) { return new Promise((resolve, reject) => {
+            const worker = new Worker(url);
             worker.onmessage = e => {worker.terminate(); resolve(e.data)};
             worker.onerror = e => {worker.terminate(); reject(new Error(e.message))};
-          })]);
+          }); }
+          const blobURL = URL.createObjectURL(new Blob([""" + json.dumps(worker_script) + """], {type:'application/javascript'}));
+          window.probeDone = Promise.all([
+            probe(), runWorker(decoderPath), runWorker('/csp-worker.js'), runWorker(blobURL)
+          ]).finally(() => URL.revokeObjectURL(blobURL));
         """
         fixtures = {
             '/csp-check.html': ('text/html', '<script src="/csp-page.js"></script>'),
             '/csp-page.js': ('application/javascript', page_script),
-            '/csp-worker.js': ('application/javascript', probe + 'probe().then(result => postMessage(result));'),
+            '/csp-worker.js': ('application/javascript', worker_script),
+            # Like the pinned codec chunk, this import keeps the default response policy; execution
+            # belongs to the decoder worker's global, whose entry response grants new Function.
+            '/csp-codec.js': ('application/javascript', probe),
+            worker_path: ('application/javascript', "importScripts('/csp-codec.js');probe().then(result => postMessage(result));"),
         }
         for path, (mime, body) in fixtures.items():
-            self.page.route('**' + path, lambda route, request, mime=mime, body=body: route.fulfill(
-                content_type=mime, body=body, headers={'Content-Security-Policy': policy}))
+            response_policy = worker_policy if path == worker_path else policy
+            self.page.route('**' + path, lambda route, request, mime=mime, body=body, csp=response_policy: route.fulfill(
+                content_type=mime, body=body, headers={'Content-Security-Policy': csp}))
         response = self.page.goto(f'http://127.0.0.1:{self.server.server_port}/csp-check.html')
         self.assertEqual(response.headers['content-security-policy'], policy)
         result = self.page.evaluate('probeDone')
-        self.assertEqual(result, [{'wasm': 42, 'evalBlocked': 'EvalError', 'dynamicBlocked': 'EvalError'}] * 2)
+        blocked = {'wasm': 42, 'evalBlocked': 'EvalError', 'dynamicBlocked': 'EvalError'}
+        self.assertEqual(result, [blocked, {'wasm': 42, 'eval': 42, 'dynamic': 42}, blocked, blocked])
 
     def test_empty_decoder_result_is_a_failed_frame_before_cache_and_recovers(self):
         self.script('image-load-status')

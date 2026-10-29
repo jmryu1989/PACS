@@ -137,7 +137,7 @@ server {
 
     # 토큰이 브라우저 저장소에 남는 이행 기간에는 외부 스크립트와 외부 연결을 막아
     # XSS의 계정 탈취 반경을 줄인다. inline은 현 단일 HTML 프론트 때문에 아직 필요하다.
-    # 영상 worker의 WASM codec 컴파일만 허용한다. JavaScript eval/new Function은 계속 차단한다.
+    # 페이지를 포함한 기본 정책은 WASM 컴파일을 허용하고 JavaScript eval/new Function은 차단한다.
     add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; object-src 'self' blob:; frame-src 'self' blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'self'; base-uri 'self'" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "no-referrer" always;
@@ -271,6 +271,21 @@ server {
     location = /ohif/manifest.json {
         alias /usr/share/nginx/html/kin-brand/viewer-manifest.json;
         default_type application/manifest+json;
+    }
+
+    # D1891: orthancteam/orthanc:24.12.0의 dicomImageLoader는 이 same-origin URL로 Worker를 만든다(blob 아님).
+    # 고정 codec의 embind가 new Function을 쓰므로 이 worker의 응답에만 허용한다. codec 청크와 페이지는 기본 정책을 유지한다.
+    # OHIF pin을 바꿀 때 worker 생성 URL과 이 정확 경로를 함께 확인한다; 모든 JS에 적용하는 wildcard로 넓히지 않는다.
+    location = /ohif/1927.bundle.497fe7ce9f85fada0cc8.js {
+        proxy_pass http://orthanc:8042;
+        include /etc/nginx/snippets/orthanc-basic-auth.conf;
+        proxy_hide_header Content-Security-Policy;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; object-src 'self' blob:; frame-src 'self' blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'self'; base-uri 'self'" always;
+        # location의 add_header는 상위 헤더 전체의 상속을 끊는다. CSP 외의 보안 헤더도 보존한다.
+        include /etc/nginx/snippets/hsts.conf;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-KIN-Auth-Code $kin_auth_code always;
     }
 
     location /ohif/ {
