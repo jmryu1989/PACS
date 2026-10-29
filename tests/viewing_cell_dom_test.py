@@ -17,8 +17,6 @@ from multi_institution_worklist_dom_test import (
 class PresenceServer(Server):
     def __init__(self):
         super().__init__(rows=[row('2.25.101', 'SYN-CURRENT'), row('2.25.102', 'SYN-PRIOR', rs='A')])
-        # A writing lock alone must never be displayed as viewing.
-        self.rows[0]['state']['holder'] = 'writer-without-viewer'
         self.people = {'2.25.101': ['SYN Colleague'], '2.25.102': ['SYN Colleague', '<img src=x onerror=window.synXss=1>']}
         self.presence_reads = []
         self.fail = False
@@ -101,13 +99,83 @@ class ViewingCellDOM(MultiInstitutionWorklist):
         self.assertEqual([], hidden_server.presence_reads)
         hidden.finish()
 
+    def test_viewing_saved_width_survives_presence_update_and_clear(self):
+        server = PresenceServer()
+        screen = self.boot(server)
+        cell = self.cell(screen, 'SYN-CURRENT')
+        expect(cell).to_have_text('Viewing: SYN Colleague')
+        dialog = screen.open_columns()
+        dialog.get_by_role('spinbutton', name='Viewing content width (px)', exact=True).fill('90')
+        dialog.get_by_role('button', name='Apply & Save in Browser', exact=True).click()
+        saved = json.loads(screen.page.evaluate('key => localStorage.getItem(key)', layout_key(SESSION_A)))
+        self.assertEqual(90, saved['modes']['Radiology']['appearance']['widths']['viewing'])
+        before = cell.bounding_box()['width']
+        self.assertLess(before, 130)
+        names = ['SYN Colleague with a long display name', 'SYN Another Colleague']
+        server.people = {'2.25.101': names}
+        expect(cell).to_have_text('Viewing: ' + ', '.join(names), timeout=12000)
+        self.assertAlmostEqual(before, cell.bounding_box()['width'], delta=1)
+        self.assertTrue(cell.evaluate('e => e.scrollWidth <= e.clientWidth + 1'))
+        server.people = {}
+        expect(cell).to_have_text('', timeout=12000)
+        self.assertAlmostEqual(before, cell.bounding_box()['width'], delta=1)
+        screen.page.reload()
+        expect(self.cell(screen, 'SYN-CURRENT')).to_have_text('')
+        self.assertAlmostEqual(before, self.cell(screen, 'SYN-CURRENT').bounding_box()['width'], delta=1)
+        screen.finish()
+
+    def test_viewing_writer_without_viewer_and_own_lock_survive_presence_updates(self):
+        server = PresenceServer()
+        writer = '<img src=x onerror=window.synXss=1>'
+        server.rows[0]['state']['holder'] = writer
+        server.rows[1]['state']['holder'] = SESSION_A['actor']
+        server.people = {}
+        screen = self.boot(server)
+        other, own = self.cell(screen, 'SYN-CURRENT'), self.cell(screen, 'SYN-PRIOR')
+        expect(other).to_have_text('✎ ' + writer)
+        expect(own).to_have_text('✎ 나')
+        server.people = {'2.25.101': ['SYN Colleague'], '2.25.102': ['SYN Colleague']}
+        expect(other).to_have_text('✎ ' + writer + ' · Viewing: SYN Colleague', timeout=12000)
+        expect(own).to_have_text('✎ 나 · Viewing: SYN Colleague')
+        expect(other.locator('img')).to_have_count(0)
+        server.fail = True
+        expect(other).to_have_text('✎ ' + writer, timeout=12000)
+        expect(own).to_have_text('✎ 나')
+        server.fail = False
+        server.people = {}
+        server.rows[0]['state']['holder'] = None
+        server.rows[1]['state']['holder'] = None
+        screen.refresh()
+        expect(other).to_have_text('', timeout=12000)
+        expect(own).to_have_text('', timeout=12000)
+        screen.finish()
+
+    def test_viewing_slow_response_outlasts_poll_without_blanking_or_overlap(self):
+        server = PresenceServer()
+        screen = self.boot(server)
+        screen.set_manual_refresh()
+        cell = self.cell(screen, 'SYN-CURRENT')
+        expect(cell).to_have_text('Viewing: SYN Colleague')
+        server.people = {'2.25.101': ['SYN Slow Reader']}
+        server.hold = True
+        until(lambda: len(server.pending) > 0, 10, 'slow poll')
+        reads = len(server.presence_reads)
+        screen.page.wait_for_timeout(6000)
+        expect(cell).to_have_text('Viewing: SYN Colleague')
+        self.assertEqual(reads, len(server.presence_reads), 'no overlapping presence request')
+        answer, payload = server.pending.pop(0)
+        server.hold = False
+        answer(200, payload)
+        expect(cell).to_have_text('Viewing: SYN Slow Reader')
+        screen.finish()
+
     def test_viewing_stalled_read_expires_and_session_end_discards_response(self):
         server = PresenceServer()
         screen = self.boot(server)
         expect(self.cell(screen, 'SYN-CURRENT')).to_have_text('Viewing: SYN Colleague')
         server.hold = True
         until(lambda: len(server.pending) > 0, 10, 'stalled poll')
-        expect(self.cell(screen, 'SYN-CURRENT')).to_have_text('', timeout=10000)
+        expect(self.cell(screen, 'SYN-CURRENT')).to_have_text('', timeout=15000)
         server.hold_landing = True
         peer = screen.page.context.new_page()
         peer.goto(ORIGIN + '/kin-emblem-j1.svg')

@@ -894,8 +894,14 @@
       desc: s => esc(shownStudyDesc(s)),
       preDoc: s => esc(displayActor(s.preDoc)),
       preReviewer: s => esc(displayActor(s.preReviewer)),
-      // Presence is independent of the report's writing lock. The API excludes self by subject.
-      viewing: s => esc(viewingNames.get(s.uid) || ''),
+      // A writer can hold the report with no viewer open. Presence excludes self; the lock does not.
+      viewing: s => {
+        const hold = !s.holder ? '' : s.holder === user
+          ? `<span class="hold me" title="내가 작성 중">✎ 나</span>`
+          : `<span class="hold other" title="${esc(displayActor(s.holder))} 님이 작성 중">✎ ${esc(displayActor(s.holder))}</span>`;
+        const presence = esc(viewingNames.get(s.uid) || '');
+        return hold + (hold && presence ? ' · ' : '') + presence;
+      },
       // S7-U3b Hospital: 서버가 준 소유 기관 이름만 쓴다. Tele는 행의 tele만 따른다 — 이름을 내 기관 이름과 비교하면
       // 등록 이름이 같은 두 기관에서 틀리고, reqHosp는 Technician에서 손으로 바꿀 수 있는 값이다.
       institutionName: s => {
@@ -8292,8 +8298,12 @@
     function paintViewing() {
       const index = shownColumns().findIndex(c => c.k === 'viewing');
       if (index < 0) return;
-      for (const row of $('#rows').querySelectorAll('tr[data-uid]'))
-        if (row.cells[index]) row.cells[index].textContent = viewingNames.get(row.dataset.uid) || '';
+      const byUid = new Map(studies.map(study => [study.uid, study]));
+      for (const row of $('#rows').querySelectorAll('tr[data-uid]')) {
+        const cell = row.cells[index], study = byUid.get(row.dataset.uid);
+        // Keep the saved width container and render the writing lock alongside presence.
+        if (cell && study) (cell.querySelector(':scope > .wc-cell') || cell).innerHTML = CELL.viewing(study);
+      }
     }
     function clearViewing() {
       ++viewingSequence;
@@ -8318,10 +8328,10 @@
       const sequence = ++viewingSequence, scope = viewingScope, uids = JSON.parse(scope);
       if (!uids.length) return;
       const controller = new AbortController(); viewingRequest = controller;
-      // A stalled read must not leave names on screen indefinitely.
+      // Allow a read to outlast one poll, but bound stale names to a stalled read's timeout.
       const timeout = setTimeout(() => {
         if (sequence === viewingSequence) clearViewing();
-      }, 5000);
+      }, 10000);
       const live = () => sequence === viewingSequence && scope === viewingScope && work.admits(at);
       try {
         const requests = [];

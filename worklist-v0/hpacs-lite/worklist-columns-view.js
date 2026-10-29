@@ -77,8 +77,14 @@
       desc: s => esc(shownStudyDesc(s)),
       preDoc: s => esc(displayActor(s.preDoc)),
       preReviewer: s => esc(displayActor(s.preReviewer)),
-      // Presence is independent of the report's writing lock. The API excludes self by subject.
-      viewing: s => esc(viewingNames.get(s.uid) || ''),
+      // A writer can hold the report with no viewer open. Presence excludes self; the lock does not.
+      viewing: s => {
+        const hold = !s.holder ? '' : s.holder === user
+          ? `<span class="hold me" title="내가 작성 중">✎ 나</span>`
+          : `<span class="hold other" title="${esc(displayActor(s.holder))} 님이 작성 중">✎ ${esc(displayActor(s.holder))}</span>`;
+        const presence = esc(viewingNames.get(s.uid) || '');
+        return hold + (hold && presence ? ' · ' : '') + presence;
+      },
       // S7-U3b Hospital: 서버가 준 소유 기관 이름만 쓴다. Tele는 행의 tele만 따른다 — 이름을 내 기관 이름과 비교하면
       // 등록 이름이 같은 두 기관에서 틀리고, reqHosp는 Technician에서 손으로 바꿀 수 있는 값이다.
       institutionName: s => {
