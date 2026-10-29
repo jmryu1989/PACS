@@ -30,6 +30,17 @@ function numId(raw: string): number {
 }
 
 /**
+ * D1880 memory-only preload: the share of the reading PC's reported memory the worklist's preload may hold, set by the
+ * site (`KIN_PRELOAD_MEMORY_SHARE`, 0 < share <= 1). No built-in value: none has a measured source yet, so the first site
+ * sets it from its own reading PCs, and without it preload stays off (worklist-v0/hpacs-lite/preload-store.js).
+ */
+function preloadMemoryShare(): number | null {
+  const raw = String(process.env.KIN_PRELOAD_MEMORY_SHARE ?? '').trim();
+  const share = raw ? Number(raw) : NaN;
+  return Number.isFinite(share) && share > 0 && share <= 1 ? share : null;
+}
+
+/**
  * 모든 엔드포인트가 Keycloak 토큰을 요구한다(@Public 제외).
  * 호출자가 누구인지·어느 기관인지는 헤더가 아니라 **서명된 토큰**에서 나온다.
  * 역할별 권한과 기관 경계는 서비스 계층에서 검사한다 — 화면이 아니라 서버가 방어선이다.
@@ -100,7 +111,7 @@ export class PacsController {
   @Header('Cache-Control', 'no-store')
   me(@Req() req: any) {
     return { ...caller(req), user: req.actor, displayName: req.displayName ?? req.actor, sessionId: req.sessionId ?? null,
-      issuer: process.env.KC_ISSUER || null };
+      issuer: process.env.KC_ISSUER || null, preloadMemoryShare: preloadMemoryShare() };
   }
 
   /** nginx auth_request 전용. 204=통과, 403=기관 경계 밖. PHI 본문은 싣지 않는다. */
