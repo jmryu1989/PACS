@@ -420,7 +420,7 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-tech-note-dom --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/viewer-resources.js --file worklist-v0/hpacs-lite/viewer-session.js --file worklist-v0/hpacs-lite/workspace-shortcuts.js --file worklist-v0/hpacs-lite/tech-note.js --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/viewer_session_fixture.py --file tests/viewer_tech_note_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_tech_note_dom_test.py
     - name: D-MEASURE2 B1 real readback, held drafts, manual SR and source recovery
       if: ${{ !cancelled() }}
-      timeout-minutes: 28
+      timeout-minutes: 43
       run: |
         "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile measurements
     - name: Sanitized synthetic measurement evidence

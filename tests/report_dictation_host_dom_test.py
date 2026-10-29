@@ -279,6 +279,7 @@ function updateTemplatePreview() {}
 function toast(message, kind) { toasts.push({ message, kind }); }
 function apiFail(e) { toast("서버 저장 실패: " + e.message, "err"); }
 // What the real study move reaches for besides the report; inert here.
+let multiStudyView = null;
 let templateEditor = null, reasonResolve = null, relatedUid = null, relatedReportSeq = 0;
 let relatedModality = "", relatedBodyPart = "", relatedIncludeCurrent = false, mode = "Reading";
 function closeTemplateEditor() {}
