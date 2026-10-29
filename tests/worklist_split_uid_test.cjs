@@ -709,3 +709,26 @@ test('viewer UID lookup retains the response-time institution recheck', async ()
   w.hooks.find = (_arg, n, store) => { if (n === 2) store.states.get(NORMAL).institutionId = 'other'; };
   await rejects(w.pacs.listStudies(caller(), { uids: NORMAL }), 409, 'STUDY_LIST_CHANGED');
 });
+
+// D1887: REQ-PATIENTLESS-HELD -> RISK-UNIDENTIFIED-READING -> TEST-PATIENTLESS-SELECTION.
+// An overlay is not correction of the source patient identity. All list consumers use the same source selection.
+test('patientless studies stay in the existing held queue until the original patient is identified', async () => {
+  const missing = '2.25.1887', blank = '2.25.1888';
+  const w = await world({ resources: [resource(missing, ''), resource(blank, '   '), resource(NORMAL, 'VISIBLE')],
+    states: [stateRow(missing, { institutionId: 'hallym', ov: JSON.stringify({ id: 'OVERLAY' }) })] }).start();
+  for (const query of [undefined, { limit: '100' }, { uids: [missing, blank, NORMAL].join(',') }]) {
+    assert.deepEqual((await w.pacs.listStudies(caller(), query)).studies.map(r => r.uid), [NORMAL]);
+    assert.deepEqual(readBody(await w.pacs.clinicianStudies(caller({ roles: ['clinician'] }), query)).studies.map(r => r.uid), [NORMAL]);
+  }
+  assert.equal((await w.pacs.bootstrap(caller())).states[missing], undefined);
+  const admin = caller({ roles: ['admin'] });
+  const held = (await w.pacs.heldSources(admin)).groups;
+  assert.equal(held.reduce((n, g) => n + g.count, 0), 2);
+  assert.ok(held.every(g => g.reason === 'patient_not_identified' && !g.sourceUnregistered));
+  assert.deepEqual((await w.pacs.heldSources(caller({ roles: ['admin'], institution: 'other' }))).groups, []);
+  w.resources.find(r => r.uid === missing).patientId = 'CORRECTED';
+  const row = (await w.pacs.listStudies(caller(), { uids: missing })).studies[0];
+  assert.equal(row.id, 'CORRECTED');
+  assert.equal(row.sourcePatientKey, 'hallym|CORRECTED');
+  assert.equal((await w.pacs.heldSources(admin)).groups.reduce((n, g) => n + g.count, 0), 1);
+});

@@ -209,11 +209,11 @@
         <div class="spacer"></div>
         <button type="button" id="held-refresh" disabled>Refresh Held Studies</button>
       </div>
-      <p class="gateway-hint">보낸 병원을 확인하지 못해 보류된 검사입니다. 기관명(InstitutionName)이 등록된 표기와 맞지 않고 보낸 장비도 등록되지 않았습니다. 보류 검사는 누구도 열 수 없고 어느 워크리스트에도 나오지 않습니다. 여기에는 환자·검사 정보 없이 장비·기관명 원문·도착 시각·건수만 보입니다. 병원에 연락해 장비 또는 기관명 표기가 이 기관의 것임을 확인한 뒤 등록하면, 해당 보류 검사와 앞으로 받을 검사가 이 기관에 연결됩니다. 연결은 되돌리는 경로가 없으니 확인한 뒤에만 등록하세요.</p>
+      <p class="gateway-hint">보낸 병원 또는 원본 영상의 환자 식별을 확인하지 못한 검사입니다. 보류 검사는 판독 목록에서 제외됩니다. 여기에는 환자·검사 정보 없이 보류 사유·장비·기관명 원문·도착 시각·건수만 보입니다. Unknown Source는 병원에 확인한 장비 또는 기관명 표기를 등록하여 연결합니다. 기관 연결은 되돌리는 경로가 없으니 확인한 뒤에만 등록하세요. Patient Not Identified는 송신 병원에서 환자를 확인하여 원본 PatientID를 등록·보정해야 하며, 기관 연결만으로는 해제되지 않습니다.</p>
       <p class="message" id="held-message" role="alert"></p>
       <div class="audit-table" id="held-wrap" hidden>
         <table>
-          <thead><tr><th scope="col">Device (AE Title)</th><th scope="col">Institution Name (Raw)</th><th scope="col">First Arrival (UTC)</th><th scope="col">Last Arrival (UTC)</th><th scope="col">Count</th><th scope="col">Register</th></tr></thead>
+          <thead><tr><th scope="col">Device (AE Title)</th><th scope="col">Institution Name (Raw)</th><th scope="col">Reason</th><th scope="col">First Arrival (UTC)</th><th scope="col">Last Arrival (UTC)</th><th scope="col">Count</th><th scope="col">Correction</th></tr></thead>
           <tbody id="held-rows"></tbody>
         </table>
       </div>
