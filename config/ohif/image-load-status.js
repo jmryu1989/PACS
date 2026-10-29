@@ -28,7 +28,7 @@ function kinCreateImageLoadStatus() {
     if (error?.name === 'TimeoutError' || /timeout|timed out/i.test(message))
       return '영상 서버 응답 시간이 초과되었습니다. 연결 상태를 확인한 뒤 검사를 다시 여세요.';
     if (error?.name === 'AbortError') return '영상 요청이 취소되었습니다. 이 프레임이 필요하면 검사를 다시 여세요.';
-    if (status === 0 || error?.name === 'TypeError' || /no image frame|multipart|truncat|short read|terminated/i.test(message))
+    if (status === 0 || /Failed to fetch|NetworkError|Load failed|no image frame|multipart|truncat|short read|terminated/i.test(message))
       return '영상 전송이 끊겼거나 프레임이 완전하지 않습니다. 연결 상태를 확인한 뒤 검사를 다시 여세요.';
     return '영상 데이터를 불러오지 못했습니다' + http +
       '. 뷰어를 다시 열어 보고, 계속되면 관리자에게 문의하세요.';

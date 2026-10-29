@@ -139,6 +139,11 @@ export class DicomFrameService {
   async serveFrames(request: FrameRequest, target: RelayTarget, signal?: AbortSignal, lease?: TakeLease): Promise<void> {
     const path = `/dicom-web/studies/${request.studyUid}/series/${request.seriesUid}/instances/${request.sopUid}/frames/${request.frames.join(',')}`;
     const accept = request.accept || 'multipart/related; type="application/octet-stream"; transfer-syntax=*';
+    // Orthanc 1.18 cannot parse the viewer/preload's multi-codec Accept list. Its octet-stream wildcard
+    // is the pre-existing native-syntax fallback; keep the full list only for our direct-read negotiation.
+    // Preserve single-entry and explicit-syntax requests instead of silently changing their negotiation.
+    const relayAccept = accept.includes(',') ? accept.split(',').map(entry => entry.trim()).find(entry =>
+      /^multipart\/related\s*;\s*type=(?:application\/octet-stream|"application\/octet-stream")\s*;\s*transfer-syntax=\*$/i.test(entry)) || accept : accept;
     let object = (await this.directReads()) ? this.within(await this.stored(request.sopUid, signal), request) : null;
     const held = (await lease?.()) ?? null;
     if (object && held && object.patientId !== held.binding.patient.patientId) {
@@ -159,13 +164,13 @@ export class DicomFrameService {
     // file that has since changed size (replaced, truncated) is no longer the object the index describes.
     if (!layout || !directReadServes(accept, object!.facts.transferSyntax!, mediaType) ||
         request.frames.some(frame => frameRanges(layout, frame) === null) || !(await this.sameFile(object!, filePath))) {
-      await this.orthanc.relay(path, accept, target, signal, request.origin, confirm);
+      await this.orthanc.relay(path, relayAccept, target, signal, request.origin, confirm);
       return;
     }
     // The file is opened before any header goes out: a file that cannot be opened is Orthanc's to answer.
     let handle: FileHandle | undefined;
     try { handle = await fs.open(filePath, 'r'); }
-    catch { this.forget(object!.id); await this.orthanc.relay(path, accept, target, signal, request.origin, confirm); return; }
+    catch { this.forget(object!.id); await this.orthanc.relay(path, relayAccept, target, signal, request.origin, confirm); return; }
     const locationBase = `${request.origin}/dicom-web/studies/${request.studyUid}/series/${request.seriesUid}/instances/${request.sopUid}`;
     const frameSize = (frame: number) => frameRanges(layout, frame)!.reduce((size, range) => size + range.end - range.start + 1, 0);
     const multipart = multipartFrames(randomUUID() + '-' + randomUUID().slice(0, 23), locationBase, object!.facts.transferSyntax!, frameSize, mediaType);

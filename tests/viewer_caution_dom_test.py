@@ -110,6 +110,10 @@ class ViewerCautionDOM(unittest.TestCase):
                                 ("{status:503,response:{code:'IMAGE_DELIVERY_RECORD_UNAVAILABLE',message:'영상 열람 기록을 저장하지 못해 영상을 보낼 수 없습니다.'}}", '열람 기록'),
                                 ('{status:409}', '변경되었습니다'), ('{status:416}', '프레임 번호'), ('{status:503}', '영상 서버'),
                                 ('{status:0}', '전송이 끊겼'), ("new Error('CACHE_SIZE_EXCEEDED')", '메모리'),
+                                ("new TypeError('Failed to fetch')", '전송이 끊겼'),
+                                ("new TypeError('NetworkError when attempting to fetch resource.')", '전송이 끊겼'),
+                                ("new TypeError('Load failed')", '전송이 끊겼'),
+                                ("new TypeError('Cannot read properties of undefined')", '계속되면 관리자에게 문의하세요'),
                                 ("new Error('JPEG 2000 decoder failed')", '압축 영상'), ("'JPEG-LS decoder failed'", '압축 영상'),
                                 ("new DOMException('cancelled','AbortError')", '요청이 취소'), ("new DOMException('timeout','TimeoutError')", '시간이 초과')]:
             self.page.evaluate(f"()=>{{window.latest={error};fail(latest);reject(latest);renderError(latest)}}")

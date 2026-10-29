@@ -2,7 +2,7 @@
 // REQ-MG-LOADING-FRAME -> RISK-MG-FRAME-WRONG-BYTES/SLOW-OPEN -> TEST-MG-COMPRESSED.
 // Behavioral byte/transport tests. The opaque payloads here test extraction, not codec correctness;
 // scripts/mg_compressed_fixture.py builds real encoded EA1141 derivatives for the served decoder run.
-const { facts, syntheticObject, stubOrthanc, target, request } = require('./dicom_frame_fixture.cjs');
+const { facts, syntheticObject, stubOrthanc, target, request, withService } = require('./dicom_frame_fixture.cjs');
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path'), zlib = require('node:zlib');
 const { encapsulatedLayout, ENCAPSULATED_MEDIA } = require('/app/dist/dicom-frame-encapsulated.js');
@@ -22,6 +22,51 @@ function encoded(frames, table = true) {
 const payloads = [[Buffer.from([1, 2, 3, 4])], [Buffer.from([11, 12]), Buffer.from([13, 14, 15, 16])], [Buffer.from([21, 22])]];
 const accept = [...new Set(['application/octet-stream', ...ENCAPSULATED_MEDIA.values()])]
   .map(type => `multipart/related; type=${type}; transfer-syntax=*`).join(', ');
+// These are the viewer/preload wire contracts, independent of the direct reader's supported codec map.
+const clientHeaders = [false, true].map(quoted => {
+  const entries = ['application/octet-stream', 'image/jpeg', 'image/jls', 'image/jp2', 'image/dicom-rle']
+    .map(type => `multipart/related; type=${quoted ? '"' + type + '"' : type}; transfer-syntax=*`);
+  return { expanded: entries.join(quoted ? ', ' : ','), beforePR: entries[0] };
+});
+
+for (const { expanded, beforePR } of clientHeaders) {
+  test(`fallback sends the pre-PR Accept to Orthanc: ${beforePR}`, async () => {
+    for (const transferSyntax of ['1.2.840.10008.1.2.4.50', '1.2.840.10008.1.2.4.51',
+      '1.2.840.10008.1.2.4.81', '1.2.840.10008.1.2.2', '1.2.840.10008.1.2.1.99']) {
+      await withService(async (service, object, archive) => {
+        for (const stored of [false, true]) {
+          const sink = target(); await service.serveFrames(request({ accept: expanded, stored }), sink);
+          assert.equal((await sink.result()).headers['content-type'], 'relayed');
+          assert.equal(archive.calls.filter(c => c[0] === 'relay').at(-1)[2], beforePR, transferSyntax);
+        }
+      }, { transferSyntax });
+    }
+  });
+
+  test(`storage and layout fallback retain pre-PR Accept: ${beforePR}`, async () => {
+    for (const reason of ['absent storage', 'ambiguous layout', 'changed file', 'open failure']) {
+      await setup('1.2.840.10008.1.2.4.90', payloads, async (service, object, archive) => {
+        const originalOpen = fs.promises.open, previous = process.env.KIN_ORTHANC_STORAGE;
+        try {
+          if (reason === 'absent storage') {
+            delete process.env.KIN_ORTHANC_STORAGE;
+            service = new DicomFrameService(archive);
+          } else if (reason !== 'ambiguous layout') {
+            const warm = target(); await service.serveFrames(request({ accept: expanded }), warm); await warm.result();
+            if (reason === 'changed file') fs.truncateSync(object.filePath, object.file.length - 2);
+            else fs.promises.open = async (...args) => {
+              if (args[0] === object.filePath) throw Object.assign(new Error('unreadable'), { code: 'EACCES' });
+              return originalOpen(...args);
+            };
+          }
+          const sink = target(); await service.serveFrames(request({ accept: expanded }), sink);
+          assert.equal((await sink.result()).headers['content-type'], 'relayed', reason);
+          assert.equal(archive.calls.filter(c => c[0] === 'relay').at(-1)[2], beforePR, reason);
+        } finally { fs.promises.open = originalOpen; process.env.KIN_ORTHANC_STORAGE = previous; }
+      }, reason !== 'ambiguous layout');
+    }
+  });
+}
 async function setup(syntax, frames, fn, table = true) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-compressed-'));
   const previous = process.env.KIN_ORTHANC_STORAGE; process.env.KIN_ORTHANC_STORAGE = dir;
@@ -125,8 +170,10 @@ test('compressed selection retains hierarchy, delivery lease, revision and negot
     assert.equal(leases, 0);
     const sink = target(); await service.serveFrames(request({ accept, revision: true }), sink, undefined, lease);
     assert.equal(leases, 1); assert.equal((await sink.result()).headers['x-kin-study-revision'], 'rev-1');
-    const relay = target(); await service.serveFrames(request({ accept: 'multipart/related; type=application/octet-stream; transfer-syntax=1.2.840.10008.1.2.1' }), relay);
+    const explicit = 'multipart/related; type=application/octet-stream; transfer-syntax=1.2.840.10008.1.2.1';
+    const relay = target(); await service.serveFrames(request({ accept: explicit }), relay);
     assert.equal((await relay.result()).headers['content-type'], 'relayed');
+    assert.equal(archive.calls.filter(c => c[0] === 'relay').at(-1)[2], explicit, 'explicit syntax negotiation is preserved');
     assert.equal(directReadServes('multipart/related; type=image/jp2; q=0, */*', '1.2.840.10008.1.2.4.90', 'image/jp2'), false);
     const preview = target(); await service.servePreview(object.id, preview);
     assert.equal((await preview.result()).headers['content-type'], 'relayed', 'compressed bytes are never interpreted as grey pixels');
