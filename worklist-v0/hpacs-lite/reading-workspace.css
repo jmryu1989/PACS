@@ -66,7 +66,7 @@ body.reading-panel-resizing #reading-frame { pointer-events: none; }
 #reading-panel-help { margin: 8px 0 0; max-width: 100ch; line-height: 1.6; }
 body.reading .report-p { min-width: 0; min-height: 370px; flex: 1; }
 body.reading .rbtns, body.reading .rfoot2 { flex-wrap: wrap; }
-body.reading .redit { min-height: 180px; }
+body.reading .report-compose { min-height: 180px; }
 body.reading .redit textarea { min-height: 65px; }
 body.reading .menubar { overflow-x: auto; }
 body.reading .userfilter { max-height: 92px; overflow-y: auto; }
@@ -98,7 +98,8 @@ body.reading .userfilter { max-height: 92px; overflow-y: auto; }
 #reading-findings .reading-findings-meta { color: #9fb9dc; }
 #reading-findings ul { margin: 4px 0; padding-left: 16px; }
 #reading-findings li { margin: 3px 0; }
-/* Dictation review in this layout. `body.reading .redit` keeps its 180px minimum, so the review pane at its
+/* Dictation review in this layout. `body.reading .report-compose` (the editor with its head row and Clinical Context;
+   until Minhoon item 8 the editor scroller .redit alone) keeps its 180px minimum, so the review pane at its
    plain cap pushed .rfoot2 57px below a 1680x1100 column (U4L attempt 1). While the transcript is shown the
    pane gives way instead: it prefers the plain cap (the same expression as main.html's #dictation-pane
    max-height), shrinks when the column is short, and never goes below its own rows. That floor is the pane's
@@ -117,7 +118,7 @@ body.reading #dictation-pane:has(> #dictation-text:not([hidden])) > .dictation-f
 /* With the read-only Recommendation notice also shown, the 370px column minimum held the footer 16.5px below the
    column (W4 integration): the notice's 22px were paid almost only by the pane. The field region gives up 20px
    instead; Findings/Conclusion stay at or above their own minimums. Without the notice nothing changes. */
-body.reading .report-p:has(#recnote:not([hidden])):has(#dictation-text:not([hidden])) .redit { min-height: 160px; }
+body.reading .report-p:has(#recnote:not([hidden])):has(#dictation-text:not([hidden])) .report-compose { min-height: 160px; }
 @media (max-width: 1250px) {
   body.reading .rbtns button, body.reading .rfoot2 button { padding: 5px 7px; }
 }

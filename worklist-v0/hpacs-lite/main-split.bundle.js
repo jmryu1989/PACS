@@ -4258,10 +4258,11 @@
     }
 
     /**
-     * W5 Back to Current Draft (Back, Esc, Report Editor/Ctrl+Alt+4): leaves the mode and gives the editor back with its caret,
-     * selection and scroll (or the insertion end). Never refused. The Viewed Study stays the Source, so its report stays in the
-     * Related Report pane beside the editor (reading while writing, D1244); Return to Current (#related-return) is the separate
-     * action that gives the viewing back to the Target, and in the mode it also leaves the mode.
+     * W5 Back to Current Draft (Back, Esc, Report Editor/Ctrl+Alt+4, the editor's Resume Editing): leaves the mode and gives the
+     * editor back with its caret, selection and scroll (or the insertion end). Never refused. The Viewed Study stays the Source,
+     * so its report stays in the Related panel's Related Report view beside the editor (reading while writing, D1244; Minhoon
+     * item 8); Return to Current (#related-return) is the separate action that gives the viewing back to the Target, and in
+     * the mode it also leaves the mode.
      */
     function backToCurrentDraft() {
       const left = relatedMode.exit();
@@ -4581,6 +4582,20 @@
     }
 
     /**
+     * Minhoon item 8 (2026-10-27): the editor is marked Editable only where typing would be accepted now. The answer is the
+     * frame's own edit gate (canEdit above: the page's work state, a Reading Target, reportEditorBlock), so the mark and a
+     * refused keystroke never disagree; Read Only carries the gate's reason. In Related Report mode the editor stays on
+     * screen with the draft, and Resume Editing beside the mark is the mode's Back.
+     */
+    function renderEditorState() {
+      const why = work.state() !== "active" ? "판독 화면이 지금 편집을 받지 않습니다." : !selectedUid ? "검사를 선택하세요" : reportEditorBlock();
+      $("#report-editor").dataset.editable = String(!why);
+      $("#report-editor-state").textContent = why ? "Read Only" : "Editable";
+      $("#report-editor-why").textContent = $("#report-editor-why").title = why || "";
+      $("#report-editor-resume").hidden = !relatedMode.active();
+    }
+
+    /**
      * 초안 표시줄.
      *
      * 초안을 사람에게 붙이고 나면 화면이 확정본이 아닌 것을 보여줄 수 있게 된다.
@@ -4596,6 +4611,7 @@
       if (reportNotice || reportNoticeShown) renderReportNotice();
       // W5: the Reading Target card of Related Report mode shows this same draft state.
       relatedMode.refresh();
+      renderEditorState();
       const bar = $("#draftbar");
       const r = appState[selectedUid] ?? {};
       const d = r.prelimHidden ? null : r.draft;
@@ -9813,8 +9829,12 @@
       // The worklist floor must not push the prior report's first line out of a
       // stacked work area (D383). The report window band yields first, only as much
       // as needed and never below its 140 px drag minimum; a stored size wins.
+      // The pane's text is its plain view's body or, while Related Report mode stands in that view's place (Minhoon item 8),
+      // the mode's text region: the one on screen is measured (a hidden one measures at the top of the window).
+      const priorText = () => related.querySelector("#related-mode:not([hidden]) .related-mode-scroll")
+        || related.querySelector(".prior-report-body");
       if (portrait && !narrow && sizes.top == null && !document.body.classList.contains("reading")) {
-        const area = $(".right"), body = related.querySelector(".prior-report-body"), style = getComputedStyle(body);
+        const area = $(".right"), body = priorText(), style = getComputedStyle(body);
         const line = body.getBoundingClientRect().top + area.scrollTop + parseFloat(style.paddingTop) + 2 * parseFloat(style.fontSize);
         const over = line - area.getBoundingClientRect().bottom;
         if (over > 0) top.style.height = Math.max(140, Math.floor(top.getBoundingClientRect().height - over)) + "px";
@@ -9823,7 +9843,7 @@
       // much as needed and never below the list's header and one whole row; the
       // next row is then a wheel turn away inside the band.
       if (narrow && listNeed) {
-        const area = $(".right"), body = related.querySelector(".prior-report-body"), style = getComputedStyle(body);
+        const area = $(".right"), body = priorText(), style = getComputedStyle(body);
         const line = body.getBoundingClientRect().top + area.scrollTop + parseFloat(style.paddingTop) + 2 * parseFloat(style.fontSize);
         const over = line - area.getBoundingClientRect().bottom;
         if (over > 0) {
@@ -12228,6 +12248,8 @@
     $('#related-load-parts').addEventListener('click',()=>{if(cur()&&serverMode&&!offline&&!demoMode)relatedParts.load(relatedCandidates().map(x=>x.uid));});
     $('#related-cancel-parts').addEventListener('click',()=>relatedParts.cancel());
     $("#related-return").addEventListener("click", returnToReportStudy);
+    // Minhoon item 8: the editor stays on screen in Related Report mode; its Resume Editing is the mode's Back.
+    $("#report-editor-resume").addEventListener("click", () => { backToCurrentDraft(); });
     $("#related-modality").addEventListener("change", e => {
       if (!cur()) return;
       // 목록을 좁히는 동작이 현재 영상/판독문을 다시 읽거나 점유를 옮겨서는 안 된다.

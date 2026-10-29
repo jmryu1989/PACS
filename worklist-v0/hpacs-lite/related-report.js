@@ -114,10 +114,11 @@
     }
 
     /**
-     * W5 Back to Current Draft (Back, Esc, Report Editor/Ctrl+Alt+4): leaves the mode and gives the editor back with its caret,
-     * selection and scroll (or the insertion end). Never refused. The Viewed Study stays the Source, so its report stays in the
-     * Related Report pane beside the editor (reading while writing, D1244); Return to Current (#related-return) is the separate
-     * action that gives the viewing back to the Target, and in the mode it also leaves the mode.
+     * W5 Back to Current Draft (Back, Esc, Report Editor/Ctrl+Alt+4, the editor's Resume Editing): leaves the mode and gives the
+     * editor back with its caret, selection and scroll (or the insertion end). Never refused. The Viewed Study stays the Source,
+     * so its report stays in the Related panel's Related Report view beside the editor (reading while writing, D1244; Minhoon
+     * item 8); Return to Current (#related-return) is the separate action that gives the viewing back to the Target, and in
+     * the mode it also leaves the mode.
      */
     function backToCurrentDraft() {
       const left = relatedMode.exit();

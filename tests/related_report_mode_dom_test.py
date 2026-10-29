@@ -495,7 +495,9 @@ class RelatedModePage(unittest.TestCase):
     def stored(self, uid=UID_A):
         return self.site.stored_of(uid)
 
-    def editor_hidden(self):
+    def editor_held(self):
+        """[hidden, inert] of the editor host. Minhoon item 8: the mode never hides it (the draft stays on screen); it holds
+        it inert, and only the mode's own restriction is ever lifted or put back."""
         return self.js("() => { const e = document.querySelector('.redit'); return [e.hidden, e.inert]; }")
 
     def back(self):
@@ -512,7 +514,7 @@ class RelatedModePage(unittest.TestCase):
                   and self.js("!draftClient.busy(selectedUid)"), "the autosave")
 
     # ── PAGE-01/02/03: entry, the two cards, the Source ──
-    def test_w5_entry_from_a_clean_target_shows_two_cards_hides_the_editor_and_focuses_the_title(self):
+    def test_w5_entry_from_a_clean_target_shows_two_cards_in_the_related_panel_holds_the_editor_and_focuses_the_title(self):
         self.open()
         # Phase B startup order: the mode is mounted before its first eager consumer. Both CVR areas call `blocked()` while
         # they mount; had the mode not existed yet, their mount would have failed into the page's fallback toast.
@@ -522,7 +524,15 @@ class RelatedModePage(unittest.TestCase):
         writes = len(self.site.flow_puts)
         self.enter()
         expect(self.page.locator("#related-mode-title")).to_be_focused()
-        self.assertEqual([True, True], self.editor_hidden(), "the editor host is hidden and inert")
+        self.assertEqual([False, True], self.editor_held(), "the editor host stays on screen and is inert")
+        # Minhoon item 8: the related report opens inside the Related panel, in the place of its plain view (one display),
+        # and the editor keeps the Target's draft in view beside it, marked Read Only with the way back.
+        expect(self.page.locator(".related-p #related-mode")).to_be_visible()
+        expect(self.page.locator(".prior-report-head")).to_be_hidden()
+        expect(self.page.locator(".prior-report-body")).to_be_hidden()
+        expect(self.page.locator("#findings")).to_be_visible()
+        expect(self.page.locator("#report-editor-state")).to_have_text("Read Only")
+        expect(self.page.locator("#report-editor-resume")).to_be_visible()
         self.assertEqual((UID_A, UID_B), (self.js("selectedUid"), self.js("relatedUid")), "Source never becomes the Target")
         target = self.page.locator("#related-mode-target").inner_text()
         for value in (ALPHA, "SYN-P-001", "SYN Hospital A", "2026-10-03", "SYN CT CHEST CURRENT", "SYNACCA001", "v0 · RS W", "No Draft"):
@@ -537,6 +547,35 @@ class RelatedModePage(unittest.TestCase):
         self.assertEqual(writes, len(self.site.flow_puts), "a clean Target enters without a write")
         self.assertEqual([], self.site.related_puts)
         self.assertEqual("", self.value(), "the Source never reaches the Target's editor")
+
+    def test_minhoon8_the_held_editor_keeps_the_draft_in_view_and_resume_editing_is_the_modes_back(self):
+        """Minhoon item 8 (2026-10-27): the editable editor is marked; a selected related report opens inside the Related
+        panel while the editor keeps the current draft on screen (held, marked Read Only); Resume Editing beside the editor
+        leaves the mode like Back, and the related report stays in the Related panel."""
+        self.open()
+        self.open_target()
+        state, resume, findings = (self.page.locator(s) for s in ("#report-editor-state", "#report-editor-resume", "#findings"))
+        expect(state).to_have_text("Editable")
+        expect(self.page.locator("#report-editor")).to_have_attribute("data-editable", "true")
+        expect(resume).to_be_hidden()
+        findings.fill("SYN draft kept in view")
+        self.autosave()
+        self.enter()
+        expect(findings).to_be_visible()
+        expect(findings).to_have_value("SYN draft kept in view")
+        expect(state).to_have_text("Read Only")
+        expect(self.page.locator("#report-editor")).to_have_attribute("data-editable", "false")
+        expect(self.page.locator("#report-editor-why")).to_contain_text(MODE_REASON)
+        self.assertEqual(PRIOR_B["findings"], self.source_text("findings"))
+        resume.click()
+        expect(self.mode()).to_be_hidden()
+        expect(findings).to_be_focused()
+        expect(state).to_have_text("Editable")
+        expect(resume).to_be_hidden()
+        expect(self.page.locator("#prior-findings")).to_have_text(PRIOR_B["findings"])
+        expect(self.page.locator("#prior-report-content")).to_be_visible()
+        self.page.keyboard.type(" and typed after")
+        self.assertEqual("SYN draft kept in view and typed after", self.value())
 
     def test_w5_entry_with_unsaved_text_saves_first_and_enters_only_after_the_save_is_confirmed(self):
         self.open()
@@ -581,7 +620,7 @@ class RelatedModePage(unittest.TestCase):
         expect(self.notice()).to_contain_text("Save Failed")
         expect(self.notice()).to_contain_text("Related Report 모드로 들어가지 않았습니다")
         expect(self.mode()).to_be_hidden()
-        self.assertEqual(([False, False], UID_A), (self.editor_hidden(), self.js("selectedUid")))
+        self.assertEqual(([False, False], UID_A), (self.editor_held(), self.js("selectedUid")))
         self.assertEqual("SYN A refused", self.value())
         self.page.locator("#report-notice-retry").click()
         expect(self.mode()).to_be_visible()
@@ -668,12 +707,15 @@ class RelatedModePage(unittest.TestCase):
     def test_w5b_recommendation_shows_only_with_text_and_a_whole_insert_carries_only_what_is_shown(self):
         """W-07b (gap report: hide when empty). Findings and Conclusion are the report's sections. A stored Recommendation is
         shown read-only only when it has text, in the mode and in the Related Report pane alike; an empty one shows no heading.
-        A whole-report Insert carries exactly the sections on screen, and the Target's own hidden Recommendation is kept."""
+        A whole-report Insert carries exactly the sections on screen, and the Target's own hidden Recommendation is kept.
+        Minhoon item 8: the mode opens in the place of the pane's plain view, so the plain view is checked by its sections'
+        own hidden state, which is what it shows after Back."""
         self.open()
         self.open_target()
         sections = self.page.locator("#related-mode .related-mode-section h4:visible")
-        pane = self.page.locator(".prior-report-section h4:visible")
+        pane = self.page.locator(".prior-report-section:not([hidden]) h4")
         self.enter()
+        expect(self.page.locator(".prior-report-body")).to_be_hidden()
         expect(sections).to_have_text(["Findings", "Conclusion", "Recommendation"])
         expect(pane).to_have_text(["Findings", "Conclusion", "Recommendation"])
         expect(self.page.locator('#related-mode [data-related-source="recommendation"]')).to_have_text(PRIOR_B["recommendation"])
@@ -753,7 +795,7 @@ class RelatedModePage(unittest.TestCase):
         expect(self.page.locator("#findings")).to_be_focused()
         self.assertEqual(self.whole(), self.value())
         self.assertEqual([len(self.whole())] * 2, self.js("[$('#findings').selectionStart, $('#findings').selectionEnd]"))
-        self.assertEqual([False, False], self.editor_hidden())
+        self.assertEqual([False, False], self.editor_held())
         # Native history: one Undo removes the insertion, Redo puts it back (W6 frame unchanged).
         self.page.keyboard.press("Control+z")
         self.assertEqual("", self.value())
@@ -1097,7 +1139,7 @@ class RelatedModePage(unittest.TestCase):
         self.settle(300)
         expect(self.page.locator("#related-current")).to_have_text("판독 대상을 선택하세요")
         self.back()
-        self.assertEqual([False, False], self.editor_hidden())
+        self.assertEqual([False, False], self.editor_held())
         expect(self.page.locator("#findings")).to_be_focused()
         self.assertEqual("SYN A kept", self.value())
 
@@ -1109,7 +1151,7 @@ class RelatedModePage(unittest.TestCase):
         self.enter()
         self.page.locator("#related-return").click()
         expect(self.mode()).to_be_hidden()
-        self.assertEqual([False, False], self.editor_hidden())
+        self.assertEqual([False, False], self.editor_held())
         expect(self.page.locator("#findings")).to_be_focused()
         self.assertEqual((UID_A, None), (self.js("selectedUid"), self.js("relatedUid")))
         expect(self.page.locator("#prior-findings")).to_have_text("")
@@ -1123,7 +1165,7 @@ class RelatedModePage(unittest.TestCase):
         self.page.locator(f'#rows tr[data-uid="{UID_D}"]').click()
         self.wait(lambda: self.js("selectedUid") == UID_D, "the clean move")
         expect(self.mode()).to_be_hidden()
-        self.assertEqual([False, False], self.editor_hidden())
+        self.assertEqual([False, False], self.editor_held())
         self.assertIsNone(self.js("relatedUid"))
 
     def test_w5b_the_common_command_block_carries_the_mode_reason_and_next_prev_leave_through_the_gate(self):
@@ -1144,7 +1186,7 @@ class RelatedModePage(unittest.TestCase):
         moved = self.js("() => { document.querySelector('#b-next').click(); return selectedUid; }")
         self.assertNotEqual(UID_A, moved, "Next switches in the same event")
         expect(self.mode()).to_be_hidden()
-        self.assertEqual([False, False], self.editor_hidden())
+        self.assertEqual([False, False], self.editor_held())
         self.assertEqual([], self.site.flow_commits)
 
     def test_w5_back_without_insert_restores_caret_selection_direction_scroll_and_undo(self):
@@ -1253,7 +1295,7 @@ class RelatedModePage(unittest.TestCase):
         self.assertEqual((UID_B, 1), (ri["source"]["uid"], ri["source"]["version"]), "the Retry kept its own Source")
         self.assertEqual(self.whole(), self.value())
 
-    def test_w5_native_edit_refusal_restores_hidden_inert_and_focus_and_sends_nothing(self):
+    def test_w5_native_edit_refusal_restores_inert_and_focus_and_sends_nothing(self):
         self.open()
         self.open_target()
         self.enter()
@@ -1263,7 +1305,7 @@ class RelatedModePage(unittest.TestCase):
         self.page.locator("#related-insert-confirm").click()
         expect(self.page.locator("#related-insert-dialog")).to_be_visible()
         expect(self.page.locator("#related-insert-error")).to_contain_text("넣지 못했습니다")
-        self.assertEqual([True, True], self.editor_hidden())
+        self.assertEqual([False, True], self.editor_held())
         self.assertEqual("", self.value())
         self.assertEqual([], self.site.related_puts)
         self.assertIsNone(self.op_state())
@@ -1286,7 +1328,7 @@ class RelatedModePage(unittest.TestCase):
         self.assertEqual((self.whole(), "", ""), (self.value(), self.value("conclusion"), self.value("recommendation")))
         self.assertEqual([], [p for p in self.site.flow_puts if "relatedInsert" not in p[1]])
         self.assertEqual(1, len(self.site.related_puts))
-        self.assertEqual([True, True], self.editor_hidden(), "the mode's restriction is back")
+        self.assertEqual([False, True], self.editor_held(), "the mode's restriction is back")
 
     def test_w5_double_click_no_longer_opens_images_and_compare_images_opens_target_and_source(self):
         viewer = self.viewer_stand_in()
@@ -2596,7 +2638,13 @@ class RelatedModePage(unittest.TestCase):
                     self.page.locator("#conclusion").fill("SYN impression line 1\nSYN impression line 2")
                     self.autosave()
                     target = self.page.locator("#" + field)
-                    target.click()
+                    # A reader clicks where the field is on screen: a field taller than the editor's scroller is clicked
+                    # inside the scroller's view, not at its own centre (which the scroller can hold out of view).
+                    target.scroll_into_view_if_needed()
+                    self.page.mouse.click(*self.js("""id => { const a = document.getElementById(id).getBoundingClientRect(),
+                      b = document.querySelector('.redit').getBoundingClientRect();
+                      return [a.left + a.width / 2, (Math.max(a.top, b.top) + Math.min(a.bottom, b.bottom)) / 2]; }""", field))
+                    expect(target).to_be_focused()
                     self.page.keyboard.press("Control+End")
                     self.assertTrue(self.js(self.CARET_VISIBLE, field), "caret is visible before arrival")
                     snapshot = """() => ({uid: selectedUid, fields: ['findings', 'conclusion', 'recommendation'].map(id => {
@@ -2763,7 +2811,7 @@ class RelatedModePage(unittest.TestCase):
         act()
         expect(self.mode()).to_be_hidden()
         expect(self.page.locator("#findings")).to_be_focused()
-        self.assertEqual([False, False], self.editor_hidden())
+        self.assertEqual([False, False], self.editor_held())
         self.assertEqual((UID_A, "SYN A kept for the editor entry"), (self.js("selectedUid"), self.value()))
         self.assertEqual([5, 9], self.js("[$('#findings').selectionStart, $('#findings').selectionEnd]"))
 

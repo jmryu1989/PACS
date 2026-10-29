@@ -74,7 +74,12 @@ class RelatedReportModeE2E(TemplatePreservationE2E):
         mode = page.locator("#related-mode")
         expect(mode).to_be_visible()
         expect(page.locator("#related-mode-title")).to_be_focused()
-        expect(page.locator("#findings")).to_be_hidden()
+        # Minhoon item 8: the Source opens inside the Related panel; the editor keeps the Target's draft on screen and does
+        # not take typing until Back.
+        expect(page.locator(".related-p #related-mode")).to_be_visible()
+        expect(page.locator("#findings")).to_be_visible()
+        expect(page.locator("#findings")).to_have_value(TARGET_OWN)
+        expect(page.locator("#findings")).not_to_be_editable()
         source_text = page.locator('#related-mode [data-related-source="findings"]')
         expect(source_text).to_have_text(SOURCE_FINDINGS)
         self.assertEqual(page.evaluate("selectedUid"), target.uid)

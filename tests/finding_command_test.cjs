@@ -550,6 +550,8 @@ class FakeElement extends EventTarget {
     for (let at = siblings.indexOf(this) - 1; at >= 0; at--) if (siblings[at].tagName !== '#text') return siblings[at];
     return null;
   }
+  // Since Minhoon item 8 the field region sits one level down in the editor column, so the walk also goes up its parents.
+  get parentElement() { return this.parent; }
   // No layout here: an element is an empty box at the origin unless a test places it by hand.
   getBoundingClientRect() { return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 }; }
 }
@@ -741,11 +743,16 @@ test('adapter: the open panel observes the field region and every element above 
   const make = (className, id) => { const el = doc.createElement('div'); el.className = className || ''; el.id = id || ''; return el; };
   const report = make('panel report-p'), rbtns = make('rbtns'), draftbar = make('draftbar', 'draftbar'), citelist = make('', 'citelist');
   const pane = make('', 'dictation-pane'), redit = make('redit'), rfoot = make('rfoot2');
-  report.append(rbtns, draftbar, doc.createTextNode(' '), citelist, pane, redit, rfoot);
+  // Minhoon item 8: the page's editor row - the editor column (its head row above `.redit`) with Clinical Context beside it.
+  const row = make('report-compose'), editor = make('report-editor', 'report-editor'), head = make('report-editor-head');
+  const context = make('clinical-context', 'clinical-context');
+  editor.append(head, redit);
+  row.append(editor, context);
+  report.append(rbtns, draftbar, doc.createTextNode(' '), citelist, pane, row, rfoot);
   doc.body.append(report);
   // The Related region is watched too (S4 GEO): a separator move shifts the report by resizing it.
   const region = h.document.querySelector('.related-p');
-  const above = new Set([redit, pane, citelist, draftbar, rbtns, region]);
+  const above = new Set([redit, head, editor, row, pane, citelist, draftbar, rbtns, region]);
   let top = 576;
   redit.getBoundingClientRect = () => ({ top, height: 180 });
   await h.open();
@@ -753,7 +760,8 @@ test('adapter: the open panel observes the field region and every element above 
   const [first] = h.observers;
   assert.deepEqual(new Set(first.targets), above, 'the field region, every element above it and the Related region');
   assert.equal(first.targets.length, above.size, 'each observed once');
-  assert.ok(!first.targets.includes(rfoot) && !first.targets.includes(report), 'nothing below it and not the column itself');
+  assert.ok(!first.targets.includes(rfoot) && !first.targets.includes(report) && !first.targets.includes(context),
+    'nothing below or beside it and not the column itself');
   const bound = () => h.panel().style.getPropertyValue('--reading-findings-top');
   assert.equal(bound(), '576px');
   // The pane grows above the pinned field region: `.redit` moves 100px down at the same height, and
