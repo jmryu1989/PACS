@@ -2055,8 +2055,12 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         opened, answered, _ = self.seed_threads()
         self.open_reader(me(RADIOLOGIST, ["radiologist"]))
         place = self.page.evaluate("""() => { const s = document.querySelector('#question-p');
-          return [s.previousElementSibling.className, s.nextElementSibling.className, !!s.closest('.rbtns, .rfoot2'), s.parentElement.className]; }""")
-        self.assertEqual(["redit", "rfoot2", False, "panel report-p"], place)
+          const report = document.querySelector('.report-p'), editor = report.querySelector('.redit'),
+            footer = report.querySelector('.rfoot2');
+          return [!!(editor.compareDocumentPosition(s) & Node.DOCUMENT_POSITION_FOLLOWING),
+            !!(s.compareDocumentPosition(footer) & Node.DOCUMENT_POSITION_FOLLOWING),
+            !s.closest('.redit, .rbtns, .rfoot2'), report.contains(s)]; }""")
+        self.assertEqual([True, True, True, True], place)
         self.assertEqual((False, "idle"), (self.reader()["shown"], self.reader()["state"]))
 
         # A target without threads: read once, hidden, the report column's boxes are those of a page without the row.

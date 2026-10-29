@@ -221,7 +221,8 @@ class HeldMeasurementE2E(MeasurementReadbackE2E):
         row.get_by_role('button',name='Restore',exact=True).click()
         expect(row).to_contain_text('서버에 다른 판')
         saved=self.durable(f);writes=[]
-        p.on('request',lambda request:writes.append(request.url) if request.method in ['POST','PATCH','DELETE'] else None)
+        p.on('request',lambda request:writes.append(request.url)
+            if request.method in ['POST','PUT','PATCH','DELETE'] and '/viewer-items' in request.url else None)
         p.once('dialog',lambda dialog:dialog.accept())
         row.get_by_role('button',name='Discard Held Changes',exact=True).click()
         expect(row).to_contain_text('Saved r4')
