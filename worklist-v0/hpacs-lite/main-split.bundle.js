@@ -9822,7 +9822,13 @@
         }
       }
       workspaceWasNarrow = narrow;
-      if (sizes.top != null) top.style.height = clampPanel(sizes.top, 140, $(".right").getBoundingClientRect().height - 266) + "px";
+      const topMaximum = $(".right").getBoundingClientRect().height - 266;
+      if (sizes.top != null) {
+        // A tight column may keep its default band, but a taller window's saved
+        // height must still yield to this window's prior report line below.
+        const maximum = topMaximum < 140 ? top.getBoundingClientRect().height : topMaximum;
+        top.style.height = clampPanel(sizes.top, 140, maximum) + "px";
+      }
       const row = $(".workrow").getBoundingClientRect();
       if (sizes.related != null) related.style[portrait ? "height" : "width"] = clampPanel(sizes.related,
         portrait ? 286 : 220, portrait ? row.height - 186 : row.width - 366) + "px";
@@ -9853,8 +9859,9 @@
       }
       // The worklist floor must not push the prior report's first line out of a
       // stacked work area (D383). The report window band yields first, only as much
-      // as needed and never below its 140 px drag minimum; a stored size wins.
-      if (portrait && !narrow && sizes.top == null && !document.body.classList.contains("reading")) {
+      // as needed and never below its 140 px drag minimum. In a tight column even
+      // a stored band must yield, without overwriting the reader's saved height.
+      if (portrait && !narrow && (sizes.top == null || topMaximum < 140) && !document.body.classList.contains("reading")) {
         const area = $(".right"), body = related.querySelector(".prior-report-body"), style = getComputedStyle(body);
         const line = body.getBoundingClientRect().top + area.scrollTop + parseFloat(style.paddingTop) + 2 * parseFloat(style.fontSize);
         const over = line - area.getBoundingClientRect().bottom;
@@ -11302,7 +11309,7 @@
         e.preventDefault();
         const box = handle.getBoundingClientRect(), step = e.shiftKey ? 40 : 10;
         const delta = e.key === 'Home' ? -16384 : e.key === 'End' ? 16384 : e.key === keys[0] ? -step : step;
-        resize({ clientX: box.left + (direction === 'x' ? delta : 0), clientY: box.top + (direction === 'y' ? delta : 0) }, direction);
+        resize({ clientX: box.left + (direction === 'x' ? delta : 0), clientY: box.top + (direction === 'y' ? delta : 0) }, direction, delta);
         rememberPanelSize(selector);
       });
       handle.addEventListener("pointerdown", e => {
@@ -11316,8 +11323,12 @@
         handle.classList.add("dragging");
         document.body.classList.add("resizing", dragAxis === "x" ? "resizing-x" : "resizing-y");
 
+        let previous = dragAxis === 'x' ? e.clientX : e.clientY;
         const move = event => {
-          if (event.pointerId === e.pointerId) work.commit(at, () => resize(event, dragAxis));
+          if (event.pointerId !== e.pointerId) return;
+          const position = dragAxis === 'x' ? event.clientX : event.clientY, delta = position - previous;
+          previous = position;
+          work.commit(at, () => resize(event, dragAxis, delta));
         };
         const end = event => {
           if (event.pointerId !== e.pointerId) return;
@@ -11544,10 +11555,12 @@
       else
         $(".left").style.width = clampPanel(e.clientX - box.left, 500, box.width - 426) + "px";
     });
-    bindPanelResize("#resize-top", "y", e => {
-      const right = $(".right"), box = right.getBoundingClientRect();
-      // 세로 작업공간을 스크롤한 뒤에도 패널 자체의 높이를 조절한다.
-      $(".rw").style.height = clampPanel(e.clientY - box.top + right.scrollTop, 140, box.height - 266) + "px";
+    bindPanelResize("#resize-top", "y", (e, axis, delta) => {
+      const top = $(".rw"), current = top.getBoundingClientRect().height;
+      // 목록의 최소 높이 때문에 상한이 현재 띠보다 작아도 손과 반대로 줄이지 않는다.
+      // 포인터 이동량을 쓰므로 손잡이 안의 누른 위치나 작업공간 스크롤에 영향받지 않는다.
+      const maximum = Math.max(current, 140, $(".right").getBoundingClientRect().height - 266);
+      top.style.height = clampPanel(current + delta, Math.min(current, 140), maximum) + "px";
     });
     bindPanelResize("#resize-related", () => portraitLayout() ? "y" : "x", (e, axis) => {
       const box = $(".workrow").getBoundingClientRect();
@@ -11562,6 +11575,7 @@
       list.style.flex = "none";
       list.style.height = clampPanel(e.clientY - box.top, 150, box.height - 136) + "px";
     });
+
 
     $("#quick").addEventListener("input", () => { worklistSearch?.change(); render(); });
     for (const host of [$('#quick'),$('#filterrow')]) host.addEventListener('keydown',e=>{
