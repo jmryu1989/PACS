@@ -259,10 +259,12 @@
         }
       }
       workspaceWasNarrow = narrow;
+      const topMaximum = $(".right").getBoundingClientRect().height - 266;
       if (sizes.top != null) {
-        const maximum = $(".right").getBoundingClientRect().height - 266;
-        // 최소 높이조차 들어가지 않는 열은 스크롤한다. 드래그로 보존한 높이를 복원 때 줄이지 않는다.
-        top.style.height = (maximum < 140 ? Math.max(140, sizes.top) : clampPanel(sizes.top, 140, maximum)) + "px";
+        // A tight column may keep its default band, but a taller window's saved
+        // height must still yield to this window's prior report line below.
+        const maximum = topMaximum < 140 ? top.getBoundingClientRect().height : topMaximum;
+        top.style.height = clampPanel(sizes.top, 140, maximum) + "px";
       }
       const row = $(".workrow").getBoundingClientRect();
       if (sizes.related != null) related.style[portrait ? "height" : "width"] = clampPanel(sizes.related,
@@ -294,8 +296,9 @@
       }
       // The worklist floor must not push the prior report's first line out of a
       // stacked work area (D383). The report window band yields first, only as much
-      // as needed and never below its 140 px drag minimum; a stored size wins.
-      if (portrait && !narrow && sizes.top == null && !document.body.classList.contains("reading")) {
+      // as needed and never below its 140 px drag minimum. In a tight column even
+      // a stored band must yield, without overwriting the reader's saved height.
+      if (portrait && !narrow && (sizes.top == null || topMaximum < 140) && !document.body.classList.contains("reading")) {
         const area = $(".right"), body = related.querySelector(".prior-report-body"), style = getComputedStyle(body);
         const line = body.getBoundingClientRect().top + area.scrollTop + parseFloat(style.paddingTop) + 2 * parseFloat(style.fontSize);
         const over = line - area.getBoundingClientRect().bottom;

@@ -56,7 +56,7 @@ GEOM = '''() => { const q = s => document.querySelector(s), r = n => { if (!n ||
   return { usable: rw && rw.getClientRects().length ? rw.getBoundingClientRect().width - (rw.offsetWidth - rw.clientWidth) : null,
     rw: r(rw), thumb: r(q('.rw > .s-thumb')), thumbwrap: r(q('.rw .thumbwrap')), clinical: r(q('.rw > .s-clinical')),
     template: r(q('.rw > .s-template')), rtabs: r(q('.rw .rtabs')), separator: r(q('#resize-top')), workrow: r(q('.workrow')),
-    report: r(q('.report-p')), order: r(q('.order-p')), split: r(q('.split')), listEdge: r(q('#resize-main')),
+    report: r(q('.report-p')), order: r(q('.order-p')), split: r(q('.split')), right: r(q('.right')), listEdge: r(q('#resize-main')),
     mode: q('.tabs > div.on')?.dataset.tab, viewport: [innerWidth, innerHeight],
     tabs: [...document.querySelectorAll('.rw .rtabs > div')].filter(n => n.getClientRects().length).map(n => n.textContent) }; }'''
 
@@ -479,7 +479,8 @@ class WSpaceDOM(unittest.TestCase):
     def drag_top(self, page, dy):
         grip = page.locator('#resize-top').bounding_box()
         x, y = grip['x'] + grip['width'] / 2, grip['y'] + grip['height'] / 2
-        before = page.evaluate(GEOM)['rw'][3]
+        start = page.evaluate(GEOM)
+        before = start['rw'][3]
         previous = before
         page.mouse.move(x, y)
         page.mouse.down()
@@ -491,9 +492,13 @@ class WSpaceDOM(unittest.TestCase):
             previous = current
         page.mouse.up()
         settle(page)
-        after = page.evaluate(GEOM)['rw'][3]
-        self.assertGreaterEqual((after - before) * (1 if dy > 0 else -1), -0.5,
-                                'Finishing the drag must preserve its direction')
+        finished = page.evaluate(GEOM)
+        after = finished['rw'][3]
+        # Saving can wrap the toolbar's status line, reducing the work column.
+        # Only that measured loss of room may clamp a downward drag on release.
+        lost_room = max(0, start['right'][3] - finished['right'][3]) if dy > 0 else 0
+        self.assertGreaterEqual((after - before) * (1 if dy > 0 else -1), -lost_room - 0.5,
+                                'Finishing the drag must preserve direction within the available work column')
         return before, after
 
     def test_wspace_g4_saved_geometry_stays_the_readers_intent(self):
@@ -540,7 +545,7 @@ class WSpaceDOM(unittest.TestCase):
                     self.assertEqual(start['rw'][3], back['rw'][3])
                     self.assert_same_content(start, back, 'reload and Show All')
                     self.assertEqual(sizes, {a: self.stored(page)[a] for a in sizes})
-                    # A smaller window clamps for now; the original window returns the saved geometry.
+                    # A temporary window keeps the saved preference; the tall portrait case below checks clamping.
                     page.set_viewport_size({'width': int(width * 0.8), 'height': int(height * 0.8)})
                     settle(page)
                     page.set_viewport_size({'width': width, 'height': height})
@@ -563,6 +568,34 @@ class WSpaceDOM(unittest.TestCase):
                     lower, blocked = self.drag_top(page, -30)
                     self.assertAlmostEqual(140, lower, delta=1)
                     self.assertAlmostEqual(lower, blocked, delta=1)
+
+            with self.subTest(mode=mode, size='tall portrait restored in short portrait'):
+                site = WorkspaceSite()
+                page = self.open(site, 768, 1024)
+                self.switch(page, mode)
+                default_height = page.evaluate(GEOM)['rw'][3]
+                page.set_viewport_size({'width': 1080, 'height': 1920})
+                settle(page)
+                _, tall_height = self.drag_top(page, 400)
+                self.assertGreater(tall_height, default_height)
+                saved = self.stored(page)
+                self.assertAlmostEqual(tall_height, saved['portrait']['top'], delta=1)
+                page.set_viewport_size({'width': 768, 'height': 1024})
+                settle(page)
+                for reload in (False, True):
+                    if reload:
+                        self.reload(page, site)
+                        self.switch(page, mode)
+                    short = page.evaluate(GEOM)
+                    self.assertLessEqual(short['rw'][3], default_height + 1,
+                                         'A taller window\'s saved band must fit the short window like its default band')
+                    self.assertLess(short['workrow'][1], short['viewport'][1])
+                    self.assertEqual(saved, self.stored(page), 'Clamping must not overwrite the preferred height')
+                page.screenshot(path=str(OUT / f'g4-{mode}-tall-restored-768x1024.png'))
+                page.set_viewport_size({'width': 1080, 'height': 1920})
+                settle(page)
+                self.assertAlmostEqual(tall_height, page.evaluate(GEOM)['rw'][3], delta=1)
+                self.assertEqual(saved, self.stored(page))
 
     def test_wspace_g5_tabs_only_and_empty_band_return_their_height(self):
         """TEST-WSPACE-G5 (RISK-WSPACE-EMPTY, invariant 5): with every content panel the mode can show hidden the band is
