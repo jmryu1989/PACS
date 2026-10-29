@@ -140,11 +140,11 @@ export class PacsWorklist {
   }
 
   /**
-   * Observes the archive once and runs the registration above over every UID; the held rows are those still null.
+   * Observes the archive once and runs the registration above over every UID; patient identity is observed too.
    * The device answers kept are those of UIDs this observation still holds or announces, so the cache is the held set.
    */
   private async observeArrivals() {
-    const sources = groupSources(await this.orthanc.studyIdentities(), st => OrthancService.tag(st, '0020000D'));
+    const sources = groupSources(await this.orthanc.studyIdentities(true), st => OrthancService.tag(st, '0020000D'));
     const select = { uid: true, institutionId: true, createdAt: true } as const;
     const byUid = new Map<string, any>((await this.prisma.studyState.findMany({ select })).map(s => [s.uid, s]));
     await this.registerArrivals(sources, byUid, select);
@@ -153,27 +153,38 @@ export class PacsWorklist {
     return { sources, byUid };
   }
 
+  // D1887: the source patient, not a display overlay, must identify an image read's patient.
+  // Re-observe it on every list so correcting the original releases an already attached study too.
+  private patientIdentified(resources: any[]) {
+    return resources.every(st => OrthancService.tag(st, '00100020').trim() !== '');
+  }
+
   /**
    * D1882 operator alert: held studies grouped by sending device and the raw InstitutionName text, with arrival times
    * and a count. Nothing that names a patient or a study (no UID, name, ID, date, description, image or report) leaves
-   * here, so reading it is not a medical-record read and opens nothing. Any administrator sees it: a held study belongs
-   * to no institution yet, and these facts are what the hospital is asked to confirm.
+   * here, so reading it is not a medical-record read and opens nothing. Unknown sources are shown to administrators;
+   * an attached study without PatientID (D1887) is shown only to its owning institution's administrator.
    */
   async heldSources(c: Caller) {
     need(c.roles, 'admin', '수신 보류 알림 조회');
     const me = inst(c);
     const { sources, byUid } = await this.observeArrivals();
-    const groups = new Map<string, { device: string | null; institutionText: string; institutionNames: string[]; count: number; firstArrival: string; lastArrival: string }>();
+    const groups = new Map<string, { device: string | null; institutionText: string; institutionNames: string[]; reason: string; sourceUnregistered: boolean; count: number; firstArrival: string; lastArrival: string }>();
     for (const uid of sources.uids) {
       const state = byUid.get(uid);
-      if (!state || state.institutionId != null) continue;
+      if (!state) continue;
+      const resources = sources.byUid.get(uid)!;
+      const unidentified = !this.patientIdentified(resources);
+      const sourceUnregistered = state.institutionId == null;
+      if (!sourceUnregistered && (!unidentified || state.institutionId !== me)) continue;
+      const reason = unidentified ? 'patient_not_identified' : 'unknown_source';
       const device = await this.sendingDevice(uid);
       // The distinct spellings travel as a list: a hospital's own name may contain " / ", so the joined display text
       // cannot tell one spelling from several.
-      const names = [...new Set(sources.byUid.get(uid)!.map(st => OrthancService.tag(st, '00080080').trim()))].sort();
-      const at = new Date(state.createdAt).toISOString(), key = JSON.stringify([device, names]);
+      const names = [...new Set(resources.map(st => OrthancService.tag(st, '00080080').trim()))].sort();
+      const at = new Date(state.createdAt).toISOString(), key = JSON.stringify([device, names, reason, sourceUnregistered]);
       const group = groups.get(key);
-      if (!group) groups.set(key, { device, institutionText: names.join(' / '), institutionNames: names, count: 1, firstArrival: at, lastArrival: at });
+      if (!group) groups.set(key, { device, institutionText: names.join(' / '), institutionNames: names, reason, sourceUnregistered, count: 1, firstArrival: at, lastArrival: at });
       else Object.assign(group, { count: group.count + 1, firstArrival: at < group.firstArrival ? at : group.firstArrival,
         lastArrival: at > group.lastArrival ? at : group.lastArrival });
     }
@@ -207,7 +218,7 @@ export class PacsWorklist {
     const uids = requested === undefined ? null : requested.split(',');
     const owner = [me, c.sub, c.actor, String(access.revision), String(access.windowOpen)], page = studyPageQuery(uids ? undefined : query, owner);
     // S4-U2 asks the paged enumeration for the indexed AccessionNumber too; the full QIDO carries it already.
-    const qido = uids ? await this.orthanc.studiesByUid(uids) : page ? await this.orthanc.studyIdentities(this.studyAccess.needsMetadata(access), true) : await this.orthanc.studies();
+    const qido = uids ? await this.orthanc.studiesByUid(uids) : page ? await this.orthanc.studyIdentities(true, true) : await this.orthanc.studies();
     // S4-U1b: the server time at which this successful enumeration returned. A failed QIDO throws
     // before this line, so no response ever carries an observation time it did not make.
     const observedAt = new Date().toISOString();
@@ -233,6 +244,7 @@ export class PacsWorklist {
     const normal: any[] = [], issues: string[] = [];
     for (const uid of sources.uids) {
       const resources = sources.byUid.get(uid)!, state = byUid.get(uid);
+      if (!this.patientIdentified(resources)) continue;
       if (!state || !this.access.visible(state, me) || !resources.every(st => this.studyAccess.matches(access, uid, st))) continue;
       if (resources.length === 1) normal.push(resources[0]);
       // D1882: a UID attached by its registered sending device is announced on the same terms (every resource came from it).
@@ -298,6 +310,7 @@ export class PacsWorklist {
       // would pass the policy and the stored rows are unchanged.
       const withMetadata = this.studyAccess.needsMetadata(access);
       if (pageUids.some(uid => detail.byUid.get(uid)?.length !== 1 || !this.studyAccess.matches(access, uid, detail.byUid.get(uid)![0])
+        || !this.patientIdentified(detail.byUid.get(uid)!)
         || !sameAccessTags(sources.byUid.get(uid)?.[0], detail.byUid.get(uid)![0], withMetadata)))
         throw accessConflict();
       sourceRows = pageUids.map(uid => detail.byUid.get(uid)![0]);
@@ -422,11 +435,11 @@ export class PacsWorklist {
     for (const st of qido) {
       const uid = OrthancService.tag(st, '0020000D');
       if (!uid) return null;
-      if (observed.has(uid)) unresolved.add(uid);
+      if (observed.has(uid) || !this.patientIdentified([st])) unresolved.add(uid);
       observed.set(uid, st);
     }
-    // WORKLIST-SPLIT-UID: a UID two patient resources answer has no accession of its own (either row's would be a
-    // representative). It is neither a pairing candidate nor a linked order's reconciled study; the rest go on.
+    // A split UID has no single source accession; a patientless study stays held. Neither can be a pairing
+    // candidate or a linked order's reconciled study.
     for (const uid of unresolved) observed.delete(uid);
     return reconcileOrders({ me, restricted: access.policy.restricted, orders,
       links: links.filter(s => !unresolved.has(s.uid)), observed,
@@ -453,9 +466,9 @@ export class PacsWorklist {
     const unresolved = new Set<string>();
     if (!omitStates && stateRows.length) {
       const seen = new Set<string>();
-      for (const st of await this.orthanc.studyIdentities()) {
+      for (const st of await this.orthanc.studyIdentities(true)) {
         const uid = OrthancService.tag(st, '0020000D');
-        if (seen.has(uid)) unresolved.add(uid);
+        if (seen.has(uid) || !this.patientIdentified([st])) unresolved.add(uid);
         seen.add(uid);
       }
     }

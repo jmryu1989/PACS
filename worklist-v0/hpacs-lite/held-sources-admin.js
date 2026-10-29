@@ -57,10 +57,17 @@
       const tr = document.createElement('tr');
       cell(tr, group.device ?? 'Not Recorded').title = group.device ? '' : '수신 장비(AE Title)가 기록되지 않았습니다(REST 업로드 등). 기관명 표기로만 연결할 수 있습니다.';
       cell(tr, group.institutionText || '(empty)');
+      cell(tr, group.reason === 'patient_not_identified' ? 'Patient Not Identified' : 'Unknown Source');
       cell(tr, group.firstArrival);
       cell(tr, group.lastArrival);
       cell(tr, String(group.count));
       const actions = cell(tr, '');
+      if (group.reason === 'patient_not_identified') {
+        const guidance = document.createElement('p');
+        guidance.textContent = '송신 병원에서 환자를 확인해 PatientID를 보정·재전송한 뒤 아카이브 관리자가 PatientID가 비어 있는 기존 사본을 제거해야 합니다. 이후 Refresh Held Studies로 확인하세요. 환자를 확인하지 못한 검사는 판독하지 않습니다.';
+        actions.append(guidance);
+      }
+      if (group.sourceUnregistered === false) return tr;
       const add = (label, kind, value, refusal) => {
         const button = document.createElement('button');
         button.type = 'button';

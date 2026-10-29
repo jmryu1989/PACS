@@ -1228,6 +1228,10 @@ class LiveStack:
         fixture = Fixture(uid, patient_id, institution, owner, "REPORT-" + run)
         self.active[uid] = fixture
         try:
+            # D1887: a patientless arrival exists in the archive but is held, never a verified reading fixture.
+            if not patient_id.strip():
+                self.first_instance_id(uid)
+                return fixture
             mode = os.environ.get("KIN_TEST_INGEST", "cstore").strip().lower()
             wait_seconds = 90 if mode == "gateway" else 20
             deadline = time.monotonic() + wait_seconds
@@ -3589,12 +3593,13 @@ class LiveInvariantTests(unittest.TestCase):
             listed = self.stack.request("GET", "/studies", "kdoctor")
             self.assertEqual(listed.status, 200, listed.text)
             rows = {item["uid"]: item for item in listed.body.get("studies", [])}
-            for fixture in (hallym_a, hallym_b, kin, empty):
+            for fixture in (hallym_a, hallym_b, kin):
                 self.assertIn(fixture.uid, rows)
             self.assertEqual(rows[hallym_a.uid].get("sourcePatientKey"), f"hallym|{patient_id}")
             self.assertEqual(rows[hallym_b.uid].get("sourcePatientKey"), f"hallym|{patient_id}")
             self.assertEqual(rows[kin.uid].get("sourcePatientKey"), f"kin-center|{patient_id}")
-            self.assertIsNone(rows[empty.uid].get("sourcePatientKey"))
+            # D1887: no empty patient may become a reading/prior candidate, even without a grouping key.
+            self.assertNotIn(empty.uid, rows)
             same_source = [
                 row for row in rows.values()
                 if row.get("sourcePatientKey") == f"hallym|{patient_id}"

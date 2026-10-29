@@ -146,7 +146,9 @@ window.KinViewerPatientTabs = (() => {
     return { key: row.sourcePatientKey, href: new URL(href, location.origin).href, studies: wanted,
       patient: { name: text(row.name) || 'Unknown', id: text(row.id) || 'Unknown', age: years >= 0 ? years + 'Y' : 'Unknown', sex: text(row.sex) || 'Unknown' } };
   }
-  function navigate(tab) {
+  function navigate(tab, opening) {
+    // The tab's new opening is taken before its scope is exposed, so every read it starts names that opening.
+    opening.commit();
     tab.restorePending = !!tab.view;
     current = tab; explicitlyClosed = false; pending = false; render(); publish();
     if (location.href === tab.href) { restore(); return; }
@@ -178,6 +180,12 @@ window.KinViewerPatientTabs = (() => {
     try {
       const resolved = await resolve(url.href, controller.signal);
       if (signal?.aborted || ticket !== sequence || !guard(true)) return false;
+      // Showing these studies is a new opening of each (opening contract 2026-10-29). One this document showed before is
+      // read live for it first, so its 열람 is recorded before pixels still held here can show; when it cannot be, the
+      // current screen stays. A same-scope Open returned above and keeps its opening.
+      const opening = await (window.KinViewerSessionBoundary?.reenter(resolved.studies, controller.signal) ?? { commit() {} });
+      if (signal?.aborted || ticket !== sequence) return false;
+      if (!opening) { status.textContent = '영상 열람 기록을 저장하지 못해 환자를 전환하지 않았습니다. 다시 시도하세요.'; return false; }
       capture();
       let tab = tabs.find(tab => tab.key === resolved.key);
       if (!tab) { tab = resolved; tabs.push(tab); }
@@ -186,7 +194,7 @@ window.KinViewerPatientTabs = (() => {
         // but never restore the previous examination over the requested one.
         Object.assign(tab, resolved, { view: null });
       }
-      navigate(tab); return true;
+      navigate(tab, opening); return true;
     } catch (error) { if (ticket === sequence && error.name !== 'AbortError') status.textContent = error.message; return false; }
     finally { signal?.removeEventListener('abort', cancel); if (ticket === sequence) { pending = false; render(); } }
   }
