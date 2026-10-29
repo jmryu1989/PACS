@@ -298,8 +298,12 @@
       // stacked work area (D383). The report window band yields first, only as much
       // as needed and never below its 140 px drag minimum. In a tight column even
       // a stored band must yield, without overwriting the reader's saved height.
+      // The pane's text is its plain view's body or, while Related Report mode stands in that view's place (Minhoon item 8),
+      // the mode's text region: the one on screen is measured (a hidden one measures at the top of the window).
+      const priorText = () => related.querySelector("#related-mode:not([hidden]) .related-mode-scroll")
+        || related.querySelector(".prior-report-body");
       if (portrait && !narrow && (sizes.top == null || topMaximum < 140) && !document.body.classList.contains("reading")) {
-        const area = $(".right"), body = related.querySelector(".prior-report-body"), style = getComputedStyle(body);
+        const area = $(".right"), body = priorText(), style = getComputedStyle(body);
         const line = body.getBoundingClientRect().top + area.scrollTop + parseFloat(style.paddingTop) + 2 * parseFloat(style.fontSize);
         const over = line - area.getBoundingClientRect().bottom;
         if (over > 0) top.style.height = Math.max(140, Math.floor(top.getBoundingClientRect().height - over)) + "px";
@@ -308,7 +312,7 @@
       // much as needed and never below the list's header and one whole row; the
       // next row is then a wheel turn away inside the band.
       if (narrow && listNeed) {
-        const area = $(".right"), body = related.querySelector(".prior-report-body"), style = getComputedStyle(body);
+        const area = $(".right"), body = priorText(), style = getComputedStyle(body);
         const line = body.getBoundingClientRect().top + area.scrollTop + parseFloat(style.paddingTop) + 2 * parseFloat(style.fontSize);
         const over = line - area.getBoundingClientRect().bottom;
         if (over > 0) {

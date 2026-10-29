@@ -74,7 +74,19 @@ class RelatedReportModeE2E(TemplatePreservationE2E):
         mode = page.locator("#related-mode")
         expect(mode).to_be_visible()
         expect(page.locator("#related-mode-title")).to_be_focused()
-        expect(page.locator("#findings")).to_be_hidden()
+        # Minhoon item 8: the Source opens inside the Related panel; the editor keeps the Target's draft on screen and does
+        # not take typing until Back.
+        expect(page.locator(".related-p #related-mode")).to_be_visible()
+        expect(page.locator("#findings")).to_be_visible()
+        expect(page.locator("#findings")).to_have_value(TARGET_OWN)
+        # A reader's click on the held draft takes no focus and changes nothing (Back below gives the field back).
+        held = page.locator("#findings")
+        box = held.bounding_box()
+        page.mouse.click(box["x"] + box["width"] / 2, box["y"] + min(box["height"], 20) / 2)
+        expect(held).not_to_be_focused()
+        self.assertFalse(held.evaluate("node => { node.focus(); return document.activeElement === node; }"),
+                         "the held draft refuses focus")
+        expect(held).to_have_value(TARGET_OWN)
         source_text = page.locator('#related-mode [data-related-source="findings"]')
         expect(source_text).to_have_text(SOURCE_FINDINGS)
         self.assertEqual(page.evaluate("selectedUid"), target.uid)

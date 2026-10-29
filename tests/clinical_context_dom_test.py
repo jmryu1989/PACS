@@ -1540,20 +1540,30 @@ class ClinicalContextDOMTest(unittest.TestCase):
         self.assertEqual(self.state_of("techNote"), "stale")
         self.assertEqual(self.sections()["priorReports"]["open"], [True, False])
 
-    def test_cd13_a_large_answer_stays_within_the_column_bound(self):
+    def test_cd13_a_large_answer_stays_in_its_column_beside_the_editor(self):
+        """Minhoon item 8 (2026-10-27): Clinical Context is read while writing, so it sits beside the report editor in the
+        report panel at a normal and at a small window. A large answer scrolls inside its own column: it neither moves the
+        editor nor runs past the row or sideways."""
         self.open_reader()
         self.show(A, vector="A-TRUNC")
-        box = self.page.evaluate("""() => {
-          const panel = document.querySelector('#clinical-context'), column = document.querySelector('.s-clinical'),
-            clinical = document.querySelector('#clinical');
-          return { panel: panel.getBoundingClientRect().height, column: column.getBoundingClientRect().height,
-                   clinical: clinical.getBoundingClientRect().height, scroll: panel.scrollWidth, width: panel.clientWidth,
-                   inColumn: column.contains(panel) && !clinical.contains(panel) };
-        }""")
-        self.assertTrue(box["inColumn"])
-        self.assertLessEqual(box["panel"], box["column"] * 0.45 + 0.5, box)
-        self.assertGreater(box["clinical"], 0, box)
-        self.assertLessEqual(box["scroll"], box["width"], box)
+        for width, height in ((1920, 1080), (1366, 768), (900, 700)):
+            with self.subTest(window=(width, height)):
+                self.page.set_viewport_size({"width": width, "height": height})
+                box = self.page.evaluate("""() => {
+                  const r = s => document.querySelector(s).getBoundingClientRect(), panel = document.querySelector('#clinical-context');
+                  const p = r('#clinical-context'), e = r('.report-editor'), row = r('.report-compose');
+                  return { left: p.left, editorRight: e.right, top: p.top, editorTop: e.top, height: p.height, rowHeight: row.height,
+                           width: p.width, editorWidth: e.width, scroll: panel.scrollWidth, client: panel.clientWidth,
+                           scrolls: panel.scrollHeight > panel.clientHeight,
+                           inReport: document.querySelector('.report-p').contains(panel) && !document.querySelector('.rw').contains(panel) };
+                }""")
+                self.assertTrue(box["inReport"], box)
+                self.assertGreaterEqual(box["left"], box["editorRight"] - 0.5, box)
+                self.assertAlmostEqual(box["top"], box["editorTop"], delta=0.5, msg=box)
+                self.assertLessEqual(box["height"], box["rowHeight"] + 0.5, box)
+                self.assertGreater(box["editorWidth"], box["width"], box)
+                self.assertLessEqual(box["scroll"], box["client"], box)
+                self.assertTrue(box["scrolls"], box)
 
     # ── cd14 ──
     def test_cd14_one_request_per_change_of_the_viewed_study_in_order_and_none_otherwise(self):

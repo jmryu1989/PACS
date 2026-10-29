@@ -5,6 +5,8 @@
     $('#related-load-parts').addEventListener('click',()=>{if(cur()&&serverMode&&!offline&&!demoMode)relatedParts.load(relatedCandidates().map(x=>x.uid));});
     $('#related-cancel-parts').addEventListener('click',()=>relatedParts.cancel());
     $("#related-return").addEventListener("click", returnToReportStudy);
+    // Minhoon item 8: the editor stays on screen in Related Report mode; its Resume Editing is the mode's Back.
+    $("#report-editor-resume").addEventListener("click", () => { backToCurrentDraft(); });
     $("#related-modality").addEventListener("change", e => {
       if (!cur()) return;
       // 목록을 좁히는 동작이 현재 영상/판독문을 다시 읽거나 점유를 옮겨서는 안 된다.
