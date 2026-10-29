@@ -123,9 +123,12 @@ export class ClinicalRuntime {
       });
       if (!created) {
         const previous = await work.lookup(command.operationId);
-        // Pending means the original may still own COMMIT. Only B2 settlement
-        // can decide it; a timeout never authorizes another signature/projector.
-        if (previous) return await this.answer(work, request, command, previous, true, w.prepare);
+        // Admission may have committed before the first delivery starts its
+        // business transaction. Join that same B2 operation: transaction() locks
+        // it and returns its terminal result without repeating a committed effect.
+        // An actual unreadable COMMIT still reaches CommitUnknown below.
+        if (previous && previous.outcome !== 'pending')
+          return await this.answer(work, request, command, previous, true, w.prepare);
       }
       const operation = await work.admit(command.event, undefined,
         { operationId: command.operationId, attemptId: command.attemptId });
