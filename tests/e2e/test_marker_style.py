@@ -17,19 +17,41 @@ from test_viewer_history import ViewerHistoryE2E
 from viewer_tools import select_image_tool
 from workspace_roaming_support import cleanup_workspace
 
-# The drawn mark: stroke colour/width of its lines and handles, and the colour of its value text.
+# The Length mark as drawn: its own SVG nodes (the drawing helper keys every node it draws by the annotation UID),
+# their stroke colour/width, the colour of its value text, and the pointer-feedback colours the viewer uses now.
 DRAWN = '''() => {
-  const shapes = [], texts = [];
-  for (const svg of document.querySelectorAll('svg.svg-layer')) {
-    for (const e of svg.querySelectorAll('[stroke]')) if (!e.closest('text') && e.getAttribute('stroke') !== 'none')
-      shapes.push({tag: e.tagName, stroke: e.getAttribute('stroke'), width: Number(e.getAttribute('stroke-width')), dash: e.getAttribute('stroke-dasharray') || ''});
-    for (const e of svg.querySelectorAll('text')) if (e.textContent.trim()) texts.push({fill: e.getAttribute('fill'), text: e.textContent});
+  const ct = cornerstoneTools, a = ct.annotation.state.getAllAnnotations().find(a => a.metadata.toolName === 'Length');
+  const style = ct.annotation.config.style.getDefaultToolStyles().global || {};
+  const out = {uid: a?.annotationUID || null, highlighted: !!a?.highlighted, selected: !!(a && ct.annotation.selection.isAnnotationSelected?.(a.annotationUID)),
+    locked: !!(a && ct.annotation.locking.isAnnotationLocked?.(a.annotationUID)), feedback: [style.colorHighlighted, style.colorSelected].filter(Boolean),
+    own: a && ct.annotation.locking.isAnnotationLocked?.(a.annotationUID) ? style.colorLocked : style.color,
+    keyed: 0, shapes: [], texts: []};
+  if (!a) return out;
+  const roots = [...document.querySelectorAll('svg.svg-layer [data-id]')].filter(e => e.getAttribute('data-id').includes(a.annotationUID)), nodes = new Set();
+  out.keyed = roots.length;
+  for (const r of roots) { nodes.add(r); r.querySelectorAll('*').forEach(n => nodes.add(n)); }
+  if (!roots.length) document.querySelectorAll('svg.svg-layer *').forEach(n => nodes.add(n));
+  for (const e of nodes) {
+    if (e.tagName === 'text') { if (e.textContent.trim()) out.texts.push({fill: e.getAttribute('fill'), text: e.textContent}); continue; }
+    if (e.closest('text') || !e.hasAttribute('stroke') || e.getAttribute('stroke') === 'none') continue;
+    out.shapes.push({tag: e.tagName, stroke: e.getAttribute('stroke'), width: Number(e.getAttribute('stroke-width')), dash: e.getAttribute('stroke-dasharray') || ''});
   }
-  return {shapes, texts};
+  return out;
 }'''
+# Everything needed to read a failed wait: every drawn SVG node, the annotations' states and the live styles.
+DIAGNOSIS = '''() => ({
+  svg: [...document.querySelectorAll('svg.svg-layer *')].slice(0, 300).map(e => ({tag: e.tagName, id: e.getAttribute('data-id'),
+    stroke: e.getAttribute('stroke'), width: e.getAttribute('stroke-width'), fill: e.getAttribute('fill'), text: e.tagName === 'text' ? e.textContent : undefined})),
+  annotations: cornerstoneTools.annotation.state.getAllAnnotations().map(a => ({uid: a.annotationUID, tool: a.metadata.toolName,
+    highlighted: a.highlighted, locked: cornerstoneTools.annotation.locking.isAnnotationLocked?.(a.annotationUID),
+    selected: cornerstoneTools.annotation.selection.isAnnotationSelected?.(a.annotationUID), visible: a.isVisible})),
+  styles: cornerstoneTools.annotation.config.style.getDefaultToolStyles(),
+  active: document.activeElement?.outerHTML?.slice(0, 200)})'''
+STYLES = '() => cornerstoneTools.annotation.config.style.getDefaultToolStyles()'
 LENGTH = '''() => { const a = cornerstoneTools.annotation.state.getAllAnnotations().find(a => a.metadata.toolName === 'Length');
   return a && {points: a.data.handles.points, stats: a.data.cachedStats}; }'''
-SELECTION = ['rgb(0, 255, 0)', 'rgb(0, 220, 0)']
+# The mark's own solid lines (the dashed one links the value text).
+SOLID = 'd.shapes.filter(s => !s.dash)'
 
 
 class MarkerStyleE2E(ViewerHistoryE2E):
@@ -42,25 +64,33 @@ class MarkerStyleE2E(ViewerHistoryE2E):
         work.locator('#reading-appearance-open').click()
         expect(work.locator('#appearance-account-save')).to_be_enabled()
 
-    def rest(self, page):
-        # Point at an empty corner of the image and clear the selection, as a reader does, so no
-        # mark is drawn in its hover or selection colour.
+    def until(self, page, condition, label, arg=None, timeout=30000):
+        try:
+            page.wait_for_function('arg => { const d = (' + DRAWN + ')(); return ' + condition + '; }', arg=arg, timeout=timeout)
+        except Exception:
+            folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/marker-style')); folder.mkdir(parents=True, exist_ok=True)
+            (folder / (label + '-diagnosis.json')).write_text(json.dumps({'drawn': page.evaluate(DRAWN), 'page': page.evaluate(DIAGNOSIS)},
+                                                                          ensure_ascii=False, indent=1, default=str), encoding='utf-8')
+            page.screenshot(path=str(folder / (label + '-failed.png')))
+            raise
+        return page.evaluate(DRAWN)
+
+    def rest(self, page, label):
+        # Leave the row's buttons, point at an empty corner of the image and clear the selection, as a reader does,
+        # so the mark is drawn in neither its hover nor its selection colour.
+        page.evaluate('() => document.activeElement?.blur?.()')
         corner = page.evaluate('''() => services.cornerstoneViewportService.getCornerstoneViewport(
             services.viewportGridService.getActiveViewportId()).element.querySelector('canvas').getBoundingClientRect().toJSON()''')
         page.mouse.move(corner['x'] + 30, corner['y'] + 30, steps=4); page.mouse.move(corner['x'] + 8, corner['y'] + 8, steps=4)
         page.evaluate('''() => { cornerstoneTools.annotation.selection.deselectAnnotation?.();
-            for (const engine of cornerstone.getRenderingEngines()) engine.render(); }''')
-        page.wait_for_function('''selection => { const shapes = [...document.querySelectorAll('svg.svg-layer [stroke]')]
-            .filter(e => !e.closest('text') && e.getAttribute('stroke') !== 'none');
-            return shapes.length > 0 && shapes.every(e => !selection.includes(e.getAttribute('stroke'))); }''', arg=SELECTION)
-        return page.evaluate(DRAWN)
+            for (const engine of cornerstone.getRenderingEngines()) for (const v of engine.getViewports())
+              try { cornerstoneTools.utilities.triggerAnnotationRender(v.element); } catch (_) { v.render(); } }''')
+        return self.until(page, SOLID + '.length > 0 && d.shapes.every(s => !d.feedback.includes(s.stroke))', label)
 
-    def wait_drawn(self, page, color, width):
-        page.wait_for_function('''([color, width]) => { const shapes = [...document.querySelectorAll('svg.svg-layer [stroke]')]
-            .filter(e => !e.closest('text') && e.getAttribute('stroke') !== 'none' && !e.getAttribute('stroke-dasharray'));
-            return shapes.length > 0 && shapes.every(e => e.getAttribute('stroke') === color) &&
-              Math.max(...shapes.map(e => Number(e.getAttribute('stroke-width')))) === width; }''', arg=[color, width], timeout=15000)
-        return page.evaluate(DRAWN)
+    def wait_drawn(self, page, color, width, label):
+        # color None: the viewer's own colour for the mark's state (a saved mark reloaded in another window is locked).
+        return self.until(page, SOLID + '.length > 0 && ' + SOLID + '.every(s => s.stroke === (arg[0] ?? d.own)) && Math.max(...' + SOLID +
+                          '.map(s => s.width)) === arg[1]', label, arg=[color, width], timeout=15000)
 
     def test_marker_style_01_open_windows_redraw_and_records_stay(self):
         folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/marker-style'))
@@ -80,8 +110,8 @@ class MarkerStyleE2E(ViewerHistoryE2E):
         expect(row).to_contain_text('저장 완료')
         saved = self.saved(f)
         measured = page.evaluate(LENGTH)
-        base = self.rest(page)
-        base_color = base['shapes'][0]['stroke']
+        base = self.rest(page, 'rest-open')
+        own_styles = page.evaluate(STYLES)
         base_width = max(s['width'] for s in base['shapes'] if not s['dash'])
         page.screenshot(path=str(folder / 'marker-default.png'))
         page.evaluate('window.kinMarkerProbe = 1')
@@ -93,7 +123,7 @@ class MarkerStyleE2E(ViewerHistoryE2E):
         work.locator('#reading-marker-color').select_option('red')
         work.locator('#reading-marker-width').select_option('thick')
         expect(work.locator('#reading-marker-status')).to_contain_text('적용')
-        red = self.wait_drawn(page, 'rgb(255, 64, 64)', base_width * 2)
+        red = self.wait_drawn(page, 'rgb(255, 64, 64)', base_width * 2, 'red-open')
         self.assertTrue(red['texts'] and all(t['fill'] == 'rgb(255, 64, 64)' for t in red['texts']), red['texts'])
         self.assertEqual(page.evaluate('window.kinMarkerProbe'), 1, 'the viewer window was not reloaded')
         self.assertEqual(page.evaluate(LENGTH), measured, 'points and measured values never follow the display choice')
@@ -106,8 +136,8 @@ class MarkerStyleE2E(ViewerHistoryE2E):
         other.goto(self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + f.uid)
         self.open_measurement_tools(other)
         other.wait_for_function("() => cornerstoneTools.annotation.state.getAllAnnotations().some(a => a.metadata.toolName === 'Length')", timeout=60000)
-        self.rest(other)
-        self.wait_drawn(other, 'rgb(255, 64, 64)', base_width * 2)
+        self.rest(other, 'rest-new')
+        self.wait_drawn(other, 'rgb(255, 64, 64)', base_width * 2, 'red-new')
 
         # The account keeps the choice; an older-format save cannot replace it.
         work.locator('#appearance-account-save').click()
@@ -118,9 +148,9 @@ class MarkerStyleE2E(ViewerHistoryE2E):
 
         # Reset returns both windows to the viewer's own style.
         work.locator('#reading-marker-reset').click()
-        for target in [page, other]:
-            back = self.wait_drawn(target, base_color, base_width)
-            self.assertTrue(all(t['fill'] == base['texts'][0]['fill'] for t in back['texts']))
+        for target, label in [(page, 'reset-open'), (other, 'reset-new')]:
+            self.wait_drawn(target, None, base_width, label)
+            self.assertEqual(target.evaluate(STYLES), own_styles, 'Default/Standard is the viewer style exactly')
         self.assertEqual(page.evaluate(LENGTH), measured)
         (folder / 'marker-style.json').write_text(json.dumps({'study': f.uid, 'base': base, 'red': red, 'stored': stored['sizes']['markers']},
                                                              ensure_ascii=False, indent=2), encoding='utf-8')
