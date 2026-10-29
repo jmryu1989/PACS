@@ -130,7 +130,9 @@ async function setup({policies=()=>[],studies}={}){
     $queryRaw:async(strings)=>{const sql=strings.join('?');if(sql.includes('StudyAccessPolicy')){seq.push('policy');return policies(++policyReads);}return [];},
   };
   const orthanc={studies:studies||(async()=>structuredClone(QIDO)),
-    studyIdentities:async(...args)=>structuredClone(QIDO).map(r=>({'0020000D':r['0020000D'],'00080080':r['00080080'],...(args[1]?{'00080050':r['00080050']??val('')}:{})})),
+    studyIdentities:async(accessMetadata,accession)=>structuredClone(QIDO).map(r=>({'0020000D':r['0020000D'],'00080080':r['00080080'],
+      ...(accessMetadata?{'00100020':r['00100020'],'00080020':r['00080020'],'00080061':r['00080061']}:{}),
+      ...(accession?{'00080050':r['00080050']??val('')}:{})})),
     studiesByUid:async uids=>uids.map(uid=>structuredClone(QIDO).find(r=>r['0020000D'].Value[0]===uid))};
   const svc=new PacsService(prisma,orthanc,{},new StudyAccessService(prisma,orthanc,{}));
   await start(svc,prisma,[{id:'hallym',name:'hallym'},{id:'kin-center',name:'kin-center'}]);

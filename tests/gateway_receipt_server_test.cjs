@@ -174,7 +174,9 @@ test('S4-U3 list: only own rows carry the stored receipt; tele, stray and absent
     auditLog:{create:async()=>{throw new Error('no audit expected');}},$queryRaw:async()=>[],
   };
   const orthanc={studies:async()=>structuredClone(QIDO),
-    studyIdentities:async()=>structuredClone(QIDO).map(r=>({'0020000D':r['0020000D'],'00080080':r['00080080']})),
+    studyIdentities:async(accessMetadata,accession)=>structuredClone(QIDO).map(r=>({'0020000D':r['0020000D'],'00080080':r['00080080'],
+      ...(accessMetadata?{'00100020':r['00100020'],'00080020':r['00080020'],'00080061':r['00080061']}:{}),
+      ...(accession?{'00080050':r['00080050']}:{})})),
     studiesByUid:async uids=>structuredClone(QIDO).filter(r=>uids.includes(r['0020000D'].Value[0]))};
   const svc=new PacsService(prisma,orthanc,{},new StudyAccessService(prisma,orthanc,{}));
   await start(svc,prisma,[{id:'hallym',name:'hallym'},{id:'kin-center',name:'kin-center'}]);
@@ -234,7 +236,9 @@ test('S4-F01V list: an absent own study carries only its own receipt, read befor
     $queryRaw:async strings=>{if(strings.join('?').includes('"StudyAccessPolicy"'))log.push(['policy']);return [];},
   };
   const orthanc={studies:async()=>structuredClone(qido),
-    studyIdentities:async()=>structuredClone(qido).map(r=>({'0020000D':r['0020000D'],'00080080':r['00080080']})),
+    studyIdentities:async(accessMetadata,accession)=>structuredClone(qido).map(r=>({'0020000D':r['0020000D'],'00080080':r['00080080'],
+      ...(accessMetadata?{'00100020':r['00100020'],'00080020':r['00080020'],'00080061':r['00080061']}:{}),
+      ...(accession?{'00080050':r['00080050']}:{})})),
     studiesByUid:async uids=>structuredClone(qido).filter(r=>uids.includes(r['0020000D']?.Value?.[0]))};
   const svc=new PacsService(prisma,orthanc,{},new StudyAccessService(prisma,orthanc,{}));
   await start(svc,prisma,[{id:'hallym',name:'hallym'},{id:'kin-center',name:'kin-center'}]);
@@ -313,7 +317,9 @@ test('S5-U6a admin view: each institution admin sees only its own receipts, ever
     auditLog:{create:async()=>{throw new Error('no audit expected');}},$queryRaw:async()=>[],
   };
   const orthanc={studies:async()=>structuredClone(QIDO),
-    studyIdentities:async()=>structuredClone(QIDO).map(r=>({'0020000D':r['0020000D'],'00080080':r['00080080']})),
+    studyIdentities:async(accessMetadata,accession)=>structuredClone(QIDO).map(r=>({'0020000D':r['0020000D'],'00080080':r['00080080'],
+      ...(accessMetadata?{'00100020':r['00100020'],'00080020':r['00080020'],'00080061':r['00080061']}:{}),
+      ...(accession?{'00080050':r['00080050']}:{})})),
     studiesByUid:async uids=>structuredClone(QIDO).filter(r=>uids.includes(r['0020000D'].Value[0]))};
   const svc=new PacsService(prisma,orthanc,{},new StudyAccessService(prisma,orthanc,{}));
   await start(svc,prisma,[{id:'hallym',name:'hallym'},{id:'kin-center',name:'kin-center'}]);
