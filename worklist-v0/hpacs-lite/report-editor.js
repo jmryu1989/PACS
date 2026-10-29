@@ -207,6 +207,20 @@
     }
 
     /**
+     * Minhoon item 8 (2026-10-27): the editor is marked Editable only where typing would be accepted now. The answer is the
+     * frame's own edit gate (canEdit above: the page's work state, a Reading Target, reportEditorBlock), so the mark and a
+     * refused keystroke never disagree; Read Only carries the gate's reason. In Related Report mode the editor stays on
+     * screen with the draft, and Resume Editing beside the mark is the mode's Back.
+     */
+    function renderEditorState() {
+      const why = work.state() !== "active" ? "판독 화면이 지금 편집을 받지 않습니다." : !selectedUid ? "검사를 선택하세요" : reportEditorBlock();
+      $("#report-editor").dataset.editable = String(!why);
+      $("#report-editor-state").textContent = why ? "Read Only" : "Editable";
+      $("#report-editor-why").textContent = $("#report-editor-why").title = why || "";
+      $("#report-editor-resume").hidden = !relatedMode.active();
+    }
+
+    /**
      * 초안 표시줄.
      *
      * 초안을 사람에게 붙이고 나면 화면이 확정본이 아닌 것을 보여줄 수 있게 된다.
@@ -222,6 +236,7 @@
       if (reportNotice || reportNoticeShown) renderReportNotice();
       // W5: the Reading Target card of Related Report mode shows this same draft state.
       relatedMode.refresh();
+      renderEditorState();
       const bar = $("#draftbar");
       const r = appState[selectedUid] ?? {};
       const d = r.prelimHidden ? null : r.draft;

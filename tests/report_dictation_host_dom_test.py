@@ -1219,7 +1219,10 @@ class ReportDictationHostDOMTest(unittest.TestCase):
                paneContentRight: pane.getBoundingClientRect().right - parseFloat(cs.paddingRight) - parseFloat(cs.borderRightWidth),
                status: box($('#dictation-status')), meta: box(meta), actions: box(actions),
                text: { ...box(text), client: text.clientHeight, scroll: text.scrollHeight, line },
-               note: box($('#recnote')), redit: box($('.redit')), reditMin: parseFloat(getComputedStyle($('.redit')).minHeight) || 0,
+               note: box($('#recnote')), redit: box($('.redit')),
+               // Minhoon item 8: the reading layout's minimum is on the editor row (the fields' scroller, its head row and
+               // Clinical Context beside it), not on the scroller alone.
+               editorRow: box($('.report-compose')), editorRowMin: parseFloat(getComputedStyle($('.report-compose')).minHeight) || 0,
                rfoot: box($('.rfoot2')), frame: box($('#frame')), cap: Math.min(innerHeight * 0.3, 168),
                panelScrolls: ['auto', 'scroll'].includes(getComputedStyle($('.report-p')).overflowY),
                fields: ['findings', 'conclusion'].map(k => [k, $('#' + k).getBoundingClientRect().height,
@@ -1327,8 +1330,8 @@ class ReportDictationHostDOMTest(unittest.TestCase):
                                            msg="with room the pane takes the plain cap: " + where)
                 else:
                     self.assertLess(value["pane"]["height"], value["cap"] - 1, "a short column: the pane gives way: " + where)
-                    self.assertGreaterEqual(value["redit"]["height"] + 0.5, value["reditMin"], where)
-                self.assertGreater(value["reditMin"], 0, "the reading layout's field minimum applies: " + where)
+                    self.assertGreaterEqual(value["editorRow"]["height"] + 0.5, value["editorRowMin"], where)
+                self.assertGreater(value["editorRowMin"], 0, "the reading layout's editor row minimum applies: " + where)
                 self.assert_stacked(value, where, footer="column")
                 self.assertGreater(value["text"]["line"], 0, "the transcript line has a stated pitch: " + where)
                 self.assertLess(value["actions"]["width"], value["paneContentWidth"] - 1,

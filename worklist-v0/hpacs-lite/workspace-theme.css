@@ -56,9 +56,8 @@ tbody tr.sel td { background: var(--kin-row-sel); }
 .thumb-description, .thumb-images-view > p { color: var(--kin-muted); }
 .thumb-images-toolbar select, .tpl-opts select, .tpl-search input { background: var(--kin-bg); color: var(--kin-text); border-color: var(--kin-line2); }
 .tpl-opts { background: var(--kin-panel); color: var(--kin-muted); }
-.tpl-filter-status, .clinical, .s-clinical .clinical-context, .clinical-context .cc-note, .clinical-context .cc-source { color: var(--kin-muted); }
+.tpl-filter-status, .clinical, .clinical-context, .clinical-context .cc-note, .clinical-context .cc-source { color: var(--kin-muted); }
 .clinical-context .cc-section-head { color: var(--kin-text); }
-.s-clinical .clinical-context { border-top-color: var(--kin-line2); }
 .clinical-context .cc-state, .clinical-context .cc-badge { border-color: var(--kin-line2); }
 .clinical-context-head h4, #clinical-context-scope, .clinical td:first-child { color: var(--kin-muted); }
 
@@ -69,6 +68,22 @@ tbody tr.sel td { background: var(--kin-row-sel); }
 
 /* Report editor and the rows under it. */
 .redit label { color: var(--kin-muted); }
+
+/* Minhoon item 8 (2026-10-27): clear borders between panels. Each work panel and each part of the Related and report
+   panels is edged in secondary text at half strength (the five colours only). Outlines drawn inside the box: no panel
+   moves or changes size, and a focus outline still replaces the edge of the pane it marks. */
+.rw > section, .related-p, .related-list-pane, .prior-report-pane, .report-p, .report-editor, .report-compose > .clinical-context {
+  outline: 1px solid #b4b4b480; outline-offset: -1px; }
+/* The editor says whether the reader can write in it now (renderEditorState): Editable is the accent, Read Only is not. */
+.report-editor-head b { color: var(--kin-text); }
+#report-editor-why { color: var(--kin-muted); }
+.report-editor-state { color: var(--kin-muted); border-color: var(--kin-line2); }
+.report-editor[data-editable="true"] { outline: 2px solid var(--kin-accent); outline-offset: -2px; }
+.report-editor[data-editable="true"] .report-editor-state { color: var(--kin-bg); background: var(--kin-accent); border-color: var(--kin-accent); }
+.report-editor[data-editable="false"] .redit textarea { border-style: dashed; }
+#report-editor-resume { padding: 1px 8px; border: 1px solid var(--kin-accent); border-radius: 3px; background: var(--kin-panel); color: var(--kin-text);
+  cursor: pointer; font-size: 11px; }
+#report-editor-resume:focus-visible { outline: 2px solid var(--kin-accent); outline-offset: 1px; }
 .recnote, #citelist { background: var(--kin-panel); border-top-color: var(--kin-line2); color: var(--kin-text); }
 #recnote-text, #citelist h5 { color: var(--kin-text); }
 #citelist .cite-note { color: var(--kin-muted); }
