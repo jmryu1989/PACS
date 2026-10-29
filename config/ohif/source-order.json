@@ -30,6 +30,7 @@
     "three-d-cursor.js",
     "dicom-pdf.js",
     "series-recovery.js",
+    "image-load-status.js",
     "context-loss.js",
     "mammography-hanging.js",
     "mg-reference-lines.js",
