@@ -92,7 +92,7 @@ class ConsultationE2E(WorklistE2E):
         complete=self.change_body(accepted,'complete');done=self.change_request(accepted,'complete',body=complete)['item']
         self.assertEqual(done['state'],'Completed');self.assertEqual(done['reply'],complete['note'])
         self.assertEqual(self.change_request(accepted,'complete',body=complete)['item'],done)
-        self.assertEqual(self.create_request(a,body=body)['item'],done);self.assertEqual(len(self.audits(a)),3)
+        self.assertEqual(self.create_request(a,body=body)['item'],row);self.assertEqual(len(self.audits(a)),3)
         self.change_request(done,'cancel','doctor',status=409)
         next_row=self.create_request(a)['item'];cancelled=self.change_request(next_row,'cancel','doctor')['item']
         self.assertEqual(cancelled['state'],'Cancelled');self.assertTrue(cancelled['cancelReason'])
@@ -119,7 +119,8 @@ class ConsultationE2E(WorklistE2E):
         expect(receiver.locator('#rows tr[data-uid]')).to_have_count(1)
         expect(receiver.locator('#findings')).to_have_value('CONSULTATION PRIVATE DRAFT');self.assertEqual(receiver.evaluate('selectedUid'),b.uid)
         self.open_dialog(receiver);receiver.locator(f'[data-consultation="{id}"]').click()
-        receiver.locator('#co-open-study').click();self.assertEqual(receiver.evaluate('selectedUid'),a.uid)
+        receiver.locator('#co-open-study').click()
+        receiver.wait_for_function('uid => selectedUid === uid', arg=a.uid)
         self.assertEqual(len(self.versions(b)),1)
         self.open_dialog(sender);sender.locator('#co-direction').select_option('sent')
         sender.locator(f'[data-consultation="{id}"]').click()

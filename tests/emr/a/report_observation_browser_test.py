@@ -22,7 +22,7 @@ Cases:
      Playwright keeps the pages of its own contexts visible (focus emulation), so this case signs in through the first
      tab of a Chromium started for it and reached with connect_over_cdp(no_defaults=True), where a tab behind another
      tab is really hidden.
-  07 A Source answer drawn while Unmatched Studies (a class-based modal) covers the page is reported once the reader
+  07 A Source answer drawn while Report History (a class-based modal) covers the page is reported once the reader
      closes the modal, as the same single event.
 """
 from __future__ import annotations
@@ -494,8 +494,7 @@ class ReportObservationBrowser(base.WorklistE2E):
         self.evidence(page, "account-switch", shown=shown)
 
     def test_a5_07_a_source_drawn_under_a_modal_is_reported_when_the_modal_closes(self):
-        # Unmatched Studies is the page's own class-based modal (it closes by dropping .show, with no close event and no
-        # change of the Source's place on screen); only an administrator opens it.
+        # Report History closes by dropping .show, without a close event or moving the Source on screen.
         target, source = self.pair()
         page = self.login("jmryu")
         sent = self.reports(page)
@@ -505,9 +504,9 @@ class ReportObservationBrowser(base.WorklistE2E):
         page.locator(f'#relrows tr[data-uid="{source.uid}"] td').first.click()
         expect(page.locator("#related-mode")).to_be_visible()
         self.wait_ledger(page, lambda: held, lambda v: len(v) == 1, "the held Source read")
-        self.open_toolbar_group(page, "#m-unassigned")
-        page.locator("#m-unassigned").click()
-        expect(page.locator("#unmodal")).to_be_visible()
+        self.open_toolbar_group(page, "#b-history")
+        page.locator("#b-history").click()
+        expect(page.locator("#histmodal")).to_be_visible()
         route, answer = held[0]
         route.fulfill(response=answer)
         release()
@@ -517,8 +516,8 @@ class ReportObservationBrowser(base.WorklistE2E):
         self.assertEqual(self.shown(source.uid), [])
         self.evidence(page, "under-modal")
 
-        page.locator("#un-close").click()
-        expect(page.locator("#unmodal")).to_be_hidden()
+        page.locator("#hist-close").click()
+        expect(page.locator("#histmodal")).to_be_hidden()
         shown = self.wait_ledger(page, lambda: self.shown(source.uid), lambda v: len(v) == 1, "the display once uncovered")
         self.wait_ledger(page, lambda: sent, lambda v: len(v) == 1 and v[0]["status"] == 200, "the acknowledgement")
         event = shown[0]

@@ -527,7 +527,8 @@ async function authFailure() {
       { provide: StudyAccessService, useFactory: prisma => new StudyAccessService(prisma, {}, {}), inject: [PrismaService] },
       { provide: AuthService, useClass: AuthType }, { provide: EMR_RECORD_PORT, useValue: runtime.port },
       { provide: EMR_BACKGROUND_WORK, useValue: runtime.background.work }] })(AuthFixture);
-    app = await NestFactory.create(AuthFixture, { logger: false });
+    // Surface DI errors to the test runner even while routine Nest logs are disabled.
+    app = await NestFactory.create(AuthFixture, { logger: false, abortOnError: false });
     await app.listen(0, '127.0.0.1');
     return await app.getUrl();
   }
@@ -666,7 +667,8 @@ async function authSuccess(endings = false) {
       { provide: StudyAccessService, useFactory: prisma => new StudyAccessService(prisma, {}, {}), inject: [PrismaService] },
       { provide: AuthService, useClass: AuthType }, { provide: EMR_RECORD_PORT, useValue: observedPort },
       { provide: EMR_BACKGROUND_WORK, useValue: runtime.background.work }, {provide: APP_GUARD, useClass: AuthGuard}] })(AuthFixture);
-    app = await NestFactory.create(AuthFixture, { logger: false });
+    // Surface DI errors to the test runner even while routine Nest logs are disabled.
+    app = await NestFactory.create(AuthFixture, { logger: false, abortOnError: false });
     app.setGlobalPrefix('api');
     const interval = global.setInterval;
     global.setInterval = (callback, delay, ...args) => {
