@@ -12,6 +12,7 @@ import uuid
 
 from playwright.sync_api import expect
 from document_session import document_request
+from network_faults import route_first
 from test_viewer_layout import ViewerLayoutE2E
 from test_prior_selection import canvas_ready
 
@@ -179,7 +180,7 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
         expect(panel.get_by_role('row')).to_have_count(3)
         row = self.row(panel, 'reset prior')
         endpoint = '**/api/studies/' + x.uid + '/report/versions'
-        page.route(endpoint, lambda route: route.fulfill(status=503, body='Unavailable'), times=1)
+        route_first(page, endpoint, lambda route: route.fulfill(status=503, body='Unavailable'))
         row.get_by_role('button', name='Report', exact=True).click()
         expect(report.get_by_role('button', name='Retry', exact=True)).to_be_visible()
         with page.expect_response(lambda response: response.url.endswith('/' + x.uid + '/report/versions')) as reply:
@@ -189,13 +190,13 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
         expect(report).not_to_contain_text('Superseded approval')
         report.get_by_role('button', name='Close', exact=True).click()
         panel.get_by_role('button', name='Close', exact=True).click()
-        page.route('**/api/studies', lambda route: route.fulfill(status=503, body='Unavailable'), times=1)
+        route_first(page, '**/api/studies', lambda route: route.fulfill(status=503, body='Unavailable'))
         page.get_by_role('region', name='Viewport Information').get_by_role('button', name='Study', exact=False).click()
         expect(panel.get_by_role('button', name='Retry', exact=True)).to_be_visible()
         panel.get_by_role('button', name='Retry', exact=True).click()
         expect(panel.get_by_role('table')).to_be_visible()
         panel.get_by_role('button', name='Close', exact=True).click()
-        page.route('**/api/studies', lambda route: route.fulfill(json={'studies': []}), times=1)
+        route_first(page, '**/api/studies', lambda route: route.fulfill(json={'studies': []}))
         page.get_by_role('region', name='Viewport Information').get_by_role('button', name='Study', exact=False).click()
         expect(panel).to_contain_text('검사를 확인할 수 없습니다.')
         expect(panel.get_by_role('table')).to_have_count(0)
@@ -234,7 +235,7 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
                 except Exception: pass  # The replaced request has been aborted.
         def hold_x():
             held = []
-            page.route('**/api/studies/' + x.uid + '/report/versions', lambda route: held.append((route, route.fetch())), times=1)
+            route_first(page, '**/api/studies/' + x.uid + '/report/versions', lambda route: held.append((route, route.fetch())))
             return held
         held = hold_x()
         with page.expect_request(lambda r: r.url.endswith('/' + x.uid + '/report/versions')):
@@ -298,8 +299,8 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
         work, page = self.open_viewer(current)
         panel = self.studies(page)
         held = []
-        page.route('**/dicom-web/studies/' + x.uid + '/**',
-                   lambda route: held.append((route, route.fetch())), times=1)
+        route_first(page, '**/dicom-web/studies/' + x.uid + '/**',
+                   lambda route: held.append((route, route.fetch())))
         with page.expect_request(lambda request: '/dicom-web/studies/' + x.uid + '/' in request.url):
             panel.get_by_role('button', name='D03A delayed X', exact=True).click()
         expect(panel).to_contain_text('영상을 불러오는 중')
@@ -315,8 +316,8 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
         self.identity(page, expected)
         panel = self.studies(page, 1)
         reports = []
-        page.route('**/api/studies/' + y.uid + '/report/versions',
-                   lambda route: reports.append((route, route.fetch())), times=1)
+        route_first(page, '**/api/studies/' + y.uid + '/report/versions',
+                   lambda route: reports.append((route, route.fetch())))
         self.row(panel, 'chosen Y').get_by_role('button', name='Report', exact=True).click()
         report = self.report_panel(page)
         expect(report).to_contain_text('불러오는 중')
@@ -451,8 +452,8 @@ class ViewerUXPriorsE2E(ViewerLayoutE2E):
         page.get_by_role('button', name='Reload Settings', exact=True).click()
         layout(page, True)
         # A failed write leaves the saved default and exposes recovery.
-        fresh.route('**/api/workspace-shortcuts', lambda route: route.fulfill(status=503, json={'message':'Synthetic unavailable'})
-                    if route.request.method == 'PUT' else route.continue_(), times=1)
+        route_first(fresh, '**/api/workspace-shortcuts', lambda route: route.fulfill(status=503, json={'message':'Synthetic unavailable'})
+                    if route.request.method == 'PUT' else route.continue_())
         with fresh.expect_response(lambda r: r.url.endswith('/api/workspace-shortcuts') and r.request.method == 'PUT') as reply:
             fresh.locator('#kin-mammography-hanging').get_by_label('MG Layout', exact=True).select_option('current')
         self.assertEqual(reply.value.status, 503)

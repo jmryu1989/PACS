@@ -26,8 +26,13 @@ window.KinViewerSeriesStrip = (() => {
     const patient = () => window.KinViewerPatientTabs.snapshot();
     const samePatient = snapshot => {
       const now = patient();
-      return !!now && !!snapshot && now.key === snapshot.key && now.sequence === snapshot.sequence;
+      return !now && !snapshot || !!now && !!snapshot && now.key === snapshot.key && now.sequence === snapshot.sequence;
     };
+    function patientReady(snapshot) {
+      if (samePatient(snapshot)) return true;
+      services.uiNotificationService?.show({ title: 'Series', message: '환자 전환이 끝난 뒤 시리즈를 다시 선택하세요.', type: 'info' });
+      return false;
+    }
     function panes() {
       const ids = [...grid.getState().viewports.keys()];
       const nodes = [...document.querySelectorAll('[data-cy="viewport-grid"] [data-cy="viewport-pane"]')];
@@ -78,7 +83,7 @@ window.KinViewerSeriesStrip = (() => {
       return true;
     }
     function assign(series, expectedStudy, id = grid.getActiveViewportId(), snapshot = patient()) {
-      if (ended || !samePatient(snapshot) || !grid.getState().viewports.has(id) || !canReplace()) return;
+      if (ended || !patientReady(snapshot) || !grid.getState().viewports.has(id) || !canReplace()) return;
       const viewport = services.cornerstoneViewportService.getCornerstoneViewport(id);
       if (viewport && viewport.type !== 'stack') {
         services.uiNotificationService?.show({ title: 'Series', message: '2D 영상 칸에 시리즈를 놓으세요.', type: 'info' }); return;
@@ -107,10 +112,13 @@ window.KinViewerSeriesStrip = (() => {
         const imageId = current.viewport?.getCurrentImageId?.();
         const instance = imageId && window.cornerstone.metaData.get('instance', imageId);
         if (imageId && load.watched !== imageId && instance?.SeriesInstanceUID === load.series && instance?.StudyInstanceUID === load.study) {
-          load.watched = imageId;
-          // Share the native loader's promise: grid assignment itself completes
-          // before a frame loads and cannot report a decode/network failure.
-          window.cornerstone.imageLoader.loadAndCacheImage(imageId).catch(error => showLoad(load, error));
+          // Observe only the viewport's load; starting one here could cache an
+          // image with different scaling/buffer options before the viewport does.
+          const pending = window.cornerstone.cache.getImageLoadObject(imageId);
+          if (pending) {
+            load.watched = imageId;
+            pending.promise.catch(error => showLoad(load, error));
+          }
         }
       }
     }
@@ -176,7 +184,7 @@ window.KinViewerSeriesStrip = (() => {
           card.onclick = () => assign(series, study, grid.getActiveViewportId(), stripPatient);
           card.draggable = true;
           card.ondragstart = event => {
-            const snapshot = stripPatient; if (!samePatient(snapshot) || !canReplace()) { event.preventDefault(); return; }
+            const snapshot = stripPatient; if (!patientReady(snapshot) || !canReplace()) { event.preventDefault(); return; }
             dragging = { series, study, patient: snapshot };
             event.dataTransfer.setData('application/x-kin-series', JSON.stringify({ series, study }));
             event.dataTransfer.effectAllowed = 'copy';
@@ -251,7 +259,15 @@ window.KinViewerSeriesStrip = (() => {
       if (uid !== next) { load(next); return; }
       for (const [series, card] of cards) card.setAttribute('aria-pressed', String(series === current.set?.SeriesInstanceUID));
     }
+    const stopPatient = window.KinViewerPatientTabs.subscribe(() => {
+      const next = patient();
+      // A cancelled switch can publish a newer generation of the same tab
+      // while its active comparison cell is vacant.
+      if (next && (stripPatient?.key === next.key || !stripPatient && next.studyUIDs.includes(uid))) stripPatient = next;
+      refresh();
+    });
     return { refresh, place, dispose() {
+      stopPatient();
       ended = true; events.abort(); finishDrag(); [...loads.keys()].forEach(clearLoad);
       clear(); host?.remove(); slot?.remove();
     } };

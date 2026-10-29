@@ -434,6 +434,35 @@ test('TEST-D-01 clinical_vs_operational: planned kinds belong to the A route and
 for (const [surface, author, create] of [
   ['image-request.cancel', c1, imageRequest], ['consultation.cancel', r1, consultation],
 ]) {
+  test(`TEST-D-01 optional cancellation: ${surface} preserves and signs a whitespace note from the real plan`, () => {
+    const unit = create(), note = '   ';
+    const p = plan(surface, author, unit, changeBody(author, unit, 'cancel', note));
+    const next = R.applyPlan(unit, p);
+    assert.equal(next.state, 'Cancelled');
+    assert.equal(next.revision, unit.revision + 1);
+    assert.deepEqual(next.versions.slice(0, -1), unit.versions);
+    assert.equal(p.version.reason, note);
+    assert.equal(p.version.entry, 'clinical-entry');
+    const s = p.signing;
+    assert.ok(s);
+    const key = ServerCrypto.generateServerKeyPair();
+    const signed = ServerCrypto.signServerPayload({
+      formatVersion: 'emr-signature/1', text: { kind: 'clinical-entry', body: s.content.body }, patient: s.patient,
+      studyId: s.studyId, managingInstitutionId: s.managingInstitutionId, actingInstitutionId: s.actingInstitutionId,
+      recordKind: s.recordKind, recordId: s.recordId, versionId: s.versionId, author: s.author, signer: s.signer,
+      identityRegistrationId: s.identityRegistrationId, action: s.action, previousVersion: s.previousVersion,
+      attachments: s.attachments, reason: s.reason,
+    }, 'synthetic-cancel-key', key.privateKey);
+    const payload = JSON.parse(S.inspectSignatureEnvelope(signed.envelope).payloadBytes.toString('utf8'));
+    assert.equal(payload.reason, note);
+    assert.equal(payload.text.body, s.content.body);
+    assert.equal(payload.recordId, unit.recordId);
+    assert.equal(payload.action, 'cancel');
+    assert.equal(require('node:crypto').verify('sha256',
+      Buffer.from(signed.envelope.protected + '.' + signed.envelope.payload, 'ascii'),
+      { key: require('node:crypto').createPublicKey({ key: key.publicKey, format: 'jwk' }), dsaEncoding: 'ieee-p1363' },
+      Buffer.from(signed.envelope.signature, 'base64url')), true);
+  });
   test(`TEST-D-01 optional cancellation: ${surface} accepts an empty note and its signature payload accepts a null reason`, () => {
     const unit = create();
     const p = plan(surface, author, unit, changeBody(author, unit, 'cancel', ''));

@@ -115,16 +115,20 @@ class ViewerToolsE2E(ViewerHistoryE2E):
                 .find(v => v.type === 'stack' && v.getCurrentImageId() === a.metadata.referencedImageId);
             const rect = v.element.getBoundingClientRect();
             return { points:a.data.handles.points, stats:Object.values(a.data.cachedStats)[0],
+                imagePoints:a.data.handles.points.map(point => Array.from(v.getImageData().imageData.worldToIndex(point))),
                 canvas:a.data.handles.points.map(point => { const p = v.worldToCanvas(point); return [p[0] + rect.x, p[1] + rect.y]; }) }; }''')
 
     def check_values(self, page, fixture, modality):
         annotation = self.ellipse(page)
-        bottom, top, left, right = np.array(annotation['points'])
+        ds = self.source_dicom(fixture)
+        # Keep fractional handle coordinates: voxel-index rounding changes the ROI.
+        # Image coordinates identify the reader's handles; DICOM supplies the
+        # physical spacing independently of the renderer's chosen world scale.
+        bottom, top, left, right = np.array(annotation['imagePoints']) * [float(ds.PixelSpacing[1]), float(ds.PixelSpacing[0]), 1]
         ru, rv = np.linalg.norm(right - left) / 2, np.linalg.norm(bottom - top) / 2
         annotation['area'] = math.pi * ru * rv
         if modality == 'CT':
             self.assertAlmostEqual(annotation['stats']['area'], annotation['area'], delta=.01)
-            ds = self.source_dicom(fixture)
             center = (bottom + top + left + right) / 4
             yy, xx = np.mgrid[:int(ds.Rows), :int(ds.Columns)]
             world = np.stack([xx * float(ds.PixelSpacing[1]), yy * float(ds.PixelSpacing[0]), np.zeros_like(xx)], axis=-1)
@@ -324,17 +328,26 @@ class ViewerStackControlsE2E(DisplayControlsE2E):
                 page.wait_for_function('index => services.viewportGridService.getState().activeViewportId === [...services.viewportGridService.getState().viewports.keys()][index]', arg=cell)
                 series_cards[card].click()
         if use_drop:
+            def feedback(cell):
+                expect(cell).to_be_visible()
+                value = cell.evaluate('''el => { const s = getComputedStyle(el, '::after');
+                    return {text:s.content, color:s.color, background:s.backgroundColor,
+                        visible:s.display !== 'none' && s.visibility === 'visible' && Number(s.opacity) > 0 && parseFloat(s.fontSize) > 0}; }''')
+                self.assertIn('Drop Series', value['text'])
+                self.assertTrue(value['visible'])
+                self.assertNotEqual(value['color'], value['background'])
+                return value
             card_box, cell_box = series_cards[1].bounding_box(), cells.nth(1).bounding_box()
             page.mouse.move(card_box['x'] + card_box['width']/2, card_box['y'] + card_box['height']/2)
             page.mouse.down()
             page.mouse.move(cell_box['x'] + cell_box['width']/2, cell_box['y'] + cell_box['height']/2, steps=15)
-            expect(cells.nth(1)).to_have_css('outline-style', 'solid')
-            expect(cells.nth(0)).to_have_css('outline-style', 'dashed')
+            hovered, available = feedback(cells.nth(1)), feedback(cells.nth(0))
+            self.assertNotEqual(hovered, available, 'the hovered drop target is visually distinct')
             page.screenshot(path=str(folder/'compare-drag-feedback.png'))
             page.mouse.move(card_box['x'] + card_box['width']/2, card_box['y'] + card_box['height']/2, steps=15)
-            expect(cells.nth(1)).to_have_css('outline-style', 'dashed')
+            self.assertEqual(feedback(cells.nth(1)), available)
             page.mouse.move(cell_box['x'] + cell_box['width']/2, cell_box['y'] + cell_box['height']/2, steps=15)
-            expect(cells.nth(1)).to_have_css('outline-style', 'solid')
+            self.assertEqual(feedback(cells.nth(1)), hovered)
             page.mouse.up()
         else:
             assign(1, 1)
