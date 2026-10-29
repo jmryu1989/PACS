@@ -1155,9 +1155,9 @@
     <div class="item" title="Config — 추후 구현">⚙ <span class="item-label">Config</span></div>
     <div class="item" title="Help — 추후 구현">? <span class="item-label">Help</span></div>
     <div class="item" id="m-filmbox">⇄ Filmbox</div>
-    <!-- 기관을 못 알아본 검사. 관리자에게만 보인다 — 평소엔 0건이라 숨어 있다. -->
-    <div class="item" id="m-unassigned" style="display:none;color:#d8b24a"
-         title="DICOM 기관명을 알아보지 못해 어느 워크리스트에도 안 뜨는 검사">⚠ Unmatched Studies</div>
+    <!-- D1882 수신 보류 알림. 관리자에게만, 보류가 있을 때만 보인다 — 평소엔 0건이라 숨어 있다. -->
+    <a class="item" id="m-held" href="admin.html#held-sources" style="display:none;color:#d8b24a;text-decoration:none"
+       title="보낸 병원을 확인하지 못해 보류된 검사가 있습니다. 관리 화면 Held Studies에서 병원과 확인한 장비·기관명 표기를 등록하세요.">⚠ Held Studies</a>
     <div class="spacer"></div>
     <div class="menubar-status" role="group" aria-label="Status">
       <div class="mright">Prefetch <input type="checkbox" aria-label="Prefetch" checked></div>
@@ -1849,21 +1849,6 @@
         <button id="stale-discard" type="button">Discard Draft</button>
         <button class="ok" id="stale-rebase" type="button">Rebase</button>
       </div>
-    </div>
-  </div>
-
-  <!-- 미배정 검사 (관리자) -->
-  <div class="modal" id="unmodal">
-    <div class="box" style="width:720px;max-width:94vw">
-      <h3>Unmatched Studies</h3>
-      <div style="padding:8px 12px;color:#8892a4;font-size:11px;line-height:1.6">
-        DICOM <code>InstitutionName(0008,0080)</code>이 등록된 별칭과 안 맞아 어느 기관에도
-        속하지 않은 검사입니다. <b>어느 워크리스트에도 안 뜹니다.</b><br>
-        아래 "DICOM 기관명"을 보고 판단해 배정하거나, 장비 설정·별칭
-        (<code>Institution.dicomNames</code>)을 고치세요.
-      </div>
-      <div class="hist" id="un-body" style="padding:0 12px"></div>
-      <div class="foot"><button class="ok" id="un-close">Close</button></div>
     </div>
   </div>
 

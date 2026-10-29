@@ -92,6 +92,16 @@ export function adminAuditRead(body: any, ids: readonly number[]): LocalReadResp
     consumerSource('access-audit', null, body.institutionId, String(ids[index]), null, ['rows', index])));
 }
 
+/**
+ * A-027 (D1881): GET audit records every returned row to the institution PacsAudit.auditRead selected with it - the
+ * recorded institution of a row that has one, else the study's current owner. A row without either refuses the whole
+ * response (consumerSource), never a partly recorded one.
+ */
+export function studyAuditRead(read: { rows: any[]; managing: readonly (string | null)[] }): LocalReadResponse {
+  return new LocalReadResponse(read.rows, read.rows.map((row, index) =>
+    consumerSource('access-audit', row.target, read.managing[index], String(row.id), null, [index])));
+}
+
 /** Existing classification logs organization reads even before clinical adoption; filtered UID lists stay filtered. */
 export function organizationRead(body: any, catalogs: boolean): LocalReadResponse {
   const [institution, subject] = body.owner;

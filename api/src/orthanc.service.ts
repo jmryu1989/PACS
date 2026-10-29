@@ -416,6 +416,41 @@ export class OrthancService {
     });
   }
 
+  /**
+   * D1882: the sending device of a study is the calling AE title Orthanc recorded on each received instance (metadata
+   * RemoteAET). One title on every instance is the device; an instance without one (REST/STOW upload), two titles or no
+   * instance is null, so the study stays held rather than being attached by a guess.
+   */
+  async sendingDevice(studyUid: string): Promise<string | null> {
+    if (!isStudyLookupKey(studyUid)) return null;
+    const rows = await this.get('/tools/find', { Level: 'Instance', Query: { StudyInstanceUID: studyUid }, ResponseContent: ['Metadata'] });
+    if (!Array.isArray(rows)) throw new ServiceUnavailableException('원본 수신 장비를 확인할 수 없습니다');
+    const titles = new Set(rows.map(row => {
+      const title = row?.Metadata?.RemoteAET;
+      return typeof title === 'string' ? title.trim() : '';
+    }));
+    const [only] = titles;
+    return titles.size === 1 && only ? only : null;
+  }
+
+  /**
+   * D1882: what an arriving instance changes for a study — each Study resource answering the UID with its instance count
+   * and the LastUpdate Orthanc records on every store. A sendingDevice() answer read after a stamp holds only while the
+   * stamp is unchanged; null when no resource answers. One indexed Study lookup, not the instance list sendingDevice reads.
+   */
+  async studyArrivalStamp(studyUid: string): Promise<string | null> {
+    if (!isStudyLookupKey(studyUid)) return null;
+    const rows = await this.get('/tools/find', { Level: 'Study', Query: { StudyInstanceUID: studyUid },
+      ResponseContent: ['Metadata', 'RequestedTags'], RequestedTags: ['NumberOfStudyRelatedInstances'] });
+    if (!Array.isArray(rows)) throw new ServiceUnavailableException('원본 수신 상태를 확인할 수 없습니다');
+    if (!rows.length) return null;
+    const stamps = rows.map(row => [row?.ID, row?.Metadata?.LastUpdate, row?.RequestedTags?.NumberOfStudyRelatedInstances]);
+    // Without both change signals an unchanged stamp would prove nothing.
+    if (stamps.some(([id, at, count]) => typeof id !== 'string' || typeof at !== 'string' || !at || count == null || count === ''))
+      throw new ServiceUnavailableException('원본 수신 상태를 확인할 수 없습니다');
+    return JSON.stringify(stamps.map(stamp => stamp.map(String)).sort());
+  }
+
   async studyAccessMetadata(uid:string):Promise<any> {
     const rows=await this.viewerJson('/dicom-web/studies?StudyInstanceUID='+encodeURIComponent(uid)+
       '&includefield=00100020,00080020,00080061');

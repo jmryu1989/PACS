@@ -73,6 +73,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # in document order. CI-17 records exactly these with this file.
 SERVED_FILES = (
     "worklist-v0/hpacs-lite/admin-access-review.js",
+    "worklist-v0/hpacs-lite/held-sources-admin.js",
     "worklist-v0/hpacs-lite/index.html",
     "proxy/branding/kin-emblem-j1.svg",
     "proxy/branding/kin-favicon-32.png",
@@ -161,6 +162,7 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/study-access-admin.js",
     "worklist-v0/hpacs-lite/signing-key-admin.js",
     "worklist-v0/hpacs-lite/admin-access-review.js",
+    "worklist-v0/hpacs-lite/held-sources-admin.js",
     "worklist-v0/hpacs-lite/clinician.html",
     "worklist-v0/hpacs-lite/clinician.js",
 )
@@ -505,7 +507,7 @@ class Site:
         return route.fulfill(status=200, content_type=TYPES[Path(rel).suffix], body=(ROOT / rel).read_bytes())
 
     # Requests this unit's files send (auth.js, index.html, main.html's own script): each must name its session.
-    STRICT = re.compile(r"/api/(auth/logout|bootstrap|studies|prefs|colleagues|templates.*|filters.*|unassigned"
+    STRICT = re.compile(r"/api/(auth/logout|bootstrap|studies|prefs|colleagues|templates.*|filters.*"
                         r"|studies/[^/]+/(report|draft|hold|release|report/commit|report/citations|report/structure"
                         r"|report/versions.*|clinical-context|image-requests|questions|gateway-retry))$")
 
