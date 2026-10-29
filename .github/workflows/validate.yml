@@ -770,7 +770,7 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/typecheck --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json -- api/node_modules/.bin/tsc --noEmit -p api
     - name: D contracts and C01-C56 model selection (C52 explicitly deferred to R2 DOM)
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
-      run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/contract --cwd . --tree api/src/emr-clinical --tree api/src/emr-contract --file tests/emr/d/contract_test.cjs --file api/tsconfig.json --file api/package-lock.json -- docker run --rm --network none --read-only --tmpfs /tmp -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/emr/d/contract_test.cjs
+      run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/contract --cwd . --tree api/src/emr-clinical --tree api/src/emr-contract --file api/src/finding.controller.ts --file api/src/finding.service.ts --file tests/emr/d/contract_test.cjs --file tests/emr/d/finding_api_regression_test.cjs --file api/tsconfig.json --file api/package-lock.json -- docker run --rm --network none --read-only --tmpfs /tmp -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/emr/d/contract_test.cjs tests/emr/d/finding_api_regression_test.cjs
     - name: Keep pinned browser dependencies independent of unused Chrome APT repository
       run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
     - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809

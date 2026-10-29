@@ -89,6 +89,9 @@ function viewable(study: any, c: Caller) {
     canReadPreliminary(study, c);
 }
 function visible(study: any, c: Caller) {
+  // The service owns this boundary even when an EMR reader calls it before
+  // resolving the study scope. A foreign study must answer like an absent one.
+  if (!study || (study.institutionId !== c.institution && study.teleInstitutionId !== c.institution)) absent();
   if (!viewable(study, c)) denied();
 }
 // A comparison study must be viewable like the anchor and allowed by the caller's study-access
@@ -216,7 +219,7 @@ export class FindingService {
               FROM "FindingRevision" r JOIN head h ON h.id = r."findingId"
               WHERE (${page.cursor}::int IS NULL OR r.revision > ${page.cursor}::int)
               ORDER BY r.revision LIMIT ${page.limit + 1}) page), '[]'::jsonb)::text AS rows`;
-        if (!pageRow.allowed) denied();
+        if (!pageRow.allowed) { visible(await tx.studyState.findUnique({ where: { uid } }), c); denied(); }
         // An unreadable finding answers exactly like an absent id.
         if (!pageRow.present) absent();
         const rows: any[] = parsed(pageRow.rows);
@@ -235,7 +238,7 @@ export class FindingService {
               AND (${page.cursor}::uuid IS NULL OR f.id > ${page.cursor}::uuid)
               AND ${readableLineage(studies)}
             ORDER BY f.id LIMIT ${page.limit + 1}) page), '[]'::jsonb)::text AS rows`;
-      if (!pageRow.allowed) denied();
+      if (!pageRow.allowed) { visible(await tx.studyState.findUnique({ where: { uid } }), c); denied(); }
       const rows: any[] = parsed(pageRow.rows);
       const items = rows.slice(0, page.limit).map(row => ({ ...result(row), links: row.links }));
       if (schema !== '2' && !legacyOnly(items.map(i => i.item))) clientOutdated();
