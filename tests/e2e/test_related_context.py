@@ -155,8 +155,12 @@ class RelatedContextE2E(previous.PriorSelectionE2E):
         folder = previous.base.Path(__file__).parent / "artifacts"; folder.mkdir(exist_ok=True)
         for height in (600, 1200):
             page.set_viewport_size(dict(width=900, height=height))
-            for selector in ("#related-current", ".prior-report-head", "#prior-report-content"):
-                expect(page.locator(selector)).to_be_in_viewport()
+            # Minhoon item 8: the opened Source shows in the Related panel either in its plain view or in Related Report mode,
+            # which stands in that view's place; the one on screen has the "Related Report" head and its Findings section.
+            panel = page.locator(".related-p")
+            for locator in (page.locator("#related-current"), panel.get_by_text("Related Report", exact=True).filter(visible=True),
+                            panel.get_by_text("Findings", exact=True).filter(visible=True)):
+                expect(locator).to_be_in_viewport()
             self.related(page, future).scroll_into_view_if_needed()
             expect(self.related(page, future)).to_be_in_viewport()
             row = self.related(page, future).bounding_box()
