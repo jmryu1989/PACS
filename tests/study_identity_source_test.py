@@ -484,9 +484,11 @@ class LiveAndWorkflowPins(unittest.TestCase):
         # #252 (ef66d0d149809ee746c5eb3a45323880e4d47c84) removed duplicated count
         # fields from BASE. Compare the exact collected cases with the candidate selection.
         self.assertIn(("invariants_live.py", None, "candidate-invariants"), candidate_ci.BASE)
-        _, selected = candidate_ci.exact_selection(ROOT, RUNNER)
-        self.assertEqual(sorted(planned), sorted(row["case"] for row in selected
-                                               if row["file"] == "tests/invariants_live.py"))
+        # The candidate's own plan for this module; exact_selection would import every candidate
+        # module (playwright, numpy) on the plain python3 that nightly step 20 runs on.
+        candidate = [row["case"] for row in RUNNER.module_plan("tests/invariants_live.py", "candidate-invariants", "live",
+                                                                540, None)["tests"]]
+        self.assertEqual(sorted(planned), sorted(candidate))
 
     def test_hosted_steps_run_the_real_code_with_source_hashes(self):
         for needle in (
