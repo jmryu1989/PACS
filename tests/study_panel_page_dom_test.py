@@ -113,6 +113,36 @@ HIDE_CENSUS = """() => { document.querySelector('#t-desc')?.closest('label')?.se
   document.querySelector('#b-except')?.setAttribute('hidden', '');
   [...document.querySelectorAll('button')].find(b => b.textContent === 'Split Exam')?.setAttribute('hidden', ''); }"""
 SCROLLER = '''() => { const r = document.querySelector('.redit').getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; }'''
+# Minhoon item 8 (PR #286, 2026-10-27 feedback 8): two decided differences in the report column, from every baseline.
+# - The Report Editor group (role group, named Report Editor) puts its head row (title, Read Only/Editable, why, Resume
+#   Editing) above W6's scroller, and Clinical Context of the selected study sits beside the group. The scroller starts
+#   that row lower; the editor row (the group with Clinical Context) is compared where the baseline's scroller was, by the
+#   same rule (w6_moved, w6_regions), and each picture covers the whole row. A baseline tree has no such group: its head
+#   is 0 and its editor row is its scroller.
+# - The Questions / Image Request / CVR status sentences no longer set the column's narrowest width (a0dca42: the
+#   column was wider than a 1366px window and cut Clinical Context off). Where a baseline column was wider than its room
+#   (its work row's right edge), it is narrower now and never narrower than that room; its left edge and everything
+#   outside it are unchanged (item8_narrowing). Its narrowed rows are compared by geometry, not pixels. A row above the
+#   editor may wrap in the narrower column (the citation bar's sentence at 1366x768 and 1024x768 with a study open): the
+#   editor row then starts that much lower, never higher, and keeps its bottom (w6_moved).
+# - The panels' edges (W-SPACE item 11's palette, drawn on the baseline too by with_palette) are half-transparent lines
+#   on the panels' own edges. Where a work area moves (assert_moved_work_area) an edge at the window's bottom stays while
+#   the rows above it move, and the baseline's text under its edge rasterises differently; so both pictures are taken
+#   without the edges (HIDE_ITEM8_EDGES). They change no box, and every box is still compared.
+# The editor's own cases (report_editor_frame_dom_test.py, related_report_mode_dom_test.py) carry what it shows.
+EDITOR = '''() => { const scroller = document.querySelector('.redit'), s = scroller.getBoundingClientRect();
+  const group = [...document.querySelectorAll('[role=group][aria-labelledby]')].find(g => g.contains(scroller)
+    && document.getElementById(g.getAttribute('aria-labelledby'))?.textContent === 'Report Editor');
+  const head = group ? s.top - group.getBoundingClientRect().top : 0;
+  const e = group ? group.parentElement.getBoundingClientRect() : s;
+  const column = scroller.closest('.report-p'), row = document.querySelector('.workrow');
+  return {head, editor: [e.x, e.y, e.width, e.height], top: column ? column.getBoundingClientRect().y : null,
+          room: column && row ? row.getBoundingClientRect().right - column.getBoundingClientRect().x : null}; }'''
+ITEM8_COLUMN = ('.report-p', '.rbtns')
+HIDE_ITEM8_EDGES = """() => { const style = document.createElement('style');
+  style.textContent = `.rw > section, .related-p, .related-list-pane, .prior-report-pane, .report-p, .report-editor,
+    .report-compose > .clinical-context { outline: none !important; }`;
+  document.head.append(style); }"""
 # Below the scroller in its column: the footer and each notice (a notice section's first row is its bar; an opened
 # notice pane scrolls inside its own height cap).
 W6_BELOW = ('.rfoot2', '#question-p', '#image-request-p', '#cvr-sent-p', '#cvr-inbox-p')
@@ -144,16 +174,68 @@ W6_REACH = '''(names) => {
     for (const [e, top, left] of saved) { e.scrollTop = top; e.scrollLeft = left; }
   }
   return facts; }'''
+# Each shown element of the report column outside those rows that paints over one of them: its box as painted (cut to
+# every ancestor up to the column that does not let its overflow show) against the row's box. The top layer (an open
+# popover or dialog) is drawn above the page on purpose and is not counted.
+OVER_BELOW = '''(names) => {
+  const column = document.querySelector('.report-p');
+  if (!column) return [];
+  const rows = names.map(name => [name, document.querySelector(name)])
+    .filter(([, row]) => row && column.contains(row) && row.getClientRects().length);
+  const label = e => e.id ? '#' + e.id : e.tagName.toLowerCase() + (e.className && typeof e.className === 'string' ? '.' + e.className.trim().split(/\\s+/).join('.') : '');
+  const over = [];
+  for (const e of column.querySelectorAll('*')) {
+    if (rows.some(([, row]) => row.contains(e) || e.contains(row)) || e.closest(':popover-open, dialog[open]')) continue;
+    if (!e.getClientRects().length || getComputedStyle(e).visibility !== 'visible') continue;
+    const r = e.getBoundingClientRect();
+    let [left, top, right, bottom] = [r.left, r.top, r.right, r.bottom];
+    for (let a = e.parentElement; a && a !== column.parentElement; a = a.parentElement) {
+      const s = getComputedStyle(a);
+      if (s.overflowX === 'visible' && s.overflowY === 'visible') continue;
+      const c = a.getBoundingClientRect(), x = c.left + a.clientLeft, y = c.top + a.clientTop;
+      [left, top, right, bottom] = [Math.max(left, x), Math.max(top, y), Math.min(right, x + a.clientWidth), Math.min(bottom, y + a.clientHeight)];
+    }
+    for (const [name, row] of rows) {
+      const b = row.getBoundingClientRect();
+      const w = Math.min(right, b.right) - Math.max(left, b.left), h = Math.min(bottom, b.bottom) - Math.max(top, b.top);
+      if (w > 0.5 && h > 0.5) over.push([label(e), name, w, h]);
+    }
+  }
+  return over; }'''
 
 
 def w6_facts(page):
-    """The W6 scroller's box and the reach of what lies below it (W6-PAGE-22, D1300)."""
-    return {'scroller': page.evaluate(SCROLLER), 'reach': page.evaluate(W6_REACH, list(W6_BELOW))}
+    """The W6 scroller's box, the reach of what lies below it (W6-PAGE-22, D1300), what in the report column paints over
+    those rows, and the Report Editor around it with the report column's room (Minhoon item 8, EDITOR)."""
+    return {'scroller': page.evaluate(SCROLLER), 'reach': page.evaluate(W6_REACH, list(W6_BELOW)),
+            'over': page.evaluate(OVER_BELOW, list(W6_BELOW)), **page.evaluate(EDITOR)}
+
+
+def item8_narrowing(case, theirs, mine, where):
+    """Minhoon item 8 (EDITOR above): how much narrower the report column is than the baseline's, 0 where the baseline
+    column fit its room (then its width is compared exactly); otherwise it lies between its room and the baseline's."""
+    w, w_mine = theirs['editor'][2], mine['editor'][2]
+    case.assertAlmostEqual(theirs['room'], mine['room'], delta=0.01, msg=f'{where}: the report column keeps its room')
+    if w <= theirs['room'] + 0.01:
+        return 0
+    case.assertGreaterEqual(w_mine, mine['room'] - 0.01, f'{where}: the report column still takes its room')
+    case.assertLessEqual(w_mine, w + 0.01, f'{where}: the report column only narrows')
+    return w_mine - w
+
+
+def item8_columns(facts, narrowing):
+    """Baseline first-paint facts with the report column's boxes narrowed as Minhoon item 8 decided (item8_narrowing)."""
+    return {**facts, 'panels': [[box[0], box[1], box[2] + narrowing, box[3]] if name in ITEM8_COLUMN else box
+                                for (name, _), box in zip(PANELS, facts['panels'], strict=True)]}
 
 
 def assert_w6_reachable(case, facts, where):
     """W6R1-05: the page itself never scrolls, and the footer and every notice bar shown lie in the window or inside a
-    container the reader can wheel-scroll; nothing below the scroller is silently cut off."""
+    container the reader can wheel-scroll; nothing below the scroller is silently cut off. Minhoon item 8 (2026-10-29
+    commander decision on PR #286): nothing else in the report column paints over the footer or a notice row (OVER_BELOW),
+    and however short the column, the editor row keeps at least its Report Editor head row (EDITOR)."""
+    case.assertEqual([], facts['over'], f'{where}: the report column paints over the rows below the editor')
+    case.assertGreaterEqual(facts['editor'][3], facts['head'] - 0.01, f'{where}: the editor row is shorter than its head row {facts}')
     reach = facts['reach']
     case.assertEqual(reach['root'][1], reach['root'][0], f'{where}: the page overflows the window {reach}')
     case.assertIn('.rfoot2', reach['below'], where)
@@ -165,17 +247,27 @@ def assert_w6_reachable(case, facts, where):
 
 def w6_moved(case, theirs, mine, offset, where):
     """What lies below the scroller is the baseline's, moved down by `offset` (the work area's own move) plus the scroller's
-    growth: the scroller keeps its place and width and only grows, in whole pixels; the same rows are shown."""
-    (x, top, w, h), (x_mine, top_mine, w_mine, h_mine) = theirs['scroller'], mine['scroller']
-    for a, b in zip((x, top + offset, w), (x_mine, top_mine, w_mine)):
-        case.assertAlmostEqual(a, b, delta=0.01, msg=f'{where}: the W6 scroller keeps its place {theirs["scroller"]} {mine["scroller"]}')
-    shift = h_mine - h
+    growth: the scroller keeps its place and width and only grows, in whole pixels; the same rows are shown. Minhoon item 8
+    (EDITOR): the Report Editor, its head row above the scroller, takes the place of the baseline's scroller by this rule,
+    and the column's width is the baseline's narrowed by item8_narrowing. In a narrowed column the rows above the editor
+    may wrap: it starts lower by their growth (`wrap`, whole pixels, never negative) and gives that height up, so its
+    bottom and what lies below are the baseline's unless it grows."""
+    narrowing = item8_narrowing(case, theirs, mine, where)
+    (x, top, w, h), (x_mine, top_mine, w_mine, h_mine) = theirs['editor'], mine['editor']
+    wrap = (top_mine - mine['top']) - (top - theirs['top']) if narrowing else 0
+    case.assertGreaterEqual(wrap, -0.01, f'{where}: the rows above the editor only wrap')
+    case.assertAlmostEqual(round(wrap), wrap, delta=0.01, msg=where)
+    for a, b in zip((x, top + offset + wrap, w + narrowing), (x_mine, top_mine, w_mine)):
+        case.assertAlmostEqual(a, b, delta=0.01, msg=f'{where}: the W6 scroller keeps its place {theirs["editor"]} {mine["editor"]}')
+    case.assertGreaterEqual(mine['head'], 0, where)
+    shift = h_mine + wrap - h
     case.assertGreaterEqual(shift, -0.01, where)
     case.assertAlmostEqual(round(shift), shift, delta=0.01, msg=where)
     below, below_mine = theirs['reach']['below'], mine['reach']['below']
     case.assertEqual(sorted(below), sorted(below_mine), f'{where}: the rows below the scroller')
     for name, fact in below.items():
-        expected = [fact['box'][0], fact['box'][1] + offset + shift, *fact['box'][2:]]
+        bx, by, bw, bh = fact['box']
+        expected = [bx, by + offset + shift, bw + narrowing, bh]
         for a, b in zip(expected, below_mine[name]['box']):
             case.assertAlmostEqual(a, b, delta=0.01, msg=f'{where}: {name} expected {expected}, got {below_mine[name]["box"]}')
     return round(shift)
@@ -186,15 +278,20 @@ def w6_regions(theirs, mine, width, height):
     in place except W6's scroller (.redit), which is left out, and what lies below it in its column, which is compared
     moved down by the scroller's growth (w6_moved checks its place). Where it moves, the scroller's fractional edge
     columns (column and neighbour in one pixel) are not compared. What a move would push past the window's bottom is
-    not in the picture; assert_w6_reachable covers it."""
-    (x, top, w, h_theirs), (_, _, _, h_mine) = theirs, mine
+    not in the picture; assert_w6_reachable covers it. Minhoon item 8 (EDITOR): `theirs`/`mine` are W6 facts and the
+    Report Editor (head row and scroller) is the region the scroller was; where the column narrowed, what lies below it
+    in the column, and the column's rows above it, are compared by geometry only (w6_moved, the page's boxes)."""
+    (x, top, w, h_theirs), (_, _, w_mine, h_mine) = theirs['editor'], mine['editor']
+    narrowed = w_mine < w - 0.01
     shift = round(h_mine - h_theirs)
-    above, below = min(math.floor(top), height), math.ceil(top + h_theirs)
+    above, below = min(math.floor(theirs['top'] if narrowed else top), height), math.ceil(top + h_theirs)
     # The window clips a column that extends past its right edge (the 1024x768 report column).
     left, right = min(math.floor(x), width), min(math.ceil(x + w), width)
     inner_left, inner_right = min(math.ceil(x), width), min(math.floor(x + w), width)
-    regions = [[0, width, 0, 0, above], [0, left, above, above, height - above], [right, width - right, above, above, height - above],
-               [inner_left, inner_right - inner_left, below, below + shift, height - below - shift]]
+    regions = [[0, width, 0, 0, above], [0, left, above, above, height - above], [right, width - right, above, above, height - above]]
+    if narrowed:
+        return [region for region in regions if region[1] > 0 and region[4] > 0]
+    regions.append([inner_left, inner_right - inner_left, below, below + shift, height - below - shift])
     if not shift:
         regions += [[left, inner_left - left, below, below, height - below], [inner_right, right - inner_right, below, below, height - below]]
     return [region for region in regions if region[1] > 0 and region[4] > 0]
@@ -1289,7 +1386,8 @@ class StudyPanelPageDOM(unittest.TestCase):
             pixels = None
             if picture:
                 page.evaluate(HIDE_W4)   # W4-LAND decided difference, see HIDE_W4
-                cover(page, [rail, w6['scroller']])
+                page.evaluate(HIDE_ITEM8_EDGES)   # Minhoon item 8, see EDITOR
+                cover(page, [rail, w6['editor']])   # the scroller with item 8's editor head (EDITOR)
                 pixels = first_paint_pixels(page, picture)
             self.assertEqual([], site.violations)
             return facts, area, box and [box['x'], box['y'], box['width'], box['height']], pixels, w6
@@ -1318,6 +1416,7 @@ class StudyPanelPageDOM(unittest.TestCase):
         if yielded:
             self.assertGreaterEqual(mine['related_line'], 8, 'the band yields only to keep the prior report line in view')
         g, y = round(grown), round(yielded)
+        w2 = item8_columns(w2, item8_narrowing(self, w2_w6, mine_w6, f'{width}x{height}'))   # Minhoon item 8, see EDITOR
         for (name, move), theirs, ours in zip(PANELS, w2['panels'], mine['panels']):
             if name in W6_REPORT_FIELDS:
                 continue  # W6-PAGE-22 (D1300): a decided difference, see W6_REPORT_FIELDS
@@ -1366,6 +1465,8 @@ class StudyPanelPageDOM(unittest.TestCase):
         # - D1880 preload (HIDE_PRELOAD above): the same for the toolbar's Preload button.
         # - #259 caution census (HIDE_CENSUS above): its removed commands are hidden in the baseline
         #   too before anything is measured.
+        # - Minhoon item 8 (EDITOR above): the Report Editor's head row takes the top of the scroller's
+        #   place, and a report column wider than its room is narrower (item8_narrowing).
         # Pixels count as equal within ANTIALIAS (16/255 per channel), not exact.
         current = auth.ROOT
         pictures = Path(os.environ.get('KIN_W3_PILOT_DIR', ROOT / 'tmp/w3-land/pilot')) / 'first-paint'
@@ -1394,10 +1495,11 @@ class StudyPanelPageDOM(unittest.TestCase):
                         with self.subTest(version=version, width=width, height=height):
                             assert_w6_reachable(self, mine_w6, name)
                             if missing <= 0.5:
-                                self.assertEqual(without_w6_fields(w2), without_w6_fields(mine))
+                                narrowing = item8_narrowing(self, w2_w6, mine_w6, name)   # Minhoon item 8, see EDITOR
+                                self.assertEqual(without_w6_fields(item8_columns(w2, narrowing)), without_w6_fields(mine))
                                 w6_moved(self, w2_w6, mine_w6, 0, name)
                                 if picture:
-                                    for result in difference_of(w6_regions(w2_w6['scroller'], mine_w6['scroller'], width, height)):
+                                    for result in difference_of(w6_regions(w2_w6, mine_w6, width, height)):
                                         self.assertFalse(result.get('outside') or result.get('size'), result)
                                         self.assertEqual(0, result['over'], f'first-paint pixels differ outside the logo/native checkbox/Rail/W6 scroller: {result}')
                                 continue

@@ -319,7 +319,11 @@
        share; the context column is 34% of the row within 120-300px and scrolls inside itself, so it never adds height to
        the report column. The two floors (160 + 120px) fit the reading layout's narrowest report column (300px,
        reading-panel-layout.js). `hidden` (no radiologist/admin role, ended session) gives its width back to the editor. */
-    .report-compose { flex: 1; min-height: 0; display: flex; }
+    /* A short column shrinks the row only down to its head row (title, Read Only/Editable, Resume Editing): with no
+       floor the row went to 0px in short portrait windows with the Study Panel open, and the head and the fields drew
+       over the Questions bar and the footer. The floor is the row's automatic minimum, which counts the head and not
+       the fields: .redit's zero basis below keeps its text out of it, and its fields scroll inside it. */
+    .report-compose { flex: 1; display: flex; }
     .report-editor { flex: 1 1 0; min-width: 160px; min-height: 0; display: flex; flex-direction: column; }
     .report-compose > .clinical-context { flex: 0 1 clamp(120px, 34%, 300px); min-width: 120px; overflow: auto; padding: 3px 8px 6px;
       box-sizing: border-box; contain: size; }
@@ -336,7 +340,7 @@
        wider than a 1366px window and cut off Clinical Context at its right edge. It is cut to the room left instead. */
     #question-summary, #image-request-summary, #cvr-sent-summary { width: 0; }
     #report-editor-resume[hidden] { display: none; }
-    .redit { flex: 1; overflow: auto; padding: 4px 10px; display: flex; flex-direction: column; gap: 2px; }
+    .redit { flex: 1 1 0px; overflow: auto; padding: 4px 10px; display: flex; flex-direction: column; gap: 2px; }
     .redit label { margin: 2px 0; font-size: 11px; color: #8892a4; }
     .redit textarea { flex: 0 1 auto; width: 100%; box-sizing: border-box; background: #14181f; color: #cdd3dc; border: 1px solid #3a4356; padding: 6px; font: inherit; resize: none; overflow: hidden; }
     #findings { height: 80px; min-height: 50px; }
