@@ -179,7 +179,8 @@
     /* S7-U4b Clinical Context: a read-only panel (contract S7-U4p §10). Minhoon item 8 (2026-10-27) puts it beside the
        report editor (.report-compose below), so it is read while writing instead of in the report window band above. */
     .clinical-context { font-size: 11px; color: #aab2c0; overflow-wrap: anywhere; }
-    .clinical-context-head { display: flex; align-items: center; gap: 6px; }
+    /* Wraps for the 120px column beside the editor: Refresh goes under the title instead of breaking it letter by letter. */
+    .clinical-context-head { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; }
     .clinical-context-head h4 { margin: 0; font-size: 11px; font-weight: normal; color: #8892a4; }
     .clinical-context .cc-section { margin-top: 4px; }
     .clinical-context .cc-section-head { color: #cdd3dc; }
@@ -323,7 +324,10 @@
     .report-compose > .clinical-context { flex: 0 1 clamp(120px, 34%, 300px); min-width: 120px; overflow: auto; padding: 3px 8px 6px;
       box-sizing: border-box; contain: size; }
     .report-compose > .clinical-context[hidden] { display: none; }
-    .report-editor-head { display: flex; align-items: center; gap: 6px; flex: none; padding: 3px 10px 0; font-size: 11px; min-width: 0; }
+    /* The head wraps: at the 160px editor floor its one line (title, state, Resume Editing) was ~230px and ran under
+       Clinical Context, which then took Resume Editing's clicks. Wrapped, Resume Editing takes a line of its own there. */
+    .report-editor-head { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; flex: none; padding: 3px 10px 0;
+      font-size: 11px; min-width: 0; }
     .report-editor-head b { font-weight: 600; white-space: nowrap; }
     .report-editor-state { flex: none; padding: 0 6px; border: 1px solid; border-radius: 3px; font-weight: 600; white-space: nowrap; }
     /* Zero basis and width: the reason is cut to the room left and never widens the report column (its min-content). */

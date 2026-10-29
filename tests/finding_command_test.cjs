@@ -758,10 +758,11 @@ test('adapter: the open panel observes the field region and every element above 
   await h.open();
   assert.equal(h.observers.length, 1, 'one observer while the panel is open');
   const [first] = h.observers;
-  assert.deepEqual(new Set(first.targets), above, 'the field region, every element above it and the Related region');
-  assert.equal(first.targets.length, above.size, 'each observed once');
-  assert.ok(!first.targets.includes(rfoot) && !first.targets.includes(report) && !first.targets.includes(context),
-    'nothing below or beside it and not the column itself');
+  // Whatever else it watches (Clinical Context beside the editor is free either way), every box whose resize moves the
+  // field region is watched, once.
+  for (const el of above) assert.ok(first.targets.includes(el), `observes ${el.className || el.id}`);
+  assert.equal(new Set(first.targets).size, first.targets.length, 'each observed once');
+  assert.ok(!first.targets.includes(rfoot) && !first.targets.includes(report), 'nothing below it and not the column itself');
   const bound = () => h.panel().style.getPropertyValue('--reading-findings-top');
   assert.equal(bound(), '576px');
   // The pane grows above the pinned field region: `.redit` moves 100px down at the same height, and

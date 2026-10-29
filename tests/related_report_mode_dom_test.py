@@ -577,6 +577,31 @@ class RelatedModePage(unittest.TestCase):
         self.page.keyboard.type(" and typed after")
         self.assertEqual("SYN draft kept in view and typed after", self.value())
 
+    def test_minhoon8_resume_editing_takes_a_pointer_click_at_the_narrowest_reading_report_width(self):
+        """At the reading layout's narrowest report column (Home on the size separator) the editor shares the row with
+        Clinical Context; its head controls stay inside the editor, so a reader's click reaches Resume Editing."""
+        self.open()
+        self.open_target()
+        self.page.locator("#findings").fill("SYN draft at the narrow width")
+        self.autosave()
+        self.page.set_viewport_size({"width": 1366, "height": 768})
+        self.enter_reading()
+        self.enter()
+        self.page.locator("#reading-resize-report").press("Home")
+        resume = self.page.locator("#report-editor-resume")
+        resume.scroll_into_view_if_needed()
+        expect(resume).to_be_visible()
+        expect(self.page.locator("#clinical-context")).to_be_visible()
+        inside = self.js("""() => { const e = document.getElementById('report-editor').getBoundingClientRect(),
+          b = document.getElementById('report-editor-resume').getBoundingClientRect();
+          return b.left >= e.left - 0.5 && b.right <= e.right + 0.5; }""")
+        self.assertTrue(inside, "Resume Editing stays inside the editor column")
+        resume.click(timeout=3000)
+        expect(self.mode()).to_be_hidden()
+        expect(self.page.locator("#findings")).to_be_focused()
+        self.page.keyboard.type(" resumed")
+        self.assertEqual("SYN draft at the narrow width resumed", self.value())
+
     def test_w5_entry_with_unsaved_text_saves_first_and_enters_only_after_the_save_is_confirmed(self):
         self.open()
         self.open_target()
