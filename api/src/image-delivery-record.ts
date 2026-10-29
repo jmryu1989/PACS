@@ -143,7 +143,10 @@ export interface DeliveryBinding { readonly patient: PatientLinkSnapshot; readon
  */
 export function archiveRead(admitted: AdmittedStudy | undefined): DeliveryTarget {
   if (!admitted) throw new ForbiddenException('열람 권한이 없습니다');
-  if (!admitted.sourcePatientId) throw new NotFoundException('검사가 없습니다.');
+  if (!admitted.sourcePatientId) throw new NotFoundException({
+    code: 'IMAGE_SOURCE_IDENTITY_UNAVAILABLE',
+    message: '원본 검사 또는 환자 식별자(PatientID)를 확인할 수 없어 영상을 열 수 없습니다. 관리자에게 원본 환자 정보 확인을 요청하세요.',
+  });
   return { studyUid: admitted.studyUid, patient: studyPatientLink(admitted.managingInstitutionId, admitted.sourcePatientId), manifest: null };
 }
 

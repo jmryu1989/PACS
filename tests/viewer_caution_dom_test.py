@@ -25,6 +25,42 @@ class ViewerCautionDOM(unittest.TestCase):
         self.page.evaluate("document.body.replaceChildren(); document.body.innerHTML='<p id=kin-viewer-layout-status></p>'")
     def tearDown(self): self.page.close()
     def script(self, name): self.page.add_script_tag(url=f'/config/ohif/{name}.js')
+    def test_pixel_failure_explanation_follows_the_displayed_image_and_mode(self):
+        self.script('image-load-status')
+        self.page.evaluate("""() => {
+          const element = document.createElement('div'); document.body.append(element);
+          window.currentImage = 'image-a';
+          const events = {IMAGE_LOAD_FAILED:'failed', IMAGE_LOADED:'loaded', STACK_NEW_IMAGE:'stack', VIEWPORT_NEW_IMAGE_SET:'set'};
+          window.loadedImages = new Set();
+          window.cornerstone = {cache:{getImage:id => loadedImages.has(id) ? {imageId:id} : undefined},
+            Enums:{Events:events}, eventTarget:new EventTarget(), getRenderingEngines:() => [{
+            getViewports:() => [{element, getCurrentImageId:() => window.currentImage}]
+          }]};
+          window.extension = kinCreateImageLoadStatus();
+          extension.preRegistration({servicesManager:{services:{viewportGridService:{EVENTS:{GRID_STATE_CHANGED:'grid'},
+            subscribe:(name, refresh) => {window.refreshGrid=refresh; return {unsubscribe(){}};}}}}});
+          extension.onModeEnter();
+          window.pixelEvent = (type, imageId, error) => cornerstone.eventTarget.dispatchEvent(new CustomEvent(type,{detail:{imageId,error}}));
+        }""")
+        self.page.evaluate("pixelEvent('failed','prefetched-image',{status:404})")
+        expect(self.page.get_by_role('alert')).to_have_count(0)
+        self.page.evaluate("""pixelEvent('failed','image-a',{status:404,request:{response:new TextEncoder().encode(JSON.stringify({
+          code:'IMAGE_SOURCE_IDENTITY_UNAVAILABLE',message:'원본 PatientID를 확인해 주세요.'})).buffer}})""")
+        expect(self.page.get_by_role('alert')).to_have_text('원본 PatientID를 확인해 주세요.')
+        self.page.evaluate("currentImage='image-b'; refreshGrid()")
+        expect(self.page.get_by_role('alert')).to_have_count(0)
+        self.page.evaluate("pixelEvent('failed','image-a',{status:404})")
+        expect(self.page.get_by_role('alert')).to_have_count(0)
+        self.page.evaluate("pixelEvent('failed','image-b',{status:503})")
+        expect(self.page.get_by_role('alert')).to_contain_text('HTTP 503')
+        self.page.evaluate("loadedImages.add('image-b'); pixelEvent('loaded','image-b'); pixelEvent('failed','image-b',{status:404})")
+        expect(self.page.get_by_role('alert')).to_have_count(0)
+        self.page.evaluate("pixelEvent('failed','image-b',{status:404}); extension.onModeExit(); pixelEvent('failed','image-b',{status:404})")
+        expect(self.page.get_by_role('alert')).to_have_count(0)
+        self.page.evaluate("extension.onModeEnter(); refreshGrid()")
+        expect(self.page.get_by_role('alert')).to_have_count(0)
+        self.page.evaluate('extension.onModeExit()')
+
     def test_failed_module_can_retry_without_reopening_study(self):
         self.script('tool-retry')
         for source, factory, asset, global_name, member in [

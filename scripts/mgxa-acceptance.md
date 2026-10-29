@@ -126,10 +126,15 @@ Known observations to carry into review:
   the pinned Orthanc OHIF plugin, not KIN file:line pointers. Evidence is served
   bundle code plus run measurements; the review did not run a live metadata query.
   A display-only VOI/spacing override does not restore measurement calibration.
-- The unchanged GDCM XA has a leading-zero UID component (`083000`) and invalid
-  DA `1994.10.16`. Its viewer-jobs, viewer-items and findings calls return 400.
-  It can support local decoding/cine observations, but cannot validate a complete
-  worklist/report/save/reopen workflow. Do not rewrite the public original to hide this.
+- The unchanged GDCM XA has no `PatientID`, a leading-zero UID component (`083000`)
+  and invalid DA `1994.10.16`. Its viewer-jobs, viewer-items and findings calls
+  return 400. The recorded image-delivery path refuses its frames and preview
+  because no source patient can be linked to the access record; this is separate
+  from the UID format. This original cannot support viewer decoding/cine acceptance
+  under that contract, or a complete worklist/report/save/reopen workflow. Keep its
+  refusal as an error-display observation, never a cine PASS. Do not rewrite the
+  public original to hide this; use a separately identified suitable original for
+  cine acceptance.
 - The pinned OHIF Patient-ID prior search previously returned 403 because the
   proxy accepts a single study UID. The viewer now resolves the opened study's
   source patient key through the scoped worklist, then queries each matching UID.

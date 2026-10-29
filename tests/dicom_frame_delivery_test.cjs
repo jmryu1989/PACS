@@ -173,6 +173,44 @@ async function until(check, label, ms = 3000) {
 }
 const byAction = (entries, action) => entries.filter(e => e.event.action === action);
 
+test('stored leading-zero UIDs and a nonconforming date still serve exact pixels under the real patient access record', async () => {
+  const study = '999.999.1.19941016.083000', series = study + '.5', sop = series + '.104';
+  const s = await stack({ shape: { tags: { StudyInstanceUID: study, SeriesInstanceUID: series,
+    SOPInstanceUID: sop, StudyDate: '1994.10.16' } } });
+  try {
+    s.states.set(study, { uid: study, institutionId: SITE, teleInstitutionId: null });
+    const answer = await s.get(`/dicom-web/studies/${study}/series/${series}/instances/${sop}/frames/1`, { Accept: ACCEPT });
+    assert.equal(answer.status, 200);
+    const start = s.object.offset + 12;
+    assert.ok(answer.body.includes(s.object.file.subarray(start, start + s.object.frameBytes)), 'stored frame bytes');
+    const prepared = byAction(s.records.entries, 'provide-prepared');
+    assert.equal(prepared.length, 1);
+    assert.equal(prepared[0].event.targets[0].studyId.value, study, 'the stored UID is preserved in the record');
+    assert.equal(prepared[0].event.targets[0].patientLinkSnapshot.value.patientId, 'SYN-PID-1');
+  } finally { await s.close(); }
+});
+
+test('a stored study without PatientID explains the image refusal on frames, preview and relay, retaining institution and record boundaries', async () => {
+  const s = await stack({ shape: { tags: { PatientID: '' } }, orthanc: () => ({
+    async studyIdentityResources(uid) {
+      return [{ '0020000D': { vr: 'UI', Value: [uid] } }];
+    },
+  }) });
+  try {
+    assert.equal((await s.frame(1, { 'x-synthetic-site': 'other-site' })).status, 403);
+    const answers = [await s.frame(1), await s.preview(),
+      await s.get(`/api/image-relay/instances/${INSTANCE_ID}/frames/0/rendered`)];
+    for (const answer of answers) {
+      assert.equal(answer.status, 404);
+      const body = JSON.parse(answer.body);
+      assert.equal(body.code, 'IMAGE_SOURCE_IDENTITY_UNAVAILABLE');
+      assert.ok(body.message.includes('PatientID'), 'the refusal identifies the missing source information');
+    }
+    assert.equal(s.records.entries.length, 0, 'no patient link or successful image delivery is invented');
+    assert.equal(s.observations.filter(row => row.firstByte).length, 0, 'no image bytes were written');
+  } finally { await s.close(); }
+});
+
 test('open: frames and the preview of one study by one session are served under one durable provide-prepared, closed by one transfer-ended', async () => {
   const s = await stack();
   try {
