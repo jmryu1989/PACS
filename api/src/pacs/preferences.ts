@@ -104,7 +104,7 @@ export class PacsPreferences {
       const workspace = value.workspace;
       const own = (v: any, key: string) => Object.prototype.hasOwnProperty.call(v, key);
       // Drawer visibility belongs to the current opening, never the account's saved layout.
-      if (!object(workspace) || Object.keys(workspace).filter(k => k !== 'studyPanel').sort().join(',') !==
+      if (!object(workspace) || Object.keys(workspace).filter(k => k !== 'studyPanel' && k !== 'hiddenPanels').sort().join(',') !==
           'prior,rail,railCollapsed,related,studyPanelTab,version,worklist' ||
           workspace.version !== 1 || typeof workspace.railCollapsed !== 'boolean' ||
           !['images', 'info', 'templates'].includes(workspace.studyPanelTab))
@@ -136,6 +136,13 @@ export class PacsPreferences {
           if (Object.keys(values).length) kept[axis] = values;
         }
         if (Object.keys(kept).length) clean.workspace.studyPanel = kept;
+      }
+      // Report window panels hidden in Panel Settings (Minhoon item 9); sparse, the same rule as workspace-layout.js.
+      if (own(workspace, 'hiddenPanels')) {
+        const panels = ['thumbnail', 'aiReport', 'imageReport', 'clinical', 'template'], hidden = workspace.hiddenPanels;
+        if (!Array.isArray(hidden) || new Set(hidden).size !== hidden.length || hidden.some((k: any) => !panels.includes(k)))
+          throw new BadRequestException('작업공간 배치 형식이 잘못되었습니다');
+        if (hidden.length) clean.workspace.hiddenPanels = panels.filter(k => hidden.includes(k));
       }
     }
     return clean;

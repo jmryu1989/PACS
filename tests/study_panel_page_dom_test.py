@@ -81,6 +81,21 @@ HIDE_W4 = "() => document.querySelector('#b-approve-next')?.style.setProperty('v
 # the W9 cases (multi_study_view_dom_test.py).
 HIDE_W9 = """() => [...document.querySelectorAll('#worklist-selection button')]
   .find(b => b.textContent === 'Open Selected Studies')?.style.setProperty('display', 'none')"""
+# W-SPACE item 11 (Minhoon 2026-10-27, the work page palette): a decided difference. Every colour of the page changes by
+# design and nothing else does, so a baseline tree is drawn with the shipped palette stylesheet, linked where main.html
+# links it (last in the head); every box and every other pixel is still compared with the baseline (with_palette).
+THEME = 'worklist-v0/hpacs-lite/workspace-theme.css'
+
+
+def with_palette(tree, current):
+    tree, current = Path(tree), Path(current)
+    (tree / THEME).write_bytes((current / THEME).read_bytes())
+    page = tree / 'worklist-v0/hpacs-lite/main.html'
+    raw = page.read_bytes()
+    assert raw.count(b'</head>') == 1 and b'workspace-theme.css' not in raw, 'baseline head'
+    page.write_bytes(raw.replace(b'</head>', b'  <link rel="stylesheet" href="workspace-theme.css">\n</head>'))
+
+
 # D1880 memory-only preload (PR #277, Minhoon P0 item 1): a decided difference of the same kind. The Selected toolbar gains
 # Preload, disabled at first paint, and its status panel (closed and hidden while nothing is queued); main.html adds
 # preload-queue.js (both declared regions of study_panel_size_dom_test.py, DECIDED_REGIONS). The first-paint comparisons
@@ -1359,6 +1374,7 @@ class StudyPanelPageDOM(unittest.TestCase):
             raw = subprocess.check_output(['git', 'archive', '--format=zip', W2_LANDED,
                 'worklist-v0/hpacs-lite', 'scripts/main-split-order.json', 'proxy/branding'], cwd=ROOT)
             zipfile.ZipFile(io.BytesIO(raw)).extractall(temporary)
+            with_palette(temporary, current)   # W-SPACE item 11 decided difference, see THEME
             try:
                 for version in (None, 1, 2):
                     for width, height in ((1366,768),(1920,1080),(2560,1440),(900,1200),(768,1024),(1080,1920)):

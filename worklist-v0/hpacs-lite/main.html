@@ -151,7 +151,6 @@
     .rtabs { display: flex; background: #1b212c; flex: none; border-bottom: 2px solid #2196f3; }
     .rtabs div { padding: 4px 10px; font-size: 11px; color: #7f8899; cursor: pointer; white-space: nowrap; }
     .rtabs div.on { color: #4da3ff; }
-    .s-thumb { width: 34%; }
     .thumbwrap { flex: 1; background: #000; overflow: auto; padding: 4px; }
     .thumbwrap button:disabled { opacity: .35; cursor: default; }
     .thumbs { display: grid; gap: 3px; }
@@ -174,7 +173,6 @@
     .thumb-images-view > p { margin: 4px; color: #c1d3e9; overflow-wrap: anywhere; }
     .thumb-images-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(145px,1fr)); gap: 4px; }
     .thumb-image-preview img { display: block; width: 100%; height: auto; object-fit: contain; background: #000; }
-    .s-clinical { width: 30%; }
     .clinical { flex: 1; padding: 6px 10px; overflow: auto; color: #aab2c0; }
     .clinical table td { border: none; padding: 2px 6px; }
     .clinical td:first-child { color: #667; }
@@ -195,6 +193,34 @@
     .clinical-context .cc-body { white-space: pre-wrap; margin: 0 0 3px 8px; }
     #clinical-context-scope { margin: 4px 0 0; color: #667; }
     .s-template { flex: 1; }
+    /* The report window band (Minhoon 2026-10-27 item 9). One allocation: workspace-layout.js reportWindow() resolves the
+       workflow mode's content panels and their shares minus the panels the reader hid, and applyLayout() writes them as
+       these grid columns and body classes (the fallback is Radiology's first paint, 34 : 30 : 36). AI/Image Report own no
+       column: with Thumbnail hidden their tabs are a full-width strip above the content row, so toggling them never
+       moves a content panel (WS-05). With no content panel left the band is that strip, without the separator, or gone,
+       and the Related/report row takes the height. The reading layout opens this band only on request and shows every
+       panel there; the Study Panel drawer, an explicit open, does too. */
+    body:not(.reading) .right > .rw { display: grid; grid-template-rows: minmax(0, 1fr);
+      grid-template-columns: var(--kin-rw-columns, 34% 30% minmax(0, 1fr)); }
+    body:not(.reading).kin-report-window-strip .right > .rw { grid-template-rows: auto minmax(0, 1fr); }
+    body:not(.reading).kin-report-window-strip .rw > .s-thumb { grid-column: 1 / -1; border-right: none; }
+    body:not(.reading).kin-report-window-strip .rw > section:not(.s-thumb) { grid-row: 2; }
+    body:not(.reading).kin-hide-thumbnail .rw > .s-thumb > .thumbwrap,
+    body:not(.reading).kin-hide-thumbnail .rw > .s-thumb > .rtabs > [data-panel="thumbnail"],
+    body:not(.reading).kin-hide-aiReport .rw > .s-thumb > .rtabs > [data-panel="aiReport"],
+    body:not(.reading).kin-hide-imageReport .rw > .s-thumb > .rtabs > [data-panel="imageReport"],
+    body:not(.reading).kin-hide-thumbnail.kin-hide-aiReport.kin-hide-imageReport .rw > .s-thumb,
+    body:not(.reading).kin-hide-clinical .rw > .s-clinical,
+    body:not(.reading).kin-hide-template .rw > .s-template,
+    body:not(.reading).kin-report-window-empty .right > .rw,
+    body:not(.reading).kin-report-window-empty #resize-top,
+    body:not(.reading).kin-report-window-tabs #resize-top { display: none !important; }
+    /* Only placeholder tabs left: the band is the tab strip, its height goes to the row below, and the stored band height
+       stays in the record for when a panel comes back (WS-02). The compact and Multi-Study floors are for content, and
+       the strip does not yield height either: under Multi-Study's composition a shrinking band clipped it to 0 (WS-06). */
+    body:not(.reading).kin-report-window-tabs .right > .rw { height: auto !important; min-height: 0 !important; flex: none !important; }
+    /* The choice has no effect there, and the reading toolbar's View row (92px, G-LIVE-GEO) must stay one line. */
+    body.reading #panel-settings-open { display: none; }
     .tpl-opts { display: flex; gap: 8px; padding: 3px 8px; background: #171c25; color: #8892a4; font-size: 11px; flex: none; flex-wrap: wrap; }
     .tpl-opts select { max-width: 145px; min-width: 0; background: #14181f; color: #cdd3dc; border: 1px solid #3a4356; font: inherit; }
     .tpl-filter-status { padding: 3px 8px; color: #aab2c0; font-size: 11px; flex: none; overflow-wrap: anywhere; }
@@ -449,11 +475,14 @@
       body.portrait:not(.reading) .left { height: auto !important; min-height: 300px; max-height: none; }
       body.portrait:not(.reading) .left > .grid { flex: none; height: 220px; }
       body.portrait:not(.reading) .right { flex: none; height: 650px; }
-      body.portrait:not(.reading) .rw { height: 760px !important; flex-direction: column; }
+      /* Stacked full-width panels: the band is the sum of the panels shown (all three: 340 + 180 + 240 = 760px), so a
+         hidden panel, and Technician's Template, take no height and no column share applies. */
+      body.portrait:not(.reading) .right > .rw { height: auto !important; display: flex; flex-direction: column; }
       body.portrait:not(.reading) .rw > section { width: 100%; flex: none; }
       body.portrait:not(.reading) .s-thumb { height: 340px; }
       body.portrait:not(.reading) .s-clinical { height: 180px; }
       body.portrait:not(.reading) .s-template { height: 240px; }
+      body.portrait:not(.reading).kin-hide-thumbnail .s-thumb { height: auto; }
     }
 
     /* ── 모달 (Modify Exam) ── */
@@ -1141,6 +1170,7 @@
   <link rel="stylesheet" href="reading-workspace.css">
   <link rel="stylesheet" href="related-report-mode.css">
   <link rel="stylesheet" href="multi-study-view.css">
+  <link rel="stylesheet" href="workspace-theme.css">
 </head>
 <body>
 
@@ -1256,6 +1286,7 @@
           <button class="chip" id="layout-toggle" title="자동·세로 고정·가로 고정 순서로 전환">Layout: Auto</button>
           <button class="chip" id="study-panel-open" type="button" aria-expanded="false" aria-controls="study-panel-host" title="영상·검사 정보·상용구 패널을 엽니다.">Study Panel</button>
           <span id="study-panel-status" role="status" lang="ko"></span>
+          <button class="chip" id="panel-settings-open" type="button" aria-haspopup="dialog" title="Thumbnail·AI Report·Image Report·Clinical Information·Reading Template 패널을 보이거나 숨깁니다.">Panels</button>
           <button class="chip" id="columnsettings">Columns</button>
           <button class="chip" id="reading-appearance-open" type="button" disabled>Appearance &amp; Tools</button>
           <button class="chip" id="layout-reset" title="이 계정의 현재 브라우저 배치를 초기화합니다">Reset Layout</button>
@@ -1376,9 +1407,9 @@
       <div class="rw">
         <section class="s-thumb">
           <div class="rtabs">
-            <div class="on">Thumbnail</div>
-            <div title="추후 구현">AI Report</div>
-            <div title="추후 구현">Image Report</div>
+            <div class="on" data-panel="thumbnail">Thumbnail</div>
+            <div title="추후 구현" data-panel="aiReport">AI Report</div>
+            <div title="추후 구현" data-panel="imageReport">Image Report</div>
           </div>
           <div class="thumbwrap" id="thumbwrap">
             <div style="color:#556;padding:20px;text-align:center">검사를 선택하세요</div>
