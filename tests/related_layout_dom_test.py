@@ -35,6 +35,7 @@ Cases (the RL ids are test-plan section 3 of the S7-RELATED-LAYOUT diagnosis, PA
        table; a click on it opens it.
   rl03 the Clinical Info column draws only inside itself (every text line it holds stays inside its box) and the
        neighbouring controls are not under it; each of its controls is reachable inside the column (900x600, 1366x768).
+       Minhoon item 8: Clinical Context is beside the report editor (both sizes) and reachable at 1366x768.
   rl04 keyboard: More Filters -> Tab reaches a related row, the arrow keys and End move to visible rows.
   rl05 a stored 400px list height: capped in the small window without being rewritten, back at 400px in a large one;
        a drag in the small window stores what is visible; Reset Layout.
@@ -111,8 +112,10 @@ def rows(extra=()):
 
 
 # What the prior report pane says first in each state (the page's own sentences; Findings is the first section heading).
-STATES = {"unselected": "Related Exam을 선택하세요", "loading": "승인 판독문 불러오는 중…", "failure": "판독문 조회 실패",
-          "none": "판독문 없음", "shown": "Findings"}
+# Minhoon item 8: a related exam opened by its row shows in Related Report mode, which now stands in the pane's place
+# (its head is "Related Report" too), so the opened states read the mode's own sentences.
+STATES = {"unselected": "Related Exam을 선택하세요", "loading": "승인 판독문을 불러오는 중입니다", "failure": "이전 판독문을 불러오지 못했습니다",
+          "none": "이 검사에는 승인된 판독문이 없습니다", "shown": "Findings"}
 NOTICE = "열람 중인 검사는 필터 밖입니다"
 HELP = "↑/↓ · Home/End 이동 · Enter 미리보기 · Tab 영상 버튼"
 SEPARATOR = "드래그하여 Related 목록과 이전 판독문 높이 조절"
@@ -186,7 +189,8 @@ class Window:
         self.list_region = self.region(self.title, self.related_table)
         self.target_label = self.list_region.get_by_text(re.compile(r"^판독 대상( · |을 선택하세요$)"))
         self.panel = self.region(self.separator, self.related_table)
-        self.report_head = self.panel.get_by_text("Related Report", exact=True)
+        # The pane's plain head and Related Report mode's head both read "Related Report"; one of them is on screen.
+        self.report_head = self.panel.get_by_text("Related Report", exact=True).filter(visible=True)
         self.clinical = self.region(page.get_by_role("heading", name=re.compile(r"^Clinical Info")),
                                     page.get_by_role("button", name="Copy Patient ID", exact=True))
 
@@ -212,7 +216,7 @@ class Window:
     def first_line(self):
         """The first text under the Related Report head line in the Related panel: the status sentence or Findings."""
         return js(self.page, """
-          const [panel] = arg, nodes = texts(panel), at = nodes.findIndex(n => n.nodeValue.trim() === 'Related Report');
+          const [panel] = arg, nodes = texts(panel), at = nodes.findIndex(n => n.nodeValue.trim() === 'Related Report' && firstRect(n));
           if (at < 0) return null;
           const head = firstRect(nodes[at]);
           for (const n of nodes.slice(at + 1)) { const r = firstRect(n); if (r && r[1] >= head[3] - 0.01) return await exposure(n); }
@@ -221,7 +225,7 @@ class Window:
     def prior_pane(self):
         """The smallest element holding the Related Report head text and the first text below it (an element handle)."""
         return self.page.evaluate_handle("async (arg) => {" + TOOLS + """
-          const [panel] = arg, nodes = texts(panel), at = nodes.findIndex(n => n.nodeValue.trim() === 'Related Report');
+          const [panel] = arg, nodes = texts(panel), at = nodes.findIndex(n => n.nodeValue.trim() === 'Related Report' && firstRect(n));
           const head = firstRect(nodes[at]);
           const below = nodes.slice(at + 1).find(n => { const r = firstRect(n); return r && r[1] >= head[3] - 0.01; });
           let e = nodes[at].parentElement; while (!e.contains(below)) e = e.parentElement; return e; }""",
@@ -276,9 +280,10 @@ class Window:
         page.wait_for_timeout(120)
         case.assertAlmostEqual(before[0], self.visible(self.title)["box"][0], delta=0.5, msg=f"{tag}: the Related list scrolled sideways")
         # Reachable inside their panes (S): the keyboard help, and in the shown state the Findings value.
-        # W5 Phase B: the row click that shows the prior also opens Related Report mode, which shows the same Source text in
-        # the report column; the value this case reaches is the Related panel's own (its pane), so it is found there.
-        reach = [("keyboard help", self.help)] + ([("Findings value", self.panel.get_by_text(FINDINGS, exact=True))] if state == "shown" else [])
+        # W5 Phase B: the row click that shows the prior also opens Related Report mode; since Minhoon item 8 the mode shows
+        # the Source text in the pane itself, in the place of the plain view, so the one Findings value on screen is the mode's.
+        findings = self.panel.get_by_text(FINDINGS, exact=True).filter(visible=True)
+        reach = [("keyboard help", self.help)] + ([("Findings value", findings)] if state == "shown" else [])
         for name, locator in reach:
             case.assertIsNotNone(js(page, "return firstRect(texts(arg)[0]);", locator.element_handle()), f"{tag}: {name} rendered")
             self.scroll_into_view(locator)
@@ -395,16 +400,32 @@ class Window:
               return out;""", [locator.element_handle(), self.clinical.element_handle()])
             case.assertEqual([], covered, f"{tag}: {name} under the Clinical Info column at {covered}")
 
-    def assert_clinical_reachable(self, tag):
+    def assert_clinical_reachable(self, tag, context=True):
         page, case = self.page, self.case
         controls = [page.get_by_role("button", name="Copy Patient ID", exact=True),
                     page.get_by_role("button", name="Source SR", exact=True),
-                    page.get_by_role("button", name="Tech Note", exact=True),
-                    page.get_by_role("region", name="Clinical Context", exact=True).get_by_role("button", name="Refresh", exact=True)]
+                    page.get_by_role("button", name="Tech Note", exact=True)]
+        # Minhoon item 8: Clinical Context sits beside the report editor, in the report column, no longer in this column.
+        if context:
+            controls.append(self.context_refresh())
         for locator in controls:
             self.scroll_into_view(locator)
             self.assert_no_document_scroll(f"{tag} {locator}")
-            case.assertTrue(self.pointable(locator), f"{tag}: {locator} reachable inside the Clinical Info column")
+            case.assertTrue(self.pointable(locator), f"{tag}: {locator} reachable without moving the document")
+
+    def context_refresh(self):
+        return self.page.get_by_role("region", name="Clinical Context", exact=True).get_by_role("button", name="Refresh", exact=True)
+
+    def assert_context_beside_editor(self, tag):
+        """Minhoon item 8: Clinical Context is beside the report editor, to its right, sharing its rows."""
+        page, case = self.page, self.case
+        editor = page.get_by_role("group", name="Report Editor", exact=True).bounding_box()
+        context = page.get_by_role("region", name="Clinical Context", exact=True).bounding_box()
+        measure(tag, editor=editor, clinical_context=context)
+        case.assertGreaterEqual(context["x"], editor["x"] + editor["width"] - 0.5, f"{tag}: Clinical Context right of the editor")
+        # The same top: at 900x600 the report column leaves the editor row no height at all (as on the base), so a
+        # shared top, not an overlap of heights, is what "beside" can mean there.
+        case.assertAlmostEqual(context["y"], editor["y"], delta=0.5, msg=f"{tag}: Clinical Context beside the editor (top)")
 
 
 class Base(unittest.TestCase):
@@ -533,7 +554,10 @@ class RelatedLayoutDOMTest(Base):
                 w = self.open_state("unselected", size=size)
                 harness.expect(w.page.get_by_role("region", name="Clinical Context", exact=True)).to_be_visible()
                 w.assert_clinical_contained(f"RL-03 {size[0]}x{size[1]}")
-                w.assert_clinical_reachable(f"RL-03 {size[0]}x{size[1]}")
+                w.assert_context_beside_editor(f"RL-03 {size[0]}x{size[1]}")
+                # At 900x600 the report column (and so Clinical Context beside the editor) is wider than what the window
+                # has left for it, as on the base before item 8 (document 1145px wide at a1c6fab); 1366x768 must fit.
+                w.assert_clinical_reachable(f"RL-03 {size[0]}x{size[1]}", context=size != SMALL)
                 w.screen.finish()
 
     # ── RL-04 ───────────────────────────────────────────────────────────────────────────────────────────────────────

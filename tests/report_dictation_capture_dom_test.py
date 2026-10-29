@@ -169,6 +169,7 @@ REDITHTML
 RFOOTHTML
 </div>
 </div>
+RELATEDMODEHTML
 PANEHTML
 CITEHTML
 STRUCTHTML
@@ -199,7 +200,8 @@ let calls = [], holdCalls = [], citeCalls = [], structCalls = [], dictCalls = []
 let replies = [], toasts = [], confirms = [], logouts = 0;
 const studyPriority = { get: () => false };
 // W5 (order-list-store.js): the page's Related Report mode and the base-rule marker, made as the page makes them: the
-// shipped module mounted on main.html's own mode markup (BARS_HTML) over the report fields. It stays inactive here;
+// shipped module mounted on main.html's own mode markup (cut from the page beside the report panel: Minhoon item 8 moved
+// it from the report bars into the Related panel) over the report fields. It stays inactive here;
 // entering it is the complete page's (tests/related_report_mode_dom_test.py).
 const relatedMode = KinRelatedReportMode({ editor: () => document.querySelector('.redit'), field: name => $('#' + name) });
 const RELATED_BASE = Object.freeze({ base: true });
@@ -310,6 +312,8 @@ def page_html(state):
                       ("BASEBLOCK", "BASE_BLOCK"), ("REPORTBLOCK", "REPORT_BLOCK"),
                       ("HOLDBLOCK", "HOLD_BLOCK"), ("SELECTBLOCK", "SELECT_BLOCK")):
         page = page.replace(key, S[name])
+    at = MAIN.index('<section id="related-mode"')
+    page = page.replace("RELATEDMODEHTML", MAIN[at:MAIN.index("</section>", at) + len("</section>")])
     for control in ('b-draft-keep','b-draft-load','b-approved-view'):
         if f'id="{control}"' not in page:
             page=page.replace('<button id="b-report-reload"',f'<button id="{control}"></button><button id="b-report-reload"',1)
