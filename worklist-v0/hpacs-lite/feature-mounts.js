@@ -302,29 +302,36 @@
       // the mode's text region: the one on screen is measured (a hidden one measures at the top of the window).
       const priorText = () => related.querySelector("#related-mode:not([hidden]) .related-mode-scroll")
         || related.querySelector(".prior-report-body");
+      // How far that line (two text lines into the pane's body) lies below the work area.
+      const lineOver = () => {
+        const area = $(".right"), body = priorText(), style = getComputedStyle(body);
+        const line = body.getBoundingClientRect().top + area.scrollTop + parseFloat(style.paddingTop) + 2 * parseFloat(style.fontSize);
+        return line - area.getBoundingClientRect().bottom;
+      };
+      // The list band yields to that line only as much as needed and never below
+      // the list's header and one whole row; the list then fills the shorter band
+      // and scrolls inside it, and the controls under it scroll in the column.
+      const listYields = over => {
+        if (!(over > 0 && listNeed)) return;
+        const band = Math.max(Math.ceil(listNeed), Math.floor(left.getBoundingClientRect().height - over));
+        left.style.setProperty("height", band + "px", "important");
+        left.style.minHeight = band + "px";
+        listFloor = Math.max(listNeed, Math.min(listFloor, band));
+        listGrid.style.minHeight = "";
+        keepListFloor();
+      };
       if (portrait && !narrow && (sizes.top == null || topMaximum < 140) && !document.body.classList.contains("reading")) {
-        const area = $(".right"), body = priorText(), style = getComputedStyle(body);
-        const line = body.getBoundingClientRect().top + area.scrollTop + parseFloat(style.paddingTop) + 2 * parseFloat(style.fontSize);
-        const over = line - area.getBoundingClientRect().bottom;
+        const over = lineOver();
         if (over > 0) top.style.height = Math.max(140, Math.floor(top.getBoundingClientRect().height - over)) + "px";
+        // A band at its minimum can still leave the line below: the list's controls
+        // took a line more (at 768x1024 the Selected toolbar wraps to a third line
+        // since Preload, D1880). The stacked list yields the rest, as the narrow
+        // sheet's does.
+        if (over > 0) listYields(lineOver());
       }
-      // In the narrow sheet the list band yields to that line the same way, only as
-      // much as needed and never below the list's header and one whole row; the
+      // In the narrow sheet the list band yields to that line the same way; the
       // next row is then a wheel turn away inside the band.
-      if (narrow && listNeed) {
-        const area = $(".right"), body = priorText(), style = getComputedStyle(body);
-        const line = body.getBoundingClientRect().top + area.scrollTop + parseFloat(style.paddingTop) + 2 * parseFloat(style.fontSize);
-        const over = line - area.getBoundingClientRect().bottom;
-        if (over > 0) {
-          const band = Math.max(Math.ceil(listNeed), Math.floor(left.getBoundingClientRect().height - over));
-          left.style.setProperty("height", band + "px", "important");
-          left.style.minHeight = band + "px";
-          // The list then fills the shorter band and scrolls inside it.
-          listFloor = Math.max(listNeed, Math.min(listFloor, band));
-          listGrid.style.minHeight = "";
-          keepListFloor();
-        }
-      }
+      if (narrow && listNeed) listYields(lineOver());
       // Becoming the narrow sheet at selection reflows the list: bring the band's
       // top and the selected row back into view, scrolling inside the band only.
       if (becameNarrow && listNeed) {
