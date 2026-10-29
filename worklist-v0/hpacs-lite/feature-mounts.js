@@ -259,7 +259,11 @@
         }
       }
       workspaceWasNarrow = narrow;
-      if (sizes.top != null) top.style.height = clampPanel(sizes.top, 140, $(".right").getBoundingClientRect().height - 266) + "px";
+      if (sizes.top != null) {
+        const maximum = $(".right").getBoundingClientRect().height - 266;
+        // 최소 높이조차 들어가지 않는 열은 스크롤한다. 드래그로 보존한 높이를 복원 때 줄이지 않는다.
+        top.style.height = (maximum < 140 ? Math.max(140, sizes.top) : clampPanel(sizes.top, 140, maximum)) + "px";
+      }
       const row = $(".workrow").getBoundingClientRect();
       if (sizes.related != null) related.style[portrait ? "height" : "width"] = clampPanel(sizes.related,
         portrait ? 286 : 220, portrait ? row.height - 186 : row.width - 366) + "px";

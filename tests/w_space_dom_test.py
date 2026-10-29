@@ -479,12 +479,22 @@ class WSpaceDOM(unittest.TestCase):
     def drag_top(self, page, dy):
         grip = page.locator('#resize-top').bounding_box()
         x, y = grip['x'] + grip['width'] / 2, grip['y'] + grip['height'] / 2
+        before = page.evaluate(GEOM)['rw'][3]
+        previous = before
         page.mouse.move(x, y)
         page.mouse.down()
-        page.mouse.move(x, y + dy / 2, steps=4)
-        page.mouse.move(x, y + dy, steps=4)
+        for step in range(1, 9):
+            page.mouse.move(x, y + dy * step / 8)
+            current = page.evaluate(GEOM)['rw'][3]
+            self.assertGreaterEqual((current - previous) * (1 if dy > 0 else -1), -0.5,
+                                    'The band must never move against the pointer, including at a limit')
+            previous = current
         page.mouse.up()
         settle(page)
+        after = page.evaluate(GEOM)['rw'][3]
+        self.assertGreaterEqual((after - before) * (1 if dy > 0 else -1), -0.5,
+                                'Finishing the drag must preserve its direction')
+        return before, after
 
     def test_wspace_g4_saved_geometry_stays_the_readers_intent(self):
         """TEST-WSPACE-G4 (RISK-WSPACE-PREFERENCE, invariant 4): a dragged and a keyed band height survive hiding,
@@ -496,11 +506,18 @@ class WSpaceDOM(unittest.TestCase):
                     page = self.open(site, width, height)
                     self.switch(page, mode)
                     axis = 'portrait' if height > width else 'landscape'
+                    before, after = self.drag_top(page, 30)
+                    if width > height:
+                        self.assertAlmostEqual(before + 30, after, delta=1)
+                    self.reload(page, site)
+                    self.switch(page, mode)
+                    self.assertAlmostEqual(after, page.evaluate(GEOM)['rw'][3], delta=1)
+                    self.drag_top(page, -30)
                     self.drag_top(page, 30)
                     self.assertIsNotNone(self.stored(page)[axis]['top'])
                     dragged = page.evaluate(GEOM)['rw'][3]
                     # The key moves from the drawn separator, respecting the existing 140 px drag minimum.
-                    # Preload's list floor can leave a tight portrait band already at that minimum.
+                    # A tight portrait band can start above that minimum even when enlargement is blocked.
                     page.locator('#resize-top').focus()
                     page.keyboard.press('ArrowUp')
                     settle(page)
@@ -516,6 +533,7 @@ class WSpaceDOM(unittest.TestCase):
                     self.switch(page, other)
                     self.switch(page, mode)
                     self.assertEqual(sizes, {a: self.stored(page)[a] for a in sizes})
+
                     self.reload(page, site)
                     self.switch(page, mode)
                     back = self.show_all(page)
@@ -531,6 +549,20 @@ class WSpaceDOM(unittest.TestCase):
                     self.assertEqual(start['rw'][3], again['rw'][3])
                     self.assert_same_content(start, again, 'smaller window and back')
                     self.assertEqual(sizes, {a: self.stored(page)[a] for a in sizes})
+
+                    # Outward drags at either limit stay put; reversing direction still works.
+                    page.locator('#resize-top').focus()
+                    page.keyboard.press('End')
+                    settle(page)
+                    upper, blocked = self.drag_top(page, 30)
+                    self.assertAlmostEqual(upper, blocked, delta=1)
+                    self.drag_top(page, -30)
+                    page.locator('#resize-top').focus()
+                    page.keyboard.press('Home')
+                    settle(page)
+                    lower, blocked = self.drag_top(page, -30)
+                    self.assertAlmostEqual(140, lower, delta=1)
+                    self.assertAlmostEqual(lower, blocked, delta=1)
 
     def test_wspace_g5_tabs_only_and_empty_band_return_their_height(self):
         """TEST-WSPACE-G5 (RISK-WSPACE-EMPTY, invariant 5): with every content panel the mode can show hidden the band is

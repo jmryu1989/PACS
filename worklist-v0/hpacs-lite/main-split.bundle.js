@@ -9822,7 +9822,11 @@
         }
       }
       workspaceWasNarrow = narrow;
-      if (sizes.top != null) top.style.height = clampPanel(sizes.top, 140, $(".right").getBoundingClientRect().height - 266) + "px";
+      if (sizes.top != null) {
+        const maximum = $(".right").getBoundingClientRect().height - 266;
+        // 최소 높이조차 들어가지 않는 열은 스크롤한다. 드래그로 보존한 높이를 복원 때 줄이지 않는다.
+        top.style.height = (maximum < 140 ? Math.max(140, sizes.top) : clampPanel(sizes.top, 140, maximum)) + "px";
+      }
       const row = $(".workrow").getBoundingClientRect();
       if (sizes.related != null) related.style[portrait ? "height" : "width"] = clampPanel(sizes.related,
         portrait ? 286 : 220, portrait ? row.height - 186 : row.width - 366) + "px";
@@ -11302,7 +11306,7 @@
         e.preventDefault();
         const box = handle.getBoundingClientRect(), step = e.shiftKey ? 40 : 10;
         const delta = e.key === 'Home' ? -16384 : e.key === 'End' ? 16384 : e.key === keys[0] ? -step : step;
-        resize({ clientX: box.left + (direction === 'x' ? delta : 0), clientY: box.top + (direction === 'y' ? delta : 0) }, direction);
+        resize({ clientX: box.left + (direction === 'x' ? delta : 0), clientY: box.top + (direction === 'y' ? delta : 0) }, direction, delta);
         rememberPanelSize(selector);
       });
       handle.addEventListener("pointerdown", e => {
@@ -11316,8 +11320,12 @@
         handle.classList.add("dragging");
         document.body.classList.add("resizing", dragAxis === "x" ? "resizing-x" : "resizing-y");
 
+        let previous = dragAxis === 'x' ? e.clientX : e.clientY;
         const move = event => {
-          if (event.pointerId === e.pointerId) work.commit(at, () => resize(event, dragAxis));
+          if (event.pointerId !== e.pointerId) return;
+          const position = dragAxis === 'x' ? event.clientX : event.clientY, delta = position - previous;
+          previous = position;
+          work.commit(at, () => resize(event, dragAxis, delta));
         };
         const end = event => {
           if (event.pointerId !== e.pointerId) return;
@@ -11544,10 +11552,12 @@
       else
         $(".left").style.width = clampPanel(e.clientX - box.left, 500, box.width - 426) + "px";
     });
-    bindPanelResize("#resize-top", "y", e => {
-      const right = $(".right"), box = right.getBoundingClientRect();
-      // 세로 작업공간을 스크롤한 뒤에도 패널 자체의 높이를 조절한다.
-      $(".rw").style.height = clampPanel(e.clientY - box.top + right.scrollTop, 140, box.height - 266) + "px";
+    bindPanelResize("#resize-top", "y", (e, axis, delta) => {
+      const top = $(".rw"), current = top.getBoundingClientRect().height;
+      // 목록의 최소 높이 때문에 상한이 현재 띠보다 작아도 손과 반대로 줄이지 않는다.
+      // 포인터 이동량을 쓰므로 손잡이 안의 누른 위치나 작업공간 스크롤에 영향받지 않는다.
+      const maximum = Math.max(current, 140, $(".right").getBoundingClientRect().height - 266);
+      top.style.height = clampPanel(current + delta, Math.min(current, 140), maximum) + "px";
     });
     bindPanelResize("#resize-related", () => portraitLayout() ? "y" : "x", (e, axis) => {
       const box = $(".workrow").getBoundingClientRect();
@@ -11562,6 +11572,7 @@
       list.style.flex = "none";
       list.style.height = clampPanel(e.clientY - box.top, 150, box.height - 136) + "px";
     });
+
 
     $("#quick").addEventListener("input", () => { worklistSearch?.change(); render(); });
     for (const host of [$('#quick'),$('#filterrow')]) host.addEventListener('keydown',e=>{
