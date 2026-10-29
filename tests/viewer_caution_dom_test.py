@@ -44,9 +44,10 @@ class ViewerCautionDOM(unittest.TestCase):
         }""")
         self.page.evaluate("pixelEvent('failed','prefetched-image',{status:404})")
         expect(self.page.get_by_role('alert')).to_have_count(0)
-        self.page.evaluate("""pixelEvent('failed','image-a',{status:404,request:{response:new TextEncoder().encode(JSON.stringify({
-          code:'IMAGE_SOURCE_IDENTITY_UNAVAILABLE',message:'원본 PatientID를 확인해 주세요.'})).buffer}})""")
-        expect(self.page.get_by_role('alert')).to_have_text('원본 PatientID를 확인해 주세요.')
+        # The served pinned loader reports the first-frame fetch failure as Error(message),
+        # with no response/status fields. The served-page test proves the server-reason channel.
+        self.page.evaluate("pixelEvent('failed','image-a',new Error(\"Couldn't retrieve image-a got status 404\"))")
+        expect(self.page.get_by_role('alert')).to_contain_text('계속되면 관리자에게 문의하세요')
         self.page.evaluate("currentImage='image-b'; refreshGrid()")
         expect(self.page.get_by_role('alert')).to_have_count(0)
         self.page.evaluate("pixelEvent('failed','image-a',{status:404})")
@@ -55,7 +56,9 @@ class ViewerCautionDOM(unittest.TestCase):
         expect(self.page.get_by_role('alert')).to_contain_text('HTTP 503')
         self.page.evaluate("loadedImages.add('image-b'); pixelEvent('loaded','image-b'); pixelEvent('failed','image-b',{status:404})")
         expect(self.page.get_by_role('alert')).to_have_count(0)
-        self.page.evaluate("pixelEvent('failed','image-b',{status:404}); extension.onModeExit(); pixelEvent('failed','image-b',{status:404})")
+        self.page.evaluate("currentImage='image-c'; pixelEvent('failed','image-c',{status:404})")
+        expect(self.page.get_by_role('alert')).to_be_visible()
+        self.page.evaluate("extension.onModeExit(); pixelEvent('failed','image-c',{status:404})")
         expect(self.page.get_by_role('alert')).to_have_count(0)
         self.page.evaluate("extension.onModeEnter(); refreshGrid()")
         expect(self.page.get_by_role('alert')).to_have_count(0)
