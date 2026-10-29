@@ -20,6 +20,13 @@ import { need, needExact, inst } from './access';
 import type { Caller, PacsAccess } from './access';
 import type { PacsInstitutions } from './institutions';
 
+/**
+ * What the gate observed, on this request, of the study an admitted read names: its managing institution and the patient
+ * its original resources name now (null when none does). The image routes bind their study delivery's 열람 record to it
+ * (image-delivery-record.ts), so the patient a record names is the one this read was admitted for, with no second read.
+ */
+export interface AdmittedStudy { studyUid: string; managingInstitutionId: string; sourcePatientId: string | null }
+
 export class PacsDicomGateway {
   constructor(
     private readonly prisma: PrismaService,
@@ -32,7 +39,7 @@ export class PacsDicomGateway {
    * DICOMweb 경로의 기관 관문. 워크리스트가 지키는 경계(visible)를 영상 경로에도 세운다.
    * auth_request 제약상 거부는 전부 403이다 — 404를 던지면 nginx가 500으로 바꾼다.
    */
-  async authzDicom(originalUri: string, originalMethod: string, c: Caller) {
+  async authzDicom(originalUri: string, originalMethod: string, c: Caller): Promise<AdmittedStudy | undefined> {
     const me = inst(c);
     const [path, query = ''] = originalUri.split('?');
     const method = originalMethod.toUpperCase();
@@ -97,7 +104,9 @@ export class PacsDicomGateway {
     // WORKLIST-SPLIT-UID: an old list or a typed URL can still name a UID two patient resources answer. Only after the
     // scope checks, this request observes the source; auth_request cannot carry 409/503, so every source refusal is 403.
     await this.studyAccess.prepareSourceIdentity(c, [uid]);
-    try { this.studyAccess.assertUnsplitSource(c, uid); } catch { throw new ForbiddenException('열람 권한이 없습니다'); }
+    let patientId: string | null;
+    try { patientId = this.studyAccess.assertUnsplitSource(c, uid).sourcePatientId; } catch { throw new ForbiddenException('열람 권한이 없습니다'); }
+    return { studyUid: uid, managingInstitutionId: s.institutionId, sourcePatientId: patientId };
   }
 
   /**

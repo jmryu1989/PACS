@@ -53,6 +53,7 @@ class OnlineImagePg(pg.PgLedgerFixture):
         # grants and the next observation sequence on this owned synthetic host.
         snapshot = """SELECT jsonb_build_object(
           'preparation',(SELECT jsonb_agg(to_jsonb(t) ORDER BY event_id) FROM emr_image.preparation t),
+          'source_manifest',(SELECT jsonb_agg(to_jsonb(t) ORDER BY body_sha256) FROM emr_image.source_manifest t),
           'observation',(SELECT jsonb_agg(to_jsonb(t) ORDER BY sequence) FROM emr_image.observation t),
           'sequence',(SELECT jsonb_build_object('last_value',last_value,'is_called',is_called) FROM emr_image.observation_sequence_seq),
           'grants',(SELECT jsonb_agg(to_jsonb(t) ORDER BY table_schema,table_name,grantor,grantee,privilege_type,is_grantable,with_hierarchy)

@@ -53,6 +53,12 @@ upstream kin_api_archive {
     server api:3000;
     keepalive 8;
 }
+# EMR-E 영상 경계(아래 프레임 location)도 같은 이유다: API가 마지막 byte 뒤 자기 응답을 끝내고 전송 종료를 기록하기 전에
+# nginx가 연결을 닫으면 끝까지 보낸 프레임이 중단으로 남는다. 뷰어는 프레임을 동시에 여럿 받으므로 쉬는 연결을 더 둔다.
+upstream kin_api_image {
+    server api:3000;
+    keepalive 16;
+}
 
 include /etc/nginx/snippets/default-servers.conf;
 
@@ -282,6 +288,19 @@ server {
         sub_filter '<link rel="icon" type="image/png" sizes="228x228" href="./assets/coast-228x228.png"/>' '';
         sub_filter '<title>OHIF Viewer</title>' '<title>판독 뷰어 — KOREA IMAGING NETWORK</title>';
     }
+
+    # EMR-E 영상 경계(E_ROUTE): 뷰어가 원본 픽셀을 받는 WADO-RS 프레임 요청은 Orthanc로 바로 가지 않고 API의 E 경로
+    # (images/dicom-web)로 간다. API가 지금의 접근을 확인하고, 보낼 바이트를 고정해 B2 provide-prepared 기록과 함께
+    # 확정한 뒤에만 첫 byte를 쓴다 — auth_request의 204는 영상 제공의 기록이 아니다. target은 nginx가 정규화한 $uri뿐이다:
+    # 이 정규식이 숫자·점·쉼표·빗금만 통과시키므로 query 구분자가 섞일 수 없고, proxy_pass에 변수가 있으면 원 요청의 query는
+    # 붙지 않는다. 전송 끝과 중단을 API가 실제 연결에서 관측하도록 버퍼링하지 않는다(E-03). 메타데이터·렌더링·썸네일 같은
+    # 파생 표현과 Gateway STOW는 아래 기존 경로 그대로다.
+    # 이 location은 15-kin-config.envsh가 쓴다: E의 manifest는 배포된 뷰어/디코더 자산 목록(KIN_EMR_IMAGE_ASSET_CATALOG)을
+    # 고정해야 하므로, 그 목록을 주지 않은 설치에서는 이 location이 비어 있고 프레임 요청은 아래의 다음 프레임 location
+    # (MG-LOADING: API의 프레임 range 읽기, 같은 관문과 image-delivery-record.ts의 열람 기록 뒤에 첫 byte)으로 간다. 목록
+    # 없이 E로 보내면 뷰어는 503만 받고 영상을 보여주지 못하고, authz 부요청 뒤 Orthanc 직결은 기록 없는 byte다(D1877).
+    # 두 location 중 먼저 쓰인 이 쪽이 정규식 순서로 이기므로 목록이 있으면 E, 없으면 range 읽기다.
+    include /etc/nginx/snippets/image-frames.conf;
 
     # 검사 UID를 경로에 박은 STOW만 Gateway에 연다. UID 없는 POST는 아래 읽기 전용
     # location에 남아 403이고, API authz가 announce 선행과 기관 일치를 다시 확인한다.

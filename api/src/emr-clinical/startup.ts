@@ -1,16 +1,16 @@
-import { BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import type { IncomingMessage } from 'node:http';
 import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 import { OrthancService } from '../orthanc.service';
 import { StudyAccessService } from '../study-access.service';
-import { STUDY_IDENTITY_UNRESOLVED, STUDY_IDENTITY_UNRESOLVED_MESSAGE } from '../study-source-groups';
 import { lockMemberRights } from '../member-rights';
 import { PacsAccess, Caller } from '../pacs/access';
 import { REQUEST_CONTEXT_SOURCE, RequestContextSource, RequestWorkContext } from '../emr-runtime/request-context';
 import { EMR_RECORD_PORT, EmrRecordPort } from '../emr-runtime/record-port';
 import { FileWrappingSecrets } from '../emr-signature/server-keys';
 import type { RequestIdentityPort, RequestIdentity, WrappingSecrets } from '../emr-signature/server-contract';
+import type { PatientLinkSnapshot } from '../emr-contract/access-event';
 import { EMR_NATIVE_REPORT_SIGNING } from '../emr-report/native-signing';
 import { EMR_CLINICAL_ROUTES, ClinicalRouteSources } from './routes';
 import { EMR_MANUAL_SR_SIGNING } from './manual-sr';
@@ -80,12 +80,29 @@ export function configuredWrappingSecrets(env: NodeJS.ProcessEnv = process.env):
 
 export const CURRENT_CLINICAL_CONTEXT = Symbol('CURRENT_CLINICAL_CONTEXT');
 
+/** The link a study's current original patient is named by: the patient ID under the study's managing institution. The
+ * current-study read below and the image routes' gate observation (image-delivery-record.ts) name a patient by it. */
+export function studyPatientLink(managingInstitutionId: string, patientId: string): PatientLinkSnapshot {
+  return { linkId: JSON.stringify([managingInstitutionId, patientId]), patientId, assigningAuthority: managingInstitutionId };
+}
+
 export function createCurrentClinicalContext(prisma: PrismaService, requests: RequestContextSource,
   orthanc: OrthancService, studyAccess: StudyAccessService): ClinicalContextSource {
   const identity = onlineRequestIdentity(requests);
   const access = new PacsAccess(prisma, studyAccess);
+  // One current-identity check per request and transaction: facts() and scope()/study() of the same request on the
+  // same transaction read the same session and rights rows under the same locks, so the second read can only repeat
+  // the first. E's per-response check used to pay it twice inside a ledger lane (R244-02 profile).
+  const resolved = new WeakMap<object, WeakMap<object, Promise<RequestIdentity>>>();
+  const resolve = (tx: Prisma.TransactionClient, request: object): Promise<RequestIdentity> => {
+    let perRequest = resolved.get(tx);
+    if (!perRequest) resolved.set(tx, perRequest = new WeakMap());
+    let pending = perRequest.get(request);
+    if (!pending) perRequest.set(request, pending = identity.resolve(tx, request));
+    return pending;
+  };
   const scope = async (tx: Prisma.TransactionClient, request: object, uid: string) => {
-    const current = await identity.resolve(tx, request);
+    const current = await resolve(tx, request);
     const state = await tx.studyState.findUnique({ where: { uid } });
     if (!state || !access.visible(state, current.actor.institutionId)) throw new NotFoundException('검사가 없습니다.');
     const c: Caller = { sub: current.actor.identity.subject, actor: current.actor.identity.subject,
@@ -96,7 +113,7 @@ export function createCurrentClinicalContext(prisma: PrismaService, requests: Re
   };
   const context: ClinicalContextSource = {
     async facts(tx, request) {
-      const current = await identity.resolve(tx, request);
+      const current = await resolve(tx, request);
       return { actor: { identity: current.actor.identity, kind: current.actor.kind, roles: current.actor.roles,
         institutionId: current.actor.institutionId, signingRegistrationId: current.actor.canSign ? current.actor.identityRegistrationId : null },
         requestId: current.ingress.requestId, ip: current.ingress.ip };
@@ -106,15 +123,10 @@ export function createCurrentClinicalContext(prisma: PrismaService, requests: Re
       const current = await scope(tx, request, uid);
       // This snapshot binds the currently observed original patient to the
       // managing institution. It is not an A fixed-version/retention lookup.
-      // WORKLIST-SPLIT-UID: a UID that two patient resources share has no
-      // resolved patient; the product's own refusal answers, never an invented link.
-      const resources = await orthanc.studyIdentityResources(uid);
-      if (!resources.length) throw new NotFoundException('검사가 없습니다.');
-      if (resources.length > 1) throw new ConflictException({ code: STUDY_IDENTITY_UNRESOLVED, message: STUDY_IDENTITY_UNRESOLVED_MESSAGE });
-      const patientId = OrthancService.tag(resources[0], '00100020');
-      if (!patientId.trim() || patientId.length > 64) throw new BadRequestException('원본 환자 식별을 확인할 수 없습니다');
-      return { ...current, patient: { linkId: JSON.stringify([current.managingInstitutionId, patientId]),
-        patientId, assigningAuthority: current.managingInstitutionId } };
+      // WORKLIST-SPLIT-UID: the rule (no resource, two patient resources, unreadable patient) is the archive reader's
+      // studyPatientIdentity, which E's per-response source check applies as well.
+      const patientId = await orthanc.studyPatientIdentity(uid);
+      return { ...current, patient: studyPatientLink(current.managingInstitutionId, patientId) };
     },
   };
   return context;

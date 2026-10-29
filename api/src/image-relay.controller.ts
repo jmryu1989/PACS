@@ -4,39 +4,21 @@
  * image representations of `/dicom-web/` (WADO-RS frames, rendered, thumbnail, bulk data, whole-object retrieve) - used
  * to go from nginx straight to Orthanc after `auth_request`, which admits a read but cannot see it delivered, so no
  * study delivery record existed for them. nginx now routes them here. The handler runs the same DICOMweb gate
- * (PacsService.authzDicom: institution, StudyAccess, split UID), takes the study delivery's lease - its provide-prepared
- * event durable before any byte (image-delivery-record.ts) - and relays Orthanc's answer unchanged (status, media type,
- * body; the query carries rendering and windowing as before), naming the study it recorded (`RECORDED_STUDY_HEADER`, for
- * the viewer's openings). Descriptions without the image (QIDO, DICOMweb metadata,
+ * (PacsService.authzDicom: institution, StudyAccess, split UID), takes the study delivery's lease for the study and
+ * patient the gate observed - its provide-prepared event durable before any byte, naming that patient and the archive's
+ * revision the recorder read for this lease (image-delivery-record.ts) - and, once the archive still holds them after
+ * Orthanc chose its answer, relays that answer unchanged (status, media type,
+ * body; the query carries rendering and windowing as before). Descriptions without the image (QIDO, DICOMweb metadata,
  * DICOM tags) are not deliveries of the image and keep the plain gate; the auth_request route refuses every image read
  * (pacs.controller.ts), so an image byte has no unrecorded way out.
  */
-import { Controller, ForbiddenException, Get, NotFoundException, Req, Res } from '@nestjs/common';
-import { RECORDED_STUDY_HEADER, StudyImageDeliveryRecorder, readUse } from './image-delivery-record';
-import type { DeliveryLease } from './image-delivery-record';
+import { Controller, Get, NotFoundException, Req, Res } from '@nestjs/common';
+import { archiveRead, RECORDED_STUDY_HEADER, StudyImageDeliveryRecorder } from './image-delivery-record';
 import { OrthancService } from './orthanc.service';
 import { Caller, PacsService } from './pacs.service';
 
 export const IMAGE_RELAY_SURFACE = 'GET image-relay/*';
 const PREFIX = '/api/image-relay';
-const UID = '[0-9.]{1,64}';
-// QIDO answers and DICOMweb metadata: attributes and BulkDataURIs, never the pixel data itself.
-const DICOMWEB_DESCRIPTION = new RegExp(`^/dicom-web/(?:studies|series|instances|studies/${UID}/(?:series|instances|series/${UID}/instances)` +
-  `|studies/${UID}(?:/series/${UID}(?:/instances/${UID})?)?/metadata)$`);
-// The header reads the print and volume consumers make before their image read: Orthanc's tag dumps leave binary
-// values out, and the attachment info is the stored file's size and digest.
-const INSTANCE_DESCRIPTION = /^\/instances\/[0-9a-f-]+\/(?:tags|simplified-tags|header|attachments\/dicom\/info)$/;
-
-/**
- * True for a read whose answer carries the stored object's image: pixels, a rendering, an encapsulated document or the
- * whole object. Anything under the two image roots that is not a named description counts, so a representation added
- * later is recorded rather than missed.
- */
-export function imageRead(path: string): boolean {
-  if (path.startsWith('/instances/')) return !INSTANCE_DESCRIPTION.test(path);
-  if (path.startsWith('/dicom-web/')) return !DICOMWEB_DESCRIPTION.test(path);
-  return false;
-}
 
 /** The original path and query nginx appended to the relay prefix; anything but a plain image-root path is no route. */
 function relayTarget(url: string): { path: string; query: string } | null {
@@ -61,14 +43,10 @@ export class ImageRelayController {
     const target = relayTarget(String(req.originalUrl ?? req.url ?? ''));
     if (!target) throw new NotFoundException('영상 경로가 올바르지 않습니다');
     const uri = target.path + target.query;
-    await this.pacs.authzDicom(uri, req.method, member(req));
-    // HEAD sends no image byte (Node drops the body), so it is no delivery.
-    let lease: DeliveryLease | null = null;
-    if (req.method === 'GET' && imageRead(target.path)) {
-      const study = await this.studyOf(target.path);
-      lease = await this.deliveries.admit(req, IMAGE_RELAY_SURFACE, study, readUse(req));
-      res.setHeader(RECORDED_STUDY_HEADER, study);
-    }
+    const admitted = await this.pacs.authzDicom(uri, req.method, member(req));
+    // A HEAD or a description is no delivery (image-delivery-record.ts lease()).
+    const lease = await this.deliveries.lease(req, IMAGE_RELAY_SURFACE, target.path, () => archiveRead(admitted));
+    if (lease) res.setHeader(RECORDED_STUDY_HEADER, admitted!.studyUid);
     const abort = new AbortController();
     const stop = () => { if (!res.writableFinished) abort.abort(); };
     let relayed = false;
@@ -81,7 +59,9 @@ export class ImageRelayController {
     const first = (name: string) => String(req.headers?.[name] ?? '').split(',')[0].trim();
     const origin = `${first('x-forwarded-proto')}://${first('x-forwarded-host')}`;
     try {
-      await this.orthanc.relay(uri, String(req.headers?.accept ?? '*/*'), res, abort.signal, origin);
+      // Orthanc selects what it answers when the request reaches it, after the lease read the study: the answer is
+      // copied only once the archive still holds the patient and revision the record names (C6/C7, I3).
+      await this.orthanc.relay(uri, String(req.headers?.accept ?? '*/*'), res, abort.signal, origin, lease ? () => lease.confirm() : undefined);
       relayed = true;
     } catch (error) {
       // After the headers a JSON error cannot follow; cutting the connection is the truthful end of a partial image.
@@ -92,14 +72,5 @@ export class ImageRelayController {
       // A served image is a relayed success answer the client received in full; Orthanc's error answers are not.
       if (lease) void closed.then(() => lease.release(relayed && res.writableFinished === true && res.statusCode >= 200 && res.statusCode < 300));
     }
-  }
-
-  /** The gate has just resolved (and cached) the same study; an image read always names it. */
-  private async studyOf(path: string): Promise<string> {
-    const study = /^\/dicom-web\/studies\/([0-9.]+)(?:\/|$)/.exec(path)?.[1];
-    if (study) return study;
-    const instance = /^\/instances\/([0-9a-f-]+)(?:\/|$)/.exec(path)?.[1];
-    if (instance) return this.orthanc.instanceStudyUid(instance);
-    throw new ForbiddenException('열람 권한이 없습니다');
   }
 }

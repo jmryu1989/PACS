@@ -12,7 +12,7 @@ export interface EmrRecordWork {
   admit(event: AccessEvent, served?: readonly ResolvedRecord[], keys?: AttemptKeys): Promise<AdmittedOperation>;
   transaction(operation: AdmittedOperation, work: (tx: EmrRecordTransaction) => Promise<BusinessReference | null>): Promise<OperationResult>;
   transactionWithRecords<T>(work: (tx: EmrRecordTransaction, record: RecordMutation) => Promise<T>,
-    options?: { maxWait: number; timeout: number }): Promise<T>;
+    options?: { maxWait: number; timeout: number }, failureEvent?: string): Promise<T>;
   append(event: AccessEvent, served?: readonly ResolvedRecord[], keys?: AttemptKeys): Promise<DurableAccessReceipt>;
   confirm(appended: ProvisionalAppend): Promise<DurableAccessReceipt>;
   lookup(operationId: string): Promise<OperationResult | null>;
@@ -52,7 +52,7 @@ export function createRecordPort(store: AccessLedgerStore): { port: EmrRecordPor
       return {
         admit: (event, served, keys) => run(() => store.admit(event, served, keys)),
         transaction: (operation, work) => run(() => store.transaction(operation, work)),
-        transactionWithRecords: (work, options) => run(() => store.transactionWithRecords(work, options)),
+        transactionWithRecords: (work, options, failureEvent) => run(() => store.transactionWithRecords(work, options, failureEvent)),
         append: (event, served, keys) => run(() => store.append(event, served, keys)),
         confirm: appended => run(() => store.confirm(appended)),
         lookup: id => run(() => store.lookup(id)),

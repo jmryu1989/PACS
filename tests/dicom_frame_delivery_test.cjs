@@ -15,13 +15,16 @@
  * read is a background-fetch delivery of its own referring to the root, with its own terminal), and a retry after a lost
  * COMMIT reply, a restart, or a root the ledger settled negative never yields a second root, and an image answer of a
  * stored object names the study its opening recorded; a ledger that cannot record answers 503 with no body; refusals of the
- * gate leave no record; shutdown closes open deliveries; a delivery that provided no image closes as aborted, not
+ * gate leave no record; shutdown closes open deliveries after their responses end; a delivery that provided no image closes as aborted, not
  * succeeded (MG-10), and a HEAD - answered behind the gate - neither opens a delivery nor makes one whose relayed read
  * (the real ImageRelayController on the same recorder) failed a provided one (review INT-01); a terminal the ledger cannot take at the close is retried as the same event until durable, and the
  * shutdown makes a last attempt without inventing one (MG-09); a graceful Nest shutdown (installed Nest's application
  * context close, the real EmrNestLifecycle closing admission) still records the terminal of a delivery whose
  * preparation or whose first terminal attempt was in flight when admission closed (MG-09, round 4), and of one whose
- * first terminal attempt was made during the stop and failed once (MG-09, round 5). The PostgreSQL
+ * first terminal attempt was made during the stop and failed once (MG-09, round 5); a relay fallback copies Orthanc's
+ * answer only once the archive still holds the revision and patient its record names: a newer revision is asked again
+ * under that revision's record, another patient gets no byte (C8 of the shared recorder contract, R244-GPT-FIX9-01/
+ * FIX10-01). The PostgreSQL
  * ledger itself is proven in tests/emr/a (real PG). D73: behaviour at the boundary, no product source text. Synthetic
  * values only; 127.0.0.1 only. */
 const { STUDY_UID, SERIES_UID, SOP_UID, INSTANCE_ID, STUDY_ID, syntheticObject, stubOrthanc } = require('./dicom_frame_fixture.cjs');
@@ -126,12 +129,14 @@ async function stack(options = {}) {
   const clinical = createCurrentClinicalContext(prisma, contexts.source, orthanc, studyAccess);
   // The runtime's background registry, as app.module provides it: terminal retries are its timers and tasks.
   const background = createBackgroundWorkRegistry();
+  // Every lease uses the check pool over the fixture's current synthetic rows, including after restart.
+  const checks = { $transaction: async work => work({ ...records.tx, $executeRaw: async () => 0 }) };
   const service = new DicomFrameService(orthanc);
   let recorder, controller, relay;
   // A new API process over the same ledger: the recorder and its controllers start empty, the ledger keeps what it holds.
   const restart = () => {
-    recorder = new StudyImageDeliveryRecorder(records.port, contexts.source, clinical, background.work, orthanc, IDLE_MS);
-    controller = new DicomFrameController(service, { authzDicom: (...args) => gate.authzDicom(...args) }, orthanc, recorder);
+    recorder = new StudyImageDeliveryRecorder(records.port, contexts.source, clinical, background.work, orthanc, IDLE_MS, checks);
+    controller = new DicomFrameController(service, { authzDicom: (...args) => gate.authzDicom(...args) }, recorder);
     // The other image reads of the same study, which nginx sends to the relay; app.module gives both controllers one recorder.
     relay = new ImageRelayController({ authzDicom: (...args) => gate.authzDicom(...args) }, orthanc, recorder);
     return recorder;
@@ -239,7 +244,6 @@ test('open: frames and the preview of one study by one session are served under 
     assert.equal(byAction(s.records.entries, 'transfer-ended')[1].event.relatedEventId, second.eventId);
     await settle();
     assert.equal(s.records.control.live(), 0, 'every record work was ended');
-    assert.equal(s.orthanc.calls.filter(c => c[0] === 'revision').length, 2, 'the study revision is read once per delivery');
   } finally { await s.close(); }
 });
 
@@ -285,6 +289,39 @@ test('D1880: a memory preload is a transfer and never the opening; the opening r
     assert.equal((await s2.frame(1, VIEW)).status, 200);
     assert.deepEqual(byAction(s2.records.entries, 'provide-prepared').map(e => e.event.cause), ['background-fetch', 'user-view']);
   } finally { await s2.close(); }
+});
+
+test('preload store/check answers the revision its actual bytes were recorded under; unavailable source revision refuses both before bytes or a record', async () => {
+  let unavailable = false;
+  const s = await stack({ orthanc: orthanc => {
+    const revision = orthanc.studyRevision.bind(orthanc);
+    return { studyRevision: async uid => { if (unavailable) throw new Error('two study resources'); return revision(uid); } };
+  } });
+  try {
+    const view = opening('syn-opening-0001');
+    const store = await s.frame(1, { 'x-kin-preload': 'store', ...view });
+    const check = await s.frame(1, { 'x-kin-preload': 'check', ...view });
+    const ordinary = await s.frame(1);
+    assert.deepEqual([store.status, check.status, ordinary.status], [200, 200, 200]);
+    assert.equal(store.headers.get('content-type'), 'application/gzip');
+    assert.match(check.headers.get('content-type'), /^multipart\/related/);
+    const records = byAction(s.records.entries, 'provide-prepared');
+    assert.equal(store.headers.get('x-kin-study-revision'), records[0].event.targets[0].versionId.value);
+    assert.equal(check.headers.get('x-kin-study-revision'), records[1].event.targets[0].versionId.value);
+    assert.equal(ordinary.headers.get('x-kin-study-revision'), null);
+    assert.deepEqual(records.map(e => e.event.cause), ['background-fetch', 'user-view', 'background-fetch']);
+    assert.equal((await s.frame(2, view)).status, 200);
+    assert.equal((await s.frame(2, { 'x-kin-view-opening': 'bad opening!' })).status, 200);
+    assert.equal(byAction(s.records.entries, 'provide-prepared').length, 3, 'view and unnamed fetch keep their own deliveries');
+    unavailable = true;
+    for (const mode of ['store', 'check']) {
+      const failed = await s.frame(1, { 'x-kin-preload': mode, ...view });
+      assert.equal(failed.status, 503);
+      assert.equal(failed.headers.get('x-kin-study-revision'), null);
+      assert.equal(s.observations.at(-1).firstByte, null);
+    }
+    assert.equal(byAction(s.records.entries, 'provide-prepared').length, 3, 'no source revision means no new record or image');
+  } finally { await s.close(); }
 });
 
 test('opening contract O1/O4: a fresh opening inside the previous opening\'s idle gap has its own root; one opening\'s concurrent first reads share one; a read naming no opening never joins one', async () => {
@@ -441,7 +478,7 @@ test('review R1 of f455ba2: an image answer of a stored object names the study i
   } finally { await s.close(); }
 });
 
-test('shutdown closes open deliveries: a quiet one ends, one still being sent is aborted, and nothing stays open', async () => {
+test('shutdown closes open deliveries once their responses have: a quiet one at once, one still being sent when it ends (R244-GPT-FIX8-02)', async () => {
   let hold = false, release = null;
   const s = await stack({ orthanc: orthanc => { const relay = orthanc.relay.bind(orthanc); return { relay: async (...args) => {
     if (hold) await new Promise(resolve => { release = resolve; });
@@ -454,14 +491,101 @@ test('shutdown closes open deliveries: a quiet one ends, one still being sent is
     const pending = s.frame(9, { 'x-synthetic-session': 'authref:session-b' });
     await until(() => byAction(s.records.entries, 'provide-prepared').length === 2 && release !== null, 'B was not admitted before its read');
     s.recorder.onModuleDestroy();
-    await s.recorder.beforeApplicationShutdown();
-    const terminals = s.records.entries.filter(e => e.event.action !== 'provide-prepared').map(e => e.event.action).sort();
-    assert.deepEqual(terminals, ['transfer-aborted', 'transfer-ended']);
+    const stopping = s.recorder.beforeApplicationShutdown();
+    await until(() => byAction(s.records.entries, 'transfer-ended').length === 1, 'the quiet delivery ends at once');
+    await wait(IDLE_MS * 3);
+    assert.equal(s.records.entries.length, 3, 'no terminal for B while its response is still being sent');
     hold = false; release();
-    assert.equal((await pending).status, 200, 'the held read still completes for its client');
+    assert.equal((await pending).status, 200, 'the held read completes for its client');
+    await stopping;
+    const terminals = s.records.entries.filter(e => e.event.action !== 'provide-prepared').map(e => e.event.action);
+    assert.deepEqual(terminals, ['transfer-ended', 'transfer-ended'], 'B ends by what it served, after its response did');
     await settle();
     assert.equal(s.records.control.live(), 0);
   } finally { hold = false; release?.(); await s.close(); }
+});
+
+test('C8: a relay fallback is confirmed once Orthanc answered; a newer revision is asked again under its own record, another patient gets no byte', async () => {
+  const [R0, R1] = ['20261028T090000', '20261028T090100'].map(at => `orthanc-study:${STUDY_ID}@${at}`);
+  for (const change of ['revision', 'patient']) {
+    let lastUpdate = '20261028T090000', patient = 'SYN-PID-1', changed = false;
+    const s = await stack({ orthanc: orthanc => { const identity = orthanc.studyIdentityResources.bind(orthanc), relay = orthanc.relay.bind(orthanc);
+      return {
+        studyRevision: async uid => { orthanc.calls.push(['revision', uid]); return { id: STUDY_ID, lastUpdate }; },
+        studyIdentityResources: async uid => (await identity(uid)).map(row => ({ ...row, '00100020': { vr: 'LO', Value: [patient] } })),
+        // Orthanc selects what it answers when the relayed request reaches it: here once after the archive changed, after
+        // the delivery was admitted. Its answer is copied only once the relay's `selected` check passes (OrthancService.relay).
+        relay: async (path, accept, target, signal, origin, selected) => {
+          if (!changed) { changed = true; if (change === 'revision') lastUpdate = '20261028T090100'; else patient = 'SYN-PID-2'; }
+          do orthanc.calls.push(['answered', path]); while (!(await selected()));
+          return relay(path, accept, target);
+        },
+      }; } });
+    try {
+      // Frame 9 is past the object's five: the direct attempt falls back to Orthanc.
+      const answer = await s.frame(9, { 'x-kin-preload': 'check', ...opening('syn-fallback-opening') });
+      if (change === 'patient') {
+        assert.equal(answer.status, 409);
+        assert.equal(JSON.parse(answer.body.toString()).code, 'ImageCurrentStudyChanged');
+        assert.deepEqual(s.orthanc.calls.filter(c => c[0] === 'relay'), [], 'the answer of the corrected patient was not copied');
+        assert.ok(s.observations.every(o => o.firstByte === null), 'no image byte');
+        await until(() => byAction(s.records.entries, 'transfer-aborted').length === 1, 'the outdated delivery ends at once, aborted');
+      } else {
+        // Orthanc's answer may be of either revision: it is dropped unread, and Orthanc is asked again under the record of
+        // the revision the archive holds now, durable before the first byte.
+        assert.equal(answer.status, 200);
+        assert.equal(s.orthanc.calls.filter(c => c[0] === 'answered').length, 2);
+        const opened = byAction(s.records.entries, 'provide-prepared');
+        assert.deepEqual(opened.map(e => e.event.targets[0].versionId.value), [R0, R1]);
+        assert.equal(answer.headers.get('x-kin-study-revision'), R1, 'the check names the revision selected again, not the discarded one');
+        assert.deepEqual(opened.map(e => e.event.cause), ['user-view', 'background-fetch']);
+        assert.equal(opened[1].event.relatedEventId, opened[0].event.eventId, 'source revision changes keep this opening root');
+        assert.ok(s.records.entries.slice(0, s.observations[0].firstByte.entries).includes(opened[1]), 'the first byte followed the newer revision\'s record');
+        await until(() => s.records.entries.length === 4, 'both deliveries closed');
+        assert.deepEqual(s.records.entries.filter(e => e.event.action !== 'provide-prepared').map(e => [e.event.targets[0].versionId.value, e.event.action]),
+          [[R0, 'transfer-aborted'], [R1, 'transfer-ended']]);
+      }
+    } finally { await s.close(); }
+  }
+});
+test('R244-GPT-FIX10-01 the direct reader serves an object only under a record of its patient: an index cache from before a correction is selected again, an object of another patient gets no byte', async () => {
+  const B_ID = 'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee', B_STUDY = 'bbbbbbbb-cccccccc-dddddddd-eeeeeeee-ffffffff';
+  const B_UUID = 'a447e43e-7a12-4de9-af18-9ceb86847e05';
+  for (const objectPatient of ['SYN-PID-2', 'SYN-PID-3']) {
+    let patient = 'SYN-PID-1';
+    const s = await stack({ orthanc: orthanc => { const identity = orthanc.studyIdentityResources.bind(orthanc), facts = orthanc.frameFacts.bind(orthanc);
+      return {
+        // A patient correction gives the study and its objects new archive resources, as Orthanc's do.
+        studyRevision: async uid => { orthanc.calls.push(['revision', uid]); return { id: patient === 'SYN-PID-1' ? STUDY_ID : B_STUDY, lastUpdate: '20261028T090000' }; },
+        studyIdentityResources: async uid => (await identity(uid)).map(row => ({ ...row, '00100020': { vr: 'LO', Value: [patient] } })),
+        lookupInstance: async sop => { orthanc.calls.push(['lookup', sop]); return [{ Type: 'Instance', ID: patient === 'SYN-PID-1' ? INSTANCE_ID : B_ID }]; },
+        frameFacts: async id => { const f = await facts(id); return id !== B_ID ? f : { ...f, tags: { ...f.tags, PatientID: objectPatient }, attachment: { ...f.attachment, Uuid: B_UUID } }; },
+      }; } });
+    try {
+      // The corrected object's stored file: the same layout, its own pixels.
+      const storage = path.dirname(path.dirname(path.dirname(s.object.filePath)));
+      const bFile = Buffer.from(s.object.file), bPixels = Buffer.alloc(s.object.frameBytes, 0x6b);
+      bPixels.copy(bFile, s.object.offset + 12);
+      fs.mkdirSync(path.join(storage, B_UUID.slice(0, 2), B_UUID.slice(2, 4)), { recursive: true });
+      fs.writeFileSync(path.join(storage, B_UUID.slice(0, 2), B_UUID.slice(2, 4), B_UUID), bFile);
+      assert.equal((await s.frame(1)).status, 200);   // the reader's index cache now names patient A's object for the SOP
+      patient = 'SYN-PID-2';
+      const answer = await s.frame(1);
+      await s.recorder.beforeApplicationShutdown();
+      const pairs = byAction(s.records.entries, 'provide-prepared').map(p => [p.event.targets[0].patientLinkSnapshot.value.patientId,
+        s.records.entries.filter(e => e.event.relatedEventId === p.event.eventId).map(e => e.event.action)]);
+      if (objectPatient === 'SYN-PID-2') {
+        assert.equal(answer.status, 200);
+        assert.ok(answer.body.includes(bPixels), 'the corrected object, selected again, under the corrected patient\'s record');
+        assert.deepEqual(pairs, [['SYN-PID-1', ['transfer-ended']], ['SYN-PID-2', ['transfer-ended']]]);
+      } else {
+        assert.equal(answer.status, 409);
+        assert.equal(JSON.parse(answer.body.toString()).code, 'ImageCurrentStudyChanged');
+        assert.ok(!answer.body.includes(bPixels));
+        assert.deepEqual(pairs, [['SYN-PID-1', ['transfer-ended']], ['SYN-PID-2', ['transfer-aborted']]]);
+      }
+    } finally { await s.close(); }
+  }
 });
 
 test('a delivery that provided no image closes as transfer-aborted, never succeeded: a source read that failed with 503, a relayed refusal', async () => {
@@ -635,7 +759,8 @@ test('graceful Nest shutdown closes record admission after the stop began: a del
     const response = await read;
     await stopping;
     assert.equal(response.status, 200, 'the read admitted before the stop completes for its client');
-    assert.deepEqual(s.records.entries.map(e => e.event.action), ['provide-prepared', 'transfer-aborted'], 'the pair is complete; the response was still being sent at the stop');
+    assert.deepEqual(s.records.entries.map(e => e.event.action), ['provide-prepared', 'transfer-ended'],
+      'the pair is complete: the stop waited for the response and closed it by what it served (R244-GPT-FIX8-02)');
     assert.equal(s.records.entries[1].event.relatedEventId, s.records.entries[0].event.eventId);
     assert.equal(s.records.control.live(), 0, 'every record work, the one reserved for the stop included, was ended');
     assert.deepEqual(nest.lines.filter(line => line.startsWith('error')), [], 'a complete shutdown reports no pending terminal');
@@ -694,11 +819,11 @@ test('graceful Nest shutdown: a terminal whose first attempt was made during the
     const response = await read;
     await stopping;
     assert.equal(response.status, 200);
-    assert.deepEqual(s.records.entries.map(e => e.event.action), ['provide-prepared', 'transfer-aborted'], 'the pair is complete after one failed terminal attempt during the stop');
+    assert.deepEqual(s.records.entries.map(e => e.event.action), ['provide-prepared', 'transfer-ended'], 'the pair is complete after one failed terminal attempt during the stop');
     assert.equal(s.records.entries[1].event.relatedEventId, s.records.entries[0].event.eventId);
     assert.equal(terminals.length, 2, 'the failed attempt and the stop\'s last attempt both reached the store');
     assert.equal(terminals[0], terminals[1], 'the same terminal event, not a new one');
-    assert.equal(s.records.attempts.filter(a => a.action === 'transfer-aborted').length, 1, 'the store holds the one that succeeded');
+    assert.equal(s.records.attempts.filter(a => a.action === 'transfer-ended').length, 1, 'the store holds the one that succeeded');
     assert.equal(nest.lines.filter(line => line.startsWith('warn')).length, 1, 'the failed attempt is reported once, as an attempt');
     assert.deepEqual(nest.lines.filter(line => line.startsWith('error')), [], 'nothing pending is reported');
     assert.equal(s.records.control.live(), 0, 'the reserved work was ended after the last attempt');
