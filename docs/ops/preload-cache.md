@@ -10,7 +10,7 @@
 
 ## 저장 항목과 표시 경계
 
-PACS origin의 IndexedDB `kin-preload`에 WADO-RS 프레임 본문과 암호화한 검사 manifest를 보관한다. 프레임은 수신한 gzip 또는 multipart 본문 그대로이며 DICOM 태그 JSON은 저장하지 않는다. manifest는 워크리스트 행 문자열(성명·환자번호·검사일·검사설명·접수번호, 200자 이내), UID, revision, 사본 번호, 상태·사유·대기열 순번, 대기·수신 시각, 용량, 프레임 경로 지도를 포함한다. 환자번호를 주민번호로 사용하는 기관에서는 라벨에도 그 번호가 포함되므로 도입 때 데이터 체계와 병원의 처리 근거를 확인한다. 평문 필드는 무작위 레코드 ID·키 ID·만료 시각·암호문 크기·IV뿐이다. Cache Storage와 OPFS는 사용하지 않으며 영상 HTTP 응답은 `no-store`다.
+PACS origin의 IndexedDB `kin-preload`에 WADO-RS 프레임 본문과 암호화한 검사 manifest를 보관한다. 프레임은 수신한 gzip 또는 multipart 본문 그대로이며 DICOM 태그 JSON은 저장하지 않는다. manifest는 워크리스트 행 문자열(환자번호(id) · 성명(name) · 검사일(date) · 검사 종류(modality), 200자 이내), UID, revision, 사본 번호, 상태·사유·대기열 순번, 대기·수신 시각, 용량, 프레임 경로 지도를 포함한다. 환자번호를 주민번호로 사용하는 기관에서는 라벨에도 그 번호가 포함되므로 도입 때 데이터 체계와 병원의 처리 근거를 확인한다. 평문 필드는 무작위 레코드 ID·키 ID·만료 시각·암호문 크기·IV뿐이다. Cache Storage와 OPFS는 사용하지 않으며 영상 HTTP 응답은 `no-store`다.
 
 매 열람은 서버의 `check` 읽기로 기관·StudyAccess·분할 UID·보류와 revision을 확인하고 user-view 뿌리 기록을 남긴 뒤 보관 사본을 표시한다. 미리 받기 자체는 background-fetch 전달 기록이며 HEAD는 열람을 만들지 않는다. 기록 실패·네트워크 단절 때 캐시를 대신 표시하지 않는다.
 

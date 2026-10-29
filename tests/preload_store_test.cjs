@@ -202,6 +202,28 @@ test('R5 fixed 72-hour window blocks held/frame before sweep and releases every 
   assert.equal(status(store, '1.1').expiresAt, now + 72*3600000);
 });
 
+test('R5 a still-queued study expires at its original deadline after restart', () => {
+  const queuedAt = 1000, deadline = queuedAt + 72 * 3600000;
+  const store = create(100, () => queuedAt);
+  store.add([{ uid: '1.1' }]);
+  const manifest = store.manifest('1.1');
+  assert.equal(manifest.fetchedAt, null, 'no frame was ever received');
+  for (const restartAt of [deadline - 1, deadline, deadline + 3600000]) {
+    const restarted = create(100, () => restartAt);
+    restarted.restore(manifest, new Map());
+    restarted.expire();
+    if (restartAt < deadline) {
+      assert.equal(restarted.next().uid, '1.1');
+      assert.equal(status(restarted, '1.1').status, STATUS.queued);
+    } else {
+      assert.equal(restarted.next(), null, 'expired queue must not download again');
+      assert.equal(status(restarted, '1.1').status, STATUS.evicted);
+      assert.match(status(restarted, '1.1').reason, /대기열/);
+    }
+    assert.equal(status(restarted, '1.1').expiresAt, deadline, 'restart never renews retention');
+  }
+});
+
 test('R11 R15 a persisted downloading manifest resumes Queued with reference-only frames', () => {
   const store = create(100);
   store.add([{uid:'1.1',label:'SYN · Patient'}]); store.start('1.1', 2);

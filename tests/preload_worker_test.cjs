@@ -47,7 +47,7 @@ function memoryDisk() {
 const { webcrypto, randomBytes } = require('node:crypto');
 const KEY = randomBytes(32), SERVER_START = Date.parse('2026-10-30T00:00:00Z');
 function boot({ diskGb = 0.25, respond, disk = memoryDisk(), skew = 0, keyResponse, unavailableDisk = false } = {}) {
-  const requests = [], timers = [], imports = [];
+  const requests = [], timers = [], imports = [], decryptKeys = [];
   let clock = SERVER_START;
   const me = () => new Response(JSON.stringify({ kind: 'member', preloadDiskGb: diskGb }), { headers: { 'Content-Type': 'application/json' } });
   const images = respond || (async url => {
@@ -63,7 +63,8 @@ function boot({ diskGb = 0.25, respond, disk = memoryDisk(), skew = 0, keyRespon
     navigator: {storage:{estimate:()=>disk.estimate()}}, Blob, Response, DecompressionStream, AbortController, URL, Headers, setTimeout, console,
     TextEncoder, TextDecoder, atob, Uint8Array, Date: class extends Date { static now(){return clock+skew;} },
     crypto: { randomUUID:()=>webcrypto.randomUUID(), getRandomValues:b=>webcrypto.getRandomValues(b),
-      subtle: { encrypt:(...a)=>webcrypto.subtle.encrypt(...a), decrypt:(...a)=>webcrypto.subtle.decrypt(...a),
+      subtle: { encrypt:(...a)=>webcrypto.subtle.encrypt(...a),
+        decrypt:(...a)=> { decryptKeys.push(a[1]); return webcrypto.subtle.decrypt(...a); },
         importKey: async (...args)=> { const key = await webcrypto.subtle.importKey(...args); imports.push({raw:args[1], key}); return key; } } },
     setInterval: fn => { timers.push(fn); return 1; },
     fetch: async (url, init) => {
@@ -93,7 +94,7 @@ function boot({ diskGb = 0.25, respond, disk = memoryDisk(), skew = 0, keyRespon
     return port;
   };
   const reads = () => requests.filter(r => !r.url.startsWith('/api/'));
-  return { requests, reads, connect, disk, imports, advance:ms=>{clock+=ms;}, sweep:()=>timers.forEach(fn=>fn()),
+  return { requests, reads, connect, disk, imports, decryptKeys, advance:ms=>{clock+=ms;}, sweep:()=>timers.forEach(fn=>fn()),
     hold: () => { let open; gate = new Promise(resolve => { open = resolve; }); return () => { gate = null; open(); }; } };
 }
 
@@ -166,6 +167,28 @@ test('reading comes first: while a viewer loads from the network, no new preload
   await until(() => statusOf(list, OTHER)?.status === 'Queued', 'second study queued');
   viewer.send({ type: 'bye' });
   await until(() => statusOf(list, OTHER)?.status === 'Ready', 'second study Ready after bye');
+});
+
+test('reading comes first after metadata: frame reads pause until the viewer is idle', async () => {
+  const { reads, connect, hold } = boot();
+  const viewer = connect();
+  viewer.send({ type: 'hello', role: 'viewer' });
+  const list = connect();
+  list.send({ type: 'hello', role: 'list' });
+  const release = hold();
+  list.send({ type: 'add', session: 'sess-1', studies: [{ uid: STUDY }] });
+  await until(() => reads().length === 1, 'metadata request');
+  viewer.send({ type: 'busy', busy: true });
+  release();
+  try {
+    for (let i = 0; i < 20; i++) await tick();
+    assert.equal(reads().length, 1, 'metadata may finish but no frame starts while reading');
+    assert.equal(statusOf(list, STUDY).status, 'Downloading');
+  } finally {
+    viewer.send({ type: 'busy', busy: false });
+  }
+  await until(() => statusOf(list, STUDY)?.status === 'Ready', 'Ready after reading');
+  assert.equal(reads().length, 4, 'all frames resume');
 });
 
 test('a session that ended on the server empties the store; a new session never sees the old one', async () => {
@@ -317,6 +340,30 @@ async function ready(h, uid=STUDY) {
   await until(()=>statusOf(list,uid)?.status==='Ready','Ready'); return list;
 }
 const query = (p, session='sess-A', uid=STUDY) => p.ask({type:'query',session,uid});
+
+for (const nextSession of [null, 'sess-B']) {
+  test(`R11 delayed disk read cannot use the old key after ${nextSession ? 'user switch' : 'logout'}`, async () => {
+    const h = boot(), list = await ready(h);
+    const held = (await query(list)).held;
+    // A positive control makes the crypto spy prove actual use of the issued key.
+    assert.ok((await list.ask({ type: 'frame', session: 'sess-A', path: FRAME, copy: held.copy })).bytes);
+    const oldKey = h.imports[0].key;
+    assert.ok(h.decryptKeys.includes(oldKey));
+    h.decryptKeys.length = 0;
+    const before = await h.disk.list();
+    const get = h.disk.get;
+    let release, started = false;
+    const pending = new Promise(resolve => { release = resolve; });
+    h.disk.get = async id => { started = true; await pending; return get(id); };
+    const answer = list.ask({ type: 'frame', session: 'sess-A', path: FRAME, copy: held.copy });
+    await until(() => started, 'disk read awaiting completion');
+    list.send({ type: 'session', session: nextSession });
+    release();
+    assert.equal((await answer).bytes, null);
+    assert.equal(h.decryptKeys.includes(oldKey), false, 'the old key is dropped before the pending read resumes');
+    assert.deepEqual(await h.disk.list(), before, 'ending a session preserves ciphertext');
+  });
+}
 
 test('R1 R2 R15 encrypted exact manifests and unchanged frame bodies, zeroed input and no key in window messages', async()=>{
   const h=boot(), list=await ready(h);
