@@ -297,9 +297,10 @@ window.KinReadingWorkspace = function (app) {
     if (!active || ended || !app.allowed()) return;
     // W5 (D1423 R4): Related Report opens the page's Related Report mode for the viewed Related study and Report Editor is its
     // Back, when the page has the mode (the same hook the viewer frame's Finalize uses); otherwise they only move focus.
+    // A hidden Related panel comes back first: the mode opens inside it (Minhoon item 8), and its title takes the focus.
+    if (which === 'prior' && panelValues.relatedHidden) setRelatedHidden(false);
     if ((which === 'prior' || which === 'report') && window.KinReportCommands?.related?.(which) === true) {
-      // The mode took the key (its entry or its Back): the list overlay and a hidden Related panel follow as for the panes.
-      if (which === 'prior' && panelValues.relatedHidden) setRelatedHidden(false);
+      // The mode took the key (its entry or its Back): the list overlay follows as for the panes.
       closeList();
       return;
     }
@@ -326,7 +327,6 @@ window.KinReadingWorkspace = function (app) {
       if (tool) { tool.focus({ preventScroll: true }); tool.scrollIntoView({ block: 'nearest' }); }
     } else {
       if (which === 'report') closeContext();
-      if (which === 'prior' && panelValues.relatedHidden) setRelatedHidden(false);
       const pane = $(which === 'prior' ? '.prior-report-pane' : '#findings');
       if (!pane || !pane.getClientRects().length) return;
       closeList();
