@@ -287,3 +287,85 @@ test('D1160-M4: the largest record with every Study Panel choice stays within th
   assert.equal(layout.write(s, k, value), true);
   assert.deepEqual(layout.read(s, k).state.workspace.studyPanel, { landscape: full, portrait: full });
 });
+
+// Minhoon 2026-10-27 item 9 (Panel Settings): a hidden panel gives its space back without leaving an empty band, and
+// the record survives the layout's own writes and an account Load -> TEST-WSPACE-PANELS-03..05.
+const v3 = () => layout.toVersion3(layout.defaults());
+
+test('TEST-WSPACE-PANELS-03 withHiddenPanels keeps a fixed order, drops the field when empty, and keeps other choices', () => {
+  const base = layout.withStudyPanel(v3(), 'landscape', { width: 420 });
+  const hidden = layout.withHiddenPanels(base, ['template', 'thumbnail']);
+  assert.deepEqual(hidden.workspace.hiddenPanels, ['thumbnail', 'template']);
+  assert.deepEqual(hidden.workspace.studyPanel, { landscape: { width: 420 } });
+  assert.deepEqual(layout.hiddenPanels(hidden), ['thumbnail', 'template']);
+  // A later Study Panel or reading write retains the hidden panels.
+  assert.deepEqual(layout.withStudyPanel(hidden, 'portrait', { text: 1 }).workspace.hiddenPanels, ['thumbnail', 'template']);
+  assert.deepEqual(layout.withReading(hidden, hidden.reading).workspace.hiddenPanels, ['thumbnail', 'template']);
+  assert.equal(Object.hasOwn(layout.withHiddenPanels(hidden, []).workspace, 'hiddenPanels'), false);
+  for (const bad of [['template', 'template'], ['Related'], 'template', null]) assert.equal(layout.withHiddenPanels(base, bad), null);
+  // Legacy records show every panel and upgrade only when the reader chooses.
+  assert.deepEqual(layout.hiddenPanels(layout.defaults()), []);
+  assert.equal(layout.withHiddenPanels(layout.defaults(), ['clinical']).version, 3);
+});
+
+test('TEST-WSPACE-PANELS-04 the account Load of an older record keeps the hidden panels of the current layout', () => {
+  const current = layout.withHiddenPanels(v3(), ['clinical']);
+  const loaded = layout.mergeLoaded(current, { version: 1, mode: 'landscape', portrait: {}, landscape: { main: 640 } });
+  assert.deepEqual(loaded.workspace.hiddenPanels, ['clinical']);
+  assert.equal(loaded.landscape.main, 640);
+  // A v3 record from the account is the reader's saved choice, including no hidden panel.
+  assert.deepEqual(layout.hiddenPanels(layout.mergeLoaded(current, v3())), []);
+});
+
+// The W-SPACE layout contract (2026-10-29): the shares are the modes' shipped first paint, a placeholder tab never
+// changes the content allocation, and the band's state follows the panels the mode can show.
+test('TEST-WSPACE-PANELS-05 reportWindow: mode shares, placeholders own no column, band state from effective content', () => {
+  const fractions = (mode, hidden) => {
+    const { content } = layout.reportWindow(mode, hidden), sum = content.reduce((s, p) => s + p.share, 0);
+    return Object.fromEntries(content.map(p => [p.key, p.share / sum]));
+  };
+  assert.deepEqual(fractions('Radiology', []), { thumbnail: 0.34, clinical: 0.30, template: 0.36 });
+  assert.deepEqual(fractions('Technician', []), { thumbnail: 0.34, clinical: 0.66 });
+  for (const mode of ['Radiology', 'Technician']) {
+    for (const content of [[], ['thumbnail'], ['clinical'], ['template'], ['thumbnail', 'clinical']]) {
+      const base = fractions(mode, content);
+      for (const tabs of [['aiReport'], ['imageReport'], ['aiReport', 'imageReport']]) {
+        assert.deepEqual(fractions(mode, [...content, ...tabs]), base, `${mode} ${content} ${tabs}`);
+      }
+    }
+    // A hidden content panel's share goes to the others in proportion: no survivor narrows.
+    const all = fractions(mode, []);
+    for (const gone of Object.keys(all)) {
+      const rest = fractions(mode, [gone]);
+      for (const [key, value] of Object.entries(rest)) assert.ok(value > all[key], `${mode} ${gone} ${key}`);
+      for (const key of Object.keys(rest)) {
+        for (const other of Object.keys(rest)) assert.ok(Math.abs(rest[key] / rest[other] - all[key] / all[other]) < 1e-12);
+      }
+    }
+  }
+  // Technician cannot show Template; the reader's Template choice changes nothing there and is not edited.
+  const hidden = ['template'];
+  assert.deepEqual(layout.reportWindow('Technician', hidden), layout.reportWindow('Technician', []));
+  assert.deepEqual(hidden, ['template']);
+  const cases = [
+    ['Radiology', [], 'content', false],
+    ['Radiology', ['thumbnail'], 'content', true],
+    ['Radiology', ['thumbnail', 'aiReport', 'imageReport'], 'content', false],
+    ['Radiology', ['thumbnail', 'clinical', 'template'], 'tabs', true],
+    ['Radiology', ['thumbnail', 'imageReport', 'clinical', 'template'], 'tabs', true],
+    ['Radiology', ['thumbnail', 'aiReport', 'imageReport', 'clinical', 'template'], 'empty', false],
+    ['Radiology', ['thumbnail', 'aiReport', 'imageReport', 'clinical'], 'content', false],
+    ['Technician', ['thumbnail', 'clinical'], 'tabs', true],
+    ['Technician', ['thumbnail', 'aiReport', 'imageReport', 'clinical'], 'empty', false],
+  ];
+  for (const [mode, off, state, strip] of cases) {
+    const band = layout.reportWindow(mode, off);
+    assert.equal(band.state, state, `${mode} ${off}`);
+    assert.equal(band.strip, strip, `${mode} ${off}`);
+    assert.equal(band.classes['kin-report-window-tabs'], state === 'tabs');
+    assert.equal(band.classes['kin-report-window-empty'], state === 'empty');
+    assert.equal(band.classes['kin-report-window-strip'], strip);
+  }
+  assert.equal(layout.reportWindow('Technician', []).classes['kin-hide-template'], true);
+  assert.equal(layout.reportWindow('Radiology', []).classes['kin-hide-template'], false);
+});

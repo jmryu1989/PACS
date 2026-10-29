@@ -104,6 +104,8 @@ DECIDED_REGIONS = (
     ('EMR-D #219: clinical signing facts', 'script[src="clinical-signature.js"]', 'node', None),
     ('W9-UI: Multi-Study View', '#multi-study', 'tree', None),
     ('W9-UI', '#multi-selection-open-set, link[href="multi-study-view.css"], script[src="multi-study-view.js"]', 'node', None),
+    ('W-SPACE item 9: Panel Settings', '#panel-settings-dialog', 'tree', None),
+    ('W-SPACE items 9/11', '#panel-settings-open, link[href="workspace-theme.css"]', 'node', None),
     ('Dictation first site: Retry (docs/ops/dictation-first-site.md)', '#dictation-retry', 'node', None),
     ('#259 caution census: Change Password (Session details)', 'a[href="/api/auth/login?action=UPDATE_PASSWORD"]', 'node', None),
     ('#259 caution census: Clinical Context Next Page', '#clinical-context-status ~ button', 'node', 'Next Page'),
@@ -305,6 +307,7 @@ class StudyPanelSizeDOM(unittest.TestCase):
             raw = subprocess.check_output(['git', 'archive', '--format=zip', R6,
                 'worklist-v0/hpacs-lite', 'scripts/main-split-order.json', 'proxy/branding'], cwd=ROOT)
             zipfile.ZipFile(io.BytesIO(raw)).extractall(temporary)
+            dom.with_palette(temporary, current)   # W-SPACE item 11 decided difference (study_panel_page_dom_test.py THEME)
             try:
                 for width, height in DEFAULT_SIZES:
                     picture = (width, height) in ((1920, 1080), (1200, 1920), (900, 1200), (1024, 768), (840, 768))

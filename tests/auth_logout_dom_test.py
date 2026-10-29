@@ -92,6 +92,8 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/related-report-mode.css",
     # W9-UI: the Multi-Study View's stylesheet (main.html links it after the Related Report mode's).
     "worklist-v0/hpacs-lite/multi-study-view.css",
+    # W-SPACE item 11: the work page palette (main.html links it last in the head).
+    "worklist-v0/hpacs-lite/workspace-theme.css",
     "worklist-v0/hpacs-lite/reading-panel-layout.js",
     "worklist-v0/hpacs-lite/viewer-opening.js",
     "worklist-v0/hpacs-lite/worklist-startup.js",
