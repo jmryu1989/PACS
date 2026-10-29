@@ -25,6 +25,129 @@ import pg_ledger_restore_test as pg
 import ops_backup as ops
 
 
+class ImageDeliveryRetention(pg.PgLedgerFixture):
+    """H-04: expiry through the shipped PG boundary, including #244 details.
+
+    A retained terminal/hold and a second delivery keep their shared manifest.
+    Receipts retain only their existing retry binding after payload expiry.
+    """
+    def scalar(self, sql):
+        return self.sql(sql).stdout.strip()
+
+    def event(self, action, at='2020-01-01T00:00:00Z', related=None):
+        event, operation, attempt = (str(uuid.uuid4()) for _ in range(3))
+        payload = json.dumps(dict(eventId=event, occurredAt=at, userId={'synthetic': True},
+            action=action, result='prepared' if action == 'provide-prepared' else 'succeeded',
+            relatedEventId=related, targets=[dict(kind='image', recordId=dict(status='known', value=event),
+            versionId=dict(status='known', value='synthetic-version'))]))
+        literal = "'" + payload.replace("'", "''") + "'"
+        self.sql(f"SELECT emr_access.admit_operation('{operation}','{attempt}',{literal},'열람')", 'kin_runtime')
+        self.sql(f"SELECT emr_access.append_operation('{operation}','{attempt}',{literal},'열람',NULL,NULL,NULL)", 'kin_runtime')
+        return event
+
+    def expire(self, event, check=True):
+        entry = self.scalar(f"SELECT entry_id FROM emr_access.access_entry WHERE event_id='{event}'")
+        return self.sql(f"SELECT emr_access.expire_entry('{entry}')", 'kin_emr_retention', check=check)
+
+    def test_linked_opening_details_expire_with_last_delivery_in_either_order(self):
+        # Both orders of the opening and both orders of a later pair matter:
+        # its preparation can disappear while its held terminal still names it.
+        for root_first in (True, False):
+            for terminal_first in (True, False):
+                with self.subTest(root_first=root_first, terminal_first=terminal_first):
+                    root = self.event('provide-prepared')
+                    root_end = self.event('transfer-ended', related=root)
+                    later = self.event('provide-prepared', related=root)
+                    later_end = self.event('transfer-aborted', at='2099-01-01T00:00:00Z', related=later)
+                    manifest = hashlib.sha256(root.encode()).hexdigest()
+                    self.sql(f"INSERT INTO emr_image.source_manifest(body_sha256,study_uid,body) "
+                        f"VALUES ('{manifest}','2.25.702','{{\"studyUid\":\"2.25.702\",\"sha256\":\"{manifest}\"}}')")
+                    for delivery in (root, later):
+                        self.sql(f"INSERT INTO emr_image.preparation(event_id,delivery_event_id,request_id,study_uid,"
+                            f"source_manifest_body,response_manifest,staging_copies) VALUES ('{uuid.uuid4()}',"
+                            f"'{delivery}','synthetic-linked','2.25.702','{manifest}','{{}}','[]')")
+                        self.sql(f"INSERT INTO emr_image.observation(event_id,delivery_event_id,request_id,kind,body) "
+                            f"VALUES ('{uuid.uuid4()}','{delivery}','synthetic-linked','copies','[]')")
+
+                    def root_rows(expected):
+                        for table in ('preparation', 'observation'):
+                            self.assertEqual(self.scalar(f"SELECT count(*) FROM emr_image.{table} "
+                                f"WHERE delivery_event_id='{root}'"), str(expected))
+                        self.assertEqual(self.scalar(f"SELECT count(*) FROM emr_image.source_manifest "
+                            f"WHERE body_sha256='{manifest}'"), str(expected))
+
+                    if root_first:
+                        self.expire(root)
+                        self.expire(root_end)
+                    self.assertNotEqual(self.expire(later_end, check=False).returncode, 0)
+                    root_rows(1)
+                    # Advance only the synthetic fact, retaining the shipped period.
+                    self.sql(f"UPDATE emr_access.access_entry SET occurred_at='2020-01-01' WHERE event_id='{later_end}'")
+                    first, last = (later_end, later) if terminal_first else (later, later_end)
+                    hold = str(uuid.uuid4())
+                    fact = dict(holdId=hold, recordId=last, basis='synthetic linked hold', actorId='fixture',
+                        at='2020-01-01T00:00:00Z', release=None)
+                    self.sql(f"SELECT emr_access.place_hold('{hold}','{last}','{json.dumps(fact)}')", 'kin_runtime')
+                    self.expire(first)
+                    self.assertNotEqual(self.expire(last, check=False).returncode, 0)
+                    root_rows(1)
+                    fact['release'] = dict(actorId='fixture', at='2020-01-02T00:00:00Z', reason='synthetic resolution')
+                    self.sql(f"SELECT emr_access.release_hold('{hold}','{json.dumps(fact)}')", 'kin_runtime')
+                    self.expire(last)
+                    if not root_first:
+                        root_rows(1)
+                        self.expire(root_end)
+                        root_rows(1)
+                        self.expire(root)
+                    root_rows(0)
+                    for table in ('preparation', 'observation'):
+                        self.assertEqual(self.scalar(f"SELECT count(*) FROM emr_image.{table} "
+                            f"WHERE delivery_event_id='{later}'"), '0')
+                    self.assertEqual(self.scalar(f"SELECT count(*) FROM emr_image.expiring_delivery_link "
+                        f"WHERE opening_event_id='{root}'"), '0')
+
+    def test_delivery_details_follow_last_retained_access_record(self):
+        first = self.event('provide-prepared')
+        terminal = self.event('transfer-ended', related=first)
+        second = self.event('provide-prepared')
+        live = self.event('provide-prepared', at='2099-01-01T00:00:00Z')
+        manifest = hashlib.sha256(first.encode()).hexdigest()
+        self.sql(f"INSERT INTO emr_image.source_manifest(body_sha256,study_uid,body) VALUES ('{manifest}','2.25.701',"
+            f"'{{\"studyUid\":\"2.25.701\",\"sha256\":\"{manifest}\"}}')")
+        for delivery in (first, second, live):
+            self.sql(f"INSERT INTO emr_image.preparation(event_id,delivery_event_id,request_id,study_uid,"
+                f"source_manifest_body,response_manifest,staging_copies) VALUES ('{uuid.uuid4()}','{delivery}',"
+                f"'synthetic-request','2.25.701','{manifest}','{{}}','[]')")
+            # No preparation for this response: failed preparation's late copy observation.
+            self.sql(f"INSERT INTO emr_image.observation(event_id,delivery_event_id,request_id,kind,body,retained_after) "
+                f"VALUES ('{uuid.uuid4()}','{delivery}','synthetic-failed-request','copies','[]','SyntheticWriteRefused')")
+        hold = str(uuid.uuid4())
+        fact = dict(holdId=hold, recordId=terminal, basis='synthetic hold', actorId='fixture',
+            at='2020-01-01T00:00:00Z', release=None)
+        self.sql(f"SELECT emr_access.place_hold('{hold}','{terminal}','{json.dumps(fact)}')", 'kin_runtime')
+        self.expire(first)
+        self.assertNotEqual(self.expire(terminal, check=False).returncode, 0)
+        self.assertEqual(self.scalar(f"SELECT count(*) FROM emr_image.preparation WHERE delivery_event_id='{first}'"), '1')
+        self.assertEqual(self.scalar(f"SELECT count(*) FROM emr_image.observation WHERE delivery_event_id='{first}'"), '1')
+        self.assertNotEqual(self.expire(live, check=False).returncode, 0)
+        fact['release'] = dict(actorId='fixture', at='2020-01-02T00:00:00Z', reason='synthetic resolution')
+        self.sql(f"SELECT emr_access.release_hold('{hold}','{json.dumps(fact)}')", 'kin_runtime')
+        self.expire(terminal)
+        self.assertEqual(self.scalar(f"SELECT count(*) FROM emr_image.preparation WHERE delivery_event_id='{first}'"), '0')
+        self.assertEqual(self.scalar(f"SELECT count(*) FROM emr_image.observation WHERE delivery_event_id='{first}'"), '0')
+        self.assertEqual(self.scalar(f"SELECT count(*) FROM emr_image.source_manifest WHERE body_sha256='{manifest}'"), '1')
+        self.expire(second)
+        self.assertEqual(self.scalar(f"SELECT count(*) FROM emr_image.preparation WHERE delivery_event_id='{live}'"), '1')
+        # Advance the fixture clock fact, never the product's period or hold rules.
+        self.sql(f"UPDATE emr_access.access_entry SET occurred_at='2020-01-01' WHERE event_id='{live}'")
+        sweep = json.loads(self.scalar("SELECT emr_access.restore_expiry_sweep('{}')"))
+        self.assertEqual(sweep['deletedEntries'], 1)
+        self.assertEqual(self.scalar(f"SELECT count(*) FROM emr_image.source_manifest WHERE body_sha256='{manifest}'"), '0')
+        self.assertEqual(self.scalar(f"SELECT count(*) FROM emr_access.entry_receipt WHERE event_id IN ('{first}','{terminal}','{second}','{live}')"), '4')
+        self.assertEqual(self.scalar(f"SELECT count(*) FROM emr_access.disposal_fact d JOIN emr_access.entry_receipt r USING(entry_id) "
+            f"WHERE r.event_id IN ('{first}','{terminal}','{second}','{live}')"), '4')
+
+
 class RetentionBackupLink(pg.PgLedgerFixture):
     admin_user = 'kin'
     database_name = 'kin'
