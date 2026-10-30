@@ -23,12 +23,13 @@ TABLESPACE_LOCATION = "/var/lib/postgresql/emr-access/ts"
 
 _ROLE_LIST = ", ".join("'%s'" % role for role in ROLES)
 _PASSWORD = r"\A[A-Za-z0-9._~-]+\Z"
-# Compose's volume-name grammar (two or more characters: a single letter before ':' is a Windows drive).
-_VOLUME_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]+")
+# Compose's volume-name grammar.
+_VOLUME_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 # Compose interpolates before it splits a short-syntax entry, so any '$' can place a host path in the source or the
 # target (${PWD}/host, /host:${TARGET}); entries are therefore admitted by exact shape, never by spotting a bind.
 _CONTAINER_PATH = re.compile(r"/[^:$]*")
-_NAMED_SHORT = re.compile(r"([A-Za-z0-9][A-Za-z0-9_.-]+):(/[^:$]*)(?::([^:$]+))?")
+# In short syntax a single letter before ':/' is a Windows drive to Compose, so a one-character name must be a digit.
+_NAMED_SHORT = re.compile(r"([A-Za-z0-9][A-Za-z0-9_.-]+|[0-9]):(/[^:$]*)(?::([^:$]+))?")
 _MODES = {"ro", "rw", "z", "Z", "nocopy", "consistent", "cached", "delegated",
           "shared", "rshared", "slave", "rslave", "private", "rprivate"}
 
@@ -109,12 +110,13 @@ def load_yaml(path):
     import yaml  # PyYAML, as the existing CI declaration tests use it
 
     class ComposeLoader(yaml.SafeLoader):
-        """Compose's merge tags (!reset, !override) carry the value they replace with; nothing else is admitted."""
+        """Compose's merge tags: !override replaces with its value; !reset drops the value it carries entirely."""
 
-    for tag in ("!reset", "!override"):
-        ComposeLoader.add_constructor(tag, lambda loader, node: (
-            Replaced(loader.construct_sequence(node, deep=True)) if isinstance(node, yaml.SequenceNode) else
-            loader.construct_mapping(node) if isinstance(node, yaml.MappingNode) else loader.construct_scalar(node)))
+    ComposeLoader.add_constructor("!override", lambda loader, node: (
+        Replaced(loader.construct_sequence(node, deep=True)) if isinstance(node, yaml.SequenceNode) else
+        loader.construct_mapping(node) if isinstance(node, yaml.MappingNode) else loader.construct_scalar(node)))
+    ComposeLoader.add_constructor("!reset", lambda loader, node: (
+        Replaced() if isinstance(node, yaml.SequenceNode) else {} if isinstance(node, yaml.MappingNode) else None))
     return yaml.load(path.read_text(encoding="utf-8"), Loader=ComposeLoader)
 
 

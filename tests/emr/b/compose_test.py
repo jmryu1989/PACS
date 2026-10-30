@@ -27,12 +27,14 @@ VOLUME_FORMS = (
     ("short: anonymous container path", "/cache", True),
     ("short: named volume", "other-unit:/x", True),
     ("short: named volume with modes", "other-unit:/x:ro,nocopy", True),
+    ("short: one-digit named volume", "1:/x", True),
     ("short: absolute host source", "/host:/x", False),
     ("short: relative host source with mode", "./host:/x:ro", False),
     ("short: home host source", "~/host:/x", False),
     ("short: Windows drive source", "C:\\host:/x:ro", False),
     ("short: Windows drive source, forward slashes", "C:/host:/x", False),
     ("short: single-letter source (a drive to Compose)", "c:/x", False),
+    ("short: declared single-letter source (still a drive to Compose)", "a:/x", False),
     ("short: anonymous path with a mode (Compose reads a bind)", "/host:ro", False),
     ("short: variable source", "${PWD}/host:/x", False),
     ("short: defaulted variable source", "${KIN_DATA:-/srv/kin}:/data", False),
@@ -46,6 +48,7 @@ VOLUME_FORMS = (
     ("short: relative target", "other-unit:x", False),
     ("short: undeclared named volume", "undeclared-unit:/x", False),
     ("long: named volume", {"type": "volume", "source": "other-unit", "target": "/x", "read_only": True}, True),
+    ("long: one-letter named volume", {"type": "volume", "source": "a", "target": "/x"}, True),
     ("long: anonymous volume", {"type": "volume", "target": "/x"}, True),
     ("long: tmpfs", {"type": "tmpfs", "target": "/x"}, True),
     ("long: bind", {"type": "bind", "source": "/host", "target": "/x", "read_only": True}, False),
@@ -114,7 +117,7 @@ class ComposeSafetyTests(unittest.TestCase):
         self.assertIn("compose-api-holds-installer-secret", self.check())
 
     def test_every_volume_form_in_production(self):
-        self.prod.setdefault("volumes", {})["other-unit"] = None
+        self.prod.setdefault("volumes", {}).update({"other-unit": None, "a": None, "1": None})
         volumes = self.prod["services"]["api"]["volumes"]
         for form, entry, admitted in VOLUME_FORMS:
             with self.subTest(form=form):
@@ -165,6 +168,16 @@ class ComposeSafetyTests(unittest.TestCase):
                     api["volumes"] = compose.Replaced(replacement)
                     self.assertIn(code, self.check())
             api["volumes"] = original
+
+    def test_reset_production_volumes_drop_their_entries(self):
+        # Compose ignores the entries under !reset, so the production api keeps no state volume at all.
+        text = (ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8")
+        api = text.index("\n  api:\n")
+        reset = text[:api] + text[api:].replace("volumes: !override", "volumes: !reset", 1)
+        self.assertNotEqual(reset, text)
+        (self.root / "docker-compose.yml").write_text(yaml.dump(self.base, Dumper=ComposeDumper), encoding="utf-8")
+        (self.root / "docker-compose.prod.yml").write_text(reset, encoding="utf-8")
+        self.assertEqual(compose.check(self.root), ["prod-api-state-volume"])
 
     def test_production_migration_image_is_required(self):
         del self.prod["services"]["api-migrate"]["build"]["target"]
