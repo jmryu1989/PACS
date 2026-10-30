@@ -93,11 +93,11 @@ const CASES = [
 ];
 const RULE_TABLE = path.join(__dirname, 'rule-cases.json');
 // Shared contract identity, normalized to LF for Git checkouts (AGENTS 1-B.14), not a product implementation pin.
-const RULE_TABLE_LF_SHA256 = 'a60b86b6267853615872a915d66a59150062afdbfe5d8725ca7a55f578c984d0';
+const RULE_TABLE_LF_SHA256 = '2f754e7a06e982c94912d1deec9703946646c2fafc5e345363db1a06668163e9';
 const ruleBytes = Buffer.from(fs.readFileSync(RULE_TABLE).toString('latin1').replace(/\r\n/g, '\n'), 'latin1');
 if (createHash('sha256').update(ruleBytes).digest('hex') !== RULE_TABLE_LF_SHA256) throw new Error('rule-cases.json is not the D744-2 table this file is bound to');
 const RULE = JSON.parse(ruleBytes.toString('utf8'));
-if (RULE.schemaVersion !== 'D744-2' || RULE.cases.length !== 273 || new Set(RULE.cases.map(c => c.testId)).size !== 273) throw new Error('unexpected D744-2 table shape');
+if (RULE.schemaVersion !== 'D744-2' || RULE.cases.length !== 319 || new Set(RULE.cases.map(c => c.testId)).size !== 319) throw new Error('unexpected D744-2 table shape');
 const DECLARED = [...CASES, ...RULE.cases.map(c => c.testId)];
 if (process.argv.includes('--list-cases')) {
   process.stdout.write(JSON.stringify(DECLARED) + '\n');
@@ -577,7 +577,7 @@ def('TEST-E-02 manifest_sources R4', () => {
 });
 def('TEST-E-02 manifest_sources A4', () => {
   const m = build(), byUid = Object.fromEntries(m.objects.map(o => [o.sopInstanceUid, o]));
-  assert.equal(m.classificationRule, 'D744-2');
+  assert.equal(m.classificationRule, 'D1892');
   const synth = byUid[SYNTH].mammography;
   assert.deepEqual([byUid[DBT].mammography.class, byUid[DBT].mammography.representation, synth.class, synth.fullViewAutoMatch], ['dbt-slices', 'slices', 'device-synthetic-2d', true]);
   // The raw reference is kept with its path and judged against the stored target header.
@@ -1130,7 +1130,7 @@ def('TEST-E-02 manifest_sources A5', () => {
   for (const o of original) if (o.mammography) delete o.mammography.header['00281350'];
   const absent = allowed(() => build(original)), r = absent.objects.find(o => o.sopInstanceUid === SYNTH).mammography;
   assert.deepEqual([absent.classificationRule, r.rule, r.partialDeclaration, r.partial, r.fullness, r.fullViewAutoMatch],
-    ['D744-2', 'D744-2', 'ABSENT', 'unknown', 'inferred-for-hanging', true]);
+    ['D1892', 'D1892', 'ABSENT', 'unknown', 'inferred-for-hanging', true]);
   assert.equal(r.sourceAccepted, false, 'automatic hanging does not prove source coverage');
   const again = allowed(() => M.buildImageManifest({ ...manifestInput(structuredClone(original)), builtAt: T2 }));
   assert.equal(again.sha256, absent.sha256); assert.deepEqual(again.objects, absent.objects);
