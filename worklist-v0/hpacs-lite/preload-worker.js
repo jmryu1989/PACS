@@ -17,7 +17,8 @@
 'use strict';
 importScripts('preload-store.js');
 
-const FRAME_ACCEPT = 'multipart/related; type="application/octet-stream"; transfer-syntax=*';
+const FRAME_ACCEPT = ['application/octet-stream', 'image/jpeg', 'image/jls', 'image/jp2', 'image/dicom-rle']
+  .map(type => 'multipart/related; type="' + type + '"; transfer-syntax=*').join(', ');
 const ENDED_CODES = ['AUTH_SESSION_ENDED', 'AUTH_SESSION_MISMATCH'];
 const MESSAGES = Object.freeze({
   unavailable: '이 브라우저가 메모리 크기를 알려 주지 않아 미리 받기를 할 수 없습니다.',

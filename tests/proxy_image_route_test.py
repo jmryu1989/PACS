@@ -59,9 +59,11 @@ class Recorder(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
         body = b"" if self.command == "HEAD" else b"FRAME"
-        self.send_response(200)
+        self.send_response(int(self.headers.get("X-Probe-Status", "200")))
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", "5")
+        if self.headers.get("X-Probe-CSP"):
+            self.send_header("Content-Security-Policy", self.headers["X-Probe-CSP"])
         self.end_headers()
         self.wfile.write(body)
 
@@ -114,6 +116,61 @@ class ImageRouteTests(unittest.TestCase):
                          "a frame request reaches only the E image route, with the normalized path as its target")
         self.assertEqual(b"" if method == "HEAD" else b"FRAME", data)
         return seen[0][2]
+
+    def test_only_the_pinned_decoder_worker_response_allows_javascript_eval(self):
+        worker = "/ohif/1927.bundle.497fe7ce9f85fada0cc8.js"
+
+        def request(method, target, headers=None):
+            connection = http.client.HTTPConnection("127.0.0.1", self.proxy.p443, timeout=10)
+            try:
+                connection.request(method, target, headers={"Host": self.host, **(headers or {})})
+                response = connection.getresponse()
+                response.read()
+                return response.status, response.headers
+            finally:
+                connection.close()
+
+        def directives(policy):
+            return {parts[0]: parts[1:] for d in policy.split(';') if (parts := d.split())}
+
+        status, page_headers = request("GET", "/ohif/viewer?StudyInstanceUIDs=2.25.1")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(page_headers.get_all("Content-Security-Policy", [])), 1)
+        page_policy = directives(page_headers["Content-Security-Policy"])
+        self.assertIn("'wasm-unsafe-eval'", page_policy["script-src"])
+        self.assertNotIn("'unsafe-eval'", [s for sources in page_policy.values() for s in sources])
+        expected_worker = {**page_policy, "script-src": page_policy["script-src"] + ["'unsafe-eval'"]}
+
+        for method in ("GET", "HEAD"):
+            for status in (200, 404, 503):
+                for target in (worker, worker + "?v=pinned"):
+                    with self.subTest(method=method, status=status, target=target):
+                        # An upstream CSP must not add a second, intersecting policy that blocks the codec.
+                        got, headers = request(method, target, {"X-Probe-Status": str(status),
+                                               "X-Probe-CSP": "script-src 'self'"})
+                        self.assertEqual(got, status, Recorder.seen[-1])
+                        self.assertEqual(len(headers.get_all("Content-Security-Policy", [])), 1)
+                        self.assertEqual(directives(headers["Content-Security-Policy"]), expected_worker)
+                        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+                        self.assertEqual(headers["Referrer-Policy"], "no-referrer")
+                        self.assertEqual(headers.get_all("Strict-Transport-Security"),
+                                         page_headers.get_all("Strict-Transport-Security"))
+                        self.assertEqual(Recorder.seen[-1][1], target)
+                        self.assertEqual(Recorder.seen[-1][2].get("authorization"), ORTHANC_BASIC)
+
+        # Nearby names, imported codec chunks, other workers, app scripts and documents retain their own policy.
+        for target in ("/ohif/", "/ohif/viewer", "/ohif/app-config.js", "/ohif/init-service-worker.js",
+                       "/ohif/4571.bundle.3b1691730b3c57bf4d35.js", "/ohif/another-worker.js",
+                       worker + ".map", worker + "/extra", worker.replace("497fe", "597fe"),
+                       "/worklist/hpacs-lite/main.html", "/api/health", "/auth/"):
+            with self.subTest(target=target):
+                status, headers = request("GET", target)
+                self.assertEqual(status, 200)
+                for policy in headers.get_all("Content-Security-Policy", []):
+                    self.assertNotIn("'unsafe-eval'", [s for sources in directives(policy).values() for s in sources])
+                if target.startswith("/ohif/"):
+                    self.assertEqual(headers.get_all("Content-Security-Policy"),
+                                     page_headers.get_all("Content-Security-Policy"))
 
     def test_frame_requests_reach_the_e_boundary_with_the_exact_target(self):
         for frames in ("1", "2", "1,2,3", "10"):
