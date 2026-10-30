@@ -43,7 +43,7 @@ PROFILES = {
         'suite_timeout': 1200,
         'suites': (('e2e/test_context_loss.py', 'ContextLossE2E', 'ci-context-loss'),),
     },
-    # EMR-B1: the access ledger's own disposable PostgreSQL/API containers (emr/units/b.json cases.live).
+    # EMR-B1: the access ledger's own disposable PostgreSQL/API containers.
     # D941 includes live 20k prefill and interleaved latency measurement in the same gated suite.
     'emr-b': {
         'out': ROOT / 'tests/e2e/artifacts/emr-b-ci',

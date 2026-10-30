@@ -23,6 +23,9 @@ TABLESPACE_LOCATION = "/var/lib/postgresql/emr-access/ts"
 
 _ROLE_LIST = ", ".join("'%s'" % role for role in ROLES)
 _PASSWORD = r"\A[A-Za-z0-9._~-]+\Z"
+# Compose's volume-name grammar. Anything else in a short-syntax source is a host path once Compose interpolates it
+# (${PWD}/api, ${KIN_DATA:-/srv/kin}), so a prefix list of path characters is not enough.
+_VOLUME_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
 
 def _optional_login(role, variable, environment):
@@ -122,7 +125,8 @@ def mounts(service):
             match = re.fullmatch(r"(.+):(/[^:]*)(?::([^:]*))?", volume)
             if match:
                 source, target, mode = match.groups()
-                yield {"source": source, "target": target, "read_only": "ro" in (mode or "").split(",")}
+                yield {"type": "volume" if _VOLUME_NAME.fullmatch(source) else "bind", "source": source,
+                       "target": target, "read_only": "ro" in (mode or "").split(",")}
             else:
                 yield {"target": volume}
 
@@ -165,7 +169,7 @@ def compose_shape(root, problems):
     if not has_state_volume(papi):
         problem(problems, "prod-api-state-volume")
     # A host bind can replace image contents. Other named volumes need not be read-only.
-    if any(volume.get("type") == "bind" or re.match(r"^(?:[./\\~]|[A-Za-z]:)", str(volume.get("source", "")))
+    if any(volume.get("type") == "bind" or ("source" in volume and not _VOLUME_NAME.fullmatch(str(volume["source"])))
            for volume in mounts(papi)):
         problem(problems, "prod-api-host-bind")
 

@@ -59,7 +59,7 @@ class ComposeSafetyTests(unittest.TestCase):
 
     def test_production_host_binds_are_refused(self):
         volumes = self.prod["services"]["api"]["volumes"]
-        for bind in ("/host:/x", "./host:/x:ro", "C:\\host:/x:ro",
+        for bind in ("/host:/x", "./host:/x:ro", "C:\\host:/x:ro", "${PWD}/host:/x", "${KIN_DATA:-/srv/kin}:/data",
                      {"type": "bind", "source": "/host", "target": "/x", "read_only": True}):
             with self.subTest(bind=bind):
                 volumes.append(bind)

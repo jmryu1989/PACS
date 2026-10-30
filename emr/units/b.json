@@ -53,6 +53,7 @@
       "scripts/ops_emr_probe.py",
       "emr/units/b.json",
       "tests/emr/b/contract_test.cjs",
+      "tests/emr/b/compose_test.py",
       "tests/emr/b/pg_ledger_api_test.cjs",
       "tests/emr/b/pg_ledger_profile.cjs",
       "tests/emr/b/pg_ledger_restore_test.py",
