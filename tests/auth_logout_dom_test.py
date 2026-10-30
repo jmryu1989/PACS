@@ -106,6 +106,8 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/preload-queue.js",
     "worklist-v0/hpacs-lite/preload-worker.js",
     "worklist-v0/hpacs-lite/preload-store.js",
+    # D1890: the worker's encrypted disk tier (importScripts beside preload-store.js).
+    "worklist-v0/hpacs-lite/preload-disk.js",
     "worklist-v0/hpacs-lite/worklist-selection.js",
     "worklist-v0/hpacs-lite/worklist-image-preview.js",
     "worklist-v0/hpacs-lite/worklist-image-thumbnails.js",
