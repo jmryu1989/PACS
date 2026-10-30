@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>민훈 스튜디오</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="studio.css">
+<link rel="stylesheet" href="pick.css">
+</head>
+<body class="studio-page" data-layout="two">
+<!-- Overlay mode only: the product fills the window and the chat slides over it. -->
+<iframe id="mirror" class="full-product overlay-only" title="제품 화면 (합성 자료)" src="about:blank"></iframe>
+<div id="mirror-banner" class="banner" hidden>
+  <span>새 버전이 준비됐어요. 입력 중이라 자동으로 바꾸지 않았습니다.</span>
+  <button id="apply-now" type="button">지금 보기</button>
+</div>
+<div id="preview-banner" class="banner preview overlay-only" hidden>
+  <span><b>미리보기</b> 아직 적용하지 않은 제안입니다: <span id="preview-title"></span></span>
+  <button id="preview-apply" type="button" class="primary" title="이 제안을 스튜디오 화면에 적용합니다(기록에 남고 되돌리기 가능).">적용</button>
+  <button id="preview-stop" type="button" title="미리보기를 닫고 지금 화면으로 돌아갑니다.">원래대로</button>
+</div>
+<div class="studio-widget overlay-only">
+  <button id="pick-local" type="button" title="고르기 (Alt+G): 바꿀 곳을 클릭해 대화에 붙입니다. 클릭해도 화면의 버튼은 눌리지 않습니다.">고르기</button>
+</div>
+<button id="overlay-open" class="overlay-open overlay-only" type="button" title="스튜디오 대화 열기 (Alt+S)">스튜디오</button>
+
+<aside id="studio" class="studio">
+  <header class="bar">
+    <strong class="brand">민훈 스튜디오</strong>
+    <span class="badge" title="실제 환자 자료가 아닌 합성 자료와 공개 표본 영상으로 화면만 시험합니다.">합성 자료</span>
+    <span class="grow"></span>
+    <label class="field" title="두 창: 제품 화면을 실제 제품처럼 보통 Chrome 탭(탭·북마크바 포함)으로 엽니다. 그 탭을 가로 모니터로 끌어 최대화하세요(모니터 두 대). 한 창: 제품 화면 위에 대화를 겹쳐 엽니다(모니터 한 대).">보기
+      <select id="layout">
+        <option value="two">두 창</option>
+        <option value="overlay">한 창 (겹쳐 보기)</option>
+      </select>
+    </label>
+    <span id="who" class="muted"></span>
+    <button id="logout" type="button">나가기</button>
+    <button id="overlay-close" class="overlay-only" type="button" title="대화 닫기 (Alt+S). 제품 화면 크기는 그대로입니다.">닫기</button>
+  </header>
+  <div class="controls">
+    <label class="field">화면
+      <select id="screen"></select>
+    </label>
+    <label class="field" title="모의 로그인 계정의 역할입니다. 역할·잠금 규칙 중 일부는 아직 미결 질문입니다.">역할
+      <select id="role">
+        <option value="radiologist">판독의 (radiologist)</option>
+        <option value="technician">기사 (technician)</option>
+        <option value="clinician">임상의 (clinician)</option>
+        <option value="admin">관리자 (admin)</option>
+      </select>
+    </label>
+    <label class="field" title="꼼꼼하게: 판단·비판이 더 정확하고 느림(작은 수정 25~45초). 빠르게: 작은 화면 수정이 2~3배 빠름(8~20초).">Claude
+      <select id="model">
+        <option value="fast">빠르게 (Sonnet)</option>
+        <option value="deep">꼼꼼하게 (Opus)</option>
+      </select>
+    </label>
+    <button id="reload" type="button" title="제품 화면을 다시 불러옵니다">새로고침</button>
+    <button id="missing" type="button" class="warn" hidden title="스튜디오에 아직 가짜 응답이 없는 요청">모의 응답 없음 <b>0</b></button>
+    <button id="errors" type="button" class="warn" hidden title="제품 화면에서 난 JavaScript 오류">화면 오류 <b>0</b></button>
+  </div>
+  <div class="product-link two-only">
+    <span id="link-dot" class="dot"></span>
+    <span id="link-text">제품 화면 확인 중…</span>
+    <span class="grow"></span>
+    <button id="open-product" type="button" class="primary" title="제품 화면을 새 탭으로 엽니다(실제 제품과 같은 보통 Chrome 창). 이미 열려 있으면 그 탭을 앞으로 가져옵니다.">제품 화면 열기</button>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button type="button" role="tab" data-mode="edit" class="on" aria-selected="true">바꾸기</button>
+    <button type="button" role="tab" data-mode="ask" aria-selected="false">물어보기</button>
+    <button type="button" id="showcase" class="showcase-btn" title="스튜디오로 할 수 있는 것">할 수 있는 것</button>
+  </nav>
+  <div id="job-line" class="job-line" hidden></div>
+  <ol id="messages" aria-live="polite"></ol>
+  <div id="suggest" class="suggest" hidden>
+    <div class="suggest-line">
+      <span class="suggest-label">제안:</span>
+      <span id="suggest-title" class="suggest-title"></span>
+      <button id="suggest-why" type="button" class="link" title="왜 이 제안인지, 근거(화면 요소·피드백 항목·판독 관행)">근거</button>
+    </div>
+    <div id="suggest-detail" class="suggest-detail" hidden></div>
+    <div class="suggest-actions">
+      <button id="suggest-preview" type="button" title="미리 만들어 둔 화면을 제품 화면에 바로 띄웁니다(아직 적용 안 됨).">미리보기</button>
+      <button id="suggest-apply" type="button" class="primary" title="적용하면 기록에 남고 되돌리기로 뺄 수 있습니다.">적용</button>
+      <button id="suggest-next" type="button" title="이 제안은 넘기고 다른 제안을 준비합니다(넘긴 제안은 다시 내지 않음).">다른 제안</button>
+      <button id="suggest-no" type="button" title="이 제안은 하지 않습니다(다시 내지 않음).">됐어요</button>
+      <span id="suggest-note" class="muted"></span>
+    </div>
+  </div>
+  <div id="suggest-wait" class="suggest-wait muted" hidden>다음 제안을 준비하고 있어요…</div>
+  <div id="picks" class="picks" hidden>
+    <span class="muted">고른 곳 (다음 메시지와 함께 보냄):</span>
+    <span id="chips"></span>
+    <span id="picks-over" hidden></span>
+    <button id="picks-clear" type="button" class="link">모두 지우기</button>
+  </div>
+  <form id="composer">
+    <button type="button" id="pick" class="pick-btn" title="고르기 (Alt+G): 제품 화면에서 바꿀 곳을 클릭해 고릅니다. 여러 개 가능, Esc로 모두 지우기.">고르기</button>
+    <textarea id="input" rows="3" placeholder="예) 판독문 입력칸을 더 크게 해 주세요"></textarea>
+    <button type="submit" id="send">보내기</button>
+  </form>
+  <footer class="actions">
+    <button id="undo" type="button" title="가장 최근에 적용한 변경을 되돌립니다(git revert, 되돌린 뒤 빌드·검사)">되돌리기</button>
+    <button id="changes" type="button" title="적용한 변경 목록과 내용. 예전 변경 하나만 골라 되돌릴 수도 있습니다.">기록</button>
+    <button id="status" type="button" title="개발 현황(status.json)">현황</button>
+    <button id="done" type="button" title="오늘 요청과 변경을 정리해 지휘자에게 넘깁니다">오늘 끝</button>
+    <details class="more">
+      <summary>더보기</summary>
+      <div class="menu">
+        <button id="digests" type="button">지난 인계 보기</button>
+        <button id="records" type="button">이견·넘긴 질문</button>
+        <button id="metrics" type="button">반영 시간 기록</button>
+        <button id="claude" type="button">Claude 상태</button>
+        <button id="reset-mock" type="button">합성 자료 처음으로</button>
+      </div>
+    </details>
+  </footer>
+</aside>
+<dialog id="panel">
+  <header><h2 id="panel-title"></h2><button type="button" id="panel-close">닫기</button></header>
+  <div id="panel-body"></div>
+</dialog>
+<script src="shared.js"></script>
+<script src="mirror.js"></script>
+<script src="pick.js"></script>
+<script src="studio.js"></script>
+</body>
+</html>

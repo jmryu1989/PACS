@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>민훈 스튜디오 — 로그인</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="studio.css">
+</head>
+<body class="login-page">
+  <form id="login" class="login-card" autocomplete="on">
+    <h1>민훈 스튜디오</h1>
+    <p class="muted">합성 자료로 PACS 화면을 바꿔 보는 곳입니다. 실제 환자 자료는 없습니다.</p>
+    <label>이름 <input name="user" autocomplete="username" required autofocus placeholder="minhoon"></label>
+    <label>비밀번호 <input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit">들어가기</button>
+    <p id="error" class="error" role="alert"></p>
+  </form>
+  <script src="login.js"></script>
+</body>
+</html>

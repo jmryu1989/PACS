@@ -1,0 +1,74 @@
+{
+  "_note": "합성 자료. 실제 환자가 아니다. 이름·번호·판독문은 모두 지어낸 것이고 영상은 공개 CC BY TCIA 표본이다(image 키). daysAgo는 오늘(KST) 기준.",
+  "institutions": [
+    { "id": "kin-center", "name": "KIN 판독센터", "type": "reading-center" },
+    { "id": "hallym", "name": "한림병원", "type": "hospital" }
+  ],
+  "colleagues": [
+    { "id": "studio-kim-jiho", "name": "KIM JIHO", "username": "kim.jiho@studio.invalid" },
+    { "id": "studio-lee-sora", "name": "LEE SORA", "username": "lee.sora@studio.invalid" }
+  ],
+  "patients": [
+    { "key": "P1", "id": "ST-1001", "name": "KIM HANEUL", "birth": "1958-03-14", "sex": "F" },
+    { "key": "P2", "id": "ST-1002", "name": "PARK MINJUN", "birth": "1971-11-02", "sex": "M" },
+    { "key": "P3", "id": "ST-1003", "name": "LEE SEOYEON", "birth": "1985-06-21", "sex": "F" },
+    { "key": "P4", "id": "ST-1004", "name": "CHOI JIWOO", "birth": "1966-09-09", "sex": "F" },
+    { "key": "P5", "id": "ST-1005", "name": "JUNG DOHYUN", "birth": "1949-01-30", "sex": "M" },
+    { "key": "P6", "id": "ST-1006", "name": "KANG SUBIN", "birth": "1977-04-17", "sex": "F" },
+    { "key": "P7", "id": "ST-1007", "name": "YOON JAEHO", "birth": "1990-12-05", "sex": "M" },
+    { "key": "P8", "id": "HL-2208", "name": "HAN YEJIN", "birth": "1962-07-28", "sex": "F" },
+    { "key": "P9", "id": "ST-1009", "name": "OH SEUNGWOO", "birth": "1955-02-11", "sex": "M" },
+    { "key": "P10", "id": "ST-1010", "name": "SEO YUNA", "birth": "2001-09-02", "sex": "F" },
+    { "key": "P11", "id": "ST-1011", "name": "SHIN HYUNWOO", "birth": "1968-10-10", "sex": "M" },
+    { "key": "P12", "id": "ST-1012", "name": "KWON NARI", "birth": "1980-05-05", "sex": "F" },
+    { "key": "P13", "id": "ST-1013", "name": "BAEK DOYUN", "birth": "1958-12-19", "sex": "M" },
+    { "key": "P14", "id": "HL-2214", "name": "MOON CHAEWON", "birth": "1993-08-08", "sex": "F" },
+    { "key": "P15", "id": "ST-1015", "name": "LIM JUNSEO", "birth": "1983-02-14", "sex": "M" },
+    { "key": "P16", "id": "ST-1016", "name": "YANG HAEUN", "birth": "1975-11-30", "sex": "F" }
+  ],
+  "studies": [
+    { "n": 1, "patient": "P1", "daysAgo": 0, "modality": "DX", "desc": "CHEST PA", "image": "A872279/1901-01-13", "acc": "A26102701", "ward": "ER", "rs": "W",
+      "clinical": { "reason": "기침 2주, 미열. 폐렴 여부", "history": "고혈압 약 복용 중" } },
+    { "n": 2, "patient": "P1", "daysAgo": 92, "modality": "DX", "desc": "CHEST PA AND LATERAL", "image": "A872279/1901-01-12", "acc": "A26072701", "ward": "OPD", "rs": "A",
+      "report": { "author": "kim.jiho@studio.invalid", "findings": "Both lungs are clear without focal consolidation.\nNo pleural effusion or pneumothorax.\nHeart size is within normal limits.\nMild degenerative change of the thoracic spine.", "conclusion": "No active lung lesion.", "recommendation": "" } },
+    { "n": 3, "patient": "P2", "daysAgo": 0, "modality": "CT", "desc": "CT ABDOMEN-PELVIS WITH CONTRAST", "image": "TCGA-CW-5580/1992-06-01", "acc": "A26102702", "ward": "ER", "em": "E", "rs": "W",
+      "clinical": { "reason": "RLQ pain since this morning. r/o appendicitis", "history": "Lt renal mass f/u 중 (외부 비뇨기과)" } },
+    { "n": 4, "patient": "P2", "daysAgo": 128, "modality": "CT", "desc": "CT ABDOMEN-PELVIS WITH CONTRAST", "image": "TCGA-CW-5580/1992-02-25", "acc": "A26062201", "ward": "URO", "rs": "A",
+      "report": { "author": "lee.sora@studio.invalid", "findings": "A 3.1 cm enhancing exophytic mass in the lower pole of the left kidney.\nNo renal vein or IVC thrombus.\nNo enlarged retroperitoneal lymph node.\nLiver, spleen, pancreas and adrenal glands are unremarkable.", "conclusion": "3.1 cm enhancing left renal mass, suggestive of renal cell carcinoma.", "recommendation": "Urology referral." } },
+    { "n": 5, "patient": "P3", "daysAgo": 1, "modality": "MR", "desc": "MR BRAIN WITH AND WITHOUT CONTRAST", "image": "MSB-04030/1963-12-12", "acc": "A26102601", "ward": "NR", "rs": "T",
+      "report": { "author": "SELF", "findings": "No acute infarction on diffusion-weighted images.\nNo abnormal enhancing lesion.", "conclusion": "", "recommendation": "" },
+      "clinical": { "reason": "두통 3개월, 이전 MR 대비 변화 확인" } },
+    { "n": 6, "patient": "P3", "daysAgo": 400, "modality": "MR", "desc": "MR BRAIN WITH AND WITHOUT CONTRAST", "image": "MSB-04030/1961-01-30", "acc": "A25092201", "ward": "NR", "rs": "A",
+      "report": { "author": "kim.jiho@studio.invalid", "findings": "Several nonspecific T2 hyperintense foci in the bilateral frontal white matter.\nNo abnormal enhancement.\nVentricles and sulci are within normal limits.", "conclusion": "Nonspecific white matter T2 hyperintensities, likely small vessel change.", "recommendation": "Clinical correlation." } },
+    { "n": 7, "patient": "P4", "daysAgo": 0, "modality": "MG", "desc": "MAMMOGRAPHY SCREENING BILATERAL", "image": "CMMD/D1-0860", "acc": "A26102703", "ward": "HC", "rs": "W",
+      "clinical": { "reason": "검진" } },
+    { "n": 8, "patient": "P5", "daysAgo": 0, "modality": "CR", "desc": "CHEST AP PORTABLE", "image": "A223238/1901-01-09", "acc": "A26102704", "ward": "ICU", "rs": "P",
+      "preDoc": "kim.jiho@studio.invalid", "preReviewer": "REVIEWER",
+      "report": { "author": "kim.jiho@studio.invalid", "findings": "Endotracheal tube tip about 4 cm above the carina.\nIncreased opacity in the right lower lung zone.\nSmall right pleural effusion.", "conclusion": "Right lower lung consolidation with small effusion, pneumonia is suspected.", "recommendation": "Follow-up chest radiograph." },
+      "clinical": { "reason": "intubation 후 위치 확인" } },
+    { "n": 9, "patient": "P6", "daysAgo": 2, "modality": "XA", "desc": "ANGIOGRAPHY CELIAC", "image": "CMB-CRC/MSB-06489", "acc": "A26102501", "ward": "IR", "rs": "W" },
+    { "n": 10, "patient": "P7", "daysAgo": 0, "modality": "DX", "desc": "CHEST PA", "image": "A872279/1901-01-13", "acc": "A26102705", "ward": "ER", "em": "E", "rs": "W",
+      "clinical": { "reason": "흉통, 호흡곤란. pneumothorax r/o" } },
+    { "n": 11, "patient": "P8", "daysAgo": 0, "modality": "CT", "desc": "CT CHEST WITHOUT CONTRAST", "image": "TCGA-CW-5580/1992-06-01", "acc": "H26102711", "ward": "", "rs": "W", "institution": "hallym", "tele": true },
+    { "n": 12, "patient": "P9", "daysAgo": 3, "modality": "MR", "desc": "MR L-SPINE WITHOUT CONTRAST", "image": "MSB-04030/1963-12-12", "acc": "A26102401", "ward": "OS", "rs": "A",
+      "report": { "author": "lee.sora@studio.invalid", "findings": "Diffuse disc bulging at L4-5 with mild central canal narrowing.\nRight subarticular disc protrusion at L5-S1 abutting the right S1 nerve root.\nNo compression fracture.", "conclusion": "L5-S1 right subarticular disc protrusion abutting the right S1 root.", "recommendation": "" } },
+    { "n": 13, "patient": "P10", "daysAgo": 0, "modality": "CR", "desc": "CHEST PA", "image": "A223238/1901-01-09", "acc": "A26102706", "ward": "OPD", "rs": "H", "holdReason": "외부 병원 이전 검사 영상 요청 중" },
+    { "n": 14, "patient": "P11", "daysAgo": 0, "modality": "DX", "desc": "CHEST PA", "image": "A872279/1901-01-12", "acc": "", "ward": "", "rs": "W", "ss": "Unverified" },
+    { "n": 15, "patient": "P12", "daysAgo": 5, "modality": "MG", "desc": "MAMMOGRAPHY DIAGNOSTIC LEFT", "image": "CMMD/D1-0860", "acc": "A26102201", "ward": "BR", "rs": "A",
+      "report": { "author": "kim.jiho@studio.invalid", "findings": "Heterogeneously dense breasts.\nA 1.2 cm oval circumscribed mass in the left upper outer quadrant.\nNo suspicious microcalcification.", "conclusion": "Left breast probably benign mass. BI-RADS 3.", "recommendation": "Short-interval follow-up in 6 months." } },
+    { "n": 16, "patient": "P13", "daysAgo": 0, "modality": "CT", "desc": "CT ABDOMEN WITHOUT CONTRAST", "image": "TCGA-CW-5580/1992-02-25", "acc": "A26102707", "ward": "GS", "rs": "W", "holder": "kim.jiho@studio.invalid" },
+    { "n": 17, "patient": "P14", "daysAgo": 0, "modality": "MR", "desc": "MR KNEE RIGHT", "image": "MSB-04030/1961-01-30", "acc": "H26102712", "ward": "", "rs": "W", "institution": "hallym", "tele": true },
+    { "n": 18, "patient": "P15", "daysAgo": 1, "modality": "CR", "desc": "CHEST PA", "image": "A223238/1901-01-09", "acc": "A26102602", "ward": "OPD", "rs": "T",
+      "report": { "author": "SELF", "findings": "No active lung lesion.", "conclusion": "", "recommendation": "" } },
+    { "n": 19, "patient": "P16", "daysAgo": 7, "modality": "XA", "desc": "ANGIOGRAPHY RENAL", "image": "CMB-CRC/MSB-06489", "acc": "A26102001", "ward": "IR", "rs": "A",
+      "report": { "author": "lee.sora@studio.invalid", "findings": "Selective right renal angiography shows normal arterial branching.\nNo aneurysm or arteriovenous fistula.", "conclusion": "Normal right renal angiogram.", "recommendation": "" } }
+  ],
+  "templates": [
+    { "title": "Normal Chest", "shortcut": "nc", "modality": "CR", "bodypart": "Chest", "findings": "Both lungs are clear.\nNo pleural effusion or pneumothorax.\nHeart size is within normal limits.", "conclusion": "No active lung lesion.", "recommendation": "" },
+    { "title": "Normal Brain CT", "shortcut": "nbct", "modality": "CT", "bodypart": "Head", "findings": "No evidence of acute intracranial hemorrhage.\nNo mass effect or midline shift.", "conclusion": "No acute intracranial abnormality.", "recommendation": "" },
+    { "title": "Screening Mammography", "shortcut": "mg", "modality": "MG", "bodypart": "Breast", "findings": "Scattered fibroglandular densities.\nNo suspicious mass or microcalcification.", "conclusion": "Negative. BI-RADS 1.", "recommendation": "Routine screening." }
+  ],
+  "orders": [
+    { "oid": "O-9105", "id": "ST-1020", "name": "NAM GAEUN", "sex": "F", "birth": "1988-01-21", "sched": "TODAY 15:30", "modality": "CT", "desc": "CT BRAIN WITHOUT CONTRAST", "ward": "NR", "reqDoc": "PARK MD", "matched": "U", "studyUid": null }
+  ]
+}
