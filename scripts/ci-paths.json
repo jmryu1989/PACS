@@ -1088,6 +1088,7 @@
       "tests/emr/b/contract_test.cjs",
       "tests/emr/b/live.py",
       "tests/emr/b/live_benchmark.cjs",
+      "tests/emr/b/pg_ledger_api_test.cjs",
       "tests/emr/b/pg_ledger_restore_test.py",
       "tests/emr/b/seal_checker.cjs",
       "tests/emr/b/throughput.cjs",
