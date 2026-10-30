@@ -822,6 +822,7 @@
       "worklist-v0/hpacs-lite/viewer-multi-study.js",
       "worklist-v0/hpacs-lite/order-*",
       "worklist-v0/hpacs-lite/page-core*",
+      "worklist-v0/hpacs-lite/preload-*",
       "worklist-v0/hpacs-lite/reader-*",
       "worklist-v0/hpacs-lite/reading*",
       "worklist-v0/hpacs-lite/related*",
