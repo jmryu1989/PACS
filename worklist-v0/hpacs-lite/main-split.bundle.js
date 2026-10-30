@@ -898,7 +898,7 @@
       viewing: s => {
         const hold = !s.holder ? '' : s.holder === user
           ? `<span class="hold me" title="내가 작성 중">✎ 나</span>`
-          : `<span class="hold other" title="${esc(displayActor(s.holder))} 님이 작성 중">✎ ${esc(displayActor(s.holder))}</span>`;
+          : `<span class="hold other" title="${s.holder === '다른 기관' ? '다른 기관 판독의가' : esc(displayActor(s.holder)) + ' 님이'} 작성 중">✎ ${esc(displayActor(s.holder))}</span>`;
         const presence = esc(viewingNames.get(s.uid) || '');
         return hold + (hold && presence ? ' · ' : '') + presence;
       },
@@ -5777,7 +5777,8 @@
       if (uid === selectedUid) { updateReportButtons(); loadReport(); }
       if (warnedFor !== uid) {
         warnedFor = uid;
-        toast(`${displayActor(holder)} 님이 판독 중입니다 — 저장되지 않았습니다`, "err");
+        const writer = holder === '다른 기관' ? '다른 기관 판독의가' : `${displayActor(holder)} 님이`;
+        toast(`${writer} 판독 중입니다 — 저장되지 않았습니다`, "err");
       }
     }
 
@@ -5872,6 +5873,7 @@
       if (uid === selectedUid) { renderCitationBar(); ensureCitations(uid, { force: true }); }
       return changed;
     }
+
 
     /* ── 구조화 판독 본문 (S3-structured-report) ─────────────────────────────────────
      *
@@ -7547,7 +7549,8 @@
           holdBlocked = { uid, at: Date.now() };
           if (warnedFor !== uid) {
             warnedFor = uid;
-            toast(`${displayActor(r.holder)} 님이 먼저 판독을 시작했습니다 — 잠금이 풀리면 이어서 할 수 있습니다`, "err");
+            const writer = r.holder === '다른 기관' ? '다른 기관 판독의가' : `${displayActor(r.holder)} 님이`;
+            toast(`${writer} 먼저 판독을 시작했습니다 — 잠금이 풀리면 이어서 할 수 있습니다`, "err");
           }
           return;
         }
@@ -7606,6 +7609,7 @@
         const total = $("#findings").value.length + $("#conclusion").value.length + $("#recommendation").value.length;
         if (total >= HOLD_MIN_CHARS) claimHold(selectedUid);
       });
+
 
     // ══════════ 이탈 시 판독문 보존 (교훈 §1) ══════════
     /**

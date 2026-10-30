@@ -6,7 +6,7 @@ import { canReadPreliminary } from '../preliminary-reader';
 import type { StudyAccessService } from '../study-access.service';
 import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import type { PrismaService } from '../prisma.service';
-import { noteTransactionError, holdAlive, visibleHolder } from './values';
+import { noteTransactionError, holdAlive, visibleHolder, dump } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
 
@@ -47,7 +47,7 @@ export class PacsHold {
       const other=holdAlive(prev)&&prev.holder!==c.actor?prev.holder:null;
       if(!other){
         await tx.studyState.update({where:{uid},data:{holder:c.actor,holderInstitutionId:inst(c),heldAt:new Date()}});
-        if(!holdAlive(prev))await tx.auditLog.create({data:{actor:c.actor,action:'report.hold',target:uid}});
+        if(!holdAlive(prev))await tx.auditLog.create({data:{actor:c.actor,action:'report.hold',target:uid,detail:dump({institution:inst(c)})}});
       }
       return {holder:other?visibleHolder(prev,c):c.actor,mine:!other,conflict:!!other};
     },{maxWait:4000,timeout:8000}).catch(noteTransactionError);
@@ -72,7 +72,8 @@ export class PacsHold {
     await tx.studyState.update({ where: { uid }, data: { holder: null, holderInstitutionId: null, heldAt: null } });
     // 점유가 없었어도 관리자 조치의 호출 흔적은 남긴다.
     await audit(c.actor, 'hold.force-release', uid, {
-      by: inst(c), holder: prev.holder ?? null, heldAt: prev.heldAt ?? null, alive: holdAlive(prev),
+      institution: inst(c), by: inst(c), holder: prev.holder ?? null, heldAt: prev.heldAt ?? null, alive: holdAlive(prev),
+      holderInstitutionId: prev.holderInstitutionId ?? null,
     });
     return { ok: true, released: visibleHolder(prev,c) };
     });

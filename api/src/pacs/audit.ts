@@ -5,7 +5,7 @@
 import type { StudyAccessService } from '../study-access.service';
 import { NotFoundException } from '@nestjs/common';
 import type { PrismaService } from '../prisma.service';
-import { noteTransactionError, dump } from './values';
+import { noteTransactionError, dump, parse, visibleHolder } from './values';
 import { inst } from './access';
 import type { Caller, PacsAccess } from './access';
 
@@ -19,9 +19,9 @@ export const OWNER_ONLY_AUDIT_ACTIONS: readonly string[] = Object.freeze(['study
 /**
  * 기록 기관 전용 감사 action(S7-U3a, D-S7-09 a). 소유 기관과 원격판독 수신 기관이 한 검사에 각자의 판독의 배정을 두므로,
  * 이 행은 `GET audit`의 두 경로에서 기록 기관(detail.institution) = caller 기관일 때만 나간다 — 상대 기관의 배정이
- * 감사 통로로 보이지 않게 한다(RISK-S7-U3a-CROSS-TENANT-ASSIGN).
+ * 감사 통로로 보이지 않게 한다(RISK-S7-U3a-CROSS-TENANT-ASSIGN). 점유·강제 해제도 작성자 신원을 담으므로 같은 경계를 따른다.
  */
-export const INSTITUTION_AUDIT_ACTIONS: readonly string[] = Object.freeze(['reader.assignment']);
+export const INSTITUTION_AUDIT_ACTIONS: readonly string[] = Object.freeze(['reader.assignment', 'report.hold', 'hold.force-release']);
 
 export class PacsAudit {
   constructor(
@@ -54,7 +54,14 @@ export class PacsAudit {
    */
   async auditRead(uid: string | undefined, take: number, c: Caller) {
     const selected: any[] = await this.selectAudits(uid, take, c);
-    return { rows: selected.map(({ managingInstitution, ...row }) => row), managing: selected.map(row => row.managingInstitution ?? null) };
+    const rows = selected.map(({ managingInstitution, ...row }) => {
+      if (row.action !== 'hold.force-release') return row;
+      // A local administrator can release a foreign writer's hold. Keep the raw audit,
+      // but the institution-scoped action must not reveal that writer in its response.
+      const { holderInstitutionId, ...detail } = parse(row.detail) ?? {};
+      return { ...row, detail: dump({ ...detail, holder: visibleHolder({ holder: detail.holder, holderInstitutionId }, c) }) };
+    });
+    return { rows, managing: selected.map(row => row.managingInstitution ?? null) };
   }
 
   private async selectAudits(uid: string | undefined, take: number, c: Caller): Promise<any[]> {

@@ -53,7 +53,8 @@ export function visibleHolder(s: any, caller: Caller): string | null {
 
 export function reportHeld(s: any, caller: Caller): ConflictException {
   const holder = visibleHolder(s, caller);
-  return new ConflictException({ code: 'REPORT_HELD', holder, message: `${holder} 님이 판독 중입니다` });
+  const writer = holder === '다른 기관' ? '다른 기관 판독의가' : `${holder} 님이`;
+  return new ConflictException({ code: 'REPORT_HELD', holder, message: `${writer} 판독 중입니다` });
 }
 
 /**

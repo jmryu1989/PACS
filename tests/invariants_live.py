@@ -3070,34 +3070,47 @@ class LiveInvariantTests(unittest.TestCase):
     def test_hold_is_visible_and_enforced_across_tele_boundary_both_ways(self) -> None:
         with self.stack.fixture() as fixture:
             path = f"/studies/{quote(fixture.uid)}"
-            doctor, kdoctor = self.stack.actor("doctor"), self.stack.actor("kdoctor")
+            kdoctor = self.stack.actor("kdoctor")
             self.assert_status(self.stack.request("POST", path + "/hold", "doctor"), 201)
             self.assert_status(self.stack.request("PATCH", path, "doctor", {"ts": "wait", "teleTo": "kin-center"}), 200)
             seen = self.state(fixture, "kdoctor")
-            self.assertEqual((seen["holder"], seen["teleInstitutionId"]), (doctor, "kin-center"))
+            self.assertEqual((seen["holder"], seen["teleInstitutionId"]), ("다른 기관", "kin-center"))
             listed = self.stack.request("GET", "/studies", "kdoctor")
             row = next(item for item in listed.body["studies"] if item["uid"] == fixture.uid)
-            self.assertEqual((row["tele"], row["state"]["holder"]), (True, doctor))
+            self.assertEqual((row["tele"], row["state"]["holder"]), (True, "다른 기관"))
             blocked = self.stack.request("PUT", path + "/report", "kdoctor", {"findings": "x"})
             self.assert_status(blocked, 409)
-            self.assertEqual((blocked.body.get("code"), blocked.body.get("holder")), ("REPORT_HELD", doctor))
+            self.assertEqual((blocked.body.get("code"), blocked.body.get("holder")), ("REPORT_HELD", "다른 기관"))
             self.assertEqual(self.stack.request("POST", path + "/hold", "kdoctor").body["conflict"], True)
 
             self.assert_status(self.stack.request("POST", path + "/release", "doctor"), 201)
             self.assertEqual(self.stack.request("POST", path + "/hold", "kdoctor").body["mine"], True)
-            self.assertEqual(self.state(fixture, "doctor")["holder"], kdoctor)
+            self.assertEqual(self.state(fixture, "doctor")["holder"], "다른 기관")
             listed = self.stack.request("GET", "/studies", "doctor")
             row = next(item for item in listed.body["studies"] if item["uid"] == fixture.uid)
-            self.assertEqual((row["tele"], row["state"]["holder"]), (False, kdoctor))
+            self.assertEqual((row["tele"], row["state"]["holder"]), (False, "다른 기관"))
             blocked = self.stack.request("PUT", path + "/report", "doctor", {"findings": "x"})
             self.assert_status(blocked, 409)
-            self.assertEqual(blocked.body.get("holder"), kdoctor)
+            self.assertEqual((blocked.body.get("code"), blocked.body.get("holder")), ("REPORT_HELD", "다른 기관"))
+            self.assertEqual(self.stack.request("POST", path + "/hold", "doctor").body["conflict"], True)
             self.assertEqual(self.state(fixture, "ktech")["holder"], kdoctor)   # holder는 읽기 필드, 역할 관문 없음
             self.assert_status(self.stack.request("POST", path + "/hold", "ktech"), 403)
 
             forced = self.stack.request("POST", path + "/release/force", "jmryu")
             self.assert_status(forced, 200)
-            self.assertEqual(forced.body["released"], kdoctor)
+            self.assertEqual(forced.body["released"], "다른 기관")
+            for user, writer in [("doctor", self.stack.actor("doctor")), ("ktech", kdoctor)]:
+                for audit_path in [f"/audit?uid={quote(fixture.uid)}&take=500", "/audit?take=500"]:
+                    audited = self.stack.request("GET", audit_path, user)
+                    self.assert_status(audited, 200)
+                    rows = [row for row in audited.body if row["target"] == fixture.uid]
+                    self.assertEqual([row["actor"] for row in rows if row["action"] == "report.hold"], [writer])
+                    releases = [row for row in rows if row["action"] == "hold.force-release"]
+                    if user == "doctor":
+                        self.assertEqual([row["actor"] for row in releases], [self.stack.actor("jmryu")])
+                        self.assertEqual(json.loads(releases[0]["detail"])["holder"], "다른 기관")
+                    else:
+                        self.assertEqual(releases, [])
             self.assert_status(self.stack.request("PUT", path + "/report", "doctor", {"findings": "x"}), 200)
 
     def test_hold_requires_radiologist_and_prelim_access(self) -> None:

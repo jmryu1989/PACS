@@ -196,7 +196,7 @@ class ViewingCellDOM(MultiInstitutionWorklist):
         screen = self.boot(server)
         cell = self.cell(screen, 'SYN-CURRENT')
         expect(cell).to_have_text('✎ 다른 기관')
-        expect(cell.get_by_text('✎ 다른 기관', exact=True)).to_have_attribute('title', '다른 기관 님이 작성 중')
+        expect(cell.get_by_text('✎ 다른 기관', exact=True)).to_have_attribute('title', '다른 기관 판독의가 작성 중')
         server.people = {'2.25.101': ['SYN Colleague']}
         expect(cell).to_have_text('✎ 다른 기관 · Viewing: SYN Colleague', timeout=12000)
         server.fail = True

@@ -679,6 +679,8 @@ for (const [writer, peer, stranger, admin] of [
         commitBody(caller, 'save', s.draftEpoch, 0, 0, { findings: 'SYN unchanged' }), caller, null), 409, 'REPORT_HELD');
       for (const response of [draft, commit]) {
         assert.equal(response.holder, expected);
+        assert.equal(response.message, expected === '다른 기관'
+          ? '다른 기관 판독의가 판독 중입니다' : `${writer.actor} 님이 판독 중입니다`);
         if (caller.institution !== writer.institution)
           assert.ok(!JSON.stringify(response).includes(writer.actor), '409 must not disclose the e-mail');
       }
@@ -709,6 +711,64 @@ test('writer privacy: legacy holds hide unknown institutions until the writer re
   assert.equal(values.toClient(state(), null, ADMIN_B).holder, RAD_B.actor);
   await w.hold.release(s.uid, RAD_B);
   assert.equal(values.toClient(state(), null, ADMIN_B).holder, null);
+});
+
+// The SQL double consumes the bound action scopes. Actual PostgreSQL selection is
+// covered by invariants_live's existing two-way tele hold case, including /audit.
+for (const singleStudy of [true, false]) test(`writer audit privacy: ${singleStudy ? 'study' : 'aggregate'} reads keep only the recording institution's hold history`, async () => {
+  const w = world();
+  const s = w.study({ teleInstitutionId: INST_B });
+  w.db.handlers.push([/^SELECT a\.\*, CASE .* FROM "AuditLog" a LEFT JOIN "StudyState" s/, (params, tables) => {
+    const [ownerActions, institutionActions, target] = params;
+    const me = params.at(-2), limit = params.at(-1);
+    const uids = Array.isArray(target) ? target : [target];
+    return tables.auditLog.filter(row => {
+      const study = tables.studyState.find(study => study.uid === row.target);
+      if (!study || !uids.includes(row.target) || ![study.institutionId, study.teleInstitutionId].includes(me)) return false;
+      const institution = JSON.parse(row.detail ?? 'null')?.institution;
+      return ownerActions.includes(row.action) ? study.institutionId === me && institution === me
+        : institutionActions.includes(row.action) ? institution === me : true;
+    }).sort((a, b) => +b.at - +a.at || b.id - a.id).slice(0, limit).map(row => ({ ...copy(row),
+      managingInstitution: ownerActions.includes(row.action) || institutionActions.includes(row.action)
+        ? JSON.parse(row.detail).institution : tables.studyState.find(study => study.uid === row.target).institutionId,
+    }));
+  }]);
+  for (const [writer, admin] of [[RAD_A, ADMIN_A], [RAD_B, ADMIN_B]]) {
+    await w.hold.hold(s.uid, writer);
+    await w.hold.forceRelease(s.uid, admin);
+  }
+  for (const action of ['report.hold', 'hold.force-release']) {
+    w.db.seed('auditLog', { action, target: s.uid, actor: 'legacy@synthetic.example',
+      detail: action === 'report.hold' ? null : JSON.stringify({ holder: 'legacy@synthetic.example', by: INST_A }) });
+  }
+  w.db.seed('auditLog', { action: 'study.verified', target: s.uid, actor: 'SYN shared event' });
+  const original = copy(w.db.rows('auditLog'));
+  for (const [caller, writer, admin] of [[TECH_A, RAD_A, ADMIN_A], [ADMIN_B, RAD_B, ADMIN_B]]) {
+    const result = await w.audit.auditRead(singleStudy ? s.uid : undefined, 500, caller);
+    const holds = result.rows.filter(row => row.action === 'report.hold');
+    const releases = result.rows.filter(row => row.action === 'hold.force-release');
+    assert.deepEqual(holds.map(row => row.actor), [writer.actor]);
+    assert.deepEqual(releases.map(row => [row.actor, JSON.parse(row.detail).holder]), [[admin.actor, writer.actor]]);
+    assert.ok(result.rows.some(row => row.action === 'study.verified'), 'unrelated shared events remain visible');
+    for (const [index, row] of result.rows.entries()) {
+      if (row.action !== 'study.verified') assert.equal(result.managing[index], caller.institution);
+    }
+  }
+  assert.deepEqual(w.db.rows('auditLog'), original, 'reading must preserve the original audit identities');
+  for (const holderInstitutionId of [INST_B, null]) {
+    await w.hold.hold(s.uid, RAD_B);
+    w.db.rows('studyState')[0].holderInstitutionId = holderInstitutionId;
+    await w.hold.forceRelease(s.uid, ADMIN_A);
+    const recorded = copy(w.audits('hold.force-release').at(-1));
+    const own = await w.audit.audits(singleStudy ? s.uid : undefined, 500, TECH_A);
+    const shown = own.find(row => row.id === recorded.id);
+    assert.equal(shown.actor, ADMIN_A.actor);
+    assert.equal(JSON.parse(shown.detail).holder, '다른 기관', 'a local admin action must not expose a foreign or legacy holder');
+    const remote = await w.audit.audits(singleStudy ? s.uid : undefined, 500, TECH_B);
+    assert.ok(!remote.some(row => row.id === recorded.id), 'the other institution must not see the releasing admin');
+    assert.equal(JSON.parse(recorded.detail).holder, RAD_B.actor, 'the raw audit retains the actual holder');
+    assert.deepEqual(w.audits('hold.force-release').at(-1), recorded, 'response redaction must not rewrite the audit');
+  }
 });
 
 test('SPLIT-12 the list and the boot bundle carry own and tele-received studies only; first sight registers a study; unknown counts stay unknown', async () => {
