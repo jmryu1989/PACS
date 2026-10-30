@@ -241,6 +241,9 @@ class Server:
         return self.static(route, path, entry, strict=True)
 
     def static(self, route, path, entry, strict):
+        # The proxy mounts these assets here; absolute worker URLs use the same files as the page's relative URLs.
+        if path.startswith("/worklist/hpacs-lite/"):
+            path = path[len("/worklist/hpacs-lite"):]
         if path == "/index.html" and self.hold_landing:
             # The move to the landing after a session end: 204 keeps the closed document readable for the case.
             entry["status"] = 204
