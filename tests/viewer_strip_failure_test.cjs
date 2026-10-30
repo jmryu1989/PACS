@@ -80,6 +80,55 @@ async function fixture() {
     close() { strip.dispose(); window.KinViewerPatientTabs.end(); } };
 }
 
+test('returning to a patient tab restores the scroll origin together with the saved frame', async () => {
+  const listeners = new Set(), views = new Map(), body = new Element('body');
+  const location = { origin: 'https://viewer.test', href: 'https://viewer.test/ohif/viewer?StudyInstanceUIDs=1.2' };
+  const study = () => new URL(location.href).searchParams.get('StudyInstanceUIDs');
+  const sets = ['1.2', '2.3'].map(uid => ({ displaySetInstanceUID: 'ds-' + uid, StudyInstanceUID: uid, SeriesInstanceUID: uid + '.1' }));
+  const state = { activeViewportId: 'cell', layout: { layoutType: 'grid', numRows: 1, numCols: 1 }, viewports: new Map() };
+  const changed = viewportId => { for (const listener of [...listeners]) listener({ viewportId }); };
+  function create(id, uid, index) {
+    const ids = Array.from({ length: 6 }, (_, n) => uid + '/frame/' + n);
+    const view = { type: 'stack', current: index, targetImageIdIndex: index,
+      getImageIds: () => ids, getCurrentImageId() { return ids[this.current]; }, getCurrentImageIdIndex() { return this.current; },
+      setImageIdIndex(value) { this.current = value; return Promise.resolve(ids[value]); }, render() {},
+      scroll(delta) { this.targetImageIdIndex = Math.max(0, Math.min(ids.length - 1, this.targetImageIdIndex + delta)); return this.setImageIdIndex(this.targetImageIdIndex); } };
+    views.clear(); views.set(id, view);
+    state.activeViewportId = id;
+    state.viewports = new Map([[id, { viewportId: id, displaySetInstanceUIDs: ['ds-' + uid] }]]);
+    return view;
+  }
+  create('cell', '1.2', 3);
+  const services = { displaySetService: { getActiveDisplaySets: () => sets, getDisplaySetByUID: id => sets.find(set => set.displaySetInstanceUID === id) },
+    viewportGridService: { getState: () => state, setLayout(options) {
+      const cell = options.findOrCreateViewport(0), id = cell.viewportOptions.viewportId;
+      create(id, study(), 0); // The recreated renderer still needs the saved frame applied.
+      queueMicrotask(() => changed(id));
+    } },
+    cornerstoneViewportService: { EVENTS: { VIEWPORT_DATA_CHANGED: 'data' }, getCornerstoneViewport: id => views.get(id),
+      subscribe(_event, listener) { listeners.add(listener); return { unsubscribe: () => listeners.delete(listener) }; } } };
+  const window = { KinViewerInfoBar: { identity: () => ({ instance: { StudyInstanceUID: study() } }) },
+    kinViewerFrameCoverageConfirm: () => true,
+    dispatchEvent() { create('cell', study(), 0); queueMicrotask(() => changed('cell')); } };
+  const context = vm.createContext({ window, location, URL, URLSearchParams, AbortController, structuredClone, queueMicrotask, clearTimeout,
+    requestAnimationFrame: fn => queueMicrotask(fn), crypto: require('node:crypto').webcrypto, PopStateEvent: Event,
+    document: { body, createElement: tag => new Element(tag), getElementById: () => null, querySelector: () => null },
+    history: { state: {}, replaceState(_state, _title, href) { location.href = href; } },
+    fetch: async path => { const uid = new URL(path, location.origin).searchParams.get('uids');
+      return { ok: true, json: async () => ({ studies: [{ uid, sourcePatientKey: uid, id: uid, name: 'Synthetic' }] }) }; } });
+  vm.runInContext(fs.readFileSync('worklist-v0/hpacs-lite/viewer-patient-tabs.js', 'utf8'), context);
+  const tabs = window.KinViewerPatientTabs;
+  try {
+    await tabs.mount({ services, session: { state: () => 'active', readOnly: () => false }, refreshChrome() {} });
+    assert.equal(await tabs.open('/ohif/viewer?StudyInstanceUIDs=2.3'), true); await settle();
+    assert.equal(await tabs.open('/ohif/viewer?StudyInstanceUIDs=1.2'), true); await settle();
+    const restored = views.get(state.activeViewportId);
+    assert.equal(restored.getCurrentImageId(), '1.2/frame/3');
+    await restored.scroll(1);
+    assert.equal(restored.getCurrentImageId(), '1.2/frame/4');
+  } finally { tabs.end(); }
+});
+
 for (const refusal of ['lookup 503', 'declined coverage', 'refused opening']) test(refusal + ' retains strip selection in a vacant cell', async () => {
   const f = await fixture();
   f.state.viewports.get('cell').displaySetInstanceUIDs = [];

@@ -67,6 +67,9 @@ window.KinViewerPatientTabs = (() => {
         const imageIndex = v?.getImageIds?.().indexOf(cell.image);
         if (imageIndex == null || imageIndex < 0 || !v.getCurrentImageId?.()) continue;
         restored.add(index);
+        // The pinned setter does not retarget the next wheel/arrow step.
+        clearTimeout(v.debouncedTimeout);
+        v.targetImageIdIndex = imageIndex;
         if (v.getCurrentImageId() !== cell.image) await v.setImageIdIndex(imageIndex);
         await new Promise(requestAnimationFrame);
         if (current !== tab || epoch !== mountEpoch || !mounted) return;
