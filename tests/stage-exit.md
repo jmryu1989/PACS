@@ -146,7 +146,7 @@ stage-exit PASS 증거로 쓰지 않는다. **이전 성공 run 대체 금지**�
 
 `ci_rerun_diagnostic_test.py`는 PS5.1/pwsh 문서 호출, 상대 out·다른 cwd·digest·실패·기존 파일
 보존을 검사한다. `record_run_test.py`는 이 시험과 collector·detector 행동 시험을 수집하며 기존
-validate.yml / measurements의 `Execution evidence raw and LF hash preservation` 단계에서 실행된다.
+pr-regressions.yml / source-regressions의 `Execution evidence raw and LF hash preservation` 단계에서 실행된다.
 `node tests/ci_workflow_consumers.cjs --audit .`는 gap/미등록 파일로 CI를 실패시키지 않는 진단이다.
 진단기의 실행/파싱 오류와 행동 시험 실패는 성공으로 숨기지 않는다.
 
@@ -333,14 +333,20 @@ Stage 7 절차와 기존 영구 원장을 따르고 실패 기록을 별도 보�
 | 동일 최종 SHA의 hosted 입력 | artifact / 내부 기록 | 용도 |
 |---|---|---|
 | `runtime` 및 동명 artifact의 모든 소유 workflow | `synthetic-runtime-record-runs`: `viewer-context-event`, `tech-note-attempt`, `findings-migration`, `production-image` | 서버 사건·실제 PG 저장 시도·dump/restore·기동 |
-| `measurements` 및 동명 artifact의 모든 소유 workflow | `synthetic-workspace-dom-results`: `viewer-context-loss-dom`, `viewer-tech-note-dom`, `emr-contract` | CTX/VR 결합 포함 DOM·두 Note 소비자·EMR-A 순수 계약 |
+| `pr-regressions.yml` / `viewer-dom` | `synthetic-viewer-dom-results`: `viewer-context-loss-dom`, `viewer-tech-note-dom` | CTX/VR 결합 포함 DOM·두 Note 소비자 |
+| `pr-regressions.yml` / `source-regressions` | `synthetic-source-regressions-results`: `emr-contract` | EMR-A 순수 계약 |
 | `volume-rendering`의 소유 workflow | `synthetic-volume-rendering-results`: `tmp/vr-ci/pure-vr`, `tmp/vr-ci/binding-dom` (artifact 내부 경로 유지) | VR 순수 모델 3파일·접근/세션 DOM |
 | 각각 `volume-rendering`, `context-loss`의 소유 workflow | `synthetic-volume-rendering-results`, `synthetic-context-loss`의 profile 결과/로그/영상 | hosted native 보조 근거; 아래 local 기록 대체 불가 |
 | candidate.yml | `candidate-<최종 40자리 SHA>` | `candidate-provenance.json`과 전 선택/cleanup 결과 |
 
 전체 소유 workflow의 성공·headSha·attempt와 artifact 출처를 별도 보존한다.
-분할 후 `volume-rendering`은 `volume-rendering.yml`에서 찾으며 validate 실행에서 받지 않는다.
-Worklist UX의 동명 workspace/runtime artifact도 각 소유 실행에서 따로 받는다.
+`volume-rendering`은 현재 `validate.yml`에서 찾으며, 이동한 DOM·source 회귀는 `pr-regressions.yml`에서 받는다.
+Worklist UX는 `synthetic-workspace-dom-results`를 계속 사용한다. Stage 7·8 수집은 이 artifact와
+`synthetic-source-regressions-results`, `synthetic-worklist-dom-results`, `synthetic-report-dom-results`,
+`synthetic-viewer-dom-results`, `synthetic-clinician-dom-results`, `synthetic-critical-result-dom-results`,
+`synthetic-admin-session-dom-results`, `synthetic-related-layout-dom-results`, `synthetic-study-transfer-dom-results`,
+`synthetic-privacy-dom-results`, `synthetic-viewer-native-dom-results`, `synthetic-proxy-contracts-results`를
+각 소유 workflow 실행에서 함께 받는다. 원래 workspace 기록의 분할이며 단계 시험 범위를 줄이지 않는다.
 build 및 나머지 회귀 jobs를 생략하지 않는다. 위 artifact의 profile `results.json`/
 개별 `.log`는 `run.json`이 없으므로 `--runs`의 적격 live 근거가 아니다.
 `synthetic-context-loss`는 보조 폴더에 받아 판정기의 `--runs`로 넘기지 않는다.

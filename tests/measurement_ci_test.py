@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import measurement_ci as ci
 from ci_workflows import WorkflowCatalog
+from ci_regression_inputs import regression_inputs
 from live_admin_credential_test import ImportedAdminCredentialTests
 
 # validate.yml steps that run after a failure keep doing so on a ready run and exclude a draft run, whose
@@ -172,7 +173,7 @@ class MeasurementCiTests(unittest.TestCase):
     def test_regression_suites_have_path_selected_pr_owners(self):
         for owner, expected in REGRESSION_SUITES.items():
             workflow, job = self.catalog.owner(owner)
-            self.assertEqual(workflow, '.github/workflows/validate.yml')
+            self.assertEqual(workflow, '.github/workflows/pr-regressions.yml')
             self.assertTrue(self.catalog.automatic(self.catalog.documents[workflow]))
             self.assertEqual(job['needs'], 'select')
             actual = set()
@@ -204,8 +205,8 @@ class MeasurementCiTests(unittest.TestCase):
                 selected[path] = selector.select([path])
             self.assertTrue(selected[path][owner], (owner, path))
 
-        for owner, suites in REGRESSION_SUITES.items():
-            for path in suites:
+        for owner, inputs in regression_inputs(ci.ROOT, self.catalog, REGRESSION_SUITES).items():
+            for path in inputs:
                 check(path, owner)
             for step in self.catalog.job(owner)['steps']:
                 args = shlex.split(re.sub(r'\$\{\{[^}]+\}\}', 'EXPRESSION', step.get('run', '')), comments=True)
@@ -219,15 +220,47 @@ class MeasurementCiTests(unittest.TestCase):
                     if path == 'config/ohif.js':
                         check('config/ohif/viewer.js', owner)
             self.assertTrue(selector.select([], all_jobs=True)[owner])
-        self.assertFalse(any(selector.select(['docs/unrelated.md']).values()))
+        for path in ('docs/unrelated.md', 'keycloak/README.md', 'api/src/pacs/README.md'):
+            self.assertFalse(any(selector.select([path]).values()), path)
+        # These are explicit recorder inputs of the source contract suites.
+        # Broad tests/** and api/src/** consumers must still ignore them.
+        for path in ('api/src/emr-contract/README.md', 'tests/README.md'):
+            self.assertEqual({job for job, enabled in selector.select([path]).items() if enabled},
+                             {'source-regressions'}, path)
         # A legal fixture is Markdown too; dropping all .md paths loses this regression.
         check('tests/fixtures/legal/verified-statutes.md', 'source-regressions')
         check('api/src/manual-sr.service.ts', 'measurements')
         check('worklist-v0/hpacs-lite/viewer-measurements.js', 'measurements')
+        for script in ('preload-queue.js', 'preload-worker.js', 'preload-store.js', 'report-editor-frame.js'):
+            for owner in ('report-dom', 'admin-session-dom', 'related-layout-dom'):
+                check('worklist-v0/hpacs-lite/' + script, owner)
+
+    def test_page_inputs_follow_worker_imports_and_bundle_sources(self):
+        from ci_regression_inputs import page_scripts, expand_scripts
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            page = 'worklist-v0/hpacs-lite/main.html'
+            directory = root / 'worklist-v0/hpacs-lite'
+            directory.mkdir(parents=True)
+            (root / 'scripts').mkdir()
+            (root / 'scripts/main-split-order.json').write_text(json.dumps({
+                'artifact': 'worklist-v0/hpacs-lite/bundle.js', 'sources': [{'file': 'entry.js'}]}))
+            (root / page).write_text('<script src="bundle.js"></script><script src="https://example.test/remote.js"></script>')
+            for name, source in {
+                'entry.js': 'const worker = "/worklist/hpacs-lite/worker.js?v=1"; new SharedWorker(worker); // "unloaded.js"',
+                'worker.js': 'importScripts("store.js");',
+                'store.js': 'import "./worker.js";',
+                'unloaded.js': 'throw new Error("comment only");',
+            }.items():
+                (directory / name).write_text(source)
+            actual = expand_scripts(root, page_scripts(root, page), {})
+            self.assertEqual(actual, {
+                'scripts/main-split-order.json', 'scripts/build-main-split-bundle.py',
+                *('worklist-v0/hpacs-lite/' + name for name in ('bundle.js', 'entry.js', 'worker.js', 'store.js'))})
 
     def test_complete_measurement_profile_is_an_automatic_pr_contract(self):
         owner = self.catalog.profile_report(['measurements'])['measurements']
-        self.assertEqual((owner['workflow'], owner['job']), ('.github/workflows/validate.yml', 'measurements'))
+        self.assertEqual((owner['workflow'], owner['job']), ('.github/workflows/pr-regressions.yml', 'measurements'))
         self.assertFalse(owner['dispatch'])
         self.assertEqual([row[0] for row in ci.PROFILES['measurements']['suites']], list(ci.SUITES))
         self.assertEqual([row[1] for row in ci.PROFILES['measurements']['suites']], list(ci.SUITE_CLASSES))
@@ -282,8 +315,10 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(jobs['select']['outputs'], {'jobs': '${{ steps.paths.outputs.jobs }}'})
         self.assertIn('python3 scripts/ci_select.py', [step.get('run') for step in jobs['select']['steps']])
         selected = {}
-        for name, job in jobs.items():
-            if name in ('select', 'runtime') or job.get('needs') == 'produce':
+        regression_jobs = self.catalog.documents['.github/workflows/pr-regressions.yml']['jobs']
+        self.assertEqual(regression_jobs['select'], jobs['select'])
+        for name, job in [*jobs.items(), *regression_jobs.items()]:
+            if name in ('select', 'runtime', 'pr-ci') or job.get('needs') == 'produce':
                 continue
             with self.subTest(job=name):
                 self.assertEqual(job['needs'], 'select')
@@ -336,7 +371,15 @@ class MeasurementCiTests(unittest.TestCase):
         select_failed = "${{ needs.select.result != 'success' }}"
         status = re.compile(r'\b(?:always|cancelled|failure)\(\)')
         excluded = 0
-        for name, job in jobs.items():
+        regression = self.catalog.documents['.github/workflows/pr-regressions.yml']
+        regression_triggers = regression.get('on', regression.get(True))
+        self.assertEqual(regression_triggers['pull_request'], triggers['pull_request'])
+        self.assertEqual(regression_triggers['workflow_dispatch'], triggers['workflow_dispatch'])
+        self.assertEqual(regression_triggers['push'], {'tags': triggers['push']['tags']})
+        self.assertEqual(regression['concurrency']['cancel-in-progress'], workflow['concurrency']['cancel-in-progress'])
+        for name, job in [*jobs.items(), *regression['jobs'].items()]:
+            if name == 'pr-ci':
+                continue  # The aggregation test checks failure propagation, including drafts.
             with self.subTest(job=name):
                 self.assertIn(job['steps'][0]['if'], (draft, select_failed))
                 self.assertTrue(job['steps'][0]['run'].rstrip().endswith('exit 1'))
@@ -348,6 +391,63 @@ class MeasurementCiTests(unittest.TestCase):
                     self.assertIn(condition, (AFTER_FAILURE, AFTER_SIBLING_FAILURE))
                     excluded += 1
         self.assertTrue(excluded)
+
+    def test_workflows_stay_below_the_hosted_size_limit(self):
+        for workflow in self.catalog.documents:
+            self.assertLess((ci.ROOT / workflow).stat().st_size, 450_000, workflow)
+
+    def test_regression_job_budgets_include_all_step_limits_and_setup(self):
+        for owner in REGRESSION_SUITES:
+            job = self.catalog.job(owner)
+            self.assertGreaterEqual(job['timeout-minutes'],
+                                    sum(step.get('timeout-minutes', 0) for step in job['steps']) + 15, owner)
+
+    def test_each_pr_workflow_aggregates_every_result(self):
+        import subprocess
+        contexts = []
+        for filename in ('validate.yml', 'pr-regressions.yml'):
+            jobs = self.catalog.documents['.github/workflows/' + filename]['jobs']
+            gate = jobs['pr-ci']
+            contexts.append(gate['name'])
+            self.assertEqual(gate['if'], 'always()')
+            self.assertEqual(set(gate['needs']), set(jobs) - {'pr-ci'})
+            step, = gate['steps']
+            self.assertEqual(step['env'], {'NEEDS_JSON': '${{ toJSON(needs) }}'})
+            self.assertEqual(step['shell'], 'python')
+            results = {name: {'result': 'success'} for name in gate['needs']}
+            for name in results:
+                for state in ('success', 'skipped', 'failure', 'cancelled'):
+                    results[name]['result'] = state
+                    run = subprocess.run([sys.executable, '-c', step['run']],
+                                         env={**os.environ, 'NEEDS_JSON': json.dumps(results)},
+                                         capture_output=True, text=True, timeout=10)
+                    self.assertEqual(run.returncode, int(state not in ('success', 'skipped')),
+                                     (filename, name, state, run.stdout, run.stderr))
+                results[name]['result'] = 'success'
+            results = {name: {'result': 'skipped'} for name in gate['needs']}
+            run = subprocess.run([sys.executable, '-c', step['run']],
+                                 env={**os.environ, 'NEEDS_JSON': json.dumps(results)},
+                                 capture_output=True, text=True, timeout=10)
+            self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(contexts, ['pr-ci / validate', 'pr-ci / regressions'])
+
+    def test_markdown_contract_exceptions_are_exact_and_job_scoped(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('markdown_selector', ci.ROOT / 'scripts/ci_select.py')
+        selector = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(selector)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'scripts').mkdir()
+            (root / 'scripts/ci-paths.json').write_text(json.dumps({
+                'common': [], 'shared_browser': [], 'browser_jobs': [],
+                'jobs': {'contract': ['docs/contract.md'], 'tree': ['docs/**'],
+                         'fixture': ['tests/fixtures/**']}}), encoding='utf-8')
+            with patch.object(selector, 'ROOT', root):
+                self.assertEqual(selector.select(['docs/contract.md']),
+                                 {'contract': True, 'tree': False, 'fixture': False})
+                self.assertFalse(any(selector.select(['docs/other.md']).values()))
+                self.assertTrue(selector.select(['tests/fixtures/legal/input.md'])['fixture'])
 
     def test_accuracy_pr_subset_keeps_original_suite_contracts(self):
         expected = [('e2e/test_measurement_readback.py', 'MeasurementReadbackE2E'),

@@ -114,6 +114,9 @@ function scan(source, filename) {
     reads: unresolved || consumesLiterals(literals),
     modules,
     files,
+    // Browser pages also load workers/importScripts and constructed script URLs.
+    // Keep executable path literals conservatively; comments never enter the AST.
+    scriptPaths: literals.filter(value => /\.(?:js|mjs|cjs)(?:[?#].*)?$/.test(value)),
   };
 }
 
