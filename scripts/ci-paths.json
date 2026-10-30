@@ -922,6 +922,7 @@
       "tests/e2e/**"
     ],
     "source-regressions": [
+      "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       ".github/workflows/gateway-e2e.yml",
       ".github/workflows/validate.yml",
@@ -1472,6 +1473,7 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "report-dom": [
+      "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
       "api/package-lock.json",
@@ -1648,6 +1650,7 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "viewer-dom": [
+      "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
       "api/prisma/schema.prisma",
@@ -1883,6 +1886,7 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "clinician-dom": [
+      "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
       "api/prisma/schema.prisma",
@@ -2050,6 +2054,7 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "critical-result-dom": [
+      "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
       "api/prisma/schema.prisma",
@@ -2207,6 +2212,7 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "admin-session-dom": [
+      "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
       "api/prisma/schema.prisma",
@@ -2373,6 +2379,7 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "related-layout-dom": [
+      "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
       "api/prisma/schema.prisma",
