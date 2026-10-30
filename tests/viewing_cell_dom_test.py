@@ -201,6 +201,10 @@ class ViewingCellDOM(MultiInstitutionWorklist):
         expect(cell).to_have_text('✎ 다른 기관 · Viewing: SYN Colleague', timeout=12000)
         server.fail = True
         expect(cell).to_have_text('✎ 다른 기관', timeout=12000)
+        server.rows[0]['state']['holder'] = '작성자 비공개'
+        screen.refresh()
+        expect(cell).to_have_text('✎ 작성자 비공개')
+        expect(cell.get_by_text('✎ 작성자 비공개', exact=True)).to_have_attribute('title', '비공개 작성자가 작성 중')
         server.rows[0]['state']['holder'] = None
         screen.refresh()
         expect(cell).to_have_text('')

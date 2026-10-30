@@ -898,7 +898,7 @@
       viewing: s => {
         const hold = !s.holder ? '' : s.holder === user
           ? `<span class="hold me" title="내가 작성 중">✎ 나</span>`
-          : `<span class="hold other" title="${s.holder === '다른 기관' ? '다른 기관 판독의가' : esc(displayActor(s.holder)) + ' 님이'} 작성 중">✎ ${esc(displayActor(s.holder))}</span>`;
+          : `<span class="hold other" title="${s.holder === '다른 기관' ? '다른 기관 판독의가' : s.holder === '작성자 비공개' ? '비공개 작성자가' : esc(displayActor(s.holder)) + ' 님이'} 작성 중">✎ ${esc(displayActor(s.holder))}</span>`;
         const presence = esc(viewingNames.get(s.uid) || '');
         return hold + (hold && presence ? ' · ' : '') + presence;
       },
@@ -5777,7 +5777,8 @@
       if (uid === selectedUid) { updateReportButtons(); loadReport(); }
       if (warnedFor !== uid) {
         warnedFor = uid;
-        const writer = holder === '다른 기관' ? '다른 기관 판독의가' : `${displayActor(holder)} 님이`;
+        const writer = holder === '다른 기관' ? '다른 기관 판독의가'
+          : holder === '작성자 비공개' ? '비공개 작성자가' : `${displayActor(holder)} 님이`;
         toast(`${writer} 판독 중입니다 — 저장되지 않았습니다`, "err");
       }
     }
@@ -7549,7 +7550,8 @@
           holdBlocked = { uid, at: Date.now() };
           if (warnedFor !== uid) {
             warnedFor = uid;
-            const writer = r.holder === '다른 기관' ? '다른 기관 판독의가' : `${displayActor(r.holder)} 님이`;
+            const writer = r.holder === '다른 기관' ? '다른 기관 판독의가'
+              : r.holder === '작성자 비공개' ? '비공개 작성자가' : `${displayActor(r.holder)} 님이`;
             toast(`${writer} 먼저 판독을 시작했습니다 — 잠금이 풀리면 이어서 할 수 있습니다`, "err");
           }
           return;

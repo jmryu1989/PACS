@@ -263,11 +263,14 @@ function fieldAttribution(rule: string, base: Omit<AuditProjection, 'rule' | 'de
   // action does not grant access to that writer's identity. Never alter storage.
   if (base.action === 'hold.force-release') {
     const { holderInstitutionId, ...rest } = detail;
-    detail = { ...rest, holder: !rest.holder ? null : holderInstitutionId === value ? rest.holder : '다른 기관' };
+    detail = { ...rest, holder: !rest.holder ? null
+      : rest.holder === base.actor || holderInstitutionId === value ? rest.holder
+      : holderInstitutionId ? '다른 기관' : '작성자 비공개' };
   } else if (base.action === 'report.draft.force-discard' && Array.isArray(detail.drafts)) {
     // Drafts do not record their author's institution. The releasing institution
     // is not evidence of authorship, including for legacy rows.
-    detail = { ...detail, drafts: detail.drafts.map(draft => ({ ...draft, author: '다른 기관' })) };
+    detail = { ...detail, drafts: detail.drafts.map(draft => ({ ...draft,
+      author: draft.author === base.actor ? draft.author : '작성자 비공개' })) };
   }
   return { rule, visible_to: [value], projection_by_side: new Map([[value, { ...base, rule, detail }]]), hidden: null };
 }

@@ -87,7 +87,7 @@ export class PacsAudit {
         // Keycloak 사용자 id)이 이 통로로 새어 나갔다. 회원 감사 조회가 필요해지면 admin 전용 경로로 만든다.
         if (!prev || !this.access.visible(prev, me)) throw new NotFoundException('검사를 찾을 수 없습니다');
         await this.studyAccess.require(c, [uid], tx);
-        return tx.$queryRaw<any[]>`SELECT a.*, CASE WHEN a.action = 'hold.force-release'
+        return tx.$queryRaw<any[]>`SELECT a.*, CASE WHEN a.action IN ('hold.force-release', 'report.draft.force-discard')
             THEN COALESCE(a.detail::jsonb ->> 'institution', a.detail::jsonb ->> 'by')
             WHEN a.action = ANY(${OWNER_ONLY_AUDIT_ACTIONS}::text[]) OR a.action = ANY(${INSTITUTION_AUDIT_ACTIONS}::text[])
             THEN (a.detail::jsonb ->> 'institution') ELSE s."institutionId" END AS "managingInstitution"
@@ -95,7 +95,7 @@ export class PacsAudit {
           WHERE a.target = ${uid}
             AND CASE WHEN a.action = ANY(${OWNER_ONLY_AUDIT_ACTIONS}::text[])
                      THEN s."institutionId" = ${me} AND (a.detail::jsonb ->> 'institution') = ${me}
-                     WHEN a.action = 'hold.force-release'
+                     WHEN a.action IN ('hold.force-release', 'report.draft.force-discard')
                      THEN COALESCE(a.detail::jsonb ->> 'institution', a.detail::jsonb ->> 'by') = ${me}
                      WHEN a.action = ANY(${INSTITUTION_AUDIT_ACTIONS}::text[])
                      THEN (a.detail::jsonb ->> 'institution') = ${me}
@@ -110,7 +110,7 @@ export class PacsAudit {
     const allowed = [...await this.studyAccess.allowed(c,mine.map(s=>s.uid))];
     // S7-U3a-R-001-F01: the institution boundary is checked again in the statement that reads the entries, so the entries
     // of a study whose tele channel closed after `mine` was read are left out, the close's own included.
-    return this.prisma.$queryRaw<any[]>`SELECT a.*, CASE WHEN a.action = 'hold.force-release'
+    return this.prisma.$queryRaw<any[]>`SELECT a.*, CASE WHEN a.action IN ('hold.force-release', 'report.draft.force-discard')
             THEN COALESCE(a.detail::jsonb ->> 'institution', a.detail::jsonb ->> 'by')
             WHEN a.action = ANY(${OWNER_ONLY_AUDIT_ACTIONS}::text[]) OR a.action = ANY(${INSTITUTION_AUDIT_ACTIONS}::text[])
             THEN (a.detail::jsonb ->> 'institution') ELSE s."institutionId" END AS "managingInstitution"
@@ -119,7 +119,7 @@ export class PacsAudit {
         AND (s."institutionId" = ${me} OR s."teleInstitutionId" = ${me})
         AND CASE WHEN a.action = ANY(${OWNER_ONLY_AUDIT_ACTIONS}::text[])
                  THEN s."institutionId" = ${me} AND (a.detail::jsonb ->> 'institution') = ${me}
-                 WHEN a.action = 'hold.force-release'
+                 WHEN a.action IN ('hold.force-release', 'report.draft.force-discard')
                  THEN COALESCE(a.detail::jsonb ->> 'institution', a.detail::jsonb ->> 'by') = ${me}
                  WHEN a.action = ANY(${INSTITUTION_AUDIT_ACTIONS}::text[])
                  THEN (a.detail::jsonb ->> 'institution') = ${me}

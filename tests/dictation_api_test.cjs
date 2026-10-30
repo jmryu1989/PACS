@@ -232,7 +232,11 @@ test('CORE_R11_DICTATION role -> institution -> unverified -> hold -> designatio
     result=await call(c); assert.equal(result.status,200); assert.equal(result.body.text,'SYNTHETIC TRANSCRIPT');
   }
   assert.equal(audits.length,2); assert.ok(audits.every(a=>a.action==='dictation.request'));
-  for(const a of audits) assert.deepEqual(Object.keys(JSON.parse(a.detail)).sort(),['bytes','engine','ms','outcome','seconds']);
+  for(const a of audits) {
+    const detail = JSON.parse(a.detail);
+    assert.deepEqual(Object.keys(detail).sort(),['bytes','engine','institution','ms','outcome','seconds']);
+    assert.equal(detail.institution, x.institution);
+  }
   assert.ok(!JSON.stringify(audits).includes('TRANSCRIPT'));
   state.preDocSub=null; state.preReviewerSub=null;
   assert.equal((await call({...x,sub:'legacy-sub',actor:'old-label'})).status,200);

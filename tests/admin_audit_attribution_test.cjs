@@ -202,24 +202,28 @@ test('writer privacy: admin audit row 30 and legacy releases redact foreign or u
     const source = { ...ROWS.get(30), detail: JSON.stringify(detail) };
     const original = json(source);
     const shown = A.projectAuditRow(source, 'inst-a');
-    assert.equal(shown.detail.holder, institution === 'inst-a' ? detail.holder : '다른 기관');
+    assert.equal(shown.detail.holder, institution === 'inst-a' ? detail.holder : institution ? '다른 기관' : '작성자 비공개');
     assert.ok(!('holderInstitutionId' in shown.detail));
     assert.equal(A.projectAuditRow(source, 'inst-b'), null);
     assert.deepEqual(json(source), original);
   }
   const legacy = { ...ROWS.get(30), detail: JSON.stringify({ by: 'inst-a', holder: 'legacy@synthetic.test' }) };
-  assert.equal(A.projectAuditRow(legacy, 'inst-a').detail.holder, '다른 기관');
+  assert.equal(A.projectAuditRow(legacy, 'inst-a').detail.holder, '작성자 비공개');
+  const self = { ...legacy, actor: 'legacy@synthetic.test' };
+  assert.equal(A.projectAuditRow(self, 'inst-a').detail.holder, self.actor);
 });
 
 test('writer privacy: administrator draft discard audit cannot reveal authors whose institution was never recorded', () => {
   const source = row(99, 'report.draft.force-discard', S2, { by: 'inst-a', drafts: [
     { author: 'foreign@synthetic.test', len: [4, 0, 0] },
     { author: 'unknown@synthetic.test', len: [5, 0, 0] },
-  ], versions: [2, 3] });
+    { author: 'admin@synthetic.test', len: [6, 0, 0] },
+  ], versions: [2, 3, 4] }, 'admin@synthetic.test');
   const before = source.detail;
   const shown = A.projectAuditRow(source, 'inst-a');
-  assert.deepEqual(shown.detail.drafts, [{ author: '다른 기관', len: [4, 0, 0] }, { author: '다른 기관', len: [5, 0, 0] }]);
-  assert.deepEqual(shown.detail.versions, [2, 3]);
+  assert.deepEqual(shown.detail.drafts, [{ author: '작성자 비공개', len: [4, 0, 0] },
+    { author: '작성자 비공개', len: [5, 0, 0] }, { author: source.actor, len: [6, 0, 0] }]);
+  assert.deepEqual(shown.detail.versions, [2, 3, 4]);
   assert.equal(A.projectAuditRow(source, 'inst-b'), null);
   assert.equal(source.detail, before);
 });

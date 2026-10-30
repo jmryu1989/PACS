@@ -1393,7 +1393,14 @@ def u5_bearer(stack: LiveStack, uid: str, token: str | None, body: bytes, conten
 
 
 def u5_context(stack: LiveStack, fixture: Fixture, pin: str, users: tuple[str, ...]) -> dict[str, Any]:
-    return {"engine_pin": pin, "secret": fixture.secret, "actors": {user: stack.actor(user) for user in users}}
+    institutions = {}
+    for user in users:
+        me = stack.request("GET", "/me", user)
+        if me.status != 200 or not me.body.get("institution"):
+            raise RuntimeError(f"U5 caller institution unavailable: {user}")
+        institutions[user] = me.body["institution"]
+    return {"engine_pin": pin, "secret": fixture.secret, "actors": {user: stack.actor(user) for user in users},
+            "institutions": institutions}
 
 
 def u5_precondition(test: unittest.TestCase, stack: LiveStack, key: str) -> str:
@@ -2897,12 +2904,11 @@ class LiveInvariantTests(unittest.TestCase):
                 [row["action"] for row in rows],
                 ["save", "approve", "addendum", "discarded", "reset", "save"],
             )
-            # Safety copies have no recorded writer institution. The response
-            # hides that identity; the immutable stored author/reason stay intact.
-            self.assertEqual([row["author"] for row in rows], [doctor, doctor, doctor2, "다른 기관", doctor, doctor])
+            # Reset copies retain the already shared signer and cancellation provenance.
+            self.assertEqual([row["author"] for row in rows], [doctor, doctor, doctor2, doctor2, doctor, doctor])
             discarded, reset_row = rows[3], rows[4]
             self.assertEqual(discarded["findings"], "addendum text")
-            self.assertEqual(discarded["reason"], "판독문 폐기 보존본")
+            self.assertEqual(discarded["reason"], f"판독 취소로 폐기 (취소자: {doctor})")
             stored = json.loads(psql(f'''SELECT json_build_object('author',author,'reason',reason) FROM "ReportVersion" WHERE id={int(discarded['id'])};''')[0])
             self.assertEqual(stored["author"], doctor2)
             self.assertTrue(stored["reason"].startswith("판독 취소로 폐기"), stored)
@@ -3126,7 +3132,7 @@ class LiveInvariantTests(unittest.TestCase):
             discarded = self.stack.request("DELETE", path + "/draft/force", "jmryu")
             self.assert_status(discarded, 200)
             self.assertEqual(discarded.body["count"], 2)
-            self.assertEqual([d["author"] for d in discarded.body["drafts"]], ["다른 기관", "다른 기관"])
+            self.assertEqual([d["author"] for d in discarded.body["drafts"]], ["작성자 비공개", "작성자 비공개"])
             for user, institution, writer in [("doctor", "hallym", self.stack.actor("doctor")), ("ktech", "kin-center", kdoctor)]:
                 for audit_path in [f"/audit?uid={quote(fixture.uid)}&take=500", "/audit?take=500"]:
                     audited = self.stack.request("GET", audit_path, user)
@@ -3138,30 +3144,39 @@ class LiveInvariantTests(unittest.TestCase):
                         self.assertEqual(detail["institution"], institution)
                         if row["action"] == "report.draft.force-discard":
                             self.assertEqual(row["actor"], self.stack.actor("jmryu"))
-                            self.assertCountEqual([d["author"] for d in detail["drafts"]], [writer, "다른 기관"])
+                            self.assertCountEqual([d["author"] for d in detail["drafts"]], [writer, "작성자 비공개"])
                         else:
                             self.assertEqual(row["actor"], writer)
 
-            # Old forced releases already recorded the institution as `by`.
+            # Old forced releases and draft discards recorded the institution as `by`.
             # New `institution` takes precedence; old holds/drafts remain closed.
             self.assertRegex(fixture.uid, r"^[0-9.]+$")
             legacy = [
                 ("SYN legacy A", "hold.force-release", {"by": "hallym", "holder": "legacy@synthetic.test"}),
                 ("SYN legacy B", "hold.force-release", {"by": "kin-center", "holder": "legacy@synthetic.test"}),
                 ("SYN preferred B", "hold.force-release", {"institution": "kin-center", "by": "hallym", "holder": "legacy@synthetic.test"}),
+                ("SYN legacy draft A", "report.draft.force-discard", {"by": "hallym", "drafts": [{"author": "legacy@synthetic.test", "len": [1, 0, 0]}], "versions": [1]}),
+                ("SYN legacy draft B", "report.draft.force-discard", {"by": "kin-center", "drafts": [{"author": "legacy@synthetic.test", "len": [1, 0, 0]}], "versions": [2]}),
+                ("SYN preferred draft B", "report.draft.force-discard", {"institution": "kin-center", "by": "hallym", "drafts": [{"author": "legacy@synthetic.test", "len": [1, 0, 0]}], "versions": [3]}),
                 ("SYN hidden hold", "report.hold", {}),
                 ("SYN hidden draft", "report.draft", {"len": [1, 0, 0]}),
             ]
             for actor, action, detail in legacy:
                 raw = json.dumps(detail).replace("'", "''")
                 psql(f'''INSERT INTO "AuditLog" (actor,action,target,detail) VALUES ('{actor}','{action}','{fixture.uid}','{raw}');''')
-            for user, expected in [("doctor", {"SYN legacy A"}), ("ktech", {"SYN legacy B", "SYN preferred B"})]:
+            for user, expected in [("doctor", {"SYN legacy A", "SYN legacy draft A"}),
+                                   ("ktech", {"SYN legacy B", "SYN preferred B", "SYN legacy draft B", "SYN preferred draft B"})]:
                 for audit_path in [f"/audit?uid={quote(fixture.uid)}&take=500", "/audit?take=500"]:
                     audited = self.stack.request("GET", audit_path, user)
                     self.assert_status(audited, 200)
                     rows = [row for row in audited.body if row["target"] == fixture.uid and row["actor"].startswith("SYN ")]
                     self.assertEqual({row["actor"] for row in rows}, expected)
-                    self.assertTrue(all(json.loads(row["detail"])["holder"] == "다른 기관" for row in rows))
+                    for row in rows:
+                        detail = json.loads(row["detail"])
+                        if row["action"] == "hold.force-release":
+                            self.assertEqual(detail["holder"], "작성자 비공개")
+                        else:
+                            self.assertEqual(detail["drafts"][0]["author"], "작성자 비공개")
 
     def test_hold_requires_radiologist_and_prelim_access(self) -> None:
         with self.stack.fixture() as fixture:

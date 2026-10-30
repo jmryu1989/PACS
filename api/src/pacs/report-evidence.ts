@@ -338,11 +338,21 @@ export class PacsReportEvidence {
         recommendation: true, reason: true, author: true, at: true } });
     // MODULE_A A2: 이 읽기가 고정한 행 전부가 열람 기록의 대상이다. 화면이 나중에 고르는 판만 기록하면 내보낸 다른 판의
     // 열람이 기록에서 빠진다. 응답은 기록이 COMMIT된 뒤 이 행 그대로 나간다(A1 응답 경계).
-    // Discarded rows include private drafts and reset safety copies without a
-    // recorded writer institution. Keep their raw provenance; committed versions
-    // retain their signatures, while safety copies cannot bypass draft privacy.
-    const shown = rows.map(row => row.action === 'discarded' ? { ...row,
-      author: visibleDraftAuthor(row.author, c), reason: '판독문 폐기 보존본' } : row);
+    // A signer already disclosed in this list is shared report provenance. A
+    // discarded draft alone cannot establish that its author belongs to a side.
+    const signers = new Set(rows.filter(row => row.action !== 'discarded').map(row => row.author));
+    const resets = new Map(rows.filter(row => row.action === 'reset').map(row => [row.version, row.author]));
+    const shown = rows.map(row => {
+      if (row.action !== 'discarded') return row;
+      // Historical copies share action=discarded. Reset writes this reason and
+      // its following reset row atomically; adjacency alone could be an admin
+      // draft discard followed by a reset of an already empty report.
+      const resetActor = resets.get(row.version + 1);
+      const resetCopy = resetActor && row.reason === `판독 취소로 폐기 (취소자: ${resetActor})`;
+      return { ...row,
+        author: signers.has(row.author) ? row.author : visibleDraftAuthor(row.author, c),
+        reason: resetCopy ? row.reason : '관리자 강제 초안 해제' };
+    });
     return reportVersionsRead(uid, prev.institutionId, shown, sourceIdentity);
   }
 

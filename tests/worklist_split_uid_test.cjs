@@ -523,7 +523,7 @@ test('TEST-WSU-08 hold release and force release stay available; images are 403 
   for (const holderInstitutionId of [c.institution, 'kin-center', null]) {
     Object.assign(w.states.get(SPLIT), { holder: 'someone-else', holderInstitutionId, heldAt: new Date() });
     assert.equal((await w.pacs.forceRelease(SPLIT, c)).released,
-      holderInstitutionId === c.institution ? 'someone-else' : '다른 기관');
+      holderInstitutionId === c.institution ? 'someone-else' : holderInstitutionId ? '다른 기관' : '작성자 비공개');
     assert.equal(w.states.get(SPLIT).holder, null);
     assert.equal(w.states.get(SPLIT).holderInstitutionId, null);
   }
