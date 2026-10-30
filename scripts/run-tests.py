@@ -114,6 +114,12 @@ class GateResult(unittest.TextTestResult):
             self.refused = str(err[1])
         super().addError(test, err)
 
+    def addSubTest(self, test, subtest, err):
+        # unittest routes an exception inside self.subTest() here, not through addError().
+        if err is not None and issubclass(err[0], gate.Refused) and self.refused is None:
+            self.refused = str(err[1])
+        super().addSubTest(test, subtest, err)
+
 
 def worker(path):
     # The internal entry point cannot start an independent, unrecorded run.

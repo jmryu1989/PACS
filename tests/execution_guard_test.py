@@ -778,6 +778,8 @@ class Probe(unittest.TestCase):
  def test_pass(self): (BASE/'passed').write_text('yes')
  def test_fail(self): self.fail('intentional synthetic failure')
  def test_live(self): require_live_run(); (BASE/'live').write_text('yes')
+ def test_live_in_subtest(self):
+  with self.subTest(step='live'): require_live_run(); (BASE/'live').write_text('yes')
  def test_live_skip(self): require_live_run(); self.skipTest('synthetic skip')
  def test_exit_zero(self): os._exit(0)
  def test_live_exit_zero(self): require_live_run(); os._exit(0)
@@ -851,11 +853,14 @@ with socket.create_connection(json.loads((base/'address.json').read_text()), tim
         self.assertEqual(subprocess.check_output(command,env=altered),original)
 
     def test_pure_mode_cannot_grant_live_permission(self):
-        result = self.run_plan(self.plan(case='test_live'))
-        self.assertEqual(result.returncode, 125, result.stderr)
-        # The gate's refusal inside a test stays a refusal, not a test failure.
-        self.assertIn(b'TEST_RUN_REFUSED', result.stderr)
-        self.assertNotIn(b'TEST_RUN_FAILED', result.stderr)
+        # The gate's refusal inside a test, or inside a test's subTest(), stays a refusal, not a test failure.
+        for unit, case in (('probe', 'test_live'), ('probe-subtest', 'test_live_in_subtest')):
+            with self.subTest(case=case):
+                result = self.run_plan(self.plan(unit=unit, case=case))
+                self.assertEqual(result.returncode, 125, result.stderr)
+                self.assertIn(b'TEST_RUN_REFUSED', result.stderr)
+                self.assertNotIn(b'TEST_RUN_FAILED', result.stderr)
+                self.assertFalse((self.tests/'live').exists())
         self.assertFalse((self.tests/'live').exists())
         self.assertFalse((self.state/'live-needs-inspection.json').exists())
 
