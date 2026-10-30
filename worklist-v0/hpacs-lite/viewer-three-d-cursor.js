@@ -353,7 +353,13 @@
        issuing a second request would let two native loads compete for the same viewport. */
     async function navigate(item,index){
       let promise;
-      try{promise=item.viewport.setImageIdIndex(index);}catch(_){return 'navigation-failed';}
+      try{
+        // Keep the load Promise for quarantine/restore, but supersede the old
+        // scroll target and debounce before this explicit navigation starts.
+        clearTimeout(item.viewport.debouncedTimeout);
+        item.viewport.targetImageIdIndex=index;
+        promise=item.viewport.setImageIdIndex(index);
+      }catch(_){return 'navigation-failed';}
       const record=watch(promise),outcome=await settle(record,navigationAttempts);
       if(outcome==='pending'){quarantine.set(item.id,{index,token:item.token,record});return 'navigation-unsettled';}
       return outcome==='rejected'?'navigation-failed':null;

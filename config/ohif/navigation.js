@@ -42,7 +42,14 @@ async function kinViewerNavigateTo(env, target) {
     if (v && !stack(v)) return refusal('viewport-unsupported');
     const index = (v ? v.getImageIds() : []).findIndex(id => env.matches(env.reference(id), identity));
     if (index >= 0) {
-      try { await v.setImageIdIndex(index); } catch (_) { return live() ? refusal('frame-missing') : refusal('superseded'); }
+      try {
+        // The pinned setter preserves its load Promise but leaves the scroll target
+        // and an older wheel debounce untouched. Retarget before starting the load;
+        // doing this after await would rewind a newer user scroll.
+        clearTimeout(v.debouncedTimeout);
+        v.targetImageIdIndex = index;
+        await v.setImageIdIndex(index);
+      } catch (_) { return live() ? refusal('frame-missing') : refusal('superseded'); }
       if (!live() || env.services.viewportGridService.getActiveViewportId() !== viewportId) return refusal('superseded');
       // The frame actually shown after the await is the only proof; a user scroll or a
       // display-set change during the load must not be reported as arrival.

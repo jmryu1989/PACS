@@ -1,6 +1,7 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs'),vm=require('node:vm');
+const nativeStack=require('./fixtures/viewer-stack-loading-source.cjs');
 const source=fs.readFileSync('config/ohif.js','utf8');
 const implementation=source.slice(source.indexOf('function kinCineWithinBudget('),source.indexOf('function kinApplyCTPreset('));
 
@@ -19,13 +20,22 @@ class Element {
 }
 function fixture(kind='orthographic',stackFrames=7,cachedInstances=[]){
  const document=new Element(),window=new Element(),timers=new Map();let nextTimer=0,current,allowed=true,resolveOld,rejectOld,requests=0,nativePlays=0,lastPlaybackRate;
+ const frameCache=new Set(),deferred=new Map();
+ const defer=(fn,ms)=>{const id=++nextTimer;deferred.set(id,{fn,ms});return id;},cancel=id=>deferred.delete(id);
  document.body=new Element();document.createElement=()=>new Element();document.hidden=false;
- const events={VIEWPORT_NEW_IMAGE_SET:'images',VOLUME_VIEWPORT_NEW_VOLUME:'volume',CAMERA_MODIFIED:'camera'};
+ const events={VIEWPORT_NEW_IMAGE_SET:'images',VOLUME_VIEWPORT_NEW_VOLUME:'volume',CAMERA_MODIFIED:'camera',STACK_VIEWPORT_SCROLL:'scroll',STACK_NEW_IMAGE:'loaded'};
+ const stack=nativeStack({window:{setTimeout:defer},setTimeout:defer,clearTimeout:cancel,
+  cache:{Ay:{isLoaded:id=>frameCache.has(id)}},enums:{Events:events,ViewportStatus:{PRE_RENDER:'rendered'}},
+  triggerEvent:{A:(element,event,detail)=>element.emit(event,{detail})}}).stack;
  const makeView=()=>{
   const element=new Element();let camera={focalPoint:[0,0,0],position:[0,0,10],viewPlaneNormal:[0,0,1],viewUp:[0,1,0],parallelScale:10,flipHorizontal:false,flipVertical:false};
-  let index=0;const ids=Array.from({length:stackFrames},(_,i)=>'image/'+i);
+  const ids=Array.from({length:stackFrames},(_,i)=>'image/'+i);
   const v={id:'selected-view',type:kind,element,viewportStatus:'rendered',getCamera:()=>structuredClone(camera),setCamera:c=>{camera={...camera,...c};element.emit(events.CAMERA_MODIFIED);},render(){},
-   getImageIds:()=>ids,getTargetImageIdIndex:()=>index,getCurrentImageIdIndex:()=>index,setIndex:value=>{index=value;}};element.viewport=v;return v;
+   imageIds:ids,currentImageIdIndex:0,targetImageIdIndex:0,perImageIdDefaultProperties:new Map(),shown:ids[0],
+   getImageIds:()=>ids,getTargetImageIdIndex(){return this.targetImageIdIndex;},getCurrentImageIdIndex(){return this.currentImageIdIndex;},
+   getCurrentImageId(){return ids[this.currentImageIdIndex];},_throwIfDestroyed(){},
+   async _loadAndDisplayImage(id){this.shown=id;return id;},
+   setIndex(value){this.currentImageIdIndex=value;this.targetImageIdIndex=value;this.shown=ids[value];},...stack};element.viewport=v;return v;
  };
  current=makeView();
  const cineEvents=new Element(),gridEvents=new Element(),state={isCineEnabled:true,cines:{'selected-view':{isPlaying:false}}},toolState={loop:true};
@@ -34,13 +44,16 @@ function fixture(kind='orthographic',stackFrames=7,cachedInstances=[]){
   stopClip(){cineEvents.emit('cine');},setCine:({id,...values})=>{Object.assign(state.cines[id],values);cineEvents.emit('cine');}};
  const grid={EVENTS:{ACTIVE_VIEWPORT_ID_CHANGED:'active',GRID_STATE_CHANGED:'grid'},getActiveViewportId:()=>current.id,getState:()=>({viewports:new Map([[current.id,{}]])}),subscribe:subscribe(gridEvents)};
  window.cornerstone={Enums:{Events:events,ViewportStatus:{RENDERED:'rendered'}},getEnabledElement:element=>element.disabled?undefined:({viewport:element.viewport}),
-  cache:{getImage:()=>null,getMaxCacheSize:()=>16*1024*1024,getCacheSize:()=>0,isCacheable:n=>n<=16*1024*1024},metaData:{get:()=>({rows:64,columns:64})},imageLoader:{loadAndCacheImage:async()=>{}},utilities:{
+  cache:{getImage:()=>null,getMaxCacheSize:()=>16*1024*1024,getCacheSize:()=>0,isCacheable:n=>n<=16*1024*1024},metaData:{get:()=>({rows:64,columns:64})},imageLoader:{loadAndCacheImage:async id=>{frameCache.add(id);}},utilities:{
    getVolumeViewportScrollInfo:v=>({sliceRangeInfo:{sliceRange:{min:0,max:32,current:v.getCamera().focalPoint[2]},spacingInNormalDirection:1,camera:v.getCamera()}}),
-   jumpToSlice:async(element,{imageIndex})=>element.viewport.setIndex(imageIndex),scroll:(v,{delta})=>v.setIndex(v.getTargetImageIdIndex()+delta)}};
+   // Pinned jumpToSlice chooses current vs pending index from debounceLoading;
+   // native scroll always applies that delta to the pending target.
+   jumpToSlice:async(element,{imageIndex,debounceLoading=false})=>{const v=element.viewport;v.scroll(imageIndex-(debounceLoading?v.getTargetImageIdIndex():v.getCurrentImageIdIndex()),debounceLoading);},
+   scroll:(v,{delta,debounceLoading})=>v.scroll(delta,debounceLoading)}};
  window.cornerstoneTools={utilities:{cine:{getToolState:()=>toolState}}};
  window.kinGetVolumeCineTarget=()=>({key:'same-source-and-selection',contentKey:'same-source',allowed,volume:{volumeId:'volume'}});
  const fetch=()=>++requests===1?new Promise((resolve,reject)=>{resolveOld=resolve;rejectOld=reject;}):Promise.resolve(response());
- const context={performance:{},window,document,fetch,AbortController,setTimeout,clearTimeout,JSON,Number,Math,Error,
+ const context={performance:{},window,document,fetch,AbortController,setTimeout:defer,clearTimeout:cancel,JSON,Number,Math,Error,
   setInterval:(fn,ms)=>{const id=++nextTimer;timers.set(id,{fn,ms});return id;},clearInterval:id=>timers.delete(id)};
  const extension=vm.runInNewContext(implementation+';kinCreateCine()',context);
  const handlerId='@ohif/extension-default.sopClassHandlerModule.stack';
@@ -69,8 +82,30 @@ function fixture(kind='orthographic',stackFrames=7,cachedInstances=[]){
   stopOld(element,disabled=false){element.disabled=disabled;cine.stopClip(element,{viewportId:'selected-view'});},
   release(){resolveOld(response());},reject(){rejectOld(Error('Synthetic old response failed'));},deny(){allowed=false;},
   tick(){for(const entry of [...timers.values()])if(entry.ms!==250)entry.fn();},index:()=>current.getCurrentImageIdIndex(),nativePlays:()=>nativePlays,
+  deferred(){for(const [id,entry] of [...deferred])if(entry.ms===40){deferred.delete(id);entry.fn();}},
   rangeValues:()=>[control('Range Start').value,control('Range End').value],playing:()=>state.cines['selected-view'].isPlaying,close:()=>extension.onModeExit()};
 }
+
+for(const end of [false,true])test(`stack cine ${end?'Last':'First'} Frame corrects a stale target and the next wheel step starts there`,async()=>{
+ const f=fixture('stack');try{
+  await f.old.setImageIdIndex(4); // A legacy direct jump leaves its scroll target behind.
+  f.range(2,6);f.jump(end);await new Promise(setImmediate);
+  const wanted=end?5:1;
+  assert.equal(f.old.shown,'image/'+wanted);
+  f.old.scroll(end?-1:1,false);
+  assert.equal(f.old.shown,'image/'+(wanted+(end?-1:1)));
+ }finally{f.close();}
+});
+
+test('stack cine range start supersedes a pending wheel target without a deferred rewind',async()=>{
+ const f=fixture('stack');try{
+  f.range(3,5);f.old.scroll(1); // Current 0, target 1, frame 1 still deferred.
+  const playing=f.play();f.release();await playing;
+  assert.equal(f.old.shown,'image/2');
+  f.deferred();assert.equal(f.old.shown,'image/2');
+  f.tick();assert.equal(f.old.shown,'image/3');
+ }finally{f.close();}
+});
 
 for(const [name,attributes,expected] of [
  ['Cine Rate', {CineRate:12},12],
