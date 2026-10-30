@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 IDENTITY = ROOT / "worklist-v0" / "hpacs-lite" / "viewer-identity.js"
 APPEARANCE = ROOT / "worklist-v0" / "hpacs-lite" / "reading-appearance.js"
 VOLUME = ROOT / "worklist-v0" / "hpacs-lite" / "volume-preferences.js"
+MARKERS = ROOT / "worklist-v0" / "hpacs-lite" / "marker-style.js"
 
 HARNESS = r"""
 <style>
@@ -172,8 +173,9 @@ class ViewerIdentityPositionDOMTest(unittest.TestCase):
         self.assertEqual(0, self.page.locator(".kin-viewer-identity").count())
         self.assertEqual("판독 뷰어 — KOREA IMAGING NETWORK", self.page.title())
 
-    def test_settings_copy_exports_v9_and_strictly_loads_v7_viewer_v1(self):
+    def test_settings_copy_exports_v10_and_strictly_loads_v7_viewer_v1(self):
         self.page.add_script_tag(path=str(VOLUME))
+        self.page.add_script_tag(path=str(MARKERS))
         self.page.add_script_tag(path=str(APPEARANCE))
         self.page.evaluate("""()=>{window.appearance=KinReadingAppearance({owner:()=>JSON.stringify(ownerValue)});document.querySelector('#reading-appearance-open').click()}""")
         self.assertEqual(["top-left", "top-right", "bottom-left", "bottom-right"], self.page.locator("#viewer-identity-current-position option").evaluate_all("o=>o.map(x=>x.value)"))
@@ -183,7 +185,7 @@ class ViewerIdentityPositionDOMTest(unittest.TestCase):
         self.page.click("#viewer-identity-copy-current")
         result = self.page.evaluate("""()=>({value:appearance.read(),priorPosition:document.querySelector('#viewer-identity-prior-position').value,
           priorSize:document.querySelector('#viewer-identity-prior-size').value,report:document.querySelector('#report').value,images:structuredClone(imageState)})""")
-        self.assertEqual(9, result["value"]["version"])
+        self.assertEqual(10, result["value"]["version"])
         self.assertEqual(3, result["value"]["viewer"]["version"])
         self.assertEqual("bottom-left", result["priorPosition"])
         self.assertEqual("18", result["priorSize"])
@@ -191,17 +193,19 @@ class ViewerIdentityPositionDOMTest(unittest.TestCase):
 
         legacy = result["value"]
         legacy["version"] = 7
+        del legacy["markers"]  # a version 7 envelope predates the marker choice
         legacy["viewer"] = v1_viewer()
         compatibility = self.page.evaluate("""legacy=>{const normalized=appearance.normalize(legacy);const applied=appearance.apply(normalized);return {normalized,applied,exported:appearance.read()}}""", legacy)
         self.assertEqual(7, compatibility["normalized"]["version"])
         self.assertEqual(1, compatibility["normalized"]["viewer"]["version"])
         self.assertTrue(compatibility["applied"])
-        self.assertEqual(9, compatibility["exported"]["version"])
+        self.assertEqual(10, compatibility["exported"]["version"])
         self.assertEqual("top-right", compatibility["exported"]["viewer"]["prior"]["position"])
         invalid = self.page.evaluate("""v=>{const wrong=structuredClone(v);wrong.version=7;return appearance.normalize(wrong)}""", compatibility["exported"])
         self.assertIsNone(invalid, "v1-v7 envelopes must reject a v3 viewer payload")
 
     def test_missing_mpr_keeps_position_local_and_disables_account_transfer(self):
+        self.page.add_script_tag(path=str(MARKERS))
         self.page.add_script_tag(path=str(APPEARANCE))
         self.page.add_script_tag(path=str(APPEARANCE.with_name('reading-appearance-account.js')))
         result = self.page.evaluate("""()=>{const appearance=KinReadingAppearance({owner:()=>JSON.stringify(ownerValue)});

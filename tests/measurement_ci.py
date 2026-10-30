@@ -143,8 +143,8 @@ PROFILES = {
         'out': ROOT / 'tests/e2e/artifacts/u2b-regressions-ci',
         'project_prefix': 'kin-u2b-regress-ci-',
         # S5-CIE: the two existing live modules S5-U2b named as required regressions, which no hosted profile
-        # ran. Not appended to measurements: its 20 suites at 540s already let it claim the whole 25-minute
-        # deadline. No hosted history yet; the 540s multi-suite cap gives (540+35)*2 = 1150s of the shared
+        # ran. Kept separate from the already crowded measurements profile. No hosted history yet;
+        # the 540s multi-suite cap gives (540+35)*2 = 1150s of this profile's shared
         # 1500s deadline and leaves 350s for a stack whose recorded hosted setup and cleanup took about 70s.
         'suite_timeout': 540,
         # Explicit local classes: only the declared test_d03a_* and test_scope_* cases, never the inherited
@@ -156,9 +156,11 @@ PROFILES = {
         'out': ROOT / 'tests/e2e/artifacts/viewer-ux-shell-ci',
         'project_prefix': 'kin-viewer-ux-shell-ci-',
         # Viewer U2 shell (D1821): the module's own test_shell_* cases on the shipped viewer, in the
-        # worklist-ux-measurements job. One suite at the single-suite 900s ceiling, not an estimate.
+        # worklist-ux-measurements job. Tools shares this viewer flow and deadline;
+        # its load_tests selects only authored tool cases across its three classes.
         'suite_timeout': 900,
-        'suites': (('e2e/test_viewer_ux_shell.py', 'ViewerUXShellE2E', 'ci-viewer-ux-shell'),),
+        'suites': (('e2e/test_viewer_ux_shell.py', 'ViewerUXShellE2E', 'ci-viewer-ux-shell'),
+                   ('e2e/test_viewer_tools.py', None, 'ci-viewer-tools')),
     },
     's9-u7-served': {
         'out': ROOT / 'tests/e2e/artifacts/s9-u7-served-ci',
@@ -232,6 +234,9 @@ PROFILES = {
     'measurements': {
         'out': ROOT / 'tests/e2e/artifacts/measurement-ci',
         'project_prefix': 'kin-measure-ci-',
+        # The cumulative nightly run can leave the last suite only seconds under
+        # the shared default. Preserve its full hang allowance and cleanup margin.
+        'deadline_seconds': 40 * 60,
         'suite_timeout': 540,
         'suites': tuple((suite, class_name, 'ci-'+Path(suite).stem.replace('_','-'))
                         for suite, class_name in zip(SUITES, SUITE_CLASSES)),

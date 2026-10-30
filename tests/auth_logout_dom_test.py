@@ -125,6 +125,7 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/study-panel.css",
     "worklist-v0/hpacs-lite/viewer-identity.js",
     "worklist-v0/hpacs-lite/volume-preferences.js",
+    "worklist-v0/hpacs-lite/marker-style.js",
     "worklist-v0/hpacs-lite/reading-appearance.js",
     "worklist-v0/hpacs-lite/reading-appearance-account.js",
     "worklist-v0/hpacs-lite/workspace-roaming.js",

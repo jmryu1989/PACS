@@ -121,7 +121,7 @@ def lf_text(path):
 
 ORIGIN = "https://clinician.test"
 BASE = "/worklist/hpacs-lite/"
-SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "work-context.js", "session-transport.js", "critical-result-inbox.js")}
+SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "work-context.js", "session-transport.js", "critical-result-inbox.js", "clinical-signature.js")}
 MAIN = read_page_source(HPACS / "main.html")
 
 # The commit this unit (and S5-U4b) started from (main after S5-UI3) and the main commit that merged the S5-U4b/U4c
@@ -465,8 +465,10 @@ class RequestServer:
     def change(self, id_, body):
         keys = {"requestId", "expectedOwner", "revision", "action", "note"}
         if (not isinstance(body, dict) or set(body) != keys or body["action"] not in ("accept", "close", "decline", "cancel")
-                or (body["action"] == "accept") != (body["note"] == "")):
-            return 400, err("IMAGE_REQUEST_INPUT_INVALID", "요청 ID·기준 revision·동작과 note를 확인하세요(accept는 빈 note, 그 밖은 1~2,000자)")
+                or not isinstance(body["note"], str) or len(body["note"]) > 2000
+                or (body["action"] == "accept" and body["note"] != "")
+                or (body["action"] in ("close", "decline") and not body["note"].strip())):
+            return 400, err("IMAGE_REQUEST_INPUT_INVALID", "요청 ID·기준 revision·동작과 note를 확인하세요(취소 사유는 선택)")
         if body["expectedOwner"] != self.owner:
             return 409, err("OWNER_CHANGED", "로그인한 계정이 바뀌었습니다. 화면을 다시 불러오세요")
         row = self.items.get(id_)
@@ -506,7 +508,6 @@ C_TELE = "원격판독으로 받은 검사에는 영상 요청을 남기거나 �
 C_NOT_FOUND = ("이 검사나 요청을 찾을 수 없습니다. 원격판독으로 받은 검사나 접근 조건이 바뀐 검사에서는 영상 요청을 읽거나 남길 수 "
                "없습니다.")
 C_NO_TEXT = "Counterparty(1~256자)와 Reason(1~2,000자)을 입력하세요."
-C_NO_CANCEL = "취소 사유를 1~2,000자로 입력하세요."
 C_CREATED = "요청을 등록했습니다."
 C_CANCELLED = "요청을 취소했습니다."
 REPLAYED = "이미 저장된 요청입니다. 서버가 처음 저장한 결과를 돌려주었습니다."
@@ -1158,23 +1159,20 @@ class ClinicianRequestDOMTest(Harness):
         self.open_requests("ready")
         first, second = self.item_locator(1), self.item_locator(2)
 
-        first.locator("[data-send]").click()
-        self.assertEqual(["failed", C_NO_CANCEL, ""], self.view()["items"][0]["note"])
-        self.assertEqual([], self.writes)
-        first.locator('[data-field="note"]').fill("SYN no longer needed")
+        # Cancellation may omit its reason; the second request below retains a typed reason.
         first.locator("[data-send]").click()
         self.note_state(first, "saved")
         path, body = self.writes[0]
         self.assertEqual(f"/api/image-requests/{rid(1)}", path)
         self.assertEqual({"requestId", "expectedOwner", "revision", "action", "note"}, set(body))
         self.assertRegex(body["requestId"], V4)
-        self.assertEqual(([INSTITUTION, CLIN_SUB], 1, "cancel", "SYN no longer needed"),
+        self.assertEqual(([INSTITUTION, CLIN_SUB], 1, "cancel", ""),
                          (body["expectedOwner"], body["revision"], body["action"], body["note"]))
         self.wait_until(lambda: len(self.reads) == 2, "the list read again after the cancel")
         expect(first).to_have_attribute("data-state", "Cancelled")
         seen = self.view()["items"][0]
         self.assertEqual(("Cancelled", None, ["saved", C_CANCELLED, ""]), (seen["status"], seen["cancel"], seen["note"]))
-        self.assertEqual("Cancel Reason SYN no longer needed", seen["lines"][-1])
+        self.assertEqual("Cancel Reason", seen["lines"][-1].strip())
 
         cases = [
             (409, err("IMAGE_REQUEST_CHANGED", "영상 요청이 변경되었습니다. 다시 불러온 뒤 확인하세요"), "failed", C_CODES["IMAGE_REQUEST_CHANGED"], True),

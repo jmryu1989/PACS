@@ -710,6 +710,21 @@ test('viewer UID lookup retains the response-time institution recheck', async ()
   await rejects(w.pacs.listStudies(caller(), { uids: NORMAL }), 409, 'STUDY_LIST_CHANGED');
 });
 
+test('bootstrap publishes owned and legitimate tele studies while preserving null-owner residue', async () => {
+  const orphan = '2.25.1889', tele = '2.25.1890';
+  const w = await world({ resources: [resource(NORMAL, 'VISIBLE'), resource(orphan, 'HELD'), resource(tele, 'TELE')],
+    states: [stateRow(NORMAL, { institutionId: 'hallym' }),
+      stateRow(orphan, { institutionId: null, teleInstitutionId: 'hallym' }),
+      stateRow(tele, { institutionId: 'center', teleInstitutionId: 'hallym' })] }).start();
+  const before = JSON.stringify([...w.states]);
+  const body = await w.pacs.bootstrap(caller());
+  assert.deepEqual(Object.keys(body.states).sort(), [NORMAL, tele].sort());
+  const { bootstrapRead } = require('/app/dist/emr-viewing/consumer-read');
+  const response = bootstrapRead(body, 'reader', 'hallym');
+  assert.deepEqual(Object.keys(readBody(response).states).sort(), [NORMAL, tele].sort());
+  assert.equal(JSON.stringify([...w.states]), before, 'withholding must not delete or reassign the residue');
+});
+
 // D1887: REQ-PATIENTLESS-HELD -> RISK-UNIDENTIFIED-READING -> TEST-PATIENTLESS-SELECTION.
 // An overlay is not correction of the source patient identity. All list consumers use the same source selection.
 test('patientless studies stay in the existing held queue until the original patient is identified', async () => {

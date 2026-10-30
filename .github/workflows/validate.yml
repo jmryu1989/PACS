@@ -265,7 +265,7 @@ jobs:
     - name: SR source tree identity and bounded literal values
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/sr_tree_test.cjs
     - name: Pinned viewer precision and isolated stack method boundaries
-      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_precision_test.cjs tests/viewer_frame_metadata_test.cjs tests/viewer_reference_lines_test.cjs
+      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_precision_test.cjs tests/viewer_frame_metadata_test.cjs tests/viewer_reference_lines_test.cjs tests/viewer_stack_loading_test.cjs
     - name: Deployment preflight refusal and shared lock
       run: python3 tests/ops_deploy_preflight_test.py
     - name: Deployment state machine and retained operations lock
@@ -304,6 +304,8 @@ jobs:
         docker run --rm --network none --read-only --user nginx --entrypoint sh kin-proxy:ci -c 'test -r /usr/share/nginx/html/kin-brand/kin-favicon-32.png && test -r /usr/share/nginx/html/kin-brand/kin-emblem-j1.svg && test -r /etc/nginx/templates/default.conf.template'
     - name: Reproduce a private deployment checkout
       run: chmod -R go-rwx api
+    - name: Viewer stack mouse and strip failure boundaries
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/viewer-stack-mouse --cwd . --file config/ohif.js --file config/ohif/viewer-ux.js --file tests/viewer_stack_mouse_test.cjs --file tests/viewer_strip_failure_test.cjs --file worklist-v0/hpacs-lite/viewer-patient-tabs.js --file worklist-v0/hpacs-lite/viewer-series-strip.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_stack_mouse_test.cjs tests/viewer_strip_failure_test.cjs
     - name: OHIF generated configuration matches ordered sources
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/ohif-config-check --cwd . --file scripts/build-ohif-config.py --tree config/ohif --file config/ohif.js -- python3 scripts/build-ohif-config.py --check
     - name: OHIF builder byte and stale-output boundaries
@@ -1407,6 +1409,9 @@ jobs:
     - name: Armed 3D annotation pick is not previewed by progressive refinement on the real panel
       timeout-minutes: 5
       run: python3 scripts/record-run.py --run-dir tmp/marks-ci/progressive-dom --cwd . --file worklist-v0/hpacs-lite/volume-marks.js --file worklist-v0/hpacs-lite/viewer-volume-marks.js --file worklist-v0/hpacs-lite/viewer-volume-progressive.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file tests/viewer_volume_marks_progressive_dom_test.py -- "$RUNNER_TEMP/marks-python/bin/python" -B tests/viewer_volume_marks_progressive_dom_test.py
+    - name: Manual 3D annotations follow the account marker colour and thickness on the real panel
+      timeout-minutes: 5
+      run: python3 scripts/record-run.py --run-dir tmp/marks-ci/marker-style-dom --cwd . --file worklist-v0/hpacs-lite/volume-marks.js --file worklist-v0/hpacs-lite/viewer-volume-marks.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/marker-style.js --file tests/viewer_volume_marks_progressive_dom_test.py --file tests/viewer_volume_marks_style_dom_test.py -- "$RUNNER_TEMP/marks-python/bin/python" -B tests/viewer_volume_marks_style_dom_test.py
     - name: Isolated declared manual 3D annotation and annotated output tests
       timeout-minutes: 28
       run: |
@@ -1509,6 +1514,9 @@ jobs:
     - name: W4 shortcut v2 server contract
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w4-shortcut-v2-server --cwd . --tree api/src --file api/prisma/schema.prisma --file api/package-lock.json --tree worklist-v0/hpacs-lite --tree tests -- node --test tests/workspace_shortcuts_v2_service_test.cjs
+    - name: Minhoon 12 marker colour and thickness model and account appearance contract
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/marker-style --cwd . --tree api/src --file api/prisma/schema.prisma --file api/package-lock.json --file worklist-v0/hpacs-lite/marker-style.js --file config/ohif/marker-style.js --file config/ohif/clinician-context.js --file tests/marker_style_test.cjs --file tests/service_test_loader.cjs -- node --test tests/marker_style_test.cjs
     - name: W5 related insert idempotency and receipt contract
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w5-related-insert-service --cwd . --tree api/src --file api/prisma/schema.prisma --file api/prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/related_report_insert_service_test.cjs -- node --test tests/related_report_insert_service_test.cjs
@@ -1667,6 +1675,7 @@ jobs:
         path: |
           tests/e2e/artifacts/viewer-ux-shell-ci/
           tmp/viewer-ux-u2/screens/
+          tmp/viewer-tools/
         if-no-files-found: error
         retention-days: 7
     - name: Isolated declared S9-U7 output, identity and unsaved-work tests

@@ -472,7 +472,9 @@ export class PacsWorklist {
         seen.add(uid);
       }
     }
-    const states=stateRows.filter(s=>permitted.has(s.uid)&&!unresolved.has(s.uid));
+    // A tele assignment without its owning institution is held residue, not a
+    // publishable study. Exclude it before reading reports/drafts or recording delivery.
+    const states=stateRows.filter(s=>this.access.visible(s,me)&&permitted.has(s.uid)&&!unresolved.has(s.uid));
     const orders=orderRows.filter(o=>o.studyUid?permitted.has(o.studyUid):!access.policy.restricted);
     const reports = omitStates ? [] : await this.prisma.report.findMany({
       where: { uid: { in: states.map(s => s.uid) } },

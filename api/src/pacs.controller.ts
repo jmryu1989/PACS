@@ -78,8 +78,9 @@ export class PacsController {
 
   @Get('presence')
   @Header('Cache-Control', 'no-store')
-  viewingPresence(@Req() req: any, @Query('uids') uids?: string) {
-    return this.presence.read(caller(req), uids ? uids.split(',') : []);
+  viewingPresence(@Req() req: any, @Query('uids') uids?: unknown) {
+    if (uids !== undefined && typeof uids !== 'string') throw new BadRequestException('검사 UID 목록 형식이 잘못되었습니다');
+    return this.presence.read(caller(req), typeof uids === 'string' && uids ? uids.split(',') : []);
   }
 
   @Post('presence')

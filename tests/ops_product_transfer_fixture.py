@@ -121,6 +121,7 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261027230000_caution_app_limits/migration.sql',
               'api/prisma/migrations/20261028120000_held_unknown_source/migration.sql',
               'api/prisma/migrations/20261029120000_emr_image_retention/migration.sql',
+              'api/prisma/migrations/20261029130000_emr_preparation_manifest_index/migration.sql',
               'api/prisma/migrations/20261030120000_preload_cache_key/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
