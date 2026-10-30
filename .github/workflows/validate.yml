@@ -869,6 +869,8 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/manifest-reuse --cwd . --tree api/src/emr-image --tree api/src/emr-contract --file api/src/image-delivery-record.ts --file tests/emr/e/manifest_reuse_test.cjs -- node --test --test-reporter=tap tests/emr/e/manifest_reuse_test.cjs
     - name: E_ROUTE frames share the study delivery record of every image route; a HEAD or a description records nothing (compiled above)
       run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/delivery --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --file api/src/image-delivery-record.ts --file api/src/image-relay.controller.ts --file api/src/orthanc.service.ts --file tests/emr/e/delivery_test.cjs -- node --test --test-reporter=tap tests/emr/e/delivery_test.cjs
+    - name: The API image catalog classifies Siemens CT-format tomosynthesis slices as the viewer hangs them (compiled above)
+      run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/catalog-mg --cwd . --file api/src/emr-source/image.ts --tree api/src/emr-image --file tests/fixtures/mg_vendor_cases.json --file worklist-v0/hpacs-lite/mammography-model.js --file tests/emr/e/catalog_mg_test.cjs -- node --test --test-reporter=tap tests/emr/e/catalog_mg_test.cjs
     - name: E_ROUTE a split study UID refuses the response; a refused row is retained on its own ledger transaction or kept for a later retention (compiled above)
       run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/service-retention --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --file api/src/image-delivery-record.ts --file api/src/orthanc.service.ts --file tests/emr/e/service_retention_test.cjs -- node --test --test-reporter=tap tests/emr/e/service_retention_test.cjs
     - name: E_ROUTE viewer frame requests reach the E boundary through the real nginx configuration
@@ -1143,6 +1145,12 @@ jobs:
       timeout-minutes: 5
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/model --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/validate.yml --file "$KIN_MG_RULE_CASES" -- node --test --test-reporter=tap --test-reporter-destination=tmp/part1-mg-ci/model.tap --test-reporter=spec --test-reporter-destination=stdout tests/part1/mg/model_test.cjs
+    - name: Vendor headers, native hanging and decoder asset guard
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      timeout-minutes: 5
+      run: |
+        python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/vendors --file tests/mg_vendor_test.cjs --file tests/mg_vendor_hanging_test.cjs --file tests/fixtures/mg_vendor_cases.json --file worklist-v0/hpacs-lite/mammography-model.js --file config/ohif/mammography-hanging.js -- node --test tests/mg_vendor_test.cjs tests/mg_vendor_hanging_test.cjs
+        python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/worker-asset --file tests/ohif_worker_asset_test.py --file proxy/nginx.conf.template -- python3 tests/ohif_worker_asset_test.py
     - name: Model declared cases equal the cases that passed
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 5

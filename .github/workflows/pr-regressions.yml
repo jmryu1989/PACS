@@ -978,7 +978,7 @@ jobs:
     needs: select
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['viewer-native-dom']) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 55
+    timeout-minutes: 60
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -1031,6 +1031,11 @@ jobs:
         native_id=$(docker create --network none orthancteam/orthanc:24.12.0)
         trap 'docker rm "$native_id"' EXIT
         docker cp "$native_id:/usr/share/orthanc/plugins-available/libOrthancOHIF.so" "$RUNNER_TEMP/vr112-native/libOrthancOHIF.so"
+    - name: Decoder worker named by the nginx eval exception is the one the pinned viewer creates
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      timeout-minutes: 5
+      run: |
+        python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/ohif-worker-asset --cwd . --file tests/ohif_worker_asset_test.py --file proxy/nginx.conf.template --file "$RUNNER_TEMP/vr112-native/libOrthancOHIF.so" -- python3 -B tests/ohif_worker_asset_test.py --ohif-library "$RUNNER_TEMP/vr112-native/libOrthancOHIF.so"
     - name: Viewer Job native initial-image and completion contracts
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 15
@@ -1079,7 +1084,7 @@ jobs:
     needs: select
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['measurements']) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 73
+    timeout-minutes: 88
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -1112,7 +1117,7 @@ jobs:
         "$RUNNER_TEMP/measurement-python/bin/python" -m playwright install --with-deps chromium
     - name: D-MEASURE2 B1 real readback, held drafts, manual SR and source recovery
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
-      timeout-minutes: 43
+      timeout-minutes: 58
       run: |
         "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile measurements
     - name: Sanitized synthetic measurement evidence

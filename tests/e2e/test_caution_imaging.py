@@ -14,6 +14,7 @@ from invariants_live import Fixture, s9u4_cleanup, psql, ROOT
 from test_viewer_history import ViewerHistoryE2E
 from test_prior_selection import canvas_ready
 from viewer_tools import select_image_tool
+from ohif_worker_asset_test import assert_served_assets
 
 class CautionImagingE2E(ViewerHistoryE2E):
     def make_object(self, folder, modality, rows, cols, frames, sop_class):
@@ -100,6 +101,7 @@ class CautionImagingE2E(ViewerHistoryE2E):
                 p.on('pageerror',lambda error:errors.append(str(error)))
                 try:
                     p.goto(self.stack.proxy+'/ohif/viewer?StudyInstanceUIDs='+uid)
+                    assert_served_assets(self, p)
                     self.select_series(p,modality)
                     expect(p.locator('#kin-viewer-history [role=status]')).to_contain_text('개 저장 항목')
                     record['rendered']=p.evaluate("()=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId());return {image:v.getCurrentImageId(),frames:v.getImageIds().length,cacheMax:cornerstone.cache.getMaxCacheSize(),cacheable:String(cornerstone.cache.isCacheable)}}")

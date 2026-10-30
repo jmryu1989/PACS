@@ -1919,7 +1919,8 @@ class LogoutDOMTest(unittest.TestCase):
                     other.wait_for_url(INDEX_URL)
                 else:
                     self.site.ended.add(session)
-                    self.refresh()
+                    # A request still queued from the typing can get the 401 first and hide the toolbar; click like a script.
+                    self.page.evaluate("() => document.querySelector('#refresh').click()")
                 expect(self.panel_title()).to_have_text("Session Ended")
                 self.assert_closed(cause)
                 self.page.wait_for_timeout(300)

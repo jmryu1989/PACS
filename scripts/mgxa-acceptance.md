@@ -6,6 +6,12 @@ product changes are involved. The source corpus must contain collector
 `manifest.json` files and their accepted `studies/` or `repositories/` originals.
 Keep the manifests' citations and restrictions with the observations.
 
+At installation, inspect the first real ingest locally with
+`python scripts/mg_ingest_headers.py <local-dicom-directory>` (existing pydicom dependency).
+The output groups vendor/model, SOP class, transfer syntax, Image Type and pixel format without
+patient identifiers. Compare those rows with `tests/fixtures/mg_vendor_cases.json`, then open the
+actual 2D, DBT and synthetic 2D through the installed viewer; a matching header is not a display check.
+
 Use Python with the existing `tests/e2e/requirements.txt`, pydicom 2.4.4 and
 requests (local observations used 2.32.3; CI installs the existing 2.32.5 gateway pin),
 Playwright Chromium, Docker, and Node on PATH. Obtain the host's exclusive heavy
