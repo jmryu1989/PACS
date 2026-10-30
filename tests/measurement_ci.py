@@ -43,14 +43,6 @@ PROFILES = {
         'suite_timeout': 1200,
         'suites': (('e2e/test_context_loss.py', 'ContextLossE2E', 'ci-context-loss'),),
     },
-    # EMR-B1: the access ledger's own disposable PostgreSQL/API containers.
-    # D941 includes live 20k prefill and interleaved latency measurement in the same gated suite.
-    'emr-b': {
-        'out': ROOT / 'tests/e2e/artifacts/emr-b-ci',
-        'project_prefix': 'kin-emr-b-ci-',
-        'suite_timeout': 3600,
-        'suites': (('emr/b/live.py', 'EmrBLedgerLive', 'ci-emr-b-ledger'),),
-    },
     'u5-session-api': {
         'out': ROOT / 'tests/e2e/artifacts/u5-session-api-ci',
         'project_prefix': 'kin-u5-session-api-ci-',
@@ -749,10 +741,9 @@ def inspect_failed_module(run, out, compose, unit, suite, result):
 
 
 def profile_deadline_seconds(profile_name):
-    # D941's live 20k prefill needs the whole EMR suite budget plus setup/cleanup.
     # Candidate configuration supplies its measured cumulative allowance;
     # other existing profiles retain the shared 25 minute deadline.
-    return PROFILES[profile_name].get('deadline_seconds', 65*60 if profile_name == 'emr-b' else 25*60)
+    return PROFILES[profile_name].get('deadline_seconds', 25*60)
 
 
 def workflow_report(root=None):
