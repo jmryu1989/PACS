@@ -186,12 +186,16 @@ def compose_shape(root, problems):
         return
     migrate, api = (services[n] for n in ("api-migrate", "api"))
     env = environment(api)
-    # Compose password substitutions may contain '?'; these are templates, not resolved URLs.
-    url = env.get("DATABASE_URL", "")
-    if not url.startswith(("postgresql://kin_runtime:", "postgres://kin_runtime:")):
-        problem(problems, "compose-api-not-runtime-role")
-    if any("POSTGRES_PASSWORD" in str(value) for pair in env.items() for value in pair):
-        problem(problems, "compose-api-holds-installer-secret")
+    pservices = prod.get("services") or {}
+    papi, pmigrate = pservices.get("api") or {}, pservices.get("api-migrate") or {}
+    # Compose merges the production environment into the base by key, so production is checked on the merged set.
+    for prefix, effective in (("compose", env), ("prod", {**env, **environment(papi)})):
+        # Compose password substitutions may contain '?'; these are templates, not resolved URLs.
+        url = effective.get("DATABASE_URL", "")
+        if not url.startswith(("postgresql://kin_runtime:", "postgres://kin_runtime:")):
+            problem(problems, prefix + "-api-not-runtime-role")
+        if any("POSTGRES_PASSWORD" in str(value) for pair in effective.items() for value in pair):
+            problem(problems, prefix + "-api-holds-installer-secret")
     if env.get("KIN_EMR_STATE_DIR") != "/var/lib/kin-emr" or not has_state_volume(api.get("volumes") or []):
         problem(problems, "compose-api-state-volume")
     if ((api.get("depends_on") or {}).get("api-migrate") or {}).get("condition") != "service_completed_successfully":
@@ -200,8 +204,6 @@ def compose_shape(root, problems):
         problem(problems, "compose-migration-before-provision")
     if "emr-state" not in (compose.get("volumes") or {}):
         problem(problems, "compose-volume-undeclared", "emr-state")
-    pservices = prod.get("services") or {}
-    papi, pmigrate = pservices.get("api") or {}, pservices.get("api-migrate") or {}
     if (pmigrate.get("build") or {}).get("target") != "production":
         problem(problems, "prod-migration-not-production-image")
     pvolumes = effective_volumes(api, papi)

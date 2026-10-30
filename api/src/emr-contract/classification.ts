@@ -1,8 +1,8 @@
 import { isEmrReader } from './composition';
 import { STATUTORY_MINIMUM as FLOOR, StatutoryMinimum } from './legal-basis';
-import { choice, freeze, object, refuse, string, utc, sha256, integer } from './validation';
+import { choice, freeze, object, refuse, string, utc, sha256 } from './validation';
 
-export type PurposeEnd = 'result-version-signed' | 'intent-superseded' | 'explicit-discard' | 'owner-deleted' | 'assignment-ended' | 'setting-replaced' | 'session-ended' | 'institution-closed' | 'transfer-obligations-ended' | 'operation-completed' | 'original-received' | 'order-purpose-ended' | 'lawful-return' | 'unnecessary-operations';
+export type PurposeEnd = 'result-version-signed' | 'intent-superseded' | 'explicit-discard' | 'owner-deleted' | 'assignment-ended' | 'setting-replaced' | 'session-ended' | 'institution-closed' | 'transfer-obligations-ended' | 'operation-completed' | 'order-purpose-ended' | 'lawful-return' | 'unnecessary-operations';
 export type SignatureRule = 'required' | 'clinical-entry-only' | 'source-evidence' | 'not-required';
 export interface RecordClassification {
   author: { observedSource: string; responsibility: 'immutable-actual-author-or-source' };
@@ -106,10 +106,6 @@ export const RECORD_CLASSIFICATION = freeze({
   'delivery-receipt': { ...record('Gateway/service/request actor; fixed source reference', unsigned('단순 전달 영수증의 제품 정책 2년; 원판·원서명은 별도 의무'), [FLOOR.access], 'evidence-record'),
     retention: { years: 2, statutoryMinimum: [], basis: '제품 정책: 전달 결과 확인; 내부 관리계획에 목적·필요성·조기 종료 명시', mode: 'statutory' as const, purposeEnds: [] } },
   'system-operation': record('System process; health/statistics/accounting', unsigned('운영 상태'), [], 'operational-record', 'purpose', ['operation-completed']),
-  // EMR-B1 (D596): an approval actually signed on a registered device while disconnected is the signed record itself, kept
-  // from its actual signedAt; its recovery/review working copy is a separate purpose record that cannot outlive its purpose.
-  'offline-signed-original': record('Device signer; registered device key and its own kid; exact signed bytes at the actual signedAt', signed('단말에서 실제 서명한 임상 기재 원본; 수신·재인증 시각으로 다시 서명하거나 기산하지 않음'), images),
-  'recovery-working-copy': record('Owner; its original event or conflict record; purpose ID', conditional('복구·재검토 작업본 자체의 별도 서명 의무는 명시되지 않음; 진료기록으로 기재·채택할 때 새 서명판'), [], 'emr-candidate', 'purpose', ['original-received', 'explicit-discard']),
   // D-19 (legal register §5-02): the 10-year 진료기록부 class applies only through this recorded fact - a hospital EMR
   // incorporation event or the treating physician's chart entry that incorporates the pinned versions (its component
   // manifest; relation 'incorporation'). A comparison or navigation link never counts. Its period counts from the
@@ -134,44 +130,19 @@ export const SQL_STORAGE_CLASSIFICATION: Readonly<Record<string, readonly Record
   'emr_access.clause_version': ['legal-reference'],
   'emr_access.order_fact': ['order', 'order-indication', 'exam-clinical-info', 'received-order', 'order-exam-component'],
 });
-/** D596 storage boundary: offline originals and their working copies live in C's clinical terminal queue, not in B. */
-export const TERMINAL_RECORD_BOUNDARY = freeze({
-  storage: 'clinical-terminal-queue',
-  models: { TerminalSignedOriginal: ['offline-signed-original'], TerminalRecoveryCopy: ['recovery-working-copy'] } as Record<string, readonly RecordKind[]>,
-  states: ['pending-transmission', 'received-unverified', 'verified', 'verification-refused'],
-  original: 'owned by its immutable signer; retention from the actual signedAt; never ended by a private-draft purpose end; reception and re-authentication are separate events',
-  recovery: 'owned by the same member; references its original event; a purpose ID; ends at verified reception of the original or the owner discard',
-});
 /** D-19 storage boundary: chart incorporation facts come from the hospital EMR or the treating physician's chart (C/H). */
 export const CHART_INCORPORATION_BOUNDARY = freeze({
   storage: 'chart-incorporation-facts',
   models: { ChartIncorporation: ['chart-incorporation'] } as Record<string, readonly RecordKind[]>,
   sources: ['hospital-emr-incorporation', 'treating-physician-chart-entry'],
 });
-export type TerminalState = 'pending-transmission' | 'received-unverified' | 'verified' | 'verification-refused';
-export interface TerminalRecordFacts {
-  ownerId: string; originalEventId: string; state: TerminalState;
-  signedAt: string | null; purposeId: string | null;
-}
-function terminalFacts(kind: RecordKind, row: Record<string, any>, event: RecordEvent): void {
-  string(row.ownerId); string(row.originalEventId); choice(row.state, TERMINAL_RECORD_BOUNDARY.states);
-  if (kind === 'offline-signed-original') {
-    // The stored event time is the device's actual signing time; a reception or re-authentication time is refused.
-    if (row.purposeId !== null || utc(row.signedAt) !== event.at || !event.signature) refuse('TerminalOriginalTimeRefused');
-  } else if (row.signedAt !== null || typeof row.purposeId !== 'string' || !row.purposeId.trim() || event.act !== 'creation') {
-    refuse('TerminalPurposeRequired');
-  }
-}
-
 /** D-24: facts supplied by the bound storage adapter, never classification flags accepted from an HTTP body. */
 export const ORDER_OBJECTS = freeze(['registration', 'order-indication', 'exam-clinical-info', 'received-order', 'exam-component'] as const);
 export const ORDER_REVIEW_STATES = freeze(['classification-unconfirmed', 'entrusted-evidence-unconfirmed', 'linked-fulfilment-unconfirmed',
   'open-order', 'unlinked-exam', 'copy-window-review', 'interface-outage', 'claim-duty-end-unconfirmed'] as const);
+/** An open review is held until its recorded decision; time passing never closes it. */
 export interface OrderProcedure {
   state: typeof ORDER_REVIEW_STATES[number]; responsibleRole: 'privacy-officer' | 'delegated-officer'; assigneeId: string;
-  enteredAt: string; evidenceDueAt: string; escalationDecisionDueAt: string; finalDecisionDueAt: string;
-  superiorRole: 'institution-head' | 'trustee-representative'; superiorId: string; escalatedAt: string | null;
-  extensions: number; extensionLimit: number; extensionEvidenceId: string | null;
   decision: null | { route: 'classification-confirmed' | 'duty-continues' | 'lawful-return' | 'unnecessary-operations';
     actorId: string; at: string; evidenceId: string; basisId: string | null; scope: readonly string[];
     reviewAt: string | null; originalPreservedEvidenceId: string | null };
@@ -195,21 +166,12 @@ export interface OrderFacts {
     verificationRunId: string; linkedStudyIds: readonly string[] };
 }
 export function parseOrderProcedure(input: unknown): Readonly<OrderProcedure> {
-  const p = object(input, ['state', 'responsibleRole', 'assigneeId', 'enteredAt', 'evidenceDueAt', 'escalationDecisionDueAt',
-    'finalDecisionDueAt', 'superiorRole', 'superiorId', 'escalatedAt', 'extensions', 'extensionLimit', 'extensionEvidenceId', 'decision']);
+  const p = object(input, ['state', 'responsibleRole', 'assigneeId', 'decision']);
   choice(p.state, ORDER_REVIEW_STATES); choice(p.responsibleRole, ['privacy-officer', 'delegated-officer']); string(p.assigneeId);
-  choice(p.superiorRole, ['institution-head', 'trustee-representative']); string(p.superiorId);
-  const dates = ['enteredAt', 'evidenceDueAt', 'escalationDecisionDueAt', 'finalDecisionDueAt'].map(k => utc(p[k]));
-  if (dates.some((d, i) => i > 0 && d <= dates[i - 1])) refuse('OrderProcedureDeadlineRequired');
-  if (p.escalatedAt !== null && utc(p.escalatedAt) < p.enteredAt) refuse('OrderProcedureDeadlineRequired');
-  if (integer(p.extensions) > integer(p.extensionLimit)) refuse('OrderReconciliationLimit');
-  if (p.extensions > 0) string(p.extensionEvidenceId); else if (p.extensionEvidenceId !== null) refuse('OrderExtensionEvidenceRequired');
   if (p.decision !== null) {
     const d = object(p.decision, ['route', 'actorId', 'at', 'evidenceId', 'basisId', 'scope', 'reviewAt', 'originalPreservedEvidenceId']);
     choice(d.route, ['classification-confirmed', 'duty-continues', 'lawful-return', 'unnecessary-operations']);
-    string(d.actorId); string(d.evidenceId);
-    if (utc(d.at) < p.enteredAt || ![p.assigneeId, p.superiorId].includes(d.actorId) ||
-        (d.at >= p.escalationDecisionDueAt && d.actorId !== p.superiorId)) refuse('OrderDecisionAuthorityRequired');
+    string(d.actorId); string(d.evidenceId); utc(d.at);
     if (!Array.isArray(d.scope) || !d.scope.length) refuse('OrderDecisionScopeRequired');
     d.scope.forEach(x => string(x));
     if (d.route === 'duty-continues') {
@@ -371,10 +333,6 @@ function rowKinds(model: string, row: Record<string, any>, event: RecordEvent): 
   if (model === 'emr_access.order_fact') return orderKinds(row, event);
   if (model === 'DicomInstance') return [row.sopClass === 'image' ? 'image' : choice(row.sopClass, ['external-sr-seg', 'pdf'])];
   if (model === 'Dictation') return ['dictation'];
-  if (Object.prototype.hasOwnProperty.call(TERMINAL_RECORD_BOUNDARY.models, model)) {
-    const [kind] = TERMINAL_RECORD_BOUNDARY.models[model];
-    terminalFacts(kind, row, event); return [kind];
-  }
   if (Object.prototype.hasOwnProperty.call(CHART_INCORPORATION_BOUNDARY.models, model)) {
     // An incorporation names its source and incorporates at least one pinned version; a link without content is not one.
     choice(row.source, CHART_INCORPORATION_BOUNDARY.sources);

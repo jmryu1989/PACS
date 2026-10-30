@@ -13,8 +13,6 @@ const { EmrLedgerClient } = require(path.join(build, 'emr-runtime/client.js'));
 const { FailureJournal, FailureSpool } = require(path.join(build, 'emr-runtime/failure-journal.js'));
 const { verifyRuntimeConnection } = require(path.join(build, 'emr-runtime/manifest.js'));
 const { EMR_BACKGROUND_WORK } = require(path.join(build, 'emr-runtime/background-work.js'));
-const { StudyTransferLocalService } = require(path.join(build, 'study-transfer-local.service.js'));
-const { PresenceService } = require(path.join(build, 'presence.service.js'));
 const { provideAfterReceipt } = require(path.join(build, 'emr-runtime/contract.js'));
 const { createRequestContext, REQUEST_CONTEXT_CAPTURE, REQUEST_CONTEXT_SOURCE } = require(path.join(build, 'emr-runtime/request-context.js'));
 const { createRequestIngress } = require(path.join(build, 'emr-runtime/request-ingress.js'));
@@ -22,6 +20,40 @@ function requestProviders(port) {
   const requests = createRequestContext(createRequestIngress({ proxyPeers: ['127.0.0.1'] }), port);
   return [{ provide: REQUEST_CONTEXT_CAPTURE, useValue: requests.capture },
     { provide: REQUEST_CONTEXT_SOURCE, useValue: requests.source }];
+}
+// A fixture module is AppModule's own graph: the given controllers and roots plus every provider they
+// inject, read from AppModule's metadata. Callers pass only synthetic collaborators and the runtime's
+// withLedger providers as overrides. @Optional dependencies stay absent unless overridden, and a token
+// AppModule does not declare (Nest's Reflector) is left to Nest, which reports a real gap at boot.
+function productFixture(controllers, overrides, roots = []) {
+  require('reflect-metadata');
+  const { Module } = require('@nestjs/common');
+  const { AppModule } = require(path.join(build, 'app.module.js'));
+  const tokenOf = provider => typeof provider === 'function' ? provider : provider.provide;
+  const product = new Map(Reflect.getMetadata('providers', AppModule).map(provider => [tokenOf(provider), provider]));
+  const replaced = new Map(overrides.map(provider => [tokenOf(provider), provider]));
+  const dependencies = provider => {
+    const type = typeof provider === 'function' ? provider : provider.useClass;
+    if (!type) return provider.useExisting ? [provider.useExisting]
+      : (provider.inject || []).filter(item => !item?.optional).map(item => item?.token ?? item);
+    const declared = [...(Reflect.getMetadata('design:paramtypes', type) || [])];
+    for (const { index, param } of Reflect.getMetadata('self:paramtypes', type) || []) declared[index] = param;
+    const optional = new Set(Reflect.getMetadata('optional:paramtypes', type) || []);
+    return declared.filter((_, index) => !optional.has(index));
+  };
+  const chosen = new Map(), pending = [...controllers.flatMap(dependencies), ...roots];
+  while (pending.length) {
+    let token = pending.shift();
+    if (token?.forwardRef) token = token.forwardRef();
+    if (chosen.has(token)) continue;
+    const provider = replaced.get(token) || product.get(token);
+    if (!provider) continue;
+    chosen.set(token, provider);
+    pending.push(...dependencies(provider));
+  }
+  class ProductFixture {}
+  Module({ controllers, providers: [...chosen.values()] })(ProductFixture);
+  return ProductFixture;
 }
 const known = value => ({ status: 'known', value });
 
@@ -245,18 +277,12 @@ async function scaleServer() {
 async function clinicalHttp() {
   require('reflect-metadata');
   const http = require('node:http'), jose = require('jose');
-  const { Module } = require('@nestjs/common');
   const { NestFactory, APP_GUARD } = require('@nestjs/core');
   const { EmrRuntime } = require(path.join(build, 'emr-runtime/application.js'));
   const { EMR_RECORD_PORT } = require(path.join(build, 'emr-runtime/record-port.js'));
   const { PrismaService } = require(path.join(build, 'prisma.service.js'));
-  const { AuthService } = require(path.join(build, 'auth.service.js'));
-  const { AuthGuard } = require(path.join(build, 'auth.guard.js'));
   const { PacsController } = require(path.join(build, 'pacs.controller.js'));
-  const { PacsService } = require(path.join(build, 'pacs.service.js'));
   const { AdminController } = require(path.join(build, 'admin.controller.js'));
-  const { AdminService } = require(path.join(build, 'admin.service.js'));
-  const { AdminAccessReview } = require(path.join(build, 'admin-access-review.js'));
   const { StudyAccessService } = require(path.join(build, 'study-access.service.js'));
   const { OrthancService } = require(path.join(build, 'orthanc.service.js'));
   const { KeycloakService } = require(path.join(build, 'keycloak.service.js'));
@@ -290,17 +316,14 @@ async function clinicalHttp() {
       emailVerified:true,approved:true,suspended:false,institution,roles:['admin']}});
     await runtime.start();
     const orthanc={studyIdentityResources:async uid=>[{'0020000D':{Value:[uid]}}],studyIdentities:async()=>[]};
-    class ClinicalFixture {}
     // Only external collaborators are synthetic. Both routes, the draft/CAS
     // implementation, auth/rights checks and PostgreSQL are the actual product.
-    Module({controllers:[PacsController,AdminController],providers:[...requestProviders(runtime.port),PrismaService,PacsService,AuthService,PresenceService,AdminService,AdminAccessReview,
+    const ClinicalFixture=productFixture([PacsController,AdminController],[...requestProviders(runtime.port),
       {provide:OrthancService,useValue:orthanc},{provide:KeycloakService,useValue:{}},
       {provide:FindingService,useValue:{}},
       {provide:StudyAccessService,useFactory:db=>new StudyAccessService(db,orthanc,{}),inject:[PrismaService]},
       {provide:EMR_RECORD_PORT,useValue:runtime.port},
-      {provide:EMR_BACKGROUND_WORK,useValue:runtime.background.work},{provide:APP_GUARD,useClass:AuthGuard},
-      // S9-U4b (#181): AuthGuard also injects the archive-grant service; the draft routes never reach it.
-      {provide:StudyTransferLocalService,useValue:{}}]})(ClinicalFixture);
+      {provide:EMR_BACKGROUND_WORK,useValue:runtime.background.work}],[APP_GUARD]);
     app=await NestFactory.create(ClinicalFixture,{logger:['error']});app.setGlobalPrefix('api');await app.listen(0,'127.0.0.1');
     const origin=await app.getUrl();
     const headers={authorization:'Bearer '+token,'content-type':'application/json','x-real-ip':'192.0.2.22'};
@@ -496,14 +519,12 @@ async function clinicalHttp() {
 
 async function authFailure() {
   require('reflect-metadata');
-  const { Module } = require('@nestjs/common');
   const { NestFactory } = require('@nestjs/core');
   const NodeModule = require('node:module');
   const { EmrRuntime } = require(path.join(build, 'emr-runtime/application.js'));
   const { EMR_RECORD_PORT } = require(path.join(build, 'emr-runtime/record-port.js'));
   const { PrismaService } = require(path.join(build, 'prisma.service.js'));
   const { StudyAccessService } = require(path.join(build, 'study-access.service.js'));
-  const { KeycloakService } = require(path.join(build, 'keycloak.service.js'));
   process.env.KC_ISSUER = 'https://synthetic.invalid/realms/b2r';
   process.env.KIN_COOKIE_SECRET = randomUUID();
   process.env.PUBLIC_ORIGIN = 'https://synthetic.invalid';
@@ -522,11 +543,10 @@ async function authFailure() {
   const runtime = new EmrRuntime(process.env.DATABASE_URL, process.env.KIN_B2R_SPOOL);
   let app, faultInstalled = false;
   async function start(AuthType) {
-    class AuthFixture {}
-    Module({ controllers: [AuthController], providers: [PrismaService, KeycloakService, PresenceService,
+    const AuthFixture = productFixture([AuthController], [
       { provide: StudyAccessService, useFactory: prisma => new StudyAccessService(prisma, {}, {}), inject: [PrismaService] },
       { provide: AuthService, useClass: AuthType }, { provide: EMR_RECORD_PORT, useValue: runtime.port },
-      { provide: EMR_BACKGROUND_WORK, useValue: runtime.background.work }] })(AuthFixture);
+      { provide: EMR_BACKGROUND_WORK, useValue: runtime.background.work }]);
     // Surface DI errors to the test runner even while routine Nest logs are disabled.
     app = await NestFactory.create(AuthFixture, { logger: false, abortOnError: false });
     await app.listen(0, '127.0.0.1');
@@ -606,14 +626,12 @@ async function authSuccess(endings = false) {
   require('reflect-metadata');
   const http = require('node:http');
   const jose = require('jose');
-  const { Module } = require('@nestjs/common');
   const { NestFactory, APP_GUARD } = require('@nestjs/core');
   const NodeModule = require('node:module');
   const { EmrRuntime } = require(path.join(build, 'emr-runtime/application.js'));
   const { EMR_RECORD_PORT } = require(path.join(build, 'emr-runtime/record-port.js'));
   const { PrismaService } = require(path.join(build, 'prisma.service.js'));
   const { StudyAccessService } = require(path.join(build, 'study-access.service.js'));
-  const { KeycloakService } = require(path.join(build, 'keycloak.service.js'));
   const issuer = 'https://synthetic.invalid/realms/b2r';
   Object.assign(process.env, { KC_ISSUER: issuer, KC_AUDIENCE: 'kin-api', KIN_COOKIE_SECRET: randomUUID(),
     KC_WEB_SECRET: randomUUID(), PUBLIC_ORIGIN: 'https://synthetic.invalid' });
@@ -636,7 +654,6 @@ async function authSuccess(endings = false) {
   const authPath = path.join(build, 'auth.service.js');
   const { AuthService } = require(authPath);
   const { AuthController } = require(path.join(build, 'auth.controller.js'));
-  const { AuthGuard } = require(path.join(build, 'auth.guard.js'));
   const source = fs.readFileSync(authPath, 'utf8');
   const offset = endings ? source.indexOf('async endRow(') : source.indexOf('async finishCallback(');
   assert.equal(offset >= 0, true, 'Producer mutation location found');
@@ -662,11 +679,10 @@ async function authSuccess(endings = false) {
   } };
   let sweepCallback;
   async function start(AuthType) {
-    class AuthFixture {}
-    Module({ controllers: [AuthController], providers: [...requestProviders(observedPort), PrismaService, KeycloakService, PresenceService,
+    const AuthFixture = productFixture([AuthController], [...requestProviders(observedPort),
       { provide: StudyAccessService, useFactory: prisma => new StudyAccessService(prisma, {}, {}), inject: [PrismaService] },
       { provide: AuthService, useClass: AuthType }, { provide: EMR_RECORD_PORT, useValue: observedPort },
-      { provide: EMR_BACKGROUND_WORK, useValue: runtime.background.work }, {provide: APP_GUARD, useClass: AuthGuard}] })(AuthFixture);
+      { provide: EMR_BACKGROUND_WORK, useValue: runtime.background.work }], [APP_GUARD]);
     // Surface DI errors to the test runner even while routine Nest logs are disabled.
     app = await NestFactory.create(AuthFixture, { logger: false, abortOnError: false });
     app.setGlobalPrefix('api');

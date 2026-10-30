@@ -112,7 +112,7 @@ export function parseAccessEvent(input: unknown, served?: readonly ResolvedRecor
   // Read the discriminator without running a getter; the selected parser validates the whole object.
   const version = input && typeof input === 'object' && !Array.isArray(input) ?
     Object.getOwnPropertyDescriptor(input, 'formatVersion')?.value : undefined;
-  const parsed = version === 2 ? parseAccessEventV2(input, served) : parseAccessEventV1(input, served);
+  const parsed = version === 2 ? parseAccessEventV2(input) : parseAccessEventV1(input, served);
   parsedEvents.add(parsed);
   return parsed;
 }
@@ -273,9 +273,8 @@ const UUID4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{
 // ── formatVersion 2 (EMR-B1, D596) ──
 // `local-read` records observed local sources without a formal record envelope.
 // `online-auth` is a U5 authentication fact; it never names clinical targets and never passes as a
-// clinical write. `verified-offline` is a clinical act that happened on a registered device while disconnected; it is
-// admitted only through the verification capability composed at server start (none until C ships real key/signature
-// verification, so the branch is refused as unsupported). v1 parsing and results are unchanged apart from D-18's context.
+// clinical write. `verified-offline` (a clinical act on a disconnected device) is excluded from the first release (D1753)
+// and always refused as unsupported. v1 parsing and results are unchanged apart from D-18's context.
 export const AUTH_ACTIONS = freeze(['auth.login', 'auth.entry', 'auth.logout', 'auth.session.expired'] as const);
 export type AuthAction = typeof AUTH_ACTIONS[number];
 /** 의료법 제23조④ 대상 행위가 아니라 접속·인증 사실이다. none은 사건 생략이 아니다. */
@@ -292,7 +291,7 @@ export const AUTH_FAILURE_CAUSES = freeze({
 export type AuthFailureCause = typeof AUTH_FAILURE_CAUSES[keyof typeof AUTH_FAILURE_CAUSES][number];
 export const REAUTHENTICATION_TRIGGERS = freeze(['logout-unfinished', 'switch-account', 'storage-untrusted', 'record-unreadable', 'register'] as const);
 export type ReauthenticationTrigger = typeof REAUTHENTICATION_TRIGGERS[number];
-type UnresolvedReason = 'not-authenticated' | 'not-resolved' | 'not-observed' | 'offline';
+type UnresolvedReason = 'not-authenticated' | 'not-resolved' | 'not-observed';
 type NotApplicableReason = 'non-record-target' | 'in-process-service' | 'not-approved';
 export type EvidenceFactV2<T> = Readonly<
   { status: 'known'; value: T } |
@@ -326,31 +325,6 @@ export interface AuthAccessEventV2 {
   auth: Readonly<AuthContextV2>;
   requestId: string; auditLinkId: string; relatedEventId: string | null;
 }
-export interface OfflineFactsV2 {
-  envelopeId: string; deviceId: string; kid: string; preAuthorizationId: string; signedAt: string | null;
-  timeBasis: { anchorEventId: string; uncertaintyMs: number }; deviceSequence: number; targetManifestSha256: string;
-}
-export interface OfflineAccessEventV2 {
-  formatVersion: 2; branch: 'verified-offline';
-  surface: string;
-  /** The device-generated original event ID; a resend carries the same ID and content. */
-  eventId: string;
-  userId: EvidenceFactV2<ImmutableIdentity>; rolesAtTime: EvidenceFactV2<readonly string[]>;
-  actingInstitution: EvidenceFactV2<string>; managingInstitution: EvidenceFactV2<string>;
-  /** When the act happened on the device, never the reception time. */
-  occurredAt: string;
-  /** Always `unresolved: offline`; the reconnecting IP belongs to the related reception event. */
-  trustedProxyIp: EvidenceFactV2<{ address: string; source: 'trusted-proxy' }>;
-  cause: 'user-view'; executor: 'member';
-  /** D-18: the device's work context at the act (or an out-of-context reason). */
-  context: Readonly<WorkContext>;
-  targets: readonly AccessTarget[];
-  action: AccessAction; result: AccessEventV1['result'];
-  offline: Readonly<OfflineFactsV2>;
-  requestId: string; auditLinkId: string;
-  /** The separate online reception event of this original. */
-  relatedEventId: string;
-}
 /** Local source observations do not assert a formal PatientLink or a signed/retained record. */
 export interface LocalReadTarget {
   kind: 'study-metadata' | 'report-version' | 'report-evidence' | 'report-head' | 'private-draft' | 'key-image' | 'measurement' | 'comparison-layout' | 'comparison-description' | 'order' | 'critical-result' | 'study-organization' | 'access-audit';
@@ -377,7 +351,7 @@ export interface LocalReadAccessEventV2 {
   result: 'prepared' | 'succeeded' | 'aborted' | 'reported';
   requestId: string; auditLinkId: string; relatedEventId: string | null;
 }
-export type AccessEventV2 = AuthAccessEventV2 | OfflineAccessEventV2 | LocalReadAccessEventV2 | OriginalDownloadAccessEventV2;
+export type AccessEventV2 = AuthAccessEventV2 | LocalReadAccessEventV2 | OriginalDownloadAccessEventV2;
 export type AccessEvent = AccessEventV1 | AccessEventV2;
 
 function factV2<T>(input: unknown, parse: (value: unknown) => T, unresolved: readonly UnresolvedReason[],
@@ -417,11 +391,12 @@ function authSurfaces(action: AuthAction, endCause: AuthEndCause | null): readon
 function surfaceCauses(surface: string): readonly CauseKind[] {
   return Object.prototype.hasOwnProperty.call(INTERNAL_SURFACES, surface) ? INTERNAL_SURFACES[surface].causes : routeContract(surface).causes;
 }
-function parseAccessEventV2(input: unknown, served?: readonly ResolvedRecord[]): Readonly<AccessEventV2> {
+function parseAccessEventV2(input: unknown): Readonly<AccessEventV2> {
   const branch = input && typeof input === 'object' ? Object.getOwnPropertyDescriptor(input, 'branch')?.value : undefined;
   if (branch === 'local-read') return parseLocalReadEvent(input);
   if (branch === 'online-auth') return parseAuthEventV2(input);
-  if (branch === 'verified-offline') return parseOfflineEventV2(input, served);
+  // A body flag never admits an offline fact; first release has no verifier to admit one.
+  if (branch === 'verified-offline') refuse('OfflineVerificationUnsupported');
   if (branch === 'original-download') return parseOriginalDownloadEvent(input);
   throw new Error('Unknown access format branch');
 }
@@ -566,60 +541,6 @@ function parseAuthEventV2(input: unknown): Readonly<AuthAccessEventV2> {
     targets: [] as [], action, result, auth: { endCause, failureCause, trigger }, requestId, auditLinkId, relatedEventId });
 }
 
-type OfflineVerifier = Readonly<{ verify(envelopeId: string): unknown }>;
-let offlineVerifier: OfflineVerifier | undefined;
-/** Server start only, once (B2 composes it beside the readers in main.ts). Until C's real key and signature verification
- * exists nothing composes it, and every offline receipt is refused as unsupported. */
-export function composeOfflineReceiptVerifier(verifier: { verify(envelopeId: string): unknown }): void {
-  if (offlineVerifier) refuse('OfflineVerifierAlreadyComposed');
-  if (!verifier || typeof verifier.verify !== 'function') refuse('OfflineVerifierRequired');
-  offlineVerifier = Object.freeze({ verify: verifier.verify.bind(verifier) });
-}
-const OFFLINE_FACT_KEYS = ['envelopeId', 'deviceId', 'kid', 'preAuthorizationId', 'signedAt', 'timeBasis', 'deviceSequence', 'targetManifestSha256'];
-function offlineFacts(value: unknown): Readonly<OfflineFactsV2> {
-  const o = object(value, OFFLINE_FACT_KEYS), t = object(o.timeBasis, ['anchorEventId', 'uncertaintyMs']);
-  return { envelopeId: string(o.envelopeId), deviceId: string(o.deviceId), kid: string(o.kid), preAuthorizationId: string(o.preAuthorizationId),
-    signedAt: o.signedAt === null ? null : utc(o.signedAt), timeBasis: { anchorEventId: string(t.anchorEventId), uncertaintyMs: integer(t.uncertaintyMs, 0) },
-    deviceSequence: integer(o.deviceSequence, 1), targetManifestSha256: sha256(o.targetManifestSha256) };
-}
-function parseOfflineEventV2(input: unknown, served?: readonly ResolvedRecord[]): Readonly<OfflineAccessEventV2> {
-  const v = object(input, ['formatVersion', 'branch', 'surface', 'eventId', 'userId', 'rolesAtTime', 'actingInstitution', 'managingInstitution',
-    'occurredAt', 'trustedProxyIp', 'cause', 'context', 'executor', 'targets', 'action', 'result', 'offline', 'requestId', 'auditLinkId', 'relatedEventId']);
-  // A body flag never admits an offline fact: only the composed verifier's stored result does.
-  if (!offlineVerifier) refuse('OfflineVerificationUnsupported');
-  const offline = offlineFacts(v.offline);
-  let verified: Readonly<OfflineFactsV2>;
-  try { verified = offlineFacts(offlineVerifier.verify(offline.envelopeId)); } catch { refuse('OfflineReceiptBindingRefused'); }
-  if (JSON.stringify(verified) !== JSON.stringify(offline)) refuse('OfflineReceiptBindingRefused');
-  const eventId = string(v.eventId);
-  if (!UUID4.test(eventId)) throw new Error('Original event ID must be a UUID');
-  const surface = string(v.surface), surfaceKinds = surfaceKindsOf(surface);
-  const action = choice(v.action, actions);
-  if (action === 'provide-prepared' || accessPersistence(action) === 'independent-failure') throw new Error('An offline original is a performed act');
-  const result = choice(v.result, ['prepared', 'succeeded', 'aborted', 'refused', 'failed', 'reported']);
-  if (result !== expectedResult(action)) throw new Error('Event result does not describe the observed stage');
-  if (v.cause !== 'user-view' || v.executor !== 'member') throw new Error('An offline original is a member act');
-  const context = workContext(v.context, 'user-view', false);
-  const userId = factV2(v.userId, identity, [], []);
-  const rolesAtTime = factV2(v.rolesAtTime, value => { const roles = roleList(value); if (!roles.length) throw new Error('Roles missing'); return roles; }, [], []);
-  const actingInstitution = factV2(v.actingInstitution, value => string(value), [], []);
-  const managingInstitution = factV2(v.managingInstitution, value => string(value), [], []);
-  const trustedProxyIp = factV2(v.trustedProxyIp, proxyAddress, ['offline'], []);
-  if (trustedProxyIp.status !== 'unresolved') throw new Error('An offline original has no observed proxy address');
-  const mixed = surfaceKinds.some(k => NON_RECORD_TARGETS.includes(k)) && surfaceKinds.some(k => !NON_RECORD_TARGETS.includes(k));
-  if (mixed && (!served || served.length !== v.targets?.length)) refuse('ServedRecordManifestRequired');
-  const targets = parseTargets(v.targets, surfaceKinds, served, false);
-  if (!targets.length) throw new Error('An offline original names its targets');
-  const requestId = string(v.requestId), auditLinkId = string(v.auditLinkId), relatedEventId = string(v.relatedEventId);
-  if (!AUDIT_LINK.test(auditLinkId)) throw new Error('Invalid audit link ID');
-  if (relatedEventId === eventId) throw new Error('The reception is a separate event');
-  const occurredAt = utc(v.occurredAt);
-  if (offline.signedAt !== null && offline.signedAt !== occurredAt) throw new Error('The signed act and its event time are one fact');
-  return freeze({ formatVersion: 2 as const, branch: 'verified-offline' as const, surface, eventId, userId, rolesAtTime, actingInstitution,
-    managingInstitution, occurredAt, trustedProxyIp, cause: 'user-view' as const, context, executor: 'member' as const, targets, action, result,
-    offline, requestId, auditLinkId, relatedEventId });
-}
-
 export interface DurableAccessReceipt { eventId: string; durableAt: string }
 /** B seals within append under the store lock. Runtime has INSERT only, never owner/superuser/UPDATE/DELETE.
  * A separate retention-job role removes eligible prefixes only, atomically appending an expiry chain checkpoint.
@@ -694,7 +615,7 @@ const CHANGE_ACTS: readonly StatutoryAct[] = freeze(['기재', '추가기재', '
 export function statutoryAct(input: unknown, served?: readonly ResolvedRecord[]): StatutoryAct {
   const event = parseAccessEvent(input, served);
   return event.formatVersion === 2 && event.branch === 'online-auth' ? AUTH_STATUTORY_ACT[event.action] :
-    STATUTORY_ACT[(event as AccessEventV1 | OfflineAccessEventV2 | LocalReadAccessEventV2 | OriginalDownloadAccessEventV2).action];
+    STATUTORY_ACT[(event as AccessEventV1 | LocalReadAccessEventV2 | OriginalDownloadAccessEventV2).action];
 }
 /** The streams an event is recorded in: always the viewing stream; also the history stream when it changed a record. */
 export function accessStreams(input: unknown, served?: readonly ResolvedRecord[]): readonly AccessStream[] {
