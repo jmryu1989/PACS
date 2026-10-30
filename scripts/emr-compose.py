@@ -23,9 +23,18 @@ TABLESPACE_LOCATION = "/var/lib/postgresql/emr-access/ts"
 
 _ROLE_LIST = ", ".join("'%s'" % role for role in ROLES)
 _PASSWORD = r"\A[A-Za-z0-9._~-]+\Z"
-# Compose's volume-name grammar. Anything else in a short-syntax source is a host path once Compose interpolates it
-# (${PWD}/api, ${KIN_DATA:-/srv/kin}), so a prefix list of path characters is not enough.
-_VOLUME_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+# Compose's volume-name grammar (two or more characters: a single letter before ':' is a Windows drive).
+_VOLUME_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]+")
+# Compose interpolates before it splits a short-syntax entry, so any '$' can place a host path in the source or the
+# target (${PWD}/host, /host:${TARGET}); entries are therefore admitted by exact shape, never by spotting a bind.
+_CONTAINER_PATH = re.compile(r"/[^:$]*")
+_NAMED_SHORT = re.compile(r"([A-Za-z0-9][A-Za-z0-9_.-]+):(/[^:$]*)(?::([^:$]+))?")
+_MODES = {"ro", "rw", "z", "Z", "nocopy", "consistent", "cached", "delegated",
+          "shared", "rshared", "slave", "rslave", "private", "rprivate"}
+
+
+class Replaced(list):
+    """A sequence tagged !override or !reset: it replaces the base file's list instead of merging with it."""
 
 
 def _optional_login(role, variable, environment):
@@ -104,7 +113,7 @@ def load_yaml(path):
 
     for tag in ("!reset", "!override"):
         ComposeLoader.add_constructor(tag, lambda loader, node: (
-            loader.construct_sequence(node) if isinstance(node, yaml.SequenceNode) else
+            Replaced(loader.construct_sequence(node, deep=True)) if isinstance(node, yaml.SequenceNode) else
             loader.construct_mapping(node) if isinstance(node, yaml.MappingNode) else loader.construct_scalar(node)))
     return yaml.load(path.read_text(encoding="utf-8"), Loader=ComposeLoader)
 
@@ -116,25 +125,52 @@ def environment(service):
     return values
 
 
-def mounts(service):
-    """Accept both Compose volume syntaxes; a Windows drive colon belongs to the source."""
-    for volume in service.get("volumes") or []:
-        if isinstance(volume, dict):
-            yield volume
-        else:
-            match = re.fullmatch(r"(.+):(/[^:]*)(?::([^:]*))?", volume)
-            if match:
-                source, target, mode = match.groups()
-                yield {"type": "volume" if _VOLUME_NAME.fullmatch(source) else "bind", "source": source,
-                       "target": target, "read_only": "ro" in (mode or "").split(",")}
-            else:
-                yield {"target": volume}
+def mount(volume):
+    """The long form of a volume entry, or None when its shape could reach the host (bind, variable, unknown)."""
+    if isinstance(volume, str):
+        if _CONTAINER_PATH.fullmatch(volume):
+            return {"type": "volume", "target": volume}
+        match = _NAMED_SHORT.fullmatch(volume)
+        if not match or not set((match[3] or "rw").split(",")) <= _MODES:
+            return None
+        return {"type": "volume", "source": match[1], "target": match[2], "read_only": "ro" in (match[3] or "").split(",")}
+    if not isinstance(volume, dict) or "$" in json.dumps(volume, default=str):
+        return None
+    if not isinstance(volume.get("target"), str) or not _CONTAINER_PATH.fullmatch(volume["target"]):
+        return None
+    if volume.get("type") == "tmpfs" and "source" not in volume:
+        return volume
+    if volume.get("type") != "volume" or ("source" in volume and not (
+            isinstance(volume["source"], str) and _VOLUME_NAME.fullmatch(volume["source"]))):
+        return None
+    return volume
 
 
-def has_state_volume(service):
-    return any(volume.get("source") == "emr-state" and volume.get("target") == "/var/lib/kin-emr"
-               and volume.get("type", "volume") == "volume" and not volume.get("read_only")
-               for volume in mounts(service))
+def effective_volumes(base, override):
+    """Compose merges an override's volumes into the base by target unless the override list is tagged to replace."""
+    volumes = override.get("volumes")
+    if isinstance(volumes, Replaced):
+        return list(volumes)
+    merged = {}
+    for index, volume in enumerate((base.get("volumes") or []) + (volumes or [])):
+        parsed = mount(volume)
+        merged[parsed["target"] if parsed else ("unparsed", index)] = volume
+    return list(merged.values())
+
+
+def has_state_volume(volumes):
+    return any(parsed is not None and parsed.get("source") == "emr-state" and parsed["target"] == "/var/lib/kin-emr"
+               and parsed["type"] == "volume" and not parsed.get("read_only")
+               for parsed in map(mount, volumes))
+
+
+def plain_named_volume(name, configs):
+    """A named volume declared without a driver, driver options or external origin cannot be a host directory."""
+    declarations = [(config.get("volumes") or {})[name] for config in configs if name in (config.get("volumes") or {})]
+    return bool(declarations) and all(
+        declaration is None or (isinstance(declaration, dict) and not declaration.get("external")
+                                and not declaration.get("driver_opts") and declaration.get("driver") in (None, "local"))
+        for declaration in declarations)
 
 
 def compose_shape(root, problems):
@@ -154,7 +190,7 @@ def compose_shape(root, problems):
         problem(problems, "compose-api-not-runtime-role")
     if any("POSTGRES_PASSWORD" in str(value) for pair in env.items() for value in pair):
         problem(problems, "compose-api-holds-installer-secret")
-    if env.get("KIN_EMR_STATE_DIR") != "/var/lib/kin-emr" or not has_state_volume(api):
+    if env.get("KIN_EMR_STATE_DIR") != "/var/lib/kin-emr" or not has_state_volume(api.get("volumes") or []):
         problem(problems, "compose-api-state-volume")
     if ((api.get("depends_on") or {}).get("api-migrate") or {}).get("condition") != "service_completed_successfully":
         problem(problems, "compose-api-before-migration")
@@ -166,11 +202,14 @@ def compose_shape(root, problems):
     papi, pmigrate = pservices.get("api") or {}, pservices.get("api-migrate") or {}
     if (pmigrate.get("build") or {}).get("target") != "production":
         problem(problems, "prod-migration-not-production-image")
-    if not has_state_volume(papi):
+    pvolumes = effective_volumes(api, papi)
+    if not has_state_volume(pvolumes):
         problem(problems, "prod-api-state-volume")
-    # A host bind can replace image contents. Other named volumes need not be read-only.
-    if any(volume.get("type") == "bind" or ("source" in volume and not _VOLUME_NAME.fullmatch(str(volume["source"])))
-           for volume in mounts(papi)):
+    # A host bind can replace image contents, so only shapes that cannot name a host path pass. Other named volumes
+    # need not be read-only.
+    parsed = [mount(volume) for volume in pvolumes]
+    if None in parsed or not all(plain_named_volume(volume["source"], (compose, prod))
+                                 for volume in parsed if "source" in volume):
         problem(problems, "prod-api-host-bind")
 
 
