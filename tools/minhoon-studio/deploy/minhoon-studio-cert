@@ -1,0 +1,22 @@
+#!/bin/sh
+# Certbot deploy hook (installed by install.sh as /etc/letsencrypt/renewal-hooks/deploy/minhoon-studio-cert).
+# The studio on :8443 serves the host's pacs.koreaimagingnetwork.com certificate. The service user cannot read
+# /etc/letsencrypt, so each renewal copies fullchain + key to studio-readable files and restarts the studio.
+# Run directly (no RENEWED_LINEAGE) it copies once; install.sh does that.
+set -eu
+LINEAGE=/etc/letsencrypt/live/pacs.koreaimagingnetwork.com
+DEST=/opt/minhoon-studio/etc/tls
+
+# Certbot runs every deploy hook for every renewed lineage; only ours concerns the studio.
+if [ -n "${RENEWED_LINEAGE:-}" ] && [ "$RENEWED_LINEAGE" != "$LINEAGE" ]; then exit 0; fi
+
+install -d -o root -g studio -m 750 "$DEST"
+# install(1) copies the symlink targets; write both before swapping so the server never reads a mismatched pair.
+install -o root -g studio -m 640 "$LINEAGE/fullchain.pem" "$DEST/fullchain.pem.new"
+install -o root -g studio -m 640 "$LINEAGE/privkey.pem" "$DEST/privkey.pem.new"
+mv -f "$DEST/fullchain.pem.new" "$DEST/fullchain.pem"
+mv -f "$DEST/privkey.pem.new" "$DEST/privkey.pem"
+
+# The server reads the certificate at start. A paused studio (README "Pause") stays stopped. install.sh restarts the
+# studio itself once the new unit and config are in place (a restart here would start the new app under the old unit).
+if [ -z "${MINHOON_STUDIO_NO_RESTART:-}" ] && systemctl is-active --quiet minhoon-studio; then systemctl restart minhoon-studio; fi
