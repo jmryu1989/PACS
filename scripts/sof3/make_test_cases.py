@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Write tests/fixtures/sof3_cases.json: small synthetic JPEG lossless codestreams for TEST-MG-SOF3-EQUALITY.
+
+The expected samples are not stored: they come from a seeded xorshift32 formula that tests/sof3_decode_test.cjs
+repeats, so the reference is the encoder's input, independent of any decoder. Each codestream is encoded by
+imagecodecs (native libjpeg-turbo) and must decode, wrapped as a DICOM object, to exactly that input through
+pydicom + GDCM before it is written; a mismatch stops the generator. Needs numpy, pydicom, python-gdcm, imagecodecs
+(local tool, not a CI dependency). Run: python scripts/sof3/make_test_cases.py
+"""
+import base64
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+import gdcm  # noqa: F401  (pydicom's GDCM handler must be the reference decoder)
+import imagecodecs
+import numpy as np
+import pydicom
+from pydicom.dataset import Dataset, FileMetaDataset
+from pydicom.encaps import encapsulate
+from pydicom.uid import generate_uid
+
+ROOT = Path(__file__).resolve().parents[2]
+OUTPUT = ROOT / "tests/fixtures/sof3_cases.json"
+SV1, PROCESS14 = "1.2.840.10008.1.2.4.70", "1.2.840.10008.1.2.4.57"
+# name, rows, columns, precision, predictor, seeds (one per frame), components
+CASES = [
+    ("p16-sv1-2d", 40, 64, 16, 1, [1], 1),
+    ("p16-sv1-multiframe", 17, 33, 16, 1, [2, 3, 4], 1),
+    ("p16-process14-predictor6", 24, 31, 16, 6, [5], 1),
+    ("p15-sv1", 20, 20, 15, 1, [6], 1),
+    ("p12-sv1-multiframe", 30, 26, 12, 1, [7, 8], 1),
+    ("p12-process14-predictor7", 18, 22, 12, 7, [9], 1),
+    ("p10-sv1-2d", 36, 48, 10, 1, [10], 1),
+    ("p8-sv1-in-16-bit-frame", 16, 24, 8, 1, [11], 1),
+    ("rgb8-sv1", 8, 16, 8, 1, [12], 3),
+]
+
+
+def expected(rows, columns, precision, seed, components=1):
+    """Mirror of expected() in tests/sof3_decode_test.cjs; full range at the first two samples."""
+    mask, state = (1 << precision) - 1, seed
+    out = np.empty(rows * columns * components, dtype=np.uint16)
+    for i in range(out.size):
+        state ^= (state << 13) & 0xFFFFFFFF
+        state ^= state >> 17
+        state ^= (state << 5) & 0xFFFFFFFF
+        pixel = i // components
+        x, y = pixel % columns, pixel // columns
+        out[i] = ((x * 37 + y * 101) * (mask // 512 + 1) + (state >> 26)) & mask
+    out[0], out[1] = mask, 0
+    return out.reshape(rows, columns, components) if components > 1 else out.reshape(rows, columns)
+
+
+def gdcm_frames(codestreams, rows, columns, precision, predictor, components):
+    ds = Dataset()
+    ds.file_meta = FileMetaDataset()
+    ds.file_meta.TransferSyntaxUID = SV1 if predictor == 1 else PROCESS14
+    ds.file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.7"
+    ds.file_meta.MediaStorageSOPInstanceUID = generate_uid()
+    ds.is_little_endian, ds.is_implicit_VR = True, False
+    ds.Rows, ds.Columns, ds.SamplesPerPixel = rows, columns, components
+    ds.BitsAllocated = 16 if precision > 8 or components == 1 else 8
+    ds.BitsStored, ds.HighBit, ds.PixelRepresentation = precision, precision - 1, 0
+    ds.PhotometricInterpretation = "MONOCHROME2" if components == 1 else "RGB"
+    if components > 1:
+        ds.PlanarConfiguration = 0
+    ds.NumberOfFrames = len(codestreams)
+    ds.PixelData = encapsulate(codestreams)
+    ds["PixelData"].VR = "OB"
+    pydicom.config.pixel_data_handlers = [h for h in pydicom.config.pixel_data_handlers if "gdcm" in h.__name__]
+    pixels = ds.pixel_array
+    return pixels.reshape((len(codestreams),) + pixels.shape[-(3 if components > 1 else 2):])
+
+
+def main():
+    cases = []
+    for name, rows, columns, precision, predictor, seeds, components in CASES:
+        frames, codestreams = [], []
+        for seed in seeds:
+            source = expected(rows, columns, precision, seed, components)
+            data = imagecodecs.jpeg8_encode(source if precision > 8 else source.astype(np.uint8), lossless=True,
+                                            predictor=predictor, bitspersample=precision)
+            codestreams.append(bytes(data))
+            frames.append(source)
+        decoded = gdcm_frames(codestreams, rows, columns, precision, predictor, components)
+        for index, source in enumerate(frames):
+            if not np.array_equal(decoded[index].astype(np.uint16), source):
+                raise SystemExit(f"{name} frame {index}: GDCM decode differs from the encoder input")
+        cases.append({
+            "name": name, "transferSyntax": SV1 if predictor == 1 else PROCESS14, "rows": rows, "columns": columns,
+            "precision": precision, "predictor": predictor, "components": components,
+            "frames": [{"seed": seed, "sha256": hashlib.sha256(data).hexdigest(),
+                        "codestream": base64.b64encode(data).decode("ascii")} for seed, data in zip(seeds, codestreams)],
+        })
+        print(name, [len(c) for c in codestreams], "bytes, GDCM equal", flush=True)
+    document = {
+        "purpose": "TEST-MG-SOF3-EQUALITY inputs; generated by scripts/sof3/make_test_cases.py. Expected samples are the "
+                   "encoder input, recomputed from the seed formula; every frame decoded equal through pydicom + GDCM.",
+        "encoder": "imagecodecs " + imagecodecs.__version__ + " (libjpeg-turbo " + imagecodecs.jpeg8_version() + ")",
+        "reference": "pydicom " + pydicom.__version__ + " + python-gdcm " + gdcm.Version.GetVersion(),
+        "cases": cases,
+    }
+    OUTPUT.write_text(json.dumps(document, indent=1) + "\n", encoding="utf-8", newline="\n")
+    print("wrote", OUTPUT.relative_to(ROOT), OUTPUT.stat().st_size, "bytes")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

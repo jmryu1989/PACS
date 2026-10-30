@@ -1,7 +1,8 @@
 // A failed pixel request is otherwise only a console error in the pinned viewer. Keep its explanation on the
 // affected frame until that image loads or the viewport changes; a failed prefetch must not cover a displayed image.
 function kinCreateImageLoadStatus() {
-  let services, extensions, stop, handleGlobal, registered = false;
+  // The SOF3 decoder lives for the page: once it could not load, later mode entries keep the pinned path.
+  let services, extensions, stop, handleGlobal, sof3, registered = false;
   const globalFailure = event => handleGlobal?.(event);
   function explanation(error) {
     const status = error?.status;
@@ -50,9 +51,12 @@ function kinCreateImageLoadStatus() {
     // Reject at the worker result boundary, before createImage/cache/IMAGE_LOADED can turn a corrupt codestream
     // into a successful blank frame. The loader's existing rejection path supplies the affected imageId.
     const workerManager = core.getWebWorkerManager?.(), executeTask = workerManager?.executeTask;
+    sof3 ??= kinCreateSof3Decode({ size: window.config?.maxNumberOfWebWorkers || 3 });
     const checkedDecode = function (workerName, methodName, ...args) {
-      const result = executeTask.call(this, workerName, methodName, ...args);
-      if (!active || workerName !== 'dicomImageLoader' || methodName !== 'decodeTask') return result;
+      const decode = active && workerName === 'dicomImageLoader' && methodName === 'decodeTask';
+      const dispatch = task => executeTask.call(this, workerName, methodName, task, ...args.slice(1));
+      const result = (decode && sof3.decode(args[0], dispatch)) || executeTask.call(this, workerName, methodName, ...args);
+      if (!decode) return result;
       return result.then(frame => {
         if (!(frame?.rows > 0 && frame?.columns > 0 && frame?.pixelData?.length > 0)) {
           const error = new Error('Empty decoded image frame');
@@ -218,6 +222,7 @@ function kinCreateImageLoadStatus() {
       active = false;
       if (window.fetch === observedFetch) window.fetch = originalFetch;
       if (workerManager?.executeTask === checkedDecode) workerManager.executeTask = executeTask;
+      sof3.stop();
       core.eventTarget.removeEventListener(events.IMAGE_LOAD_FAILED, failed);
       if (events.IMAGE_LOAD_ERROR) core.eventTarget.removeEventListener(events.IMAGE_LOAD_ERROR, failed);
       core.eventTarget.removeEventListener(events.IMAGE_LOADED, loaded);
@@ -233,6 +238,8 @@ function kinCreateImageLoadStatus() {
   }
   return { id: 'kin.image-load-status', preRegistration({ servicesManager, extensionManager }) {
     services = servicesManager.services; extensions = extensionManager;
+    // Support diagnostics: which decoder answered (routed, fallbacks, rejected) and why it is unavailable, if it is.
+    window.kinSof3DecodeState = () => sof3?.state() ?? null;
     // Window-target events run listeners in registration order, even with capture. Register before React mounts
     // the route boundary, then delegate only to the active mode; installing onModeEnter would be too late.
     if (!registered) {

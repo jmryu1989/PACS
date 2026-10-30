@@ -87,7 +87,7 @@ class ViewerCautionDOM(unittest.TestCase):
         self.assertEqual(result, [blocked, {'wasm': 42, 'eval': 42, 'dynamic': 42}, blocked, blocked])
 
     def test_empty_decoder_result_is_a_failed_frame_before_cache_and_recovers(self):
-        self.script('image-load-status')
+        self.script('sof3-decode'); self.script('image-load-status')
         self.page.evaluate("""() => {
           const element = document.createElement('div'); document.body.append(element);
           window.currentImage = 'wadors:frame-a'; window.images = new Map(); window.messages = [];
@@ -166,7 +166,7 @@ class ViewerCautionDOM(unittest.TestCase):
         self.assertEqual(self.page.evaluate('workerManager.executeTask()'), 'later owner')
 
     def test_pixel_failure_explanation_follows_the_displayed_image_and_mode(self):
-        self.script('image-load-status')
+        self.script('sof3-decode'); self.script('image-load-status')
         self.page.evaluate("""() => {
           const element = document.createElement('div'); document.body.append(element);
           window.currentImage = 'image-a';
@@ -225,7 +225,7 @@ class ViewerCautionDOM(unittest.TestCase):
             self.page.evaluate('ext.onModeExit()'); self.page.unroute(route)
 
     def test_known_image_rejections_are_specific_and_do_not_reach_the_global_boundary(self):
-        self.script('image-load-status')
+        self.script('sof3-decode'); self.script('image-load-status')
         self.page.evaluate("""() => {
           window.currentImage='wadors:'+location.origin+'/dicom-web/studies/1/series/2/instances/3/frames/1';
           const element=document.createElement('div');document.body.append(element);
