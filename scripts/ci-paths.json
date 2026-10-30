@@ -90,6 +90,7 @@
     "worklist-v0/hpacs-lite/main-split.bundle.js",
     "worklist-v0/hpacs-lite/main.html",
     "worklist-v0/hpacs-lite/order-reconciliation.js",
+    "worklist-v0/hpacs-lite/preload-*",
     "worklist-v0/hpacs-lite/reader-assignment.js",
     "worklist-v0/hpacs-lite/reading-appearance-account.js",
     "worklist-v0/hpacs-lite/reading-appearance.js",
