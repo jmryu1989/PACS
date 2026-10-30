@@ -375,6 +375,7 @@
         }).join("") + `</tr>`).join("")
         || `<tr><td class="empty" colspan="${shown.length}">${bodyPartNote ? '부위 확인 전인 검사가 있어 검색 결과가 아직 완전하지 않습니다.' : 'No records found'}</td></tr>`;
       columnPrefs?.decorate(mode);
+      syncViewingRows();
       multiSelection?.sync();
       rowNavigation?.sync();
       worklistSearch?.show();
