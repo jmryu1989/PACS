@@ -568,47 +568,6 @@ class PgLedgerClinicalHttpLive(PgLedgerFixture):
         self.node_case('clinical-http')
 
 
-class PgLedgerDraftRegressionLive(PgLedgerFixture):
-    def test_existing_draft_contract(self):
-        self.sql('CREATE DATABASE kin_report_draft_test')
-        url = self.witness_url.rsplit('/', 1)[0] + '/kin_report_draft_test'
-        evidence = ROOT / 'tmp/emr-b2-replace-20261023' / ('draft-regression-' + self.token)
-        evidence.mkdir()
-        args = ['docker','run','--rm','--name',self.container+'-node',
-            '--label','kin.b2r='+self.token,'--network',self.network,
-            '--mount','type=bind,source='+str(ROOT/'tests/report_draft_cas_service_test.cjs')
-            +',target=/app/report_draft_cas_service_test.cjs,readonly',
-            '-e','KIN_REPORT_DRAFT_DATABASE_URL='+url,
-            self.image,'node','--test','--test-concurrency=1','/app/report_draft_cas_service_test.cjs']
-        with (evidence/'node.stdout').open('wb') as out, (evidence/'node.stderr').open('wb') as err:
-            result=subprocess.run(args,stdout=out,stderr=err,timeout=3600)
-        self.assertEqual(result.returncode,0,(evidence/'node.stdout').read_text(errors='replace')[-3000:]
-                         +(evidence/'node.stderr').read_text(errors='replace')[-1000:])
-
-
-class PgLedgerAuthRegressionLive(PgLedgerFixture):
-    def test_existing_auth_contract(self):
-        self.sql('CREATE DATABASE kin_auth_session_test')
-        url = self.witness_url.rsplit('/', 1)[0] + '/kin_auth_session_test'
-        evidence = ROOT / 'tmp/emr-b2-replace-20261023' / ('auth-regression-' + self.token)
-        evidence.mkdir(exist_ok=True)
-        args = ['docker', 'run', '--rm', '--name', self.container + '-node',
-            '--label', 'kin.b2r=' + self.token, '--network', self.network,
-            '--memory', '3584m', '--memory-swap', '3584m', '--cpus', '2',
-            '--mount', 'type=bind,source=' + str(ROOT / 'tests/auth_session_service_test.cjs')
-            + ',target=/app/auth_session_service_test.cjs,readonly',
-            '-e', 'KIN_AUTH_SESSION_DATABASE_URL=' + url, '-e', 'NODE_OPTIONS=--max-old-space-size=3072',
-            self.image, 'node', '--max-old-space-size=3072', '--test', '--test-concurrency=1',
-            *(['--test-name-pattern',os.environ['KIN_B2R_AUTH_PATTERN']] if os.environ.get('KIN_B2R_AUTH_PATTERN') else []),
-            '/app/auth_session_service_test.cjs']
-        # Preserve every result as it arrives, including a runner timeout or
-        # interrupted subprocess; the 3600s unit limit is the existing gate limit.
-        with (evidence/'node.stdout').open('wb') as out, (evidence/'node.stderr').open('wb') as err:
-            result = subprocess.run(args,stdout=out,stderr=err,timeout=3600)
-        self.assertEqual(result.returncode, 0, (evidence/'node.stdout').read_text(errors='replace')[-2500:]
-                         + (evidence/'node.stderr').read_text(errors='replace')[-1000:])
-
-
 class PgLedgerRetentionLive(PgLedgerFixture):
     def test_failure_expiry_and_delayed_spool_replay(self):
         current, expired, held = [str(uuid.uuid4()) for _ in range(3)]

@@ -978,9 +978,12 @@ function syntheticEvent(identity,dual=true) {
 async function concurrentReceipts() {
   return pgBoundary(async({db,witness,store})=>{
     const identity=await store.resolveIdentity(db,'synthetic-issuer','doctor');
-    const events=Array.from({length:48},(_,i)=>syntheticEvent(identity,i%2===0)); // retained L03b selection
+    // Twice the product's append pool (lanes + verify reserve): every connection is busy and as many appends wait.
+    const { EMR_APPEND_POOL_SIZE } = require(path.join(build, 'emr-runtime/limits.js'));
+    const count=2*EMR_APPEND_POOL_SIZE, dual=Math.ceil(count/2);
+    const events=Array.from({length:count},(_,i)=>syntheticEvent(identity,i%2===0));
     const result=await Promise.all(events.map(e=>store.append(e)));
-    assert.equal(result.length,48);
+    assert.equal(result.length,count);
     for(let i=0;i<events.length;i++) {
       assert.equal(result[i].eventId,events[i].eventId);
       const [row]=await witness.$queryRaw`SELECT count(*)::int AS n FROM emr_access.access_entry WHERE event_id=${events[i].eventId}`;
@@ -989,8 +992,8 @@ async function concurrentReceipts() {
     }
     const [row]=await witness.$queryRaw`SELECT (SELECT count(*)::int FROM emr_access.access_entry) entries,
       (SELECT count(*)::int FROM emr_access.attempt_outcome WHERE outcome='committed') committed`;
-    assert.deepEqual(row,{entries:72,committed:48});
-    console.log(JSON.stringify({status:'PASS',boundary:'48 concurrent production-store receipts + independent PG',...row}));
+    assert.deepEqual(row,{entries:count+dual,committed:count});
+    console.log(JSON.stringify({status:'PASS',boundary:count+' concurrent production-store receipts + independent PG',...row}));
   });
 }
 async function crashChild() {
