@@ -23,7 +23,7 @@ import zipfile
 from urllib.parse import parse_qs, urlsplit
 
 import yaml
-from ci_artifacts import CANDIDATE, ROOT, download, inventory, listing, gh_get
+from ci_artifacts import CANDIDATE, ROOT, REGRESSION_ARTIFACTS, STAGE_ARTIFACTS, download, inventory, listing, gh_get
 import ci_candidate_evidence_test as g3_fixture
 from ci_workflows import WorkflowCatalog
 
@@ -158,7 +158,7 @@ class FullStageCases:
         self.assertEqual(self.stage_manifest(), result)
         hosted = self.stage_manifest('artifact-downloads.json')
         self.assertEqual((hosted['scope'], hosted['status']), ('non-candidate', 'completed'))
-        self.assertEqual(len(hosted['downloads']), 6)
+        self.assertEqual(len(hosted['downloads']), 6 + len(REGRESSION_ARTIFACTS))
         g3 = self.stage_manifest('g3/g3-evidence.json')
         self.assertEqual(g3['status'], 'verified')
         self.assertEqual(result['g3']['record_sha256'], hashlib.sha256(self.stage_record.read_bytes()).hexdigest())
@@ -297,7 +297,8 @@ class ArtifactTests(FullStageCases, unittest.TestCase):
                     if '/workflows/renamed-volume.yml/runs?' in endpoint and self.urls.count(endpoint) == 2:
                         body['workflow_runs'][0]['updated_at'] = '2026-10-13T00:00:00Z'
                     return body, headers
-            with self.assertRaisesRegex(ValueError, 'STOP run_id=12 attempt=1 artifact_id=1201: .*workflow run set/revisions changed during collection'):
+            # The relocated regression workflow now supplies the last download.
+            with self.assertRaisesRegex(ValueError, 'STOP run_id=14 attempt=1 artifact_id=1401: .*workflow run set/revisions changed during collection'):
                 self.collect(root, Changed(uploads))
 
     def test_latest_run_uses_instants_across_calendar_and_timezone_boundaries(self):
@@ -578,6 +579,10 @@ foreach ($file in Get-ChildItem $PSScriptRoot -Filter '*.ps1' | Where-Object Nam
             'worklist-ux.yml': {'worklist-ux-runtime': ['synthetic-runtime-record-runs'],
                                 'worklist-ux-measurements': ['synthetic-workspace-dom-results']},
             'candidate.yml': {'candidate': [CANDIDATE]},
+            # Keep the original six downloads first: race fixtures below mutate
+            # the first/last original download to verify the same refusal boundary.
+            'zz-relocated-regressions.yml': {artifact.removeprefix('synthetic-').removesuffix('-results'): [artifact]
+                                        for artifact in REGRESSION_ARTIFACTS},
         }
         for file, jobs in uploads.items():
             value = {'jobs': {name: {'steps': [{'uses': 'actions/upload-artifact@pin', 'with': {'name': artifact}}
@@ -616,7 +621,7 @@ foreach ($file in Get-ChildItem $PSScriptRoot -Filter '*.ps1' | Where-Object Nam
             github = FakeGitHub(uploads)
             result, calls = self.collect(root, github)
             self.assertEqual(result['status'], 'completed')
-            self.assertEqual(len(calls), 6)
+            self.assertEqual(len(calls), 6 + len(REGRESSION_ARTIFACTS))
             self.assertEqual(result['scope'], 'non-candidate')
             self.assertFalse(any('candidate.yml' in url for url in github.urls))
             for row, call in zip(result['downloads'], calls):
@@ -634,6 +639,32 @@ foreach ($file in Get-ChildItem $PSScriptRoot -Filter '*.ps1' | Where-Object Nam
                 self.assertEqual(len({call[3] for call in rows}), 2)
                 self.assertEqual(len({call[7] for call in rows}), 2)
             self.assertEqual(len([row for row in inventory(root) if row['artifact'] == 'synthetic-runtime-record-runs']), 2)
+
+    def test_stage_collection_covers_every_relocated_workspace_run(self):
+        catalog = WorkflowCatalog(ROOT)
+        for workflow, document in catalog.documents.items():
+            for name, job in document['jobs'].items():
+                for step in job.get('steps', []):
+                    directories = re.findall(r'--run-dir (tmp/workspace-ui-ci/[^\s]+)', step.get('run', ''))
+                    for directory in directories:
+                        uploads = [upload['with']['name'] for upload in job['steps']
+                                   if upload.get('uses', '').startswith('actions/upload-artifact@')
+                                   and any(directory.startswith(path.rstrip('/') + '/') or directory == path.rstrip('/')
+                                           for path in upload['with']['path'].splitlines())]
+                        self.assertTrue(uploads, (workflow, name, directory))
+                        for stage in ('7', '8'):
+                            self.assertTrue(set(uploads) & set(STAGE_ARTIFACTS[stage]),
+                                            (stage, workflow, name, directory, uploads))
+
+    def test_missing_relocated_artifact_is_refused(self):
+        for artifact in REGRESSION_ARTIFACTS:
+            with self.subTest(artifact=artifact), tempfile.TemporaryDirectory() as folder:
+                owner = artifact.removeprefix('synthetic-').removesuffix('-results')
+                root, _ = self.fixture(folder, omit=(owner,))
+                github = FakeGitHub({})
+                with self.assertRaisesRegex(ValueError, artifact):
+                    self.collect(root, github)
+                self.assertEqual(github.urls, [])
 
     def test_wrong_sha_owner_failed_pending_missing_or_expired_never_substitute(self):
         for defect in ('wrong-sha', 'wrong-owner', 'failed', 'pending', 'missing', 'expired'):
@@ -703,6 +734,8 @@ foreach ($file in Get-ChildItem $PSScriptRoot -Filter '*.ps1' | Where-Object Nam
                 'validate.yml': {'runtime': ['synthetic-runtime-record-runs'],
                                  'measurements': ['synthetic-workspace-dom-results']},
                 'worklist-ux.yml': {'r': ['synthetic-runtime-record-runs'], 'm': ['synthetic-workspace-dom-results']},
+                'zz-relocated-regressions.yml': {artifact.removeprefix('synthetic-').removesuffix('-results'): [artifact]
+                                            for artifact in REGRESSION_ARTIFACTS},
                 'candidate.yml': {'candidate': [CANDIDATE]}}), stage='7')
             self.assertEqual(result['status'], 'completed')
 
@@ -777,7 +810,7 @@ foreach ($file in Get-ChildItem $PSScriptRoot -Filter '*.ps1' | Where-Object Nam
                     calls.append(endpoint)
                     with zipfile.ZipFile(path, 'w') as z:
                         z.writestr('evidence', 'synthetic')
-                    if len(calls) == 6:
+                    if len(calls) == 6 + len(REGRESSION_ARTIFACTS):
                         if change == 'rerun':
                             github.run('renamed-volume.yml')['run_attempt'] = 2
                         else:
@@ -827,7 +860,7 @@ foreach ($file in Get-ChildItem $PSScriptRoot -Filter '*.ps1' | Where-Object Nam
                     self.assertEqual(self.calls, [])
                 else:
                     result, _ = self.collect(root, github)
-                    self.assertEqual(len(result['downloads']), 6)
+                    self.assertEqual(len(result['downloads']), 6 + len(REGRESSION_ARTIFACTS))
                     self.assertTrue(any('/artifacts?' in u and 'page=3' in u for u in github.urls))
                 self.assertTrue(any('/runs?' in u and 'page=2' in u for u in github.urls))
                 self.assertEqual(github.urls.count('repos/o/r'), 1)
