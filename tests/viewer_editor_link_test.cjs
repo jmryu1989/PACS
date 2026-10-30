@@ -234,3 +234,31 @@ test('an array-shaped body from the bound window is refused, not read as fields'
     data: reply({ editor: Object.assign([], body({ findings: 'LEAK' })) }) });
   assert.deepEqual(await answer, { ok: false, reason: 'invalid' });
 });
+
+test('a delayed editor answer cannot outlive the window or its current owner', async () => {
+  for (const change of ['close', 'inactive', 'owner']) {
+    let live = true, owner = ['INST-1', 'subject-1'];
+    const kit = harness({ live: () => live, owner: () => owner });
+    const answer = kit.adapter.read();
+    if (change === 'close') kit.target.closed = true;
+    if (change === 'inactive') live = false;
+    if (change === 'owner') owner = ['INST-1', 'subject-2'];
+    kit.deliver({ origin: ORIGIN, source: kit.target, data: reply() });
+    assert.deepEqual(await answer, { ok: false, reason: change === 'owner' ? 'session' : 'missing' });
+    assert.equal(kit.listeners.size, 0);
+    if (change === 'close') assert.equal(kit.adapter.available(), false);
+  }
+});
+
+test('cancelling document preparation does not revive its older editor request', async () => {
+  const work = require('../worklist-v0/hpacs-lite/work-context.js').create();
+  work.follow({ onLifecycle(listener) { listener({ state: 'active', session: 'sess-1' }); } });
+  const kit = harness();
+  kit.view.KinWorkContext = work;
+  const answer = kit.adapter.read();
+  const preparing = work.prepare();
+  assert.equal(work.cancelPreparation(preparing), true);
+  kit.deliver({ origin: ORIGIN, source: kit.target, data: reply() });
+  assert.deepEqual(await answer, { ok: false, reason: 'missing' });
+  assert.equal(kit.listeners.size, 0);
+});

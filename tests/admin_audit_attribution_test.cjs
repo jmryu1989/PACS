@@ -112,6 +112,11 @@ Object.assign(CONTRACT.field_rules, {"dicom.import.intent":{"source":"detail.ins
 // D1489: the archive grant's issue/refusal row is attributed the same way (vectors 51-52).
 CONTRACT.field_rules["original.download.grant"] = {"source":"detail.institutionId","meaning":IMPORT_MEANING};
 CONTRACT.field_rules["original.download.refused"] = {"source":"detail.institutionId","meaning":IMPORT_MEANING};
+/* D1882 held unknown source: a held study attached by a registered device or spelling records the owner it was attached
+ * to (system row), and a registration records the registering administrator's own institution. */
+Object.assign(CONTRACT.field_rules, {"study.attach":{"source":"detail.institutionId","meaning":"owner the held study was attached to (system)"},
+  "institution.device.register":{"source":"detail.institution","meaning":"registering administrator's institution"},
+  "institution.alias.register":{"source":"detail.institution","meaning":"registering administrator's institution"}});
 CONTRACT.synthetic_vectors.push(
   {"row":42,"action":"dicom.import.intent","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A member's import intent"},
   {"row":43,"action":"dicom.import.result","rule":"field:detail.institutionId","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"A's unconfirmed file result: the admin finds operationId and index"},
@@ -554,6 +559,7 @@ test('the page read filters before paging: totals, pages and the continuation co
   assert.equal(first.total, 10, 'hidden, unparsable and other-institution rows are not counted');
   assert.deepEqual(first.rows.map(r => r.target), [40, 36, 32, 28].map(id => `${S1}.${id}`));
   assert.equal(first.last, 28);
+  assert.deepEqual(first.ids, [40, 36, 32, 28], 'the access record names exactly the returned rows');
   assert.deepEqual(calls.slice(0, 3), [[null, 3], [38, 3], [35, 3]], 'the source is walked downward in batches');
   // Totals need every visible row: 13 full batches of 3 and a last short one of 1, whatever the page size.
   assert.equal(calls.length, 14);
@@ -570,9 +576,9 @@ test('the page read filters before paging: totals, pages and the continuation co
   const b = await A.readAuditPage(sourceOver(rows), 'inst-b', { after: null, limit: 100 });
   assert.deepEqual([b.total, b.rows.length, b.last], [10, 10, null]);
   const z = await A.readAuditPage(sourceOver(rows), 'inst-z', { after: null, limit: 25 });
-  assert.deepEqual(json(z), { rows: [], total: 0, last: null });
+  assert.deepEqual(json(z), { rows: [], ids: [], total: 0, last: null });
   const empty = await A.readAuditPage(sourceOver([]), 'inst-a', { after: null, limit: 25 });
-  assert.deepEqual(json(empty), { rows: [], total: 0, last: null });
+  assert.deepEqual(json(empty), { rows: [], ids: [], total: 0, last: null });
 });
 
 test('a failed or disordered source is an error, never an empty page', async () => {

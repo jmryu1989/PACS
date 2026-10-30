@@ -104,7 +104,7 @@ export class PacsPreferences {
       const workspace = value.workspace;
       const own = (v: any, key: string) => Object.prototype.hasOwnProperty.call(v, key);
       // Drawer visibility belongs to the current opening, never the account's saved layout.
-      if (!object(workspace) || Object.keys(workspace).filter(k => k !== 'studyPanel').sort().join(',') !==
+      if (!object(workspace) || Object.keys(workspace).filter(k => k !== 'studyPanel' && k !== 'hiddenPanels').sort().join(',') !==
           'prior,rail,railCollapsed,related,studyPanelTab,version,worklist' ||
           workspace.version !== 1 || typeof workspace.railCollapsed !== 'boolean' ||
           !['images', 'info', 'templates'].includes(workspace.studyPanelTab))
@@ -136,6 +136,13 @@ export class PacsPreferences {
           if (Object.keys(values).length) kept[axis] = values;
         }
         if (Object.keys(kept).length) clean.workspace.studyPanel = kept;
+      }
+      // Report window panels hidden in Panel Settings (Minhoon item 9); sparse, the same rule as workspace-layout.js.
+      if (own(workspace, 'hiddenPanels')) {
+        const panels = ['thumbnail', 'aiReport', 'imageReport', 'clinical', 'template'], hidden = workspace.hiddenPanels;
+        if (!Array.isArray(hidden) || new Set(hidden).size !== hidden.length || hidden.some((k: any) => !panels.includes(k)))
+          throw new BadRequestException('작업공간 배치 형식이 잘못되었습니다');
+        if (hidden.length) clean.workspace.hiddenPanels = panels.filter(k => hidden.includes(k));
       }
     }
     return clean;
@@ -303,8 +310,31 @@ export class PacsPreferences {
   }
 
   private validViewerSettings(value: any) {
-    if (!value || typeof value !== 'object' || Array.isArray(value) || ![1, 2].includes(value.version) ||
-        Object.keys(value).sort().join(',') !== 'bar,shortcuts,version' ||
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const { mammography, hanging, ...tools } = value;
+    if (Object.prototype.hasOwnProperty.call(value, 'mammography')) {
+      const options = { viewOrder: ['CC-MLO', 'MLO-CC'], sideOrder: ['R-L', 'L-R'],
+        priorPosition: ['right', 'left', 'bottom', 'top'], currentColumns: [1, 2, 4], compareColumns: [1, 2, 4, 8] };
+      if (!mammography || typeof mammography !== 'object' || Array.isArray(mammography) ||
+          !['compare', 'current'].includes(mammography.layout) ||
+          ![null, 'conventional', 'generated2d', 'dbt'].includes(mammography.kind) ||
+          Object.keys(mammography).some(key => !['kind', 'layout', ...Object.keys(options)].includes(key)) ||
+          Object.entries(options).some(([key, choices]) => key in mammography && !(choices as any[]).includes(mammography[key]))) return false;
+      const vertical = ['top', 'bottom'].includes(mammography.priorPosition || 'right');
+      if (vertical ? mammography.compareColumns === 8 : mammography.compareColumns === 1) return false;
+    }
+    if (Object.prototype.hasOwnProperty.call(value, 'hanging')) {
+      if (!hanging || typeof hanging !== 'object' || Array.isArray(hanging) ||
+          Object.entries(hanging).some(([modality, raw]) => {
+            const v: any = raw;
+            return !['CT', 'MR', 'XA', 'Other'].includes(modality) || !v || typeof v !== 'object' || Array.isArray(v) ||
+              Object.keys(v).sort().join(',') !== 'layout,priorPosition,seriesMatch' ||
+              !(v.layout === 'automatic' || typeof v.layout === 'string' && /^[1-9]\d*x[1-9]\d*$/.test(v.layout) &&
+                Number.isSafeInteger(v.layout.split('x').map(Number).reduce((a, b) => a * b, 1))) ||
+              !['right', 'left', 'bottom', 'top'].includes(v.priorPosition) || !['similar', 'number', 'largest'].includes(v.seriesMatch);
+          })) return false;
+    }
+    if (![1, 2].includes(value.version) || Object.keys(tools).sort().join(',') !== 'bar,shortcuts,version' ||
         !Array.isArray(value.bar) || new Set(value.bar).size !== value.bar.length ||
         !value.shortcuts || typeof value.shortcuts !== 'object' || Array.isArray(value.shortcuts)) return false;
     // IDs are native viewer tool names, never patient data or executable commands.
@@ -388,7 +418,7 @@ export class PacsPreferences {
       [12,14,16,18,20].includes(p.size) && ['default','sans','serif','mono'].includes(p.font) && ['default','warm','cool','white'].includes(p.color) && positions.includes(p.position) &&
       ['name','date','description'].every(k => typeof p[k] === 'boolean') && object(p.fieldPositions) && Object.keys(p.fieldPositions).sort().join(',') === 'date,description,name' &&
       ['name','date','description'].every(k => positions.includes(p.fieldPositions[k])) && (!overrides || object(p.overrides) && Object.keys(p.overrides).every(k => modalities.includes(k) && validViewerProfile(p.overrides[k], false)));
-    const validViewer = (v: any, appearanceVersion: number) => object(v) && v.version === (appearanceVersion === 9 ? 3 : appearanceVersion === 8 ? 2 : 1) && Object.keys(v).sort().join(',') === 'current,prior,version' &&
+    const validViewer = (v: any, appearanceVersion: number) => object(v) && v.version === (appearanceVersion >= 9 ? 3 : appearanceVersion === 8 ? 2 : 1) && Object.keys(v).sort().join(',') === 'current,prior,version' &&
       ['current', 'prior'].every(role => { const p = v[role]; return v.version === 3 ? validViewerProfile(p, true) : object(p) && Object.keys(p).sort().join(',') === (v.version === 2 ? 'color,date,description,font,name,position,size' : 'color,date,description,font,name,size') &&
         [12,14,16,18,20].includes(p.size) && ['default','sans','serif','mono'].includes(p.font) && ['default','warm','cool','white'].includes(p.color) &&
         (v.version === 1 || positions.includes(p.position)) && ['name','date','description'].every(k => typeof p[k] === 'boolean'); });
@@ -396,10 +426,13 @@ export class PacsPreferences {
       object(v.display) && Object.keys(v.display).sort().join(',') === 'autoHideCrosshair,cube,demographics,orientation,sample,scale,thickness,windowing,zoom' && Object.values(v.display).every(x => typeof x === 'boolean') &&
       object(v.mouse) && Object.keys(v.mouse).sort().join(',') === 'left,middle,right' && new Set(Object.values(v.mouse)).size === 3 && Object.values(v.mouse).every(x => ['WindowLevel','Pan','Zoom','StackScroll'].includes(x as string)) &&
       object(v.sync) && Object.keys(v.sync).sort().join(',') === 'windowing,zoom' && Object.values(v.sync).every(x => typeof x === 'boolean');
+    // Measurement marker colour and thickness (Minhoon item 12): display choices, never part of a mark's record.
+    const validMarkers = (v: any) => object(v) && v.version === 1 && Object.keys(v).sort().join(',') === 'color,version,width' &&
+      ['default', 'red', 'cyan', 'magenta', 'white'].includes(v.color) && ['standard', 'thick', 'extra-thick'].includes(v.width);
     const validAppearance = (v: any) => object(v) && ['list', 'current', 'prior'].every(k => [12, 14, 16, 18, 20].includes(v[k])) &&
       (v.version === 1 ? Object.keys(v).sort().join(',') === 'current,list,prior,version' :
-        [2, 3, 4, 5, 6, 7, 8, 9].includes(v.version) && Object.keys(v).sort().join(',') === (v.version >= 7 ? 'colors,current,dock,fonts,list,mpr,prior,toolbar,version,viewer' : v.version === 6 ? 'colors,current,dock,fonts,list,prior,toolbar,version,viewer' : v.version >= 4 ? 'colors,current,dock,fonts,list,prior,version,viewer' : v.version === 3 ? 'colors,current,dock,fonts,list,prior,version' : 'colors,current,fonts,list,prior,version') &&
-        (v.version < 3 || validDock(v.dock, v.version)) && (v.version < 4 || validViewer(v.viewer, v.version)) && (v.version < 6 || validToolbar(v.toolbar)) && (v.version < 7 || validMpr(v.mpr)) &&
+        [2, 3, 4, 5, 6, 7, 8, 9, 10].includes(v.version) && Object.keys(v).sort().join(',') === (v.version >= 10 ? 'colors,current,dock,fonts,list,markers,mpr,prior,toolbar,version,viewer' : v.version >= 7 ? 'colors,current,dock,fonts,list,mpr,prior,toolbar,version,viewer' : v.version === 6 ? 'colors,current,dock,fonts,list,prior,toolbar,version,viewer' : v.version >= 4 ? 'colors,current,dock,fonts,list,prior,version,viewer' : v.version === 3 ? 'colors,current,dock,fonts,list,prior,version' : 'colors,current,fonts,list,prior,version') &&
+        (v.version < 3 || validDock(v.dock, v.version)) && (v.version < 4 || validViewer(v.viewer, v.version)) && (v.version < 6 || validToolbar(v.toolbar)) && (v.version < 7 || validMpr(v.mpr)) && (v.version < 10 || validMarkers(v.markers)) &&
         choices(v.fonts, ['default', 'sans', 'serif', 'mono']) && choices(v.colors, ['default', 'warm', 'cool', 'white']));
     if (!object(body) || Object.keys(body).sort().join(',') !== 'expectedOwner,revision,sizes' ||
         !Number.isInteger(body.revision) || body.revision < 0 || body.revision >= 2147483647 ||
@@ -413,6 +446,7 @@ export class PacsPreferences {
         ...(body.sizes.version >= 3 ? { dock: { version: body.sizes.dock.version, placement: body.sizes.dock.placement, panel: body.sizes.dock.panel, ...(body.sizes.version >= 5 ? { autoHide: body.sizes.dock.autoHide } : {}) } } : {}),
         ...(body.sizes.version >= 6 ? { toolbar: { version: 1, order: body.sizes.toolbar.order.slice(), hidden: body.sizes.toolbar.hidden.slice() } } : {}),
         ...(body.sizes.version >= 7 ? { mpr: { version: 1, progressive: body.sizes.mpr.progressive, display: { ...body.sizes.mpr.display }, mouse: { ...body.sizes.mpr.mouse }, sync: { ...body.sizes.mpr.sync } } } : {}),
+        ...(body.sizes.version >= 10 ? { markers: { version: 1, color: body.sizes.markers.color, width: body.sizes.markers.width } } : {}),
         ...(body.sizes.version >= 4 ? { viewer: { version: body.sizes.viewer.version, ...Object.fromEntries(['current','prior'].map(role => { const p = body.sizes.viewer[role];
           const copyProfile = (value: any) => ({ size:value.size, font:value.font, color:value.color, name:value.name, date:value.date, description:value.description, position:value.position, fieldPositions:{ name:value.fieldPositions.name, date:value.fieldPositions.date, description:value.fieldPositions.description } });
           return [role, body.sizes.viewer.version === 3 ? { ...copyProfile(p), overrides:Object.fromEntries(Object.keys(p.overrides).map(modality => [modality, copyProfile(p.overrides[modality])])) } : { size:p.size, font:p.font, color:p.color, name:p.name, date:p.date, description:p.description, ...(body.sizes.viewer.version === 2 ? { position:p.position } : {}) }]; })) } } : {}) };

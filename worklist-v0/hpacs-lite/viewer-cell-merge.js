@@ -135,7 +135,7 @@
       if (!camera || !Array.isArray(actors) || actors.length !== 1) return null;
       const volumeId = viewport.getVolumeId?.(), volume = volumeOf(viewport), imageIds = volume?.imageIds;
       if (typeof volumeId !== 'string' || !volumeId || !volume?.loadStatus?.loaded || !Array.isArray(imageIds) ||
-          imageIds.length < 2 || imageIds.length > 256 || volume.framesLoaded !== imageIds.length) return null;
+          imageIds.length < 2 || volume.framesLoaded !== imageIds.length) return null;
       const sops = imageIds.map(id => { try { return native?.metaData?.get?.('instance', id)?.SOPInstanceUID; } catch (_) { return null; } });
       if (!sops.every(value => typeof value === 'string' && value) || new Set(sops).size !== sops.length) return null;
       // The requested orientation is authoritative; a camera the Crosshairs tool has rotated
@@ -348,8 +348,13 @@
             reapplyPlane(cell, viewport);
           } else {
             if (viewport.type !== 'stack') continue;
-            if (Number.isInteger(cell.imageIndex) && viewport.getCurrentImageId?.() !== cell.imageId && typeof viewport.setImageIdIndex === 'function')
-              Promise.resolve(viewport.setImageIdIndex(cell.imageIndex)).catch(() => { });
+            if (Number.isInteger(cell.imageIndex) && typeof viewport.setImageIdIndex === 'function') {
+              // A restored frame also owns the next scroll, including a no-op load.
+              clearTimeout(viewport.debouncedTimeout);
+              viewport.targetImageIdIndex = cell.imageIndex;
+              if (viewport.getCurrentImageId?.() !== cell.imageId)
+                Promise.resolve(viewport.setImageIdIndex(cell.imageIndex)).catch(() => { });
+            }
             const properties = viewport.getProperties?.() || {};
             if (cell.voiRange && JSON.stringify(properties.voiRange ?? null) !== JSON.stringify(cell.voiRange))
               viewport.setVOI?.(copy(cell.voiRange), { forceRecreateLUTFunction: true, voiUpdatedWithSetProperties: true });

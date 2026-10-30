@@ -1,6 +1,7 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs'),vm=require('node:vm');
+const nativeStack=require('./fixtures/viewer-stack-loading-source.cjs');
 const source=fs.readFileSync('config/ohif.js','utf8');
 const implementation=source.slice(source.indexOf('function kinCineWithinBudget('),source.indexOf('function kinApplyCTPreset('));
 
@@ -17,38 +18,63 @@ class Element {
  remove(){}
  querySelectorAll(){return [];}
 }
-function fixture(kind='orthographic',stackFrames=7){
- const document=new Element(),window=new Element(),timers=new Map();let nextTimer=0,current,allowed=true,resolveOld,rejectOld,requests=0,nativePlays=0;
+function fixture(kind='orthographic',stackFrames=7,cachedInstances=[]){
+ const document=new Element(),window=new Element(),timers=new Map();let nextTimer=0,current,allowed=true,resolveOld,rejectOld,requests=0,nativePlays=0,lastPlaybackRate;
+ const frameCache=new Set(),deferred=new Map();
+ const defer=(fn,ms)=>{const id=++nextTimer;deferred.set(id,{fn,ms});return id;},cancel=id=>deferred.delete(id);
  document.body=new Element();document.createElement=()=>new Element();document.hidden=false;
- const events={VIEWPORT_NEW_IMAGE_SET:'images',VOLUME_VIEWPORT_NEW_VOLUME:'volume',CAMERA_MODIFIED:'camera'};
+ const events={VIEWPORT_NEW_IMAGE_SET:'images',VOLUME_VIEWPORT_NEW_VOLUME:'volume',CAMERA_MODIFIED:'camera',STACK_VIEWPORT_SCROLL:'scroll',STACK_NEW_IMAGE:'loaded'};
+ const stack=nativeStack({window:{setTimeout:defer},setTimeout:defer,clearTimeout:cancel,
+  cache:{Ay:{isLoaded:id=>frameCache.has(id)}},enums:{Events:events,ViewportStatus:{PRE_RENDER:'rendered'}},
+  triggerEvent:{A:(element,event,detail)=>element.emit(event,{detail})}}).stack;
  const makeView=()=>{
   const element=new Element();let camera={focalPoint:[0,0,0],position:[0,0,10],viewPlaneNormal:[0,0,1],viewUp:[0,1,0],parallelScale:10,flipHorizontal:false,flipVertical:false};
-  let index=0;const ids=Array.from({length:stackFrames},(_,i)=>'image/'+i);
+  const ids=Array.from({length:stackFrames},(_,i)=>'image/'+i);
   const v={id:'selected-view',type:kind,element,viewportStatus:'rendered',getCamera:()=>structuredClone(camera),setCamera:c=>{camera={...camera,...c};element.emit(events.CAMERA_MODIFIED);},render(){},
-   getImageIds:()=>ids,getTargetImageIdIndex:()=>index,getCurrentImageIdIndex:()=>index,setIndex:value=>{index=value;}};element.viewport=v;return v;
+   imageIds:ids,currentImageIdIndex:0,targetImageIdIndex:0,perImageIdDefaultProperties:new Map(),shown:ids[0],
+   getImageIds:()=>ids,getTargetImageIdIndex(){return this.targetImageIdIndex;},getCurrentImageIdIndex(){return this.currentImageIdIndex;},
+   getCurrentImageId(){return ids[this.currentImageIdIndex];},_throwIfDestroyed(){},
+   async _loadAndDisplayImage(id){this.shown=id;return id;},
+   setIndex(value){this.currentImageIdIndex=value;this.targetImageIdIndex=value;this.shown=ids[value];},...stack};element.viewport=v;return v;
  };
  current=makeView();
  const cineEvents=new Element(),gridEvents=new Element(),state={isCineEnabled:true,cines:{'selected-view':{isPlaying:false}}},toolState={loop:true};
  const subscribe=emitter=>(name,fn)=>{emitter.addEventListener(name,fn);return {unsubscribe:()=>emitter.removeEventListener(name,fn)};};
- const cine={EVENTS:{CINE_STATE_CHANGED:'cine'},getState:()=>state,subscribe:subscribe(cineEvents),playClip(){if(kind==='orthographic')throw Error('MPR must use guarded timer');nativePlays++;},
+ const cine={EVENTS:{CINE_STATE_CHANGED:'cine'},getState:()=>state,subscribe:subscribe(cineEvents),playClip(element,options){if(kind==='orthographic')throw Error('MPR must use guarded timer');nativePlays++;lastPlaybackRate=options.framesPerSecond;},
   stopClip(){cineEvents.emit('cine');},setCine:({id,...values})=>{Object.assign(state.cines[id],values);cineEvents.emit('cine');}};
  const grid={EVENTS:{ACTIVE_VIEWPORT_ID_CHANGED:'active',GRID_STATE_CHANGED:'grid'},getActiveViewportId:()=>current.id,getState:()=>({viewports:new Map([[current.id,{}]])}),subscribe:subscribe(gridEvents)};
  window.cornerstone={Enums:{Events:events,ViewportStatus:{RENDERED:'rendered'}},getEnabledElement:element=>element.disabled?undefined:({viewport:element.viewport}),
-  metaData:{get:()=>({rows:64,columns:64})},imageLoader:{loadAndCacheImage:async()=>{}},utilities:{
+  cache:{getImage:()=>null,getMaxCacheSize:()=>16*1024*1024,getCacheSize:()=>0,isCacheable:n=>n<=16*1024*1024},metaData:{get:()=>({rows:64,columns:64})},imageLoader:{loadAndCacheImage:async id=>{frameCache.add(id);}},utilities:{
    getVolumeViewportScrollInfo:v=>({sliceRangeInfo:{sliceRange:{min:0,max:32,current:v.getCamera().focalPoint[2]},spacingInNormalDirection:1,camera:v.getCamera()}}),
-   jumpToSlice:async(element,{imageIndex})=>element.viewport.setIndex(imageIndex),scroll:(v,{delta})=>v.setIndex(v.getTargetImageIdIndex()+delta)}};
+   // Pinned jumpToSlice chooses current vs pending index from debounceLoading;
+   // native scroll always applies that delta to the pending target.
+   jumpToSlice:async(element,{imageIndex,debounceLoading=false})=>{const v=element.viewport;v.scroll(imageIndex-(debounceLoading?v.getTargetImageIdIndex():v.getCurrentImageIdIndex()),debounceLoading);},
+   scroll:(v,{delta,debounceLoading})=>v.scroll(delta,debounceLoading)}};
  window.cornerstoneTools={utilities:{cine:{getToolState:()=>toolState}}};
  window.kinGetVolumeCineTarget=()=>({key:'same-source-and-selection',contentKey:'same-source',allowed,volume:{volumeId:'volume'}});
  const fetch=()=>++requests===1?new Promise((resolve,reject)=>{resolveOld=resolve;rejectOld=reject;}):Promise.resolve(response());
- const context={window,document,fetch,AbortController,setTimeout,clearTimeout,JSON,Number,Math,Error,
+ const context={performance:{},window,document,fetch,AbortController,setTimeout:defer,clearTimeout:cancel,JSON,Number,Math,Error,
   setInterval:(fn,ms)=>{const id=++nextTimer;timers.set(id,{fn,ms});return id;},clearInterval:id=>timers.delete(id)};
  const extension=vm.runInNewContext(implementation+';kinCreateCine()',context);
- extension.preRegistration({servicesManager:{services:{cineService:cine,viewportGridService:grid,cornerstoneViewportService:{getCornerstoneViewport:()=>current}}}});extension.onModeEnter();
+ const handlerId='@ohif/extension-default.sopClassHandlerModule.stack';
+ // The native stack handler exposes FrameTime in milliseconds on a display set.
+ // Model that service boundary, leaving all DICOM instances untouched.
+ const originalCreate=instances=>instances.map(instance=>({instances:[instance],FrameRate:instance.FrameTime,SOPClassHandlerId:handlerId}));
+ const handler={getDisplaySetsFromSeries:originalCreate},cached=originalCreate(cachedInstances);
+ extension.preRegistration({extensionManager:{getModuleEntry:id=>{assert.equal(id,handlerId);return handler;}},servicesManager:{services:{
+  cineService:cine,viewportGridService:grid,cornerstoneViewportService:{getCornerstoneViewport:()=>current},displaySetService:{getActiveDisplaySets:()=>cached}
+ }}});extension.onModeEnter();
  const find=predicate=>{const visit=node=>node instanceof Element&&(predicate(node)?node:node.children.map(visit).find(Boolean));return visit(document.body);};
  const control=label=>find(node=>node.attributes['aria-label']===label),button=text=>find(node=>node.textContent===text);
  function response(){return {ok:true,json:async()=>({kind:'member',institution:'institution',sub:'same-user'})};}
- function play(){document.emit('click',{target:{closest:()=>true}});cine.setCine({id:current.id,isPlaying:true});return cine.playClip(current.element,{framesPerSecond:24});}
+ function play(){document.emit('click',{target:{closest:()=>true}});cine.setCine({id:current.id,isPlaying:true});return cine.playClip(current.element,{framesPerSecond:state.cines[current.id].frameRate??24});}
+ // OHIF 3.9.1 initializes both the FPS control and cine service from this hint.
+ function openDisplaySet(ds){const frameRate=ds.FrameRate?Math.round(1000/ds.FrameRate):24;cine.setCine({id:current.id,isPlaying:false,frameRate});return frameRate;}
  return {play,old:current,range(first,last){control('Range Start').value=String(first);control('Range End').value=String(last);button('Apply Range').emit('click');},
+  openSeries:instance=>openDisplaySet(handler.getDisplaySetsFromSeries([instance])[0]),openCached:()=>openDisplaySet(cached[0]),
+  setRate:frameRate=>cine.setCine({id:current.id,frameRate}),rate:()=>state.cines[current.id].frameRate,playbackRate:()=>lastPlaybackRate,
+  changeRate(frameRate){cine.setCine({id:current.id,frameRate});cine.stopClip(current.element,{viewportId:current.id});return cine.playClip(current.element,{framesPerSecond:frameRate});},
+  handlerRestored:()=>handler.getDisplaySetsFromSeries===originalCreate,reenter:()=>extension.onModeEnter(),
   restart(){cine.stopClip(current.element,{viewportId:current.id});return cine.playClip(current.element,{framesPerSecond:12});},
   mode(value){control('Playback Direction').value=value;control('Playback Direction').emit('change');},loop(value){const input=find(node=>node.type==='checkbox');input.checked=value;input.emit('change');},
   jump(end){button(end?(kind==='stack'?'Last Frame':'Last Plane'):(kind==='stack'?'First Frame':'First Plane')).emit('click');},
@@ -56,8 +82,68 @@ function fixture(kind='orthographic',stackFrames=7){
   stopOld(element,disabled=false){element.disabled=disabled;cine.stopClip(element,{viewportId:'selected-view'});},
   release(){resolveOld(response());},reject(){rejectOld(Error('Synthetic old response failed'));},deny(){allowed=false;},
   tick(){for(const entry of [...timers.values()])if(entry.ms!==250)entry.fn();},index:()=>current.getCurrentImageIdIndex(),nativePlays:()=>nativePlays,
+  deferred(){for(const [id,entry] of [...deferred])if(entry.ms===40){deferred.delete(id);entry.fn();}},
   rangeValues:()=>[control('Range Start').value,control('Range End').value],playing:()=>state.cines['selected-view'].isPlaying,close:()=>extension.onModeExit()};
 }
+
+for(const end of [false,true])test(`stack cine ${end?'Last':'First'} Frame corrects a stale target and the next wheel step starts there`,async()=>{
+ const f=fixture('stack');try{
+  await f.old.setImageIdIndex(4); // A legacy direct jump leaves its scroll target behind.
+  f.range(2,6);f.jump(end);await new Promise(setImmediate);
+  const wanted=end?5:1;
+  assert.equal(f.old.shown,'image/'+wanted);
+  f.old.scroll(end?-1:1,false);
+  assert.equal(f.old.shown,'image/'+(wanted+(end?-1:1)));
+ }finally{f.close();}
+});
+
+test('stack cine range start supersedes a pending wheel target without a deferred rewind',async()=>{
+ const f=fixture('stack');try{
+  f.range(3,5);f.old.scroll(1); // Current 0, target 1, frame 1 still deferred.
+  const playing=f.play();f.release();await playing;
+  assert.equal(f.old.shown,'image/2');
+  f.deferred();assert.equal(f.old.shown,'image/2');
+  f.tick();assert.equal(f.old.shown,'image/3');
+ }finally{f.close();}
+});
+
+for(const [name,attributes,expected] of [
+ ['Cine Rate', {CineRate:12},12],
+ ['Recommended Display Frame Rate before Cine Rate and Frame Time', {RecommendedDisplayFrameRate:12,CineRate:24,FrameTime:40},12],
+ ['Cine Rate before Frame Time', {CineRate:'12',FrameTime:40},12],
+ ['Frame Time fallback', {FrameTime:100},10],
+ ['no rate', {},24],
+ ['Frame Time Vector alone keeps the existing default', {FrameTimeVector:[0,80,80]},24],
+ ['invalid recommended rate falls back to Cine Rate', {RecommendedDisplayFrameRate:'bad',CineRate:12},12],
+ ['nonpositive rates fall back to Frame Time', {RecommendedDisplayFrameRate:0,CineRate:-12,FrameTime:50},20],
+ ['non-finite rates keep the existing default', {RecommendedDisplayFrameRate:Infinity,CineRate:NaN},24],
+])test(`multiframe opens and plays at ${expected} FPS: ${name}`,async()=>{
+ const f=fixture('stack'),instance=Object.freeze({NumberOfFrames:7,...attributes}),before={...instance};try{
+  assert.equal(f.openSeries(instance),expected);assert.equal(f.rate(),expected);
+  const pending=f.play();f.release();await pending;assert.equal(f.playbackRate(),expected);
+  await f.changeRate(23);assert.equal(f.rate(),23);assert.equal(f.playbackRate(),23);
+  assert.deepEqual(instance,before);
+ }finally{f.close();}
+ assert.equal(f.handlerRestored(),true);
+});
+
+test('a replacement series gets its own rate, including the old default when absent',()=>{
+ const f=fixture('stack');try{
+  assert.equal(f.openSeries({NumberOfFrames:7,CineRate:12}),12);f.setRate(23);
+  assert.equal(f.openSeries({NumberOfFrames:7}),24);
+  assert.equal(f.openSeries({NumberOfFrames:7,CineRate:15}),15);
+  assert.equal(f.openSeries({NumberOfFrames:1,CineRate:12}),24);
+ }finally{f.close();}
+});
+
+test('cached multiframe rates and mode re-entry use the same source precedence',()=>{
+ const instance=Object.freeze({NumberOfFrames:7,RecommendedDisplayFrameRate:12,CineRate:24});
+ const f=fixture('stack',7,[instance]);try{
+  assert.equal(f.openCached(),12);f.reenter();assert.equal(f.openCached(),12);
+  assert.equal(f.openSeries({NumberOfFrames:7,CineRate:15}),15);
+ }finally{f.close();}
+ assert.equal(f.handlerRestored(),true);
+});
 for(const outcome of ['release','reject'])test(`late retired MPR ${outcome} leaves replacement playback running`,async()=>{
  const f=fixture();try{
   const old=f.play(),replacement=f.replace();assert.equal(f.playing(),false);await f.play();f.tick();assert.equal(replacement.getCamera().focalPoint[2],1);

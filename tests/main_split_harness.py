@@ -26,6 +26,7 @@ What a case asserts is browser-observed behaviour (registrations, dispatch outco
 implementation strings (AGENTS 1-B). Statement names appear only in the manifest, to tell a reader where a
 registration came from.
 """
+import base64
 import hashlib
 import json
 import shutil
@@ -33,6 +34,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlparse
 
 try:
@@ -279,6 +281,115 @@ class Delivery:
         return index == 0 or page.evaluate("name => window.__kinTrace.executed.includes(name)", self.order[index - 1])
 
 
+class WorkerRequest:
+    """The request fields the synthetic page handlers consume, preserved from CDP."""
+
+    def __init__(self, request, page):
+        self.method, self.url = request["method"], request["url"]
+        self.headers = {name.lower(): value for name, value in request.get("headers", {}).items()}
+        self.post_data = request.get("postData")
+        # SharedWorkers have no frame; the registering document owns this synthetic session.
+        self.frame = SimpleNamespace(page=page)
+
+    @property
+    def post_data_json(self):
+        return json.loads(self.post_data) if self.post_data is not None else None
+
+
+class WorkerRoute:
+    """Adapt the page handler's fulfill/abort contract to CDP, including deferred answers."""
+
+    def __init__(self, cdp, request_id, request):
+        self.cdp, self.request_id, self.request = cdp, request_id, request
+        self.on_fulfill = lambda: None
+
+    def fulfill(self, *, status=200, headers=None, content_type=None, body=None, json=None):
+        response_headers = {name.lower(): value for name, value in (headers or {}).items()}
+        if json is not None:
+            # Keep the same keyword as Playwright's Route.fulfill.
+            from json import dumps
+            body = dumps(json)
+            response_headers.setdefault("content-type", "application/json")
+        if content_type is not None:
+            response_headers["content-type"] = content_type
+        if isinstance(body, str):
+            body = body.encode("utf-8")
+        self.cdp.send("Fetch.fulfillRequest", {
+            "requestId": self.request_id, "responseCode": status,
+            "responseHeaders": [{"name": name, "value": value} for name, value in response_headers.items()],
+            "body": base64.b64encode(body or b"").decode("ascii"),
+        })
+        self.on_fulfill()
+
+    def abort(self, error_code="failed"):
+        reason = {"failed": "Failed", "aborted": "Aborted", "connectionreset": "ConnectionReset"}[error_code]
+        return self.cdp.send("Fetch.failRequest", {"requestId": self.request_id, "errorReason": reason})
+
+
+class WorkerNetwork:
+    """What a SharedWorker itself asks for (importScripts, fetch) passes every Playwright route - measured: a context
+    route sees the worker's own script but nothing the running worker requests - so on the synthetic origin it would go
+    to the real network, fail, and end the worker's start with an error no served product page has (the preload
+    worker's importScripts('preload-store.js')). The browser target's own interception (CDP Fetch) catches those
+    requests; each is answered by the synthetic origin of the browser context it belongs to. A registered context's
+    request that origin does not answer is failed and reported, never invented; a page's request (the context routes
+    answer those first) and another context's go on unchanged."""
+
+    _networks = []
+
+    @classmethod
+    def of(cls, browser):
+        for known, network in cls._networks:
+            if known is browser:
+                return network
+        network = cls(browser)
+        cls._networks.append((browser, network))
+        return network
+
+    def __init__(self, browser):
+        self.cdp = browser.new_browser_cdp_session()
+        self.contexts = {}
+        self.cdp.on("Fetch.requestPaused", self._paused)
+        self.cdp.send("Fetch.enable", {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]})
+
+    def register(self, context, page, answer, unanswered):
+        """`answer(route, request)` uses the page handler; `unanswered(method, url)` reports handler failures."""
+        session = context.new_cdp_session(page)
+        try:
+            key = session.send("Target.getTargetInfo")["targetInfo"]["browserContextId"]
+        finally:
+            session.detach()
+        self.contexts[key] = (page, answer, unanswered)
+        return key
+
+    def unregister(self, key):
+        self.contexts.pop(key, None)
+
+    def _paused(self, event):
+        request, request_id = event["request"], event["requestId"]
+        try:
+            try:
+                owner = self.cdp.send("Target.getTargetInfo", {"targetId": event.get("frameId")})["targetInfo"]
+            except PlaywrightError:
+                owner = None
+            handler = (self.contexts.get(owner["browserContextId"])
+                       if owner and owner["type"] in ("shared_worker", "worker", "service_worker") else None)
+            if handler is None:
+                return self.cdp.send("Fetch.continueRequest", {"requestId": request_id})
+            page, answer, unanswered = handler
+            worker_request = WorkerRequest(request, page)
+            route = WorkerRoute(self.cdp, request_id, worker_request)
+            try:
+                answer(route, worker_request)
+            except PlaywrightError:
+                raise
+            except Exception:  # a missing historical asset or an unsupported handler request must fail closed
+                unanswered(request["method"], request["url"])
+                route.abort()
+        except PlaywrightError:
+            pass  # the worker or its context has gone
+
+
 # The trace is installed before any page script (context.add_init_script). It keeps its own references to the
 # original EventTarget methods, so its own listeners are not part of the trace.
 #
@@ -297,6 +408,7 @@ TRACE_SCRIPT = r"""(() => {
   if (window.__kinTrace) return;
   const add = EventTarget.prototype.addEventListener, remove = EventTarget.prototype.removeEventListener;
   const registrations = [], dispatches = [], executed = [], errors = [], objects = [], unresolved = [], parsed = [];
+  const workers = [];
   let seq = 0, thrown = null;
   const births = new WeakMap(), siteCounts = new Map();
   const NOISY = new Set(['mousemove', 'pointermove', 'pointerrawupdate', 'mouseover', 'mouseout', 'pointerover',
@@ -403,9 +515,25 @@ TRACE_SCRIPT = r"""(() => {
     Object.defineProperty(window, name, { ...d, value: proxy });
   };
   for (const name of ['EventTarget', 'BroadcastChannel', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'Worker',
-    'SharedWorker', 'FileReader', 'Notification', 'MediaRecorder', 'MediaStream', 'AudioContext', 'OfflineAudioContext',
+    'FileReader', 'Notification', 'MediaRecorder', 'MediaStream', 'AudioContext', 'OfflineAudioContext',
     'MediaSource', 'RTCPeerConnection', 'Image', 'Audio', 'Option'])
     construct(name, (obj, fr) => create(obj, obj instanceof Element ? kindOf(obj) : name, 'new ' + name, fr));
+  // A shared worker is reached through the port it is created with (the preload queue's onmessage is set on it).
+  // Its start is host I/O the page does not wait for: the browser tells the page it failed (an error event on the
+  // worker) or the worker shows it ran by the first message its port delivers. A barrier waits for one of the two
+  // (`workers()`), so the outcome lands in the same phase on every side. Native listeners: not part of the trace, and
+  // an added message listener does not start the port.
+  construct('SharedWorker', (worker, fr) => {
+    const record = create(worker, 'SharedWorker', 'new SharedWorker', fr);
+    create(worker.port, 'MessagePort', 'SharedWorker.port', fr, worker, 'port');
+    const start = { object: record ? 'o' + record.id : null, outcome: 'starting', seq: null };
+    workers.push(start);
+    const settle = outcome => event => {
+      if (start.outcome === 'starting' && event.isTrusted) { start.outcome = outcome; start.seq = seq; }
+    };
+    add.call(worker, 'error', settle('failed'));
+    add.call(worker.port, 'message', settle('started'));
+  });
   construct('AudioWorkletNode', (node, fr) => {
     create(node, 'AudioWorkletNode', 'new AudioWorkletNode', fr);
     create(node.port, 'MessagePort', 'AudioWorkletNode.port', fr, node, 'port');
@@ -601,6 +729,7 @@ TRACE_SCRIPT = r"""(() => {
   Object.defineProperty(window, '__kinTrace', { value: Object.freeze({ registrations, dispatches, executed, errors,
     rendering, excludedDispatchTypes: [...NOISY],
     unresolved, objectsFor, parsed: () => parsed.slice(), created: () => objects.length,
+    workers: () => workers.map(item => ({ ...item })),
     mark(label) { const item = { seq: ++seq, label: String(label) }; dispatches.push(item); return item.seq; },
     now: () => seq }) });
 })();"""
@@ -618,7 +747,7 @@ def snapshot(page, since=0):
       const registrations = pick(t.registrations), dispatches = pick(t.dispatches);
       const ids = [...registrations.flatMap(r => [r.object, r.signalObject]), ...dispatches.map(d => d.object)];
       return { registrations, dispatches, errors: pick(t.errors), executed: t.executed.slice(), now: t.now(),
-               objects: t.objectsFor(ids), unresolved: t.unresolved.slice(),
+               objects: t.objectsFor(ids), unresolved: t.unresolved.slice(), workers: t.workers(),
                excluded_dispatch_types: t.excludedDispatchTypes.slice() }; }""", since)
 
 

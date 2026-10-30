@@ -69,8 +69,8 @@ ARTIFACTS = Path(os.environ.get('KIN_U4L_ARTIFACTS', ROOT / 'tests/e2e/artifacts
 RFIELDS = ('findings', 'conclusion', 'recommendation')
 REPORT_TABLES = ('Report', 'ReportDraft', 'ReportVersion')
 CAPABILITY_KEYS = {'available', 'maxBytes', 'timeoutMs', 'languagePin', 'enginePin', 'modelPin'}
-MAX_BYTES = 1048576                  # the code ceiling an unconfigured stack reports (asr.service.ts:18,27)
-MAX_FRAMES = (MAX_BYTES - 44) // 2   # 524266: the node cap dictation-capture.js derives from maxBytes
+MAX_BYTES = 180 * 32000 + 44         # the limit an unconfigured stack reports (dictation-audio.ts DICTATION_AUDIO_DEFAULT_BYTES)
+MAX_FRAMES = (MAX_BYTES - 44) // 2   # 2880000: the node cap dictation-capture.js derives from maxBytes
 WAIT_SECONDS = 20                    # every wait, as the page default (test_worklist.py:166)
 WAIT_MS = WAIT_SECONDS * 1000
 FRAME_SECONDS = 30                   # the one longer wait: the embedded viewer's first load (readiness §5)
@@ -138,6 +138,8 @@ def source_pin(name):
 ASR_ENGINE_PIN, ASR_MODEL_PIN = source_pin('ASR_ENGINE_PIN'), source_pin('ASR_MODEL_PIN')
 TEMPLATE_CSP = re.findall(r'add_header Content-Security-Policy "([^"]*)" always;',
                           (ROOT / 'proxy' / 'nginx.conf.template').read_text(encoding='utf-8'))
+# D1891's decoder policy permits JS eval; dictation uses the page policy, checked against served headers below.
+TEMPLATE_CSP = [policy for policy in TEMPLATE_CSP if "'unsafe-eval'" not in policy.replace(';', ' ').split()]
 # Sized to reach the pane's max-height cap (main.html:266), the worst case for the pane geometry.
 REVIEW_TEXT = '\n'.join('U4L geometry review line %02d — 합성 검토 문장' % n for n in range(1, 13))
 REVIEW_BODY = json.dumps({'text': REVIEW_TEXT, 'seconds': 1.0, 'languagePin': 'auto', 'enginePin': ASR_ENGINE_PIN,
@@ -1397,7 +1399,7 @@ def oracle_self_check():
     if set(generated_secret_names()) != {'POSTGRES_PASSWORD', 'ORTHANC_PASS', 'KC_ADMIN_PASSWORD',
                                          'KC_CLIENT_SECRET', 'KC_WEB_SECRET', 'KIN_COOKIE_SECRET', 'KIN_EMR_RUNTIME_PASSWORD'}:
         problems.append('the generated secret names must be read from measurement_ci.py')
-    if CHANNEL != 'chromium' or MAX_FRAMES != 524266:
+    if CHANNEL != 'chromium' or MAX_FRAMES != 2880000:
         problems.append('the launch channel and node cap pins moved')
     return problems + netlog_oracle_self_check()
 

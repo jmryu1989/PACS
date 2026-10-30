@@ -466,7 +466,7 @@
     KinDictation.mount(dictation, {
       button: $("#b-dictate"), pane: $("#dictation-pane"), status: $("#dictation-status"),
       text: $("#dictation-text"), place: $("#dictation-place"), meta: $("#dictation-meta"),
-      stop: $("#dictation-stop"), cancel: $("#dictation-cancel"), repin: $("#dictation-repin"),
+      stop: $("#dictation-stop"), cancel: $("#dictation-cancel"), retry: $("#dictation-retry"), repin: $("#dictation-repin"),
       insert: $("#dictation-insert"), close: $("#dictation-close"),
     }, {
       inserted: field => {
@@ -881,6 +881,7 @@
 
     // 특수 렌더링이 필요한 칸만 함수로
     let studyPriority = null;
+    const viewingNames = new Map();
     const CELL = {
       assignedReader:s=>`<button type="button" class="chip" data-reader-assignment="${esc(s.uid)}" ${!serverMode||demoMode||offline?'disabled':''}>${esc(s.assignedReader||'Unassigned')}</button>`,
       techNote: s => `<button type="button" class="chip" data-tech-note="${esc(s.uid)}" aria-label="${esc(s.id)} Tech 메모 ${noteLabel(s.uid)}" ${!serverMode || demoMode || offline ? 'disabled' : ''}>${noteLabel(s.uid)}</button>`,
@@ -893,11 +894,14 @@
       desc: s => esc(shownStudyDesc(s)),
       preDoc: s => esc(displayActor(s.preDoc)),
       preReviewer: s => esc(displayActor(s.preReviewer)),
-      // Viewing: 지금 이 검사의 판독문을 쓰고 있는 사람
-      viewing: s => !s.holder ? ""
-        : s.holder === user
+      // A writer can hold the report with no viewer open. Presence excludes self; the lock does not.
+      viewing: s => {
+        const hold = !s.holder ? '' : s.holder === user
           ? `<span class="hold me" title="내가 작성 중">✎ 나</span>`
-          : `<span class="hold other" title="${esc(displayActor(s.holder))} 님이 작성 중">✎ ${esc(displayActor(s.holder))}</span>`,
+          : `<span class="hold other" title="${esc(displayActor(s.holder))} 님이 작성 중">✎ ${esc(displayActor(s.holder))}</span>`;
+        const presence = esc(viewingNames.get(s.uid) || '');
+        return hold + (hold && presence ? ' · ' : '') + presence;
+      },
       // S7-U3b Hospital: 서버가 준 소유 기관 이름만 쓴다. Tele는 행의 tele만 따른다 — 이름을 내 기관 이름과 비교하면
       // 등록 이름이 같은 두 기관에서 틀리고, reqHosp는 Technician에서 손으로 바꿀 수 있는 값이다.
       institutionName: s => {
@@ -964,6 +968,7 @@
       worklistSearch?.change();
       render();
     });
+
 
     // ── 데이터 ──
     // S4-U1b session-local KIN observation (renderObservation). Memory only; a page load starts over.
@@ -1436,6 +1441,7 @@
         }).join("") + `</tr>`).join("")
         || `<tr><td class="empty" colspan="${shown.length}">${bodyPartNote ? '부위 확인 전인 검사가 있어 검색 결과가 아직 완전하지 않습니다.' : 'No records found'}</td></tr>`;
       columnPrefs?.decorate(mode);
+      syncViewingRows();
       multiSelection?.sync();
       rowNavigation?.sync();
       worklistSearch?.show();
@@ -1536,7 +1542,7 @@
       $("#holdbar").style.display = held ? "flex" : "none";
       $("#holdmsg").textContent = held ? `✎ ${heldTitle} — 잠금이 풀리면 이어서 판독할 수 있습니다` : "";
       $("#deferbar").style.display = s?.rs === "H" ? "flex" : "none";
-      $("#defermsg").textContent = s?.rs === "H" ? `⏸ On Hold — ${s.holdReason ?? ""}` : "";
+      $("#defermsg").textContent = s?.rs === "H" ? `⏸ On Hold${s.holdReason ? ' — ' + s.holdReason : ''}` : "";
       // 남의 예비 판독은 읽지도 쓰지도 못한다. 서버가 막지만 회색으로 보이는 편이 낫다 —
       // 눌러보고 거절당하는 건 "왜 안 되지"를 만들고, 회색은 "내 것이 아니구나"를 만든다.
       const locked = !!appState[selectedUid]?.prelimHidden;
@@ -1895,6 +1901,7 @@
       render(); refreshRight();
     }
 
+
     /**
      * 날짜 퀵필터. "최근 N일" — **양쪽 끝을 다 본다.**
      *
@@ -1941,8 +1948,7 @@
       document.querySelectorAll(".tabs > div").forEach(x => x.classList.toggle("on", x.dataset.tab === m));
       const tech = m === "Technician";
       $("#ctxbar").classList.toggle("show", tech);
-      document.querySelector(".s-template").style.display = tech ? "none" : "flex";
-      document.querySelector(".s-clinical").style.width = tech ? "66%" : "30%";
+      // The report window's panels and widths for this mode come from applyLayout() below (workspace-layout.js).
       document.querySelector(".report-p").style.display = tech ? "none" : "flex";
       document.querySelector(".order-p").style.display = tech ? "flex" : "none";
       $("#routing-factors").hidden = tech;
@@ -2515,7 +2521,7 @@
       receipt.hidden = !s;
       if (!s) return;
       // Every worklist row passed the visible() boundary on the server, so axis A is `assigned` here;
-      // institution-less studies only appear in the admin Unmatched Studies list.
+      // a study whose sending hospital is unknown is held and reaches no list (D1882).
       const labels = KinStudyArrivals.receiptLabels({ assignment: "assigned",
         observation: KinStudyArrivals.studyObservation(studyObservationModel, s.uid), gateway: s.gatewayReceipt ?? null });
       $("#receipt-assignment").textContent = labels.assignment.text; $("#receipt-assignment").title = labels.assignment.title;
@@ -4149,6 +4155,8 @@
     let relatedReportSeq = 0;
 
     function clearRelatedReport(message = "Related Exam을 선택하세요") {
+      // A5: the Source opening ends with its text; a later read of any Source is a new display.
+      KinReportViews.end("related");
       $("#prior-report-meta").textContent = "";
       $("#prior-report-meta").title = "";
       $("#prior-report-status").textContent = message;
@@ -4195,6 +4203,8 @@
       const uid = s.uid;
       const currentUid = selectedUid;
       const seq = ++relatedReportSeq;
+      // A5: another Source ends the shown Source's opening now; a re-read of the same Source continues it.
+      KinReportViews.open("related", uid);
       // 이 읽기의 답·실패가 이전 판독문 칸에 닿는 자리는 이 읽기를 시작한 문맥과 요청 번호·선택을 함께 지난다.
       const at = work.capture("study");
       const stale = () => !work.admits(at) || seq !== relatedReportSeq || uid !== relatedUid || selectedUid !== currentUid;
@@ -4225,11 +4235,15 @@
         const restricted = e?.status === 403 || e?.status === 404;
         $("#prior-report-status").textContent = restricted
           ? "이 판독문을 볼 권한이 없습니다 (Access Restricted)" : `판독문 조회 실패: ${e.message}`;
+        KinReportViews.end("related");
         shown({ state: restricted ? "restricted" : "failed" });
         return;
       }
       if (stale()) return;
-      if (!report) { $("#prior-report-status").textContent = "판독문 없음"; shown({ state: "none" }); return; }
+      if (!report) {
+        KinReportViews.end("related");
+        $("#prior-report-status").textContent = "판독문 없음"; shown({ state: "none" }); return;
+      }
       $("#prior-report-meta").textContent =
         `${relatedReportMeta(s)} · 판독의 ${displayActor(report.author) || "-"}`;
       $("#prior-report-meta").title = $("#prior-report-meta").textContent;
@@ -4242,6 +4256,13 @@
       shown({ state: "ready", version: Number.isSafeInteger(report.version) ? report.version : null, action: report.action ?? null,
         author: displayActor(report.author) || null, at: typeof report.at === "string" ? report.at.replace("T", " ").slice(0, 16) : null,
         texts: { findings: report.findings ?? "", conclusion: report.conclusion ?? "", recommendation: report.recommendation ?? "" } });
+      // A5: only the version this Source shows is displayed (the read provided every version row). Its display report names
+      // this read's provision; a re-read of the same Source and version (every list refresh) is the same display.
+      const key = "report-version:" + report.version;
+      KinReportViews.end("related", [key]);
+      KinReportViews.watch("related", uid, key, { uid, accessRef: report.accessRef,
+        nodes: [$("#prior-report-content"), document.querySelector("#related-mode .related-mode-body")], live: () => !stale(),
+        report: body => api("POST", `/studies/${encodeURIComponent(uid)}/view-observations`, body, undefined, at) });
     }
 
     function returnToReportStudy() {
@@ -4259,10 +4280,11 @@
     }
 
     /**
-     * W5 Back to Current Draft (Back, Esc, Report Editor/Ctrl+Alt+4): leaves the mode and gives the editor back with its caret,
-     * selection and scroll (or the insertion end). Never refused. The Viewed Study stays the Source, so its report stays in the
-     * Related Report pane beside the editor (reading while writing, D1244); Return to Current (#related-return) is the separate
-     * action that gives the viewing back to the Target, and in the mode it also leaves the mode.
+     * W5 Back to Current Draft (Back, Esc, Report Editor/Ctrl+Alt+4, the editor's Resume Editing): leaves the mode and gives the
+     * editor back with its caret, selection and scroll (or the insertion end). Never refused. The Viewed Study stays the Source,
+     * so its report stays in the Related panel's Related Report view beside the editor (reading while writing, D1244; Minhoon
+     * item 8); Return to Current (#related-return) is the separate action that gives the viewing back to the Target, and in
+     * the mode it also leaves the mode.
      */
     function backToCurrentDraft() {
       const left = relatedMode.exit();
@@ -4582,6 +4604,20 @@
     }
 
     /**
+     * Minhoon item 8 (2026-10-27): the editor is marked Editable only where typing would be accepted now. The answer is the
+     * frame's own edit gate (canEdit above: the page's work state, a Reading Target, reportEditorBlock), so the mark and a
+     * refused keystroke never disagree; Read Only carries the gate's reason. In Related Report mode the editor stays on
+     * screen with the draft, and Resume Editing beside the mark is the mode's Back.
+     */
+    function renderEditorState() {
+      const why = work.state() !== "active" ? "판독 화면이 지금 편집을 받지 않습니다." : !selectedUid ? "검사를 선택하세요" : reportEditorBlock();
+      $("#report-editor").dataset.editable = String(!why);
+      $("#report-editor-state").textContent = why ? "Read Only" : "Editable";
+      $("#report-editor-why").textContent = $("#report-editor-why").title = why || "";
+      $("#report-editor-resume").hidden = !relatedMode.active();
+    }
+
+    /**
      * 초안 표시줄.
      *
      * 초안을 사람에게 붙이고 나면 화면이 확정본이 아닌 것을 보여줄 수 있게 된다.
@@ -4597,6 +4633,7 @@
       if (reportNotice || reportNoticeShown) renderReportNotice();
       // W5: the Reading Target card of Related Report mode shows this same draft state.
       relatedMode.refresh();
+      renderEditorState();
       const bar = $("#draftbar");
       const r = appState[selectedUid] ?? {};
       const d = r.prelimHidden ? null : r.draft;
@@ -6943,7 +6980,7 @@
     function announceCommit(uid, action, reason, lateText) {
       const done = {
         save: "임시 저장했습니다 (RS: T)",
-        defer: `보류했습니다 (RS: H) — ${reason}`,
+        defer: `보류했습니다 (RS: H)${reason ? ' — ' + reason : ''}`,
         approve: "판독문을 승인했습니다 (RS: A)",
         addendum: "추가기재를 저장했습니다 — 이전 승인본은 그대로 남습니다",
         reset: "판독을 취소했습니다 (RS: W). 사유가 이력에 기록됐습니다",
@@ -7397,7 +7434,7 @@
     $("#b-approve-next").addEventListener("click", approveAndNext);
     $("#b-addendum").addEventListener("click", () => commitReport("addendum"));
     let reasonResolve = null;
-    function askReason({ title, choices }) {
+    function askReason({ title, choices, optional = false }) {
       if (reasonResolve) reasonResolve(null);
       const modal = $("#reasonmodal"), extra = $("#reason-extra"), ok = $("#reason-ok");
       $("#reason-title").textContent = title;
@@ -7407,10 +7444,12 @@
       const value = () => {
         const choice = modal.querySelector('input[name="reason-choice"]:checked')?.value;
         const detail = extra.value.trim();
-        if (!choice || (choice === "기타" && !detail) || detail.length > 200) return null;
+        if (detail.length > 200) return null;
+        if (!choice) return optional ? detail : null;
+        if (choice === "기타" && !detail && !optional) return null;
         return detail ? `${choice} — ${detail}` : choice;
       };
-      const update = () => { ok.disabled = !value(); };
+      const update = () => { ok.disabled = value() === null; };
       update();
       modal.classList.add("show");
       return new Promise(resolve => {
@@ -7425,7 +7464,7 @@
         modal.oninput = modal.onchange = update;
         modal.onkeydown = e => { if (e.key === "Escape") finish(null); };
         $("#reason-cancel").onclick = () => finish(null);
-        ok.onclick = () => { const reason = value(); if (reason) finish(reason); };
+        ok.onclick = () => { const reason = value(); if (reason !== null) finish(reason); };
       });
     }
     $("#b-unread").addEventListener("click", async () => {
@@ -7438,8 +7477,8 @@
     });
     $("#b-defer").addEventListener("click", async () => {
       const uid = selectedUid, at = work.capture("study");
-      const reason = await askReason({ title: "판독 보류 사유", choices: ["prior 없음", "임상정보 부족", "영상 불량", "재촬영 필요", "기타"] });
-      if (!reason || uid !== selectedUid || !work.admits(at)) return;
+      const reason = await askReason({ title: "Defer (Optional Reason)", optional: true, choices: ["prior 없음", "임상정보 부족", "영상 불량", "재촬영 필요", "기타"] });
+      if (reason === null || uid !== selectedUid || !work.admits(at)) return;
       commitReport("defer", reason);
     });
 
@@ -7459,6 +7498,7 @@
       if (a.ward) s.ward = a.ward;
       if (a.reqHosp && !s.institutionName) s.reqHosp = a.reqHosp;
     }
+
 
     // ══════════ 동시 판독 점유 (교훈 §2) ══════════
     // 점유는 **열람이 아니라 쓰기**로 시작한다. 검사를 열어보는 건 흔한 일이고,
@@ -8269,12 +8309,82 @@
       prep.panel.replaceChildren(title, note, pending, status, actions);
       if (!prep.panel.open) prep.panel.showModal();
       actions.querySelector("button")?.focus();
+    }    // Presence follows the viewer heartbeat, independently of the optional list refresh.
+    let viewingTimer = null, viewingRequest = null, viewingSequence = 0, viewingScope = '';
+    function paintViewing() {
+      const index = shownColumns().findIndex(c => c.k === 'viewing');
+      if (index < 0) return;
+      const byUid = new Map(studies.map(study => [study.uid, study]));
+      for (const row of $('#rows').querySelectorAll('tr[data-uid]')) {
+        const cell = row.cells[index], study = byUid.get(row.dataset.uid);
+        // Keep the saved width container and render the writing lock alongside presence.
+        if (cell && study) (cell.querySelector(':scope > .wc-cell') || cell).innerHTML = CELL.viewing(study);
+      }
     }
-
+    function clearViewing() {
+      ++viewingSequence;
+      viewingRequest?.abort(); viewingRequest = null;
+      viewingNames.clear(); paintViewing();
+    }
+    function stopViewing() {
+      clearInterval(viewingTimer); viewingTimer = null;
+      viewingScope = ''; clearViewing();
+    }
+    function syncViewingRows() {
+      const scope = serverMode && !demoMode && !offline && shownColumns().some(c => c.k === 'viewing')
+        ? JSON.stringify([...$('#rows').querySelectorAll('tr[data-uid]')].map(row => row.dataset.uid)) : '';
+      if (scope === viewingScope) return;
+      clearViewing(); viewingScope = scope;
+      if (scope) void refreshViewing();
+    }
+    async function refreshViewing() {
+      if (!serverMode || demoMode || offline || document.hidden || !viewingScope || viewingRequest) return;
+      const at = work.capture('document');
+      if (!work.admits(at)) { clearViewing(); return; }
+      const sequence = ++viewingSequence, scope = viewingScope, uids = JSON.parse(scope);
+      if (!uids.length) return;
+      const controller = new AbortController(); viewingRequest = controller;
+      // Allow a read to outlast one poll, but bound stale names to a stalled read's timeout.
+      const timeout = setTimeout(() => {
+        if (sequence === viewingSequence) clearViewing();
+      }, 10000);
+      const live = () => sequence === viewingSequence && scope === viewingScope && work.admits(at);
+      try {
+        const requests = [];
+        // Keep each GET below the proxy's request-line bound even with long DICOM UIDs.
+        for (let i = 0; i < uids.length; i += 50)
+          requests.push(api('GET', '/presence?uids=' + encodeURIComponent(uids.slice(i, i + 50).join(',')),
+            undefined, controller.signal, at));
+        const replies = await Promise.all(requests);
+        if (!live()) return;
+        viewingNames.clear();
+        for (const reply of replies) for (const [uid, people] of Object.entries(reply.studies || {})) {
+          if (!uids.includes(uid) || !Array.isArray(people)) continue;
+          const names = people.filter(person => typeof person?.name === 'string' && person.name).map(person => person.name);
+          if (names.length) viewingNames.set(uid, 'Viewing: ' + names.join(', '));
+        }
+        paintViewing();
+      } catch (_) {
+        if (live()) { viewingNames.clear(); paintViewing(); }
+      } finally {
+        clearTimeout(timeout);
+        if (sequence === viewingSequence) viewingRequest = null;
+      }
+    }
+    onCommonEnd(stopViewing);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) clearViewing(); else void refreshViewing();
+    });
+    window.addEventListener('pagehide', stopViewing);
     // 다른 사람이 잡거나 놓은 걸 보려면 주기적으로 확인해야 한다.
     // 기본 30초. 간격 변경은 진행 중인 이전 조회도 무효화한다.
     let poll = null, pollGeneration = 0;
     function startPolling() {
+      stopViewing();
+      if (serverMode && !demoMode && !offline) {
+        syncViewingRows();
+        viewingTimer = setInterval(() => { syncViewingRows(); void refreshViewing(); }, 5000);
+      }
       clearInterval(poll); poll = null;
       const generation = ++pollGeneration;
       const seconds = worklistRefresh?.seconds() ?? 30;
@@ -8401,6 +8511,7 @@
     }
     let pollFails = 0;
 
+
     // ── 판독문 이력 ──
     /**
      * 이 모달 한 번의 열람을 가르는 번호. 목록 읽기와 판별 인용 읽기가 전부 이 번호를 들고
@@ -8421,6 +8532,14 @@
       historyReads.clear();
       $("#hist-body").replaceChildren();
       $("#histmodal").classList.remove("show");
+      // A5: this opening's display reports end with it (the next opening is a new display, even of the same versions).
+      KinReportViews.end("history");
+    }
+    /** A5: one shown version row or evidence block of this opening, reported as displayed only while it is on screen. */
+    function historyShown(key, uid, epoch, at, accessRef, node) {
+      KinReportViews.watch("history", epoch, key, { uid, accessRef, nodes: [node],
+        live: () => work.admits(at) && historyLive(epoch, uid),
+        report: body => api("POST", `/studies/${encodeURIComponent(uid)}/view-observations`, body, undefined, at) });
     }
     /**
      * 답은 **그 판 하나**에 대한 것인가. 존재 상태는 서버가 그 판 자신의 본문에 대해 계산해
@@ -8495,6 +8614,8 @@
       historyReads.delete(version);
       button.disabled = false;
       historyCitationBlock(host, state, state === "ok" ? answer : null);
+      // Only an answer drawn as this version's evidence is its display; an unknown or refused block shows no evidence.
+      if (state === "ok") historyShown("report-evidence:" + version, uid, epoch, at, answer.accessRef, host.firstElementChild);
     }
     async function showHistory() {
       const uid = selectedUid;
@@ -8503,6 +8624,7 @@
       const epoch = ++historyEpoch;
       historyUid = uid;
       historyReads.clear();
+      KinReportViews.end("history");
       $("#histmodal").classList.add("show");
       box.innerHTML = "<div style='color:#667;padding:10px'>불러오는 중…</div>";
       if (!serverMode) {
@@ -8539,6 +8661,11 @@
           const host = button.closest(".ver")?.querySelector(".vcite-host");
           if (!Number.isSafeInteger(version) || version < 1 || !host) { button.remove(); continue; }
           button.addEventListener("click", () => loadHistoryCitations(uid, version, host, button));
+        }
+        // A5: every row was provided; a row is displayed only once the reader has it on screen (scrolling the list shows more).
+        for (const row of box.querySelectorAll(".ver")) {
+          const v = list.find(item => String(item.version) === row.dataset.version);
+          if (v) historyShown("report-version:" + v.version, uid, epoch, at, v.accessRef, row);
         }
       } catch (e) {
         // 늦게 온 **실패**도 새 열람의 목록을 오류 문구로 덮지 않는다.
@@ -9725,6 +9852,14 @@
         $('#rail-collapse')?.setAttribute('aria-expanded', String(!geometry.railCollapsed));
       }
       const left = $(".left"), related = $(".related-p"), top = $(".rw"), prior = $(".related-list-pane");
+      // Before any measuring below: the workflow mode and the hidden panels decide the band's panels and their columns.
+      // Each column is its share of the shown shares; the last takes the remainder, as Template always has, so the
+      // default band paints to the same sub-pixel as the percentage widths it replaces.
+      const band = KinWorkspaceLayout.reportWindow(mode, geometry?.hiddenPanels || []);
+      for (const [name, on] of Object.entries(band.classes)) document.body.classList.toggle(name, on);
+      const shares = band.content.reduce((sum, p) => sum + p.share, 0);
+      top.style.setProperty('--kin-rw-columns', band.content.map((p, i) => i === band.content.length - 1 ? 'minmax(0, 1fr)'
+        : `${100 * p.share / shares}%`).join(' ') || 'minmax(0, 1fr)');
       left.style[portrait ? "height" : "width"] = "";
       related.style[portrait ? "height" : "width"] = "";
       top.style.height = "";
@@ -9768,13 +9903,25 @@
           // Grow by whole pixels: the work area below moves down unchanged, keeping
           // the sub-pixel position each of its lines and borders had at first paint.
           if (short > 0) left.style.minHeight = left.getBoundingClientRect().height + Math.ceil(short) + "px";
+          // Controls that wrap to more lines than the column holds overflow it with
+          // the list already at 0 px; part of that first grow goes to the overflow, so
+          // grow again by what the list still misses (row 0 was cut at 768x1024 once
+          // the Selected toolbar wrapped to a third line).
+          const still = need - grid.getBoundingClientRect().height;
+          if (short > 0 && still > 0.5) left.style.minHeight = left.getBoundingClientRect().height + Math.ceil(still) + "px";
         } else {
           listFloor = need + (narrow && rows.length > 1 ? rowHeight(1) : 0);
           keepListFloor();
         }
       }
       workspaceWasNarrow = narrow;
-      if (sizes.top != null) top.style.height = clampPanel(sizes.top, 140, $(".right").getBoundingClientRect().height - 266) + "px";
+      const topMaximum = $(".right").getBoundingClientRect().height - 266;
+      if (sizes.top != null) {
+        // A tight column may keep its default band, but a taller window's saved
+        // height must still yield to this window's prior report line below.
+        const maximum = topMaximum < 140 ? top.getBoundingClientRect().height : topMaximum;
+        top.style.height = clampPanel(sizes.top, 140, maximum) + "px";
+      }
       const row = $(".workrow").getBoundingClientRect();
       if (sizes.related != null) related.style[portrait ? "height" : "width"] = clampPanel(sizes.related,
         portrait ? 286 : 220, portrait ? row.height - 186 : row.width - 366) + "px";
@@ -9805,30 +9952,42 @@
       }
       // The worklist floor must not push the prior report's first line out of a
       // stacked work area (D383). The report window band yields first, only as much
-      // as needed and never below its 140 px drag minimum; a stored size wins.
-      if (portrait && !narrow && sizes.top == null && !document.body.classList.contains("reading")) {
-        const area = $(".right"), body = related.querySelector(".prior-report-body"), style = getComputedStyle(body);
+      // as needed and never below its 140 px drag minimum. In a tight column even
+      // a stored band must yield, without overwriting the reader's saved height.
+      // The pane's text is its plain view's body or, while Related Report mode stands in that view's place (Minhoon item 8),
+      // the mode's text region: the one on screen is measured (a hidden one measures at the top of the window).
+      const priorText = () => related.querySelector("#related-mode:not([hidden]) .related-mode-scroll")
+        || related.querySelector(".prior-report-body");
+      // How far that line (two text lines into the pane's body) lies below the work area.
+      const lineOver = () => {
+        const area = $(".right"), body = priorText(), style = getComputedStyle(body);
         const line = body.getBoundingClientRect().top + area.scrollTop + parseFloat(style.paddingTop) + 2 * parseFloat(style.fontSize);
-        const over = line - area.getBoundingClientRect().bottom;
+        return line - area.getBoundingClientRect().bottom;
+      };
+      // The list band yields to that line only as much as needed and never below
+      // the list's header and one whole row; the list then fills the shorter band
+      // and scrolls inside it, and the controls under it scroll in the column.
+      const listYields = over => {
+        if (!(over > 0 && listNeed)) return;
+        const band = Math.max(Math.ceil(listNeed), Math.floor(left.getBoundingClientRect().height - over));
+        left.style.setProperty("height", band + "px", "important");
+        left.style.minHeight = band + "px";
+        listFloor = Math.max(listNeed, Math.min(listFloor, band));
+        listGrid.style.minHeight = "";
+        keepListFloor();
+      };
+      if (portrait && !narrow && (sizes.top == null || topMaximum < 140) && !document.body.classList.contains("reading")) {
+        const over = lineOver();
         if (over > 0) top.style.height = Math.max(140, Math.floor(top.getBoundingClientRect().height - over)) + "px";
+        // A band at its minimum can still leave the line below: the list's controls
+        // took a line more (at 768x1024 the Selected toolbar wraps to a third line
+        // since Preload, D1880). The stacked list yields the rest, as the narrow
+        // sheet's does.
+        if (over > 0) listYields(lineOver());
       }
-      // In the narrow sheet the list band yields to that line the same way, only as
-      // much as needed and never below the list's header and one whole row; the
+      // In the narrow sheet the list band yields to that line the same way; the
       // next row is then a wheel turn away inside the band.
-      if (narrow && listNeed) {
-        const area = $(".right"), body = related.querySelector(".prior-report-body"), style = getComputedStyle(body);
-        const line = body.getBoundingClientRect().top + area.scrollTop + parseFloat(style.paddingTop) + 2 * parseFloat(style.fontSize);
-        const over = line - area.getBoundingClientRect().bottom;
-        if (over > 0) {
-          const band = Math.max(Math.ceil(listNeed), Math.floor(left.getBoundingClientRect().height - over));
-          left.style.setProperty("height", band + "px", "important");
-          left.style.minHeight = band + "px";
-          // The list then fills the shorter band and scrolls inside it.
-          listFloor = Math.max(listNeed, Math.min(listFloor, band));
-          listGrid.style.minHeight = "";
-          keepListFloor();
-        }
-      }
+      if (narrow && listNeed) listYields(lineOver());
       // Becoming the narrow sheet at selection reflows the list: bring the band's
       // top and the selected row back into view, scrolling inside the band only.
       if (becameNarrow && listNeed) {
@@ -10009,7 +10168,9 @@
       const retry = node('button', model.TEXT.retry, 'chip');
       retry.type = 'button';
       retry.hidden = true;
-      status.after(retry);
+      const next = node('button', 'Next Page', 'chip'); next.type = 'button';
+      next.addEventListener('click', () => { if (answer?.nextCursor && !loading) start(shownUid, answer.nextCursor); });
+      status.after(retry, next);
       // shownUid: the study the panel is for (null = hidden). A request is one generation of seq; only the newest may paint.
       let ended = false, seq = 0, controller = null, loading = false, shownUid = null;
       let answer = null, stale = {}, failure = null, observation = null;
@@ -10039,6 +10200,7 @@
         refresh.disabled = !visible || loading;
         retry.disabled = loading;
         retry.hidden = true;
+        next.hidden = !visible || !answer?.nextCursor; next.disabled = loading;
         status.replaceChildren();
         status.title = '';
         conflict.replaceChildren();
@@ -10102,7 +10264,7 @@
         if (!loading) line(model.summary(answer, stale, failure));
       }
 
-      function start(uid) {
+      function start(uid, cursor) {
         if (controller) controller.abort();
         const mine = ++seq, who = owner(), own = new AbortController();
         controller = own;
@@ -10110,7 +10272,7 @@
         paint();
         // 이 읽기를 시작한 작업 문맥. 답도 실패도 그것이 그대로일 때만 이 패널에 닿는다.
         const at = work.capture('document');
-        read(uid, own.signal, at).then(value => settle(mine, uid, who, value, null, at), error => settle(mine, uid, who, null, error, at));
+        read(uid, own.signal, at, cursor).then(value => settle(mine, uid, who, value, null, at), error => settle(mine, uid, who, null, error, at));
       }
       function settle(mine, uid, who, value, error, at) {
         // 로그아웃 준비·그 취소 뒤에 온 답은 아무것도 그리지 않는다. 그 읽기가 세운 대기 표시만 내려 두고(자기 것만),
@@ -10211,7 +10373,7 @@
         allowed: () => !!sess && serverMode && !demoMode && !offline && (KinAuth.has('radiologist') || KinAuth.has('admin')),
         target: () => viewed()?.uid ?? null,
         owner: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution ?? null, s.sub ?? null] : null; },
-        read: (uid, signal, at) => api('GET', '/studies/' + encodeURIComponent(uid) + '/clinical-context', undefined, signal, at),
+        read: (uid, signal, at, cursor) => api('GET', '/studies/' + encodeURIComponent(uid) + '/clinical-context' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''), undefined, signal, at),
         actor: value => displayActor(value) });
     } catch (_) { toast('Clinical Context 패널을 준비하지 못했습니다. 판독 작업은 계속할 수 있습니다.', 'err'); }
 
@@ -10297,7 +10459,7 @@
         inboxReady: (n, more) => `질문 ${n}건을 최신순으로 표시합니다.${more ? ' More로 이어서 읽습니다.' : ''}`,
         notListed: '이 검사는 지금 워크리스트에 없어 열 수 없습니다. 목록을 새로고침하거나 검색 조건을 바꾸세요.',
         unlisted: '워크리스트에 없는 검사',
-        noText: '1~2,000자의 내용을 입력하세요.',
+        noText: '내용을 입력하세요.',
         sending: '보내는 중입니다…',
         saved: '저장했습니다.',
         replayed: '이미 저장된 요청입니다. 서버가 처음 저장한 결과를 돌려주었습니다.',
@@ -10337,7 +10499,7 @@
       const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
       const STUDY = /^\d+(?:\.\d+)+$/;
       const CURSOR = /^[A-Za-z0-9_-]{1,256}$/;
-      const TIMEOUT_MS = 60000, TEXT_MAX = 2000;
+      const TIMEOUT_MS = 60000;
       let ended = false, lock = null;
       // 나가 있는 질문 요청. 세션이 끝나면(end) 모두 멈춘다 — 답은 번호로도 버려지지만 끝난 세션의 응답을 기다리지 않는다.
       const inflight = new Set();
@@ -10474,7 +10636,7 @@
         if (!item || typeof item !== 'object' || item.id !== id) throw new Error(TEXT.malformed);
         // 다른 검사의 질문이면 판독 대상 곁에 열지 않고 그 이유를 보인다(Inbox에서 고른 질문도 이 단건 읽기로 확인한다).
         if (item.studyUid !== target) throw new Error(TEXT.otherStudy);
-        if (!STATES.includes(item.state) || !who(item.author) || !Array.isArray(item.entries) || !item.entries.length || item.entries.length > 100
+        if (!STATES.includes(item.state) || !who(item.author) || !Array.isArray(item.entries) || !item.entries.length
             || item.revision !== item.entries.length || item.entryCount !== item.entries.length || !anchor(item.current)
             || (item.state === 'Closed') !== (!!item.closed && typeof item.closed === 'object'))
           throw new Error(TEXT.malformed);
@@ -10700,7 +10862,6 @@
         field.dataset.field = '';
         if (spec.multiline) field.rows = 3;
         else field.type = 'text';
-        field.maxLength = TEXT_MAX;
         field.setAttribute('aria-describedby', hintId);
         field.addEventListener('input', () => {
           if (!attempts.has(key)) drafts.set(key, field.value);
@@ -10768,7 +10929,7 @@
         const who = owner();
         if (ended || lock !== null || target !== uid || attempts.has(key) || !loaded || !who) return;
         const value = field.value;
-        if (!(action === 'close' && value === '') && (!value.trim() || value.length > TEXT_MAX)) {
+        if (!(action === 'close' && value === '') && (!value.trim())) {
           setNote(noteKey, 'failed', TEXT.noText);
           return;
         }
@@ -11252,7 +11413,7 @@
         e.preventDefault();
         const box = handle.getBoundingClientRect(), step = e.shiftKey ? 40 : 10;
         const delta = e.key === 'Home' ? -16384 : e.key === 'End' ? 16384 : e.key === keys[0] ? -step : step;
-        resize({ clientX: box.left + (direction === 'x' ? delta : 0), clientY: box.top + (direction === 'y' ? delta : 0) }, direction);
+        resize({ clientX: box.left + (direction === 'x' ? delta : 0), clientY: box.top + (direction === 'y' ? delta : 0) }, direction, delta);
         rememberPanelSize(selector);
       });
       handle.addEventListener("pointerdown", e => {
@@ -11266,8 +11427,12 @@
         handle.classList.add("dragging");
         document.body.classList.add("resizing", dragAxis === "x" ? "resizing-x" : "resizing-y");
 
+        let previous = dragAxis === 'x' ? e.clientX : e.clientY;
         const move = event => {
-          if (event.pointerId === e.pointerId) work.commit(at, () => resize(event, dragAxis));
+          if (event.pointerId !== e.pointerId) return;
+          const position = dragAxis === 'x' ? event.clientX : event.clientY, delta = position - previous;
+          previous = position;
+          work.commit(at, () => resize(event, dragAxis, delta));
         };
         const end = event => {
           if (event.pointerId !== e.pointerId) return;
@@ -11414,7 +11579,53 @@
     // fixed window, and so do the first rendered rows.
     for (const node of [...$('.related-list-pane').children, $('#relrows'), $('.left > .grid thead'), $('#rows'),
       ...[...$('.left').children].filter(child => !child.matches('.grid, #worklist-folders-panel'))]) workspaceObserver.observe(node);
+    // ── Panel Settings (Minhoon 2026-10-27 item 9) ──
+    // Which report window panels stay on screen. Kept in the same layout record as the rail and panel sizes, so
+    // Account Layout carries it to another browser and Reset Layout shows every panel again. Display only: the panels
+    // and their content stay in the document; AI Report / Image Report remain the placeholder tabs.
+    const panelDialog = document.createElement('dialog');
+    panelDialog.id = 'panel-settings-dialog'; panelDialog.setAttribute('aria-labelledby', 'panel-settings-title');
+    panelDialog.innerHTML = `<h2 id="panel-settings-title">Panel Settings</h2>
+      <p>판독 창 위쪽 패널을 보이거나 숨깁니다. 숨긴 패널의 자리는 옆 패널과 관련 검사·판독문 영역이 씁니다.
+      Study Panel과 판독 화면의 검사 정보 열기에서는 모든 패널을 볼 수 있습니다.</p>
+      <fieldset><legend>Show Panels</legend>${[['thumbnail', 'Thumbnail'], ['aiReport', 'AI Report'], ['imageReport', 'Image Report'],
+        ['clinical', 'Clinical Information'], ['template', 'Reading Template']].map(([key, label]) =>
+        `<label${key === 'aiReport' || key === 'imageReport' ? ' title="추후 구현 탭입니다. 표시 여부만 정합니다."' : ''}><input type="checkbox" data-panel="${key}"> ${label}</label>`).join('')}</fieldset>
+      <p>이 브라우저에 계정별로 기억합니다. 다른 기기에서는 View &gt; Account Layout으로 계정에 저장하고 불러오세요.</p>
+      <p id="panel-settings-status" role="status"></p>
+      <footer><button type="button" id="panel-settings-show-all">Show All Panels</button><button type="button" id="panel-settings-close">Close</button></footer>`;
+    document.body.append(panelDialog);
+    const hiddenPanelsNow = () => workspaceState.workspace?.hiddenPanels?.slice() || [];
+    function renderPanelSettings() {
+      const hidden = hiddenPanelsNow(), editable = workspaceEditable();
+      for (const input of panelDialog.querySelectorAll('input[data-panel]')) { input.checked = !hidden.includes(input.dataset.panel); input.disabled = !editable; }
+      $('#panel-settings-show-all').disabled = !editable || !hidden.length;
+    }
+    function choosePanels(hidden) {
+      if (!workspaceEditable()) { renderPanelSettings(); return; }
+      const next = KinWorkspaceLayout.withHiddenPanels(workspaceState, KinWorkspaceLayout.PANELS.filter(key => hidden.includes(key)));
+      if (!next) { $('#panel-settings-status').textContent = '패널 설정을 확인할 수 없습니다. Reset Layout으로 기본 배치를 사용할 수 있습니다.'; return; }
+      // The dialog says the outcome itself: rewriting the toolbar status line would wrap it in narrow windows and move
+      // the list and the work area under the reader (W3R7-04, as for Study Panel choices).
+      workspaceState = next; applyLayout(); saveWorkspace(true); renderPanelSettings();
+      $('#panel-settings-status').textContent = workspaceLocalKept ? '패널 표시를 기억했습니다 · 이 브라우저'
+        : '패널 표시를 이 창에만 적용했습니다. 브라우저에 저장하지 못했습니다.';
+    }
+    panelDialog.querySelector('fieldset').addEventListener('change', event => {
+      const input = event.target.closest('input[data-panel]'); if (!input) return;
+      const hidden = hiddenPanelsNow().filter(key => key !== input.dataset.panel);
+      choosePanels(input.checked ? hidden : [...hidden, input.dataset.panel]);
+    });
+    $('#panel-settings-show-all').addEventListener('click', () => choosePanels([]));
+    $('#panel-settings-close').addEventListener('click', () => panelDialog.close());
+    panelDialog.addEventListener('close', () => { const opener = $('#panel-settings-open'); if (!opener.disabled) opener.focus({ preventScroll: true }); });
+    $('#panel-settings-open').addEventListener('click', () => {
+      if (!workspaceEditable() || panelDialog.open) return;
+      $('#panel-settings-status').textContent = ''; renderPanelSettings(); panelDialog.showModal();
+      panelDialog.querySelector('input[data-panel]').focus();
+    });
     function stopWorkspaceLayout() {
+      if (panelDialog.open) panelDialog.close();
       workspaceEnded = true; workspaceGeneration++;
       workspaceDragCancel?.(); workspaceObserver.disconnect(); cancelAnimationFrame(splitFrame); splitFrame = 0;
       window.removeEventListener('resize', applyLayout);
@@ -11448,10 +11659,12 @@
       else
         $(".left").style.width = clampPanel(e.clientX - box.left, 500, box.width - 426) + "px";
     });
-    bindPanelResize("#resize-top", "y", e => {
-      const right = $(".right"), box = right.getBoundingClientRect();
-      // 세로 작업공간을 스크롤한 뒤에도 패널 자체의 높이를 조절한다.
-      $(".rw").style.height = clampPanel(e.clientY - box.top + right.scrollTop, 140, box.height - 266) + "px";
+    bindPanelResize("#resize-top", "y", (e, axis, delta) => {
+      const top = $(".rw"), current = top.getBoundingClientRect().height;
+      // 목록의 최소 높이 때문에 상한이 현재 띠보다 작아도 손과 반대로 줄이지 않는다.
+      // 포인터 이동량을 쓰므로 손잡이 안의 누른 위치나 작업공간 스크롤에 영향받지 않는다.
+      const maximum = Math.max(current, 140, $(".right").getBoundingClientRect().height - 266);
+      top.style.height = clampPanel(current + delta, Math.min(current, 140), maximum) + "px";
     });
     bindPanelResize("#resize-related", () => portraitLayout() ? "y" : "x", (e, axis) => {
       const box = $(".workrow").getBoundingClientRect();
@@ -11466,6 +11679,7 @@
       list.style.flex = "none";
       list.style.height = clampPanel(e.clientY - box.top, 150, box.height - 136) + "px";
     });
+
 
     $("#quick").addEventListener("input", () => { worklistSearch?.change(); render(); });
     for (const host of [$('#quick'),$('#filterrow')]) host.addEventListener('keydown',e=>{
@@ -12067,7 +12281,7 @@
     });
     let ctxSelection = null;
     function showSelectionMenu(e, set) {
-      showCtx(e, [{ label: "Open Selected Studies", dis: set.studyUids.length > KinWorklistSelection.SET_LIMITS.max,
+      showCtx(e, [{ label: "Open Selected Studies",
         act: () => { ctxSelection = null; multiStudyView?.open(set); } }], null, null);
       ctxSelection = { items: ctxItems, generation: set.generation };
     }
@@ -12175,6 +12389,8 @@
     $('#related-load-parts').addEventListener('click',()=>{if(cur()&&serverMode&&!offline&&!demoMode)relatedParts.load(relatedCandidates().map(x=>x.uid));});
     $('#related-cancel-parts').addEventListener('click',()=>relatedParts.cancel());
     $("#related-return").addEventListener("click", returnToReportStudy);
+    // Minhoon item 8: the editor stays on screen in Related Report mode; its Resume Editing is the mode's Back.
+    $("#report-editor-resume").addEventListener("click", () => { backToCurrentDraft(); });
     $("#related-modality").addEventListener("change", e => {
       if (!cur()) return;
       // 목록을 좁히는 동작이 현재 영상/판독문을 다시 읽거나 점유를 옮겨서는 안 된다.
@@ -12385,8 +12601,8 @@
       // "지금 누구로 보고 있는지"를 모르면 필터가 되는지 안 되는지도 알 수 없다.
       // `roleText`를 기준으로 다시 쓴다 — 재연결마다 앞에 덧붙으면 줄이 길어진다.
       $("#roles").textContent = `${myInstitutionName} · ${roleText}`;
-      // 미배정 통로는 관리자에게만. 평소엔 0건이라 숨어 있어야 맞다.
-      $("#m-unassigned").style.display = KinAuth.has("admin") ? "" : "none";
+      // D1882 수신 보류 알림은 관리자에게만, 보류가 있을 때만 보인다. 평소엔 0건이라 숨어 있어야 맞다.
+      void showHeldSources();
       startPolling();
       // 연결이 되살아났다: 앞서 실패해 멈춘 검사도 한 번 다시 보낸다(같은 거절이면 한 번 알리고 다시 멈춘다).
       reportSaveFailures.clear();
@@ -12400,6 +12616,7 @@
     function goOffline(e) {
       reportPreview.close();
       serverMode = false; offline = true;
+      stopViewing();
       folderLoadState = 'unknown'; filterCollection = null; ++filterReadSequence; ++sharedFilterReadSequence;
       updateWorklistFolders(); shortcutStatus('서버에 연결한 뒤 바로가기를 불러오세요.');
       // 녹음 중이던 받아쓰기는 여기서 멈춘다(보낼 곳이 없다). 받아 둔 글은 Insert가 거절한다.
@@ -12454,65 +12671,26 @@
     let roleText = "";
 
     /**
-     * 미배정 검사 목록 (관리자).
+     * D1882 수신 보류 알림 (관리자).
      *
-     * 기관을 못 알아본 검사는 어느 워크리스트에도 안 뜬다. 그건 의도한 설계지만,
-     * **보이는 곳이 하나도 없으면 영영 고아로 남는다.** 장비 태그 오타 하나로
-     * 영상이 들어와 있는데 아무도 모르고, 아무도 모르니 아무도 안 고친다.
+     * 보낸 병원을 모르는 검사는 보류되어 아무도 열지 못하고 어느 워크리스트에도 없다. 그래도 **아무도 모르면 영영
+     * 보류로 남는다.** 그래서 관리자에게 건수만 알리고, 장비·기관명 원문 확인과 등록은 관리 화면(Held Studies)에서 한다.
+     * 이 알림은 환자·검사 정보를 싣지 않으며, 못 읽으면 숨긴 채 다음 연결 때 다시 묻는다.
      */
-    async function showUnassigned() {
-      const box = $("#un-body");
-      $("#unmodal").classList.add("show");
-      box.innerHTML = "<div style='color:#667;padding:10px'>불러오는 중…</div>";
+    async function showHeldSources() {
+      const item = $("#m-held");
+      item.style.display = "none";
+      if (!KinAuth.has("admin")) return;
       const at = work.capture("document");
       try {
-        const r = await api("GET", "/unassigned", undefined, undefined, at);
-        if (!work.admits(at)) return;
-        if (!r.studies.length) {
-          box.innerHTML = "<div style='color:#4ac06a;padding:10px'>미배정 검사가 없습니다.</div>";
-          return;
-        }
-        const opts = r.institutions.map(i => `<option value="${esc(i.id)}">${esc(i.name)}</option>`).join("");
-        box.innerHTML = r.studies.map(s => `
-          <div class="ver">
-            <div class="vh">
-              <b>${esc(s.name || "(이름 없음)")}</b>
-              <span>${esc(s.id)}</span>
-              <span style="color:#667">${esc(fmtD(s.date))} · ${esc(s.desc)}</span>
-            </div>
-            <div class="vr">DICOM 기관명: ${s.dicomInstitution ? `"${esc(s.dicomInstitution)}"` : "(비어 있음)"}</div>
-            <div style="display:flex;gap:6px;align-items:center;padding:4px 0">
-              <select data-uid="${esc(s.uid)}" class="un-sel"
-                      style="background:#14181f;color:#cdd3dc;border:1px solid #3a4356;padding:3px 6px;font:inherit">${opts}</select>
-              <button class="un-go" data-uid="${esc(s.uid)}"
-                      style="background:#3b6ea5;color:#fff;border:1px solid #3b6ea5;padding:3px 12px;border-radius:3px;cursor:pointer;font-size:11px">배정</button>
-            </div>
-          </div>`).join("");
-      } catch (e) {
-        work.commit(at, () => { box.innerHTML = `<div style="color:#ff8080;padding:10px">${esc(e.message)}</div>`; });
-      }
+        const r = await api("GET", "/admin/held-sources", undefined, undefined, at);
+        const count = Array.isArray(r?.groups) ? r.groups.reduce((n, g) => n + (Number.isInteger(g?.count) ? g.count : 0), 0) : 0;
+        work.commit(at, () => {
+          item.textContent = `⚠ Held Studies ${count}`;
+          item.style.display = count ? "" : "none";
+        });
+      } catch (e) { /* 알림은 보조 신호다: 실패는 숨긴 채 다음 연결 때 다시 묻는다 */ }
     }
-    $("#un-body").addEventListener("click", async e => {
-      const btn = e.target.closest(".un-go"); if (!btn) return;
-      const uid = btn.dataset.uid;
-      const sel = $(`.un-sel[data-uid="${CSS.escape(uid)}"]`);
-      const name = sel.options[sel.selectedIndex].textContent;
-      if (!confirm(`이 검사를 "${name}"에 배정합니다.\n배정하면 그 기관의 워크리스트에 나타납니다. 계속할까요?`)) return;
-      btn.disabled = true;
-      const at = work.capture("document");
-      try {
-        await api("POST", `/studies/${encodeURIComponent(uid)}/assign`, { institutionId: sel.value }, undefined, at);
-        if (!work.commit(at, () => toast(`"${name}"에 배정했습니다`, "ok"))) return;
-        await showUnassigned();
-        await load();
-      } catch (err) {
-        // 이 배정이 잠근 단추는 이 배정이 푼다(자기 것만).
-        btn.disabled = false;
-        work.commit(at, () => toast("배정 실패: " + err.message, "err"));
-      }
-    });
-    $("#m-unassigned").addEventListener("click", showUnassigned);
-    $("#un-close").addEventListener("click", () => $("#unmodal").classList.remove("show"));
 
     // 세션 상세(S5-UI1): 헤더의 #user·#roles는 한 줄로 말줄임될 수 있다. 전체 문구를 단추의 툴팁과 Session details에
     // 옮겨 적는다. 두 칸을 쓰는 곳이 셋(boot·applyRoleUi·goOnline)이라 그 자리마다 부르지 않고 글자가 바뀔 때 따라 적는다 —

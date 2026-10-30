@@ -28,7 +28,13 @@ dialog must be present and closed in every count, so it cannot leave the count b
 
 Decided differences in the node counts (PR #231 fix round, 2026-10-27, by D73 §14): each decision that adds to or
 removes from the first paint is declared once, as the region it owns, in DECIDED_REGIONS - W6-PAGE-22 (D1300), W4-LAND,
-W5-UI Phases A and B, S9-U4b (D1486/D1617/D1668), EMR-D #219, W9-UI and the opened panel's round-7 controls (Text Size,
+W5-UI Phases A and B, S9-U4b (D1486/D1617/D1668), EMR-D #219, W9-UI, the dictation first site's hidden Retry button,
+#259's Change Password link (in the closed Session details menu: a node, never drawn) and Clinical Context Next Page,
+D1882's removed Unmatched Studies dialog (#276: a closed modal, never drawn; its replacement Held Studies is admin.html's),
+D1880's Preload (#277: the Selected toolbar's button, taken out of the layout like W9's by HIDE_PRELOAD, its status
+panel, hidden while nothing is queued, and its script), Minhoon item 8's editor row and Report Editor head (its
+geometry: study_panel_page_dom_test.py EDITOR), Minhoon 12's Measurement Markers section (MH-4: in the closed
+Appearance & Tools dialog, never drawn) and its model script, and the opened panel's round-7 controls (Text Size,
 its row, Default, the edge). The counts of those regions are derived from that declaration in each served tree
 (decided_nodes) and never pinned; every element outside them is compared exactly, at first paint and with the panel
 open. What a feature builds inside its own declared region is that feature's own cases' (e.g. study_transfer_local,
@@ -46,8 +52,8 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 import study_panel_page_dom_test as dom
 from study_panel_page_dom_test import KEY, RASTER, ROOT, VISIBLE, WorkspaceSite, auth, cover, picture_difference, settle, wait_startup
-from study_panel_page_dom_test import W6_REPORT_FIELDS, assert_w6_reachable, w6_facts, w6_moved, w6_regions
-from study_panel_page_dom_test import HIDE_W4, HIDE_W9
+from study_panel_page_dom_test import W6_REPORT_FIELDS, assert_w6_reachable, item8_narrowing, w6_facts, w6_moved, w6_regions
+from study_panel_page_dom_test import HIDE_PRELOAD, HIDE_W4, HIDE_W9
 
 # Round 6 as finished (a94f2e2 product tree + the r6c test/README commit): the default this round must keep.
 R6 = 'ea2a0379cc3dc0482ee3887940f875fe34ce773c'
@@ -81,6 +87,16 @@ BOUND_SIZES = ((1200, 1920), (1440, 2560), (900, 1200), (1920, 1080), (1366, 768
                (840, 768), (860, 700), (900, 768), (1024, 768), (900, 600), (1280, 720), (800, 768))
 SCALES = (1, 1.2, 1.4)
 STUDY_PANEL = '[role="complementary"][aria-label="Study Panel"]'
+# Minhoon item 8 (2026-10-27 feedback 8): Clinical Context left the panel's Info view for the editor's side
+# (study_panel_page_dom_test.py EDITOR). In round 6 it was a row of that view's study section, after the study's table;
+# the section is now that much shorter and every row after it is round 6's moved up by its height (compared box by box).
+# From the table's bottom to the panel's bottom the pictures are covered alike (`cover`, the same box in both trees).
+ITEM8_INFO = '''(panel) => { const d = document.querySelector(panel), section = d.querySelector('.s-clinical');
+  const r = n => { const b = n.getBoundingClientRect(); return [b.x, b.y, b.width, b.height]; };
+  const context = n => n.matches('[role=region][aria-label="Clinical Context"]');
+  const table = section.querySelector('.clinical').getBoundingClientRect(), s = r(section), drawer = d.getBoundingClientRect();
+  return {section: s, rows: [...section.children].filter(n => n.getClientRects().length).map(n => [context(n), ...r(n)]),
+          cover: [s[0], table.bottom, s[2], drawer.bottom - table.bottom]}; }'''
 # The decided differences of the round-6 comparison, each declared as the region it owns (module header):
 # (decision, CSS selector, 'tree' = the element and all it holds | 'node' = the element only, accessible name or None).
 # A feature's own cases own what happens inside its region; this comparison owns everything outside all of them.
@@ -94,11 +110,26 @@ DECIDED_REGIONS = (
     ('W5-UI Phase A: Related-mode reason lines', '#cvr-sent-mode-reason, #cvr-inbox-mode-reason', 'node', None),
     ('W5-UI Phase B: Related Report mode', '#related-mode', 'tree', None),
     ('W5-UI Phase B', 'link[href="related-report-mode.css"], script[src="related-report-mode.js"]', 'node', None),
+    ('MODULE_A A5: report display reports', 'script[src="report-view-observation.js"]', 'node', None),
     ('S9-U4b D1486/D1617/D1668: DICOM Transfer', '#study-transfer', 'tree', None),
     ('S9-U4b D1486', '#t-import, style:has(+ #study-transfer), script[src="study-transfer-local.js"]', 'node', None),
     ('EMR-D #219: clinical signing facts', 'script[src="clinical-signature.js"]', 'node', None),
     ('W9-UI: Multi-Study View', '#multi-study', 'tree', None),
     ('W9-UI', '#multi-selection-open-set, link[href="multi-study-view.css"], script[src="multi-study-view.js"]', 'node', None),
+    ('W-SPACE item 9: Panel Settings', '#panel-settings-dialog', 'tree', None),
+    ('W-SPACE items 9/11', '#panel-settings-open, link[href="workspace-theme.css"]', 'node', None),
+    ('Dictation first site: Retry (docs/ops/dictation-first-site.md)', '#dictation-retry', 'node', None),
+    ('#259 caution census: Change Password (Session details)', 'a[href="/api/auth/login?action=UPDATE_PASSWORD"]', 'node', None),
+    ('#259 caution census: Clinical Context Next Page', '#clinical-context-status ~ button', 'node', 'Next Page'),
+    ('D1882 #276: the removed Unmatched Studies dialog (held studies reach no list)', '#unmodal', 'tree', None),
+    ('D1880 #277: Preload in the Selected toolbar', '#worklist-selection button', 'node', 'Preload'),
+    ('D1880 #277: the preload status panel (hidden while nothing is queued)', '#worklist-selection > details', 'tree', None),
+    ('D1880 #277', 'script[src="preload-queue.js"]', 'node', None),
+    ('Minhoon item 8: the editor row and the Report Editor group', '.report-compose, [role="group"][aria-labelledby="report-editor-title"]',
+     'node', None),
+    ('Minhoon item 8: the Report Editor head (title, Read Only/Editable, why, Resume Editing)', '.report-editor-head', 'tree', None),
+    ('Minhoon 12 MH-4: Measurement Markers (closed Appearance & Tools dialog)', '#reading-appearance-dialog fieldset:has(#reading-marker-color)', 'tree', None),
+    ('Minhoon 12 MH-4', 'script[src="marker-style.js"]', 'node', None),
     ('D1160 round 7: Text Size', STUDY_PANEL + ' select[aria-label="Text Size"]', 'tree', None),
     ('D1160 round 7: the controls row', STUDY_PANEL + ' :has(> select[aria-label="Text Size"])', 'node', None),
     ('D1160 round 7: Default', STUDY_PANEL + ' button', 'node', 'Default'),
@@ -251,6 +282,7 @@ class StudyPanelSizeDOM(unittest.TestCase):
             expect(page.locator('#rows tr[data-uid]')).to_have_count(2)
             wait_startup(page, site)
             page.evaluate(HIDE_W9)   # W9-UI decided difference (study_panel_page_dom_test.py HIDE_W9)
+            page.evaluate(HIDE_PRELOAD)   # D1880 decided difference (study_panel_page_dom_test.py HIDE_PRELOAD)
             settle(page)
             facts = {'first_paint_nodes': nodes_outside_shortcuts(page), 'decided_first_paint_nodes': decided_nodes(page)}
             self.click_row(page, 0, f'{width}x{height}')
@@ -261,6 +293,7 @@ class StudyPanelSizeDOM(unittest.TestCase):
             facts['decided_nodes'] = decided_nodes(page)
             facts['panel'], facts['page'] = self.panel(page), page.evaluate(PAGE)
             facts['w6'] = w6_facts(page)
+            facts['info'] = page.evaluate(ITEM8_INFO, STUDY_PANEL)
             del facts['panel']['edge']
             drawer = page.get_by_role('complementary', name='Study Panel', exact=True)
             controls = [c.bounding_box() for c in (drawer.get_by_role('combobox', name='Text Size'),
@@ -270,7 +303,7 @@ class StudyPanelSizeDOM(unittest.TestCase):
                 mask = [left, top, max(c['x'] + c['width'] for c in controls) - left, max(c['y'] + c['height'] for c in controls) - top]
             if picture:
                 page.evaluate(HIDE_W4)   # W4-LAND decided difference (study_panel_page_dom_test.py HIDE_W4)
-                cover(page, [mask])
+                cover(page, [mask, facts['info']['cover']])   # Minhoon item 8, see ITEM8_INFO
                 settle(page)
                 facts['pixels'] = page.screenshot(animations='disabled', caret='hide',
                     mask=[page.locator('.brand img'), page.locator('input[type=checkbox]'), page.locator('.kin-test-cover')])
@@ -292,6 +325,7 @@ class StudyPanelSizeDOM(unittest.TestCase):
             raw = subprocess.check_output(['git', 'archive', '--format=zip', R6,
                 'worklist-v0/hpacs-lite', 'scripts/main-split-order.json', 'proxy/branding'], cwd=ROOT)
             zipfile.ZipFile(io.BytesIO(raw)).extractall(temporary)
+            dom.with_palette(temporary, current)   # W-SPACE item 11 decided difference (study_panel_page_dom_test.py THEME)
             try:
                 for width, height in DEFAULT_SIZES:
                     picture = (width, height) in ((1920, 1080), (1200, 1920), (900, 1200), (1024, 768), (840, 768))
@@ -302,9 +336,23 @@ class StudyPanelSizeDOM(unittest.TestCase):
                         self.assertEqual(theirs['first_paint_nodes'] - theirs['decided_first_paint_nodes'],
                                          mine['first_paint_nodes'] - mine['decided_first_paint_nodes'], 'first paint')
                         self.assertEqual(theirs['panel'], mine['panel'], 'panel')
-                        page_facts = lambda facts: [row for row in facts['page'] if row[0] not in W6_REPORT_FIELDS]
-                        self.assertEqual(page_facts(theirs), page_facts(mine), 'page')
                         where = f'{width}x{height}'
+                        # Minhoon item 8 (study_panel_page_dom_test.py EDITOR): a report column wider than its room is narrower.
+                        narrowing = item8_narrowing(self, theirs['w6'], mine['w6'], where)
+                        page_facts = lambda facts, narrowing=0: [[*row[:3], row[3] + narrowing, *row[4:]] if row[0] == '.report-p' else row
+                                                                 for row in facts['page'] if row[0] not in W6_REPORT_FIELDS]
+                        self.assertEqual(page_facts(theirs, narrowing), page_facts(mine), 'page')
+                        # Minhoon item 8 (ITEM8_INFO): the Info view without Clinical Context, the rest round 6's.
+                        info, info_mine = theirs['info'], mine['info']
+                        gone = [row for row in info['rows'] if row[0]]
+                        self.assertEqual(1, len(gone), info)
+                        self.assertFalse(any(row[0] for row in info_mine['rows']), info_mine)
+                        top, height = gone[0][2], gone[0][4]
+                        expected = [[False, x, y - height if y > top else y, w, h] for flag, x, y, w, h in info['rows'] if not flag]
+                        expected.append(info['section'][:3] + [info['section'][3] - height])
+                        for a, b in zip(sum(expected, []), sum(info_mine['rows'] + [info_mine['section']], []), strict=True):
+                            self.assertAlmostEqual(a, b, delta=0.01, msg=f'{where}: the Info view {expected} {info_mine}')
+                        self.assertEqual(info['cover'], info_mine['cover'], where)
                         assert_w6_reachable(self, mine['w6'], where)
                         w6_moved(self, theirs['w6'], mine['w6'], 0, where)
                         # Round 6's tab click rewrote the toolbar status line, which wraps at 900x1200 and 768x1024 and
@@ -330,7 +378,7 @@ class StudyPanelSizeDOM(unittest.TestCase):
                         self.assertEqual(theirs['nodes'] - theirs['decided_nodes'],
                                          mine['nodes'] - mine['decided_nodes'], 'opened panel')
                         if picture:
-                            regions = w6_regions(theirs['w6']['scroller'], mine['w6']['scroller'], width, height)
+                            regions = w6_regions(theirs['w6'], mine['w6'], width, height)
                             for difference in picture_difference(self.browser, theirs['pixels'], mine['pixels'], regions):
                                 self.assertFalse(difference.get('outside') or difference.get('size'), difference)
                                 self.assertEqual(0, difference['over'], f'open panel pixels differ outside the new controls/W6 scroller: {difference}')

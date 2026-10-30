@@ -202,6 +202,23 @@
       <p class="gateway-empty" id="gateway-empty" hidden></p>
     </section>
 
+    <section class="gateway" id="held-sources" aria-labelledby="held-title">
+      <div class="gateway-head">
+        <h2 id="held-title">Held Studies</h2>
+        <span class="gstate not_loaded" id="held-state" role="status">Not Loaded</span>
+        <div class="spacer"></div>
+        <button type="button" id="held-refresh" disabled>Refresh Held Studies</button>
+      </div>
+      <p class="gateway-hint">보낸 병원 또는 원본 영상의 환자 식별을 확인하지 못한 검사입니다. 보류 검사는 판독 목록에서 제외됩니다. 여기에는 환자·검사 정보 없이 보류 사유·장비·기관명 원문·도착 시각·건수만 보입니다. Unknown Source는 병원에 확인한 장비 또는 기관명 표기를 등록하여 연결합니다. 기관 연결은 되돌리는 경로가 없으니 확인한 뒤에만 등록하세요. Patient Not Identified는 송신 병원에서 환자를 확인해 PatientID를 보정·재전송한 뒤 아카이브 관리자가 PatientID가 비어 있는 기존 사본을 제거해야 합니다. 기관 연결만으로는 해제되지 않습니다.</p>
+      <p class="message" id="held-message" role="alert"></p>
+      <div class="audit-table" id="held-wrap" hidden>
+        <table>
+          <thead><tr><th scope="col">Device (AE Title)</th><th scope="col">Institution Name (Raw)</th><th scope="col">Reason</th><th scope="col">First Arrival (UTC)</th><th scope="col">Last Arrival (UTC)</th><th scope="col">Count</th><th scope="col">Correction</th></tr></thead>
+          <tbody id="held-rows"></tbody>
+        </table>
+      </div>
+      <p class="gateway-empty" id="held-empty" hidden>보류된 검사가 없습니다.</p>
+    </section>
     <section class="ops" id="metrics" aria-labelledby="metrics-title">
       <div class="ops-head">
         <h2 id="metrics-title">Operations</h2>
@@ -280,6 +297,9 @@
         <label>이메일<input name="email" type="email" required maxlength="254" autocomplete="off"></label>
         <label>성<input name="lastName" required maxlength="128" autocomplete="off"></label>
         <label>이름<input name="firstName" required maxlength="128" autocomplete="off"></label>
+        <label>Institution<input name="institution" list="institution-options" required maxlength="128"></label>
+        <label>Role<select name="role" required><option value="">Select Role</option><option value="radiologist">Radiologist</option><option value="clinician">Clinician</option><option value="technician">Technician</option><option value="admin">Admin</option></select></label>
+        <p>대면 확인 후 기관과 역할을 지정합니다. 이메일 검증은 필수가 아닙니다.</p>
       </div>
       <div class="dialog-actions">
         <button type="button" data-close="create-dialog">Cancel</button>
@@ -303,7 +323,7 @@
           <label><input type="checkbox" name="role" value="admin">관리자</label>
           <label><input type="checkbox" name="role" value="clinician">임상의</label>
         </fieldset>
-        <label class="full check"><input type="checkbox" name="verificationOverride">대면 확인으로 이메일 검증 예외 승인</label>
+        <p class="full">대면 확인 후 승인합니다. 이메일 검증 여부는 승인 기록에 남습니다.</p>
       </div>
       <div class="dialog-actions">
         <button type="button" data-close="membership-dialog">Cancel</button>
@@ -312,6 +332,20 @@
     </form>
   </dialog>
 
+  <dialog id="held-dialog">
+    <form class="dialog-body" id="held-form">
+      <h2 id="held-dialog-title">Register Device</h2>
+      <p id="held-dialog-target"></p>
+      <p class="message show" id="held-dialog-message" role="alert"></p>
+      <label>Hospital Confirmation<input name="confirmation" required maxlength="500" autocomplete="off"
+        placeholder="예: 2026-10-28 한림병원 영상의학과 홍길동 전화 확인"></label>
+      <p>병원 담당자와 누가·언제 확인했는지 적습니다. 등록 기록(감사로그)에 남습니다.</p>
+      <div class="dialog-actions">
+        <button type="button" id="held-cancel">Cancel</button>
+        <button type="submit" class="primary">Register</button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="password-dialog">
     <div class="dialog-body">
       <h2>Temporary Password</h2>
@@ -527,7 +561,6 @@
           label.append(input, document.createTextNode(role));
           fieldset.append(label);
         });
-        form.elements.verificationOverride.checked = false;
         $("#membership-dialog").showModal();
       }
 
@@ -690,6 +723,7 @@
           const created = await request("POST", "/admin/users", {
             username: values.get("username"), email: values.get("email"),
             firstName: values.get("firstName"), lastName: values.get("lastName"),
+            institution: values.get("institution"), roles: [values.get("role")],
           });
           if (KinConsoleSession.ended()) return;
           form.reset();
@@ -731,8 +765,6 @@
           setDialogMessage("#membership-message", "변경된 내용이 없어 저장하지 않았습니다.");
           return;
         }
-        // 이메일 검증 예외는 승인·자격 변경에 붙는 표시일 뿐 그 자체로는 변경이 아니다.
-        if (form.elements.verificationOverride.checked) body.verificationOverride = true;
         $("#membership-dialog").close();
         state.editing = null;
         await mutate(base, body);
@@ -1646,5 +1678,6 @@
     })();
   </script>
   <script src="admin-access-review.js"></script>
+  <script src="held-sources-admin.js"></script>
 </body>
 </html>

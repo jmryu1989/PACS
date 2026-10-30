@@ -60,18 +60,26 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const header = { ...resource(imageUid, 'synthetic:' + imageUid),
       '0020000E': { Value: [seriesUid] }, '00080018': { Value: [sopUid] },
       '00080016': { Value: ['1.2.840.10008.5.1.4.1.1.2'] }, '00080008': { Value: ['ORIGINAL', 'PRIMARY'] } };
-    let catalogPatient = 'synthetic:' + imageUid, fileReads = 0, beforeIdentity = null, storedFile = 'synthetic-file-1';
-    let frameCount = 1, holdFrame = null;
+    let catalogPatient = 'synthetic:' + imageUid, fileReads = 0, storedFile = 'synthetic-file-1';
+    let frameCount = 1, holdFrame = null, atRecording = null, failFile = 0;
     const frameReads = [], frameData = n => n === 0 ? frameBytes : Buffer.alloc(512, 11 + n);
     // FIND-248-F3: a finding's comparison identity is read before its write locks the anchor study row, so a
     // concurrent write to that study never waits behind an archive call. Each comparison lookup probes the lock.
     let comparisonLookups = 0;
     const lockedLookups = [];
+    // Orthanc's change log as the catalog's follower reads it: `?last` for where to start, then pages after `since`.
+    // The follower takes its start at its first poll, not at startup; `followerStarted` settles once it has asked.
+    const changes = [];
+    let followerStarted;
+    const followerStart = new Promise(resolve => { followerStarted = resolve; });
     archive = require('node:http').createServer(async (req, res) => {
       const url = new URL(req.url, 'http://synthetic'), json = value => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(value)); };
+      if (url.pathname === '/changes' && url.searchParams.has('last')) followerStarted();
+      if (url.pathname === '/changes') return json(url.searchParams.has('last')
+        ? { Changes: changes.slice(-1), Done: true, Last: changes.length }
+        : { Changes: changes.filter(change => change.Seq > Number(url.searchParams.get('since'))), Done: true, Last: changes.length });
       if (url.pathname === '/dicom-web/studies') {
         const uid = url.searchParams.get('StudyInstanceUID');
-        if (uid === imageUid && beforeIdentity) await beforeIdentity();
         return json(!uid ? [] : uid === splitUid ? [resource(uid, 'synthetic:split-a'), resource(uid, 'synthetic:split-b')]
           : [resource(uid, 'synthetic:' + (uid === comparisonUid ? imageUid : uid))]);
       }
@@ -86,15 +94,21 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
           : body === comparisonUid ? [{ Type: 'Study', ID: comparisonResource }]
           : body === sopUid ? [{ Type: 'Instance', ID: objectResource }] : []);
       }
+      // LastUpdate: the archive's revision of the study, which the study delivery's record names (image-delivery-record.ts).
+      // The study delivery record's own archive read (its revision); a case may run a step while the request waits on it.
+      if (url.pathname === `/studies/${studyResource}` && atRecording) { const step = atRecording; atRecording = null; await step(); }
       if ([`/studies/${studyResource}`, `/studies/${comparisonResource}`].includes(url.pathname)) return json({
         MainDicomTags: { StudyInstanceUID: url.pathname.endsWith(comparisonResource) ? comparisonUid : imageUid },
-        PatientMainDicomTags: { PatientID: 'synthetic:' + imageUid } });
+        PatientMainDicomTags: { PatientID: 'synthetic:' + imageUid }, LastUpdate: '20261028T120000' });
       if (url.pathname === `/studies/${studyResource}/instances`) return json([{ ID: objectResource, FileUuid: storedFile, MainDicomTags: { SOPInstanceUID: sopUid } }]);
       if (url.pathname.endsWith('/metadata')) return json([{ ...header, '00100020': { Value: [catalogPatient] },
         ...(frameCount > 1 ? { '00280008': { Value: [frameCount] } } : {}) }]);
+      // The stored object's own header, PatientID included: E compares it with the manifest's patient on every response.
       if (url.pathname.endsWith('/simplified-tags')) return json({ StudyInstanceUID: imageUid, SeriesInstanceUID: seriesUid,
-        SOPInstanceUID: sopUid, SOPClassUID: header['00080016'].Value[0], NumberOfFrames: String(frameCount) });
+        SOPInstanceUID: sopUid, SOPClassUID: header['00080016'].Value[0], NumberOfFrames: String(frameCount), PatientID: 'synthetic:' + imageUid });
       if (url.pathname.endsWith('/header')) return json({ '0002,0010': { Value: '1.2.840.10008.1.2.1' } });
+      // A temporary archive outage: the next `failFile` stored-file reads answer 503.
+      if (url.pathname.endsWith('/file') && failFile > 0) { failFile--; res.statusCode = 503; res.end(); return; }
       if (url.pathname.endsWith('/file')) { fileReads++; res.end(original); return; }
       const frame = url.pathname.match(/\/frames\/(\d+)\/raw$/);
       if (frame && Number(frame[1]) < frameCount) {
@@ -126,20 +140,28 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const requests = createRequestContext(createRequestIngress({ proxyPeers: ['127.0.0.1'] }), runtime.port);
     Module({ controllers: services.map(n => product(n + '.controller')[className(n) + 'Controller']),
       providers: [PrismaService, ...services.map(n => product(n + '.service')[className(n) + 'Service']),
-        product('emr-image/service').OnlineImageService, product('emr-source/image').OrthancImageCatalog,
+        // E's image service with its own check pool and the study delivery recorder every image route shares (app.module).
+        product('emr-image/service').OnlineImageService, product('emr-image/check-db').ImageCheckDatabase,
+        product('image-delivery-record').StudyImageDeliveryRecorder, product('emr-source/image').OrthancImageCatalog,
         { provide: product('emr-image/context').ImageContextSource,
           inject: [product('emr-clinical/startup').CURRENT_CLINICAL_CONTEXT, product('emr-source/image').OrthancImageCatalog],
           useFactory: (clinical, catalog) => new (product('emr-image/context').ProductionImageContext)(clinical, catalog) },
-        product('auth.service').AuthService, ...product('emr-clinical/startup').startupClinicalProviders,
+        product('auth.service').AuthService, product('presence.service').PresenceService,
+        ...product('emr-clinical/startup').startupClinicalProviders,
         { provide: REQUEST_CONTEXT_CAPTURE, useValue: requests.capture }, { provide: REQUEST_CONTEXT_SOURCE, useValue: requests.source },
         { provide: product('orthanc.service').OrthancService, useValue: orthanc },
         { provide: product('keycloak.service').KeycloakService, useValue: keycloak },
         { provide: StudyAccessService, useFactory: prisma => new StudyAccessService(prisma, orthanc, keycloak), inject: [PrismaService] },
         { provide: product('emr-runtime/record-port').EMR_RECORD_PORT, useValue: runtime.port },
         { provide: product('emr-runtime/background-work').EMR_BACKGROUND_WORK, useValue: runtime.background.work },
+        // A short idle gap, so a delivery's end is observed within the case (DEFAULT_IMAGE_DELIVERY_IDLE_MS is two minutes).
+        { provide: product('image-delivery-record').IMAGE_DELIVERY_IDLE_MS, useValue: 400 },
         { provide: APP_GUARD, useClass: product('auth.guard').AuthGuard },
         { provide: product('study-transfer-local.service').StudyTransferLocalService, useValue: {} }] })(HttpFixture);
-    app = await NestFactory.create(HttpFixture, { logger: ['error'], rawBody: true });
+    // Warnings are what an operator reads; errors still go to the test's stderr.
+    const warnings = [];
+    app = await NestFactory.create(HttpFixture, { rawBody: true, logger: { log() {}, debug() {}, verbose() {},
+      warn: message => warnings.push(String(message)), error: (...args) => console.error(...args) } });
     app.setGlobalPrefix('api'); await app.listen(0, '127.0.0.1');
     const origin = await app.getUrl();
     const send = async (name, method, route, body, expected = method === 'GET' || method === 'PATCH' ? 200 : 201) => {
@@ -303,10 +325,30 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const fixedCopy = JSON.parse(exactCommand.body).projection.fixedSources[0].row.snapshot;
     assert.deepEqual([fixedCopy.baseline.values, fixedCopy.points[0][0]], [[exactValue], exactValue]);
     // The registered image route reads real HTTP catalog/object/frame bodies and
-    // persists the exact preparation/transport evidence through PostgreSQL B2.
-    const imageUrl = origin + '/api/images/dicom-web?target=' + encodeURIComponent(`/dicom-web/studies/${imageUid}/series/${seriesUid}/instances/${sopUid}`);
-    const imageResponse = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
-    assert.equal(imageResponse.status, 200, await (imageResponse.status === 200 ? Promise.resolve('') : imageResponse.text()));
+    // persists the exact preparation/transport evidence through PostgreSQL B2. A series retrieve reads the catalog on
+    // every request (R244-01: a request naming one object may be served from the kept study manifest instead), so the
+    // catalog's own reuse and partial-read rules below are what each request meets.
+    const imageUrl = origin + '/api/images/dicom-web?target=' + encodeURIComponent(`/dicom-web/studies/${imageUid}/series/${seriesUid}`);
+    // R244-GPT-FIX7-04: the study moves to another institution while the member's first image request waits at its
+    // recording boundary - during the delivery record's own archive read (the archive's revision of the study), after
+    // the catalog admitted the request. The opening's current facts are read after that revision, so they find the
+    // move (the shared recorder contract): no image byte of the moved study leaves, no response is prepared, and no
+    // record of the moved request is opened, nor any ending as a successful transfer.
+    const [{ since: movedSince }] = await db.$queryRaw`SELECT clock_timestamp() AS since`;
+    let moved = false;
+    atRecording = async () => { await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: receiver } }); moved = true; };
+    const inFlight = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
+    const inFlightBody = Buffer.from(await inFlight.arrayBuffer());
+    assert.ok(moved, 'the study moved while the request was at its recording boundary');
+    assert.notEqual(inFlight.status, 200, inFlightBody.toString().slice(0, 200));
+    assert.equal(inFlightBody.includes(original), false, 'no image byte of the moved study');
+    assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n, 0, 'no response was prepared');
+    const movedRecords = (await db.$queryRaw`SELECT e.payload::jsonb AS event FROM emr_access.access_entry e
+      WHERE e.recorded_at >= ${movedSince} ORDER BY e.sequence`).map(r => r.event)
+      .filter(e => e.targets.some(t => t.kind === 'image' && t.recordId?.value === imageUid));
+    assert.deepEqual(movedRecords.map(e => e.action), [], 'the opening\'s current read refused the moved study: no record was opened');
+    await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: hospital } });
+    const imageResponse = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });    assert.equal(imageResponse.status, 200, await (imageResponse.status === 200 ? Promise.resolve('') : imageResponse.text()));
     const bodyBytes = Buffer.from(await imageResponse.arrayBuffer());
     assert.ok(bodyBytes.includes(original));
     const firstReads = fileReads;
@@ -320,7 +362,8 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     const rewrittenImage = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
     assert.equal(rewrittenImage.status, 200); await rewrittenImage.arrayBuffer();
     assert.equal(fileReads - firstReads - repeatedReads, firstReads);
-    const preparations = await db.$queryRaw`SELECT source_manifest, response_manifest FROM emr_image.preparation`;
+    const preparations = await db.$queryRaw`SELECT COALESCE(p.source_manifest, m.body) AS source_manifest, p.response_manifest FROM emr_image.preparation p
+      LEFT JOIN emr_image.source_manifest m ON m.body_sha256 = p.source_manifest_body`;
     assert.equal(preparations.length, 3);
     assert.equal(new Set(preparations.map(p => JSON.stringify(p.source_manifest.objects))).size, 1, 'the same fixed object version each time');
     const observed = preparations[0].source_manifest;
@@ -337,15 +380,16 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     assert.equal((await changedPatient.json()).code, 'ImageCurrentStudyChanged');
     assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n, 3);
     catalogPatient = 'synthetic:' + imageUid;
-    let identityReads = 0;
-    beforeIdentity = async () => {
-      if (++identityReads === 2) await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: receiver } });
-    };
+    // A study moved to another institution after the member's delivery opened is refused for the next request before
+    // any source read (the catalog's and the response's own current study and scope reads); no row, no byte.
+    await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: receiver } });
+    const readsBeforeMove = fileReads;
     const movedStudy = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
-    assert.equal(movedStudy.status, 503);
-    assert.equal((await movedStudy.json()).code, 'ImageCurrentStudyChanged');
+    const movedBody = Buffer.from(await movedStudy.arrayBuffer());
+    assert.equal(movedStudy.status, 404, movedBody.toString().slice(0, 200));
+    assert.equal(movedBody.includes(original), false);
+    assert.equal(fileReads, readsBeforeMove, 'the moved study\'s source is not read');
     assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n, 3);
-    beforeIdentity = null;
     await db.studyState.update({ where: { uid: imageUid }, data: { institutionId: hospital } });
     // R248-FIX3-01: the catalog has no deadline or size refusal of its own. A requester that leaves while a
     // multiframe object is being read keeps the frames already finished; the next request reads only the rest.
@@ -362,13 +406,71 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
     assert.equal(resumed.status, 200, await (resumed.status === 200 ? resumed.arrayBuffer().then(() => '') : resumed.text()));
     assert.deepEqual(frameReads, [0, 1, 2, 2], 'only the unfinished frame is read again');
     assert.equal(fileReads - readsBeforePartial, 1 + repeatedReads, 'the stored file is digested once, then delivered');
-    const multiframe = (await db.$queryRaw`SELECT source_manifest FROM emr_image.preparation`)
+    const multiframe = (await db.$queryRaw`SELECT COALESCE(p.source_manifest, m.body) AS source_manifest FROM emr_image.preparation p
+      LEFT JOIN emr_image.source_manifest m ON m.body_sha256 = p.source_manifest_body`)
       .map(p => p.source_manifest.objects[0]).filter(o => o.frames.length === 3);
     assert.equal(multiframe.length, 1);
     assert.deepEqual(multiframe[0].frames.map(f => [f.number, f.sha256]),
       [0, 1, 2].map(n => [n + 1, require('node:crypto').createHash('sha256').update(frameData(n)).digest('hex')]));
     frameCount = 1; storedFile = 'synthetic-file-2';
-    const question = { requestId: randomUUID(), expectedOwner: owner('clinician'), body: '합성 질문 원문' };
+    // Cold first opening (#248 follow-up): each stored file's digests are kept in emr_image.object_digest, by the
+    // opening that read them or by the follower once the study is stable. An opening that finds the listed file's row
+    // reads no original or frame for its manifest (no process memory is involved); delivery still reads what it serves.
+    const sha = bytes => require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+    const kept = file => db.$queryRaw`SELECT sha256, frames FROM emr_image.object_digest WHERE instance_id=${objectResource} AND file_uuid=${file}`;
+    assert.deepEqual((await kept('synthetic-file-1')).map(row => [row.sha256, row.frames]),
+      [[sha(original), [{ number: 1, bytes: frameBytes.length, sha256: sha(frameBytes) }]]]);
+    storedFile = 'synthetic-file-4';
+    const readsBeforeFollow = fileReads, framesBeforeFollow = frameReads.length;
+    // A study that became stable before the follower's start is left to its first opening (by design). On a fast host
+    // this test reaches here inside the first poll interval (B4, 2026-10-28), so the change is logged after that start.
+    const started = await Promise.race([followerStart.then(() => true),
+      new Promise(resolve => setTimeout(resolve, 120000, false).unref())]);
+    assert.ok(started, 'the follower read where the change log ends');
+    changes.push({ Seq: changes.length + 1, ChangeType: 'StableStudy', ResourceType: 'Study', ID: studyResource });
+    // The same hang bound the D fixture gives its archive source to start (online_live.py, 120 s).
+    for (const until = Date.now() + 120000; !(await kept('synthetic-file-4')).length;) {
+      assert.ok(Date.now() < until, 'the follower kept the stable study');
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    assert.deepEqual([fileReads - readsBeforeFollow, frameReads.length - framesBeforeFollow], [1, 1], 'the follower read the file and its frame once');
+    const readsBeforeCold = fileReads, framesBeforeCold = frameReads.length;
+    const cold = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
+    assert.equal(cold.status, 200); assert.ok(Buffer.from(await cold.arrayBuffer()).includes(original));
+    assert.deepEqual([fileReads - readsBeforeCold, frameReads.length - framesBeforeCold], [repeatedReads, 0],
+      'the first opening of the followed file reads only what it delivers');
+    // A stable study the follower cannot read now is reported, not taken for digested, and its first opening reads
+    // it. A study removed before the follower reached it is expected and stays quiet; the log names neither.
+    storedFile = 'synthetic-file-6'; failFile = 1;
+    const warnedBefore = warnings.length, readsBeforeOutage = fileReads;
+    changes.push({ Seq: changes.length + 1, ChangeType: 'StableStudy', ResourceType: 'Study', ID: '44444444-44444444-44444444-44444444-44444444' });
+    changes.push({ Seq: changes.length + 1, ChangeType: 'StableStudy', ResourceType: 'Study', ID: studyResource });
+    for (const until = Date.now() + 120000; warnings.length === warnedBefore;) {
+      assert.ok(Date.now() < until, 'the follower reported the study it could not read');
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    assert.equal(failFile, 0);
+    const reported = warnings.slice(warnedBefore);
+    assert.equal(reported.length, 1, JSON.stringify(reported));
+    assert.match(reported[0], /ImageSourceUnavailable/);
+    for (const name of [studyResource, objectResource, imageUid, 'synthetic:', storedFile]) assert.equal(reported[0].includes(name), false, name);
+    assert.equal((await kept('synthetic-file-6')).length, 0, 'nothing is kept for the study not read');
+    const afterOutage = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
+    assert.equal(afterOutage.status, 200); assert.ok(Buffer.from(await afterOutage.arrayBuffer()).includes(original));
+    assert.equal(fileReads - readsBeforeOutage, 1 + repeatedReads, 'the first opening reads the file the follower could not');
+    assert.equal((await kept('synthetic-file-6')).length, 1);
+    // A kept row is no delivery check of its own: a row naming other bytes builds a manifest the delivery refuses.
+    storedFile = 'synthetic-file-5';
+    await db.$executeRaw`INSERT INTO emr_image.object_digest (instance_id, file_uuid, sop_instance_uid, transfer_syntax_uid, bytes, sha256, frames)
+      VALUES (${objectResource}, ${storedFile}, ${sopUid}, '1.2.840.10008.1.2.1', ${original.length}::bigint, ${'0'.repeat(64)},
+        ${JSON.stringify([{ number: 1, bytes: frameBytes.length, sha256: sha(frameBytes) }])}::jsonb)`;
+    const preparedBeforeWrong = (await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n;
+    const wrong = await fetch(imageUrl, { headers: { authorization: 'Bearer ' + tokens.doctor } });
+    const wrongBody = Buffer.from(await wrong.arrayBuffer());
+    assert.notEqual(wrong.status, 200); assert.equal(wrongBody.includes(original), false);
+    assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_image.preparation`)[0].n, preparedBeforeWrong);
+    storedFile = 'synthetic-file-2';
+    const question ={ requestId: randomUUID(), expectedOwner: owner('clinician'), body: '합성 질문 원문' };
     const created = await send('clinician', 'POST', `/studies/${uid}/questions`, question);
     const signature = created.emr.signature;
     assert.equal(signature.registration.kid, clinical.keys.get(members.clinician.sub).kid);

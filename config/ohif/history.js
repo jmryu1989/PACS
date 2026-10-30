@@ -57,9 +57,24 @@ function kinCreateViewerHistory() {
     };
     // After a 401/403 or a logout the panel has ended: that, not the account wording, is what the user needs to hear.
     const closedText = kind => ended ? '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.' : (readOnly() ? READ_ONLY : UNCONFIRMED)[kind];
+    function planar(imageId, kind) {
+      const image = cs.metaData.get('instance', imageId);
+      if (image?.Modality === 'MG' && kind === 'length' || image?.Modality === 'CT' && image.SOPClassUID === '1.2.840.10008.5.1.4.1.1.2' && Number(image.NumberOfFrames || 1) === 1) return null;
+      return kinPlanarGeometry(image, reference(imageId)?.frame);
+    }
     function measurementReason(imageId, kind, points) {
       const image = cs.metaData.get('instance', imageId);
       const finite = n => (typeof n === 'number' || typeof n === 'string' && n.trim() !== '') && Number.isFinite(Number(n));
+      try {
+        const geometry = planar(imageId, kind);
+        if (geometry) {
+          const plane = cs.metaData.get('imagePlaneModule', imageId);
+          if (cs.cache.getImage(imageId)?.calibration?.type || Number(plane?.rowPixelSpacing) !== geometry.spacing[0] || Number(plane?.columnPixelSpacing) !== geometry.spacing[1])
+            return '표시 간격과 원본 간격이 일치하지 않습니다';
+          if (points) geometry.measure(kind, points);
+          return '';
+        }
+      } catch (error) { return error.message; }
       if (image?.Modality === 'MG' && kind === 'length') {
         try {
           const mg = kinMgGeometry(image, reference(imageId)?.frame);
@@ -122,6 +137,8 @@ function kinCreateViewerHistory() {
       if (!a || a.invalidated) return null;
       const kind = kinds[a.metadata.toolName], target = 'imageId:' + a.metadata.referencedImageId, s = a.data.cachedStats?.[target];
       if (!freshStats(a.data, target) || measurementReason(a.metadata.referencedImageId, kind, a.data.handles.points)) return null;
+      const geometry = planar(a.metadata.referencedImageId, kind);
+      if (geometry) return { calculator: geometry.calculator, values: [geometry.measure(kind, a.data.handles.points)] };
       const values = kind === 'length' ? [s.length] : kind === 'angle' ? [s.angle] :
         [s.area, s.mean, s.statsArray?.find(x => x?.name === 'min')?.value, s.max, s.statsArray?.find(x => x?.name === 'count')?.value];
       if (values.some(n => !Number.isFinite(n)) || kind === 'ellipse' && s.modalityUnit !== 'HU') return null;
@@ -151,6 +168,12 @@ function kinCreateViewerHistory() {
           checked.displayText = { ...checked.displayText, primary: [...(checked.displayText?.primary || []), mg.label] };
           const report = checked.getReport;
           checked.getReport = () => { const r = report(); return { ...r, columns: [...r.columns, 'Measurement basis'], values: [...r.values, mg.label] }; };
+        }
+        const kind = kinds[a.metadata.toolName], geometry = planar(a.metadata.referencedImageId, kind);
+        if (geometry) {
+          const value = geometry.measure(kind, a.data.handles.points), unit = kind === 'angle' ? '°' : kind === 'ellipse' ? 'mm²' : 'mm';
+          checked.displayText = { primary: [value.toFixed(1) + ' ' + unit, geometry.label], secondary: [] };
+          checked.getReport = () => ({ columns: [kind, 'Unit', 'Measurement basis'], values: [value, unit, geometry.label] });
         }
         return checked;
       } catch (_) { return null; } // Display sets may disappear before their metadata.
@@ -661,7 +684,7 @@ function kinCreateViewerHistory() {
         do {
           const page = await api(path() + '?includeHidden=true&limit=100' + (recheck ? '&recheck=' + encodeURIComponent(recheck) : '') + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {}, ticket);
           if (!asked(ticket, seq, 'author')) return;
-          if (!Array.isArray(page.items) || heads.length + page.items.length > 512 || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
+          if (!Array.isArray(page.items) || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
           heads.push(...page.items); cursor = page.nextCursor;
         } while (cursor);
         if (!asked(ticket, seq, 'author')) return;
@@ -711,20 +734,20 @@ function kinCreateViewerHistory() {
     async function readOnlyLoad(ticket, seq) {
       if (!valid(ticket) || seq !== readSequence) return;
       const study = scope, heads = [];
-      let cursor = null, version = null, withheld = false, pages = 0;
+      let cursor = null, version = null, withheld = false;
       dropRows(); panel.dataset.readOnly = 'loading'; toolbar();
       try {
         do {
           const page = await api(path() + '?limit=100' + (cursor === null ? '' : '&cursor=' + encodeURIComponent(cursor)), {}, ticket);
           if (!asked(ticket, seq, 'final')) return;
-          if (++pages > 6 || !page || page.uid !== study || typeof page.final !== 'boolean') throw new Error('Invalid page');
+          if (!page || page.uid !== study || typeof page.final !== 'boolean') throw new Error('Invalid page');
           if (!page.final) {
             if (cursor !== null || page.items !== null || page.nextCursor !== null) throw new Error('Invalid page');
             withheld = true; break;
           }
           const next = page.nextCursor;
           if (!Number.isSafeInteger(page.reportVersion) || page.reportVersion < 1 || (version !== null && page.reportVersion !== version) ||
-              !Array.isArray(page.items) || page.items.length > 100 || heads.length + page.items.length > 512 ||
+              !Array.isArray(page.items) || page.items.length > 100 ||
               !page.items.every(h => h && typeof h === 'object' && typeof h.id === 'string' && h.id && Number.isSafeInteger(h.revision) &&
                 h.item && typeof h.item === 'object' && Object.hasOwn(names, h.item.kind)) ||
               !(next === null || typeof next === 'string' && next.length > 0 && next.length <= 512 && next !== cursor)) throw new Error('Invalid page');
@@ -825,7 +848,7 @@ function kinCreateViewerHistory() {
       refreshSrButtons();
       for (const kind of ['length', 'angle', 'ellipse']) button(actions, names[kind], () => {
         const v = viewport(), group = v && ct.ToolGroupManager.getToolGroupForViewport(v.id, v.renderingEngineId);
-        if (!group || v.type !== 'stack') { status.textContent = '원본 CT 프레임을 선택하세요.'; return; }
+        if (!group || v.type !== 'stack') { status.textContent = '원본 프레임을 선택하세요.'; return; }
         if (!group.getToolInstance(tools[kind])) group.addTool(tools[kind]);
         configureMeasurements(group);
         const previous = group.getActivePrimaryMouseButtonTool();
@@ -876,8 +899,8 @@ function kinCreateViewerHistory() {
         const lines = [];
         if (Number.isFinite(s.area)) lines.push('Area: ' + number(s.area) + ' ' + s.areaUnit);
         if (s.modalityUnit === 'HU') {
-          for (const [name, value] of [['Mean', s.mean], ['Min', min], ['Max', s.max]])
-            if (Number.isFinite(value)) lines.push(name + ': ' + (name === 'Mean' ? number(value) : value) + ' HU');
+          for (const [name, value] of [['Mean', s.mean], ['SD', s.stdDev], ['Min', min], ['Max', s.max]])
+            if (Number.isFinite(value)) lines.push(name + ': ' + (['Mean', 'SD'].includes(name) ? number(value) : value) + ' HU');
         }
         return lines;
       } };
@@ -892,8 +915,8 @@ function kinCreateViewerHistory() {
           }
           const v = cs.getEnabledElement(event.detail.element).viewport;
           const id = v.type === 'stack' && v.getCurrentImageId();
-          let reason = id ? measurementReason(id, kind) : '일반 CT 원본 프레임을 선택하세요';
-          if (!reason && kind === 'ellipse' && v.getCamera().viewUp.filter(n => Math.abs(n) > 1e-6).length !== 1)
+          let reason = id ? measurementReason(id, kind) : '원본 프레임을 선택하세요';
+          if (!reason && kind === 'ellipse' && !planar(id, kind) && v.getCamera().viewUp.filter(n => Math.abs(n) > 1e-6).length !== 1)
             reason = '사선·회전 ROI는 아직 지원하지 않습니다';
           if (reason) { status.textContent = reason; return; }
           const annotation = add.call(this, event);
@@ -906,6 +929,11 @@ function kinCreateViewerHistory() {
             id ? measurementReason(id, kind, data.handles.points) : '지원하지 않는 측정 평면입니다';
           if (reason) return [reason];
           if (!freshStats(data, target)) return ['재확인 필요: 현재 좌표로 계산되지 않았습니다'];
+          const geometry = planar(id, kind);
+          if (geometry) {
+            const value = geometry.measure(kind, data.handles.points);
+            return [value.toFixed(1) + (kind === 'angle' ? '°' : kind === 'ellipse' ? ' mm²' : ' mm'), ...geometry.label.split(' · ')];
+          }
           if (kind === 'ellipse') return lines(data, target);
           const mg = kind === 'length' && kinMgGeometry(cs.metaData.get('instance', id), reference(id)?.frame);
           const value = mg ? mg.length(data.handles.points) : data.cachedStats[target]?.[kind === 'length' ? 'length' : 'angle'];
@@ -955,7 +983,12 @@ function kinCreateViewerHistory() {
     function row(e) {
       if (!e.element) { e.element = document.createElement('section'); e.element.style.cssText = 'border-top:1px solid #405777;margin-top:8px;padding-top:8px'; list.append(e.element); }
       const el = e.element; el.replaceChildren(); el.dataset.itemId = e.head?.id || ''; el.dataset.kind = e.draft.kind;
-      text(el, 'strong', names[e.draft.kind] + ' · ' + (e.head ? 'Saved r' + e.head.revision : 'Unsaved') + (e.head?.hidden ? ' · Hidden' : ''));
+      const sourceUnverified = manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified';
+      // Saved names the server revision; an edit, a save in flight or an unknown answer is not that revision.
+      // Source verification keeps its own 재확인 필요 line below, so a saved item stays Saved r<n>.
+      const stateLabel = e.busy ? 'Saving' : e.pending ? 'Unverified' : hasWork(e) || !e.head ? 'Unsaved' : 'Saved r' + e.head.revision;
+      text(el, 'strong', names[e.draft.kind] + ' · ' + stateLabel + (e.head?.hidden ? ' · Hidden' : ''));
+      if (e.head && stateLabel !== 'Saved r' + e.head.revision) text(el, 'div', '서버 저장 이력 r' + e.head.revision + ' · 현재 수정·저장 결과와는 별개입니다.');
       // The clinician projection carries no author (clinician-policy.ts clinicianViewerItem).
       if (e.head) text(el, 'div', readOnly() ? 'Read-only' : e.head.authorActor + (writable(e) ? ' · My Item' : ' · Read-only'));
       if (e.editing) {
@@ -978,7 +1011,6 @@ function kinCreateViewerHistory() {
         text(held, 'p', '프레임 ' + e.heldDraft.frame + ' · 아직 저장되지 않은 내용입니다.');
       }
       button(el, 'Go to Image', () => navigate(e));
-      const sourceUnverified = manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified';
       // Recheck and remeasure belong to the writer; a read-only row keeps the "재확인 필요" message hydrate() writes.
       if (sourceUnverified && !e.head.hidden && writer()) {
         text(el, 'p', '저장 이력과 현재 원본 확인은 별개입니다. 이 항목만 다시 확인할 수 있습니다. 원본이 바뀐 경우 새 뷰어에서 다시 측정하세요. 이 창의 수정과 기존 저장 이력은 유지됩니다.');
@@ -994,8 +1026,8 @@ function kinCreateViewerHistory() {
         else if (e.editing) button(el, 'Save', () => save(e, 'edit'), !!e.busy || !!e.latest || !!sourceUnverified);
         else if (!e.head?.hidden) button(el, 'Edit', () => { e.editing = true; lock(e, false); row(e); }, manual(e.draft.kind) && e.head?.referenceStatus !== 'verified');
         if (e.head && !e.editing && !e.pending) button(el, e.head.hidden ? 'Restore' : 'Hide', () => {
-          const reason = window.prompt((e.head.hidden ? '복원' : '숨김') + ' 사유');
-          if (reason?.trim()) save(e, e.head.hidden ? 'restore' : 'hide', reason);
+          const reason = window.prompt((e.head.hidden ? '복원' : '숨김') + ' 사유 (선택)');
+          if (reason !== null) save(e, e.head.hidden ? 'restore' : 'hide', reason);
         }, !!e.busy);
         if (e.latest && !e.pending) button(el, 'Use Latest & Keep Changes', () => {
           e.head = e.latest; e.latest = null;
@@ -1157,6 +1189,7 @@ function kinCreateViewerHistory() {
       if (!ended && kinViewerSession.ended()) end();
       closeAuthoring();
       if (ended) return;
+      kinViewerToolbarLabels.outputScope(document);
       const r = current();
       if (r && r.study !== scope) {
         park(); reset('검사 확인 중…'); scope = r.study; me = null;
@@ -1227,7 +1260,7 @@ function kinCreateViewerHistory() {
         if (!e) {
           const ref = reference(a.metadata.referencedImageId);
           e = { id: crypto.randomUUID(), annotationUID: a.annotationUID, editing: true,
-            draft: { schemaVersion: 1, kind, seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: kind === 'length' && cs.metaData.get('instance', a.metadata.referencedImageId)?.Modality === 'MG'
+            draft: { schemaVersion: 1, kind, seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: manual(kind) && (planar(a.metadata.referencedImageId, kind) || cs.metaData.get('instance', a.metadata.referencedImageId)?.Modality === 'MG')
                 ? cs.metaData.get('instance', a.metadata.referencedImageId).FrameOfReferenceUID || null : a.metadata.FrameOfReferenceUID, label: a.data.text ?? a.data.label ?? '', points: clone(a.data.handles.points),
               ...(kind === 'arrow' ? {} : { viewPlaneNormal: clone(a.metadata.viewPlaneNormal), viewUp: clone(a.metadata.viewUp) }) } };
           entries.set(e.id, e); annotations.set(a.annotationUID, e); row(e);

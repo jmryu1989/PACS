@@ -35,7 +35,7 @@ ORIGIN = "https://clinician.test"
 
 BASE = "/worklist/hpacs-lite/"
 
-SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "work-context.js", "session-transport.js", "viewer-resources.js", "viewer-session.js", "critical-result-inbox.js")}
+SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "work-context.js", "session-transport.js", "viewer-resources.js", "viewer-preload.js", "viewer-session.js", "critical-result-inbox.js", "clinical-signature.js")}
 
 CONFIG = lf_text(ROOT / "config" / "ohif.js")
 
@@ -2582,7 +2582,9 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.wait_until(lambda: held_saves, 'the Job save sent')
         self.wait_until(lambda: self.unsaved_work()[0] == ['jobs'], 'the Job save that is out declared')
         self.assertEqual([['jobs']], self.unsaved_work()[1])
-        held_saves.pop().fulfill(json={'id': row['id'], 'revision': 2})
+        # The revision receipt is the API summary (viewer-job.service.ts revise): it names this Job's study.
+        saved = held_saves.pop()
+        saved.fulfill(json={'id': row['id'], 'studyUid': unquote(urlparse(saved.request.url).path.split('/')[3]), 'revision': 2})
         self.wait_until(lambda: self.unsaved_work() == [[], [[]]], 'the confirmed Job save withdrawn')
 
     def notice(self,session,kind='broadcast'):

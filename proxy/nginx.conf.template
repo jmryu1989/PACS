@@ -1,9 +1,6 @@
 # KIN 리버스 프록시 — 브라우저가 보는 출처를 하나로 모은다.
 # PUBLIC_PORT 계열만 envsubst한다. $host·$request_uri 같은 nginx 변수는 런타임까지 남아야 한다.
 
-limit_req_zone $binary_remote_addr zone=kin_registration:10m rate=10r/m;
-limit_req_zone $binary_remote_addr zone=kin_token:10m rate=30r/m;
-limit_req_status 429;
 
 # S9-U4b 원본 archive(D1489)의 접근 기록: 메서드·정규화한 경로·상태·바이트·시각뿐이다. 그 GET의 query에는 일회용
 # 다운로드 grant가 있으므로 $request·$request_uri·$args·$http_referer·Cookie·Authorization은 쓰지 않는다.
@@ -43,12 +40,24 @@ map "$kin_grant_key:$uri" $kin_grant_outside_archive {
     "~^1:/api/studies/[0-9.]+/original-downloads/[0-9a-f-]+/archive$"  0;
     "~^1:"                                                             1;
 }
+# MG-08 IDR-03: 검사 UID 경로(/dicom-web/studies/<uid>)에서 기록 중계로 보낼 읽기 메서드. POST(STOW)는 0이다.
+map $request_method $kin_image_read_method {
+    default 0;
+    GET     1;
+    HEAD    1;
+}
 # 그 archive의 API 연결은 응답 뒤에도 nginx가 먼저 끊지 않는다(keepalive). 끊으면 API의 writer가 마지막 byte를 넘긴 뒤 자기
 # 응답을 끝내기 전에 연결이 닫혀, 끝까지 받은 다운로드가 Incomplete로 기록된다(S9-U4b (c) r2, hosted G3 dfca33a: nginx 200 전체
 # byte, API attempt aborted·responseFinished false).
 upstream kin_api_archive {
     server api:3000;
     keepalive 8;
+}
+# EMR-E 영상 경계(아래 프레임 location)도 같은 이유다: API가 마지막 byte 뒤 자기 응답을 끝내고 전송 종료를 기록하기 전에
+# nginx가 연결을 닫으면 끝까지 보낸 프레임이 중단으로 남는다. 뷰어는 프레임을 동시에 여럿 받으므로 쉬는 연결을 더 둔다.
+upstream kin_api_image {
+    server api:3000;
+    keepalive 16;
 }
 
 include /etc/nginx/snippets/default-servers.conf;
@@ -114,7 +123,9 @@ server {
     # Keycloak 계정 콘솔(S7-U5 A018). 제품은 이 화면을 쓰지 않고 어디에서도 가리키지 않는다. 열어 두면 Keycloak 자신의
     # SSO만으로 열려 제품의 콜백(끝내기로 한 세션을 막는 자리)을 지나지 않는다 — 제품이 세션을 끝낸 뒤 인증 서버의 종료가
     # 확인되기 전의 틈에 다음 사람이 앞사람의 계정 화면에 닿는다. 로그인·가입·비밀번호 재설정·필수 동작
-    # (login-actions, protocol/openid-connect)과 테마 자산(resources)은 다른 경로라 영향이 없다.
+    # (login-actions, protocol/openid-connect — Change Password의 UPDATE_PASSWORD 동작 포함)과 테마 자산(resources)은
+    # 다른 경로라 영향이 없다. 접속기록 신원(이메일·이름)의 다른 본인 수정 길은 렐름이 UPDATE_PROFILE·VERIFY_PROFILE을
+    # 꺼서 닫는다(keycloak/README.md).
     # 정확 경로 둘이 아니라 대소문자를 가리지 않는 정규식 하나다(SEA-F05): `account;x=1`(행렬 매개변수 — Keycloak의 경로
     # 대조는 무시한다), `account/…`, `ACCOUNT`, 그리고 nginx가 대조 전에 정규화하는 %-인코딩(`%61ccount`)·겹친 빗금·`/./`·
     # `/../` 표기가 모두 여기서 끝난다. 이 경로 아래에는 prefix `^~` location이 없으므로 정규식이 `/auth/`보다 먼저 맞는다.
@@ -126,7 +137,8 @@ server {
 
     # 토큰이 브라우저 저장소에 남는 이행 기간에는 외부 스크립트와 외부 연결을 막아
     # XSS의 계정 탈취 반경을 줄인다. inline은 현 단일 HTML 프론트 때문에 아직 필요하다.
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; object-src 'self' blob:; frame-src 'self' blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'self'; base-uri 'self'" always;
+    # 페이지를 포함한 기본 정책은 WASM 컴파일을 허용하고 JavaScript eval/new Function은 차단한다.
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; object-src 'self' blob:; frame-src 'self' blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'self'; base-uri 'self'" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "no-referrer" always;
 
@@ -160,17 +172,16 @@ server {
         limit_except GET HEAD { deny all; }
     }
 
-    # 가입 신청은 BFF가 state·PKCE를 만든 뒤 Keycloak으로 보낸다. 진입점과 실제 등록
-    # 제출을 같은 제한 구역에 넣어 새 계정 생성 입력면을 양쪽에서 막는다.
+    # 가입 신청은 BFF가 state·PKCE를 만든 뒤 Keycloak으로 보낸다. IP별 요청 수 제한은 두지 않는다: 병원의 여러 사용자가
+    # 한 IP를 공유한다. 가입한 계정은 관리자 승인 전에는 업무 권한이 없고, 계정별 로그인 실패 잠금은 렐름 설정에 남는다.
     location = /api/auth/register {
-        limit_req zone=kin_registration burst=5 nodelay;
         client_max_body_size 2m;
         proxy_pass http://api:3000;
     }
 
     location = /api/dicom-import {
-        # 반입 객체 24 MiB(API가 정확히 강제)와 헤더 여유. 나머지 /api/는 2m 그대로.
-        client_max_body_size 32m;
+        # DICOM 객체는 크기로 거절하지 않는다. 나머지 /api/는 2m 그대로.
+        client_max_body_size 0;
         proxy_pass http://api:3000;
     }
 
@@ -193,6 +204,14 @@ server {
         proxy_pass http://kin_api_archive;
     }
 
+    # 받아쓰기 녹음(16 kHz 모노 PCM16 WAV, 초당 32,000 byte). 정확한 상한은 API가 KIN_ASR_MAX_BYTES로 강제한다(기본 180초 분량).
+    # 여기 본문 상한은 15-kin-config.envsh가 같은 설정에서 만든다 — 설정을 올리면 프록시도 함께 올라가 둘이 어긋나지 않는다.
+    # API의 경로 판정(dictation-parser.ts)과 같은 모양이며 대소문자를 가리지 않는다. 정규식이라 /api/보다 먼저 맞는다.
+    location ~* ^/api/studies/[^/]+/dictation/?$ {
+        include /etc/nginx/snippets/dictation-body.conf;
+        proxy_pass http://api:3000;
+    }
+
     location /api/ {
         # 판독문·필터·상용구 JSON뿐이다. 2MB면 넉넉하고, 그 이상은 실수 아니면 공격이다.
         client_max_body_size 2m;
@@ -200,7 +219,6 @@ server {
     }
 
     location = /auth/realms/kin/login-actions/registration {
-        limit_req zone=kin_registration burst=5 nodelay;
         proxy_pass http://keycloak:8080;
         proxy_buffer_size       16k;
         proxy_buffers        8  16k;
@@ -208,7 +226,6 @@ server {
     }
 
     location = /auth/realms/kin/protocol/openid-connect/token {
-        limit_req zone=kin_token burst=10 nodelay;
         proxy_pass http://keycloak:8080;
         proxy_buffer_size       16k;
         proxy_buffers        8  16k;
@@ -256,6 +273,21 @@ server {
         default_type application/manifest+json;
     }
 
+    # D1891: orthancteam/orthanc:24.12.0의 dicomImageLoader는 이 same-origin URL로 Worker를 만든다(blob 아님).
+    # 고정 codec의 embind가 new Function을 쓰므로 이 worker의 응답에만 허용한다. codec 청크와 페이지는 기본 정책을 유지한다.
+    # OHIF pin을 바꿀 때 worker 생성 URL과 이 정확 경로를 함께 확인한다; 모든 JS에 적용하는 wildcard로 넓히지 않는다.
+    location = /ohif/1927.bundle.497fe7ce9f85fada0cc8.js {
+        proxy_pass http://orthanc:8042;
+        include /etc/nginx/snippets/orthanc-basic-auth.conf;
+        proxy_hide_header Content-Security-Policy;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; object-src 'self' blob:; frame-src 'self' blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'self'; base-uri 'self'" always;
+        # location의 add_header는 상위 헤더 전체의 상속을 끊는다. CSP 외의 보안 헤더도 보존한다.
+        include /etc/nginx/snippets/hsts.conf;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-KIN-Auth-Code $kin_auth_code always;
+    }
+
     location /ohif/ {
         # sub_filter가 압축된 HTML에는 적용되지 않는다. 번들/CSS는 그대로 통과시키고
         # text/html 응답의 고정 title·favicon 메타만 KIN 브라우저 셸로 바꾼다.
@@ -273,19 +305,55 @@ server {
         sub_filter '<title>OHIF Viewer</title>' '<title>판독 뷰어 — KOREA IMAGING NETWORK</title>';
     }
 
+    # EMR-E 영상 경계(E_ROUTE): 뷰어가 원본 픽셀을 받는 WADO-RS 프레임 요청은 Orthanc로 바로 가지 않고 API의 E 경로
+    # (images/dicom-web)로 간다. API가 지금의 접근을 확인하고, 보낼 바이트를 고정해 B2 provide-prepared 기록과 함께
+    # 확정한 뒤에만 첫 byte를 쓴다 — auth_request의 204는 영상 제공의 기록이 아니다. target은 nginx가 정규화한 $uri뿐이다:
+    # 이 정규식이 숫자·점·쉼표·빗금만 통과시키므로 query 구분자가 섞일 수 없고, proxy_pass에 변수가 있으면 원 요청의 query는
+    # 붙지 않는다. 전송 끝과 중단을 API가 실제 연결에서 관측하도록 버퍼링하지 않는다(E-03). 메타데이터·렌더링·썸네일 같은
+    # 파생 표현과 Gateway STOW는 아래 기존 경로 그대로다.
+    # 이 location은 15-kin-config.envsh가 쓴다: E의 manifest는 배포된 뷰어/디코더 자산 목록(KIN_EMR_IMAGE_ASSET_CATALOG)을
+    # 고정해야 하므로, 그 목록을 주지 않은 설치에서는 이 location이 비어 있고 프레임 요청은 아래의 다음 프레임 location
+    # (MG-LOADING: API의 프레임 range 읽기, 같은 관문과 image-delivery-record.ts의 열람 기록 뒤에 첫 byte)으로 간다. 목록
+    # 없이 E로 보내면 뷰어는 503만 받고 영상을 보여주지 못하고, authz 부요청 뒤 Orthanc 직결은 기록 없는 byte다(D1877).
+    # 두 location 중 먼저 쓰인 이 쪽이 정규식 순서로 이기므로 목록이 있으면 E, 없으면 range 읽기다.
+    include /etc/nginx/snippets/image-frames.conf;
+
     # 검사 UID를 경로에 박은 STOW만 Gateway에 연다. UID 없는 POST는 아래 읽기 전용
     # location에 남아 403이고, API authz가 announce 선행과 기관 일치를 다시 확인한다.
+    # 같은 경로의 GET/HEAD는 검사 전체 영상 읽기다(MG-08 IDR-03): 아래 /dicom-web/ 영상 읽기와 같은 기록 중계로 보낸다.
+    # 이 정규식이 그 prefix보다 먼저 맞으므로 여기서 메서드로 나눈다. if 안에서는 return만 쓰고(rewrite 단계), 그 밖의
+    # 메서드는 limit_except가 거절한다.
     location ~ ^/dicom-web/studies/[0-9.]+$ {
+        client_max_body_size 0;
         limit_except GET HEAD POST { deny all; }
+        error_page 418 = @kin_study_image_read;
+        if ($kin_image_read_method) { return 418; }
         auth_request /kin-authz;
         auth_request_set $kin_auth_code $upstream_http_x_kin_auth_code;
         proxy_pass http://orthanc:8042;
         include /etc/nginx/snippets/orthanc-basic-auth.conf;
+    }
+
+    # MG-LOADING (Minhoon P0, 2026-10-27): the viewer's frame reads and the series strip's previews go to the API's
+    # range reader (api/src/dicom-frame.service.ts). Measured cause: Orthanc reads and MD5-checks the whole 1 GB DBT
+    # file for every frame (2-3.5 s each, serialized). The API runs the same gate as /kin-authz itself, so no
+    # auth_request here; it relays to Orthanc what it cannot serve directly. Buffering off: a 17 MB frame streams
+    # as it is read instead of being spooled to a temp file first. Regex locations win over the prefix ones below.
+    location ~ ^/dicom-web/studies/[0-9.]+/series/[0-9.]+/instances/[0-9.]+/frames/[0-9,]+$ {
+        limit_except GET HEAD { deny all; }
+        proxy_buffering off;
+        proxy_pass http://api:3000/api$request_uri;
+    }
+    location ~ ^/instances/[0-9a-f-]+/preview$ {
+        limit_except GET HEAD { deny all; }
+        proxy_pass http://api:3000/api$request_uri;
     }
 
     # 4242만 닫아도 STOW-RS가 열려 있으면 HTTPS로 영상을 쓸 수 있다.
     # 조회도 먼저 API의 토큰 검증을 통과해야 Orthanc 자격증명을 대신 붙인다.
-    location /dicom-web/ {
+    # 영상이 없는 기술(QIDO 목록·DICOMweb metadata)만 여기서 Orthanc로 간다. 같은 목록이 API의 imageRead
+    # (api/src/image-relay.controller.ts)에 있고, 이 밖의 경로가 auth_request에 오면 API가 403으로 거절한다.
+    location ~ ^/dicom-web/(studies|series|instances|studies/[0-9.]+/(series|instances|series/[0-9.]+/instances)|studies/[0-9.]+(/series/[0-9.]+(/instances/[0-9.]+)?)?/metadata)$ {
         limit_except GET HEAD { deny all; }
         auth_request /kin-authz;
         auth_request_set $kin_auth_code $upstream_http_x_kin_auth_code;
@@ -293,13 +361,29 @@ server {
         include /etc/nginx/snippets/orthanc-basic-auth.conf;
     }
 
-    # 썸네일. 읽기만 — DELETE /instances/{id}는 영상을 지운다.
+    # MG-08(D1877(2)): 영상 바이트(WADO-RS frame·rendered·thumbnail·bulk·객체 전체)는 API의 기록 중계로 간다. auth_request는
+    # 읽기를 허락할 뿐 전달을 보지 못해, 이 경로로 Orthanc가 직접 보내면 검사 열람 기록(provide-prepared → 종결)이 남지 않았다.
+    # API가 같은 DICOMweb 관문을 돌고 기록이 durable해진 뒤에만 Orthanc의 답을 그대로 흘린다. 버퍼링 없이 흘려 큰 프레임을
+    # 임시 파일에 쌓지 않는다. 위 정규식 location이 이 prefix보다 먼저 맞는다.
+    location /dicom-web/ {
+        limit_except GET HEAD { deny all; }
+        proxy_buffering off;
+        proxy_pass http://api:3000/api/image-relay/dicom-web/;
+    }
+
+    # 위 검사 UID location의 GET/HEAD. 정규식이 맞은 $uri는 숫자와 점뿐이고, query는 rewrite가 그대로 붙인다.
+    location @kin_study_image_read {
+        proxy_buffering off;
+        rewrite ^ /api/image-relay$uri break;
+        proxy_pass http://api:3000;
+    }
+
+    # 워크리스트 미리보기·썸네일(frames/N/rendered), 판독문·출력 화소(image-uint16/int16), strip preview, pdf 등 저장 객체의
+    # 모든 읽기. 같은 이유로 API의 기록 중계로 간다(태그 읽기는 기록 없이 관문만). 읽기만 — DELETE /instances/{id}는 영상을 지운다.
     location /instances/ {
         limit_except GET HEAD { deny all; }
-        auth_request /kin-authz;
-        auth_request_set $kin_auth_code $upstream_http_x_kin_auth_code;
-        proxy_pass http://orthanc:8042;
-        include /etc/nginx/snippets/orthanc-basic-auth.conf;
+        proxy_buffering off;
+        proxy_pass http://api:3000/api/image-relay/instances/;
     }
 
     location = /statistics {

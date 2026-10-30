@@ -64,7 +64,7 @@ HOLD_SECONDS = 25
 # Session states a started run never leaves by itself (dictation-session.js ACTIVE is the complement).
 TERMINAL_STATES = ("failed", "cancelled", "unavailable", "inserted")
 SMALL_CAP = 32044                           # 16000 frames: the CAP-03 worklet cap
-FULL_FRAMES = 524266                        # floor((1048576 - 44) / 2), dictation-worklet.js:8
+FULL_FRAMES = 524266                        # floor((1048576 - 44) / 2): this file's CAPABILITY maxBytes, as dictation-capture.js derives it
 WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 LOGGED_HEADERS = ("Content-Type", "Content-Length", "Transfer-Encoding", "X-KIN-CSRF", "Authorization", "Cookie",
                   "X-KIN-Session", "Origin", "Sec-Fetch-Dest", "Sec-Fetch-Mode", "Sec-Fetch-Site")
@@ -169,6 +169,7 @@ REDITHTML
 RFOOTHTML
 </div>
 </div>
+RELATEDMODEHTML
 PANEHTML
 CITEHTML
 STRUCTHTML
@@ -199,7 +200,8 @@ let calls = [], holdCalls = [], citeCalls = [], structCalls = [], dictCalls = []
 let replies = [], toasts = [], confirms = [], logouts = 0;
 const studyPriority = { get: () => false };
 // W5 (order-list-store.js): the page's Related Report mode and the base-rule marker, made as the page makes them: the
-// shipped module mounted on main.html's own mode markup (BARS_HTML) over the report fields. It stays inactive here;
+// shipped module mounted on main.html's own mode markup (cut from the page beside the report panel: Minhoon item 8 moved
+// it from the report bars into the Related panel) over the report fields. It stays inactive here;
 // entering it is the complete page's (tests/related_report_mode_dom_test.py).
 const relatedMode = KinRelatedReportMode({ editor: () => document.querySelector('.redit'), field: name => $('#' + name) });
 const RELATED_BASE = Object.freeze({ base: true });
@@ -310,6 +312,8 @@ def page_html(state):
                       ("BASEBLOCK", "BASE_BLOCK"), ("REPORTBLOCK", "REPORT_BLOCK"),
                       ("HOLDBLOCK", "HOLD_BLOCK"), ("SELECTBLOCK", "SELECT_BLOCK")):
         page = page.replace(key, S[name])
+    at = MAIN.index('<section id="related-mode"')
+    page = page.replace("RELATEDMODEHTML", MAIN[at:MAIN.index("</section>", at) + len("</section>")])
     for control in ('b-draft-keep','b-draft-load','b-approved-view'):
         if f'id="{control}"' not in page:
             page=page.replace('<button id="b-report-reload"',f'<button id="{control}"></button><button id="b-report-reload"',1)
@@ -502,7 +506,8 @@ PROBES = {
     "state": "() => dictation.snapshot().state",
     "controller": "() => typeof dictation === 'object' && dictation !== null && typeof dictation.snapshot === 'function'",
     "strings": "() => ({ uploading: KinDictation.STATUS.uploading, capped: KinDictation.STATUS.capped,"
-               " reasons: KinDictation.REASONS })",
+               " held: KinDictation.STATUS.held, reasons: KinDictation.REASONS })",
+    "held": "() => dictation.view().held === true",
     "fixed": "s => s.toFixed(1)",
     "put": "([f, p]) => { put(f, p); return true; }",
     "expected": "([v, t, s, e]) => expected(v, t, s, e)",
@@ -1714,9 +1719,12 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             case.wait_js("recorded_for", 1000, "1.0 s after the worklet node", while_active=True)
             case.page.click("#dictation-stop", timeout=case.left_ms())
             entry = self.post_entry(case, held=False)
-            case.wait_state("failed", "failed")
+            # An engine failure is transient: the recording waits for Retry (first-site recovery), the
+            # microphone is already released and the report is untouched.
+            case.wait_js("held", None, "the recording held for Retry", while_active=True)
             value = case.snap()
-            self.failed_with(case, value, "DICTATION_ENGINE_FAILED")
+            case.check("pane held DICTATION_ENGINE_FAILED", value["pane"]["status"] ==
+                       case.strings["reasons"]["DICTATION_ENGINE_FAILED"] + case.strings["held"], value["pane"]["status"])
             self.tracks_ended(case, "tracks-ended", value)
             case.unchanged("report-unchanged", value)
             body, verdict, u1_ok, reasons = self.upload(case, entry, CAPABILITY["maxBytes"])

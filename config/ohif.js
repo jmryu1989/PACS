@@ -35,7 +35,7 @@ const KIN_VIEWER_EXPECTED_SESSION = (() => {
 // The first extension sets the page defaults before shared modules and data sources start work.
 function kinCreateSessionBoundary() {
   return { id: 'kin.session-boundary', async preRegistration() {
-    for (const name of ['work-context.js', 'session-transport.js', 'viewer-resources.js', 'viewer-session.js']) {
+    for (const name of ['work-context.js', 'session-transport.js', 'viewer-resources.js', 'viewer-preload.js', 'viewer-session.js']) {
       await new Promise((resolve, reject) => {
         const script = document.createElement('script');
         script.src = '/worklist/hpacs-lite/' + name;
@@ -96,6 +96,17 @@ function kinViewerOnEnd(run) {
   return { close() { off?.(); window.removeEventListener?.('kin-viewer-session-ready', attach); } };
 }
 window.kinViewerOnEnd = kinViewerOnEnd;
+// A module connection failure is retryable within the current mode, without discarding the study.
+function kinToolRetry(id, message, retry) {
+  document.getElementById(id)?.remove();
+  if (!retry) return;
+  const row = document.createElement('div'); row.id = id;
+  const text = document.createElement('span'); text.textContent = message;
+  const button = document.createElement('button'); button.type = 'button'; button.textContent = 'Retry';
+  button.onclick = () => { row.remove(); retry(); };
+  row.append(text, button);
+  (document.querySelector('#kin-viewer-layout-status')?.parentElement || document.body).append(row);
+}
 
 /* S5-UI5 (VUI-04). 고정 뷰어 도구막대의 이름과 설명: aria-label은 영어 이름, title은 한국어 설명이다. 도구 ID·data-cy·명령·
    순서·단축키는 뷰어의 것이라 DOM 속성만 붙인다. 켜고 끄는 도구에는 켜짐 상태(aria-pressed)와 title의 "사용 중"을 더해 색에만
@@ -109,7 +120,9 @@ const kinViewerToolbarLabels = (() => {
     Pan: ['Pan', '이동'],
     TrackballRotate: ['3D Rotate', '3D 회전(볼륨에서만 동작)'],
     WindowLevel: ['Window / Level', '창/레벨 조절(드래그)'],
-    Capture: ['Capture', '현재 화면을 PNG로 저장(검사 저장 아님)'],
+    // The pinned download form passes 'jpg'/'png' to canvas.toDataURL, which only knows MIME types, so every
+    // choice writes PNG bytes; a jpg choice changes the file name only.
+    Capture: ['Capture', '선택한 영상 칸의 화면을 PNG 이미지로 다운로드 · File Type을 jpg로 두어도 파일 내용은 PNG입니다 · DICOM 원본·판독문·서버 작업 저장 아님 · 식별정보가 포함될 수 있습니다. Image Text/Images Only는 익명화가 아닙니다.'],
     Layout: ['Layout', '화면 배치'],
     Crosshairs: ['Crosshairs', 'MPR 교차선(3D/MPR에서만 동작)'],
     MoreTools: ['More Tools', '기타 도구'],
@@ -180,7 +193,15 @@ const kinViewerToolbarLabels = (() => {
       put(element, 'data-kin-tool-label', found.id);
     }
   }
-  return { PRIMARY, ITEMS, TOGGLES, entry, apply };
+  // The Viewer-UX toolbar owns its button title (name, shortcut, drag hint); the output meaning goes in front of it.
+  function outputScope(scope) {
+    const meaning = PRIMARY.Capture[1];
+    for (const button of scope.querySelectorAll('[data-tool="Capture"]')) {
+      const title = button.getAttribute('title') || '';
+      if (!title.startsWith(meaning)) put(button, 'title', meaning + (title ? ' · ' + title : ''));
+    }
+  }
+  return { PRIMARY, ITEMS, TOGGLES, entry, apply, outputScope };
 })();
 
 /** Product branding only; loaded-image identity owns clinical window titles. */
@@ -603,7 +624,6 @@ function kinCreateSRProvenance() {
       }
     }
     walk(instance?.ContentSequence, null);
-    if (incomplete) groups.clear();
     groups.incomplete = incomplete; return groups;
   };
   function mount() {
@@ -854,7 +874,14 @@ async function kinViewerNavigateTo(env, target) {
     if (v && !stack(v)) return refusal('viewport-unsupported');
     const index = (v ? v.getImageIds() : []).findIndex(id => env.matches(env.reference(id), identity));
     if (index >= 0) {
-      try { await v.setImageIdIndex(index); } catch (_) { return live() ? refusal('frame-missing') : refusal('superseded'); }
+      try {
+        // The pinned setter preserves its load Promise but leaves the scroll target
+        // and an older wheel debounce untouched. Retarget before starting the load;
+        // doing this after await would rewind a newer user scroll.
+        clearTimeout(v.debouncedTimeout);
+        v.targetImageIdIndex = index;
+        await v.setImageIdIndex(index);
+      } catch (_) { return live() ? refusal('frame-missing') : refusal('superseded'); }
       if (!live() || env.services.viewportGridService.getActiveViewportId() !== viewportId) return refusal('superseded');
       // The frame actually shown after the await is the only proof; a user scroll or a
       // display-set change during the load must not be reported as arrival.
@@ -959,6 +986,69 @@ function kinMgGeometry(tags, frame) {
   return { origin, orientation, spacing, normal, imagePoint, length, basis, label,
     frameOfReferenceUid: tags.FrameOfReferenceUID || null, calculator: 'kin-mg-length-v1:' + basis };
 }
+// Physical lengths, angles and areas on a specified original frame; no non-CT HU inference.
+function kinPlanarGeometry(tags, frame) {
+  const fail = () => { throw new Error('원본 프레임의 좌표·간격·보정을 확인할 수 없습니다'); };
+  const numbers = (v, n) => {
+    const a = typeof v === 'string' ? v.split('\\') : v;
+    if (!Array.isArray(a) || a.length !== n || a.some(x => !(typeof x === 'number' || typeof x === 'string' && x.trim()) || !Number.isFinite(Number(x)))) return fail();
+    return a.map(Number);
+  };
+  const frames = Number(tags?.NumberOfFrames ?? 1);
+  if (!Number.isSafeInteger(frame) || frame < 1 || !Number.isSafeInteger(frames) || frame > frames) return fail();
+  const per = tags.PerFrameFunctionalGroupsSequence, shared = tags.SharedFunctionalGroupsSequence;
+  if (per !== undefined && (!Array.isArray(per) || per.length !== frames)) return fail();
+  const value = (sequence, key) => per || shared ? (per?.[frame - 1]?.[sequence]?.[0] ?? shared?.[0]?.[sequence]?.[0])?.[key] : tags[key];
+  const mg = tags.Modality === 'MG' ? kinMgGeometry(tags, frame) : null;
+  let origin, orientation, spacing, basis;
+  if (mg) ({ origin, orientation, spacing, basis } = mg);
+  else {
+    const pixel = value('PixelMeasuresSequence', 'PixelSpacing');
+    spacing = numbers(pixel ?? value('FramePixelDataPropertiesSequence', 'ImagerPixelSpacing'), 2);
+    basis = pixel !== undefined ? 'pixel' : 'detector';
+    if (basis === 'detector') {
+      const factor = value('XRayGeometrySequence', 'EstimatedRadiographicMagnificationFactor');
+      if (factor !== undefined) {
+        const k = numbers([factor], 1)[0]; if (k <= 0) return fail();
+        spacing = spacing.map(x => x / k); basis = 'ermf';
+      }
+    }
+    origin = numbers(value('PlanePositionSequence', 'ImagePositionPatient') ?? [0, 0, 0], 3);
+    orientation = numbers(value('PlaneOrientationSequence', 'ImageOrientationPatient') ?? [1, 0, 0, 0, 1, 0], 6);
+  }
+  if (spacing.some(n => n <= 0)) return fail();
+  const rows = Number(tags.Rows), columns = Number(tags.Columns);
+  if (![rows, columns].every(n => Number.isSafeInteger(n) && n > 0)) return fail();
+  const u = orientation.slice(0, 3), v = orientation.slice(3), dot = (a, b) => a.reduce((s, n, i) => s + n * b[i], 0);
+  const uu = dot(u, u), vv = dot(v, v), uv = dot(u, v), det = uu * vv - uv * uv;
+  if (uu <= 0 || vv <= 0 || det <= 0 || Math.abs(uv / Math.sqrt(uu * vv)) > 1e-4) return fail();
+  const cross = [u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0]];
+  const normal = cross.map(n => n / Math.sqrt(dot(cross, cross)));
+  const imagePoint = point => {
+    const d = numbers(point, 3).map((n, i) => n - origin[i]);
+    const x = (dot(d, u) * vv - dot(d, v) * uv) / det / spacing[1];
+    const y = (dot(d, v) * uu - dot(d, u) * uv) / det / spacing[0];
+    if (Math.abs(dot(d, normal)) > .001 || x < -.501 || y < -.501 || x > columns - .499 || y > rows - .499) return fail();
+    return [x, y];
+  };
+  const measure = (kind, points) => {
+    const p = points.map(point => imagePoint(point).map((n, i) => n * spacing[1 - i]));
+    const sub = (a, b) => a.map((n, i) => n - b[i]), size = a => Math.hypot(...a);
+    const a = sub(p[0], p[1]); if (size(a) <= 1e-6) return fail();
+    if (kind === 'length') return size(a);
+    const b = kind === 'angle' ? sub(p[2], p[1]) : sub(p[3], p[2]);
+    if (size(b) <= 1e-6) return fail();
+    const cosine = dot(a, b) / size(a) / size(b);
+    if (kind === 'angle') {
+      return Math.acos(Math.max(-1, Math.min(1, cosine))) * 180 / Math.PI;
+    }
+    if (kind !== 'ellipse' || Math.abs(cosine) > 1e-4 || size(p[0].map((n, i) => (n + p[1][i] - p[2][i] - p[3][i]) / 2)) > .001) return fail();
+    return Math.PI * size(a) * size(b) / 4;
+  };
+  const label = mg?.label || { pixel: 'PixelSpacing · 원본 기준면', detector: 'ImagerPixelSpacing · 검출기 기준', ermf: 'ImagerPixelSpacing / ERMF · 추정 보정' }[basis];
+  return { origin, orientation, spacing, normal, imagePoint, measure, label, frameOfReferenceUid: tags.FrameOfReferenceUID || null,
+    calculator: 'kin-planar-manual-v1:' + basis };
+}
 
 function kinCreateViewerHistory() {
   let services, commands, extensions, stop;
@@ -1018,9 +1108,24 @@ function kinCreateViewerHistory() {
     };
     // After a 401/403 or a logout the panel has ended: that, not the account wording, is what the user needs to hear.
     const closedText = kind => ended ? '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.' : (readOnly() ? READ_ONLY : UNCONFIRMED)[kind];
+    function planar(imageId, kind) {
+      const image = cs.metaData.get('instance', imageId);
+      if (image?.Modality === 'MG' && kind === 'length' || image?.Modality === 'CT' && image.SOPClassUID === '1.2.840.10008.5.1.4.1.1.2' && Number(image.NumberOfFrames || 1) === 1) return null;
+      return kinPlanarGeometry(image, reference(imageId)?.frame);
+    }
     function measurementReason(imageId, kind, points) {
       const image = cs.metaData.get('instance', imageId);
       const finite = n => (typeof n === 'number' || typeof n === 'string' && n.trim() !== '') && Number.isFinite(Number(n));
+      try {
+        const geometry = planar(imageId, kind);
+        if (geometry) {
+          const plane = cs.metaData.get('imagePlaneModule', imageId);
+          if (cs.cache.getImage(imageId)?.calibration?.type || Number(plane?.rowPixelSpacing) !== geometry.spacing[0] || Number(plane?.columnPixelSpacing) !== geometry.spacing[1])
+            return '표시 간격과 원본 간격이 일치하지 않습니다';
+          if (points) geometry.measure(kind, points);
+          return '';
+        }
+      } catch (error) { return error.message; }
       if (image?.Modality === 'MG' && kind === 'length') {
         try {
           const mg = kinMgGeometry(image, reference(imageId)?.frame);
@@ -1083,6 +1188,8 @@ function kinCreateViewerHistory() {
       if (!a || a.invalidated) return null;
       const kind = kinds[a.metadata.toolName], target = 'imageId:' + a.metadata.referencedImageId, s = a.data.cachedStats?.[target];
       if (!freshStats(a.data, target) || measurementReason(a.metadata.referencedImageId, kind, a.data.handles.points)) return null;
+      const geometry = planar(a.metadata.referencedImageId, kind);
+      if (geometry) return { calculator: geometry.calculator, values: [geometry.measure(kind, a.data.handles.points)] };
       const values = kind === 'length' ? [s.length] : kind === 'angle' ? [s.angle] :
         [s.area, s.mean, s.statsArray?.find(x => x?.name === 'min')?.value, s.max, s.statsArray?.find(x => x?.name === 'count')?.value];
       if (values.some(n => !Number.isFinite(n)) || kind === 'ellipse' && s.modalityUnit !== 'HU') return null;
@@ -1112,6 +1219,12 @@ function kinCreateViewerHistory() {
           checked.displayText = { ...checked.displayText, primary: [...(checked.displayText?.primary || []), mg.label] };
           const report = checked.getReport;
           checked.getReport = () => { const r = report(); return { ...r, columns: [...r.columns, 'Measurement basis'], values: [...r.values, mg.label] }; };
+        }
+        const kind = kinds[a.metadata.toolName], geometry = planar(a.metadata.referencedImageId, kind);
+        if (geometry) {
+          const value = geometry.measure(kind, a.data.handles.points), unit = kind === 'angle' ? '°' : kind === 'ellipse' ? 'mm²' : 'mm';
+          checked.displayText = { primary: [value.toFixed(1) + ' ' + unit, geometry.label], secondary: [] };
+          checked.getReport = () => ({ columns: [kind, 'Unit', 'Measurement basis'], values: [value, unit, geometry.label] });
         }
         return checked;
       } catch (_) { return null; } // Display sets may disappear before their metadata.
@@ -1622,7 +1735,7 @@ function kinCreateViewerHistory() {
         do {
           const page = await api(path() + '?includeHidden=true&limit=100' + (recheck ? '&recheck=' + encodeURIComponent(recheck) : '') + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {}, ticket);
           if (!asked(ticket, seq, 'author')) return;
-          if (!Array.isArray(page.items) || heads.length + page.items.length > 512 || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
+          if (!Array.isArray(page.items) || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
           heads.push(...page.items); cursor = page.nextCursor;
         } while (cursor);
         if (!asked(ticket, seq, 'author')) return;
@@ -1672,20 +1785,20 @@ function kinCreateViewerHistory() {
     async function readOnlyLoad(ticket, seq) {
       if (!valid(ticket) || seq !== readSequence) return;
       const study = scope, heads = [];
-      let cursor = null, version = null, withheld = false, pages = 0;
+      let cursor = null, version = null, withheld = false;
       dropRows(); panel.dataset.readOnly = 'loading'; toolbar();
       try {
         do {
           const page = await api(path() + '?limit=100' + (cursor === null ? '' : '&cursor=' + encodeURIComponent(cursor)), {}, ticket);
           if (!asked(ticket, seq, 'final')) return;
-          if (++pages > 6 || !page || page.uid !== study || typeof page.final !== 'boolean') throw new Error('Invalid page');
+          if (!page || page.uid !== study || typeof page.final !== 'boolean') throw new Error('Invalid page');
           if (!page.final) {
             if (cursor !== null || page.items !== null || page.nextCursor !== null) throw new Error('Invalid page');
             withheld = true; break;
           }
           const next = page.nextCursor;
           if (!Number.isSafeInteger(page.reportVersion) || page.reportVersion < 1 || (version !== null && page.reportVersion !== version) ||
-              !Array.isArray(page.items) || page.items.length > 100 || heads.length + page.items.length > 512 ||
+              !Array.isArray(page.items) || page.items.length > 100 ||
               !page.items.every(h => h && typeof h === 'object' && typeof h.id === 'string' && h.id && Number.isSafeInteger(h.revision) &&
                 h.item && typeof h.item === 'object' && Object.hasOwn(names, h.item.kind)) ||
               !(next === null || typeof next === 'string' && next.length > 0 && next.length <= 512 && next !== cursor)) throw new Error('Invalid page');
@@ -1786,7 +1899,7 @@ function kinCreateViewerHistory() {
       refreshSrButtons();
       for (const kind of ['length', 'angle', 'ellipse']) button(actions, names[kind], () => {
         const v = viewport(), group = v && ct.ToolGroupManager.getToolGroupForViewport(v.id, v.renderingEngineId);
-        if (!group || v.type !== 'stack') { status.textContent = '원본 CT 프레임을 선택하세요.'; return; }
+        if (!group || v.type !== 'stack') { status.textContent = '원본 프레임을 선택하세요.'; return; }
         if (!group.getToolInstance(tools[kind])) group.addTool(tools[kind]);
         configureMeasurements(group);
         const previous = group.getActivePrimaryMouseButtonTool();
@@ -1837,8 +1950,8 @@ function kinCreateViewerHistory() {
         const lines = [];
         if (Number.isFinite(s.area)) lines.push('Area: ' + number(s.area) + ' ' + s.areaUnit);
         if (s.modalityUnit === 'HU') {
-          for (const [name, value] of [['Mean', s.mean], ['Min', min], ['Max', s.max]])
-            if (Number.isFinite(value)) lines.push(name + ': ' + (name === 'Mean' ? number(value) : value) + ' HU');
+          for (const [name, value] of [['Mean', s.mean], ['SD', s.stdDev], ['Min', min], ['Max', s.max]])
+            if (Number.isFinite(value)) lines.push(name + ': ' + (['Mean', 'SD'].includes(name) ? number(value) : value) + ' HU');
         }
         return lines;
       } };
@@ -1853,8 +1966,8 @@ function kinCreateViewerHistory() {
           }
           const v = cs.getEnabledElement(event.detail.element).viewport;
           const id = v.type === 'stack' && v.getCurrentImageId();
-          let reason = id ? measurementReason(id, kind) : '일반 CT 원본 프레임을 선택하세요';
-          if (!reason && kind === 'ellipse' && v.getCamera().viewUp.filter(n => Math.abs(n) > 1e-6).length !== 1)
+          let reason = id ? measurementReason(id, kind) : '원본 프레임을 선택하세요';
+          if (!reason && kind === 'ellipse' && !planar(id, kind) && v.getCamera().viewUp.filter(n => Math.abs(n) > 1e-6).length !== 1)
             reason = '사선·회전 ROI는 아직 지원하지 않습니다';
           if (reason) { status.textContent = reason; return; }
           const annotation = add.call(this, event);
@@ -1867,6 +1980,11 @@ function kinCreateViewerHistory() {
             id ? measurementReason(id, kind, data.handles.points) : '지원하지 않는 측정 평면입니다';
           if (reason) return [reason];
           if (!freshStats(data, target)) return ['재확인 필요: 현재 좌표로 계산되지 않았습니다'];
+          const geometry = planar(id, kind);
+          if (geometry) {
+            const value = geometry.measure(kind, data.handles.points);
+            return [value.toFixed(1) + (kind === 'angle' ? '°' : kind === 'ellipse' ? ' mm²' : ' mm'), ...geometry.label.split(' · ')];
+          }
           if (kind === 'ellipse') return lines(data, target);
           const mg = kind === 'length' && kinMgGeometry(cs.metaData.get('instance', id), reference(id)?.frame);
           const value = mg ? mg.length(data.handles.points) : data.cachedStats[target]?.[kind === 'length' ? 'length' : 'angle'];
@@ -1916,7 +2034,12 @@ function kinCreateViewerHistory() {
     function row(e) {
       if (!e.element) { e.element = document.createElement('section'); e.element.style.cssText = 'border-top:1px solid #405777;margin-top:8px;padding-top:8px'; list.append(e.element); }
       const el = e.element; el.replaceChildren(); el.dataset.itemId = e.head?.id || ''; el.dataset.kind = e.draft.kind;
-      text(el, 'strong', names[e.draft.kind] + ' · ' + (e.head ? 'Saved r' + e.head.revision : 'Unsaved') + (e.head?.hidden ? ' · Hidden' : ''));
+      const sourceUnverified = manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified';
+      // Saved names the server revision; an edit, a save in flight or an unknown answer is not that revision.
+      // Source verification keeps its own 재확인 필요 line below, so a saved item stays Saved r<n>.
+      const stateLabel = e.busy ? 'Saving' : e.pending ? 'Unverified' : hasWork(e) || !e.head ? 'Unsaved' : 'Saved r' + e.head.revision;
+      text(el, 'strong', names[e.draft.kind] + ' · ' + stateLabel + (e.head?.hidden ? ' · Hidden' : ''));
+      if (e.head && stateLabel !== 'Saved r' + e.head.revision) text(el, 'div', '서버 저장 이력 r' + e.head.revision + ' · 현재 수정·저장 결과와는 별개입니다.');
       // The clinician projection carries no author (clinician-policy.ts clinicianViewerItem).
       if (e.head) text(el, 'div', readOnly() ? 'Read-only' : e.head.authorActor + (writable(e) ? ' · My Item' : ' · Read-only'));
       if (e.editing) {
@@ -1939,7 +2062,6 @@ function kinCreateViewerHistory() {
         text(held, 'p', '프레임 ' + e.heldDraft.frame + ' · 아직 저장되지 않은 내용입니다.');
       }
       button(el, 'Go to Image', () => navigate(e));
-      const sourceUnverified = manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified';
       // Recheck and remeasure belong to the writer; a read-only row keeps the "재확인 필요" message hydrate() writes.
       if (sourceUnverified && !e.head.hidden && writer()) {
         text(el, 'p', '저장 이력과 현재 원본 확인은 별개입니다. 이 항목만 다시 확인할 수 있습니다. 원본이 바뀐 경우 새 뷰어에서 다시 측정하세요. 이 창의 수정과 기존 저장 이력은 유지됩니다.');
@@ -1955,8 +2077,8 @@ function kinCreateViewerHistory() {
         else if (e.editing) button(el, 'Save', () => save(e, 'edit'), !!e.busy || !!e.latest || !!sourceUnverified);
         else if (!e.head?.hidden) button(el, 'Edit', () => { e.editing = true; lock(e, false); row(e); }, manual(e.draft.kind) && e.head?.referenceStatus !== 'verified');
         if (e.head && !e.editing && !e.pending) button(el, e.head.hidden ? 'Restore' : 'Hide', () => {
-          const reason = window.prompt((e.head.hidden ? '복원' : '숨김') + ' 사유');
-          if (reason?.trim()) save(e, e.head.hidden ? 'restore' : 'hide', reason);
+          const reason = window.prompt((e.head.hidden ? '복원' : '숨김') + ' 사유 (선택)');
+          if (reason !== null) save(e, e.head.hidden ? 'restore' : 'hide', reason);
         }, !!e.busy);
         if (e.latest && !e.pending) button(el, 'Use Latest & Keep Changes', () => {
           e.head = e.latest; e.latest = null;
@@ -2118,6 +2240,7 @@ function kinCreateViewerHistory() {
       if (!ended && kinViewerSession.ended()) end();
       closeAuthoring();
       if (ended) return;
+      kinViewerToolbarLabels.outputScope(document);
       const r = current();
       if (r && r.study !== scope) {
         park(); reset('검사 확인 중…'); scope = r.study; me = null;
@@ -2188,7 +2311,7 @@ function kinCreateViewerHistory() {
         if (!e) {
           const ref = reference(a.metadata.referencedImageId);
           e = { id: crypto.randomUUID(), annotationUID: a.annotationUID, editing: true,
-            draft: { schemaVersion: 1, kind, seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: kind === 'length' && cs.metaData.get('instance', a.metadata.referencedImageId)?.Modality === 'MG'
+            draft: { schemaVersion: 1, kind, seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: manual(kind) && (planar(a.metadata.referencedImageId, kind) || cs.metaData.get('instance', a.metadata.referencedImageId)?.Modality === 'MG')
                 ? cs.metaData.get('instance', a.metadata.referencedImageId).FrameOfReferenceUID || null : a.metadata.FrameOfReferenceUID, label: a.data.text ?? a.data.label ?? '', points: clone(a.data.handles.points),
               ...(kind === 'arrow' ? {} : { viewPlaneNormal: clone(a.metadata.viewPlaneNormal), viewUp: clone(a.metadata.viewUp) }) } };
           entries.set(e.id, e); annotations.set(a.annotationUID, e); row(e);
@@ -2274,7 +2397,39 @@ function kinCreateViewerHistory() {
   return { id: 'kin.viewer-history', preRegistration({ servicesManager, commandsManager, extensionManager }) { services = servicesManager.services; commands = commandsManager; extensions = extensionManager; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
 
-// Only a bounded recent grid is retained; transient display-set IDs never leave this session.
+// Minhoon item 12 (MH-4): the account's measurement marker colour and line thickness in every
+// viewer document, embedded or standalone, for writers and read-only readers alike. The work
+// page's Appearance & Tools dialog writes the choice (worklist-v0/hpacs-lite/marker-style.js);
+// this document only draws with it and follows later changes without a reload.
+function kinCreateMarkerStyle() {
+  let ready = null, current = null, epoch = 0, unwatch = null;
+  const load = () => window.KinMarkerStyle ? Promise.resolve() : ready || (ready = new Promise((resolve, reject) => {
+    const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/marker-style.js';
+    script.onload = () => resolve();
+    // The stock marker style stays; a later mode entry tries again.
+    script.onerror = () => { script.remove(); ready = null; reject(Error('Marker style loading failed')); };
+    document.head.append(script);
+  }));
+  return { id: 'kin.marker-style',
+    preRegistration() { load().catch(() => {}); },
+    onModeEnter() {
+      const ticket = ++epoch;
+      const start = () => load().then(() => {
+        const owner = kinViewerSession.owner();
+        if (ticket !== epoch || current || kinViewerSession.ended() || !owner) return;
+        current = window.KinMarkerStyle.mount({ tools: window.cornerstoneTools, cornerstone: window.cornerstone, owner: JSON.stringify(owner) });
+      }).catch(() => {});
+      // The owner is the account the document's /me answered; another extension's answer serves too.
+      // A first /me that failed leaves no owner; the open viewer then follows from the later answer
+      // that settles the role, instead of only after the next mode entry.
+      unwatch?.(); unwatch = kinViewerSession.onChange(() => { start(); });
+      (kinViewerSession.owner() ? Promise.resolve() : kinViewerSession.decide()).then(start);
+    },
+    // The drawn style stays for the document; the next mode entry re-reads the latest choice.
+    onModeExit() { epoch++; unwatch?.(); unwatch = null; current?.dispose(); current = null; } };
+}
+
+// The recent display layout is retained; transient display-set IDs never leave this session.
 const kinViewerLayoutModel = (() => {
   const PREFIX = 'kin-viewer-layout-v1:';
   const uid = s => typeof s === 'string' && s.length <= 64 && /^[0-9]+(?:\.[0-9]+)*$/.test(s);
@@ -2283,26 +2438,41 @@ const kinViewerLayoutModel = (() => {
     const query = new URLSearchParams(search), raw = query.getAll('StudyInstanceUIDs');
     if (raw.length !== 1) return null;
     const values = raw[0].split(',');
-    return values.length >= 1 && values.length <= 2 && values.every(uid) && new Set(values).size === values.length ? values.sort() : null;
+    return values.length >= 1 && values.every(uid) && new Set(values).size === values.length ? values.sort() : null;
   }
   function owner(me) {
     return me?.kind === 'member' && [me.sub, me.institution].every(x => typeof x === 'string' && x.length > 0 && x.length <= 256)
       ? PREFIX + JSON.stringify([me.institution, me.sub]) : null;
   }
   function normalize(value) {
+    if (value?.version === 2) {
+      const { studies, rows, cols, active, cells } = value;
+      if (!Array.isArray(studies) || !studies.length || !studies.every(uid) || new Set(studies).size !== studies.length ||
+          ![rows, cols].every(n => Number.isSafeInteger(n) && n > 0) || !Array.isArray(cells) || !cells.length ||
+          !Number.isSafeInteger(active) || active < 0 || active >= cells.length) return null;
+      for (const cell of cells) {
+        if (!cell || ![cell.x, cell.y, cell.width, cell.height].every(Number.isFinite) || cell.x < 0 || cell.y < 0 ||
+            cell.width <= 0 || cell.height <= 0 || cell.x + cell.width > 1.000001 || cell.y + cell.height > 1.000001 ||
+            !Array.isArray(cell.sets) || !cell.sets.every(ref => ref && studies.includes(ref.study) && uid(ref.series) &&
+              typeof ref.handler === 'string' && Array.isArray(ref.sops) && ref.sops.every(uid)) ||
+            !cell.viewportOptions || typeof cell.viewportOptions !== 'object' || !Array.isArray(cell.displaySetOptions)) return null;
+      }
+      return JSON.parse(JSON.stringify({ version: 2, studies: [...studies].sort(), rows, cols, active, cells }));
+    }
     if (!exact(value, ['version', 'studies', 'rows', 'cols', 'active', 'cells']) || value.version !== 1) return null;
     const { studies, rows, cols, active, cells } = value;
-    if (!Array.isArray(studies) || ![1, 2].includes(studies.length) || !studies.every(uid) || new Set(studies).size !== studies.length) return null;
-    if (![1, 2].includes(rows) || ![1, 2].includes(cols) || !Number.isInteger(active) || active < 0 || active >= rows * cols) return null;
+    if (!Array.isArray(studies) || !studies.length || !studies.every(uid) || new Set(studies).size !== studies.length) return null;
+    if (![rows, cols].every(n => Number.isSafeInteger(n) && n > 0) || !Number.isInteger(active) || active < 0 || active >= rows * cols) return null;
     if (!Array.isArray(cells) || cells.length !== rows * cols || cells.every(x => x === null)) return null;
     if (!cells.every(x => x === null || (exact(x, ['study', 'series']) && studies.includes(x.study) && uid(x.series)))) return null;
     return { version: 1, studies: [...studies].sort(), rows, cols, active, cells: cells.map(x => x && ({ study: x.study, series: x.series })) };
   }
+
   function read(storage, key) {
     if (!key) throw new Error('계정 정보를 확인할 수 없습니다.');
     const raw = storage.getItem(key);
     if (raw === null) return null;
-    const value = typeof raw === 'string' && raw.length <= 8192 ? normalize(JSON.parse(raw)) : null;
+    const value = typeof raw === 'string' ? normalize(JSON.parse(raw)) : null;
     if (!value) throw new Error('저장한 배치가 손상되었거나 지원하지 않는 형식입니다.');
     return value;
   }
@@ -2516,29 +2686,33 @@ function kinCreateViewerLayout() {
       const state = grid.getState();
       return JSON.stringify([state.layout, state.activeViewportId, ordered(state).map(v => [v.viewportId, v.x, v.y, v.width, v.height, v.displaySetInstanceUIDs])]);
     };
+    function reference(d) {
+      return { study: d.StudyInstanceUID, series: d.SeriesInstanceUID, handler: d.SOPClassHandlerId || '',
+        sops: [...new Set((d.images || [d.instance || d]).map(i => i.SOPInstanceUID).filter(Boolean))].sort() };
+    }
     function resolve(cell) {
       if (!cell) return null;
-      const matches = ds.getActiveDisplaySets().filter(d => d.StudyInstanceUID === cell.study && d.SeriesInstanceUID === cell.series);
-      // Split series and non-stack objects cannot be silently replaced with a default display set.
-      if (matches.length !== 1 || matches[0].Modality !== 'CT' || !(matches[0].images?.length) ||
-          !matches[0].images.every(i => i.SOPClassUID === '1.2.840.10008.5.1.4.1.1.2')) throw new Error('시리즈를 찾을 수 없거나 지원하지 않는 영상입니다. 현재 배치를 유지합니다.');
+      const matches = ds.getActiveDisplaySets().filter(d => d.StudyInstanceUID === cell.study && d.SeriesInstanceUID === cell.series &&
+        (!cell.sops || JSON.stringify(reference(d)) === JSON.stringify(cell)));
+      if (matches.length !== 1) throw new Error('저장한 영상 구성을 찾을 수 없습니다. 현재 배치를 유지합니다.');
       return matches[0].displaySetInstanceUID;
     }
     function capture() {
-      const state = grid.getState(), views = ordered(state), { numRows: rows, numCols: cols, layoutType } = state.layout;
-      if (layoutType !== 'grid' || views.length !== rows * cols) throw new Error('1·2·4화면의 일반 CT 배치만 저장할 수 있습니다.');
-      const cells = views.map((v, i) => {
-        if (Math.abs(v.x - (i % cols) / cols) > 1e-6 || Math.abs(v.y - Math.floor(i / cols) / rows) > 1e-6 ||
-            Math.abs(v.width - 1 / cols) > 1e-6 || Math.abs(v.height - 1 / rows) > 1e-6) throw new Error('병합 또는 특수 배치는 저장할 수 없습니다.');
-        const ids = v.displaySetInstanceUIDs || [];
-        if (!ids.length) return null;
-        if (ids.length !== 1 || cs.getCornerstoneViewport(v.viewportId)?.type !== 'stack') throw new Error('일반 CT 스택만 저장할 수 있습니다.');
-        const d = ds.getDisplaySetByUID(ids[0]), cell = { study: d?.StudyInstanceUID, series: d?.SeriesInstanceUID };
-        if (!studies.includes(cell.study) || resolve(cell) !== ids[0] || !cs.getCornerstoneViewport(v.viewportId)?.getCurrentImageId?.()) throw new Error('영상 로딩이 끝난 뒤 다시 저장하세요.');
-        return cell;
+      const state = grid.getState(), views = ordered(state), { numRows: rows, numCols: cols } = state.layout;
+      const cells = views.map(v => {
+        const refs = (v.displaySetInstanceUIDs || []).map(id => {
+          const d = ds.getDisplaySetByUID(id);
+          if (!d || !studies.includes(d.StudyInstanceUID)) throw new Error('영상 로딩이 끝난 뒤 다시 저장하세요.');
+          const ref = reference(d);
+          if (resolve(ref) !== id) throw new Error('표시 영상의 구성을 확인할 수 없습니다.');
+          return ref;
+        });
+        const { viewportId, ...viewportOptions } = v.viewportOptions || {};
+        return { x: v.x, y: v.y, width: v.width, height: v.height, sets: refs,
+          viewportOptions, displaySetOptions: v.displaySetOptions || refs.map(() => ({})) };
       });
-      const value = model.normalize({ version: 1, studies, rows, cols, active: views.findIndex(v => v.viewportId === state.activeViewportId), cells });
-      if (!value) throw new Error('1·2·4화면의 일반 CT 배치만 저장할 수 있습니다.');
+      const value = model.normalize({ version: 2, studies, rows, cols, active: views.findIndex(v => v.viewportId === state.activeViewportId), cells });
+      if (!value) throw new Error('현재 화면의 배치를 확인할 수 없습니다.');
       return value;
     }
     async function run(action) {
@@ -2554,14 +2728,17 @@ function kinCreateViewerLayout() {
         if (action === 'save') { model.write(localStorage, key, capture()); status.textContent = '최근 배치를 이 브라우저에 저장했습니다.'; }
         else if (action === 'remove') { localStorage.removeItem(key); status.textContent = '이 계정의 최근 배치를 삭제했습니다. 현재 화면은 유지됩니다.'; }
         else {
-          if (ordered(grid.getState()).some(v => v.displaySetInstanceUIDs?.length && cs.getCornerstoneViewport(v.viewportId)?.type !== 'stack')) throw new Error('일반 CT 화면에서 배치를 복원하세요. 현재 화면은 유지됩니다.');
           const value = model.read(localStorage, key);
           if (!value) throw new Error('이 계정에서 저장한 최근 배치가 없습니다.');
           if (JSON.stringify(value.studies) !== JSON.stringify(studies)) throw new Error('다른 검사의 배치입니다. 저장한 검사를 먼저 여세요.');
-          const sets = value.cells.map(resolve), ids = value.cells.map(() => 'kin-layout-' + crypto.randomUUID());
+          const cells = value.version === 2 ? value.cells : value.cells.map((ref, i) => ({
+            x: i % value.cols / value.cols, y: Math.floor(i / value.cols) / value.rows, width: 1 / value.cols, height: 1 / value.rows,
+            sets: ref ? [ref] : [], viewportOptions: { viewportType: 'stack', toolGroupId: 'default' }, displaySetOptions: [{}] }));
+          const sets = cells.map(cell => cell.sets.map(resolve)), ids = cells.map(() => 'kin-layout-' + crypto.randomUUID());
           await grid.setLayout({ numRows: value.rows, numCols: value.cols, activeViewportId: ids[value.active], isHangingProtocolLayout: false,
-            findOrCreateViewport: index => ({ displaySetInstanceUIDs: sets[index] ? [sets[index]] : [], displaySetOptions: [{}],
-              viewportOptions: { viewportId: ids[index], viewportType: 'stack', toolGroupId: 'default', allowUnmatchedView: true } }) });
+            layoutOptions: cells.map(({ x, y, width, height }) => ({ x, y, width, height })),
+            findOrCreateViewport: index => ({ displaySetInstanceUIDs: sets[index], displaySetOptions: cells[index].displaySetOptions,
+              viewportOptions: { ...cells[index].viewportOptions, viewportId: ids[index], allowUnmatchedView: true } }) });
           if (live()) status.textContent = '저장한 시리즈 배치를 적용했습니다. 영상 로딩 상태를 확인하세요.';
         }
       } catch (error) {
@@ -2591,7 +2768,7 @@ function kinCreateViewerLayout() {
       if (kinViewerSession.readOnly()) { readOnlyPanel(); return; }
       status.textContent = '현재 검사의 배치를 직접 저장하거나 복원하세요.'; await mountProtocols();
     }).catch(error => { if (live()) status.textContent = error?.message || '계정 정보를 확인할 수 없습니다. 뷰어를 다시 여세요.'; }).finally(refresh);
-    else status.textContent = '현재 검사 1~2개의 일반 CT 배치만 지원합니다.';
+    else status.textContent = '현재 검사의 식별 정보를 확인할 수 없습니다.';
     stop = () => { unwatch(); unwatchEnd(); end();  channel?.close(); panel.remove(); };
   }
   return { id: 'kin.viewer-layout', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
@@ -2612,9 +2789,8 @@ const kinCTSyncModel = (() => {
   function match(source, target) {
     const deny = reason => ({ reason, index: -1 });
     if (!source?.patient || source.patient !== target?.patient) return deny('같은 환자를 확인할 수 없습니다');
-    if (!source.classic || !target.classic) return deny('일반 CT 스택만 위치 동기할 수 있습니다');
     const a = source.planes?.[source.index], planes = target.planes;
-    if (!a?.frameOfReferenceUID || !Array.isArray(planes) || planes.length < 2 || planes.length > 2000 ||
+    if (!a?.frameOfReferenceUID || !Array.isArray(planes) || planes.length < 1 ||
         planes.some(p => !p?.frameOfReferenceUID || p.frameOfReferenceUID !== a.frameOfReferenceUID)) return deny('좌표계가 다르거나 없습니다');
     const n = normal(a), t = normal(planes[0]);
     if (!n || !t || Math.abs(dot(n, t)) < 1 - 1e-6) return deny('영상 방향 또는 위치가 맞지 않습니다');
@@ -2623,7 +2799,6 @@ const kinCTSyncModel = (() => {
       const pn = normal(p);
       if (!pn || Math.abs(dot(pn, t)) < 1 - 1e-6) return deny('영상 방향 또는 위치가 맞지 않습니다');
       const d = sub(p.imagePositionPatient, origin), z = dot(d, t);
-      if (Math.sqrt(dot(d, d) - Math.min(dot(d, d), z*z)) > eps) return deny('기울어진 스택은 위치 동기하지 않습니다');
       values.push(z);
     }
     const sorted = [...values].sort((a, b) => a - b), gaps = sorted.slice(1).map((x, i) => x - sorted[i]);
@@ -2633,7 +2808,7 @@ const kinCTSyncModel = (() => {
     // Preserve native nearest-position and stable first-index tie behavior, but refuse large gaps.
     let index = 0;
     for (let i = 1; i < values.length; i++) if (Math.abs(values[i]-z) < Math.abs(values[index]-z) - 1e-9) index = i;
-    if (Math.abs(values[index]-z) > Math.min(...gaps) / 2 + eps) return deny('대상 영상 위치 사이에 큰 공백이 있습니다');
+    if (Math.abs(values[index]-z) > gaps.reduce((min, gap) => Math.min(min, gap), Infinity) / 2 + eps) return deny('대상 영상 위치 사이에 큰 공백이 있습니다');
     return { index, reason: '' };
   }
   return { match };
@@ -2778,11 +2953,10 @@ function kinCreateCTSync() {
       if (!v || !g || v.getRenderingEngine().id !== info.renderingEngineId) return null;
       const ids = v.getImageIds?.() || [], sets = g.displaySetInstanceUIDs || [];
       const d = sets.length === 1 && services.displaySetService.getDisplaySetByUID(sets[0]);
-      const classic = v.type === 'stack' && d?.Modality === 'CT' && d?.SOPClassUID === '1.2.840.10008.5.1.4.1.1.2' &&
-        d.images?.length === ids.length && d.images.every(i => i.SOPClassUID === '1.2.840.10008.5.1.4.1.1.2') &&
-        ids.length > 1 && ids.length <= 2000 && ids.every(id => id.includes('/studies/'+d.StudyInstanceUID+'/series/'+d.SeriesInstanceUID+'/'));
-      return { v, ids, study: d?.StudyInstanceUID, patient: null, classic, index: v.getCurrentImageIdIndex?.(),
-        planes: classic ? ids.map(id => core.metaData.get('imagePlaneModule', id)) : [],
+      const stack = v.type === 'stack' && d && ids.length > 1 &&
+        ids.every(id => id.includes('/studies/'+d.StudyInstanceUID+'/series/'+d.SeriesInstanceUID+'/'));
+      return { v, ids, study: d?.StudyInstanceUID, patient: null, stack, index: v.getCurrentImageIdIndex?.(),
+        planes: stack ? ids.map(id => core.metaData.get('imagePlaneModule', id)) : [],
         signature: JSON.stringify([sets, ids, v.getCurrentImageId?.()]) };
     }
     const current = (info, before) => before && view(info)?.signature === before.signature;
@@ -2824,7 +2998,7 @@ function kinCreateCTSync() {
               if (m.index >= 0) core.utilities.spatialRegistrationMetadataProvider.add([targets[i].viewportId, sourceInfo.viewportId], [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]);
             });
             const denied = matches.find(m => m.index < 0);
-            say(denied ? '위치 동기 제한: '+denied.reason : '같은 좌표계의 CT 위치 동기');
+            say(denied ? '위치 동기 제한: '+denied.reason : '같은 좌표계의 스택 위치 동기');
             return fire.call(sync, sourceInfo, event);
           } catch (error) {
             // Session termination is owned by the page transport and gate.
@@ -2855,10 +3029,20 @@ function kinCreateCTSync() {
   return { id: 'kin.ct-sync', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
 
-function kinCineWithinBudget(ids, pixels) {
-  return ids.length >= 2 && ids.length <= 500 && pixels.length === ids.length &&
-    pixels.every(p => Number.isInteger(p?.rows) && p.rows > 0 && Number.isInteger(p?.columns) && p.columns > 0) &&
-    pixels.reduce((n, p) => n + p.rows * p.columns * 4, 0) <= 128 * 1024 * 1024;
+function kinCineWithinBudget(ids, pixels, available, cached = [], cacheable = () => true) {
+  if (ids.length < 2 || pixels.length !== ids.length || !Number.isFinite(available) || available < 0) return false;
+  let needed = 0, total = 0;
+  for (let i = 0; i < pixels.length; i++) {
+    const p = pixels[i];
+    if (![p?.rows, p?.columns].every(n => Number.isSafeInteger(n) && n > 0)) return false;
+    // Use the decoded frame's size when present; an uncached frame uses its
+    // native allocation (8/16-bit monochrome or RGB), not Float32 per sample.
+    const bytes = cached[i]?.sizeInBytes ?? p.rows * p.columns * (p.decodedBytesPerPixel ?? Number(p.bitsAllocated || 32) / 8 * Number(p.samplesPerPixel || 1));
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) return false;
+    total += bytes;
+    if (!cached[i]) needed += bytes;
+  }
+  return Number.isSafeInteger(total) && needed <= available && cacheable(total);
 }
 
 function kinCineNext(index, first, last, mode, direction, loop) {
@@ -2880,9 +3064,36 @@ function kinCineNext(index, first, last, mode, direction, loop) {
 }
 
 function kinCreateCine() {
-  let services, dispose;
+  let services, extensions, dispose;
   function mount() {
     dispose?.();
+    // OHIF's stack handler only copies FrameTime into this millisecond playback
+    // hint. Supply the preferred DICOM rate before native cine initializes both
+    // its FPS control and playback state; never rewrite the instance metadata.
+    const handlerId = '@ohif/extension-default.sopClassHandlerModule.stack';
+    const handler = extensions.getModuleEntry(handlerId);
+    const nativeDisplaySets = handler.getDisplaySetsFromSeries;
+    function sourceRate(displaySet) {
+      const instance = displaySet.instances?.[0];
+      if (!(Number(instance?.NumberOfFrames) > 1)) return;
+      for (const value of [instance.RecommendedDisplayFrameRate, instance.CineRate]) {
+        const rate = typeof value === 'number' || typeof value === 'string' ? Number(value) : NaN;
+        if (Number.isFinite(rate) && rate > 0) {
+          displaySet.FrameRate = 1000 / rate;
+          return;
+        }
+      }
+      // Preserve OHIF's existing FrameTime conversion and its no-rate default.
+    }
+    const createDisplaySets = function (...args) {
+      const displaySets = nativeDisplaySets.apply(this, args);
+      displaySets.forEach(sourceRate);
+      return displaySets;
+    };
+    handler.getDisplaySetsFromSeries = createDisplaySets;
+    services.displaySetService.getActiveDisplaySets().forEach(ds => {
+      if (ds.SOPClassHandlerId === handlerId) sourceRate(ds);
+    });
     const core = window.cornerstone, cine = services.cineService, grid = services.viewportGridService;
     const nativePlay = cine.playClip, nativeStop = cine.stopClip;
     const records = new Map(), subscriptions = [], listeners = [];
@@ -3034,8 +3245,25 @@ function kinCreateCine() {
             }catch(error){clearInterval(timer);if(records.get(id)===r){r.message=error.message||'MPR 재생을 중단했습니다.';if(r.ticket===ticket)halt(id);render();}}
           },1000/fps);r.volumeTimer=timer;render();return;
         }
-        const ids = v.getImageIds(), pixels = ids.map(imageId => core.metaData.get('imagePixelModule', imageId));
-        if (!kinCineWithinBudget(ids, pixels)) throw Error('재생 준비 범위는 2~500 프레임·128 MiB 이내입니다');
+        const ids = v.getImageIds(), metadata = ids.map(imageId => core.metaData.get('imagePixelModule', imageId));
+        const cached = ids.map(id => core.cache.getImage(id));
+        // A displayed frame supplies the actual decoder allocation, including
+        // Float32 promotion for its rescale and RGB/RGBA conversion.
+        const keys = metadata.map((p,i) => JSON.stringify([p?.bitsAllocated,p?.samplesPerPixel,p?.photometricInterpretation,core.metaData.get('modalityLutModule',ids[i])]));
+        const allocations = new Map();
+        cached.forEach((image,i) => { if (image?.sizeInBytes && metadata[i]?.rows && metadata[i]?.columns)
+          allocations.set(keys[i],image.sizeInBytes/(metadata[i].rows*metadata[i].columns)); });
+        const pixels = metadata.map((p,i) => ({...p,decodedBytesPerPixel:allocations.get(keys[i])}));
+        // Cornerstone includes evictable images in isCacheable(); subtracting the
+        // whole image cache would reject cine after viewing an unrelated study.
+        let available = core.cache.getMaxCacheSize();
+        const heap = performance.memory;
+        if (heap && Number.isFinite(heap.jsHeapSizeLimit - heap.usedJSHeapSize))
+          available = Math.min(available, heap.jsHeapSizeLimit - heap.usedJSHeapSize);
+        if (!kinCineWithinBudget(ids, pixels, available, cached, bytes => core.cache.isCacheable(bytes))) {
+          r.message = '현재 영상 캐시·메모리 여유가 부족합니다. 다른 검사를 정리하거나 뷰어를 다시 연 뒤 재생하세요.';
+          throw Error(r.message);
+        }
         await session(); if (!current()) return;
         // Finish a bounded, four-worker preparation before the native timer starts, so stop/replace cannot be undone by a late frame load.
         let next = 0;
@@ -3044,7 +3272,11 @@ function kinCreateCine() {
         }));
         if (!current()) return;
         const bounds=playbackRange(r,ids.length);if(!bounds)throw Error('재생 범위가 바뀌었습니다. 다시 적용하세요.');const currentIndex=()=>v.getTargetImageIdIndex?.()??v.getCurrentImageIdIndex?.();
-        if(currentIndex()<bounds.first||currentIndex()>bounds.last){await core.utilities.jumpToSlice(v.element,{imageIndex:bounds.first});if(!current())return;}
+        if(currentIndex()<bounds.first||currentIndex()>bounds.last){
+          clearTimeout(v.debouncedTimeout);
+          await core.utilities.jumpToSlice(v.element,{imageIndex:bounds.first,debounceLoading:true});
+          if(!current())return;
+        }
         r.loading = false;
         if(!r.range&&r.mode!=='yoyo'){
           nativePlay.call(this, element, { ...options, framesPerSecond: Math.abs(options.framesPerSecond || 10) * (r.mode==='reverse' ? -1 : 1), loop: r.loop });
@@ -3064,7 +3296,7 @@ function kinCreateCine() {
         },1000/fps);r.volumeTimer=timer;
         render();
       } catch (error) {
-        if (current()) { r.message = v.type==='orthographic'?(error.message||'MPR 재생을 준비할 수 없습니다.'):'재생을 준비할 수 없습니다. 로그인·영상과 500 프레임/128 MiB 제한을 확인하세요.'; halt(id); render(); }
+        if (current()) { r.message = v.type==='orthographic' ? (error.message || 'MPR 재생을 준비할 수 없습니다.') : (r.message || '재생을 준비할 수 없습니다. 로그인 상태와 영상을 확인하고 다시 시도하세요.'); halt(id); render(); }
       } finally {
         if(v.type==='orthographic'&&records.get(id)===r&&r.ticket===ticket&&!current()){halt(id);render();}
       }
@@ -3100,7 +3332,10 @@ function kinCreateCine() {
       try {
         await core.imageLoader.loadAndCacheImage(imageId);
         if (ended || r.ticket !== ticket || viewport(v.id) !== v || signature(v) !== before) return;
-        await core.utilities.jumpToSlice(v.element, { imageIndex: index });
+        // jumpToSlice must measure from the pending scroll target, not the current
+        // image. Pixels are already cached; cancel any older deferred wheel load.
+        clearTimeout(v.debouncedTimeout);
+        await core.utilities.jumpToSlice(v.element, { imageIndex: index, debounceLoading: true });
       } catch (_) { if (!ended && r.ticket === ticket) r.message = '프레임을 불러올 수 없습니다'; }
       finally { if (!ended && r.ticket === ticket) { r.loading = false; render(); } }
     }
@@ -3120,9 +3355,11 @@ function kinCreateCine() {
 
     try { channel = kinViewerOnEnd(end); } catch (_) {}
     const timer = setInterval(render, 250); selected = grid.getActiveViewportId(); render();
-    dispose = () => { end(); clearInterval(timer); listeners.forEach(off => off()); subscriptions.forEach(s => s.unsubscribe()); channel?.close(); cine.playClip = nativePlay; cine.stopClip = nativeStop; panel.remove(); };
+    dispose = () => { end(); clearInterval(timer); listeners.forEach(off => off()); subscriptions.forEach(s => s.unsubscribe()); channel?.close(); cine.playClip = nativePlay; cine.stopClip = nativeStop; panel.remove();
+      if (handler.getDisplaySetsFromSeries === createDisplaySets) handler.getDisplaySetsFromSeries = nativeDisplaySets;
+    };
   }
-  return { id: 'kin.cine', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { dispose?.(); dispose = null; } };
+  return { id: 'kin.cine', preRegistration({ servicesManager, extensionManager }) { services = servicesManager.services; extensions = extensionManager; }, onModeEnter: mount, onModeExit() { dispose?.(); dispose = null; } };
 }
 
 function kinApplyCTPreset(services, commands, presetIndex) {
@@ -3258,24 +3495,25 @@ function kinCreateImagesOnly() {
     if (window.KinViewerImagesOnly) return Promise.resolve(window.KinViewerImagesOnly);
     if (!ready) ready = new Promise((resolve, reject) => {
       const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/viewer-images-only.js';
-      const timer = setTimeout(() => finish(new Error('Images Only 도구를 불러오지 못했습니다. 뷰어를 다시 여세요.')), 10000);
+      const timer = setTimeout(() => finish(new Error('Images Only 도구를 불러오지 못했습니다. 다시 시도하세요.')), 10000);
       function finish(error) { clearTimeout(timer); script.onload = script.onerror = null; if (error) { script.remove(); reject(error); } else resolve(window.KinViewerImagesOnly); }
       script.onload = () => finish(window.KinViewerImagesOnly ? null : new Error('Images Only 모듈을 확인할 수 없습니다.'));
-      script.onerror = () => finish(new Error('Images Only 도구를 불러오지 못했습니다. 뷰어를 다시 여세요.'));
+      script.onerror = () => finish(new Error('Images Only 도구를 불러오지 못했습니다. 다시 시도하세요.'));
       document.head.append(script);
     }).catch(error => { ready = null; throw error; });
     return ready;
   }
-  return { id: 'kin.images-only', onModeEnter({ servicesManager }) {
-    if (ended) return; watchSession();
+  const extension = { id: 'kin.images-only', onModeEnter({ servicesManager }) {
+    if (ended) return; watchSession(); kinToolRetry('kin-images-retry');
     const ticket = ++epoch; current?.stop(); current = null;
     prepare().then(module => {
       if (ticket !== epoch) return;
       const connected = module.create(servicesManager.services);
       if (!connected.mount()) { connected.stop(); throw new Error('Images Only 패널을 연결하지 못했습니다.'); }
       current = connected;
-    }).catch(error => { if (ticket === epoch) { const status = document.querySelector('#kin-viewer-layout-status'); if (status) status.textContent = error.message; } });
-  }, onModeExit() { epoch++; current?.stop(); current = null; } };
+    }).catch(error => { if (ticket === epoch) { kinToolRetry('kin-images-retry', error.message, () => extension.onModeEnter({ servicesManager })); } });
+  }, onModeExit() { kinToolRetry('kin-images-retry'); epoch++; current?.stop(); current = null; } };
+  return extension;
 }
 
 function kinCreateImageText() {
@@ -3408,10 +3646,29 @@ function kinCreateViewerFindings() {
 
 function kinCreateViewerTechNote() {
   let ready, current, prepare, epoch=0, active=false, state='stopped';
+  let identity, identityReady, prepareIdentity, identityServices;
+  function stopIdentity(){identity?.dispose();identity=null;}
+  function connectIdentity(){
+    if(!active||!kinViewerSession.readOnly()||identity||!prepareIdentity)return;
+    const ticket=epoch;
+    prepareIdentity().then(module=>{
+      if(!active||ticket!==epoch||!kinViewerSession.readOnly()||identity)return;
+      // Patient identification also belongs to read-only viewing. It does not
+      // require mounting the writer's Tech Note, clipboard or volume tools.
+      identity=module.mount({services:identityServices,resolve:()=>null,
+        owner:()=>kinViewerSession.owner(),allowed:()=>active&&kinViewerSession.readOnly(),
+        studies:(new URLSearchParams(location.search).get('StudyInstanceUIDs')||'').split(',').filter(Boolean)});
+    }).catch(()=>{
+      if(!active||ticket!==epoch)return;
+      const status=document.querySelector('#kin-viewer-layout-status');
+      if(status)status.textContent='환자 식별 표시를 연결하지 못했습니다. 영상 정보 표시에서 환자와 검사를 확인하세요.';
+    });
+  }
   // The bridge follows the verified role; document disposal belongs to the page boundary.
-  kinViewerSession.onChange(next=>{if(next==='writer'){connect();return;}epoch++;if(active)state=next;if(next==='read-only'){current?.stop();current=null;}});
+  kinViewerSession.onChange(next=>{if(next==='writer'){stopIdentity();connect();return;}epoch++;if(active)state=next;if(next==='read-only'){current?.stop();current=null;connectIdentity();}else stopIdentity();});
   function connect() {
     if(!active||state==='loading'||state==='ready'||!kinViewerSession.writer())return;
+    kinToolRetry('kin-note-retry');
     const ticket=epoch;state='loading';
     prepare().then(extension=>{
       if(!active||ticket!==epoch)return;
@@ -3421,7 +3678,7 @@ function kinCreateViewerTechNote() {
     }).catch(e=>{
       if(!active||ticket!==epoch)return;
       state='failed';
-      if(window.top===window){const p=document.querySelector('#kin-viewer-layout-status');if(p)p.textContent='Tech 메모 화면을 연결하지 못했습니다. 영상 작업을 저장한 뒤 뷰어를 다시 여세요.';}
+      kinToolRetry('kin-note-retry', 'Tech 메모 화면을 연결하지 못했습니다.', connect);
     });
   }
   return {id:'kin.viewer-tech-note',preRegistration({servicesManager}) {
@@ -3431,6 +3688,9 @@ function kinCreateViewerTechNote() {
       const timer=setTimeout(fail,20000);
       script.onload=()=>{clearTimeout(timer);resolve();};script.onerror=fail;document.head.append(script);
     });
+    identityServices=servicesManager.services;
+    prepareIdentity=()=>window.KinViewerIdentity?Promise.resolve(window.KinViewerIdentity):
+      identityReady||(identityReady=load('viewer-identity.js').then(()=>window.KinViewerIdentity).catch(error=>{identityReady=null;throw error;}));
     const standalone=window.top===window;
     if(standalone){const css=document.createElement('link');css.rel='stylesheet';css.href='/worklist/hpacs-lite/tech-note.css';document.head.append(css);}
     prepare=()=>ready||(ready=(standalone&&typeof window.KinTechNote!=='function'?load('tech-note.js'):Promise.resolve())
@@ -3466,27 +3726,31 @@ function kinCreateViewerTechNote() {
   },onModeEnter(){if(!prepare)return;epoch++;active=true;state='unconfirmed';const ticket=epoch;
     // S5-U2b: Tech notes are a technician record the clinician allowlist neither reads nor writes. The bridge connects only
     // after a /me answered writer; until an answer it stays 'unconfirmed', and 'read-only'/'refused' never connect.
-    kinViewerSession.decide().then(session=>{if(!active||ticket!==epoch)return;if(session==='writer')connect();else state=session;});
-  },onModeExit(){epoch++;active=false;state='stopped';current?.stop();current=null;}};
+    kinViewerSession.decide().then(session=>{if(!active||ticket!==epoch)return;if(session==='writer')connect();else{state=session;if(session==='read-only')connectIdentity();}});
+  },onModeExit(){kinToolRetry('kin-note-retry');epoch++;active=false;state='stopped';stopIdentity();current?.stop();current=null;}};
 }
 
 function kinCreateFrameCoverage() {
-  let ready, current, services, epoch=0;
-  return {id:'kin.frame-coverage',preRegistration({servicesManager}) {
-    services=servicesManager.services;
-    ready=new Promise((resolve,reject)=>{
-      const script=document.createElement('script');script.src='/worklist/hpacs-lite/viewer-frame-coverage.js';
-      const timeout=setTimeout(()=>reject(Error('Frame Coverage loading timeout')),20000);
-      script.onload=()=>{clearTimeout(timeout);resolve();};script.onerror=()=>{clearTimeout(timeout);reject(Error('Frame Coverage loading failed'));};document.head.append(script);
-    });ready.catch(()=>{});
-  },onModeEnter(){
-    const ticket=++epoch;
-    window.kinViewerFrameCoverageState=()=>({warn:true,phase:'unverified'});
-    window.kinViewerFrameCoverageConfirm=ask=>(ask||window.confirm)('원본 프레임 표시 확인을 연결하지 못했습니다. 이 영상을 떠날까요?');
-    ready.then(()=>{if(ticket===epoch)current=window.KinFrameCoverage.mount(services);}).catch(()=>{
-      if(ticket===epoch){const status=document.querySelector('#kin-viewer-layout-status');if(status)status.textContent='Frame Coverage를 연결하지 못했습니다. 영상 작업을 저장한 뒤 뷰어를 다시 여세요.';}
-    });
-  },onModeExit(){epoch++;current?.stop();current=null;}};
+  let ready, current, services, epoch = 0;
+  function prepare() {
+    if (!ready) ready = (window.KinFrameCoverage ? Promise.resolve() : new Promise((resolve, reject) => {
+      const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/viewer-frame-coverage.js';
+      const finish = error => { clearTimeout(timer); script.onload = script.onerror = null; script.remove(); error ? reject(error) : resolve(); };
+      const timer = setTimeout(() => finish(Error('Frame Coverage 연결 시간이 지났습니다.')), 20000);
+      script.onload = () => finish(window.KinFrameCoverage?.mount ? null : Error('Frame Coverage 도구를 확인할 수 없습니다.'));
+      script.onerror = () => finish(Error('Frame Coverage를 불러오지 못했습니다.')); document.head.append(script);
+    })).catch(error => { ready = null; throw error; });
+    return ready;
+  }
+  const extension = { id: 'kin.frame-coverage', preRegistration({ servicesManager }) { services = servicesManager.services; },
+    onModeEnter() {
+      const ticket = ++epoch; kinToolRetry('kin-coverage-retry'); current?.stop(); current = null;
+      window.kinViewerFrameCoverageState = () => ({ warn: true, phase: 'unverified' });
+      window.kinViewerFrameCoverageConfirm = ask => (ask || window.confirm)('원본 프레임 표시 확인을 연결하지 못했습니다. 이 영상을 떠날까요?');
+      prepare().then(() => { if (ticket === epoch) current = window.KinFrameCoverage.mount(services); })
+        .catch(error => { if (ticket === epoch) kinToolRetry('kin-coverage-retry', error.message, () => extension.onModeEnter()); });
+    }, onModeExit() { epoch++; kinToolRetry('kin-coverage-retry'); current?.stop(); current = null; } };
+  return extension;
 }
 
 /* REQ-D-3D-CURSOR 연결 경로. 이 확장은 3D Cursor 모듈 두 개를 불러 컨트롤러를 붙이고
@@ -3833,14 +4097,14 @@ function kinCreateDicomPdf() {
     if (!ready) ready = new Promise((resolve, reject) => {
       const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/viewer-dicom-pdf.js';
       const finish = error => { clearTimeout(timer); script.onload = script.onerror = null; script.remove(); error ? reject(error) : resolve(window.KinDicomPdf); };
-      const timer = setTimeout(() => finish(new Error('원본 PDF 도구 연결 시간이 지났습니다. 뷰어를 다시 여세요.')), 10000);
+      const timer = setTimeout(() => finish(new Error('원본 PDF 도구 연결 시간이 지났습니다. 다시 시도하세요.')), 10000);
       script.onload = () => finish(window.KinDicomPdf?.create ? null : new Error('원본 PDF 도구를 확인할 수 없습니다.'));
-      script.onerror = () => finish(new Error('원본 PDF 도구를 불러오지 못했습니다. 뷰어를 다시 여세요.'));
+      script.onerror = () => finish(new Error('원본 PDF 도구를 불러오지 못했습니다. 다시 시도하세요.'));
       document.head.append(script);
     }).catch(error => { ready = null; throw error; });
     return ready;
   }
-  return { id: 'kin.source-pdf', preRegistration({ servicesManager, extensionManager }) {
+  const extension = { id: 'kin.source-pdf', preRegistration({ servicesManager, extensionManager }) {
     services = servicesManager.services;
     if (extensionManager) { viewportGuard = kinDicomPdfViewportGuard(extensionManager, { onSessionEnd: retire,
       onFailure: (error, value, pdfUrl) => { nativeErrors.set(value, { pdfUrl, error }); current?.nativeFailure?.(error, value, pdfUrl); },
@@ -3848,6 +4112,7 @@ function kinCreateDicomPdf() {
     }); if (!viewportGuard.install()) throw new Error('원본 PDF 화면을 안전하게 연결하지 못했습니다. 뷰어를 다시 여세요.'); }
   },
     onModeEnter() {
+      kinToolRetry('kin-pdf-retry');
       if (viewportGuard && !viewportGuard.ownsWrapper() && !viewportGuard.install()) { const status = document.querySelector('#kin-viewer-layout-status'); if (status) status.textContent = '원본 PDF 화면을 안전하게 연결하지 못했습니다. 뷰어를 다시 여세요.'; return; }
       viewportGuard?.activate();
       const ticket = ++epoch; current?.stop(); current = null;
@@ -3855,11 +4120,12 @@ function kinCreateDicomPdf() {
         nativeFailureFor: (value, pdfUrl) => { const saved = nativeErrors.get(value); return saved?.pdfUrl === pdfUrl ? saved.error : null; },
         onRetry: (value, pdfUrl) => viewportGuard?.retry(value, pdfUrl)
       }); current.mount(); } }).catch(error => {
-        if (ticket === epoch) { const status = document.querySelector('#kin-viewer-layout-status'); if (status) status.textContent = error.message; }
+        if (ticket === epoch) kinToolRetry('kin-pdf-retry', error.message, () => extension.onModeEnter());
       });
     },
-    onModeExit() { viewportGuard?.deactivate(); retire(); },
+    onModeExit() { kinToolRetry('kin-pdf-retry'); viewportGuard?.deactivate(); retire(); },
   };
+  return extension;
 }
 
 /* S3-U5 CI1. OHIF 3.9.1 로더는 시리즈 메타데이터 GET 하나가 거절되면 다시 묻지 않고 검사 캐시에 거절된 약속을
@@ -3937,6 +4203,9 @@ function kinCreateSeriesMetadataRecovery() {
       const fresh = !current.failures.has(key);
       current.failures.set(key, { position, status: error?.status, error, retried: retried || !!current.failures.get(key)?.retried });
       render(current);
+      // The route boundary also listens to unhandled rejections. Its generic toast must not replace the reason
+      // this request already has (including the exhausted single retry), even if an upstream caller drops its catch.
+      window.dispatchEvent(new CustomEvent('kin-series-metadata-failed', { detail: { error, message: describe(current.failures.get(key)) } }));
       if (!fresh) return;
       try { services?.uiNotificationService?.show?.({ title: 'Image Loading', message: describe(current.failures.get(key)), type: 'error' }); } catch (_) {}
     };
@@ -3979,39 +4248,286 @@ function kinCreateSeriesMetadataRecovery() {
     onModeExit() { release(); },
   };
 }
+// A failed pixel request is otherwise only a console error in the pinned viewer. Keep its explanation on the
+// affected frame until that image loads or the viewport changes; a failed prefetch must not cover a displayed image.
+function kinCreateImageLoadStatus() {
+  let services, extensions, stop, handleGlobal, registered = false;
+  const globalFailure = event => handleGlobal?.(event);
+  function explanation(error) {
+    const status = error?.status;
+    const http = Number.isInteger(status) && status > 0 ? ' (HTTP ' + status + ')' : '';
+    let body = error?.response;
+    try {
+      if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) body = new TextDecoder().decode(body);
+      if (typeof body === 'string') body = JSON.parse(body);
+      if (['IMAGE_SOURCE_IDENTITY_UNAVAILABLE', 'ImageCurrentStudyChanged', 'ImageRequestContextUnavailable',
+        'IMAGE_DELIVERY_RECORD_UNAVAILABLE', 'AUTH_SESSION_ENDED', 'AUTH_SESSION_MISMATCH'].includes(body?.code) &&
+          typeof body.message === 'string') return body.message + http;
+    } catch (_) { /* A non-JSON image-server error still has a visible explanation. */ }
+    if (status === 401) return '로그인 세션을 확인할 수 없습니다. 업무 화면에서 다시 로그인한 뒤 검사를 여세요.' + http;
+    if (status === 403) return '이 검사 영상의 접근 권한이 없습니다. 기관과 검사 접근 권한을 확인하세요.' + http;
+    if (status === 404) return '요청한 원본 영상 또는 프레임이 없습니다. 검사 목록을 새로 고친 뒤 다시 여세요.' + http;
+    if (status === 409) return '검사 원본이나 환자 연결이 변경되었습니다. 검사 목록에서 다시 여세요.' + http;
+    if (status === 400 || status === 416) return '요청한 프레임 번호나 영상 범위가 올바르지 않습니다. 검사를 다시 열고 계속되면 관리자에게 문의하세요.' + http;
+    if (status === 429 || status >= 500) return '영상 서버가 요청을 완료하지 못했습니다. 잠시 후 검사를 다시 열어 주세요.' + http;
+    const message = String(error?.message ?? error ?? '');
+    if (message === 'CACHE_SIZE_EXCEEDED' || /Array buffer allocation failed|Invalid typed array length|out of memory/i.test(message))
+      return '영상 표시 메모리가 부족합니다. 사용하지 않는 영상 창을 닫고 검사를 다시 여세요.';
+    if (error?.name === 'EvalError' || /WebAssembly|\bwasm\b|content security policy|unsafe-eval/i.test(message))
+      return '압축 영상 프레임을 해독하지 못했습니다. 뷰어 보안 정책과 WebAssembly 디코더 설정을 관리자에게 확인해 주세요.';
+    if (error?.code === 'IMAGE_DECODE_EMPTY' || /empty decoded image frame/i.test(message))
+      return '압축 영상 프레임의 해독 결과가 비어 있거나 불완전합니다. 원본 파일 손상과 압축 형식을 관리자에게 확인해 주세요.';
+    if (/transfer syntax|decode|decoder|codestream/i.test(message))
+      return '압축 영상 프레임을 해독하지 못했습니다. 원본의 압축 형식과 파일 손상을 관리자에게 확인해 주세요.';
+    if (error?.name === 'TimeoutError' || /timeout|timed out/i.test(message))
+      return '영상 서버 응답 시간이 초과되었습니다. 연결 상태를 확인한 뒤 검사를 다시 여세요.';
+    if (error?.name === 'AbortError') return '영상 요청이 취소되었습니다. 이 프레임이 필요하면 검사를 다시 여세요.';
+    if (status === 0 || /Failed to fetch|NetworkError|Load failed|no image frame|multipart|truncat|short read|terminated/i.test(message))
+      return '영상 전송이 끊겼거나 프레임이 완전하지 않습니다. 연결 상태를 확인한 뒤 검사를 다시 여세요.';
+    return '영상 데이터를 불러오지 못했습니다' + http +
+      '. 뷰어를 다시 열어 보고, 계속되면 관리자에게 문의하세요.';
+  }
+  function mount() {
+    stop?.();
+    const core = window.cornerstone, failures = new Map(), notices = new Map();
+    const knownErrors = new WeakMap(), primitiveErrors = new Map(), announced = new Set();
+    const rememberKnown = (error, detail) => {
+      if (error && typeof error === 'object') knownErrors.set(error, detail);
+      else if (typeof error === 'string' && error) primitiveErrors.set(error, detail);
+    };
+    const responses = new Map(), requests = new Map(), originalFetch = window.fetch;
+    let active = true, sequence = 0;
+    // Reject at the worker result boundary, before createImage/cache/IMAGE_LOADED can turn a corrupt codestream
+    // into a successful blank frame. The loader's existing rejection path supplies the affected imageId.
+    const workerManager = core.getWebWorkerManager?.(), executeTask = workerManager?.executeTask;
+    const checkedDecode = function (workerName, methodName, ...args) {
+      const result = executeTask.call(this, workerName, methodName, ...args);
+      if (!active || workerName !== 'dicomImageLoader' || methodName !== 'decodeTask') return result;
+      return result.then(frame => {
+        if (!(frame?.rows > 0 && frame?.columns > 0 && frame?.pixelData?.length > 0)) {
+          const error = new Error('Empty decoded image frame');
+          error.code = 'IMAGE_DECODE_EMPTY';
+          throw error;
+        }
+        return frame;
+      });
+    };
+    if (executeTask) workerManager.executeTask = checkedDecode;
+    // Orthanc supplies the data source configuration. The pinned loader reads that object on every beforeSend,
+    // not window.config.acceptHeader. Restore it on mode exit, keeping any later owner's changes intact.
+    const configurations = [];
+    for (const source of extensions?.getActiveDataSource?.() || []) {
+      const config = source.getConfig?.();
+      if (!config) continue;
+      const previous = config.acceptHeader;
+      const accept = window.config?.acceptHeader;
+      if (!Array.isArray(accept)) continue;
+      config.acceptHeader = accept;
+      configurations.push({ config, previous, accept });
+    }
+    const imageUrl = imageId => {
+      try { return new URL(imageId.replace(/^wadors:/, ''), window.location.href).href; } catch (_) { return null; }
+    };
+    // The pinned loader's first-frame fetch throws only an Error(message), unlike its XHR loads. Its streaming
+    // loop also spins at EOF on an empty 200. Validate the transport envelope while streaming (only a short tail
+    // is retained), so empty/truncated frames reject before they can be counted as a completed image.
+    const observedFetch = async function (input, init) {
+      if (!active) return originalFetch.call(this, input, init);
+      const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url, window.location.href);
+      const frame = url.origin === window.location.origin &&
+        /^\/dicom-web\/studies\/[^/]+\/series\/[^/]+\/instances\/[^/]+\/frames\//.test(url.pathname);
+      const request = frame ? ++sequence : null;
+      if (frame) requests.set(url.href, request);
+      const remember = error => {
+        if (active && error && typeof error === 'object') knownErrors.set(error,
+          { imageId: 'wadors:' + url.href, text: explanation(error), url: url.href, request });
+        return error;
+      };
+      let response;
+      try { response = await originalFetch.call(this, input, init); }
+      catch (error) { if (frame) remember(error); throw error; }
+      if (!active || !frame) return response;
+      if (!response.ok) {
+        let body;
+        try { body = await response.clone().json(); } catch (_) { /* Non-JSON failures still retain their HTTP status. */ }
+        if (active && requests.get(url.href) === request) responses.set(url.href, { status: response.status, response: body });
+        return response;
+      }
+      const method = init?.method || (typeof input === 'object' && input.method) || 'GET';
+      if (method === 'HEAD') return response;
+      const contentType = response.headers.get('Content-Type') || '';
+      const boundary = /boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(contentType);
+      const closing = boundary && response.status === 200 ? new TextEncoder().encode('--' + (boundary[1] || boundary[2]) + '--') : null;
+      let length = 0, tail = new Uint8Array();
+      const incomplete = () => remember(new Error('Incomplete multipart image frame'));
+      if (!response.body) throw incomplete();
+      const body = response.body.pipeThrough(new TransformStream({
+        transform(chunk, controller) {
+          length += chunk.byteLength;
+          if (closing) {
+            const joined = new Uint8Array(tail.length + chunk.length); joined.set(tail); joined.set(chunk, tail.length);
+            tail = joined.slice(-closing.length - 2);
+          }
+          controller.enqueue(chunk);
+        },
+        flush() {
+          if (!length) throw incomplete();
+          if (closing) {
+            const end = tail.length >= 2 && tail[tail.length - 2] === 13 && tail[tail.length - 1] === 10 ? tail.length - 2 : tail.length;
+            const start = end - closing.length;
+            if (start < 0 || !closing.every((byte, i) => tail[start + i] === byte)) throw incomplete();
+          }
+          const expected = response.headers.get('Content-Length');
+          if (expected && !response.headers.get('Content-Encoding') && Number(expected) !== length) throw incomplete();
+        },
+      }));
+      return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+    };
+    window.fetch = observedFetch;
+    function refresh() {
+      if (!failures.size && !notices.size) return;
+      const current = new Map();
+      for (const engine of core.getRenderingEngines()) for (const view of engine.getViewports()) {
+        const text = failures.get(view.getCurrentImageId?.());
+        if (text && view.element?.isConnected) current.set(view.element, text);
+      }
+      for (const [element, notice] of notices) if (!current.has(element)) { notice.remove(); notices.delete(element); }
+      for (const [element, text] of current) {
+        let notice = notices.get(element);
+        if (!notice) {
+          notice = document.createElement('p'); notice.setAttribute('role', 'alert');
+          notice.style.cssText = 'position:absolute;inset:12px 12px auto;margin:0;padding:12px;background:#161c25;color:#ffb4a8;z-index:10;pointer-events:none;white-space:normal';
+          notices.set(element, notice); element.append(notice);
+        }
+        if (notice.textContent !== text) notice.textContent = text;
+      }
+    }
+    const failed = event => {
+      const { imageId, error } = event.detail || {};
+      if (typeof imageId !== 'string') return;
+      const url = imageUrl(imageId), response = responses.get(url);
+      const observed = error && typeof error === 'object' ? knownErrors.get(error) : null;
+      if (observed?.request && requests.get(observed.url) !== observed.request) return;
+      responses.delete(url);
+      const text = explanation(error?.status ? error : response ?? error);
+      rememberKnown(error, { ...observed, imageId, text });
+      // A completed load can overtake an older failed request for the same image during A -> B -> A navigation.
+      if (core.cache.getImage(imageId)) return;
+      failures.set(imageId, text); refresh();
+    };
+    // OHIF 3.9.1 ui-next ErrorBoundary also listens to global errors/rejections and emits its generic toast after
+    // 100 ms. Handle only an error positively associated with an image request; unrelated errors retain that path.
+    const unhandled = event => {
+      const error = event.reason ?? event.error;
+      let known = error && typeof error === 'object' ? knownErrors.get(error) : primitiveErrors.get(error);
+      if (!known) {
+        const match = /^Couldn't retrieve (\S+) got status (\d{3})$/.exec(error?.message || '');
+        if (match) {
+          try {
+            const url = new URL(match[1], window.location.href);
+            if (url.origin === window.location.origin && /^\/dicom-web\/studies\/[^/]+\/series\/[^/]+\/instances\/[^/]+\/frames\//.test(url.pathname))
+              known = { imageId: 'wadors:' + url.href, text: explanation(responses.get(url.href) ?? { status: Number(match[2]) }) };
+          } catch (_) {}
+        }
+      }
+      if (!known) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (known.metadata) return; // Series recovery already showed the terminal reason after its one retry.
+      if (known.request && requests.get(known.url) !== known.request) return;
+      if (core.cache.getImage(known.imageId)) return;
+      failures.set(known.imageId, known.text); refresh();
+      if (!announced.has(known.imageId)) {
+        announced.add(known.imageId);
+        services.uiNotificationService?.show?.({ title: 'Image Loading', message: known.text, type: 'error' });
+      }
+    };
+    const metadataFailed = event => {
+      const { error, message } = event.detail || {};
+      if (typeof message === 'string') rememberKnown(error, { metadata: true, text: message });
+    };
+    const loaded = event => {
+      const imageId = event.detail?.imageId ?? event.detail?.image?.imageId;
+      failures.delete(imageId);
+      announced.delete(imageId);
+      if (typeof imageId === 'string') responses.delete(imageUrl(imageId));
+      refresh();
+    };
+    const events = core.Enums.Events;
+    core.eventTarget.addEventListener(events.IMAGE_LOAD_FAILED, failed);
+    if (events.IMAGE_LOAD_ERROR) core.eventTarget.addEventListener(events.IMAGE_LOAD_ERROR, failed);
+    core.eventTarget.addEventListener(events.IMAGE_LOADED, loaded);
+    document.addEventListener(events.STACK_NEW_IMAGE, refresh, true);
+    document.addEventListener(events.VIEWPORT_NEW_IMAGE_SET, refresh, true);
+    handleGlobal = unhandled;
+    window.addEventListener('kin-series-metadata-failed', metadataFailed);
+    // React can mount the viewport after the load has already failed. Observe that mount, without a polling timer.
+    const observer = new MutationObserver(refresh);
+    observer.observe(document.body, { childList: true, subtree: true });
+    const subscription = services.viewportGridService.subscribe(services.viewportGridService.EVENTS.GRID_STATE_CHANGED, refresh);
+    stop = () => {
+      active = false;
+      if (window.fetch === observedFetch) window.fetch = originalFetch;
+      if (workerManager?.executeTask === checkedDecode) workerManager.executeTask = executeTask;
+      core.eventTarget.removeEventListener(events.IMAGE_LOAD_FAILED, failed);
+      if (events.IMAGE_LOAD_ERROR) core.eventTarget.removeEventListener(events.IMAGE_LOAD_ERROR, failed);
+      core.eventTarget.removeEventListener(events.IMAGE_LOADED, loaded);
+      document.removeEventListener(events.STACK_NEW_IMAGE, refresh, true);
+      document.removeEventListener(events.VIEWPORT_NEW_IMAGE_SET, refresh, true);
+      if (handleGlobal === unhandled) handleGlobal = null;
+      window.removeEventListener('kin-series-metadata-failed', metadataFailed);
+      for (const { config, previous, accept } of configurations) if (config.acceptHeader === accept) config.acceptHeader = previous;
+      observer.disconnect(); subscription.unsubscribe();
+      for (const notice of notices.values()) notice.remove();
+      notices.clear(); failures.clear(); responses.clear(); requests.clear(); primitiveErrors.clear();
+    };
+  }
+  return { id: 'kin.image-load-status', preRegistration({ servicesManager, extensionManager }) {
+    services = servicesManager.services; extensions = extensionManager;
+    // Window-target events run listeners in registration order, even with capture. Register before React mounts
+    // the route boundary, then delegate only to the active mode; installing onModeEnter would be too late.
+    if (!registered) {
+      window.addEventListener('unhandledrejection', globalFailure, true);
+      window.addEventListener('error', globalFailure, true);
+      registered = true;
+    }
+  },
+    onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
+}
 
 function kinCreateContextLoss() {
-  let ready, current, epoch = 0;
-  return { id: 'kin.context-loss', preRegistration({ servicesManager }) {
-    ready = new Promise((resolve, reject) => {
+  let ready, current, services, epoch = 0;
+  function prepare() {
+    if (!ready) ready = (window.KinViewerContextLoss ? Promise.resolve() : new Promise((resolve, reject) => {
       const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/viewer-context-loss.js';
-      const timeout = setTimeout(() => reject(Error('Viewer recovery loading timeout')), 20000);
-      script.onload = () => { clearTimeout(timeout); resolve(); };
-      script.onerror = () => { clearTimeout(timeout); reject(Error('Viewer recovery loading failed')); }; document.head.append(script);
-    }).then(() => {
-      current = window.KinViewerContextLoss.create({ services: servicesManager.services, session: kinViewerSession });
-      window.kinViewerContextLoss = current;
-      window.dispatchEvent(new Event('kin-context-recovery-ready'));
-    }); ready.catch(() => {});
-  }, onModeEnter() {
-    const ticket = ++epoch;
-    ready?.then(() => { if (ticket === epoch) current.start(); }).catch(() => {
-      if (ticket !== epoch) return;
-      try { current?.stop(); } catch (_) {}
-      const status = document.querySelector('#kin-viewer-layout-status');
-      if (status) status.textContent = '영상 복구 도구를 연결하지 못했습니다. 영상 작업을 저장한 뒤 뷰어를 다시 여세요.';
-    });
-  }, onModeExit() { epoch++; current?.stop(); } };
+      const finish = error => { clearTimeout(timer); script.onload = script.onerror = null; script.remove(); error ? reject(error) : resolve(); };
+      const timer = setTimeout(() => finish(Error('영상 복구 도구 연결 시간이 지났습니다.')), 20000);
+      script.onload = () => finish(window.KinViewerContextLoss?.create ? null : Error('영상 복구 도구를 확인할 수 없습니다.'));
+      script.onerror = () => finish(Error('영상 복구 도구를 불러오지 못했습니다.')); document.head.append(script);
+    })).catch(error => { ready = null; throw error; });
+    return ready;
+  }
+  const extension = { id: 'kin.context-loss', preRegistration({ servicesManager }) { services = servicesManager.services; },
+    onModeEnter() {
+      const ticket = ++epoch; kinToolRetry('kin-context-retry'); current?.stop(); current = null;
+      prepare().then(() => {
+        if (ticket !== epoch) return;
+        current = window.KinViewerContextLoss.create({ services, session: kinViewerSession });
+        window.kinViewerContextLoss = current; current.start();
+        window.dispatchEvent(new Event('kin-context-recovery-ready'));
+      }).catch(error => { if (ticket === epoch) kinToolRetry('kin-context-retry', error.message, () => extension.onModeEnter()); });
+    }, onModeExit() { epoch++; kinToolRetry('kin-context-retry'); current?.stop(); current = null; } };
+  return extension;
 }
 
 // The generic comparison protocol chooses by arrival order, not by breast/view/image kind.
 // Use the existing DICOM classifier, while leaving pixels and viewport tools with OHIF.
 function kinCreateMammographyHanging() {
-  const protocolId = 'kin.mammography';
+  let protocolId = 'kin.mammography';
   let services, extensions, stop, institution;
   let preference = { layout: 'compare', kind: null };
   let preferenceProvider = null;
-  let requestedLayout = null;
+  let requestedLayout = null, accountDefault = false;
+  const arrangement = { viewOrder: 'CC-MLO', sideOrder: 'R-L', priorPosition: 'right', currentColumns: 2, compareColumns: 4 };
   let applyPreference = () => {};
   const kinds = ['conventional', 'generated2d', 'dbt'];
   const labels = { conventional: 'Conventional', generated2d: 'Synthetic 2D', dbt: 'DBT' };
@@ -4028,10 +4544,11 @@ function kinCreateMammographyHanging() {
       preferenceProvider = provider;
       return true;
     },
-    set(value) {
+    set(value, options = {}) {
       if (!value || !['compare', 'current'].includes(value.layout) ||
           !(value.kind === null || kinds.includes(value.kind))) return false;
-      preference = { layout: value.layout, kind: value.kind };
+      preference = { ...value };
+      accountDefault = !!options.accountDefault;
       requestedLayout = value.layout;
       applyPreference();
       return true;
@@ -4044,7 +4561,7 @@ function kinCreateMammographyHanging() {
     const opened = new URLSearchParams(search).get('StudyInstanceUIDs')?.split(',') || [];
     requestedLayout = null;
     preference = { layout: opened.length > 1 ? 'compare' : 'current', kind: null };
-    try { preferences.set(preferenceProvider?.({ studyInstanceUIDs: opened.slice() })); } catch (_) { /* Use the study-aware default. */ }
+    try { preferences.set(preferenceProvider?.({ studyInstanceUIDs: opened.slice() }), { accountDefault: true }); } catch (_) { /* Use the study-aware default. */ }
     const retrieve = series.metadata, run = hp.run;
     let ended = false, last = null, cells = [], stageCells = [], panel = null, missing = null;
     const live = () => !ended && location.search === search;
@@ -4130,16 +4647,31 @@ function kinCreateMammographyHanging() {
       const hasKind = (role, kind) => plan.objects.some(o => o.role === role && o.standard && o.kind === kind);
       // Prefer a representation shared by both examinations; never substitute a different kind
       // in an empty counterpart. A personal explicit selection still wins.
-      const selectedKind = preference.kind || kinds.find(k => hasKind('current', k) && hasKind('prior', k)) ||
+      const selectedKind = (preference.kind && (!accountDefault || hasKind('current', preference.kind)) ? preference.kind : null) || kinds.find(k => hasKind('current', k) && hasKind('prior', k)) ||
         kinds.find(k => hasKind('current', k)) || 'conventional';
+      const shape = { ...arrangement, ...preference };
+      protocolId = 'kin.mammography' + (Object.keys(arrangement).some(key => shape[key] !== arrangement[key]) ? '.' + Object.keys(arrangement).map(key => shape[key]).join('.') : '');
       const selectors = {}, stages = [], layouts = ['compare', 'current'];
       stageCells = [];
       // OHIF retains a protocol object when its ID is unchanged. Native stages keep layout/type
       // switches real, instead of re-registering one ID and leaving its former images on screen.
       for (const layout of layouts) for (const kind of kinds) {
         const specs = [];
-        for (const view of ['CC', 'MLO']) for (const role of layout === 'compare' ? ['current', 'prior'] : ['current'])
-          for (const side of ['R', 'L']) specs.push({ role, side, view });
+        const roles = layout === 'compare' ? (['left', 'top'].includes(shape.priorPosition) ? ['prior', 'current'] : ['current', 'prior']) : ['current'];
+        const views = shape.viewOrder.split('-'), sides = shape.sideOrder.split('-');
+        const vertical = ['top', 'bottom'].includes(shape.priorPosition);
+        const columns = layout === 'current' ? shape.currentColumns :
+          vertical ? Math.min(4, shape.compareColumns) : Math.max(2, shape.compareColumns);
+        const breastViews = views.flatMap(view => sides.map(side => ({ side, view })));
+        if (layout === 'current' || vertical) {
+          for (const role of roles) for (const spec of breastViews) specs.push({ role, ...spec });
+        } else {
+          // Each study occupies its chosen side at every grid width, including 4 x 2.
+          const perStudy = columns / roles.length;
+          for (let offset = 0; offset < breastViews.length; offset += perStudy) {
+            for (const role of roles) for (const spec of breastViews.slice(offset, offset + perStudy)) specs.push({ role, ...spec });
+          }
+        }
         const entries = specs.map(spec => {
           const key = [spec.role, spec.side, spec.view, kind].join('|'), slot = plan.slots[key];
           const object = slot?.status === 'ready' ? slot.object : null;
@@ -4154,7 +4686,7 @@ function kinCreateMammographyHanging() {
         stageCells.push(entries);
         stages.push({ id: layout + '-' + kind, name: (layout === 'compare' ? 'Current vs Prior' : 'Current') + ' · ' + labels[kind],
           stageActivation: { enabled: { minViewportsMatched: 0 } },
-          viewportStructure: { layoutType: 'grid', properties: { rows: 2, columns: layout === 'compare' ? 4 : 2 } },
+          viewportStructure: { layoutType: 'grid', properties: { rows: specs.length / columns, columns } },
           viewports: entries.map(cell => ({ viewportOptions: { toolGroupId: 'default', viewportType: 'stack', allowUnmatchedView: true },
             displaySets: [{ id: cell.key }] })) });
       }
@@ -4189,7 +4721,7 @@ function kinCreateMammographyHanging() {
     }
     const wrappedRun = function (data, requested, options) {
       if (!live() || !data.displaySets.some(d => d.Modality === 'MG' && d.StudyInstanceUID === opened[0]) ||
-          (requested && !['@ohif/hpCompare', 'default', protocolId].includes(requested))) {
+          (requested && !['@ohif/hpCompare', 'default'].includes(requested) && !requested.startsWith('kin.mammography'))) {
         last = null; return run.call(this, data, requested, options);
       }
       last = { data, options };
@@ -4388,11 +4920,71 @@ function kinCreateStudyPrefetch() {
   }
   return { id: 'kin.study-prefetch', onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
+
+// OHIF's study browser searches priors by MRN. Patient IDs are local to an
+// institution, so resolve them through the same source patient key as Related.
+// Each resulting UID still uses the ordinary scoped DICOMweb query.
+function kinCreateStudySearch() {
+  let extensions, stop;
+  function mount() {
+    stop?.();
+    const studies = extensions.getActiveDataSource()[0].query.studies;
+    const original = studies.search, search = location.search;
+    const opened = new URLSearchParams(search).get('StudyInstanceUIDs')?.split(',') || [];
+    let ended = false;
+    const controller = new AbortController();
+    const session = kinViewerOnEnd(() => { ended = true; controller.abort(); });
+    const live = () => !ended && location.search === search;
+    const current = () => { if (!live()) throw new Error('검사 조회가 종료되었습니다.'); };
+    // OHIF repeats the patient lookup for each opened study. Share the list only
+    // within this mode/session; each UID query still checks current access.
+    let listing;
+    const readList = () => listing ||= (async () => {
+      const response = await fetch('/api/studies', { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
+      if (!response.ok) throw new Error('이전 검사 목록을 확인하지 못했습니다 (HTTP ' + response.status + ').');
+      return response.json();
+    })().catch(error => { listing = null; throw error; });
+    // /api/studies is the radiology list; a clinician-only session is refused it (api/src/clinician-policy.ts) and keeps the
+    // stock scoped MRN search. An account not yet confirmed either way does not read that list or merge by MRN.
+    const role = async () => {
+      const now = kinViewerSession.state();
+      return now === 'unconfirmed' ? kinViewerSession.decide() : now;
+    };
+    const wrapped = async function (params) {
+      if (!params?.patientId || params.studyInstanceUid) return original.call(this, params);
+      current();
+      const verdict = await role();
+      current();
+      if (verdict === 'read-only') return original.call(this, params);
+      if (verdict !== 'writer') throw new Error('계정을 확인하지 못해 이전 검사를 찾지 않았습니다.');
+      const list = await readList();
+      current();
+      const keys = new Set(list.studies.filter(row => opened.includes(row.uid) && row.id === params.patientId && row.sourcePatientKey)
+        .map(row => row.sourcePatientKey));
+      // The stock MRN request does not identify which opened study asked it.
+      // Keep its current-study fallback when two institutions reuse that MRN.
+      if (keys.size > 1) throw new Error('기관별 환자 식별이 달라 이전 검사를 하나로 묶을 수 없습니다.');
+      if (keys.size === 0) throw new Error('열린 검사의 환자 식별을 확인하지 못했습니다.');
+      const rows = list.studies.filter(row => row.id === params.patientId && keys.has(row.sourcePatientKey));
+      const results = [];
+      for (const row of rows) {
+        current();
+        results.push(...await original.call(this, { ...params, studyInstanceUid: row.uid, disableWildcard: true }));
+      }
+      current();
+      return results;
+    };
+    studies.search = wrapped;
+    stop = () => { ended = true; controller.abort(); session.close(); if (studies.search === wrapped) studies.search = original; };
+  }
+  return { id: 'kin.study-search', preRegistration({ extensionManager }) { extensions = extensionManager; },
+    onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
+}
 // The stock mode owns the grid and Cornerstone elements. This extension owns
 // only its chrome and removes it when that mode or document ends.
 function kinCreateViewerUX() {
-  let services, dispose, toolbar, shortcuts, generation = 0, ready;
-  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-ux-toolbar.js', 'viewer-ux-shell.js'];
+  let services, dispose, toolbar, shortcuts, mouse, resize, generation = 0, ready;
+  const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-hanging-settings.js', 'viewer-ux-toolbar.js', 'viewer-ux-shell.js'];
   // The theme fixes the chrome rows' heights. It is loaded once per document,
   // before the first mount, and stays: a stylesheet attached per mount and
   // dropped on mode exit left a window on re-entry (saved Job, patient tab) in
@@ -4419,7 +5011,7 @@ function kinCreateViewerUX() {
       document.head.append(script);
     })), stylesheet()).catch(error => { ready = null; throw error; });
   }
-  function stop() { generation++; dispose?.(); dispose = null; }
+  function stop() { generation++; dispose?.(); dispose = null; mouse?.dispose(); mouse = null; resize?.(); resize = null; }
   return {
     id: 'kin.viewer-ux',
     async preRegistration({ servicesManager }) {
@@ -4431,6 +5023,7 @@ function kinCreateViewerUX() {
         services.uiNotificationService?.show({ title: 'Viewer', message: error.message, type: 'error' });
         return;
       }
+      await window.KinViewerUXToolbar.prepare(kinViewerSession);
       // Own letter keys before the first mode enters, including route teardown.
       shortcuts = window.KinViewerUXShortcuts.mount({
         getBindings: () => toolbar?.bindings() || {}, invoke: id => toolbar?.invoke(id),
@@ -4440,6 +5033,10 @@ function kinCreateViewerUX() {
     },
     onModeEnter() {
       stop();
+      if (!kinViewerSession.ended()) {
+        mouse = kinStackMouse(services);
+        resize = kinStackResize(services.cornerstoneViewportService);
+      }
       if (window.top !== window || !shortcuts) return;
       const ticket = generation;
       if (kinViewerSession.ended()) return;
@@ -4456,6 +5053,188 @@ function kinCreateViewerUX() {
     onModeExit: stop,
   };
 }
+
+// OHIF's resize restores a stack's current frame through setViewReference ->
+// scroll. That rewinds a pending scroll's target while its debounce/load can
+// still finish: the next key then selects the frame already shown, and the
+// native Loading indicator never receives another STACK_NEW_IMAGE. Resizing
+// restores the camera, not the slice; explicit navigation keeps its reference.
+function kinStackResize(service) {
+  const resize = service.performResize, present = service.setPresentations;
+  if (typeof resize !== 'function' || typeof present !== 'function') return;
+  let resizing = 0;
+  const resized = function (...args) {
+    resizing++;
+    try { return resize.apply(this, args); }
+    finally { resizing--; }
+  };
+  const presented = function (id, presentations, ...args) {
+    if (resizing && this.getCornerstoneViewport(id)?.type === 'stack' && presentations?.positionPresentation) {
+      presentations = { ...presentations,
+        positionPresentation: { ...presentations.positionPresentation, viewReference: undefined } };
+    }
+    return present.call(this, id, presentations, ...args);
+  };
+  service.performResize = resized;
+  service.setPresentations = presented;
+  return () => {
+    if (service.performResize === resized) service.performResize = resize;
+    if (service.setPresentations === presented) service.setPresentations = present;
+  };
+}
+
+// Stack defaults belong to its native tool group. MPR groups keep their own
+// bindings; selecting a tool only replaces the primary binding, leaving wheel
+// scroll and right-button windowing available while drawing or zooming.
+function kinStackMouse(services) {
+  const cs = window.cornerstone, tools = window.cornerstoneTools;
+  const initialized = new WeakSet(), subscriptions = [];
+  const primary = tools.Enums.MouseBindings.Primary;
+  const secondary = tools.Enums.MouseBindings.Secondary;
+  const wheel = tools.Enums.MouseBindings.Wheel;
+  let ended = false, frame;
+  function groupFor(viewport) {
+    return viewport?.type === 'stack' && tools.ToolGroupManager.getToolGroupForViewport(viewport.id, viewport.renderingEngineId);
+  }
+  function refresh() {
+    frame = null;
+    if (ended || kinViewerSession.ended()) return;
+    for (const id of services.viewportGridService.getState().viewports.keys()) {
+      const viewport = services.cornerstoneViewportService.getCornerstoneViewport(id), group = groupFor(viewport);
+      if (!group || initialized.has(group) || !group.hasTool('StackScroll') || !group.hasTool('WindowLevel')) continue;
+      if (group.getViewportsInfo().some(info => {
+        const view = cs.getRenderingEngine(info.renderingEngineId)?.getViewport(info.viewportId);
+        return view && view.type !== 'stack';
+      })) continue;
+      const bindings = [primary, secondary, wheel].map(mouseButton => ({ mouseButton }));
+      for (const [name, options] of Object.entries(group.toolOptions)) {
+        if (options.bindings?.some(binding => !binding.modifierKey && bindings.some(b => b.mouseButton === binding.mouseButton)))
+          group.setToolPassive(name, { removeAllBindings: bindings });
+      }
+      group.setToolActive('StackScroll', { bindings: [{ mouseButton: primary }, { mouseButton: wheel }] });
+      group.setToolActive('WindowLevel', { bindings: [{ mouseButton: secondary }] });
+      initialized.add(group);
+      services.toolbarService.refreshToolbarState?.({ viewportId: id });
+    }
+  }
+  function schedule() { if (!ended && !frame) frame = requestAnimationFrame(refresh); }
+  for (const service of [services.viewportGridService, services.cornerstoneViewportService]) {
+    for (const event of Object.values(service.EVENTS || {})) subscriptions.push(service.subscribe(event, schedule));
+  }
+  const enabled = cs.Enums.Events.ELEMENT_ENABLED;
+  cs.eventTarget.addEventListener(enabled, schedule);
+  const controller = {
+    deselect(name) {
+      const viewport = services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId());
+      const group = groupFor(viewport);
+      if (!group || name === 'StackScroll' || group.getActivePrimaryMouseButtonTool() !== name) return false;
+      group.setToolPassive(name);
+      group.setToolActive('StackScroll', { bindings: [{ mouseButton: primary }, { mouseButton: wheel }] });
+      services.toolbarService.refreshToolbarState?.({ viewportId: viewport.id });
+      return true;
+    },
+    dispose() {
+      ended = true; cancelAnimationFrame(frame);
+      subscriptions.forEach(subscription => subscription.unsubscribe());
+      cs.eventTarget.removeEventListener(enabled, schedule);
+      if (window.kinViewerStackMouse === controller) delete window.kinViewerStackMouse;
+    },
+  };
+  window.kinViewerStackMouse = controller;
+  schedule();
+  return controller;
+}
+// U3 consumes the U2 document/viewport context. The native data source still
+// owns DICOM loading and display-set creation; reports are API reads only.
+function kinCreateViewerPrior() {
+  let services, extensions, generation = 0, ready, dispose, frame;
+  const assets = ['viewer-prior-controller.js', 'viewer-prior-panel.js'];
+  function load() {
+    return ready ||= assets.reduce((previous, name) => previous.then(() => new Promise((resolve, reject) => {
+      const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/' + name;
+      script.onload = () => { script.remove(); resolve(); };
+      script.onerror = () => { script.remove(); reject(new Error('이전 검사 모듈을 불러오지 못했습니다.')); };
+      document.head.append(script);
+    })), Promise.resolve()).catch(error => { ready = null; throw error; });
+  }
+  function stop() { generation++; cancelAnimationFrame(frame); dispose?.(); dispose = null; }
+  function mount(viewer) {
+    const host = document.createElement('section'); host.hidden = true; host.dataset.kinUxOwned = '';
+    host.className = 'kin-viewer-prior-list';
+    const style = document.createElement('style');
+    style.textContent = `.kin-viewer-prior-list{position:absolute;right:0;top:0;z-index:35;max-width:100%;max-height:100%;overflow:auto;background:#2D2D2D;color:#E3E3E3;border:1px solid #8AB4C8;padding:8px;font-size:12px}
+      .kin-viewer-prior-list[hidden]{display:none}.kin-viewer-prior-list table{border-collapse:collapse;width:100%}.kin-viewer-prior-list th,.kin-viewer-prior-list td{padding:4px;text-align:left;border-bottom:1px solid #555}
+      .kin-viewer-prior-list button,.kin-viewer-prior-report button{background:#212121;color:#E3E3E3;border:1px solid #8AB4C8;padding:4px;cursor:pointer}.kin-viewer-prior-list tr:focus-within,.kin-viewer-prior-list tbody tr:hover{background:#3b4c54}
+      .kin-viewer-prior-report{z-index:36;overflow:auto}.kin-viewer-prior-report p{overflow-wrap:anywhere}`;
+    document.head.append(style);
+    let anchor = null, reportOpener = null, reportUid = null, listOpen = false;
+    const closeList = () => { controller.close(); if (anchor?.isConnected) anchor.focus(); };
+    const report = (uid, opener) => { reportUid = uid; reportOpener = opener; controller.openReport(uid); };
+    const controller = window.KinViewerPriorController.create({ viewer,
+      async loadStudy(uid, origin) {
+        const source = extensions.getActiveDataSource()[0];
+        try { await source.retrieve.series.metadata({ StudyInstanceUID: uid, madeInClient: true }); }
+        catch (error) {
+          // The pinned loader caches failed metadata promises. A user's Retry
+          // must reach the data source again rather than replay that failure.
+          source.deleteStudyMetadataPromise(uid); throw error;
+        }
+        const sets = services.displaySetService.getActiveDisplaySets().filter(set => set.StudyInstanceUID === uid && set.images?.length)
+          .sort((a, b) => Number(a.SeriesNumber || 0) - Number(b.SeriesNumber || 0) || a.SeriesInstanceUID.localeCompare(b.SeriesInstanceUID));
+        const sourceSet = services.displaySetService.getActiveDisplaySets().find(set => set.StudyInstanceUID === origin.studyUid && set.SeriesInstanceUID === origin.seriesUid);
+        return window.KinViewerHangingSettings.rank(sets, sourceSet, window.kinViewerHangingPreference?.(sourceSet?.Modality).seriesMatch);
+      },
+      onList(value) {
+        listOpen = value.state !== 'closed';
+        window.KinViewerPriorPanel.list(host, value, { openImages: uid => controller.openImages(uid),
+          openReport: report, retry: () => controller.retryList(), close: closeList });
+      },
+      onReport(value) {
+        if (value.state === 'closed') { viewer.reportHost.close({ notify: false }); host.hidden = !listOpen; return; }
+        // Collapse the dropdown while its report covers the image. Keep its
+        // rows so Close can restore the exact keyboard opener.
+        host.hidden = true;
+        viewer.reportHost.render(value.origin, (container, controls) => window.KinViewerPriorPanel.report(container, value, controls),
+          { opener: reportOpener, onClose: () => controller.closeReport(), onRetry: () => controller.openReport(reportUid) });
+      },
+    });
+    host.onkeydown = event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeList(); } };
+    const unregister = viewer.registerStudyActions({
+      listPriors(value) {
+        anchor = value.anchor;
+        const pane = anchor.closest('[data-cy="viewport-pane"]');
+        if (!pane) return;
+        pane.append(host);
+        // The list starts immediately below the cell's Study information bar.
+        host.style.top = anchor.closest('.kin-viewer-info-bar').offsetHeight + 'px';
+        host.style.maxHeight = 'calc(100% - ' + host.style.top + ')';
+        controller.open(value);
+      },
+      openImages: controller.openImages, openReport: report, refresh: controller.refresh,
+    });
+    const channel = kinViewerOnEnd(stop);
+    return () => { channel?.close(); unregister(); controller.dispose(); host.remove(); style.remove(); };
+  }
+  return {
+    id: 'kin.viewer-prior',
+    preRegistration({ servicesManager, extensionManager }) { services = servicesManager.services; extensions = extensionManager; },
+    onModeEnter() {
+      stop(); if (window.top !== window) return;
+      const ticket = generation;
+      load().then(() => {
+        const attach = () => {
+          if (ticket !== generation || kinViewerSession.ended()) return;
+          if (kinViewerSession.readOnly()) return;
+          if (window.KinViewerUX) dispose = mount(window.KinViewerUX);
+          else frame = requestAnimationFrame(attach);
+        };
+        attach();
+      }).catch(error => { if (ticket === generation) services.uiNotificationService?.show({ title: 'Studies', message: error.message, type: 'error' }); });
+    },
+    onModeExit: stop,
+  };
+}
+
 
 // W9 multi-study view (worklist-v0/hpacs-lite/viewer-multi-study.js): load, mount and stop its strip and renderer observer
 // with the viewer mode, the way Frame Coverage is mounted. Only a viewer the worklist opened for a multi-study opening (the
@@ -4483,7 +5262,7 @@ function kinCreateMultiStudyStrip() {
 }
 
 window.config = {
-  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateViewerUX(), kinCreateMultiStudyStrip()],
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateImageLoadStatus(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateStudySearch(), kinCreateViewerUX(), kinCreateViewerPrior(), kinCreateMultiStudyStrip(), kinCreateMarkerStyle()],
   // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
   // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
   kinThreeDCursor: { enabled: false },
@@ -4504,6 +5283,10 @@ window.config = {
   maxNumberOfWebWorkers: 3,
   // below flag is for performance reasons, but it might not work for all servers
   omitQuotationForMultipartRequest: true,
+  // Offer native frame codecs explicitly so the archive can pass through compressed MG/DBT without transcoding.
+  acceptHeader: ['multipart/related; type=application/octet-stream; transfer-syntax=*',
+    'multipart/related; type=image/jpeg; transfer-syntax=*', 'multipart/related; type=image/jls; transfer-syntax=*',
+    'multipart/related; type=image/jp2; transfer-syntax=*', 'multipart/related; type=image/dicom-rle; transfer-syntax=*'],
   showWarningMessageForCrossOrigin: true,
   showCPUFallbackMessage: true,
   showLoadingIndicator: true,

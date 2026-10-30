@@ -9,8 +9,10 @@ window.KinViewerSeriesStrip = (() => {
     return classic.has(value(instance, '00080016')) ? 1 : null;
   }
   function mount({ services }) {
-    let host, slot, list, uid, controller, sequence = 0, ended = false;
-    const urls = new Set(), cards = new Map();
+    let host, slot, list, uid, stripPatient, controller, sequence = 0, ended = false;
+    const urls = new Set(), cards = new Map(), loads = new Map();
+    let dragging = null;
+    const events = new AbortController();
     const grid = services.viewportGridService, sets = services.displaySetService;
     function clear() { controller?.abort(); sequence++; urls.forEach(url => URL.revokeObjectURL(url)); urls.clear(); cards.clear(); list?.replaceChildren(); }
     async function request(path, options, signal) {
@@ -21,22 +23,162 @@ window.KinViewerSeriesStrip = (() => {
       return response;
     }
     function message(text) { const label = document.createElement('span'); label.className = 'kin-series-status'; label.setAttribute('role', 'status'); label.textContent = text; list.replaceChildren(label); }
-    function assign(series, expectedStudy) {
-      const id = grid.getActiveViewportId(), current = window.KinViewerInfoBar.identity(services, id);
-      if (ended || current.set?.StudyInstanceUID !== expectedStudy) return;
+    const patient = () => window.KinViewerPatientTabs.snapshot();
+    const samePatient = snapshot => {
+      const now = patient();
+      return !now && !snapshot || !!now && !!snapshot && now.key === snapshot.key && now.sequence === snapshot.sequence;
+    };
+    function patientReady(snapshot) {
+      if (samePatient(snapshot)) return true;
+      services.uiNotificationService?.show({ title: 'Series', message: '환자 전환이 끝난 뒤 시리즈를 다시 선택하세요.', type: 'info' });
+      return false;
+    }
+    function panes() {
+      const ids = [...grid.getState().viewports.keys()];
+      const nodes = [...document.querySelectorAll('[data-cy="viewport-grid"] [data-cy="viewport-pane"]')];
+      return new Map(ids.map((id, index) => [id,
+        services.cornerstoneViewportService.getCornerstoneViewport(id)?.element?.closest('[data-cy="viewport-pane"]') ||
+        (nodes.length === ids.length ? nodes[index] : null)]));
+    }
+    function clearLoad(id) { loads.get(id)?.notice?.remove(); loads.delete(id); }
+    function liveLoad(load) {
+      return !ended && loads.get(load.id) === load && samePatient(load.patient) &&
+        grid.getState().viewports.get(load.id)?.displaySetInstanceUIDs?.[0] === load.set;
+    }
+    function showLoad(load, error) {
+      if (!liveLoad(load)) return;
+      const unchanged = load.error === (error || null);
+      load.error = error || null;
+      const pane = panes().get(load.id); if (!pane) return;
+      // Refreshes must preserve the Retry node while a pointer/key action is
+      // in progress, and must not feed the shell observer with our own moves.
+      if (unchanged && load.notice?.parentElement === pane) return;
+      const notice = load.notice ||= document.createElement('section');
+      notice.className = 'kin-series-load'; notice.dataset.kinUxOwned = ''; notice.setAttribute('role', 'status');
+      notice.replaceChildren();
+      const label = document.createElement('span');
+      label.textContent = error ? '영상을 불러오지 못했습니다. 연결을 확인한 뒤 Retry로 다시 시도하세요.' : '영상을 불러오는 중…';
+      notice.append(label);
+      if (error) {
+        const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = 'Retry';
+        retry.onclick = () => retryLoad(load); notice.append(retry);
+      }
+      if (notice.parentElement !== pane) pane.append(notice);
+    }
+    async function retryLoad(load) {
+      if (!liveLoad(load) || !canReplace()) return;
+      const viewport = services.cornerstoneViewportService.getCornerstoneViewport(load.id);
+      const ids = viewport?.getImageIds?.();
+      if (!ids?.length) { assign(load.series, load.study, load.id, load.patient); return; }
+      const retry = { ...load, notice: null, watched: null, failures: new Map() };
+      clearLoad(load.id); loads.set(load.id, retry); showLoad(retry);
+      try {
+        await viewport.setStack(ids, viewport.getCurrentImageIdIndex());
+        if (liveLoad(retry)) viewport.render();
+      } catch (error) { showLoad(retry, error); }
+    }
+    function canReplace() {
+      if (document.body.classList.contains('kin-patient-switching') || document.body.classList.contains('kin-viewer-empty')) return false;
       // Reuse the same busy/unsaved boundaries as HP and saved-work restore.
       const states = [window.kinViewerHistoryWorkspaceState?.(), window.kinViewerJobWorkspaceState?.()];
       if (states.some(state => state?.dirty || state?.busy) || window.kinViewerHistoryHasUnsaved?.() || window.kinMprMarks?.dirty?.()) {
-        services.uiNotificationService?.show({ title: 'Series', message: '미저장 작업을 저장하거나 편집을 마친 뒤 시리즈를 여세요.', type: 'info' }); return;
+        services.uiNotificationService?.show({ title: 'Series', message: '미저장 작업을 저장하거나 편집을 마친 뒤 시리즈를 여세요.', type: 'info' }); return false;
+      }
+      return true;
+    }
+    function assign(series, expectedStudy, id = grid.getActiveViewportId(), snapshot = patient()) {
+      if (ended || !patientReady(snapshot) || !grid.getState().viewports.has(id) || !canReplace()) return;
+      const viewport = services.cornerstoneViewportService.getCornerstoneViewport(id);
+      if (viewport && viewport.type !== 'stack') {
+        services.uiNotificationService?.show({ title: 'Series', message: '2D 영상 칸에 시리즈를 놓으세요.', type: 'info' }); return;
       }
       const matches = sets.getActiveDisplaySets().filter(set => set.StudyInstanceUID === expectedStudy && set.SeriesInstanceUID === series);
       if (matches.length !== 1) {
         services.uiNotificationService?.show({ title: 'Series', message: '분할된 시리즈 또는 아직 준비되지 않은 영상입니다. Studies에서 영상을 선택하세요.', type: 'info' }); return;
       }
-      grid.setDisplaySetsForViewport({ viewportId: id, displaySetInstanceUIDs: [matches[0].displaySetInstanceUID] });
+      const set = matches[0].displaySetInstanceUID;
+      clearLoad(id);
+      const load = { id, set, series, study: expectedStudy, patient: snapshot, failures: new Map() };
+      loads.set(id, load);
+      try {
+        grid.setDisplaySetsForViewport({ viewportId: id, displaySetInstanceUIDs: [set],
+          viewportOptions: { viewportType: 'stack', toolGroupId: 'default', allowUnmatchedView: true } });
+        showLoad(load, load.error);
+      } catch (error) { showLoad(load, error); }
     }
+    function refreshLoads() {
+      for (const [id, load] of loads) {
+        if (!liveLoad(load)) { clearLoad(id); continue; }
+        const current = window.KinViewerInfoBar.identity(services, id);
+        if (current.instance?.SeriesInstanceUID === load.series && current.instance?.StudyInstanceUID === load.study) {
+          clearLoad(id); continue;
+        }
+        const imageId = current.viewport?.getCurrentImageId?.();
+        if (load.failures.has(imageId)) { showLoad(load, load.failures.get(imageId)); continue; }
+        const instance = imageId && window.cornerstone.metaData.get('instance', imageId);
+        if (imageId && load.watched !== imageId && instance?.SeriesInstanceUID === load.series && instance?.StudyInstanceUID === load.study) {
+          // Observe only the viewport's load; starting one here could cache an
+          // image with different scaling/buffer options before the viewport does.
+          const pending = window.cornerstone.cache.getImageLoadObject(imageId);
+          if (pending) {
+            load.watched = imageId;
+            pending.promise.catch(error => showLoad(load, error));
+          }
+        }
+      }
+    }
+    // Failed native loads are evicted from the cache before a chrome refresh
+    // can observe their promise. Retain the event only for pending assignments;
+    // refresh still checks the current image, cell, patient and generation.
+    const core = window.cornerstone;
+    const imageFailed = event => {
+      const { imageId, error } = event.detail || {};
+      if (!imageId || core.cache.getImage(imageId)) return;
+      const instance = core.metaData.get('instance', imageId);
+      for (const load of loads.values()) {
+        if (liveLoad(load) && instance?.StudyInstanceUID === load.study && instance?.SeriesInstanceUID === load.series)
+          load.failures.set(imageId, error || new Error('Image load failed'));
+      }
+      refreshLoads();
+    };
+    const imageLoaded = event => {
+      const imageId = event.detail?.imageId ?? event.detail?.image?.imageId;
+      for (const load of loads.values()) load.failures.delete(imageId);
+      refreshLoads();
+    };
+    core.eventTarget.addEventListener(core.Enums.Events.IMAGE_LOAD_FAILED, imageFailed);
+    core.eventTarget.addEventListener(core.Enums.Events.IMAGE_LOADED, imageLoaded);
+    function finishDrag() {
+      dragging = null;
+      document.querySelectorAll('.kin-series-drop-target,.kin-series-drop-over').forEach(node => {
+        node.classList.remove('kin-series-drop-target', 'kin-series-drop-over'); delete node.dataset.kinSeriesDrop;
+      });
+    }
+    function dragTarget(event) {
+      if (!dragging || !samePatient(dragging.patient)) return null;
+      return [...panes()].find(([id, pane]) => {
+        const viewport = services.cornerstoneViewportService.getCornerstoneViewport(id);
+        // OHIF's empty-cell hit surface is a sibling of the non-interactive
+        // pane. Both surfaces belong to the same grid cell.
+        const cell = pane?.closest('[data-cy="viewport-grid"] > div');
+        return cell?.contains(event.target) && (!viewport || viewport.type === 'stack');
+      });
+    }
+    document.addEventListener('dragover', event => {
+      if (!dragging) return;
+      const target = dragTarget(event);
+      for (const [, pane] of panes()) pane?.classList.toggle('kin-series-drop-over', pane === target?.[1]);
+      if (!target) return;
+      event.preventDefault(); event.stopImmediatePropagation(); event.dataTransfer.dropEffect = 'copy';
+    }, { capture: true, signal: events.signal });
+    document.addEventListener('drop', event => {
+      const target = dragTarget(event); if (!target) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      const source = dragging; finishDrag(); assign(source.series, source.study, target[0], source.patient);
+    }, { capture: true, signal: events.signal });
+    document.addEventListener('dragend', finishDrag, { signal: events.signal });
     async function load(study) {
-      clear(); uid = study;
+      clear(); uid = study; stripPatient = patient();
       if (!study) { message('현재 셀의 영상이 준비되면 시리즈를 표시합니다.'); return; }
       controller = new AbortController(); const signal = controller.signal, ticket = sequence;
       const live = () => !ended && !signal.aborted && ticket === sequence && uid === study;
@@ -64,7 +206,20 @@ window.KinViewerSeriesStrip = (() => {
           const description = document.createElement('span'); description.className = 'kin-series-title'; description.textContent = title;
           card.title = title + ' — SeriesNumber / 원본 DICOM 전체 프레임 수(다중 프레임 포함). 알 수 없는 수는 Unknown입니다.';
           card.setAttribute('aria-label', label.textContent + ' ' + title + '. ' + card.title);
-          preview.append(image, previewStatus); card.append(preview, label, description); card.onclick = () => assign(series, study);
+          preview.append(image, previewStatus); card.append(preview, label, description);
+          card.onclick = () => assign(series, study, grid.getActiveViewportId(), stripPatient);
+          card.draggable = true;
+          card.ondragstart = event => {
+            const snapshot = stripPatient; if (!patientReady(snapshot) || !canReplace()) { event.preventDefault(); return; }
+            dragging = { series, study, patient: snapshot };
+            event.dataTransfer.setData('application/x-kin-series', JSON.stringify({ series, study }));
+            event.dataTransfer.effectAllowed = 'copy';
+            for (const [id, pane] of panes()) {
+              const viewport = services.cornerstoneViewportService.getCornerstoneViewport(id);
+              if (!pane || viewport && viewport.type !== 'stack') continue;
+              pane.classList.add('kin-series-drop-target'); pane.dataset.kinSeriesDrop = 'Drop Series';
+            }
+          };
           cards.set(series, card); list.append(card);
         }
         if (!groups.size) message('시리즈가 없습니다.');
@@ -116,15 +271,34 @@ window.KinViewerSeriesStrip = (() => {
     }
     function refresh() {
       if (ended) return;
+      refreshLoads();
+      if (dragging && !samePatient(dragging.patient)) finishDrag();
       place(); if (!host) return;
+      if (document.body.classList.contains('kin-patient-switching')) return;
       const current = window.KinViewerInfoBar.identity(services, grid.getActiveViewportId());
       // The strip follows the grid's assigned study while a slice is loading;
       // otherwise every wheel/cine frame would discard and fetch all previews.
-      const next = current.set?.StudyInstanceUID || null;
+      // Selecting a vacant comparison cell must leave a source to choose from.
+      // Keep the strip only for the same patient/tab generation.
+      if (current.set?.StudyInstanceUID === uid) stripPatient = patient();
+      const next = current.set?.StudyInstanceUID || (samePatient(stripPatient) ? uid : null);
       if (uid !== next) { load(next); return; }
       for (const [series, card] of cards) card.setAttribute('aria-pressed', String(series === current.set?.SeriesInstanceUID));
     }
-    return { refresh, place, dispose() { ended = true; clear(); host?.remove(); slot?.remove(); } };
+    const stopPatient = window.KinViewerPatientTabs.subscribe(() => {
+      const next = patient();
+      // A cancelled switch can publish a newer generation of the same tab
+      // while its active comparison cell is vacant.
+      if (next && (stripPatient?.key === next.key || !stripPatient && next.studyUIDs.includes(uid))) stripPatient = next;
+      refresh();
+    });
+    return { refresh, place, dispose() {
+      stopPatient();
+      core.eventTarget.removeEventListener(core.Enums.Events.IMAGE_LOAD_FAILED, imageFailed);
+      core.eventTarget.removeEventListener(core.Enums.Events.IMAGE_LOADED, imageLoaded);
+      ended = true; events.abort(); finishDrag(); [...loads.keys()].forEach(clearLoad);
+      clear(); host?.remove(); slot?.remove();
+    } };
   }
   return { mount };
 })();

@@ -1,3 +1,6 @@
+import { PreloadKeyController } from './preload-key.controller';
+import { PreloadKeyService } from './preload-key.service';
+import { PresenceService } from './presence.service';
 import { startupClinicalProviders } from './emr-clinical/startup';
 import { EMR_BACKGROUND_WORK } from './emr-runtime/background-work';
 import { EmrAuditController } from './emr-audit/audit.controller';
@@ -49,6 +52,7 @@ import { ViewerJobService } from './viewer-job.service';
 import { ConnectController } from './connect.controller';
 import { ConnectService } from './connect.service';
 import { OnlineImageService } from './emr-image/service';
+import { ImageCheckDatabase } from './emr-image/check-db';
 import { ImageContextSource, ProductionImageContext } from './emr-image/context';
 import { OrthancImageCatalog } from './emr-source/image';
 import { CURRENT_CLINICAL_CONTEXT } from './emr-clinical/startup';
@@ -65,18 +69,22 @@ import { ClinicalContextService } from './clinical-context.service';
 import { StudyTransferLocalController } from './study-transfer-local.controller';
 import { StudyTransferLocalService } from './study-transfer-local.service';
 import { DicomImportGateService } from './dicom-import-gate.service';
+import { ImageRelayController } from './image-relay.controller';
+import { StudyImageDeliveryRecorder } from './image-delivery-record';
+import { DicomFrameController } from './dicom-frame.controller';
+import { DicomFrameService } from './dicom-frame.service';
 
 @Module({
-  controllers: [EmrAuditController, DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController, SigningKeyAdminController],
+  controllers: [PreloadKeyController, EmrAuditController, DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController, SigningKeyAdminController, ImageRelayController, DicomFrameController],
   providers: [
-    EmrAuditService,
+    PreloadKeyService, PresenceService, EmrAuditService,
     ...startupClinicalProviders,
     ViewerContextEventService,
-    OnlineImageService, OrthancImageCatalog,
+    OnlineImageService, ImageCheckDatabase, OrthancImageCatalog,
     { provide: ImageContextSource, inject: [CURRENT_CLINICAL_CONTEXT, OrthancImageCatalog],
       useFactory: (clinical: ClinicalContextSource, catalog: OrthancImageCatalog) => new ProductionImageContext(clinical, catalog) },
     AsrService, StudyAccessService, PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, FindingService, ViewerJobService, ConnectService, ManualSrService, FavoriteService, StudyTagsService, ReaderAssignmentService, ConsultationService, ClinicianQuestionService, ImageRequestService, ClinicalContextService, CriticalResultService,
-    StudyTransferLocalService, DicomImportGateService,
+    StudyTransferLocalService, DicomImportGateService, StudyImageDeliveryRecorder, DicomFrameService,
     AdminAccessReview,
     { provide: APP_GUARD, useClass: AuthGuard },
     // W9 source selections use the same request-bound A1 response recorder.

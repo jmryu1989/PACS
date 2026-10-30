@@ -93,8 +93,11 @@ class Upstream(http.server.BaseHTTPRequestHandler):
 class Proxy:
     """One nginx over the rendered repository configuration in a temporary prefix."""
 
-    def __init__(self, mode, upstream_port, raw_request_log=False):
+    def __init__(self, mode, upstream_port, raw_request_log=False, deployment=None):
+        """deployment: what the compose service gives the proxy container beyond ports, mode and the Orthanc credential
+        (today KIN_EMR_IMAGE_ASSET_CATALOG, which turns the E image route on). Nothing of it is read from this process."""
         self.mode = mode
+        self.deployment = dict(deployment or {})
         self.dir = Path(tempfile.mkdtemp(prefix="kin-proxy-grant-"))
         for sub in ("conf", "snippets", "workflow", "logs", "temp"):
             (self.dir / sub).mkdir()
@@ -137,11 +140,14 @@ class Proxy:
         else:
             env.update(PUBLIC_PORT="9443")
             env.pop("SERVER_NAME", None)
+        env.pop("KIN_EMR_IMAGE_ASSET_CATALOG", None)
+        env.update(self.deployment)
         if not shutil.which("base64", path=env.get("PATH")):
             # A host sh without coreutils' base64 (Windows MinGit): a stand-in with the same output, for the Orthanc header.
             shim = self.dir / "shim"
             shim.mkdir()
-            (shim / "base64").write_text('#!/bin/sh\nexec "%s" -c "import base64,sys;sys.stdout.write(base64.b64encode(sys.stdin.buffer.read()).decode()+chr(10))"\n'
+            # Binary stdout preserves Unix LF on Windows; a CR would survive tr -d '\n' and truncate HTTP headers.
+            (shim / "base64").write_text('#!/bin/sh\nexec "%s" -c "import base64,sys;sys.stdout.buffer.write(base64.b64encode(sys.stdin.buffer.read())+bytes([10]))"\n'
                                          % Path(sys.executable).as_posix(), encoding="utf-8", newline="\n")
             env["PATH"] = str(shim) + os.pathsep + env.get("PATH", "")
         names = ["PUBLIC_PORT", "PUBLIC_PORT_SUFFIX", "SERVER_NAME", "TLS_CERTIFICATE", "TLS_CERTIFICATE_KEY"]

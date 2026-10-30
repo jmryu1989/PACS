@@ -40,8 +40,8 @@ def fixture():
     product = dict(migrations=MIGRATIONS, study_uid=UID, catalog=catalog,
                    rows=transfer.expected_rows(UID), sequences=transfer.expected_sequences(),
                    emr=dict(catalog=emr_catalog(), rows=transfer.expected_emr_rows(),
-                       image=dict(catalog=dict(tables=['observation', 'preparation']), rows=transfer.expected_image_rows(),
-                           sequence=dict(last_value=2, is_called=True)),
+                       image=dict(catalog=dict(tables=['expiring_delivery_link', 'object_digest', 'observation', 'preparation', 'source_manifest']), rows=transfer.expected_image_rows(),
+                           sequence=dict(last_value=3, is_called=True)),
                        audit=dict(catalog=dict(tables=sorted(transfer.expected_audit_rows())), rows=transfer.expected_audit_rows(),
                            sequences={table: dict(last_value=1, is_called=True) for table in ('roster_event', 'issuance_event', 'request_event')})))
     return dict(body, schema=2, profile=transfer.PROFILE, product=product,
@@ -76,6 +76,17 @@ class Pure(unittest.TestCase):
         actual['emr']['image']['rows']['observation'].pop()
         with patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
             transfer.verify_product('owned', 'kin', expected)
+        # A preparation written since 20261026210000 names the one kept study-manifest body, and since 20261027090000 the
+        # study delivery's access record and its request; an observation written since 20261027150000 names them too, with
+        # the cause of a late write: losing any of them is a mismatch.
+        for lose in (lambda rows: rows['source_manifest'].pop(), lambda rows: rows['preparation'][1].update(source_manifest_body=None),
+                     lambda rows: rows['preparation'][1].update(delivery_event_id=None), lambda rows: rows['preparation'][1].update(request_id=None),
+                     lambda rows: rows['observation'][2].update(delivery_event_id=None), lambda rows: rows['observation'][2].update(request_id=None),
+                     lambda rows: rows['observation'][2].update(retained_after=None)):
+            actual = copy.deepcopy(expected)
+            lose(actual['emr']['image']['rows'])
+            with patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
+                transfer.verify_product('owned', 'kin', expected)
     def test_catalog_column_budget_supports_current_schema_and_stays_bounded(self):
         catalog=fixture()[0]['product']['catalog']
         # S9-U4b + W5-API: the product has 542 scalar columns in schema.prisma with ImportOperation (15) and
@@ -227,6 +238,19 @@ class Pure(unittest.TestCase):
             actual = {key: copy.deepcopy(expected[key]) for key in ('catalog', 'rows', 'sequences', 'emr')}
             change(actual['rows']['ReportDraftInsertReceipt'])
             with self.subTest(change=name), patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
+                transfer.verify_product('owned', 'kin', expected)
+
+    def test_preload_key_restore_preserves_active_bytes_and_retirement_tombstone(self):
+        body, _, _, _ = fixture(); expected = body['product']
+        active, retired = expected['rows']['PreloadCacheKey']
+        self.assertEqual(active['key'], '\\x' + 'ab' * 32)
+        self.assertIsNone(active['retiredAt'])
+        self.assertIsNone(retired['key'])
+        self.assertEqual(retired['retiredAt'], transfer.STAMP)
+        for field, value in [('key', None), ('institution', 'foreign'), ('sub', 'foreign')]:
+            actual = {k: copy.deepcopy(expected[k]) for k in ('catalog','rows','sequences','emr')}
+            actual['rows']['PreloadCacheKey'][0][field] = value
+            with self.subTest(field=field), patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned', 'kin', expected)
 
     def test_current_git_migrations_are_covered(self):
@@ -447,7 +471,7 @@ class Pure(unittest.TestCase):
         # every attempt phase, a prepared, a Sent and a still-sending download, and the gate's four Study and four SOP reservations.
         # W5-API added ReportDraftInsertReceipt (48 migration files, 53 public tables with S9-U4b) with three synthetic receipts:
         # refused, applied and discarded.
-        self.assertEqual(len(transfer.TABLES), 52)
+        self.assertEqual(len(transfer.TABLES), 53)
         self.assertEqual(set(rows), set(transfer.TABLES))
         emr = transfer.expected_emr_rows()
         self.assertEqual(sorted(emr), transfer.EMR_TABLES)
@@ -482,7 +506,8 @@ class Pure(unittest.TestCase):
                          + 1    # S8-CTX: revision with save attempt id, beside the legacy revision
                          + 2    # S7-U5 D600: the unknown and the settled provider change record
                          + 12   # S9-U4b: one import, three downloads, four Study and four SOP reservations
-                         + 3)   # W5-API: the refused, the applied and the discarded insert receipt
+                         + 3    # W5-API: the refused, the applied and the discarded insert receipt
+                         + 2)   # D1890: active key and retired destruction record
         self.assert_import_operation_rows(rows['ImportOperation'])
         self.assert_insert_receipt_rows(rows['ReportDraftInsertReceipt'], rows)
         self.assertEqual(sorted((r['sub'], r['providerDoneAt'] is None, r['attempts']) for r in rows['MemberIsolation']),

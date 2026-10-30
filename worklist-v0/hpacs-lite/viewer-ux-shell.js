@@ -4,10 +4,16 @@ window.KinViewerUXShell = (() => {
     // this mount; the body class scopes its viewer-wide rules to the mounted shell.
     document.body.classList.add('kin-viewer-ux');
     const tabs = window.KinViewerPatientTabs;
-    let actions = null, reportContext = null;
+    let actions = null, reportContext = null, reportLifecycle = null;
     const report = document.createElement('section'); report.hidden = true; report.className = 'kin-viewer-prior-report';
     report.dataset.kinUxOwned = ''; report.setAttribute('role', 'region'); report.setAttribute('aria-label', 'Previous Report');
-    const closeReport = () => { report.hidden = true; reportContext = null; report.replaceChildren(); };
+    const closeReport = options => {
+      const { restoreFocus = false, notify = true } = options || {};
+      const previous = reportLifecycle; reportLifecycle = null;
+      report.hidden = true; reportContext = null; report.replaceChildren();
+      if (notify) previous?.onClose?.();
+      if (restoreFocus && previous?.opener?.isConnected) previous.opener.focus();
+    };
     const context = viewportId => {
       const patient = tabs.snapshot(), cell = window.KinViewerInfoBar.identity(services, viewportId);
       return patient && cell.instance ? { patientKey: patient.key, sequence: patient.sequence, viewportId,
@@ -42,8 +48,64 @@ window.KinViewerUXShell = (() => {
         return { layout: { ...state.layout }, viewportId: [...state.viewports.values()]
           .find(cell => cell.viewportId !== value.viewportId && !cell.displaySetInstanceUIDs?.length)?.viewportId || null };
       },
+      async compare(value, displaySetInstanceUIDs, { signal, studies } = {}) {
+        if (!admits(value) || !tabs.guard() || signal?.aborted) return false;
+        const grid = services.viewportGridService;
+        const signature = () => JSON.stringify([...grid.getState().viewports.values()].map(cell =>
+          [cell.viewportId, cell.displaySetInstanceUIDs, cell.x, cell.y, cell.width, cell.height]));
+        const before = signature(), sets = displaySetInstanceUIDs.map(id => services.displaySetService.getDisplaySetByUID(id));
+        if (!sets.length || sets.some(set => !set)) return false;
+        // The prior controller already read these rows for this patient/sequence.
+        // Direct seam callers still resolve just the affected studies.
+        if (!studies) {
+          const uids = [...new Set([value.studyUid, ...sets.map(set => set.StudyInstanceUID)])].join(',');
+          const endpoint = session.readOnly() ? '/api/clinician/studies' : '/api/studies';
+          const response = await fetch(endpoint + '?uids=' + encodeURIComponent(uids), { credentials: 'same-origin', signal });
+          if (window.KinSessionTransport.refusal(response)) throw window.KinSessionTransport.responseError(response);
+          if (!response.ok) return false;
+          studies = (await response.json()).studies;
+        }
+        if (signal?.aborted || !admits(value) || before !== signature() || !tabs.guard(true) || sets.some(set =>
+          studies?.find(study => study.uid === set.StudyInstanceUID)?.sourcePatientKey !== value.patientKey)) return false;
+        const preference = window.kinViewerHangingPreference?.(sets[0].Modality) || window.KinViewerHangingSettings.defaults;
+        const currentUid = tabs.snapshot().studyUIDs[0], cells = [...grid.getState().viewports.values()];
+        if (sets.every(set => set.StudyInstanceUID === value.studyUid)) return true;
+        // A prior cell is replaceable. From the current cell, preserve every
+        // current image and reuse an assigned comparison or an empty cell.
+        const originCell = cells.find(cell => cell.viewportId === value.viewportId);
+        const onPriorSide = cell => preference.priorPosition === 'left' ? cell.x < originCell.x : preference.priorPosition === 'top' ? cell.y < originCell.y : preference.priorPosition === 'bottom' ? cell.y > originCell.y : cell.x > originCell.x;
+        let target = value.studyUid !== currentUid ? value.viewportId : cells.find(cell => {
+          const rendered = context(cell.viewportId);
+          return rendered && rendered.studyUid !== currentUid;
+        })?.viewportId || cells.find(cell => cell.viewportId !== value.viewportId && !cell.displaySetInstanceUIDs?.length && onPriorSide(cell))?.viewportId;
+        if (target) {
+          grid.setDisplaySetsForViewport({ viewportId: target, displaySetInstanceUIDs,
+            viewportOptions: { viewportType: 'stack', toolGroupId: 'default', allowUnmatchedView: true } });
+        } else {
+          // With no comparison or vacant cell, the guarded comparison layout
+          // keeps the originating current image beside the requested prior.
+          if (value.mode !== 'stack') return false;
+          target = 'kin-prior-' + crypto.randomUUID();
+          const current = cells.find(cell => cell.viewportId === value.viewportId);
+          const layout = window.KinViewerHangingSettings.dimensions(preference, true);
+          const priorIndex = layout.priorFirst ? 0 : layout.vertical ? layout.columns : 1;
+          const currentIndex = layout.priorFirst ? layout.vertical ? layout.columns : 1 : 0;
+          grid.setLayout({ numRows: layout.rows, numCols: layout.columns, activeViewportId: value.viewportId, isHangingProtocolLayout: false,
+            findOrCreateViewport: index => index === currentIndex ? current : ({ displaySetInstanceUIDs: index === priorIndex ? displaySetInstanceUIDs : [], displaySetOptions: [{}],
+              viewportOptions: { viewportId: index === priorIndex ? target : 'kin-prior-' + crypto.randomUUID(), viewportType: 'stack', toolGroupId: 'default', allowUnmatchedView: true } }) });
+        }
+        return true;
+      },
       reportHost: {
         close: closeReport,
+        render(value, renderer, lifecycle = {}) {
+          if (!admits(value)) return false;
+          const pane = services.cornerstoneViewportService.getCornerstoneViewport(value.viewportId)?.element?.closest('[data-cy="viewport-pane"]');
+          if (!pane) return false;
+          reportContext = value; reportLifecycle = lifecycle; pane.append(report);
+          renderer(report, { close: () => closeReport({ restoreFocus: true }), retry: lifecycle.onRetry });
+          report.hidden = false; return true;
+        },
         show(value, body) {
           if (!admits(value)) return false;
           closeReport();
@@ -62,7 +124,8 @@ window.KinViewerUXShell = (() => {
     window.KinViewerUX = seam;
     const stopPatient = tabs.subscribe(closeReport);
     const info = window.KinViewerInfoBar.mount({ services, studyActions: {
-      available: () => typeof actions?.listPriors === 'function',
+      hidden: () => session.readOnly(),
+      available: () => !session.readOnly() && typeof actions?.listPriors === 'function',
       open(viewportId, anchor) { const value = context(viewportId); if (value) actions?.listPriors({ ...value, anchor, openImages: actions.openImages, openReport: actions.openReport }); },
     } });
     const series = window.KinViewerSeriesStrip.mount({ services });
@@ -81,6 +144,7 @@ window.KinViewerUXShell = (() => {
     // shell's needs a re-fit of its own.
     function refresh() { frame = null; if (!ended) {
       if (reportContext && !admits(reportContext)) closeReport();
+      actions?.refresh?.();
       info.refresh(); series.refresh(); tabs.refresh();
     } }
     function schedule() { if (!ended && !frame) frame = requestAnimationFrame(refresh); }
@@ -96,7 +160,12 @@ window.KinViewerUXShell = (() => {
     const imageEvents = [events.PRE_STACK_NEW_IMAGE, events.STACK_NEW_IMAGE, events.IMAGE_RENDERED, events.ELEMENT_ENABLED, events.ELEMENT_DISABLED].filter(Boolean);
     imageEvents.forEach(event => document.addEventListener(event, schedule, true));
     const observer = new MutationObserver(records => {
-      if (ended || !records.some(record => !record.target.closest?.('[data-kin-ux-owned]'))) return;
+      if (ended || !records.some(record => {
+        if (record.target.closest?.('[data-kin-ux-owned]')) return false;
+        // Attaching/removing shell chrome targets the stock pane or column,
+        // so inspect the changed nodes as well as the mutation's parent.
+        return [...record.addedNodes, ...record.removedNodes].some(node => !node.matches?.('[data-kin-ux-owned]'));
+      })) return;
       // The strip and the toolbar's reserved row go above the grid in this same
       // microtask, as soon as the grid exists, and a pane gets its bar in the
       // row its padding reserves: neither changes the size of a canvas the
@@ -110,7 +179,7 @@ window.KinViewerUXShell = (() => {
       ended = true; cancelAnimationFrame(frame); observer.disconnect();
       subscriptions.forEach(subscription => subscription.unsubscribe());
       imageEvents.forEach(event => document.removeEventListener(event, schedule, true));
-      stopPatient(); report.remove(); if (window.KinViewerUX === seam) delete window.KinViewerUX;
+      stopPatient(); closeReport(); report.remove(); if (window.KinViewerUX === seam) delete window.KinViewerUX;
       tabs.dispose(); info.dispose(); series.dispose(); document.body.classList.remove('kin-viewer-ux');
     } };
   }

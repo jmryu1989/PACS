@@ -19,7 +19,6 @@ import tempfile
 
 import ops_export_inventory as inventory
 
-MAX_TOTAL = 512 * 1024**3
 AGE_TIMEOUT = 900
 BECH32 = '023456789acdefghjklmnpqrstuvwxyz'
 RECIPIENT = re.compile('age1[' + BECH32 + ']{58}')
@@ -92,7 +91,7 @@ def sync_directory(path):
 
 def hash_file(path):
     with read_private(path) as stream:
-        digest, size = inventory.stream_digest(stream, MAX_TOTAL)
+        digest, size = inventory.stream_digest(stream)
     return {'bytes': size, 'sha256': digest}
 
 
@@ -188,7 +187,6 @@ class BoundReader:
 
 
 def pack(source, raw, body, target):
-    require(sum(row['bytes'] for row in body['files'].values()) + len(raw) + 1024**2 <= MAX_TOTAL)
     with create_file(target) as out:
         # USTAR cannot encode an 8GiB member although inventory permits larger
         # components. GNU base-256 sizes preserve the fixed regular-file paths.
@@ -249,7 +247,7 @@ def parse_receipt(raw, expected):
     for field in ('plaintext', 'ciphertext'):
         row = body[field]
         require(type(row) is dict and set(row) == {'bytes', 'sha256'})
-        require(type(row['bytes']) is int and 0 < row['bytes'] <= MAX_TOTAL)
+        require(type(row['bytes']) is int and 0 < row['bytes'])
         require(type(row['sha256']) is str and inventory.HEX.fullmatch(row['sha256']))
     return body
 

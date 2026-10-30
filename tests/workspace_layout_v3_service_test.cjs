@@ -309,3 +309,36 @@ test('TEST-W3-SERVER-14 invalid Study Panel choices are refused before storage',
   }
   assert.equal(f.transactions(), 0); assert.equal(f.writes(), 0);
 });
+
+// Minhoon 2026-10-27 item 9: the report window panels a reader hid, optional and sparse in v3 like studyPanel.
+const hiddenLayout = hiddenPanels => { const v = layout(); v.workspace.hiddenPanels = hiddenPanels; return v; };
+
+test('TEST-WSPACE-PANELS-01 hidden panels roundtrip in a fixed order; empty is not stored; older writers cannot erase them', async () => {
+  for (const [given, kept] of [[['template'], ['template']], [['clinical', 'thumbnail'], ['thumbnail', 'clinical']],
+    [['imageReport', 'aiReport', 'thumbnail', 'template', 'clinical'], ['thumbnail', 'aiReport', 'imageReport', 'clinical', 'template']]]) {
+    const f = fixture(), source = client.normalize(hiddenLayout(given));
+    assert.deepEqual(source.workspace.hiddenPanels, kept);
+    const saved = await f.service.writeWorkspaceLayout(request(source, 0), caller, false);
+    assert.deepEqual(saved.layout.workspace.hiddenPanels, kept);
+    assert.deepEqual(await f.service.workspaceLayout(caller), saved);
+    assert.deepEqual(client.normalize(saved.layout), source);
+  }
+  const f = fixture(), saved = await f.service.writeWorkspaceLayout(request(hiddenLayout([])), caller, false);
+  assert.equal(Object.hasOwn(saved.layout.workspace, 'hiddenPanels'), false);
+  const g = fixture(), kept = await g.service.writeWorkspaceLayout(request(hiddenLayout(['clinical'])), caller, false);
+  for (const version of [1, 2])
+    await assert.rejects(g.service.writeWorkspaceLayout(request(layout(version), kept.revision), caller, false), status(409, 'WORKSPACE_CONFLICT'));
+  assert.deepEqual(await g.service.workspaceLayout(caller), kept);
+});
+
+test('TEST-WSPACE-PANELS-02 unknown, repeated or non-list hidden panels are refused before storage', async () => {
+  const invalid = [null, 'template', {}, ['Thumbnail'], ['template', 'template'], ['related'], [1], [null]].map(hiddenLayout);
+  for (const version of [1, 2]) invalid.push({ ...layout(version), hiddenPanels: ['template'] });
+  const f = fixture(); f.seed(layout()); const before = f.snapshot();
+  for (const value of invalid) {
+    assert.equal(client.normalize(clone(value)), null, JSON.stringify(value.workspace?.hiddenPanels));
+    await assert.rejects(f.service.writeWorkspaceLayout(request(value, 7), caller, false), status(400), JSON.stringify(value.workspace?.hiddenPanels));
+    assert.deepEqual(f.snapshot(), before);
+  }
+  assert.equal(f.transactions(), 0); assert.equal(f.writes(), 0);
+});

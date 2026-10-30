@@ -375,6 +375,7 @@
         }).join("") + `</tr>`).join("")
         || `<tr><td class="empty" colspan="${shown.length}">${bodyPartNote ? '부위 확인 전인 검사가 있어 검색 결과가 아직 완전하지 않습니다.' : 'No records found'}</td></tr>`;
       columnPrefs?.decorate(mode);
+      syncViewingRows();
       multiSelection?.sync();
       rowNavigation?.sync();
       worklistSearch?.show();
@@ -475,7 +476,7 @@
       $("#holdbar").style.display = held ? "flex" : "none";
       $("#holdmsg").textContent = held ? `✎ ${heldTitle} — 잠금이 풀리면 이어서 판독할 수 있습니다` : "";
       $("#deferbar").style.display = s?.rs === "H" ? "flex" : "none";
-      $("#defermsg").textContent = s?.rs === "H" ? `⏸ On Hold — ${s.holdReason ?? ""}` : "";
+      $("#defermsg").textContent = s?.rs === "H" ? `⏸ On Hold${s.holdReason ? ' — ' + s.holdReason : ''}` : "";
       // 남의 예비 판독은 읽지도 쓰지도 못한다. 서버가 막지만 회색으로 보이는 편이 낫다 —
       // 눌러보고 거절당하는 건 "왜 안 되지"를 만들고, 회색은 "내 것이 아니구나"를 만든다.
       const locked = !!appState[selectedUid]?.prelimHidden;

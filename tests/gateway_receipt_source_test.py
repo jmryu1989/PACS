@@ -293,7 +293,11 @@ class AgentPins(unittest.TestCase):
     def test_every_gateway_error_literal_has_a_code_and_the_table_has_no_stale_entry(self):
         found = constructed(AGENT)
         self.assertEqual([(line, t) for line, t in found if t not in AGENT_CODES], [])
-        self.assertEqual(set(AGENT_CODES), {t for _line, t in found})
+        # Streaming STOW no longer raises the old in-memory size refusals. Their
+        # public receipt codes remain accepted; product code need not throw them
+        # just to keep a source inventory equal to the compatibility table.
+        retired = {"single DICOM instance exceeds byte budget", "multipart body exceeds byte budget"}
+        self.assertEqual(set(AGENT_CODES), {t for _line, t in found} | retired)
         self.assertEqual(AGENT_FALLBACK, "other")
         for code in CODES:
             self.assertRegex(code, r"^[a-z][a-z_]{0,39}$")
@@ -529,7 +533,8 @@ class MigrationPins(unittest.TestCase):
         # 46 -> 47 migrations and 51 -> 52 tables: S9-U4b added 20261015013945_import_operation (ImportOperation).
         # 47 -> 48 migrations and 52 -> 53 tables: W5-API added 20261016120000_related_report_insert_receipt (ReportDraftInsertReceipt).
         # 53 -> 52 tables: product cuts 3 dropped IdpSessionEnd (20261025120000_auth_flow_subtraction).
-        self.assertEqual(len(restore_fixture.TABLES), 52)
+        # 52 -> 53 tables: D1890 added 20261030120000_preload_cache_key (PreloadCacheKey).
+        self.assertEqual(len(restore_fixture.TABLES), 53)
         self.assertEqual(len(restore_fixture.expected_rows("2.25.1")["GatewayReceipt"]), 1)
 
 

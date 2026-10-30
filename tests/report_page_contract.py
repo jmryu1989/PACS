@@ -131,6 +131,12 @@ def install_contract(html):
         recnote = _page_markup('<details class="recnote" id="recnote"', '</details>')
         at = html.rindex('<', 0, html.index('id="draftbar"'))
         html = html[:at] + notice + recnote + html[at:]
+    # Minhoon item 8: the draft bar's render also marks whether the editor takes typing now (renderEditorState) on main.html's
+    # editor head. A fixture that slices the report region with its own fields carries that head as the page has it.
+    if 'id="draftbar"' in html and 'id="report-editor"' not in html:
+        head = _page_markup('<div class="report-editor-head">', '</button>\n            </div>')
+        at = html.rindex('<', 0, html.index('id="draftbar"'))
+        html = html[:at] + '<div class="report-editor" id="report-editor">' + head + '</div>' + html[at:]
     if 'id="b-approve"' in html and 'id="b-approve-next"' not in html:
         at = html.index('id="b-approve"')
         at = html.rindex('<', 0, at)

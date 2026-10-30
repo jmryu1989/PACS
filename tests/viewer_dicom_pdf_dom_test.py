@@ -422,7 +422,7 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         page = self.browser.new_page()
         self.addCleanup(page.close)
         page.set_content('<p id="kin-viewer-layout-status"></p>')
-        page.add_script_tag(content=extract_function(CONFIG.read_text(encoding="utf-8"), "kinCreateDicomPdf"))
+        page.add_script_tag(path=str(CONFIG))
         result = page.evaluate("""async () => {
           let load,src=null,created=0,mounted=0,stopped=0;
           const append=document.head.append.bind(document.head);document.head.append=element=>{

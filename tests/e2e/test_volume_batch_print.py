@@ -62,10 +62,16 @@ class VolumeBatchPrintE2E(VolumeBatchScoutE2E):
   v.get_by_role('button',name='Print Saved Images',exact=True).click();expect(v.locator('#kin-job-print [role=status]')).to_contain_text('출력 단면을 만들지 못했습니다',timeout=120000);expect(v.locator('[data-kin-batch-print-render]')).to_have_count(0);expect(v.locator('[data-kin-batch-scout-render]')).to_have_count(0)
   v.locator('#kin-job-print').get_by_role('button',name='다시 확인',exact=True).click();expect(v.locator('#kin-job-print [role=status]')).to_contain_text('미리보기 내용을 확인',timeout=120000);self.preserved_volume(before,self.volume_state(v));self.assertEqual(len(self.jobs(a)),1)
  def test_batch_print_09_capacity_message_before_pixels(self):
-  a,p,v=self.batch_start();self.make_batch(v);self.save_volume(v);requests=[];v.on('request',lambda r:requests.append(r.url) if '/frames/0/image-' in r.url else None)
-  def large(route):
-   response=route.fetch();value=response.json();value.update(Rows='1024',Columns='1024');route.fulfill(response=response,json=value)
-  v.route('**/simplified-tags',large);v.get_by_role('button',name='Print Saved Images',exact=True).click();expect(v.locator('#kin-job-print [role=status]')).to_contain_text('출력 CT 원본 크기가 한도를 초과했습니다',timeout=120000);self.assertEqual(requests,[]);expect(v.locator('#kin-job-print').get_by_role('button',name='인쇄 / PDF',exact=True)).to_be_disabled()
+  a,p,v=self.batch_start();self.make_batch(v);self.save_volume(v);job=self.get_volume_job(a);requests=[];v.on('request',lambda r:requests.append(r.url) if '/frames/0/image-' in r.url else None)
+  # The viewer's free memory is the only output capacity (no fixed pixel quota).
+  # One byte less than the real 64x64 16-bit phantom series cannot hold the source
+  # at all, so the refusal must come from the memory notice before any frame read.
+  source=64*64*2*len(job['snapshot']['volume']['sops'])
+  v.evaluate('need=>{window.printAvailable=cornerstone.cache.getBytesAvailable;cornerstone.cache.getBytesAvailable=()=>need-1}',source)
+  v.get_by_role('button',name='Print Saved Images',exact=True).click();expect(v.locator('#kin-job-print [role=status]')).to_contain_text('출력용 CT 메모리가 부족합니다. 다른 검사를 닫고 다시 확인하세요.',timeout=120000)
+  self.assertEqual(requests,[]);expect(v.locator('#kin-job-print').get_by_role('button',name='인쇄 / PDF',exact=True)).to_be_disabled();expect(v.locator('[data-kin-batch-print-render]')).to_have_count(0)
+  v.evaluate('()=>cornerstone.cache.getBytesAvailable=printAvailable');v.locator('#kin-job-print').get_by_role('button',name='다시 확인',exact=True).click();expect(v.locator('#kin-job-print [role=status]')).to_contain_text('미리보기 내용을 확인',timeout=120000)
+  self.assertGreaterEqual(len(requests),len(job['snapshot']['volume']['sops']));expect(v.locator('#kin-job-print').get_by_role('button',name='인쇄 / PDF',exact=True)).to_be_enabled();self.assertEqual(len(self.jobs(a)),1)
  def test_batch_print_10_single_flip_mip_dpr125(self):
   a,p,v=self.batch_start();self.project(v,1,20);v.evaluate('()=>{projectionVP.setCamera({flipHorizontal:true});projectionVP.render()}');self.make_batch(v,offset=1,interval=1,count=3);expected=self.pixels(v);self.save_volume(v)
   create=self.browser.new_context
@@ -73,7 +79,7 @@ class VolumeBatchPrintE2E(VolumeBatchScoutE2E):
   self.launch(fresh,[a]);self.ready(fresh);paper=self.open_batch_print(fresh);self.assertEqual(self.print_pixels(paper),expected);self.assertEqual(fresh.evaluate('devicePixelRatio'),1.25)
  def test_batch_print_07_signed_negative_pixels_and_rescale(self):
   phantom=projection.phantom
-  with patch.object(projection,'phantom',side_effect=lambda stack,intercept,constant:phantom(stack,-100,constant,signed=True)):a,p,v=self.batch_start()
+  with patch.object(projection,'phantom',side_effect=lambda stack,intercept,constant,**sample:phantom(stack,-100,constant,signed=True,**sample)):a,p,v=self.batch_start()
   v.evaluate('()=>{projectionVP.setProperties({voiRange:{lower:-1124,upper:-124}});projectionVP.render()}');self.project(v,3,20);v.wait_for_function('()=>Math.abs(projectionPixel()-128)<=3');self.make_batch(v,offset=1,interval=1,count=3);expected=self.pixels(v);self.save_volume(v)
   paper=self.open_batch_print(v);self.assertEqual(self.print_pixels(paper),expected);expect(paper.locator('main')).to_contain_text('VOI -1124 ~ -124');self.assertEqual(len(self.jobs(a)),1)
  def test_batch_print_11_minip_vertical_flip(self):

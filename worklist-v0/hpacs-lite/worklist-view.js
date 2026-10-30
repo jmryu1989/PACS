@@ -46,8 +46,7 @@
       document.querySelectorAll(".tabs > div").forEach(x => x.classList.toggle("on", x.dataset.tab === m));
       const tech = m === "Technician";
       $("#ctxbar").classList.toggle("show", tech);
-      document.querySelector(".s-template").style.display = tech ? "none" : "flex";
-      document.querySelector(".s-clinical").style.width = tech ? "66%" : "30%";
+      // The report window's panels and widths for this mode come from applyLayout() below (workspace-layout.js).
       document.querySelector(".report-p").style.display = tech ? "none" : "flex";
       document.querySelector(".order-p").style.display = tech ? "flex" : "none";
       $("#routing-factors").hidden = tech;

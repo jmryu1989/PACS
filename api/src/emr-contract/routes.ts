@@ -32,7 +32,12 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
   { kinds: ['system-operation'], operation: 'read', causes: ['user-view', 'service-job'],
     routes: ['GET health'] },
   { kinds: ['system-operation'], operation: 'read', causes: ['user-view', 'background-fetch'],
-    routes: ['GET admin/metrics'] },
+    routes: ['GET admin/metrics', 'GET admin/held-sources'] },
+  // Transient staff viewing presence is operational state, not a patient record or proof of record delivery.
+  { kinds: ['system-operation'], operation: 'read', causes: ['user-view', 'background-fetch'],
+    routes: ['GET presence', 'GET preload/cache-key'] },
+  { kinds: ['system-operation'], operation: 'write', causes: ['user-view', 'background-fetch'],
+    routes: ['POST presence'] },
   { kinds: ['authentication-session'], operation: 'auth', causes: ['user-view'],
     routes: ['GET auth/login', 'GET auth/register', 'GET auth/callback', 'POST auth/logout', 'POST auth/login', 'POST auth/register'] },
   { kinds: ['identity-access', 'authentication-session'], operation: 'read', causes: ['user-view', 'background-fetch'],
@@ -51,9 +56,11 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
   { kinds: ['study-metadata'], operation: 'write', causes: ['service-job'],
     routes: ['POST gateway/announce'] },
   { kinds: ['study-metadata'], operation: 'read', causes: ['user-view', 'background-fetch'],
-    routes: ['GET unassigned', 'GET clinician/studies', 'GET clinician/studies/:uid/timeline'] },
-  { kinds: ['study-metadata'], operation: 'write', causes: ['user-view'],
-    routes: ['POST studies/:uid/assign'] },
+    routes: ['GET clinician/studies', 'GET clinician/studies/:uid/timeline'] },
+  // D1882: an administrator's confirmed sending device or InstitutionName spelling; the held studies it now decides are
+  // attached by the server's own registration (StudyState owner), never by a per-study choice.
+  { kinds: ['institution', 'study-metadata'], operation: 'write', causes: ['user-view'],
+    routes: ['POST admin/source-devices', 'POST admin/institution-aliases'] },
   { kinds: ['delivery-receipt'], operation: 'write', causes: ['service-job'],
     routes: ['POST gateway/receipt'] },
   { kinds: ['delivery-receipt'], operation: 'read', causes: ['service-job'],
@@ -70,7 +77,7 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['POST templates', 'DELETE templates/:id'] },
   { kinds: ['study-metadata', 'report-head', 'private-draft', 'order', 'received-order', 'institution', 'preferences', 'reading-template'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET bootstrap'] },
-  { kinds: ['study-metadata', 'report-head', 'private-draft'], operation: 'read', causes: ['user-view', 'background-fetch'],
+  { kinds: ['study-metadata', 'report-head', 'private-draft', 'order'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET studies'] },
   { kinds: ['study-metadata', 'study-correction', 'report-head', 'private-draft'], operation: 'write', causes: ['user-view'],
     routes: ['PATCH studies/:uid', 'DELETE studies/:uid'] },
@@ -101,6 +108,10 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
   // on the person's recovery action, so both causes are real.
   { kinds: ['access-audit'], operation: 'write', causes: ['user-view', 'background-fetch'],
     routes: ['POST studies/:uid/viewer-context-events'] },
+  // MODULE_A A4: the browser reports it displayed a report version (or its evidence) this member was provided, after the
+  // person opened it. The server writes the provision's client-shown access record and no clinical record.
+  { kinds: ['access-audit'], operation: 'write', causes: ['user-view'],
+    routes: ['POST studies/:uid/view-observations'] },
   // W9-LITE: the ordered same-patient viewing set's minimal source metadata, read on the person's Open, page, compare or Retry.
   // Its access record is the read's own provision record, not a write of the business request.
   { kinds: ['study-metadata'], operation: 'read', causes: ['user-view'],
@@ -143,7 +154,7 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['GET studies/:uid/viewer-items', 'GET studies/:uid/viewer-items/:id/revisions'] },
   { kinds: ['measurement', 'key-image'], operation: 'write', causes: ['user-view'],
     routes: ['POST studies/:uid/viewer-items', 'POST studies/:uid/viewer-items/:id/revisions'] },
-  { kinds: ['comparison-layout', 'comparison-description', 'study-metadata'], operation: 'read', causes: ['user-view', 'background-fetch'],
+  { kinds: ['comparison-layout', 'comparison-description', 'study-metadata', 'measurement'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['POST studies/:uid/viewer-jobs/preview', 'GET studies/:uid/viewer-jobs', 'GET studies/:uid/viewer-jobs/:id'] },
   { kinds: ['comparison-layout', 'comparison-description', 'study-metadata'], operation: 'write', causes: ['user-view'],
     routes: ['POST studies/:uid/viewer-jobs', 'POST studies/:uid/viewer-jobs/:id/revisions'] },
@@ -167,6 +178,26 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['GET studies/:uid/original-downloads/:operationId'] },
   { kinds: ['delivery-receipt', 'study-metadata'], operation: 'write', causes: ['user-view'],
     routes: ['POST admin/dicom-import/:operationId/files/:index/recovery'] },
+  // MG-08 (D1877(2)): the image reads nginx used to send straight to Orthanc behind authz/dicom (the external surfaces
+  // below) now pass the API's relay (image-relay.controller.ts): worklist previews and thumbnails, report and print pixel
+  // reads, encapsulated PDFs, rendered, bulk data and whole objects, plus the plain descriptions (QIDO, metadata, tags)
+  // the relay passes without a delivery. The viewer's WADO-RS frame reads and strip previews go to the range reader
+  // (the next two groups); the relay still answers them if they reach it. Read as the person looks and ahead of it, so
+  // both causes are real. Admission is authzDicom's; the study delivery's pair is image-delivery-record.ts's.
+  { kinds: ['image', 'external-sr-seg', 'pdf', 'thumbnail', 'key-image', 'study-metadata'], operation: 'read',
+    causes: ['user-view', 'background-fetch'], routes: ['GET image-relay/*'] },
+  // MG-LOADING: the two image reads nginx now routes to the API's range reader (dicom-frame.controller.ts) instead of
+  // straight to Orthanc; before, the same bytes left through the external surfaces below. The frame route carries the
+  // pixel frames of one image or segmentation object; the preview route the strip's rendering of one object, the same
+  // kinds as `orthanc-instance-preview`. The viewer fetches them as the person looks and ahead of it (prefetch), so
+  // both causes are real. Admission is authzDicom's; the D1877 pair per study delivery (provide-prepared before the
+  // first byte, a terminal when the delivery ends) is recorded on whichever of the two routes opens the delivery, by
+  // image-delivery-record.ts (the relay's recorder, so one opening is one pair across both), with the study as the
+  // `image` target.
+  { kinds: ['image', 'external-sr-seg'], operation: 'read', causes: ['user-view', 'background-fetch'],
+    routes: ['GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames'] },
+  { kinds: ['thumbnail', 'image', 'key-image'], operation: 'read', causes: ['user-view', 'background-fetch'],
+    routes: ['GET instances/:id/preview'] },
 ];
 
 const routeEntries = groups.flatMap(({ routes, ...contract }) => routes.map(route => [route, contract] as const));

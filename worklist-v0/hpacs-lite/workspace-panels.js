@@ -16,7 +16,7 @@
         e.preventDefault();
         const box = handle.getBoundingClientRect(), step = e.shiftKey ? 40 : 10;
         const delta = e.key === 'Home' ? -16384 : e.key === 'End' ? 16384 : e.key === keys[0] ? -step : step;
-        resize({ clientX: box.left + (direction === 'x' ? delta : 0), clientY: box.top + (direction === 'y' ? delta : 0) }, direction);
+        resize({ clientX: box.left + (direction === 'x' ? delta : 0), clientY: box.top + (direction === 'y' ? delta : 0) }, direction, delta);
         rememberPanelSize(selector);
       });
       handle.addEventListener("pointerdown", e => {
@@ -30,8 +30,12 @@
         handle.classList.add("dragging");
         document.body.classList.add("resizing", dragAxis === "x" ? "resizing-x" : "resizing-y");
 
+        let previous = dragAxis === 'x' ? e.clientX : e.clientY;
         const move = event => {
-          if (event.pointerId === e.pointerId) work.commit(at, () => resize(event, dragAxis));
+          if (event.pointerId !== e.pointerId) return;
+          const position = dragAxis === 'x' ? event.clientX : event.clientY, delta = position - previous;
+          previous = position;
+          work.commit(at, () => resize(event, dragAxis, delta));
         };
         const end = event => {
           if (event.pointerId !== e.pointerId) return;
@@ -178,7 +182,53 @@
     // fixed window, and so do the first rendered rows.
     for (const node of [...$('.related-list-pane').children, $('#relrows'), $('.left > .grid thead'), $('#rows'),
       ...[...$('.left').children].filter(child => !child.matches('.grid, #worklist-folders-panel'))]) workspaceObserver.observe(node);
+    // ── Panel Settings (Minhoon 2026-10-27 item 9) ──
+    // Which report window panels stay on screen. Kept in the same layout record as the rail and panel sizes, so
+    // Account Layout carries it to another browser and Reset Layout shows every panel again. Display only: the panels
+    // and their content stay in the document; AI Report / Image Report remain the placeholder tabs.
+    const panelDialog = document.createElement('dialog');
+    panelDialog.id = 'panel-settings-dialog'; panelDialog.setAttribute('aria-labelledby', 'panel-settings-title');
+    panelDialog.innerHTML = `<h2 id="panel-settings-title">Panel Settings</h2>
+      <p>판독 창 위쪽 패널을 보이거나 숨깁니다. 숨긴 패널의 자리는 옆 패널과 관련 검사·판독문 영역이 씁니다.
+      Study Panel과 판독 화면의 검사 정보 열기에서는 모든 패널을 볼 수 있습니다.</p>
+      <fieldset><legend>Show Panels</legend>${[['thumbnail', 'Thumbnail'], ['aiReport', 'AI Report'], ['imageReport', 'Image Report'],
+        ['clinical', 'Clinical Information'], ['template', 'Reading Template']].map(([key, label]) =>
+        `<label${key === 'aiReport' || key === 'imageReport' ? ' title="추후 구현 탭입니다. 표시 여부만 정합니다."' : ''}><input type="checkbox" data-panel="${key}"> ${label}</label>`).join('')}</fieldset>
+      <p>이 브라우저에 계정별로 기억합니다. 다른 기기에서는 View &gt; Account Layout으로 계정에 저장하고 불러오세요.</p>
+      <p id="panel-settings-status" role="status"></p>
+      <footer><button type="button" id="panel-settings-show-all">Show All Panels</button><button type="button" id="panel-settings-close">Close</button></footer>`;
+    document.body.append(panelDialog);
+    const hiddenPanelsNow = () => workspaceState.workspace?.hiddenPanels?.slice() || [];
+    function renderPanelSettings() {
+      const hidden = hiddenPanelsNow(), editable = workspaceEditable();
+      for (const input of panelDialog.querySelectorAll('input[data-panel]')) { input.checked = !hidden.includes(input.dataset.panel); input.disabled = !editable; }
+      $('#panel-settings-show-all').disabled = !editable || !hidden.length;
+    }
+    function choosePanels(hidden) {
+      if (!workspaceEditable()) { renderPanelSettings(); return; }
+      const next = KinWorkspaceLayout.withHiddenPanels(workspaceState, KinWorkspaceLayout.PANELS.filter(key => hidden.includes(key)));
+      if (!next) { $('#panel-settings-status').textContent = '패널 설정을 확인할 수 없습니다. Reset Layout으로 기본 배치를 사용할 수 있습니다.'; return; }
+      // The dialog says the outcome itself: rewriting the toolbar status line would wrap it in narrow windows and move
+      // the list and the work area under the reader (W3R7-04, as for Study Panel choices).
+      workspaceState = next; applyLayout(); saveWorkspace(true); renderPanelSettings();
+      $('#panel-settings-status').textContent = workspaceLocalKept ? '패널 표시를 기억했습니다 · 이 브라우저'
+        : '패널 표시를 이 창에만 적용했습니다. 브라우저에 저장하지 못했습니다.';
+    }
+    panelDialog.querySelector('fieldset').addEventListener('change', event => {
+      const input = event.target.closest('input[data-panel]'); if (!input) return;
+      const hidden = hiddenPanelsNow().filter(key => key !== input.dataset.panel);
+      choosePanels(input.checked ? hidden : [...hidden, input.dataset.panel]);
+    });
+    $('#panel-settings-show-all').addEventListener('click', () => choosePanels([]));
+    $('#panel-settings-close').addEventListener('click', () => panelDialog.close());
+    panelDialog.addEventListener('close', () => { const opener = $('#panel-settings-open'); if (!opener.disabled) opener.focus({ preventScroll: true }); });
+    $('#panel-settings-open').addEventListener('click', () => {
+      if (!workspaceEditable() || panelDialog.open) return;
+      $('#panel-settings-status').textContent = ''; renderPanelSettings(); panelDialog.showModal();
+      panelDialog.querySelector('input[data-panel]').focus();
+    });
     function stopWorkspaceLayout() {
+      if (panelDialog.open) panelDialog.close();
       workspaceEnded = true; workspaceGeneration++;
       workspaceDragCancel?.(); workspaceObserver.disconnect(); cancelAnimationFrame(splitFrame); splitFrame = 0;
       window.removeEventListener('resize', applyLayout);
@@ -212,10 +262,12 @@
       else
         $(".left").style.width = clampPanel(e.clientX - box.left, 500, box.width - 426) + "px";
     });
-    bindPanelResize("#resize-top", "y", e => {
-      const right = $(".right"), box = right.getBoundingClientRect();
-      // 세로 작업공간을 스크롤한 뒤에도 패널 자체의 높이를 조절한다.
-      $(".rw").style.height = clampPanel(e.clientY - box.top + right.scrollTop, 140, box.height - 266) + "px";
+    bindPanelResize("#resize-top", "y", (e, axis, delta) => {
+      const top = $(".rw"), current = top.getBoundingClientRect().height;
+      // 목록의 최소 높이 때문에 상한이 현재 띠보다 작아도 손과 반대로 줄이지 않는다.
+      // 포인터 이동량을 쓰므로 손잡이 안의 누른 위치나 작업공간 스크롤에 영향받지 않는다.
+      const maximum = Math.max(current, 140, $(".right").getBoundingClientRect().height - 266);
+      top.style.height = clampPanel(current + delta, Math.min(current, 140), maximum) + "px";
     });
     bindPanelResize("#resize-related", () => portraitLayout() ? "y" : "x", (e, axis) => {
       const box = $(".workrow").getBoundingClientRect();

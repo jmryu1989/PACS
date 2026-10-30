@@ -1,4 +1,6 @@
 'use strict';
+// Read the selected wire body; HTTP/PG publication is covered by emr/a/report_reads_test.cjs.
+const readBody = value => JSON.parse(value.json);
 // Only the contracts missing from the existing compiled suites live here.
 // Public PacsService calls use test-owned stores; no private-method forwarding seam.
 const { test } = require('node:test');
@@ -123,7 +125,7 @@ test('U0B-CLINICIAN-ROLES mixed members keep statistics; clinician-only and gate
 test('U0B-CLINICIAN-SNAPSHOT report read is final-only, tenant-gated and transaction-bound', async () => {
   const c = caller(['clinician']);
   for (const rs of ['W', 'T', 'R', 'A']) {
-    const f = fixture({ state: { rs } }), out = await f.service.clinicianReportRead(UID, c);
+    const f = fixture({ state: { rs } }), out = readBody(await f.service.clinicianReportRead(UID, c));
     assert.equal(out.report.final, rs === 'A');
     assert.equal(JSON.stringify(out).includes('FINAL'), rs === 'A');
     assert.equal(JSON.stringify(out).includes('DO NOT SEND'), false);
@@ -143,7 +145,7 @@ test('U0B-CLINICIAN-SNAPSHOT report read is final-only, tenant-gated and transac
 
 test('U0B-CLINICIAN-LIST public enumeration narrows rows and refuses a changed snapshot', async () => {
   const c = caller(['clinician']), f = fixture({ state: { rs: 'A' } });
-  const out = await f.service.clinicianStudies(c);
+  const out = readBody(await f.service.clinicianStudies(c));
   assert.equal(out.studies.length, 1);
   for (const field of ['notObserved', 'orderReconciliation', 'gatewayReceipt']) assert.equal(field in out, false);
   assert.equal(JSON.stringify(out).includes('DO NOT SEND'), false);
@@ -151,6 +153,58 @@ test('U0B-CLINICIAN-LIST public enumeration narrows rows and refuses a changed s
     .filter(x => Array.isArray(x) && x[0] === 'root:sql').length, 1);
   for (const snapshot of [{ institutionId: 'syn-b' }, { rs: 'T' }, { repDoc: 'changed' }, { confirm: new Date() }])
     await refused(fixture({ state: { rs: 'A' }, snapshot }).service.clinicianStudies(c), 409);
+});
+
+// S5-U1b viewer items through the real controller: a clinician-only member reads only the items of the signed version
+// the gate saw, checked again after the read; mixed and legacy roles keep the existing recorded read.
+test('U0B-CLINICIAN-VIEWER items are pinned to one signed version; mixed and legacy roles keep the existing read', async () => {
+  const { ViewerController } = require('/app/dist/viewer.controller');
+  const ITEM_ID = '00000000-0000-4000-8000-0000000000a1';
+  const item = { id: ITEM_ID, revision: 2, hidden: false, item: { kind: 'key', author: 'SECRET-AUTHOR' } };
+  const world = ({ heads = [4, 4], finalVersion = 4, nextCursor = null } = {}) => {
+    const calls = [], queue = [...heads];
+    const svc = {
+      selectFinal: async (_uid, query, _c, version) => { calls.push(['selectFinal', version, query.cursor ?? null]);
+        return { institution: 'syn-a', body: { items: [item], nextCursor, finalVersion } }; },
+      listRead: async () => { calls.push('listRead'); return 'legacy-read'; },
+    };
+    const pacs = { clinicianViewerHead: async () => { calls.push('head'); return queue.shift(); } };
+    return { calls, controller: new ViewerController(svc, pacs, {}) };
+  };
+  const req = roles => ({ ...caller(roles), headers: {} });
+  const pinned = world(), answer = await pinned.controller.list(UID, {}, req(['clinician']));
+  assert.deepEqual(pinned.calls, ['head', ['selectFinal', 4, null], 'head']);
+  const body = readBody(answer);
+  assert.deepEqual([body.final, body.reportVersion, body.items.map(row => row.id)], [true, 4, [ITEM_ID]]);
+  assert.equal(JSON.stringify(body).includes('SECRET-AUTHOR'), false);
+  // The returned item is the recorded target, under the institution the selection read with it.
+  assert.deepEqual(answer.sources.map(s => [s.path, s.managingInstitution, s.target.kind, s.target.recordId.value]),
+    [[['items', 0], 'syn-a', 'key-image', ITEM_ID]]);
+  const viewerChanged = async promise => assert.rejects(promise, error =>
+    error.getStatus?.() === 409 && error.getResponse().code === 'VIEWER_REPORT_CHANGED');
+  for (const changed of [{ heads: [4, 5] }, { finalVersion: 3 }, { heads: [4, null] }])
+    await viewerChanged(world(changed).controller.list(UID, {}, req(['clinician'])));
+  // A continuation reaches the read only as the boundary it signed, and only on the version it signed.
+  const first = readBody(await world({ nextCursor: ITEM_ID }).controller.list(UID, {}, req(['clinician'])));
+  assert.equal(typeof first.nextCursor, 'string');
+  assert.notEqual(first.nextCursor, ITEM_ID);
+  const next = world();
+  await next.controller.list(UID, { cursor: first.nextCursor }, req(['clinician']));
+  assert.deepEqual(next.calls, ['head', ['selectFinal', 4, ITEM_ID], 'head']);
+  const reapproved = world({ heads: [5, 5] });
+  await viewerChanged(reapproved.controller.list(UID, { cursor: first.nextCursor }, req(['clinician'])));
+  assert.deepEqual(reapproved.calls, ['head']);
+  const forged = world();
+  await viewerChanged(forged.controller.list(UID, { cursor: ITEM_ID }, req(['clinician'])));
+  assert.deepEqual(forged.calls, []);
+  const withheld = world({ heads: [null] });
+  assert.deepEqual(await withheld.controller.list(UID, {}, req(['clinician'])), { uid: UID, final: false, items: null, nextCursor: null });
+  assert.deepEqual(withheld.calls, ['head']);
+  for (const roles of [['clinician', 'radiologist'], ['radiologist'], ['technician'], ['admin']]) {
+    const legacy = world();
+    assert.equal(await legacy.controller.list(UID, {}, req(roles)), 'legacy-read');
+    assert.deepEqual(legacy.calls, ['listRead'], roles.join('+'));
+  }
 });
 
 test('U0B-IDENTITY-PATCH overlay vectors retain role, ownership, preliminary and state refusal precedence', async () => {

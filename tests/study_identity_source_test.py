@@ -15,7 +15,7 @@ What this file proves, and nothing more (review M-2):
   2. Source pins that the shipped files still carry the reviewed decisions: the tenant-pinned second Order read and
      its position, relations only from server-read tags, no Order value in the answer, the M-1/N-1 shape checks after
      every existing refusal, the controller's route table against the one
-     S4-U5 shipped (no route added or dropped since; its handlers' bodies are not pinned), the one new live method, its place in the live selection
+     S4-U5 shipped with the explicitly cited later route changes (handlers' bodies are not pinned), the one new live method, its place in the live selection
      scripts/run-tests.py plans (collected, never run) and the hosted steps that run the real code.
      Client behaviour is covered by study_identity_test.cjs and study_identity_dom_test.py, not source pins here.
 What it cannot see: whether TypeScript compiles, the browser renders, or PostgreSQL/Orthanc behave as the source says.
@@ -407,11 +407,17 @@ class ServicePins(unittest.TestCase):
             ("worklist-v0/hpacs-lite/order-reconciliation.js", "47abd1d5a00a69d37a8c7977e5f31c9d3a9ce16ca04a43d5fd8830a4369963d3"),
         ):
             self.assertEqual(fixed_file(S4U5_BASE, path, digest), fixed_file(S4U5_RESULT, path, digest))
-        # The live controller serves the routes of the one S4-U5 shipped, whatever its handlers do, and the one route a
-        # later unit added on purpose: S7-U5's read of the caller's own draft and boundary (no order value in it).
+        # Preserve exact route equality, accounting only for intended later contracts:
+        # S7-U5 added the caller's own draft read; #278 (43610898eded796c1f57180c8c515b772613f518)
+        # added GET/POST presence. D1882/#276 (d677f4b89586364145adbf1411c38de3a6fda411)
+        # retired unassigned/assign in favor of the held-source workflow.
         tables = controller_route_tables({"live": CONTROLLER, "s4u5": shipped[S4U5_RESULT]})
         self.assertTrue(tables["s4u5"])
-        self.assertEqual(tables["live"], sorted(tables["s4u5"] + ["GET studies/:uid/draft"]))
+        retired = {"GET unassigned", "POST studies/:uid/assign"}
+        self.assertTrue(retired.issubset(tables["s4u5"]))
+        self.assertEqual(tables["live"], sorted(
+            [route for route in tables["s4u5"] if route not in retired]
+            + ["GET studies/:uid/draft", "GET presence", "POST presence"]))
         self.behaviour("CORE_R11_BOOTSTRAP")
         assert_behaviour('study_identity_server_test.cjs', '^S4-U5 (full list|bootstrap)')
         self.assertNotIn("accession", SEED)
@@ -475,8 +481,14 @@ class LiveAndWorkflowPins(unittest.TestCase):
         # 89 -> 95: CN-N01-A added the six OrderCorrectionInvariantTests; 95 -> 100: S9-U4b added the five test_s9_u4_* cases;
         # 100 -> 101: its pure S9U4CleanupTests (round 2, U4BB-15); 101 -> 102: its pure S9U4RegisterTests (round 6, U4BL-03).
         # WORKLIST-SPLIT-UID: + six WorklistSplitUidInvariantTests (95 -> 101 on main); the union with S9-U4b: 102 + 6 = 108.
-        self.assertEqual(len(planned), 108)
-        self.assertIn(("invariants_live.py", None, "candidate-invariants", len(planned)), candidate_ci.BASE)
+        # #252 (ef66d0d149809ee746c5eb3a45323880e4d47c84) removed duplicated count
+        # fields from BASE. Compare the exact collected cases with the candidate selection.
+        self.assertIn(("invariants_live.py", None, "candidate-invariants"), candidate_ci.BASE)
+        # The candidate's own plan for this module; exact_selection would import every candidate
+        # module (playwright, numpy) on the plain python3 used by the source regression step.
+        candidate = [row["case"] for row in RUNNER.module_plan("tests/invariants_live.py", "candidate-invariants", "live",
+                                                                540, None)["tests"]]
+        self.assertEqual(sorted(planned), sorted(candidate))
 
     def test_hosted_steps_run_the_real_code_with_source_hashes(self):
         for needle in (
@@ -505,7 +517,10 @@ class LiveAndWorkflowPins(unittest.TestCase):
         build = next(i for i, step in enumerate(runtime) if '-t kin-api:ci api' in step.get('run', ''))
         server = next(i for i, step in enumerate(runtime) if '/tests/study_identity_server_test.cjs' in step.get('run', ''))
         self.assertLess(build, server)
-        self.assertIn('-B tests/study_identity_dom_test.py', CATALOG.job_text(CATALOG.job('measurements')))
+        owners = [job for job in CATALOG.combined(automatic_only=True)['jobs'].values()
+                  if '-B tests/study_identity_dom_test.py' in CATALOG.job_text(job)]
+        self.assertEqual(len(owners), 1)
+        self.assertIn('--run-dir tmp/workspace-ui-ci/study-identity-dom ', CATALOG.job_text(owners[0]))
 
 
 class Encoding(unittest.TestCase):

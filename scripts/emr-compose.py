@@ -174,7 +174,12 @@ def compose_shape(root, problems):
     papi, pmigrate = pservices.get("api") or {}, pservices.get("api-migrate") or {}
     if (pmigrate.get("build") or {}).get("target") != "production":
         problem(problems, "prod-migration-not-production-image")
-    if list(papi.get("volumes") or []) != ["emr-state:/var/lib/kin-emr"]:
+    # The EMR-B1 state volume must stay the writable mount. Any other production mount must be a read-only
+    # named volume (MG-LOADING reads Orthanc's storage for frame ranges), never a host path: a host bind
+    # would let the running code differ from the deployed image.
+    pvolumes = list(papi.get("volumes") or [])
+    extra = [v for v in pvolumes if v != "emr-state:/var/lib/kin-emr"]
+    if "emr-state:/var/lib/kin-emr" not in pvolumes or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*:/[^:]+:ro", v) for v in extra):
         problem(problems, "prod-api-state-volume")
 
 

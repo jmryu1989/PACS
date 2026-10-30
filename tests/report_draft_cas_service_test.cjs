@@ -53,9 +53,14 @@ Object.assign(process.env, { KC_ISSUER: 'https://syn.test/auth/realms/kin', KC_A
 
 const { PacsService } = require('/app/dist/pacs.service');
 const { AuthService } = require('/app/dist/auth.service');
+const { PresenceService } = require('/app/dist/presence.service');
 const { StudyAccessService } = require('/app/dist/study-access.service');
 const { AppModule } = require('/app/dist/app.module');
 const { STRUCTURE_CATALOG, renderItem } = require('/app/dist/report-structure');
+const { LocalReadResponse } = require('/app/dist/emr-viewing/local-read');
+// Module A local reads (#264) return a LocalReadResponse; the HTTP layer sends its serialized body
+// (emr-viewing.module.ts ViewingResponseInterceptor), so that is the answer these cases read.
+const sent = value => value instanceof LocalReadResponse ? JSON.parse(value.json) : value;
 const nest = createRequire('/app/dist/app.module.js');
 const { PATH_METADATA, METHOD_METADATA, MODULE_METADATA, ROUTE_ARGS_METADATA } = nest('@nestjs/common/constants');
 const { RequestMethod, HttpException } = nest('@nestjs/common');
@@ -253,7 +258,7 @@ async function world() {
   w.app = build();
   /** A new process: nothing of the old one's memory, the same database. */
   w.restart = () => { w.app = build(); };
-  w.auth = new AuthService(recorder, undefined, ledger, background.work);
+  w.auth = new AuthService(recorder, undefined, ledger, background.work, new PresenceService(recorder, null));
   ledgerCleanup.push(async () => {
     await w.auth.onModuleDestroy(); background.quiesce(); await background.drained();
     control.close(); await control.drained(); await journal.close();
@@ -294,7 +299,7 @@ async function world() {
       else assert.fail(`the handler asks for argument ${slot} ${JSON.stringify(data)}, which these cases do not provide`);
     }
     try {
-      return { ok: true, status: 200, code: null, body: await w.app.controller(controller)[key](...args) };
+      return { ok: true, status: 200, code: null, body: sent(await w.app.controller(controller)[key](...args)) };
     } catch (error) {
       if (!(error instanceof HttpException)) return { ok: false, status: 0, code: 'NOT_HTTP', body: null, error };
       const answer = error.getResponse();
@@ -1331,11 +1336,11 @@ test('PREVIEW_DESIGNATION_RENAME_RECYCLE initial and post-Orthanc permission',as
   const svc=new ReportPreviewController(w.client,w.orthanc,w.access,{});
   for(const field of ['preDoc','preReviewer']) {
     await w.designate(field);
-    for(const c of [w.x,w.renamed])assert.equal((await svc.read(w.uid,c)).report.findings,'R11-PRIVATE-BODY');
+    for(const c of [w.x,w.renamed])assert.equal(sent(await svc.read(w.uid,c)).report.findings,'R11-PRIVATE-BODY');
     const reads=w.remoteReads;await w.refusal(svc.read(w.uid,w.y));assert.equal(w.remoteReads,reads,'initial refusal reads no original');
     await w.designate(field,w.y.sub);w.remote(()=>w.designate(field));
     await w.refusal(svc.read(w.uid,w.y));
-    await w.designate(field,null);assert.equal((await svc.read(w.uid,w.y)).report.findings,'R11-PRIVATE-BODY');
+    await w.designate(field,null);assert.equal(sent(await svc.read(w.uid,w.y)).report.findings,'R11-PRIVATE-BODY');
     await w.refusal(svc.read(w.uid,w.renamed));
   }
 });

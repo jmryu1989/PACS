@@ -30,6 +30,13 @@ SUITE_CLASSES = ['ViewerAPI', 'MeasurementReadbackE2E', 'MeasurementPanelE2E',
                  'CineE2E', 'VolumeCineE2E',
                  'FindingAPI', 'FindingNavigationE2E', 'FindingWorklistE2E', 'DictationLiveE2E']
 PROFILES = {
+    'viewer-ux-priors': {
+        'out': ROOT / 'tests/e2e/artifacts/viewer-ux-priors-ci',
+        'project_prefix': 'kin-viewer-ux-priors-ci-',
+        # Retain the measured run-4 served plan hang allowance (all five U3 cases).
+        'suite_timeout': 900,
+        'suites': (('e2e/test_viewer_ux_priors.py', 'ViewerUXPriorsE2E', 'ci-viewer-ux-priors'),),
+    },
     'context-loss': {
         'out': ROOT / 'tests/e2e/artifacts/context-loss-ci',
         'project_prefix': 'kin-context-loss-ci-',
@@ -136,8 +143,8 @@ PROFILES = {
         'out': ROOT / 'tests/e2e/artifacts/u2b-regressions-ci',
         'project_prefix': 'kin-u2b-regress-ci-',
         # S5-CIE: the two existing live modules S5-U2b named as required regressions, which no hosted profile
-        # ran. Not appended to measurements: its 20 suites at 540s already let it claim the whole 25-minute
-        # deadline. No hosted history yet; the 540s multi-suite cap gives (540+35)*2 = 1150s of the shared
+        # ran. Kept separate from the already crowded measurements profile. No hosted history yet;
+        # the 540s multi-suite cap gives (540+35)*2 = 1150s of this profile's shared
         # 1500s deadline and leaves 350s for a stack whose recorded hosted setup and cleanup took about 70s.
         'suite_timeout': 540,
         # Explicit local classes: only the declared test_d03a_* and test_scope_* cases, never the inherited
@@ -149,9 +156,26 @@ PROFILES = {
         'out': ROOT / 'tests/e2e/artifacts/viewer-ux-shell-ci',
         'project_prefix': 'kin-viewer-ux-shell-ci-',
         # Viewer U2 shell (D1821): the module's own test_shell_* cases on the shipped viewer, in the
-        # worklist-ux-measurements job. One suite at the single-suite 900s ceiling, not an estimate.
+        # worklist-ux-measurements job. Tools shares this viewer flow and deadline;
+        # its load_tests selects only authored tool cases across its three classes.
         'suite_timeout': 900,
-        'suites': (('e2e/test_viewer_ux_shell.py', 'ViewerUXShellE2E', 'ci-viewer-ux-shell'),),
+        'suites': (('e2e/test_viewer_ux_shell.py', 'ViewerUXShellE2E', 'ci-viewer-ux-shell'),
+                   ('e2e/test_viewer_tools.py', None, 'ci-viewer-tools')),
+    },
+    's9-u7-served': {
+        'out': ROOT / 'tests/e2e/artifacts/s9-u7-served-ci',
+        'project_prefix': 'kin-s9-u7-ci-',
+        # S9-U7 output scope, identity and unsaved work on the served worklist -> OHIF flow. Each module's
+        # load_tests is the allowlist (test_output_*, test_identity_flow_*, test_unsaved_*), so no class is
+        # passed and no inherited case runs. The caps are hang ceilings, not estimates. The unsaved-work suite
+        # holds real saves through every replacement consumer and runs about 330s locally (output about 100-170s,
+        # identity about 80-95s), so each suite gets its own cap: (320+35)+(240+35)+(700+35) = 1365s of the
+        # shared 1500s deadline leaves 135s for a stack whose local setup and cleanup take about 45s.
+        'suite_timeout': 400,
+        'suite_budgets': {'ci-s9-u7-output': 320, 'ci-s9-u7-identity': 240, 'ci-s9-u7-work': 700},
+        'suites': (('e2e/test_s9_viewer_output_scope.py', None, 'ci-s9-u7-output'),
+                   ('e2e/test_s9_viewer_identity_flow.py', None, 'ci-s9-u7-identity'),
+                   ('e2e/test_s9_viewer_unsaved_flow.py', None, 'ci-s9-u7-work')),
     },
     'display-scope': {
         'out': ROOT / 'tests/e2e/artifacts/display-scope-ci',
@@ -210,6 +234,9 @@ PROFILES = {
     'measurements': {
         'out': ROOT / 'tests/e2e/artifacts/measurement-ci',
         'project_prefix': 'kin-measure-ci-',
+        # The cumulative measurement run can leave the last suite only seconds under
+        # the shared default. Preserve its full hang allowance and cleanup margin.
+        'deadline_seconds': 40 * 60,
         'suite_timeout': 540,
         'suites': tuple((suite, class_name, 'ci-'+Path(suite).stem.replace('_','-'))
                         for suite, class_name in zip(SUITES, SUITE_CLASSES)),
@@ -803,10 +830,6 @@ def main(profile_name, credential_provider=None):
     try:
         seeded = seed_source() or []
         run('database', compose+['up','-d','--wait','db'])
-        # The image's temporary initdb server only listens on its local socket.
-        run('database-tcp', compose+['exec','-T','db','sh','-c',
-            'for n in $(seq 1 60); do pg_isready -h 127.0.0.1 -U kin && exit 0; sleep 1; done; exit 1'], timeout=70)
-        run('keycloak-database', compose+['exec','-T','db','createdb','-U','kin','keycloak'])
         run('stack', compose+['up','-d','--build'], timeout=900)
         for path in ['/api/health','/auth/realms/kin/.well-known/openid-configuration']:
             ready_by = min(time.monotonic()+180, deadline)

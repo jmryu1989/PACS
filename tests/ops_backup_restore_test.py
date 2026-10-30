@@ -137,7 +137,9 @@ class InventoryContracts(unittest.TestCase):
                 ("keycloak", "public", "client"): (["id", "secret", "other"], [["same", "secret", "preserve"]])}
         def tables(container, database, sql, user):
             return [[schema, table] for db, schema, table in rows if db == database]
-        with patch.object(ops, "psql_json", side_effect=tables), patch.object(ops, "value_rows", side_effect=lambda c, d, s, t, u: rows[d, s, t]):
+        def digest(container, database, schema, table, user):
+            return ops.value_digest((database, schema, "table", table, None), *rows[database, schema, table])
+        with patch.object(ops, "psql_json", side_effect=tables), patch.object(ops, "value_table_digest", side_effect=digest):
             before = ops.value_catalog("synthetic")
             rows["keycloak", "public", "client"][1][0][2] = "changed"
             after = ops.value_catalog("synthetic")
@@ -146,11 +148,25 @@ class InventoryContracts(unittest.TestCase):
         self.assertNotEqual(ops.value_digest(("x",), ["x"], [[None]]), ops.value_digest(("x",), ["x"], [[""]]))
         self.assertNotEqual(ops.value_digest(("x",), ["x"], [["a"], ["a"]]), ops.value_digest(("x",), ["x"], [["a"]]))
 
-    def test_value_materialization_rejects_invalid_size_before_fetch(self):
-        with patch.object(ops, "psql_json_stdin", side_effect=[["x"], [-1, 2]]) as query:
-            with self.assertRaises(RuntimeError):
-                ops.value_rows("synthetic", "kin", "public", "r")
-            self.assertEqual(query.call_count, 2)
+    def test_streamed_values_refuse_output_that_is_not_the_canonical_ordered_rows(self):
+        """A row stream that is not exactly value_digest's encoding, in its order, never yields a digest to compare."""
+        def streamed(lines):
+            def run(args, *, output=None, input_file=None, timeout=600, check=True):
+                output.write(lines)
+            return run
+        good = b'["1",null]\n["2","a\\\\\\\\b"]\n'
+        for stream in (good + b'["0",null]\n',          # out of byte order
+                       b'["1", null]\n',                # a non-canonical encoding
+                       b'["1"]\n',                      # another column count
+                       b'["1",null]\n["2","a\\nb"]\n',  # a COPY escape other than a doubled backslash
+                       b'["1",null]'):                  # cut short
+            with self.subTest(stream=stream), patch.object(ops, "value_columns", return_value=["id", "body"]), \
+                    patch.object(ops, "run", side_effect=streamed(stream)), self.assertRaises(ops.RestoreAdmissionError):
+                ops.value_table_digest("synthetic", "kin", "public", "r")
+        with patch.object(ops, "value_columns", return_value=["id", "body"]), patch.object(ops, "run", side_effect=streamed(good)):
+            self.assertEqual(ops.value_table_digest("synthetic", "kin", "public", "r"),
+                             ops.value_digest(("kin", "public", "table", "r", None), ["id", "body"], [["2", "a\\b"], ["1", None]]))
+            self.assertEqual(ops.value_rows("synthetic", "kin", "public", "r"), (["id", "body"], [["1", None], ["2", "a\\b"]]))
 
     def test_boundary_difference_and_unreadable_boundary_are_admission_refusals(self):
         with tempfile.TemporaryDirectory() as folder:

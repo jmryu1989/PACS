@@ -209,7 +209,8 @@ async () => {
   window.fetch=async (url,options={})=>{
     if(url==='/api/me')return new Response(JSON.stringify({kind:'member',institution:'SYN',sub:'reader',roles:['radiologist']}));
     if(options.method==='POST'){
-      const value=JSON.parse(options.body);window.job={...value,revision:1,snapshotVersion:value.snapshot.version,
+      const studyUid=decodeURIComponent(new URL(url,location.origin).pathname.split('/')[3]);
+      const value=JSON.parse(options.body);window.job={...value,studyUid,revision:1,snapshotVersion:value.snapshot.version,
         authorSub:'reader',authorActor:'Synthetic',createdAt:'2026-10-09T00:00:00Z',hidden:false};
       return new Response(JSON.stringify(window.job));
     }

@@ -89,6 +89,9 @@ function viewable(study: any, c: Caller) {
     canReadPreliminary(study, c);
 }
 function visible(study: any, c: Caller) {
+  // The service owns this boundary even when an EMR reader calls it before
+  // resolving the study scope. A foreign study must answer like an absent one.
+  if (!study || (study.institutionId !== c.institution && study.teleInstitutionId !== c.institution)) absent();
   if (!viewable(study, c)) denied();
 }
 // A comparison study must be viewable like the anchor and allowed by the caller's study-access
@@ -216,7 +219,7 @@ export class FindingService {
               FROM "FindingRevision" r JOIN head h ON h.id = r."findingId"
               WHERE (${page.cursor}::int IS NULL OR r.revision > ${page.cursor}::int)
               ORDER BY r.revision LIMIT ${page.limit + 1}) page), '[]'::jsonb)::text AS rows`;
-        if (!pageRow.allowed) denied();
+        if (!pageRow.allowed) { visible(await tx.studyState.findUnique({ where: { uid } }), c); denied(); }
         // An unreadable finding answers exactly like an absent id.
         if (!pageRow.present) absent();
         const rows: any[] = parsed(pageRow.rows);
@@ -235,7 +238,7 @@ export class FindingService {
               AND (${page.cursor}::uuid IS NULL OR f.id > ${page.cursor}::uuid)
               AND ${readableLineage(studies)}
             ORDER BY f.id LIMIT ${page.limit + 1}) page), '[]'::jsonb)::text AS rows`;
-      if (!pageRow.allowed) denied();
+      if (!pageRow.allowed) { visible(await tx.studyState.findUnique({ where: { uid } }), c); denied(); }
       const rows: any[] = parsed(pageRow.rows);
       const items = rows.slice(0, page.limit).map(row => ({ ...result(row), links: row.links }));
       if (schema !== '2' && !legacyOnly(items.map(i => i.item))) clientOutdated();
@@ -436,7 +439,6 @@ export class FindingService {
         if (head.authorSub !== c.sub) denied();
         if (head.revision !== command.expectedRevision) conflict();
         if ((command.action === 'hide' && head.hidden) || (command.action === 'restore' && !head.hidden)) conflict();
-        if (head.revision + 1 > FINDING_LIMITS.history) storageLimit();
         // Version rule: an edit may promote version 1 to 2 but never write version 1 over version 2, whose
         // characteristics and job copies a shipped client cannot carry. Hide and restore keep the head's
         // version; on version 2 they also keep its content exactly.
@@ -505,16 +507,6 @@ export class FindingService {
       const sizes = await tx.$queryRaw<{ bytes: number }[]>`SELECT octet_length(convert_to(${serialized}::jsonb::text, 'UTF8')) AS bytes`;
       const bytes = sizes[0].bytes;
       if (bytes > FINDING_LIMITS.snapshot) storageLimit();
-      // Lifetime counts under the parent lock; revisions are append-only so the aggregate is the
-      // lifetime figure and hiding never recovers budget. They count every finding of this study,
-      // including those this caller cannot read, and the refusal names no finding or count.
-      const [usage] = await tx.$queryRaw<any[]>`SELECT
-        (SELECT count(*)::int FROM "Finding" WHERE "studyUid" = ${uid}) AS findings,
-        (SELECT count(*)::int FROM "FindingRevision" r JOIN "Finding" f ON f.id = r."findingId" WHERE f."studyUid" = ${uid}) AS revisions,
-        (SELECT COALESCE(sum(r."payloadBytes"), 0)::bigint FROM "FindingRevision" r JOIN "Finding" f ON f.id = r."findingId" WHERE f."studyUid" = ${uid}) AS bytes`;
-      const added = head ? 0 : 1;
-      if (usage.findings + added > FINDING_LIMITS.findings || usage.revisions + 1 > FINDING_LIMITS.revisions ||
-          Number(usage.bytes) + bytes > FINDING_LIMITS.bytes) storageLimit();
       const now = new Date(), revision = head ? head.revision + 1 : 1;
       // Preparation reads the same locked sources and limits as commit. It cannot
       // publish a finding before its signed D version and B2 event commit together.

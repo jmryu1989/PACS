@@ -1,4 +1,6 @@
 'use strict';
+// Read the selected wire body; HTTP/PG publication is covered by emr/a/report_reads_test.cjs.
+const readBody = value => JSON.parse(value.json);
 
 // B2 consumer fixture only: these existing pure suites exercise business/CAS rules.
 // Real ledger atomicity and HTTP publication are tested against PostgreSQL.
@@ -58,6 +60,12 @@ function world({ resources = [], states = [], policy = null, institutions = INST
     w.orthanc.push({ method, path: u.pathname, uid: u.searchParams.get('StudyInstanceUID'), inTx: w.inTx > 0 });
     if (w.orthancDown) throw new TypeError('fetch failed');
     if (method === 'POST' && u.pathname === '/tools/find') {
+      // D1882 sending-device read: the calling AE Orthanc recorded on each instance (w.devices[uid]: one title, or one per
+      // instance); none unless a case sets it. The arrival stamp counts those instances, as Orthanc's would change.
+      const find = JSON.parse(init.body), titles = [].concat(w.devices?.[find.Query.StudyInstanceUID] ?? []);
+      if (find.Level === 'Instance') return json(titles.map(title => ({ Type: 'Instance', Metadata: { RemoteAET: title } })));
+      if (find.Query.StudyInstanceUID) return json(w.resources.filter(r => r.uid === find.Query.StudyInstanceUID).map(r => ({ Type: 'Study',
+        ID: 'syn-' + r.patientId, Metadata: { LastUpdate: '20261001T000000' }, RequestedTags: { NumberOfStudyRelatedInstances: String(titles.length || 1) } })));
       const asked = JSON.parse(init.body).RequestedTags;
       const tags = r => ({ StudyInstanceUID: r.uid, InstitutionName: r.institution, PatientID: r.patientId, StudyDate: r.date,
         ModalitiesInStudy: r.modalities.join('\\'), AccessionNumber: r.accession });
@@ -546,7 +554,7 @@ test('TEST-WSU-08 a source observation is per request: an earlier single answer 
 });
 
 // ── TEST-WSU-09 derived projections (M-WSU-04) ──
-test('TEST-WSU-09 a split UID is observed, has no order pairing or reconciliation, and is not restored by bootstrap or unassigned', async () => {
+test('TEST-WSU-09 a split UID is observed, has no order pairing or reconciliation, and is not restored by bootstrap or the held alert', async () => {
   // SPLIT is linked to order O-S; 2.25.901 is an unlinked split whose two resources carry ACC-4 (first) and ACC-5 (last).
   const OPEN = '2.25.901';
   const w = await world({ resources: [A({ accession: 'ACC-1' }), B({ accession: 'ACC-2' }), resource(NORMAL, 'SYN-PID-N', { accession: 'ACC-3' }),
@@ -579,29 +587,74 @@ test('TEST-WSU-09 a split UID is observed, has no order pairing or reconciliatio
   const lean = await w.pacs.bootstrap(caller(), { states: 'omit' });
   assert.deepEqual(lean.states, {});
 
-  // Unassigned: a split is not two assignable patients, and its assignment is refused without a write.
-  const orphan = await world({ resources: [A({ institution: 'UNKNOWN' }), B({ institution: 'UNKNOWN' }), resource(NORMAL, 'SYN-PID-N', { institution: 'UNKNOWN' })] }).start();
-  await orphan.pacs.listStudies(caller());
-  const admin = caller({ roles: ['admin'] });
-  assert.deepEqual((await orphan.pacs.unassigned(admin)).studies.map(s => s.uid), [NORMAL]);
-  const writes = orphan.writes.length;
-  await rejects(orphan.pacs.assignInstitution(SPLIT, 'hallym', admin), 409, 'STUDY_IDENTITY_UNRESOLVED');
-  assert.equal(orphan.writes.length, writes);
-  assert.equal(orphan.states.get(SPLIT).institutionId, null);
-  await orphan.pacs.assignInstitution(NORMAL, 'hallym', admin);
-  assert.equal(orphan.states.get(NORMAL).institutionId, 'hallym');
+  // D1882: an unknown sending hospital is held. A split UID is held like any other study and reaches no list; the operator
+  // alert counts each held UID once by its raw text and names no UID, and nothing assigns a study one by one.
+  const held = await world({ resources: [A({ institution: 'UNKNOWN' }), B({ institution: 'UNKNOWN' }), resource(NORMAL, 'SYN-PID-N', { institution: 'UNKNOWN' })] }).start();
+  assert.deepEqual((await held.pacs.listStudies(caller())).studies, []);
+  const alert = await held.pacs.heldSources(caller({ roles: ['admin'] }));
+  assert.deepEqual(alert.groups.map(g => [g.device, g.institutionText, g.count]), [[null, 'UNKNOWN', 2]]);
+  assert.equal([SPLIT, NORMAL, 'SYN-PID'].some(fact => JSON.stringify(alert).includes(fact)), false, 'no study or patient fact');
+  assert.deepEqual([held.states.get(SPLIT).institutionId, held.states.get(NORMAL).institutionId], [null, null]);
 });
-test('TEST-WSU-09 the clinician list and timeline count the normal set and carry only UID+code issues', async () => {
+test('TEST-WSU-09 D1882 a split UID attached by its registered device is announced to its owner like one attached by name', async () => {
+  const institutions = INSTITUTIONS.map(i => i.id === 'hallym' ? { ...i, dicomAets: 'SYN_CT_9' } : { ...i, dicomAets: '' });
+  const held = await world({ resources: [A({ institution: 'UNKNOWN' }), B({ institution: 'UNKNOWN' }), resource(NORMAL, 'SYN-PID-N')], institutions }).start();
+  const before = await held.pacs.listStudies(caller());
+  assert.equal('identityIssues' in before && before.identityIssues.length > 0, false, 'without a registered device the UID is held: nobody is told');
+  const w = await world({ resources: [A({ institution: 'UNKNOWN' }), B({ institution: 'UNKNOWN' }), resource(NORMAL, 'SYN-PID-N')], institutions }).start();
+  w.devices = { [SPLIT]: 'SYN_CT_9' };
+  const listed = await w.pacs.listStudies(caller());
+  assert.equal(w.states.get(SPLIT).institutionId, 'hallym');
+  assert.deepEqual(listed.identityIssues, [{ uid: SPLIT, code: 'STUDY_IDENTITY_UNRESOLVED' }]);
+  assert.deepEqual(listed.studies.map(r => r.uid), [NORMAL]);
+  assert.equal((await w.pacs.listStudies(caller({ institution: 'center' }))).identityIssues?.length ?? 0, 0, 'never on another institution behalf');
+});
+test('TEST-WSU-09 D1882 a held study is decided on its current instances: a second device after the first answer keeps it held', async () => {
+  const institutions = INSTITUTIONS.map(i => ({ ...i, dicomAets: '' }));
+  const w = await world({ resources: [resource(NORMAL, 'SYN-PID-N', { institution: 'UNKNOWN' })], institutions }).start();
+  const admin = caller({ roles: ['admin'] });
+  w.devices = { [NORMAL]: ['SYN_CT_A'] };
+  assert.deepEqual((await w.pacs.heldSources(admin)).groups.map(g => g.device), ['SYN_CT_A']);
+  w.devices[NORMAL].push('SYN_CT_B');
+  // The hospital confirms SYN_CT_A afterwards; the study it no longer solely sent stays held.
+  institutions[0].dicomAets = 'SYN_CT_A';
+  await w.start();
+  assert.deepEqual(uidsOf(await w.pacs.listStudies(caller())), []);
+  assert.equal(w.states.get(NORMAL).institutionId, null);
+  assert.deepEqual((await w.pacs.heldSources(admin)).groups.map(g => g.device), [null]);
+});
+test('TEST-WSU-09 D1882 a row with no owner opens for nobody through the DICOM gate, a tele value on it included', async () => {
+  for (const [owner, opens] of [[null, false], ['center', true]]) {
+    const w = await world({ resources: [resource(NORMAL, 'SYN-PID-N', { institution: 'UNKNOWN' })],
+      states: [stateRow(NORMAL, { institutionId: owner, teleInstitutionId: 'hallym' })] }).start();
+    for (const roles of [['radiologist'], ['admin']]) {
+      const gate = w.pacs.authzDicom('/dicom-web/studies/' + NORMAL + '/metadata', 'GET', caller({ roles }));
+      if (opens) await gate; else await rejects(gate, 403);
+      assert.equal(uidsOf(await w.pacs.listStudies(caller({ roles }))).includes(NORMAL), opens, `${owner} ${roles}`);
+    }
+  }
+});test('TEST-WSU-09 the clinician list and timeline count the normal set and carry only UID+code issues', async () => {
   const w = await world({ resources: [A(), B(), resource(NORMAL, 'SYN-PID-N'), resource('2.25.101', 'SYN-PID-N')] }).start();
   const clinician = caller({ roles: ['clinician'], actor: 'clinician-1', sub: 'sub-clinician' });
-  const list = await w.pacs.clinicianStudies(clinician);
+  const response = await w.pacs.clinicianStudies(clinician);
+  const list = readBody(response);
   assert.deepEqual(list.studies.map(s => s.uid).sort(), [NORMAL, '2.25.101']);
   assert.deepEqual(list.identityIssues, [{ uid: SPLIT, code: 'STUDY_IDENTITY_UNRESOLVED' }]);
   assert.deepEqual(Object.keys(list).sort(), ['identityIssues', 'serverTime', 'studies']);
-  const paged = await w.pacs.clinicianStudies(clinician, { limit: '1' });
+  // Every study the answer carries — a returned split UID included — is an access-record target, under the stored
+  // owner, with the split's source patient left unresolved. The ordinary worklist records the same issue the same way.
+  const issueTarget = r => r.sources.filter(s => s.path[0] === 'identityIssues')
+    .map(s => [s.path, s.managingInstitution, s.target.studyId, s.target.sourcePatientId]);
+  const expected = [[['identityIssues', 0], 'hallym', { status: 'known', value: SPLIT },
+    { status: 'unresolved', reason: 'not-observed' }]];
+  assert.deepEqual(issueTarget(response), expected);
+  assert.deepEqual(issueTarget(await w.pacs.readStudies(caller())), expected);
+  assert.deepEqual(response.sources.filter(s => s.path[0] === 'studies').map(s => s.target.studyId.value).sort(),
+    [NORMAL, '2.25.101']);
+  const paged = readBody(await w.pacs.clinicianStudies(clinician, { limit: '1' }));
   assert.equal(paged.pagination.total, 2);
   assert.equal('identityIssues' in paged, false);
-  const timeline = await w.pacs.clinicianTimeline(NORMAL, clinician, { limit: '10' });
+  const timeline = readBody(await w.pacs.clinicianTimeline(NORMAL, clinician, { limit: '10' }));
   assert.equal(timeline.pagination.total, 2);
   await rejects(w.pacs.clinicianTimeline(SPLIT, clinician, { limit: '10' }), 404);
 });
@@ -638,7 +691,7 @@ test('viewer UID lookup reads only requested sources and preserves scoped clinic
     const w = await world({ resources: [resource(NORMAL, 'VISIBLE'), resource(other, 'OTHER', { institution: 'OTHER' }), A(), B()],
       states: [stateRow(NORMAL, { institutionId: 'hallym' }), stateRow(other, { institutionId: 'other' })] }).start();
     const query = { uids: [NORMAL, other, SPLIT].join(',') };
-    const result = clinician ? await w.pacs.clinicianStudies(caller({ roles: ['clinician'] }), query)
+    const result = clinician ? readBody(await w.pacs.clinicianStudies(caller({ roles: ['clinician'] }), query))
       : await w.pacs.listStudies(caller(), query);
     assert.deepEqual(result.studies.map(row => row.uid), [NORMAL]);
     assert.equal(result.studies[0].sourcePatientKey, 'hallym|VISIBLE');
@@ -655,4 +708,42 @@ test('viewer UID lookup retains the response-time institution recheck', async ()
   const w = await world({ resources: [resource(NORMAL, 'VISIBLE')], states: [stateRow(NORMAL, { institutionId: 'hallym' })] }).start();
   w.hooks.find = (_arg, n, store) => { if (n === 2) store.states.get(NORMAL).institutionId = 'other'; };
   await rejects(w.pacs.listStudies(caller(), { uids: NORMAL }), 409, 'STUDY_LIST_CHANGED');
+});
+
+test('bootstrap publishes owned and legitimate tele studies while preserving null-owner residue', async () => {
+  const orphan = '2.25.1889', tele = '2.25.1890';
+  const w = await world({ resources: [resource(NORMAL, 'VISIBLE'), resource(orphan, 'HELD'), resource(tele, 'TELE')],
+    states: [stateRow(NORMAL, { institutionId: 'hallym' }),
+      stateRow(orphan, { institutionId: null, teleInstitutionId: 'hallym' }),
+      stateRow(tele, { institutionId: 'center', teleInstitutionId: 'hallym' })] }).start();
+  const before = JSON.stringify([...w.states]);
+  const body = await w.pacs.bootstrap(caller());
+  assert.deepEqual(Object.keys(body.states).sort(), [NORMAL, tele].sort());
+  const { bootstrapRead } = require('/app/dist/emr-viewing/consumer-read');
+  const response = bootstrapRead(body, 'reader', 'hallym');
+  assert.deepEqual(Object.keys(readBody(response).states).sort(), [NORMAL, tele].sort());
+  assert.equal(JSON.stringify([...w.states]), before, 'withholding must not delete or reassign the residue');
+});
+
+// D1887: REQ-PATIENTLESS-HELD -> RISK-UNIDENTIFIED-READING -> TEST-PATIENTLESS-SELECTION.
+// An overlay is not correction of the source patient identity. All list consumers use the same source selection.
+test('patientless studies stay in the existing held queue until the original patient is identified', async () => {
+  const missing = '2.25.1887', blank = '2.25.1888';
+  const w = await world({ resources: [resource(missing, ''), resource(blank, '   '), resource(NORMAL, 'VISIBLE')],
+    states: [stateRow(missing, { institutionId: 'hallym', ov: JSON.stringify({ id: 'OVERLAY' }) })] }).start();
+  for (const query of [undefined, { limit: '100' }, { uids: [missing, blank, NORMAL].join(',') }]) {
+    assert.deepEqual((await w.pacs.listStudies(caller(), query)).studies.map(r => r.uid), [NORMAL]);
+    assert.deepEqual(readBody(await w.pacs.clinicianStudies(caller({ roles: ['clinician'] }), query)).studies.map(r => r.uid), [NORMAL]);
+  }
+  assert.equal((await w.pacs.bootstrap(caller())).states[missing], undefined);
+  const admin = caller({ roles: ['admin'] });
+  const held = (await w.pacs.heldSources(admin)).groups;
+  assert.equal(held.reduce((n, g) => n + g.count, 0), 2);
+  assert.ok(held.every(g => g.reason === 'patient_not_identified' && !g.sourceUnregistered));
+  assert.deepEqual((await w.pacs.heldSources(caller({ roles: ['admin'], institution: 'other' }))).groups, []);
+  w.resources.find(r => r.uid === missing).patientId = 'CORRECTED';
+  const row = (await w.pacs.listStudies(caller(), { uids: missing })).studies[0];
+  assert.equal(row.id, 'CORRECTED');
+  assert.equal(row.sourcePatientKey, 'hallym|CORRECTED');
+  assert.equal((await w.pacs.heldSources(admin)).groups.reduce((n, g) => n + g.count, 0), 1);
 });

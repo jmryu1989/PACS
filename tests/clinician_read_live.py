@@ -91,6 +91,8 @@ const pause = (event, detail) => new Promise(resolve => {
 const failure = error => ({ status: typeof error?.getStatus === 'function' ? error.getStatus() : 500,
   body: typeof error?.getResponse === 'function' ? error.getResponse() : String(error?.message ?? error) });
 const watchdog = setTimeout(() => { say('timeout'); process.exit(3); }, 150000);
+// A recorded read is served as its one serialized body (LocalReadResponse.json); a plain answer is served as is.
+const served = answer => typeof answer?.json === 'string' ? JSON.parse(answer.json) : answer;
 
 const prisma = new PrismaService(), orthanc = new OrthancService();
 const access = new StudyAccessService(prisma, orthanc, {});
@@ -105,13 +107,14 @@ async function viewer() {
     if (heads.length === 1) await pause('head', { version });
     return version;
   } };
-  const service = { listFinal: async (uid, query, c, version) => {
-    const page = await items.listFinal(uid, query, c, version);
-    await pause('read', { finalVersion: page.finalVersion, ids: page.items.map(item => item.id) });
-    return page;
+  // The controller's final-items selection: the read pauses after the pinned page is selected, as before.
+  const service = { selectFinal: async (uid, query, c, version) => {
+    const selected = await items.selectFinal(uid, query, c, version);
+    await pause('read', { finalVersion: selected.body.finalVersion, ids: selected.body.items.map(item => item.id) });
+    return selected;
   } };
   const controller = new ViewerController(service, gate);
-  try { say('result', { status: 200, body: await controller.list(args.uid, {}, args.caller), heads }); }
+  try { say('result', { status: 200, body: served(await controller.list(args.uid, {}, args.caller)), heads }); }
   catch (error) { say('result', { ...failure(error), heads }); }
 }
 
@@ -138,7 +141,7 @@ async function list() {
   let query = args.paged ? { limit: '100' } : {};
   for (let page = 0; page < 1000; page++) {
     let answer;
-    try { answer = await pacs.clinicianStudies(args.caller, query); }
+    try { answer = served(await pacs.clinicianStudies(args.caller, query)); }
     catch (error) { say('result', { ...failure(error), paused }); return; }
     const row = answer.studies.find(study => study.uid === args.uid);
     if (row || !answer.pagination?.next) { say('result', { status: 200, row: row ?? null, paused }); return; }
@@ -315,9 +318,19 @@ class ClinicianReadLive(unittest.TestCase):
         for _ in range(1000):
             query = "?limit=100" + ("&after=" + quote(after, safe="") if after else "")
             page = self.call("GET", "/clinician/studies" + query, user).body
-            self.assertEqual(sorted(page), sorted(C["list_paged_response_keys"]))
             pagination = page["pagination"]
             self.assertEqual(sorted(pagination), sorted(C["pagination_keys"]))
+            # WORKLIST-SPLIT-UID (#180, D1492; tests/README.md): excluded identities are a separate,
+            # narrow list sent only on the page that completes the list, never on an earlier page.
+            completing = pagination["next"] is None
+            self.assertEqual(sorted(page), sorted(C["list_paged_response_keys"] + (["identityIssues"] if completing else [])))
+            if completing:
+                self.assertIsInstance(page["identityIssues"], list)
+                listed = [row["uid"] for row in rows + page["studies"]]
+                for issue in page["identityIssues"]:
+                    self.assertEqual(sorted(issue), ["code", "uid"])
+                    self.assertEqual(issue["code"], "STUDY_IDENTITY_UNRESOLVED")
+                    self.assertNotIn(issue["uid"], listed)
             total = pagination["total"] if total is None else total
             self.assertEqual(pagination["total"], total)
             self.assertEqual(pagination["offset"], len(rows))
@@ -488,7 +501,12 @@ class ClinicianReadLive(unittest.TestCase):
             # COUNT-LEAK / TENANT-UID: the clinician sees exactly the studies the same institution's worklist sees.
             self.assertEqual(set(listed), self.worklist_uids("doctor"))
             unpaged = self.call("GET", "/clinician/studies", "clinician").body
-            self.assertEqual(sorted(unpaged), sorted(C["list_response_keys"]))
+            self.assertEqual(sorted(unpaged), sorted(C["list_response_keys"] + ["identityIssues"]))
+            self.assertIsInstance(unpaged["identityIssues"], list)
+            for issue in unpaged["identityIssues"]:
+                self.assertEqual(sorted(issue), ["code", "uid"])
+                self.assertEqual(issue["code"], "STUDY_IDENTITY_UNRESOLVED")
+                self.assertNotIn(issue["uid"], [row["uid"] for row in unpaged["studies"]])
             self.assertEqual({r["uid"] for r in unpaged["studies"]}, set(listed))
             self.assert_clean(unpaged, "unpaged clinician list")
             other = self.clinician_rows("kclinician")

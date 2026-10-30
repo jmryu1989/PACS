@@ -36,6 +36,7 @@ copy.filename = path;
 copy.paths = Module._nodeModulePaths('/app/dist');
 copy._compile(source, path);
 const { AuthService } = copy.exports;
+const { PresenceService } = require('/app/dist/presence.service');
 (async () => {
   const db = new PrismaService(), observer = new PrismaService();
   await db.$connect(); await observer.$connect();
@@ -43,7 +44,7 @@ const { AuthService } = copy.exports;
   const { EmrRuntime } = require('/app/dist/emr-runtime/application');
   const runtime = new EmrRuntime(process.env.DATABASE_URL, '/tmp/logout-order-' + input.sub);
   await runtime.start();
-  const auth = new AuthService(db, new KeycloakService(), runtime.port, runtime.background.work);
+  const auth = new AuthService(db, new KeycloakService(), runtime.port, runtime.background.work, new PresenceService(db, null));
   const sid = auth.sessionId({headers:{cookie:'kin_sid=' + input.cookie}});
   const row = await observer.authSession.findUnique({where:{sid}});
   if (!row || !row.idpSid) throw Error('The logged-in session must name its provider session');

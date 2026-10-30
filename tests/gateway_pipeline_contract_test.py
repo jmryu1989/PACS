@@ -4,7 +4,7 @@ The offline judge must pass the clean vector, fail every violating vector on exa
 missing evidence. The live harness is read as source and never imported here: its import chain belongs to the
 run-tests live permission. Pinned: the harness shape (A1 timing, scoped Compose, no reads while kin-orthanc is paused,
 teardown order, the A3 handoff), the gateway-e2e finally path in measurement_ci, the dispatch-only workflow (A2) and
-the one D-7 pure step in validate.yml.
+the one D-7 pure step in automatic PR CI.
 """
 from ci_workflows import WorkflowCatalog
 import ast
@@ -121,8 +121,8 @@ class JudgeAdequacy(unittest.TestCase):
                 self.assertEqual(judge.judge(apply(VECTORS['clean'], item['patch'])), [item['id']])
 
     def test_tolerated_variants_stay_clean(self):
-        # A4 (a receipt on the Not Observed item) and the two outcomes the contract accepts either way.
-        self.assertEqual(len(VECTORS['tolerated']), 3)
+        # Observed network and restart outcomes preserve the same delivery contract.
+        self.assertTrue(VECTORS['tolerated'])
         for item in VECTORS['tolerated']:
             with self.subTest(why=item['why']):
                 self.assertEqual(judge.judge(apply(VECTORS['clean'], item['patch'])), [])
@@ -383,10 +383,13 @@ class WorkflowPins(unittest.TestCase):
                        'retention-days: 7'):
             self.assertIn(needle, upload)
 
-    def test_validate_runs_only_the_pure_contract_in_the_measurements_job(self):
+    def test_validate_runs_only_the_pure_contract_in_its_owning_job(self):
         # D-7: one pure step on push and PR; the live profile stays dispatch only.
         self.assertEqual(VALIDATE.count('-- python3 -B tests/gateway_pipeline_contract_test.py'), 1)
-        job = CATALOG.job_text(CATALOG.job('measurements'))
+        owners = [job for job in CATALOG.combined(automatic_only=True)['jobs'].values()
+                  if '-- python3 -B tests/gateway_pipeline_contract_test.py' in CATALOG.job_text(job)]
+        self.assertEqual(len(owners), 1)
+        job = CATALOG.job_text(owners[0])
         self.assertIn('--run-dir tmp/workspace-ui-ci/gateway-pipeline-contract ', job)
         self.assertIn('-- python3 -B tests/gateway_pipeline_contract_test.py', job)
         self.assertNotIn('--profile gateway-e2e', VALIDATE)

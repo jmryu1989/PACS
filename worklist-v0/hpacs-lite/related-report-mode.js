@@ -7,6 +7,10 @@
  * confirmation of one explicit Insert and the one-shot admission that lets exactly that native edit through while every
  * other write and report command stays blocked. The Source is read-only text: it never becomes an editor value, a draft, a
  * save or recovery snapshot. Only the reviewed insertion string reaches the Target, by the page's own native edit.
+ *
+ * Minhoon item 8 (2026-10-27): the mode is shown inside the Related panel and the editor stays on screen with the current
+ * draft. Holding the editor is therefore `inert` only: it is not focusable or editable, and an Insert lands in front of
+ * the reader's eyes.
  */
 (function (root) {
   'use strict';
@@ -81,6 +85,8 @@
       if (!box) throw new Error('Related Report mode: the ' + field + ' section is missing');
       return [field, box];
     }));
+    const sourceState = section.querySelector('.related-mode-state');
+    if (!sourceState) throw new Error('Related Report mode: the Source state line is missing');
     const editor = app.editor();
     if (!editor) throw new Error('Related Report mode: the report editor host is missing');
 
@@ -90,7 +96,7 @@
     let confirming = null;   // the open confirmation: { generation, parts, source }
     let admission = null;    // the one-shot native-edit admission of the Insert being confirmed (R2)
     let closing = 0;         // a close this module makes itself, so its own close handler stays out of the way
-    let held = null;         // what the page had on the editor host before the mode hid it (only W5's own change is undone)
+    let held = null;         // what the page had on the editor host before the mode held it (only W5's own change is undone)
     let lastField = 'findings';
 
     // The field the reader worked in: a row click moves focus away from the editor before the mode opens.
@@ -100,13 +106,11 @@
 
     function holdEditor() {
       if (held) return;
-      held = { hidden: editor.hidden, inert: editor.inert };
-      editor.hidden = true;
+      held = { inert: editor.inert };
       editor.inert = true;
     }
     function releaseEditor() {
       if (!held) return;
-      editor.hidden = held.hidden;
       editor.inert = held.inert;
       held = null;
     }
@@ -117,9 +121,9 @@
      */
     function withEditor(run) {
       const was = held;
-      if (was) { editor.hidden = was.hidden; editor.inert = was.inert; }
+      if (was) editor.inert = was.inert;
       try { return run(); }
-      finally { if (was && held === was) { editor.hidden = true; editor.inert = true; } }
+      finally { if (was && held === was) editor.inert = true; }
     }
 
     function capturePoint() {
@@ -133,7 +137,8 @@
         value: el.value, scrolls: Object.freeze(scrolls) });
     }
 
-    function say(text) { status.textContent = text; }
+    // The status row is one line in the Related panel; its tooltip keeps the whole sentence.
+    function say(text) { status.textContent = text; status.title = text; }
 
     function rows(card, heading, entries, extra) {
       const nodes = [];
@@ -191,8 +196,13 @@
       const note = doc.createElement('div');
       note.className = 'related-mode-note';
       note.setAttribute('lang', 'ko');
-      note.textContent = view.state === 'ready' ? '비교 중인 검사의 판독문입니다.' : view.message || SOURCE_STATE[view.state] || SOURCE_STATE.idle;
+      const ready = view.state === 'ready';
+      note.textContent = ready ? '비교 중인 검사의 판독문입니다.' : view.message || SOURCE_STATE[view.state] || SOURCE_STATE.idle;
       extra.push(note);
+      // Minhoon item 8: the mode stands in the Related panel's place for the plain view, so without a report its first
+      // line says why (loading, failed, none) where the text would be, instead of empty section headings.
+      sourceState.hidden = ready;
+      sourceState.textContent = ready ? '' : note.textContent;
       if (view.state === 'failed') {
         const retry = doc.createElement('button');
         retry.type = 'button';
@@ -208,7 +218,7 @@
         if (shown[field].textContent !== text) shown[field].textContent = text;
         // W-07b: Findings and Conclusion are the two report sections. A stored Recommendation is shown read-only only when it
         // has text, so an empty heading never shows and a whole-report Insert never carries text the reader did not see.
-        if (OPTIONAL_FIELDS.includes(field)) sections[field].hidden = !text;
+        sections[field].hidden = !ready || OPTIONAL_FIELDS.includes(field) && !text;
       }
     }
 
@@ -461,19 +471,8 @@
         el.scrollIntoView({ block: 'nearest' });
       } else if (!inserted && el.value === point.value) {
         el.setSelectionRange(point.start, point.end, point.direction);
-        const scrolled = () => { for (const [box, top, left] of point.scrolls) if (box.isConnected) { box.scrollTop = top; box.scrollLeft = left; } };
-        scrolled();
-        // The editor host was display:none, so the shared frame fits its fields again when it shows (its own resize
-        // observer, created before this one, runs first). The saved scroll is put back right after that fit, in the
-        // same rendering step, while nothing has changed the field since.
-        if (typeof ResizeObserver === 'function') {
-          const after = new ResizeObserver(() => {
-            after.disconnect();
-            if (!state && doc.activeElement === el && el.value === point.value && el.selectionStart === point.start
-                && el.selectionEnd === point.end) scrolled();
-          });
-          after.observe(editor);
-        }
+        // Focus may scroll the field's boxes to the caret; the reader's own scroll positions come back.
+        for (const [box, top, left] of point.scrolls) if (box.isConnected) { box.scrollTop = top; box.scrollLeft = left; }
       }
     }
 

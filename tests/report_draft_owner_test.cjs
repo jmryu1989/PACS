@@ -23,6 +23,7 @@ const test = require('node:test'), assert = require('node:assert/strict');
 const { createRequire } = require('node:module');
 const { PacsService } = require('/app/dist/pacs.service');
 const { AuthService } = require('/app/dist/auth.service');
+const { PresenceService } = require('/app/dist/presence.service');
 const { AppModule } = require('/app/dist/app.module');
 const { createRequestContext, REQUEST_CONTEXT_SOURCE } = require('/app/dist/emr-runtime/request-context');
 const { createRequestIngress } = require('/app/dist/emr-runtime/request-ingress');
@@ -110,7 +111,7 @@ function fixture() {
     resolveRequestIdentity:async()=> '00000000-0000-4000-8000-000000000001',
     transactionWithRecords:async()=>{throw new Error('Refused body must not start a draft transaction');},end(){},
   })});
-  return { svc: new PacsService(store, {}, keycloak, studyAccess, findings), touched, controllers: new Map(), requests };
+  return { svc: new PacsService(store, {}, keycloak, studyAccess, findings), presence: new PresenceService(store, studyAccess), touched, controllers: new Map(), requests };
 }
 
 /** The request as the router hands it over: `caller` is the session the auth guard resolved. */
@@ -121,7 +122,7 @@ function send(f, route, body, caller, uid = UID) {
     const types = [...(Reflect.getMetadata('design:paramtypes', controller) ?? [])];
     for (const {index,param} of Reflect.getMetadata(SELF_DECLARED_DEPS_METADATA,controller) ?? []) types[index]=param;
     const providers = new Map([[PacsService, f.svc], [AuthService, { memberRightsState: async () => 'ready' }],
-      [REQUEST_CONTEXT_SOURCE, f.requests.source]]);
+      [REQUEST_CONTEXT_SOURCE, f.requests.source], [PresenceService, f.presence]]);
     f.controllers.set(controller, new controller(...types.map(type => {
       assert.ok(providers.has(type), `${controller.name} needs ${type?.name}, which these cases do not provide`);
       return providers.get(type);

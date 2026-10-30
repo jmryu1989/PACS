@@ -143,6 +143,34 @@ test('D online exact versions, B2 result recovery and current access on PostgreS
     assert.equal((await runtime.lookup({}, parallel)).status, 'replayed');
     assert.equal(signCalls, callsAfterCommit + 1);
 
+    // R290-04 / S2-API-10: a healthy duplicate can arrive after admission but
+    // before the original starts its transaction. The real B2 operation lock
+    // must converge both deliveries without a second version or signature.
+    let admissionReady, continueOriginal, heldAdmission = false;
+    const admissionSeen = new Promise(resolve => { admissionReady = resolve; });
+    const continueAdmission = new Promise(resolve => { continueOriginal = resolve; });
+    const delayed = { begin() { const work = port.begin(); return { ...work, async admit(...args) {
+      const admitted = await work.admit(...args);
+      if (!heldAdmission) { heldAdmission = true; admissionReady(); await continueAdmission; }
+      return admitted;
+    } }; } };
+    const joined = composeClinicalRuntime({ ...parts, records: delayed });
+    const twin = create('synthetic admission race'), beforeTwinSign = signCalls;
+    const beforeTwinVersions = await count('emr_clinical.online_version');
+    const beforeTwinProjection = await count('public.d_online_projection');
+    const original = joined.write({}, twin);
+    let firstArrival, second;
+    try {
+      // If the original fails before admission, propagate it instead of hanging.
+      await Promise.race([admissionSeen, original]);
+      second = await joined.write({}, twin);
+    } finally { continueOriginal(); firstArrival = await original; }
+    assert.deepEqual([firstArrival.status, second.status], ['committed', 'replayed']);
+    assert.deepEqual(second.receipt, firstArrival.receipt);
+    assert.equal(signCalls, beforeTwinSign + 1);
+    assert.equal(await count('emr_clinical.online_version'), beforeTwinVersions + 1);
+    assert.equal(await count('public.d_online_projection'), beforeTwinProjection + 1);
+
     const blocked = create('synthetic ledger lock'), beforeBlocked = await count('emr_clinical.online_version');
     const beforeBlockedProjection = await count('public.d_online_projection');
     let acquired, release, timer;

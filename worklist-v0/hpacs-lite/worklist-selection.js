@@ -23,8 +23,9 @@
       generation:()=>generation
     };
   }
-  // The W9 viewing API's own wire bound (multi-study-view.service.ts VIEWING_SET_LIMITS: 2-20); never truncated here.
-  const SET_LIMITS=Object.freeze({min:2,max:20});
+  // The W9 viewing API's own wire bound (multi-study-view.service.ts VIEWING_SET_LIMITS.minMembers); the server has no upper
+  // member count (removed by the caution census), so the page sets none either. Never truncated here.
+  const SET_LIMITS=Object.freeze({min:2});
   function comparison(rows,current){
     if(rows.length!==2||!rows[0].sourcePatientKey||rows[0].sourcePatientKey!==rows[1].sourcePatientKey)return null;
     return rows[1].uid===current?[rows[1].uid,rows[0].uid]:rows.map(s=>s.uid);
@@ -40,14 +41,19 @@
     // W9: the same Open Selected Studies here, in Selection Details and in the selected rows' menu (options.openSet).
     const openSet=options.openSet?element('button','Open Selected Studies',host):null;
     if(openSet){openSet.type='button';openSet.id='multi-selection-open-set';}
+    // D1890 / Minhoon P0 item 1: Preload queues encrypted reading-PC copies (preload-queue.js).
+    const preloadQueue=root.KinPreloadQueue?.available()?root.KinPreloadQueue:null;
+    const preload=preloadQueue?element('button','Preload',host):null;
+    if(preload){preload.type='button';preload.id='multi-selection-preload';preload.title='선택한 검사의 영상을 암호화해 72시간 보관합니다. 열 때 서버의 권한 확인과 열람 기록을 거칩니다.';
+      preload.onclick=()=>{const list=rows();if(!live()||!list.length)return;preloadQueue.add(list.map(s=>({uid:s.uid,label:[s.id,s.name,s.date,s.modality].filter(Boolean).join(' · ')})),root.KinWorkContext?.session?.());};}
     element('span','Ctrl/⌘ 클릭 · Shift 범위 · Space 선택. 작성 대상은 유지합니다.',host);
+    const preloadPanel=preloadQueue?preloadQueue.mount(host):null;
     function rows(){return live()?model.rows(options.rows()):[];}
     /** The selected UIDs in the order the reader sees them, bound to this owner and selection generation. */
     function snapshot(){const list=rows();return live()?{owner:initial,generation:model.generation(),studyUids:list.map(s=>s.uid)}:null;}
     // A count outside the API's bound disables the action with the reason; the server still decides everything else.
     function setBlock(count){
       if(count<SET_LIMITS.min)return '여러 검사 열기는 2개 이상 선택해야 합니다.';
-      if(count>SET_LIMITS.max)return '같은 환자의 검사를 2개에서 20개까지 선택하세요. 중복 검사는 포함할 수 없습니다.';
       return options.openBlocked?.()||null;
     }
     function runOpenSet(){const s=snapshot();if(!s||setBlock(s.studyUids.length))return;dialog?.open&&dialog.close();options.openSet(s);}
@@ -72,7 +78,7 @@
     function sync(){
       if(!live()){end();return;}
       const selected=rows();count.textContent=`Selected: ${selected.length}`;
-      clear.disabled=inspect.disabled=!selected.length;page.disabled=!tbody.querySelector('tr[data-uid]');
+      clear.disabled=inspect.disabled=!selected.length;if(preload)preload.disabled=!selected.length;page.disabled=!tbody.querySelector('tr[data-uid]');
       if(openSet){const why=setBlock(selected.length);openSet.disabled=!!why;openSet.title=why||'';}
       if(model.generation()!==lastGeneration){lastGeneration=model.generation();options.changed?.(lastGeneration);}
       for(const tr of tbody.querySelectorAll('tr[data-uid]')){
@@ -116,7 +122,7 @@
     work.onInvalidate(event => {
       if (event.reason === 'lifecycle' && !['active', 'preparing'].includes(event.state)) end();
     });
-    function end(){if(ended)return;ended=true;model.clear();dialog?.remove();dialog=null;host.hidden=true;for(const tr of tbody.querySelectorAll('.multi-selected')){tr.classList.remove('multi-selected');tr.removeAttribute('aria-selected');}tbody.removeEventListener('click',click,true);tbody.removeEventListener('keydown',key,true);tbody.removeEventListener('dblclick',double,true);root.removeEventListener('pagehide',end);}
+    function end(){if(ended)return;ended=true;model.clear();preloadPanel?.end();dialog?.remove();dialog=null;host.hidden=true;for(const tr of tbody.querySelectorAll('.multi-selected')){tr.classList.remove('multi-selected');tr.removeAttribute('aria-selected');}tbody.removeEventListener('click',click,true);tbody.removeEventListener('keydown',key,true);tbody.removeEventListener('dblclick',double,true);root.removeEventListener('pagehide',end);}
     root.addEventListener('pagehide',end);
 
     sync();return {sync,end,snapshot,has:uid=>live()&&model.has(uid)&&rows().some(s=>s.uid===uid)};

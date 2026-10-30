@@ -1,4 +1,5 @@
-import { BackgroundWork, EMR_BACKGROUND_WORK } from './emr-runtime/background-work';
+import { PresenceService } from './presence.service';
+import { BackgroundWork, EMR_BACKGROUND_WORK, backgroundRetryDelayMs } from './emr-runtime/background-work';
 import {
   HttpException, Inject, Injectable, InternalServerErrorException, Logger,
   OnModuleDestroy, OnModuleInit, UnauthorizedException,
@@ -44,7 +45,8 @@ const REFRESH_LEAD_MS = 30_000;
 const TOKEN_MARGIN_MS = 2000;
 const AUTH_LOGIN = 'auth.login';
 type EndCause = 'logout' | 'account_switch' | 'reauthentication' | 'idle' | 'refresh_failed' | 'sweep' | 'isolation';
-type PendingLogin = { state: string; verifier: string; issuedAt: number };
+// action: Change Password의 Keycloak 동작 흐름. 그 콜백은 code를 교환하지 않고 제품 세션을 만들지 않는다.
+type PendingLogin = { state: string; verifier: string; issuedAt: number; action?: 'UPDATE_PASSWORD' };
 type Session = {
   sid: string; auditRef: string; sub: string; accessToken: string; refreshToken: string;
   atExpiresAt: Date; createdAt: Date; lastSeenAt: Date;
@@ -68,7 +70,10 @@ type EndResult = { ended: boolean; idpSid: string | null };
 export type CallbackResult =
   | { kind: 'entered'; sid: string; document: 'main.html' | 'clinician.html' }
   | { kind: 'work' }
+  | { kind: 'password'; status: PasswordActionStatus }
   | { kind: 'landing'; error: string };
+/** Keycloak AIA의 `kc_action_status`. 모르는 값·error 콜백은 `error`다 — 바뀌었다고도 안 바뀌었다고도 말하지 않는다. */
+export type PasswordActionStatus = 'success' | 'cancelled' | 'error';
 /**
  * refresh 교환의 답. `refused`는 Keycloak이 **그 refresh token을 거절했다고 답한 것**(400 invalid_grant: 만료·철회)뿐이다.
  * 연결 실패·시간 초과·5xx·읽지 못한 답·검증하지 못한 새 토큰은 `unavailable`이다 — 세션이 끝났다는 증거가 아니다.
@@ -135,7 +140,8 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
 
   constructor(private prisma: PrismaService, private keycloak: KeycloakService,
     @Inject(EMR_RECORD_PORT) private readonly ledger: EmrRecordPort,
-    @Inject(EMR_BACKGROUND_WORK) private readonly background: BackgroundWork) {}
+    @Inject(EMR_BACKGROUND_WORK) private readonly background: BackgroundWork,
+    private readonly presence: PresenceService) {}
 
   private async withAccessRecords<T>(claims: { issuer: string; subject: string; actor: string },
     body: (tx: EmrRecordTransaction, record: RecordMutation, user: { status: 'known'; value: ImmutableIdentity }) => Promise<T>,
@@ -174,7 +180,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`Member rights import attempt ${attempt}: ready`);
       if (outcome?.publication) await outcome.publication;
     } catch (error: any) {
-      const delay = Math.min(30000, 1000 * 2 ** Math.min(attempt - 1, 5));
+      const delay = backgroundRetryDelayMs(attempt);
       this.logger.warn(`Member rights import attempt ${attempt}: ${error?.message ?? 'storage/provider failure'}; retry in ${delay}ms`);
       if (!this.stopping && !signal.aborted) {
         this.cancelImportRetry = this.background.schedule('auth.importRights', delay, next => this.importRights(attempt + 1, next));
@@ -439,13 +445,17 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       };
       let issuer: string | undefined;
       try { issuer = decodeJwt(session.accessToken).iss; } catch { /* Keep the missing original identity explicit. */ }
-      if (issuer) return await this.withAccessRecords({ issuer, subject: session.sub, actor: this.storedIdentity(session).actor }, end,
-        { maxWait: 4000, timeout: 8000 });
+      const completed = (result: EndResult) => {
+        if (result.ended) this.presence.endUser(session.sub);
+        return result;
+      };
+      if (issuer) return completed(await this.withAccessRecords({ issuer, subject: session.sub, actor: this.storedIdentity(session).actor }, end,
+        { maxWait: 4000, timeout: 8000 }));
       // An unreadable stored token must not prevent ending its existing session.
       // Keep its auditRef and the projection's stored subject; never guess an issuer.
       const work = this.ledger.begin();
-      try { return await work.transactionWithRecords((tx, record) => end(tx, record, { status: 'unresolved', reason: 'not-resolved' }),
-        { maxWait: 4000, timeout: 8000 }); }
+      try { return completed(await work.transactionWithRecords((tx, record) => end(tx, record, { status: 'unresolved', reason: 'not-resolved' }),
+        { maxWait: 4000, timeout: 8000 })); }
       finally { work.end(); }
     } catch (error: any) {
       if (lockWaitExceeded(error)) throw this.conflict();
@@ -662,22 +672,31 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 흐름 하나에 서명한 pending 쿠키 하나. 로그인은 언제나 prompt=login으로 자격 입력을 요구하고(살아 있는 SSO로 폼 없이
    * 돌아오지 않는다), 가입은 prompt=create의 가입 폼이다.
    */
-  private startFlow(res: any, register = false): string {
+  private startFlow(res: any, register = false, action?: 'UPDATE_PASSWORD'): string {
     const verifier = randomBytes(32).toString('base64url');
     const state = randomBytes(32).toString('base64url');
     const challenge = createHash('sha256').update(verifier).digest('base64url');
-    const pending: PendingLogin = { state, verifier, issuedAt: Date.now() };
+    const pending: PendingLogin = { state, verifier, issuedAt: Date.now(), action };
     this.appendCookie(res, `${this.pendingName(state)}=${encodeURIComponent(this.signPending(pending))}; Path=/api/auth; `
       + `HttpOnly; Secure; SameSite=Lax; Max-Age=${PENDING_VALID_MS / 1000}`);
     const query = new URLSearchParams({ client_id: 'kin-bff', response_type: 'code', scope: 'openid profile email',
       redirect_uri: this.redirectUri(), state, nonce: state, code_challenge: challenge, code_challenge_method: 'S256', prompt: register ? 'create' : 'login' });
+    if (action) {
+      // Change Password는 이 브라우저의 로그인한 사람의 SSO 위에서 동작만 연다(Keycloak이 재인증 창을 넘긴 로그인에는 현재
+      // 비밀번호를 다시 묻고 이름은 고정한다). prompt=login이면 그 폼에서 다른 계정으로 로그인해 그 계정의 SSO를 남길 수 있다.
+      // 이 흐름은 제품 세션을 만들지 않으므로 "로그인은 언제나 자격 입력" 규칙의 대상이 아니다.
+      query.delete('prompt');
+      query.set('kc_action', action);
+    }
     return `${this.externalOidc('/auth')}?${query}`;
   }
 
-  /** 결속 없는 링크는 다른 문서가 쓰는 세션을 끝내지 않는다. */
-  async beginLogin(req: any, res: any, prompt?: 'create'): Promise<string | null> {
-    if (await this.hasSession(req)) return null;
-    return this.startFlow(res, prompt === 'create');
+  /** 결속 없는 링크는 다른 문서가 쓰는 세션을 끝내지 않는다. 비밀번호 동작은 살아 있는 세션을 그대로 둔 채 연다. */
+  async beginLogin(req: any, res: any, prompt?: 'create', action?: 'UPDATE_PASSWORD'): Promise<string | null> {
+    const active = await this.hasSession(req);
+    if (active && !action) return null;
+    // 세션이 이미 끝났으면 동작 대신 평범한 로그인으로 간다.
+    return this.startFlow(res, prompt === 'create', active ? action : undefined);
   }
 
   /** 종료 원인은 접속기록에만 쓰며 다음 로그인 흐름으로 전파하지 않는다. */
@@ -768,11 +787,20 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** 자기 pending만 소비하고 세션과 성공 기록을 같은 transaction으로 만든다. */
-  async finishCallback(req: any, res: any, query: { code?: string; state?: string; error?: string }): Promise<CallbackResult> {
+  async finishCallback(req: any, res: any, query: { code?: string; state?: string; error?: string; actionStatus?: string }): Promise<CallbackResult> {
     const { code, state, error } = query;
-    if ((!code || !state) && await this.hasSession(req)) return { kind: 'work' };
     const flows = this.pendingFlows(req);
     const own = state ? flows.find(item => item.name === this.pendingName(state) && item.pending?.state === state) : undefined;
+    // The password action grants no product session: its code is never exchanged and the working document's
+    // session/cookie stay as they were. The tab only reports Keycloak's own outcome so the user knows which password holds.
+    // Recognised before the active-session shortcut: Keycloak's error answer carries state but no code, and would otherwise
+    // send the popup to another worklist with no outcome while leaving this flow's cookie behind.
+    if (own?.live && own.pending?.action === 'UPDATE_PASSWORD') {
+      this.expirePending(res, own.name);
+      const status = query.actionStatus;
+      return { kind: 'password', status: !error && (status === 'success' || status === 'cancelled') ? status : 'error' };
+    }
+    if ((!code || !state) && await this.hasSession(req)) return { kind: 'work' };
     if (own) this.expirePending(res, own.name);
     if (!own?.live || !own.pending) {
       if (flows.some(item => item.live))

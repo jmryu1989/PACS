@@ -21,6 +21,7 @@ from test_prior_selection import canvas_ready
 from test_cine import CineE2E
 from test_display_controls import DisplayControlsE2E
 from document_session import document_request
+from network_faults import route_first
 
 
 class ViewerUXShellE2E(ViewerLayoutE2E):
@@ -34,6 +35,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
                     if '/ohif/viewer' not in page.url: continue
                     try:
                         name = 'failure-' + self._testMethodName + '-' + str(i) + '-' + str(j)
+                        (folder / (name + '-browser-errors.json')).write_text(json.dumps(getattr(self, 'browser_errors', []), indent=2), encoding='utf-8')
                         page.screenshot(path=str(folder / (name + '.png')))
                         (folder / (name + '.html')).write_text(page.content(), encoding='utf-8')
                         state = page.evaluate('''() => ({url:location.href, classes:document.body.className,
@@ -44,7 +46,6 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
                             image:services.cornerstoneViewportService.getCornerstoneViewport(c.viewportId)?.getCurrentImageId?.(),
                             camera:services.cornerstoneViewportService.getCornerstoneViewport(c.viewportId)?.getCamera?.()}))})''')
                         (folder / (name + '.json')).write_text(json.dumps(state, indent=2), encoding='utf-8')
-                        (folder / (name + '-browser-errors.json')).write_text(json.dumps(getattr(self, 'browser_errors', []), indent=2), encoding='utf-8')
                     except Exception as error: print('Viewer failure capture:', str(error)[:180], flush=True)
         super().tearDown()
 
@@ -136,7 +137,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         # A late patient lookup cannot win after selecting A again (A→B→A).
         page.wait_for_function('''() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false''')
         held = []
-        page.route('**/api/studies?*', lambda route: held.append(route), times=1)
+        route_first(page, '**/api/studies?*', lambda route: held.append(route))
         with page.expect_request(lambda request: request.url.split('?')[0].endswith('/api/studies')):
             tabs.get_by_role('tab').filter(has_text=b.patient_id).click()
         tabs.get_by_role('tab').filter(has_text=a.patient_id).click()
@@ -146,7 +147,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         expect(tabs.get_by_role('tab').filter(has_text=a.patient_id)).to_have_attribute('aria-selected','true')
         page.wait_for_function('expected => (' + display_state + ')() === expected', arg=before_display)
         held = []
-        page.route('**/api/studies?*', lambda route: held.append(route), times=1)
+        route_first(page, '**/api/studies?*', lambda route: held.append(route))
         with page.expect_request(lambda request: request.url.split('?')[0].endswith('/api/studies')):
             tabs.get_by_role('tab').filter(has_text=b.patient_id).click()
         tabs.get_by_role('button', name='Close D03A SYNTHETIC ' + b.patient_id, exact=True).click()
@@ -176,6 +177,8 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         page.keyboard.press('Delete')
         expect(tabs.get_by_role('tab')).to_have_count(1)
         expect(tabs.get_by_role('tab').filter(has_text=a.patient_id)).to_be_focused()
+        # Closing B starts A's native mode again; focus returns before its images.
+        page.wait_for_function('expected => (' + display_state + ')() === expected', arg=before_display)
         page.wait_for_function('''() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false''')
         tabs.get_by_role('button', name='Close ', exact=False).click()
         expect(tabs.get_by_role('tab')).to_have_count(0)
@@ -214,19 +217,37 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
 
     def test_shell_07_failed_patient_lookup_recovers(self):
         fixture = self.multiple('U2-' + uuid.uuid4().hex[:12], 'lookup failure', '20260801')
+        refused = self.multiple('U2-' + uuid.uuid4().hex[:12], 'refused switch', '20260801')
         work = self.login()
         page = work.context.new_page()
-        page.route('**/api/studies?*', lambda route: route.fulfill(status=503, content_type='application/json', body='{}'), times=1)
+        route_first(page, '**/api/studies?*', lambda route: route.fulfill(status=503, content_type='application/json', body='{}'))
         page.goto(self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + fixture.uid)
         canvas_ready(page, 1)
         retry = page.get_by_role('button', name='Retry Patient', exact=True)
         expect(retry).to_be_visible()
         expect(page.locator('[data-cy="viewport-grid"]')).to_be_visible()
         self.assertFalse(page.evaluate("document.body.classList.contains('kin-viewer-empty')"))
+        strip = page.get_by_role('region', name='Series', exact=True)
+        other = strip.locator('button[aria-pressed="false"]').first
+        expect(other).to_be_visible()
+        previous = self.cells(page)[0]['image']
+        other.click()
+        page.wait_for_function('image => services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId()).getCurrentImageId() !== image', arg=previous)
+        canvas_ready(page, 1)
         before = self.cells(page)
         retry.click(); expect(retry).not_to_be_visible()
         expect(page.get_by_role('tablist', name='Patients')).to_contain_text(fixture.patient_id)
         self.assertEqual(self.cells(page), before)
+        # A failed switch after a tab exists also ends its admission: its series
+        # must remain usable without a reload or another tab render.
+        route_first(page, '**/api/studies?*', lambda route: route.fulfill(status=503, content_type='application/json', body='{}'))
+        switched = page.evaluate('uid => kinViewerOpenPatient("/ohif/viewer?StudyInstanceUIDs=" + uid)', refused.uid)
+        self.assertFalse(switched)
+        previous = self.cells(page)[0]['image']
+        strip.locator('button[aria-pressed="false"]').first.click()
+        page.wait_for_function('image => services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId()).getCurrentImageId() !== image', arg=previous)
+        canvas_ready(page, 1)
+        expect(page.get_by_role('tablist', name='Patients')).to_contain_text(fixture.patient_id)
 
     def test_shell_08_same_patient_requested_study(self):
         patient = 'U2-' + uuid.uuid4().hex[:12]
@@ -253,7 +274,18 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
     def test_shell_09_settings_failure_keeps_default_tools(self):
         fixture = self.multiple('U2-' + uuid.uuid4().hex[:12], 'settings failure', '20260801')
         page = self.login()
-        page.route('**/api/workspace-shortcuts', lambda route: route.fulfill(status=503, content_type='application/json', body='{}'), times=1)
+        failed_settings = False
+        def settings(route):
+            nonlocal failed_settings
+            if not failed_settings:
+                failed_settings = True
+                route.fulfill(status=503, content_type='application/json', body='{}')
+            else:
+                route.continue_()
+        # Expiring the last route disables Chromium interception while OHIF's
+        # mode chunks start loading, which can leave those requests unfinished.
+        # Keep routing active; Reload Settings still reaches the real server.
+        page.route('**/api/workspace-shortcuts', settings)
         page = self.launch(page, [fixture])
         page.locator('#kin-workspace-dock nav button[aria-controls="kin-viewer-layout"]').click()
         retry = page.get_by_role('button', name='Reload Settings', exact=True)
@@ -298,7 +330,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         work = self.login(); page = work.context.new_page()
         page.goto(self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + current.uid + ',' + prior.uid)
         canvas_ready(page, 8)
-        expect(page.get_by_label('MG Layout', exact=True)).to_have_value('compare')
+        expect(page.locator('#kin-mammography-hanging').get_by_label('MG Layout', exact=True)).to_have_value('compare')
         before = [cell['image'] for cell in self.cells(page)]
         self.assertEqual(len(set(before)), 8)
         page.wait_for_function('() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false')
@@ -311,7 +343,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         tabs.get_by_role('tab').filter(has_text=patient).click()
         page.wait_for_function('expected => JSON.stringify([...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x).map(c=>services.cornerstoneViewportService.getCornerstoneViewport(c.viewportId)?.getCurrentImageId?.())) === JSON.stringify(expected)', arg=before)
         canvas_ready(page, 8)
-        expect(page.get_by_label('MG Layout', exact=True)).to_have_value('compare')
+        expect(page.locator('#kin-mammography-hanging').get_by_label('MG Layout', exact=True)).to_have_value('compare')
 
     def test_shell_06_study_action_seam(self):
         patient = 'U2-' + uuid.uuid4().hex[:12]
@@ -321,8 +353,12 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         self.grid(page, 2); self.drag(page, 'D03A seam prior', 1)
         canvas_ready(page, 2)
         bars = page.get_by_role('region', name='Viewport Information')
-        for bar in bars.all(): expect(bar.get_by_role('button', name='Study', exact=False)).to_be_disabled()
-        # Register only the future consumer callbacks at the public boundary;
+        for bar in bars.all(): expect(bar.get_by_role('button', name='Study', exact=False)).to_be_enabled()
+        bars.nth(1).get_by_role('button', name='Study', exact=False).click()
+        studies = page.get_by_role('region', name='Studies', exact=True)
+        expect(studies.get_by_role('table')).to_be_visible()
+        studies.get_by_role('button', name='Close', exact=True).click()
+        # U3 is the shipped consumer. Exercise alternate callbacks and disposal at its public boundary;
         # the shipped shell, services, native grid and report host execute normally.
         page.evaluate('''() => {
           window.u2Unregister = KinViewerUX.registerStudyActions({
@@ -382,6 +418,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         self.assertTrue(any('/api/clinician/studies?uids=' in url for url in requests))
         expect(page.get_by_role('button', name='Viewer Settings', exact=True)).not_to_be_visible()
         expect(page.get_by_role('region', name='Image Tools', exact=True).get_by_role('status')).to_be_empty()
+        expect(page.get_by_role('region', name='Viewport Information').get_by_role('button', name='Study', exact=False)).not_to_be_visible()
         self.assertFalse(any(url.split('?')[0].endswith('/api/studies') for url in requests))
         page.get_by_role('tablist', name='Patients').get_by_role('button', name='Close ', exact=False).click()
         expect(page.get_by_role('tablist', name='Patients').get_by_role('tab')).to_have_count(0)
@@ -731,7 +768,25 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
 
     def test_shell_03_toolbar_shortcuts_and_account_roaming(self):
         current = self.multiple('U2-' + uuid.uuid4().hex[:16], 'current', '20260801')
+        prior = self.multiple(current.patient_id, 'prior', '20250701')
         page = self.launch(self.login(), [current])
+        comparison_url = self.stack.proxy + '/ohif/viewer?StudyInstanceUIDs=' + current.uid + ',' + prior.uid
+        comparison_images = '''() => [...services.viewportGridService.getState().viewports.values()]
+          .sort((a,b)=>a.y-b.y||a.x-b.x).map(c=>{
+            const v=services.cornerstoneViewportService.getCornerstoneViewport(c.viewportId);
+            const m=cornerstone.metaData.get('instance',v?.getCurrentImageId?.());
+            return [m?.StudyInstanceUID,m?.SeriesInstanceUID,m?.SOPInstanceUID];})'''
+        hanging_state = '''() => ({protocol:services.hangingProtocolService.getState().protocolId,
+          rows:services.viewportGridService.getState().layout.numRows,
+          columns:services.viewportGridService.getState().layout.numCols})'''
+        baseline = page.context.new_page()
+        baseline.goto(comparison_url); canvas_ready(baseline, 1)
+        stock_hang = baseline.evaluate(hanging_state)
+        baseline.goto(comparison_url + '&hangingProtocolId=@ohif/hpCompare'); canvas_ready(baseline, 4)
+        before_save = baseline.evaluate(comparison_images)
+        self.assertEqual({image[0] for image in before_save}, {current.uid, prior.uid})
+        self.assertEqual(len({image[1] for image in before_save}), 4)
+        baseline.close()
         tools = page.get_by_role('region', name='Image Tools', exact=True)
         bar = tools.get_by_role('toolbar', name='Frequent Tools')
         zoom = bar.get_by_role('button', name='Zoom', exact=True)
@@ -809,7 +864,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         dialog.get_by_role('button', name='Save', exact=True).focus()
         page.keyboard.press('p')
         self.assertEqual(page.evaluate(active_tool), 'Zoom')
-        page.route('**/api/workspace-shortcuts', lambda route: route.fulfill(status=503, body='Unavailable'), times=1)
+        route_first(page, '**/api/workspace-shortcuts', lambda route: route.fulfill(status=503, body='Unavailable'))
         dialog.get_by_role('button', name='Save', exact=True).click()
         expect(dialog).to_contain_text('계정 설정 응답을 읽지 못했습니다')
         expect(bar.get_by_role('button', name='Zoom', exact=True)).to_have_attribute('aria-keyshortcuts', 'J')
@@ -838,6 +893,42 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         self.assertEqual(document_request(page, 'GET', '/api/workspace-shortcuts').json()['bindings'], bindings)
         folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/viewer-ux-u2/screens')); folder.mkdir(parents=True, exist_ok=True)
         other.screenshot(path=str(folder / 'toolbar-roaming.png'))
+        # An unrelated Save must not create personal layouts or change the next hang.
+        self.assertFalse(document_request(other, 'GET', '/api/workspace-shortcuts').json()['viewerSettings'].get('hanging'))
+        comparison = other.context.new_page()
+        comparison.goto(comparison_url + '&hangingProtocolId=@ohif/hpCompare'); canvas_ready(comparison, 4)
+        self.assertEqual(comparison.evaluate(comparison_images), before_save)
+        comparison.screenshot(path=str(folder / 'unrelated-save-comparison.png'))
+        # Existing Automatic records also delegate to stock. A saved grid applies to
+        # the hpCompare open every product comparison path sends: current left, prior right.
+        record = document_request(other, 'GET', '/api/workspace-shortcuts').json()
+        original_settings = record['viewerSettings']
+        for layout, requested, count, expected in [
+                ('automatic', '', 1, None),
+                ('automatic', '&hangingProtocolId=@ohif/hpCompare', 4, before_save),
+                ('1x2', '&hangingProtocolId=@ohif/hpCompare', 2, [current.uid, prior.uid])]:
+            settings = {**original_settings, 'hanging': {'CT': {
+                'layout': layout, 'priorPosition': 'right', 'seriesMatch': 'similar'}}}
+            response = document_request(other, 'PUT', '/api/workspace-shortcuts', headers={'X-KIN-CSRF': '1'},
+                                        data=dict(expectedOwner=record['owner'], revision=record['revision'], viewerSettings=settings))
+            self.assertEqual(response.status, 200); record = response.json()
+            comparison.goto(comparison_url + requested); canvas_ready(comparison, count)
+            images = comparison.evaluate(comparison_images)
+            if count == 2:
+                grid = comparison.evaluate(hanging_state)
+                self.assertEqual((grid['rows'], grid['columns']), (1, 2))
+                self.assertEqual([image[0] for image in images], expected)
+            elif expected is not None:
+                self.assertEqual(images, expected)
+            else:
+                # Without a requested comparison, native OHIF owns image selection.
+                # Automatic retains that native protocol;
+                # it must not install the personal two-cell comparison.
+                self.assertEqual(comparison.evaluate(hanging_state), stock_hang)
+                self.assertIn(images[0][:2], [image[:2] for image in before_save])
+        response = document_request(other, 'PUT', '/api/workspace-shortcuts', headers={'X-KIN-CSRF': '1'},
+                                    data=dict(expectedOwner=record['owner'], revision=record['revision'], viewerSettings=original_settings))
+        self.assertEqual(response.status, 200)
 
     def test_shell_15_flip_rotate_shift_keys(self):
         # F8 (2026-10-26 reader answer): Shift+H/V flip, Shift+L/R turn; L and R stay Length and Rectangle.

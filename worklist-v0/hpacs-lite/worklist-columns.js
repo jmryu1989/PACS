@@ -130,6 +130,8 @@
       status(fitted ? `${fitted}개 열의 내용 너비를 준비했습니다. 적용 버튼으로 반영하세요. 다른 페이지의 내용은 포함하지 않았습니다.` : '현재 페이지에 맞출 내용이 없습니다. 기존 너비는 유지했습니다.');
     }
     $('fit-all').addEventListener('click', () => fit(draft.modes[openedMode].order.filter(k => !draft.modes[openedMode].hidden.includes(k))));
+    let dragged = null;
+    const clearDrop = () => { for (const el of $('list').querySelectorAll('.wc-drop-before, .wc-drop-after')) el.classList.remove('wc-drop-before', 'wc-drop-after'); };
     function renderEditor(focus) {
       const part = draft.modes[openedMode];
       const a = part.appearance || appearanceDefault();
@@ -137,6 +139,34 @@
       $('list').replaceChildren(...part.order.map((key, index) => {
         const column = columns[openedMode].find(c => c.k === key);
         const row = document.createElement('div'); row.className = 'wc-row'; row.dataset.column = key;
+        // Drag by the grip only: a draggable row would take presses meant for the checkbox and width field.
+        // Up/Down stay the keyboard path; a drop changes the draft like they do.
+        const grip = document.createElement('span'); grip.className = 'wc-grip'; grip.draggable = true;
+        grip.textContent = '≡'; grip.title = '끌어서 열 순서를 바꿉니다. 키보드는 Up·Down 단추를 사용하세요.';
+        grip.setAttribute('aria-hidden', 'true');
+        grip.addEventListener('dragstart', event => {
+          dragged = key; row.classList.add('wc-dragging');
+          event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', key);
+        });
+        grip.addEventListener('dragend', () => { dragged = null; clearDrop(); row.classList.remove('wc-dragging'); });
+        row.addEventListener('dragover', event => {
+          if (!dragged || dragged === key) return;
+          event.preventDefault(); event.dataTransfer.dropEffect = 'move';
+          const box = row.getBoundingClientRect(), after = event.clientY > box.top + box.height / 2;
+          clearDrop(); row.classList.add(after ? 'wc-drop-after' : 'wc-drop-before');
+        });
+        row.addEventListener('dragleave', event => { if (!row.contains(event.relatedTarget)) row.classList.remove('wc-drop-before', 'wc-drop-after'); });
+        row.addEventListener('drop', event => {
+          if (!dragged || dragged === key) return;
+          event.preventDefault();
+          const after = row.classList.contains('wc-drop-after'), moving = dragged;
+          dragged = null; clearDrop();
+          const order = part.order.filter(k => k !== moving);
+          order.splice(order.indexOf(key) + (after ? 1 : 0), 0, moving);
+          generation++; part.order = order; renderEditor();
+          status(`${columns[openedMode].find(c => c.k === moving).t} 열을 옮겼습니다. 적용 버튼을 누르면 목록에 반영됩니다.`);
+        });
+        row.append(grip);
         const label = document.createElement('label'), input = document.createElement('input');
         input.type = 'checkbox'; input.checked = !part.hidden.includes(key); input.disabled = REQUIRED.includes(key);
         input.setAttribute('aria-label', 'Show ' + column.t);

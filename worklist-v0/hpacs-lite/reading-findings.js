@@ -159,7 +159,10 @@ window.KinReadingFindings = function (app) {
       const el = fields();
       if (el && window.ResizeObserver) {
         sizeWatch = new ResizeObserver(onLayout);
-        for (let node = el; node; node = node.previousElementSibling) sizeWatch.observe(node);
+        // `.redit` sits in the editor column beside Clinical Context (Minhoon item 8): what is above it is the column's
+        // head row and, one level up, the report column's rows above that pair.
+        for (let box = el; box && box !== reportColumn(); box = box.parentElement)
+          for (let node = box; node; node = node.previousElementSibling) sizeWatch.observe(node);
         // A Related height or list/report separator move shifts the report and the list's bottom
         // without resizing anything above `.redit`; the docked panel reads both.
         for (const node of [region, relatedList()]) if (node) sizeWatch.observe(node);

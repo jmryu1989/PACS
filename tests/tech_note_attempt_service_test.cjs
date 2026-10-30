@@ -141,7 +141,7 @@ function standIn() {
       let finish; const tx = { notes: [], audit: [], held: [], done: new Promise(resolve => { finish = resolve; }) };
       try {
         const result = await fn(view(tx));
-        if (hooks.beforeCommit) await hooks.beforeCommit();
+        if (tx.notes.length && hooks.beforeCommit) await hooks.beforeCommit();
         // A second insert of a committed key waits for the first transaction and then violates the index.
         for (const row of tx.notes) {
           if (row.attemptId && committed.notes.some(n => n.attemptId === row.attemptId)) throw P2002(['attemptId']);
@@ -185,15 +185,21 @@ function postgres() {
     const hooks = { failAudit: null, beforeCommit: null, beforeTransaction: null };
     // A recording view of the real client: the service's own transactions, with an audit write that can be made to fail
     // and a pause after the work, before the commit. Nothing else is replaced.
-    const wrap = tx => new Proxy(tx, { get(target, key) {
+    const wrap = (tx, inserted) => new Proxy(tx, { get(target, key) {
+      if (key === 'techNoteRevision') return new Proxy(target.techNoteRevision, { get(model, method) {
+        if (method === 'create') return async args => { const row = await model.create(args); inserted.value = true; return row; };
+        const value = Reflect.get(model, method);
+        return typeof value === 'function' ? value.bind(model) : value;
+      } });
       if (key === 'auditLog') return { create: async args => { if (hooks.failAudit?.(args.data)) throw new Error('SYN audit write failed'); return target.auditLog.create(args); } };
       const value = Reflect.get(target, key);
       return typeof value === 'function' ? value.bind(target) : value;
     } });
     const prisma = new Proxy(base, { get(target, key) {
       if (key === '$transaction') return async (fn, options) => { if (hooks.beforeTransaction) await hooks.beforeTransaction(); return target.$transaction(async tx => {
-        const result = await fn(wrap(tx));
-        if (hooks.beforeCommit) await hooks.beforeCommit();
+        const inserted = { value: false };
+        const result = await fn(wrap(tx, inserted));
+        if (inserted.value && hooks.beforeCommit) await hooks.beforeCommit();
         return result;
       }, options); };
       const value = Reflect.get(target, key);
@@ -242,7 +248,7 @@ const receiptOf = row => ({ version: row.version, text: row.text, attemptId: row
 /** The detail of a tech-note audit row, parsed. */
 const detail = row => JSON.parse(row.detail);
 
-/** Pause the next transaction after its work, before its commit. */
+/** Pause the next revision insert before commit; admission-only transactions do not own the attempt-id index entry. */
 function holdNextCommit(store) {
   let reached, release;
   const at = new Promise(resolve => { reached = resolve; });
@@ -501,14 +507,20 @@ test('TEST-S8-NOTE-SVR-13 the first note must not be blank: the server refuses w
   assert.equal((await w.store.audits(uid)).length, 0);
 });
 
-test('TEST-S8-NOTE-SVR-14 an edit with an id still needs a reason and a changed text; a refusal writes nothing', async () => {
+test('TEST-S8-NOTE-SVR-14 an edit with an id allows an optional reason and still needs changed text; a refusal writes nothing', async () => {
   const w = await world(), uid = await w.study();
   assert.equal((await w.save(uid, body(0, 'SYN v1'))).status, 200);
-  assert.equal((await w.save(uid, body(1, 'SYN v2', '   '))).status, 400);
-  assert.equal((await w.save(uid, body(1, 'SYN v1', 'R'))).status, 400);
+  assert.equal((await w.save(uid, body(1, 'SYN v2', '   '))).status, 200);
+  assert.equal((await w.save(uid, body(2, 'SYN v2', 'R'))).status, 400);
   assert.equal((await w.save(uid, body(0, 'SYN stale', 'R'))).status, 409);
-  assert.equal((await w.store.rows(uid)).length, 1);
-  assert.equal((await w.store.audits(uid)).length, 1);
+  assert.equal((await w.store.rows(uid)).length, 2);
+  assert.equal((await w.store.audits(uid)).length, 2);
 });
 
 test('storage of this run', () => { process.stderr.write('S8-NOTE-SVR storage: ' + (PG ? 'postgresql' : 'stand-in (logic only)') + '\n'); });
+
+test('a note beyond the former 10000-character cap is stored and re-read without truncation',async()=>{
+ const w=await world(),uid=await w.study(),text='SYN'.repeat(4000);
+ assert.equal((await w.save(uid,body(0,text))).status,200);
+ assert.equal((await w.store.rows(uid))[0].text,text);
+});

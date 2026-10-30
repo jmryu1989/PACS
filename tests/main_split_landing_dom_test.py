@@ -18,12 +18,75 @@ def tearDownModule():
 class CurrentLanding(pre.PreCase):
     both = pre.Registration.both
 
+    def test_worker_uses_the_same_api_answers_and_session_checks_as_the_page(self):
+        run = pre.Run(self, pre.Pages.current.layout('actual'), filters=(pre.SAVED,))
+        run.booted()
+        # The shipped worker's startup read must reach the existing synthetic server, including its 404 fallback.
+        run.wait(lambda: any(r['path'] == '/api/preload/cache-key' and r['answered']
+                             for r in run.worker_requests), 'preload session API answered')
+        self.assertEqual([], run.errors)
+        run.page.evaluate("""() => {
+          const source = `onconnect = event => {
+            const port = event.ports[0];
+            port.onmessage = async event => {
+              const {url, options} = event.data;
+              try {
+                const response = await fetch(url, options);
+                port.postMessage({status: response.status, code: response.headers.get('X-KIN-Auth-Code'),
+                                  body: await response.json()});
+              } catch (_) { port.postMessage({aborted: true}); }
+            };
+            port.start();
+          };`;
+          window.workerProbe = new SharedWorker(URL.createObjectURL(new Blob([source], {type: 'text/javascript'})));
+          window.workerAnswers = [];
+          workerProbe.port.onmessage = event => workerAnswers.push(event.data);
+          workerProbe.port.start();
+        }""")
+
+        def ask(path, session, method='GET', body=None):
+            options = {'method': method, 'headers': {'X-KIN-Session': session}}
+            if body is not None:
+                options['headers']['Content-Type'] = 'application/json'
+                options['body'] = pre.json.dumps(body)
+            run.page.evaluate('request => workerProbe.port.postMessage(request)',
+                              {'url': pre.h.ORIGIN + path, 'options': options})
+
+        def answer(number):
+            run.wait(lambda: run.page.evaluate('workerAnswers.length') == number, 'worker API reply')
+            return run.page.evaluate('workerAnswers[workerAnswers.length - 1]')
+
+        # An ordinary synthetic API hold remains pending for a worker until the same answer path runs.
+        held = run.site.held_gets['/api/syn-held'] = []
+        ask('/api/syn-held?source=worker', run.site.cookie)
+        run.wait(lambda: bool(held), 'worker API held by the origin')
+        self.assertEqual([], run.page.evaluate('workerAnswers'))
+        run.site.answer(held.pop(), 503, {'message': 'SYN held response'})
+        self.assertEqual({'status': 503, 'code': None, 'body': {'message': 'SYN held response'}}, answer(1))
+        ask('/api/prefs?source=worker', run.site.cookie)
+        self.assertEqual({'status': 200, 'code': None, 'body': {'filters': [pre.SAVED], 'templates': []}}, answer(2))
+        ask('/api/prefs', 'SYN-WRONG-SESSION')
+        refused = answer(3)
+        self.assertEqual((409, 'AUTH_SESSION_MISMATCH', 'AUTH_SESSION_MISMATCH'),
+                         (refused['status'], refused['code'], refused['body']['code']))
+        ask('/api/syn-absent', run.site.cookie)
+        missing = answer(4)
+        self.assertEqual((404, 'SYN_NOT_STUBBED'), (missing['status'], missing['body']['code']))
+        template = {'name': 'SYN Worker Template', 'findings': 'SYN worker text'}
+        ask('/api/templates', run.site.cookie, 'POST', template)
+        saved = answer(5)
+        self.assertEqual(200, saved['status'])
+        self.assertEqual([template], run.site.template_posts)
+        self.assertEqual([saved['body']], run.site.templates)
+        self.assertEqual([], run.errors)
+
     def test_hosted_request_contract_retains_multiplicity(self):
         from main_load_hosted import assert_script_requests, assert_account_requests
         baseline = [('GET', '/worklist/hpacs-lite/auth.js', '')]
         candidate = baseline + [('GET', '/worklist/hpacs-lite/'+name, '')
                                 for name in ('main-split.bundle.js', 'worklist-folder-tree.js', 'study-panel.js', 'report-editor-frame.js',
-                                             'study-transfer-local.js', 'related-report-mode.js', 'multi-study-view.js')]
+                                             'study-transfer-local.js', 'related-report-mode.js', 'report-view-observation.js',
+                                             'multi-study-view.js')]
         assert_script_requests(baseline, candidate, landing=True)
         for bad in (candidate[:-1], candidate+[candidate[-1]], candidate+[('GET','/extra.js','')]):
             with self.assertRaises(AssertionError):

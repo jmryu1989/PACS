@@ -14,6 +14,7 @@ const { FailureJournal, FailureSpool } = require(path.join(build, 'emr-runtime/f
 const { verifyRuntimeConnection } = require(path.join(build, 'emr-runtime/manifest.js'));
 const { EMR_BACKGROUND_WORK } = require(path.join(build, 'emr-runtime/background-work.js'));
 const { StudyTransferLocalService } = require(path.join(build, 'study-transfer-local.service.js'));
+const { PresenceService } = require(path.join(build, 'presence.service.js'));
 const { provideAfterReceipt } = require(path.join(build, 'emr-runtime/contract.js'));
 const { createRequestContext, REQUEST_CONTEXT_CAPTURE, REQUEST_CONTEXT_SOURCE } = require(path.join(build, 'emr-runtime/request-context.js'));
 const { createRequestIngress } = require(path.join(build, 'emr-runtime/request-ingress.js'));
@@ -292,7 +293,7 @@ async function clinicalHttp() {
     class ClinicalFixture {}
     // Only external collaborators are synthetic. Both routes, the draft/CAS
     // implementation, auth/rights checks and PostgreSQL are the actual product.
-    Module({controllers:[PacsController,AdminController],providers:[...requestProviders(runtime.port),PrismaService,PacsService,AuthService,AdminService,AdminAccessReview,
+    Module({controllers:[PacsController,AdminController],providers:[...requestProviders(runtime.port),PrismaService,PacsService,AuthService,PresenceService,AdminService,AdminAccessReview,
       {provide:OrthancService,useValue:orthanc},{provide:KeycloakService,useValue:{}},
       {provide:FindingService,useValue:{}},
       {provide:StudyAccessService,useFactory:db=>new StudyAccessService(db,orthanc,{}),inject:[PrismaService]},
@@ -501,6 +502,7 @@ async function authFailure() {
   const { EmrRuntime } = require(path.join(build, 'emr-runtime/application.js'));
   const { EMR_RECORD_PORT } = require(path.join(build, 'emr-runtime/record-port.js'));
   const { PrismaService } = require(path.join(build, 'prisma.service.js'));
+  const { StudyAccessService } = require(path.join(build, 'study-access.service.js'));
   const { KeycloakService } = require(path.join(build, 'keycloak.service.js'));
   process.env.KC_ISSUER = 'https://synthetic.invalid/realms/b2r';
   process.env.KIN_COOKIE_SECRET = randomUUID();
@@ -521,10 +523,12 @@ async function authFailure() {
   let app, faultInstalled = false;
   async function start(AuthType) {
     class AuthFixture {}
-    Module({ controllers: [AuthController], providers: [PrismaService, KeycloakService,
+    Module({ controllers: [AuthController], providers: [PrismaService, KeycloakService, PresenceService,
+      { provide: StudyAccessService, useFactory: prisma => new StudyAccessService(prisma, {}, {}), inject: [PrismaService] },
       { provide: AuthService, useClass: AuthType }, { provide: EMR_RECORD_PORT, useValue: runtime.port },
       { provide: EMR_BACKGROUND_WORK, useValue: runtime.background.work }] })(AuthFixture);
-    app = await NestFactory.create(AuthFixture, { logger: false });
+    // Surface DI errors to the test runner even while routine Nest logs are disabled.
+    app = await NestFactory.create(AuthFixture, { logger: false, abortOnError: false });
     await app.listen(0, '127.0.0.1');
     return await app.getUrl();
   }
@@ -608,6 +612,7 @@ async function authSuccess(endings = false) {
   const { EmrRuntime } = require(path.join(build, 'emr-runtime/application.js'));
   const { EMR_RECORD_PORT } = require(path.join(build, 'emr-runtime/record-port.js'));
   const { PrismaService } = require(path.join(build, 'prisma.service.js'));
+  const { StudyAccessService } = require(path.join(build, 'study-access.service.js'));
   const { KeycloakService } = require(path.join(build, 'keycloak.service.js'));
   const issuer = 'https://synthetic.invalid/realms/b2r';
   Object.assign(process.env, { KC_ISSUER: issuer, KC_AUDIENCE: 'kin-api', KIN_COOKIE_SECRET: randomUUID(),
@@ -658,10 +663,12 @@ async function authSuccess(endings = false) {
   let sweepCallback;
   async function start(AuthType) {
     class AuthFixture {}
-    Module({ controllers: [AuthController], providers: [...requestProviders(observedPort), PrismaService, KeycloakService,
+    Module({ controllers: [AuthController], providers: [...requestProviders(observedPort), PrismaService, KeycloakService, PresenceService,
+      { provide: StudyAccessService, useFactory: prisma => new StudyAccessService(prisma, {}, {}), inject: [PrismaService] },
       { provide: AuthService, useClass: AuthType }, { provide: EMR_RECORD_PORT, useValue: observedPort },
       { provide: EMR_BACKGROUND_WORK, useValue: runtime.background.work }, {provide: APP_GUARD, useClass: AuthGuard}] })(AuthFixture);
-    app = await NestFactory.create(AuthFixture, { logger: false });
+    // Surface DI errors to the test runner even while routine Nest logs are disabled.
+    app = await NestFactory.create(AuthFixture, { logger: false, abortOnError: false });
     app.setGlobalPrefix('api');
     const interval = global.setInterval;
     global.setInterval = (callback, delay, ...args) => {

@@ -91,8 +91,8 @@
       // "지금 누구로 보고 있는지"를 모르면 필터가 되는지 안 되는지도 알 수 없다.
       // `roleText`를 기준으로 다시 쓴다 — 재연결마다 앞에 덧붙으면 줄이 길어진다.
       $("#roles").textContent = `${myInstitutionName} · ${roleText}`;
-      // 미배정 통로는 관리자에게만. 평소엔 0건이라 숨어 있어야 맞다.
-      $("#m-unassigned").style.display = KinAuth.has("admin") ? "" : "none";
+      // D1882 수신 보류 알림은 관리자에게만, 보류가 있을 때만 보인다. 평소엔 0건이라 숨어 있어야 맞다.
+      void showHeldSources();
       startPolling();
       // 연결이 되살아났다: 앞서 실패해 멈춘 검사도 한 번 다시 보낸다(같은 거절이면 한 번 알리고 다시 멈춘다).
       reportSaveFailures.clear();
@@ -106,6 +106,7 @@
     function goOffline(e) {
       reportPreview.close();
       serverMode = false; offline = true;
+      stopViewing();
       folderLoadState = 'unknown'; filterCollection = null; ++filterReadSequence; ++sharedFilterReadSequence;
       updateWorklistFolders(); shortcutStatus('서버에 연결한 뒤 바로가기를 불러오세요.');
       // 녹음 중이던 받아쓰기는 여기서 멈춘다(보낼 곳이 없다). 받아 둔 글은 Insert가 거절한다.
@@ -160,65 +161,26 @@
     let roleText = "";
 
     /**
-     * 미배정 검사 목록 (관리자).
+     * D1882 수신 보류 알림 (관리자).
      *
-     * 기관을 못 알아본 검사는 어느 워크리스트에도 안 뜬다. 그건 의도한 설계지만,
-     * **보이는 곳이 하나도 없으면 영영 고아로 남는다.** 장비 태그 오타 하나로
-     * 영상이 들어와 있는데 아무도 모르고, 아무도 모르니 아무도 안 고친다.
+     * 보낸 병원을 모르는 검사는 보류되어 아무도 열지 못하고 어느 워크리스트에도 없다. 그래도 **아무도 모르면 영영
+     * 보류로 남는다.** 그래서 관리자에게 건수만 알리고, 장비·기관명 원문 확인과 등록은 관리 화면(Held Studies)에서 한다.
+     * 이 알림은 환자·검사 정보를 싣지 않으며, 못 읽으면 숨긴 채 다음 연결 때 다시 묻는다.
      */
-    async function showUnassigned() {
-      const box = $("#un-body");
-      $("#unmodal").classList.add("show");
-      box.innerHTML = "<div style='color:#667;padding:10px'>불러오는 중…</div>";
+    async function showHeldSources() {
+      const item = $("#m-held");
+      item.style.display = "none";
+      if (!KinAuth.has("admin")) return;
       const at = work.capture("document");
       try {
-        const r = await api("GET", "/unassigned", undefined, undefined, at);
-        if (!work.admits(at)) return;
-        if (!r.studies.length) {
-          box.innerHTML = "<div style='color:#4ac06a;padding:10px'>미배정 검사가 없습니다.</div>";
-          return;
-        }
-        const opts = r.institutions.map(i => `<option value="${esc(i.id)}">${esc(i.name)}</option>`).join("");
-        box.innerHTML = r.studies.map(s => `
-          <div class="ver">
-            <div class="vh">
-              <b>${esc(s.name || "(이름 없음)")}</b>
-              <span>${esc(s.id)}</span>
-              <span style="color:#667">${esc(fmtD(s.date))} · ${esc(s.desc)}</span>
-            </div>
-            <div class="vr">DICOM 기관명: ${s.dicomInstitution ? `"${esc(s.dicomInstitution)}"` : "(비어 있음)"}</div>
-            <div style="display:flex;gap:6px;align-items:center;padding:4px 0">
-              <select data-uid="${esc(s.uid)}" class="un-sel"
-                      style="background:#14181f;color:#cdd3dc;border:1px solid #3a4356;padding:3px 6px;font:inherit">${opts}</select>
-              <button class="un-go" data-uid="${esc(s.uid)}"
-                      style="background:#3b6ea5;color:#fff;border:1px solid #3b6ea5;padding:3px 12px;border-radius:3px;cursor:pointer;font-size:11px">배정</button>
-            </div>
-          </div>`).join("");
-      } catch (e) {
-        work.commit(at, () => { box.innerHTML = `<div style="color:#ff8080;padding:10px">${esc(e.message)}</div>`; });
-      }
+        const r = await api("GET", "/admin/held-sources", undefined, undefined, at);
+        const count = Array.isArray(r?.groups) ? r.groups.reduce((n, g) => n + (Number.isInteger(g?.count) ? g.count : 0), 0) : 0;
+        work.commit(at, () => {
+          item.textContent = `⚠ Held Studies ${count}`;
+          item.style.display = count ? "" : "none";
+        });
+      } catch (e) { /* 알림은 보조 신호다: 실패는 숨긴 채 다음 연결 때 다시 묻는다 */ }
     }
-    $("#un-body").addEventListener("click", async e => {
-      const btn = e.target.closest(".un-go"); if (!btn) return;
-      const uid = btn.dataset.uid;
-      const sel = $(`.un-sel[data-uid="${CSS.escape(uid)}"]`);
-      const name = sel.options[sel.selectedIndex].textContent;
-      if (!confirm(`이 검사를 "${name}"에 배정합니다.\n배정하면 그 기관의 워크리스트에 나타납니다. 계속할까요?`)) return;
-      btn.disabled = true;
-      const at = work.capture("document");
-      try {
-        await api("POST", `/studies/${encodeURIComponent(uid)}/assign`, { institutionId: sel.value }, undefined, at);
-        if (!work.commit(at, () => toast(`"${name}"에 배정했습니다`, "ok"))) return;
-        await showUnassigned();
-        await load();
-      } catch (err) {
-        // 이 배정이 잠근 단추는 이 배정이 푼다(자기 것만).
-        btn.disabled = false;
-        work.commit(at, () => toast("배정 실패: " + err.message, "err"));
-      }
-    });
-    $("#m-unassigned").addEventListener("click", showUnassigned);
-    $("#un-close").addEventListener("click", () => $("#unmodal").classList.remove("show"));
 
     // 세션 상세(S5-UI1): 헤더의 #user·#roles는 한 줄로 말줄임될 수 있다. 전체 문구를 단추의 툴팁과 Session details에
     // 옮겨 적는다. 두 칸을 쓰는 곳이 셋(boot·applyRoleUi·goOnline)이라 그 자리마다 부르지 않고 글자가 바뀔 때 따라 적는다 —

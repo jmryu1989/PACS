@@ -12,7 +12,7 @@ jobs:
     needs: select
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['emr-b']) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 210
+    timeout-minutes: 251
     env:
       NODE_OPTIONS: --max-old-space-size=3072
       KIN_EMR_PYTHON: python3
@@ -172,6 +172,8 @@ jobs:
     - name: TypeScript for the report harness fixture projection
       timeout-minutes: 5
       run: npm ci --prefix api --ignore-scripts --no-audit --no-fund
+    - name: Keycloak institution roster continuation
+      run: node --test tests/keycloak_member_paging_test.cjs
     - name: CI registry and exact suite selection (once)
       if: ${{ fromJSON(steps.paths.outputs.jobs)['ci-selfchecks'] }}
       run: |
@@ -242,6 +244,8 @@ jobs:
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_prior_test.cjs
     - name: W9 multi-study composition, selection generation and viewer channel model
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/multi_study_view_test.cjs tests/worklist_selection_test.cjs
+    - name: D1890 encrypted preload store, crypto, worker and viewer opening check
+      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/preload_store_test.cjs tests/preload_disk_test.cjs tests/preload_worker_test.cjs tests/viewer_preload_test.cjs
     - name: Compound search operators and malformed condition boundaries
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/compound_filter_test.cjs tests/worklist_alerts_test.cjs tests/worklist_refresh_test.cjs tests/worklist_startup_test.cjs tests/related_parts_test.cjs tests/worklist_body_parts_test.cjs tests/study_priority_test.cjs tests/worklist_search_test.cjs
     - name: Worklist column visibility and account storage model
@@ -261,7 +265,7 @@ jobs:
     - name: SR source tree identity and bounded literal values
       run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/sr_tree_test.cjs
     - name: Pinned viewer precision and isolated stack method boundaries
-      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_precision_test.cjs tests/viewer_frame_metadata_test.cjs tests/viewer_reference_lines_test.cjs
+      run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_precision_test.cjs tests/viewer_frame_metadata_test.cjs tests/viewer_reference_lines_test.cjs tests/viewer_stack_loading_test.cjs
     - name: Deployment preflight refusal and shared lock
       run: python3 tests/ops_deploy_preflight_test.py
     - name: Deployment state machine and retained operations lock
@@ -300,6 +304,8 @@ jobs:
         docker run --rm --network none --read-only --user nginx --entrypoint sh kin-proxy:ci -c 'test -r /usr/share/nginx/html/kin-brand/kin-favicon-32.png && test -r /usr/share/nginx/html/kin-brand/kin-emblem-j1.svg && test -r /etc/nginx/templates/default.conf.template'
     - name: Reproduce a private deployment checkout
       run: chmod -R go-rwx api
+    - name: Viewer stack mouse and strip failure boundaries
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/viewer-stack-mouse --cwd . --file config/ohif.js --file config/ohif/viewer-ux.js --file tests/viewer_stack_mouse_test.cjs --file tests/viewer_strip_failure_test.cjs --file worklist-v0/hpacs-lite/viewer-patient-tabs.js --file worklist-v0/hpacs-lite/viewer-series-strip.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_stack_mouse_test.cjs tests/viewer_strip_failure_test.cjs
     - name: OHIF generated configuration matches ordered sources
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/ohif-config-check --cwd . --file scripts/build-ohif-config.py --tree config/ohif --file config/ohif.js -- python3 scripts/build-ohif-config.py --check
     - name: OHIF builder byte and stale-output boundaries
@@ -317,7 +323,7 @@ jobs:
         KIN_TEST_API_IMAGE: kin-api:ci
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/findings-migration --cwd . --file api/prisma/migrations/20260917120000_findings/migration.sql --file api/prisma/migrations/20260920120000_report_citations/migration.sql --file api/src/pacs.service.ts --file api/src/pacs/values.ts --file api/src/pacs/access.ts --file api/src/pacs/institutions.ts --file api/src/study-source-groups.ts --file api/src/pacs/worklist.ts --file api/src/pacs/dicom-gateway.ts --file api/src/pacs/preferences.ts --file api/src/pacs/filters.ts --file api/src/pacs/study-state.ts --file api/src/pacs/tech-note.ts --file api/src/pacs/report-draft.ts --file api/src/pacs/report-evidence.ts --file api/src/pacs/report-commit.ts --file api/src/pacs/hold.ts --file api/src/pacs/clinician.ts --file api/src/pacs/audit.ts --file api/src/pacs/metrics.ts --file tests/ops_product_transfer_fixture.py --file tests/viewer_migration_test.py --file api/src/worklist-columns.ts --file api/prisma/migrations/20260930120000_audit_log_append_only/migration.sql --file scripts/ops_backup.py --file scripts/ops_export_inventory.py --file scripts/emr-compose.py --file tests/ops_combined_transfer_fixture.py --file tests/ops_database_transfer_fixture.py --file tests/ops_image_transfer_fixture.py --file tests/ops_orthanc_transfer_fixture.py --file tests/ops_orthanc_transfer_worker.py --file tests/ops_product_transfer_worker.py -- python3 -B tests/viewer_migration_test.py ViewerMigration.test_findings_additive_restrict_owner_key_and_failed_ddl ViewerMigration.test_findings_action_check_survives_pg_dump_restore ViewerMigration.test_report_citations_additive_nullable_bounded_and_named ViewerMigration.test_report_citations_runtime_check_translation_and_draft_lock ViewerMigration.test_03_real_dump_restore_every_row_revision_replay_budget_and_fk
     - name: Compiled viewer input, Unicode and original-plane validation
-      run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" -v "$PWD/config:/config:ro" --entrypoint node kin-api:ci --test /tests/viewer_input_test.cjs /tests/mg_length_test.cjs
+      run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" -v "$PWD/config:/config:ro" --entrypoint node kin-api:ci --test /tests/viewer_input_test.cjs /tests/mg_length_test.cjs /tests/viewer_study_search_test.cjs
     - name: Compiled finding input allow-list, fingerprint and copied provenance
       run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/finding_input_test.cjs
     - name: D-MEASURE2 source failures, safe warnings and real read deadlines
@@ -389,6 +395,7 @@ jobs:
         done
         python3 -c 'import sys; sys.path.insert(0, "tests"); from ops_product_transfer_fixture import provision; provision(sys.argv[1])' "$db"
         python3 scripts/record-run.py --run-dir tmp/runtime-ci/tech-note-attempt --cwd . --file api/src/pacs.service.ts --file api/src/pacs/values.ts --file api/src/pacs/access.ts --file api/src/pacs/institutions.ts --file api/src/study-source-groups.ts --file api/src/pacs/worklist.ts --file api/src/pacs/dicom-gateway.ts --file api/src/pacs/preferences.ts --file api/src/pacs/filters.ts --file api/src/pacs/study-state.ts --file api/src/pacs/tech-note.ts --file api/src/pacs/report-draft.ts --file api/src/pacs/report-evidence.ts --file api/src/pacs/report-commit.ts --file api/src/pacs/hold.ts --file api/src/pacs/clinician.ts --file api/src/pacs/audit.ts --file api/src/pacs/metrics.ts --file api/src/pacs.controller.ts --file api/src/study-access.service.ts --file api/src/admin-audit.ts --file api/prisma/schema.prisma --file api/prisma/migrations/20261006000000_tech_note_attempt_id/migration.sql --file tests/tech_note_attempt_service_test.cjs --file tests/ops_product_transfer_fixture.py --file scripts/emr-compose.py -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_TECH_NOTE_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_tech_note_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/tech_note_attempt_service_test.cjs
+        python3 scripts/record-run.py --run-dir tmp/runtime-ci/caution-app-database --cwd . --tree api/prisma --file tests/caution_app_database_test.cjs -- timeout 180 docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_CAUTION_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_tech_note_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/caution_app_database_test.cjs
     - name: Build the development target for the TypeScript-parser source check
       run: docker build --target development -t kin-api:dev-ci api
     - name: S7-U1a critical result sources read the report only through ReportVersion rows
@@ -419,7 +426,7 @@ jobs:
     - name: S9-U4b compiled minimal Part-10 reader over the D1172 allow-list and refusal vectors
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/s9-u4b-part10-reader --cwd . --file api/src/dicom-part10-reader.ts --file tests/dicom_part10_reader_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/dicom_part10_reader_test.cjs
     - name: S9-U4b compiled whole-original archive manifest, ZIP32 plan and streaming writer
-      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/s9-u4b-original-archive --cwd . --file api/src/original-archive.ts --file tests/original_archive_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/original_archive_test.cjs
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/s9-u4b-original-archive --cwd . --file api/src/original-archive.ts --file tests/original_archive_test.cjs -- docker run --rm --network none --read-only --tmpfs /tmp:rw,size=64m -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/original_archive_test.cjs
     - name: S9-U4b compiled import gate, import/download routes and raw parser over a recording store and a fake Orthanc
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/s9-u4b-transfer-server --cwd . --file api/src/dicom-import-gate.service.ts --file api/src/study-transfer-local.controller.ts --file api/src/study-transfer-local.service.ts --file api/src/study-transfer-local-parser.ts --file api/src/dicom-part10-reader.ts --file api/src/original-archive.ts --file api/src/study-access.service.ts --file api/src/study-access-policy.ts --file api/src/pacs/access.ts --file api/src/pacs/values.ts --file api/src/member-rights.ts --file api/src/clinician-policy.ts --file api/src/study-identity.ts --file api/src/order-reconciliation.ts --file api/src/prisma.service.ts --file api/src/orthanc.service.ts --file api/src/keycloak.service.ts --file api/src/viewer-source-warning.ts --file api/prisma/schema.prisma --file api/src/auth.guard.ts --file api/src/auth.service.ts --file api/src/study-source-groups.ts --file tests/study_transfer_local_server_test.cjs --file tests/service_test_loader.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/study_transfer_local_server_test.cjs
     - name: S5-U6b compiled admin metrics rows and route over a fake store, and the page model that reads them
@@ -438,6 +445,10 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/dictation-host --cwd . --file worklist-v0/hpacs-lite/dictation.js --file worklist-v0/hpacs-lite/dictation-session.js --file worklist-v0/hpacs-lite/dictation-capture.js --file tests/dictation_host_test.cjs --file tests/module_session_harness.cjs --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/dictation_host_test.cjs
     - name: Compiled volume job command and volume mark boundary models
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/volume-api-models --cwd . --file tests/viewer_volume_job_test.cjs --file tests/viewer_volume_marks_test.cjs --file tests/study_query_scope_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_volume_job_test.cjs /tests/viewer_volume_marks_test.cjs /tests/study_query_scope_test.cjs
+    - name: Spaced original-frame measurements and verified SR readback
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/planar-measurements --cwd . --tree api/src --tree config/ohif --file tests/planar_measurement_test.cjs --file tests/mg_length_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src --entrypoint node kin-api:ci --test tests/planar_measurement_test.cjs tests/mg_length_test.cjs
+    - name: Compiled study page cursor and password action callback
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/page-cursor-password-callback --cwd . --file api/src/study-page.ts --file api/src/auth.service.ts --file api/src/auth.controller.ts --file tests/study_page_test.cjs --file tests/auth_password_callback_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/study_page_test.cjs /tests/auth_password_callback_test.cjs
     - name: Observe an isolated real restart loop
       run: python3 tests/ops_monitor_container_test.py
     - name: Production image migration, startup and refusal checks
@@ -516,7 +527,7 @@ jobs:
         retention-days: 7
   asr-engine:
     runs-on: ubuntu-24.04
-    timeout-minutes: 85
+    timeout-minutes: 115
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -761,7 +772,7 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/typecheck --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json -- api/node_modules/.bin/tsc --noEmit -p api
     - name: D contracts and C01-C56 model selection (C52 explicitly deferred to R2 DOM)
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
-      run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/contract --cwd . --tree api/src/emr-clinical --tree api/src/emr-contract --file tests/emr/d/contract_test.cjs --file api/tsconfig.json --file api/package-lock.json -- docker run --rm --network none --read-only --tmpfs /tmp -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/emr/d/contract_test.cjs
+      run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/contract --cwd . --tree api/src/emr-clinical --tree api/src/emr-contract --file api/src/finding.controller.ts --file api/src/finding.service.ts --file tests/emr/d/contract_test.cjs --file tests/emr/d/finding_api_regression_test.cjs --file api/tsconfig.json --file api/package-lock.json -- docker run --rm --network none --read-only --tmpfs /tmp -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/emr/d/contract_test.cjs tests/emr/d/finding_api_regression_test.cjs
     - name: Keep pinned browser dependencies independent of unused Chrome APT repository
       run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
     - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809
@@ -824,7 +835,17 @@ jobs:
         node api/node_modules/typescript/bin/tsc -p api/tsconfig.json --incremental false
         export KIN_B2R_NODE="$(command -v node)"
         export KIN_B2R_PRISMA_CLI="$PWD/api/node_modules/prisma/build/index.js"
-        python3 scripts/record-run.py --run-dir tmp/emr-e-ci/online-pg --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --tree api/src/emr-contract --tree tests/emr/e --tree api/prisma --file api/src/connect.controller.ts --file api/src/app.module.ts --file api/src/orthanc.service.ts --file emr/units/e.json --file tests/emr/b/pg_ledger_restore_test.py -- python3 -B scripts/run-tests.py --module tests/emr/e/online_live.py --class OnlineImagePg --mode live --unit emr-e-online --timeout 600
+        python3 scripts/record-run.py --run-dir tmp/emr-e-ci/online-pg --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --tree api/src/emr-contract --tree tests/emr/e --tree api/prisma --file api/src/connect.controller.ts --file api/src/app.module.ts --file api/src/image-delivery-record.ts --file api/src/orthanc.service.ts --file emr/units/e.json --file tests/emr/b/pg_ledger_restore_test.py -- python3 -B scripts/run-tests.py --module tests/emr/e/online_live.py --class OnlineImagePg --mode live --unit emr-e-online --timeout 600
+    - name: E_ROUTE one study manifest serves its frame requests (compiled by the previous step)
+      run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/manifest-reuse --cwd . --tree api/src/emr-image --tree api/src/emr-contract --file api/src/image-delivery-record.ts --file tests/emr/e/manifest_reuse_test.cjs -- node --test --test-reporter=tap tests/emr/e/manifest_reuse_test.cjs
+    - name: E_ROUTE frames share the study delivery record of every image route; a HEAD or a description records nothing (compiled above)
+      run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/delivery --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --file api/src/image-delivery-record.ts --file api/src/image-relay.controller.ts --file api/src/orthanc.service.ts --file tests/emr/e/delivery_test.cjs -- node --test --test-reporter=tap tests/emr/e/delivery_test.cjs
+    - name: E_ROUTE a split study UID refuses the response; a refused row is retained on its own ledger transaction or kept for a later retention (compiled above)
+      run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/service-retention --cwd . --tree api/src/emr-image --tree api/src/emr-runtime --file api/src/image-delivery-record.ts --file api/src/orthanc.service.ts --file tests/emr/e/service_retention_test.cjs -- node --test --test-reporter=tap tests/emr/e/service_retention_test.cjs
+    - name: E_ROUTE viewer frame requests reach the E boundary through the real nginx configuration
+      run: |
+        command -v nginx >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq nginx; }
+        python3 scripts/record-run.py --run-dir tmp/emr-e-ci/nginx-route --cwd . --file proxy/nginx.conf.template --file proxy/15-kin-config.envsh --file tests/proxy_grant_log_test.py --file tests/proxy_image_route_test.py -- python3 -B tests/proxy_image_route_test.py
     - name: Raw run evidence
       if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -928,7 +949,7 @@ jobs:
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['contract']) }}
   hanging-protocols:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 93
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -993,7 +1014,7 @@ jobs:
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['hanging-protocols']) }}
   part1-mg:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 155
     env:
       PART1_UNIT: mg
       KIN_MG_CI_SCOPE: hosted
@@ -1140,7 +1161,7 @@ jobs:
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['part1-mg']) }}
   part1-xa:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 140
     env:
       PART1_UNIT: xa
       TARGET_SHA: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
@@ -1359,7 +1380,7 @@ jobs:
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['part1-xa']) }}
   volume-marks:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 68
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -1388,6 +1409,9 @@ jobs:
     - name: Armed 3D annotation pick is not previewed by progressive refinement on the real panel
       timeout-minutes: 5
       run: python3 scripts/record-run.py --run-dir tmp/marks-ci/progressive-dom --cwd . --file worklist-v0/hpacs-lite/volume-marks.js --file worklist-v0/hpacs-lite/viewer-volume-marks.js --file worklist-v0/hpacs-lite/viewer-volume-progressive.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file tests/viewer_volume_marks_progressive_dom_test.py -- "$RUNNER_TEMP/marks-python/bin/python" -B tests/viewer_volume_marks_progressive_dom_test.py
+    - name: Manual 3D annotations follow the account marker colour and thickness on the real panel
+      timeout-minutes: 5
+      run: python3 scripts/record-run.py --run-dir tmp/marks-ci/marker-style-dom --cwd . --file worklist-v0/hpacs-lite/volume-marks.js --file worklist-v0/hpacs-lite/viewer-volume-marks.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/marker-style.js --file tests/viewer_volume_marks_progressive_dom_test.py --file tests/viewer_volume_marks_style_dom_test.py -- "$RUNNER_TEMP/marks-python/bin/python" -B tests/viewer_volume_marks_style_dom_test.py
     - name: Isolated declared manual 3D annotation and annotated output tests
       timeout-minutes: 28
       run: |
@@ -1406,7 +1430,7 @@ jobs:
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-marks']) }}
   volume-rendering:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 61
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -1490,6 +1514,9 @@ jobs:
     - name: W4 shortcut v2 server contract
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w4-shortcut-v2-server --cwd . --tree api/src --file api/prisma/schema.prisma --file api/package-lock.json --tree worklist-v0/hpacs-lite --tree tests -- node --test tests/workspace_shortcuts_v2_service_test.cjs
+    - name: Minhoon 12 marker colour and thickness model and account appearance contract
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/marker-style --cwd . --tree api/src --file api/prisma/schema.prisma --file api/package-lock.json --file worklist-v0/hpacs-lite/marker-style.js --file config/ohif/marker-style.js --file config/ohif/clinician-context.js --file tests/marker_style_test.cjs --file tests/service_test_loader.cjs -- node --test tests/marker_style_test.cjs
     - name: W5 related insert idempotency and receipt contract
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w5-related-insert-service --cwd . --tree api/src --file api/prisma/schema.prisma --file api/prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/related_report_insert_service_test.cjs -- node --test tests/related_report_insert_service_test.cjs
@@ -1499,6 +1526,15 @@ jobs:
     - name: W9 viewing-set resolve and access-event contract
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w9-viewing-set-service --cwd . --tree api/src --file api/prisma/schema.prisma --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/multi_study_view_service_test.cjs -- node --test tests/multi_study_view_service_test.cjs
+    - name: MG-08 study image delivery record on the relayed image reads
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/mg08-image-delivery-record --cwd . --tree api/src --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/image_delivery_record_test.cjs -- node --test tests/image_delivery_record_test.cjs
+    - name: D1890 session-bound preload key issue and retirement
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/preload-key --cwd . --tree api/src --file api/prisma/schema.prisma --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/preload_key_route_test.cjs -- node --test tests/preload_key_route_test.cjs
+    - name: MG-LOADING frame range reader contract
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/mg-loading-frame-reader --cwd . --tree api/src --file api/package-lock.json --file tests/service_test_loader.cjs --file tests/dicom_frame_fixture.cjs --file tests/dicom_frame_test.cjs --file tests/dicom_frame_compressed_test.cjs --file tests/dicom_frame_delivery_test.cjs -- node --test tests/dicom_frame_test.cjs tests/dicom_frame_compressed_test.cjs tests/dicom_frame_delivery_test.cjs
     - name: Keep pinned browser dependencies independent of unused Chrome APT repository
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: |
@@ -1523,10 +1559,10 @@ jobs:
       run: git fetch --no-tags --depth=1 origin f1d540626aac03f46de23a9620d69f4c9da66037 0261b1c834c4d5ff5c610185b17a40763985097b 7bccdb614c6582b2a718c493cfb5cff6600629b9
     - name: W2 served folder search, dates, counts and account shortcuts
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
-      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/worklist-folders --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-editor-frame.js --file worklist-v0/hpacs-lite/compound-filter.js --file worklist-v0/hpacs-lite/related-parts.js --file worklist-v0/hpacs-lite/worklist-body-parts.js --file worklist-v0/hpacs-lite/saved-filter-manager.js --file tests/worklist_body_parts_dom_test.py --file tests/module_session_harness.py --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/main-split.bundle.js --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file .gitattributes --file worklist-v0/hpacs-lite/page-core.js --file worklist-v0/hpacs-lite/study-state.js --file worklist-v0/hpacs-lite/order-list-store.js --file worklist-v0/hpacs-lite/report-templates.js --file worklist-v0/hpacs-lite/report-dictation.js --file worklist-v0/hpacs-lite/report-templates-ui.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/sr-reader.js --file worklist-v0/hpacs-lite/current-study.js --file worklist-v0/hpacs-lite/study-info-panel.js --file worklist-v0/hpacs-lite/related-studies.js --file worklist-v0/hpacs-lite/study-thumbnails.js --file worklist-v0/hpacs-lite/order-list.js --file worklist-v0/hpacs-lite/study-image-requests.js --file worklist-v0/hpacs-lite/study-corrections.js --file worklist-v0/hpacs-lite/related-report.js --file worklist-v0/hpacs-lite/report-editor.js --file worklist-v0/hpacs-lite/report-draft-sync.js --file worklist-v0/hpacs-lite/report-structure-pane.js --file worklist-v0/hpacs-lite/report-citation-pane.js --file worklist-v0/hpacs-lite/report-draft-save.js --file worklist-v0/hpacs-lite/report-commit.js --file worklist-v0/hpacs-lite/report-hold.js --file worklist-v0/hpacs-lite/work-exit.js --file worklist-v0/hpacs-lite/worklist-polling.js --file worklist-v0/hpacs-lite/report-history.js --file worklist-v0/hpacs-lite/report-toolbar.js --file worklist-v0/hpacs-lite/viewer-placement.js --file worklist-v0/hpacs-lite/viewer-launch.js --file worklist-v0/hpacs-lite/feature-mounts.js --file worklist-v0/hpacs-lite/clinical-context-panel.js --file worklist-v0/hpacs-lite/critical-result-mounts.js --file worklist-v0/hpacs-lite/study-questions.js --file worklist-v0/hpacs-lite/workspace-panels.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/worklist-row-events.js --file worklist-v0/hpacs-lite/telerad-request.js --file worklist-v0/hpacs-lite/context-menu.js --file worklist-v0/hpacs-lite/related-controls.js --file worklist-v0/hpacs-lite/session-end.js --file worklist-v0/hpacs-lite/page-boot.js --file worklist-v0/hpacs-lite/saved-filter-manager.css --file tests/page_source.py --file tests/page_source.cjs --file tests/main_move_spec.json --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file tests/main_split_harness.cjs --file tests/main_move_contract.cjs --file tests/worklist_folders_dom_test.py --file tests/auth_logout_dom_test.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/worklist_folders_dom_test.py
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/worklist-folders --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-editor-frame.js --file worklist-v0/hpacs-lite/compound-filter.js --file worklist-v0/hpacs-lite/related-parts.js --file worklist-v0/hpacs-lite/worklist-body-parts.js --file worklist-v0/hpacs-lite/saved-filter-manager.js --file tests/worklist_body_parts_dom_test.py --file tests/module_session_harness.py --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/main-split.bundle.js --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file .gitattributes --file worklist-v0/hpacs-lite/page-core.js --file worklist-v0/hpacs-lite/study-state.js --file worklist-v0/hpacs-lite/order-list-store.js --file worklist-v0/hpacs-lite/report-templates.js --file worklist-v0/hpacs-lite/report-dictation.js --file worklist-v0/hpacs-lite/report-templates-ui.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/sr-reader.js --file worklist-v0/hpacs-lite/current-study.js --file worklist-v0/hpacs-lite/study-info-panel.js --file worklist-v0/hpacs-lite/related-studies.js --file worklist-v0/hpacs-lite/study-thumbnails.js --file worklist-v0/hpacs-lite/order-list.js --file worklist-v0/hpacs-lite/study-image-requests.js --file worklist-v0/hpacs-lite/study-corrections.js --file worklist-v0/hpacs-lite/related-report.js --file worklist-v0/hpacs-lite/report-editor.js --file worklist-v0/hpacs-lite/report-draft-sync.js --file worklist-v0/hpacs-lite/report-structure-pane.js --file worklist-v0/hpacs-lite/report-citation-pane.js --file worklist-v0/hpacs-lite/report-draft-save.js --file worklist-v0/hpacs-lite/report-commit.js --file worklist-v0/hpacs-lite/report-hold.js --file worklist-v0/hpacs-lite/work-exit.js --file worklist-v0/hpacs-lite/worklist-polling.js --file worklist-v0/hpacs-lite/report-history.js --file worklist-v0/hpacs-lite/report-toolbar.js --file worklist-v0/hpacs-lite/viewer-placement.js --file worklist-v0/hpacs-lite/viewer-launch.js --file worklist-v0/hpacs-lite/feature-mounts.js --file worklist-v0/hpacs-lite/clinical-context-panel.js --file worklist-v0/hpacs-lite/critical-result-mounts.js --file worklist-v0/hpacs-lite/study-questions.js --file worklist-v0/hpacs-lite/workspace-panels.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/worklist-row-events.js --file worklist-v0/hpacs-lite/telerad-request.js --file worklist-v0/hpacs-lite/context-menu.js --file worklist-v0/hpacs-lite/related-controls.js --file worklist-v0/hpacs-lite/session-end.js --file worklist-v0/hpacs-lite/page-boot.js --file worklist-v0/hpacs-lite/saved-filter-manager.css --file tests/page_source.py --file tests/page_source.cjs --file tests/main_move_spec.json --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file tests/main_split_harness.cjs --file tests/main_move_contract.cjs --file tests/worklist_folders_dom_test.py --file tests/auth_logout_dom_test.py --file worklist-v0/hpacs-lite/preload-queue.js --file worklist-v0/hpacs-lite/preload-worker.js --file worklist-v0/hpacs-lite/preload-store.js --file worklist-v0/hpacs-lite/preload-disk.js --file worklist-v0/hpacs-lite/worklist-selection.js -- $RUNNER_TEMP/measurement-python/bin/python -B tests/worklist_folders_dom_test.py
     - name: Current source bundle event order and held-input behavior
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
-      run: KIN_SPLIT_PARENT=7bccdb614c6582b2a718c493cfb5cff6600629b9 KIN_PRE_TRACE_DIR="$PWD/tmp/workspace-ui-ci/main-split-landing-raw" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/main-split-landing --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-editor-frame.js --file worklist-v0/hpacs-lite/compound-filter.js --file worklist-v0/hpacs-lite/related-parts.js --file worklist-v0/hpacs-lite/worklist-body-parts.js --file worklist-v0/hpacs-lite/saved-filter-manager.js --file tests/worklist_body_parts_dom_test.py --file tests/module_session_harness.py --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/main-split.bundle.js --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file .gitattributes --file worklist-v0/hpacs-lite/page-core.js --file worklist-v0/hpacs-lite/study-state.js --file worklist-v0/hpacs-lite/order-list-store.js --file worklist-v0/hpacs-lite/report-templates.js --file worklist-v0/hpacs-lite/report-dictation.js --file worklist-v0/hpacs-lite/report-templates-ui.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/sr-reader.js --file worklist-v0/hpacs-lite/current-study.js --file worklist-v0/hpacs-lite/study-info-panel.js --file worklist-v0/hpacs-lite/related-studies.js --file worklist-v0/hpacs-lite/study-thumbnails.js --file worklist-v0/hpacs-lite/order-list.js --file worklist-v0/hpacs-lite/study-image-requests.js --file worklist-v0/hpacs-lite/study-corrections.js --file worklist-v0/hpacs-lite/related-report.js --file worklist-v0/hpacs-lite/report-editor.js --file worklist-v0/hpacs-lite/report-draft-sync.js --file worklist-v0/hpacs-lite/report-structure-pane.js --file worklist-v0/hpacs-lite/report-citation-pane.js --file worklist-v0/hpacs-lite/report-draft-save.js --file worklist-v0/hpacs-lite/report-commit.js --file worklist-v0/hpacs-lite/report-hold.js --file worklist-v0/hpacs-lite/work-exit.js --file worklist-v0/hpacs-lite/worklist-polling.js --file worklist-v0/hpacs-lite/report-history.js --file worklist-v0/hpacs-lite/report-toolbar.js --file worklist-v0/hpacs-lite/viewer-placement.js --file worklist-v0/hpacs-lite/viewer-launch.js --file worklist-v0/hpacs-lite/feature-mounts.js --file worklist-v0/hpacs-lite/clinical-context-panel.js --file worklist-v0/hpacs-lite/critical-result-mounts.js --file worklist-v0/hpacs-lite/study-questions.js --file worklist-v0/hpacs-lite/workspace-panels.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/worklist-row-events.js --file worklist-v0/hpacs-lite/telerad-request.js --file worklist-v0/hpacs-lite/context-menu.js --file worklist-v0/hpacs-lite/related-controls.js --file worklist-v0/hpacs-lite/session-end.js --file worklist-v0/hpacs-lite/page-boot.js --file worklist-v0/hpacs-lite/saved-filter-manager.css --file tests/page_source.py --file tests/page_source.cjs --file tests/main_move_spec.json --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file tests/main_split_harness.cjs --file tests/main_move_contract.cjs --file tests/main_split_landing_dom_test.py --file tests/main_early_input_dom_test.py --file tests/main_split_harness.py --file tests/main_load_hosted.py --file tests/main_split_harness_fixture.json --file api/package-lock.json --file tests/auth_logout_dom_test.py --file tests/live_test_gate.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/main_split_landing_dom_test.py
+      run: KIN_SPLIT_PARENT=7bccdb614c6582b2a718c493cfb5cff6600629b9 KIN_PRE_TRACE_DIR="$PWD/tmp/workspace-ui-ci/main-split-landing-raw" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/main-split-landing --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-editor-frame.js --file worklist-v0/hpacs-lite/compound-filter.js --file worklist-v0/hpacs-lite/related-parts.js --file worklist-v0/hpacs-lite/worklist-body-parts.js --file worklist-v0/hpacs-lite/saved-filter-manager.js --file tests/worklist_body_parts_dom_test.py --file tests/module_session_harness.py --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/main-split.bundle.js --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file .gitattributes --file worklist-v0/hpacs-lite/page-core.js --file worklist-v0/hpacs-lite/study-state.js --file worklist-v0/hpacs-lite/order-list-store.js --file worklist-v0/hpacs-lite/report-templates.js --file worklist-v0/hpacs-lite/report-dictation.js --file worklist-v0/hpacs-lite/report-templates-ui.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/sr-reader.js --file worklist-v0/hpacs-lite/current-study.js --file worklist-v0/hpacs-lite/study-info-panel.js --file worklist-v0/hpacs-lite/related-studies.js --file worklist-v0/hpacs-lite/study-thumbnails.js --file worklist-v0/hpacs-lite/order-list.js --file worklist-v0/hpacs-lite/study-image-requests.js --file worklist-v0/hpacs-lite/study-corrections.js --file worklist-v0/hpacs-lite/related-report.js --file worklist-v0/hpacs-lite/report-editor.js --file worklist-v0/hpacs-lite/report-draft-sync.js --file worklist-v0/hpacs-lite/report-structure-pane.js --file worklist-v0/hpacs-lite/report-citation-pane.js --file worklist-v0/hpacs-lite/report-draft-save.js --file worklist-v0/hpacs-lite/report-commit.js --file worklist-v0/hpacs-lite/report-hold.js --file worklist-v0/hpacs-lite/work-exit.js --file worklist-v0/hpacs-lite/worklist-polling.js --file worklist-v0/hpacs-lite/report-history.js --file worklist-v0/hpacs-lite/report-toolbar.js --file worklist-v0/hpacs-lite/viewer-placement.js --file worklist-v0/hpacs-lite/viewer-launch.js --file worklist-v0/hpacs-lite/feature-mounts.js --file worklist-v0/hpacs-lite/clinical-context-panel.js --file worklist-v0/hpacs-lite/critical-result-mounts.js --file worklist-v0/hpacs-lite/study-questions.js --file worklist-v0/hpacs-lite/workspace-panels.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/worklist-row-events.js --file worklist-v0/hpacs-lite/telerad-request.js --file worklist-v0/hpacs-lite/context-menu.js --file worklist-v0/hpacs-lite/related-controls.js --file worklist-v0/hpacs-lite/session-end.js --file worklist-v0/hpacs-lite/page-boot.js --file worklist-v0/hpacs-lite/saved-filter-manager.css --file tests/page_source.py --file tests/page_source.cjs --file tests/main_move_spec.json --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file tests/main_split_harness.cjs --file tests/main_move_contract.cjs --file tests/main_split_landing_dom_test.py --file tests/main_early_input_dom_test.py --file tests/main_split_harness.py --file tests/main_load_hosted.py --file tests/main_split_harness_fixture.json --file api/package-lock.json --file tests/auth_logout_dom_test.py --file tests/live_test_gate.py --file worklist-v0/hpacs-lite/preload-queue.js --file worklist-v0/hpacs-lite/preload-worker.js --file worklist-v0/hpacs-lite/preload-store.js --file worklist-v0/hpacs-lite/preload-disk.js --file worklist-v0/hpacs-lite/worklist-selection.js -- $RUNNER_TEMP/measurement-python/bin/python -B tests/main_split_landing_dom_test.py
     - name: W2 first-paint baseline for W3 layout
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: git fetch --no-tags --depth=1 origin 9d6984b1ba3af76f7522b1c6d6179c398c513b57
@@ -1536,14 +1572,14 @@ jobs:
     - name: W3 drawer relocation, layout v3, account recovery and W2 first paint
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 8
-      run: KIN_W3_PILOT_DIR="$PWD/tmp/workspace-ui-ci/w3-pilot" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w3-drawer-dom --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-editor-frame.js --file worklist-v0/hpacs-lite/compound-filter.js --file worklist-v0/hpacs-lite/related-parts.js --file worklist-v0/hpacs-lite/worklist-body-parts.js --file worklist-v0/hpacs-lite/saved-filter-manager.js --file tests/worklist_body_parts_dom_test.py --file tests/module_session_harness.py --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/main-split.bundle.js --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file .gitattributes --file worklist-v0/hpacs-lite/page-core.js --file worklist-v0/hpacs-lite/study-state.js --file worklist-v0/hpacs-lite/order-list-store.js --file worklist-v0/hpacs-lite/report-templates.js --file worklist-v0/hpacs-lite/report-dictation.js --file worklist-v0/hpacs-lite/report-templates-ui.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/sr-reader.js --file worklist-v0/hpacs-lite/current-study.js --file worklist-v0/hpacs-lite/study-info-panel.js --file worklist-v0/hpacs-lite/related-studies.js --file worklist-v0/hpacs-lite/study-thumbnails.js --file worklist-v0/hpacs-lite/order-list.js --file worklist-v0/hpacs-lite/study-image-requests.js --file worklist-v0/hpacs-lite/study-corrections.js --file worklist-v0/hpacs-lite/related-report.js --file worklist-v0/hpacs-lite/report-editor.js --file worklist-v0/hpacs-lite/report-draft-sync.js --file worklist-v0/hpacs-lite/report-structure-pane.js --file worklist-v0/hpacs-lite/report-citation-pane.js --file worklist-v0/hpacs-lite/report-draft-save.js --file worklist-v0/hpacs-lite/report-commit.js --file worklist-v0/hpacs-lite/report-hold.js --file worklist-v0/hpacs-lite/work-exit.js --file worklist-v0/hpacs-lite/worklist-polling.js --file worklist-v0/hpacs-lite/report-history.js --file worklist-v0/hpacs-lite/report-toolbar.js --file worklist-v0/hpacs-lite/viewer-placement.js --file worklist-v0/hpacs-lite/viewer-launch.js --file worklist-v0/hpacs-lite/feature-mounts.js --file worklist-v0/hpacs-lite/clinical-context-panel.js --file worklist-v0/hpacs-lite/critical-result-mounts.js --file worklist-v0/hpacs-lite/study-questions.js --file worklist-v0/hpacs-lite/workspace-panels.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/worklist-row-events.js --file worklist-v0/hpacs-lite/telerad-request.js --file worklist-v0/hpacs-lite/context-menu.js --file worklist-v0/hpacs-lite/related-controls.js --file worklist-v0/hpacs-lite/session-end.js --file worklist-v0/hpacs-lite/page-boot.js --file worklist-v0/hpacs-lite/saved-filter-manager.css --file tests/page_source.py --file tests/page_source.cjs --file tests/main_move_spec.json --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file tests/main_split_harness.cjs --file tests/main_move_contract.cjs --file tests/main_split_landing_dom_test.py --file tests/main_early_input_dom_test.py --file tests/main_split_harness.py --file tests/main_load_hosted.py --file tests/main_split_harness_fixture.json --file api/package-lock.json --file tests/auth_logout_dom_test.py --file tests/live_test_gate.py --file worklist-v0/hpacs-lite/study-panel.js --file worklist-v0/hpacs-lite/study-panel.css --file tests/study_panel_page_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/study_panel_page_dom_test.py -v
+      run: KIN_W3_PILOT_DIR="$PWD/tmp/workspace-ui-ci/w3-pilot" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w3-drawer-dom --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-editor-frame.js --file worklist-v0/hpacs-lite/compound-filter.js --file worklist-v0/hpacs-lite/related-parts.js --file worklist-v0/hpacs-lite/worklist-body-parts.js --file worklist-v0/hpacs-lite/saved-filter-manager.js --file tests/worklist_body_parts_dom_test.py --file tests/module_session_harness.py --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/main-split.bundle.js --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file .gitattributes --file worklist-v0/hpacs-lite/page-core.js --file worklist-v0/hpacs-lite/study-state.js --file worklist-v0/hpacs-lite/order-list-store.js --file worklist-v0/hpacs-lite/report-templates.js --file worklist-v0/hpacs-lite/report-dictation.js --file worklist-v0/hpacs-lite/report-templates-ui.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/sr-reader.js --file worklist-v0/hpacs-lite/current-study.js --file worklist-v0/hpacs-lite/study-info-panel.js --file worklist-v0/hpacs-lite/related-studies.js --file worklist-v0/hpacs-lite/study-thumbnails.js --file worklist-v0/hpacs-lite/order-list.js --file worklist-v0/hpacs-lite/study-image-requests.js --file worklist-v0/hpacs-lite/study-corrections.js --file worklist-v0/hpacs-lite/related-report.js --file worklist-v0/hpacs-lite/report-editor.js --file worklist-v0/hpacs-lite/report-draft-sync.js --file worklist-v0/hpacs-lite/report-structure-pane.js --file worklist-v0/hpacs-lite/report-citation-pane.js --file worklist-v0/hpacs-lite/report-draft-save.js --file worklist-v0/hpacs-lite/report-commit.js --file worklist-v0/hpacs-lite/report-hold.js --file worklist-v0/hpacs-lite/work-exit.js --file worklist-v0/hpacs-lite/worklist-polling.js --file worklist-v0/hpacs-lite/report-history.js --file worklist-v0/hpacs-lite/report-toolbar.js --file worklist-v0/hpacs-lite/viewer-placement.js --file worklist-v0/hpacs-lite/viewer-launch.js --file worklist-v0/hpacs-lite/feature-mounts.js --file worklist-v0/hpacs-lite/clinical-context-panel.js --file worklist-v0/hpacs-lite/critical-result-mounts.js --file worklist-v0/hpacs-lite/study-questions.js --file worklist-v0/hpacs-lite/workspace-panels.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/worklist-row-events.js --file worklist-v0/hpacs-lite/telerad-request.js --file worklist-v0/hpacs-lite/context-menu.js --file worklist-v0/hpacs-lite/related-controls.js --file worklist-v0/hpacs-lite/session-end.js --file worklist-v0/hpacs-lite/page-boot.js --file worklist-v0/hpacs-lite/saved-filter-manager.css --file tests/page_source.py --file tests/page_source.cjs --file tests/main_move_spec.json --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file tests/main_split_harness.cjs --file tests/main_move_contract.cjs --file tests/main_split_landing_dom_test.py --file tests/main_early_input_dom_test.py --file tests/main_split_harness.py --file tests/main_load_hosted.py --file tests/main_split_harness_fixture.json --file api/package-lock.json --file tests/auth_logout_dom_test.py --file tests/live_test_gate.py --file worklist-v0/hpacs-lite/study-panel.js --file worklist-v0/hpacs-lite/study-panel.css --file tests/study_panel_page_dom_test.py --file worklist-v0/hpacs-lite/preload-queue.js --file worklist-v0/hpacs-lite/preload-worker.js --file worklist-v0/hpacs-lite/preload-store.js --file worklist-v0/hpacs-lite/preload-disk.js --file worklist-v0/hpacs-lite/worklist-selection.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/study_panel_page_dom_test.py -v
     - name: Round 6 Study Panel baseline for the W3 size options
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: git fetch --no-tags --depth=1 origin ea2a0379cc3dc0482ee3887940f875fe34ce773c
     - name: W3 Study Panel size and Text Size options (pilot D1160)
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 12
-      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w3-panel-size-dom --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-editor-frame.js --file worklist-v0/hpacs-lite/compound-filter.js --file worklist-v0/hpacs-lite/related-parts.js --file worklist-v0/hpacs-lite/worklist-body-parts.js --file worklist-v0/hpacs-lite/saved-filter-manager.js --file tests/worklist_body_parts_dom_test.py --file tests/module_session_harness.py --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/main-split.bundle.js --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file .gitattributes --file worklist-v0/hpacs-lite/page-core.js --file worklist-v0/hpacs-lite/study-state.js --file worklist-v0/hpacs-lite/order-list-store.js --file worklist-v0/hpacs-lite/report-templates.js --file worklist-v0/hpacs-lite/report-dictation.js --file worklist-v0/hpacs-lite/report-templates-ui.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/sr-reader.js --file worklist-v0/hpacs-lite/current-study.js --file worklist-v0/hpacs-lite/study-info-panel.js --file worklist-v0/hpacs-lite/related-studies.js --file worklist-v0/hpacs-lite/study-thumbnails.js --file worklist-v0/hpacs-lite/order-list.js --file worklist-v0/hpacs-lite/study-image-requests.js --file worklist-v0/hpacs-lite/study-corrections.js --file worklist-v0/hpacs-lite/related-report.js --file worklist-v0/hpacs-lite/report-editor.js --file worklist-v0/hpacs-lite/report-draft-sync.js --file worklist-v0/hpacs-lite/report-structure-pane.js --file worklist-v0/hpacs-lite/report-citation-pane.js --file worklist-v0/hpacs-lite/report-draft-save.js --file worklist-v0/hpacs-lite/report-commit.js --file worklist-v0/hpacs-lite/report-hold.js --file worklist-v0/hpacs-lite/work-exit.js --file worklist-v0/hpacs-lite/worklist-polling.js --file worklist-v0/hpacs-lite/report-history.js --file worklist-v0/hpacs-lite/report-toolbar.js --file worklist-v0/hpacs-lite/viewer-placement.js --file worklist-v0/hpacs-lite/viewer-launch.js --file worklist-v0/hpacs-lite/feature-mounts.js --file worklist-v0/hpacs-lite/clinical-context-panel.js --file worklist-v0/hpacs-lite/critical-result-mounts.js --file worklist-v0/hpacs-lite/study-questions.js --file worklist-v0/hpacs-lite/workspace-panels.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/worklist-row-events.js --file worklist-v0/hpacs-lite/telerad-request.js --file worklist-v0/hpacs-lite/context-menu.js --file worklist-v0/hpacs-lite/related-controls.js --file worklist-v0/hpacs-lite/session-end.js --file worklist-v0/hpacs-lite/page-boot.js --file worklist-v0/hpacs-lite/saved-filter-manager.css --file tests/page_source.py --file tests/page_source.cjs --file tests/main_move_spec.json --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file tests/main_split_harness.cjs --file tests/main_move_contract.cjs --file tests/main_split_landing_dom_test.py --file tests/main_early_input_dom_test.py --file tests/main_split_harness.py --file tests/main_load_hosted.py --file tests/main_split_harness_fixture.json --file api/package-lock.json --file tests/auth_logout_dom_test.py --file tests/live_test_gate.py --file worklist-v0/hpacs-lite/study-panel.js --file worklist-v0/hpacs-lite/study-panel.css --file tests/study_panel_page_dom_test.py --file tests/study_panel_size_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/study_panel_size_dom_test.py -v
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w3-panel-size-dom --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-editor-frame.js --file worklist-v0/hpacs-lite/compound-filter.js --file worklist-v0/hpacs-lite/related-parts.js --file worklist-v0/hpacs-lite/worklist-body-parts.js --file worklist-v0/hpacs-lite/saved-filter-manager.js --file tests/worklist_body_parts_dom_test.py --file tests/module_session_harness.py --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/main-split.bundle.js --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file .gitattributes --file worklist-v0/hpacs-lite/page-core.js --file worklist-v0/hpacs-lite/study-state.js --file worklist-v0/hpacs-lite/order-list-store.js --file worklist-v0/hpacs-lite/report-templates.js --file worklist-v0/hpacs-lite/report-dictation.js --file worklist-v0/hpacs-lite/report-templates-ui.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/sr-reader.js --file worklist-v0/hpacs-lite/current-study.js --file worklist-v0/hpacs-lite/study-info-panel.js --file worklist-v0/hpacs-lite/related-studies.js --file worklist-v0/hpacs-lite/study-thumbnails.js --file worklist-v0/hpacs-lite/order-list.js --file worklist-v0/hpacs-lite/study-image-requests.js --file worklist-v0/hpacs-lite/study-corrections.js --file worklist-v0/hpacs-lite/related-report.js --file worklist-v0/hpacs-lite/report-editor.js --file worklist-v0/hpacs-lite/report-draft-sync.js --file worklist-v0/hpacs-lite/report-structure-pane.js --file worklist-v0/hpacs-lite/report-citation-pane.js --file worklist-v0/hpacs-lite/report-draft-save.js --file worklist-v0/hpacs-lite/report-commit.js --file worklist-v0/hpacs-lite/report-hold.js --file worklist-v0/hpacs-lite/work-exit.js --file worklist-v0/hpacs-lite/worklist-polling.js --file worklist-v0/hpacs-lite/report-history.js --file worklist-v0/hpacs-lite/report-toolbar.js --file worklist-v0/hpacs-lite/viewer-placement.js --file worklist-v0/hpacs-lite/viewer-launch.js --file worklist-v0/hpacs-lite/feature-mounts.js --file worklist-v0/hpacs-lite/clinical-context-panel.js --file worklist-v0/hpacs-lite/critical-result-mounts.js --file worklist-v0/hpacs-lite/study-questions.js --file worklist-v0/hpacs-lite/workspace-panels.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/worklist-row-events.js --file worklist-v0/hpacs-lite/telerad-request.js --file worklist-v0/hpacs-lite/context-menu.js --file worklist-v0/hpacs-lite/related-controls.js --file worklist-v0/hpacs-lite/session-end.js --file worklist-v0/hpacs-lite/page-boot.js --file worklist-v0/hpacs-lite/saved-filter-manager.css --file tests/page_source.py --file tests/page_source.cjs --file tests/main_move_spec.json --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file tests/main_split_harness.cjs --file tests/main_move_contract.cjs --file tests/main_split_landing_dom_test.py --file tests/main_early_input_dom_test.py --file tests/main_split_harness.py --file tests/main_load_hosted.py --file tests/main_split_harness_fixture.json --file api/package-lock.json --file tests/auth_logout_dom_test.py --file tests/live_test_gate.py --file worklist-v0/hpacs-lite/study-panel.js --file worklist-v0/hpacs-lite/study-panel.css --file tests/study_panel_page_dom_test.py --file tests/study_panel_size_dom_test.py --file worklist-v0/hpacs-lite/preload-queue.js --file worklist-v0/hpacs-lite/preload-worker.js --file worklist-v0/hpacs-lite/preload-store.js --file worklist-v0/hpacs-lite/preload-disk.js --file worklist-v0/hpacs-lite/worklist-selection.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/study_panel_size_dom_test.py -v
     - name: W6 frame native history and composition
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-editor-frame --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file api/package-lock.json -- $RUNNER_TEMP/measurement-python/bin/python -B tests/report_editor_frame_dom_test.py
@@ -1612,6 +1648,20 @@ jobs:
           tmp/u2b-regressions-ci/
         if-no-files-found: error
         retention-days: 7
+    - name: Viewer U3 served prior images and read-only reports
+      timeout-minutes: 28
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: '"$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile viewer-ux-priors'
+    - name: Viewer U3 synthetic served evidence
+      if: ${{ always() && !github.event.pull_request.draft }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-viewer-ux-priors
+        path: |
+          tests/e2e/artifacts/viewer-ux-priors-ci/
+          tmp/viewer-ux-u3/
+        if-no-files-found: error
+        retention-days: 7
     - name: Isolated declared Viewer U2 shell tests
       timeout-minutes: 28
       run: |
@@ -1625,6 +1675,22 @@ jobs:
         path: |
           tests/e2e/artifacts/viewer-ux-shell-ci/
           tmp/viewer-ux-u2/screens/
+          tmp/viewer-tools/
+        if-no-files-found: error
+        retention-days: 7
+    - name: Isolated declared S9-U7 output, identity and unsaved-work tests
+      timeout-minutes: 28
+      run: |
+        "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile s9-u7-served
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+    - name: Sanitized synthetic S9-U7 served evidence
+      if: ${{ always() && !github.event.pull_request.draft }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: synthetic-s9-u7-served-results
+        path: |
+          tests/e2e/artifacts/s9-u7-served-ci/
+          tmp/s9-u7/screens/
         if-no-files-found: error
         retention-days: 7
     - name: Worklist folder multi-selection and shortcut module contract
@@ -1753,7 +1819,7 @@ jobs:
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-mpr']) }}
   volume-batch:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 63
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -2197,7 +2263,7 @@ jobs:
     # S9-U0E (main #199): the generated config/ohif.js as Orthanc serves it on a normal worklist launch, in its
     # own job and runner. The exact-selection self-check runs once in runtime (ci-selfchecks).
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 58
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -2290,6 +2356,41 @@ jobs:
         retention-days: 7
     needs: select
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['patient-identity-measurements']) }}
+  pr-ci:
+    name: pr-ci / validate
+    needs:
+    - emr-b
+    - select
+    - runtime
+    - asr-engine
+    - emr-c
+    - emr-d
+    - emr-e-contracts
+    - emr-f-contracts
+    - contract
+    - hanging-protocols
+    - part1-mg
+    - part1-xa
+    - volume-marks
+    - volume-rendering
+    - worklist-ux-measurements
+    - volume-mpr
+    - volume-batch
+    - volume-mip-voi
+    - s7-u5-session-contracts
+    - produce
+    - consume
+    - s9-u0e-served
+    - patient-identity-measurements
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+    - name: Require every selected job to pass
+      shell: python
+      env:
+        NEEDS_JSON: ${{ toJSON(needs) }}
+      run: "import json, os\nresults = json.loads(os.environ[\"NEEDS_JSON\"])\nfailed = {name: job[\"result\"] for name, job in results.items()\n          if job[\"result\"] not in (\"success\", \"skipped\")}\nprint(json.dumps(failed or {\"result\": \"success\"}, sort_keys=True))\nraise SystemExit(bool(failed))\n"
 'on':
   push:
     branches:

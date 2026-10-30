@@ -1,3 +1,5 @@
+// Read the selected wire body; HTTP/PG publication is covered by emr/a/report_reads_test.cjs.
+const readBody = value => JSON.parse(value.json);
 
 // B2 consumer fixture only: these existing pure suites exercise business/CAS rules.
 // Real ledger atomicity and HTTP publication are tested against PostgreSQL.
@@ -833,7 +835,7 @@ test('the read answers head and draft with a presence state computed now', async
   const { svc } = fixture({ versions, report: { version: 4, findings: DRAFT_LINE, conclusion: '', recommendation: '' },
     draft: { findings: TEXT_LINE, conclusion: '', recommendation: '',
       structured: [draftStored({ sid: 's-mine', itemCode: 'TECHNIQUE', renderedText: TEXT_LINE })] } });
-  const answer = await svc.reportStructure(UID, CALLER);
+  const answer = readBody(await svc.reportStructure(UID, CALLER));
   assert.equal(answer.version, 4);
   assert.equal(answer.unknown, false);
   assert.equal(answer.head[0].state, 'present');
@@ -844,14 +846,14 @@ test('the read answers head and draft with a presence state computed now', async
 test('a sentence the reader deleted reads as absent, not as a lie', async () => {
   const versions = new Map([[4, { structured: [draftStored({ sid: 's-head' })] }]]);
   const { svc } = fixture({ versions, report: { version: 4, findings: 'reader rewrote this', conclusion: '', recommendation: '' } });
-  const answer = await svc.reportStructure(UID, CALLER);
+  const answer = readBody(await svc.reportStructure(UID, CALLER));
   assert.equal(answer.head[0].state, 'absent');
 });
 
 test('one malformed stored entry makes the whole answer unknown', async () => {
   const versions = new Map([[4, { structured: [draftStored({ sid: 's-head' }), { sid: 'x', field: 'nope' }] }]]);
   const { svc } = fixture({ versions });
-  const answer = await svc.reportStructure(UID, CALLER);
+  const answer = readBody(await svc.reportStructure(UID, CALLER));
   assert.equal(answer.unknown, true);
   assert.equal(answer.head, null);
   assert.equal(answer.draft, null);

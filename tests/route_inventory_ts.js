@@ -29,6 +29,8 @@
  * code-point offset, using this same program and its AST. The closed source contract decides which forms to accept.
  * EMR-R1-LAND: {"classPropertySource": maskedSource} returns {"class_properties": [codePointOffset, ...]} without
  * changing the binding program's source set. Only AST-confirmed property names are excluded by the heading reader.
+ * MG-08 IDR-04: {"frozenArraySource": source, "name": exportName} returns {"frozen_array": [string, ...] | null}, the
+ * string elements of `export const <name> = Object.freeze([...])` as the AST holds them (comments are not elements).
  */
 const path = require('path');
 const readline = require('readline');
@@ -242,6 +244,27 @@ function answer(request) {
     };
     visit(file);
     return { class_properties: properties };
+  }
+  if (typeof request.frozenArraySource === 'string') {
+    // The elements of `export const <name> ... = Object.freeze([...])`, read from the AST: a comment between the
+    // elements is trivia, not an element, whatever quote characters its prose holds. null when the declaration is not
+    // that shape or an element is not a string literal.
+    const file = ts.createSourceFile('frozen-array.ts', request.frozenArraySource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    let found = null;
+    for (const statement of file.statements) {
+      if (!ts.isVariableStatement(statement) || !(statement.declarationList.flags & ts.NodeFlags.Const) ||
+          !statement.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.ExportKeyword)) continue;
+      for (const declaration of statement.declarationList.declarations) {
+        if (!ts.isIdentifier(declaration.name) || declaration.name.text !== request.name) continue;
+        const call = declaration.initializer;
+        const array = call && ts.isCallExpression(call) && ts.isPropertyAccessExpression(call.expression) &&
+          ts.isIdentifier(call.expression.expression) && call.expression.expression.text === 'Object' &&
+          call.expression.name.text === 'freeze' && call.arguments.length === 1 && ts.isArrayLiteralExpression(call.arguments[0])
+          ? call.arguments[0] : null;
+        found = array && array.elements.every(ts.isStringLiteral) ? array.elements.map(element => element.text) : null;
+      }
+    }
+    return { frozen_array: found };
   }
   const set = new Map();
   for (const [name, text] of Object.entries(request.files)) {

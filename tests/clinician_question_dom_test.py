@@ -175,7 +175,7 @@ R_NOT_LISTED = "이 검사는 지금 워크리스트에 없어 열 수 없습니
 NON_FINAL = "확정 전 소견을 적으면 임상의에게 그대로 보입니다."
 ANCHOR_CHANGED = "답변 이후 판독 상태가 바뀌었습니다."
 CLOSE_EMPTY = "사유 없이 닫았습니다."
-NO_TEXT = "1~2,000자의 내용을 입력하세요."
+NO_TEXT = "내용을 입력하세요."
 SENDING = "보내는 중입니다…"
 SAVED = "저장했습니다."
 REPLAYED = "이미 저장된 요청입니다. 서버가 처음 저장한 결과를 돌려주었습니다."
@@ -399,6 +399,9 @@ REPORT_FRAME = slice_between(MAIN, "    let reportFrame = null;\n", "    functio
 # S7-U5 §8: stashReport() stands for the draft write of the logout's preparation and answers "saved" when the case lets it
 # go, as the shipped one answers a stored write; the preparation's other page reads are the empty case.
 EXIT_STAND_INS = """
+// The logout slice includes presence cleanup; this question fixture has no worklist columns.
+const viewingNames = new Map();
+function shownColumns() { return []; }
 let insertInFlight = false, commitInFlight = false, appState = {}, selectionSeq = 0, user = 'syn-radiologist';
 const RFIELDS = ['findings', 'conclusion', 'recommendation'];
 """ + REPORT_FRAME + """
@@ -603,7 +606,7 @@ class QuestionServer:
 
     @staticmethod
     def text_ok(value):
-        return isinstance(value, str) and value.strip() != "" and len(value) <= 2000 and not CONTROL.search(value)
+        return isinstance(value, str) and value.strip() != "" and not CONTROL.search(value)
 
     def replay(self, rid, mark, qid, owner):
         receipt = self.receipts[rid]
@@ -668,7 +671,7 @@ class QuestionServer:
             return self.error("QUESTION_ROLE_REQUIRED")
         if (not isinstance(body, dict) or set(body) != {"requestId", "expectedOwner", "body"}
                 or not SERVICE_UUID.match(str(body.get("requestId"))) or not self.text_ok(body.get("body"))):
-            return self.error("QUESTION_INPUT_INVALID", "요청 ID와 1~2,000자의 질문을 입력하세요")
+            return self.error("QUESTION_INPUT_INVALID", "요청 ID와 질문을 입력하세요")
         if body["expectedOwner"] != owner:
             return self.error("OWNER_CHANGED")
         if u not in self.owned:
@@ -1566,18 +1569,19 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         aria = self.page.evaluate("""() => ({reply: document.querySelector('#question-reply-text').getAttribute('aria-describedby'),
           replyLabel: document.querySelector('label[for="question-reply-text"]').textContent,
           thread: document.querySelector('#question-thread').getAttribute('aria-labelledby'),
-          state: [document.querySelector('#questions-state').getAttribute('role'), document.querySelector('#questions-state').getAttribute('aria-live')],
-          max: document.querySelector('#question-reply-text').maxLength})""")
+          state: [document.querySelector('#questions-state').getAttribute('role'), document.querySelector('#questions-state').getAttribute('aria-live')]})""")
         self.assertEqual({"reply": "question-reply-hint", "replyLabel": "Reply", "thread": "question-thread-title",
-                          "state": ["status", "polite"], "max": 2000}, aria)
+                          "state": ["status", "polite"]}, aria)
         # Keyboard to the reply field and its button.
         self.page.locator("#question-reply-text").focus()
+        long_prefix = 'SYN' * 1000
+        self.page.locator('#question-reply-text').fill(long_prefix)
         self.page.keyboard.type("SYN typed by keyboard")
         self.page.keyboard.press("Tab")
         self.assertEqual(("BUTTON", "Reply", True), tuple(self.page.evaluate(ACTIVE)[k] for k in ("tag", "text", "send")))
         self.page.keyboard.press("Enter")
         self.settled_note("saved")
-        self.assertEqual("SYN typed by keyboard", self.requests("reply")[-1]["body"]["body"])
+        self.assertEqual(long_prefix + "SYN typed by keyboard", self.requests("reply")[-1]["body"]["body"])
         # Boundaries: its own routes only - no consultation route, no report body, no storage, text only.
         stored = self.page.evaluate("JSON.stringify({...localStorage}) + JSON.stringify({...sessionStorage})")
         self.assertNotIn("SYN typed by keyboard", stored, "question text stays in document memory")
@@ -2054,8 +2058,12 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         opened, answered, _ = self.seed_threads()
         self.open_reader(me(RADIOLOGIST, ["radiologist"]))
         place = self.page.evaluate("""() => { const s = document.querySelector('#question-p');
-          return [s.previousElementSibling.className, s.nextElementSibling.className, !!s.closest('.rbtns, .rfoot2'), s.parentElement.className]; }""")
-        self.assertEqual(["redit", "rfoot2", False, "panel report-p"], place)
+          const report = document.querySelector('.report-p'), editor = report.querySelector('.redit'),
+            footer = report.querySelector('.rfoot2');
+          return [!!(editor.compareDocumentPosition(s) & Node.DOCUMENT_POSITION_FOLLOWING),
+            !!(s.compareDocumentPosition(footer) & Node.DOCUMENT_POSITION_FOLLOWING),
+            !s.closest('.redit, .rbtns, .rfoot2'), report.contains(s)]; }""")
+        self.assertEqual([True, True, True, True], place)
         self.assertEqual((False, "idle"), (self.reader()["shown"], self.reader()["state"]))
 
         # A target without threads: read once, hidden, the report column's boxes are those of a page without the row.
@@ -2459,11 +2467,9 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
           summary: [document.querySelector('#question-summary').getAttribute('role'), document.querySelector('#question-summary').getAttribute('aria-live')],
           region: [document.querySelector('#question-pane').getAttribute('role'), document.querySelector('#question-pane').getAttribute('aria-label')],
           section: document.querySelector('#question-p').getAttribute('aria-label'),
-          closeLabel: document.querySelector('label[for="question-close-text"]').textContent,
-          max: [document.querySelector('#question-reply-text').maxLength, document.querySelector('#question-close-text').maxLength]})""")
+          closeLabel: document.querySelector('label[for="question-close-text"]').textContent})""")
         self.assertEqual({"toggle": "question-pane", "inbox": "question-pane", "summary": ["status", "polite"],
-                          "region": ["region", "Question Threads"], "section": "Questions", "closeLabel": "Close Reason",
-                          "max": [2000, 2000]}, aria)
+                          "region": ["region", "Question Threads"], "section": "Questions", "closeLabel": "Close Reason"}, aria)
         # Keyboard into the reply field and onto Reply.
         self.page.locator("#question-reply-text").focus()
         self.page.keyboard.type("SYN keyboard answer")

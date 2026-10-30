@@ -162,7 +162,9 @@ async function listService(names=INSTITUTIONS){
     $queryRaw:async()=>[],
   };
   const orthanc={studies:async()=>clone(QIDO),
-    studyIdentities:async()=>clone(QIDO).map(r=>({'0020000D':r['0020000D'],'00080080':r['00080080'],'00080050':r['00080050']})),
+    studyIdentities:async(accessMetadata,accession)=>clone(QIDO).map(r=>({'0020000D':r['0020000D'],'00080080':r['00080080'],
+      ...(accessMetadata?{'00100020':r['00100020'],'00080020':r['00080020'],'00080061':r['00080061']}:{}),
+      ...(accession?{'00080050':r['00080050']}:{})})),
     studiesByUid:async uids=>uids.map(uid=>clone(QIDO).find(r=>r['0020000D'].Value[0]===uid))};
   const svc=new PacsService(prisma,orthanc,{},new StudyAccessService(prisma,orthanc,{}));
   await start(svc,prisma,clone(names));
