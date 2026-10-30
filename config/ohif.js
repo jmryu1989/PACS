@@ -4541,7 +4541,7 @@ function kinCreateMammographyHanging() {
     const path = at < 0 ? '' : '/dicom-web' + url.pathname.slice(at);
     return /^\/dicom-web\/studies\/[^/]+\/series\/[^/]+\/instances\/[^/]+\/bulk\/[0-9A-Fa-f/]+$/.test(path) ? path : null;
   }
-  // A single-part answer is the element's bytes; a multipart one carries them in its first part.
+  // The element's bytes are the first part of the multipart answer; a server that answers single-part sends them bare.
   function firstPart(bytes, type) {
     if (!/^multipart\//i.test(type)) return bytes;
     const boundary = /boundary="?([^";]+)"?/i.exec(type)?.[1];
@@ -4636,7 +4636,9 @@ function kinCreateMammographyHanging() {
       await Promise.allSettled([...new Set(tables)].map(async uri => {
         const url = sameOriginBulk(uri);
         if (!url) return;
-        const response = await fetch(url, { credentials: 'same-origin', headers: { Accept: 'application/octet-stream' } });
+        // DICOMweb bulk data is a multipart/related answer; Orthanc refuses a bare octet-stream Accept with 400.
+        const response = await fetch(url, { credentials: 'same-origin',
+          headers: { Accept: 'multipart/related; type="application/octet-stream"' } });
         if (!response.ok) return;
         const bytes = firstPart(new Uint8Array(await response.arrayBuffer()), response.headers.get('content-type') || '');
         if (bytes && live()) lutBytes.set(uri, bytes);

@@ -3238,7 +3238,11 @@ the EMR-E API classifier (Siemens LEFT/RIGHT/BOTH in Image Type value 4, free-te
 The hanging test runs the extension through the pinned OHIF display-set path: the store callback attached before
 `start()`, one display set per Modality MG instance and a non-writable `ImageSet.images`, so the Siemens
 CT-format slices (Modality MG) must become one stack there. A stored VOI LUT read from implicit VR arrives as
-InlineBinary or a BulkDataURI fetched on this origin before hanging; an unread table shows a notice. Signed 16-bit in Siemens's statement
+InlineBinary or a BulkDataURI fetched on this origin before hanging, as the first part of the multipart/related answer
+Orthanc gives (the synthetic archive refuses any other Accept with 400, as the pinned plugin does); an unread table
+shows a notice. `node --test tests/emr/e/catalog_mg_test.cjs` (compiled `api/dist`, emr-e-contracts job) runs the API
+image catalog over a synthetic Orthanc: Siemens CT-format tomosynthesis slices get the same DBT class the viewer hangs,
+and an ordinary CT image gets no mammography result. Signed 16-bit in Siemens's statement
 is a receive/display capability, not a declared MG acquisition output. Fuji bit depths within its
 declared range are representative synthetic choices, not claims about a specific device.
 

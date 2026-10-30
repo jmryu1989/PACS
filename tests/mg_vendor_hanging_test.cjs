@@ -61,6 +61,17 @@ class Element {
   querySelectorAll() { return []; }
 }
 
+// The pinned Orthanc DICOMweb plugin (AcceptBulkData in WadoRs.cpp) serves bulk data only as multipart/related of
+// application/octet-stream, and when no Accept is given; any other Accept, a bare application/octet-stream included,
+// is answered 400 (measured on the served stack at 17b5428).
+function orthancBulkAccept(accept) {
+  if (accept === undefined) return true;
+  const [media, ...params] = String(accept).split(';').map(s => s.trim());
+  if (media.toLowerCase() !== 'multipart/related') return false;
+  const type = params.map(p => p.split('=')).find(([k]) => k.trim().toLowerCase() === 'type')?.[1];
+  return type === undefined || type.trim().replace(/^"|"$/g, '') === 'application/octet-stream';
+}
+
 async function mount(items, { routes = {} } = {}) {
   const listeners = new Map(), panel = new Element(), requests = [];
   const document = { head: new Element(), body: new Element(), createElement: () => new Element(),
@@ -97,6 +108,7 @@ async function mount(items, { routes = {} } = {}) {
     requests.push({ url, options });
     if (url === '/api/me') return { ok: true, json: async () => ({ institution: 'SYNTHETIC' }) };
     const route = routes[url];
+    if (route && !orthancBulkAccept(options?.headers?.Accept)) return { ok: false, status: 400, headers: { get: () => 'text/plain' } };
     return route ? { ok: true, headers: { get: () => route.type }, arrayBuffer: async () => route.body.buffer.slice(route.body.byteOffset, route.body.byteOffset + route.body.byteLength) }
       : { ok: false, headers: { get: () => '' } };
   };
@@ -205,9 +217,11 @@ function implicitLut(form) {
 }
 for (const [form, body, type] of [
   ['inline'],
-  ['bulk single part', words, 'application/octet-stream'],
   ['bulk multipart', Buffer.concat([Buffer.from('--b1\r\nContent-Type: application/octet-stream\r\n\r\n'), words, Buffer.from('\r\n--b1--\r\n')]),
     'multipart/related; type="application/octet-stream"; boundary=b1'],
+  ['bulk multipart, quoted boundary and more part headers', Buffer.concat([Buffer.from('--ab-12\r\nContent-Type: application/octet-stream\r\n' +
+    'MIME-Version: 1.0\r\nContent-Length: 16\r\n\r\n'), words, Buffer.from('\r\n--ab-12--')]),
+    'multipart/related; type="application/octet-stream"; boundary="ab-12"'],
 ]) test('implicit-VR stored VOI LUT (' + form + ') is applied exactly', async () => {
   const { d, path } = implicitLut(form === 'inline' ? 'inline' : 'bulk');
   const h = await mount([d], { routes: body ? { [path]: { body: new Uint8Array(body), type } } : {} });

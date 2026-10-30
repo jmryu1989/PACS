@@ -253,7 +253,10 @@
       "api/src/image-relay.controller.ts",
       "tests/ops_product_transfer_fixture.py",
       "tests/proxy_image_route_test.py",
-      "tests/proxy_grant_log_test.py"
+      "tests/proxy_grant_log_test.py",
+      "api/src/emr-source/image.ts",
+      "tests/fixtures/mg_vendor_cases.json",
+      "worklist-v0/hpacs-lite/mammography-model.js"
     ],
     "emr-f-contracts": [
       "api/Dockerfile*",
