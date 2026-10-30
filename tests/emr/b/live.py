@@ -1,6 +1,6 @@
 """B2 PG candidate selection; REQ-B2R-01..07 -> RISK-B2R-01..07.
 
-Historical selector names remain for the existing measurement/candidate callers.
+Historical selector names remain for the existing CI, candidate and restore-rehearsal callers.
 The mapping below replaces the removed chain/seal mechanisms with real PG
 boundaries. Each case owns a fresh synthetic database and the production image.
 """
@@ -19,7 +19,7 @@ class EmrBLedgerLive(unittest.TestCase):
         pg.gate.require_live_run()
         if os.environ.get('KIN_TEST_API_IMAGE'):
             return
-        # Candidate/measurement CI supplies a source checkout, as before B2.
+        # Candidate CI supplies a source checkout, as before B2.
         # Restore its production-image preparation instead of requiring worker-local Node paths.
         tag = 'kin-emrb-live:' + uuid.uuid4().hex[:12]
         pg.PgLedgerFixture.command(['docker', 'build', '--target', 'production',
@@ -29,14 +29,17 @@ class EmrBLedgerLive(unittest.TestCase):
         cls.addClassCleanup(os.environ.pop, 'KIN_TEST_API_IMAGE', None)
 
     def boundary(self, fixture, method):
-        case=fixture(method)
-        try:
-            fixture.setUpClass()
-            case.setUp()
-            try: getattr(case,method)()
-            finally: case.tearDown();case.doCleanups()
-        finally:
-            fixture.doClassCleanups()
+        # Called by hand, doCleanups() only returns False and doClassCleanups() only keeps
+        # tearDown_exceptions: a fixture left behind (or preserved for a foreign label) passed.
+        # unittest's own suite run reports both, with their tracebacks, as errors of this case.
+        result=unittest.TestResult()
+        unittest.TestSuite([fixture(method)]).run(result)
+        problems=[trace for _,trace in result.errors+result.failures]
+        # A skipped or unexpectedly passing live boundary is not a pass either.
+        problems+=[str(test)+' skipped: '+reason for test,reason in result.skipped]
+        problems+=[str(test)+' unexpected success' for test in result.unexpectedSuccesses]
+        if problems or result.testsRun!=1:
+            self.fail(fixture.__name__+'.'+method+' (ran '+str(result.testsRun)+'):\n'+'\n'.join(problems))
 
     def test_b01_ledger_roles_and_restart(self):
         self.boundary(pg.PgLedgerSchemaLive,'test_pg_schema_atomicity_dedup_and_expiry')
@@ -48,10 +51,12 @@ class EmrBLedgerLive(unittest.TestCase):
         self.boundary(pg.PgLedgerSchemaLive,'test_statutory_act_retry_binding')
 
     def test_b03b_concurrent_48_receipts(self):
+        # Historical selector name; the count now follows the append pool (pg_ledger_api_test.cjs).
         self.boundary(pg.PgLedgerConcurrencyLive,'test_concurrent_receipts')
 
-    def test_b03c_warm_single_sustained_and_verification_plans(self):
-        self.boundary(pg.PgLedgerPlanLive,'test_indexed_outcome_and_pending_plans')
+    # b03c (100k EXPLAIN rung) left the CI selection with D1806's dropped numeric rungs: a small N plans a
+    # seq scan, b01/b03 check the results, and the first-site 6M VM run checks the index at scale.
+    # On demand: run-tests.py --module tests/emr/b/pg_ledger_restore_test.py --class PgLedgerPlanLive.
 
     def test_b04_chain_tail_and_crash_recovery(self):
         # D1770: PG commit/outcome recovery replaces chain-tail recovery.

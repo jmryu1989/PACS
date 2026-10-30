@@ -12,7 +12,8 @@ jobs:
     needs: select
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['emr-b']) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 251
+    # Hang limits about three times the measured run (~5 min job, ~70 s ledger suite).
+    timeout-minutes: 60
     env:
       NODE_OPTIONS: --max-old-space-size=3072
       KIN_EMR_PYTHON: python3
@@ -22,8 +23,9 @@ jobs:
         if: ${{ needs.select.result != 'success' }}
         env:
           SELECT_RESULT: ${{ needs.select.result }}
+          DRAFT: ${{ github.event.pull_request.draft == true }}
         run: |
-          echo "::error::select job ended $SELECT_RESULT; the module selection is unknown"
+          echo "::error::select job ended $SELECT_RESULT (draft=$DRAFT); the module selection is unknown"
           exit 1
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -55,44 +57,70 @@ jobs:
       - name: Production API image of this commit
         timeout-minutes: 15
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/image --tree api/src --tree api/prisma --file api/Dockerfile --file api/start-production.sh --file api/package-lock.json -- docker build --target production --build-arg "VCS_REF=${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}" -t "kin-emrb-ci:${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}" api
-      - name: Pinned synthetic stack test dependencies
-        timeout-minutes: 10
-        run: |
-          python3 -m venv "$RUNNER_TEMP/emr-b-python"
-          "$RUNNER_TEMP/emr-b-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
       - name: Orthanc image for same-point native restore
         run: docker pull orthancteam/orthanc:24.12.0
-      - name: Existing thirteen candidate selectors on the PG implementation
-        timeout-minutes: 68
-        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/live --tree api/src --tree api/prisma --tree tests/emr/b --file scripts/ops_backup.py --file tests/measurement_ci.py -- "$RUNNER_TEMP/emr-b-python/bin/python" tests/measurement_ci.py --profile emr-b
+      # The ledger cases own their PG fixtures (tests/emr/b/live.py): no Compose stack, realm or browser.
+      # Every live step and loop class has its own KIN_LIVE_ENVIRONMENT, so a failed run's inspection marker
+      # never refuses the next one (tests/live_test_gate.py); later steps still run after a failure, and the
+      # job fails if any of them did. The auth (265) and draft (52) suites run once, in the runtime job.
+      - name: Existing candidate selectors on the PG implementation
+        timeout-minutes: 15
+        env:
+          KIN_LIVE_ENVIRONMENT: ci-emr-b-ledger
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/live --tree api/src --tree api/prisma --tree tests/emr/b --file scripts/ops_backup.py -- python3 scripts/run-tests.py --module tests/emr/b/live.py --class EmrBLedgerLive --mode live --unit ci-emr-b-ledger --timeout 600
       - name: Actual PG roles, clinical HTTP, consumers and recovery
-        timeout-minutes: 30
+        if: ${{ !cancelled() && !github.event.pull_request.draft }}
+        timeout-minutes: 15
         run: |
-          for entry in 'PgLedgerRoleLive:roles' 'PgLedgerClinicalHttpLive:clinical-http' 'PgLedgerDraftRegressionLive:draft-regression' 'PgLedgerStartupLive:startup' 'PgLedgerImportCliLive:import-cli' 'PgLedgerFailureFilesLive:failure-files' 'PgLedgerRetentionAdapterLive:retention-adapter' 'PgLedgerRestoreSweepLive:restore-sweep' 'PgLedgerRequestWorkLive:request-work' 'PgLedgerAuthFailureLive:auth-failure' 'PgLedgerAuthEndLive:auth-end'; do
+          failed=()
+          for entry in 'PgLedgerRoleLive:roles' 'PgLedgerClinicalHttpLive:clinical-http' 'PgLedgerStartupLive:startup' 'PgLedgerImportCliLive:import-cli' 'PgLedgerFailureFilesLive:failure-files' 'PgLedgerRetentionAdapterLive:retention-adapter' 'PgLedgerRestoreSweepLive:restore-sweep' 'PgLedgerRequestWorkLive:request-work' 'PgLedgerAuthFailureLive:auth-failure' 'PgLedgerAuthEndLive:auth-end'; do
             cls="${entry%%:*}"
             unit="${entry#*:}"
-            python3 scripts/record-run.py --run-dir "tmp/emr-b-ci/$unit" --tree api/src --tree tests/emr/b -- python3 scripts/run-tests.py --module tests/emr/b/pg_ledger_restore_test.py --class "$cls" --mode live --unit "ci-b2r-$unit" --timeout 300
+            echo "$cls: KIN_LIVE_ENVIRONMENT=ci-b2r-$unit"
+            if ! KIN_LIVE_ENVIRONMENT="ci-b2r-$unit" python3 scripts/record-run.py --run-dir "tmp/emr-b-ci/$unit" --tree api/src --tree tests/emr/b -- python3 scripts/run-tests.py --module tests/emr/b/pg_ledger_restore_test.py --class "$cls" --mode live --unit "ci-b2r-$unit" --timeout 300; then
+              echo "::error::$cls failed (unit ci-b2r-$unit)"
+              failed+=("$cls")
+            fi
           done
-      - name: Existing auth compatibility on the real PG record port
-        timeout-minutes: 65
-        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/auth-regression --tree api/src --file tests/auth_session_service_test.cjs --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/b/pg_ledger_restore_test.py --class PgLedgerAuthRegressionLive --mode live --unit ci-b2r-auth-regression --timeout 3600
+          if [ "${#failed[@]}" -ne 0 ]; then
+            echo "::error::${#failed[@]} PG ledger classes failed: ${failed[*]}"
+            exit 1
+          fi
       - name: Request facts through registered HTTP and PostgreSQL
+        if: ${{ !cancelled() && !github.event.pull_request.draft }}
         timeout-minutes: 5
+        env:
+          KIN_LIVE_ENVIRONMENT: ci-request-facts
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/request-facts-live --tree api/src --tree tests/emr/request -- python3 scripts/run-tests.py --module tests/emr/request/request_facts_live.py --class RequestFactsLive --mode live --unit ci-request-facts --timeout 300
       - name: Module A local-read recording on the real PG record port
+        if: ${{ !cancelled() && !github.event.pull_request.draft }}
         timeout-minutes: 5
+        env:
+          KIN_LIVE_ENVIRONMENT: ci-module-a-pg
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-pg --tree api/src --tree tests/emr/a --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/a/recording_boundary_test.py --class LocalReadRecordingBoundary --mode live --unit ci-module-a-pg --timeout 300
       - name: Module A report reads on the real HTTP route and PG record port
+        if: ${{ !cancelled() && !github.event.pull_request.draft }}
         timeout-minutes: 5
+        env:
+          KIN_LIVE_ENVIRONMENT: ci-module-a-report-reads
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-report-reads --tree api/src --tree tests/emr/a --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/a/report_reads_test.py --class ReportReadsHttp --mode live --unit ci-module-a-report-reads --timeout 300
       - name: Module A W9 metadata through real HTTP and PG
+        if: ${{ !cancelled() && !github.event.pull_request.draft }}
         timeout-minutes: 5
+        env:
+          KIN_LIVE_ENVIRONMENT: ci-module-a-w9
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-w9 --tree api/src --tree tests/emr/a --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/a/viewing_set_test.py --class ViewingSetHttpBoundary --mode live --unit ci-module-a-w9 --timeout 300
       - name: Module A report display observations through real HTTP and PG
+        if: ${{ !cancelled() && !github.event.pull_request.draft }}
         timeout-minutes: 5
+        env:
+          KIN_LIVE_ENVIRONMENT: ci-module-a-report-observation
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-report-observation --tree api/src --tree tests/emr/a --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/a/report_observation_test.py --class ReportObservationHttp --mode live --unit ci-module-a-report-observation --timeout 300
       - name: Original-download stages through HTTP into the real PG record port
+        if: ${{ !cancelled() && !github.event.pull_request.draft }}
         timeout-minutes: 5
+        env:
+          KIN_LIVE_ENVIRONMENT: ci-download-producer
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/download-producer --tree api/src --tree tests/emr/request --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/emr/request/download_producer_live.py --class DownloadProducerLive --mode live --unit ci-download-producer --timeout 300
       - name: EMR-B evidence (synthetic, sanitized)
         if: ${{ always() && !github.event.pull_request.draft }}
@@ -100,7 +128,6 @@ jobs:
         with:
           name: emr-b-evidence
           path: |
-            tests/e2e/artifacts/emr-b-ci/
             tmp/emr-b-ci/
             tmp/emr-b2-replace-20261023/
             tmp/module-a-01-2/
