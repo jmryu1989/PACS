@@ -345,6 +345,7 @@ HOLDBLOCK
 SELECTBLOCK
 // Unrelated offline indicators/reconnect scheduling are inert in this component page.
 const worklistBodyParts = { sync() {} }, consultations = { refresh() {} };
+function stopViewing() {}
 let poll = null, pollGeneration = 0;
 function startReconnect() {}
 GOOFFLINEFN

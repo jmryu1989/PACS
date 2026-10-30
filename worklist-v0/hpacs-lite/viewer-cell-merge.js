@@ -348,8 +348,13 @@
             reapplyPlane(cell, viewport);
           } else {
             if (viewport.type !== 'stack') continue;
-            if (Number.isInteger(cell.imageIndex) && viewport.getCurrentImageId?.() !== cell.imageId && typeof viewport.setImageIdIndex === 'function')
-              Promise.resolve(viewport.setImageIdIndex(cell.imageIndex)).catch(() => { });
+            if (Number.isInteger(cell.imageIndex) && typeof viewport.setImageIdIndex === 'function') {
+              // A restored frame also owns the next scroll, including a no-op load.
+              clearTimeout(viewport.debouncedTimeout);
+              viewport.targetImageIdIndex = cell.imageIndex;
+              if (viewport.getCurrentImageId?.() !== cell.imageId)
+                Promise.resolve(viewport.setImageIdIndex(cell.imageIndex)).catch(() => { });
+            }
             const properties = viewport.getProperties?.() || {};
             if (cell.voiRange && JSON.stringify(properties.voiRange ?? null) !== JSON.stringify(cell.voiRange))
               viewport.setVOI?.(copy(cell.voiRange), { forceRecreateLUTFunction: true, voiUpdatedWithSetProperties: true });

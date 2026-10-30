@@ -375,11 +375,12 @@ function realSeries(prefix,seriesUid,count,gap){
    요청이고, 그것이 이 시험에서 취소할 수 없는 native 요청의 자리다. */
 function realViewport(id,ids,gap,index){
   const gates=[];
-  const self={type:'stack',id,viewportStatus:'ready',index,gates,
+  const self={type:'stack',id,viewportStatus:'ready',index,gates,targetImageIdIndex:index,
     getRenderingEngine:()=>({id:'engine-1'}),
     getImageIds:()=>ids,
     getCurrentImageIdIndex:()=>self.index,
     getCurrentImageId:()=>ids[self.index],
+    scroll(delta){self.targetImageIdIndex=Math.max(0,Math.min(ids.length-1,self.targetImageIdIndex+delta));return self.setImageIdIndex(self.targetImageIdIndex);},
     getCornerstoneImage:()=>({imageId:ids[self.index]}),
     // 첫 장의 원점이 [0,0,0]이고 화소 간격이 1 mm라 캔버스 좌표가 곧 현재 단면 위의 mm다.
     canvasToWorld:point=>[point[0],point[1],gap*self.index],
@@ -420,6 +421,21 @@ async function realStarted(){
     viewportA,viewportB,elementA,elementB,
     real:()=>made.sandbox.__controllers[made.sandbox.__controllers.length-1].real};
 }
+
+test('3D cursor jump leaves the next wheel step at the selected slice',async()=>{
+  const it=await realStarted();
+  try{
+    it.toggleOf(0).fire('click',{});
+    it.elementA.fire('click',{clientX:10,clientY:10});
+    await waitFor(()=>it.viewportB.gates.length===1,'cursor slice request');
+    it.viewportB.gates[0].resolve();
+    await waitFor(()=>!it.real().state().busy,'cursor arrival');
+    assert.equal(it.viewportB.getCurrentImageIdIndex(),0);
+    const step=it.viewportB.scroll(1);
+    it.viewportB.gates[1].resolve();await step;
+    assert.equal(it.viewportB.getCurrentImageIdIndex(),1);
+  }finally{it.extension.onModeExit();await idle();}
+});
 
 test('패널이 스스로 미완료 종료를 낸 뒤 호스트 종료가 idle이어도 그 창은 영구히 막힌다 (M6, 실제 컨트롤러)',async()=>{
   const it=await realStarted();

@@ -8,8 +8,8 @@ const vm = require('node:vm');
 const { readFileSync } = require('node:fs');
 const native = require('./fixtures/viewer-stack-loading-source.cjs');
 
-async function fixture() {
-  const scheduled = new Map(), requests = [], pending = new Map(), cached = new Set(['frame:1']);
+async function fixture(imageIds = ['frame:1', 'frame:2', 'frame:3', 'frame:4']) {
+  const scheduled = new Map(), requests = [], pending = new Map(), cached = new Set([imageIds[0]]);
   let timer = 0, loading = false;
   const setTimeout = (run, delay) => { scheduled.set(++timer, { run, delay }); return timer; };
   const clearTimeout = id => scheduled.delete(id);
@@ -27,8 +27,8 @@ async function fixture() {
   element.addEventListener(Events.STACK_VIEWPORT_SCROLL, indicator.scroll);
   element.addEventListener(Events.STACK_NEW_IMAGE, indicator.loaded);
   const viewport = Object.assign({ id: 'left', type: 'stack', element,
-    imageIds: ['frame:1', 'frame:2', 'frame:3', 'frame:4'], currentImageIdIndex: 0, targetImageIdIndex: 0,
-    perImageIdDefaultProperties: new Map(), shown: 'frame:1', camera: { zoom: 2 },
+    imageIds, currentImageIdIndex: 0, targetImageIdIndex: 0,
+    perImageIdDefaultProperties: new Map(), shown: imageIds[0], camera: { zoom: 2 }, render() {},
     getImageIds() { return this.imageIds; },
     getCurrentImageId() { return this.imageIds[this.currentImageIdIndex]; },
     getCurrentImageIdIndex() { return this.currentImageIdIndex; },
@@ -64,8 +64,9 @@ async function fixture() {
   }, methods.service);
   const window = { top: {}, cornerstone: { Enums: { Events }, eventTarget: new EventTarget() },
     cornerstoneTools: { Enums: { MouseBindings: {} }, ToolGroupManager: { getToolGroupForViewport() {} } } };
-  vm.runInNewContext(readFileSync('config/ohif.js', 'utf8'), { window, document: {}, console,
-    requestAnimationFrame: () => 1, cancelAnimationFrame() {} });
+  const context = { window, document: {}, console, setTimeout, clearTimeout,
+    requestAnimationFrame: () => 1, cancelAnimationFrame() {} };
+  vm.runInNewContext(readFileSync('config/ohif.js', 'utf8'), context);
   const extension = window.config.extensions.find(e => e.id === 'kin.viewer-ux');
   await extension.preRegistration({ servicesManager: { services: { cornerstoneViewportService: service,
     viewportGridService: { EVENTS: {}, getState: () => ({ viewports }) }, toolbarService: {} } } });
@@ -75,8 +76,54 @@ async function fixture() {
     pending.delete(imageId); error ? entry.reject(error) : entry.resolve();
     await new Promise(setImmediate);
   };
-  return { viewport, volume, service, extension, requests, pending, cached, timers, settle, loading: () => loading };
+  let navigation = 0;
+  const reference = context.kinViewerImageReference;
+  const env = { services: { cornerstoneViewportService: service,
+    viewportGridService: { getActiveViewportId: () => viewport.id },
+    displaySetService: { getActiveDisplaySets: () => [{ StudyInstanceUID: '1.2', SeriesInstanceUID: '1.3', instances: [{ SOPInstanceUID: '1.4' }] }] } },
+    ended: () => false, scope: () => '1.2', busy: () => false, generation: () => 1, valid: () => true,
+    beginNavigation: () => ++navigation, navigation: () => navigation, viewport: () => viewport, reference,
+    matches: (a, b) => a?.study === '1.2' && a.seriesUid === b.seriesUid && a.sopUid === b.sopUid && a.frame === b.frame,
+    hydrate() {}, highlight: () => ({ highlighted: false, annotation: 'none' }) };
+  return { viewport, volume, service, extension, requests, pending, cached, timers, settle, loading: () => loading,
+    goTo: frame => context.kinViewerNavigateTo(env, { studyUid: '1.2', seriesUid: '1.3', sopUid: '1.4', frame }) };
 }
+
+const images = Array.from({ length: 5 }, (_, i) => `wadors:/dicom-web/studies/1.2/series/1.3/instances/1.4/frames/${i + 1}`);
+for (const resize of [false, true]) for (const delta of [-1, 1]) {
+  test(`Go to Image then ${delta > 0 ? 'ArrowDown/wheel forward' : 'ArrowUp/wheel backward'} starts at the shown frame${resize ? ' after resize' : ''}`, async () => {
+    const f = await fixture(images);
+    try {
+      const arrived = f.goTo(3);
+      await f.settle(images[2]);
+      assert.equal((await arrived).ok, true);
+      assert.equal(f.viewport.shown, images[2]);
+      if (resize) f.service.performResize();
+      f.viewport.scroll(delta); f.timers(40);
+      assert.equal(f.requests.at(-1), images[2 + delta], 'the next step requests the neighbour of the displayed frame');
+      await f.settle(images[2 + delta]); f.timers(50);
+      assert.equal(f.viewport.shown, images[2 + delta]);
+      assert.equal(f.loading(), false);
+    } finally { f.extension.onModeExit(); }
+  });
+}
+
+test('Go to Image supersedes an older deferred scroll without a late rewind', async () => {
+  const f = await fixture(images);
+  try {
+    f.viewport.scroll(1);
+    const arrived = f.goTo(4);
+    await f.settle(images[3]);
+    assert.equal((await arrived).ok, true);
+    f.timers(40); f.timers(50);
+    assert.deepEqual(f.requests, [images[3]], 'the old deferred frame must not be requested after arrival');
+    assert.equal(f.viewport.shown, images[3]);
+    assert.equal(f.loading(), false);
+    f.viewport.scroll(1); f.timers(40);
+    await f.settle(images[4]);
+    assert.equal(f.viewport.shown, images[4]);
+  } finally { f.extension.onModeExit(); }
+});
 
 test('resize between ArrowDown and its deferred load preserves the next scroll and clears Loading', async () => {
   const f = await fixture();
