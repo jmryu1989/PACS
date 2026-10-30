@@ -1,3 +1,5 @@
+import { PreloadKeyController } from './preload-key.controller';
+import { PreloadKeyService } from './preload-key.service';
 import { PresenceService } from './presence.service';
 import { startupClinicalProviders } from './emr-clinical/startup';
 import { EMR_BACKGROUND_WORK } from './emr-runtime/background-work';
@@ -73,9 +75,9 @@ import { DicomFrameController } from './dicom-frame.controller';
 import { DicomFrameService } from './dicom-frame.service';
 
 @Module({
-  controllers: [EmrAuditController, DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController, SigningKeyAdminController, ImageRelayController, DicomFrameController],
+  controllers: [PreloadKeyController, EmrAuditController, DictationController, PacsController, AuthController, AdminController, ViewerController, MultiStudyViewController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController, StudyTransferLocalController, SigningKeyAdminController, ImageRelayController, DicomFrameController],
   providers: [
-    PresenceService, EmrAuditService,
+    PreloadKeyService, PresenceService, EmrAuditService,
     ...startupClinicalProviders,
     ViewerContextEventService,
     OnlineImageService, ImageCheckDatabase, OrthancImageCatalog,
