@@ -94,13 +94,14 @@ const clone = value => JSON.parse(JSON.stringify(value));
 
 function makeViewport(id, imageId, seed) {
   return {
-    id, type: 'stack', current: imageId, index: 0, renders: 0,
+    id, type: 'stack', current: imageId, index: 0, targetImageIdIndex: 0, renders: 0,
     // The pane a double click lands in; a target names the cell it was delivered to.
     element: { isConnected: true, contains: target => target?.cell === id },
     camera: { ...clone(CAMERA), parallelScale: seed },
     properties: { invert: false, voiRange: { lower: 0, upper: 100 } },
     getCurrentImageId() { return this.current; },
     getCurrentImageIdIndex() { return this.index; },
+    scroll(delta) { this.targetImageIdIndex = Math.max(0, this.targetImageIdIndex + delta); return this.setImageIdIndex(this.targetImageIdIndex); },
     getCamera() { return clone(this.camera); },
     setCamera(value) { Object.assign(this.camera, clone(value)); },
     getProperties() { return clone(this.properties); },
@@ -675,6 +676,17 @@ test('a pane refit during the merge is undone on restore, but real user work is 
   y.viewports.get('A').camera.parallelScale = 3.5;
   assert.equal((await y.controller.unmerge()).ok, true);
   assert.equal(y.viewports.get('A').camera.parallelScale, 3.5);
+});
+
+test('a recreated stack resumes wheel scrolling from its restored frame after unmerge', async () => {
+  const x = fixture();
+  await x.viewports.get('B').scroll(3);
+  assert.equal((await x.controller.merge('maximize', 'A')).ok, true);
+  assert.equal((await x.controller.unmerge()).ok, true);
+  const restored = x.viewports.get('B');
+  assert.equal(restored.getCurrentImageId(), 'wadors:B:3');
+  await restored.scroll(1);
+  assert.equal(restored.getCurrentImageId(), 'wadors:B:4');
 });
 
 // Each field the merge record carries is decided on its own. Scrolling or windowing the
