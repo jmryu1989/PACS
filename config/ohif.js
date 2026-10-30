@@ -2390,6 +2390,38 @@ function kinCreateViewerHistory() {
   return { id: 'kin.viewer-history', preRegistration({ servicesManager, commandsManager, extensionManager }) { services = servicesManager.services; commands = commandsManager; extensions = extensionManager; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
 
+// Minhoon item 12 (MH-4): the account's measurement marker colour and line thickness in every
+// viewer document, embedded or standalone, for writers and read-only readers alike. The work
+// page's Appearance & Tools dialog writes the choice (worklist-v0/hpacs-lite/marker-style.js);
+// this document only draws with it and follows later changes without a reload.
+function kinCreateMarkerStyle() {
+  let ready = null, current = null, epoch = 0, unwatch = null;
+  const load = () => window.KinMarkerStyle ? Promise.resolve() : ready || (ready = new Promise((resolve, reject) => {
+    const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/marker-style.js';
+    script.onload = () => resolve();
+    // The stock marker style stays; a later mode entry tries again.
+    script.onerror = () => { script.remove(); ready = null; reject(Error('Marker style loading failed')); };
+    document.head.append(script);
+  }));
+  return { id: 'kin.marker-style',
+    preRegistration() { load().catch(() => {}); },
+    onModeEnter() {
+      const ticket = ++epoch;
+      const start = () => load().then(() => {
+        const owner = kinViewerSession.owner();
+        if (ticket !== epoch || current || kinViewerSession.ended() || !owner) return;
+        current = window.KinMarkerStyle.mount({ tools: window.cornerstoneTools, cornerstone: window.cornerstone, owner: JSON.stringify(owner) });
+      }).catch(() => {});
+      // The owner is the account the document's /me answered; another extension's answer serves too.
+      // A first /me that failed leaves no owner; the open viewer then follows from the later answer
+      // that settles the role, instead of only after the next mode entry.
+      unwatch?.(); unwatch = kinViewerSession.onChange(() => { start(); });
+      (kinViewerSession.owner() ? Promise.resolve() : kinViewerSession.decide()).then(start);
+    },
+    // The drawn style stays for the document; the next mode entry re-reads the latest choice.
+    onModeExit() { epoch++; unwatch?.(); unwatch = null; current?.dispose(); current = null; } };
+}
+
 // The recent display layout is retained; transient display-set IDs never leave this session.
 const kinViewerLayoutModel = (() => {
   const PREFIX = 'kin-viewer-layout-v1:';
@@ -4937,7 +4969,7 @@ function kinCreateStudySearch() {
 // The stock mode owns the grid and Cornerstone elements. This extension owns
 // only its chrome and removes it when that mode or document ends.
 function kinCreateViewerUX() {
-  let services, dispose, toolbar, shortcuts, mouse, generation = 0, ready;
+  let services, dispose, toolbar, shortcuts, mouse, resize, generation = 0, ready;
   const assets = ['viewer-info-bar.js', 'viewer-series-strip.js', 'viewer-patient-tabs.js', 'viewer-ux-shortcuts.js', 'viewer-hanging-settings.js', 'viewer-ux-toolbar.js', 'viewer-ux-shell.js'];
   // The theme fixes the chrome rows' heights. It is loaded once per document,
   // before the first mount, and stays: a stylesheet attached per mount and
@@ -4965,7 +4997,7 @@ function kinCreateViewerUX() {
       document.head.append(script);
     })), stylesheet()).catch(error => { ready = null; throw error; });
   }
-  function stop() { generation++; dispose?.(); dispose = null; mouse?.dispose(); mouse = null; }
+  function stop() { generation++; dispose?.(); dispose = null; mouse?.dispose(); mouse = null; resize?.(); resize = null; }
   return {
     id: 'kin.viewer-ux',
     async preRegistration({ servicesManager }) {
@@ -4987,7 +5019,10 @@ function kinCreateViewerUX() {
     },
     onModeEnter() {
       stop();
-      if (!kinViewerSession.ended()) mouse = kinStackMouse(services);
+      if (!kinViewerSession.ended()) {
+        mouse = kinStackMouse(services);
+        resize = kinStackResize(services.cornerstoneViewportService);
+      }
       if (window.top !== window || !shortcuts) return;
       const ticket = generation;
       if (kinViewerSession.ended()) return;
@@ -5002,6 +5037,35 @@ function kinCreateViewerUX() {
       }
     },
     onModeExit: stop,
+  };
+}
+
+// OHIF's resize restores a stack's current frame through setViewReference ->
+// scroll. That rewinds a pending scroll's target while its debounce/load can
+// still finish: the next key then selects the frame already shown, and the
+// native Loading indicator never receives another STACK_NEW_IMAGE. Resizing
+// restores the camera, not the slice; explicit navigation keeps its reference.
+function kinStackResize(service) {
+  const resize = service.performResize, present = service.setPresentations;
+  if (typeof resize !== 'function' || typeof present !== 'function') return;
+  let resizing = 0;
+  const resized = function (...args) {
+    resizing++;
+    try { return resize.apply(this, args); }
+    finally { resizing--; }
+  };
+  const presented = function (id, presentations, ...args) {
+    if (resizing && this.getCornerstoneViewport(id)?.type === 'stack' && presentations?.positionPresentation) {
+      presentations = { ...presentations,
+        positionPresentation: { ...presentations.positionPresentation, viewReference: undefined } };
+    }
+    return present.call(this, id, presentations, ...args);
+  };
+  service.performResize = resized;
+  service.setPresentations = presented;
+  return () => {
+    if (service.performResize === resized) service.performResize = resize;
+    if (service.setPresentations === presented) service.setPresentations = present;
   };
 }
 
@@ -5184,7 +5248,7 @@ function kinCreateMultiStudyStrip() {
 }
 
 window.config = {
-  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateImageLoadStatus(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateStudySearch(), kinCreateViewerUX(), kinCreateViewerPrior(), kinCreateMultiStudyStrip()],
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateFrameMetadata(), kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateImageLoadStatus(), kinCreateContextLoss(), kinCreateMammographyHanging(), kinCreateMGReferenceLines(), kinCreateStudyPrefetch(), kinCreateStudySearch(), kinCreateViewerUX(), kinCreateViewerPrior(), kinCreateMultiStudyStrip(), kinCreateMarkerStyle()],
   // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
   // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
   kinThreeDCursor: { enabled: false },

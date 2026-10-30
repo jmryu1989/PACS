@@ -9,6 +9,17 @@ require.extensions['.ts'] = (mod, file) => mod._compile(ts.transpileModule(fs.re
     experimentalDecorators: true, emitDecoratorMetadata: true }, fileName: file,
 }).outputText, file);
 const { PresenceService, PRESENCE_EXPIRES_MS } = require('../api/src/presence.service.ts');
+test('presence query accepts a UID list and refuses repeated or structured parameters before reading', async () => {
+  const { PacsController } = require('../api/src/pacs.controller.ts');
+  const seen = [];
+  const controller = new PacsController(null, null, null, { read: (_caller, uids) => { seen.push(uids); return uids; } });
+  const request = { sub: 'synthetic', institution: 'A', roles: ['radiologist'] };
+  assert.deepEqual(controller.viewingPresence(request, '1.2,1.3'), ['1.2', '1.3']);
+  assert.deepEqual(controller.viewingPresence(request), []);
+  for (const invalid of [['1.2', '1.3'], { nested: '1.2' }, null])
+    assert.throws(() => controller.viewingPresence(request, invalid), error => error.getStatus() === 400);
+  assert.equal(seen.length, 2);
+});
 function fixture() {
   const rows = [{uid:'1.2',institutionId:'A',teleInstitutionId:'B'}, {uid:'1.3',institutionId:'A',teleInstitutionId:null},
     {uid:'2.1',institutionId:'B',teleInstitutionId:null}];
@@ -19,10 +30,10 @@ function fixture() {
   const access = {allowed: async (c,uids) => new Set(uids.filter(uid => uid !== c.denied))};
   const svc = new PresenceService(db,access);
   const caller = (sub='doctor',institution='A',denied=null) => ({sub,actor:sub,roles:['radiologist'],institution,kind:'member',denied});
-  const update = (id,seq,uids,c=caller(),sid='session-a') => svc.update(c,sid,'ref-'+sid,c.sub,{viewerId:id,sequence:seq,uids});
-  return {svc,sessions,caller,update,read:(c=caller())=>svc.read(c,['1.2','1.3','2.1'])};
+  const update = (id,seq,uids,c=caller(),sid='session-a',name=c.sub) => svc.update(c,sid,'ref-'+sid,name,{viewerId:id,sequence:seq,uids});
+  return {svc,sessions,caller,update,read:(c=caller('observer'))=>svc.read(c,['1.2','1.3','2.1'])};
 }
-test('two doctors, two windows, switch, close, and same-name users preserve distinct viewing', async () => {
+test('two doctors, two windows, switch and close preserve distinct viewing', async () => {
   const f=fixture();
   await f.update('tab',1,['1.2','1.3']);
   await f.update('other-tab',1,['1.2']);
@@ -38,6 +49,18 @@ test('two doctors, two windows, switch, close, and same-name users preserve dist
   // A delayed heartbeat must not undo the close.
   await f.update('reader-tab',1,['1.2'],f.caller('reader'),'session-b');
   assert.deepEqual((await f.read()).studies['1.2'],[]);
+});
+test('self is excluded by subject across windows while a same-name colleague remains', async () => {
+  const f=fixture();
+  await f.update('a',1,['1.2','1.3'],f.caller(),'session-a','Same Name');
+  await f.update('a2',1,['1.2'],f.caller(),'session-a','Same Name');
+  await f.update('b',1,['1.2','1.3'],f.caller('reader'),'session-b','Same Name');
+  for (const uid of ['1.2','1.3']) {
+    assert.deepEqual((await f.read(f.caller())).studies[uid].map(v=>v.name),['Same Name']);
+    assert.equal((await f.read()).studies[uid].length,2);
+  }
+  await f.update('b',2,[],f.caller('reader'),'session-b','Same Name');
+  assert.deepEqual((await f.read(f.caller())).studies,{'1.2':[],'1.3':[]});
 });
 test('same institution plus visible study plus individual StudyAccess all apply', async () => {
   const f=fixture();await f.update('a',1,['1.2']);

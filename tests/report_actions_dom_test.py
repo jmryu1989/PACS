@@ -127,7 +127,7 @@ FOOT = ['b-prev', 'b-next']
 W4_FOOT = ['b-approve-next']
 SECTIONS = {
     'report-more-reading': ['b-addendum', 'b-transcribe'],
-    'report-more-status': ['b-defer', 'b-except', 'b-mark-cvr', 'b-unread'],
+    'report-more-status': ['b-defer', 'b-mark-cvr', 'b-unread'],
     'report-more-editor': ['b-copy', 'b-paste', 'b-clear', 'b-report-template'],
     'report-more-output': ['b-print', 'b-history'],
 }
@@ -153,7 +153,7 @@ PLACEHOLDER_REASONS = {
     'b-mark-cvr': ('서버가', '답하기 전에는 켜지지 않습니다'),
 }
 # The buttons inside More, in their declared order, the Structured entry right before Print.
-MENU_ORDER = ['b-addendum', 'b-transcribe', 'b-defer', 'b-except', 'b-mark-cvr', 'b-unread', 'b-copy', 'b-paste',
+MENU_ORDER = ['b-addendum', 'b-transcribe', 'b-defer', 'b-mark-cvr', 'b-unread', 'b-copy', 'b-paste',
               'b-clear', 'b-report-template', 'b-structured', 'b-print', 'b-history']
 # fix1: the one attribute added to base buttons, the Korean tooltips of the two placeholders (the base had none). Checked
 # on the fixed merge commit (RESULT), where Mark CVR is still the placeholder S7-U1b later wired.
@@ -302,9 +302,9 @@ MEASURE = r"""()=>{
   const pane=q('#dictation-pane');
   return {vw:innerWidth,vh:innerHeight,open:q('#report-more').open,rbtns:box(row),rfoot:box(q('.report-p .rfoot2')),
     redit:box(q('.report-p .redit')),pane:pane.hidden?null:box(pane),panel:box(q('#report-more > .toolbar-menu-panel')),
-    top,natural,foot:[...q('.report-p .rfoot2').children].map(one),menu:[...document.querySelectorAll('#report-more button')].map(one),
+    top,natural,foot:[...q('.report-p .rfoot2').children].map(one),menu:[...document.querySelectorAll('#report-more button')].filter(e=>!e.hidden).map(one),
     sections:[...document.querySelectorAll('#report-more .toolbar-section')].map(s=>{const h=getComputedStyle(s,'::before');
-      return {id:s.id,...box(s),ids:[...s.children].map(c=>c.id),kids:[...s.children].map(c=>({key:c.id,...box(c)})),
+      return {id:s.id,...box(s),ids:[...s.children].filter(c=>!c.hidden).map(c=>c.id),kids:[...s.children].filter(c=>!c.hidden).map(c=>({key:c.id,...box(c)})),
         head:{label:s.getAttribute('aria-label'),content:h.content,font:h.fontSize,display:h.display}}}),
     fields:['findings','conclusion','recommendation'].map(i=>({id:i,...box(q('#'+i))}))};
 }"""
@@ -389,7 +389,7 @@ class ReportActionsStructureTest(unittest.TestCase):
         self.assertEqual(set(BUTTON_IDS) - set(GIVEN_IDS), set(base_ids))
         # Every base button is declared exactly once: in view, or in one section of More.
         declared = TOP + FOOT + [i for ids in SECTIONS.values() for i in ids]
-        self.assertEqual(sorted(BUTTON_IDS), sorted(declared))
+        self.assertEqual(sorted(set(BUTTON_IDS) - {'b-except'}), sorted(declared))
         self.assertLessEqual(len(IN_VIEW), MAX_IN_VIEW)
 
 
@@ -495,7 +495,7 @@ class ReportActionsDOMTest(unittest.TestCase):
                 for key in ids:
                     with self.subTest(key=key):
                         self.assertEqual((None, MENU, section), where[key], key)
-                got = page.evaluate("(s)=>[...document.getElementById(s).children].map(c=>c.id)", section)
+                got = page.evaluate("(s)=>[...document.getElementById(s).children].filter(c=>!c.hidden).map(c=>c.id)", section)
                 expected = ['b-structured'] + ids if section == 'report-more-output' else ids
                 self.assertEqual(expected, got, section)
             menu = page.evaluate("""()=>{const d=document.getElementById('report-more'),s=d.querySelector(':scope > summary'),
@@ -520,9 +520,11 @@ class ReportActionsDOMTest(unittest.TestCase):
             self.assertEqual(IN_VIEW, page.evaluate(SHOWN))
             self.assertLessEqual(len(page.evaluate(SHOWN)), MAX_IN_VIEW)
             # Approve stays the one drawn as the primary action.
-            looks = page.evaluate("""()=>['#b-approve','#b-save','#b-prelim'].map(s=>getComputedStyle(document.querySelector(s)).backgroundImage)""")
-            self.assertIn('gradient', looks[0])
-            self.assertEqual(['none', 'none'], looks[1:])
+            looks = page.evaluate("""()=>['#b-approve','#b-save','#b-prelim'].map(s=>getComputedStyle(document.querySelector(s)).backgroundColor)""")
+            self.assertNotEqual(looks[0], looks[1])
+            self.assertNotEqual(looks[0], looks[2])
+            # Except was retired from the available actions; it must remain unreachable.
+            self.assertFalse(page.locator('#b-except').is_visible())
         finally:
             page.close()
 
@@ -640,7 +642,7 @@ class ReportActionsDOMTest(unittest.TestCase):
     def reach_menu(self, page, where):
         """Every control of the open More is drawn, owns its centre and takes focus (disabled ones cannot take focus)."""
         reached = []
-        for key in page.evaluate("()=>[...document.querySelectorAll('#report-more button')].map(b=>b.id)"):
+        for key in page.evaluate("()=>[...document.querySelectorAll('#report-more button')].filter(b=>!b.hidden).map(b=>b.id)"):
             locator = page.locator('#' + key)
             locator.scroll_into_view_if_needed()
             reach = locator.evaluate(REACH)
@@ -749,7 +751,7 @@ class ReportActionsDOMTest(unittest.TestCase):
                     # Enter opens; Tab enters the menu and walks it in its own order, then leaves for the fields.
                     page.keyboard.press('Enter')
                     self.assertTrue(page.evaluate("document.querySelector('#report-more').open"))
-                    menu = page.evaluate("()=>[...document.querySelectorAll('#report-more button')].map(b=>b.id)")
+                    menu = page.evaluate("()=>[...document.querySelectorAll('#report-more button')].filter(b=>!b.hidden).map(b=>b.id)")
                     walked = []
                     for _ in range(len(menu) + 1):
                         page.keyboard.press('Tab')
@@ -790,7 +792,7 @@ class ReportActionsDOMTest(unittest.TestCase):
                     # Clicking a button would run its handler; the page script is stripped, so only its state is taken
                     # off here, where the layout does not depend on it.
                     page.evaluate(ENABLE_ALL)
-                    menu = page.evaluate("()=>[...document.querySelectorAll('#report-more button')].map(b=>b.id)")
+                    menu = page.evaluate("()=>[...document.querySelectorAll('#report-more button')].filter(b=>!b.hidden).map(b=>b.id)")
                     self.assertEqual(MENU_ORDER, menu)
                     for key in menu:
                         page.locator('#' + key).click(timeout=2000)
@@ -818,7 +820,7 @@ class ReportActionsDOMTest(unittest.TestCase):
                     page.keyboard.press('Enter')
                     self.assertTrue(page.evaluate("document.querySelector('#report-more').open"))
                     enabled = page.evaluate(
-                        "()=>[...document.querySelectorAll('#report-more button')].filter(b=>!b.disabled).map(b=>b.id)")
+                        "()=>[...document.querySelectorAll('#report-more button')].filter(b=>!b.hidden&&!b.disabled).map(b=>b.id)")
                     # The walk is judged against the declared lists, not the page's own states (F02).
                     self.assertEqual([key for key in MENU_ORDER if key not in INITIAL_DISABLED], enabled)
                     self.assertEqual('b-transcribe', enabled[0])
@@ -890,7 +892,7 @@ class ReportActionsDOMTest(unittest.TestCase):
                 page.keyboard.press('Tab')
             self.assertEqual(MENU + '>summary', page.evaluate(ACTIVE))
             page.keyboard.press('Enter')
-            enabled = page.evaluate("()=>[...document.querySelectorAll('#report-more button')].filter(b=>!b.disabled).map(b=>b.id)")
+            enabled = page.evaluate("()=>[...document.querySelectorAll('#report-more button')].filter(b=>!b.hidden&&!b.disabled).map(b=>b.id)")
             self.assertLess(enabled.index('b-defer'), enabled.index('b-mark-cvr'))
             self.assertLess(enabled.index('b-mark-cvr'), enabled.index('b-unread'))
             walked = []

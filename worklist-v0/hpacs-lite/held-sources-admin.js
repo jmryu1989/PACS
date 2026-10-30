@@ -80,9 +80,13 @@
       if (group.device) add('Register Device', 'device', group.device, '');
       // The server's list decides multiplicity; a " / " inside one hospital's own spelling is still one spelling.
       const names = group.institutionNames;
-      if (names.length > 1)
-        add('Register Name', 'alias', group.institutionText, '표기가 여럿인 기관명은 등록할 수 없습니다. 수신 장비 등록으로 연결하세요.');
-      else if (names[0]) add('Register Name', 'alias', names[0], '');
+      if (names.length > 1) {
+        const guidance = document.createElement('p');
+        guidance.textContent = '이 기관의 표기인지 병원과 확인한 이름만 각각 등록하세요. 모든 원본의 기관이 확인되기 전에는 검사가 계속 보류될 수 있습니다.';
+        actions.append(guidance);
+      }
+      for (const name of names.filter(Boolean))
+        add(names.length > 1 ? 'Register Name: ' + name : 'Register Name', 'alias', name, '');
       return tr;
     });
     $('#held-rows').replaceChildren(...rows);

@@ -148,7 +148,7 @@ class SessionModulesDOMTest(unittest.TestCase):
         self.page.evaluate("syn.prepare();syn.cancel();syn.holds.shift()()")
         expect(self.page.locator("#tech-note-dialog")).to_be_visible()
         expect(note).to_have_value("SYN edited")
-        expect(reason).to_have_value("SYN reason")  # S8-CTX: no outcome changes the input
+        expect(reason).to_have_value("")  # A confirmed save consumes its reason; it must not leak into the next edit.
         expect(self.page.get_by_role("button", name="Save Note", exact=True)).to_be_enabled()
         expect(self.page.locator("#tech-note-status")).to_have_text("앞선 입력은 v2로 저장되었습니다.")
         self.assertEqual(['GET','POST','GET'],self.page.evaluate("syn.calls.map(c=>c.method)"))
@@ -342,11 +342,15 @@ class ModulesBootDOMTest(unittest.TestCase):
                     page.on("pageerror", lambda error: errors.append(str(error)))
                     page.goto(ORIGIN + BASE + "main.html")
                     page.wait_for_function("KinWorkContext.state()==='active'")
-                    page.locator('#cvr-inbox-toggle').click()
                     page.locator('#cvr-sent-toggle').click()
+                    page.locator('#cvr-inbox-toggle').click()
                     for area in ("cvr-inbox", "cvr-sent"):
                         expect(page.locator('#'+area+'-refresh')).to_be_enabled()
                     changed.append(True)
+                    # Received is now an overlay. Close it before reaching the
+                    # Sent refresh underneath; both mounted areas retain their owner.
+                    if source == "sent":
+                        page.locator('#cvr-inbox-toggle').click()
                     page.locator('#'+prefix+'-refresh').click()
                     for area in ("cvr-inbox", "cvr-sent"):
                         expect(page.locator('#'+area+'-refresh')).to_be_disabled()
