@@ -763,8 +763,20 @@ test('SPLIT-13 a held study is decided on its current instances, and a spelling 
   assert.deepEqual([...issuerInstitutions('SYN Hospital, Main', stored)], [INST_A]);
   assert.deepEqual([...issuerInstitutions('Main', stored)], []);
 });
-// ── A-027 (D1881): the institution GET audit records each returned row to ──
+test('multiple source spellings attach only after each resolves to the confirmed institution', async () => {
+  const w = world(); await w.boot();
+  const uid = uidOf();
+  w.orthanc.rows = [qido(uid, 'SYN North'), qido(uid, 'SYN South')];
+  w.orthanc.devices = { [uid]: null };
+  await w.worklist.heldSources(ADMIN_A);
+  assert.equal((await w.worklist.registerInstitutionAlias({ value: 'SYN North', confirmation: 'SYN phone' }, ADMIN_A)).attached, 0);
+  assert.equal(w.db.rows('studyState').find(r => r.uid === uid).institutionId, null);
+  assert.equal((await w.worklist.registerInstitutionAlias({ value: 'SYN South', confirmation: 'SYN phone' }, ADMIN_A)).attached, 1);
+  assert.equal(w.db.rows('studyState').find(r => r.uid === uid).institutionId, INST_A);
+  assert.equal(w.audits('study.attach').filter(a => a.target === uid).length, 1);
+});
 
+// ── A-027 (D1881): the institution GET audit records each returned row to ──
 test('A-027 GET audit records every returned row to the institution its own statement selected; a row without one refuses the response', async () => {
   const w = world();
   await w.boot();

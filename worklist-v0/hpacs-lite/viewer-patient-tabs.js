@@ -196,7 +196,12 @@ window.KinViewerPatientTabs = (() => {
       }
       navigate(tab, opening); return true;
     } catch (error) { if (ticket === sequence && error.name !== 'AbortError') status.textContent = error.message; return false; }
-    finally { signal?.removeEventListener('abort', cancel); if (ticket === sequence) { pending = false; render(); } }
+    finally {
+      signal?.removeEventListener('abort', cancel);
+      // A refused lookup/confirmation/opening still advanced the generation.
+      // Consumers must adopt the retained tab once this admission has ended.
+      if (ticket === sequence && pending) { pending = false; render(); publish(); }
+    }
   }
   async function close(tab) {
     // Closing a tab also cancels a lookup started by selecting that tab, so

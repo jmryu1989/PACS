@@ -9,6 +9,17 @@ require.extensions['.ts'] = (mod, file) => mod._compile(ts.transpileModule(fs.re
     experimentalDecorators: true, emitDecoratorMetadata: true }, fileName: file,
 }).outputText, file);
 const { PresenceService, PRESENCE_EXPIRES_MS } = require('../api/src/presence.service.ts');
+test('presence query accepts a UID list and refuses repeated or structured parameters before reading', async () => {
+  const { PacsController } = require('../api/src/pacs.controller.ts');
+  const seen = [];
+  const controller = new PacsController(null, null, null, { read: (_caller, uids) => { seen.push(uids); return uids; } });
+  const request = { sub: 'synthetic', institution: 'A', roles: ['radiologist'] };
+  assert.deepEqual(controller.viewingPresence(request, '1.2,1.3'), ['1.2', '1.3']);
+  assert.deepEqual(controller.viewingPresence(request), []);
+  for (const invalid of [['1.2', '1.3'], { nested: '1.2' }, null])
+    assert.throws(() => controller.viewingPresence(request, invalid), error => error.getStatus() === 400);
+  assert.equal(seen.length, 2);
+});
 function fixture() {
   const rows = [{uid:'1.2',institutionId:'A',teleInstitutionId:'B'}, {uid:'1.3',institutionId:'A',teleInstitutionId:null},
     {uid:'2.1',institutionId:'B',teleInstitutionId:null}];

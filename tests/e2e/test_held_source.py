@@ -245,6 +245,9 @@ class HeldSourceE2E(WorklistE2E):
         self.assertEqual(psql(f'SELECT count(*) FROM "StudyState" WHERE uid={quoted([moved])} AND "institutionId" IS NULL '
                               f'AND "teleInstitutionId"={quoted([owner])};'), ["1"])
         for actor, viewer in (("jmryu", page), ("doctor", self.login("doctor"))):
+            bootstrap = document_request(viewer, "GET", self.stack.api + "/bootstrap")
+            self.assertEqual(bootstrap.status, 200, bootstrap.text())
+            self.assertNotIn(moved, bootstrap.json()["states"])
             permission_denied(self, document_request(viewer, "GET", f"{self.stack.proxy}/dicom-web/studies/{moved}/metadata"))
             self.assertNotIn(moved, self.listed(actor))
 

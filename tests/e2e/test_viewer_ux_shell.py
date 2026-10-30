@@ -217,6 +217,7 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
 
     def test_shell_07_failed_patient_lookup_recovers(self):
         fixture = self.multiple('U2-' + uuid.uuid4().hex[:12], 'lookup failure', '20260801')
+        refused = self.multiple('U2-' + uuid.uuid4().hex[:12], 'refused switch', '20260801')
         work = self.login()
         page = work.context.new_page()
         route_first(page, '**/api/studies?*', lambda route: route.fulfill(status=503, content_type='application/json', body='{}'))
@@ -237,6 +238,16 @@ class ViewerUXShellE2E(ViewerLayoutE2E):
         retry.click(); expect(retry).not_to_be_visible()
         expect(page.get_by_role('tablist', name='Patients')).to_contain_text(fixture.patient_id)
         self.assertEqual(self.cells(page), before)
+        # A failed switch after a tab exists also ends its admission: its series
+        # must remain usable without a reload or another tab render.
+        route_first(page, '**/api/studies?*', lambda route: route.fulfill(status=503, content_type='application/json', body='{}'))
+        switched = page.evaluate('uid => kinViewerOpenPatient("/ohif/viewer?StudyInstanceUIDs=" + uid)', refused.uid)
+        self.assertFalse(switched)
+        previous = self.cells(page)[0]['image']
+        strip.locator('button[aria-pressed="false"]').first.click()
+        page.wait_for_function('image => services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId()).getCurrentImageId() !== image', arg=previous)
+        canvas_ready(page, 1)
+        expect(page.get_by_role('tablist', name='Patients')).to_contain_text(fixture.patient_id)
 
     def test_shell_08_same_patient_requested_study(self):
         patient = 'U2-' + uuid.uuid4().hex[:12]

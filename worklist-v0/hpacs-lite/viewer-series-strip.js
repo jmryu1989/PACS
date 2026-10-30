@@ -47,8 +47,12 @@ window.KinViewerSeriesStrip = (() => {
     }
     function showLoad(load, error) {
       if (!liveLoad(load)) return;
+      const unchanged = load.error === (error || null);
       load.error = error || null;
       const pane = panes().get(load.id); if (!pane) return;
+      // Refreshes must preserve the Retry node while a pointer/key action is
+      // in progress, and must not feed the shell observer with our own moves.
+      if (unchanged && load.notice?.parentElement === pane) return;
       const notice = load.notice ||= document.createElement('section');
       notice.className = 'kin-series-load'; notice.dataset.kinUxOwned = ''; notice.setAttribute('role', 'status');
       notice.replaceChildren();
@@ -59,14 +63,14 @@ window.KinViewerSeriesStrip = (() => {
         const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = 'Retry';
         retry.onclick = () => retryLoad(load); notice.append(retry);
       }
-      pane.append(notice);
+      if (notice.parentElement !== pane) pane.append(notice);
     }
     async function retryLoad(load) {
       if (!liveLoad(load) || !canReplace()) return;
       const viewport = services.cornerstoneViewportService.getCornerstoneViewport(load.id);
       const ids = viewport?.getImageIds?.();
       if (!ids?.length) { assign(load.series, load.study, load.id, load.patient); return; }
-      const retry = { ...load, notice: null, watched: null };
+      const retry = { ...load, notice: null, watched: null, failures: new Map() };
       clearLoad(load.id); loads.set(load.id, retry); showLoad(retry);
       try {
         await viewport.setStack(ids, viewport.getCurrentImageIdIndex());
@@ -94,12 +98,12 @@ window.KinViewerSeriesStrip = (() => {
       }
       const set = matches[0].displaySetInstanceUID;
       clearLoad(id);
-      const load = { id, set, series, study: expectedStudy, patient: snapshot };
+      const load = { id, set, series, study: expectedStudy, patient: snapshot, failures: new Map() };
       loads.set(id, load);
       try {
         grid.setDisplaySetsForViewport({ viewportId: id, displaySetInstanceUIDs: [set],
           viewportOptions: { viewportType: 'stack', toolGroupId: 'default', allowUnmatchedView: true } });
-        showLoad(load);
+        showLoad(load, load.error);
       } catch (error) { showLoad(load, error); }
     }
     function refreshLoads() {
@@ -110,6 +114,7 @@ window.KinViewerSeriesStrip = (() => {
           clearLoad(id); continue;
         }
         const imageId = current.viewport?.getCurrentImageId?.();
+        if (load.failures.has(imageId)) { showLoad(load, load.failures.get(imageId)); continue; }
         const instance = imageId && window.cornerstone.metaData.get('instance', imageId);
         if (imageId && load.watched !== imageId && instance?.SeriesInstanceUID === load.series && instance?.StudyInstanceUID === load.study) {
           // Observe only the viewport's load; starting one here could cache an
@@ -122,6 +127,27 @@ window.KinViewerSeriesStrip = (() => {
         }
       }
     }
+    // Failed native loads are evicted from the cache before a chrome refresh
+    // can observe their promise. Retain the event only for pending assignments;
+    // refresh still checks the current image, cell, patient and generation.
+    const core = window.cornerstone;
+    const imageFailed = event => {
+      const { imageId, error } = event.detail || {};
+      if (!imageId || core.cache.getImage(imageId)) return;
+      const instance = core.metaData.get('instance', imageId);
+      for (const load of loads.values()) {
+        if (liveLoad(load) && instance?.StudyInstanceUID === load.study && instance?.SeriesInstanceUID === load.series)
+          load.failures.set(imageId, error || new Error('Image load failed'));
+      }
+      refreshLoads();
+    };
+    const imageLoaded = event => {
+      const imageId = event.detail?.imageId ?? event.detail?.image?.imageId;
+      for (const load of loads.values()) load.failures.delete(imageId);
+      refreshLoads();
+    };
+    core.eventTarget.addEventListener(core.Enums.Events.IMAGE_LOAD_FAILED, imageFailed);
+    core.eventTarget.addEventListener(core.Enums.Events.IMAGE_LOADED, imageLoaded);
     function finishDrag() {
       dragging = null;
       document.querySelectorAll('.kin-series-drop-target,.kin-series-drop-over').forEach(node => {
@@ -268,6 +294,8 @@ window.KinViewerSeriesStrip = (() => {
     });
     return { refresh, place, dispose() {
       stopPatient();
+      core.eventTarget.removeEventListener(core.Enums.Events.IMAGE_LOAD_FAILED, imageFailed);
+      core.eventTarget.removeEventListener(core.Enums.Events.IMAGE_LOADED, imageLoaded);
       ended = true; events.abort(); finishDrag(); [...loads.keys()].forEach(clearLoad);
       clear(); host?.remove(); slot?.remove();
     } };

@@ -783,6 +783,7 @@
       "tests/e2e/test_study_arrivals*",
       "tests/e2e/test_viewer_image_text.py",
       "tests/e2e/test_viewer_ux_shell.py",
+      "tests/e2e/test_viewer_tools.py",
       "tests/e2e/test_viewer_ux_span.py",
       "tests/e2e/test_viewer_ux_priors.py",
       "tests/e2e/test_worklist*",
