@@ -76,7 +76,7 @@ export class PresenceService {
       const people = new Map<string, { name: string; since: number }>();
       for (const viewer of this.viewers.values()) {
         const since = viewer.studies.get(uid);
-        if (viewer.institution !== institution || since === undefined) continue;
+        if (viewer.user === c.sub || viewer.institution !== institution || since === undefined) continue;
         const person = people.get(viewer.user);
         if (!person || since < person.since) people.set(viewer.user, { name: viewer.name, since });
       }

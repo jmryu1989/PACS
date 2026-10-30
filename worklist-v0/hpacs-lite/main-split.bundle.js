@@ -881,6 +881,7 @@
 
     // 특수 렌더링이 필요한 칸만 함수로
     let studyPriority = null;
+    const viewingNames = new Map();
     const CELL = {
       assignedReader:s=>`<button type="button" class="chip" data-reader-assignment="${esc(s.uid)}" ${!serverMode||demoMode||offline?'disabled':''}>${esc(s.assignedReader||'Unassigned')}</button>`,
       techNote: s => `<button type="button" class="chip" data-tech-note="${esc(s.uid)}" aria-label="${esc(s.id)} Tech 메모 ${noteLabel(s.uid)}" ${!serverMode || demoMode || offline ? 'disabled' : ''}>${noteLabel(s.uid)}</button>`,
@@ -893,11 +894,14 @@
       desc: s => esc(shownStudyDesc(s)),
       preDoc: s => esc(displayActor(s.preDoc)),
       preReviewer: s => esc(displayActor(s.preReviewer)),
-      // Viewing: 지금 이 검사의 판독문을 쓰고 있는 사람
-      viewing: s => !s.holder ? ""
-        : s.holder === user
+      // A writer can hold the report with no viewer open. Presence excludes self; the lock does not.
+      viewing: s => {
+        const hold = !s.holder ? '' : s.holder === user
           ? `<span class="hold me" title="내가 작성 중">✎ 나</span>`
-          : `<span class="hold other" title="${esc(displayActor(s.holder))} 님이 작성 중">✎ ${esc(displayActor(s.holder))}</span>`,
+          : `<span class="hold other" title="${esc(displayActor(s.holder))} 님이 작성 중">✎ ${esc(displayActor(s.holder))}</span>`;
+        const presence = esc(viewingNames.get(s.uid) || '');
+        return hold + (hold && presence ? ' · ' : '') + presence;
+      },
       // S7-U3b Hospital: 서버가 준 소유 기관 이름만 쓴다. Tele는 행의 tele만 따른다 — 이름을 내 기관 이름과 비교하면
       // 등록 이름이 같은 두 기관에서 틀리고, reqHosp는 Technician에서 손으로 바꿀 수 있는 값이다.
       institutionName: s => {
@@ -964,6 +968,7 @@
       worklistSearch?.change();
       render();
     });
+
 
     // ── 데이터 ──
     // S4-U1b session-local KIN observation (renderObservation). Memory only; a page load starts over.
@@ -1436,6 +1441,7 @@
         }).join("") + `</tr>`).join("")
         || `<tr><td class="empty" colspan="${shown.length}">${bodyPartNote ? '부위 확인 전인 검사가 있어 검색 결과가 아직 완전하지 않습니다.' : 'No records found'}</td></tr>`;
       columnPrefs?.decorate(mode);
+      syncViewingRows();
       multiSelection?.sync();
       rowNavigation?.sync();
       worklistSearch?.show();
@@ -8303,12 +8309,82 @@
       prep.panel.replaceChildren(title, note, pending, status, actions);
       if (!prep.panel.open) prep.panel.showModal();
       actions.querySelector("button")?.focus();
+    }    // Presence follows the viewer heartbeat, independently of the optional list refresh.
+    let viewingTimer = null, viewingRequest = null, viewingSequence = 0, viewingScope = '';
+    function paintViewing() {
+      const index = shownColumns().findIndex(c => c.k === 'viewing');
+      if (index < 0) return;
+      const byUid = new Map(studies.map(study => [study.uid, study]));
+      for (const row of $('#rows').querySelectorAll('tr[data-uid]')) {
+        const cell = row.cells[index], study = byUid.get(row.dataset.uid);
+        // Keep the saved width container and render the writing lock alongside presence.
+        if (cell && study) (cell.querySelector(':scope > .wc-cell') || cell).innerHTML = CELL.viewing(study);
+      }
     }
-
+    function clearViewing() {
+      ++viewingSequence;
+      viewingRequest?.abort(); viewingRequest = null;
+      viewingNames.clear(); paintViewing();
+    }
+    function stopViewing() {
+      clearInterval(viewingTimer); viewingTimer = null;
+      viewingScope = ''; clearViewing();
+    }
+    function syncViewingRows() {
+      const scope = serverMode && !demoMode && !offline && shownColumns().some(c => c.k === 'viewing')
+        ? JSON.stringify([...$('#rows').querySelectorAll('tr[data-uid]')].map(row => row.dataset.uid)) : '';
+      if (scope === viewingScope) return;
+      clearViewing(); viewingScope = scope;
+      if (scope) void refreshViewing();
+    }
+    async function refreshViewing() {
+      if (!serverMode || demoMode || offline || document.hidden || !viewingScope || viewingRequest) return;
+      const at = work.capture('document');
+      if (!work.admits(at)) { clearViewing(); return; }
+      const sequence = ++viewingSequence, scope = viewingScope, uids = JSON.parse(scope);
+      if (!uids.length) return;
+      const controller = new AbortController(); viewingRequest = controller;
+      // Allow a read to outlast one poll, but bound stale names to a stalled read's timeout.
+      const timeout = setTimeout(() => {
+        if (sequence === viewingSequence) clearViewing();
+      }, 10000);
+      const live = () => sequence === viewingSequence && scope === viewingScope && work.admits(at);
+      try {
+        const requests = [];
+        // Keep each GET below the proxy's request-line bound even with long DICOM UIDs.
+        for (let i = 0; i < uids.length; i += 50)
+          requests.push(api('GET', '/presence?uids=' + encodeURIComponent(uids.slice(i, i + 50).join(',')),
+            undefined, controller.signal, at));
+        const replies = await Promise.all(requests);
+        if (!live()) return;
+        viewingNames.clear();
+        for (const reply of replies) for (const [uid, people] of Object.entries(reply.studies || {})) {
+          if (!uids.includes(uid) || !Array.isArray(people)) continue;
+          const names = people.filter(person => typeof person?.name === 'string' && person.name).map(person => person.name);
+          if (names.length) viewingNames.set(uid, 'Viewing: ' + names.join(', '));
+        }
+        paintViewing();
+      } catch (_) {
+        if (live()) { viewingNames.clear(); paintViewing(); }
+      } finally {
+        clearTimeout(timeout);
+        if (sequence === viewingSequence) viewingRequest = null;
+      }
+    }
+    onCommonEnd(stopViewing);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) clearViewing(); else void refreshViewing();
+    });
+    window.addEventListener('pagehide', stopViewing);
     // 다른 사람이 잡거나 놓은 걸 보려면 주기적으로 확인해야 한다.
     // 기본 30초. 간격 변경은 진행 중인 이전 조회도 무효화한다.
     let poll = null, pollGeneration = 0;
     function startPolling() {
+      stopViewing();
+      if (serverMode && !demoMode && !offline) {
+        syncViewingRows();
+        viewingTimer = setInterval(() => { syncViewingRows(); void refreshViewing(); }, 5000);
+      }
       clearInterval(poll); poll = null;
       const generation = ++pollGeneration;
       const seconds = worklistRefresh?.seconds() ?? 30;
@@ -8434,6 +8510,7 @@
       }, seconds * 1000);
     }
     let pollFails = 0;
+
 
     // ── 판독문 이력 ──
     /**
@@ -12539,6 +12616,7 @@
     function goOffline(e) {
       reportPreview.close();
       serverMode = false; offline = true;
+      stopViewing();
       folderLoadState = 'unknown'; filterCollection = null; ++filterReadSequence; ++sharedFilterReadSequence;
       updateWorklistFolders(); shortcutStatus('서버에 연결한 뒤 바로가기를 불러오세요.');
       // 녹음 중이던 받아쓰기는 여기서 멈춘다(보낼 곳이 없다). 받아 둔 글은 Insert가 거절한다.

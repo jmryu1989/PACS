@@ -160,7 +160,12 @@ window.KinViewerUXShell = (() => {
     const imageEvents = [events.PRE_STACK_NEW_IMAGE, events.STACK_NEW_IMAGE, events.IMAGE_RENDERED, events.ELEMENT_ENABLED, events.ELEMENT_DISABLED].filter(Boolean);
     imageEvents.forEach(event => document.addEventListener(event, schedule, true));
     const observer = new MutationObserver(records => {
-      if (ended || !records.some(record => !record.target.closest?.('[data-kin-ux-owned]'))) return;
+      if (ended || !records.some(record => {
+        if (record.target.closest?.('[data-kin-ux-owned]')) return false;
+        // Attaching/removing shell chrome targets the stock pane or column,
+        // so inspect the changed nodes as well as the mutation's parent.
+        return [...record.addedNodes, ...record.removedNodes].some(node => !node.matches?.('[data-kin-ux-owned]'));
+      })) return;
       // The strip and the toolbar's reserved row go above the grid in this same
       // microtask, as soon as the grid exists, and a pane gets its bar in the
       // row its padding reserves: neither changes the size of a canvas the

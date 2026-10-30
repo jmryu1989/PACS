@@ -18,13 +18,17 @@ from test_prior_selection import canvas_ready
 
 
 class ViewingPresenceE2E(ServedViewerFlow, ViewerUXPriorsE2E):
-    def presence(self, fixtures, actor='doctor'):
+    def presence(self, fixtures, actor='jmryu'):
         response = self.stack.request('GET', '/presence?uids=' + ','.join(f.uid for f in fixtures), actor)
         self.assertEqual(response.status, 200, response.text)
         return response.body
 
     def names(self, fixture):
         return sorted(v['name'] for v in self.presence([fixture])['studies'][fixture.uid])
+
+    def viewing_cell(self, page, fixture):
+        headers = page.locator('#heads th').all_text_contents()
+        return page.locator(f'#rows tr[data-uid="{fixture.uid}"]').get_by_role('cell').nth(headers.index('Viewing'))
 
     def until(self, observer, read, expected, timeout=20000):
         end = time.monotonic() + timeout / 1000
@@ -63,11 +67,19 @@ class ViewingPresenceE2E(ServedViewerFlow, ViewerUXPriorsE2E):
         second, other = self.open_as(current, 'doctor2')
         names = sorted(document_request(p, 'GET', self.stack.api + '/me').json()['displayName'] for p in [work, second])
         self.until(work, lambda: self.names(current), names)
+        own_name = document_request(work, 'GET', self.stack.api + '/me').json()['displayName']
+        other_name = document_request(second, 'GET', self.stack.api + '/me').json()['displayName']
+        expect(self.viewing_cell(work, current)).to_have_text('Viewing: ' + other_name, timeout=15000)
+        expect(self.viewing_cell(second, current)).to_have_text('Viewing: ' + own_name, timeout=15000)
         self.assertEqual(self.presence([current], 'kdoctor')['studies'], {})
+        repeated = self.stack.request('GET', '/presence?uids=' + current.uid + '&uids=' + prior.uid, 'doctor')
+        self.assertEqual(repeated.status, 400, repeated.text)
         self.studies(viewer).get_by_role('button', name='D03A presence prior', exact=True).click()
         canvas_ready(viewer, 2)
         self.until(work, lambda: self.names(prior), [document_request(work, 'GET', self.stack.api + '/me').json()['displayName']])
         self.until(work, lambda: self.names(current), names)
+        expect(self.viewing_cell(second, prior)).to_have_text('Viewing: ' + own_name, timeout=15000)
+        expect(self.viewing_cell(work, prior)).to_have_text('')
         self.evidence(viewer, 'presence-two-displayed-studies')
         # A fresh worklist action replaces the named viewer with the selected study.
         self.select(work, prior)
@@ -76,6 +88,7 @@ class ViewingPresenceE2E(ServedViewerFlow, ViewerUXPriorsE2E):
         self.until(work, lambda: self.names(current), [document_request(second, 'GET', self.stack.api + '/me').json()['displayName']])
         viewer.close()
         self.until(second, lambda: self.names(prior), [])
+        expect(self.viewing_cell(second, prior)).to_have_text('', timeout=15000)
         response = document_request(second, 'POST', self.stack.api + '/auth/logout')
         self.assertIn(response.status, (200, 201, 204))
         self.until(work, lambda: self.names(current), [])
@@ -90,6 +103,7 @@ class ViewingPresenceE2E(ServedViewerFlow, ViewerUXPriorsE2E):
         work, viewer = self.open_as(study, 'doctor')
         name = document_request(work, 'GET', self.stack.api + '/me').json()['displayName']
         self.until(observer, lambda: self.names(study), [name])
+        expect(self.viewing_cell(observer, study)).to_have_text('Viewing: ' + name, timeout=15000)
         beats = []
         viewer.on('request', lambda request: beats.append(time.monotonic())
                   if request.method == 'POST' and request.url.endswith('/api/presence') and request.post_data_json.get('uids') else None)
@@ -100,8 +114,10 @@ class ViewingPresenceE2E(ServedViewerFlow, ViewerUXPriorsE2E):
         lost = time.monotonic()
         self.until(observer, lambda: self.names(study), [], timeout=policy['expiresMs'] + 20000)
         network_drop = round((time.monotonic()-lost)*1000, 2)
+        expect(self.viewing_cell(observer, study)).to_have_text('', timeout=15000)
         work.context.set_offline(False)
         self.until(observer, lambda: self.names(study), [name])
+        expect(self.viewing_cell(observer, study)).to_have_text('Viewing: ' + name, timeout=15000)
         self.evidence(viewer, 'presence-network-reconnected')
         crashes = []
         viewer.once('crash', lambda _: crashes.append(time.monotonic()))
@@ -114,9 +130,11 @@ class ViewingPresenceE2E(ServedViewerFlow, ViewerUXPriorsE2E):
             self.assertTrue(any(text in str(error).lower() for text in ['crash', 'closed', 'err_aborted']), str(error))
         self.until(observer, lambda: bool(crashes), True)
         self.until(observer, lambda: self.names(study), [], timeout=policy['expiresMs'] + 20000)
+        crash_drop = round((time.monotonic()-crashes[0])*1000, 2)
+        expect(self.viewing_cell(observer, study)).to_have_text('', timeout=15000)
         measured = {'heartbeat_ms': policy['heartbeatMs'], 'expiry_ms': policy['expiresMs'],
                     'observed_intervals_ms': intervals, 'network_drop_ms': network_drop,
-                    'crash_drop_ms': round((time.monotonic()-crashes[0])*1000, 2)}
+                    'crash_drop_ms': crash_drop}
         folder = Path(os.environ['KIN_EVIDENCE_DIR'])
         (folder/'presence-timing.json').write_text(json.dumps(measured, indent=2), encoding='utf-8')
         print('PRESENCE_TIMING', json.dumps(measured), flush=True)

@@ -153,6 +153,18 @@ window.KinReadingAppearance = function (options) {
   function changeViewer(role,field,value){if(!live()){end();return;}const selected=viewerProfiles[role],base=viewerValue[role];if(selected==='general')setViewer({...viewerValue,[role]:{...base,[field]:value}});else{const source=base.overrides[selected]||displayProfile(base).copy;setViewer({...viewerValue,[role]:{...base,overrides:{...base.overrides,[selected]:{...clone(source),[field]:value}}}});}}
   function resetViewerProfile(role){if(!live()){end();return;}const selected=viewerProfiles[role],fresh=viewer.defaults()[role];if(selected==='general')setViewer({...viewerValue,[role]:{...fresh,overrides:viewerValue[role].overrides}});else{const overrides={...viewerValue[role].overrides};delete overrides[selected];setViewer({...viewerValue,[role]:{...viewerValue[role],overrides}});}}
   const stopViewer=viewer.subscribe(initialOwner,next=>{if(!live())return;if(JSON.stringify(viewerValue)!==JSON.stringify(next)){viewerValue=next;generation++;showViewer();viewerStatus.textContent='같은 계정의 영상 표시 변경을 적용했습니다.';}});showViewer();
+  const markers=window.KinMarkerStyle,markerFields={},markerSection=element('fieldset','',dialog);let markerValue=markers.read(initialOwner);element('legend','Measurement Markers',markerSection);
+  element('p','측정·화살표 표식의 색과 선 굵기를 이 계정으로 연 모든 영상 창의 표식에 바로 적용합니다. 측정값·좌표, 저장된 SR과 인쇄 출력은 바뀌지 않습니다.',markerSection);
+  for(const [name,label,choices] of [['color','Marker Color',markers.colors],['width','Marker Line Thickness',markers.widths]]){
+    const row=element('label',label,markerSection),select=element('select','',row);select.id='reading-marker-'+name;markerFields[name]=select;
+    for(const [id,text] of choices){const option=element('option',text,select);option.value=id;}
+    select.onchange=()=>{if(!live()){end();return;}setMarkers({...markerValue,[name]:select.value});};
+  }
+  const markerStatus=element('p','',markerSection);markerStatus.id='reading-marker-status';markerStatus.setAttribute('role','status');
+  const markerReset=element('button','Reset Markers',markerSection);markerReset.type='button';markerReset.id='reading-marker-reset';markerReset.onclick=()=>{if(!live()){end();return;}setMarkers(markers.defaults());};
+  function showMarkers(){markerFields.color.value=markerValue.color;markerFields.width.value=markerValue.width;}
+  function setMarkers(next){const clean=markers.normalize(next);if(!live()||!clean)return false;markerValue=clean;generation++;showMarkers();markerStatus.textContent=markers.publish(initialOwner,clean)?'열린 영상 창의 표식에 적용했습니다 · 이 브라우저':'저장소를 사용할 수 없어 이 화면의 통합 영상에만 적용합니다.';return true;}
+  const stopMarkers=markers.subscribe(initialOwner,next=>{if(!live()||JSON.stringify(next)===JSON.stringify(markerValue))return;markerValue=next;generation++;showMarkers();markerStatus.textContent='같은 계정의 표식 모양 변경을 적용했습니다.';});showMarkers();
   function showDock(){dockFields.placement.value=dockValue.placement;dockFields.panel.value=String(dockValue.panel);dockFields.autoHide.checked=!!dockValue.autoHide;}
   function setDock(next){
     let clean=normalizeDock(next);if(!live()||!clean)return false;clean={...clean,version:2,autoHide:clean.autoHide??dockValue.autoHide};
@@ -201,6 +213,7 @@ window.KinReadingAppearance = function (options) {
   opener.onclick=()=>{if(!live()){end();return;}if(!dialog.open)dialog.showModal();};
   function end(){
     stopViewer();for(const control of viewerSection.querySelectorAll('button,select,input'))control.disabled=true;
+    stopMarkers();for(const control of markerSection.querySelectorAll('button,select'))control.disabled=true;
     ended=true;opener.disabled=true;for(const f of Object.values(fields))f.disabled=true;reset.disabled=true;
     if(dialog.open)dialog.close();value=defaults();apply();fontValue=defaultFonts();applyFonts();
     for(const f of Object.values(fontFields))f.disabled=true;fontReset.disabled=true;
@@ -265,22 +278,23 @@ window.KinReadingAppearance = function (options) {
   subscribeStorage();window.addEventListener('pagehide',end);
   const normalizeAccount=v=>{
     const legacy=normalize(v);if(legacy)return legacy;
-    if(!v||typeof v!=='object'||Array.isArray(v)||![2,3,4,5,6,7,8,9].includes(v.version)||Object.keys(v).sort().join(',')!==(v.version>=7?'colors,current,dock,fonts,list,mpr,prior,toolbar,version,viewer':v.version===6?'colors,current,dock,fonts,list,prior,toolbar,version,viewer':v.version>=4?'colors,current,dock,fonts,list,prior,version,viewer':v.version===3?'colors,current,dock,fonts,list,prior,version':'colors,current,fonts,list,prior,version'))return null;
-    if(v.version>=4&&v.viewer?.version!==(v.version===9?3:v.version===8?2:1))return null;
+    if(!v||typeof v!=='object'||Array.isArray(v)||![2,3,4,5,6,7,8,9,10].includes(v.version)||Object.keys(v).sort().join(',')!==(v.version>=10?'colors,current,dock,fonts,list,markers,mpr,prior,toolbar,version,viewer':v.version>=7?'colors,current,dock,fonts,list,mpr,prior,toolbar,version,viewer':v.version===6?'colors,current,dock,fonts,list,prior,toolbar,version,viewer':v.version>=4?'colors,current,dock,fonts,list,prior,version,viewer':v.version===3?'colors,current,dock,fonts,list,prior,version':'colors,current,fonts,list,prior,version'))return null;
+    if(v.version>=4&&v.viewer?.version!==(v.version>=9?3:v.version===8?2:1))return null;
     const clean=normalize({version:1,list:v.list,current:v.current,prior:v.prior}),f=normalizeFonts(v.fonts),c=normalizeColors(v.colors);
     const dock=v.version>=3?normalizeDock(v.dock):null,checkedView=v.version>=4?viewer.normalize(v.viewer):null;
     const view=checkedView&&clone(v.viewer);
-    const toolbar=v.version>=6?normalizeToolbar(v.toolbar):null,mpr=v.version>=7?mprModel?.normalize(v.mpr):null;
-    return clean&&f&&c&&(v.version===2||dock)&&(v.version<4||view)&&(v.version<6||toolbar)&&(v.version<7||mpr)&&(v.version<3||dock?.version===(v.version>=5?2:1))?{...clean,version:v.version,fonts:f,colors:c,...(dock?{dock}:{}),...(view?{viewer:view}:{}),...(toolbar?{toolbar}:{}),...(mpr?{mpr}:{})}:null;
+    const toolbar=v.version>=6?normalizeToolbar(v.toolbar):null,mpr=v.version>=7?mprModel?.normalize(v.mpr):null,marks=v.version>=10?markers.normalize(v.markers):null;
+    return clean&&f&&c&&(v.version===2||dock)&&(v.version<4||view)&&(v.version<6||toolbar)&&(v.version<7||mpr)&&(v.version<10||marks)&&(v.version<3||dock?.version===(v.version>=5?2:1))?{...clean,version:v.version,fonts:f,colors:c,...(dock?{dock}:{}),...(view?{viewer:view}:{}),...(toolbar?{toolbar}:{}),...(mpr?{mpr}:{}),...(marks?{markers:marks}:{})}:null;
   };
   const legacyViewer=()=>({version:1,...Object.fromEntries(['current','prior'].map(role=>{const p=viewerValue[role];return [role,{size:p.size,font:p.font,color:p.color,name:p.name,date:p.date,description:p.description}];}))});
-  return {host:account,read:()=>({...value,version:mprModel?9:6,...(mprModel?{mpr:readMpr()}:{}),fonts:{...fontValue},colors:{...colorValue},dock:{...dockValue},viewer:mprModel?viewer.normalize(viewerValue):legacyViewer(),toolbar:normalizeToolbar(toolbarValue)}),generation:()=>generation,normalize:normalizeAccount,allowed:()=>live()&&!!mprModel,
+  return {host:account,read:()=>({...value,version:mprModel?10:6,...(mprModel?{mpr:readMpr(),markers:{...markerValue}}:{}),fonts:{...fontValue},colors:{...colorValue},dock:{...dockValue},viewer:mprModel?viewer.normalize(viewerValue):legacyViewer(),toolbar:normalizeToolbar(toolbarValue)}),generation:()=>generation,normalize:normalizeAccount,allowed:()=>live()&&!!mprModel,
     apply:next=>{const clean=normalizeAccount(next);if(!live()||!clean)return false;
       if(clean.version>=6){const controller=options.getToolbar?.();if(controller&&!controller.canApply(clean.toolbar))return false;}
       if(clean.version>=3&&!setDock(clean.dock))return false;
       if(clean.version>=6&&!setToolbar(clean.toolbar))return false;
       if(clean.version>=4&&!setViewer(clean.viewer))return false;
       if(clean.version>=7&&!setMpr(clean.mpr))return false;
+      if(clean.version>=10&&!setMarkers(clean.markers))return false;
       value={version:1,list:clean.list,current:clean.current,prior:clean.prior};
       if(clean.version>=2){fontValue=clean.fonts;colorValue=clean.colors;applyFonts();applyColors();saveFonts();saveColors();}
       apply();save();return true;}};
