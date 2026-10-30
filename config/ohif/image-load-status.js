@@ -52,6 +52,7 @@ function kinCreateImageLoadStatus() {
     // into a successful blank frame. The loader's existing rejection path supplies the affected imageId.
     const workerManager = core.getWebWorkerManager?.(), executeTask = workerManager?.executeTask;
     sof3 ??= kinCreateSof3Decode({ size: window.config?.maxNumberOfWebWorkers || 3 });
+    if (executeTask) sof3.prewarm();
     const checkedDecode = function (workerName, methodName, ...args) {
       const decode = active && workerName === 'dicomImageLoader' && methodName === 'decodeTask';
       const dispatch = task => executeTask.call(this, workerName, methodName, task, ...args.slice(1));

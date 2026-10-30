@@ -114,6 +114,7 @@ class ViewerSof3DecodeDOM(unittest.TestCase):
 
     def test_lossless_frames_decode_in_wasm_and_reach_the_pinned_worker_as_little_endian(self):
         self.mount()
+        self.assertEqual(self.page.evaluate('kinSof3DecodeState().workers'), 1, 'a decoder is started before the first frame')
         decoded = 0
         for case in [c for c in CASES if c['components'] == 1]:
             for index, frame in enumerate(case['frames']):

@@ -37,9 +37,10 @@ function kinCreateSof3Decode({ workerUrl = '/worklist/hpacs-lite/sof3-decode-wor
     const entry = { worker, job: null };
     worker.onmessage = event => {
       const { id, pixels, error, unavailable: reason } = event.data || {};
+      // The decoder could not load: whatever this worker holds or the queue holds goes back to the pinned path.
+      if (reason) { release(String(reason)); return; }
       const job = entry.job;
       if (!job || job.id !== id) return;
-      if (reason) { release(String(reason)); return; }
       entry.job = null;
       if (pixels) {
         counts.routed++;
@@ -62,6 +63,9 @@ function kinCreateSof3Decode({ workerUrl = '/worklist/hpacs-lite/sof3-decode-wor
         pump();
       });
     },
+    // One worker loads and warms its decoder before the first frame arrives (a cold worker's first full-size frame
+    // measured ~280 ms against ~44 ms warm); further workers start when frames queue.
+    prewarm() { if (!unavailable && !workers.length) spawn(); },
     stop() { release(null); },
     state: () => ({ unavailable, workers: workers.length, queued: queue.length, ...counts }),
   };

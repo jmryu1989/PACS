@@ -85,7 +85,7 @@ test('truncated, damaged, colour or mis-sized streams are refused and never retu
 
 // The browser Worker contract the pool relies on: a script URL, asynchronous structured-clone messages with transfer,
 // onmessage/onerror, terminate(). The worker script itself and kin-sof3.js run unchanged in their own vm context.
-function workerWorld({ wasmStatus = 200, scriptError = null } = {}) {
+function workerWorld({ wasmStatus = 200, wasmBytes = wasm, scriptError = null } = {}) {
   const created = [];
   class Worker {
     constructor(url) {
@@ -96,11 +96,11 @@ function workerWorld({ wasmStatus = 200, scriptError = null } = {}) {
         setImmediate(() => { if (!worker.terminated) target(copy); });
       };
       const scope = vm.createContext({
-        console, URL, TextDecoder, WebAssembly, setTimeout, Promise,
+        console, URL, TextDecoder, WebAssembly, setTimeout, Promise, atob,
         location: { href: 'https://viewer.test' + url },
         fetch: async target => {
           assert.equal(String(target), 'https://viewer.test/worklist/hpacs-lite/kin-sof3.wasm');
-          return { ok: wasmStatus === 200, status: wasmStatus, arrayBuffer: async () => wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.length) };
+          return { ok: wasmStatus === 200, status: wasmStatus, arrayBuffer: async () => wasmBytes.buffer.slice(wasmBytes.byteOffset, wasmBytes.byteOffset + wasmBytes.length) };
         },
         importScripts: name => {
           assert.equal(name, 'kin-sof3.js');
@@ -187,13 +187,14 @@ test('a refused stream rejects with the decoder reason and is never handed to th
 });
 
 test('a decoder that cannot load sends queued frames down the unchanged pinned path and stays off for the page', async () => {
-  for (const [label, options] of [['wasm 404', { wasmStatus: 404 }], ['worker script failed', { scriptError: 'importScripts failed' }]]) {
+  for (const [label, options, reason] of [['wasm 404', { wasmStatus: 404 }, /HTTP 404/], ['worker script failed', { scriptError: 'importScripts failed' }, /importScripts failed/],
+    ['wasm does not compile', { wasmBytes: Buffer.from('not a wasm module') }, /WebAssembly|magic/i]]) {
     const world = workerWorld(options), pool = world.create({ size: 2 }), item = byName['p12-sv1-multiframe'];
     const tasks = item.frames.concat(item.frames).map(frame => task(item, frame));
     const results = await Promise.all(tasks.map(original => pool.decode(original, forwarded => ({ forwarded }))));
     results.forEach(({ forwarded }, index) => assert.equal(forwarded, tasks[index], label + ': the original task object'));
     const state = pool.state();
-    assert.match(String(state.unavailable), label === 'wasm 404' ? /HTTP 404/ : /importScripts failed/);
+    assert.match(String(state.unavailable), reason);
     assert.equal(state.fallbacks, tasks.length, label);
     assert.equal(pool.decode(task(item, item.frames[0]), () => assert.fail('decoded')), null, label + ': later frames skip the pool');
     assert.ok(world.created.every(worker => worker.terminated), label);
@@ -212,4 +213,20 @@ test('stopping the pool returns frames still waiting to the pinned path; the nex
   assert.equal(again.transferSyntax, LE);
   assert.equal(world.created.length, 2);
   pool.stop();
+});
+
+test('a prewarmed worker decodes the first frame; a decoder that cannot load is known before any frame arrives', async () => {
+  const world = workerWorld(), pool = world.create({ size: 3 }), item = byName['p16-sv1-2d'], frame = item.frames[0];
+  pool.prewarm(); pool.prewarm();
+  assert.equal(world.created.length, 1, 'one worker ahead of the first frame');
+  const forwarded = await pool.decode(task(item, frame), value => value);
+  assert.equal(firstDifference(new Uint16Array(forwarded.pixelData.buffer), expected(item, frame.seed)), null);
+  assert.equal(world.created.length, 1, 'the first frame used the prewarmed worker');
+  pool.stop();
+
+  const broken = workerWorld({ wasmStatus: 404 }), early = broken.create({ size: 3 });
+  early.prewarm();
+  while (!early.state().unavailable) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(early.decode(task(item, frame), () => assert.fail('decoded')), null);
+  assert.deepEqual({ ...early.state() }, { unavailable: 'kin-sof3.wasm HTTP 404', workers: 0, queued: 0, routed: 0, fallbacks: 0, rejected: 0 });
 });
