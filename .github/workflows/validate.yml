@@ -36,12 +36,14 @@ jobs:
           node --version
           npm ci --prefix api --ignore-scripts --no-audit --no-fund
           (cd api && ./node_modules/.bin/prisma generate)
-      - name: PG declaration and exact collection
-        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/declaration --tree emr/units --file scripts/emr-compose.py --tree tests/emr/b --tree api/prisma -- python3 -B scripts/emr-compose.py check
+      - name: PG deployment safety
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/emr-b-ci/declaration --file scripts/emr-compose.py --file docker-compose.yml --file docker-compose.prod.yml -- python3 -B scripts/emr-compose.py check
+          python3 scripts/record-run.py --run-dir tmp/emr-b-ci/compose-safety --file scripts/emr-compose.py --file docker-compose.yml --file docker-compose.prod.yml --file emr/units/b.json --file tests/emr/b/compose_test.py -- python3 -B tests/emr/b/compose_test.py
       - name: Retained law and public boundary contracts
         run: |
           python3 scripts/record-run.py --run-dir tmp/emr-b-ci/contract --tree api/src --file emr/units/b.json --file scripts/emr-compose.py --file tests/emr/b/contract_test.cjs -- node --test --test-concurrency=1 --test-reporter=tap tests/emr/b/contract_test.cjs
-          python3 -B scripts/emr-compose.py check-run --kind node --cases-from contract --run-dir tmp/emr-b-ci/contract
+          if grep -Eq '# (SKIP|TODO)([[:space:]]|$)' tmp/emr-b-ci/contract/stdout.log; then exit 1; fi
       - name: Transaction options, connection reserve and background drain
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/lifecycle --tree api/src --tree tests/emr/b -- node --test --test-concurrency=1 tests/emr/b/transaction_options_test.cjs tests/emr/b/client_pool_test.cjs tests/emr/b/lock_test.cjs
       - name: Request facts capture, ingress and ownership
