@@ -146,7 +146,8 @@ class Proxy:
             # A host sh without coreutils' base64 (Windows MinGit): a stand-in with the same output, for the Orthanc header.
             shim = self.dir / "shim"
             shim.mkdir()
-            (shim / "base64").write_text('#!/bin/sh\nexec "%s" -c "import base64,sys;sys.stdout.write(base64.b64encode(sys.stdin.buffer.read()).decode()+chr(10))"\n'
+            # Binary stdout preserves Unix LF on Windows; a CR would survive tr -d '\n' and truncate HTTP headers.
+            (shim / "base64").write_text('#!/bin/sh\nexec "%s" -c "import base64,sys;sys.stdout.buffer.write(base64.b64encode(sys.stdin.buffer.read())+bytes([10]))"\n'
                                          % Path(sys.executable).as_posix(), encoding="utf-8", newline="\n")
             env["PATH"] = str(shim) + os.pathsep + env.get("PATH", "")
         names = ["PUBLIC_PORT", "PUBLIC_PORT_SUFFIX", "SERVER_NAME", "TLS_CERTIFICATE", "TLS_CERTIFICATE_KEY"]
