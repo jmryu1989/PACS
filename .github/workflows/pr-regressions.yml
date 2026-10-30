@@ -1079,7 +1079,7 @@ jobs:
     needs: select
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['measurements']) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 73
+    timeout-minutes: 88
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -1112,7 +1112,7 @@ jobs:
         "$RUNNER_TEMP/measurement-python/bin/python" -m playwright install --with-deps chromium
     - name: D-MEASURE2 B1 real readback, held drafts, manual SR and source recovery
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
-      timeout-minutes: 43
+      timeout-minutes: 58
       run: |
         "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile measurements
     - name: Sanitized synthetic measurement evidence

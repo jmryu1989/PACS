@@ -236,7 +236,12 @@ PROFILES = {
         'project_prefix': 'kin-measure-ci-',
         # The cumulative measurement run can leave the last suite only seconds under
         # the shared default. Preserve its full hang allowance and cleanup margin.
-        'deadline_seconds': 40 * 60,
+        # Healthy hosted PR runs took 1353-1586s from database to cleanup (plus ~35s of
+        # unrecorded readiness), so 40 minutes left only 1.4-1.7x; one runner 4.3x slower
+        # throughout (pip, stack and every suite) ran out at the ninth suite (2026-10-30,
+        # run 41009566002). About twice the slowest healthy run, the margin the other
+        # profiles use: ceil(2 * 1620s) rounded up to 55 minutes.
+        'deadline_seconds': 55 * 60,
         'suite_timeout': 540,
         'suites': tuple((suite, class_name, 'ci-'+Path(suite).stem.replace('_','-'))
                         for suite, class_name in zip(SUITES, SUITE_CLASSES)),
