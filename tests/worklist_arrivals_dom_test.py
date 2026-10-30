@@ -83,6 +83,11 @@ HARNESS = """<!doctype html><html><body>
 <script>
 WORKCONTEXT
 window.setInterval=fn=>{window.pollCallback=fn;return 7};window.clearInterval=()=>{};
+// Presence is outside this list-poll fixture; the last interval captured below remains the work poll.
+let viewingTimer = null;
+function stopViewing() {}
+function syncViewingRows() {}
+async function refreshViewing() {}
 const $=selector=>document.querySelector(selector);let poll=null,pollGeneration=0,pollFails=0,commitEpoch=4,commitInFlight=false,serverMode=true,offline=false,demoMode=false;
 let studies=INITIAL,selectedUid='1.2.3',heldUid='1.2.3',appState={'1.2.3':{...INITIAL[0].state,version:3,draft:'LOCAL DRAFT'}};
 let nextReply=null,readStarted=0,readResolver=null,toasts=[],renders=0,loadReports=0,buttonUpdates=0,observed=[];
