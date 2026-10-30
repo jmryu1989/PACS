@@ -30,6 +30,15 @@ const PREVIEW_SIDE = 320;
 const GZIP_LEVEL = 1;
 /** One read of the stored file per chunk; a 17 MB frame is 17 reads, each handed to the response with backpressure. */
 const CHUNK_BYTES = 1 << 20;
+/**
+ * JPEG lossless process 14 (SV1 and any-predictor). The pinned viewer decodes it with a pure-JS decoder that takes ~1 s
+ * per 3328x2560 frame once its worker has decoded one, and the codestream is ~1.7x the JPEG-LS one of the same pixels
+ * (evidence mg-sv1-firstimage-20261030). A single-frame object is therefore asked of Orthanc as JPEG-LS lossless, which
+ * the viewer decodes in WASM; Orthanc transcodes whole instances, so a multi-frame object keeps its stored codestream.
+ */
+const JPEG_LOSSLESS_P14 = new Set(['1.2.840.10008.1.2.4.70', '1.2.840.10008.1.2.4.57']);
+const JPEG_LS_LOSSLESS = '1.2.840.10008.1.2.4.80';
+const JPEG_LS_FRAMES = `multipart/related; type="image/jls"; transfer-syntax=${JPEG_LS_LOSSLESS}`;
 
 export interface FrameRequest {
   studyUid: string; seriesUid: string; sopUid: string; frames: number[];
@@ -158,6 +167,13 @@ export class DicomFrameService {
       if (current) revision();
       return current;
     } : undefined;
+    // Only for a client that takes JPEG-LS parts at its top preference, and for the greyscale shapes verified pixel-equal.
+    const facts = object?.facts;
+    if (facts && facts.numberOfFrames === 1 && JPEG_LOSSLESS_P14.has(facts.transferSyntax!) && facts.samplesPerPixel === 1 &&
+        /^MONOCHROME[12]$/.test(facts.photometric) && directReadServes(accept, JPEG_LS_LOSSLESS, 'image/jls')) {
+      await this.orthanc.relay(path, JPEG_LS_FRAMES, target, signal, request.origin, confirm);
+      return;
+    }
     const layout = object?.layout ?? null, filePath = object ? this.filePath(object.uuid) : '';
     const mediaType = layout?.encapsulated ? ENCAPSULATED_MEDIA.get(object!.facts.transferSyntax!)! : 'application/octet-stream';
     // The description was checked against the file once; the file is checked again for this request, since a stored

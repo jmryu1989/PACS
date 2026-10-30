@@ -113,6 +113,54 @@ for (const [syntax, media] of ENCAPSULATED_MEDIA) test(`native ${syntax}: reques
   });
 });
 
+// The syntax and part type an Accept entry asks Orthanc for, parsed (quotes and spacing are not the contract).
+function asked(acceptEntry) {
+  const params = new Map(acceptEntry.split(';').slice(1).map(p => p.split('=').map(s => s.trim().replace(/"/g, ''))));
+  return { type: params.get('type'), syntax: params.get('transfer-syntax'), entries: acceptEntry.split(',').length };
+}
+const SV1 = '1.2.840.10008.1.2.4.70', P14 = '1.2.840.10008.1.2.4.57';
+
+test('SV1 first image: a single-frame JPEG lossless object reaches a JPEG-LS-capable viewer as JPEG-LS lossless, not its pure-JS codestream', async () => {
+  for (const syntax of [SV1, P14]) for (const { expanded } of clientHeaders) {
+    await setup(syntax, [[Buffer.from([1, 2, 3, 4])]], async (service, object, archive) => {
+      for (const stored of [false, true]) {
+        const sink = target(); await service.serveFrames(request({ accept: expanded, frames: [1], stored }), sink);
+        assert.equal((await sink.result()).headers['content-type'], 'relayed', `${syntax} is Orthanc's transcode`);
+        const call = archive.calls.filter(c => c[0] === 'relay').at(-1);
+        assert.equal(call[1], '/dicom-web/studies/1.2.3/series/1.2.3.4/instances/1.2.3.4.5/frames/1');
+        assert.deepEqual(asked(call[2]), { type: 'image/jls', syntax: '1.2.840.10008.1.2.4.80', entries: 1 }, `${syntax} asked as JPEG-LS lossless`);
+      }
+    });
+  }
+});
+
+test('SV1 transcode boundary: multi-frame, colour, and clients without JPEG-LS keep the stored codestream', async () => {
+  // Orthanc transcodes whole instances: a DBT keeps its stored frames from the direct reader.
+  await setup(SV1, payloads, async (service, object, archive) => {
+    const sink = target(); await service.serveFrames(request({ accept, frames: [2] }), sink);
+    const answer = await sink.result();
+    assert.deepEqual(parts(answer)[0].bytes, Buffer.concat(payloads[1]));
+    assert.ok(parts(answer)[0].headers.includes(`Content-Type: image/jpeg; transfer-syntax=${SV1}`));
+    assert.equal(archive.calls.some(c => c[0] === 'relay'), false);
+  });
+  await setup(SV1, [[Buffer.from([1, 2, 3, 4])]], async (service, object, archive) => {
+    // A client that does not take JPEG-LS parts (or prefers the stored JPEG) gets the stored codestream.
+    for (const other of ['multipart/related; type="image/jpeg"; transfer-syntax=*',
+      'multipart/related; type="image/jpeg"; transfer-syntax=*, multipart/related; type="image/jls"; transfer-syntax=*; q=0.5']) {
+      const sink = target(); await service.serveFrames(request({ accept: other, frames: [1] }), sink);
+      const answer = await sink.result();
+      assert.deepEqual(parts(answer)[0].bytes, Buffer.from([1, 2, 3, 4]), other);
+      assert.equal(archive.calls.some(c => c[0] === 'relay'), false, other);
+    }
+  });
+  await setup(SV1, [[Buffer.from([1, 2, 3, 4])]], async (service, object, archive) => {
+    object.tags.SamplesPerPixel = '3'; object.tags.PhotometricInterpretation = 'RGB';
+    const sink = target(); await service.serveFrames(request({ accept, frames: [1] }), sink);
+    assert.deepEqual(parts(await sink.result())[0].bytes, Buffer.from([1, 2, 3, 4]), 'colour is not in the verified shape');
+    assert.equal(archive.calls.some(c => c[0] === 'relay'), false);
+  });
+});
+
 test('encapsulation scan reads headers/table only and never a compressed payload', async () => {
   const file = encoded(payloads), reads = [];
   const l = await encapsulatedLayout(facts({ transferSyntax: '1.2.840.10008.1.2.4.90', numberOfFrames: 3, fileSize: file.length, storedSize: file.length }), async (at, n) => {
