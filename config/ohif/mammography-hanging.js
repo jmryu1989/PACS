@@ -231,6 +231,7 @@ function kinCreateMammographyHanging() {
         const ar = a.getBoundingClientRect(), br = b.getBoundingClientRect();
         return ar.top-br.top || ar.left-br.left;
       });
+      const shown = new Set();
       views.forEach((v, i) => {
         const cell = cells[i], host = document.querySelector('[data-viewport-uid="' + v.viewportId + '"]') ||
           (!v.displaySetInstanceUIDs?.length && panes.length === views.length ? panes[i] : null);
@@ -240,14 +241,20 @@ function kinCreateMammographyHanging() {
         const orientation = orientations.get(viewport);
         const unverified = orientation?.imageId === viewport?.getCurrentImageId?.() && orientation?.status === 'unverified';
         const matched = views.length === cells.length && v.displaySetInstanceUIDs?.[0] === cell.selected;
-        if (!matched && !unverified) { label?.remove(); return; }
+        if (!matched && !unverified) return;
         const text = (matched ? cell.label : '') + (unverified ? (matched ? ' · ' : '') + 'Orientation Unverified' : '');
-        if (label?.textContent === text) return;
-        if (!label) { label = document.createElement('div'); label.className = 'kin-mg-slot'; host.append(label); }
-        label.style.cssText = 'position:absolute;bottom:24px;left:8px;z-index:5;pointer-events:none;color:#fff;background:#101e32;padding:3px 6px;font:12px sans-serif';
-        label.textContent = text;
-        label.title = unverified ? '영상 방향을 확인할 수 없어 저장된 방향으로 표시합니다.' : '';
+        if (label?.textContent !== text) {
+          if (!label) { label = document.createElement('div'); label.className = 'kin-mg-slot'; host.append(label); }
+          label.style.cssText = 'position:absolute;bottom:24px;left:8px;z-index:5;pointer-events:none;color:#fff;background:#101e32;padding:3px 6px;font:12px sans-serif';
+          label.textContent = text;
+          label.title = unverified ? '영상 방향을 확인할 수 없어 저장된 방향으로 표시합니다.' : '';
+        }
+        shown.add(label);
       });
+      // An empty pane is labelled on its wrapper. Once the reader opens an image there, the
+      // pane's host becomes the inner viewport element, so the wrapper's "Missing" label would
+      // stay over an image it does not describe. Keep only the labels written for this state.
+      document.querySelectorAll('.kin-mg-slot').forEach(el => shown.has(el) || el.remove());
     }
     function protocol(data) {
       const model = window.KinMammographyModel;
