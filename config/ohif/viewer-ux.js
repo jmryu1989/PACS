@@ -106,13 +106,17 @@ function kinStackResize(service) {
   };
 }
 
-// The already requested animation frame stays scheduled: if this draw throws,
-// that frame retries it, and after a draw it finds nothing flagged.
+// A draw that throws leaves the engine's requested frame to retry it. A draw
+// that succeeds forgets that frame's handle, so it is cancelled here: left
+// scheduled it would repeat the VTK draw call and, after the engine is
+// destroyed, throw. A frame requested during the draw has its own handle.
 function kinDrawQueuedFrame(engine) {
   if (!engine || engine.hasBeenDestroyed || !engine._animationFrameSet) return;
   if (typeof engine._renderFlaggedViewports !== 'function') return;
+  const queued = engine._animationFrameHandle;
   try { engine._renderFlaggedViewports(); }
-  catch (error) { console.warn('Resize redraw deferred to the next frame', error); }
+  catch (error) { console.warn('Resize redraw deferred to the next frame', error); return; }
+  cancelAnimationFrame(queued);
 }
 
 // Stack defaults belong to its native tool group. MPR groups keep their own

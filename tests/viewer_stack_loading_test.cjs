@@ -18,9 +18,22 @@ async function fixture(imageIds = ['frame:1', 'frame:2', 'frame:3', 'frame:4']) 
       scheduled.delete(id); task.run();
     }
   };
-  const Events = { STACK_VIEWPORT_SCROLL: 'scroll', STACK_NEW_IMAGE: 'loaded', ELEMENT_ENABLED: 'enabled' };
+  // One browser frame queue shared by the engine and the product: unique handles, cancel removes a pending
+  // callback, and a callback requested while a frame runs waits for the following frame.
+  const frames = new Map();
+  let frameId = 0;
+  const requestAnimationFrame = run => { frames.set(++frameId, run); return frameId; };
+  const cancelAnimationFrame = id => { frames.delete(id); };
+  const nextFrame = () => {
+    for (const id of [...frames.keys()]) {
+      const run = frames.get(id);
+      if (run) { frames.delete(id); run(); }
+    }
+  };
+  const Events = { STACK_VIEWPORT_SCROLL: 'scroll', STACK_NEW_IMAGE: 'loaded', ELEMENT_ENABLED: 'enabled', IMAGE_RENDERED: 'rendered' };
   const element = new EventTarget();
-  const methods = native({ window: { setTimeout }, setTimeout, clearTimeout,
+  const methods = native({ window: { setTimeout, requestAnimationFrame, cancelAnimationFrame }, setTimeout, clearTimeout,
+    renderingEngineCache: { A: { delete() {} } },
     cache: { Ay: { isLoaded: id => cached.has(id) } }, enums: { Events, ViewportStatus: { PRE_RENDER: 'preRender' } },
     triggerEvent: { A(target, name, detail) { target.dispatchEvent(new CustomEvent(name, { detail })); } } });
   const indicator = methods.indicator(value => { loading = value; });
@@ -64,8 +77,7 @@ async function fixture(imageIds = ['frame:1', 'frame:2', 'frame:3', 'frame:4']) 
   }, methods.service);
   const window = { top: {}, cornerstone: { Enums: { Events }, eventTarget: new EventTarget() },
     cornerstoneTools: { Enums: { MouseBindings: {} }, ToolGroupManager: { getToolGroupForViewport() {} } } };
-  const context = { window, document: {}, console, setTimeout, clearTimeout,
-    requestAnimationFrame: () => 1, cancelAnimationFrame() {} };
+  const context = { window, document: {}, console, setTimeout, clearTimeout, requestAnimationFrame, cancelAnimationFrame };
   vm.runInNewContext(readFileSync('config/ohif.js', 'utf8'), context);
   const extension = window.config.extensions.find(e => e.id === 'kin.viewer-ux');
   await extension.preRegistration({ servicesManager: { services: { cornerstoneViewportService: service,
@@ -86,6 +98,8 @@ async function fixture(imageIds = ['frame:1', 'frame:2', 'frame:3', 'frame:4']) 
     matches: (a, b) => a?.study === '1.2' && a.seriesUid === b.seriesUid && a.sopUid === b.sopUid && a.frame === b.frame,
     hydrate() {}, highlight: () => ({ highlighted: false, annotation: 'none' }) };
   return { viewport, volume, service, extension, requests, pending, cached, timers, settle, loading: () => loading,
+    RenderingEngine: methods.RenderingEngine, nextFrame,
+    pendingFrames: run => [...frames.values()].filter(queued => queued === run).length,
     goTo: frame => context.kinViewerNavigateTo(env, { studyUid: '1.2', seriesUid: '1.3', sopUid: '1.4', frame }) };
 }
 
@@ -194,51 +208,84 @@ test('mode exit/reentry restores and reinstalls resize handling without stacking
 
 // The pinned RenderingEngine's resize assigns every canvas size (clearing it) and its render() only flags the
 // viewports and requests one animation frame. A cell beside a dropped series must not stay cleared after the
-// resize task while it still reports a rendered image.
-function frameEngine(viewports, { failDraws = 0 } = {}) {
-  const frames = [], needs = new Set();
-  const engine = {
-    canvases: new Map(viewports.map(v => [v.id, 'image'])),
-    _animationFrameSet: false, _animationFrameHandle: null, hasBeenDestroyed: false,
-    getViewports: () => viewports,
-    resize() { for (const id of engine.canvases.keys()) engine.canvases.set(id, 'cleared'); },
-    render() {
-      viewports.forEach(v => needs.add(v.id));
-      if (!engine._animationFrameSet) { frames.push(engine._renderFlaggedViewports); engine._animationFrameHandle = frames.length; engine._animationFrameSet = true; }
-    },
-    _renderFlaggedViewports() {
+// resize task while it still reports a rendered image, and the engine must not keep a frame it no longer owns.
+function pinnedEngine(f, { failDraws = 0 } = {}) {
+  const engine = new f.RenderingEngine('engine');
+  const views = [{ id: f.viewport.id, element: f.viewport.element }, { id: f.volume.id }];
+  const canvas = new Map(views.map(v => [v.id, 'image']));
+  let draws = 0;
+  Object.assign(engine, {
+    useCPURendering: false,
+    _viewports: new Map(views.map(v => [v.id, { ...v, setRendered() {} }])),
+    offscreenMultiRenderWindow: { getRenderWindow: () => ({ render() { draws++; } }),
+      getRenderers: () => views.map(v => ({ id: v.id, renderer: { setDraw() {} } })), removeRenderer() {}, delete() {} },
+    _resetViewport() {},
+    // As the pinned _resizeVTKViewports with immediate=false: canvas size assignment clears it, no redraw.
+    resize() { this._throwIfDestroyed(); for (const id of canvas.keys()) canvas.set(id, 'cleared'); },
+    renderViewportUsingCustomOrVtkPipeline(viewport) {
       if (failDraws > 0) { failDraws--; throw new Error('context lost'); }
-      for (const id of needs) engine.canvases.set(id, 'image');
-      needs.clear(); engine._animationFrameSet = false; engine._animationFrameHandle = null;
+      canvas.set(viewport.id, 'image');
+      return { element: viewport.element, viewportId: viewport.id };
     },
-    nextFrame() { frames.shift()?.(); },
-    pendingFrames: () => frames.length,
-  };
-  return engine;
+  });
+  f.service.renderingEngine = engine;
+  return { engine, canvases: () => [...canvas.values()], draws: () => draws,
+    frames: () => f.pendingFrames(engine._renderFlaggedViewports) };
 }
 
-test('resize draws its queued frame before returning, so no rendered cell is left cleared', async () => {
+test('resize draws its queued frame before returning and leaves no engine frame behind', async () => {
   const f = await fixture();
   try {
-    const engine = f.service.renderingEngine = frameEngine([...f.service.renderingEngine.getViewports()]);
+    const e = pinnedEngine(f);
     f.service.performResize();
-    assert.deepEqual([...engine.canvases.values()], ['image', 'image']);
-    assert.equal(engine._animationFrameSet, false);
-    engine.nextFrame(); // The frame the engine requested still runs and finds nothing left to draw.
-    assert.deepEqual([...engine.canvases.values()], ['image', 'image']);
+    assert.deepEqual(e.canvases(), ['image', 'image']);
+    assert.equal(e.draws(), 1);
+    assert.equal(e.frames(), 0, 'the frame the drawn work requested is not left scheduled');
+    f.nextFrame();
+    assert.equal(e.draws(), 1, 'no second render-window call for the same resize');
+    for (let i = 0; i < 10; i++) f.service.performResize();
+    assert.equal(e.frames(), 0);
+    assert.equal(e.draws(), 11);
+    assert.deepEqual(e.canvases(), ['image', 'image']);
+  } finally { f.extension.onModeExit(); }
+});
+
+test('an engine destroyed after a resize redraw has no frame left to throw', async () => {
+  const f = await fixture();
+  try {
+    const e = pinnedEngine(f);
+    f.service.performResize();
+    e.engine.destroy();
+    assert.doesNotThrow(() => f.nextFrame());
+    assert.equal(e.draws(), 1);
+  } finally { f.extension.onModeExit(); }
+});
+
+test('a render requested while the resize redraw runs keeps its own frame', async () => {
+  const f = await fixture();
+  try {
+    const e = pinnedEngine(f);
+    let again = true;
+    f.viewport.element.addEventListener('rendered', () => { if (again) { again = false; e.engine.renderViewport(f.volume.id); } });
+    f.service.performResize();
+    assert.equal(e.frames(), 1);
+    f.nextFrame();
+    assert.equal(e.draws(), 2);
+    assert.equal(e.frames(), 0);
   } finally { f.extension.onModeExit(); }
 });
 
 test('a resize redraw that fails is retried by the frame the engine already requested', async () => {
   const f = await fixture();
   try {
-    const engine = f.service.renderingEngine = frameEngine([...f.service.renderingEngine.getViewports()], { failDraws: 1 });
+    const e = pinnedEngine(f, { failDraws: 1 });
     const warn = console.warn; console.warn = () => {};
     try { f.service.performResize(); } finally { console.warn = warn; }
-    assert.deepEqual([...engine.canvases.values()], ['cleared', 'cleared']);
-    assert.equal(engine.pendingFrames(), 1);
-    engine.nextFrame();
-    assert.deepEqual([...engine.canvases.values()], ['image', 'image']);
+    assert.deepEqual(e.canvases(), ['cleared', 'cleared']);
+    assert.equal(e.frames(), 1);
+    f.nextFrame();
+    assert.deepEqual(e.canvases(), ['image', 'image']);
+    assert.equal(e.frames(), 0);
   } finally { f.extension.onModeExit(); }
 });
 
