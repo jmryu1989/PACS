@@ -232,7 +232,7 @@ PROFILES = {
     'measurements': {
         'out': ROOT / 'tests/e2e/artifacts/measurement-ci',
         'project_prefix': 'kin-measure-ci-',
-        # The cumulative nightly run can leave the last suite only seconds under
+        # The cumulative measurement run can leave the last suite only seconds under
         # the shared default. Preserve its full hang allowance and cleanup margin.
         'deadline_seconds': 40 * 60,
         'suite_timeout': 540,

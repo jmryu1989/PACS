@@ -22,16 +22,222 @@ NOT_DRAFT = ' && !github.event.pull_request.draft }}'
 AFTER_FAILURE = '${{ always()' + NOT_DRAFT
 AFTER_SIBLING_FAILURE = '${{ !cancelled()' + NOT_DRAFT
 
+# Windows SSL and known-folder lookup need OS paths even in an otherwise empty
+# hosted-runner environment. Preserve no credentials, Docker or CI settings.
+HOST_OS_ENV = {key: os.environ[key] for key in ('SYSTEMROOT', 'USERPROFILE') if key in os.environ}
+
+
+# Public CI contract: these suites must have an automatic PR owner.
+# Keep the inventory independent of the workflow so removing a command fails.
+REGRESSION_SUITES = {
+    'source-regressions': """
+        tests/admin_audit_attribution_test.cjs
+        tests/clinician_policy_test.py
+        tests/clinician_read_serializer_test.cjs
+        tests/emr/b/contract_test.cjs
+        tests/emr_contract_test.cjs
+        tests/execution_guard_test.py
+        tests/gateway_pipeline_contract_test.py
+        tests/gateway_receipt_source_test.py
+        tests/gateway_retry_source_test.py
+        tests/legal_pages_test.py
+        tests/order_reconciliation_source_test.py
+        tests/pacs_source_behavior_test.cjs
+        tests/pacs_split_modules_test.cjs
+        tests/record_run_test.py
+        tests/report_citation_migration_test.py
+        tests/report_citation_vectors_test.py
+        tests/report_structure_migration_test.py
+        tests/report_structure_vectors_test.py
+        tests/stage_exit_test.py
+        tests/study_identity_source_test.py
+    """.split(),
+    'worklist-dom': """
+        tests/multi_institution_worklist_dom_test.py
+        tests/order_reconciliation_dom_test.py
+        tests/report_actions_dom_test.py
+        tests/study_identity_dom_test.py
+        tests/worklist_arrivals_dom_test.py
+        tests/worklist_body_parts_dom_test.py
+        tests/worklist_header_dom_test.py
+        tests/worklist_image_thumbnails_dom_test.py
+        tests/worklist_narrow_layout_dom_test.py
+        tests/worklist_search_owner_dom_test.py
+        tests/worklist_split_uid_dom_test.py
+        tests/worklist_toolbar_dom_test.py
+    """.split(),
+    'report-dom': """
+        tests/report_citation_dom_test.py
+        tests/report_cursor_insert_dom_test.py
+        tests/report_dictation_host_dom_test.py
+        tests/report_dictation_input_dom_test.py
+        tests/report_preview_citation_dom_test.py
+        tests/report_rebase_dom_test.py
+        tests/report_structure_dom_test.py
+        tests/report_text_boundaries_dom_test.py
+        tests/report_version_citation_dom_test.py
+        tests/viewer_job_print_citation_dom_test.py
+        tests/viewer_job_print_pages_test.py
+    """.split(),
+    'viewer-dom': """
+        tests/context_loss_harness_test.py
+        tests/viewer_cell_merge_dom_test.py
+        tests/viewer_clinician_entry_dom_test.py
+        tests/viewer_context_loss_dom_test.py
+        tests/viewer_dicom_pdf_dom_test.py
+        tests/viewer_display_scope_dom_test.py
+        tests/viewer_hanging_protocol_dom_test.py
+        tests/viewer_hanging_protocol_mount_dom_test.py
+        tests/viewer_identity_fields_dom_test.py
+        tests/viewer_identity_position_dom_test.py
+        tests/viewer_image_text_dom_test.py
+        tests/viewer_image_text_loader_dom_test.py
+        tests/viewer_images_only_dom_test.py
+        tests/viewer_images_only_loader_dom_test.py
+        tests/viewer_resource_guard_dom_test.py
+        tests/viewer_session_dom_test.py
+        tests/viewer_tech_note_dom_test.py
+        tests/viewer_three_d_cursor_dom_test.py
+        tests/viewer_window_manager_dom_test.py
+    """.split(),
+    'clinician-dom': """
+        tests/clinician_home_dom_test.py
+        tests/clinician_question_dom_test.py
+        tests/clinician_request_dom_test.py
+        tests/clinician_timeline_dom_test.py
+        tests/clinician_viewer_dom_test.py
+    """.split(),
+    'critical-result-dom': """
+        tests/clinical_context_dom_test.py
+        tests/critical_result_recipient_dom_test.py
+        tests/critical_result_sender_dom_test.py
+    """.split(),
+    'admin-session-dom': """
+        tests/admin_audit_dom_test.py
+        tests/admin_gateway_status_dom_test.py
+        tests/admin_member_roles_dom_test.py
+        tests/admin_metrics_dom_test.py
+        tests/admin_session_dom_test.py
+        tests/auth_entry_dom_test.py
+        tests/auth_logout_dom_test.py
+        tests/report_session_page_dom_test.py
+        tests/session_entry_dom_test.py
+        tests/session_modules_dom_test.py
+    """.split(),
+    'related-layout-dom': """
+        tests/related_layout_dom_test.py
+    """.split(),
+    'study-transfer-dom': """
+        tests/study_transfer_local_dom_test.py
+    """.split(),
+    'privacy-dom': """
+        tests/privacy_date_dom_test.py
+    """.split(),
+    'viewer-native-dom': """
+        tests/viewer_stack_restore_dom_test.py
+    """.split(),
+    'proxy-contracts': """
+        tests/proxy_grant_log_test.py
+    """.split(),
+    'measurements': """
+        tests/e2e/test_cine.py
+        tests/e2e/test_dictation_live.py
+        tests/e2e/test_finding_navigation.py
+        tests/e2e/test_finding_worklist.py
+        tests/e2e/test_held_measurements.py
+        tests/e2e/test_manual_sr.py
+        tests/e2e/test_measurement_calibration.py
+        tests/e2e/test_measurement_panel.py
+        tests/e2e/test_measurement_readback.py
+        tests/e2e/test_measurement_recheck.py
+        tests/e2e/test_viewer_identity_fields.py
+        tests/e2e/test_viewer_identity_position.py
+        tests/e2e/test_viewer_recovery.py
+        tests/e2e/test_volume_cine.py
+        tests/e2e/test_worklist_body_parts.py
+        tests/finding_api_test.py
+        tests/reading_appearance_fields_live.py
+        tests/reading_appearance_live.py
+        tests/reading_appearance_position_live.py
+        tests/viewer_api_test.py
+    """.split(),
+}
+
 
 class MeasurementCiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.catalog = WorkflowCatalog(ci.ROOT)
 
+    def test_regression_suites_have_path_selected_pr_owners(self):
+        for owner, expected in REGRESSION_SUITES.items():
+            workflow, job = self.catalog.owner(owner)
+            self.assertEqual(workflow, '.github/workflows/validate.yml')
+            self.assertTrue(self.catalog.automatic(self.catalog.documents[workflow]))
+            self.assertEqual(job['needs'], 'select')
+            actual = set()
+            for step in job['steps']:
+                for line in step.get('run', '').splitlines():
+                    args = shlex.split(re.sub(r'\$\{\{[^}]+\}\}', 'EXPRESSION', line), comments=True)
+                    if '--' in args:
+                        args = args[args.index('--') + 1:]
+                    actual.update(a for a in args if a.startswith('tests/')
+                                  and a.endswith(('.py', '.cjs')) and a != 'tests/measurement_ci.py')
+                    if 'discover' in args:
+                        actual.update(p.relative_to(ci.ROOT).as_posix()
+                                      for p in (ci.ROOT / 'tests').glob(args[args.index('-p') + 1]))
+                    if '--profile' in args:
+                        actual.update('tests/' + row[0] for row in ci.PROFILES[args[args.index('--profile') + 1]]['suites'])
+            # The existing browser APT guard is also a suite, repeated in each browser setup.
+            self.assertEqual(actual, set(expected) | (set() if owner == 'proxy-contracts'
+                                                     else {'tests/ci_browser_apt_test.py'}), owner)
+
+    def test_regression_inputs_select_their_pr_job(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('regression_selector', ci.ROOT / 'scripts/ci_select.py')
+        selector = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(selector)
+        selected = {}
+
+        def check(path, owner):
+            if path not in selected:
+                selected[path] = selector.select([path])
+            self.assertTrue(selected[path][owner], (owner, path))
+
+        for owner, suites in REGRESSION_SUITES.items():
+            for path in suites:
+                check(path, owner)
+            for step in self.catalog.job(owner)['steps']:
+                args = shlex.split(re.sub(r'\$\{\{[^}]+\}\}', 'EXPRESSION', step.get('run', '')), comments=True)
+                for index, arg in enumerate(args[:-1]):
+                    if arg not in ('--file', '--tree'):
+                        continue
+                    path = args[index + 1]
+                    if '$' in path or 'node_modules/' in path:
+                        continue
+                    check(path + '/new-input.py' if arg == '--tree' else path, owner)
+                    if path == 'config/ohif.js':
+                        check('config/ohif/viewer.js', owner)
+            self.assertTrue(selector.select([], all_jobs=True)[owner])
+        self.assertFalse(any(selector.select(['docs/unrelated.md']).values()))
+        # A legal fixture is Markdown too; dropping all .md paths loses this regression.
+        check('tests/fixtures/legal/verified-statutes.md', 'source-regressions')
+        check('api/src/manual-sr.service.ts', 'measurements')
+        check('worklist-v0/hpacs-lite/viewer-measurements.js', 'measurements')
+
+    def test_complete_measurement_profile_is_an_automatic_pr_contract(self):
+        owner = self.catalog.profile_report(['measurements'])['measurements']
+        self.assertEqual((owner['workflow'], owner['job']), ('.github/workflows/validate.yml', 'measurements'))
+        self.assertFalse(owner['dispatch'])
+        self.assertEqual([row[0] for row in ci.PROFILES['measurements']['suites']], list(ci.SUITES))
+        self.assertEqual([row[1] for row in ci.PROFILES['measurements']['suites']], list(ci.SUITE_CLASSES))
+        events = self.catalog.documents[owner['workflow']]
+        self.assertIn('workflow_dispatch', events.get('on', events.get(True)))
 
     def test_consolidated_profiles_keep_commands_deadlines_and_artifacts(self):
         # D1799/D1801: grouping changes job layout, never the real suite selection.
         expected = {
+            'measurements': ['measurements'],
             'volume-mpr': ['volume-mpr', 'volume-slab', 'volume-path', 'volume-sync-preferences'],
             'volume-mip-voi': ['volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient'],
             's7-u5-session-contracts': ['u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries', 'u5-session-browser', 'u5-session-end', 'u5-fixups', 'context-loss'],
@@ -209,10 +415,14 @@ class MeasurementCiTests(unittest.TestCase):
             self.assertEqual(report['volume-rendering']['workflow'], '.github/workflows/renamed-volume.yml')
 
     def test_removed_profile_job_is_rejected(self):
+        import yaml
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             shutil.copytree(ci.ROOT / '.github/workflows', root / '.github/workflows')
-            (root / self.catalog.owner('volume-rendering')[0]).unlink()
+            path = root / self.catalog.owner('volume-rendering')[0]
+            workflow = yaml.safe_load(path.read_text(encoding='utf-8'))
+            del workflow['jobs']['volume-rendering']
+            path.write_text(yaml.safe_dump(workflow), encoding='utf-8')
             with self.assertRaisesRegex(ValueError, "job 'volume-rendering'.*found 0"):
                 ci.workflow_report(root)
 
@@ -238,7 +448,7 @@ class MeasurementCiTests(unittest.TestCase):
                 calls.append((command, kwargs['timeout']))
                 return SimpleNamespace(returncode=1 if 'up' in command else 0, stdout=b'', stderr=b'')
             profile = dict(ci.PROFILES['emr-b'], out=root/'out')
-            with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted'}, clear=True), \
+            with patch.dict(os.environ, {**HOST_OS_ENV, 'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted'}, clear=True), \
                     patch.object(ci, 'ROOT', root), patch.dict(ci.PROFILES, {'emr-b': profile}), \
                     patch.object(ci, 'seed_source'), patch.object(ci, 'profile_deadline_seconds', return_value=37), \
                     patch.object(ci.time, 'monotonic', side_effect=[100, 105, 106, 107, 108, 109, 110]), \
@@ -264,7 +474,7 @@ class MeasurementCiTests(unittest.TestCase):
                         for name in ('volume-mpr', 'volume-slab', 'volume-path')}
             def docker_output(command):
                 return b'unix:///runner.sock' if 'inspect' in command else b''
-            with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted'}, clear=True), \
+            with patch.dict(os.environ, {**HOST_OS_ENV, 'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted'}, clear=True), \
                     patch.object(ci, 'ROOT', root), patch.dict(ci.PROFILES, profiles), \
                     patch.object(ci.subprocess, 'check_output', side_effect=docker_output), \
                     patch.object(ci.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=b'', stderr=b'')) as run, \
@@ -353,7 +563,7 @@ class MeasurementCiTests(unittest.TestCase):
                 secret = seen[0][1].get('KIN_EMR_RUNTIME_PASSWORD', 'missing')
                 return MagicMock(returncode=1 if len(seen) == 1 else 0, stdout=('echo ' + secret).encode(), stderr=b'')
 
-            with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted'}, clear=True), \
+            with patch.dict(os.environ, {**HOST_OS_ENV, 'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted'}, clear=True), \
                     patch.object(ci, 'ROOT', root), patch.dict(ci.PROFILES, {'emr-b': patched}), \
                     patch.object(ci, 'seed_source'), \
                     patch.object(ci.subprocess, 'check_output', side_effect=[b'', b'', b'unix:///var/run/docker.sock']), \
@@ -550,7 +760,7 @@ class MeasurementCiTests(unittest.TestCase):
                     return subprocess_run(command, **kwargs)
                 return MagicMock(returncode=code, stdout=b'module output', stderr=b'')
 
-            with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted',
+            with patch.dict(os.environ, {**HOST_OS_ENV, 'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted',
                                           'RUNNER_TEMP': folder}, clear=True), \
                     patch.object(ci, 'ROOT', root), patch.dict(ci.PROFILES, {'measurements': profile}), \
                     patch.object(ci.gate, 'STATE', state), \
@@ -885,7 +1095,7 @@ class MeasurementCiTests(unittest.TestCase):
                 root = Path(folder)
                 response = MagicMock(); response.__enter__.return_value.status = 200
                 response.__enter__.return_value.read.return_value = b'{"memberRights":"ready"}'
-                with patch.dict(os.environ, {'GITHUB_ACTIONS':'true', 'RUNNER_ENVIRONMENT':'github-hosted'}, clear=True), \
+                with patch.dict(os.environ, {**HOST_OS_ENV, 'GITHUB_ACTIONS':'true', 'RUNNER_ENVIRONMENT':'github-hosted'}, clear=True), \
                      patch.object(ci, 'ROOT', root), \
                      patch.dict(ci.PROFILES, {'u2b-regressions': {**profile, 'out': root/'artifacts'}}), \
                      patch.object(ci, 'time', fake_time), \
@@ -2575,7 +2785,7 @@ class MeasurementCiTests(unittest.TestCase):
             response=MagicMock();response.__enter__.return_value.status=200
             response.__enter__.return_value.read.return_value = b'{"memberRights":"ready"}'
             checks=[b'',b'',b'unix:///var/run/docker.sock']
-            with patch.dict(os.environ, {'GITHUB_ACTIONS':'true',
+            with patch.dict(os.environ, {**HOST_OS_ENV, 'GITHUB_ACTIONS':'true',
                     'RUNNER_ENVIRONMENT':'github-hosted','RUNNER_TEMP':folder}, clear=True), \
                  patch.object(ci,'ROOT',root), \
                  patch.dict(ci.PROFILES, {'volume-rendering':profile}), \
@@ -2914,7 +3124,7 @@ class MeasurementCiTests(unittest.TestCase):
 
             response = MagicMock(); response.__enter__.return_value.status = 200
             response.__enter__.return_value.read.return_value = b'{"memberRights":"ready"}'
-            with patch.dict(os.environ, {'GITHUB_ACTIONS':'true', 'RUNNER_ENVIRONMENT':'github-hosted'}, clear=True), \
+            with patch.dict(os.environ, {**HOST_OS_ENV, 'GITHUB_ACTIONS':'true', 'RUNNER_ENVIRONMENT':'github-hosted'}, clear=True), \
                  patch.object(ci, 'ROOT', root), \
                  patch.dict(ci.PROFILES, {'gateway-e2e': profile}), \
                  patch.object(ci.gate, 'STATE', root / 'gate-state'), \
@@ -2963,7 +3173,7 @@ class MeasurementCiTests(unittest.TestCase):
 
             response = MagicMock(); response.__enter__.return_value.status = 200
             response.__enter__.return_value.read.return_value = b'{"memberRights":"ready"}'
-            with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted'}, clear=True), \
+            with patch.dict(os.environ, {**HOST_OS_ENV, 'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted'}, clear=True), \
                  patch.object(ci, 'ROOT', root), patch.dict(ci.PROFILES, profiles), \
                  patch.object(ci, 'seed_source', side_effect=seed), \
                  patch.object(ci.subprocess, 'check_output', side_effect=[b'', b'', b'unix:///var/run/docker.sock']*2), \

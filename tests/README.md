@@ -1,5 +1,16 @@
 # 살아 있는 불변조건 테스트
 
+CI 회귀 시험은 `.github/workflows/validate.yml` 한 곳에서 PR 경로에 따라 실행한다.
+종전 `measurements-nightly.yml`의 순수·Node·static DOM·served stack·measurement 시험도
+`scripts/ci-paths.json`에 선언한 시험 자체·fixture·제품 입력이 바뀌면 PR에서 실행한다.
+DOM은 기능별 병렬 job으로, native OHIF·nginx·measurement는 각각의 실행 환경을 유지한다.
+Markdown fixture도 입력이며 일반 문서 변경은 해당 경로 선언이 없으면 job을 선택하지 않는다.
+전체 회귀 실행은 `validate.yml`의 기존 `workflow_dispatch` 또는 버전 태그를 사용한다.
+별도 measurement 야간 workflow는 없으며 기존 restore-product 예약은 복원 리허설만 담당한다.
+`candidate.yml` G3의 최종 SHA 불변조건·worklist·누적 업무 흐름 선택은 그대로 유지한다.
+경로 선택·profile 소유권·선언/수집 대조는 `measurement_ci_test.py`,
+`execution_selection_test.py`, `candidate_ci_test.py`, `ci_workflow_consumers_test.py`로 검사한다.
+
 일상 업무 제한 완화(caution-app): `caution_app_dom_test.py`는 이름 초안·확인 없는 복사·계정 링크·SR 부분 표시를,
 `clinical_context_service_test.cjs`/`clinical_context_dom_test.py`는 이전 판독·이력 이어읽기를 검사한다.
 `keycloak_member_paging_test.cjs`는 1,000명 이후 사용자 조회를, `viewer_volume_job_test.cjs`는 201번째 작업과 66개 주석의 보존을 검사한다.
