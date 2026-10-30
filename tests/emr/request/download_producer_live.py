@@ -25,20 +25,14 @@ class DownloadProducerLive(PgLedgerFixture):
         env = {**os.environ, 'DATABASE_URL': self.runtime_url, 'KIN_B2R_WITNESS_URL': self.witness_url,
                'KIN_B2R_SPOOL': str(ROOT / 'tmp/download-producer-b2/spool' / self.token), 'KIN_DOWNLOAD_REVIEW': review}
         if self.image:
-            command = ['docker', 'run', '--rm', '--name', self.container + '-node', '--label', 'kin.b2r=' + self.token,
+            command = ['docker', 'run', '--name', self.container + '-node', '--label', 'kin.b2r=' + self.token,
                        '--network', self.network, '--mount', 'type=bind,source=' + str(driver) + ',target=/app/download-test.cjs,readonly',
                        '-e', 'KIN_DOWNLOAD_API=/app', '-e', 'KIN_DOWNLOAD_REVIEW=' + review, '-e', 'DATABASE_URL=' + self.runtime_url,
                        '-e', 'KIN_B2R_WITNESS_URL=' + self.witness_url, '-e', 'KIN_B2R_SPOOL=/tmp/download-spool',
                        self.image, 'node', '/app/download-test.cjs']
         else:
             command = [os.environ['KIN_B2R_NODE'], str(driver)]
-        result = self.command(command, env=env, check=False, timeout=120)
-        evidence = ROOT / 'tmp/download-producer-b2' / self.token
-        evidence.mkdir(parents=True, exist_ok=True)
-        (evidence / 'node.stdout.log').write_text(result.stdout, encoding='utf-8')
-        (evidence / 'node.stderr.log').write_text(result.stderr, encoding='utf-8')
-        print(result.stdout)
-        self.assertEqual(result.returncode, 0, result.stderr[-3000:])
+        self.run_node_case(command, ROOT / 'tmp/download-producer-b2' / self.token, env=env, timeout=120)
 
 
 if __name__ == '__main__':

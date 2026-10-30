@@ -54,6 +54,9 @@ jobs:
       - name: Module A local-read projection, outcome and audit replay
         timeout-minutes: 5
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/module-a-pure --tree api/src --tree tests/emr/a -- node --test tests/emr/a/local_read_test.cjs
+      - name: Native crash evidence of a node child
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/native-crash --file tests/emr/b/native_crash_test.py --file tests/emr/b/pg_ledger_restore_test.py -- python3 -B tests/emr/b/native_crash_test.py
       - name: Production API image of this commit
         timeout-minutes: 15
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/image --tree api/src --tree api/prisma --file api/Dockerfile --file api/start-production.sh --file api/package-lock.json -- docker build --target production --build-arg "VCS_REF=${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}" -t "kin-emrb-ci:${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}" api

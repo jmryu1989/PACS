@@ -156,7 +156,7 @@ B의 원장은 업무 데이터와 같은 PostgreSQL 트랜잭션에 참여하�
 `formatVersion: 1`의 필드·규칙·체인 바이트는 그대로다. `parseAccessEvent()`는 getter를 실행하지 않고 판본을 읽어 v1과 v2를 나누며 v2는 닫힌 두 분기다.
 
 - **`online-auth`**: `auth.login`·`auth.entry`·`auth.logout`·`auth.session.expired`(법정행위 전부 none, `AUTH_STATUTORY_ACT`). `targets`는 항상 빈 배열이며 임상 대상을 합성하지 않는다. 실행자(`userId`)와 영향 신원(`affectedIdentity`)을 분리한다: 회원 자신의 로그인·종료는 같은 신원, 관리자의 isolation은 다른 회원, 세션 수거는 서비스 신원과 그 회원이다(`service:auth-session-sweep`, `INTERNAL_SURFACES`, IP는 `not-applicable: in-process-service`). 검증 후 거절한 로그인은 known 신원을 남기고 검증 전 거절은 unresolved다. 역할은 확인된 빈 배열도 known이며 DB 권한 판(`rightsVersion`)을 함께 둔다. 기관 미승인 회원의 인증 성공은 `actingInstitution: not-applicable / not-approved`로 임상 접근 성공과 구별한다. 성공은 확인된 역할·권한 판과 비인증 난수 세션 참조(`authref:<UUID>`)를 남기고 실패에는 세션이 없다. 관찰하지 못한 접속지·관리기관은 unresolved로 유지하며, 기관에 속하지 않는 내부 수거 작업의 actingInstitution은 in-process-service로 표시한다. `auth`의 `endCause`·`failureCause`·`trigger`는 닫힌 값이며 trigger는 재인증 종료에만 있다. 원사건 ID는 서버가 만든 UUID다.
-- **`verified-offline`**: 단말에서 실제로 일어난 임상 행위. IP는 항상 `unresolved: offline`(재접속 IP는 `relatedEventId`의 별도 수신사건), 기기·kid·사전권한·시간 근거/불확실도·기기 순서·대상 manifest·실제 signedAt을 요구하며 이 사실은 서버 시작 시 한 번 구성하는 `composeOfflineReceiptVerifier()`의 결과와 같아야 한다. 본문의 `offline`/`verified` 플래그는 근거가 아니다. C의 실제 키·서명 검증이 없는 현재는 아무것도 구성하지 않으므로 이 분기는 `OfflineVerificationUnsupported`로 거절된다(B2가 main.ts에서 구성 위치를 정한다).
+- **`verified-offline`**: 단말에서 실제로 일어난 임상 행위. 첫 릴리스는 offline approval을 제공하지 않으므로(D1753) 본문의 `offline`/`verified` 플래그와 관계없이 이 분기는 항상 `OfflineVerificationUnsupported`로 거절된다.
 
 B의 SQL 전용 저장(schema `emr_access`, 전용 tablespace)은 Prisma 모델이 아니므로 `SQL_STORAGE_CLASSIFICATION`에 따로 분류하고 실제 catalog와 양방향 대조한다. 법적 보존 의무·요청(`legal-duty`)과 검토된 조문 판본 이력(`legal-reference`)은 원기록을 따르는 증빙이다(`source-record`). 저장된 접속사건은 `emr_access.access_entry` 모델로 A의 고정 접속 매핑과 같은 사실을 돌려준다.
 
@@ -177,8 +177,6 @@ DISPOSED_D557: 공격자 시나리오에 근거한 체인·외부 seal·anti-rol
 **D-18 업무 문맥:** 기존 서버 자동 문맥을 사건에 유지한다. 문맥 밖 사유는 선택 사항이며 일반 열람을 차단하지 않는다. 로그인/Approve UI나 단계별 재인증을 추가하지 않는다. 서버 보유 의사별 온라인 서명은 C2가 구현하며 B2는 키를 생성하거나 사용하지 않는다. 첫 릴리스의 offline approval은 제공하지 않는다.
 
 **D-3 Tech Note:** 방사선사 본인 Tech Note는 작성자 본인 키 서명판(`tech-note`, 서명 필수)이고 관리자 메모는 서명 없는 운영 문구(`operational-note`)다. 저장 행의 작성자 역할(`authorRole`)로 구분하고 요청 플래그로 정하지 않는다. 서명 연결은 C다.
-
-D596 단말 경계(`TERMINAL_RECORD_BOUNDARY`, 저장은 C의 단말 대기열): 미전송 서명 원본(`offline-signed-original`)은 서명자 소유, 실제 signedAt부터의 판독/진료기록 기간이며 private-draft의 목적 종료로 지워지지 않고 수신·재인증 시각으로 기산하지 않는다(`TerminalOriginalTimeRefused`). 복구·재검토 작업본(`recovery-working-copy`)은 같은 회원 소유·원본 사건 참조·목적 ID를 가진 목적 자료이며 검증된 원본 수신(`original-received`) 또는 소유자 폐기에서 끝난다. 상태는 `pending-transmission`·`received-unverified`·`verified`·`verification-refused`다.
 
 **A low 이관 상태(B1):** L5-02의 B 부분은 `emr_access.clause_version`(설치 자격만 기록, 수정·삭제 거절)과 결속 reader의 전체 hold 목록(활성·종료·해제, `complete:true`, 조회 실패는 빈 집합이 아님)이다. F/H/I 부분은 남는다. L5-05(main 단일 구성·AST 허용 위치 이동)는 B2, L5-01·03·04·06은 C/F/H/I 그대로다.
 
@@ -228,7 +226,7 @@ REQ-EMR-01/17/19 → RISK-EMR-01/17/19 → TEST-EMR-01/17/19-A: 분류·최장 �
 
 B의 `emr_access.order_fact`는 주문 사실의 추가 전용 이력이다. 상태 사건과 고정 임상 판 사건을 구별하며 재수신·취소가 원 서명판의 시각이나 내용을 바꾸지 못한다. `recordOrderFact`는 같은 기록의 저장 잠금 아래 이전 사건과 대조하고, 같은 ID의 다른 내용·불완전 이력·이미 성립한 의무의 축소를 거절한다. 만료일은 사건 행에 넣지 않는다. C는 기존 Order를 이 계약에 연결하고 이행 확인을 기존 매칭 과정에서 수행한다. B는 정상 판독 화면에 클릭·입력을 추가하지 않는다.
 
-미확인·열림·대사·장애 절차에는 담당 직무/배정자, enteredAt, 유한한 증거·상신·최종 결정 기한, 차상위 결정자, 연장 상한과 새 객관적 근거가 필수다. 무응답·재시도는 기한을 갱신하지 않는다. 기한 경과는 이관할 상태를 반환하며 임상·수탁 의무를 소멸시키지 않는다. 분류 확정, 실제 근거/범위/재검토일의 의무 지속, 원본 보존 검증 후 적법 반환, 불필요 운영자료 파기의 네 결정만 인정한다. `refreshOrderLifecycle`는 같은 고정 임상판의 저장된 후속 사실만 갱신하고 기산은 유지한다. H/I는 유한 설정값, 자동 이관·파기 실행, N일 사본 종료를 연결해야 한다. B는 무응답을 파기 허가나 무기한 보유 근거로 만들지 않는다.
+미확인·열림·대사·장애 절차에는 담당 직무/배정자와 기록된 결정만 둔다. 결정이 기록되기 전에는 시간이 지나도 검토 중(`pending`)이며 임상·수탁 의무를 소멸시키지 않는다. 분류 확정, 실제 근거/범위/재검토일의 의무 지속(재검토일이 지나면 다시 검토 중), 원본 보존 검증 후 적법 반환, 불필요 운영자료 파기의 네 결정만 인정하며 기록된 결정은 고쳐 쓰지 않는다. `refreshOrderLifecycle`는 같은 고정 임상판의 저장된 후속 사실만 갱신하고 기산은 유지한다. H/I는 자동 이관·파기 실행, N일 사본 종료를 연결해야 한다. B는 무응답을 파기 허가나 무기한 보유 근거로 만들지 않는다.
 
 접속·열람 사건은 viewing 스트림의 2년 하한, 변경 이력·원판·원서명·출처·원 기산 증거는 원기록 의무, 단순 전달 영수증은 제품 정책 2년으로 분리한다. 영수증의 2년은 법정 하한이나 원시 payload 전체의 보존 근거가 아니다. `orderReceptionEvidence`는 이 세 참조를 구별하고 원본 증거는 access payload가 아닌 주문 사실 저장소에 둔다. `nhi:96-4.1` 의무는 검토된 조문 이력과 실제 종료 사건을 읽는 법적 의무 어댑터를 요구한다. 종료 사건 공급이 불가능하면 담당자 절차의 의무 지속/적법 반환 경로를 사용하며 시각만으로 해제하지 않는다.
 

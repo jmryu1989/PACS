@@ -30,22 +30,18 @@ class OnlineClinicalPg(pg.PgLedgerFixture):
                    'KIN_D_EXPECTED_PATH': '/evidence/expected.json' if self.image else str(logs / 'expected.json'),
                    'KIN_D_RESTORED': '1' if restored else '0'}
             if self.image:
-                command = ['docker', 'run', '--rm', '--network', self.network, '--tmpfs', '/tmp',
+                command = ['docker', 'run', '--name', self.container + '-node', '--label', 'kin.b2r=' + self.token,
+                           '--network', self.network, '--tmpfs', '/tmp',
                            '-v', str(ROOT / 'tests/emr/d') + ':/tests:ro',
                            '-v', str(logs) + ':/evidence', '-e', 'KIN_D_API=/app']
                 for key, value in env.items():
                     command += ['-e', key + '=' + value]
                 command += ['--entrypoint', 'node', self.image, '--test', '/tests/online_pg_test.cjs']
-                result = self.command(command, check=False)
             else:
-                result = self.command([os.environ['KIN_B2R_NODE'], '--test',
-                                       str(ROOT / 'tests/emr/d/online_pg_test.cjs')],
-                                      env={**os.environ, **env}, check=False)
+                command = [os.environ['KIN_B2R_NODE'], '--test', str(ROOT / 'tests/emr/d/online_pg_test.cjs')]
             phase = 'restored' if restored else 'original'
-            (logs / (phase + '.stdout')).write_text(result.stdout, encoding='utf-8')
-            (logs / (phase + '.stderr')).write_text(result.stderr, encoding='utf-8')
             print('D online raw logs:', logs, phase)
-            self.assertEqual(result.returncode, 0, result.stdout[-3000:] + result.stderr[-1000:])
+            self.run_node_case(command, logs, env={**os.environ, **env}, label=phase)
 
         run(False)
         self.command(['docker', 'exec', self.container, 'pg_dump', '-U', self.admin_user,
@@ -68,19 +64,16 @@ class ReportCommitPg(pg.PgLedgerFixture):
                'KIN_D_SPOOL': '/tmp/report-spool' if self.image else str(logs / 'spool')}
         env.update(getattr(self, 'http_environment', {}))
         if self.image:
-            command = ['docker', 'run', '--rm', '--network', self.network,
+            command = ['docker', 'run', '--name', self.container + '-node', '--label', 'kin.b2r=' + self.token,
+                       '--network', self.network,
                        '-v', str(ROOT / 'tests/emr/d') + ':/tests:ro', '-e', 'KIN_D_API=/app']
             for key, value in env.items():
                 command += ['-e', key + '=' + value]
             command += ['--entrypoint', 'node', self.image, '--test', '/tests/' + self.script]
-            result = self.command(command, check=False)
         else:
-            result = self.command([os.environ['KIN_B2R_NODE'], '--test', str(ROOT / 'tests/emr/d' / self.script)],
-                                  env={**os.environ, **env}, check=False)
-        (logs / 'stdout.log').write_text(result.stdout, encoding='utf-8')
-        (logs / 'stderr.log').write_text(result.stderr, encoding='utf-8')
+            command = [os.environ['KIN_B2R_NODE'], '--test', str(ROOT / 'tests/emr/d' / self.script)]
         print('Report commit HTTP raw logs:', logs)
-        self.assertEqual(result.returncode, 0, result.stdout[-3000:] + result.stderr[-1000:])
+        self.run_node_case(command, logs, env={**os.environ, **env})
 
 
 class ClinicalRoutesPg(pg.PgLedgerFixture):

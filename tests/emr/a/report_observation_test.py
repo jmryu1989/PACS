@@ -10,7 +10,6 @@ The Node driver is embedded so the single A4 entry point is self-contained (A3's
 import os
 from pathlib import Path
 import re
-import subprocess
 import sys
 import unittest
 
@@ -527,7 +526,7 @@ class ReportObservationHttp(PgLedgerFixture):
                'KIN_B2R_SPOOL': str(evidence / ('spool-' + phase)),
                'KIN_B2R_BUILD': os.environ.get('KIN_B2R_BUILD', str(ROOT / 'api/dist')), 'KIN_A4_PHASE': phase, **extra}
         if self.image:
-            command = ['docker', 'run', '--rm', '--name', self.container + '-node', '--label', 'kin.b2r=' + self.token,
+            command = ['docker', 'run', '--name', self.container + '-node', '--label', 'kin.b2r=' + self.token,
                        '--network', self.network, '--memory', '1536m', '--memory-swap', '1536m', '--cpus', '2',
                        '--mount', 'type=bind,source=' + str(driver) + ',target=/app/report_observation.cjs,readonly']
             for key, value in {'DATABASE_URL': self.runtime_url, 'KIN_B2R_WITNESS_URL': self.witness_url,
@@ -537,19 +536,8 @@ class ReportObservationHttp(PgLedgerFixture):
             command += [self.image, 'node', '--test', '--test-reporter=tap', '/app/report_observation.cjs']
         else:
             command = [os.environ['KIN_B2R_NODE'], '--test', '--test-reporter=tap', str(driver)]
-        try:
-            result = self.command(command, env=env, check=False, timeout=240)  # A2's report-read driver hang timeout.
-        except subprocess.TimeoutExpired as error:
-            # Keep partial raw output; the command line carries ephemeral fixture credentials.
-            for name, value in [('stdout', error.stdout), ('stderr', error.stderr)]:
-                raw = value if isinstance(value, bytes) else (value or '').encode('utf-8')
-                (evidence / ('node.' + phase + '.' + name + '.log')).write_bytes(raw)
-            raise RuntimeError('Node fixture timed out; partial logs: ' + str(evidence)) from None
-        (evidence / ('node.' + phase + '.stdout.log')).write_text(result.stdout, encoding='utf-8')
-        (evidence / ('node.' + phase + '.stderr.log')).write_text(result.stderr, encoding='utf-8')
-        print(result.stdout)
-        self.assertEqual(result.returncode, 0, result.stderr[-3000:] or result.stdout[-3000:])
-        return result.stdout
+        # A2's report-read driver hang timeout.
+        return self.run_node_case(command, evidence, env=env, timeout=240, label='node.' + phase)
 
     def test_display_reports_bind_to_the_stored_provision(self):
         evidence = EVIDENCE / self.token

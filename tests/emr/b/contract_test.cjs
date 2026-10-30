@@ -6,7 +6,7 @@
  */
 const fs = require('node:fs');
 const path = require('node:path');
-const { createHash, randomUUID } = require('node:crypto');
+const { randomUUID } = require('node:crypto');
 function errorCode(error) {
   if (!error) return 'unknown';
   if (typeof error.code === 'string' && /^[A-Z][A-Za-z]+$/.test(error.code)) return error.code;
@@ -63,11 +63,11 @@ function contractSuite() {
   const declaration = JSON.parse(fs.readFileSync(path.join(root, 'emr/units/b.json'), 'utf8'));
 
   // Composition happens once per process. Legal, clinical and stored-access facts are the B runtime readers themselves;
-  // terminal-queue rows (C's future storage) and purpose ends (C's) are synthetic facts held by this test.
-  const terminalRows = new Map(), purposeEnds = new Map(), signedResults = new Map(), intentFacts = new Map();
+  // stored order rows and purpose ends (C's) are synthetic facts held by this test.
+  const storedRows = new Map(), purposeEnds = new Map(), signedResults = new Map(), intentFacts = new Map();
   const claimDuties = new Map();
   M.composeEmrAdapters({
-    stored: { load: (recordId, eventId) => terminalRows.has(recordId + ':' + eventId) ? structuredClone(terminalRows.get(recordId + ':' + eventId))
+    stored: { load: (recordId, eventId) => storedRows.has(recordId + ':' + eventId) ? structuredClone(storedRows.get(recordId + ':' + eventId))
       : CTX.runtimeAdapters.stored.load(recordId, eventId) },
     legal: { ...CTX.runtimeAdapters.legal, loadStatutoryDuty: id => claimDuties.get(id) },
     purpose: { load: id => purposeEnds.get(id), loadSignedResult: (id, vid) => signedResults.get(id + ':' + vid), loadIntentEndingFact: id => intentFacts.get(id) },
@@ -278,56 +278,8 @@ function contractSuite() {
       () => inSnapshot({}, () => CTX.runtimeAdapters.stored.load('report-1', 'event-1'))]) code(call, 'EmrRecordUnsupported');
   });
 
-  test('C09 the signed original and its recovery copy keep owner and original time; a private-draft end or a new authentication never restarts or erases them', async () => {
-    const signedAt = '2026-10-08T22:00:00.000Z', receivedAt = '2026-10-09T03:00:00.000Z';
-    const digest = text => createHash('sha256').update(text).digest('hex');
-    const facts = (recordId, model, row, event) => ({ recordId, model, row: { ownerId: 'reader-1', originalEventId: 'original-event-1', state: 'pending-transmission', ...row }, event: {
-      eventId: 'event:' + recordId, recordId, versionId: 'v1', sha256: digest(recordId), contentSha256: digest(recordId), at: signedAt, act: 'entry',
-      signature: { versionId: 'v1', sha256: digest(recordId), signedAt, verified: true }, predecessor: null, components: [], processing: null, ...event } });
-    const resolve = f => { terminalRows.set(f.recordId + ':' + f.event.eventId, f); return Cl.resolveStoredRecord(M.emrAdapters().stored, f.recordId, f.event.eventId); };
-    const signed = resolve(facts('offline-1', 'TerminalSignedOriginal', { signedAt, purposeId: null }, {}));
-    assert.deepEqual(signed.kinds, ['offline-signed-original']);
-    const retained = inSnapshot(noHolds('offline-1'), () => D.newRetentionRecord(signed));
-    // D-19: a signed original keeps its record class's period (5 years, never 진료기록부 by being signed), from signedAt.
-    const originalYears = Cl.RECORD_CLASSIFICATION['offline-signed-original'].retention.years;
-    assert.equal(D.retentionDeadline(retained), D.civilPeriodEnd(signedAt, originalYears), 'from the actual signing time');
-    code(() => resolve(facts('offline-2', 'TerminalSignedOriginal', { signedAt, purposeId: null }, { at: receivedAt, signature: { versionId: 'v1', sha256: digest('offline-2'), signedAt: receivedAt, verified: true } })), 'TerminalOriginalTimeRefused');
-    code(() => resolve(facts('offline-3', 'TerminalSignedOriginal', { signedAt, purposeId: null }, { signature: null })), 'TerminalOriginalTimeRefused');
-    // An original is never a purpose record, so no draft purpose end can destroy it.
-    assert.throws(() => inSnapshot(noHolds('offline-1'), () => D.newPurposeRecord(signed, ['v1'])));
-    // A new authentication or a reception is not a part of the original: it never resolves as one, the clock stays.
-    code(() => resolve(facts('offline-1', 'TerminalSignedOriginal', { signedAt: receivedAt, purposeId: null }, { eventId: 'event:auth', versionId: 'v2', at: receivedAt,
-      act: 'access', sha256: digest('auth'), contentSha256: digest('auth'), signature: null,
-      predecessor: { recordId: 'offline-1', partId: 'v1', sha256: digest('offline-1') } })), 'TerminalOriginalTimeRefused');
-    const resigned = resolve(facts('offline-1', 'TerminalSignedOriginal', { signedAt: receivedAt, purposeId: null }, { eventId: 'event:resign', versionId: 'v2', at: receivedAt,
-      act: 'resign', sha256: digest('resign'), contentSha256: digest('resign'), signature: { versionId: 'v2', sha256: digest('resign'), signedAt: receivedAt, verified: true },
-      predecessor: { recordId: 'offline-1', partId: 'v1', sha256: digest('offline-1') } }));
-    code(() => inSnapshot(noHolds('offline-1'), () => D.recordVersionAdded(retained, resigned,
-      { records: [retained], references: [], complete: true, revision: 'r', checkedAt: receivedAt })), 'NewLawfulRecordEventRequired');
-    assert.equal(D.retentionDeadline(retained), D.civilPeriodEnd(signedAt, originalYears));
-    // The recovery copy: owned, referenced, with a purpose that ends at verified reception or the owner's discard only.
-    const copyFacts = facts('recovery-1', 'TerminalRecoveryCopy', { signedAt: null, purposeId: 'purpose-recover-1' }, { act: 'creation', signature: null });
-    const copy = resolve(copyFacts);
-    assert.deepEqual(copy.kinds, ['recovery-working-copy']);
-    code(() => resolve(facts('recovery-2', 'TerminalRecoveryCopy', { signedAt: null, purposeId: null }, { act: 'creation', signature: null })), 'TerminalPurposeRequired');
-    const record = inSnapshot(noHolds('recovery-1'), () => D.newPurposeRecord(copy, ['v1']));
-    assert.equal(record.ownerId, 'reader-1');
-    const end = (trigger, extra = {}) => { const e = { eventId: 'end:' + trigger, recordId: 'recovery-1', trigger, actorId: 'reader-1', at: receivedAt, result: null, superseded: null, ...extra }; purposeEnds.set(e.eventId, e); return Cl && D.resolvePurposeEnd(M.emrAdapters().purpose, e.eventId); };
-    const purposeStore = { append: async () => ({ durableAt: receivedAt }), withPurposeLock: async (id, at, work) => work(record) };
-    const destroy = async () => ({ completedAt: receivedAt, method: 'irreversible-permanent-deletion' });
-    for (const trigger of ['intent-superseded', 'result-version-signed', 'session-ended'])
-      await rejects(inSnapshot(noHolds('recovery-1'), () => D.destroyAtPurposeEnd(purposeStore, record, end(trigger), receivedAt, destroy)), 'PurposeBindingRefused');
-    await rejects(inSnapshot(noHolds('recovery-1'), () => D.destroyAtPurposeEnd(purposeStore, record, end('explicit-discard', { actorId: 'reader-2' }), receivedAt, destroy)), 'PurposeOwnerRefused');
-    const done = await inSnapshot(noHolds('recovery-1'), () => D.destroyAtPurposeEnd(purposeStore, record, end('original-received'), receivedAt, destroy));
-    assert.equal(done.phase, 'completed');
-    assert.deepEqual(Cl.TERMINAL_RECORD_BOUNDARY.states, ['pending-transmission', 'received-unverified', 'verified', 'verification-refused']);
-  });
-
   const orderAt = '2026-01-02T00:00:00.000Z';
-  const procedure = (state = 'open-order', patch = {}) => ({ state, responsibleRole: 'privacy-officer', assigneeId: 'officer',
-    enteredAt: orderAt, evidenceDueAt: '2026-01-05T00:00:00.000Z', escalationDecisionDueAt: '2026-01-06T00:00:00.000Z',
-    finalDecisionDueAt: '2026-01-07T00:00:00.000Z', superiorRole: 'institution-head', superiorId: 'head', escalatedAt: null,
-    extensions: 0, extensionLimit: 1, extensionEvidenceId: null, decision: null, ...patch });
+  const procedure = (state = 'open-order', patch = {}) => ({ state, responsibleRole: 'privacy-officer', assigneeId: 'officer', decision: null, ...patch });
   const orderFacts = (patch = {}) => ({ objectKind: 'order-indication', origin: 'product-authored', authorId: 'physician', authorRole: 'physician',
     requestingClinicianId: 'physician', directionSourceRef: null, examCodes: ['CT-CHEST'], source: null, feed: null, inherited: [],
     firstReceivedAt: null, firstReceiptEventId: null, duplicateOf: null, scheduledAt: null, scheduleChangeEvidenceId: null,
@@ -338,7 +290,7 @@ function contractSuite() {
     signature: { versionId: 'original', sha256: 'ab'.repeat(32), signedAt: orderAt, verified: true },
     predecessor: null, components: [], processing: null, ...patch });
   const resolveOrder = (facts, event = orderEvent()) => {
-    terminalRows.set(event.recordId + ':' + event.eventId, { recordId: event.recordId, model: 'emr_access.order_fact', row: facts, event });
+    storedRows.set(event.recordId + ':' + event.eventId, { recordId: event.recordId, model: 'emr_access.order_fact', row: facts, event });
     return Cl.resolveStoredRecord(M.emrAdapters().stored, event.recordId, event.eventId);
   };
   const fulfilment = { eventId: 'fulfilled', actorId: 'technician', at: '2028-01-02T00:00:00.000Z', studyId: 'study', partial: true, reason: 'partial examination confirmed' };
@@ -433,38 +385,34 @@ function contractSuite() {
     assert.equal(fixed.row.duplicateOf, event.eventId); assert.equal(fixed.event.at, orderAt);
   });
 
-  test('C17 D24 finite review deadlines escalate without erasing duties or renewing on retries; four evidence-bound decisions close the procedure', () => {
-    for (const state of ['classification-unconfirmed', 'entrusted-evidence-unconfirmed', 'linked-fulfilment-unconfirmed', 'open-order', 'unlinked-exam', 'copy-window-review', 'interface-outage', 'claim-duty-end-unconfirmed']) {
+  test('C17 D24 an open review stays pending however long it waits; only an evidence-bound decision closes it, and a continued duty reopens at its review date', () => {
+    for (const state of Cl.ORDER_REVIEW_STATES) {
       const facts = orderFacts({ procedure: procedure(state) });
-      assert.equal(D.orderProcedureState(facts, '2026-01-03T00:00:00.000Z'), 'pending');
-      assert.equal(D.orderProcedureState(facts, '2026-01-05T00:00:00.000Z'), 'escalate');
-      assert.equal(D.orderProcedureState(facts, '2040-01-01T00:00:00.000Z'), 'superior-decision-overdue');
-      code(() => D.validateOrderTransition(facts, { ...facts, procedure: procedure(state, { evidenceDueAt: '2026-01-05T01:00:00.000Z' }) }), 'OrderProcedureDeadlineRequired');
-      assert.throws(() => Cl.parseOrderFacts({ ...facts, procedure: { ...facts.procedure, finalDecisionDueAt: null } }));
+      for (const at of ['2026-01-03T00:00:00.000Z', '2040-01-01T00:00:00.000Z']) assert.equal(D.orderProcedureState(facts, at), 'pending');
+      code(() => D.validateOrderTransition(facts, { ...facts, procedure: null }), 'OrderProcedureRequired');
     }
     const pending = orderFacts({ procedure: procedure('open-order') }), at = '2026-01-08T00:00:00.000Z';
     const record = inSnapshot(noHolds('native'), () => D.newRetentionRecord(resolveOrder(pending)));
     assert.equal(D.retentionState(record, undefined, '2040-01-01T00:00:00.000Z').destroyNotBefore, null);
     for (const route of ['classification-confirmed', 'duty-continues', 'lawful-return', 'unnecessary-operations']) {
-      const decision = { route, actorId: 'head', at, evidenceId: 'decision-' + route, basisId: route === 'duty-continues' ? 'actual-legal-basis' : null,
+      const decision = { route, actorId: 'officer', at, evidenceId: 'decision-' + route, basisId: route === 'duty-continues' ? 'actual-legal-basis' : null,
         scope: ['native'], reviewAt: route === 'duty-continues' ? '2027-01-01T00:00:00.000Z' : null, originalPreservedEvidenceId: route === 'lawful-return' ? 'hospital-original-verified' : null };
       const next = { ...pending, procedure: { ...pending.procedure, decision } };
+      assert.equal(D.orderProcedureState(next, '2026-01-07T00:00:00.000Z'), 'pending', 'a decision counts from its own time');
       if (route === 'duty-continues') {
-        // No automatic destruction on an unanswered deadline, and no baseless or unreviewed indefinite retention.
+        // No automatic destruction on an unanswered review, and no baseless or unreviewed indefinite retention.
         for (const missing of ['basisId', 'reviewAt', 'evidenceId'])
           assert.throws(() => Cl.parseOrderFacts({ ...next, procedure: { ...next.procedure, decision: { ...decision, [missing]: null } } }), missing);
-        assert.equal(D.orderProcedureState(next, decision.reviewAt), 'escalate');
-        assert.equal(D.orderProcedureState(next, '2040-01-01T00:00:00.000Z'), 'escalate', 'overdue review is never silent indefinite authorization');
+        assert.equal(D.orderProcedureState(next, decision.reviewAt), 'pending');
+        assert.equal(D.orderProcedureState(next, '2040-01-01T00:00:00.000Z'), 'pending', 'overdue review is never silent indefinite authorization');
+      } else {
+        code(() => D.validateOrderTransition(next, { ...next, procedure: { ...next.procedure, decision: { ...decision, evidenceId: 'rewritten' } } }), 'OrderDecisionBindingRefused');
       }
       D.validateOrderTransition(pending, next);
       assert.equal(D.orderProcedureState(next, at), route === 'duty-continues' ? 'duty-continues' : 'clear');
-      code(() => Cl.parseOrderFacts({ ...next, procedure: { ...next.procedure, decision: { ...decision, actorId: 'officer' } } }), 'OrderDecisionAuthorityRequired');
       const updated = D.refreshOrderLifecycle(record, resolveOrder(next));
       assert.equal(D.retentionDeadline(updated), '2036-01-01T15:00:00.000Z', 'return or an operational decision never shortens an established native duty');
     }
-    const extended = { ...pending, procedure: procedure('open-order', { evidenceDueAt: '2026-02-05T00:00:00.000Z', escalationDecisionDueAt: '2026-02-06T00:00:00.000Z', finalDecisionDueAt: '2026-02-07T00:00:00.000Z', extensions: 1, extensionEvidenceId: 'new-reservation' }) };
-    D.validateOrderTransition(pending, extended);
-    assert.throws(() => D.validateOrderTransition(extended, { ...extended, procedure: { ...extended.procedure, extensions: 2 } }));
   });
 
   test('C18 D24 claim duties require an actual ending event and preserve an outstanding statutory obligation past internal deadlines', () => {

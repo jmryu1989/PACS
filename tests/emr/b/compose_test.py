@@ -116,6 +116,16 @@ class ComposeSafetyTests(unittest.TestCase):
         self.base["services"]["api"]["environment"] = [f"{key}={value}" for key, value in env.items()] + ["POSTGRES_PASSWORD"]
         self.assertIn("compose-api-holds-installer-secret", self.check())
 
+    def test_production_environment_override_is_checked_as_merged(self):
+        env = self.prod["services"]["api"]["environment"]
+        for key, value, code in (("DATABASE_URL", "postgresql://kin:synthetic@db:5432/kin", "prod-api-not-runtime-role"),
+                                 ("POSTGRES_PASSWORD", "synthetic", "prod-api-holds-installer-secret"),
+                                 ("EXTRA_SECRET", "${POSTGRES_PASSWORD}", "prod-api-holds-installer-secret")):
+            with self.subTest(key=key):
+                env[key] = value
+                self.assertEqual(self.check(), [code])
+                env.pop(key)
+
     def test_every_volume_form_in_production(self):
         self.prod.setdefault("volumes", {}).update({"other-unit": None, "a": None, "1": None})
         volumes = self.prod["services"]["api"]["volumes"]
