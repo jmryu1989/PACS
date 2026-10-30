@@ -17,14 +17,29 @@ const dump = async page => page.evaluate(async()=>{
 test('R1 R2 R3 R4 R5 R9 R15 R16 real encrypted storage, persistent profile, corruption deletion and expiry', {timeout:120000}, async t=>{
   const key=randomBytes(32), otherKey=randomBytes(32), requests=[];
   let clock=Date.now(), owner='A';
-  const body=gzipSync(Buffer.concat([Buffer.from('--body\r\nContent-Type: application/octet-stream\r\n\r\n'),randomBytes(128*1024),Buffer.from('\r\n--body--\r\n')]));
+  const frames = [
+    ['application/octet-stream', '1.2.840.10008.1.2.1'],
+    ['image/jpeg', '1.2.840.10008.1.2.4.50'],
+    ['image/jls', '1.2.840.10008.1.2.4.80'],
+    ['image/jp2', '1.2.840.10008.1.2.4.90'],
+    ['image/dicom-rle', '1.2.840.10008.1.2.5'],
+  ].flatMap(([media, syntax]) => [true, false].map(gzip => {
+    const type = `${media}; transfer-syntax=${syntax}`;
+    const plain = Buffer.concat([Buffer.from(`--body\r\nContent-Type: ${type}\r\n\r\n`), randomBytes(128*1024), Buffer.from('\r\n--body--\r\n')]);
+    return { plain, body: gzip ? gzipSync(plain) : plain, gzip, partType: `multipart/related; type="${type}"; boundary=body` };
+  }));
   const server=http.createServer((req,res)=>{
     requests.push({url:req.url,store:req.headers['x-kin-preload'],session:req.headers['x-kin-session']});
     res.setHeader('Date',new Date(clock).toUTCString());res.setHeader('Cache-Control','no-store');
     if(req.url==='/api/preload/cache-key') {res.setHeader('Content-Type','application/json');return res.end(JSON.stringify({keyId:owner,key:(owner==='A'?key:otherKey).toString('base64'),serverTime:new Date(clock).toISOString()}));}
     if(req.url==='/api/me')return res.end(JSON.stringify({preloadDiskGb:0.1}));
-    if(req.url.endsWith('/metadata'))return res.end(JSON.stringify([{'0020000E':{Value:['2']},'00080018':{Value:['3']},'00280008':{Value:[3]},'7FE00010':{BulkDataURI:'not-stored'}}]));
-    if(req.url.startsWith('/dicom-web/')) {res.setHeader('Content-Type','application/gzip');res.setHeader('X-KIN-Part-Type','multipart/related; type="application/octet-stream"; boundary=body');res.setHeader('X-KIN-Study-Revision','rev');res.setHeader('Content-Length',body.length);return res.end(body);}
+    if(req.url.endsWith('/metadata'))return res.end(JSON.stringify([{'0020000E':{Value:['2']},'00080018':{Value:['3']},'00280008':{Value:[frames.length]},'7FE00010':{BulkDataURI:'not-stored'}}]));
+    if(req.url.startsWith('/dicom-web/')) {
+      const frame = frames[Number(req.url.split('/').at(-1)) - 1];
+      res.setHeader('Content-Type', frame.gzip ? 'application/gzip' : frame.partType);
+      if(frame.gzip)res.setHeader('X-KIN-Part-Type',frame.partType);
+      res.setHeader('X-KIN-Study-Revision','rev');res.setHeader('Content-Length',frame.body.length);return res.end(frame.body);
+    }
     const name=path.posix.basename(req.url);
     if(['preload-worker.js','preload-store.js','preload-disk.js','preload-queue.js'].includes(name)){res.setHeader('Content-Type','application/javascript; charset=utf-8');return res.end(fs.readFileSync(path.join(root,'worklist-v0/hpacs-lite',name)));}
     res.setHeader('Content-Type','text/html; charset=utf-8');res.end('<!doctype html><meta charset="utf-8"><title>Synthetic retention test</title><div id="panel"></div>');
@@ -46,7 +61,21 @@ test('R1 R2 R3 R4 R5 R9 R15 R16 real encrypted storage, persistent profile, corr
   let page=await connect('session-A');
   await page.evaluate(uid=>worker.port.postMessage({type:'add',session:'session-A',studies:[{uid,label:'SYN-123 · Synthetic^Patient'}]}),uid);
   await page.waitForFunction(()=>messages.at(-1)?.studies?.some(s=>s.status==='Ready')).catch(async error=>{console.log('worker messages',await page.evaluate(()=>messages));throw error;});
-  const stored=await dump(page);assert.deepEqual(stored.stores,['frames','studies']);assert.equal(stored.frames.length,3);
+  const stored=await dump(page);assert.deepEqual(stored.stores,['frames','studies']);assert.equal(stored.frames.length,frames.length);
+  async function checkFrames(page, session) {
+    const held = (await page.evaluate(({uid,session})=>ask({type:'query',uid,session}),{uid,session})).held;
+    assert.ok(held);
+    for (const [index, frame] of frames.entries()) {
+      const answer = await page.evaluate(async ({path, session, copy}) => {
+        const result = await ask({type:'frame',path,session,copy});
+        return {bytes:result.bytes ? [...new Uint8Array(result.bytes)] : null,partType:result.partType};
+      }, {path:framePath.replace(/1$/,String(index+1)),session,copy:held.copy});
+      assert.equal(answer.partType,frame.partType);
+      assert.deepEqual(Buffer.from(answer.bytes),frame.plain);
+    }
+    return held;
+  }
+  await checkFrames(page,'session-A');
   // The shipped status panel shows the fixed server-Date expiry, without adding a reading prompt.
   await page.addScriptTag({url:origin+'/worklist/hpacs-lite/preload-queue.js'});
   await page.evaluate(()=>KinPreloadQueue.mount(document.getElementById('panel')));
@@ -71,13 +100,10 @@ test('R1 R2 R3 R4 R5 R9 R15 R16 real encrypted storage, persistent profile, corr
   await context.close();context=null;
   owner='B';page=await connect('session-B');
   assert.equal((await page.evaluate(uid=>ask({type:'query',uid,session:'session-B'}),uid)).held,null);
-  assert.equal((await dump(page)).frames.length,3);
+  assert.equal((await dump(page)).frames.length,frames.length);
   await context.close();context=null;
   owner='A';const before=requests.filter(r=>r.store==='store').length;page=await connect('session-A2');
-  const held=(await page.evaluate(uid=>ask({type:'query',uid,session:'session-A2'}),uid)).held;assert.ok(held);
-  const received=await page.evaluate(async ({framePath,copy})=>{
-    const r=await ask({type:'frame',path:framePath,session:'session-A2',copy});return {length:r.bytes?.byteLength,partType:r.partType};
-  },{framePath,copy:held.copy});assert.ok(received.length>128*1024);assert.match(received.partType,/boundary=body/);
+  const held=await checkFrames(page,'session-A2');
   assert.equal(requests.filter(r=>r.store==='store').length,before);
   const usageBefore=await page.evaluate(async()=> (await navigator.storage.estimate()).usage);
   const baseline=await page.evaluate(async()=> (await navigator.storage.estimate()).usage);
@@ -96,7 +122,7 @@ test('R1 R2 R3 R4 R5 R9 R15 R16 real encrypted storage, persistent profile, corr
   // Same-size rewrite, no deletion: measure the browser's accounting movement for the control operation.
   const noDelete=await page.evaluate(async()=> (await navigator.storage.estimate()).usage);
   // Read every frame: UUID index ordering need not be download order.
-  for(let n=1;n<=3;n++)await page.evaluate(({p,copy})=>ask({type:'frame',path:p,session:'session-A2',copy}),{p:framePath.replace(/1$/,String(n)),copy:held.copy});
+  for(let n=1;n<=frames.length;n++)await page.evaluate(({p,copy})=>ask({type:'frame',path:p,session:'session-A2',copy}),{p:framePath.replace(/1$/,String(n)),copy:held.copy});
   const cleared=await dump(page);assert.equal(cleared.frames.length+cleared.studies.length,0);
   const usageAfter=await page.evaluate(async()=> (await navigator.storage.estimate()).usage);
   const released=[...stored.frames,...stored.studies].reduce((n,r)=>n+r.ct.length,0),slack=Math.max(Math.abs(usageBefore-baseline),Math.abs(noDelete-baseline));

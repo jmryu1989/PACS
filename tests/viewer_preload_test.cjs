@@ -36,7 +36,7 @@ function setup({ held = {}, network, shared = true, studies = null, page = false
         } else if (message.type === 'frame') {
           const uid = /studies\/([0-9.]+)\//.exec(message.path)[1], entry = held[uid];
           if (entry && entry.session === message.session && (entry.copy ?? 1) !== message.copy) reply({ bytes: null, stale: true });
-          else reply(entry && entry.session === message.session ? { bytes: new TextEncoder().encode(`held ${entry.copy ?? 1} ${message.path}`).buffer, partType: PART } : { bytes: null });
+          else reply(entry && entry.session === message.session ? { bytes: new TextEncoder().encode(`held ${entry.copy ?? 1} ${message.path}`).buffer, partType: entry.partType ?? PART } : { bytes: null });
         }
       } };
     }
@@ -70,6 +70,25 @@ function fakeDocument() {
 }
 const openingOf = s => s.headers.get('X-KIN-View-Opening');
 const tick = () => new Promise(resolve => setTimeout(resolve, 5));
+
+for (const [media, syntax] of [
+  ['application/octet-stream', '1.2.840.10008.1.2.1'],
+  ['image/jpeg', '1.2.840.10008.1.2.4.50'],
+  ['image/jls', '1.2.840.10008.1.2.4.80'],
+  ['image/jp2', '1.2.840.10008.1.2.4.90'],
+  ['image/dicom-rle', '1.2.840.10008.1.2.5'],
+]) {
+  test(`cached ${media} reaches the viewer with its exact Content-Type after the live check`, async () => {
+    const partType = `multipart/related; type="${media}; transfer-syntax=${syntax}"; boundary=codec`;
+    const { fetch, sent } = setup({ held: { [STUDY]: { revision: 'rev-now', session: 'sess-1', partType } } });
+    await (await fetch(frameUrl(1), bound())).arrayBuffer();
+    const answer = await fetch(frameUrl(2), bound());
+    assert.equal(answer.headers.get('Content-Type'), partType);
+    assert.equal(await answer.text(), 'held 1 ' + new URL(frameUrl(2)).pathname);
+    assert.equal(sent.length, 1, 'only the live check used the network');
+    assert.equal(sent[0].headers.get('X-KIN-Preload'), 'check');
+  });
+}
 
 test('a study the worker does not hold is read live, unchanged', async () => {
   const { fetch, sent, posted } = setup();

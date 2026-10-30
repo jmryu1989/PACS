@@ -53,7 +53,7 @@ function boot({ diskGb = 0.25, respond, disk = memoryDisk(), skew = 0, keyRespon
   const images = respond || (async url => {
     const study = /\/studies\/([0-9.]+)\//.exec(url)[1];
     if (url.endsWith('/metadata')) return new Response(JSON.stringify(metadata(study)), { headers: { 'Content-Type': 'application/dicom+json' } });
-    const body = zlib.gzipSync(Buffer.from('--b1\r\nframe ' + url + '\r\n--b1--'));
+    const body = zlib.gzipSync(Buffer.from('--b1\r\nContent-Type: application/octet-stream\r\n\r\nframe ' + url + '\r\n--b1--'));
     return new Response(body, { headers: { Date: new Date(clock).toUTCString(), 'Content-Length': String(body.length), 'Content-Type': 'application/gzip', 'X-KIN-Part-Type': PART, 'X-KIN-Study-Revision': 'orthanc-study:s@1' } });
   });
   const server = (url, init) => url === '/api/me' ? me() : url === '/api/preload/cache-key'
@@ -138,7 +138,7 @@ test('a viewer of the same session gets the decoded frame and the revision; anot
   const frame = `/dicom-web/studies/${STUDY}/series/${STUDY}.1/instances/${STUDY}.1.1/frames/2`;
   const ask = session => viewer.ask({ type: 'frame', path: frame, session, copy: held.copy });
   const answer = await ask('sess-1');
-  assert.equal(Buffer.from(answer.bytes).toString(), '--b1\r\nframe ' + frame + '\r\n--b1--');
+  assert.equal(Buffer.from(answer.bytes).toString(), '--b1\r\nContent-Type: application/octet-stream\r\n\r\nframe ' + frame + '\r\n--b1--');
   assert.equal(answer.partType, PART);
   // The same frame twice: the store keeps its bytes (the first answer was handed over, not the held copy).
   assert.equal(Buffer.from((await ask('sess-1')).bytes).length, answer.bytes.byteLength);
@@ -309,7 +309,7 @@ test('a viewer is answered from the copy it checked only: after Clear All and Re
   const { connect } = boot({ respond: async url => {
     const study = /\/studies\/([0-9.]+)\//.exec(url)[1];
     if (url.endsWith('/metadata')) return new Response(JSON.stringify(metadata(study)));
-    return new Response(zlib.gzipSync(Buffer.from('--b1\r\nframe-' + revision + '\r\n--b1--')), { headers: { 'Content-Type': 'application/gzip', 'X-KIN-Part-Type': PART, 'X-KIN-Study-Revision': revision } });
+    return new Response(zlib.gzipSync(Buffer.from('--b1\r\nContent-Type: application/octet-stream\r\n\r\nframe-' + revision + '\r\n--b1--')), { headers: { 'Content-Type': 'application/gzip', 'X-KIN-Part-Type': PART, 'X-KIN-Study-Revision': revision } });
   } });
   const list = connect();
   list.send({ type: 'hello', role: 'list' });
@@ -319,7 +319,7 @@ test('a viewer is answered from the copy it checked only: after Clear All and Re
   viewer.send({ type: 'hello', role: 'viewer' });
   const checked = (await viewer.ask({ type: 'query', uid: STUDY, session: 'sess-1' })).held;
   const frame = `/dicom-web/studies/${STUDY}/series/${STUDY}.1/instances/${STUDY}.1.1/frames/2`;
-  assert.equal(Buffer.from((await viewer.ask({ type: 'frame', path: frame, session: 'sess-1', copy: checked.copy })).bytes).toString(), '--b1\r\nframe-r1\r\n--b1--');
+  assert.equal(Buffer.from((await viewer.ask({ type: 'frame', path: frame, session: 'sess-1', copy: checked.copy })).bytes).toString(), '--b1\r\nContent-Type: application/octet-stream\r\n\r\nframe-r1\r\n--b1--');
   list.send({ type: 'clear' });
   await until(() => statusOf(list, STUDY)?.status === 'Evicted', 'clear completed');
   revision = 'r2';
@@ -330,7 +330,7 @@ test('a viewer is answered from the copy it checked only: after Clear All and Re
   const now = (await viewer.ask({ type: 'query', uid: STUDY, session: 'sess-1' })).held;
   assert.equal(now.revision, 'r2');
   assert.notEqual(now.copy, checked.copy);
-  assert.equal(Buffer.from((await viewer.ask({ type: 'frame', path: frame, session: 'sess-1', copy: now.copy })).bytes).toString(), '--b1\r\nframe-r2\r\n--b1--');
+  assert.equal(Buffer.from((await viewer.ask({ type: 'frame', path: frame, session: 'sess-1', copy: now.copy })).bytes).toString(), '--b1\r\nContent-Type: application/octet-stream\r\n\r\nframe-r2\r\n--b1--');
 });
 
 const FRAME = `/dicom-web/studies/${STUDY}/series/${STUDY}.1/instances/${STUDY}.1.1/frames/1`;
@@ -340,6 +340,70 @@ async function ready(h, uid=STUDY) {
   await until(()=>statusOf(list,uid)?.status==='Ready','Ready'); return list;
 }
 const query = (p, session='sess-A', uid=STUDY) => p.ask({type:'query',session,uid});
+
+// Both direct stored gzip and relayed multipart must retain the original codec, syntax and frame bytes.
+for (const [media, syntax] of [
+  ['application/octet-stream', '1.2.840.10008.1.2.1'],
+  ['image/jpeg', '1.2.840.10008.1.2.4.50'],
+  ['image/jls', '1.2.840.10008.1.2.4.80'],
+  ['image/jp2', '1.2.840.10008.1.2.4.90'],
+  ['image/dicom-rle', '1.2.840.10008.1.2.5'],
+]) for (const gzip of [true, false]) {
+  test(`cached ${media} (${gzip ? 'gzip' : 'multipart'}) preserves Content-Type immediately and after restart`, async () => {
+    const type = `${media}; transfer-syntax=${syntax}`;
+    const partType = `multipart/related; type="${type}"; boundary=b1`;
+    const body = Buffer.concat([Buffer.from(`--b1\r\nContent-Location: ${FRAME}\r\nContent-Type: ${type}\r\n\r\n`),
+      Buffer.from([0, 255, 1, 128]), Buffer.from('\r\n--b1--\r\n')]);
+    const h = boot({ respond: async url => url.endsWith('/metadata')
+      ? new Response(JSON.stringify(metadata(STUDY)))
+      : new Response(gzip ? zlib.gzipSync(body) : body, { headers: {
+        'Content-Type': gzip ? 'application/gzip' : partType,
+        ...(gzip ? { 'X-KIN-Part-Type': partType } : {}), 'X-KIN-Study-Revision': 'r1',
+      } }) });
+    const list = await ready(h);
+    const check = async (port, session) => {
+      const held = (await query(port, session)).held;
+      assert.ok(held);
+      const answer = await port.ask({ type: 'frame', session, path: FRAME, copy: held.copy });
+      assert.deepEqual(Buffer.from(answer.bytes), body);
+      assert.equal(answer.partType, partType);
+    };
+    await check(list, 'sess-A');
+    list.send({ type: 'session', session: null });
+    const restarted = boot({ disk: h.disk }), resumed = restarted.connect();
+    resumed.send({ type: 'session', session: 'sess-A2' });
+    await check(resumed, 'sess-A2');
+    assert.equal(restarted.reads().length, 0, 'restoration serves the persisted type without another image read');
+  });
+}
+
+test('cached multipart headers retain a long relayed part type and reject missing, duplicate or unauthenticated types', async () => {
+  const type = 'image/jp2; transfer-syntax=1.2.840.10008.1.2.4.90';
+  for (const mode of ['valid', 'missing', 'duplicate', 'tampered']) {
+    const header = mode === 'missing' ? '' : `cOnTeNt-TyPe: ${type}\r\n`;
+    const body = Buffer.from(`\r\n--relay:boundary\r\nContent-Location: /${'long-path/'.repeat(150)}\r\n${header}` +
+      (mode === 'duplicate' ? 'Content-Type: application/octet-stream\r\n' : '') + '\r\npixels\r\n--relay:boundary--\r\n');
+    const h = boot({ respond: async url => url.endsWith('/metadata')
+      ? new Response(JSON.stringify(metadata(STUDY)))
+      : new Response(body, { headers: { 'Content-Type': 'multipart/related; boundary="relay:boundary"', 'X-KIN-Study-Revision': 'r1' } }) });
+    const list = await ready(h), held = (await query(list)).held;
+    if (mode === 'tampered') {
+      // GCM ciphertext has the plaintext's length/order before its tag. Changing only the codec bytes must fail authentication.
+      const record = [...h.disk.frames.values()][0];
+      new Uint8Array(record.ct)[body.indexOf('image/jp2')] ^= 1;
+    }
+    const answer = await list.ask({ type: 'frame', session: 'sess-A', path: FRAME, copy: held.copy });
+    if (mode === 'valid') {
+      assert.deepEqual(Buffer.from(answer.bytes), body);
+      assert.equal(answer.partType, `multipart/related; type="${type}"; boundary="relay:boundary"`);
+    } else {
+      assert.equal(answer.bytes, null, mode);
+      assert.equal((await query(list)).held, null, mode);
+      assert.equal(h.disk.frames.size + h.disk.studies.size, 0, mode);
+      assert.match(statusOf(list, STUDY).reason, /손상/, mode);
+    }
+  }
+});
 
 for (const nextSession of [null, 'sess-B']) {
   test(`R11 delayed disk read cannot use the old key after ${nextSession ? 'user switch' : 'logout'}`, async () => {
@@ -380,7 +444,7 @@ test('R1 R2 R15 encrypted exact manifests and unchanged frame bodies, zeroed inp
       const f=h.disk.frames.get(id);
       assert.deepEqual(Object.keys(f).sort(),['entryId','keyId','expiresAt','bytes','iv','ct'].sort());
       const plain=await D.open(diskKey,f,D.frameAAD(r.keyId,m.uid,path,m.revision,m.copy));
-      assert.equal(zlib.gunzipSync(Buffer.from(plain)).toString(),'--b1\r\nframe '+path+'\r\n--b1--');
+      assert.equal(zlib.gunzipSync(Buffer.from(plain)).toString(),'--b1\r\nContent-Type: application/octet-stream\r\n\r\nframe '+path+'\r\n--b1--');
       assert.equal(f.expiresAt,SERVER_START+72*3600000);
     }
   }

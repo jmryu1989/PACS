@@ -283,12 +283,21 @@ async function decoded(data) {
   if (bytes[0] !== 0x1f || bytes[1] !== 0x8b) return data;
   return new Response(new Blob([data]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
 }
-// The stored plaintext is exactly the WADO body. Its first delimiter supplies the multipart boundary after restart.
+// The unchanged WADO body authenticates both the delimiter and the part's codec/syntax, including after restart.
 function partType(bytes) {
-  const first = new TextDecoder().decode(new Uint8Array(bytes, 0, Math.min(bytes.byteLength, 1024)));
+  const data = new Uint8Array(bytes);
+  let end = 0;
+  while (end + 3 < data.length && !(data[end] === 13 && data[end + 1] === 10 && data[end + 2] === 13 && data[end + 3] === 10)) end++;
+  if (end + 3 >= data.length) throw new Error('multipart headers');
+  const first = new TextDecoder().decode(data.subarray(0, end));
   const boundary = /^(?:\r\n)?--([^\r\n]+)\r\n/.exec(first)?.[1];
-  if (!boundary || /["\\]/.test(boundary)) throw new Error('multipart boundary');
-  return `multipart/related; type="application/octet-stream"; boundary=${boundary}`;
+  if (!boundary || !/^[0-9A-Za-z'()+_,./:=? -]+$/.test(boundary) || boundary.endsWith(' ')) throw new Error('multipart boundary');
+  const types = [...first.replace(/\r\n[ \t]+/g, ' ').matchAll(/^content-type:[ \t]*([^\r\n]+)$/gim)];
+  const type = types[0]?.[1].trim();
+  if (types.length !== 1 || !/^[\w!#$&^.+-]+\/[\w!#$&^.+-]+(?:[ \t]*;[^\r\n]*)?$/.test(type || '') || /[\x00-\x08\x0a-\x1f\x7f]/.test(type)) throw new Error('multipart content type');
+  const quotedType = type.replace(/["\\]/g, '\\$&');
+  const delimiter = /^[\w'+.-]+$/.test(boundary) ? boundary : `"${boundary}"`;
+  return `multipart/related; type="${quotedType}"; boundary=${delimiter}`;
 }
 function release(port) {
   const info = ports.get(port); if (!info) return;
