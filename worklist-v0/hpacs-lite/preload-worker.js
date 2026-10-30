@@ -212,6 +212,8 @@ async function download(study, mine) {
     try { data = await response.arrayBuffer(); } catch (_) { throw new Stop(signal.aborted ? null : MESSAGES.network); }
     const length = response.headers.get('Content-Length');
     if (!data.byteLength || (length !== null && Number(length) !== data.byteLength)) throw new Stop(MESSAGES.network);
+    // Reject unusable multipart headers before persisting a copy the viewer cannot read.
+    try { partType(await decoded(data)); } catch (_) { throw new Stop(MESSAGES.malformed); }
     if (!live()) return;
     const result = await locked(async () => {
       if (!live() || !key || study.status !== 'Downloading') return 'gone';

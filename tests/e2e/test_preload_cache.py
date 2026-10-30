@@ -387,7 +387,7 @@ class PreloadCacheE2E(ViewerWindowsE2E):
         self.assertEqual([s for s in seen[mark:] if s[0] == a.uid], [], 'a same-scope Open reads nothing')
         self.assertEqual(len(self.opens(a.uid)), 1, 'a same-scope Open is no new opening')
         viewer.close(run_before_unload=True)
-        self.wait_status(p, a.uid, '^Ready$')
+        self.wait_status(p, a.uid, r'^Ready\b(?!.*\(Open\))')
 
         # 1b. Review R1: A opened again at once in a fresh viewer, well inside the first viewer's 120 s idle gap - a new
         # opening with its own live check and its own root, its slices then from disk.
@@ -699,16 +699,24 @@ class PreloadCacheE2E(ViewerWindowsE2E):
 
     def test_preload_03_R13_cut_check_never_displays_cached_pixels(self):
         fixture, context, page, seen = self.cache_fixture('OFFLINE')
+        blocked = []
+        # The series strip reads previews live; cut those too before asserting that no image read records a view.
+        image_routes = re.compile(r'(?:/dicom-web/studies/[^?]+/frames/[^/?]+|/instances/[^/?]+/preview)(?:\?.*)?$')
         def offline(route):
-            if '/frames/' in route.request.url: route.abort('internetdisconnected')
-            else: route.continue_()
-        context.route('**/dicom-web/**', offline)
-        viewer = self.open_viewer(page, fixture)
-        viewer.wait_for_timeout(3000)
-        self.assertFalse(viewer.evaluate("""() => !!window.cornerstone?.getEnabledElements().some(e => e.viewport?.csImage?.imageId)"""))
-        self.assertEqual(self.opens(fixture.uid), [], 'cut opening has no user-view root and no cached display')
-        context.unroute('**/dicom-web/**', offline)
-        viewer.close(run_before_unload=True)
+            blocked.append(route.request.url)
+            route.abort('internetdisconnected')
+        context.route(image_routes, offline)
+        viewer = None
+        try:
+            viewer = self.open_viewer(page, fixture)
+            viewer.wait_for_timeout(3000)
+            self.assertTrue(any('/frames/' in url for url in blocked), 'the opening attempted a live frame check')
+            self.assertFalse(viewer.evaluate("""() => !!window.cornerstone?.getEnabledElements().some(e => e.viewport?.csImage?.imageId)"""))
+            self.assertEqual(self.opens(fixture.uid), [], 'cut opening has no user-view root and no cached display')
+        finally:
+            if viewer is not None:
+                viewer.close(run_before_unload=True)
+            context.unroute(image_routes, offline)
 
     def test_preload_04_R3_R11_same_profile_A_B_A_keeps_ciphertext_and_restores_ready(self):
         fixture, context, page, seen = self.cache_fixture('OWNERS')

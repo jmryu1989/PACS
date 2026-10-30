@@ -14,6 +14,8 @@ const zlib = require('node:zlib');
 const DIR = path.join(__dirname, '..', 'worklist-v0', 'hpacs-lite');
 const STUDY = '1.2.840.9.1', OTHER = '1.2.840.9.2';
 const PART = 'multipart/related; type="application/octet-stream"; boundary=b1';
+const multipart = payload => Buffer.concat([Buffer.from('--b1\r\nContent-Type: application/octet-stream\r\n\r\n'),
+  Buffer.from(payload), Buffer.from('\r\n--b1--')]);
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 async function until(check, what) {
   for (let i = 0; i < 400; i++) { if (check()) return; await tick(); }
@@ -197,7 +199,7 @@ test('a session that ended on the server empties the store; a new session never 
     if (refuse) return new Response('{}', { status: 401, headers: { 'X-KIN-Auth-Code': 'AUTH_SESSION_ENDED' } });
     const study = /\/studies\/([0-9.]+)\//.exec(url)[1];
     if (url.endsWith('/metadata')) return new Response(JSON.stringify(metadata(study)));
-    return new Response(zlib.gzipSync(Buffer.from('x')), { headers: { 'Content-Type': 'application/gzip', 'X-KIN-Part-Type': PART, 'X-KIN-Study-Revision': 'r' } });
+    return new Response(zlib.gzipSync(multipart('x')), { headers: { 'Content-Type': 'application/gzip', 'X-KIN-Part-Type': PART, 'X-KIN-Study-Revision': 'r' } });
   } });
   const list = connect();
   list.send({ type: 'hello', role: 'list' });
@@ -248,7 +250,7 @@ test('a refused, missing or changing study fails with a reason and Retry; a brow
     const study = /\/studies\/([0-9.]+)\//.exec(url)[1];
     if (study === OTHER) return new Response('{}', { status: 403 });
     if (url.endsWith('/metadata')) return new Response(JSON.stringify(metadata(study)));
-    return new Response(zlib.gzipSync(Buffer.from('x')), { headers: { 'Content-Type': 'application/gzip', 'X-KIN-Part-Type': PART, 'X-KIN-Study-Revision': 'r' + (++revision) } });
+    return new Response(zlib.gzipSync(multipart('x')), { headers: { 'Content-Type': 'application/gzip', 'X-KIN-Part-Type': PART, 'X-KIN-Study-Revision': 'r' + (++revision) } });
   } });
   const list = connect();
   list.send({ type: 'hello', role: 'list' });
@@ -272,7 +274,7 @@ test('a study that could not fit alone in the disk cap fails with the size reaso
   const { reads, connect } = boot({ diskGb: 1500 / 1024 ** 3, respond: async url => {
     const study = /\/studies\/([0-9.]+)\//.exec(url)[1];
     if (url.endsWith('/metadata')) return new Response(JSON.stringify(metadata(study)));
-    const body = study === STUDY ? zlib.gzipSync(random(600), { level: 0 }) : zlib.gzipSync(Buffer.from('x'));
+    const body = study === STUDY ? zlib.gzipSync(multipart(random(600)), { level: 0 }) : zlib.gzipSync(multipart('x'));
     return new Response(body, { headers: { 'Content-Type': 'application/gzip', 'X-KIN-Part-Type': PART, 'X-KIN-Study-Revision': 'r' } });
   } });
   const list = connect();
@@ -377,12 +379,49 @@ for (const [media, syntax] of [
   });
 }
 
-test('cached multipart headers retain a long relayed part type and reject missing, duplicate or unauthenticated types', async () => {
+for (const [name, malformed] of [
+  ['missing type', '--b1\r\nContent-Location: /frame\r\n\r\npixels\r\n--b1--'],
+  ['duplicate type', '--b1\r\nContent-Type: image/jp2\r\nContent-Type: application/octet-stream\r\n\r\npixels\r\n--b1--'],
+  ['incomplete headers', '--b1\r\nContent-Type: image/jp2'],
+]) for (const gzip of [true, false]) {
+  test(`preload rejects ${name} before storing a frame (${gzip ? 'gzip' : 'multipart'}) and Retry recovers`, async () => {
+    let repaired = false;
+    const disk = memoryDisk(), writes = [], write = disk.write;
+    disk.write = async (puts = {}, deletes = {}) => {
+      writes.push(...(puts.frames || []));
+      return write(puts, deletes);
+    };
+    const h = boot({ disk, respond: async url => {
+      if (url.endsWith('/metadata')) return new Response(JSON.stringify(metadata(STUDY)));
+      const body = repaired ? multipart('pixels') : Buffer.from(malformed);
+      return new Response(gzip ? zlib.gzipSync(body) : body, { headers: {
+        'Content-Type': gzip ? 'application/gzip' : PART,
+        'X-KIN-Part-Type': PART, 'X-KIN-Study-Revision': 'r1',
+      } });
+    } });
+    const list = h.connect();
+    list.send({ type: 'hello', role: 'list' });
+    list.send({ type: 'add', session: 'sess-A', studies: [{ uid: STUDY }] });
+    await until(() => statusOf(list, STUDY)?.status === 'Failed', 'malformed response rejected during preload');
+    assert.match(statusOf(list, STUDY).reason, /서버 응답을 해석하지 못했습니다/);
+    assert.equal(writes.length, 0, 'invalid frames must never reach storage, even temporarily');
+    assert.equal(disk.frames.size, 0);
+    assert.equal((await query(list)).held, null);
+    assert.equal((await list.ask({ type: 'frame', session: 'sess-A', path: FRAME })).bytes, null);
+    repaired = true;
+    list.send({ type: 'retry', uid: STUDY });
+    await until(() => statusOf(list, STUDY)?.status === 'Ready', 'Retry after server repair');
+    const held = (await query(list)).held;
+    const answer = await list.ask({ type: 'frame', session: 'sess-A', path: FRAME, copy: held.copy });
+    assert.deepEqual(Buffer.from(answer.bytes), multipart('pixels'));
+    assert.equal(answer.partType, PART);
+  });
+}
+
+test('cached multipart headers retain a long relayed part type and reject unauthenticated types', async () => {
   const type = 'image/jp2; transfer-syntax=1.2.840.10008.1.2.4.90';
-  for (const mode of ['valid', 'missing', 'duplicate', 'tampered']) {
-    const header = mode === 'missing' ? '' : `cOnTeNt-TyPe: ${type}\r\n`;
-    const body = Buffer.from(`\r\n--relay:boundary\r\nContent-Location: /${'long-path/'.repeat(150)}\r\n${header}` +
-      (mode === 'duplicate' ? 'Content-Type: application/octet-stream\r\n' : '') + '\r\npixels\r\n--relay:boundary--\r\n');
+  for (const mode of ['valid', 'tampered']) {
+    const body = Buffer.from(`\r\n--relay:boundary\r\nContent-Location: /${'long-path/'.repeat(150)}\r\ncOnTeNt-TyPe: ${type}\r\n\r\npixels\r\n--relay:boundary--\r\n`);
     const h = boot({ respond: async url => url.endsWith('/metadata')
       ? new Response(JSON.stringify(metadata(STUDY)))
       : new Response(body, { headers: { 'Content-Type': 'multipart/related; boundary="relay:boundary"', 'X-KIN-Study-Revision': 'r1' } }) });
