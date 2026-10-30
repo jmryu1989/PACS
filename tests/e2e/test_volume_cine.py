@@ -9,6 +9,9 @@ from viewer_session import end_viewer
 
 class VolumeCineE2E(VolumeOrientationE2E):
  CAPTURE_TIMEOUT_MS=10000
+ # Hang timeout for a full unlooped pass. Delivered frames follow the software renderer (hosted 17-24 fps for a
+ # 24 fps request), so a pass-length deadline must not encode a delivered rate: 10s was 8.3 fps for the 83 oblique planes.
+ PLAYBACK_HANG_MS=60000
  def wait_for_capture(self,v,size,what,count=1):
   # Route handlers and page listeners append after the action returns, so a fixed window can expire
   # before the append lands (D-CINETIMING 추가 1). Poll the capture itself; sync-API route handlers
@@ -24,17 +27,32 @@ class VolumeCineE2E(VolumeOrientationE2E):
   select_image_tool(v, 'Cine');expect(v.locator('#kin-cine')).to_be_visible()
  def cine_play(self,v):
   v.locator('[data-cy=viewport-grid] > div').nth(0).locator('[data-cy="cine-player-play-pause"]').click()
+ def watch_timers(self,v):
+  # Tag each page interval tick with its scheduled delay and ordinal, so a camera move can be traced to the timer
+  # tick that made it. This separates the requested schedule from how fast the renderer lets ticks run.
+  v.evaluate("""()=>{const native=window.setInterval;window.cineTick=null;window.setInterval=function(callback,delay,...rest){if(typeof callback!=='function')return native.call(this,callback,delay,...rest);let tick=0;const id=native.call(this,function(...args){const outer=window.cineTick;window.cineTick={id,delay,tick:++tick};try{return callback.apply(this,args)}finally{window.cineTick=outer}},delay,...rest);return id}}""")
+ def assert_schedule(self,positions,requested):
+  # Every plane is one tick of a single cine clock running at the requested interval, counted from its first tick:
+  # a dropped, doubled or out-of-band step fails here however slowly this runner renders.
+  ticks=[r['tick'] for r in positions];self.assertTrue(all(ticks),ticks)
+  self.assertEqual(len({t['id'] for t in ticks}),1,ticks);self.assertAlmostEqual(ticks[0]['delay'],1000/requested,delta=1e-6)
+  self.assertEqual([t['tick'] for t in ticks],list(range(1,len(positions)+1)))
  def watch_cine(self,v):
-  v.evaluate("""()=>{window.cineView=services.cornerstoneViewportService.getCornerstoneViewport('mpr-axial');window.cinePositions=[];window.cinePixels=[];cineView.element.addEventListener(cornerstone.Enums.Events.CAMERA_MODIFIED,()=>{const p=cineView.getCamera().focalPoint;if(!cinePositions.length||p.some((x,i)=>Math.abs(x-cinePositions.at(-1).point[i])>1e-6))cinePositions.push({point:p,time:performance.now()})});cineView.element.addEventListener(cornerstone.Enums.Events.IMAGE_RENDERED,()=>{const c=cineView.getCanvas(),p=cineView.getCamera().focalPoint,q=cineView.worldToCanvas(p);cinePixels.push({point:p,value:c.getContext('2d').getImageData(Math.floor(q[0]*c.width/c.clientWidth),Math.floor(q[1]*c.height/c.clientHeight),1,1).data[0]})})}""")
+  v.evaluate("""()=>{window.cineView=services.cornerstoneViewportService.getCornerstoneViewport('mpr-axial');window.cinePositions=[];window.cinePixels=[];cineView.element.addEventListener(cornerstone.Enums.Events.CAMERA_MODIFIED,()=>{const p=cineView.getCamera().focalPoint;if(!cinePositions.length||p.some((x,i)=>Math.abs(x-cinePositions.at(-1).point[i])>1e-6))cinePositions.push({point:p,time:performance.now(),tick:window.cineTick??null})});cineView.element.addEventListener(cornerstone.Enums.Events.IMAGE_RENDERED,()=>{const c=cineView.getCanvas(),p=cineView.getCamera().focalPoint,q=cineView.worldToCanvas(p);cinePixels.push({point:p,value:c.getContext('2d').getImageData(Math.floor(q[0]*c.width/c.clientWidth),Math.floor(q[1]*c.height/c.clientHeight),1,1).data[0]})})}""")
  def test_volume_cine_01_both_endpoints_direction_pixels(self):
-  a,p,v=self.starting();original=self.originals();p.locator('#findings').fill('KEEP MPR CINE REPORT');self.cine_open(v);v.get_by_label('Loop',exact=True).uncheck();v.get_by_role('button',name='First Plane',exact=True).click();v.wait_for_timeout(200);before=self.volume_state(v);self.assertAlmostEqual(before[0]['camera']['focalPoint'][2],32,delta=1e-6);self.watch_cine(v);self.cine_play(v)
-  v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false",timeout=10000);forward=v.evaluate('()=>cinePositions');np.testing.assert_allclose([r['point'][2] for r in forward],list(range(31,-1,-1)),atol=1e-6,rtol=0);fps=(len(forward)-1)*1000/(forward[-1]['time']-forward[0]['time'])
-  print('VOLUME_CINE_FPS',fps,'REQUESTED',v.evaluate("()=>services.cineService.getState().cines['mpr-axial']"),flush=True)
-  self.assertGreater(fps,18);self.assertLess(fps,30)
+  a,p,v=self.starting();original=self.originals();p.locator('#findings').fill('KEEP MPR CINE REPORT');self.cine_open(v);v.get_by_label('Loop',exact=True).uncheck();v.get_by_role('button',name='First Plane',exact=True).click();v.wait_for_timeout(200);before=self.volume_state(v);self.assertAlmostEqual(before[0]['camera']['focalPoint'][2],32,delta=1e-6);self.watch_timers(v);self.watch_cine(v);self.cine_play(v)
+  v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false",timeout=self.PLAYBACK_HANG_MS);forward=v.evaluate('()=>cinePositions');np.testing.assert_allclose([r['point'][2] for r in forward],list(range(31,-1,-1)),atol=1e-6,rtol=0);fps=(len(forward)-1)*1000/(forward[-1]['time']-forward[0]['time'])
+  requested=v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].frameRate");print('VOLUME_CINE_FPS',fps,'REQUESTED',requested,flush=True)
+  # The requirement is the user-selected rate (D06: not a declared-FPS guarantee under slow rendering; the 1~90 fps
+  # setting is not the processing speed). Delivered FPS under CI's CPU-only renderer is recorded, not bounded below:
+  # hosted runs split 17-18 / 22-24 fps for the same 24 fps request. The schedule is asserted instead, and load can
+  # only slow ticks, so playback faster than requested stays a failure. Real-GPU delivered FPS is checked on the
+  # reading-PC-class GPU, not here.
+  self.assert_schedule(forward,requested);self.assertLess(fps,30)
   pixels=v.evaluate('()=>cinePixels');self.assertTrue(pixels)
   for row in pixels:
    z=row['point'][2];want=25 if z<10.5 else 230 if z>=21.5 else 128;self.assertAlmostEqual(row['value'],want,delta=3)
-  self.preserved_volume(before[1:],self.volume_state(v)[1:]);v.get_by_label('Playback Direction',exact=True).select_option('reverse');v.evaluate('()=>{cinePositions=[];cinePixels=[]}');self.cine_play(v);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false",timeout=10000);reverse=v.evaluate('()=>cinePositions');np.testing.assert_allclose([r['point'][2] for r in reverse],list(range(1,33)),atol=1e-6,rtol=0);expect(p.locator('#findings')).to_have_value('KEEP MPR CINE REPORT');self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1);print('CINE_BOTH_DIRECTIONS',len(forward),len(reverse),flush=True)
+  self.preserved_volume(before[1:],self.volume_state(v)[1:]);v.get_by_label('Playback Direction',exact=True).select_option('reverse');v.evaluate('()=>{cinePositions=[];cinePixels=[]}');self.cine_play(v);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false",timeout=self.PLAYBACK_HANG_MS);reverse=v.evaluate('()=>cinePositions');np.testing.assert_allclose([r['point'][2] for r in reverse],list(range(1,33)),atol=1e-6,rtol=0);self.assert_schedule(reverse,requested);expect(p.locator('#findings')).to_have_value('KEEP MPR CINE REPORT');self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1);print('CINE_BOTH_DIRECTIONS',len(forward),len(reverse),flush=True)
  def test_volume_cine_02_selection_modal_session_stop(self):
   a,p,v=self.starting();self.cine_open(v);self.watch_cine(v);self.cine_play(v);v.wait_for_function('()=>cinePositions.length>=3');self.choose_volume(v,v,1);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false");count=v.evaluate('()=>cinePositions.length');v.wait_for_timeout(250);self.assertEqual(v.evaluate('()=>cinePositions.length'),count)  # negative assertion: fixed window is the delivery margin for frames that must not arrive after the modal stop
   self.choose_volume(v,v,0);v.wait_for_timeout(600);v.get_by_label('Playback Direction',exact=True).select_option('reverse');v.get_by_label('Loop',exact=True).uncheck();self.cine_play(v);v.wait_for_function('(count)=>cinePositions.length>count',arg=count);self.open_note(v);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false");v.locator('#tech-note-close').click();expect(v.get_by_label('Playback Direction',exact=True)).to_have_value('reverse');expect(v.get_by_label('Loop',exact=True)).not_to_be_checked();self.cine_play(v);v.wait_for_timeout(200)
@@ -45,7 +63,7 @@ class VolumeCineE2E(VolumeOrientationE2E):
   count=v.evaluate('cinePositions.length');v.wait_for_function('n=>cinePositions.length>n',arg=count)
   ended=end_viewer(v);count=ended.evaluate('()=>cinePositions.length');ended.assert_quiet(500);self.assertEqual(ended.evaluate('()=>cinePositions.length'),count);self.assertEqual(len(self.versions(a)),1)
  def test_volume_cine_03_oblique_spacing_and_loop(self):
-  a,p,v=self.starting();self.rotate_planes(v,0,25);self.rotate_planes(v,1,-35);self.cine_open(v);v.get_by_label('Loop',exact=True).uncheck();v.get_by_role('button',name='First Plane',exact=True).click();v.wait_for_timeout(200);before=self.volume_state(v);normal=np.array(before[0]['camera']['viewPlaneNormal']);first=np.array(before[0]['camera']['focalPoint']);last=int(np.floor(float(np.dot(np.abs(normal),[63,63,32]))));self.assertAlmostEqual(float(np.dot(first,normal)),float(np.minimum(normal*[63,63,32],0).sum()),delta=2e-5);self.watch_cine(v);self.cine_play(v);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false",timeout=10000);positions=v.evaluate('()=>cinePositions');self.assertEqual(len(positions),last)
+  a,p,v=self.starting();self.rotate_planes(v,0,25);self.rotate_planes(v,1,-35);self.cine_open(v);v.get_by_label('Loop',exact=True).uncheck();v.get_by_role('button',name='First Plane',exact=True).click();v.wait_for_timeout(200);before=self.volume_state(v);normal=np.array(before[0]['camera']['viewPlaneNormal']);first=np.array(before[0]['camera']['focalPoint']);last=int(np.floor(float(np.dot(np.abs(normal),[63,63,32]))));self.assertAlmostEqual(float(np.dot(first,normal)),float(np.minimum(normal*[63,63,32],0).sum()),delta=2e-5);self.watch_cine(v);self.cine_play(v);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false",timeout=self.PLAYBACK_HANG_MS);positions=v.evaluate('()=>cinePositions');self.assertEqual(len(positions),last)
   for i,row in enumerate(positions,1):np.testing.assert_allclose(row['point'],first+normal*i,atol=2e-5,rtol=0)
   self.preserved_volume(before[1:],self.volume_state(v)[1:]);self.assertGreater(len(positions),40);v.get_by_label('Loop',exact=True).check();v.evaluate('()=>cinePositions=[]');self.cine_play(v);v.wait_for_function('()=>cinePositions.length>=3');self.cine_play(v);points=v.evaluate('()=>cinePositions');np.testing.assert_allclose(points[0]['point'],first,atol=2e-5,rtol=0);self.assertEqual(len(self.versions(a)),1);print('OBLIQUE_CINE_POSITIONS',last,flush=True)
  def test_volume_cine_04_delayed_permission_and_source_change(self):
