@@ -74,6 +74,9 @@ function kinCreateSeriesMetadataRecovery() {
       const fresh = !current.failures.has(key);
       current.failures.set(key, { position, status: error?.status, error, retried: retried || !!current.failures.get(key)?.retried });
       render(current);
+      // The route boundary also listens to unhandled rejections. Its generic toast must not replace the reason
+      // this request already has (including the exhausted single retry), even if an upstream caller drops its catch.
+      window.dispatchEvent(new CustomEvent('kin-series-metadata-failed', { detail: { error, message: describe(current.failures.get(key)) } }));
       if (!fresh) return;
       try { services?.uiNotificationService?.show?.({ title: 'Image Loading', message: describe(current.failures.get(key)), type: 'error' }); } catch (_) {}
     };

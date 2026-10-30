@@ -2,7 +2,8 @@
 'use strict';
 importScripts('preload-store.js', 'preload-disk.js');
 const Model = self.KinPreloadStore, Disk = self.KinPreloadDisk, disk = Disk.create();
-const FRAME_ACCEPT = 'multipart/related; type="application/octet-stream"; transfer-syntax=*';
+const FRAME_ACCEPT = ['application/octet-stream', 'image/jpeg', 'image/jls', 'image/jp2', 'image/dicom-rle']
+  .map(type => 'multipart/related; type="' + type + '"; transfer-syntax=*').join(', ');
 const MESSAGES = Object.freeze({
   unavailable: '이 브라우저의 보관 저장소를 사용할 수 없습니다. 다시 시도하세요.',
   unset: '이 기관에서 미리 받기에 쓸 저장 용량을 아직 정하지 않아 미리 받기를 할 수 없습니다. 관리자에게 문의하세요.',

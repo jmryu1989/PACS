@@ -354,7 +354,7 @@ function recovery({ search = `?StudyInstanceUIDs=${CURRENT},${PRIOR}`, lazy = tr
   if (own) client.retrieveSeriesMetadata = function foreign(options) { return native.call(this, options); };
   const dataSource = { retrieve: accessor ? { getWadoDicomWebClient: () => client } : {}, getConfig: () => ({ enableStudyLazyLoad: lazy }) };
   window.KinSessionTransport = transports;
-  vm.runInNewContext(source, { window, document, location, URLSearchParams, crypto: webcrypto, TextEncoder, console, Event, AbortController,
+  vm.runInNewContext(source, { window, document, location, URLSearchParams, crypto: webcrypto, TextEncoder, console, Event, CustomEvent, AbortController,
     setInterval: () => 0, clearInterval() {}, setTimeout: (fn, ms) => { timers.set(++serial, { fn, ms }); return serial; }, clearTimeout: id => { timers.delete(id); },
     fetch: async () => { throw new Error('no network in this contract'); } });
   timers.clear();
