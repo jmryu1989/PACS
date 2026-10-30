@@ -9,7 +9,7 @@ import { BadRequestException, ConflictException, ForbiddenException, NotFoundExc
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import type { PrismaService } from '../prisma.service';
-import { dump, holdAlive, toClient, draftConflict, draftOwner, draftEpochOf, draftExpected, draftSnapshotInput,
+import { dump, holdAlive, reportHeld, toClient, draftConflict, draftOwner, draftEpochOf, draftExpected, draftSnapshotInput,
   draftEnvelope, draftTransactionError, draftBounded } from './values';
 import type { DraftOwner } from './values';
 import { need, inst } from './access';
@@ -110,7 +110,7 @@ export class PacsReportDraft {
       throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
     const heldByOther = holdAlive(prev) && prev.holder !== c.actor ? prev.holder : null;
     if (heldByOther)
-      throw new ConflictException({ code: 'REPORT_HELD', holder: heldByOther, message: `${heldByOther} 님이 판독 중입니다` });
+      throw reportHeld(prev, c);
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
     if (!canReadPreliminary(prev, c))
       throw new ForbiddenException(

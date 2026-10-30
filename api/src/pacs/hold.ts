@@ -6,7 +6,7 @@ import { canReadPreliminary } from '../preliminary-reader';
 import type { StudyAccessService } from '../study-access.service';
 import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import type { PrismaService } from '../prisma.service';
-import { noteTransactionError, holdAlive } from './values';
+import { noteTransactionError, holdAlive, visibleHolder } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
 
@@ -27,7 +27,7 @@ export class PacsHold {
    * 응급 판독을 자물쇠로 막는 건 위험하다. 실제 충돌은 저장 시점의 버전 비교가 잡는다.
    *
    * 원격판독으로 넘어간 검사는 두 기관의 판독의가 동시에 열 수 있다 —
-   * 점유가 기관을 넘어 보여야 하는 이유가 여기 있다.
+   * 점유 사실은 기관을 넘어 보여야 하지만 작성자 신원은 같은 기관에만 보인다.
    */
   async hold(uid: string, c: Caller) {
     need(c.roles, 'radiologist', '판독문 점유');
@@ -46,10 +46,10 @@ export class PacsHold {
       if(!canReadPreliminary(prev,c))throw new ForbiddenException('예비 판독(RS: P) 중인 검사입니다');
       const other=holdAlive(prev)&&prev.holder!==c.actor?prev.holder:null;
       if(!other){
-        await tx.studyState.update({where:{uid},data:{holder:c.actor,heldAt:new Date()}});
+        await tx.studyState.update({where:{uid},data:{holder:c.actor,holderInstitutionId:inst(c),heldAt:new Date()}});
         if(!holdAlive(prev))await tx.auditLog.create({data:{actor:c.actor,action:'report.hold',target:uid}});
       }
-      return {holder:other??c.actor,mine:!other,conflict:!!other};
+      return {holder:other?visibleHolder(prev,c):c.actor,mine:!other,conflict:!!other};
     },{maxWait:4000,timeout:8000}).catch(noteTransactionError);
   }
 
@@ -59,7 +59,7 @@ export class PacsHold {
     need(c.roles, 'radiologist', '판독문 점유 해제');   // hold와 같은 역할 경계
     const prev = await this.access.gate(uid,c,tx);
     if (!prev || prev.holder !== c.actor) return { ok: true };   // 내 것이 아니면 건드리지 않는다
-    await tx.studyState.update({ where: { uid }, data: { holder: null, heldAt: null } });
+    await tx.studyState.update({ where: { uid }, data: { holder: null, holderInstitutionId: null, heldAt: null } });
     return { ok: true };
     });
   }
@@ -69,12 +69,12 @@ export class PacsHold {
     need(c.roles, 'admin', '판독 점유 강제 해제');
     const prev = await this.access.gate(uid,c,tx);
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
-    await tx.studyState.update({ where: { uid }, data: { holder: null, heldAt: null } });
+    await tx.studyState.update({ where: { uid }, data: { holder: null, holderInstitutionId: null, heldAt: null } });
     // 점유가 없었어도 관리자 조치의 호출 흔적은 남긴다.
     await audit(c.actor, 'hold.force-release', uid, {
       by: inst(c), holder: prev.holder ?? null, heldAt: prev.heldAt ?? null, alive: holdAlive(prev),
     });
-    return { ok: true, released: prev.holder ?? null };
+    return { ok: true, released: visibleHolder(prev,c) };
     });
   }
 }

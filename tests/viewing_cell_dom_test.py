@@ -150,6 +150,62 @@ class ViewingCellDOM(MultiInstitutionWorklist):
         expect(own).to_have_text('', timeout=12000)
         screen.finish()
 
+    def test_viewing_long_writer_wraps_inside_saved_width(self):
+        server = PresenceServer()
+        writer = 'syn.long.reader.name@synthetic-hospital.example'
+        server.rows[0]['state']['holder'] = writer
+        screen = self.boot(server)
+        cell = self.cell(screen, 'SYN-CURRENT')
+        expect(cell).to_have_text('✎ ' + writer + ' · Viewing: SYN Colleague')
+        dialog = screen.open_columns()
+        dialog.get_by_role('spinbutton', name='Viewing content width (px)', exact=True).fill('90')
+        dialog.get_by_role('button', name='Apply & Save in Browser', exact=True).click()
+        width = cell.bounding_box()['width']
+        self.assertLess(width, 130)
+
+        def fits():
+            self.assertAlmostEqual(width, cell.bounding_box()['width'], delta=1)
+            self.assertTrue(cell.evaluate('e => e.scrollWidth <= e.clientWidth + 1'))
+            # A Range measures the visible writer text on every line, not its wrapper's box.
+            boxes = cell.get_by_text('✎ ' + writer, exact=True).evaluate('''e => {
+              const r = document.createRange(); r.selectNodeContents(e);
+              return Array.from(r.getClientRects(), b => ({left:b.left, right:b.right, top:b.top}));
+            }''')
+            bounds = cell.bounding_box()
+            self.assertGreater(len({b['top'] for b in boxes}), 1, 'writer must wrap')
+            for box in boxes:
+                self.assertGreaterEqual(box['left'], bounds['x'] - 1)
+                self.assertLessEqual(box['right'], bounds['x'] + bounds['width'] + 1)
+
+        fits()
+        server.people = {'2.25.101': ['SYN New Reader']}
+        expect(cell).to_have_text('✎ ' + writer + ' · Viewing: SYN New Reader', timeout=12000)
+        fits()
+        server.fail = True
+        expect(cell).to_have_text('✎ ' + writer, timeout=12000)
+        fits()
+        screen.page.reload()
+        expect(cell).to_have_text('✎ ' + writer)
+        fits()
+        screen.finish()
+
+    def test_viewing_server_redacted_writer_survives_poll_and_release(self):
+        server = PresenceServer()
+        server.rows[0]['state']['holder'] = '다른 기관'
+        server.people = {}
+        screen = self.boot(server)
+        cell = self.cell(screen, 'SYN-CURRENT')
+        expect(cell).to_have_text('✎ 다른 기관')
+        expect(cell.get_by_text('✎ 다른 기관', exact=True)).to_have_attribute('title', '다른 기관 님이 작성 중')
+        server.people = {'2.25.101': ['SYN Colleague']}
+        expect(cell).to_have_text('✎ 다른 기관 · Viewing: SYN Colleague', timeout=12000)
+        server.fail = True
+        expect(cell).to_have_text('✎ 다른 기관', timeout=12000)
+        server.rows[0]['state']['holder'] = None
+        screen.refresh()
+        expect(cell).to_have_text('')
+        screen.finish()
+
     def test_viewing_slow_response_outlasts_poll_without_blanking_or_overlap(self):
         server = PresenceServer()
         screen = self.boot(server)

@@ -655,6 +655,62 @@ test('SPLIT-11 a live hold of another reader is reported, never overwritten; an 
 
 // ── SPLIT-12 worklist: the institution boundary of the list and the boot bundle (M13, M14) ──
 
+// #292 N2: a shared study does not make the other institution's current writer a colleague.
+for (const [writer, peer, stranger, admin] of [
+  [RAD_A, RAD_A2, RAD_B, ADMIN_B], [RAD_B, ADMIN_B, RAD_A, ADMIN_A],
+]) test(`writer privacy: ${writer.institution} hold is named only within its institution`, async () => {
+  const w = world();
+  await w.boot();
+  const s = w.study({ teleInstitutionId: INST_B });
+  w.orthanc.rows = [qido(s.uid, 'SYN A HOSPITAL')];
+  await w.hold.hold(s.uid, writer);
+  for (const caller of [writer, peer, stranger, admin]) {
+    const expected = caller.institution === writer.institution ? writer.actor : '다른 기관';
+    const list = await w.worklist.listStudies(caller);
+    const boot = await w.worklist.bootstrap(caller);
+    assert.equal(list.studies[0].state.holder, expected);
+    assert.equal(boot.states[s.uid].holder, expected);
+    assert.deepEqual(await w.hold.hold(s.uid, caller),
+      { holder: expected, mine: caller.actor === writer.actor, conflict: caller.actor !== writer.actor });
+    if (caller.actor !== writer.actor) {
+      const draft = await refused(() => w.draft.putReport(s.uid,
+        draftBody(caller, s.draftEpoch, 0, { findings: 'SYN unchanged' }), caller, null), 409, 'REPORT_HELD');
+      const commit = await refused(() => w.commit.commitReport(s.uid,
+        commitBody(caller, 'save', s.draftEpoch, 0, 0, { findings: 'SYN unchanged' }), caller, null), 409, 'REPORT_HELD');
+      for (const response of [draft, commit]) {
+        assert.equal(response.holder, expected);
+        if (caller.institution !== writer.institution)
+          assert.ok(!JSON.stringify(response).includes(writer.actor), '409 must not disclose the e-mail');
+      }
+    }
+  }
+  assert.equal(w.db.rows('studyState')[0].holder, writer.actor, 'redaction must not change the lock owner');
+  assert.equal(w.db.rows('report').length, 0);
+  assert.equal(w.db.rows('reportDraft').length, 0);
+  await w.hold.release(s.uid, stranger);
+  assert.equal((await w.worklist.bootstrap(stranger)).states[s.uid].holder, '다른 기관');
+  assert.deepEqual(await w.hold.forceRelease(s.uid, admin), { ok: true, released: '다른 기관' });
+  assert.equal((await w.worklist.bootstrap(stranger)).states[s.uid].holder, null);
+  assert.equal(JSON.parse(w.audits('hold.force-release')[0].detail).holder, writer.actor, 'audit keeps the real owner');
+});
+
+test('writer privacy: legacy holds hide unknown institutions until the writer renews; expiry and takeover keep the new affiliation', async () => {
+  const w = world();
+  const s = w.study({ teleInstitutionId: INST_B, holder: RAD_A.actor, heldAt: new Date() });
+  const state = () => w.db.rows('studyState')[0];
+  assert.equal(values.toClient(state(), null, RAD_A2).holder, '다른 기관');
+  assert.equal(values.toClient(state(), null, RAD_A).holder, RAD_A.actor);
+  await w.hold.hold(s.uid, RAD_A);
+  assert.equal(values.toClient(state(), null, RAD_A2).holder, RAD_A.actor);
+  w.db.tables.studyState[0].heldAt = new Date(Date.now() - 6 * 60_000);
+  assert.equal(values.toClient(state(), null, RAD_B).holder, null);
+  await w.hold.hold(s.uid, RAD_B);
+  assert.equal(values.toClient(state(), null, RAD_A2).holder, '다른 기관');
+  assert.equal(values.toClient(state(), null, ADMIN_B).holder, RAD_B.actor);
+  await w.hold.release(s.uid, RAD_B);
+  assert.equal(values.toClient(state(), null, ADMIN_B).holder, null);
+});
+
 test('SPLIT-12 the list and the boot bundle carry own and tele-received studies only; first sight registers a study; unknown counts stay unknown', async () => {
   const w = world();
   await w.boot();

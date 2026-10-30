@@ -11,7 +11,7 @@ import { ContractError } from '../emr-contract/validation';
 import type { KeycloakService } from '../keycloak.service';
 import { applyKeepList, citationArray, citationUnion } from '../report-citation';
 import { applyStructureKeepList, commitStructureSelection, structureArray, structureUnion } from '../report-structure';
-import { holdAlive, toClient, draftOwner, draftExpected, draftEnvelope } from './values';
+import { holdAlive, reportHeld, toClient, draftOwner, draftExpected, draftEnvelope } from './values';
 import { need, inst } from './access';
 import type { Caller } from './access';
 import { citationLimit, structureLimit, isStructureCheck, isCitationCheck } from './report-evidence';
@@ -74,7 +74,7 @@ export class PacsReportCommit {
       throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
     const heldByOther = holdAlive(prev) && prev.holder !== c.actor ? prev.holder : null;
     if (heldByOther)
-      throw new ConflictException({ code: 'REPORT_HELD', holder: heldByOther, message: `${heldByOther} 님이 판독 중입니다` });
+      throw reportHeld(prev, c);
 
     // 예비 판독 중인 검사는 지정된 두 사람 말고는 쓰지도 못한다.
     // 읽기만 막고 쓰기를 열어두면, 내용을 못 본 채로 덮어쓸 수 있다 — 더 나쁘다.
@@ -180,7 +180,7 @@ export class PacsReportCommit {
           recommendation: body.recommendation ?? '',
         };
 
-    const stateData: any = { rs, holder: null, heldAt: null };   // 확정하면 점유가 풀린다
+    const stateData: any = { rs, holder: null, holderInstitutionId: null, heldAt: null };   // 확정하면 점유가 풀린다
     stateData.holdReason = action === 'defer' ? body.reason : null;
     if (action === 'preliminary') {
       stateData.preDoc = c.actor;

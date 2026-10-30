@@ -41,6 +41,22 @@ const HOLD_TTL_MS = 5 * 60 * 1000;
 export const holdAlive = (s: any) => s?.holder && s.heldAt && Date.now() - new Date(s.heldAt).getTime() < HOLD_TTL_MS;
 
 /**
+ * A shared study grants access to the report, not the other institution's writer identity.
+ * Keep the existing nonempty holder contract so clients still block conflicting writes.
+ * Unknown legacy affiliations fail closed; only an authenticated hold heartbeat can fill them.
+ */
+export function visibleHolder(s: any, caller: Caller): string | null {
+  if (!s?.holder) return null;
+  return s.holder === caller.actor || (caller.institution && s.holderInstitutionId === caller.institution)
+    ? s.holder : '다른 기관';
+}
+
+export function reportHeld(s: any, caller: Caller): ConflictException {
+  const holder = visibleHolder(s, caller);
+  return new ConflictException({ code: 'REPORT_HELD', holder, message: `${holder} 님이 판독 중입니다` });
+}
+
+/**
  * Preliminary(RS=P) 판독문을 이 사람이 볼 수 있는가.
  *
  * 예비 판독은 **아직 확정되지 않은 소견**이다. 상급 판독의가 뒤집을 수 있는 내용이
@@ -91,7 +107,7 @@ export function toClient(s: any, r: any, caller: Caller, d: any = null) {
     // undefined가 아니라 null인 이유: JSON.stringify는 undefined 키를 통째로 지운다.
     // 키가 사라지면 클라이언트의 `{...기존, ...응답}` 이 이전 점유자를 그대로 남긴다.
     // "값을 비웠다"는 사실도 전송되어야 한다.
-    holder: holdAlive(s) ? s.holder : null,
+    holder: holdAlive(s) ? visibleHolder(s, caller) : null,
     holdReason: s.holdReason ?? null,
     version: r?.version ?? 0,
     findings: hidden ? '' : (r?.findings ?? ''),

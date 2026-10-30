@@ -121,7 +121,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261027230000_caution_app_limits/migration.sql',
               'api/prisma/migrations/20261028120000_held_unknown_source/migration.sql',
               'api/prisma/migrations/20261029120000_emr_image_retention/migration.sql',
-              'api/prisma/migrations/20261029130000_emr_preparation_manifest_index/migration.sql']
+              'api/prisma/migrations/20261029130000_emr_preparation_manifest_index/migration.sql',
+              'api/prisma/migrations/20261030120000_writer_institution/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -231,7 +232,7 @@ def expected_rows(uid):
     rows['StudyState'] = [dict(uid=uid, institutionId='SYNTHETIC-hospital', teleInstitutionId='SYNTHETIC-tele',
         origin='dicom', rs='R', holdReason=None, ss='Verified', em='N', ts='none', matched='U', ward='',
         reqHosp='SYNTHETIC', repDoc='SYNTHETIC-reader', confirm=None, preDoc=None, preReviewer=None, preDocSub="SYNTHETIC-author-sub", preReviewerSub="SYNTHETIC-reviewer-sub",
-        ov=None, orig=None, orderOid=None, holder=None, heldAt=None,
+        ov=None, orig=None, orderOid=None, holder=None, holderInstitutionId=None, heldAt=None,
         # S7-U5: the draft epoch is a value of the row (rotated by a forced release), not something a restore may re-draw.
         draftEpoch='00000000-0000-4000-8000-0000000000d1', updatedAt=STAMP, createdAt=STAMP)]
     rows['Report'] = [dict(uid=uid, findings='SYNTHETIC findings\n합성', conclusion='SYNTHETIC conclusion',

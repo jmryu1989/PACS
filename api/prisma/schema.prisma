@@ -165,6 +165,7 @@ model StudyState {
   /// 매칭은 1:1이다. nullable unique라 미매칭(NULL)은 여럿이어도 같은 오더가 두 검사에 붙지는 않는다.
   orderOid  String?  @unique                  // 매칭된 오더
   holder    String?                           // 지금 판독문을 쓰고 있는 사람
+  holderInstitutionId String?                 // 점유/하트비트에서 인증된 작성자의 기관. 없으면 이름을 공개하지 않는다
   heldAt    DateTime?                         // 마지막 하트비트. TTL이 지나면 점유가 풀린다
   /// S7-U5 초안 경계의 세대(U5S-REQ-14). 행이 생길 때마다 DB가 새 값을 주고(지웠다 다시 생긴 검사도 새 세대),
   /// 관리자 강제 해제가 바꾼다. 초안 쓰기는 자기가 본 세대를 함께 보내고, 다르면 거절된다.
