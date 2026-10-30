@@ -1083,3 +1083,16 @@ model ImportOperation {
 
 // emr_image.object_digest keeps each stored archive file's digests for the catalog
 // (20261027180000_emr_image_object_digest), on the application connection.
+
+// D1890: ciphertext lives on the PC; retired rows preserve the destruction time, never the bytes.
+model PreloadCacheKey {
+  id           String   @id @default(uuid()) @db.Uuid
+  institution  String
+  sub          String
+  key          Bytes?
+  createdAt    DateTime @default(now())
+  lastIssuedAt DateTime @default(now())
+  retiredAt    DateTime?
+
+  @@index([lastIssuedAt])
+}

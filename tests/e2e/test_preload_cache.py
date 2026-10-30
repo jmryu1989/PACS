@@ -1,32 +1,35 @@
 # coding: utf-8
-"""REQ-MG-PRELOAD-MEM -> RISK-PRELOAD-STALE-IDENTITY / RISK-PRELOAD-UNRECORDED-VIEW / RISK-PRELOAD-STARVES-READING /
-RISK-PRELOAD-OOM-REPORT-LOSS -> TEST-MG-PRELOAD-SERVED.
+"""REQ-MG-PRELOAD-CACHE -> RISK-PRELOAD-STALE-IDENTITY / RISK-PRELOAD-UNRECORDED-VIEW / RISK-PRELOAD-STARVES-READING /
+RISK-PRELOAD-DISK-READABLE / RISK-PRELOAD-CROSS-USER -> TEST-PRELOAD-CACHE-SERVED (R1-R4/R7-R9/R11-R13/R16).
 
-D1880 memory-only preload on the served stack, real browser: Preload on a worklist multi-selection, one study opened
-while the others still load, frames after the opening check served from the worker's memory (no network read), the
-store's memory within the budget, nothing in Cache Storage / IndexedDB / OPFS. 열람 (D1880 "each open still records
+D1890 encrypted retention preload on the served stack, real browser: Preload on a worklist multi-selection, one study opened
+while the others still load, frames after the opening check served from the worker's disk cache (no network read), the
+store's ciphertext within the budget, ciphertext in IndexedDB, nothing in Cache Storage / OPFS. 열람 (D1880 "each open still records
 열람"; opening contract consult-preload-opening-contract-20261029): an opening's root is its user-view provide-prepared
 in the PostgreSQL ledger. A preloaded study that is not opened has none (its preload is a background-fetch transfer)
 (O3); every new opening has exactly one - right after the preload, after the preload's delivery closed, a fresh viewer
 inside the previous viewer's idle gap (review R1), a reload, a back/forward return, a patient tab entering the study
 again - and a same-scope Open adds none (O1); while the ledger cannot take the root (its admission held at the
-PostgreSQL boundary), neither a live image body nor the worker's memory reaches the screen, and the study shows once
+PostgreSQL boundary), neither a live image body nor the worker's disk cache reaches the screen, and the study shows once
 the root is durable - for a patient tab entering a study again, its live read waits and the current scope stays on
 screen (O2); after the idle gap the same opening reads as a background-fetch delivery referring to its
 root, and a HEAD records nothing (O4). With a viewer open, Clear All and Retry under a new revision: the viewer's next
-read does not take the new copy from memory; it is read live, then checked, and only then served from memory - and the
+read does not take the new copy from disk; it is read live, then checked, and only then served from disk - and the
 opening keeps its one root (O5). The viewer's reading stays busy for the worker until the image body has ended (the
 page's real streams). A study changed after preload is dropped at opening and read live. Synthetic studies only; the
 SharedWorker's own fetches are not visible to Playwright (measured: neither context.route nor request events see them),
 so the worker is observed through the panel.
 
-The stack's site setting KIN_PRELOAD_MEMORY_SHARE must be set (a synthetic share, e.g. 0.25): without it preload is
+The stack's site setting KIN_PRELOAD_DISK_GB must be set (a synthetic disk cap in GiB, e.g. 0.25): without it preload is
 off by design and every study fails with that reason.
 """
+import base64
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 import uuid
@@ -113,7 +116,20 @@ def store_slices(stack, uid, series, frame, patient, label, date, slices, size, 
         assoc.release()
 
 
-class PreloadMemoryE2E(ViewerWindowsE2E):
+class PreloadCacheE2E(ViewerWindowsE2E):
+    @classmethod
+    def cleanup_sessions(cls):
+        super().cleanup_sessions()
+        subjects = list(cls.stack.user_ids.values())
+        for sub in subjects:
+            if str(uuid.UUID(sub)) != sub:
+                raise RuntimeError('Invalid temporary subject; refusing cache-key cleanup')
+        if subjects:
+            quoted = ','.join("'" + sub + "'" for sub in subjects)
+            base.psql('DELETE FROM "PreloadCacheKey" WHERE sub IN (' + quoted + ')')
+            if base.psql('SELECT count(*) FROM "PreloadCacheKey" WHERE sub IN (' + quoted + ')') != ['0']:
+                raise RuntimeError('Synthetic preload-key cleanup failed')
+
     def study(self, patient, label, date, slices, size):
         uid, series, frame = generate_uid(), generate_uid(), generate_uid()
         fixture = Fixture(uid, patient, '한림병원', 'jmryu', 'PRELOAD-SYNTHETIC-' + label)
@@ -151,11 +167,62 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
             print('PANEL', json.dumps(self.panel(p), ensure_ascii=False), flush=True)
             raise
 
-    def memory(self, p):
+    def disk_usage(self, p):
         text = p.locator('#preload-panel [role="status"]').text_content()
-        match = re.search(r'메모리 ([0-9.]+) / ([0-9.]+) GB', text)
+        match = re.search(r'보관 ([0-9.]+) / ([0-9.]+) GB', text)
         self.assertIsNotNone(match, text)
         return float(match.group(1)), float(match.group(2)), text
+
+    def assert_ciphertext(self, page, patient):
+        key_ids = page.evaluate("""async () => {
+          const db=await new Promise(resolve=>{const r=indexedDB.open('kin-preload');r.onsuccess=()=>resolve(r.result);});
+          const rows=await new Promise(resolve=>{const r=db.transaction('studies').objectStore('studies').getAll();r.onsuccess=()=>resolve(r.result);});
+          db.close();return [...new Set(rows.map(r=>r.keyId))];
+        }""")
+        keys = []
+        for key_id in key_ids:
+            self.assertEqual(str(uuid.UUID(key_id)), key_id)
+            rows = base.psql('SELECT encode("key", \'hex\') FROM "PreloadCacheKey" WHERE id=\'' + key_id + "'::uuid")
+            self.assertEqual(len(rows), 1)
+            raw = bytes.fromhex(rows[0])
+            self.assertEqual(len(raw), 32)
+            keys.append(base64.b64encode(raw).decode('ascii'))
+        # Scan complete ciphertext in Chromium, returning predicates only: large CT studies need not serialize
+        # every byte through Playwright. The test's server keys never enter assertion messages or artifacts.
+        result = page.evaluate("""async ({keys,secrets}) => {
+          const db=await new Promise(resolve=>{const r=indexedDB.open('kin-preload');r.onsuccess=()=>resolve(r.result);});
+          const rows={};
+          for(const name of db.objectStoreNames) rows[name]=await new Promise(resolve=>{
+            const r=db.transaction(name).objectStore(name).getAll();r.onsuccess=()=>resolve(r.result);
+          });db.close();
+          const raw=keys.map(k=>Uint8Array.from(atob(k),c=>c.charCodeAt(0)));
+          const contains=(bytes,key)=>bytes.some((b,i)=>b===key[0] && key.every((v,j)=>bytes[i+j]===v));
+          const opfs=[];for await(const [name] of (await navigator.storage.getDirectory()).entries())opfs.push(name);
+          const storage={local:{...localStorage},session:{...sessionStorage},name:window.name,caches:await caches.keys(),opfs};
+          const storageText=JSON.stringify(storage),checks=[];
+          secrets.push(KinWorkContext.session());
+          for(const [store,values] of Object.entries(rows))for(const r of values){
+            const bytes=new Uint8Array(r.ct),clear=JSON.stringify({...r,ct:undefined,iv:undefined});
+            const prefix=new TextDecoder().decode(bytes.slice(0,256));
+            let gunzipFailed=false;
+            try {await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();}
+            catch {gunzipFailed=true;}
+            checks.push({store,fields:Object.keys(r),noIdentifiers:secrets.every(s=>!clear.includes(s)&&!prefix.includes(s)),
+              noMagic:!(bytes[0]===31&&bytes[1]===139)&&!(bytes[0]===45&&bytes[1]===45),gunzipFailed,
+              noRawKey:raw.every(k=>!contains(bytes,k)),noEncodedKey:keys.every(k=>!clear.includes(k)&&!prefix.includes(k))});
+          }
+          return {stores:Object.keys(rows),frames:rows.frames.length,checks,caches:storage.caches,opfs,
+                  windowKeyAbsent:keys.every(k=>!storageText.includes(k))&&raw.every(k=>!storageText.includes(JSON.stringify([...k])))};
+        }""", {'keys': keys, 'secrets': [patient, 'PRELOAD^SYNTHETIC', *self.stack.active.keys()]})
+        self.assertEqual(set(result['stores']), {'frames','studies'})
+        self.assertGreater(result['frames'], 0)
+        self.assertEqual(result['caches'], [])
+        self.assertEqual(result['opfs'], [])
+        self.assertTrue(result['windowKeyAbsent'])
+        for row in result['checks']:
+            self.assertEqual(set(row['fields']), {'entryId','keyId','expiresAt','bytes','iv','ct'} if row['store']=='frames'
+                             else {'manifestId','keyId','expiresAt','iv','ct'})
+            self.assertTrue(all(row[k] for k in ('noIdentifiers','noMagic','gunzipFailed','noRawKey','noEncodedKey')), row)
 
     def events(self, uid):
         """The study's image-delivery 열람 events (D1877 pairs); report and draft reads of the study are other events."""
@@ -253,7 +320,7 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
             return { target, drawn: v.csImage?.imageId, count: v.getImageIds().length };
         }""", index)
 
-    def test_preload_01_queue_open_from_memory_record_and_no_disk(self):
+    def test_preload_01_queue_open_from_cache_record_and_ciphertext(self):
         patient = 'PRELOAD-' + uuid.uuid4().hex[:10]
         a = self.study(patient, 'A', '20260803', slices=8, size=512)
         b = self.study(patient, 'B', '20260802', slices=48, size=1024)
@@ -302,15 +369,16 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
             shown = self.stack_index(viewer, index)
             self.assertEqual(shown['drawn'], shown['target'], shown)
         self.assertEqual(shown['count'], a.slices)
-        self.assertEqual([s for s in seen[before:] if s[0] == a.uid], reads, 'every later slice came from memory')
-        self.wait_status(p, a.uid, r'^Ready \(Open\)')
+        self.assertEqual([s for s in seen[before:] if s[0] == a.uid], reads, 'every later slice came from disk')
+        self.wait_status(p, a.uid, r'^Ready.*\(Open\)')
         self.assertTrue(any(at_open[f.uid][0] in ('Queued', 'Downloading') for f in (b, c)),
                         'B or C was still loading when A opened: %r' % at_open)
-        used, budget, text = self.memory(p)
+        used, budget, text = self.disk_usage(p)
         self.assertGreater(budget, 0, text)
         self.assertLessEqual(used, budget, text)
         for page in (p, viewer):
-            self.assertEqual(page.evaluate(STORAGE), {'caches': [], 'indexedDB': [], 'opfs': []})
+            self.assertEqual(page.evaluate(STORAGE), {'caches': [], 'indexedDB': ['kin-preload'], 'opfs': []})
+        self.assert_ciphertext(p, patient)
         # O1: Open of the scope already shown keeps the opening - no read, no record.
         viewer.wait_for_function(TAB_SHOWN)
         mark = len(seen)
@@ -319,10 +387,10 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
         self.assertEqual([s for s in seen[mark:] if s[0] == a.uid], [], 'a same-scope Open reads nothing')
         self.assertEqual(len(self.opens(a.uid)), 1, 'a same-scope Open is no new opening')
         viewer.close(run_before_unload=True)
-        self.wait_status(p, a.uid, '^Ready$')
+        self.wait_status(p, a.uid, r'^Ready\b(?!.*\(Open\))')
 
         # 1b. Review R1: A opened again at once in a fresh viewer, well inside the first viewer's 120 s idle gap - a new
-        # opening with its own live check and its own root, its slices then from memory.
+        # opening with its own live check and its own root, its slices then from disk.
         before = len(seen)
         viewer = self.separate(p, a)
         reads = [s for s in seen[before:] if s[0] == a.uid]
@@ -338,7 +406,7 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
         print('REOPEN A', json.dumps({'openings': [first_opening, reads[0][3]], 'roots': [r[0] for r in roots]}), flush=True)
         shown = self.stack_index(viewer, a.slices - 1)
         self.assertEqual(shown['drawn'], shown['target'], shown)
-        self.assertEqual([s for s in seen[before:] if s[0] == a.uid], reads, 'its slices came from memory')
+        self.assertEqual([s for s in seen[before:] if s[0] == a.uid], reads, 'its slices came from disk')
 
         # 1c. A reload of that viewer is a new opening.
         before = len(seen)
@@ -389,7 +457,7 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
                 viewer.wait_for_timeout(200)
             viewer.wait_for_timeout(5000)
             waiting = [s for s in seen[before:] if s[0] == a.uid]
-            self.assertEqual([r[1] for r in waiting], [None], 'one live read, no memory, no check: %r' % waiting)
+            self.assertEqual([r[1] for r in waiting], [None], 'one live read, no cache, no check: %r' % waiting)
             self.assertNotIn(a.uid, self.finished[done:], 'the live read waits for its root')
             self.assertEqual(self.ids(viewer), [d.uid], 'D stays on screen while A\'s root is not durable')
             self.assertEqual(len(self.opens(a.uid)), 3, 'no root yet')
@@ -421,7 +489,7 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
         print('BACK FORWARD', json.dumps({'kept_by_browser': kept}), flush=True)
         viewer.close(run_before_unload=True)
 
-        # 2. B, opened after its preload delivery closed: the opening has its own 열람 record (D1877), from memory.
+        # 2. B, opened after its preload delivery closed: the opening has its own 열람 record (D1877), from disk.
         self.wait_status(p, b.uid, '^Ready', timeout=300000)
         self.wait_status(p, c.uid, '^Ready', timeout=300000)
         self.wait_status(p, e_study.uid, '^Ready', timeout=300000)
@@ -432,10 +500,10 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
                             'the preload delivery itself is recorded as the fetch it is')
 
         # 2a. O2, first opening: E is opened while the ledger takes no record. No image body of E arrives and nothing is
-        # drawn - from the network or from the worker's memory - and no root exists. A fresh viewer has more to load
+        # drawn - from the network or from the worker's disk cache - and no root exists. A fresh viewer has more to load
         # than the re-entry in 1d, which isolates the root, so whether E's check read is sent while held is recorded,
         # not asserted; the hold ends before the ledger's own 15 s transaction limit. Once the ledger takes records
-        # again, E shows from one check and then memory, with exactly one root.
+        # again, E shows from one check and then disk, with exactly one root.
         before = len(seen)
         held = self.hold_ledger()
         try:
@@ -457,7 +525,7 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
         for index in range(1, e_study.slices):
             shown = self.stack_index(viewer, index)
             self.assertEqual(shown['drawn'], shown['target'], shown)
-        self.assertEqual([s[1] for s in seen[before:] if s[0] == e_study.uid], ['check'], 'then every slice from memory')
+        self.assertEqual([s[1] for s in seen[before:] if s[0] == e_study.uid], ['check'], 'then every slice from disk')
         self.assertEqual(len(self.opens(e_study.uid)), 1)
         viewer.close(run_before_unload=True)
 
@@ -473,20 +541,21 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
         for index in (b.slices // 2, b.slices - 1):
             shown = self.stack_index(viewer, index)
             self.assertEqual(shown['drawn'], shown['target'], shown)
-        self.assertEqual([s[1] for s in seen[before:] if s[0] == b.uid], ['check'], 'B\'s slices came from memory')
-        used, budget, text = self.memory(p)
-        print('MEMORY', text, flush=True)
+        self.assertEqual([s[1] for s in seen[before:] if s[0] == b.uid], ['check'], 'B\'s slices came from disk')
+        used, budget, text = self.disk_usage(p)
+        print('DISK', text, flush=True)
         self.assertLessEqual(used, budget, text)
         for page in (p, viewer):
-            self.assertEqual(page.evaluate(STORAGE), {'caches': [], 'indexedDB': [], 'opfs': []})
+            self.assertEqual(page.evaluate(STORAGE), {'caches': [], 'indexedDB': ['kin-preload'], 'opfs': []})
+        self.assert_ciphertext(p, patient)
 
         # 2b. With B's viewer still open: Clear All, B changes, Retry under its new revision. The viewer must not take
-        # the new copy from memory under its earlier check: the next read goes live, a new check follows, then memory.
+        # the new copy from disk under its earlier check: the next read goes live, a new check follows, then disk.
         urls = viewer.evaluate("""() => cornerstone.getEnabledElements().map(e => e.viewport).find(v => v.type === 'stack')
             .getImageIds().map(id => id.replace(/^wadors:/, ''))""")
         mark = len(seen)
         self.assertEqual(self.viewer_read(viewer, urls[1])['status'], 200)
-        self.assertEqual([s for s in seen[mark:] if s[0] == b.uid], [], 'before the change: from memory')
+        self.assertEqual([s for s in seen[mark:] if s[0] == b.uid], [], 'before the change: from disk')
         p.locator('#preload-clear').click()
         self.wait_status(p, b.uid, '^Evicted')
         store_slices(self.stack, b.uid, b.series, b.frame, patient, 'B', b.date, 1, 1024, start=b.slices)
@@ -579,12 +648,143 @@ class PreloadMemoryE2E(ViewerWindowsE2E):
         p.locator(f'#preload-panel tbody tr[data-uid="{c.uid}"] button', has_text='Retry').click()
         self.wait_status(p, c.uid, '^Ready', timeout=300000)
         self.assertEqual(self.panel(p)[c.uid][1], '%d/%d' % (c.slices + 1, c.slices + 1))
-        folder = Path(__file__).resolve().parents[2] / 'tmp' / 'preload-memory'; folder.mkdir(parents=True, exist_ok=True)
+        folder = Path(__file__).resolve().parents[2] / 'tmp' / 'preload-cache'; folder.mkdir(parents=True, exist_ok=True)
         p.screenshot(path=str(folder / 'worklist-panel.png'))
+
+    def cache_fixture(self, label, context=None):
+        patient = 'CACHE-' + uuid.uuid4().hex[:10]
+        fixture = self.study(patient, label, '20261001', slices=4, size=256)
+        context = context or self.device()
+        seen = self.observe(context)
+        page = self.sign_in(context)
+        self.limit(page, 2)
+        if not page.locator('.left').is_visible(): page.get_by_role('button', name='Worklist', exact=True).click()
+        page.locator('#quick').fill(patient)
+        row = page.locator(f'#rows tr[data-uid="{fixture.uid}"]')
+        expect(row).to_be_visible()
+        row.click(modifiers=['Control'])
+        page.locator('#multi-selection-preload').click()
+        self.wait_status(page, fixture.uid, '^Ready')
+        return fixture, context, page, seen
+
+    def test_preload_02_R9_corrupt_record_uses_live_frames_and_R16_clear_deletes(self):
+        fixture, context, page, seen = self.cache_fixture('CORRUPT')
+        page.evaluate("""async () => {
+          const db=await new Promise(resolve=>{const r=indexedDB.open('kin-preload');r.onsuccess=()=>resolve(r.result);});
+          await new Promise((resolve,reject)=>{const tx=db.transaction('frames','readwrite'),s=tx.objectStore('frames'),r=s.openCursor();
+            r.onsuccess=()=>{const c=r.result;if(c){const v=c.value;new Uint8Array(v.ct)[0]^=1;c.update(v);c.continue();}};
+            tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error);});db.close();
+        }""")
+        before = len(seen)
+        viewer = self.separate(page, fixture)
+        canvas_ready(viewer, 1)
+        for index in range(1, fixture.slices):
+            shown = self.stack_index(viewer, index)
+            self.assertEqual(shown['drawn'], shown['target'])
+        self.wait_status(page, fixture.uid, '^Evicted')
+        reads = [r for r in seen[before:] if r[0] == fixture.uid]
+        self.assertTrue(any(r[1] is None for r in reads), 'corrupt cache falls back to live frames')
+        self.assertEqual(len(self.opens(fixture.uid)), 1, 'one durable opening despite cache fallback')
+        viewer.close(run_before_unload=True)
+        page.locator('#preload-panel > summary').click()
+        page.locator(f'#preload-panel tbody tr[data-uid="{fixture.uid}"] button', has_text='Retry').click()
+        self.wait_status(page, fixture.uid, '^Ready')
+        page.locator('#preload-clear').click()
+        self.wait_status(page, fixture.uid, '^Evicted')
+        count = page.evaluate("""async () => {
+          const db=await new Promise(resolve=>{const r=indexedDB.open('kin-preload');r.onsuccess=()=>resolve(r.result);});
+          const counts=await Promise.all([...db.objectStoreNames].map(name=>new Promise(resolve=>{const r=db.transaction(name).objectStore(name).count();r.onsuccess=()=>resolve(r.result);})));db.close();return counts.reduce((a,b)=>a+b,0);
+        }""")
+        self.assertEqual(count, 0)
+
+    def test_preload_03_R13_cut_check_never_displays_cached_pixels(self):
+        fixture, context, page, seen = self.cache_fixture('OFFLINE')
+        blocked = []
+        # The series strip reads previews live; cut those too before asserting that no image read records a view.
+        image_routes = re.compile(r'(?:/dicom-web/studies/[^?]+/frames/[^/?]+|/instances/[^/?]+/preview)(?:\?.*)?$')
+        def offline(route):
+            blocked.append(route.request.url)
+            route.abort('internetdisconnected')
+        context.route(image_routes, offline)
+        viewer = None
+        try:
+            viewer = self.open_viewer(page, fixture)
+            viewer.wait_for_timeout(3000)
+            self.assertTrue(any('/frames/' in url for url in blocked), 'the opening attempted a live frame check')
+            self.assertFalse(viewer.evaluate("""() => !!window.cornerstone?.getEnabledElements().some(e => e.viewport?.csImage?.imageId)"""))
+            self.assertEqual(self.opens(fixture.uid), [], 'cut opening has no user-view root and no cached display')
+        finally:
+            if viewer is not None:
+                viewer.close(run_before_unload=True)
+            context.unroute(image_routes, offline)
+
+    def test_preload_04_R3_R11_same_profile_A_B_A_keeps_ciphertext_and_restores_ready(self):
+        fixture, context, page, seen = self.cache_fixture('OWNERS')
+        count_script = """async () => {
+          const db=await new Promise(resolve=>{const r=indexedDB.open('kin-preload');r.onsuccess=()=>resolve(r.result);});
+          const n=await new Promise(resolve=>{const r=db.transaction('frames').objectStore('frames').count();r.onsuccess=()=>resolve(r.result);});db.close();return n;
+        }"""
+        count = page.evaluate(count_script)
+        self.assertEqual(count, fixture.slices)
+        self.sign_out(page)
+        other = self.sign_in(context, 'tech')
+        other.wait_for_timeout(500)
+        self.assertNotIn(fixture.uid, self.panel(other), 'B cannot name A encrypted rows')
+        self.assertEqual(other.evaluate(count_script), count)
+        mark = len(seen)
+        viewer = self.separate(other, fixture)
+        canvas_ready(viewer, 1)
+        for index in range(1, fixture.slices):
+            shown = self.stack_index(viewer, index)
+            self.assertEqual(shown['drawn'], shown['target'])
+        reads = [r for r in seen[mark:] if r[0] == fixture.uid]
+        self.assertTrue(reads)
+        self.assertTrue(all(r[1] is None for r in reads), 'B reads live, with no cache check')
+        viewer.close(run_before_unload=True)
+        self.sign_out(other)
+        again = self.sign_in(context)
+        self.wait_status(again, fixture.uid, '^Ready')
+        self.assertEqual(again.evaluate(count_script), count)
+        mark = len(seen)
+        viewer = self.separate(again, fixture)
+        canvas_ready(viewer, 1)
+        for index in range(1, fixture.slices):
+            shown = self.stack_index(viewer, index)
+            self.assertEqual(shown['drawn'], shown['target'])
+        self.assertEqual([r[1] for r in seen[mark:] if r[0] == fixture.uid], ['check'])
+        viewer.close(run_before_unload=True)
+
+    def test_preload_05_R4_persistent_profile_restart_keeps_ready_and_one_opening_check(self):
+        profile = tempfile.mkdtemp(prefix='retention-profile-', dir=ROOT / 'tmp')
+        options = dict(channel=self.browser_channel, headless=os.environ.get('KIN_E2E_HEADED') != '1',
+                       ignore_https_errors=True, viewport={'width':1600,'height':1000},
+                       args=['--enable-unsafe-swiftshader'])
+        context = self.pw.chromium.launch_persistent_context(profile, **options)
+        self.contexts.append(context)
+        fixture, context, page, _ = self.cache_fixture('RESTART', context=context)
+        background = [e for _,e in self.events(fixture.uid) if e['action']=='provide-prepared' and e['cause']=='background-fetch']
+        context.close()
+        self.contexts.remove(context)
+        context = self.pw.chromium.launch_persistent_context(profile, **options)
+        self.contexts.append(context)
+        seen = self.observe(context)
+        page = self.sign_in(context)
+        self.wait_status(page, fixture.uid, '^Ready')
+        self.assertEqual([e for _,e in self.events(fixture.uid) if e['action']=='provide-prepared' and e['cause']=='background-fetch'], background,
+                         'restored Ready makes no background store read')
+        self.assert_ciphertext(page, fixture.patient_id)
+        viewer = self.separate(page, fixture)
+        canvas_ready(viewer, 1)
+        for index in range(1, fixture.slices):
+            shown = self.stack_index(viewer, index)
+            self.assertEqual(shown['drawn'], shown['target'])
+        self.assertEqual([r[1] for r in seen if r[0]==fixture.uid], ['check'])
+        self.assertEqual(len(self.opens(fixture.uid)), 1)
+        viewer.close(run_before_unload=True)
 
 
 def load_tests(loader, tests, pattern):
-    return unittest.TestSuite(PreloadMemoryE2E(name) for name in PreloadMemoryE2E.__dict__ if name.startswith('test_preload_'))
+    return unittest.TestSuite(PreloadCacheE2E(name) for name in PreloadCacheE2E.__dict__ if name.startswith('test_preload_'))
 
 
 if __name__ == '__main__':

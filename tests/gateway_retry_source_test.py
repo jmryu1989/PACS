@@ -620,9 +620,10 @@ class MigrationPins(unittest.TestCase):
         # S9-U4b: 47 migrations, 52 tables (ImportOperation), rows + one import, three downloads and eight reservations, 102.
         # W5-API: 48 migrations, 53 tables (ReportDraftInsertReceipt), rows + the refused, applied and discarded receipt, 105.
         # Product cuts 3: 52 tables (IdpSessionEnd dropped), rows without its 2 end marks, 103.
-        self.assertEqual(len(restore_fixture.TABLES), 52)
+        # D1890: 53 tables (PreloadCacheKey), rows + its 2 synthetic keys, 105.
+        self.assertEqual(len(restore_fixture.TABLES), 53)
         self.assertEqual(set(rows), set(restore_fixture.TABLES))
-        self.assertEqual(sum(len(value) for value in rows.values()), 103)   # S7-U5: + the emptied draft row (tombstone); + 2 isolation facts; + 2 change records; S9-U4b: + 12; W5-API: + 3
+        self.assertEqual(sum(len(value) for value in rows.values()), 105)   # S7-U5: + the emptied draft row (tombstone); + 2 isolation facts; + 2 change records; S9-U4b: + 12; W5-API: + 3
         self.assertEqual({table: len(rows[table]) for table in ("GatewayRetryRequest", "CriticalResult", "CriticalResultEvent",
                                                                 "CriticalResultReceipt")},
                          {"GatewayRetryRequest": 1, "CriticalResult": 4, "CriticalResultEvent": 7, "CriticalResultReceipt": 6})
