@@ -33,7 +33,8 @@ W5-UI Phases A and B, S9-U4b (D1486/D1617/D1668), EMR-D #219, W9-UI, the dictati
 D1882's removed Unmatched Studies dialog (#276: a closed modal, never drawn; its replacement Held Studies is admin.html's),
 D1880's Preload (#277: the Selected toolbar's button, taken out of the layout like W9's by HIDE_PRELOAD, its status
 panel, hidden while nothing is queued, and its script), Minhoon item 8's editor row and Report Editor head (its
-geometry: study_panel_page_dom_test.py EDITOR), and the opened panel's round-7 controls (Text Size,
+geometry: study_panel_page_dom_test.py EDITOR), Minhoon 12's Measurement Markers section (MH-4: in the closed
+Appearance & Tools dialog, never drawn) and its model script, and the opened panel's round-7 controls (Text Size,
 its row, Default, the edge). The counts of those regions are derived from that declaration in each served tree
 (decided_nodes) and never pinned; every element outside them is compared exactly, at first paint and with the panel
 open. What a feature builds inside its own declared region is that feature's own cases' (e.g. study_transfer_local,
@@ -127,6 +128,8 @@ DECIDED_REGIONS = (
     ('Minhoon item 8: the editor row and the Report Editor group', '.report-compose, [role="group"][aria-labelledby="report-editor-title"]',
      'node', None),
     ('Minhoon item 8: the Report Editor head (title, Read Only/Editable, why, Resume Editing)', '.report-editor-head', 'tree', None),
+    ('Minhoon 12 MH-4: Measurement Markers (closed Appearance & Tools dialog)', '#reading-appearance-dialog fieldset:has(#reading-marker-color)', 'tree', None),
+    ('Minhoon 12 MH-4', 'script[src="marker-style.js"]', 'node', None),
     ('D1160 round 7: Text Size', STUDY_PANEL + ' select[aria-label="Text Size"]', 'tree', None),
     ('D1160 round 7: the controls row', STUDY_PANEL + ' :has(> select[aria-label="Text Size"])', 'node', None),
     ('D1160 round 7: Default', STUDY_PANEL + ' button', 'node', 'Default'),

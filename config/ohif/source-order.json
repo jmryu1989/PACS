@@ -12,6 +12,7 @@
     "mg-length.js",
     "planar-geometry.js",
     "history.js",
+    "marker-style.js",
     "layout-model.js",
     "clinician-context.js",
     "layout.js",
