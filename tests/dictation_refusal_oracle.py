@@ -26,7 +26,7 @@ SAMPLE_RATE = 16_000
 WAV_SHA256 = "156075e2635b9b2c186258f4db987ed9fbdfb727f49e5eac4b9a126aefbdf727"
 WAV_44100_SHA256 = "48f304b4730189540fb9a2b9c8d05d6aba5e55b1375efbd9e2ef28ed544a9743"
 AUDIT_ACTION = "dictation.request"
-AUDIT_KEYS = frozenset({"bytes", "seconds", "ms", "engine", "outcome"})
+AUDIT_KEYS = frozenset({"bytes", "seconds", "ms", "engine", "outcome", "institution"})
 NOT_CONFIGURED = "DICTATION_NOT_CONFIGURED"
 INVALID = "DICTATION_AUDIO_INVALID"
 TOO_LARGE = "DICTATION_AUDIO_TOO_LARGE"
@@ -35,7 +35,7 @@ KINDS = ("refusal", "input", "control")
 TAGS = (
     "status", "body", "cache-control", "secret",
     "audit-delta", "audit-action", "audit-actor", "audit-keys", "audit-bytes", "audit-seconds",
-    "audit-ms", "audit-outcome", "audit-engine",
+    "audit-ms", "audit-outcome", "audit-engine", "audit-institution",
     "report-rows", "study-state", "probe-rows",
     "unpaired", "precondition", "missing-case", "duplicate-case", "unknown-case",
 )
@@ -203,7 +203,7 @@ def _same(before: dict[str, Any], after: dict[str, Any], keys: tuple[str, ...]) 
 
 
 def _audit_row_problems(case: Case, row: Any, context: dict[str, Any]) -> set[str]:
-    detail_tags = {"audit-keys", "audit-bytes", "audit-seconds", "audit-ms", "audit-engine", "audit-outcome"}
+    detail_tags = {"audit-keys", "audit-bytes", "audit-seconds", "audit-ms", "audit-engine", "audit-outcome", "audit-institution"}
     if not isinstance(row, dict):
         return {"audit-action", "audit-actor"} | detail_tags
     problems = set()
@@ -221,6 +221,9 @@ def _audit_row_problems(case: Case, row: Any, context: dict[str, Any]) -> set[st
     expected_bytes, expected_seconds, expected_outcome = case.audit
     if set(detail) != AUDIT_KEYS:       # exactly metadata: no transcript, no audio, nothing added
         problems.add("audit-keys")
+    institution = (context.get("institutions") or {}).get(case.caller)
+    if not _text(institution) or detail.get("institution") != institution:
+        problems.add("audit-institution")
     if not _number(detail.get("bytes"), (int,)) or detail.get("bytes") != expected_bytes:
         problems.add("audit-bytes")
     if not _number(detail.get("seconds")) or detail.get("seconds") != expected_seconds:

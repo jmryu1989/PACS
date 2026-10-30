@@ -36,7 +36,8 @@ PIN = u5.source_engine_pin(source("api/src/asr.service.ts"))
 ACTORS = {name: "kin-test-000000000000-%s@local.test" % name
           for name in ("doctor", "doctor2", "jmryu", "tech", "kdoctor")}
 SECRET = "REPORT-" + "0" * 32
-CONTEXT = {"engine_pin": PIN, "secret": SECRET, "actors": ACTORS,
+INSTITUTIONS = {name: "kin-center" if name == "kdoctor" else "hallym" for name in ACTORS}
+CONTEXT = {"engine_pin": PIN, "secret": SECRET, "actors": ACTORS, "institutions": INSTITUTIONS,
            "holder": ACTORS["doctor"], "pre_reviewer": ACTORS["jmryu"]}
 UID, PROBE = "1.2.826.0.1.3680043.8.498.1", "2.25.1"
 
@@ -135,8 +136,8 @@ def state_row(**changes):
 def audit_row(case_id, detail=None, **changes):
     """The row the API writes, with the detail text as JavaScript serializes it (0.0000625, not 6.25e-05)."""
     size, seconds, outcome = AUDIT[case_id]
-    text = ('{"bytes":%d,"seconds":%s,"ms":3,"engine":"%s","outcome":"%s"}'
-            % (size, "0.0000625" if seconds else "0", PIN, outcome)) if detail is None else json.dumps(detail)
+    text = ('{"bytes":%d,"seconds":%s,"ms":3,"engine":"%s","outcome":"%s","institution":"%s"}'
+            % (size, "0.0000625" if seconds else "0", PIN, outcome, INSTITUTIONS[CALLER[case_id]])) if detail is None else json.dumps(detail)
     row = {"id": 901, "at": "2026-09-24T00:00:01.000", "actor": ACTORS[CALLER[case_id]],
            "action": "dictation.request", "target": UID, "detail": text}
     row.update(changes)
@@ -164,7 +165,8 @@ def canonical(case_id):
 
 def detail_of(case_id):
     size, seconds, outcome = AUDIT[case_id]
-    return {"bytes": size, "seconds": seconds, "ms": 3, "engine": PIN, "outcome": outcome}
+    return {"bytes": size, "seconds": seconds, "ms": 3, "engine": PIN, "outcome": outcome,
+            "institution": INSTITUTIONS[CALLER[case_id]]}
 
 
 VECTORS, MUTANTS = [], []
@@ -275,7 +277,7 @@ class OracleTests(unittest.TestCase):
                 case.id, lambda o: o.update(text=o["text"] + SECRET)), ["secret"])
 
     def test_07_audit_detail_drift_on_every_input_and_control(self):
-        detail_tags = ["audit-keys", "audit-bytes", "audit-seconds", "audit-ms", "audit-engine", "audit-outcome"]
+        detail_tags = ["audit-keys", "audit-bytes", "audit-seconds", "audit-ms", "audit-engine", "audit-outcome", "audit-institution"]
         for case in u5.CASES:
             if case.kind == "refusal":
                 continue
@@ -288,7 +290,14 @@ class OracleTests(unittest.TestCase):
 
             without_engine = detail_of(case.id)
             del without_engine["engine"]
+            without_institution = detail_of(case.id)
+            del without_institution["institution"]
             mutants = [
+                ("wrong-institution", detail(institution="kin-center" if INSTITUTIONS[case.caller] == "hallym" else "hallym"),
+                 ["audit-institution"]),
+                ("null-institution", detail(institution=None), ["audit-institution"]),
+                ("no-institution-key", lambda o: o["after"].update(audit=[audit_row(case.id, without_institution)]),
+                 ["audit-keys", "audit-institution"]),
                 ("text-key", detail(text="synthetic words"), ["audit-keys"]),
                 ("bytes+1", detail(bytes=size + 1), ["audit-bytes"]),
                 ("bytes-as-text", detail(bytes=str(size)), ["audit-bytes"]),
@@ -411,6 +420,8 @@ class OracleTests(unittest.TestCase):
         self.kill("R-PRELIM/context-without-reviewer", self.mutate("R-PRELIM", lambda o: None, without_reviewer), ["body"])
         without_actors = dict(CONTEXT, actors={})
         self.kill("C-W/context-without-actor", self.mutate("C-W", lambda o: None, without_actors), ["audit-actor"])
+        without_institutions = dict(CONTEXT, institutions={})
+        self.kill("C-W/context-without-institution", self.mutate("C-W", lambda o: None, without_institutions), ["audit-institution"])
         without_pin = dict(CONTEXT, engine_pin=None)
         self.kill("C-W/context-without-pin", self.mutate("C-W", lambda o: None, without_pin), ["audit-engine"])
 

@@ -473,7 +473,9 @@
       if (uid === selectedUid) { updateReportButtons(); loadReport(); }
       if (warnedFor !== uid) {
         warnedFor = uid;
-        toast(`${displayActor(holder)} 님이 판독 중입니다 — 저장되지 않았습니다`, "err");
+        const writer = holder === '다른 기관' ? '다른 기관 판독의가'
+          : holder === '작성자 비공개' ? '비공개 작성자가' : `${displayActor(holder)} 님이`;
+        toast(`${writer} 판독 중입니다 — 저장되지 않았습니다`, "err");
       }
     }
 

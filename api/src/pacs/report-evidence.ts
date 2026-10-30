@@ -15,7 +15,7 @@ import { applyKeepList, blockIsBlank, citationArray, citationIdList, citationIns
 import { applyStructureKeepList, isStructureEntry, projectStructure, structureApplyInput, structureArray,
   structureIdList, structureItemKey, structureSameTextCounts, structureUnion, StructureInputError, STRUCTURE_CATALOG,
   REPORT_STRUCTURE_LIMITS, REPORT_STRUCTURE_SCHEMA } from '../report-structure';
-import { draftToken } from './values';
+import { draftToken, visibleDraftAuthor } from './values';
 import type { Caller, PacsAccess } from './access';
 import { reportVersionCitationsRead, reportVersionsRead } from '../emr-viewing/report-read';
 import { LocalReadResponse } from '../emr-viewing/local-read';
@@ -338,7 +338,22 @@ export class PacsReportEvidence {
         recommendation: true, reason: true, author: true, at: true } });
     // MODULE_A A2: 이 읽기가 고정한 행 전부가 열람 기록의 대상이다. 화면이 나중에 고르는 판만 기록하면 내보낸 다른 판의
     // 열람이 기록에서 빠진다. 응답은 기록이 COMMIT된 뒤 이 행 그대로 나간다(A1 응답 경계).
-    return reportVersionsRead(uid, prev.institutionId, rows, sourceIdentity);
+    // A signer already disclosed in this list is shared report provenance. A
+    // discarded draft alone cannot establish that its author belongs to a side.
+    const signers = new Set(rows.filter(row => row.action !== 'discarded').map(row => row.author));
+    const resets = new Map(rows.filter(row => row.action === 'reset').map(row => [row.version, row.author]));
+    const shown = rows.map(row => {
+      if (row.action !== 'discarded') return row;
+      // Historical copies share action=discarded. Reset writes this reason and
+      // its following reset row atomically; adjacency alone could be an admin
+      // draft discard followed by a reset of an already empty report.
+      const resetActor = resets.get(row.version + 1);
+      const resetCopy = resetActor && row.reason === `판독 취소로 폐기 (취소자: ${resetActor})`;
+      return { ...row,
+        author: signers.has(row.author) ? row.author : visibleDraftAuthor(row.author, c),
+        reason: resetCopy ? row.reason : '관리자 강제 초안 해제' };
+    });
+    return reportVersionsRead(uid, prev.institutionId, shown, sourceIdentity);
   }
 
   /**
@@ -501,9 +516,9 @@ export class PacsReportEvidence {
           `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
       const row = await tx.reportVersion.findUnique({
         where: { uid_version: { uid, version: want } },
-        // 내보내는 것은 아래 메타데이터뿐이다. `action`·`author`·`at`·`reason`은 이력 응답의 것이고, 여기서 다시 나가면
-        // 관문을 하나도 새로 만들지 않은 채 노출면만 넓어진다. `id`는 응답에 싣지 않고 이 판의 열람 기록 대상에만 쓴다.
-        select: { id: true, citations: true, findings: true, conclusion: true, recommendation: true },
+        // action separates safety copies from committed provenance; it is not
+        // returned. id likewise stays internal to the access record.
+        select: { id: true, action: true, citations: true, findings: true, conclusion: true, recommendation: true },
       });
       // 없는 판을 「인용 없음」으로 답하면 그 자체가 거짓말이다.
       if (!row) throw new NotFoundException('그 판을 찾을 수 없습니다');
@@ -514,9 +529,11 @@ export class PacsReportEvidence {
       const readable = new Set<string>();
       for (const found of await this.findings.readableFindings(tx, c, uid, ids)) readable.add(String(found.id));
       const answer = { version: want, actor: c.actor, entries: entries.map((entry, index) => {
+        const insertedBy = row.action === 'discarded' && entry?.insertedBy
+          ? visibleDraftAuthor(entry.insertedBy, c) : entry?.insertedBy ?? null;
         if (!readable.has(String(entry?.findingId ?? '')))
           return { field: entry?.field ?? null, insertedAt: entry?.insertedAt ?? null,
-            insertedBy: entry?.insertedBy ?? null, state: SOURCE_UNAVAILABLE };
+            insertedBy, state: SOURCE_UNAVAILABLE };
         /**
          * 셀 수 없는 건은 **모른다고 말한다.** `lineBlockOccurrences`는 문자열이 아닌 값을
          * `''`로 바꾸므로 그대로 세면 0회 → `absent`가 되어, 확인하지 못한 것을 「더는
@@ -526,7 +543,7 @@ export class PacsReportEvidence {
           && typeof entry?.insertedText === 'string';
         return { field: entry?.field ?? null, findingRevision: entry?.findingRevision ?? null,
           sourceIndex: entry?.sourceIndex ?? null, linkStateAtInsert: entry?.linkStateAtInsert ?? null,
-          insertedAt: entry?.insertedAt ?? null, insertedBy: entry?.insertedBy ?? null,
+          insertedAt: entry?.insertedAt ?? null, insertedBy,
           presence: countable
             ? presenceState(lineBlockOccurrences(String((row as any)[entry.field] ?? ''), entry.insertedText), counts[index])
             : null };

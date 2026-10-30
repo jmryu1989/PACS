@@ -695,7 +695,8 @@ test('D04 force-discard archives present drafts, advances their owners, rotates 
   assert.equal(forced.ok, true, JSON.stringify(forced.body));
   const next = await w.epoch(uid);
   assert.notEqual(next, epoch, 'the epoch rotated');
-  assert.deepEqual([forced.body.count, forced.body.epoch, forced.body.drafts.map(d => d.author)], [2, next, [A.actor, B.actor]]);
+  assert.deepEqual([forced.body.count, forced.body.epoch, forced.body.drafts.map(d => d.author)], [2, next, ['작성자 비공개', '작성자 비공개']],
+    'the admin wrote neither draft and the drafts record no institution, so the response withholds both authors');
   const versions = await w.base.reportVersion.findMany({ where: { uid }, orderBy: { version: 'asc' } });
   assert.deepEqual(versions.map(v => [v.version, v.action, v.author, v.findings]),
     [[1, 'discarded', A.actor, 'SYN first draft'], [2, 'discarded', B.actor, 'SYN draft of b']], 'the archived snapshots, by their authors');

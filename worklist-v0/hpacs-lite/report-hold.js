@@ -47,7 +47,9 @@
           holdBlocked = { uid, at: Date.now() };
           if (warnedFor !== uid) {
             warnedFor = uid;
-            toast(`${displayActor(r.holder)} 님이 먼저 판독을 시작했습니다 — 잠금이 풀리면 이어서 할 수 있습니다`, "err");
+            const writer = r.holder === '다른 기관' ? '다른 기관 판독의가'
+              : r.holder === '작성자 비공개' ? '비공개 작성자가' : `${displayActor(r.holder)} 님이`;
+            toast(`${writer} 먼저 판독을 시작했습니다 — 잠금이 풀리면 이어서 할 수 있습니다`, "err");
           }
           return;
         }

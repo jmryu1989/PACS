@@ -52,14 +52,25 @@ const naturalize = d => ({ SOPInstanceUID: d['00080018'].Value[0], SeriesInstanc
   StudyInstanceUID: d['0020000D'].Value[0], Modality: d['00080060'].Value[0], SOPClassUID: d['00080016'].Value[0],
   InstanceNumber: d['00200013']?.Value?.[0], NumberOfFrames: d['00280008']?.Value?.[0] });
 
+// The selector forms the viewer's DOM is queried with: .class, [attr="value"] and [class~="token"].
 class Element {
   constructor(className = '') { this.className = className; this.style = {}; this.children = []; this.textContent = ''; this.attributes = {}; }
-  append(...children) { this.children.push(...children); for (const c of children) c.onload?.(); }
-  setAttribute(k, v) { this.attributes[k] = v; } addEventListener() {}
-  remove() { this.parent && (this.parent.children = this.parent.children.filter(c => c !== this)); }
-  querySelector(selector) { const c = this.children.find(x => '.' + x.className === selector); if (c) c.parent = this; return c || null; }
-  querySelectorAll() { return []; }
+  append(...children) { for (const c of children) { c.parent = this; this.children.push(c); c.onload?.(); } }
+  setAttribute(k, v) { this.attributes[k] = v; } getAttribute(k) { return this.attributes[k] ?? null; } addEventListener() {}
+  remove() { this.parent && (this.parent.children = this.parent.children.filter(c => c !== this)); this.parent = null; }
+  getBoundingClientRect() { return this.rect || { top: 0, left: 0 }; }
+  matches(selector) {
+    const cls = /^\.(\S+)$/.exec(selector), attr = /^\[([\w-]+)(~?)="([^"]*)"\]$/.exec(selector);
+    if (cls) return this.className.split(' ').includes(cls[1]);
+    if (!attr) throw new Error('unsupported selector ' + selector);
+    const value = attr[1] === 'class' ? this.className : this.getAttribute(attr[1]);
+    return attr[2] ? (value || '').split(' ').includes(attr[3]) : value === attr[3];
+  }
+  querySelectorAll(selector) { return this.children.flatMap(c => [...(c.matches(selector) ? [c] : []), ...c.querySelectorAll(selector)]); }
+  querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
 }
+// What a pane puts on screen: the text of everything inside it.
+const paneText = el => [el.textContent, ...el.children.map(paneText)].filter(Boolean).join(' | ');
 
 // The pinned Orthanc DICOMweb plugin (AcceptBulkData in WadoRs.cpp) serves bulk data only as multipart/related of
 // application/octet-stream, and when no Accept is given; any other Accept, a bare application/octet-stream included,
@@ -74,9 +85,11 @@ function orthancBulkAccept(accept) {
 
 async function mount(items, { routes = {} } = {}) {
   const listeners = new Map(), panel = new Element(), requests = [];
-  const document = { head: new Element(), body: new Element(), createElement: () => new Element(),
-    querySelector: s => s === '#kin-viewer-layout' ? panel : null, querySelectorAll: () => [],
+  const body = new Element();
+  const document = { head: new Element(), body, createElement: () => new Element(),
+    querySelector: s => s === '#kin-viewer-layout' ? panel : body.querySelector(s), querySelectorAll: s => body.querySelectorAll(s),
     addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) };
+  let grid = new Map(), gridChanged = () => {};
   let state, protocol, current = 0, renderCount = 0;
   const points = [], properties = [], ranges = [], element = new Element();
   const transfer = { removeAllPoints() { points.length = 0; }, addRGBPoint(...point) { points.push(point); } };
@@ -87,7 +100,7 @@ async function mount(items, { routes = {} } = {}) {
   const hp = { getState: () => state, addProtocol: (_, p) => { protocol = p; },
     run: (_, id, options) => { state = { protocolId: id, stageIndex: options?.stageIndex }; } };
   const services = { hangingProtocolService: hp, viewportGridService: { EVENTS: { GRID_STATE_CHANGED: 'grid' },
-    getState: () => ({ viewports: new Map() }), subscribe: () => ({ unsubscribe() {} }) },
+    getState: () => ({ viewports: grid }), subscribe: (_, fn) => { gridChanged = fn; return { unsubscribe() {} }; } },
     cornerstoneViewportService: { getCornerstoneViewport: () => viewport } };
   const modules = { [STACK]: createStackHandler() }, displaySets = [];
   const extensionManager = { getActiveDataSource: () => [source], getModuleEntry: id => modules[id] };
@@ -125,9 +138,11 @@ async function mount(items, { routes = {} } = {}) {
   extension.onModeEnter();
   const loads = await source.retrieve.series.metadata();
   await Promise.all(loads.map(p => p.start()));
-  return { hp, study, items, extension, points, properties, ranges, element, displaySets, requests,
+  return { hp, study, items, extension, points, properties, ranges, element, displaySets, requests, body,
     protocol: () => protocol, state: () => state, renderCount: () => renderCount,
     run() { hp.run({ displaySets }, 'default', {}); },
+    // viewportGridService publishes GRID_STATE_CHANGED after every viewport assignment.
+    setGrid(viewports) { grid = new Map(viewports.map(v => [v.viewportId, v])); gridChanged(); },
     selected(key) { return protocol.displaySetSelectors[key].seriesMatchingRules[0].constraint.equals.value; },
     show(index, type = 'image', list = items) { order = list; current = index; listeners.get(type)({ type, detail: { viewportId: 'test' } }); } };
 }
@@ -187,6 +202,37 @@ test('a partial slice display set cannot satisfy the full stack', async () => {
   h.hp.run({ displaySets: [{ ...set, images: set.images.slice(0, 1), displaySetInstanceUID: 'partial' }] }, 'default', {});
   assert.equal(h.selected('current|R|CC|dbt'), '');
   h.extension.onModeExit();
+});
+
+// OHIF renders a Cornerstone element ([data-viewport-uid]) only inside a pane that has an image; an empty
+// pane is just its grid wrapper. Opening a series into an empty slot adds that element to the same wrapper.
+test('a pane opened by the reader into an empty slot no longer shows that slot\'s Missing label', async () => {
+  const h = await mount(ctSlices()); // R CC DBT only: the other three DBT views are missing
+  h.run();
+  const stage = h.protocol().stages[h.state().stageIndex], { columns } = stage.viewportStructure.properties;
+  const keys = stage.viewports.map(v => v.displaySets[0].id);
+  const panes = keys.map((_, i) => Object.assign(new Element('relative group/pane'), { rect: { top: Math.floor(i / columns), left: i % columns } }));
+  h.body.append(...panes.slice().reverse()); // DOM order is not grid order
+  const viewports = keys.map((key, i) => ({ viewportId: 'vp-' + i, x: i % columns, y: Math.floor(i / columns),
+    displaySetInstanceUIDs: h.selected(key) ? [h.selected(key)] : [] }));
+  const open = i => { const element = new Element(); element.setAttribute('data-viewport-uid', 'vp-' + i); panes[i].append(element); };
+  viewports.forEach((v, i) => v.displaySetInstanceUIDs.length && open(i));
+  h.setGrid(viewports);
+  const hung = keys.findIndex(key => h.selected(key)), empty = keys.map((key, i) => i).filter(i => !h.selected(keys[i]));
+  assert.equal(empty.length, 3);
+  assert.match(paneText(panes[hung]), /^Current · R CC · [^|]*$/);
+  for (const i of empty) assert.match(paneText(panes[i]), /^Current · [LR] (CC|MLO) · .* · Missing$/);
+
+  const [target, ...rest] = empty, before = paneText(panes[rest[0]]);
+  viewports[target] = { ...viewports[target], displaySetInstanceUIDs: [h.displaySets[0].displaySetInstanceUID] };
+  open(target);
+  h.setGrid(viewports);
+  assert.equal(paneText(panes[target]), '', 'no slot label over an image that does not fill that slot');
+  for (const i of rest) assert.match(paneText(panes[i]), /· Missing$/);
+  assert.equal(paneText(panes[rest[0]]), before);
+  assert.match(paneText(panes[hung]), /^Current · R CC · [^|]*$/);
+  h.extension.onModeExit();
+  assert.equal(panes.map(paneText).join(''), '', 'mode exit removes every slot label');
 });
 
 test('stored VOI table reaches the actor and switching to a windowed image replaces it', async () => {

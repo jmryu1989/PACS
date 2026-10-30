@@ -520,8 +520,13 @@ test('TEST-WSU-08 hold release and force release stay available; images are 403 
   w.states.set(NORMAL, stateRow(NORMAL, { institutionId: 'hallym' }));
   assert.deepEqual(await w.pacs.release(SPLIT, c), { ok: true });
   assert.equal(w.states.get(SPLIT).holder, null);
-  w.states.get(SPLIT).holder = 'someone-else'; w.states.get(SPLIT).heldAt = new Date();
-  assert.equal((await w.pacs.forceRelease(SPLIT, c)).released, 'someone-else');
+  for (const holderInstitutionId of [c.institution, 'kin-center', null]) {
+    Object.assign(w.states.get(SPLIT), { holder: 'someone-else', holderInstitutionId, heldAt: new Date() });
+    assert.equal((await w.pacs.forceRelease(SPLIT, c)).released,
+      holderInstitutionId === c.institution ? 'someone-else' : holderInstitutionId ? '다른 기관' : '작성자 비공개');
+    assert.equal(w.states.get(SPLIT).holder, null);
+    assert.equal(w.states.get(SPLIT).holderInstitutionId, null);
+  }
   for (const uri of ['/dicom-web/studies/' + SPLIT + '/series', '/dicom-web/studies?StudyInstanceUID=' + SPLIT,
     '/dicom-web/studies/' + SPLIT + '/series/2.25.5/instances/2.25.6/frames/1'])
     await rejects(w.pacs.authzDicom(uri, 'GET', c), 403);

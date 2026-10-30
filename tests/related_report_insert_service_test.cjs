@@ -403,7 +403,8 @@ test('W5API-01 first apply: draft +1 with the fixed proposal, one report.draft a
   assert.equal(w.draft().revision, 2);
   assert.deepEqual(w.audits(), [`${A.actor} report.draft ${TARGET}`]);
   const audit = JSON.parse(w.store.rows('auditLog')[0].detail);
-  assert.deepEqual(Object.keys(audit).sort(), ['cits', 'len'], 'the existing minimal audit: lengths and citation ids only');
+  assert.deepEqual(Object.keys(audit).sort(), ['cits', 'institution', 'len'], 'institution scoping plus lengths and citation ids, without report text');
+  assert.equal(audit.institution, A.institution);
   const receipt = w.receipt(body.relatedInsert.insertRequestId);
   assert.deepEqual({ state: receipt.state, appliedRevision: receipt.appliedRevision, reason: receipt.reason, receiptRevision: receipt.receiptRevision,
     expectedEpoch: receipt.expectedEpoch, expectedRevision: receipt.expectedRevision, targetUid: receipt.targetUid, sourceUid: receipt.sourceUid,

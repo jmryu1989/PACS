@@ -81,7 +81,7 @@
       viewing: s => {
         const hold = !s.holder ? '' : s.holder === user
           ? `<span class="hold me" title="내가 작성 중">✎ 나</span>`
-          : `<span class="hold other" title="${esc(displayActor(s.holder))} 님이 작성 중">✎ ${esc(displayActor(s.holder))}</span>`;
+          : `<span class="hold other" title="${s.holder === '다른 기관' ? '다른 기관 판독의가' : s.holder === '작성자 비공개' ? '비공개 작성자가' : esc(displayActor(s.holder)) + ' 님이'} 작성 중">✎ ${esc(displayActor(s.holder))}</span>`;
         const presence = esc(viewingNames.get(s.uid) || '');
         return hold + (hold && presence ? ' · ' : '') + presence;
       },

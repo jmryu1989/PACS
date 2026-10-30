@@ -26,6 +26,20 @@ emr_compose = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(emr_compose)
 INSTALLER_URL = "postgresql://postgres@127.0.0.1:5432/kin"
 RUNTIME_URL = "postgresql://kin_runtime@127.0.0.1:5432/kin"
+# The one expected migration list, in order: the image must package exactly these and the migrate mode must apply exactly
+# these. Adding a migration means adding it here (and to the restore fixture, tests/ops_product_transfer_fixture.py).
+MIGRATIONS = [
+    '0_init', '20260907040000_viewer_history', '20260908020000_workspace_layout',
+    '20260908081500_connect_gate', '20260908120000_manual_sr',
+    '20260908180000_viewer_jobs', '20260908200000_manual_sr_recovery',
+    '20260909060000_saved_filter_organization', '20260909100000_tech_note_revision',
+    '20260909180000_worklist_columns', '20260909220000_favorite_workspace', '20260909233000_study_tags', '20260910000500_reader_assignment', '20260910013000_reading_preferences', '20260910023000_reading_appearance', '20260910044500_workspace_shortcuts', '20260910090000_filter_folders', '20260910100000_shared_filters', '20260910110000_study_consultation', '20260910123000_consultation_predicates', '20260910130000_study_access', '20260910133000_study_access_subject', '20260912100000_hanging_protocol_preferences', '20260917120000_findings', '20260920120000_report_citations', '20260921120000_report_structure', '20260924120000_order_accession', '20260924130000_gateway_receipt', '20260924140000_gateway_retry_request', '20260926120000_study_questions', '20260926130000_study_image_requests', '20260928120000_critical_result', '20260928130000_reader_assignment_scope', '20260930120000_audit_log_append_only', '20261004120000_draft_revision_session_entry',
+    '20261005120000_idp_session_end', '20261005130000_member_isolation',
+    '20261006000000_tech_note_attempt_id',
+    '20261006120000_member_isolation_call', '20261007120000_provider_change', '20261007170000_member_db_rights', '20261007200000_designation_subjects',
+    '20261008120000_emr_b', '20261010120000_emr_seal_attempts', '20261010150000_emr_read_jit_off', '20261011120000_filter_shortcuts',
+    '20261015013945_import_operation', '20261016120000_related_report_insert_receipt', '20261023180000_emr_pg_ledger', '20261023200000_emr_server_signing', '20261024120000_emr_d_online', '20261025000000_emr_e_online', '20261025120000_access_review', '20261025120000_auth_flow_subtraction', '20261025150000_emr_f_link', '20261026120000_assignment_access_stream', '20261026180000_emr_signing_key_admin', '20261026210000_emr_e_source_manifest', '20261027090000_emr_e_study_delivery', '20261027150000_emr_e_observation_delivery', '20261027180000_emr_image_object_digest', '20261027230000_caution_app_limits', '20261028120000_held_unknown_source', '20261029120000_emr_image_retention', '20261029130000_emr_preparation_manifest_index', '20261030120000_preload_cache_key', '20261030130000_writer_institution',
+]
 
 
 class ProductionImageTests(unittest.TestCase):
@@ -137,9 +151,12 @@ class ProductionImageTests(unittest.TestCase):
         script = """
 const fs=require('fs'), assert=require('assert');
 assert.notStrictEqual(process.getuid(),0);
-for(const p of ['dist/main.js','dist/emr-runtime/store.js','prisma/migrations/0_init/migration.sql',
-  'prisma/migrations/20261008120000_emr_b/migration.sql', 'prisma/migrations/20261010120000_emr_seal_attempts/migration.sql', 'prisma/migrations/20261010150000_emr_read_jit_off/migration.sql', 'prisma/migrations/20261011120000_filter_shortcuts/migration.sql',
-  'prisma/migrations/20261015013945_import_operation/migration.sql', 'prisma/migrations/20261016120000_related_report_insert_receipt/migration.sql', 'prisma/migrations/20261023180000_emr_pg_ledger/migration.sql', 'prisma/migrations/20261023200000_emr_server_signing/migration.sql', 'prisma/migrations/20261024120000_emr_d_online/migration.sql', 'prisma/migrations/20261025000000_emr_e_online/migration.sql', 'prisma/migrations/20261025120000_access_review/migration.sql', 'prisma/migrations/20261025120000_auth_flow_subtraction/migration.sql', 'prisma/migrations/20261025150000_emr_f_link/migration.sql', 'prisma/migrations/20261026120000_assignment_access_stream/migration.sql', 'prisma/migrations/20261026180000_emr_signing_key_admin/migration.sql', 'prisma/migrations/20261026210000_emr_e_source_manifest/migration.sql', 'prisma/migrations/20261027090000_emr_e_study_delivery/migration.sql', 'prisma/migrations/20261027150000_emr_e_observation_delivery/migration.sql', 'prisma/migrations/20261027180000_emr_image_object_digest/migration.sql', 'prisma/migrations/20261027230000_caution_app_limits/migration.sql', 'prisma/migrations/20261028120000_held_unknown_source/migration.sql', 'prisma/migrations/20261029120000_emr_image_retention/migration.sql', 'prisma/migrations/20261029130000_emr_preparation_manifest_index/migration.sql', 'prisma/migrations/20261030120000_preload_cache_key/migration.sql',
+const expected=JSON.parse(process.argv[1]);
+const packaged=fs.readdirSync('prisma/migrations',{withFileTypes:true}).filter(e=>e.isDirectory()).map(e=>e.name)
+  .sort((a,b)=>a<b?-1:a>b?1:0);
+assert.deepStrictEqual(packaged,expected);
+for(const name of expected) assert(fs.existsSync('prisma/migrations/'+name+'/migration.sql'),name);
+for(const p of ['dist/main.js','dist/emr-runtime/store.js',
   'node_modules/prisma/build/index.js','node_modules/.prisma/client/index.js']) assert(fs.existsSync(p),p);
 for(const p of ['src','node_modules/@nestjs/cli','node_modules/typescript']) assert(!fs.existsSync(p),p);
 assert.strictEqual(require('@prisma/client/package.json').version,'5.22.0');
@@ -149,7 +166,8 @@ assert(!fs.readFileSync('start-production.sh').includes(13));
 const state=fs.statSync('/var/lib/kin-emr');
 assert(state.isDirectory()); assert.strictEqual(state.uid,process.getuid()); assert.strictEqual(state.mode&0o777,0o700);
 """
-        ops.temporary_run(["--network", "none", "--entrypoint", "node", self.image_id, "-e", script])
+        ops.temporary_run(["--network", "none", "--entrypoint", "node", self.image_id, "-e", script,
+                           json.dumps(MIGRATIONS)])
 
     def test_02_migrate_boot_restart_preserves_data_and_history(self):
         """TEST-C1-02/03: real Prisma engines, empty migration, auth guard and exec signal path.
@@ -191,17 +209,7 @@ const runtime=new EmrRuntime(process.env.DATABASE_URL, '/var/lib/kin-emr/outage'
         history_query = 'SELECT migration_name,checksum,finished_at FROM "_prisma_migrations" ORDER BY migration_name COLLATE "C";'
         history = self.psql(history_query)
         self.assertTrue(history.startswith("0_init|"))
-        self.assertEqual(sorted(line.split('|')[0] for line in history.splitlines()),
-                         ['0_init', '20260907040000_viewer_history', '20260908020000_workspace_layout',
-                          '20260908081500_connect_gate', '20260908120000_manual_sr',
-                          '20260908180000_viewer_jobs', '20260908200000_manual_sr_recovery',
-                          '20260909060000_saved_filter_organization', '20260909100000_tech_note_revision',
-                           '20260909180000_worklist_columns', '20260909220000_favorite_workspace', '20260909233000_study_tags', '20260910000500_reader_assignment', '20260910013000_reading_preferences', '20260910023000_reading_appearance', '20260910044500_workspace_shortcuts', '20260910090000_filter_folders', '20260910100000_shared_filters', '20260910110000_study_consultation', '20260910123000_consultation_predicates', '20260910130000_study_access', '20260910133000_study_access_subject', '20260912100000_hanging_protocol_preferences', '20260917120000_findings', '20260920120000_report_citations', '20260921120000_report_structure', '20260924120000_order_accession', '20260924130000_gateway_receipt', '20260924140000_gateway_retry_request', '20260926120000_study_questions', '20260926130000_study_image_requests', '20260928120000_critical_result', '20260928130000_reader_assignment_scope', '20260930120000_audit_log_append_only', '20261004120000_draft_revision_session_entry',
-                          '20261005120000_idp_session_end', '20261005130000_member_isolation',
-                          '20261006000000_tech_note_attempt_id',
-                          '20261006120000_member_isolation_call', '20261007120000_provider_change', '20261007170000_member_db_rights', '20261007200000_designation_subjects',
-                          '20261008120000_emr_b', '20261010120000_emr_seal_attempts', '20261010150000_emr_read_jit_off', '20261011120000_filter_shortcuts',
-                          '20261015013945_import_operation', '20261016120000_related_report_insert_receipt', '20261023180000_emr_pg_ledger', '20261023200000_emr_server_signing', '20261024120000_emr_d_online', '20261025000000_emr_e_online', '20261025120000_access_review', '20261025120000_auth_flow_subtraction', '20261025150000_emr_f_link', '20261026120000_assignment_access_stream', '20261026180000_emr_signing_key_admin', '20261026210000_emr_e_source_manifest', '20261027090000_emr_e_study_delivery', '20261027150000_emr_e_observation_delivery', '20261027180000_emr_image_object_digest', '20261027230000_caution_app_limits', '20261028120000_held_unknown_source', '20261029120000_emr_image_retention', '20261029130000_emr_preparation_manifest_index', '20261030120000_preload_cache_key'])
+        self.assertEqual(sorted(line.split('|')[0] for line in history.splitlines()), MIGRATIONS)
         self.assertEqual(self.psql("SELECT string_agg(table_name, ',' ORDER BY table_name) FROM information_schema.tables WHERE table_schema='emr_image';"), "expiring_delivery_link,object_digest,observation,preparation,source_manifest")
         self.assertEqual(self.psql("SELECT concat_ws(',', has_table_privilege('kin_runtime','emr_image.preparation','INSERT'), has_table_privilege('kin_runtime','emr_image.observation','INSERT'), has_sequence_privilege('kin_runtime','emr_image.observation_sequence_seq','USAGE'), has_table_privilege('kin_runtime','emr_image.object_digest','SELECT,INSERT'), has_table_privilege('kin_runtime','emr_image.object_digest','UPDATE,DELETE,TRUNCATE'));"), "t,t,t,t,f")
         self.psql("CREATE TABLE c1_probe(value text); INSERT INTO c1_probe VALUES ('preserved');")

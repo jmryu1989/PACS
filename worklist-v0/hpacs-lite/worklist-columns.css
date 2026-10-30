@@ -23,3 +23,4 @@
 #column-manager #wc-appearance p { width: 100%; margin: 0 0 8px; }
 #column-manager select, #column-manager .wc-width { background: #212121; color: #e3e3e3; border: 1px solid #b4b4b466; padding: 6px; border-radius: 4px; }
 #rows .wc-cell, #relrows .wc-cell { white-space: normal; overflow-wrap: anywhere; }
+#rows .wc-cell .hold { white-space: normal; }

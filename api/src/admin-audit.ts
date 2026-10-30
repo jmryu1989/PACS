@@ -69,7 +69,7 @@ export const AUDIT_REPORT_COMMIT_ACTIONS: readonly string[] = Object.freeze([
   "addendum", "approve", "defer", "preliminary", "reset", "save",
 ]);
 
-/** 쓸 때 기관을 남기지 않는 행. `*`로 끝나는 항목은 그 접두어의 모든 action이다. */
+/** 기관 미기록 또는 검사별 감사 전용 행. 새 hold/draft 행도 관리자 콘솔로 넓히지 않는다. `*`는 접두어다. */
 export const AUDIT_HIDDEN_NO_RECORD_TIME_INSTITUTION: readonly string[] = Object.freeze([
   "admin.user.list", "report.draft", "report.draft.clear", "report.draft.rebase", "report.draft.discard", "report.hold",
   "dictation.request", "gateway.receipt.first", "gateway.receipt.transition", "gateway.receipt.epoch_unrecognised",
@@ -259,7 +259,19 @@ function fieldAttribution(rule: string, base: Omit<AuditProjection, 'rule' | 'de
   const key = source.startsWith('detail.') ? source.slice('detail.'.length) : null;
   const value = key === null ? base.target : own(detail, key) ? detail[key] : undefined;
   if (typeof value !== 'string' || !value) return hidden(rule, 'no_institution_recorded');
-  // 기록된 detail 그대로다(파싱한 새 객체라 행끼리 공유하지 않는다). 기록되지 않은 값은 채우지 않는다.
+  // A local administrator may release a foreign writer. Attribution of the
+  // action does not grant access to that writer's identity. Never alter storage.
+  if (base.action === 'hold.force-release') {
+    const { holderInstitutionId, ...rest } = detail;
+    detail = { ...rest, holder: !rest.holder ? null
+      : rest.holder === base.actor || holderInstitutionId === value ? rest.holder
+      : holderInstitutionId ? '다른 기관' : '작성자 비공개' };
+  } else if (base.action === 'report.draft.force-discard' && Array.isArray(detail.drafts)) {
+    // Drafts do not record their author's institution. The releasing institution
+    // is not evidence of authorship, including for legacy rows.
+    detail = { ...detail, drafts: detail.drafts.map(draft => ({ ...draft,
+      author: draft.author === base.actor ? draft.author : '작성자 비공개' })) };
+  }
   return { rule, visible_to: [value], projection_by_side: new Map([[value, { ...base, rule, detail }]]), hidden: null };
 }
 
