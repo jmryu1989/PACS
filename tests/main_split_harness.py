@@ -34,6 +34,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlparse
 
 try:
@@ -280,6 +281,51 @@ class Delivery:
         return index == 0 or page.evaluate("name => window.__kinTrace.executed.includes(name)", self.order[index - 1])
 
 
+class WorkerRequest:
+    """The request fields the synthetic page handlers consume, preserved from CDP."""
+
+    def __init__(self, request, page):
+        self.method, self.url = request["method"], request["url"]
+        self.headers = {name.lower(): value for name, value in request.get("headers", {}).items()}
+        self.post_data = request.get("postData")
+        # SharedWorkers have no frame; the registering document owns this synthetic session.
+        self.frame = SimpleNamespace(page=page)
+
+    @property
+    def post_data_json(self):
+        return json.loads(self.post_data) if self.post_data is not None else None
+
+
+class WorkerRoute:
+    """Adapt the page handler's fulfill/abort contract to CDP, including deferred answers."""
+
+    def __init__(self, cdp, request_id, request):
+        self.cdp, self.request_id, self.request = cdp, request_id, request
+        self.on_fulfill = lambda: None
+
+    def fulfill(self, *, status=200, headers=None, content_type=None, body=None, json=None):
+        response_headers = {name.lower(): value for name, value in (headers or {}).items()}
+        if json is not None:
+            # Keep the same keyword as Playwright's Route.fulfill.
+            from json import dumps
+            body = dumps(json)
+            response_headers.setdefault("content-type", "application/json")
+        if content_type is not None:
+            response_headers["content-type"] = content_type
+        if isinstance(body, str):
+            body = body.encode("utf-8")
+        self.cdp.send("Fetch.fulfillRequest", {
+            "requestId": self.request_id, "responseCode": status,
+            "responseHeaders": [{"name": name, "value": value} for name, value in response_headers.items()],
+            "body": base64.b64encode(body or b"").decode("ascii"),
+        })
+        self.on_fulfill()
+
+    def abort(self, error_code="failed"):
+        reason = {"failed": "Failed", "aborted": "Aborted", "connectionreset": "ConnectionReset"}[error_code]
+        return self.cdp.send("Fetch.failRequest", {"requestId": self.request_id, "errorReason": reason})
+
+
 class WorkerNetwork:
     """What a SharedWorker itself asks for (importScripts, fetch) passes every Playwright route - measured: a context
     route sees the worker's own script but nothing the running worker requests - so on the synthetic origin it would go
@@ -307,13 +353,13 @@ class WorkerNetwork:
         self.cdp.send("Fetch.enable", {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]})
 
     def register(self, context, page, answer, unanswered):
-        """`answer(method, url) -> (content_type, body) | None`; `unanswered(method, url)` reports a request failed."""
+        """`answer(route, request)` uses the page handler; `unanswered(method, url)` reports handler failures."""
         session = context.new_cdp_session(page)
         try:
             key = session.send("Target.getTargetInfo")["targetInfo"]["browserContextId"]
         finally:
             session.detach()
-        self.contexts[key] = (answer, unanswered)
+        self.contexts[key] = (page, answer, unanswered)
         return key
 
     def unregister(self, key):
@@ -330,15 +376,16 @@ class WorkerNetwork:
                        if owner and owner["type"] in ("shared_worker", "worker", "service_worker") else None)
             if handler is None:
                 return self.cdp.send("Fetch.continueRequest", {"requestId": request_id})
-            answer, unanswered = handler
-            found = answer(request["method"], request["url"])
-            if found is None:
+            page, answer, unanswered = handler
+            worker_request = WorkerRequest(request, page)
+            route = WorkerRoute(self.cdp, request_id, worker_request)
+            try:
+                answer(route, worker_request)
+            except PlaywrightError:
+                raise
+            except Exception:  # a missing historical asset or an unsupported handler request must fail closed
                 unanswered(request["method"], request["url"])
-                return self.cdp.send("Fetch.failRequest", {"requestId": request_id, "errorReason": "Failed"})
-            content_type, body = found
-            self.cdp.send("Fetch.fulfillRequest", {"requestId": request_id, "responseCode": 200,
-                "responseHeaders": [{"name": "Content-Type", "value": content_type}],
-                "body": base64.b64encode(body).decode("ascii")})
+                route.abort()
         except PlaywrightError:
             pass  # the worker or its context has gone
 

@@ -165,6 +165,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.equal(R.routeContract('POST studies/:uid/viewer-jobs/preview').operation, 'read');
     assert.equal(R.routeContract('GET studies/:uid/report-preview').operation, 'export');
     assert.equal(R.routeContract('GET authz/dicom').operation, 'auth');
+    assert.deepEqual(R.routeContract('GET preload/cache-key'), {kinds:['system-operation'],operation:'read',causes:['user-view','background-fetch']});
     for (const route of ['POST auth/login', 'POST auth/register']) {
       assert.equal(R.routeContract(route).operation, 'auth');
       assert(R.classifyRoute(route).includes('authentication-session'));

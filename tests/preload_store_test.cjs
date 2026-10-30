@@ -1,5 +1,5 @@
 'use strict';
-// REQ-MG-PRELOAD-MEM -> RISK-PRELOAD-OOM-REPORT-LOSS / RISK-PRELOAD-STALE-IDENTITY / RISK-PRELOAD-CROSS-SESSION
+// REQ-MG-PRELOAD-CACHE -> RISK-PRELOAD-OOM-REPORT-LOSS / RISK-PRELOAD-STALE-IDENTITY / RISK-PRELOAD-CROSS-SESSION
 // -> TEST-MG-PRELOAD-STORE: the preload store's budget, eviction order and revision rules (worklist-v0/hpacs-lite/preload-store.js).
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -7,7 +7,8 @@ const { create, budgetFor, studyOfPath, STATUS } = require('../worklist-v0/hpacs
 
 const GB = 1024 ** 3;
 const path = (study, n = 1, sop = '9.1') => `/dicom-web/studies/${study}/series/8.1/instances/${sop}/frames/${n}`;
-const frame = bytes => ({ data: new ArrayBuffer(bytes), gzip: true, type: 'multipart/related; type="application/octet-stream"' });
+let nextId = 0;
+const frame = bytes => ({ entryId: 'opaque-' + (++nextId), bytes });
 const status = (store, uid) => store.snapshot().studies.find(s => s.uid === uid);
 
 /** Fetch `count` frames of `uid` of `bytes` each, as the worker does, and mark it Ready. */
@@ -17,13 +18,10 @@ function fill(store, uid, count, bytes, revision = 'r1') {
   assert.equal(store.ready(uid), true);
 }
 
-test('budget is the memory the browser reports times the share the site set; no report or no share, no preload', () => {
-  // Synthetic shares: the product has none of its own (no measured source); the site sets it.
-  assert.equal(budgetFor(8, 0.25), 2 * GB);
-  assert.equal(budgetFor(0.25, 0.5), Math.floor(0.125 * GB));
-  assert.equal(budgetFor(32, 0.5), 16 * GB, 'no ceiling of the product\'s own on top of the browser\'s report');
-  for (const none of [undefined, null, 0, -1, NaN, '8']) assert.equal(budgetFor(none, 0.25), null, String(none));
-  for (const share of [undefined, null, 0, -0.1, 1.5, NaN, '0.2']) assert.equal(budgetFor(8, share), null, String(share));
+test('R10 disk cap comes only from the institution setting; unset or invalid means no storage', () => {
+  assert.equal(budgetFor(2), 2 * GB);
+  assert.equal(budgetFor(32), 32 * GB);
+  for (const none of [undefined, null, 0, -1, NaN, '8', Infinity]) assert.equal(budgetFor(none), null);
   const store = create(null);
   store.add([{ uid: '1.1' }]);
   store.start('1.1', 1);
@@ -37,7 +35,7 @@ test('only frame paths without a query name a study', () => {
     assert.equal(studyOfPath(other), null, other);
 });
 
-test('memory stays within the budget: the opened-and-closed study goes first, never the open one or one not read yet', () => {
+test('disk space stays within the budget: the opened-and-closed study goes first, never the open one or one not read yet', () => {
   const store = create(100);
   store.add([{ uid: '1.1' }, { uid: '1.2' }, { uid: '1.3' }, { uid: '1.4' }]);
   fill(store, '1.1', 3, 10);           // read, then closed
@@ -53,12 +51,12 @@ test('memory stays within the budget: the opened-and-closed study goes first, ne
   assert.equal(status(store, '1.2').status, STATUS.ready);
   assert.equal(status(store, '1.3').status, STATUS.ready);
   assert.ok(store.used() <= store.budget());
-  // Nothing left that may go: the next frame waits for memory instead of evicting B (open) or C (not read yet).
+  // Nothing left that may go: the next frame waits for disk space instead of evicting B (open) or C (not read yet).
   store.start('1.4', 3);
   assert.equal(store.put('1.4', path('1.4', 3), frame(20), 'r1'), 'full');
   assert.equal(status(store, '1.4').status, STATUS.queued);
   assert.equal(status(store, '1.4').waiting, true);
-  assert.equal(store.next(), null, 'a waiting study is not picked again until memory may be free');
+  assert.equal(store.next(), null, 'a waiting study is not picked again until disk space may be free');
   assert.equal(status(store, '1.2').status, STATUS.ready);
   assert.equal(status(store, '1.3').status, STATUS.ready);
   assert.ok(store.used() <= store.budget());
@@ -106,7 +104,7 @@ test('held frames are answered by path and revision; failed, evicted and cleared
   store.add([{ uid: '1.1', label: 'SYN-1 · Synthetic' }, { uid: '1.2' }]);
   fill(store, '1.1', 2, 10, 'rev-A');
   assert.deepEqual(store.held('1.1'), { revision: 'rev-A', status: STATUS.ready, copy: 1 });
-  assert.equal(store.frame(path('1.1', 2)).data.byteLength, 10);
+  assert.equal(store.frame(path('1.1', 2)).bytes, 10);
   assert.equal(store.frame(path('1.1', 3)), null);
   assert.equal(store.held('1.2'), null, 'queued with nothing fetched is not held');
   store.evict('1.1', 'changed at open');
@@ -131,14 +129,14 @@ test('Retry puts a failed or evicted study at the head of the queue; a held one 
   assert.equal(status(store, '1.3').status, STATUS.ready);
 });
 
-test('a study that could not fit even alone does not wait for memory; one that could fit once others go waits', () => {
+test('a study that could not fit even alone does not wait for disk space; one that could fit once others go waits', () => {
   const store = create(100);
   store.add([{ uid: '1.1' }, { uid: '1.2' }, { uid: '1.3' }]);
   store.start('1.1', 3);
   assert.equal(store.put('1.1', path('1.1', 1), frame(40), 'r1'), 'stored');
   assert.equal(store.put('1.1', path('1.1', 2), frame(40), 'r1'), 'stored');
   assert.equal(store.put('1.1', path('1.1', 3), frame(40), 'r1'), 'oversize', '120 bytes can never fit in 100');
-  assert.equal(status(store, '1.1').waiting, false, 'not parked for memory');
+  assert.equal(status(store, '1.1').waiting, false, 'not parked for disk space');
   store.fail('1.1', 'too large');
   assert.equal(store.used(), 0, 'its partial bytes go with the failure');
   assert.equal(store.next().uid, '1.2', 'the queue goes on');
@@ -181,4 +179,60 @@ test('a study larger than the whole budget is refused from its first frames', ()
   store.add([{ uid: '1.1' }]);
   assert.equal(store.estimate('1.1', 101), false);
   assert.equal(store.estimate('1.1', 100), true);
+});
+
+
+test('R5 fixed 72-hour window blocks held/frame before sweep and releases every ID; retry starts a new window', () => {
+  let now = 1000;
+  const store = create(100, () => now);
+  store.add([{uid:'1.1'}, {uid:'1.2'}]);
+  store.fetched('1.1', now);
+  fill(store, '1.1', 1, 10);
+  const id = store.frame(path('1.1')).entryId;
+  now += 72*3600000 - 1;
+  assert.ok(store.held('1.1'));
+  now++;
+  assert.equal(store.held('1.1'), null);
+  assert.equal(store.frame(path('1.1')), null);
+  assert.deepEqual(store.expire(), [id]);
+  assert.equal(store.used(), 0);
+  assert.match(status(store, '1.1').reason, /72시간/);
+  assert.match(status(store, '1.2').reason, /대기열/);
+  assert.equal(store.retry('1.1'), true);
+  assert.equal(status(store, '1.1').expiresAt, now + 72*3600000);
+});
+
+test('R5 a still-queued study expires at its original deadline after restart', () => {
+  const queuedAt = 1000, deadline = queuedAt + 72 * 3600000;
+  const store = create(100, () => queuedAt);
+  store.add([{ uid: '1.1' }]);
+  const manifest = store.manifest('1.1');
+  assert.equal(manifest.fetchedAt, null, 'no frame was ever received');
+  for (const restartAt of [deadline - 1, deadline, deadline + 3600000]) {
+    const restarted = create(100, () => restartAt);
+    restarted.restore(manifest, new Map());
+    restarted.expire();
+    if (restartAt < deadline) {
+      assert.equal(restarted.next().uid, '1.1');
+      assert.equal(status(restarted, '1.1').status, STATUS.queued);
+    } else {
+      assert.equal(restarted.next(), null, 'expired queue must not download again');
+      assert.equal(status(restarted, '1.1').status, STATUS.evicted);
+      assert.match(status(restarted, '1.1').reason, /대기열/);
+    }
+    assert.equal(status(restarted, '1.1').expiresAt, deadline, 'restart never renews retention');
+  }
+});
+
+test('R11 R15 a persisted downloading manifest resumes Queued with reference-only frames', () => {
+  const store = create(100);
+  store.add([{uid:'1.1',label:'SYN · Patient'}]); store.start('1.1', 2);
+  store.put('1.1', path('1.1'), {entryId:'opaque',bytes:10}, 'r');
+  const manifest = store.manifest('1.1');
+  assert.equal(manifest.status, 'Queued');
+  const restarted = create(100);
+  restarted.restore(manifest, new Map([['opaque',{bytes:10}]]));
+  assert.equal(restarted.next().uid, '1.1');
+  assert.equal(restarted.frame(path('1.1')).entryId, 'opaque');
+  assert.equal(restarted.used(),10);
 });
