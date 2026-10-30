@@ -138,6 +138,8 @@ def source_pin(name):
 ASR_ENGINE_PIN, ASR_MODEL_PIN = source_pin('ASR_ENGINE_PIN'), source_pin('ASR_MODEL_PIN')
 TEMPLATE_CSP = re.findall(r'add_header Content-Security-Policy "([^"]*)" always;',
                           (ROOT / 'proxy' / 'nginx.conf.template').read_text(encoding='utf-8'))
+# D1891's decoder policy permits JS eval; dictation uses the page policy, checked against served headers below.
+TEMPLATE_CSP = [policy for policy in TEMPLATE_CSP if "'unsafe-eval'" not in policy.replace(';', ' ').split()]
 # Sized to reach the pane's max-height cap (main.html:266), the worst case for the pane geometry.
 REVIEW_TEXT = '\n'.join('U4L geometry review line %02d — 합성 검토 문장' % n for n in range(1, 13))
 REVIEW_BODY = json.dumps({'text': REVIEW_TEXT, 'seconds': 1.0, 'languagePin': 'auto', 'enginePin': ASR_ENGINE_PIN,
