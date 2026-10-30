@@ -50,6 +50,7 @@ class FailureServicesE2E(unittest.TestCase):
     service_restored = True
     # Reuse fixture/UI helpers without inheriting WorklistE2E's unrelated cases.
     login = worklist.WorklistE2E.login
+    login_page = worklist.WorklistE2E.login_page
     select = worklist.WorklistE2E.select
     close_contexts = worklist.WorklistE2E.close_contexts
     cleanup_fixtures = worklist.WorklistE2E.cleanup_fixtures

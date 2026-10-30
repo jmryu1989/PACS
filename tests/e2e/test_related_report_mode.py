@@ -79,6 +79,7 @@ class RelatedReportModeE2E(TemplatePreservationE2E):
         expect(page.locator(".related-p #related-mode")).to_be_visible()
         expect(page.locator("#findings")).to_be_visible()
         expect(page.locator("#findings")).to_have_value(TARGET_OWN)
+        expect(page.locator("#report-editor-state")).to_have_text("Read Only")
         # A reader's click on the held draft takes no focus and changes nothing (Back below gives the field back).
         held = page.locator("#findings")
         box = held.bounding_box()

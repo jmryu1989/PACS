@@ -56,10 +56,14 @@ LINES = "\n".join("SYN A5 HISTORY LINE %d" % n for n in range(1, 7))
 class ReportObservationBrowser(base.WorklistE2E):
     # -- ledger witness -----------------------------------------------------------------------------------------------
     def ledger(self, uid, action):
+        # Only report reads can be the subject of a display report (client-shown accepts report-version/report-evidence).
+        # Worklist/bootstrap consumer reads also record provisions for the same study (study-metadata, report-head,
+        # private-draft); those are other records, not this witness.
         self.assertRegex(uid, r"^[0-9.]+$")
         self.assertIn(action, ("provide-prepared", "client-shown"))
         rows = psql("SELECT (payload::jsonb)::text FROM emr_access.access_entry WHERE payload::jsonb->>'branch' = 'local-read' "
                     f"AND payload::jsonb->>'action' = '{action}' AND payload::jsonb->'targets'->0->'studyId'->>'value' = '{uid}' "
+                    "AND payload::jsonb->'targets'->0->>'kind' IN ('report-version', 'report-evidence') "
                     "ORDER BY sequence;")
         return [json.loads(row) for row in rows]
 
