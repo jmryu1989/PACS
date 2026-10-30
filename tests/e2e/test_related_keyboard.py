@@ -17,9 +17,13 @@ class RelatedKeyboardE2E(ReadingWorkspaceE2E):
   # The last visible filter control precedes the sole row; pagination is hidden.
   expect(p.locator(f'#relrows tr[data-uid="{b.uid}"]')).to_be_focused();expect(p.locator('#relrows tr[tabindex="0"]')).to_have_count(1)
   # W5 (design v5 §1, D1244): Enter on a Related row opens Related Report mode on that Source. The typed Target is saved
-  # first through the W4 move gate; the editor is put away with its text and the mode's title takes the focus.
+  # first through the W4 move gate and the mode's title takes the focus. Since MINHOON-8 the Source opens inside the
+  # Related panel and the editor stays on screen with the typed text, held (Read Only, refusing focus) until Back.
+  # The hold is an inert ancestor, which Playwright's editable state does not read, so focus refusal is checked directly.
   p.keyboard.press('Enter');expect(p.locator('#related-mode')).to_be_visible();expect(p.locator('#related-mode-title')).to_be_focused()
-  expect(p.locator('#related-mode [data-related-source="findings"]')).to_have_text('PRIOR '+b.uid);expect(p.locator('#findings')).to_be_hidden();expect(p.locator('#findings')).to_have_value('KEEP RELATED KEYBOARD REPORT')
+  expect(p.locator('#related-mode [data-related-source="findings"]')).to_have_text('PRIOR '+b.uid);expect(p.locator('.related-p #related-mode')).to_be_visible()
+  expect(p.locator('#findings')).to_be_visible();expect(p.locator('#findings')).to_have_value('KEEP RELATED KEYBOARD REPORT');expect(p.locator('#report-editor-state')).to_have_text('Read Only')
+  self.assertFalse(p.locator('#findings').evaluate('n=>{n.focus();return document.activeElement===n}'),'the held draft refuses focus');expect(p.locator('#related-mode-title')).to_be_focused()
   self.assertEqual(p.evaluate('selectedUid'),a.uid);self.assertEqual(p.evaluate('relatedUid'),b.uid)
   # The explicit image action stays reachable in the mode and still opens Target + Source (PAGE-10).
   compare=p.locator(f'[data-related-open="{b.uid}"]');compare.focus();expect(compare).to_be_focused()

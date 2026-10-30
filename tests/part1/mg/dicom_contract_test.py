@@ -217,7 +217,7 @@ class MammographyDicomContractTest(unittest.TestCase):
         calls = [["classify", dicom_json(dataset(s))] for s in CMMD_VIEWS + DBT_OBJECTS]
         results = run_model(*calls)
         for result in results:
-            self.assertEqual(result['contract']['ruleVersion'], 'D744-2')
+            self.assertEqual(result['contract']['ruleVersion'], 'D1892')
             self.assertEqual(result['partialDeclaration'], 'ABSENT')
             self.assertEqual(result['fullness'], 'inferred-for-hanging')
             self.assertTrue(result['contract']['fullViewAutoMatch'])

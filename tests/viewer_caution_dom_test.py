@@ -29,7 +29,9 @@ class ViewerCautionDOM(unittest.TestCase):
     def test_product_csp_allows_eval_only_in_the_decoder_worker(self):
         policies = re.findall(r'add_header Content-Security-Policy "([^"]+)" always;',
                               (ROOT / 'proxy/nginx.conf.template').read_text(encoding='utf-8'))
-        policy = policies[0]
+        page_policies = [p for p in policies if "'unsafe-eval'" not in p.replace(';', ' ').split()]
+        self.assertEqual(len(page_policies), 1, 'one page policy without JavaScript eval')
+        policy = page_policies[0]
         worker_policy = next(p for p in policies if "'unsafe-eval'" in p.replace(';', ' ').split())
         directives = {parts[0]: parts[1:] for directive in policy.split(';') if (parts := directive.split())}
         self.assertIn("'wasm-unsafe-eval'", directives['script-src'])
