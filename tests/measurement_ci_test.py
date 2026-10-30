@@ -432,6 +432,8 @@ class MeasurementCiTests(unittest.TestCase):
                        'suites': tuple((s, None, None if default_unit else 'explicit-' + Path(s).stem.replace('_', '-'))
                                        for s in suites)}
             clock, live, commands = [0.0], [], []
+            # Exhaust the configured profile deadline, including any tail-suite allowance.
+            exhausted_at = ci.profile_deadline_seconds('measurements') + 1
             subprocess_run = ci.subprocess.run
             release = ci.gate.release_after_inspection
             snapshots = {}
@@ -535,10 +537,10 @@ class MeasurementCiTests(unittest.TestCase):
                                                          else line for line in lines).encode()
                         clock[0] += 0.25
                         if exhaust_deadline:
-                            clock[0] = 1501
+                            clock[0] = exhausted_at
                         return result
                     if exhaust_deadline:
-                        clock[0] = 1501
+                        clock[0] = exhausted_at
                         raise ci.subprocess.TimeoutExpired(command, kwargs['timeout'], output=b'timed out')
                     clock[0] += 0.25
                     code = 1 if 'failure' in module else 0
@@ -569,6 +571,8 @@ class MeasurementCiTests(unittest.TestCase):
                     print((profile['out'] / (Path(module).stem + '.log')).read_text(encoding='utf-8'))
             self.assertIn(Path(suites[0]).stem, str(error.exception))
             blocked = inspection_failure or wrong_unit or result_defect
+            if exhaust_deadline and not blocked:
+                self.assertIn('Insufficient CI time for a supervised test run', str(error.exception))
             attempted = suites[:1] if exhaust_deadline or blocked else suites
             self.assertEqual(live, ['tests/' + s for s in attempted])
             if not exhaust_deadline and not blocked:
