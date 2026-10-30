@@ -219,7 +219,8 @@
       "proxy/**",
       "scripts/emr-compose.py",
       "scripts/record-run.py",
-      "tests/emr/d/**"
+      "tests/emr/d/**",
+      "worklist-v0/hpacs-lite/preload-*"
     ],
     "emr-e-contracts": [
       "api/Dockerfile*",
