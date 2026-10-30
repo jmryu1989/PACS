@@ -1,5 +1,18 @@
 # 살아 있는 불변조건 테스트
 
+CI 회귀 시험은 `.github/workflows/validate.yml`과 `pr-regressions.yml`이 같은 경로 선택 선언을 사용해 PR에서 실행한다.
+종전 `measurements-nightly.yml`의 순수·Node·static DOM·served stack·measurement 시험도
+`scripts/ci-paths.json`에 선언한 시험 자체·fixture·제품 입력이 바뀌면 PR에서 실행한다.
+DOM은 기능별 병렬 job으로, native OHIF·nginx·measurement는 각각의 실행 환경을 유지한다.
+페이지가 로드하는 script·worker와 시험이 import하는 helper도 선택 입력에 포함한다.
+Markdown은 정확히 선언한 파일 경로와 `tests/fixtures/**`만 선택 입력으로 인정한다.
+전체 회귀 실행은 두 workflow의 `workflow_dispatch`를 각각 실행하거나 버전 태그를 사용한다.
+각 workflow의 집계 체크는 `pr-ci / validate`, `pr-ci / regressions`다. 모든 하위 job이 success/skipped일 때만 성공하며 failure/cancelled는 실패한다.
+별도 measurement 야간 workflow는 없으며 기존 restore-product 예약은 복원 리허설만 담당한다.
+`candidate.yml` G3의 최종 SHA 불변조건·worklist·누적 업무 흐름 선택은 그대로 유지한다.
+경로 선택·profile 소유권·선언/수집 대조는 `measurement_ci_test.py`,
+`execution_selection_test.py`, `candidate_ci_test.py`, `ci_workflow_consumers_test.py`로 검사한다.
+
 일상 업무 제한 완화(caution-app): `caution_app_dom_test.py`는 이름 초안·확인 없는 복사·계정 링크·SR 부분 표시를,
 `clinical_context_service_test.cjs`/`clinical_context_dom_test.py`는 이전 판독·이력 이어읽기를 검사한다.
 `keycloak_member_paging_test.cjs`는 1,000명 이후 사용자 조회를, `viewer_volume_job_test.cjs`는 201번째 작업과 66개 주석의 보존을 검사한다.
@@ -107,7 +120,7 @@ PR은 required CI와 교차 검수를 거치며 G3는 최종 후보 SHA에서 di
 
 REQ-D-CINE-RANGE/YOYO → RISK-D-CINE-WRONG-FRAME/STALE/LOSS/UNBOUNDED → TEST-CINE-RANGE/YOYO: `cine_playback_test.cjs`와 `cine_lifecycle_test.cjs`는 선택 구간의 양 끝·왕복·중단, 범위 검증·원본/평면 기하 교체와 기존 비동기 소유권을 검사한다. `e2e/test_cine.py`와 `e2e/test_volume_cine.py`의 각 클래스에 직접 정의된 시험은 기존 `measurements` 프로필에서 함께 실행하며, 실제 multiframe/재구성 평면·화소·세션/선택/숨김/지연 중단·판독/원본 보존을 확인한다. `execution_selection_test.py`는 새 범위/중단 시험의 실제 선택과 상속 시험 제외를 대조한다. 로컬 원본 fixture는 실행하지 않으며 등록 사실은 hosted 실행 성공을 뜻하지 않는다.
 
-VR112-REQ-02 → VR112-RISK-02 → `tests/viewer_stack_restore_dom_test.py` (T01–T12, 29 methods): `KIN_PINNED_OHIF_LIBRARY=<libOrthancOHIF.so> python -B tests/viewer_stack_restore_dom_test.py` exercises the pinned native OHIF stack, rendered pixels, image labels and mounted Job completion/failure boundaries in full Chromium with synthetic images and intercepted requests. The existing `measurements` job extracts the library from an unstarted, network-disabled `orthancteam/orthanc:24.12.0` container after installing the pinned Python/Playwright dependencies, then records every source input and the extracted library with concrete `--file` arguments. Its `tmp/workspace-ui-ci/viewer-stack-restore-dom/` raw streams and `run.json` are retained by `synthetic-workspace-dom-results` even on failure. This adds no measurement profile or live suite; the 38 profiles, 20 measurements suites and G3 114 cases remain unchanged. LiveStack and hosted execution results are separate evidence.
+VR112-REQ-02 → VR112-RISK-02 → `tests/viewer_stack_restore_dom_test.py` (T01–T12, 29 methods): `KIN_PINNED_OHIF_LIBRARY=<libOrthancOHIF.so> python -B tests/viewer_stack_restore_dom_test.py` exercises the pinned native OHIF stack, rendered pixels, image labels and mounted Job completion/failure boundaries in full Chromium with synthetic images and intercepted requests. The existing `viewer-native-dom` job extracts the library from an unstarted, network-disabled `orthancteam/orthanc:24.12.0` container after installing the pinned Python/Playwright dependencies, then records every source input and the extracted library with concrete `--file` arguments. Its `tmp/workspace-ui-ci/viewer-stack-restore-dom/` raw streams and `run.json` are retained by `synthetic-viewer-native-dom-results` even on failure. This adds no measurement profile or live suite; the 38 profiles, 20 measurements suites and G3 114 cases remain unchanged. LiveStack and hosted execution results are separate evidence.
 
 REQ-D-WORKSPACE-WINDOWS → RISK-D-WORKSPACE-IDENTITY/UNSAVED/STALE → TEST-VIEWER-WINDOW-MANAGER-DOM: `python tests/viewer_window_manager_dom_test.py` exercises the actual window-manager DOM handler and registry in isolated Chromium with synthetic window/session state and all network requests blocked. It checks pending navigation, changes during close confirmation, existing dirty/busy guards, normal close/focus, and neutral comparison identification. It does not start LiveStack or replace real OHIF/DICOM and physical-monitor verification. The existing measurements CI job runs this suite after installing the pinned browser dependencies and preserves its raw execution record separately.
 
@@ -870,95 +883,99 @@ from merge-commit runner tools. See [G3 record, collection and STOP recovery](st
 The single candidate job must produce a fresh upload on rerun. Provenance verification
 does not replace stage-exit's selected-test/result/cleanup checks, non-G3 CI or review.
 
-Every `scripts/record-run.py --run-dir` in the workflows listed below sits under a path of an `if: always()` `actions/upload-artifact` step of the same job with `if-no-files-found: error`, so each record's `run.json`, `stdout.log` and `stderr.log` reach an artifact whatever the job's outcome. Every job uploads its whole record root except `runtime`, whose `synthetic-runtime-print-identity` names directories one by one and missed eleven of them; `synthetic-runtime-record-runs` uploads all of `tmp/runtime-ci/` (S5-CI2), and the older artifact keeps its name and paths. A unittest module at the default verbosity records only dots and `Ran N`, so the display-scope DOM step passes `-v`; the other record-run steps whose module or `-m unittest` command prints no case names are `identity-fields`, `hanging-protocols`, `cell-merge`, `images-only-loader`, `image-text-loader`, `three-d-cursor-dom` and `identity-position` under `tmp/workspace-ui-ci/`, and `binding-dom` and `orientation-basic-dom` under `tmp/vr-ci/`. The table covers `validate.yml`, `worklist-ux.yml` and the named per-job workflows in `.github/workflows/` (one row per run directory, with the artifacts that cover it); rebuild it from the owning workflow when a step changes. A cell with only a job id belongs to `validate.yml`.
+Every `scripts/record-run.py --run-dir` in the workflows listed below sits under a path of an `if: always()` `actions/upload-artifact` step of the same job with `if-no-files-found: error`, so each record's `run.json`, `stdout.log` and `stderr.log` reach an artifact whatever the job's outcome. Every job uploads its whole record root except `runtime`, whose `synthetic-runtime-print-identity` names directories one by one and missed eleven of them; `synthetic-runtime-record-runs` uploads all of `tmp/runtime-ci/` (S5-CI2), and the older artifact keeps its name and paths. A unittest module at the default verbosity records only dots and `Ran N`, so the display-scope DOM step passes `-v`; the other record-run steps whose module or `-m unittest` command prints no case names are `identity-fields`, `hanging-protocols`, `cell-merge`, `images-only-loader`, `image-text-loader`, `three-d-cursor-dom` and `identity-position` under `tmp/workspace-ui-ci/`, and `binding-dom` and `orientation-basic-dom` under `tmp/vr-ci/`. The table covers `validate.yml`, `pr-regressions.yml` and the named per-job workflows in `.github/workflows/` (one row per run directory, with the artifacts that cover it); rebuild it from the owning workflow when a step changes. A cell with only a job id belongs to `validate.yml`.
 
 | Job | `--run-dir` | Artifact(s) | Step |
 |---|---|---|---|
-| `worklist-ux-measurements` (`worklist-ux.yml`) | `tmp/workspace-ui-ci/w3-server-prep` | `synthetic-workspace-dom-results` | W3 layout v3 server preparation and accepted module contracts |
-| `worklist-ux-measurements` (`worklist-ux.yml`) | `tmp/workspace-ui-ci/w3-drawer-dom`, `tmp/workspace-ui-ci/w3-pilot` | `synthetic-workspace-dom-results` | W3 drawer relocation, layout v3, account recovery and W2 first paint |
-| `worklist-ux-measurements` (`worklist-ux.yml`) | `tmp/workspace-ui-ci/w3-panel-size-dom` | `synthetic-workspace-dom-results` | W3 Study Panel size and Text Size options (pilot D1160) |
-| `measurements` | `tmp/workspace-ui-ci/pacs-split` | `synthetic-workspace-dom-results` | S9-U0b RELIST AST movement contract and independent structure mutants |
-| `measurements` | `tmp/workspace-ui-ci/pacs-split-modules` | `synthetic-workspace-dom-results` | S9-U0b concern modules and the PacsService facade over test doubles |
-| `measurements` | `tmp/workspace-ui-ci/pacs-source-behaviour` | `synthetic-workspace-dom-results` | S9-U0b RELIST source service behaviour gaps |
-| `measurements` | `tmp/workspace-ui-ci/citation-vectors` | `synthetic-workspace-dom-results` | S3-U2a shared citation vectors against an independent rule |
-| `measurements` | `tmp/workspace-ui-ci/citation-migration` | `synthetic-workspace-dom-results` | S3-U2a additive citation migration, canonical bounds and leak boundary |
-| `measurements` | `tmp/workspace-ui-ci/structure-vectors` | `synthetic-workspace-dom-results` | S3-structured-report shared render vectors against an independent rule and the empty product catalog |
-| `measurements` | `tmp/workspace-ui-ci/structure-migration` | `synthetic-workspace-dom-results` | S3-structured-report additive migration, NULL-writing rules and leak boundary |
-| `measurements` | `tmp/workspace-ui-ci/study-observation` | `synthetic-workspace-dom-results` | S4-U1b observation vectors, receipt labels, source pins, S4-U1a counts and Stage 3 main.html anchors |
-| `measurements` | `tmp/workspace-ui-ci/study-arrivals-counts` | `synthetic-workspace-dom-results` | S4-U1b observation vectors, receipt labels, source pins, S4-U1a counts and Stage 3 main.html anchors |
-| `measurements` | `tmp/workspace-ui-ci/s4-anchors-report_cursor_insert_mutants` | `synthetic-workspace-dom-results` | S4-U1b observation vectors, receipt labels, source pins, S4-U1a counts and Stage 3 main.html anchors |
-| `measurements` | `tmp/workspace-ui-ci/s4-anchors-report_structure_mutants` | `synthetic-workspace-dom-results` | S4-U1b observation vectors, receipt labels, source pins, S4-U1a counts and Stage 3 main.html anchors |
-| `measurements` | `tmp/workspace-ui-ci/s4-anchors-report_preview_citation_mutants` | `synthetic-workspace-dom-results` | S4-U1b observation vectors, receipt labels, source pins, S4-U1a counts and Stage 3 main.html anchors |
-| `measurements` | `tmp/workspace-ui-ci/s4-anchors-report_version_citation_mutants` | `synthetic-workspace-dom-results` | S4-U1b observation vectors, receipt labels, source pins, S4-U1a counts and Stage 3 main.html anchors |
-| `measurements` | `tmp/workspace-ui-ci/s4-anchors-viewer_job_print_citation_mutants` | `synthetic-workspace-dom-results` | S4-U1b observation vectors, receipt labels, source pins, S4-U1a counts and Stage 3 main.html anchors |
-| `measurements` | `tmp/workspace-ui-ci/order-reconciliation-source` | `synthetic-workspace-dom-results` | S4-U2 order reconciliation vectors, wrong-rule adequacy and source pins |
-| `measurements` | `tmp/workspace-ui-ci/study-identity-source` | `synthetic-workspace-dom-results` | S4-U5 study identity vectors well-formedness, source pins and forbidden wording |
-| `measurements` | `tmp/workspace-ui-ci/gateway-receipt-source` | `synthetic-workspace-dom-results` | S4-U3 gateway receipt vectors, wrong-rule adequacy, agent error mapping and source pins |
-| `measurements` | `tmp/workspace-ui-ci/gateway-retry-source` | `synthetic-workspace-dom-results` | S4-U4 gateway retry vectors, wrong-rule adequacy, agent single-writer pins and source pins |
-| `measurements` | `tmp/workspace-ui-ci/gateway-pipeline-contract` | `synthetic-workspace-dom-results` | S4-EG1 gateway pipeline judge adequacy and harness pins |
-| `measurements` | `tmp/workspace-ui-ci/clinician-policy` | `synthetic-workspace-dom-results` | S5-U1a clinician-only default denial fixtures, route classification and role-list source pins |
-| `measurements` | `tmp/workspace-ui-ci/clinician-read-serializer` | `synthetic-workspace-dom-results` | S5-U1b clinician read serializer vectors against the TS source |
-| `measurements` | `tmp/workspace-ui-ci/admin-audit-attribution` | `synthetic-workspace-dom-results` | Admin audit record-time attribution and paging behavior |
-| `measurements` | `tmp/workspace-ui-ci/viewer-stack-restore-dom` | `synthetic-workspace-dom-results` | Viewer Job native initial-image and completion contracts |
-| `measurements` | `tmp/workspace-ui-ci/identity-fields` | `synthetic-workspace-dom-results` | Image field positions and modality profile DOM integration |
-| `measurements` | `tmp/workspace-ui-ci/hanging-protocols` | `synthetic-workspace-dom-results` | Personal Hanging Protocol form and authenticated mount boundaries |
-| `measurements` | `tmp/workspace-ui-ci/image-thumbnails` | `synthetic-workspace-dom-results` | Individual image thumbnails identity and bounded page lifecycle |
-| `measurements` | `tmp/workspace-ui-ci/narrow-image-layout` | `synthetic-workspace-dom-results` | Narrow worklist row and image control hit targets |
-| `measurements` | `tmp/workspace-ui-ci/worklist-header` | `synthetic-workspace-dom-results` | S5-UI1 worklist header keeps Log out on screen and keyboard reachable |
-| `measurements` | `tmp/workspace-ui-ci/main-move` | `synthetic-workspace-dom-results` | S9-U0a A1 byte move map, loss, duplication and order mutants |
-| `measurements` | `tmp/workspace-ui-ci/main-split-static` and `main-split-static.json` | `synthetic-workspace-dom-results` | S9-U0a C2 AST declaration/execution order and C6 shared classic-script Program |
-| `measurements` | `tmp/workspace-ui-ci/pre-fixture-reference` | `synthetic-workspace-dom-results` | S9-U0a-PRE report harness fixture statements equal the f1d5406 page |
-| `measurements` | `tmp/workspace-ui-ci/pre-early-input-dom` | `synthetic-workspace-dom-results` | S9-U0a-PRE early input, pagehide and registration order on 18/30/45-part pages against the f1d5406 page |
-| `measurements` | `tmp/workspace-ui-ci/pre-mutants` | `synthetic-workspace-dom-results` | S9-U0a PRE/F2/F3/S1/H178/S2: 75 cumulative mutants, each checked by its designated oracle |
-| `measurements` | `tmp/workspace-ui-ci/worklist-toolbar` | `synthetic-workspace-dom-results` | S5-UI2 worklist toolbar keeps one row of groups, every control and the page script |
-| `measurements` | `tmp/workspace-ui-ci/report-actions` | `synthetic-workspace-dom-results` | S5-UI3 report button rows keep every button in its declared section and the page script |
-| `measurements` | `tmp/workspace-ui-ci/study-arrivals` | `synthetic-workspace-dom-results` | Existing study arrivals and preserved reading inputs |
-| `measurements` | `tmp/workspace-ui-ci/order-reconciliation-dom` | `synthetic-workspace-dom-results` | S4-U2 order reconciliation display through the real poll, failure keep and offline seed exclusion |
-| `measurements` | `tmp/workspace-ui-ci/study-identity-dom` | `synthetic-workspace-dom-results` | S4-U5 DICOM Identity panel through the real poll and the correction paths, with the b6a317c controls |
-| `measurements` | `tmp/workspace-ui-ci/report-rebase` | `synthetic-workspace-dom-results` | Stale addendum refusal, approved-report pane and non-destructive rebase |
-| `measurements` | `tmp/workspace-ui-ci/report-citation-dom` | `synthetic-workspace-dom-results` | S3-U2b citation insertion ordering, late answers, modal busy and convergence |
-| `measurements` | `tmp/workspace-ui-ci/report-cursor-insert-dom` | `synthetic-workspace-dom-results` | S3-U6 cursor insertion position, retention, guards and identity DOM integration |
-| `measurements` | `tmp/workspace-ui-ci/report-cursor-insert-mutants` | `synthetic-workspace-dom-results` | S3-U6 cursor insertion browser mutants killed through the shipped-file overrides |
-| `measurements` | `tmp/workspace-ui-ci/report-dictation-input-dom` | `synthetic-workspace-dom-results` | S3-R14 recogniser-shaped text input parity, occupancy and structured refusals DOM |
-| `measurements` | `tmp/workspace-ui-ci/report-dictation-host-dom` | `synthetic-workspace-dom-results` | S3-ASR-U4 Dictate control, review pane, stale refusals and explicit Insert DOM (synthetic media and transport) |
-| `measurements` | `tmp/workspace-ui-ci/report-structure-dom` | `synthetic-workspace-dom-results` | S3-structured-report entry lifecycle, replace, guards, stale plan and empty catalog DOM |
-| `measurements` | `tmp/workspace-ui-ci/report-structure-mutants` | `synthetic-workspace-dom-results` | S3-structured-report client mutants killed through the shipped-file overrides |
-| `measurements` | `tmp/workspace-ui-ci/report-preview-citation-dom` | `synthetic-workspace-dom-results` | S3-U4 printed citation section lifecycle, terminal states and print re-read |
-| `measurements` | `tmp/workspace-ui-ci/report-preview-citation-mutants` | `synthetic-workspace-dom-results` | S3-U4 printed citation browser mutants killed through the shipped-file override |
-| `measurements` | `tmp/workspace-ui-ci/display-scope` | `synthetic-workspace-dom-results` | Selected CT display controls and session loader boundaries |
-| `measurements` | `tmp/workspace-ui-ci/cell-merge` | `synthetic-workspace-dom-results` | Cell merge double-click ownership, panel and loader boundaries |
-| `measurements` | `tmp/workspace-ui-ci/images-only` | `synthetic-workspace-dom-results` | Images Only fullscreen lifecycle and source preservation |
-| `measurements` | `tmp/workspace-ui-ci/images-only-loader` | `synthetic-workspace-dom-results` | Images Only config loader mode and session boundaries |
-| `measurements` | `tmp/workspace-ui-ci/image-text` | `synthetic-workspace-dom-results` | Image text visibility and source preservation |
-| `measurements` | `tmp/workspace-ui-ci/image-text-loader` | `synthetic-workspace-dom-results` | Image text config loader lifecycle |
-| `measurements` | `tmp/workspace-ui-ci/source-pdf` | `synthetic-workspace-dom-results` | Source PDF owner identity and popup lifecycle boundaries |
-| `measurements` | `tmp/workspace-ui-ci/three-d-cursor-dom` | `synthetic-workspace-dom-results` | Three-D cursor pick, marker origin and rollback ownership DOM integration |
-| `measurements` | `tmp/workspace-ui-ci/job-print-pages` | `synthetic-workspace-dom-results` | Saved comparison print page identity and pagination |
-| `measurements` | `tmp/workspace-ui-ci/job-print-citation-dom` | `synthetic-workspace-dom-results` | S3-U5 job print citation evidence DOM |
-| `measurements` | `tmp/workspace-ui-ci/job-print-citation-mutants` | `synthetic-workspace-dom-results` | S3-U5 job print citation evidence browser mutants |
-| `measurements` | `tmp/workspace-ui-ci/report-version-citation-dom` | `synthetic-workspace-dom-results` | S3-U5b report history citation DOM |
-| `measurements` | `tmp/workspace-ui-ci/report-version-citation-mutants` | `synthetic-workspace-dom-results` | S3-U5b report history citation browser mutants |
-| `measurements` | `tmp/workspace-ui-ci/window-manager` | `synthetic-workspace-dom-results` | Workspace window transition and identity DOM regressions |
-| `measurements` | `tmp/workspace-ui-ci/body-parts` | `synthetic-workspace-dom-results` | Worklist DICOM body-part search and saved-search DOM integration |
-| `measurements` | `tmp/workspace-ui-ci/identity-position` | `synthetic-workspace-dom-results` | Current and prior identity position and legacy display preferences |
-| `measurements` | `tmp/workspace-ui-ci/viewer-opening-focus-dom` | `synthetic-workspace-dom-results` | S4-U3 Image Opening close listener keeps focus moved after Done (old reproduced, stranded fallback, session end, mutant) |
-| `measurements` | `tmp/workspace-ui-ci/admin-member-roles-dom` | `synthetic-workspace-dom-results` | S5-U5a Members console role round trip, unknown-role passthrough and wording DOM |
-| `measurements` | `tmp/workspace-ui-ci/clinician-home-dom` | `synthetic-workspace-dom-results` | S5-U2a Clinician Home landing, final-report-first reads, A-B-A guard and list state DOM |
-| `measurements` | `tmp/workspace-ui-ci/clinician-viewer-dom` | `synthetic-workspace-dom-results` | S5-U2b Clinician read-only viewer, same-patient comparison, A-B-A and state DOM (01-13) |
-| `measurements` | `tmp/workspace-ui-ci/clinician-viewer-dom-2` | `synthetic-workspace-dom-results` | S5-U2b Clinician viewer clinician-only change, held work and session end DOM (14-18) |
-| `measurements` | `tmp/workspace-ui-ci/clinician-viewer-dom-3` | `synthetic-workspace-dom-results` | S5-U2b Clinician viewer document owner, real write modules and logout between modes DOM (19-) |
-| `measurements` | `tmp/workspace-ui-ci/clinician-timeline-dom` | `synthetic-workspace-dom-results` | S5-U3 Clinician patient timeline, identity conflict marker, A-B-A and state DOM |
-| `measurements` | `tmp/workspace-ui-ci/clinician-question-dom` | `synthetic-workspace-dom-results` | S5-U4b Clinician Home questions, requestId retry, A-B-A and session lock DOM (01-07) |
-| `measurements` | `tmp/workspace-ui-ci/clinician-question-dom-2` | `synthetic-workspace-dom-results` | S5-U4b Reading screen answer row, OQ-11 notice, Inbox, A-B-A and session lock DOM (11-17) |
-| `measurements` | `tmp/workspace-ui-ci/clinician-request-dom` | `synthetic-workspace-dom-results` | S5-U4c Image request screens, write envelope, refusals by code, A-B-A and session end DOM |
-| `measurements` | `tmp/workspace-ui-ci/critical-result-sender-dom` | `synthetic-workspace-dom-results` | S7-U1b Critical result sender Mark CVR, dialog, sent list, unknown outcomes, A-B-A and session end DOM |
-| `measurements` | `tmp/workspace-ui-ci/clinical-context-dom` | `synthetic-workspace-dom-results` | S7-U4b Clinical Context panel states, provenance and permission labels, stale list comparison, A-B-A and session end DOM |
-| `measurements` | `tmp/workspace-ui-ci/multi-institution-worklist-dom` | `synthetic-workspace-dom-results` | S7-U3b multi-institution worklist Hospital column, filter, tele label, factor legend and stored column layouts DOM |
-| `measurements` | `tmp/workspace-ui-ci/related-layout-dom` | `synthetic-workspace-dom-results` | S7-RELATED-LAYOUT small-window Related panel, prior report first line, row reach and Clinical Info containment DOM |
-| `measurements` | `tmp/workspace-ui-ci/worklist-search-owner-dom` | `synthetic-workspace-dom-results` | S7-DEMO-ROWS worklist search owner contract (owner-less, owner change, session end) DOM |
-| `measurements` | `tmp/workspace-ui-ci/admin-gateway-status-dom` | `synthetic-workspace-dom-results` | S5-U6a Members console Gateway Status five states, retry rule, A-B-A guards and wording DOM |
-| `measurements` | `tmp/workspace-ui-ci/admin-metrics-dom` | `synthetic-workspace-dom-results` | S5-U6b Members console Operations metrics states, unknown never 0, A-B-A guard and wording DOM |
-| `measurements` | `tmp/workspace-ui-ci/admin-audit-dom` | `synthetic-workspace-dom-results` | S5-U5b Members console Audit / Security rows, withheld and not recorded, failure not empty, A-B-A guards DOM |
+| `worklist-ux-measurements` (`validate.yml`) | `tmp/workspace-ui-ci/w3-server-prep` | `synthetic-workspace-dom-results` | W3 layout v3 server preparation and accepted module contracts |
+| `worklist-ux-measurements` (`validate.yml`) | `tmp/workspace-ui-ci/w3-drawer-dom`, `tmp/workspace-ui-ci/w3-pilot` | `synthetic-workspace-dom-results` | W3 drawer relocation, layout v3, account recovery and W2 first paint |
+| `worklist-ux-measurements` (`validate.yml`) | `tmp/workspace-ui-ci/w3-panel-size-dom` | `synthetic-workspace-dom-results` | W3 Study Panel size and Text Size options (pilot D1160) |
+| `source-regressions` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/pacs-split-modules` | `synthetic-source-regressions-results` | S9-U0b concern modules and the PacsService facade over test doubles |
+| `source-regressions` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/pacs-source-behaviour` | `synthetic-source-regressions-results` | S9-U0b RELIST source service behaviour gaps |
+| `source-regressions` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/legal-pages` | `synthetic-source-regressions-results` | Static legal notices, draft wording and verified statute references |
+| `source-regressions` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/citation-vectors` | `synthetic-source-regressions-results` | S3-U2a shared citation vectors against an independent rule |
+| `source-regressions` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/citation-migration` | `synthetic-source-regressions-results` | S3-U2a additive citation migration, canonical bounds and leak boundary |
+| `source-regressions` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/structure-vectors` | `synthetic-source-regressions-results` | S3-structured-report shared render vectors against an independent rule and the empty product catalog |
+| `source-regressions` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/structure-migration` | `synthetic-source-regressions-results` | S3-structured-report additive migration, NULL-writing rules and leak boundary |
+| `source-regressions` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/order-reconciliation-source` | `synthetic-source-regressions-results` | S4-U2 order reconciliation vectors, wrong-rule adequacy and source pins |
+| `source-regressions` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/gateway-receipt-source` | `synthetic-source-regressions-results` | S4-U3 gateway receipt vectors, wrong-rule adequacy, agent error mapping and source pins |
+| `source-regressions` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/gateway-retry-source` | `synthetic-source-regressions-results` | S4-U4 gateway retry vectors, wrong-rule adequacy, agent single-writer pins and source pins |
+| `source-regressions` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/gateway-pipeline-contract` | `synthetic-source-regressions-results` | S4-EG1 gateway pipeline judge adequacy and harness pins |
+| `source-regressions` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/clinician-policy` | `synthetic-source-regressions-results` | S5-U1a clinician-only default denial fixtures, route classification and role-list source pins |
+| `source-regressions` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/study-identity-source` | `synthetic-source-regressions-results` | S4-U5 study identity vectors well-formedness, source pins and forbidden wording |
+| `source-regressions` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/clinician-read-serializer` | `synthetic-source-regressions-results` | S5-U1b clinician read serializer vectors against the TS source |
+| `source-regressions` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/admin-audit-attribution` | `synthetic-source-regressions-results` | Admin audit record-time attribution and paging behavior |
+| `source-regressions` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/emr-contract` | `synthetic-source-regressions-results` | EMR-A record classification, access events, signatures and lawful lifecycle contracts |
+| `source-regressions` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/emr-b-declaration` | `synthetic-source-regressions-results` | EMR-B1 declaration agreement and access ledger contracts C01-C10 and C13-C18 |
+| `source-regressions` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/emr-b-contract` | `synthetic-source-regressions-results` | EMR-B1 declaration agreement and access ledger contracts C01-C10 and C13-C18 |
+| `source-regressions` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/stage-exit` | `synthetic-source-regressions-results` | S7 stage-exit verdict tool - required-test list resolution and per-requirement verdict (pure) |
+| `worklist-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/image-thumbnails` | `synthetic-worklist-dom-results` | Individual image thumbnails identity and bounded page lifecycle |
+| `worklist-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/narrow-image-layout` | `synthetic-worklist-dom-results` | Narrow worklist row and image control hit targets |
+| `worklist-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/worklist-header` | `synthetic-worklist-dom-results` | S5-UI1 worklist header keeps Log out on screen and keyboard reachable |
+| `worklist-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/worklist-toolbar` | `synthetic-worklist-dom-results` | S5-UI2 worklist toolbar keeps one row of groups, every control and the page script |
+| `worklist-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/report-actions` | `synthetic-worklist-dom-results` | S5-UI3 report button rows keep every button in its declared section and the page script |
+| `worklist-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/study-arrivals` | `synthetic-worklist-dom-results` | Existing study arrivals and preserved reading inputs |
+| `worklist-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/order-reconciliation-dom` | `synthetic-worklist-dom-results` | S4-U2 order reconciliation display through the real poll, failure keep and offline seed exclusion |
+| `worklist-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/study-identity-dom` | `synthetic-worklist-dom-results` | S4-U5 DICOM Identity panel through the real poll and the correction paths, with the b6a317c controls |
+| `worklist-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/body-parts` | `synthetic-worklist-dom-results` | Worklist DICOM body-part search and saved-search DOM integration |
+| `worklist-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/multi-institution-worklist-dom` | `synthetic-worklist-dom-results` | S7-U3b multi-institution worklist Hospital column, filter, tele label, factor legend and stored column layouts DOM |
+| `worklist-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/worklist-search-owner-dom` | `synthetic-worklist-dom-results` | S7-DEMO-ROWS worklist search owner contract (owner-less, owner change, session end) DOM |
+| `worklist-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/worklist-split-uid-dom` | `synthetic-worklist-dom-results` | WORKLIST-SPLIT-UID Patient Identity Conflict notice, kept text and locked writes, late answers and the clinician list on the whole page DOM (TEST-WSU-07, 12) |
+| `report-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/report-rebase` | `synthetic-report-dom-results` | Stale addendum refusal, approved-report pane and non-destructive rebase |
+| `report-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/report-citation-dom` | `synthetic-report-dom-results` | S3-U2b citation insertion ordering, late answers, modal busy and convergence |
+| `report-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/report-cursor-insert-dom` | `synthetic-report-dom-results` | S3-U6 cursor insertion position, retention, guards and identity DOM integration |
+| `report-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/report-dictation-input-dom` | `synthetic-report-dom-results` | S3-R14 recogniser-shaped text input parity, occupancy and structured refusals DOM |
+| `report-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/report-dictation-host-dom` | `synthetic-report-dom-results` | S3-ASR-U4 Dictate control, review pane, stale refusals and explicit Insert DOM (synthetic media and transport) |
+| `report-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/report-structure-dom` | `synthetic-report-dom-results` | S3-structured-report entry lifecycle, replace, guards, stale plan and empty catalog DOM |
+| `report-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/report-preview-citation-dom` | `synthetic-report-dom-results` | S3-U4 printed citation section lifecycle, terminal states and print re-read |
+| `report-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/job-print-pages` | `synthetic-report-dom-results` | Saved comparison print page identity and pagination |
+| `report-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/job-print-citation-dom` | `synthetic-report-dom-results` | S3-U5 job print citation evidence DOM |
+| `report-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/report-version-citation-dom` | `synthetic-report-dom-results` | S3-U5b report history citation DOM |
+| `report-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/report-text-boundaries-dom` | `synthetic-report-dom-results` | S7-U5 report text boundaries - save, approve, study change, conflict, reconnect, logout preparation locks and the approved-report notices DOM |
+| `viewer-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/identity-fields` | `synthetic-viewer-dom-results` | Image field positions and modality profile DOM integration |
+| `viewer-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/hanging-protocols` | `synthetic-viewer-dom-results` | Personal Hanging Protocol form and authenticated mount boundaries |
+| `viewer-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/display-scope` | `synthetic-viewer-dom-results` | Selected CT display controls and session loader boundaries |
+| `viewer-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/cell-merge` | `synthetic-viewer-dom-results` | Cell merge double-click ownership, panel and loader boundaries |
+| `viewer-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/images-only` | `synthetic-viewer-dom-results` | Images Only fullscreen lifecycle and source preservation |
+| `viewer-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/images-only-loader` | `synthetic-viewer-dom-results` | Images Only config loader mode and session boundaries |
+| `viewer-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/image-text` | `synthetic-viewer-dom-results` | Image text visibility and source preservation |
+| `viewer-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/image-text-loader` | `synthetic-viewer-dom-results` | Image text config loader lifecycle |
+| `viewer-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/source-pdf` | `synthetic-viewer-dom-results` | Source PDF owner identity and popup lifecycle boundaries |
+| `viewer-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/three-d-cursor-dom` | `synthetic-viewer-dom-results` | Three-D cursor pick, marker origin and rollback ownership DOM integration |
+| `viewer-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/window-manager` | `synthetic-viewer-dom-results` | Workspace window transition and identity DOM regressions |
+| `viewer-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/identity-position` | `synthetic-viewer-dom-results` | Current and prior identity position and legacy display preferences |
+| `viewer-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/viewer-session-dom` | `synthetic-viewer-dom-results` | S7-U5 viewer documents - session boundary, pause held by a Web Lock, end before any start, resource guard and clinician entry DOM |
+| `viewer-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/viewer-resource-guard-dom` | `synthetic-viewer-dom-results` | S7-U5 viewer documents - session boundary, pause held by a Web Lock, end before any start, resource guard and clinician entry DOM |
+| `viewer-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/viewer-clinician-entry-dom` | `synthetic-viewer-dom-results` | S7-U5 viewer documents - session boundary, pause held by a Web Lock, end before any start, resource guard and clinician entry DOM |
+| `viewer-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/viewer-context-loss-dom` | `synthetic-viewer-dom-results` | S8-CTX viewer context loss and note recovery DOM |
+| `viewer-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/context-loss-harness` | `synthetic-viewer-dom-results` | S8-CTX context loss recovery and SQL harness |
+| `viewer-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/viewer-tech-note-dom` | `synthetic-viewer-dom-results` | S8-CTX viewer Tech Note write outcomes DOM |
+| `clinician-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/clinician-home-dom` | `synthetic-clinician-dom-results` | S5-U2a Clinician Home landing, final-report-first reads, A-B-A guard and list state DOM |
+| `clinician-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/clinician-viewer-dom` | `synthetic-clinician-dom-results` | S5-U2b Clinician read-only viewer, same-patient comparison, A-B-A and state DOM (01-13) |
+| `clinician-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/clinician-viewer-dom-2` | `synthetic-clinician-dom-results` | S5-U2b Clinician viewer clinician-only change, held work and session end DOM (14-18) |
+| `clinician-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/clinician-viewer-dom-3` | `synthetic-clinician-dom-results` | S5-U2b Clinician viewer document owner, real write modules and logout between modes DOM (19-) |
+| `clinician-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/clinician-timeline-dom` | `synthetic-clinician-dom-results` | S5-U3 Clinician patient timeline, identity conflict marker, A-B-A and state DOM |
+| `clinician-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/clinician-question-dom` | `synthetic-clinician-dom-results` | S5-U4b Clinician Home questions, requestId retry, A-B-A and session lock DOM (01-07) |
+| `clinician-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/clinician-question-dom-2` | `synthetic-clinician-dom-results` | S5-U4b Reading screen answer row, OQ-11 notice, Inbox, A-B-A and session lock DOM (11-17) |
+| `clinician-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/clinician-request-dom` | `synthetic-clinician-dom-results` | S5-U4c Image request screens, write envelope, refusals by code, A-B-A and session end DOM |
+| `critical-result-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/critical-result-sender-dom` | `synthetic-critical-result-dom-results` | S7-U1b Critical result sender Mark CVR, dialog, sent list, unknown outcomes, A-B-A and session end DOM |
+| `critical-result-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/critical-result-recipient-dom` | `synthetic-critical-result-dom-results` | S7-U2a Critical result recipient list, explicit ACK, unknown outcomes, badge, focus under server changes, A-B-A and session end DOM |
+| `critical-result-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/clinical-context-dom` | `synthetic-critical-result-dom-results` | S7-U4b Clinical Context panel states, provenance and permission labels, stale list comparison, A-B-A and session end DOM |
+| `admin-session-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/admin-member-roles-dom` | `synthetic-admin-session-dom-results` | S5-U5a Members console role round trip, unknown-role passthrough and wording DOM |
+| `admin-session-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/admin-gateway-status-dom` | `synthetic-admin-session-dom-results` | S5-U6a Members console Gateway Status five states, retry rule, A-B-A guards and wording DOM |
+| `admin-session-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/admin-metrics-dom` | `synthetic-admin-session-dom-results` | S5-U6b Members console Operations metrics states, unknown never 0, A-B-A guard and wording DOM |
+| `admin-session-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/admin-audit-dom` | `synthetic-admin-session-dom-results` | S5-U5b Members console Audit / Security rows, withheld and not recorded, failure not empty, A-B-A guards DOM |
+| `admin-session-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/auth-logout-dom` | `synthetic-admin-session-dom-results` | S7-U5 logout end states, ending, end unconfirmed, end confirmed, Retry Log Out, tab notices, late answers and draft preservation DOM |
+| `admin-session-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/session-entry-dom` | `synthetic-admin-session-dom-results` | S7-U5 entry - bounded confirmation retries, the one-time proof consumed by the account's final document and role changes DOM |
+| `admin-session-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/auth-entry-dom` | `synthetic-admin-session-dom-results` | S7-U5 entry - bounded confirmation retries, the one-time proof consumed by the account's final document and role changes DOM |
+| `admin-session-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/session-modules-dom` | `synthetic-admin-session-dom-results` | S7-U5 shared modules of the main document on the page gate and transport - requests, timers, decoders, boot and account notices DOM |
+| `admin-session-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/admin-session-dom` | `synthetic-admin-session-dom-results` | S7-U5 admin and clinician pages on the session-bound transport - plain failures, coded ends, late answers, entry and history DOM |
+| `admin-session-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/report-session-page-dom` | `synthetic-admin-session-dom-results` | S7-U5 report page - draft commands, conflicts and unconfirmed text across refresh, poll and patch on the whole page DOM |
+| `related-layout-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/related-layout-dom` | `synthetic-related-layout-dom-results` | S7-RELATED-LAYOUT small-window Related panel, prior report first line, row reach and Clinical Info containment DOM |
+| `study-transfer-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/study-transfer-local-dom` | `synthetic-study-transfer-dom-results` | S9-U4b Import DICOM, Download Originals and Resolve Unconfirmed panel DOM |
+| `privacy-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/privacy-date` | `synthetic-privacy-dom-results` | Privacy article 8 KST effective-date display |
+| `viewer-native-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/viewer-stack-restore-dom` | `synthetic-viewer-native-dom-results` | Viewer Job native initial-image and completion contracts |
+| `proxy-contracts` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/proxy-grant-log` | `synthetic-proxy-contracts-results` | S9-U4b proxy logs and redirects never carry an original-download grant (real nginx) |
 | `volume-rendering.yml` / `volume-rendering` | `tmp/vr-ci/measurement-ci` | `synthetic-volume-rendering-results` | CI profile safeguards and artifact policy |
 | `volume-rendering.yml` / `volume-rendering` | `tmp/vr-ci/pure-vr` | `synthetic-volume-rendering-results` | Volume rendering, sculpt, and personal preset boundaries |
 | `volume-rendering.yml` / `volume-rendering` | `tmp/vr-ci/pure-volume-models` | `synthetic-volume-rendering-results` | Volume display, batch, crosshair, marks, curved MPR, orientation, job capture and preference models |

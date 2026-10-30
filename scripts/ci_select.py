@@ -26,10 +26,14 @@ def matches(path, pattern):
 
 def select(paths, *, all_jobs=False, main_push=False):
     config = json.loads((ROOT / 'scripts/ci-paths.json').read_text(encoding='utf-8'))
-    paths = [path for path in paths if not path.endswith('.md')]
+    # Broad source/tree globs must not turn documentation edits into regressions.
+    # A job can explicitly declare a Markdown contract; fixtures stay executable.
+    paths = list(paths)
 
     def changed(patterns):
-        return any(matches(path, pattern) for path in paths for pattern in patterns)
+        return any(matches(path, pattern) for path in paths for pattern in patterns
+                   if not path.endswith('.md') or path.startswith('tests/fixtures/')
+                   or (path == pattern and not any(char in pattern for char in '*?[')))
 
     shared = changed(config['shared_browser'])
     return {job: all_jobs or (not main_push and (
@@ -68,8 +72,8 @@ def main():
                           os.environ.get('GITHUB_REF', '').startswith('refs/tags/'),
                           main_push=main_push)
         if name == 'schedule':
-            # The nightly run of main is the restore-product nightly (D1808); the measurement
-            # bulk has its own scheduled workflow.
+            # This existing schedule rehearses restore-product only. All regression
+            # suites are path-selected on PRs; dispatch and tags select every job.
             selected = {job: job == 'restore-product' for job in selected}
     result = json.dumps(selected, separators=(',', ':'))
     if os.environ.get('GITHUB_OUTPUT'):

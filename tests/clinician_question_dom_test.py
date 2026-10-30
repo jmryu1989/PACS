@@ -399,6 +399,9 @@ REPORT_FRAME = slice_between(MAIN, "    let reportFrame = null;\n", "    functio
 # S7-U5 §8: stashReport() stands for the draft write of the logout's preparation and answers "saved" when the case lets it
 # go, as the shipped one answers a stored write; the preparation's other page reads are the empty case.
 EXIT_STAND_INS = """
+// The logout slice includes presence cleanup; this question fixture has no worklist columns.
+const viewingNames = new Map();
+function shownColumns() { return []; }
 let insertInFlight = false, commitInFlight = false, appState = {}, selectionSeq = 0, user = 'syn-radiologist';
 const RFIELDS = ['findings', 'conclusion', 'recommendation'];
 """ + REPORT_FRAME + """

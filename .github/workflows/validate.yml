@@ -12,7 +12,7 @@ jobs:
     needs: select
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['emr-b']) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 210
+    timeout-minutes: 251
     env:
       NODE_OPTIONS: --max-old-space-size=3072
       KIN_EMR_PYTHON: python3
@@ -527,7 +527,7 @@ jobs:
         retention-days: 7
   asr-engine:
     runs-on: ubuntu-24.04
-    timeout-minutes: 85
+    timeout-minutes: 115
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -949,7 +949,7 @@ jobs:
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['contract']) }}
   hanging-protocols:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 93
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -1014,7 +1014,7 @@ jobs:
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['hanging-protocols']) }}
   part1-mg:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 155
     env:
       PART1_UNIT: mg
       KIN_MG_CI_SCOPE: hosted
@@ -1161,7 +1161,7 @@ jobs:
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['part1-mg']) }}
   part1-xa:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 140
     env:
       PART1_UNIT: xa
       TARGET_SHA: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
@@ -1380,7 +1380,7 @@ jobs:
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['part1-xa']) }}
   volume-marks:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 68
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -1430,7 +1430,7 @@ jobs:
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-marks']) }}
   volume-rendering:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 61
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -1819,7 +1819,7 @@ jobs:
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['volume-mpr']) }}
   volume-batch:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 63
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -2263,7 +2263,7 @@ jobs:
     # S9-U0E (main #199): the generated config/ohif.js as Orthanc serves it on a normal worklist launch, in its
     # own job and runner. The exact-selection self-check runs once in runtime (ci-selfchecks).
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 58
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -2356,6 +2356,41 @@ jobs:
         retention-days: 7
     needs: select
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['patient-identity-measurements']) }}
+  pr-ci:
+    name: pr-ci / validate
+    needs:
+    - emr-b
+    - select
+    - runtime
+    - asr-engine
+    - emr-c
+    - emr-d
+    - emr-e-contracts
+    - emr-f-contracts
+    - contract
+    - hanging-protocols
+    - part1-mg
+    - part1-xa
+    - volume-marks
+    - volume-rendering
+    - worklist-ux-measurements
+    - volume-mpr
+    - volume-batch
+    - volume-mip-voi
+    - s7-u5-session-contracts
+    - produce
+    - consume
+    - s9-u0e-served
+    - patient-identity-measurements
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+    - name: Require every selected job to pass
+      shell: python
+      env:
+        NEEDS_JSON: ${{ toJSON(needs) }}
+      run: "import json, os\nresults = json.loads(os.environ[\"NEEDS_JSON\"])\nfailed = {name: job[\"result\"] for name, job in results.items()\n          if job[\"result\"] not in (\"success\", \"skipped\")}\nprint(json.dumps(failed or {\"result\": \"success\"}, sort_keys=True))\nraise SystemExit(bool(failed))\n"
 'on':
   push:
     branches:

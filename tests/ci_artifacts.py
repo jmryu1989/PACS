@@ -21,10 +21,17 @@ import ci_candidate_evidence
 from ci_workflows import WorkflowCatalog
 
 ROOT = Path(__file__).resolve().parents[1]
+# These replace the former nightly workspace artifact. Worklist UX still owns
+# synthetic-workspace-dom-results, so that artifact remains required separately.
+REGRESSION_ARTIFACTS = tuple('synthetic-' + job + '-results' for job in (
+    'source-regressions', 'worklist-dom', 'report-dom', 'viewer-dom', 'clinician-dom',
+    'critical-result-dom', 'admin-session-dom', 'related-layout-dom',
+    'study-transfer-dom', 'privacy-dom', 'viewer-native-dom', 'proxy-contracts',
+))
 STAGE_ARTIFACTS = {
-    '7': ('synthetic-runtime-record-runs', 'synthetic-workspace-dom-results'),
+    '7': ('synthetic-runtime-record-runs', 'synthetic-workspace-dom-results', *REGRESSION_ARTIFACTS),
     '8': ('synthetic-runtime-record-runs', 'synthetic-workspace-dom-results',
-          'synthetic-volume-rendering-results', 'synthetic-context-loss'),
+          *REGRESSION_ARTIFACTS, 'synthetic-volume-rendering-results', 'synthetic-context-loss'),
 }
 CANDIDATE = 'candidate-${{ env.CANDIDATE_SHA }}'
 # This cap belongs only to filtered workflow-run searches, not artifact listings.
