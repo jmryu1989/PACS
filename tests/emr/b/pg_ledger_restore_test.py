@@ -7,6 +7,7 @@ import concurrent.futures
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import subprocess
 import sys
@@ -17,6 +18,16 @@ import uuid
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'tests'))
 import live_test_gate as gate
+
+# Linux numbers: the runner is Linux and a container reports a signal death as 128+N.
+SIGNALS = {4: 'SIGILL', 5: 'SIGTRAP', 6: 'SIGABRT', 7: 'SIGBUS', 8: 'SIGFPE', 9: 'SIGKILL', 11: 'SIGSEGV', 15: 'SIGTERM'}
+# node --test exits 1 for a file whose process died and names the signal only in its report.
+TAP_SIGNAL = re.compile(r"signal: '(SIG[A-Z0-9]+)'")
+# Run by the same node (or image) that died, so the record names the runtime and engine it loaded.
+RUNTIME = ("const fs=require('fs'),path=require('path');let engines;"
+           "try{engines=fs.readdirSync(path.join(process.argv[1],'node_modules/.prisma/client')).filter(n=>n.includes('engine'))}"
+           "catch(error){engines=String(error.message)}"
+           "console.log(JSON.stringify({node:process.version,openssl:process.versions.openssl,engines}))")
 
 
 class PgLedgerFixture(unittest.TestCase):
@@ -41,35 +52,120 @@ class PgLedgerFixture(unittest.TestCase):
                            data=prefix + statement, check=check)
 
     @classmethod
-    def image_command(cls, command, env):
+    def image_args(cls, command, env, *, remove=True):
         # This is the same compiled product boundary on a second authorized host.
         # One exact run-owned container uses only this fixture's private network.
-        args = ['docker', 'run', '--rm', '--name', cls.container + '-node', '--label', 'kin.b2r=' + cls.token,
+        args = ['docker', 'run', *(['--rm'] if remove else []), '--name', cls.container + '-node',
+                '--label', 'kin.b2r=' + cls.token,
                 '--network', cls.network, '--memory', '1536m', '--memory-swap', '1536m', '--cpus', '2',
                 '--mount', 'type=bind,source=' + str(ROOT / 'tests/emr/b/pg_ledger_api_test.cjs')
                 + ',target=/app/pg_ledger_api_test.cjs,readonly']
         for key, value in env.items():
             args.extend(['-e', key + '=' + value])
-        return cls.command(args + [cls.image] + command, check=False)
+        return args + [cls.image] + command
+
+    @classmethod
+    def image_command(cls, command, env):
+        return cls.command(cls.image_args(command, env), check=False)
+
+    def run_node_case(self, command, evidence, *, env=None, timeout=120, label='node'):
+        """Run one node child, streaming its output into evidence so a timeout keeps it.
+
+        A docker command names the run-owned self.container + '-node' without --rm: a failed
+        run's exit state is read from the stopped container, which is removed here afterwards
+        (cleanup() remains the backstop). A failure is reported, never retried; a success returns stdout.
+        """
+        evidence.mkdir(parents=True, exist_ok=True)
+        name = command[command.index('--name') + 1] if command[0] == 'docker' else None
+        stdout, stderr = evidence / (label + '.stdout.log'), evidence / (label + '.stderr.log')
+        try:
+            with stdout.open('wb') as out, stderr.open('wb') as err:
+                try:
+                    code = subprocess.run(command, stdout=out, stderr=err, env=env, timeout=timeout).returncode
+                except subprocess.TimeoutExpired:
+                    code = None
+            output = stdout.read_text(encoding='utf-8', errors='replace')
+            errors = stderr.read_text(encoding='utf-8', errors='replace')
+            print(output)
+            if code == 0:
+                return output
+            found = TAP_SIGNAL.search(output + errors)
+            number = -code if code is not None and code < 0 else code - 128 if name and code and code > 128 else None
+            signal = found.group(1) if found else SIGNALS.get(number, 'SIG' + str(number)) if number else None
+            self.native_evidence(evidence, label, command, name)
+            headline = (('NATIVE_CRASH ' + signal) if signal else
+                        ('TIMEOUT after %ds' % timeout) if code is None else ('exit %d' % code)) + ' ' + str(evidence)
+            print(headline)
+            if os.environ.get('GITHUB_STEP_SUMMARY'):
+                with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+                    summary.write(headline + '\n')
+            self.fail(headline + '\n' + errors[-2000:] + output[-2000:])
+        finally:
+            if name:
+                observed = self.command(['docker', 'inspect', '--format', '{{ index .Config.Labels "kin.b2r" }}', name], check=False)
+                if observed.returncode == 0 and observed.stdout.strip() == self.token:
+                    self.command(['docker', 'rm', '-f', '-v', name], check=False)
+
+    def native_evidence(self, evidence, label, command, name):
+        def keep(suffix, args, tail=None):
+            # Each record is written even when its source is missing; only a success's output is returned.
+            row = None
+            try:
+                row = subprocess.run(args, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=60)
+                text = row.stdout + row.stderr + ('' if row.returncode == 0 else '[exit %d]\n' % row.returncode)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                text = 'unavailable: %s\n' % error
+            if tail:
+                text = '\n'.join(text.splitlines()[-tail:]) + '\n'
+            (evidence / (label + suffix)).write_text(text, encoding='utf-8')
+            return row.stdout if row and row.returncode == 0 else ''
+        state = keep('.inspect.json', ['docker', 'inspect', '--format', '{{json .State}} {{.Id}}', name]) if name else ''
+        # The runner grants passwordless sudo; elsewhere the refusal itself is recorded.
+        keep('.dmesg.txt', ['sudo', '-n', 'dmesg', '-T'], tail=40)
+        versions = {}
+        if self.image:
+            versions['image'] = keep('.image.txt', ['docker', 'image', 'inspect', '--format', '{{.Id}}', self.image]).strip()
+            runtime = keep('.runtime.json', ['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'node',
+                                             self.image, '-e', RUNTIME, '/app'])
+        else:
+            runtime = keep('.runtime.json', [command[0], '-e', RUNTIME, str(ROOT / 'api')])
+        try:
+            versions['runtime'] = json.loads(runtime)
+        except ValueError:
+            versions['runtime'] = runtime
+        cpu = Path('/proc/cpuinfo')
+        versions['cpu'] = next((line.split(':', 1)[1].strip() for line in cpu.read_text().splitlines()
+                                if line.startswith('model name')), None) if cpu.exists() else None
+        (evidence / (label + '.versions.json')).write_text(json.dumps(versions, indent=2), encoding='utf-8')
+        # The container's own cgroup goes with it; its parent slice and this runner's keep the oom counts.
+        groups = []
+        if Path('/proc/self/cgroup').exists():
+            groups.append(Path('/sys/fs/cgroup' + Path('/proc/self/cgroup').read_text().splitlines()[0].split(':', 2)[2]))
+        if state.strip():
+            groups.append(Path('/sys/fs/cgroup/system.slice/docker-' + state.split()[-1] + '.scope'))
+        groups.append(Path('/sys/fs/cgroup/system.slice'))
+        lines = []
+        for group in groups:
+            for item in ('memory.events', 'memory.peak'):
+                try:
+                    lines.append('== %s/%s\n%s' % (group, item, (group / item).read_text().strip()))
+                except OSError as error:
+                    lines.append('== %s/%s unavailable: %s' % (group, item, error))
+        (evidence / (label + '.cgroup.txt')).write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
     def node_case(self, case):
+        evidence = ROOT / 'tmp/emr-b2-replace-20261023' / (case + '-' + self.token)
         if self.image:
-            result = self.image_command(['node', '--max-old-space-size=3072', '/app/pg_ledger_api_test.cjs'], {
+            command = self.image_args(['node', '--max-old-space-size=3072', '/app/pg_ledger_api_test.cjs'], {
                 'DATABASE_URL': self.runtime_url, 'KIN_B2R_WITNESS_URL': self.witness_url,
                 'KIN_B2R_BUILD': '/app/dist', 'KIN_B2R_CASE': case, 'KIN_B2R_SPOOL': '/tmp/b2r-failure-spool',
-            })
+            }, remove=False)
+            env = None
         else:
-            spool = ROOT / 'tmp/emr-b2-replace-20261023' / (case + '-' + self.token)
-            result = self.command([os.environ['KIN_B2R_NODE'], '--max-old-space-size=3072',
-                                   str(ROOT / 'tests/emr/b/pg_ledger_api_test.cjs')], check=False,
-                                  env={**os.environ, 'DATABASE_URL': self.runtime_url, 'KIN_B2R_CASE': case,
-                                       'KIN_B2R_WITNESS_URL': self.witness_url, 'KIN_B2R_SPOOL': str(spool)})
-        evidence = ROOT / 'tmp/emr-b2-replace-20261023' / (case + '-' + self.token)
-        evidence.mkdir(exist_ok=True)
-        (evidence / 'node.stdout').write_text(result.stdout, encoding='utf-8')
-        (evidence / 'node.stderr').write_text(result.stderr, encoding='utf-8')
-        self.assertEqual(result.returncode, 0, result.stderr[-2000:] or result.stdout[-2000:])
-        print(result.stdout)
+            command = [os.environ['KIN_B2R_NODE'], '--max-old-space-size=3072', str(ROOT / 'tests/emr/b/pg_ledger_api_test.cjs')]
+            env = {**os.environ, 'DATABASE_URL': self.runtime_url, 'KIN_B2R_CASE': case,
+                   'KIN_B2R_WITNESS_URL': self.witness_url, 'KIN_B2R_SPOOL': str(evidence)}
+        self.run_node_case(command, evidence, env=env)
 
     @classmethod
     def setUpClass(cls):
@@ -779,15 +875,9 @@ async function cli(env,args=[]){
 })().finally(async()=>{if(server)await new Promise(resolve=>server.close(resolve));await witness.$disconnect();})
   .catch(error=>{console.error(error);process.exitCode=1;});
 """
-        result = self.image_command(['node', '--max-old-space-size=3072', '-e', script], {
+        self.run_node_case(self.image_args(['node', '--max-old-space-size=3072', '-e', script], {
             'DATABASE_URL': self.runtime_url, 'KIN_B2R_WITNESS_URL': self.witness_url,
-        })
-        evidence = ROOT / 'tmp/emr-b2-replace-20261023' / ('import-cli-' + self.token)
-        evidence.mkdir()
-        (evidence / 'stdout.log').write_text(result.stdout, encoding='utf-8')
-        (evidence / 'stderr.log').write_text(result.stderr, encoding='utf-8')
-        self.assertEqual(result.returncode, 0, result.stderr[-1800:])
-        print(result.stdout)
+        }, remove=False), ROOT / 'tmp/emr-b2-replace-20261023' / ('import-cli-' + self.token))
 
 
 class PgLedgerNativeRestoreLive(PgLedgerFixture):

@@ -24,7 +24,7 @@ class ReportReadsHttp(PgLedgerFixture):
                'KIN_B2R_SPOOL': str(evidence / 'spool'),
                'KIN_B2R_BUILD': os.environ.get('KIN_B2R_BUILD', str(ROOT / 'api/dist'))}
         if self.image:
-            args = ['docker', 'run', '--rm', '--name', self.container + '-node', '--label', 'kin.b2r=' + self.token,
+            args = ['docker', 'run', '--name', self.container + '-node', '--label', 'kin.b2r=' + self.token,
                     '--network', self.network, '--memory', '1536m', '--memory-swap', '1536m', '--cpus', '2',
                     '--mount', 'type=bind,source=' + str(driver) + ',target=/app/report_reads_test.cjs,readonly']
             for key, value in {**env, 'KIN_B2R_BUILD': '/app/dist', 'KIN_B2R_SPOOL': '/tmp/report-reads-spool'}.items():
@@ -33,12 +33,7 @@ class ReportReadsHttp(PgLedgerFixture):
             command = args + [self.image, 'node', '--test', '--test-reporter=tap', '/app/report_reads_test.cjs']
         else:
             command = [os.environ['KIN_B2R_NODE'], '--test', '--test-reporter=tap', str(driver)]
-        result = self.command(command, env=env, check=False, timeout=240)
-        evidence.mkdir(parents=True, exist_ok=True)
-        (evidence / 'node.stdout.log').write_text(result.stdout, encoding='utf-8')
-        (evidence / 'node.stderr.log').write_text(result.stderr, encoding='utf-8')
-        print(result.stdout)
-        self.assertEqual(result.returncode, 0, result.stderr[-2000:] or result.stdout[-2000:])
+        self.run_node_case(command, evidence, env=env, timeout=240)
 
 
 if __name__ == '__main__':
