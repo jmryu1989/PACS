@@ -180,9 +180,9 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.throws(() => R.classifyRoute('POST studies/:uid/new-record'));
   });
   test('TEST-EMR-01-A: stored and served record coverage includes non-DB and mixed records', () => {
-    // EMR-B1: SQL-only storage and the terminal-queue boundary are classified in their own closed tables, never as Prisma models.
+    // EMR-B1: SQL-only storage is classified in its own closed table, never as Prisma models.
     const covered = new Set([...Object.values(C.MODEL_CLASSIFICATION), ...Object.values(R.ROUTE_CLASSIFICATION), ...Object.values(R.EXTERNAL_SURFACES),
-      ...Object.values(C.SQL_STORAGE_CLASSIFICATION), ...Object.values(C.TERMINAL_RECORD_BOUNDARY.models),
+      ...Object.values(C.SQL_STORAGE_CLASSIFICATION),
       ...Object.values(C.CHART_INCORPORATION_BOUNDARY.models)].flat());
     assert.deepEqual([...covered].sort(), Object.keys(C.RECORD_CLASSIFICATION).sort());
     for (const kind of ['clinical-answer', 'critical-result-ack', 'comparison-description', 'thumbnail', 'copy', 'external-sr-seg']) assert(covered.has(kind));
@@ -202,7 +202,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
     // reading report and the clinical records attached to it are the image's 소견서/검사소견 - five years, never 진료기록부 -
     // and the ten-year 진료기록부 class belongs only to a recorded chart incorporation.
     for (const kind of ['image', 'report-head', 'report-version', 'manual-sr', 'clinical-question', 'clinical-answer', 'consultation',
-      'critical-result', 'critical-result-ack', 'finding', 'offline-signed-original', 'comparison-description']) {
+      'critical-result', 'critical-result-ack', 'finding', 'comparison-description']) {
       assert.equal(defaults[kind].retentionYears, 5, kind);
       assert(C.RECORD_CLASSIFICATION[kind].retention.statutoryMinimum.some(m => m.clauseId === 'medical-rules:15.1.6' && m.years === 5), kind);
       assert(!C.RECORD_CLASSIFICATION[kind].retention.statutoryMinimum.some(m => m.clauseId === 'medical-rules:15.1.2'), kind);
@@ -303,7 +303,6 @@ if (process.argv.includes('--emr-inventory-generator')) {
     preferences: ['ReadingPreferences', {}], assignment: ['ReaderAssignment', {}],
     'identity-access': ['StudyAccessRevision', {}], 'authentication-session': ['AuthSession', {}],
     institution: ['Institution', {}], 'transfer-governance': ['TransferBasis', {}], 'system-operation': ['ViewerStorageBudget', {}],
-    'recovery-working-copy': ['TerminalRecoveryCopy', { originalEventId: 'original-1', state: 'pending-transmission', signedAt: null, purposeId: 'purpose-1' }],
     'chart-incorporation': ['ChartIncorporation', { source: 'hospital-emr-incorporation' }],
     'operational-note': ['TechNoteRevision', { authorRole: 'administrator' }],
   };
@@ -958,10 +957,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
         const orderRow = ['order', 'received-order'].includes(kind) ? { status: 'closed',
           statusEvent: { eventId: 'ended', actorId: 'owner', at: deadline, reason: 'objective completion' },
           procedure: trigger === 'order-purpose-ended' ? null : {
-            state: 'copy-window-review', responsibleRole: 'privacy-officer', assigneeId: 'owner', enteredAt: t0,
-            evidenceDueAt: '2026-10-06T00:00:00.000Z', escalationDecisionDueAt: '2026-10-07T00:00:00.000Z',
-            finalDecisionDueAt: '2026-10-08T00:00:00.000Z', superiorRole: 'institution-head', superiorId: 'owner', escalatedAt: null,
-            extensions: 0, extensionLimit: 0, extensionEvidenceId: null,
+            state: 'copy-window-review', responsibleRole: 'privacy-officer', assigneeId: 'owner',
             decision: { route: trigger, actorId: 'owner', at: deadline, evidenceId: 'decision', scope: ['private'], basisId: null, reviewAt: null,
               originalPreservedEvidenceId: trigger === 'lawful-return' ? 'verified-original' : null } } } : {};
         const record = purposeRecord('private', kind, 'owner', t0, ['private-v1', 'private-v2'], { row: orderRow });

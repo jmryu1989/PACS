@@ -180,20 +180,18 @@ export function orderRetentionDuties(source: ResolvedRecord): readonly { kind: R
   return freeze(result);
 }
 
-/** D-24 §2: time passing causes escalation; it never establishes a classification or removes a duty. */
-export function orderProcedureState(input: OrderFacts, at: string): 'clear' | 'pending' | 'escalate' | 'superior-decision-overdue' | 'duty-continues' {
+/** D-24 §2: time passing never establishes a classification or removes a duty; only the recorded decision clears a review. */
+export function orderProcedureState(input: OrderFacts, at: string): 'clear' | 'pending' | 'duty-continues' {
   const r = parseOrderFacts(input); utc(at);
   if (!r.procedure) return 'clear';
-  const p = parseOrderProcedure(r.procedure), d = p.decision;
-  if (d && d.at <= at) {
-    if (d.route === 'duty-continues') return at >= d.reviewAt! ? 'escalate' : 'duty-continues';
-    return 'clear';
-  }
-  if (at >= p.finalDecisionDueAt) return 'superior-decision-overdue';
-  return at >= p.evidenceDueAt ? 'escalate' : 'pending';
+  const d = r.procedure.decision;
+  if (!d || d.at > at) return 'pending';
+  // A continued duty past its review date is open again, never a silent indefinite authorization.
+  if (d.route === 'duty-continues') return at >= d.reviewAt! ? 'pending' : 'duty-continues';
+  return 'clear';
 }
 
-/** Checked under the order's storage lock. An unanswered review, retry or outage cannot renew its clocks. */
+/** Checked under the order's storage lock. A review is never dropped; only a continued duty's later review replaces its decision. */
 export function validateOrderTransition(previous: OrderFacts, next: OrderFacts): void {
   const before = parseOrderFacts(previous), after = parseOrderFacts(next);
   if (before.objectKind !== after.objectKind || before.origin !== after.origin || before.authorId !== after.authorId ||
@@ -210,12 +208,7 @@ export function validateOrderTransition(previous: OrderFacts, next: OrderFacts):
     refuse('OrderExtensionEvidenceRequired');
   if (before.procedure) {
     const p = before.procedure, n = after.procedure;
-    if (!n || n.enteredAt !== p.enteredAt || n.extensionLimit !== p.extensionLimit || n.extensions < p.extensions)
-      refuse('OrderProcedureDeadlineRequired');
-    const changed = ['evidenceDueAt', 'escalationDecisionDueAt', 'finalDecisionDueAt'].some(k => p[k] !== n[k]);
-    if (changed && (n.extensions !== p.extensions + 1 || !n.extensionEvidenceId || n.extensionEvidenceId === p.extensionEvidenceId ||
-        !['open-order', 'unlinked-exam'].includes(p.state))) refuse('OrderProcedureDeadlineRequired');
-    if (!changed && n.extensions !== p.extensions) refuse('OrderExtensionEvidenceRequired');
+    if (!n) refuse('OrderProcedureRequired');
     if (p.decision && JSON.stringify(p.decision) !== JSON.stringify(n.decision) &&
         (p.decision.route !== 'duty-continues' || !n.decision || n.decision.at <= p.decision.at ||
          n.decision.evidenceId === p.decision.evidenceId)) refuse('OrderDecisionBindingRefused');
