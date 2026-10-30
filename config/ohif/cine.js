@@ -242,7 +242,11 @@ function kinCreateCine() {
         }));
         if (!current()) return;
         const bounds=playbackRange(r,ids.length);if(!bounds)throw Error('재생 범위가 바뀌었습니다. 다시 적용하세요.');const currentIndex=()=>v.getTargetImageIdIndex?.()??v.getCurrentImageIdIndex?.();
-        if(currentIndex()<bounds.first||currentIndex()>bounds.last){await core.utilities.jumpToSlice(v.element,{imageIndex:bounds.first});if(!current())return;}
+        if(currentIndex()<bounds.first||currentIndex()>bounds.last){
+          clearTimeout(v.debouncedTimeout);
+          await core.utilities.jumpToSlice(v.element,{imageIndex:bounds.first,debounceLoading:true});
+          if(!current())return;
+        }
         r.loading = false;
         if(!r.range&&r.mode!=='yoyo'){
           nativePlay.call(this, element, { ...options, framesPerSecond: Math.abs(options.framesPerSecond || 10) * (r.mode==='reverse' ? -1 : 1), loop: r.loop });
@@ -298,7 +302,10 @@ function kinCreateCine() {
       try {
         await core.imageLoader.loadAndCacheImage(imageId);
         if (ended || r.ticket !== ticket || viewport(v.id) !== v || signature(v) !== before) return;
-        await core.utilities.jumpToSlice(v.element, { imageIndex: index });
+        // jumpToSlice must measure from the pending scroll target, not the current
+        // image. Pixels are already cached; cancel any older deferred wheel load.
+        clearTimeout(v.debouncedTimeout);
+        await core.utilities.jumpToSlice(v.element, { imageIndex: index, debounceLoading: true });
       } catch (_) { if (!ended && r.ticket === ticket) r.message = '프레임을 불러올 수 없습니다'; }
       finally { if (!ended && r.ticket === ticket) { r.loading = false; render(); } }
     }
