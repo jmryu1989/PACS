@@ -10,7 +10,7 @@ import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import type { PrismaService } from '../prisma.service';
 import { dump, holdAlive, reportHeld, toClient, draftConflict, draftOwner, draftEpochOf, draftExpected, draftSnapshotInput,
-  draftEnvelope, draftTransactionError, draftBounded } from './values';
+  draftEnvelope, draftTransactionError, draftBounded, visibleDraftSummary } from './values';
 import type { DraftOwner } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
@@ -281,7 +281,7 @@ export class PacsReportDraft {
   }
 
   async dictationAudit(uid: string, c: Caller, detail: { bytes: number; seconds: number; ms: number; engine: string; outcome: string }) {
-    await this.audit.audit(c.actor, 'dictation.request', uid, detail);
+    await this.audit.audit(c.actor, 'dictation.request', uid, { ...detail, institution: inst(c) });
   }
 
   async putReport(uid: string, body: any, c: Caller, session: string | null, facts: DraftRequestFacts) {
@@ -460,6 +460,7 @@ export class PacsReportDraft {
         const saved = await this.storeDraft(tx, uid, c.actor, row,
           { ...content, citations: cited.entries, structured: structure.entries });
         await audit(c.actor, 'report.draft', uid, {
+          institution: inst(c),
           len: [content.findings.length, content.conclusion.length, content.recommendation.length],
           ...(cited.detail ? { cits: cited.detail } : {}),
           ...(structure.detail ? { strs: structure.detail } : {}),
@@ -507,7 +508,7 @@ export class PacsReportDraft {
         throw new ConflictException({ code: 'REPORT_STRUCTURE_TEXT',
           message: '구조화 항목의 문장이 그 칸의 본문에 줄 단위로 그대로 있지 않습니다' });
       const cleared = await this.storeDraft(tx, uid, c.actor, row, null);
-      await audit(c.actor, 'report.draft.clear', uid, {});
+      await audit(c.actor, 'report.draft.clear', uid, { institution: inst(c) });
       return draftEnvelope(uid, owner, state.draftEpoch, cleared);
     }
 
@@ -538,6 +539,7 @@ export class PacsReportDraft {
       { ...content, citations: cited.entries, structured: structure.entries });
     // 판독문 전문을 감사로그에 통째로 넣지 않는다 — 길이와 개인정보 때문. 길이만 남긴다.
     await audit(c.actor, 'report.draft', uid, {
+      institution: inst(c),
       len: [content.findings.length, content.conclusion.length, content.recommendation.length],
       // 인용 감사는 `cid`·칸·수만 남긴다. `findingId`·`sourceIndex`·삽입 문구를 남기면
       // 역할·예비 판독 관문이 없는 감사 통로(`audits()`)로 판독문↔소견 연결이 통째로 새어 나간다.
@@ -547,7 +549,7 @@ export class PacsReportDraft {
       ...(structure.detail ? { strs: structure.detail } : {}),
     });
     if (prior && baseVersion > prior.baseVersion)
-      await audit(c.actor, 'report.draft.rebase', uid, { from: prior.baseVersion, to: baseVersion });
+      await audit(c.actor, 'report.draft.rebase', uid, { institution: inst(c), from: prior.baseVersion, to: baseVersion });
     /**
      * 답은 저장된 것의 표준 스냅숏이다(U5S-REQ-15). 화면은 owner·uid·revision·스냅숏 전체가 보낸 것과 같을 때만
      * 저장됨으로 본다. 인용·구조화는 식별자만 싣는다 — 전문은 소견 가독을 다시 거는 전용 읽기로만 나간다.
@@ -573,7 +575,7 @@ export class PacsReportDraft {
         const row = await this.ownDraft(tx, uid, c, expected.revision);
         // 초안이 없었어도 경계는 올린다 — 이 버리기보다 앞서 보낸 쓰기가 뒤늦게 닿아 초안을 만들지 못하게.
         const cleared = await this.storeDraft(tx, uid, c.actor, row, null);
-        await audit(c.actor, 'report.draft.discard', uid, {});
+        await audit(c.actor, 'report.draft.discard', uid, { institution: inst(c) });
         const rep = await tx.report.findUnique({ where: { uid } });
         return { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, rep, c, cleared) };
       });
@@ -618,7 +620,7 @@ export class PacsReportDraft {
         await tx.auditLog.create({
           data: {
             actor: c.actor, action: 'report.draft.force-discard', target: uid,
-            detail: dump({ by: me, drafts: [], versions: [] }),
+            detail: dump({ institution: me, by: me, drafts: [], versions: [] }),
           },
         });
         return { ok: true, count: 0, drafts: [], versions: [], epoch: rotated.draftEpoch };
@@ -657,11 +659,11 @@ export class PacsReportDraft {
       await tx.auditLog.create({
         data: {
           actor: c.actor, action: 'report.draft.force-discard', target: uid,
-          detail: dump({ by: me, drafts: summary, versions }),
+          detail: dump({ institution: me, by: me, drafts: summary, versions }),
         },
       });
 
-      return { ok: true, count: drafts.length, drafts: summary, versions, epoch: rotated.draftEpoch };
+      return { ok: true, count: drafts.length, drafts: visibleDraftSummary(summary, c), versions, epoch: rotated.draftEpoch };
     }));
   }
 }

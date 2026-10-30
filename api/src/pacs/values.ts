@@ -51,6 +51,12 @@ export function visibleHolder(s: any, caller: Caller): string | null {
     ? s.holder : '다른 기관';
 }
 
+// ReportDraft and its discarded safety copies have no recorded affiliation.
+// Neither the study owner nor a current holder proves who wrote those drafts.
+export const visibleDraftAuthor = (author: string, caller: Caller): string => author === caller.actor ? author : '다른 기관';
+export const visibleDraftSummary = (drafts: any[], caller: Caller) =>
+  drafts.map(draft => ({ ...draft, author: visibleDraftAuthor(draft.author, caller) }));
+
 export function reportHeld(s: any, caller: Caller): ConflictException {
   const holder = visibleHolder(s, caller);
   const writer = holder === '다른 기관' ? '다른 기관 판독의가' : `${holder} 님이`;

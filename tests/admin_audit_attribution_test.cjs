@@ -189,12 +189,40 @@ const ROWS = new Map([
   row(27, 'agreement.record', 'syn-agreement-27', { agreementId: 'syn-agreement-27', from: 'inst-a', to: 'inst-b' }),
   row(28, 'future.action', S1, { by: 'inst-a' }),
   row(29, 'hanging-protocol.site.save', 'inst-a', { revision: 2 }),
-  row(30, 'hold.force-release', S2, { by: 'inst-a', holder: 'syn-reader-b@members.test', heldAt: '2026-09-26T00:00:00.000Z', alive: true }),
+  row(30, 'hold.force-release', S2, { by: 'inst-a', holder: 'syn-reader-b@members.test', holderInstitutionId: 'inst-b', heldAt: '2026-09-26T00:00:00.000Z', alive: true }),
   // clinician-question.service.ts receipt(): the creating institution is recorded, the row is still not the console's
   row(31, 'study.question', S2, { id: '00000000-0000-4000-8000-000000000031', institution: 'inst-a',
     entry: '00000000-0000-4000-8000-000000000031', kind: 'question', from: null, to: 'Open', revision: 1,
     requestId: '00000000-0000-4000-8000-000000000031', role: 'clinician' }, 'syn-clinician-a@members.test'),
 ].map(r => [r.id, r]));
+
+test('writer privacy: admin audit row 30 and legacy releases redact foreign or unknown holders without changing storage', () => {
+  for (const institution of ['inst-a', 'inst-b', null]) {
+    const detail = { ...JSON.parse(ROWS.get(30).detail), holderInstitutionId: institution };
+    const source = { ...ROWS.get(30), detail: JSON.stringify(detail) };
+    const original = json(source);
+    const shown = A.projectAuditRow(source, 'inst-a');
+    assert.equal(shown.detail.holder, institution === 'inst-a' ? detail.holder : '다른 기관');
+    assert.ok(!('holderInstitutionId' in shown.detail));
+    assert.equal(A.projectAuditRow(source, 'inst-b'), null);
+    assert.deepEqual(json(source), original);
+  }
+  const legacy = { ...ROWS.get(30), detail: JSON.stringify({ by: 'inst-a', holder: 'legacy@synthetic.test' }) };
+  assert.equal(A.projectAuditRow(legacy, 'inst-a').detail.holder, '다른 기관');
+});
+
+test('writer privacy: administrator draft discard audit cannot reveal authors whose institution was never recorded', () => {
+  const source = row(99, 'report.draft.force-discard', S2, { by: 'inst-a', drafts: [
+    { author: 'foreign@synthetic.test', len: [4, 0, 0] },
+    { author: 'unknown@synthetic.test', len: [5, 0, 0] },
+  ], versions: [2, 3] });
+  const before = source.detail;
+  const shown = A.projectAuditRow(source, 'inst-a');
+  assert.deepEqual(shown.detail.drafts, [{ author: '다른 기관', len: [4, 0, 0] }, { author: '다른 기관', len: [5, 0, 0] }]);
+  assert.deepEqual(shown.detail.versions, [2, 3]);
+  assert.equal(A.projectAuditRow(source, 'inst-b'), null);
+  assert.equal(source.detail, before);
+});
 // S7-U5: auth.service.ts writes {institution, ip, dataSubject: null, outcome[, cause]} (login) or {institution, ip,
 // dataSubject: null, cause} (logout, expiry); target is the account id, actor its login identity.
 const authDetail = (institution, rest, ip = '198.51.100.7') => ({ institution, ip, dataSubject: null, ...rest });

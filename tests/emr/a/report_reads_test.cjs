@@ -294,7 +294,9 @@ test('A-HTTP-REPORT / A-HTTP-BODY / A-PG-COMMIT: every returned version is commi
     const { accessRef, ...fields } = row;
     assert.match(accessRef, UUID4);
     assert.deepEqual(fields, { id: stored.id, uid, version: stored.version, action: stored.action, findings: stored.findings,
-      conclusion: stored.conclusion, recommendation: stored.recommendation, reason: stored.reason, author: stored.author,
+      conclusion: stored.conclusion, recommendation: stored.recommendation,
+      reason: stored.version === 3 ? '판독문 폐기 보존본' : stored.reason,
+      author: stored.version === 3 ? '다른 기관' : stored.author,
       at: stored.at.toISOString() });
   }
   const recorded = await settled(uid, rows.length);

@@ -2897,12 +2897,16 @@ class LiveInvariantTests(unittest.TestCase):
                 [row["action"] for row in rows],
                 ["save", "approve", "addendum", "discarded", "reset", "save"],
             )
-            # discarded의 저자는 지운 사람이 아니라 마지막으로 그 내용을 저장한 사람이다.
-            self.assertEqual([row["author"] for row in rows], [doctor, doctor, doctor2, doctor2, doctor, doctor])
+            # Safety copies have no recorded writer institution. The response
+            # hides that identity; the immutable stored author/reason stay intact.
+            self.assertEqual([row["author"] for row in rows], [doctor, doctor, doctor2, "다른 기관", doctor, doctor])
             discarded, reset_row = rows[3], rows[4]
             self.assertEqual(discarded["findings"], "addendum text")
-            self.assertTrue(str(discarded["reason"]).startswith("판독 취소로 폐기"), discarded)
-            self.assertIn(doctor, str(discarded["reason"]))
+            self.assertEqual(discarded["reason"], "판독문 폐기 보존본")
+            stored = json.loads(psql(f'''SELECT json_build_object('author',author,'reason',reason) FROM "ReportVersion" WHERE id={int(discarded['id'])};''')[0])
+            self.assertEqual(stored["author"], doctor2)
+            self.assertTrue(stored["reason"].startswith("판독 취소로 폐기"), stored)
+            self.assertIn(doctor, stored["reason"])
             self.assertEqual((reset_row["reason"], reset_row["findings"]), ("lifecycle", ""))
             by_id = {row["id"]: row for row in rows}
             for row in first_three:
@@ -3113,6 +3117,52 @@ class LiveInvariantTests(unittest.TestCase):
                         self.assertEqual(releases, [])
             self.assert_status(self.stack.request("PUT", path + "/report", "doctor", {"findings": "x"}), 200)
 
+            # Draft activity must not provide a second route to the foreign
+            # in-progress writer. These requests use the existing draft CAS helper.
+            self.assert_status(self.stack.request("PUT", path + "/report", "kdoctor", {"findings": "SYN foreign draft"}), 200)
+            self.assert_status(self.stack.request("PUT", path + "/report", "kdoctor", {}), 200)
+            self.assert_status(self.stack.request("DELETE", path + "/draft", "kdoctor"), 200)
+            self.assert_status(self.stack.request("PUT", path + "/report", "kdoctor", {"findings": "SYN preserved draft"}), 200)
+            discarded = self.stack.request("DELETE", path + "/draft/force", "jmryu")
+            self.assert_status(discarded, 200)
+            self.assertEqual(discarded.body["count"], 2)
+            self.assertEqual([d["author"] for d in discarded.body["drafts"]], ["다른 기관", "다른 기관"])
+            for user, institution, writer in [("doctor", "hallym", self.stack.actor("doctor")), ("ktech", "kin-center", kdoctor)]:
+                for audit_path in [f"/audit?uid={quote(fixture.uid)}&take=500", "/audit?take=500"]:
+                    audited = self.stack.request("GET", audit_path, user)
+                    self.assert_status(audited, 200)
+                    drafts = [row for row in audited.body if row["target"] == fixture.uid and row["action"].startswith("report.draft")]
+                    self.assertTrue(drafts)
+                    for row in drafts:
+                        detail = json.loads(row["detail"])
+                        self.assertEqual(detail["institution"], institution)
+                        if row["action"] == "report.draft.force-discard":
+                            self.assertEqual(row["actor"], self.stack.actor("jmryu"))
+                            self.assertCountEqual([d["author"] for d in detail["drafts"]], [writer, "다른 기관"])
+                        else:
+                            self.assertEqual(row["actor"], writer)
+
+            # Old forced releases already recorded the institution as `by`.
+            # New `institution` takes precedence; old holds/drafts remain closed.
+            self.assertRegex(fixture.uid, r"^[0-9.]+$")
+            legacy = [
+                ("SYN legacy A", "hold.force-release", {"by": "hallym", "holder": "legacy@synthetic.test"}),
+                ("SYN legacy B", "hold.force-release", {"by": "kin-center", "holder": "legacy@synthetic.test"}),
+                ("SYN preferred B", "hold.force-release", {"institution": "kin-center", "by": "hallym", "holder": "legacy@synthetic.test"}),
+                ("SYN hidden hold", "report.hold", {}),
+                ("SYN hidden draft", "report.draft", {"len": [1, 0, 0]}),
+            ]
+            for actor, action, detail in legacy:
+                raw = json.dumps(detail).replace("'", "''")
+                psql(f'''INSERT INTO "AuditLog" (actor,action,target,detail) VALUES ('{actor}','{action}','{fixture.uid}','{raw}');''')
+            for user, expected in [("doctor", {"SYN legacy A"}), ("ktech", {"SYN legacy B", "SYN preferred B"})]:
+                for audit_path in [f"/audit?uid={quote(fixture.uid)}&take=500", "/audit?take=500"]:
+                    audited = self.stack.request("GET", audit_path, user)
+                    self.assert_status(audited, 200)
+                    rows = [row for row in audited.body if row["target"] == fixture.uid and row["actor"].startswith("SYN ")]
+                    self.assertEqual({row["actor"] for row in rows}, expected)
+                    self.assertTrue(all(json.loads(row["detail"])["holder"] == "다른 기관" for row in rows))
+
     def test_hold_requires_radiologist_and_prelim_access(self) -> None:
         with self.stack.fixture() as fixture:
             path = f"/studies/{quote(fixture.uid)}"
@@ -3198,7 +3248,7 @@ class LiveInvariantTests(unittest.TestCase):
             self.assert_status(drafted, 200)
             self.assertEqual(count("report.draft"), 1)
             draft_row = next(row for row in self.audit_rows(fixture) if row["action"] == "report.draft")
-            self.assertEqual(json.loads(draft_row["detail"]), {"len": [len(fixture.secret), 1, 0]})
+            self.assertEqual(json.loads(draft_row["detail"]), {"institution": "hallym", "len": [len(fixture.secret), 1, 0]})
             self.assert_status(self.stack.request("PUT", path + "/report", "doctor", {}), 200)
             self.assertEqual(count("report.draft.clear"), 1)
             # U5S-REQ-02/03/14/16: even an absent discard changes the durable
@@ -3235,7 +3285,7 @@ class LiveInvariantTests(unittest.TestCase):
                     self.assertEqual(len(added), 1, "성공한 경계 변경의 감사가 없거나 중복되었습니다")
                     self.assertEqual((added[0]["action"], added[0]["actor"], added[0]["target"]),
                                      ("report.draft.discard", self.stack.actor("doctor"), fixture.uid))
-                    self.assertEqual(json.loads(added[0]["detail"]), {}, "폐기 감사에 본문이나 허위 폐기 이력이 실렸습니다")
+                    self.assertEqual(json.loads(added[0]["detail"]), {"institution": "hallym"}, "폐기 감사에 본문이나 허위 폐기 이력이 실렸습니다")
                     audits_after = self.audit_rows(fixture)
                     replay = self.stack.request("DELETE", path + "/draft", "doctor", precondition)
                     self.assert_status(replay, 409)

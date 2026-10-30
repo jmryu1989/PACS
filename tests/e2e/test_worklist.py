@@ -612,7 +612,7 @@ class WorklistE2E(unittest.TestCase):
         audit = self.stack.request("GET", f"/audit?uid={fixture.uid}", "jmryu")
         self.assertEqual(audit.status, 200)
         rebases = [json.loads(row["detail"]) for row in audit.body if row["action"] == "report.draft.rebase"]
-        self.assertEqual(rebases, [{"from": 1, "to": 2}])
+        self.assertEqual(rebases, [{"institution": "hallym", "from": 1, "to": 2}])
 
         final_text = f"{draft_text} — written after reading v2"
         page.locator("#findings").fill(final_text)

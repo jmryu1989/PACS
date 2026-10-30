@@ -621,6 +621,76 @@ test('SPLIT-10 a forced discard is administrator-only, keeps every present draft
 
 // ── SPLIT-11 hold (M11, M12) ──
 
+test('writer privacy: every draft mutation and dictation audit records its authenticated institution', async () => {
+  const w = world(), s = w.study({ teleInstitutionId: INST_B });
+  for (const caller of [RAD_A, RAD_B]) {
+    await w.draft.putReport(s.uid, draftBody(caller, s.draftEpoch, 0, { findings: 'SYN draft' }), caller, null);
+  }
+  w.db.seed('report', { uid: s.uid, version: 1, findings: 'SYN committed', conclusion: '', recommendation: '' });
+  for (const caller of [RAD_A, RAD_B]) {
+    await w.draft.putReport(s.uid, draftBody(caller, s.draftEpoch, 1, { findings: 'SYN rebased', baseVersion: 1 }), caller, null);
+    await w.draft.putReport(s.uid, draftBody(caller, s.draftEpoch, 2, { findings: '' }), caller, null);
+    await w.draft.discardDraft(s.uid, { expectedOwner: ownerOf(caller), expectedRevision: `${s.draftEpoch}:3` }, caller, null);
+    await w.draft.dictationAudit(s.uid, caller, { outcome: 'success', institution: 'untrusted' });
+    const rows = w.audits().filter(row => row.actor === caller.actor);
+    assert.deepEqual([...new Set(rows.map(row => row.action))].sort(),
+      ['dictation.request', 'report.draft', 'report.draft.clear', 'report.draft.discard', 'report.draft.rebase']);
+    assert.ok(rows.every(row => JSON.parse(row.detail).institution === caller.institution));
+  }
+});
+
+for (const admin of [ADMIN_A, ADMIN_B]) test(`writer privacy: force discard by ${admin.institution} preserves originals but hides unrecorded affiliations in responses and history`, async () => {
+  const w = world(), s = w.study({ teleInstitutionId: INST_B });
+  for (const author of [RAD_A.actor, RAD_B.actor, admin.actor, 'legacy@synthetic.test'])
+    w.db.seed('reportDraft', { uid: s.uid, author, findings: 'SYN text', conclusion: '', recommendation: '', baseVersion: 0, revision: 1, present: true });
+  const before = copy(w.db.rows('reportDraft'));
+  const out = await w.draft.forceDiscardDrafts(s.uid, { expectedOwner: ownerOf(admin), expectedEpoch: s.draftEpoch }, admin, null);
+  assert.equal(out.count, 4);
+  assert.deepEqual(out.drafts.map(d => d.author).sort(), [admin.actor, '다른 기관', '다른 기관', '다른 기관'].sort());
+  assert.deepEqual(w.db.rows('reportVersion').map(d => d.author).sort(), before.map(d => d.author).sort());
+  const recorded = JSON.parse(w.audits('report.draft.force-discard')[0].detail);
+  assert.equal(recorded.institution, admin.institution);
+  assert.deepEqual(recorded.drafts.map(d => d.author).sort(), before.map(d => d.author).sort());
+  for (const caller of [RAD_A, RAD_B]) {
+    const versions = readBody(await w.evidence.versions(s.uid, caller));
+    assert.deepEqual(versions.map(v => v.author).sort(), [caller.actor, '다른 기관', '다른 기관', '다른 기관'].sort());
+    assert.ok(versions.every(v => v.reason === '판독문 폐기 보존본'));
+  }
+  assert.ok(w.db.rows('reportVersion').every(v => v.reason.includes(admin.actor)), 'stored provenance is preserved');
+  const empty = await w.draft.forceDiscardDrafts(s.uid, { expectedOwner: ownerOf(admin), expectedEpoch: out.epoch }, admin, null);
+  assert.equal(empty.count, 0);
+  assert.equal(JSON.parse(w.audits('report.draft.force-discard').at(-1).detail).institution, admin.institution);
+});
+
+test('writer privacy: deleting a study with a foreign draft refuses without disclosing its author', async () => {
+  const w = world(), s = w.study({ teleInstitutionId: INST_B });
+  w.db.seed('reportDraft', { uid: s.uid, author: RAD_B.actor, present: true });
+  const refusal = await refused(() => w.studyState.removeState(s.uid, ADMIN_A), 400);
+  assert.ok(!JSON.stringify(refusal).includes(RAD_B.actor));
+  assert.equal(w.db.rows('studyState').length, 1);
+  assert.equal(w.db.rows('reportDraft').length, 1);
+});
+
+test('writer privacy: discarded citation metadata hides its writer on readable and unavailable sources; committed provenance remains', async () => {
+  const w = world(), s = w.study({ teleInstitutionId: INST_B });
+  const citations = [{ field: 'findings', findingId: 'readable', insertedText: 'SYN', insertedBy: RAD_B.actor },
+    { field: 'findings', findingId: 'unavailable', insertedText: 'OTHER', insertedBy: RAD_B.actor }];
+  w.findings.readable.add('readable');
+  for (const [version, action] of [[1, 'discarded'], [2, 'save']])
+    w.db.seed('reportVersion', { uid: s.uid, version, action, author: RAD_B.actor,
+      findings: 'SYN\nOTHER', conclusion: '', recommendation: '', citations });
+  const before = copy(w.db.rows('reportVersion'));
+  for (const caller of [RAD_A, RAD_B]) for (const version of ['1', '2']) {
+    const answer = readBody(await w.evidence.reportVersionCitations(s.uid, version, caller));
+    assert.equal(answer.entries.length, 2);
+    assert.ok(answer.entries.every(entry => entry.insertedBy ===
+      (version === '1' && caller.actor !== RAD_B.actor ? '다른 기관' : RAD_B.actor)));
+  }
+  const versions = readBody(await w.evidence.versions(s.uid, RAD_A));
+  assert.equal(versions.find(v => v.action === 'save').author, RAD_B.actor);
+  assert.deepEqual(w.db.rows('reportVersion'), before);
+});
+
 test('SPLIT-11 a live hold of another reader is reported, never overwritten; an expired one is taken over; forced release is audited', async () => {
   const w = world();
   const s = w.study();
@@ -725,12 +795,14 @@ for (const singleStudy of [true, false]) test(`writer audit privacy: ${singleStu
     return tables.auditLog.filter(row => {
       const study = tables.studyState.find(study => study.uid === row.target);
       if (!study || !uids.includes(row.target) || ![study.institutionId, study.teleInstitutionId].includes(me)) return false;
-      const institution = JSON.parse(row.detail ?? 'null')?.institution;
+      const detail = JSON.parse(row.detail ?? 'null');
+      const institution = detail?.institution ?? (row.action === 'hold.force-release' ? detail?.by : null);
       return ownerActions.includes(row.action) ? study.institutionId === me && institution === me
         : institutionActions.includes(row.action) ? institution === me : true;
     }).sort((a, b) => +b.at - +a.at || b.id - a.id).slice(0, limit).map(row => ({ ...copy(row),
       managingInstitution: ownerActions.includes(row.action) || institutionActions.includes(row.action)
-        ? JSON.parse(row.detail).institution : tables.studyState.find(study => study.uid === row.target).institutionId,
+        ? (JSON.parse(row.detail).institution ?? (row.action === 'hold.force-release' ? JSON.parse(row.detail).by : null))
+        : tables.studyState.find(study => study.uid === row.target).institutionId,
     }));
   }]);
   for (const [writer, admin] of [[RAD_A, ADMIN_A], [RAD_B, ADMIN_B]]) {
@@ -748,13 +820,27 @@ for (const singleStudy of [true, false]) test(`writer audit privacy: ${singleStu
     const holds = result.rows.filter(row => row.action === 'report.hold');
     const releases = result.rows.filter(row => row.action === 'hold.force-release');
     assert.deepEqual(holds.map(row => row.actor), [writer.actor]);
-    assert.deepEqual(releases.map(row => [row.actor, JSON.parse(row.detail).holder]), [[admin.actor, writer.actor]]);
+    assert.deepEqual(releases.map(row => [row.actor, JSON.parse(row.detail).holder]),
+      caller.institution === INST_A ? [['legacy@synthetic.example', '다른 기관'], [admin.actor, writer.actor]] : [[admin.actor, writer.actor]]);
     assert.ok(result.rows.some(row => row.action === 'study.verified'), 'unrelated shared events remain visible');
     for (const [index, row] of result.rows.entries()) {
       if (row.action !== 'study.verified') assert.equal(result.managing[index], caller.institution);
     }
   }
   assert.deepEqual(w.db.rows('auditLog'), original, 'reading must preserve the original audit identities');
+  const privateActions = ['report.draft', 'report.draft.clear', 'report.draft.rebase', 'report.draft.discard',
+    'report.draft.force-discard', 'dictation.request', 'viewer-context.event'];
+  for (const action of privateActions) for (const institution of [INST_A, INST_B, null]) {
+    w.db.seed('auditLog', { action, target: s.uid, actor: `writer-${institution}@synthetic.example`,
+      detail: JSON.stringify({ institution, by: institution, drafts: [{ author: 'foreign@synthetic.example', len: [1, 0, 0] }] }) });
+  }
+  for (const caller of [TECH_A, TECH_B]) {
+    const rows = await w.audit.audits(singleStudy ? s.uid : undefined, 500, caller);
+    const drafts = rows.filter(row => privateActions.includes(row.action));
+    assert.equal(drafts.length, privateActions.length);
+    assert.ok(drafts.every(row => row.actor === `writer-${caller.institution}@synthetic.example`));
+    assert.equal(JSON.parse(drafts.find(row => row.action === 'report.draft.force-discard').detail).drafts[0].author, '다른 기관');
+  }
   for (const holderInstitutionId of [INST_B, null]) {
     await w.hold.hold(s.uid, RAD_B);
     w.db.rows('studyState')[0].holderInstitutionId = holderInstitutionId;

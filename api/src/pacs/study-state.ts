@@ -339,7 +339,7 @@ export class PacsStudyState {
         where: { uid, action: { not: 'discarded' } }, select: { id: true },
       }),
       // 비운 자리(present=false)는 쓰는 중인 글이 아니다 — 삭제를 막지 않는다.
-      tx.reportDraft.findFirst({ where: { uid, present: true }, select: { author: true } }),
+      tx.reportDraft.findFirst({ where: { uid, present: true }, select: { uid: true } }),
     ]);
     if (version)
       throw new BadRequestException(
@@ -347,7 +347,7 @@ export class PacsStudyState {
     if (draft)
       throw new BadRequestException(
         `작성 중인 판독문 초안이 있는 검사는 삭제할 수 없습니다. ` +
-        `작성자(${draft.author})에게 확정 또는 폐기를 요청하거나 관리자에게 강제 해제를 요청하세요.`);
+        `작성자에게 확정 또는 폐기를 요청하거나 관리자에게 강제 해제를 요청하세요.`);
 
     if (prev?.orderOid)
       await tx.order.update({ where: { oid: prev.orderOid }, data: { matched: 'U', studyUid: null } });
