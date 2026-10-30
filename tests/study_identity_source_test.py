@@ -485,7 +485,7 @@ class LiveAndWorkflowPins(unittest.TestCase):
         # fields from BASE. Compare the exact collected cases with the candidate selection.
         self.assertIn(("invariants_live.py", None, "candidate-invariants"), candidate_ci.BASE)
         # The candidate's own plan for this module; exact_selection would import every candidate
-        # module (playwright, numpy) on the plain python3 that nightly step 20 runs on.
+        # module (playwright, numpy) on the plain python3 used by the source regression step.
         candidate = [row["case"] for row in RUNNER.module_plan("tests/invariants_live.py", "candidate-invariants", "live",
                                                                 540, None)["tests"]]
         self.assertEqual(sorted(planned), sorted(candidate))
@@ -517,7 +517,10 @@ class LiveAndWorkflowPins(unittest.TestCase):
         build = next(i for i, step in enumerate(runtime) if '-t kin-api:ci api' in step.get('run', ''))
         server = next(i for i, step in enumerate(runtime) if '/tests/study_identity_server_test.cjs' in step.get('run', ''))
         self.assertLess(build, server)
-        self.assertIn('-B tests/study_identity_dom_test.py', CATALOG.job_text(CATALOG.job('measurements')))
+        owners = [job for job in CATALOG.combined(automatic_only=True)['jobs'].values()
+                  if '-B tests/study_identity_dom_test.py' in CATALOG.job_text(job)]
+        self.assertEqual(len(owners), 1)
+        self.assertIn('--run-dir tmp/workspace-ui-ci/study-identity-dom ', CATALOG.job_text(owners[0]))
 
 
 class Encoding(unittest.TestCase):

@@ -25,7 +25,7 @@ function slice() {
   const text = source.slice(start, end);
   assert.ok(text.includes('async function kinViewerNavigateTo'), 'the shipped navigation function is in the slice');
   assert.ok(text.includes('function kinViewerActivateStudy'), 'the shipped activation function is in the slice');
-  const sandbox = { Number, Array, Object, Promise, JSON, RegExp, Error, console };
+  const sandbox = { Number, Array, Object, Promise, JSON, RegExp, Error, console, clearTimeout };
   vm.createContext(sandbox);
   vm.runInContext(text + ';this.reference = kinViewerImageReference; this.navigateTo = kinViewerNavigateTo; this.REASONS = KIN_NAVIGATION_REASONS;' +
     'this.activate = kinViewerActivateStudy; this.ACTIVATION_REASONS = KIN_ACTIVATION_REASONS;', sandbox);
