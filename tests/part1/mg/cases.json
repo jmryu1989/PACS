@@ -244,7 +244,7 @@
    ],
    "rule_table": {
     "path": "tests/emr/e/rule-cases.json",
-    "sha256": "a60b86b6267853615872a915d66a59150062afdbfe5d8725ca7a55f578c984d0",
+    "sha256": "2ce98e9c36a04d95980dd72907ba735412ba56faaff55968743b0bbad214414b",
     "schema": "D744-2",
     "cases": 273,
     "test_names": "each case's testId + 'D744 rule table is the pinned one'",

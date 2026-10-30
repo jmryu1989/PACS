@@ -64,7 +64,7 @@ const PARTIAL_MEDIAL={'00281352':seq({'00080102':v('SH','SCT'),'00080100':v('SH'
 // data from the consult; nothing here is generated from this model's output.
 const fs=require('node:fs'),crypto=require('node:crypto');
 const RULE_TABLE=process.env.KIN_MG_RULE_CASES||path.join(__dirname,'..','..','emr','e','rule-cases.json');
-const RULE_TABLE_SHA256='a60b86b6267853615872a915d66a59150062afdbfe5d8725ca7a55f578c984d0';
+const RULE_TABLE_SHA256='2ce98e9c36a04d95980dd72907ba735412ba56faaff55968743b0bbad214414b';
 // This LF-normalised byte pin binds both products to the same input contract across Git checkout line endings.
 // A missing required table fails collection, rather than silently passing a smaller suite.
 const raw=fs.readFileSync(RULE_TABLE,'utf8').replace(/\r\n/g,'\n'),table=JSON.parse(raw);
@@ -267,12 +267,11 @@ test('MG01-reject DERIVED alone, a description, a contradiction or a non-mammogr
     assert.equal(c.status,'unverified','MG01 M17: Image Type and Frame Type must agree before any kind is trusted ('+name+')');
     assert.equal(c.standard,false,name);
   }
-  // Exactly the named exception, nothing wider.
+  // A manufacturer-specific VOLUME/MAX_IP shape still requires a declared device family.
   // Each differs from the verified profile in one respect only (same VOLUME/MAX_IP one-frame encoding).
   const exact={positions:[0],imageType:GENERATED,technique:'MAX_IP',volumetric:'VOLUME',thickness:54};
   for(const [name,object] of [['another manufacturer',dbt({...exact,extra:{'00080070':v('LO','GE MEDICAL SYSTEMS'),'00081090':v('LO','Senographe Pristina'),'00181020':v('LO','AWS:1.9.1.8')}})],
     ['a look-alike manufacturer',dbt({...exact,extra:{...HOLOGIC,'00080070':v('LO','HOLOGIC clone')}})],
-    ['another software',dbt({...exact,extra:{...HOLOGIC,'00181020':v('LO','AWS:99.0')}})],
     ['no manufacturer',dbt({...exact})],
     ['Hologic but many frames',dbt({imageType:GENERATED,extra:HOLOGIC})],
     ['Hologic but Value 3 VOLUME',dbt({positions:[0],imageType:['DERIVED','PRIMARY','VOLUME','GENERATED_2D'],extra:HOLOGIC})]]){

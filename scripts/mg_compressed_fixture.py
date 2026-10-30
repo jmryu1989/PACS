@@ -52,8 +52,8 @@ def finish_metadata(ds, destination, pixel_offset, ratio=None):
     return final_offset
 
 
-def encoder(name, scratch):
-    if name.startswith('jpeg2000'):
+def encoder(name, scratch, bits_stored=16):
+    if name.startswith('jpeg2000') and bits_stored == 16:
         from PIL import Image, features
         if not features.check('jpg_2000'):
             raise RuntimeError('Pillow OpenJPEG codec missing')
@@ -78,7 +78,7 @@ def encoder(name, scratch):
                 raise ValueError('RLE lossless pixel mismatch')
             return data, {'max_absolute_error': 0}
         return encode
-    if name == 'jpegls-lossless':
+    if name == 'jpegls-lossless' and bits_stored == 16:
         import jpeg_ls
         def encode(array):
             data = bytes(jpeg_ls.encode(array, 0))
@@ -101,8 +101,9 @@ def encoder(name, scratch):
         ds.Rows, ds.Columns = array.shape
         ds.SamplesPerPixel = 1
         ds.PhotometricInterpretation = 'MONOCHROME2'
-        ds.BitsAllocated = ds.BitsStored = 16
-        ds.HighBit = 15
+        ds.BitsAllocated = 16
+        ds.BitsStored = bits_stored
+        ds.HighBit = bits_stored - 1
         ds.PixelRepresentation = 0
         ds.PixelData = array.tobytes()
         ds.is_little_endian = True
@@ -112,16 +113,23 @@ def encoder(name, scratch):
         reader = gdcm.ImageReader(); reader.SetFileName(str(source))
         if not reader.Read(): raise RuntimeError('GDCM input read failed')
         change = gdcm.ImageChangeTransferSyntax()
-        change.SetTransferSyntax(gdcm.TransferSyntax(gdcm.TransferSyntax.JPEGLosslessProcess14_1))
+        # Unlike Pillow's uint16 path, GDCM receives the actual stored precision. The vendor
+        # fixtures must test 10/12/14-bit codestreams, not a 16-bit stream relabelled afterwards.
+        syntax = {'jpeg-lossless-sv1': 'JPEGLosslessProcess14_1', 'jpegls-lossless': 'JPEGLSLossless',
+                  'jpeg2000-lossless': 'JPEG2000Lossless', 'jpeg-extended': 'JPEGExtendedProcess2_4'}[name]
+        change.SetTransferSyntax(gdcm.TransferSyntax(getattr(gdcm.TransferSyntax, syntax)))
         change.SetInput(reader.GetImage())
-        if not change.Change(): raise RuntimeError('GDCM SV1 encode failed')
+        if not change.Change(): raise RuntimeError('GDCM ' + name + ' encode failed')
         writer = gdcm.ImageWriter(); writer.SetFileName(str(target))
         writer.SetFile(reader.GetFile()); writer.SetImage(change.GetOutput())
         if not writer.Write(): raise RuntimeError('GDCM output write failed')
         compressed = pydicom.dcmread(str(target))
-        if str(compressed.file_meta.TransferSyntaxUID) != SYNTAXES[name]: raise ValueError('wrong codec syntax')
-        if not np.array_equal(array, compressed.pixel_array): raise ValueError('SV1 lossless pixel mismatch')
-        return next(generate_pixel_data_frame(compressed.PixelData)), {'max_absolute_error': 0}
+        expected_syntax = '1.2.840.10008.1.2.4.51' if name == 'jpeg-extended' else SYNTAXES[name]
+        if str(compressed.file_meta.TransferSyntaxUID) != expected_syntax: raise ValueError('wrong codec syntax')
+        decoded = compressed.pixel_array
+        error = int(np.abs(array.astype('int32') - decoded.astype('int32')).max())
+        if name != 'jpeg-extended' and error: raise ValueError(name + ' lossless pixel mismatch')
+        return next(generate_pixel_data_frame(compressed.PixelData)), {'max_absolute_error': error}
     return encode
 
 

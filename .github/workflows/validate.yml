@@ -1114,6 +1114,12 @@ jobs:
       timeout-minutes: 5
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/model --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/validate.yml --file "$KIN_MG_RULE_CASES" -- node --test --test-reporter=tap --test-reporter-destination=tmp/part1-mg-ci/model.tap --test-reporter=spec --test-reporter-destination=stdout tests/part1/mg/model_test.cjs
+    - name: Vendor headers, native hanging and decoder asset guard
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      timeout-minutes: 5
+      run: |
+        python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/vendors --file tests/mg_vendor_test.cjs --file tests/mg_vendor_hanging_test.cjs --file tests/fixtures/mg_vendor_cases.json --file worklist-v0/hpacs-lite/mammography-model.js --file config/ohif/mammography-hanging.js -- node --test tests/mg_vendor_test.cjs tests/mg_vendor_hanging_test.cjs
+        python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/worker-asset --file tests/ohif_worker_asset_test.py --file proxy/nginx.conf.template -- python3 tests/ohif_worker_asset_test.py
     - name: Model declared cases equal the cases that passed
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 5

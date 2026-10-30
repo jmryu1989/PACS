@@ -93,7 +93,7 @@ const CASES = [
 ];
 const RULE_TABLE = path.join(__dirname, 'rule-cases.json');
 // Shared contract identity, normalized to LF for Git checkouts (AGENTS 1-B.14), not a product implementation pin.
-const RULE_TABLE_LF_SHA256 = 'a60b86b6267853615872a915d66a59150062afdbfe5d8725ca7a55f578c984d0';
+const RULE_TABLE_LF_SHA256 = '2ce98e9c36a04d95980dd72907ba735412ba56faaff55968743b0bbad214414b';
 const ruleBytes = Buffer.from(fs.readFileSync(RULE_TABLE).toString('latin1').replace(/\r\n/g, '\n'), 'latin1');
 if (createHash('sha256').update(ruleBytes).digest('hex') !== RULE_TABLE_LF_SHA256) throw new Error('rule-cases.json is not the D744-2 table this file is bound to');
 const RULE = JSON.parse(ruleBytes.toString('utf8'));

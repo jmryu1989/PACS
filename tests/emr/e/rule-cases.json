@@ -85622,7 +85622,7 @@
       "requirement": "REQ-D735-CLASS",
       "risk": "RISK-D735-MISCLASS",
       "testId": "TEST-D735-BTO-GENERATED-UNKNOWN-SOFTWARE",
-      "purpose": "이번 R1 장비 지원 범위를 표준 전체로 확대하지 않음",
+      "purpose": "MG vendor universal 2026-10-30: Hologic RD-04751 header shape does not require the EA1141 software version.",
       "input": {
         "dicom": {
           "00080016": {
@@ -85879,12 +85879,12 @@
         }
       },
       "expected": {
-        "class": "unverified",
-        "baseClass": "unverified",
-        "status": "unverified",
+        "class": "device-synthetic-2d",
+        "baseClass": "device-synthetic-2d",
+        "status": "verified",
         "partial": "no",
         "representation": null,
-        "fullViewAutoMatch": false,
+        "fullViewAutoMatch": true,
         "sourceClassEligible": false
       }
     },
@@ -86162,7 +86162,7 @@
       "requirement": "REQ-D735-CLASS",
       "risk": "RISK-D735-MISCLASS",
       "testId": "TEST-D735-BTO-GENERATED-MISSING-SOFTWARE",
-      "purpose": "고정 프로필 소프트웨어 근거 누락",
+      "purpose": "MG vendor universal 2026-10-30: Hologic RD-04751 header shape does not require the EA1141 software version.",
       "input": {
         "dicom": {
           "00080016": {
@@ -86413,12 +86413,12 @@
         }
       },
       "expected": {
-        "class": "unverified",
-        "baseClass": "unverified",
-        "status": "unverified",
+        "class": "device-synthetic-2d",
+        "baseClass": "device-synthetic-2d",
+        "status": "verified",
         "partial": "no",
         "representation": null,
-        "fullViewAutoMatch": false,
+        "fullViewAutoMatch": true,
         "sourceClassEligible": false
       }
     },

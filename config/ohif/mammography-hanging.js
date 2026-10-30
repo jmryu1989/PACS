@@ -45,38 +45,71 @@ function kinCreateMammographyHanging() {
     const retrieve = series.metadata, run = hp.run;
     let ended = false, last = null, cells = [], stageCells = [], panel = null, missing = null;
     const live = () => !ended && location.search === search;
-    const orientations = new WeakMap();
+    const orientations = new WeakMap(), presentations = new WeakMap();
     function orient(event) {
-      if (!live() || hp.getState()?.protocolId !== protocolId) return;
+      if (!live()) return;
       const viewport = services.cornerstoneViewportService.getCornerstoneViewport(event.detail?.viewportId);
       const imageId = viewport?.getCurrentImageId?.();
       if (!imageId || viewport.type !== 'stack') return;
       const instance = window.cornerstone.metaData.get('instance', imageId);
       const item = raw.get(instance?.SOPInstanceUID);
       if (!item) return;
+      const frame = item['00280008']?.Value?.[0] > 1 ? viewport.getCurrentImageIdIndex() + 1 : 1;
+      const ctTomo = window.KinMammographyModel.classify(item).basis === 'ct-breast-tomosynthesis';
+      const sourceKey = ctTomo ? instance.SeriesInstanceUID : instance.SOPInstanceUID;
+      const previousPresentation = event.type === newStackEvent ? null : presentations.get(viewport);
+      if (item['00080060']?.Value?.[0] === 'MG' || ctTomo) {
+        if (previousPresentation?.sourceKey !== sourceKey) applyHeaderVOI(viewport, item, frame);
+        presentations.set(viewport, { sourceKey });
+      }
+      // Grayscale belongs to the image even when the reader selected another layout.
+      if (hp.getState()?.protocolId !== protocolId) return;
       // setStack clears flips even if the same object is hung again in this viewport.
       const previous = event.type === newStackEvent ? null : orientations.get(viewport);
       if (previous?.imageId === imageId) return;
-      const frame = viewport.getCurrentImageIdIndex() + 1;
       const orientation = window.KinMammographyModel.displaySpec(item, frame).orientation;
-      const sameObject = previous?.sop === instance.SOPInstanceUID;
+      const sameObject = previous?.sop === instance.SOPInstanceUID ||
+        previous?.series === instance.SeriesInstanceUID && ctTomo;
       const camera = viewport.getCamera();
       // Preserve a reader's manual flip while scrolling; only changes in the stored frame's
       // orientation alter the normalization. A new object starts from its own display rule.
       const flipHorizontal = sameObject ? !!camera.flipHorizontal !== (previous.flipH !== orientation.flipH) : orientation.flipH;
       const flipVertical = sameObject ? !!camera.flipVertical !== (previous.flipV !== orientation.flipV) : orientation.flipV;
-      orientations.set(viewport, { imageId, sop: instance.SOPInstanceUID, ...orientation });
+      orientations.set(viewport, { imageId, sop: instance.SOPInstanceUID, series: instance.SeriesInstanceUID, ...orientation });
       if (!!camera.flipHorizontal !== flipHorizontal || !!camera.flipVertical !== flipVertical) {
         viewport.setCamera({ flipHorizontal, flipVertical });
         viewport.render();
       }
       renderLabels();
     }
+    function applyHeaderVOI(viewport, item, frame) {
+      const spec = window.KinMammographyModel.displaySpec(item, frame), voi = spec.voi;
+      if (voi.status !== 'verified') return;
+      if (voi.lut) {
+        // Use the stored table on the GPU actor, without rewriting decoded source pixels or the cache.
+        // VTK midpoint=1/sharpness=1 keeps each integer entry constant until the next input value.
+        const transfer = viewport.getDefaultActor()?.actor?.getProperty().getRGBTransferFunction(0);
+        if (!transfer) return;
+        transfer.removeAllPoints();
+        const max = 2 ** voi.lut.bits - 1;
+        voi.lut.data.forEach((value, i) => {
+          const gray = spec.invert ? 1 - value / max : value / max;
+          transfer.addRGBPoint(voi.lut.first + i, gray, gray, gray, 1, 1);
+        });
+      } else {
+        const half = (voi.width - (voi.fn === 'LINEAR' ? 1 : 0)) / 2;
+        const center = voi.center - (voi.fn === 'LINEAR' ? 0.5 : 0);
+        // A fresh native LUT also removes a table left on a reused stack actor.
+        viewport.setProperties({ VOILUTFunction: voi.fn, invert: spec.invert });
+        viewport.setVOI({ lower: center - half, upper: center + half }, { forceRecreateLUTFunction: true });
+      }
+      viewport.render();
+    }
     // Keep the raw responses that the real data source already loads. Starting all MG metadata
     // before hanging prevents a late series from turning a missing/unique slot into another image.
     const metadata = async function (...args) {
       const result = await retrieve.apply(this, args);
-      if (!live() || !Array.isArray(result) || !result.some(p => p?.metadata?.Modality === 'MG')) return result;
+      if (!live() || !Array.isArray(result) || !result.some(p => ['MG', 'CT'].includes(p?.metadata?.Modality))) return result;
       await Promise.allSettled(result.map(p => p.start().then(instances => {
         if (live()) for (const item of instances) raw.set(item['00080018']?.Value?.[0], item);
       })));
@@ -117,7 +150,7 @@ function kinCreateMammographyHanging() {
     }
     function protocol(data) {
       const model = window.KinMammographyModel;
-      const displaySets = data.displaySets.filter(d => d.Modality === 'MG');
+      const displaySets = data.displaySets;
       const studies = opened.slice(0, 2).map((uid, i) => ({ uid, role: i ? 'prior' : 'current', institution,
         instances: [...raw.values()].filter(item => item['0020000D']?.Value?.[0] === uid) }));
       // The institution here is the viewing session's scope. The DICOMweb server has already
@@ -155,8 +188,10 @@ function kinCreateMammographyHanging() {
         const entries = specs.map(spec => {
           const key = [spec.role, spec.side, spec.view, kind].join('|'), slot = plan.slots[key];
           const object = slot?.status === 'ready' ? slot.object : null;
-          const matches = object ? displaySets.filter(d => d.images?.length === 1 &&
-            d.StudyInstanceUID === object.study && d.images[0].SOPInstanceUID === object.sop) : [];
+          const sops = object ? new Set((object.stackMembers || [object]).map(o => o.sop)) : null;
+          const matches = object ? displaySets.filter(d => d.StudyInstanceUID === object.study &&
+            d.images?.length === sops.size && new Set(d.images.map(i => i.SOPInstanceUID)).size === sops.size &&
+            d.images.every(i => sops.has(i.SOPInstanceUID))) : [];
           const selected = matches.length === 1 ? matches[0] : null;
           selectors[key] = { seriesMatchingRules: [{ attribute: 'displaySetInstanceUID', required: true,
             constraint: { equals: { value: selected?.displaySetInstanceUID || '' } } }] };
@@ -200,7 +235,8 @@ function kinCreateMammographyHanging() {
       document.querySelector('#kin-viewer-layout')?.append(panel);
     }
     const wrappedRun = function (data, requested, options) {
-      if (!live() || !data.displaySets.some(d => d.Modality === 'MG' && d.StudyInstanceUID === opened[0]) ||
+      if (!live() || !data.displaySets.some(d => d.StudyInstanceUID === opened[0] && (d.Modality === 'MG' ||
+          d.images?.some(i => raw.has(i.SOPInstanceUID) && window.KinMammographyModel.classify(raw.get(i.SOPInstanceUID)).basis === 'ct-breast-tomosynthesis'))) ||
           (requested && !['@ohif/hpCompare', 'default'].includes(requested) && !requested.startsWith('kin.mammography'))) {
         last = null; return run.call(this, data, requested, options);
       }

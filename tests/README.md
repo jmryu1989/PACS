@@ -3202,6 +3202,31 @@ REQ-MG-LENGTH-SCALE/FRAME/READBACK → RISK-MG-WRONG-SCALE/FRAME/BASIS → TEST-
 
 REQ-D1882-HELD → RISK-UNKNOWN-SOURCE-MIX → TEST-D1882-HELD: a study whose sending hospital is unknown (InstitutionName matches no registered spelling and the calling AE no registered device) is held - in no institution's list, opened by nobody; the cross-institution admin view (GET unassigned) and per-study assignment (POST studies/:uid/assign) are retired. `pacs_split_modules_test.cjs` SPLIT-13 (held until a registration attaches it, admin-only and own-institution registration, 400/409, attach and arrival audit detail, an alert with no study or patient fact), `worklist_split_uid_test.cjs` TEST-WSU-09 (a split UID is held and counted once; a second device's instance after the first answer keeps the study held; a row with no owner, a tele value on it included, is refused by authzDicom and listed for nobody, radiologist and admin), SPLIT-13 (a spelling with a comma is one registered value, also for the import gate's issuer check), `study_source_test.cjs` (one study.attach row on attach). Served: `e2e/test_held_source.py` C-STOREs two synthetic studies from run-unique AE titles, checks they are held for doctor/kdoctor/jmryu, reads GET admin/held-sources (device, raw text, count; no UID or patient fact), registers the device through the real admin page (Held Studies; the outcome stays shown after the refresh that follows) and the spelling through the API, then sees them in the owner's list only, the study.attach rows and, for A-027, that GET audit records every returned row to the study's current institution in the EMR ledger. test_held_02 sends a second instance of a held study from another AE after the alert named the first, registers the first AE (attached 0, still held), sees Register Name enabled for a spelling with a comma, and sets a tele value on the held row: GET /dicom-web/studies/{uid}/metadata is 403 for jmryu and doctor. It restores the institution's registration columns; the API keeps the run-unique values cached until restart.
 
+### MG vendor headers (2026-10-30)
+
+REQ-MG-VENDOR-CLASS/HANG/DISPLAY -> RISK-MG-MISCLASS/OMITTED-SLICES/WRONG-VOI ->
+`node --test tests/mg_vendor_test.cjs tests/mg_vendor_hanging_test.cjs` checks the source-declared
+Hologic, Siemens, GE Pristina 10.x and Fuji header shapes in `fixtures/mg_vendor_cases.json`.
+This includes Siemens CT slices/INSIGHT_2D, cross-vendor synthetic 2D comparison, 12/14-bit unsigned
+MONOCHROME1/2, header windows and stored VOI tables (including the frame macro). The native extension
+sets the display transfer function; source pixels stay unchanged. Signed 16-bit in Siemens's statement
+is a receive/display capability, not a declared MG acquisition output. Fuji bit depths within its
+declared range are representative synthetic choices, not claims about a specific device.
+
+`python scripts/mg_vendor_fixture.py --output tmp/mg-vendor-fixtures` creates only synthetic DICOM,
+round-trips all native pixels and checks the actual compressed codestream precision using the #295
+encoder. Missing GDCM is NOT_RUN (exit 2), not a passed compressed fixture. GE 2D is uncompressed per
+the 10.x SOP table; its BTO and Hologic/Fuji/Siemens use their declared syntax lists. Siemens baseline
+8-bit forwarding is already covered by #295; no native 8-bit MG acquisition is fabricated.
+No additional TS from the DICOM registry alone (HTJ2K, deflate, .57) is introduced.
+
+REQ-MG-WORKER-ASSET -> RISK-CODEC-CSP-DRIFT -> `ohif_worker_asset_test.py` fails if nginx's eval-enabled
+worker is absent from `--viewer-root <extracted-build>`. The existing `e2e/test_caution_imaging.py`
+also GETs that asset from the actual pinned viewer and rejects missing/HTML fallback responses.
+Pure service tests and generated fixtures do not prove served GPU grayscale/decoding, real device
+compatibility or physician acceptance. Run the served checks on the isolated VM and retain those results.
+First-ingest header inspection is described in `scripts/mgxa-acceptance.md`.
+
 ### Imaging scope after D1819/D1821
 
 `gateway/agent/test_agent.py` covers a 30 MiB object sent alone through the disk-backed STOW writer. `study_transfer_local_server_test.cjs` covers the real import parser, 30 MiB MG storage/readback and multiframe XA; `study_transfer_local_dom_test.py` covers automatic operation splitting for 101 selected files. `original_archive_test.cjs` covers ZIP64 planning and writing 65,536 entries; `KIN_ZIP64_ARCHIVE` optionally retains that archive for an independent standard-reader check.
