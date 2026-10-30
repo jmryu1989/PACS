@@ -141,7 +141,10 @@ window.kinCreateVolumeSync=function({target,permitted,alive,services,host}){
   }
   windowing.onchange=()=>change('windowing',windowing.checked);zoom.onchange=()=>change('zoom',zoom.checked);
   const capability={selected(operation){session?.pending.clear();suppressed++;try{return operation();}finally{suppressed--;}},read(){return session?{windowing:session.windowing,zoom:session.zoom}:null;},apply(value){
-    try{if(!allowed()||!same(session?.target,target(true))||typeof value?.windowing!=='boolean'||typeof value?.zoom!=='boolean')return false;
+    try{if(!allowed()||typeof value?.windowing!=='boolean'||typeof value?.zoom!=='boolean')return false;
+      // MPR Properties applies a saved profile from its own timer. Planes that became ready after this panel's
+      // last refresh are bound here first; refusing them left the defaults and the saved choice was never retried.
+      refresh();if(!same(session?.target,target(true)))return false;
       session.pending.clear();session.windowing=value.windowing;session.zoom=value.zoom;refresh();return true;
     }catch(_){return false;}
   }};
