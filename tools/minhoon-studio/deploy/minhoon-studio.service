@@ -1,0 +1,48 @@
+[Unit]
+Description=Minhoon studio (synthetic-data screen studio; not part of the deployed PACS)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=studio
+Group=studio
+WorkingDirectory=/opt/minhoon-studio
+EnvironmentFile=-/opt/minhoon-studio/etc/studio.env
+Environment=HOME=/opt/minhoon-studio/home
+ExecStart=/opt/minhoon-studio/node/bin/node /opt/minhoon-studio/app/server/server.js --config /opt/minhoon-studio/etc/config.json
+Restart=on-failure
+RestartSec=5
+UMask=0027
+
+# Resource limits: the PACS on this host must always win. The studio (server + Claude CLI + builders, all children
+# of this unit) gets at most MemoryMax and a low CPU weight with a one-core cap. Values and their basis are in
+# README "Resource limits"; re-measure before raising them.
+MemoryHigh=1200M
+MemoryMax=1536M
+MemorySwapMax=0
+CPUWeight=20
+CPUQuota=100%
+TasksMax=256
+LimitNOFILE=4096
+
+# Confinement: the studio writes only its own folders and cannot touch the PACS stack, Docker or nginx.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/minhoon-studio/data /opt/minhoon-studio/sandbox /opt/minhoon-studio/sandbox-read /opt/minhoon-studio/sandbox-preview /opt/minhoon-studio/claude-config /opt/minhoon-studio/home
+ReadOnlyPaths=/opt/minhoon-studio/knowledge
+InaccessiblePaths=-/var/run/docker.sock -/run/docker.sock -/etc/nginx -/var/lib/docker -/root
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

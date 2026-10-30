@@ -1,0 +1,62 @@
+{
+  "schema": "minhoon-studio.status/1",
+  "published_at": "2026-10-27T14:40:00.000Z",
+  "publisher": "Opus studio build — INITIAL SEED, not a commander publication. The commander replaces this file on its own schedule (decision D8).",
+  "next_publication": null,
+  "publication_note": "다음 발행 시각은 지휘자가 정한다. 이 첫 판은 스튜디오 설치 시점의 자료만 담았고, 작업 상태·일정은 아직 발행되지 않았다.",
+  "base_sha": "9ab97a0dda4d71018f6db85e43c1a784548aaaec",
+  "deployed_sha": null,
+  "sources": [
+    { "what": "민훈 선생님 피드백 12건 (2026-10-27 원격 데모, main 7f88f21)", "where": "Slack DM thread 1793082066.486349; commander copy evidence/minhoon-feedback-20261027/feedback.md" },
+    { "what": "스튜디오 설계 결정 D1-D11", "where": "evidence/studio-design-final-20261027.md" },
+    { "what": "정모 님 추가 지시 (비판, 질의응답, 비밀 외 전부 공개, 운영 서버 호스트)", "where": "fable-tools/scratch-bc12ddf5/studio-design-owner-additions.md" }
+  ],
+  "lanes": [
+    { "name": "Minhoon studio (이 스튜디오)", "open_items": [
+      { "id": "studio-p1", "title": "Phase 1: 로그인, 거울, 바꾸기/되돌리기, 비판, 물어보기, 하루 인계", "state": "설치됨 — Claude 로그인 대기", "owner": "Opus build → commander", "eta": { "date": null, "label": "추정 없음" } },
+      { "id": "studio-p2", "title": "Phase 2: 가리키기(이거), 같은 탭 캡처, 새 기능 시안, 선제 추천", "state": "대기 (Phase 1 사용 뒤)", "owner": "commander", "eta": { "date": null, "label": "추정 없음" } },
+      { "id": "studio-p3", "title": "Phase 3: A/B 나란히 비교, 추천 조정", "state": "대기", "owner": "commander", "eta": { "date": null, "label": "추정 없음" } }
+    ] }
+  ],
+  "feedback": [
+    { "n": 1, "priority": "P0", "title": "MG loading speed and reliability (30-60초 이상, 'Sorry, something went wrong', Preload/Download 목록·상태·재시도·자동 캐시 삭제)", "state": "접수됨 — 작업 상태 미발행", "work_unit": null, "eta": null, "note": "2026-10-27 노트북 측정 작업(브랜치 claude/mg-loading-20261027)이 있었다는 기록만 있다. 결과·일정은 이 판에 없음." },
+    { "n": 2, "priority": "P1", "title": "Ellipse ROI가 동작하지 않음 (만들기·편집·크기·이동·삭제, 정확한 값)", "state": "접수됨 — 작업 상태 미발행", "work_unit": null, "eta": null },
+    { "n": 3, "priority": "P1", "title": "Compare Image 불안정 (왼/오른 뷰포트로 시리즈 끌어놓기, 다른 쪽 유지, 놓을 곳 표시, 여러 시리즈 시험 검사)", "state": "접수됨 — 작업 상태 미발행", "work_unit": null, "eta": null },
+    { "n": 4, "priority": "P1", "title": "영상 영역 넓히기 (툴바 줄이기, 작은 아이콘, 좌우 뷰포트 독립 조작, sync 켰을 때만 함께)", "state": "접수됨 — 작업 상태 미발행", "work_unit": null, "eta": null },
+    { "n": 5, "priority": "P1", "title": "뷰어 창 재사용 (새 창 대신 기존 창 포커스, 크기·위치·모니터 기억)", "state": "접수됨 — 작업 상태 미발행", "work_unit": null, "eta": null, "note": "스튜디오 거울(iframe)에서는 창 재사용·모니터 위치를 확인할 수 없다." },
+    { "n": 6, "priority": "P1", "title": "마우스 기본값 (왼쪽 드래그=스택, 오른쪽 드래그=W/L, 휠=스크롤, Zoom 선택 가능, 사용자 설정)", "state": "접수됨 — 작업 상태 미발행", "work_unit": null, "eta": null },
+    { "n": 7, "priority": "P1", "title": "Worklist Viewing 열에 실시간 'Viewing: [사용자]' (열기·닫기·전환 반영, 끊긴 세션 표시 남지 않게)", "state": "접수됨 — 작업 상태 미발행", "work_unit": null, "eta": null },
+    { "n": 8, "priority": "P1", "title": "판독 편집기 배치 (편집기 표시, Clinical Context를 편집기 옆으로, Related Exam 필터를 그 구역 안으로, 선택한 관련 판독문을 Related Reports 패널 안에, 패널 경계)", "state": "접수됨 — 작업 상태 미발행", "work_unit": null, "eta": null, "note": "스튜디오에서 바로 바꿔 볼 수 있는 대표 항목." },
+    { "n": 9, "priority": "P1", "title": "접을 수 있는 패널 (Thumbnail, AI Report, Image Report, Clinical Information, Reading Template; 설정에서 켜고 끄기, 사용자별 기억)", "state": "접수됨 — 작업 상태 미발행", "work_unit": null, "eta": null },
+    { "n": 10, "priority": "P2", "title": "Worklist 열 (PF 뜻 설명, 열 숨기기·끌어서 순서 바꾸기, 사용자별 저장)", "state": "접수됨 — 작업 상태 미발행", "work_unit": null, "eta": null },
+    { "n": 11, "priority": "P2", "title": "색 (배경 #212121, 패널 #2d2d2d, 본문 #e3e3e3, 보조 #b4b4b4, 선택 #8ab4c8; 하늘색은 선택·강조에만)", "state": "접수됨 — 작업 상태 미발행", "work_unit": null, "eta": null },
+    { "n": 12, "priority": "P2", "title": "주석 모양 (선 굵기·색·실선/점선·화살촉, 사용자별 저장)", "state": "접수됨 — 작업 상태 미발행", "work_unit": null, "eta": null }
+  ],
+  "questions_from_minhoon": [
+    { "q": "MG 지연은 어디서 오나: 네트워크, 서버, 디코딩, 렌더링, 캐시?", "state": "답 미발행" },
+    { "q": "Compare는 언제 실패하나?", "state": "답 미발행" },
+    { "q": "PF는 무슨 뜻인가?", "state": "답 미발행 — 코드로 확인 가능하면 물어보기가 코드 근거로 답한다" },
+    { "q": "창 배치의 브라우저 한계는?", "state": "답 미발행" },
+    { "q": "Preload·캐시의 개인정보·보안 요건은?", "state": "답 미발행" }
+  ],
+  "questions_pending_for_minhoon": [],
+  "questions_pending_note": "선생님께 보낸 대기 질문 목록(잠금·역할 등)은 이 판에 실리지 않았다. 지휘자 발행을 기다린다.",
+  "decisions_concerning_minhoon": [
+    { "d": "studio-D1", "date": "2026-10-27", "one_line": "스튜디오 Claude에는 일반 셸이 없다. 빌드 스크립트 두 개와 studio-mock 시험만 정확한 명령으로 허용하고, 화면 코드와 모의 자료만 고칠 수 있다.", "source": "studio-design-final-20261027.md" },
+    { "d": "studio-D2", "date": "2026-10-27", "one_line": "적용마다 스튜디오 브랜치에 커밋하고 되돌리기는 git revert. 스튜디오 브랜치는 제품 이력이 아니며 제품 커밋은 지휘자가 한다.", "source": "studio-design-final-20261027.md" },
+    { "d": "studio-D3", "date": "2026-10-27", "one_line": "깨끗한 시안 diff는 실제 백엔드 기준 교차 검토 뒤 재사용할 수 있다. 자동 병합은 없다.", "source": "studio-design-final-20261027.md" },
+    { "d": "studio-D4", "date": "2026-10-27", "one_line": "비판: 구체적 법 위반·환자 안전 실패만 거절(이유와 대안 제시). 그 밖은 짧은 근거 뒤 볼 수 있는 시안을 만든다. 이견은 인계에 기록.", "source": "studio-design-final-20261027.md" },
+    { "d": "studio-D6", "date": "2026-10-27", "one_line": "모든 화면을 거울로 보여주되 판독 흐름(목록→검사 열기→판독→관련 판독)을 먼저 깊게. 모의 응답이 없는 요청은 '스튜디오 미지원'으로 답한다.", "source": "studio-design-final-20261027.md" },
+    { "d": "studio-D7", "date": "2026-10-27", "one_line": "뷰어는 공개 표본 몇 건의 정적 DICOMweb으로. 실제 PACS의 Orthanc는 쓰지 않는다.", "source": "studio-design-final-20261027.md" },
+    { "d": "studio-D10", "date": "2026-10-27", "one_line": "스튜디오는 합성 자료만. 선생님께는 살아있는 비밀값(비밀번호·키·토큰) 말고 모든 것을 보여준다(정모 님 22:3x).", "source": "studio-design-owner-additions.md" },
+    { "d": "owner-22:5x", "date": "2026-10-27", "one_line": "스튜디오는 운영 서버(pacs.koreaimagingnetwork.com)에 별도 사용자·폴더·포트 8443으로. 첫 병원 실사용 전 옮기거나 잠그고, Part 1 설치일에는 멈춘다.", "source": "studio-design-owner-additions.md" },
+    { "d": "D1819 (출처 충돌)", "date": "2026-10-24", "one_line": "결정 원장에는 10월 24일 선생님이 '오프라인 열람 불필요'라고 답했다고 기록되어 있으나, 최신 지시는 오프라인 열람을 답변 대기로 둔다. 지휘자가 정리하기 전까지 오프라인 기능은 시작하지 않는다.", "source": "consult-studio-design-r2-20261027/report.md (GPT 2차 설계)" }
+  ],
+  "disagreements_open": [
+    { "between": "GPT 2차 설계 vs Fable 2차 설계", "topic": "추천 미리보기 사전 제작·캡처 방식·A/B 격리", "one_line": "지휘자가 D5·D9로 정리했다(사전 제작은 유휴 시간, 캡처는 Phase 2 같은 탭, A/B는 Phase 3 경로 접두사).", "state": "결정됨" }
+  ],
+  "estimates": [
+    { "what": "스튜디오 Phase 1", "value": "약 하루", "label": "추정", "by": "commander", "at": "2026-10-27", "basis": "studio-design-final-20261027.md" }
+  ],
+  "usage": { "label": "미집계", "note": "모델·토큰·비용 사용량은 지휘자 발행에 포함된다. 스튜디오 자체 사용량은 하루 인계(digest)에 기록된다." }
+}
