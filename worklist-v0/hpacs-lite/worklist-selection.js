@@ -41,10 +41,10 @@
     // W9: the same Open Selected Studies here, in Selection Details and in the selected rows' menu (options.openSet).
     const openSet=options.openSet?element('button','Open Selected Studies',host):null;
     if(openSet){openSet.type='button';openSet.id='multi-selection-open-set';}
-    // D1880 / Minhoon P0 item 1: Preload queues the selected studies into this browser's memory (preload-queue.js).
+    // D1890 / Minhoon P0 item 1: Preload queues encrypted reading-PC copies (preload-queue.js).
     const preloadQueue=root.KinPreloadQueue?.available()?root.KinPreloadQueue:null;
     const preload=preloadQueue?element('button','Preload',host):null;
-    if(preload){preload.type='button';preload.id='multi-selection-preload';preload.title='선택한 검사의 영상을 판독 전에 이 브라우저 메모리로 미리 받습니다. 디스크에는 남기지 않고, 열 때 서버에서 다시 확인합니다.';
+    if(preload){preload.type='button';preload.id='multi-selection-preload';preload.title='선택한 검사의 영상을 암호화해 72시간 보관합니다. 열 때 서버의 권한 확인과 열람 기록을 거칩니다.';
       preload.onclick=()=>{const list=rows();if(!live()||!list.length)return;preloadQueue.add(list.map(s=>({uid:s.uid,label:[s.id,s.name,s.date,s.modality].filter(Boolean).join(' · ')})),root.KinWorkContext?.session?.());};}
     element('span','Ctrl/⌘ 클릭 · Shift 범위 · Space 선택. 작성 대상은 유지합니다.',host);
     const preloadPanel=preloadQueue?preloadQueue.mount(host):null;

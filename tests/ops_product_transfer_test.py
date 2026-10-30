@@ -240,6 +240,19 @@ class Pure(unittest.TestCase):
             with self.subTest(change=name), patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned', 'kin', expected)
 
+    def test_preload_key_restore_preserves_active_bytes_and_retirement_tombstone(self):
+        body, _, _, _ = fixture(); expected = body['product']
+        active, retired = expected['rows']['PreloadCacheKey']
+        self.assertEqual(active['key'], '\\x' + 'ab' * 32)
+        self.assertIsNone(active['retiredAt'])
+        self.assertIsNone(retired['key'])
+        self.assertEqual(retired['retiredAt'], transfer.STAMP)
+        for field, value in [('key', None), ('institution', 'foreign'), ('sub', 'foreign')]:
+            actual = {k: copy.deepcopy(expected[k]) for k in ('catalog','rows','sequences','emr')}
+            actual['rows']['PreloadCacheKey'][0][field] = value
+            with self.subTest(field=field), patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
+                transfer.verify_product('owned', 'kin', expected)
+
     def test_current_git_migrations_are_covered(self):
         self.assertEqual(len(transfer.migration_sources()), len(transfer.MIGRATIONS))
 
@@ -458,7 +471,7 @@ class Pure(unittest.TestCase):
         # every attempt phase, a prepared, a Sent and a still-sending download, and the gate's four Study and four SOP reservations.
         # W5-API added ReportDraftInsertReceipt (48 migration files, 53 public tables with S9-U4b) with three synthetic receipts:
         # refused, applied and discarded.
-        self.assertEqual(len(transfer.TABLES), 52)
+        self.assertEqual(len(transfer.TABLES), 53)
         self.assertEqual(set(rows), set(transfer.TABLES))
         emr = transfer.expected_emr_rows()
         self.assertEqual(sorted(emr), transfer.EMR_TABLES)
@@ -493,7 +506,8 @@ class Pure(unittest.TestCase):
                          + 1    # S8-CTX: revision with save attempt id, beside the legacy revision
                          + 2    # S7-U5 D600: the unknown and the settled provider change record
                          + 12   # S9-U4b: one import, three downloads, four Study and four SOP reservations
-                         + 3)   # W5-API: the refused, the applied and the discarded insert receipt
+                         + 3    # W5-API: the refused, the applied and the discarded insert receipt
+                         + 2)   # D1890: active key and retired destruction record
         self.assert_import_operation_rows(rows['ImportOperation'])
         self.assert_insert_receipt_rows(rows['ReportDraftInsertReceipt'], rows)
         self.assertEqual(sorted((r['sub'], r['providerDoneAt'] is None, r['attempts']) for r in rows['MemberIsolation']),

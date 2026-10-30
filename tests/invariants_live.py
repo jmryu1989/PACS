@@ -101,6 +101,7 @@ class Route:
 # 이 표가 진입점의 단일 진실원천이다. 컨트롤러에 라우트를 추가하고 여기에 선언하지
 # 않으면 test_every_controller_route_is_declared가 살아 있는 스택을 건드리기도 전에 실패한다.
 ROUTES: dict[tuple[str, str], Route] = {
+    ("GET", "preload/cache-key"): Route(Kind.TENANT),
     ("GET", "presence"): Route(Kind.TENANT),
     ("POST", "presence"): Route(Kind.TENANT),
     ("POST", "emr-audit/roster/:grantId"): Route(Kind.TENANT),

@@ -40,6 +40,7 @@ export const CLINICIAN_SESSION_ROUTES: readonly string[] = Object.freeze(['GET m
  *    technician·admin만, 취소는 요청자·admin만 서비스가 허용하고, 요청은 전송이 아니다(Connect route는 계속 거절).
  *  - S7-U1a 중요 결과 세 행(critical-result.controller.ts): 받은 목록·한 건·ACK. view=sent는 서비스가 403, 남의 기록은
  *    404, 확정 원천이 아닌 기록(C3/C4)의 ACK는 409다 — 게이트 통과는 원문 권한이 아니다.
+ * `GET preload/cache-key` remains a worklist-only route; clinician-only sessions read images live.
  * `GET studies`·`GET bootstrap`·`GET studies/:uid/report-preview`·`GET audit`는 계속 거절한다 —
  * 초안·오더·상용구·작성자 칸이나 확정 전 본문을 싣는 응답이다.
  */

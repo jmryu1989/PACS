@@ -90,6 +90,7 @@
     "worklist-v0/hpacs-lite/main-split.bundle.js",
     "worklist-v0/hpacs-lite/main.html",
     "worklist-v0/hpacs-lite/order-reconciliation.js",
+    "worklist-v0/hpacs-lite/preload-*",
     "worklist-v0/hpacs-lite/reader-assignment.js",
     "worklist-v0/hpacs-lite/reading-appearance-account.js",
     "worklist-v0/hpacs-lite/reading-appearance.js",
@@ -221,7 +222,8 @@
       "proxy/**",
       "scripts/emr-compose.py",
       "scripts/record-run.py",
-      "tests/emr/d/**"
+      "tests/emr/d/**",
+      "worklist-v0/hpacs-lite/preload-*"
     ],
     "emr-e-contracts": [
       "api/Dockerfile*",
@@ -825,6 +827,7 @@
       "worklist-v0/hpacs-lite/viewer-multi-study.js",
       "worklist-v0/hpacs-lite/order-*",
       "worklist-v0/hpacs-lite/page-core*",
+      "worklist-v0/hpacs-lite/preload-*",
       "worklist-v0/hpacs-lite/reader-*",
       "worklist-v0/hpacs-lite/reading*",
       "worklist-v0/hpacs-lite/related*",
@@ -920,6 +923,7 @@
       "tests/e2e/**"
     ],
     "source-regressions": [
+      "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       ".github/workflows/gateway-e2e.yml",
       ".github/workflows/validate.yml",
@@ -1470,6 +1474,7 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "report-dom": [
+      "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
       "api/package-lock.json",
@@ -1646,6 +1651,7 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "viewer-dom": [
+      "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
       "api/prisma/schema.prisma",
@@ -1881,6 +1887,7 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "clinician-dom": [
+      "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
       "api/prisma/schema.prisma",
@@ -2048,6 +2055,7 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "critical-result-dom": [
+      "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
       "api/prisma/schema.prisma",
@@ -2205,6 +2213,7 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "admin-session-dom": [
+      "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
       "api/prisma/schema.prisma",
@@ -2371,6 +2380,7 @@
       "worklist-v0/hpacs-lite/workspace-shortcuts.js"
     ],
     "related-layout-dom": [
+      "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
       "api/prisma/schema.prisma",
