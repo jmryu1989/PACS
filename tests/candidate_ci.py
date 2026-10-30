@@ -76,7 +76,7 @@ FLOWS = (
     # client-shown entry in emr_access (the module's other cases run by its own command, tests/emr/a/README.md).
     ("emr/a/report_observation_browser_test.py", "ReportObservationBrowser",
      "test_a5_01_related_source_reports_only_the_shown_version_once", "test_a5_01_"),
-    # EMR-B1 L01 (emr/units/b.json candidate_cases): the access ledger's roles, guards and restart in its own disposable
+    # EMR-B1 L01: the access ledger's roles, guards and restart in its own disposable
     # database and production API image (the merged selection 115 -> 116).
     ("e2e/test_study_arrivals.py", "StudyArrivalsE2E", "test_arrivals_01_same_series_sop_updates_count_and_preserves_viewer_draft_hold_report_and_sources", "test_arrivals_01_"),
     ("e2e/test_finding_worklist.py", "FindingWorklistE2E", "test_worklist_02_separate_windows_ambiguous_owner_unattached_reattach_and_close", "test_worklist_02_"),
