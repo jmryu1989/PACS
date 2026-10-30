@@ -192,6 +192,56 @@ test('mode exit/reentry restores and reinstalls resize handling without stacking
   assert.equal(f.service.performResize, original);
 });
 
+// The pinned RenderingEngine's resize assigns every canvas size (clearing it) and its render() only flags the
+// viewports and requests one animation frame. A cell beside a dropped series must not stay cleared after the
+// resize task while it still reports a rendered image.
+function frameEngine(viewports, { failDraws = 0 } = {}) {
+  const frames = [], needs = new Set();
+  const engine = {
+    canvases: new Map(viewports.map(v => [v.id, 'image'])),
+    _animationFrameSet: false, _animationFrameHandle: null, hasBeenDestroyed: false,
+    getViewports: () => viewports,
+    resize() { for (const id of engine.canvases.keys()) engine.canvases.set(id, 'cleared'); },
+    render() {
+      viewports.forEach(v => needs.add(v.id));
+      if (!engine._animationFrameSet) { frames.push(engine._renderFlaggedViewports); engine._animationFrameHandle = frames.length; engine._animationFrameSet = true; }
+    },
+    _renderFlaggedViewports() {
+      if (failDraws > 0) { failDraws--; throw new Error('context lost'); }
+      for (const id of needs) engine.canvases.set(id, 'image');
+      needs.clear(); engine._animationFrameSet = false; engine._animationFrameHandle = null;
+    },
+    nextFrame() { frames.shift()?.(); },
+    pendingFrames: () => frames.length,
+  };
+  return engine;
+}
+
+test('resize draws its queued frame before returning, so no rendered cell is left cleared', async () => {
+  const f = await fixture();
+  try {
+    const engine = f.service.renderingEngine = frameEngine([...f.service.renderingEngine.getViewports()]);
+    f.service.performResize();
+    assert.deepEqual([...engine.canvases.values()], ['image', 'image']);
+    assert.equal(engine._animationFrameSet, false);
+    engine.nextFrame(); // The frame the engine requested still runs and finds nothing left to draw.
+    assert.deepEqual([...engine.canvases.values()], ['image', 'image']);
+  } finally { f.extension.onModeExit(); }
+});
+
+test('a resize redraw that fails is retried by the frame the engine already requested', async () => {
+  const f = await fixture();
+  try {
+    const engine = f.service.renderingEngine = frameEngine([...f.service.renderingEngine.getViewports()], { failDraws: 1 });
+    const warn = console.warn; console.warn = () => {};
+    try { f.service.performResize(); } finally { console.warn = warn; }
+    assert.deepEqual([...engine.canvases.values()], ['cleared', 'cleared']);
+    assert.equal(engine.pendingFrames(), 1);
+    engine.nextFrame();
+    assert.deepEqual([...engine.canvases.values()], ['image', 'image']);
+  } finally { f.extension.onModeExit(); }
+});
+
 test('a failed resize does not leave explicit stack navigation in resize mode', async () => {
   const f = await fixture();
   f.extension.onModeExit();
