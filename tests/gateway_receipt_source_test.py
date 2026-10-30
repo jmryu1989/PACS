@@ -293,7 +293,11 @@ class AgentPins(unittest.TestCase):
     def test_every_gateway_error_literal_has_a_code_and_the_table_has_no_stale_entry(self):
         found = constructed(AGENT)
         self.assertEqual([(line, t) for line, t in found if t not in AGENT_CODES], [])
-        self.assertEqual(set(AGENT_CODES), {t for _line, t in found})
+        # Streaming STOW no longer raises the old in-memory size refusals. Their
+        # public receipt codes remain accepted; product code need not throw them
+        # just to keep a source inventory equal to the compatibility table.
+        retired = {"single DICOM instance exceeds byte budget", "multipart body exceeds byte budget"}
+        self.assertEqual(set(AGENT_CODES), {t for _line, t in found} | retired)
         self.assertEqual(AGENT_FALLBACK, "other")
         for code in CODES:
             self.assertRegex(code, r"^[a-z][a-z_]{0,39}$")
