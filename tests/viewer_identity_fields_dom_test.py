@@ -1,5 +1,5 @@
 # coding: utf-8
-"""REQ-D02-IDENTITY-FIELDS isolated DOM coverage for viewer v3 and appearance v9."""
+"""REQ-D02-IDENTITY-FIELDS isolated DOM coverage for viewer v3 and appearance v10."""
 from pathlib import Path
 import unittest
 
@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 IDENTITY = ROOT / "worklist-v0" / "hpacs-lite" / "viewer-identity.js"
 APPEARANCE = ROOT / "worklist-v0" / "hpacs-lite" / "reading-appearance.js"
 VOLUME = ROOT / "worklist-v0" / "hpacs-lite" / "volume-preferences.js"
+MARKERS = ROOT / "worklist-v0" / "hpacs-lite" / "marker-style.js"
 
 
 class ViewerIdentityFieldsDOMTest(unittest.TestCase):
@@ -151,6 +152,7 @@ class ViewerIdentityFieldsDOMTest(unittest.TestCase):
 
     def test_editor_copy_reset_and_appearance_v9_legacy_v8(self):
         self.page.add_script_tag(path=str(VOLUME))
+        self.page.add_script_tag(path=str(MARKERS))
         self.page.add_script_tag(path=str(APPEARANCE))
         self.page.evaluate("window.appearance=KinReadingAppearance({owner:()=>JSON.stringify(ownerValue)})")
         self.page.click("#reading-appearance-open")
@@ -165,10 +167,10 @@ class ViewerIdentityFieldsDOMTest(unittest.TestCase):
         self.page.click("#viewer-identity-copy-modality")
         result = self.page.evaluate("""() => {
           const saved=appearance.read(),priorCt=saved.viewer.prior.overrides.CT,priorMr=saved.viewer.prior.overrides.MR;
-          const legacy=structuredClone(saved);legacy.version=8;legacy.viewer={version:2,...Object.fromEntries(['current','prior'].map(role=>{const p=saved.viewer[role];return [role,{size:p.size,font:p.font,color:p.color,name:p.name,date:p.date,description:p.description,position:p.position}]}))};
+          const legacy=structuredClone(saved);legacy.version=8;delete legacy.markers;legacy.viewer={version:2,...Object.fromEntries(['current','prior'].map(role=>{const p=saved.viewer[role];return [role,{size:p.size,font:p.font,color:p.color,name:p.name,date:p.date,description:p.description,position:p.position}]}))};
           return {saved,priorCt,priorMr,legacy:appearance.normalize(legacy)};
         }""")
-        self.assertEqual((9, 3), (result["saved"]["version"], result["saved"]["viewer"]["version"]))
+        self.assertEqual((10, 3), (result["saved"]["version"], result["saved"]["viewer"]["version"]))
         self.assertEqual("top-left", result["priorCt"]["fieldPositions"]["name"], "whole-role copy is a deep snapshot")
         self.assertEqual(result["priorCt"], result["priorMr"], "modality copy clones the selected explicit profile")
         self.assertEqual((8, 2), (result["legacy"]["version"], result["legacy"]["viewer"]["version"]))

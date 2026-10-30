@@ -156,9 +156,11 @@ PROFILES = {
         'out': ROOT / 'tests/e2e/artifacts/viewer-ux-shell-ci',
         'project_prefix': 'kin-viewer-ux-shell-ci-',
         # Viewer U2 shell (D1821): the module's own test_shell_* cases on the shipped viewer, in the
-        # worklist-ux-measurements job. One suite at the single-suite 900s ceiling, not an estimate.
+        # worklist-ux-measurements job. Tools shares this viewer flow and deadline;
+        # its load_tests selects only authored tool cases across its three classes.
         'suite_timeout': 900,
-        'suites': (('e2e/test_viewer_ux_shell.py', 'ViewerUXShellE2E', 'ci-viewer-ux-shell'),),
+        'suites': (('e2e/test_viewer_ux_shell.py', 'ViewerUXShellE2E', 'ci-viewer-ux-shell'),
+                   ('e2e/test_viewer_tools.py', None, 'ci-viewer-tools')),
     },
     's9-u7-served': {
         'out': ROOT / 'tests/e2e/artifacts/s9-u7-served-ci',
