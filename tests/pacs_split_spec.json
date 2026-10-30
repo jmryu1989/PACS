@@ -9613,5 +9613,60 @@
         ]
       }
     ]
+  },
+  "di_additions_preload_cache": {
+    "unit": "D1890",
+    "note": "Encrypted reading-PC cache key issue and owned hourly retirement. No patient data or access record.",
+    "middleware_routes": [],
+    "controllers": [
+      "PreloadKeyController"
+    ],
+    "providers": [
+      "PreloadKeyService"
+    ],
+    "routes": [
+      {
+        "controller": "PreloadKeyController",
+        "handler": "read",
+        "method": "GET",
+        "paths": [
+          "/|preload/cache-key"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [
+          {
+            "name": "Cache-Control",
+            "value": "no-store"
+          }
+        ],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      }
+    ],
+    "injectables": {
+      "PreloadKeyController": {
+        "params": [
+          "PreloadKeyService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "PreloadKeyService": {
+        "params": [
+          "PrismaService",
+          "Object"
+        ],
+        "scope": null,
+        "declared": [
+          "1:Symbol(EmrBackgroundWork)"
+        ],
+        "optional": []
+      }
+    }
   }
 }

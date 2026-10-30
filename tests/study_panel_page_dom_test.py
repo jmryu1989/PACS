@@ -100,7 +100,7 @@ def with_palette(tree, current):
 # Preload, disabled at first paint, and its status panel (closed and hidden while nothing is queued); main.html adds
 # preload-queue.js (both declared regions of study_panel_size_dom_test.py, DECIDED_REGIONS). The first-paint comparisons
 # take the button out of the layout where it stands (HIDE_PRELOAD, display none) and compare every other box and pixel
-# with the baseline; its own place and behaviour are the preload cases (e2e/test_preload_memory.py). The list floor with
+# with the baseline; its own place and behaviour are the preload cases (e2e/test_preload_cache.py). The list floor with
 # the toolbar's extra line stays this module's case (W3R-09, test_stacked_list_shows_header_and_one_whole_row).
 HIDE_PRELOAD = """() => [...document.querySelectorAll('#worklist-selection button')]
   .find(b => b.textContent === 'Preload')?.style.setProperty('display', 'none')"""

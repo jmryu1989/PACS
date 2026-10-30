@@ -352,21 +352,6 @@ class PreSite(h.Site):
             return route.fulfill(status=200, content_type=found[0], body=found[1])
         return super().static(route, path)
 
-    def worker_file(self, method, url):
-        """What a worker of the page asks for itself (WorkerNetwork), answered as `static` answers the page: a GET of a
-        file of the page directory. Anything else - a call or another origin - is not answered here (None)."""
-        parsed = urlparse(url)
-        if method != "GET" or f"{parsed.scheme}://{parsed.netloc}" != h.ORIGIN or not parsed.path.startswith(h.BASE):
-            return None
-        found = self.own_file(parsed.path)
-        if found:
-            return found
-        rel = "worklist-v0/hpacs-lite/" + parsed.path[len(h.BASE):]
-        if rel not in h.SERVED_FILES:
-            return None
-        h.SERVED.add(rel)
-        return h.TYPES[Path(rel).suffix], (h.ROOT / rel).read_bytes()
-
     def answer_dictation(self, text):
         route = self.held_dictations.pop(0)
         self.answer(route, 200, {"text": text, "seconds": 1.0, "languagePin": "ko", "enginePin": "SYN-ENGINE",
@@ -452,7 +437,7 @@ class Run:
         self.page = self.context.new_page()
         self.page.set_default_timeout(10000)
         self.errors, self.dialogs = [], []
-        # The page's SharedWorker gets its own files from this run's origin too (see sh.WorkerNetwork).
+        # Worker imports and API calls use this run's same synthetic origin and session.
         self.worker_requests = []
         self.worker_network = sh.WorkerNetwork.of(case.browser)
         self.worker_context = self.worker_network.register(self.context, self.page, self.worker_answer,
@@ -467,15 +452,12 @@ class Run:
         self.closed = False
         self.page.goto(h.MAIN_URL, wait_until="commit")
 
-    def worker_answer(self, method, url):
-        record = {"method": method, "path": urlparse(url).path, "answered": False}
+    def worker_answer(self, route, request):
+        record = {"method": request.method, "path": urlparse(request.url).path, "answered": False}
         self.worker_requests.append(record)
-        try:
-            found = self.site.worker_file(method, url)
-        except Exception:  # noqa: BLE001 - e.g. a historical side without that file: reported as unanswered
-            found = None
-        record["answered"] = found is not None
-        return found
+        route.on_fulfill = lambda: record.update(answered=True)
+        # Keep host-driven worker I/O in its own trace, outside the page's deterministic request order.
+        h.Site.handle(self.site, route, request)
 
     def worker_unanswered(self, method, url):
         self.errors.append(f"worker request not answered by the synthetic origin: {method} {urlparse(url).path}")
