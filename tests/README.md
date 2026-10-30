@@ -289,7 +289,7 @@ REQ-S9-U0a-PRE-ORDER → RISK-B1-03/05/15/41/42/45/57/58·PRE-X1~X3·PRE-P3(clas
 
 순수 Node 계약 시험 `node --test tests/emr_contract_test.cjs`는 D589/D591의 법정 기록 분류·접속사건 형식·서명 payload·판독 수명주기와 적법 기본값을 결속한다.
 
-현행 PostgreSQL 접속기록 원장은 `emr/units/b.json`과 `.github/workflows/validate.yml`의 선언·경계·복원 시험을 따른다. 이전 B1 성능 관문과 `emr-b.yml` 참조는 역사 기록이며 현행 출시 조건이 아니다.
+현행 PostgreSQL 접속기록 원장은 `.github/workflows/validate.yml`의 배포 안전·공개 경계·복원 시험을 따른다. `emr/units/b.json`은 배포 catalog·복원 설명·REQ-B2R→RISK→TEST 연결과 C 시험이 읽는 소유 경계를 남기며, migration·case·mutant 정확 목록을 중복 선언하지 않는다. `scripts/emr-compose.py check`는 Compose의 런타임 자격·설치 비밀 비노출·state 볼륨·기동 순서·운영 이미지와 host bind 금지를 확인한다. 계약 시험은 Node 실행 결과와 TAP SKIP/TODO 거절로 판정하며, G3 선택·수집 일치는 `candidate_ci`가 확인한다. 이전 B1 성능 관문과 `emr-b.yml` 참조는 역사 기록이며 현행 출시 조건이 아니다.
 
 역사 기록 — 폐기된 EMR-B1 D961 판정(REQ-D961 → RISK-EMR-FALSE-PERFORMANCE-ACCEPT → `noninferiority_test.py`, L03/L03b/L03c, M36): 짝지은 블록의 candidate/r3 지연 비율에 대한 단측 95% Student t 상한(UB)을 사용한다. single·sustained p95와 concurrent-24/48 tail p95는 point와 UB가 모두 ≤ 1.10이어야 하고, concurrent median은 UB ≤ 1.10만 요구한다(중앙값 point ≤ 1.00 조건 없음). concurrent는 tail과 median을 모두 통과해야 하며 acceptance는 각 revision/workload의 attribution ≥ 0.95도 요구한다. p95 point 조건은 UB 조건에 포함되지만 D961의 명시 조건으로 유지한다(R9-08). hosted CI는 D1006(REQ-D1006 → RISK-EMR-FALSE-PERFORMANCE-ACCEPT/RECEIPT-DELAY/HOST-OFFSET → `noninferiority_test.py`, `performance_test.py`, L03/L03b/L03c, M36, MP02/MP03)에 따라 모든 receipt workload/case(concurrent 포함)의 지연을 R > 1.25 AND D > 5.0ms일 때만 FAIL로 판정한다(등호는 통과). live R은 짝별 블록 p95 비율의 기하평균이고, `performance.py` R은 블록 p95 중앙값들의 비율로 서로 다른 추정량이다. D는 짝별 candidate_p95 − baseline_p95의 부호 있는 차이의 중앙값이며 절댓값·평균·중앙값들의 차이가 아니다. 각 결과에 `ratio_method`, `R`, `pair_deltas_ms`, `D`, `gate_ratio_limit`, `gate_delta_floor_ms`, `gate_passed`, `gate_reason`을 남긴다. hosted runner에서 반복 관찰된 비용 증가의 원인은 미확정이며, sub-10ms baseline의 고정 비용 차이에 대한 5ms는 gross-only 허용폭 선택이지 검증된 잡음 상한이 아니다. 모든 짝이 9→14ms(+55.6%)여도 통과하는 사각지대를 수용하며 일부 블록에만 집중된 증가도 중앙값이 가릴 수 있다. 1→160–230ms JIT급 및 100→140ms 회귀는 실패한다. 누락·NaN·불일치 쌍은 통과할 수 없고 요청 실패·JIT/plan·구조 검사와 기존 mutant는 빠른 지연값으로 상쇄되지 않는 독립 차단 조건이다. 기존 FAIL 기록은 보존한다. 구속력 있는 성능 수용 판정은 D961/D970 quiet-host live acceptance이며, 기존 1.10 / 단측 95% UB 조건은 그대로 유지한다. permutation p·paired log-ratio bound·added-ms bound와 sustained noninferiority는 기록하며 sustained UB로 CI를 실패시키지 않는다. 요청 실패·retained-prefix 읽기·유의한 size effect·journal 재읽기 검사는 유지한다. SQL/COMMIT 지연은 모델값이며 acceptance 판정이 아니다. `performance_test.py`의 순수 판정·구조·negative-control 시험 489건은 기존 CI `noninferiority_test.py` 진입점에서 함께 실행하며 계약/live/candidate 건수에는 더하지 않는다. 성능 음성 대조(D1550, `performance_mutants.py`): 지연 변이(MP02 sustained, MP03 concurrent)는 필요한 case 통계가 모두 유한하고 양쪽 revision의 요청 실패가 0이며 원래 R/D 한계를 넘을 때만 kill이다. 어느 쪽이든 요청 실패·통계 누락·harness 오류는 `killed=None`(INVALID_CONTROL)이며 driver가 실패 종료한다. kill도 생존도 아니다. MP02는 변이 사본의 `AccessLedgerStore.confirm` 끝(acknowledge 대기 뒤, receipt 반환 직전)에 L = max(50, ceil(1.5·B+10))ms 지연을 넣는다. B=2000ms는 hosted r3 sustained 블록 p95의 사전 상한(관측 최대 1348.2ms)이고 L=3010ms다. 같은 실행의 원시 행에서 모든 r3 블록 p95 ≤ B, 모든 변이 receipt ≥ L, 요청 실패 0을 확인해야 kill로 세며(R ≥ L/B > 1.25, 모든 짝 차이 ≥ L−B > 5ms), 하나라도 어기면 INVALID_CONTROL이다. 건강한 대조군 실패(`control_failed`)와 대조군 설계 무효(`invalid_control`)는 따로 보고한다. 계약/live/candidate 건수는 바뀌지 않는다.
 
@@ -3224,6 +3224,43 @@ D1821 / RISK-WRONG-DISPLAY: pinned native stack rendering uses a shared GPU canv
 REQ-MG-LENGTH-SCALE/FRAME/READBACK → RISK-MG-WRONG-SCALE/FRAME/BASIS → TEST-MG-LENGTH-BOUNDARY: `mg_length_test.cjs` checks DBT frame/shared geometry, Synthetic 2D and FFDM spacing precedence, detector/ERMF/source-plane labels, no-spacing refusal, saved baseline and SR frame/coordinates. PixelSpacing takes precedence; otherwise projection spacing is ImagerPixelSpacing / supplied ERMF or explicitly detector-based. Source: user/Minhoon 2026-10-26; DICOM PS3.3 §10.7. Real served public-sample draw/save/reopen/SR evidence is recorded separately; pure tests do not constitute physician acceptance.
 
 REQ-D1882-HELD → RISK-UNKNOWN-SOURCE-MIX → TEST-D1882-HELD: a study whose sending hospital is unknown (InstitutionName matches no registered spelling and the calling AE no registered device) is held - in no institution's list, opened by nobody; the cross-institution admin view (GET unassigned) and per-study assignment (POST studies/:uid/assign) are retired. `pacs_split_modules_test.cjs` SPLIT-13 (held until a registration attaches it, admin-only and own-institution registration, 400/409, attach and arrival audit detail, an alert with no study or patient fact), `worklist_split_uid_test.cjs` TEST-WSU-09 (a split UID is held and counted once; a second device's instance after the first answer keeps the study held; a row with no owner, a tele value on it included, is refused by authzDicom and listed for nobody, radiologist and admin), SPLIT-13 (a spelling with a comma is one registered value, also for the import gate's issuer check), `study_source_test.cjs` (one study.attach row on attach). Served: `e2e/test_held_source.py` C-STOREs two synthetic studies from run-unique AE titles, checks they are held for doctor/kdoctor/jmryu, reads GET admin/held-sources (device, raw text, count; no UID or patient fact), registers the device through the real admin page (Held Studies; the outcome stays shown after the refresh that follows) and the spelling through the API, then sees them in the owner's list only, the study.attach rows and, for A-027, that GET audit records every returned row to the study's current institution in the EMR ledger. test_held_02 sends a second instance of a held study from another AE after the alert named the first, registers the first AE (attached 0, still held), sees Register Name enabled for a spelling with a comma, and sets a tele value on the held row: GET /dicom-web/studies/{uid}/metadata is 403 for jmryu and doctor. It restores the institution's registration columns; the API keeps the run-unique values cached until restart.
+
+### MG vendor headers (2026-10-30)
+
+REQ-MG-VENDOR-CLASS/HANG/DISPLAY -> RISK-MG-MISCLASS/OMITTED-SLICES/WRONG-VOI ->
+`node --test tests/mg_vendor_test.cjs tests/mg_vendor_hanging_test.cjs` checks the source-declared
+Hologic, Siemens, GE Pristina 10.x and Fuji header shapes in `fixtures/mg_vendor_cases.json`.
+This includes Siemens CT slices/INSIGHT_2D, cross-vendor synthetic 2D comparison, 12/14-bit unsigned
+MONOCHROME1/2, header windows and stored VOI tables (including the frame macro). The native extension
+sets the display transfer function; source pixels stay unchanged. D1892 (Minhoon 10-26 vendor-universal request)
+replaces D735's R1 device limit; `emr/e/rule-cases.json` carries the vendor shapes for both the viewer model and
+the EMR-E API classifier (Siemens LEFT/RIGHT/BOTH in Image Type value 4, free-text hints on every vendor path).
+The hanging test runs the extension through the pinned OHIF display-set path: the store callback attached before
+`start()`, one display set per Modality MG instance and a non-writable `ImageSet.images`, so the Siemens
+CT-format slices (Modality MG) must become one stack there. A stored VOI LUT read from implicit VR arrives as
+InlineBinary or a BulkDataURI fetched on this origin before hanging, as the first part of the multipart/related answer
+Orthanc gives (the synthetic archive refuses any other Accept with 400, as the pinned plugin does); an unread table
+shows a notice. `node --test tests/emr/e/catalog_mg_test.cjs` (compiled `api/dist`, emr-e-contracts job) runs the API
+image catalog over a synthetic Orthanc: Siemens CT-format tomosynthesis slices get the same DBT class the viewer hangs,
+and an ordinary CT image gets no mammography result. Signed 16-bit in Siemens's statement
+is a receive/display capability, not a declared MG acquisition output. Fuji bit depths within its
+declared range are representative synthetic choices, not claims about a specific device.
+
+`python scripts/mg_vendor_fixture.py --output tmp/mg-vendor-fixtures` creates only synthetic DICOM,
+round-trips all native pixels and checks the actual compressed codestream precision. 10/12/14-bit frames
+are encoded at their true precision with imagecodecs (J2K, SV1, .51) and pyjpegls (JPEG-LS); a missing encoder
+is NOT_RUN (exit 2), not a passed compressed fixture. GE 2D is uncompressed per
+the 10.x SOP table; its BTO and Hologic/Fuji/Siemens use their declared syntax lists. Siemens baseline
+8-bit forwarding is already covered by #295; no native 8-bit MG acquisition is fabricated.
+No additional TS from the DICOM registry alone (HTJ2K, deflate, .57) is introduced.
+
+REQ-MG-WORKER-ASSET -> RISK-CODEC-CSP-DRIFT -> `ohif_worker_asset_test.py` fails if nginx's eval-enabled
+worker is absent from `--viewer-root <extracted-build>`. In the `viewer-native-dom` PR job, `--ohif-library` reads
+the pinned `libOrthancOHIF.so`: the worker file the dicom-image-loader creates must be nginx's exact location. The existing `e2e/test_caution_imaging.py`
+also GETs that asset from the actual pinned viewer and rejects missing/HTML fallback responses.
+Pure service tests and generated fixtures do not prove served GPU grayscale/decoding, real device
+compatibility or physician acceptance. Run the served checks on the isolated VM and retain those results.
+First-ingest header inspection is described in `scripts/mgxa-acceptance.md`.
 
 ### Imaging scope after D1819/D1821
 

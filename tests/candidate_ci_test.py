@@ -58,8 +58,8 @@ class CandidateCiTests(unittest.TestCase):
         self.assertEqual(sum(1 for item in selected if item["case"].startswith("WorklistSplitUidInvariantTests.test_split_uid_")), 6)
         self.assertEqual([item["case"] for item in selected[-len(candidate.FLOWS):]],
             [class_name + "." + method for _, class_name, method, _ in candidate.FLOWS])
-        declaration = json.loads((target / "emr/units/b.json").read_text(encoding="utf-8"))
-        self.assertEqual([item for item in selected if item["file"] == "tests/emr/b/live.py"], [{"file": row["file"], "case": row["case"]} for row in declaration["candidate_cases"]])
+        self.assertEqual([item for item in selected if item["file"] == "tests/emr/b/live.py"], [
+            {"file": "tests/emr/b/live.py", "case": "EmrBLedgerLive.test_b01_ledger_roles_and_restart"}])
         for filename, class_name, method, prefix in candidate.FLOWS:
             module = runner.load_module(target / "tests" / filename)
             self.assertTrue(method.startswith(prefix))

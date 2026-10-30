@@ -149,7 +149,7 @@ function provenance(value: unknown, format: ObjectFormat): Provenance {
 // read from the stored header only; a caller's label is recorded, never used. "verified" means this contract's header
 // evidence is met, not diagnostic fitness, decoder or display correctness, or a preserved acquisition.
 
-export const MG_RULE_VERSION = 'D744-2' as const;
+export const MG_RULE_VERSION = 'D1892' as const;
 export type DicomJson = Readonly<Record<string, { vr?: string; Value?: readonly unknown[] }>>;
 export type MgClass = 'conventional-2d-presentation' | 'conventional-2d-processing' | 'device-synthetic-2d' | 'dbt-slices' | 'dbt-slab' |
   'projection' | 'partial-view' | 'unverified';
@@ -170,6 +170,8 @@ export interface MammographyResult {
   claim: { class: string; agrees: boolean } | null;
 }
 const MG_P = '1.2.840.10008.5.1.4.1.1.1.2', MG_R = '1.2.840.10008.5.1.4.1.1.1.2.1', BTO = '1.2.840.10008.5.1.4.1.1.13.1.3';
+const CT = '1.2.840.10008.5.1.4.1.1.2';
+const side = (v: string) => ({ LEFT: 'L', RIGHT: 'R', BOTH: 'B' }[v] ?? v);
 const SOURCE_CLASSES: readonly MgClass[] = freeze(['dbt-slices', 'dbt-slab', 'projection']);
 const GENERATED_V3: readonly string[] = freeze(['TOMOSYNTHESIS', 'TOMO_SCOUT', 'PREFIRE', 'POSTFIRE', 'POSTBIOPSY', 'POSTMARKER']);
 const SLAB_PAIRS: readonly string[] = freeze(['NONE|MAX_IP', 'MAXIMUM|MAX_IP', 'NONE|MIN_IP', 'MAXIMUM|TOMOSYNTHESIS', 'MEAN|TOMOSYNTHESIS']);
@@ -251,8 +253,8 @@ function frameStructure(h: DicomJson, sop: string): void {
 }
 function laterality(h: DicomJson, frames: DicomJson[]): { value: string | null; conflict: boolean } {
   const seen = new Set<string>();
-  for (const tag of ['00200062', '00200060']) { const v = first(h, tag); if (v) seen.add(v.toUpperCase()); }
-  for (const f of frames) for (const a of itemsOf(f, '00209071') ?? []) { const v = first(a, '00209072'); if (v) seen.add(v.toUpperCase()); }
+  for (const tag of ['00200062', '00200060']) { const v = first(h, tag); if (v) seen.add(side(v.toUpperCase())); }
+  for (const f of frames) for (const a of itemsOf(f, '00209071') ?? []) { const v = first(a, '00209072'); if (v) seen.add(side(v.toUpperCase())); }
   return { value: seen.size === 1 ? [...seen][0] : null, conflict: seen.size > 1 };
 }
 function facts(h: DicomJson, sop: string, frames: DicomJson[]): Facts & { lateralityConflict: boolean; viewConflict: boolean; error: string | null } {
@@ -286,7 +288,7 @@ function facts(h: DicomJson, sop: string, frames: DicomJson[]): Facts & { latera
     btoCodeMissing: sop === BTO && flag === 'YES' && codes.length === 0, error };
 }
 const hologic = (h: DicomJson) => ['HOLOGIC', 'HOLOGIC, INC.'].includes((first(h, '00080070') ?? '').toUpperCase()) &&
-  (first(h, '00081090') ?? '').toUpperCase() === 'SELENIA DIMENSIONS';
+  ['SELENIA DIMENSIONS', '3DIMENSIONS'].includes((first(h, '00081090') ?? '').toUpperCase());
 const software = (h: DicomJson, versions: readonly string[]) => (strings(h, '00181020') ?? []).some(s => versions.includes(s));
 
 /** G: stored geometry of every frame, positions projected on the plane normal, regular spacing (rule.md G). */
@@ -343,6 +345,16 @@ function classify2d(h: DicomJson, sop: string): Base {
   const v3 = type[2] ?? null, v4 = type[3] ?? null, extension = type.slice(4).some(x => x !== '');
   const plainV4 = v4 === null || v4 === '' || v4 === 'NONE';
   const conventional = sop === MG_P ? 'conventional-2d-presentation' as const : 'conventional-2d-processing' as const;
+  if (first(h, '00080070')?.toUpperCase() === 'SIEMENS' && type[1] === 'PRIMARY' && ['R', 'L', 'B'].includes(side(v4))) {
+    if (side(v4) !== laterality(h, []).value) fail('laterality-conflict');
+    const tail = type.slice(4).filter(Boolean);
+    if (type[0] === 'DERIVED' && v3 === 'TOMO_2D' && tail.length === 1 && tail[0] === 'INSIGHT_2D' && sop === MG_P)
+      return { base: 'device-synthetic-2d', basis: 'siemens-insight-2d', representation: null, biopsy: null };
+    if (!tail.length && ['', 'TOMO_2D'].includes(v3)) {
+      if (['0008103E', '00181030', '00082111'].some(tag => LEGACY_HINT.test(first(h, tag) ?? ''))) fail('possible-legacy-generated-2d');
+      return { base: conventional, basis: 'siemens-digital-mammography', representation: null, biopsy: null };
+    }
+  }
   if (!extension && (v3 === null || v3 === '') && plainV4) {
     if (['0008103E', '00181030', '00082111'].some(tag => LEGACY_HINT.test(first(h, tag) ?? ''))) fail('possible-legacy-generated-2d');
     return { base: conventional, basis: v3 === null ? 'digital-mammography-legacy-null-v3' : 'digital-mammography', representation: null, biopsy: null };
@@ -381,13 +393,17 @@ function classifyBto(h: DicomJson): Base {
     if (first(ft[0], '00089207') !== technique || technique === null) fail('technique-summary-conflict');
   }
   if (type.some((x, i) => x === 'GENERATED_2D' && i !== 3) || (v3 === 'VOLUME' && v4 === 'GENERATED_2D')) fail('image-type-profile');
-  if (v1 === 'ORIGINAL' && (v4 !== 'NONE' || technique !== 'NONE')) fail('original-requires-none');
+  const gePlanes = ['GE MEDICAL SYSTEMS', 'GE HEALTHCARE'].includes(first(h, '00080070')?.toUpperCase()) &&
+    first(h, '00081090')?.toUpperCase() === 'SENOGRAPHE PRISTINA' && v3 === 'TOMOSYNTHESIS' && vp === 'VOLUME' && technique === 'TOMOSYNTHESIS';
+  if (v1 === 'ORIGINAL' && (v4 !== 'NONE' || technique !== 'NONE' && !gePlanes)) fail('original-requires-none');
   if (!['VOLUME', 'SAMPLED'].includes(vp)) fail('volumetric-unsupported');
   if (v4 === 'GENERATED_2D') {
-    // R1 supports the observed Hologic Selenia Dimensions Intelligent 2D profile only; other devices stay unverified
-    // as a support boundary, not as a DICOM violation (DC-01).
-    if (n === 1 && key === 'DERIVED\\PRIMARY\\TOMOSYNTHESIS\\GENERATED_2D' && hologic(h) && software(h, ['AWS:1.9.1.8']) && vp === 'VOLUME' && technique === 'MAX_IP')
-      return { base: 'device-synthetic-2d', basis: 'hologic-selenia-dimensions-bto-generated-2d', representation: null, biopsy: null };
+    // D1892: vendor-universal support supersedes D735's sample-device/software restriction.
+    const standard = vp === 'SAMPLED' && technique === 'TOMOSYNTHESIS';
+    const hologicShape = hologic(h) && vp === 'VOLUME' && technique === 'MAX_IP';
+    if (n === 1 && key === 'DERIVED\\PRIMARY\\TOMOSYNTHESIS\\GENERATED_2D' && (standard || hologicShape))
+      return { base: 'device-synthetic-2d', basis: hologicShape && first(h, '00081090')?.toUpperCase() === 'SELENIA DIMENSIONS' && software(h, ['AWS:1.9.1.8'])
+        ? 'hologic-selenia-dimensions-bto-generated-2d' : 'breast-tomosynthesis-generated-2d', representation: null, biopsy: null };
     return fail('unsupported-device-profile');
   }
   if (v3 === 'TOMO_PROJ' && v4 === 'NONE') return { base: 'projection', basis: 'breast-tomosynthesis-projection', representation: null, biopsy: null };
@@ -396,12 +412,30 @@ function classifyBto(h: DicomJson): Base {
   const close = (a: number, b: number) => Math.abs(a - b) <= tol(g.d);
   if (v4 === 'NONE' && g.t <= 3 && close(g.t, g.d) && ['TOMOSYNTHESIS', 'NONE'].includes(technique))
     return { base: 'dbt-slices', basis: 'thin-slice-geometry', representation: 'slices', biopsy: null };
-  if (v4 === 'NONE' && hologic(h) && software(h, ['AWS:1.8.3.63', 'AWS:1.9.1.8']) && Math.abs(g.t - 1) <= 0.05 && Math.abs(g.d - 1) <= 0.05 &&
+  if (v4 === 'NONE' && hologic(h) && Math.abs(g.t - 1) <= 0.05 && Math.abs(g.d - 1) <= 0.05 &&
       vp === 'VOLUME' && technique === 'MAX_IP')
     return { base: 'dbt-slices', basis: 'hologic-selenia-1mm-slices', representation: 'slices', biopsy: null };
   if (g.t > 3 && g.t + tol(g.d) >= g.d && SLAB_PAIRS.includes(`${v4}|${technique}`))
     return { base: 'dbt-slab', basis: 'thick-aggregation-and-geometry', representation: technique === 'MAX_IP' ? 'mip-slab' : technique === 'MIN_IP' ? 'minip-slab' : 'slab', biopsy: null };
   return fail('slice-or-slab-evidence');
+}
+
+function classifyCtTomo(h: DicomJson): Base {
+  const type = strings(h, '00080008'), lat = laterality(h, []).value;
+  const anatomy = (itemsOf(h, '00082218') ?? []).map(codeKey);
+  const count = numbers(h, '00280008');
+  if (first(h, '00080070')?.toUpperCase() !== 'SIEMENS' || !type ||
+      typeKey(type.map((v, i) => i === 3 ? side(v) : v)) !== 'DERIVED\\PRIMARY\\TOMO\\' + lat ||
+      !['R', 'L', 'B'].includes(lat) || !anatomy.some(c => ['SNM3|T-04000', 'SRT|T-04000', 'SCT|76752008'].includes(c)) ||
+      has(h, '52009229') || has(h, '52009230') || count !== null && (count.length !== 1 || count[0] !== 1)) fail('ct-tomo-profile-conflict');
+  const orientation = numbers(h, '00200037'), position = numbers(h, '00200032'), spacing = numbers(h, '00280030'), thickness = numbers(h, '00180050');
+  if (orientation?.length !== 6 || !orientation.every(Number.isFinite) || position?.length !== 3 || !position.every(Number.isFinite) ||
+      spacing?.length !== 2 || !spacing.every(n => Number.isFinite(n) && n > 0) || thickness?.length !== 1 || !(thickness[0] > 0) ||
+      !/^[0-9]+(?:\.[0-9]+)+$/.test(first(h, '00200052') ?? '') || first(h, '00200052').length > 64) fail('geometry-incomplete');
+  const row = orientation.slice(0, 3), column = orientation.slice(3);
+  const dot = (a: number[], b: number[]) => a.reduce((n, x, i) => n + x * b[i], 0);
+  if (Math.abs(dot(row, row) - 1) > 1e-3 || Math.abs(dot(column, column) - 1) > 1e-3 || Math.abs(dot(row, column)) > 1e-3) fail('orientation-invalid');
+  return { base: 'dbt-slices', basis: 'ct-breast-tomosynthesis', representation: 'slices', biopsy: null };
 }
 
 interface Classified { sop: string; studyUid: string; sopClass: string; frameCount: number | null; result: Omit<MammographyResult,
@@ -425,12 +459,13 @@ export function classifyMammography(headerInput: unknown): Classified {
     // A malformed source container invalidates classification as well as source
     // linkage. Otherwise an unverified object can retain a verified slab label.
     extractSources(h);
-    if (![MG_P, MG_R, BTO].includes(sop)) fail('unsupported-sop');
+    const ctTomo = sop === CT && strings(h, '00080008')?.[2] === 'TOMO';
+    if (![MG_P, MG_R, BTO].includes(sop) && !ctTomo) fail('unsupported-sop');
     for (const uid of [sop, sopInstance, studyUid, first(h, '0020000E') ?? '']) if (uid.length > 64 || !/^[0-9]+(?:\.[0-9]+)+$/.test(uid)) fail('identity-invalid');
-    if (first(h, '00080060')?.toUpperCase() !== 'MG') fail('modality-not-mg');
+    if (first(h, '00080060')?.toUpperCase() !== 'MG' && !(ctTomo && first(h, '00080060')?.toUpperCase() === 'CT')) fail('modality-not-mg');
     // An out-of-IOD root claim cannot contradict the Image Type just because that IOD does not consume it.
     if (has(h, '00089007') && typeKey(strings(h, '00089007')) !== typeKey(strings(h, '00080008'))) fail('root-frame-type-conflict');
-    base = sop === BTO ? classifyBto(h) : classify2d(h, sop);
+    base = ctTomo ? classifyCtTomo(h) : sop === BTO ? classifyBto(h) : classify2d(h, sop);
     if (f.lateralityConflict) fail('laterality-conflict');
     if (f.viewConflict) fail('view-conflict');
     if (f.partial === 'conflict') fail('partial-conflict');

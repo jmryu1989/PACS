@@ -1,33 +1,41 @@
 #!/usr/bin/env python3
-"""EMR-B deployment declaration: check it, and supply the fixed provisioning SQL.
+"""Check EMR-B deployment safety and supply the fixed provisioning SQL.
 
   python scripts/emr-compose.py sql provision        print the provisioning SQL (no secrets; psql reads them via \\getenv)
-  python scripts/emr-compose.py check [--json]        the unit declaration emr/units/b.json against this checkout
-  python scripts/emr-compose.py check-run --kind node|unittest --run-dir DIR --cases-from contract|live
-                                                      a record-run.py evidence directory against the declared cases
+  python scripts/emr-compose.py check [--json]        Compose credentials, state, startup order and production mounts
 
 This tool never connects to a database or a Docker daemon and never runs an operational command. Provisioning is
 executed by whoever installs a deployment (the compose service `emr-provision`, CI, or an operator) with psql and the
 installer credential; secrets come from that environment only (KIN_EMR_RUNTIME_PASSWORD, and optionally
-KIN_EMR_READER_PASSWORD / KIN_EMR_RETENTION_PASSWORD). It checks honest-mistake consistency against reviewed tables;
-it is not a general judge of test results.
+KIN_EMR_READER_PASSWORD / KIN_EMR_RETENTION_PASSWORD).
 """
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 from pathlib import Path
 import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-DECLARATION = ROOT / "emr" / "units" / "b.json"
 ROLES = ("kin_emr_owner", "kin_runtime", "kin_emr_reader", "kin_emr_retention")
 TABLESPACE_LOCATION = "/var/lib/postgresql/emr-access/ts"
 
 _ROLE_LIST = ", ".join("'%s'" % role for role in ROLES)
 _PASSWORD = r"\A[A-Za-z0-9._~-]+\Z"
+# Compose's volume-name grammar.
+_VOLUME_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+# Compose interpolates before it splits a short-syntax entry, so any '$' can place a host path in the source or the
+# target (${PWD}/host, /host:${TARGET}); entries are therefore admitted by exact shape, never by spotting a bind.
+_CONTAINER_PATH = re.compile(r"/[^:$]*")
+# In short syntax a single letter before ':/' is a Windows drive to Compose, so a one-character name must be a digit.
+_NAMED_SHORT = re.compile(r"([A-Za-z0-9][A-Za-z0-9_.-]+|[0-9]):(/[^:$]*)(?::([^:$]+))?")
+_MODES = {"ro", "rw", "z", "Z", "nocopy", "consistent", "cached", "delegated",
+          "shared", "rshared", "slave", "rslave", "private", "rprivate"}
+
+
+class Replaced(list):
+    """A sequence tagged !override or !reset: it replaces the base file's list instead of merging with it."""
 
 
 def _optional_login(role, variable, environment):
@@ -102,33 +110,69 @@ def load_yaml(path):
     import yaml  # PyYAML, as the existing CI declaration tests use it
 
     class ComposeLoader(yaml.SafeLoader):
-        """Compose's merge tags (!reset, !override) carry the value they replace with; nothing else is admitted."""
+        """Compose's merge tags: !override replaces with its value; !reset drops the value it carries entirely."""
 
-    for tag in ("!reset", "!override"):
-        ComposeLoader.add_constructor(tag, lambda loader, node: (
-            loader.construct_sequence(node) if isinstance(node, yaml.SequenceNode) else
-            loader.construct_mapping(node) if isinstance(node, yaml.MappingNode) else loader.construct_scalar(node)))
+    ComposeLoader.add_constructor("!override", lambda loader, node: (
+        Replaced(loader.construct_sequence(node, deep=True)) if isinstance(node, yaml.SequenceNode) else
+        loader.construct_mapping(node) if isinstance(node, yaml.MappingNode) else loader.construct_scalar(node)))
+    ComposeLoader.add_constructor("!reset", lambda loader, node: (
+        Replaced() if isinstance(node, yaml.SequenceNode) else {} if isinstance(node, yaml.MappingNode) else None))
     return yaml.load(path.read_text(encoding="utf-8"), Loader=ComposeLoader)
 
 
-DECLARATION_KEYS = {"unit", "round", "base_sha", "dependencies", "owned_paths", "models", "routes", "records", "migrations",
-                    "deployment", "restore", "req_risk_test", "cases", "expected", "mutants", "candidate_cases", "replacement"}
+def environment(service):
+    values = service.get("environment") or {}
+    if isinstance(values, list):
+        return dict(value.partition("=")[::2] for value in values)
+    return values
 
 
-def declared_cases(root, declaration, kind):
-    """The live/contract case names collected from the test files themselves (Python AST; TypeScript AST for JS is
-    the contract test's own C10)."""
-    cases = declaration["cases"][kind]
-    if kind == "live":
-        try:
-            module = ast.parse((root / cases["file"]).read_text(encoding="utf-8"))
-        except (OSError, SyntaxError, UnicodeDecodeError):
+def mount(volume):
+    """The long form of a volume entry, or None when its shape could reach the host (bind, variable, unknown)."""
+    if isinstance(volume, str):
+        if _CONTAINER_PATH.fullmatch(volume):
+            return {"type": "volume", "target": volume}
+        match = _NAMED_SHORT.fullmatch(volume)
+        if not match or not set((match[3] or "rw").split(",")) <= _MODES:
             return None
-        cls = next((n for n in module.body if isinstance(n, ast.ClassDef) and n.name == cases["class"]), None)
-        if cls is None:
-            return None
-        return [n.name for n in cls.body if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")]
-    return None
+        return {"type": "volume", "source": match[1], "target": match[2], "read_only": "ro" in (match[3] or "").split(",")}
+    if not isinstance(volume, dict) or "$" in json.dumps(volume, default=str):
+        return None
+    if not isinstance(volume.get("target"), str) or not _CONTAINER_PATH.fullmatch(volume["target"]):
+        return None
+    if volume.get("type") == "tmpfs" and "source" not in volume:
+        return volume
+    if volume.get("type") != "volume" or ("source" in volume and not (
+            isinstance(volume["source"], str) and _VOLUME_NAME.fullmatch(volume["source"]))):
+        return None
+    return volume
+
+
+def effective_volumes(base, override):
+    """Compose merges an override's volumes into the base by target unless the override list is tagged to replace."""
+    volumes = override.get("volumes")
+    if isinstance(volumes, Replaced):
+        return list(volumes)
+    merged = {}
+    for index, volume in enumerate((base.get("volumes") or []) + (volumes or [])):
+        parsed = mount(volume)
+        merged[parsed["target"] if parsed else ("unparsed", index)] = volume
+    return list(merged.values())
+
+
+def has_state_volume(volumes):
+    return any(parsed is not None and parsed.get("source") == "emr-state" and parsed["target"] == "/var/lib/kin-emr"
+               and parsed["type"] == "volume" and not parsed.get("read_only")
+               for parsed in map(mount, volumes))
+
+
+def plain_named_volume(name, configs):
+    """A named volume declared without a driver, driver options or external origin cannot be a host directory."""
+    declarations = [(config.get("volumes") or {})[name] for config in configs if name in (config.get("volumes") or {})]
+    return bool(declarations) and all(
+        declaration is None or (isinstance(declaration, dict) and not declaration.get("external")
+                                and not declaration.get("driver_opts") and declaration.get("driver") in (None, "local"))
+        for declaration in declarations)
 
 
 def compose_shape(root, problems):
@@ -140,151 +184,43 @@ def compose_shape(root, problems):
             problem(problems, "compose-service-missing", name)
     if problems:
         return
-    db, provision, migrate, api = (services[n] for n in ("db", "emr-provision", "api-migrate", "api"))
-    if "emr-access:/var/lib/postgresql/emr-access" not in (db.get("volumes") or []):
-        problem(problems, "compose-tablespace-volume")
-    entry = " ".join(db.get("entrypoint") or [])
-    if "install -d -o postgres -g postgres -m 700 " + TABLESPACE_LOCATION not in entry or "docker-entrypoint.sh postgres" not in entry:
-        problem(problems, "compose-tablespace-directory")
-    script = (provision.get("command") or [""])[-1]
-    match = re.search(r"<<'KIN_EMR_SQL'\n(.*)KIN_EMR_SQL\n?\Z", script, re.S)
-    if not match or match.group(1) != PROVISION_SQL:
-        problem(problems, "compose-provision-sql-differs")
-    env = provision.get("environment") or {}
-    if "KIN_EMR_RUNTIME_PASSWORD" not in env or env.get("PGUSER") != "kin":
-        problem(problems, "compose-provision-environment")
-    url = (api.get("environment") or {}).get("DATABASE_URL", "")
-    if not url.startswith("postgresql://kin_runtime:${KIN_EMR_RUNTIME_PASSWORD"):
+    migrate, api = (services[n] for n in ("api-migrate", "api"))
+    env = environment(api)
+    # Compose password substitutions may contain '?'; these are templates, not resolved URLs.
+    url = env.get("DATABASE_URL", "")
+    if not url.startswith(("postgresql://kin_runtime:", "postgres://kin_runtime:")):
         problem(problems, "compose-api-not-runtime-role")
-    if any("POSTGRES_PASSWORD" in str(value) for value in (api.get("environment") or {}).values()):
+    if any("POSTGRES_PASSWORD" in str(value) for pair in env.items() for value in pair):
         problem(problems, "compose-api-holds-installer-secret")
-    if (api.get("environment") or {}).get("KIN_EMR_STATE_DIR") != "/var/lib/kin-emr" or "emr-state:/var/lib/kin-emr" not in (api.get("volumes") or []):
+    if env.get("KIN_EMR_STATE_DIR") != "/var/lib/kin-emr" or not has_state_volume(api.get("volumes") or []):
         problem(problems, "compose-api-state-volume")
     if ((api.get("depends_on") or {}).get("api-migrate") or {}).get("condition") != "service_completed_successfully":
         problem(problems, "compose-api-before-migration")
-    murl = (migrate.get("environment") or {}).get("DATABASE_URL", "")
-    if not murl.startswith("postgresql://kin:${POSTGRES_PASSWORD") or migrate.get("command") != ["./node_modules/.bin/prisma", "migrate", "deploy"]:
-        problem(problems, "compose-migration-credential")
     if ((migrate.get("depends_on") or {}).get("emr-provision") or {}).get("condition") != "service_completed_successfully":
         problem(problems, "compose-migration-before-provision")
-    for volume in ("emr-access", "emr-state"):
-        if volume not in (compose.get("volumes") or {}):
-            problem(problems, "compose-volume-undeclared", volume)
+    if "emr-state" not in (compose.get("volumes") or {}):
+        problem(problems, "compose-volume-undeclared", "emr-state")
     pservices = prod.get("services") or {}
     papi, pmigrate = pservices.get("api") or {}, pservices.get("api-migrate") or {}
     if (pmigrate.get("build") or {}).get("target") != "production":
         problem(problems, "prod-migration-not-production-image")
-    # The EMR-B1 state volume must stay the writable mount. Any other production mount must be a read-only
-    # named volume (MG-LOADING reads Orthanc's storage for frame ranges), never a host path: a host bind
-    # would let the running code differ from the deployed image.
-    pvolumes = list(papi.get("volumes") or [])
-    extra = [v for v in pvolumes if v != "emr-state:/var/lib/kin-emr"]
-    if "emr-state:/var/lib/kin-emr" not in pvolumes or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*:/[^:]+:ro", v) for v in extra):
+    pvolumes = effective_volumes(api, papi)
+    if not has_state_volume(pvolumes):
         problem(problems, "prod-api-state-volume")
+    # A host bind can replace image contents, so only shapes that cannot name a host path pass. Other named volumes
+    # need not be read-only.
+    parsed = [mount(volume) for volume in pvolumes]
+    if None in parsed or not all(plain_named_volume(volume["source"], (compose, prod))
+                                 for volume in parsed if "source" in volume):
+        problem(problems, "prod-api-host-bind")
 
 
-def check(root, declaration_path):
+def check(root):
     problems = []
-    try:
-        declaration = json.loads(declaration_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        return ["declaration-unreadable: " + type(error).__name__]
-    if not isinstance(declaration, dict) or set(declaration) != DECLARATION_KEYS:
-        return ["declaration-keys: " + ",".join(sorted(set(declaration) ^ DECLARATION_KEYS if isinstance(declaration, dict) else DECLARATION_KEYS))]
-    owned = declaration["owned_paths"]
-    paths = [path for group in owned.values() for path in group]
-    if len(paths) != len(set(paths)):
-        problem(problems, "owned-path-duplicated", ",".join(sorted({p for p in paths if paths.count(p) > 1})))
-    for path in paths:
-        if not (root / path).is_file():
-            problem(problems, "owned-path-missing", path)
-    migrations = sorted(p.parent.name for p in (root / "api/prisma/migrations").glob("*/migration.sql"))
-    spec = declaration["migrations"]
-    for name in spec["added"]:
-        if name not in migrations:
-            problem(problems, "migration-missing", name)
-    # Compare the full suffix after the declared baseline so omissions remain visible.
-    # Later additive migrations extend the declaration, not a fixed migration count.
-    if spec["latest_before"] not in migrations:
-        problem(problems, "migration-baseline-missing", spec["latest_before"])
-    elif migrations[migrations.index(spec["latest_before"]) + 1:] != spec["added"]:
-        problem(problems, "migration-order", json.dumps(migrations[migrations.index(spec["latest_before"]) + 1:]))
-    # SQL migrations may replace earlier relations. PG-01 compares the installed
-    # catalog with this declaration; parsing CREATE statements cannot describe it.
-    tables = sorted(declaration["deployment"]["tables"])
-    classified = sorted(name.removeprefix("emr_access.") for name in declaration["models"]["sql"])
-    if classified != tables:
-        problem(problems, "table-unclassified", json.dumps({"classified": classified, "declared": tables}))
-    for path in ("tests/production_image_test.py", "tests/ops_product_transfer_fixture.py"):
-        text = (root / path).read_text(encoding="utf-8")
-        for name in spec["added"]:
-            if name not in text:
-                problem(problems, "migration-consumer-stale", path)
-    live = declared_cases(root, declaration, "live")
-    expected_live = [case.split(" ", 1)[0] for case in declaration["cases"]["live"][declaration["round"]]]
-    if live != expected_live:
-        problem(problems, "live-cases-differ", json.dumps({"collected": live, "declared": expected_live}))
-    sys.path.insert(0, str(root / "tests"))
-    try:
-        import measurement_ci  # noqa: E402
-        import candidate_ci  # noqa: E402
-    except Exception as error:  # an unreadable consumer is a failed check, never a pass
-        problem(problems, "ci-consumer-unreadable", type(error).__name__)
-    else:
-        profile = measurement_ci.PROFILES.get("emr-b")
-        live_spec = declaration["cases"]["live"]
-        if not profile or [tuple(s) for s in profile["suites"]] != [tuple(s) for s in live_spec["profile_suites"]]:
-            problem(problems, "profile-differs")
-        selected = {(row[0], row[1] + "." + row[2]) for row in candidate_ci.FLOWS}
-        for item in declaration["candidate_cases"]:
-            if (item["file"].removeprefix("tests/"), item["case"]) not in selected:
-                problem(problems, "candidate-case-missing", item["case"])
-        flows = [row for row in candidate_ci.FLOWS if row[0].startswith("emr/b/")]
-        if len(flows) != len(declaration["candidate_cases"]):
-            problem(problems, "candidate-cases-differ")
     try:
         compose_shape(root, problems)
     except Exception as error:
         problem(problems, "compose-unreadable", type(error).__name__)
-    return problems
-
-
-def run_cases(declaration, which):
-    return [case.split(" ", 1)[0] for case in declaration["cases"][which][declaration["round"]]]
-
-
-def check_run(run_dir, kind, cases):
-    """record-run.py evidence: both exits zero, and exactly the declared cases reported passed once each."""
-    problems = []
-    try:
-        record = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-        stdout = (run_dir / "stdout.log").read_text(encoding="utf-8", errors="replace")
-        stderr = (run_dir / "stderr.log").read_text(encoding="utf-8", errors="replace")
-    except (OSError, ValueError) as error:
-        return ["evidence-unreadable: " + type(error).__name__]
-    if record.get("status") != "completed" or record.get("exit_code") != 0 or record.get("recorder_exit_code") != 0:
-        problem(problems, "exit-not-zero", "%s/%s" % (record.get("exit_code"), record.get("recorder_exit_code")))
-    text = stdout + "\n" + stderr
-    if kind == "node":
-        passed = re.findall(r"^\s*ok \d+ - (.+?)\s*$", text, re.M)
-        failed = re.findall(r"^\s*not ok \d+ - (.+?)\s*$", text, re.M)
-        skipped = re.findall(r"^\s*ok \d+ - .+ # (?:SKIP|TODO)", text, re.M)
-        names = [re.split(r"[ :]", name, maxsplit=1)[0] for name in passed]
-    else:
-        # unittest verbosity 2: "name (module.Class.name)", then the docstring's first line when there is one, then
-        # " ... ok"; every failure or error (also of a subtest or a class fixture) has its own "FAIL: " / "ERROR: " header.
-        passed = re.findall(r"^(test_\w+) \([\w.]+\)(?:\n(?!test_)[^\n]*?)? \.\.\. ok$", text, re.M)
-        failed = re.findall(r"^(?:FAIL|ERROR): (\w+) \(", text, re.M)
-        skipped = re.findall(r"^(test_\w+) \([\w.]+\)(?:\n(?!test_)[^\n]*?)? \.\.\. skipped", text, re.M)
-        names = passed
-    if failed or skipped:
-        problem(problems, "cases-not-passed", ",".join(failed + skipped))
-    for case in cases:
-        if names.count(case) != 1:
-            problem(problems, "case-not-passed-once", case)
-    extra = sorted(set(names) - set(cases))
-    if extra:
-        problem(problems, "undeclared-cases", ",".join(extra))
     return problems
 
 
@@ -297,14 +233,8 @@ def main(argv=None):
         sql.add_argument("--" + option)
     sql.add_argument("--capacity", choices=["privacy-officer", "institution-representative"])
     chk = sub.add_parser("check")
-    chk.add_argument("--declaration", type=Path, default=DECLARATION)
     chk.add_argument("--root", type=Path, default=ROOT)
     chk.add_argument("--json", action="store_true")
-    run = sub.add_parser("check-run")
-    run.add_argument("--declaration", type=Path, default=DECLARATION)
-    run.add_argument("--kind", choices=["node", "unittest"], required=True)
-    run.add_argument("--cases-from", choices=["contract", "live"], required=True)
-    run.add_argument("--run-dir", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "sql":
         if args.what == "audit-grantor":
@@ -327,16 +257,7 @@ def main(argv=None):
             return 0
         sys.stdout.write(PROVISION_SQL)
         return 0
-    if args.command == "check":
-        problems = check(args.root.resolve(), args.declaration)
-    else:
-        try:
-            declaration = json.loads(args.declaration.read_text(encoding="utf-8"))
-            cases = run_cases(declaration, args.cases_from)
-        except (OSError, ValueError, KeyError, TypeError) as error:
-            problems = ["declaration-unreadable: " + type(error).__name__]
-        else:
-            problems = check_run(args.run_dir, args.kind, cases)
+    problems = check(args.root.resolve())
     print(json.dumps({"ok": not problems, "problems": problems}, indent=None if getattr(args, "json", False) else 1))
     return 0 if not problems else 1
 

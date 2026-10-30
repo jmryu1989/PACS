@@ -18,6 +18,7 @@ const unavailable = (code: string): never => {
   throw new ServiceUnavailableException({ code, message: '영상 원본과 배포된 뷰어 정보를 확인할 수 없습니다.' });
 };
 const value = (header: any, tag: string) => header?.[tag]?.Value?.[0];
+const CT_IMAGE = '1.2.840.10008.5.1.4.1.1.2';
 
 type AssetFile = { size: number; mtimeMs: number; ino: number; sha256: string };
 const assetFiles = new Map<string, AssetFile>();
@@ -324,12 +325,15 @@ export class OrthancImageCatalog implements ImageCatalogSource, OnModuleInit, On
       }
       const imageType = pixel ? header['00080008']?.Value ?? null : null;
       const family = SOP_CLASSES[sopClassUid]?.family;
+      // Siemens stores breast tomosynthesis slices as CT Image Storage with Image Type value 3 TOMO. The classifier
+      // takes that header as it takes an MG/BTO one, so the API states the same class the viewer hangs.
+      const ctTomo = sopClassUid === CT_IMAGE && typeof imageType?.[2] === 'string' && imageType[2].trim() === 'TOMO';
       // The manifest checks these values as it did when each was read here; a kept row is the same file's read.
       objects.push({ studyUid: image.studyUid, seriesUid, sopInstanceUid: sop as string, sopClassUid, transferSyntaxUid: transferSyntaxUid as string,
         ...original, declaredFrameCount, frames, provenance, imageType,
         derivation: !pixel ? { kind: 'not-image' } : imageType?.[0] === 'ORIGINAL' ? { kind: 'original' }
           : imageType?.[0] === 'DERIVED' ? { kind: 'derived', sources: refs } : { kind: 'unknown' },
-        mammography: family === 'mammography-2d' || family === 'breast-tomosynthesis'
+        mammography: family === 'mammography-2d' || family === 'breast-tomosynthesis' || ctTomo
           ? { header, declaredSources: null, claimedClass: null } : null,
         timing: header['00181065']?.Value ? { source: 'frame-time-vector', vectorMs: header['00181065'].Value.map(Number) }
           : header['00181063']?.Value ? { source: 'frame-time', frameTimeMs: Number(value(header, '00181063')) } : null });

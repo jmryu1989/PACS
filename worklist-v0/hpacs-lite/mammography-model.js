@@ -6,6 +6,7 @@
 (function(root){
   'use strict';
   const SOP_MG='1.2.840.10008.5.1.4.1.1.1.2',SOP_MG_PROCESSING='1.2.840.10008.5.1.4.1.1.1.2.1',SOP_DBT='1.2.840.10008.5.1.4.1.1.13.1.3';
+  const SOP_CT='1.2.840.10008.5.1.4.1.1.2';
   const MAX_FRAMES=2000,MAX_INSTANCES=4000,POSITION_EPSILON=1e-3,SPACING_TOLERANCE=0.01;
   const KINDS=['conventional','generated2d','dbt'],ROLES=['current','prior'],SIDES=['R','L'],STANDARD_VIEWS=['CC','MLO'];
   const uid=v=>typeof v==='string'&&v.length<=64&&/^\d+(?:\.\d+)+$/.test(v);
@@ -28,6 +29,7 @@
   }
   const items=(item,tag)=>values(item,tag).filter(x=>x&&typeof x==='object'&&!Array.isArray(x));
   const tokens=(item,tag)=>values(item,tag).map(v=>typeof v==='string'?v.trim().toUpperCase():'');
+  const side=v=>({LEFT:'L',RIGHT:'R',BOTH:'B'}[v]||v);
 
   // Functional group macros: a per-frame item overrides the shared item (PS3.3 C.7.6.16).
   const object=v=>!!v&&typeof v==='object'&&!Array.isArray(v);
@@ -77,7 +79,7 @@
 
   function laterality(item,fg){
     const found=[];
-    const add=(source,v)=>{if(v)found.push([source,v.toUpperCase()]);};
+    const add=(source,v)=>{if(v)found.push([source,side(v.toUpperCase())]);};
     add('Image Laterality',text(item,'00200062'));
     add('Laterality',text(item,'00200060'));
     if(fg.shared){const a=items(fg.shared,'00209071')[0];if(a)add('Frame Laterality',text(a,'00209072'));}
@@ -97,7 +99,7 @@
   // Result fields: class, baseClass, status, partial (yes/no/unknown/conflict), presentation, representation,
   // fullViewAutoMatch, sourceClassEligible, basis, declared source references. status=verified means only
   // that the header satisfies this contract; it certifies no display, diagnosis or acquisition coverage.
-  const RULE_VERSION='D744-2';
+  const RULE_VERSION='D1892';
   const FAMILY={[SOP_MG]:'MG-P',[SOP_MG_PROCESSING]:'MG-R',[SOP_DBT]:'BTO'};
   const BIOPSY3=new Set(['TOMO_SCOUT','PREFIRE','POSTFIRE','POSTBIOPSY','POSTMARKER']);
   const GENERATED3=new Set(['TOMOSYNTHESIS',...BIOPSY3]);
@@ -108,11 +110,13 @@
   // confirms a kind, but it does stop the object from being treated as a confirmed conventional view.
   // "Tomosynthesis" itself is no such hint: a 2D exposure of a combo examination is described that way.
   const LEGACY_HINT=/\bc-?view\b|synthetic|synthesi[sz]ed|\bv-?preview\b|intelligent\s*2d|\bs-?view\b|insight\s*2d|generated\s*2d|2d\s*generated/i;
-  // Verified device profiles (R1 support limits, not DICOM conformance verdicts; C.8.21.6 allows a
-  // generated 2D Breast Tomosynthesis object). Evidence: TCIA EA1141 v2 EA1141-4339969 (D735 rule H).
+  // D1892 supersedes D735's R1 device limit: Minhoon's 2026-10-26 vendor-universal request
+  // includes DBT and synthetic 2D. The old sample software versions identify provenance only.
   const HOLOGIC_MANUFACTURERS=['HOLOGIC','HOLOGIC, INC.'],HOLOGIC_MODEL='SELENIA DIMENSIONS';
   const PROFILE_SYNTHETIC={id:'hologic-selenia-dimensions-bto-generated-2d',software:['AWS:1.9.1.8']};
   const PROFILE_SLICES={id:'hologic-selenia-1mm-slices',software:['AWS:1.8.3.63','AWS:1.9.1.8']};
+  const hologicDimensions=item=>HOLOGIC_MANUFACTURERS.includes(text(item,'00080070').toUpperCase())&&
+    [HOLOGIC_MODEL,'3DIMENSIONS'].includes(text(item,'00081090').toUpperCase());
   function hologic(item,profile){
     const manufacturer=text(item,'00080070').toUpperCase(),model=text(item,'00081090').toUpperCase();
     const software=values(item,'00181020').map(v=>typeof v==='string'?v.trim():'');
@@ -215,7 +219,8 @@
   }
 
   function classify(item){
-    const fg=groups(item),sopClass=text(item,'00080016'),family=FAMILY[sopClass]||null,type=typeOf(item,'00080008');
+    const fg=groups(item),sopClass=text(item,'00080016'),type=typeOf(item,'00080008');
+    const family=FAMILY[sopClass]||(sopClass===SOP_CT&&type?.[2]==='TOMO'?'CT-TOMO':null);
     const out={sop:text(item,'00080018'),series:text(item,'0020000E'),study:text(item,'0020000D'),sopClass,
       instanceNumber:number(item,'00200013'),seriesNumber:number(item,'00200011'),frames:null,
       kind:null,status:'unverified',presentation:null,laterality:null,view:null,modifiers:[],partial:false,partialState:'unknown',partialSections:[],
@@ -234,9 +239,10 @@
     const ids=uid(out.sop)&&uid(out.series)&&uid(out.study);
     // T: identity, modality, supported IOD and frame count before any per-frame work.
     if(!ids)unverified('identity-invalid');
-    else if(text(item,'00080060').toUpperCase()!=='MG'){out.kind='other';unverified('modality-not-mg');}
+    else if(text(item,'00080060').toUpperCase()!=='MG'&&!(family==='CT-TOMO'&&text(item,'00080060').toUpperCase()==='CT')){out.kind='other';unverified('modality-not-mg');}
     else if(!family){out.kind='other';out.basis='unsupported-sop';unverified('sop-class-not-mammography-image');}
     else if(!fg.valid)unverified('shared-functional-groups-invalid');
+    else if(family==='CT-TOMO')base=classifyCTTomosynthesis(item,fg,type,out,issue);
     else if(family==='BTO')base=classifyTomosynthesis(item,fg,type,out,issue);
     else base=classifyMammography(item,fg,type,family,out,issue);
     // Header contradictions in laterality/view/partial override any class (decision row 0); a Breast
@@ -249,6 +255,7 @@
       const volumeCandidate=!type||type[3]!=='GENERATED_2D'&&type[2]!=='TOMO_PROJ';
       representation=base&&base.startsWith('dbt')?out.sliceKind:!base&&(volumeCandidate||pv.yesWithoutCodes)?'unspecified':null;
     }
+    if(family==='CT-TOMO'&&base)representation='slices';
     out.status=base?'verified':'unverified';
     if(!base){out.kind=out.kind==='other'?'other':null;out.sliceKind=representation;}
     if(family==='BTO')out.presentation=base==='device-synthetic-2d'||base==='projection'?'presentation':null;
@@ -278,22 +285,37 @@
     if(!['ORIGINAL','DERIVED'].includes(type[0])||!['PRIMARY','SECONDARY'].includes(type[1])){issue('image-type-unknown');return null;}
     // A Frame Type outside this single-frame IOD is a second, conflicting claim.
     if(fg.shared||fg.perFrame.length){issue('functional-groups-outside-iod');return null;}
-    const v3=type.length>2?type[2]:null,v4=type.length>3?type[3]:'',rest=type.slice(4);
-    if(rest.some(x=>x!=='')||v4&&!['NONE','GENERATED_2D'].includes(v4)){out.basis='unmapped-image-type-extension';
-      issue(['ADDITION','SUBTRACTION'].includes(v4)?'contrast-enhanced-not-supported':'image-type-unknown');return null;}
-    if(v4==='GENERATED_2D'){
-      if(!GENERATED3.has(v3)){issue('generated-2d-value3-contradiction');return null;}
-      out.kind='generated2d';out.biopsy=v3==='TOMOSYNTHESIS'?null:v3;out.basis='digital-mammography-generated-2d';
-      return 'device-synthetic-2d';
+    // Revelation VC20G Table 164 uses laterality in value 4, INSIGHT_2D in value 5.
+    // Its ordinary TOMO_2D is the acquired first projection, not a synthesized view.
+    let siemens=false;
+    if(text(item,'00080070').toUpperCase()==='SIEMENS'&&type[1]==='PRIMARY'&&['R','L','B'].includes(side(type[3]))){
+      if(side(type[3])!==out.laterality){issue('laterality-conflict');return null;}
+      const tail=type.slice(4).filter(Boolean);
+      if(type[0]==='DERIVED'&&type[2]==='TOMO_2D'&&tail.length===1&&tail[0]==='INSIGHT_2D'&&family==='MG-P'){
+        out.kind='generated2d';out.basis='siemens-insight-2d';return 'device-synthetic-2d';
+      }
+      // A plain Siemens exposure joins the common conventional exit and its free-text safety check below.
+      siemens=!tail.length&&['','TOMO_2D'].includes(type[2]);
     }
-    if(v3==='TOMO_PROJ'){out.kind='projection';out.basis='digital-mammography-projection';issue('tomosynthesis-projection');return 'projection';}
-    if(v3==='TOMOSYNTHESIS'){issue('tomosynthesis-without-generated-2d');return null;}
-    if(v3&&(BIOPSY3.has(v3)||STEREO.has(v3))){issue('biopsy-image');return null;}
-    if(v3&&['PRE_CONTRAST','POST_CONTRAST'].includes(v3)){issue('contrast-enhanced-not-supported');return null;}
-    if(v3){issue('image-type-unknown');return null;}
+    const v3=type.length>2?type[2]:null,v4=type.length>3?type[3]:'',rest=type.slice(4);
+    if(!siemens){
+      if(rest.some(x=>x!=='')||v4&&!['NONE','GENERATED_2D'].includes(v4)){out.basis='unmapped-image-type-extension';
+        issue(['ADDITION','SUBTRACTION'].includes(v4)?'contrast-enhanced-not-supported':'image-type-unknown');return null;}
+      if(v4==='GENERATED_2D'){
+        if(!GENERATED3.has(v3)){issue('generated-2d-value3-contradiction');return null;}
+        out.kind='generated2d';out.biopsy=v3==='TOMOSYNTHESIS'?null:v3;out.basis='digital-mammography-generated-2d';
+        return 'device-synthetic-2d';
+      }
+      if(v3==='TOMO_PROJ'){out.kind='projection';out.basis='digital-mammography-projection';issue('tomosynthesis-projection');return 'projection';}
+      if(v3==='TOMOSYNTHESIS'){issue('tomosynthesis-without-generated-2d');return null;}
+      if(v3&&(BIOPSY3.has(v3)||STEREO.has(v3))){issue('biopsy-image');return null;}
+      if(v3&&['PRE_CONTRAST','POST_CONTRAST'].includes(v3)){issue('contrast-enhanced-not-supported');return null;}
+      if(v3){issue('image-type-unknown');return null;}
+    }
     if(['0008103E','00181030','00082111'].some(tag=>LEGACY_HINT.test(text(item,tag)))){issue('possible-legacy-generated-2d');return null;}
     // Value 1 DERIVED describes pixel processing, not synthesis; with no Value 3/4 type this is a 2D exposure.
     out.kind='conventional';out.basis=v3===null?'digital-mammography-legacy-null-v3':'digital-mammography';
+    if(siemens)out.basis='siemens-digital-mammography';
     if(family==='MG-R')issue('for-processing-display-not-validated');
     return family==='MG-P'?'conventional-2d-presentation':'conventional-2d-processing';
   }
@@ -320,11 +342,17 @@
     const [v1,v2,v3,v4]=imageType.split('\\');
     if(!['ORIGINAL','DERIVED'].includes(v1)||v2!=='PRIMARY'||!v3||!v4||imageType.split('\\').length>4){issue('heterogeneous-profile-not-supported');return null;}
     if(!['VOLUME','SAMPLED'].includes(volumetric)||!technique){issue('volumetric-profile-not-supported');return null;}
-    if(v1==='ORIGINAL'&&(v4!=='NONE'||technique!=='NONE')){issue('original-requires-none');return null;}
+    const gePlanes=['GE MEDICAL SYSTEMS','GE HEALTHCARE'].includes(text(item,'00080070').toUpperCase())&&
+      text(item,'00081090').toUpperCase()==='SENOGRAPHE PRISTINA'&&v3==='TOMOSYNTHESIS'&&volumetric==='VOLUME'&&technique==='TOMOSYNTHESIS';
+    // Pristina 10.x A.2.4 declares ORIGINAL planes with the TOMOSYNTHESIS technique.
+    if(v1==='ORIGINAL'&&(v4!=='NONE'||technique!=='NONE'&&!gePlanes)){issue('original-requires-none');return null;}
     if(v4==='GENERATED_2D'){
-      const exact=imageType===PROFILE_SYNTHETIC_TYPE&&declared===1&&volumetric==='VOLUME'&&technique==='MAX_IP';
-      if(!exact||!hologic(item,PROFILE_SYNTHETIC)){issue('unsupported-device-profile');return null;}
-      out.kind='generated2d';out.basis=PROFILE_SYNTHETIC.id;out.notes.push('device-profile:'+PROFILE_SYNTHETIC.id);
+      // GE Pristina 10.x A.2 and Fuji 897N201838B §8.1.1.36 declare SAMPLED/TOMOSYNTHESIS.
+      // Hologic RD-04751 declares VOLUME/MAX_IP across AWS versions, not only the old sample's version.
+      const standard=volumetric==='SAMPLED'&&technique==='TOMOSYNTHESIS';
+      const hologicShape=volumetric==='VOLUME'&&technique==='MAX_IP'&&hologicDimensions(item);
+      if(imageType!==PROFILE_SYNTHETIC_TYPE||declared!==1||!(standard||hologicShape)){issue('unsupported-device-profile');return null;}
+      out.kind='generated2d';out.basis=hologic(item,PROFILE_SYNTHETIC)?PROFILE_SYNTHETIC.id:'breast-tomosynthesis-generated-2d';
       return 'device-synthetic-2d';
     }
     if(v3==='TOMO_PROJ'){
@@ -338,7 +366,7 @@
     if(!g.ok||dims.length){issue(g.ok?dims[0]:g.reason);out.sliceKind='unspecified';return null;}
     out.sliceThickness=g.thickness;
     const tol=lengthTolerance(g.spacing),contiguous=Math.abs(g.thickness-g.spacing)<=tol;
-    const hologicSlices=hologic(item,PROFILE_SLICES)&&Math.abs(g.thickness-1)<=0.05&&Math.abs(g.spacing-1)<=0.05&&
+    const hologicSlices=hologicDimensions(item)&&Math.abs(g.thickness-1)<=0.05&&Math.abs(g.spacing-1)<=0.05&&
       volumetric==='VOLUME'&&technique==='MAX_IP'&&v4==='NONE';
     if(hologicSlices){out.kind='dbt';out.sliceKind='slices';out.basis=PROFILE_SLICES.id;return 'dbt-slices';}
     if(g.thickness<=THIN_MAX_MM&&contiguous&&v4==='NONE'&&['TOMOSYNTHESIS','NONE'].includes(technique)){
@@ -351,6 +379,44 @@
     issue('slice-or-slab-evidence-missing');out.sliceKind='unspecified';return null;
   }
   const PROFILE_SYNTHETIC_TYPE='DERIVED\\PRIMARY\\TOMOSYNTHESIS\\GENERATED_2D';
+
+  function classifyCTTomosynthesis(item,fg,type,out,issue){
+    out.frames=1;
+    const anatomy=items(item,'00082218').map(code);
+    const normalized=type&&type.map((v,i)=>i===3?side(v):v);
+    if(!normalized||normalizedType(normalized)!=='DERIVED\\PRIMARY\\TOMO\\'+out.laterality||
+        text(item,'00080070').toUpperCase()!=='SIEMENS'||!['R','L','B'].includes(out.laterality)||!anatomy.some(c=>['T-04000','76752008'].includes(c))||
+        fg.shared||fg.perFrame.length||(number(item,'00280008')??1)!==1){issue('ct-tomo-profile-conflict');return null;}
+    const iop=numbers(item,'00200037',6),ipp=numbers(item,'00200032',3),spacing=numbers(item,'00280030',2),thickness=number(item,'00180050');
+    if(!iop||!ipp||!spacing||spacing.some(n=>n<=0)||!(thickness>0)||!uid(text(item,'00200052'))){issue('geometry-incomplete');return null;}
+    const row=iop.slice(0,3),column=iop.slice(3);
+    if(Math.abs(dot(row,row)-1)>GEOMETRY_EPSILON||Math.abs(dot(column,column)-1)>GEOMETRY_EPSILON||Math.abs(dot(row,column))>GEOMETRY_EPSILON){issue('orientation-invalid');return null;}
+    out.kind='dbt';out.sliceKind='slices';out.sliceThickness=thickness;out.basis='ct-breast-tomosynthesis';
+    return 'dbt-slices';
+  }
+
+  // A CT compatibility export is a series of real SOPs. Only a homogeneous, contiguous series
+  // becomes one hanging choice; it never creates a fictitious multiframe SOP or absorbs another image.
+  function hangingObjects(objects){
+    const result=objects.filter(o=>o.basis!=='ct-breast-tomosynthesis'),series=new Map();
+    for(const o of objects.filter(o=>o.basis==='ct-breast-tomosynthesis')){
+      const list=series.get(o.series)||[];list.push(o);series.set(o.series,list);
+    }
+    for(const list of series.values()){
+      const first=list[0],iop=numbers(first.item,'00200037',6),normal=cross(iop.slice(0,3),iop.slice(3));
+      const all=objects.filter(o=>o.series===first.series);
+      if(list.length<2||all.length!==list.length||!list.every(o=>o.standard&&o.laterality===first.laterality&&o.view===first.view&&
+          ['00200052','00280010','00280011'].every(tag=>text(o.item,tag)===text(first.item,tag))&&
+          numbers(o.item,'00280030',2).every((n,i)=>Math.abs(n-numbers(first.item,'00280030',2)[i])<=GEOMETRY_EPSILON)&&
+          numbers(o.item,'00200037',6).every((n,i)=>Math.abs(n-iop[i])<=GEOMETRY_EPSILON)&&
+          Math.abs(o.sliceThickness-first.sliceThickness)<=lengthTolerance(first.sliceThickness)))continue;
+      const ordered=list.slice().sort((a,b)=>dot(numbers(a.item,'00200032',3),normal)-dot(numbers(b.item,'00200032',3),normal));
+      const gaps=ordered.slice(1).map((o,i)=>dot(numbers(o.item,'00200032',3),normal)-dot(numbers(ordered[i].item,'00200032',3),normal));
+      if(gaps.some(g=>g<=GEOMETRY_EPSILON||Math.abs(g-first.sliceThickness)>lengthTolerance(first.sliceThickness)))continue;
+      result.push({...first,frames:list.length,stackMembers:ordered});
+    }
+    return result;
+  }
 
   // Only the supplied reference graph is knowable. Missing nodes remain unresolved; a reachable
   // back edge is a contradiction, including a cycle that does not lead back to the result itself.
@@ -571,7 +637,7 @@
       const key=[role,side,v,kind].join('|');
       if(role==='prior'&&priorStatus!=='ok'){slots[key]={key,status:priorStatus==='absent'?'missing':'refused',reason:priorReason};continue;}
       const s=usable.find(x=>x.role===role);
-      const found=s.objects.filter(o=>o.standard&&o.kind===kind&&o.laterality===side&&o.view===v);
+      const found=hangingObjects(s.objects).filter(o=>o.standard&&o.kind===kind&&o.laterality===side&&o.view===v);
       let best=found;
       if(kind==='dbt'&&found.length>1){
         const rank=o=>DBT_RANK[o.sliceKind]??Infinity;
@@ -637,7 +703,28 @@
     if(fromIOP&&fromIOP.status==='verified')return fromIOP;
     return fromPO||fromIOP||decide('','',null,c);
   }
-  function displaySpec(item,frame=1){
+  // LUT Data is US or OW. Implicit VR (and an explicit OW) reaches DICOMweb JSON as binary, either
+  // inline or as a bulk data URI whose bytes the caller has already fetched (options.bulk).
+  function lutData(table,descriptor,bulk){
+    const element=table&&table['00283006'];
+    if(Array.isArray(element?.Value))return element.Value;
+    if(!descriptor)return [];
+    let bytes=null;
+    if(typeof element?.InlineBinary==='string'){
+      if(element.InlineBinary.length>174764)return [];
+      try{const binary=atob(element.InlineBinary);bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));}
+      catch(_){return [];}
+    }else if(typeof element?.BulkDataURI==='string'&&typeof bulk==='function')bytes=bulk(element.BulkDataURI);
+    if(!ArrayBuffer.isView(bytes)||bytes.BYTES_PER_ELEMENT!==1)return [];
+    // Binary values are little endian. An 8-bit table is stored 8 bits allocated (PS3.3 C.11.2.1.1),
+    // padded to even length; the descriptor and byte count must agree before any entry is used.
+    const count=descriptor[0]||65536;
+    if(bytes.length===count*2)return Array.from({length:count},(_,i)=>bytes[i*2]|bytes[i*2+1]<<8);
+    if(descriptor[2]===8&&bytes.length===count+(count%2)&&(!(count%2)||bytes[count]===0))return Array.from(bytes.subarray(0,count));
+    return [];
+  }
+  // options.bulk(uri) returns the fetched bytes of a bulk data element, or null when they are not available.
+  function displaySpec(item,frame=1,options={}){
     const c=classify(item),fg=groups(item),issues=[];
     const rows=number(item,'00280010'),columns=number(item,'00280011');
     const photometric=text(item,'00280004').toUpperCase(),shape=text(item,'20500020').toUpperCase();
@@ -647,8 +734,17 @@
     let center=voiItem?number(voiItem,'00281050'):number(item,'00281050'),width=voiItem?number(voiItem,'00281051'):number(item,'00281051');
     let fn=((voiItem?text(voiItem,'00281056'):'')||text(item,'00281056')||'LINEAR').toUpperCase(),source=voiItem?'Frame VOI LUT':'Window Center/Width',status='verified';
     if(!['LINEAR','LINEAR_EXACT','SIGMOID'].includes(fn)){issues.push('voi-function-unknown');fn='LINEAR';status='unverified';}
-    if(values(item,'00283010').length&&(center===null||width===null))issues.push('voi-lut-table-not-applied');
-    if(center===null||width===null||!(width>0)){
+    let lut=null;
+    const voiHolder=voiItem||item;
+    if(values(voiHolder,'00283010').length&&(center===null||width===null)){
+      const table=items(voiHolder,'00283010')[0],descriptor=numbers(table,'00283002',3),data=lutData(table,descriptor,options&&options.bulk);
+      const count=descriptor&&(descriptor[0]===0?65536:descriptor[0]);
+      if(descriptor&&Number.isInteger(count)&&count>0&&count<=65536&&Number.isInteger(descriptor[1])&&
+          [8,16].includes(descriptor[2])&&data.length===count&&data.every(n=>Number.isInteger(n)&&n>=0&&n<2**descriptor[2])){
+        lut={first:descriptor[1],bits:descriptor[2],data:data.slice()};source='VOI LUT Sequence';fn='TABLE';
+      }else issues.push('voi-lut-table-invalid');
+    }
+    if(!lut&&(center===null||width===null||!(width>0))){
       const bits=number(item,'00280101'),signed=number(item,'00280103')===1;
       if(!Number.isInteger(bits)||bits<1||bits>16){center=null;width=null;status='unverified';issues.push('voi-unknown');}
       else{const low=signed?-(2**(bits-1)):0,high=signed?2**(bits-1)-1:2**bits-1;const a=low*slope+intercept,b=high*slope+intercept;
@@ -662,7 +758,7 @@
     const pixel=frameSpacing?{row:frameSpacing[0],column:frameSpacing[1],basis:'Pixel Measures'}:spacing?{row:spacing[0],column:spacing[1],basis:'Pixel Spacing'}
       :imager?{row:imager[0],column:imager[1],basis:'Imager Pixel Spacing'}:null;
     return {rows:Number.isInteger(rows)&&rows>0?rows:null,columns:Number.isInteger(columns)&&columns>0?columns:null,
-      orientation:orientation(item,c,frame),voi:{status:issues.some(x=>x.startsWith('voi'))?'unverified':status,center,width,fn,source},
+      orientation:orientation(item,c,frame),voi:{status:issues.some(x=>x.startsWith('voi'))?'unverified':status,center,width,fn,source,lut},
       modality:{slope,intercept},invert,photometric,spacing:pixel,issues};
   }
 

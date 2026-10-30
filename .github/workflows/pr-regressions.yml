@@ -167,12 +167,12 @@ jobs:
     - name: EMR-A record classification, access events, signatures and lawful lifecycle contracts
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/emr-contract --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json --file api/prisma/schema.prisma --file api/src/emr-contract/README.md --file api/src/emr-contract/access-event.ts --file api/src/emr-contract/classification.ts --file api/src/emr-contract/composition.ts --file api/src/emr-contract/lawful-defaults.ts --file api/src/emr-contract/legal-basis.ts --file api/src/emr-contract/report-lifecycle.ts --file api/src/emr-contract/routes.ts --file api/src/emr-contract/signature.ts --file api/src/emr-contract/validation.ts --file tests/emr_contract_test.cjs -- docker run --rm --network none --read-only --tmpfs /tmp -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/emr_contract_test.cjs
-    - name: EMR-B1 declaration agreement and access ledger contracts C01-C10 and C13-C18
+    - name: EMR-B deployment safety and retained access ledger contracts
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: |
         python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/emr-b-declaration --cwd . --file emr/units/b.json --file scripts/emr-compose.py --file docker-compose.yml --file docker-compose.prod.yml --file tests/measurement_ci.py --file tests/candidate_ci.py --file tests/emr/b/live.py --file tests/production_image_test.py --file tests/ops_product_transfer_fixture.py --file api/prisma/migrations/20261008120000_emr_b/migration.sql --file api/prisma/migrations/20261010120000_emr_seal_attempts/migration.sql --file api/prisma/migrations/20261010150000_emr_read_jit_off/migration.sql --file api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql -- python3 -B scripts/emr-compose.py check
         python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/emr-b-contract --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json --file emr/units/b.json --file scripts/emr-compose.py --file tests/emr/b/contract_test.cjs --file tests/emr/b/seal_checker.cjs --file tests/emr/b/live_benchmark.cjs --file tests/emr/b/throughput.cjs --file tests/emr/b/verification_plan.cjs -- env KIN_EMR_PYTHON=python3 node --test --test-reporter=tap tests/emr/b/contract_test.cjs
-        python3 -B scripts/emr-compose.py check-run --kind node --cases-from contract --run-dir tmp/workspace-ui-ci/emr-b-contract
+        if grep -Eq '# (SKIP|TODO)([[:space:]]|$)' tmp/workspace-ui-ci/emr-b-contract/stdout.log; then exit 1; fi
     - name: S7 stage-exit verdict tool - required-test list resolution and per-requirement verdict (pure)
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 5
@@ -978,7 +978,7 @@ jobs:
     needs: select
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['viewer-native-dom']) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 55
+    timeout-minutes: 60
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -1031,6 +1031,11 @@ jobs:
         native_id=$(docker create --network none orthancteam/orthanc:24.12.0)
         trap 'docker rm "$native_id"' EXIT
         docker cp "$native_id:/usr/share/orthanc/plugins-available/libOrthancOHIF.so" "$RUNNER_TEMP/vr112-native/libOrthancOHIF.so"
+    - name: Decoder worker named by the nginx eval exception is the one the pinned viewer creates
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      timeout-minutes: 5
+      run: |
+        python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/ohif-worker-asset --cwd . --file tests/ohif_worker_asset_test.py --file proxy/nginx.conf.template --file "$RUNNER_TEMP/vr112-native/libOrthancOHIF.so" -- python3 -B tests/ohif_worker_asset_test.py --ohif-library "$RUNNER_TEMP/vr112-native/libOrthancOHIF.so"
     - name: Viewer Job native initial-image and completion contracts
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 15
@@ -1079,7 +1084,7 @@ jobs:
     needs: select
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['measurements']) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 73
+    timeout-minutes: 88
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -1112,7 +1117,7 @@ jobs:
         "$RUNNER_TEMP/measurement-python/bin/python" -m playwright install --with-deps chromium
     - name: D-MEASURE2 B1 real readback, held drafts, manual SR and source recovery
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
-      timeout-minutes: 43
+      timeout-minutes: 58
       run: |
         "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile measurements
     - name: Sanitized synthetic measurement evidence

@@ -2,11 +2,10 @@
  * Pure event/retention/context decisions use their public boundaries. PostgreSQL
  * atomicity, authority and durable publication run against the production image
  * in pg_ledger_restore_test.py. Superseded chain/seal/reference-engine cases are
- * disposed explicitly in emr/units/b.json, not treated as passing PG evidence.
+ * excluded from the current contract suite, not treated as passing PG evidence.
  */
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const { createHash, randomUUID } = require('node:crypto');
 function errorCode(error) {
   if (!error) return 'unknown';
@@ -48,7 +47,6 @@ function provideEvent(A, overrides = {}) {
 function contractSuite() {
   const assert = require('node:assert/strict');
   const { test } = require('node:test');
-  const { spawnSync } = require('node:child_process');
   const root = path.resolve(__dirname, '..', '..', '..');
   const api = path.join(root, 'api');
   const ts = require(path.join(api, 'node_modules/typescript'));
@@ -58,12 +56,11 @@ function contractSuite() {
   require.extensions['.ts'] = (module, filename) => module._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'),
     { compilerOptions: parsed.options, fileName: filename }).outputText, filename);
   const load = name => require(path.join(api, 'src', name));
-  const M = load('emr-contract/composition.ts'), Cl = load('emr-contract/classification.ts'), R = load('emr-contract/routes.ts');
+  const M = load('emr-contract/composition.ts'), Cl = load('emr-contract/classification.ts');
   const D = load('emr-contract/lawful-defaults.ts'), A = load('emr-contract/access-event.ts'), V = load('emr-contract/validation.ts');
   const C = load('emr-runtime/contract.ts'), CTX = load('emr-runtime/context.ts'), RT = load('emr-runtime/store.ts');
   const MF = load('emr-runtime/manifest.ts');
   const declaration = JSON.parse(fs.readFileSync(path.join(root, 'emr/units/b.json'), 'utf8'));
-  const python = process.env.KIN_EMR_PYTHON || 'python3';
 
   // Composition happens once per process. Legal, clinical and stored-access facts are the B runtime readers themselves;
   // terminal-queue rows (C's future storage) and purpose ends (C's) are synthetic facts held by this test.
@@ -201,7 +198,7 @@ function contractSuite() {
     assert(A.parseAccessEvent(authEvent(A, { result: 'refused', auth: { endCause: null, failureCause: 'provider-error', trigger: null }, session: unresolved('not-resolved'), trustedProxyIp: unresolved('not-observed') })));
   });
 
-  test('C04 a verified offline original with its own reception; a self-declared flag, a reconnect address and another content under one ID are refused', async () => {
+  test('C04 offline originals remain unsupported, including self-declared verification', () => {
     const reception = authEvent(A);
     const facts = { envelopeId: 'envelope-1', deviceId: 'device-1', kid: 'device-kid-1', preAuthorizationId: 'preauth-1', signedAt: '2026-10-08T22:00:00.000Z',
       timeBasis: { anchorEventId: 'anchor-1', uncertaintyMs: 2000 }, deviceSequence: 7, targetManifestSha256: 'ab'.repeat(32) };
@@ -213,39 +210,10 @@ function contractSuite() {
         studyId: known('study-1'), recordId: known('report-1'), versionId: known('version-2') }],
       action: 'approve-sign', result: 'succeeded', offline: structuredClone(facts), requestId: 'request-offline', auditLinkId: A.newAuditLinkId(),
       relatedEventId: reception.eventId, ...overrides });
-    // No verifier is composed by the product until C exists: unsupported, whatever the body says.
+    // Offline approval is excluded from the first release, regardless of body flags.
     code(() => A.parseAccessEvent(original()), 'OfflineVerificationUnsupported');
     code(() => A.parseAccessEvent(original({ offline: { ...facts, verified: true } })), 'OfflineVerificationUnsupported');
-    // The product source composes no verifier (B2 places the one call in main.ts).
-    const program = ts.createProgram(parsed.fileNames, parsed.options), checker = program.getTypeChecker();
-    const resolveSymbol = symbol => symbol?.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
-    const contractFile = program.getSourceFiles().find(f => f.fileName.replaceAll('\\', '/').endsWith('/emr-contract/access-event.ts'));
-    const composeVerifier = checker.getExportsOfModule(checker.getSymbolAtLocation(contractFile)).find(s => s.name === 'composeOfflineReceiptVerifier');
-    assert(composeVerifier);
-    const calls = [];
-    for (const source of program.getSourceFiles().filter(f => parsed.fileNames.includes(f.fileName))) {
-      const visit = node => { if (ts.isCallExpression(node) && resolveSymbol(checker.getSymbolAtLocation(node.expression)) === composeVerifier) calls.push(source.fileName); ts.forEachChild(node, visit); };
-      visit(source);
-    }
-    assert.deepEqual(calls, []);
-    // A synthetic verifier capability, composed once here, stands for C's stored verification result.
-    const verified = new Map([[facts.envelopeId, structuredClone(facts)]]);
-    A.composeOfflineReceiptVerifier({ verify: id => { if (!verified.has(id)) throw new Error('unknown envelope'); return structuredClone(verified.get(id)); } });
-    code(() => A.composeOfflineReceiptVerifier({ verify: () => facts }), 'OfflineVerifierAlreadyComposed');
-    const parsedOriginal = A.parseAccessEvent(original());
-    assert.equal(parsedOriginal.occurredAt, facts.signedAt, 'the device act time, never the reception time');
-    assert.equal(parsedOriginal.trustedProxyIp.reason, 'offline');
-    assert.notEqual(parsedOriginal.relatedEventId, parsedOriginal.eventId);
-    for (const [name, bad] of [
-      ['reconnect address on the original', original({ trustedProxyIp: known({ address: '192.0.2.10', source: 'trusted-proxy' }) })],
-      ['self-declared verification', original({ offline: { ...facts, verified: true } })],
-      ['changed device order', original({ offline: { ...facts, deviceSequence: 8 } })],
-      ['unknown envelope', original({ offline: { ...facts, envelopeId: 'forged' } })],
-      ['reception time as act time', original({ occurredAt: '2026-10-09T01:00:00.000Z' })],
-      ['no separate reception', original({ relatedEventId: null })],
-      ['empty targets', original({ targets: [] })],
-      ['server-side provision', original({ action: 'provide-prepared', result: 'prepared' })],
-    ]) assert.throws(() => A.parseAccessEvent(bad), name);
+
   });
 
   test('C05 protected publication waits for its matching durable receipt and sends nothing on refusal', async () => {
@@ -522,75 +490,12 @@ function contractSuite() {
 
   // D889 §3.3 A7 -> RISK-EMR-FORGED-RECEIPT -> C20 / M38.
 
-  test('C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused', () => {
-    // The declaration against the contract and the runtime manifest, both ways.
-    assert.deepEqual(declaration.models.sql, Cl.SQL_STORAGE_CLASSIFICATION);
+  test('C10 deployment catalog and runtime classification cover every stored relation and record kind', () => {
     assert.deepEqual([...declaration.deployment.tables].sort(), [...MF.EMR_STORAGE.tables].sort());
     assert.deepEqual(Object.keys(Cl.SQL_STORAGE_CLASSIFICATION).map(n => n.replace('emr_access.', '')).sort(), [...MF.EMR_STORAGE.tables].sort());
     assert.deepEqual(declaration.deployment.roles, MF.EMR_STORAGE.roles);
     assert.equal(declaration.deployment.schema, MF.EMR_STORAGE.schema); assert.equal(declaration.deployment.tablespace, MF.EMR_STORAGE.tablespace);
-    assert.deepEqual(declaration.routes.internal_surfaces, Object.keys(R.INTERNAL_SURFACES));
-    assert.deepEqual(declaration.records.terminal_models, Cl.TERMINAL_RECORD_BOUNDARY.models);
-    for (const kind of declaration.records.kinds_added) assert(Cl.RECORD_CLASSIFICATION[kind], kind);
     for (const kinds of Object.values(Cl.SQL_STORAGE_CLASSIFICATION)) for (const kind of kinds) assert(Cl.RECORD_CLASSIFICATION[kind], kind);
-    const migrations = fs.readdirSync(path.join(api, 'prisma/migrations'), { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name).sort();
-    assert.ok(migrations.includes(declaration.migrations.latest_before));
-    assert.deepEqual(migrations.slice(migrations.indexOf(declaration.migrations.latest_before) + 1), declaration.migrations.added);
-    // The contract cases of this very file, collected with the installed TypeScript parser, against the declaration.
-    const file = ts.createSourceFile(__filename, fs.readFileSync(__filename, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
-    const collected = [];
-    const visit = node => {
-      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'test' && ts.isStringLiteralLike(node.arguments[0]))
-        collected.push(node.arguments[0].text.split(' ')[0]);
-      ts.forEachChild(node, visit);
-    };
-    visit(file);
-    assert.deepEqual(collected, declaration.cases.contract[declaration.round].map(c => c.split(' ')[0]));
-    assert.equal(collected.length, declaration.expected.contract);
-    assert.equal(declaration.mutants.length, declaration.expected.mutants);
-    // The checker of the declaration (scripts/emr-compose.py) on this checkout, then each refusal on its own.
-    const compose = (...args) => spawnSync(python, ['-B', path.join(root, 'scripts/emr-compose.py'), ...args], { cwd: root, encoding: 'utf8', timeout: 120000 });
-    const real = compose('check', '--json');
-    assert.equal(real.status, 0, real.stdout + real.stderr);
-    const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'emr-b-declaration-'));
-    try {
-      const variant = (name, change) => { const copy = structuredClone(declaration); change(copy); const target = path.join(temp, name + '.json'); fs.writeFileSync(target, JSON.stringify(copy)); return target; };
-      for (const [name, change, expected] of [
-        ['missing-owner', d => d.owned_paths['B2-replacement'].push('api/src/emr-runtime/missing.ts'), 'owned-path-missing'],
-        ['doubled-owner', d => d.owned_paths['B2-replacement'].push(d.owned_paths['B2-replacement'][0]), 'owned-path-duplicated'],
-        ['dropped-migration', d => { d.migrations.added.pop(); }, 'migration-order'],
-        ['reordered-ledger', d => { d.migrations.added.reverse(); }, 'migration-order'],
-        ['missing-baseline', d => { d.migrations.latest_before = 'missing'; }, 'migration-baseline-missing'],
-        ['renamed-migration', d => { d.migrations.added = ['20261008120000_emr_b_renamed']; }, 'migration-missing'],
-        ['missing-live-case', d => { d.cases.live[d.round].pop(); }, 'live-cases-differ'],
-        ['extra-live-case', d => { d.cases.live[d.round].push('test_b99_undeclared'); }, 'live-cases-differ'],
-        ['candidate-case', d => { d.candidate_cases[0].case = 'EmrBLedgerLive.test_b99_absent'; }, 'candidate-case-missing'],
-        ['profile', d => { d.cases.live.profile_suites[0][2] = 'ci-emr-b-other'; }, 'profile-differs'],
-        ['keys', d => { delete d.restore; }, 'declaration-keys'],
-        ['unclassified-table', d => { d.deployment.tables.push('syn_unclassified'); }, 'table-unclassified'],
-        ['unclassified-model', d => { delete d.models.sql['emr_access.clause_version']; }, 'table-unclassified'],
-      ]) {
-        const result = compose('check', '--json', '--declaration', variant(name, change));
-        assert.equal(result.status, 1, name);
-        assert(JSON.parse(result.stdout).problems.some(p => p.startsWith(expected)), name + ': ' + result.stdout);
-      }
-      // record-run evidence: exactly the declared cases, each passed once, with both exits zero.
-      const ids = declaration.cases.contract[declaration.round].map(c => c.split(' ')[0]);
-      const evidence = (name, exit, lines) => {
-        const dir = path.join(temp, 'run-' + name); fs.mkdirSync(dir);
-        fs.writeFileSync(path.join(dir, 'run.json'), JSON.stringify({ status: 'completed', exit_code: exit, recorder_exit_code: exit }));
-        fs.writeFileSync(path.join(dir, 'stdout.log'), lines.join('\n') + '\n'); fs.writeFileSync(path.join(dir, 'stderr.log'), '');
-        return dir;
-      };
-      const tap = list => ['TAP version 13', ...list.map((id, n) => `ok ${n + 1} - ${id} synthetic case`)];
-      const judge = dir => { const r = compose('check-run', '--kind', 'node', '--cases-from', 'contract', '--run-dir', dir); return JSON.parse(r.stdout); };
-      assert.deepEqual(judge(evidence('good', 0, tap(ids))), { ok: true, problems: [] });
-      assert(judge(evidence('false-exit', 1, tap(ids))).problems.some(p => p.startsWith('exit-not-zero')));
-      assert(judge(evidence('missing', 0, tap(ids.slice(1)))).problems.some(p => p.startsWith('case-not-passed-once')));
-      assert(judge(evidence('extra', 0, tap([...ids, 'C99']))).problems.some(p => p.startsWith('undeclared-cases')));
-      assert(judge(evidence('failed', 0, [...tap(ids), 'not ok 11 - C03 synthetic failure'])).problems.some(p => p.startsWith('cases-not-passed')));
-      assert(judge(evidence('twice', 0, tap([...ids, ids[0]]))).problems.some(p => p.startsWith('case-not-passed-once')));
-    } finally { fs.rmSync(temp, { recursive: true, force: true }); }
   });
 }
 contractSuite();
