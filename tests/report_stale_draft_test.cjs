@@ -184,7 +184,7 @@ test('an explicit rebase is audited apart from the twenty-second autosave, and n
   await advanced.svc.putReport(UID, { ...BODY, baseVersion: 4 }, CALLER, null);
   assert.deepEqual(advanced.writes, ['reportDraft.store:base4']);
   assert.deepEqual(advanced.audits.map(a => a.action), ['report.draft', 'report.draft.rebase']);
-  assert.deepEqual(JSON.parse(advanced.audits[1].detail), { from: 2, to: 4 });
+  assert.deepEqual(JSON.parse(advanced.audits[1].detail), { from: 2, to: 4, institution: 'synthetic' });
   assert.deepEqual(advanced.raw.map(sql => sql.match(/FROM "(\w+)"/)[1]), ['StudyState', 'ReportDraft'], 'putReport must not take a FOR UPDATE lock on Report');
 
   for (const draft of [null, { baseVersion: 4 }, { baseVersion: 2 }]) {
