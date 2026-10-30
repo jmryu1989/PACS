@@ -15,10 +15,11 @@ from pg_ledger_restore_test import PgLedgerFixture
 class RequestFactsLive(PgLedgerFixture):
     def test_registered_admin_signed_guard_session_and_current_authorization(self):
         driver = ROOT / 'tests/emr/request/request_facts_pg_test.cjs'
+        evidence = ROOT / 'tmp/request-auth/request-facts-01' / self.token
         env = {**os.environ, 'DATABASE_URL': self.runtime_url, 'KIN_B2R_WITNESS_URL': self.witness_url,
-               'KIN_B2R_SPOOL': str(ROOT / 'tmp/request-auth/request-facts-01' / self.token)}
+               'KIN_B2R_SPOOL': str(evidence)}
         if self.image:
-            args = ['docker', 'run', '--rm', '--name', self.container + '-node', '--label', 'kin.b2r=' + self.token,
+            args = ['docker', 'run', '--name', self.container + '-node', '--label', 'kin.b2r=' + self.token,
                     '--network', self.network, '--memory', '1536m', '--memory-swap', '1536m', '--cpus', '2',
                     '--mount', 'type=bind,source=' + str(driver) + ',target=/app/request_facts_pg_test.cjs,readonly']
             for key, value in {**env, 'KIN_B2R_BUILD': '/app/dist', 'KIN_B2R_SPOOL': '/tmp/request-facts'}.items():
@@ -27,13 +28,7 @@ class RequestFactsLive(PgLedgerFixture):
             command = args + [self.image, 'node', '/app/request_facts_pg_test.cjs']
         else:
             command = [os.environ['KIN_B2R_NODE'], str(driver)]
-        result = self.command(command, env=env, check=False, timeout=120)
-        evidence = ROOT / 'tmp/request-auth/request-facts-01' / self.token
-        evidence.mkdir(parents=True, exist_ok=True)
-        (evidence / 'node.stdout.log').write_text(result.stdout, encoding='utf-8')
-        (evidence / 'node.stderr.log').write_text(result.stderr, encoding='utf-8')
-        self.assertEqual(result.returncode, 0, result.stderr[-2000:] or result.stdout[-2000:])
-        print(result.stdout)
+        self.run_node_case(command, evidence, env=env, timeout=120)
 
 
 if __name__ == '__main__':

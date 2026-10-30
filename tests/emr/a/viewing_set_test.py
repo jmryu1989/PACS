@@ -6,7 +6,6 @@ The embedded Node driver keeps the single A3 test entry point self-contained.
 """
 import os
 from pathlib import Path
-import subprocess
 import sys
 import unittest
 
@@ -383,7 +382,7 @@ class ViewingSetHttpBoundary(PgLedgerFixture):
         env = {**os.environ, 'DATABASE_URL': self.runtime_url, 'KIN_B2R_WITNESS_URL': self.witness_url,
                'KIN_B2R_SPOOL': str(evidence / 'spool')}
         if self.image:
-            command = ['docker', 'run', '--rm', '--name', self.container + '-node', '--label', 'kin.b2r=' + self.token,
+            command = ['docker', 'run', '--name', self.container + '-node', '--label', 'kin.b2r=' + self.token,
                        '--network', self.network, '--mount', 'type=bind,source=' + str(driver) + ',target=/app/viewing-set.cjs,readonly']
             for key, value in {'DATABASE_URL': self.runtime_url, 'KIN_B2R_WITNESS_URL': self.witness_url,
                                'KIN_B2R_BUILD': '/app/dist', 'KIN_B2R_SPOOL': '/tmp/a3-spool'}.items():
@@ -391,19 +390,7 @@ class ViewingSetHttpBoundary(PgLedgerFixture):
             command += [self.image, 'node', '/app/viewing-set.cjs']
         else:
             command = [os.environ['KIN_B2R_NODE'], str(driver)]
-        try:
-            result = self.command(command, env=env, check=False, timeout=120)  # Existing A1 PG driver hang timeout.
-        except subprocess.TimeoutExpired as error:
-            # Keep partial raw output and omit ephemeral fixture credentials
-            # from unittest's command-line traceback.
-            for name, value in [('stdout', error.stdout), ('stderr', error.stderr)]:
-                raw = value if isinstance(value, bytes) else (value or '').encode('utf-8')
-                (evidence / ('node.' + name + '.log')).write_bytes(raw)
-            raise RuntimeError('Node fixture timed out; partial logs: ' + str(evidence)) from None
-        (evidence / 'node.stdout.log').write_text(result.stdout, encoding='utf-8')
-        (evidence / 'node.stderr.log').write_text(result.stderr, encoding='utf-8')
-        print(result.stdout)
-        self.assertEqual(result.returncode, 0, result.stderr[-3000:] or result.stdout[-3000:])
+        self.run_node_case(command, evidence, env=env, timeout=120)  # Existing A1 PG driver hang timeout.
 
 
 if __name__ == '__main__':

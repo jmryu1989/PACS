@@ -853,6 +853,9 @@ with socket.create_connection(json.loads((base/'address.json').read_text()), tim
     def test_pure_mode_cannot_grant_live_permission(self):
         result = self.run_plan(self.plan(case='test_live'))
         self.assertEqual(result.returncode, 125, result.stderr)
+        # The gate's refusal inside a test stays a refusal, not a test failure.
+        self.assertIn(b'TEST_RUN_REFUSED', result.stderr)
+        self.assertNotIn(b'TEST_RUN_FAILED', result.stderr)
         self.assertFalse((self.tests/'live').exists())
         self.assertFalse((self.state/'live-needs-inspection.json').exists())
 
@@ -886,8 +889,14 @@ with socket.create_connection(json.loads((base/'address.json').read_text()), tim
             self.assertEqual(result.returncode, 0 if case == 'test_pass' else 125, result.stderr)
             # The parent ran and recorded the attempt (a refusal prints no PLAN_RESULT).
             self.assertIn(b'PLAN_RESULT', result.stdout)
+            if case == 'test_fail':
+                # A test failure is reported as a failure, never as a refusal.
+                self.assertIn(b'TEST_RUN_FAILED', result.stderr)
+                self.assertNotIn(b'TEST_RUN_REFUSED', result.stderr)
         rows = json.loads((self.state/'probe.json').read_text())['attempts']
         self.assertEqual([row['status'] for row in rows], statuses)
+        self.assertEqual([row.get('error') for row in rows],
+                         ['TEST_RUN_FAILED: 1 failure(s), 0 error(s)'] * 3 + [None, None])
         self.assertEqual([row['attempt'] for row in rows], list(range(1, len(statuses) + 1)))
         self.assertTrue((self.tests/'passed').exists())
 

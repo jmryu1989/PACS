@@ -105,6 +105,16 @@ def collect(plan):
     return unittest.TestSuite(selected)
 
 
+class GateResult(unittest.TextTestResult):
+    """Keeps a gate refusal raised inside a test (e.g. live access in pure mode) a refusal, not a test failure."""
+    refused = None
+
+    def addError(self, test, err):
+        if issubclass(err[0], gate.Refused) and self.refused is None:
+            self.refused = str(err[1])
+        super().addError(test, err)
+
+
 def worker(path):
     # The internal entry point cannot start an independent, unrecorded run.
     ticket = sys.stdin.readline(1024).strip()
@@ -131,11 +141,17 @@ def worker(path):
     # own terminal state may reopen the gate.
     with gate.live_run(unit=plan["unit"], module=module, plan_sha256=claim["plan_sha256"],
                        attempt=len(ledger["attempts"]), release=False) if plan["mode"] == "live" else nullcontext() as identity:
-        result = unittest.TextTestRunner(verbosity=2).run(suite)
+        result = unittest.TextTestRunner(verbosity=2, resultclass=GateResult).run(suite)
         # A failed live run retains its marker as the record of the fixtures it
         # owned, even if it appears to have cleaned up.
+        if result.refused:
+            raise gate.Refused(result.refused)
         if not result.wasSuccessful():
-            raise gate.Refused("Tests failed; this is not a completed plan")
+            # A failure is a result, not a refusal; the exit code stays 125 for existing consumers.
+            failure = "TEST_RUN_FAILED: %d failure(s), %d error(s)" % (len(result.failures), len(result.errors))
+            failure_path(path).write_text(failure + "\n", encoding="utf-8")
+            print(failure, file=sys.stderr, flush=True)
+            return 125
         # An exit status alone is not completion (os._exit, a stray sys.exit):
         # attest the completed suite with the parent's ticket.
         with completion_path(path).open("x", encoding="utf-8") as stream:
@@ -145,6 +161,18 @@ def worker(path):
 
 def completion_path(frozen):
     return Path(frozen).with_suffix(".completed.json")
+
+
+def failure_path(frozen):
+    return Path(frozen).with_suffix(".failed.txt")
+
+
+def worker_error(frozen, code):
+    # Only the ledger's description; any non-zero worker exit is already a failed attempt.
+    try:
+        return failure_path(frozen).read_text(encoding="utf-8").strip()
+    except OSError:
+        return "TEST_RUN_REFUSED or crashed: worker exit %d without a test result" % code
 
 
 def completion_proof(ticket):
@@ -207,7 +235,7 @@ def execute(path):
             process.stdin.close()
             code = process.wait(timeout=plan["timeout_seconds"])
             if code != 0:
-                row.update(status="failed", exit_code=code)
+                row.update(status="failed", exit_code=code, error=worker_error(frozen, code))
             else:
                 marker = completed_marker(frozen, ticket, plan, row)
                 row.update(status="completed_with_skips" if row["skipped"] else "passed",

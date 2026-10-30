@@ -73,7 +73,7 @@ class PgLedgerFixture(unittest.TestCase):
 
         A docker command names the run-owned self.container + '-node' without --rm: a failed
         run's exit state is read from the stopped container, which is removed here afterwards
-        (cleanup() remains the backstop). A failure is reported, never retried.
+        (cleanup() remains the backstop). A failure is reported, never retried; a success returns stdout.
         """
         evidence.mkdir(parents=True, exist_ok=True)
         name = command[command.index('--name') + 1] if command[0] == 'docker' else None
@@ -88,7 +88,7 @@ class PgLedgerFixture(unittest.TestCase):
             errors = stderr.read_text(encoding='utf-8', errors='replace')
             print(output)
             if code == 0:
-                return
+                return output
             found = TAP_SIGNAL.search(output + errors)
             number = -code if code is not None and code < 0 else code - 128 if name and code and code > 128 else None
             signal = found.group(1) if found else SIGNALS.get(number, 'SIG' + str(number)) if number else None
