@@ -64,14 +64,14 @@ const PARTIAL_MEDIAL={'00281352':seq({'00080102':v('SH','SCT'),'00080100':v('SH'
 // data from the consult; nothing here is generated from this model's output.
 const fs=require('node:fs'),crypto=require('node:crypto');
 const RULE_TABLE=process.env.KIN_MG_RULE_CASES||path.join(__dirname,'..','..','emr','e','rule-cases.json');
-const RULE_TABLE_SHA256='2ce98e9c36a04d95980dd72907ba735412ba56faaff55968743b0bbad214414b';
+const RULE_TABLE_SHA256='2f754e7a06e982c94912d1deec9703946646c2fafc5e345363db1a06668163e9';
 // This LF-normalised byte pin binds both products to the same input contract across Git checkout line endings.
 // A missing required table fails collection, rather than silently passing a smaller suite.
 const raw=fs.readFileSync(RULE_TABLE,'utf8').replace(/\r\n/g,'\n'),table=JSON.parse(raw);
 {
   test('D744 rule table is the pinned one',()=>{
     assert.equal(crypto.createHash('sha256').update(raw).digest('hex'),RULE_TABLE_SHA256);
-    assert.equal(table.cases.length,273);assert.equal(new Set(table.cases.map(c=>c.testId)).size,273);
+    assert.equal(table.cases.length,319);assert.equal(new Set(table.cases.map(c=>c.testId)).size,319);
   });
   for(const k of table.cases)test(k.testId,()=>{
     const got=model.contract(k.input.dicom,k.input.context);
@@ -198,7 +198,13 @@ test('MG01-allow v2 separates declaration and hanging while malformed partial ev
   }
   for(const k of table.cases){
     const o=clone(k.input.dicom);o['00100020']=v('LO','test-patient');
-    const c=model.classify(o),p=model.plan(manifest(study(c.study,'current',[o])));
+    const c=model.classify(o),objects=[o];
+    // A CT-format DBT slice is one SOP of a slice series; its hanging unit is the series, never one slice.
+    if(c.basis==='ct-breast-tomosynthesis'){
+      const next=clone(o);next['00080018']=v('UI',o['00080018'].Value[0]+'.2');
+      next['00200032']=v('DS',...o['00200032'].Value.map((x,i)=>i===2?Number(x)+Number(o['00180050'].Value[0]):Number(x)));objects.push(next);
+    }
+    const p=model.plan(manifest(study(c.study,'current',objects)));
     assert.equal(c.standard,c.contract.fullViewAutoMatch,k.id+' plan eligibility matches the contract');
     if(c.standard)assert.equal(slot(p,'current',c.laterality,c.view,c.kind).status,'ready',k.id+' eligible object really hangs');
     else assert.ok(!Object.values(p.slots).some(s=>s.status==='ready'),k.id+' excluded object does not hang');

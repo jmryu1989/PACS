@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Create only synthetic MG vendor phantoms. No archive connection or patient input.
 
-Uses the #295 encoder for compressed frames. Requires the existing fixture dependencies
-(pydicom/numpy and GDCM for precision-aware compression); unavailable encoders are NOT_RUN.
+Uses the #295 encoder for compressed frames. Requires pydicom/numpy and imagecodecs/pyjpegls
+for true 10/12/14-bit compression; unavailable encoders are NOT_RUN.
 """
 import argparse
 import hashlib
@@ -57,7 +57,16 @@ def make_dataset(case, syntax_index, instance):
     ds.update(Dataset.from_json(case['dicom']))
     ds.PatientName = 'MGVENDOR^SYNTHETIC'
     ds.InstitutionName = 'SYNTHETIC LOCAL TEST'
-    ds.SeriesDescription = 'Synthetic ' + case['id']
+    # Phantom identity belongs in PatientName/InstitutionName. The description reads like the vendor's
+    # own series text, so a free-text classification hint is never introduced by the generator.
+    vendor = str(ds.Manufacturer).upper()
+    place = ' '.join(filter(None, [str(getattr(ds, 'ImageLaterality', '')), str(getattr(ds, 'ViewPosition', '') or 'CC')]))
+    descriptions = {
+        'conventional': place,
+        'generated2d': ('INSIGHT 2D ' if vendor == 'SIEMENS' else 'S-View ' if 'FUJI' in vendor else 'Generated 2D ') + place,
+        'dbt': ('TOMO ' if vendor == 'SIEMENS' else 'Tomosynthesis ') + place,
+    }
+    ds.SeriesDescription = descriptions[case['kind']]
     ds.StudyInstanceUID += '.' + str(syntax_index)
     ds.SeriesInstanceUID = ds.StudyInstanceUID + '.1'
     ds.SOPInstanceUID = ds.SeriesInstanceUID + '.' + str(instance + 1)
@@ -113,7 +122,13 @@ def generate(output, native_only=False):
                     path = output / (case['id'] + '-' + name + '-' + str(instance + 1) + '.dcm')
                     ds.save_as(path, write_like_original=False)
                     saved = pydicom.dcmread(path)
-                    decoded = saved.pixel_array.reshape(count, ds.Rows, ds.Columns)
+                    if compressed:
+                        import imagecodecs
+                        from pydicom.encaps import generate_pixel_data_frame
+                        decode = imagecodecs.jpeg2k_decode if name.startswith('jpeg2000') else imagecodecs.jpegls_decode if name.startswith('jpegls') else imagecodecs.jpeg8_decode
+                        decoded = np.stack([decode(data) for data in generate_pixel_data_frame(saved.PixelData, count)])
+                    else:
+                        decoded = saved.pixel_array.reshape(count, ds.Rows, ds.Columns)
                     if name != 'jpeg-extended' and not np.array_equal(decoded, np.stack(arrays)):
                         raise ValueError('stored pixel round-trip mismatch')
                     row.update(status='PASS', path=path.name, sha256=hashlib.sha256(path.read_bytes()).hexdigest(),

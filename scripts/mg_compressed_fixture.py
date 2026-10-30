@@ -53,6 +53,33 @@ def finish_metadata(ds, destination, pixel_offset, ratio=None):
 
 
 def encoder(name, scratch, bits_stored=16):
+    if bits_stored < 16 and name.startswith('jpeg'):
+        # GDCM's uint16 input produces P=16 even with a lower BitsStored. Set codec precision
+        # explicitly (CharLS via pyjpegls infers it from the phantom's full-range samples).
+        import imagecodecs
+        if name == 'jpegls-lossless':
+            import jpeg_ls
+        def encode(array):
+            if name == 'jpeg2000-lossless':
+                data = imagecodecs.jpeg2k_encode(array, level=0, codecformat='J2K', reversible=True,
+                                                bitspersample=bits_stored, mct=False)
+                decoded = imagecodecs.jpeg2k_decode(data)
+            elif name == 'jpegls-lossless':
+                data = bytes(jpeg_ls.encode(np.ascontiguousarray(array), 0))
+                decoded = imagecodecs.jpegls_decode(data)
+            elif name == 'jpeg-lossless-sv1':
+                data = imagecodecs.jpeg8_encode(array, lossless=True, predictor=1, bitspersample=bits_stored)
+                decoded = imagecodecs.jpeg8_decode(data)
+            elif name == 'jpeg-extended':
+                data = imagecodecs.jpeg8_encode(array, level=95, bitspersample=bits_stored)
+                decoded = imagecodecs.jpeg8_decode(data)
+            else:
+                raise ValueError('unsupported precision-aware codec: ' + name)
+            error = int(np.abs(array.astype('int32') - decoded.astype('int32')).max())
+            if name != 'jpeg-extended' and error:
+                raise ValueError(name + ' lossless pixel mismatch')
+            return bytes(data), {'max_absolute_error': error}
+        return encode
     if name.startswith('jpeg2000') and bits_stored == 16:
         from PIL import Image, features
         if not features.check('jpg_2000'):

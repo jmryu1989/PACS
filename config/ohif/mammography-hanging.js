@@ -11,6 +11,33 @@ function kinCreateMammographyHanging() {
   let applyPreference = () => {};
   const kinds = ['conventional', 'generated2d', 'dbt'];
   const labels = { conventional: 'Conventional', generated2d: 'Synthetic 2D', dbt: 'DBT' };
+  const CT_IMAGE = '1.2.840.10008.5.1.4.1.1.2';
+  // Orthanc builds bulk data URIs from its own base URL. Only the DICOMweb instance bulk path is
+  // requested, and always on this origin, so a header cannot direct the viewer elsewhere.
+  function sameOriginBulk(uri) {
+    let url;
+    try { url = new URL(uri, location.href); } catch (_) { return null; }
+    const at = url.pathname.indexOf('/studies/');
+    const path = at < 0 ? '' : '/dicom-web' + url.pathname.slice(at);
+    return /^\/dicom-web\/studies\/[^/]+\/series\/[^/]+\/instances\/[^/]+\/bulk\/[0-9A-Fa-f/]+$/.test(path) ? path : null;
+  }
+  // A single-part answer is the element's bytes; a multipart one carries them in its first part.
+  function firstPart(bytes, type) {
+    if (!/^multipart\//i.test(type)) return bytes;
+    const boundary = /boundary="?([^";]+)"?/i.exec(type)?.[1];
+    if (!boundary) return null;
+    const encode = s => Uint8Array.from(s, c => c.charCodeAt(0));
+    const find = (needle, from) => {
+      outer: for (let i = from; i <= bytes.length - needle.length; i++) {
+        for (let j = 0; j < needle.length; j++) if (bytes[i + j] !== needle[j]) continue outer;
+        return i;
+      }
+      return -1;
+    };
+    const start = find(encode('--' + boundary), 0), body = start < 0 ? -1 : find(encode('\r\n\r\n'), start);
+    const end = body < 0 ? -1 : find(encode('\r\n--' + boundary), body + 4);
+    return end < 0 ? null : bytes.subarray(body + 4, end);
+  }
   // U2 owns account storage. Restore through this hook after checking its owner; reset on logout.
   const preferences = {
     get: () => ({ ...preference }),
@@ -45,6 +72,56 @@ function kinCreateMammographyHanging() {
     const retrieve = series.metadata, run = hp.run;
     let ended = false, last = null, cells = [], stageCells = [], panel = null, missing = null;
     const live = () => !ended && location.search === search;
+    const handler = extensions.getModuleEntry('@ohif/extension-default.sopClassHandlerModule.stack');
+    const nativeDisplaySets = handler.getDisplaySetsFromSeries;
+    // OHIF makes one display set per instance for Modality MG, and the Siemens CT-format slices
+    // carry MG. Only a complete, geometrically verified slice series becomes one stack, in position
+    // order, built from OHIF's own set and the real instances; anything else stays native.
+    const createDisplaySets = function (instances, ...args) {
+      const sets = nativeDisplaySets.call(this, instances, ...args);
+      const headers = instances.map(i => raw.get(i.SOPInstanceUID));
+      if (!live() || !headers.length || headers.some(h => !h || h['00080016']?.Value?.[0] !== CT_IMAGE ||
+          String(h['00080008']?.Value?.[2] ?? '').trim().toUpperCase() !== 'TOMO')) return sets;
+      const model = window.KinMammographyModel, study = headers[0]['0020000D']?.Value?.[0];
+      const plan = model.plan({ institution, studies: [{ uid: study, role: 'current', institution, instances: headers }] });
+      const stacks = Object.values(plan.slots || {}).filter(s => s.status === 'ready' && s.object.stackMembers);
+      if (stacks.length !== 1 || stacks[0].object.stackMembers.length !== instances.length) return sets;
+      const members = stacks[0].object.stackMembers, sops = new Set(members.map(o => o.sop));
+      const images = sets.flatMap(s => s.images || []), stack = sets[0];
+      if (images.length !== sops.size || new Set(images.map(i => i.SOPInstanceUID)).size !== sops.size ||
+          !images.every(i => sops.has(i.SOPInstanceUID)) || !Array.isArray(stack?.images)) return sets;
+      // ImageSet.images is a non-writable property holding the array that is also `instances`;
+      // fill that array in place rather than replacing it.
+      const ordered = members.map(o => instances.find(i => i.SOPInstanceUID === o.sop));
+      stack.images.splice(0, stack.images.length, ...ordered);
+      if (stack.instances !== stack.images) stack.instances = stack.images;
+      stack.instance = ordered[0];
+      stack.setAttributes?.({ numImageFrames: ordered.length, isMultiFrame: false, instanceNumber: ordered[0].InstanceNumber });
+      return stack.images.length === ordered.length ? [stack] : sets;
+    };
+    handler.getDisplaySetsFromSeries = createDisplaySets;
+    // A stored VOI LUT read from implicit VR arrives as a bulk data element. Its bytes are fetched
+    // with the metadata, before hanging, and handed to the classifier; an unread table is shown as such.
+    const lutBytes = new Map();
+    async function loadLutBulk(instances) {
+      const tables = [];
+      for (const item of instances) {
+        const holders = [item, ...['52009229', '52009230'].flatMap(tag => (item[tag]?.Value || [])
+          .map(group => group?.['00289132']?.Value?.[0]).filter(Boolean))];
+        for (const holder of holders) for (const table of holder['00283010']?.Value || []) {
+          const uri = table?.['00283006']?.BulkDataURI;
+          if (typeof uri === 'string' && !Array.isArray(table['00283006'].Value) && !lutBytes.has(uri)) tables.push(uri);
+        }
+      }
+      await Promise.allSettled([...new Set(tables)].map(async uri => {
+        const url = sameOriginBulk(uri);
+        if (!url) return;
+        const response = await fetch(url, { credentials: 'same-origin', headers: { Accept: 'application/octet-stream' } });
+        if (!response.ok) return;
+        const bytes = firstPart(new Uint8Array(await response.arrayBuffer()), response.headers.get('content-type') || '');
+        if (bytes && live()) lutBytes.set(uri, bytes);
+      }));
+    }
     const orientations = new WeakMap(), presentations = new WeakMap();
     function orient(event) {
       if (!live()) return;
@@ -83,8 +160,19 @@ function kinCreateMammographyHanging() {
       renderLabels();
     }
     function applyHeaderVOI(viewport, item, frame) {
-      const spec = window.KinMammographyModel.displaySpec(item, frame), voi = spec.voi;
-      if (voi.status !== 'verified') return;
+      const spec = window.KinMammographyModel.displaySpec(item, frame, { bulk: uri => lutBytes.get(uri) || null }), voi = spec.voi;
+      const element = viewport.element;
+      element?.querySelector('.kin-mg-voi-notice')?.remove();
+      if (voi.status !== 'verified') {
+        if (element && spec.issues.includes('voi-lut-table-invalid')) {
+          const notice = document.createElement('div'); notice.className = 'kin-mg-voi-notice';
+          notice.setAttribute('role', 'status');
+          notice.textContent = '저장된 VOI LUT를 읽을 수 없습니다. 영상 밝기와 대비를 확인해 주세요.';
+          notice.style.cssText = 'position:absolute;top:40px;left:8px;z-index:5;color:#fff;background:#713f12;padding:4px 8px;pointer-events:none';
+          element.append(notice);
+        }
+        return;
+      }
       if (voi.lut) {
         // Use the stored table on the GPU actor, without rewriting decoded source pixels or the cache.
         // VTK midpoint=1/sharpness=1 keeps each integer entry constant until the next input value.
@@ -110,9 +198,20 @@ function kinCreateMammographyHanging() {
     const metadata = async function (...args) {
       const result = await retrieve.apply(this, args);
       if (!live() || !Array.isArray(result) || !result.some(p => ['MG', 'CT'].includes(p?.metadata?.Modality))) return result;
-      await Promise.allSettled(result.map(p => p.start().then(instances => {
-        if (live()) for (const item of instances) raw.set(item['00080018']?.Value?.[0], item);
-      })));
+      const keep = instances => { if (live() && Array.isArray(instances)) for (const item of instances) raw.set(item['00080018']?.Value?.[0], item); };
+      // OHIF attaches its store callback before start(), and that callback builds display sets at
+      // once. Keep the raw headers (and any VOI LUT bulk data) inside the load itself, ahead of it.
+      for (const p of result) {
+        const load = p?.processFunction;
+        if (typeof load === 'function' && !p.internalPromise && typeof p.setProcessFunction === 'function') {
+          p.setProcessFunction(() => Promise.resolve(load()).then(async instances => {
+            keep(instances);
+            if (live() && Array.isArray(instances)) await loadLutBulk(instances);
+            return instances;
+          }));
+        }
+      }
+      await Promise.allSettled(result.map(p => p.start().then(keep)));
       return result;
     };
     series.metadata = metadata;
@@ -262,13 +361,15 @@ function kinCreateMammographyHanging() {
     document.addEventListener(imageEvent, orient, true);
     document.addEventListener(newStackEvent, orient, true);
     stop = () => {
-      ended = true; raw.clear(); last = null; applyPreference = () => {};
+      ended = true; raw.clear(); lutBytes.clear(); last = null; applyPreference = () => {};
       if (series.metadata === metadata) series.metadata = retrieve;
+      if (handler.getDisplaySetsFromSeries === createDisplaySets) handler.getDisplaySetsFromSeries = nativeDisplaySets;
       if (hp.run === wrappedRun) hp.run = run;
       observer.disconnect(); subscription.unsubscribe(); panel?.remove();
       document.removeEventListener(imageEvent, orient, true);
       document.removeEventListener(newStackEvent, orient, true);
       document.querySelectorAll('.kin-mg-slot').forEach(el => el.remove());
+      document.querySelectorAll('.kin-mg-voi-notice').forEach(el => el.remove());
     };
   }
   return { id: 'kin.mammography-hanging', async preRegistration({ servicesManager, extensionManager }) {

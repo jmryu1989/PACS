@@ -44,7 +44,7 @@
    "id": "model",
    "file": "tests/part1/mg/model_test.cjs",
    "command": "node --test tests/part1/mg/model_test.cjs",
-   "expected": 293,
+   "expected": 339,
    "cases": [
     {
      "name": "MG01-allow conventional, device synthetic 2D and DBT are told apart by standard attributes with evidence",
@@ -244,9 +244,9 @@
    ],
    "rule_table": {
     "path": "tests/emr/e/rule-cases.json",
-    "sha256": "2ce98e9c36a04d95980dd72907ba735412ba56faaff55968743b0bbad214414b",
+    "sha256": "2f754e7a06e982c94912d1deec9703946646c2fafc5e345363db1a06668163e9",
     "schema": "D744-2",
-    "cases": 273,
+    "cases": 319,
     "test_names": "each case's testId + 'D744 rule table is the pinned one'",
     "disputed": [],
     "missing": "collection failure"

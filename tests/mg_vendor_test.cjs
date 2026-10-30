@@ -76,6 +76,34 @@ test('INSIGHT_2D is only the declared Siemens presentation image with matching l
   }
   const exposure = row('siemens-insight12'); exposure['00080008'].Value.pop();
   assert.equal(model.classify(exposure).kind, 'conventional');
+  // VC20G describes its series "INSIGHT 2D"; without the INSIGHT_2D value it is no conventional view either.
+  exposure['0008103E'] = value('LO', 'INSIGHT 2D R CC');
+  assert.equal(model.classify(exposure).status, 'unverified');
+  assert.equal(plan([exposure]).slots['current|R|CC|conventional'].status, 'missing');
+});
+test('Siemens Table 164 laterality literals hang by side; BOTH is never a full-view slot', () => {
+  for (const [literal, side] of [['LEFT', 'L'], ['RIGHT', 'R'], ['L', 'L']]) {
+    const d = row('siemens-2d-12-1'); d['00080008'].Value[3] = literal; d['00200062'] = value('CS', side); d['00200060'] = value('CS', side);
+    assert.equal(plan([d]).slots['current|' + side + '|CC|conventional'].status, 'ready', literal);
+  }
+  const both = row('siemens-insight12'); both['00080008'].Value[3] = 'BOTH'; both['00200062'] = value('CS', 'B'); both['00200060'] = value('CS', 'B');
+  assert.equal(model.classify(both).standard, false);
+});
+test('implicit-VR LUT Data is read from inline or fetched bulk bytes, never guessed', () => {
+  const lut = [0, 512, 4096, 16000, 32000, 50000, 62000, 65535], bytes = new Uint8Array(new Uint16Array(lut).buffer);
+  const withData = element => { const d = row('siemens-lut-12-1'); d['00283010'].Value[0]['00283006'] = element; return d; };
+  const inline = model.displaySpec(withData({ vr: 'OW', InlineBinary: Buffer.from(bytes).toString('base64') }));
+  assert.equal(inline.voi.status, 'verified'); assert.deepEqual(inline.voi.lut.data, lut);
+  const bulk = withData({ vr: 'OW', BulkDataURI: 'https://example.invalid/bulk/1' });
+  assert.equal(model.displaySpec(bulk).voi.status, 'unverified', 'bytes not fetched yet');
+  assert.ok(model.displaySpec(bulk).issues.includes('voi-lut-table-invalid'));
+  assert.deepEqual(model.displaySpec(bulk, 1, { bulk: () => bytes }).voi.lut.data, lut);
+  assert.equal(model.displaySpec(bulk, 1, { bulk: () => bytes.subarray(1) }).voi.status, 'unverified', 'a short table is not padded');
+  // An 8-bit table is stored 8 bits allocated, padded to an even length.
+  const eight = withData({ vr: 'OW', InlineBinary: Buffer.from([0, 64, 128, 255, 9, 0]).toString('base64') });
+  eight['00283010'].Value[0]['00283002'] = value('US', 5, 100, 8);
+  assert.deepEqual(model.displaySpec(eight).voi.lut, { first: 100, bits: 8, data: [0, 64, 128, 255, 9] });
+  assert.equal(model.displaySpec(withData({ vr: 'OW', InlineBinary: '%%%' })).voi.status, 'unverified');
 });
 test('a partial or contradictory synthetic view cannot fill a full-view slot', () => {
   for (const vendor of ['hologic-generated-bto10', 'ge-generated-bto12', 'fuji-sview12']) {

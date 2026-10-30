@@ -135,6 +135,7 @@ REGRESSION_SUITES = {
         tests/privacy_date_dom_test.py
     """.split(),
     'viewer-native-dom': """
+        tests/ohif_worker_asset_test.py
         tests/viewer_stack_restore_dom_test.py
     """.split(),
     'proxy-contracts': """

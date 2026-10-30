@@ -3226,19 +3226,27 @@ REQ-MG-VENDOR-CLASS/HANG/DISPLAY -> RISK-MG-MISCLASS/OMITTED-SLICES/WRONG-VOI ->
 Hologic, Siemens, GE Pristina 10.x and Fuji header shapes in `fixtures/mg_vendor_cases.json`.
 This includes Siemens CT slices/INSIGHT_2D, cross-vendor synthetic 2D comparison, 12/14-bit unsigned
 MONOCHROME1/2, header windows and stored VOI tables (including the frame macro). The native extension
-sets the display transfer function; source pixels stay unchanged. Signed 16-bit in Siemens's statement
+sets the display transfer function; source pixels stay unchanged. D1892 (Minhoon 10-26 vendor-universal request)
+replaces D735's R1 device limit; `emr/e/rule-cases.json` carries the vendor shapes for both the viewer model and
+the EMR-E API classifier (Siemens LEFT/RIGHT/BOTH in Image Type value 4, free-text hints on every vendor path).
+The hanging test runs the extension through the pinned OHIF display-set path: the store callback attached before
+`start()`, one display set per Modality MG instance and a non-writable `ImageSet.images`, so the Siemens
+CT-format slices (Modality MG) must become one stack there. A stored VOI LUT read from implicit VR arrives as
+InlineBinary or a BulkDataURI fetched on this origin before hanging; an unread table shows a notice. Signed 16-bit in Siemens's statement
 is a receive/display capability, not a declared MG acquisition output. Fuji bit depths within its
 declared range are representative synthetic choices, not claims about a specific device.
 
 `python scripts/mg_vendor_fixture.py --output tmp/mg-vendor-fixtures` creates only synthetic DICOM,
-round-trips all native pixels and checks the actual compressed codestream precision using the #295
-encoder. Missing GDCM is NOT_RUN (exit 2), not a passed compressed fixture. GE 2D is uncompressed per
+round-trips all native pixels and checks the actual compressed codestream precision. 10/12/14-bit frames
+are encoded at their true precision with imagecodecs (J2K, SV1, .51) and pyjpegls (JPEG-LS); a missing encoder
+is NOT_RUN (exit 2), not a passed compressed fixture. GE 2D is uncompressed per
 the 10.x SOP table; its BTO and Hologic/Fuji/Siemens use their declared syntax lists. Siemens baseline
 8-bit forwarding is already covered by #295; no native 8-bit MG acquisition is fabricated.
 No additional TS from the DICOM registry alone (HTJ2K, deflate, .57) is introduced.
 
 REQ-MG-WORKER-ASSET -> RISK-CODEC-CSP-DRIFT -> `ohif_worker_asset_test.py` fails if nginx's eval-enabled
-worker is absent from `--viewer-root <extracted-build>`. The existing `e2e/test_caution_imaging.py`
+worker is absent from `--viewer-root <extracted-build>`. In the `viewer-native-dom` PR job, `--ohif-library` reads
+the pinned `libOrthancOHIF.so`: the worker file the dicom-image-loader creates must be nginx's exact location. The existing `e2e/test_caution_imaging.py`
 also GETs that asset from the actual pinned viewer and rejects missing/HTML fallback responses.
 Pure service tests and generated fixtures do not prove served GPU grayscale/decoding, real device
 compatibility or physician acceptance. Run the served checks on the isolated VM and retain those results.

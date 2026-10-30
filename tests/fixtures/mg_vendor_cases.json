@@ -1944,7 +1944,7 @@
             "DERIVED",
             "PRIMARY",
             "",
-            "R"
+            "RIGHT"
           ]
         },
         "00080070": {
@@ -2227,7 +2227,7 @@
             "DERIVED",
             "PRIMARY",
             "",
-            "R"
+            "RIGHT"
           ]
         },
         "00080070": {
@@ -2526,7 +2526,7 @@
             "DERIVED",
             "PRIMARY",
             "",
-            "R"
+            "RIGHT"
           ]
         },
         "00080070": {
@@ -2809,7 +2809,7 @@
             "DERIVED",
             "PRIMARY",
             "",
-            "R"
+            "RIGHT"
           ]
         },
         "00080070": {
@@ -3107,7 +3107,7 @@
             "DERIVED",
             "PRIMARY",
             "",
-            "R"
+            "RIGHT"
           ]
         },
         "00080070": {
@@ -3389,7 +3389,7 @@
             "DERIVED",
             "PRIMARY",
             "",
-            "R"
+            "RIGHT"
           ]
         },
         "00080070": {
@@ -3687,7 +3687,7 @@
             "DERIVED",
             "PRIMARY",
             "",
-            "R"
+            "RIGHT"
           ]
         },
         "00080070": {
@@ -3969,7 +3969,7 @@
             "DERIVED",
             "PRIMARY",
             "",
-            "R"
+            "RIGHT"
           ]
         },
         "00080070": {
@@ -4268,7 +4268,7 @@
             "DERIVED",
             "PRIMARY",
             "TOMO_2D",
-            "R",
+            "RIGHT",
             "INSIGHT_2D"
           ]
         },
@@ -4552,7 +4552,7 @@
             "DERIVED",
             "PRIMARY",
             "TOMO",
-            "R"
+            "RIGHT"
           ]
         },
         "00080070": {
