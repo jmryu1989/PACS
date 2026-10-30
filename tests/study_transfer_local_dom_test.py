@@ -2436,7 +2436,8 @@ class TransferPanelPage(rf.ReportFlowPage):
                 self.assertEqual(raw, self.raw(self.page, key), 'R7-A04-legacy: the old bytes are kept exactly')
                 self.site.import_answers = ['abort']
                 self.choose(self.files(1))
-                self.observed(lambda: len(self.site.imports) == posts + 1 and self.site.import_reads[-1] == self.site.imports[-1]['operation'],
+                self.observed(lambda: len(self.site.imports) == posts + 1 and self.site.import_reads
+                              and self.site.import_reads[-1] == self.site.imports[-1]['operation'],
                               'new import read')
                 fresh = self.site.imports[-1]['operation']
                 self.assertEqual(raw, self.raw(self.page, key), 'R7-A04-legacy: the old bytes are kept exactly')
