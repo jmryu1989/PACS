@@ -295,6 +295,8 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
   private readonly retiring = new Set<Delivery>();
   /** Closed deliveries that still owe the ledger their terminal or facts. Never reported as recorded. */
   private readonly closing = new Set<Delivery>();
+  /** Description records within their idle gap (describe()), keyed apart from the deliveries. */
+  private readonly descriptions = new Map<string, { prepared: Promise<Readonly<DurableAccessReceipt>>; timer: ReturnType<typeof setTimeout> | null }>();
   private stopping = false;
   private shutdown: Promise<void> | null = null;
   private readonly idleMs: number;
@@ -316,6 +318,7 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
    * drops it) and a description (QIDO, DICOMweb metadata, tags; `imageRead`). Neither opens a delivery nor counts in
    * one - a 200 HEAD beside reads that all failed would turn an aborted delivery into a provided one (review INT-01,
    * R244-GPT-FIX6-01). Every image route asks here with its request path, so the rule is this one, not each route's.
+   * A relayed instance description records its own 열람 of the study's metadata instead (describe()).
    * `target` is what the read serves (its study, the patient the route's gate or manifest names, E's manifest digest);
    * it is only asked for a delivery.
    */
@@ -323,6 +326,74 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
     target: () => DeliveryTarget<P> | Promise<DeliveryTarget<P>>, use: DeliveryUse = readUse(request)): Promise<DeliveryLease<P> | null> {
     if (request.method !== 'GET' || !imageRead(path)) return null;
     return this.admit(request, surface, await target(), use);
+  }
+
+  /**
+   * 제23조④ 열람 of a stored object's description the relay answers (`/instances/{id}/tags|simplified-tags|header|
+   * attachments/dicom/info`: the print and report consumers' header reads), or null for any other read. The tag dump is
+   * the study's producer metadata, not its image: its record names `study-metadata`, never an image, and it is kept
+   * apart from the deliveries - it neither opens, joins nor closes one, so the image read that follows still records its
+   * own delivery. Its grain is the delivery's (D1877): one provide-prepared per member session, study, patient and
+   * archive revision within the idle gap, durable before the first byte; a volume print's hundreds of header reads are
+   * one record, not hundreds of ledger appends. Each read still decides on current facts (current()). There is no
+   * terminal: the description is answered whole or not at all, and a header read is not a transfer of the image.
+   * `confirm` binds what Orthanc then selected to the record, as a lease's does. QIDO and DICOMweb metadata do not pass
+   * the API (nginx to Orthanc behind auth_request) and are not recorded here.
+   */
+  async describe(request: IncomingMessage, surface: string, path: string,
+    target: () => DeliveryTarget | Promise<DeliveryTarget>): Promise<{ confirm(): Promise<boolean> } | null> {
+    if (request.method !== 'GET' || !INSTANCE_DESCRIPTION.test(path)) return null;
+    const read = await target();
+    let binding = await this.described(request, surface, read);
+    return { confirm: async () => {
+      const held = await this.holds({ studyUid: read.studyUid, binding });
+      if (held === 'current') return true;
+      if (held === 'patient') throw new StudyChanged();
+      // A newer revision of the same patient's study: what Orthanc selected may be of either, so the newer one is
+      // recorded first and the relay asks again under it.
+      binding = await this.described(request, surface, read);
+      return false;
+    } };
+  }
+
+  /** The durable description record of this read's session, study, patient and current revision (describe()). */
+  private async described(request: IncomingMessage, surface: string, target: DeliveryTarget): Promise<DeliveryBinding> {
+    try {
+      if (this.stopping) throw new ServiceUnavailableException(IMAGE_DELIVERY_UNAVAILABLE);
+      const snapshot = this.requests.read(request);
+      const binding: DeliveryBinding = { patient: target.patient, revision: await this.revision(target.studyUid), manifest: null };
+      const current = await this.current(request, target);
+      const key = JSON.stringify([snapshot.issuer, snapshot.subject, snapshot.binding.sessionRef, target.studyUid,
+        binding.patient.linkId, binding.revision]);
+      let entry = this.descriptions.get(key);
+      if (!entry) {
+        const created = { prepared: this.prepareDescription(surface, target.studyUid, binding, current), timer: null as ReturnType<typeof setTimeout> | null };
+        // A description that could not be recorded is none: the next read asks the ledger again.
+        created.prepared.catch(() => { if (this.descriptions.get(key) === created) this.descriptions.delete(key); });
+        this.descriptions.set(key, entry = created);
+      }
+      if (entry.timer) clearTimeout(entry.timer);
+      const held = entry;
+      held.timer = setTimeout(() => { if (this.descriptions.get(key) === held) this.descriptions.delete(key); }, this.idleMs);
+      held.timer.unref?.();
+      await held.prepared;
+      return binding;
+    } catch (error) { throw this.unavailable(error); }
+  }
+
+  private async prepareDescription(surface: string, studyUid: string, binding: DeliveryBinding,
+    { facts, study }: CurrentDeliveryFacts): Promise<Readonly<DurableAccessReceipt>> {
+    const work = this.records.begin();
+    try {
+      const event = parseAccessEvent({ formatVersion: 1, surface, eventId: randomUUID(),
+        userId: known(facts.actor.identity), rolesAtTime: known(facts.actor.roles), actingInstitution: known(facts.actor.institutionId),
+        managingInstitution: known(study.managingInstitutionId), occurredAt: new Date().toISOString(), trustedProxyIp: facts.ip,
+        cause: 'background-fetch', context: { basis: 'background-fetch', studyId: studyUid, relatedStudyId: null, reason: null },
+        executor: 'member', targets: [{ kind: 'study-metadata', patientLinkSnapshot: known(study.patient), studyId: known(studyUid),
+          recordId: known(studyUid), versionId: known(binding.revision) }],
+        action: 'provide-prepared', result: 'prepared', requestId: facts.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null }) as Readonly<AccessEventV1>;
+      return await this.append(work, event, randomUUID());
+    } finally { work.end(); }
   }
 
   /**
@@ -481,7 +552,7 @@ export class StudyImageDeliveryRecorder implements OnModuleDestroy, BeforeApplic
    * What the archive holds now against what the delivery records: the same, a newer revision of the same patient's
    * study, or another patient. Read from the archive itself, never from the open record (R244-GPT-FIX9-01).
    */
-  private async holds(delivery: Delivery): Promise<Held> {
+  private async holds(delivery: Pick<Delivery, 'studyUid' | 'binding'>): Promise<Held> {
     const [revision, patientId] = await Promise.all([this.revision(delivery.studyUid),
       this.orthanc.studyPatientIdentity(delivery.studyUid)]);
     if (patientId !== delivery.binding.patient.patientId) return 'patient';

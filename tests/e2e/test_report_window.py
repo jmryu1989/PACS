@@ -94,7 +94,9 @@ class ReportWindowE2E(ReportPreviewE2E):
         printed=opened.value;printed.wait_for_function('()=>window.__printed===true')
         output=Path(__file__).parent/'artifacts/report-window.pdf';printed.pdf(path=str(output),prefer_css_page_size=True)
         pdf=PdfReader(output);text='\n'.join(sheet.extract_text() for sheet in pdf.pages)
-        self.assertIn('출력 W 1000 / L -100',text)
+        # pypdf rebuilds word gaps from glyph positions, so the gap width follows the host's CJK font
+        # (the S9-FLOW VM run read "출력  W 1000 / L -100"); the printed words are the contract, not the gap.
+        self.assertIn('출력 W 1000 / L -100',' '.join(text.split()))
         for sheet in pdf.pages:self.assertIn(f.patient_id,sheet.extract_text())
         images=[np.asarray(image.image.convert('L')) for sheet in pdf.pages for image in sheet.images]
         self.assertEqual(len(images),1);self.assertTrue(np.array_equal(images[0],second))

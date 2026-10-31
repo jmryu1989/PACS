@@ -71,9 +71,9 @@ export function viewerSources(uid: string, institution: string, rows: any[], pat
 /**
  * S7-U4a Clinical Context: the anchor's identity and request tags, the same-patient study rows and the signed prior report
  * bodies the answer actually carries. A failed or absent section returned no record and adds no target. The Tech Note
- * section carries only version/author metadata, never the note text, and `tech-note` is not a local-read target kind;
- * whether that metadata is a 열람 is an open question (access-record-20261031 report), so it adds no target here.
- * `studies` holds each returned study's managing institution and observed source PatientID.
+ * section carries the note's version, author and time but never its text; that is still read from the note record, so it
+ * is recorded as a 열람 of that version (the conservative reading of 제23조④; the note's record is its study, as on the
+ * Tech Note routes). `studies` holds each returned study's managing institution and observed source PatientID.
  */
 export function clinicalContextRead(body: any,
   studies: ReadonlyMap<string, { institution: string | null; patientId: string | null }>): LocalReadResponse {
@@ -93,6 +93,8 @@ export function clinicalContextRead(body: any,
   sections.priorReports.items.forEach((item: any, index: number) =>
     sources.push(source('report-version', item.studyUid, item.provenance.recordId, item.report.version,
       ['sections', 'priorReports', 'items', index])));
+  sections.techNote.items.forEach((item: any, index: number) =>
+    sources.push(source('tech-note', uid, uid, item.version, ['sections', 'techNote', 'items', index])));
   return new LocalReadResponse(body, sources);
 }
 

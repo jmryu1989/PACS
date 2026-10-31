@@ -106,7 +106,10 @@ class ThumbnailSortE2E(ThumbnailFailuresE2E):
         expect(page.get_by_label('시리즈 정렬')).to_have_value('number-asc')
         for name,value in values.items():expect(page.locator('#'+name)).to_have_value(value)
         self.assertEqual(self.state(current)['holder'],self.stack.actor('doctor'))
-        self.assertEqual(writes,[])
+        # The one write allowed is the 열람 record of a report the page showed (MODULE_A A5 view-observations, 의료법
+        # 제23조④); opening series and the related study change no study or report (the rows below).
+        viewed={self.stack.proxy+f'/api/studies/{f.uid}/view-observations' for f in (current,related)}
+        self.assertEqual([w for w in writes if w.split('?')[0] not in viewed],[])
         for fixture in (current,related):self.assertEqual(self.report_rows(fixture),rows[fixture.uid])
         self.assertEqual(self.originals(),originals)
 

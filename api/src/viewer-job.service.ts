@@ -7,6 +7,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
 import { Caller } from './pacs.service';
+import type { ClinicalWorkflow, RecordedTransaction, WorkflowRecord } from './emr-clinical/routes';
 import { canonical, viewerUid, viewerUuid, verifyViewerReference, isManualMeasurement } from './viewer-input';
 import { jobCommand, jobFingerprint, verifyJobCell, previewCommand } from './viewer-job-input';
 import { verifyVolumeReference, compactVolumeTags } from './viewer-volume-reference';
@@ -19,18 +20,27 @@ const summary = (j: any) => ({ id: j.id, studyUid: j.studyUid, authorSub: j.auth
   description: j.description, hidden: j.hidden, revision: j.revision, createdAt: j.createdAt, updatedAt: j.updatedAt,
   snapshotVersion: j.snapshot?.version });
 
+const jobChange = (surface: string, j: { id: string; studyUid: string; revision: number }, institution: string,
+  kind: 'comparison-layout' | 'comparison-description', action: 'write' | 'modify', patientId: string | null): WorkflowRecord =>
+  ({ surface, uid: j.studyUid, institution, kind, recordId: j.id, version: String(j.revision), action, patientId,
+    reference: { kind: 'ViewerJob', id: j.id, version: String(j.revision) } });
+
 @Injectable()
 export class ViewerJobService {
   constructor(private prisma: PrismaService, private orthanc: OrthancService, private studyAccess:StudyAccessService) {}
   private member(c: Caller, write = false) {
     if (c.kind !== 'member' || !c.sub || !c.actor || !c.institution || write && !c.roles.includes('radiologist')) deny();
   }
-  private async transaction<T>(work: (tx: Prisma.TransactionClient) => Promise<T>, read = false): Promise<T> {
+  private async transaction<T>(work: (tx: Prisma.TransactionClient, workflow?: ClinicalWorkflow) => Promise<T>, read = false,
+    recorded?: RecordedTransaction): Promise<T> {
     try {
-      return await this.prisma.$transaction(async tx => {
+      const body = async (tx: Prisma.TransactionClient, workflow?: ClinicalWorkflow) => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`; await tx.$executeRaw`SET LOCAL statement_timeout = '5s'`;
-        return work(tx);
-      }, { isolationLevel: read ? 'RepeatableRead' : 'ReadCommitted', maxWait: 4000, timeout: 8000 });
+        return work(tx, workflow);
+      };
+      // A write's 제23조④ access record commits with it, in the request's records transaction (ReadCommitted, as here).
+      if (recorded && !read) return await recorded(workflow => body(workflow.tx, workflow));
+      return await this.prisma.$transaction(tx => body(tx), { isolationLevel: read ? 'RepeatableRead' : 'ReadCommitted', maxWait: 4000, timeout: 8000 });
     } catch (e) {
       if (e instanceof Prisma.PrismaClientKnownRequestError) {
         if (['P2002', 'P2003', 'P2034'].includes(e.code)) conflict();
@@ -51,6 +61,8 @@ export class ViewerJobService {
     const identity = new Map<string, string>();
     for (const uid of snapshot.studies) identity.set(uid, (await this.orthanc.connectStudyIdentity(uid)).patientId);
     if (new Set(identity.values()).size !== 1) throw new BadRequestException('같은 환자의 검사만 비교 작업으로 저장할 수 있습니다');
+    // The one PatientID every participating original names; a new job's access record carries it as its patient link.
+    const patientId = identity.get(snapshot.studies[0])!;
     // A version 8 layout carries BOTH shapes, so it is verified against both originals:
     // the whole ordered CT volume its plane cells reconstruct, and every stack cell's own
     // instance. Neither check is skipped because the other one passed.
@@ -76,7 +88,7 @@ export class ViewerJobService {
         if(old && error instanceof BadRequestException)throw new ConflictException('저장 당시 볼륨 원본과 달라 복원하지 않았습니다');
         throw error;
       } finally { clearTimeout(timer); controller.abort(); }
-      if (![8, 9].includes(snapshot.version)) return verified;
+      if (![8, 9].includes(snapshot.version)) return { snapshot: verified, patientId };
     }
     const cells = [];
     for (const cell of verified.cells) {
@@ -88,7 +100,7 @@ export class ViewerJobService {
       if (old && cell.sourceDigest !== tags._kinSourceDigest) throw new ConflictException('저장 당시 원본과 달라 복원하지 않았습니다');
       cells.push({ ...cell, sourceDigest: tags._kinSourceDigest });
     }
-    return { ...verified, cells };
+    return { snapshot: { ...verified, cells }, patientId };
   }
   private async annotations(tx: any, snapshot: any, sources: Map<string, any>) {
     const refs = snapshot.annotations;
@@ -196,23 +208,24 @@ export class ViewerJobService {
     const input = previewCommand(raw);
     if (input.studies[0] !== uid) throw new BadRequestException('판독 대상 검사가 일치하지 않습니다');
     this.sameInstitution(await this.parents(this.prisma, input.studies, c));
-    const snapshot = await this.sources(input);
+    const { snapshot } = await this.sources(input);
     // Recheck access after remote reads. This preview has no stored comparison revision.
     const parents = await this.parents(this.prisma, input.studies, c);
     this.sameInstitution(parents);
     return { body: { snapshot }, sources: input.studies.map(study => consumerSource('comparison-layout', study,
       parents[0].institutionId, study, null, ['snapshot'])) };
   }
-  async create(uid: string, raw: Buffer, c: Caller) {
+  async create(uid: string, raw: Buffer, c: Caller, recorded?: RecordedTransaction) {
     this.member(c, true); viewerUid(uid);
     const b = jobCommand(raw, true), fingerprint = jobFingerprint({ uid, ...b });
     if (b.snapshot.studies[0] !== uid) throw new BadRequestException('판독 대상 검사가 일치하지 않습니다');
     this.sameInstitution(await this.parents(this.prisma, b.snapshot.studies, c));
     const known = await this.prisma.viewerJob.findUnique({ where: { id: b.id } });
     const sources = new Map<string, any>();
-    const snapshot = known ? null : await this.sources(b.snapshot, false, sources);
-    return this.transaction(async tx => {
-      this.sameInstitution(await this.parents(tx, b.snapshot.studies, c, true));
+    const verified = known ? null : await this.sources(b.snapshot, false, sources), snapshot = verified?.snapshot;
+    return this.transaction(async (tx, workflow) => {
+      const parents = await this.parents(tx, b.snapshot.studies, c, true);
+      this.sameInstitution(parents);
       const replay = await tx.viewerJob.findUnique({ where: { id: b.id } });
       if (replay) {
         if (replay.studyUid !== uid || replay.authorSub !== c.sub || replay.fingerprint !== fingerprint) conflict();
@@ -227,23 +240,33 @@ export class ViewerJobService {
       // The query engine re-parses Json values and can move a 17-digit double by one ULP. The
       // snapshot is therefore written as JSON text, which jsonb keeps as exact decimal numbers.
       await writeSnapshot(tx, j.id, frozen);
-      await this.history(tx, j, '', c); return summary({ ...j, snapshot: frozen });
-    });
+      await this.history(tx, j, '', c);
+      // 제23조④ 기재: the saved layout and its clinical title/description.
+      const surface = 'POST studies/:uid/viewer-jobs';
+      await workflow?.record(jobChange(surface, j, parents[0].institutionId, 'comparison-layout', 'write', verified.patientId));
+      await workflow?.record(jobChange(surface, j, parents[0].institutionId, 'comparison-description', 'write', verified.patientId));
+      return summary({ ...j, snapshot: frozen });
+    }, false, recorded);
   }
   private async history(tx: Prisma.TransactionClient, j: any, reason: string, c: Caller) {
     await tx.viewerJobRevision.create({ data: { jobId: j.id, revision: j.revision, title: j.title, description: j.description, hidden: j.hidden, reason, actor: c.actor } });
     await tx.auditLog.create({ data: { actor: c.actor, target: j.studyUid, action: 'viewer.job', detail: canonical({ jobId: j.id, revision: j.revision, hidden: j.hidden }) } });
   }
-  async revise(uid: string, id: string, raw: Buffer, c: Caller) { await this.studyAccess.prepare(c);
+  async revise(uid: string, id: string, raw: Buffer, c: Caller, recorded?: RecordedTransaction) { await this.studyAccess.prepare(c);
     this.member(c, true); viewerUid(uid); viewerUuid(id); const b = jobCommand(raw, false);
     const head = await this.head(uid, id, c);
-    return this.transaction(async tx => {
-      this.sameInstitution(await this.parents(tx, head.studies, c, true));
+    return this.transaction(async (tx, workflow) => {
+      const parents = await this.parents(tx, head.studies, c, true);
+      this.sameInstitution(parents);
       const j = await tx.viewerJob.findUnique({ where: { id } });
       if (!j || j.studyUid !== uid || j.authorSub !== c.sub) deny();
       if (j.revision !== b.expectedRevision) conflict();
       const next = await tx.viewerJob.update({ where: { id }, data: { title: b.title, description: b.description, hidden: b.hidden, revision: { increment: 1 }, updatedAt: new Date() } });
-      await this.history(tx, next, b.reason, c); return summary(next);
-    });
+      await this.history(tx, next, b.reason, c);
+      // 제23조④ 수정: a revision changes the title, description or hidden flag, never the layout. It reads no original,
+      // so it holds no observed PatientID and its link stays unresolved.
+      await workflow?.record(jobChange('POST studies/:uid/viewer-jobs/:id/revisions', next, parents[0].institutionId, 'comparison-description', 'modify', null));
+      return summary(next);
+    }, false, recorded);
   }
 }
