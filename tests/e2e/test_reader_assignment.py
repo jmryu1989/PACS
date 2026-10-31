@@ -64,10 +64,10 @@ class ReaderAssignmentE2E(WorklistE2E):
    try:self.change(a,self.body(self.read(a),None),status=409)
    finally:psql('UPDATE "StudyState" SET rs='+lit('W')+' WHERE uid='+lit(a.uid))
   after=self.change(a,self.body(self.read(a),None))
-  # A committed request's replay answers its original outcome even after the assignment moved on, and writes nothing
-  # (EMR-D clinical records, api/src/emr-clinical/records.ts admit(): the replay check runs before the revision check).
-  replayed=self.change(a,body,role)
-  self.assertEqual((replayed['revision'],replayed['reader'],len(replayed['history'])),(after['revision'],None,len(after['history'])))
+  # Replaying the first request right after it committed answered 201 above. Once another change has overtaken it, the
+  # replay is refused with the conflict answer: the current row is not that request's outcome. Nothing is written.
+  self.change(a,body,role,409);now=self.read(a)
+  self.assertEqual((now['revision'],now['reader'],len(now['history'])),(after['revision'],None,len(after['history'])))
  def test_assignment_03_browser_column_search_and_report(self):
   a=self.fixture();b=self.fixture(patient_id=a.patient_id);c=self.fixture(patient_id=a.patient_id);self.seed_report(c)
   tech=self.login('tech');self.select(tech,a);self.open(tech,a);tech.locator('#ra-reader').select_option(self.stack.user_ids['doctor']);tech.locator('#ra-save').click();expect(tech.locator('#ra-status')).to_contain_text('저장되었습니다');tech.locator('#ra-close').click()
@@ -80,7 +80,12 @@ class ReaderAssignmentE2E(WorklistE2E):
   def lost(route):route.fetch();route.abort()
   p.route('**/reader-assignment',lambda r:lost(r) if r.request.method=='POST' else r.continue_());p.locator('#ra-reader').select_option(self.stack.user_ids['doctor']);p.locator('#ra-save').click();expect(p.locator('#ra-status')).to_contain_text('저장 확인 실패');expect(p.locator('#ra-retry')).to_be_enabled()
   p.unroute('**/reader-assignment');p.locator('#ra-retry').click();expect(p.locator('#ra-status')).to_contain_text('저장되었습니다');self.assertEqual(len(self.read(a)['history']),1)
-  self.change(a,self.body(self.read(a),'doctor2'));p.locator('#ra-reader').select_option('');p.locator('#ra-save').click();expect(p.locator('#ra-status')).to_contain_text('바뀌었습니다');expect(p.locator('#ra-reader')).to_have_value('');p.locator('#ra-reload').click();expect(p.locator('#ra-current')).to_contain_text(self.stack.actor('doctor2'));expect(p.locator('#ra-reader')).to_have_value('');p.locator('#ra-save').click();expect(p.locator('#ra-status')).to_contain_text('저장되었습니다');self.assertIsNone(self.read(a)['reader']);p.locator('#ra-close').click()
+  self.change(a,self.body(self.read(a),'doctor2'));p.locator('#ra-reader').select_option('');p.locator('#ra-save').click();expect(p.locator('#ra-status')).to_contain_text('바뀌었습니다');expect(p.locator('#ra-reader')).to_have_value('');p.locator('#ra-reload').click();expect(p.locator('#ra-current')).to_contain_text(self.stack.actor('doctor2'));expect(p.locator('#ra-reader')).to_have_value('');p.locator('#ra-save').click();expect(p.locator('#ra-status')).to_contain_text('저장되었습니다');self.assertIsNone(self.read(a)['reader'])
+  # A lost reply, then another manager's change, then Retry: the dialog must not report the retried selection as saved.
+  p.route('**/reader-assignment',lambda r:lost(r) if r.request.method=='POST' else r.continue_());p.locator('#ra-reader').select_option(self.stack.user_ids['doctor']);p.locator('#ra-save').click();expect(p.locator('#ra-status')).to_contain_text('저장 확인 실패');p.unroute('**/reader-assignment')
+  overtaken=self.change(a,self.body(self.read(a),'doctor2'),'jmryu');p.locator('#ra-retry').click();expect(p.locator('#ra-status')).to_contain_text('바뀌었습니다');expect(p.locator('#ra-status')).not_to_contain_text('저장되었습니다');expect(p.locator('#ra-retry')).to_be_hidden()
+  now=self.read(a);self.assertEqual((now['revision'],now['reader']['sub'],len(now['history'])),(overtaken['revision'],self.stack.user_ids['doctor2'],len(overtaken['history'])))
+  p.locator('#ra-reload').click();expect(p.locator('#ra-current')).to_contain_text(self.stack.actor('doctor2'));p.locator('#ra-reader').select_option(self.stack.user_ids['doctor2']);p.locator('#ra-close').click()
   waiting=[];p.route('**/reader-assignment',lambda r:waiting.append(r));p.locator(f'[data-reader-assignment="{a.uid}"]').click();expect(p.locator('#ra-status')).to_contain_text('읽는 중');end_document(p);expect(p.locator('#reader-assignment-dialog')).not_to_be_visible();self.assertFalse(p.locator('#reader-assignment-dialog').evaluate_all('nodes => nodes.some(node => node.open)'),'An ended document retained an open dialog')
   for route in waiting:release_after_end(route,status=200,content_type='application/json',body=json.dumps(self.read(a)))
   expect(p.locator('#ra-history')).to_be_empty();expect(p.locator('#ra-reader')).to_be_empty()
@@ -148,9 +153,8 @@ class ReaderAssignmentE2E(WorklistE2E):
   # Reopen: a new revision with no reader and no history; the closed channel's last request does not apply.
   self.tele(a,{'ts':'wait','teleTo':'kin-center'});again=self.read(a,'ktech')
   self.assertEqual((again['revision'],again['reader'],again['history']),(4,None,[]))
-  # The closed channel's last request applies nothing: EMR-D answers its committed receipt (201, as in test 02) with the
-  # reopened row unchanged - no reader, no history, revision 4.
-  replayed=self.change(a,last,'kdoctor');self.assertEqual((replayed['revision'],replayed['reader'],replayed['history']),(4,None,[]))
+  # The closed channel's last request is refused (as in test 02) and the reopened row is unchanged.
+  self.change(a,last,'kdoctor',409);replayed=self.read(a,'ktech');self.assertEqual((replayed['revision'],replayed['reader'],replayed['history']),(4,None,[]))
   again=self.change(a,self.body(again,'kdoctor'),'ktech')
   self.assertEqual((again['revision'],[h['detail']['revision'] for h in again['history']]),(5,[5]))
   self.assertEqual([self.rows(a)['kin-center'][k] for k in ('closedRevision','closedAt')],[4,None]);self.assertEqual(self.rows(a)['hallym'],owner_row)
