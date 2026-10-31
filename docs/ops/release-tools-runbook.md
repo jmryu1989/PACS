@@ -93,8 +93,9 @@ is an admission condition for a clean install.
    the API's authentication configuration. If either request fails, inspect the
    service logs and keep the installation unverified. After correcting the cause,
    repeat this bounded check and preserve the first failure in the release record.
-   Then perform the approved synthetic save/reopen and signing checks before
-   clinical handover. Save their actual outcomes in the release record.
+   Then perform the approved synthetic save/reopen and signing checks
+   ([below](#synthetic-savereopen-and-signing-checks)) before clinical handover.
+   Save their actual outcomes in the release record.
 4. Backup and restore: after verification, take the **first populated backup**
    with `ops.backup('<backup-directory>')` in this same locked session (the CLI
    equivalent outside this session is `python3 scripts/ops_backup.py backup --output <backup-directory>`).
@@ -117,6 +118,198 @@ recheck them before a larger site or when the backup approaches the existing 600
 base-backup helper hang timeout; that timeout still needs the first-site measurement. Conversion commands remain available only when
 an existing installation actually needs conversion. This procedure does not claim
 an installation or restore was executed by this documentation change.
+
+## Synthetic save/reopen and signing checks
+
+Two existing checks make up step 3's "approved synthetic save/reopen and signing
+checks". Neither writes a synthetic record into a clinical installation: report
+versions are append-only (AGENTS §1.1) and there is no Orthanc delete feature
+(AGENTS §6), so whatever a check saved on the site would stay there.
+
+1. **Save/reopen and signed approval: the G3 candidate run of the installed SHA.**
+   `.github/workflows/candidate.yml` (`tests/candidate_ci.py`) is the approved
+   candidate gate (AGENTS §2). It runs on a disposable synthetic stack that
+   `tests/measurement_ci.py` starts with the deployment's own signing overlay and
+   a fresh 32-byte `c2-wrap-v1` file (`tests/emr/d/synthetic_stack.py`); each
+   synthetic doctor gets a C2 key (`tests/emr/d/provision_synthetic.cjs`). Its
+   selection includes `WorklistE2E.test_02_selection_draft_isolation` (draft
+   save), `test_11_approved_buttons_stay_disabled_after_reload` (UI Approve,
+   reload, the same findings, one version) and
+   `RelatedReportModeE2E.test_w5_01_prior_insert_loss_check_back_commit_reopen`
+   (save, approval, reopen). An approval there succeeds only through the server
+   signing path; a stack without the wrapping mapping answers
+   `WrappingSecretConfigurationPending` (see Enabling online approvals). These
+   tests do not read `emr_signing.signed_version` themselves; signature
+   verification after a PostgreSQL restore is CI's `ServerSigningPg`
+   (`tests/emr/c/server_signing_live.py`). Find the run with
+   `gh run list --workflow candidate.yml --json databaseId,displayTitle,conclusion,createdAt`.
+   Expected: `displayTitle` `candidate <installed SHA> [g3:<nonce>]` and
+   `conclusion` `success`. Record the run ID and the `candidate-<SHA>` artifact
+   in the release record. A missing or failed run leaves the check NOT_RUN or
+   FAIL; a run of another SHA does not count.
+2. **Signing recovery on the installed host: step 4's backup and rehearsal.**
+   `rehearse` restores the set's wrapping custody copy and unwraps every restored
+   private key with the recorded API image's own `unwrapServerPrivateKey`.
+   Expected in its printed JSON, besides `success: true`:
+   - custody configured (Nightly job): `wrapping_custody.custody` =
+     `restored and verified` and `wrapping_custody.keys` = the row count of
+     `emr_signing.private_key`. That count is 0 on a clean install and ≥ 1 after
+     the admin's first Create Key (Enabling online approvals). Run a new backup
+     and rehearsal after that first key; until then the key is not recoverable;
+   - no custody configuration and no keys:
+     `{"keys": 0, "custody": "not configured; no stored signing keys"}`. Stored
+     keys without custody fail the backup itself.
+   `restore-wrapping` (Recovery and rehearsal) must print the `c2-wrap-v1` →
+   restored file mapping.
+
+No tool performs a save, reopen or signed approval on the installed host itself.
+The LiveStack suites run only on a disposable synthetic stack through
+`scripts/run-tests.py` (AGENTS §2), not on a site.
+
+# Rollback to the previous release (N → N-1)
+
+Applies to a host installed and upgraded with the plain Compose list of the clean
+installation. A host that runs through the protected entry
+(`/opt/kin-deploy/entry.py`) uses that mode's own rollback (tests/README.md, EMR
+introduction). The application-only switch-back of `scripts/ops_deploy_runner.py`
+(same schema, previous API image, no database restore) needs an installed
+operational adapter and a compatibility authorization. Neither exists: its CLI
+prints `No operational adapter installed; deployment CLI is unavailable.`
+
+**What is and is not reversible.** Migrations are forward-only. The API image runs
+`prisma migrate deploy`, `api/prisma/migrations/` holds no down migration, and
+schema reset or db push is not allowed (step 2). Nothing is reverted in place. A
+rollback replaces the site's state with the **pre-upgrade backup B** in new
+volumes. It does this even when N added no migration, because data that N wrote
+can still be unreadable to N-1 (for example tests/README.md, OP-3 a: a saved column
+setting from a later build is refused by an earlier one until it is cleared).
+Everything written after B is **not** in the rolled-back site:
+- reports and their versions;
+- images received;
+- access and audit rows;
+- Keycloak account and password changes;
+- signing keys created on N, and the approvals they signed.
+
+All of that stays in N's preserved volumes, plus the N backup taken in step R2 when
+it succeeds. No tool merges it into N-1 (see Gaps). N's volumes are kept, never
+removed:
+- access records keep their 2-year period (개인정보의 안전성 확보조치 기준
+  제8조제1항, Recovery and rehearsal);
+- record retention follows 의료법 시행규칙 제15조제1항.
+
+The host's wrapping secret files are not changed by the upgrade or by the
+rollback.
+
+**Precondition: the upgrade itself.** Before N is started on an existing site,
+take B in step 1 while N-1 is still running:
+`python3 scripts/ops_backup.py backup --output <backup-directory>`. Then run
+`python3 scripts/ops_backup.py rehearse <B>`. Record B's directory and its
+manifest's `git_sha` (N-1) and `running_images`. The upgrade is then steps 2–4
+with the checkout at N and `ops.run(compose + ['up', '-d', '--build'])` on the
+existing project; `migrate deploy` applies only N's new migrations. Keep the image
+IDs that B records until the rollback window ends. `validate_backup` runs
+`docker image inspect` on them, so after an image prune B can no longer be
+restored or rehearsed.
+
+**Rollback**, in one operator Python session in the site checkout, as for steps
+2–4 (`ops.lock()`, `hold.__enter__()`, `ops.require_local_docker()`, the observed
+values compared and recorded):
+
+```python
+import json
+from pathlib import Path
+backup_set = Path('<B>')
+previous_sha = '<N-1 full SHA>'
+directory, manifest = ops.validate_backup(backup_set)   # checksums, archive entries, recorded images present
+assert manifest['git_sha'] == previous_sha and manifest['git_dirty'] is False
+assert manifest.get('emr') and manifest.get('role_catalog') is not None   # otherwise: Gaps, no live restore path
+lease.retain()
+record['status'] = 'ROLLING_BACK'
+ops.write_json(record_path, record)
+```
+
+- **R1. Rehearse B first.** Run `ops.rehearse(directory)`. Expected: `success: true`
+  (as in step 4). On failure, stop: N keeps running and the record becomes
+  `NEEDS_ATTENTION`.
+- **R2. Preserve N.** If N's containers run, call `ops.backup('<backup-directory>')`.
+  Keep the printed set even when it raises after `"complete": true` (a readiness
+  failure of N). Then run `ops.run(compose + ['down'])`. Do not pass `-v`: N's
+  named volumes stay under N's Compose project. Record that project name and
+  `ops.text(['docker', 'volume', 'ls', '--filter', 'label=com.docker.compose.project=<N project>'])`.
+- **R3. Check out N-1 and compare its configuration with B.** Run
+  `ops.run(['git', 'checkout', '--detach', previous_sha])`. Then check
+  `all(ops.digest(ops.ROOT / name) == manifest['sha256'][name] for name in ('.env', 'docker-compose.yml', 'docker-compose.prod.yml'))`.
+  A difference stops the rollback, because B was taken with other configuration.
+- **R4. Choose a new Compose project.** Restoring into N's volumes would overwrite
+  them, so the site gets a new Compose project R: fresh, empty volumes, while N's
+  remain. Add `COMPOSE_PROJECT_NAME=<R>` to the checkout's `.env`, or replace an
+  existing line. Compose reads that name from `.env`, so every later command of
+  the site, including the nightly `backup` (fixed container names), addresses R.
+  Record R. Then start the empty cluster alone:
+  `ops.run(compose + ['up', '-d', '--wait', 'db'])`. Its init creates the empty
+  `kin` and `keycloak` databases and the tablespace directory.
+- **R5. Restore PostgreSQL** with the daily set's own restore, the one `rehearse`
+  uses:
+
+  ```python
+  source, outside = ops.daily_set_catalog(manifest['role_catalog'])
+  print(ops.restore_snapshot('kin-db', directory, 'kin', 'post', source=source))
+  assert all(ops.counts('kin-db', db, 'kin') == manifest['counts'][db] for db in ops.PRE_DATABASES)
+  assert ops.emr_catalog('kin-db', 'kin') == json.loads((directory / 'emr-catalog.json').read_text(encoding='utf-8'))
+  print([row[0] for row in ops.migration_rows('kin-db')][-1])   # N-1's last migration
+  ```
+
+  `restore_snapshot` refuses a cluster that is not fresh or has a non-empty
+  database. Expected: `{"roles_created": [...], "memberships_granted": n, "catalog": "equal"}`,
+  `outside` = `[]`, and the last migration equal to the last folder of
+  `git ls-tree --name-only <N-1> api/prisma/migrations/`.
+- **R6. Restore Orthanc and the EMR state into R's new volumes.** First build N-1
+  and create R's containers without starting them:
+  `ops.run(compose + ['up', '--no-start', '--build'], timeout=install_timeout)`.
+  Read the volume names from the mounts, as `backup()` does:
+  `orthanc_volume` is the `kin-orthanc` mount at `/var/lib/orthanc/db` and
+  `state_volume` is the `kin-api` mount at `/var/lib/kin-emr`
+  (`json.loads(ops.text(['docker', 'inspect', name]))[0]['Mounts']`). Both must be
+  R's. Then extract with `rehearse`'s own helper:
+
+  ```python
+  for volume, archive in ((orthanc_volume, 'orthanc.tgz'), (state_volume, 'emr-state.tgz')):
+      ops.temporary_run(['--network', 'none', '--read-only', '--mount', f'type=volume,source={volume},target=/restore',
+                         '--mount', f'type=bind,source={directory},target=/backup,readonly', '--entrypoint', 'tar',
+                         manifest['postgres_image'], '-xzf', '/backup/' + archive, '-C', '/restore'], timeout=1800)
+  print(ops.temporary_run(['--network', 'none', '--read-only', '--mount', f'type=volume,source={orthanc_volume},target=/restore,readonly',
+                           '--entrypoint', 'python3', manifest['orthanc_image'], '-c', ops.SQLITE_CHECK], timeout=300))
+  ```
+
+  Expected: `{"integrity": "ok", "attachments": n, ...}`, with `n` equal to B's
+  rehearsal receipt.
+- **R7. Start N-1:** `ops.run(compose + ['up', '-d'], timeout=install_timeout)`.
+  Expected: `kin-api-migrate` and `kin-emr-provision` exit 0. Check with
+  `ops.text(['docker', 'inspect', '--format', '{{.State.ExitCode}}', name])`. The
+  migrate log (`ops.text(compose + ['logs', 'api-migrate'])`) shows
+  `No pending migrations to apply.`, because the restored history is N-1's.
+- **R8. Verify as in steps 3–4.** Run the bounded HTTPS readiness check and the
+  synthetic save/reopen and signing checks above. For check 1, use the G3 run of
+  N-1. Then take R's first populated backup, `rehearse` it, and run the custody
+  commands. Only then record `status=ROLLED_BACK` with the evidence paths and
+  release the lock as in step 4. On any failure, keep the lock and record
+  `NEEDS_ATTENTION`. N's volumes and B stay as they are.
+
+A host keeps one serving stack: the container names are fixed (`kin-db`, `kin-api`,
+…), so N and R cannot run at the same time. This section does not claim that a
+rollback was executed by this documentation change.
+
+**Gaps (no existing tool; not invented here):**
+- There is no single restore command for a daily set into a live site. R4–R7
+  compose the existing `ops_backup` functions that `rehearse` runs in its isolated
+  copy.
+- No tool brings data written on N after B into the rolled-back N-1 site.
+- A daily set without `role_catalog` (made before D23) has no live restore path.
+  `restore_snapshot` needs that catalog. The older sets' `pg_dumpall` role replay
+  is refused by PostgreSQL 16 for a `GRANTED BY kin` membership
+  (`ops_backup.rehearse`, tests/README.md D23).
+- No tool checks save, reopen or signed approval on the installed host
+  (Synthetic save/reopen and signing checks).
 
 # Online signing keys: backup and restore
 
@@ -203,7 +396,8 @@ external-backup OFF decision.
 
 ## Recovery and rehearsal
 
-Restore the database with the existing release recovery procedure. Before
+Restore the database as in Rollback to the previous release (R4–R7) or, for a
+host behind the protected entry, with that mode's rollback. Before
 enabling online approvals, restore the wrapping files into a new directory:
 
 ```sh
