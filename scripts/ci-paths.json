@@ -219,6 +219,8 @@
       "api/prisma/schema.prisma",
       "api/src/emr-clinical/**",
       "api/src/emr-contract/**",
+      "api/src/finding.controller.ts",
+      "api/src/finding.service.ts",
       "api/tsconfig*.json",
       "docker-compose*.yml",
       "keycloak/**",
