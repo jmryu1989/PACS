@@ -3071,15 +3071,17 @@ function kinCreateCine() {
     // hint. Supply the preferred DICOM rate before native cine initializes both
     // its FPS control and playback state; never rewrite the instance metadata.
     const handlerId = '@ohif/extension-default.sopClassHandlerModule.stack';
+    // Without the handler only this rate hint is lost; the rest of the cine controls still mount.
     const handler = extensions.getModuleEntry(handlerId);
-    const nativeDisplaySets = handler.getDisplaySetsFromSeries;
+    const nativeDisplaySets = typeof handler?.getDisplaySetsFromSeries === 'function' ? handler.getDisplaySetsFromSeries : null;
     function sourceRate(displaySet) {
       const instance = displaySet.instances?.[0];
       if (!(Number(instance?.NumberOfFrames) > 1)) return;
       for (const value of [instance.RecommendedDisplayFrameRate, instance.CineRate]) {
         const rate = typeof value === 'number' || typeof value === 'string' ? Number(value) : NaN;
         if (Number.isFinite(rate) && rate > 0) {
-          displaySet.FrameRate = 1000 / rate;
+          // The native FPS control and Range/Yoyo Play accept 1-90 fps; outside it the arrows and Play refuse.
+          displaySet.FrameRate = 1000 / Math.min(90, Math.max(1, rate));
           return;
         }
       }
@@ -3090,10 +3092,12 @@ function kinCreateCine() {
       displaySets.forEach(sourceRate);
       return displaySets;
     };
-    handler.getDisplaySetsFromSeries = createDisplaySets;
-    services.displaySetService.getActiveDisplaySets().forEach(ds => {
-      if (ds.SOPClassHandlerId === handlerId) sourceRate(ds);
-    });
+    if (nativeDisplaySets) {
+      handler.getDisplaySetsFromSeries = createDisplaySets;
+      services.displaySetService.getActiveDisplaySets().forEach(ds => {
+        if (ds.SOPClassHandlerId === handlerId) sourceRate(ds);
+      });
+    }
     const core = window.cornerstone, cine = services.cineService, grid = services.viewportGridService;
     const nativePlay = cine.playClip, nativeStop = cine.stopClip;
     const records = new Map(), subscriptions = [], listeners = [];
@@ -3356,7 +3360,7 @@ function kinCreateCine() {
     try { channel = kinViewerOnEnd(end); } catch (_) {}
     const timer = setInterval(render, 250); selected = grid.getActiveViewportId(); render();
     dispose = () => { end(); clearInterval(timer); listeners.forEach(off => off()); subscriptions.forEach(s => s.unsubscribe()); channel?.close(); cine.playClip = nativePlay; cine.stopClip = nativeStop; panel.remove();
-      if (handler.getDisplaySetsFromSeries === createDisplaySets) handler.getDisplaySetsFromSeries = nativeDisplaySets;
+      if (handler?.getDisplaySetsFromSeries === createDisplaySets) handler.getDisplaySetsFromSeries = nativeDisplaySets;
     };
   }
   return { id: 'kin.cine', preRegistration({ servicesManager, extensionManager }) { services = servicesManager.services; extensions = extensionManager; }, onModeEnter: mount, onModeExit() { dispose?.(); dispose = null; } };
