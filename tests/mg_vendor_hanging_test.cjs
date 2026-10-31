@@ -1,4 +1,5 @@
 // REQ-MG-VENDOR-HANG/VOI -> RISK-MG-OMITTED-SLICES/WRONG-VOI -> TEST-MG-VENDOR-HANG.
+// REQ-MG-04-REPEAT -> RISK-MG-REPEAT-HIDDEN -> TEST-MG-VENDOR-HANG (repeat exposure case).
 // Runs the shipped extension against its OHIF service/viewport interfaces. GPU/HTTP remain served checks.
 // The OHIF side below reproduces the pinned viewer's (orthancteam/orthanc:24.12.0 libOrthancOHIF.so) display-set
 // path: DeferredPromise keeps the store callback registered before start() and runs it first; the store builds
@@ -53,10 +54,19 @@ const naturalize = d => ({ SOPInstanceUID: d['00080018'].Value[0], SeriesInstanc
   InstanceNumber: d['00200013']?.Value?.[0], NumberOfFrames: d['00280008']?.Value?.[0] });
 
 // The selector forms the viewer's DOM is queried with: .class, [attr="value"] and [class~="token"].
+// Setting textContent replaces the element's children, as in the DOM.
 class Element {
-  constructor(className = '') { this.className = className; this.style = {}; this.children = []; this.textContent = ''; this.attributes = {}; }
+  constructor(className = '', tagName = 'DIV') {
+    this.className = className; this.tagName = tagName; this.style = {}; this.children = []; this.text = ''; this.attributes = {};
+    this.dataset = {}; this.listeners = {};
+  }
+  get textContent() { return this.text; }
+  set textContent(value) { this.children.forEach(c => { c.parent = null; }); this.children = []; this.text = value; }
   append(...children) { for (const c of children) { c.parent = this; this.children.push(c); c.onload?.(); } }
-  setAttribute(k, v) { this.attributes[k] = v; } getAttribute(k) { return this.attributes[k] ?? null; } addEventListener() {}
+  setAttribute(k, v) { this.attributes[k] = v; } getAttribute(k) { return this.attributes[k] ?? null; }
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+  click() { const event = { stopPropagation() {} }; (this.listeners.click || []).forEach(fn => fn(event)); }
+  descendants() { return this.children.flatMap(c => [c, ...c.descendants()]); }
   remove() { this.parent && (this.parent.children = this.parent.children.filter(c => c !== this)); this.parent = null; }
   getBoundingClientRect() { return this.rect || { top: 0, left: 0 }; }
   matches(selector) {
@@ -86,7 +96,7 @@ function orthancBulkAccept(accept) {
 async function mount(items, { routes = {} } = {}) {
   const listeners = new Map(), panel = new Element(), requests = [];
   const body = new Element();
-  const document = { head: new Element(), body, createElement: () => new Element(),
+  const document = { head: new Element(), body, createElement: tag => new Element('', tag.toUpperCase()),
     querySelector: s => s === '#kin-viewer-layout' ? panel : body.querySelector(s), querySelectorAll: s => body.querySelectorAll(s),
     addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) };
   let grid = new Map(), active = null;
@@ -102,6 +112,15 @@ async function mount(items, { routes = {} } = {}) {
     run: (_, id, options) => { state = { protocolId: id, stageIndex: options?.stageIndex }; } };
   const services = { hangingProtocolService: hp, viewportGridService: { EVENTS: { GRID_STATE_CHANGED: 'grid' },
     getState: () => ({ viewports: grid, activeViewportId: active }), setActiveViewportId: id => { active = id; },
+    // SET_DISPLAYSETS_FOR_VIEWPORTS, then GRID_STATE_CHANGED; the reducer refuses a missing viewport id.
+    setDisplaySetsForViewports: list => {
+      grid = new Map(grid);
+      for (const { viewportId, displaySetInstanceUIDs } of list) {
+        if (!grid.has(viewportId)) throw new Error('ViewportId is required to set display sets for viewport');
+        grid.set(viewportId, { ...grid.get(viewportId), displaySetInstanceUIDs });
+      }
+      gridChanged();
+    },
     subscribe: (_, fn) => { gridListeners.add(fn); return { unsubscribe: () => gridListeners.delete(fn) }; } },
     cornerstoneViewportService: { getCornerstoneViewport: () => viewport } };
   const modules = { [STACK]: createStackHandler() }, displaySets = [];
@@ -253,7 +272,8 @@ test('a pane opened by the reader into an empty slot no longer shows that slot\'
   assert.equal(panes.map(paneText).join(''), '', 'mode exit removes every slot label');
 });
 
-// Two R CC Conventional images of one study fill the same slot, so the hanging places no image anywhere.
+// Two R CC Conventional images of one study fill the same slot. They carry no exposure time and the same
+// Instance Number, so neither is the latest and the hanging places no image anywhere.
 test('a thumbnail double-click opens the series in a cell when the MG hanging places no image', async () => {
   const a = fixture('siemens-2d-12-1'), b = fixture('siemens-2d-12-2');
   b['0020000D'] = structuredClone(a['0020000D']);
@@ -275,6 +295,49 @@ test('a thumbnail double-click opens the series in a cell when the MG hanging pl
   assert.deepEqual(h.grid().get('vp-2').displaySetInstanceUIDs, [first]);
   assert.deepEqual(h.grid().get('vp-0').displaySetInstanceUIDs, [second]);
   h.extension.onModeExit();
+});
+
+// A retaken R CC: three R CC Conventional images of one study, stored out of exposure order. The latest
+// exposure is hung and its cell says it is one of three, with a control that shows each image in turn.
+test('a repeat exposure hangs the latest image, marked as one of several, and the cell switches to each other image', async () => {
+  const items = ['siemens-2d-12-1', 'siemens-2d-12-2', 'siemens-2d-12-1'].map(fixture);
+  items[2]['00080018'].Value[0] += '.3'; items[2]['0020000E'].Value[0] += '.3';
+  for (const d of items.slice(1)) d['0020000D'] = structuredClone(items[0]['0020000D']);
+  ['20261030101500', '20261030102000', '20261030101000'].forEach((t, i) => { items[i]['0008002A'] = { vr: 'DT', Value: [t] }; });
+  const h = await mount(items);
+  h.run();
+  const set = d => h.displaySets.find(s => s.images[0].SOPInstanceUID === d['00080018'].Value[0]).displaySetInstanceUID;
+  const key = 'current|R|CC|conventional';
+  assert.equal(h.selected(key), set(items[1]), 'the latest exposure fills the slot');
+  const stage = h.protocol().stages[h.state().stageIndex], { columns } = stage.viewportStructure.properties;
+  const keys = stage.viewports.map(v => v.displaySets[0].id), cell = keys.indexOf(key);
+  assert.deepEqual(plain(keys.filter(k => h.selected(k))), [key], 'no other slot takes one of the repeated images');
+  const panes = keys.map((_, i) => Object.assign(new Element('relative group/pane'), { rect: { top: Math.floor(i / columns), left: i % columns } }));
+  h.body.append(...panes);
+  const open = i => { const element = new Element(); element.setAttribute('data-viewport-uid', 'vp-' + i); panes[i].append(element); };
+  open(cell);
+  h.layout(keys.map((k, i) => ({ viewportId: 'vp-' + i, x: i % columns, y: Math.floor(i / columns), displaySetInstanceUIDs: h.selected(k) ? [h.selected(k)] : [] })));
+  const label = () => paneText(panes[cell]);
+  const button = () => panes[cell].descendants().filter(e => e.tagName === 'BUTTON');
+  assert.match(label(), /^Current · R CC · Conventional · 3장 중 1장 · 재촬영/);
+  assert.equal(button().length, 1, 'one switch control in the repeat cell');
+  assert.ok(panes.every((p, i) => i === cell || !p.descendants().some(e => e.tagName === 'BUTTON')), 'no control in a single-image or empty cell');
+  // The reader opens an image in an empty cell; switching the repeat cell leaves that cell as it is.
+  const other = keys.findIndex(k => !h.selected(k));
+  h.activate('vp-' + other); h.doubleClick(set(items[2])); open(other);
+  for (const [shown, n] of [[items[0], 2], [items[2], 3], [items[1], 1]]) {
+    button()[0].click();
+    assert.deepEqual(plain(h.grid().get('vp-' + cell).displaySetInstanceUIDs), [set(shown)], 'image ' + n + ' of 3 in the same cell');
+    assert.match(label(), new RegExp('^Current · R CC · Conventional · 3장 중 ' + n + '장 · 재촬영'));
+    assert.equal(button().length, 1);
+    assert.deepEqual(h.grid().get('vp-' + other).displaySetInstanceUIDs, [set(items[2])], 'the reader\'s own cell is unchanged');
+  }
+  // The reader's choice survives a new hanging run (a layout or image type change).
+  button()[0].click();
+  h.run();
+  assert.equal(h.selected(key), set(items[0]));
+  h.extension.onModeExit();
+  assert.equal(panes.map(paneText).join(''), '', 'mode exit removes the label and its control');
 });
 
 test('stored VOI table reaches the actor and switching to a windowed image replaces it', async () => {

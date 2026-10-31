@@ -615,8 +615,27 @@
   }
 
   const DBT_RANK={slices:1,slab:2,'mip-slab':3,'minip-slab':3,unspecified:4};
-  // Current/prior x side x view x kind. A duplicate is never resolved by picking one; the only order
-  // applied is slices before slabs inside DBT, and every alternative stays listed.
+  // DT as a fixed-width key (date, time to the second, microseconds) plus its UTC offset, or null.
+  function dateTime(value){
+    const m=/^(\d{8})(\d{2})?(\d{2})?(\d{2})?(?:\.(\d{1,6}))?([+-]\d{4})?$/.exec(value);
+    return m?m[1]+(m[2]||'00')+(m[3]||'00')+(m[4]||'00')+(m[5]||'').padEnd(6,'0')+(m[6]||''):null;
+  }
+  const EXPOSURE_TIMES=[o=>dateTime(text(o.item,'0008002A')),o=>dateTime(text(o.item,'00080022')+text(o.item,'00080032')),
+    o=>dateTime(text(o.item,'00080023')+text(o.item,'00080033'))];
+  // A repeat exposure of one slot, newest first: the first acquisition/content time every candidate
+  // carries (one UTC offset), then Instance Number. null when that order cannot name one latest
+  // image; the slot then stays an explicit choice.
+  function newestFirst(found){
+    const times=EXPOSURE_TIMES.map(f=>found.map(f)).find(list=>list.every(Boolean)&&new Set(list.map(t=>t.slice(20))).size===1)||null;
+    const numbers=found.every(o=>o.instanceNumber!==null);
+    if(!times&&!numbers)return null;
+    const keyed=found.map((o,i)=>({o,time:times?times[i].slice(0,20):'',number:numbers?o.instanceNumber:0}))
+      .sort((a,b)=>a.time<b.time?1:a.time>b.time?-1:b.number-a.number);
+    return keyed[0].time===keyed[1].time&&keyed[0].number===keyed[1].number?null:keyed.map(k=>k.o);
+  }
+  // Current/prior x side x view x kind. A duplicate is never resolved into `object`; the only order
+  // applied is slices before slabs inside DBT, and every alternative stays listed. An ambiguous slot
+  // carries `newestFirst` so a viewer may show the latest exposure, marked as one of several.
   function plan(manifest){
     const studies=Array.isArray(manifest&&manifest.studies)?manifest.studies:[];
     const current=studies.filter(s=>s&&s.role==='current'),prior=studies.filter(s=>s&&s.role==='prior');
@@ -646,7 +665,7 @@
       const alternatives=found.filter(o=>!best.includes(o));
       const partials=s.objects.filter(o=>o.partialSlot&&o.kind===kind&&o.laterality===side&&o.view===v);
       slots[key]=!best.length?(partials.length?{key,status:'partial',candidates:partials}:{key,status:'missing'})
-        :best.length>1?{key,status:'ambiguous',candidates:best,alternatives,partials}:{key,status:'ready',object:best[0],alternatives,partials};
+        :best.length>1?{key,status:'ambiguous',candidates:best,newestFirst:newestFirst(best),alternatives,partials}:{key,status:'ready',object:best[0],alternatives,partials};
     }
     const objects=[cur,...(pri?[pri]:[])].flatMap(s=>s.objects.map(o=>({...o,use:s===pri&&priorStatus!=='ok'?'refused':o.standard?'slot':o.partialSlot?'partial':'other'})));
     return {status:'ok',institution:manifest.institution,current:{uid:cur.uid,date:cur.date,patient:cur.patient},

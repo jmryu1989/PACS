@@ -1,4 +1,5 @@
-// TEST-MG-MODEL (E-MG R1): REQ-MG-01/02/03/04/05/06 -> RISK-MG-MISCLASS/OMIT/FALSE-ANATOMY/WRONG-STUDY/FLIP-CLIP/STALE.
+// TEST-MG-MODEL (E-MG R1): REQ-MG-01/02/03/04/05/06 -> RISK-MG-MISCLASS/OMIT/FALSE-ANATOMY/WRONG-STUDY/FLIP-CLIP/STALE;
+// REQ-MG-04-REPEAT -> RISK-MG-REPEAT-HIDDEN -> TEST-MG04-MODEL-REPEAT.
 // D73: every assertion binds to the public model contract (kind, frame identity, position, slot,
 // ticket validity) for DICOM JSON inputs built here; no source text, function name or DOM is read.
 // KIN_MG_MODEL may point at a copy of the model (tests/part1/mg/mutants.py); the product tree is never edited.
@@ -412,6 +413,37 @@ test('MG04-allow current and prior are paired per side, view and kind, and a mis
   assert.equal(alone.prior,null);for(const [lat,view] of views)assert.equal(slot(alone,'prior',lat,view,'conventional').status,'missing');
 });
 
+// A repeat exposure (e.g. a retaken R CC) stays an explicit choice that lists every image; its order names the
+// latest only when exposure time, then Instance Number, tells one image apart (commander decision 2026-10-31).
+test('MG04-allow a repeat exposure is ordered latest first by exposure time then Instance Number, and an undecidable order names none',()=>{
+  const cur='1.2.826.0.1.3680043.10.7.1';
+  const left=mg({study:cur,lat:'L',view:'CC'});
+  const order=images=>{
+    const s=slot(model.plan(manifest(study(cur,'current',[left,...images]))),'current','R','CC','conventional');
+    assert.equal(s.status,'ambiguous');assert.equal(s.object,undefined,'the slot object is never set for a repeat');
+    assert.deepEqual(s.candidates.map(o=>o.sop).sort(),images.map(i=>i['00080018'].Value[0]).sort(),'every image stays listed');
+    return s.newestFirst&&s.newestFirst.map(o=>images.findIndex(i=>i['00080018'].Value[0]===o.sop));
+  };
+  const at=(number,tags)=>mg({study:cur,lat:'R',view:'CC',number,extra:Object.fromEntries(Object.entries(tags).map(([t,x])=>[t,v(t==='0008002A'?'DT':t.endsWith('22')||t.endsWith('23')?'DA':'TM',x)]))});
+  assert.deepEqual(order([at(2,{'0008002A':'20261030101000'}),at(1,{'0008002A':'20261030102000'})]),[1,0],'Acquisition DateTime before Instance Number');
+  assert.deepEqual(order([at(1,{'00080022':'20261030','00080032':'102000'}),at(2,{'00080022':'20261030','00080032':'101000'})]),[0,1],'Acquisition Date + Time');
+  assert.deepEqual(order([at(1,{'00080023':'20261031','00080033':'090000'}),at(2,{'00080023':'20261030','00080033':'235959'})]),[0,1],'Content Date + Time, across midnight');
+  assert.deepEqual(order([at(1,{'00080022':'20261030','00080032':'101000.5'}),at(2,{'00080022':'20261030','00080032':'101000.25'})]),[0,1],'fractional seconds');
+  assert.deepEqual(order([at(9,{'0008002A':'20261030102000','00080023':'20261030','00080033':'101000'}),at(1,{'00080023':'20261030','00080033':'103000'})]),[1,0],
+    'a time only one image carries is not compared with another source; the source both carry decides');
+  assert.deepEqual(order([at(1,{'0008002A':'20261030101000'}),at(2,{'0008002A':'20261030101000'})]),[1,0],'equal times: Instance Number');
+  assert.deepEqual(order([at(3,{}),at(7,{}),at(5,{})]),[1,2,0],'no time: Instance Number orders all three');
+  assert.deepEqual(order([at(2,{'0008002A':'20261030101000+0900'}),at(1,{'0008002A':'20261030100000+0000'})]),[0,1],'differing UTC offsets are not compared');
+  assert.deepEqual(order([at(7,{'0008002A':'20261030101000'}),at(1,{'0008002A':'20261030102000'}),at(5,{'0008002A':'20261030102000'})]),[2,1,0],
+    'Instance Number breaks a tie only among the latest time');
+  assert.equal(order([at(1,{}),at(1,{})]),null,'no time and one Instance Number: no latest image');
+  assert.equal(order([at(1,{'0008002A':'20261030101000'}),at(1,{'0008002A':'20261030101000'})]),null,'same time and Instance Number: no latest image');
+  const unnumbered=[at(1,{}),at(2,{})];delete unnumbered[0]['00200013'];
+  assert.equal(order(unnumbered),null,'no time and an Instance Number missing: no latest image');
+  const ready=slot(model.plan(manifest(study(cur,'current',[left,at(1,{'0008002A':'20261030101000'})]))),'current','R','CC','conventional');
+  assert.equal(ready.status,'ready');assert.equal(ready.newestFirst,undefined,'a single image is a ready slot, unchanged');
+});
+
 test('MG04-reject another patient, another institution, an ambiguous duplicate or a partial/modified view is never chosen',()=>{
   const cur='1.2.826.0.1.3680043.10.7.1',pri='1.2.826.0.1.3680043.10.7.2';
   const current=[mg({study:cur,lat:'R',view:'CC'}),mg({study:cur,lat:'L',view:'CC'})];
@@ -426,7 +458,7 @@ test('MG04-reject another patient, another institution, an ambiguous duplicate o
     study(pri,'prior',priorOf({birth:'19710101'})))).prior.status,'refused','conflicting birth dates');
   const dup=model.plan(manifest(study(cur,'current',[...current,mg({study:cur,lat:'R',view:'CC',number:7})])));
   const r=slot(dup,'current','R','CC','conventional');
-  assert.equal(r.status,'ambiguous');assert.equal(r.candidates.length,2);assert.equal(r.object,undefined,'no duplicate is picked silently');
+  assert.equal(r.status,'ambiguous');assert.equal(r.candidates.length,2);assert.equal(r.object,undefined,'a duplicate is never resolved into the slot object');
   const extras=model.plan(manifest(study(cur,'current',[mg({study:cur,lat:'R',view:'CC',modifiers:[['SCT','399055006']]}),
     mg({study:cur,lat:'L',view:'CC',modifiers:[['SRT','R-102D6']]}),mg({study:cur,lat:'R',view:'MLO',partial:'YES'}),
     mg({study:cur,lat:'B',view:'MLO',orientation:['P','F']}),mg({study:cur,lat:null,view:'MLO'})])));

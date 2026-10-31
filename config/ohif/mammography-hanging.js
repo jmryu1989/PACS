@@ -71,6 +71,8 @@ function kinCreateMammographyHanging() {
     try { preferences.set(preferenceProvider?.({ studyInstanceUIDs: opened.slice() }), { accountDefault: true }); } catch (_) { /* Use the study-aware default. */ }
     const retrieve = series.metadata, run = hp.run;
     let ended = false, last = null, cells = [], stageCells = [], panel = null, missing = null;
+    // The reader's image per repeat-exposure slot (SOP), kept across layout and image type changes.
+    const repeatChoices = new Map();
     const live = () => !ended && location.search === search;
     const handler = extensions.getModuleEntry('@ohif/extension-default.sopClassHandlerModule.stack');
     const nativeDisplaySets = handler.getDisplaySetsFromSeries;
@@ -243,11 +245,15 @@ function kinCreateMammographyHanging() {
         const matched = views.length === cells.length && v.displaySetInstanceUIDs?.[0] === cell.selected;
         if (!matched && !unverified) return;
         const text = (matched ? cell.label : '') + (unverified ? (matched ? ' · ' : '') + 'Orientation Unverified' : '');
-        if (label?.textContent !== text) {
+        const repeat = matched ? cell.repeat : null;
+        if (label?.dataset.text !== text + (repeat?.show || '')) {
           if (!label) { label = document.createElement('div'); label.className = 'kin-mg-slot'; host.append(label); }
           label.style.cssText = 'position:absolute;bottom:24px;left:8px;z-index:5;pointer-events:none;color:#fff;background:#101e32;padding:3px 6px;font:12px sans-serif';
           label.textContent = text;
-          label.title = unverified ? '영상 방향을 확인할 수 없어 저장된 방향으로 표시합니다.' : '';
+          label.dataset.text = text + (repeat?.show || '');
+          label.title = [unverified ? '영상 방향을 확인할 수 없어 저장된 방향으로 표시합니다.' : '',
+            repeat ? '같은 좌우·촬영 방향·영상 종류의 영상이 여러 장입니다. 가장 최근 촬영을 먼저 표시합니다.' : ''].filter(Boolean).join(' ');
+          if (repeat) label.append(switchButton(v.viewportId, cell.key, repeat));
         }
         shown.add(label);
       });
@@ -255,6 +261,24 @@ function kinCreateMammographyHanging() {
       // pane's host becomes the inner viewport element, so the wrapper's "Missing" label would
       // stay over an image it does not describe. Keep only the labels written for this state.
       document.querySelectorAll('.kin-mg-slot').forEach(el => shown.has(el) || el.remove());
+    }
+    // Shows the next image of a repeat-exposure slot in its own cell, through the same grid update a
+    // thumbnail double-click uses, so the other cells keep what the reader did with them.
+    function switchButton(viewportId, key, repeat) {
+      const button = document.createElement('button');
+      button.type = 'button'; button.textContent = 'Switch';
+      button.title = '같은 위치의 다른 영상으로 바꿉니다.';
+      button.style.cssText = 'margin-left:6px;pointer-events:auto;cursor:pointer;color:#fff;background:#101e32;border:1px solid #657c9f;padding:0 4px;font:12px sans-serif';
+      // The label sits inside the viewport element; a press here must not start an image tool.
+      for (const type of ['pointerdown', 'mousedown']) button.addEventListener(type, event => event.stopPropagation());
+      button.addEventListener('click', event => {
+        event.stopPropagation();
+        if (!live() || !last || hp.getState()?.protocolId !== protocolId) return;
+        repeatChoices.set(key, repeat.next);
+        protocol(last.data);
+        services.viewportGridService.setDisplaySetsForViewports([{ viewportId, displaySetInstanceUIDs: [repeat.show] }]);
+      });
+      return button;
     }
     function protocol(data) {
       const model = window.KinMammographyModel;
@@ -264,6 +288,13 @@ function kinCreateMammographyHanging() {
       // The institution here is the viewing session's scope. The DICOMweb server has already
       // authorized these objects; this client classification does not grant access to a study.
       const plan = model.plan({ institution, studies });
+      const displaySetOf = object => {
+        const sops = new Set((object.stackMembers || [object]).map(o => o.sop));
+        const matches = displaySets.filter(d => d.StudyInstanceUID === object.study &&
+          d.images?.length === sops.size && new Set(d.images.map(i => i.SOPInstanceUID)).size === sops.size &&
+          d.images.every(i => sops.has(i.SOPInstanceUID)));
+        return matches.length === 1 ? matches[0] : null;
+      };
       preference.layout = plan.prior?.status === 'ok' ? (requestedLayout || 'compare') : 'current';
       const hasKind = (role, kind) => plan.objects.some(o => o.role === role && o.standard && o.kind === kind);
       // Prefer a representation shared by both examinations; never substitute a different kind
@@ -295,16 +326,18 @@ function kinCreateMammographyHanging() {
         }
         const entries = specs.map(spec => {
           const key = [spec.role, spec.side, spec.view, kind].join('|'), slot = plan.slots[key];
-          const object = slot?.status === 'ready' ? slot.object : null;
-          const sops = object ? new Set((object.stackMembers || [object]).map(o => o.sop)) : null;
-          const matches = object ? displaySets.filter(d => d.StudyInstanceUID === object.study &&
-            d.images?.length === sops.size && new Set(d.images.map(i => i.SOPInstanceUID)).size === sops.size &&
-            d.images.every(i => sops.has(i.SOPInstanceUID))) : [];
-          const selected = matches.length === 1 ? matches[0] : null;
+          // A repeat exposure hangs the latest image only when every image of the slot has its own
+          // display set, so the cell can say how many there are and switch to each of them.
+          const repeat = slot?.status === 'ambiguous' && slot.newestFirst ? slot.newestFirst.map(displaySetOf) : null;
+          const choices = repeat?.every(Boolean) ? repeat : null;
+          const chosen = choices ? Math.max(0, slot.newestFirst.findIndex(o => o.sop === repeatChoices.get(key))) : -1;
+          const selected = choices ? choices[chosen] : slot?.status === 'ready' ? displaySetOf(slot.object) : null;
           selectors[key] = { seriesMatchingRules: [{ attribute: 'displaySetInstanceUID', required: true,
             constraint: { equals: { value: selected?.displaySetInstanceUID || '' } } }] };
-          const state = selected ? '' : slot?.status === 'ambiguous' ? ' · Select Image' : slot?.status === 'missing' ? ' · Missing' : ' · Unverified';
-          return { key, selected: selected?.displaySetInstanceUID, label: (spec.role === 'current' ? 'Current' : 'Prior') + ' · ' + spec.side + ' ' + spec.view + ' · ' + labels[kind] + state };
+          const state = choices ? ' · ' + choices.length + '장 중 ' + (chosen + 1) + '장 · 재촬영' : selected ? '' :
+            slot?.status === 'ambiguous' ? ' · Select Image' : slot?.status === 'missing' ? ' · Missing' : ' · Unverified';
+          return { key, selected: selected?.displaySetInstanceUID, label: (spec.role === 'current' ? 'Current' : 'Prior') + ' · ' + spec.side + ' ' + spec.view + ' · ' + labels[kind] + state,
+            repeat: choices && { next: slot.newestFirst[(chosen + 1) % choices.length].sop, show: choices[(chosen + 1) % choices.length].displaySetInstanceUID } };
         });
         stageCells.push(entries);
         stages.push({ id: layout + '-' + kind, name: (layout === 'compare' ? 'Current vs Prior' : 'Current') + ' · ' + labels[kind],

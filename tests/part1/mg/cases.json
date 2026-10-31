@@ -22,6 +22,10 @@
    "title": "current/prior x side x view x kind comparison",
    "risk": "RISK-MG-WRONG-STUDY"
   },
+  "REQ-MG-04-REPEAT": {
+   "title": "repeat exposure in one slot: the latest (exposure time, then Instance Number) is shown only marked as one of N with a switch; an undecidable order stays an explicit choice",
+   "risk": "RISK-MG-REPEAT-HIDDEN"
+  },
   "REQ-MG-05": {
    "title": "orientation, grayscale, Fit, 1:1 and pan from the original",
    "risk": "RISK-MG-FLIP-CLIP"
@@ -44,7 +48,7 @@
    "id": "model",
    "file": "tests/part1/mg/model_test.cjs",
    "command": "node --test tests/part1/mg/model_test.cjs",
-   "expected": 339,
+   "expected": 340,
    "cases": [
     {
      "name": "MG01-allow conventional, device synthetic 2D and DBT are told apart by standard attributes with evidence",
@@ -112,6 +116,14 @@
      "test": "TEST-MG04-MODEL-ALLOW",
      "req": "REQ-MG-04",
      "risk": "RISK-MG-WRONG-STUDY",
+     "inputs": "DICOM JSON built in the test",
+     "mutants": []
+    },
+    {
+     "name": "MG04-allow a repeat exposure is ordered latest first by exposure time then Instance Number, and an undecidable order names none",
+     "test": "TEST-MG04-MODEL-REPEAT",
+     "req": "REQ-MG-04-REPEAT",
+     "risk": "RISK-MG-REPEAT-HIDDEN",
      "inputs": "DICOM JSON built in the test",
      "mutants": []
     },
