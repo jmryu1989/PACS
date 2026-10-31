@@ -6,10 +6,16 @@ const nativeSigning = { sign: async () => ({ fixture: 'native-signature' }) };
 // B2 consumer fixture only: these existing pure suites exercise business/CAS rules.
 // Real ledger atomicity and HTTP publication are tested against PostgreSQL.
 const {withDraftRequestContext} = require('./emr/request/consumer_fixture.cjs');
-function b2Ledger(prisma) {
-  return { begin: () => ({
+// `events` keeps the access events of committed transactions only: a rolled-back write leaves no record.
+function b2Ledger(prisma, events = []) {
+  return { events, begin: () => ({
     resolveRequestIdentity: async () => '00000000-0000-4000-8000-000000000001',
-    transactionWithRecords: (work, options) => prisma.$transaction(tx => work(tx, async (_event, effect) => effect()), options),
+    transactionWithRecords: async (work, options) => {
+      const staged = [];
+      const value = await prisma.$transaction(tx => work(tx, async (event, effect) => { staged.push(event); return effect(); }), options);
+      events.push(...staged);
+      return value;
+    },
     end() {},
   }) };
 }
@@ -69,6 +75,10 @@ const { PacsReportDraft } = require('/app/dist/pacs/report-draft');
 const { PacsReportCommit } = require('/app/dist/pacs/report-commit');
 const { STRUCTURE_CATALOG } = require('/app/dist/report-structure');
 const { PacsService } = require('/app/dist/pacs.service');
+const { parseAccessEvent, STATUTORY_ACT } = require('/app/dist/emr-contract/access-event');
+/** 의료법 제23조④ access records a route committed, as the ledger contract parses them: [act, action, kind, recordId, versionId]. */
+const actsOf = (records, surface) => records.filter(event => event.surface === surface).map(event => parseAccessEvent(event))
+  .flatMap(event => event.targets.map(t => [STATUTORY_ACT[event.action], event.action, t.kind, t.recordId.value, t.versionId.value]));
 
 // ── the Prisma double: tables in memory, transactions on a copy, every write recorded with its client ──
 
@@ -341,7 +351,8 @@ function world() {
   const hold = new PacsHold(prisma, sa, access);
   const clinician = new PacsClinician(prisma, sa, access, worklist);
   const evidence = new PacsReportEvidence(prisma, sa, findings, access);
-  const draft = withDraftRequestContext(new PacsReportDraft(prisma, sa, access, audit, evidence, b2Ledger(prisma)), b2Ledger(prisma));
+  const records = [];
+  const draft = withDraftRequestContext(new PacsReportDraft(prisma, sa, access, audit, evidence, b2Ledger(prisma)), b2Ledger(prisma, records));
   const commit = withDraftRequestContext(new PacsReportCommit(keycloak, sa, evidence, draft, nativeSigning), b2Ledger(prisma));
   const clinical = {
     read: (_request, _kind, _id, read) => prisma.$transaction(read),
@@ -350,7 +361,7 @@ function world() {
       closeAssignment: async () => {} })),
   };
   const w = { db, sa, orthanc, keycloak, findings, access, institutions, preferences, filters, audit, metrics, worklist, gateway,
-    studyState, techNote, hold, clinician, evidence, draft, commit };
+    studyState, techNote, hold, clinician, evidence, draft, commit, records };
   /** The PacsService facade over the same providers: it builds and owns its own concern graph. */
   w.facade = () => withDraftRequestContext(new PacsService(prisma, orthanc, keycloak, sa, findings, b2Ledger(prisma), nativeSigning, clinical), b2Ledger(prisma));
   w.workflow = execute => clinical.workflow({}, execute);
@@ -607,6 +618,32 @@ test('SPLIT-09 a draft write is kept only on the boundary it saw, under a live s
   const discarded = await w.draft.discardDraft(s.uid, { expectedOwner: ownerOf(RAD_A), expectedRevision: `${epoch}:2` }, RAD_A, 'sid-a');
   assert.deepEqual([discarded.revision, discarded.present, discarded.state.draft], [`${epoch}:3`, false, null]);
   assert.equal(mine().revision, 3);
+  // 의료법 제23조④: the discard is a 수정 of this author's draft. No report is stored yet, so the answer provides none.
+  const row = JSON.stringify([s.uid, RAD_A.actor]);
+  assert.deepEqual(actsOf(w.records, 'DELETE studies/:uid/draft'), [['수정', 'discard', 'private-draft', row, `${epoch}:3`]]);
+});
+
+test('SPLIT-09b a discard answering a stored report records the 열람 of that report version, unless the preliminary body is withheld', async () => {
+  const w = world();
+  const s = w.study({ rs: 'A' });
+  w.db.seed('report', { uid: s.uid, findings: 'approved text', conclusion: '', recommendation: '', version: 2, updatedBy: RAD_A2.actor });
+  w.db.seed('reportVersion', { uid: s.uid, version: 2, action: 'approve', findings: 'approved text', conclusion: '', recommendation: '', author: RAD_A2.actor });
+  const epoch = s.draftEpoch;
+  await w.draft.putReport(s.uid, draftBody(RAD_A, epoch, 0, { findings: 'mine', baseVersion: 2 }), RAD_A, null);
+  const out = await w.draft.discardDraft(s.uid, { expectedOwner: ownerOf(RAD_A), expectedRevision: `${epoch}:1` }, RAD_A, null);
+  assert.deepEqual([out.state.version, out.state.findings, out.state.draft], [2, 'approved text', null]);
+  assert.deepEqual(actsOf(w.records, 'DELETE studies/:uid/draft'), [
+    ['수정', 'discard', 'private-draft', JSON.stringify([s.uid, RAD_A.actor]), `${epoch}:2`],
+    ['열람', 'provide-prepared', 'report-version', s.uid, '2']]);
+
+  // A preliminary report another radiologist may not read: the answer carries no body, so no report read is recorded.
+  const p = w.study({ rs: 'P', preDoc: RAD_A2.actor, preDocSub: RAD_A2.sub, preReviewer: 'syn-senior', preReviewerSub: 'syn-senior' });
+  w.db.seed('report', { uid: p.uid, findings: 'prelim text', conclusion: '', recommendation: '', version: 1, updatedBy: RAD_A2.actor });
+  const before = w.records.length;
+  const hidden = await w.draft.discardDraft(p.uid, { expectedOwner: ownerOf(RAD_A), expectedRevision: `${p.draftEpoch}:0` }, RAD_A, null);
+  assert.deepEqual([hidden.state.prelimHidden, hidden.state.findings], [true, '']);
+  assert.deepEqual(actsOf(w.records.slice(before), 'DELETE studies/:uid/draft'),
+    [['수정', 'discard', 'private-draft', JSON.stringify([p.uid, RAD_A.actor]), `${p.draftEpoch}:1`]]);
 });
 
 // ── SPLIT-10 the administrator's forced discard ──
@@ -625,7 +662,13 @@ test('SPLIT-10 a forced discard is administrator-only, keeps every present draft
     byAuthor([['discarded', RAD_A.actor, 'a text'], ['discarded', RAD_A2.actor, 'b text']]));
   assert.deepEqual(w.db.rows('reportDraft').map(d => [d.present, d.revision]), [[false, 3], [false, 2]]);
   assert.deepEqual(w.audits().map(a => a.action), ['report.draft.force-discard']);
+  // 의료법 제23조④: the administrator changed each author's draft; each is a 수정 of that author's row (its new boundary on
+  // the rotated epoch), recorded in the discard's commit. The refused attempts below add none.
+  const forced = [['수정', 'discard', 'private-draft', JSON.stringify([s.uid, RAD_A.actor]), `${out.epoch}:3`],
+    ['수정', 'discard', 'private-draft', JSON.stringify([s.uid, RAD_A2.actor]), `${out.epoch}:2`]];
+  assert.deepEqual(actsOf(w.records, 'DELETE studies/:uid/draft/force').sort(), forced.sort());
   await refused(() => w.draft.forceDiscardDrafts(s.uid, { expectedOwner: ownerOf(ADMIN_A), expectedEpoch: s.draftEpoch }, ADMIN_A, null), 409, 'REPORT_DRAFT_CONFLICT');
+  assert.deepEqual(actsOf(w.records, 'DELETE studies/:uid/draft/force').sort(), forced.sort());
 });
 
 // ── SPLIT-11 hold (M11, M12) ──

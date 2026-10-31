@@ -10,7 +10,7 @@ import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import type { PrismaService } from '../prisma.service';
 import { dump, holdAlive, reportHeld, toClient, draftConflict, draftOwner, draftEpochOf, draftExpected, draftSnapshotInput,
-  draftEnvelope, draftTransactionError, draftBounded, visibleDraftSummary } from './values';
+  draftEnvelope, draftTransactionError, draftBounded, visibleDraftSummary, draftToken } from './values';
 import type { DraftOwner } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
@@ -31,9 +31,11 @@ export interface DraftRequestFacts {
   ip: { address: string; source: 'trusted-proxy' | 'request-peer' } | null;
   requestId: string;
 }
-type DraftObservation = { facts: DraftRequestFacts; surface: string; action: AccessAction; target?: 'report-version' };
+// `ownTargets`: the work records what it changes and what its answer provides itself (another author's draft, or the
+// report version a discard answer carries); draftTransaction adds no record of the caller's draft.
+type DraftObservation = { facts: DraftRequestFacts; surface: string; action: AccessAction; target?: 'report-version'; ownTargets?: true };
 type RecordDraft = (state: any, value: any, action?: AccessAction,
-  source?: { uid: string; version: number }) => Promise<void>;
+  source?: { uid: string; version: number } | { author: string; revision: string }) => Promise<void>;
 
 export class PacsReportDraft {
   constructor(
@@ -55,9 +57,12 @@ export class PacsReportDraft {
       await facts.request.requireCurrent(tx);
       return body(tx, async (state, value, action = observation.action, source) => {
         await facts.request.requireCurrent(tx);
-        const report = !!source || observation.target === 'report-version';
-        const revision = source ? String(source.version) : report ? String(value.state.version) : value.revision;
-        const resource = report ? source?.uid ?? uid : JSON.stringify([uid, c.actor]);
+        // Another author's draft (the administrator's forced discard) is that author's row, not the caller's.
+        const version = source && 'version' in source ? source : null;
+        const draft = source && !version ? source as { author: string; revision: string } : null;
+        const report = !!version || !draft && observation.target === 'report-version';
+        const revision = draft ? draft.revision : version ? String(version.version) : report ? String(value.state.version) : value.revision;
+        const resource = report ? version?.uid ?? uid : JSON.stringify([uid, draft?.author ?? c.actor]);
         const event: AccessEventV1 = {
           formatVersion: 1, surface, eventId: randomUUID(),
           userId: { status: 'known', value: identity }, rolesAtTime: { status: 'known', value: facts.request.facts.roles },
@@ -68,7 +73,7 @@ export class PacsReportDraft {
           cause: 'user-view', context: { basis: 'worklist', studyId: uid, relatedStudyId: null, reason: null },
           executor: 'member', targets: [{ kind: report ? 'report-version' : 'private-draft',
             patientLinkSnapshot: { status: 'unresolved', reason: 'not-resolved' },
-            studyId: { status: 'known', value: source?.uid ?? uid }, recordId: { status: 'known', value: resource },
+            studyId: { status: 'known', value: version?.uid ?? uid }, recordId: { status: 'known', value: resource },
             versionId: { status: 'known', value: revision } }],
           action, result: action === 'provide-prepared' ? 'prepared' : 'succeeded',
           requestId: facts.requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null,
@@ -183,7 +188,7 @@ export class PacsReportDraft {
         if (view) rolledBackView = { state, value: view };
         throw error;
       }
-      if (record) {
+      if (record && !observation?.ownTargets) {
         if (!related) await record(state, value);
         const view = related ? this.relatedDraftView(value) : value;
         if (view) await record(state, view, 'provide-prepared');
@@ -566,19 +571,24 @@ export class PacsReportDraft {
    * 다를 때 사용자가 고를 수 있어야 한다.
    * 내 초안만 비운다. 남의 초안은 애초에 보이지도 않는다. 행은 경계(revision)만 남긴 자리로 남는다.
    */
-  async discardDraft(uid: string, body: any, c: Caller, session: string | null) {
+  async discardDraft(uid: string, body: any, c: Caller, session: string | null, facts: DraftRequestFacts) {
     need(c.roles, 'radiologist', '판독문 저장');
     const owner = draftOwner(body, c);
     const expected = draftExpected(body);
+    // 버리기는 초안의 수정(제23조④)이고, 답은 확정본(`state`)을 다시 내준다. 둘 다 같은 commit의 접속기록이다.
     return this.draftTransaction(uid, c, session, expected.epoch, () => this.studyAccess.prepare(c,[uid]),
-      async (tx, state, audit) => {
+      async (tx, state, audit, record) => {
         const row = await this.ownDraft(tx, uid, c, expected.revision);
         // 초안이 없었어도 경계는 올린다 — 이 버리기보다 앞서 보낸 쓰기가 뒤늦게 닿아 초안을 만들지 못하게.
         const cleared = await this.storeDraft(tx, uid, c.actor, row, null);
         await audit(c.actor, 'report.draft.discard', uid, { institution: inst(c) });
         const rep = await tx.report.findUnique({ where: { uid } });
-        return { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, rep, c, cleared) };
-      });
+        const answer = { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, rep, c, cleared) };
+        await record!(state, answer, 'discard');
+        // 답이 내주는 글은 비운 초안이 아니라 확정본의 그 판이다. 예비 판독으로 가려 본문을 싣지 않은 답은 그 판의 열람이 아니다.
+        if (rep && !answer.state.prelimHidden) await record!(state, null, 'provide-prepared', { uid, version: rep.version });
+        return answer;
+      }, undefined, { facts, surface: 'DELETE studies/:uid/draft', action: 'discard', ownTargets: true });
   }
 
   /**
@@ -592,7 +602,7 @@ export class PacsReportDraft {
    * 초안이 달라지는 틈이 없고, 다른 검사의 자동 저장과 확정까지 멈추는 테이블 락은 잡지 않는다. 같은 검사의 확정도
    * 같은 잠금에 줄을 서므로 판 번호가 겹치지 않는다. 보존·비움·세대 교체·감사는 한 commit이다.
    */
-  async forceDiscardDrafts(uid: string, body: any, c: Caller, session: string | null) {
+  async forceDiscardDrafts(uid: string, body: any, c: Caller, session: string | null, facts: DraftRequestFacts) {
     need(c.roles, 'admin', '판독문 초안 강제 해제');
     const me = inst(c);
     // 관리자도 자기가 본 세대를 보낸다: 그 사이 다른 강제 해제가 있었다면 이 요청은 옛 화면의 것이다.
@@ -601,7 +611,7 @@ export class PacsReportDraft {
 
     // CHECK 백스톱의 409 변환은 그대로 둔다. 판 번호 충돌의 재시도는 없다 — 확정과 강제 해제가 같은 검사 잠금에 줄을 선다.
     return this.reportEvidence.reportLimitChecked(() => this.draftTransaction(uid, c, session, epoch, () => this.studyAccess.prepare(c,[uid]),
-      async tx => {
+      async (tx, state, _audit, record) => {
       // 비운 자리(present=false)는 초안이 아니다: 판으로 보존하지도, 건수에 넣지도 않는다.
       const drafts = await tx.$queryRaw<any[]>`
         SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, revision, present, "updatedAt"
@@ -654,7 +664,12 @@ export class PacsReportDraft {
         })),
       });
       // 판으로 보존한 바로 그 행들만 비운다(잠근 revision일 때만). 각 작성자의 경계도 하나씩 오른다.
-      for (const d of drafts) await this.storeDraft(tx, uid, d.author, d, null);
+      // 지운 초안마다 그 작성자 행의 수정(discard)을 같은 commit에 남긴다 — 관리자가 바꾼 것은 남의 기록이다.
+      for (const d of drafts) {
+        await this.storeDraft(tx, uid, d.author, d, null);
+        // storeDraft wrote exactly the locked revision + 1 (or refused); that is the row's new boundary.
+        await record!(state, null, 'discard', { author: d.author, revision: draftToken(rotated.draftEpoch, d.revision + 1) });
+      }
       // 판독문 전문은 감사로그에 넣지 않는다. 누구의 몇 글자를 지웠는지만 남긴다.
       await tx.auditLog.create({
         data: {
@@ -664,6 +679,6 @@ export class PacsReportDraft {
       });
 
       return { ok: true, count: drafts.length, drafts: visibleDraftSummary(summary, c), versions, epoch: rotated.draftEpoch };
-    }));
+    }, undefined, { facts, surface: 'DELETE studies/:uid/draft/force', action: 'discard', ownTargets: true }));
   }
 }
