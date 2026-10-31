@@ -52,7 +52,7 @@ class PgLedgerFixture(unittest.TestCase):
                            data=prefix + statement, check=check)
 
     @classmethod
-    def image_args(cls, command, env, *, remove=True):
+    def image_args(cls, command, env, *, remove=True, mounts=()):
         # This is the same compiled product boundary on a second authorized host.
         # One exact run-owned container uses only this fixture's private network.
         args = ['docker', 'run', *(['--rm'] if remove else []), '--name', cls.container + '-node',
@@ -60,6 +60,8 @@ class PgLedgerFixture(unittest.TestCase):
                 '--network', cls.network, '--memory', '1536m', '--memory-swap', '1536m', '--cpus', '2',
                 '--mount', 'type=bind,source=' + str(ROOT / 'tests/emr/b/pg_ledger_api_test.cjs')
                 + ',target=/app/pg_ledger_api_test.cjs,readonly']
+        for source, target in mounts:
+            args.extend(['--mount', 'type=bind,source=' + str(source) + ',target=' + target + ',readonly'])
         for key, value in env.items():
             args.extend(['-e', key + '=' + value])
         return args + [cls.image] + command
@@ -1085,6 +1087,197 @@ class PgLedgerProbeLive(PgLedgerFixture):
                           'red': 'missing-readiness mutant admits installer; refusal assertion fails',
                           'green': 'installer refused before append; runtime append/replay/two new processes retain one outcome',
                           'evidence': str(evidence.relative_to(ROOT)), 'production_image': 'NOT_RUN', 'http': 'NOT_RUN'}))
+
+
+class PgLedgerUpgradeCarryLive(PgLedgerFixture):
+    """M1 (2026-10-31): an EMR-B host upgrades to the PG ledger without losing its events.
+
+    The production host holds one B event, the 10-15 release probe, with 46 migrations applied.
+    Each owned database below takes that state through the real Prisma deploy, then the rest of
+    the migrations exactly as api-migrate applies them. The fixture's own database is the clean
+    installation the empty upgrade must equal.
+    """
+    # The last migration applied on the 10-15 host (prod-observe-20261031, 46 of 67).
+    HOST_LAST = '20261011120000_filter_shortcuts'
+    REVIEW_FROM, REVIEW_UNTIL = '2026-10-15T00:00:00.000Z', '2026-10-16T00:00:00.000Z'
+
+    def psql(self, database, statement, role=None, check=True):
+        prefix = ('SET ROLE ' + role + ';\n') if role else ''
+        return self.command(['docker', 'exec', '-i', self.container, 'psql', '-X', '-q', '-t', '-A',
+                             '-v', 'ON_ERROR_STOP=1', '-U', self.admin_user, '-d', database],
+                            data=prefix + statement, check=check)
+
+    @staticmethod
+    def literal(value):
+        return "'" + value.replace("'", "''") + "'"
+
+    def url(self, base, database):
+        return base.rsplit('/', 1)[0] + '/' + database
+
+    def deploy(self, database, partial=None):
+        """Prisma migrate deploy: the host's 46 (partial) or the release's full set as api-migrate runs it."""
+        url = self.url(self.witness_url, database)
+        if self.image:
+            schema = ['--schema', '/tmp/host-prisma/schema.prisma'] if partial else []
+            return self.command(self.image_args(['node', '--max-old-space-size=3072', '/app/node_modules/prisma/build/index.js',
+                                                 'migrate', 'deploy', *schema], {'DATABASE_URL': url},
+                                                mounts=[(partial, '/tmp/host-prisma')] if partial else ()), check=False)
+        return self.command([os.environ['KIN_B2R_NODE'], '--max-old-space-size=3072', os.environ['KIN_B2R_PRISMA_CLI'],
+                             'migrate', 'deploy', '--schema', str((partial or ROOT / 'api/prisma') / 'schema.prisma')],
+                            env={**os.environ, 'DATABASE_URL': url}, check=False)
+
+    def host_database(self, database, partial):
+        self.command(['docker', 'exec', self.container, 'createdb', '-U', self.admin_user, database])
+        result = self.deploy(database, partial)
+        self.assertEqual(result.returncode, 0, result.stdout[-2000:] + result.stderr[-2000:])
+        self.assertEqual(self.psql(database, 'SELECT count(*) FROM _prisma_migrations WHERE finished_at IS NOT NULL;').stdout.strip(), '46')
+
+    @staticmethod
+    def release_probe_event(occurred_at):
+        """scripts/ops_emr_probe.py probe_event at 5315187, the tool that wrote the 10-15 row, field for field."""
+        issuer, event_id = 'urn:kin:release-probe', str(uuid.uuid4())
+        na = {'status': 'not-applicable', 'reason': 'non-record-target'}
+        return {'formatVersion': 1, 'surface': 'GET health', 'eventId': event_id,
+                'userId': {'status': 'known', 'value': {'id': str(uuid.uuid5(uuid.NAMESPACE_URL, issuer + ':kin-center')),
+                                                        'issuer': issuer, 'subject': 'release-probe'}},
+                'rolesAtTime': {'status': 'known', 'value': ['release-probe']},
+                'actingInstitution': {'status': 'known', 'value': 'kin-center'},
+                'managingInstitution': {'status': 'known', 'value': 'kin-center'}, 'occurredAt': occurred_at,
+                'trustedProxyIp': {'status': 'not-applicable', 'reason': 'in-process-service'}, 'cause': 'service-job',
+                'context': {'basis': 'service-job', 'studyId': 'SYNTHETIC-release-probe', 'relatedStudyId': None, 'reason': None},
+                'executor': 'service',
+                'targets': [{'kind': 'system-operation', 'patientLinkSnapshot': na, 'studyId': na,
+                             'recordId': na, 'versionId': na}],
+                'action': 'provide-prepared', 'result': 'prepared', 'requestId': 'release-probe-' + event_id,
+                'auditLinkId': 'audit:' + str(uuid.uuid4()), 'relatedEventId': None}
+
+    def b_append(self, database, event):
+        """The 10-15 API's store.append: B's reserved append and its commit binding in one runtime transaction."""
+        text = json.dumps(event, separators=(',', ':'), ensure_ascii=False)
+        payload = '{"kind":"access","event":' + text + '}'
+        attempt = str(uuid.uuid4())
+        self.psql(database, 'BEGIN;\n'
+                  f"SELECT sequence FROM emr_access.append_reserved('viewing',{self.literal(event['eventId'])},"
+                  f"{self.literal(payload)},'열람',{self.literal(attempt)},{self.literal(str(uuid.uuid4()))});\n"
+                  f"SELECT emr_access.bind_commit('viewing',{self.literal(attempt)},1,NULL);\nCOMMIT;", 'kin_runtime')
+        return text
+
+    def schema(self, database):
+        dump = self.command(['docker', 'exec', self.container, 'pg_dump', '-U', self.admin_user, '-s', '-d', database]).stdout
+        # pg_dump 16.10+ wraps the script in a per-run random \restrict key.
+        return '\n'.join(line for line in dump.splitlines() if not line.startswith(('\\restrict', '\\unrestrict')))
+
+    def test_release_probe_row_is_carried_and_an_empty_ledger_upgrades_unchanged(self):
+        evidence = ROOT / 'tmp/emr-b2-replace-20261023' / ('upgrade-' + self.token)
+        partial = evidence / 'host-prisma'
+        (partial / 'migrations').mkdir(parents=True)
+        source = ROOT / 'api/prisma'
+        (partial / 'schema.prisma').write_bytes((source / 'schema.prisma').read_bytes())
+        (partial / 'migrations/migration_lock.toml').write_bytes((source / 'migrations/migration_lock.toml').read_bytes())
+        for folder in sorted(p for p in (source / 'migrations').iterdir() if p.is_dir() and p.name <= self.HOST_LAST):
+            (partial / 'migrations' / folder.name).mkdir()
+            (partial / 'migrations' / folder.name / 'migration.sql').write_bytes((folder / 'migration.sql').read_bytes())
+
+        # The host's ledger: one probe event, its commit marker, the viewing head at 1.
+        self.host_database('upgrade_probe', partial)
+        event = self.release_probe_event('2026-10-15T08:53:30.123Z')
+        inner = self.b_append('upgrade_probe', event)
+        self.assertEqual(self.psql('upgrade_probe', "SELECT json_build_array((SELECT count(*) FROM emr_access.access_entry), "
+                                   "(SELECT count(*) FROM emr_access.commit_marker), "
+                                   "(SELECT sequence FROM emr_access.chain_head WHERE stream='viewing'));").stdout.strip(), '[1, 1, 1]')
+        self.host_database('upgrade_empty', partial)
+        # An expiry checkpoint is the one B shape with no event to carry: it must still refuse.
+        self.host_database('upgrade_expiry', partial)
+        self.b_append('upgrade_expiry', self.release_probe_event('2020-01-02T00:00:00.000Z'))
+        checkpoint = str(uuid.uuid4())
+        self.psql('upgrade_expiry', 'BEGIN;\n'
+                  f"SELECT deleted_count FROM emr_access.expire_reserved(1,{self.literal(checkpoint)},{self.literal(str(uuid.uuid4()))});\n"
+                  f"SELECT emr_access.bind_commit('viewing',{self.literal(checkpoint)},2,repeat('a',64));\nCOMMIT;", 'kin_emr_retention')
+        self.assertEqual(self.psql('upgrade_expiry', 'SELECT kind FROM emr_access.access_entry;').stdout.strip(), 'expiry')
+
+        upgrades = {}
+        for database in ('upgrade_probe', 'upgrade_empty', 'upgrade_expiry'):
+            result = self.deploy(database)
+            (evidence / (database + '.deploy.log')).write_text(result.stdout + result.stderr, encoding='utf-8')
+            upgrades[database] = result
+        for database in ('upgrade_probe', 'upgrade_empty'):
+            result = upgrades[database]
+            self.assertEqual(result.returncode, 0, database + ': ' + result.stdout[-2000:] + result.stderr[-2000:])
+            self.assertEqual(self.psql(database, 'SELECT count(*) FILTER (WHERE finished_at IS NOT NULL), count(*) '
+                                       'FROM _prisma_migrations;').stdout.strip(), '67|67')
+        self.assertNotEqual(upgrades['upgrade_expiry'].returncode, 0, 'An expiry checkpoint must refuse the upgrade')
+        # Prisma reports only the aborted transaction; the server log names the refusal.
+        server = self.command(['docker', 'logs', self.container])
+        (evidence / 'postgres.log').write_text(server.stdout + server.stderr, encoding='utf-8')
+        self.assertEqual(len(re.findall(r'ERROR:\s+EmrCleanInstallRequired', server.stdout + server.stderr)), 1,
+                         'Only the expiry database may refuse')
+        self.assertEqual(self.psql('upgrade_expiry', 'SELECT count(*) FROM emr_access.chain_head;').stdout.strip(), '2',
+                         'The refused migration must leave the B ledger as it was')
+
+        # The carried probe: one committed operation whose one viewing entry holds the inner event bytes.
+        row = json.loads(self.psql('upgrade_probe', "SELECT json_build_object('entries',(SELECT count(*) FROM emr_access.access_entry),"
+            "'operation',(SELECT row_to_json(o) FROM emr_access.operation o),"
+            "'outcome',(SELECT outcome FROM emr_access.attempt_outcome),"
+            "'entry',(SELECT json_build_object('stream',stream,'event_id',event_id,'payload',payload,'act',statutory_act,"
+            "'retention',retention_class,'occurred',to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),"
+            "'receipt',EXISTS(SELECT FROM emr_access.entry_receipt r WHERE r.entry_id=e.entry_id)) FROM emr_access.access_entry e),"
+            "'targets',(SELECT json_agg(json_build_array(target_index,target_kind,record_id,version_id)) FROM emr_access.access_target));").stdout)
+        self.assertEqual(row['entries'], 1)
+        self.assertEqual(row['outcome'], 'committed')
+        self.assertEqual((row['operation']['event_id'], row['operation']['streams'], row['operation']['pending']),
+                         (event['eventId'], ['viewing'], False))
+        self.assertEqual(row['entry'], {'stream': 'viewing', 'event_id': event['eventId'], 'payload': inner, 'act': '열람',
+                                        'retention': 'viewing2y', 'occurred': event['occurredAt'], 'receipt': True})
+        self.assertEqual(row['targets'], [[0, 'system-operation', None, None]])
+        # The ledger's own admission recognises the carried row as this event, not a conflicting one.
+        admitted = self.psql('upgrade_probe', 'BEGIN;\n'
+            f"SELECT emr_access.admit_operation({self.literal(str(uuid.uuid4()))},{self.literal(str(uuid.uuid4()))},"
+            f"{self.literal(inner)},'열람');\nROLLBACK;", 'kin_runtime').stdout.strip()
+        self.assertEqual(admitted, row['operation']['operation_id'])
+        result = json.loads(self.psql('upgrade_probe', f"SELECT emr_access.operation_result({self.literal(admitted)});",
+                                      'kin_runtime').stdout)
+        self.assertEqual((result['outcome'], [e['expired'] for e in result['entries']]), ('committed', [False]))
+
+        # Access Review's one ledger read, as the runtime calls it.
+        review = self.psql('upgrade_probe', 'SELECT json_agg(r) FROM emr_access.review_entries('
+            f"'kin-center','{self.REVIEW_FROM}','{self.REVIEW_UNTIL}',false,NULL,NULL,26) r;", 'kin_runtime').stdout
+        review = json.loads(review)
+        self.assertEqual(len(review), 1)
+        shown = json.loads(review[0]['payload'])
+        self.assertEqual((review[0]['event_id'], review[0]['statutory_act'], shown['executor'], shown['action'],
+                          shown['userId']['value']['subject'], shown['managingInstitution']['value'], shown['targets'][0]['kind']),
+                         (event['eventId'], '열람', 'service', 'provide-prepared', 'release-probe', 'kin-center', 'system-operation'))
+        found = self.psql('upgrade_probe', "SELECT count(*) FROM emr_access.investigation_entries('viewing','kin-center',"
+            f"'{self.REVIEW_FROM}','{self.REVIEW_UNTIL}',NULL,NULL,10);", 'kin_runtime').stdout.strip()
+        self.assertEqual(found, '1')
+
+        # The API refuses to start on a ledger whose relations differ; it must accept the carried one.
+        script = ("const p=require('path');const b=process.argv[1];"
+                  "const {EmrLedgerClient}=require(p.join(b,'emr-runtime/client.js'));"
+                  "const {verifyRuntimeConnection}=require(p.join(b,'emr-runtime/manifest.js'));"
+                  "(async()=>{const db=new EmrLedgerClient(process.env.DATABASE_URL);await db.$connect();"
+                  "try{console.log('KIN_RESULT '+JSON.stringify(await verifyRuntimeConnection(db)))}finally{await db.$disconnect()}})()"
+                  ".catch(e=>{console.log('KIN_RESULT '+JSON.stringify({error:String(e&&e.message||e)}));process.exitCode=1});")
+        runtime = self.url(self.runtime_url, 'upgrade_probe')
+        if self.image:
+            checked = self.command(self.image_args(['node', '-e', script, '/app/dist'], {'DATABASE_URL': runtime}), check=False)
+        else:
+            checked = self.command([os.environ['KIN_B2R_NODE'], '-e', script, os.environ['KIN_B2R_BUILD']], check=False,
+                                   cwd=ROOT / 'api', env={**os.environ, 'DATABASE_URL': runtime})
+        verdict = json.loads(checked.stdout.split('KIN_RESULT ', 1)[1].splitlines()[0])
+        self.assertEqual(checked.returncode, 0, verdict)
+        self.assertEqual(verdict['role'], 'kin_runtime')
+
+        # An empty B ledger upgrades exactly as before: the clean installation's schema, no events.
+        self.assertEqual(self.psql('upgrade_empty', 'SELECT (SELECT count(*) FROM emr_access.access_entry) + '
+                                   '(SELECT count(*) FROM emr_access.operation);').stdout.strip(), '0')
+        clean, empty, carried = self.schema(self.database_name), self.schema('upgrade_empty'), self.schema('upgrade_probe')
+        for name, text in (('clean', clean), ('empty', empty), ('carried', carried)):
+            (evidence / (name + '.schema.sql')).write_text(text, encoding='utf-8')
+        self.assertEqual(empty, clean, 'An empty B ledger must upgrade to the clean installation schema')
+        self.assertEqual(carried, empty, 'The carried ledger must have the same schema as the empty upgrade')
+        print(json.dumps({'status': 'PASS', 'carried_event': event['eventId'], 'review_rows': len(review),
+                          'manifest': verdict, 'expiry': 'refused EB010', 'evidence': str(evidence.relative_to(ROOT))}))
 
 
 if __name__ == '__main__':

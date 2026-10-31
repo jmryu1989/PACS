@@ -76,7 +76,7 @@ jobs:
         timeout-minutes: 15
         run: |
           failed=()
-          for entry in 'PgLedgerRoleLive:roles' 'PgLedgerClinicalHttpLive:clinical-http' 'PgLedgerStartupLive:startup' 'PgLedgerImportCliLive:import-cli' 'PgLedgerFailureFilesLive:failure-files' 'PgLedgerRetentionAdapterLive:retention-adapter' 'PgLedgerRestoreSweepLive:restore-sweep' 'PgLedgerRequestWorkLive:request-work' 'PgLedgerAuthFailureLive:auth-failure' 'PgLedgerAuthEndLive:auth-end'; do
+          for entry in 'PgLedgerRoleLive:roles' 'PgLedgerClinicalHttpLive:clinical-http' 'PgLedgerStartupLive:startup' 'PgLedgerImportCliLive:import-cli' 'PgLedgerFailureFilesLive:failure-files' 'PgLedgerRetentionAdapterLive:retention-adapter' 'PgLedgerRestoreSweepLive:restore-sweep' 'PgLedgerRequestWorkLive:request-work' 'PgLedgerAuthFailureLive:auth-failure' 'PgLedgerAuthEndLive:auth-end' 'PgLedgerUpgradeCarryLive:upgrade-carry'; do
             cls="${entry%%:*}"
             unit="${entry#*:}"
             echo "$cls: KIN_LIVE_ENVIRONMENT=ci-b2r-$unit"
