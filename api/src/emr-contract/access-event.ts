@@ -126,6 +126,14 @@ function surfaceKindsOf(surface: string): readonly RecordKind[] {
   return Object.prototype.hasOwnProperty.call(EXTERNAL_SURFACES, surface) ? EXTERNAL_SURFACES[surface] :
     Object.prototype.hasOwnProperty.call(INTERNAL_SURFACES, surface) ? INTERNAL_SURFACES[surface].kinds : routeContract(surface).kinds;
 }
+/** PACS rows written in their own service transaction (ClinicalWorkflow.record): the study, record and version are
+ * persisted, but no PatientLink row exists and the patient is observed only from the source archive, which the write
+ * must not wait on under its locks (and a WORKLIST-SPLIT-UID study has no single patient). A write that already holds
+ * the link records it; otherwise the fact stays unresolved, never invented, as drafts' do. */
+const NATIVE_WRITE_SURFACES: readonly string[] = freeze(['PATCH studies/:uid', 'DELETE studies/:uid', 'POST match', 'POST unmatch',
+  'POST studies/:uid/critical-results', 'POST critical-results/:id/ack', 'POST critical-results/:id/cancel', 'POST critical-results/:id/supersede',
+  'POST studies/:uid/viewer-items', 'POST studies/:uid/viewer-items/:id/revisions',
+  'POST studies/:uid/viewer-jobs', 'POST studies/:uid/viewer-jobs/:id/revisions']);
 function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manifest: readonly ResolvedRecord[] | undefined,
     failure: boolean): AccessTarget[];
 function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manifest: readonly ResolvedRecord[] | undefined,
@@ -169,7 +177,8 @@ function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manif
     // study/record/version identities but no patient-link row. Preserve that
     // unknown fact on these existing boundaries; never invent a patient link.
     const nativeRecord = kind === 'private-draft' ||
-      (['PUT studies/:uid/report', 'POST studies/:uid/report/commit'].includes(surface) && kind === 'report-version');
+      (['PUT studies/:uid/report', 'POST studies/:uid/report/commit', 'DELETE studies/:uid/draft/force'].includes(surface) && kind === 'report-version') ||
+      NATIVE_WRITE_SURFACES.includes(surface);
     // Request intake and hold administration disclose request facts even when an original
     // cannot yet be packaged. Preserve its patient/record; do not invent a study or version.
     const requestFacts = kind === 'disclosure' && ['POST emr-audit/requests', 'POST emr-audit/issuances',
@@ -327,7 +336,7 @@ export interface AuthAccessEventV2 {
 }
 /** Local source observations do not assert a formal PatientLink or a signed/retained record. */
 export interface LocalReadTarget {
-  kind: 'study-metadata' | 'report-version' | 'report-evidence' | 'report-head' | 'private-draft' | 'key-image' | 'measurement' | 'comparison-layout' | 'comparison-description' | 'order' | 'critical-result' | 'study-organization' | 'access-audit';
+  kind: 'study-metadata' | 'report-version' | 'report-evidence' | 'report-head' | 'private-draft' | 'key-image' | 'measurement' | 'comparison-layout' | 'comparison-description' | 'order' | 'critical-result' | 'study-organization' | 'access-audit' | 'tech-note';
   studyId: EvidenceFact<string>;
   recordId: EvidenceFact<string>;
   versionId: EvidenceFact<string>;
@@ -427,7 +436,7 @@ export function parseLocalReadEvent(input: unknown): Readonly<LocalReadAccessEve
     const t = object(value, ['kind', 'studyId', 'recordId', 'versionId', 'sourcePatientId', 'sourceInstitution', 'projectionSha256']);
     const kind = choice(t.kind, ['study-metadata', 'report-version', 'report-evidence', 'report-head', 'private-draft',
       'key-image', 'measurement', 'comparison-layout', 'comparison-description', 'order', 'critical-result', 'study-organization',
-      'access-audit']);
+      'access-audit', 'tech-note']);
     if (!kinds.includes(kind)) throw new Error('Target kind does not belong to the server route');
     // An AuditLog row is append-only (no revision) and its target is not always a study.
     const versionId = kind === 'study-metadata' || kind === 'comparison-layout' || kind === 'order' || kind === 'access-audit'

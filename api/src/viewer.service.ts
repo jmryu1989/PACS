@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
 import { Caller } from './pacs.service';
+import type { ClinicalWorkflow, RecordedTransaction } from './emr-clinical/routes';
 import { ViewerSourceUnavailable, warnViewerSource } from './viewer-source-warning';
 import { canonical, isManualMeasurement, viewerCommand, viewerFingerprint, viewerPage, viewerUid, viewerUuid, verifyViewerReference, VIEWER_LIMITS } from './viewer-input';
 import { CLINICIAN_FINAL_ACTIONS } from './clinician-policy';
@@ -84,13 +85,17 @@ export class ViewerService {
     await this.studyAccess.require(c,[uid]);
   }
 
-  private async bounded<T>(work: (tx: Prisma.TransactionClient) => Promise<T>, read = false): Promise<T> {
+  private async bounded<T>(work: (tx: Prisma.TransactionClient, workflow?: ClinicalWorkflow) => Promise<T>, read = false,
+    recorded?: RecordedTransaction): Promise<T> {
     try {
-      return await this.prisma.$transaction(async tx => {
+      const body = async (tx: Prisma.TransactionClient, workflow?: ClinicalWorkflow) => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         await tx.$executeRaw`SET LOCAL statement_timeout = '5s'`;
-        return work(tx);
-      }, { isolationLevel: read ? Prisma.TransactionIsolationLevel.RepeatableRead : Prisma.TransactionIsolationLevel.ReadCommitted,
+        return work(tx, workflow);
+      };
+      // A write's 제23조④ access record commits with it, in the request's records transaction (ReadCommitted, as here).
+      if (recorded && !read) return await recorded(workflow => body(workflow.tx, workflow));
+      return await this.prisma.$transaction(tx => body(tx), { isolationLevel: read ? Prisma.TransactionIsolationLevel.RepeatableRead : Prisma.TransactionIsolationLevel.ReadCommitted,
         maxWait: 4000, timeout: 8000 });
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError) {
@@ -176,7 +181,7 @@ export class ViewerService {
     return { body, institution: pageResult.institution, sources: viewerSources(uid, pageResult.institution, body[key], [key], undefined, id) };
   }
 
-  async write(uid: string, raw: Buffer, c: Caller, id?: string) {
+  async write(uid: string, raw: Buffer, c: Caller, id?: string, recorded?: RecordedTransaction) {
     member(c, true); viewerUid(uid); if (id !== undefined) viewerUuid(id);
     const command = viewerCommand(raw, id === undefined), fingerprint = viewerFingerprint(uid, id ?? null, command);
     visible(await this.prisma.studyState.findUnique({ where: { uid } }), c);
@@ -205,7 +210,7 @@ export class ViewerService {
     }
 
     let replayed = false;
-    const output = await this.bounded(async tx => {
+    const output = await this.bounded(async (tx, workflow) => {
       await this.studyAccess.require(c,[uid],tx);
       const studies = await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
       visible(studies[0], c);
@@ -260,8 +265,13 @@ export class ViewerService {
       await tx.auditLog.create({ data: { actor: c.actor, action: 'viewer.' + command.action, target: uid,
         detail: JSON.stringify({ itemId: head.id, revision, authorSub: c.sub, payloadBytes: bytes }) } });
       await tx.viewerRequest.create({ data: { ...requestKey, fingerprint, itemId: head.id, revision } });
+      // 제23조④: a new mark is 기재; an edit, hide or restore of a saved one is 수정 (a replay above records nothing).
+      await workflow?.record({ surface: id === undefined ? 'POST studies/:uid/viewer-items' : 'POST studies/:uid/viewer-items/:id/revisions',
+        uid, institution: studies[0].institutionId, kind: command.item.kind === 'key' ? 'key-image' : 'measurement',
+        recordId: head.id, version: String(revision), action: added ? 'write' : 'modify', patient: null,
+        reference: { kind: 'ViewerItem', id: head.id, version: String(revision) } });
       return { ...result(head), ...(manual ? { referenceStatus: 'verified' } : {}) };
-    });
+    }, false, recorded);
     // Persisted success and current source identity are separate facts. Never
     // invent a verified status for a replay just because its write succeeded.
     if (replayed && manual) await this.verifyMeasurements(uid, [output], c);

@@ -586,7 +586,13 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
       assert.equal(event.targets[0].versionId.value, '2');
       assert.deepEqual(event.targets[0].patientLinkSnapshot, { status: 'not-applicable', reason: 'non-record-target' });
     }
-    assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_access.access_entry WHERE payload::jsonb->>'surface'='PATCH studies/:uid'`)[0].n, 0);
+    // 의료법 제23조④: the study write itself is one 수정 of the study (both streams); the allocation close stays its own surface.
+    const patched = await db.$queryRaw`SELECT stream, statutory_act, payload FROM emr_access.access_entry
+      WHERE payload::jsonb->>'surface'='PATCH studies/:uid' ORDER BY stream`;
+    assert.deepEqual(patched.map(row => [row.stream, row.statutory_act]), [['history', '수정'], ['viewing', '수정']]);
+    const patchEvent = typeof patched[0].payload === 'string' ? JSON.parse(patched[0].payload) : patched[0].payload;
+    assert.deepEqual([patchEvent.action, patchEvent.targets[0].kind, patchEvent.targets[0].recordId.value, patchEvent.userId.value.subject],
+      ['modify', 'study-metadata', teleUid, members.doctor.sub]);
     const denied = await fetch(origin + `/api/studies/${teleUid}/reader-assignment`, { headers: { authorization: 'Bearer ' + tokens.receiving } });
     assert.ok(denied.status >= 400);
     assert.equal(await db.reportVersion.count(), 0); assert.equal(await db.reportDraft.count(), 0);

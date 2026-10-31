@@ -90,7 +90,10 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
   { kinds: ['private-draft', 'report-head', 'report-evidence', 'report-version'], operation: 'write', causes: ['user-view', 'background-fetch'],
     routes: ['PUT studies/:uid/report'] },
   { kinds: ['private-draft', 'report-head', 'report-evidence'], operation: 'write', causes: ['user-view'],
-    routes: ['DELETE studies/:uid/draft', 'DELETE studies/:uid/draft/force'] },
+    routes: ['DELETE studies/:uid/draft'] },
+  // The forced discard also writes each discarded draft as an unsigned `discarded` ReportVersion: its own 기재.
+  { kinds: ['private-draft', 'report-head', 'report-evidence', 'report-version'], operation: 'write', causes: ['user-view'],
+    routes: ['DELETE studies/:uid/draft/force'] },
   { kinds: ['report-head', 'report-version', 'private-draft', 'report-evidence'], operation: 'write', causes: ['user-view'],
     routes: ['POST studies/:uid/report/commit'] },
   { kinds: ['report-version', 'report-evidence'], operation: 'read', causes: ['user-view', 'background-fetch'],

@@ -5016,11 +5016,23 @@
       },
       {
         "name": "match",
-        "slot": "studyStateConcern"
+        "slot": "clinicalConcern",
+        "implementation": {
+          "file": "api/src/emr-clinical/pacs-routes.ts",
+          "owner": "PacsClinicalRoutes",
+          "name": "match",
+          "kind": "MethodDeclaration"
+        }
       },
       {
         "name": "unmatch",
-        "slot": "studyStateConcern"
+        "slot": "clinicalConcern",
+        "implementation": {
+          "file": "api/src/emr-clinical/pacs-routes.ts",
+          "owner": "PacsClinicalRoutes",
+          "name": "unmatch",
+          "kind": "MethodDeclaration"
+        }
       },
       {
         "name": "removeState",
@@ -5434,11 +5446,16 @@
         "params": [
           "ViewerService",
           "PacsService",
-          "ViewerContextEventService"
+          "ViewerContextEventService",
+          "ClinicalRoutes"
         ],
         "scope": null,
-        "declared": [],
-        "optional": []
+        "declared": [
+          "3:Symbol(EMR_CLINICAL_ROUTES)"
+        ],
+        "optional": [
+          3
+        ]
       },
       "FindingController": {
         "params": [
@@ -5450,11 +5467,16 @@
       },
       "ViewerJobController": {
         "params": [
-          "ViewerJobService"
+          "ViewerJobService",
+          "ClinicalRoutes"
         ],
         "scope": null,
-        "declared": [],
-        "optional": []
+        "declared": [
+          "1:Symbol(EMR_CLINICAL_ROUTES)"
+        ],
+        "optional": [
+          1
+        ]
       },
       "ConnectController": {
         "params": [
@@ -5541,11 +5563,16 @@
       },
       "CriticalResultController": {
         "params": [
-          "CriticalResultService"
+          "CriticalResultService",
+          "ClinicalRoutes"
         ],
         "scope": null,
-        "declared": [],
-        "optional": []
+        "declared": [
+          "1:Symbol(EMR_CLINICAL_ROUTES)"
+        ],
+        "optional": [
+          1
+        ]
       },
       "StudyAccessController": {
         "params": [

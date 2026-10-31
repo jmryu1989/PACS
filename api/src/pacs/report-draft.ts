@@ -658,6 +658,8 @@ export class PacsReportDraft {
           author: d.author,   // 지운 관리자가 아니라 실제로 **쓴 사람**이 저자다
         })),
       });
+      // 보존한 판 하나하나도 새로 기재된 판독 기록이다(서명 없는 discarded 판이어도 보수적으로 남긴다).
+      for (const version of versions) await record!(state, null, 'write', { uid, version });
       // 판으로 보존한 바로 그 행들만 비운다(잠근 revision일 때만). 각 작성자의 경계도 하나씩 오른다.
       // 지운 초안마다 그 작성자 행의 수정(discard)을 같은 commit에 남긴다 — 관리자가 바꾼 것은 남의 기록이다.
       for (const d of drafts) {

@@ -1,4 +1,5 @@
-import { Controller, ForbiddenException, Get, HttpCode, Param, Post, Query, Req } from '@nestjs/common';
+import { Controller, ForbiddenException, Get, HttpCode, Inject, Optional, Param, Post, Query, Req } from '@nestjs/common';
+import { EMR_CLINICAL_ROUTES, ClinicalRoutes, clinicalRoutes } from './emr-clinical/routes';
 import { ViewerJobService } from './viewer-job.service';
 import { Caller } from './pacs.service';
 const caller = (r: any): Caller => {
@@ -7,7 +8,7 @@ const caller = (r: any): Caller => {
 };
 @Controller()
 export class ViewerJobController {
-  constructor(private svc: ViewerJobService) {}
+  constructor(private svc: ViewerJobService, @Optional() @Inject(EMR_CLINICAL_ROUTES) private readonly clinical?: ClinicalRoutes) {}
   @Post('studies/:uid/viewer-jobs/preview')
   @HttpCode(200)
   preview(@Param('uid') uid: string, @Req() r: any) { return this.svc.previewRead(uid, r.rawBody, caller(r)); }
@@ -15,10 +16,10 @@ export class ViewerJobController {
   list(@Param('uid') uid: string, @Query() q: any, @Req() r: any) { return this.svc.listRead(uid, q, caller(r)); }
   @Post('studies/:uid/viewer-jobs')
   @HttpCode(200)
-  create(@Param('uid') uid: string, @Req() r: any) { return this.svc.create(uid, r.rawBody, caller(r)); }
+  create(@Param('uid') uid: string, @Req() r: any) { return this.svc.create(uid, r.rawBody, caller(r), clinicalRoutes(this.clinical).recorder(r)); }
   @Get('studies/:uid/viewer-jobs/:id')
   get(@Param('uid') uid: string, @Param('id') id: string, @Req() r: any) { return this.svc.getRead(uid, id, caller(r)); }
   @Post('studies/:uid/viewer-jobs/:id/revisions')
   @HttpCode(200)
-  revise(@Param('uid') uid: string, @Param('id') id: string, @Req() r: any) { return this.svc.revise(uid, id, r.rawBody, caller(r)); }
+  revise(@Param('uid') uid: string, @Param('id') id: string, @Req() r: any) { return this.svc.revise(uid, id, r.rawBody, caller(r), clinicalRoutes(this.clinical).recorder(r)); }
 }

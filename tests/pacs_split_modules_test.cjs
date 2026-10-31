@@ -76,6 +76,7 @@ const { PacsReportCommit } = require('/app/dist/pacs/report-commit');
 const { STRUCTURE_CATALOG } = require('/app/dist/report-structure');
 const { PacsService } = require('/app/dist/pacs.service');
 const { parseAccessEvent, STATUTORY_ACT } = require('/app/dist/emr-contract/access-event');
+const { ClinicalRoutes } = require('/app/dist/emr-clinical/routes');
 /** 의료법 제23조④ access records a route committed, as the ledger contract parses them: [act, action, kind, recordId, versionId]. */
 const actsOf = (records, surface) => records.filter(event => event.surface === surface).map(event => parseAccessEvent(event))
   .flatMap(event => event.targets.map(t => [STATUTORY_ACT[event.action], event.action, t.kind, t.recordId.value, t.versionId.value]));
@@ -256,6 +257,7 @@ const BUILT_IN = [
   [/^SET LOCAL /, () => 0],
   [/pg_advisory_xact_lock/, () => [{ locked: 1 }]],
   [/^SELECT \* FROM "StudyState" WHERE uid ?= ?\? FOR (UPDATE|SHARE)$/, ([uid], t) => (t.studyState ?? []).filter(r => r.uid === uid).map(copy)],
+  [/^SELECT uid FROM "StudyState" WHERE uid = \? FOR UPDATE$/, ([uid], t) => (t.studyState ?? []).filter(r => r.uid === uid).map(r => ({ uid: r.uid }))],
   [/^SELECT "institutionId", "teleInstitutionId" FROM "StudyState" WHERE uid = \? FOR (SHARE|NO KEY UPDATE)$/,
     ([uid], t) => (t.studyState ?? []).filter(r => r.uid === uid).map(r => ({ institutionId: r.institutionId, teleInstitutionId: r.teleInstitutionId }))],
   [/FROM "AuthSession" WHERE sid = \? FOR KEY SHARE$/, ([sid], t) => (t.authSession ?? []).filter(r => r.sid === sid).map(() => ({ held: 1 }))],
@@ -329,6 +331,9 @@ const RAD_B = member('rad-b', INST_B, ['radiologist']), TECH_B = member('tech-b'
 const CLIN_A = member('clin-a', INST_A, ['clinician']);
 const GATEWAY_A = { kind: 'gateway', sub: 'syn-gw-a', actor: 'syn-gw-a', roles: ['gateway'], institution: INST_A };
 const ownerOf = c => ({ institution: c.institution, sub: c.sub, author: c.actor });
+const WRITE_FACTS = { actor: { identity: { id: '00000000-0000-4000-8000-0000000000c1', issuer: 'https://idp.synthetic.test', subject: TECH_A.sub },
+  kind: 'member', roles: TECH_A.roles, institutionId: INST_A, signingRegistrationId: null }, requestId: 'syn-request-study',
+  ip: { status: 'known', value: { address: '127.0.0.1', source: 'request-peer' } } };
 let serial = 0;
 const uidOf = () => `1.2.840.99999.${process.pid}.${++serial}`;
 
@@ -354,17 +359,23 @@ function world() {
   const records = [];
   const draft = withDraftRequestContext(new PacsReportDraft(prisma, sa, access, audit, evidence, b2Ledger(prisma)), b2Ledger(prisma, records));
   const commit = withDraftRequestContext(new PacsReportCommit(keycloak, sa, evidence, draft, nativeSigning), b2Ledger(prisma));
+  // Study writes run in the real request records transaction (ClinicalRoutes.workflow) over the B2 double: `writes` keeps
+  // the access events their committed transactions appended.
+  const writes = [];
+  const routes = new ClinicalRoutes({ records: b2Ledger(prisma, writes), context: { facts: async () => WRITE_FACTS,
+    scope: async (_tx, _request, uid) => ({ studyId: uid, managingInstitutionId: INST_A, teleInstitutionId: null }) } }, null);
   const clinical = {
     read: (_request, _kind, _id, read) => prisma.$transaction(read),
     write: async (_request, _input, write) => ({ ...await prisma.$transaction(write), emr: { replayed: false } }),
-    workflow: (_request, execute) => prisma.$transaction(tx => execute({ tx,
-      closeAssignment: async () => {} })),
+    workflow: (request, execute) => routes.workflow(request, execute),
+    recorder: request => execute => routes.workflow(request, execute),
   };
   const w = { db, sa, orthanc, keycloak, findings, access, institutions, preferences, filters, audit, metrics, worklist, gateway,
-    studyState, techNote, hold, clinician, evidence, draft, commit, records };
+    studyState, techNote, hold, clinician, evidence, draft, commit, records, writes };
   /** The PacsService facade over the same providers: it builds and owns its own concern graph. */
   w.facade = () => withDraftRequestContext(new PacsService(prisma, orthanc, keycloak, sa, findings, b2Ledger(prisma), nativeSigning, clinical), b2Ledger(prisma));
   w.workflow = execute => clinical.workflow({}, execute);
+  w.recorder = clinical.recorder({});
   w.study = (fields = {}) => db.seed('studyState', { uid: uidOf(), institutionId: INST_A, ss: 'Verified', ...fields });
   w.audits = (action) => db.rows('auditLog').filter(row => !action || row.action === action);
   /** Starts the institutions concern as the facade's onModuleInit does: two synthetic institutions beside the seeds. */
@@ -520,6 +531,39 @@ test('SPLIT-06 PATCH refuses report-owned fields without writing anything; techn
   assert.deepEqual(w.audits().map(a => a.action), ['state.patch', 'reader.assignment', 'state.patch']);
 });
 
+// ── SPLIT-25 의료법 제23조④ study writes ──
+
+test('SPLIT-25 PATCH, DELETE, match and unmatch each commit one 수정 record of the study, versioned by the audit row that holds the change; a refusal records none', async () => {
+  const w = world();
+  await w.boot();
+  const written = () => w.writes.filter(event => event.surface !== 'server:reader-assignment-close').map(event => parseAccessEvent(event))
+    .map(event => [event.surface, event.targets[0].kind, event.targets[0].recordId.value, event.targets[0].versionId.value,
+      event.managingInstitution.value, event.action, STATUTORY_ACT[event.action]]);
+  const auditId = action => String(w.audits(action).at(-1).id);
+  const s = w.study();
+  await w.workflow(workflow => w.studyState.patchState(s.uid, { em: 'E' }, TECH_A, workflow));
+  const metadata = auditId('state.patch');
+  await w.workflow(workflow => w.studyState.patchState(s.uid, { ov: { name: 'SYN NEW' } }, TECH_A, workflow));
+  const correction = auditId('state.patch');
+  await refused(() => w.workflow(workflow => w.studyState.patchState(s.uid, { rs: 'A' }, TECH_A, workflow)), 400);
+  assert.deepEqual(written(), [['PATCH studies/:uid', 'study-metadata', s.uid, metadata, INST_A, 'modify', '수정'],
+    ['PATCH studies/:uid', 'study-correction', s.uid, correction, INST_A, 'modify', '수정']]);
+
+  const m = w.study();
+  w.db.seed('order', { oid: 'syn-order-1', institutionId: INST_A, matched: 'U', studyUid: null, patientId: 'SYN-PID', name: 'SYN^PATIENT',
+    sex: 'O', birth: '19700101', descr: 'SYN CT', ward: '' });
+  await w.studyState.match(m.uid, 'syn-order-1', { orig: null }, TECH_A, w.recorder);
+  const matched = auditId('match');
+  await w.workflow(workflow => w.studyState.unmatch(m.uid, TECH_A, workflow));
+  const unmatched = auditId('unmatch');
+  await refused(() => w.workflow(workflow => w.studyState.unmatch(m.uid, TECH_A, workflow)), 400);
+  const d = w.study();
+  await w.workflow(workflow => w.studyState.removeState(d.uid, TECH_A, workflow));
+  assert.deepEqual(written().slice(2), [['POST match', 'patient-match', m.uid, matched, INST_A, 'modify', '수정'],
+    ['POST unmatch', 'patient-match', m.uid, unmatched, INST_A, 'modify', '수정'],
+    ['DELETE studies/:uid', 'study-metadata', d.uid, auditId('state.delete'), INST_A, 'modify', '수정']]);
+});
+
 // ── SPLIT-07 commit: append-only history, the approved report's two exits, the role (M02, M04, M06) ──
 
 test('SPLIT-07 commit appends one version per decision; an approved report leaves only by addendum or reset; a technician cannot commit', async () => {
@@ -643,8 +687,10 @@ test('SPLIT-10 a forced discard is administrator-only, keeps every present draft
   assert.deepEqual(w.audits().map(a => a.action), ['report.draft.force-discard']);
   // 의료법 제23조④: the administrator changed each author's draft; each is a 수정 of that author's row (its new boundary on
   // the rotated epoch), recorded in the discard's commit. The refused attempts below add none.
+  // Each discarded draft it keeps is a new (unsigned) ReportVersion: a 기재 of that version.
   const forced = [['수정', 'discard', 'private-draft', JSON.stringify([s.uid, RAD_A.actor]), `${out.epoch}:3`],
-    ['수정', 'discard', 'private-draft', JSON.stringify([s.uid, RAD_A2.actor]), `${out.epoch}:2`]];
+    ['수정', 'discard', 'private-draft', JSON.stringify([s.uid, RAD_A2.actor]), `${out.epoch}:2`],
+    ['기재', 'write', 'report-version', s.uid, '1'], ['기재', 'write', 'report-version', s.uid, '2']];
   assert.deepEqual(actsOf(w.records, 'DELETE studies/:uid/draft/force').sort(), forced.sort());
   await refused(() => w.draft.forceDiscardDrafts(s.uid, { expectedOwner: ownerOf(ADMIN_A), expectedEpoch: s.draftEpoch }, ADMIN_A, null), 409, 'REPORT_DRAFT_CONFLICT');
   assert.deepEqual(actsOf(w.records, 'DELETE studies/:uid/draft/force').sort(), forced.sort());

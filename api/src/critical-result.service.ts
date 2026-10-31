@@ -8,6 +8,8 @@ import { KeycloakService, KeycloakUser } from './keycloak.service';
 import { OrthancService } from './orthanc.service';
 import { clinicianFinal } from './clinician-policy';
 import type { Caller } from './pacs.service';
+import type { ClinicalWorkflow, RecordedTransaction, WorkflowRecord } from './emr-clinical/routes';
+import { studyPatientLink } from './emr-clinical/startup';
 import {
   CRITICAL_RESULT_CODES as CODE, CRITICAL_RESULT_PAGE, CRITICAL_RESULT_PINNABLE_ACTIONS, CRITICAL_RESULT_STATE_FILTERS, Head,
   RADIOLOGIST, RecipientClass, Refusal, ackFingerprint, ackRefusal, appliedResult, auditDetail, cancelFingerprint, clip,
@@ -168,14 +170,18 @@ export class CriticalResultService {
    * 한 스냅샷에서 행 잠금 없이 읽는다(목록 한 쪽과 pending 수도 같은 스냅샷). 정책 공유 잠금은 caller와(생성·대체면)
    * 수신자 주체다. 두 공유 잠금은 서로 막지 않고 정책 쓰기는 주체 하나의 배타 잠금만 잡는다.
    */
-  private async run<T>(c: Caller, subjects: Caller[], fn: (tx: any) => Promise<T>, read = false): Promise<T> {
+  private async run<T>(c: Caller, subjects: Caller[], fn: (tx: any, workflow?: ClinicalWorkflow) => Promise<T>, read = false,
+    recorded?: RecordedTransaction): Promise<T> {
     try {
-      return await this.prisma.$transaction(async tx => {
+      const body = async (tx: any, workflow?: ClinicalWorkflow) => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         await this.studyAccess.snapshot(c, tx);
         for (const subject of subjects) await this.studyAccess.snapshot(subject, tx);
-        return fn(tx);
-      }, read ? READ : WRITE);
+        return fn(tx, workflow);
+      };
+      // A write's 제23조④ access record commits with it, in the request's records transaction.
+      return await (recorded && !read ? recorded(workflow => body(workflow.tx, workflow))
+        : this.prisma.$transaction(tx => body(tx), read ? READ : WRITE));
     } catch (e: any) {
       // 확인 대기 중복은 검사 행 잠금 아래에서 먼저 찾는다. 부분 unique가 걸리면 같은 뜻의 409이고, 그 밖의 unique 충돌은
       // 같은 requestId가 다른 기록·route에서 동시에 쓰인 때뿐이다.
@@ -288,6 +294,15 @@ export class CriticalResultService {
       actorActor: c.actor, actorName: name, actorRole: role, requestId, at } });
   }
 
+  /** 제23조④: one CriticalResult write's access record. Its patient is the original identity the record pinned when made. */
+  private change(surface: string, row: any, kind: 'critical-result' | 'critical-result-ack', revision: number,
+    action: WorkflowRecord['action']): WorkflowRecord {
+    const patientId = typeof row.origPatientId === 'string' && row.origPatientId.trim() ? row.origPatientId : null;
+    return { surface, uid: row.studyUid, institution: row.institutionId, kind, recordId: row.id, version: String(revision), action,
+      patient: patientId ? studyPatientLink(row.institutionId, patientId) : null,
+      reference: { kind: 'CriticalResult', id: row.id, version: String(revision) } };
+  }
+
   /** 상태 변경마다 같은 트랜잭션에 감사 한 행(§11). detail에는 메시지·사유·본문·환자 식별자·수신자 sub가 없다. */
   private async writeAudit(tx: any, c: Caller, record: any, e: { event: string; from: string | null; to: string; revision: number;
     requestId: string; role: string; supersedes: string | null; replacedBy: string | null }) {
@@ -389,7 +404,7 @@ export class CriticalResultService {
   // ── #2 생성 ──
 
   /** POST studies/:uid/critical-results. 발신자는 인증된 요청, 수신자 자격·귀속은 DB 회원에서 온다. */
-  async create(uid: string, c: CriticalCaller, b: CreateRequest) {
+  async create(uid: string, c: CriticalCaller, b: CreateRequest, recorded?: RecordedTransaction) {
     this.member(c);
     if (!holds(c.roles, RADIOLOGIST)) throw roleRequired();
     if (!studyUidValue(uid)) throw invalid('검사 UID를 확인하세요');
@@ -413,7 +428,7 @@ export class CriticalResultService {
     const subject = recipient && prepared ? this.subject(c, prepared, recipientSub) : null;
     await this.studyAccess.prepare(c, [uid]);
     if (subject) await this.studyAccess.prepare(subject, [uid]);
-    return this.run(c, subject ? [subject] : [], async tx => {
+    return this.run(c, subject ? [subject] : [], async (tx, workflow) => {
       const state = await this.studyRow(tx, uid, true);
       // 발신 범위(tele 통로 포함)는 잠근 검사 행에서 다시 본다 — 사전 읽기 뒤 통로가 닫혔으면 여기서 404다(TC-04).
       const institution = await this.visibleStudy(tx, uid, c, state, studyMissing);
@@ -447,8 +462,9 @@ export class CriticalResultService {
       await this.receipt(tx, c, requestId, 'create', mark, applied, at);
       await this.writeAudit(tx, c, record, { event: 'created', from: null, to: 'created', revision: 1, requestId, role: RADIOLOGIST,
         supersedes: null, replacedBy: null });
+      await workflow?.record(this.change('POST studies/:uid/critical-results', record, 'critical-result', 1, 'write'));
       return { owner: this.owner(c), applied, replayed: false };
-    });
+    }, false, recorded);
   }
 
   // ── #6 ACK ──
@@ -457,7 +473,7 @@ export class CriticalResultService {
    * POST critical-results/:id/ack. 지정된 수신자 본인이 지금 읽을 수 있는 고정 판(C2/R2)에 대해 명시적으로 보낸 것만 ACK다.
    * 목록·한 건·검사별 GET, 시간 경과, 발신자·관리자의 행위는 ACK가 아니다(§5.3). ACK에는 자유 문장이 없다.
    */
-  async ack(id: string, c: CriticalCaller, b: any) {
+  async ack(id: string, c: CriticalCaller, b: any, recorded?: RecordedTransaction) {
     this.member(c);
     if (!recipientClass(c.roles)) throw roleRequired();
     if (!exactKeys(b, ACK_KEYS) || !uuidValue(b.requestId) || !positiveValue(b.revision)) throw invalid('요청 ID와 기준 revision을 확인하세요');
@@ -469,7 +485,7 @@ export class CriticalResultService {
     // 부류는 지금의 역할로 판정한다: 새 요청은 토큰 ∩ Keycloak, 재전송은 토큰(§4.2).
     const roles = known ? c.roles : await this.recheck(c, r => !!recipientClass(r));
     await this.studyAccess.prepare(c);
-    return this.run(c, [], async tx => {
+    return this.run(c, [], async (tx, workflow) => {
       const { row, state, head } = await this.writeTarget(tx, recordId, c, 'recipient');
       const cls = recipientClass(roles);
       const kase = recipientCase({ cls, visible: true, pin: row.sourceVersion, head, state, actor: c.actor, sub: c.sub });
@@ -487,14 +503,16 @@ export class CriticalResultService {
       await this.receipt(tx, c, row.id, 'ack', mark, applied, at);
       await this.writeAudit(tx, c, row, { event: 'acknowledged', from: 'created', to: 'acknowledged', revision: 2, requestId, role: cls,
         supersedes: null, replacedBy: null });
+      // The recipient's acknowledgment is its own entry (CriticalResultEvent.actorSub), written on the record.
+      await workflow?.record(this.change('POST critical-results/:id/ack', row, 'critical-result-ack', 2, 'write'));
       return { owner: this.owner(c), applied, replayed: false };
-    });
+    }, false, recorded);
   }
 
   // ── #7 취소 ──
 
   /** POST critical-results/:id/cancel. 발신자 본인, 사유 필수. 원천·수신자 사례와 무관하다(C2~C5 어느 때나). */
-  async cancel(id: string, c: CriticalCaller, b: any) {
+  async cancel(id: string, c: CriticalCaller, b: any, recorded?: RecordedTransaction) {
     this.member(c);
     if (!holds(c.roles, RADIOLOGIST)) throw roleRequired();
     if (!exactKeys(b, CANCEL_KEYS) || !uuidValue(b.requestId) || !positiveValue(b.revision) || !textValue(b.reason))
@@ -506,7 +524,7 @@ export class CriticalResultService {
     const known = await this.prisma.criticalResultReceipt.findUnique({ where: { requestId } });
     if (!known) await this.recheck(c, roles => holds(roles, RADIOLOGIST));
     await this.studyAccess.prepare(c);
-    return this.run(c, [], async tx => {
+    return this.run(c, [], async (tx, workflow) => {
       const { row } = await this.writeTarget(tx, recordId, c, 'sender');
       const receipt = await tx.criticalResultReceipt.findUnique({ where: { requestId } });
       if (receipt) return this.replay(receipt, mark, recordId, 'cancel', c);
@@ -521,8 +539,9 @@ export class CriticalResultService {
       await this.receipt(tx, c, row.id, 'cancel', mark, applied, at);
       await this.writeAudit(tx, c, row, { event: 'cancelled', from: 'created', to: 'cancelled', revision: 2, requestId, role: RADIOLOGIST,
         supersedes: null, replacedBy: null });
+      await workflow?.record(this.change('POST critical-results/:id/cancel', row, 'critical-result', 2, 'cancel'));
       return { owner: this.owner(c), applied, replayed: false };
-    });
+    }, false, recorded);
   }
 
   // ── #8 대체 ──
@@ -531,7 +550,7 @@ export class CriticalResultService {
    * POST critical-results/:id/supersede. 지금 머리 판으로 같은 수신자에게 새 기록(id = requestId)을 만들고 옛 기록을
    * superseded로 닫는다. 옛 기록을 먼저 바꾼 뒤 새 기록을 넣는다 — 확인 대기 부분 unique는 문장마다 검사된다.
    */
-  async supersede(id: string, c: CriticalCaller, b: any) {
+  async supersede(id: string, c: CriticalCaller, b: any, recorded?: RecordedTransaction) {
     this.member(c);
     if (!holds(c.roles, RADIOLOGIST)) throw roleRequired();
     if (!exactKeys(b, SUPERSEDE_KEYS) || !uuidValue(b.requestId) || !positiveValue(b.revision) || !positiveValue(b.sourceVersion)
@@ -560,7 +579,7 @@ export class CriticalResultService {
       }
     }
     await this.studyAccess.prepare(c);
-    return this.run(c, subject ? [subject] : [], async tx => {
+    return this.run(c, subject ? [subject] : [], async (tx, workflow) => {
       const { row, state, head } = await this.writeTarget(tx, recordId, c, 'sender');
       const receipt = await tx.criticalResultReceipt.findUnique({ where: { requestId } });
       if (receipt) return this.replay(receipt, mark, recordId, 'supersede', c);
@@ -586,8 +605,11 @@ export class CriticalResultService {
       const applied = appliedResult({ id: row.id, studyUid: row.studyUid, requestId, action: 'supersede', from: 'created', to: 'superseded',
         revision: 2, replacement: { id: requestId, revision: 1, sourceVersion: head.version }, at });
       await this.receipt(tx, c, row.id, 'supersede', mark, applied, at);
+      const surface = 'POST critical-results/:id/supersede';
+      await workflow?.record(this.change(surface, row, 'critical-result', 2, 'modify'));
+      await workflow?.record(this.change(surface, record, 'critical-result', 1, 'write'));
       return { owner: this.owner(c), applied, replayed: false };
-    });
+    }, false, recorded);
   }
 
   // ── 읽기 ──

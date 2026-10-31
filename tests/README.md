@@ -15,6 +15,7 @@ Markdown은 정확히 선언한 파일 경로와 `tests/fixtures/**`만 선택 �
 
 일상 업무 제한 완화(caution-app): `caution_app_dom_test.py`는 이름 초안·확인 없는 복사·계정 링크·SR 부분 표시를,
 `clinical_context_service_test.cjs`/`clinical_context_dom_test.py`는 이전 판독·이력 이어읽기를 검사한다.
+의료법 제23조④ 쓰기 접속기록: `access_record_writes_test.cjs`(pr-regressions source-regressions)는 중요 결과 전송·ACK·취소·대체, 뷰어 표시(측정·Key Image), 비교 작업이 쓰기와 같은 commit에 남기는 기재·수정 기록을, `pacs_split_modules_test.cjs` SPLIT-25는 PATCH/DELETE studies/:uid·match·unmatch의 수정 기록을 검사한다.
 `keycloak_member_paging_test.cjs`는 1,000명 이후 사용자 조회를, `viewer_volume_job_test.cjs`는 201번째 작업과 66개 주석의 보존을 검사한다.
 `caution_app_database_test.cjs`와 `tech_note_attempt_service_test.cjs`의 합성 PostgreSQL 실행은 종전 누적 한도 이후 이력·긴 글 저장을 확인한다.
 질문·협진·Tech Note의 글자 수 제한과 질문 100항목 제한은 제거한다. Reset/Addendum 사유·다른 작성자의 질문 닫기 사유·덮어쓰기 확인은 유지한다.

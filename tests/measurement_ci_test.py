@@ -32,6 +32,7 @@ HOST_OS_ENV = {key: os.environ[key] for key in ('SYSTEMROOT', 'USERPROFILE') if 
 # Keep the inventory independent of the workflow so removing a command fails.
 REGRESSION_SUITES = {
     'source-regressions': """
+        tests/access_record_writes_test.cjs
         tests/admin_audit_attribution_test.cjs
         tests/clinician_policy_test.py
         tests/clinician_read_serializer_test.cjs
