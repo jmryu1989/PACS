@@ -247,6 +247,11 @@ class ImagePathsE2E(base.WorklistE2E):
                     self.assertEqual(200, status, body[:300])
                 self.assertIsNone(headers.get("x-kin-image-event"))
                 self.assertEqual([], self.member_entries(described["study"]), "a description opens no delivery")
+                if cell.name == "instance tags":
+                    # B2-GPT-03: the relayed tag dump is the member's 열람 of the study metadata, one record of its own.
+                    relayed = [p for _, _, p in entries_of(described["study"]) if p["surface"] == "GET image-relay/*"]
+                    self.assertEqual([(p["action"], p["targets"][0]["kind"], p["userId"]["value"]["subject"]) for p in relayed],
+                                     [("provide-prepared", "study-metadata", self.stack.user_ids["doctor"])])
 
         # (d) the original-download archive: HEAD refused before any supply, GET after its own durable record.
         archived = self.study("paths-archive")

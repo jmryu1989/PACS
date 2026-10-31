@@ -8,7 +8,8 @@
  * capture is called with it). Asserted: no image byte before the provide-prepared event is durable; one pair per study
  * delivery across routes (open, a read within the idle gap, a read after it); one viewer opening across the frame reader
  * and the relay is one root, another opening its own (opening contract 2026-10-29); descriptions (tags, metadata) and HEAD
- * are no delivery; a ledger that cannot record answers 503 and Orthanc is never asked for the image; refusals of the
+ * are no delivery, and a relayed instance description records its own 열람 of the study metadata before its first byte
+ * (B2-GPT-03); a ledger that cannot record answers 503 and Orthanc is never asked for the image; refusals of the
  * gate leave no record; a delivery whose only response failed or was cut short closes as aborted, not succeeded
  * (MG-10); a terminal the ledger cannot take is retained as the same event and offered again until durable, on the
  * background schedule and at shutdown (MG-09); under the installed Nest shutdown with the real EmrNestLifecycle and
@@ -346,9 +347,54 @@ test('MG-08 descriptions and HEAD are relayed behind the gate without a delivery
     assert.equal((await s.get(s.routes.tags)).status, 200);
     assert.equal((await s.get(s.routes.metadata)).status, 200);
     assert.equal((await s.get(s.routes.thumbnail, {}, 'HEAD')).status, 200);
-    assert.deepEqual(s.records.attempts, [], 'no image byte left, so no delivery was recorded');
+    assert.deepEqual(s.records.entries.flatMap(e => e.event.targets.map(t => t.kind)).filter(kind => kind !== 'study-metadata'), [],
+      'no image byte left, so no delivery was recorded');
     const refused = await s.get(s.routes.tags, { 'X-Synthetic-Site': 'site-b' });
     assert.equal(refused.status, 403, 'the description keeps the institution gate');
+  } finally { await s.close(); }
+});
+
+test('B2-GPT-03 a relayed instance description is a 열람 of the study metadata, durable before its first byte, and leaves the image delivery to record itself', async () => {
+  const s = await stack();
+  try {
+    const tags = await s.get(s.routes.tags);
+    assert.equal(tags.status, 200);
+    assert.deepEqual(JSON.parse(tags.body), { StudyInstanceUID: STUDY_UID, Rows: '2' }, 'Orthanc\'s description, unchanged');
+    assert.deepEqual(s.observations[0].firstByte, ['provide-prepared'], 'the record was durable when the first byte left');
+    const [described] = s.records.entries.map(e => e.event);
+    assert.deepEqual([described.surface, described.action, described.result, described.cause, described.relatedEventId],
+      ['GET image-relay/*', 'provide-prepared', 'prepared', 'background-fetch', null]);
+    assert.deepEqual(described.targets.map(t => [t.kind, t.patientLinkSnapshot.value.patientId, t.studyId.value, t.recordId.value, t.versionId.value]),
+      [['study-metadata', 'SYN-PID-1', STUDY_UID, STUDY_UID, `orthanc-study:${STUDY_ID}@20261028T090000`]]);
+    // The same session's further header reads of the study inside the gap are that one 열람; a HEAD answers no description.
+    assert.equal((await s.get(s.routes.tags)).status, 200);
+    assert.equal((await s.get(s.routes.tags, {}, 'HEAD')).status, 200);
+    assert.equal(s.records.entries.length, 1);
+    // The image read that follows is not taken for the description: it records its own delivery.
+    assert.equal((await s.get(s.routes.report)).status, 200);
+    assert.deepEqual(s.records.entries.map(e => [e.event.action, e.event.targets[0].kind]),
+      [['provide-prepared', 'study-metadata'], ['provide-prepared', 'image']]);
+    // Another session is its own reader.
+    assert.equal((await s.get(s.routes.tags, { 'X-Synthetic-Session': 'authref:session-b' })).status, 200);
+    assert.equal(s.records.entries.filter(e => e.event.targets[0].kind === 'study-metadata').length, 2);
+    // A newer archive revision, inside the same gap, is a description of that revision.
+    s.source.behaviour.revision = '20261028T100000';
+    assert.equal((await s.get(s.routes.tags)).status, 200);
+    assert.deepEqual(s.records.entries.filter(e => e.event.targets[0].kind === 'study-metadata').map(e => e.event.targets[0].versionId.value).slice(-1),
+      [`orthanc-study:${STUDY_ID}@20261028T100000`]);
+  } finally { await s.close(); }
+});
+
+test('B2-GPT-03 a description the ledger cannot record answers 503 and Orthanc is never asked for it', async () => {
+  const s = await stack();
+  try {
+    s.records.state.failing = true;
+    const r = await s.get(s.routes.tags);
+    assert.equal(r.status, 503);
+    assert.equal(s.source.calls.filter(c => c.path.endsWith('/simplified-tags')).length, 0);
+    s.records.state.failing = false;
+    assert.equal((await s.get(s.routes.tags)).status, 200, 'the next read asks the ledger again');
+    assert.equal(s.records.entries.length, 1);
   } finally { await s.close(); }
 });
 
