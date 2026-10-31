@@ -5,7 +5,10 @@ the report editor, clinician/admin pages, the pinned OHIF viewer with `config/oh
 against a **synthetic** mock API. **Chat window:** a Korean chat with the Claude Code CLI that edits those screens; the
 product window reloads by itself within seconds of the edit. It is not the PACS and holds no patient data: 20 invented patients, 27 studies, and for the images nine public CC BY TCIA
 sample studies plus eight synthetic MG vendor phantom studies (Hologic, Siemens, GE, Fujifilm; each one study stored
-uncompressed and one in the vendor's compressed syntaxes, from `scripts/mg_vendor_fixture.py`). Identity tags are
+uncompressed and one in the vendor's compressed syntaxes, from `scripts/mg_vendor_fixture.py`). Every phantom is
+an R CC image and the product's MG hanging leaves a cell empty when two images fit it, so each study holds one
+image per kind (Conventional / Synthetic 2D / DBT; FOR PROCESSING copies are never hung); the vendor fixture itself
+covers every case and syntax. Identity tags are
 replaced at serve time with the synthetic ones; pixels unchanged; `assets/dicomweb/ATTRIBUTION.md` lists collections,
 DOIs and licences.
 

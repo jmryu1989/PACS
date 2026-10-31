@@ -3,8 +3,8 @@
 
 A throwaway Orthanc (no volumes, loopback port only) ingests a few public CC BY
 TCIA sample studies and the synthetic MG vendor phantoms of
-scripts/mg_vendor_fixture.py (no patient input; regrouped into one native and one
-compressed study per vendor); every response the OHIF client needs is fetched once
+scripts/mg_vendor_fixture.py (no patient input; per vendor one native and one
+compressed study, at most one hung image per MG slot); every response the OHIF client needs is fetched once
 and written to disk, so the mock can serve the viewer without any PACS behind it.
 
   python tools/minhoon-studio/dev/build_dicomweb_store.py [--mg-python <python>] [--out <dir>]
@@ -78,13 +78,30 @@ FOLDERS = [
     "studies/CMB-CRC/MSB-06489/1959-10-06-4968582907",
 ]
 
-# Synthetic MG vendor phantoms: per vendor one study with every case stored uncompressed and one with every case in
-# each compressed syntax the vendor's conformance statement lists (tests/fixtures/mg_vendor_cases.json). Implicit VR
-# and big endian copies are left out: they are byte-order decoding cases for the API, and look the same on screen.
+# Synthetic MG vendor phantoms: per vendor a compressed study (today) and an uncompressed one (prior), in the
+# syntaxes the vendor's conformance statement lists (tests/fixtures/mg_vendor_cases.json). Every phantom is an R CC
+# image, and the product's MG hanging never picks between two images for one slot (side x view x Conventional /
+# Synthetic 2D / DBT): such a study opens with every cell empty. So each study holds at most one hung image per
+# kind; FOR PROCESSING images are never hung and may repeat. The vendor fixture itself checks every case and syntax.
+# Implicit VR and big endian copies are left out: byte-order cases for the API that look the same on screen.
 MG_ROOT = "synthetic-mg-vendor"
-MG_VENDORS = ["hologic", "siemens", "ge", "fuji"]
-MG_GROUPS = {"native": ["explicit-le"],
-             "compressed": ["jpeg-lossless-sv1", "jpegls-lossless", "jpeg2000-lossless", "jpeg-extended"]}
+MG_STUDIES = {
+    "hologic": {"compressed": [("hologic-presentation12", "jpeg-lossless-sv1"), ("hologic-generated-dm10", "jpegls-lossless"),
+                               ("hologic-dbt10", "jpeg2000-lossless"), ("hologic-processing14", "jpeg-lossless-sv1"),
+                               ("hologic-processing14", "jpegls-lossless"), ("hologic-processing14", "jpeg2000-lossless")],
+                "native": [("hologic-presentation12", "explicit-le"), ("hologic-generated-bto10", "explicit-le"),
+                           ("hologic-dbt10", "explicit-le"), ("hologic-processing14", "explicit-le")]},
+    "siemens": {"compressed": [("siemens-lut-12-2", "jpeg-lossless-sv1"), ("siemens-insight12", "jpeg-extended"),
+                               ("siemens-ct-tomo12", "jpeg-lossless-sv1")],
+                "native": [("siemens-2d-12-1", "explicit-le"), ("siemens-insight12", "explicit-le"),
+                           ("siemens-bto12", "explicit-le")]},
+    "ge": {"compressed": [("ge-generated-bto12", "jpeg-lossless-sv1"), ("ge-dbt12", "jpeg2000-lossless")],
+           "native": [("ge-presentation12", "explicit-le"), ("ge-generated-bto12", "explicit-le"),
+                      ("ge-dbt12", "explicit-le"), ("ge-processing14", "explicit-le")]},
+    "fuji": {"compressed": [("fuji-2d12", "jpeg-lossless-sv1"), ("fuji-sview-lut12", "jpeg2000-lossless"),
+                            ("fuji-dbt12", "jpeg-lossless-sv1")],
+             "native": [("fuji-2d14", "explicit-le"), ("fuji-sview12", "explicit-le"), ("fuji-dbt-sigmoid12", "explicit-le")]},
+}
 MG_SYNTAX_LABEL = {"explicit-le": "EXPLICIT LE", "jpeg-lossless-sv1": "JPEG LOSSLESS SV1", "jpegls-lossless": "JPEG-LS LOSSLESS",
                    "jpeg2000-lossless": "JPEG 2000 LOSSLESS", "jpeg-extended": "JPEG EXTENDED LOSSY"}
 MG_VENDOR_NAME = {"hologic": "HOLOGIC", "siemens": "SIEMENS", "ge": "GE", "fuji": "FUJIFILM"}
@@ -109,10 +126,16 @@ def prepare_mg_phantoms(mg_python, work):
         raise RuntimeError(f"MG phantom generator exit {run.returncode} {totals}: {(run.stderr or run.stdout)[-800:]}")
     root = work / "mg-vendor"
     entries, series_numbers = {}, {}
+    wanted = {(vendor, kind, case, syntax) for vendor, groups in MG_STUDIES.items()
+              for kind, objects in groups.items() for case, syntax in objects}
+    produced = {(r["case"], r["syntax"]) for r in report["records"]}
+    absent = sorted({(case, syntax) for _, _, case, syntax in wanted} - produced)
+    if absent:
+        raise RuntimeError(f"MG phantom generator no longer produces {absent}")
     for record in report["records"]:
         vendor, syntax = record["case"].split("-", 1)[0], record["syntax"]
-        kind = next((k for k, names in MG_GROUPS.items() if syntax in names), None)
-        if vendor not in MG_VENDORS or kind is None:
+        kind = next((k for k in MG_STUDIES.get(vendor, {}) if (vendor, k, record["case"], syntax) in wanted), None)
+        if kind is None:
             continue
         folder = f"{MG_ROOT}/{vendor}-{kind}"
         study_uid = mg_uid(vendor, kind)
