@@ -442,6 +442,27 @@ test('a reopened channel starts at a new revision: no reader, no history and no 
     [[1, null], [2, 'tele-closed'], [3, null], [4, 'tele-closed']]);
 });
 
+test('a replay answered from the clinical receipt is the outcome only while it is still the row\'s last request', async () => {
+  // The clinical route answers a committed request's replay from its receipt before write() runs, and the controller then
+  // reads with that request ID. A later change or a channel close overtakes it: the current row is then not its outcome.
+  const w = await world();
+  await channel(w, 'open');
+  const first = w.body('aTech', await w.read('aTech'), 'aDoc');
+  const written = await w.write('aTech', first);
+  assert.deepEqual(await w.ra.read(UID, caller('aTech'), undefined, first.requestId.toUpperCase()), written);
+  await w.assign('aAdmin', 'aDoc2');
+  const before = w.snapshot();
+  await assert.rejects(w.ra.read(UID, caller('aTech'), undefined, first.requestId), status(409));
+  assert.deepEqual(w.snapshot(), before);
+  // The receiver's last request before a close no longer replays once the channel is reopened.
+  const last = w.body('bTech', await w.read('bTech'), 'bDoc');
+  await w.write('bTech', last);
+  await w.tele({ ts: 'cancelled' });
+  await w.tele({ ts: 'wait', teleTo: B });
+  await assert.rejects(w.ra.read(UID, caller('bTech'), undefined, last.requestId), status(409));
+  assert.deepEqual(await w.read('bTech').then(s => [s.revision, s.reader, s.history]), [2, null, []]);
+});
+
 test('every close gives the ended channel a new revision: a request prepared in one channel never lands in the next (F02)', async () => {
   // (a) No row: B read revision 0 in its first channel and held a request; the owner cancelled and reopened.
   const w = await world();
