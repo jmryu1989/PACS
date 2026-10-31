@@ -8,6 +8,9 @@
 #   sudo bash install.sh <bundle-dir> --rotate-passwords
 #
 # Re-running updates the app and keeps the sandbox (its commits), the data, the Claude login and the passwords.
+# A bundle with a newer BASE_SHA refreshes the sandbox: main is merged into the studio branch (make-sandbox.py
+# --refresh; every studio commit stays). What a run replaces is kept beside it as <name>.bak-YYYYMMDD (the first run
+# of a day keeps its backup; remove old ones by hand).
 set -euo pipefail
 
 BUNDLE=${1:?bundle directory}
@@ -23,6 +26,10 @@ IP_PUBLIC=61.109.239.207
 [ "$(id -u)" = 0 ] || { echo "run as root (sudo)"; exit 1; }
 for f in app.tgz base.tar assets-ohif.tgz assets-dicomweb.tgz BASE_SHA; do [ -f "$BUNDLE/$f" ] || { echo "missing $BUNDLE/$f"; exit 1; }; done
 BASE_SHA=$(tr -d '[:space:]' < "$BUNDLE/BASE_SHA")
+BAK=bak-$(date +%Y%m%d)
+
+# Move a path aside as <path>.$BAK, or drop it when today's backup already exists (that one is the older state).
+backup_move() { if [ -e "$1.$BAK" ]; then rm -rf "$1"; else mv "$1" "$1.$BAK"; fi; }
 
 # The port must be free or already ours.
 if ss -ltnH "( sport = :$PORT )" | grep -q . && ! systemctl is-active --quiet minhoon-studio; then
@@ -38,7 +45,7 @@ echo "== app (read-only for the service)"
 rm -rf "$ROOT/app.new" && mkdir -p "$ROOT/app.new"
 tar -xzf "$BUNDLE/app.tgz" -C "$ROOT/app.new"
 chown -R root:root "$ROOT/app.new" && chmod -R go-w "$ROOT/app.new"
-rm -rf "$ROOT/app.old"; [ -d "$ROOT/app" ] && mv "$ROOT/app" "$ROOT/app.old"; mv "$ROOT/app.new" "$ROOT/app"
+[ -d "$ROOT/app" ] && backup_move "$ROOT/app"; mv "$ROOT/app.new" "$ROOT/app"
 
 echo "== node $NODE_VERSION (private copy, not on the system PATH)"
 if [ ! -x "$ROOT/node/bin/node" ] || [ "$("$ROOT/node/bin/node" --version)" != "v$NODE_VERSION" ]; then
@@ -56,21 +63,36 @@ if [ ! -x "$ROOT/home/.local/bin/claude" ]; then
 fi
 ln -sfn "$ROOT/home/.local/bin/claude" "$ROOT/bin/claude"
 
-echo "== assets (pinned OHIF build, public CC BY sample DICOMweb)"
+echo "== assets (pinned OHIF build; DICOMweb: public CC BY samples + synthetic MG vendor phantoms)"
 for a in ohif dicomweb; do
   rm -rf "$ROOT/assets/$a.new" && mkdir -p "$ROOT/assets/$a.new"
   tar -xzf "$BUNDLE/assets-$a.tgz" -C "$ROOT/assets/$a.new"
-  rm -rf "$ROOT/assets/$a"; mv "$ROOT/assets/$a.new" "$ROOT/assets/$a"
+  [ -d "$ROOT/assets/$a" ] && backup_move "$ROOT/assets/$a"; mv "$ROOT/assets/$a.new" "$ROOT/assets/$a"
 done
-chown -R root:root "$ROOT/assets"; chmod -R a+rX "$ROOT/assets"
+# Archives made on Windows carry 0777 modes; the service only reads the assets.
+chown -R root:root "$ROOT/assets"; chmod -R a+rX,go-w "$ROOT/assets"
 
-echo "== sandbox (product tree at main $BASE_SHA; created once, then kept)"
+# The bundle folder is the uploader's private directory; give studio its own copy of the archive.
+sandbox_tool() {
+  install -o studio -g studio -m 600 "$BUNDLE/base.tar" "$ROOT/home/base.tar"
+  sudo -u studio -H env HOME="$ROOT/home" python3 "$ROOT/app/deploy/make-sandbox.py" --archive "$ROOT/home/base.tar" --sha "$BASE_SHA" --out "$ROOT/sandbox" "$@"
+  rm -f "$ROOT/home/base.tar"
+}
+echo "== sandbox (product tree at main $BASE_SHA; created once, then kept and refreshed)"
 if [ ! -d "$ROOT/sandbox/.git" ]; then
   install -d -o studio -g studio "$ROOT/sandbox"
-  # The bundle folder is the uploader's private directory; give studio its own copy of the archive.
-  install -o studio -g studio -m 600 "$BUNDLE/base.tar" "$ROOT/home/base.tar"
-  sudo -u studio -H env HOME="$ROOT/home" python3 "$ROOT/app/deploy/make-sandbox.py" --archive "$ROOT/home/base.tar" --sha "$BASE_SHA" --out "$ROOT/sandbox"
-  rm -f "$ROOT/home/base.tar"
+  sandbox_tool
+else
+  current=$(sudo -u studio git -C "$ROOT/sandbox" log -1 --format='%(trailers:key=Studio-Base-Sha,valueonly)' studio-base | tr -d '[:space:]')
+  if [ "$current" != "$BASE_SHA" ]; then
+    echo "   refresh $current -> $BASE_SHA (merge into $(sudo -u studio git -C "$ROOT/sandbox" rev-parse --abbrev-ref HEAD))"
+    # No chat edit may write the sandbox during the merge; the unit is started again below.
+    systemctl stop minhoon-studio 2>/dev/null || true
+    [ -e "$ROOT/sandbox.$BAK" ] || cp -a "$ROOT/sandbox" "$ROOT/sandbox.$BAK"
+    # A changed studio-mock/dataset.json resets the mock state (mock.js); keep the old one.
+    [ -f "$ROOT/data/mock-state.json" ] && { [ -e "$ROOT/data/mock-state.json.$BAK" ] || cp -a "$ROOT/data/mock-state.json" "$ROOT/data/mock-state.json.$BAK"; }
+    sandbox_tool --refresh --python python3 | tee "$ROOT/data/refresh-$BASE_SHA.json"
+  fi
 fi
 install -d -o studio -g studio "$ROOT/sandbox-read" "$ROOT/sandbox-preview"
 

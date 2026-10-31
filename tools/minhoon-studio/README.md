@@ -3,9 +3,11 @@
 A web page for Minhoon (radiologist) and the owner. **Product window:** the real PACS screens (worklist-v0/hpacs-lite,
 the report editor, clinician/admin pages, the pinned OHIF viewer with `config/ohif`) at their real size, running
 against a **synthetic** mock API. **Chat window:** a Korean chat with the Claude Code CLI that edits those screens; the
-product window reloads by itself within seconds of the edit. It is not the PACS and holds no patient data: 16 invented patients, 19 studies, and nine public CC BY TCIA
-sample studies for the images (identity tags replaced at serve time with the synthetic ones; pixels unchanged;
-`assets/dicomweb/ATTRIBUTION.md` lists collections, DOIs and licences).
+product window reloads by itself within seconds of the edit. It is not the PACS and holds no patient data: 20 invented patients, 27 studies, and for the images nine public CC BY TCIA
+sample studies plus eight synthetic MG vendor phantom studies (Hologic, Siemens, GE, Fujifilm; each one study stored
+uncompressed and one in the vendor's compressed syntaxes, from `scripts/mg_vendor_fixture.py`). Identity tags are
+replaced at serve time with the synthetic ones; pixels unchanged; `assets/dicomweb/ATTRIBUTION.md` lists collections,
+DOIs and licences.
 
 Design decisions: `evidence/studio-design-final-20261027.md` (D1–D11). Phase 1 = login, mirror (reading workflow
 deep, other screens browsable), 바꾸기 (edit) + 되돌리기 (undo = `git revert`), critique (D4), 물어보기 (Q&A from
@@ -52,10 +54,11 @@ back to a self-signed certificate in `tls/`.
 | `node/` | root | private Node 22.23.2 (not on the system PATH) |
 | `bin/claude` → `home/.local/bin/claude` | studio | Claude Code CLI 2.1.284 |
 | `claude-config/sdij`, `claude-config/admin` | studio | the two Claude logins (CLAUDE_CONFIG_DIR); empty until the owner logs in |
-| `sandbox/` | studio | git repo: product tree at main `studio-base` + studio commits on `studio/minhoon-YYYYMMDD` |
+| `sandbox/` | studio | git repo: product tree at main `studio-base` + studio commits on `studio/minhoon-YYYYMMDD` (+ one `Studio-Kind: refresh` merge per new main) |
 | `sandbox-read/` | studio | detached copy the 물어보기 Claude reads |
 | `sandbox-preview/` | studio | detached copy where 먼저 제안하기 builds its previews (`refs/studio-preview/<id>`) |
-| `assets/ohif`, `assets/dicomweb` | root | pinned OHIF build; static DICOMweb samples |
+| `assets/ohif`, `assets/dicomweb` | root | pinned OHIF build; static DICOMweb samples (TCIA + synthetic MG phantoms) |
+| `*.bak-YYYYMMDD` | as the original | what an `install.sh` run replaced (app, assets, sandbox copy before a refresh, `data/mock-state.json`) |
 | `knowledge/status.json` | root | the commander's status feed (read-only for the service) |
 | `knowledge/minhoon-feedback.md` | root | Minhoon's feedback the suggestions are grounded in (installed by the commander, not in this repo) |
 | `data/` | studio | users/sessions (hashes only), chat, metrics, usage, mock state, `public/digests/`, `public/records.jsonl` |
@@ -109,8 +112,21 @@ side ignores the other's cookie by name and the studio never logs cookies.
 - **Collect the branch as commits:** `ssh ubuntu@61.109.239.207 'sudo -u studio git -C /opt/minhoon-studio/sandbox bundle create - studio-base..HEAD' > studio.bundle`
   then `git fetch studio.bundle HEAD:refs/studio/minhoon` locally (base = the main SHA in the `studio-base` commit message).
   Studio commits are not product history; reuse clean diffs only after the normal cross review against the real backend (D2/D3).
-- **New main in the sandbox:** between sessions only — build a new bundle and move the old sandbox aside
-  (`sudo mv /opt/minhoon-studio/sandbox /opt/minhoon-studio/sandbox-<date>`), then rerun `install.sh`.
+- **New main in the sandbox (refresh):** between sessions only (the refresh stops the unit while it merges). Build a
+  bundle at the new main and rerun `install.sh <bundle>`; a `BASE_SHA` different from the sandbox's `studio-base`
+  merges that main into Minhoon's branch (`deploy/make-sandbox.py --refresh`): every studio commit stays, a file
+  both sides changed keeps the studio version and is listed in the merge commit and in `data/refresh-<sha>.json`, the
+  bundle/OHIF config are rebuilt, `studio-base` moves to the new main (old one: tag `studio-base-<sha12>`). A changed
+  `studio-mock/dataset.json` resets the mock state (drafts in the mirror); the old one stays as
+  `data/mock-state.json.bak-YYYYMMDD`. Bundle, from the product checkout (`<b>` = an empty folder):
+  ```powershell
+  git fetch origin; $sha = git rev-parse origin/main; git archive --format=tar -o <b>/base.tar $sha; Set-Content <b>/BASE_SHA $sha
+  git archive --format=tar.gz -o <b>/app.tgz HEAD:tools/minhoon-studio                     # the studio app (this folder)
+  python tools/minhoon-studio/dev/extract_ohif.py --out <ohif>; tar -czf <b>/assets-ohif.tgz -C <ohif> .
+  python tools/minhoon-studio/dev/build_dicomweb_store.py --mg-python <python with codecs> --out <store>; tar -czf <b>/assets-dicomweb.tgz -C <store> .
+  scp -r <b> ubuntu@61.109.239.207:/tmp/studio-bundle
+  ssh ubuntu@61.109.239.207 'mkdir -p /tmp/studio-app && tar -xzf /tmp/studio-bundle/app.tgz -C /tmp/studio-app && sudo bash /tmp/studio-app/deploy/install.sh /tmp/studio-bundle'
+  ```
 - **Pause** (Part 1 install day): `sudo systemctl stop minhoon-studio` (do not restart automatically afterwards).
   **Before the first real hospital use:** move the studio off this host or `sudo systemctl disable --now minhoon-studio`
   and remove the security-group rule.
@@ -164,7 +180,9 @@ end to end. Full numbers: `data/metrics.jsonl`, the studio's 반영 시간 기�
 
 ```powershell
 python tools/minhoon-studio/dev/extract_ohif.py --out tmp/minhoon-studio/ohif-dist          # pinned OHIF build
-python tools/minhoon-studio/dev/build_dicomweb_store.py                                      # static DICOMweb samples
+python tools/minhoon-studio/dev/build_dicomweb_store.py --mg-python <python>                 # static DICOMweb samples + MG phantoms
+#   <python> has pydicom, numpy, imagecodecs and pyjpegls; EA1141 derivatives stay local (scripts/mgxa-acceptance.md)
+python tools/minhoon-studio/test/refresh_test.py                                             # make-sandbox.py --refresh
 python tools/minhoon-studio/deploy/make-sandbox.py --repo . --sha <main sha> --out <run>/sandbox
 # config: copy deploy/install.sh's config block with Windows paths, "shellTool": "PowerShell", "python": "python"
 node tools/minhoon-studio/server/server.js --config <run>/config.json                        # http://127.0.0.1:8443
