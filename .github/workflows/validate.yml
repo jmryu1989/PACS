@@ -1154,6 +1154,12 @@ jobs:
       run: |
         python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/vendors --file tests/mg_vendor_test.cjs --file tests/mg_vendor_hanging_test.cjs --file tests/fixtures/mg_vendor_cases.json --file worklist-v0/hpacs-lite/mammography-model.js --file config/ohif/mammography-hanging.js -- node --test tests/mg_vendor_test.cjs tests/mg_vendor_hanging_test.cjs
         python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/worker-asset --file tests/ohif_worker_asset_test.py --file proxy/nginx.conf.template -- python3 tests/ohif_worker_asset_test.py
+    - name: JPEG lossless wasm decoder - recorded artifact, pixel equality, routing and fallback
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      timeout-minutes: 5
+      run: |
+        python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/sof3-decode --cwd . --file tests/sof3_decode_test.cjs --file tests/fixtures/sof3_cases.json --file config/ohif/sof3-decode.js --file worklist-v0/hpacs-lite/kin-sof3.js --file worklist-v0/hpacs-lite/kin-sof3.wasm --file worklist-v0/hpacs-lite/kin-sof3.wasm.sha256 --file worklist-v0/hpacs-lite/sof3-decode-worker.js -- node --test tests/sof3_decode_test.cjs
+        python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/sof3-decode-dom --cwd . --file tests/viewer_sof3_dom_test.py --file tests/fixtures/sof3_cases.json --file config/ohif/sof3-decode.js --file config/ohif/image-load-status.js --file worklist-v0/hpacs-lite/kin-sof3.js --file worklist-v0/hpacs-lite/kin-sof3.wasm --file worklist-v0/hpacs-lite/sof3-decode-worker.js -- "$RUNNER_TEMP/part1-mg-python/bin/python" -B tests/viewer_sof3_dom_test.py -v
     - name: Model declared cases equal the cases that passed
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 5

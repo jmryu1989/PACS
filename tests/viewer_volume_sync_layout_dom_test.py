@@ -6,8 +6,8 @@ RISK-D-MPR-PREF-LOSS. The real MPR Synchronization panel runs in Chromium agains
 viewports, grid and brightness synchronizer. A Hanging Protocol opens the three planes in a 2x2 grid
 whose fourth cell is empty, and the shared MPR target accepts those three shown cells. The panel must
 keep the user's latest Windowing/Zoom choice and a profile applied through its capability on that
-layout, bind each plane once, attach a restored layout once, release the session when the vacancy is
-filled, and a failed attach must leave no native change behind before it recovers. This is no GPU,
+layout, also when that profile reaches newly ready planes before the panel's own refresh, bind each
+plane once, attach a restored layout once, release the session when the vacancy is filled, and a failed attach must leave no native change behind before it recovers. This is no GPU,
 pixel or native Hanging Protocol proof.
 """
 from pathlib import Path
@@ -86,15 +86,16 @@ class ViewerVolumeSyncLayoutDOMTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.browser.close();cls.pw.stop()
 
-    def open_page(self, vacancy=True, broken_engine=False):
+    def open_page(self, vacancy=True, broken_engine=False, hidden=False):
         page = self.browser.new_page();errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
         page.route("https://sync-layout.test/", lambda route: route.fulfill(body=HARNESS, content_type="text/html"))
         page.goto("https://sync-layout.test/")
         page.evaluate("([vacancy,broken])=>{layout('opened',vacancy);if(broken)delete engine.resize}", [vacancy, broken_engine])
         page.add_script_tag(path=str(SYNC))
-        page.evaluate("()=>{mount();tick()}")
-        expect(page.locator('#kin-volume-sync')).to_be_visible()
+        page.evaluate("hidden=>{hideTarget=hidden;mount();tick()}", hidden)
+        if not hidden:
+            expect(page.locator('#kin-volume-sync')).to_be_visible()
         return page, errors
 
     def click(self, page, name):
@@ -155,6 +156,30 @@ class ViewerVolumeSyncLayoutDOMTest(unittest.TestCase):
             self.assertTrue(state['nativeEnabled'], "the native brightness group is handed back")
             self.assertFalse(state['hooked'])
             self.assertEqual([[0, 0]] * 3, page.evaluate("bindings(planes())"))
+            self.assertEqual([], errors)
+        finally:
+            page.close()
+
+    def test_profile_applied_before_the_next_refresh_is_kept_on_newly_ready_planes(self):
+        # MPR Properties applies a saved profile from its own refresh. The planes can become ready (canvas resize, last
+        # frame loaded, plane selected) after this panel's refresh in the same cadence, so the profile arrives first.
+        page, errors = self.open_page(vacancy=True, hidden=True)
+        try:
+            page.evaluate("hideTarget=false")
+            self.assertIsNone(page.evaluate("syncState().read"), "no planes were attached before the profile")
+            self.assertTrue(page.evaluate("kinVolumeSynchronization.apply({windowing:false,zoom:true})"),
+                            "a saved profile for the current planes is accepted")
+            page.evaluate("tick(4)")
+            state = page.evaluate("syncState()")
+            self.assertEqual({'windowing': False, 'zoom': True}, state['read'], "the saved choice is not replaced by the defaults")
+            self.assertEqual((False, True, True), (state['windowing'], state['zoom'], state['enabled']))
+            self.assertEqual(1, state['attach'], "the newly ready planes are attached once")
+            self.assertFalse(state['nativeEnabled']);self.assertTrue(state['hooked'])
+            self.assertEqual([[1, 1]] * 3, page.evaluate("bindings(planes())"))
+            page.evaluate("planes()[2].setZoom(2)")
+            self.assertEqual([2] * 3, page.evaluate("zooms()"))
+            page.evaluate("async()=>{planes()[0].setProperties({voiRange:{lower:0,upper:1500}});await new Promise(r=>setTimeout(r,0))}")
+            self.assertEqual([1500, None, None], page.evaluate("uppers()"))
             self.assertEqual([], errors)
         finally:
             page.close()

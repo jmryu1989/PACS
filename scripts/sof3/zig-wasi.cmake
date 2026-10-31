@@ -1,0 +1,17 @@
+# CMake toolchain: libjpeg-turbo as a wasm32-wasi static library with zig cc (pip package ziglang, no emscripten).
+# WASI libc supplies malloc/memcpy/stdio; the browser side stubs the few wasi_snapshot_preview1 imports the library pulls in.
+set(CMAKE_SYSTEM_NAME Generic)
+set(CMAKE_SYSTEM_PROCESSOR wasm32)
+set(CMAKE_C_COMPILER "$ENV{KIN_ZIG_EXE}" cc)
+set(CMAKE_C_COMPILER_TARGET wasm32-wasi)
+set(CMAKE_C_FLAGS_INIT "-target wasm32-wasi")
+set(CMAKE_AR "$ENV{KIN_ZIG_EXE}" CACHE FILEPATH "")
+set(CMAKE_C_COMPILER_AR "$ENV{KIN_ZIG_EXE}" CACHE FILEPATH "")
+set(CMAKE_C_ARCHIVE_CREATE "<CMAKE_AR> ar qc <TARGET> <LINK_FLAGS> <OBJECTS>")
+set(CMAKE_C_ARCHIVE_APPEND "<CMAKE_AR> ar q <TARGET> <LINK_FLAGS> <OBJECTS>")
+set(CMAKE_C_ARCHIVE_FINISH "<CMAKE_AR> ranlib <TARGET>")
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+set(CMAKE_SIZEOF_VOID_P 4)
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)

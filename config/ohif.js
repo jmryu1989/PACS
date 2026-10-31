@@ -4248,10 +4248,83 @@ function kinCreateSeriesMetadataRecovery() {
     onModeExit() { release(); },
   };
 }
+// REQ-MG-SOF3-DECODE -> RISK-MG-SOF3-PIXEL, RISK-MG-SOF3-FALLBACK. The pinned loader decodes JPEG lossless
+// (.70/.57) with a pure-JS decoder, 3.6-4.4x slower per mammography frame than libjpeg-turbo in wasm on the same CPU.
+// Unsigned 16-bit greyscale frames are decoded by kin-sof3.wasm in a small worker pool and then handed to the pinned
+// worker as Explicit VR Little Endian, so its own post-processing (preScale, target buffer, min/max) builds the frame.
+// Every other frame, and every frame once the decoder could not load, keeps the pinned path. A stream libjpeg refused
+// is not retried there: that decoder returns black or partial pixels for the same damage.
+const KIN_SOF3_WASM = true;
+const KIN_SOF3_SYNTAXES = new Set(['1.2.840.10008.1.2.4.70', '1.2.840.10008.1.2.4.57']);
+function kinCreateSof3Decode({ workerUrl = '/worklist/hpacs-lite/sof3-decode-worker.js', size = 3, WorkerClass = window.Worker } = {}) {
+  let unavailable = KIN_SOF3_WASM && typeof WorkerClass === 'function' ? null : 'disabled', sequence = 0;
+  const workers = [], queue = [], counts = { routed: 0, fallbacks: 0, rejected: 0 };
+  const routable = task => {
+    const frame = task?.imageFrame;
+    return KIN_SOF3_SYNTAXES.has(task?.transferSyntax) && frame?.bitsAllocated === 16 && frame.samplesPerPixel === 1 &&
+      frame.pixelRepresentation === 0 && frame.rows > 0 && frame.columns > 0 && ArrayBuffer.isView(task.pixelData);
+  };
+  const settle = (job, next) => { try { job.resolve(next()); } catch (error) { job.reject(error); } };
+  const fallBack = job => { counts.fallbacks++; settle(job, () => job.dispatch(job.task)); };
+  function release(reason) {
+    if (reason && !unavailable) unavailable = reason;
+    for (const entry of workers.splice(0)) { entry.worker.terminate(); if (entry.job) fallBack(entry.job); }
+    for (const job of queue.splice(0)) fallBack(job);
+  }
+  function pump() {
+    while (queue.length && !unavailable) {
+      const entry = workers.find(candidate => !candidate.job) || (workers.length < size ? spawn() : null);
+      if (!entry) return;
+      const job = entry.job = queue.shift();
+      // The pinned loader keeps its own pixelData for the fallback; only this copy is transferred.
+      const bytes = job.task.pixelData.slice();
+      entry.worker.postMessage({ id: job.id, bytes, rows: job.task.imageFrame.rows, columns: job.task.imageFrame.columns }, [bytes.buffer]);
+    }
+  }
+  function spawn() {
+    let worker;
+    try { worker = new WorkerClass(workerUrl); } catch (error) { release('worker: ' + (error?.message || error)); return null; }
+    const entry = { worker, job: null };
+    worker.onmessage = event => {
+      const { id, pixels, error, unavailable: reason } = event.data || {};
+      // The decoder could not load: whatever this worker holds or the queue holds goes back to the pinned path.
+      if (reason) { release(String(reason)); return; }
+      const job = entry.job;
+      if (!job || job.id !== id) return;
+      entry.job = null;
+      if (pixels) {
+        counts.routed++;
+        settle(job, () => job.dispatch({ ...job.task, transferSyntax: '1.2.840.10008.1.2.1', pixelData: new Uint8Array(pixels) }));
+      } else { counts.rejected++; job.reject(new Error(error)); }
+      pump();
+    };
+    // A script that failed to load, or a worker that died, is an unavailable decoder, not a damaged frame.
+    worker.onerror = event => { event.preventDefault?.(); release('worker: ' + (event.message || 'failed to load')); };
+    workers.push(entry);
+    return entry;
+  }
+  return {
+    // null keeps the task on the pinned path. Otherwise dispatch(task) is called once, with the decoded samples as
+    // Explicit VR Little Endian, or with the unchanged task if the decoder became unavailable before answering.
+    decode(task, dispatch) {
+      if (unavailable || !routable(task)) return null;
+      return new Promise((resolve, reject) => {
+        queue.push({ id: ++sequence, task, dispatch, resolve, reject });
+        pump();
+      });
+    },
+    // One worker loads and warms its decoder before the first frame arrives (a cold worker's first full-size frame
+    // measured ~280 ms against ~44 ms warm); further workers start when frames queue.
+    prewarm() { if (!unavailable && !workers.length) spawn(); },
+    stop() { release(null); },
+    state: () => ({ unavailable, workers: workers.length, queued: queue.length, ...counts }),
+  };
+}
 // A failed pixel request is otherwise only a console error in the pinned viewer. Keep its explanation on the
 // affected frame until that image loads or the viewport changes; a failed prefetch must not cover a displayed image.
 function kinCreateImageLoadStatus() {
-  let services, extensions, stop, handleGlobal, registered = false;
+  // The SOF3 decoder lives for the page: once it could not load, later mode entries keep the pinned path.
+  let services, extensions, stop, handleGlobal, sof3, registered = false;
   const globalFailure = event => handleGlobal?.(event);
   function explanation(error) {
     const status = error?.status;
@@ -4300,9 +4373,13 @@ function kinCreateImageLoadStatus() {
     // Reject at the worker result boundary, before createImage/cache/IMAGE_LOADED can turn a corrupt codestream
     // into a successful blank frame. The loader's existing rejection path supplies the affected imageId.
     const workerManager = core.getWebWorkerManager?.(), executeTask = workerManager?.executeTask;
+    sof3 ??= kinCreateSof3Decode({ size: window.config?.maxNumberOfWebWorkers || 3 });
+    if (executeTask) sof3.prewarm();
     const checkedDecode = function (workerName, methodName, ...args) {
-      const result = executeTask.call(this, workerName, methodName, ...args);
-      if (!active || workerName !== 'dicomImageLoader' || methodName !== 'decodeTask') return result;
+      const decode = active && workerName === 'dicomImageLoader' && methodName === 'decodeTask';
+      const dispatch = task => executeTask.call(this, workerName, methodName, task, ...args.slice(1));
+      const result = (decode && sof3.decode(args[0], dispatch)) || executeTask.call(this, workerName, methodName, ...args);
+      if (!decode) return result;
       return result.then(frame => {
         if (!(frame?.rows > 0 && frame?.columns > 0 && frame?.pixelData?.length > 0)) {
           const error = new Error('Empty decoded image frame');
@@ -4468,6 +4545,7 @@ function kinCreateImageLoadStatus() {
       active = false;
       if (window.fetch === observedFetch) window.fetch = originalFetch;
       if (workerManager?.executeTask === checkedDecode) workerManager.executeTask = executeTask;
+      sof3.stop();
       core.eventTarget.removeEventListener(events.IMAGE_LOAD_FAILED, failed);
       if (events.IMAGE_LOAD_ERROR) core.eventTarget.removeEventListener(events.IMAGE_LOAD_ERROR, failed);
       core.eventTarget.removeEventListener(events.IMAGE_LOADED, loaded);
@@ -4483,6 +4561,8 @@ function kinCreateImageLoadStatus() {
   }
   return { id: 'kin.image-load-status', preRegistration({ servicesManager, extensionManager }) {
     services = servicesManager.services; extensions = extensionManager;
+    // Support diagnostics: which decoder answered (routed, fallbacks, rejected) and why it is unavailable, if it is.
+    window.kinSof3DecodeState = () => sof3?.state() ?? null;
     // Window-target events run listeners in registration order, even with capture. Register before React mounts
     // the route boundary, then delegate only to the active mode; installing onModeEnter would be too late.
     if (!registered) {
@@ -5205,6 +5285,11 @@ function kinCreateViewerUX() {
 // still finish: the next key then selects the frame already shown, and the
 // native Loading indicator never receives another STACK_NEW_IMAGE. Resizing
 // restores the camera, not the slice; explicit navigation keeps its reference.
+// The pinned engine's resize also assigns every canvas size, which clears the
+// canvas even when the size is unchanged, and leaves the redraw to the next
+// animation frame while each viewport still reports RENDERED. Drawing that
+// queued frame before the resize returns keeps a capture or pixel read in a
+// later task from seeing a cleared cell beside a newly dropped series.
 function kinStackResize(service) {
   const resize = service.performResize, present = service.setPresentations;
   if (typeof resize !== 'function' || typeof present !== 'function') return;
@@ -5212,7 +5297,7 @@ function kinStackResize(service) {
   const resized = function (...args) {
     resizing++;
     try { return resize.apply(this, args); }
-    finally { resizing--; }
+    finally { if (!--resizing) kinDrawQueuedFrame(this.renderingEngine); }
   };
   const presented = function (id, presentations, ...args) {
     if (resizing && this.getCornerstoneViewport(id)?.type === 'stack' && presentations?.positionPresentation) {
@@ -5227,6 +5312,19 @@ function kinStackResize(service) {
     if (service.performResize === resized) service.performResize = resize;
     if (service.setPresentations === presented) service.setPresentations = present;
   };
+}
+
+// A draw that throws leaves the engine's requested frame to retry it. A draw
+// that succeeds forgets that frame's handle, so it is cancelled here: left
+// scheduled it would repeat the VTK draw call and, after the engine is
+// destroyed, throw. A frame requested during the draw has its own handle.
+function kinDrawQueuedFrame(engine) {
+  if (!engine || engine.hasBeenDestroyed || !engine._animationFrameSet) return;
+  if (typeof engine._renderFlaggedViewports !== 'function') return;
+  const queued = engine._animationFrameHandle;
+  try { engine._renderFlaggedViewports(); }
+  catch (error) { console.warn('Resize redraw deferred to the next frame', error); return; }
+  cancelAnimationFrame(queued);
 }
 
 // Stack defaults belong to its native tool group. MPR groups keep their own

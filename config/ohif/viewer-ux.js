@@ -77,6 +77,11 @@ function kinCreateViewerUX() {
 // still finish: the next key then selects the frame already shown, and the
 // native Loading indicator never receives another STACK_NEW_IMAGE. Resizing
 // restores the camera, not the slice; explicit navigation keeps its reference.
+// The pinned engine's resize also assigns every canvas size, which clears the
+// canvas even when the size is unchanged, and leaves the redraw to the next
+// animation frame while each viewport still reports RENDERED. Drawing that
+// queued frame before the resize returns keeps a capture or pixel read in a
+// later task from seeing a cleared cell beside a newly dropped series.
 function kinStackResize(service) {
   const resize = service.performResize, present = service.setPresentations;
   if (typeof resize !== 'function' || typeof present !== 'function') return;
@@ -84,7 +89,7 @@ function kinStackResize(service) {
   const resized = function (...args) {
     resizing++;
     try { return resize.apply(this, args); }
-    finally { resizing--; }
+    finally { if (!--resizing) kinDrawQueuedFrame(this.renderingEngine); }
   };
   const presented = function (id, presentations, ...args) {
     if (resizing && this.getCornerstoneViewport(id)?.type === 'stack' && presentations?.positionPresentation) {
@@ -99,6 +104,19 @@ function kinStackResize(service) {
     if (service.performResize === resized) service.performResize = resize;
     if (service.setPresentations === presented) service.setPresentations = present;
   };
+}
+
+// A draw that throws leaves the engine's requested frame to retry it. A draw
+// that succeeds forgets that frame's handle, so it is cancelled here: left
+// scheduled it would repeat the VTK draw call and, after the engine is
+// destroyed, throw. A frame requested during the draw has its own handle.
+function kinDrawQueuedFrame(engine) {
+  if (!engine || engine.hasBeenDestroyed || !engine._animationFrameSet) return;
+  if (typeof engine._renderFlaggedViewports !== 'function') return;
+  const queued = engine._animationFrameHandle;
+  try { engine._renderFlaggedViewports(); }
+  catch (error) { console.warn('Resize redraw deferred to the next frame', error); return; }
+  cancelAnimationFrame(queued);
 }
 
 // Stack defaults belong to its native tool group. MPR groups keep their own

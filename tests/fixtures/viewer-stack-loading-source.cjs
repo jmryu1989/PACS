@@ -23,7 +23,9 @@
 // Native loading/navigation and resize methods, retained as executable behaviour fixtures.
 // Also from 1185.bundle.ec6a71537e54fa339268.js (viewport service) and
 // 9611.bundle.767595c93877e5166c03.js (loading indicator). No source-text assertions.
-module.exports = ({ cache, enums, triggerEvent, window, clearTimeout, setTimeout }) => ({
+// RenderingEngine keeps the pinned animation-frame/draw/destroy members verbatim; the
+// constructor's VTK/off-screen setup and the canvas resize are supplied by the test.
+module.exports = ({ cache, enums, triggerEvent, window, clearTimeout, setTimeout, renderingEngineCache }) => ({
   stack: {
     async _setImageIdIndex(imageIdIndex) {
         if (imageIdIndex >= this.imageIds.length) {
@@ -186,5 +188,127 @@ module.exports = ({ cache, enums, triggerEvent, window, clearTimeout, setTimeout
     setLoading(false);
   };
     return { scroll: setLoadingState, loaded: setFinishLoadingState };
+  },
+  RenderingEngine: class RenderingEngine {
+    constructor(id) {
+        this._needsRender = new Set();
+        this._animationFrameSet = false;
+        this._animationFrameHandle = null;
+        this._renderFlaggedViewports = () => {
+            this._throwIfDestroyed();
+            if (!this.useCPURendering) {
+                this.performVtkDrawCall();
+            }
+            const viewports = this._getViewportsAsArray();
+            const eventDetailArray = [];
+            for (let i = 0; i < viewports.length; i++) {
+                const viewport = viewports[i];
+                if (this._needsRender.has(viewport.id)) {
+                    const eventDetail = this.renderViewportUsingCustomOrVtkPipeline(viewport);
+                    eventDetailArray.push(eventDetail);
+                    viewport.setRendered();
+                    this._needsRender.delete(viewport.id);
+                    if (this._needsRender.size === 0) {
+                        break;
+                    }
+                }
+            }
+            this._animationFrameSet = false;
+            this._animationFrameHandle = null;
+            eventDetailArray.forEach((eventDetail) => {
+                if (!eventDetail?.element) {
+                    return;
+                }
+                (0,triggerEvent/* default */.A)(eventDetail.element, enums.Events.IMAGE_RENDERED, eventDetail);
+            });
+        };
+        this.id = id;
+    }
+    getViewports() {
+        this._throwIfDestroyed();
+        return this._getViewportsAsArray();
+    }
+    render() {
+        const viewports = this.getViewports();
+        const viewportIds = viewports.map((vp) => vp.id);
+        this._setViewportsToBeRenderedNextFrame(viewportIds);
+    }
+    renderViewports(viewportIds) {
+        this._setViewportsToBeRenderedNextFrame(viewportIds);
+    }
+    renderViewport(viewportId) {
+        this._setViewportsToBeRenderedNextFrame([viewportId]);
+    }
+    destroy() {
+        if (this.hasBeenDestroyed) {
+            return;
+        }
+        if (!this.useCPURendering) {
+            const viewports = this._getViewportsAsArray();
+            viewports.forEach((vp) => {
+                this.offscreenMultiRenderWindow.removeRenderer(vp.id);
+            });
+            this.offscreenMultiRenderWindow.delete();
+            delete this.offscreenMultiRenderWindow;
+        }
+        this._reset();
+        renderingEngineCache/* default */.A.delete(this.id);
+        this.hasBeenDestroyed = true;
+    }
+    _clearAnimationFrame() {
+        window.cancelAnimationFrame(this._animationFrameHandle);
+        this._needsRender.clear();
+        this._animationFrameSet = false;
+        this._animationFrameHandle = null;
+    }
+    _reset() {
+        const viewports = this._getViewportsAsArray();
+        viewports.forEach((viewport) => {
+            this._resetViewport(viewport);
+        });
+        this._clearAnimationFrame();
+        this._viewports = new Map();
+    }
+    _throwIfDestroyed() {
+        if (this.hasBeenDestroyed) {
+            throw new Error('this.destroy() has been manually called to free up memory, can not longer use this instance. Instead make a new one.');
+        }
+    }
+    _getViewportsAsArray() {
+        return Array.from(this._viewports.values());
+    }
+    _setViewportsToBeRenderedNextFrame(viewportIds) {
+        viewportIds.forEach((viewportId) => {
+            this._needsRender.add(viewportId);
+        });
+        this._render();
+    }
+    _render() {
+        if (this._needsRender.size > 0 && !this._animationFrameSet) {
+            this._animationFrameHandle = window.requestAnimationFrame(this._renderFlaggedViewports);
+            this._animationFrameSet = true;
+        }
+    }
+    performVtkDrawCall() {
+        const { offscreenMultiRenderWindow } = this;
+        const renderWindow = offscreenMultiRenderWindow.getRenderWindow();
+        const renderers = offscreenMultiRenderWindow.getRenderers();
+        if (!renderers.length) {
+            return;
+        }
+        for (let i = 0; i < renderers.length; i++) {
+            const { renderer, id } = renderers[i];
+            if (this._needsRender.has(id)) {
+                renderer.setDraw(true);
+            }
+            else {
+                renderer.setDraw(false);
+            }
+        }
+        renderWindow.render();
+        for (let i = 0; i < renderers.length; i++) {
+            renderers[i].renderer.setDraw(false);
+        }
+    }
   },
 });

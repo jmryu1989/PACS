@@ -64,3 +64,7 @@ worklist-v0/hpacs-lite/page-boot.js text eol=lf
 # the pristine candidate pin. Keep other whitespace checks on both paths.
 worklist-v0/hpacs-lite/page-boot.js whitespace=-blank-at-eol,-blank-at-eof
 worklist-v0/hpacs-lite/main-split.bundle.js whitespace=-blank-at-eol,-blank-at-eof
+
+# The viewer's JPEG lossless decoder: CI compares these exact bytes with the recorded build hash.
+worklist-v0/hpacs-lite/kin-sof3.wasm binary
+worklist-v0/hpacs-lite/kin-sof3.wasm.sha256 text eol=lf
