@@ -53,17 +53,26 @@ function kinCreateImageLoadStatus() {
     const workerManager = core.getWebWorkerManager?.(), executeTask = workerManager?.executeTask;
     sof3 ??= kinCreateSof3Decode({ size: window.config?.maxNumberOfWebWorkers || 3 });
     if (executeTask) sof3.prewarm();
+    const emptyFrame = message => Object.assign(new Error(message), { code: 'IMAGE_DECODE_EMPTY' });
+    // The pinned JS lossless decoder resolves a codestream cut short as an all-zero frame, which no pixel check can
+    // tell from a uniform image. A complete JPEG stream ends with EOI (FFD9); entropy-coded data never contains that
+    // pair, so it is looked for only near the end, past the fragment padding a writer may add.
+    const cutShort = task => {
+      if (!KIN_SOF3_SYNTAXES.has(task?.transferSyntax) || !ArrayBuffer.isView(task.pixelData)) return false;
+      const bytes = new Uint8Array(task.pixelData.buffer, task.pixelData.byteOffset, task.pixelData.byteLength);
+      for (let i = bytes.length - 2; i >= Math.max(0, bytes.length - 64); i--) if (bytes[i] === 0xff && bytes[i + 1] === 0xd9) return false;
+      return true;
+    };
     const checkedDecode = function (workerName, methodName, ...args) {
       const decode = active && workerName === 'dicomImageLoader' && methodName === 'decodeTask';
-      const dispatch = task => executeTask.call(this, workerName, methodName, task, ...args.slice(1));
-      const result = (decode && sof3.decode(args[0], dispatch)) || executeTask.call(this, workerName, methodName, ...args);
+      // Every task the pinned worker receives, directly or as the wasm decoder's fallback; a frame the wasm decoder
+      // decoded arrives as Explicit VR Little Endian, and its own refusals keep their message.
+      const dispatch = task => cutShort(task) ? Promise.reject(emptyFrame('Incomplete JPEG lossless codestream'))
+        : executeTask.call(this, workerName, methodName, task, ...args.slice(1));
+      const result = (decode && (sof3.decode(args[0], dispatch) || dispatch(args[0]))) || executeTask.call(this, workerName, methodName, ...args);
       if (!decode) return result;
       return result.then(frame => {
-        if (!(frame?.rows > 0 && frame?.columns > 0 && frame?.pixelData?.length > 0)) {
-          const error = new Error('Empty decoded image frame');
-          error.code = 'IMAGE_DECODE_EMPTY';
-          throw error;
-        }
+        if (!(frame?.rows > 0 && frame?.columns > 0 && frame?.pixelData?.length > 0)) throw emptyFrame('Empty decoded image frame');
         return frame;
       });
     };
