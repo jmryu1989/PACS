@@ -1019,6 +1019,9 @@ class LogoutDOMTest(unittest.TestCase):
     def landing(self, page=None):
         page = page or self.page
         page.wait_for_url(INDEX_URL)
+        # A fresh index.html decides its landing only after /api/me answers and keeps the page hidden until then
+        # (html.auto-entry); #signin is enabled in the markup. Read the notice the doctor sees, not the undecided page.
+        expect(page.locator("#signin")).to_be_visible()
         expect(page.locator("#signin")).to_be_enabled()
         return page.locator("#msg").inner_text(), page.locator("#retry-logout").is_visible()
 
