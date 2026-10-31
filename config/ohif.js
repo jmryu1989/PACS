@@ -3071,15 +3071,17 @@ function kinCreateCine() {
     // hint. Supply the preferred DICOM rate before native cine initializes both
     // its FPS control and playback state; never rewrite the instance metadata.
     const handlerId = '@ohif/extension-default.sopClassHandlerModule.stack';
+    // Without the handler only this rate hint is lost; the rest of the cine controls still mount.
     const handler = extensions.getModuleEntry(handlerId);
-    const nativeDisplaySets = handler.getDisplaySetsFromSeries;
+    const nativeDisplaySets = typeof handler?.getDisplaySetsFromSeries === 'function' ? handler.getDisplaySetsFromSeries : null;
     function sourceRate(displaySet) {
       const instance = displaySet.instances?.[0];
       if (!(Number(instance?.NumberOfFrames) > 1)) return;
       for (const value of [instance.RecommendedDisplayFrameRate, instance.CineRate]) {
         const rate = typeof value === 'number' || typeof value === 'string' ? Number(value) : NaN;
         if (Number.isFinite(rate) && rate > 0) {
-          displaySet.FrameRate = 1000 / rate;
+          // The native FPS control and Range/Yoyo Play accept 1-90 fps; outside it the arrows and Play refuse.
+          displaySet.FrameRate = 1000 / Math.min(90, Math.max(1, rate));
           return;
         }
       }
@@ -3090,10 +3092,12 @@ function kinCreateCine() {
       displaySets.forEach(sourceRate);
       return displaySets;
     };
-    handler.getDisplaySetsFromSeries = createDisplaySets;
-    services.displaySetService.getActiveDisplaySets().forEach(ds => {
-      if (ds.SOPClassHandlerId === handlerId) sourceRate(ds);
-    });
+    if (nativeDisplaySets) {
+      handler.getDisplaySetsFromSeries = createDisplaySets;
+      services.displaySetService.getActiveDisplaySets().forEach(ds => {
+        if (ds.SOPClassHandlerId === handlerId) sourceRate(ds);
+      });
+    }
     const core = window.cornerstone, cine = services.cineService, grid = services.viewportGridService;
     const nativePlay = cine.playClip, nativeStop = cine.stopClip;
     const records = new Map(), subscriptions = [], listeners = [];
@@ -3356,7 +3360,7 @@ function kinCreateCine() {
     try { channel = kinViewerOnEnd(end); } catch (_) {}
     const timer = setInterval(render, 250); selected = grid.getActiveViewportId(); render();
     dispose = () => { end(); clearInterval(timer); listeners.forEach(off => off()); subscriptions.forEach(s => s.unsubscribe()); channel?.close(); cine.playClip = nativePlay; cine.stopClip = nativeStop; panel.remove();
-      if (handler.getDisplaySetsFromSeries === createDisplaySets) handler.getDisplaySetsFromSeries = nativeDisplaySets;
+      if (handler?.getDisplaySetsFromSeries === createDisplaySets) handler.getDisplaySetsFromSeries = nativeDisplaySets;
     };
   }
   return { id: 'kin.cine', preRegistration({ servicesManager, extensionManager }) { services = servicesManager.services; extensions = extensionManager; }, onModeEnter: mount, onModeExit() { dispose?.(); dispose = null; } };
@@ -4375,17 +4379,45 @@ function kinCreateImageLoadStatus() {
     const workerManager = core.getWebWorkerManager?.(), executeTask = workerManager?.executeTask;
     sof3 ??= kinCreateSof3Decode({ size: window.config?.maxNumberOfWebWorkers || 3 });
     if (executeTask) sof3.prewarm();
+    const emptyFrame = message => Object.assign(new Error(message), { code: 'IMAGE_DECODE_EMPTY' });
+    // The pinned JS lossless decoder resolves a codestream cut short as a full-size frame of zero or wrong samples,
+    // which no pixel check can tell from a real image. The stream must reach EOI through its own marker structure: an
+    // FFD9 found by position can sit inside an APP/COM segment ahead of a cut scan. Entropy-coded data stuffs every FF,
+    // so a scan ends at the first marker that is not FF00, a fill byte or a restart marker. Bytes after EOI are padding.
+    const terminated = bytes => {
+      if (bytes[0] !== 0xff || bytes[1] !== 0xd8) return false;
+      for (let i = 2; i + 1 < bytes.length;) {
+        if (bytes[i] !== 0xff) return false;
+        const marker = bytes[i + 1];
+        if (marker === 0xd9) return true;
+        if (marker === 0xff) { i++; continue; }
+        if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; }
+        if (i + 3 >= bytes.length) return false;
+        const length = bytes[i + 2] << 8 | bytes[i + 3];
+        if (length < 2) return false;
+        i += 2 + length;
+        if (marker !== 0xda) continue;
+        for (;; i++) {
+          i = bytes.indexOf(0xff, i);
+          if (i < 0 || i + 1 >= bytes.length) return false;
+          const next = bytes[i + 1];
+          if (next !== 0 && next !== 0xff && (next < 0xd0 || next > 0xd7)) break;
+        }
+      }
+      return false;
+    };
+    const cutShort = task => KIN_SOF3_SYNTAXES.has(task?.transferSyntax) && ArrayBuffer.isView(task.pixelData) &&
+      !terminated(new Uint8Array(task.pixelData.buffer, task.pixelData.byteOffset, task.pixelData.byteLength));
     const checkedDecode = function (workerName, methodName, ...args) {
       const decode = active && workerName === 'dicomImageLoader' && methodName === 'decodeTask';
-      const dispatch = task => executeTask.call(this, workerName, methodName, task, ...args.slice(1));
-      const result = (decode && sof3.decode(args[0], dispatch)) || executeTask.call(this, workerName, methodName, ...args);
+      // Every task the pinned worker receives, directly or as the wasm decoder's fallback; a frame the wasm decoder
+      // decoded arrives as Explicit VR Little Endian, and its own refusals keep their message.
+      const dispatch = task => cutShort(task) ? Promise.reject(emptyFrame('Incomplete JPEG lossless codestream'))
+        : executeTask.call(this, workerName, methodName, task, ...args.slice(1));
+      const result = (decode && (sof3.decode(args[0], dispatch) || dispatch(args[0]))) || executeTask.call(this, workerName, methodName, ...args);
       if (!decode) return result;
       return result.then(frame => {
-        if (!(frame?.rows > 0 && frame?.columns > 0 && frame?.pixelData?.length > 0)) {
-          const error = new Error('Empty decoded image frame');
-          error.code = 'IMAGE_DECODE_EMPTY';
-          throw error;
-        }
+        if (!(frame?.rows > 0 && frame?.columns > 0 && frame?.pixelData?.length > 0)) throw emptyFrame('Empty decoded image frame');
         return frame;
       });
     };
@@ -4777,14 +4809,15 @@ function kinCreateMammographyHanging() {
       }
       if (voi.lut) {
         // Use the stored table on the GPU actor, without rewriting decoded source pixels or the cache.
-        // VTK midpoint=1/sharpness=1 keeps each integer entry constant until the next input value.
+        // A stored value takes its own entry; only magnified samples between two stored values blend
+        // the two neighbouring entries linearly, as with a windowed VOI.
         const transfer = viewport.getDefaultActor()?.actor?.getProperty().getRGBTransferFunction(0);
         if (!transfer) return;
         transfer.removeAllPoints();
         const max = 2 ** voi.lut.bits - 1;
         voi.lut.data.forEach((value, i) => {
           const gray = spec.invert ? 1 - value / max : value / max;
-          transfer.addRGBPoint(voi.lut.first + i, gray, gray, gray, 1, 1);
+          transfer.addRGBPoint(voi.lut.first + i, gray, gray, gray);
         });
       } else {
         const half = (voi.width - (voi.fn === 'LINEAR' ? 1 : 0)) / 2;

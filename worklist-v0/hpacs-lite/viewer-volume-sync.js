@@ -2,7 +2,7 @@ window.kinCreateVolumeSync=function({target,permitted,alive,services,host}){
   const panel=document.createElement('section');panel.id='kin-volume-sync';panel.style.cssText='border-top:1px solid #657c9f;padding:8px 0';
   panel.innerHTML='<strong>MPR Synchronization</strong><p class="target"></p><label><input type="checkbox" aria-label="Sync MPR Windowing"> Windowing</label> <label><input type="checkbox" aria-label="Sync MPR Zoom"> Zoom</label><p role="status"></p><p>현재 세 평면에서 이후 조절하는 밝기·대비 또는 기본 맞춤 기준 확대 배율을 함께 적용합니다. 단면 위치·회전·이동·반전은 각각 유지합니다. Reset View 및 Reset Windowing / Reset Zoom / Pan은 대기 중인 동기화를 취소하며 선택 평면만 초기화합니다. 설정은 현재 배치에만 적용됩니다.</p>';
   host.append(panel);const [windowing,zoom]=panel.querySelectorAll('input'),status=panel.querySelector('[role=status]'),caption=panel.querySelector('.target');
-  let ended=false,session=null,applying=false,suppressed=0,resizing=0;
+  let ended=false,session=null,kept=null,applying=false,suppressed=0,resizing=0;
   const manager=()=>window.cornerstoneTools.SynchronizerManager;
   const events=()=>window.cornerstone.Enums.Events;
   const same=(a,b)=>a?.group===b?.group&&a?.views.every((v,i)=>v===b.views[i]);
@@ -38,7 +38,7 @@ window.kinCreateVolumeSync=function({target,permitted,alive,services,host}){
     });
   }
   function clear(){
-    const old=session;session=null;if(!old)return;
+    const old=session;session=null;if(!old)return;kept={target:old.target,windowing:old.windowing,zoom:old.zoom};
     for(const [element,name,handler] of old.listeners)element.removeEventListener(name,handler);
     for(const {owner,key,original,hook,own} of (old.resizeHooks||[]).slice().reverse())if(owner[key]===hook){if(own)owner[key]=original;else delete owner[key];}
     for(const {group,enabled} of old.muted)try{if(manager().getSynchronizer(group.id)===group)group.setEnabled(enabled);}catch(_){}
@@ -46,7 +46,10 @@ window.kinCreateVolumeSync=function({target,permitted,alive,services,host}){
   function attach(t){
     clear();const initial=groups(t);
     const engine=t.views[0].getRenderingEngine();if(t.views.some(v=>v.getRenderingEngine()!==engine))throw Error('같은 영상 엔진의 세 평면을 선택하세요.');
-    session={target:t,windowing:initial.some(x=>x.enabled),zoom:false,controlled:true,muted:initial,listeners:[],pending:new Map(),suspended:false,mounts:t.views.map(view=>({view,element:view.element,volume:window.cornerstone.cache.getVolume(view.getVolumeId())})),scales:new Map(t.views.map(v=>[v,v.initialCamera.parallelScale])),zooms:new Map(t.views.map(v=>[v,v.getZoom()]))};
+    // The same plane viewports coming back after the grid briefly showed another cell count are the layout the
+    // choice was made on. MPR Properties keeps its binding through that and does not apply its profile again.
+    const back=same(kept?.target,t)?kept:null;kept=null;
+    session={target:t,windowing:back?back.windowing:initial.some(x=>x.enabled),zoom:!!back?.zoom,controlled:true,muted:initial,listeners:[],pending:new Map(),suspended:false,mounts:t.views.map(view=>({view,element:view.element,volume:window.cornerstone.cache.getVolume(view.getVolumeId())})),scales:new Map(t.views.map(v=>[v,v.initialCamera.parallelScale])),zooms:new Map(t.views.map(v=>[v,v.getZoom()]))};
     for(const {group} of initial)group.setEnabled(false);
     const s=session;s.resizeHooks=[];
     // Native resize emits intermediate reset/restore camera events before all

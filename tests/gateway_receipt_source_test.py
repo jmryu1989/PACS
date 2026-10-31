@@ -290,7 +290,7 @@ class ModelVectors(unittest.TestCase):
 
 
 class AgentPins(unittest.TestCase):
-    def test_every_gateway_error_literal_has_a_code_and_the_table_has_no_stale_entry(self):
+    def test_every_gateway_error_literal_has_a_code_and_only_retired_entries_go_unraised(self):
         found = constructed(AGENT)
         self.assertEqual([(line, t) for line, t in found if t not in AGENT_CODES], [])
         # Streaming STOW no longer raises the old in-memory size refusals. Their

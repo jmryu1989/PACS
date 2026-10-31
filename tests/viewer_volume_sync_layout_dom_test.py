@@ -7,7 +7,8 @@ viewports, grid and brightness synchronizer. A Hanging Protocol opens the three 
 whose fourth cell is empty, and the shared MPR target accepts those three shown cells. The panel must
 keep the user's latest Windowing/Zoom choice and a profile applied through its capability on that
 layout, also when that profile reaches newly ready planes before the panel's own refresh, bind each
-plane once, attach a restored layout once, release the session when the vacancy is filled, and a failed attach must leave no native change behind before it recovers. This is no GPU,
+plane once, attach a restored layout once, release the session when the vacancy is filled, keep the choice
+when the same planes return after that, and a failed attach must leave no native change behind before it recovers. This is no GPU,
 pixel or native Hanging Protocol proof.
 """
 from pathlib import Path
@@ -177,6 +178,28 @@ class ViewerVolumeSyncLayoutDOMTest(unittest.TestCase):
             self.assertFalse(state['nativeEnabled']);self.assertTrue(state['hooked'])
             self.assertEqual([[1, 1]] * 3, page.evaluate("bindings(planes())"))
             page.evaluate("planes()[2].setZoom(2)")
+            self.assertEqual([2] * 3, page.evaluate("zooms()"))
+            page.evaluate("async()=>{planes()[0].setProperties({voiRange:{lower:0,upper:1500}});await new Promise(r=>setTimeout(r,0))}")
+            self.assertEqual([1500, None, None], page.evaluate("uppers()"))
+            self.assertEqual([], errors)
+        finally:
+            page.close()
+
+    def test_same_planes_returning_after_a_brief_grid_change_keep_the_applied_profile(self):
+        # MPR Properties keeps its binding while the same plane viewports stay connected, so it never applies its
+        # profile again; the choice has to survive in this panel when those planes become the target again.
+        page, errors = self.open_page(vacancy=True)
+        try:
+            self.assertTrue(page.evaluate("kinVolumeSynchronization.apply({windowing:false,zoom:true})"))
+            page.evaluate("()=>{cells[3].displaySetInstanceUIDs=['other-series'];tick(2)}")
+            state = page.evaluate("syncState()")
+            self.assertIsNone(state['read']);self.assertTrue(state['nativeEnabled'], "the brief other layout gets the native group back")
+            page.evaluate("()=>{cells[3].displaySetInstanceUIDs=[];tick(4)}")
+            state = page.evaluate("syncState()")
+            self.assertEqual({'windowing': False, 'zoom': True}, state['read'], "the applied profile is not replaced by the defaults")
+            self.assertEqual((False, True, True, 2), (state['windowing'], state['zoom'], state['enabled'], state['attach']))
+            self.assertFalse(state['nativeEnabled']);self.assertEqual([[1, 1]] * 3, page.evaluate("bindings(planes())"))
+            page.evaluate("planes()[1].setZoom(2)")
             self.assertEqual([2] * 3, page.evaluate("zooms()"))
             page.evaluate("async()=>{planes()[0].setProperties({voiRange:{lower:0,upper:1500}});await new Promise(r=>setTimeout(r,0))}")
             self.assertEqual([1500, None, None], page.evaluate("uppers()"))
