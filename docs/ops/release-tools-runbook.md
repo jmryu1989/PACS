@@ -35,13 +35,31 @@ is an admission condition for a clean install.
    After that comparison, set `record_path` to the private release record's path
    outside the checkout, `record` to the observed values plus the operator and
    backup locations, and `install_timeout` to the site's measured installation
-   hang timeout (seconds). Persist the hold before starting Compose:
+   hang timeout (seconds). Define `clean_env`, `compose_for` and
+   `config_matches` from [Site Compose command](#site-compose-command).
+
+   Decide signing before Compose starts. Online approvals are enabled at
+   installation exactly when the custody configuration
+   `/etc/kin-deploy/emr-wrapping-custody.json` is installed (Nightly job). Its
+   `c2-wrap-v1` file is then prepared as Enabling online approvals requires, and
+   the stack starts with the signing overlay mapping that same file. Without the
+   configuration the stack starts without the overlay. Persist the hold and the
+   decision before starting Compose:
 
    ```python
+   import re
+   assert 'KIN_EMR_WRAPPING_CUSTODY' not in os.environ   # backups in this session read only the installed configuration
+   project = ops.ROOT.name                                # a plain invocation in the checkout then names the same project
+   assert re.fullmatch(r'[a-z0-9][a-z0-9_-]*', project)
+   assert 'COMPOSE_PROJECT_NAME' not in ops.env_names(ops.ROOT / '.env')
+   secret_file = None
+   if ops.WRAPPING_CUSTODY_CONFIG.is_file():
+       secret_file = json.loads(ops.WRAPPING_CUSTODY_CONFIG.read_text(encoding='utf-8'))['files']['c2-wrap-v1']
+   files = ['docker-compose.yml', 'docker-compose.prod.yml'] + ([SIGNING_OVERLAY] if secret_file else [])
+   compose = compose_for(project, ops.ROOT, files, secret_file)
    lease.retain()
-   record['status'] = 'STARTED'
+   record.update(status='STARTED', compose_project=project, compose_files=files, wrapping_secret_file=secret_file)
    ops.write_json(record_path, record)
-   compose = ['docker', 'compose', '-f', 'docker-compose.yml', '-f', 'docker-compose.prod.yml']
    ops.run(compose + ['up', '-d', '--build'], timeout=install_timeout)
    ```
 
@@ -120,6 +138,55 @@ base-backup helper hang timeout; that timeout still needs the first-site measure
 an existing installation actually needs conversion. This procedure does not claim
 an installation or restore was executed by this documentation change.
 
+## Site Compose command
+
+Installation, upgrade, enabling online approvals and rollback start Compose only
+in this form. Each Compose project is then fully described by its checkout
+directory, that directory's `.env`, its compose file list and at most one
+signing file path:
+- `env -i` drops every inherited variable, so an exported `POSTGRES_PASSWORD`,
+  `KC_WEB_SECRET` or `COMPOSE_PROJECT_NAME` cannot override `.env`. Docker's
+  interpolation precedence puts the shell environment above `.env`.
+- Only what the Docker client itself needs passes through.
+- The signing overlay's one variable is given explicitly, and only together with
+  the overlay.
+
+```python
+import json, os
+from pathlib import Path
+SIGNING_OVERLAY = 'emr/deploy/docker-compose.signing.yml'
+
+def clean_env(*assignments):
+    keep = [f'{name}={os.environ[name]}' for name in ('PATH', 'HOME', 'DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG')
+            if name in os.environ]
+    return ['env', '-i', *keep, *assignments]
+
+def compose_for(project, directory, files, secret_file):
+    """files: paths relative to directory, in merge order; secret_file: the c2-wrap-v1 host file, or None."""
+    assert (SIGNING_OVERLAY in files) == bool(secret_file)
+    directory = Path(directory)
+    signing = [f'KIN_EMR_WRAPPING_SECRET_FILE={secret_file}'] if secret_file else []
+    return (clean_env(*signing) + ['docker', 'compose', '-p', project, '--project-directory', str(directory),
+                                   '--env-file', str(directory / '.env')]
+            + [arg for name in files for arg in ('-f', str(directory / name))])
+
+def config_matches(compose, project):
+    """Every existing container of the project carries the configuration hash this command renders."""
+    rendered = dict(line.split(' ', 1) for line in ops.text(compose + ['config', '--hash', '*']).splitlines())
+    ids = ops.text(['docker', 'ps', '-aq', '--filter', f'label=com.docker.compose.project={project}']).split()
+    labels = [item['Config']['Labels'] for item in json.loads(ops.text(['docker', 'inspect', *ids]))] if ids else []
+    return bool(labels) and all(rendered.get(label['com.docker.compose.service']) == label['com.docker.compose.config-hash']
+                                for label in labels)
+```
+
+`config_matches` compares hashes only, so no configuration value reaches the
+log. Compose stores the same service hash in each container's
+`com.docker.compose.config-hash` label when it creates the container. Equality
+therefore means the command reproduces the running configuration, including
+interpolated credentials. The hash leaves out build settings. A different
+Compose version can compute it differently. The observed `docker compose version`
+is compared with the release record before any of this runs.
+
 ## Synthetic save/reopen and signing checks
 
 Three checks make up step 3's "approved synthetic save/reopen and signing
@@ -166,26 +233,36 @@ versions are append-only (AGENTS §1.1) and there is no Orthanc delete feature
    without it has no locator: the command stops with `Wrapping custody locator is
    missing` (`ops_backup.wrapping_custody_files`). Record custody restoration as
    not applicable then, with the rehearsal JSON above as the evidence.
-3. **Signing path of the running API on the host.** This applies when the site
-   has enabled online approvals: the release record names a
-   `wrapping_secret_file`, `/etc/kin-deploy/emr-wrapping-custody.json` exists, or
+3. **Signing path of the running API on the host.** `secret_file` is the host
+   path the stack was started with (`None` without the overlay):
+   - after installation, an upgrade or Enabling online approvals:
+     `record['wrapping_secret_file']`;
+   - in rollback R7: `record['rollback_secret_file']`;
+   - on the way back to N: `record['n_secret_file']`.
+
+   The check applies when `secret_file` is set,
+   `/etc/kin-deploy/emr-wrapping-custody.json` exists, or
    `emr_signing.private_key` has rows. Otherwise, record "online approvals not
    enabled". Approvals then answer `WrappingSecretConfigurationPending` (Enabling
    online approvals).
 
-   The check confirms two things:
-   - `kin-api` runs with the signing overlay's mapping;
+   The check confirms three things:
+   - the custody configuration, which the nightly backup copies, names the same
+     `c2-wrap-v1` file;
+   - `kin-api` runs with the signing overlay's mapping of that file;
    - its own user reads the mapped file and unwraps every stored private key with
      the product code an approval uses (`FileWrappingSecrets.read`, then
      `unwrapServerPrivateKey`).
 
    ```python
    import json, tempfile
+   custody = json.loads(ops.WRAPPING_CUSTODY_CONFIG.read_text(encoding='utf-8'))
+   assert secret_file and custody['files'].get('c2-wrap-v1') == secret_file
    api = json.loads(ops.text(['docker', 'inspect', 'kin-api']))[0]
    env = dict(entry.split('=', 1) for entry in api['Config']['Env'] if '=' in entry)
    assert env.get('KIN_EMR_WRAPPING_KEY_ID') == 'c2-wrap-v1'
    assert [m['Source'] for m in api['Mounts']
-           if m['Destination'] == '/run/secrets/emr-signing-wrap-v1'] == [record['wrapping_secret_file']]
+           if m['Destination'] == '/run/secrets/emr-signing-wrap-v1'] == [secret_file]
    script = """const {FileWrappingSecrets}=require('/app/dist/emr-signature/server-keys');
    const {unwrapServerPrivateKey}=require('/app/dist/emr-signature/server-crypto');
    (async()=>{const rows=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
@@ -203,9 +280,10 @@ versions are append-only (AGENTS §1.1) and there is no Orthanc delete feature
    Expected: `SIGNING_PATH_READY <n>`, where `n` is the row count of
    `emr_signing.private_key`. `docker exec` runs as the production image's
    `node` user (`api/Dockerfile`, `USER node`). A file that uid 1000 cannot read,
-   a missing overlay or bytes that differ from the stored keys therefore fail
-   here, not at a doctor's first approval. The script prints no error text, so no
-   key material reaches the log.
+   a missing overlay, a custody configuration naming another file, or bytes that
+   differ from the stored keys therefore fail here, not at a doctor's first
+   approval or a later restore. The script prints no error text, so no key
+   material reaches the log.
 
 The end-to-end signed approval is check 1's synthetic run. Check 3 shows that
 the installed API takes the same path to the key. The site's own first signed
@@ -241,40 +319,66 @@ Everything written after B is **not** in the rolled-back site:
 - signing keys created on N, and the approvals they signed.
 
 All of that stays in N's preserved volumes, plus the N backup taken in step R1
-when it succeeds (held, never rotated). No tool merges it into N-1 (see Gaps).
+(held, never rotated). No tool merges it into N-1 (see Gaps).
 N's volumes are kept, never removed:
 - access records keep their 2-year period (개인정보의 안전성 확보조치 기준
   제8조제1항, Recovery and rehearsal);
 - record retention follows 의료법 시행규칙 제15조제1항.
 
-The host's wrapping secret files are not changed by the upgrade or by the
-rollback. Preflight P5 checks this against B.
+**How the rollback is built.** Three rules apply to every step below.
+1. **N is only stopped, never reconfigured.** N's checkout directory (its HEAD,
+   `.env` and compose files), its project, volumes and signing file are left as
+   they are. Preflight P3 proves that the recorded command `compose_n` renders
+   N's running configuration exactly. `compose_n down` therefore stops N as it
+   runs, and on the way back `compose_n up -d` restarts it unchanged.
+2. **R is built only from B.** The rolled-back release runs as a new Compose
+   project R from **its own new checkout directory** at N-1 (a `git worktree`
+   named R). Its `.env` is B's checksummed copy. Its signing files are restored
+   from B's custody into a new directory, and its custody configuration is
+   staged as a new file. That configuration is activated in R7, after N has
+   stopped and R's API has proved the files. N's custody configuration is kept
+   as a copy for the way back.
+3. **No inherited environment.** Every Compose command is `compose_for`
+   ([Site Compose command](#site-compose-command)). R's backups run with R's
+   own `scripts/ops_backup.py` under `clean_env`.
 
-**Precondition: the upgrade itself.** Run it in one locked operator session at
-N-1, in the form of steps 2–4. The session runs as the account that owns the
-backup root. `backup()` refuses any other account, and rotation checks that a
-set's components belong to the account that runs it.
+The restored-copy expiry sweep runs after the running API has finished its own
+recovery, while the proxy is still not started (R6).
 
-1. **Address the running stack exactly.** Take the Compose project and file list
-   from N-1's own containers, so the upgrade carries the signing overlay when the
-   site uses it:
+A host keeps one serving stack: the container names are fixed (`kin-db`, `kin-api`,
+…), so N and R cannot run at the same time. This section does not claim that a
+rollback was executed by this documentation change.
+
+**Precondition: the upgrade itself.** Run it in one locked operator session in the
+site checkout at N-1, in the form of steps 2–4. Define `clean_env`, `compose_for`
+and `config_matches` there too, and check that the session does not carry
+`KIN_EMR_WRAPPING_CUSTODY` (step 2). The session runs as the account that owns the
+backup root. `backup()` refuses any other account, and rotation checks that a set's
+components belong to the account that runs it.
+
+1. **Address the running stack exactly.** Take the Compose project, file list and
+   signing file from N-1's own containers. Then prove that the clean command
+   reproduces them:
 
    ```python
-   import json, os
-   from pathlib import Path
    api = json.loads(ops.text(['docker', 'inspect', 'kin-api']))[0]
-   project = api['Config']['Labels']['com.docker.compose.project']
-   files = api['Config']['Labels']['com.docker.compose.project.config_files'].split(',')
-   secret = [m['Source'] for m in api['Mounts'] if m['Destination'] == '/run/secrets/emr-signing-wrap-v1']
-   if secret:
-       os.environ['KIN_EMR_WRAPPING_SECRET_FILE'] = secret[0]   # the overlay's required variable
-   compose = ['docker', 'compose', '-p', project] + [arg for name in files for arg in ('-f', name)]
-   record.update(compose_project=project, compose_files=files, wrapping_secret_file=secret[0] if secret else None)
+   labels = api['Config']['Labels']
+   assert Path(labels['com.docker.compose.project.working_dir']).resolve() == ops.ROOT
+   project = labels['com.docker.compose.project']
+   files = [Path(name).resolve().relative_to(ops.ROOT).as_posix()
+            for name in labels['com.docker.compose.project.config_files'].split(',')]
+   mount = [m['Source'] for m in api['Mounts'] if m['Destination'] == '/run/secrets/emr-signing-wrap-v1']
+   secret_file = mount[0] if mount else None
+   compose = compose_for(project, ops.ROOT, files, secret_file)
+   assert config_matches(compose, project)   # N-1 runs exactly what its directory's .env and files say
+   record.update(compose_project=project, compose_files=files, wrapping_secret_file=secret_file,
+                 config_matched=True)
    ```
 
-   `-p` takes precedence over an inherited `COMPOSE_PROJECT_NAME` and over `.env`
-   (Docker Compose's documented precedence; `ops.run` passes the session's
-   environment through). The upgrade therefore cannot start a second stack.
+   A stack started with exported variables, or with a file list other than its
+   labels, fails here, before B is taken. Correct the cause first. B's `.env` then
+   provably reproduces the configuration that N-1 ran with (including its
+   PostgreSQL, Keycloak and client credentials), and a rollback can rely on it.
 2. **Take and hold B.** Run `B = ops.backup('<backup-directory>')`, then
    `ops.rehearse(B)`. Record B's directory and its manifest's `git_sha` (N-1) and
    `running_images`. Then protect B from the nightly rotation for the rollback
@@ -298,115 +402,212 @@ can no longer be restored or rehearsed. When the window ends, remove the hold
 with `(B / ops.HOLD_FILE).unlink()` in a locked session as the same account, and
 record it. The next rotation then treats B as an ordinary daily set.
 
-**Rollback.** Run it in one operator Python session in the site checkout, still
-at N, as for steps 2–4: `ops.lock()`, `hold.__enter__()`,
-`ops.require_local_docker()`, and the observed values compared and recorded. The
-session runs as the account that owns the backup root (see the precondition).
+**Rollback session.** Open one operator Python session in the site checkout, still
+at N, as for steps 2–4:
+- `ops.lock()`, `hold.__enter__()` and `ops.require_local_docker()`;
+- the observed values compared with the record, and recorded;
+- `clean_env`, `compose_for` and `config_matches` defined;
+- `'KIN_EMR_WRAPPING_CUSTODY' not in os.environ` checked.
 
-Restoring into N's volumes would overwrite them. The site therefore gets a new
-Compose project R, with fresh empty volumes, while N's volumes remain.
+The session runs as the account that owns the backup root (see the precondition).
+N's lock in this checkout also keeps the nightly job, which runs in this checkout,
+out until R7 points it at R. Load the upgrade's release record with
+`record = json.loads(record_path.read_text(encoding='utf-8'))`.
 
-**Preflight, while N keeps serving.** Nothing is stopped, switched or written
-outside the private record.
+**Preflight, while N keeps serving.** Nothing of N is stopped, switched or
+reconfigured. Preflight writes only new paths:
+- the private record;
+- R's checkout directory (P6);
+- R's staged signing directory and custody configuration (P7).
 
 ```python
-import hashlib, json, os, shutil
-from pathlib import Path
+import contextlib, hashlib, io, re, shutil, subprocess, sys, time
 backup_set = Path('<B>')
 previous_sha = '<N-1 full SHA>'
-R = '<new project name>'   # lower-case letters, digits, '-' or '_'; not N's project
-directory, manifest = ops.validate_backup(backup_set)   # P1: checksums, archive entries, recorded images present
-assert manifest['git_sha'] == previous_sha and manifest['git_dirty'] is False
-assert manifest.get('emr') and manifest.get('role_catalog') is not None   # otherwise: Gaps, no live restore path
-os.environ.pop('COMPOSE_PROJECT_NAME', None)   # P6, with -p below
-api = json.loads(ops.text(['docker', 'inspect', 'kin-api']))[0]
-n_files = api['Config']['Labels']['com.docker.compose.project.config_files'].split(',')
-n_project = api['Config']['Labels']['com.docker.compose.project']
-compose_n = ['docker', 'compose', '-p', n_project] + [arg for name in n_files for arg in ('-f', name)]
-compose_r = ['docker', 'compose', '-p', R] + [arg for name in record['compose_files'] for arg in ('-f', name)]
+n_sha = ops.text(['git', 'rev-parse', 'HEAD'])
+R = '<new project name>'             # lower-case letters, digits, '-' or '_'; not N's project
+R_dir = ops.ROOT.parent / R          # R's own checkout; its name is its project name
+R_signing = Path('<new directory>')  # outside both checkouts and both backup roots
+R_custody = Path('<new file>')       # R's custody configuration, beside the private record
+backup_root = '<backup-directory>'   # the daily backup root (B's parent)
 ```
 
-`record['compose_files']` and `record['wrapping_secret_file']` are N-1's values,
-recorded at the upgrade (precondition step 1).
+- **P1. Validate B and the upgrade's evidence.**
 
-- **P1. Validate B** (above).
+  ```python
+  directory, manifest = ops.validate_backup(backup_set)   # checksums, archive entries, recorded images present
+  assert manifest['git_sha'] == previous_sha and manifest['git_dirty'] is False
+  assert manifest.get('emr') and manifest.get('role_catalog') is not None   # otherwise: Gaps, no live restore path
+  assert record.get('config_matched') is True and record['compose_files']   # precondition step 1
+  ```
+
 - **P2. Rehearse B.** Run `ops.rehearse(directory)`. Expected: `success: true`, as
   in step 4.
-- **P3. Configuration.**
+- **P3. N is addressable as it runs.**
+
+  ```python
+  api = json.loads(ops.text(['docker', 'inspect', 'kin-api']))[0]
+  labels = api['Config']['Labels']
+  assert Path(labels['com.docker.compose.project.working_dir']).resolve() == ops.ROOT
+  n_project = labels['com.docker.compose.project']
+  n_files = [Path(name).resolve().relative_to(ops.ROOT).as_posix()
+             for name in labels['com.docker.compose.project.config_files'].split(',')]
+  mount = [m['Source'] for m in api['Mounts'] if m['Destination'] == '/run/secrets/emr-signing-wrap-v1']
+  n_secret_file = mount[0] if mount else None
+  compose_n = compose_for(n_project, ops.ROOT, n_files, n_secret_file)
+  assert config_matches(compose_n, n_project)
+  ```
+
+  N's signing file is N's own mount source. It is taken from N, never from N-1's
+  record or R's files. The hash comparison covers every N container, including
+  the exited `kin-api-migrate` and `kin-emr-provision`. `compose_n` therefore
+  interpolates completely for `down`, and it restarts N unchanged on the way
+  back.
+- **P4. R is unused.**
+  - `re.fullmatch(r'[a-z0-9][a-z0-9_-]*', R)` must hold, with `R != n_project`.
+  - `R_dir` must not exist.
+  - Both commands must print nothing:
+    - `ops.text(['docker', 'ps', '-aq', '--filter', f'label=com.docker.compose.project={R}'])`
+    - `ops.text(['docker', 'volume', 'ls', '-q', '--filter', f'label=com.docker.compose.project={R}'])`
+  - `ops.run(['docker', 'volume', 'inspect', f'{R}_{v}'], check=False).returncode`
+    must be non-zero for each of `pg-db`, `emr-access`, `orthanc-db` and
+    `emr-state`.
+
+  Compose names a project's volumes `<project>_<volume>` (`docker-compose.yml`),
+  and it reuses an existing volume of that name. An old database or tablespace
+  volume would make R4's restore refuse the cluster, or start N-1 on foreign
+  data.
+- **P5. N-1's configuration, from B.**
   - Each recorded compose file must exist at N-1:
-    `ops.run(['git', 'cat-file', '-e', f'{previous_sha}:{Path(name).relative_to(ops.ROOT).as_posix()}'])`.
+    `ops.run(['git', 'cat-file', '-e', f'{previous_sha}:{name}'])` for each
+    `name` in `record['compose_files']`.
   - N-1's compose files must equal B's copies:
     `hashlib.sha256(ops.run(['git', 'show', f'{previous_sha}:{name}']).stdout).hexdigest() == manifest['sha256'][name]`
     for `docker-compose.yml` and `docker-compose.prod.yml`.
-  - Compare `ops.digest(ops.ROOT / '.env')` with `manifest['sha256']['.env']`.
-    If they differ (N changed its configuration), R uses B's own checksummed
-    copy `directory / '.env'`. B's Keycloak database, client secrets and
-    PostgreSQL roles were made with that copy. Record that `.env` differs; do not
-    record its values.
-- **P4. R is unused.** Both commands must print nothing:
-  - `ops.text(['docker', 'ps', '-aq', '--filter', f'label=com.docker.compose.project={R}'])`
-  - `ops.text(['docker', 'volume', 'ls', '-q', '--filter', f'label=com.docker.compose.project={R}'])`
+  - `'COMPOSE_PROJECT_NAME' not in ops.env_names(directory / '.env')`. Otherwise a
+    plain invocation in R's directory would name another project, possibly
+    N's. No tool rewrites a set's `.env` (Gaps).
+  - Signing follows B: `bool(record['wrapping_secret_file']) == ('wrapping_custody' in manifest)`.
+    When B has custody, `'c2-wrap-v1' in manifest['wrapping_custody']['files']`.
+    The overlay is used exactly when a custody configuration is installed (step
+    2, Enabling online approvals), and B records custody exactly when one was
+    installed (`capture_wrapping_custody`). A mismatch means that N-1 was not
+    configured by these procedures.
+- **P6. Stage R's checkout.**
 
-  Also, `ops.run(['docker', 'volume', 'inspect', f'{R}_{v}'], check=False).returncode`
-  must be non-zero for each of `pg-db`, `emr-access`, `orthanc-db` and
-  `emr-state`. Compose names a project's volumes `<project>_<volume>`
-  (`docker-compose.yml`), and it reuses an existing volume of that name. An old
-  database or tablespace volume would make R4's restore refuse the cluster, or
-  start N-1 on foreign data.
-- **P5. Signing.**
-  - If B's manifest has `wrapping_custody`: run
-    `ops.digest(Path(record['wrapping_secret_file']))`. It must equal
-    `manifest['wrapping_custody']['files']['c2-wrap-v1']['sha256']`. If the host
-    file is gone or differs, restore it from custody instead: run
-    `restore-wrapping` into a new directory (Recovery and rehearsal), then
-    `chown 1000:1000` and `chmod 0400` (Enabling online approvals). Use that path
-    as `record['wrapping_secret_file']` and in the custody configuration's
-    `files` entry (Nightly job).
-  - If B has no custody and no keys, and N-1 ran without the overlay, R runs
-    without it too. Record signing as not enabled.
-  - If R uses the overlay, run
-    `os.environ['KIN_EMR_WRAPPING_SECRET_FILE'] = record['wrapping_secret_file']`.
-    Compose stops on the overlay's missing variable, even for `down`.
-- **P6. Project pinning.** Every command below uses `compose_n` or `compose_r`,
-  each with `-p`. An inherited `COMPOSE_PROJECT_NAME` cannot redirect them, and
-  the session no longer carries one.
+  ```python
+  ops.run(['git', 'worktree', 'add', '--detach', str(R_dir), previous_sha])
+  shutil.copyfile(directory / '.env', R_dir / '.env')
+  (R_dir / '.env').chmod(0o600)
+  assert ops.text(['git', '-C', str(R_dir), 'rev-parse', 'HEAD']) == previous_sha
+  assert ops.digest(R_dir / '.env') == manifest['sha256']['.env']
+  ```
 
-If any preflight step fails, nothing has changed. Record
-`ROLLBACK_NOT_STARTED` with the cause, release the lock normally (not retained),
-and N keeps serving. Correct the cause and repeat the preflight. Only after the
-preflight passes:
+  R uses B's own `.env` unchanged. B's Keycloak database, client secrets and
+  PostgreSQL roles were made with it, and `restore_snapshot` sets the restored
+  role passwords from it (`snapshot_credentials`). N's `.env` is never touched.
+  Bind mounts such as `./config` and `./keycloak` come from R's directory at
+  N-1.
+- **P7. Stage R's signing files and custody configuration** (only when B has
+  custody):
+
+  ```python
+  r_secret_file = None
+  if 'wrapping_custody' in manifest or ops.WRAPPING_CUSTODY_CONFIG.is_file():
+      ops.run(['sudo', '-n', 'true'])   # R7 changes the custody configuration with the same non-interactive sudo
+  if 'wrapping_custody' in manifest:
+      restored = json.loads(ops.text([sys.executable, 'scripts/ops_backup.py', 'restore-wrapping', str(directory),
+                                      '--destination', str(R_signing)]))['files']
+      r_secret_file = restored['c2-wrap-v1']
+      Path(r_secret_file).chmod(0o400)
+      ops.run(['sudo', '-n', 'chown', '1000:1000', r_secret_file])   # the API's node user (Enabling online approvals)
+      ops.write_json(R_custody, {'backup_root': str(Path(manifest['wrapping_custody']['directory']).parent),
+                                 'files': restored})
+  ```
+
+  `restore-wrapping` checks every custody file against B's sha256 before it
+  creates the directory, and it prints only the ID → path mapping. R's files are
+  therefore byte-equal to the copies that P2 just unwrapped B's keys with. The
+  custody configuration currently installed (N's) and N's own signing file are
+  not changed. `backup_root` is B's custody root, so R's sets and B rotate under
+  the same root.
+- **P8. R's command renders.**
+
+  ```python
+  compose_r = compose_for(R, R_dir, record['compose_files'], r_secret_file)
+  ops.run(compose_r + ['config', '--quiet'])
+  r_tool = [sys.executable, str(R_dir / 'scripts' / 'ops_backup.py')]
+  assert '--no-rotate' in ops.text(clean_env() + r_tool + ['backup', '--help'])   # R7 runs N-1's own tool
+  record.update(n_project=n_project, n_files=n_files, n_secret_file=n_secret_file, rollback_project=R,
+                rollback_dir=str(R_dir), rollback_files=record['compose_files'], rollback_secret_file=r_secret_file,
+                rollback_custody=str(R_custody) if r_secret_file else None, rollback_signing=str(R_signing))
+  ops.write_json(record_path, record)
+  ```
+
+  `config --quiet` fails on a missing variable or file and prints nothing. The
+  help check confirms, before N stops, that N-1's own backup tool takes the
+  options R7 uses.
+
+If any preflight step fails, N has not changed. Record `ROLLBACK_NOT_STARTED`
+with the cause and the paths that P6 and P7 created, then release the lock
+normally (not retained); N keeps serving. Before a repeat with the same R, inspect
+and remove only what this preflight created: run
+`git worktree remove --force <R_dir>`, delete the staged signing directory (B's
+custody keeps the original) and delete `R_custody`. Otherwise choose a new R.
+Only after the preflight passes:
 
 ```python
 lease.retain()
-record.update(status='ROLLING_BACK', rollback_project=R, n_project=n_project, n_compose_files=n_files)
+record['status'] = 'ROLLING_BACK'
 ops.write_json(record_path, record)
 ```
 
-- **R1. Preserve N.** If N's containers run, call
-  `N_set = ops.backup('<backup-directory>')`. Keep the printed set even when the
-  call raises after `"complete": true` (a readiness failure of N). Hold that set
-  with `ops.write_json(N_set / ops.HOLD_FILE, {'reason': 'rolled-back release', 'release': '<N SHA>'})`.
-  Beside N's volumes, it is the only copy of what N wrote after B. Its hold has
-  no end date: removing it is a separate retention decision.
+- **R1. Preserve N while it serves.** Bind N's set from the receipt that
+  `backup()` prints, not from its return value. `backup()` prints the receipt
+  even when it then raises for a readiness failure after `"complete": true`:
 
-  If N could not be backed up, copy the current `.env` (N's) into the private
-  record's directory with mode 0600. Then run `ops.run(compose_n + ['down'])`.
-  Do not pass `-v`: N's named volumes stay under N's Compose project. Record
+  ```python
+  printed, n_error = io.StringIO(), None
+  try:
+      with contextlib.redirect_stdout(printed):
+          ops.backup(backup_root)
+  except Exception as error:
+      n_error = f'{type(error).__name__}: {error}'
+  lines = printed.getvalue().splitlines()
+  receipt = json.loads(lines[-1]) if lines else None
+  print(receipt, n_error)
+  if receipt is None or receipt['complete'] is not True:
+      raise RuntimeError('N was not preserved; N is not stopped (see below)')
+  N_set = Path(receipt['backup'])
+  _, n_manifest = ops.validate_backup(N_set)
+  assert n_manifest['git_sha'] == n_sha
+  ops.write_json(N_set / ops.HOLD_FILE, {'reason': 'rolled-back release', 'release': n_sha})
+  record.update(n_set=str(N_set), n_backup_receipt=receipt, n_backup_error=n_error)
+  ops.write_json(record_path, record)
+  ops.rehearse(N_set)
+  ```
+
+  N's set is taken with N's own custody configuration, which nothing has
+  changed. Its rehearsal unwraps N's stored keys with that custody copy, so the
+  set is a usable copy of N's keys. Beside N's volumes, it is the only copy of
+  what N wrote after B. Its hold has no end date: removing it is a separate
+  retention decision.
+
+  When `kin-db` of N is not running, no backup is possible: `backup()` stops
+  before writing anything (`PostgreSQL must be running`). Record
+  `n_set = None` with that cause and continue. N's volumes are then the only
+  copy. Any other failure in R1 (no complete receipt, a validation, or a failed
+  rehearsal) stops here. Nothing has been switched: record `ROLLBACK_NOT_STARTED`
+  with the cause, keep any held set, set `lease.retained = False` and release the
+  lock. N keeps its containers; `backup()` resumes the writers it stopped.
+- **R2. Stop N.** Run `ops.run(compose_n + ['down'])`. Do not pass `-v`: N's named
+  volumes stay under N's Compose project. Record
   `ops.text(['docker', 'volume', 'ls', '--filter', f'label=com.docker.compose.project={n_project}'])`.
-- **R2. Check out N-1 and set its configuration.** Run
-  `ops.run(['git', 'checkout', '--detach', previous_sha])`. If P3 found `.env`
-  different, run `shutil.copyfile(directory / '.env', ops.ROOT / '.env')` and
-  `(ops.ROOT / '.env').chmod(0o600)`.
-
-  Then add `COMPOSE_PROJECT_NAME=<R>` to `.env`, or replace an existing line, so
-  that a later plain `docker compose` in the checkout also addresses R. Record R
-  and the site's new compose list (`compose_r`) in the release record. Future
-  upgrades read both from R's containers (precondition step 1).
-
-  Container names are fixed, so the nightly `backup` follows R unchanged.
-- **R3. Start the empty cluster alone:**
-  `ops.run(compose_r + ['up', '-d', '--wait', 'db'])`. Its init creates the empty
-  `kin` and `keycloak` databases and the tablespace directory.
+  N's checkout, `.env`, signing file and custody configuration are unchanged.
+- **R3. Start R's empty cluster alone:**
+  `ops.run(compose_r + ['up', '-d', '--wait', 'db'], timeout=install_timeout)`. Its
+  init creates the empty `kin` and `keycloak` databases and the tablespace
+  directory.
 - **R4. Restore PostgreSQL** with the daily set's own restore, the one `rehearse`
   uses:
 
@@ -423,7 +624,7 @@ ops.write_json(record_path, record)
   `outside` = `[]`, and the last migration equal to the last folder of
   `git ls-tree --name-only <N-1> api/prisma/migrations/`.
 - **R5. Restore Orthanc and the EMR state into R's new volumes.** First build
-  N-1 and create R's containers without starting them:
+  N-1 from R's directory and create R's containers without starting them:
   `ops.run(compose_r + ['up', '--no-start', '--build'], timeout=install_timeout)`.
   Read the volume names from the mounts, as `backup()` does:
   - `orthanc_volume` is the `kin-orthanc` mount at `/var/lib/orthanc/db`;
@@ -444,7 +645,7 @@ ops.write_json(record_path, record)
 
   Expected: `{"integrity": "ok", "attachments": n, ...}`, with `n` equal to B's
   rehearsal receipt.
-- **R6. Start N-1 without the entry, expire, then open.**
+- **R6. Start N-1 without the entry, let its API recover, expire, then open.**
   1. Run `ops.run(compose_r + ['up', '-d', 'api'], timeout=install_timeout)`. This
      starts `db`, `emr-provision`, `api-migrate`, `keycloak`, `orthanc` and `api`
      through `depends_on`. It does not start `proxy`, which is the only business
@@ -454,11 +655,40 @@ ops.write_json(record_path, record)
      `ops.text(['docker', 'inspect', '--format', '{{.State.ExitCode}}', name])`.
      The migrate log (`ops.text(compose_r + ['logs', 'api-migrate'])`) shows
      `No pending migrations to apply.`, because the restored history is N-1's.
-  3. Run the restored-copy expiry sweep in the same order as `rehearse_held`: the
-     ledger is ready, then `restored_emr_expiry`.
+  3. Wait until the running API has finished its own recovery. `api/src/main.ts`
+     awaits `runtime.start()` before `app.listen(3000)`, and `start()` runs
+     `recoverPending()` and then the failure-journal replay
+     (`api/src/emr-runtime/application.ts`). Any HTTP answer on the API's own
+     port therefore comes after both:
 
      ```python
-     ops.resumed_ledger_ready(120)   # backup()'s default readiness bound
+     listening = ("require('node:http').get('http://127.0.0.1:3000/api/health',"
+                  "r=>{r.resume();process.stdout.write('LISTENING');}).on('error',()=>{process.exitCode=1;})")
+     api_timeout = 134   # step 3's installation readiness bound
+     started = time.monotonic()
+     deadline = started + api_timeout
+     while True:
+         remaining = deadline - time.monotonic()
+         if remaining <= 0:
+             raise RuntimeError(f'R API did not finish recovery within {api_timeout}s; keep the proxy closed and inspect its log')
+         try:
+             if ops.run(['docker', 'exec', 'kin-api', 'node', '-e', listening], timeout=min(30, remaining),
+                        check=False).stdout == b'LISTENING':
+                 break
+         except subprocess.TimeoutExpired:
+             pass
+         time.sleep(min(3, max(0, deadline - time.monotonic())))
+     record['api_recovered_seconds'] = round(time.monotonic() - started, 3)
+     ```
+
+     A failed start makes the API exit before it listens, so a restart loop
+     never answers and the bound decides. Record the elapsed time. Recheck the
+     bound for a larger restored failure spool; it is not a clinical performance
+     requirement.
+  4. Only then run the restored-copy expiry sweep, as `rehearse_held` runs it
+     after its own recovery check:
+
+     ```python
      sweep = ops.restored_emr_expiry('kin-db', 'kin')
      assert sweep.get('ran') is True   # rehearse: "Restored expiry sweep did not run before business use"
      record['expiry_sweep'] = sweep
@@ -468,62 +698,113 @@ ops.write_json(record_path, record)
      The sweep removes access and failure rows past their period, unless a hold
      or an open duty request keeps them. It keeps history rows that have no
      ending evidence and counts them (Recovery and rehearsal). The API's own
-     startup does not run it.
-  4. Open the entry: `ops.run(compose_r + ['up', '-d'], timeout=install_timeout)`.
-- **R7. Verify as in steps 3–4.**
-  - Run the bounded HTTPS readiness check and the synthetic save/reopen and
-    signing checks above.
-  - For check 1, use the G3 run of N-1.
-  - For check 3, expect `n` = B's `emr_signing.private_key` count.
-  - Then take R's first populated backup and `rehearse` it. Run the custody
-    commands when its manifest has `wrapping_custody`; otherwise record them as
-    not applicable.
+     startup does not run it. Nothing replays after it, because the replay ran
+     once, before `listen`.
+  5. Open the entry: `ops.run(compose_r + ['up', '-d'], timeout=install_timeout)`.
+- **R7. Activate R's custody configuration, verify, and hand over.**
+  1. Keep N's custody configuration and install R's. After R2, nothing reads the
+     configuration: N's nightly job is held out by this session's lock.
+
+     ```python
+     saved_n_custody = record_path.parent / 'n-wrapping-custody.json'
+     had_n_custody = ops.WRAPPING_CUSTODY_CONFIG.is_file()
+     if had_n_custody:
+         shutil.copyfile(ops.WRAPPING_CUSTODY_CONFIG, saved_n_custody)
+         saved_n_custody.chmod(0o600)
+     if r_secret_file:
+         ops.run(['sudo', '-n', 'install', '-o', str(os.getuid()), '-g', str(os.getgid()), '-m', '0600',
+                  str(R_custody), str(ops.WRAPPING_CUSTODY_CONFIG)])
+     elif had_n_custody:   # N enabled approvals after B; R runs as B did, without them
+         ops.run(['sudo', '-n', 'rm', str(ops.WRAPPING_CUSTODY_CONFIG)])
+     record.update(custody_activated=True, had_n_custody=had_n_custody,
+                   saved_n_custody=str(saved_n_custody) if had_n_custody else None)
+     ops.write_json(record_path, record)
+     ```
+
+  2. Run the bounded HTTPS readiness check and the synthetic save/reopen and
+     signing checks above. For check 1, use the G3 run of N-1. For check 3, set
+     `secret_file = record['rollback_secret_file']` and expect `n` = B's
+     `emr_signing.private_key` count.
+  3. Take R's first populated backup with R's own tool, the one the nightly job
+     will run, and rehearse it:
+
+     ```python
+     result = ops.run(clean_env() + r_tool + ['backup', '--output', backup_root, '--no-rotate'],
+                      timeout=backup_timeout, check=False)
+     r_receipt = json.loads(result.stdout.decode('utf-8').splitlines()[-1])
+     assert result.returncode == 0 and r_receipt['complete'] is True
+     R_set = Path(r_receipt['backup'])
+     print(ops.text(clean_env() + r_tool + ['rehearse', str(R_set)], timeout=backup_timeout))
+     ```
+
+     `backup_timeout` is the site's backup hang timeout, set from the backup
+     elapsed time recorded at installation (below step 4).
+     `backup()` refuses containers whose Compose working directory is not its
+     own checkout, so only R's tool can back up R. The rehearsal must show
+     `success: true` and check 2's `wrapping_custody` result. With custody, it
+     unwraps every restored key with the copy that R's new custody configuration
+     just captured.
+  4. Point the host's jobs that name the site checkout at `R_dir`: the nightly
+     backup command (Nightly job), and certbot's webroot `certbot/www`
+     (`docker-compose.prod.yml` mounts `./certbot/www`). From N's checkout the
+     nightly backup now fails on purpose with `Container configuration belongs
+     to a different repository`. Record the changed job definitions.
 
   Only then record `status=ROLLED_BACK` with the evidence paths, and release the
-  lock as in step 4.
+  lock as in step 4. R's directory is the site checkout from now on. A later
+  upgrade starts there (precondition step 1 reads R's labels).
 
-**Failure after R1 (N stopped).** Keep the lock and record `NEEDS_ATTENTION`.
+**Failure after R2 (N stopped).** Keep the lock and record `NEEDS_ATTENTION`.
 Never remove a volume of N or R without inspection. B and N's set stay held.
 Then take one of two ways:
 - **Forward with a new project.** Use this from R3 onwards. A partly restored R is
   no longer a fresh cluster, and `restore_snapshot` refuses it.
-  1. Run `ops.run(compose_r + ['down'])` without `-v`; R's volumes stay for
-     inspection.
-  2. Choose R′, repeat P4 for it, and build `compose_r` with `-p R′`.
-  3. Set `.env`'s `COMPOSE_PROJECT_NAME`, then continue from R3.
+  1. Run `ops.run(compose_r + ['down'])` without `-v`; R's volumes and directory
+     stay for inspection.
+  2. Choose R′. Repeat P4 and P6–P8 for R′ (new directory, staged files and
+     `compose_r`).
+  3. Continue from R3.
 
   For a failure in R6 or R7 whose cause is outside the data (configuration,
   readiness), correct it and repeat that step on R.
 - **Back to N.**
   1. Run `ops.run(compose_r + ['down'])` without `-v`.
-  2. Run `ops.run(['git', 'checkout', '--detach', '<N SHA>'])`.
-  3. Put back N's `.env`, from N's set or the saved copy.
-  4. Set `KIN_EMR_WRAPPING_SECRET_FILE` to N's mount source when N used the
-     overlay.
-  5. Run `ops.run(compose_n + ['up', '-d'], timeout=install_timeout)`.
-
-  N's volumes are unchanged, because R1's `down` kept them. Then run step 3's
-  readiness check and check 3 before reopening. Record `ROLLBACK_ABANDONED`.
-
-A host keeps one serving stack: the container names are fixed (`kin-db`, `kin-api`,
-…), so N and R cannot run at the same time. This section does not claim that a
-rollback was executed by this documentation change.
+  2. If R7 had installed or removed the custody configuration, put N's back with
+     `ops.run(['sudo', '-n', 'install', '-o', str(os.getuid()), '-g', str(os.getgid()), '-m', '0600', str(saved_n_custody), str(ops.WRAPPING_CUSTODY_CONFIG)])`.
+     When N had none, remove R's instead (`sudo -n rm`). If R7 had repointed the
+     host's jobs, point them back at N's checkout.
+  3. Run `ops.run(compose_n + ['up', '-d'], timeout=install_timeout)`. N's
+     checkout, `.env`, compose files and signing file were never changed, and P3
+     proved that `compose_n` renders N's configuration. R2 kept N's volumes.
+  4. Run step 3's readiness check and check 3 with
+     `secret_file = record['n_secret_file']`, then record
+     `ROLLBACK_ABANDONED` and release the lock.
 
 **Gaps (no existing tool; not invented here):**
 - There is no single restore command for a daily set into a live site. R3–R6
   compose the existing `ops_backup` functions that `rehearse` runs in its isolated
-  copy. Until a rehearsal runs this section, these remain unverified:
+  copy. Until a host rehearsal runs this section, these remain unverified:
   - whether `up --no-start --build` leaves the running `db` as it is;
   - whether a live Orthanc and API accept the file ownership that the tar
     extraction leaves;
   - whether R's `proxy` can create the fixed-name `kin-workflow` network
     (`docker-compose.prod.yml`) while the separately managed workflow receiver
     stays attached to N's network;
-  - whether the Compose label `com.docker.compose.project.config_files` names the
-    files exactly as the site invoked them (no tool in the repository reads it
-    yet).
+  - whether `docker compose config --hash '*'` equals the creating Compose's
+    `com.docker.compose.config-hash` labels for every N container. A difference
+    fails P3 or precondition step 1, before anything changes;
+  - whether `clean_env` keeps everything the host's Docker client needs. A
+    rootless daemon reached through a variable not in the list fails P3, before
+    anything changes.
 
-  A failure in any of these shows at R5–R7.
+  A failure in the first three shows at R5–R7.
+- No tool repoints the host's jobs that name the checkout path (the nightly
+  backup and certbot's webroot). They are host-managed; R7 step 4 records the
+  change.
+- No tool rewrites a set's `.env`. A B whose `.env` names `COMPOSE_PROJECT_NAME`
+  fails P5 and needs a separate decision.
+- R7 and the way back to N write `/etc/kin-deploy/emr-wrapping-custody.json` with
+  `sudo -n install`. P7 checks non-interactive sudo before anything changes.
 - No tool brings data written on N after B into the rolled-back N-1 site.
 - A daily set without `role_catalog` (made before D23) has no live restore path.
   `restore_snapshot` needs that catalog. The older sets' `pg_dumpall` role replay
@@ -555,13 +836,26 @@ installation operator. This runbook does not claim that any site is configured.
 the host, keep one raw 32-byte file per wrapping ID (the file the custody
 configuration's `files` entry for `c2-wrap-v1` names), readable by the API
 container user only (`node`, uid 1000 in the production image: `chown 1000:1000`,
-`chmod 0400`). Merge the overlay after the stack's own files with
-`KIN_EMR_WRAPPING_SECRET_FILE` set to that absolute path, for example:
+`chmod 0400`). Install the custody configuration (Nightly job) first, so that the
+overlay and the nightly custody copy name the same file.
 
-```sh
-KIN_EMR_WRAPPING_SECRET_FILE=/srv/kin-signing-secrets/emr-signing-wrap-v1 \
-  docker compose -f docker-compose.yml -f docker-compose.prod.yml -f emr/deploy/docker-compose.signing.yml up -d api
+At installation, step 2 adds the overlay itself. On a running stack, use one
+locked operator session in the site checkout, as for steps 2–4. Address the stack
+as in upgrade step 1, then merge the overlay after the stack's own files, record
+the new list and file, and run check 3:
+
+```python
+secret_file = json.loads(ops.WRAPPING_CUSTODY_CONFIG.read_text(encoding='utf-8'))['files']['c2-wrap-v1']
+files = record['compose_files'] + [SIGNING_OVERLAY]
+compose = compose_for(record['compose_project'], ops.ROOT, files, secret_file)
+ops.run(compose + ['up', '-d', 'api'], timeout=install_timeout)
+record.update(compose_files=files, wrapping_secret_file=secret_file)
+ops.write_json(record_path, record)
 ```
+
+The overlay's own header shows the bare shell form. Use `compose_for` on a site
+instead: an exported variable would otherwise override `.env` (Site Compose
+command).
 
 A missing variable or file stops Compose; nothing creates replacement bytes. A
 stack started without the overlay still serves its other work and answers each
@@ -635,9 +929,10 @@ python3 scripts/ops_backup.py rehearse /srv/kin-backups/SET --wrapping-source /m
 
 The first command checks the custody files against the snapshot and prints only
 the restored ID/path mapping. It reads every custody file before creating the
-destination, so a missing or changed file leaves no partial directory. Point
-`KIN_EMR_WRAPPING_SECRET_FILE` of the signing overlay (above) at the restored
-`c2-wrap-v1` file. The command refuses to overwrite an existing destination.
+destination, so a missing or changed file leaves no partial directory. Start the
+stack with the restored `c2-wrap-v1` file as `compose_for`'s `secret_file`, and
+name the restored files in the custody configuration, as rollback P7 and R7 do.
+The command refuses to overwrite an existing destination.
 
 Rehearsal restores its own temporary custody copy using that same locator, checks
 all restored table counts and calls the existing product key-unwrapping function
