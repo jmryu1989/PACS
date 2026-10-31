@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import json
 import ssl
-import subprocess
 import time
 import unittest
 import uuid
@@ -45,8 +44,8 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import test_worklist as base
-from invariants_live import ROOT, psql
-from test_image_route import FRAME_ACCEPT, ct_series, quoted
+from invariants_live import psql
+from test_image_route import FRAME_ACCEPT, asset_catalog_deployed, ct_series, quoted
 
 DICOM = 'multipart/related; type="application/dicom"'
 FRAME = "/dicom-web/studies/{study}/series/{series}/instances/{sop}/frames/{frame}"
@@ -121,16 +120,6 @@ FAILING_CELLS = [
 # The original-download archive: image bytes under the download's own record, exercised by (d).
 ARCHIVE = Cell("original-download archive", "/api/studies/{study}/original-downloads/{operation}/archive", "*/*",
                (L_ARCHIVE,) * 2, ("download archive",) * 2)
-
-
-def asset_catalog_deployed():
-    """Whether the running stack was deployed with the viewer/decoder asset catalog (KIN_EMR_IMAGE_ASSET_CATALOG, the
-    setting the api and the proxy share): with it E answers the viewer's frames, without it the frame reader does."""
-    probe = subprocess.run(["docker", "compose", "exec", "-T", "api", "printenv", "KIN_EMR_IMAGE_ASSET_CATALOG"], cwd=ROOT,
-                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
-    if probe.returncode not in (0, 1):
-        raise RuntimeError("reading the api's asset catalog setting failed: " + probe.stderr[-500:])
-    return bool(probe.stdout.strip())
 
 
 def entries_of(record_id, *, image_only=False):
