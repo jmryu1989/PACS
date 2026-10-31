@@ -4965,6 +4965,16 @@ function kinCreateMammographyHanging() {
     const observer = new MutationObserver(renderLabels);
     observer.observe(document.body, { childList: true, subtree: true });
     const subscription = services.viewportGridService.subscribe(services.viewportGridService.EVENTS.GRID_STATE_CHANGED, renderLabels);
+    // OHIF lays out a protocol grid with no active viewport when no cell receives an image, and a
+    // thumbnail double-click then has no viewport to fill and blanks the viewer. Keep a cell active.
+    function keepActiveCell() {
+      if (!live() || hp.getState()?.protocolId !== protocolId) return;
+      const grid = services.viewportGridService, { viewports, activeViewportId } = grid.getState();
+      if (!viewports.size || viewports.has(activeViewportId)) return;
+      const [first] = [...viewports.values()].sort((a, b) => a.y - b.y || a.x - b.x);
+      grid.setActiveViewportId(first.viewportId);
+    }
+    const activeSubscription = services.viewportGridService.subscribe(services.viewportGridService.EVENTS.GRID_STATE_CHANGED, keepActiveCell);
     const imageEvent = window.cornerstone.Enums.Events.STACK_NEW_IMAGE;
     const newStackEvent = window.cornerstone.Enums.Events.VIEWPORT_NEW_IMAGE_SET;
     document.addEventListener(imageEvent, orient, true);
@@ -4974,7 +4984,7 @@ function kinCreateMammographyHanging() {
       if (series.metadata === metadata) series.metadata = retrieve;
       if (handler.getDisplaySetsFromSeries === createDisplaySets) handler.getDisplaySetsFromSeries = nativeDisplaySets;
       if (hp.run === wrappedRun) hp.run = run;
-      observer.disconnect(); subscription.unsubscribe(); panel?.remove();
+      observer.disconnect(); subscription.unsubscribe(); activeSubscription.unsubscribe(); panel?.remove();
       document.removeEventListener(imageEvent, orient, true);
       document.removeEventListener(newStackEvent, orient, true);
       document.querySelectorAll('.kin-mg-slot').forEach(el => el.remove());
