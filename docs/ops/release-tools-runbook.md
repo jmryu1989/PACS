@@ -171,10 +171,16 @@ def compose_for(project, directory, files, secret_file):
             + [arg for name in files for arg in ('-f', str(directory / name))])
 
 def config_matches(compose, project):
-    """Every existing container of the project carries the configuration hash this command renders."""
+    """The cleaned environment reaches this session's daemon, and every existing container of the project carries
+    the configuration hash this command renders."""
+    probe = ['docker', 'info', '--format', '{{.ID}}']
+    daemon = ops.text(probe)
+    if not daemon or ops.text(clean_env() + probe) != daemon:
+        return False
     rendered = dict(line.split(' ', 1) for line in ops.text(compose + ['config', '--hash', '*']).splitlines())
-    ids = ops.text(['docker', 'ps', '-aq', '--filter', f'label=com.docker.compose.project={project}']).split()
-    labels = [item['Config']['Labels'] for item in json.loads(ops.text(['docker', 'inspect', *ids]))] if ids else []
+    ids = ops.text(clean_env() + ['docker', 'ps', '-aq', '--filter', f'label=com.docker.compose.project={project}']).split()
+    labels = ([item['Config']['Labels'] for item in json.loads(ops.text(clean_env() + ['docker', 'inspect', *ids]))]
+              if ids else [])
     return bool(labels) and all(rendered.get(label['com.docker.compose.service']) == label['com.docker.compose.config-hash']
                                 for label in labels)
 ```
@@ -186,6 +192,12 @@ therefore means the command reproduces the running configuration, including
 interpolated credentials. The hash leaves out build settings. A different
 Compose version can compute it differently. The observed `docker compose version`
 is compared with the release record before any of this runs.
+
+Every Docker read in `config_matches` runs under `clean_env`, as Compose will.
+It first compares the daemon ID that `docker info` reports under `clean_env` with
+the one this session reaches. A cleaned environment that reaches no daemon fails
+the command. One that reaches another daemon, or reports an empty ID, returns
+`False`. Either way the check fails before anything changes.
 
 ## Synthetic save/reopen and signing checks
 
@@ -507,7 +519,10 @@ backup_root = '<backup-directory>'   # the daily backup root (B's parent)
   PostgreSQL roles were made with it, and `restore_snapshot` sets the restored
   role passwords from it (`snapshot_credentials`). N's `.env` is never touched.
   Bind mounts such as `./config` and `./keycloak` come from R's directory at
-  N-1.
+  N-1. Identical bytes do not yet mean identical passwords:
+  `snapshot_credentials` only splits each line at `=` and strips surrounding
+  quotes. It does not apply Compose's `.env` rules (interpolation, inline
+  comments, escapes). P8 compares both readings.
 - **P7. Stage R's signing files and custody configuration** (only when B has
   custody):
 
@@ -518,9 +533,16 @@ backup_root = '<backup-directory>'   # the daily backup root (B's parent)
   if 'wrapping_custody' in manifest:
       restored = json.loads(ops.text([sys.executable, 'scripts/ops_backup.py', 'restore-wrapping', str(directory),
                                       '--destination', str(R_signing)]))['files']
+      sums = {key: entry['sha256'] for key, entry in manifest['wrapping_custody']['files'].items()}
       r_secret_file = restored['c2-wrap-v1']
-      Path(r_secret_file).chmod(0o400)
-      ops.run(['sudo', '-n', 'chown', '1000:1000', r_secret_file])   # the API's node user (Enabling online approvals)
+      Path(r_secret_file).chmod(0o440)
+      ops.run(['sudo', '-n', 'chown', f'1000:{os.getgid()}', r_secret_file])   # Enabling online approvals
+      # R7's backup reads every file as this account; R's API reads the mounted one as the image's node user.
+      assert all(ops.digest(Path(path)) == sums[key] for key, path in restored.items())
+      read = "process.stdout.write(String(require('node:fs').readFileSync('/run/secrets/emr-signing-wrap-v1').length))"
+      assert ops.temporary_run(['--network', 'none', '--read-only', '--mount',
+                                f'type=bind,source={r_secret_file},target=/run/secrets/emr-signing-wrap-v1,readonly',
+                                '--entrypoint', 'node', manifest['running_images']['kin-api']['id'], '-e', read]) == '32'
       ops.write_json(R_custody, {'backup_root': str(Path(manifest['wrapping_custody']['directory']).parent),
                                  'files': restored})
   ```
@@ -531,11 +553,34 @@ backup_root = '<backup-directory>'   # the daily backup root (B's parent)
   custody configuration currently installed (N's) and N's own signing file are
   not changed. `backup_root` is B's custody root, so R's sets and B rotate under
   the same root.
+
+  R's `c2-wrap-v1` file gets the arrangement of Enabling online approvals: owner
+  uid 1000 (the API's `node` user), group = this session's group, mode 0440.
+  This session runs as the backup account (see the precondition), and R7's backup
+  and the nightly job read the file as that account. Both readers are checked
+  before N stops:
+  - the digests read the files as this account;
+  - a temporary container of N-1's own API image (B's `running_images`) reads the
+    mapped file as the image's user, at the overlay's mount point. It prints only
+    the length.
+
+  A file that either reader cannot open, including one whose ownership a
+  user-namespace or rootless daemon maps differently, fails here.
 - **P8. R's command renders.**
 
   ```python
   compose_r = compose_for(R, R_dir, record['compose_files'], r_secret_file)
   ops.run(compose_r + ['config', '--quiet'])
+  # R4 sets the role passwords from snapshot_credentials; R6's services get Compose's own reading. Never printed.
+  services = json.loads(ops.text(compose_r + ['config', '--format', 'json']))['services']
+  delivered = {'kin': services['db']['environment']['POSTGRES_PASSWORD'],
+               'kin_runtime': services['emr-provision']['environment']['KIN_EMR_RUNTIME_PASSWORD']}
+  verifiers = manifest['role_catalog']['login_verifiers']
+  restore_input = ops.snapshot_credentials(directory)
+  credentials_equal = set(verifiers) <= delivered.keys() and all(restore_input[role] == delivered[role]
+                                                                 for role in verifiers)
+  del services, delivered, restore_input
+  assert credentials_equal
   r_tool = [sys.executable, str(R_dir / 'scripts' / 'ops_backup.py')]
   assert '--no-rotate' in ops.text(clean_env() + r_tool + ['backup', '--help'])   # R7 runs N-1's own tool
   record.update(n_project=n_project, n_files=n_files, n_secret_file=n_secret_file, rollback_project=R,
@@ -548,19 +593,47 @@ backup_root = '<backup-directory>'   # the daily backup root (B's parent)
   help check confirms, before N stops, that N-1's own backup tool takes the
   options R7 uses.
 
+  The credential check compares, in memory, two readings of every login role
+  that B's catalog restores with a password (`login_verifiers`):
+  - the value R4 will set (`snapshot_credentials` of B's `.env`);
+  - the value Compose delivers to R's services. `POSTGRES_PASSWORD` reaches
+    `db`, Keycloak and `api-migrate`, and `KIN_EMR_RUNTIME_PASSWORD` reaches
+    `emr-provision` and the API's `DATABASE_URL`.
+
+  Only the outcome is kept. A value that the two readings parse differently (an
+  inline comment, `${...}` interpolation, an escape) fails here, while N still
+  serves. So does a login role whose password Compose passes to no service:
+  that is an input this check cannot compare. No tool rewrites a set's `.env`
+  (Gaps). P2's rehearsal does not show this, because its restored copy accepts
+  trusted connections.
+
 If any preflight step fails, N has not changed. Record `ROLLBACK_NOT_STARTED`
 with the cause and the paths that P6 and P7 created, then release the lock
 normally (not retained); N keeps serving. Before a repeat with the same R, inspect
 and remove only what this preflight created: run
 `git worktree remove --force <R_dir>`, delete the staged signing directory (B's
 custody keeps the original) and delete `R_custody`. Otherwise choose a new R.
-Only after the preflight passes:
+Only after the preflight passes, save N's custody configuration once, and only
+then switch the record:
 
 ```python
+saved_n_custody = record_path.parent / f'n-wrapping-custody-{R}.json'
+had_n_custody = ops.WRAPPING_CUSTODY_CONFIG.is_file()
+if had_n_custody:
+    descriptor = os.open(saved_n_custody, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)   # never replaced
+    with os.fdopen(descriptor, 'wb') as copy:
+        copy.write(ops.WRAPPING_CUSTODY_CONFIG.read_bytes())
 lease.retain()
-record['status'] = 'ROLLING_BACK'
+record.update(status='ROLLING_BACK', had_n_custody=had_n_custody,
+              saved_n_custody=str(saved_n_custody) if had_n_custody else None,
+              n_custody_sha256=ops.digest(saved_n_custody) if had_n_custody else None)
 ops.write_json(record_path, record)
 ```
+
+The installed configuration is still N's here: preflight did not touch it. The
+copy, its existence flag and its digest are recorded once for this rollback.
+R7 and the way back to N only read them, so a repeated R7, or a forward attempt
+with R′, cannot replace N's configuration with R's or lose the flag.
 
 - **R1. Preserve N while it serves.** Bind N's set from the receipt that
   `backup()` prints, not from its return value. `backup()` prints the receipt
@@ -599,7 +672,9 @@ ops.write_json(record_path, record)
   copy. Any other failure in R1 (no complete receipt, a validation, or a failed
   rehearsal) stops here. Nothing has been switched: record `ROLLBACK_NOT_STARTED`
   with the cause, keep any held set, set `lease.retained = False` and release the
-  lock. N keeps its containers; `backup()` resumes the writers it stopped.
+  lock. N keeps its containers; `backup()` resumes the writers it stopped. The
+  saved custody copy stays with the record. Before a repeat with the same R,
+  delete it together with what preflight created.
 - **R2. Stop N.** Run `ops.run(compose_n + ['down'])`. Do not pass `-v`: N's named
   volumes stay under N's Compose project. Record
   `ops.text(['docker', 'volume', 'ls', '--filter', f'label=com.docker.compose.project={n_project}'])`.
@@ -702,24 +777,22 @@ ops.write_json(record_path, record)
      once, before `listen`.
   5. Open the entry: `ops.run(compose_r + ['up', '-d'], timeout=install_timeout)`.
 - **R7. Activate R's custody configuration, verify, and hand over.**
-  1. Keep N's custody configuration and install R's. After R2, nothing reads the
-     configuration: N's nightly job is held out by this session's lock.
+  1. Install R's custody configuration. N's was saved before R1. After R2,
+     nothing reads the configuration: N's nightly job is held out by this
+     session's lock.
 
      ```python
-     saved_n_custody = record_path.parent / 'n-wrapping-custody.json'
-     had_n_custody = ops.WRAPPING_CUSTODY_CONFIG.is_file()
-     if had_n_custody:
-         shutil.copyfile(ops.WRAPPING_CUSTODY_CONFIG, saved_n_custody)
-         saved_n_custody.chmod(0o600)
      if r_secret_file:
          ops.run(['sudo', '-n', 'install', '-o', str(os.getuid()), '-g', str(os.getgid()), '-m', '0600',
                   str(R_custody), str(ops.WRAPPING_CUSTODY_CONFIG)])
-     elif had_n_custody:   # N enabled approvals after B; R runs as B did, without them
-         ops.run(['sudo', '-n', 'rm', str(ops.WRAPPING_CUSTODY_CONFIG)])
-     record.update(custody_activated=True, had_n_custody=had_n_custody,
-                   saved_n_custody=str(saved_n_custody) if had_n_custody else None)
+     elif record['had_n_custody']:   # N enabled approvals after B; R runs as B did, without them
+         ops.run(['sudo', '-n', 'rm', '-f', str(ops.WRAPPING_CUSTODY_CONFIG)])
+     record['custody_activated'] = True
      ops.write_json(record_path, record)
      ```
+
+     The step reads and writes no copy of N's configuration, so it can be
+     repeated.
 
   2. Run the bounded HTTPS readiness check and the synthetic save/reopen and
      signing checks above. For check 1, use the G3 run of N-1. For check 3, set
@@ -762,17 +835,29 @@ Then take one of two ways:
   1. Run `ops.run(compose_r + ['down'])` without `-v`; R's volumes and directory
      stay for inspection.
   2. Choose R′. Repeat P4 and P6–P8 for R′ (new directory, staged files and
-     `compose_r`).
+     `compose_r`). N's saved custody copy and `had_n_custody` stay as recorded;
+     do not repeat the block that saved them.
   3. Continue from R3.
 
   For a failure in R6 or R7 whose cause is outside the data (configuration,
   readiness), correct it and repeat that step on R.
 - **Back to N.**
   1. Run `ops.run(compose_r + ['down'])` without `-v`.
-  2. If R7 had installed or removed the custody configuration, put N's back with
-     `ops.run(['sudo', '-n', 'install', '-o', str(os.getuid()), '-g', str(os.getgid()), '-m', '0600', str(saved_n_custody), str(ops.WRAPPING_CUSTODY_CONFIG)])`.
-     When N had none, remove R's instead (`sudo -n rm`). If R7 had repointed the
-     host's jobs, point them back at N's checkout.
+  2. Put N's custody configuration back from the copy saved before R1. Do this
+     whether or not R7 ran: it is idempotent, and it also covers an R7 that
+     changed the configuration but did not record it.
+
+     ```python
+     if record['had_n_custody']:
+         saved = Path(record['saved_n_custody'])
+         assert ops.digest(saved) == record['n_custody_sha256']
+         ops.run(['sudo', '-n', 'install', '-o', str(os.getuid()), '-g', str(os.getgid()), '-m', '0600',
+                  str(saved), str(ops.WRAPPING_CUSTODY_CONFIG)])
+     else:
+         ops.run(['sudo', '-n', 'rm', '-f', str(ops.WRAPPING_CUSTODY_CONFIG)])
+     ```
+
+     If R7 had repointed the host's jobs, point them back at N's checkout.
   3. Run `ops.run(compose_n + ['up', '-d'], timeout=install_timeout)`. N's
      checkout, `.env`, compose files and signing file were never changed, and P3
      proved that `compose_n` renders N's configuration. R2 kept N's volumes.
@@ -794,15 +879,21 @@ Then take one of two ways:
     `com.docker.compose.config-hash` labels for every N container. A difference
     fails P3 or precondition step 1, before anything changes;
   - whether `clean_env` keeps everything the host's Docker client needs. A
-    rootless daemon reached through a variable not in the list fails P3, before
-    anything changes.
+    cleaned environment that reaches no daemon, or another one, fails
+    `config_matches` in P3 or precondition step 1, before anything changes
+    (Site Compose command);
+  - whether `docker compose config --format json` on the site's Compose
+    version renders `environment` as the mapping P8 reads. Another shape fails
+    P8, before anything changes.
 
   A failure in the first three shows at R5–R7.
 - No tool repoints the host's jobs that name the checkout path (the nightly
   backup and certbot's webroot). They are host-managed; R7 step 4 records the
   change.
 - No tool rewrites a set's `.env`. A B whose `.env` names `COMPOSE_PROJECT_NAME`
-  fails P5 and needs a separate decision.
+  fails P5 and needs a separate decision. So does a B whose credentials
+  `snapshot_credentials` reads differently from Compose (P8):
+  `restore_snapshot` has no other credential input.
 - R7 and the way back to N write `/etc/kin-deploy/emr-wrapping-custody.json` with
   `sudo -n install`. P7 checks non-interactive sudo before anything changes.
 - No tool brings data written on N after B into the rolled-back N-1 site.
@@ -834,9 +925,13 @@ installation operator. This runbook does not claim that any site is configured.
 
 `emr/deploy/docker-compose.signing.yml` is that mapping for the API container. On
 the host, keep one raw 32-byte file per wrapping ID (the file the custody
-configuration's `files` entry for `c2-wrap-v1` names), readable by the API
-container user only (`node`, uid 1000 in the production image: `chown 1000:1000`,
-`chmod 0400`). Install the custody configuration (Nightly job) first, so that the
+configuration's `files` entry for `c2-wrap-v1` names). It has two readers: the
+API container user (`node`, uid 1000 in the production image) and the backup
+account, whose nightly backup copies it into custody. Make it readable by those
+two only: `chown 1000:<backup account's group>`, `chmod 0440`. With a backup
+account of uid 1000 the owner bit already covers both. A file only uid 1000 can
+read makes another backup account's backup fail with `Wrapping source file is
+unavailable`. Install the custody configuration (Nightly job) first, so that the
 overlay and the nightly custody copy name the same file.
 
 At installation, step 2 adds the overlay itself. On a running stack, use one
