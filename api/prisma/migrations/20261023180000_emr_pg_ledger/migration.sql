@@ -1,4 +1,4 @@
--- REQ-B2R-01/02/03/05/07. Clean installation only (D1770).
+-- REQ-B2R-01/02/03/05/07. D1770 replaces the chain; existing B events are carried forward.
 -- PostgreSQL owns finality. Hashes below compare accidental duplicate content;
 -- they are neither a chain nor an independent integrity/rollback witness.
 BEGIN;
@@ -9,18 +9,34 @@ CREATE UNIQUE INDEX "AuthSession_auditRef_key" ON public."AuthSession"("auditRef
 SET LOCAL ROLE kin_emr_owner;
 SET LOCAL default_tablespace = 'kin_emr_access';
 
+-- A B access/history row is one event and becomes one committed operation below.
+-- An expiry checkpoint has no event, and its deleted prefix cannot be rebuilt;
+-- neither can an event whose streams disagree. Those still refuse the upgrade.
 DO $$
 BEGIN
   LOCK TABLE emr_access.access_entry, emr_access.commit_marker,
     emr_access.access_target, emr_access.audit_projection IN ACCESS EXCLUSIVE MODE;
-  IF EXISTS (SELECT FROM emr_access.access_entry)
-    OR EXISTS (SELECT FROM emr_access.commit_marker)
-    OR EXISTS (SELECT FROM emr_access.access_target)
-    OR EXISTS (SELECT FROM emr_access.audit_projection)
-    OR EXISTS (SELECT FROM emr_access.chain_head WHERE sequence <> 0) THEN
+  IF EXISTS (SELECT FROM emr_access.access_entry WHERE kind = 'expiry')
+    OR EXISTS (SELECT FROM emr_access.access_entry e
+      WHERE e.payload::jsonb #>> '{event,eventId}' IS DISTINCT FROM e.event_id
+        OR e.payload::jsonb #> '{event,userId}' IS NULL
+        OR jsonb_typeof(e.payload::jsonb #> '{event,targets}') IS DISTINCT FROM 'array')
+    OR EXISTS (SELECT FROM emr_access.access_entry h WHERE h.stream = 'history' AND NOT EXISTS (
+      SELECT FROM emr_access.access_entry v WHERE v.stream = 'viewing' AND v.event_id = h.event_id
+        AND v.statutory_act = h.statutory_act AND (v.payload::json -> 'event')::text = (h.payload::json -> 'event')::text)) THEN
     RAISE EXCEPTION 'EmrCleanInstallRequired: existing events preserved' USING ERRCODE = 'EB010';
   END IF;
 END $$;
+-- New payloads hold the inner event only, as later readers parse it. json (not
+-- jsonb) keeps the stored bytes of that event. Chain hashes and commit markers
+-- are not carried (D1770). Held only until the new tables exist.
+CREATE TABLE emr_access.carried_event AS
+  SELECT gen_random_uuid() AS operation_id, gen_random_uuid() AS attempt_id, v.sequence AS position,
+    v.event_id, v.statutory_act, (v.payload::json -> 'event')::text AS payload, v.occurred_at,
+    v.stored_at, h.stored_at AS history_stored_at
+  FROM emr_access.access_entry v
+  LEFT JOIN emr_access.access_entry h ON h.stream = 'history' AND h.event_id = v.event_id
+  WHERE v.stream = 'viewing';
 
 DROP TRIGGER access_commit_marker ON emr_access.access_entry;
 DROP FUNCTION emr_access.require_commit_marker();
@@ -150,6 +166,41 @@ CREATE TABLE emr_access.disposal_fact (
   CHECK (num_nonnulls(entry_id,failure_id)=1),
   CHECK ((failure_id IS NULL) = (failure_binding IS NULL))
 );
+
+-- The carried events, written as append_operation below writes a committed
+-- operation; the B store time stands in for admission and commit.
+INSERT INTO emr_access.operation(operation_id,event_id,content_sha256,actor_sha256,streams,admitted_at,pending)
+  SELECT operation_id,event_id,encode(sha256(convert_to(statutory_act || ':' || payload,'UTF8')),'hex'),
+    encode(sha256(convert_to((payload::jsonb->'userId')::text,'UTF8')),'hex'),
+    CASE WHEN history_stored_at IS NULL THEN ARRAY['viewing'] ELSE ARRAY['viewing','history'] END,stored_at,false
+  FROM emr_access.carried_event;
+INSERT INTO emr_access.attempt(stream,attempt_id,operation_id,admitted_at)
+  SELECT s.stream,c.attempt_id,c.operation_id,c.stored_at
+  FROM emr_access.carried_event c CROSS JOIN (VALUES ('viewing'),('history')) s(stream)
+  WHERE s.stream = 'viewing' OR c.history_stored_at IS NOT NULL;
+INSERT INTO emr_access.attempt_outcome(operation_id,outcome,recorded_at)
+  SELECT operation_id,'committed',GREATEST(stored_at,history_stored_at) FROM emr_access.carried_event;
+WITH receipt AS (
+  INSERT INTO emr_access.entry_receipt(operation_id,stream,event_id,attempt_id)
+    SELECT c.operation_id,s.stream,c.event_id,c.attempt_id
+    FROM emr_access.carried_event c CROSS JOIN (VALUES ('viewing'),('history')) s(stream)
+    WHERE s.stream = 'viewing' OR c.history_stored_at IS NOT NULL
+    RETURNING entry_id,operation_id,stream)
+INSERT INTO emr_access.access_entry(entry_id,operation_id,stream,event_id,payload,occurred_at,recorded_at,statutory_act,retention_class)
+  SELECT r.entry_id,c.operation_id,r.stream,c.event_id,c.payload,c.occurred_at,
+    CASE WHEN r.stream = 'history' THEN c.history_stored_at ELSE c.stored_at END,c.statutory_act,
+    CASE WHEN r.stream = 'history' THEN 'record-history'
+      WHEN c.payload::jsonb->>'result' = 'succeeded' AND c.statutory_act IN ('기재','추가기재','수정') AND EXISTS
+        (SELECT FROM jsonb_array_elements(c.payload::jsonb->'targets') t WHERE t->>'kind' = 'identity-access') THEN 'rights3y'
+      ELSE 'viewing2y' END
+  FROM receipt r JOIN emr_access.carried_event c USING (operation_id)
+  ORDER BY c.position, r.stream = 'history';
+INSERT INTO emr_access.access_target(entry_id,target_index,target_kind,record_id,version_id)
+  SELECT e.entry_id,(t.ordinality-1)::integer,t.value->>'kind',
+    CASE WHEN t.value->'recordId'->>'status' = 'known' THEN t.value->'recordId'->>'value' END,
+    CASE WHEN t.value->'versionId'->>'status' = 'known' THEN t.value->'versionId'->>'value' END
+  FROM emr_access.access_entry e CROSS JOIN LATERAL jsonb_array_elements(e.payload::jsonb->'targets') WITH ORDINALITY t(value,ordinality);
+DROP TABLE emr_access.carried_event;
 
 CREATE FUNCTION emr_access.event_streams(p_event jsonb, p_act text) RETURNS text[]
 LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, pg_temp AS $$

@@ -35,8 +35,17 @@ is an admission condition for a clean install.
    After that comparison, set `record_path` to the private release record's path
    outside the checkout, `record` to the observed values plus the operator and
    backup locations, and `install_timeout` to the site's measured installation
-   hang timeout (seconds). Define `clean_env`, `compose_for` and
+   hang timeout (seconds). Until the site has its own measurement, use
+   `install_timeout = 2400` and `backup_timeout = 600` (R7), the values the
+   2026-10-31 rehearsal ran with; 600 s is also the existing base-backup helper
+   hang timeout (below step 4). Define `clean_env`, `compose_for` and
    `config_matches` from [Site Compose command](#site-compose-command).
+
+   Put `KIN_REVISION=<selected full SHA>` in the checkout's `.env` before the
+   build. The API image's revision label comes only from it
+   (`VCS_REF: ${KIN_REVISION:-unknown}`, `docker-compose.prod.yml`), because
+   `clean_env` drops an exported value. `.env` is not tracked, so `backup()`
+   does not count the change as a dirty checkout.
 
    Decide signing before Compose starts. Online approvals are enabled at
    installation exactly when the custody configuration
@@ -62,6 +71,10 @@ is an admission condition for a clean install.
    ops.write_json(record_path, record)
    ops.run(compose + ['up', '-d', '--build'], timeout=install_timeout)
    ```
+
+   A host that must not build (its CPU and memory are shared with other
+   services) loads images built elsewhere instead and drops `--build`, as in
+   upgrade step 3 below.
 
    PostgreSQL initializes both `kin` and `keycloak` on the new empty data volume;
    the init SQL does not run again on an existing volume. The API image runs
@@ -309,9 +322,11 @@ site.
 # Rollback to the previous release (N → N-1)
 
 Applies to a host installed and upgraded with the plain Compose list of the clean
-installation. A host that runs through the protected entry
-(`/opt/kin-deploy/entry.py`) uses that mode's own rollback (tests/README.md, EMR
-introduction). The application-only switch-back of `scripts/ops_deploy_runner.py`
+installation, and to a host adopted once from the protected entry (Adopting a
+protected-entry host, below). A host that still runs
+through the protected entry (`/opt/kin-deploy/entry.py`) and is not adopted uses
+that mode's own rollback (tests/README.md, EMR introduction). The
+application-only switch-back of `scripts/ops_deploy_runner.py`
 (same schema, previous API image, no database restore) needs an installed
 operational adapter and a compatibility authorization. Neither exists: its CLI
 prints `No operational adapter installed; deployment CLI is unavailable.`
@@ -361,6 +376,60 @@ A host keeps one serving stack: the container names are fixed (`kin-db`, `kin-ap
 …), so N and R cannot run at the same time. This section does not claim that a
 rollback was executed by this documentation change.
 
+**Adopting a protected-entry host (one time).** A host whose stack the
+EMR-introduction tool started is adopted into the plain form once, before its
+first upgrade. Its `kin-api` label `com.docker.compose.project.config_files`
+names root-only copies under `/var/lib/kin-deploy/compose-entries/<generation>/`
+plus a `runtime.yml` with image pins (the production host since 10-15).
+Precondition step 1 cannot address those files, and `config_matches` cannot hold
+while `runtime.yml` is part of every container's hash. Adopt in the upgrade's
+locked operator session (below), in the site checkout at the running SHA, before
+precondition step 1:
+
+1. Add `KIN_MONITOR_PUBLIC_DIR` and `KIN_REVISION` to `.env`.
+   `docker-compose.monitor.yml` requires the first (`:?`), and `compose_for`
+   passes nothing else. Its value is in the entry's root-only `environment.json`.
+   That file holds the literal `.env` values, credentials included: read only
+   this one key and never print the file. `KIN_REVISION` is the running full SHA.
+2. Give the running images the names plain Compose uses. The compose files name
+   no `image:` for these services, so without the names `up` builds on the host:
+
+   ```python
+   project = ops.ROOT.name
+   api_image = ops.text(['docker', 'inspect', '--format', '{{.Image}}', 'kin-api'])
+   proxy_image = ops.text(['docker', 'inspect', '--format', '{{.Image}}', 'kin-proxy'])
+   for image, service in ((api_image, 'api'), (api_image, 'api-migrate'), (proxy_image, 'proxy')):
+       ops.run(['docker', 'tag', image, f'{project}-{service}'])
+   ```
+
+   `api-migrate` is the same `production` target of `api/` as `api`
+   (`docker-compose.prod.yml`).
+3. Recreate once with the plain command. Use the entry's own file list in its
+   order; a file outside the checkout stays an absolute path. Signing follows
+   step 2: the overlay only with an installed custody configuration.
+
+   ```python
+   files = ['docker-compose.yml', 'docker-compose.prod.yml',
+            '/etc/kin-deploy/overlays/docker-compose.halo-reports.yml', 'docker-compose.monitor.yml']   # 10-15 host
+   compose = compose_for(project, ops.ROOT, files, None)   # no custody configuration installed
+   lease.retain()
+   record.update(status='ADOPTING', compose_project=project, compose_files=files)
+   ops.write_json(record_path, record)
+   ops.run(compose + ['up', '-d'], timeout=install_timeout)
+   ```
+
+   This is a 1–2 minute outage. `runtime.yml`'s pins, labels and maintenance
+   port change every container's configuration hash, so Compose recreates all of
+   them, `db` included; volumes are kept. Plan it in the window, before B.
+4. Run step 3's readiness check, then `assert config_matches(compose, project)`.
+5. Continue with precondition step 1. B is taken after the adoption, so its
+   `.env` and the labels are already the plain form.
+
+From then on, never run `/opt/kin-deploy/entry.py compose recreate`. It recreates
+the stack from the entry's recorded generation (its root-only copies and old
+image pins), which would bring back the old generation over the new one. Leave
+`/var/lib/kin-deploy` and `/etc/kin-deploy` as they are and record them as inert.
+
 **Precondition: the upgrade itself.** Run it in one locked operator session in the
 site checkout at N-1, in the form of steps 2–4. Define `clean_env`, `compose_for`
 and `config_matches` there too, and check that the session does not carry
@@ -377,20 +446,28 @@ components belong to the account that runs it.
    labels = api['Config']['Labels']
    assert Path(labels['com.docker.compose.project.working_dir']).resolve() == ops.ROOT
    project = labels['com.docker.compose.project']
-   files = [Path(name).resolve().relative_to(ops.ROOT).as_posix()
-            for name in labels['com.docker.compose.project.config_files'].split(',')]
+   files = []
+   for name in labels['com.docker.compose.project.config_files'].split(','):
+       path = Path(name).resolve()
+       files.append(path.relative_to(ops.ROOT).as_posix() if path.is_relative_to(ops.ROOT) else str(path))
+   outside_files = {name: ops.digest(Path(name)) for name in files if Path(name).is_absolute()}
    mount = [m['Source'] for m in api['Mounts'] if m['Destination'] == '/run/secrets/emr-signing-wrap-v1']
    secret_file = mount[0] if mount else None
    compose = compose_for(project, ops.ROOT, files, secret_file)
    assert config_matches(compose, project)   # N-1 runs exactly what its directory's .env and files say
-   record.update(compose_project=project, compose_files=files, wrapping_secret_file=secret_file,
-                 config_matched=True)
+   record.update(compose_project=project, compose_files=files, outside_files=outside_files,
+                 wrapping_secret_file=secret_file, config_matched=True)
    ```
 
    A stack started with exported variables, or with a file list other than its
    labels, fails here, before B is taken. Correct the cause first. B's `.env` then
    provably reproduces the configuration that N-1 ran with (including its
    PostgreSQL, Keycloak and client credentials), and a rollback can rely on it.
+   The checkout's own files are relative, so they follow the checkout to N and
+   R's checkout to N-1. A file outside the checkout (a host overlay such as
+   `/etc/kin-deploy/overlays/…`) stays absolute; `compose_for` takes it as it is.
+   Neither git nor B holds it, so its sha256 is recorded here, and step 3, P3 and
+   P5 compare it.
 2. **Take and hold B.** Run `B = ops.backup('<backup-directory>')`, then
    `ops.rehearse(B)`. Record B's directory and its manifest's `git_sha` (N-1) and
    `running_images`. Then protect B from the nightly rotation for the rollback
@@ -402,17 +479,66 @@ components belong to the account that runs it.
      job).
    - Without the hold, the nightly CLI's seven daily generations
      (`DAILY_GENERATIONS`) would delete B.
-3. **Upgrade.** Run `ops.run(['git', 'checkout', '--detach', '<N SHA>'])`. Every
-   recorded compose file must exist at N. Then run
-   `ops.run(compose + ['up', '-d', '--build'], timeout=install_timeout)` and
+
+   Then keep B's images with one tag each, before anything is loaded or built:
+
+   ```python
+   b_manifest = json.loads((B / 'manifest.json').read_text(encoding='utf-8'))
+   hold_tags = []
+   for container, image in b_manifest['running_images'].items():
+       tag = f"kin-rollback-hold/{container}:{b_manifest['git_sha'][:12]}"
+       ops.run(['docker', 'tag', image['id'], tag])
+       hold_tags.append(tag)
+   record.update(backup_set=str(B), rollback_hold_tags=hold_tags)
+   ops.write_json(record_path, record)
+   ```
+
+   The upgrade's `up` can delete the N-1 image that B records. In the 2026-10-31
+   rehearsal (containerd image store) `up -d --build` moved the `<project>-api`
+   tag to N's image and N-1's image ceased to exist; `validate_backup` then
+   stopped P1 at `docker image inspect`, and no rollback was possible. With
+   these tags the same rollback passed.
+3. **Upgrade.** Set `KIN_REVISION=<N SHA>` in `.env` (step 2). Choose how N's
+   images arrive. A host that builds sets `build = ['--build']`. A host that
+   must not build (the production host: 2 vCPU, no swap, shared with other
+   services) loads them, after B's hold tags. Build them on another host from a
+   checkout at N whose directory has the site checkout's name (the project name,
+   so the images are `<project>-api`, `<project>-api-migrate` and
+   `<project>-proxy`) and whose `.env` has `KIN_REVISION=<N SHA>`. Save them with
+   `docker save -o <file> <project>-api <project>-api-migrate <project>-proxy`.
+   On the site:
+
+   ```python
+   ops.run(['docker', 'load', '-i', '<file>'], timeout=install_timeout)
+   revision = '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+   assert all(ops.text(['docker', 'image', 'inspect', '--format', revision, f'{project}-{service}']) == '<N SHA>'
+              for service in ('api', 'api-migrate'))   # the proxy image carries no revision label
+   build = []   # up -d uses the loaded names; a missing name would make up build on the host
+   ```
+
+   Then upgrade:
+
+   ```python
+   lease.retain()   # as in step 2: the hold persists before the checkout or the stack changes
+   record.update(status='STARTED', release_sha='<N SHA>')
+   ops.write_json(record_path, record)
+   ops.run(['git', 'checkout', '--detach', '<N SHA>'])
+   assert all(ops.digest(Path(name)) == sha for name, sha in record['outside_files'].items())
+   ops.run(compose + ['up', '-d', *build], timeout=install_timeout)
+   ```
+
+   Every recorded compose file inside the checkout must exist at N. Then
    continue with steps 3–4, including check 3 (signing path). `migrate deploy`
    applies only N's new migrations.
 
-Keep the image IDs that B records until the rollback window ends.
-`validate_backup` runs `docker image inspect` on them, so after an image prune B
-can no longer be restored or rehearsed. When the window ends, remove the hold
-with `(B / ops.HOLD_FILE).unlink()` in a locked session as the same account, and
-record it. The next rotation then treats B as an ordinary daily set.
+Keep the image IDs that B records until the rollback window ends; step 2's tags
+do this, and no image is pruned in the window. `validate_backup` runs
+`docker image inspect` on them, so without them B can no longer be restored or
+rehearsed. When the window ends, remove the hold with
+`(B / ops.HOLD_FILE).unlink()` in a locked session as the same account, then the
+tags with `ops.run(['docker', 'image', 'rm', *record['rollback_hold_tags']])`
+(an image is deleted only when no other tag or container uses it), and record
+both. The next rotation then treats B as an ordinary daily set.
 
 **Rollback session.** Open one operator Python session in the site checkout, still
 at N, as for steps 2–4:
@@ -462,8 +588,12 @@ backup_root = '<backup-directory>'   # the daily backup root (B's parent)
   labels = api['Config']['Labels']
   assert Path(labels['com.docker.compose.project.working_dir']).resolve() == ops.ROOT
   n_project = labels['com.docker.compose.project']
-  n_files = [Path(name).resolve().relative_to(ops.ROOT).as_posix()
-             for name in labels['com.docker.compose.project.config_files'].split(',')]
+  n_files = []
+  for name in labels['com.docker.compose.project.config_files'].split(','):
+      path = Path(name).resolve()
+      n_files.append(path.relative_to(ops.ROOT).as_posix() if path.is_relative_to(ops.ROOT) else str(path))
+  assert ({name: ops.digest(Path(name)) for name in n_files if Path(name).is_absolute()}
+          == record.get('outside_files', {}))   # precondition step 1's sha256 of each file outside the checkout
   mount = [m['Source'] for m in api['Mounts'] if m['Destination'] == '/run/secrets/emr-signing-wrap-v1']
   n_secret_file = mount[0] if mount else None
   compose_n = compose_for(n_project, ops.ROOT, n_files, n_secret_file)
@@ -490,9 +620,14 @@ backup_root = '<backup-directory>'   # the daily backup root (B's parent)
   volume would make R4's restore refuse the cluster, or start N-1 on foreign
   data.
 - **P5. N-1's configuration, from B.**
-  - Each recorded compose file must exist at N-1:
+  - Each recorded compose file inside the checkout must exist at N-1:
     `ops.run(['git', 'cat-file', '-e', f'{previous_sha}:{name}'])` for each
-    `name` in `record['compose_files']`.
+    `name` in `record['compose_files']` that is not an absolute path. Each
+    absolute one (outside the checkout) must still have the sha256 that
+    precondition step 1 recorded:
+    `ops.digest(Path(name)) == record['outside_files'][name]`. R reads that same
+    host file, so it is the file N-1 ran with. It is not in N-1's tree, so
+    `git cat-file` would stop here.
   - N-1's compose files must equal B's copies:
     `hashlib.sha256(ops.run(['git', 'show', f'{previous_sha}:{name}']).stdout).hexdigest() == manifest['sha256'][name]`
     for `docker-compose.yml` and `docker-compose.prod.yml`.
@@ -811,7 +946,8 @@ with R′, cannot replace N's configuration with R's or lose the flag.
      ```
 
      `backup_timeout` is the site's backup hang timeout, set from the backup
-     elapsed time recorded at installation (below step 4).
+     elapsed time recorded at installation (below step 4); 600 s until that
+     measurement exists (step 2).
      `backup()` refuses containers whose Compose working directory is not its
      own checkout, so only R's tool can back up R. The rehearsal must show
      `success: true` and check 2's `wrapping_custody` result. With custody, it
@@ -841,7 +977,21 @@ Then take one of two ways:
 
   For a failure in R6 or R7 whose cause is outside the data (configuration,
   readiness), correct it and repeat that step on R.
-- **Back to N.**
+- **Back to N.** When the rollback session has ended, its retained lock
+  (`.kin-ops.lock`, content `retained:…`) stays in N's checkout, and `ops.lock()`
+  refuses while it exists. Remove it only after inspecting what that session
+  left, and record the removal. Then open a new session in N's checkout as for
+  the rollback session (lock, observed values, the three definitions,
+  `install_timeout`) and rebuild both commands from the record:
+
+  ```python
+  record = json.loads(record_path.read_text(encoding='utf-8'))
+  compose_r = compose_for(record['rollback_project'], record['rollback_dir'], record['rollback_files'],
+                          record['rollback_secret_file'])
+  compose_n = compose_for(record['n_project'], ops.ROOT, record['n_files'], record['n_secret_file'])
+  lease.retain()
+  ```
+
   1. Run `ops.run(compose_r + ['down'])` without `-v`.
   2. Put N's custody configuration back from the copy saved before R1. Do this
      whether or not R7 ran: it is idempotent, and it also covers an R7 that
