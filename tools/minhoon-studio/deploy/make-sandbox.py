@@ -76,7 +76,7 @@ def rebuild_generated(out, python):
             continue
         if artifact is None:
             artifact = json.load(open(os.path.join(out, "scripts/main-split-order.json"), encoding="utf-8"))["artifact"]
-        subprocess.run([python, script], cwd=out, check=True)
+        subprocess.run([python, script], cwd=out, check=True, stdout=sys.stderr)
         generated.append(artifact)
     # Against the index (the merge result so far), not HEAD: HEAD lacks everything main brought in.
     changed = [f for f in (git_out(out, "diff", "--name-only").splitlines()
