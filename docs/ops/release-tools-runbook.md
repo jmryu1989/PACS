@@ -1152,6 +1152,35 @@ no `retain()`: keep the lock with `lease.retained = True`, release it with
      are kept. `emr-provision` and `api-migrate` run again (no pending
      migration).
 
+     **If any line of U1.3 fails**, bring a86ecf1 back on the entry's own
+     generation files with the command that started the VM's
+     production-shaped site (run 2, S6): all services from 0dc0d506…, then
+     the proxy from 3284076f… (the generations on `kin-api` and `kin-proxy`
+     on 2026-10-31):
+
+     ```python
+     def entry(generation, *args):
+         g = Path('/var/lib/kin-deploy/compose-entries') / generation
+         monitor = ops.text(['sudo', '-n', 'python3', '-c',
+                             f"import json;print(json.load(open('{g}/environment.json'))['KIN_MONITOR_PUBLIC_DIR'])"])
+         return (['sudo', '-n', 'env', '-i', f'PATH={os.environ["PATH"]}', 'HOME=/root', f'KIN_MONITOR_PUBLIC_DIR={monitor}',
+                  'docker', 'compose', '--project-directory', str(ops.ROOT), '--project-name', project,
+                  '--env-file', str(g / 'inputs.env')]
+                 + [arg for i in range(4) for arg in ('-f', str(g / f'source-0{i}.yml'))] + ['-f', str(g / 'runtime.yml'), *args])
+     ops.run(entry('0dc0d506cd332aad092a931629b5c0be18ca8661ac3c811fb9ad81623c0770bb', 'up', '-d'), timeout=install_timeout)
+     ops.run(entry('3284076f7c7296656167a94b8cdb0890ef56bfb4a08a7bf3ebe5c08b7a9458fc', 'up', '-d', '--no-deps', 'proxy'),
+             timeout=install_timeout)
+     ready()
+     record.update(status='ADOPTION_REVERTED')
+     ops.write_json(record_path, record)
+     lease.retained = False
+     hold.__exit__(None, None, None)
+     ```
+
+     The window ends there with a86ecf1 as before; the two `.env` lines of
+     U1.1 may stay (the entry reads `inputs.env`), and the nightly job is
+     unchanged.
+
   From then on, never run `/opt/kin-deploy/entry.py compose recreate`: it
   would bring back the entry's recorded generation over the plain stack. Leave
   `/var/lib/kin-deploy` and `/etc/kin-deploy` as they are and record them as
@@ -1205,7 +1234,11 @@ no `retain()`: keep the lock with `lease.retained = True`, release it with
   ```
 
   `api-migrate` applies N's 21 migrations to the 46 of a86ecf1. Then check:
-  - `_prisma_migrations`: 67 rows, all finished, none rolled back;
+  - `_prisma_migrations`: all 67 expected migrations applied and no
+    unresolved failure,
+    `SELECT count(DISTINCT migration_name) FILTER (WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL), count(*) FILTER (WHERE finished_at IS NULL AND rolled_back_at IS NULL) FROM "_prisma_migrations"`
+    returns `67|0`; a rolled-back attempt that M resolved may remain as an
+    extra row;
   - the 10-15 probe event moved into the new ledger: one `emr_access.access_entry`
     (stream `viewing`, act `열람`, `viewing2y`) whose payload has executor
     `service`, user `release-probe`, target `system-operation`;
@@ -1278,6 +1311,25 @@ ops.run(compose + ['up', '-d', '--no-build', '--pull', 'never'], timeout=install
 ```
 
 and continue at U4's checks. `resolve` changes only that history row.
+
+**Rollback from M** (the default). Not run on the VM.
+1. Leave the failed state as it is: no `resolve`, no repair, no `down -v`.
+   N's volumes are its only copy. Record `status='MIGRATION_FAILED'` and
+   `failed`.
+2. The lock: this session still holds it (`lease.retained = True` since
+   U1.3) and keeps it through R7. If the session is gone, remove the retained
+   `.kin-ops.lock` only after inspecting it, as Back to N says, and take it in
+   a new session with `hold = ops.lock(); lease = hold.__enter__();
+   lease.retained = True`.
+3. Run the preflight below in this session (it takes no lock of its own).
+   Skip its "rehearse again" (B was rehearsed in U2) and skip R1: N's tool
+   cannot back up and rehearse a half-migrated database, and nothing has
+   written to the database since B. A preflight failure leaves the stack
+   down: keep the lock and record `NEEDS_ATTENTION`.
+4. Stop N: at R2 run only `ops.run(compose_n + ['down'])` (no `-v`) and
+   record `ROLLING_BACK`.
+5. R3–R7 as written, restoring B. U6 has not run, so the crontab stays as
+   it is. R7 releases the lock.
 
 ## Rollback to a86ecf1
 
@@ -1376,8 +1428,9 @@ window. Any failure here: record `ROLLBACK_NOT_STARTED`; N keeps serving.
   before it listens). a86ecf1 has no restored-copy expiry sweep; there is none
   to run. Then `ops.run(compose_r + ['up', '-d', '--no-build', '--pull', 'never'], timeout=install_timeout)`.
 - **R7. Verify and hand over.** `ready()`; `config_matches(compose_r, R)`;
-  B's data: the row counts of B's manifest, its ledger event, Orthanc's
-  instance count. Then R's first backup with R's own tool, the nightly helper:
+  B's data: the `kin` row counts of B's manifest (`keycloak` may differ in
+  `jgroups_ping`, Keycloak's own runtime row: 0→1 on the VM), its ledger
+  event, Orthanc's instance count. Then R's first backup with R's own tool, the nightly helper:
   `R_set = ops.backup(str(backup_root), 240)`, `ops.rehearse(R_set)`. Put the
   crontab line `nightly_old` back (U6 replaced it). Record
   `status='ROLLED_BACK'`, set `lease.retained = False` and release the lock. The
@@ -1388,6 +1441,7 @@ lock (remove a retained `.kin-ops.lock` only after inspecting what its session
 left, and record it):
 
 ```python
+hold = ops.lock(); lease = hold.__enter__(); lease.retained = True   # skip if this session still holds it
 compose_r = compose_for(record['rollback_project'], ops.ROOT, record['compose_files'], None)
 compose_n = compose_for(record['n_project'], ops.ROOT, record['n_files'], None)
 ops.run(compose_r + ['down'])                     # no -v: R's volumes stay for inspection
@@ -1399,7 +1453,9 @@ assert config_matches(compose_n, record['n_project'])
 
 N's checkout files, `.env` and volumes are as they were at R2, so N comes back
 with everything it wrote. Put the crontab line `nightly_n` back if R7 had
-restored `nightly_old`. Record `ROLLBACK_ABANDONED`.
+restored `nightly_old`. Record `ROLLBACK_ABANDONED`, then
+`lease.retained = False` and `hold.__exit__(None, None, None)`; until then
+every backup refuses the lock.
 
 **Where this rollback ends.** It restores a86ecf1 without online approvals.
 Once a custody configuration is installed on N (Enabling online approvals) or
