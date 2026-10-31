@@ -64,22 +64,24 @@ test('B2-01 each PACS write surface commits a 기재/추가기재/수정 record 
     ['POST studies/:uid/viewer-jobs', 'comparison-description', 'write', '기재'],
     ['POST studies/:uid/viewer-jobs/:id/revisions', 'comparison-description', 'modify', '수정'],
   ];
-  for (const patient of [null, { linkId: JSON.stringify([INST, 'SYN-PID']), patientId: 'SYN-PID', assigningAuthority: INST }]) {
+  for (const patientId of [null, 'SYN-PID']) {
     const committed = [];
     for (const [surface, kind, action] of rows) await recorded(noTx, committed)(w => w.record({ surface, uid: '2.25.1', institution: INST,
-      kind, recordId: 'rec-1', version: '3', action, patient, reference: { kind: 'Synthetic', id: 'rec-1', version: '3' } }));
+      kind, recordId: 'rec-1', version: '3', action, patientId, reference: { kind: 'Synthetic', id: 'rec-1', version: '3' } }));
     assert.deepEqual(committed.map(r => [r.event.surface, r.event.targets[0].kind, r.event.action, r.act]),
       rows.map(([surface, kind, action, act]) => [surface, kind, action, act]));
     for (const r of committed) {
       assert.deepEqual(r.streams, ['viewing', 'history'], 'a record change is kept in both streams');
       assert.deepEqual([r.event.userId.value, r.event.actingInstitution.value, r.event.managingInstitution.value, r.event.requestId],
         [IDENTITY, INST, INST, 'syn-request-1']);
-      assert.deepEqual(r.event.targets[0].patientLinkSnapshot, patient ? { status: 'known', value: patient } : { status: 'unresolved', reason: 'not-resolved' });
+      // A held source PatientID is named by the study's managing institution, as the current-study read names it.
+      assert.deepEqual(r.event.targets[0].patientLinkSnapshot, patientId ? { status: 'known', value: { linkId: JSON.stringify([INST, patientId]),
+        patientId, assigningAuthority: INST } } : { status: 'unresolved', reason: 'not-resolved' });
     }
   }
   // A kind the route does not write is still refused by the contract, so the record cannot mislabel what was written.
   await assert.rejects(recorded(noTx, [])(w => w.record({ surface: 'POST studies/:uid/viewer-items', uid: '2.25.1', institution: INST,
-    kind: 'report-version', recordId: 'rec-1', version: '1', action: 'write', patient: null, reference: { kind: 'Synthetic', id: 'rec-1', version: '1' } })));
+    kind: 'report-version', recordId: 'rec-1', version: '1', action: 'write', patientId: null, reference: { kind: 'Synthetic', id: 'rec-1', version: '1' } })));
 });
 
 // ── viewer items ──

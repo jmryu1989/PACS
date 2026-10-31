@@ -9,7 +9,6 @@ import { OrthancService } from './orthanc.service';
 import { clinicianFinal } from './clinician-policy';
 import type { Caller } from './pacs.service';
 import type { ClinicalWorkflow, RecordedTransaction, WorkflowRecord } from './emr-clinical/routes';
-import { studyPatientLink } from './emr-clinical/startup';
 import {
   CRITICAL_RESULT_CODES as CODE, CRITICAL_RESULT_PAGE, CRITICAL_RESULT_PINNABLE_ACTIONS, CRITICAL_RESULT_STATE_FILTERS, Head,
   RADIOLOGIST, RecipientClass, Refusal, ackFingerprint, ackRefusal, appliedResult, auditDetail, cancelFingerprint, clip,
@@ -299,7 +298,7 @@ export class CriticalResultService {
     action: WorkflowRecord['action']): WorkflowRecord {
     const patientId = typeof row.origPatientId === 'string' && row.origPatientId.trim() ? row.origPatientId : null;
     return { surface, uid: row.studyUid, institution: row.institutionId, kind, recordId: row.id, version: String(revision), action,
-      patient: patientId ? studyPatientLink(row.institutionId, patientId) : null,
+      patientId,
       reference: { kind: 'CriticalResult', id: row.id, version: String(revision) } };
   }
 

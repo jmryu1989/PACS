@@ -268,7 +268,7 @@ export class ViewerService {
       // 제23조④: a new mark is 기재; an edit, hide or restore of a saved one is 수정 (a replay above records nothing).
       await workflow?.record({ surface: id === undefined ? 'POST studies/:uid/viewer-items' : 'POST studies/:uid/viewer-items/:id/revisions',
         uid, institution: studies[0].institutionId, kind: command.item.kind === 'key' ? 'key-image' : 'measurement',
-        recordId: head.id, version: String(revision), action: added ? 'write' : 'modify', patient: null,
+        recordId: head.id, version: String(revision), action: added ? 'write' : 'modify', patientId: null,
         reference: { kind: 'ViewerItem', id: head.id, version: String(revision) } });
       return { ...result(head), ...(manual ? { referenceStatus: 'verified' } : {}) };
     }, false, recorded);

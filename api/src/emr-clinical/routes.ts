@@ -22,11 +22,17 @@ export interface ClinicalWorkflow {
   record(entry: WorkflowRecord): Promise<void>;
 }
 /** `surface` is the request's own route; `institution` the record's managing institution as the write's locked rows hold
- * it (a deleted study has no row left to look up). `patient` is a link the write already holds; null leaves it
- * unresolved rather than reading the archive under the write's locks. */
+ * it (a deleted study has no row left to look up). `patientId` is a source PatientID the write already holds; null leaves
+ * the link unresolved rather than reading the archive under the write's locks. */
 export interface WorkflowRecord {
   surface: string; uid: string; institution: string; kind: RecordKind; recordId: string; version: string;
-  action: AccessAction; patient: PatientLinkSnapshot | null; reference: BusinessReference;
+  action: AccessAction; patientId: string | null; reference: BusinessReference;
+}
+/** The link a study's current original patient is named by: the patient ID under the study's managing institution. The
+ * current-study read (startup.ts), the image routes' gate observation (image-delivery-record.ts) and a written record's
+ * event (ClinicalWorkflow.record) name a patient by it. */
+export function studyPatientLink(managingInstitutionId: string, patientId: string): PatientLinkSnapshot {
+  return { linkId: JSON.stringify([managingInstitutionId, patientId]), patientId, assigningAuthority: managingInstitutionId };
 }
 /** A service write that runs in the request's records transaction (ClinicalRoutes.workflow). */
 export type RecordedTransaction = <T>(execute: (workflow: ClinicalWorkflow) => Promise<T>) => Promise<T>;
@@ -116,7 +122,8 @@ export class ClinicalRoutes {
             actingInstitution: known(facts.actor.institutionId), managingInstitution: known(entry.institution),
             occurredAt: new Date().toISOString(), trustedProxyIp: facts.ip, cause: 'user-view',
             context: { basis: 'worklist', studyId: entry.uid, relatedStudyId: null, reason: null }, executor: 'member',
-            targets: [{ kind: entry.kind, patientLinkSnapshot: entry.patient ? known(entry.patient) : { status: 'unresolved', reason: 'not-resolved' },
+            targets: [{ kind: entry.kind, patientLinkSnapshot: entry.patientId ? known(studyPatientLink(entry.institution, entry.patientId))
+                : { status: 'unresolved', reason: 'not-resolved' },
               studyId: known(entry.uid), recordId: known(entry.recordId), versionId: known(entry.version) }],
             action: entry.action, result: 'succeeded', requestId: facts.requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null },
           async () => entry.reference);

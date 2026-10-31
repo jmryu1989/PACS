@@ -54,7 +54,7 @@ const TELE_NEXT: Record<string, string[]> = {
 function studyChange(surface: string, state: { uid: string; institutionId: string }, kind: 'study-metadata' | 'study-correction' | 'patient-match',
     audit: { id: number }): WorkflowRecord {
   return { surface, uid: state.uid, institution: state.institutionId, kind, recordId: state.uid, version: String(audit.id),
-    action: 'modify', patient: null, reference: { kind: 'AuditLog', id: String(audit.id), version: null } };
+    action: 'modify', patientId: null, reference: { kind: 'AuditLog', id: String(audit.id), version: null } };
 }
 
 export class PacsStudyState {

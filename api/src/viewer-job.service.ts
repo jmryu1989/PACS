@@ -22,7 +22,7 @@ const summary = (j: any) => ({ id: j.id, studyUid: j.studyUid, authorSub: j.auth
 
 const jobChange = (surface: string, j: { id: string; studyUid: string; revision: number }, institution: string,
   kind: 'comparison-layout' | 'comparison-description', action: 'write' | 'modify'): WorkflowRecord =>
-  ({ surface, uid: j.studyUid, institution, kind, recordId: j.id, version: String(j.revision), action, patient: null,
+  ({ surface, uid: j.studyUid, institution, kind, recordId: j.id, version: String(j.revision), action, patientId: null,
     reference: { kind: 'ViewerJob', id: j.id, version: String(j.revision) } });
 
 @Injectable()
