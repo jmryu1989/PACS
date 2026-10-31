@@ -21,8 +21,8 @@ const summary = (j: any) => ({ id: j.id, studyUid: j.studyUid, authorSub: j.auth
   snapshotVersion: j.snapshot?.version });
 
 const jobChange = (surface: string, j: { id: string; studyUid: string; revision: number }, institution: string,
-  kind: 'comparison-layout' | 'comparison-description', action: 'write' | 'modify'): WorkflowRecord =>
-  ({ surface, uid: j.studyUid, institution, kind, recordId: j.id, version: String(j.revision), action, patientId: null,
+  kind: 'comparison-layout' | 'comparison-description', action: 'write' | 'modify', patientId: string | null): WorkflowRecord =>
+  ({ surface, uid: j.studyUid, institution, kind, recordId: j.id, version: String(j.revision), action, patientId,
     reference: { kind: 'ViewerJob', id: j.id, version: String(j.revision) } });
 
 @Injectable()
@@ -61,6 +61,8 @@ export class ViewerJobService {
     const identity = new Map<string, string>();
     for (const uid of snapshot.studies) identity.set(uid, (await this.orthanc.connectStudyIdentity(uid)).patientId);
     if (new Set(identity.values()).size !== 1) throw new BadRequestException('같은 환자의 검사만 비교 작업으로 저장할 수 있습니다');
+    // The one PatientID every participating original names; a new job's access record carries it as its patient link.
+    const patientId = identity.get(snapshot.studies[0])!;
     // A version 8 layout carries BOTH shapes, so it is verified against both originals:
     // the whole ordered CT volume its plane cells reconstruct, and every stack cell's own
     // instance. Neither check is skipped because the other one passed.
@@ -86,7 +88,7 @@ export class ViewerJobService {
         if(old && error instanceof BadRequestException)throw new ConflictException('저장 당시 볼륨 원본과 달라 복원하지 않았습니다');
         throw error;
       } finally { clearTimeout(timer); controller.abort(); }
-      if (![8, 9].includes(snapshot.version)) return verified;
+      if (![8, 9].includes(snapshot.version)) return { snapshot: verified, patientId };
     }
     const cells = [];
     for (const cell of verified.cells) {
@@ -98,7 +100,7 @@ export class ViewerJobService {
       if (old && cell.sourceDigest !== tags._kinSourceDigest) throw new ConflictException('저장 당시 원본과 달라 복원하지 않았습니다');
       cells.push({ ...cell, sourceDigest: tags._kinSourceDigest });
     }
-    return { ...verified, cells };
+    return { snapshot: { ...verified, cells }, patientId };
   }
   private async annotations(tx: any, snapshot: any, sources: Map<string, any>) {
     const refs = snapshot.annotations;
@@ -206,7 +208,7 @@ export class ViewerJobService {
     const input = previewCommand(raw);
     if (input.studies[0] !== uid) throw new BadRequestException('판독 대상 검사가 일치하지 않습니다');
     this.sameInstitution(await this.parents(this.prisma, input.studies, c));
-    const snapshot = await this.sources(input);
+    const { snapshot } = await this.sources(input);
     // Recheck access after remote reads. This preview has no stored comparison revision.
     const parents = await this.parents(this.prisma, input.studies, c);
     this.sameInstitution(parents);
@@ -220,7 +222,7 @@ export class ViewerJobService {
     this.sameInstitution(await this.parents(this.prisma, b.snapshot.studies, c));
     const known = await this.prisma.viewerJob.findUnique({ where: { id: b.id } });
     const sources = new Map<string, any>();
-    const snapshot = known ? null : await this.sources(b.snapshot, false, sources);
+    const verified = known ? null : await this.sources(b.snapshot, false, sources), snapshot = verified?.snapshot;
     return this.transaction(async (tx, workflow) => {
       const parents = await this.parents(tx, b.snapshot.studies, c, true);
       this.sameInstitution(parents);
@@ -241,8 +243,8 @@ export class ViewerJobService {
       await this.history(tx, j, '', c);
       // 제23조④ 기재: the saved layout and its clinical title/description.
       const surface = 'POST studies/:uid/viewer-jobs';
-      await workflow?.record(jobChange(surface, j, parents[0].institutionId, 'comparison-layout', 'write'));
-      await workflow?.record(jobChange(surface, j, parents[0].institutionId, 'comparison-description', 'write'));
+      await workflow?.record(jobChange(surface, j, parents[0].institutionId, 'comparison-layout', 'write', verified.patientId));
+      await workflow?.record(jobChange(surface, j, parents[0].institutionId, 'comparison-description', 'write', verified.patientId));
       return summary({ ...j, snapshot: frozen });
     }, false, recorded);
   }
@@ -261,8 +263,9 @@ export class ViewerJobService {
       if (j.revision !== b.expectedRevision) conflict();
       const next = await tx.viewerJob.update({ where: { id }, data: { title: b.title, description: b.description, hidden: b.hidden, revision: { increment: 1 }, updatedAt: new Date() } });
       await this.history(tx, next, b.reason, c);
-      // 제23조④ 수정: a revision changes the title, description or hidden flag, never the layout.
-      await workflow?.record(jobChange('POST studies/:uid/viewer-jobs/:id/revisions', next, parents[0].institutionId, 'comparison-description', 'modify'));
+      // 제23조④ 수정: a revision changes the title, description or hidden flag, never the layout. It reads no original,
+      // so it holds no observed PatientID and its link stays unresolved.
+      await workflow?.record(jobChange('POST studies/:uid/viewer-jobs/:id/revisions', next, parents[0].institutionId, 'comparison-description', 'modify', null));
       return summary(next);
     }, false, recorded);
   }

@@ -7,7 +7,8 @@
  *   (the study writes are in tests/pacs_split_modules_test.cjs SPLIT-25).
  *
  * What is bound: the committed event of each write, as the ledger canonicalizes it (parseAccessEvent): its route, record
- * kind, record/version, managing institution and statutory act; that a refused or replayed write records nothing; and that
+ * kind, record/version, managing institution and statutory act; the patient link a write's verified originals already
+ * named (B2-05; never one taken from the request); that a refused or replayed write records nothing; and that
  * a write rolled back with its business transaction keeps no record. Not bound: SQL text (the doubles below answer by
  * table, as tests/viewer_volume_job_test.cjs does) or private names. The compiled service suites over PostgreSQL remain
  * the authority for SQL; this file proves which access record each write commits.
@@ -217,6 +218,34 @@ test('B2-03 a saved comparison job is 기재 of its layout and its description; 
     RAD, recorded(db, committed)), error => error.getStatus?.() === 409);
   assert.equal(committed.length, 3, 'a stale revision records nothing');
   assert.equal(db.store.audit.length, 2);
+});
+
+test('B2-05 a viewer write names the patient its verified originals already showed; a write that read no original leaves it unresolved', async () => {
+  const known = patientId => ({ status: 'known', value: { linkId: JSON.stringify([INST, patientId]), patientId, assigningAuthority: INST } });
+  const unresolved = { status: 'unresolved', reason: 'not-resolved' };
+  const links = committed => committed.map(r => r.event.targets[0].patientLinkSnapshot);
+
+  // A key image: the instance's own tags, verified against the study, name the patient — on the save and on each edit.
+  const itemDb = viewerDatabase(), items = [];
+  const itemSvc = new ViewerService(itemDb, { viewerReference: async () => ({ ...tags, PatientID: 'SYN-KNOWN' }) }, access);
+  const created = await itemSvc.write(UID, body({ requestId: '00000000-0000-4000-8000-0000000000c1', item: keyItem }), RAD, undefined, recorded(itemDb, items));
+  await itemSvc.write(UID, body({ requestId: '00000000-0000-4000-8000-0000000000c2', expectedRevision: 1, action: 'hide', reason: 'SYNTHETIC', item: keyItem }),
+    RAD, created.id, recorded(itemDb, items));
+  assert.deepEqual(links(items), [known('SYN-KNOWN'), known('SYN-KNOWN')]);
+  // Tags that name no patient are not completed from the request: the link stays unresolved.
+  const blankDb = viewerDatabase(), blank = [];
+  await new ViewerService(blankDb, { viewerReference: async () => ({ ...tags, PatientID: '' }) }, access)
+    .write(UID, body({ requestId: '00000000-0000-4000-8000-0000000000c3', item: keyItem }), RAD, undefined, recorded(blankDb, blank));
+  assert.deepEqual(links(blank), [unresolved]);
+
+  // A comparison job: every participating study's original names one patient, verified before the save.
+  const jobDb = jobDatabase(), jobs = [];
+  const jobSvc = new ViewerJobService(jobDb, volumeSource, access);
+  await jobSvc.create(UID, body({ id: JOB, title: 'SYNTHETIC', description: 'SYNTHETIC description', snapshot: layout }), RAD, recorded(jobDb, jobs));
+  assert.deepEqual(links(jobs), [known('SYN-PID'), known('SYN-PID')]);
+  // A description revision reads no original, so it has no observed patient to name.
+  await jobSvc.revise(UID, JOB, body({ expectedRevision: 1, title: 'SYNTHETIC 2', description: '', hidden: false, reason: 'SYNTHETIC' }), RAD, recorded(jobDb, jobs));
+  assert.deepEqual(links(jobs.slice(2)), [unresolved]);
 });
 // ── critical results ──
 

@@ -193,6 +193,9 @@ export class ViewerService {
     // are checked again under the parent lock before returning anything.
     const manual = isManualMeasurement(command.item.kind);
     let sourceDigest: string;
+    // The original's PatientID as the verified source tags name it: the access record's patient link, without a second
+    // archive read under the write's locks. A replay fetches no tags and its write records nothing.
+    let sourcePatient: string | null = null;
     if (!known) {
       // D-MEASURE2 C4b: one shared source deadline for a new measurement,
       // replay and read recheck, including all lookup/tag/digest requests.
@@ -203,6 +206,7 @@ export class ViewerService {
         if (controller.signal.aborted) throw new ServiceUnavailableException('원본 확인이 지연되었습니다. 같은 요청으로 다시 시도하세요');
         verifyViewerReference(uid, command.item, tags);
         if (manual) sourceDigest = tags._kinSourceDigest;
+        sourcePatient = typeof tags.PatientID === 'string' && tags.PatientID.trim() && tags.PatientID.length <= 64 ? tags.PatientID : null;
       } catch (error) {
         if (controller.signal.aborted) throw new ServiceUnavailableException('원본 확인이 지연되었습니다. 같은 요청으로 다시 시도하세요');
         throw error;
@@ -268,7 +272,7 @@ export class ViewerService {
       // 제23조④: a new mark is 기재; an edit, hide or restore of a saved one is 수정 (a replay above records nothing).
       await workflow?.record({ surface: id === undefined ? 'POST studies/:uid/viewer-items' : 'POST studies/:uid/viewer-items/:id/revisions',
         uid, institution: studies[0].institutionId, kind: command.item.kind === 'key' ? 'key-image' : 'measurement',
-        recordId: head.id, version: String(revision), action: added ? 'write' : 'modify', patientId: null,
+        recordId: head.id, version: String(revision), action: added ? 'write' : 'modify', patientId: sourcePatient,
         reference: { kind: 'ViewerItem', id: head.id, version: String(revision) } });
       return { ...result(head), ...(manual ? { referenceStatus: 'verified' } : {}) };
     }, false, recorded);
