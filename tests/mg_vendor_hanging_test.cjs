@@ -324,7 +324,8 @@ test('a repeat exposure hangs the latest image, marked as one of several, and th
   assert.ok(panes.every((p, i) => i === cell || !p.descendants().some(e => e.tagName === 'BUTTON')), 'no control in a single-image or empty cell');
   // The reader opens an image in an empty cell; switching the repeat cell leaves that cell as it is.
   const other = keys.findIndex(k => !h.selected(k));
-  h.activate('vp-' + other); h.doubleClick(set(items[2])); open(other);
+  h.activate('vp-' + other); open(other); h.doubleClick(set(items[2]));
+  assert.match(paneText(panes[other]), /^Current · R CC · Conventional · 3장 중 3장 · 재촬영/, 'a repeat image is marked as its own slot wherever it is shown');
   for (const [shown, n] of [[items[0], 2], [items[2], 3], [items[1], 1]]) {
     button()[0].click();
     assert.deepEqual(plain(h.grid().get('vp-' + cell).displaySetInstanceUIDs), [set(shown)], 'image ' + n + ' of 3 in the same cell');
@@ -336,8 +337,17 @@ test('a repeat exposure hangs the latest image, marked as one of several, and th
   button()[0].click();
   h.run();
   assert.equal(h.selected(key), set(items[0]));
+  // The reader changes to a one-viewport layout, which keeps the image shown: its mark and Switch stay with it.
+  const one = Object.assign(new Element('relative group/pane'), { rect: { top: 0, left: 0 } }), oneView = new Element();
+  oneView.setAttribute('data-viewport-uid', 'one'); one.append(oneView);
+  panes.forEach(p => p.remove()); h.body.append(one);
+  h.layout([{ viewportId: 'one', x: 0, y: 0, displaySetInstanceUIDs: [set(items[0])] }]);
+  assert.equal(paneText(one), 'Current · R CC · Conventional · 3장 중 2장 · 재촬영 | Switch');
+  one.descendants().find(e => e.tagName === 'BUTTON').click();
+  assert.deepEqual(plain(h.grid().get('one').displaySetInstanceUIDs), [set(items[2])], 'the one viewport shows the next image');
+  assert.equal(paneText(one), 'Current · R CC · Conventional · 3장 중 3장 · 재촬영 | Switch');
   h.extension.onModeExit();
-  assert.equal(panes.map(paneText).join(''), '', 'mode exit removes the label and its control');
+  assert.equal(paneText(h.body), '', 'mode exit removes the label and its control');
 });
 
 test('stored VOI table reaches the actor and switching to a windowed image replaces it', async () => {

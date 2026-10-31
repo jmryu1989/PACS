@@ -236,25 +236,32 @@ function kinCreateMammographyHanging() {
       });
       const shown = new Set();
       views.forEach((v, i) => {
-        const cell = cells[i], host = document.querySelector('[data-viewport-uid="' + v.viewportId + '"]') ||
+        const host = document.querySelector('[data-viewport-uid="' + v.viewportId + '"]') ||
           (!v.displaySetInstanceUIDs?.length && panes.length === views.length ? panes[i] : null);
+        // A repeat image is labelled by its own slot wherever it is shown, so a layout change or
+        // double-click that moves it keeps its "k of N" mark and Switch. Other slot labels are positional.
+        const showing = v.displaySetInstanceUIDs?.[0];
+        const owner = showing ? cells.find(c => c.repeat?.some(r => r.uid === showing)) : null;
+        const cell = owner || cells[i];
         if (!cell || !host) return;
         let label = host.querySelector('.kin-mg-slot');
         const viewport = services.cornerstoneViewportService.getCornerstoneViewport(v.viewportId);
         const orientation = orientations.get(viewport);
         const unverified = orientation?.imageId === viewport?.getCurrentImageId?.() && orientation?.status === 'unverified';
-        const matched = views.length === cells.length && v.displaySetInstanceUIDs?.[0] === cell.selected;
+        const matched = !!owner || views.length === cells.length && showing === cell.selected;
         if (!matched && !unverified) return;
-        const text = (matched ? cell.label : '') + (unverified ? (matched ? ' · ' : '') + 'Orientation Unverified' : '');
-        const repeat = matched ? cell.repeat : null;
-        if (label?.dataset.text !== text + (repeat?.show || '')) {
+        const at = owner ? owner.repeat.findIndex(r => r.uid === showing) : -1;
+        const next = owner ? owner.repeat[(at + 1) % owner.repeat.length] : null;
+        const slotText = owner ? owner.name + ' · ' + owner.repeat.length + '장 중 ' + (at + 1) + '장 · 재촬영' : cell.label;
+        const text = (matched ? slotText : '') + (unverified ? (matched ? ' · ' : '') + 'Orientation Unverified' : '');
+        if (label?.dataset.text !== text + (next?.uid || '')) {
           if (!label) { label = document.createElement('div'); label.className = 'kin-mg-slot'; host.append(label); }
           label.style.cssText = 'position:absolute;bottom:24px;left:8px;z-index:5;pointer-events:none;color:#fff;background:#101e32;padding:3px 6px;font:12px sans-serif';
           label.textContent = text;
-          label.dataset.text = text + (repeat?.show || '');
+          label.dataset.text = text + (next?.uid || '');
           label.title = [unverified ? '영상 방향을 확인할 수 없어 저장된 방향으로 표시합니다.' : '',
-            repeat ? '같은 좌우·촬영 방향·영상 종류의 영상이 여러 장입니다. 가장 최근 촬영을 먼저 표시합니다.' : ''].filter(Boolean).join(' ');
-          if (repeat) label.append(switchButton(v.viewportId, cell.key, repeat));
+            owner ? '같은 좌우·촬영 방향·영상 종류의 영상이 여러 장입니다. 가장 최근 촬영을 먼저 표시합니다.' : ''].filter(Boolean).join(' ');
+          if (owner) label.append(switchButton(v.viewportId, owner.key, next));
         }
         shown.add(label);
       });
@@ -263,9 +270,9 @@ function kinCreateMammographyHanging() {
       // stay over an image it does not describe. Keep only the labels written for this state.
       document.querySelectorAll('.kin-mg-slot').forEach(el => shown.has(el) || el.remove());
     }
-    // Shows the next image of a repeat-exposure slot in its own cell, through the same grid update a
-    // thumbnail double-click uses, so the other cells keep what the reader did with them.
-    function switchButton(viewportId, key, repeat) {
+    // Shows the next image of a repeat-exposure slot in the cell showing this one, through the same grid
+    // update a thumbnail double-click uses, so the other cells keep what the reader did with them.
+    function switchButton(viewportId, key, next) {
       const button = document.createElement('button');
       button.type = 'button'; button.textContent = 'Switch';
       button.title = '같은 위치의 다른 영상으로 바꿉니다.';
@@ -274,10 +281,9 @@ function kinCreateMammographyHanging() {
       for (const type of ['pointerdown', 'mousedown']) button.addEventListener(type, event => event.stopPropagation());
       button.addEventListener('click', event => {
         event.stopPropagation();
-        if (!live() || !last || hp.getState()?.protocolId !== protocolId) return;
-        repeatChoices.set(key, repeat.next);
-        protocol(last.data);
-        services.viewportGridService.setDisplaySetsForViewports([{ viewportId, displaySetInstanceUIDs: [repeat.show] }]);
+        if (!live() || hp.getState()?.protocolId !== protocolId) return;
+        repeatChoices.set(key, next.sop);
+        services.viewportGridService.setDisplaySetsForViewports([{ viewportId, displaySetInstanceUIDs: [next.uid] }]);
       });
       return button;
     }
@@ -337,8 +343,9 @@ function kinCreateMammographyHanging() {
             constraint: { equals: { value: selected?.displaySetInstanceUID || '' } } }] };
           const state = choices ? ' · ' + choices.length + '장 중 ' + (chosen + 1) + '장 · 재촬영' : selected ? '' :
             slot?.status === 'ambiguous' ? ' · Select Image' : slot?.status === 'missing' ? ' · Missing' : ' · Unverified';
-          return { key, selected: selected?.displaySetInstanceUID, label: (spec.role === 'current' ? 'Current' : 'Prior') + ' · ' + spec.side + ' ' + spec.view + ' · ' + labels[kind] + state,
-            repeat: choices && { next: slot.newestFirst[(chosen + 1) % choices.length].sop, show: choices[(chosen + 1) % choices.length].displaySetInstanceUID } };
+          const name = (spec.role === 'current' ? 'Current' : 'Prior') + ' · ' + spec.side + ' ' + spec.view + ' · ' + labels[kind];
+          return { key, name, selected: selected?.displaySetInstanceUID, label: name + state,
+            repeat: choices && slot.newestFirst.map((o, i) => ({ sop: o.sop, uid: choices[i].displaySetInstanceUID })) };
         });
         stageCells.push(entries);
         stages.push({ id: layout + '-' + kind, name: (layout === 'compare' ? 'Current vs Prior' : 'Current') + ' · ' + labels[kind],

@@ -615,23 +615,77 @@
   }
 
   const DBT_RANK={slices:1,slab:2,'mip-slab':3,'minip-slab':3,unspecified:4};
-  // DT as a fixed-width key (date, time to the second, microseconds) plus its UTC offset, or null.
-  function dateTime(value){
-    const m=/^(\d{8})(\d{2})?(\d{2})?(\d{2})?(?:\.(\d{1,6}))?([+-]\d{4})?$/.exec(value);
-    return m?m[1]+(m[2]||'00')+(m[3]||'00')+(m[4]||'00')+(m[5]||'').padEnd(6,'0')+(m[6]||''):null;
+  // A UTC offset (&ZZXX) in minutes, within the -1200..+1400 DICOM allows; otherwise null.
+  function utcOffset(value){
+    const m=/^([+-])(\d{2})(\d{2})$/.exec(value);
+    const minutes=m&&+m[3]<60?(m[1]==='-'?-1:1)*(+m[2]*60+ +m[3]):NaN;
+    return minutes>=-720&&minutes<=840?minutes:null;
   }
-  const EXPOSURE_TIMES=[o=>dateTime(text(o.item,'0008002A')),o=>dateTime(text(o.item,'00080022')+text(o.item,'00080032')),
-    o=>dateTime(text(o.item,'00080023')+text(o.item,'00080033'))];
-  // A repeat exposure of one slot, newest first: the first acquisition/content time every candidate
-  // carries (one UTC offset), then Instance Number. null when that order cannot name one latest
-  // image; the slot then stays an explicit choice.
+  // A DT value as the span of time it names, in microseconds of local time, with its UTC offset in
+  // minutes (zone: the value's own suffix, else Timezone Offset From UTC, else null = unknown).
+  // Omitted trailing components widen the span (PS3.5 6.2): "2026103010" is any moment of that hour,
+  // not 10:00:00. A value that is not a real calendar date and time is no time at all.
+  function dateTime(value,zone){
+    const m=/^(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?(?:\.(\d{1,6}))?([+-]\d{4})?$/.exec(value);
+    if(!m||m[7]&&!m[6])return null;
+    const given=m.slice(2,7).filter(x=>x!==undefined).length;
+    const [y,mo=1,d=1,h=0,mi=0,s=0]=m.slice(1,7).map(x=>x===undefined?undefined:+x);
+    const at=(...p)=>{const t=new Date(0);t.setUTCFullYear(p[0],p[1]-1,p[2]);t.setUTCHours(p[3],p[4],p[5]);return t.getTime()*1000;};
+    const days=new Date(at(y,mo+1,0,0,0,0)/1000).getUTCDate();
+    if(mo<1||mo>12||d<1||d>days||h>23||mi>59||s>60)return null; // second 60 is a leap second
+    const own=m[8]===undefined?zone:utcOffset(m[8]);
+    if(m[8]!==undefined&&own===null)return null;
+    const p=[y,mo,d,h,mi,s],lo=at(...p)+(m[7]?+m[7].padEnd(6,'0'):0);
+    p[given]++;
+    return {lo,hi:m[7]?lo+10**(6-m[7].length):at(...p),zone:own};
+  }
+  // DA + TM read as one DT; an absent time is the whole day. A malformed part is no time.
+  function dateAndTime(date,time,zone){
+    return /^\d{8}$/.test(date)&&/^(?:\d{2}(?:\d{2}(?:\d{2}(?:\.\d{1,6})?)?)?)?$/.test(time)?dateTime(date+time,zone):null;
+  }
+  const MINUTE=60e6;
+  // The span in UTC. An unknown offset is any of the allowed offsets, unless neither side knows its
+  // offset: then both are read as one local clock, as the images of one study are.
+  function utcSpan(a,both){
+    if(a.zone!==null)return [a.lo-a.zone*MINUTE,a.hi-a.zone*MINUTE];
+    return both?[a.lo,a.hi]:[a.lo-840*MINUTE,a.hi+720*MINUTE];
+  }
+  // 1 or -1 when one span lies wholly after the other; 0 when they overlap or either is unknown.
+  function laterSpan(a,b){
+    if(!a||!b)return 0;
+    const local=a.zone===null&&b.zone===null,[al,ah]=utcSpan(a,local),[bl,bh]=utcSpan(b,local);
+    return al>=bh?1:bl>=ah?-1:0;
+  }
+  // Acquisition DateTime and Acquisition Date + Time name one moment; read together, the span is
+  // what both allow. Spans that exclude each other are no acquisition time.
+  function acquired(item,zone){
+    const a=dateTime(text(item,'0008002A'),zone),b=dateAndTime(text(item,'00080022'),text(item,'00080032'),zone);
+    if(!a||!b)return a||b;
+    if(a.zone!==b.zone&&(a.zone===null||b.zone===null))return a.zone!==null?a:b;
+    const shift=x=>x.zone===null?0:x.zone*MINUTE,lo=Math.max(a.lo-shift(a),b.lo-shift(b)),hi=Math.min(a.hi-shift(a),b.hi-shift(b));
+    return lo<hi?{lo:lo+shift(a),hi:hi+shift(a),zone:a.zone}:null;
+  }
+  // Positive when image a is known to be the later exposure: acquisition time, then content time,
+  // each only where both images carry it and the spans do not overlap, then Instance Number.
+  function laterExposure(a,b){
+    return laterSpan(a.acquired,b.acquired)||laterSpan(a.content,b.content)||
+      (a.number!==null&&b.number!==null?Math.sign(a.number-b.number):0);
+  }
+  // A repeat exposure of one slot, newest first. The first image is later than every other one by
+  // the order above; null when no image is, and the slot then stays an explicit choice. The rest
+  // follow the same way while that order names one, then in stored order.
   function newestFirst(found){
-    const times=EXPOSURE_TIMES.map(f=>found.map(f)).find(list=>list.every(Boolean)&&new Set(list.map(t=>t.slice(20))).size===1)||null;
-    const numbers=found.every(o=>o.instanceNumber!==null);
-    if(!times&&!numbers)return null;
-    const keyed=found.map((o,i)=>({o,time:times?times[i].slice(0,20):'',number:numbers?o.instanceNumber:0}))
-      .sort((a,b)=>a.time<b.time?1:a.time>b.time?-1:b.number-a.number);
-    return keyed[0].time===keyed[1].time&&keyed[0].number===keyed[1].number?null:keyed.map(k=>k.o);
+    let rest=found.map(o=>{
+      const zone=utcOffset(text(o.item,'00080201'));
+      return {o,acquired:acquired(o.item,zone),content:dateAndTime(text(o.item,'00080023'),text(o.item,'00080033'),zone),number:o.instanceNumber};
+    });
+    const ordered=[];
+    while(rest.length){
+      const top=rest.find(a=>rest.every(b=>a===b||laterExposure(a,b)>0));
+      if(!top)break;
+      ordered.push(top);rest=rest.filter(k=>k!==top);
+    }
+    return ordered.length?[...ordered,...rest].map(k=>k.o):null;
   }
   // Current/prior x side x view x kind. A duplicate is never resolved into `object`; the only order
   // applied is slices before slabs inside DBT, and every alternative stays listed. An ambiguous slot
