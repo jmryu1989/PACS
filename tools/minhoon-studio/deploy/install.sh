@@ -7,7 +7,14 @@
 #   sudo bash install.sh <bundle-dir>            # bundle-dir holds app.tgz base.tar assets-ohif.tgz assets-dicomweb.tgz BASE_SHA
 #   sudo bash install.sh <bundle-dir> --rotate-passwords
 #
-# Re-running updates the app and keeps the sandbox (its commits), the data, the Claude login and the passwords.
+# Re-running updates the app and keeps the sandbox (its commits), the data, the Claude login, the passwords and
+# etc/config.json + etc/studio.env (written only when absent; a new claude-config/<name> folder is added to an
+# existing config, nothing else in it changes). A bundle with a newer BASE_SHA refreshes the sandbox: main is merged
+# into the studio branch (make-sandbox.py --refresh; every studio commit stays) with the unit stopped; a conflict or a
+# failed check or step stops the install and puts the sandbox back as it was. A studio that was stopped before the run
+# stays stopped; a running one is started again only on a sandbox verified as merged or restored (a first install
+# starts it). What a run replaces or copies first is kept beside it as
+# <name>.bak-YYYYMMDD-HHMMSS-<pid>, one id per run, so every run can be rolled back (remove old ones by hand).
 set -euo pipefail
 
 BUNDLE=${1:?bundle directory}
@@ -23,6 +30,43 @@ IP_PUBLIC=61.109.239.207
 [ "$(id -u)" = 0 ] || { echo "run as root (sudo)"; exit 1; }
 for f in app.tgz base.tar assets-ohif.tgz assets-dicomweb.tgz BASE_SHA; do [ -f "$BUNDLE/$f" ] || { echo "missing $BUNDLE/$f"; exit 1; }; done
 BASE_SHA=$(tr -d '[:space:]' < "$BUNDLE/BASE_SHA")
+# One id per run: a second run on the same day must keep the state it replaces too (10-31: the day's backup made the
+# second run delete the app it replaced).
+BAK=bak-$(date +%Y%m%d-%H%M%S)-$$
+
+# Keep a path as <path>.$BAK (moved or copied); never replaces an existing backup.
+backup_move() { [ ! -e "$1.$BAK" ] || { echo "backup $1.$BAK already exists; refusing"; exit 1; }; mv "$1" "$1.$BAK"; }
+backup_copy() { [ ! -e "$1.$BAK" ] || { echo "backup $1.$BAK already exists; refusing"; exit 1; }; cp -a "$1" "$1.$BAK"; }
+echo "backup id: $BAK"
+
+# The studio's state before this run decides its state after it: an update never starts a studio the owner stopped
+# (10-31 review: the final restart started a paused studio). Only a first install, with no unit yet, starts it.
+if systemctl is-active --quiet minhoon-studio; then was_active=yes; else was_active=no; fi
+first_install=no; [ -f /etc/systemd/system/minhoon-studio.service ] || first_install=yes
+
+# Stop the unit and confirm nothing of it still runs: a chat edit writing the sandbox during the backup or the merge
+# would be lost to the refresh's restore. Exits without touching anything if that cannot be confirmed.
+stop_studio() {
+  if [ "$(systemctl show -p LoadState --value minhoon-studio 2>/dev/null)" = loaded ]; then
+    systemctl stop minhoon-studio || echo "   systemctl stop minhoon-studio failed"
+  fi
+  local left
+  left=$(pgrep -u studio -a || true)
+  if systemctl is-active --quiet minhoon-studio || [ -n "$left" ]; then
+    echo "could not confirm the studio stopped (unit $(systemctl is-active minhoon-studio 2>/dev/null || true); processes of user studio: ${left:-none})"
+    echo "the sandbox was not touched; stop it by hand, then rerun"
+    exit 1
+  fi
+}
+
+# True when the refresh summary says the sandbox was verified as before the run and git agrees on HEAD.
+sandbox_restored() {
+  local head
+  head=$(python3 -c 'import json, sys
+s = json.load(open(sys.argv[1], encoding="utf-8"))
+print(s["head_before"] if s.get("sandbox_restored") is True else "")' "$1" 2>/dev/null) || return 1
+  [ -n "$head" ] && [ "$(sudo -u studio git -C "$ROOT/sandbox" rev-parse HEAD 2>/dev/null)" = "$head" ]
+}
 
 # The port must be free or already ours.
 if ss -ltnH "( sport = :$PORT )" | grep -q . && ! systemctl is-active --quiet minhoon-studio; then
@@ -38,7 +82,7 @@ echo "== app (read-only for the service)"
 rm -rf "$ROOT/app.new" && mkdir -p "$ROOT/app.new"
 tar -xzf "$BUNDLE/app.tgz" -C "$ROOT/app.new"
 chown -R root:root "$ROOT/app.new" && chmod -R go-w "$ROOT/app.new"
-rm -rf "$ROOT/app.old"; [ -d "$ROOT/app" ] && mv "$ROOT/app" "$ROOT/app.old"; mv "$ROOT/app.new" "$ROOT/app"
+[ -d "$ROOT/app" ] && backup_move "$ROOT/app"; mv "$ROOT/app.new" "$ROOT/app"
 
 echo "== node $NODE_VERSION (private copy, not on the system PATH)"
 if [ ! -x "$ROOT/node/bin/node" ] || [ "$("$ROOT/node/bin/node" --version)" != "v$NODE_VERSION" ]; then
@@ -56,21 +100,49 @@ if [ ! -x "$ROOT/home/.local/bin/claude" ]; then
 fi
 ln -sfn "$ROOT/home/.local/bin/claude" "$ROOT/bin/claude"
 
-echo "== assets (pinned OHIF build, public CC BY sample DICOMweb)"
+echo "== assets (pinned OHIF build; DICOMweb: public CC BY samples + synthetic MG vendor phantoms)"
 for a in ohif dicomweb; do
   rm -rf "$ROOT/assets/$a.new" && mkdir -p "$ROOT/assets/$a.new"
   tar -xzf "$BUNDLE/assets-$a.tgz" -C "$ROOT/assets/$a.new"
-  rm -rf "$ROOT/assets/$a"; mv "$ROOT/assets/$a.new" "$ROOT/assets/$a"
+  [ -d "$ROOT/assets/$a" ] && backup_move "$ROOT/assets/$a"; mv "$ROOT/assets/$a.new" "$ROOT/assets/$a"
 done
-chown -R root:root "$ROOT/assets"; chmod -R a+rX "$ROOT/assets"
+# Archives made on Windows carry 0777 modes; the service only reads the assets.
+chown -R root:root "$ROOT/assets"; chmod -R a+rX,go-w "$ROOT/assets"
 
-echo "== sandbox (product tree at main $BASE_SHA; created once, then kept)"
+# The bundle folder is the uploader's private directory; give studio its own copy of the archive.
+sandbox_tool() {
+  install -o studio -g studio -m 600 "$BUNDLE/base.tar" "$ROOT/home/base.tar"
+  local rc=0
+  sudo -u studio -H env HOME="$ROOT/home" python3 "$ROOT/app/deploy/make-sandbox.py" --archive "$ROOT/home/base.tar" --sha "$BASE_SHA" --out "$ROOT/sandbox" "$@" || rc=$?
+  rm -f "$ROOT/home/base.tar"
+  return $rc
+}
+echo "== sandbox (product tree at main $BASE_SHA; created once, then kept and refreshed)"
 if [ ! -d "$ROOT/sandbox/.git" ]; then
   install -d -o studio -g studio "$ROOT/sandbox"
-  # The bundle folder is the uploader's private directory; give studio its own copy of the archive.
-  install -o studio -g studio -m 600 "$BUNDLE/base.tar" "$ROOT/home/base.tar"
-  sudo -u studio -H env HOME="$ROOT/home" python3 "$ROOT/app/deploy/make-sandbox.py" --archive "$ROOT/home/base.tar" --sha "$BASE_SHA" --out "$ROOT/sandbox"
-  rm -f "$ROOT/home/base.tar"
+  sandbox_tool
+else
+  current=$(sudo -u studio git -C "$ROOT/sandbox" log -1 --format='%(trailers:key=Studio-Base-Sha,valueonly)' studio-base | tr -d '[:space:]')
+  if [ "$current" != "$BASE_SHA" ]; then
+    echo "   refresh $current -> $BASE_SHA (merge into $(sudo -u studio git -C "$ROOT/sandbox" rev-parse --abbrev-ref HEAD))"
+    # No chat edit may write the sandbox during the merge; the unit is started again at the end if it was running.
+    stop_studio
+    backup_copy "$ROOT/sandbox"
+    # A changed studio-mock/dataset.json resets the mock state (mock.js); keep the old one.
+    if [ -f "$ROOT/data/mock-state.json" ]; then backup_copy "$ROOT/data/mock-state.json"; fi
+    summary_json=$ROOT/data/refresh-$BASE_SHA-$BAK.json
+    if ! sandbox_tool --refresh --python python3 --node "$ROOT/node/bin/node" | tee "$summary_json"; then
+      echo "sandbox refresh to $BASE_SHA stopped: see $summary_json; resolve by hand, then rerun"
+      if sandbox_restored "$summary_json"; then
+        # The new app runs with the old sandbox: a studio that was running keeps running, a paused one stays stopped.
+        if [ "$was_active" = yes ]; then systemctl start minhoon-studio; fi
+      else
+        # No verified restore (failed, or no summary at all): the chat must not edit a sandbox in an unknown state.
+        echo "the sandbox was NOT verified as restored; the studio stays stopped. Inspect $ROOT/sandbox (copy before the run: $ROOT/sandbox.$BAK)"
+      fi
+      exit 1
+    fi
+  fi
 fi
 install -d -o studio -g studio "$ROOT/sandbox-read" "$ROOT/sandbox-preview"
 
@@ -97,6 +169,44 @@ else
 fi
 
 echo "== config"
+# Every login folder under claude-config/ is an account: the owner adds one by hand (claude-config/<name> plus
+# STUDIO_CLAUDE_ACCOUNT=<name> in studio.env). An existing config.json is the owner's (accounts, models, mappings
+# edited by hand) and is never rewritten: 10-31 a rewrite dropped the hand-added account and the chat answered
+# "unknown Claude account". Only a folder it does not list yet is added to claude.configDirs.
+if [ -f "$ROOT/etc/studio.env" ]; then
+  acct=$(sed -n 's/^STUDIO_CLAUDE_ACCOUNT=//p' "$ROOT/etc/studio.env" | tail -1 | tr -d '[:space:]')
+  [ -z "$acct" ] || [ -d "$ROOT/claude-config/$acct" ] || { echo "studio.env names Claude account '$acct' but claude-config/$acct is missing"; exit 1; }
+fi
+if [ -f "$ROOT/etc/config.json" ]; then
+  added=$(python3 - "$ROOT/etc/config.json" "$ROOT/claude-config" "$TLS_CERT" <<'PY'
+import json, os, re, sys
+path, root, cert = sys.argv[1:4]
+with open(path, encoding="utf-8") as f:
+    config = json.load(f)
+dirs = config.setdefault("claude", {}).setdefault("configDirs", {})
+added = [n for n in sorted(os.listdir(root))
+         if re.fullmatch(r"[A-Za-z0-9_-]+", n) and os.path.isdir(os.path.join(root, n)) and n not in dirs]
+if (config.get("tls") or {}).get("cert") != cert:
+    print(f"   note: config.json keeps tls.cert {(config.get('tls') or {}).get('cert')} (this host would use {cert})", file=sys.stderr)
+if added:
+    for n in added:
+        dirs[n] = os.path.join(root, n)
+    with open(path + ".new", "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+print(" ".join(added))
+PY
+)
+  if [ -n "$added" ]; then
+    backup_copy "$ROOT/etc/config.json"
+    mv "$ROOT/etc/config.json.new" "$ROOT/etc/config.json"
+    echo "   kept config.json; added account folder(s): $added (previous: config.json.$BAK)"
+  else
+    echo "   kept config.json unchanged"
+  fi
+else
+CONFIG_DIRS=$(for d in "$ROOT"/claude-config/*/; do n=$(basename "$d"); case "$n" in *[!A-Za-z0-9_-]*) continue;; esac
+  printf '"%s": "%s", ' "$n" "$ROOT/claude-config/$n"; done | sed 's/, $//')
 cat > "$ROOT/etc/config.json" <<JSON
 {
   "listen": { "host": "0.0.0.0", "port": $PORT },
@@ -108,7 +218,7 @@ cat > "$ROOT/etc/config.json" <<JSON
   },
   "claude": {
     "bin": "$ROOT/bin/claude",
-    "configDirs": { "sdij": "$ROOT/claude-config/sdij", "admin": "$ROOT/claude-config/admin" },
+    "configDirs": { $CONFIG_DIRS },
     "account": "sdij",
     "model": null,
     "models": { "fast": "sonnet", "deep": "opus" },
@@ -121,6 +231,7 @@ cat > "$ROOT/etc/config.json" <<JSON
   "digest": { "idleMinutes": 60 }
 }
 JSON
+fi
 [ -f "$ROOT/etc/studio.env" ] || printf '# STUDIO_CLAUDE_ACCOUNT=admin   # switch the chat to the admin Claude login (README)\n' > "$ROOT/etc/studio.env"
 chmod 644 "$ROOT/etc/config.json" "$ROOT/etc/studio.env"
 
@@ -139,7 +250,11 @@ chmod 600 "$ROOT/data/users.json" "$ROOT/data/sessions.json" 2>/dev/null || true
 echo "== systemd"
 install -o root -g root -m 644 "$ROOT/app/deploy/minhoon-studio.service" /etc/systemd/system/minhoon-studio.service
 systemctl daemon-reload
-systemctl enable minhoon-studio >/dev/null
+if [ "$was_active" = no ] && [ "$first_install" = no ]; then
+  echo "installed; the studio was stopped before this run and stays stopped (start: sudo systemctl start minhoon-studio)"
+  exit 0
+fi
+[ "$first_install" = no ] || systemctl enable minhoon-studio >/dev/null
 systemctl restart minhoon-studio
 sleep 3
 systemctl is-active minhoon-studio

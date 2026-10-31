@@ -1732,7 +1732,8 @@ class ReportEditorFramePageDOM(unittest.TestCase):
           const panel = document.querySelector('#study-panel-host .study-panel:not([hidden])')?.getBoundingClientRect();
           const seen = id => { const r = document.getElementById(id).getBoundingClientRect();
             return Math.min(box.bottom, r.bottom, innerHeight) - Math.max(box.top, r.top, 0); };
-          const column = host.parentElement;
+          // The editor is nested beside Clinical Context; notices and footer belong to the report column.
+          const column = host.closest('.report-p');
           return {height: box.height, least: ['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth'].reduce((n, k) => n + parseFloat(css[k]), 0),
                   overflow: column.scrollHeight - column.clientHeight,
                   covered: !!panel && box.left < panel.right && box.right > panel.left
@@ -2072,7 +2073,7 @@ PAGE_MUTANTS = [
      "if (follow && doc.activeElement === follow && follow.getAttribute('aria-hidden') !== 'true') revealCaret(follow);",
      "if (false) revealCaret(follow);", 'test_page_single_scroll_tab_shortcut_and_thousand_lines'),
     # Round 2 (Opus binding review of 9277ccd): each finding's fault put back.
-    ('W6R1-01-hard-minimum', 'main.html', '.redit { flex: 1; overflow: auto;', '.redit { flex: 1; min-height: 200px; overflow: auto;',
+    ('W6R1-01-hard-minimum', 'main.html', '.redit { flex: 1 1 0px; overflow: auto;', '.redit { flex: 1 1 0px; min-height: 200px; overflow: auto;',
      'test_page_frame_minimum_on_w3_layouts_with_notices_and_panel'),
     ('W6R1-01-column-scroll', 'main.html', '.report-p { overflow-y: auto; min-width: min-content; }', '.report-p { min-width: min-content; }',
      'test_page_frame_minimum_on_w3_layouts_with_notices_and_panel'),

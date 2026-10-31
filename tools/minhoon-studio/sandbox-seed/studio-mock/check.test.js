@@ -10,6 +10,8 @@ const read = name => JSON.parse(fs.readFileSync(path.join(__dirname, name), 'utf
 test('dataset: every study names a known patient, a unique n and a known state', () => {
   const d = read('dataset.json');
   const patients = new Set(d.patients.map(p => p.key));
+  // Every image the viewer opens carries this PatientID (dicomweb.js rewrites it), so none may be empty.
+  for (const p of d.patients) assert.ok(typeof p.id === 'string' && p.id.trim(), `patient ${p.key} has no id`);
   const seen = new Set();
   for (const s of d.studies) {
     assert.ok(Number.isInteger(s.n) && s.n > 0 && s.n < 10000, `study n ${s.n}`);

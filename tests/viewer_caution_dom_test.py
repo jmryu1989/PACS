@@ -1,5 +1,6 @@
 # coding: utf-8
 """C09/M17: shipped extensions at their browser/service boundary on a synthetic HTTP origin."""
+import base64
 import functools
 import http.server
 import json
@@ -164,6 +165,68 @@ class ViewerCautionDOM(unittest.TestCase):
         self.assertTrue(self.page.evaluate('workerManager.executeTask===originalTask'))
         self.page.evaluate("ext.onModeEnter();workerManager.executeTask=()=>Promise.resolve('later owner');ext.onModeExit()")
         self.assertEqual(self.page.evaluate('workerManager.executeTask()'), 'later owner')
+
+    def test_jpeg_lossless_stream_cut_short_fails_before_the_decoder(self):
+        # The pinned JS lossless decoder answers a stream cut short with a complete all-zero frame, so the
+        # check is on the codestream: an all-zero frame from a complete stream still displays.
+        self.script('sof3-decode'); self.script('image-load-status')
+        self.page.evaluate("""() => {
+          const element = document.createElement('div'); document.body.append(element);
+          window.currentImage = 'wadors:frame-a'; window.decoded = []; window.messages = [];
+          window.workerManager = {executeTask(name, method, task) {
+            decoded.push(task.transferSyntax);
+            return Promise.resolve({rows:2,columns:2,pixelData:new Uint16Array(4)});
+          }};
+          window.cornerstone = {getWebWorkerManager:()=>workerManager, cache:{getImage:()=>undefined},
+            Enums:{Events:{IMAGE_LOAD_FAILED:'failed',IMAGE_LOADED:'loaded',STACK_NEW_IMAGE:'stack',VIEWPORT_NEW_IMAGE_SET:'set'}},
+            eventTarget:new EventTarget(),getRenderingEngines:()=>[{getViewports:()=>[{element,getCurrentImageId:()=>currentImage}]}]};
+          window.ext = kinCreateImageLoadStatus();
+          ext.preRegistration({servicesManager:{services:{uiNotificationService:{show:m=>messages.push(m)},
+            viewportGridService:{EVENTS:{GRID_STATE_CHANGED:'grid'},subscribe:()=>({unsubscribe(){}})}}}});
+          ext.onModeEnter();
+          // 8-bit frames stay on the pinned decoder, as every frame does when the wasm decoder is unavailable.
+          window.decode = async (transferSyntax, bytes) => {
+            try {
+              await workerManager.executeTask('dicomImageLoader','decodeTask',{transferSyntax,pixelData:new Uint8Array(bytes),
+                imageFrame:{rows:2,columns:2,bitsAllocated:8,samplesPerPixel:1,pixelRepresentation:0}},{});
+              return 'shown';
+            } catch(error) {
+              cornerstone.eventTarget.dispatchEvent(new CustomEvent('failed',{detail:{imageId:currentImage,error}}));
+              return 'failed';
+            }
+          };
+        }""")
+        # Real encoded codestreams (tests/fixtures/sof3_cases.json). With the pinned decoder, a scan cut short behind
+        # an APP segment that carries FF D9 decoded to 2,556 of 2,560 wrong samples and was shown.
+        fixtures = json.loads((ROOT / 'tests/fixtures/sof3_cases.json').read_text(encoding='utf-8'))['cases']
+        app = bytes([0xff, 0xe1, 0x00, 0x04, 0xff, 0xd9])
+        com = bytes([0xff, 0xfe, 0x00, 0x06, 0x12, 0xff, 0xd9, 0x34])
+        cases = []
+        for name in ('p16-sv1-2d', 'p16-process14-predictor6'):
+            fixture = next(c for c in fixtures if c['name'] == name)
+            syntax, full = fixture['transferSyntax'], base64.b64decode(fixture['frames'][0]['codestream'])
+            sos = full.index(b'\xff\xda')
+            scan = sos + 2 + int.from_bytes(full[sos + 2:sos + 4], 'big')
+            tagged = full[:sos] + app + full[sos:]
+            cases += [(syntax, 'complete', full, 'shown'),
+                      (syntax, 'complete with APP/COM carrying FF D9', full[:sos] + app + com + full[sos:], 'shown'),
+                      (syntax, 'complete with padding', tagged + b'\x00', 'shown'),
+                      (syntax, 'scan cut short', full[:scan + 8], 'failed'),
+                      (syntax, 'scan cut short behind APP FF D9', tagged[:scan + len(app) + 8], 'failed'),
+                      (syntax, 'cut at the end of an APP segment', tagged[:sos + len(app)], 'failed'),
+                      (syntax, 'cut in the scan header', full[:sos + 3], 'failed'),
+                      (syntax, 'EOI missing', full[:-2], 'failed')]
+        cases.append(('1.2.840.10008.1.2.1', 'little endian', bytes([0x12, 0x34, 0x56, 0x78]), 'shown'))
+        for syntax, label, data, outcome in cases:
+            data = list(data)
+            with self.subTest(syntax=syntax, case=label):
+                before = self.page.evaluate('decoded.length')
+                self.assertEqual(self.page.evaluate('([s, b]) => decode(s, b)', [syntax, data]), outcome)
+                self.assertEqual(self.page.evaluate('decoded.length') - before, 0 if outcome == 'failed' else 1,
+                                 'a stream cut short never reaches the decoder')
+                if outcome == 'failed':
+                    expect(self.page.get_by_role('alert')).to_contain_text('해독 결과가 비어 있거나 불완전')
+        self.page.evaluate('ext.onModeExit()')
 
     def test_pixel_failure_explanation_follows_the_displayed_image_and_mode(self):
         self.script('sof3-decode'); self.script('image-load-status')

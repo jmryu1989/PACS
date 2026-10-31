@@ -18,7 +18,7 @@ class Element {
  remove(){}
  querySelectorAll(){return [];}
 }
-function fixture(kind='orthographic',stackFrames=7,cachedInstances=[]){
+function fixture(kind='orthographic',stackFrames=7,cachedInstances=[],stackHandler=true){
  const document=new Element(),window=new Element(),timers=new Map();let nextTimer=0,current,allowed=true,resolveOld,rejectOld,requests=0,nativePlays=0,lastPlaybackRate;
  const frameCache=new Set(),deferred=new Map();
  const defer=(fn,ms)=>{const id=++nextTimer;deferred.set(id,{fn,ms});return id;},cancel=id=>deferred.delete(id);
@@ -61,7 +61,7 @@ function fixture(kind='orthographic',stackFrames=7,cachedInstances=[]){
  // Model that service boundary, leaving all DICOM instances untouched.
  const originalCreate=instances=>instances.map(instance=>({instances:[instance],FrameRate:instance.FrameTime,SOPClassHandlerId:handlerId}));
  const handler={getDisplaySetsFromSeries:originalCreate},cached=originalCreate(cachedInstances);
- extension.preRegistration({extensionManager:{getModuleEntry:id=>{assert.equal(id,handlerId);return handler;}},servicesManager:{services:{
+ extension.preRegistration({extensionManager:{getModuleEntry:id=>{assert.equal(id,handlerId);return stackHandler?handler:undefined;}},servicesManager:{services:{
   cineService:cine,viewportGridService:grid,cornerstoneViewportService:{getCornerstoneViewport:()=>current},displaySetService:{getActiveDisplaySets:()=>cached}
  }}});extension.onModeEnter();
  const find=predicate=>{const visit=node=>node instanceof Element&&(predicate(node)?node:node.children.map(visit).find(Boolean));return visit(document.body);};
@@ -117,6 +117,8 @@ for(const [name,attributes,expected] of [
  ['invalid recommended rate falls back to Cine Rate', {RecommendedDisplayFrameRate:'bad',CineRate:12},12],
  ['nonpositive rates fall back to Frame Time', {RecommendedDisplayFrameRate:0,CineRate:-12,FrameTime:50},20],
  ['non-finite rates keep the existing default', {RecommendedDisplayFrameRate:Infinity,CineRate:NaN},24],
+ ['a source rate above the playable range opens at its maximum', {CineRate:120,FrameTime:40},90],
+ ['a source rate below one frame per second opens at its minimum', {RecommendedDisplayFrameRate:0.3},1],
 ])test(`multiframe opens and plays at ${expected} FPS: ${name}`,async()=>{
  const f=fixture('stack'),instance=Object.freeze({NumberOfFrames:7,...attributes}),before={...instance};try{
   assert.equal(f.openSeries(instance),expected);assert.equal(f.rate(),expected);
@@ -125,6 +127,14 @@ for(const [name,attributes,expected] of [
   assert.deepEqual(instance,before);
  }finally{f.close();}
  assert.equal(f.handlerRestored(),true);
+});
+
+test('a viewer without the stack handler loses only the source-rate hint',async()=>{
+ const f=fixture('stack',7,[],false);try{
+  assert.equal(f.openSeries({NumberOfFrames:7,CineRate:12}),24);
+  f.range(2,6);f.jump(true);await new Promise(setImmediate);
+  assert.equal(f.old.shown,'image/5');
+ }finally{f.close();}
 });
 
 test('a replacement series gets its own rate, including the old default when absent',()=>{

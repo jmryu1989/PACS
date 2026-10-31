@@ -338,13 +338,13 @@ export class PacsController {
   /** 초안 버리기 — 확정본으로 돌아간다. 내 초안만 비운다 */
   @Delete('studies/:uid/draft')
   discardDraft(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
-    return this.svc.discardDraft(uid, body, caller(req), draftSession(req));
+    return this.withDraftFacts(req, facts => this.svc.discardDraft(uid, body, caller(req), draftSession(req), facts));
   }
 
   /** 관리자 강제 해제 — 모든 초안을 폐기 이력으로 보존한 뒤 비우고 검사의 초안 세대를 바꾼다 */
   @Delete('studies/:uid/draft/force')
   forceDiscardDrafts(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
-    return this.svc.forceDiscardDrafts(uid, body, caller(req), draftSession(req));
+    return this.withDraftFacts(req, facts => this.svc.forceDiscardDrafts(uid, body, caller(req), draftSession(req), facts));
   }
 
   /** 확정 — save / approve / addendum / reset / preliminary. 내용·버전·RS를 한 트랜잭션으로 */

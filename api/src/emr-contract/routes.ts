@@ -89,8 +89,11 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['POST studies/:uid/tech-note'] },
   { kinds: ['private-draft', 'report-head', 'report-evidence', 'report-version'], operation: 'write', causes: ['user-view', 'background-fetch'],
     routes: ['PUT studies/:uid/report'] },
+  // A discard answers the stored report state as a commit does; that report version is the answer's 열람 target.
+  { kinds: ['private-draft', 'report-head', 'report-evidence', 'report-version'], operation: 'write', causes: ['user-view'],
+    routes: ['DELETE studies/:uid/draft'] },
   { kinds: ['private-draft', 'report-head', 'report-evidence'], operation: 'write', causes: ['user-view'],
-    routes: ['DELETE studies/:uid/draft', 'DELETE studies/:uid/draft/force'] },
+    routes: ['DELETE studies/:uid/draft/force'] },
   { kinds: ['report-head', 'report-version', 'private-draft', 'report-evidence'], operation: 'write', causes: ['user-view'],
     routes: ['POST studies/:uid/report/commit'] },
   { kinds: ['report-version', 'report-evidence'], operation: 'read', causes: ['user-view', 'background-fetch'],
