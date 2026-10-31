@@ -118,14 +118,18 @@ side ignores the other's cookie by name and the studio never logs cookies.
 - **Collect the branch as commits:** `ssh ubuntu@61.109.239.207 'sudo -u studio git -C /opt/minhoon-studio/sandbox bundle create - studio-base..HEAD' > studio.bundle`
   then `git fetch studio.bundle HEAD:refs/studio/minhoon` locally (base = the main SHA in the `studio-base` commit message).
   Studio commits are not product history; reuse clean diffs only after the normal cross review against the real backend (D2/D3).
-- **New main in the sandbox (refresh):** between sessions only (the refresh stops the unit while it merges). Build a
+- **New main in the sandbox (refresh):** between sessions only (the refresh stops the unit while it merges; if the
+  unit or a process of user `studio` is still running after the stop, the install stops before touching the sandbox). Build a
   bundle at the new main and rerun `install.sh <bundle>`; a `BASE_SHA` different from the sandbox's `studio-base`
   merges that main into Minhoon's branch (`deploy/make-sandbox.py --refresh`): every studio commit stays, the
   bundle/OHIF config are rebuilt, the merged files pass the chat's build/syntax check (`server/build.js`), and
   `studio-base` moves to the new main (old one: tag `studio-base-<sha12>`). The summary is
-  `data/refresh-<sha>-<backup id>.json`. **A conflict (both sides changed the same lines), a failed builder or a failed
-  syntax check stops the install** with the sandbox unchanged (HEAD, `studio-base`, files) and the conflicted files or
-  check errors in that JSON; a running studio is started again on the old sandbox. Resolve by hand in a copy, then
+  `data/refresh-<sha>-<backup id>.json`. **A conflict (both sides changed the same lines), a failed builder, a failed
+  syntax check, a failed commit/tag or any other error stops the install** with the sandbox put back (HEAD, branch,
+  `studio-base` and every ref, index, files) and the conflicted files or errors in that JSON. A studio that was running
+  is started again on the old sandbox only when the JSON says `sandbox_restored: true` and HEAD matches; otherwise it
+  stays stopped for a person to inspect (`sandbox.<backup id>` is the copy from before the run). An install never
+  starts a studio that was stopped before it (Pause below); only a first install starts it. Resolve by hand in a copy, then
   rerun. A changed `studio-mock/dataset.json` resets the mock state (drafts in the mirror); the old one stays as
   `data/mock-state.json.<backup id>`. Bundle, from the product checkout (`<b>` = an empty folder):
   ```powershell

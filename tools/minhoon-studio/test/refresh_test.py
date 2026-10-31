@@ -81,7 +81,7 @@ class RefreshTest(unittest.TestCase):
     def sandbox_state(self):
         files = {rel: Path(self.sandbox, rel).read_bytes() for rel in (PAGE, OTHER)}
         return (git(self.sandbox, "rev-parse", "HEAD"), git(self.sandbox, "rev-parse", "studio-base^{commit}"),
-                git(self.sandbox, "tag", "--list"), git(self.sandbox, "status", "--porcelain", "--untracked-files=all"),
+                git(self.sandbox, "for-each-ref", "--format=%(refname) %(objectname)"), git(self.sandbox, "status", "--porcelain", "--untracked-files=all"),
                 git(self.sandbox, "rev-parse", "--abbrev-ref", "HEAD"), files)
 
     def assert_stopped_unchanged(self, run, before, result):
@@ -153,6 +153,37 @@ class RefreshTest(unittest.TestCase):
         self.assertFalse(Path(self.sandbox, "scripts/build-ohif-config.py").exists())
         self.assertEqual(summary["head"], before[0])
 
+    def test_manifest_without_artifact_stops_and_changes_nothing(self):
+        # A KeyError from the bundle manifest is a rebuild failure like any other, not an uncaught crash mid-merge.
+        write(self.product, "scripts/build-main-split-bundle.py", "print(1)\n")
+        write(self.product, "scripts/main-split-order.json", json.dumps({"page": PAGE, "sources": []}))
+        sha_c = self.commit_product("C")
+        before = self.sandbox_state()
+        run = self.refresh(sha_c)
+        summary = self.assert_stopped_unchanged(run, before, "rebuild-failed")
+        self.assertIn("KeyError", run.stderr)
+        self.assertEqual(summary["head"], before[0])
+
+    def test_rejected_commit_restores_everything(self):
+        # The merge passed every check but the commit itself is refused: the staged merge must not stay behind.
+        hook = Path(self.sandbox, ".git", "hooks", "pre-commit")
+        hook.write_text("#!/bin/sh\nexit 1\n", newline="\n")
+        hook.chmod(0o755)
+        before = self.sandbox_state()
+        self.assert_stopped_unchanged(self.refresh(), before, "commit-failed")
+
+    def test_tag_failure_after_the_commit_restores_head_and_refs(self):
+        # The commit succeeded and the old-base tag was made, then studio-base cannot move: HEAD, the branch and every
+        # tag go back, so studio-base never describes a sandbox it is not the base of.
+        lock = Path(self.sandbox, ".git", "refs", "tags", "studio-base.lock")
+        lock.write_text("")
+        before = self.sandbox_state()
+        summary = self.assert_stopped_unchanged(self.refresh(), before, "commit-failed")
+        self.assertNotIn(f"refs/tags/studio-base-{self.sha_a[:12]}", before[2])
+        self.assertEqual(summary["head"], before[0])
+        lock.unlink()
+        self.assertEqual(json.loads(self.refresh().stdout)["result"], "merged")
+
     def test_second_run_is_a_no_op(self):
         self.assertEqual(self.refresh().returncode, 0)
         head = git(self.sandbox, "rev-parse", "HEAD")
@@ -166,6 +197,9 @@ class RefreshTest(unittest.TestCase):
         head = git(self.sandbox, "rev-parse", "HEAD")
         run = self.refresh()
         self.assertNotEqual(run.returncode, 0)
+        summary = json.loads(run.stdout)
+        self.assertEqual((summary["result"], summary["sandbox_restored"], summary["head_before"]), ("dirty", True, head))
+        self.assertEqual(Path(self.sandbox, OTHER).read_text(), "half an edit\n")
         self.assertEqual(git(self.sandbox, "rev-parse", "HEAD"), head)
         self.assertEqual(git(self.sandbox, "log", "-1", "--format=%(trailers:key=Studio-Base-Sha,valueonly)", "studio-base"), self.sha_a)
 

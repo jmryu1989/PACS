@@ -10,8 +10,10 @@
 # Re-running updates the app and keeps the sandbox (its commits), the data, the Claude login, the passwords and
 # etc/config.json + etc/studio.env (written only when absent; a new claude-config/<name> folder is added to an
 # existing config, nothing else in it changes). A bundle with a newer BASE_SHA refreshes the sandbox: main is merged
-# into the studio branch (make-sandbox.py --refresh; every studio commit stays); a conflict or a failed check stops the
-# install and leaves the sandbox as it was. What a run replaces or copies first is kept beside it as
+# into the studio branch (make-sandbox.py --refresh; every studio commit stays) with the unit stopped; a conflict or a
+# failed check or step stops the install and puts the sandbox back as it was. A studio that was stopped before the run
+# stays stopped; a running one is started again only on a sandbox verified as merged or restored (a first install
+# starts it). What a run replaces or copies first is kept beside it as
 # <name>.bak-YYYYMMDD-HHMMSS-<pid>, one id per run, so every run can be rolled back (remove old ones by hand).
 set -euo pipefail
 
@@ -36,6 +38,35 @@ BAK=bak-$(date +%Y%m%d-%H%M%S)-$$
 backup_move() { [ ! -e "$1.$BAK" ] || { echo "backup $1.$BAK already exists; refusing"; exit 1; }; mv "$1" "$1.$BAK"; }
 backup_copy() { [ ! -e "$1.$BAK" ] || { echo "backup $1.$BAK already exists; refusing"; exit 1; }; cp -a "$1" "$1.$BAK"; }
 echo "backup id: $BAK"
+
+# The studio's state before this run decides its state after it: an update never starts a studio the owner stopped
+# (10-31 review: the final restart started a paused studio). Only a first install, with no unit yet, starts it.
+if systemctl is-active --quiet minhoon-studio; then was_active=yes; else was_active=no; fi
+first_install=no; [ -f /etc/systemd/system/minhoon-studio.service ] || first_install=yes
+
+# Stop the unit and confirm nothing of it still runs: a chat edit writing the sandbox during the backup or the merge
+# would be lost to the refresh's restore. Exits without touching anything if that cannot be confirmed.
+stop_studio() {
+  if [ "$(systemctl show -p LoadState --value minhoon-studio 2>/dev/null)" = loaded ]; then
+    systemctl stop minhoon-studio || echo "   systemctl stop minhoon-studio failed"
+  fi
+  local left
+  left=$(pgrep -u studio -a || true)
+  if systemctl is-active --quiet minhoon-studio || [ -n "$left" ]; then
+    echo "could not confirm the studio stopped (unit $(systemctl is-active minhoon-studio 2>/dev/null || true); processes of user studio: ${left:-none})"
+    echo "the sandbox was not touched; stop it by hand, then rerun"
+    exit 1
+  fi
+}
+
+# True when the refresh summary says the sandbox was verified as before the run and git agrees on HEAD.
+sandbox_restored() {
+  local head
+  head=$(python3 -c 'import json, sys
+s = json.load(open(sys.argv[1], encoding="utf-8"))
+print(s["head_before"] if s.get("sandbox_restored") is True else "")' "$1" 2>/dev/null) || return 1
+  [ -n "$head" ] && [ "$(sudo -u studio git -C "$ROOT/sandbox" rev-parse HEAD 2>/dev/null)" = "$head" ]
+}
 
 # The port must be free or already ours.
 if ss -ltnH "( sport = :$PORT )" | grep -q . && ! systemctl is-active --quiet minhoon-studio; then
@@ -94,17 +125,21 @@ else
   current=$(sudo -u studio git -C "$ROOT/sandbox" log -1 --format='%(trailers:key=Studio-Base-Sha,valueonly)' studio-base | tr -d '[:space:]')
   if [ "$current" != "$BASE_SHA" ]; then
     echo "   refresh $current -> $BASE_SHA (merge into $(sudo -u studio git -C "$ROOT/sandbox" rev-parse --abbrev-ref HEAD))"
-    # No chat edit may write the sandbox during the merge; the unit is started again below.
-    was_active=no; systemctl is-active --quiet minhoon-studio && was_active=yes
-    systemctl stop minhoon-studio 2>/dev/null || true
+    # No chat edit may write the sandbox during the merge; the unit is started again at the end if it was running.
+    stop_studio
     backup_copy "$ROOT/sandbox"
     # A changed studio-mock/dataset.json resets the mock state (mock.js); keep the old one.
     if [ -f "$ROOT/data/mock-state.json" ]; then backup_copy "$ROOT/data/mock-state.json"; fi
-    if ! sandbox_tool --refresh --python python3 --node "$ROOT/node/bin/node" | tee "$ROOT/data/refresh-$BASE_SHA-$BAK.json"; then
-      # make-sandbox.py left the sandbox as it was (data/refresh-*.json lists the conflicts or check errors). The new
-      # app runs with it, so a studio that was running keeps running; a paused one stays stopped.
-      [ "$was_active" = yes ] && systemctl start minhoon-studio
-      echo "sandbox refresh to $BASE_SHA stopped: see $ROOT/data/refresh-$BASE_SHA-$BAK.json; resolve by hand, then rerun"
+    summary_json=$ROOT/data/refresh-$BASE_SHA-$BAK.json
+    if ! sandbox_tool --refresh --python python3 --node "$ROOT/node/bin/node" | tee "$summary_json"; then
+      echo "sandbox refresh to $BASE_SHA stopped: see $summary_json; resolve by hand, then rerun"
+      if sandbox_restored "$summary_json"; then
+        # The new app runs with the old sandbox: a studio that was running keeps running, a paused one stays stopped.
+        if [ "$was_active" = yes ]; then systemctl start minhoon-studio; fi
+      else
+        # No verified restore (failed, or no summary at all): the chat must not edit a sandbox in an unknown state.
+        echo "the sandbox was NOT verified as restored; the studio stays stopped. Inspect $ROOT/sandbox (copy before the run: $ROOT/sandbox.$BAK)"
+      fi
       exit 1
     fi
   fi
@@ -215,7 +250,11 @@ chmod 600 "$ROOT/data/users.json" "$ROOT/data/sessions.json" 2>/dev/null || true
 echo "== systemd"
 install -o root -g root -m 644 "$ROOT/app/deploy/minhoon-studio.service" /etc/systemd/system/minhoon-studio.service
 systemctl daemon-reload
-systemctl enable minhoon-studio >/dev/null
+if [ "$was_active" = no ] && [ "$first_install" = no ]; then
+  echo "installed; the studio was stopped before this run and stays stopped (start: sudo systemctl start minhoon-studio)"
+  exit 0
+fi
+[ "$first_install" = no ] || systemctl enable minhoon-studio >/dev/null
 systemctl restart minhoon-studio
 sleep 3
 systemctl is-active minhoon-studio

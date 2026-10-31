@@ -15,9 +15,11 @@ studio commit plus the merge, and the diff against studio-base is the studio's o
 generated bundle and OHIF config are rebuilt from the merged sources and the result goes through the chat's own
 build/syntax check (server/build.js), as after a chat edit.
 
-The refresh stops and leaves the sandbox exactly as it was (HEAD, studio-base, working tree) when both sides changed the
-same lines (the conflicted files are listed in the stdout JSON), when a builder fails, or when the merged files fail
-the syntax check (two clean merges can still declare one name twice). Resolving is a person's call, not this tool's.
+The refresh stops and puts the sandbox back exactly as it was (HEAD, branch, studio-base and every other ref, index,
+working tree) when both sides changed the same lines (the conflicted files are listed in the stdout JSON), when a
+builder fails, when the merged files fail the syntax check (two clean merges can still declare one name twice), when
+the commit or a tag update fails, or on any other error or SIGTERM/SIGHUP. The JSON's sandbox_restored is true only
+when that state was verified afterwards. Resolving is a person's call, not this tool's.
 """
 import argparse
 import datetime
@@ -25,6 +27,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -120,48 +123,71 @@ def check_merged(out, args):
     return ([] if result.get("ok") else (result.get("errors") or ["the syntax check failed without a message"])), checked
 
 
-def abort_merge(out, head_before):
-    """Undo the uncommitted merge; returns what is still wrong afterwards (empty when the sandbox is as before)."""
-    subprocess.run(["git", "merge", "--abort"], cwd=out, capture_output=True)
-    if (git_out(out, "rev-parse", "HEAD").strip() != head_before
-            or git_out(out, "status", "--porcelain=v1", "--untracked-files=all").strip()):
-        # merge --abort keeps unstaged edits, e.g. a builder's output written before a failure. The refresh started
-        # from a clean tree with no untracked files (checked above), so everything left now came from this run.
-        subprocess.run(["git", "reset", "-q", "--hard", head_before], cwd=out, capture_output=True)
-        subprocess.run(["git", "clean", "-fdq"], cwd=out, capture_output=True)
+class Stop(Exception):
+    """A refresh step failed; `result` names it in the summary JSON."""
+
+    def __init__(self, result, message, **extra):
+        super().__init__(message)
+        self.result, self.extra = result, extra
+
+
+def interrupted(signum, _frame):
+    # Default SIGTERM/SIGHUP (e.g. the ssh session running install.sh drops) would end the run with a half-made merge
+    # or commit and no restore; as an exception it goes through the same restore as any failed step.
+    raise Stop("interrupted", f"signal {signum}")
+
+
+def snapshot(out):
+    """What a failed refresh must put back: HEAD (sha and branch) and every ref, tags included."""
+    symbolic = subprocess.run(["git", "symbolic-ref", "-q", "HEAD"], cwd=out, capture_output=True, text=True).stdout.strip()
+    refs = dict(line.split(" ", 1)[::-1] for line in
+                git_out(out, "for-each-ref", "--format=%(objectname) %(refname)").splitlines() if line)
+    return {"head": git_out(out, "rev-parse", "HEAD").strip(), "symbolic": symbolic, "refs": refs}
+
+
+def restore(out, before):
+    """Put HEAD, every ref, the index and the working tree back as they were at `before`; returns what is still wrong
+    afterwards (empty when the sandbox is as before). Each step runs even if an earlier one failed."""
+    def quiet(*args):
+        subprocess.run(["git", *args], cwd=out, capture_output=True)
+
+    quiet("merge", "--abort")
+    try:
+        now = snapshot(out)["refs"]
+    except (subprocess.CalledProcessError, OSError):
+        now = {}
+    for ref, sha in before["refs"].items():
+        if now.get(ref) != sha:
+            quiet("update-ref", "--no-deref", ref, sha)
+    for ref in now.keys() - before["refs"].keys():
+        quiet("update-ref", "--no-deref", "-d", ref)
+    if before["symbolic"]:
+        quiet("symbolic-ref", "HEAD", before["symbolic"])
+    # reset --hard also drops a staged merge and MERGE_HEAD; clean removes what a builder wrote. The refresh started
+    # from a clean tree with no untracked files (checked first), so everything it removes came from this run.
+    quiet("reset", "-q", "--hard", before["head"])
+    quiet("clean", "-fdq")
     problems = []
-    if git_out(out, "rev-parse", "HEAD").strip() != head_before:
+    try:
+        after = snapshot(out)
+        status = git_out(out, "status", "--porcelain=v1", "--untracked-files=all").strip()
+    except (subprocess.CalledProcessError, OSError) as error:
+        return [f"could not read the sandbox state: {error}"]
+    if after["head"] != before["head"] or after["symbolic"] != before["symbolic"]:
         problems.append("HEAD moved")
-    if git_out(out, "status", "--porcelain=v1", "--untracked-files=all").strip():
+    changed = sorted(r for r in before["refs"].keys() | after["refs"].keys() if before["refs"].get(r) != after["refs"].get(r))
+    if changed:
+        problems.append(f"refs differ: {changed}")
+    if status:
         problems.append("the working tree is not clean")
+    if os.path.exists(os.path.join(out, ".git", "MERGE_HEAD")):
+        problems.append("a merge is still in progress")
     return problems
 
 
-def stop(out, summary, head_before, result, message, **extra):
-    """Abort the merge, print the summary JSON (install.sh keeps it) and exit non-zero; studio-base was not moved."""
-    problems = abort_merge(out, head_before)
-    print(json.dumps({**summary, "result": result, **extra, "head": git_out(out, "rev-parse", "HEAD").strip(),
-                      "sandbox_restored": not problems, "restore_problems": problems}, indent=1))
-    where = (f"sandbox left at {head_before}, studio-base not moved" if not problems else
-             f"ALSO the abort did not restore the sandbox ({'; '.join(problems)}); inspect {out}")
-    sys.exit(f"refresh stopped: {message}; {where}")
-
-
-def refresh(args):
-    out = os.path.abspath(args.out)
-    if not os.path.exists(os.path.join(out, ".git")):
-        sys.exit(f"{out} holds no sandbox to refresh")
-    if git_out(out, "status", "--porcelain=v1", "--untracked-files=all").strip():
-        sys.exit(f"{out} has uncommitted changes (a chat edit in progress?); stop the studio and try again")
-    old_base = git_out(out, "rev-parse", "studio-base^{commit}").strip()
-    old_sha = git_out(out, "log", "-1", "--format=%(trailers:key=Studio-Base-Sha,valueonly)", old_base).strip()
-    head_before = git_out(out, "rev-parse", "HEAD").strip()
-    branch = git_out(out, "rev-parse", "--abbrev-ref", "HEAD").strip()
-    summary = {"sandbox": out, "branch": branch, "previous_base_sha": old_sha, "base_sha": args.sha,
-               "head_before": head_before}
-    if old_sha == args.sha:
-        print(json.dumps({**summary, "result": "already-at-base", "head": head_before}, indent=1))
-        return
+def merge_and_check(out, args, summary, old_base, old_sha):
+    """Every step that writes the sandbox: merge, rebuild, check, commit, tags. Raises on any failure; the caller
+    restores the snapshot taken before it."""
     tree = product_tree(out, open_archive(args))
     message = f"studio base: product main {args.sha}\n\nStudio-Kind: base\nStudio-Base-Sha: {args.sha}\n"
     new_base = subprocess.run(["git", *IDENTITY, "commit-tree", tree, "-p", old_base, "-F", "-"], cwd=out, check=True,
@@ -171,30 +197,78 @@ def refresh(args):
     conflicts = [f for f in git_out(out, "diff", "--name-only", "--diff-filter=U").splitlines() if f]
     if conflicts:
         # Taking one side per file would also drop the other side's non-conflicting changes in that file.
-        stop(out, summary, head_before, "conflict", "both sides changed " + ", ".join(conflicts),
-             conflicts=conflicts, new_base_commit=new_base)
+        raise Stop("conflict", "both sides changed " + ", ".join(conflicts), conflicts=conflicts, new_base_commit=new_base)
     if merged.returncode:
-        stop(out, summary, head_before, "merge-failed", merged.stderr.strip() or merged.stdout.strip())
+        raise Stop("merge-failed", merged.stderr.strip() or merged.stdout.strip())
     try:
         regenerated = rebuild_generated(out, args.python)
-    except (RuntimeError, subprocess.CalledProcessError, OSError, ValueError) as error:
-        stop(out, summary, head_before, "rebuild-failed", f"rebuild after the merge failed: {error}")
+    except Exception as error:  # a builder's own failure, a stray file, or a manifest without "artifact" (KeyError)
+        raise Stop("rebuild-failed", f"rebuild after the merge failed: {type(error).__name__}: {error}") from error
     errors, checked = check_merged(out, args)
     if errors:
-        stop(out, summary, head_before, "check-failed", "the merged files fail the build/syntax check:\n" + "\n".join(errors),
-             check_errors=errors)
+        raise Stop("check-failed", "the merged files fail the build/syntax check:\n" + "\n".join(errors),
+                   check_errors=errors)
+    branch, head_before = summary["branch"], summary["head_before"]
     body = [f"studio refresh: product main {args.sha}", "",
             f"Merged the product tree at main {args.sha} (was {old_sha}) into {branch}; every studio commit is kept.",
             "No file was changed on both sides; the merged files passed the build/syntax check.", "",
             "Studio-Kind: refresh", f"Studio-Base-Sha: {args.sha}", f"Studio-Previous-Base-Sha: {old_sha}"]
-    subprocess.run(["git", *IDENTITY, "commit", "-q", "-F", "-"], cwd=out, check=True, input="\n".join(body) + "\n", text=True)
     old_tag = "studio-base-" + (old_sha or old_base)[:12]
-    if subprocess.run(["git", "rev-parse", "-q", "--verify", f"refs/tags/{old_tag}"], cwd=out, capture_output=True).returncode:
-        git(out, "tag", old_tag, old_base)
-    git(out, "tag", "-f", "studio-base", new_base)
-    print(json.dumps({**summary, "result": "merged", "new_base_commit": new_base, "head": git_out(out, "rev-parse", "HEAD").strip(),
-                      "old_base_tag": old_tag, "regenerated": regenerated, "syntax_checked": checked,
-                      "studio_commits": len(git_out(out, "log", "--format=%H", f"{old_base}..{head_before}").split())}, indent=1))
+    try:
+        subprocess.run(["git", *IDENTITY, "commit", "-q", "-F", "-"], cwd=out, check=True, input="\n".join(body) + "\n",
+                       text=True, stdout=sys.stderr)
+        if subprocess.run(["git", "rev-parse", "-q", "--verify", f"refs/tags/{old_tag}"], cwd=out, capture_output=True).returncode:
+            git(out, "tag", old_tag, old_base)
+        git(out, "tag", "-f", "studio-base", new_base)
+    except (subprocess.CalledProcessError, OSError) as error:
+        raise Stop("commit-failed", f"commit or tag after the merge failed: {error}") from error
+    return {**summary, "result": "merged", "new_base_commit": new_base, "head": git_out(out, "rev-parse", "HEAD").strip(),
+            "old_base_tag": old_tag, "regenerated": regenerated, "syntax_checked": checked,
+            "studio_commits": len(git_out(out, "log", "--format=%H", f"{old_base}..{head_before}").split())}
+
+
+def refresh(args):
+    """sandbox_restored in the summary JSON is true only when the sandbox was verified to be as before the run
+    (install.sh starts the studio again only then)."""
+    out = os.path.abspath(args.out)
+    if not os.path.exists(os.path.join(out, ".git")):
+        sys.exit(f"{out} holds no sandbox to refresh")
+    before = snapshot(out)
+    head_before = before["head"]
+    branch = git_out(out, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    summary = {"sandbox": out, "branch": branch, "base_sha": args.sha, "head_before": head_before}
+    if git_out(out, "status", "--porcelain=v1", "--untracked-files=all").strip():
+        print(json.dumps({**summary, "result": "dirty", "head": head_before, "sandbox_restored": True,
+                          "restore_problems": []}, indent=1))
+        sys.exit(f"{out} has uncommitted changes (a chat edit in progress?); nothing was changed")
+    old_base = git_out(out, "rev-parse", "studio-base^{commit}").strip()
+    old_sha = git_out(out, "log", "-1", "--format=%(trailers:key=Studio-Base-Sha,valueonly)", old_base).strip()
+    summary["previous_base_sha"] = old_sha
+    if old_sha == args.sha:
+        print(json.dumps({**summary, "result": "already-at-base", "head": head_before}, indent=1))
+        return
+    for name in ("SIGTERM", "SIGHUP"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), interrupted)
+    try:
+        done = merge_and_check(out, args, summary, old_base, old_sha)
+    except BaseException as error:  # includes KeyboardInterrupt: nothing may leave a half-made refresh behind
+        for name in ("SIGTERM", "SIGHUP", "SIGINT"):  # a second signal must not cut the restore short
+            if hasattr(signal, name):
+                signal.signal(getattr(signal, name), signal.SIG_IGN)
+        result, extra = (error.result, error.extra) if isinstance(error, Stop) else ("failed", {})
+        message = str(error) if isinstance(error, Stop) else f"{type(error).__name__}: {error}"
+        problems = restore(out, before)
+        try:
+            head = git_out(out, "rev-parse", "HEAD").strip()
+        except (subprocess.CalledProcessError, OSError):
+            head = None
+        print(json.dumps({**summary, "result": result, **extra, "head": head,
+                          "sandbox_restored": not problems, "restore_problems": problems}, indent=1))
+        where = (f"sandbox left at {head_before}, studio-base and every other ref as before" if not problems else
+                 f"ALSO the restore did not put the sandbox back ({'; '.join(problems)}); inspect {out}")
+        sys.exit(f"refresh stopped: {message}; {where}")
+    print(json.dumps(done, indent=1))
 
 
 def main():
