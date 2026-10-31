@@ -1217,6 +1217,10 @@ class ClinicianRequestDOMTest(Harness):
         self.assertEqual(["saved", C_CANCELLED, ""], self.view()["items"][1]["note"])
         expect(second).to_have_attribute("data-state", "Cancelled")
         self.assertEqual((3, "Cancelled"), (self.server.items[rid(2)]["revision"], self.server.items[rid(2)]["state"]))
+        # The typed reason is the one sent, and the cancelled request shows it after the list is read again.
+        self.assertEqual(("cancel", "SYN changed plans"), (self.writes[-1][1]["action"], self.writes[-1][1]["note"]))
+        self.wait_until(lambda: self.view()["items"][1]["lines"][-1].strip() == "Cancel Reason SYN changed plans",
+                        "the cancelled request shows its typed reason")
 
     def test_c04_a_b_a_late_list_answers_never_paint(self):
         a, b = uid(1), uid(2)

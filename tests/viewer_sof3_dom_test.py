@@ -165,6 +165,17 @@ class ViewerSof3DecodeDOM(unittest.TestCase):
         self.assertTrue(state['unavailable'])
         self.assertEqual((state['routed'], state['rejected'], state['workers']), (0, 0, 0))
         expect(self.page.get_by_role('alert')).to_have_count(0)
+        # On this path a scan cut short behind an APP segment carrying FF D9 is refused before the pinned decoder,
+        # which would show it as a full frame of wrong samples.
+        full = base64.b64decode(case['frames'][0]['codestream'])
+        sos = full.index(b'\xff\xda')
+        scan = sos + 2 + int.from_bytes(full[sos + 2:sos + 4], 'big')
+        app = bytes([0xff, 0xe1, 0x00, 0x04, 0xff, 0xd9])
+        cut = base64.b64encode((full[:sos] + app + full[sos:])[:scan + len(app) + 8]).decode('ascii')
+        result = self.page.evaluate('([spec]) => loadFrame(currentImage, spec)', [self.spec(case, case['frames'][0], cut)])
+        self.assertFalse(result['ok'])
+        self.assertEqual(self.page.evaluate('calls.length'), len(case['frames']))
+        expect(self.page.get_by_role('alert')).to_contain_text('해독 결과가 비어 있거나 불완전')
         self.page.evaluate('ext.onModeExit()')
 
 

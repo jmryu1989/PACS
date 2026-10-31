@@ -55,6 +55,22 @@ window.KinViewerUXToolbar = (() => {
     const toolbar = element('section'); toolbar.className = 'kin-ux-toolbar'; toolbar.dataset.kinUxOwned = '';
     toolbar.setAttribute('aria-label', 'Image Tools');
     const bar = element('div', '', toolbar); bar.className = 'kin-ux-tools-bar'; bar.setAttribute('role', 'toolbar'); bar.setAttribute('aria-label', 'Frequent Tools');
+    // The one-line row has no room for a scrollbar track. Where the frequent tools do not fit (a portrait
+    // screen with both side panels open), arrows like the series strip's page through them; they stay in
+    // the bar the reader chose rather than moving to More.
+    const pagers = [['Previous Tools', -1, '‹', '앞의 도구를 보여 줍니다.'], ['Next Tools', 1, '›', '뒤의 도구를 보여 줍니다.']].map(([name, direction, text, tip]) => {
+      const node = button(text, null, () => bar.scrollBy({ left: direction * bar.clientWidth, behavior: 'smooth' }));
+      node.className = 'kin-ux-tools-scroll'; node.setAttribute('aria-label', name); node.title = tip; node.hidden = true; return node;
+    });
+    bar.before(pagers[0]); bar.after(pagers[1]);
+    function overflow() {
+      if (ended) return;
+      // Measured against the width the bar has without the arrows, so showing them never hides them again.
+      const shown = !pagers[0].hidden, gap = parseFloat(getComputedStyle(toolbar).columnGap) || 0;
+      const room = bar.clientWidth + (shown ? pagers.reduce((sum, node) => sum + node.offsetWidth + gap, 0) : 0);
+      pagers.forEach(node => { node.hidden = bar.scrollWidth <= room + 1; });
+    }
+    const resized = new ResizeObserver(overflow); resized.observe(toolbar); resized.observe(bar);
     const more = element('details', '', toolbar); more.className = 'kin-ux-more';
     const summary = element('summary', 'More', more); summary.title = '도구를 도구 모음과 More 사이로 끌어 옮길 수 있습니다.';
     const menu = element('div', '', more); menu.setAttribute('role', 'group'); menu.setAttribute('aria-label', 'More Tools');
@@ -286,7 +302,7 @@ window.KinViewerUXToolbar = (() => {
       node.title = label(item) + (key ? ' · ' + keys.display(key) : ' · 단축키 미지정') + ' — 끌어서 도구 위치를 바꿀 수 있습니다.';
       if (key) node.setAttribute('aria-keyshortcuts', keys.display(key));
       const icon = element('span', symbols[id] || label(item).split(' ').map(word => word[0]).slice(0, 2).join(''), node); icon.setAttribute('aria-hidden', 'true'); icon.className = 'kin-ux-tool-icon';
-      element('span', label(item), node); element('kbd', keys.display(key) || '—', node);
+      element('span', label(item), node).className = 'kin-ux-tool-label'; element('kbd', keys.display(key) || '—', node);
       node.ondragstart = event => { if (saving || !loaded) { event.preventDefault(); return; } dragged = id; event.dataTransfer.setData('text/plain', id); event.dataTransfer.effectAllowed = 'move'; more.open = true; };
       node.ondragend = () => { dragged = null; };
       node.ondragover = event => { if (dragged) event.preventDefault(); };
@@ -303,7 +319,7 @@ window.KinViewerUXToolbar = (() => {
       if (!menu.children.length) element('span', '도구를 여기로 끌어 놓으세요.', menu);
       edit.hidden = !session.writer();
       edit.disabled = saving; saveButton.disabled = !loaded || saving;
-      refreshState();
+      refreshState(); overflow();
     }
     function refreshState() {
       for (const node of toolbar.querySelectorAll('[data-tool]')) {
@@ -427,7 +443,7 @@ window.KinViewerUXToolbar = (() => {
       else load();
     }
     return { invoke, bindings: () => preferences.shortcuts, dispose() {
-      if (ended) return; ended = true; abort.abort(); observer.disconnect(); window.removeEventListener('pointerdown', trackPointer, true); toolbar.remove(); settings.remove(); dialog.remove();
+      if (ended) return; ended = true; abort.abort(); observer.disconnect(); resized.disconnect(); window.removeEventListener('pointerdown', trackPointer, true); toolbar.remove(); settings.remove(); dialog.remove();
       subscription.unsubscribe();
       sizing.dispose(); generalHanging.dispose(); delete window.kinViewerHangingPreference;
       if (window.kinViewerUXFocusTools === focusTools) delete window.kinViewerUXFocusTools;

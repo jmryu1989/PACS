@@ -206,6 +206,11 @@ jobs:
       run: npm ci --prefix api --ignore-scripts --no-audit --no-fund
     - name: Keycloak institution roster continuation
       run: node --test tests/keycloak_member_paging_test.cjs
+    - name: Viewing presence query and service
+      timeout-minutes: 5
+      run: |
+        (cd api && ./node_modules/.bin/prisma generate)
+        node --test tests/presence_service_test.cjs
     - name: CI registry and exact suite selection (once)
       if: ${{ fromJSON(steps.paths.outputs.jobs)['ci-selfchecks'] }}
       run: |
