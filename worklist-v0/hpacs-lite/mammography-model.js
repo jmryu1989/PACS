@@ -621,10 +621,13 @@
     const minutes=m&&+m[3]<60?(m[1]==='-'?-1:1)*(+m[2]*60+ +m[3]):NaN;
     return minutes>=-720&&minutes<=840?minutes:null;
   }
-  // A DT value as the span of time it names, in microseconds of local time, with its UTC offset in
-  // minutes (zone: the value's own suffix, else Timezone Offset From UTC, else null = unknown).
-  // Omitted trailing components widen the span (PS3.5 6.2): "2026103010" is any moment of that hour,
-  // not 10:00:00. A value that is not a real calendar date and time is no time at all.
+  const MINUTE=60e6;
+  // A DT value as the UTC span [earliest, latest) it can name, in microseconds. Omitted trailing
+  // components widen it (PS3.5 6.2): "2026103010" is any moment of that hour, not 10:00:00. The
+  // offset is the value's own suffix, else Timezone Offset From UTC (zone); without either it may be
+  // any offset DICOM allows (-12:00..+14:00), so the span covers all of them. Each value is read on
+  // its own, so no pairing of known and unknown offsets can order two images that might be reversed.
+  // A value that is not a real calendar date and time is no time at all.
   function dateTime(value,zone){
     const m=/^(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?(?:\.(\d{1,6}))?([+-]\d{4})?$/.exec(value);
     if(!m||m[7]&&!m[6])return null;
@@ -637,33 +640,22 @@
     if(m[8]!==undefined&&own===null)return null;
     const p=[y,mo,d,h,mi,s],lo=at(...p)+(m[7]?+m[7].padEnd(6,'0'):0);
     p[given]++;
-    return {lo,hi:m[7]?lo+10**(6-m[7].length):at(...p),zone:own};
+    const hi=m[7]?lo+10**(6-m[7].length):at(...p);
+    return own===null?[lo-840*MINUTE,hi+720*MINUTE]:[lo-own*MINUTE,hi-own*MINUTE];
   }
   // DA + TM read as one DT; an absent time is the whole day. A malformed part is no time.
   function dateAndTime(date,time,zone){
     return /^\d{8}$/.test(date)&&/^(?:\d{2}(?:\d{2}(?:\d{2}(?:\.\d{1,6})?)?)?)?$/.test(time)?dateTime(date+time,zone):null;
   }
-  const MINUTE=60e6;
-  // The span in UTC. An unknown offset is any of the allowed offsets, unless neither side knows its
-  // offset: then both are read as one local clock, as the images of one study are.
-  function utcSpan(a,both){
-    if(a.zone!==null)return [a.lo-a.zone*MINUTE,a.hi-a.zone*MINUTE];
-    return both?[a.lo,a.hi]:[a.lo-840*MINUTE,a.hi+720*MINUTE];
-  }
   // 1 or -1 when one span lies wholly after the other; 0 when they overlap or either is unknown.
-  function laterSpan(a,b){
-    if(!a||!b)return 0;
-    const local=a.zone===null&&b.zone===null,[al,ah]=utcSpan(a,local),[bl,bh]=utcSpan(b,local);
-    return al>=bh?1:bl>=ah?-1:0;
-  }
+  function laterSpan(a,b){return !a||!b?0:a[0]>=b[1]?1:b[0]>=a[1]?-1:0;}
   // Acquisition DateTime and Acquisition Date + Time name one moment; read together, the span is
   // what both allow. Spans that exclude each other are no acquisition time.
   function acquired(item,zone){
-    const a=dateTime(text(item,'0008002A'),zone),b=dateAndTime(text(item,'00080022'),text(item,'00080032'),zone);
-    if(!a||!b)return a||b;
-    if(a.zone!==b.zone&&(a.zone===null||b.zone===null))return a.zone!==null?a:b;
-    const shift=x=>x.zone===null?0:x.zone*MINUTE,lo=Math.max(a.lo-shift(a),b.lo-shift(b)),hi=Math.min(a.hi-shift(a),b.hi-shift(b));
-    return lo<hi?{lo:lo+shift(a),hi:hi+shift(a),zone:a.zone}:null;
+    const spans=[dateTime(text(item,'0008002A'),zone),dateAndTime(text(item,'00080022'),text(item,'00080032'),zone)].filter(Boolean);
+    if(!spans.length)return null;
+    const lo=Math.max(...spans.map(s=>s[0])),hi=Math.min(...spans.map(s=>s[1]));
+    return lo<hi?[lo,hi]:null;
   }
   // Positive when image a is known to be the later exposure: acquisition time, then content time,
   // each only where both images carry it and the spans do not overlap, then Instance Number.

@@ -239,9 +239,11 @@ function kinCreateMammographyHanging() {
         const host = document.querySelector('[data-viewport-uid="' + v.viewportId + '"]') ||
           (!v.displaySetInstanceUIDs?.length && panes.length === views.length ? panes[i] : null);
         // A repeat image is labelled by its own slot wherever it is shown, so a layout change or
-        // double-click that moves it keeps its "k of N" mark and Switch. Other slot labels are positional.
+        // double-click that moves it keeps its "k of N" mark and Switch. Its slot is looked up in every
+        // stage, since a Prior or another image type may be opened where the active stage has no such
+        // cell. Other slot labels are positional.
         const showing = v.displaySetInstanceUIDs?.[0];
-        const owner = showing ? cells.find(c => c.repeat?.some(r => r.uid === showing)) : null;
+        const owner = showing ? stageCells.flat().find(c => c.repeat?.some(r => r.uid === showing)) : null;
         const cell = owner || cells[i];
         if (!cell || !host) return;
         let label = host.querySelector('.kin-mg-slot');
