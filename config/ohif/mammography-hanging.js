@@ -177,14 +177,15 @@ function kinCreateMammographyHanging() {
       }
       if (voi.lut) {
         // Use the stored table on the GPU actor, without rewriting decoded source pixels or the cache.
-        // VTK midpoint=1/sharpness=1 keeps each integer entry constant until the next input value.
+        // A stored value takes its own entry; only magnified samples between two stored values blend
+        // the two neighbouring entries linearly, as with a windowed VOI.
         const transfer = viewport.getDefaultActor()?.actor?.getProperty().getRGBTransferFunction(0);
         if (!transfer) return;
         transfer.removeAllPoints();
         const max = 2 ** voi.lut.bits - 1;
         voi.lut.data.forEach((value, i) => {
           const gray = spec.invert ? 1 - value / max : value / max;
-          transfer.addRGBPoint(voi.lut.first + i, gray, gray, gray, 1, 1);
+          transfer.addRGBPoint(voi.lut.first + i, gray, gray, gray);
         });
       } else {
         const half = (voi.width - (voi.fn === 'LINEAR' ? 1 : 0)) / 2;
