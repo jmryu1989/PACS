@@ -321,7 +321,7 @@ class ViewerStackControlsE2E(DisplayControlsE2E):
         folder = Path(os.environ.get('KIN_EVIDENCE_DIR', 'tmp/viewer-tools')); folder.mkdir(parents=True, exist_ok=True)
         def assign(card, cell):
             if use_drop:
-                series_cards[card].drag_to(page.locator('[data-cy=viewport-grid] > div').nth(cell))
+                series_cards[card].locator('.kin-series-preview').drag_to(page.locator('[data-cy=viewport-grid] > div').nth(cell))
             else:
                 box = cells.nth(cell).bounding_box()
                 page.mouse.click(box['x'] + box['width']/2, box['y'] + box['height']/2)
@@ -337,7 +337,9 @@ class ViewerStackControlsE2E(DisplayControlsE2E):
                 self.assertTrue(value['visible'])
                 self.assertNotEqual(value['color'], value['background'])
                 return value
-            card_box, cell_box = series_cards[1].bounding_box(), cells.nth(1).bounding_box()
+            # Grab the thumbnail, the card's picture handle: in headless Chromium a press on the card's text
+            # dispatches dragstart but no dragover (main and V-SPACE alike), and the compact card centres on text.
+            card_box, cell_box = series_cards[1].locator('.kin-series-preview').bounding_box(), cells.nth(1).bounding_box()
             page.mouse.move(card_box['x'] + card_box['width']/2, card_box['y'] + card_box['height']/2)
             page.mouse.down()
             page.mouse.move(cell_box['x'] + cell_box['width']/2, cell_box['y'] + cell_box['height']/2, steps=15)

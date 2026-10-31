@@ -149,3 +149,49 @@ test('an inaccessible replacement followed by another verified scope releases pe
   inaccessible = false; document = {}; popup.href = url(3);
   assert.equal(r.rows()[0].pending, false); assert.deepEqual(r.rows()[0].scope.studies, ['1.2.3']);
 });
+
+// V-SPACE (Minhoon 2026-10-27 item 5): a reloaded list keeps the viewer's place.
+const flush = () => new Promise(resolve => setTimeout(resolve, 30));
+test('a list that no longer holds the viewer saves its reported move; a held window is measured by its list', async () => {
+  const { options } = setup(), saved = [];
+  const r = create({ ...options, placed: (slot, rect) => saved.push([slot, rect]) });
+  const slot = r.choose(url(1), 1), viewer = new BroadcastChannel('kin-viewer-windows:' + id);
+  try {
+    const rect = { left: 1920, top: 0, width: 1600, height: 1000 };
+    const present = extra => viewer.postMessage({ type: 'present', owner: '["i","a"]', index: slot.index, href: url(1), ...extra });
+    present({}); await flush();
+    assert.deepEqual(saved, [], 'an announcement without a move keeps the saved place');
+    present({ rect }); await flush();
+    assert.deepEqual(saved, [[slot.index, rect]]);
+    for (const extra of [{ rect: { ...rect, width: 100 } }, { rect: { ...rect, left: -32000 } }, { rect: { ...rect, top: 'x' } },
+      { rect, owner: '["i","b"]' }, { rect, index: 2 }]) { present(extra); await flush(); }
+    assert.equal(saved.length, 1, 'small, minimized, malformed, other-account and unoccupied reports are ignored');
+    r.attach(slot, { href: url(1), closed: false });
+    present({ rect: { ...rect, left: 0 } }); await flush();
+    assert.equal(saved.length, 1, 'the list holding the window keeps its own measurement and pending placement');
+  } finally { viewer.close(); }
+});
+test('a viewer reports its geometry only after it moves, and not while minimized', async t => {
+  const names = ['location', 'document', 'screenX', 'screenY', 'outerWidth', 'outerHeight', 'addEventListener', 'removeEventListener'];
+  const saved = Object.fromEntries(names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+  t.after(() => { for (const name of names) { if (saved[name]) Object.defineProperty(globalThis, name, saved[name]); else delete globalThis[name]; } });
+  const stub = { location: new URL(url(1) + '#kin-window-group=' + id + '&kin-window-slot=0'), document: { visibilityState: 'visible' },
+    screenX: 40, screenY: 40, outerWidth: 1600, outerHeight: 1000, addEventListener() {}, removeEventListener() {} };
+  for (const [name, value] of Object.entries(stub)) Object.defineProperty(globalThis, name, { value, writable: true, configurable: true });
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const list = new BroadcastChannel('kin-viewer-windows:' + id), heard = [];
+  list.onmessage = event => heard.push(event.data);
+  const viewer = model.connect({ owner: () => ['i', 'a'], live: () => true });
+  try {
+    await flush();
+    assert.equal(heard.length, 1); assert.equal(heard[0].type, 'present'); assert.equal('rect' in heard[0], false);
+    t.mock.timers.tick(2000); await flush();
+    assert.equal(heard.length, 1, 'an unmoved window says nothing more');
+    globalThis.screenX = 1960; t.mock.timers.tick(2000); await flush();
+    assert.deepEqual(heard.at(-1).rect, { left: 1960, top: 40, width: 1600, height: 1000 });
+    t.mock.timers.tick(2000); await flush();
+    assert.equal(heard.length, 2, 'the same place is reported once');
+    globalThis.document.visibilityState = 'hidden'; globalThis.screenX = -32000; t.mock.timers.tick(2000); await flush();
+    assert.equal(heard.length, 2, 'a minimized window never reports its off-screen coordinates');
+  } finally { viewer.dispose(); list.close(); }
+});
