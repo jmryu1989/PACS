@@ -227,6 +227,12 @@
       } catch (_) { return false; }
     }
 
+    // A window this list no longer holds (the list was reloaded) reports its own
+    // moves; the registry passes them only for a slot without a held window.
+    function rememberReportedOhifRect(slot, rect) {
+      try { localStorage.setItem(slot ? OHIF_RECT_KEY + ':' + slot : OHIF_RECT_KEY, JSON.stringify(rect)); } catch (_) {}
+    }
+
     function watchOhifRect(popup, slot = ohifPopupSlots.get(popup) || 0) {
       ohifPopupHandle = popup;
       ohifPopupSlots.set(popup, slot);

@@ -1,4 +1,43 @@
 window.KinViewerUXShell = (() => {
+  // Minhoon 2026-10-27 item 4: the stock Studies and Measurement panels take image width. They open as the
+  // stock mode declares until the reader opens or closes one with its own controls; that choice is then kept
+  // for this account in this browser, like the window's place. Only the reader's clicks are recorded: a panel
+  // the stock opens by itself is left open for that viewer only.
+  function mountSidePanels(session, signal) {
+    const sides = ['left', 'right'], applied = new Set();
+    const key = () => { const owner = session.owner(); return owner ? 'kin-viewer-side-panels:v1:' + JSON.stringify(owner) : null; };
+    const header = side => document.querySelector('[data-cy="side-panel-header-' + side + '"]');
+    // The stock panel slides out by a negative margin and stays mounted as a narrow strip.
+    const container = side => header(side)?.closest('[style*="margin-' + side + '"]');
+    const open = side => { const box = container(side); return box ? box.style[side === 'left' ? 'marginLeft' : 'marginRight'] === '0px' : null; };
+    function read() {
+      try {
+        const value = JSON.parse(localStorage.getItem(key()) || 'null');
+        return value && typeof value === 'object' ? value : {};
+      } catch (_) { return {}; }
+    }
+    function apply() {
+      if (!key() || applied.size === sides.length) return;
+      const saved = read();
+      for (const side of sides) {
+        const now = open(side);
+        if (applied.has(side) || now === null) continue;
+        applied.add(side);
+        if (typeof saved[side] === 'boolean' && saved[side] !== now) header(side).click();
+      }
+    }
+    document.addEventListener('click', event => {
+      const side = sides.find(value => container(value)?.contains(event.target));
+      if (!side || !event.isTrusted) return;
+      const before = open(side);
+      requestAnimationFrame(() => {
+        const now = open(side), name = key();
+        if (signal.aborted || !name || now === null || now === before) return;
+        try { localStorage.setItem(name, JSON.stringify({ ...read(), [side]: now })); } catch (_) {}
+      });
+    }, { capture: true, signal });
+    return { apply };
+  }
   function mount({ services, session }) {
     // The theme stylesheet is loaded once per document by the extension before
     // this mount; the body class scopes its viewer-wide rules to the mounted shell.
@@ -130,7 +169,7 @@ window.KinViewerUXShell = (() => {
     } });
     const series = window.KinViewerSeriesStrip.mount({ services });
     tabs.mount({ services, session, refreshChrome() { info.refresh(); series.refresh(); } });
-    const subscriptions = [];
+    const subscriptions = [], abort = new AbortController(), panels = mountSidePanels(session, abort.signal);
     let frame, ended = false;
     // The shell never resizes the rendering engine. The stock viewport observer
     // queues its own resize for every pane whose element changes size and that
@@ -145,7 +184,7 @@ window.KinViewerUXShell = (() => {
     function refresh() { frame = null; if (!ended) {
       if (reportContext && !admits(reportContext)) closeReport();
       actions?.refresh?.();
-      info.refresh(); series.refresh(); tabs.refresh();
+      info.refresh(); series.refresh(); tabs.refresh(); panels.apply();
     } }
     function schedule() { if (!ended && !frame) frame = requestAnimationFrame(refresh); }
     for (const service of [services.viewportGridService, services.displaySetService, services.cornerstoneViewportService]) {
@@ -170,13 +209,13 @@ window.KinViewerUXShell = (() => {
       // microtask, as soon as the grid exists, and a pane gets its bar in the
       // row its padding reserves: neither changes the size of a canvas the
       // stock has already created.
-      series.place(); info.adopt();
+      series.place(); info.adopt(); panels.apply();
       schedule();
     });
     observer.observe(document.getElementById('root'), { childList: true, subtree: true });
     schedule();
     return { dispose() {
-      ended = true; cancelAnimationFrame(frame); observer.disconnect();
+      ended = true; cancelAnimationFrame(frame); observer.disconnect(); abort.abort();
       subscriptions.forEach(subscription => subscription.unsubscribe());
       imageEvents.forEach(event => document.removeEventListener(event, schedule, true));
       stopPatient(); closeReport(); report.remove(); if (window.KinViewerUX === seam) delete window.KinViewerUX;

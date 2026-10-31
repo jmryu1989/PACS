@@ -23,7 +23,14 @@
       return { studies, series };
     } catch (_) { return null; }
   }
-  function create({ storage, owner, newId, origin, describe, changed = () => {} }) {
+  // A viewer reports its outer geometry only; the receiving list validates it.
+  function geometry(value) {
+    if (!value || typeof value !== 'object') return null;
+    const rect = { left: value.left, top: value.top, width: value.width, height: value.height };
+    return Object.values(rect).every(Number.isFinite) && rect.left > -30000 && rect.top > -30000 &&
+      rect.width >= 320 && rect.height >= 240 ? rect : null;
+  }
+  function create({ storage, owner, newId, origin, describe, changed = () => {}, placed = () => {} }) {
     const work=root.KinWorkContext;
     const bound = owner(), key = 'kin-viewer-windows:v1:' + bound;
     let state, error = null, ended = false, channel;
@@ -121,6 +128,11 @@
         if (!current() || m?.type !== 'present' || m.owner !== bound || !Number.isInteger(m.index) ||
             m.index < 0 || m.index > 3 || !state.slots[m.index] || !scope(m.href, origin)) return;
         if (entries[m.index].href !== m.href) { entries[m.index].href = m.href; changed(); }
+        // A list that holds the window measures it itself, including while its
+        // placement is pending. A reloaded list holds no handle, so a viewer the
+        // reader moves afterwards would otherwise reopen at the old place.
+        const rect = geometry(m.rect);
+        if (rect && !entries[m.index].popup) placed(m.index, rect);
       });
       refresh();
     }
@@ -131,17 +143,31 @@
   }
   function connect({ owner, live }) {
     const work=root.KinWorkContext;
-    let channel, ended = false, group, index;
+    let channel, ended = false, group, index, first = null, moved = false, reported = null, poll = null;
     const bound = JSON.stringify(owner());
     const identity = () => !ended && live() && JSON.stringify(owner()) === bound ? bound : null;
     root.kinViewerWindowOwner = identity;
+    // The first geometry this document sees can be a fallback its list has not
+    // placed yet, or one kept after a failed placement; it never replaces the
+    // saved place. Any later change is the reader's move (or the placement).
+    // A minimized window is hidden (and reports far-off coordinates).
+    function rect() {
+      try { if (root.document.visibilityState === 'hidden') return null; } catch (_) { return null; }
+      const value = geometry({ left: root.screenX, top: root.screenY, width: root.outerWidth, height: root.outerHeight });
+      if (!value) return null;
+      if (!first) { first = value; return null; }
+      moved ||= JSON.stringify(value) !== JSON.stringify(first);
+      return moved ? value : null;
+    }
     function announce() {
       if (work.state()!=='active'||ended || !live() || JSON.stringify(owner()) !== bound || !channel) return;
       if (!scope(root.location.href, root.location.origin)) return;
-      channel.postMessage({ type: 'present', owner: bound, index, href: root.location.href });
+      const place = rect(); reported = place && JSON.stringify(place);
+      channel.postMessage({ type: 'present', owner: bound, index, href: root.location.href, ...(place ? { rect: place } : {}) });
     }
+    function watch() { const place = rect(); if (place && JSON.stringify(place) !== reported) announce(); }
     function bind() {
-      channel?.close(); channel = null;
+      channel?.close(); channel = null; clearInterval(poll); poll = null;
       if (work.state()!=='active'||ended || !live() || JSON.stringify(owner()) !== bound) return;
       const hash = new URLSearchParams(root.location.hash.slice(1));
       const groups = hash.getAll('kin-window-group'), slots = hash.getAll('kin-window-slot');
@@ -151,13 +177,15 @@
         channel = new root.BroadcastChannel('kin-viewer-windows:' + group);
         const at=work.capture('document');channel.onmessage = e => work.commit(at,()=>{ if (e.data?.type === 'discover' && e.data.owner === bound) announce(); });
         announce();
+        // Browsers announce no window move; the list polls its own handle at the same rate.
+        poll = setInterval(() => work.commit(at, watch), 2000);
       } catch (_) { channel = null; }
     }
     let changed;
     function listen(){root.removeEventListener('hashchange',changed);root.removeEventListener('kin-window-link-changed',changed);const at=work.capture('document');changed=()=>work.commit(at,bind);root.addEventListener('hashchange',changed);root.addEventListener('kin-window-link-changed',changed);bind();}
-    work.onInvalidate(event=>{if(event.reason==='cancel'||event.reason==='lifecycle'&&event.state==='active')listen();else if(event.reason==='lifecycle'&&event.state!=='preparing'){ended=true;channel?.close();}});
+    work.onInvalidate(event=>{if(event.reason==='cancel'||event.reason==='lifecycle'&&event.state==='active')listen();else if(event.reason==='lifecycle'&&event.state!=='preparing'){ended=true;channel?.close();clearInterval(poll);}});
     listen();
-    return { dispose() { ended = true; if (root.kinViewerWindowOwner === identity) root.kinViewerWindowOwner = () => null; channel?.close(); root.removeEventListener('hashchange', changed); root.removeEventListener('kin-window-link-changed', changed); } };
+    return { dispose() { ended = true; if (root.kinViewerWindowOwner === identity) root.kinViewerWindowOwner = () => null; channel?.close(); clearInterval(poll); root.removeEventListener('hashchange', changed); root.removeEventListener('kin-window-link-changed', changed); } };
   }
   const api = { normalize, scope, create, connect };
   if (typeof module === 'object' && module.exports) module.exports = api;

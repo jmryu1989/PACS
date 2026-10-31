@@ -286,7 +286,7 @@ window.KinViewerUXToolbar = (() => {
       node.title = label(item) + (key ? ' · ' + keys.display(key) : ' · 단축키 미지정') + ' — 끌어서 도구 위치를 바꿀 수 있습니다.';
       if (key) node.setAttribute('aria-keyshortcuts', keys.display(key));
       const icon = element('span', symbols[id] || label(item).split(' ').map(word => word[0]).slice(0, 2).join(''), node); icon.setAttribute('aria-hidden', 'true'); icon.className = 'kin-ux-tool-icon';
-      element('span', label(item), node); element('kbd', keys.display(key) || '—', node);
+      element('span', label(item), node).className = 'kin-ux-tool-label'; element('kbd', keys.display(key) || '—', node);
       node.ondragstart = event => { if (saving || !loaded) { event.preventDefault(); return; } dragged = id; event.dataTransfer.setData('text/plain', id); event.dataTransfer.effectAllowed = 'move'; more.open = true; };
       node.ondragend = () => { dragged = null; };
       node.ondragover = event => { if (dragged) event.preventDefault(); };
