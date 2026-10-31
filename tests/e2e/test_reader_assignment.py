@@ -140,7 +140,9 @@ class ReaderAssignmentE2E(WorklistE2E):
   rows=self.rows(a);closed=rows['kin-center'];self.assertEqual(rows['hallym'],owner_row);self.assertIsNotNone(closed['closedAt'])
   self.assertEqual([closed[k] for k in ('revision','closedRevision','readerSub','readerActor','readerName','changedBy')],[4,4,None,None,None,self.stack.actor('doctor')])
   entries=[d for d in map(json.loads,psql('SELECT detail FROM "AuditLog" WHERE target='+lit(a.uid)+" AND action='reader.assignment' ORDER BY id")) if 'closed' in d]
-  self.assertEqual(entries,[{'institution':'kin-center','revision':4,'from':self.stack.actor('kdoctor'),'to':None,'closed':'tele-closed'}])
+  # Since EMR-D (6651cbf) the entry also names who closed it and the institution that lost the row.
+  self.assertEqual(entries,[{'institution':'kin-center','revision':4,'from':self.stack.actor('kdoctor'),'to':None,'closed':'tele-closed',
+   'caller':{'sub':self.stack.user_ids['doctor'],'institution':'hallym','roles':['radiologist']},'ownerInstitution':'kin-center'}])
   for role in ('kdoctor','ktech'):refused(role,3)
   self.assertIsNone(self.listed(a,'kdoctor'));self.assertEqual(self.audited(a,'tech'),['hallym'])
   # Reopen: a new revision with no reader and no history; the closed channel's last request does not apply.
