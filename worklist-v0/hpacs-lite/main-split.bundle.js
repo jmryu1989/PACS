@@ -8799,6 +8799,8 @@
     let screensCache = [];
     let monitorDetails = null;
     let monitorHintShown = false;
+    // Settles once the display permission (and, when granted, the screens) is known.
+    let monitorReady = Promise.resolve();
 
     function monitorPermissionGranted() {
       return monitorPermission?.state === "granted" ||
@@ -8869,7 +8871,7 @@
       });
     });
     screen.addEventListener?.("change", updateMonitorButton);
-    initMonitorPermission();
+    monitorReady = initMonitorPermission();
 
     function usableScreenRect(value) {
       const left = Number(value?.availLeft ?? value?.left ?? 0);
@@ -9015,7 +9017,14 @@
     // A window this list no longer holds (the list was reloaded) reports its own
     // moves; the registry passes them only for a slot without a held window.
     function rememberReportedOhifRect(slot, rect) {
-      try { localStorage.setItem(slot ? OHIF_RECT_KEY + ':' + slot : OHIF_RECT_KEY, JSON.stringify(rect)); } catch (_) {}
+      try { localStorage.setItem(slot ? OHIF_RECT_KEY + ':' + slot : OHIF_RECT_KEY, JSON.stringify(rect)); } catch (_) { return; }
+      // As for a held window moved after a failed placement: a selected span that cannot be placed now
+      // would make the next open ignore this place. The reloaded list reports the move as soon as it
+      // asks, so judge the span only once its display permission and screens are known.
+      const at = work.capture("document");
+      monitorReady.then(() => work.commit(at, () => {
+        if (readOhifSpanScreens() && !ohifSpanTarget()) localStorage.removeItem(OHIF_SPAN_SCREENS_KEY);
+      })).catch(() => {});
     }
 
     function watchOhifRect(popup, slot = ohifPopupSlots.get(popup) || 0) {

@@ -1,9 +1,11 @@
 # coding: utf-8
 """V-SPACE (Minhoon feedback 2026-10-27 items 4 and 5): image area, per-cell scope and the reused window's place.
 
-Item 4: one-line image tools and series rows; the reader's Studies/Measurement panel choice is kept per account in
-this browser; image actions change only the cell they act on while no synchronizer is on.
-Item 5: the single viewer window is reused, and a move made after the list reloaded is where it reopens.
+Item 4: one-line image tools and series rows, with arrows that page tools the row cannot fit; the reader's
+Studies/Measurement panel choice is kept per account in this browser (two accounts in one profile keep their own);
+image actions change only the cell they act on while no synchronizer is on.
+Item 5: the single viewer window is reused, and a move made after the list reloaded is where it reopens, also when an
+earlier two-screen choice can no longer be placed.
 Headless window coordinates are a browser reachability check, not physical monitor acceptance.
 """
 import json
@@ -19,6 +21,7 @@ from playwright.sync_api import expect
 from test_prior_selection import canvas_ready
 from test_viewer_layout import ViewerLayoutE2E
 from test_viewer_windows import ViewerWindowsE2E
+from test_workspace_persistence import WorkspacePersistenceE2E
 
 
 GEOMETRY = '''() => {
@@ -44,6 +47,10 @@ def evidence():
 
 
 class ViewerSpaceE2E(ViewerLayoutE2E):
+    device = WorkspacePersistenceE2E.device
+    sign_in = WorkspacePersistenceE2E.sign_in
+    sign_out = WorkspacePersistenceE2E.sign_out
+
     def viewer(self, page, fixture):
         page.set_viewport_size({'width': 1920, 'height': 1080})
         self.launch(page, [fixture])
@@ -92,43 +99,56 @@ class ViewerSpaceE2E(ViewerLayoutE2E):
             self.assertTrue(all(row['card'] <= row['strip'] for row in layout), layout)
         expect(cards.first).to_have_attribute('aria-label', re.compile(r'^\d+/\d+ '))
 
+    def panels(self, page):
+        return [page.evaluate(PANEL_OPEN, side) for side in ['left', 'right']]
+
+    def panels_are(self, page, left, right):
+        page.wait_for_function('want => ["left", "right"].every((side, i) => (' + PANEL_OPEN + ')(side) === want[i])',
+                               arg=[left, right])
+
     def test_space_02_side_panel_choice_follows_the_account(self):
         fixture = self.multiple('VSPACE-' + uuid.uuid4().hex[:12], 'current', '20260801')
-        page = self.viewer(self.login(), fixture)
-        self.assertEqual([page.evaluate(PANEL_OPEN, side) for side in ['left', 'right']], [True, False],
+        # Both accounts sign in, in turn, to one browser profile: one localStorage, as on a shared reading PC.
+        browser = self.device()
+        worklist = self.sign_in(browser, 'doctor')
+        page = self.viewer(browser.new_page(), fixture)
+        self.assertEqual(self.panels(page), [True, False],
                          'the stock mode opens Studies and keeps Measurements closed until the reader chooses')
         self.record(page, 'space-02-first-entry')
         before = page.evaluate(GEOMETRY)
         page.locator('[data-cy=side-panel-header-left]').click()
-        page.wait_for_function('side => (' + PANEL_OPEN + ')(side) === false', arg='left')
+        self.panels_are(page, False, False)
         page.wait_for_function('w => document.querySelector("[data-cy=viewport-grid]").getBoundingClientRect().width > w + 200',
                                arg=before['grid']['width'])
         self.record(page, 'space-02-studies-closed')
         # A new viewer document for the same account opens without the Studies panel.
         self.viewer(page, fixture)
-        page.wait_for_function('side => (' + PANEL_OPEN + ')(side) === false', arg='left')
-        self.assertFalse(page.evaluate(PANEL_OPEN, 'right'))
+        self.panels_are(page, False, False)
         after = page.evaluate(GEOMETRY)
         self.assertGreater(after['grid']['width'], before['grid']['width'] + 200)
         self.record(page, 'space-02-reopened-viewer')
-        # Its own icon opens Measurements; that choice is kept the same way, and reopening Studies too.
+        page.close()
+        self.sign_out(worklist)
+        # The second account in the same storage gets the stock entry, not the first account's choice, and
+        # chooses differently: Measurements opened by its own icon, Studies left as the stock opens it.
+        worklist = self.sign_in(browser, 'doctor2')
+        page = self.viewer(browser.new_page(), fixture)
+        self.assertEqual(self.panels(page), [True, False], 'the first account\'s closed Studies did not carry over')
         page.locator('[data-cy=trackedMeasurements-btn]').click()
-        page.wait_for_function('side => (' + PANEL_OPEN + ')(side) === true', arg='right')
-        page.locator('[data-cy=side-panel-header-left]').click()
-        page.wait_for_function('side => (' + PANEL_OPEN + ')(side) === true', arg='left')
+        self.panels_are(page, True, True)
         page.wait_for_timeout(300)
         self.viewer(page, fixture)
-        page.wait_for_function('() => ["left", "right"].every(side => (' + PANEL_OPEN + ')(side) === true)')
-        page.locator('[data-cy=side-panel-header-right]').click()
-        page.wait_for_function('side => (' + PANEL_OPEN + ')(side) === false', arg='right')
-        page.wait_for_timeout(300)
-        # Another account in its own browser keeps the stock entry.
-        other = self.viewer(self.login('doctor2'), fixture)
-        self.assertEqual([other.evaluate(PANEL_OPEN, side) for side in ['left', 'right']], [True, False])
+        self.panels_are(page, True, True)
+        page.close()
+        self.sign_out(worklist)
+        # Back to the first account: its own choice, untouched by the second account's.
+        worklist = self.sign_in(browser, 'doctor')
+        page = self.viewer(browser.new_page(), fixture)
+        self.panels_are(page, False, False)
         stored = page.evaluate("Object.entries(localStorage).filter(([k]) => k.startsWith('kin-viewer-side-panels:v1:'))")
-        self.assertEqual(len(stored), 1, stored)
-        self.assertEqual(json.loads(stored[0][1]), {'left': True, 'right': False})
-        self.assertNotIn(fixture.uid, stored[0][0] + stored[0][1])
+        self.assertEqual(sorted(json.dumps(json.loads(value), sort_keys=True) for _, value in stored),
+                         ['{"left": false}', '{"right": true}'], stored)
+        self.assertNotIn(fixture.uid, json.dumps(stored))
 
     def test_space_03_actions_stay_in_their_cell_without_sync(self):
         fixture = self.multiple('VSPACE-' + uuid.uuid4().hex[:12], 'current', '20260801')
@@ -172,6 +192,65 @@ class ViewerSpaceE2E(ViewerLayoutE2E):
         self.assertEqual(page.evaluate(CELL, ids[0]), windowed[0], 'zoom stays in the cell it was used on')
         self.record(page, 'space-03-independent-cells')
 
+    def test_space_04_tools_that_do_not_fit_keep_a_visible_control(self):
+        fixture = self.multiple('VSPACE-' + uuid.uuid4().hex[:12], 'current', '20260801')
+        page = self.login()
+        # A portrait reading screen with Studies and Measurements both open.
+        page.set_viewport_size({'width': 1080, 'height': 1920})
+        self.launch(page, [fixture])
+        bar = page.get_by_role('toolbar', name='Frequent Tools')
+        expect(bar.get_by_role('button', name='Zoom', exact=True)).to_be_attached()
+        page.wait_for_function('() => window.kinViewerHistoryWorkspaceState?.()?.busy === false && window.kinViewerJobWorkspaceState?.()?.busy === false')
+        page.locator('[data-cy=trackedMeasurements-btn]').click()
+        self.panels_are(page, True, True)
+        # The reader shows every tool in the frequent bar; saving also leaves the account status in the row.
+        tools_row = page.get_by_label('Image Tools', exact=True)
+        tools_row.get_by_role('button', name='Viewer Settings', exact=True).click()
+        dialog = page.get_by_role('dialog', name='Viewer Settings')
+        shown = dialog.get_by_role('checkbox', name=re.compile(r'^Show '))
+        for i in range(shown.count()):
+            shown.nth(i).check()
+        dialog.get_by_role('button', name='Save', exact=True).click()
+        expect(dialog).to_be_hidden()
+        expect(tools_row.get_by_role('status')).to_have_text(re.compile(r'\S'))
+        expect(page.get_by_role('group', name='More Tools').get_by_role('button')).to_have_count(0)
+        page.wait_for_timeout(300)
+        width = bar.evaluate('b => ({scroll: b.scrollWidth, client: b.clientWidth, row: b.parentElement.getBoundingClientRect().width})')
+        print('TOOLS ROW', json.dumps(width), flush=True)
+        self.assertGreater(width['scroll'], width['client'], 'precondition: the default tools overflow this row')
+        self.record(page, 'space-04-portrait-both-panels')
+        seen = '''(bar, last) => { const b = bar.getBoundingClientRect(), tools = bar.querySelectorAll('button'),
+          t = tools[last ? tools.length - 1 : 0].getBoundingClientRect(); return t.left >= b.left - 1 && t.right <= b.right + 1; }'''
+        forward = page.get_by_role('button', name='Next Tools', exact=True)
+        back = page.get_by_role('button', name='Previous Tools', exact=True)
+        expect(forward).to_be_visible()
+        expect(back).to_be_visible()
+        self.assertFalse(bar.evaluate(seen, True), 'the last tool starts clipped')
+        for _ in range(10):
+            if bar.evaluate(seen, True): break
+            forward.click()
+            page.wait_for_timeout(500)
+        self.assertTrue(bar.evaluate(seen, True), 'Next Tools brings the clipped tool into the row')
+        bar.get_by_role('button').last.click(trial=True)
+        self.record(page, 'space-04-next-tools')
+        for _ in range(10):
+            if bar.evaluate(seen, False): break
+            back.click()
+            page.wait_for_timeout(500)
+        self.assertTrue(bar.evaluate(seen, False), 'Previous Tools returns to the first tool')
+        # Once the tools fit again (landscape, panels closed, default tools) the arrows do not take any of the row.
+        page.set_viewport_size({'width': 1920, 'height': 1080})
+        page.locator('[data-cy=side-panel-header-left]').click()
+        page.locator('[data-cy=side-panel-header-right]').click()
+        self.panels_are(page, False, False)
+        tools_row.get_by_role('button', name='Viewer Settings', exact=True).click()
+        dialog.get_by_role('button', name='Restore Defaults', exact=True).click()
+        dialog.get_by_role('button', name='Save', exact=True).click()
+        expect(dialog).to_be_hidden()
+        page.wait_for_function('b => b.scrollWidth <= b.clientWidth', arg=bar.element_handle())
+        expect(forward).to_be_hidden()
+        expect(back).to_be_hidden()
+
 
 class ViewerWindowPlaceE2E(ViewerWindowsE2E):
     def test_space_05_reloaded_list_keeps_the_reused_window_place(self):
@@ -195,6 +274,10 @@ class ViewerWindowPlaceE2E(ViewerWindowsE2E):
         p.reload()
         expect(p.locator('#dbstat')).to_contain_text('DB Connected')
         saved = p.evaluate("() => localStorage.getItem('kin.ohif.current.rect')")
+        # A two-screen span chosen earlier whose screens this browser cannot place now (no display grant here).
+        # Left selected, the next open would fall back to the default place instead of the reader's move.
+        p.evaluate('''() => localStorage.setItem('kin.ohif.span.screens', JSON.stringify([
+          {left: 0, top: 0, width: 1920, height: 1040}, {left: 1920, top: 0, width: 1920, height: 1040}]))''')
         viewer.evaluate('() => { moveTo(screenX + 37, screenY + 23); resizeTo(outerWidth - 41, outerHeight - 29); }')
         viewer.wait_for_timeout(300)
         moved = viewer.evaluate('() => ({left: screenX, top: screenY, width: outerWidth, height: outerHeight})')
@@ -206,6 +289,7 @@ class ViewerWindowPlaceE2E(ViewerWindowsE2E):
             p.wait_for_timeout(500)
         print('PLACE', json.dumps(dict(saved=saved, moved=moved, stored=stored, viewer=viewer.url)), flush=True)
         self.assertEqual(stored, moved, 'the reloaded list saved the viewer the reader moved')
+        p.wait_for_function("() => localStorage.getItem('kin.ohif.span.screens') === null", timeout=10000)
         viewer.close()
         self.choose(p, a)
         with p.context.expect_page() as opened:

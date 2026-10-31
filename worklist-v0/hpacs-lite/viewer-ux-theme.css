@@ -110,6 +110,7 @@ body.kin-viewer-ux #root :has(> .kin-viewer-series-strip) { min-width: 0; }
 .kin-ux-toolbar-slot { flex: none; box-sizing: border-box; height: 36px; min-width: 0; }
 .kin-ux-toolbar { display: flex; flex: none; min-width: 0; gap: .5em; align-items: center; background: var(--kin-panel); color: var(--kin-ux-text); padding: .3em; font: 12px/1.4 sans-serif; box-sizing: border-box; height: 3em; }
 .kin-ux-tools-bar { display: flex; flex: 1; min-width: 0; height: 2.4em; align-items: center; gap: .25em; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.kin-ux-toolbar .kin-ux-tools-scroll { flex: none; padding: .3em .5em; }
 /* A long status cannot wrap below the row; buttons stay first and the dialog repeats the full text. */
 .kin-ux-toolbar-settings { display: flex; flex: 0 1 auto; align-items: center; gap: .4em; min-width: 0; overflow: hidden; white-space: nowrap; }
 .kin-ux-toolbar-settings > button { flex: none; }
