@@ -218,12 +218,12 @@ class ViewerWindowPlaceE2E(ViewerWindowsE2E):
 
 
 def load_tests(loader, tests, pattern):
-    suite = unittest.TestSuite()
-    suite.addTests(loader.loadTestsFromTestCase(ViewerSpaceE2E))
-    suite.addTests(loader.loadTestsFromTestCase(ViewerWindowPlaceE2E))
-    return suite
+    # Only the cases this module declares; the inherited layout/window cases run in their own profiles.
+    return unittest.TestSuite(cls(name) for cls in (ViewerSpaceE2E, ViewerWindowPlaceE2E)
+                              for name in sorted(cls.__dict__) if name.startswith('test_space_'))
 
 
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     unittest.main()
+

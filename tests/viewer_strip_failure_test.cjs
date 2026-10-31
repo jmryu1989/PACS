@@ -177,7 +177,7 @@ test('shell ignores its chrome writes but refreshes for stock viewport changes i
     KinViewerInfoBar: { mount: chrome }, KinViewerSeriesStrip: { mount: chrome },
     cornerstone: { Enums: { Events: {} } },
   };
-  const context = vm.createContext({ window, document,
+  const context = vm.createContext({ window, document, AbortController,
     requestAnimationFrame(fn) { frames.set(++nextFrame, fn); return nextFrame; },
     cancelAnimationFrame(id) { frames.delete(id); },
     MutationObserver: class { constructor(callback) { observer = callback; } observe() {} disconnect() {} },
@@ -185,7 +185,7 @@ test('shell ignores its chrome writes but refreshes for stock viewport changes i
   vm.runInContext(fs.readFileSync('worklist-v0/hpacs-lite/viewer-ux-shell.js', 'utf8'), context);
   const shell = window.KinViewerUXShell.mount({ services: {
     viewportGridService: {}, displaySetService: {}, cornerstoneViewportService: {},
-  }, session: {} });
+  }, session: { owner: () => null } });
   const flush = () => { for (const [id, fn] of [...frames]) { frames.delete(id); fn(); } };
   flush(); const initial = refreshes;
   const mutation = (target, addedNodes = [], removedNodes = []) => ({ target, addedNodes, removedNodes });
