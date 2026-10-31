@@ -119,6 +119,16 @@ else
 fi
 
 echo "== config"
+# Every login folder under claude-config/ is an account: the owner adds one by hand (claude-config/<name> plus
+# STUDIO_CLAUDE_ACCOUNT=<name> in studio.env), and rewriting the config must not drop it (10-31: it did, and the chat
+# answered "unknown Claude account").
+CONFIG_DIRS=$(for d in "$ROOT"/claude-config/*/; do n=$(basename "$d"); case "$n" in *[!A-Za-z0-9_-]*) continue;; esac
+  printf '"%s": "%s", ' "$n" "$ROOT/claude-config/$n"; done | sed 's/, $//')
+if [ -f "$ROOT/etc/studio.env" ]; then
+  acct=$(sed -n 's/^STUDIO_CLAUDE_ACCOUNT=//p' "$ROOT/etc/studio.env" | tail -1 | tr -d '[:space:]')
+  [ -z "$acct" ] || [ -d "$ROOT/claude-config/$acct" ] || { echo "studio.env names Claude account '$acct' but claude-config/$acct is missing"; exit 1; }
+fi
+[ -f "$ROOT/etc/config.json" ] && { [ -e "$ROOT/etc/config.json.$BAK" ] || cp -a "$ROOT/etc/config.json" "$ROOT/etc/config.json.$BAK"; }
 cat > "$ROOT/etc/config.json" <<JSON
 {
   "listen": { "host": "0.0.0.0", "port": $PORT },
@@ -130,7 +140,7 @@ cat > "$ROOT/etc/config.json" <<JSON
   },
   "claude": {
     "bin": "$ROOT/bin/claude",
-    "configDirs": { "sdij": "$ROOT/claude-config/sdij", "admin": "$ROOT/claude-config/admin" },
+    "configDirs": { $CONFIG_DIRS },
     "account": "sdij",
     "model": null,
     "models": { "fast": "sonnet", "deep": "opus" },
