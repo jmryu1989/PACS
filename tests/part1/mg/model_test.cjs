@@ -445,11 +445,28 @@ test('MG04-allow a repeat exposure is ordered latest first by exposure time then
     'an offset only one image states leaves hours of doubt: no latest image');
   assert.deepEqual(order([at(2,{'0008002A':'20261030101000+0900'}),at(1,{'0008002A':'20261031101000'})]),[1,0],
     'a day apart is later under any offset');
-  // A time without a known offset may be at any allowed offset, whichever image it belongs to.
-  assert.deepEqual(order([at(2,{'0008002A':'20261030101000'}),at(1,{'0008002A':'20261030102000'})]),[0,1],
-    'two times of one session without an offset are hours of doubt apart: Instance Number decides');
+  // Images of one study where none states an offset share its local clock: only precision widens.
+  assert.deepEqual(order([at(2,{'0008002A':'20261030101000'}),at(1,{'0008002A':'20261030102000'})]),[1,0],
+    'two times of one session without an offset are read on one clock: time before Instance Number');
+  assert.deepEqual(order([at(1,{'0008002A':'20261030103000'}),at(1,{'0008002A':'20261030100000'})]),[0,1],
+    'a repeat 30 minutes later without an offset, with one Instance Number, is the latest image');
+  assert.deepEqual(order([at(1,{'00080022':'20261030','00080032':'100000'}),at(1,{'00080022':'20261030','00080032':'103000'})]),[1,0],
+    'Acquisition Date + Time without an offset, on one clock');
+  assert.deepEqual(order([at(1,{'00080023':'20261030','00080033':'101000'}),at(1,{'00080023':'20261030','00080033':'100500'})]),[0,1],
+    'Content Date + Time without an offset, on one clock');
+  assert.equal(order([at(1,{'0008002A':'2026103010'}),at(1,{'0008002A':'20261030103000'})]),null,
+    'without an offset an hour-precision time may still be later within that hour: no latest image');
+  assert.deepEqual(order([at(1,{'0008002A':'2026103011'}),at(1,{'0008002A':'20261030103000'})]),[0,1],
+    'without an offset a whole hour later is later');
   assert.deepEqual(order([at(2,{'0008002A':'20261030101000'}),at(1,{'0008002A':'20261101101000'})]),[1,0],
-    'without an offset, more than the widest offset span apart is later');
+    'without an offset, days apart is later');
+  // Once one image of the two states an offset, a time without one may be at any allowed offset.
+  assert.equal(order([at(1,{'0008002A':'20261030103000'}),at(1,{'0008002A':'20261030100000','00080201':'+0900'})]),null,
+    'one stated and one unknown offset, 30 minutes apart: hours of doubt, no latest image');
+  assert.deepEqual(order([at(1,{'0008002A':'20261030103000'}),at(2,{'0008002A':'20261030100000+0900'})]),[1,0],
+    'one stated and one unknown offset, 30 minutes apart: Instance Number decides');
+  assert.deepEqual(order([at(1,{'0008002A':'20261101103000'}),at(2,{'0008002A':'20261030100000+0900'})]),[0,1],
+    'one stated and one unknown offset, more than the widest offset span apart: time decides');
   assert.deepEqual(order([at(1,{'0008002A':'202610+0000','00080022':'20261030','00080032':'110000'}),at(2,{'0008002A':'20261028100000+0000'})]),[0,1],
     'an image whose acquisition DateTime has an offset and Date + Time has none is read from both: the 30 Oct exposure is later than 28 Oct under any offset');
   assert.deepEqual(order([kst(1,{'0008002A':'20261030103000+0000','00080022':'20261030','00080032':'103000'}),at(2,{'0008002A':'20261030100000+0000'})]),[1,0],

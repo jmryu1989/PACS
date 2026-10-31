@@ -622,13 +622,14 @@
     return minutes>=-720&&minutes<=840?minutes:null;
   }
   const MINUTE=60e6;
-  // A DT value as the UTC span [earliest, latest) it can name, in microseconds. Omitted trailing
+  // A DT value as the span [earliest, latest) it can name, in microseconds. Omitted trailing
   // components widen it (PS3.5 6.2): "2026103010" is any moment of that hour, not 10:00:00. The
-  // offset is the value's own suffix, else Timezone Offset From UTC (zone); without either it may be
-  // any offset DICOM allows (-12:00..+14:00), so the span covers all of them. Each value is read on
-  // its own, so no pairing of known and unknown offsets can order two images that might be reversed.
-  // A value that is not a real calendar date and time is no time at all.
-  function dateTime(value,zone){
+  // offset is the value's own suffix, else Timezone Offset From UTC (zone), else `unknown`. An
+  // unknown of null is any offset DICOM allows (-12:00..+14:00), so the span covers all of them and
+  // no pairing of known and unknown offsets can order two images that might be reversed; an unknown
+  // of 0 reads the value on its local clock. A value that is not a real calendar date and time is no
+  // time at all.
+  function dateTime(value,zone,unknown=null){
     const m=/^(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?(?:\.(\d{1,6}))?([+-]\d{4})?$/.exec(value);
     if(!m||m[7]&&!m[6])return null;
     const given=m.slice(2,7).filter(x=>x!==undefined).length;
@@ -636,7 +637,7 @@
     const at=(...p)=>{const t=new Date(0);t.setUTCFullYear(p[0],p[1]-1,p[2]);t.setUTCHours(p[3],p[4],p[5]);return t.getTime()*1000;};
     const days=new Date(at(y,mo+1,0,0,0,0)/1000).getUTCDate();
     if(mo<1||mo>12||d<1||d>days||h>23||mi>59||s>60)return null; // second 60 is a leap second
-    const own=m[8]===undefined?zone:utcOffset(m[8]);
+    const own=m[8]===undefined?(zone??unknown):utcOffset(m[8]);
     if(m[8]!==undefined&&own===null)return null;
     const p=[y,mo,d,h,mi,s],lo=at(...p)+(m[7]?+m[7].padEnd(6,'0'):0);
     p[given]++;
@@ -644,23 +645,27 @@
     return own===null?[lo-840*MINUTE,hi+720*MINUTE]:[lo-own*MINUTE,hi-own*MINUTE];
   }
   // DA + TM read as one DT; an absent time is the whole day. A malformed part is no time.
-  function dateAndTime(date,time,zone){
-    return /^\d{8}$/.test(date)&&/^(?:\d{2}(?:\d{2}(?:\d{2}(?:\.\d{1,6})?)?)?)?$/.test(time)?dateTime(date+time,zone):null;
+  function dateAndTime(date,time,zone,unknown){
+    return /^\d{8}$/.test(date)&&/^(?:\d{2}(?:\d{2}(?:\d{2}(?:\.\d{1,6})?)?)?)?$/.test(time)?dateTime(date+time,zone,unknown):null;
   }
   // 1 or -1 when one span lies wholly after the other; 0 when they overlap or either is unknown.
   function laterSpan(a,b){return !a||!b?0:a[0]>=b[1]?1:b[0]>=a[1]?-1:0;}
   // Acquisition DateTime and Acquisition Date + Time name one moment; read together, the span is
   // what both allow. Spans that exclude each other are no acquisition time.
-  function acquired(item,zone){
-    const spans=[dateTime(text(item,'0008002A'),zone),dateAndTime(text(item,'00080022'),text(item,'00080032'),zone)].filter(Boolean);
+  function acquired(item,zone,unknown){
+    const spans=[dateTime(text(item,'0008002A'),zone,unknown),dateAndTime(text(item,'00080022'),text(item,'00080032'),zone,unknown)].filter(Boolean);
     if(!spans.length)return null;
     const lo=Math.max(...spans.map(s=>s[0])),hi=Math.min(...spans.map(s=>s[1]));
     return lo<hi?[lo,hi]:null;
   }
   // Positive when image a is known to be the later exposure: acquisition time, then content time,
-  // each only where both images carry it and the spans do not overlap, then Instance Number.
+  // each only where both images carry it and the spans do not overlap, then Instance Number. The
+  // candidates are one study's images, so when neither of the two states an offset their times are
+  // read on the one local clock of that study; once either states one, a time without one may be at
+  // any offset.
   function laterExposure(a,b){
-    return laterSpan(a.acquired,b.acquired)||laterSpan(a.content,b.content)||
+    const t=a.zoned||b.zoned?'utc':'local';
+    return laterSpan(a[t].acquired,b[t].acquired)||laterSpan(a[t].content,b[t].content)||
       (a.number!==null&&b.number!==null?Math.sign(a.number-b.number):0);
   }
   // A repeat exposure of one slot, newest first. The first image is later than every other one by
@@ -668,8 +673,9 @@
   // follow the same way while that order names one, then in stored order.
   function newestFirst(found){
     let rest=found.map(o=>{
-      const zone=utcOffset(text(o.item,'00080201'));
-      return {o,acquired:acquired(o.item,zone),content:dateAndTime(text(o.item,'00080023'),text(o.item,'00080033'),zone),number:o.instanceNumber};
+      const zone=utcOffset(text(o.item,'00080201')),dt=text(o.item,'0008002A');
+      const read=unknown=>({acquired:acquired(o.item,zone,unknown),content:dateAndTime(text(o.item,'00080023'),text(o.item,'00080033'),zone,unknown)});
+      return {o,zoned:zone!==null||/[+-]\d{4}$/.test(dt)&&dateTime(dt,null)!==null,utc:read(null),local:read(0),number:o.instanceNumber};
     });
     const ordered=[];
     while(rest.length){

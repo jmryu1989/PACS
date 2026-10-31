@@ -301,8 +301,7 @@ test('a thumbnail double-click opens the series in a cell when the MG hanging pl
   h.extension.onModeExit();
 });
 
-// Acquisition DateTime per image, at the site's stated UTC offset: a time without one may be at any offset and
-// would not order exposures minutes apart.
+// Acquisition DateTime per image, at the site's stated UTC offset.
 function exposed(items, times) {
   times.forEach((t, i) => { items[i]['0008002A'] = { vr: 'DT', Value: [t] }; items[i]['00080201'] = { vr: 'SH', Value: ['+0900'] }; });
   return items;
@@ -414,6 +413,24 @@ test('a Conventional repeat opened in the DBT stage keeps its mark and Switch', 
   assert.ok(h.preferences().set({ layout: 'current', kind: 'dbt' }));
   assert.equal(h.protocol().stages[h.state().stageIndex].id, 'current-dbt');
   await openElsewhere(h, set(items[0]), k => 'Current · R CC · Conventional · 2장 중 ' + k + '장 · 재촬영');
+  h.extension.onModeExit();
+});
+
+// A retake minutes later at a site that states no UTC offset, both images numbered alike: the study's images
+// share one clock, so the later exposure is hung and marked, not left as "Select Image".
+test('a repeat exposure without any UTC offset hangs the later image of one study', async () => {
+  const items = ['siemens-2d-12-1', 'siemens-2d-12-2'].map(fixture);
+  items[1]['0020000D'] = structuredClone(items[0]['0020000D']);
+  ['20261030100000', '20261030103000'].forEach((t, i) => {
+    items[i]['0008002A'] = { vr: 'DT', Value: [t] }; delete items[i]['00080201']; items[i]['00200013'] = { vr: 'IS', Value: [1] };
+  });
+  const h = await mount(items);
+  h.run();
+  const set = d => h.displaySets.find(s => s.images[0].SOPInstanceUID === d['00080018'].Value[0]).displaySetInstanceUID;
+  const key = 'current|R|CC|conventional';
+  assert.equal(h.selected(key), set(items[1]), 'the exposure 30 minutes later fills the slot');
+  const { keys, panes } = layOut(h);
+  assert.equal(paneText(panes[keys.indexOf(key)]), 'Current · R CC · Conventional · 2장 중 1장 · 재촬영 | Switch');
   h.extension.onModeExit();
 });
 
