@@ -49,7 +49,8 @@ class StudyPageTransferE2E(WorklistE2E):
         expect(page.locator('#findings')).to_have_value('Transfer keeps unsaved report')
         folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);page.screenshot(path=str(folder/'resumed-related-pages.png'))
     def test_transfer_02_owner_response_requires_confirmed_session_replacement(self):
-        page=self.login();expect(page.locator('#rows tr[data-uid]').first).to_be_visible()
+        # Its own listed study: on a fresh synthetic stack nothing else is listed for doctor once earlier cases cleaned up.
+        self.fixture();page=self.login();expect(page.locator('#rows tr[data-uid]').first).to_be_visible()
         before=page.locator('#rows tr[data-uid]').count();logouts=[]
         page.on('request',lambda r:logouts.append(r.url) if r.method=='POST' and r.url.endswith('/auth/logout') else None)
         pattern='**/api/studies?*'

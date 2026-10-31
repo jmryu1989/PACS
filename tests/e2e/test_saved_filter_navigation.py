@@ -56,6 +56,18 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         expect(page.locator('#sfm-save')).to_be_focused()
         return saved
 
+    def close_manager(self, page):
+        # The manager returns focus in its close event, a frame after the click. An enabled opener was already
+        # refocused by the browser inside close(), so focus alone does not show the event ran; a keystroke sent before
+        # it would go to the opener. Wait for the event itself (this listener runs after the manager's own).
+        seen = page.locator('#saved-filter-manager').evaluate_handle("""dialog => {
+            const seen = {closed: false};
+            dialog.addEventListener('close', () => { seen.closed = true; }, {once: true});
+            return seen;
+        }""")
+        page.locator('#sfm-close').click()
+        page.wait_for_function('seen => seen.closed', arg=seen, timeout=5000)
+
     def expect_rows(self, page, *fixtures):
         expect(page.locator('#rows tr[data-uid]')).to_have_count(len(fixtures))
         self.assertEqual(set(page.locator('#rows tr[data-uid]').evaluate_all(
@@ -135,7 +147,8 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         expect(page.locator('#sfm-name')).to_have_value(name)
         expect(page.locator('#sfm-quick')).to_have_value(prefix)
         expect(page.locator('#sfm-col-id')).to_have_value(second.patient_id)
-        page.locator('#sfm-close').click()
+        self.close_manager(page)
+        expect(page.locator('#edit-active-filter')).to_be_focused()
         page.locator('#quick').fill(prefix)
         expect(page.locator('#active-filter-state')).to_have_text('Saved')
         page.locator('#heads th[data-key="id"]').click()

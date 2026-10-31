@@ -1,7 +1,8 @@
 import { BadRequestException, ConflictException, NotFoundException, ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
-import type { AccessEventV1 } from '../emr-contract/access-event';
+import type { AccessAction, AccessEventV1, PatientLinkSnapshot } from '../emr-contract/access-event';
+import type { RecordKind } from '../emr-contract/classification';
 import type { EmrRecordWork } from '../emr-runtime/record-port';
 import type { BusinessReference } from '../emr-runtime/store';
 import { ContractError, refuse } from '../emr-contract/validation';
@@ -17,7 +18,24 @@ export type ClinicalRouteSources = (tx: Prisma.TransactionClient, request: objec
 export interface ClinicalWorkflow {
   tx: Prisma.TransactionClient;
   closeAssignment(uid: string, owner: string, revision: number): Promise<void>;
+  /** 제23조④: the access record of one PACS record this request wrote (기재·추가기재·수정), committed with that write. */
+  record(entry: WorkflowRecord): Promise<void>;
 }
+/** `surface` is the request's own route; `institution` the record's managing institution as the write's locked rows hold
+ * it (a deleted study has no row left to look up). `patientId` is a source PatientID the write already holds; null leaves
+ * the link unresolved rather than reading the archive under the write's locks. */
+export interface WorkflowRecord {
+  surface: string; uid: string; institution: string; kind: RecordKind; recordId: string; version: string;
+  action: AccessAction; patientId: string | null; reference: BusinessReference;
+}
+/** The link a study's current original patient is named by: the patient ID under the study's managing institution. The
+ * current-study read (startup.ts), the image routes' gate observation (image-delivery-record.ts) and a written record's
+ * event (ClinicalWorkflow.record) name a patient by it. */
+export function studyPatientLink(managingInstitutionId: string, patientId: string): PatientLinkSnapshot {
+  return { linkId: JSON.stringify([managingInstitutionId, patientId]), patientId, assigningAuthority: managingInstitutionId };
+}
+/** A service write that runs in the request's records transaction (ClinicalRoutes.workflow). */
+export type RecordedTransaction = <T>(execute: (workflow: ClinicalWorkflow) => Promise<T>) => Promise<T>;
 /** S7-U3a: the receiving institution's reader allocation closes inside the study operation that
  * takes the tele channel away (PATCH/DELETE studies/:uid). D1860 / D-T5: allocation is none of
  * 제23조④'s record acts, so the close names no patient-bearing target and resolves the study
@@ -97,9 +115,24 @@ export class ClinicalRoutes {
               recordId: known(id), versionId: known(String(revision)) }], action: 'modify', result: 'succeeded',
             requestId: facts.requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null },
           async () => ({ kind: 'ReaderAssignment', id, version: String(revision) }));
+        }, record: async entry => {
+          const known = <V>(value: V) => ({ status: 'known' as const, value });
+          await record({ formatVersion: 1, surface: entry.surface, eventId: randomUUID(),
+            userId: known(facts.actor.identity), rolesAtTime: known(facts.actor.roles),
+            actingInstitution: known(facts.actor.institutionId), managingInstitution: known(entry.institution),
+            occurredAt: new Date().toISOString(), trustedProxyIp: facts.ip, cause: 'user-view',
+            context: { basis: 'worklist', studyId: entry.uid, relatedStudyId: null, reason: null }, executor: 'member',
+            targets: [{ kind: entry.kind, patientLinkSnapshot: entry.patientId ? known(studyPatientLink(entry.institution, entry.patientId))
+                : { status: 'unresolved', reason: 'not-resolved' },
+              studyId: known(entry.uid), recordId: known(entry.recordId), versionId: known(entry.version) }],
+            action: entry.action, result: 'succeeded', requestId: facts.requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null },
+          async () => entry.reference);
         } });
       }).catch(routeError);
     } finally { work.end(); }
+  }
+  recorder(request: object): RecordedTransaction {
+    return execute => this.workflow(request, execute);
   }
   async write<T>(request: object, write: RouteWrite,
     project: (tx: Prisma.TransactionClient, plan: Readonly<ClinicalWritePlan>) => Promise<T>) {

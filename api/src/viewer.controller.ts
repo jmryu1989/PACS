@@ -1,4 +1,5 @@
-import { BadRequestException, ConflictException, Controller, Get, HttpCode, Param, Post, Query, Req } from '@nestjs/common';
+import { BadRequestException, ConflictException, Controller, Get, HttpCode, Inject, Optional, Param, Post, Query, Req } from '@nestjs/common';
+import { EMR_CLINICAL_ROUTES, ClinicalRoutes, clinicalRoutes } from './emr-clinical/routes';
 import { randomBytes } from 'node:crypto';
 import { LocalReadResponse } from './emr-viewing/local-read';
 import { viewerSources } from './emr-viewing/consumer-read';
@@ -19,7 +20,8 @@ const changed = (message = '판독 상태가 바뀌었습니다. 새로고침하
 
 @Controller()
 export class ViewerController {
-  constructor(private svc: ViewerService, private pacs: PacsService, private contextEvents: ViewerContextEventService) {}
+  constructor(private svc: ViewerService, private pacs: PacsService, private contextEvents: ViewerContextEventService,
+    @Optional() @Inject(EMR_CLINICAL_ROUTES) private readonly clinical?: ClinicalRoutes) {}
 
   @Post('studies/:uid/viewer-context-events')
   @HttpCode(200)
@@ -63,7 +65,7 @@ export class ViewerController {
   @Post('studies/:uid/viewer-items')
   @HttpCode(200)
   create(@Param('uid') uid: string, @Req() req: any) {
-    return this.svc.write(uid, req.rawBody, caller(req));
+    return this.svc.write(uid, req.rawBody, caller(req), undefined, clinicalRoutes(this.clinical).recorder(req));
   }
 
   @Get('studies/:uid/viewer-items/:id/revisions')
@@ -74,6 +76,6 @@ export class ViewerController {
   @Post('studies/:uid/viewer-items/:id/revisions')
   @HttpCode(200)
   revise(@Param('uid') uid: string, @Param('id') id: string, @Req() req: any) {
-    return this.svc.write(uid, req.rawBody, caller(req), id);
+    return this.svc.write(uid, req.rawBody, caller(req), id, clinicalRoutes(this.clinical).recorder(req));
   }
 }

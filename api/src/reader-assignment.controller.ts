@@ -7,6 +7,12 @@ const caller=(r:any)=>({sub:r.sub,actor:r.actor,roles:r.roles??[],institution:r.
 export class ReaderAssignmentController {
   constructor(private service: ReaderAssignmentService, @Optional() @Inject(EMR_CLINICAL_ROUTES) private readonly clinical?: ClinicalRoutes){}
   @Get('reader-candidates') candidates(@Req() r:any){return this.service.candidates(caller(r));}
-  @Get('studies/:uid/reader-assignment') read(@Param('uid') uid:string,@Req() r:any){return clinicalRoutes(this.clinical).assignment(r, uid, tx => this.service.read(uid,caller(r), tx));}
-  @Post('studies/:uid/reader-assignment') async write(@Param('uid') uid:string,@Req() r:any,@Body() b:any){ await clinicalRoutes(this.clinical).write(r, { surface: 'assignment.write', studyId: uid, recordId: JSON.stringify([uid,r.institution]), body: b }, tx => this.service.write(uid,caller(r),b, tx)); return this.read(uid, r); }
+  @Get('studies/:uid/reader-assignment') read(@Param('uid') uid:string,@Req() r:any){return this.current(uid,r);}
+  @Post('studies/:uid/reader-assignment') async write(@Param('uid') uid:string,@Req() r:any,@Body() b:any){
+    const written=await clinicalRoutes(this.clinical).write(r, { surface: 'assignment.write', studyId: uid, recordId: JSON.stringify([uid,r.institution]), body: b }, tx => this.service.write(uid,caller(r),b, tx));
+    // A replay answers from the clinical receipt before the service sees it. Once another change (or a channel close)
+    // has overtaken that request, the current row is not this request's outcome and must not be answered as saved.
+    return this.current(uid, r, written.emr.replayed ? b.requestId : null);
+  }
+  private current(uid:string,r:any,replayed:string|null=null){return clinicalRoutes(this.clinical).assignment(r, uid, tx => this.service.read(uid,caller(r), tx, replayed));}
 }

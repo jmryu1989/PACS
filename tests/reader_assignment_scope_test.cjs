@@ -207,8 +207,11 @@ async function world() {
     studies: async () => [...t.StudyState.values()].map(s => ({ '0020000D': { Value: [s.uid] }, '00080080': { Value: [s.institutionId] },
       '00100020': { Value: ['SYN-' + s.uid] }, '00100010': { Value: ['SYNTHETIC^PATIENT'] } })),
   };
+  // `records`: the study writes' own 제23조④ records (bound in access_record_writes_test / pacs_split_modules_test SPLIT-25).
+  const records = [];
   const workflow = { workflow: (_request, execute) => root.$transaction(tx => execute({ tx,
-    closeAssignment: async (uid, owner, revision) => { log.push({ client: tx.__name, model: 'Ledger', op: 'close', uid, owner, revision }); } })) };
+    closeAssignment: async (uid, owner, revision) => { log.push({ client: tx.__name, model: 'Ledger', op: 'close', uid, owner, revision }); },
+    record: async entry => { records.push({ client: tx.__name, ...entry }); } })) };
   const w = {
     t, log, access, keycloak,
     ra: new ReaderAssignmentService(root, keycloak, access),
@@ -437,6 +440,27 @@ test('a reopened channel starts at a new revision: no reader, no history and no 
   assert.deepEqual(await w.read('bTech').then(s => [s.revision, s.reader, s.history]), [4, null, []]);
   assert.deepEqual(w.audits().filter(a => a.action === ACTION && a.detail.institution === B).map(a => [a.detail.revision, a.detail.closed ?? null]),
     [[1, null], [2, 'tele-closed'], [3, null], [4, 'tele-closed']]);
+});
+
+test('a replay answered from the clinical receipt is the outcome only while it is still the row\'s last request', async () => {
+  // The clinical route answers a committed request's replay from its receipt before write() runs, and the controller then
+  // reads with that request ID. A later change or a channel close overtakes it: the current row is then not its outcome.
+  const w = await world();
+  await channel(w, 'open');
+  const first = w.body('aTech', await w.read('aTech'), 'aDoc');
+  const written = await w.write('aTech', first);
+  assert.deepEqual(await w.ra.read(UID, caller('aTech'), undefined, first.requestId.toUpperCase()), written);
+  await w.assign('aAdmin', 'aDoc2');
+  const before = w.snapshot();
+  await assert.rejects(w.ra.read(UID, caller('aTech'), undefined, first.requestId), status(409));
+  assert.deepEqual(w.snapshot(), before);
+  // The receiver's last request before a close no longer replays once the channel is reopened.
+  const last = w.body('bTech', await w.read('bTech'), 'bDoc');
+  await w.write('bTech', last);
+  await w.tele({ ts: 'cancelled' });
+  await w.tele({ ts: 'wait', teleTo: B });
+  await assert.rejects(w.ra.read(UID, caller('bTech'), undefined, last.requestId), status(409));
+  assert.deepEqual(await w.read('bTech').then(s => [s.revision, s.reader, s.history]), [2, null, []]);
 });
 
 test('every close gives the ended channel a new revision: a request prepared in one channel never lands in the next (F02)', async () => {

@@ -27,8 +27,11 @@ SOURCES = sorted([*(ROOT / "api" / "src").glob("critical-result*.ts"), ROOT / "a
 MIGRATIONS = sorted(p for p in (ROOT / "api" / "prisma" / "migrations").iterdir() if p.is_dir())
 DEV_IMAGE = os.environ.get("KIN_TEST_API_DEV_IMAGE")
 DATABASE = "kin_critical_result_source"
+# ./emr-clinical/routes: the controller's request records transaction (의료법 제23조④ record of each write). It runs the
+# service's own transaction body and appends an access event; it supplies no report content.
 IMPORTS = {"@nestjs/common", "node:crypto", "crypto", "./member-rights", "./prisma.service", "./study-access.service", "./keycloak.service",
-           "./emr-viewing/consumer-read", "./orthanc.service", "./clinician-policy", "./critical-result-policy", "./critical-result.service", "./preliminary-reader"}
+           "./emr-viewing/consumer-read", "./orthanc.service", "./clinician-policy", "./critical-result-policy", "./critical-result.service", "./preliminary-reader",
+           "./emr-clinical/routes"}
 REPORT_COLUMNS = {"uid", "version"}
 FORBIDDEN_MEMBERS = {"report", "reportDraft", "reportPreview", "$queryRawUnsafe", "$executeRawUnsafe"}
 FORBIDDEN_TEXT = ("ReportDraft", "reportDraft", "report-preview", "reportPreview")

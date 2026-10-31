@@ -42,6 +42,8 @@ const { ConflictException, ServiceUnavailableException } = require('/app/node_mo
 const P = require('/app/dist/critical-result-policy');
 const { CriticalResultService, CRITICAL_RESULT_AUDIT_ACTION } = require('/app/dist/critical-result.service');
 const { CriticalResultController } = require('/app/dist/critical-result.controller');
+const { ClinicalRoutes } = require('/app/dist/emr-clinical/routes');
+const { parseAccessEvent } = require('/app/dist/emr-contract/access-event');
 const { StudyAccessService } = require('/app/dist/study-access.service');
 const { OWNER_ONLY_AUDIT_ACTIONS } = require('/app/dist/pacs.service');
 const { AUDIT_HIDDEN_STUDY_SCOPED, auditRule } = require('/app/dist/admin-audit');
@@ -234,9 +236,20 @@ async function world({ policies = {} } = {}) {
   } });
   w.access = new StudyAccessService(prisma, orthanc, {});
   w.svc = new CriticalResultService(prisma, w.access, keycloak, orthanc);
+  w.prisma = prisma;
   return w;
 }
 
+/** 의료법 제23조④: the controller's writes run in the request records transaction (ClinicalRoutes.workflow); here over this
+ * world's database, each appended event canonicalized as the ledger does (tests/access_record_writes_test.cjs binds them). */
+function controllerOf(w) {
+  const records = { begin: () => ({ end() {}, transactionWithRecords: work =>
+    w.prisma.$transaction(tx => work(tx, async (event, effect) => { parseAccessEvent(event); return effect(); })) }) };
+  const facts = { actor: { identity: { id: '00000000-0000-4000-8000-0000000000f1', issuer: 'https://idp.synthetic.test', subject: 'syn-sub' },
+    kind: 'member', roles: ['radiologist'], institutionId: INST, signingRegistrationId: null }, requestId: 'syn-request',
+    ip: { status: 'known', value: { address: '127.0.0.1', source: 'request-peer' } } };
+  return new CriticalResultController(w.svc, new ClinicalRoutes({ records, context: { facts: async () => facts } }, null));
+}
 const createBody = (c, requestId, recipient, sourceVersion, message = MESSAGE) =>
   ({ requestId, expectedOwner: owner(c), recipientSub: SUBS[recipient], sourceVersion, message });
 const ackBody = (c, requestId, revision = 1) => ({ requestId, expectedOwner: owner(c), revision });
@@ -719,7 +732,7 @@ test('the received list pages by (createdAt, id) under a cursor bound to the Stu
 test('SV13 a committed write whose answer is lost replays with the same requestId', async () => {
     const w = await world();
     const v1 = await approved(w);
-    const controller = new CriticalResultController(w.svc);
+    const controller = controllerOf(w);
     const request = c => ({ kind: 'member', institution: c.institution, sub: c.sub, actor: c.actor, roles: c.roles, displayName: c.name });
     const call = async (handler, c, ...args) => {
       const req = request(c);
@@ -1491,7 +1504,7 @@ test('TSV16 cancel and supersede judge the channel after the study row lock: a c
 test('TSV17 a tele create whose committed answer was lost: after the channel closes the same request is 404, never a stored result (TC-07)', async () => {
   const w = await teleWorld();
   const v1 = await w.commit(TELE_UID, 'approve', { author: actorOf('S') });
-  const controller = new CriticalResultController(w.svc);
+  const controller = controllerOf(w);
   const c = S(), req = { kind: 'member', institution: c.institution, sub: c.sub, actor: c.actor, roles: c.roles, displayName: c.name };
   const body = createBody(c, id(2071), 'KC', v1);
   const post = () => controller.create(TELE_UID, req, body);

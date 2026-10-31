@@ -662,6 +662,9 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.page.locator('#sfm-delete').click()
         expect(self.page.locator('#sfm-status')).to_contain_text('삭제')
         self.page.locator('#sfm-close').click()
+        # Closing returns focus in the dialog's close event, after the click. Edit Search is disabled for a deleted
+        # search, so it lands on Clear; typing before it lands would send fill()'s keystroke to Clear instead.
+        expect(self.page.locator('#clearfilter')).to_be_focused()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
         expect(self.page.locator('#active-filter-state')).to_have_text('Deleted')
         self.page.locator('#quick').fill('')
