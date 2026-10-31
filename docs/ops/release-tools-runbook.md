@@ -853,9 +853,12 @@ Then take one of two ways:
          assert ops.digest(saved) == record['n_custody_sha256']
          ops.run(['sudo', '-n', 'install', '-o', str(os.getuid()), '-g', str(os.getgid()), '-m', '0600',
                   str(saved), str(ops.WRAPPING_CUSTODY_CONFIG)])
-     else:
+     elif record['rollback_custody']:   # only R7 can have installed one, and P7 checked sudo for it
          ops.run(['sudo', '-n', 'rm', '-f', str(ops.WRAPPING_CUSTODY_CONFIG)])
      ```
+
+     With neither N nor B having custody, nothing in this procedure creates a
+     configuration, so there is nothing to remove and no sudo is used.
 
      If R7 had repointed the host's jobs, point them back at N's checkout.
   3. Run `ops.run(compose_n + ['up', '-d'], timeout=install_timeout)`. N's
@@ -894,8 +897,9 @@ Then take one of two ways:
   fails P5 and needs a separate decision. So does a B whose credentials
   `snapshot_credentials` reads differently from Compose (P8):
   `restore_snapshot` has no other credential input.
-- R7 and the way back to N write `/etc/kin-deploy/emr-wrapping-custody.json` with
-  `sudo -n install`. P7 checks non-interactive sudo before anything changes.
+- R7 and the way back to N write or remove `/etc/kin-deploy/emr-wrapping-custody.json`
+  with `sudo -n`, only when B or N has custody. P7 checks non-interactive sudo in
+  exactly that case, before anything changes.
 - No tool brings data written on N after B into the rolled-back N-1 site.
 - A daily set without `role_catalog` (made before D23) has no live restore path.
   `restore_snapshot` needs that catalog. The older sets' `pg_dumpall` role replay
