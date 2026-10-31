@@ -90,7 +90,9 @@ back to a self-signed certificate in `tls/`.
    Rotate both: `sudo bash /opt/minhoon-studio/app/deploy/install.sh <bundle> --rotate-passwords`.
 4. **Later, switch to the admin Claude account:** log in once with `CLAUDE_CONFIG_DIR=/opt/minhoon-studio/claude-config/admin`
    (same commands as step 2), then `echo STUDIO_CLAUDE_ACCOUNT=admin | sudo tee /opt/minhoon-studio/etc/studio.env`
-   and `sudo systemctl restart minhoon-studio`.
+   and `sudo systemctl restart minhoon-studio`. Any folder `claude-config/<name>` is an account
+   (`STUDIO_CLAUDE_ACCOUNT=<name>`); `install.sh` lists every such folder in `etc/config.json` and stops if
+   `studio.env` names one that does not exist.
 
 URL: `https://pacs.koreaimagingnetwork.com:8443/` (no certificate warning). `https://61.109.239.207:8443/` still
 works but the browser warns, because the certificate names only the hostname. With the hostname the browser sends
