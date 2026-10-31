@@ -662,11 +662,32 @@ test('SPLIT-09 a draft write is kept only on the boundary it saw, under a live s
   const discarded = await w.draft.discardDraft(s.uid, { expectedOwner: ownerOf(RAD_A), expectedRevision: `${epoch}:2` }, RAD_A, 'sid-a');
   assert.deepEqual([discarded.revision, discarded.present, discarded.state.draft], [`${epoch}:3`, false, null]);
   assert.equal(mine().revision, 3);
-  // 의료법 제23조④: the discard is a 수정 of this author's draft, and its answer (the stored report state) is provided in
-  // the same commit, as a draft clear is.
+  // 의료법 제23조④: the discard is a 수정 of this author's draft. No report is stored yet, so the answer provides none.
   const row = JSON.stringify([s.uid, RAD_A.actor]);
-  assert.deepEqual(actsOf(w.records, 'DELETE studies/:uid/draft'),
-    [['수정', 'discard', 'private-draft', row, `${epoch}:3`], ['열람', 'provide-prepared', 'private-draft', row, `${epoch}:3`]]);
+  assert.deepEqual(actsOf(w.records, 'DELETE studies/:uid/draft'), [['수정', 'discard', 'private-draft', row, `${epoch}:3`]]);
+});
+
+test('SPLIT-09b a discard answering a stored report records the 열람 of that report version, unless the preliminary body is withheld', async () => {
+  const w = world();
+  const s = w.study({ rs: 'A' });
+  w.db.seed('report', { uid: s.uid, findings: 'approved text', conclusion: '', recommendation: '', version: 2, updatedBy: RAD_A2.actor });
+  w.db.seed('reportVersion', { uid: s.uid, version: 2, action: 'approve', findings: 'approved text', conclusion: '', recommendation: '', author: RAD_A2.actor });
+  const epoch = s.draftEpoch;
+  await w.draft.putReport(s.uid, draftBody(RAD_A, epoch, 0, { findings: 'mine', baseVersion: 2 }), RAD_A, null);
+  const out = await w.draft.discardDraft(s.uid, { expectedOwner: ownerOf(RAD_A), expectedRevision: `${epoch}:1` }, RAD_A, null);
+  assert.deepEqual([out.state.version, out.state.findings, out.state.draft], [2, 'approved text', null]);
+  assert.deepEqual(actsOf(w.records, 'DELETE studies/:uid/draft'), [
+    ['수정', 'discard', 'private-draft', JSON.stringify([s.uid, RAD_A.actor]), `${epoch}:2`],
+    ['열람', 'provide-prepared', 'report-version', s.uid, '2']]);
+
+  // A preliminary report another radiologist may not read: the answer carries no body, so no report read is recorded.
+  const p = w.study({ rs: 'P', preDoc: RAD_A2.actor, preDocSub: RAD_A2.sub, preReviewer: 'syn-senior', preReviewerSub: 'syn-senior' });
+  w.db.seed('report', { uid: p.uid, findings: 'prelim text', conclusion: '', recommendation: '', version: 1, updatedBy: RAD_A2.actor });
+  const before = w.records.length;
+  const hidden = await w.draft.discardDraft(p.uid, { expectedOwner: ownerOf(RAD_A), expectedRevision: `${p.draftEpoch}:0` }, RAD_A, null);
+  assert.deepEqual([hidden.state.prelimHidden, hidden.state.findings], [true, '']);
+  assert.deepEqual(actsOf(w.records.slice(before), 'DELETE studies/:uid/draft'),
+    [['수정', 'discard', 'private-draft', JSON.stringify([p.uid, RAD_A.actor]), `${p.draftEpoch}:1`]]);
 });
 
 // ── SPLIT-10 the administrator's forced discard ──

@@ -177,14 +177,15 @@ function kinCreateMammographyHanging() {
       }
       if (voi.lut) {
         // Use the stored table on the GPU actor, without rewriting decoded source pixels or the cache.
-        // VTK midpoint=1/sharpness=1 keeps each integer entry constant until the next input value.
+        // A stored value takes its own entry; only magnified samples between two stored values blend
+        // the two neighbouring entries linearly, as with a windowed VOI.
         const transfer = viewport.getDefaultActor()?.actor?.getProperty().getRGBTransferFunction(0);
         if (!transfer) return;
         transfer.removeAllPoints();
         const max = 2 ** voi.lut.bits - 1;
         voi.lut.data.forEach((value, i) => {
           const gray = spec.invert ? 1 - value / max : value / max;
-          transfer.addRGBPoint(voi.lut.first + i, gray, gray, gray, 1, 1);
+          transfer.addRGBPoint(voi.lut.first + i, gray, gray, gray);
         });
       } else {
         const half = (voi.width - (voi.fn === 'LINEAR' ? 1 : 0)) / 2;
@@ -365,6 +366,16 @@ function kinCreateMammographyHanging() {
     const observer = new MutationObserver(renderLabels);
     observer.observe(document.body, { childList: true, subtree: true });
     const subscription = services.viewportGridService.subscribe(services.viewportGridService.EVENTS.GRID_STATE_CHANGED, renderLabels);
+    // OHIF lays out a protocol grid with no active viewport when no cell receives an image, and a
+    // thumbnail double-click then has no viewport to fill and blanks the viewer. Keep a cell active.
+    function keepActiveCell() {
+      if (!live() || hp.getState()?.protocolId !== protocolId) return;
+      const grid = services.viewportGridService, { viewports, activeViewportId } = grid.getState();
+      if (!viewports.size || viewports.has(activeViewportId)) return;
+      const [first] = [...viewports.values()].sort((a, b) => a.y - b.y || a.x - b.x);
+      grid.setActiveViewportId(first.viewportId);
+    }
+    const activeSubscription = services.viewportGridService.subscribe(services.viewportGridService.EVENTS.GRID_STATE_CHANGED, keepActiveCell);
     const imageEvent = window.cornerstone.Enums.Events.STACK_NEW_IMAGE;
     const newStackEvent = window.cornerstone.Enums.Events.VIEWPORT_NEW_IMAGE_SET;
     document.addEventListener(imageEvent, orient, true);
@@ -374,7 +385,7 @@ function kinCreateMammographyHanging() {
       if (series.metadata === metadata) series.metadata = retrieve;
       if (handler.getDisplaySetsFromSeries === createDisplaySets) handler.getDisplaySetsFromSeries = nativeDisplaySets;
       if (hp.run === wrappedRun) hp.run = run;
-      observer.disconnect(); subscription.unsubscribe(); panel?.remove();
+      observer.disconnect(); subscription.unsubscribe(); activeSubscription.unsubscribe(); panel?.remove();
       document.removeEventListener(imageEvent, orient, true);
       document.removeEventListener(newStackEvent, orient, true);
       document.querySelectorAll('.kin-mg-slot').forEach(el => el.remove());

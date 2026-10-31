@@ -1,5 +1,5 @@
 {
-  "_note": "합성 자료. 실제 환자가 아니다. 이름·번호·판독문은 모두 지어낸 것이고 영상은 공개 CC BY TCIA 표본이다(image 키). daysAgo는 오늘(KST) 기준.",
+  "_note": "합성 자료. 실제 환자가 아니다. 이름·번호·판독문은 모두 지어낸 것이고 영상은 공개 CC BY TCIA 표본 또는 합성 MG 공급사 팬텀(synthetic-mg-vendor, 환자 자료 없음)이다(image 키). daysAgo는 오늘(KST) 기준.",
   "institutions": [
     { "id": "kin-center", "name": "KIN 판독센터", "type": "reading-center" },
     { "id": "hallym", "name": "한림병원", "type": "hospital" }
@@ -24,7 +24,11 @@
     { "key": "P13", "id": "ST-1013", "name": "BAEK DOYUN", "birth": "1958-12-19", "sex": "M" },
     { "key": "P14", "id": "HL-2214", "name": "MOON CHAEWON", "birth": "1993-08-08", "sex": "F" },
     { "key": "P15", "id": "ST-1015", "name": "LIM JUNSEO", "birth": "1983-02-14", "sex": "M" },
-    { "key": "P16", "id": "ST-1016", "name": "YANG HAEUN", "birth": "1975-11-30", "sex": "F" }
+    { "key": "P16", "id": "ST-1016", "name": "YANG HAEUN", "birth": "1975-11-30", "sex": "F" },
+    { "key": "P17", "id": "ST-1021", "name": "HWANG MINSEO", "birth": "1969-04-03", "sex": "F" },
+    { "key": "P18", "id": "ST-1022", "name": "JANG EUNBI", "birth": "1972-08-19", "sex": "F" },
+    { "key": "P19", "id": "ST-1023", "name": "SONG JIAN", "birth": "1964-01-25", "sex": "F" },
+    { "key": "P20", "id": "ST-1024", "name": "AHN YUJIN", "birth": "1978-06-12", "sex": "F" }
   ],
   "studies": [
     { "n": 1, "patient": "P1", "daysAgo": 0, "modality": "DX", "desc": "CHEST PA", "image": "A872279/1901-01-13", "acc": "A26102701", "ward": "ER", "rs": "W",
@@ -61,7 +65,19 @@
     { "n": 18, "patient": "P15", "daysAgo": 1, "modality": "CR", "desc": "CHEST PA", "image": "A223238/1901-01-09", "acc": "A26102602", "ward": "OPD", "rs": "T",
       "report": { "author": "SELF", "findings": "No active lung lesion.", "conclusion": "", "recommendation": "" } },
     { "n": 19, "patient": "P16", "daysAgo": 7, "modality": "XA", "desc": "ANGIOGRAPHY RENAL", "image": "CMB-CRC/MSB-06489", "acc": "A26102001", "ward": "IR", "rs": "A",
-      "report": { "author": "lee.sora@studio.invalid", "findings": "Selective right renal angiography shows normal arterial branching.\nNo aneurysm or arteriovenous fistula.", "conclusion": "Normal right renal angiogram.", "recommendation": "" } }
+      "report": { "author": "lee.sora@studio.invalid", "findings": "Selective right renal angiography shows normal arterial branching.\nNo aneurysm or arteriovenous fistula.", "conclusion": "Normal right renal angiogram.", "recommendation": "" } },
+    { "n": 20, "patient": "P17", "daysAgo": 0, "modality": "MG", "desc": "MG VENDOR PHANTOM HOLOGIC (COMPRESSED)", "image": "synthetic-mg-vendor/hologic-compressed", "acc": "A26103101", "ward": "BR", "rs": "W",
+      "clinical": { "reason": "합성 MG 팬텀(Hologic 형식, 압축 전송구문). 진료 영상 아님" } },
+    { "n": 21, "patient": "P17", "daysAgo": 30, "modality": "MG", "desc": "MG VENDOR PHANTOM HOLOGIC (NATIVE)", "image": "synthetic-mg-vendor/hologic-native", "acc": "A26100101", "ward": "BR", "rs": "W" },
+    { "n": 22, "patient": "P18", "daysAgo": 0, "modality": "MG", "desc": "MG VENDOR PHANTOM SIEMENS (COMPRESSED)", "image": "synthetic-mg-vendor/siemens-compressed", "acc": "A26103102", "ward": "BR", "rs": "W",
+      "clinical": { "reason": "합성 MG 팬텀(Siemens 형식, 압축 전송구문). 진료 영상 아님" } },
+    { "n": 23, "patient": "P18", "daysAgo": 30, "modality": "MG", "desc": "MG VENDOR PHANTOM SIEMENS (NATIVE)", "image": "synthetic-mg-vendor/siemens-native", "acc": "A26100102", "ward": "BR", "rs": "W" },
+    { "n": 24, "patient": "P19", "daysAgo": 0, "modality": "MG", "desc": "MG VENDOR PHANTOM GE (COMPRESSED)", "image": "synthetic-mg-vendor/ge-compressed", "acc": "A26103103", "ward": "BR", "rs": "W",
+      "clinical": { "reason": "합성 MG 팬텀(GE 형식, 압축 전송구문). 진료 영상 아님" } },
+    { "n": 25, "patient": "P19", "daysAgo": 30, "modality": "MG", "desc": "MG VENDOR PHANTOM GE (NATIVE)", "image": "synthetic-mg-vendor/ge-native", "acc": "A26100103", "ward": "BR", "rs": "W" },
+    { "n": 26, "patient": "P20", "daysAgo": 0, "modality": "MG", "desc": "MG VENDOR PHANTOM FUJIFILM (COMPRESSED)", "image": "synthetic-mg-vendor/fuji-compressed", "acc": "A26103104", "ward": "BR", "rs": "W",
+      "clinical": { "reason": "합성 MG 팬텀(Fujifilm 형식, 압축 전송구문). 진료 영상 아님" } },
+    { "n": 27, "patient": "P20", "daysAgo": 30, "modality": "MG", "desc": "MG VENDOR PHANTOM FUJIFILM (NATIVE)", "image": "synthetic-mg-vendor/fuji-native", "acc": "A26100104", "ward": "BR", "rs": "W" }
   ],
   "templates": [
     { "title": "Normal Chest", "shortcut": "nc", "modality": "CR", "bodypart": "Chest", "findings": "Both lungs are clear.\nNo pleural effusion or pneumothorax.\nHeart size is within normal limits.", "conclusion": "No active lung lesion.", "recommendation": "" },

@@ -53,17 +53,45 @@ function kinCreateImageLoadStatus() {
     const workerManager = core.getWebWorkerManager?.(), executeTask = workerManager?.executeTask;
     sof3 ??= kinCreateSof3Decode({ size: window.config?.maxNumberOfWebWorkers || 3 });
     if (executeTask) sof3.prewarm();
+    const emptyFrame = message => Object.assign(new Error(message), { code: 'IMAGE_DECODE_EMPTY' });
+    // The pinned JS lossless decoder resolves a codestream cut short as a full-size frame of zero or wrong samples,
+    // which no pixel check can tell from a real image. The stream must reach EOI through its own marker structure: an
+    // FFD9 found by position can sit inside an APP/COM segment ahead of a cut scan. Entropy-coded data stuffs every FF,
+    // so a scan ends at the first marker that is not FF00, a fill byte or a restart marker. Bytes after EOI are padding.
+    const terminated = bytes => {
+      if (bytes[0] !== 0xff || bytes[1] !== 0xd8) return false;
+      for (let i = 2; i + 1 < bytes.length;) {
+        if (bytes[i] !== 0xff) return false;
+        const marker = bytes[i + 1];
+        if (marker === 0xd9) return true;
+        if (marker === 0xff) { i++; continue; }
+        if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; }
+        if (i + 3 >= bytes.length) return false;
+        const length = bytes[i + 2] << 8 | bytes[i + 3];
+        if (length < 2) return false;
+        i += 2 + length;
+        if (marker !== 0xda) continue;
+        for (;; i++) {
+          i = bytes.indexOf(0xff, i);
+          if (i < 0 || i + 1 >= bytes.length) return false;
+          const next = bytes[i + 1];
+          if (next !== 0 && next !== 0xff && (next < 0xd0 || next > 0xd7)) break;
+        }
+      }
+      return false;
+    };
+    const cutShort = task => KIN_SOF3_SYNTAXES.has(task?.transferSyntax) && ArrayBuffer.isView(task.pixelData) &&
+      !terminated(new Uint8Array(task.pixelData.buffer, task.pixelData.byteOffset, task.pixelData.byteLength));
     const checkedDecode = function (workerName, methodName, ...args) {
       const decode = active && workerName === 'dicomImageLoader' && methodName === 'decodeTask';
-      const dispatch = task => executeTask.call(this, workerName, methodName, task, ...args.slice(1));
-      const result = (decode && sof3.decode(args[0], dispatch)) || executeTask.call(this, workerName, methodName, ...args);
+      // Every task the pinned worker receives, directly or as the wasm decoder's fallback; a frame the wasm decoder
+      // decoded arrives as Explicit VR Little Endian, and its own refusals keep their message.
+      const dispatch = task => cutShort(task) ? Promise.reject(emptyFrame('Incomplete JPEG lossless codestream'))
+        : executeTask.call(this, workerName, methodName, task, ...args.slice(1));
+      const result = (decode && (sof3.decode(args[0], dispatch) || dispatch(args[0]))) || executeTask.call(this, workerName, methodName, ...args);
       if (!decode) return result;
       return result.then(frame => {
-        if (!(frame?.rows > 0 && frame?.columns > 0 && frame?.pixelData?.length > 0)) {
-          const error = new Error('Empty decoded image frame');
-          error.code = 'IMAGE_DECODE_EMPTY';
-          throw error;
-        }
+        if (!(frame?.rows > 0 && frame?.columns > 0 && frame?.pixelData?.length > 0)) throw emptyFrame('Empty decoded image frame');
         return frame;
       });
     };

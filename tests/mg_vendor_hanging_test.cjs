@@ -89,7 +89,8 @@ async function mount(items, { routes = {} } = {}) {
   const document = { head: new Element(), body, createElement: () => new Element(),
     querySelector: s => s === '#kin-viewer-layout' ? panel : body.querySelector(s), querySelectorAll: s => body.querySelectorAll(s),
     addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) };
-  let grid = new Map(), gridChanged = () => {};
+  let grid = new Map(), active = null;
+  const gridListeners = new Set(), gridChanged = () => gridListeners.forEach(fn => fn());
   let state, protocol, current = 0, renderCount = 0;
   const points = [], properties = [], ranges = [], element = new Element();
   const transfer = { removeAllPoints() { points.length = 0; }, addRGBPoint(...point) { points.push(point); } };
@@ -100,7 +101,8 @@ async function mount(items, { routes = {} } = {}) {
   const hp = { getState: () => state, addProtocol: (_, p) => { protocol = p; },
     run: (_, id, options) => { state = { protocolId: id, stageIndex: options?.stageIndex }; } };
   const services = { hangingProtocolService: hp, viewportGridService: { EVENTS: { GRID_STATE_CHANGED: 'grid' },
-    getState: () => ({ viewports: grid }), subscribe: (_, fn) => { gridChanged = fn; return { unsubscribe() {} }; } },
+    getState: () => ({ viewports: grid, activeViewportId: active }), setActiveViewportId: id => { active = id; },
+    subscribe: (_, fn) => { gridListeners.add(fn); return { unsubscribe: () => gridListeners.delete(fn) }; } },
     cornerstoneViewportService: { getCornerstoneViewport: () => viewport } };
   const modules = { [STACK]: createStackHandler() }, displaySets = [];
   const extensionManager = { getActiveDataSource: () => [source], getModuleEntry: id => modules[id] };
@@ -143,6 +145,22 @@ async function mount(items, { routes = {} } = {}) {
     run() { hp.run({ displaySets }, 'default', {}); },
     // viewportGridService publishes GRID_STATE_CHANGED after every viewport assignment.
     setGrid(viewports) { grid = new Map(viewports.map(v => [v.viewportId, v])); gridChanged(); },
+    grid: () => grid, activate(id) { active = id; },
+    // The pinned viewer's SET_LAYOUT: a hanging protocol passes no active viewport, so determineActiveViewportId
+    // takes the first new cell when none was active, otherwise the first new cell that shows an image, else null.
+    layout(viewports) {
+      const next = new Map(viewports.map(v => [v.viewportId, v]));
+      active = !grid.has(active) ? viewports[0].viewportId : viewports.find(v => v.displaySetInstanceUIDs.length)?.viewportId ?? null;
+      grid = next; gridChanged();
+    },
+    // The study browser's thumbnail double-click fills the active viewport. The MG stages allow unmatched views, so
+    // getViewportsRequireUpdate returns its default, and the SET_DISPLAYSETS_FOR_VIEWPORTS reducer refuses a missing id.
+    doubleClick(displaySetInstanceUID) {
+      const viewportId = active;
+      if (!viewportId) throw new Error('ViewportId is required to set display sets for viewport');
+      grid = new Map(grid).set(viewportId, { ...grid.get(viewportId), displaySetInstanceUIDs: [displaySetInstanceUID] });
+      gridChanged();
+    },
     selected(key) { return protocol.displaySetSelectors[key].seriesMatchingRules[0].constraint.equals.value; },
     show(index, type = 'image', list = items) { order = list; current = index; listeners.get(type)({ type, detail: { viewportId: 'test' } }); } };
 }
@@ -233,6 +251,30 @@ test('a pane opened by the reader into an empty slot no longer shows that slot\'
   assert.match(paneText(panes[hung]), /^Current · R CC · [^|]*$/);
   h.extension.onModeExit();
   assert.equal(panes.map(paneText).join(''), '', 'mode exit removes every slot label');
+});
+
+// Two R CC Conventional images of one study fill the same slot, so the hanging places no image anywhere.
+test('a thumbnail double-click opens the series in a cell when the MG hanging places no image', async () => {
+  const a = fixture('siemens-2d-12-1'), b = fixture('siemens-2d-12-2');
+  b['0020000D'] = structuredClone(a['0020000D']);
+  const h = await mount([a, b]);
+  // OHIF's default protocol lays out its own grid before the MG protocol replaces it.
+  h.layout([{ viewportId: 'default-0', x: 0, y: 0, displaySetInstanceUIDs: [h.displaySets[0].displaySetInstanceUID] }]);
+  h.run();
+  const stage = h.protocol().stages[h.state().stageIndex], { columns } = stage.viewportStructure.properties;
+  const keys = stage.viewports.map(v => v.displaySets[0].id);
+  assert.ok(keys.every(key => !h.selected(key)), 'no cell is hung');
+  h.layout(keys.map((key, i) => ({ viewportId: 'vp-' + i, x: i % columns, y: Math.floor(i / columns), displaySetInstanceUIDs: [] })));
+  const [first, second] = h.displaySets.map(d => d.displaySetInstanceUID);
+  h.doubleClick(second);
+  assert.deepEqual(h.grid().get('vp-0').displaySetInstanceUIDs, [second], 'the first cell shows the series');
+  assert.equal([...h.grid().values()].filter(v => v.displaySetInstanceUIDs.length).length, 1);
+  // A cell the reader made active keeps receiving the next double-click.
+  h.activate('vp-2');
+  h.doubleClick(first);
+  assert.deepEqual(h.grid().get('vp-2').displaySetInstanceUIDs, [first]);
+  assert.deepEqual(h.grid().get('vp-0').displaySetInstanceUIDs, [second]);
+  h.extension.onModeExit();
 });
 
 test('stored VOI table reaches the actor and switching to a windowed image replaces it', async () => {

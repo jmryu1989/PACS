@@ -35,14 +35,19 @@ def main():
     data = open(so, "rb").read()
     pattern = rb"[A-Za-z0-9_./@-]{3,200}\.(?:js|css|wasm|json|png|svg|ico|woff2?|ttf|html|txt|map|webmanifest|xml)(?![A-Za-z0-9])"
     names = sorted({m.group().decode() for m in re.finditer(pattern, data)})
+    # The OHIF plugin refuses to start without the DICOMweb plugin (Orthanc then exits and --rm removes it).
     subprocess.run(["docker", "run", "-d", "--rm", "--name", NAME, "-p", f"127.0.0.1:{PORT}:8042",
-                    "-e", "OHIF_PLUGIN_ENABLED=true", "-e", "ORTHANC__AUTHENTICATION_ENABLED=false", IMAGE], check=True, capture_output=True)
+                    "-e", "OHIF_PLUGIN_ENABLED=true", "-e", "DICOM_WEB_PLUGIN_ENABLED=true",
+                    "-e", "ORTHANC__AUTHENTICATION_ENABLED=false", IMAGE], check=True, capture_output=True)
     try:
         for _ in range(60):
             try:
                 urllib.request.urlopen(f"http://127.0.0.1:{PORT}/ohif/", timeout=2); break
             except Exception:
                 time.sleep(1)
+        else:
+            # Without this every resource below waits out its own connection attempt (hours for ~2000 names).
+            raise SystemExit(f"Orthanc OHIF plugin did not answer on port {PORT}")
         ok = total = 0
         index = None
         for name in names:

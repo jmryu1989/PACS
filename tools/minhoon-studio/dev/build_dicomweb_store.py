@@ -2,12 +2,18 @@
 """Build a STATIC DICOMweb store for the studio mock viewer server.
 
 A throwaway Orthanc (no volumes, loopback port only) ingests a few public CC BY
-TCIA sample studies; every response the OHIF client needs is fetched once and
-written to disk, so the mock can serve the viewer without any PACS behind it.
+TCIA sample studies and the synthetic MG vendor phantoms of
+scripts/mg_vendor_fixture.py (no patient input; per vendor one native and one
+compressed study, at most one hung image per MG slot); every response the OHIF client needs is fetched once
+and written to disk, so the mock can serve the viewer without any PACS behind it.
 
-  python tools/minhoon-studio/dev/build_dicomweb_store.py
+  python tools/minhoon-studio/dev/build_dicomweb_store.py [--mg-python <python>] [--out <dir>]
 
-Output (tmp/minhoon-studio/dicomweb-store, recreated on every run):
+--mg-python runs the phantom generator; it needs pydicom, numpy, imagecodecs and
+pyjpegls (the compressed syntaxes), and the build stops unless every phantom passes.
+EA1141 derivatives (scripts/mg_compressed_fixture.py) stay local and are not used.
+
+Output (tmp/minhoon-studio/dicomweb-store unless --out, recreated on every run):
   files/<sha256-24>   response bodies, deduplicated by content hash
   routes.json         request path -> {file, type (Content-Type verbatim), bytes}
   studies.json        per study: QIDO object, counts, UID maps, source/licence
@@ -20,6 +26,7 @@ JSON bodies carry absolute URLs (BulkDataURI, RetrieveURL); the build origin is
 replaced with the literal {{ORIGIN}} so the mock can insert the browser origin
 at serve time. Binary bodies are stored byte-exact.
 """
+import argparse
 import hashlib
 import json
 import os
@@ -27,10 +34,12 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -69,8 +78,94 @@ FOLDERS = [
     "studies/CMB-CRC/MSB-06489/1959-10-06-4968582907",
 ]
 
+# Synthetic MG vendor phantoms: per vendor a compressed study (today) and an uncompressed one (prior), in the
+# syntaxes the vendor's conformance statement lists (tests/fixtures/mg_vendor_cases.json). Every phantom is an R CC
+# image, and the product's MG hanging never picks between two images for one slot (side x view x Conventional /
+# Synthetic 2D / DBT): such a study opens with every cell empty. So each study holds at most one hung image per
+# kind; FOR PROCESSING images are never hung and may repeat. The vendor fixture itself checks every case and syntax.
+# Implicit VR and big endian copies are left out: byte-order cases for the API that look the same on screen.
+MG_ROOT = "synthetic-mg-vendor"
+MG_STUDIES = {
+    "hologic": {"compressed": [("hologic-presentation12", "jpeg-lossless-sv1"), ("hologic-generated-dm10", "jpegls-lossless"),
+                               ("hologic-dbt10", "jpeg2000-lossless"), ("hologic-processing14", "jpeg-lossless-sv1"),
+                               ("hologic-processing14", "jpegls-lossless"), ("hologic-processing14", "jpeg2000-lossless")],
+                "native": [("hologic-presentation12", "explicit-le"), ("hologic-generated-bto10", "explicit-le"),
+                           ("hologic-dbt10", "explicit-le"), ("hologic-processing14", "explicit-le")]},
+    "siemens": {"compressed": [("siemens-lut-12-2", "jpeg-lossless-sv1"), ("siemens-insight12", "jpeg-extended"),
+                               ("siemens-ct-tomo12", "jpeg-lossless-sv1")],
+                "native": [("siemens-2d-12-1", "explicit-le"), ("siemens-insight12", "explicit-le"),
+                           ("siemens-bto12", "explicit-le")]},
+    "ge": {"compressed": [("ge-generated-bto12", "jpeg-lossless-sv1"), ("ge-dbt12", "jpeg2000-lossless")],
+           "native": [("ge-presentation12", "explicit-le"), ("ge-generated-bto12", "explicit-le"),
+                      ("ge-dbt12", "explicit-le"), ("ge-processing14", "explicit-le")]},
+    "fuji": {"compressed": [("fuji-2d12", "jpeg-lossless-sv1"), ("fuji-sview-lut12", "jpeg2000-lossless"),
+                            ("fuji-dbt12", "jpeg-lossless-sv1")],
+             "native": [("fuji-2d14", "explicit-le"), ("fuji-sview12", "explicit-le"), ("fuji-dbt-sigmoid12", "explicit-le")]},
+}
+MG_SYNTAX_LABEL = {"explicit-le": "EXPLICIT LE", "jpeg-lossless-sv1": "JPEG LOSSLESS SV1", "jpegls-lossless": "JPEG-LS LOSSLESS",
+                   "jpeg2000-lossless": "JPEG 2000 LOSSLESS", "jpeg-extended": "JPEG EXTENDED LOSSY"}
+MG_VENDOR_NAME = {"hologic": "HOLOGIC", "siemens": "SIEMENS", "ge": "GE", "fuji": "FUJIFILM"}
+
 # The system proxy (Windows registry) must not intercept loopback build traffic.
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def mg_uid(*parts):
+    return "2.25." + str(uuid.uuid5(uuid.NAMESPACE_URL, "kin-studio-mg-vendor/" + "/".join(parts)).int)
+
+
+def prepare_mg_phantoms(mg_python, work):
+    """Generate the phantoms and regroup them per vendor; returns (root, manifest entries by folder, generator log)."""
+    import pydicom
+    raw = work / "mg-vendor-raw"
+    generator = REPO / "scripts" / "mg_vendor_fixture.py"
+    run = subprocess.run([mg_python, str(generator), "--output", str(raw)], capture_output=True, text=True)
+    report = json.loads((raw / "manifest.json").read_text(encoding="utf-8")) if (raw / "manifest.json").is_file() else {}
+    totals = {s: sum(r["status"] == s for r in report.get("records", [])) for s in ("PASS", "FAIL", "NOT_RUN")}
+    if run.returncode != 0 or totals["FAIL"] or totals["NOT_RUN"] or not totals["PASS"]:
+        raise RuntimeError(f"MG phantom generator exit {run.returncode} {totals}: {(run.stderr or run.stdout)[-800:]}")
+    root = work / "mg-vendor"
+    entries, series_numbers = {}, {}
+    wanted = {(vendor, kind, case, syntax) for vendor, groups in MG_STUDIES.items()
+              for kind, objects in groups.items() for case, syntax in objects}
+    produced = {(r["case"], r["syntax"]) for r in report["records"]}
+    absent = sorted({(case, syntax) for _, _, case, syntax in wanted} - produced)
+    if absent:
+        raise RuntimeError(f"MG phantom generator no longer produces {absent}")
+    for record in report["records"]:
+        vendor, syntax = record["case"].split("-", 1)[0], record["syntax"]
+        kind = next((k for k in MG_STUDIES.get(vendor, {}) if (vendor, k, record["case"], syntax) in wanted), None)
+        if kind is None:
+            continue
+        folder = f"{MG_ROOT}/{vendor}-{kind}"
+        study_uid = mg_uid(vendor, kind)
+        ds = pydicom.dcmread(raw / record["path"])
+        series_key = (folder, record["case"], syntax)
+        if series_key not in series_numbers:
+            series_numbers[series_key] = sum(1 for k in series_numbers if k[0] == folder) + 1
+        ds.StudyInstanceUID = study_uid
+        ds.SeriesInstanceUID = mg_uid(vendor, kind, record["case"], syntax)
+        ds.SOPInstanceUID = mg_uid(vendor, kind, record["case"], syntax, str(record["instance"]))
+        ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+        ds.SeriesNumber = series_numbers[series_key]
+        ds.PatientID = "SYN-MG-" + MG_VENDOR_NAME[vendor]
+        ds.StudyDescription = f"SYNTHETIC MG VENDOR PHANTOM {MG_VENDOR_NAME[vendor]} {kind.upper()}"
+        ds.SeriesDescription = f"{ds.SeriesDescription} {MG_SYNTAX_LABEL[syntax]}"
+        target = root / folder / f"{record['case']}-{syntax}-{record['instance']}.dcm"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        ds.save_as(target, write_like_original=False)
+        entries.setdefault(folder, {
+            "folder": folder, "collection": "Synthetic MG vendor phantoms", "study_uid": study_uid, "modalities": ["MG"],
+            "patient_id_as_published": ds.PatientID,
+            "description": f"{MG_VENDOR_NAME[vendor]} {kind}: generated by scripts/mg_vendor_fixture.py "
+                           "from tests/fixtures/mg_vendor_cases.json; gradient test patterns, no patient data",
+            "licenses": [{"name": "Synthetic phantom, no patient data (project test fixture)", "url": None}],
+            "collection_dois": [], "required_citations": [], "synthetic": True, "cases": []})
+        entries[folder]["cases"].append(f"{record['case']} {syntax} #{record['instance']}")
+    log = {"generator": "scripts/mg_vendor_fixture.py", "generator_sha256": hashlib.sha256(generator.read_bytes()).hexdigest(),
+           "python": mg_python, "exit": run.returncode, "totals": totals, "pydicom": report.get("pydicom"),
+           "vendor_sources": report.get("sources")}
+    return root, entries, log
 
 
 def http(method, path, body=None, accept=None, content_type=None, timeout=300):
@@ -182,7 +277,11 @@ class Store:
 
 
 class Builder:
-    def __init__(self):
+    def __init__(self, out=OUT, mg_python=sys.executable):
+        self.out = Path(out)
+        self.mg_python = mg_python
+        self.roots = {}
+        self.mg_log = None
         self.started = time.time()
         self.store = None
         self.failures = []
@@ -223,7 +322,8 @@ class Builder:
 
     # ---- upload ----------------------------------------------------------
     def upload_folder(self, folder):
-        root = SAMPLES / folder
+        base = self.roots[folder]
+        root = base / folder
         study_ids, uploaded, skipped, statuses = [], 0, [], {}
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames.sort()
@@ -235,7 +335,7 @@ class Builder:
                     continue
                 status, _, body = http("POST", "/instances", body=data, content_type="application/dicom")
                 if status != 200:
-                    self.fail("/instances", status, f"upload {path.relative_to(SAMPLES)}: {body[:200]!r}", folder)
+                    self.fail("/instances", status, f"upload {path.relative_to(base)}: {body[:200]!r}", folder)
                     continue
                 answer = json.loads(body)
                 statuses[answer.get("Status")] = statuses.get(answer.get("Status"), 0) + 1
@@ -367,6 +467,7 @@ class Builder:
                 "citation": citations[0] if len(citations) == 1 else citations,
                 "study_uid": entry.get("study_uid"),
                 "modalities": entry.get("modalities"),
+                "synthetic": bool(entry.get("synthetic")),
             },
         })
         print(f"  {st}: {sorted(modalities)} series={len(series_to_orthanc)} instances={len(sop_to_orthanc)} "
@@ -377,13 +478,19 @@ class Builder:
         lines = [
             "# Attribution",
             "",
-            "These are public de-identified TCIA (The Cancer Imaging Archive) sample studies, used unchanged "
-            "under their Creative Commons Attribution (CC BY) licences.",
+            "The TCIA studies below are public de-identified TCIA (The Cancer Imaging Archive) sample studies, used "
+            "unchanged under their Creative Commons Attribution (CC BY) licences. The \"Synthetic MG vendor phantoms\" "
+            "are generated test patterns (scripts/mg_vendor_fixture.py); they hold no patient data and need no attribution.",
             "",
         ]
         for study in self.studies:
             source = study["source"]
             entry = self.manifest[source["folder"]]
+            if entry.get("synthetic"):
+                lines += [f"## Synthetic / {source['patient_id_as_published']} / {study['studyUid']}", "",
+                          f"- Source: {entry['description']}", f"- Folder key: `{source['folder']}`",
+                          f"- Objects: {', '.join(entry['cases'])}", ""]
+                continue
             lines += [f"## {source['collection']} / {source['patient_id_as_published']} / {study['studyUid']}", ""]
             lines.append(f"- Collection: {source['collection']}")
             lines.append(f"- Folder: `{source['folder']}`")
@@ -434,16 +541,28 @@ class Builder:
         }
 
     def run(self):
+        with tempfile.TemporaryDirectory(prefix="mstudio-mg-") as work:
+            return self.build(Path(work))
+
+    def build(self, work):
+        out = self.out
         manifest = json.loads((SAMPLES / "manifest.json").read_text(encoding="utf-8"))
         by_folder = {s.get("folder"): s for s in manifest["studies"]}
         for folder in FOLDERS:
             if folder not in by_folder:
                 raise RuntimeError(f"manifest has no study for {folder}")
             self.manifest[folder] = by_folder[folder]
+            self.roots[folder] = SAMPLES
+        print("generate synthetic MG vendor phantoms")
+        mg_root, mg_entries, self.mg_log = prepare_mg_phantoms(self.mg_python, work)
+        for folder, entry in mg_entries.items():
+            self.manifest[folder] = entry
+            self.roots[folder] = mg_root
+        folders = FOLDERS + sorted(mg_entries)
 
-        if OUT.exists():
-            shutil.rmtree(OUT)
-        self.store = Store(OUT)
+        if out.exists():
+            shutil.rmtree(out)
+        self.store = Store(out)
 
         image_id = docker("image", "inspect", IMAGE, "--format", "{{.Id}}").stdout.strip()
         orthanc = {}
@@ -458,7 +577,7 @@ class Builder:
                 orthanc["dicomweb_plugin"] = json.loads(body).get("Version")
 
             targets = []
-            for folder in FOLDERS:
+            for folder in folders:
                 print("upload " + folder)
                 targets += [(folder, study) for study in self.upload_folder(folder)]
             for folder, study in targets:
@@ -470,8 +589,8 @@ class Builder:
 
         for path in self.store.leftover_origin:
             self.warn(f"absolute host still present in JSON body of {path}")
-        (OUT / "routes.json").write_text(json.dumps(dict(sorted(self.store.routes.items())), indent=1), encoding="utf-8")
-        (OUT / "studies.json").write_text(json.dumps(self.studies, indent=1, ensure_ascii=False), encoding="utf-8")
+        (out / "routes.json").write_text(json.dumps(dict(sorted(self.store.routes.items())), indent=1), encoding="utf-8")
+        (out / "studies.json").write_text(json.dumps(self.studies, indent=1, ensure_ascii=False), encoding="utf-8")
         self.attribution()
         verification = self.verify()
         counts = {
@@ -489,6 +608,8 @@ class Builder:
             "elapsed_seconds": round(time.time() - self.started, 1),
             "docker": {"image": IMAGE, "image_id": image_id, "container": CONTAINER, "run": DOCKER_RUN},
             "orthanc": orthanc,
+            "product_head": subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True).stdout.strip(),
+            "mg_phantoms": self.mg_log,
             "counts": counts,
             "frame_content_types": self.frame_types,
             "uid_mismatches": self.uid_mismatches,
@@ -497,7 +618,7 @@ class Builder:
             "warnings": self.warnings,
             "verification": verification,
         }
-        (OUT / "build-log.json").write_text(json.dumps(log, indent=1, ensure_ascii=False), encoding="utf-8")
+        (out / "build-log.json").write_text(json.dumps(log, indent=1, ensure_ascii=False), encoding="utf-8")
 
         print("\nstudy | modalities | series | instances | frames | MB")
         for study in self.studies:
@@ -513,4 +634,8 @@ class Builder:
 
 
 if __name__ == "__main__":
-    sys.exit(Builder().run())
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--out", type=Path, default=OUT)
+    parser.add_argument("--mg-python", default=sys.executable, help="python with the phantom generator's codecs")
+    arguments = parser.parse_args()
+    sys.exit(Builder(arguments.out, arguments.mg_python).run())
