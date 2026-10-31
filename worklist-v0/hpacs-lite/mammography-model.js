@@ -646,8 +646,10 @@
   // time can be a later reprocessing, so it never stands in for an acquisition time another image has.
   // Every image must then carry that time as a real date and time to whole seconds, with an offset stated
   // on all images (compared in UTC) or on none (one study's local clock). Equal times, and images that
-  // carry no time at all, are told apart only by present and distinct Instance Numbers.
+  // carry no time at all, are told apart only by present and distinct Instance Numbers. A CT-format DBT
+  // stack has no stack-level time or number, only those of whichever slice arrived first, so never ordered.
   function newestFirst(found){
+    if(found.some(o=>o.stackMembers))return null;
     const all=found.map(o=>({o,number:o.instanceNumber,...exposure(o.item)}));
     const field=['acquired','content'].find(f=>all.some(k=>k[f]!==null));
     const times=field?all.map(k=>k[field]):[];

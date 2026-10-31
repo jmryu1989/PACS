@@ -499,6 +499,20 @@ test('MG04-allow a repeat exposure is ordered latest first by exposure time then
   assert.equal(order([kst(null,{'0008002A':'20261030100000','00080023':'20261030','00080033':'100000'}),
     kst(null,{'0008002A':'20261030090000','00080023':'20261030','00080033':'120000'}),kst(null,{'00080023':'20261030','00080033':'110000'})]),null,
     'round-5 time cycle: B content 12:00 is a reprocessing, not its 09:00 exposure, so no latest image (1aebad0: [1,2,0])');
+  // GPT's reproduction on 57aba68: two CT-format DBT stacks took the order of whichever slice arrived first.
+  const ct=table.cases.find(k=>model.classify(k.input.dicom).basis==='ct-breast-tomosynthesis').input.dicom,ctKind=model.classify(ct);
+  const stack=name=>[1,2,3].map(n=>{
+    const o=clone(ct);o['00100020']=v('LO','test-patient');o['0020000E']=v('UI',ct['0020000E'].Value[0]+'.'+name);
+    o['00080018']=v('UI',ct['00080018'].Value[0]+'.'+name+'.'+n);o['00200013']=v('IS',n);
+    o['00200032']=v('DS',...ct['00200032'].Value.map((x,i)=>i===2?Number(x)+n*Number(ct['00180050'].Value[0]):Number(x)));
+    return o;
+  });
+  const [a,b]=[stack(1),stack(2)];
+  for(const objects of [[a[2],b[0],a[0],a[1],b[1],b[2]],[a[0],b[2],a[1],a[2],b[0],b[1]]]){
+    const s=slot(model.plan(manifest(study(ctKind.study,'current',objects))),'current',ctKind.laterality,ctKind.view,ctKind.kind);
+    assert.equal(s.status,'ambiguous');
+    assert.equal(s.newestFirst,null,'two CT-format DBT stacks stay an explicit choice whatever slice arrives first (57aba68: the first arrival decided)');
+  }
   // Equal times: Instance Number, only if present and distinct among the equal ones.
   assert.deepEqual(order([kst(1,{'0008002A':'20261030101000'}),kst(2,{'0008002A':'20261030101000'})]),[1,0],'equal times: Instance Number');
   assert.deepEqual(order([kst(7,{'0008002A':'20261030101000'}),kst(1,{'0008002A':'20261030102000'}),kst(5,{'0008002A':'20261030102000'})]),[2,1,0],
