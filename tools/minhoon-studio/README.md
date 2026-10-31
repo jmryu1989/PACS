@@ -61,11 +61,11 @@ back to a self-signed certificate in `tls/`.
 | `sandbox-read/` | studio | detached copy the 물어보기 Claude reads |
 | `sandbox-preview/` | studio | detached copy where 먼저 제안하기 builds its previews (`refs/studio-preview/<id>`) |
 | `assets/ohif`, `assets/dicomweb` | root | pinned OHIF build; static DICOMweb samples (TCIA + synthetic MG phantoms) |
-| `*.bak-YYYYMMDD` | as the original | what an `install.sh` run replaced (app, assets, sandbox copy before a refresh, `data/mock-state.json`) |
+| `*.bak-YYYYMMDD-HHMMSS-<pid>` | as the original | what an `install.sh` run replaced or copied first (app, assets, sandbox before a refresh, `data/mock-state.json`, `etc/config.json` when an account folder is added); one id per run, printed as `backup id:` — remove old ones by hand |
 | `knowledge/status.json` | root | the commander's status feed (read-only for the service) |
 | `knowledge/minhoon-feedback.md` | root | Minhoon's feedback the suggestions are grounded in (installed by the commander, not in this repo) |
 | `data/` | studio | users/sessions (hashes only), chat, metrics, usage, mock state, `public/digests/`, `public/records.jsonl` |
-| `etc/config.json`, `etc/studio.env` | root | config; `STUDIO_CLAUDE_ACCOUNT=admin` switches the Claude login |
+| `etc/config.json`, `etc/studio.env` | root | config, written by `install.sh` only when absent and then the owner's (hand edits stay); `STUDIO_CLAUDE_ACCOUNT=admin` switches the Claude login |
 | `etc/tls/` | root:studio 0750, files 0640 | copy of the Let's Encrypt fullchain + key (deploy hook) |
 | `tls/` | studio | self-signed fallback (unused while `etc/tls/` is configured) |
 | `/root/minhoon-studio-passwords.txt` | root, 0600 | the two studio passwords (never printed by the installer) |
@@ -94,8 +94,9 @@ back to a self-signed certificate in `tls/`.
 4. **Later, switch to the admin Claude account:** log in once with `CLAUDE_CONFIG_DIR=/opt/minhoon-studio/claude-config/admin`
    (same commands as step 2), then `echo STUDIO_CLAUDE_ACCOUNT=admin | sudo tee /opt/minhoon-studio/etc/studio.env`
    and `sudo systemctl restart minhoon-studio`. Any folder `claude-config/<name>` is an account
-   (`STUDIO_CLAUDE_ACCOUNT=<name>`); `install.sh` lists every such folder in `etc/config.json` and stops if
-   `studio.env` names one that does not exist.
+   (`STUDIO_CLAUDE_ACCOUNT=<name>`); `install.sh` adds a folder `etc/config.json` does not list yet to
+   `claude.configDirs` (nothing else in the config changes) and stops if `studio.env` names one that does not exist.
+   TLS paths, models and the default account in an existing config are not touched by a rerun; edit them by hand.
 
 URL: `https://pacs.koreaimagingnetwork.com:8443/` (no certificate warning). `https://61.109.239.207:8443/` still
 works but the browser warns, because the certificate names only the hostname. With the hostname the browser sends
@@ -119,11 +120,14 @@ side ignores the other's cookie by name and the studio never logs cookies.
   Studio commits are not product history; reuse clean diffs only after the normal cross review against the real backend (D2/D3).
 - **New main in the sandbox (refresh):** between sessions only (the refresh stops the unit while it merges). Build a
   bundle at the new main and rerun `install.sh <bundle>`; a `BASE_SHA` different from the sandbox's `studio-base`
-  merges that main into Minhoon's branch (`deploy/make-sandbox.py --refresh`): every studio commit stays, a file
-  both sides changed keeps the studio version and is listed in the merge commit and in `data/refresh-<sha>.json`, the
-  bundle/OHIF config are rebuilt, `studio-base` moves to the new main (old one: tag `studio-base-<sha12>`). A changed
-  `studio-mock/dataset.json` resets the mock state (drafts in the mirror); the old one stays as
-  `data/mock-state.json.bak-YYYYMMDD`. Bundle, from the product checkout (`<b>` = an empty folder):
+  merges that main into Minhoon's branch (`deploy/make-sandbox.py --refresh`): every studio commit stays, the
+  bundle/OHIF config are rebuilt, the merged files pass the chat's build/syntax check (`server/build.js`), and
+  `studio-base` moves to the new main (old one: tag `studio-base-<sha12>`). The summary is
+  `data/refresh-<sha>-<backup id>.json`. **A conflict (both sides changed the same lines), a failed builder or a failed
+  syntax check stops the install** with the sandbox unchanged (HEAD, `studio-base`, files) and the conflicted files or
+  check errors in that JSON; a running studio is started again on the old sandbox. Resolve by hand in a copy, then
+  rerun. A changed `studio-mock/dataset.json` resets the mock state (drafts in the mirror); the old one stays as
+  `data/mock-state.json.<backup id>`. Bundle, from the product checkout (`<b>` = an empty folder):
   ```powershell
   git fetch origin; $sha = git rev-parse origin/main; git archive --format=tar -o <b>/base.tar $sha; Set-Content <b>/BASE_SHA $sha
   git archive --format=tar.gz -o <b>/app.tgz HEAD:tools/minhoon-studio                     # the studio app (this folder)

@@ -7,10 +7,12 @@
 #   sudo bash install.sh <bundle-dir>            # bundle-dir holds app.tgz base.tar assets-ohif.tgz assets-dicomweb.tgz BASE_SHA
 #   sudo bash install.sh <bundle-dir> --rotate-passwords
 #
-# Re-running updates the app and keeps the sandbox (its commits), the data, the Claude login and the passwords.
-# A bundle with a newer BASE_SHA refreshes the sandbox: main is merged into the studio branch (make-sandbox.py
-# --refresh; every studio commit stays). What a run replaces is kept beside it as <name>.bak-YYYYMMDD (the first run
-# of a day keeps its backup; remove old ones by hand).
+# Re-running updates the app and keeps the sandbox (its commits), the data, the Claude login, the passwords and
+# etc/config.json + etc/studio.env (written only when absent; a new claude-config/<name> folder is added to an
+# existing config, nothing else in it changes). A bundle with a newer BASE_SHA refreshes the sandbox: main is merged
+# into the studio branch (make-sandbox.py --refresh; every studio commit stays); a conflict or a failed check stops the
+# install and leaves the sandbox as it was. What a run replaces or copies first is kept beside it as
+# <name>.bak-YYYYMMDD-HHMMSS-<pid>, one id per run, so every run can be rolled back (remove old ones by hand).
 set -euo pipefail
 
 BUNDLE=${1:?bundle directory}
@@ -26,10 +28,14 @@ IP_PUBLIC=61.109.239.207
 [ "$(id -u)" = 0 ] || { echo "run as root (sudo)"; exit 1; }
 for f in app.tgz base.tar assets-ohif.tgz assets-dicomweb.tgz BASE_SHA; do [ -f "$BUNDLE/$f" ] || { echo "missing $BUNDLE/$f"; exit 1; }; done
 BASE_SHA=$(tr -d '[:space:]' < "$BUNDLE/BASE_SHA")
-BAK=bak-$(date +%Y%m%d)
+# One id per run: a second run on the same day must keep the state it replaces too (10-31: the day's backup made the
+# second run delete the app it replaced).
+BAK=bak-$(date +%Y%m%d-%H%M%S)-$$
 
-# Move a path aside as <path>.$BAK, or drop it when today's backup already exists (that one is the older state).
-backup_move() { if [ -e "$1.$BAK" ]; then rm -rf "$1"; else mv "$1" "$1.$BAK"; fi; }
+# Keep a path as <path>.$BAK (moved or copied); never replaces an existing backup.
+backup_move() { [ ! -e "$1.$BAK" ] || { echo "backup $1.$BAK already exists; refusing"; exit 1; }; mv "$1" "$1.$BAK"; }
+backup_copy() { [ ! -e "$1.$BAK" ] || { echo "backup $1.$BAK already exists; refusing"; exit 1; }; cp -a "$1" "$1.$BAK"; }
+echo "backup id: $BAK"
 
 # The port must be free or already ours.
 if ss -ltnH "( sport = :$PORT )" | grep -q . && ! systemctl is-active --quiet minhoon-studio; then
@@ -75,8 +81,10 @@ chown -R root:root "$ROOT/assets"; chmod -R a+rX,go-w "$ROOT/assets"
 # The bundle folder is the uploader's private directory; give studio its own copy of the archive.
 sandbox_tool() {
   install -o studio -g studio -m 600 "$BUNDLE/base.tar" "$ROOT/home/base.tar"
-  sudo -u studio -H env HOME="$ROOT/home" python3 "$ROOT/app/deploy/make-sandbox.py" --archive "$ROOT/home/base.tar" --sha "$BASE_SHA" --out "$ROOT/sandbox" "$@"
+  local rc=0
+  sudo -u studio -H env HOME="$ROOT/home" python3 "$ROOT/app/deploy/make-sandbox.py" --archive "$ROOT/home/base.tar" --sha "$BASE_SHA" --out "$ROOT/sandbox" "$@" || rc=$?
   rm -f "$ROOT/home/base.tar"
+  return $rc
 }
 echo "== sandbox (product tree at main $BASE_SHA; created once, then kept and refreshed)"
 if [ ! -d "$ROOT/sandbox/.git" ]; then
@@ -87,11 +95,18 @@ else
   if [ "$current" != "$BASE_SHA" ]; then
     echo "   refresh $current -> $BASE_SHA (merge into $(sudo -u studio git -C "$ROOT/sandbox" rev-parse --abbrev-ref HEAD))"
     # No chat edit may write the sandbox during the merge; the unit is started again below.
+    was_active=no; systemctl is-active --quiet minhoon-studio && was_active=yes
     systemctl stop minhoon-studio 2>/dev/null || true
-    [ -e "$ROOT/sandbox.$BAK" ] || cp -a "$ROOT/sandbox" "$ROOT/sandbox.$BAK"
+    backup_copy "$ROOT/sandbox"
     # A changed studio-mock/dataset.json resets the mock state (mock.js); keep the old one.
-    [ -f "$ROOT/data/mock-state.json" ] && { [ -e "$ROOT/data/mock-state.json.$BAK" ] || cp -a "$ROOT/data/mock-state.json" "$ROOT/data/mock-state.json.$BAK"; }
-    sandbox_tool --refresh --python python3 | tee "$ROOT/data/refresh-$BASE_SHA.json"
+    if [ -f "$ROOT/data/mock-state.json" ]; then backup_copy "$ROOT/data/mock-state.json"; fi
+    if ! sandbox_tool --refresh --python python3 --node "$ROOT/node/bin/node" | tee "$ROOT/data/refresh-$BASE_SHA-$BAK.json"; then
+      # make-sandbox.py left the sandbox as it was (data/refresh-*.json lists the conflicts or check errors). The new
+      # app runs with it, so a studio that was running keeps running; a paused one stays stopped.
+      [ "$was_active" = yes ] && systemctl start minhoon-studio
+      echo "sandbox refresh to $BASE_SHA stopped: see $ROOT/data/refresh-$BASE_SHA-$BAK.json; resolve by hand, then rerun"
+      exit 1
+    fi
   fi
 fi
 install -d -o studio -g studio "$ROOT/sandbox-read" "$ROOT/sandbox-preview"
@@ -120,15 +135,43 @@ fi
 
 echo "== config"
 # Every login folder under claude-config/ is an account: the owner adds one by hand (claude-config/<name> plus
-# STUDIO_CLAUDE_ACCOUNT=<name> in studio.env), and rewriting the config must not drop it (10-31: it did, and the chat
-# answered "unknown Claude account").
-CONFIG_DIRS=$(for d in "$ROOT"/claude-config/*/; do n=$(basename "$d"); case "$n" in *[!A-Za-z0-9_-]*) continue;; esac
-  printf '"%s": "%s", ' "$n" "$ROOT/claude-config/$n"; done | sed 's/, $//')
+# STUDIO_CLAUDE_ACCOUNT=<name> in studio.env). An existing config.json is the owner's (accounts, models, mappings
+# edited by hand) and is never rewritten: 10-31 a rewrite dropped the hand-added account and the chat answered
+# "unknown Claude account". Only a folder it does not list yet is added to claude.configDirs.
 if [ -f "$ROOT/etc/studio.env" ]; then
   acct=$(sed -n 's/^STUDIO_CLAUDE_ACCOUNT=//p' "$ROOT/etc/studio.env" | tail -1 | tr -d '[:space:]')
   [ -z "$acct" ] || [ -d "$ROOT/claude-config/$acct" ] || { echo "studio.env names Claude account '$acct' but claude-config/$acct is missing"; exit 1; }
 fi
-[ -f "$ROOT/etc/config.json" ] && { [ -e "$ROOT/etc/config.json.$BAK" ] || cp -a "$ROOT/etc/config.json" "$ROOT/etc/config.json.$BAK"; }
+if [ -f "$ROOT/etc/config.json" ]; then
+  added=$(python3 - "$ROOT/etc/config.json" "$ROOT/claude-config" "$TLS_CERT" <<'PY'
+import json, os, re, sys
+path, root, cert = sys.argv[1:4]
+with open(path, encoding="utf-8") as f:
+    config = json.load(f)
+dirs = config.setdefault("claude", {}).setdefault("configDirs", {})
+added = [n for n in sorted(os.listdir(root))
+         if re.fullmatch(r"[A-Za-z0-9_-]+", n) and os.path.isdir(os.path.join(root, n)) and n not in dirs]
+if (config.get("tls") or {}).get("cert") != cert:
+    print(f"   note: config.json keeps tls.cert {(config.get('tls') or {}).get('cert')} (this host would use {cert})", file=sys.stderr)
+if added:
+    for n in added:
+        dirs[n] = os.path.join(root, n)
+    with open(path + ".new", "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+print(" ".join(added))
+PY
+)
+  if [ -n "$added" ]; then
+    backup_copy "$ROOT/etc/config.json"
+    mv "$ROOT/etc/config.json.new" "$ROOT/etc/config.json"
+    echo "   kept config.json; added account folder(s): $added (previous: config.json.$BAK)"
+  else
+    echo "   kept config.json unchanged"
+  fi
+else
+CONFIG_DIRS=$(for d in "$ROOT"/claude-config/*/; do n=$(basename "$d"); case "$n" in *[!A-Za-z0-9_-]*) continue;; esac
+  printf '"%s": "%s", ' "$n" "$ROOT/claude-config/$n"; done | sed 's/, $//')
 cat > "$ROOT/etc/config.json" <<JSON
 {
   "listen": { "host": "0.0.0.0", "port": $PORT },
@@ -153,6 +196,7 @@ cat > "$ROOT/etc/config.json" <<JSON
   "digest": { "idleMinutes": 60 }
 }
 JSON
+fi
 [ -f "$ROOT/etc/studio.env" ] || printf '# STUDIO_CLAUDE_ACCOUNT=admin   # switch the chat to the admin Claude login (README)\n' > "$ROOT/etc/studio.env"
 chmod 644 "$ROOT/etc/config.json" "$ROOT/etc/studio.env"
 
