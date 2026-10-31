@@ -322,10 +322,10 @@ site.
 # Rollback to the previous release (N → N-1)
 
 Applies to a host installed and upgraded with the plain Compose list of the clean
-installation, and to a host adopted once from the protected entry (Adopting a
-protected-entry host, below). A host that still runs
-through the protected entry (`/opt/kin-deploy/entry.py`) and is not adopted uses
-that mode's own rollback (tests/README.md, EMR introduction). The
+installation. The production host that runs a86ecf1 through the protected entry
+(`/opt/kin-deploy/entry.py`) reaches the plain form, at N, only through
+[One-time upgrade of the a86ecf1 host](#one-time-upgrade-of-the-a86ecf1-host),
+which has its own rollback; this section applies there from N onward. The
 application-only switch-back of `scripts/ops_deploy_runner.py`
 (same schema, previous API image, no database restore) needs an installed
 operational adapter and a compatibility authorization. Neither exists: its CLI
@@ -375,60 +375,6 @@ recovery, while the proxy is still not started (R6).
 A host keeps one serving stack: the container names are fixed (`kin-db`, `kin-api`,
 …), so N and R cannot run at the same time. This section does not claim that a
 rollback was executed by this documentation change.
-
-**Adopting a protected-entry host (one time).** A host whose stack the
-EMR-introduction tool started is adopted into the plain form once, before its
-first upgrade. Its `kin-api` label `com.docker.compose.project.config_files`
-names root-only copies under `/var/lib/kin-deploy/compose-entries/<generation>/`
-plus a `runtime.yml` with image pins (the production host since 10-15).
-Precondition step 1 cannot address those files, and `config_matches` cannot hold
-while `runtime.yml` is part of every container's hash. Adopt in the upgrade's
-locked operator session (below), in the site checkout at the running SHA, before
-precondition step 1:
-
-1. Add `KIN_MONITOR_PUBLIC_DIR` and `KIN_REVISION` to `.env`.
-   `docker-compose.monitor.yml` requires the first (`:?`), and `compose_for`
-   passes nothing else. Its value is in the entry's root-only `environment.json`.
-   That file holds the literal `.env` values, credentials included: read only
-   this one key and never print the file. `KIN_REVISION` is the running full SHA.
-2. Give the running images the names plain Compose uses. The compose files name
-   no `image:` for these services, so without the names `up` builds on the host:
-
-   ```python
-   project = ops.ROOT.name
-   api_image = ops.text(['docker', 'inspect', '--format', '{{.Image}}', 'kin-api'])
-   proxy_image = ops.text(['docker', 'inspect', '--format', '{{.Image}}', 'kin-proxy'])
-   for image, service in ((api_image, 'api'), (api_image, 'api-migrate'), (proxy_image, 'proxy')):
-       ops.run(['docker', 'tag', image, f'{project}-{service}'])
-   ```
-
-   `api-migrate` is the same `production` target of `api/` as `api`
-   (`docker-compose.prod.yml`).
-3. Recreate once with the plain command. Use the entry's own file list in its
-   order; a file outside the checkout stays an absolute path. Signing follows
-   step 2: the overlay only with an installed custody configuration.
-
-   ```python
-   files = ['docker-compose.yml', 'docker-compose.prod.yml',
-            '/etc/kin-deploy/overlays/docker-compose.halo-reports.yml', 'docker-compose.monitor.yml']   # 10-15 host
-   compose = compose_for(project, ops.ROOT, files, None)   # no custody configuration installed
-   lease.retain()
-   record.update(status='ADOPTING', compose_project=project, compose_files=files)
-   ops.write_json(record_path, record)
-   ops.run(compose + ['up', '-d'], timeout=install_timeout)
-   ```
-
-   This is a 1–2 minute outage. `runtime.yml`'s pins, labels and maintenance
-   port change every container's configuration hash, so Compose recreates all of
-   them, `db` included; volumes are kept. Plan it in the window, before B.
-4. Run step 3's readiness check, then `assert config_matches(compose, project)`.
-5. Continue with precondition step 1. B is taken after the adoption, so its
-   `.env` and the labels are already the plain form.
-
-From then on, never run `/opt/kin-deploy/entry.py compose recreate`. It recreates
-the stack from the entry's recorded generation (its root-only copies and old
-image pins), which would bring back the old generation over the new one. Leave
-`/var/lib/kin-deploy` and `/etc/kin-deploy` as they are and record them as inert.
 
 **Precondition: the upgrade itself.** Run it in one locked operator session in the
 site checkout at N-1, in the form of steps 2–4. Define `clean_env`, `compose_for`
@@ -1058,6 +1004,389 @@ Then take one of two ways:
 - No tool performs a save, reopen or signed approval on the installed host.
   Check 3 shows only that the running API can reach every stored key
   (Synthetic save/reopen and signing checks).
+
+# One-time upgrade of the a86ecf1 host
+
+Used once, for the production host as observed on 2026-10-31: a86ecf1 started on
+10-15 by the protected entry (`kin-api`'s `config_files` label names root-only
+copies under `/var/lib/kin-deploy/compose-entries/<generation>/` plus a
+`runtime.yml` with image pins), the Halo overlay
+`/etc/kin-deploy/overlays/docker-compose.halo-reports.yml`, and the nightly job
+`~/.local/bin/kin-pacs-reviewed-backup`. After it the host runs N in the plain
+form, and the sections above apply from N onward.
+
+**Each side uses its own version's tools.** a86ecf1's checkout has no backup
+tool that knows its own ledger and no restore command; the main tools do not
+know a86ecf1's (no `/app/dist/emr-runtime/application` in its API image, no
+`restore_expiry_sweep` in its database). So:
+- Up to and including B, and the whole rollback, use the helper production runs
+  every night: c7ef074's `ops_backup.py` and `ops_audit_integrity.py`, stored in
+  `.git/` and pinned by the nightly wrapper. They import with `ROOT` = the site
+  checkout (`Path(__file__).parents[1]`), and the bytes do not change when the
+  checkout moves between a86ecf1 and N. Its `backup()` is exactly what the
+  nightly CLI runs (`--ready-timeout 240 --no-rotate`), and its daily-set
+  `rehearse()` and `restore_snapshot(..., 'post')` restore a role-catalog set into
+  a fresh product cluster.
+- Compose runs the files of the checked-out version, through `compose_for`.
+- N's `scripts/ops_backup.py` runs only against N: its first backup and
+  rehearsal (U5), and N's set before a rollback (R1).
+- Nothing is built on the host. N's images are loaded; a86ecf1's are the
+  running images, kept by tag. Every `up` passes `--no-build --pull never`, so a
+  missing image stops Compose instead of building or pulling one.
+
+The c7ef074 CLI and N's CLI take the operations lock themselves (`.kin-ops.lock`
+in the checkout). An operator session therefore holds the lock only around its
+own steps, and a CLI runs only while the session does not hold it.
+
+## Before the window (no change to the running stack)
+
+1. **Fetch and verify N.** The host's repository lacks N (it lacks even
+   9bdbb7d), and loaded images bring no Git objects:
+
+   ```bash
+   git -C /home/ubuntu/pacs-starter-kit fetch origin main
+   git -C /home/ubuntu/pacs-starter-kit cat-file -t <N full SHA>          # commit
+   git -C /home/ubuntu/pacs-starter-kit rev-parse --verify '<N full SHA>^{commit}'
+   git -C /home/ubuntu/pacs-starter-kit merge-base --is-ancestor <N full SHA> origin/main && echo on-main
+   ```
+
+   The full SHA must equal the approved release record's N and be on main. A
+   fetch writes only `.git` objects and refs; HEAD stays a86ecf1.
+2. **Build N's images on another host**, never on this one (2 vCPU, no swap,
+   shared with Halo and the studio). Use a checkout at N in a directory named
+   `pacs-starter-kit`, so the images get the site's project names, and a `.env`
+   with `KIN_REVISION=<N full SHA>` plus throwaway values for the `:?`
+   variables (no site credential leaves the site):
+
+   ```bash
+   docker compose -p pacs-starter-kit -f docker-compose.yml -f docker-compose.prod.yml build api api-migrate proxy
+   docker save -o kin-n-images.tar pacs-starter-kit-api pacs-starter-kit-api-migrate pacs-starter-kit-proxy
+   sha256sum kin-n-images.tar
+   ```
+
+   Copy the file to the host outside the checkout and the backup root, and
+   compare its sha256 there.
+3. **Check the nightly helper and the space.**
+   `~/.local/bin/kin-pacs-reviewed-backup --check` must print
+   `pins ok c7ef074`. The newest daily set must be `complete: true`. Free space:
+   at least two daily sets (B and N's set) plus the image file and the loaded
+   images, about 3 GB on 2026-10-31.
+4. Schedule the window so that it does not cover the nightly job's 20:00 UTC
+   start. During a locked step the job fails on the lock (`O_EXCL`) and writes
+   nothing.
+
+## In the window
+
+**Session.** One `python3 -B -E -s` session in `/home/ubuntu/pacs-starter-kit`
+(HEAD a86ecf1) as `ubuntu`, the account that owns the backup root:
+
+```python
+import hashlib, json, os, socket, sys, time
+from pathlib import Path
+PINS = {'ops_backup.py': '473c2acc78089aeae43cad8b52e0fc47f21eada1f2238b6267ac3b6fe79c8dbe',
+        'ops_audit_integrity.py': '0ec3984285f82e02ada1bfd9ccdec0c78e87abf818ac8a3bb34dd02e486c029f'}
+assert all(hashlib.sha256((Path('.git') / name).read_bytes()).hexdigest() == sha for name, sha in PINS.items())
+sys.path.insert(0, str(Path('.git').resolve()))
+import ops_backup as ops          # the nightly job's c7ef074 helper
+assert ops.ROOT == Path.cwd().resolve()
+hold = ops.lock()
+lease = hold.__enter__()
+ops.require_local_docker()
+observed = {'host': socket.gethostname(), 'sha': ops.text(['git', 'rev-parse', 'HEAD']),
+            'docker': ops.text(['docker', 'version']), 'compose': ops.text(['docker', 'compose', 'version'])}
+```
+
+Compare `observed` with the release record, then set `record_path` (outside
+the checkout), `record`, `install_timeout = 2400`, `backup_root =
+Path('/home/ubuntu/backups/kin-pacs')`, `N = '<N full SHA>'` and
+`OLD = 'a86ecf1655c8c587012cef5fd16e233e121ae7dc'`. Define `clean_env`,
+`compose_for` and `config_matches` from [Site Compose command](#site-compose-command),
+and the readiness loop of installation step 3 as `ready()`. c7ef074's lease has
+no `retain()`: keep the lock with `lease.retained = True`, release it with
+`lease.retained = False` and `hold.__exit__(None, None, None)`.
+
+- **U1. Adopt the running stack into the plain form.** About 1–2 minutes of
+  outage.
+  1. Add `KIN_MONITOR_PUBLIC_DIR` and `KIN_REVISION=<OLD>` to `.env`.
+     `docker-compose.monitor.yml` requires the first (`:?`), and `compose_for`
+     passes nothing else. Its value is in the entry's root-only
+     `environment.json`, which holds the literal `.env` values, credentials
+     included: read only this key (`sudo -n python3 -c` printing that one
+     value) and never print the file.
+  2. Name the running images as plain Compose does. The compose files give
+     `api`, `api-migrate` and `proxy` no `image:`, so without the names `up`
+     would build. The other services name tags; each tag must already be the
+     running image, or the recreate would switch it:
+
+     ```python
+     project = ops.ROOT.name
+     image = {c: ops.text(['docker', 'inspect', '--format', '{{.Image}}', c])
+              for c in ('kin-api', 'kin-proxy', 'kin-db', 'kin-orthanc', 'kin-keycloak')}
+     for tag, container in (('postgres:16-alpine', 'kin-db'), ('orthancteam/orthanc:24.12.0', 'kin-orthanc'),
+                            ('quay.io/keycloak/keycloak:26.7.3', 'kin-keycloak')):
+         assert ops.text(['docker', 'image', 'inspect', '--format', '{{.Id}}', tag]) == image[container], tag
+     for service, container in (('api', 'kin-api'), ('api-migrate', 'kin-api'), ('proxy', 'kin-proxy')):
+         ops.run(['docker', 'tag', image[container], f'{project}-{service}'])
+     ```
+
+     `api-migrate` is the same `production` target of `api/` as `api`.
+  3. Recreate once with the plain command and the entry's own file list:
+
+     ```python
+     files = ['docker-compose.yml', 'docker-compose.prod.yml',
+              '/etc/kin-deploy/overlays/docker-compose.halo-reports.yml', 'docker-compose.monitor.yml']
+     outside_files = {name: ops.digest(Path(name)) for name in files if Path(name).is_absolute()}
+     compose = compose_for(project, ops.ROOT, files, None)   # no custody configuration on this host
+     assert not Path('/etc/kin-deploy/emr-wrapping-custody.json').exists()
+     lease.retained = True
+     record.update(status='ADOPTING', compose_project=project, compose_files=files, outside_files=outside_files,
+                   wrapping_secret_file=None)
+     ops.write_json(record_path, record)
+     ops.run(compose + ['up', '-d', '--no-build', '--pull', 'never'], timeout=install_timeout)
+     ready()
+     assert config_matches(compose, project)
+     ```
+
+     `runtime.yml`'s pins, labels and one-shot names change every container's
+     configuration hash, so all of them are recreated, `db` included; volumes
+     are kept. `emr-provision` and `api-migrate` run again (no pending
+     migration).
+
+  From then on, never run `/opt/kin-deploy/entry.py compose recreate`: it
+  would bring back the entry's recorded generation over the plain stack. Leave
+  `/var/lib/kin-deploy` and `/etc/kin-deploy` as they are and record them as
+  inert.
+- **U2. Take B with the nightly helper, rehearse it, hold it.**
+
+  ```python
+  B = ops.backup(str(backup_root), 240)    # what the nightly CLI runs, without rotation
+  ops.rehearse(B)                           # expected: "success": true, "shape": "post", catalog equal, emr verified
+  b_manifest = json.loads((B / 'manifest.json').read_text(encoding='utf-8'))
+  assert b_manifest['git_sha'] == OLD and b_manifest['git_dirty'] is False and b_manifest['role_catalog']
+  ops.write_json(B / ops.HOLD_FILE, {'reason': 'rollback-window and original ledger representation', 'release': N})
+  hold_tags = []
+  for container, entry in b_manifest['running_images'].items():
+      tag = f'kin-rollback-hold/{container}:{OLD[:12]}'
+      ops.run(['docker', 'tag', entry['id'], tag])
+      hold_tags.append(tag)
+  record.update(backup_set=str(B), rollback_hold_tags=hold_tags)
+  ops.write_json(record_path, record)
+  ```
+
+  B holds both databases whole (`kin` with `emr_access` and its one 10-15
+  ledger event, `keycloak`), the role catalog and EMR catalog, the EMR state
+  volume, the Orthanc storage, `.env`, both base compose files and the sealed
+  AuditLog checkpoint. It does not hold the host files: the Halo overlay (its
+  sha256 is in the record), `/etc/kin-workflow`, the certificates and the
+  entry's state. B's rehearsal restores it into a fresh networkless cluster
+  with the role-catalog replay and checks the EMR seal with B's own API image.
+  Keep B's hold and tags after the window until a separate retention decision:
+  B is the only copy of the ledger in its original (chain) representation.
+- **U3. Load N's images.**
+
+  ```python
+  ops.run(['docker', 'load', '-i', '<kin-n-images.tar>'], timeout=install_timeout)
+  revision = '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+  assert all(ops.text(['docker', 'image', 'inspect', '--format', revision, f'{project}-{service}']) == N
+             for service in ('api', 'api-migrate'))   # the proxy image carries no revision label
+  ```
+
+  The load moves the three project tags to N; B's images keep their hold tags.
+- **U4. Upgrade.** Set `KIN_REVISION=<N>` in `.env`, then:
+
+  ```python
+  record.update(status='STARTED', release_sha=N)
+  ops.write_json(record_path, record)
+  ops.run(['git', 'checkout', '--detach', N])
+  assert all(ops.digest(Path(name)) == sha for name, sha in record['outside_files'].items())
+  ops.run(compose + ['up', '-d', '--no-build', '--pull', 'never'], timeout=install_timeout)
+  ready()
+  assert ops.text(['docker', 'inspect', '--format', '{{.State.ExitCode}}', 'kin-api-migrate']) == '0'
+  ```
+
+  `api-migrate` applies N's 21 migrations to the 46 of a86ecf1. Then check:
+  - `_prisma_migrations`: 67 rows, all finished, none rolled back;
+  - the 10-15 probe event moved into the new ledger: one `emr_access.access_entry`
+    (stream `viewing`, act `열람`, `viewing2y`) whose payload has executor
+    `service`, user `release-probe`, target `system-operation`;
+  - Access Review shows it: `emr_access.review_entries('kin-center', '2026-10-15', '2026-10-16', false, NULL, NULL, 10)`
+    as `kin_runtime` returns that row (the admin page reads exactly this function);
+  - `config_matches(compose, project)`.
+
+  If `kin-api-migrate` exits non-zero, go to M below. Any other failure: keep
+  the lock, record `NEEDS_ATTENTION`, and choose the rollback.
+- **U5. N's own tools from here.** Record `status='UPGRADED'`, set
+  `lease.retained = False` and release the lock. Then, as the same account:
+
+  ```bash
+  env -i PATH="$PATH" HOME="$HOME" python3 scripts/ops_backup.py backup --output /home/ubuntu/backups/kin-pacs --no-rotate
+  env -i PATH="$PATH" HOME="$HOME" python3 scripts/ops_backup.py rehearse <printed set>
+  ```
+
+  This is N's first backup. Write `restore-hold.json` in it as well, and run
+  checks 2 and 3 of the synthetic checks (no custody: "online approvals not
+  enabled"). Enabling online approvals is a later step on the running N.
+
+**M. `api-migrate` failed in the window.** Each migration file runs in one
+transaction, so the failing file left nothing, and the files before it are
+applied. N's API has not started (it waits for `api-migrate`), so the doctors
+still see the outage, and nothing has written to the database since B.
+
+```python
+print(ops.text(compose + ['logs', 'api-migrate']))   # the failing migration and PostgreSQL's error
+failed = ops.text(['docker', 'exec', 'kin-db', 'psql', '-X', '-U', 'kin', '-d', 'kin', '-qAt', '-c',
+                   'SELECT migration_name FROM "_prisma_migrations" WHERE finished_at IS NULL AND rolled_back_at IS NULL'])
+```
+
+Prisma refuses every later `migrate deploy` while that row exists (P3009). The
+default is the rollback below. Go forward only when the cause is outside the
+data and is corrected (an object in the way, a missing privilege), and record
+the cause and the correction. Then mark the attempt rolled back and run the
+migration again:
+
+```python
+ops.run(compose + ['run', '--rm', '--no-deps', 'api-migrate',
+                   './node_modules/.bin/prisma', 'migrate', 'resolve', '--rolled-back', failed])
+ops.run(compose + ['up', '-d', '--no-build', '--pull', 'never'], timeout=install_timeout)
+```
+
+and continue at U4's checks. `resolve` changes only that history row.
+
+## Rollback to a86ecf1
+
+Applies from U4 until N's first change that B cannot represent is accepted
+(see the end of this section). R is a new Compose project in the same checkout,
+switched back to a86ecf1, with new volumes restored from B and B's own images.
+N's volumes are kept and N's project is only stopped. Keeping the one checkout
+means the nightly job, certbot's webroot and the monitor keep their paths.
+
+**Preflight, while N serves.** A session as above (pinned import, `observed`,
+the definitions), still at N, **without** the lock:
+
+```python
+B = Path(record['backup_set'])
+directory, manifest = ops.validate_backup(B)              # checksums, archives, B's images present by ID
+assert manifest['git_sha'] == OLD and manifest['git_dirty'] is False and manifest['role_catalog']
+api = json.loads(ops.text(['docker', 'inspect', 'kin-api']))[0]
+n_project = api['Config']['Labels']['com.docker.compose.project']
+n_files = record['compose_files']
+compose_n = compose_for(n_project, ops.ROOT, n_files, None)
+assert config_matches(compose_n, n_project)
+R = n_project + '-r1'                                     # unused: no container, no volume with this project
+assert not ops.text(['docker', 'ps', '-aq', '--filter', f'label=com.docker.compose.project={R}'])
+assert not ops.text(['docker', 'volume', 'ls', '-q', '--filter', f'label=com.docker.compose.project={R}'])
+for name in ('docker-compose.yml', 'docker-compose.prod.yml'):
+    assert hashlib.sha256(ops.run(['git', 'show', f'{OLD}:{name}']).stdout).hexdigest() == manifest['sha256'][name]
+ops.run(['git', 'cat-file', '-e', f'{OLD}:docker-compose.monitor.yml'])
+assert all(ops.digest(Path(name)) == sha for name, sha in record['outside_files'].items())
+site_env = [l for l in (ops.ROOT / '.env').read_text(encoding='utf-8').splitlines() if not l.startswith('KIN_REVISION=')]
+b_env = [l for l in (directory / '.env').read_text(encoding='utf-8').splitlines() if not l.startswith('KIN_REVISION=')]
+assert site_env == b_env    # R runs with the credentials B's databases were made with
+for tag, container in (('postgres:16-alpine', 'kin-db'), ('orthancteam/orthanc:24.12.0', 'kin-orthanc'),
+                       ('quay.io/keycloak/keycloak:26.7.3', 'kin-keycloak')):
+    assert ops.text(['docker', 'image', 'inspect', '--format', '{{.Id}}', tag]) == manifest['running_images'][container]['id']
+assert not Path('/etc/kin-deploy/emr-wrapping-custody.json').exists()   # see the end of this section
+record.update(n_project=n_project, n_files=n_files, rollback_project=R)
+ops.write_json(record_path, record)
+```
+
+Then `ops.rehearse(directory)` again when B's last rehearsal is not from this
+window. Any failure here: record `ROLLBACK_NOT_STARTED`; N keeps serving.
+
+- **R1. Preserve N with N's tool**, still without the session lock:
+  `env -i PATH="$PATH" HOME="$HOME" python3 scripts/ops_backup.py backup --output /home/ubuntu/backups/kin-pacs --no-rotate`,
+  then its `rehearse`, then `restore-hold.json` in that set (reason
+  `rolled-back release`). Record the set. Without a complete N set, stop
+  (`ROLLBACK_NOT_STARTED`). When N's `kin-db` does not run, record that N's
+  volumes are the only copy and continue.
+- **R2. Lock, stop N.** `hold = ops.lock(); lease = hold.__enter__()`,
+  `lease.retained = True`, `status='ROLLING_BACK'`, then
+  `ops.run(compose_n + ['down'])` without `-v`. Record N's volumes
+  (`docker volume ls --filter label=com.docker.compose.project=<n_project>`).
+- **R3. Check out a86ecf1 and give R B's images.**
+
+  ```python
+  ops.run(['git', 'checkout', '--detach', OLD])
+  images = manifest['running_images']
+  for service, container in (('api', 'kin-api'), ('api-migrate', 'kin-api'), ('proxy', 'kin-proxy')):
+      ops.run(['docker', 'tag', images[container]['id'], f'{R}-{service}'])
+  compose_r = compose_for(R, ops.ROOT, record['compose_files'], None)
+  ops.run(compose_r + ['config', '--quiet'])
+  ops.run(compose_r + ['up', '-d', '--wait', '--no-build', '--pull', 'never', 'db'], timeout=install_timeout)
+  ```
+
+  a86ecf1's `db` creates only `kin` (no `keycloak` init script), which is the
+  fresh cluster `restore_snapshot` requires.
+- **R4. Restore PostgreSQL from B** (c7ef074's daily-set restore, the one its
+  rehearsal uses):
+
+  ```python
+  source, outside = ops.daily_set_catalog(manifest['role_catalog'])
+  print(ops.restore_snapshot('kin-db', directory, 'kin', 'post', source=source), outside)   # outside == []
+  assert all(ops.counts('kin-db', db, 'kin') == manifest['counts'][db] for db in ops.PRE_DATABASES)
+  assert ops.emr_catalog('kin-db', 'kin') == json.loads((directory / 'emr-catalog.json').read_text(encoding='utf-8'))
+  print([row[0] for row in ops.migration_rows('kin-db')][-1])   # 20261011120000_filter_shortcuts
+  ```
+- **R5. Restore Orthanc and the EMR state.**
+  `ops.run(compose_r + ['up', '--no-start', '--no-build', '--pull', 'never'], timeout=install_timeout)`,
+  read `orthanc_volume` (`kin-orthanc` at `/var/lib/orthanc/db`) and
+  `state_volume` (`kin-api` at `/var/lib/kin-emr`) from the mounts (they must be
+  `<R>_orthanc-db` and `<R>_emr-state`), then extract with c7ef074's helper:
+
+  ```python
+  for volume, archive in ((orthanc_volume, 'orthanc.tgz'), (state_volume, 'emr-state.tgz')):
+      ops.temporary_run(['--network', 'none', '--read-only', '--mount', f'type=volume,source={volume},target=/restore',
+                         '--mount', f'type=bind,source={directory},target=/backup,readonly', '--entrypoint', 'tar',
+                         manifest['postgres_image'], '-xzf', '/backup/' + archive, '-C', '/restore'], timeout=1800)
+  print(ops.temporary_run(['--network', 'none', '--read-only', '--mount', f'type=volume,source={orthanc_volume},target=/restore,readonly',
+                           '--entrypoint', 'python3', manifest['orthanc_image'], '-c', ops.SQLITE_CHECK], timeout=300))
+  ```
+
+  Expected: `"integrity": "ok"` with B's attachment count.
+- **R6. Start R.** `ops.run(compose_r + ['up', '-d', '--no-build', '--pull', 'never', 'api'], timeout=install_timeout)`;
+  `kin-emr-provision` and `kin-api-migrate` exit 0 (`No pending migrations to
+  apply.`); the API answers on its own port (a86ecf1's API recovers its EMR seal
+  before it listens). a86ecf1 has no restored-copy expiry sweep; there is none
+  to run. Then `ops.run(compose_r + ['up', '-d', '--no-build', '--pull', 'never'], timeout=install_timeout)`.
+- **R7. Verify and hand over.** `ready()`; `config_matches(compose_r, R)`;
+  B's data: the row counts of B's manifest, its ledger event, Orthanc's
+  instance count. Then R's first backup with R's own tool, the nightly helper:
+  `R_set = ops.backup(str(backup_root), 240)`, `ops.rehearse(R_set)`. Record
+  `status='ROLLED_BACK'`, set `lease.retained = False` and release the lock. The
+  nightly job, which names this checkout, now backs up R unchanged.
+
+**Back to N** (after R7, or after a failure from R2 on): in a session holding the
+lock (remove a retained `.kin-ops.lock` only after inspecting what its session
+left, and record it):
+
+```python
+compose_r = compose_for(record['rollback_project'], ops.ROOT, record['compose_files'], None)
+compose_n = compose_for(record['n_project'], ops.ROOT, record['n_files'], None)
+ops.run(compose_r + ['down'])                     # no -v: R's volumes stay for inspection
+ops.run(['git', 'checkout', '--detach', record['release_sha']])
+ops.run(compose_n + ['up', '-d', '--no-build', '--pull', 'never'], timeout=install_timeout)
+ready()
+assert config_matches(compose_n, record['n_project'])
+```
+
+N's checkout files, `.env` and volumes are as they were at R2, so N comes back
+with everything it wrote. Record `ROLLBACK_ABANDONED`.
+
+**Where this rollback ends.** It restores a86ecf1 without online approvals.
+Once a custody configuration is installed on N (Enabling online approvals) or
+a doctor has a signing key, it no longer applies (preflight refuses on the
+custody file): a86ecf1 cannot use the key, and the sections above, with N's
+tools on both sides, cover later releases.
+
+## After the window
+
+- The nightly job keeps c7ef074's helper until it is replaced by N's tool in a
+  separate change. N's tool rotates to seven daily generations by default and
+  would delete older sets on its first run; keep `--no-rotate` or protect the
+  sets first.
+- B, its hold file and its `kin-rollback-hold/*` tags stay until a separate
+  retention decision. So do N's first set and its hold.
+- Remove `kin-n-images.tar` once N's images are confirmed loaded.
 
 # Online signing keys: backup and restore
 
