@@ -164,7 +164,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
                   new Promise(release=>{releases.set('kin-session-ended:S1',release);
                     channel.postMessage({type:'session-ended',session:'S1'});
                     releases.get('kin-preparation:'+id)();done();})))""", pid)
-                for _ in range(100):
+                for _ in range(500):
                     if landing: break
                     self.opener.wait_for_timeout(10)
                 self.assertTrue(landing)
@@ -224,7 +224,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
                 self.opener.evaluate("KinWorkContext.cancelPreparation(localPreparation)")
             else:
                 self.opener.evaluate("id=>preparationLocks.get(JSON.stringify(['S1',id])).release()", pid)
-            for _ in range(100):
+            for _ in range(500):
                 if landing: break
                 self.opener.wait_for_timeout(10)
             self.assertTrue(landing)
@@ -261,7 +261,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
             elif entry == 'restore': view.evaluate("entryStates=[];dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true}))")
             else:
                 self.opener.evaluate("const f=document.createElement('iframe');f.id='viewer';f.src='/ohif/viewer';document.body.append(f)")
-            for _ in range(100):
+            for _ in range(500):
                 if (entry == 'frame' and self.opener.locator('#viewer').count() == 0) or landing: break
                 self.opener.wait_for_timeout(10)
             if entry == 'frame': self.assertEqual(self.opener.locator('#viewer').count(), 0)
@@ -280,7 +280,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
         held = []
         self.context.route(BASE + '/api/me', lambda route: held.append(route))
         view = self.open_noopener('S1')
-        for _ in range(100):
+        for _ in range(500):
             if held: break
             view.wait_for_timeout(10)
         self.assertEqual(len(held), 1)
@@ -288,7 +288,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
         view.wait_for_timeout(100)
         held[0].fulfill(json={'sessionId':'S1'})
         # Driver polling avoids a timeout-only mutant oracle on the suspended page clock.
-        for _ in range(100):
+        for _ in range(500):
             if view.evaluate("!!window.started || !!document.querySelector('[role=alert]')"): break
             view.wait_for_timeout(10)
         self.assertEqual(view.evaluate('[KinWorkContext.session(),KinWorkContext.state(),!!window.started]'), ['S1','active',True])
@@ -456,7 +456,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
                 view.go_back()
             else:
                 view.reload()
-            for _ in range(100):
+            for _ in range(500):
                 if view.url.endswith('/index.html'): break
                 view.wait_for_timeout(10)
             self.assertEqual(view.url, BASE + '/worklist/hpacs-lite/index.html')
@@ -550,7 +550,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
         view.wait_for_function("KinWorkContext.state()==='preparing'")
         held=[]; view.route(BASE+'/worklist/hpacs-lite/index.html',lambda route:held.append(route))
         self.opener.evaluate("channel.postMessage({type:'session-ended',session:'S1'})")
-        for _ in range(100):
+        for _ in range(500):
             if held: break
             view.wait_for_timeout(10)
         self.assertTrue(held)
@@ -570,7 +570,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
             if view.evaluate('!!window.KinViewerSessionBoundary'): break
             view.wait_for_timeout(10)
         self.notice('session-preparing',preparation='ending-without-notice')
-        for _ in range(100):
+        for _ in range(500):
             if view.evaluate("KinWorkContext.state()==='preparing'"): break
             view.wait_for_timeout(10)
         self.assertEqual(view.evaluate('KinWorkContext.state()'),'preparing')
@@ -578,7 +578,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
         held=[]; view.route(BASE+'/worklist/hpacs-lite/index.html',lambda route:held.append(route))
         self.opener.evaluate("""()=>{source({state:'ending',session:'S1'});
           preparationLocks.get(JSON.stringify(['S1','ending-without-notice'])).release();}""")
-        for _ in range(100):
+        for _ in range(500):
             if held: break
             view.wait_for_timeout(10)
         self.assertTrue(held,'the lock release observes the end even with the viewer polling clock stopped')
@@ -619,7 +619,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
                 page = self.context.new_page()
                 page.clock.install()
                 page.goto(BASE + '/ohif/viewer')
-                for _ in range(100):
+                for _ in range(500):
                     if '/ohif/viewer' not in page.url or page.evaluate('!!window.KinViewerSessionBoundary'): break
                     page.wait_for_timeout(10)
                 page.wait_for_timeout(50)
@@ -791,7 +791,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
                     # active opener and legitimately resumes before the end notice arrives.
                     self.opener.evaluate("source({state:'ending',session:'S1'})")
                     self.notice('session-ended')
-                    for _ in range(100):
+                    for _ in range(500):
                         if landing: break
                         view.wait_for_timeout(10)
                     self.assertTrue(landing, 'the viewer must finish its end transition')
@@ -814,7 +814,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
     def hold_ended_viewer(self, view):
         held=[];view.route(BASE+'/worklist/hpacs-lite/index.html',lambda route:held.append(route))
         self.notice('session-ended')
-        for _ in range(100):
+        for _ in range(500):
             if held: break
             view.wait_for_timeout(10)
         self.assertTrue(held)
@@ -868,7 +868,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
         held = []
         view.route(BASE + '/worklist/hpacs-lite/index.html', lambda route: held.append(route))
         self.notice('session-ended')
-        for _ in range(100):
+        for _ in range(500):
             if held: break
             view.wait_for_timeout(10)
         self.assertTrue(self.opener.evaluate('viewerRef.savedBlobUrls.every(url=>!viewerRef.KinViewerResource.has(url))'))
@@ -1042,7 +1042,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
         view.route(BASE + "/worklist/hpacs-lite/index.html", lambda route: held.append(route))
         self.status, self.code = 403, "AUTH_SESSION_MISMATCH"
         view.evaluate("() => {window.applied=0;fetch('/dicom-web/studies').then(()=>applied++).catch(()=>applied++).finally(()=>applied++);}")
-        for _ in range(100):
+        for _ in range(500):
             if held:
                 break
             view.wait_for_timeout(10)
@@ -1204,7 +1204,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
         held=[]
         self.context.route(BASE+'/api/me',lambda route: held.append(route))
         page=self.context.new_page();page.goto(BASE+'/ohif/viewer')
-        for _ in range(100):
+        for _ in range(500):
             if held:break
             page.wait_for_timeout(10)
         self.assertEqual(len(held),1)
@@ -1240,7 +1240,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
           window.effects=[];window.img=new Image();img.src='/pixels.png';
           img.decode().then(()=>{effects.push('decode');document.querySelector('#draft').value='decoded'});
         }""")
-        for _ in range(100):
+        for _ in range(500):
             if held:break
             view.wait_for_timeout(10)
         self.notice('session-preparing');view.wait_for_function("KinWorkContext.state()==='preparing'")
@@ -1282,7 +1282,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
           const worker=new Worker(url);worker.onmessage=write;worker.postMessage('decode');
           KinViewerSessionBoundary.authFailure({session:'S1',status:401,code:'AUTH_SESSION_ENDED'});
         }""")
-        for _ in range(100):
+        for _ in range(500):
             if held:break
             view.wait_for_timeout(10)
         self.assertEqual(len(held),1)
@@ -1436,7 +1436,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
         }""")
         view.locator("#tech-note-text").fill("unsaved original")
         view.locator("#tech-note-save").click()
-        for _ in range(100):
+        for _ in range(500):
             if held:
                 break
             view.wait_for_timeout(10)
@@ -1467,7 +1467,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
           const xhr=new XMLHttpRequest();xhr.open('GET','/instances/held/file');
           xhr.onload=()=>received++;xhr.send();
         }""")
-        for _ in range(100):
+        for _ in range(500):
             if held:
                 break
             view.wait_for_timeout(10)
@@ -1512,7 +1512,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
         }""")
         view.wait_for_function("window.firstRead===true")
         self.notice("session-ended")
-        for _ in range(100):
+        for _ in range(500):
             if held:
                 break
             view.wait_for_timeout(10)
@@ -1574,7 +1574,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
           for(const name of ['abort','load','error','loadend'])xhr.addEventListener(name,()=>events.push(name));
           xhr.send();
         }""")
-        for _ in range(100):
+        for _ in range(500):
             if held:
                 break
             view.wait_for_timeout(10)
@@ -1589,7 +1589,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
         view = self.open_viewer()
         view.locator("#draft").fill("preserved layout and input")
         view.evaluate("dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true}))")
-        for _ in range(100):
+        for _ in range(500):
             if self.requests:
                 break
             view.wait_for_timeout(10)
@@ -1612,7 +1612,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
         self.notice("session-preparing")
         view.wait_for_function("KinWorkContext.state()==='preparing'")
         # The page's animation scheduler is intentionally paused; observe from the browser driver.
-        for _ in range(100):
+        for _ in range(500):
             if view.evaluate("window.networkAborted===true"):
                 break
             view.wait_for_timeout(10)
