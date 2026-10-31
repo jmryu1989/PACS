@@ -92,7 +92,8 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
   // A discard answers the stored report state as a commit does; that report version is the answer's 열람 target.
   { kinds: ['private-draft', 'report-head', 'report-evidence', 'report-version'], operation: 'write', causes: ['user-view'],
     routes: ['DELETE studies/:uid/draft'] },
-  { kinds: ['private-draft', 'report-head', 'report-evidence'], operation: 'write', causes: ['user-view'],
+  // The forced discard also writes each discarded draft as an unsigned `discarded` ReportVersion: its own 기재.
+  { kinds: ['private-draft', 'report-head', 'report-evidence', 'report-version'], operation: 'write', causes: ['user-view'],
     routes: ['DELETE studies/:uid/draft/force'] },
   { kinds: ['report-head', 'report-version', 'private-draft', 'report-evidence'], operation: 'write', causes: ['user-view'],
     routes: ['POST studies/:uid/report/commit'] },

@@ -402,12 +402,12 @@ export class PacsController {
 
   @Post('match')
   match(@Body() body: any, @Req() req: any) {
-    return this.svc.match(body.uid, body.oid, body.patient, caller(req));
+    return this.svc.match(body.uid, body.oid, body.patient, caller(req), req);
   }
 
   @Post('unmatch')
   unmatch(@Body() body: any, @Req() req: any) {
-    return this.svc.unmatch(body.uid, caller(req));
+    return this.svc.unmatch(body.uid, caller(req), req);
   }
 
   @Get('audit')

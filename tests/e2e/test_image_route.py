@@ -36,6 +36,7 @@ import hashlib
 import json
 import os
 import ssl
+import subprocess
 import time
 import unittest
 import uuid
@@ -52,7 +53,7 @@ from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
 from pynetdicom import AE
 
 import test_worklist as base
-from invariants_live import Fixture, psql
+from invariants_live import ROOT, Fixture, psql
 from test_prior_selection import canvas_ready
 
 FRAME_ACCEPT = 'multipart/related; type="application/octet-stream"; transfer-syntax=*'
@@ -170,7 +171,26 @@ def quoted(values):
     return ",".join("'" + value + "'" for value in values)
 
 
+def asset_catalog_deployed():
+    """Whether the running stack was deployed with the viewer/decoder asset catalog (KIN_EMR_IMAGE_ASSET_CATALOG, the
+    setting the api and the proxy share): with it E answers the viewer's frames, without it the frame reader does."""
+    probe = subprocess.run(["docker", "compose", "exec", "-T", "api", "printenv", "KIN_EMR_IMAGE_ASSET_CATALOG"], cwd=ROOT,
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+    if probe.returncode not in (0, 1):
+        raise RuntimeError("reading the api's asset catalog setting failed: " + probe.stderr[-500:])
+    return bool(probe.stdout.strip())
+
+
 class ImageRouteE2E(base.WorklistE2E):
+    def setUp(self):
+        # Every case asserts E's own facts (X-KIN-Image-Event, emr_image rows), which exist only when the deployment gives
+        # the catalog. No deploy script supplies one yet (emr/units/e.json "remaining"), so the stock and production
+        # stacks send frames to the frame reader, whose record test_frame_delivery_record asserts. Not run is not passed:
+        # scripts/run-tests.py reports a skip as completed_with_skips and exits non-zero.
+        if not asset_catalog_deployed():
+            raise unittest.SkipTest("needs a stack deployed with KIN_EMR_IMAGE_ASSET_CATALOG (E_ROUTE); this stack has none")
+        super().setUp()
+
     def frame(self, path, actor, method="GET", accept=FRAME_ACCEPT):
         request = Request(self.stack.proxy + path, method=method, headers={
             "Accept": accept, "Authorization": "Bearer " + self.stack.token(actor)})

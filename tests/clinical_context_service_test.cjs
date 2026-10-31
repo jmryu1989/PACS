@@ -344,7 +344,7 @@ test('CC-S01 an item missing a provenance field is not made; its section alone i
 
 // ── CC-S15 의료법 제23조④ 열람 ──
 
-test('CC-S15 the answer is recorded as the 열람 of exactly the records it carries: the anchor, its request tags, the same-patient row and the signed prior body', async () => {
+test('CC-S15 the answer is recorded as the 열람 of exactly the records it carries: the anchor, its request tags, the same-patient row, the signed prior body and the Tech Note version', async () => {
   const w = fullWorld();
   const result = await call(w, reader);
   assert.equal(result.status, 200);
@@ -354,6 +354,8 @@ test('CC-S15 the answer is recorded as the 열람 of exactly the records it carr
     ['study-metadata', ANCHOR, ANCHOR, null, A, 'sections/requestTags'],
     ['study-metadata', '2.25.7002', '2.25.7002', null, A, 'sections/history/items/0'],
     ['report-version', '2.25.7002', String(head.id), '1', A, 'sections/priorReports/items/0'],
+    // The section carries the note's version, author and time (never its text): still a 열람 of that note version.
+    ['tech-note', ANCHOR, ANCHOR, '1', A, 'sections/techNote/items/0'],
   ]);
   // A section that returned nothing records nothing: an unreadable signed body leaves its section failed and unrecorded.
   const v = fullWorld();

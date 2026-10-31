@@ -1088,6 +1088,7 @@
       "scripts/run-tests.py",
       "scripts/stage-exit.py",
       "tests/README.md",
+      "tests/access_record_writes_test.cjs",
       "tests/admin_audit_attribution_test.cjs",
       "tests/admin_member_policy_test.cjs",
       "tests/auth_logout_dom_test.py",

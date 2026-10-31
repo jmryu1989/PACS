@@ -586,7 +586,19 @@ test('clinical HTTP writes sign exact entries; operational allocation and close 
       assert.equal(event.targets[0].versionId.value, '2');
       assert.deepEqual(event.targets[0].patientLinkSnapshot, { status: 'not-applicable', reason: 'non-record-target' });
     }
-    assert.equal((await db.$queryRaw`SELECT count(*)::int AS n FROM emr_access.access_entry WHERE payload::jsonb->>'surface'='PATCH studies/:uid'`)[0].n, 0);
+    // 의료법 제23조④: each study write is one 수정 of its study (both streams); the allocation close stays its own surface.
+    // The split UID's PATCH above is recorded too, with its patient link unresolved: that UID has no single patient.
+    const patched = async study => (await db.$queryRaw`SELECT stream, statutory_act, payload FROM emr_access.access_entry
+      WHERE payload::jsonb->>'surface'='PATCH studies/:uid' AND payload::jsonb->'targets'->0->'studyId'->>'value' = ${study}
+      ORDER BY stream`).map(row => ({ ...row, event: typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload }));
+    for (const study of [teleUid, splitUid]) {
+      const rows = await patched(study);
+      assert.deepEqual(rows.map(row => [row.stream, row.statutory_act]), [['history', '수정'], ['viewing', '수정']], study);
+      const { event } = rows[0];
+      assert.deepEqual([event.action, event.targets[0].kind, event.targets[0].recordId.value, event.userId.value.subject],
+        ['modify', 'study-metadata', study, members.doctor.sub]);
+      assert.deepEqual(event.targets[0].patientLinkSnapshot, { status: 'unresolved', reason: 'not-resolved' });
+    }
     const denied = await fetch(origin + `/api/studies/${teleUid}/reader-assignment`, { headers: { authorization: 'Bearer ' + tokens.receiving } });
     assert.ok(denied.status >= 400);
     assert.equal(await db.reportVersion.count(), 0); assert.equal(await db.reportDraft.count(), 0);
