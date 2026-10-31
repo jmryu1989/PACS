@@ -1029,7 +1029,7 @@ know a86ecf1's (no `/app/dist/emr-runtime/application` in its API image, no
   a fresh product cluster.
 - Compose runs the files of the checked-out version, through `compose_for`.
 - N's `scripts/ops_backup.py` runs only against N: its first backup and
-  rehearsal (U5), and N's set before a rollback (R1).
+  rehearsal (U5), the nightly job from U6 on, and N's set before a rollback (R1).
 - Nothing is built on the host. N's images are loaded; a86ecf1's are the
   running images, kept by tag. Every `up` passes `--no-build --pull never`, so a
   missing image stops Compose instead of building or pulling one.
@@ -1209,8 +1209,10 @@ no `retain()`: keep the lock with `lease.retained = True`, release it with
   - the 10-15 probe event moved into the new ledger: one `emr_access.access_entry`
     (stream `viewing`, act `열람`, `viewing2y`) whose payload has executor
     `service`, user `release-probe`, target `system-operation`;
-  - Access Review shows it: `emr_access.review_entries('kin-center', '2026-10-15', '2026-10-16', false, NULL, NULL, 10)`
-    as `kin_runtime` returns that row (the admin page reads exactly this function);
+  - Access Review shows it: as `kin_runtime`,
+    `SELECT * FROM emr_access.review_entries('kin-center'::text, '2026-10-15T00:00:00Z'::timestamptz, '2026-10-16T00:00:00Z'::timestamptz, false, NULL::bigint, NULL::bigint, 10)`
+    returns that row (the admin page reads exactly this function, for the
+    caller's own institution, so only a kin-center admin sees it);
   - `config_matches(compose, project)`.
 
   If `kin-api-migrate` exits non-zero, go to M below. Any other failure: keep
@@ -1226,6 +1228,20 @@ no `retain()`: keep the lock with `lease.retained = True`, release it with
   This is N's first backup. Write `restore-hold.json` in it as well, and run
   checks 2 and 3 of the synthetic checks (no custody: "online approvals not
   enabled"). Enabling online approvals is a later step on the running N.
+- **U6. Point the nightly job at N's tool.** The c7ef074 helper still backs up
+  N (exit 0, a complete set), but neither tool can verify that set: c7ef074's
+  rehearsal finds the restored EMR catalog different, and N's finds the `kin`
+  row counts different, because c7ef074 counts only `public` and `emr_access`
+  (VM rehearsal, 2026-11-01). Record the current crontab line in the release
+  record (`nightly_old`), then replace it with N's tool, without rotation:
+
+  ```
+  0 20 * * * /usr/bin/flock -n /home/ubuntu/.kin-backup-cron.lock /usr/bin/env -i PATH=/usr/bin:/bin HOME=/home/ubuntu /usr/bin/python3 -B -E -s /home/ubuntu/pacs-starter-kit/scripts/ops_backup.py backup --output /home/ubuntu/backups/kin-pacs --ready-timeout 240 --no-rotate >> /home/ubuntu/backups/kin-pacs/scheduled.log 2>&1 # kin-pacs-n-backup
+  ```
+
+  Record the new line as `nightly_n`. The tool path names the checkout, so the
+  line runs whatever version is checked out; the rollback therefore puts
+  `nightly_old` back (R7) and Back to N puts `nightly_n` back.
 
 **M. `api-migrate` failed in the window.** Each migration file runs in one
 transaction, so the failing file left nothing, and the files before it are
@@ -1233,10 +1249,16 @@ applied. N's API has not started (it waits for `api-migrate`), so the doctors
 still see the outage, and nothing has written to the database since B.
 
 ```python
-print(ops.text(compose + ['logs', 'api-migrate']))   # the failing migration and PostgreSQL's error
+print(ops.text(compose + ['logs', 'api-migrate']))   # which migration failed
+db_log = ops.run(['docker', 'logs', '--tail', '300', 'kin-db']).stderr.decode('utf-8', 'replace')
+print([line for line in db_log.splitlines() if 'ERROR:' in line])   # PostgreSQL's own error
 failed = ops.text(['docker', 'exec', 'kin-db', 'psql', '-X', '-U', 'kin', '-d', 'kin', '-qAt', '-c',
                    'SELECT migration_name FROM "_prisma_migrations" WHERE finished_at IS NULL AND rolled_back_at IS NULL'])
 ```
+
+Prisma prints only `current transaction is aborted` for a migration file
+that opens its own transaction (as `20261023180000_emr_pg_ledger` does); the
+cause is the first `ERROR:` line in `kin-db`'s log.
 
 Prisma refuses every later `migrate deploy` while that row exists (P3009). The
 default is the rollback below. Go forward only when the cause is outside the
@@ -1258,7 +1280,7 @@ Applies from U4 until N's first change that B cannot represent is accepted
 (see the end of this section). R is a new Compose project in the same checkout,
 switched back to a86ecf1, with new volumes restored from B and B's own images.
 N's volumes are kept and N's project is only stopped. Keeping the one checkout
-means the nightly job, certbot's webroot and the monitor keep their paths.
+means certbot's webroot, the monitor and the nightly wrapper keep their paths.
 
 **Preflight, while N serves.** A session as above (pinned import, `observed`,
 the definitions), still at N, **without** the lock:
@@ -1351,9 +1373,10 @@ window. Any failure here: record `ROLLBACK_NOT_STARTED`; N keeps serving.
 - **R7. Verify and hand over.** `ready()`; `config_matches(compose_r, R)`;
   B's data: the row counts of B's manifest, its ledger event, Orthanc's
   instance count. Then R's first backup with R's own tool, the nightly helper:
-  `R_set = ops.backup(str(backup_root), 240)`, `ops.rehearse(R_set)`. Record
+  `R_set = ops.backup(str(backup_root), 240)`, `ops.rehearse(R_set)`. Put the
+  crontab line `nightly_old` back (U6 replaced it). Record
   `status='ROLLED_BACK'`, set `lease.retained = False` and release the lock. The
-  nightly job, which names this checkout, now backs up R unchanged.
+  nightly wrapper, which names this checkout, now backs up R unchanged.
 
 **Back to N** (after R7, or after a failure from R2 on): in a session holding the
 lock (remove a retained `.kin-ops.lock` only after inspecting what its session
@@ -1370,7 +1393,8 @@ assert config_matches(compose_n, record['n_project'])
 ```
 
 N's checkout files, `.env` and volumes are as they were at R2, so N comes back
-with everything it wrote. Record `ROLLBACK_ABANDONED`.
+with everything it wrote. Put the crontab line `nightly_n` back if R7 had
+restored `nightly_old`. Record `ROLLBACK_ABANDONED`.
 
 **Where this rollback ends.** It restores a86ecf1 without online approvals.
 Once a custody configuration is installed on N (Enabling online approvals) or
@@ -1380,10 +1404,9 @@ tools on both sides, cover later releases.
 
 ## After the window
 
-- The nightly job keeps c7ef074's helper until it is replaced by N's tool in a
-  separate change. N's tool rotates to seven daily generations by default and
-  would delete older sets on its first run; keep `--no-rotate` or protect the
-  sets first.
+- The nightly job runs N's tool with `--no-rotate` (U6). Rotation is a separate
+  decision: N's tool keeps seven daily generations by default and would delete
+  the older sets on its first rotating run; sets with `restore-hold.json` stay.
 - B, its hold file and its `kin-rollback-hold/*` tags stay until a separate
   retention decision. So do N's first set and its hold.
 - Remove `kin-n-images.tar` once N's images are confirmed loaded.
