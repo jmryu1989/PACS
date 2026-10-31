@@ -54,15 +54,34 @@ function kinCreateImageLoadStatus() {
     sof3 ??= kinCreateSof3Decode({ size: window.config?.maxNumberOfWebWorkers || 3 });
     if (executeTask) sof3.prewarm();
     const emptyFrame = message => Object.assign(new Error(message), { code: 'IMAGE_DECODE_EMPTY' });
-    // The pinned JS lossless decoder resolves a codestream cut short as an all-zero frame, which no pixel check can
-    // tell from a uniform image. A complete JPEG stream ends with EOI (FFD9); entropy-coded data never contains that
-    // pair, so it is looked for only near the end, past the fragment padding a writer may add.
-    const cutShort = task => {
-      if (!KIN_SOF3_SYNTAXES.has(task?.transferSyntax) || !ArrayBuffer.isView(task.pixelData)) return false;
-      const bytes = new Uint8Array(task.pixelData.buffer, task.pixelData.byteOffset, task.pixelData.byteLength);
-      for (let i = bytes.length - 2; i >= Math.max(0, bytes.length - 64); i--) if (bytes[i] === 0xff && bytes[i + 1] === 0xd9) return false;
-      return true;
+    // The pinned JS lossless decoder resolves a codestream cut short as a full-size frame of zero or wrong samples,
+    // which no pixel check can tell from a real image. The stream must reach EOI through its own marker structure: an
+    // FFD9 found by position can sit inside an APP/COM segment ahead of a cut scan. Entropy-coded data stuffs every FF,
+    // so a scan ends at the first marker that is not FF00, a fill byte or a restart marker. Bytes after EOI are padding.
+    const terminated = bytes => {
+      if (bytes[0] !== 0xff || bytes[1] !== 0xd8) return false;
+      for (let i = 2; i + 1 < bytes.length;) {
+        if (bytes[i] !== 0xff) return false;
+        const marker = bytes[i + 1];
+        if (marker === 0xd9) return true;
+        if (marker === 0xff) { i++; continue; }
+        if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; }
+        if (i + 3 >= bytes.length) return false;
+        const length = bytes[i + 2] << 8 | bytes[i + 3];
+        if (length < 2) return false;
+        i += 2 + length;
+        if (marker !== 0xda) continue;
+        for (;; i++) {
+          i = bytes.indexOf(0xff, i);
+          if (i < 0 || i + 1 >= bytes.length) return false;
+          const next = bytes[i + 1];
+          if (next !== 0 && next !== 0xff && (next < 0xd0 || next > 0xd7)) break;
+        }
+      }
+      return false;
     };
+    const cutShort = task => KIN_SOF3_SYNTAXES.has(task?.transferSyntax) && ArrayBuffer.isView(task.pixelData) &&
+      !terminated(new Uint8Array(task.pixelData.buffer, task.pixelData.byteOffset, task.pixelData.byteLength));
     const checkedDecode = function (workerName, methodName, ...args) {
       const decode = active && workerName === 'dicomImageLoader' && methodName === 'decodeTask';
       // Every task the pinned worker receives, directly or as the wasm decoder's fallback; a frame the wasm decoder
