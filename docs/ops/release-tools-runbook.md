@@ -1212,7 +1212,8 @@ no `retain()`: keep the lock with `lease.retained = True`, release it with
   - Access Review shows it: as `kin_runtime`,
     `SELECT * FROM emr_access.review_entries('kin-center'::text, '2026-10-15T00:00:00Z'::timestamptz, '2026-10-16T00:00:00Z'::timestamptz, false, NULL::bigint, NULL::bigint, 10)`
     returns that row (the admin page reads exactly this function, for the
-    caller's own institution, so only a kin-center admin sees it);
+    caller's own institution, so only a kin-center admin sees it; on
+    2026-11-01 production had none: kin-center 2 approved members, 0 admins);
   - `config_matches(compose, project)`.
 
   If `kin-api-migrate` exits non-zero, go to M below. Any other failure: keep
@@ -1243,22 +1244,26 @@ no `retain()`: keep the lock with `lease.retained = True`, release it with
   line runs whatever version is checked out; the rollback therefore puts
   `nightly_old` back (R7) and Back to N puts `nightly_n` back.
 
-**M. `api-migrate` failed in the window.** Each migration file runs in one
-transaction, so the failing file left nothing, and the files before it are
-applied. N's API has not started (it waits for `api-migrate`), so the doctors
+**M. `api-migrate` failed in the window.** The failing file leaves nothing of
+itself and the files before it stay applied (VM drill on B: `emr_pg_ledger`,
+which opens its own transaction, failed after 48 finished rows and left none of
+its tables). N's API has not started (it waits for `api-migrate`), so the doctors
 still see the outage, and nothing has written to the database since B.
 
 ```python
 print(ops.text(compose + ['logs', 'api-migrate']))   # which migration failed
-db_log = ops.run(['docker', 'logs', '--tail', '300', 'kin-db']).stderr.decode('utf-8', 'replace')
-print([line for line in db_log.splitlines() if 'ERROR:' in line])   # PostgreSQL's own error
+db_log = ops.run(['docker', 'logs', 'kin-db']).stderr.decode('utf-8', 'replace')
+print([line for line in db_log.splitlines() if 'ERROR:' in line][-3:])   # PostgreSQL's own error, then the aborted ones
 failed = ops.text(['docker', 'exec', 'kin-db', 'psql', '-X', '-U', 'kin', '-d', 'kin', '-qAt', '-c',
                    'SELECT migration_name FROM "_prisma_migrations" WHERE finished_at IS NULL AND rolled_back_at IS NULL'])
 ```
 
 Prisma prints only `current transaction is aborted` for a migration file
 that opens its own transaction (as `20261023180000_emr_pg_ledger` does); the
-cause is the first `ERROR:` line in `kin-db`'s log.
+cause is the `ERROR:` line before those in `kin-db`'s log. Read the whole log:
+PostgreSQL follows that line with the failing statement, which is the whole
+migration file (474 lines for `20261023180000_emr_pg_ledger`), so a
+`--tail 300` showed only the aborted-transaction line on the VM.
 
 Prisma refuses every later `migrate deploy` while that row exists (P3009). The
 default is the rollback below. Go forward only when the cause is outside the
