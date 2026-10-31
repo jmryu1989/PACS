@@ -63,7 +63,11 @@ class ReaderAssignmentE2E(WorklistE2E):
    psql('UPDATE "StudyState" SET rs='+lit(status)+' WHERE uid='+lit(a.uid))
    try:self.change(a,self.body(self.read(a),None),status=409)
    finally:psql('UPDATE "StudyState" SET rs='+lit('W')+' WHERE uid='+lit(a.uid))
-  self.change(a,self.body(self.read(a),None));self.change(a,body,role,409)
+  after=self.change(a,self.body(self.read(a),None))
+  # A committed request's replay answers its original outcome even after the assignment moved on, and writes nothing
+  # (EMR-D clinical records, api/src/emr-clinical/records.ts admit(): the replay check runs before the revision check).
+  replayed=self.change(a,body,role)
+  self.assertEqual((replayed['revision'],replayed['reader'],len(replayed['history'])),(after['revision'],None,len(after['history'])))
  def test_assignment_03_browser_column_search_and_report(self):
   a=self.fixture();b=self.fixture(patient_id=a.patient_id);c=self.fixture(patient_id=a.patient_id);self.seed_report(c)
   tech=self.login('tech');self.select(tech,a);self.open(tech,a);tech.locator('#ra-reader').select_option(self.stack.user_ids['doctor']);tech.locator('#ra-save').click();expect(tech.locator('#ra-status')).to_contain_text('저장되었습니다');tech.locator('#ra-close').click()
@@ -103,12 +107,15 @@ class ReaderAssignmentE2E(WorklistE2E):
   # unknown study. Use a separate valid UID for the non-disclosure comparison.
   a=self.fixture();missing='2.25.'+str(uuid.uuid4().int)
   unknown=self.stack.request('GET',f'/studies/{missing}/reader-assignment','kdoctor');self.assertEqual(unknown.status,404)
+  # Each route is compared with its own answer for an unknown UID: the assignment route answers through the EMR-D clinical
+  # route and GET audit through its own gate, so their wording differs while each keeps hidden and unknown identical.
+  unknown_audit=self.stack.request('GET',f'/audit?uid={missing}','kdoctor');self.assertEqual(unknown_audit.status,404)
   def refused(role,revision=0):
    self.account(role);request=str(uuid.uuid4());self.requests.add(request)
    write=dict(expectedOwner=['kin-center',self.stack.user_ids[role]],revision=revision,readerSub=None,requestId=request)
    for method,body in (('GET',None),('POST',write)):
     r=self.stack.request(method,f'/studies/{a.uid}/reader-assignment',role,body);self.assertEqual((r.status,r.text),(404,unknown.text),role+' '+method)
-   r=self.stack.request('GET',f'/audit?uid={a.uid}',role);self.assertEqual((r.status,r.text),(404,unknown.text),role+' audit')
+   r=self.stack.request('GET',f'/audit?uid={a.uid}',role);self.assertEqual((r.status,r.text),(404,unknown_audit.text),role+' audit')
   # Z: kin-center before any channel gets what an unknown UID gets, on read, write and GET audit (gate()).
   for role in ('kdoctor','ktech'):refused(role)
   self.assertEqual(self.tele(a,{'ts':'wait','teleTo':'kin-center'})['teleInstitutionId'],'kin-center')
@@ -133,12 +140,17 @@ class ReaderAssignmentE2E(WorklistE2E):
   rows=self.rows(a);closed=rows['kin-center'];self.assertEqual(rows['hallym'],owner_row);self.assertIsNotNone(closed['closedAt'])
   self.assertEqual([closed[k] for k in ('revision','closedRevision','readerSub','readerActor','readerName','changedBy')],[4,4,None,None,None,self.stack.actor('doctor')])
   entries=[d for d in map(json.loads,psql('SELECT detail FROM "AuditLog" WHERE target='+lit(a.uid)+" AND action='reader.assignment' ORDER BY id")) if 'closed' in d]
-  self.assertEqual(entries,[{'institution':'kin-center','revision':4,'from':self.stack.actor('kdoctor'),'to':None,'closed':'tele-closed'}])
+  # Since EMR-D (6651cbf) the entry also names who closed it and the institution that lost the row.
+  self.assertEqual(entries,[{'institution':'kin-center','revision':4,'from':self.stack.actor('kdoctor'),'to':None,'closed':'tele-closed',
+   'caller':{'sub':self.stack.user_ids['doctor'],'institution':'hallym','roles':['radiologist']},'ownerInstitution':'kin-center'}])
   for role in ('kdoctor','ktech'):refused(role,3)
   self.assertIsNone(self.listed(a,'kdoctor'));self.assertEqual(self.audited(a,'tech'),['hallym'])
   # Reopen: a new revision with no reader and no history; the closed channel's last request does not apply.
   self.tele(a,{'ts':'wait','teleTo':'kin-center'});again=self.read(a,'ktech')
-  self.assertEqual((again['revision'],again['reader'],again['history']),(4,None,[]));self.change(a,last,'kdoctor',409)
+  self.assertEqual((again['revision'],again['reader'],again['history']),(4,None,[]))
+  # The closed channel's last request applies nothing: EMR-D answers its committed receipt (201, as in test 02) with the
+  # reopened row unchanged - no reader, no history, revision 4.
+  replayed=self.change(a,last,'kdoctor');self.assertEqual((replayed['revision'],replayed['reader'],replayed['history']),(4,None,[]))
   again=self.change(a,self.body(again,'kdoctor'),'ktech')
   self.assertEqual((again['revision'],[h['detail']['revision'] for h in again['history']]),(5,[5]))
   self.assertEqual([self.rows(a)['kin-center'][k] for k in ('closedRevision','closedAt')],[4,None]);self.assertEqual(self.rows(a)['hallym'],owner_row)

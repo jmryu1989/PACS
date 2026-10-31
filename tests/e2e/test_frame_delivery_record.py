@@ -32,10 +32,13 @@ from test_image_route import FRAME_ACCEPT, ct_series, multipart_parts, quoted
 
 
 def study_entries(uid, where="TRUE"):
-    """B2 access entries (event_id, payload) whose targets name the study record `uid`, in ledger order."""
+    """B2 access entries (event_id, payload) whose image targets name the study record `uid`, in ledger order.
+    Image targets only, as test_image_paths.entries_of(image_only=True): a worklist read records the listed study's
+    metadata (target kind study-metadata, e.g. the fixture's own GET studies), which is not this delivery's record."""
     quoted([uid])
     rows = psql("SELECT e.event_id || E'\\t' || e.payload FROM emr_access.access_entry e WHERE e.entry_id IN "
-                f"(SELECT entry_id FROM emr_access.access_target WHERE record_id = '{uid}') AND {where} ORDER BY e.sequence;")
+                f"(SELECT entry_id FROM emr_access.access_target WHERE record_id = '{uid}' AND target_kind = 'image') "
+                f"AND {where} ORDER BY e.sequence;")
     return [(row.split("\t", 1)[0], json.loads(row.split("\t", 1)[1])) for row in rows]
 
 
