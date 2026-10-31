@@ -1,4 +1,5 @@
-// TEST-MG-MODEL (E-MG R1): REQ-MG-01/02/03/04/05/06 -> RISK-MG-MISCLASS/OMIT/FALSE-ANATOMY/WRONG-STUDY/FLIP-CLIP/STALE.
+// TEST-MG-MODEL (E-MG R1): REQ-MG-01/02/03/04/05/06 -> RISK-MG-MISCLASS/OMIT/FALSE-ANATOMY/WRONG-STUDY/FLIP-CLIP/STALE;
+// REQ-MG-04-REPEAT -> RISK-MG-REPEAT-HIDDEN -> TEST-MG04-MODEL-REPEAT.
 // D73: every assertion binds to the public model contract (kind, frame identity, position, slot,
 // ticket validity) for DICOM JSON inputs built here; no source text, function name or DOM is read.
 // KIN_MG_MODEL may point at a copy of the model (tests/part1/mg/mutants.py); the product tree is never edited.
@@ -412,6 +413,129 @@ test('MG04-allow current and prior are paired per side, view and kind, and a mis
   assert.equal(alone.prior,null);for(const [lat,view] of views)assert.equal(slot(alone,'prior',lat,view,'conventional').status,'missing');
 });
 
+// A repeat exposure (e.g. a retaken R CC) stays an explicit choice that lists every image. Its order is decided for
+// the slot's images as one set or not at all (commander decision 2026-10-31, round 7): one time field all of them
+// carry, at whole-second precision, with an offset on all or none; otherwise, only when none carries a time, Instance
+// Number. Anything less leaves the cell "Select Image" with no latest, as before repeats were ordered.
+test('MG04-allow a repeat exposure is ordered latest first by exposure time then Instance Number, and an undecidable order names none',()=>{
+  const cur='1.2.826.0.1.3680043.10.7.1';
+  const left=mg({study:cur,lat:'L',view:'CC'});
+  const sops=images=>{
+    const s=slot(model.plan(manifest(study(cur,'current',[left,...images]))),'current','R','CC','conventional');
+    assert.equal(s.status,'ambiguous');assert.equal(s.object,undefined,'the slot object is never set for a repeat');
+    assert.deepEqual(s.candidates.map(o=>o.sop).sort(),images.map(i=>i['00080018'].Value[0]).sort(),'every image stays listed');
+    return s.newestFirst&&s.newestFirst.map(o=>o.sop);
+  };
+  const perms=a=>a.length<2?[a]:a.flatMap((x,i)=>perms([...a.slice(0,i),...a.slice(i+1)]).map(p=>[x,...p]));
+  // Every case is run in every stored order: the result is a property of the set.
+  const order=images=>{
+    const first=sops(images);
+    for(const p of perms(images))assert.deepEqual(sops(p),first,'the same result in every stored order');
+    return first&&first.map(sop=>images.findIndex(i=>i['00080018'].Value[0]===sop));
+  };
+  const at=(number,tags)=>mg({study:cur,lat:'R',view:'CC',number,extra:Object.fromEntries(Object.entries(tags).map(([t,x])=>[t,v({'0008002A':'DT','00080201':'SH'}[t]||(t.endsWith('22')||t.endsWith('23')?'DA':'TM'),x)]))});
+  const kst=(number,tags)=>at(number,{'00080201':'+0900',...tags});
+  // One time field for the whole set: acquisition if any image has it, else content.
+  assert.deepEqual(order([kst(2,{'0008002A':'20261030101000'}),kst(1,{'0008002A':'20261030102000'})]),[1,0],'Acquisition DateTime before Instance Number');
+  assert.deepEqual(order([kst(1,{'00080022':'20261030','00080032':'102000'}),kst(2,{'00080022':'20261030','00080032':'101000'})]),[0,1],'Acquisition Date + Time');
+  assert.deepEqual(order([kst(1,{'0008002A':'20261030103000'}),kst(2,{'00080022':'20261030','00080032':'101000'})]),[0,1],
+    'Acquisition DateTime is compared with Acquisition Date + Time');
+  assert.deepEqual(order([kst(1,{'00080023':'20261031','00080033':'090000'}),kst(2,{'00080023':'20261030','00080033':'235959'})]),[0,1],'Content Date + Time, across midnight');
+  assert.deepEqual(order([kst(1,{'00080022':'20261030','00080032':'101000.5'}),kst(2,{'00080022':'20261030','00080032':'101000.25'})]),[0,1],'fractional seconds');
+  assert.equal(order([kst(9,{'0008002A':'20261030102000','00080023':'20261030','00080033':'101000'}),kst(1,{'00080023':'20261030','00080033':'103000'})]),null,
+    'an acquisition time only one image carries: content time does not stand in for it (1aebad0: [1,0])');
+  assert.deepEqual(order([kst(1,{'0008002A':'20261030103000','00080022':'20261030','00080032':'103000'}),kst(2,{'0008002A':'20261030102000'})]),[0,1],
+    'Acquisition DateTime and Date + Time naming one moment are one acquisition time');
+  assert.equal(order([kst(1,{'0008002A':'20261030103000','00080022':'20261030','00080032':'101000','00080023':'20261030','00080033':'100000'}),
+    kst(2,{'0008002A':'20261030102000','00080023':'20261030','00080033':'100500'})]),null,
+    'an image whose two acquisition encodings disagree: no latest image, content time does not decide (1aebad0: [1,0])');
+  // Offsets: stated on every image (compared in UTC) or on none (one local clock).
+  assert.deepEqual(order([at(2,{'0008002A':'20261030101000+0900'}),at(1,{'0008002A':'20261030100000+0000'})]),[1,0],
+    'UTC offsets are applied: 10:10+0900 is 01:10 UTC, before 10:00+0000');
+  assert.deepEqual(order([at(2,{'00080022':'20261030','00080032':'101000','00080201':'+0900'}),at(1,{'00080022':'20261030','00080032':'100000','00080201':'+0000'})]),[1,0],
+    'Timezone Offset From UTC applies to Date + Time');
+  assert.deepEqual(order([at(2,{'0008002A':'20261030101000','00080201':'+0900'}),at(1,{'0008002A':'20261030100000+0000'})]),[1,0],
+    'Timezone Offset From UTC applies to a DateTime without its own offset');
+  assert.deepEqual(order([at(1,{'0008002A':'20261030100000'}),at(1,{'0008002A':'20261030103000'})]),[1,0],
+    'no offset on either image, a repeat 30 minutes later with the same Instance Number: the later one is the latest');
+  assert.deepEqual(order([at(2,{'0008002A':'20261030101000'}),at(1,{'0008002A':'20261030102000'})]),[1,0],'no offset: time before Instance Number');
+  assert.deepEqual(order([at(1,{'00080022':'20261030','00080032':'100000'}),at(1,{'00080022':'20261030','00080032':'103000'})]),[1,0],'no offset: Acquisition Date + Time');
+  assert.deepEqual(order([at(1,{'00080023':'20261030','00080033':'101000'}),at(1,{'00080023':'20261030','00080033':'100500'})]),[0,1],'no offset: Content Date + Time');
+  assert.deepEqual(order([at(2,{'0008002A':'20261030101000'}),at(1,{'0008002A':'20261101101000'})]),[1,0],'no offset: days apart');
+  // Deliberately null since round 7 (a03da17 named a latest for each): a mixed offset.
+  assert.equal(order([at(1,{'0008002A':'20261030101000+0900'}),at(1,{'0008002A':'20261030100000'})]),null,'an offset only one image states: no latest image');
+  assert.equal(order([at(1,{'0008002A':'20261030103000'}),at(2,{'0008002A':'20261030100000+0900'})]),null,
+    'a mixed offset is not resolved by Instance Number (a03da17: [1,0])');
+  assert.equal(order([at(1,{'0008002A':'20261101103000'}),at(2,{'0008002A':'20261030100000+0900'})]),null,
+    'a mixed offset is not resolved by days of difference (a03da17: [0,1])');
+  assert.equal(order([at(2,{'0008002A':'20261030101000+0900'}),at(1,{'0008002A':'20261031101000'})]),null,'a mixed offset a day apart (a03da17: [1,0])');
+  assert.equal(order([kst(1,{'0008002A':'20261030103000+0000','00080022':'20261030','00080032':'103000'}),at(2,{'0008002A':'20261030100000+0000'})]),null,
+    'acquisition encodings of one image that disagree on the offset: that image has no acquisition time, the other does (a03da17: [1,0] by Instance Number)');
+  // GPT's round-2 reproduction: A's DateTime is month precision with an offset, its Date + Time has none.
+  assert.equal(order([at(1,{'0008002A':'202610+0000','00080022':'20261030','00080032':'110000'}),at(2,{'0008002A':'20261028100000+0000'})]),null,
+    'GPT round 2: A has no agreeing acquisition time, B has one (a03da17: [0,1])');
+  // GPT's A, B, C, D (review of a03da17): A and B without an offset, C and D at +0000.
+  const gpt=[at(3,{'0008002A':'20261030100000'}),at(1,{'0008002A':'20261030110000'}),at(2,{'0008002A':'20261030103000+0000'}),at(4,{'0008002A':'20261102000000+0000'})];
+  assert.equal(order(gpt),null,'GPT A, B, C, D: a mixed offset (a03da17: [3,0,1,2])');
+  assert.equal(order(gpt.slice(0,3)),null,'GPT A, B, C: a mixed offset (a03da17: null)');
+  // Precision below whole seconds. Deliberately null since round 7 where a03da17 named a latest.
+  assert.equal(order([kst(1,{'0008002A':'2026103010'}),kst(1,{'0008002A':'20261030103000'})]),null,'hour precision: no latest image');
+  assert.equal(order([at(1,{'0008002A':'2026103010'}),at(1,{'0008002A':'20261030103000'})]),null,'hour precision without an offset: no latest image');
+  assert.equal(order([kst(1,{'0008002A':'2026103011'}),kst(1,{'0008002A':'20261030103000'})]),null,'hour precision a whole hour later (a03da17: [0,1])');
+  assert.equal(order([at(1,{'0008002A':'2026103011'}),at(1,{'0008002A':'20261030103000'})]),null,'hour precision without an offset a whole hour later (a03da17: [0,1])');
+  assert.equal(order([kst(1,{'0008002A':'202610301030'}),kst(2,{'0008002A':'20261030110000'})]),null,'minute precision: no latest image');
+  assert.equal(order([kst(1,{'0008002A':'2026103010','00080023':'20261030','00080033':'101000'}),kst(1,{'0008002A':'20261030103000','00080023':'20261030','00080033':'103000'})]),null,
+    'an hour-precision acquisition time is not passed over for the content time (a03da17: [1,0])');
+  assert.equal(order([kst(1,{'00080022':'20261030','00080023':'20261030','00080033':'103000'}),kst(1,{'00080022':'20261030','00080032':'101000','00080023':'20261030','00080033':'101000'})]),null,
+    'an Acquisition Date without a time is an acquisition time below second precision (a03da17: [0,1] by content time)');
+  assert.equal(order([kst(1,{'0008002A':'2026103010','00080022':'20261030','00080032':'1040'}),kst(2,{'0008002A':'20261030102000'})]),null,
+    'two partial acquisition encodings of one image are not combined (a03da17: [0,1])');
+  // Some images with a time, some without, or no common field.
+  assert.equal(order([kst(1,{'0008002A':'20261030100000'}),at(2,{})]),null,'one image without any time: Instance Number does not decide');
+  const xbc=n=>[kst(n[0],{'0008002A':'20261030103000'}),kst(n[1],{'0008002A':'20261030090000','00080023':'20261030','00080033':'120000'}),
+    kst(n[2],{'00080023':'20261030','00080033':'110000'})];
+  assert.equal(order(xbc([null,null,null])),null,'X, B, C: no time field every image carries');
+  assert.equal(order(xbc([1,2,3])),null,'X, B, C with Instance Numbers: still no latest image');
+  assert.equal(order([kst(null,{'0008002A':'20261030100000','00080023':'20261030','00080033':'100000'}),
+    kst(null,{'0008002A':'20261030090000','00080023':'20261030','00080033':'120000'}),kst(null,{'00080023':'20261030','00080033':'110000'})]),null,
+    'round-5 time cycle: B content 12:00 is a reprocessing, not its 09:00 exposure, so no latest image (1aebad0: [1,2,0])');
+  // GPT's reproduction on 57aba68: two CT-format DBT stacks took the order of whichever slice arrived first.
+  const ct=table.cases.find(k=>model.classify(k.input.dicom).basis==='ct-breast-tomosynthesis').input.dicom,ctKind=model.classify(ct);
+  const stack=name=>[1,2,3].map(n=>{
+    const o=clone(ct);o['00100020']=v('LO','test-patient');o['0020000E']=v('UI',ct['0020000E'].Value[0]+'.'+name);
+    o['00080018']=v('UI',ct['00080018'].Value[0]+'.'+name+'.'+n);o['00200013']=v('IS',n);
+    o['00200032']=v('DS',...ct['00200032'].Value.map((x,i)=>i===2?Number(x)+n*Number(ct['00180050'].Value[0]):Number(x)));
+    return o;
+  });
+  const [a,b]=[stack(1),stack(2)];
+  for(const objects of [[a[2],b[0],a[0],a[1],b[1],b[2]],[a[0],b[2],a[1],a[2],b[0],b[1]]]){
+    const s=slot(model.plan(manifest(study(ctKind.study,'current',objects))),'current',ctKind.laterality,ctKind.view,ctKind.kind);
+    assert.equal(s.status,'ambiguous');
+    assert.equal(s.newestFirst,null,'two CT-format DBT stacks stay an explicit choice whatever slice arrives first (57aba68: the first arrival decided)');
+  }
+  // Equal times: Instance Number, only if present and distinct among the equal ones.
+  assert.deepEqual(order([kst(1,{'0008002A':'20261030101000'}),kst(2,{'0008002A':'20261030101000'})]),[1,0],'equal times: Instance Number');
+  assert.deepEqual(order([kst(7,{'0008002A':'20261030101000'}),kst(1,{'0008002A':'20261030102000'}),kst(5,{'0008002A':'20261030102000'})]),[2,1,0],
+    'Instance Number breaks a tie only among the equal times');
+  assert.deepEqual(order([kst(null,{'0008002A':'20261030100000'}),kst(1,{'0008002A':'20261030103000'}),kst(2,{'0008002A':'20261030103000'})]),[2,1,0],
+    'an image of another time without Instance Number does not block the tie-break');
+  assert.equal(order([kst(1,{'0008002A':'20261030101000'}),kst(1,{'0008002A':'20261030101000'})]),null,'same time and Instance Number: no latest image');
+  assert.equal(order([kst(null,{'0008002A':'20261030101000'}),kst(1,{'0008002A':'20261030101000'})]),null,'same time and an Instance Number missing: no latest image');
+  assert.equal(order([kst(2,{'0008002A':'20261030110000'}),kst(1,{'0008002A':'20261030101000'}),kst(1,{'0008002A':'20261030101000'})]),null,
+    'an unresolved tie below the latest still leaves no order');
+  // No time on any image: Instance Number, if present and distinct.
+  assert.deepEqual(order([at(3,{}),at(7,{}),at(5,{})]),[1,2,0],'no time: Instance Number orders all three');
+  assert.equal(order([at(1,{}),at(1,{})]),null,'no time and one Instance Number: no latest image');
+  assert.equal(order([at(null,{}),at(2,{})]),null,'no time and an Instance Number missing: no latest image');
+  // An impossible date, time or offset is no time; a leap second is not read either.
+  for(const bad of ['20261330100000','20260230100000','20261030240000','20261030106000','20261030100060','20261030100000+1500','2026103010.5'])
+    assert.equal(order([kst(1,{'0008002A':bad}),kst(2,{'0008002A':'20261030103000'})]),null,bad+' is not a time');
+  assert.equal(order([kst(1,{'00080022':'20261030','00080032':'10:00:00'}),kst(2,{'00080022':'20261030','00080032':'103000'})]),null,'a malformed time is not a time');
+  assert.equal(order([at(1,{'0008002A':'20261030100000','00080201':'0900'}),at(2,{'0008002A':'20261030103000','00080201':'+0900'})]),null,'a malformed Timezone Offset From UTC is not an offset');
+  const ready=slot(model.plan(manifest(study(cur,'current',[left,at(1,{'0008002A':'20261030101000'})]))),'current','R','CC','conventional');
+  assert.equal(ready.status,'ready');assert.equal(ready.newestFirst,undefined,'a single image is a ready slot, unchanged');
+});
+
 test('MG04-reject another patient, another institution, an ambiguous duplicate or a partial/modified view is never chosen',()=>{
   const cur='1.2.826.0.1.3680043.10.7.1',pri='1.2.826.0.1.3680043.10.7.2';
   const current=[mg({study:cur,lat:'R',view:'CC'}),mg({study:cur,lat:'L',view:'CC'})];
@@ -426,7 +550,7 @@ test('MG04-reject another patient, another institution, an ambiguous duplicate o
     study(pri,'prior',priorOf({birth:'19710101'})))).prior.status,'refused','conflicting birth dates');
   const dup=model.plan(manifest(study(cur,'current',[...current,mg({study:cur,lat:'R',view:'CC',number:7})])));
   const r=slot(dup,'current','R','CC','conventional');
-  assert.equal(r.status,'ambiguous');assert.equal(r.candidates.length,2);assert.equal(r.object,undefined,'no duplicate is picked silently');
+  assert.equal(r.status,'ambiguous');assert.equal(r.candidates.length,2);assert.equal(r.object,undefined,'a duplicate is never resolved into the slot object');
   const extras=model.plan(manifest(study(cur,'current',[mg({study:cur,lat:'R',view:'CC',modifiers:[['SCT','399055006']]}),
     mg({study:cur,lat:'L',view:'CC',modifiers:[['SRT','R-102D6']]}),mg({study:cur,lat:'R',view:'MLO',partial:'YES'}),
     mg({study:cur,lat:'B',view:'MLO',orientation:['P','F']}),mg({study:cur,lat:null,view:'MLO'})])));

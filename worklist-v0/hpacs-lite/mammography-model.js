@@ -615,8 +615,53 @@
   }
 
   const DBT_RANK={slices:1,slab:2,'mip-slab':3,'minip-slab':3,unspecified:4};
-  // Current/prior x side x view x kind. A duplicate is never resolved by picking one; the only order
-  // applied is slices before slabs inside DBT, and every alternative stays listed.
+  // A UTC offset (&ZZXX) in minutes, within the -1200..+1400 DICOM allows; otherwise null.
+  function utcOffset(value){
+    const m=/^([+-])(\d{2})(\d{2})$/.exec(value);
+    const minutes=m&&+m[3]<60?(m[1]==='-'?-1:1)*(+m[2]*60+ +m[3]):NaN;
+    return minutes>=-720&&minutes<=840?minutes:null;
+  }
+  // One image's acquisition and content time, each {at: microseconds on its clock, offset: minutes or
+  // null when none is stated}; null when the image does not carry it and false when it carries a value
+  // that is not a real date and time to whole seconds. Acquisition DateTime and Acquisition Date + Time
+  // that do not name one moment are carried but unusable.
+  function exposure(item){
+    const zoneText=text(item,'00080201'),zone=utcOffset(zoneText);
+    const read=value=>{
+      const m=/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(?:\.(\d{1,6}))?([+-]\d{4})?$/.exec(value);
+      const offset=m&&m[8]?utcOffset(m[8]):zone;
+      if(!m||(m[8]?offset===null:zoneText&&zone===null))return false;
+      const [y,mo,d,h,mi,s]=m.slice(1,7).map(Number),t=new Date(Date.UTC(y,mo-1,d,h,mi,s));
+      if(t.getUTCFullYear()!==y||t.getUTCMonth()!==mo-1||t.getUTCDate()!==d||t.getUTCHours()!==h||t.getUTCMinutes()!==mi||t.getUTCSeconds()!==s)return false;
+      return {at:t.getTime()*1000+(m[7]?+m[7].padEnd(6,'0'):0),offset};
+    };
+    const pair=(date,time)=>!date&&!time?null:/^\d{8}$/.test(date)&&/^\d{6}(?:\.\d{1,6})?$/.test(time)&&read(date+time);
+    const dt=text(item,'0008002A'),a=dt?read(dt):null,b=pair(text(item,'00080022'),text(item,'00080032'));
+    const acquired=a===null?b:b===null?a:a&&b&&a.at===b.at&&a.offset===b.offset?a:false;
+    const carries=['0008002A','00080022','00080032','00080023','00080033'].some(tag=>text(item,tag));
+    return {acquired,content:pair(text(item,'00080023'),text(item,'00080033')),carries};
+  }
+  // A repeat exposure of one slot, newest first, ordered as a whole set or not at all (null: the slot
+  // stays an explicit choice). The time is acquisition if any image carries it, else content: content
+  // time can be a later reprocessing, so it never stands in for an acquisition time another image has.
+  // Every image must then carry that time as a real date and time to whole seconds, with an offset stated
+  // on all images (compared in UTC) or on none (one study's local clock). Equal times, and images that
+  // carry no time at all, are told apart only by present and distinct Instance Numbers. A CT-format DBT
+  // stack has no stack-level time or number, only those of whichever slice arrived first, so never ordered.
+  function newestFirst(found){
+    if(found.some(o=>o.stackMembers))return null;
+    const all=found.map(o=>({o,number:o.instanceNumber,...exposure(o.item)}));
+    const field=['acquired','content'].find(f=>all.some(k=>k[f]!==null));
+    const times=field?all.map(k=>k[field]):[];
+    if(field?times.some(t=>!t)||new Set(times.map(t=>t.offset===null)).size>1:all.some(k=>k.carries))return null;
+    const time=k=>field?k[field].at-(k[field].offset||0)*60e6:0;
+    const sorted=all.sort((a,b)=>time(b)-time(a)||(b.number??0)-(a.number??0));
+    const told=sorted.every((k,i)=>!i||time(k)!==time(sorted[i-1])||k.number!==null&&sorted[i-1].number!==null&&k.number!==sorted[i-1].number);
+    return told?sorted.map(k=>k.o):null;
+  }
+  // Current/prior x side x view x kind. A duplicate is never resolved into `object`; the only order
+  // applied is slices before slabs inside DBT, and every alternative stays listed. An ambiguous slot
+  // carries `newestFirst` so a viewer may show the latest exposure, marked as one of several.
   function plan(manifest){
     const studies=Array.isArray(manifest&&manifest.studies)?manifest.studies:[];
     const current=studies.filter(s=>s&&s.role==='current'),prior=studies.filter(s=>s&&s.role==='prior');
@@ -646,7 +691,7 @@
       const alternatives=found.filter(o=>!best.includes(o));
       const partials=s.objects.filter(o=>o.partialSlot&&o.kind===kind&&o.laterality===side&&o.view===v);
       slots[key]=!best.length?(partials.length?{key,status:'partial',candidates:partials}:{key,status:'missing'})
-        :best.length>1?{key,status:'ambiguous',candidates:best,alternatives,partials}:{key,status:'ready',object:best[0],alternatives,partials};
+        :best.length>1?{key,status:'ambiguous',candidates:best,newestFirst:newestFirst(best),alternatives,partials}:{key,status:'ready',object:best[0],alternatives,partials};
     }
     const objects=[cur,...(pri?[pri]:[])].flatMap(s=>s.objects.map(o=>({...o,use:s===pri&&priorStatus!=='ok'?'refused':o.standard?'slot':o.partialSlot?'partial':'other'})));
     return {status:'ok',institution:manifest.institution,current:{uid:cur.uid,date:cur.date,patient:cur.patient},

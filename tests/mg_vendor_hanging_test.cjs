@@ -1,4 +1,5 @@
 // REQ-MG-VENDOR-HANG/VOI -> RISK-MG-OMITTED-SLICES/WRONG-VOI -> TEST-MG-VENDOR-HANG.
+// REQ-MG-04-REPEAT -> RISK-MG-REPEAT-HIDDEN -> TEST-MG-VENDOR-HANG (repeat exposure case).
 // Runs the shipped extension against its OHIF service/viewport interfaces. GPU/HTTP remain served checks.
 // The OHIF side below reproduces the pinned viewer's (orthancteam/orthanc:24.12.0 libOrthancOHIF.so) display-set
 // path: DeferredPromise keeps the store callback registered before start() and runs it first; the store builds
@@ -52,16 +53,26 @@ const naturalize = d => ({ SOPInstanceUID: d['00080018'].Value[0], SeriesInstanc
   StudyInstanceUID: d['0020000D'].Value[0], Modality: d['00080060'].Value[0], SOPClassUID: d['00080016'].Value[0],
   InstanceNumber: d['00200013']?.Value?.[0], NumberOfFrames: d['00280008']?.Value?.[0] });
 
-// The selector forms the viewer's DOM is queried with: .class, [attr="value"] and [class~="token"].
+// The selector forms the viewer's DOM is queried with: tag, .class, [attr="value"] and [class~="token"].
+// Setting textContent replaces the element's children, as in the DOM.
 class Element {
-  constructor(className = '') { this.className = className; this.style = {}; this.children = []; this.textContent = ''; this.attributes = {}; }
+  constructor(className = '', tagName = 'DIV') {
+    this.className = className; this.tagName = tagName; this.style = {}; this.children = []; this.text = ''; this.attributes = {};
+    this.dataset = {}; this.listeners = {};
+  }
+  get textContent() { return this.text; }
+  set textContent(value) { this.children.forEach(c => { c.parent = null; }); this.children = []; this.text = value; }
   append(...children) { for (const c of children) { c.parent = this; this.children.push(c); c.onload?.(); } }
-  setAttribute(k, v) { this.attributes[k] = v; } getAttribute(k) { return this.attributes[k] ?? null; } addEventListener() {}
+  setAttribute(k, v) { this.attributes[k] = v; } getAttribute(k) { return this.attributes[k] ?? null; }
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+  click() { const event = { stopPropagation() {} }; (this.listeners.click || []).forEach(fn => fn(event)); }
+  descendants() { return this.children.flatMap(c => [c, ...c.descendants()]); }
   remove() { this.parent && (this.parent.children = this.parent.children.filter(c => c !== this)); this.parent = null; }
   getBoundingClientRect() { return this.rect || { top: 0, left: 0 }; }
   matches(selector) {
     const cls = /^\.(\S+)$/.exec(selector), attr = /^\[([\w-]+)(~?)="([^"]*)"\]$/.exec(selector);
     if (cls) return this.className.split(' ').includes(cls[1]);
+    if (/^[a-z]+$/.test(selector)) return this.tagName === selector.toUpperCase();
     if (!attr) throw new Error('unsupported selector ' + selector);
     const value = attr[1] === 'class' ? this.className : this.getAttribute(attr[1]);
     return attr[2] ? (value || '').split(' ').includes(attr[3]) : value === attr[3];
@@ -83,10 +94,10 @@ function orthancBulkAccept(accept) {
   return type === undefined || type.trim().replace(/^"|"$/g, '') === 'application/octet-stream';
 }
 
-async function mount(items, { routes = {} } = {}) {
+async function mount(items, { routes = {}, opened = null } = {}) {
   const listeners = new Map(), panel = new Element(), requests = [];
   const body = new Element();
-  const document = { head: new Element(), body, createElement: () => new Element(),
+  const document = { head: new Element(), body, createElement: tag => new Element('', tag.toUpperCase()),
     querySelector: s => s === '#kin-viewer-layout' ? panel : body.querySelector(s), querySelectorAll: s => body.querySelectorAll(s),
     addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) };
   let grid = new Map(), active = null;
@@ -102,6 +113,15 @@ async function mount(items, { routes = {} } = {}) {
     run: (_, id, options) => { state = { protocolId: id, stageIndex: options?.stageIndex }; } };
   const services = { hangingProtocolService: hp, viewportGridService: { EVENTS: { GRID_STATE_CHANGED: 'grid' },
     getState: () => ({ viewports: grid, activeViewportId: active }), setActiveViewportId: id => { active = id; },
+    // SET_DISPLAYSETS_FOR_VIEWPORTS, then GRID_STATE_CHANGED; the reducer refuses a missing viewport id.
+    setDisplaySetsForViewports: list => {
+      grid = new Map(grid);
+      for (const { viewportId, displaySetInstanceUIDs } of list) {
+        if (!grid.has(viewportId)) throw new Error('ViewportId is required to set display sets for viewport');
+        grid.set(viewportId, { ...grid.get(viewportId), displaySetInstanceUIDs });
+      }
+      gridChanged();
+    },
     subscribe: (_, fn) => { gridListeners.add(fn); return { unsubscribe: () => gridListeners.delete(fn) }; } },
     cornerstoneViewportService: { getCornerstoneViewport: () => viewport } };
   const modules = { [STACK]: createStackHandler() }, displaySets = [];
@@ -127,11 +147,12 @@ async function mount(items, { routes = {} } = {}) {
     return route ? { ok: true, headers: { get: () => route.type }, arrayBuffer: async () => route.body.buffer.slice(route.body.byteOffset, route.body.byteOffset + route.body.byteLength) }
       : { ok: false, headers: { get: () => '' } };
   };
+  const uids = (opened || [study]).join(',');
+  const window = { KinMammographyModel: model, cornerstone: { Enums: { Events: { STACK_NEW_IMAGE: 'image', VIEWPORT_NEW_IMAGE_SET: 'stack' } },
+    metaData: { get: () => ({ SOPInstanceUID: shown()['00080018'].Value[0], SeriesInstanceUID: shown()['0020000E'].Value[0] }) } } };
   const context = vm.createContext({ document, URL, URLSearchParams, fetch,
-    location: { search: '?StudyInstanceUIDs=' + study, href: 'https://localhost:9443/ohif/viewer?StudyInstanceUIDs=' + study },
-    MutationObserver: class { observe() {} disconnect() {} }, kinViewerSession: { sameAccount: () => true },
-    window: { KinMammographyModel: model, cornerstone: { Enums: { Events: { STACK_NEW_IMAGE: 'image', VIEWPORT_NEW_IMAGE_SET: 'stack' } },
-      metaData: { get: () => ({ SOPInstanceUID: shown()['00080018'].Value[0], SeriesInstanceUID: shown()['0020000E'].Value[0] }) } } } });
+    location: { search: '?StudyInstanceUIDs=' + uids, href: 'https://localhost:9443/ohif/viewer?StudyInstanceUIDs=' + uids },
+    MutationObserver: class { observe() {} disconnect() {} }, kinViewerSession: { sameAccount: () => true }, window });
   let order = items;
   const shown = () => order[current];
   vm.runInContext(fs.readFileSync('config/ohif/mammography-hanging.js', 'utf8'), context);
@@ -142,6 +163,8 @@ async function mount(items, { routes = {} } = {}) {
   await Promise.all(loads.map(p => p.start()));
   return { hp, study, items, extension, points, properties, ranges, element, displaySets, requests, body,
     protocol: () => protocol, state: () => state, renderCount: () => renderCount,
+    // The layout and image type controls write through the preference interface the extension publishes.
+    preferences: () => window.kinMammographyHanging,
     run() { hp.run({ displaySets }, 'default', {}); },
     // viewportGridService publishes GRID_STATE_CHANGED after every viewport assignment.
     setGrid(viewports) { grid = new Map(viewports.map(v => [v.viewportId, v])); gridChanged(); },
@@ -253,7 +276,8 @@ test('a pane opened by the reader into an empty slot no longer shows that slot\'
   assert.equal(panes.map(paneText).join(''), '', 'mode exit removes every slot label');
 });
 
-// Two R CC Conventional images of one study fill the same slot, so the hanging places no image anywhere.
+// Two R CC Conventional images of one study fill the same slot. They carry no exposure time and the same
+// Instance Number, so neither is the latest and the hanging places no image anywhere.
 test('a thumbnail double-click opens the series in a cell when the MG hanging places no image', async () => {
   const a = fixture('siemens-2d-12-1'), b = fixture('siemens-2d-12-2');
   b['0020000D'] = structuredClone(a['0020000D']);
@@ -274,6 +298,139 @@ test('a thumbnail double-click opens the series in a cell when the MG hanging pl
   h.doubleClick(first);
   assert.deepEqual(h.grid().get('vp-2').displaySetInstanceUIDs, [first]);
   assert.deepEqual(h.grid().get('vp-0').displaySetInstanceUIDs, [second]);
+  h.extension.onModeExit();
+});
+
+// Acquisition DateTime per image, at the site's stated UTC offset.
+function exposed(items, times) {
+  times.forEach((t, i) => { items[i]['0008002A'] = { vr: 'DT', Value: [t] }; items[i]['00080201'] = { vr: 'SH', Value: ['+0900'] }; });
+  return items;
+}
+// The active stage as the grid lays it out: one pane per cell, each with its viewport element, hung as the protocol says.
+function layOut(h) {
+  const stage = h.protocol().stages[h.state().stageIndex], { columns } = stage.viewportStructure.properties;
+  const keys = stage.viewports.map(v => v.displaySets[0].id), id = i => stage.id + '-' + i;
+  h.body.querySelectorAll('[class~="group/pane"]').forEach(p => p.remove());
+  const panes = keys.map((_, i) => {
+    const pane = Object.assign(new Element('relative group/pane'), { rect: { top: Math.floor(i / columns), left: i % columns } });
+    const element = new Element(); element.setAttribute('data-viewport-uid', id(i)); pane.append(element);
+    return pane;
+  });
+  h.body.append(...panes);
+  h.layout(keys.map((k, i) => ({ viewportId: id(i), x: i % columns, y: Math.floor(i / columns), displaySetInstanceUIDs: h.selected(k) ? [h.selected(k)] : [] })));
+  return { keys, panes, id };
+}
+
+// A retaken R CC: three R CC Conventional images of one study, stored out of exposure order. The latest
+// exposure is hung and its cell says it is one of three, with a control that shows each image in turn.
+test('a repeat exposure hangs the latest image, marked as one of several, and the cell switches to each other image', async () => {
+  const items = ['siemens-2d-12-1', 'siemens-2d-12-2', 'siemens-2d-12-1'].map(fixture);
+  items[2]['00080018'].Value[0] += '.3'; items[2]['0020000E'].Value[0] += '.3';
+  for (const d of items.slice(1)) d['0020000D'] = structuredClone(items[0]['0020000D']);
+  exposed(items, ['20261030101500', '20261030102000', '20261030101000']);
+  const h = await mount(items);
+  h.run();
+  const set = d => h.displaySets.find(s => s.images[0].SOPInstanceUID === d['00080018'].Value[0]).displaySetInstanceUID;
+  const key = 'current|R|CC|conventional';
+  assert.equal(h.selected(key), set(items[1]), 'the latest exposure fills the slot');
+  const stage = h.protocol().stages[h.state().stageIndex], { columns } = stage.viewportStructure.properties;
+  const keys = stage.viewports.map(v => v.displaySets[0].id), cell = keys.indexOf(key);
+  assert.deepEqual(plain(keys.filter(k => h.selected(k))), [key], 'no other slot takes one of the repeated images');
+  const panes = keys.map((_, i) => Object.assign(new Element('relative group/pane'), { rect: { top: Math.floor(i / columns), left: i % columns } }));
+  h.body.append(...panes);
+  const open = i => { const element = new Element(); element.setAttribute('data-viewport-uid', 'vp-' + i); panes[i].append(element); };
+  open(cell);
+  h.layout(keys.map((k, i) => ({ viewportId: 'vp-' + i, x: i % columns, y: Math.floor(i / columns), displaySetInstanceUIDs: h.selected(k) ? [h.selected(k)] : [] })));
+  const label = () => paneText(panes[cell]);
+  const button = () => panes[cell].descendants().filter(e => e.tagName === 'BUTTON');
+  assert.match(label(), /^Current · R CC · Conventional · 3장 중 1장 · 재촬영/);
+  assert.equal(button().length, 1, 'one switch control in the repeat cell');
+  assert.ok(panes.every((p, i) => i === cell || !p.descendants().some(e => e.tagName === 'BUTTON')), 'no control in a single-image or empty cell');
+  // The reader opens an image in an empty cell; switching the repeat cell leaves that cell as it is.
+  const other = keys.findIndex(k => !h.selected(k));
+  h.activate('vp-' + other); open(other); h.doubleClick(set(items[2]));
+  assert.match(paneText(panes[other]), /^Current · R CC · Conventional · 3장 중 3장 · 재촬영/, 'a repeat image is marked as its own slot wherever it is shown');
+  for (const [shown, n] of [[items[0], 2], [items[2], 3], [items[1], 1]]) {
+    button()[0].click();
+    assert.deepEqual(plain(h.grid().get('vp-' + cell).displaySetInstanceUIDs), [set(shown)], 'image ' + n + ' of 3 in the same cell');
+    assert.match(label(), new RegExp('^Current · R CC · Conventional · 3장 중 ' + n + '장 · 재촬영'));
+    assert.equal(button().length, 1);
+    assert.deepEqual(h.grid().get('vp-' + other).displaySetInstanceUIDs, [set(items[2])], 'the reader\'s own cell is unchanged');
+  }
+  // The reader's choice survives a new hanging run (a layout or image type change).
+  button()[0].click();
+  h.run();
+  assert.equal(h.selected(key), set(items[0]));
+  // The reader changes to a one-viewport layout, which keeps the image shown: its mark and Switch stay with it.
+  const one = Object.assign(new Element('relative group/pane'), { rect: { top: 0, left: 0 } }), oneView = new Element();
+  oneView.setAttribute('data-viewport-uid', 'one'); one.append(oneView);
+  panes.forEach(p => p.remove()); h.body.append(one);
+  h.layout([{ viewportId: 'one', x: 0, y: 0, displaySetInstanceUIDs: [set(items[0])] }]);
+  assert.equal(paneText(one), 'Current · R CC · Conventional · 3장 중 2장 · 재촬영 | Switch');
+  one.descendants().find(e => e.tagName === 'BUTTON').click();
+  assert.deepEqual(plain(h.grid().get('one').displaySetInstanceUIDs), [set(items[2])], 'the one viewport shows the next image');
+  assert.equal(paneText(one), 'Current · R CC · Conventional · 3장 중 3장 · 재촬영 | Switch');
+  h.extension.onModeExit();
+  assert.equal(paneText(h.body), '', 'mode exit removes the label and its control');
+});
+
+// The reader opens a repeat image where the active stage has no cell for its slot. Its mark and Switch come
+// with it, and Switch changes only that cell.
+async function openElsewhere(h, image, expected) {
+  const { keys, panes, id } = layOut(h);
+  const before = new Map([...h.grid()].map(([k, v]) => [k, v.displaySetInstanceUIDs]));
+  const target = keys.findIndex(k => !h.selected(k));
+  h.activate(id(target)); h.doubleClick(image);
+  assert.equal(paneText(panes[target]), expected(1) + ' | Switch', 'the opened repeat image keeps its slot mark and Switch');
+  panes[target].descendants().find(e => e.tagName === 'BUTTON').click();
+  assert.equal(paneText(panes[target]), expected(2) + ' | Switch');
+  assert.notDeepEqual(plain(h.grid().get(id(target)).displaySetInstanceUIDs), [image], 'Switch shows the other image in that cell');
+  for (const [k, uids] of before) if (k !== id(target)) assert.deepEqual(h.grid().get(k).displaySetInstanceUIDs, uids, 'no other cell changes');
+}
+
+test('a marked Prior repeat opened in the Current layout keeps its mark and Switch', async () => {
+  const current = fixture('siemens-2d-12-1'), prior = exposed(['siemens-2d-12-1', 'siemens-2d-12-2'].map(fixture), ['20241030101000', '20241030102000']);
+  for (const d of prior) {
+    d['0020000D'] = { ...d['0020000D'], Value: ['1.2.826.0.1.3680043.10.7.99'] };
+    d['00080018'].Value[0] += '.9'; d['0020000E'].Value[0] += '.9';
+  }
+  const h = await mount([current, ...prior], { opened: [current['0020000D'].Value[0], '1.2.826.0.1.3680043.10.7.99'] });
+  h.run();
+  const set = d => h.displaySets.find(s => s.images[0].SOPInstanceUID === d['00080018'].Value[0]).displaySetInstanceUID;
+  assert.equal(h.selected('prior|R|CC|conventional'), set(prior[1]), 'the Compare layout hangs the latest Prior exposure');
+  assert.ok(h.preferences().set({ layout: 'current', kind: null }));
+  assert.match(h.protocol().stages[h.state().stageIndex].id, /^current-/);
+  await openElsewhere(h, set(prior[1]), k => 'Prior · R CC · Conventional · 2장 중 ' + k + '장 · 재촬영');
+  h.extension.onModeExit();
+});
+
+test('a Conventional repeat opened in the DBT stage keeps its mark and Switch', async () => {
+  const items = exposed(['siemens-2d-12-1', 'siemens-2d-12-2'].map(fixture), ['20261030102000', '20261030101000']);
+  items[1]['0020000D'] = structuredClone(items[0]['0020000D']);
+  const h = await mount(items);
+  h.run();
+  const set = d => h.displaySets.find(s => s.images[0].SOPInstanceUID === d['00080018'].Value[0]).displaySetInstanceUID;
+  assert.ok(h.preferences().set({ layout: 'current', kind: 'dbt' }));
+  assert.equal(h.protocol().stages[h.state().stageIndex].id, 'current-dbt');
+  await openElsewhere(h, set(items[0]), k => 'Current · R CC · Conventional · 2장 중 ' + k + '장 · 재촬영');
+  h.extension.onModeExit();
+});
+
+// A retake minutes later at a site that states no UTC offset, both images numbered alike: the study's images
+// share one clock, so the later exposure is hung and marked, not left as "Select Image".
+test('a repeat exposure without any UTC offset hangs the later image of one study', async () => {
+  const items = ['siemens-2d-12-1', 'siemens-2d-12-2'].map(fixture);
+  items[1]['0020000D'] = structuredClone(items[0]['0020000D']);
+  ['20261030100000', '20261030103000'].forEach((t, i) => {
+    items[i]['0008002A'] = { vr: 'DT', Value: [t] }; delete items[i]['00080201']; items[i]['00200013'] = { vr: 'IS', Value: [1] };
+  });
+  const h = await mount(items);
+  h.run();
+  const set = d => h.displaySets.find(s => s.images[0].SOPInstanceUID === d['00080018'].Value[0]).displaySetInstanceUID;
+  const key = 'current|R|CC|conventional';
+  assert.equal(h.selected(key), set(items[1]), 'the exposure 30 minutes later fills the slot');
+  const { keys, panes } = layOut(h);
+  assert.equal(paneText(panes[keys.indexOf(key)]), 'Current · R CC · Conventional · 2장 중 1장 · 재촬영 | Switch');
   h.extension.onModeExit();
 });
 
