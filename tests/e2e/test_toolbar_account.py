@@ -23,8 +23,11 @@ class ToolbarAccountE2E(ToolbarPreferencesE2E):
   other=self.login();g=self.workspace(other,a);self.tools(g);g.get_by_label('Job Title',exact=True).fill('KEEP TOOLBAR ROAM JOB');other.locator('#findings').fill('KEEP TOOLBAR ROAM REPORT');before=self.snapshot(g);self.account_ready(other);self.assertEqual(self.section(g),BASE)
   other.locator('#appearance-account-load').click();self.loaded(other);self.assertEqual(self.section(g),wanted);self.assertEqual(self.snapshot(g),before);expect(other.locator('#findings')).to_have_value('KEEP TOOLBAR ROAM REPORT');expect(g.get_by_label('Job Title',exact=True)).to_have_value('KEEP TOOLBAR ROAM JOB');self.assertEqual(self.jobs(a),[])
   other.locator('#reading-appearance-close').click()
-  with other.context.expect_page() as opened:other.get_by_role('button',name='Open Viewer Window',exact=True).click()
-  v=opened.value;canvas_ready(v,2);self.ready(v);self.assertEqual(self.section(v),wanted)
+  # U2 (f1b851a): the standalone "Open Viewer Window" carries the shell's own Frequent Tools bar from the account's
+  # viewerSettings (test_viewer_ux_shell 03), not this section. The order restored here belongs to this browser's embedded
+  # viewer, so the next workspace window opened in it starts with that order and the open one keeps its work.
+  later=other.context.new_page();later.goto(other.url);v=self.workspace(later,a);canvas_ready(v,2);self.ready(v);self.assertEqual(self.section(v),wanted)
+  self.assertEqual(self.snapshot(g),before);expect(other.locator('#findings')).to_have_value('KEEP TOOLBAR ROAM REPORT');expect(g.get_by_label('Job Title',exact=True)).to_have_value('KEEP TOOLBAR ROAM JOB')
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);self.settings(other);other.screenshot(path=str(folder/'toolbar-account.png'))
 
  def test_account_02_late_load_aba_and_save_snapshot(self):
@@ -58,8 +61,9 @@ class ToolbarAccountE2E(ToolbarPreferencesE2E):
 
  def test_account_05_other_window_invalidates_late_load_without_live_change(self):
   a,b=self.pair();p=self.login();f=self.customized(p,a);wanted=self.section(f);p.locator('#reading-appearance-close').click()
-  with p.context.expect_page() as opened:p.get_by_role('button',name='Open Viewer Window',exact=True).click()
-  v=opened.value;canvas_ready(v,2);self.ready(v);self.assertEqual(self.section(v),wanted);self.account_ready(p)
+  # The other window is a second workspace of this browser (U2 moved the standalone window's toolbar to the shell, as in
+  # test_toolbar_preferences 02); its edit reaches this page through the shared storage key only.
+  other=p.context.new_page();other.goto(p.url);v=self.workspace(other,a);canvas_ready(v,2);self.ready(v);self.assertEqual(self.section(v),wanted);self.account_ready(p)
   pending=[];p.route('**/api/reading-appearance',lambda route:pending.append(route));p.locator('#appearance-account-load').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정 확인 중…')
   self.editor(v);v.locator('#kin-native-toolbar-default').click();self.applied(v);expect(p.locator('#reading-toolbar-status')).to_contain_text('다른 창');self.assertEqual(self.section(f),wanted);self.assertEqual(self.section(v),BASE);self.assertEqual(len(pending),1)
   pending.pop().fulfill(response=document_request(p, "GET", self.stack.api+'/reading-appearance'));expect(p.locator('#appearance-account-status')).to_contain_text('현재 설정이 바뀌어 적용하지 않았습니다');self.assertEqual(self.section(f),wanted)
