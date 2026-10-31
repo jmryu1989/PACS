@@ -81,7 +81,13 @@ export class ReaderAssignmentService {
       ORDER BY at DESC, id DESC LIMIT 20`;
     return {owner:[c.institution,c.sub],studyUid:s.uid,revision:row?.revision??0,reader:row?.readerSub?{sub:row.readerSub,actor:row.readerActor,name:row.readerName}:null,canManage:this.manager(c),blocked:this.blocked(s),history:history.map((h:any)=>({at:h.at,actor:h.actor,detail:JSON.parse(h.detail)}))};
   }
-  async read(uid:string,c:Caller,transaction?:Prisma.TransactionClient){this.member(c);await this.studyAccess.prepare(c,[uid]);return this.run(c,async tx=>this.result(tx,await this.study(tx,uid,c,'share'),c),transaction);}
+  /** `replayed`: the request ID of a write the clinical receipt answered. It is still the outcome only while the row's
+   * last request is that one; the same rule write() applies to a replay that reaches it. */
+  async read(uid:string,c:Caller,transaction?:Prisma.TransactionClient,replayed:string|null=null){this.member(c);await this.studyAccess.prepare(c,[uid]);return this.run(c,async tx=>{
+    const s=await this.study(tx,uid,c,'share');
+    if(replayed!==null&&(await tx.readerAssignment.findUnique({where:key(uid,c.institution!)}))?.lastRequest!==replayed.toLowerCase())throw conflict();
+    return this.result(tx,s,c);
+  },transaction);}
   async write(uid:string,c:Caller,b:any,transaction?:Prisma.TransactionClient){
     this.member(c);
     if(!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).sort().join()!=='expectedOwner,readerSub,requestId,revision'||!Number.isInteger(b.revision)||b.revision<0||b.revision>=2147483647||!uuid(b.requestId)||(b.readerSub!==null&&!uuid(b.readerSub)))throw new BadRequestException('배정 요청 형식을 확인하세요');
