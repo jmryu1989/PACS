@@ -31,7 +31,8 @@ export interface DraftRequestFacts {
   ip: { address: string; source: 'trusted-proxy' | 'request-peer' } | null;
   requestId: string;
 }
-// `ownTargets`: the work records each draft it changes itself; its answer names no draft of the caller to record.
+// `ownTargets`: the work records what it changes and what its answer provides itself (another author's draft, or the
+// report version a discard answer carries); draftTransaction adds no record of the caller's draft.
 type DraftObservation = { facts: DraftRequestFacts; surface: string; action: AccessAction; target?: 'report-version'; ownTargets?: true };
 type RecordDraft = (state: any, value: any, action?: AccessAction,
   source?: { uid: string; version: number } | { author: string; revision: string }) => Promise<void>;
@@ -576,14 +577,18 @@ export class PacsReportDraft {
     const expected = draftExpected(body);
     // 버리기는 초안의 수정(제23조④)이고, 답은 확정본(`state`)을 다시 내준다. 둘 다 같은 commit의 접속기록이다.
     return this.draftTransaction(uid, c, session, expected.epoch, () => this.studyAccess.prepare(c,[uid]),
-      async (tx, state, audit) => {
+      async (tx, state, audit, record) => {
         const row = await this.ownDraft(tx, uid, c, expected.revision);
         // 초안이 없었어도 경계는 올린다 — 이 버리기보다 앞서 보낸 쓰기가 뒤늦게 닿아 초안을 만들지 못하게.
         const cleared = await this.storeDraft(tx, uid, c.actor, row, null);
         await audit(c.actor, 'report.draft.discard', uid, { institution: inst(c) });
         const rep = await tx.report.findUnique({ where: { uid } });
-        return { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, rep, c, cleared) };
-      }, undefined, { facts, surface: 'DELETE studies/:uid/draft', action: 'discard' });
+        const answer = { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, rep, c, cleared) };
+        await record!(state, answer, 'discard');
+        // 답이 내주는 글은 비운 초안이 아니라 확정본의 그 판이다. 예비 판독으로 가려 본문을 싣지 않은 답은 그 판의 열람이 아니다.
+        if (rep && !answer.state.prelimHidden) await record!(state, null, 'provide-prepared', { uid, version: rep.version });
+        return answer;
+      }, undefined, { facts, surface: 'DELETE studies/:uid/draft', action: 'discard', ownTargets: true });
   }
 
   /**

@@ -165,11 +165,11 @@ function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manif
     const facts = [parsed.patientLinkSnapshot, parsed.studyId, parsed.recordId, parsed.versionId];
     if (facts.some(f => f.status === 'not-applicable' && (!NON_RECORD_TARGETS.includes(kind) || f.reason !== 'non-record-target')))
       throw new Error('Patient-bearing record facts cannot be waived');
-    // Native drafts and the approved Source read by a W5 insertion have persisted
-    // study/record/version identities but no patient-link row. Preserve that
+    // Native drafts, the approved Source read by a W5 insertion and the stored report a commit or discard answers have
+    // persisted study/record/version identities but no patient-link row. Preserve that
     // unknown fact on these existing boundaries; never invent a patient link.
     const nativeRecord = kind === 'private-draft' ||
-      (['PUT studies/:uid/report', 'POST studies/:uid/report/commit'].includes(surface) && kind === 'report-version');
+      (['PUT studies/:uid/report', 'POST studies/:uid/report/commit', 'DELETE studies/:uid/draft'].includes(surface) && kind === 'report-version');
     // Request intake and hold administration disclose request facts even when an original
     // cannot yet be packaged. Preserve its patient/record; do not invent a study or version.
     const requestFacts = kind === 'disclosure' && ['POST emr-audit/requests', 'POST emr-audit/issuances',
