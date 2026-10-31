@@ -413,90 +413,111 @@ test('MG04-allow current and prior are paired per side, view and kind, and a mis
   assert.equal(alone.prior,null);for(const [lat,view] of views)assert.equal(slot(alone,'prior',lat,view,'conventional').status,'missing');
 });
 
-// A repeat exposure (e.g. a retaken R CC) stays an explicit choice that lists every image; its order names the
-// latest only when exposure time, then Instance Number, tells one image apart (commander decision 2026-10-31).
+// A repeat exposure (e.g. a retaken R CC) stays an explicit choice that lists every image. Its order is decided for
+// the slot's images as one set or not at all (commander decision 2026-10-31, round 7): one time field all of them
+// carry, at whole-second precision, with an offset on all or none; otherwise, only when none carries a time, Instance
+// Number. Anything less leaves the cell "Select Image" with no latest, as before repeats were ordered.
 test('MG04-allow a repeat exposure is ordered latest first by exposure time then Instance Number, and an undecidable order names none',()=>{
   const cur='1.2.826.0.1.3680043.10.7.1';
   const left=mg({study:cur,lat:'L',view:'CC'});
-  const order=images=>{
+  const sops=images=>{
     const s=slot(model.plan(manifest(study(cur,'current',[left,...images]))),'current','R','CC','conventional');
     assert.equal(s.status,'ambiguous');assert.equal(s.object,undefined,'the slot object is never set for a repeat');
     assert.deepEqual(s.candidates.map(o=>o.sop).sort(),images.map(i=>i['00080018'].Value[0]).sort(),'every image stays listed');
-    return s.newestFirst&&s.newestFirst.map(o=>images.findIndex(i=>i['00080018'].Value[0]===o.sop));
+    return s.newestFirst&&s.newestFirst.map(o=>o.sop);
+  };
+  const perms=a=>a.length<2?[a]:a.flatMap((x,i)=>perms([...a.slice(0,i),...a.slice(i+1)]).map(p=>[x,...p]));
+  // Every case is run in every stored order: the result is a property of the set.
+  const order=images=>{
+    const first=sops(images);
+    for(const p of perms(images))assert.deepEqual(sops(p),first,'the same result in every stored order');
+    return first&&first.map(sop=>images.findIndex(i=>i['00080018'].Value[0]===sop));
   };
   const at=(number,tags)=>mg({study:cur,lat:'R',view:'CC',number,extra:Object.fromEntries(Object.entries(tags).map(([t,x])=>[t,v({'0008002A':'DT','00080201':'SH'}[t]||(t.endsWith('22')||t.endsWith('23')?'DA':'TM'),x)]))});
-  // Images that state their UTC offset (here Timezone Offset From UTC); without one see the cases further down.
   const kst=(number,tags)=>at(number,{'00080201':'+0900',...tags});
+  // One time field for the whole set: acquisition, else content.
   assert.deepEqual(order([kst(2,{'0008002A':'20261030101000'}),kst(1,{'0008002A':'20261030102000'})]),[1,0],'Acquisition DateTime before Instance Number');
   assert.deepEqual(order([kst(1,{'00080022':'20261030','00080032':'102000'}),kst(2,{'00080022':'20261030','00080032':'101000'})]),[0,1],'Acquisition Date + Time');
+  assert.deepEqual(order([kst(1,{'0008002A':'20261030103000'}),kst(2,{'00080022':'20261030','00080032':'101000'})]),[0,1],
+    'Acquisition DateTime is compared with Acquisition Date + Time');
   assert.deepEqual(order([kst(1,{'00080023':'20261031','00080033':'090000'}),kst(2,{'00080023':'20261030','00080033':'235959'})]),[0,1],'Content Date + Time, across midnight');
   assert.deepEqual(order([kst(1,{'00080022':'20261030','00080032':'101000.5'}),kst(2,{'00080022':'20261030','00080032':'101000.25'})]),[0,1],'fractional seconds');
   assert.deepEqual(order([kst(9,{'0008002A':'20261030102000','00080023':'20261030','00080033':'101000'}),kst(1,{'00080023':'20261030','00080033':'103000'})]),[1,0],
-    'a time only one image carries is not compared with another source; the source both carry decides');
-  assert.deepEqual(order([kst(1,{'0008002A':'20261030101000'}),kst(2,{'0008002A':'20261030101000'})]),[1,0],'equal times: Instance Number');
-  assert.deepEqual(order([at(3,{}),at(7,{}),at(5,{})]),[1,2,0],'no time: Instance Number orders all three');
+    'an acquisition time only one image carries is not used; the content time every image carries decides');
+  assert.deepEqual(order([kst(1,{'0008002A':'20261030103000','00080022':'20261030','00080032':'103000'}),kst(2,{'0008002A':'20261030102000'})]),[0,1],
+    'Acquisition DateTime and Date + Time naming one moment are one acquisition time');
+  assert.deepEqual(order([kst(1,{'0008002A':'20261030103000','00080022':'20261030','00080032':'101000','00080023':'20261030','00080033':'100000'}),
+    kst(2,{'0008002A':'20261030102000','00080023':'20261030','00080033':'100500'})]),[1,0],
+    'an image whose two acquisition encodings disagree has no acquisition time: the content time every image carries decides');
+  // Offsets: stated on every image (compared in UTC) or on none (one local clock).
   assert.deepEqual(order([at(2,{'0008002A':'20261030101000+0900'}),at(1,{'0008002A':'20261030100000+0000'})]),[1,0],
     'UTC offsets are applied: 10:10+0900 is 01:10 UTC, before 10:00+0000');
   assert.deepEqual(order([at(2,{'00080022':'20261030','00080032':'101000','00080201':'+0900'}),at(1,{'00080022':'20261030','00080032':'100000','00080201':'+0000'})]),[1,0],
     'Timezone Offset From UTC applies to Date + Time');
   assert.deepEqual(order([at(2,{'0008002A':'20261030101000','00080201':'+0900'}),at(1,{'0008002A':'20261030100000+0000'})]),[1,0],
     'Timezone Offset From UTC applies to a DateTime without its own offset');
-  assert.equal(order([at(1,{'0008002A':'20261030101000+0900'}),at(1,{'0008002A':'20261030100000'})]),null,
-    'an offset only one image states leaves hours of doubt: no latest image');
-  assert.deepEqual(order([at(2,{'0008002A':'20261030101000+0900'}),at(1,{'0008002A':'20261031101000'})]),[1,0],
-    'a day apart is later under any offset');
-  // Images of one study where none states an offset share its local clock: only precision widens.
-  assert.deepEqual(order([at(2,{'0008002A':'20261030101000'}),at(1,{'0008002A':'20261030102000'})]),[1,0],
-    'two times of one session without an offset are read on one clock: time before Instance Number');
-  assert.deepEqual(order([at(1,{'0008002A':'20261030103000'}),at(1,{'0008002A':'20261030100000'})]),[0,1],
-    'a repeat 30 minutes later without an offset, with one Instance Number, is the latest image');
-  assert.deepEqual(order([at(1,{'00080022':'20261030','00080032':'100000'}),at(1,{'00080022':'20261030','00080032':'103000'})]),[1,0],
-    'Acquisition Date + Time without an offset, on one clock');
-  assert.deepEqual(order([at(1,{'00080023':'20261030','00080033':'101000'}),at(1,{'00080023':'20261030','00080033':'100500'})]),[0,1],
-    'Content Date + Time without an offset, on one clock');
-  assert.equal(order([at(1,{'0008002A':'2026103010'}),at(1,{'0008002A':'20261030103000'})]),null,
-    'without an offset an hour-precision time may still be later within that hour: no latest image');
-  assert.deepEqual(order([at(1,{'0008002A':'2026103011'}),at(1,{'0008002A':'20261030103000'})]),[0,1],
-    'without an offset a whole hour later is later');
-  assert.deepEqual(order([at(2,{'0008002A':'20261030101000'}),at(1,{'0008002A':'20261101101000'})]),[1,0],
-    'without an offset, days apart is later');
-  // Once one image of the two states an offset, a time without one may be at any allowed offset.
-  assert.equal(order([at(1,{'0008002A':'20261030103000'}),at(1,{'0008002A':'20261030100000','00080201':'+0900'})]),null,
-    'one stated and one unknown offset, 30 minutes apart: hours of doubt, no latest image');
-  assert.deepEqual(order([at(1,{'0008002A':'20261030103000'}),at(2,{'0008002A':'20261030100000+0900'})]),[1,0],
-    'one stated and one unknown offset, 30 minutes apart: Instance Number decides');
-  assert.deepEqual(order([at(1,{'0008002A':'20261101103000'}),at(2,{'0008002A':'20261030100000+0900'})]),[0,1],
-    'one stated and one unknown offset, more than the widest offset span apart: time decides');
-  assert.deepEqual(order([at(1,{'0008002A':'202610+0000','00080022':'20261030','00080032':'110000'}),at(2,{'0008002A':'20261028100000+0000'})]),[0,1],
-    'an image whose acquisition DateTime has an offset and Date + Time has none is read from both: the 30 Oct exposure is later than 28 Oct under any offset');
-  assert.deepEqual(order([kst(1,{'0008002A':'20261030103000+0000','00080022':'20261030','00080032':'103000'}),at(2,{'0008002A':'20261030100000+0000'})]),[1,0],
-    'acquisition encodings of one image that exclude each other give no time: Instance Number decides');
-  // DT/TM precision: an omitted component is any value of it, never zero.
-  assert.equal(order([kst(1,{'0008002A':'2026103010'}),kst(1,{'0008002A':'20261030103000'})]),null,'an hour-precision time may be later within that hour: no latest image');
-  assert.deepEqual(order([kst(1,{'0008002A':'2026103011'}),kst(1,{'0008002A':'20261030103000'})]),[0,1],'a whole hour later is later');
-  assert.deepEqual(order([kst(1,{'0008002A':'2026103010','00080023':'20261030','00080033':'101000'}),kst(1,{'0008002A':'20261030103000','00080023':'20261030','00080033':'103000'})]),[1,0],
-    'an acquisition time that cannot decide leaves the content time to decide');
-  assert.deepEqual(order([kst(1,{'00080022':'20261030','00080023':'20261030','00080033':'103000'}),kst(1,{'00080022':'20261030','00080032':'101000','00080023':'20261030','00080033':'101000'})]),[0,1],
-    'an Acquisition Date without time is the whole day, not midnight, and the content time decides');
-  // Acquisition DateTime and Acquisition Date + Time are one source.
-  assert.deepEqual(order([kst(1,{'0008002A':'20261030103000'}),kst(2,{'00080022':'20261030','00080032':'101000'})]),[0,1],
-    'Acquisition DateTime is compared with Acquisition Date + Time');
-  assert.deepEqual(order([kst(1,{'0008002A':'2026103010','00080022':'20261030','00080032':'1040'}),kst(2,{'0008002A':'20261030102000'})]),[0,1],
-    'both encodings of one image are read together');
-  // Instance Number is required only of the images it has to tell apart.
-  const older=kst(1,{'0008002A':'20261030100000'});delete older['00200013'];
-  assert.deepEqual(order([older,kst(1,{'0008002A':'20261030103000'}),kst(2,{'0008002A':'20261030103000'})]),[2,1,0],
-    'an older image without Instance Number does not block the tie-break between the latest two');
-  // An impossible date, time or offset is no evidence of recency.
-  for(const bad of ['20261330100000','20260230100000','20261030240000','20261030106000','20261030100000+1500','2026103010.5'])
-    assert.equal(order([kst(1,{'0008002A':bad}),kst(1,{'0008002A':'20261030103000'})]),null,bad+' is not a time');
-  assert.equal(order([kst(1,{'00080022':'20261030','00080032':'10:00:00'}),kst(1,{'00080022':'20261030','00080032':'103000'})]),null,'a malformed time is not a time');
+  assert.deepEqual(order([at(1,{'0008002A':'20261030100000'}),at(1,{'0008002A':'20261030103000'})]),[1,0],
+    'no offset on either image, a repeat 30 minutes later with the same Instance Number: the later one is the latest');
+  assert.deepEqual(order([at(2,{'0008002A':'20261030101000'}),at(1,{'0008002A':'20261030102000'})]),[1,0],'no offset: time before Instance Number');
+  assert.deepEqual(order([at(1,{'00080022':'20261030','00080032':'100000'}),at(1,{'00080022':'20261030','00080032':'103000'})]),[1,0],'no offset: Acquisition Date + Time');
+  assert.deepEqual(order([at(1,{'00080023':'20261030','00080033':'101000'}),at(1,{'00080023':'20261030','00080033':'100500'})]),[0,1],'no offset: Content Date + Time');
+  assert.deepEqual(order([at(2,{'0008002A':'20261030101000'}),at(1,{'0008002A':'20261101101000'})]),[1,0],'no offset: days apart');
+  // Deliberately null since round 7 (a03da17 named a latest for each): a mixed offset.
+  assert.equal(order([at(1,{'0008002A':'20261030101000+0900'}),at(1,{'0008002A':'20261030100000'})]),null,'an offset only one image states: no latest image');
+  assert.equal(order([at(1,{'0008002A':'20261030103000'}),at(2,{'0008002A':'20261030100000+0900'})]),null,
+    'a mixed offset is not resolved by Instance Number (a03da17: [1,0])');
+  assert.equal(order([at(1,{'0008002A':'20261101103000'}),at(2,{'0008002A':'20261030100000+0900'})]),null,
+    'a mixed offset is not resolved by days of difference (a03da17: [0,1])');
+  assert.equal(order([at(2,{'0008002A':'20261030101000+0900'}),at(1,{'0008002A':'20261031101000'})]),null,'a mixed offset a day apart (a03da17: [1,0])');
+  assert.equal(order([kst(1,{'0008002A':'20261030103000+0000','00080022':'20261030','00080032':'103000'}),at(2,{'0008002A':'20261030100000+0000'})]),null,
+    'acquisition encodings of one image that disagree on the offset: that image has no acquisition time, the other does (a03da17: [1,0] by Instance Number)');
+  // GPT's round-2 reproduction: A's DateTime is month precision with an offset, its Date + Time has none.
+  assert.equal(order([at(1,{'0008002A':'202610+0000','00080022':'20261030','00080032':'110000'}),at(2,{'0008002A':'20261028100000+0000'})]),null,
+    'GPT round 2: A has no agreeing acquisition time, B has one (a03da17: [0,1])');
+  // GPT's A, B, C, D (review of a03da17): A and B without an offset, C and D at +0000.
+  const gpt=[at(3,{'0008002A':'20261030100000'}),at(1,{'0008002A':'20261030110000'}),at(2,{'0008002A':'20261030103000+0000'}),at(4,{'0008002A':'20261102000000+0000'})];
+  assert.equal(order(gpt),null,'GPT A, B, C, D: a mixed offset (a03da17: [3,0,1,2])');
+  assert.equal(order(gpt.slice(0,3)),null,'GPT A, B, C: a mixed offset (a03da17: null)');
+  // Precision below whole seconds. Deliberately null since round 7 where a03da17 named a latest.
+  assert.equal(order([kst(1,{'0008002A':'2026103010'}),kst(1,{'0008002A':'20261030103000'})]),null,'hour precision: no latest image');
+  assert.equal(order([at(1,{'0008002A':'2026103010'}),at(1,{'0008002A':'20261030103000'})]),null,'hour precision without an offset: no latest image');
+  assert.equal(order([kst(1,{'0008002A':'2026103011'}),kst(1,{'0008002A':'20261030103000'})]),null,'hour precision a whole hour later (a03da17: [0,1])');
+  assert.equal(order([at(1,{'0008002A':'2026103011'}),at(1,{'0008002A':'20261030103000'})]),null,'hour precision without an offset a whole hour later (a03da17: [0,1])');
+  assert.equal(order([kst(1,{'0008002A':'202610301030'}),kst(2,{'0008002A':'20261030110000'})]),null,'minute precision: no latest image');
+  assert.equal(order([kst(1,{'0008002A':'2026103010','00080023':'20261030','00080033':'101000'}),kst(1,{'0008002A':'20261030103000','00080023':'20261030','00080033':'103000'})]),null,
+    'an hour-precision acquisition time is not passed over for the content time (a03da17: [1,0])');
+  assert.equal(order([kst(1,{'00080022':'20261030','00080023':'20261030','00080033':'103000'}),kst(1,{'00080022':'20261030','00080032':'101000','00080023':'20261030','00080033':'101000'})]),null,
+    'an Acquisition Date without a time is an acquisition time below second precision (a03da17: [0,1] by content time)');
+  assert.equal(order([kst(1,{'0008002A':'2026103010','00080022':'20261030','00080032':'1040'}),kst(2,{'0008002A':'20261030102000'})]),null,
+    'two partial acquisition encodings of one image are not combined (a03da17: [0,1])');
+  // Some images with a time, some without, or no common field.
+  assert.equal(order([kst(1,{'0008002A':'20261030100000'}),at(2,{})]),null,'one image without any time: Instance Number does not decide');
+  const xbc=n=>[kst(n[0],{'0008002A':'20261030103000'}),kst(n[1],{'0008002A':'20261030090000','00080023':'20261030','00080033':'120000'}),
+    kst(n[2],{'00080023':'20261030','00080033':'110000'})];
+  assert.equal(order(xbc([null,null,null])),null,'X, B, C: no time field every image carries');
+  assert.equal(order(xbc([1,2,3])),null,'X, B, C with Instance Numbers: still no latest image');
+  assert.deepEqual(order([kst(null,{'0008002A':'20261030100000','00080023':'20261030','00080033':'100000'}),
+    kst(null,{'0008002A':'20261030090000','00080023':'20261030','00080033':'120000'}),kst(null,{'00080023':'20261030','00080033':'110000'})]),[1,2,0],
+    'round-5 time cycle: content is the one field every image carries, and orders them (a03da17: null)');
+  // Equal times: Instance Number, only if present and distinct among the equal ones.
+  assert.deepEqual(order([kst(1,{'0008002A':'20261030101000'}),kst(2,{'0008002A':'20261030101000'})]),[1,0],'equal times: Instance Number');
   assert.deepEqual(order([kst(7,{'0008002A':'20261030101000'}),kst(1,{'0008002A':'20261030102000'}),kst(5,{'0008002A':'20261030102000'})]),[2,1,0],
-    'Instance Number breaks a tie only among the latest time');
-  assert.equal(order([at(1,{}),at(1,{})]),null,'no time and one Instance Number: no latest image');
+    'Instance Number breaks a tie only among the equal times');
+  assert.deepEqual(order([kst(null,{'0008002A':'20261030100000'}),kst(1,{'0008002A':'20261030103000'}),kst(2,{'0008002A':'20261030103000'})]),[2,1,0],
+    'an image of another time without Instance Number does not block the tie-break');
   assert.equal(order([kst(1,{'0008002A':'20261030101000'}),kst(1,{'0008002A':'20261030101000'})]),null,'same time and Instance Number: no latest image');
-  const unnumbered=[at(1,{}),at(2,{})];delete unnumbered[0]['00200013'];
-  assert.equal(order(unnumbered),null,'no time and an Instance Number missing: no latest image');
+  assert.equal(order([kst(null,{'0008002A':'20261030101000'}),kst(1,{'0008002A':'20261030101000'})]),null,'same time and an Instance Number missing: no latest image');
+  assert.equal(order([kst(2,{'0008002A':'20261030110000'}),kst(1,{'0008002A':'20261030101000'}),kst(1,{'0008002A':'20261030101000'})]),null,
+    'an unresolved tie below the latest still leaves no order');
+  // No time on any image: Instance Number, if present and distinct.
+  assert.deepEqual(order([at(3,{}),at(7,{}),at(5,{})]),[1,2,0],'no time: Instance Number orders all three');
+  assert.equal(order([at(1,{}),at(1,{})]),null,'no time and one Instance Number: no latest image');
+  assert.equal(order([at(null,{}),at(2,{})]),null,'no time and an Instance Number missing: no latest image');
+  // An impossible date, time or offset is no time; a leap second is not read either.
+  for(const bad of ['20261330100000','20260230100000','20261030240000','20261030106000','20261030100060','20261030100000+1500','2026103010.5'])
+    assert.equal(order([kst(1,{'0008002A':bad}),kst(2,{'0008002A':'20261030103000'})]),null,bad+' is not a time');
+  assert.equal(order([kst(1,{'00080022':'20261030','00080032':'10:00:00'}),kst(2,{'00080022':'20261030','00080032':'103000'})]),null,'a malformed time is not a time');
+  assert.equal(order([at(1,{'0008002A':'20261030100000','00080201':'0900'}),at(2,{'0008002A':'20261030103000','00080201':'+0900'})]),null,'a malformed Timezone Offset From UTC is not an offset');
   const ready=slot(model.plan(manifest(study(cur,'current',[left,at(1,{'0008002A':'20261030101000'})]))),'current','R','CC','conventional');
   assert.equal(ready.status,'ready');assert.equal(ready.newestFirst,undefined,'a single image is a ready slot, unchanged');
 });

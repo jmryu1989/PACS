@@ -23,7 +23,7 @@
    "risk": "RISK-MG-WRONG-STUDY"
   },
   "REQ-MG-04-REPEAT": {
-   "title": "repeat exposure in one slot: the latest (acquisition time, then content time, each read as the span its precision and offset allow: two images without any stated offset on the study's one local clock, a missing offset beside a stated one being any allowed one, then Instance Number) is shown only marked as one of N with a switch that stays with the image across layouts and image types; an order that cannot be established stays an explicit choice",
+   "title": "repeat exposure in one slot: the latest is shown only marked as one of N with a switch that stays with the image across layouts and image types; the slot's images are ordered as one set (acquisition time if every image carries it, else content time if every image does, each to whole seconds with an offset stated on all or none, equal times by present and distinct Instance Numbers; Instance Number alone only when no image carries any time); any other set stays an explicit choice with no latest",
    "risk": "RISK-MG-REPEAT-HIDDEN"
   },
   "REQ-MG-05": {
