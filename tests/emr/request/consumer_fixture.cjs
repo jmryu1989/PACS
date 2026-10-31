@@ -12,6 +12,8 @@ const ROUTES = {
   putReport: {caller: 2, facts: 4, method: 'PUT', route: 'studies/:uid/report'},
   readDraft: {caller: 1, facts: 2, method: 'GET', route: 'studies/:uid/draft'},
   commitReport: {caller: 2, facts: 4, method: 'POST', route: 'studies/:uid/report/commit'},
+  discardDraft: {caller: 2, facts: 4, method: 'DELETE', route: 'studies/:uid/draft'},
+  forceDiscardDrafts: {caller: 2, facts: 4, method: 'DELETE', route: 'studies/:uid/draft/force'},
 };
 
 function withDraftRequestContext(service, ledger) {
