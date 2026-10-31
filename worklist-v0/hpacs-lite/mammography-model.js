@@ -624,7 +624,7 @@
   // One image's acquisition and content time, each {at: microseconds on its clock, offset: minutes or
   // null when none is stated}; null when the image does not carry it and false when it carries a value
   // that is not a real date and time to whole seconds. Acquisition DateTime and Acquisition Date + Time
-  // that do not name one moment are no acquisition time.
+  // that do not name one moment are carried but unusable.
   function exposure(item){
     const zoneText=text(item,'00080201'),zone=utcOffset(zoneText);
     const read=value=>{
@@ -637,18 +637,19 @@
     };
     const pair=(date,time)=>!date&&!time?null:/^\d{8}$/.test(date)&&/^\d{6}(?:\.\d{1,6})?$/.test(time)&&read(date+time);
     const dt=text(item,'0008002A'),a=dt?read(dt):null,b=pair(text(item,'00080022'),text(item,'00080032'));
-    const acquired=a===null?b:b===null?a:a&&b&&a.at===b.at&&a.offset===b.offset?a:null;
+    const acquired=a===null?b:b===null?a:a&&b&&a.at===b.at&&a.offset===b.offset?a:false;
     const carries=['0008002A','00080022','00080032','00080023','00080033'].some(tag=>text(item,tag));
     return {acquired,content:pair(text(item,'00080023'),text(item,'00080033')),carries};
   }
   // A repeat exposure of one slot, newest first, ordered as a whole set or not at all (null: the slot
-  // stays an explicit choice). The time is acquisition if every image carries it, else content if every
-  // image does; every value must then be a real date and time to whole seconds, with an offset stated on
-  // all images (compared in UTC) or on none (one study's local clock). Equal times, and images that carry
-  // no time at all, are told apart only by present and distinct Instance Numbers.
+  // stays an explicit choice). The time is acquisition if any image carries it, else content: content
+  // time can be a later reprocessing, so it never stands in for an acquisition time another image has.
+  // Every image must then carry that time as a real date and time to whole seconds, with an offset stated
+  // on all images (compared in UTC) or on none (one study's local clock). Equal times, and images that
+  // carry no time at all, are told apart only by present and distinct Instance Numbers.
   function newestFirst(found){
     const all=found.map(o=>({o,number:o.instanceNumber,...exposure(o.item)}));
-    const field=['acquired','content'].find(f=>all.every(k=>k[f]!==null));
+    const field=['acquired','content'].find(f=>all.some(k=>k[f]!==null));
     const times=field?all.map(k=>k[field]):[];
     if(field?times.some(t=>!t)||new Set(times.map(t=>t.offset===null)).size>1:all.some(k=>k.carries))return null;
     const time=k=>field?k[field].at-(k[field].offset||0)*60e6:0;

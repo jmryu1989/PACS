@@ -435,20 +435,20 @@ test('MG04-allow a repeat exposure is ordered latest first by exposure time then
   };
   const at=(number,tags)=>mg({study:cur,lat:'R',view:'CC',number,extra:Object.fromEntries(Object.entries(tags).map(([t,x])=>[t,v({'0008002A':'DT','00080201':'SH'}[t]||(t.endsWith('22')||t.endsWith('23')?'DA':'TM'),x)]))});
   const kst=(number,tags)=>at(number,{'00080201':'+0900',...tags});
-  // One time field for the whole set: acquisition, else content.
+  // One time field for the whole set: acquisition if any image has it, else content.
   assert.deepEqual(order([kst(2,{'0008002A':'20261030101000'}),kst(1,{'0008002A':'20261030102000'})]),[1,0],'Acquisition DateTime before Instance Number');
   assert.deepEqual(order([kst(1,{'00080022':'20261030','00080032':'102000'}),kst(2,{'00080022':'20261030','00080032':'101000'})]),[0,1],'Acquisition Date + Time');
   assert.deepEqual(order([kst(1,{'0008002A':'20261030103000'}),kst(2,{'00080022':'20261030','00080032':'101000'})]),[0,1],
     'Acquisition DateTime is compared with Acquisition Date + Time');
   assert.deepEqual(order([kst(1,{'00080023':'20261031','00080033':'090000'}),kst(2,{'00080023':'20261030','00080033':'235959'})]),[0,1],'Content Date + Time, across midnight');
   assert.deepEqual(order([kst(1,{'00080022':'20261030','00080032':'101000.5'}),kst(2,{'00080022':'20261030','00080032':'101000.25'})]),[0,1],'fractional seconds');
-  assert.deepEqual(order([kst(9,{'0008002A':'20261030102000','00080023':'20261030','00080033':'101000'}),kst(1,{'00080023':'20261030','00080033':'103000'})]),[1,0],
-    'an acquisition time only one image carries is not used; the content time every image carries decides');
+  assert.equal(order([kst(9,{'0008002A':'20261030102000','00080023':'20261030','00080033':'101000'}),kst(1,{'00080023':'20261030','00080033':'103000'})]),null,
+    'an acquisition time only one image carries: content time does not stand in for it (1aebad0: [1,0])');
   assert.deepEqual(order([kst(1,{'0008002A':'20261030103000','00080022':'20261030','00080032':'103000'}),kst(2,{'0008002A':'20261030102000'})]),[0,1],
     'Acquisition DateTime and Date + Time naming one moment are one acquisition time');
-  assert.deepEqual(order([kst(1,{'0008002A':'20261030103000','00080022':'20261030','00080032':'101000','00080023':'20261030','00080033':'100000'}),
-    kst(2,{'0008002A':'20261030102000','00080023':'20261030','00080033':'100500'})]),[1,0],
-    'an image whose two acquisition encodings disagree has no acquisition time: the content time every image carries decides');
+  assert.equal(order([kst(1,{'0008002A':'20261030103000','00080022':'20261030','00080032':'101000','00080023':'20261030','00080033':'100000'}),
+    kst(2,{'0008002A':'20261030102000','00080023':'20261030','00080033':'100500'})]),null,
+    'an image whose two acquisition encodings disagree: no latest image, content time does not decide (1aebad0: [1,0])');
   // Offsets: stated on every image (compared in UTC) or on none (one local clock).
   assert.deepEqual(order([at(2,{'0008002A':'20261030101000+0900'}),at(1,{'0008002A':'20261030100000+0000'})]),[1,0],
     'UTC offsets are applied: 10:10+0900 is 01:10 UTC, before 10:00+0000');
@@ -496,9 +496,9 @@ test('MG04-allow a repeat exposure is ordered latest first by exposure time then
     kst(n[2],{'00080023':'20261030','00080033':'110000'})];
   assert.equal(order(xbc([null,null,null])),null,'X, B, C: no time field every image carries');
   assert.equal(order(xbc([1,2,3])),null,'X, B, C with Instance Numbers: still no latest image');
-  assert.deepEqual(order([kst(null,{'0008002A':'20261030100000','00080023':'20261030','00080033':'100000'}),
-    kst(null,{'0008002A':'20261030090000','00080023':'20261030','00080033':'120000'}),kst(null,{'00080023':'20261030','00080033':'110000'})]),[1,2,0],
-    'round-5 time cycle: content is the one field every image carries, and orders them (a03da17: null)');
+  assert.equal(order([kst(null,{'0008002A':'20261030100000','00080023':'20261030','00080033':'100000'}),
+    kst(null,{'0008002A':'20261030090000','00080023':'20261030','00080033':'120000'}),kst(null,{'00080023':'20261030','00080033':'110000'})]),null,
+    'round-5 time cycle: B content 12:00 is a reprocessing, not its 09:00 exposure, so no latest image (1aebad0: [1,2,0])');
   // Equal times: Instance Number, only if present and distinct among the equal ones.
   assert.deepEqual(order([kst(1,{'0008002A':'20261030101000'}),kst(2,{'0008002A':'20261030101000'})]),[1,0],'equal times: Instance Number');
   assert.deepEqual(order([kst(7,{'0008002A':'20261030101000'}),kst(1,{'0008002A':'20261030102000'}),kst(5,{'0008002A':'20261030102000'})]),[2,1,0],
