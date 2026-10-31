@@ -270,7 +270,7 @@ const read=async()=>{const s=await p.studyState.findUnique({where:{uid:UID},sele
   kept:d&&Array.isArray(d.citations)?d.citations.map(e=>e.cid):[]};};
 const put=async b=>{const r=await read();return withFacts(facts=>svc.putReport(UID,Object.assign({citationIds:r.kept,structureIds:[]},b,r.pre),CALLER,null,facts));};
 const commit=async b=>{const r=await read();return withFacts(facts=>svc.commitReport(UID,Object.assign({},b,r.pre),CALLER,null,facts),'POST','studies/:uid/report/commit');};
-const force=async()=>{const r=await read();return svc.forceDiscardDrafts(UID,{expectedOwner:OWNER,expectedEpoch:r.epoch},CALLER,null);};
+const force=async()=>{const r=await read();return withFacts(facts=>svc.forceDiscardDrafts(UID,{expectedOwner:OWNER,expectedEpoch:r.epoch},CALLER,null,facts),'DELETE','studies/:uid/draft/force');};
 /**
  * A failing assertion in here used to leave exit 1 and nothing else: ops.run raises on the exit code
  * without echoing the child, so print() never ran and the DRIVER line - the one fact pin A1 asks for -

@@ -27,6 +27,13 @@ const policy = require('/app/dist/clinical-context-policy');
 const { StudyAccessService } = require('/app/dist/study-access.service');
 const { PacsService } = require('/app/dist/pacs.service');
 const { OrthancService } = require('/app/dist/orthanc.service');
+const { LocalReadResponse, localReadEvents } = require('/app/dist/emr-viewing/local-read');
+const { randomUUID } = require('node:crypto');
+/** The request facts the guard captures for this route (synthetic actor; the address the trusted proxy observed). */
+const readFacts = caller => ({ issuer: 'https://synthetic.invalid', subject: caller.sub,
+  actor: { id: randomUUID(), issuer: 'https://synthetic.invalid', subject: caller.sub }, roles: caller.roles, rightsVersion: 1,
+  institution: caller.institution, binding: { method: 'session', sessionRef: 'authref:' + randomUUID() }, requestId: randomUUID(),
+  ingress: { status: 'known', value: { address: '192.0.2.12', source: 'trusted-proxy' } }, surface: 'GET studies/:uid/clinical-context' });
 
 // Contract S7-U4p uxr-trace.json (docs fc7680b): the closed response keys and the forbidden key names (section 3.1, 9.1).
 const RESPONSE_KEYS = ['kind', 'recordId', 'version', 'author', 'recordedAt', 'observedAt', 'state', 'reason', 'sourceLabel',
@@ -249,12 +256,19 @@ function world(studies, { policies = {}, orders = true } = {}) {
   return w;
 }
 
-/** Calls the real controller; answers { status, body } for 200 and for every HTTP error. */
+/**
+ * Calls the real controller; answers { status, body } for 200 and for every HTTP error. A 200 is a recorded read
+ * (의료법 제23조④ 열람): `body` is the selected wire body and `targets` the access-record targets committed with it.
+ */
 async function call(w, caller, uid = ANCHOR, query = {}) {
   await w.started;
   try {
-    const body = await w.controller.read(uid, query, { ...caller });
-    return { status: 200, body: JSON.parse(JSON.stringify(body)) };
+    const read = await w.controller.read(uid, query, { ...caller });
+    assert.ok(read instanceof LocalReadResponse, 'the answer leaves only as a recorded read');
+    // The interceptor builds these same events before the body; the ledger contract must accept every target on this route.
+    localReadEvents(readFacts(caller), read);
+    return { status: 200, body: JSON.parse(read.json), targets: read.sources.map(s => [s.target.kind, s.target.studyId.value,
+      s.target.recordId.value, s.target.versionId.status === 'known' ? s.target.versionId.value : null, s.managingInstitution, s.path.join('/')]) };
   } catch (error) {
     if (typeof error?.getStatus !== 'function') throw error;
     return { status: error.getStatus(), body: error.getResponse() };
@@ -326,6 +340,27 @@ test('CC-S01 an item missing a provenance field is not made; its section alone i
   answer = await ok(v, reader);
   assert.deepEqual([answer.sections.history.state, answer.sections.history.reason], ['failed', 'source_invalid']);
   assert.equal(answer.sections.priorReports.state, 'present');
+});
+
+// ── CC-S15 의료법 제23조④ 열람 ──
+
+test('CC-S15 the answer is recorded as the 열람 of exactly the records it carries: the anchor, its request tags, the same-patient row and the signed prior body', async () => {
+  const w = fullWorld();
+  const result = await call(w, reader);
+  assert.equal(result.status, 200);
+  const head = w.store.versions.find(v => v.uid === '2.25.7002' && v.version === 1);
+  assert.deepEqual(result.targets, [
+    ['study-metadata', ANCHOR, ANCHOR, null, A, ''],
+    ['study-metadata', ANCHOR, ANCHOR, null, A, 'sections/requestTags'],
+    ['study-metadata', '2.25.7002', '2.25.7002', null, A, 'sections/history/items/0'],
+    ['report-version', '2.25.7002', String(head.id), '1', A, 'sections/priorReports/items/0'],
+  ]);
+  // A section that returned nothing records nothing: an unreadable signed body leaves its section failed and unrecorded.
+  const v = fullWorld();
+  delete v.store.versions.find(r => r.uid === '2.25.7002').at;
+  const failed = await call(v, reader);
+  assert.equal(failed.body.sections.priorReports.state, 'failed');
+  assert.ok(!failed.targets.some(([kind]) => kind === 'report-version'), 'no record target for a body that was not returned');
 });
 
 // ── CC-S02 read rules and roles ──

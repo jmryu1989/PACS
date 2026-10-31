@@ -1043,7 +1043,8 @@ class MeasurementCiTests(unittest.TestCase):
         # never the inherited ViewerLayoutE2E cases.
         profile = ci.PROFILES['viewer-ux-shell']
         self.assertEqual(profile['suites'], (('e2e/test_viewer_ux_shell.py', 'ViewerUXShellE2E', 'ci-viewer-ux-shell'),
-                                            ('e2e/test_viewer_tools.py', None, 'ci-viewer-tools')))
+                                            ('e2e/test_viewer_tools.py', None, 'ci-viewer-tools'),
+                                            ('e2e/test_viewer_space.py', None, 'ci-viewer-space')))
         tools, _ = ci.guarded_profile_run(profile, *profile['suites'][1], 2000)
         self.assertNotIn('--class', tools)  # Retain the module's authored-case allowlist.
         self.assertEqual(tools[tools.index('--module')+1], 'tests/e2e/test_viewer_tools.py')
@@ -1074,6 +1075,9 @@ class MeasurementCiTests(unittest.TestCase):
         selection = json.loads((ci.ROOT/'scripts/ci-paths.json').read_text(encoding='utf-8'))['jobs']['worklist-ux-measurements']
         self.assertIn('tests/e2e/test_viewer_ux_shell.py', selection)
         self.assertIn('tests/e2e/test_viewer_tools.py', selection)
+        self.assertIn('tests/e2e/test_viewer_space.py', selection)
+        space, _ = ci.guarded_profile_run(profile, *profile['suites'][2], 2000)
+        self.assertNotIn('--class', space)  # V-SPACE: the module's test_space_* allowlist, no inherited case.
 
     def test_s9_u7_served_profile_runs_its_three_allowlisted_modules_in_worklist_ux(self):
         # S9-U7 orders 02/03/04 name these served flows; worklist-ux.yml is now validate.yml's

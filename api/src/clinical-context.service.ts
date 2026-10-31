@@ -16,6 +16,7 @@ import {
   contextSameKey, contextSection, contextSigned, contextStudySources, contextTechNoteItem,
 } from './clinical-context-policy';
 import type { ContextMember, ContextPins, ContextSourceStudy } from './clinical-context-policy';
+import { clinicalContextRead } from './emr-viewing/consumer-read';
 
 /**
  * S7-U4a — Clinical Context 읽기(계약 S7-U4p §6.1 R1~R9). 무엇을 싣고 어떻게 판정하는지는 clinical-context-policy.ts의
@@ -125,13 +126,18 @@ export class ClinicalContextService {
         .map(member => contextPriorItem(member, bodies.get(member.head.id), anchorKeys, read.readAt)), read.readAt, read.signed > (cursor + 1) * CONTEXT_PRIOR_LIMIT);
     }
     const techNote = contextReadSection('techNote', read.note ? [contextTechNoteItem(uid, read.note, read.readAt)] : [], read.readAt);
-    return clinicalContextAnswer({
+    // 의료법 제23조④ 열람: 서명된 과거 판독 본문과 같은 환자의 검사 행은 답이 나가기 전에 접속기록이 된다(R9의 읽기 전용은
+    // 업무 자료에 대한 것이다). 기록 대상은 조립된 답에 실제로 실린 항목뿐이다.
+    const studied = new Map<string, { institution: string | null; patientId: string | null }>([
+      [uid, { institution: read.anchor.institutionId, patientId: studies.kind === 'read' ? studies.anchor.patientId : null }],
+      ...read.members.map((m: ContextMember) => [m.source.uid, { institution: m.state.institutionId, patientId: m.source.patientId }] as const)]);
+    return clinicalContextRead(clinicalContextAnswer({
       uid, observedAt, patientKey: read.patientKey,
       nextCursor: history.truncated || priorReports.truncated ? String(cursor + 1) : null,
       anchor: { access: read.access, institutionName, techNoteVersion: read.note?.version ?? 0 },
       identity: contextIdentity(studies.kind === 'read' ? [anchorKeys, ...read.members.map(member => contextIdentityKeys(member.source))] : []),
       sections: { priorReports, history, requestTags, techNote },
-    });
+    }), studied);
   }
 
   /** R5 (a)(b): 원본 열거 한 번(워크리스트와 같은 QIDO)에서 기준 행과 같은 PatientID의 후보를 가른다. 실패는 던지지 않고 돌려준다. */

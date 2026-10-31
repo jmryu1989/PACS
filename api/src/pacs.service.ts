@@ -356,12 +356,12 @@ export class PacsService implements OnModuleInit {
     return this.reportDraftConcern.putReport(uid, body, c, session, facts);
   }
 
-  async discardDraft(uid: string, body: any, c: Caller, session: string | null) {
-    return this.reportDraftConcern.discardDraft(uid, body, c, session);
+  async discardDraft(uid: string, body: any, c: Caller, session: string | null, facts: DraftRequestFacts) {
+    return this.reportDraftConcern.discardDraft(uid, body, c, session, facts);
   }
 
-  async forceDiscardDrafts(uid: string, body: any, c: Caller, session: string | null) {
-    return this.reportDraftConcern.forceDiscardDrafts(uid, body, c, session);
+  async forceDiscardDrafts(uid: string, body: any, c: Caller, session: string | null, facts: DraftRequestFacts) {
+    return this.reportDraftConcern.forceDiscardDrafts(uid, body, c, session, facts);
   }
 
   // ── report-commit (api/src/pacs/report-commit.ts) ──

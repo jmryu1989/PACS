@@ -68,6 +68,34 @@ export function viewerSources(uid: string, institution: string, rows: any[], pat
     uid, institution, itemId ?? row.id, row.revision, [...path, index], identity));
 }
 
+/**
+ * S7-U4a Clinical Context: the anchor's identity and request tags, the same-patient study rows and the signed prior report
+ * bodies the answer actually carries. A failed or absent section returned no record and adds no target. The Tech Note
+ * section carries only version/author metadata, never the note text, and `tech-note` is not a local-read target kind;
+ * whether that metadata is a 열람 is an open question (access-record-20261031 report), so it adds no target here.
+ * `studies` holds each returned study's managing institution and observed source PatientID.
+ */
+export function clinicalContextRead(body: any,
+  studies: ReadonlyMap<string, { institution: string | null; patientId: string | null }>): LocalReadResponse {
+  const at = (uid: string) => {
+    const study = studies.get(uid);
+    return { institution: study?.institution ?? '', identity: { sourcePatientId: study?.patientId || null, sourceInstitution: null } };
+  };
+  const source = (kind: LocalReadTarget['kind'], uid: string, recordId: string, version: string | number | null,
+    path: readonly (string | number)[], fields?: readonly string[]) =>
+    consumerSource(kind, uid, at(uid).institution, recordId, version, path, at(uid).identity, fields);
+  const { uid, sections } = body;
+  const sources = [source('study-metadata', uid, uid, null, [], ['uid', 'patientKey', 'anchor', 'identity'])];
+  if (sections.requestTags.state === 'present')
+    sources.push(source('study-metadata', uid, uid, null, ['sections', 'requestTags']));
+  sections.history.items.forEach((item: any, index: number) =>
+    sources.push(source('study-metadata', item.studyUid, item.studyUid, null, ['sections', 'history', 'items', index])));
+  sections.priorReports.items.forEach((item: any, index: number) =>
+    sources.push(source('report-version', item.studyUid, item.provenance.recordId, item.report.version,
+      ['sections', 'priorReports', 'items', index])));
+  return new LocalReadResponse(body, sources);
+}
+
 /** The existing critical-result visibility projection decides whether a pinned report body was actually provided. */
 export function criticalRead(body: any, rows: any[], single = false): LocalReadResponse {
   const items = single ? [body.item] : body.items;

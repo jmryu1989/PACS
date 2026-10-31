@@ -613,7 +613,7 @@
       }
       let storage; try { storage = sessionStorage; } catch (_) {}
       viewerWindows = KinViewerWindows.create({ storage, owner: () => { const key = KinViewerOpening.key(KinAuth.session()); return key ? key.slice(KinViewerOpening.PREFIX.length) : null; },
-        newId: () => crypto.randomUUID(), origin: location.origin, describe: ohifPopupState, changed: render });
+        newId: () => crypto.randomUUID(), origin: location.origin, describe: ohifPopupState, changed: render, placed: rememberReportedOhifRect });
       button.disabled = false;
       function cycle(step) {
         const rows = viewerWindows.rows(); if (!rows.length) return;

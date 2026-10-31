@@ -102,7 +102,7 @@ const KinViewerDisplayLayout = {span:()=>null,screens:details=>details.screens||
   fit:()=>({left:10,top:10,width:800,height:600})};
 const initMonitorPermission = async()=>{}, cacheMonitorScreens=details=>{monitorDetails=details}, popupRect=()=>null;
 const readOhifSpanScreens=()=>null;const OHIF_SPAN_SCREENS_KEY='kin.ohif.span.screens';
-const monitorPermissionGranted = ()=>true, rememberOhifRect=()=>true, watchOhifRect=()=>{};
+const monitorPermissionGranted = ()=>true, rememberOhifRect=()=>true, watchOhifRect=()=>{}, rememberReportedOhifRect=()=>{};
 let monitorQueryUnsupported=false, monitorSessionGranted=false, monitorDetails=null;const screensCache=[display];
 let demoMode=false,ohifOpenSeq=0,viewerOpenSeq=0,monitorHintShown=false;
 let monitorPermission={state:'denied'};
