@@ -562,7 +562,9 @@ test('review R1 of f455ba2: an image answer of a stored object names the study i
     assert.equal(study(await s.get(`/instances/${INSTANCE_ID}/preview`, {}, 'HEAD')), null, 'a HEAD');
     const refused = await s.preview({ 'x-synthetic-site': 'site-b', ...opening('syn-viewer-b') });
     assert.deepEqual([refused.status, study(refused)], [403, null], 'a refusal');
-    assert.equal(byAction(s.records.entries, 'provide-prepared').length, 1, 'none of them recorded anything');
+    // None of them is an image delivery; the description is its own 열람 of the study metadata (B2-GPT-03).
+    const kinds = byAction(s.records.entries, 'provide-prepared').map(e => e.event.targets[0].kind);
+    assert.deepEqual(kinds, ['image', 'study-metadata']);
   } finally { await s.close(); }
 });
 

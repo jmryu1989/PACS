@@ -207,8 +207,11 @@ async function world() {
     studies: async () => [...t.StudyState.values()].map(s => ({ '0020000D': { Value: [s.uid] }, '00080080': { Value: [s.institutionId] },
       '00100020': { Value: ['SYN-' + s.uid] }, '00100010': { Value: ['SYNTHETIC^PATIENT'] } })),
   };
+  // `records`: the study writes' own 제23조④ records (bound in access_record_writes_test / pacs_split_modules_test SPLIT-25).
+  const records = [];
   const workflow = { workflow: (_request, execute) => root.$transaction(tx => execute({ tx,
-    closeAssignment: async (uid, owner, revision) => { log.push({ client: tx.__name, model: 'Ledger', op: 'close', uid, owner, revision }); } })) };
+    closeAssignment: async (uid, owner, revision) => { log.push({ client: tx.__name, model: 'Ledger', op: 'close', uid, owner, revision }); },
+    record: async entry => { records.push({ client: tx.__name, ...entry }); } })) };
   const w = {
     t, log, access, keycloak,
     ra: new ReaderAssignmentService(root, keycloak, access),

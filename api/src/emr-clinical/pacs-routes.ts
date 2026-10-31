@@ -22,6 +22,16 @@ export class PacsClinicalRoutes {
       : this.studyState.removeState(uid, c);
   }
 
+  async match(uid: string, oid: string, patient: any, c: Caller, request?: object) {
+    return this.studyState.match(uid, oid, patient, c, this.clinical && request ? this.clinical.recorder(request) : undefined);
+  }
+
+  async unmatch(uid: string, c: Caller, request?: object) {
+    return this.clinical && request
+      ? this.clinical.workflow(request, workflow => this.studyState.unmatch(uid, c, workflow))
+      : this.studyState.unmatch(uid, c);
+  }
+
   async techNote(uid: string, c: Caller, before?: string, request?: object) {
     // The current note serves its one version and a history page the versions it lists; a note version is its
     // D sequence (the write's baseVersion is the unit revision). Retained versions not returned are not 열람.

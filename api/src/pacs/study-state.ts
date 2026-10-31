@@ -1,4 +1,4 @@
-import type { ClinicalWorkflow } from '../emr-clinical/routes';
+import type { ClinicalWorkflow, RecordedTransaction, WorkflowRecord } from '../emr-clinical/routes';
 /*
  * 검사 상태 PATCH·오더 매칭/해제·검사 행 삭제와 원격판독 전이표. rs·repDoc·confirm은 여기서 바꾸지 않는다(commitReport 전용).
  * PacsService가 만들어 소유하는 평범한 객체다(Nest provider가 아니다). 생성자는 참조만 저장한다.
@@ -6,6 +6,7 @@ import type { ClinicalWorkflow } from '../emr-clinical/routes';
 import { canReadPreliminary } from '../preliminary-reader';
 import type { StudyAccessService } from '../study-access.service';
 import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
 import type { PrismaService } from '../prisma.service';
 import { overlayShape, OVERLAY_RULE_TEXT } from '../study-identity';
 import { closeReaderAssignments } from '../reader-assignment.service';
@@ -47,6 +48,14 @@ const TELE_NEXT: Record<string, string[]> = {
   sent: ['inReading', 'cancelled'], inReading: ['completed', 'cancelled'],
   completed: [], cancelled: ['wait'], fail: ['wait', 'cancelled'],
 };
+
+/** 제23조④: a StudyState write's access record. The row has no revision, so the audit row holding the change is its version
+ * and its reference (B2 projects that audit row onto the event). Managing institution: the row the write locked. */
+function studyChange(surface: string, state: { uid: string; institutionId: string }, kind: 'study-metadata' | 'study-correction' | 'patient-match',
+    audit: { id: number }): WorkflowRecord {
+  return { surface, uid: state.uid, institution: state.institutionId, kind, recordId: state.uid, version: String(audit.id),
+    action: 'modify', patientId: null, reference: { kind: 'AuditLog', id: String(audit.id), version: null } };
+}
 
 export class PacsStudyState {
   constructor(
@@ -158,7 +167,9 @@ export class PacsStudyState {
     if (data.teleInstitutionId !== undefined)
       await closeReaderAssignments(tx, uid, { institutionId: prev.institutionId, teleInstitutionId: data.teleInstitutionId }, c, 'tele-closed', workflow);
     const saved = await tx.studyState.update({ where: { uid }, data });
-    await audit(c.actor, 'state.patch', uid, { ...data, by: me });
+    const row = await audit(c.actor, 'state.patch', uid, { ...data, by: me });
+    // 제23조④ 수정. StudyState에는 판 번호가 없어 그 변경을 담은 감사 행이 판이다. ov는 환자·검사 정보의 정정판이다.
+    await workflow?.record(studyChange('PATCH studies/:uid', saved, body.ov !== undefined ? 'study-correction' : 'study-metadata', row));
     const r = await tx.report.findUnique({ where: { uid } });
     return toClient(saved, r, c, await this.access.myDraft(uid,c.actor,tx));
     },workflow?.tx);
@@ -168,7 +179,7 @@ export class PacsStudyState {
    * Match (8.1.2.1.1): 오더 정보를 검사에 덮어쓴다.
    * 두 테이블을 같이 바꾸므로 트랜잭션. 하나만 바뀌면 M/U가 어긋난 유령 상태가 남는다.
    */
-  async match(uid: string, oid: string, patient: any, c: Caller) {
+  async match(uid: string, oid: string, patient: any, c: Caller, recorded?: RecordedTransaction) {
     need(c.roles, 'technician', '오더 매칭');
     const me = inst(c);
     const order = await this.prisma.order.findUnique({ where: { oid } });
@@ -182,7 +193,7 @@ export class PacsStudyState {
 
     let state;
     try {
-      state = await this.prisma.$transaction(async tx => {
+      const claim = async (tx: Prisma.TransactionClient, workflow?: ClinicalWorkflow) => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         await this.studyAccess.require(c,[uid],tx);
         // 판독·해제·삭제와 같은 순서: 정책 → 검사 → 오더. 잠금 뒤 다시 읽어야
@@ -236,10 +247,13 @@ export class PacsStudyState {
             throw new BadRequestException('이미 매칭된 검사입니다. 목록을 새로고침한 뒤 다시 선택하세요.');
           saved = await tx.studyState.findUniqueOrThrow({ where: { uid } });
         }
-        await tx.auditLog.create({ data: { actor: c.actor || 'unknown', action: 'match', target: uid,
+        const row = await tx.auditLog.create({ data: { actor: c.actor || 'unknown', action: 'match', target: uid,
           detail: dump({ oid, ov, by: me }) } });
+        await workflow?.record(studyChange('POST match', saved, 'patient-match', row));
         return saved;
-      }, { maxWait: 4000, timeout: 8000 });
+      };
+      state = await (recorded ? recorded(workflow => claim(workflow.tx, workflow))
+        : this.prisma.$transaction(tx => claim(tx), { maxWait: 4000, timeout: 8000 }));
     } catch (e: any) {
       /**
        * 아직 없는 검사를 동시에 만드는 경쟁에는 잠글 검사 행이 없다. 양쪽 nullable unique가 마지막 관문이고, 그 충돌은 사용자가
@@ -255,7 +269,7 @@ export class PacsStudyState {
   }
 
   /** Unmatch (8.1.2.1.2): 검사·오더 양쪽을 동시에 해제 */
-  async unmatch(uid: string, c: Caller) {
+  async unmatch(uid: string, c: Caller, workflow?: ClinicalWorkflow) {
     return this.access.scopeWrite(uid,c,async(tx,audit)=>{
     need(c.roles, 'technician', '매칭 해제');
     const me = inst(c);
@@ -280,10 +294,11 @@ export class PacsStudyState {
         where: { oid: prev.orderOid }, data: { matched: 'U', studyUid: null },
       });
 
-    await audit(c.actor, 'unmatch', uid, { oid: prev.orderOid, by: me });
+    const row = await audit(c.actor, 'unmatch', uid, { oid: prev.orderOid, by: me });
+    await workflow?.record(studyChange('POST unmatch', state, 'patient-match', row));
     const r = await tx.report.findUnique({ where: { uid } });
     return toClient(state, r, c, await this.access.myDraft(uid,c.actor,tx));
-    });
+    }, workflow?.tx);
   }
 
   /** 검사 상태 행 삭제 (장비 수신 시뮬로 만든 가짜 검사 정리용) */
@@ -359,7 +374,8 @@ export class PacsStudyState {
     // 검사는 새 세대(draftEpoch)를 받으므로, 치운 자리의 revision이 없어도 옛 경계의 쓰기는 모두 거절된다.
     await tx.reportDraft.deleteMany({ where: { uid, present: false } });
     await tx.studyState.delete({ where: { uid } });
-    await tx.auditLog.create({ data: { actor: c.actor, action: 'state.delete', target: uid, detail: JSON.stringify({ by: me }) } });
+    const row = await tx.auditLog.create({ data: { actor: c.actor, action: 'state.delete', target: uid, detail: JSON.stringify({ by: me }) } });
+    await workflow?.record(studyChange('DELETE studies/:uid', prev, 'study-metadata', row));
     return { ok: true };
     };
     return workflow ? execute(workflow.tx) : this.prisma.$transaction(execute, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 });

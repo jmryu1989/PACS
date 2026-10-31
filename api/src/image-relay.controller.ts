@@ -8,8 +8,10 @@
  * patient the gate observed - its provide-prepared event durable before any byte, naming that patient and the archive's
  * revision the recorder read for this lease (image-delivery-record.ts) - and, once the archive still holds them after
  * Orthanc chose its answer, relays that answer unchanged (status, media type,
- * body; the query carries rendering and windowing as before). Descriptions without the image (QIDO, DICOMweb metadata,
- * DICOM tags) are not deliveries of the image and keep the plain gate; the auth_request route refuses every image read
+ * body; the query carries rendering and windowing as before). Descriptions without the image are not deliveries of the
+ * image: the instance tag dumps and attachment info relayed here record a 열람 of the study's metadata of their own
+ * (StudyImageDeliveryRecorder.describe), durable before their first byte; QIDO and DICOMweb metadata go from nginx to
+ * Orthanc behind auth_request and are not recorded. The auth_request route refuses every image read
  * (pacs.controller.ts), so an image byte has no unrecorded way out.
  */
 import { Controller, Get, NotFoundException, Req, Res } from '@nestjs/common';
@@ -44,9 +46,12 @@ export class ImageRelayController {
     if (!target) throw new NotFoundException('영상 경로가 올바르지 않습니다');
     const uri = target.path + target.query;
     const admitted = await this.pacs.authzDicom(uri, req.method, member(req));
-    // A HEAD or a description is no delivery (image-delivery-record.ts lease()).
+    // A HEAD or a description is no delivery (image-delivery-record.ts lease()); an instance description is a 열람 of
+    // the study's metadata, recorded apart from the deliveries (describe()).
     const lease = await this.deliveries.lease(req, IMAGE_RELAY_SURFACE, target.path, () => archiveRead(admitted));
+    const described = lease ? null : await this.deliveries.describe(req, IMAGE_RELAY_SURFACE, target.path, () => archiveRead(admitted));
     if (lease) res.setHeader(RECORDED_STUDY_HEADER, admitted!.studyUid);
+    const selected = lease ? () => lease.confirm() : described ? () => described.confirm() : undefined;
     const abort = new AbortController();
     const stop = () => { if (!res.writableFinished) abort.abort(); };
     let relayed = false;
@@ -61,7 +66,7 @@ export class ImageRelayController {
     try {
       // Orthanc selects what it answers when the request reaches it, after the lease read the study: the answer is
       // copied only once the archive still holds the patient and revision the record names (C6/C7, I3).
-      await this.orthanc.relay(uri, String(req.headers?.accept ?? '*/*'), res, abort.signal, origin, lease ? () => lease.confirm() : undefined);
+      await this.orthanc.relay(uri, String(req.headers?.accept ?? '*/*'), res, abort.signal, origin, selected);
       relayed = true;
     } catch (error) {
       // After the headers a JSON error cannot follow; cutting the connection is the truthful end of a partial image.
