@@ -147,7 +147,10 @@ class ReaderAssignmentE2E(WorklistE2E):
   self.assertIsNone(self.listed(a,'kdoctor'));self.assertEqual(self.audited(a,'tech'),['hallym'])
   # Reopen: a new revision with no reader and no history; the closed channel's last request does not apply.
   self.tele(a,{'ts':'wait','teleTo':'kin-center'});again=self.read(a,'ktech')
-  self.assertEqual((again['revision'],again['reader'],again['history']),(4,None,[]));self.change(a,last,'kdoctor',409)
+  self.assertEqual((again['revision'],again['reader'],again['history']),(4,None,[]))
+  # The closed channel's last request applies nothing: EMR-D answers its committed receipt (201, as in test 02) with the
+  # reopened row unchanged - no reader, no history, revision 4.
+  replayed=self.change(a,last,'kdoctor');self.assertEqual((replayed['revision'],replayed['reader'],replayed['history']),(4,None,[]))
   again=self.change(a,self.body(again,'kdoctor'),'ktech')
   self.assertEqual((again['revision'],[h['detail']['revision'] for h in again['history']]),(5,[5]))
   self.assertEqual([self.rows(a)['kin-center'][k] for k in ('closedRevision','closedAt')],[4,None]);self.assertEqual(self.rows(a)['hallym'],owner_row)
