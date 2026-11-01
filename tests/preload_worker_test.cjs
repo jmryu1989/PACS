@@ -193,6 +193,31 @@ test('reading comes first after metadata: frame reads pause until the viewer is 
   assert.equal(reads().length, 4, 'all frames resume');
 });
 
+test('reading comes first in the middle of a study: after a frame, the next one waits until the viewer is idle', async () => {
+  const { reads, connect, hold } = boot();
+  const viewer = connect();
+  viewer.send({ type: 'hello', role: 'viewer' });
+  const list = connect();
+  list.send({ type: 'hello', role: 'list' });
+  let release = hold();
+  list.send({ type: 'add', session: 'sess-1', studies: [{ uid: STUDY }] });
+  await until(() => reads().length === 1, 'metadata request');
+  release(); release = hold();
+  await until(() => reads().length === 2, 'first frame request');
+  viewer.send({ type: 'busy', busy: true });
+  release();
+  try {
+    await until(() => statusOf(list, STUDY)?.done === 1, 'the first frame stored');
+    for (let i = 0; i < 20; i++) await tick();
+    assert.equal(reads().length, 2, 'the first frame finishes but no later frame starts while reading');
+    assert.equal(statusOf(list, STUDY).status, 'Downloading');
+  } finally {
+    viewer.send({ type: 'busy', busy: false });
+  }
+  await until(() => statusOf(list, STUDY)?.status === 'Ready', 'Ready after reading');
+  assert.equal(reads().length, 4, 'the rest resumes');
+});
+
 test('a session that ended on the server empties the store; a new session never sees the old one', async () => {
   let refuse = false;
   const { connect } = boot({ respond: async url => {
