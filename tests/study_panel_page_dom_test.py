@@ -1,4 +1,7 @@
-"""REQ-WS1/WS2/WS7 -> RISK-WS1/WS2/WS7 -> WS1-LAYOUT-ROAM / WS7-RW-RELOCATION.
+"""Retired W2 first-paint byte/geometry identity: Minhoon 2026-11-01 removed Rail and the toolbar.
+Current first-screen reachability is checked on the served page (AGENTS 1-B.14).
+
+REQ-WS1/WS2/WS7 -> RISK-WS1/WS2/WS7 -> WS1-LAYOUT-ROAM / WS7-RW-RELOCATION.
 
 Serve the real page and dependency assets. Only HTTP answers are synthetic.
 Node identity is itself the relocation contract; all other assertions observe
@@ -1447,75 +1450,32 @@ class StudyPanelPageDOM(unittest.TestCase):
             self.assertFalse(result.get('outside') or result.get('size'), result)
             self.assertEqual(0, result['over'], f'moved first-paint pixels differ: {result}')
 
-    def test_first_paint_matches_w2_for_empty_v1_and_v2_records(self):
-        # D1004 requires identical first paint. This fixed landed-input comparison
-        # is a deliberate byte-provenance use; compare visible geometry and pixels.
-        # The baseline is the landed W2 (main 9d6984b: PR #164 W2-LAND + PR #168
-        # W2-FU): D1041 6-② made W2 open Folders on every login, so W2's own first
-        # paint changed by decision after the earlier W2 input 9d4ba0f, and W2-FU
-        # then changed how the footer wraps beside it. Three decided differences:
-        # - W3's Rail control shows in that open panel's title row; its measured
-        #   box is masked in both pictures (the folder tree keeps W2's place).
-        # - W3R-09: where W2's stacked list cannot show its header and one whole
-        #   row, W3's list grows by the missing height in whole pixels. Toolbar,
-        #   focus, Folders and the list's place stay W2's; every panel below is W2's
-        #   panel moved down (the report window band may yield for D383's prior
-        #   report line), geometry and pixels alike (assert_moved_work_area).
-        # - W6-PAGE-22 (D1300, W6_REPORT_FIELDS above): the Findings/Conclusion boxes
-        #   are left out of the geometry and each picture covers its own W6 scroller;
-        #   what lies below the scroller in its column is compared where the scroller
-        #   leaves it (w6_moved, w6_regions) and stays reachable (assert_w6_reachable).
-        # - W9-UI (HIDE_W9 above): the Selected toolbar's Open Selected Studies
-        #   button is taken out of the layout before anything is measured (HIDE_W9).
-        # - D1880 preload (HIDE_PRELOAD above): the same for the toolbar's Preload button.
-        # - #259 caution census (HIDE_CENSUS above): its removed commands are hidden in the baseline
-        #   too before anything is measured.
-        # - Minhoon item 8 (EDITOR above): the Report Editor's head row takes the top of the scroller's
-        #   place, and a report column wider than its room is narrower (item8_narrowing).
-        # Pixels count as equal within ANTIALIAS (16/255 per channel), not exact.
-        current = auth.ROOT
-        pictures = Path(os.environ.get('KIN_W3_PILOT_DIR', ROOT / 'tmp/w3-land/pilot')) / 'first-paint'
-        pictures.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix='kin-w3-w2-') as temporary:
-            raw = subprocess.check_output(['git', 'archive', '--format=zip', W2_LANDED,
-                'worklist-v0/hpacs-lite', 'scripts/main-split-order.json', 'proxy/branding'], cwd=ROOT)
-            zipfile.ZipFile(io.BytesIO(raw)).extractall(temporary)
-            with_palette(temporary, current)   # W-SPACE item 11 decided difference, see THEME
-            try:
-                for version in (None, 1, 2):
-                    for width, height in ((1366,768),(1920,1080),(2560,1440),(900,1200),(768,1024),(1080,1920)):
-                        mine, area, rail, _, mine_w6 = self.first_paint(current, version, width, height)
-                        self.assertIsNotNone(rail)
-                        name = f'v{version or 0}-{width}x{height}.png'
-                        picture = (width, height) in ((1920,1080), (900,1200), (1080,1920), (768,1024))
-                        w2, w2_area, w2_rail, w2_pixels, w2_w6 = self.first_paint(Path(temporary), version, width, height, rail,
-                            pictures / ('w2-' + name) if picture else None)
-                        self.assertIsNone(w2_rail)
-                        missing = w2_area['head'] + w2_area['row'] + w2_area['scrollbar'] - (w2_area['grid'][1] - w2_area['grid'][0])
-                        pixels = None
-                        if picture:
-                            again, _, _, pixels, _ = self.first_paint(current, version, width, height, rail, pictures / ('current-' + name))
-                            self.assertEqual(mine, again)
-                        difference_of = (lambda regions: picture_difference(self.browser, w2_pixels, pixels, regions)) if picture else None
-                        with self.subTest(version=version, width=width, height=height):
-                            assert_w6_reachable(self, mine_w6, name)
-                            if missing <= 0.5:
-                                narrowing = item8_narrowing(self, w2_w6, mine_w6, name)   # Minhoon item 8, see EDITOR
-                                self.assertEqual(without_w6_fields(item8_columns(w2, narrowing)), without_w6_fields(mine))
-                                w6_moved(self, w2_w6, mine_w6, 0, name)
-                                if picture:
-                                    for result in difference_of(w6_regions(w2_w6, mine_w6, width, height)):
-                                        self.assertFalse(result.get('outside') or result.get('size'), result)
-                                        self.assertEqual(0, result['over'], f'first-paint pixels differ outside the logo/native checkbox/Rail/W6 scroller: {result}')
-                                continue
-                            self.assertGreater(height, width, 'only a stacked list grows')
-                            need = area['head'] + area['row'] + area['scrollbar']
-                            self.assertAlmostEqual(need, area['grid'][1] - area['grid'][0], delta=1)
-                            for key in ('focus', 'toolbar', 'folders', 'headings'):
-                                self.assertEqual(w2[key], mine[key], key)
-                            self.assert_moved_work_area(w2, w2_area, mine, width, height, difference_of, w2_w6, mine_w6)
-            finally:
-                auth.ROOT = current
+    def test_first_screen_controls_reachable_for_empty_v1_and_v2_records(self):
+        for version in (None, 1, 2):
+            for width, height in ((1366,768),(1920,1080),(2560,1440),(900,1200),(768,1024),(1080,1920)):
+                with self.subTest(version=version, viewport=(width,height)):
+                    site = WorkspaceSite()
+                    context = self.browser.new_context(viewport=dict(width=width,height=height))
+                    context.route('**/*', lambda route, request: site.handle(route, request))
+                    try:
+                        if version:
+                            value = dict(version=version, mode='auto', landscape={'main':650}, portrait={'main':310})
+                            if version == 2: value['reading'] = READING
+                            context.add_init_script('localStorage.setItem('+json.dumps(KEY)+','+json.dumps(json.dumps(value))+')')
+                        page = context.new_page(); page.goto(auth.MAIN_URL)
+                        expect(page.locator('#rows')).to_contain_text(auth.PATIENT)
+                        wait_startup(page, site)
+                        for selector in ('#toolbar-view > summary','#toolbar-more > summary','#m-refresh','#logout','#toolbar-filters > summary'):
+                            expect(page.locator(selector)).to_be_in_viewport()
+                        page.locator('#toolbar-view > summary').click()
+                        expect(page.locator('#columnsettings')).to_be_visible()
+                        page.locator('#toolbar-view > summary').click()
+                        page.locator('#rows tr[data-uid]').first.click()
+                        expect(page.locator('#findings')).to_be_editable()
+                        self.assert_report_usable(page, 'first selected study')
+                        self.assertEqual([], site.violations)
+                    finally:
+                        context.close()
 
 
 if __name__ == '__main__':

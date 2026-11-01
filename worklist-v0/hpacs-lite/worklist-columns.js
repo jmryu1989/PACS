@@ -7,12 +7,12 @@
   const COLORS = { default: '', cool: '#d9ecff', warm: '#ffe6c4' };
   const FONTS = { default: '', sans: 'Arial, "Malgun Gothic", sans-serif', mono: 'Consolas, "Malgun Gothic", monospace' };
   const RELATED = { date: 1, modality: 2, desc: 3, count: 4, rs: 5 };
-  const appearanceDefault = () => ({ widths: {}, font: 'default', size: 13, color: 'default' });
+  const appearanceDefault = () => ({ widths: {}, font: 'default', size: 11, color: 'default' });
   function appearance(value, keys) {
     if (!object(value) || Object.keys(value).sort().join() !== 'color,font,size,widths'
       || typeof value.color !== 'string' || typeof value.font !== 'string'
       || !Object.hasOwn(COLORS, value.color) || !Object.hasOwn(FONTS, value.font)
-      || !Number.isInteger(value.size) || value.size < 12 || value.size > 20 || !object(value.widths)
+      || !Number.isInteger(value.size) || value.size < 10 || value.size > 20 || !object(value.widths)
       || Object.entries(value.widths).some(([k,w]) => !keys.includes(k) || !Number.isInteger(w) || w < 64 || w > 600)) return null;
     return copy(value);
   }
@@ -86,7 +86,7 @@
       <p>ID·Name은 항상 표시합니다. 숨긴 열의 검색 조건과 정렬은 유지됩니다.</p>
       <section id="wc-appearance" aria-label="Worklist appearance">
       <label>Font <select id="wc-font"><option value="default">Default</option><option value="sans">Sans Serif</option><option value="mono">Monospace</option></select></label>
-      <label>Text Size <select id="wc-size">${Array.from({length:9},(_,i)=>`<option value="${i+12}">${i+12}px</option>`).join('')}</select></label>
+      <label>Text Size <select id="wc-size">${Array.from({length:11},(_,i)=>`<option value="${i+10}">${i+10}px</option>`).join('')}</select></label>
       <label>Text Color <select id="wc-color"><option value="default">Default</option><option value="cool">Light Blue</option><option value="warm">Light Yellow</option></select></label>
       <p>열 내용 너비는 64–600px, 빈칸은 자동입니다. 상태 표식의 색은 유지됩니다.</p>
       <p>글자·도구 설정에 저장하거나 직접 적용한 목록 글자 설정이 있으면 이곳의 글자 설정보다 우선합니다.</p>

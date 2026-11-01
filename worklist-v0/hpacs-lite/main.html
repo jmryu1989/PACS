@@ -1662,24 +1662,15 @@
             <div class="related-mode-foot">
               <span id="related-mode-status" role="status" aria-live="polite"></span>
               <span class="spacer"></span>
-              <button id="related-mode-insert" type="button">Insert into Current Draft…</button>
+              <button id="related-mode-insert" type="button">Insert into Current Draft</button>
             </div>
             <dialog id="related-insert-dialog" aria-labelledby="related-insert-title" aria-describedby="related-insert-help">
-              <h3 id="related-insert-title">Insert into Current Draft</h3>
-              <p id="related-insert-help" lang="ko">아래 글을 현재 초안의 고른 칸 끝에 한 번 넣습니다. 넣은 뒤 서버 저장을 확인합니다.</p>
+              <h3 id="related-insert-title">Insert Unavailable</h3>
+              <p id="related-insert-help" lang="ko">현재 초안이나 이전 판독문을 확인한 뒤 다시 시도하세요.</p>
               <p id="related-insert-target"></p>
-              <p id="related-insert-source"></p>
-              <fieldset>
-                <legend>Section</legend>
-                <label><input type="radio" name="related-insert-section" value="findings" checked> Findings</label>
-                <label><input type="radio" name="related-insert-section" value="conclusion"> Conclusion</label>
-              </fieldset>
-              <p id="related-insert-position"></p>
-              <pre id="related-insert-text" tabindex="0" aria-label="넣을 글"></pre>
               <p id="related-insert-error" role="alert"></p>
               <div class="related-insert-actions">
-                <button id="related-insert-cancel" type="button">Cancel</button>
-                <button id="related-insert-confirm" type="button">Insert</button>
+                <button id="related-insert-cancel" type="button">Close</button>
               </div>
             </dialog>
           </section>

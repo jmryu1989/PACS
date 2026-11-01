@@ -55,6 +55,16 @@ test('sc02 refused documents stay refused whole; a document that already places 
   assert.deepEqual(normalizeWorklistColumns(radiology).modes.Radiology.order.slice(0,3),['id','name','institutionName']);
 });
 
+test('compact 11px is accepted and 9px is refused by the API normalizer',()=>{
+  const document=clone(byId.V01.document);
+  for(const size of [10,11,20]) {
+    document.modes.Radiology.appearance={widths:{name:240},font:'default',size,color:'default'};
+    assert.equal(normalizeWorklistColumns(document).modes.Radiology.appearance.size,size);
+  }
+  document.modes.Radiology.appearance.size=9;
+  assert.equal(normalizeWorklistColumns(document),null);
+});
+
 // ── the column routes over a fake store ──
 function columnsService(initial){
   let row=initial?clone(initial):null;const writes=[],reads=[];

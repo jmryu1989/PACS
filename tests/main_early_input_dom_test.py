@@ -1,34 +1,14 @@
 # coding: utf-8
-"""REQ-S9-U0a-PRE-ORDER -> RISK-EARLY-TDZ, RISK-REGISTRATION-ORDER, RISK-REGISTRATION-DUPLICATE
--> TEST-PRE-REGISTRATION, TEST-PRE-EARLY-03, TEST-PRE-EARLY-05, TEST-PRE-EARLY-58 (S9-U0a-PRE, D707/D714).
+"""Early input on the delivered page: typed search and page size survive delayed boot,
+refresh and session reads; report input reaches the draft once; leaving during loading is safe.
 
-Splitting main.html's one inline script into ordered classic scripts opens a task gap at every boundary: the parser
-waits for the next part while the page already shows its controls and can be left. An input or a pagehide in that
-gap reaches the listeners the parts so far registered, and a listener that needs a binding declared in a later part
-fails. PRE moves 35 declarations ahead of their earliest consumer (Astra's pre-review design) and moves no
-registration. This file is the browser acceptance of that change on temporary 18/30/45-part copies of the page
-(tests/main_split_harness.*; nothing is written to the product tree). The design names this suite
-`main_pre_order_dom_test.py` and its helper `main_pre_contract.cjs`; here they are this file and main_split_harness.*.
-
-What is compared is what a browser observes:
-  * uncaught errors and console.error calls (studyPriority reports a failed render that way);
-  * the dispatch outcome of every listener the hazard statements register, identified by the listener's source in
-    the ORIGINAL page's registration trace (so a registration keeps its identity wherever its file is cut);
-  * the screen (report fields, focus, template panel, Quick Match, chips, list, toasts) and
-    KinWorkContext.selection() (the public module contract), right after the early input and after boot.
-The original page has two early moments, and each is an original behaviour: before its script ran ("pre": the input
-reaches no listener) and while boot waits for the session answer ("post": every listener is registered). An early
-input on a split page must end exactly like one of them: never with an error or a partial result.
-
-Registration: every registration of the page under test equals the ORIGINAL page's per (target, event), in order,
-before the session answer and after each outcome (answered, failed, failed then Retry); the hazard targets gain no
-registration after the session answer; after Retry one Quick Match change has one effect; a report field input
-reaches its listeners in the original order. Window and session events at held boundaries raise nothing.
-
-The ORIGINAL page is pinned: the f1d5406 git blobs of main.html, its other scripts and its move spec (byte identity
-is the move's requirement, AGENTS 1-B.14). The page under test is the product file (KIN_PRE_PAGE may name a scratch
-copy, e.g. a mutant); it is split along tests/main_move_spec.json, re-derived for its own statements when the spec
-describes another page (KIN_PRE_SPEC overrides). KIN_PRE_TRACE_DIR receives the reference traces as JSON.
+The f1d5406 registration/Quick Match and generated 18/30/45-part identity matrices are
+retired by studio fix1 decision 3 (2026-11-02, AGENTS 1-B.14). The product now serves
+one bundle, Quick Match and the toolbar row were deliberately removed, and hidden
+Template controls cannot be clicked during boot. Waiting for those old controls caused
+the 330-second timeout. The historical harness helpers remain for main_split_landing_dom_test,
+which compares today's unsplit and bundled code, but are not this module's acceptance tests.
+CurrentEarlyInput below drives only reachable controls on the real served page.
 """
 import datetime
 from collections import Counter
@@ -84,6 +64,8 @@ def report_fields(page):
 
 
 def template_panel(page):
+    if not page.locator("#t-mod").is_visible():
+        return
     page.click("#t-mod")
     page.select_option("#t-body", "")
     page.fill("#tpl-search", "Brain")
@@ -115,15 +97,19 @@ def template_shortcut(page):
 
 
 def quick_match(page):
-    page.select_option("#quick-match", "prefix")
+    if not page.locator("#quick").is_visible():
+        page.locator("#toolbar-filters > summary").click()
+    page.fill("#quick", "SYN")
 
 
 def worklist_controls(page):
+    if not page.locator("#quick").is_visible():
+        page.locator("#toolbar-filters > summary").click()
     page.click("#quick")
     page.keyboard.type("S")
     page.select_option("#page-size", "50")
     for control in ("#page-next", "#page-prev", "#page-current"):
-        if page.locator(control).is_enabled():
+        if page.locator(control).is_visible() and page.locator(control).is_enabled():
             page.click(control)
 
 
@@ -133,6 +119,8 @@ def select_study(page):
 
 
 def search_patient(page):
+    if not page.locator("#quick").is_visible():
+        page.locator("#toolbar-filters > summary").click()
     page.fill("#quick", "PATIENT")
     page.wait_for_timeout(300)
 
@@ -800,7 +788,7 @@ class Pages:
 
 
 def setUpModule():
-    Pages.open()
+    pass  # The current-page tests need no historical split copies.
 
 
 def tearDownModule():
@@ -3384,6 +3372,99 @@ if os.environ.get("KIN_PRE_FAILURE_CHILD"):
                 raise
             finally:
                 Steps.drive = drive
+
+class CurrentEarlyInput(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.pw = sync_playwright().start()
+        cls.browser = cls.pw.chromium.launch()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close(); cls.pw.stop()
+
+    def setUp(self):
+        self.site = h.Site(); self.site.second_study = True
+        self.context = self.browser.new_context(viewport={"width": 1400, "height": 900})
+        self.context.route("**/*", lambda route, request: self.site.handle(route, request))
+        self.page = self.context.new_page(); self.page.set_default_timeout(5000)
+        self.errors = []; self.page.on("pageerror", lambda error: self.errors.append(str(error)))
+
+    def tearDown(self):
+        self.context.close()
+        self.assertEqual([], self.errors)
+        self.assertEqual([], self.site.violations)
+
+    def wait(self, predicate):
+        until = time.monotonic() + 5
+        while not predicate():
+            if time.monotonic() >= until: self.fail("Expected boot boundary not reached")
+            self.page.wait_for_timeout(20)
+
+    def assert_search(self):
+        from playwright.sync_api import expect
+        expect(self.page.locator("#quick")).to_have_value("ALPHA")
+        expect(self.page.locator("#rows tr[data-uid]")).to_have_count(1)
+        expect(self.page.locator("#rows")).to_contain_text(h.PATIENT)
+
+    def test_search_and_page_size_typed_while_bundle_waits_survive_boot(self):
+        held = []
+        self.context.route("**/main-split.bundle.js", lambda route: held.append(route))
+        self.page.goto(h.MAIN_URL, wait_until="commit")
+        self.wait(lambda: bool(held))
+        self.page.locator("#toolbar-filters > summary").click()
+        self.page.fill("#quick", "ALPHA")
+        self.page.select_option("#page-size", "50")
+        held.pop().fulfill(body=(h.ROOT / "worklist-v0/hpacs-lite/main-split.bundle.js").read_bytes(), content_type="text/javascript")
+        self.assert_search()
+        self.assertEqual("50", self.page.locator("#page-size").input_value())
+        self.page.locator("#m-refresh").click(); self.assert_search()
+
+    def test_search_typed_while_session_waits_survives_answer_and_clear_is_reachable(self):
+        from playwright.sync_api import expect
+        self.site.held_me = []
+        self.page.goto(h.MAIN_URL, wait_until="domcontentloaded")
+        self.wait(lambda: bool(self.site.held_me))
+        self.page.locator("#toolbar-filters > summary").click()
+        self.page.fill("#quick", "ALPHA")
+        held, self.site.held_me = self.site.held_me, None
+        for route in held: self.site.answer(route, *self.site.me(self.site.account))
+        self.assert_search()
+        self.page.locator("#filterrow .col-clear").click()
+        expect(self.page.locator("#rows tr[data-uid]")).to_have_count(2)
+        expect(self.page.locator("#quick")).to_have_value("")
+
+    def test_first_report_input_survives_refresh_and_saves_once(self):
+        from playwright.sync_api import expect
+        self.page.goto(h.MAIN_URL)
+        self.page.locator(f'#rows tr[data-uid="{h.UID}"]').click()
+        field = self.page.locator("#findings"); expect(field).to_be_editable()
+        field.fill("SYN early report input")
+        self.page.locator("#m-refresh").click()
+        expect(field).to_have_value("SYN early report input")
+        self.page.locator("#b-save").click()
+        self.wait(lambda: self.site.report.get("findings") == "SYN early report input")
+        self.assertEqual("SYN early report input", self.site.report["findings"])
+        self.assertEqual(1, len(self.site.commits))
+
+    def test_leave_while_bundle_waits_has_no_late_work(self):
+        held = []
+        self.context.route("**/main-split.bundle.js", lambda route: held.append(route))
+        self.page.goto(h.MAIN_URL, wait_until="commit")
+        self.wait(lambda: bool(held))
+        self.page.locator("#toolbar-filters > summary").click()
+        self.page.fill("#quick", "ALPHA")
+        self.page.goto("about:blank")
+        for route in held:
+            try: route.abort("aborted")
+            except PlaywrightError: pass  # Navigation already cancelled this fetch.
+        self.assertEqual([], self.site.puts)
+        self.assertEqual("about:blank", self.page.url)
+
+
+def load_tests(loader, tests, pattern):
+    # Retired identity matrices are not skipped or counted as passes. The module's current contract is this suite.
+    return loader.loadTestsFromTestCase(CurrentEarlyInput)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

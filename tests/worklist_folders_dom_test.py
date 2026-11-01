@@ -441,8 +441,11 @@ class WorklistFoldersDOM(unittest.TestCase):
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
         self.site.sign_in(auth.RAD)
         self.page.goto(auth.MAIN_URL)
-        expect(self.folder('Morning')).to_be_visible()
-        self.page.get_by_role('list', name='My Shortcuts', exact=True).get_by_role('button', name=re.compile(r'^Morning \(')).click()
+        # The saved search also appears in Saved Searches; verify the user's shortcut in its own group.
+        shortcut = self.page.get_by_role('list', name='My Shortcuts', exact=True).get_by_role('button', name=re.compile(r'^Morning \('))
+        expect(shortcut).to_have_count(1)
+        expect(shortcut).to_be_visible()
+        shortcut.click()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
         saved = next(f for f in self.site.filters if f['name'] == 'Morning')
         self.assertEqual('own:' + str(saved['id']), self.site.shortcuts[0]['searchId'])

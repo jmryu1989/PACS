@@ -1674,7 +1674,8 @@
       if (selectedUid && list.some(s => s.uid === selectedUid)) queueSeen = { uid: selectedUid, order: list.map(s => s.uid) };
       return list;
     }
-    let resultPage = 0, resultQuery = '', resultPageSize = 100;
+    // 번들을 기다리는 동안 고른 Per page 값을 첫 render가 기본값으로 덮지 않는다.
+    let resultPage = 0, resultQuery = '', resultPageSize = Number($('#page-size').value);
     function render(revealUid) {
       updateWorklistFolders();
       const cols = COLS[mode], shown = shownColumns();
@@ -5886,7 +5887,7 @@
     function relatedInsertSubmit(op) {
       if (relatedInserts.get(op.uid) !== op || op.state !== "editing") return;
       op.turn = reportEditedAt.get(op.uid) ?? reportEdits;
-      relatedInsertSend(op, "apply");
+      return relatedInsertSend(op, "apply");
     }
     async function relatedInsertSend(op, kind, context = work.capture("document"), session = undefined) {
       const admit = () => relatedInserts.get(op.uid) === op && relatedInsertIdentityResolved(op);

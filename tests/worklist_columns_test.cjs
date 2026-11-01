@@ -31,7 +31,7 @@ test('appearance validates bounded display values without losing legacy modes',(
   const state=model.defaults(columns);
   state.modes.Radiology.appearance={widths:{name:240},size:18,font:'mono',color:'warm'};
   assert.deepEqual(model.normalize(state,columns),state);
-  for(const patch of [{size:11},{size:21},{size:13.5},{color:'#000000'},{color:['warm']},{font:'url(https://invalid)'},{widths:{name:63}},{widths:{name:601}},{widths:{name:null}},{widths:{name:'240'}},{widths:{patientId:240}}]){
+  for(const patch of [{size:9},{size:21},{size:13.5},{color:'#000000'},{color:['warm']},{font:'url(https://invalid)'},{widths:{name:63}},{widths:{name:601}},{widths:{name:null}},{widths:{name:'240'}},{widths:{patientId:240}}]){
     const bad=JSON.parse(JSON.stringify(state));Object.assign(bad.modes.Radiology.appearance,patch);
     assert.equal(model.normalize(bad,columns),null);
   }

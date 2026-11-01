@@ -1,4 +1,7 @@
-"""REQ-WS1/WS7 (pilot D1160) -> RISK-WS1/WS7 -> WS7-PANEL-SIZE / WS7-PANEL-TEXT / WS1-PANEL-ROAM.
+"""Retired round-6 DOM-count and pixel identity: Minhoon 2026-11-01 changed the report band
+and stacked panels. Current default bounds and reachable controls replace that pin (AGENTS 1-B.14).
+
+REQ-WS1/WS7 (pilot D1160) -> RISK-WS1/WS7 -> WS7-PANEL-SIZE / WS7-PANEL-TEXT / WS1-PANEL-ROAM.
 
 The pilot radiologist's answer D1160: the Study Panel's size can be changed by the reader (width and height,
 because monitors differ) and its text size too; today's layout stays the default. This module serves the real page
@@ -317,73 +320,23 @@ class StudyPanelSizeDOM(unittest.TestCase):
         finally:
             context.close()
 
-    def test_default_is_round_6(self):
-        """D1160 '지금이 기본 세팅': nothing chosen = round 6's panel at every placement, to the pixel; the first
-        paint is round 6's too (the options exist only in the opened panel)."""
-        current = auth.ROOT
-        with tempfile.TemporaryDirectory(prefix='kin-w3-r6-') as temporary:
-            raw = subprocess.check_output(['git', 'archive', '--format=zip', R6,
-                'worklist-v0/hpacs-lite', 'scripts/main-split-order.json', 'proxy/branding'], cwd=ROOT)
-            zipfile.ZipFile(io.BytesIO(raw)).extractall(temporary)
-            dom.with_palette(temporary, current)   # W-SPACE item 11 decided difference (study_panel_page_dom_test.py THEME)
-            try:
-                for width, height in DEFAULT_SIZES:
-                    picture = (width, height) in ((1920, 1080), (1200, 1920), (900, 1200), (1024, 768), (840, 768))
-                    mine, mask = self.default_panel(current, width, height, picture=picture)
-                    theirs, _ = self.default_panel(Path(temporary), width, height, mask=mask, picture=picture)
-                    with self.subTest(width=width, height=height):
-                        # Compare everything outside the declared feature regions in both served trees.
-                        self.assertEqual(theirs['first_paint_nodes'] - theirs['decided_first_paint_nodes'],
-                                         mine['first_paint_nodes'] - mine['decided_first_paint_nodes'], 'first paint')
-                        self.assertEqual(theirs['panel'], mine['panel'], 'panel')
-                        where = f'{width}x{height}'
-                        # Minhoon item 8 (study_panel_page_dom_test.py EDITOR): a report column wider than its room is narrower.
-                        narrowing = item8_narrowing(self, theirs['w6'], mine['w6'], where)
-                        page_facts = lambda facts, narrowing=0: [[*row[:3], row[3] + narrowing, *row[4:]] if row[0] == '.report-p' else row
-                                                                 for row in facts['page'] if row[0] not in W6_REPORT_FIELDS]
-                        self.assertEqual(page_facts(theirs, narrowing), page_facts(mine), 'page')
-                        # Minhoon item 8 (ITEM8_INFO): the Info view without Clinical Context, the rest round 6's.
-                        info, info_mine = theirs['info'], mine['info']
-                        gone = [row for row in info['rows'] if row[0]]
-                        self.assertEqual(1, len(gone), info)
-                        self.assertFalse(any(row[0] for row in info_mine['rows']), info_mine)
-                        top, height = gone[0][2], gone[0][4]
-                        expected = [[False, x, y - height if y > top else y, w, h] for flag, x, y, w, h in info['rows'] if not flag]
-                        expected.append(info['section'][:3] + [info['section'][3] - height])
-                        for a, b in zip(sum(expected, []), sum(info_mine['rows'] + [info_mine['section']], []), strict=True):
-                            self.assertAlmostEqual(a, b, delta=0.01, msg=f'{where}: the Info view {expected} {info_mine}')
-                        self.assertEqual(info['cover'], info_mine['cover'], where)
-                        assert_w6_reachable(self, mine['w6'], where)
-                        w6_moved(self, theirs['w6'], mine['w6'], 0, where)
-                        # Round 6's tab click rewrote the toolbar status line, which wraps at 900x1200 and 768x1024 and
-                        # pushed its panel down (W3R7-04, fixed this round). So each tab's content is round 6's within
-                        # the panel, and the panel itself stays where it opened, which is round 6's place (above).
-                        for key in ('tab Images', 'tab Templates', 'tab Info'):
-                            expected = within_panel(theirs[key])
-                            opened, after = theirs['panel']['drawer'], theirs[key]['drawer']
-                            if after != opened:
-                                # Where the status line wrapped depends on the platform's fonts (Windows: 900x1200 and
-                                # 768x1024; the Linux runner also 1024x768). A panel in a column keeps its bottom, so
-                                # round 6's panel there also lost the height it moved down by. Round 6's tab is then
-                                # compared as if its panel had stayed where it opened: same left and width, the lost
-                                # height given back to the panel and its shown tab; everything else unchanged.
-                                down, lost = after[1] - opened[1], opened[3] - after[3]
-                                self.assertEqual((opened[0], opened[2]), (after[0], after[2]), key)
-                                self.assertGreater(down, 0, key)
-                                self.assertIn(lost, (0, down), key)
-                                expected['drawer'] = [expected['drawer'][0], expected['drawer'][1] + lost]
-                                expected['shown'] = expected['shown'][:3] + [expected['shown'][3] + lost]
-                            self.assertEqual(expected, within_panel(mine[key]), key)
-                            self.assertEqual(mine['panel']['drawer'], mine[key]['drawer'], key + ': the panel does not move')
-                        self.assertEqual(theirs['nodes'] - theirs['decided_nodes'],
-                                         mine['nodes'] - mine['decided_nodes'], 'opened panel')
-                        if picture:
-                            regions = w6_regions(theirs['w6'], mine['w6'], width, height)
-                            for difference in picture_difference(self.browser, theirs['pixels'], mine['pixels'], regions):
-                                self.assertFalse(difference.get('outside') or difference.get('size'), difference)
-                                self.assertEqual(0, difference['over'], f'open panel pixels differ outside the new controls/W6 scroller: {difference}')
-            finally:
-                auth.ROOT = current
+    def test_default_panel_stays_in_window_and_tabs_do_not_clip(self):
+        for width, height in DEFAULT_SIZES:
+            with self.subTest(viewport=(width, height)):
+                page, site, context = self.page(width, height)
+                drawer = self.open_panel(page)
+                before = self.panel(page)['drawer']
+                self.assert_report_usable(page, 'default panel')
+                for tab in ('Images', 'Templates', 'Info'):
+                    drawer.get_by_role('tab', name=tab, exact=True).click(); settle(page)
+                    facts = self.panel(page)
+                    x,y,w,h = facts['drawer']
+                    self.assertGreaterEqual(x, 0); self.assertGreaterEqual(y, 0)
+                    self.assertLessEqual(x+w, width+1); self.assertLessEqual(y+h, height+1)
+                    self.assertEqual(before, facts['drawer'], 'tab change does not move the panel')
+                    self.assertLessEqual(max(facts['overflow']), 1, 'tab text not clipped')
+                    expect(drawer.get_by_role('button', name='Close', exact=True)).to_be_in_viewport(ratio=1)
+                self.doCleanups()
 
     # ── resizing ───────────────────────────────────────────────────────────────────────────────────────
 

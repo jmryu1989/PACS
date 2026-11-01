@@ -4,7 +4,7 @@
  * The page keeps everything that belongs to the Reading Target: its editor, its Draft command state and the settlement of
  * an inserted operation (an operation outlives this mode: Back, a Source move and a new mode never end it). This module owns
  * only what the mode adds: its lifecycle and generation, the two identity cards, the Source display context, the
- * confirmation of one explicit Insert and the one-shot admission that lets exactly that native edit through while every
+ * field operations of one explicit Insert and the one-shot admission that lets exactly that native edit through while every
  * other write and report command stays blocked. The Source is read-only text: it never becomes an editor value, a draft, a
  * save or recovery snapshot. Only the reviewed insertion string reaches the Target, by the page's own native edit.
  *
@@ -68,9 +68,7 @@
     const section = node('related-mode'), title = node('related-mode-title'), back = node('related-mode-back');
     const targetCard = node('related-mode-target'), sourceCard = node('related-mode-source'), status = node('related-mode-status');
     const insertButton = node('related-mode-insert'), dialog = node('related-insert-dialog');
-    const dialogTarget = node('related-insert-target'), dialogSource = node('related-insert-source');
-    const dialogPosition = node('related-insert-position'), dialogText = node('related-insert-text');
-    const dialogError = node('related-insert-error'), confirmButton = node('related-insert-confirm');
+    const dialogTarget = node('related-insert-target'), dialogError = node('related-insert-error');
     const cancelButton = node('related-insert-cancel');
     // The one Notice's Discard Insert (its markup comes with this mode): shown only for a confirmed refused operation.
     const noticeDiscardButton = node('report-notice-discard');
@@ -273,7 +271,7 @@
       if (selection && selection.rangeCount && !selection.isCollapsed) {
         const range = selection.getRangeAt(0), parts = [];
         let touched = false;
-        for (const field of SOURCE_FIELDS) {
+        for (const field of SECTIONS) {
           const el = shown[field], text = view.texts[field];
           if (!text || !range.intersectsNode(el)) continue;
           touched = true;
@@ -282,39 +280,11 @@
           const end = el.contains(range.endContainer) ? offset(range.endContainer, range.endOffset) : text.length;
           if (end > start) parts.push({ field, start, end });
         }
-        if (touched) return validParts(parts, view.texts);
+        if (touched) return parts.length === 1 ? validParts(parts, view.texts) : null;
+        return null;
       }
-      return validParts(SOURCE_FIELDS.filter(field => view.texts[field]).map(field => ({ field, start: 0, end: view.texts[field].length })),
+      return validParts(SECTIONS.filter(field => view.texts[field]).map(field => ({ field, start: 0, end: view.texts[field].length })),
         view.texts);
-    }
-
-    function chosenSection() {
-      const chosen = dialog.querySelector('input[name="related-insert-section"]:checked')?.value;
-      return SECTIONS.includes(chosen) ? chosen : 'findings';
-    }
-    function paintDialog() {
-      const open = confirming;
-      if (!open) return;
-      const seed = app.seed();
-      const section = chosenSection();
-      dialogSource.textContent = 'Source: ' + (pair(open.source.version === null ? null : 'v' + open.source.version,
-        ACTION[open.source.action] || open.source.action, open.source.author, open.source.at) || UNKNOWN) + ' · '
-        + open.parts.map(part => LABEL[part.field] + (part.start === 0 && part.end === open.source.texts[part.field].length ? '' : ' (선택한 부분)')).join(', ');
-      if (!seed || seed.reason) {
-        dialogTarget.textContent = 'Target: ' + (seed?.label || UNKNOWN);
-        dialogPosition.textContent = '';
-        dialogText.textContent = '';
-        dialogError.textContent = seed?.reason || '현재 초안을 확인하지 못했습니다.';
-        confirmButton.disabled = true;
-        return;
-      }
-      const planned = insertion(seed.texts[section], open.parts, open.source.texts);
-      dialogTarget.textContent = 'Target: ' + seed.label;
-      dialogPosition.textContent = LABEL[section] + ' 칸의 끝에 넣습니다' + (planned.text.startsWith('\n') ? ' · 앞 글과 줄을 바꿔 붙입니다' : '')
-        + ' · 넣는 글은 아래와 같습니다.';
-      dialogText.textContent = planned.text;
-      dialogError.textContent = '';
-      confirmButton.disabled = !planned.text.replace(/\n/g, '');
     }
 
     function closeDialog(returnFocus) {
@@ -325,84 +295,67 @@
       if (returnFocus && was && state && was.generation === generation) (insertButton.disabled ? title : insertButton).focus({ preventScroll: true });
     }
 
+    function refuseInsert(message) {
+      say(message);
+      dialogTarget.textContent = app.seed()?.label || UNKNOWN;
+      dialogError.textContent = message;
+      dialog.showModal();
+      cancelButton.focus();
+    }
+
     async function openInsert() {
       if (!state || confirming) return;
       const gen = generation, view = source;
       const why = insertReason();
-      if (why) { say(why); return; }
+      if (why) { refuseInsert(why); return; }
       const parts = selectedParts(view);
-      if (!parts) { say('선택한 글의 범위를 확인할 수 없습니다. 선택을 지우고 다시 누르면 판독문 전체를 넣습니다.'); return; }
-      insertButton.disabled = true;
-      say('현재 초안의 저장 상태를 확인하는 중입니다…');
-      let prepared;
-      try { prepared = await app.prepare(); }
-      catch (_) { prepared = '현재 초안의 저장 상태를 확인하지 못했습니다.'; }
-      // Back or another mode meanwhile: this confirmation is not theirs. Another Source text: the reader looks again first.
-      if (!state || gen !== generation) return;
-      if (!sameView(source, view)) { say('이전 판독문이 그 사이 바뀌었습니다 — 다시 확인한 뒤 누르세요.'); renderButtons(); return; }
-      if (prepared) { say(prepared); renderButtons(); return; }
-      say('');
-      confirming = { generation: gen, parts, source };
-      const first = dialog.querySelector('input[name="related-insert-section"][value="findings"]');
-      if (first) first.checked = true;
-      paintDialog();
+      if (!parts) { refuseInsert('넣을 글이 없거나 선택한 범위를 확인할 수 없습니다. Findings 또는 Conclusion 한 칸에서 선택하세요.'); return; }
+      const open = { generation: gen, parts, source };
+      confirming = open;
       renderButtons();
-      dialog.showModal();
-      (confirmButton.disabled ? cancelButton : confirmButton).focus();
-    }
-
-    /**
-     * The explicit Insert (R2). Everything asynchronous happened before this click. Here, in one synchronous span: the page
-     * freezes one operation for the current Target, Source and CAS (or refuses), the confirmation closes, the editor host is
-     * released only from this mode's own restriction, one native edit runs under a one-shot admission, the restriction and a
-     * safe focus come back. Only an applied native edit is handed to the page to send; a refused one is never sent.
-     */
-    function confirmInsert() {
-      const open = confirming;
-      if (!open || !state || open.generation !== generation || source !== open.source) { closeDialog(true); return; }
-      const gen = generation, section = chosenSection();
-      const token = Object.seal({ op: null, field: section, at: null, text: null, state: 'prepared' });
-      admission = token;
-      let frozen = null, applied = false;
+      say('현재 초안의 저장 상태를 확인하는 중입니다…');
       try {
-        frozen = app.freeze({ section, parts: open.parts, source: open.source, admission: token });
-        if (!frozen || frozen.refused) {
-          dialogError.textContent = frozen?.refused || '현재 초안에 넣을 수 없습니다.';
-          return;
+        let prepared;
+        try { prepared = await app.prepare(); }
+        catch (_) { prepared = '현재 초안의 저장 상태를 확인하지 못했습니다.'; }
+        if (!state || gen !== generation || confirming !== open) return;
+        if (!sameView(source, view)) { refuseInsert('이전 판독문이 그 사이 바뀌었습니다 — 다시 확인한 뒤 누르세요.'); return; }
+        if (prepared) { refuseInsert(prepared); return; }
+        // Each field keeps the existing atomic receipt. A refusal/unknown first result never starts the next field.
+        for (const part of parts) {
+          if (!state || gen !== generation || confirming !== open || !sameView(source, view)) return;
+          const section = part.field;
+          const token = Object.seal({ op: null, field: section, at: null, text: null, state: 'prepared' });
+          admission = token;
+          let frozen, applied = false;
+          try {
+            frozen = app.freeze({ section, parts: [part], source, admission: token });
+            if (!frozen || frozen.refused) { refuseInsert(frozen?.refused || '현재 초안에 넣을 수 없습니다.'); return; }
+            token.op = frozen.op;
+            token.at = frozen.at;
+            token.text = frozen.text;
+            try { applied = withEditor(() => app.edit(frozen, token)) === true; } catch (_) { applied = false; }
+          } finally {
+            admission = null;
+            token.state = 'spent';
+          }
+          if (!applied) {
+            app.abandon(frozen.op);
+            refuseInsert('현재 초안에 넣지 못했습니다. 편집기의 글을 확인한 뒤 다시 시도하세요.');
+            return;
+          }
+          if (state && gen === generation) {
+            state.inserted = Object.freeze({ field: frozen.at.field, end: frozen.at.start + frozen.text.length, after: frozen.op.after });
+            title.focus({ preventScroll: true });
+          }
+          say('현재 초안에 넣었습니다. 서버 저장을 확인하는 중입니다…');
+          const result = await app.submit(frozen.op);
+          if (result?.outcome !== 'applied' || frozen.op.state !== 'applied') return;
         }
-        token.op = frozen.op;
-        token.at = frozen.at;
-        token.text = frozen.text;
-        confirming = null;
-        closing += 1;
-        try { dialog.close(); } finally { closing -= 1; }
-        // An exception inside the native edit is a refused edit: the restriction comes back and nothing is sent.
-        try { applied = withEditor(() => app.edit(frozen, token)) === true; } catch (_) { applied = false; }
       } finally {
-        admission = null;
-        token.state = 'spent';
-        // A safe, visible focus of this mode (the Insert button itself waits while the operation is pending).
-        if (frozen && !frozen.refused && state && gen === generation) title.focus({ preventScroll: true });
+        if (confirming === open) confirming = null;
+        if (state && gen === generation) renderButtons();
       }
-      if (!frozen || frozen.refused) return;
-      if (applied) {
-        if (state && gen === generation)
-          state.inserted = Object.freeze({ field: frozen.at.field, end: frozen.at.start + frozen.text.length, after: frozen.op.after });
-        say('현재 초안에 넣었습니다. 서버 저장을 확인하는 중입니다…');
-        app.submit(frozen.op);
-      } else {
-        app.abandon(frozen.op);
-        if (state && gen === generation && source === open.source) {
-          // The same context: give the reader the confirmation back with what happened.
-          confirming = open;
-          paintDialog();
-          dialogError.textContent = '현재 초안에 넣지 못했습니다. 편집기의 글은 바뀌지 않았거나 그대로 남아 있습니다 — 확인한 뒤 다시 시도하세요.';
-          renderButtons();
-          dialog.showModal();
-          cancelButton.focus();
-        }
-      }
-      if (state) renderButtons();
     }
 
     /** One native edit of the page under a one-shot admission while the mode holds the editor (the inverse of a discarded Insert). */
@@ -490,9 +443,7 @@
 
     back.addEventListener('click', () => { if (state) app.back(); });
     insertButton.addEventListener('click', () => { openInsert(); });
-    confirmButton.addEventListener('click', confirmInsert);
     cancelButton.addEventListener('click', () => closeDialog(true));
-    dialog.addEventListener('change', event => { if (event.target?.name === 'related-insert-section') paintDialog(); });
     dialog.addEventListener('close', () => {
       if (closing) return;
       const was = confirming;

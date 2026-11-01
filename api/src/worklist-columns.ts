@@ -22,9 +22,10 @@ export function normalizeWorklistColumns(value: any) {
     clean.modes[mode] = { order: [...part.order, ...keys.filter(k => !part.order.includes(k))], hidden: [...part.hidden] };
     if (Object.prototype.hasOwnProperty.call(part, 'appearance')) {
       const a = part.appearance;
+      // 민훈 2026-11-01: 기본 11px, 사용자 설정으로 키움. Compact 기본값도 계정에 저장한다.
       if (!object(a) || Object.keys(a).sort().join() !== 'color,font,size,widths' ||
           !['default','cool','warm'].includes(a.color) || !['default','sans','mono'].includes(a.font) ||
-          !Number.isInteger(a.size) || a.size < 12 || a.size > 20 || !object(a.widths) ||
+          !Number.isInteger(a.size) || a.size < 10 || a.size > 20 || !object(a.widths) ||
           Object.entries(a.widths).some(([k,w]) => !keys.includes(k) || !Number.isInteger(w) || Number(w) < 64 || Number(w) > 600)) return null;
       clean.modes[mode].appearance = { widths: { ...a.widths }, font: a.font, size: a.size, color: a.color };
     }
