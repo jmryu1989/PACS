@@ -10,9 +10,10 @@
   const $ = id => document.getElementById(id);
   const messages = $('messages');
   const input = $('input');
+  const MAX_IMAGES = 4, MAX_IMAGE_BYTES = 8 * 1024 * 1024, IMAGE_EDGE = 2000;
   const layout = store.get('studio-layout', 'two') === 'overlay' ? 'overlay' : 'two';
   document.body.dataset.layout = layout;
-  const state = { mode: 'edit', me: null, live: new Map(), errors: [], missing: [], picks: [], jobsWaiting: new Set(), timings: {},
+  const state = { mode: 'edit', me: null, live: new Map(), errors: [], missing: [], picks: [], images: [], sending: false, jobsWaiting: new Set(), timings: {},
     product: { seen: 0, page: '', study: null, errors: [], pickActive: false, typing: false },
     suggestion: null, previewing: null, previewClick: null, suggestAsked: false, seen: new Set(),
     rev: 0, activity: { pending: 0, typing: [] } };
@@ -60,6 +61,7 @@
     li.append(who, text);
     const meta = entry.meta || {};
     if (entry.role === 'user' && Array.isArray(meta.picks) && meta.picks.length) li.append(el('div', 'meta', `고른 곳: ${meta.picks.join(', ')}`));
+    if (entry.role === 'user' && Array.isArray(meta.images) && meta.images.length) li.append(el('div', 'meta', `그림 ${meta.images.length}장: ${meta.images.map(p => p.split('/').pop()).join(', ')}`));
     if (entry.role === 'assistant' && meta.changed && meta.sha) {
       const row = el('div', 'meta');
       row.append(el('span', 'applied', '반영됨'));
@@ -203,6 +205,7 @@
     $('picks-over').hidden = all.length <= MAX_PICKS;
     $('picks-over').textContent = ` · ${all.length}개: 한 번에 ${MAX_PICKS}개까지 보낼 수 있습니다. ${all.length - MAX_PICKS}개를 빼 주세요.`;
     $('picks').hidden = !all.length;
+    updateSend();
     viewer.counts(pickCounts());
   }
   function clearPicks() { target.pickClear(); viewer.pickClear(); }
@@ -429,6 +432,85 @@
   $('pick').onclick = () => togglePick();
 
   // ── chat ──
+  let imageQueue = Promise.resolve();
+  function imagesBlocked() {
+    return state.images.length > MAX_IMAGES || state.images.some(image => !image.payload);
+  }
+  function updateSend() {
+    $('send').disabled = state.sending || state.picks.length > MAX_PICKS || imagesBlocked();
+  }
+  function renderImages() {
+    $('image-chips').replaceChildren();
+    state.images.forEach((image, i) => {
+      const chip = el('span', 'chip image-chip');
+      if (image.url) {
+        const thumb = el('img'); thumb.src = image.url; thumb.alt = `Image ${i + 1}`; chip.append(thumb);
+      }
+      chip.append(el('span', '', `Image ${i + 1}`));
+      chip.title = image.error || (image.payload ? `${image.payload.width}×${image.payload.height}` : '그림을 준비하고 있습니다.');
+      const remove = el('button', 'x', '×'); remove.type = 'button';
+      remove.setAttribute('aria-label', `Remove Image ${i + 1}`); remove.title = '첨부 그림을 뺍니다.';
+      remove.onclick = () => { removeImages([image]); prepareImages(); };
+      chip.append(remove); $('image-chips').append(chip);
+    });
+    const over = state.images.length > MAX_IMAGES;
+    const error = state.images.find(image => image.error);
+    $('images-over').textContent = over ? `그림은 한 번에 ${MAX_IMAGES}장까지 보낼 수 있습니다. ${state.images.length - MAX_IMAGES}장을 빼 주세요.`
+      : error ? error.error : imagesBlocked() ? '그림을 준비하고 있습니다…' : '';
+    $('images-over').hidden = !$('images-over').textContent;
+    $('images').hidden = !state.images.length;
+    updateSend();
+  }
+  function removeImages(images) {
+    for (const image of images) if (image.url) URL.revokeObjectURL(image.url);
+    state.images = state.images.filter(image => !images.includes(image));
+    renderImages();
+  }
+  async function encodeImage(file) {
+    if (!['image/png', 'image/jpeg'].includes(file.type)) throw new Error('PNG 또는 JPEG 그림을 첨부해 주세요.');
+    // Decode asynchronously and encode only the resized canvas; serial processing avoids decoding several huge pastes together.
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, IMAGE_EDGE / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    try { canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height); }
+    finally { bitmap.close(); }
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, file.type));
+    if (!blob) throw new Error('그림을 변환하지 못했습니다. 다시 첨부해 주세요.');
+    if (blob.size > MAX_IMAGE_BYTES) throw new Error('그림은 축소한 뒤 장당 8 MB까지 보낼 수 있습니다. 해당 그림을 빼고 더 작은 그림을 첨부해 주세요.');
+    const data = await new Promise((resolve, reject) => {
+      const reader = new FileReader(); reader.onload = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = () => reject(new Error('그림을 읽지 못했습니다. 다시 첨부해 주세요.')); reader.readAsDataURL(blob);
+    });
+    return { payload: { type: blob.type, data, width: canvas.width, height: canvas.height }, blob };
+  }
+  function prepareImages() {
+    imageQueue = imageQueue.then(async () => {
+      if (state.images.length > MAX_IMAGES) return;
+      for (const image of [...state.images]) {
+        if (image.payload || image.error || !state.images.includes(image)) continue;
+        try {
+          const encoded = await encodeImage(image.file);
+          if (state.images.includes(image)) { image.payload = encoded.payload; image.url = URL.createObjectURL(encoded.blob); }
+        } catch (error) { image.error = `그림을 준비하지 못했습니다: ${error.message}`; }
+        image.file = null;
+        renderImages();
+      }
+    });
+  }
+  function attachImages(files) {
+    state.images.push(...Array.from(files, file => ({ file })));
+    renderImages(); prepareImages();
+  }
+  $('attach').onclick = () => $('image-files').click();
+  $('image-files').onchange = e => { attachImages(e.target.files); e.target.value = ''; };
+  input.addEventListener('paste', e => {
+    const files = Array.from(e.clipboardData?.items || []).filter(item => item.kind === 'file' && item.type.startsWith('image/')).map(item => item.getAsFile()).filter(Boolean);
+    if (!files.length) return;
+    e.preventDefault(); attachImages(files);
+  });
+
   function setMode(mode) {
     state.mode = mode;
     for (const b of document.querySelectorAll('.tabs button[data-mode]')) { b.classList.toggle('on', b.dataset.mode === mode); b.setAttribute('aria-selected', String(b.dataset.mode === mode)); }
@@ -438,19 +520,22 @@
 
   async function sendMessage() {
     const text = input.value.trim();
-    if (!text) return;
+    if (!text || state.sending || imagesBlocked()) return;
     if (state.picks.length > MAX_PICKS) { alert(`고른 곳이 ${state.picks.length}개입니다. 한 번에 ${MAX_PICKS}개까지 보낼 수 있으니 ${state.picks.length - MAX_PICKS}개를 빼고 보내 주세요.`); return; }
-    const product = await target.context();
-    const picks = state.picks.map(({ id, ...rest }) => rest);
-    const context = { page: product.page, study: product.study, errors: product.errors || [], picks,
-      missing: state.missing.slice(-8).map(m => `${m.method} ${m.path}`) };
-    input.value = '';
-    typingChanged();
+    const images = [...state.images], mode = state.mode, original = input.value;
+    state.sending = true; updateSend();
     try {
-      await api('chat', { json: { mode: state.mode, text, context } });
+      const product = await target.context();
+      const picks = state.picks.map(({ id, ...rest }) => rest);
+      const context = { page: product.page, study: product.study, errors: product.errors || [], picks,
+        images: images.map(image => image.payload), missing: state.missing.slice(-8).map(m => `${m.method} ${m.path}`) };
+      await api('chat', { json: { mode, text, context } });
+      if (input.value === original) input.value = '';
+      removeImages(images); typingChanged();
       if (picks.length) clearPicks();
       endPreviewHere(); // the server ended this browser's preview: his own request is about his screen
-    } catch (error) { input.value = text; alert('보내지 못했습니다: ' + error.message); }
+    } catch (error) { alert('보내지 못했습니다: ' + error.message); }
+    finally { state.sending = false; updateSend(); }
   }
   input.addEventListener('input', () => typingChanged());
   $('composer').addEventListener('submit', e => { e.preventDefault(); sendMessage(); });

@@ -16,10 +16,13 @@ Design decisions: `evidence/studio-design-final-20261027.md` (D1–D11). Phase 1
 deep, other screens browsable), 바꾸기 (edit) + 되돌리기 (undo = `git revert`), critique (D4), 물어보기 (Q&A from
 `status.json` + the repo), daily digest. Added 2026-10-28: two windows / overlay, point-and-click, the
 "할 수 있는 것" showcase; the product window as an ordinary tab and the viewer as the product's popup; the admin
-console against the mock; 먼저 제안하기 (Phase 2, proactive suggestions with pre-built previews). Captures and A/B are
+console against the mock; 먼저 제안하기 (Phase 2, proactive suggestions with pre-built previews). Tab capture and A/B are
 Phase 2/3.
 
 ## What Minhoon sees
+
+채팅 입력칸에 스크린샷을 Ctrl+V로 붙여넣거나 **Attach**에서 PNG/JPEG 파일을 여러 장 선택합니다. 썸네일의 ×로 빼며, 다음 바꾸기/물어보기 요청과 함께 전송됩니다.
+한 번에 4장, 장당 축소 후 8 MB까지입니다(긴 변 2000 px로 자동 축소). Claude는 첨부 파일을 Read로 열어 보고 답하며, 채팅 기록·하루 인계에는 그림 수와 저장 파일명이 남습니다.
 
 | Area | What it does |
 |---|---|

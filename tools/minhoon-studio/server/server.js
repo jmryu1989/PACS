@@ -16,6 +16,7 @@ const { DicomWeb } = require('./dicomweb');
 const { Mock } = require('./mock');
 const { Sandbox } = require('./sandbox');
 const { Chat, MAX_PICKS } = require('./chat');
+const { CHAT_BODY_BYTES } = require('./images');
 const { StatusFeed } = require('./status');
 const { writeDigest, listDigests, DIGEST_ID } = require('./digest');
 const { buildAndCheck } = require('./build');
@@ -182,7 +183,8 @@ async function main() {
     if (p === 'claude' && method === 'GET') { sendJson(res, 200, await checkClaude()); return; }
     if (p === 'history' && method === 'GET') { sendJson(res, 200, chat.history(Number(url.searchParams.get('limit') || 300))); return; }
     if (p === 'chat' && method === 'POST') {
-      const body = await readJson(req, 256 * 1024);
+      // This route alone needs room for four 8 MB images in base64, plus the existing text/pick allowance.
+      const body = await readJson(req, CHAT_BODY_BYTES);
       const text = String(body.text || '').trim();
       if (!text) { sendJson(res, 400, { error: '내용이 비었습니다.' }); return; }
       const picked = body.context && Array.isArray(body.context.picks) ? body.context.picks.length : 0;
