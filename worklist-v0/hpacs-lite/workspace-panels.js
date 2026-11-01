@@ -97,9 +97,10 @@
         saveWorkspace(); return;
       }
       const targets = { "#resize-main": ["main", ".left"], "#resize-top": ["top", ".rw"],
-        "#resize-related": ["related", ".related-p"], "#resize-prior": ["prior", ".related-list-pane"] };
+        "#resize-related": ["related", ".related-p"], "#resize-left-split": ["prior", ".related-list-pane"] };
       const [name, panel] = targets[selector];
-      const dimension = !portraitLayout() && ["main", "related"].includes(name) ? "width" : "height";
+      // Related Report and Report Editor are stacked in every layout, so the related size is always a height.
+      const dimension = !portraitLayout() && name === "main" ? "width" : "height";
       workspaceState[workspaceAxis()][name] = Math.round($(panel).getBoundingClientRect()[dimension]);
       saveWorkspace();
     }
@@ -110,6 +111,16 @@
       // Restore legacy display state as it was saved. Adopt v3 only on an
       // explicit edit/open/save, so new geometry cannot affect the first paint.
       workspaceState = result.state;
+      // First use (nothing saved yet): start with Clinical Information only. Thumbnail, AI Report, Image Report and Reading
+      // Template stay one click away in Panels; a saved choice always wins and nothing is saved by this line.
+      // A layout saved before this default existed is switched once per browser (flag below); after that the reader's own
+      // Panels choice, including Show All Panels, is kept.
+      let applyOnce = false;
+      try { applyOnce = localStorage.getItem('kin-clinical-only-default') !== '1'; localStorage.setItem('kin-clinical-only-default', '1'); } catch (_) {}
+      if (['empty', 'disabled'].includes(result.status) || applyOnce) {
+        const initial = KinWorkspaceLayout.withHiddenPanels(workspaceState, [...new Set([...KinWorkspaceLayout.hiddenPanels(workspaceState), 'thumbnail', 'aiReport', 'imageReport', 'template'])]);
+        if (initial) workspaceState = initial;
+      }
       if (workspaceState.workspace) {
         let sameSession = false;
         try { sameSession = !!work.session() && workspaceStorage?.getItem(studyPanelSessionKey()) === work.session(); } catch (_) {}
@@ -134,6 +145,7 @@
       const removed = KinWorkspaceLayout.remove(workspaceStorage, workspaceOwner);
       workspaceLocalKept = !!removed;
       workspaceState = KinWorkspaceLayout.toVersion3(KinWorkspaceLayout.defaults()); layoutMode = "auto";
+      workspaceState = KinWorkspaceLayout.withHiddenPanels(workspaceState, ['thumbnail', 'aiReport', 'imageReport', 'template']) || workspaceState;
       readingWorkspace.applyPanels(KinReadingPanelLayout.defaults());
       applyLayout();
       $("#layout-status").textContent = removed ? "기본 배치 · 이 브라우저" : "초기화 저장 안 됨 · 이 창에서만 유지";
@@ -243,12 +255,6 @@
       // drawer later moves nothing (W3R-03).
       if (event.reason === 'select') scheduleWorkspaceLayout();
     });
-    $('#rail-collapse').addEventListener('click', () => {
-      if (!workspaceEditable()) return;
-      workspaceState = KinWorkspaceLayout.toVersion3(workspaceState);
-      workspaceState.workspace.railCollapsed = !workspaceState.workspace.railCollapsed;
-      applyLayout(); saveWorkspace();
-    });
     bindPanelResize('#resize-rail', 'x', e => {
       const left = $('.left').getBoundingClientRect();
       document.body.style.setProperty('--workspace-rail-width', clampPanel(e.clientX - left.left, 160, innerWidth / 3) + 'px');
@@ -269,16 +275,13 @@
       const maximum = Math.max(current, 140, $(".right").getBoundingClientRect().height - 266);
       top.style.height = clampPanel(current + delta, Math.min(current, 140), maximum) + "px";
     });
-    bindPanelResize("#resize-related", () => portraitLayout() ? "y" : "x", (e, axis) => {
+    bindPanelResize("#resize-related", "y", e => {
       const box = $(".workrow").getBoundingClientRect();
-      if (axis === "y")
-        $(".related-p").style.height = clampPanel(e.clientY - box.top, 286, box.height - 186) + "px";
-      else
-        $(".related-p").style.width = clampPanel(e.clientX - box.left, 220, box.width - 366) + "px";
+      $(".related-p").style.height = clampPanel(e.clientY - box.top, portraitLayout() ? 286 : 150, box.height - 186) + "px";
     });
-    bindPanelResize("#resize-prior", "y", e => {
-      const box = $(".related-p").getBoundingClientRect();
+    bindPanelResize("#resize-left-split", "y", e => {
+      const box = $(".left").getBoundingClientRect();
       const list = $(".related-list-pane");
       list.style.flex = "none";
-      list.style.height = clampPanel(e.clientY - box.top, 150, box.height - 136) + "px";
+      list.style.height = clampPanel(box.bottom - e.clientY, 80, box.height - 170) + "px";
     });

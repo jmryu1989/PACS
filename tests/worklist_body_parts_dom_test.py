@@ -163,14 +163,14 @@ class WorklistBodyPartsDOMTest(unittest.TestCase):
             body['studies'][0]['series'] = 3
             return body
         self.site.list_body = changed_source
-        page.locator('#refresh').click()
+        page.locator('#m-refresh').click()
         expect(page.locator('#chips')).to_contain_text('(0 · Partial)')
         expect(page.locator('#rows tr[data-uid]')).to_have_count(0)
         expect(page.locator('#active-filter-name')).to_have_text('Chest saved')
         expect(page.locator('#findings')).to_have_value('draft before lookup')
         self.assertIn('부위 미확인 3건', page.locator('#chips button').get_attribute('aria-label'))
         # D1041: Folders is already open for this login.
-        expect(page.locator('#worklist-folders-toggle')).to_have_attribute('aria-expanded', 'true')
+        expect(page.locator('#worklist-folders-panel')).to_have_attribute('open', '')
         folder = page.get_by_role('navigation', name='Folders').get_by_role('button', name=re.compile('^Chest saved'))
         expect(folder).to_have_text('Chest saved (—)')
         expect(folder).to_have_attribute('aria-current', 'true')

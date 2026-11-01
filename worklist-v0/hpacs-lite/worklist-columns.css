@@ -1,4 +1,18 @@
 /* Colours follow the work page palette (Minhoon 2026-10-27 item 11, workspace-theme.css). */
+/* Header "+" column picker: small, compact, opens under the button. */
+.col-add { width: 16px; height: 16px; padding: 0; margin-right: 4px; line-height: 1; font-size: 13px; font-weight: 700; color: #e3e3e3; background: #2d2d2d; border: 1px solid #b4b4b466; border-radius: 3px; cursor: pointer; vertical-align: middle; }
+.col-add:hover { background: #8ab4c833; border-color: #8ab4c8; }
+#column-picker { min-width: 190px; overflow: auto; box-sizing: border-box; padding: 6px 8px; border: 1px solid #b4b4b466; border-radius: 6px; background: #2d2d2d; color: #e3e3e3; font-size: 11px; }
+#column-picker::backdrop { background: #0000; }
+#column-picker header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 4px; }
+#column-picker .cp-row { display: flex; align-items: center; gap: 4px; padding: 1px 0; border-top: 2px solid transparent; border-bottom: 2px solid transparent; }
+#column-picker .cp-row label { flex: 1; white-space: nowrap; }
+#column-picker .cp-grip { cursor: grab; color: #b4b4b4; user-select: none; padding: 0 2px; }
+#column-picker .cp-dragging { opacity: .4; }
+#column-picker .cp-before { border-top-color: #8ab4c8; }
+#column-picker .cp-after { border-bottom-color: #8ab4c8; }
+#column-picker footer { margin-top: 4px; }
+#column-picker button { font-size: 11px; padding: 1px 6px; }
 #column-manager { width: min(620px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); box-sizing: border-box; padding: 18px; border: 1px solid #b4b4b466; border-radius: 10px; background: #2d2d2d; color: #e3e3e3; }
 #column-manager::backdrop { background: #000000b8; }
 #column-manager header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -24,3 +38,27 @@
 #column-manager select, #column-manager .wc-width { background: #212121; color: #e3e3e3; border: 1px solid #b4b4b466; padding: 6px; border-radius: 4px; }
 #rows .wc-cell, #relrows .wc-cell { white-space: normal; overflow-wrap: anywhere; }
 #rows .wc-cell .hold { white-space: normal; }
+
+/* Excel-style column resize: grip on the right edge of each header; fixed layout once a width has been set. */
+#heads th { position: sticky; }
+#heads .col-grip { position: absolute; top: 0; right: 0; width: 7px; height: 100%; cursor: col-resize; z-index: 3; }
+#heads .col-grip:hover, #heads .col-grip.dragging { background: var(--kin-link, #8ab4c8); opacity: .55; }
+table.cols-fixed { table-layout: fixed; }
+table.cols-fixed th, table.cols-fixed td { overflow: hidden; text-overflow: ellipsis; }
+
+/* Clear Filters button in the first cell of the filter row */
+#filterrow .col-clear { width: 100%; padding: 1px 2px; font-size: 10px; line-height: 1.3; cursor: pointer; white-space: nowrap;
+  color: var(--kin-text, #e3e3e3); background: var(--kin-panel2, #2d2d2d); border: 1px solid var(--kin-line2, #333c4d); border-radius: 3px; }
+#filterrow .col-clear:hover { border-color: var(--kin-link, #8ab4c8); }
+
+/* StudyDate filter menu */
+#filterrow .date-filter select { width: 100%; min-width: 0; }
+/* "Custom…" opens a floating window (position set by placeDatePopup) so the filter row keeps its height. */
+#filterrow .date-filter .date-custom { position: fixed; z-index: 60; display: flex; flex-direction: column; gap: 6px; width: 210px; padding: 8px 10px; box-sizing: border-box;
+  background: var(--kin-panel, #2d2d2d); border: 1px solid var(--kin-line2, #333c4d); border-radius: 4px; box-shadow: 0 6px 18px rgba(0,0,0,.5); }
+#filterrow .date-filter .date-custom::before { content: "Custom date range"; font-size: 11px; color: var(--kin-muted, #b4b4b4); }
+#filterrow .date-filter .date-custom label { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 11px; }
+#filterrow .date-filter .date-custom[hidden] { display: none; }
+#filterrow .date-filter input[type="date"] { width: 130px; min-width: 0; font-size: 11px; box-sizing: border-box; }
+
+#column-picker .cp-row input[type="number"] { width: 72px; margin-left: auto; }

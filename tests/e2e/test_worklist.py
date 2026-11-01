@@ -337,7 +337,7 @@ class WorklistE2E(unittest.TestCase):
             tech.locator("#t-verify").click()
         self.assertEqual(reply.value.status, 200)
         self.assertEqual(self.state(fixture)["ss"], "Verified")
-        doctor.locator("#refresh").click()
+        doctor.locator("#m-refresh").click()
         for button in ("#b-save", "#b-transcribe", "#b-approve"):
             expect(doctor.locator(button)).to_be_enabled()
         expect(doctor.locator("#findings")).to_have_js_property("readOnly", False)
@@ -431,7 +431,7 @@ class WorklistE2E(unittest.TestCase):
         first.locator("#findings").fill(fixture.secret)
         self.wait_state(first, fixture, lambda s: s.get("holder") == self.stack.actor("doctor"))
         self.select(second, fixture)
-        second.locator("#refresh").click()
+        second.locator("#m-refresh").click()
         try:
             expect(second.locator("#holdbar")).to_be_visible()
         except AssertionError:
@@ -484,7 +484,7 @@ class WorklistE2E(unittest.TestCase):
         second.locator("#findings").fill("Second writer after administrator release")
         self.wait_state(second, fixture, lambda s: s.get("holder") == self.stack.actor("doctor2"))
         self.assertEqual(self.state(fixture)["draft"]["findings"], fixture.secret)
-        first.locator("#refresh").click()
+        first.locator("#m-refresh").click()
         self.locked(first)
 
     def test_09_defer_reason_cancel_and_commit(self):

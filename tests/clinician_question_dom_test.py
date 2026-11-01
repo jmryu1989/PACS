@@ -2053,7 +2053,7 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
             self.assertNotIn(needle, READER_BLOCK, needle)
         markup = slice_between(MAIN, '<div class="panel report-p">', "<!-- Order List (8.2.2)")
         self.assertLess(markup.index('<div class="redit">'), markup.index('<section id="question-p"'))
-        self.assertLess(markup.index('<section id="question-p"'), markup.index('<div class="rfoot2">'))
+        self.assertLess(markup.index('<section id="question-p"'), markup.index('<div class="rfoot2 rbtns">'))
 
         opened, answered, _ = self.seed_threads()
         self.open_reader(me(RADIOLOGIST, ["radiologist"]))

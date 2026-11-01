@@ -319,16 +319,88 @@
        share; the context column is 34% of the row within 120-300px and scrolls inside itself, so it never adds height to
        the report column. The two floors (160 + 120px) fit the reading layout's narrowest report column (300px,
        reading-panel-layout.js). `hidden` (no radiologist/admin role, ended session) gives its width back to the editor. */
-    /* A short column shrinks the row only down to its head row (title, Read Only/Editable, Resume Editing): with no
-       floor the row went to 0px in short portrait windows with the Study Panel open, and the head and the fields drew
-       over the Questions bar and the footer. The floor is the row's automatic minimum, which counts the head and not
-       the fields: .redit's zero basis below keeps its text out of it, and its fields scroll inside it. */
-    .report-compose { flex: 1; display: flex; }
+    /* 입력칸의 내용 높이를 남겨 좁은 카드에서도 첫 소견을 읽을 수 있게 한다.
+       부족한 높이는 Report Editor 카드에서 스크롤하며 버튼 줄은 입력칸 아래에 남긴다. */
+    .report-compose { flex: 1 0 auto; display: flex; }
     .report-editor { flex: 1 1 0; min-width: 160px; min-height: 0; display: flex; flex-direction: column; }
     .report-compose > .clinical-context { flex: 0 1 clamp(120px, 34%, 300px); min-width: 120px; overflow: auto; padding: 3px 8px 6px;
       box-sizing: border-box; contain: size; }
     .report-compose > .clinical-context[hidden] { display: none; }
-    /* The head wraps: at the 160px editor floor its one line (title, state, Resume Editing) was ~230px and ran under
+    /* Clinical Context now sits beside Clinical Info inside the Clinical band (two columns, each scrolls on its own). */
+    /* 두 정보 영역은 텍스트 길이에 관계없이 같은 너비를 사용한다. */
+    .clin-pair { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); width: 100%; }
+    /* Related Report panel and Report Editor are stacked (one above the other, each full width) instead of side by side.
+       Same arrangement the portrait layout already uses; the handle between them now drags the height split (row-resize). */
+    body .workrow { flex-direction: column; }
+    body .workrow > .related-p { width: calc(100% - 12px) !important; height: 42%; min-height: 150px; flex: none; }
+    body .workrow > .report-p { flex: 1; min-width: 0; min-height: 180px; }
+    /* Five separate boxes: Worklist, Related Exam, Clinical Information, Related Report, Report Editor.
+       Each is its own rounded card with a gap around it on a darker backdrop. (Dragging the boxes around is not built yet.) */
+    body .left, body .right, body .workrow { background: #141414; }
+    body .left > .grid { margin: 6px 6px 0; border: 1px solid var(--kin-line2); border-bottom: 0; border-radius: 6px 6px 0 0; background: var(--kin-panel); }
+    body .left > .statusbar { margin: 0 6px 0; border: 1px solid var(--kin-line2); border-top: 1px solid var(--kin-line); border-radius: 0 0 6px 6px; background: var(--kin-panel); }
+    body .left > .related-list-pane { margin: 0 6px 6px; border: 1px solid var(--kin-line2); border-radius: 6px; background: var(--kin-panel); }
+    body .left > #resize-left-split { height: 6px; }
+    body .rw { background: #141414; border-bottom: 0; }
+    body .rw > .s-clinical { margin: 6px 6px 0; border: 1px solid var(--kin-line2); border-radius: 6px; background: var(--kin-panel); overflow: hidden; width: calc(100% - 12px); }
+    body .workrow > .related-p, body .workrow > .report-p { margin: 6px 6px 0; border: 1px solid var(--kin-line2); border-radius: 6px; background: var(--kin-panel); overflow: hidden; }
+    body .workrow > .report-p { margin-bottom: 6px; }
+    body .workrow > .report-p { overflow-y: auto; }
+    body .workrow > #resize-related { width: 100%; height: 6px; cursor: row-resize; }
+    body .workrow > #resize-related::after { left: 0; right: 0; top: 2px; bottom: auto; width: auto; height: 2px; }
+    /* Compact top bar: one 30px row instead of 52px. The Status group (Prefetch / Storage / DB state) goes from a 2-row grid to a single line. */
+    body .menubar, body.portrait .menubar { height: 30px !important; min-height: 0 !important; flex-wrap: nowrap !important; padding-top: 0 !important; padding-bottom: 0 !important; overflow: visible; }
+    body .menubar .tabs { height: 100% !important; min-height: 0 !important; margin-right: 8px; }
+    body .menubar .tabs > div { padding: 0 12px; font-size: 12px; }
+    body .menubar .item { padding: 4px 8px; font-size: 12px; }
+    body .menubar .brand { margin-right: 6px; }
+    body .menubar > .spacer { flex: 1 1 0; min-width: 0; }
+    body .menubar-status { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+    body .menubar-session { flex: 0 1 auto; min-width: 160px; margin-left: auto; }
+    body .menubar > .toolbar-menu { display: block; flex: none; }
+    /* 펼친 메뉴는 30px 상단 줄의 너비를 늘리지 않고 화면 안에서 자체 스크롤한다. */
+    body .menubar > .toolbar-menu[open]::details-content {
+      position: fixed; z-index: 100; left: var(--top-menu-left, 8px); top: var(--top-menu-top, 30px);
+      width: max-content; max-width: calc(100vw - 16px);
+      max-height: calc(100vh - var(--top-menu-top, 30px) - 8px); overflow: auto;
+    }
+    @media (max-width: 1100px) {
+      body .menubar .item { padding: 3px 4px; font-size: 11px; }
+      body .menubar .tabs > div { padding: 0 6px; font-size: 11px; }
+      body .menubar .brand span, body .menubar .item-label { display: none; }
+      body .menubar { padding-inline: 4px; }
+      body .menubar .brand { display: none; }
+      body .menubar .item { flex: 0 1 auto; min-width: 18px; overflow: hidden; text-overflow: ellipsis; }
+      body .menubar .tabs { flex: none; margin-right: 0; }
+      body .menubar .tabs > div { padding-inline: 4px; }
+      body .menubar-session { max-width: 180px; }
+      body .menubar-session .session-who { flex: 1 1 0; min-width: 64px; padding-inline: 2px; gap: 3px; font-size: 10px; }
+      body .menubar-session #user, body .menubar-session #roles { flex: 1 1 0; min-width: 20px; }
+      body .menubar-session > .mright { margin-left: 3px; }
+      body .menubar > .toolbar-menu > summary { padding-inline: 4px; }
+      body .menubar #m-reading { max-width: 90px; }
+    }
+    body .menubar .brand img { width: 18px; height: 18px; }
+    body .menubar-status { display: flex; align-items: center; column-gap: 10px; margin-left: 6px; white-space: nowrap; }
+    @media (max-width: 1500px) { body .menubar-status { display: none; } }
+    body .menubar-status .mright { line-height: 1.1; font-size: 11px; }
+    body .menubar-status #dbstat { width: auto; min-width: 0; white-space: nowrap; }
+    body .menubar-session .mright, body .menubar .logout { font-size: 11px; padding-top: 2px; padding-bottom: 2px; }
+    /* The "select an exam to read" status line above the Related Exam list (still in the DOM; scripts write to it). */
+    #related-current { display: none !important; }
+    /* 환자 ID는 기존 단축키로 복사하고 Context는 검사 전환 때 갱신하므로 임상 정보 띠의 중복 동작을 접는다. */
+    .s-clinical > .copy-patient-block, #clinical-context-refresh { display: none !important; }
+    /* The title bar is split 50:50 too: left half = Clinical Info (+ Source SR / Tech Note), right half = the Clinical Context title.
+       The panel's own h4 stays in the DOM but is hidden, since the bar now carries the title. */
+    .s-clinical > h3 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: center; padding: 0; }
+    .s-clinical > h3 > .clin-left { grid-column: 1; grid-row: 1; padding: 0 10px; min-width: 0; }
+    .s-clinical > h3::after { content: "Clinical Context"; grid-column: 2; grid-row: 1; padding: 0 10px; border-left: 1px solid var(--kin-line2, #333c4d); }
+    .clinical-context-head > h4 { display: none; }
+    /* Always a 50:50 split: the Clinical Context half stays in place (empty, Refresh disabled) until a study is shown. */
+    .clin-pair > .clinical { min-width: 0; min-height: 0; width: auto; flex: none; overflow: auto; }
+    .clin-pair > .clinical-context { min-width: 0; min-height: 0; width: auto; max-width: none; flex: none; overflow: auto; padding: 6px 10px;
+      box-sizing: border-box; contain: none; border-left: 1px solid var(--kin-line2, #333c4d); }
+    .clin-pair > .clinical-context[hidden] { display: none; }    /* The head wraps: at the 160px editor floor its one line (title, state, Resume Editing) was ~230px and ran under
        Clinical Context, which then took Resume Editing's clicks. Wrapped, Resume Editing takes a line of its own there. */
     .report-editor-head { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; flex: none; padding: 3px 10px 0;
       font-size: 11px; min-width: 0; }
@@ -340,7 +412,7 @@
        wider than a 1366px window and cut off Clinical Context at its right edge. It is cut to the room left instead. */
     #question-summary, #image-request-summary, #cvr-sent-summary { width: 0; }
     #report-editor-resume[hidden] { display: none; }
-    .redit { flex: 1 1 0px; overflow: auto; padding: 4px 10px; display: flex; flex-direction: column; gap: 2px; }
+    .redit { flex: 1 0 auto; overflow: auto; padding: 4px 10px; display: flex; flex-direction: column; gap: 2px; }
     .redit label { margin: 2px 0; font-size: 11px; color: #8892a4; }
     .redit textarea { flex: 0 1 auto; width: 100%; box-sizing: border-box; background: #14181f; color: #cdd3dc; border: 1px solid #3a4356; padding: 6px; font: inherit; resize: none; overflow: hidden; }
     #findings { height: 80px; min-height: 50px; }
@@ -366,6 +438,11 @@
        More를 연 높이가 늘지 않고, 대체 텍스트를 비워(/ "") 화면 낭독기가 그룹 이름을 두 번 읽지 않는다. 글자색은 --kin-dim이
        아니라 단추 글자와 같은 --kin-muted다: 11px 글자가 이 바탕에서 --kin-dim이면 명암비 4.5:1에 못 미친다. */
     .rbtns > #b-dictate, .rbtns #b-unread, .rbtns #b-clear { margin-left: 8px; }
+    /* 확정(Approve, Approve & Next)은 가장 자주 누르는 Save·◀ Prev와 4px 붙어 있었다. 간격과 세로 구분선으로 떼어
+       확정 단추를 다른 단추로 착각해 누르지 않게 한다. 순서·크기·색은 그대로라 손에 익은 위치는 바뀌지 않는다. */
+    .rbtns > #b-approve, .rfoot2 > #b-approve-next { margin-inline: 8px; border-inline: 2px solid var(--kin-line2); }
+    .rbtns > #b-approve + #b-save, .rfoot2 > #b-approve-next + #b-prev { position: relative; }
+    .rbtns > #b-approve + #b-save::before, .rfoot2 > #b-approve-next + #b-prev::before { content: ""; position: absolute; left: -7px; top: 3px; bottom: 3px; border-left: 1px solid var(--kin-line2); pointer-events: none; }
     .rbtns .toolbar-section::before { content: attr(aria-label) / ""; color: var(--kin-muted); font-size: 11px; white-space: nowrap; }
     @media (max-width: 1250px) {
       body.reading .rbtns > .toolbar-menu > summary { padding: 5px 7px; }
@@ -380,8 +457,8 @@
     .draftbar b { color: #f0c95a; }
     /* W4 숨긴 Recommendation의 읽기 전용 띠 — 안내줄과 같은 등급, 펼쳐도 판독문 칸을 밀어내지 않게 글은 짧게 스크롤한다. */
     .recnote { flex: none; padding: 3px 10px; background: #1f2530; border-top: 1px solid #3a4356; color: #c3cad6; font-size: 11px; }
-    .recnote summary { cursor: pointer; }
-    #recnote-text { margin: 3px 0 1px; max-height: 5.5em; overflow: auto; white-space: pre-wrap; color: #dfe5ee; }
+    #recnote { white-space: nowrap; overflow-x: auto; }
+    #recnote-text { color: #dfe5ee; }
     /* 인용 목록 — 안내줄과 같은 등급이며 판독문 편집 영역의 크기를 바꾸지 않는다. */
     #citelist { flex: none; max-height: 30vh; overflow: auto; padding: 4px 10px 6px;
                 background: #20242e; border-top: 1px solid #3a4356; color: #c3cad6; font-size: 11px; }
@@ -748,9 +825,9 @@
     }
 
     .userfilter {
-      min-height: 59px;
-      padding: 12px 20px;
-      gap: 8px;
+      min-height: 38px;
+      padding: 5px 10px;
+      gap: 5px;
       background: var(--kin-bg);
       border-bottom: 1px solid var(--kin-line);
     }
@@ -759,13 +836,13 @@
     .chip,
     .qf button,
     .ctxbar button {
-      height: 34px;
-      padding: 0 12px;
+      height: 26px;
+      padding: 0 8px;
       color: var(--kin-muted);
       background: var(--kin-panel);
       border: 1px solid var(--kin-line2);
-      border-radius: 7px;
-      font-size: 12.5px;
+      border-radius: 5px;
+      font-size: 11px;
     }
     #b-monitor {
       border-color: #4da3ff;
@@ -897,25 +974,34 @@
     .left { border-right-color: var(--kin-line2); }
     .ctxbar { background: var(--kin-bg); border-bottom-color: var(--kin-line); }
     .grid { background: var(--kin-bg); }
-    .left .grid table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    #worklist-pages { flex-shrink: 0; background: var(--kin-panel2); color: var(--kin-muted); font-size: 12px; }
-    #worklist-pages button, #worklist-pages select, #study-fetch button, .related-filter button { border: 1px solid var(--kin-line2); border-radius: 4px; padding: 5px 7px; color: var(--kin-text); background: var(--kin-panel); }
+    /* UXR-G-13: 목록 기본 11px(민훈 2026-11-01), 사용자 설정으로 키움. */
+    .left .grid table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    #worklist-pages { flex-shrink: 0; background: var(--kin-panel2); color: var(--kin-muted); font-size: 11px; margin-left: auto; padding: 0 !important; border-top: 0 !important; background: transparent; gap: 6px !important; flex-wrap: nowrap !important; }
+    /* 다중 선택 동작은 선택할 때만 나타나고 페이지 이동은 여러 페이지일 때 남겨 검사를 놓치지 않는다. */
+    #worklist-selection[hidden], #page-current, #row-keyboard-help { display: none; }
+    /* Related Exam은 왼쪽 목록 아래에 두고 높이는 workspace의 prior 크기로 복원한다. */
+    body .left > .related-list-pane { flex: none !important; height: 190px; min-height: 0; overflow: hidden; border-top: 1px solid var(--kin-line2); }
+    body .left > .related-list-pane .grid2 { flex: 1; min-height: 0 !important; overflow: auto; }
+    body .left > .related-list-pane #related-keyboard-help { display: none; }
+    body .related-p .prior-report-pane { height: auto !important; flex: 1; min-height: 80px; }
+    #worklist-pages:has(#page-prev:disabled):has(#page-next:disabled) :is(#page-prev, #page-next, #page-status) { display: none; }
+    #worklist-pages button, #worklist-pages select, #study-fetch button, .related-filter button { border: 1px solid var(--kin-line2); border-radius: 4px; padding: 2px 5px; color: var(--kin-text); background: var(--kin-panel); }
     #worklist-pages button:not(:disabled) { cursor: pointer; }
     #worklist-pages button:disabled { opacity: .45; }
     #worklist-pages :focus-visible { outline: 2px solid #77c9ff; outline-offset: 2px; }
     .left .grid th,
-    .left .grid td { padding: 9px 12px; border: 0; border-bottom: 1px solid var(--kin-line); color: var(--kin-text); }
+    .left .grid td { padding: 2px 6px; border: 0; border-bottom: 1px solid var(--kin-line); color: var(--kin-text); }
     .left .grid thead th {
-      height: 35px;
+      height: 24px;
       color: var(--kin-muted);
       background: var(--kin-panel2);
       border-bottom-color: var(--kin-line2);
-      font-size: 11.5px;
+      font-size: 10.5px;
       font-weight: 600;
-      letter-spacing: .06em;
+      letter-spacing: .03em;
       text-align: left;
     }
-    .left .grid thead tr.filters th { top: 35px; height: 27px; padding: 3px; background: var(--kin-panel2); }
+    .left .grid thead tr.filters th { top: 24px; height: 21px; padding: 1px 2px; background: var(--kin-panel2); }
     .filters input,
     .filters select {
       height: 21px;
@@ -948,17 +1034,17 @@
     #rows tr.sel td:first-child { box-shadow: inset 3px 0 0 var(--kin-accent) !important; }
 
     .statusbar {
-      min-height: 39px;
+      min-height: 26px;
       justify-content: flex-start;
       align-items: center;
-      gap: 18px;
-      padding: 10px 20px;
+      gap: 10px;
+      padding: 3px 10px;
       color: var(--kin-muted);
       background: var(--kin-panel);
       border-top: 1px solid var(--kin-line2);
-      font-size: 12.5px;
+      font-size: 11px;
     }
-    #countlist { display: flex; align-items: center; gap: 18px; }
+    #countlist { display: flex; align-items: center; gap: 10px; }
     #countlist .count { display: flex; align-items: center; gap: 6px; }
     #countlist .dot { width: 8px; height: 8px; border-radius: 50%; }
     #countlist .dot-w { background: var(--kin-st-w); }
@@ -966,7 +1052,7 @@
     #countlist .dot-ho { background: var(--kin-st-ho); }
     #countlist .dot-p { background: var(--kin-st-p); }
     #countlist .dot-t { background: var(--kin-st-t); }
-    #filterlist { margin-left: auto; color: var(--kin-dim); font-size: 11.5px; }
+    #filterlist { margin-left: 0; color: var(--kin-dim); font-size: 11.5px; }
 
     #image-opening-dialog { width: 460px; max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); overflow: auto; color: var(--kin-text); background: var(--kin-panel); border: 1px solid var(--kin-muted); border-radius: 8px; padding: 20px; }
     #image-opening-dialog::backdrop { background: #0009; }
@@ -991,6 +1077,15 @@
     .clinical td:first-child { color: var(--kin-dim); }
     .redit textarea { color: var(--kin-text); background: var(--kin-bg); border-color: var(--kin-line2); }
     .redit textarea:focus { border-color: var(--kin-accent); box-shadow: 0 0 0 3px var(--kin-focus-ring); }
+    /* 피드백 8 "clearly mark the editable editor": 쓰는 칸은 왼쪽 띠·밝은 바탕·진한 테두리로 주변 읽기 패널과 구분한다.
+       읽기 전용이면 띠를 빼고 점선 테두리에 라벨 글자로도 알린다(색만으로 구분하지 않음). */
+    .redit { border-left: 3px solid var(--kin-accent); background: rgba(79,142,247,.05); }
+    .redit label { color: var(--kin-text); font-weight: 600; }
+    .redit textarea:read-write { background: #131d31; border-color: rgba(130,160,210,.5); }
+    .redit:has(#findings:read-only) { border-left-color: transparent; background: none; }
+    .redit textarea:read-only { border-style: dashed; }
+    .redit:has(#findings:read-only) label[for="findings"]::after,
+    .redit:has(#conclusion:read-only) label[for="conclusion"]::after { content: " · read only"; font-weight: 400; color: var(--kin-muted); }
     /* ── S5-U4c 영상 요청 ──
        대기열은 Order List 패널 안에서 높이 상한 안에 스크롤해 오더 표와 상태줄을 밀어내지 않는다. 판독 쪽 줄은 요청이 있을 때만
        한 줄로 서고, 펼친 창은 높이 상한 안에서 스크롤한다. 글자는 12px 이상(UXR-G-13), 상태는 색과 함께 늘 글자로 쓴다(UXR-G-12). */
@@ -1205,95 +1300,10 @@
     </div>
     <div class="item" id="m-home">⌂ Home</div>
     <button class="item" id="m-reading" type="button">Reading Workspace</button>
-    <div class="item" title="Config — 추후 구현">⚙ <span class="item-label">Config</span></div>
+    <div class="item" id="m-config" role="button" tabindex="0" title="Panel Settings — 판독 창의 패널을 보이거나 숨깁니다.">⚙ <span class="item-label">Config</span></div>
     <div class="item" title="Help — 추후 구현">? <span class="item-label">Help</span></div>
     <div class="item" id="m-filmbox">⇄ Filmbox</div>
-    <!-- D1882 수신 보류 알림. 관리자에게만, 보류가 있을 때만 보인다 — 평소엔 0건이라 숨어 있다. -->
-    <a class="item" id="m-held" href="admin.html#held-sources" style="display:none;color:#d8b24a;text-decoration:none"
-       title="보낸 병원을 확인하지 못해 보류된 검사가 있습니다. 관리 화면 Held Studies에서 병원과 확인한 장비·기관명 표기를 등록하세요.">⚠ Held Studies</a>
-    <div class="spacer"></div>
-    <div class="menubar-status" role="group" aria-label="Status">
-      <div class="mright">Prefetch <input type="checkbox" aria-label="Prefetch" checked></div>
-      <div class="mright" id="storage" data-state="not_loaded" title="서버 전체 저장량을 아직 관측하지 않았습니다. 관측 전에는 값을 보이지 않으며 0으로 두지 않습니다.">Storage Unobservable</div>
-      <div class="mright" id="dbstat" title="앱 상태(판독문·RS·매칭)가 어디에 저장되는지">● 확인 중</div>
-    </div>
-    <!-- 세션 묶음은 줄지 않는 한 덩어리다. 헤더가 좁으면 앞 항목이 다음 줄로 내려가도 Log out은 화면 안에 남는다.
-         사용자·기관 문구는 헤더에서 한 줄로 줄어 보일 수 있고, 전체 문구는 이 단추가 여는 Session details에 있다.
-         계정 동작(Change Password)도 그 안에 있어 헤더 폭을 늘리지 않는다. -->
-    <div class="menubar-session" role="group" aria-label="Session">
-      <button class="mright session-who" id="session-who" type="button" popovertarget="session-details">
-        <span id="user"></span>
-        <span id="roles" style="color:#4da3ff"></span>
-      </button>
-      <div class="session-details" id="session-details" popover role="group" aria-label="Session details">
-        <dl>
-          <dt>User</dt>
-          <dd id="session-details-user"></dd>
-          <dt>Institution · Roles</dt>
-          <dd id="session-details-roles" title="Keycloak 렐름 롤"></dd>
-        </dl>
-        <a class="session-action" href="/api/auth/login?action=UPDATE_PASSWORD" target="_blank" rel="noopener">Change Password</a>
-      </div>
-      <a class="mright member-link" id="member-link" href="admin.html" style="display:none">Members</a>
-      <div class="mright" title="메뉴·버튼은 영어, 설명·오류 안내는 한국어로 표시합니다.">EN</div>
-      <button class="mright logout" id="logout" type="button">Log out</button>
-    </div>
-  </div>
-
-  <!-- 사용자 필터 영역 (6.2): Quick Search + 날짜 퀵필터 + Save/Clear -->
-  <!-- S5-UI2 (UXR-G-01): 컨트롤·id·핸들러는 그대로이고 묶음만 새로 생겼다. 한 줄에 보이는 것은 Search 묶음, Filters,
-       Refresh와 간격 메뉴, View, More, 상태 묶음, 그리고 페이지 스크립트가 이 툴바 끝에 붙이는 검색 방식 줄
-       (worklist-search.js)의 일곱이다. 나머지는 <details> 묶음 안에 있어 스크립트 없이 열리고 닫힌다. 역할별 disabled·hidden은
-       스크립트가 지금처럼 정하고, 묶음 안에 넣은 것을 권한 통제로 쓰지 않는다. 상태 묶음에는 문구만 둔다(단추 없음). -->
-  <div class="userfilter">
-    <div class="toolbar-search" id="toolbar-search" role="group" aria-label="Search">
-      <input id="quick" placeholder="ID or Name" aria-label="Patient ID or Name">
-      <select id="quick-match" aria-label="Patient Search Match"><option value="contains">Contains</option><option value="prefix">Starts With</option><option value="exact">Exact</option></select>
-      <button class="chip" id="clearfilter">Clear</button>
-    </div>
-    <button class="chip" id="worklist-folders-toggle" type="button" aria-controls="worklist-folders-panel" aria-expanded="true" title="폴더 목록을 열거나 닫습니다.">Folders</button>
-    <details class="toolbar-menu" id="toolbar-filters" name="kin-toolbar-menu">
-      <summary class="chip" title="검사일·저장 검색·즐겨찾기·검사 태그·부위 조건을 펼칩니다. 단추 앞의 점 표시는 검사일·저장 검색·즐겨찾기·검사 태그 중 하나 이상의 조건이 적용 중이라는 뜻입니다.">Filters<span class="toolbar-caret" aria-hidden="true">▾</span></summary>
-      <!-- 검사일 → 주요 동작 → 저장 검색 목록·적용 상태 순서다. 저장 검색 칩과 이름은 개수·길이에 상한이 없어 맨 아래 제 줄에
-           두고, 앞의 단추를 밀어내지 않게 한다. -->
-      <div class="toolbar-menu-panel" role="group" aria-label="Filters">
-        <div class="qf" id="qf">
-          <button id="qf-days-0" data-days="0">Today</button>
-          <button id="qf-days-3" data-days="3">3 Days</button>
-          <button id="qf-days-7" data-days="7">Week</button>
-          <button id="qf-days-30" data-days="30">1 Month</button>
-          <button id="qf-days-60" data-days="60">2 Months</button>
-          <button id="qf-days-all" data-days="-1" class="on">All</button>
-        </div>
-        <div class="toolbar-section" role="group" aria-label="Filter Actions">
-          <button class="chip" id="savefilter">Save Filter</button>
-          <button class="chip" id="managefilters">Search &amp; Saved Filters</button>
-          <button class="chip" id="favorite-open" type="button">Favorites</button>
-          <button class="chip" id="favorite-clear" type="button" hidden>Clear Favorite Filter</button>
-          <button class="chip" id="study-tag-open" type="button">Study Tags</button>
-          <button class="chip" id="study-tag-clear" type="button" hidden>Clear Tag Filter</button>
-          <button class="chip" id="body-parts-load" type="button" aria-describedby="body-parts-status" disabled>Read Body Parts</button>
-          <button class="chip" id="body-parts-refresh" type="button" title="확인한 부위 정보도 지우고 현재 목록의 모든 시리즈를 다시 조회합니다." hidden>Refresh Body Parts</button>
-          <button class="chip" id="body-parts-cancel" type="button" hidden>Cancel Body Parts</button>
-        </div>
-        <div class="toolbar-section toolbar-section-saved" role="group" aria-label="Saved Searches">
-          <span id="chips" style="display:flex;gap:4px;flex-wrap:wrap"></span>
-          <span id="active-filter-info" hidden style="max-width:100%;overflow-wrap:anywhere">
-            <span id="active-filter-name"></span> · <span id="active-filter-state" role="status"></span>
-            <button class="chip" id="edit-active-filter" type="button" title="적용한 저장 검색을 편집합니다. 열기만으로 목록 조건은 바뀌지 않습니다.">Edit Search</button>
-          </span>
-        </div>
-      </div>
-    </details>
-    <div class="toolbar-refresh" id="toolbar-refresh" role="group" aria-label="Refresh">
-      <button class="chip" id="refresh">Refresh</button>
-      <details class="toolbar-menu" id="toolbar-refresh-menu" name="kin-toolbar-menu">
-        <summary class="chip" aria-label="Auto Refresh" title="자동 목록 갱신 간격을 펼칩니다"><span class="toolbar-caret" aria-hidden="true">▾</span></summary>
-        <div class="toolbar-menu-panel" role="group" aria-label="Auto Refresh">
-          <label>Auto Refresh <select class="chip" id="worklist-refresh" aria-describedby="worklist-refresh-status" disabled><option value="0">Manual</option><option value="30">30 Seconds</option><option value="60">1 Minute</option><option value="120">2 Minutes</option><option value="300">5 Minutes</option></select></label>
-        </div>
-      </details>
-    </div>
+    <button class="item" id="m-refresh" type="button" title="검사 목록을 다시 불러옵니다.">↻ Refresh</button>
     <details class="toolbar-menu" id="toolbar-view" name="kin-toolbar-menu">
       <summary class="chip" title="배치·열·표시·영상 열기·영상 창 설정을 펼칩니다">View<span class="toolbar-caret" aria-hidden="true">▾</span></summary>
       <!-- 영상 열기·창, 이 브라우저의 배치, 계정 배치의 세 구획이다. 초기화 단추는 각 구획 끝에 떨어뜨려 둔다. -->
@@ -1335,8 +1345,12 @@
         <button class="chip" id="consultations-open" type="button" hidden disabled>Consultations</button>
         <button class="chip" id="study-access-open" type="button" disabled>Study Access</button>
         <button class="chip" id="worklist-alerts-open" type="button" disabled>Worklist Alerts</button>
-      </div>
-    </details>
+      <details class="toolbar-menu" id="toolbar-refresh-menu" name="kin-toolbar-menu">
+        <summary class="chip" aria-label="Auto Refresh" title="자동 목록 갱신 간격을 펼칩니다"><span class="toolbar-caret" aria-hidden="true">▾</span></summary>
+        <div class="toolbar-menu-panel" role="group" aria-label="Auto Refresh">
+          <label>Auto Refresh <select class="chip" id="worklist-refresh" aria-describedby="worklist-refresh-status" disabled><option value="0">Manual</option><option value="30">30 Seconds</option><option value="60">1 Minute</option><option value="120">2 Minutes</option><option value="300">5 Minutes</option></select></label>
+        </div>
+      </details>
     <!-- 상태 묶음은 한 줄에서 말줄임되므로 포인터를 올리거나 Tab으로 이 묶음에 오면 전문을 아래에 펼쳐 보인다. -->
     <div class="toolbar-status" id="toolbar-status" role="group" aria-label="Status" tabindex="0">
       <div class="spacer"></div>
@@ -1345,6 +1359,63 @@
         <small id="worklist-refresh-status" role="status" aria-live="polite"></small>
         <small id="body-parts-status" role="status" style="max-width:100%;overflow-wrap:anywhere"></small>
       </div>
+    </div>
+      </div>
+    </details>
+    <details class="toolbar-menu" id="toolbar-filters" name="kin-toolbar-menu">
+      <summary class="chip" title="저장 검색·즐겨찾기·검사 태그·부위 조건을 펼칩니다. 단추 앞의 점 표시는 저장 검색·즐겨찾기·검사 태그 중 하나 이상의 조건이 적용 중이라는 뜻입니다.">Filters<span class="toolbar-caret" aria-hidden="true">▾</span></summary>
+      <div class="toolbar-menu-panel" role="group" aria-label="Filters">
+        <input id="quick" placeholder="ID or Name" aria-label="Patient ID or Name">
+        <div class="toolbar-section" role="group" aria-label="Filter Actions">
+          <button class="chip" id="savefilter">Save Filter</button>
+          <button class="chip" id="managefilters">Search &amp; Saved Filters</button>
+          <button class="chip" id="favorite-open" type="button">Favorites</button>
+          <button class="chip" id="favorite-clear" type="button" hidden>Clear Favorite Filter</button>
+          <button class="chip" id="study-tag-open" type="button">Study Tags</button>
+          <button class="chip" id="study-tag-clear" type="button" hidden>Clear Tag Filter</button>
+          <button class="chip" id="body-parts-load" type="button" aria-describedby="body-parts-status" disabled>Read Body Parts</button>
+          <button class="chip" id="body-parts-refresh" type="button" title="확인한 부위 정보도 지우고 현재 목록의 모든 시리즈를 다시 조회합니다." hidden>Refresh Body Parts</button>
+          <button class="chip" id="body-parts-cancel" type="button" hidden>Cancel Body Parts</button>
+        </div>
+        <div class="toolbar-section toolbar-section-saved" role="group" aria-label="Saved Searches">
+          <span id="chips" style="display:flex;gap:4px;flex-wrap:wrap"></span>
+          <span id="active-filter-info" hidden style="max-width:100%;overflow-wrap:anywhere">
+            <span id="active-filter-name"></span> · <span id="active-filter-state" role="status"></span>
+            <button class="chip" id="edit-active-filter" type="button" title="적용한 저장 검색을 편집합니다. 열기만으로 목록 조건은 바뀌지 않습니다.">Edit Search</button>
+          </span>
+        </div>
+      </div>
+    </details>
+
+    <!-- D1882 수신 보류 알림. 관리자에게만, 보류가 있을 때만 보인다 — 평소엔 0건이라 숨어 있다. -->
+    <a class="item" id="m-held" href="admin.html#held-sources" style="display:none;color:#d8b24a;text-decoration:none"
+       title="보낸 병원을 확인하지 못해 보류된 검사가 있습니다. 관리 화면 Held Studies에서 병원과 확인한 장비·기관명 표기를 등록하세요.">⚠ Held Studies</a>
+    <div class="spacer"></div>
+    <div class="menubar-status" role="group" aria-label="Status">
+      <div class="mright">Prefetch <input type="checkbox" aria-label="Prefetch" checked></div>
+      <div class="mright" id="storage" data-state="not_loaded" title="서버 전체 저장량을 아직 관측하지 않았습니다. 관측 전에는 값을 보이지 않으며 0으로 두지 않습니다.">Storage Unobservable</div>
+      <div class="mright" id="dbstat" title="앱 상태(판독문·RS·매칭)가 어디에 저장되는지">● Checking…</div>
+    </div>
+    <!-- 세션 묶음은 줄지 않는 한 덩어리다. 헤더가 좁으면 앞 항목이 다음 줄로 내려가도 Log out은 화면 안에 남는다.
+         사용자·기관 문구는 헤더에서 한 줄로 줄어 보일 수 있고, 전체 문구는 이 단추가 여는 Session details에 있다.
+         계정 동작(Change Password)도 그 안에 있어 헤더 폭을 늘리지 않는다. -->
+    <div class="menubar-session" role="group" aria-label="Session">
+      <button class="mright session-who" id="session-who" type="button" popovertarget="session-details">
+        <span id="user"></span>
+        <span id="roles" style="color:#4da3ff"></span>
+      </button>
+      <div class="session-details" id="session-details" popover role="group" aria-label="Session details">
+        <dl>
+          <dt>User</dt>
+          <dd id="session-details-user"></dd>
+          <dt>Institution · Roles</dt>
+          <dd id="session-details-roles" title="Keycloak 렐름 롤"></dd>
+        </dl>
+        <a class="session-action" href="/api/auth/login?action=UPDATE_PASSWORD" target="_blank" rel="noopener">Change Password</a>
+      </div>
+      <a class="mright member-link" id="member-link" href="admin.html" style="display:none">Members</a>
+      <div class="mright" title="메뉴·버튼은 영어, 설명·오류 안내는 한국어로 표시합니다.">EN</div>
+      <button class="mright logout" id="logout" type="button">Log out</button>
     </div>
   </div>
 
@@ -1358,12 +1429,9 @@
     <!-- ══ 좌측: 워크리스트 (6.3) / Study List (8.1) ══ -->
     <div class="left">
     <details id="worklist-folders-panel" open>
-      <summary>Folders</summary>
-      <button id="rail-collapse" type="button" class="chip" aria-expanded="true" title="폴더 너비를 접거나 펼칩니다.">Rail</button>
+      <summary title="폴더 목록을 왼쪽으로 접거나 펼칩니다.">Folders</summary>
       <div id="resize-rail" role="separator" aria-orientation="vertical" aria-label="폴더 너비 조절"></div>
       <div id="worklist-folders"></div>
-      <button type="button" class="chip" id="shortcuts-reload">Reload Shortcuts</button>
-      <button type="button" class="chip" id="shortcuts-save" disabled>Save Shortcuts</button>
       <p id="shortcuts-status" role="status" lang="ko"></p>
     </details>
       <!-- Context Menu 버튼 (8.1.3) — Technician 모드에서만 -->
@@ -1389,17 +1457,57 @@
         </table>
       </div>
 
-      <nav id="worklist-pages" aria-label="검색 결과 페이지" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;border-top:1px solid var(--kin-line)">
-        <button id="page-prev" type="button">Previous Page</button><span id="page-status" role="status"></span><button id="page-next" type="button">Next Page</button>
-        <label>페이지당 <select id="page-size"><option>25</option><option>50</option><option selected>100</option></select>건</label>
-        <button id="page-current" type="button">Selected Study Page</button>
-        <span id="row-keyboard-help">↑/↓ · Home/End 이동 · Space 선택 · Enter 판독 진입</span>
-      </nav>
       <div id="worklist-selection" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;font-size:12px"></div>
       <div id="study-fetch" style="padding:4px 10px;font-size:12px" hidden><span id="study-fetch-status" role="status"></span> <button id="study-fetch-resume" type="button">Resume</button> <button id="study-fetch-cancel" type="button">Stop Loading</button></div>
       <details id="not-observed" style="padding:2px 10px;font-size:12px" hidden><summary id="not-observed-summary"></summary><div id="not-observed-list"></div></details>
+      <div class="statusbar">
+        <span id="countlist"></span>
+        <span id="observation-status" role="status" hidden></span>
+        <span id="filterlist">Filter : -</span>
+        <nav id="worklist-pages" aria-label="검색 결과 페이지" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;border-top:1px solid var(--kin-line)">
+        <button id="page-prev" type="button">Previous Page</button><span id="page-status" role="status"></span><button id="page-next" type="button">Next Page</button>
+        <label>Per page <select id="page-size"><option>25</option><option>50</option><option selected>100</option></select></label>
+        <button id="page-current" type="button">Selected Study Page</button>
+        <span id="row-keyboard-help">↑/↓ · Home/End 이동 · Space 선택 · Enter 판독 진입</span>
+        </nav>
+      </div>
+      <!-- Related Exam list now sits under the Radiology worklist (moved from the right column; same ids). -->
+      <div class="resizer resizer-h" id="resize-left-split" role="separator" aria-orientation="horizontal"
+           title="드래그하여 워크리스트와 Related Exam 높이 조절"></div>
+        <div class="related-list-pane">
+          <div class="reltabs" id="reltabs">
+            <span class="rel-title">Related Exam</span>
+            <span class="spacer"></span>
+            <button id="related-return" type="button" disabled title="판독문은 유지하고 판독 대상의 영상과 정보를 봅니다">Reading Target</button>
+          </div>
+          <div id="related-current" tabindex="-1" role="status" aria-live="polite">판독 대상을 선택하세요</div>
+          <div class="related-filter">
+            <select id="related-modality" aria-label="관련 검사 Modality" disabled><option value="">All Modalities</option></select>
+            <button id="related-options-open" type="button" popovertarget="related-options">More Filters</button>
+            <span id="related-filter-count" role="status" aria-live="polite">0 / 0</span>
+            <span id="related-pages" hidden><button id="related-page-prev" type="button">Previous</button><span id="related-page-status" role="status"></span><button id="related-page-next" type="button">Next</button>
+            <button id="related-page-current" type="button">Viewed Study Page</button></span>
+          </div>
+          <div id="related-options" popover="manual" style="inset:auto 18px 18px auto;width:min(360px,calc(100vw - 48px));max-height:calc(100vh - 48px);overflow:auto;background:var(--kin-panel);color:var(--kin-text);border:1px solid var(--kin-border);padding:12px;border-radius:8px">
+            <b>Related Exam Filters</b><button type="button" popovertarget="related-options" popovertargetaction="hide" style="float:right">Close</button>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px">            <label><input type="checkbox" id="related-include-current" disabled> Include Current</label>
+            <select id="related-body-part" aria-label="관련 검사 Body Part" disabled><option value="">All Body Parts</option></select>
+            <button id="related-load-parts" type="button" disabled title="같은 환자의 현재·관련 검사에 기록된 DICOM 부위를 조회합니다">Load Body Parts</button>
+            <button id="related-cancel-parts" type="button" hidden>Cancel</button>
+</div>
+            <div id="related-parts-status" role="status" style="font-size:11px;padding:2px 6px"></div>
+          </div>
+          <div id="related-filter-hidden" role="status" hidden>The study being viewed is outside the filter</div>
+          <div id="related-keyboard-help" style="font-size:12px">↑/↓ · Home/End 이동 · Enter 미리보기 · Tab 영상 버튼</div>
+          <div class="grid2">
+            <table aria-describedby="related-keyboard-help">
+              <thead><tr><th>Viewing</th><th>StudyDate</th><th>Modality</th><th>StudyDesc</th><th>Count</th><th>RS</th><th>Report</th></tr></thead>
+              <tbody id="relrows"><tr><td class="empty" colspan="7">-</td></tr></tbody>
+            </table>
+          </div>
+        </div>
       <!-- S7-U3b: 목록 값의 출처를 적은 글자뿐인 범례. 요청·저장 상태가 없고, 설정이 없는 요소는 Not Configured로 둔다
-           (값을 추정해 채우지 않는다). Radiology 전용이라 setMode가 Technician에서 숨긴다. -->
+           (값을 추정해 채우지 않는다). Radiology 전용이라 setMode가 Technician에서 숨긴다. Moved to the very bottom of the left column. -->
       <details id="routing-factors">
         <summary>Routing Factors</summary>
         <p>목록에 보이는 값이 어디서 오는지 적었습니다. 이 화면은 값을 추정하거나 판독의 배정·목록 순서를 대신 정하지 않습니다.</p>
@@ -1415,11 +1523,6 @@
           <dt>Availability</dt><dd>Not Configured</dd>
         </dl>
       </details>
-      <div class="statusbar">
-        <span id="countlist"></span>
-        <span id="observation-status" role="status" hidden></span>
-        <span id="filterlist">Filter : -</span>
-      </div>
     </div>
     <div class="resizer resizer-v" id="resize-main" role="separator" aria-orientation="vertical"
          title="드래그하여 워크리스트 너비 조절"></div>
@@ -1439,14 +1542,25 @@
           </div>
         </section>
         <section class="s-clinical">
-          <h3>Clinical Info <button id="sr-open" class="chip" type="button" disabled>Source SR</button> <button id="tech-note-open" class="chip" type="button" disabled>Tech Note</button></h3>
-          <div style="padding:4px 10px;overflow-wrap:anywhere">
+          <h3><span class="clin-left">Clinical Info <button id="sr-open" class="chip" type="button" disabled>Source SR</button> <button id="tech-note-open" class="chip" type="button" disabled>Tech Note</button></span></h3>
+          <div class="copy-patient-block" hidden style="padding:4px 10px;overflow-wrap:anywhere">
             <button id="copy-patient-id" class="chip" type="button" aria-keyshortcuts="Control+Alt+C" aria-describedby="copy-patient-context" disabled>Copy Patient ID</button>
             <span style="font-size:11px">Ctrl+Alt+C</span>
             <div id="copy-patient-context" style="font-size:11px">열람 검사를 선택하세요</div>
             <div id="copy-patient-status" role="status" aria-live="polite" style="font-size:11px"></div>
           </div>
+          <!-- Clinical Information and Clinical Context side by side (Context moved here from beside the report editor). -->
+          <div class="clin-pair">
           <div class="clinical" id="clinical" tabindex="-1" role="region" aria-label="열람 검사 정보">No clinical information provided.</div>
+          <!-- S7-U4b: Clinical Context(계약 S7-U4p §10). 보고 있는 검사의 정보다(clinical-context-panel.js). -->
+          <section id="clinical-context" class="clinical-context" role="region" aria-label="Clinical Context" hidden>
+            <div class="clinical-context-head"><h4 id="clinical-context-title">Clinical Context</h4><button id="clinical-context-refresh" class="chip" type="button" disabled>Refresh</button></div>
+            <div id="clinical-context-status" role="status" aria-live="polite"></div>
+            <div id="clinical-context-conflict" role="alert" hidden></div>
+            <div id="clinical-context-sections"></div>
+            <p id="clinical-context-scope">이 패널은 서명된 과거 판독문·검사 이력·DICOM 요청 태그·Tech Note만 보여 줍니다. 오더·EMR·검사실·병리 정보는 연결되어 있지 않습니다.</p>
+          </section>
+          </div>
           <!-- S4-U1b: 폴링마다 관측 시각이 바뀌므로 #clinical 밖에 둔다. 열람 검사 정보는 폴링으로 바뀌지 않는다. -->
           <div id="study-receipt" role="group" aria-label="기관 배정·KIN 관측·Gateway 보고" style="flex:none;padding:2px 10px 6px;font-size:11px;overflow-wrap:anywhere" hidden>
             <div>Institution: <span id="receipt-assignment"></span></div><div>Observed: <span id="receipt-observation"></span></div><div>Gateway: <span id="receipt-gateway"></span></div><div><button type="button" id="receipt-retry" class="chip" hidden>Now Retry</button> <span id="receipt-retry-note"></span></div>
@@ -1507,40 +1621,6 @@
       <div class="workrow">
       <!-- Related Exam 목록 + 고른 검사의 판독문(같은 패널 안). W5 Related Report 모드도 이 판독문 자리에 열린다. -->
       <div class="panel related-p">
-        <div class="related-list-pane">
-          <div class="reltabs" id="reltabs">
-            <span class="rel-title">Related Exam</span>
-            <span class="spacer"></span>
-            <button id="related-return" type="button" disabled title="판독문은 유지하고 판독 대상의 영상과 정보를 봅니다">Reading Target</button>
-          </div>
-          <div id="related-current" tabindex="-1" role="status" aria-live="polite">판독 대상을 선택하세요</div>
-          <div class="related-filter">
-            <select id="related-modality" aria-label="관련 검사 Modality" disabled><option value="">All Modalities</option></select>
-            <button id="related-options-open" type="button" popovertarget="related-options">More Filters</button>
-            <span id="related-filter-count" role="status" aria-live="polite">0 / 0</span>
-            <span id="related-pages" hidden><button id="related-page-prev" type="button">Previous</button><span id="related-page-status" role="status"></span><button id="related-page-next" type="button">Next</button>
-            <button id="related-page-current" type="button">Viewed Study Page</button></span>
-          </div>
-          <div id="related-options" popover="manual" style="inset:auto 18px 18px auto;width:min(360px,calc(100vw - 48px));max-height:calc(100vh - 48px);overflow:auto;background:var(--kin-panel);color:var(--kin-text);border:1px solid var(--kin-border);padding:12px;border-radius:8px">
-            <b>Related Exam Filters</b><button type="button" popovertarget="related-options" popovertargetaction="hide" style="float:right">Close</button>
-            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px">            <label><input type="checkbox" id="related-include-current" disabled> Include Current</label>
-            <select id="related-body-part" aria-label="관련 검사 Body Part" disabled><option value="">All Body Parts</option></select>
-            <button id="related-load-parts" type="button" disabled title="같은 환자의 현재·관련 검사에 기록된 DICOM 부위를 조회합니다">Load Body Parts</button>
-            <button id="related-cancel-parts" type="button" hidden>Cancel</button>
-</div>
-            <div id="related-parts-status" role="status" style="font-size:11px;padding:2px 6px"></div>
-          </div>
-          <div id="related-filter-hidden" role="status" hidden>열람 중인 검사는 필터 밖입니다</div>
-          <div id="related-keyboard-help" style="font-size:12px">↑/↓ · Home/End 이동 · Enter 미리보기 · Tab 영상 버튼</div>
-          <div class="grid2">
-            <table aria-describedby="related-keyboard-help">
-              <thead><tr><th>Viewing</th><th>StudyDate</th><th>Modality</th><th>StudyDesc</th><th>Count</th><th>RS</th><th>Report</th></tr></thead>
-              <tbody id="relrows"><tr><td class="empty" colspan="7">-</td></tr></tbody>
-            </table>
-          </div>
-        </div>
-        <div class="resizer resizer-h" id="resize-prior" role="separator" aria-orientation="horizontal"
-             title="드래그하여 Related 목록과 이전 판독문 높이 조절"></div>
         <div class="prior-report-pane">
           <div class="prior-report-head">
             <b>Related Report</b>
@@ -1548,7 +1628,7 @@
             <span class="readonly">Read only</span>
           </div>
           <div class="prior-report-body">
-            <div class="prior-report-status" id="prior-report-status">Related Exam을 선택하세요</div>
+            <div class="prior-report-status" id="prior-report-status">관련 검사를 선택하세요</div>
             <div id="prior-report-content" style="display:none">
               <div class="prior-report-section"><h4>Findings</h4><div class="prior-report-value" id="prior-findings"></div></div>
               <div class="prior-report-section"><h4>Conclusion</h4><div class="prior-report-value" id="prior-conclusion"></div></div>
@@ -1606,7 +1686,7 @@
         </div>
       </div>
       <div class="resizer resizer-v" id="resize-related" role="separator" aria-orientation="vertical"
-           title="드래그하여 Related 패널 너비 조절"></div>
+           title="드래그하여 Related Report와 Report Editor 높이 조절"></div>
 
       <!-- Report (7.4) — Radiology 모드 -->
       <div class="panel report-p">
@@ -1616,37 +1696,6 @@
              늘고, 받아쓰기 창까지 열면 판독문 칸이 최소 높이에 닿으므로 받아쓰기를 위해 More를 열게 하지 않는다. 역할별 disabled는
              스크립트가 지금처럼 정하고, More 안에 넣은 것을 권한 통제로 쓰지 않는다. 서식 입력 단추(Structured)는 스크립트가
              Print 바로 앞에 붙이므로 Print와 같은 구획에 나타난다. -->
-        <div class="rbtns">
-          <button class="approve" id="b-approve">Approve</button>
-          <button class="save" id="b-save">Save</button>
-          <button id="b-prelim" title="상급 판독의를 지정해 최종 판독을 맡깁니다 (RS: P)">Prelim</button>
-          <button id="b-dictate" disabled title="음성 인식기가 연결되지 않았습니다.">Dictate</button>
-          <details class="toolbar-menu" id="report-more">
-            <summary aria-label="More Report Actions" title="판독(추가기재·전사 요청), 상태(보류·판독 제외·CVR 표시·미판독으로 되돌리기), 편집(복사·붙여넣기·지우기·상용구 저장), 인쇄·개정 이력 단추를 펼칩니다. 서식 입력(Structured)은 서식이 있을 때 Print and History 구획의 Print 앞에 나타납니다">More<span class="toolbar-caret" aria-hidden="true">▾</span></summary>
-            <div class="toolbar-menu-panel" role="group" aria-label="More Report Actions">
-              <div class="toolbar-section" id="report-more-reading" role="group" aria-label="Reading">
-                <button id="b-addendum" disabled title="승인된 판독문에 덧붙입니다 (이전 승인본은 그대로 남습니다)">Addendum</button>
-                <button id="b-transcribe">Transcribe</button>
-              </div>
-              <div class="toolbar-section" id="report-more-status" role="group" aria-label="Status">
-                <button id="b-defer">Defer</button>
-                <button hidden id="b-except" disabled title="판독 제외: 아직 연결되지 않은 기능입니다(7/9단계 예정). 권한 때문에 막힌 것이 아닙니다.">Except</button>
-                <button id="b-mark-cvr" disabled title="중요 결과(CVR) 보내기: 서버가 이 검사에서 보낼 수 있다고 답하기 전에는 켜지지 않습니다.">Mark CVR</button>
-                <button id="b-unread">Reset to Unread</button>
-              </div>
-              <div class="toolbar-section" id="report-more-editor" role="group" aria-label="Editor">
-                <button id="b-copy">Copy</button>
-                <button id="b-paste">Paste</button>
-                <button id="b-clear">Clear</button>
-                <button id="b-report-template" disabled>Save as Template</button>
-              </div>
-              <div class="toolbar-section" id="report-more-output" role="group" aria-label="Print and History">
-                <button id="b-print">Print</button>
-                <button id="b-history" title="판독문 개정 이력">History</button>
-              </div>
-            </div>
-          </details>
-        </div>
         <!-- W4: 검사를 옮기지 않았을 때만 보인다(쓰던 글의 저장 거절·결과 모름·충돌·글자 조합). 무엇을 누르면 되는지 함께 말한다. -->
         <div class="draftbar" id="report-notice" role="status" aria-live="polite" style="display:none">
           <span id="report-notice-msg"></span>
@@ -1701,10 +1750,7 @@
           </div>
         </div>
         <!-- W4 (설계 v4 §3): 숨긴 Recommendation에 값이 있을 때만 보이는 읽기 전용 띠. 편집기가 아니다 — 숨긴 칸은 그대로다. -->
-        <details class="recnote" id="recnote" hidden>
-          <summary title="이 판독문에는 화면에 입력칸이 없는 Recommendation 값이 있습니다. 저장·승인에 그대로 포함됩니다. 펼쳐서 읽을 수 있습니다">Recommendation (existing value · read only)</summary>
-          <div id="recnote-text"></div>
-        </details>
+        <div class="recnote" id="recnote" hidden>Recommendation: <span id="recnote-text"></span></div>
         <!-- 민훈 피드백 8(2026-10-27): 판독문 편집기 옆에 Clinical Context를 둔다. 편집기 머리줄은 지금 이 칸에 쓸 수 있는지를
              서버 쓰기와 같은 관문(reportEditorBlock)으로 말한다(report-editor.js renderEditorState). 머리줄은 .redit 밖에 있어
              Related Report 모드가 편집기를 잠근 동안에도 Resume Editing을 누를 수 있다. -->
@@ -1725,14 +1771,6 @@
               <textarea id="recommendation" aria-label="Recommendation" aria-hidden="true" tabindex="-1"></textarea>
             </div>
           </div>
-          <!-- S7-U4b: Clinical Context(계약 S7-U4p §10). 보고 있는 검사의 정보다(clinical-context-panel.js). -->
-          <section id="clinical-context" class="clinical-context" role="region" aria-label="Clinical Context" hidden>
-            <div class="clinical-context-head"><h4 id="clinical-context-title">Clinical Context</h4><button id="clinical-context-refresh" class="chip" type="button" disabled>Refresh</button></div>
-            <div id="clinical-context-status" role="status" aria-live="polite"></div>
-            <div id="clinical-context-conflict" role="alert" hidden></div>
-            <div id="clinical-context-sections"></div>
-            <p id="clinical-context-scope">이 패널은 서명된 과거 판독문·검사 이력·DICOM 요청 태그·Tech Note만 보여 줍니다. 오더·EMR·검사실·병리 정보는 연결되어 있지 않습니다.</p>
-          </section>
         </div>
         <!-- S5-U4b 임상의 질문 스레드(판독 대상 검사). 질문이 있거나 읽기가 실패했거나 창을 연 동안에만 보인다 — 질문이
              없는 검사의 판독 화면 배치는 그대로다. 판독문 칸·버튼 줄 밖에 있고 판독문을 읽거나 쓰지 않는다. -->
@@ -1745,7 +1783,37 @@
           </div>
           <div id="question-pane" role="region" aria-label="Question Threads" hidden></div>
         </section>
-        <div class="rfoot2">
+        <!-- 저장·승인·이동을 편집기 아래 한 줄에서 이어가며, 각 승인 단추 양옆은 간격과 선으로 구분한다. -->
+        <div class="rfoot2 rbtns">
+          <button class="approve" id="b-approve">Approve</button>
+          <button class="save" id="b-save">Save</button>
+          <button id="b-prelim" title="상급 판독의를 지정해 최종 판독을 맡깁니다 (RS: P)">Prelim</button>
+          <button id="b-dictate" disabled title="음성 인식기가 연결되지 않았습니다.">Dictate</button>
+          <details class="toolbar-menu" id="report-more">
+            <summary aria-label="More Report Actions" title="판독(추가기재·전사 요청), 상태(보류·판독 제외·CVR 표시·미판독으로 되돌리기), 편집(복사·붙여넣기·지우기·상용구 저장), 인쇄·개정 이력 단추를 펼칩니다. 서식 입력(Structured)은 서식이 있을 때 Print and History 구획의 Print 앞에 나타납니다">More<span class="toolbar-caret" aria-hidden="true">▾</span></summary>
+            <div class="toolbar-menu-panel" role="group" aria-label="More Report Actions">
+              <div class="toolbar-section" id="report-more-reading" role="group" aria-label="Reading">
+                <button id="b-addendum" disabled title="승인된 판독문에 덧붙입니다 (이전 승인본은 그대로 남습니다)">Addendum</button>
+                <button id="b-transcribe">Transcribe</button>
+              </div>
+              <div class="toolbar-section" id="report-more-status" role="group" aria-label="Status">
+                <button id="b-defer">Defer</button>
+                <button hidden id="b-except" disabled title="판독 제외: 아직 연결되지 않은 기능입니다(7/9단계 예정). 권한 때문에 막힌 것이 아닙니다.">Except</button>
+                <button id="b-mark-cvr" disabled title="중요 결과(CVR) 보내기: 서버가 이 검사에서 보낼 수 있다고 답하기 전에는 켜지지 않습니다.">Mark CVR</button>
+                <button id="b-unread">Reset to Unread</button>
+              </div>
+              <div class="toolbar-section" id="report-more-editor" role="group" aria-label="Editor">
+                <button id="b-copy">Copy</button>
+                <button id="b-paste">Paste</button>
+                <button id="b-clear">Clear</button>
+                <button id="b-report-template" disabled>Save as Template</button>
+              </div>
+              <div class="toolbar-section" id="report-more-output" role="group" aria-label="Print and History">
+                <button id="b-print">Print</button>
+                <button id="b-history" title="판독문 개정 이력">History</button>
+              </div>
+            </div>
+          </details>
           <button class="approve" id="b-approve-next">Approve &amp; Next</button>
           <button id="b-prev">◀ Prev</button>
           <button id="b-next">Next ▶</button>

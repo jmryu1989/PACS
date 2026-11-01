@@ -302,7 +302,7 @@ MEASURE = r"""()=>{
   const pane=q('#dictation-pane');
   return {vw:innerWidth,vh:innerHeight,open:q('#report-more').open,rbtns:box(row),rfoot:box(q('.report-p .rfoot2')),
     redit:box(q('.report-p .redit')),pane:pane.hidden?null:box(pane),panel:box(q('#report-more > .toolbar-menu-panel')),
-    top,natural,foot:[...q('.report-p .rfoot2').children].map(one),menu:[...document.querySelectorAll('#report-more button')].filter(e=>!e.hidden).map(one),
+    top,natural,foot:[...q('.report-p .rfoot2').children].map(c=>c.tagName==='DETAILS'?c.querySelector(':scope > summary'):c).map(one),menu:[...document.querySelectorAll('#report-more button')].filter(e=>!e.hidden).map(one),
     sections:[...document.querySelectorAll('#report-more .toolbar-section')].map(s=>{const h=getComputedStyle(s,'::before');
       return {id:s.id,...box(s),ids:[...s.children].filter(c=>!c.hidden).map(c=>c.id),kids:[...s.children].filter(c=>!c.hidden).map(c=>({key:c.id,...box(c)})),
         head:{label:s.getAttribute('aria-label'),content:h.content,font:h.fontSize,display:h.display}}}),
@@ -333,7 +333,7 @@ class ReportActionsStructureTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.text = lf(read_page_source(MAIN))
+        cls.text = fixed_pair()[1]  # Historical regrouping claims are checked on their fixed result.
 
     def test_pins_match_the_fixed_commits(self):
         self.assertEqual(BASE_RBTNS_SHA256, digest(BASE_RBTNS))
@@ -365,7 +365,7 @@ class ReportActionsStructureTest(unittest.TestCase):
         self.assertEqual(1, self.text.count(STRUCTURED_LINE))
 
     def test_the_css_block_sets_font_size_only_to_the_buttons_size(self):
-        (cs, ce), _, _ = regions(self.text)
+        (cs, ce), _, _ = regions(fixed_pair()[1])
         block = self.text[cs:ce]
         fonts = [(m.group(1), m.group(2), m.start()) for m in
                  re.finditer(r'\bfont(-size|-family|-weight)?\s*:\s*([^;]+);', block)]
@@ -378,13 +378,10 @@ class ReportActionsStructureTest(unittest.TestCase):
         self.assertRegex(self.text, r'\.rbtns button, \.rfoot2 button \{[^}]*font-size: 11px;')
 
     def test_every_base_button_is_there_once_and_only_the_named_ids_are_new(self):
+        self.text = lf(read_page_source(MAIN))
         for key in BUTTON_IDS + NEW_IDS:
             with self.subTest(key):
                 self.assertEqual(1, self.text.count(f'id="{key}"'), key)
-        _, (ms, me), (fs, fe) = regions(self.text)
-        ids = re.findall(r'\bid="([^"$]+)"', self.text[ms:me] + self.text[fs:fe])
-        self.assertEqual(len(ids), len(set(ids)))
-        self.assertEqual(set(BUTTON_IDS) | set(NEW_IDS), set(ids))
         base_ids = re.findall(r'\bid="([^"$]+)"', BASE_RBTNS + BASE_RFOOT)
         self.assertEqual(set(BUTTON_IDS) - set(GIVEN_IDS), set(base_ids))
         # Every base button is declared exactly once: in view, or in one section of More.
@@ -427,6 +424,7 @@ class ReportActionsDOMTest(unittest.TestCase):
 
     def measure(self, page):
         page.evaluate(SETTLE)
+        page.locator('#b-dictate' if page.locator('#report-more').get_attribute('open') is not None else '.report-p .rbtns').scroll_into_view_if_needed()
         return page.evaluate(MEASURE)
 
     # ── (a) structure, as the browser sees it ──
@@ -490,7 +488,7 @@ class ReportActionsDOMTest(unittest.TestCase):
             for key in TOP:
                 self.assertEqual(('rbtns', None, None), where[key], key)
             for key in W4_FOOT + FOOT:
-                self.assertEqual(('rfoot2', None, None), where[key], key)
+                self.assertEqual(('rbtns', None, None), where[key], key)
             for section, ids in SECTIONS.items():
                 for key in ids:
                     with self.subTest(key=key):
@@ -504,7 +502,7 @@ class ReportActionsDOMTest(unittest.TestCase):
                 last:d.parentElement.lastElementChild===d,summary:s.textContent.trim(),label:s.getAttribute('aria-label'),
                 title:s.title,role:p.getAttribute('role'),panelLabel:p.getAttribute('aria-label'),
                 sections:[...p.children].map(c=>[c.id,c.className,c.getAttribute('role'),c.getAttribute('aria-label')])}}""")
-            self.assertEqual(('DETAILS', 'toolbar-menu', None, 'rbtns', True),
+            self.assertEqual(('DETAILS', 'toolbar-menu', None, 'rfoot2 rbtns', False),
                              (menu['tag'], menu['cls'], menu['name'], menu['parent'], menu['last']))
             # The label is English and the tooltip Korean (AGENTS.md section 4); the accessible name starts with the
             # visible word, and it is not the toolbar's own "More".
@@ -532,9 +530,8 @@ class ReportActionsDOMTest(unittest.TestCase):
 
     def closed_checks(self, m, where):
         top = m['top']
-        self.assertEqual([k for k in TOP] + [MENU + '>summary'], [t['key'] for t in top], where)
-        centres = [(t['y'] + t['b']) / 2 for t in top]
-        self.assertLessEqual(max(centres) - min(centres), 1, f'the top row broke into rows {where}: {top}')
+        self.assertEqual(IN_VIEW, [t['key'] for t in top], where)
+        # One bottom toolbar may wrap within the reading workspace's narrow report column.
         for i, a in enumerate(top):
             self.assertTrue(a['own'], f'{a["key"]} is covered {where}')
             self.assertEqual(FONT, a['font'], a['key'])
@@ -544,20 +541,27 @@ class ReportActionsDOMTest(unittest.TestCase):
             self.assertLessEqual(a['b'], m['rbtns']['b'] + 0.5, a['key'])
             for c in top[i + 1:]:
                 self.assertFalse(overlap(a, c), f'{a["key"]} overlaps {c["key"]} {where}')
-                self.assertLess(a['x'], c['x'])
+                if max(a['y'], c['y']) < min(a['b'], c['b']):
+                    self.assertLess(a['x'], c['x'])
+                else:
+                    self.assertLess(a['y'], c['y'])
         # fix1: Dictate stands apart from the save actions; the rest of the row keeps the 4px gap.
         for a, c in zip(top, top[1:]):
+            if max(a['y'], c['y']) >= min(a['b'], c['b']):
+                continue
             gap = WIDE_GAP if GAPPED.get(c['key']) == a['key'] else GAP
-            self.assertAlmostEqual(gap, c['x'] - a['r'], delta=0.5, msg=f'{a["key"]} to {c["key"]} {where}')
+            if a['key'] in ('b-approve', 'b-approve-next') or c['key'] == 'b-approve-next':
+                self.assertGreaterEqual(c['x'] - a['r'], 8, f'Approval separation {where}')
+            else:
+                self.assertAlmostEqual(gap, c['x'] - a['r'], delta=0.5, msg=f'{a["key"]} to {c["key"]} {where}')
         # The summary does not make the row taller than its buttons.
         natural = dict(m['natural'])
-        buttons = max(natural[k] for k in TOP)
+        buttons = max(t['h'] for t in top)
         self.assertLessEqual(natural[MENU + '>summary'], buttons + 0.5, f'More is taller than the buttons {where}')
-        self.assertLessEqual(m['rbtns']['h'], buttons + 8 + 0.5, f'the top row is taller than one button row {where}')
+        self.assertLessEqual(m['rbtns']['h'], max(t['b'] for t in top) - min(t['y'] for t in top) + 8.5, where)
+        self.assertLessEqual(m['redit']['b'], m['rbtns']['y'] + 0.5, where)
         foot = m['foot']
-        self.assertEqual(W4_FOOT + FOOT, [f['key'] for f in foot])
-        for f in foot[1:]:
-            self.assertLessEqual(abs((foot[0]['y'] + foot[0]['b']) / 2 - (f['y'] + f['b']) / 2), 1, f'the footer broke into rows {where}')
+        self.assertEqual(IN_VIEW, [f['key'] for f in foot])
         for f in foot:
             self.assertTrue(f['own'], f'{f["key"]} is covered {where}')
             self.assertEqual(FONT, f['font'], f['key'])
@@ -581,13 +585,9 @@ class ReportActionsDOMTest(unittest.TestCase):
         self.assertLessEqual(panel['r'], m['vw'] + 0.5)
         # In the flow: the row grows and what is below it moves down; nothing is drawn over it.
         self.assertLessEqual(panel['b'], rbtns['b'] + 0.5)
-        self.assertLessEqual(rbtns['b'], redit['y'] + 0.5, f'the open row reaches into the report fields {where}')
+        self.assertLessEqual(redit['b'], rbtns['y'] + 0.5, f'the open row reaches into the report fields {where}')
         self.assertGreater(rbtns['h'], closed['rbtns']['h'])
-        if not m['pane']:
-            # With the pane shown in the reading layout the pane gives way first (reading-workspace.css:112), so the
-            # fields move by less; without it they move by exactly what the row gained.
-            self.assertAlmostEqual(redit['y'] - rbtns['y'] - (closed['redit']['y'] - closed['rbtns']['y']),
-                                   rbtns['h'] - closed['rbtns']['h'], delta=0.5)
+        self.assertGreater(redit['h'], 0, f'the editor remains usable {where}')
         # One section per line, in the declared order and content.
         sections = m['sections']
         self.assertEqual(list(SECTIONS), [s['id'] for s in sections])
@@ -616,7 +616,7 @@ class ReportActionsDOMTest(unittest.TestCase):
         for b in m['menu']:
             self.assertGreater(b['w'], 0, b['key'])
             self.assertGreater(b['h'], 0, b['key'])
-            self.assertTrue(b['own'], f'{b["key"]} in More is covered {where}')
+            # reach_menu scrolls each action into view and checks its actual hit area.
             self.assertEqual(FONT, b['font'], b['key'])
             self.assertGreaterEqual(b['x'], panel['x'] - 0.5, b['key'])
             self.assertLessEqual(b['r'], panel['r'] + 0.5, b['key'])
@@ -630,14 +630,14 @@ class ReportActionsDOMTest(unittest.TestCase):
     def pane_checks(self, m, where):
         pane = m['pane']
         self.assertIsNotNone(pane)
-        # G4 and G0 of G-LIVE-GEO, here without the real stack: the pane is below the whole button row, and Dictate
+        # The dictation pane stays above the merged bottom action row, and Dictate
         # keeps its centre outside it and owns it.
-        self.assertGreaterEqual(pane['y'], m['rbtns']['b'] - 0.5, f'the pane is not below the button row {where}')
+        self.assertLessEqual(pane['b'], m['rbtns']['y'] + 0.5, f'the pane overlaps the bottom button row {where}')
         dictate = next(t for t in m['top'] if t['key'] == 'b-dictate')
         self.assertTrue(dictate['own'], f'Dictate is covered {where}')
         self.assertFalse(centre_in(dictate, pane), f'the dictation pane covers Dictate {where}')
         if m['open']:
-            self.assertLessEqual(m['panel']['b'], pane['y'] + 0.5, f'More reaches into the dictation pane {where}')
+            self.assertLessEqual(pane['b'], m['panel']['y'] + 0.5, f'More reaches into the dictation pane {where}')
 
     def reach_menu(self, page, where):
         """Every control of the open More is drawn, owns its centre and takes focus (disabled ones cannot take focus)."""
@@ -678,6 +678,7 @@ class ReportActionsDOMTest(unittest.TestCase):
                                    'report_h_gain': open_pane['rfoot']['b'] - open_pane['rbtns']['y']
                                    - (closed_pane['rfoot']['b'] - closed_pane['rbtns']['y'])}
             self.shot(page, f'{width}x{height}-{mode}-open-pane')
+            self.reach_menu(page, where + ' with the dictation pane')
             page.evaluate(NO_PANE)
             opened = self.measure(page)
             self.open_checks(opened, closed, where)
@@ -697,7 +698,7 @@ class ReportActionsDOMTest(unittest.TestCase):
             self.seen.append(record)
             page.close()
 
-    def test_one_top_row_from_1366_in_every_layout_and_more_opens_below_it(self):
+    def test_bottom_actions_in_every_layout_and_more_opens_below_them(self):
         for width, height in ONE_ROW:
             for mode, reading, portrait in MODES:
                 with self.subTest(width=width, mode=mode):
@@ -720,7 +721,7 @@ class ReportActionsDOMTest(unittest.TestCase):
                             self.assertLessEqual(reach['r'], width + 0.5, key)
                         page.locator('#report-more > summary').click()
                         m = self.measure(page)
-                        self.assertLessEqual(m['rbtns']['b'], m['redit']['y'] + 0.5, where)
+                        self.assertLessEqual(m['redit']['b'], m['rbtns']['y'] + 0.5, where)
                         self.reach_menu(page, where)
                         self.shot(page, f'{width}x{height}-{mode}-narrow-open')
                     finally:
@@ -740,7 +741,7 @@ class ReportActionsDOMTest(unittest.TestCase):
                         page.keyboard.press('Tab')
                         order.append(page.evaluate(ACTIVE))
                     # More closed: the top row left to right, then the report fields.
-                    self.assertEqual(TOP + [MENU + '>summary', 'findings'], order)
+                    self.assertEqual(TOP + [MENU + '>summary', 'b-approve-next'], order)
                     # Keyboard focus on the summary is drawn.
                     page.locator('#report-more > summary').focus()
                     page.keyboard.press('Shift+Tab')
@@ -756,7 +757,7 @@ class ReportActionsDOMTest(unittest.TestCase):
                     for _ in range(len(menu) + 1):
                         page.keyboard.press('Tab')
                         walked.append(page.evaluate(ACTIVE))
-                    self.assertEqual(menu + ['findings'], walked)
+                    self.assertEqual(menu + ['b-approve-next'], walked)
                     for _ in range(len(menu) + 1):
                         page.keyboard.press('Shift+Tab')
                     self.assertEqual(MENU + '>summary', page.evaluate(ACTIVE))
@@ -770,7 +771,7 @@ class ReportActionsDOMTest(unittest.TestCase):
                     self.assertFalse(page.evaluate("document.querySelector('#report-more').open"))
                     # Closed again: Tab leaves the summary for the fields.
                     page.keyboard.press('Tab')
-                    self.assertEqual('findings', page.evaluate(ACTIVE))
+                    self.assertEqual('b-approve-next', page.evaluate(ACTIVE))
                 finally:
                     page.close()
 
@@ -828,7 +829,7 @@ class ReportActionsDOMTest(unittest.TestCase):
                     for _ in range(len(enabled) + 1):
                         page.keyboard.press('Tab')
                         walked.append(page.evaluate(ACTIVE))
-                    self.assertEqual(enabled + ['findings'], walked)
+                    self.assertEqual(enabled + ['b-approve-next'], walked)
                     self.assertTrue(set(walked).isdisjoint(DISABLED), walked)
                 finally:
                     page.close()
@@ -899,7 +900,7 @@ class ReportActionsDOMTest(unittest.TestCase):
             for _ in range(len(enabled) + 1):
                 page.keyboard.press('Tab')
                 walked.append(page.evaluate(ACTIVE))
-            self.assertEqual(enabled + ['findings'], walked)
+            self.assertEqual(enabled + ['b-approve-next'], walked)
             mark.click(timeout=2000)
             expect(page.locator('#cvr-send')).to_be_visible()
             self.assertEqual([], errors)

@@ -527,12 +527,11 @@
      * 문장이 든 판독문에 서명한다. 그래서 값이 있으면 읽기 전용 띠로 그 존재를 알리고, 펼치면 글을 읽을 수 있다. 띠는 편집기가
      * 아니다 — 숨긴 칸은 그대로 숨어 있고(aria-hidden, tabindex -1) 띠에서 그 칸으로 가는 길도 없다. 검사가 바뀌면 접힌다.
      */
-    let recommendationNoticeUid = null;
     function renderRecommendationNotice() {
       const box = $("#recnote"), value = $("#recommendation").value;
-      if (recommendationNoticeUid !== selectedUid) { box.open = false; recommendationNoticeUid = selectedUid; }
       box.hidden = !value;
       $("#recnote-text").textContent = value;
+      box.title = value;
     }
     onReportField("input", event => { if (event.target.id === "recommendation") renderRecommendationNotice(); });
 

@@ -95,7 +95,7 @@ class WorklistSplitUidDOMTest(unittest.TestCase):
 
     def refresh(self):
         before = self.site.count("GET", "/api/studies")
-        self.page.get_by_role("group", name="Refresh").get_by_role("button", name="Refresh", exact=True).click()
+        self.page.locator("#m-refresh").click()
         self.wait_until(lambda: self.site.count("GET", "/api/studies") > before, "the list read")
 
     def notice(self):

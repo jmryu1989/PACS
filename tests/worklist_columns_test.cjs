@@ -5,7 +5,7 @@ const columns={Radiology:[{k:'id'},{k:'name'},{k:'date'},{k:'desc'}],Technician:
 test('defaults and mode-specific ordering do not mutate the column schema',()=>{
   const state=model.defaults(columns); state.modes.Radiology.order.reverse();state.modes.Radiology.hidden=['desc'];
   const clean=model.normalize(state,columns);
-  assert.deepEqual(model.visible(columns,clean,'Radiology').map(c=>c.k),['date','name','id']);
+  assert.deepEqual(model.visible(columns,clean,'Radiology').map(c=>c.k),['name','id','date']);
   assert.deepEqual(model.visible(columns,clean,'Technician').map(c=>c.k),['id','name','ward']);
   assert.deepEqual(columns.Radiology.map(c=>c.k),['id','name','date','desc']);
 });

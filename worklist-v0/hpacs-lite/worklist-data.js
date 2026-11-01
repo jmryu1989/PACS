@@ -96,8 +96,12 @@
     const noteSummaries = new Map();
     function noteLabel(uid) {
       const note = noteSummaries.get(uid);
-      return !note ? '미확인' : note.present ? '있음' : note.version ? '비움·이력' : '없음';
+      return !note ? 'Unknown' : note.present ? 'Yes' : note.version ? 'Cleared' : 'None';
     }
+    // Status names are English (AGENTS.md §4); the explanation stays Korean in the chip's tooltip.
+    const NOTE_HELP = { Unknown: '아직 Tech 메모 상태를 받지 못했습니다', Yes: 'Tech 메모가 있습니다',
+      Cleared: '메모를 비웠고 이전 이력이 남아 있습니다', None: 'Tech 메모가 없습니다' };
+    function noteHelp(uid) { return NOTE_HELP[noteLabel(uid)] || ''; }
     function updateNoteSummary(uid, value) {
       if (!value || !Number.isInteger(value.version) || value.version < 0 || typeof value.present !== 'boolean') return;
       // A list poll started before a local save must not roll the badge backward.
@@ -220,7 +224,7 @@
       };
     }
     let consultationFilter = null;
-    const searchCriteria = () => ({mode,quick:$('#quick').value,days:quickDays,cols:JSON.parse(JSON.stringify(fval))});
+    const searchCriteria = () => ({mode,quick:$('#quick').value,days:-1,cols:JSON.parse(JSON.stringify(fval))});
     function folderSearches() {
       return [...userFilters.filter(f => Number.isInteger(f.id)).map(f => ({ ...f, treeId: 'own:' + f.id })),
         ...sharedSearches.map(f => ({ ...f, treeId: 'shared:' + f.id }))];
@@ -286,6 +290,108 @@
       if (id) { worklistFolders.setApplied(id); return; }
       worklistFolders.setApplied(folderSelectionIds(filter || searchCriteria()));
     }
+    // My Shortcuts → popup that sets the same column filters as the filter row (fval), so the
+    // list, the active-filter summary and Saved Searches all see them. No separate filter state.
+    const EXAM_FILTER_KEYS = ['date', 'id', 'name', 'age', 'sex', 'modality', 'desc', 'acc', 'institutionName', 'assignedReader', 'techNote',
+      'rs', 'em', 'ss', 'matched', 'preDoc', 'preReviewer', 'ward'];
+    let examFilterDialog = null;
+    function openExamFilterPopup(opener) {
+      reloadFolderSearches();
+      if (!examFilterDialog) {
+        examFilterDialog = document.createElement('dialog'); examFilterDialog.id = 'exam-filter-popup';
+        examFilterDialog.setAttribute('aria-labelledby', 'exam-filter-title');
+        document.body.append(examFilterDialog);
+      }
+      const dialog = examFilterDialog;
+      // Every column that has a filter in the header row, most-used first.
+      const cols = COLS[mode].filter(c => c.f).sort((a, b) => {
+        const at = k => { const i = EXAM_FILTER_KEYS.indexOf(k); return i < 0 ? 99 : i; };
+        return at(a.k) - at(b.k);
+      });
+      const head = document.createElement('header');
+      const title = document.createElement('h2'); title.id = 'exam-filter-title'; title.textContent = 'Filter Exams';
+      const close = document.createElement('button'); close.type = 'button'; close.textContent = 'Close';
+      head.append(title, close);
+      const note = document.createElement('p'); note.lang = 'ko';
+      note.textContent = '조건을 고르고 Apply를 누르면 목록에 바로 적용됩니다. 목록 위 필터 줄과 같은 조건입니다.';
+      const form = document.createElement('form'); form.method = 'dialog';
+      const inputs = new Map();
+      for (const c of cols) {
+        const label = document.createElement('label'); label.append(document.createTextNode(c.t + ' '));
+        const current = Array.isArray(fval[c.k]) ? fval[c.k].join(',') : String(fval[c.k] ?? '');
+        let control;
+        if (c.k === 'date') {
+          // StudyDate range: From / To (either one alone also works).
+          const [from = '', to = ''] = current.split('..');
+          const wrap = document.createElement('span'), a = document.createElement('input'), b = document.createElement('input');
+          a.type = b.type = 'date'; a.value = from; b.value = to; a.setAttribute('aria-label', 'StudyDate from'); b.setAttribute('aria-label', 'StudyDate to');
+          wrap.append(a, document.createTextNode(' – '), b); label.append(wrap);
+          control = { get: () => (a.value || b.value) ? a.value + '..' + b.value : '', set: v => { a.value = b.value = v; }, focus: () => a.focus() };
+        } else if (c.f === 'text' || c.k === 'modality') {
+          const input = document.createElement('input'); input.type = 'text'; input.value = current;
+          if (c.k === 'age') input.placeholder = '40 · 30..50 · >65';
+          if (c.k === 'modality') input.placeholder = 'CT, MR';
+          label.append(input);
+          control = { get: () => input.value.trim(), set: v => { input.value = v; }, focus: () => input.focus() };
+        } else {
+          const input = document.createElement('select');
+          for (const o of ['', ...c.f]) { const opt = document.createElement('option'); opt.value = o; opt.textContent = o || 'Any'; input.append(opt); }
+          input.value = current; label.append(input);
+          control = { get: () => input.value, set: v => { input.value = v; }, focus: () => input.focus() };
+        }
+        form.append(label); inputs.set(c.k, control);
+      }
+      const apply = document.createElement('button'); apply.type = 'submit'; apply.textContent = 'Apply';
+      const clear = document.createElement('button'); clear.type = 'button'; clear.textContent = 'Clear';
+      // Save the chosen conditions as a named shortcut folder that appears under "My Shortcuts" in the Folders menu.
+      const nameLabel = document.createElement('label'); nameLabel.append(document.createTextNode('Shortcut Name '));
+      const nameInput = document.createElement('input'); nameInput.type = 'text'; nameInput.maxLength = 100; nameInput.placeholder = 'e.g. Unassigned CT';
+      nameLabel.append(nameInput); form.append(nameLabel);
+      const saveBtn = document.createElement('button'); saveBtn.type = 'button'; saveBtn.textContent = 'Save as Shortcut';
+      const status = document.createElement('p'); status.setAttribute('role', 'status'); status.lang = 'ko';
+      const actions = document.createElement('footer'); actions.append(apply, saveBtn, clear);
+      form.append(actions, status);
+      saveBtn.onclick = async () => {
+        const name = nameInput.value.trim();
+        if (!name) { status.textContent = '바로가기 이름을 입력하세요.'; nameInput.focus(); return; }
+        commit([...inputs].map(([k, ctl]) => [k, ctl.get()]));
+        saveBtn.disabled = true; status.textContent = '저장 중입니다…';
+        try {
+          const at = work.capture('document');
+          if (await filterWriteReady(undefined, at)) throw new Error('서버 계정으로 로그인한 뒤 저장할 수 있습니다.');
+          const saved = await api('POST', '/filters', { ...snapshotFilter(), name }, undefined, at);
+          if (!work.admits(at)) throw new Error('작업 화면이 바뀌었습니다. 다시 시도하세요.');
+          work.commit(at, () => acceptSavedFilter(saved, false));
+          await reloadFolderSearches(at);
+          const list = shortcutDraft ?? storedShortcuts ?? [];
+          let id = 1; while (list.some(s => s.id === String(id))) ++id;
+          const existing = list.find(s => s.name === name);
+          const stored = await saveFolderShortcuts([...list.filter(s => s.name !== name),
+            { id: existing?.id || String(id), name, searchId: 'own:' + saved.id }]);
+          if (!work.admits(at)) return;
+          if (!stored) throw new Error($('#shortcuts-status').textContent || '바로가기 저장 결과를 확인하지 못했습니다.');
+          status.textContent = '"' + name + '" 바로가기를 My Shortcuts에 저장했습니다.';
+          nameInput.value = '';
+        } catch (error) { status.textContent = '저장하지 못했습니다: ' + error.message; }
+        finally { saveBtn.disabled = false; }
+      };
+      const commit = values => {
+        for (const [k, v] of values) {
+          if (!v) { delete fval[k]; continue; }
+          // Several modalities (CT, MR) are stored as a list, like the header filter does.
+          fval[k] = k === 'modality' && /[,\\]/.test(v) ? [...new Set(v.split(/[,\\]/).map(t => t.trim().toUpperCase()).filter(Boolean))] : (k === 'modality' ? v.toUpperCase() : v);
+        }
+        folderAppliedSearch = null;
+        worklistSearch?.change(); renderHeads(); render();
+      };
+      form.onsubmit = e => { e.preventDefault(); commit([...inputs].map(([k, ctl]) => [k, ctl.get()])); dialog.close(); };
+      clear.onclick = () => { for (const ctl of inputs.values()) ctl.set(''); commit([...inputs.keys()].map(k => [k, ''])); };
+      close.onclick = () => dialog.close();
+      dialog.onclose = () => { try { opener?.focus(); } catch (_) {} };
+      dialog.replaceChildren(head, note, form);
+      if (!dialog.open) dialog.showModal();
+      inputs.values().next().value?.focus();
+    }
     function mountWorklistFolders() {
       if (worklistFolders || !$('#worklist-folders')) return;
       worklistFolders = KinWorklistFolderTree.mount({ host: $('#worklist-folders'),
@@ -298,29 +404,24 @@
             return;
           }
           folderAppliedSearch = null; activeFilterName = null;
-          $('#quick').value = ''; quickDays = -1;
-          document.querySelectorAll('#qf button').forEach(x => x.classList.toggle('on', +x.dataset.days === quickDays));
+          $('#quick').value = '';
           Object.keys(fval).forEach(k => delete fval[k]);
           if (item.kind !== 'all') fval.modality = [...item.modalities];
           worklistSearch?.apply(); renderHeads(); render();
         },
         onChange: saveFolderShortcuts,
+        onShortcutsMenu: opener => openExamFilterPopup(opener),
       });
-      const panel = $('#worklist-folders-panel'), toggle = $('#worklist-folders-toggle');
+      const panel = $('#worklist-folders-panel');
       // Keep a tab's choice across reloads only for this login, never for an account's next login.
       const panelKey = 'kin-worklist-folders', panelSession = work.session();
       let panelPreference;
       try { panelPreference = JSON.parse(sessionStorage.getItem(panelKey)); } catch (_) {}
       panel.open = panelPreference?.session === panelSession && typeof panelPreference?.open === 'boolean'
         ? panelPreference.open : true;
-      toggle.setAttribute('aria-expanded', String(panel.open));
-      toggle.addEventListener('click', () => { panel.open = !panel.open; toggle.setAttribute('aria-expanded', String(panel.open)); });
       panel.addEventListener('toggle', () => {
-        toggle.setAttribute('aria-expanded', String(panel.open));
         try { sessionStorage.setItem(panelKey, JSON.stringify({session: panelSession, open: panel.open})); } catch (_) {}
       });
-      $('#shortcuts-reload').addEventListener('click', () => reloadFolderSearches());
-      $('#shortcuts-save').addEventListener('click', () => saveFolderShortcuts(shortcutDraft));
       updateWorklistFolders();
     }
     function filtered() {
@@ -392,13 +493,10 @@
       // 목록도, 카운트도, 필터 표시도 안 그려진다. 서버 필터가 0/3/7/30/60/-1 외의
       // days를 주면 어느 버튼도 `.on`이 아니라 실제로 도달한다.
       // 화면 한 줄을 못 쓰는 것과 화면 전체가 안 그려지는 것은 다른 사고다.
-      if (quickDays >= 0)
-        active.push(`StudyDate(${$("#qf .on")?.textContent ?? `최근 ${quickDays}일`})`);
       cols.forEach(c => { if (fval[c.k]) active.push(`${c.t}(${fval[c.k]})${shown.includes(c) ? '' : ' [숨긴 열]'}`); });
       if (sortKey && sortDir && !shown.some(c => c.k === sortKey)) active.push(`숨긴 열 정렬: ${COLS[mode].find(c => c.k === sortKey)?.t ?? sortKey} ${sortDir > 0 ? '오름차순' : '내림차순'}`);
       const compound = fval[KinCompoundFilter.KEY];
       const compoundError = KinCompoundFilter.validate(compound, cols);
-      $("#quick-match").value = compoundError ? "" : KinCompoundFilter.quickMode(compound);
       if (!compoundError && compound?.version === 2) active.push("Patient Search: " + (compound.quickMatch === "exact" ? "Exact" : "Starts With"));
       if (compoundError) active.push(`복합 조건 오류: ${compoundError} · 조건을 수정하거나 Clear로 해제하세요`);
       else if (compound?.rules.length) {
@@ -409,12 +507,12 @@
       const n = (k, v) => list.filter(s => s[k] === v).length;
       if (mode === "Radiology") {
         $("#countlist").innerHTML =
-          `<span class="count"><span class="dot dot-w"></span>W:${n("rs","W")}</span>` +
-          `<span class="count"><span class="dot dot-a"></span>A:${n("rs","A")}</span>` +
-          `<span class="count"><span class="dot dot-ho"></span>H:${n("rs","H")}</span>` +
-          `<span class="count"><span class="dot dot-ho"></span>O:${n("rs","O")}</span>` +
-          `<span class="count"><span class="dot dot-t"></span>T:${n("rs","T")}</span>` +
-          `<span class="count"><span class="dot dot-p"></span>P:${n("rs","P")}</span>` +
+          // Same words as the RS column; T (saved draft, not yet approved) is counted too so drafts are not missed.
+          `<span class="count" title="RS: W — 아직 판독하지 않음"><span class="dot dot-w"></span>Unread: ${n("rs","W")}</span>` +
+          `<span class="count" title="RS: T — 저장했지만 아직 승인하지 않은 판독문"><span class="dot dot-t"></span>In Progress: ${n("rs","T")}</span>` +
+          `<span class="count" title="RS: P — 상급 판독의 승인 대기"><span class="dot dot-p"></span>Preliminary: ${n("rs","P")}</span>` +
+          `<span class="count" title="RS: H — 판독 보류"><span class="dot dot-ho"></span>On Hold: ${n("rs","H")}</span>` +
+          `<span class="count" title="RS: A — 승인된 판독문"><span class="dot dot-a"></span>Approved: ${n("rs","A")}</span>` +
           `<span class="count">Unverified:${n("ss","Unverified")}</span>`;
       } else {
         $("#countlist").textContent =

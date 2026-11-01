@@ -305,6 +305,22 @@ def owner_of(account):
     return {"institution": INSTITUTION, "sub": account["sub"], "author": account["actor"]}
 
 
+def show_all_panels(page):
+    """Explicit user choice before measuring or exercising panels hidden by the compact default."""
+    if all(page.locator(selector).is_visible() for selector in (".s-thumb", ".s-clinical", ".s-template")):
+        return
+    menu = page.locator('#toolbar-view')
+    opened = menu.get_attribute('open') is None
+    if opened:
+        menu.locator(':scope > summary').click()
+    page.locator('#panel-settings-open').click()
+    dialog = page.get_by_role('dialog', name='Panel Settings', exact=True)
+    dialog.get_by_role('button', name='Show All Panels', exact=True).click()
+    dialog.get_by_role('button', name='Close', exact=True).click()
+    if opened:
+        menu.locator(':scope > summary').click()
+
+
 class Site:
     """The synthetic origin: the shipped files from disk and an API that answers, holds or fails on the case's word."""
 
@@ -804,6 +820,9 @@ class LogoutDOMTest(unittest.TestCase):
             else:
                 route.abort()
         self.context.route('**/api/studies/*/tech-note', reply)
+        self.page.get_by_role('button', name='Choose columns', exact=True).click()
+        self.page.locator('#column-picker [data-column=techNote]').get_by_role('checkbox').check()
+        self.page.locator('#column-picker').get_by_role('button', name='Close', exact=True).click()
         self.page.locator('#rows [data-tech-note]').first.click()
         expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_label('Note', exact=True)).to_be_editable()
         self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_label('Note', exact=True).fill('SYN my note')
@@ -838,6 +857,9 @@ class LogoutDOMTest(unittest.TestCase):
                     return route.abort()
             route.fulfill(json=dict(uid=UID, writable=True, note=notes[-1]))
         self.context.route('**/api/studies/*/tech-note**', reply)
+        self.page.get_by_role('button', name='Choose columns', exact=True).click()
+        self.page.locator('#column-picker [data-column=techNote]').get_by_role('checkbox').check()
+        self.page.locator('#column-picker').get_by_role('button', name='Close', exact=True).click()
         self.page.locator('#rows [data-tech-note]').first.click()
         dialog = self.page.get_by_role('dialog', name='Tech Note', exact=True)
         expect(dialog.get_by_label('Note', exact=True)).to_have_value('SYN A')
@@ -978,7 +1000,7 @@ class LogoutDOMTest(unittest.TestCase):
         self.wait_until(lambda: self.site.holds, "the hold the typing starts", page=page)
 
     def refresh(self, page=None):
-        (page or self.page).get_by_role("group", name="Refresh").get_by_role("button", name="Refresh", exact=True).click()
+        (page or self.page).locator("#m-refresh").click()
 
     def log_out_main(self, page=None):
         (page or self.page).evaluate("() => document.querySelector('#logout').click()")
@@ -1923,7 +1945,7 @@ class LogoutDOMTest(unittest.TestCase):
                 else:
                     self.site.ended.add(session)
                     # A request still queued from the typing can get the 401 first and hide the toolbar; click like a script.
-                    self.page.evaluate("() => document.querySelector('#refresh').click()")
+                    self.page.evaluate("() => document.querySelector('#m-refresh').click()")
                 expect(self.panel_title()).to_have_text("Session Ended")
                 self.assert_closed(cause)
                 self.page.wait_for_timeout(300)
@@ -2505,7 +2527,7 @@ class LogoutDOMTest(unittest.TestCase):
         page = self.open_main(self.watch(self.context.new_page()))
         page.locator("#rows tr", has_text=PATIENT).first.click()
         expect(page.locator("#copy-patient-id")).to_be_enabled()
-        page.locator("#copy-patient-id").click()
+        page.keyboard.press("Control+Alt+c")
         self.wait_until(lambda: page.evaluate("() => window.__synClipboard.written.length") == 1, "the clipboard write", page=page)
         self.site.logout_answers = ["hold"]
         self.log_out_main(page)

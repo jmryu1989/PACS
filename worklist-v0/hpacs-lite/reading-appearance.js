@@ -45,7 +45,7 @@ window.KinReadingAppearance = function (options) {
 
   const live=()=>!ended&&!!key&&owner()===initialOwner;
   const style=document.createElement('style');style.textContent=`
-    #rows td, #rows td span, #relrows td, #relrows td span { font-size:var(--kin-list-text,var(--kin-column-text,12px)); font-family:var(--kin-list-font,var(--kin-column-font,inherit)); }
+    #rows td, #rows td span, #relrows td, #relrows td span { font-size:var(--kin-list-text,var(--kin-column-text,11px)); font-family:var(--kin-list-font,var(--kin-column-font,inherit)); }
     .redit textarea { font-size:var(--kin-current-text,12px); font-family:var(--kin-current-font,inherit); }
     .prior-report-value { font-size:var(--kin-prior-text,12px); font-family:var(--kin-prior-font,inherit); }
     #rows td, #relrows td { color:var(--kin-list-color,var(--kin-column-color,var(--kin-text))); }

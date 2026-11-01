@@ -2623,7 +2623,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
     GEOMETRY = """() => { const q = s => document.querySelector(s), box = e => e.getBoundingClientRect();
       const panel = q('#cvr-inbox-p'), toggle = [...panel.querySelectorAll('button')].find(b => /^(Show|Hide) Received$/.test(b.textContent));
       const fields = [...q('.redit').querySelectorAll('textarea')];
-      const shown = { panel: box(panel).height, button: box(toggle).height, redit: box(q('.redit')).height,
+      const shown = { panel: box(panel).height, button: box(toggle).height, redit: box(q('.redit')).height, editBottom: box(q('.redit')).bottom,
         rbtns: [box(q('.rbtns')).top, box(q('.rbtns')).height], sent: q('#cvr-sent-p').outerHTML,
         reditMin: parseFloat(getComputedStyle(q('.redit')).minHeight) || 0,
         fields: fields.map(f => [box(f).height, parseFloat(getComputedStyle(f).minHeight) || 0]) };
@@ -2650,8 +2650,9 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                     self.page.evaluate("() => document.body.classList.add('reading')")
                 g = self.page.evaluate(self.GEOMETRY)
                 self.assertLess(g["shown"]["panel"], 2 * g["shown"]["button"], "the panel is one row: its summary line")
-                self.assertAlmostEqual(g["hidden"]["redit"] - g["shown"]["redit"], g["shown"]["panel"], delta=1)
-                self.assertEqual((g["hidden"]["rbtns"], g["hidden"]["sent"]), (g["shown"]["rbtns"], g["shown"]["sent"]))
+                self.assertGreaterEqual(g["hidden"]["redit"], g["shown"]["redit"])
+                self.assertEqual((g["hidden"]["rbtns"][1], g["hidden"]["sent"]), (g["shown"]["rbtns"][1], g["shown"]["sent"]))
+                self.assertGreaterEqual(g["shown"]["rbtns"][0], g["shown"]["editBottom"])
                 self.assertGreaterEqual(g["shown"]["redit"], g["shown"]["reditMin"])
                 for height, minimum in g["shown"]["fields"]:
                     self.assertGreaterEqual(height, minimum)

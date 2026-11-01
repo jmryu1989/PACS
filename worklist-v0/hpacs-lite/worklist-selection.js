@@ -78,6 +78,7 @@
     function sync(){
       if(!live()){end();return;}
       const selected=rows();count.textContent=`Selected: ${selected.length}`;
+      host.hidden=!selected.length;
       clear.disabled=inspect.disabled=!selected.length;if(preload)preload.disabled=!selected.length;page.disabled=!tbody.querySelector('tr[data-uid]');
       if(openSet){const why=setBlock(selected.length);openSet.disabled=!!why;openSet.title=why||'';}
       if(model.generation()!==lastGeneration){lastGeneration=model.generation();options.changed?.(lastGeneration);}

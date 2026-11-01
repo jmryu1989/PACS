@@ -128,7 +128,7 @@ def install_contract(html):
     # notice from its draft bar. A fixture that carries the draft bar / the Approve button carries these as the page has them.
     if 'id="draftbar"' in html and 'id="report-notice"' not in html:
         notice = _page_markup('<div class="draftbar" id="report-notice"', '</button>\n        </div>')
-        recnote = _page_markup('<details class="recnote" id="recnote"', '</details>')
+        recnote = _page_markup('<div class="recnote" id="recnote"', '</div>')
         at = html.rindex('<', 0, html.index('id="draftbar"'))
         html = html[:at] + notice + recnote + html[at:]
     # Minhoon item 8: the draft bar's render also marks whether the editor takes typing now (renderEditorState) on main.html's

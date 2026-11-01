@@ -823,24 +823,24 @@
       Radiology: [
         { k: "pf", t: "PF" },
         { k: "assignedReader", t: "Assigned Reader", f: "text" },
-        { k: "techNote", t: "Tech Note" },
+        { k: "techNote", t: "Tech Note", f: ["Yes", "None", "Cleared", "Unknown"] },
         { k: "no", t: "No", num: 1 },
         { k: "viewing", t: "Viewing" },
         { k: "count", t: "Count", num: 1 },
         { k: "series", t: "Series", num: 1 },
         { k: "em", t: "EM", f: ["E", "N"] },
         { k: "ss", t: "SS", f: ["Verified", "Unverified"] },
-        { k: "rs", t: "RS", f: ["A", "H", "O", "P", "T", "W"] },
+        { k: "rs", t: "RS", f: ["W", "T", "P", "H", "A"] },
         { k: "acc", t: "Accession No", f: "text" },
         { k: "ts", t: "TS" },
         { k: "id", t: "ID", f: "text" },
         { k: "name", t: "Name", f: "text" },
-        { k: "age", t: "Age", num: 1 },
+        { k: "age", t: "Age", num: 1, f: "text" },
         { k: "birth", t: "BirthDate" },
         { k: "sex", t: "Sex", f: ["M", "F", "O"] },
         { k: "modality", t: "Modality", f: ["CT", "MR", "CR", "US", "SC"] },
         { k: "desc", t: "StudyDesc", f: "text" },
-        { k: "date", t: "StudyDate" },
+        { k: "date", t: "StudyDate", f: "text" },
         // 예비 판독을 쓴 사람과, 최종 판독을 맡은 상급 판독의.
         // HPACS도 2025.07에 이 둘을 컬럼으로 붙였다 (교훈 §13 — 컬럼은 끝없이 늘어난다)
         { k: "preDoc", t: "PreDoc", f: "text" },
@@ -851,22 +851,22 @@
       ],
       Technician: [
         { k: "assignedReader", t: "Assigned Reader", f: "text" },
-        { k: "techNote", t: "Tech Note" },
+        { k: "techNote", t: "Tech Note", f: ["Yes", "None", "Cleared", "Unknown"] },
         { k: "no", t: "No", num: 1 },
         { k: "count", t: "Count", num: 1 },
         { k: "series", t: "Series", num: 1 },
         { k: "em", t: "EM", f: ["E", "N"] },
         { k: "ss", t: "SS", f: ["Verified", "Unverified"] },
         { k: "matched", t: "Mt", f: ["M", "U"] },
-        { k: "rs", t: "RS", f: ["A", "H", "O", "P", "T", "W"] },
+        { k: "rs", t: "RS", f: ["W", "T", "P", "H", "A"] },
         { k: "acc", t: "Accession No", f: "text" },
         { k: "id", t: "ID", f: "text" },
         { k: "name", t: "Name", f: "text" },
-        { k: "age", t: "Age", num: 1 },
+        { k: "age", t: "Age", num: 1, f: "text" },
         { k: "sex", t: "Sex", f: ["M", "F", "O"] },
         { k: "modality", t: "Modality", f: ["CT", "MR", "CR", "US", "SC"] },
         { k: "desc", t: "StudyDesc", f: "text" },
-        { k: "date", t: "StudyDate" },
+        { k: "date", t: "StudyDate", f: "text" },
         { k: "ward", t: "Ward", f: "text" },
         { k: "reqHosp", t: "ReqHosp" },
       ],
@@ -884,9 +884,11 @@
     const viewingNames = new Map();
     const CELL = {
       assignedReader:s=>`<button type="button" class="chip" data-reader-assignment="${esc(s.uid)}" ${!serverMode||demoMode||offline?'disabled':''}>${esc(s.assignedReader||'Unassigned')}</button>`,
-      techNote: s => `<button type="button" class="chip" data-tech-note="${esc(s.uid)}" aria-label="${esc(s.id)} Tech 메모 ${noteLabel(s.uid)}" ${!serverMode || demoMode || offline ? 'disabled' : ''}>${noteLabel(s.uid)}</button>`,
+      techNote: s => `<button type="button" class="chip" data-tech-note="${esc(s.uid)}" aria-label="${esc(s.id)} Tech Note ${noteLabel(s.uid)}" title="${noteHelp(s.uid)}" ${!serverMode || demoMode || offline ? 'disabled' : ''}>${noteLabel(s.uid)}</button>`,
       em: s => {const phase=studyPriority?.get(s.uid)?.phase;return phase?`<span title="${phase==='saving'?'응급 상태를 저장 중입니다':'저장 결과 미확인 — 문맥 메뉴의 Refresh Status로 확인하세요'}">${phase==='saving'?'Saving':'Unverified'}</span>`:s.em === "E" ? `<span class="em-e">E</span>` : "";},
-      rs: s => `<span class="rs ${esc(s.rs)}" title="${esc(s.holdReason ?? "")}">${esc(s.rs)}</span>`,
+      // 판독 상태 이름은 목록과 건수 줄에서 같은 계약을 따른다.
+      rs: s => { const word = { W: "Unread", A: "Approved", H: "On Hold", P: "Preliminary", T: "In Progress" }[s.rs] ?? s.rs;
+        return `<span class="rs ${esc(s.rs)}" title="${esc(s.holdReason || (word !== s.rs ? ({ W: "아직 판독하지 않은 검사", T: "저장했지만 아직 승인하지 않은 판독문", P: "상급 판독의 승인 대기", H: "판독 보류", A: "승인된 판독문" }[s.rs] || "") : ""))}">${esc(word)}</span>`; },
       ts: s => `<span class="ts ts-${esc(s.ts)}">${esc(s.ts)}</span>`,
       ss: s => `<span class="ss ${esc(s.ss)}">${esc(s.ss)}</span>`,
       // S4-U5: server values too, but escaped like every other cell; a stored value never becomes markup.
@@ -915,16 +917,181 @@
     let columnPrefs = null, multiSelection = null, imagePreview = null, imageThumbnails = null, worklistSearch = null, rowNavigation = null, relatedRowNavigation = null, relatedRows = [];
     const shownColumns = () => columnPrefs ? columnPrefs.columns(mode) : COLS[mode];
 
+    // StudyDate filter: a preset menu (Today / since 2 days / a week / a month ago) or a custom From–To range.
+    // It writes the same "from..to" text the column filter already understands (see testCol in worklist-view.js).
+    const ymd = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    function datePresets() {
+      const today = new Date(), back = f => { const d = new Date(today); f(d); return ymd(d); }, t = ymd(today);
+      return [
+        { id: "today", label: "Today", value: `${t}..${t}` },
+        { id: "2d", label: "2 days ago", value: `${back(d => d.setDate(d.getDate() - 2))}..${t}` },
+        { id: "1w", label: "A week ago", value: `${back(d => d.setDate(d.getDate() - 7))}..${t}` },
+        { id: "1m", label: "A month ago", value: `${back(d => {
+          // 말일에서 전달로 이동할 때 존재하지 않는 날짜가 이번 달로 넘치지 않게 한다.
+          const day = d.getDate(); d.setDate(1); d.setMonth(d.getMonth() - 1);
+          d.setDate(Math.min(day, new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()));
+        })}..${t}` },
+      ];
+    }
+    function dateFilterHtml(c) {
+      const cur = String(fval[c.k] ?? ""), presets = datePresets(), hit = presets.find(p => p.value === cur);
+      const sel = cur === "" ? "" : hit ? hit.id : "custom", [from = "", to = ""] = cur.includes("..") ? cur.split("..") : [cur, cur];
+      const opt = (v, l) => `<option value="${v}"${sel === v ? " selected" : ""}>${l}</option>`;
+      return `<select data-date-preset aria-label="${esc(c.t)} Filter" title="기간을 고릅니다. Custom은 시작일과 종료일을 직접 정합니다.">` +
+        opt("", "All dates") + presets.map(p => opt(p.id, p.label)).join("") + opt("custom", "Custom…") + `</select>` +
+        `<span class="date-custom" hidden><label>From <input type="date" data-date-from aria-label="${esc(c.t)} From" value="${esc(from)}"></label><label>To <input type="date" data-date-to aria-label="${esc(c.t)} To" value="${esc(to)}"></label></span>`;
+    }
+    // Custom range is a floating window under the select (position: fixed), so the filter row never grows.
+    function placeDatePopup(row) {
+      const box = row.querySelector(".date-custom"), r = row.querySelector("[data-date-preset]").getBoundingClientRect();
+      box.style.top = Math.round(r.bottom + 2) + "px";
+      box.style.left = Math.round(Math.min(r.left, window.innerWidth - 230)) + "px";
+    }
+    document.addEventListener("pointerdown", e => {
+      document.querySelectorAll("#filterrow .date-custom:not([hidden])").forEach(box => { if (!box.closest(".date-filter").contains(e.target)) box.hidden = true; });
+    }, true);
+    document.addEventListener("click", e => {   // clicking the select while "Custom…" is chosen reopens the window
+      const sel = e.target.closest?.("#filterrow [data-date-preset]");
+      if (sel && sel.value === "custom") { const row = sel.closest(".date-filter"), box = row.querySelector(".date-custom"); box.hidden = false; placeDatePopup(row); }
+    });
+    function applyDateFilter(row) {
+      const preset = row.querySelector("[data-date-preset]").value, box = row.querySelector(".date-custom");
+      box.hidden = preset !== "custom";
+      if (!box.hidden) placeDatePopup(row);
+      let value = "";
+      if (preset === "custom") {
+        const from = row.querySelector("[data-date-from]").value, to = row.querySelector("[data-date-to]").value;
+        value = from || to ? `${from}..${to}` : "";
+      } else if (preset) value = datePresets().find(p => p.id === preset).value;
+      if (value) fval.date = value; else delete fval.date;
+      folderAppliedSearch = null;
+      worklistSearch?.change();
+      render();
+    }
+    document.addEventListener("change", e => {
+      const th = e.target.closest?.("#filterrow .date-filter"); if (th) applyDateFilter(th);
+    });
+
+    // Hover help for one- and two-letter headers. Only codes the screen already uses are explained (RS letters match the count bar).
+    const HEAD_HELP = {
+      rs: "RS (Report Status, 판독 상태)\nW: Unread — 판독 전\nT: In Progress — 저장했지만 승인 전\nP: Preliminary — 상급 판독의 승인 대기\nH: On Hold — 보류\nA: Approved — 승인됨",
+      em: "EM (Emergency)\nE: 응급\nN: 일반",
+      ss: "SS (촬영 확인 상태)\nVerified: 촬영 확인됨\nUnverified: 촬영 미확인",
+    };
     function renderHeads() {
-      $("#heads").innerHTML = shownColumns().map(c => `<th data-key="${c.k}" class="${c.num ? "num" : ""}">${c.t}</th>`).join("");
-      $("#filterrow").innerHTML = shownColumns().map(c => {
+      $("#heads").innerHTML = shownColumns().map((c, i) => `<th data-key="${c.k}" class="${c.num ? "num" : ""}"${HEAD_HELP[c.k] ? ` title="${esc(HEAD_HELP[c.k])}"` : ""}>${i === 0 ? '<button type="button" class="col-add" aria-haspopup="dialog" aria-label="Choose columns" title="표시할 열을 고릅니다.">+</button>' : ""}${c.t}</th>`).join("");
+      $("#heads .col-add")?.addEventListener("click", e => { e.stopPropagation(); openColumnPicker(e.currentTarget); });
+      bindColumnResize();
+      $("#filterrow").innerHTML = shownColumns().map((c, i) => {
+        // The first column has no filter of its own, so the worklist's "Clear Filters" button lives in that cell.
+        if (!c.f && i === 0) return '<th class="clear-cell"><button type="button" class="col-clear" title="모든 검색 조건을 지웁니다.">Clear</button></th>';
         if (!c.f) return "<th></th>";
+        if (c.k === "date") return `<th class="date-filter">${dateFilterHtml(c)}</th>`;
         if (c.f === "text" || c.k === 'modality')
           return `<th><input data-f="${c.k}" aria-label="${esc(c.t)} Filter" value="${esc(fval[c.k] ?? "")}"></th>`;
         return `<th><select data-f="${c.k}" aria-label="${esc(c.t)} Filter">` +
           ["", ...c.f].map(o => `<option value="${o}"${(fval[c.k] ?? "") === o ? " selected" : ""}>${o}</option>`).join("") +
           `</select></th>`;
       }).join("");
+      if (!$("#filterrow .col-clear")) $("#filterrow th")?.insertAdjacentHTML("afterbegin", '<button type="button" class="col-clear" title="모든 검색 조건을 지웁니다.">Clear</button>');
+    }
+    // Top bar "Config" had no action. For now it opens the existing Panel Settings dialog (same as the Panels button).
+    (function bindConfig() {
+      const cfg = $("#m-config"); if (!cfg) return;
+      const open = () => { const b = $("#panel-settings-open"); if (b && !b.disabled) b.click(); };
+      cfg.addEventListener("click", open);
+      cfg.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
+    })();
+    document.addEventListener("click", e => {
+      if (e.target.closest?.("#filterrow .col-clear")) clearWorklistFilters();
+    });
+    // 드래그 중에도 같은 계정 열 상태를 사용하되 머리글을 다시 만들지 않아 포인터를 잃지 않는다.
+    function bindColumnResize() {
+      const heads = $("#heads");
+      for (const th of heads.children) {
+        const grip = document.createElement("span");
+        grip.className = "col-grip";
+        grip.title = "열 너비: 끌어서 조절, 두 번 클릭하면 자동 너비로 돌아갑니다.";
+        grip.addEventListener("click", e => e.stopPropagation());
+        grip.addEventListener("dblclick", e => { e.stopPropagation(); columnPrefs?.setWidth(mode, th.dataset.key, null); });
+        grip.addEventListener("pointerdown", e => {
+          if (e.button !== 0 || !columnPrefs) return;
+          e.preventDefault(); e.stopPropagation(); grip.setPointerCapture(e.pointerId);
+          const key = th.dataset.key, startX = e.clientX, start = th.getBoundingClientRect().width;
+          const original = columnPrefs.widths(mode);
+          const widths = Object.fromEntries([...heads.children].map(h => [h.dataset.key,
+            Math.max(64, Math.min(600, Math.round(h.getBoundingClientRect().width)))]));
+          const move = ev => {
+            widths[key] = Math.max(64, Math.min(600, Math.round(start + ev.clientX - startX)));
+            columnPrefs.setWidths(mode, widths, false);
+          };
+          const done = ev => {
+            grip.removeEventListener("pointermove", move); grip.removeEventListener("pointerup", done); grip.removeEventListener("pointercancel", done);
+            if (grip.hasPointerCapture(e.pointerId)) grip.releasePointerCapture(e.pointerId);
+            columnPrefs.setWidths(mode, ev.type === "pointercancel" ? original : widths, true);
+          };
+          grip.addEventListener("pointermove", move); grip.addEventListener("pointerup", done); grip.addEventListener("pointercancel", done);
+        });
+        th.append(grip);
+      }
+    }
+    // "+" in the first header cell: tick any column of this mode on or off; applies at once.
+    let columnPicker = null;
+    function openColumnPicker(opener) {
+      if (!columnPrefs) return;
+      if (!columnPicker) {
+        columnPicker = document.createElement("dialog"); columnPicker.id = "column-picker";
+        columnPicker.setAttribute("aria-label", "Columns");
+        columnPicker.addEventListener("click", e => { if (e.target === columnPicker) columnPicker.close(); });
+        document.body.append(columnPicker);
+      }
+      const m = mode, head = document.createElement("header");
+      const title = document.createElement("strong"); title.textContent = "Columns · " + m;
+      const close = document.createElement("button"); close.type = "button"; close.textContent = "Close"; close.onclick = () => columnPicker.close();
+      head.append(title, close);
+      const list = document.createElement("div"); list.className = "cp-list";
+      let dragged = null;
+      const clearDrop = () => { for (const el of list.querySelectorAll(".cp-before, .cp-after")) el.classList.remove("cp-before", "cp-after"); };
+      const draw = () => {
+        list.replaceChildren(...columnPrefs.all(m).map(c => {
+          const row = document.createElement("div"); row.className = "cp-row"; row.dataset.column = c.k;
+          const grip = document.createElement("span"); grip.className = "cp-grip"; grip.textContent = "≡"; grip.draggable = true;
+          grip.title = "끌어서 열 순서를 바꿉니다.";
+          grip.addEventListener("dragstart", e => { dragged = c.k; row.classList.add("cp-dragging"); e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", c.k); });
+          grip.addEventListener("dragend", () => { dragged = null; clearDrop(); row.classList.remove("cp-dragging"); });
+          row.addEventListener("dragover", e => {
+            if (!dragged || dragged === c.k) return;
+            e.preventDefault(); e.dataTransfer.dropEffect = "move";
+            const box = row.getBoundingClientRect(); clearDrop(); row.classList.add(e.clientY > box.top + box.height / 2 ? "cp-after" : "cp-before");
+          });
+          row.addEventListener("dragleave", e => { if (!row.contains(e.relatedTarget)) row.classList.remove("cp-before", "cp-after"); });
+          row.addEventListener("drop", e => {
+            if (!dragged || dragged === c.k) return;
+            e.preventDefault(); const after = row.classList.contains("cp-after"), moving = dragged; dragged = null; clearDrop();
+            columnPrefs.move(m, moving, c.k, after); draw();
+          });
+          const label = document.createElement("label"), box = document.createElement("input");
+          box.type = "checkbox"; box.checked = c.shown; box.disabled = c.required;
+          box.addEventListener("change", () => { columnPrefs.setShown(m, c.k, box.checked); });
+          label.append(box, document.createTextNode(" " + c.t + (c.required ? " (Required)" : "")));
+          const width = document.createElement("input"); width.type = "number";
+          width.min = "64"; width.max = "600"; width.step = "1"; width.placeholder = "Auto";
+          width.setAttribute("aria-label", c.t + " width (px)"); width.value = c.width ?? "";
+          width.addEventListener("change", () => {
+            if (width.validity.valid) columnPrefs.setWidth(m, c.k, width.value === "" ? null : width.valueAsNumber);
+          });
+          row.append(grip, label, width); return row;
+        }));
+      };
+      const bulk = document.createElement("footer");
+      const all = document.createElement("button"); all.type = "button"; all.textContent = "Show All";
+      all.onclick = () => { for (const c of columnPrefs.all(m)) if (!c.shown) columnPrefs.setShown(m, c.k, true); draw(); };
+      bulk.append(all);
+      draw(); columnPicker.replaceChildren(head, list, bulk);
+      const box = opener.getBoundingClientRect();
+      columnPicker.style.cssText = `position:fixed;margin:0;left:${Math.max(4, Math.round(box.left))}px;top:${Math.round(box.bottom + 2)}px;max-height:${Math.max(160, innerHeight - box.bottom - 12)}px;`;
+      columnPicker.onclose = () => { try { opener.isConnected && opener.focus(); } catch (_) {} };
+      if (!columnPicker.open) columnPicker.showModal();
     }
     const reportedModalityInputs = new WeakSet();
     function commitModalityInput(el) {
@@ -985,7 +1152,7 @@
     // W9 multi-study view (multi-study-view.js), mounted at boot; the row menu and the W4 move gate read it before then.
     let multiStudyView = null;
     let demoMode = false;
-    let quickDays = -1, sortKey = null, sortDir = 0, selectedOid = null;
+    let sortKey = null, sortDir = 0, selectedOid = null;
     let worklistFolders = null, folderLoadState = 'unknown', folderAppliedSearch = null;
     let filterCollection = null, sharedSearches = [], shortcutDraft = null, shortcutBusy = false, filterReadSequence = 0, sharedFilterReadSequence = 0;
     let storedShortcuts = [];
@@ -1162,8 +1329,12 @@
     const noteSummaries = new Map();
     function noteLabel(uid) {
       const note = noteSummaries.get(uid);
-      return !note ? '미확인' : note.present ? '있음' : note.version ? '비움·이력' : '없음';
+      return !note ? 'Unknown' : note.present ? 'Yes' : note.version ? 'Cleared' : 'None';
     }
+    // Status names are English (AGENTS.md §4); the explanation stays Korean in the chip's tooltip.
+    const NOTE_HELP = { Unknown: '아직 Tech 메모 상태를 받지 못했습니다', Yes: 'Tech 메모가 있습니다',
+      Cleared: '메모를 비웠고 이전 이력이 남아 있습니다', None: 'Tech 메모가 없습니다' };
+    function noteHelp(uid) { return NOTE_HELP[noteLabel(uid)] || ''; }
     function updateNoteSummary(uid, value) {
       if (!value || !Number.isInteger(value.version) || value.version < 0 || typeof value.present !== 'boolean') return;
       // A list poll started before a local save must not roll the badge backward.
@@ -1286,7 +1457,7 @@
       };
     }
     let consultationFilter = null;
-    const searchCriteria = () => ({mode,quick:$('#quick').value,days:quickDays,cols:JSON.parse(JSON.stringify(fval))});
+    const searchCriteria = () => ({mode,quick:$('#quick').value,days:-1,cols:JSON.parse(JSON.stringify(fval))});
     function folderSearches() {
       return [...userFilters.filter(f => Number.isInteger(f.id)).map(f => ({ ...f, treeId: 'own:' + f.id })),
         ...sharedSearches.map(f => ({ ...f, treeId: 'shared:' + f.id }))];
@@ -1352,6 +1523,108 @@
       if (id) { worklistFolders.setApplied(id); return; }
       worklistFolders.setApplied(folderSelectionIds(filter || searchCriteria()));
     }
+    // My Shortcuts → popup that sets the same column filters as the filter row (fval), so the
+    // list, the active-filter summary and Saved Searches all see them. No separate filter state.
+    const EXAM_FILTER_KEYS = ['date', 'id', 'name', 'age', 'sex', 'modality', 'desc', 'acc', 'institutionName', 'assignedReader', 'techNote',
+      'rs', 'em', 'ss', 'matched', 'preDoc', 'preReviewer', 'ward'];
+    let examFilterDialog = null;
+    function openExamFilterPopup(opener) {
+      reloadFolderSearches();
+      if (!examFilterDialog) {
+        examFilterDialog = document.createElement('dialog'); examFilterDialog.id = 'exam-filter-popup';
+        examFilterDialog.setAttribute('aria-labelledby', 'exam-filter-title');
+        document.body.append(examFilterDialog);
+      }
+      const dialog = examFilterDialog;
+      // Every column that has a filter in the header row, most-used first.
+      const cols = COLS[mode].filter(c => c.f).sort((a, b) => {
+        const at = k => { const i = EXAM_FILTER_KEYS.indexOf(k); return i < 0 ? 99 : i; };
+        return at(a.k) - at(b.k);
+      });
+      const head = document.createElement('header');
+      const title = document.createElement('h2'); title.id = 'exam-filter-title'; title.textContent = 'Filter Exams';
+      const close = document.createElement('button'); close.type = 'button'; close.textContent = 'Close';
+      head.append(title, close);
+      const note = document.createElement('p'); note.lang = 'ko';
+      note.textContent = '조건을 고르고 Apply를 누르면 목록에 바로 적용됩니다. 목록 위 필터 줄과 같은 조건입니다.';
+      const form = document.createElement('form'); form.method = 'dialog';
+      const inputs = new Map();
+      for (const c of cols) {
+        const label = document.createElement('label'); label.append(document.createTextNode(c.t + ' '));
+        const current = Array.isArray(fval[c.k]) ? fval[c.k].join(',') : String(fval[c.k] ?? '');
+        let control;
+        if (c.k === 'date') {
+          // StudyDate range: From / To (either one alone also works).
+          const [from = '', to = ''] = current.split('..');
+          const wrap = document.createElement('span'), a = document.createElement('input'), b = document.createElement('input');
+          a.type = b.type = 'date'; a.value = from; b.value = to; a.setAttribute('aria-label', 'StudyDate from'); b.setAttribute('aria-label', 'StudyDate to');
+          wrap.append(a, document.createTextNode(' – '), b); label.append(wrap);
+          control = { get: () => (a.value || b.value) ? a.value + '..' + b.value : '', set: v => { a.value = b.value = v; }, focus: () => a.focus() };
+        } else if (c.f === 'text' || c.k === 'modality') {
+          const input = document.createElement('input'); input.type = 'text'; input.value = current;
+          if (c.k === 'age') input.placeholder = '40 · 30..50 · >65';
+          if (c.k === 'modality') input.placeholder = 'CT, MR';
+          label.append(input);
+          control = { get: () => input.value.trim(), set: v => { input.value = v; }, focus: () => input.focus() };
+        } else {
+          const input = document.createElement('select');
+          for (const o of ['', ...c.f]) { const opt = document.createElement('option'); opt.value = o; opt.textContent = o || 'Any'; input.append(opt); }
+          input.value = current; label.append(input);
+          control = { get: () => input.value, set: v => { input.value = v; }, focus: () => input.focus() };
+        }
+        form.append(label); inputs.set(c.k, control);
+      }
+      const apply = document.createElement('button'); apply.type = 'submit'; apply.textContent = 'Apply';
+      const clear = document.createElement('button'); clear.type = 'button'; clear.textContent = 'Clear';
+      // Save the chosen conditions as a named shortcut folder that appears under "My Shortcuts" in the Folders menu.
+      const nameLabel = document.createElement('label'); nameLabel.append(document.createTextNode('Shortcut Name '));
+      const nameInput = document.createElement('input'); nameInput.type = 'text'; nameInput.maxLength = 100; nameInput.placeholder = 'e.g. Unassigned CT';
+      nameLabel.append(nameInput); form.append(nameLabel);
+      const saveBtn = document.createElement('button'); saveBtn.type = 'button'; saveBtn.textContent = 'Save as Shortcut';
+      const status = document.createElement('p'); status.setAttribute('role', 'status'); status.lang = 'ko';
+      const actions = document.createElement('footer'); actions.append(apply, saveBtn, clear);
+      form.append(actions, status);
+      saveBtn.onclick = async () => {
+        const name = nameInput.value.trim();
+        if (!name) { status.textContent = '바로가기 이름을 입력하세요.'; nameInput.focus(); return; }
+        commit([...inputs].map(([k, ctl]) => [k, ctl.get()]));
+        saveBtn.disabled = true; status.textContent = '저장 중입니다…';
+        try {
+          const at = work.capture('document');
+          if (await filterWriteReady(undefined, at)) throw new Error('서버 계정으로 로그인한 뒤 저장할 수 있습니다.');
+          const saved = await api('POST', '/filters', { ...snapshotFilter(), name }, undefined, at);
+          if (!work.admits(at)) throw new Error('작업 화면이 바뀌었습니다. 다시 시도하세요.');
+          work.commit(at, () => acceptSavedFilter(saved, false));
+          await reloadFolderSearches(at);
+          const list = shortcutDraft ?? storedShortcuts ?? [];
+          let id = 1; while (list.some(s => s.id === String(id))) ++id;
+          const existing = list.find(s => s.name === name);
+          const stored = await saveFolderShortcuts([...list.filter(s => s.name !== name),
+            { id: existing?.id || String(id), name, searchId: 'own:' + saved.id }]);
+          if (!work.admits(at)) return;
+          if (!stored) throw new Error($('#shortcuts-status').textContent || '바로가기 저장 결과를 확인하지 못했습니다.');
+          status.textContent = '"' + name + '" 바로가기를 My Shortcuts에 저장했습니다.';
+          nameInput.value = '';
+        } catch (error) { status.textContent = '저장하지 못했습니다: ' + error.message; }
+        finally { saveBtn.disabled = false; }
+      };
+      const commit = values => {
+        for (const [k, v] of values) {
+          if (!v) { delete fval[k]; continue; }
+          // Several modalities (CT, MR) are stored as a list, like the header filter does.
+          fval[k] = k === 'modality' && /[,\\]/.test(v) ? [...new Set(v.split(/[,\\]/).map(t => t.trim().toUpperCase()).filter(Boolean))] : (k === 'modality' ? v.toUpperCase() : v);
+        }
+        folderAppliedSearch = null;
+        worklistSearch?.change(); renderHeads(); render();
+      };
+      form.onsubmit = e => { e.preventDefault(); commit([...inputs].map(([k, ctl]) => [k, ctl.get()])); dialog.close(); };
+      clear.onclick = () => { for (const ctl of inputs.values()) ctl.set(''); commit([...inputs.keys()].map(k => [k, ''])); };
+      close.onclick = () => dialog.close();
+      dialog.onclose = () => { try { opener?.focus(); } catch (_) {} };
+      dialog.replaceChildren(head, note, form);
+      if (!dialog.open) dialog.showModal();
+      inputs.values().next().value?.focus();
+    }
     function mountWorklistFolders() {
       if (worklistFolders || !$('#worklist-folders')) return;
       worklistFolders = KinWorklistFolderTree.mount({ host: $('#worklist-folders'),
@@ -1364,29 +1637,24 @@
             return;
           }
           folderAppliedSearch = null; activeFilterName = null;
-          $('#quick').value = ''; quickDays = -1;
-          document.querySelectorAll('#qf button').forEach(x => x.classList.toggle('on', +x.dataset.days === quickDays));
+          $('#quick').value = '';
           Object.keys(fval).forEach(k => delete fval[k]);
           if (item.kind !== 'all') fval.modality = [...item.modalities];
           worklistSearch?.apply(); renderHeads(); render();
         },
         onChange: saveFolderShortcuts,
+        onShortcutsMenu: opener => openExamFilterPopup(opener),
       });
-      const panel = $('#worklist-folders-panel'), toggle = $('#worklist-folders-toggle');
+      const panel = $('#worklist-folders-panel');
       // Keep a tab's choice across reloads only for this login, never for an account's next login.
       const panelKey = 'kin-worklist-folders', panelSession = work.session();
       let panelPreference;
       try { panelPreference = JSON.parse(sessionStorage.getItem(panelKey)); } catch (_) {}
       panel.open = panelPreference?.session === panelSession && typeof panelPreference?.open === 'boolean'
         ? panelPreference.open : true;
-      toggle.setAttribute('aria-expanded', String(panel.open));
-      toggle.addEventListener('click', () => { panel.open = !panel.open; toggle.setAttribute('aria-expanded', String(panel.open)); });
       panel.addEventListener('toggle', () => {
-        toggle.setAttribute('aria-expanded', String(panel.open));
         try { sessionStorage.setItem(panelKey, JSON.stringify({session: panelSession, open: panel.open})); } catch (_) {}
       });
-      $('#shortcuts-reload').addEventListener('click', () => reloadFolderSearches());
-      $('#shortcuts-save').addEventListener('click', () => saveFolderShortcuts(shortcutDraft));
       updateWorklistFolders();
     }
     function filtered() {
@@ -1458,13 +1726,10 @@
       // 목록도, 카운트도, 필터 표시도 안 그려진다. 서버 필터가 0/3/7/30/60/-1 외의
       // days를 주면 어느 버튼도 `.on`이 아니라 실제로 도달한다.
       // 화면 한 줄을 못 쓰는 것과 화면 전체가 안 그려지는 것은 다른 사고다.
-      if (quickDays >= 0)
-        active.push(`StudyDate(${$("#qf .on")?.textContent ?? `최근 ${quickDays}일`})`);
       cols.forEach(c => { if (fval[c.k]) active.push(`${c.t}(${fval[c.k]})${shown.includes(c) ? '' : ' [숨긴 열]'}`); });
       if (sortKey && sortDir && !shown.some(c => c.k === sortKey)) active.push(`숨긴 열 정렬: ${COLS[mode].find(c => c.k === sortKey)?.t ?? sortKey} ${sortDir > 0 ? '오름차순' : '내림차순'}`);
       const compound = fval[KinCompoundFilter.KEY];
       const compoundError = KinCompoundFilter.validate(compound, cols);
-      $("#quick-match").value = compoundError ? "" : KinCompoundFilter.quickMode(compound);
       if (!compoundError && compound?.version === 2) active.push("Patient Search: " + (compound.quickMatch === "exact" ? "Exact" : "Starts With"));
       if (compoundError) active.push(`복합 조건 오류: ${compoundError} · 조건을 수정하거나 Clear로 해제하세요`);
       else if (compound?.rules.length) {
@@ -1475,12 +1740,12 @@
       const n = (k, v) => list.filter(s => s[k] === v).length;
       if (mode === "Radiology") {
         $("#countlist").innerHTML =
-          `<span class="count"><span class="dot dot-w"></span>W:${n("rs","W")}</span>` +
-          `<span class="count"><span class="dot dot-a"></span>A:${n("rs","A")}</span>` +
-          `<span class="count"><span class="dot dot-ho"></span>H:${n("rs","H")}</span>` +
-          `<span class="count"><span class="dot dot-ho"></span>O:${n("rs","O")}</span>` +
-          `<span class="count"><span class="dot dot-t"></span>T:${n("rs","T")}</span>` +
-          `<span class="count"><span class="dot dot-p"></span>P:${n("rs","P")}</span>` +
+          // Same words as the RS column; T (saved draft, not yet approved) is counted too so drafts are not missed.
+          `<span class="count" title="RS: W — 아직 판독하지 않음"><span class="dot dot-w"></span>Unread: ${n("rs","W")}</span>` +
+          `<span class="count" title="RS: T — 저장했지만 아직 승인하지 않은 판독문"><span class="dot dot-t"></span>In Progress: ${n("rs","T")}</span>` +
+          `<span class="count" title="RS: P — 상급 판독의 승인 대기"><span class="dot dot-p"></span>Preliminary: ${n("rs","P")}</span>` +
+          `<span class="count" title="RS: H — 판독 보류"><span class="dot dot-ho"></span>On Hold: ${n("rs","H")}</span>` +
+          `<span class="count" title="RS: A — 승인된 판독문"><span class="dot dot-a"></span>Approved: ${n("rs","A")}</span>` +
           `<span class="count">Unverified:${n("ss","Unverified")}</span>`;
       } else {
         $("#countlist").textContent =
@@ -1936,6 +2201,19 @@
       if (v === "") return true;
       if (c.k === 'modality') return KinCompoundFilter.matchesModality(s.modality, v);
       const wanted = String(v);
+      if (c.k === 'techNote') return noteLabel(s.uid) === wanted;   // the note badge is not a row field
+      if (c.k === 'date') {   // StudyDate: "2026-10-31" (that day or prefix), "2026-10-01..2026-10-31", "2026-10-01.." or "..2026-10-31"
+        const day = String(s.date ?? ''), [from, to] = wanted.split('..');
+        if (wanted.includes('..')) return (!from || day >= from) && (!to || day <= to);
+        return day.startsWith(wanted);
+      }
+      if (c.k === 'age') {    // Age: "40", ">65", "<18", or "30..50"
+        const n = Number(s.age); if (s.age === '' || !Number.isFinite(n)) return false;
+        let m;
+        if ((m = wanted.match(/^(\d+)\s*\.\.\s*(\d+)$/))) return n >= +m[1] && n <= +m[2];
+        if ((m = wanted.match(/^([<>]=?)\s*(\d+)$/))) return m[1] === '>' ? n > +m[2] : m[1] === '>=' ? n >= +m[2] : m[1] === '<' ? n < +m[2] : n <= +m[2];
+        return /^\d+$/.test(wanted) ? n === +wanted : true;
+      }
       if (c.f === "text") return String(s[c.k] ?? "").toUpperCase().includes(wanted.toUpperCase());
       return String(s[c.k]) === wanted;
     }
@@ -4924,12 +5202,11 @@
      * 문장이 든 판독문에 서명한다. 그래서 값이 있으면 읽기 전용 띠로 그 존재를 알리고, 펼치면 글을 읽을 수 있다. 띠는 편집기가
      * 아니다 — 숨긴 칸은 그대로 숨어 있고(aria-hidden, tabindex -1) 띠에서 그 칸으로 가는 길도 없다. 검사가 바뀌면 접힌다.
      */
-    let recommendationNoticeUid = null;
     function renderRecommendationNotice() {
       const box = $("#recnote"), value = $("#recommendation").value;
-      if (recommendationNoticeUid !== selectedUid) { box.open = false; recommendationNoticeUid = selectedUid; }
       box.hidden = !value;
       $("#recnote-text").textContent = value;
+      box.title = value;
     }
     onReportField("input", event => { if (event.target.id === "recommendation") renderRecommendationNotice(); });
 
@@ -9714,7 +9991,7 @@
       current:()=>studies.find(s=>s.uid===selectedUid),study:uid=>studies.find(s=>s.uid===uid),
       openStudy:uid=>select(uid,{openSelected:true}),
       filter:(uids,direction)=>{
-        $('#clearfilter').click();const wanted=new Set(uids),known=new Set(studies.map(s=>s.uid));
+        clearWorklistFilters();const wanted=new Set(uids),known=new Set(studies.map(s=>s.uid));
         consultationFilter={uids:wanted,revision:++consultationFilterSequence,label:(direction==='received'?'Received':'Sent')+' Consultations · Loaded Requests'};render();
         const missing=[...wanted].filter(uid=>!known.has(uid)).length;
         if(missing)toast(`자문 검사 ${wanted.size}건 중 ${missing}건이 현재 불러온 검사 목록에 없습니다. Refresh 후 접근 가능한 검사를 확인하세요.`, 'info');
@@ -9855,20 +10132,18 @@
       }[layoutMode];
       $("#layout-toggle").setAttribute("aria-label", `화면 배치 ${layoutMode}`);
       $("#resize-main").setAttribute("aria-orientation", portrait ? "horizontal" : "vertical");
-      $("#resize-related").setAttribute("aria-orientation", portrait ? "horizontal" : "vertical");
-      if (portrait) {
-        $(".left").style.width = "";
-        $(".related-p").style.width = "";
-      } else {
-        $(".left").style.height = "";
-        $(".related-p").style.height = "";
-      }
+      // Related Report sits above Report Editor in every layout: its handle is always a height handle.
+      $("#resize-related").setAttribute("aria-orientation", "horizontal");
+      $(".related-p").style.width = "";
+      if (portrait) $(".left").style.width = "";
+      else $(".left").style.height = "";
       // A temporary small window must not overwrite the user's preferred size.
       // Reapply stored pixels within today's bounds, separately for each orientation:
       // a landscape width is never a portrait height (W3R-07).
       const sizes = workspaceState[workspaceAxis()], geometry = workspaceState.workspace;
       if (geometry) {
-        document.body.classList.toggle('workspace-rail-collapsed', geometry.railCollapsed);
+        // The Rail button is gone, so a saved "collapsed" value must not keep the panel narrow.
+        document.body.classList.remove('workspace-rail-collapsed');
         document.body.style.setProperty('--workspace-rail-width', clampPanel(geometry.rail ?? 220, 160, Math.max(160, innerWidth / 3)) + 'px');
         $('#rail-collapse')?.setAttribute('aria-expanded', String(!geometry.railCollapsed));
       }
@@ -9876,13 +10151,14 @@
       // Before any measuring below: the workflow mode and the hidden panels decide the band's panels and their columns.
       // Each column is its share of the shown shares; the last takes the remainder, as Template always has, so the
       // default band paints to the same sub-pixel as the percentage widths it replaces.
+      // Panels에서 되살린 선택을 기본 숨김 규칙으로 다시 덮지 않는다.
       const band = KinWorkspaceLayout.reportWindow(mode, geometry?.hiddenPanels || []);
       for (const [name, on] of Object.entries(band.classes)) document.body.classList.toggle(name, on);
       const shares = band.content.reduce((sum, p) => sum + p.share, 0);
       top.style.setProperty('--kin-rw-columns', band.content.map((p, i) => i === band.content.length - 1 ? 'minmax(0, 1fr)'
         : `${100 * p.share / shares}%`).join(' ') || 'minmax(0, 1fr)');
       left.style[portrait ? "height" : "width"] = "";
-      related.style[portrait ? "height" : "width"] = "";
+      related.style.height = "";
       top.style.height = "";
       prior.style.height = "";
       prior.style.flex = "";
@@ -9944,11 +10220,11 @@
         top.style.height = clampPanel(sizes.top, 140, maximum) + "px";
       }
       const row = $(".workrow").getBoundingClientRect();
-      if (sizes.related != null) related.style[portrait ? "height" : "width"] = clampPanel(sizes.related,
-        portrait ? 286 : 220, portrait ? row.height - 186 : row.width - 366) + "px";
+      if (sizes.related != null) related.style.height = clampPanel(sizes.related,
+        portrait ? 286 : 150, row.height - 186) + "px";
       if (sizes.prior != null) {
         prior.style.flex = "none";
-        prior.style.height = clampPanel(sizes.prior, 150, related.getBoundingClientRect().height - 136) + "px";
+        prior.style.height = clampPanel(sizes.prior, 80, left.getBoundingClientRect().height - 170) + "px";
       }
       if (selectedUid && !document.body.classList.contains('reading') && (portrait || innerWidth < 900)) {
         // Wrapped controls and the hidden-filter notice belong above the table,
@@ -9962,9 +10238,9 @@
           prior.style.maxHeight = ''; prior.style.overflowY = '';
           related.querySelector('.prior-report-pane').style.minHeight = '';
           prior.style.minHeight = floor + 'px';
-          related.style.minHeight = (floor + 6 + 116) + 'px';
+
         } else {
-          prior.style.maxHeight = 'calc(100% - 49px)'; prior.style.overflowY = 'auto';
+          prior.style.minHeight = floor + 'px'; prior.style.overflowY = 'auto';
           related.querySelector('.prior-report-pane').style.minHeight = '43px';
         }
       } else {
@@ -11515,9 +11791,10 @@
         saveWorkspace(); return;
       }
       const targets = { "#resize-main": ["main", ".left"], "#resize-top": ["top", ".rw"],
-        "#resize-related": ["related", ".related-p"], "#resize-prior": ["prior", ".related-list-pane"] };
+        "#resize-related": ["related", ".related-p"], "#resize-left-split": ["prior", ".related-list-pane"] };
       const [name, panel] = targets[selector];
-      const dimension = !portraitLayout() && ["main", "related"].includes(name) ? "width" : "height";
+      // Related Report and Report Editor are stacked in every layout, so the related size is always a height.
+      const dimension = !portraitLayout() && name === "main" ? "width" : "height";
       workspaceState[workspaceAxis()][name] = Math.round($(panel).getBoundingClientRect()[dimension]);
       saveWorkspace();
     }
@@ -11528,6 +11805,16 @@
       // Restore legacy display state as it was saved. Adopt v3 only on an
       // explicit edit/open/save, so new geometry cannot affect the first paint.
       workspaceState = result.state;
+      // First use (nothing saved yet): start with Clinical Information only. Thumbnail, AI Report, Image Report and Reading
+      // Template stay one click away in Panels; a saved choice always wins and nothing is saved by this line.
+      // A layout saved before this default existed is switched once per browser (flag below); after that the reader's own
+      // Panels choice, including Show All Panels, is kept.
+      let applyOnce = false;
+      try { applyOnce = localStorage.getItem('kin-clinical-only-default') !== '1'; localStorage.setItem('kin-clinical-only-default', '1'); } catch (_) {}
+      if (['empty', 'disabled'].includes(result.status) || applyOnce) {
+        const initial = KinWorkspaceLayout.withHiddenPanels(workspaceState, [...new Set([...KinWorkspaceLayout.hiddenPanels(workspaceState), 'thumbnail', 'aiReport', 'imageReport', 'template'])]);
+        if (initial) workspaceState = initial;
+      }
       if (workspaceState.workspace) {
         let sameSession = false;
         try { sameSession = !!work.session() && workspaceStorage?.getItem(studyPanelSessionKey()) === work.session(); } catch (_) {}
@@ -11552,6 +11839,7 @@
       const removed = KinWorkspaceLayout.remove(workspaceStorage, workspaceOwner);
       workspaceLocalKept = !!removed;
       workspaceState = KinWorkspaceLayout.toVersion3(KinWorkspaceLayout.defaults()); layoutMode = "auto";
+      workspaceState = KinWorkspaceLayout.withHiddenPanels(workspaceState, ['thumbnail', 'aiReport', 'imageReport', 'template']) || workspaceState;
       readingWorkspace.applyPanels(KinReadingPanelLayout.defaults());
       applyLayout();
       $("#layout-status").textContent = removed ? "기본 배치 · 이 브라우저" : "초기화 저장 안 됨 · 이 창에서만 유지";
@@ -11661,12 +11949,6 @@
       // drawer later moves nothing (W3R-03).
       if (event.reason === 'select') scheduleWorkspaceLayout();
     });
-    $('#rail-collapse').addEventListener('click', () => {
-      if (!workspaceEditable()) return;
-      workspaceState = KinWorkspaceLayout.toVersion3(workspaceState);
-      workspaceState.workspace.railCollapsed = !workspaceState.workspace.railCollapsed;
-      applyLayout(); saveWorkspace();
-    });
     bindPanelResize('#resize-rail', 'x', e => {
       const left = $('.left').getBoundingClientRect();
       document.body.style.setProperty('--workspace-rail-width', clampPanel(e.clientX - left.left, 160, innerWidth / 3) + 'px');
@@ -11687,18 +11969,15 @@
       const maximum = Math.max(current, 140, $(".right").getBoundingClientRect().height - 266);
       top.style.height = clampPanel(current + delta, Math.min(current, 140), maximum) + "px";
     });
-    bindPanelResize("#resize-related", () => portraitLayout() ? "y" : "x", (e, axis) => {
+    bindPanelResize("#resize-related", "y", e => {
       const box = $(".workrow").getBoundingClientRect();
-      if (axis === "y")
-        $(".related-p").style.height = clampPanel(e.clientY - box.top, 286, box.height - 186) + "px";
-      else
-        $(".related-p").style.width = clampPanel(e.clientX - box.left, 220, box.width - 366) + "px";
+      $(".related-p").style.height = clampPanel(e.clientY - box.top, portraitLayout() ? 286 : 150, box.height - 186) + "px";
     });
-    bindPanelResize("#resize-prior", "y", e => {
-      const box = $(".related-p").getBoundingClientRect();
+    bindPanelResize("#resize-left-split", "y", e => {
+      const box = $(".left").getBoundingClientRect();
       const list = $(".related-list-pane");
       list.style.flex = "none";
-      list.style.height = clampPanel(e.clientY - box.top, 150, box.height - 136) + "px";
+      list.style.height = clampPanel(box.bottom - e.clientY, 80, box.height - 170) + "px";
     });
 
 
@@ -11706,16 +11985,7 @@
     for (const host of [$('#quick'),$('#filterrow')]) host.addEventListener('keydown',e=>{
       if(e.key==='Enter'&&!e.isComposing&&e.keyCode!==229){e.preventDefault();worklistSearch?.apply();}
     });
-    $("#quick-match").addEventListener("change", () => {
-      try {
-        const next = KinCompoundFilter.withQuickMode(fval[KinCompoundFilter.KEY], $("#quick-match").value, COLS[mode]);
-        if (next) fval[KinCompoundFilter.KEY] = next; else delete fval[KinCompoundFilter.KEY];
-        activeFilterName = null;
-      } catch (error) { toast(error.message, 'err'); }
-      worklistSearch?.change();
-      render();
-    });
-    $("#refresh").addEventListener("click", load);
+    $("#m-refresh").addEventListener("click", load);
     $('#page-prev').addEventListener('click', () => { resultPage--; render(); });
     $('#page-next').addEventListener('click', () => { resultPage++; render(); });
     $('#page-current').addEventListener('click', () => render(selectedUid));
@@ -11726,6 +11996,24 @@
     });
     $("#m-home").addEventListener("click", load);
     $("#m-filmbox").addEventListener("click", () => { if (selectedUid) openFilmbox(selectedUid); });
+
+    // 상단 메뉴로 옮긴 뒤에도 끝 쪽의 조건·저장 검색 단추가 창 밖으로 밀리지 않게 한다.
+    function placeTopMenu(menu) {
+      if (!menu.open) return;
+      const summary = menu.querySelector(':scope > summary').getBoundingClientRect();
+      const panel = menu.querySelector(':scope > .toolbar-menu-panel').getBoundingClientRect();
+      menu.style.setProperty('--top-menu-left', Math.max(8, Math.min(summary.left, innerWidth - panel.width - 8)) + 'px');
+      menu.style.setProperty('--top-menu-top', menu.closest('.menubar').getBoundingClientRect().bottom + 'px');
+    }
+    const topMenuObserver = new ResizeObserver(entries => entries.forEach(entry => placeTopMenu(entry.target.parentElement)));
+    for (const menu of document.querySelectorAll('.menubar > .toolbar-menu')) {
+      menu.addEventListener('toggle', () => placeTopMenu(menu), true);
+      topMenuObserver.observe(menu.querySelector(':scope > .toolbar-menu-panel'));
+    }
+    window.addEventListener('resize', () => {
+      for (const menu of document.querySelectorAll('.menubar > .toolbar-menu[open]')) placeTopMenu(menu);
+    });
+
 
     // ── User Filter List (6.2.1) ──
     // 현재 필터 조합에 이름을 붙여 **계정에** 저장한다. 칩을 누르면 그대로 돌아온다.
@@ -11752,8 +12040,9 @@
     function shortcutStatus(message) {
       const status = $('#shortcuts-status');
       if (status && status.textContent !== message) status.textContent = message;
-      const save = $('#shortcuts-save');
-      if (save) save.disabled = !shortcutDraft || !filterCollection || shortcutBusy || !serverMode || offline || work.state() !== 'active';
+      // 저장 도중 화면 전환을 취소한 경우 팝업도 미확정 상태를 보여 주어야 다시 저장 여부를 판단할 수 있다.
+      const popupStatus = examFilterDialog?.open && examFilterDialog.querySelector('[role=status]');
+      if (popupStatus && message && popupStatus.textContent !== message) popupStatus.textContent = message;
     }
     async function reloadFolderSearches(at = work.capture('document')) {
       const sequence = ++filterReadSequence;
@@ -11774,11 +12063,11 @@
         try {
           if (personal.status === 'rejected') throw personal.reason;
           acceptFilterCollection(personal.value);
-          shortcutStatus(shortcutDraft ? '편집 내용을 유지했습니다. 확인 후 Save Shortcuts로 저장하세요.'
+          shortcutStatus(shortcutDraft ? '편집 내용을 유지했습니다. Filter Exams에서 이름을 확인하고 Save as Shortcut으로 다시 저장하세요.'
             : shared.status === 'rejected' ? '기관 검색을 불러오지 못했습니다. 다시 불러오세요.' : '');
         } catch (error) {
           filterCollection = null;
-          shortcutStatus('검색 모음을 읽지 못해 저장을 막았습니다. Reload Shortcuts로 다시 불러오세요. ' + error.message);
+          shortcutStatus('검색 모음을 읽지 못해 저장을 막았습니다. Filter Exams를 다시 열어 불러오세요. ' + error.message);
         }
         updateWorklistFolders(); render();
       });
@@ -11788,7 +12077,7 @@
       shortcutDraft = JSON.parse(JSON.stringify(next));
       if (shortcutBusy) { shortcutStatus('저장 중입니다. 추가 편집은 현재 저장 뒤에 반영합니다.'); return; }
       if (!filterCollection || !serverMode || offline) {
-        shortcutStatus('검색 모음 버전을 확인해야 저장할 수 있습니다. Reload Shortcuts로 다시 불러오세요.'); return;
+        shortcutStatus('검색 모음 버전을 확인해야 저장할 수 있습니다. Filter Exams를 다시 열어 불러오세요.'); return;
       }
       const at = work.capture('document'), sent = JSON.stringify(shortcutDraft);
       const body = { expectedOwner: [...filterCollection.owner], revision: filterCollection.revision,
@@ -11807,7 +12096,7 @@
       } catch (error) {
         work.commit(at, () => {
           filterCollection = null;
-          shortcutStatus('저장 결과를 확인하지 못했습니다. 편집은 유지됩니다. Reload Shortcuts 후 확인해 주세요. ' + error.message);
+          shortcutStatus('저장 결과를 확인하지 못했습니다. 편집은 유지됩니다. Filter Exams를 다시 열어 확인해 주세요. ' + error.message);
         });
       } finally {
         work.commit(at, () => {
@@ -11815,14 +12104,15 @@
           if (saved) shortcutStatus('바로가기를 저장했습니다.');
         });
       }
-      if (saved && shortcutDraft && work.admits(at)) await saveFolderShortcuts(shortcutDraft);
+      if (saved && shortcutDraft && work.admits(at)) return saveFolderShortcuts(shortcutDraft);
+      return saved;
     }
     work.onInvalidate(event => {
       if (event.reason === 'prepare') {
         ++filterReadSequence; ++sharedFilterReadSequence;
         if (shortcutBusy) {
           shortcutBusy = false; filterCollection = null;
-          shortcutStatus('저장 결과를 확인해야 합니다. 편집으로 돌아온 뒤 Reload Shortcuts로 확인해 주세요.');
+          shortcutStatus('저장 결과를 확인해야 합니다. 편집으로 돌아온 뒤 Filter Exams를 다시 열어 확인해 주세요.');
         } else shortcutStatus($('#shortcuts-status')?.textContent || '');
       } else if (event.reason === 'cancel') {
         // Resuming never revives the previous write ticket or silently resends its array.
@@ -11831,15 +12121,20 @@
     });
 
     const snapshotFilter = () => ({
-      quick: $("#quick").value, days: quickDays, mode, cols: { ...fval },
+      quick: $("#quick").value, days: -1, mode, cols: { ...fval },
       sortKey, sortDir,
     });
     function filterCriteriaKey(filter) {
       const canonical = value => Array.isArray(value) ? value.map(canonical)
         : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(k => [k, canonical(value[k])])) : value;
       const cols = Object.fromEntries(Object.entries(filter.cols || {}).filter(([, v]) => v !== '' && v != null));
+      const days = savedFilterDays(filter.days);
+      if (!cols.date && days >= 0) {
+        const to = new Date(), from = new Date(to); from.setDate(from.getDate() - days);
+        cols.date = `${ymd(from)}..${ymd(to)}`;
+      }
       const key = COLS[filter.mode]?.some(c => c.k === filter.sortKey) ? filter.sortKey : null;
-      return JSON.stringify(canonical({ mode: filter.mode, quick: filter.quick ?? '', days: savedFilterDays(filter.days),
+      return JSON.stringify(canonical({ mode: filter.mode, quick: filter.quick ?? '', days: -1,
         cols, sortKey: key, sortDir: key ? filter.sortDir || 0 : 0 }));
     }
     function focusFilterChip(name) {
@@ -11947,7 +12242,7 @@
       },
       restoreFocus(opener) {
         if (opener?.isConnected && !opener.disabled && !opener.closest('[hidden]')) opener.focus();
-        else if (opener?.id === 'edit-active-filter') $('#clearfilter').focus();
+        else if (opener?.id === 'edit-active-filter') $('#filterrow .col-clear')?.focus();
         else if (opener?.dataset.name) focusFilterChip(opener.dataset.name);
         else $('#managefilters').focus();
       },
@@ -11992,10 +12287,14 @@
       const source = folderId && folderSearches().find(saved => saved.treeId === (f.treeId || 'own:' + f.id));
       folderAppliedSearch = source ? { id: source.treeId, name: source.name, criteria: filterCriteriaKey(f) } : null;
       $("#quick").value = f.quick ?? "";
-      quickDays = savedFilterDays(f.days);
-      document.querySelectorAll("#qf button").forEach(x => x.classList.toggle("on", +x.dataset.days === quickDays));
       Object.keys(fval).forEach(k => delete fval[k]);
       Object.assign(fval, f.cols ?? {});
+      // 옛 상대 날짜 검색도 적용할 때 헤더의 단일 날짜 조건으로 옮긴다.
+      const days = savedFilterDays(f.days);
+      if (!fval.date && days >= 0) {
+        const to = new Date(), from = new Date(to); from.setDate(from.getDate() - days);
+        fval.date = `${ymd(from)}..${ymd(to)}`;
+      }
       // setMode()가 정렬을 지우므로 모드를 먼저 바꾸고 정렬을 나중에 얹는다
       if (f.mode && f.mode !== mode) setMode(f.mode);
       /**
@@ -12099,24 +12398,17 @@
     });
     renderChips();
 
-    $("#clearfilter").addEventListener("click", () => {
+    function clearWorklistFilters() {
       activeFilterName = null;
       folderAppliedSearch = null;
       favoriteList?.clear();studyTagList?.clear();consultationFilter=null;
       $("#quick").value = "";
       Object.keys(fval).forEach(k => delete fval[k]);
-      quickDays = -1;
-      document.querySelectorAll("#qf button").forEach(x => x.classList.toggle("on", x.dataset.days === "-1"));
       worklistSearch?.clear();
       alignWorklistFolder(null);
       renderHeads(); render();
-    });
+    }
 
-    $("#qf").addEventListener("click", e => {
-      const b = e.target.closest("button"); if (!b || !b.dataset.days) return;
-      document.querySelectorAll("#qf button").forEach(x => x.classList.remove("on"));
-      b.classList.add("on"); quickDays = +b.dataset.days; worklistSearch?.change(); render();
-    });
 
     $("#heads").addEventListener("click", e => {
       const th = e.target.closest("th"); if (!th) return;
@@ -12825,7 +13117,7 @@
       imagePreview = KinWorklistImagePreview.mount({owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api});
       imageThumbnails = window.KinWorklistImageThumbnails?.mount?.({host:$('#thumbwrap'),owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api,
         onPreview:value=>imagePreview?.open(value),onBack:()=>renderThumbs()}) || null;
-      worklistSearch = KinWorklistSearch.mount({host:document.querySelector('.userfilter'),owner:()=>KinViewerOpening.key(KinAuth.session()),snapshot:searchCriteria,render});
+      worklistSearch = KinWorklistSearch.mount({host:document.querySelector('#toolbar-filters .toolbar-menu-panel'),owner:()=>KinViewerOpening.key(KinAuth.session()),snapshot:searchCriteria,render});
       rowNavigation = KinWorklistRowNavigation.mount({tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,
         current:()=>selectedUid,reveal:uid=>render(uid),activate:uid=>whenSelected(select(uid),uid,()=>{if(mode==='Radiology')focusReportEditor();})});
       relatedRowNavigation = KinWorklistRowNavigation.mount({tbody:$('#relrows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:()=>relatedRows,

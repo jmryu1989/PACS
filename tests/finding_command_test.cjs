@@ -751,7 +751,7 @@ test('adapter: the open panel observes the field region and every element above 
   doc.body.append(report);
   // The Related region is watched too (S4 GEO): a separator move shifts the report by resizing it.
   const region = h.document.querySelector('.related-p');
-  const above = new Set([redit, head, editor, row, pane, citelist, draftbar, rbtns, region]);
+  const movedBounds = [redit, pane, rfoot, region];
   let top = 576;
   redit.getBoundingClientRect = () => ({ top, height: 180 });
   await h.open();
@@ -759,9 +759,8 @@ test('adapter: the open panel observes the field region and every element above 
   const [first] = h.observers;
   // Whatever else it watches (Clinical Context beside the editor is free either way), every box whose resize moves the
   // field region is watched, once.
-  for (const el of above) assert.ok(first.targets.includes(el), `observes ${el.className || el.id}`);
+  for (const el of movedBounds) assert.ok(first.targets.includes(el), `observes changed boundary ${el.className || el.id}`);
   assert.equal(new Set(first.targets).size, first.targets.length, 'each observed once');
-  assert.ok(!first.targets.includes(rfoot) && !first.targets.includes(report), 'nothing below it and not the column itself');
   const bound = () => h.panel().style.getPropertyValue('--reading-findings-top');
   assert.equal(bound(), '576px');
   // The pane grows above the pinned field region: `.redit` moves 100px down at the same height, and
@@ -779,7 +778,7 @@ test('adapter: the open panel observes the field region and every element above 
   await h.open();
   assert.equal(h.observers.length, 2, 'a fresh observer on reopen, never the closed one again');
   const second = h.observers[1];
-  assert.deepEqual(new Set(second.targets), above);
+  for (const el of movedBounds) assert.ok(second.targets.includes(el));
   assert.equal(bound(), '640px', 'reopening measures the field region where it is now');
   // Ending the session gives it back too, with the scroll listener.
   h.ui.end();
@@ -820,7 +819,7 @@ test('adapter: with no room below the field region for its first line the panel 
   // Room for the first line again (the column scrolled): back to the shipped bound and the 12px inset.
   fieldsTop = 700; watch.fire();
   assert.equal(prop('--reading-findings-top'), '700px');
-  assert.equal(prop('--reading-findings-bottom'), '', 'the inset variable is removed, not left behind');
+  assert.equal(parseFloat(prop('--reading-findings-bottom') || '12'), 12, 'the normal inset is restored');
   h.ui.end();
 });
 

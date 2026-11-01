@@ -37,7 +37,7 @@
       current:()=>studies.find(s=>s.uid===selectedUid),study:uid=>studies.find(s=>s.uid===uid),
       openStudy:uid=>select(uid,{openSelected:true}),
       filter:(uids,direction)=>{
-        $('#clearfilter').click();const wanted=new Set(uids),known=new Set(studies.map(s=>s.uid));
+        clearWorklistFilters();const wanted=new Set(uids),known=new Set(studies.map(s=>s.uid));
         consultationFilter={uids:wanted,revision:++consultationFilterSequence,label:(direction==='received'?'Received':'Sent')+' Consultations · Loaded Requests'};render();
         const missing=[...wanted].filter(uid=>!known.has(uid)).length;
         if(missing)toast(`자문 검사 ${wanted.size}건 중 ${missing}건이 현재 불러온 검사 목록에 없습니다. Refresh 후 접근 가능한 검사를 확인하세요.`, 'info');
@@ -178,20 +178,18 @@
       }[layoutMode];
       $("#layout-toggle").setAttribute("aria-label", `화면 배치 ${layoutMode}`);
       $("#resize-main").setAttribute("aria-orientation", portrait ? "horizontal" : "vertical");
-      $("#resize-related").setAttribute("aria-orientation", portrait ? "horizontal" : "vertical");
-      if (portrait) {
-        $(".left").style.width = "";
-        $(".related-p").style.width = "";
-      } else {
-        $(".left").style.height = "";
-        $(".related-p").style.height = "";
-      }
+      // Related Report sits above Report Editor in every layout: its handle is always a height handle.
+      $("#resize-related").setAttribute("aria-orientation", "horizontal");
+      $(".related-p").style.width = "";
+      if (portrait) $(".left").style.width = "";
+      else $(".left").style.height = "";
       // A temporary small window must not overwrite the user's preferred size.
       // Reapply stored pixels within today's bounds, separately for each orientation:
       // a landscape width is never a portrait height (W3R-07).
       const sizes = workspaceState[workspaceAxis()], geometry = workspaceState.workspace;
       if (geometry) {
-        document.body.classList.toggle('workspace-rail-collapsed', geometry.railCollapsed);
+        // The Rail button is gone, so a saved "collapsed" value must not keep the panel narrow.
+        document.body.classList.remove('workspace-rail-collapsed');
         document.body.style.setProperty('--workspace-rail-width', clampPanel(geometry.rail ?? 220, 160, Math.max(160, innerWidth / 3)) + 'px');
         $('#rail-collapse')?.setAttribute('aria-expanded', String(!geometry.railCollapsed));
       }
@@ -199,13 +197,14 @@
       // Before any measuring below: the workflow mode and the hidden panels decide the band's panels and their columns.
       // Each column is its share of the shown shares; the last takes the remainder, as Template always has, so the
       // default band paints to the same sub-pixel as the percentage widths it replaces.
+      // Panels에서 되살린 선택을 기본 숨김 규칙으로 다시 덮지 않는다.
       const band = KinWorkspaceLayout.reportWindow(mode, geometry?.hiddenPanels || []);
       for (const [name, on] of Object.entries(band.classes)) document.body.classList.toggle(name, on);
       const shares = band.content.reduce((sum, p) => sum + p.share, 0);
       top.style.setProperty('--kin-rw-columns', band.content.map((p, i) => i === band.content.length - 1 ? 'minmax(0, 1fr)'
         : `${100 * p.share / shares}%`).join(' ') || 'minmax(0, 1fr)');
       left.style[portrait ? "height" : "width"] = "";
-      related.style[portrait ? "height" : "width"] = "";
+      related.style.height = "";
       top.style.height = "";
       prior.style.height = "";
       prior.style.flex = "";
@@ -267,11 +266,11 @@
         top.style.height = clampPanel(sizes.top, 140, maximum) + "px";
       }
       const row = $(".workrow").getBoundingClientRect();
-      if (sizes.related != null) related.style[portrait ? "height" : "width"] = clampPanel(sizes.related,
-        portrait ? 286 : 220, portrait ? row.height - 186 : row.width - 366) + "px";
+      if (sizes.related != null) related.style.height = clampPanel(sizes.related,
+        portrait ? 286 : 150, row.height - 186) + "px";
       if (sizes.prior != null) {
         prior.style.flex = "none";
-        prior.style.height = clampPanel(sizes.prior, 150, related.getBoundingClientRect().height - 136) + "px";
+        prior.style.height = clampPanel(sizes.prior, 80, left.getBoundingClientRect().height - 170) + "px";
       }
       if (selectedUid && !document.body.classList.contains('reading') && (portrait || innerWidth < 900)) {
         // Wrapped controls and the hidden-filter notice belong above the table,
@@ -285,9 +284,9 @@
           prior.style.maxHeight = ''; prior.style.overflowY = '';
           related.querySelector('.prior-report-pane').style.minHeight = '';
           prior.style.minHeight = floor + 'px';
-          related.style.minHeight = (floor + 6 + 116) + 'px';
+
         } else {
-          prior.style.maxHeight = 'calc(100% - 49px)'; prior.style.overflowY = 'auto';
+          prior.style.minHeight = floor + 'px'; prior.style.overflowY = 'auto';
           related.querySelector('.prior-report-pane').style.minHeight = '43px';
         }
       } else {

@@ -591,7 +591,7 @@ class RelatedModePage(unittest.TestCase):
         resume = self.page.locator("#report-editor-resume")
         resume.scroll_into_view_if_needed()
         expect(resume).to_be_visible()
-        expect(self.page.locator("#clinical-context")).to_be_visible()
+        # Clinical Context moved to Clinical Info; Resume Editing still owns its hit area.
         inside = self.js("""() => { const e = document.getElementById('report-editor').getBoundingClientRect(),
           b = document.getElementById('report-editor-resume').getBoundingClientRect();
           return b.left >= e.left - 0.5 && b.right <= e.right + 0.5; }""")
@@ -773,7 +773,7 @@ class RelatedModePage(unittest.TestCase):
         self.assertEqual(0, self.page.locator("#related-mode img").count())
         # WORKLIST-SPLIT-UID mid-mode: the Source the list now reports as split is unavailable — no text, no Insert, Back works.
         self.site.identity_issues = [UID_B]
-        self.page.locator("#refresh").click()
+        self.page.locator("#m-refresh").click()
         self.wait(lambda: self.js("uid => appState[uid]?.identityUnresolved === true", UID_B), "the Source's identity issue")
         expect(self.page.locator("#related-mode-source")).to_contain_text("지금 목록에 없어")
         self.assertEqual("", self.source_text("findings"))
@@ -781,7 +781,7 @@ class RelatedModePage(unittest.TestCase):
         self.back()
         # A Target the list reports as split never enters the mode (and is never a Target at all).
         self.site.identity_issues = [UID_A]
-        self.page.locator("#refresh").click()
+        self.page.locator("#m-refresh").click()
         self.wait(lambda: self.js("uid => appState[uid]?.identityUnresolved === true", UID_A), "the Target's identity issue")
         self.js("uid => enterRelatedMode(uid, { focus: true })", UID_C)
         self.settle()
@@ -832,11 +832,12 @@ class RelatedModePage(unittest.TestCase):
         self.open()
         self.open_target()
         # The hidden Recommendation gets its value through a real template application, then the autosave stores it.
-        if not self.page.locator("#tplrows tr", has_text=rf.TEMPLATE["title"]).first.is_visible():
-            self.page.locator("[data-study-panel-tab=templates]").first.click()
+        rf.h.show_all_panels(self.page)
+        self.page.keyboard.press("Control+Alt+T")
         self.page.locator("#tplrows tr", has_text=rf.TEMPLATE["title"]).first.dblclick()
         self.wait(lambda: self.value("recommendation") == rf.TEMPLATE["recommendation"], "the template's Recommendation")
         self.autosave()
+        self.page.get_by_role("complementary", name="Study Panel", exact=True).get_by_role("button", name="Close", exact=True).click()
         self.enter()
         # Select from the middle of the Source Conclusion into its Recommendation.
         self.js("""() => { const c = document.querySelector('[data-related-source="conclusion"]').firstChild;
@@ -1159,7 +1160,7 @@ class RelatedModePage(unittest.TestCase):
         self.enter()
         self.site.hidden.add(UID_A)
         lists = self.site.count("GET", "/api/studies")
-        self.page.get_by_role("group", name="Refresh").get_by_role("button", name="Refresh", exact=True).click()
+        self.page.locator("#m-refresh").click()
         self.wait(lambda: self.site.count("GET", "/api/studies") > lists, "the refresh")
         self.settle(300)
         expect(self.page.locator("#related-current")).to_have_text("판독 대상을 선택하세요")
@@ -1465,7 +1466,7 @@ class RelatedModePage(unittest.TestCase):
         self.site.refuse_reason='TARGET_HELD';self.insert()
         self.wait(lambda:self.op_state()=='refused','refused insertion')
         self.site.identity_issues=[UID_B]
-        self.page.locator('#refresh').click()
+        self.page.locator('#m-refresh').click()
         self.wait(lambda:self.js('uid => appState[uid]?.identityUnresolved === true',UID_B),'source flagged unresolved')
         self.site.refuse_reason=None
         for name in ('#report-notice-retry', '#report-notice-discard'):
@@ -1494,7 +1495,7 @@ class RelatedModePage(unittest.TestCase):
         self.site.related_answers=['abort'];self.insert()
         self.wait(lambda:self.op_state()=='unknown','unknown insertion')
         # Public list refresh has flagged the original Source by the time the user retries.
-        self.site.identity_issues=[UID_B];self.page.locator('#refresh').click()
+        self.site.identity_issues=[UID_B];self.page.locator('#m-refresh').click()
         self.wait(lambda:self.js('uid => appState[uid]?.identityUnresolved === true',UID_B),'source unresolved')
         before=len(self.site.related_puts)
         retry=self.page.locator('#report-notice-retry')
@@ -1585,7 +1586,7 @@ class RelatedModePage(unittest.TestCase):
         text=self.r2_refused();self.site.related_answers=['hold']
         self.page.locator('#report-notice-discard').click()
         self.wait(lambda:len(self.site.held_related)==1,'discard request held')
-        self.site.identity_issues=[UID_B];self.page.locator('#refresh').click()
+        self.site.identity_issues=[UID_B];self.page.locator('#m-refresh').click()
         self.wait(lambda:self.js('uid => appState[uid]?.identityUnresolved === true',UID_B),'Source is now unresolved')
         self.site.finish_related();self.settle(300)
         print('LATE_DISCARD_UNRESOLVED_SOURCE '+json.dumps({'state':self.op_state(),'insert_text_preserved':self.value()==text}),flush=True)
@@ -1674,7 +1675,7 @@ class RelatedModePage(unittest.TestCase):
         self.assertTrue(self.js('uid => Boolean(appState[uid]?.identityUnresolved)', UID_B), 'focus listener ran')
         self.assertEqual(text, self.value(), 'W5A-03: final frame admission keeps native text')
         self.assertEqual('discard-unknown', self.op_state(), 'W5A-03: identity changed during native admission; keep operation')
-        self.page.locator('#refresh').click()
+        self.page.locator('#m-refresh').click()
         self.wait(lambda: not self.js('uid => Boolean(appState[uid]?.identityUnresolved)', UID_B), 'complete list resolves Source')
         self.page.locator('#report-notice-check').click()
         self.wait(lambda: self.op_state() == 'discarded', 'same tombstone resolves')
@@ -1685,13 +1686,13 @@ class RelatedModePage(unittest.TestCase):
         self.site.related_answers = ['abort']; self.insert()
         self.wait(lambda: self.op_state() == 'unknown', 'unknown apply')
         frozen = self.site.related_puts[0][1]
-        self.site.identity_issues = [UID_B]; self.page.locator('#refresh').click()
+        self.site.identity_issues = [UID_B]; self.page.locator('#m-refresh').click()
         self.wait(lambda: self.js('appState[relatedUid]?.identityUnresolved === true'), 'Source unresolved')
         self.js('() => { const op = relatedInserts.get(selectedUid); relatedInsertRetry(op); relatedInsertCheck(op); relatedInsertSend(op, "apply"); }')
         self.settle(200)
         self.assertEqual((1, 0), (len(self.site.related_puts), len(self.site.checks)), 'W5A-03: entry points block unresolved identities')
         self.assertEqual('unknown', self.op_state())
-        self.site.identity_issues = []; self.page.locator('#refresh').click()
+        self.site.identity_issues = []; self.page.locator('#m-refresh').click()
         self.wait(lambda: not self.js('Boolean(appState[relatedUid]?.identityUnresolved)'), 'complete list resolves Source')
         self.page.locator('#report-notice-retry').click()
         self.wait(lambda: self.op_state() == 'applied', 'same operation resumes')
@@ -1709,7 +1710,7 @@ class RelatedModePage(unittest.TestCase):
         }''')
         self.page.locator('#report-notice-retry').click()
         self.wait(lambda: self.js('digestReleases.length') == 2, 'digest computation held')
-        self.site.identity_issues = [UID_B]; self.page.locator('#refresh').click()
+        self.site.identity_issues = [UID_B]; self.page.locator('#m-refresh').click()
         self.wait(lambda: self.js('appState[relatedUid]?.identityUnresolved === true'), 'Source unresolved during queued write')
         self.js('restoreDigest()'); self.settle(200)
         self.assertEqual(1, len(self.site.related_puts), 'W5A-03: final admission after hashing')
@@ -1722,12 +1723,12 @@ class RelatedModePage(unittest.TestCase):
         self.wait(lambda: bool(self.site.held_related), 'apply held')
         _, uid, body, account = self.site.held_related[0]
         self.assertEqual(200, self.site.related_put(uid, body, account)[0], 'server applied before identity update')
-        self.site.identity_issues = [UID_B]; self.page.locator('#refresh').click()
+        self.site.identity_issues = [UID_B]; self.page.locator('#m-refresh').click()
         self.wait(lambda: self.js('appState[relatedUid]?.identityUnresolved === true'), 'Source unresolved')
         self.site.finish_related(); self.settle(200)
         self.assertEqual('unknown', self.op_state(), 'W5A-03: late reply cannot retire while Source unresolved')
         self.assertEqual(self.whole(), self.value())
-        self.site.identity_issues = []; self.page.locator('#refresh').click()
+        self.site.identity_issues = []; self.page.locator('#m-refresh').click()
         self.wait(lambda: not self.js('Boolean(appState[relatedUid]?.identityUnresolved)'), 'complete list resolves Source')
         self.page.locator('#report-notice-check').click()
         self.wait(lambda: self.op_state() == 'applied', 'same receipt resolves after identity')
@@ -2309,8 +2310,8 @@ class RelatedModePage(unittest.TestCase):
     # it does not shrink the Related Report mode (its box keeps its place and size); the list is visible, on top at its
     # own centre, and Hide Received closes it with the mode unchanged.
     # The box inside its report column (the click on the toggle may scroll the column into view; that is not a resize).
-    BOX = """selector => { const r = document.querySelector(selector).getBoundingClientRect(),
-      p = document.querySelector(".report-p"), c = p.getBoundingClientRect();
+    BOX = """selector => { const e = document.querySelector(selector), r = e.getBoundingClientRect(),
+      p = e.closest(".prior-report-pane, .report-p"), c = p.getBoundingClientRect();
       return [Math.round(r.top - c.top + p.scrollTop), Math.round(r.height)]; }"""
     ON_TOP = """selector => { const e = document.querySelector(selector), r = e.getBoundingClientRect();
       const x = r.left + r.width / 2, y = Math.max(r.top, 0) + Math.min(r.height, innerHeight) / 2;
@@ -2337,6 +2338,7 @@ class RelatedModePage(unittest.TestCase):
         body.scroll_into_view_if_needed()
         expect(body).to_be_in_viewport()
         self.assertTrue(self.js(self.ON_TOP, "#cvr-inbox-body"), "the opened list is drawn over the report area")
+        toggle.scroll_into_view_if_needed()
         expect(toggle).to_be_in_viewport()
         toggle.click()
         expect(body).to_be_hidden()
@@ -2664,11 +2666,18 @@ class RelatedModePage(unittest.TestCase):
                     self.autosave()
                     target = self.page.locator("#" + field)
                     # A reader clicks where the field is on screen: a field taller than the editor's scroller is clicked
-                    # inside the scroller's view, not at its own centre (which the scroller can hold out of view).
+                    # inside the visible intersection of the editor and report card, not an off-screen field centre.
                     target.scroll_into_view_if_needed()
-                    self.page.mouse.click(*self.js("""id => { const a = document.getElementById(id).getBoundingClientRect(),
-                      b = document.querySelector('.redit').getBoundingClientRect();
-                      return [a.left + a.width / 2, (Math.max(a.top, b.top) + Math.min(a.bottom, b.bottom)) / 2]; }""", field))
+                    self.page.mouse.click(*self.js("""id => {
+                      const node = document.getElementById(id), r = node.getBoundingClientRect();
+                      let left = Math.max(0, r.left), right = Math.min(innerWidth, r.right);
+                      let top = Math.max(0, r.top), bottom = Math.min(innerHeight, r.bottom);
+                      for (let a = node.parentElement; a; a = a.parentElement) {
+                        const s = getComputedStyle(a), b = a.getBoundingClientRect();
+                        if (s.overflowX !== 'visible') { left = Math.max(left, b.left + a.clientLeft); right = Math.min(right, b.left + a.clientLeft + a.clientWidth); }
+                        if (s.overflowY !== 'visible') { top = Math.max(top, b.top + a.clientTop); bottom = Math.min(bottom, b.top + a.clientTop + a.clientHeight); }
+                      }
+                      return [(left + right) / 2, (top + bottom) / 2]; }""", field))
                     expect(target).to_be_focused()
                     self.page.keyboard.press("Control+End")
                     self.assertTrue(self.js(self.CARET_VISIBLE, field), "caret is visible before arrival")

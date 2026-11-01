@@ -15,7 +15,7 @@
     // W9 multi-study view (multi-study-view.js), mounted at boot; the row menu and the W4 move gate read it before then.
     let multiStudyView = null;
     let demoMode = false;
-    let quickDays = -1, sortKey = null, sortDir = 0, selectedOid = null;
+    let sortKey = null, sortDir = 0, selectedOid = null;
     let worklistFolders = null, folderLoadState = 'unknown', folderAppliedSearch = null;
     let filterCollection = null, sharedSearches = [], shortcutDraft = null, shortcutBusy = false, filterReadSequence = 0, sharedFilterReadSequence = 0;
     let storedShortcuts = [];

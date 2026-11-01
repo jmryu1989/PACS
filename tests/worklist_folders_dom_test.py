@@ -138,11 +138,36 @@ class WorklistFoldersDOM(unittest.TestCase):
     def open(self):
         self.page.goto(auth.MAIN_URL)
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(len(self.site.modalities))
-        expect(self.page.locator('#worklist-folders-toggle')).to_have_attribute('aria-expanded', 'true')
+        expect(self.page.locator('#worklist-folders-panel')).to_have_attribute('open', '')
         expect(self.page.get_by_role('button', name='All Studies (6)', exact=True)).to_be_visible()
 
     def folder(self, text):
         return self.page.get_by_role('navigation', name='Folders').get_by_role('button', name=re.compile('^'+re.escape(text)+r' \('))
+
+    def close_menus(self):
+        for menu in self.page.locator('.menubar > .toolbar-menu[open]').all():
+            menu.locator(':scope > summary').click()
+
+    def menu(self, name):
+        menu = self.page.locator('#toolbar-' + name)
+        if menu.get_attribute('open') is None:
+            menu.locator(':scope > summary').click()
+
+    def reload_shortcuts(self):
+        popup = self.page.locator('#exam-filter-popup')
+        if not popup.count() or not popup.is_visible():
+            self.page.get_by_role('button', name='My Shortcuts', exact=True).click()
+        else:
+            popup.get_by_role('button', name='Close', exact=True).click()
+            self.page.get_by_role('button', name='My Shortcuts', exact=True).click()
+        popup.get_by_role('button', name='Close', exact=True).click()
+
+    def save_shortcut(self, name):
+        popup = self.page.locator('#exam-filter-popup')
+        if not popup.count() or not popup.is_visible():
+            self.page.get_by_role('button', name='My Shortcuts', exact=True).click()
+        popup.get_by_label('Shortcut Name', exact=True).fill(name)
+        popup.get_by_role('button', name='Save as Shortcut', exact=True).click()
 
     def test_first_paint_tokens_or_and_empty_and_vanished(self):
         self.open()
@@ -155,8 +180,12 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.folder('CT').click()
         self.folder('MR').click()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(3)
+        if not self.page.locator('#quick').is_visible():
+            self.menu('filters')
         self.page.locator('#quick').fill('MR')
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
+        if not self.page.locator('#quick').is_visible():
+            self.menu('filters')
         self.page.locator('#quick').fill('')
         self.folder('CT').click()
         self.folder('MR').click()
@@ -169,40 +198,44 @@ class WorklistFoldersDOM(unittest.TestCase):
             for (const r of records) if (r.target === status || [...r.removedNodes].includes(status)) ++window.selectionAnnouncements;
           }).observe(status.parentElement, {subtree:true, childList:true, characterData:true});
         }''')
+        if not self.page.locator('#quick').is_visible():
+            self.menu('filters')
         self.page.locator('#quick').fill('CT')
+        if not self.page.locator('#quick').is_visible():
+            self.menu('filters')
         self.page.locator('#quick').fill('')
         self.assertEqual(0, self.page.evaluate('window.selectionAnnouncements'))
         with self.page.expect_response(lambda r: '/api/studies' in r.url and r.request.method == 'GET') as response:
-            self.page.locator('#refresh').click()
+            self.page.locator('#m-refresh').click()
         response.value.finished()
         expect(self.folder('CT')).to_have_text('CT (2)')
         self.page.evaluate('() => new Promise(r => requestAnimationFrame(r))')
         self.assertEqual(0, self.page.evaluate('window.selectionAnnouncements'))
         self.folder('MG').click()
         self.site.modalities = ['CT']
-        self.page.locator('#refresh').click()
+        self.page.locator('#m-refresh').click()
         expect(self.folder('MG')).to_have_text('MG (0)')
         expect(self.folder('MG')).to_have_attribute('aria-pressed', 'true')
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(0)
 
         self.folder('All Studies').click()
         for account in (auth.RAD, auth.RAD_OTHER, auth.RAD):
-            self.page.locator('#worklist-folders-toggle').click()
-            expect(self.page.locator('#worklist-folders-toggle')).to_have_attribute('aria-expanded', 'false')
+            self.page.locator('#worklist-folders-panel > summary').click()
+            expect(self.page.locator('#worklist-folders-panel')).not_to_have_attribute('open', '')
             with self.page.expect_response(lambda r: '/api/studies' in r.url and r.request.method == 'GET') as response:
-                self.page.locator('#refresh').click()
+                self.page.locator('#m-refresh').click()
             response.value.finished()
-            expect(self.page.locator('#worklist-folders-toggle')).to_have_attribute('aria-expanded', 'false')
+            expect(self.page.locator('#worklist-folders-panel')).not_to_have_attribute('open', '')
             self.page.reload()
             expect(self.page.locator('#rows tr[data-uid]')).to_have_count(len(self.site.modalities))
-            expect(self.page.locator('#worklist-folders-toggle')).to_have_attribute('aria-expanded', 'false')
+            expect(self.page.locator('#worklist-folders-panel')).not_to_have_attribute('open', '')
             self.page.locator('#logout').click()
             expect(self.page).to_have_url(re.compile('index.html'))
             self.site.login_as = account
             self.page.get_by_role('button', name=auth.SIGN_IN).click()
             expect(self.page).to_have_url(auth.MAIN_URL)
             expect(self.page.locator('#rows tr[data-uid]')).to_have_count(len(self.site.modalities))
-            expect(self.page.locator('#worklist-folders-toggle')).to_have_attribute('aria-expanded', 'true')
+            expect(self.page.locator('#worklist-folders-panel')).to_have_attribute('open', '')
             expect(self.page.get_by_role('navigation', name='Folders')).to_be_visible()
             self.assertEqual(account['sub'], self.site.account['sub'])
             expect(self.page.locator('dialog[open]')).to_have_count(0)
@@ -211,8 +244,8 @@ class WorklistFoldersDOM(unittest.TestCase):
 
     def folders_state(self, page=None):
         page = page or self.page
-        toggle = page.locator('#worklist-folders-toggle')
-        expanded = toggle.get_attribute('aria-expanded')
+        toggle = page.locator('#worklist-folders-panel > summary')
+        expanded = 'true' if page.locator('#worklist-folders-panel').get_attribute('open') is not None else 'false'
         visible = page.get_by_role('navigation', name='Folders').is_visible()
         self.assertEqual(expanded == 'true', visible, 'toolbar state and panel visibility agree')
         return expanded
@@ -221,27 +254,27 @@ class WorklistFoldersDOM(unittest.TestCase):
         # W2R4-06 (mutant O9): closing through the panel's own "Folders" header is the
         # same doctor action as the toolbar button and lasts for that login in the tab.
         self.open()
-        toggle = self.page.locator('#worklist-folders-toggle')
-        header = self.page.locator('#' + toggle.get_attribute('aria-controls') + ' > summary')
+        toggle = self.page.locator('#worklist-folders-panel > summary')
+        header = toggle
         expect(header).to_have_text('Folders')
         header.click()
-        expect(toggle).to_have_attribute('aria-expanded', 'false')
+        expect(self.page.locator('#worklist-folders-panel')).not_to_have_attribute('open', '')
         for _ in range(2):
             self.page.reload()
             expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
-            expect(toggle).to_have_attribute('aria-expanded', 'false')
+            expect(self.page.locator('#worklist-folders-panel')).not_to_have_attribute('open', '')
             self.assertEqual('false', self.folders_state())
         toggle.click()
-        expect(toggle).to_have_attribute('aria-expanded', 'true')
+        expect(self.page.locator('#worklist-folders-panel')).to_have_attribute('open', '')
         header.click()
-        expect(toggle).to_have_attribute('aria-expanded', 'false')
+        expect(self.page.locator('#worklist-folders-panel')).not_to_have_attribute('open', '')
         self.page.locator('#logout').click()
         expect(self.page).to_have_url(re.compile('index.html'))
         self.site.login_as = auth.RAD
         self.page.get_by_role('button', name=auth.SIGN_IN).click()
         expect(self.page).to_have_url(auth.MAIN_URL)
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
-        expect(toggle).to_have_attribute('aria-expanded', 'true')
+        expect(self.page.locator('#worklist-folders-panel')).to_have_attribute('open', '')
         self.assertEqual('true', self.folders_state())
         self.assertEqual([], self.dialogs)
 
@@ -249,20 +282,20 @@ class WorklistFoldersDOM(unittest.TestCase):
         # W2R4-06 (mutant O11): README promises "closing it lasts for that login in the tab".
         # A second tab of the same login starts open; each tab keeps its own choice.
         self.open()
-        self.page.locator('#worklist-folders-toggle').click()
-        expect(self.page.locator('#worklist-folders-toggle')).to_have_attribute('aria-expanded', 'false')
+        self.page.locator('#worklist-folders-panel > summary').click()
+        expect(self.page.locator('#worklist-folders-panel')).not_to_have_attribute('open', '')
         second = self.context.new_page()
         second.on('pageerror', lambda e: self.errors.append(str(e)))
         second.goto(auth.MAIN_URL)
         expect(second.locator('#rows tr[data-uid]')).to_have_count(6)
-        expect(second.locator('#worklist-folders-toggle')).to_have_attribute('aria-expanded', 'true')
+        expect(second.locator('#worklist-folders-panel')).to_have_attribute('open', '')
         self.assertEqual('true', self.folders_state(second))
         self.page.reload()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
-        expect(self.page.locator('#worklist-folders-toggle')).to_have_attribute('aria-expanded', 'false')
+        expect(self.page.locator('#worklist-folders-panel')).not_to_have_attribute('open', '')
         second.reload()
         expect(second.locator('#rows tr[data-uid]')).to_have_count(6)
-        expect(second.locator('#worklist-folders-toggle')).to_have_attribute('aria-expanded', 'true')
+        expect(second.locator('#worklist-folders-panel')).to_have_attribute('open', '')
         second.close()
 
     def test_storage_unavailable_still_opens_and_closes_for_the_page(self):
@@ -280,12 +313,12 @@ class WorklistFoldersDOM(unittest.TestCase):
           }
         })()''')
         self.open()
-        self.page.locator('#worklist-folders-toggle').click()
-        expect(self.page.locator('#worklist-folders-toggle')).to_have_attribute('aria-expanded', 'false')
+        self.page.locator('#worklist-folders-panel > summary').click()
+        expect(self.page.locator('#worklist-folders-panel')).not_to_have_attribute('open', '')
         self.assertEqual('false', self.folders_state())
         self.page.reload()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
-        expect(self.page.locator('#worklist-folders-toggle')).to_have_attribute('aria-expanded', 'true')
+        expect(self.page.locator('#worklist-folders-panel')).to_have_attribute('open', '')
 
     def test_footer_counts_stay_whole_with_folders_open(self):
         # W2R4-04: D1041 makes the open panel every login's first screen. Each status count
@@ -304,7 +337,7 @@ class WorklistFoldersDOM(unittest.TestCase):
             const r = item.getBoundingClientRect();
             return {text: item.textContent, lines: lines.size, inside: r.left >= box.left - 0.5 && r.right <= box.right + 0.5};
           });
-          return {items, barOverflow: bar.scrollWidth - bar.clientWidth, panel: document.querySelector('#worklist-folders-toggle').getAttribute('aria-expanded')};
+          return {items, barOverflow: bar.scrollWidth - bar.clientWidth, panel: String(document.querySelector('#worklist-folders-panel').open)};
         }"""
         for width in (1280, 1500, 1920):
             with self.subTest(width=width):
@@ -317,8 +350,8 @@ class WorklistFoldersDOM(unittest.TestCase):
                 texts = [i['text'] for i in observed['items']]
                 self.assertGreaterEqual(len(texts), 6, texts)
                 for text in texts:
-                    self.assertRegex(text, r'^[A-Za-z]+:\d+$')
-                self.assertTrue(texts[0].startswith('W:') and texts[-1].startswith('Unverified:'), texts)
+                    self.assertRegex(text, r'^[A-Za-z ]+: ?\d+$')
+                self.assertTrue(texts[0].startswith('Unread:') and texts[-1].startswith('Unverified:'), texts)
                 for item in observed['items']:
                     self.assertEqual(1, item['lines'], (width, item))
                     self.assertTrue(item['inside'], (width, item))
@@ -329,7 +362,7 @@ class WorklistFoldersDOM(unittest.TestCase):
         # complement of Equals; switching operators keeps the same Modality list input.
         # W2R4-02: the Korean explanation is visible on that input for both operators.
         self.open()
-        self.page.locator('#toolbar-filters > summary').click()
+        self.menu('filters')
         self.page.locator('#managefilters').click()
         self.page.locator('#sfm-name').fill('Not CT')
         self.page.locator('#sfm-add-rule').click()
@@ -351,6 +384,7 @@ class WorklistFoldersDOM(unittest.TestCase):
         expect(self.page.locator('#sfm-count')).to_contain_text('목록 기준 4건')
         self.page.locator('#sfm-save-apply').click()
         expect(self.page.locator('#saved-filter-manager')).not_to_be_visible()
+        self.close_menus()
         # Rows are MR, MG, XA and CTA; both CT and CT,SR are excluded.
         expected = [auth.UID + '.' + str(i) for i, mod in enumerate(self.site.modalities) if mod in ('MR', 'MG', 'XA', 'CTA')]
         self.assertEqual(sorted(expected), sorted(self.page.locator('#rows tr[data-uid]').evaluate_all(
@@ -359,6 +393,7 @@ class WorklistFoldersDOM(unittest.TestCase):
                          self.site.filters[0]['cols']['$compound'])
         expect(self.folder('Not CT')).to_have_text('Not CT (4)')
         # A saved rule reopens with the same input and its explanation.
+        self.menu('filters')
         self.page.locator('#edit-active-filter').click()
         value = self.page.locator('#sfm-rules [data-rule-value]')
         expect(value).to_have_value('CT')
@@ -378,7 +413,10 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.open()
         self.folder('CT').click()
         self.folder('MR').click()
+        self.menu('filters')
         self.page.locator('[data-search-mode]').select_option('manual')
+        if not self.page.locator('#quick').is_visible():
+            self.menu('filters')
         self.page.locator('#quick').fill('MR')
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(3)
         self.page.locator('#quick').dispatch_event('keydown', {'key': 'Enter', 'isComposing': True})
@@ -387,26 +425,27 @@ class WorklistFoldersDOM(unittest.TestCase):
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(3)
         self.page.locator('#quick').press('Enter')
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
-        self.page.locator('#toolbar-filters > summary').click()
+        self.menu('filters')
         self.page.locator('#savefilter').click()
         self.page.locator('#sfm-name').fill('My MR')
         self.page.locator('#sfm-save-apply').click()
         expect(self.page.locator('#saved-filter-manager')).not_to_be_visible()
+        self.close_menus()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
         nav = self.page.get_by_role('navigation', name='Folders')
-        nav.get_by_label('Shortcut Name', exact=True).fill('Morning')
-        nav.get_by_role('combobox', name=re.compile(r'^Saved Search')).select_option('own:1')
-        nav.get_by_role('button', name='Add Shortcut', exact=True).click()
+        self.save_shortcut('Morning')
         expect(self.page.locator('#shortcuts-status')).to_contain_text('저장했습니다')
+        self.page.locator('#exam-filter-popup').get_by_role('button', name='Close', exact=True).click()
         self.folder('All Studies').click()
-        self.folder('Morning').click()
+        self.page.get_by_role('list', name='My Shortcuts', exact=True).get_by_role('button', name=re.compile(r'^Morning \(')).click()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
         self.site.sign_in(auth.RAD)
         self.page.goto(auth.MAIN_URL)
         expect(self.folder('Morning')).to_be_visible()
-        self.folder('Morning').click()
+        self.page.get_by_role('list', name='My Shortcuts', exact=True).get_by_role('button', name=re.compile(r'^Morning \(')).click()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
-        self.assertEqual('own:1', self.site.shortcuts[0]['searchId'])
+        saved = next(f for f in self.site.filters if f['name'] == 'Morning')
+        self.assertEqual('own:' + str(saved['id']), self.site.shortcuts[0]['searchId'])
 
     def test_counts_unknown_partial_complete_and_failure(self):
         self.site.held_lists = []
@@ -419,7 +458,7 @@ class WorklistFoldersDOM(unittest.TestCase):
             route.fulfill(json=self.site.list_body(account))
         expect(self.folder('CT')).to_have_text('CT (2)')
         self.site.held_lists = []
-        self.page.locator('#refresh').click()
+        self.page.locator('#m-refresh').click()
         expect(self.folder('CT')).to_have_text('CT (2 · Partial)')
         held = self.site.held_lists
         self.site.held_lists = None
@@ -433,12 +472,12 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.folder('Shared shortcut').click()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
         self.site.shared[0]['name'] = 'Renamed shared'
-        self.page.locator('#shortcuts-reload').click()
+        self.reload_shortcuts()
         expect(self.folder('Shared shortcut')).to_contain_text('Unavailable')
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
         expect(self.folder('All Studies')).not_to_have_attribute('aria-current', 'true')
         self.site.fail_shared = True
-        self.page.locator('#shortcuts-reload').click()
+        self.reload_shortcuts()
         expect(self.folder('Shared shortcut')).to_be_disabled()
         self.assertEqual('shared:9', self.site.shortcuts[0]['searchId'])
 
@@ -448,7 +487,7 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.folder('Shared shortcut').click()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
         self.site.held_shared = []
-        self.page.locator('#shortcuts-reload').click()
+        self.reload_shortcuts()
         for _ in range(100):
             if self.site.held_shared:
                 break
@@ -457,7 +496,7 @@ class WorklistFoldersDOM(unittest.TestCase):
         held = self.site.held_shared
         self.site.held_shared = None
         self.site.shared = []
-        self.page.locator('#shortcuts-reload').click()
+        self.reload_shortcuts()
         expect(self.folder('Shared shortcut')).to_be_disabled()
         for route, snapshot in held:
             with self.page.expect_response(lambda r: r.url.endswith('/api/shared-filters')) as response:
@@ -474,10 +513,10 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.folder('Personal shortcut').click()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
         self.site.filters[0]['name'] = 'Renamed CT'
-        self.page.locator('#shortcuts-reload').click()
+        self.reload_shortcuts()
         expect(self.page.locator('#active-filter-name')).to_contain_text('Renamed CT')
         self.site.filters = []
-        self.page.locator('#shortcuts-reload').click()
+        self.reload_shortcuts()
         expect(self.folder('Personal shortcut')).to_be_disabled()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
         self.assertEqual('own:1', self.site.shortcuts[0]['searchId'])
@@ -485,62 +524,51 @@ class WorklistFoldersDOM(unittest.TestCase):
     def test_preparation_cancel_keeps_unknown_write_blocked_until_reload(self):
         self.open()
         self.site.held_shortcuts = []
-        nav = self.page.get_by_role('navigation', name='Folders')
-        nav.get_by_label('Shortcut Name', exact=True).fill('Interrupted')
-        nav.get_by_role('button', name='Add Shortcut', exact=True).click()
-        for _ in range(100):
-            if self.site.held_shortcuts:
-                break
-            self.page.wait_for_timeout(20)
+        with self.page.expect_request(lambda request: request.url.endswith('/api/filter-folders') and request.method == 'POST'):
+            self.save_shortcut('Interrupted')
+        expect(self.page.locator('#shortcuts-status')).to_contain_text('저장 중')
         self.assertEqual(1, len(self.site.held_shortcuts))
         self.page.evaluate('''() => {
           const preparation = KinWorkContext.prepare({});
           KinWorkContext.cancelPreparation(preparation);
         }''')
-        expect(self.page.locator('#shortcuts-save')).to_be_disabled()
-        expect(self.page.locator('#shortcuts-status')).to_contain_text('Reload Shortcuts')
         held = self.site.held_shortcuts
         self.site.held_shortcuts = None
         for route, snapshot in held:
-            with self.page.expect_response(lambda r: r.request.method == 'POST' and r.url.endswith('/api/filter-folders')) as response:
-                route.fulfill(status=201, json=snapshot)
-            response.value.finished()
-        self.page.evaluate('() => new Promise(resolve => requestAnimationFrame(resolve))')
-        expect(self.page.locator('#shortcuts-save')).to_be_disabled()
+            route.fulfill(status=201, json=snapshot)
+        expect(self.page.locator('#exam-filter-popup [role=status]')).to_contain_text('저장 결과를 확인해야 합니다')
+        expect(self.page.locator('#exam-filter-popup [role=status]')).not_to_contain_text('저장했습니다')
         self.assertEqual(1, len(self.site.shortcut_writes))
-        self.page.locator('#shortcuts-reload').click()
-        expect(self.page.locator('#shortcuts-save')).to_be_enabled()
-        self.page.locator('#shortcuts-save').click()
-        expect(self.page.locator('#shortcuts-status')).to_contain_text('저장했습니다')
+        self.save_shortcut('Interrupted')
+        expect(self.page.locator('#exam-filter-popup [role=status]')).to_contain_text('저장했습니다')
         self.assertEqual(2, len(self.site.shortcut_writes))
         self.assertEqual(1, len(self.site.shortcuts))
 
+
     def test_shortcut_conflict_retains_draft_and_read_failure_blocks_writes(self):
         self.open()
-        self.site.collection_revision += 1
-        nav = self.page.get_by_role('navigation', name='Folders')
-        nav.get_by_label('Shortcut Name', exact=True).fill('Draft shortcut')
-        nav.get_by_role('button', name='Add Shortcut', exact=True).click()
-        expect(self.page.locator('#shortcuts-status')).to_contain_text('저장 결과를 확인하지 못했습니다')
-        expect(self.folder('Draft shortcut')).to_be_visible()
-        expect(self.page.locator('#shortcuts-save')).to_be_disabled()
+        self.site.fail_write = True
+        self.save_shortcut('Draft shortcut')
+        popup = self.page.locator('#exam-filter-popup')
+        expect(popup.locator('[role=status]')).to_contain_text('저장하지 못했습니다')
+        expect(popup.get_by_label('Shortcut Name', exact=True)).to_have_value('Draft shortcut')
         self.assertEqual([], self.site.shortcuts)
         self.site.fail_read = True
-        self.page.locator('#shortcuts-reload').click()
-        expect(self.page.locator('#shortcuts-status')).to_contain_text('읽지 못해')
-        expect(self.page.locator('#shortcuts-save')).to_be_disabled()
+        self.site.fail_write = False
+        popup.get_by_role('button', name='Save as Shortcut', exact=True).click()
+        expect(popup.locator('[role=status]')).to_contain_text('저장하지 못했습니다')
+        self.assertEqual(1, len(self.site.shortcut_writes))
         self.site.fail_read = False
-        self.page.locator('#shortcuts-reload').click()
-        expect(self.page.locator('#shortcuts-save')).to_be_enabled()
-        self.page.locator('#shortcuts-save').click()
-        expect(self.page.locator('#shortcuts-status')).to_contain_text('저장했습니다')
+        popup.get_by_role('button', name='Save as Shortcut', exact=True).click()
+        expect(popup.locator('[role=status]')).to_contain_text('저장했습니다')
         self.assertEqual('Draft shortcut', self.site.shortcuts[0]['name'])
         self.assertEqual(2, len(self.site.shortcut_writes))
+
 
     def test_late_collection_answer_after_logout_does_not_recreate_tree(self):
         self.open()
         self.site.held_gets['/api/filter-folders'] = []
-        self.page.locator('#shortcuts-reload').click()
+        self.reload_shortcuts()
         self.page.wait_for_function('document.querySelector("#shortcuts-status").textContent.includes("불러오는")')
         self.page.locator('#logout').click()
         expect(self.page).to_have_url(re.compile('index.html'))
@@ -590,89 +618,53 @@ class WorklistFoldersDOM(unittest.TestCase):
                 expect(self.page.locator('#rows')).to_contain_text('SYN MR')
                 expect(self.page.locator('#rows')).to_contain_text('SYN MG')
                 self.page.clock.set_fixed_time(now+timedelta(minutes=2))
-                self.page.locator('#refresh').click()
+                self.page.locator('#m-refresh').click()
                 expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
                 expect(self.page.locator('#rows')).to_contain_text('SYN MG')
 
     def test_first_paint_served_main_and_d1041_decided_state(self):
-        # D1041 deliberately changes the default CT result and open-panel width.
-        # Retain all other first-paint comparisons; retirement of this main comparison is a follow-up.
-        source_root = auth.ROOT
-        facts = """() => {
-          const grid = document.querySelector('.left .grid').getBoundingClientRect();
-          return {rows:[...document.querySelectorAll('#rows tr[data-uid]')].map(r=>r.dataset.uid),
-            chips:[...document.querySelectorAll('#chips button')].map(b=>b.textContent.trim()),
-            quick:document.querySelector('#quick').value,
-            days:[...document.querySelectorAll('#qf button.on')].map(b=>b.dataset.days),
-            state:document.querySelector('#active-filter-state').textContent,
-            hidden:document.querySelector('#active-filter-info').hidden,
-            focus:document.activeElement.id || document.activeElement.tagName,
-            grid:[grid.x,grid.width],
-            columns:[...document.querySelectorAll('#heads th')].filter(c=>c.getBoundingClientRect().right<=grid.right).map(c=>c.textContent)};
-        }"""
-        with tempfile.TemporaryDirectory(prefix='kin-w2-main-') as temporary:
-            raw = subprocess.check_output(['git', 'archive', '--format=zip', 'c8e4f1b485ec05ccbb97589c74a573b3f48b70ce',
-                'worklist-v0/hpacs-lite', 'scripts/main-split-order.json', 'proxy/branding'], cwd=Path(__file__).resolve().parents[1])
-            zipfile.ZipFile(io.BytesIO(raw)).extractall(temporary)
-            try:
-                for default in (False, 'CT', 'CT,SR'):
-                    for width in (1280, 1500, 1920):
-                        observed = []
-                        for root in (Path(temporary), source_root):
-                            auth.ROOT = root
-                            site = FolderSite()
-                            if default:
-                                site.filters = [dict(id=1, name='Default CT', mode='Radiology', days=-1,
-                                    quick='', cols={'modality':default}, isDefault=True)]
-                            ctx = self.browser.new_context(viewport={'width':width,'height':1000})
-                            try:
-                                ctx.route('**/*', lambda route, request: site.handle(route, request))
-                                page = ctx.new_page()
-                                page.goto(auth.MAIN_URL)
-                                expect(page.locator('#rows tr[data-uid]')).to_have_count((2 if root == source_root else 1) if default else 6)
-                                page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
-                                observed.append(page.evaluate(facts))
-                                if root == source_root:
-                                    expect(page.locator('#worklist-folders-toggle')).to_have_attribute('aria-expanded','true')
-                            finally:
-                                ctx.close()
-                        old, new = observed
-                        self.assertEqual(old['grid'][0] + 220, new['grid'][0])
-                        self.assertEqual(old['grid'][1] - 220, new['grid'][1])
-                        self.assertEqual({1280:4,1500:6,1920:9}[width], len(new['columns']))
-                        self.assertEqual(old['columns'][:len(new['columns'])], new['columns'])
-                        self.assertEqual([auth.UID+'.0', auth.UID+'.4'] if default else old['rows'], new['rows'])
-                        self.assertEqual([text.replace('(1)', '(2)') for text in old['chips']] if default else old['chips'], new['chips'])
-                        for key in ('quick', 'days', 'state', 'hidden', 'focus'):
-                            self.assertEqual(old[key], new[key], (default, width, key))
-                        print('D1041 first_paint_default', json.dumps(dict(default=default,width=width,main=old,w2=new)))
-            finally:
-                auth.ROOT = source_root
+        # The studio changes default geometry/columns; existing saved search criteria still win.
+        for value in ('CT', 'CT,SR'):
+            with self.subTest(saved=value):
+                self.site.filters = [dict(id=1, name='Default CT', mode='Radiology', days=-1,
+                    quick='', cols={'modality':value}, isDefault=True)]
+                self.page.goto(auth.MAIN_URL)
+                expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
+                expect(self.page.locator('#worklist-folders-panel')).to_have_attribute('open', '')
+                expect(self.page.locator('#filterrow [data-f=modality]')).to_have_value(value)
+                self.assertEqual([auth.UID+'.0', auth.UID+'.4'],
+                    self.page.locator('#rows tr[data-uid]').evaluate_all('rows => rows.map(row => row.dataset.uid)'))
+
 
     def test_chip_deleted_modified_and_transient_library_failure_keep_rows(self):
         self.site.filters = [dict(id=1, name='Personal CT', mode='Radiology', days=-1, quick='', cols={'modality':'CT'})]
         self.page.goto(auth.MAIN_URL)
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
-        self.page.locator('#toolbar-filters > summary').click()
+        self.menu('filters')
         self.page.locator('#chips').get_by_role('button', name=re.compile('^Personal CT')).click()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
+        if not self.page.locator('#quick').is_visible():
+            self.menu('filters')
         self.page.locator('#quick').fill('SYN')
         expect(self.page.locator('#active-filter-state')).to_have_text('Modified')
+        self.menu('filters')
         self.page.locator('#edit-active-filter').click()
         self.page.locator('#sfm-delete').click()
         expect(self.page.locator('#sfm-status')).to_contain_text('삭제')
         self.page.locator('#sfm-close').click()
         # Closing returns focus in the dialog's close event, after the click. Edit Search is disabled for a deleted
         # search, so it lands on Clear; typing before it lands would send fill()'s keystroke to Clear instead.
-        expect(self.page.locator('#clearfilter')).to_be_focused()
+        expect(self.page.locator('#filterrow .col-clear')).to_be_focused()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
         expect(self.page.locator('#active-filter-state')).to_have_text('Deleted')
+        if not self.page.locator('#quick').is_visible():
+            self.menu('filters')
         self.page.locator('#quick').fill('')
         expect(self.folder('CT')).to_have_attribute('aria-pressed', 'true')
         expect(self.page.locator('#active-filter-info')).to_have_attribute('title','저장 검색이 삭제됐습니다. 현재 목록 조건은 유지됩니다.')
         self.folder('Shared CT').click()
         self.site.fail_shared = 503
-        self.page.locator('#shortcuts-reload').click()
+        self.reload_shortcuts()
         expect(self.page.locator('#shortcuts-status')).to_contain_text('불러오지 못했습니다')
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
         expect(self.folder('Shared CT')).to_be_enabled()
@@ -683,17 +675,20 @@ class WorklistFoldersDOM(unittest.TestCase):
             cols={'modality':'CT,SR'},isDefault=True)]
         self.page.goto(auth.MAIN_URL)
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
-        self.page.locator('#toolbar-filters > summary').click()
+        self.menu('filters')
         self.page.locator('#edit-active-filter').click()
         self.page.locator('#sfm-save-apply').click()
         expect(self.page.locator('#saved-filter-manager')).not_to_be_visible()
+        self.close_menus()
         self.assertEqual('CT,SR', self.site.filters[0]['cols']['modality'])
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
+        self.menu('filters')
         self.page.locator('#edit-active-filter').click()
         self.page.locator('#sfm-col-modality').fill('CT, MR')
         self.page.locator('#sfm-save-apply').click()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(3)
         expect(self.page.locator('#saved-filter-manager')).not_to_be_visible()
+        self.close_menus()
         self.assertEqual(['CT','MR'], self.site.filters[0]['cols']['modality'])
         self.site.sign_in(auth.RAD)
         self.page.goto(auth.MAIN_URL)
@@ -709,16 +704,19 @@ class WorklistFoldersDOM(unittest.TestCase):
                 self.page.goto(auth.MAIN_URL)
                 expect(self.page.locator('#rows tr[data-uid]')).to_have_count(expected)
                 expect(self.folder('Stored tokens')).to_have_text(f'Stored tokens ({expected})')
-                self.page.locator('#toolbar-filters > summary').click()
+                self.menu('filters')
                 self.page.locator('#edit-active-filter').click()
                 self.page.locator('#sfm-save-apply').click()
                 expect(self.page.locator('#saved-filter-manager')).not_to_be_visible()
+                self.close_menus()
                 self.assertEqual(cols, {key:value for key,value in self.site.filters[0]['cols'].items() if value != ''})
                 expect(self.page.locator('#rows tr[data-uid]')).to_have_count(expected)
+        self.menu('filters')
         self.page.locator('#edit-active-filter').click()
         self.page.locator('#sfm-rules [data-rule-value]').fill('ct, mr')
         self.page.locator('#sfm-save-apply').click()
         expect(self.page.locator('#saved-filter-manager')).not_to_be_visible()
+        self.close_menus()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(3)
 
     def test_folder_replaces_saved_dates_and_complete_counts_agree(self):
@@ -731,6 +729,8 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.page.goto(auth.MAIN_URL)
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
         for name, count in [('CT',2),('All Studies',4),('Since yesterday',2)]:
+            if not self.page.locator('#quick').is_visible():
+                self.menu('filters')
             self.page.locator('#quick').fill('SYN MR')
             self.folder(name).click()
             expect(self.page.locator('#quick')).to_have_value('')
@@ -739,6 +739,8 @@ class WorklistFoldersDOM(unittest.TestCase):
 
     def test_column_alignment_keeps_other_conditions_and_tree_not_redrawn_per_key(self):
         self.open()
+        if not self.page.locator('#quick').is_visible():
+            self.menu('filters')
         self.page.locator('#quick').fill('MR')
         self.page.locator('#filterrow [data-f=modality]').fill('CT, MR')
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
@@ -747,32 +749,31 @@ class WorklistFoldersDOM(unittest.TestCase):
           window.treeChanges = 0;
           new MutationObserver(r=>window.treeChanges += r.length).observe(document.querySelector('#worklist-folders'),{subtree:true,childList:true});
         }""")
+        if not self.page.locator('#quick').is_visible():
+            self.menu('filters')
         self.page.locator('#quick').fill('SYN MR')
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
         self.assertEqual(0,self.page.evaluate('window.treeChanges'))
         self.site.modalities=['MR','MR','CT,SR']
-        self.page.locator('#refresh').click()
+        self.page.locator('#m-refresh').click()
         expect(self.folder('MR')).to_have_text('MR (2)')
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
 
     def test_conflict_blocks_another_edit_after_busy_ends_and_status_announces_only_changes(self):
         self.open()
-        self.site.collection_revision += 1
-        nav=self.page.get_by_role('navigation',name='Folders')
-        nav.get_by_label('Shortcut Name',exact=True).fill('One')
-        nav.get_by_role('button',name='Add Shortcut',exact=True).click()
+        self.site.fail_write = True
+        self.save_shortcut('One')
         expect(self.page.locator('#shortcuts-status')).to_contain_text('저장 결과를 확인하지 못했습니다')
-        # A second add actually enters the write path after the failed request ended.
-        nav.locator('form').get_by_label('Shortcut Name',exact=True).fill('Two')
-        nav.get_by_role('button',name='Add Shortcut',exact=True).click()
+        self.site.fail_read = True
+        self.save_shortcut('Two')
         expect(self.page.locator('#shortcuts-status')).to_contain_text('버전을 확인해야')
-        self.assertEqual(1,len(self.site.shortcut_writes))
+        self.assertEqual(1, len(self.site.shortcut_writes))
         self.page.evaluate("""() => {
           window.statusChanges = 0;
           new MutationObserver(r=>window.statusChanges += r.length).observe(document.querySelector('#shortcuts-status'),{subtree:true,childList:true,characterData:true});
           const preparation = KinWorkContext.prepare({}); KinWorkContext.cancelPreparation(preparation);
         }""")
-        self.assertEqual(0,self.page.evaluate('window.statusChanges'))
+        self.assertEqual(0, self.page.evaluate('window.statusChanges'))
 
     def test_held_session_end_discards_tree_and_account_search_data(self):
         # The retained document is required for Recover Draft; navigation cannot hide stale account data.
@@ -834,7 +835,7 @@ class WorklistFoldersDOM(unittest.TestCase):
         nav.locator('details > summary').click()
         nav.get_by_label('Shortcut Name', exact=True).first.fill('SYN private rename draft')
         nav.get_by_label('Shortcut Name', exact=True).last.fill('SYN private shortcut draft')
-        self.page.locator('#toolbar-filters > summary').click()
+        self.menu('filters')
         self.page.locator('#managefilters').click()
         self.page.locator('#sfm-name').fill('Unsaved search draft')
         self.page.locator('#sfm-folder').fill('SYN private folder')
@@ -872,8 +873,8 @@ class WorklistFoldersDOM(unittest.TestCase):
         if background_first:
             ended(background)
         else:
-            expect(self.page.locator('#refresh')).to_be_visible()   # no answer has told the page yet
-            self.page.locator('#refresh').click()
+            expect(self.page.locator('#m-refresh')).to_be_visible()   # no answer has told the page yet
+            self.page.locator('#m-refresh').click()
             first = self.waiting_request(waiting, lambda request: request.method == 'GET'
                                          and request.url.startswith(auth.ORIGIN + '/api/studies?') and 'limit=100' in request.url)
             waiting.remove(first)
@@ -883,7 +884,7 @@ class WorklistFoldersDOM(unittest.TestCase):
             self.site.handle(*waiting.pop(0))
         expect(self.page.locator('dialog.kin-logout h2')).to_have_text('Session Ended')
         if background_first:
-            expect(self.page.locator('#refresh')).not_to_be_visible()
+            expect(self.page.locator('#m-refresh')).not_to_be_visible()
         else:
             ended(background)
             # Drain the late answers and their promise callbacks without reopening the document.
@@ -952,7 +953,7 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.page.locator('#rows tr[data-uid]').click()
         expect(self.page.locator('#findings')).to_be_editable()
         self.page.locator('#findings').fill('SYN report recovery must survive')
-        self.page.locator('#toolbar-filters > summary').click()
+        self.menu('filters')
         self.page.locator('#managefilters').click()
         self.page.locator('#sfm-name').fill('SYN pending saved search')
         with self.page.expect_request(lambda request: request.method == 'POST' and request.url.endswith('/api/filters')):
@@ -975,7 +976,7 @@ class WorklistFoldersDOM(unittest.TestCase):
 
     def test_manager_read_write_failure_clears_progress_status(self):
         self.open()
-        self.page.locator('#toolbar-filters > summary').click()
+        self.menu('filters')
         self.page.locator('#managefilters').click()
         self.page.locator('#sfm-organize > summary').click()
         self.site.fail_read=True
@@ -1005,6 +1006,8 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.folder('CT').click()
         expect(self.folder('CT')).to_have_text('CT (2)')
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
+        if not self.page.locator('#quick').is_visible():
+            self.menu('filters')
         self.page.locator('#quick').fill('SYN CT,SR')
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
         expect(self.folder('CT')).to_have_attribute('aria-pressed', 'false')
@@ -1019,7 +1022,7 @@ class WorklistFoldersDOM(unittest.TestCase):
             items=[dict(id='request', studyUid=auth.UID+'.0', state='Requested', revision=1,
                         institutionId=auth.INSTITUTION, requesterActor='SYN requester')]))
         self.open()
-        self.page.locator('#toolbar-filters > summary').click()
+        self.menu('filters')
         for folder in ['All Studies', 'CT', 'Shared CT']:
             for opener, apply, footer in [('#favorite-open', '#favorite-apply', '즐겨찾기'),
                                           ('#study-tag-open', '#study-tag-apply', '태그'),
@@ -1049,11 +1052,12 @@ class WorklistFoldersDOM(unittest.TestCase):
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(3)
         expect(self.folder('CT')).to_have_attribute('aria-pressed', 'true')
         expect(self.folder('MR')).to_have_attribute('aria-pressed', 'true')
-        self.page.locator('#toolbar-filters > summary').click()
+        self.menu('filters')
         self.page.locator('#savefilter').click()
         self.page.locator('#sfm-name').fill('Column tokens')
         self.page.locator('#sfm-save-apply').click()
         expect(self.page.locator('#saved-filter-manager')).not_to_be_visible()
+        self.close_menus()
         self.assertEqual(['CT', 'MR'], self.site.filters[0]['cols']['modality'])
         before = self.page.locator('#rows tr[data-uid]').evaluate_all('rows=>rows.map(r=>r.dataset.uid)')
         for bad in ['CT,', 'CT,,MR', 'CT, UNKNOWN']:
@@ -1066,7 +1070,7 @@ class WorklistFoldersDOM(unittest.TestCase):
 
     def test_duplicate_multi_value_editor_save_reapply_and_invalid_draft(self):
         self.open()
-        self.page.locator('#toolbar-filters > summary').click()
+        self.menu('filters')
         self.page.locator('#managefilters').click()
         self.page.locator('#sfm-name').fill('Stable modalities')
         field = self.page.locator('#sfm-col-modality')
@@ -1083,6 +1087,7 @@ class WorklistFoldersDOM(unittest.TestCase):
         field.fill('ct, CT, mr, MR')
         self.page.locator('#sfm-save-apply').click()
         expect(self.page.locator('#saved-filter-manager')).not_to_be_visible()
+        self.close_menus()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(3)
         self.assertEqual(['CT', 'MR'], self.site.filters[0]['cols']['modality'])
         self.folder('All Studies').click()
@@ -1124,12 +1129,13 @@ class WorklistFoldersDOM(unittest.TestCase):
 
     def test_editor_normalizes_new_single_and_multiple_modalities(self):
         self.open()
-        self.page.locator('#toolbar-filters > summary').click()
+        self.menu('filters')
         for text, stored, count in [('ct','CT',2), (' CT ','CT',2), ('CT','CT',2),
                                     ('ct, mr',['CT','MR'],3), ('CT, MR',['CT','MR'],3),
                                     ('ct\\mr\\CT',['CT','MR'],3)]:
             with self.subTest(text=text):
                 self.folder('All Studies').click()
+                self.menu('filters')
                 self.page.locator('#managefilters').click()
                 self.page.locator('#sfm-new').click()
                 self.page.locator('#sfm-name').fill('Typed '+text)
@@ -1139,6 +1145,7 @@ class WorklistFoldersDOM(unittest.TestCase):
                 expect(self.page.locator('#sfm-count')).not_to_contain_text('오류')
                 self.page.locator('#sfm-save-apply').click()
                 expect(self.page.locator('#saved-filter-manager')).not_to_be_visible()
+                self.close_menus()
                 saved = next(f for f in self.site.filters if f['name'] == ('Typed '+text).strip())
                 self.assertEqual(stored, saved['cols']['modality'])
                 expect(self.page.locator('#rows tr[data-uid]')).to_have_count(count)
@@ -1148,7 +1155,7 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.folder('Shared CT').click()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
         self.site.fail_shared = 503
-        self.page.locator('#toolbar-filters > summary').click()
+        self.menu('filters')
         self.page.locator('#managefilters').click()
         self.page.locator('#sfm-shared > summary').click()
         with self.page.expect_response(lambda r: r.url.endswith('/api/shared-filters')) as response:
@@ -1160,6 +1167,246 @@ class WorklistFoldersDOM(unittest.TestCase):
         expect(self.folder('Shared CT')).to_be_enabled()
         expect(self.folder('Shared CT')).not_to_contain_text('Unavailable')
         expect(self.folder('All Studies')).not_to_have_attribute('aria-current', 'true')
+
+
+
+# 2026-11-01 compact worklist contract, through the same served synthetic site.
+from datetime import datetime, timezone
+
+class StudioSite(FolderSite):
+    """Synthetic account layout endpoint: tests exercise the shipped Save/Load controls."""
+    def __init__(self):
+        super().__init__()
+        self.layout = None
+        self.layout_revision = 0
+        self.layout_writes = []
+        self.statuses = None
+        self.notes = None
+
+    def list_body(self, account, rename=None):
+        body = super().list_body(account, rename)
+        if self.notes is not None:
+            for row, note in zip(body['studies'], self.notes):
+                row['techNote'] = note
+        if self.statuses:
+            for row, rs in zip(body['studies'], self.statuses):
+                row['state']['rs'] = rs
+        return body
+
+    def api(self, route, request, method, path, query):
+        if path == '/api/workspace-layout':
+            account, refused = self.authenticate(request)
+            if refused:
+                return self.refuse(route, *refused)
+            owner = [auth.INSTITUTION, account['sub']]
+            if method != 'GET':
+                body = request.post_data_json
+                self.layout_writes.append(copy.deepcopy(body))
+                if body['expectedOwner'] != owner or body['revision'] != self.layout_revision:
+                    return route.fulfill(status=409, json={'code': 'WORKSPACE_REVISION_CONFLICT'})
+                self.layout = copy.deepcopy(body.get('layout'))
+                self.layout_revision += 1
+            return route.fulfill(json=dict(owner=owner, revision=self.layout_revision, layout=self.layout, updatedAt=None))
+        return super().api(route, request, method, path, query)
+
+
+class StudioWorklistDOM(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.pw = sync_playwright().start()
+        cls.browser = cls.pw.chromium.launch()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.pw.stop()
+
+    def setUp(self):
+        self.site = StudioSite()
+        self.context = self.browser.new_context(viewport={"width": 1500, "height": 1000}, timezone_id="Asia/Seoul")
+        self.context.route("**/*", lambda route, request: self.site.handle(route, request))
+        self.page = self.context.new_page()
+        self.page.set_default_timeout(5000)
+        self.errors = []
+        self.page.on("pageerror", lambda error: self.errors.append(str(error)))
+        self.page.on("dialog", lambda dialog: dialog.accept())
+        self.page.clock.set_fixed_time(datetime(2026, 11, 1, 3, tzinfo=timezone.utc))
+
+    def tearDown(self):
+        if self.errors:
+            print("Browser errors:", self.errors)
+        self.context.close()
+        self.assertEqual([], self.errors)
+        self.assertEqual([], self.site.violations)
+
+    def open(self):
+        self.page.goto(auth.MAIN_URL)
+        expect(self.page.locator("#rows tr[data-uid]")).to_have_count(6)
+
+    def test_default_columns_and_compact_rows(self):
+        self.open()
+        names = self.page.locator("#heads th").evaluate_all("els => els.map(e => e.dataset.key)")
+        self.assertEqual(["no", "assignedReader", "rs", "date", "id", "name", "age", "desc", "modality", "institutionName"], names)
+        self.assertEqual("11px", self.page.locator("#rows td").first.evaluate("e => getComputedStyle(e).fontSize"))
+        self.assertNotIn("Referred", self.page.locator("#heads").inner_text())
+        if os.environ.get("KIN_EVIDENCE_DIR"):
+            target = Path(os.environ["KIN_EVIDENCE_DIR"]); target.mkdir(parents=True, exist_ok=True)
+            self.page.screenshot(path=str(target / "studio-worklist.png"), full_page=True)
+
+    def test_selection_bar_follows_space_and_clear(self):
+        self.open()
+        expect(self.page.locator("#worklist-selection")).to_be_hidden()
+        self.page.locator("#rows tr[data-uid]").first.press("Space")
+        expect(self.page.locator("#worklist-selection")).to_be_visible()
+        expect(self.page.get_by_role("button", name="Open Selected Studies", exact=True)).to_be_visible()
+        self.page.get_by_role("button", name="Clear Selection", exact=True).click()
+        expect(self.page.locator("#worklist-selection")).to_be_hidden()
+
+    def test_top_menus_and_logout_fit_one_row(self):
+        self.open()
+        self.assertEqual(0, self.page.locator(".userfilter, #quick-match, #shortcuts-save, #shortcuts-reload").count())
+        for width in (1920, 1366, 1024, 768):
+            self.page.set_viewport_size({"width": width, "height": 1000})
+            for selector in ("#toolbar-view > summary", "#toolbar-more > summary", "#toolbar-filters > summary", "#logout"):
+                box = self.page.locator(selector).bounding_box()
+                self.assertIsNotNone(box, selector)
+                self.assertGreaterEqual(box["x"], 0, selector)
+                self.assertLessEqual(box["x"] + box["width"], width + 1, selector)
+                self.assertLessEqual(box["y"] + box["height"], 31, selector)
+        self.page.locator("#toolbar-view > summary").click()
+        expect(self.page.locator("#columnsettings")).to_be_visible()
+        expect(self.page.locator("#panel-settings-open")).to_be_visible()
+
+    def test_header_dates_and_age_saved_shortcut_round_trip(self):
+        self.site.row_dates = ["2026-11-01", "2026-10-31", "2026-10-30", "2026-10-25", "2026-10-01", "2026-09-01"]
+        self.open()
+        date = self.page.get_by_label("StudyDate Filter", exact=True)
+        for preset, count in (("today", 1), ("2d", 3), ("1w", 4), ("1m", 5), ("", 6)):
+            date.select_option(preset)
+            expect(self.page.locator("#rows tr[data-uid]")).to_have_count(count)
+        date.select_option("1w")
+        self.page.get_by_label("Age Filter", exact=True).fill(">0")
+        self.page.get_by_label("Age Filter", exact=True).press("Enter")
+        self.page.get_by_role("button", name="My Shortcuts", exact=True).click()
+        self.page.get_by_label("Shortcut Name", exact=True).fill("SYN date age")
+        self.page.get_by_role("button", name="Save as Shortcut", exact=True).click()
+        expect(self.page.locator("#exam-filter-popup [role=status]")).to_contain_text("저장했습니다")
+        self.page.locator("#exam-filter-popup").get_by_role("button", name="Close", exact=True).click()
+        self.page.locator("#filterrow .col-clear").click()
+        self.page.get_by_label("My Shortcuts", exact=True).get_by_role("button", name="SYN date age (4)", exact=True).click()
+        expect(date).to_have_value("1w")
+        expect(self.page.get_by_label("Age Filter", exact=True)).to_have_value(">0")
+        self.assertEqual(-1, self.site.filters[0]["days"])
+        self.assertEqual(">0", self.site.filters[0]["cols"]["age"])
+        self.assertEqual("2026-10-25..2026-11-01", self.site.filters[0]["cols"]["date"])
+
+    def test_rs_words_and_count_order(self):
+        self.site.statuses = ['W', 'T', 'P', 'H', 'A', 'W']
+        self.open()
+        for word in ['Unread', 'In Progress', 'Preliminary', 'On Hold', 'Approved']:
+            expect(self.page.locator('#rows')).to_contain_text(word)
+        counts = self.page.locator('#countlist').inner_text()
+        labels = ['Unread', 'In Progress', 'Preliminary', 'On Hold', 'Approved', 'Unverified']
+        self.assertEqual(sorted(counts.index(word) for word in labels), [counts.index(word) for word in labels])
+        for old in ['Waiting', 'Transcribed', 'Temporarily Saved']:
+            self.assertNotIn(old, counts)
+
+    def test_month_preset_clamps_to_last_day_of_previous_month(self):
+        from datetime import datetime
+        self.page.clock.set_fixed_time(datetime.fromisoformat('2026-03-31T12:00:00+09:00'))
+        self.open()
+        self.page.get_by_label('StudyDate Filter', exact=True).select_option('1m')
+        self.page.get_by_role('button', name='My Shortcuts', exact=True).click()
+        popup = self.page.locator('#exam-filter-popup')
+        expect(popup.get_by_label('StudyDate from', exact=True)).to_have_value('2026-02-28')
+        expect(popup.get_by_label('StudyDate to', exact=True)).to_have_value('2026-03-31')
+
+    def test_custom_dates_float_without_growing_row(self):
+        self.open()
+        row = self.page.locator("#filterrow")
+        before = row.bounding_box()["height"]
+        self.page.get_by_label("StudyDate Filter", exact=True).select_option("custom")
+        expect(self.page.get_by_label("StudyDate From", exact=True)).to_be_visible()
+        self.assertAlmostEqual(before, row.bounding_box()["height"], delta=1)
+
+    def test_column_width_drag_and_picker_share_dialog_state(self):
+        self.open()
+        head = self.page.locator('#heads th[data-key="name"]')
+        before = head.bounding_box()["width"]
+        grip = head.locator(".col-grip").bounding_box()
+        self.page.mouse.move(grip["x"] + grip["width"] / 2, grip["y"] + grip["height"] / 2)
+        self.page.mouse.down()
+        self.page.mouse.move(grip["x"] + 45, grip["y"] + grip["height"] / 2)
+        self.page.mouse.up()
+        self.page.get_by_role("button", name="Choose columns", exact=True).click()
+        self.page.locator('#column-picker [data-column="age"]').get_by_role('checkbox').uncheck()
+        self.page.locator("#column-picker").get_by_role("button", name="Close", exact=True).click()
+        self.page.locator("#toolbar-view > summary").click()
+        self.page.locator("#columnsettings").click()
+        expect(self.page.get_by_role("checkbox", name="Show Age", exact=True)).not_to_be_checked()
+        width = int(self.page.get_by_label("Name content width (px)", exact=True).input_value())
+        self.assertGreaterEqual(width, 64)
+        self.assertLessEqual(width, 600)
+        self.assertAlmostEqual(width, min(600, max(64, before + 45 - grip["width"] / 2)), delta=1)
+
+    def test_tech_note_words_keep_korean_help(self):
+        self.site.notes = [dict(version=1, present=True), dict(version=0, present=False),
+                           dict(version=2, present=False), None]
+        self.open()
+        self.page.get_by_role('button', name='Choose columns', exact=True).click()
+        self.page.locator('#column-picker [data-column=techNote]').get_by_role('checkbox').check()
+        self.page.locator('#column-picker').get_by_role('button', name='Close', exact=True).click()
+        buttons = self.page.locator('#rows [data-tech-note]')
+        for i, word in enumerate(('Yes', 'None', 'Cleared', 'Unknown')):
+            expect(buttons.nth(i)).to_have_text(word)
+            expect(buttons.nth(i)).to_have_attribute('title', re.compile('[가-힣]'))
+        self.page.get_by_label('Tech Note Filter', exact=True).select_option('Cleared')
+        expect(self.page.locator('#rows [data-tech-note]')).to_have_text(['Cleared'])
+
+    def test_width_change_preserves_default_text_size(self):
+        self.open()
+        self.page.get_by_role("button", name="Choose columns", exact=True).click()
+        self.page.get_by_label("Name width (px)", exact=True).fill("240")
+        self.page.get_by_label("Name width (px)", exact=True).press("Tab")
+        self.page.locator("#column-picker").get_by_role("button", name="Close", exact=True).click()
+        self.assertEqual("11px", self.page.locator("#rows td").first.evaluate("e => getComputedStyle(e).fontSize"))
+
+    def test_panels_restore_after_default_and_reset(self):
+        self.open()
+        expect(self.page.locator(".rw > .s-thumb")).to_be_hidden()
+        self.page.locator("#m-config").click()
+        expect(self.page.get_by_role("dialog", name="Panel Settings")).to_be_visible()
+        self.page.get_by_role("button", name="Show All Panels", exact=True).click()
+        # The choice must actually reveal the shipped panel, including after reload.
+        expect(self.page.locator(".rw > .s-thumb")).to_be_visible()
+        self.page.reload()
+        expect(self.page.locator(".rw > .s-thumb")).to_be_visible()
+        self.page.locator("#toolbar-view > summary").click()
+        self.page.locator("#layout-reset").click()
+        expect(self.page.locator(".rw > .s-thumb")).to_be_hidden()
+
+    def test_left_split_is_restored_from_workspace(self):
+        self.open()
+        split = self.page.locator("#resize-left-split")
+        before = self.page.locator(".left > .related-list-pane").bounding_box()["height"]
+        split.press("ArrowUp")
+        after = self.page.locator(".left > .related-list-pane").bounding_box()["height"]
+        self.assertGreater(after, before)
+        self.page.locator("#toolbar-view > summary").click()
+        self.page.locator("#workspace-server-summary").click()
+        self.page.get_by_role("button", name="Save to Account", exact=True).click()
+        expect(self.page.locator("#workspace-server-status")).to_contain_text("계정에 저장했습니다")
+        self.assertTrue(self.site.layout_writes)
+        # Delete browser state: only the account workspace can restore the divider now.
+        self.page.evaluate("localStorage.clear()")
+        self.page.reload()
+        self.page.locator("#toolbar-view > summary").click()
+        self.page.locator("#workspace-server-summary").click()
+        self.page.get_by_role("button", name="Load from Account", exact=True).click()
+        expect(self.page.locator("#workspace-server-status")).to_contain_text("서버 배치를 불러왔습니다")
+        self.page.locator("#toolbar-view > summary").click()
+        restored = self.page.locator(".left > .related-list-pane").bounding_box()["height"]
+        self.assertAlmostEqual(after, restored, delta=1)
 
 
 if __name__ == '__main__':

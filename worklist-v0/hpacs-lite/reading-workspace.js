@@ -17,11 +17,17 @@ window.KinReadingWorkspace = function (app) {
   const button = (label, action, parent = nav) => {
     const b = node('button', label, parent); b.type = 'button'; b.className = 'chip'; b.onclick = action; return b;
   };
+  function focusListSearch() {
+    // 검색이 상단 Filters 안에 있으므로 이동 단축키도 그 메뉴를 먼저 펼친다.
+    const search = $('#quick'), menu = search?.closest('details');
+    if (menu) menu.open = true;
+    search?.focus();
+  }
   const list = button('Worklist', () => {
     document.body.classList.toggle('reading-list-open');
     list.setAttribute('aria-expanded', String(document.body.classList.contains('reading-list-open')));
-    if (document.body.classList.contains('reading-list-open')) $('#quick').focus();
-    else list.focus();
+    if (document.body.classList.contains('reading-list-open')) ($('#rows tr[data-uid]') || list).focus();
+    else { closeList(); list.focus(); }
   });
   list.setAttribute('aria-expanded', 'false');
   const previous = button('Previous Study', () => app.move(-1));
@@ -100,6 +106,7 @@ window.KinReadingWorkspace = function (app) {
   let panelValues = panelModel.defaults(), panelDrag = null, panelStyleSignature = '';
   const split = $('.split'), reportColumn = $('.right'), relatedRegion = $('.related-p');
   const relatedList = $('.related-list-pane'), priorReport = $('.prior-report-pane');
+  const relatedListHome = { parent: relatedList.parentNode, next: relatedList.nextSibling };
   reportColumn.id = 'reading-report-column'; relatedRegion.id = 'reading-related-region';
   relatedList.id = 'reading-related-list'; priorReport.id = 'reading-prior-report';
   const relatedToggle = button('Hide Related Panel', () => setRelatedHidden(!panelValues.relatedHidden));
@@ -287,6 +294,7 @@ window.KinReadingWorkspace = function (app) {
     position.textContent = !queue.length ? '현재 목록 0건' : i < 0 ? '현재 검사: 목록 밖 · ' + queue.length + '건' : '현재 목록 ' + (i + 1) + ' / ' + queue.length;
   }
   function closeList() {
+    $('#quick')?.closest('details')?.removeAttribute('open');
     document.body.classList.remove('reading-list-open'); list.setAttribute('aria-expanded', 'false');
   }
   function closeContext() {
@@ -355,10 +363,12 @@ window.KinReadingWorkspace = function (app) {
     if (!active) {
       // List/report navigation is also useful before opening the integrated
       // viewer. Only focus a visible local pane; do not open or retarget images.
+      if (doc === document && command === 'list') focusListSearch();
       const selector = {list:'#quick',report:'#findings',prior:'.prior-report-pane',context:'#clinical'}[command];
       const target = doc === document && selector && $(selector);
       if (!target || target.disabled || target.closest('[inert]') || !target.getClientRects().length) return;
       e.preventDefault();e.stopImmediatePropagation();
+      if (command !== 'list') closeList();
       if (command === 'prior' || command === 'context') target.tabIndex = -1;
       target.focus({preventScroll:true});target.scrollIntoView({block:'nearest',inline:'nearest'});return;
     }
@@ -371,7 +381,7 @@ window.KinReadingWorkspace = function (app) {
     e.stopImmediatePropagation();
     const panes = { image:'image', prior:'prior', report:'report', context:'context', tools:'tools', nativeTools:'nativeTools' };
     if (command === 'list') {
-      e.preventDefault(); document.body.classList.add('reading-list-open'); list.setAttribute('aria-expanded', 'true'); $('#quick').focus();
+      e.preventDefault(); document.body.classList.add('reading-list-open'); list.setAttribute('aria-expanded', 'true'); focusListSearch();
     } else if (panes[command]) {
       e.preventDefault(); focusPane(panes[command]);
     } else if (command === 'note') {
@@ -491,6 +501,11 @@ window.KinReadingWorkspace = function (app) {
   }
   function leave() { active = false; layout(); $('#m-reading').focus(); }
   function layout() {
+    // 영상 작업공간에서는 목록 열이 접히므로 같은 Related Exam 목록을 판독문 위로 옮긴다.
+    // 돌아오면 원래 워크리스트 아래 자리에 복원해 선택·행 이벤트를 그대로 유지한다.
+    if (active && relatedList.parentNode !== relatedRegion) relatedRegion.insertBefore(relatedList, priorReport);
+    else if (!active && relatedList.parentNode !== relatedListHome.parent)
+      relatedListHome.parent.insertBefore(relatedList, relatedListHome.next);
     if (!active) cancelPanelDrag();
     const toggle=$('#m-reading');toggle.textContent=active?'Back to Worklist':'Reading Workspace';toggle.setAttribute('aria-pressed',String(active));toggle.title=active?'기존 목록 화면으로 돌아갑니다. 작성 중인 판독문과 영상 작업은 유지됩니다.':'영상과 판독문을 함께 보는 작업공간을 엽니다.';
     // The native viewer observes its container size even while hidden. Preserve

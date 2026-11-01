@@ -641,7 +641,7 @@ class ReportFlowPage(unittest.TestCase):
         self.page.locator("#b-approve-next").click()
 
     def refresh(self):
-        self.page.get_by_role("group", name="Refresh").get_by_role("button", name="Refresh", exact=True).click()
+        self.page.locator("#m-refresh").click()
 
     def sort_by_name_descending(self):
         self.page.locator("#heads th[data-key=name]").click()
@@ -790,7 +790,7 @@ class ReportFlowPage(unittest.TestCase):
         self.approve_next()
         self.wait(lambda: self.site.held_flow_commits, "the commit")
         lists = self.site.count("GET", "/api/studies")
-        self.page.get_by_role("group", name="Refresh").get_by_role("button", name="Refresh", exact=True).click()
+        self.page.locator("#m-refresh").click()
         self.wait(lambda: self.site.count("GET", "/api/studies") > lists, "the refresh")
         self.settle(300)
         self.assertEqual(h.PATIENT_B, self.selected(), "no move before the approval's answer is applied")
@@ -874,9 +874,26 @@ class ReportFlowPage(unittest.TestCase):
 
     # ── RECOMMENDATION-ROUNDTRIP (W4-PAGE-12) ──
     def insert_template(self):
-        if not self.page.locator("#tplrows tr", has_text=TEMPLATE["title"]).first.is_visible():
-            self.page.locator("[data-study-panel-tab=templates]").first.click()
+        h.show_all_panels(self.page)
+        self.page.keyboard.press("Control+Alt+T")
         self.page.locator("#tplrows tr", has_text=TEMPLATE["title"]).first.dblclick()
+
+    def test_existing_report_recommendation_is_a_read_only_line(self):
+        self.site.store[h.UID]['report'].update(version=1, rs='A', findings='SYN existing findings',
+            conclusion='SYN existing conclusion', recommendation='SYN existing recommendation')
+        self.open()
+        self.open_study(h.PATIENT)
+        note = self.page.locator('#recnote')
+        expect(note).to_be_visible()
+        expect(note).to_have_text('Recommendation: SYN existing recommendation')
+        self.assertEqual('nowrap', note.evaluate('e => getComputedStyle(e).whiteSpace'))
+        self.assertEqual(0, note.locator('textarea, input, [contenteditable=true]').count())
+        self.pick(h.PATIENT_B)
+        self.wait(lambda: self.selected() == h.PATIENT_B, 'B')
+        expect(note).to_be_hidden()
+        self.pick(h.PATIENT)
+        self.wait(lambda: self.selected() == h.PATIENT, 'A again')
+        expect(note).to_have_text('Recommendation: SYN existing recommendation')
 
     def test_recommendation_from_a_template_is_announced_read_only_saved_and_shown_again(self):
         self.site.templates = [TEMPLATE]
@@ -886,14 +903,14 @@ class ReportFlowPage(unittest.TestCase):
         self.insert_template()
         note = self.page.locator("#recnote")
         expect(note).to_be_visible()
-        expect(note.locator("summary")).to_have_text("Recommendation (existing value · read only)")
-        self.page.locator("#recnote summary").click()
+        expect(note).to_contain_text("Recommendation:")
+        self.assertEqual("nowrap", note.evaluate("e => getComputedStyle(e).whiteSpace"))
         expect(self.page.locator("#recnote-text")).to_have_text(TEMPLATE["recommendation"])
         # Read only: no editor in the notice, the hidden field stays hidden and out of reach.
         self.assertEqual(0, note.locator("textarea, input, [contenteditable=true]").count())
         hidden = self.page.locator("#recommendation")
         self.assertEqual(("true", "-1"), (hidden.get_attribute("aria-hidden"), hidden.get_attribute("tabindex")))
-        self.page.locator("#recnote summary").focus()
+        self.page.locator("#conclusion").focus()
         self.page.keyboard.press("Tab")
         self.assertNotEqual("recommendation", self.page.evaluate("document.activeElement?.id"))
         # Saved with the other two fields (the autosave's whole snapshot), and shown again when the study reopens.
@@ -910,7 +927,6 @@ class ReportFlowPage(unittest.TestCase):
         self.page.goto(h.MAIN_URL)
         self.open_study(h.PATIENT)
         expect(note).to_be_visible()
-        self.page.locator("#recnote summary").click()
         expect(self.page.locator("#recnote-text")).to_have_text(TEMPLATE["recommendation"])
         # The approval carries the three fields.
         self.page.locator("#b-approve").click()

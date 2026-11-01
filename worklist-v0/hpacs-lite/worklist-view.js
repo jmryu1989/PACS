@@ -34,6 +34,19 @@
       if (v === "") return true;
       if (c.k === 'modality') return KinCompoundFilter.matchesModality(s.modality, v);
       const wanted = String(v);
+      if (c.k === 'techNote') return noteLabel(s.uid) === wanted;   // the note badge is not a row field
+      if (c.k === 'date') {   // StudyDate: "2026-10-31" (that day or prefix), "2026-10-01..2026-10-31", "2026-10-01.." or "..2026-10-31"
+        const day = String(s.date ?? ''), [from, to] = wanted.split('..');
+        if (wanted.includes('..')) return (!from || day >= from) && (!to || day <= to);
+        return day.startsWith(wanted);
+      }
+      if (c.k === 'age') {    // Age: "40", ">65", "<18", or "30..50"
+        const n = Number(s.age); if (s.age === '' || !Number.isFinite(n)) return false;
+        let m;
+        if ((m = wanted.match(/^(\d+)\s*\.\.\s*(\d+)$/))) return n >= +m[1] && n <= +m[2];
+        if ((m = wanted.match(/^([<>]=?)\s*(\d+)$/))) return m[1] === '>' ? n > +m[2] : m[1] === '>=' ? n >= +m[2] : m[1] === '<' ? n < +m[2] : n <= +m[2];
+        return /^\d+$/.test(wanted) ? n === +wanted : true;
+      }
       if (c.f === "text") return String(s[c.k] ?? "").toUpperCase().includes(wanted.toUpperCase());
       return String(s[c.k]) === wanted;
     }
