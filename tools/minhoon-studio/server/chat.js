@@ -11,6 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const { appendJsonl, readJsonl, maskSecrets, readJsonFile, writeJsonAtomic, today } = require('./util');
 const { buildAndCheck } = require('./build');
+const { storeImages } = require('./images');
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const RECORD_RE = /<studio-record>([\s\S]*?)<\/studio-record>/g;
@@ -30,6 +31,7 @@ class Chat {
     this.usageFile = path.join(dataDir, 'usage.jsonl');
     this.metricsFile = path.join(dataDir, 'metrics.jsonl');
     this.recordsFile = path.join(dataDir, 'public', 'records.jsonl');
+    fs.mkdirSync(path.join(dataDir, 'uploads'), { recursive: true });
     // Working folder per mode; the suggestion engine adds 'suggest' (its own preview copy of the sandbox).
     this.dirs = { edit: sandbox.dir, ask: sandbox.readDir };
     // Hooks for the suggestion engine: a request arrived (he is active), a request finished.
@@ -129,11 +131,14 @@ class Chat {
 
   enqueue({ user, displayName, mode, text, context }) {
     const { choice, models } = this.modelFor(user);
-    const job = { id: crypto.randomUUID().slice(0, 8), user, displayName, mode, text, context: context || {}, state: 'queued', t: { received: Date.now() },
+    const job = { id: crypto.randomUUID().slice(0, 8), user, displayName, mode, text, context: { ...context }, state: 'queued', t: { received: Date.now() },
       model: choice ? models[choice] : null };
+    job.context.images = storeImages(this.dataDir, job.id, job.context.images);
     this.jobs.set(job.id, job);
     const picks = pickLabels(job.context.picks);
-    this.log({ role: 'user', user, displayName, mode, text, jobId: job.id, ...(picks.length ? { meta: { picks } } : {}) });
+    const images = job.context.images.map(image => image.path);
+    this.log({ role: 'user', user, displayName, mode, text, jobId: job.id,
+      ...((picks.length || images.length) ? { meta: { ...(picks.length ? { picks } : {}), ...(images.length ? { images } : {}) } } : {}) });
     this.pending++;
     this.onActivity(job);
     // The final state, its commit and its failure stay on the job for whoever waits on it (a suggestion's 적용).
@@ -181,6 +186,8 @@ class Chat {
     if (Array.isArray(c.missing) && c.missing.length) lines.push(`[스튜디오 모의 응답이 없어 501이 난 요청]\n${c.missing.slice(-8).join('\n')}`);
     const picked = pickLines(c.picks);
     if (picked) lines.push(picked);
+    if (c.images && c.images.length) lines.push('[첨부 그림 — Read 도구로 각 파일을 열어 본다. 요청의 "이 화면·여기"는 이 그림이다]\n' +
+      c.images.map((image, i) => `${i + 1}. ${path.resolve(this.dataDir, image.path)} (${image.width}×${image.height})`).join('\n'));
     return lines.join('\n');
   }
 
@@ -306,7 +313,8 @@ class Chat {
       '--append-system-prompt-file', path.join(this.settingsDir, `${mode}-system.md`)];
     // Both modes read the status feed and earlier records (edits need them for the critique). These directories get
     // no Edit allow rule, and dontAsk refuses anything not allowed, so they stay read-only for the edit Claude too.
-    args.push('--add-dir', this.statusFeed.dir, path.join(this.dataDir, 'public'));
+    args.push('--add-dir', this.statusFeed.dir, path.join(this.dataDir, 'public'),
+      ...(mode !== 'suggest' ? [path.join(this.dataDir, 'uploads')] : []));
     const model = job.model || (mode === 'ask' ? (this.config.claude.askModel || this.config.claude.model) : this.config.claude.model);
     if (model) args.push('--model', model);
     const effort = mode === 'ask' ? this.config.claude.askEffort

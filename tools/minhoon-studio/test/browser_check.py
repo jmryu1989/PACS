@@ -11,7 +11,7 @@ product or studio code is replaced. The 먼저 제안하기 boundaries (P1-P3) r
 seeded ready suggestion, where only the external Claude CLI is a --require double. Writes <out>/results.json and
 screenshots; exit 1 if any check fails. Adapted from the GPT functional review scripts of 9f4437c.
 """
-import argparse, json, os, pathlib, re, socket, subprocess, sys, time, traceback, urllib.request
+import argparse, base64, json, os, pathlib, re, socket, subprocess, sys, time, traceback, urllib.request
 from playwright.sync_api import sync_playwright
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -26,6 +26,8 @@ ap.add_argument("--dicomweb", help="static DICOMweb samples (dev/build_dicomweb_
 ap.add_argument("--headed", action="store_true", help="installed Chrome in a real window: also compares the window chrome height of the two tabs")
 ap.add_argument("--claude", help="real Claude Code CLI: runs the 먼저 제안하기 checks (real suggestions, preview timing, apply/undo, answers)")
 ap.add_argument("--claude-config", help="CLAUDE_CONFIG_DIR of a logged-in account for --claude")
+ap.add_argument("--capture-cli", help="real Claude CLI for one ask and one edit attachment request; no suggestion turns")
+ap.add_argument("--capture-only", action="store_true", help="only the chat attachment boundary in this existing served-page harness")
 ap.add_argument("--feedback", help="Minhoon's feedback file the suggestions read (default: none)")
 a = ap.parse_args()
 OUT = pathlib.Path(a.out).resolve()
@@ -51,8 +53,10 @@ config = {"listen": {"host": "127.0.0.1", "port": port},
                     "knowledge": str(STUDIO / "knowledge-seed"), "ohifDist": a.ohif or str(OUT / "empty-ohif"), "dicomweb": a.dicomweb or str(OUT / "empty-dicomweb")},
           "claude": {"bin": str(OUT / "unavailable-claude"), "account": "synthetic", "configDirs": {"synthetic": str(OUT / "empty-claude")},
                      "python": "python", "shellTool": "PowerShell", "models": {"fast": "stub", "deep": "stub"}, "defaultChoice": "fast"}}
-if a.claude:
-    config["claude"].update({"bin": a.claude, "configDirs": {"synthetic": a.claude_config}, "models": {"fast": "sonnet", "deep": "opus"}, "turnTimeoutSec": 900})
+if a.claude or a.capture_cli:
+    config["claude"].update({"bin": a.claude or a.capture_cli, "configDirs": {"synthetic": a.claude_config}, "models": {"fast": "sonnet", "deep": "opus"}, "turnTimeoutSec": 900})
+if a.capture_only:
+    config["suggest"] = {"enabled": False}
 if a.feedback:
     config["paths"]["feedback"] = a.feedback
 (OUT / "config.json").write_text(json.dumps(config), encoding="utf-8")
@@ -425,6 +429,100 @@ def suggestion_boundaries(browser):
         except subprocess.TimeoutExpired: srv.kill(); srv.wait(timeout=10)
         slog.close()
 
+class CaptureComplete(Exception):
+    pass
+
+def capture_checks(chat, ctx):
+    if chat.locator("#panel[open]").count(): chat.locator("#panel-close").click()
+    ctx.grant_permissions(["clipboard-read", "clipboard-write"])
+    image_data = chat.evaluate('''() => {
+      const c = document.createElement('canvas'); c.width = 3200; c.height = 1200;
+      const x = c.getContext('2d'); x.fillStyle = 'white'; x.fillRect(0, 0, c.width, c.height);
+      x.fillStyle = 'black'; x.font = 'bold 140px sans-serif'; x.fillText('LIME ORBIT 7429', 160, 260);
+      x.fillStyle = 'blue'; x.fillRect(2600, 850, 300, 200);
+      return { png: c.toDataURL('image/png'), jpeg: c.toDataURL('image/jpeg') };
+    }''')
+    png = OUT / "distinctive.png"; jpg = OUT / "distinctive.jpg"
+    png.write_bytes(base64.b64decode(image_data["png"].split(",")[1])); jpg.write_bytes(base64.b64decode(image_data["jpeg"].split(",")[1]))
+    def clear_images():
+        while chat.get_by_role("button", name=re.compile("Remove Image")).count():
+            chat.get_by_role("button", name=re.compile("Remove Image")).first.click()
+    def paste():
+        chat.evaluate('''async data => { const blob = await (await fetch(data)).blob(); await navigator.clipboard.write([new ClipboardItem({'image/png': blob})]); }''', image_data["png"])
+        chat.locator("#input").focus(); chat.keyboard.press("Control+V")
+        chat.get_by_role("img", name="Image 1", exact=True).wait_for()
+        chat.wait_for_function('!document.querySelector("#send").disabled')
+    chat.locator("#image-files").set_input_files([str(png)] * 5)
+    record("attachments: five selected images visibly refuse send", chat.locator("#send").is_disabled() and "4장" in chat.locator("#images-over").inner_text())
+    chat.get_by_role("button", name="Remove Image 5", exact=True).click()
+    chat.wait_for_function('!document.querySelector("#send").disabled')
+    record("attachments: removing the excess prepares all four thumbnails", chat.get_by_role("img", name=re.compile("Image")).count() == 4)
+    clear_images()
+    noisy = chat.evaluate('''() => {
+      const c = document.createElement('canvas'); c.width = c.height = 2000;
+      const x = c.getContext('2d'), pixels = x.createImageData(c.width, c.height);
+      for (let i = 0; i < pixels.data.length; i += 65536) crypto.getRandomValues(pixels.data.subarray(i, i + 65536));
+      x.putImageData(pixels, 0, 0); return c.toDataURL('image/png').split(',')[1];
+    }''')
+    large = OUT / "over-eight-mb.png"; large.write_bytes(base64.b64decode(noisy))
+    assert large.stat().st_size > 8 * 1024 * 1024
+    chat.locator("#image-files").set_input_files(str(large))
+    chat.wait_for_function('document.querySelector("#images-over").textContent.includes("8 MB")')
+    record("attachments: encoded image over 8 MB explains refusal and keeps send disabled", chat.locator("#send").is_disabled())
+    clear_images()
+    # Use the actual Attach button and browser file chooser for a multi-image selection.
+    with chat.expect_file_chooser() as chooser: chat.get_by_role("button", name="Attach", exact=True).click()
+    chooser.value.set_files([str(jpg), str(png)])
+    chat.wait_for_function('!document.querySelector("#send").disabled')
+    posted = []
+    def reject(route):
+        posted.append(route.request.post_data_json)
+        route.fulfill(status=400, content_type="application/json", body=json.dumps({"error": "합성 전송 실패"}))
+    chat.route("**/studio-api/chat", reject)
+    chat.once("dialog", lambda dialog: dialog.accept())
+    chat.locator("#input").fill("첨부 전송 재시도")
+    chat.locator("#send").click()
+    chat.wait_for_function('!document.querySelector("#send").disabled')
+    record("attachments: rejected request retains the text and images", chat.locator("#input").input_value() == "첨부 전송 재시도" and chat.get_by_role("img", name=re.compile("Image")).count() == 2)
+    chat.unroute("**/studio-api/chat")
+    def accept(route):
+        posted.append(route.request.post_data_json)
+        route.fulfill(status=202, content_type="application/json", body='{"jobId":"attachment-ui-fixture"}')
+    chat.route("**/studio-api/chat", accept)
+    chat.locator("#send").click()
+    chat.wait_for_function('document.querySelector("#input").value === ""')
+    sent = posted[-1]["context"]["images"]
+    record("attachments: PNG and JPEG resized to 2000 pixels, encoded in their input formats, clear after acceptance",
+           len(sent) == 2 and [x["type"] for x in sent] == ["image/jpeg", "image/png"] and all(x["width"] == 2000 and x["height"] == 750 for x in sent) and chat.get_by_role("img", name=re.compile("Image")).count() == 0)
+    chat.unroute("**/studio-api/chat")
+    paste()
+    chat.screenshot(path=str(OUT / "attachment-preview.png"))
+    record("attachments: actual clipboard Ctrl+V creates a thumbnail", chat.get_by_role("img", name="Image 1", exact=True).is_visible())
+    if a.capture_cli:
+        for mode in ["ask", "edit"]:
+            if mode == "edit": paste()
+            chat.locator(f'[data-mode="{mode}"]').click()
+            chat.locator("#input").fill("이 그림에 무슨 글자가 보여? 글자의 위치도 알려줘. 파일 수정은 하지 마세요.")
+            with chat.expect_response("**/studio-api/chat") as response: chat.locator("#send").click()
+            reply = response.value
+            assert reply.status == 202, reply.text()
+            job_id = reply.json()["jobId"]
+            def answer():
+                file = OUT / "data/chat.jsonl"
+                rows = [json.loads(line) for line in file.read_text(encoding="utf-8").splitlines()] if file.exists() else []
+                return next((row for row in rows if row.get("jobId") == job_id and row["role"] == "assistant"), None)
+            wait_until(chat, lambda: answer() is not None, timeout=910000)
+            row = answer()
+            record(f"real CLI {mode}: reads distinctive text from attachment", bool(row and "LIME ORBIT 7429" in row["text"] and not row.get("meta", {}).get("failed")), row)
+            chat.screenshot(path=str(OUT / f"attachment-{mode}-answer.png"))
+        files = [{"path": p.relative_to(OUT / "data").as_posix(), "bytes": p.stat().st_size} for p in (OUT / "data/uploads").rglob("*") if p.is_file()]
+        (OUT / "uploads-listing.json").write_text(json.dumps(files, indent=2), encoding="utf-8")
+        chat.reload(); chat.wait_for_selector("#messages .meta")
+        record("attachments: reloaded history shows both image counts and stored file names", chat.locator("#messages").inner_text().count("그림 1장") == 2 and all(pathlib.Path(f["path"]).name in chat.locator("#messages").inner_text() for f in files))
+        record("attachments: real request digest generated", post_api(chat, "digest") == 200)
+    else:
+        clear_images()
+
 log = (OUT / "server.log").open("w", encoding="utf-8")
 server = subprocess.Popen(["node", server_js, "--config", str(OUT / "config.json")], cwd=REPO, stdout=log, stderr=subprocess.STDOUT)
 try:
@@ -436,6 +534,11 @@ try:
         ctx = browser.new_context(no_viewport=True) if a.headed else browser.new_context(viewport={"width": 1800, "height": 1000})
         ctx.add_init_script("(() => { const Native = window.EventSource; window.__sources = []; window.EventSource = class extends Native { constructor(...x) { super(...x); window.__sources.push(this); } }; })()")
         chat = ctx.new_page(); login(chat)
+        if a.capture_only:
+            chat.locator("#panel[open]").wait_for()
+            capture_checks(chat, ctx)
+            browser.close()
+            raise CaptureComplete()
 
         # F3: the showcase pick card with no product window opens it AND starts picking there.
         chat.locator("#panel[open]").wait_for()
@@ -938,8 +1041,11 @@ try:
                {"openBefore": opened, "hiddenWhilePicking": hidden_while_picking, "openAfter": reopen.locator("#studio.open").count() == 1})
         reopen.screenshot(path=str(OUT / "f8-overlay-after-resize.png"))
         reopen.evaluate("() => localStorage.setItem('studio-layout', 'two')")
+        capture_checks(reopen, ctx)
         suggestion_boundaries(browser)
         browser.close()
+except CaptureComplete:
+    pass
 except Exception as e:
     traceback.print_exc(); checks.append({"name": "harness completion", "pass": False, "error": repr(e)})
 finally:

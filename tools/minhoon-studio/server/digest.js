@@ -92,6 +92,7 @@ async function writeDigestNow({ dataDir, sandbox, reason = 'manual', by = null, 
       t: u.t, user: u.user, mode: u.mode, request: u.text, answer: last.text || '', jobId: u.jobId, outcome,
       carriedFromPrevious: u.t <= since, reloadOnly: u.t <= since && !carried.has(u.jobId),
       sha: meta.sha, files: meta.files,
+      images: (u.meta && u.meta.images) || [],
       totalToReloadSentMs: t.totalToReloadSentMs, claudeMs: t.claudeMs, buildMs: t.buildMs,
       lastEditToReloadSentMs: t.lastEditToReloadSentMs, reloadMs: reloadOk ? reload.reloadMs : null, reloadTimedOut,
       editToReadyMs: Number.isFinite(t.lastEditToReloadSentMs) && reloadOk ? t.lastEditToReloadSentMs + reload.reloadMs : null,
@@ -157,7 +158,11 @@ async function writeDigestNow({ dataDir, sandbox, reason = 'manual', by = null, 
     lines.push(`| ${r.carriedFromPrevious ? r.t.slice(0, 10) + ' ' : ''}${r.t.slice(11, 19)} | ${cell(r.user)} | ${r.mode === 'ask' ? '물어보기' : '바꾸기'} | ${cell(r.request)} | ${r.outcome} | ${r.sha ? '`' + r.sha.slice(0, 8) + '`' : ''} | ${r.mode === 'edit' && r.outcome === 'applied' ? `${ready} (전체 ${sec(r.totalToReloadSentMs)})` : ''} |`);
   }
   lines.push('', '## 스튜디오 답 (요약 원문)', '');
-  for (const r of requests) lines.push(`- **${r.t.slice(11, 19)} ${r.user}** — ${cell(r.request).slice(0, 200)}`, `  - ${cell(r.answer).slice(0, 1200)}`);
+  for (const r of requests) {
+    lines.push(`- **${r.t.slice(11, 19)} ${r.user}** — ${cell(r.request).slice(0, 200)}`);
+    if (r.images.length) lines.push(`  - 그림 ${r.images.length}장: ${r.images.map(cell).join(', ')}`);
+    lines.push(`  - ${cell(r.answer).slice(0, 1200)}`);
+  }
   lines.push('', '## 이견 (비판·거절)', '');
   const disagreements = records.filter(r => r.kind === 'disagreement');
   if (!disagreements.length) lines.push('없음');

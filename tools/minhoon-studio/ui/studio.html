@@ -97,8 +97,15 @@
     <span id="picks-over" hidden></span>
     <button id="picks-clear" type="button" class="link">모두 지우기</button>
   </div>
+  <div id="images" class="picks" hidden>
+    <span class="muted">첨부 그림 (다음 메시지와 함께 보냄):</span>
+    <span id="image-chips"></span>
+    <span id="images-over" role="status" hidden></span>
+  </div>
   <form id="composer">
     <button type="button" id="pick" class="pick-btn" title="고르기 (Alt+G): 제품 화면에서 바꿀 곳을 클릭해 고릅니다. 여러 개 가능, Esc로 모두 지우기.">고르기</button>
+    <button type="button" id="attach" title="스크린샷을 붙여넣거나(Ctrl+V) 파일로 첨부합니다. 한 번에 4장, 장당 8 MB까지">Attach</button>
+    <input id="image-files" type="file" accept="image/png,image/jpeg" multiple hidden>
     <textarea id="input" rows="3" placeholder="예) 판독문 입력칸을 더 크게 해 주세요"></textarea>
     <button type="submit" id="send">보내기</button>
   </form>
