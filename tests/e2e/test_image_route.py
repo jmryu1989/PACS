@@ -173,20 +173,27 @@ def quoted(values):
 
 def asset_catalog_deployed():
     """Whether the running stack was deployed with the viewer/decoder asset catalog (KIN_EMR_IMAGE_ASSET_CATALOG, the
-    setting the api and the proxy share): with it E answers the viewer's frames, without it the frame reader does."""
-    probe = subprocess.run(["docker", "compose", "exec", "-T", "api", "printenv", "KIN_EMR_IMAGE_ASSET_CATALOG"], cwd=ROOT,
-                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
-    if probe.returncode not in (0, 1):
-        raise RuntimeError("reading the api's asset catalog setting failed: " + probe.stderr[-500:])
-    return bool(probe.stdout.strip())
+    setting the api and the proxy share): with it E answers the viewer's frames, without it the frame reader does.
+    The reading itself reports the value, so a failed exec (a stopped api exits 1 with no output, as `printenv` of an
+    unset name does) is an error, never "no catalog"."""
+    probe = subprocess.run(["docker", "compose", "exec", "-T", "api", "node", "-e",
+                            "process.stdout.write(JSON.stringify({catalog: process.env.KIN_EMR_IMAGE_ASSET_CATALOG || ''}))"],
+                           cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+    try:
+        catalog = json.loads(probe.stdout)["catalog"] if probe.returncode == 0 else None
+    except (ValueError, KeyError, TypeError):
+        catalog = None
+    if not isinstance(catalog, str):
+        raise RuntimeError(f"reading the api's asset catalog setting failed (exit {probe.returncode}): " + probe.stderr[-500:])
+    return bool(catalog.strip())
 
 
 class ImageRouteE2E(base.WorklistE2E):
     def setUp(self):
         # Every case asserts E's own facts (X-KIN-Image-Event, emr_image rows), which exist only when the deployment gives
-        # the catalog. No deploy script supplies one yet (emr/units/e.json "remaining"), so the stock and production
-        # stacks send frames to the frame reader, whose record test_frame_delivery_record asserts. Not run is not passed:
-        # scripts/run-tests.py reports a skip as completed_with_skips and exits non-zero.
+        # the catalog (emr/units/e.json "remaining"). A stack without it sends frames to the frame reader, whose record
+        # test_frame_delivery_record asserts; which route a given deployment serves is read from it here, never assumed.
+        # Not run is not passed: scripts/run-tests.py reports a skip as completed_with_skips and exits non-zero.
         if not asset_catalog_deployed():
             raise unittest.SkipTest("needs a stack deployed with KIN_EMR_IMAGE_ASSET_CATALOG (E_ROUTE); this stack has none")
         super().setUp()

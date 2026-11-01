@@ -57,6 +57,9 @@ TG02_EXCLUDED = {
     'tests/ops_deploy_host_container_test.py': 'its own disposable project (--project-directory, -f)',
     'tests/gateway_pipeline_live.py': 'its own gateway project (-p, --env-file, -f) with a scrubbed environment',
     'tests/measurement_ci.py': 'its own hosted project (-p project, env=env) on a proven-empty daemon',
+    'tests/image_route_probe_test.py': 'mock of the tests/e2e/test_image_route.py api probe: its argv prefix check '
+                                       'plays `docker compose exec -T api` and runs only the inner command on the '
+                                       'host; no Compose process is started',
     'tests/ops_deploy_round4_test.py': 'mock of the scripts/ops_emr_introduction.py Compose contract: argv filters '
                                        'over the FakeDocker call recorder; its real Compose runs are only `config` '
                                        'renders of its own temporary ComposeEntry via the tool Runner, no container',

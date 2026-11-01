@@ -287,7 +287,10 @@ class WorkerRequest:
     def __init__(self, request, page):
         self.method, self.url = request["method"], request["url"]
         self.headers = {name.lower(): value for name, value in request.get("headers", {}).items()}
-        self.post_data = request.get("postData")
+        # CDP's postData is deprecated and may be left out of a long body; postDataEntries carries every part.
+        entries = request.get("postDataEntries")
+        self.post_data = (b"".join(base64.b64decode(entry.get("bytes", "")) for entry in entries).decode("utf-8", "replace")
+                          if entries else request.get("postData"))
         # SharedWorkers have no frame; the registering document owns this synthetic session.
         self.frame = SimpleNamespace(page=page)
 
@@ -382,7 +385,10 @@ class WorkerNetwork:
             try:
                 answer(route, worker_request)
             except PlaywrightError:
-                raise
+                # The handler's own answer was refused (a CDP fulfill error) or the worker has gone. Failing the request
+                # tells them apart: it raises for a gone worker (below), and a worker still waiting is reported.
+                route.abort()
+                unanswered(request["method"], request["url"])
             except Exception:  # a missing historical asset or an unsupported handler request must fail closed
                 unanswered(request["method"], request["url"])
                 route.abort()
