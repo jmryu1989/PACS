@@ -131,6 +131,11 @@ jobs:
     - name: Explicit test selection, process leases and bounded retries
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 tests/execution_guard_test.py
+    - name: Test harness boundaries - split-page worker requests answered or reported, E route stack probe
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: |
+        "$RUNNER_TEMP/measurement-python/bin/python" -B tests/main_split_harness_test.py
+        "$RUNNER_TEMP/measurement-python/bin/python" -B tests/image_route_probe_test.py
     - name: S3-U2a shared citation vectors against an independent rule
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/citation-vectors --cwd . --file tests/report_citation_vectors.json --file tests/report_citation_vectors_test.py -- python3 -B tests/report_citation_vectors_test.py
