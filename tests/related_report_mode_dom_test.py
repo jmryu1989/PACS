@@ -479,8 +479,9 @@ class RelatedModePage(unittest.TestCase):
         """Open the retained refusal notice using a read-only Recommendation selection."""
         self.select_source("recommendation")
         self.page.locator("#related-mode-insert").click()
-        expect(self.page.locator("#related-insert-dialog")).to_be_visible()
-        expect(self.page.locator("#related-insert-confirm")).to_be_hidden()
+        expect(self.page.locator("#related-mode-status")).to_have_text("넣을 글이 없거나 선택한 범위를 확인할 수 없습니다. Findings 또는 Conclusion 한 칸에서 선택하세요.")
+        expect(self.page.locator("#related-mode-insert")).to_be_focused()
+        self.assertEqual(0, self.page.locator("dialog[open]").count())
 
     def select_source(self, field):
         self.page.locator(f'[data-related-source="{field}"]').evaluate("""node => {
@@ -493,7 +494,7 @@ class RelatedModePage(unittest.TestCase):
         if self.js("getSelection().isCollapsed"):
             self.select_source(section)
         self.page.locator("#related-mode-insert").click()
-        expect(self.page.locator("#related-insert-dialog")).to_be_hidden()
+        self.assertEqual(0, self.page.locator("dialog[open]").count())
 
     def op_state(self, uid=UID_A):
         return self.js("uid => relatedInserts.get(uid)?.state ?? null", uid)
@@ -785,6 +786,50 @@ class RelatedModePage(unittest.TestCase):
         self.assertEqual([], self.site.related_puts)
 
     # ── PAGE-04/05: one reviewed Insert, its receipt ──
+    def test_evening_editor_target_identity_changes_and_clears_with_selection(self):
+        self.open()
+        target = self.page.locator('#report-editor-target')
+        expect(target).to_have_text('')
+        self.open_target()
+        expect(target).to_have_text(ALPHA + ' · SYN-P-001 · 2026-10-03 · CT')
+        self.enter()
+        expect(target).to_have_text(ALPHA + ' · SYN-P-001 · 2026-10-03 · CT')
+        self.back()
+        self.site.hidden.add(UID_A)
+        self.page.locator('#m-refresh').click()
+        expect(target).to_have_text('')
+
+    def test_evening_related_intervals_and_filter_position(self):
+        self.open(); self.open_target()
+        expect(self.related_row(UID_B)).to_contain_text('1m before')
+        expect(self.related_row(UID_C)).to_contain_text('1y 2m before')
+        for width in (1920, 768):
+            self.page.set_viewport_size({'width':width, 'height':1024})
+            button = self.page.locator('#related-options-open')
+            button.click()
+            panel = self.page.locator('#related-options')
+            expect(panel).to_be_visible()
+            a, b = button.bounding_box(), panel.bounding_box()
+            self.assertAlmostEqual(a['y'] + a['height'] + 4, b['y'], delta=1)
+            self.assertGreaterEqual(b['x'], 0)
+            self.assertLessEqual(b['x']+b['width'], width)
+            panel.get_by_role('button', name='Close', exact=True).click()
+
+    def test_evening_related_exam_and_report_show_real_status_words(self):
+        self.open(); self.open_target()
+        for rs, label in [('P','Preliminary'),('T','In Progress'),('H','On Hold'),('W','Unread'),('A','Approved')]:
+            self.site.store[UID_B]['report']['rs'] = rs
+            self.page.locator('#m-refresh').click()
+            expect(self.related_row(UID_B).locator('td').last).to_contain_text(label)
+            expect(self.related_row(UID_B).locator('td').first).to_contain_text('Prior')
+            self.enter(ready=rs == 'A')
+            expect(self.related_row(UID_B).locator('td').first).to_contain_text('Showing')
+            if rs != 'A':
+                expect(self.page.locator('.related-mode-state')).to_contain_text(label)
+                expect(self.page.locator('.related-mode-state')).to_contain_text('승인본만 열람')
+                self.assertEqual('', self.source_text('findings'))
+            self.back()
+
     def test_w5_insert_applies_two_receipts_in_order_and_back_returns_to_conclusion_end(self):
         self.open(); self.open_target()
         self.page.locator("#findings").fill("Current Findings")
@@ -795,7 +840,7 @@ class RelatedModePage(unittest.TestCase):
         self.site.related_answers = ["hold"]
         self.page.locator("#related-mode-insert").click()
         self.wait(lambda: len(self.site.related_puts) == 1, "Findings sent")
-        expect(self.page.locator("#related-insert-dialog")).to_be_hidden()
+        self.assertEqual(0, self.page.locator("dialog[open]").count())
         self.assertEqual("findings", self.site.related_puts[0][1]["relatedInsert"]["section"])
         self.assertEqual("Current Conclusion", self.value("conclusion"), "Conclusion waits for the first receipt")
         self.site.finish_related()
@@ -809,6 +854,10 @@ class RelatedModePage(unittest.TestCase):
             self.assertEqual([{"field": field, "start": 0, "end": len(PRIOR_B[field])}], ri["source"]["parts"])
             self.assertEqual("applied", self.site.receipts[ids[-1]]["state"])
         self.assertEqual(2, len(set(ids)))
+        expect(self.page.locator("#related-mode-status")).to_contain_text("삽입됨")
+        self.assertFalse(self.js("uid => reportConverge.has(uid)", UID_A))
+        expect(self.page.locator("#related-mode-target")).to_contain_text("Draft Saved")
+        expect(self.page.locator("#related-mode-title")).to_be_focused()
         self.assertNotEqual(self.site.related_puts[0][1]["expectedRevision"], self.site.related_puts[1][1]["expectedRevision"])
         self.assertEqual({"findings": "Current Findings\n" + PRIOR_B["findings"], "conclusion": "Current Conclusion\n" + PRIOR_B["conclusion"], "recommendation": ""}, self.stored())
         self.assertEqual([], [p for p in self.site.flow_puts[writes:] if "relatedInsert" not in p[1]])
@@ -1275,7 +1324,7 @@ class RelatedModePage(unittest.TestCase):
                   "the usable viewer frame")
         return viewer
 
-    def test_w5_escape_closes_the_confirmation_first_then_leaves_and_the_keys_enter_and_back(self):
+    def test_w5_refusal_keeps_focus_and_escape_leaves_then_shortcuts_enter_and_back(self):
         viewer = self.viewer_stand_in()
         self.open()
         self.open_target()
@@ -1290,8 +1339,7 @@ class RelatedModePage(unittest.TestCase):
         expect(self.page.locator("#related-mode-title")).to_be_focused()
         self.wait(lambda: self.source_text("findings") == PRIOR_B["findings"], "the Source")
         self.open_insert()
-        self.page.keyboard.press("Escape")
-        expect(self.page.locator("#related-insert-dialog")).to_be_hidden()
+        self.assertEqual(0, self.page.locator("dialog[open]").count())
         expect(self.mode()).to_be_visible()
         expect(self.page.locator("#related-mode-insert")).to_be_focused()
         self.page.keyboard.press("Escape")
@@ -1343,13 +1391,14 @@ class RelatedModePage(unittest.TestCase):
         self.js("() => document.querySelector('#findings').addEventListener('focus', e => { e.target.readOnly = true; }, { once: true })")
         self.select_source("findings")
         self.page.locator("#related-mode-insert").click()
-        expect(self.page.locator("#related-insert-dialog")).to_be_visible()
-        expect(self.page.locator("#related-insert-error")).to_contain_text("넣지 못했습니다")
+        expect(self.page.locator("#related-mode-status")).to_have_text("현재 초안에 넣지 못했습니다. 편집기의 글을 확인한 뒤 다시 시도하세요.")
+        expect(self.page.locator("#related-mode-title")).to_be_focused()
+        expect(self.page.locator("#related-mode-status")).to_contain_text("넣지 못했습니다")
         self.assertEqual([False, True], self.editor_held())
         self.assertEqual("", self.value())
         self.assertEqual([], self.site.related_puts)
         self.assertIsNone(self.op_state())
-        self.assertTrue(self.js("document.querySelector('#related-insert-dialog').contains(document.activeElement)"))
+        expect(self.page.locator("#related-mode-title")).to_be_focused()
 
     def test_w5_reentrant_writes_during_the_native_edit_are_refused_and_the_text_is_exactly_the_insertion(self):
         self.site.templates = [rf.TEMPLATE]
@@ -2379,7 +2428,6 @@ class RelatedModePage(unittest.TestCase):
             self.page.locator(selector).scroll_into_view_if_needed()
             self.assertTrue(self.js(self.ON_TOP, selector), f"{selector} is covered by the list that opened by itself")
         self.open_insert()
-        self.page.locator("#related-insert-cancel").click()
         self.back()
         expect(self.page.locator("#findings")).to_be_focused()
         self.assertEqual("SYN typed under a self-opened list", self.value())
@@ -2802,9 +2850,8 @@ class RelatedModePage(unittest.TestCase):
                 self.poll_arrivals()
                 self.assertEqual(focused, self.js("document.activeElement.id"))
                 self.assertEqual(before, self.js(self.BOX, "#related-mode"))
-                self.assertTrue(self.js(self.ON_TOP, "#related-insert-cancel"))
-                self.page.keyboard.press("Escape")
-                expect(self.page.locator("#related-insert-dialog")).to_be_hidden()
+                self.assertTrue(self.js(self.ON_TOP, "#related-mode-insert"))
+                self.assertEqual(0, self.page.locator("dialog[open]").count())
                 expect(self.mode()).to_be_visible()
                 expect(self.page.locator("#cvr-inbox-body")).to_be_visible()
                 self.page.keyboard.press("Escape")

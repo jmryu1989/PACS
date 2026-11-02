@@ -26,7 +26,8 @@
       if (reportFrameEnded) return null;
       if (!reportFrame) reportFrame = KinReportEditorFrame.create({
         fields: Object.fromEntries(RFIELDS.map(k => [k, $("#" + k)])),
-        host: document.querySelector(".redit"),
+        // 입력칸은 글 높이로 늘어나므로 실제 판독 열의 스크롤을 따라야 마지막 입력 줄이 화면에 남는다.
+        host: document.querySelector(".report-p"),
         // W5 (D1423 R2): every existing rule holds for every edit; Related Report mode lets through only the admission it
         // issued itself for exactly this field and request (the mode checks and consumes it here, once per edit span).
         canEdit: (field, admission = null, at = null) => work.state() === "active" && !!selectedUid
@@ -217,6 +218,10 @@
       $("#report-editor").dataset.editable = String(!why);
       $("#report-editor-state").textContent = why ? "Read Only" : "Editable";
       $("#report-editor-why").textContent = $("#report-editor-why").title = why || "";
+      // The study this editor writes for, so it is never confused with the prior report shown in the box above.
+      const target = selectedUid ? studies.find(x => x.uid === selectedUid) : null;
+      $("#report-editor-target").textContent = target ? [target.name, target.id, target.date, target.modality].filter(Boolean).join(" · ") : "";
+      $("#report-editor-target").title = target ? "이 편집기는 이 검사의 판독문입니다: " + [target.name, target.id, target.date, target.modality, shownStudyDesc(target)].filter(Boolean).join(" · ") : "";
       $("#report-editor-resume").hidden = !relatedMode.active();
     }
 

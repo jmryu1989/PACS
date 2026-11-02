@@ -299,9 +299,10 @@ MEASURE = r"""()=>{
   const natural=[...row.children].map(c=>c.tagName==='DETAILS'?c.querySelector(':scope > summary'):c)
     .map(e=>[key(e),e.getBoundingClientRect().height]);
   row.style.alignItems=was;
-  const pane=q('#dictation-pane');
+  const pane=q('#dictation-pane'), edit=q('.report-p .redit'), flex=edit.style.flex;
+  edit.style.flex='0 0 auto'; const editMinimum=edit.getBoundingClientRect().height; edit.style.flex=flex;
   return {vw:innerWidth,vh:innerHeight,open:q('#report-more').open,rbtns:box(row),rfoot:box(q('.report-p .rfoot2')),
-    redit:box(q('.report-p .redit')),pane:pane.hidden?null:box(pane),panel:box(q('#report-more > .toolbar-menu-panel')),
+    redit:box(q('.report-p .redit')),reditMin:editMinimum,pane:pane.hidden?null:box(pane),panel:box(q('#report-more > .toolbar-menu-panel')),
     top,natural,foot:[...q('.report-p .rfoot2').children].map(c=>c.tagName==='DETAILS'?c.querySelector(':scope > summary'):c).map(one),menu:[...document.querySelectorAll('#report-more button')].filter(e=>!e.hidden).map(one),
     sections:[...document.querySelectorAll('#report-more .toolbar-section')].map(s=>{const h=getComputedStyle(s,'::before');
       return {id:s.id,...box(s),ids:[...s.children].filter(c=>!c.hidden).map(c=>c.id),kids:[...s.children].filter(c=>!c.hidden).map(c=>({key:c.id,...box(c)})),
@@ -531,7 +532,10 @@ class ReportActionsDOMTest(unittest.TestCase):
     def closed_checks(self, m, where):
         top = m['top']
         self.assertEqual(IN_VIEW, [t['key'] for t in top], where)
-        # One bottom toolbar may wrap within the reading workspace's narrow report column.
+        # The single action row wraps only when its controls and declared gaps no longer fit.
+        required = sum(a['w'] for a in top) + GAP * (len(top) - 1) + 24
+        if required <= m['rbtns']['w'] - 12:
+            self.assertLessEqual(max(a['y'] for a in top) - min(a['y'] for a in top), 1, where)
         for i, a in enumerate(top):
             self.assertTrue(a['own'], f'{a["key"]} is covered {where}')
             self.assertEqual(FONT, a['font'], a['key'])
@@ -551,7 +555,7 @@ class ReportActionsDOMTest(unittest.TestCase):
                 continue
             gap = WIDE_GAP if GAPPED.get(c['key']) == a['key'] else GAP
             if a['key'] in ('b-approve', 'b-approve-next') or c['key'] == 'b-approve-next':
-                self.assertGreaterEqual(c['x'] - a['r'], 8, f'Approval separation {where}')
+                self.assertAlmostEqual(12, c['x'] - a['r'], delta=0.5, msg=f'Approval separation {where}')
             else:
                 self.assertAlmostEqual(gap, c['x'] - a['r'], delta=0.5, msg=f'{a["key"]} to {c["key"]} {where}')
         # The summary does not make the row taller than its buttons.
@@ -587,7 +591,8 @@ class ReportActionsDOMTest(unittest.TestCase):
         self.assertLessEqual(panel['b'], rbtns['b'] + 0.5)
         self.assertLessEqual(redit['b'], rbtns['y'] + 0.5, f'the open row reaches into the report fields {where}')
         self.assertGreater(rbtns['h'], closed['rbtns']['h'])
-        self.assertGreater(redit['h'], 0, f'the editor remains usable {where}')
+        expected = max(m['reditMin'], closed['redit']['h'] - (rbtns['h'] - closed['rbtns']['h']))
+        self.assertAlmostEqual(expected, redit['h'], delta=1, msg=f'editor yields exactly the expanded actions height {where}')
         # One section per line, in the declared order and content.
         sections = m['sections']
         self.assertEqual(list(SECTIONS), [s['id'] for s in sections])

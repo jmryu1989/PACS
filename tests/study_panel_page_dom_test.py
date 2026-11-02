@@ -1329,6 +1329,20 @@ class StudyPanelPageDOM(unittest.TestCase):
         self.page.keyboard.press('Escape')
         expect(opener).to_be_focused()
 
+    def test_rail_keyboard_resize_saves_workspace_width(self):
+        self.boot()
+        rail = self.page.locator('#resize-rail')
+        before = self.page.locator('#worklist-folders-panel').bounding_box()['width']
+        rail.focus()
+        self.page.keyboard.press('ArrowRight')
+        self.page.wait_for_function('(before) => document.querySelector("#worklist-folders-panel").getBoundingClientRect().width > before', arg=before)
+        width = self.page.locator('#worklist-folders-panel').bounding_box()['width']
+        self.page.wait_for_function('(key) => JSON.parse(localStorage.getItem(key)).workspace.rail > 0', arg=KEY)
+        self.assertEqual(round(width), self.local()['workspace']['rail'])
+        self.page.reload()
+        self.page.wait_for_selector('#rows tr[data-uid]')
+        self.assertAlmostEqual(width, self.page.locator('#worklist-folders-panel').bounding_box()['width'], delta=1)
+
     def test_folder_title_collapses_and_restores_the_panel(self):
         self.boot()
         folders = self.page.locator('#worklist-folders-panel')

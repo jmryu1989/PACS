@@ -36,6 +36,7 @@ class FolderSite(auth.Site):
         self.fail_shared = False
         self.fail_write = False
         self.shortcut_writes = []
+        self.conflict_next_shortcut = False
         self.modalities = ['CT', 'MR', 'MG', 'XA', 'CT,SR', 'CTA']
         self.row_dates = None
 
@@ -75,6 +76,9 @@ class FolderSite(auth.Site):
                                          json={'message': 'SYN read failed'} if self.fail_read else self.collection())
                 body = request.post_data_json
                 self.shortcut_writes.append(copy.deepcopy(body))
+                if self.conflict_next_shortcut:
+                    self.collection_revision += 1
+                    self.conflict_next_shortcut = False
                 if self.fail_write or body['revision'] != self.collection_revision:
                     return route.fulfill(status=409, json={'message': 'SYN conflict'})
                 self.shortcuts = copy.deepcopy(body['command']['shortcuts'])
@@ -409,6 +413,34 @@ class WorklistFoldersDOM(unittest.TestCase):
         expect(self.page.locator('#sfm-count')).to_contain_text('목록 기준 6건')
         self.assertEqual([], self.dialogs)
 
+    def test_favorites_buttons_have_english_names_and_korean_titles(self):
+        self.open()
+        self.page.route('**/api/favorite-folders', lambda route: route.fulfill(json=dict(
+            owner=[auth.INSTITUTION, self.site.account['sub']], revision=1,
+            folders=[dict(id='syn-folder', name='SYN Favorites', uids=[])])))
+        self.menu('filters')
+        self.page.locator('#favorite-open').click()
+        for ident, label in [('create','New Folder'),('rename','Rename'),('apply','Show in Worklist'),('add','Add Selected'),('close','Close')]:
+            button = self.page.locator('#favorite-'+ident)
+            expect(button).to_be_visible()
+            expect(button).to_have_text(label)
+            self.assertRegex(button.get_attribute('title'), '[가-힣]')
+        self.page.locator('#favorite-close').click()
+        expect(self.page.locator('#favorite-dialog')).not_to_be_visible()
+
+    def test_save_shortcut_reuses_existing_same_name_search_and_updates_criteria(self):
+        self.site.filters = [dict(id=42, name='Morning', mode='Radiology', days=-1, quick='', cols={'modality': 'CT'})]
+        self.open()
+        self.page.locator('#filterrow [data-f=modality]').fill('MR')
+        self.save_shortcut('Morning')
+        expect(self.page.locator('#shortcuts-status')).to_contain_text('저장했습니다')
+        self.assertEqual(1, len(self.site.filters))
+        self.assertEqual((42, 'MR'), (self.site.filters[0]['id'], self.site.filters[0]['cols']['modality']))
+        self.assertEqual('own:42', self.site.shortcuts[0]['searchId'])
+        self.page.locator('#exam-filter-popup').get_by_role('button', name='Close', exact=True).click()
+        for name in ('My Shortcuts', 'Saved Searches'):
+            expect(self.page.get_by_role('list', name=name, exact=True).get_by_role('button', name=re.compile(r'^Morning \('))).to_be_visible()
+
     def test_search_draft_ime_apply_save_shortcut_and_relogin(self):
         self.open()
         self.folder('CT').click()
@@ -441,7 +473,8 @@ class WorklistFoldersDOM(unittest.TestCase):
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
         self.site.sign_in(auth.RAD)
         self.page.goto(auth.MAIN_URL)
-        # The saved search also appears in Saved Searches; verify the user's shortcut in its own group.
+        # A shortcut points at a search: both groups deliberately offer the same name.
+        expect(self.page.get_by_role('list', name='Saved Searches', exact=True).get_by_role('button', name=re.compile(r'^Morning \('))).to_be_visible()
         shortcut = self.page.get_by_role('list', name='My Shortcuts', exact=True).get_by_role('button', name=re.compile(r'^Morning \('))
         expect(shortcut).to_have_count(1)
         expect(shortcut).to_be_visible()
@@ -550,14 +583,13 @@ class WorklistFoldersDOM(unittest.TestCase):
 
     def test_shortcut_conflict_retains_draft_and_read_failure_blocks_writes(self):
         self.open()
-        self.site.fail_write = True
+        self.site.conflict_next_shortcut = True
         self.save_shortcut('Draft shortcut')
         popup = self.page.locator('#exam-filter-popup')
         expect(popup.locator('[role=status]')).to_contain_text('저장하지 못했습니다')
         expect(popup.get_by_label('Shortcut Name', exact=True)).to_have_value('Draft shortcut')
         self.assertEqual([], self.site.shortcuts)
         self.site.fail_read = True
-        self.site.fail_write = False
         popup.get_by_role('button', name='Save as Shortcut', exact=True).click()
         expect(popup.locator('[role=status]')).to_contain_text('저장하지 못했습니다')
         self.assertEqual(1, len(self.site.shortcut_writes))
@@ -764,7 +796,7 @@ class WorklistFoldersDOM(unittest.TestCase):
 
     def test_conflict_blocks_another_edit_after_busy_ends_and_status_announces_only_changes(self):
         self.open()
-        self.site.fail_write = True
+        self.site.conflict_next_shortcut = True
         self.save_shortcut('One')
         expect(self.page.locator('#shortcuts-status')).to_contain_text('저장 결과를 확인하지 못했습니다')
         self.site.fail_read = True

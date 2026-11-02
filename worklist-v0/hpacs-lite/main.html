@@ -331,7 +331,8 @@
     .clin-pair { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); width: 100%; }
     /* Related Report panel and Report Editor are stacked (one above the other, each full width) instead of side by side.
        Same arrangement the portrait layout already uses; the handle between them now drags the height split (row-resize). */
-    body .workrow { flex-direction: column; }
+    /* 짧은 창에서도 두 카드의 최소 높이를 보존하고 판독 버튼까지 스크롤로 도달하게 한다. */
+    body .workrow { flex-direction: column; overflow-y: auto; }
     body .workrow > .related-p { width: calc(100% - 12px) !important; height: 42%; min-height: 150px; flex: none; }
     body .workrow > .report-p { flex: 1; min-width: 0; min-height: 180px; }
     /* Five separate boxes: Worklist, Related Exam, Clinical Information, Related Report, Report Editor.
@@ -355,7 +356,8 @@
     body .menubar .item { padding: 4px 8px; font-size: 12px; }
     body .menubar .brand { margin-right: 6px; }
     body .menubar > .spacer { flex: 1 1 0; min-width: 0; }
-    body .menubar-status { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+    /* 판독 중 연결이 끊겨도 저장 불가 경고가 화면에 남아야 한다. 상태 묶음과 경고의 폭을 줄여 문장을 자르지 않는다. */
+    body .menubar-status { flex: none; min-width: 0; overflow: hidden; }
     body .menubar-session { flex: 0 1 auto; min-width: 160px; margin-left: auto; }
     body .menubar > .toolbar-menu { display: block; flex: none; }
     /* 펼친 메뉴는 30px 상단 줄의 너비를 늘리지 않고 화면 안에서 자체 스크롤한다. */
@@ -364,8 +366,9 @@
       width: max-content; max-width: calc(100vw - 16px);
       max-height: calc(100vh - var(--top-menu-top, 30px) - 8px); overflow: auto;
     }
-    @media (max-width: 1100px) {
-      body .menubar .item { padding: 3px 4px; font-size: 11px; }
+    /* 1199px까지 메뉴 이름과 세션 폭을 접어, 연결 끊김 경고가 표시될 때 Log out이 화면 밖으로 밀리는 것을 막는다. */
+    @media (max-width: 1199px) {
+      body .menubar .item { padding: 3px 2px; font-size: 11px; }
       body .menubar .tabs > div { padding: 0 6px; font-size: 11px; }
       body .menubar .brand span, body .menubar .item-label { display: none; }
       body .menubar { padding-inline: 4px; }
@@ -373,18 +376,26 @@
       body .menubar .item { flex: 0 1 auto; min-width: 18px; overflow: hidden; text-overflow: ellipsis; }
       body .menubar .tabs { flex: none; margin-right: 0; }
       body .menubar .tabs > div { padding-inline: 4px; }
-      body .menubar-session { max-width: 180px; }
-      body .menubar-session .session-who { flex: 1 1 0; min-width: 64px; padding-inline: 2px; gap: 3px; font-size: 10px; }
-      body .menubar-session #user, body .menubar-session #roles { flex: 1 1 0; min-width: 20px; }
+      body .menubar-session { max-width: 160px; }
+      /* 이름 단추의 고정 최소 폭이 Members와 Log out을 화면 밖으로 밀지 않게 한다. 전체 이름은 세션 상세에 남는다. */
+      body .menubar-session .session-who { flex: 1 1 0; min-width: 0; padding-inline: 2px; gap: 3px; font-size: 10px; }
+      body .menubar-session #user, body .menubar-session #roles { flex: 1 1 0; min-width: 0; }
       body .menubar-session > .mright { margin-left: 3px; }
-      body .menubar > .toolbar-menu > summary { padding-inline: 4px; }
+      body .menubar > .toolbar-menu > summary { padding-inline: 2px; }
       body .menubar #m-reading { max-width: 90px; }
     }
     body .menubar .brand img { width: 18px; height: 18px; }
     body .menubar-status { display: flex; align-items: center; column-gap: 10px; margin-left: 6px; white-space: nowrap; }
-    @media (max-width: 1500px) { body .menubar-status { display: none; } }
+    @media (max-width: 1919px) { body .menubar-status > :not(#dbstat) { display: none; } }
+    /* 좁은 데스크톱에서도 연결 경고와 세션 동작이 함께 들어가도록 메뉴 여백을 줄인다. */
+    @media (min-width: 1200px) and (max-width: 1365px) {
+      body .menubar .item { padding-inline: 4px; }
+      body .menubar .tabs > div { padding-inline: 6px; }
+      body .menubar-session .session-who { padding-inline: 2px; gap: 3px; }
+      body .menubar-session #user, body .menubar-session #roles { flex: 1 1 0; min-width: 0; }
+    }
     body .menubar-status .mright { line-height: 1.1; font-size: 11px; }
-    body .menubar-status #dbstat { width: auto; min-width: 0; white-space: nowrap; }
+    body .menubar-status #dbstat { flex: none; width: auto; min-width: 0; white-space: nowrap; }
     body .menubar-session .mright, body .menubar .logout { font-size: 11px; padding-top: 2px; padding-bottom: 2px; }
     /* The "select an exam to read" status line above the Related Exam list (still in the DOM; scripts write to it). */
     #related-current { display: none !important; }
@@ -1345,21 +1356,13 @@
         <button class="chip" id="consultations-open" type="button" hidden disabled>Consultations</button>
         <button class="chip" id="study-access-open" type="button" disabled>Study Access</button>
         <button class="chip" id="worklist-alerts-open" type="button" disabled>Worklist Alerts</button>
-      <details class="toolbar-menu" id="toolbar-refresh-menu" name="kin-toolbar-menu">
+      <details class="toolbar-menu" id="toolbar-refresh-menu">
         <summary class="chip" aria-label="Auto Refresh" title="자동 목록 갱신 간격을 펼칩니다"><span class="toolbar-caret" aria-hidden="true">▾</span></summary>
         <div class="toolbar-menu-panel" role="group" aria-label="Auto Refresh">
           <label>Auto Refresh <select class="chip" id="worklist-refresh" aria-describedby="worklist-refresh-status" disabled><option value="0">Manual</option><option value="30">30 Seconds</option><option value="60">1 Minute</option><option value="120">2 Minutes</option><option value="300">5 Minutes</option></select></label>
         </div>
       </details>
-    <!-- 상태 묶음은 한 줄에서 말줄임되므로 포인터를 올리거나 Tab으로 이 묶음에 오면 전문을 아래에 펼쳐 보인다. -->
-    <div class="toolbar-status" id="toolbar-status" role="group" aria-label="Status" tabindex="0">
-      <div class="spacer"></div>
-      <div class="toolbar-status-texts">
-        <span id="layout-status" role="status" style="font-size:11px;color:var(--kin-muted)" title="계정별로 이 브라우저에 배치를 기억합니다. 작은 세로 창은 768×1024 이상에서 확인했습니다."></span>
-        <small id="worklist-refresh-status" role="status" aria-live="polite"></small>
-        <small id="body-parts-status" role="status" style="max-width:100%;overflow-wrap:anywhere"></small>
-      </div>
-    </div>
+
       </div>
     </details>
     <details class="toolbar-menu" id="toolbar-filters" name="kin-toolbar-menu">
@@ -1464,6 +1467,15 @@
         <span id="countlist"></span>
         <span id="observation-status" role="status" hidden></span>
         <span id="filterlist">Filter : -</span>
+    <!-- 상태 묶음은 한 줄에서 말줄임되므로 포인터를 올리거나 Tab으로 이 묶음에 오면 전문을 아래에 펼쳐 보인다. -->
+    <div class="toolbar-status" id="toolbar-status" role="group" aria-label="Status" tabindex="0">
+      <div class="spacer"></div>
+      <div class="toolbar-status-texts">
+        <span id="layout-status" role="status" style="font-size:11px;color:var(--kin-muted)" title="계정별로 이 브라우저에 배치를 기억합니다. 작은 세로 창은 768×1024 이상에서 확인했습니다."></span>
+        <small id="worklist-refresh-status" role="status" aria-live="polite"></small>
+        <small id="body-parts-status" role="status" style="max-width:100%;overflow-wrap:anywhere"></small>
+      </div>
+    </div>
         <nav id="worklist-pages" aria-label="검색 결과 페이지" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;border-top:1px solid var(--kin-line)">
         <button id="page-prev" type="button">Previous Page</button><span id="page-status" role="status"></span><button id="page-next" type="button">Next Page</button>
         <label>Per page <select id="page-size"><option>25</option><option>50</option><option selected>100</option></select></label>
@@ -1497,7 +1509,7 @@
 </div>
             <div id="related-parts-status" role="status" style="font-size:11px;padding:2px 6px"></div>
           </div>
-          <div id="related-filter-hidden" role="status" hidden>The study being viewed is outside the filter</div>
+          <div id="related-filter-hidden" role="status" hidden>열람 중인 검사는 필터 밖입니다</div>
           <div id="related-keyboard-help" style="font-size:12px">↑/↓ · Home/End 이동 · Enter 미리보기 · Tab 영상 버튼</div>
           <div class="grid2">
             <table aria-describedby="related-keyboard-help">
@@ -1664,15 +1676,7 @@
               <span class="spacer"></span>
               <button id="related-mode-insert" type="button">Insert into Current Draft</button>
             </div>
-            <dialog id="related-insert-dialog" aria-labelledby="related-insert-title" aria-describedby="related-insert-help">
-              <h3 id="related-insert-title">Insert Unavailable</h3>
-              <p id="related-insert-help" lang="ko">현재 초안이나 이전 판독문을 확인한 뒤 다시 시도하세요.</p>
-              <p id="related-insert-target"></p>
-              <p id="related-insert-error" role="alert"></p>
-              <div class="related-insert-actions">
-                <button id="related-insert-cancel" type="button">Close</button>
-              </div>
-            </dialog>
+
           </section>
         </div>
       </div>
@@ -1749,6 +1753,7 @@
           <div class="report-editor" id="report-editor" role="group" aria-labelledby="report-editor-title" data-editable="false">
             <div class="report-editor-head">
               <b id="report-editor-title">Report Editor</b>
+              <span id="report-editor-target" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
               <span id="report-editor-state" class="report-editor-state">Read Only</span>
               <span id="report-editor-why" lang="ko"></span>
               <button id="report-editor-resume" type="button" aria-keyshortcuts="Control+Alt+4" hidden

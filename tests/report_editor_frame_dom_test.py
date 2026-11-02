@@ -5,6 +5,12 @@ Isolated Chromium module contract plus --page delivered HTML/bundle against synt
 Assertions cover public results, text, native undo, composition and visible editor state.
 The optional one-line mutants run in memory, never rewrite product files. Their anchors
 are mutation locations, not product-shape assertions. No new parser or byte pins.
+
+D73 studio-1101: the compact page scrolls the report column around growing fields,
+not the retired fixed-height .redit viewport. Page cases measure the actual wheel
+viewport and retain caret, text, history and reachability contracts. The retired
+shrink-to-padding assertion does not describe this layout. Template interactions
+first open the reader's Templates panel instead of driving hidden rows.
 """
 import argparse
 import io
@@ -52,6 +58,16 @@ FIELD_VISIBILITY = """e => {
     readOnly: e.readOnly, selected: typeof selectedUid === 'undefined' ? null : selectedUid,
     ready: document.readyState, fonts: document.fonts.status, dialogs: ids('dialog[open]'), busy: ids('[aria-busy="true"]'),
     notices: ['#question-p', '#image-request-p', '#cvr-sent-p'].filter(s => document.querySelector(s)?.getClientRects().length)};
+}"""
+
+SCROLL_HOST = """el => {
+  let viewport=null;
+  for(let n=el.parentElement;n;n=n.parentElement){
+    if (!['auto','scroll'].includes(getComputedStyle(n).overflowY)) continue;
+    viewport ||= n;
+    if(n.scrollHeight > n.clientHeight + 1) return n;
+  }
+  return viewport || document.scrollingElement;
 }"""
 
 
@@ -1078,6 +1094,9 @@ class ReportEditorFramePageDOM(unittest.TestCase):
     def texts(self):
         return {k: self.page.locator('#' + k).input_value() for k in FIELDS}
 
+    def scroll_host(self):
+        return self.page.locator('#findings').evaluate_handle(SCROLL_HOST).as_element()
+
     def switch(self, patient):
         # W4 decided difference (W4-PAGE-06): with unconfirmed text the move waits for that text's draft save, so the
         # switch is complete when the page has selected the study, not when the click returns.
@@ -1347,12 +1366,13 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         self.keep_hold_claim()
         self.frame_text(findings='\n'.join('long '+str(i) for i in range(100)))
         self.page.locator('#findings').focus()
-        self.page.evaluate("reportFrame.element('findings').setSelectionRange(10,12); document.querySelector('.redit').scrollTop=80")
-        before = self.page.locator('.redit').evaluate('e=>e.scrollTop')
+        self.page.locator('#findings').evaluate('e => e.setSelectionRange(10,12)')
+        self.scroll_host().evaluate('e => e.scrollTop=80')
+        before = self.scroll_host().evaluate('e=>e.scrollTop')
         self.assertGreater(before, 0)
         self.frame_capture()
         self.assertEqual(self.frame_insert('REPLACE'), {'status':'applied'})
-        self.assertEqual(self.page.locator('.redit').evaluate('e=>e.scrollTop'), before)
+        self.assertEqual(self.scroll_host().evaluate('e=>e.scrollTop'), before)
         self.answer_hold_claim()
 
     def test_integrated_focus_and_unvisited(self):
@@ -1519,10 +1539,11 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         text = '\n'.join('line %s 한글' % i for i in range(1000))
         self.page.keyboard.insert_text(text)
         self.assertEqual(self.texts()['findings'], text)
-        sizes = self.page.locator('#findings').evaluate('e=>[e.scrollHeight,e.clientHeight,e.parentElement.scrollHeight,e.parentElement.clientHeight]')
+        sizes = self.page.locator('#findings').evaluate('e=>[e.scrollHeight,e.clientHeight]')
         self.assertLessEqual(sizes[0], sizes[1] + 1)
-        self.assertGreater(sizes[2], sizes[3])
-        caret_end = self.page.locator('#findings').evaluate('e=>{const h=e.parentElement.getBoundingClientRect();return [e.getBoundingClientRect().bottom,h.top,h.bottom];}')
+        scroll = self.scroll_host().evaluate('e => [e.scrollHeight,e.clientHeight]')
+        self.assertGreater(scroll[0], scroll[1])
+        caret_end = self.scroll_host().evaluate("host=>{const e=document.querySelector('#findings'),h=host.getBoundingClientRect();return [e.getBoundingClientRect().bottom,h.top,h.bottom];}")
         self.assertGreater(caret_end[0], caret_end[1])
         self.assertLessEqual(caret_end[0], caret_end[2] + 8, 'The last typed line stays in the shared viewport')
         self.page.keyboard.press('Control+a')
@@ -1580,6 +1601,10 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         return self.page.evaluate('document.activeElement.id || document.activeElement.tagName')
 
     def use_template(self, **fields):
+        panel = self.page.get_by_role('tabpanel', name='Templates', exact=True)
+        if not panel.is_visible():
+            self.page.keyboard.press('Control+Alt+T')
+        expect(panel).to_be_visible()
         self.page.evaluate("t => { templates = [t]; renderTemplates(); }", {'title': 'SYN TEMPLATE', **fields})
 
     def test_page_template_native_focus_does_not_retarget_dictation(self):
@@ -1600,7 +1625,7 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         expected = self.placed('conclusion', 'SYN C2', None)
         self.page.locator('#tplrows tr[data-i]').first.dblclick()
         self.assertEqual(self.texts()['conclusion'], expected)
-        self.assertEqual(self.active(), 'BODY')
+        expect(self.page.get_by_role('tabpanel', name='Templates', exact=True)).to_be_focused()
         self.assertEqual(self.page.evaluate('dictationContext().field'), 'findings')
         self.assertTrue(self.page.evaluate("() => { const x=dictationContext(); return dictationInsert({...x,expectedValue:x.value,text:'SYN second'}); }"))
         self.assertTrue(self.texts()['findings'].endswith('SYN second'))
@@ -1626,7 +1651,7 @@ class ReportEditorFramePageDOM(unittest.TestCase):
             self.use_template(**fields)
             self.page.locator('#tplrows tr[data-i]').first.dblclick()
             self.assertTrue(all(text in self.texts()[k] for k, text in fields.items()), fields)
-            self.assertEqual(self.active(), 'BODY', 'focus stays on the page, as before W6')
+            expect(self.page.get_by_role('tabpanel', name='Templates', exact=True)).to_be_focused()
             self.assert_off_hidden_recommendation('template %s' % sorted(fields))
         self.assertEqual(self.texts()['recommendation'], 'SYN R3')
         self.page.locator('#findings').click()
@@ -1721,24 +1746,23 @@ class ReportEditorFramePageDOM(unittest.TestCase):
     def test_page_frame_minimum_on_w3_layouts_with_notices_and_panel(self):
         # W6-PAGE-22 on W3's placements (portrait bands, narrow sheet, short windows) and 1366x768, with the three
         # unavailable-service notices shown below the report fields and the Study Panel closed or open (W6R1-01). The
-        # shared scroller has no fixed minimum: it gives up its height before anything below it leaves the column (it
-        # is down to its own padding whenever the column's content overflows), the page itself never scrolls, and the
+        # report column scrolls around the expanded fields, the page itself never scrolls, and the
         # footer and every notice bar stay in the window or inside a container the reader can wheel-scroll. The panel
         # never covers the scroller and each section focused shows in it. The last window is shorter than the column's
         # own rows: there the column itself scrolls.
         from study_panel_page_dom_test import assert_w6_reachable, w6_facts
         from study_panel_size_dom_test import BOUND_SIZES
-        measure = """() => { const host = document.querySelector('.redit'), box = host.getBoundingClientRect(), css = getComputedStyle(host);
+        measure = """() => { const host = (SCROLL_HOST)(document.querySelector('#findings')), box = host.getBoundingClientRect(), css = getComputedStyle(host);
           const panel = document.querySelector('#study-panel-host .study-panel:not([hidden])')?.getBoundingClientRect();
           const seen = id => { const r = document.getElementById(id).getBoundingClientRect();
             return Math.min(box.bottom, r.bottom, innerHeight) - Math.max(box.top, r.top, 0); };
           // The editor is nested beside Clinical Context; notices and footer belong to the report column.
-          const column = host.closest('.report-p');
-          return {height: box.height, least: ['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth'].reduce((n, k) => n + parseFloat(css[k]), 0),
+          const column = document.querySelector('#findings').closest('.report-p');
+          return {height: box.height, wheel: ['auto','scroll'].includes(css.overflowY),
                   overflow: column.scrollHeight - column.clientHeight,
                   covered: !!panel && box.left < panel.right && box.right > panel.left
                     && Math.max(box.top, 0) < panel.bottom && Math.min(box.bottom, innerHeight) > panel.top,
-                  findings: seen('findings'), conclusion: seen('conclusion')}; }"""
+                  findings: seen('findings'), conclusion: seen('conclusion')}; }""".replace('SCROLL_HOST', SCROLL_HOST)
         notices = self.page.evaluate("() => ['#question-p', '#image-request-p', '#cvr-sent-p'].filter(s => document.querySelector(s).getClientRects().length).length")
         self.assertEqual(notices, 3)
         for width, height in dict.fromkeys([tuple(size) for size in BOUND_SIZES] + [(1366, 768), (1280, 540)]):
@@ -1751,7 +1775,8 @@ class ReportEditorFramePageDOM(unittest.TestCase):
                     where = '%dx%d panel=%s' % (width, height, opened)
                     fact = self.page.evaluate(measure)
                     if fact['overflow'] > 0.5:
-                        self.assertLessEqual(fact['height'], fact['least'] + 0.5, '%s: the scroller did not yield %s' % (where, fact))
+                        self.assertTrue(fact['wheel'], '%s: overflow must remain wheel-reachable %s' % (where, fact))
+                    self.assertGreater(fact['height'], 0, where)
                     assert_w6_reachable(self, w6_facts(self.page), where)
                     for field in ('findings', 'conclusion'):
                         self.page.locator('#' + field).evaluate('e => e.focus()')
@@ -1833,7 +1858,7 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         # line height or padding (the CI host's fonts differ from this one). A block with the field's computed text
         # layout and content width, holding the text up to the caret plus one zero-width character, ends where the
         # caret's line ends; the same block holding only that character is one line high.
-        state = """() => { const host = document.querySelector('.redit'), el = document.querySelector('#findings'), box = host.getBoundingClientRect();
+        state = """() => { const el = document.querySelector('#findings'), host = (SCROLL_HOST)(el), box = host.getBoundingClientRect();
           const at = el.selectionDirection === 'backward' ? el.selectionStart : el.selectionEnd, css = getComputedStyle(el);
           const block = document.createElement('div');
           for (const p of ['font-family', 'font-size', 'font-weight', 'font-style', 'font-variant', 'font-stretch', 'font-kerning',
@@ -1851,7 +1876,7 @@ class ReportEditorFramePageDOM(unittest.TestCase):
           const end = field.top + el.clientTop + parseFloat(css.paddingTop) + below - el.scrollTop, start = end - line;
           return {value: el.value, selection: [el.selectionStart, el.selectionEnd, el.selectionDirection], top: host.scrollTop,
                   height: Math.round(box.height), line, rect: [start, end], view: [top, bottom],
-                  caret: line > 0 && start >= top - 1 && end <= bottom + 1}; }"""
+                  caret: line > 0 && start >= top - 1 && end <= bottom + 1}; }""".replace('SCROLL_HOST', SCROLL_HOST)
         frames = "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))"
         before = self.page.evaluate(state)
         self.assertTrue(before['caret'], before)

@@ -1222,10 +1222,10 @@
         ? (rel.slice(relatedPage * 50, (relatedPage + 1) * 50).map(x => {
             return `
             <tr data-uid="${esc(x.uid)}" class="${x.uid === relatedUid || (x.uid === s.uid && !relatedUid) ? "related-selected" : ""}">
-              <td>${x.uid === s.uid ? "Reading Target" : relatedDateLabel(x)} · ${x.uid === relatedUid || (x.uid === s.uid && !relatedUid) ? "👁 열람 중" : "비교"}</td>
-              <td>${esc(x.date)}</td><td>${esc(x.modality)}</td><td>${esc(shownStudyDesc(x))}</td><td class="num">${esc(x.count)}</td>
+              <td title="${x.uid === s.uid ? "지금 판독하는 검사" : esc(relatedDateTitle(x))} · ${x.uid === relatedUid || (x.uid === s.uid && !relatedUid) ? "Showing: 지금 Related Report에 보이는 검사" : "Compare: 눌러서 비교해 볼 수 있는 검사"}">${x.uid === s.uid ? "Reading Target" : relatedDateLabel(x)} · ${x.uid === relatedUid || (x.uid === s.uid && !relatedUid) ? "👁 Showing" : "Compare"}</td>
+              <td>${esc(x.date)}${x.uid !== s.uid && relatedInterval(x) ? ` <span class="rel-interval" title="판독 대상 검사 날짜와의 간격">${esc(relatedInterval(x))}</span>` : ""}</td><td>${esc(x.modality)}</td><td>${esc(shownStudyDesc(x))}</td><td class="num">${esc(x.count)}</td>
               <td><span class="rs ${esc(x.rs)}">${esc(x.rs)}</span></td>
-              <td>${x.rs === "A" ? "Approved" : "No Report"} <button class="chip" type="button" data-related-open="${esc(x.uid)}">${x.uid === s.uid ? 'Open Images' : 'Compare Images'}</button></td>
+              <td>${({ W: "Unread", T: "In Progress", P: "Preliminary", A: "Approved", H: "On Hold" })[x.rs] || "Unverified"} <button class="chip" type="button" data-related-open="${esc(x.uid)}">${x.uid === s.uid ? 'Open Images' : 'Compare Images'}</button></td>
             </tr>`;
           }).join("") || `<tr><td class="empty" colspan="7">${relatedModality || relatedBodyPart ? "조건에 맞는 관련 검사 없음" : "관련 검사 없음"}</td></tr>`)
         : `<tr><td class="empty" colspan="7">검사를 선택하세요</td></tr>`;
@@ -2882,9 +2882,29 @@
     function relatedDateLabel(target) {
       const current = cur();
       // 수동 비교에는 이후 검사도 들어온다. 날짜를 모르는 경우와 같은 날의 선후를 과거로 추측하지 않는다.
-      if (!current || !validPriorDate(current.date) || !validPriorDate(target.date)) return "날짜 미확인";
-      if (target.date === current.date) return "같은 날짜 · 선후 미확인";
-      return target.date < current.date ? "과거" : "이후";
+      // 상태 이름은 영어, 설명은 relatedDateTitle의 한국어 툴팁이다(AGENTS §4).
+      if (!current || !validPriorDate(current.date) || !validPriorDate(target.date)) return "Date Unknown";
+      if (target.date === current.date) return "Same Day";
+      return target.date < current.date ? "Prior" : "Later";
+    }
+    function relatedDateTitle(target) {
+      return { "Date Unknown": "검사 날짜를 확인할 수 없어 판독 대상과의 선후를 알 수 없습니다",
+        "Same Day": "판독 대상과 같은 날짜입니다 · 선후는 확인할 수 없습니다",
+        Prior: "판독 대상보다 앞선 검사입니다", Later: "판독 대상보다 뒤의 검사입니다" }[relatedDateLabel(target)];
+    }
+    // Completed calendar months, without rounding a partial month up; under one month show UTC calendar days.
+    // This keeps leap years and DST from making a prior look a month older when choosing a comparison.
+    function relatedInterval(target) {
+      const current = cur();
+      if (!current || !validPriorDate(current.date) || !validPriorDate(target.date)) return "";
+      if (target.date === current.date) return "same day";
+      const [a, b] = target.date < current.date ? [target.date, current.date] : [current.date, target.date];
+      const [y1, m1, d1] = a.split("-").map(Number), [y2, m2, d2] = b.split("-").map(Number);
+      const months = (y2 - y1) * 12 + (m2 - m1) - (d2 < d1 ? 1 : 0);
+      const span = months >= 12 ? `${Math.floor(months / 12)}y${months % 12 ? ` ${months % 12}m` : ""}`
+        : months >= 1 ? `${months}m`
+        : `${Math.round((Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86400000)}d`;
+      return `${span} ${target.date < current.date ? "before" : "after"}`;
     }
     function relatedReportMeta(s) {
       return `${relatedDateLabel(s)} · ${s.name} (${s.id}) · ${s.date || "날짜 없음"} · ${s.modality} · ${shownStudyDesc(s)}`;
@@ -2914,6 +2934,7 @@
     $('#related-page-prev').addEventListener('click', () => { relatedPage--; renderRelated(); });
     $('#related-page-next').addEventListener('click', () => { relatedPage++; renderRelated(); });
     $('#related-page-current').addEventListener('click', () => renderRelated(true));
+
 
     /**
      * 썸네일. **PACS에서 wrong-patient image display는 그 자체로 사고 분류 항목이다.**
@@ -4461,6 +4482,20 @@
       value.closest(".prior-report-section").hidden = !value.textContent;
     }
 
+    /**
+     * The Related Report line for a study with no approved report to show. Only approved reports are read here, so a prior
+     * whose report is Preliminary or In Progress is not "no report": the line names the list's status (English) and says
+     * why the text is not shown (Korean), matching the Related Exam row.
+     */
+    function relatedNoReportText(s) {
+      return ({
+        P: "Preliminary · 승인 전 판독문은 여기 보이지 않습니다 (승인본만 열람)",
+        T: "In Progress · 판독 중이라 아직 승인된 판독문이 없습니다 (승인본만 열람)",
+        H: "On Hold · 보류 중이라 아직 승인된 판독문이 없습니다 (승인본만 열람)",
+        W: "Unread · 아직 판독되지 않은 검사입니다 (승인본만 열람)",
+      })[s?.rs] || "판독문 없음 · 이 검사에는 승인된 판독문이 없습니다";
+    }
+
     function relatedReportHead(list) {
       const top = (Array.isArray(list) ? list : []).filter(v => v?.action !== "discarded").sort((a, b) => b.version - a.version)[0];
       return top && Number.isSafeInteger(top.version) && ["approve", "addendum"].includes(top.action) ? top : null;
@@ -4490,10 +4525,10 @@
       const shown = view => relatedMode.showSource({ seq, uid, ...view });
       $("#prior-report-meta").textContent = relatedReportMeta(s);
       $("#prior-report-meta").title = $("#prior-report-meta").textContent;
-      $("#prior-report-status").textContent = s.rs === "A" ? "승인 판독문 불러오는 중…" : "판독문 없음";
+      $("#prior-report-status").textContent = s.rs === "A" ? "승인 판독문 불러오는 중…" : relatedNoReportText(s);
       $("#prior-report-status").style.display = "";
       $("#prior-report-content").style.display = "none";
-      shown({ state: s.rs === "A" ? "loading" : "none" });
+      shown({ state: s.rs === "A" ? "loading" : "none", message: s.rs === "A" ? null : relatedNoReportText(s) });
 
       let report = null;
       try {
@@ -4521,7 +4556,7 @@
       if (stale()) return;
       if (!report) {
         KinReportViews.end("related");
-        $("#prior-report-status").textContent = "판독문 없음"; shown({ state: "none" }); return;
+        $("#prior-report-status").textContent = relatedNoReportText(s); shown({ state: "none", message: relatedNoReportText(s) }); return;
       }
       $("#prior-report-meta").textContent =
         `${relatedReportMeta(s)} · 판독의 ${displayActor(report.author) || "-"}`;
@@ -4702,7 +4737,8 @@
       if (reportFrameEnded) return null;
       if (!reportFrame) reportFrame = KinReportEditorFrame.create({
         fields: Object.fromEntries(RFIELDS.map(k => [k, $("#" + k)])),
-        host: document.querySelector(".redit"),
+        // 입력칸은 글 높이로 늘어나므로 실제 판독 열의 스크롤을 따라야 마지막 입력 줄이 화면에 남는다.
+        host: document.querySelector(".report-p"),
         // W5 (D1423 R2): every existing rule holds for every edit; Related Report mode lets through only the admission it
         // issued itself for exactly this field and request (the mode checks and consumes it here, once per edit span).
         canEdit: (field, admission = null, at = null) => work.state() === "active" && !!selectedUid
@@ -4893,6 +4929,10 @@
       $("#report-editor").dataset.editable = String(!why);
       $("#report-editor-state").textContent = why ? "Read Only" : "Editable";
       $("#report-editor-why").textContent = $("#report-editor-why").title = why || "";
+      // The study this editor writes for, so it is never confused with the prior report shown in the box above.
+      const target = selectedUid ? studies.find(x => x.uid === selectedUid) : null;
+      $("#report-editor-target").textContent = target ? [target.name, target.id, target.date, target.modality].filter(Boolean).join(" · ") : "";
+      $("#report-editor-target").title = target ? "이 편집기는 이 검사의 판독문입니다: " + [target.name, target.id, target.date, target.modality, shownStudyDesc(target)].filter(Boolean).join(" · ") : "";
       $("#report-editor-resume").hidden = !relatedMode.active();
     }
 
@@ -5581,6 +5621,7 @@
       const src = reportSource();
       return RFIELDS.some(k => (src[k] ?? "") !== $("#" + k).value);
     }
+
 
     /**
      * ── 소견 인용 (S3-U2b) ──
@@ -8920,15 +8961,18 @@
         const list = await api("GET", `/studies/${encodeURIComponent(uid)}/report/versions`, undefined, undefined, at);
         // 늦게 온 답이 새 열람의 목록을 덮지 않는다.
         if (!work.admits(at) || !historyLive(epoch, uid)) return;
-        const LABEL = { save: "임시저장", approve: "승인", addendum: "추가기재", reset: "판독취소",
-                        preliminary: "예비판독", discarded: "폐기된 초안" };
+        // Status names are English (AGENTS.md §4) and match the editor buttons; the Korean meaning stays in the tooltip.
+        const LABEL = { save: "Save", approve: "Approve", addendum: "Addendum", reset: "Reset",
+                        preliminary: "Prelim", discarded: "Discarded draft" };
+        const HINT = { save: "임시저장", approve: "승인", addendum: "추가기재", reset: "판독취소",
+                       preliminary: "예비판독", discarded: "폐기된 초안" };
         box.innerHTML = list.length ? list.map(v => `
           <div class="ver" data-version="${esc(v.version)}">
             <div class="vh">
               <b>v${v.version}</b>
-              <span class="tag ${esc(v.action)}">${esc(LABEL[v.action] ?? v.action)}</span>
+              <span class="tag ${esc(v.action)}" title="${esc(HINT[v.action] ?? "")}">${esc(LABEL[v.action] ?? v.action)}</span>
               <span>${esc(displayActor(v.author))}</span>
-              <span style="color:#667">${esc(String(v.at).replace("T", " ").slice(0, 19))}</span>
+              <span style="color:#b4b4b4">${esc(String(v.at).replace("T", " ").slice(0, 19))}</span>
             </div>
             ${v.reason ? `<div class="vr">사유: ${esc(v.reason)}</div>` : ""}
             ${v.findings || v.conclusion || v.recommendation
@@ -12702,6 +12746,15 @@
     $('#related-body-part').addEventListener('change',e=>{if(cur()){relatedBodyPart=e.target.value;renderRelated();}});
     $('#related-load-parts').addEventListener('click',()=>{if(cur()&&serverMode&&!offline&&!demoMode)relatedParts.load(relatedCandidates().map(x=>x.uid));});
     $('#related-cancel-parts').addEventListener('click',()=>relatedParts.cancel());
+    // Keep the filter next to the related-study control even after the workspace scrolls or resizes.
+    function positionRelatedOptions() {
+      const b=$('#related-options-open').getBoundingClientRect(),s=$('#related-options').style,w=Math.min(360,innerWidth-48);
+      s.inset='auto';s.margin='0';s.left=Math.max(8,Math.min(b.left,innerWidth-w-8))+'px';
+      s.top=(b.bottom+4)+'px';s.maxHeight=Math.max(0,innerHeight-b.bottom-12)+'px';
+    }
+    $('#related-options').addEventListener('beforetoggle',e=>{if(e.newState==='open')positionRelatedOptions();});
+    window.addEventListener('resize',()=>{if($('#related-options').matches(':popover-open'))positionRelatedOptions();});
+    document.addEventListener('scroll',()=>{if($('#related-options').matches(':popover-open'))positionRelatedOptions();},true);
     $("#related-return").addEventListener("click", returnToReportStudy);
     // Minhoon item 8: the editor stays on screen in Related Report mode; its Resume Editing is the mode's Back.
     $("#report-editor-resume").addEventListener("click", () => { backToCurrentDraft(); });
@@ -12724,6 +12777,7 @@
       if(uid===selectedUid)returnToReportStudy();else previewRelated(uid);
       openFilmbox(selectedUid,uid===selectedUid?null:uid);
     }
+
 
     // ══════════ 세션 종료 조정 (S7-U5) ══════════
     /**

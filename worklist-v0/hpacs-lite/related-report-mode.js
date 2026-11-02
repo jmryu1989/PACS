@@ -67,9 +67,7 @@
     };
     const section = node('related-mode'), title = node('related-mode-title'), back = node('related-mode-back');
     const targetCard = node('related-mode-target'), sourceCard = node('related-mode-source'), status = node('related-mode-status');
-    const insertButton = node('related-mode-insert'), dialog = node('related-insert-dialog');
-    const dialogTarget = node('related-insert-target'), dialogError = node('related-insert-error');
-    const cancelButton = node('related-insert-cancel');
+    const insertButton = node('related-mode-insert');
     // The one Notice's Discard Insert (its markup comes with this mode): shown only for a confirmed refused operation.
     const noticeDiscardButton = node('report-notice-discard');
     let noticeOperation = null;
@@ -93,7 +91,6 @@
     let source = Object.freeze({ seq: -1, uid: null, state: 'idle' });   // the Source display context (R6)
     let confirming = null;   // the open confirmation: { generation, parts, source }
     let admission = null;    // the one-shot native-edit admission of the Insert being confirmed (R2)
-    let closing = 0;         // a close this module makes itself, so its own close handler stays out of the way
     let held = null;         // what the page had on the editor host before the mode held it (only W5's own change is undone)
     let lastField = 'findings';
 
@@ -290,17 +287,16 @@
     function closeDialog(returnFocus) {
       const was = confirming;
       confirming = null;
-      if (dialog.open) { closing += 1; try { dialog.close(); } finally { closing -= 1; } }
       if (state) renderButtons();
       if (returnFocus && was && state && was.generation === generation) (insertButton.disabled ? title : insertButton).focus({ preventScroll: true });
     }
 
     function refuseInsert(message) {
       say(message);
-      dialogTarget.textContent = app.seed()?.label || UNKNOWN;
-      dialogError.textContent = message;
-      dialog.showModal();
-      cancelButton.focus();
+      // Refusal leaves the draft in view; the existing Notice owns any receipt recovery.
+      confirming = null;
+      renderButtons();
+      (insertButton.disabled ? title : insertButton).focus({ preventScroll: true });
     }
 
     async function openInsert() {
@@ -443,25 +439,15 @@
 
     back.addEventListener('click', () => { if (state) app.back(); });
     insertButton.addEventListener('click', () => { openInsert(); });
-    cancelButton.addEventListener('click', () => closeDialog(true));
-    dialog.addEventListener('close', () => {
-      if (closing) return;
-      const was = confirming;
-      confirming = null;
-      if (was && state && was.generation === generation) {
-        renderButtons();
-        (insertButton.disabled ? title : insertButton).focus({ preventScroll: true });
-      }
-    });
-    // Esc: the confirmation first (the dialog's own cancel), then the mode, exactly as Back.
+    // Esc leaves the mode, exactly as Back; an unrelated modal keeps its own Escape handling.
     section.addEventListener('keydown', event => {
-      if (event.key !== 'Escape' || !state || event.defaultPrevented || event.isComposing || dialog.open) return;
+      if (event.key !== 'Escape' || !state || event.defaultPrevented || event.isComposing || modalOpen()) return;
       event.preventDefault();
       event.stopPropagation();
       app.back();
     });
     doc.addEventListener('keydown', event => {
-      if (event.key !== 'Escape' || !state || event.defaultPrevented || event.isComposing || dialog.open || modalOpen()) return;
+      if (event.key !== 'Escape' || !state || event.defaultPrevented || event.isComposing || modalOpen()) return;
       const active = doc.activeElement;
       if (active && active !== doc.body && active !== doc.documentElement) return;
       event.preventDefault();

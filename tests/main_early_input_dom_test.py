@@ -27,7 +27,7 @@ from urllib.parse import parse_qsl, urlparse
 
 import auth_logout_dom_test as h
 import main_split_harness as sh
-from playwright.sync_api import Error as PlaywrightError, sync_playwright
+from playwright.sync_api import Error as PlaywrightError, sync_playwright, expect
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,8 +64,7 @@ def report_fields(page):
 
 
 def template_panel(page):
-    if not page.locator("#t-mod").is_visible():
-        return
+    expect(page.locator("#t-mod")).to_be_visible()
     page.click("#t-mod")
     page.select_option("#t-body", "")
     page.fill("#tpl-search", "Brain")
@@ -75,7 +74,11 @@ def template_panel(page):
     # it: an input the page did not offer is not given, so a failed View shows as a difference, not as a timeout.
     view, close = page.locator("#tplrows [data-tpl-preview]"), page.locator("#tpl-preview-close")
     if not view.count():
+        # Before handlers/data arrive the visible search input still receives the user's typing.
+        # There is no Preview control yet; prove that input rather than silently doing nothing.
+        expect(page.locator("#tpl-search")).to_have_value("Brain")
         return
+    expect(view.first).to_be_visible()
     view.first.click()
     if close.is_visible():
         close.click()
@@ -837,7 +840,8 @@ class PreCase(unittest.TestCase):
         spec = HAZARDS[hazard]
         saved = spec["inputs"] in SAVED_SEARCH_INPUTS
         run = Run(self, layout, hold=hold, delay_ms=delay_ms, auth=auth, filters=(SAVED,) if saved else (),
-                  local_filters=saved)
+                  local_filters=saved, templates=({"id":"SYN-EARLY-TPL", "title":"Brain", "shortcut":"", "modality":"", "bodypart":"", "ord":0,
+                      "findings":"SYN early template", "conclusion":"", "recommendation":""},) if spec["inputs"] is template_panel else ())
         if hold:
             run.blocked()
         elif auth == "wait":
@@ -847,7 +851,13 @@ class PreCase(unittest.TestCase):
         if before_input:
             before_input(run)
         since = run.page.evaluate("window.__kinTrace.now()")
-        spec["inputs"](run.page)
+        # The compact drawer has no user path before its bundle registers. Exercise its first usable
+        # state after boot; the old always-visible pre-bundle Template path was retired on 11-01.
+        deferred_template = spec["inputs"] is template_panel and not run.page.locator("#t-mod").is_visible()
+        if deferred_template:
+            expect(run.page.locator("#t-mod")).to_be_hidden()
+        else:
+            spec["inputs"](run.page)
         if gap and run.page.evaluate("f => window.__kinTrace.executed.includes(f)", gap):
             self.skipTest(f"timing: the inputs ended after {gap} ran, so they did not land in the gap before it")
         run.settle(150)
@@ -856,6 +866,10 @@ class PreCase(unittest.TestCase):
         if auth == "wait":
             run.answer_auth()
         run.booted()
+        if spec["inputs"] is template_panel:
+            h.show_all_panels(run.page)
+            run.page.keyboard.press("Control+Alt+t")
+            template_panel(run.page)
         if spec["after"]:
             spec["after"](run.page)
         return Result(errors=list(run.errors), early_screen=early_screen, final_screen=run.screen(),

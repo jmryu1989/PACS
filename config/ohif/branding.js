@@ -21,6 +21,55 @@ function KinViewerBrand({ React }) {
     const ABOUT_TITLES = new Set(['About', 'About OHIF Viewer']);
     const SETTINGS_TITLES = new Set(['Preferences', 'Viewer Settings']);
     const menuScope = () => document.getElementById('kin-viewer-brand')?.closest('.bg-secondary-dark.z-20') || null;
+    // OHIF 3.9.1 exposes Layout's aria-label, but no hooks for its toolbar slot, logo row or gear group.
+    // Keep React's control (including its dropdown) in its own tree. Its transformed ancestors mean viewport
+    // coordinates cannot be assigned as left/top directly; correct the measured offset instead.
+    let headerFrame = 0;
+    const arrangeHeader = () => {
+      headerFrame = 0;
+      const scope = menuScope();
+      const row = scope?.querySelector(':scope > div:has(#kin-viewer-brand)');
+      const button = scope?.querySelector('button[aria-label="Layout"]');
+      const toolbar = button?.closest('.relative.flex.justify-center');
+      const gearGroup = row?.querySelector(':scope > .absolute.right-0');
+      if (!row || !toolbar || !gearGroup) return;
+      row.dataset.kinLogoRow = '';
+      gearGroup.dataset.kinHeaderSettings = '';
+      let toolbarHost = toolbar;
+      while (toolbarHost.parentElement && toolbarHost.parentElement !== row) toolbarHost = toolbarHost.parentElement;
+      toolbarHost.dataset.kinHeaderTools = '';
+      let slot = button;
+      while (slot.parentElement && slot.parentElement !== toolbar) slot = slot.parentElement;
+      slot.dataset.kinHeaderLayout = '';
+      // These tabs belong to our extension, not React. Normal document flow reserves their full height.
+      const tabs = scope.parentElement.querySelector(':scope > .kin-patient-tabs');
+      if (tabs && scope.nextElementSibling !== tabs) scope.after(tabs);
+      const bar = row.getBoundingClientRect(), control = slot.getBoundingClientRect();
+      const left = (parseFloat(slot.style.left) || 0) + bar.right - control.width - control.left;
+      const top = (parseFloat(slot.style.top) || 0) + bar.top + (bar.height - control.height) / 2 - control.top;
+      slot.style.left = left + 'px';
+      slot.style.top = top + 'px';
+      // OHIF 3.9.1's portal tooltip centres the Layout menu on the button without viewport collision handling.
+      // Restrict the adjustment to fixed tooltips anchored to this header, so the rightmost menu stays usable.
+      document.querySelectorAll('#react-portal > .tooltip').forEach(popup => {
+        const anchorTop = parseFloat(popup.style.top);
+        const anchorLeft = parseFloat(popup.style.left);
+        // Inactive native tooltips are parked off-screen at top:0; clamping those would reveal them.
+        if (popup.style.position !== 'fixed' || !Number.isFinite(anchorTop) || !Number.isFinite(anchorLeft)
+          || anchorTop <= bar.top || anchorTop > bar.bottom || anchorLeft < bar.left || anchorLeft > bar.right) return;
+        popup.style.maxWidth = '100vw';
+        const box = popup.getBoundingClientRect();
+        const offset = box.right > window.innerWidth ? window.innerWidth - box.right : box.left < 0 ? -box.left : 0;
+        if (offset) popup.style.left = (parseFloat(popup.style.left) + offset) + 'px';
+      });
+    };
+    const scheduleHeader = () => { if (!headerFrame) headerFrame = requestAnimationFrame(arrangeHeader); };
+    const headerResize = new ResizeObserver(scheduleHeader);
+    const header = menuScope();
+    if (header) headerResize.observe(header);
+    window.addEventListener('resize', scheduleHeader);
+    document.addEventListener('scroll', scheduleHeader, true);
+    scheduleHeader();
     // 행의 이름은 아이콘 svg(<title> 포함)를 뺀 글자 전체다. 후손 어딘가의 한 글자 조각이 아니라 행 전체가 이름과 같아야 한다.
     const labelOf = node => node.nodeType === Node.ELEMENT_NODE
       ? (node.localName === 'svg' ? '' : [...node.childNodes].map(labelOf).join(''))
@@ -79,6 +128,7 @@ function KinViewerBrand({ React }) {
     const observer = new MutationObserver(records => {
       const scope = menuScope();
       if (scope && records.some(record => touchesScope(scope, record))) refresh(scope);
+      scheduleHeader();
     });
     observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class'] });
 
@@ -87,6 +137,10 @@ function KinViewerBrand({ React }) {
     return () => {
       document.title = KIN_VIEWER_DEFAULT_TITLE;
       observer.disconnect();
+      headerResize.disconnect();
+      cancelAnimationFrame(headerFrame);
+      window.removeEventListener('resize', scheduleHeader);
+      document.removeEventListener('scroll', scheduleHeader, true);
       if (sessionChannel) {
         sessionChannel.close();
       }
@@ -94,6 +148,22 @@ function KinViewerBrand({ React }) {
   }, []);
 
   const style = `
+    /* The compact bar and independent patient strip leave the image identity and L/R overlays untouched. */
+    [data-kin-logo-row] { height: 32px !important; min-height: 0 !important; }
+    [data-kin-header-settings] { padding-right: 32px; }
+    /* The native centre group's transform creates a stacking context; keep Layout above the gear group's empty padding. */
+    [data-kin-header-tools] { z-index: 1; }
+    [data-kin-header-layout] { position: fixed !important; width: 28px; height: 28px; z-index: 40; }
+    [data-kin-header-layout] [role="tooltip"] { width: 28px !important; height: 28px !important; }
+    [data-kin-logo-row] button { height: 28px !important; min-height: 0 !important; margin-top: 0 !important; }
+    [data-kin-logo-row] button[aria-label] { width: 28px !important; min-width: 0 !important; padding: 2px !important; }
+    [data-kin-logo-row] button svg { width: 18px !important; height: 18px !important; }
+    #kin-viewer-brand { height: 20px !important; gap: 6px !important; }
+    #kin-viewer-brand img { width: 18px !important; height: 18px !important; }
+    #kin-viewer-brand span { font-size: 8.5px !important; letter-spacing: .1em !important; line-height: 1.15 !important; }
+    .kin-patient-tabs { height: 26px !important; min-height: 26px !important; padding-block: 0 !important; }
+    .kin-patient-tabs [role="tablist"] { padding-block: 0 !important; }
+    .kin-patient-tabs button { min-height: 24px !important; padding-block: 2px !important; }
     :root {
       --kin-panel: #0E1728;
       --kin-accent: #4F8EF7;

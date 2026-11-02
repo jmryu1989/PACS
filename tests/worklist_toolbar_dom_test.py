@@ -1,5 +1,9 @@
 # coding: utf-8
-"""TEST-S5-UI2-TOOLBAR-DOM: the worklist toolbar groups (UXR-G-01) in the real markup/CSS, no services.
+"""11-01: seven-group/old row geometry and byte identity of the current page are retired;
+the shipped top menus, full status, resize, filter and lookup behavior remain tested below.
+Historical fixed-commit refactor proofs remain historical only.
+
+TEST-S5-UI2-TOOLBAR-DOM: the worklist toolbar groups (UXR-G-01) in the real markup/CSS, no services.
 
 REQ-S5-UI2-TOOLBAR-GROUPS: the controls above the worklist were about 35 buttons, inputs and texts in three rows at
 1366-1680px (143px) and two at 1920px (101px). This unit only regroups them. One row of seven top-level groups stays in
@@ -418,6 +422,66 @@ class WorklistToolbarDOMTest(unittest.TestCase):
     setUp = studio.StudioWorklistDOM.setUp
     tearDown = studio.StudioWorklistDOM.tearDown
     open = studio.StudioWorklistDOM.open
+
+    def test_more_auto_refresh_changes_interval_without_closing_parent(self):
+        self.open()
+        self.page.locator('#toolbar-more > summary').click()
+        self.page.locator('#toolbar-refresh-menu > summary').click()
+        control = self.page.locator('#worklist-refresh')
+        expect(control).to_be_visible()
+        control.select_option('60')
+        expect(control).to_have_value('60')
+        expect(self.page.locator('#toolbar-more')).to_have_attribute('open', '')
+        self.page.locator('#toolbar-more > summary').click()
+        expect(self.page.locator('#worklist-refresh-status')).to_be_visible()
+
+    def test_top_menus_exclude_each_other_and_tab_enters_open_menu(self):
+        self.open()
+        for name in ('view', 'more', 'filters', 'view'):
+            menu = self.page.locator('#toolbar-' + name)
+            menu.locator(':scope > summary').click()
+            for other in ('view', 'more', 'filters'):
+                self.assertEqual(other == name, self.page.locator('#toolbar-' + other).get_attribute('open') is not None)
+            self.page.keyboard.press('Tab')
+            self.assertTrue(menu.evaluate('el => el.contains(document.activeElement)'))
+
+    def test_status_full_text_pointer_keyboard_and_account_panel_after_resize(self):
+        self.open()
+        status = self.page.locator('#toolbar-status')
+        long = '합성 상태: 자동 새로고침을 멈췄습니다. 입력한 판독문과 확인된 부위 정보는 유지됩니다. ' * 5
+        self.page.locator('#worklist-refresh-status').evaluate('(e, text) => e.textContent = text', long)
+        for action in (status.hover, status.focus):
+            action()
+            box = self.page.locator('#worklist-refresh-status')
+            expect(box).to_be_visible()
+            self.assertEqual(long, box.text_content())
+            self.assertTrue(box.evaluate('e => e.scrollWidth <= e.clientWidth + 1 && e.scrollHeight <= e.clientHeight + 1'))
+        self.page.locator('#toolbar-view > summary').click()
+        self.page.locator('#workspace-server-summary').click()
+        for width in (1366, 768, 1920):
+            self.page.set_viewport_size({'width': width, 'height': 1000})
+            expect(self.page.locator('#workspace-server-panel')).to_be_in_viewport(ratio=1)
+
+    def test_menu_sections_resets_and_active_saved_filter_dot(self):
+        self.site.filters = [dict(id=1, name='SYN CT', mode='Radiology', days=-1, quick='', cols={'modality':'CT'})]
+        self.open()
+        for name, labels in [('view', ['Images', 'This Browser', 'Account']), ('filters', ['Filter Actions', 'Saved Searches'])]:
+            self.page.locator('#toolbar-' + name + ' > summary').click()
+            groups = self.page.locator('#toolbar-' + name + ' .toolbar-section')
+            self.assertEqual(labels, groups.evaluate_all('es => es.map(e => e.getAttribute("aria-label"))'))
+            boxes = [groups.nth(i).bounding_box() for i in range(groups.count())]
+            for a, b in zip(boxes, boxes[1:]):
+                if abs(a['y'] - b['y']) <= 1:
+                    self.assertLessEqual(a['x'] + a['width'], b['x'] + 1)
+                else:
+                    self.assertLessEqual(a['y'] + a['height'], b['y'] + 1)
+        self.assertEqual('none', self.page.locator('#toolbar-filters > summary').evaluate('e => getComputedStyle(e,"::before").content'))
+        self.page.locator('#chips button', has_text='SYN CT').click()
+        self.assertNotEqual('none', self.page.locator('#toolbar-filters > summary').evaluate('e => getComputedStyle(e,"::before").content'))
+        self.page.locator('#toolbar-view > summary').click()
+        expect(self.page.locator('#layout-reset')).to_be_visible()
+        self.page.locator('#workspace-server-summary').click()
+        expect(self.page.locator('#workspace-server-clear')).to_be_visible()
 
     def test_each_retained_action_is_reachable_from_top_menus(self):
         self.open()

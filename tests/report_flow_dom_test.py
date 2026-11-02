@@ -878,6 +878,20 @@ class ReportFlowPage(unittest.TestCase):
         self.page.keyboard.press("Control+Alt+T")
         self.page.locator("#tplrows tr", has_text=TEMPLATE["title"]).first.dblclick()
 
+    def test_history_actions_use_english_names_with_korean_meanings(self):
+        self.open(); self.open_study(h.PATIENT)
+        expected = [('save','Save','임시저장'),('approve','Approve','승인'),('addendum','Addendum','추가기재'),
+                    ('reset','Reset','판독취소'),('preliminary','Prelim','예비판독'),('discarded','Discarded draft','폐기된 초안')]
+        versions = [dict(version=i+1, action=action, author='SYN Doctor', at='2026-10-01T00:00:00Z') for i,(action,_,_) in enumerate(expected)]
+        self.page.route('**/api/studies/*/report/versions', lambda route: route.fulfill(json=versions))
+        self.page.locator('#report-more > summary').click()
+        self.page.locator('#b-history').click()
+        expect(self.page.locator('#histmodal')).to_be_visible()
+        for action, label, meaning in expected:
+            badge = self.page.locator('#hist-body .tag.'+action)
+            expect(badge).to_have_text(label)
+            expect(badge).to_have_attribute('title', meaning)
+
     def test_existing_report_recommendation_is_a_read_only_line(self):
         self.site.store[h.UID]['report'].update(version=1, rs='A', findings='SYN existing findings',
             conclusion='SYN existing conclusion', recommendation='SYN existing recommendation')

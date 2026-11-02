@@ -85,10 +85,10 @@
         ? (rel.slice(relatedPage * 50, (relatedPage + 1) * 50).map(x => {
             return `
             <tr data-uid="${esc(x.uid)}" class="${x.uid === relatedUid || (x.uid === s.uid && !relatedUid) ? "related-selected" : ""}">
-              <td>${x.uid === s.uid ? "Reading Target" : relatedDateLabel(x)} · ${x.uid === relatedUid || (x.uid === s.uid && !relatedUid) ? "👁 열람 중" : "비교"}</td>
-              <td>${esc(x.date)}</td><td>${esc(x.modality)}</td><td>${esc(shownStudyDesc(x))}</td><td class="num">${esc(x.count)}</td>
+              <td title="${x.uid === s.uid ? "지금 판독하는 검사" : esc(relatedDateTitle(x))} · ${x.uid === relatedUid || (x.uid === s.uid && !relatedUid) ? "Showing: 지금 Related Report에 보이는 검사" : "Compare: 눌러서 비교해 볼 수 있는 검사"}">${x.uid === s.uid ? "Reading Target" : relatedDateLabel(x)} · ${x.uid === relatedUid || (x.uid === s.uid && !relatedUid) ? "👁 Showing" : "Compare"}</td>
+              <td>${esc(x.date)}${x.uid !== s.uid && relatedInterval(x) ? ` <span class="rel-interval" title="판독 대상 검사 날짜와의 간격">${esc(relatedInterval(x))}</span>` : ""}</td><td>${esc(x.modality)}</td><td>${esc(shownStudyDesc(x))}</td><td class="num">${esc(x.count)}</td>
               <td><span class="rs ${esc(x.rs)}">${esc(x.rs)}</span></td>
-              <td>${x.rs === "A" ? "Approved" : "No Report"} <button class="chip" type="button" data-related-open="${esc(x.uid)}">${x.uid === s.uid ? 'Open Images' : 'Compare Images'}</button></td>
+              <td>${({ W: "Unread", T: "In Progress", P: "Preliminary", A: "Approved", H: "On Hold" })[x.rs] || "Unverified"} <button class="chip" type="button" data-related-open="${esc(x.uid)}">${x.uid === s.uid ? 'Open Images' : 'Compare Images'}</button></td>
             </tr>`;
           }).join("") || `<tr><td class="empty" colspan="7">${relatedModality || relatedBodyPart ? "조건에 맞는 관련 검사 없음" : "관련 검사 없음"}</td></tr>`)
         : `<tr><td class="empty" colspan="7">검사를 선택하세요</td></tr>`;

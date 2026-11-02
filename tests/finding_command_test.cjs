@@ -751,7 +751,7 @@ test('adapter: the open panel observes the field region and every element above 
   doc.body.append(report);
   // The Related region is watched too (S4 GEO): a separator move shifts the report by resizing it.
   const region = h.document.querySelector('.related-p');
-  const movedBounds = [redit, pane, rfoot, region];
+  const movedBounds = [redit, head, editor, row, pane, citelist, draftbar, rbtns, region];
   let top = 576;
   redit.getBoundingClientRect = () => ({ top, height: 180 });
   await h.open();

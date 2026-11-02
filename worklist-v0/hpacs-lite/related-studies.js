@@ -3,9 +3,29 @@
     function relatedDateLabel(target) {
       const current = cur();
       // 수동 비교에는 이후 검사도 들어온다. 날짜를 모르는 경우와 같은 날의 선후를 과거로 추측하지 않는다.
-      if (!current || !validPriorDate(current.date) || !validPriorDate(target.date)) return "날짜 미확인";
-      if (target.date === current.date) return "같은 날짜 · 선후 미확인";
-      return target.date < current.date ? "과거" : "이후";
+      // 상태 이름은 영어, 설명은 relatedDateTitle의 한국어 툴팁이다(AGENTS §4).
+      if (!current || !validPriorDate(current.date) || !validPriorDate(target.date)) return "Date Unknown";
+      if (target.date === current.date) return "Same Day";
+      return target.date < current.date ? "Prior" : "Later";
+    }
+    function relatedDateTitle(target) {
+      return { "Date Unknown": "검사 날짜를 확인할 수 없어 판독 대상과의 선후를 알 수 없습니다",
+        "Same Day": "판독 대상과 같은 날짜입니다 · 선후는 확인할 수 없습니다",
+        Prior: "판독 대상보다 앞선 검사입니다", Later: "판독 대상보다 뒤의 검사입니다" }[relatedDateLabel(target)];
+    }
+    // Completed calendar months, without rounding a partial month up; under one month show UTC calendar days.
+    // This keeps leap years and DST from making a prior look a month older when choosing a comparison.
+    function relatedInterval(target) {
+      const current = cur();
+      if (!current || !validPriorDate(current.date) || !validPriorDate(target.date)) return "";
+      if (target.date === current.date) return "same day";
+      const [a, b] = target.date < current.date ? [target.date, current.date] : [current.date, target.date];
+      const [y1, m1, d1] = a.split("-").map(Number), [y2, m2, d2] = b.split("-").map(Number);
+      const months = (y2 - y1) * 12 + (m2 - m1) - (d2 < d1 ? 1 : 0);
+      const span = months >= 12 ? `${Math.floor(months / 12)}y${months % 12 ? ` ${months % 12}m` : ""}`
+        : months >= 1 ? `${months}m`
+        : `${Math.round((Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86400000)}d`;
+      return `${span} ${target.date < current.date ? "before" : "after"}`;
     }
     function relatedReportMeta(s) {
       return `${relatedDateLabel(s)} · ${s.name} (${s.id}) · ${s.date || "날짜 없음"} · ${s.modality} · ${shownStudyDesc(s)}`;
