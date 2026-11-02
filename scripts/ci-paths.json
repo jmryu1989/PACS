@@ -5,6 +5,7 @@
     "scripts/ci-paths.json"
   ],
   "shared_browser": [
+    "tests/e2e/test_cd10_access_records.py",
     "api/Dockerfile*",
     "api/nest-cli.json",
     "api/package*.json",

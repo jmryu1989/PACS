@@ -51,7 +51,7 @@ export interface AccessEventV1 {
   surface: string;
   eventId: string;
   userId: EvidenceFact<ImmutableIdentity>;
-  rolesAtTime: EvidenceFact<readonly string[]>;
+  rolesAtTime: EvidenceFact<readonly string[]> | Readonly<{ status: 'unresolved'; reason: 'legacy-import-roles-not-stored' }>;
   actingInstitution: EvidenceFact<string>;
   managingInstitution: EvidenceFact<string>;
   occurredAt: string;
@@ -205,7 +205,12 @@ function parseAccessEventV1(input: unknown, served?: readonly ResolvedRecord[]):
   const result = choice(v.result, ['prepared', 'succeeded', 'aborted', 'refused', 'failed', 'reported']);
   if (result !== expectedResult(action)) throw new Error('Event result does not describe the observed stage');
   const userId = fact(v.userId, identity);
-  const rolesAtTime = fact(v.rolesAtTime, roles => {
+  // Only pre-CD10 import recovery lacks stored roles; a new unresolved request must still fail.
+  const legacyImportRoles = surface === 'POST dicom-import' && action === 'write' && result === 'succeeded'
+    && v.rolesAtTime?.status === 'unresolved' && v.rolesAtTime?.reason === 'legacy-import-roles-not-stored';
+  const rolesAtTime: AccessEventV1['rolesAtTime'] = legacyImportRoles
+    ? { status: 'unresolved', reason: choice(object(v.rolesAtTime, ['status', 'reason']).reason, ['legacy-import-roles-not-stored']) }
+    : fact(v.rolesAtTime, roles => {
     const internalService = v.executor === 'service' && v.cause === 'service-job'
       && Object.prototype.hasOwnProperty.call(INTERNAL_SURFACES, surface);
     if (!Array.isArray(roles) || (!roles.length && !internalService) || new Set(roles).size !== roles.length)
@@ -225,7 +230,7 @@ function parseAccessEventV1(input: unknown, served?: readonly ResolvedRecord[]):
   // A member-rights command has no patient scope. An unobserved ingress address
   // stays unknown for every event (B2 v2 item 2); it must never be invented.
   const rightsOnly = Array.isArray(v.targets) && v.targets.length > 0 && v.targets.every(t => t.kind === 'identity-access');
-  if ((!failure && [userId, rolesAtTime, ...(!rightsOnly ? [actingInstitution, managingInstitution] : [])].some(f => f.status !== 'known')) ||
+  if ((!failure && [userId, ...(!legacyImportRoles ? [rolesAtTime] : []), ...(!rightsOnly ? [actingInstitution, managingInstitution] : [])].some(f => f.status !== 'known')) ||
       (!failure && !rightsOnly && trustedProxyIp.status !== 'known' && !inProcess
         && !(trustedProxyIp.status === 'unresolved' && trustedProxyIp.reason === 'not-observed')) ||
       (trustedProxyIp.status === 'not-applicable' && !inProcess) ||
