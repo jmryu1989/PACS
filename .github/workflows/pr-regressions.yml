@@ -128,6 +128,9 @@ jobs:
       run: python3 tests/record_run_test.py
     - name: Static legal notices, draft wording and verified statute references
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/legal-pages --cwd . --file tests/legal_pages_test.py --file scripts/build-open-source-notices.py --file scripts/test_open_source_notices.py --tree worklist-v0/legal/licenses --file tests/fixtures/legal/draft-contract.json --file tests/fixtures/legal/verified-statutes.md --file tests/fixtures/legal/verified-statutes-addendum-20261006.md --file api/package.json --file api/package-lock.json --file worklist-v0/legal/privacy.html --file worklist-v0/legal/privacy-date.js --file worklist-v0/legal/operator-notice.html --file worklist-v0/legal/open-source-notices.html --file worklist-v0/legal/accessibility.html --file worklist-v0/legal/legal.css -- python3 -B tests/legal_pages_test.py
+    - name: SOUP vulnerability history and notification boundaries
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/soup-vulns --cwd . --file scripts/ops_soup_vulns.py --file scripts/ops_notify.py --file scripts/ops_monitor.py --file scripts/test_ops_soup_vulns.py -- python3 -B scripts/test_ops_soup_vulns.py
     - name: Explicit test selection, process leases and bounded retries
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 tests/execution_guard_test.py
