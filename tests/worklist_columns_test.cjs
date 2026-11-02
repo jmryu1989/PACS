@@ -2,6 +2,19 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const model=require('../worklist-v0/hpacs-lite/worklist-columns.js');
 const columns={Radiology:[{k:'id'},{k:'name'},{k:'date'},{k:'desc'}],Technician:[{k:'id'},{k:'name'},{k:'ward'}]};
+test('server accepts physician columns in personal Radiology order and preserves legacy preferences',()=>{
+  require('./service_test_loader.cjs');
+  const { normalizeWorklistColumns } = require('/app/dist/worklist-columns');
+  const value = {version:1,modes:{Radiology:{order:['name','id','referringPhysician','requestingPhysician'],hidden:['requestingPhysician']},
+    Technician:{order:['name','id'],hidden:[]}}};
+  const saved = normalizeWorklistColumns(value);
+  assert.ok(saved);
+  assert.deepEqual(saved.modes.Radiology.order.slice(0,4), value.modes.Radiology.order);
+  assert.deepEqual(saved.modes.Radiology.hidden,['requestingPhysician']);
+  const legacy = normalizeWorklistColumns({version:1,modes:{Radiology:{order:['id','name'],hidden:[]},Technician:{order:['id','name'],hidden:[]}}});
+  assert.ok(legacy.modes.Radiology.order.includes('referringPhysician'));
+  assert.ok(legacy.modes.Radiology.order.includes('requestingPhysician'));
+});
 test('defaults and mode-specific ordering do not mutate the column schema',()=>{
   const state=model.defaults(columns); state.modes.Radiology.order.reverse();state.modes.Radiology.hidden=['desc'];
   const clean=model.normalize(state,columns);

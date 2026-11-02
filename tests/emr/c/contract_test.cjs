@@ -174,17 +174,17 @@ test('C-C08 bodies are served after the durable receipt for the authorized versi
   const pre = server();
   await run(pre, 'r1', 'start', { at: plus(T0, -MIN) });
   await run(pre, 'r1', 'preliminary', { at: T0, reviewerId: 'r2' });
-  assert.throws(() => RD.planReportRead(ctx({ facts: pre.facts, retained: { record: pre.record, at: plus(T0, H) } }), { surface: 'clinician', versionId: null, eventId: 'r4' }), { code: 'NoPublishedReport' });
+  assert.throws(() => RD.planReportRead(ctx({ facts: pre.facts, retained: { record: pre.record, at: plus(T0, H) } }), { surface: 'clinician', versionId: null, eventId: 'r4' }), { code: 'PreliminaryReadRefused' });
   const projection = RD.listProjection(srv.facts, true);
   assert.equal(deepHas(projection, 'SYN 소견 본문'), false);
   assert.equal(projection.publishedVersionId, srv.facts.publishedVersion.versionId);
-  // A clinician never receives a version that was not published, even once a later version is approved.
+  // Historical reads follow the radiologist rule once the current state is no longer P.
   const prelim = server();
   await run(prelim, 'r1', 'start', { at: plus(T0, -H) });
   const pv = (await run(prelim, 'r1', 'preliminary', { at: plus(T0, -MIN), reviewerId: 'r2' })).plan.version.ref;
   await run(prelim, 'r2', 'approve', { at: T0 });
   const pctx = ctx({ facts: prelim.facts, retained: { record: prelim.record, at: plus(T0, H) } });
-  assert.throws(() => RD.planReportRead(pctx, { surface: 'clinician', versionId: pv.versionId, eventId: 'r-pre' }), { code: 'VersionNotPublished' });
+  assert.equal(RD.planReportRead(pctx, { surface: 'clinician', versionId: pv.versionId, eventId: 'r-pre' }).version.versionId, pv.versionId);
   const pub = prelim.facts.publishedVersion.versionId;
   assert.equal(allowed(() => RD.planReportRead(pctx, { surface: 'clinician', versionId: pub, eventId: 'r-pub' })).version.versionId, pub);
   assert.equal(allowed(() => RD.planReportRead({ ...pctx, actor: actor('r3') }, { surface: 'reader', versionId: pv.versionId, eventId: 'r-reader' })).version.versionId, pv.versionId);

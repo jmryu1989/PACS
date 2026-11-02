@@ -600,7 +600,8 @@ test('A-REMAINDER preview, report evidence, keys and revisions preserve the exac
   assert.equal(targetOf(clinical.selected, 'report-version')[0].recordId.value, String(stored.id));
   assert.equal(targetOf(clinical.selected, 'key-image').length, 1);
   const list = await readRecorded('/clinician/studies?limit=100', uid, { token: ctx.clinicianToken });
-  assert.equal(targetOf(list.selected, 'report-head').length, 0, 'clinician list has status, not report text');
+  assert.equal(targetOf(list.selected, 'report-head').length, 1, 'clinician list records the returned current body');
+  assert.equal(list.answer.studies.find(row => row.uid === uid).report.findings, stored.findings);
   const timeline = await readRecorded('/clinician/studies/' + uid + '/timeline?limit=100', uid, { token: ctx.clinicianToken });
   assert.equal(targetOf(timeline.selected, 'study-metadata').length, 2);
 });

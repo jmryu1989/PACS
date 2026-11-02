@@ -4,23 +4,129 @@
   "legacy_roles": ["radiologist", "technician", "admin"],
   "clinician_role": "clinician",
   "session_routes": ["GET me", "POST auth/logout"],
-  "business_routes": ["POST emr-audit/roster/:grantId", "POST emr-audit/investigations", "POST emr-audit/exports", "POST emr-audit/requests", "POST emr-audit/issuances", "POST emr-audit/issuances/:id/issue", "POST emr-audit/issuances/:id/delivery", "GET emr-audit/requests/:id", "POST emr-audit/requests/:id/extend", "POST emr-audit/requests/:id/resolve", "GET images/dicom-web", "HEAD images/dicom-web", "POST studies/:uid/viewer-context-events", "GET authz/dicom", "POST dicom/lookup", "GET studies/:uid/viewer-items", "GET clinician/studies", "GET clinician/studies/:uid/report", "GET clinician/studies/:uid/timeline",
-    "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
-    "GET image-requests", "GET image-requests/:id", "GET studies/:uid/image-requests", "POST studies/:uid/image-requests", "POST image-requests/:id",
-    "GET critical-results", "GET critical-results/:id", "POST critical-results/:id/ack",
-    "GET image-relay/*", "GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames", "GET instances/:id/preview"],
-  "allowed_additions": ["POST emr-audit/roster/:grantId", "POST emr-audit/investigations", "POST emr-audit/exports", "POST emr-audit/requests", "POST emr-audit/issuances", "POST emr-audit/issuances/:id/issue", "POST emr-audit/issuances/:id/delivery", "GET emr-audit/requests/:id", "POST emr-audit/requests/:id/extend", "POST emr-audit/requests/:id/resolve", "GET images/dicom-web", "HEAD images/dicom-web", "GET clinician/studies", "GET clinician/studies/:uid/report", "GET clinician/studies/:uid/timeline",
-    "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
-    "GET image-requests", "GET image-requests/:id", "GET studies/:uid/image-requests", "POST studies/:uid/image-requests", "POST image-requests/:id",
-    "GET critical-results", "GET critical-results/:id", "POST critical-results/:id/ack", "POST studies/:uid/viewer-context-events",
-    "GET image-relay/*", "GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames", "GET instances/:id/preview"],
+  "business_routes": [
+    "POST emr-audit/roster/:grantId",
+    "POST emr-audit/investigations",
+    "POST emr-audit/exports",
+    "POST emr-audit/requests",
+    "POST emr-audit/issuances",
+    "POST emr-audit/issuances/:id/issue",
+    "POST emr-audit/issuances/:id/delivery",
+    "GET emr-audit/requests/:id",
+    "POST emr-audit/requests/:id/extend",
+    "POST emr-audit/requests/:id/resolve",
+    "GET images/dicom-web",
+    "HEAD images/dicom-web",
+    "POST studies/:uid/viewer-context-events",
+    "GET authz/dicom",
+    "POST dicom/lookup",
+    "GET studies/:uid/viewer-items",
+    "GET clinician/studies",
+    "GET clinician/studies/:uid/report",
+    "GET clinician/studies/:uid/timeline",
+    "GET questions",
+    "GET questions/:id",
+    "GET studies/:uid/questions",
+    "POST studies/:uid/questions",
+    "POST questions/:id/entries",
+    "POST questions/:id/close",
+    "GET image-requests",
+    "GET image-requests/:id",
+    "GET studies/:uid/image-requests",
+    "POST studies/:uid/image-requests",
+    "POST image-requests/:id",
+    "GET critical-results",
+    "GET critical-results/:id",
+    "POST critical-results/:id/ack",
+    "GET image-relay/*",
+    "GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames",
+    "GET instances/:id/preview",
+    "GET studies",
+    "GET bootstrap",
+    "GET prefs",
+    "GET studies/:uid/report/versions",
+    "GET studies/:uid/report/citations",
+    "GET studies/:uid/report/versions/:version/citations",
+    "GET studies/:uid/report/structure",
+    "GET studies/:uid/report-preview",
+    "GET studies/:uid/viewer-items/:id/revisions",
+    "GET studies/:uid/findings",
+    "GET studies/:uid/findings/:id/revisions",
+    "GET studies/:uid/clinical-context",
+    "POST studies/:uid/view-observations",
+    "GET filter-folders",
+    "POST filter-folders",
+    "POST filters",
+    "DELETE filters/:id",
+    "PATCH filters/:id/default",
+    "GET shared-filters",
+    "POST shared-filters/copy",
+    "GET favorite-folders",
+    "POST favorite-folders",
+    "GET study-tags",
+    "GET worklist-columns",
+    "PUT worklist-columns",
+    "DELETE worklist-columns",
+    "GET workspace-layout",
+    "PUT workspace-layout",
+    "DELETE workspace-layout",
+    "GET workspace-shortcuts",
+    "PUT workspace-shortcuts",
+    "GET reading-appearance",
+    "PUT reading-appearance",
+    "GET reading-preferences",
+    "PUT reading-preferences",
+    "GET hanging-protocols",
+    "PUT hanging-protocols",
+    "GET hanging-protocols/site"
+  ],
+  "allowed_additions": [
+    "GET image-relay/*",
+    "POST studies/:uid/viewer-context-events",
+    "GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames",
+    "GET instances/:id/preview",
+    "POST studies/:uid/view-observations",
+    "GET clinician/studies",
+    "GET clinician/studies/:uid/report",
+    "GET questions",
+    "GET questions/:id",
+    "GET studies/:uid/questions",
+    "POST studies/:uid/questions",
+    "POST questions/:id/entries",
+    "POST questions/:id/close",
+    "GET image-requests",
+    "GET image-requests/:id",
+    "GET studies/:uid/image-requests",
+    "POST studies/:uid/image-requests",
+    "POST image-requests/:id",
+    "GET clinician/studies/:uid/timeline",
+    "GET studies/:uid/clinical-context",
+    "GET critical-results",
+    "GET critical-results/:id",
+    "POST critical-results/:id/ack",
+    "GET images/dicom-web",
+    "HEAD images/dicom-web",
+    "POST emr-audit/roster/:grantId",
+    "POST emr-audit/investigations",
+    "POST emr-audit/exports",
+    "POST emr-audit/issuances",
+    "POST emr-audit/issuances/:id/issue",
+    "POST emr-audit/issuances/:id/delivery",
+    "POST emr-audit/requests",
+    "GET emr-audit/requests/:id",
+    "POST emr-audit/requests/:id/extend",
+    "POST emr-audit/requests/:id/resolve"
+  ],
   "must_stay_denied": [
     "GET preload/cache-key",
-    "GET studies", "GET bootstrap", "GET prefs", "GET audit", "GET studies/:uid/report-preview",
-    "GET studies/:uid/report/versions", "GET studies/:uid/report/citations", "GET studies/:uid/report/structure",
-    "GET studies/:uid/viewer-items/:id/revisions", "POST studies/:uid/viewer-items", "GET studies/:uid/findings",
-    "GET studies/:uid/tech-note", "GET studies/:uid/reader-assignment", "PUT studies/:uid/report",
-    "POST studies/:uid/report/commit", "POST studies/:uid/hold", "GET colleagues"
+    "GET audit",
+    "POST studies/:uid/viewer-items",
+    "GET studies/:uid/tech-note",
+    "GET studies/:uid/reader-assignment",
+    "PUT studies/:uid/report",
+    "POST studies/:uid/report/commit",
+    "POST studies/:uid/hold",
+    "GET colleagues"
   ],
   "denied_code": "CLINICIAN_ROUTE_DENIED",
   "public_routes": ["GET health", "GET auth/login", "GET auth/register", "GET auth/callback", "POST auth/login", "POST auth/register"],
@@ -62,7 +168,7 @@
     {"method": 0, "controller": "/", "handler": "/me/", "key": "GET me", "allowed": true},
     {"method": 0, "controller": "/", "handler": "/", "key": "GET ", "allowed": false},
     {"method": 1, "controller": "studies", "handler": ":uid/dictation", "key": "POST studies/:uid/dictation", "allowed": false},
-    {"method": 0, "controller": "/", "handler": "studies/:uid/report-preview", "key": "GET studies/:uid/report-preview", "allowed": false},
+    {"method": 0, "controller": "/", "handler": "studies/:uid/report-preview", "key": "GET studies/:uid/report-preview", "allowed": true},
     {"method": 2, "controller": "/", "handler": "studies/:uid/report", "key": "PUT studies/:uid/report", "allowed": false},
     {"method": 3, "controller": "/", "handler": "studies/:uid", "key": "DELETE studies/:uid", "allowed": false},
     {"method": 4, "controller": "admin", "handler": "users/:id", "key": "PATCH admin/users/:id", "allowed": false},
@@ -82,7 +188,7 @@
     {"method": 0, "controller": "/", "handler": "dicom/lookup", "key": "GET dicom/lookup", "allowed": false},
     {"method": 0, "controller": "/", "handler": "studies/:uid/viewer-items", "key": "GET studies/:uid/viewer-items", "allowed": true},
     {"method": 1, "controller": "/", "handler": "studies/:uid/viewer-items", "key": "POST studies/:uid/viewer-items", "allowed": false},
-    {"method": 0, "controller": "/", "handler": "studies/:uid/viewer-items/:id/revisions", "key": "GET studies/:uid/viewer-items/:id/revisions", "allowed": false},
+    {"method": 0, "controller": "/", "handler": "studies/:uid/viewer-items/:id/revisions", "key": "GET studies/:uid/viewer-items/:id/revisions", "allowed": true},
     {"method": 0, "controller": "image-relay", "handler": "*", "key": "GET image-relay/*", "allowed": true},
     {"method": 0, "controller": "/", "handler": "dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames", "key": "GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames", "allowed": true},
     {"method": 0, "controller": "/", "handler": "instances/:id/preview", "key": "GET instances/:id/preview", "allowed": true},
@@ -91,8 +197,8 @@
     {"method": 0, "controller": "/", "handler": "/clinician/studies/:uid/report/", "key": "GET clinician/studies/:uid/report", "allowed": true},
     {"method": 0, "controller": "/", "handler": "clinician/studies/:uid/timeline", "key": "GET clinician/studies/:uid/timeline", "allowed": true},
     {"method": 1, "controller": "/", "handler": "clinician/studies", "key": "POST clinician/studies", "allowed": false},
-    {"method": 0, "controller": "/", "handler": "studies", "key": "GET studies", "allowed": false},
-    {"method": 0, "controller": "/", "handler": "bootstrap", "key": "GET bootstrap", "allowed": false},
+    {"method": 0, "controller": "/", "handler": "studies", "key": "GET studies", "allowed": true},
+    {"method": 0, "controller": "/", "handler": "bootstrap", "key": "GET bootstrap", "allowed": true},
     {"method": 0, "controller": "/", "handler": "audit", "key": "GET audit", "allowed": false},
     {"method": 0, "controller": "/", "handler": "questions", "key": "GET questions", "allowed": true},
     {"method": 0, "controller": "/", "handler": "questions/:id", "key": "GET questions/:id", "allowed": true},
@@ -111,8 +217,7 @@
     {"method": 1, "controller": "/", "handler": "critical-results/:id/cancel", "key": "POST critical-results/:id/cancel", "allowed": false},
     {"method": 1, "controller": "/", "handler": "studies/:uid/critical-results", "key": "POST studies/:uid/critical-results", "allowed": false},
     {"method": 0, "controller": "/", "handler": "images/dicom-web", "key": "GET images/dicom-web", "allowed": true},
-    {"method": 7, "controller": "/", "handler": "images/dicom-web", "key": "HEAD images/dicom-web", "allowed": true}
-  ,
+    {"method": 7, "controller": "/", "handler": "images/dicom-web", "key": "HEAD images/dicom-web", "allowed": true},
     {"method": 1, "controller": "emr-audit", "handler": "roster/:grantId", "key": "POST emr-audit/roster/:grantId", "allowed": true},
     {"method": 1, "controller": "emr-audit", "handler": "investigations", "key": "POST emr-audit/investigations", "allowed": true},
     {"method": 1, "controller": "emr-audit", "handler": "exports", "key": "POST emr-audit/exports", "allowed": true},
@@ -122,7 +227,42 @@
     {"method": 1, "controller": "emr-audit", "handler": "requests", "key": "POST emr-audit/requests", "allowed": true},
     {"method": 0, "controller": "emr-audit", "handler": "requests/:id", "key": "GET emr-audit/requests/:id", "allowed": true},
     {"method": 1, "controller": "emr-audit", "handler": "requests/:id/extend", "key": "POST emr-audit/requests/:id/extend", "allowed": true},
-    {"method": 1, "controller": "emr-audit", "handler": "requests/:id/resolve", "key": "POST emr-audit/requests/:id/resolve", "allowed": true}],
+    {"method": 1, "controller": "emr-audit", "handler": "requests/:id/resolve", "key": "POST emr-audit/requests/:id/resolve", "allowed": true},
+    {"method": 0, "controller": "", "handler": "prefs", "key": "GET prefs", "allowed": true},
+    {"method": 0, "controller": "", "handler": "studies/:uid/report/versions", "key": "GET studies/:uid/report/versions", "allowed": true},
+    {"method": 0, "controller": "", "handler": "studies/:uid/report/citations", "key": "GET studies/:uid/report/citations", "allowed": true},
+    {"method": 0, "controller": "", "handler": "studies/:uid/report/versions/:version/citations", "key": "GET studies/:uid/report/versions/:version/citations", "allowed": true},
+    {"method": 0, "controller": "", "handler": "studies/:uid/report/structure", "key": "GET studies/:uid/report/structure", "allowed": true},
+    {"method": 0, "controller": "", "handler": "studies/:uid/findings", "key": "GET studies/:uid/findings", "allowed": true},
+    {"method": 0, "controller": "", "handler": "studies/:uid/findings/:id/revisions", "key": "GET studies/:uid/findings/:id/revisions", "allowed": true},
+    {"method": 0, "controller": "", "handler": "studies/:uid/clinical-context", "key": "GET studies/:uid/clinical-context", "allowed": true},
+    {"method": 1, "controller": "", "handler": "studies/:uid/view-observations", "key": "POST studies/:uid/view-observations", "allowed": true},
+    {"method": 0, "controller": "", "handler": "filter-folders", "key": "GET filter-folders", "allowed": true},
+    {"method": 1, "controller": "", "handler": "filter-folders", "key": "POST filter-folders", "allowed": true},
+    {"method": 1, "controller": "", "handler": "filters", "key": "POST filters", "allowed": true},
+    {"method": 3, "controller": "", "handler": "filters/:id", "key": "DELETE filters/:id", "allowed": true},
+    {"method": 4, "controller": "", "handler": "filters/:id/default", "key": "PATCH filters/:id/default", "allowed": true},
+    {"method": 0, "controller": "", "handler": "shared-filters", "key": "GET shared-filters", "allowed": true},
+    {"method": 1, "controller": "", "handler": "shared-filters/copy", "key": "POST shared-filters/copy", "allowed": true},
+    {"method": 0, "controller": "", "handler": "favorite-folders", "key": "GET favorite-folders", "allowed": true},
+    {"method": 0, "controller": "", "handler": "study-tags", "key": "GET study-tags", "allowed": true},
+    {"method": 0, "controller": "", "handler": "worklist-columns", "key": "GET worklist-columns", "allowed": true},
+    {"method": 2, "controller": "", "handler": "worklist-columns", "key": "PUT worklist-columns", "allowed": true},
+    {"method": 3, "controller": "", "handler": "worklist-columns", "key": "DELETE worklist-columns", "allowed": true},
+    {"method": 0, "controller": "", "handler": "workspace-layout", "key": "GET workspace-layout", "allowed": true},
+    {"method": 2, "controller": "", "handler": "workspace-layout", "key": "PUT workspace-layout", "allowed": true},
+    {"method": 3, "controller": "", "handler": "workspace-layout", "key": "DELETE workspace-layout", "allowed": true},
+    {"method": 0, "controller": "", "handler": "workspace-shortcuts", "key": "GET workspace-shortcuts", "allowed": true},
+    {"method": 2, "controller": "", "handler": "workspace-shortcuts", "key": "PUT workspace-shortcuts", "allowed": true},
+    {"method": 0, "controller": "", "handler": "reading-appearance", "key": "GET reading-appearance", "allowed": true},
+    {"method": 2, "controller": "", "handler": "reading-appearance", "key": "PUT reading-appearance", "allowed": true},
+    {"method": 0, "controller": "", "handler": "reading-preferences", "key": "GET reading-preferences", "allowed": true},
+    {"method": 2, "controller": "", "handler": "reading-preferences", "key": "PUT reading-preferences", "allowed": true},
+    {"method": 0, "controller": "", "handler": "hanging-protocols", "key": "GET hanging-protocols", "allowed": true},
+    {"method": 2, "controller": "", "handler": "hanging-protocols", "key": "PUT hanging-protocols", "allowed": true},
+    {"method": 0, "controller": "", "handler": "hanging-protocols/site", "key": "GET hanging-protocols/site", "allowed": true},
+    {"method": 1, "controller": "", "handler": "favorite-folders", "key": "POST favorite-folders", "allowed": true}
+  ],
   "baseline_inventory": {
     "source_sha": "d914a9a8441819301cac28299063bdd6e721c10b",
     "origin": "private evidence part1-planning-successor-20260922/stage5-route-inventory.json, 104 rows, manifest_sha256 7f109e3faa62857aa307729ed8fc04ff0451d9dddbbf7bd7e15a340a9eab7ad5",
@@ -163,13 +303,13 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 167, "public": 6, "session": 2, "business": 36, "denied": 123},
+    "counts": {"routes": 167, "public": 6, "session": 2, "business": 74, "denied": 85},
     "basis_legend": {
-      "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
-      "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
+      "report": "Clinical writes and private draft reads stay denied. Shared worklist and report reads follow radiologist rules, P body excluded (owner 2026-11-02).",
+      "viewer": "Clinical annotation, finding, manual SR and viewer-job writes stay denied; current viewer items and finding reads follow radiologist rules.",
       "multi_study_view": "radiologist multi-study viewing of the own institution (W9-LITE): the same-patient viewing set's admission read (need radiologist, admin passes; owning institution, no tele, StudyAccess for every member); a clinician-only member neither resolves a viewing set nor records its display.",
       "operations": "technologist and reader operations: tech notes, reader assignment and candidates, Preliminary colleagues, transient viewing presence, order match/unmatch.",
-      "workspace": "the caller's reading-workspace state, personal or site-shared (prefs, filters, favorites, templates, columns, layout, shortcuts, appearance, reading preferences, hanging protocols, study tags) and the caller's own StudyAccess status. No clinician screen uses them before S5-U2a.",
+      "workspace": "Shared configuration writes and report templates stay denied; own screen settings and workspace reads open (owner 2026-11-02).",
       "admin": "member console, study-access administration, doctor signing keys, audit, the held-study alert and sending device / InstitutionName registration, and operations metrics (need admin).",
       "consultation": "consultations and consultation candidates; the clinician question contract is S5-U4p/U4a, denied until then.",
       "connect": "inter-institution Connect agreements, basis and transfers; a far later stage (AGENTS).",
@@ -179,19 +319,30 @@
     },
     "denied": {
       "report": [
-        "GET bootstrap", "GET studies", "DELETE studies/:uid", "PATCH studies/:uid", "DELETE studies/:uid/draft",
-        "DELETE studies/:uid/draft/force", "POST studies/:uid/hold", "POST studies/:uid/release", "POST studies/:uid/release/force",
-        "PUT studies/:uid/report", "POST studies/:uid/report/commit", "GET studies/:uid/report/versions",
-        "GET studies/:uid/report/citations", "GET studies/:uid/report/versions/:version/citations",
-        "GET studies/:uid/report/structure", "GET studies/:uid/draft", "GET studies/:uid/report-preview", "POST studies/:uid/dictation",
-        "GET studies/:uid/clinical-context", "POST studies/:uid/view-observations"
+        "DELETE studies/:uid",
+        "PATCH studies/:uid",
+        "DELETE studies/:uid/draft",
+        "DELETE studies/:uid/draft/force",
+        "POST studies/:uid/hold",
+        "POST studies/:uid/release",
+        "POST studies/:uid/release/force",
+        "PUT studies/:uid/report",
+        "POST studies/:uid/report/commit",
+        "GET studies/:uid/draft",
+        "POST studies/:uid/dictation"
       ],
       "viewer": [
-        "POST studies/:uid/viewer-items", "GET studies/:uid/viewer-items/:id/revisions", "POST studies/:uid/viewer-items/:id/revisions",
-        "GET studies/:uid/findings", "POST studies/:uid/findings", "GET studies/:uid/findings/:id/revisions",
-        "POST studies/:uid/findings/:id/revisions", "POST studies/:uid/manual-sr", "POST studies/:uid/manual-sr/:id/store",
-        "GET studies/:uid/viewer-jobs", "POST studies/:uid/viewer-jobs", "GET studies/:uid/viewer-jobs/:id",
-        "POST studies/:uid/viewer-jobs/:id/revisions", "POST studies/:uid/viewer-jobs/preview"
+        "POST studies/:uid/viewer-items",
+        "POST studies/:uid/viewer-items/:id/revisions",
+        "POST studies/:uid/findings",
+        "POST studies/:uid/findings/:id/revisions",
+        "POST studies/:uid/manual-sr",
+        "POST studies/:uid/manual-sr/:id/store",
+        "GET studies/:uid/viewer-jobs",
+        "POST studies/:uid/viewer-jobs",
+        "GET studies/:uid/viewer-jobs/:id",
+        "POST studies/:uid/viewer-jobs/:id/revisions",
+        "POST studies/:uid/viewer-jobs/preview"
       ],
       "multi_study_view": [
         "POST studies/viewing-set/resolve"
@@ -204,13 +355,12 @@
         "GET colleagues", "POST match", "POST unmatch"
       ],
       "workspace": [
-        "GET prefs", "POST filters", "DELETE filters/:id", "PATCH filters/:id/default", "GET filter-folders", "POST filter-folders",
-        "GET shared-filters", "POST shared-filters", "POST shared-filters/copy", "GET favorite-folders", "POST favorite-folders",
-        "POST templates", "DELETE templates/:id", "GET worklist-columns", "PUT worklist-columns", "DELETE worklist-columns",
-        "GET workspace-layout", "PUT workspace-layout", "DELETE workspace-layout", "GET workspace-shortcuts", "PUT workspace-shortcuts",
-        "GET reading-appearance", "PUT reading-appearance", "GET reading-preferences", "PUT reading-preferences",
-        "GET hanging-protocols", "PUT hanging-protocols", "GET hanging-protocols/site", "PUT hanging-protocols/site",
-        "GET study-tags", "POST study-tags", "GET study-access"
+        "POST shared-filters",
+        "POST templates",
+        "DELETE templates/:id",
+        "PUT hanging-protocols/site",
+        "POST study-tags",
+        "GET study-access"
       ],
       "admin": [
         "GET admin/users", "POST admin/users", "PATCH admin/users/:id", "POST admin/users/:id/reset-password",
@@ -253,7 +403,7 @@
       "GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames": {"decision": "business", "unit": "S9-MG-LOADING", "commit": null, "basis": "the viewer's WADO-RS frame bytes, routed from nginx to the API's range reader (dicom-frame.service.ts); the handler runs authzDicom, the same gate GET authz/dicom runs for every other image read, before any byte; pixels only, no report or writer field; declared in allowed_additions"},
       "GET instances/:id/preview": {"decision": "business", "unit": "S9-MG-LOADING", "commit": null, "basis": "the series strip's preview PNG of one stored object, routed from nginx to the API (dicom-frame.service.ts); the handler runs authzDicom on /instances/{id}/preview, which resolves the object's study and applies the institution, StudyAccess and split-UID gate; pixels only; declared in allowed_additions"},
       "POST studies/viewing-set/resolve": {"decision": "denied", "unit": "W9-API", "commit": "f83948e", "basis": "radiologist multi-study viewing of the own institution: the ordered same-patient viewing set's admission and minimal source metadata (need radiologist, admin passes; every member visible, owned, not tele, StudyAccess); a clinician-only member neither resolves nor records display"},
-      "POST studies/:uid/view-observations": {"decision": "denied", "unit": "emr-module-a-a4", "commit": null, "basis": "the browser's display report of a report version or version evidence this member was provided (MODULE_A A4): the gates of GET studies/:uid/report/versions (owning or tele institution, StudyAccess, preliminary readability); a clinician-only member reads no report history and reports no display of it"},
+      "POST studies/:uid/view-observations": {"decision": "business", "unit": "emr-module-a-a4", "commit": null, "basis": "Owner 2026-11-02: physician reads under radiologist rules and own screen settings; clinical writes remain denied."},
       "GET clinician/studies": {"decision": "business", "unit": "S5-U1b", "commit": "dc270a0", "basis": "narrow clinician worklist read: listStudies scope, one-snapshot report status, no drafts, bodies or writer fields; declared in allowed_additions"},
       "GET clinician/studies/:uid/report": {"decision": "business", "unit": "S5-U1b", "commit": "dc270a0", "basis": "the final head's body and key images only at RS A with an approve/addendum head, status otherwise; declared in allowed_additions"},
       "POST studies/:uid/dictation": {"decision": "denied", "unit": "S3-ASR", "commit": "7bc6ffc", "basis": "report writer path: dictationGate runs the report-draft write refusals and every attempt is audited; a clinician writes no report text"},
@@ -274,7 +424,7 @@
       "POST image-requests/:id": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "state change: accept/close/decline by technician or admin only, cancel by the requesting clinician or admin; replay returns the stored receipt; Connect routes stay denied; declared in allowed_additions"},
       "GET admin/audit": {"decision": "denied", "unit": "S5-U5b", "commit": "014010f", "basis": "admin audit and security read attributed by the institution recorded in each row (need admin, restricted study access refused); not a clinician read"},
       "GET clinician/studies/:uid/timeline": {"decision": "business", "unit": "S5-U3", "commit": "156866c", "basis": "patient timeline: the listed studies with the anchor's server patient key (listStudies scope, one-snapshot report status, list row fields) and the source birth/sex relation only, paged with limit required; no bodies or values; declared in allowed_additions"},
-      "GET studies/:uid/clinical-context": {"decision": "denied", "unit": "S7-U4a", "commit": "fa2d162", "basis": "Clinical Context reader panel (contract S7-U4p, D-S7-11 b): signed prior report bodies, exam history, DICOM request tags and Tech Note metadata for radiologist/admin only; no clinician screen, so clinician-only is refused by the guard and a second controller line"},
+      "GET studies/:uid/clinical-context": {"decision": "business", "unit": "S7-U4a", "commit": "fa2d162", "basis": "Owner 2026-11-02: physician reads under radiologist rules and own screen settings; clinical writes remain denied."},
       "GET studies/:uid/critical-result-recipients": {"decision": "denied", "unit": "S7-U1a", "commit": "e9bb028", "basis": "sender candidates and the pinnable head (radiologist only, service 403 otherwise); the recipient list is the create rule, not a clinician read"},
       "POST studies/:uid/critical-results": {"decision": "denied", "unit": "S7-U1a", "commit": "e9bb028", "basis": "critical result create: the radiologist pins the current head ReportVersion for one recipient; a clinician never sends"},
       "GET critical-results": {"decision": "business", "unit": "S7-U1a", "commit": "e9bb028", "basis": "received critical results of the caller (view=received; view=sent is the radiologist's, service 403), owning institution and StudyAccess only, C5 rows excluded before the page, pending counted in the same snapshot; declared in allowed_additions"},
@@ -573,12 +723,28 @@
   "role_composition": {
     "unit": "S5-U1c",
     "rule": "RISK-S5-U1c-MIXED-DOWNGRADE: only clinicianOnly() narrows, and only where listed. A token with any legacy role never meets the clinician gate or a clinician projection; a clinician-only token never passes a denied row. A new narrowing site is a new decision and must be listed here. Since D73 (AGENTS.md section 1-B) a new site is listed by file and call count in clinician_only_call_sites and in behaviour_checked_sites with the test cases that run it; no statement text of it is pinned. The three remaining older statement pins in test_13 are S9-U0f carry-over.",
-    "clinician_only_call_sites": {"auth.guard.ts": 1, "auth.service.ts": 1, "clinical-context.controller.ts": 1, "report-preview.controller.ts": 1, "viewer.controller.ts": 1},
+    "clinician_only_call_sites": {
+      "auth.guard.ts": 1,
+      "auth.service.ts": 1,
+      "clinical-context.controller.ts": 1
+    },
     "pacs_entry_site": {"entry": "member:authzDicom:MethodDeclaration", "calls": 1, "behaviour": {"unit": "S9-U0b-RELIST", "test": "tests/pacs_source_behavior_test.cjs", "cases": ["U0B-CLINICIAN-ROLES"]}},
     "behaviour_checked_sites": {
-      "auth.service.ts": {"unit": "S7-U5", "test": "tests/auth_session_service_test.cjs", "cases": ["U5S-ENTRY-01", "U5S-ENTRY-02"]},
-      "clinical-context.controller.ts": {"unit": "S7-U4a", "test": "tests/clinical_context_service_test.cjs", "cases": ["CC-S02"]},
-      "viewer.controller.ts": {"unit": "S5-U1b", "test": "tests/pacs_source_behavior_test.cjs", "cases": ["U0B-CLINICIAN-VIEWER"]}
+      "auth.service.ts": {
+        "unit": "S7-U5",
+        "test": "tests/auth_session_service_test.cjs",
+        "cases": [
+          "U5S-ENTRY-01",
+          "U5S-ENTRY-02"
+        ]
+      },
+      "clinical-context.controller.ts": {
+        "unit": "S7-U4a",
+        "test": "tests/clinical_context_service_test.cjs",
+        "cases": [
+          "CC-S02"
+        ]
+      }
     },
     "live_test": "test_04_mixed_and_legacy_roles_keep_their_existing_paths",
     "live_marker": "CLINICIAN_LIVE_COMPOSITION"
@@ -596,7 +762,18 @@
     },
     "literals": {
       "rule": "S5-U4c: a write body value that is neither a fill placeholder, '' nor a SYNTHETIC text is one of these enumerated values, each spelled in the source file that defines the row's audit action (null is the explicit no-counterparty-id value)",
-      "values": {"kind": ["external-image", "image-transfer"], "action": ["cancel"], "counterpartyInstitutionId": [null]}
+      "values": {
+        "kind": [
+          "external-image",
+          "image-transfer"
+        ],
+        "action": [
+          "cancel"
+        ],
+        "counterpartyInstitutionId": [
+          null
+        ]
+      }
     },
     "question": "one question the clinician asks on the study before the loop with clinician_question_live.ask_question; :id is its id. The create row asks a second one, the entries row follows it up, and the close row, which runs after every other row that names it, closes it. The question rows go before the study cleanup (both foreign keys RESTRICT) through clinician_question_live.drop_study_questions",
     "image_request": "S5-U4c: one image-transfer request the clinician makes on the study before the loop with clinician_request_live.make_image_request; :id of the image-requests rows is its id. The create row makes an external-image request (another kind, so the active-request rule never meets the prepared one) and the change row, which runs after every other row that names it, cancels the prepared one. The list row asks state=all. The request rows go before the study cleanup (every foreign key RESTRICT) through clinician_request_live.drop_study_image_requests",
@@ -611,196 +788,913 @@
     },
     "rows": {
       "POST studies/:uid/viewer-context-events": {
-        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
-        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다"},
-        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 403, "code": null}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 200,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "gateway",
+          "expect": "denied",
+          "status": 403,
+          "code": null,
+          "message": "게이트웨이에 허용되지 않는 경로입니다"
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "denied",
+          "status": 403,
+          "code": null
+        }
       },
       "GET me": {
-        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
-        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다"},
-        "wrong_tenant": {"as": "cinvalid", "expect": "denied", "status": 403, "code": "INSTITUTION_PENDING", "basis": "a session row names no study; the refused multi-institution command leaves this identity without DB rights, so membership remains pending"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 200,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "gateway",
+          "expect": "denied",
+          "status": 403,
+          "code": null,
+          "message": "게이트웨이에 허용되지 않는 경로입니다"
+        },
+        "wrong_tenant": {
+          "as": "cinvalid",
+          "expect": "denied",
+          "status": 403,
+          "code": "INSTITUTION_PENDING",
+          "basis": "a session row names no study; the refused multi-institution command leaves this identity without DB rights, so membership remains pending"
+        }
       },
       "POST auth/logout": {
-        "positive": {"as": "clinician", "expect": "allowed", "status": 204, "code": null},
-        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다"},
-        "wrong_tenant": {"as": "cinvalid", "expect": "allowed", "status": 204, "code": null, "basis": "by design, not a leak: pending identities may log out without gaining rights or reading data; this Bearer call has no BFF session to end"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 204,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "gateway",
+          "expect": "denied",
+          "status": 403,
+          "code": null,
+          "message": "게이트웨이에 허용되지 않는 경로입니다"
+        },
+        "wrong_tenant": {
+          "as": "cinvalid",
+          "expect": "allowed",
+          "status": 204,
+          "code": null,
+          "basis": "by design, not a leak: pending identities may log out without gaining rights or reading data; this Bearer call has no BFF session to end"
+        }
       },
       "GET authz/dicom": {
         "via": "nginx auth_request of GET /dicom-web/studies/{uid}/metadata, its only caller; nginx answers the refusal with a status only",
-        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
-        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null},
-        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 403, "code": null}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 200,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "gateway",
+          "expect": "denied",
+          "status": 403,
+          "code": null
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "denied",
+          "status": 403,
+          "code": null
+        }
       },
       "POST dicom/lookup": {
-        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
-        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다"},
-        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 403, "code": null, "message": "열람 권한이 없습니다"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 200,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "gateway",
+          "expect": "denied",
+          "status": 403,
+          "code": null,
+          "message": "게이트웨이에 허용되지 않는 경로입니다"
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "denied",
+          "status": 403,
+          "code": null,
+          "message": "열람 권한이 없습니다"
+        }
       },
       "GET studies/:uid/viewer-items": {
-        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
-        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다"},
-        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": null, "message": "검사를 찾을 수 없습니다"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 200,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "gateway",
+          "expect": "denied",
+          "status": 403,
+          "code": null,
+          "message": "게이트웨이에 허용되지 않는 경로입니다"
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "denied",
+          "status": 403,
+          "code": null,
+          "message": "표시 항목에 접근할 수 없습니다"
+        }
       },
       "GET clinician/studies": {
-        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
-        "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": null, "message": "clinician 권한"},
-        "wrong_tenant": {"as": "kclinician", "expect": "absent", "status": 200, "code": null, "absent": {"list": "studies", "field": "uid", "value": ":uid"}, "basis": "a collection: the other institution's clinician is answered, without the study"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 200,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "doctor",
+          "expect": "denied",
+          "status": 403,
+          "code": null,
+          "message": "clinician 권한"
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "absent",
+          "status": 200,
+          "code": null,
+          "absent": {
+            "list": "studies",
+            "field": "uid",
+            "value": ":uid"
+          },
+          "basis": "a collection: the other institution's clinician is answered, without the study"
+        }
       },
       "GET clinician/studies/:uid/report": {
-        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
-        "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": null, "message": "clinician 권한"},
-        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": null, "message": "검사를 찾을 수 없습니다"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 200,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "doctor",
+          "expect": "denied",
+          "status": 403,
+          "code": null,
+          "message": "clinician 권한"
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "denied",
+          "status": 404,
+          "code": null,
+          "message": "검사를 찾을 수 없습니다"
+        }
       },
       "GET clinician/studies/:uid/timeline": {
         "query": "limit=100",
-        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
-        "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": null, "message": "clinician 권한"},
-        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": null, "message": "검사를 찾을 수 없습니다"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 200,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "doctor",
+          "expect": "denied",
+          "status": 403,
+          "code": null,
+          "message": "clinician 권한"
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "denied",
+          "status": 404,
+          "code": null,
+          "message": "검사를 찾을 수 없습니다"
+        }
       },
       "GET questions": {
         "query": "view=mine",
-        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
-        "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": "QUESTION_ROLE_REQUIRED", "basis": "view=mine is the clinician's own list; a radiologist reads view=inbox"},
-        "wrong_tenant": {"as": "kclinician", "expect": "absent", "status": 200, "code": null, "absent": {"list": "items", "field": "id", "value": ":id"}, "basis": "a collection: the other institution's clinician is answered, without the question"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 200,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "doctor",
+          "expect": "denied",
+          "status": 403,
+          "code": "QUESTION_ROLE_REQUIRED",
+          "basis": "view=mine is the clinician's own list; a radiologist reads view=inbox"
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "absent",
+          "status": 200,
+          "code": null,
+          "absent": {
+            "list": "items",
+            "field": "id",
+            "value": ":id"
+          },
+          "basis": "a collection: the other institution's clinician is answered, without the question"
+        }
       },
       "GET questions/:id": {
-        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
-        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "QUESTION_ROLE_REQUIRED"},
-        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "QUESTION_NOT_FOUND"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 200,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "tech",
+          "expect": "denied",
+          "status": 403,
+          "code": "QUESTION_ROLE_REQUIRED"
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "denied",
+          "status": 404,
+          "code": "QUESTION_NOT_FOUND"
+        }
       },
       "GET studies/:uid/questions": {
-        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
-        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "QUESTION_ROLE_REQUIRED"},
-        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "STUDY_NOT_FOUND"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 200,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "tech",
+          "expect": "denied",
+          "status": 403,
+          "code": "QUESTION_ROLE_REQUIRED"
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "denied",
+          "status": 404,
+          "code": "STUDY_NOT_FOUND"
+        }
       },
       "POST studies/:uid/questions": {
         "write": {
           "method": "POST",
-          "body": {"requestId": "$request_id", "expectedOwner": "$owner", "body": "SYNTHETIC S5-U1c matrix question"},
+          "body": {
+            "requestId": "$request_id",
+            "expectedOwner": "$owner",
+            "body": "SYNTHETIC S5-U1c matrix question"
+          },
           "expected_status": 201,
-          "audit": {"action": "study.question", "source": ["clinician-question.service.ts", "QUESTION_AUDIT_ACTION"], "rows": 1,
-                    "actor": "clinician", "target": ":uid", "detail": {"requestId": "$request_id", "kind": "question", "role": "clinician"}}
+          "audit": {
+            "action": "study.question",
+            "source": [
+              "clinician-question.service.ts",
+              "QUESTION_AUDIT_ACTION"
+            ],
+            "rows": 1,
+            "actor": "clinician",
+            "target": ":uid",
+            "detail": {
+              "requestId": "$request_id",
+              "kind": "question",
+              "role": "clinician"
+            }
+          }
         },
-        "positive": {"as": "clinician", "expect": "allowed", "status": 201, "code": null},
-        "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": "QUESTION_ROLE_REQUIRED"},
-        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "STUDY_NOT_FOUND"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 201,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "doctor",
+          "expect": "denied",
+          "status": 403,
+          "code": "QUESTION_ROLE_REQUIRED"
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "denied",
+          "status": 404,
+          "code": "STUDY_NOT_FOUND"
+        }
       },
       "POST questions/:id/entries": {
         "write": {
           "method": "POST",
-          "body": {"requestId": "$request_id", "expectedOwner": "$owner", "revision": "$revision", "body": "SYNTHETIC S5-U1c matrix follow-up"},
+          "body": {
+            "requestId": "$request_id",
+            "expectedOwner": "$owner",
+            "revision": "$revision",
+            "body": "SYNTHETIC S5-U1c matrix follow-up"
+          },
           "expected_status": 201,
-          "audit": {"action": "study.question", "source": ["clinician-question.service.ts", "QUESTION_AUDIT_ACTION"], "rows": 1,
-                    "actor": "clinician", "target": ":uid", "detail": {"requestId": "$request_id", "kind": "followup", "role": "clinician"}}
+          "audit": {
+            "action": "study.question",
+            "source": [
+              "clinician-question.service.ts",
+              "QUESTION_AUDIT_ACTION"
+            ],
+            "rows": 1,
+            "actor": "clinician",
+            "target": ":uid",
+            "detail": {
+              "requestId": "$request_id",
+              "kind": "followup",
+              "role": "clinician"
+            }
+          }
         },
-        "positive": {"as": "clinician", "expect": "allowed", "status": 201, "code": null},
-        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "QUESTION_ROLE_REQUIRED"},
-        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "QUESTION_NOT_FOUND"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 201,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "tech",
+          "expect": "denied",
+          "status": 403,
+          "code": "QUESTION_ROLE_REQUIRED"
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "denied",
+          "status": 404,
+          "code": "QUESTION_NOT_FOUND"
+        }
       },
       "POST questions/:id/close": {
         "write": {
           "method": "POST",
-          "body": {"requestId": "$request_id", "expectedOwner": "$owner", "revision": "$revision", "note": ""},
+          "body": {
+            "requestId": "$request_id",
+            "expectedOwner": "$owner",
+            "revision": "$revision",
+            "note": ""
+          },
           "expected_status": 201,
-          "audit": {"action": "study.question", "source": ["clinician-question.service.ts", "QUESTION_AUDIT_ACTION"], "rows": 1,
-                    "actor": "clinician", "target": ":uid", "detail": {"requestId": "$request_id", "kind": "close", "role": "clinician"}}
+          "audit": {
+            "action": "study.question",
+            "source": [
+              "clinician-question.service.ts",
+              "QUESTION_AUDIT_ACTION"
+            ],
+            "rows": 1,
+            "actor": "clinician",
+            "target": ":uid",
+            "detail": {
+              "requestId": "$request_id",
+              "kind": "close",
+              "role": "clinician"
+            }
+          }
         },
-        "positive": {"as": "clinician", "expect": "allowed", "status": 201, "code": null},
-        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "QUESTION_ROLE_REQUIRED"},
-        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "QUESTION_NOT_FOUND"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 201,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "tech",
+          "expect": "denied",
+          "status": 403,
+          "code": "QUESTION_ROLE_REQUIRED"
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "denied",
+          "status": 404,
+          "code": "QUESTION_NOT_FOUND"
+        }
       },
       "GET image-requests": {
         "query": "view=mine&state=all",
-        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
-        "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": "IMAGE_REQUEST_ROLE_REQUIRED", "basis": "view=mine is the clinician's own list; radiologists and staff read view=queue"},
-        "wrong_tenant": {"as": "kclinician", "expect": "absent", "status": 200, "code": null, "absent": {"list": "items", "field": "id", "value": ":id"}, "basis": "a collection: the other institution's clinician is answered, without the request"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 200,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "doctor",
+          "expect": "denied",
+          "status": 403,
+          "code": "IMAGE_REQUEST_ROLE_REQUIRED",
+          "basis": "view=mine is the clinician's own list; radiologists and staff read view=queue"
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "absent",
+          "status": 200,
+          "code": null,
+          "absent": {
+            "list": "items",
+            "field": "id",
+            "value": ":id"
+          },
+          "basis": "a collection: the other institution's clinician is answered, without the request"
+        }
       },
       "GET image-requests/:id": {
-        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
-        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다", "basis": "every app role of the owning institution reads a request (OQ-5 a), so the identity without one is the wrong role"},
-        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "IMAGE_REQUEST_NOT_FOUND"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 200,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "gateway",
+          "expect": "denied",
+          "status": 403,
+          "code": null,
+          "message": "게이트웨이에 허용되지 않는 경로입니다",
+          "basis": "every app role of the owning institution reads a request (OQ-5 a), so the identity without one is the wrong role"
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "denied",
+          "status": 404,
+          "code": "IMAGE_REQUEST_NOT_FOUND"
+        }
       },
       "GET studies/:uid/image-requests": {
-        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
-        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다", "basis": "every app role of the owning institution reads a study's requests (OQ-5 a), so the identity without one is the wrong role"},
-        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "STUDY_NOT_FOUND"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 200,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "gateway",
+          "expect": "denied",
+          "status": 403,
+          "code": null,
+          "message": "게이트웨이에 허용되지 않는 경로입니다",
+          "basis": "every app role of the owning institution reads a study's requests (OQ-5 a), so the identity without one is the wrong role"
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "denied",
+          "status": 404,
+          "code": "STUDY_NOT_FOUND"
+        }
       },
       "POST studies/:uid/image-requests": {
         "write": {
           "method": "POST",
-          "body": {"requestId": "$request_id", "expectedOwner": "$owner", "kind": "external-image", "counterparty": "SYNTHETIC S5-U1c matrix hospital",
-                   "counterpartyInstitutionId": null, "reason": "SYNTHETIC S5-U1c matrix request"},
+          "body": {
+            "requestId": "$request_id",
+            "expectedOwner": "$owner",
+            "kind": "external-image",
+            "counterparty": "SYNTHETIC S5-U1c matrix hospital",
+            "counterpartyInstitutionId": null,
+            "reason": "SYNTHETIC S5-U1c matrix request"
+          },
           "expected_status": 201,
-          "audit": {"action": "study.image-request", "source": ["image-request.service.ts", "IMAGE_REQUEST_AUDIT_ACTION"], "rows": 1,
-                    "actor": "clinician", "target": ":uid", "detail": {"requestId": "$request_id", "action": "create", "role": "clinician"}}
+          "audit": {
+            "action": "study.image-request",
+            "source": [
+              "image-request.service.ts",
+              "IMAGE_REQUEST_AUDIT_ACTION"
+            ],
+            "rows": 1,
+            "actor": "clinician",
+            "target": ":uid",
+            "detail": {
+              "requestId": "$request_id",
+              "action": "create",
+              "role": "clinician"
+            }
+          }
         },
-        "positive": {"as": "clinician", "expect": "allowed", "status": 201, "code": null},
-        "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": "IMAGE_REQUEST_ROLE_REQUIRED"},
-        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "STUDY_NOT_FOUND"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 201,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "doctor",
+          "expect": "denied",
+          "status": 403,
+          "code": "IMAGE_REQUEST_ROLE_REQUIRED"
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "denied",
+          "status": 404,
+          "code": "STUDY_NOT_FOUND"
+        }
       },
       "POST image-requests/:id": {
         "write": {
           "method": "POST",
-          "body": {"requestId": "$request_id", "expectedOwner": "$owner", "revision": "$revision", "action": "cancel", "note": "SYNTHETIC S5-U1c matrix cancel"},
+          "body": {
+            "requestId": "$request_id",
+            "expectedOwner": "$owner",
+            "revision": "$revision",
+            "action": "cancel",
+            "note": "SYNTHETIC S5-U1c matrix cancel"
+          },
           "expected_status": 201,
-          "audit": {"action": "study.image-request", "source": ["image-request.service.ts", "IMAGE_REQUEST_AUDIT_ACTION"], "rows": 1,
-                    "actor": "clinician", "target": ":uid", "detail": {"requestId": "$request_id", "action": "cancel", "role": "clinician"}}
+          "audit": {
+            "action": "study.image-request",
+            "source": [
+              "image-request.service.ts",
+              "IMAGE_REQUEST_AUDIT_ACTION"
+            ],
+            "rows": 1,
+            "actor": "clinician",
+            "target": ":uid",
+            "detail": {
+              "requestId": "$request_id",
+              "action": "cancel",
+              "role": "clinician"
+            }
+          }
         },
-        "positive": {"as": "clinician", "expect": "allowed", "status": 201, "code": null},
-        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "IMAGE_REQUEST_ROLE_REQUIRED", "basis": "a technician handles requests but never cancels one (the requesting clinician or admin does, OQ-5 a)"},
-        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "IMAGE_REQUEST_NOT_FOUND"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 201,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "tech",
+          "expect": "denied",
+          "status": 403,
+          "code": "IMAGE_REQUEST_ROLE_REQUIRED",
+          "basis": "a technician handles requests but never cancels one (the requesting clinician or admin does, OQ-5 a)"
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "denied",
+          "status": 404,
+          "code": "IMAGE_REQUEST_NOT_FOUND"
+        }
       },
       "GET critical-results": {
         "query": "view=received",
-        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
-        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "CRITICAL_RESULT_ROLE_REQUIRED", "basis": "only clinician and radiologist are recipients (contract S7-U1p section 4.2); a technician has no received list"},
-        "wrong_tenant": {"as": "kclinician", "expect": "absent", "status": 200, "code": null, "absent": {"list": "items", "field": "id", "value": ":id"}, "basis": "a collection: the other institution's clinician is answered, without the record"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 200,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "tech",
+          "expect": "denied",
+          "status": 403,
+          "code": "CRITICAL_RESULT_ROLE_REQUIRED",
+          "basis": "only clinician and radiologist are recipients (contract S7-U1p section 4.2); a technician has no received list"
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "absent",
+          "status": 200,
+          "code": null,
+          "absent": {
+            "list": "items",
+            "field": "id",
+            "value": ":id"
+          },
+          "basis": "a collection: the other institution's clinician is answered, without the record"
+        }
       },
       "GET critical-results/:id": {
-        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
-        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "CRITICAL_RESULT_ROLE_REQUIRED"},
-        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "CRITICAL_RESULT_NOT_FOUND"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 200,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "tech",
+          "expect": "denied",
+          "status": 403,
+          "code": "CRITICAL_RESULT_ROLE_REQUIRED"
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "denied",
+          "status": 404,
+          "code": "CRITICAL_RESULT_NOT_FOUND"
+        }
       },
       "POST critical-results/:id/ack": {
         "write": {
           "method": "POST",
-          "body": {"requestId": "$request_id", "expectedOwner": "$owner", "revision": "$revision"},
+          "body": {
+            "requestId": "$request_id",
+            "expectedOwner": "$owner",
+            "revision": "$revision"
+          },
           "expected_status": 201,
-          "audit": {"action": "study.critical-result", "source": ["critical-result.service.ts", "CRITICAL_RESULT_AUDIT_ACTION"], "rows": 1,
-                    "actor": "clinician", "target": ":uid", "detail": {"requestId": "$request_id", "event": "acknowledged", "role": "clinician"}}
+          "audit": {
+            "action": "study.critical-result",
+            "source": [
+              "critical-result.service.ts",
+              "CRITICAL_RESULT_AUDIT_ACTION"
+            ],
+            "rows": 1,
+            "actor": "clinician",
+            "target": ":uid",
+            "detail": {
+              "requestId": "$request_id",
+              "event": "acknowledged",
+              "role": "clinician"
+            }
+          }
         },
-        "positive": {"as": "clinician", "expect": "allowed", "status": 201, "code": null},
-        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "CRITICAL_RESULT_ROLE_REQUIRED"},
-        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "CRITICAL_RESULT_NOT_FOUND"}
+        "positive": {
+          "as": "clinician",
+          "expect": "allowed",
+          "status": 201,
+          "code": null
+        },
+        "wrong_role": {
+          "as": "tech",
+          "expect": "denied",
+          "status": 403,
+          "code": "CRITICAL_RESULT_ROLE_REQUIRED"
+        },
+        "wrong_tenant": {
+          "as": "kclinician",
+          "expect": "denied",
+          "status": 404,
+          "code": "CRITICAL_RESULT_NOT_FOUND"
+        }
       }
     },
-    "pending_routes": {"GET image-relay/*": "NOT_RUN: in LiveStack the clinician image reads it carries (/instances/{id}/preview) are the existing rows of clinician_read_live.py through nginx; the gate is authzDicom (its own live rows above); served proof on the synthetic mgxa stack is tmp/image-delivery-record (2026-10-28).",
-    "GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames": "NOT_RUN: the positive case needs a stored multi-frame object the LiveStack fixture does not carry; the gate is authzDicom (its own live rows above) and the bytes are tests/dicom_frame_test.cjs; the mgxa synthetic MG stack run of 2026-10-27 (tmp/mg-loading) exercised the served path end to end.",
-    "GET instances/:id/preview": "NOT_RUN: the positive case needs a stored object id the LiveStack fixture does not carry; the gate is authzDicom on /instances/{id} (its own live rows above) and the PNG is tests/dicom_frame_test.cjs; the mgxa synthetic MG stack run of 2026-10-27 (tmp/mg-loading) exercised the served path end to end.",
-    "GET images/dicom-web": "NOT_RUN: REQUEST_FACTS #211 authoritative identity, patient/source/decoder and StudyAccess adapters; E online_live.py separately checks the registered unavailable seam.", "HEAD images/dicom-web": "NOT_RUN: REQUEST_FACTS #211 authoritative identity, patient/source/decoder and StudyAccess adapters; E online_live.py separately checks the registered unavailable seam.",
-    "POST emr-audit/roster/:grantId": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",
-    "POST emr-audit/investigations": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",
-    "POST emr-audit/exports": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",
-    "POST emr-audit/issuances": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",
-    "POST emr-audit/issuances/:id/issue": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",
-    "POST emr-audit/issuances/:id/delivery": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",
-    "POST emr-audit/requests": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",
-    "GET emr-audit/requests/:id": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",
-    "POST emr-audit/requests/:id/extend": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",
-    "POST emr-audit/requests/:id/resolve": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate."
-  }
+    "pending_routes": {
+      "GET image-relay/*": "NOT_RUN: in LiveStack the clinician image reads it carries (/instances/{id}/preview) are the existing rows of clinician_read_live.py through nginx; the gate is authzDicom (its own live rows above); served proof on the synthetic mgxa stack is tmp/image-delivery-record (2026-10-28).",
+      "GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames": "NOT_RUN: the positive case needs a stored multi-frame object the LiveStack fixture does not carry; the gate is authzDicom (its own live rows above) and the bytes are tests/dicom_frame_test.cjs; the mgxa synthetic MG stack run of 2026-10-27 (tmp/mg-loading) exercised the served path end to end.",
+      "GET instances/:id/preview": "NOT_RUN: the positive case needs a stored object id the LiveStack fixture does not carry; the gate is authzDicom on /instances/{id} (its own live rows above) and the PNG is tests/dicom_frame_test.cjs; the mgxa synthetic MG stack run of 2026-10-27 (tmp/mg-loading) exercised the served path end to end.",
+      "GET images/dicom-web": "NOT_RUN: REQUEST_FACTS #211 authoritative identity, patient/source/decoder and StudyAccess adapters; E online_live.py separately checks the registered unavailable seam.",
+      "HEAD images/dicom-web": "NOT_RUN: REQUEST_FACTS #211 authoritative identity, patient/source/decoder and StudyAccess adapters; E online_live.py separately checks the registered unavailable seam.",
+      "POST emr-audit/roster/:grantId": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",
+      "POST emr-audit/investigations": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",
+      "POST emr-audit/exports": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",
+      "POST emr-audit/issuances": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",
+      "POST emr-audit/issuances/:id/issue": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",
+      "POST emr-audit/issuances/:id/delivery": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",
+      "POST emr-audit/requests": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",
+      "GET emr-audit/requests/:id": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",
+      "POST emr-audit/requests/:id/extend": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate.",
+      "POST emr-audit/requests/:id/resolve": "NOT_RUN: deployed Keycloak/nginx clinician matrix; tests/emr/f/link_live.py exercises real AppModule/AuthGuard/MemberRights HTTP/PG using signed synthetic OIDC transport. #219 served D integration is separate."
+    },
+    "physician_rows": {
+      "GET studies": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET bootstrap": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET prefs": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET studies/:uid/report/versions": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET studies/:uid/report/citations": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET studies/:uid/report/versions/:version/citations": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET studies/:uid/report/structure": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET studies/:uid/report-preview": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET studies/:uid/viewer-items/:id/revisions": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET studies/:uid/findings": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET studies/:uid/findings/:id/revisions": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET studies/:uid/clinical-context": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "POST studies/:uid/view-observations": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET filter-folders": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "POST filter-folders": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "POST filters": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "DELETE filters/:id": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "PATCH filters/:id/default": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET shared-filters": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "POST shared-filters/copy": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET favorite-folders": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET study-tags": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET worklist-columns": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "PUT worklist-columns": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "DELETE worklist-columns": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET workspace-layout": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "PUT workspace-layout": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "DELETE workspace-layout": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET workspace-shortcuts": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "PUT workspace-shortcuts": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET reading-appearance": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "PUT reading-appearance": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET reading-preferences": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "PUT reading-preferences": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET hanging-protocols": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "PUT hanging-protocols": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "GET hanging-protocols/site": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      },
+      "POST favorite-folders": {
+        "positive": "clinician",
+        "wrong_role": "gateway",
+        "wrong_tenant": "kclinician"
+      }
+    }
   },
   "live_probe_values": {":uid": "1.2.826.0.1.3680043.8.498.0", ":id": "1", ":version": "1"},
   "read_contract": {
     "unit": "S5-U1b",
-    "rule": "S5-F5 conservative default: body, key images and viewer items only when rs=A and the head ReportVersion (uid, Report.version) action is approve or addendum; D-S5-NONFINAL-VIEW stays open",
+    "rule": "D-S5-NONFINAL-VIEW decided 2026-11-02 by the owner on clinical lead request: REQ-S5-U1b-CLINICIAN-READ / RISK-S5-U1b-NONFINAL-BODY; W/T/H/A bodies follow radiologist reads, P status only, no other author draft.",
     "final_actions": ["approve", "addendum"],
-    "open_states": ["W", "T", "P", "H"],
+    "open_states": [
+      "W",
+      "T",
+      "P",
+      "H",
+      "A"
+    ],
     "list_snapshot_pins": ["institutionId", "teleInstitutionId", "rs", "repDoc", "confirm", "version"],
     "viewer_changed_code": "VIEWER_REPORT_CHANGED",
     "list_response_keys": ["studies", "serverTime"],
     "list_paged_response_keys": ["studies", "serverTime", "pagination"],
-    "list_row_keys": ["uid", "id", "name", "birth", "sex", "date", "acc", "desc", "modality", "count", "series", "sourcePatientKey", "institutionName", "tele", "report"],
+    "list_row_keys": [
+      "uid",
+      "id",
+      "name",
+      "birth",
+      "sex",
+      "date",
+      "acc",
+      "desc",
+      "modality",
+      "count",
+      "series",
+      "sourcePatientKey",
+      "institutionName",
+      "tele",
+      "report",
+      "referringPhysician",
+      "requestingPhysician"
+    ],
     "overlay_display_keys": ["id", "name", "birth", "sex", "date", "acc", "desc", "modality"],
     "pagination_keys": ["next", "total", "offset", "limit"],
     "timeline_response_keys": ["uid", "patientKey", "identity", "studies", "serverTime", "pagination"],

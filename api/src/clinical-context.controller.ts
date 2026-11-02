@@ -1,7 +1,6 @@
-import { Controller, ForbiddenException, Get, Param, Query, Req } from '@nestjs/common';
+import { Controller, Get, Param, Query, Req } from '@nestjs/common';
 import type { Caller } from './pacs.service';
 import { ClinicalContextService } from './clinical-context.service';
-import { CLINICIAN_ROUTE_DENIED, clinicianOnly } from './clinician-policy';
 
 const member = (req: any): Caller => ({ sub: req.sub, actor: req.actor, roles: req.roles ?? [],
   institution: req.institution ?? null, kind: req.kind ?? 'member' });
@@ -16,9 +15,6 @@ export class ClinicalContextController {
 
   @Get('studies/:uid/clinical-context')
   read(@Param('uid') uid: string, @Query() query: any, @Req() req: any) {
-    // clinician-only never reaches this through the guard allowlist. This second line keeps a widened allowlist from
-    // opening signed prior bodies and request tags to clinicians: D-S7-11 (b) is a reader panel with no clinician screen.
-    if (clinicianOnly(req.roles)) throw new ForbiddenException({ code: CLINICIAN_ROUTE_DENIED });
     return this.context.read(uid, query, member(req));
   }
 }

@@ -16,7 +16,7 @@ import { birthKey, sexKey } from './study-identity';
 const CLINICAL_CONTEXT_SCHEMA = 'kin.clinical-context/1';
 
 /** 판독 화면 패널이다(CS-03). 명시 집합이고 need()가 아니다 — need()는 admin을 역할마다 통과시키는 다른 규칙이다(D33 OQ-3). */
-const CLINICAL_CONTEXT_ROLES: readonly string[] = Object.freeze(['radiologist', 'admin']);
+const CLINICAL_CONTEXT_ROLES: readonly string[] = Object.freeze(['radiologist', 'admin', 'clinician']);
 
 export const CLINICAL_CONTEXT_INPUT_INVALID = 'CLINICAL_CONTEXT_INPUT_INVALID';
 export const CLINICAL_CONTEXT_ROLE = 'CLINICAL_CONTEXT_ROLE';
