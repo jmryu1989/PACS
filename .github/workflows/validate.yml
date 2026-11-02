@@ -345,6 +345,8 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/viewer-stack-mouse --cwd . --file config/ohif.js --file config/ohif/viewer-ux.js --file tests/viewer_stack_mouse_test.cjs --file tests/viewer_strip_failure_test.cjs --file worklist-v0/hpacs-lite/viewer-patient-tabs.js --file worklist-v0/hpacs-lite/viewer-series-strip.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_stack_mouse_test.cjs tests/viewer_strip_failure_test.cjs
     - name: OHIF generated configuration matches ordered sources
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/ohif-config-check --cwd . --file scripts/build-ohif-config.py --tree config/ohif --file config/ohif.js -- python3 scripts/build-ohif-config.py --check
+    - name: Open source notice reproducibility
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/open-source-notices --cwd . --file scripts/build-open-source-notices.py --file api/package-lock.json --file gateway/agent/requirements.txt --tree worklist-v0/legal/licenses --file worklist-v0/legal/open-source-notices.html -- python3 -B scripts/build-open-source-notices.py --check
     - name: OHIF builder byte and stale-output boundaries
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/ohif-config-build --cwd . --file scripts/build-ohif-config.py --tree config/ohif --file config/ohif.js --file tests/s9_u0e_build_test.py -- python3 scripts/run-tests.py --module tests/s9_u0e_build_test.py --mode pure --unit ci-s9-u0e-build
     - name: CD-14 trace matrix generator over the fixed fixture tree
