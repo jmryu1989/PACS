@@ -32,6 +32,7 @@ HOST_OS_ENV = {key: os.environ[key] for key in ('SYSTEMROOT', 'USERPROFILE') if 
 # Keep the inventory independent of the workflow so removing a command fails.
 REGRESSION_SUITES = {
     'source-regressions': """
+        scripts/test_ops_soup_vulns.py
         tests/access_record_writes_test.cjs
         tests/admin_audit_attribution_test.cjs
         tests/clinician_policy_test.py
@@ -189,7 +190,7 @@ class MeasurementCiTests(unittest.TestCase):
                     args = shlex.split(re.sub(r'\$\{\{[^}]+\}\}', 'EXPRESSION', line), comments=True)
                     if '--' in args:
                         args = args[args.index('--') + 1:]
-                    actual.update(a for a in args if a.startswith('tests/')
+                    actual.update(a for a in args if a.startswith(('tests/', 'scripts/test_'))
                                   and a.endswith(('.py', '.cjs')) and a != 'tests/measurement_ci.py')
                     if 'discover' in args:
                         actual.update(p.relative_to(ci.ROOT).as_posix()

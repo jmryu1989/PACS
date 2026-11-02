@@ -78,6 +78,27 @@ def notify(api, report, run_url, drill=False):
     return 'opened'
 
 
+def notify_soup(api, count, checked_at, run_url):
+    """One summary per new SOUP batch, independent of outage recovery issues."""
+    if type(count) is not int or count <= 0 or type(checked_at) is not int:
+        raise ValueError('Invalid SOUP notification')
+    if not re.fullmatch(r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/\d+', run_url):
+        raise ValueError('Invalid run link')
+    repo = api.call('GET')
+    if repo.get('private') is not True:
+        raise ValueError('Operational notifications require a private repository')
+    owner = repo['owner']['login']
+    created = api.call('POST', '/issues', {
+        'title': '[KIN SOUP] New Vulnerabilities', 'assignees': [owner],
+        'body': '<!-- kin-ops-soup:v1 -->\n새 취약점 항목: ' + str(count)
+                + '\n영향 여부는 미판정이며 조회 기록을 확인해야 합니다.'
+                + '\nUTC epoch: ' + str(checked_at) + '\n' + run_url
+                + '\n환자 정보·구성요소 원문·원본 로그는 포함하지 않습니다.'})
+    if owner not in [row['login'] for row in created.get('assignees', [])]:
+        raise ValueError('Owner assignment was not confirmed')
+    return 'opened'
+
+
 if __name__ == '__main__':
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
