@@ -183,7 +183,7 @@ class RetentionWorkerReportLive(RetentionFixture):
                          (2, 'operational-deletion', 'operational-store-deletion', 2, 'overdue'))
         self.assertEqual(completed['delayReasonStatus'], 'missing')
         self.assertNotIn('1.2.826', json.dumps(journal), 'the destruction ledger names no study')
-        self.assertEqual(self.scalar("SELECT count(*) || ',' || bool_and(confirmed_at IS NOT NULL) FROM emr_access.retention_commit"), '1,t')
+        self.assertEqual(self.scalar("SELECT count(*) || ',' || bool_and(confirmed_at IS NOT NULL)::text FROM emr_access.retention_commit"), '1,true')
         self.assertEqual(self.scalar(f"""SELECT count(*) FROM emr_access.retention_unit WHERE record_id={literal(expired)}"""), '0')
         self.assertEqual(self.scalar("SELECT count(*) FROM emr_access.retention_unit"), '4')
         self.assertEqual(self.scalar("SELECT count(*) FROM emr_access.retention_execution"), '0')
