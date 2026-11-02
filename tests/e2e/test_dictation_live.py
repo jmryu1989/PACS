@@ -2679,7 +2679,7 @@ class DictationLiveE2E(test_worklist.WorklistE2E):
             arrival = run.js('entry_reach', REACH_TARGET)
             # Provisional until Minhoon confirms (11-03 commander): at 1366x768 Reading Workspace the stacked
             # card may start the action row below the first screen. The arrival state is recorded above, and the
-            # reveal below must be one scroll of the scrollable report column that shows Dictate whole
+            # reveal below must be ordinary scrolling of the scrollable report column that shows Dictate whole
             # (report_column_reach.py). If Minhoon answers that the row belongs on the first screen, delete the
             # reveal and this check so G0 reads the arrival state again.
             page.locator('#b-dictate').scroll_into_view_if_needed()

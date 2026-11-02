@@ -182,7 +182,7 @@ W6_REACH = '''(names) => {
   }
   return facts; }'''
 # The report action row and Save in it, for column_reach.READ around a test's own scroll to Save. W6_REACH above says a
-# wheel can reach Save; reach_problems says the test's scroll was that: the one report column moved, not the page.
+# wheel can reach Save; reach_problems says the test's scroll was that: only the report column moved, not the page.
 SAVE_ROW = ['.report-p .rbtns', '#b-save']
 # Each shown element of the report column outside those rows that paints over one of them: its box as painted (cut to
 # every ancestor up to the column that does not let its overflow show) against the row's box. The top layer (an open
@@ -802,22 +802,16 @@ class StudyPanelPageDOM(unittest.TestCase):
                 self.assertTrue(all(wheel for _, wheel in reach['scrolled']), reach)
                 page.locator('#b-save').scroll_into_view_if_needed()
                 settle(page)
-                # Judged as the served tests judge their reveal (report_column_reach.py): one report-column scroller
-                # moved, not the page, and Save is whole on all four sides after it. Two explicit exceptions:
-                # - 768x1024 portrait only: this branch's report card layout puts the card's own scroller inside the
-                #   reading column, so the reveal moves both (main 620de16 moves the reading column alone). A reader's
-                #   wheel still reaches Save there, so the layout is kept provisionally until Minhoon confirms (11-03
-                #   commander): exactly two report-column scrollers move and nothing else. Delete this exception when
-                #   that size reaches Save through one scroller again, or when Minhoon rejects the two-layer scroll.
-                # - Every size, bottom edge only, up to this file's 0.5 px (VISIBLE): the reveal scrolls whole pixels,
-                #   so Save at a fractional position can stop short of its scroller's edge by less than one. That part
-                #   is really cut off: 1024x768 on the Linux runner needed 13.45 px, scrolled 13, and left Save's bottom
-                #   0.45 px under the card's edge at 761 (Save not whole). The card had 122 px of scroll left, so the
-                #   reader's next wheel step shows Save whole. Top, left and right are still judged exactly.
+                # Judged as the served tests judge their reveal (report_column_reach.py): only user-scrollable
+                # report-column scrollers moved, not the page, and Save is whole on all four sides after it. One
+                # explicit exception, every size, bottom edge only, up to this file's 0.5 px (VISIBLE): the reveal
+                # scrolls whole pixels, so Save at a fractional position can stop short of its scroller's edge by less
+                # than one. That part is really cut off: 1024x768 on the Linux runner needed 13.45 px, scrolled 13, and
+                # left Save's bottom 0.45 px under the card's edge at 761 (Save not whole). The card had 122 px of
+                # scroll left, so the reader's next wheel step shows Save whole. Top, left and right are judged exactly.
                 revealed = page.evaluate(column_reach.READ, SAVE_ROW)
-                problems = column_reach.reach_problems(arrival, revealed, bottom_rounding=0.5,
-                                                       report_scrolls=2 if (width, height) == (768, 1024) else 1)
-                self.assertEqual([], problems, 'Save is not one report-column scroll away')
+                problems = column_reach.reach_problems(arrival, revealed, bottom_rounding=0.5)
+                self.assertEqual([], problems, 'Save is not reached by scrolling the report column')
                 self.assert_drawer_place(page, width, height)
                 scrolled = self.assert_report_usable(page, 'scrolled to the report')
                 for name in ('#b-approve', '#b-save'):

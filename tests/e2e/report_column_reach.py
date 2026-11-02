@@ -3,8 +3,9 @@
 Provisional until Minhoon confirms (11-03 commander): at 1366x768 in Reading Workspace the stacked report card may
 start the action row (`.report-p .rbtns`) below the first screen. Nobody uses the product before release, so the
 layout stays while the question is open. A test that scrolls for the reader may only do so after this module has
-recorded the arrival state, and the scroll must be one scroll of the scrollable report column, which then shows the
-entry whole. If Minhoon answers that the row must be on the first screen (or the product pins `.rbtns` in view), the
+recorded the arrival state, and the entry must be reachable by ordinary scrolling: whatever moved is a
+user-scrollable container of the report column (how many is not judged), the page itself stays put, and the entry is
+then whole in view. If Minhoon answers that the row must be on the first screen (or the product pins `.rbtns` in view), the
 callers delete their reveal and G0 / the entry hit test read the arrival state again, as before 92ddc62.
 
 READ only reads. It never scrolls, focuses or clicks.
@@ -57,15 +58,16 @@ def whole_after_rounding(entry, clip, bottom_rounding):
             and entry['left'] >= clip['left'] - LU and entry['right'] <= clip['right'] + LU)
 
 
-def reach_problems(before, after, report_scrolls=1, bottom_rounding=0):
-    """Problems with "the row is in the scrollable report column and one scroll of that column reaches its entry".
+def reach_problems(before, after, bottom_rounding=0):
+    """Problems with "the row is in the scrollable report column and ordinary scrolling of that column reaches its
+    entry".
 
     `before` is READ at arrival, `after` READ once the test's reveal has run. An entry already whole at arrival must
-    not have needed any scroll.
+    not have needed any scroll. An entry out of view at arrival needs something to have moved, and every container
+    that moved must be one the reader can scroll inside the report column; their number is not part of the judgment.
 
-    Explicit exceptions a caller turns on for itself (the defaults are the served tests' judgment):
-    `report_scrolls` - how many user-scrollable report-column containers the reveal moves (2 where a layout nests the
-    card's own scroller in the reading column). `bottom_rounding` - how far, in px, the entry's bottom may still pass
+    Explicit exception a caller turns on for itself (the default is the served tests' judgment):
+    `bottom_rounding` - how far, in px, the entry's bottom may still pass
     its clip after the reveal: a script scroll moves whole pixels, so an entry at a fractional position can stop short
     of the edge by less than one. That part is really cut off until the reader's next wheel step. Top, left and right
     are still judged exactly."""
@@ -88,13 +90,11 @@ def reach_problems(before, after, report_scrolls=1, bottom_rounding=0):
     if not any(s['user'] and s['reportColumn'] and s['max'] > 0 for s in before['scrollers']):
         problems.append('reach: the entry %r is out of view (clip %r) and no scrollable report column holds the row'
                         % (before['entry'], before['entryClip']))
-    if len(moved) != report_scrolls:
-        problems.append('reach: %d scroll containers moved %s; %d scroll(s) of the report column must reach the row'
-                        % (len(moved), [b['name'] for b, _ in moved], report_scrolls))
-    else:
-        for b, _ in moved:
-            if not (b['user'] and b['reportColumn']):
-                problems.append('reach: %s moved, which is not a user-scrollable report column' % b['name'])
+    if not moved:
+        problems.append('reach: nothing scrolled, yet the entry was out of view at arrival')
+    for b, _ in moved:
+        if not (b['user'] and b['reportColumn']):
+            problems.append('reach: %s moved, which is not a user-scrollable report column' % b['name'])
     whole = after['entryWhole'] or (bottom_rounding > 0 and after.get('entry') and after.get('entryClip')
                                     and whole_after_rounding(after['entry'], after['entryClip'], bottom_rounding))
     if not whole:
@@ -112,14 +112,18 @@ def self_check():
              'entryWhole': False, 'scrollers': [inner, column], 'document': [0, 0]}
     revealed = dict(below, entryWhole=True, scrollers=[inner, dict(column, top=69)])
     problems = []
-    if reach_problems(below, revealed):
-        problems.append('one scroll of the report column revealing the entry must pass: %r' % reach_problems(below, revealed))
+    nested = dict(revealed, scrollers=[dict(inner, top=14), dict(column, top=55)])
+    for label, after in (('one report-column scroll', revealed), ('two report-column scrolls', nested)):
+        if reach_problems(below, after):
+            problems.append('%s revealing the entry must pass: %r' % (label, reach_problems(below, after)))
     shown = dict(below, entryWhole=True)
     if reach_problems(shown, shown):
         problems.append('an entry already in view with nothing scrolled must pass')
+    outside = [inner, dict(column, reportColumn=False)]
     rejected = (
         ('a page scroll', below, dict(revealed, document=[40, 0])),
-        ('two scrolls', below, dict(revealed, scrollers=[dict(inner, top=14), dict(column, top=55)])),
+        ('two scrolls, one outside the report column', dict(below, scrollers=outside),
+         dict(nested, scrollers=[dict(s, top=t) for s, t in zip(outside, (14, 55))])),
         ('a scroll that leaves the entry out of view', below, dict(revealed, entryWhole=False)),
         ('no scroll at all', below, dict(below)),
         ('a script-only scroll', dict(below, scrollers=[inner, dict(column, user=False)]),
@@ -132,19 +136,13 @@ def self_check():
     for label, before, after in rejected:
         if not reach_problems(before, after):
             problems.append('reach must reject %s' % label)
-    # The explicit exceptions. A 100x22 Save at the bottom of a card clipped to 900..1000 x 0..761 after one scroll.
+    # The explicit exception. A 100x22 Save at the bottom of a card clipped to 900..1000 x 0..761 after the scroll.
     clip = {'top': 0, 'bottom': 761, 'left': 900, 'right': 1000}
     save = {'top': 739.45, 'bottom': 761.45, 'left': 900, 'right': 1000}
     cut = lambda **edges: dict(revealed, entryWhole=False, entry=dict(save, **edges), entryClip=clip)
-    nested = dict(revealed, scrollers=[dict(inner, top=14), dict(column, top=55)])
-    accepted = (
-        ('0.45 px of bottom left by a whole-pixel scroll, with bottom_rounding', cut(), {'bottom_rounding': 0.5}),
-        ('two report-column scrolls, with report_scrolls=2', nested, {'report_scrolls': 2}),
-    )
-    for label, after, options in accepted:
-        if reach_problems(below, after, **options):
-            problems.append('reach must pass %s: %r' % (label, reach_problems(below, after, **options)))
-    outside = [inner, dict(column, reportColumn=False)]
+    if reach_problems(below, cut(), bottom_rounding=0.5):
+        problems.append('reach must pass 0.45 px of bottom left by a whole-pixel scroll, with bottom_rounding: %r'
+                        % reach_problems(below, cut(), bottom_rounding=0.5))
     rejected = (
         ('0.45 px of bottom without bottom_rounding', below, cut(), {}),
         ('a bottom cut by 60 px', below, cut(bottom=821), {'bottom_rounding': 0.5}),
@@ -152,10 +150,6 @@ def self_check():
         ('a 160 px Save cut by 60 px on the left', below, cut(bottom=761, left=840), {'bottom_rounding': 0.5}),
         ('0.45 px cut on the right', below, cut(bottom=761, right=1000.45), {'bottom_rounding': 0.5}),
         ('0.45 px cut at the top', below, cut(top=-0.45, bottom=21.55), {'bottom_rounding': 0.5}),
-        ('two report-column scrolls without report_scrolls', below, nested, {}),
-        ('one scroll where report_scrolls=2', below, revealed, {'report_scrolls': 2}),
-        ('two scrolls, one outside the report column', dict(below, scrollers=outside),
-         dict(nested, scrollers=[dict(s, top=t) for s, t in zip(outside, (14, 55))]), {'report_scrolls': 2}),
     )
     for label, before, after, options in rejected:
         if not reach_problems(before, after, **options):
