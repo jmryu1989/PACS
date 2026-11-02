@@ -696,7 +696,7 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
 
     # ---- O-1 / O-2: the structured entry dialog in the real workspace -------------------------
     def bound_holds(self, seen, when):
-        """The drawer's top edge must stay clear of the report's control row.
+        """The drawer and the report's control row must not overlap.
 
         Asserted from the rendered rectangles, never from the stylesheet's text: what matters is
         where the panel actually ended up at this width and height, which is the only thing that
@@ -710,10 +710,10 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         self.assertTrue(drawer and controls and fields,
                         'geometry missing %s: drawer=%s controls=%s fields=%s'
                         % (when, drawer, controls, fields))
-        self.assertGreaterEqual(
-            drawer['y'], controls['b'],
-            'the Image Findings drawer top %d covers the report control row %s %s (fields top %d) - '
-            'the runtime bound did not apply' % (drawer['y'], controls, when, fields['y']))
+        self.assertTrue(
+            drawer['b'] <= controls['y'] or drawer['y'] >= controls['b'],
+            'the Image Findings drawer %s overlaps the report control row %s %s (fields %s) - '
+            'the runtime bound did not apply' % (drawer, controls, when, fields))
 
     def entry_pass(self, w, f, width, height):
         """One viewport, and it prints its numbers whatever happens.
@@ -732,8 +732,18 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         w.evaluate(COPY_PROBE)
         expect(w.locator('#reading-findings')).to_be_visible()
         expect(w.locator('#structmodal')).to_be_hidden()
-        initial, measured, reached = None, None, []
+        initial, measured, before_scroll, reached = None, None, None, []
         try:
+            before_scroll = w.evaluate(ENTRY_GEOMETRY)
+            self.bound_holds(before_scroll, 'before scrolling at %dx%d' % (width, height))
+            button = before_scroll['controls']['b-structured']['rect']
+            if button['b'] > height or button['y'] < 30:
+                # More expands below the stacked editor. Reveal its lower controls with a real
+                # wheel in the report's scrollable column; the drawer remains open throughout.
+                report = w.locator('.report-p').bounding_box()
+                w.mouse.move(report['x'] + 12, min(height - 15, report['y'] + report['height'] - 15))
+                w.mouse.wheel(0, height if button['b'] > height else -height)
+                w.evaluate('()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))')
             initial = w.evaluate(ENTRY_GEOMETRY)
             # The bound, from rendered rectangles rather than from the stylesheet's text. The drawer
             # is opened once, before the first viewport, so on the second pass this is also the
@@ -784,9 +794,10 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
             expect(w.locator('#findings')).to_have_value(f.secret); reached.append('cancel-closes')
             # The positive keeps the two negatives from passing for the wrong reason: same key, same
             # kind of focus, no dialog open, and a target the screen says is available.
-            expect(w.locator('#copy-patient-id')).to_be_enabled()
-            w.locator('#copy-patient-id').focus()
-            expect(w.locator('#copy-patient-id')).to_be_focused()
+            # Copy Patient ID now uses its keyboard shortcut; the former button is hidden.
+            # Keep the positive probe on a visible button, like the modal negatives.
+            w.locator('#b-structured').focus()
+            expect(w.locator('#b-structured')).to_be_focused()
             w.keyboard.press('Control+Alt+c')
             expect(w.locator('#copy-patient-status')).to_have_text('환자 ID를 복사했습니다.')
             self.assertEqual([f.patient_id], w.evaluate('()=>window.copyCalls')); reached.append('positive')
@@ -796,10 +807,10 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
                     measured = w.evaluate(ENTRY_GEOMETRY)
                 except Exception as error:
                     measured = dict(error=str(error))
-            # `initial` is the state nothing had touched yet, `measured` the state at the failure or
-            # at the end. Keeping both apart is what tells a later reader whether a control moved.
+            # Keep the raw resized geometry, the user-revealed entry and the modal/failure state
+            # separate so a reader can distinguish scrolling from drawer interception.
             print('R15-ENTRY ' + json.dumps(dict(viewport=[width, height], reached=reached,
-                                                 initial=initial, measured=measured),
+                                                 beforeScroll=before_scroll, initial=initial, measured=measured),
                                             ensure_ascii=False), flush=True)
 
     def test_worklist_07_structured_entry_over_the_findings_drawer_and_the_copy_shortcut(self):

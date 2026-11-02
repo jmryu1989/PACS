@@ -213,7 +213,7 @@ GEOMETRY = """() => {
   }
   return { viewport: { w: innerWidth, h: innerHeight }, reading: document.body.classList.contains('reading'),
     rightScrollTop: right ? right.scrollTop : null, menubar: box(q('.menubar')), rbtns: box(q('.report-p .rbtns')),
-    pane: box(pane), paneHidden: pane ? !!pane.hidden : null,
+    pane: box(pane), paneHidden: pane ? !!pane.hidden : null, reportColumn: box(q('.report-p')),
     redit: box(q('.report-p .redit')), reditMin: minHeight(q('.report-p .redit')), fields,
     rfoot: box(q('.report-p .rfoot2')), rfootInside: whole(q('.report-p .rfoot2')),
     drawer: box(drawer), drawerShown: !!drawer && !drawer.hidden,
@@ -939,8 +939,14 @@ def geo_problems(state, initial, measured):
         problems.append('G3 %s: drawer or pane missing (drawerShown=%r)' % (state, measured.get('drawerShown')))
     elif drawer['y'] < pane['b']:
         problems.append('G3 %s: drawer top %d above pane bottom %d (bound %r)' % (state, drawer['y'], pane['b'], measured.get('drawerTop')))
-    if not pane or not rbtns or pane['y'] < rbtns['b']:
-        problems.append('G4 %s: pane %s not below the report buttons %s' % (state, pane, rbtns))
+    redit, column = measured.get('redit'), measured.get('reportColumn')
+    if not pane or not rbtns or not (pane['b'] <= rbtns['y'] or pane['y'] >= rbtns['b']):
+        problems.append('G4 %s: pane %s overlaps the report buttons %s' % (state, pane, rbtns))
+    if not pane or not redit or pane['b'] > redit['y']:
+        problems.append('G4 %s: pane %s overlaps the report fields %s' % (state, pane, redit))
+    if not pane or not column or pane['x'] < column['x'] or pane['x'] + pane['w'] > column['x'] + column['w'] \
+            or pane['y'] < column['y'] or pane['b'] > column['b']:
+        problems.append('G4 %s: pane %s outside the report column %s' % (state, pane, column))
     if not own('m-reading'):
         problems.append('G4 %s: #m-reading covered (top %s)' % (state, top('m-reading')))
     redit, redit_min = measured.get('redit'), (measured.get('reditMin') or {}).get('px')
@@ -1048,13 +1054,14 @@ def generated_secret_names():
 
 
 def sample_geometry(state_ok=True, **changes):
-    """A consistent layout for oracle_self_check: buttons, then the pane, then the fields and the drawer below."""
+    """A consistent stacked report: pane, fields with the bounded drawer, then the action row."""
     def control(y):
         return {'present': True, 'own': True, 'topId': 'x', 'hidden': False, 'disabled': False,
                 'rect': {'x': 900, 'y': y, 'w': 40, 'h': 20, 'b': y + 20}}
     geometry = {'viewport': {'w': 1680, 'h': 1100}, 'reading': False, 'rightScrollTop': 0,
                 'menubar': {'x': 0, 'y': 0, 'w': 1680, 'h': 30, 'b': 30},
-                'rbtns': {'x': 800, 'y': 230, 'w': 800, 'h': 26, 'b': 256},
+                'reportColumn': {'x': 800, 'y': 230, 'w': 800, 'h': 576, 'b': 806},
+                'rbtns': {'x': 800, 'y': 780, 'w': 800, 'h': 26, 'b': 806},
                 'pane': {'x': 800, 'y': 256, 'w': 800, 'h': 120, 'b': 376}, 'paneHidden': not state_ok,
                 'redit': {'x': 800, 'y': 376, 'w': 800, 'h': 400, 'b': 776}, 'reditMin': {'raw': 'auto', 'px': None},
                 'fields': {name: {'box': {'x': 810, 'y': 400, 'w': 780, 'h': 100, 'b': 500}, 'min': {'raw': '50px', 'px': 50}}
@@ -1262,13 +1269,20 @@ def oracle_self_check():
             ('a covered Insert', 'review', covered('dictation-insert', stood)), ('a covered status', 'failed', covered('dictation-status')),
             ('a drawer over the pane', 'recording', dict(measured, drawer=dict(measured['drawer'], y=300))),
             ('a hidden drawer', 'failed', dict(measured, drawerShown=False)),
-            ('a pane above the buttons', 'failed', dict(measured, pane=dict(measured['pane'], y=250))),
             ('a covered Reading Workspace toggle', 'recording', covered('m-reading')),
             ('a squeezed field', 'recording', dict(measured, fields=dict(measured['fields'], conclusion={
                 'box': dict(measured['fields']['conclusion']['box'], h=20), 'min': {'raw': '34px', 'px': 34}}))),
             ('an unreachable findings field in review', 'review', dict(stood, findingsProbe=dict(stood['findingsProbe'], own=False))),
             ('a footer pushed out', 'failed', dict(measured, rfootInside=False))):
         expect_problem(label, geo_problems(state, initial, value))
+    for label, changes in (
+            ('pane covers buttons', dict(rbtns=dict(measured['rbtns'], y=300, b=326))),
+            ('pane covers fields', dict(pane=dict(measured['pane'], b=400, h=144))),
+            ('pane outside column', dict(pane=dict(measured['pane'], x=790)))):
+        for state in GEO_CONTROLS:
+            sample = stood if state == 'review' else measured
+            if not any(p.startswith('G4 ' + state) for p in geo_problems(state, initial, dict(sample, **changes))):
+                problems.append('G4 must reject %s in %s' % (label, state))
     # The paired G3 contract, each rejected by G3 itself: phase A must keep the drawer shown and bounded,
     # review must have it stood down with a reachable toggle that says so.
     for label, state, value, limb in (
@@ -2656,6 +2670,11 @@ class DictationLiveE2E(test_worklist.WorklistE2E):
             run.js('frames2')
             self.enter_layout(run, layout, rec)
             rec['drawer_reopen'] = self.reopen_drawer(run)
+            run.js('frames2')
+            rec['before_entry_reveal'] = run.js('geometry')
+            # The stacked card may start below the viewport. Reveal the entry as a reader would;
+            # G0 still rejects interception, and all subsequent geometry reads remain observational.
+            page.locator('#b-dictate').scroll_into_view_if_needed()
             run.js('frames2')
             initial = rec['initial'] = run.js('geometry')
             rec['reached'].append('initial')

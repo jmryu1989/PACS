@@ -45,7 +45,7 @@ class EmergencyConfirmE2E(WorklistE2E):
         f=self.fixture();self.seed_report(f);before=self.report_rows(f)
         doctor=self.login();self.select(doctor,f);doctor.locator('#findings').fill('unsaved emergency confirmation')
         p=self.technician(f);old=[];p.route('**/api/studies?*',lambda route:old.append(route))
-        p.locator('#refresh').click();self.wait_pending(p,old);snapshot=old[0].fetch();self.assertEqual(snapshot.status,200)
+        p.locator('#m-refresh').click();self.wait_pending(p,old);snapshot=old[0].fetch();self.assertEqual(snapshot.status,200)
         self.context_action(p,f,'Switch to Emergency');expect(self.badge(p,f)).to_have_text('E')
         old.pop().fulfill(response=snapshot);p.unroute('**/api/studies?*');p.wait_for_timeout(200)
         expect(self.badge(p,f)).to_have_text('E');self.assertEqual(p.evaluate('(uid)=>appState[uid].em',f.uid),'E')
@@ -55,7 +55,7 @@ class EmergencyConfirmE2E(WorklistE2E):
         p.route(pattern,lost);self.context_action(p,f,'Switch to Normal');expect(self.badge(p,f)).to_have_text('Unverified')
         self.assertEqual(self.state(f)['em'],'N');p.unroute(pattern)
         self.context_action(p,f,'Refresh Status');expect(self.badge(p,f)).to_have_text('')
-        doctor.locator('#refresh').click();expect(doctor.locator('#findings')).to_have_value('unsaved emergency confirmation')
+        doctor.locator('#m-refresh').click();expect(doctor.locator('#findings')).to_have_value('unsaved emergency confirmation')
         self.assertEqual(self.report_rows(f),before)
 
     def test_emergency_03_menu_intent_and_pending_report_commit(self):

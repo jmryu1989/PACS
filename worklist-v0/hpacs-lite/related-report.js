@@ -139,7 +139,8 @@
       clearRelatedReport();
       renderClinical(); renderRelated(); renderThumbs(); renderTemplates();
       if (left) { criticalInbox?.sync(); updateReportButtons(); renderDraftBar(); relatedMode.restore(left); return; }
-      $("#related-current").focus({ preventScroll: true });
+      // The old duplicate target caption is hidden in the stacked layout.
+      $("#clinical").focus({ preventScroll: true });
     }
 
     /**

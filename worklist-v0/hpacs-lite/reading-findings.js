@@ -71,14 +71,15 @@ window.KinReadingFindings = function (app) {
 
   /* ---------- keeping the panel off the report's controls ---------- */
   /**
-   * This panel is fixed to the bottom-right corner, so its top edge is `viewport − 12px − height`
-   * and rises as the screen gets shorter. At 1366×768 that put it over the report's button row and
+   * With the original fixed 12px bottom inset, the panel rose as the screen got shorter.
+   * At 1366×768 that put it over the report's button row and
    * `Structured` could not be pressed at all - measured on a real run, not predicted.
    *
    * The upper bound is not a number anyone picked. It is the top of the report's **field region**
    * at the current width, read back into the panel's own `max-height` (reading-workspace.css:84).
-   * That answer accounts for the button row wrapping and for the bars and the dictation pane
-   * appearing above the fields, in both layouts - provided it is read again whenever one of them
+   * The stacked layout also bounds the bottom four pixels above the action row below the fields.
+   * Both bounds follow the bars and dictation pane above the fields and the action row below them,
+   * in both layouts - provided they are read again whenever one of them
    * changes, which is what the sources below are for. Leaving the property off means
    * `100vh − 12px`, which is larger than both caps - the behaviour that shipped before this bound
    * existed.

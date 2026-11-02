@@ -58,6 +58,7 @@ class ReturnToCurrentE2E(previous.RelatedContextE2E):
         self.return_with_thumbnail(page, current)
         for name,value in values.items():expect(page.locator("#" + name)).to_have_value(value)
         expect(page.locator(f'#rows tr[data-uid="{current.uid}"]')).to_have_class(re.compile(r"\bsel\b"))
+        self.show_workspace_panels(page, 'Thumbnail')
         with page.context.expect_page() as opened:
             page.locator("#thumbwrap img").dblclick()
         viewer = opened.value
@@ -107,7 +108,7 @@ class ReturnToCurrentE2E(previous.RelatedContextE2E):
         reply = reports[1].fetch(); stale = reply.json(); stale[0]["findings"] = "D03C old generation"
         reports[1].fulfill(response=reply, json=stale); page.wait_for_timeout(150)
         expect(page.locator("#prior-findings")).to_have_text(related.secret)
-        expect(page.locator("#prior-report-meta")).to_contain_text("이후 · ")
+        expect(page.locator("#prior-report-meta")).to_contain_text("Later · ")
         self.assertEqual(writes, [])
         for fixture in (current, related):self.assertEqual(self.report_rows(fixture), rows[fixture.uid])
         self.assertEqual(self.originals(), originals)
@@ -130,19 +131,19 @@ class ReturnToCurrentE2E(previous.RelatedContextE2E):
         for name,value in values.items():page.locator("#" + name).fill(value)
         self.wait_state(page, current, lambda s: s.get("holder") == self.stack.actor("doctor"))
         rows = {f.uid: self.report_rows(f) for f in (current, related)}
-        requests = []; page.on("request", lambda r: requests.append((r.method,r.url)) if "/api/studies/" in r.url else None)
+        writes = self.source_writes(page, allowed_draft_uid=current.uid)
         folder = previous.previous.base.Path(__file__).parent / "artifacts"; folder.mkdir(exist_ok=True)
         page.set_viewport_size(dict(width=900,height=600))
         expect(page.locator("#related-return")).to_be_in_viewport(ratio=1)
         page.screenshot(path=str(folder / "d03c-return-900x600.png"))
         page.locator("#related-return").focus(); page.locator("#related-return").press("Enter")
-        expect(page.locator("#related-current")).to_be_focused()
+        expect(page.locator("#clinical")).to_be_focused()
         expect(page.locator("#related-return")).to_be_disabled()
         expect(page.locator("#clinical")).to_contain_text("D03A current")
         for name,value in values.items():expect(page.locator("#" + name)).to_have_value(value)
         self.assertEqual(self.state(current)["holder"], self.stack.actor("doctor"))
         # Routine autosave may independently persist these freshly typed fields; return must not commit/release.
-        self.assertFalse(any(method in ("POST","PATCH","DELETE") for method,url in requests))
+        self.assertEqual([], writes)
         after = self.report_rows(current)
         for table in ("Report","ReportVersion"):self.assertEqual(after[table], rows[current.uid][table])
         for row in after["ReportDraft"]:

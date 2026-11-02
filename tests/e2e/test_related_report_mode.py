@@ -100,7 +100,7 @@ class RelatedReportModeE2E(TemplatePreservationE2E):
         }""", len(SOURCE_LINE))
         page.locator("#related-mode-insert").click()
         dialog = page.locator("#related-insert-dialog")
-        expect(dialog).to_be_hidden()
+        expect(dialog).to_have_count(0)
         notice = page.locator("#report-notice")
         expect(notice).to_contain_text("Result Unknown")
         self.assertEqual((len(sent), len(lost)), (1, 1))

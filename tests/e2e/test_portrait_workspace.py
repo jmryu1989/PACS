@@ -18,6 +18,11 @@ from test_prior_selection import synthetic_ct
 
 
 class PortraitWorkspaceE2E(base.WorklistE2E):
+    def portrait_page(self, actor="doctor"):
+        page = super().login(actor)
+        self.show_workspace_panels(page, 'Thumbnail', 'Reading Template')
+        return page
+
     def fixture(self, patient_id=None):
         fixture = synthetic_ct(self.stack, patient_id or "D02A-" + uuid.uuid4().hex[:16],
                                "D2" + uuid.uuid4().hex[:8], date.today().strftime("%Y%m%d"), slices=1)
@@ -87,7 +92,7 @@ class PortraitWorkspaceE2E(base.WorklistE2E):
         """ACCESS/RESIZE/COST: visible real content, scroll reachability and no reload on layout."""
         fixture = self.fixture()
         self.seed_report(fixture)
-        page = self.login()
+        page = self.portrait_page()
         self.select(page, fixture)
         self.wait_thumbnail(page)
         history = self.versions(fixture)
@@ -123,16 +128,19 @@ class PortraitWorkspaceE2E(base.WorklistE2E):
             self.assertLess(page.locator(".rw").bounding_box()["height"], old - 5)
             self.open_toolbar_group(page, "#layout-toggle")
             page.locator("#layout-toggle").click()  # auto -> portrait
+            self.close_toolbar_groups(page)
             page.set_viewport_size({"width": 1600, "height": 1000})
             expect(page.locator("body")).to_have_class(re.compile(r"\bportrait\b"))
             self.open_toolbar_group(page, "#b-history")
             self.reachable(page, "#b-history")
             self.open_toolbar_group(page, "#layout-toggle")
             page.locator("#layout-toggle").click()  # portrait -> landscape
+            self.close_toolbar_groups(page)
             expect(page.locator("body")).not_to_have_class(re.compile(r"\bportrait\b"))
             self.snapshot(page, "1600-landscape")
             self.open_toolbar_group(page, "#layout-toggle")
             page.locator("#layout-toggle").click()  # landscape -> auto
+            self.close_toolbar_groups(page)
             self.portrait(page)
             self.open_toolbar_group(page, "#b-history")
             self.reachable(page, "#b-history")
@@ -169,13 +177,16 @@ class PortraitWorkspaceE2E(base.WorklistE2E):
         self.seed_report(related, action="approve")
         template = self.template()
         history = {f.uid: self.versions(f) for f in [current, related]}
-        page = self.login()
+        page = self.portrait_page()
         self.portrait(page)
         self.select(page, current)
         page.locator(f'#relrows tr[data-uid="{related.uid}"]').click()
         expect(page.locator("#prior-findings")).to_contain_text(related.secret)
         self.wait_thumbnail(page)
         expect(page.locator("#clinical")).to_contain_text(patient)
+        expect(page.locator("#report-editor-state")).to_have_text("Read Only")
+        page.locator("#report-editor-resume").click()
+        expect(page.locator("#report-editor-state")).to_have_text("Editable")
         page.locator("#tplrows").get_by_text(template["title"], exact=True).dblclick()
         expected = current.secret + "\n" + template["findings"]
         expect(page.locator("#findings")).to_have_value(expected)
@@ -199,11 +210,11 @@ class PortraitWorkspaceE2E(base.WorklistE2E):
         """MODE: technician access, filming locks and approved commit restrictions survive portrait."""
         fixture = self.fixture()
         self.patch(fixture, ss="Unverified", em="N")
-        doctor = self.login()
+        doctor = self.portrait_page()
         self.portrait(doctor)
         self.select(doctor, fixture)
         self.locked(doctor)
-        tech = self.login("tech")
+        tech = self.portrait_page("tech")
         self.portrait(tech, 768, 1024)
         tech.locator('[data-tab="Technician"]').click()
         self.select(tech, fixture)

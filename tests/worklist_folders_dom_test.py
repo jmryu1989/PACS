@@ -145,6 +145,21 @@ class WorklistFoldersDOM(unittest.TestCase):
         expect(self.page.locator('#worklist-folders-panel')).to_have_attribute('open', '')
         expect(self.page.get_by_role('button', name='All Studies (6)', exact=True)).to_be_visible()
 
+    def test_empty_list_returns_keyboard_focus_to_visible_search(self):
+        """REQ-D01-ROW-KEYBOARD: disappearing rows retain a visible keyboard destination."""
+        self.open()
+        page = self.page
+        page.wait_for_function('rowNavigation !== null')
+        self.assertIsNone(page.locator('#toolbar-filters').get_attribute('open'))
+        row = page.locator('#rows tr[tabindex="0"]')
+        row.focus()
+        expect(row).to_be_focused()
+        page.evaluate('()=>{studies=[];render();}')
+        expect(page.locator('#rows tr[data-uid]')).to_have_count(0)
+        search = page.locator('#filterrow [data-f="id"]')
+        expect(search).to_be_visible()
+        expect(search).to_be_focused()
+
     def folder(self, text):
         return self.page.get_by_role('navigation', name='Folders').get_by_role('button', name=re.compile('^'+re.escape(text)+r' \('))
 

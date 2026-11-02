@@ -155,6 +155,7 @@ class W6DoctorPathE2E(TemplatePreservationE2E):
    self.select(page,fixture);checkpoint('open study')
    page.locator('#findings').click();page.keyboard.press('Control+A');page.keyboard.type('SYN W6 TYPED')
    checkpoint('type')
+   self.show_workspace_panels(page, 'Reading Template')
    page.locator('#tpl-search').fill(template['title'])
    page.locator('#tplrows').get_by_text(template['title'],exact=True).dblclick()
    expect(page.locator('#findings')).to_have_value('SYN W6 TYPED\nSYN W6 TEMPLATE')
