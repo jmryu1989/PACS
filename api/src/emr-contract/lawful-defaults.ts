@@ -733,25 +733,27 @@ function receiptCompletedAt(value: unknown, operationId: string, unitIds: readon
 }
 const DESTRUCTION_KEYS = ['formatVersion', 'kind', 'revision', 'operationId', 'phase', 'occurredAt', 'day', 'disposalUnitId', 'classes',
   'clauseIds', 'partCount', 'expiryDay', 'extensionUsed', 'dueDay', 'timeliness', 'method', 'justifiedDelay', 'delayReasonStatus', 'basis'];
-/** H's reconciliation when the deletion committed but its completion write was lost: the same execution's started
- * record, completed at the durable deletion confirmation. Timeliness comes from the stored due day, so a late
- * confirmation stays late; the unit, classes and delay reason are the started record's own. */
-export function completedFromStarted(input: unknown, completedAt: string): Readonly<DestructionRecord> {
+/** H's reconciliation of an interrupted execution from its own started record: completed at the durable deletion
+ * confirmation when the deletion committed but its completion write was lost, or failed at the actual failure time.
+ * Timeliness comes from the stored due day, so a late confirmation stays late; unit, classes and reason are unchanged. */
+function fromStarted(input: unknown, phase: 'completed' | 'failed', at: string): Readonly<DestructionRecord> {
   let s: Record<string, any>;
   try {
-    s = object(input, DESTRUCTION_KEYS); string(s.operationId); opaqueUnit(s.disposalUnitId); utc(s.occurredAt); utc(completedAt);
+    s = object(input, DESTRUCTION_KEYS); string(s.operationId); opaqueUnit(s.disposalUnitId); utc(s.occurredAt); utc(at);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(s.dueDay)) throw new Error('due day');
   } catch { refuse('StartedDestructionRequired'); }
   if (s.formatVersion !== 2 || s.kind !== 'operational-deletion' || s.phase !== 'started' || s.revision !== 1 ||
-      s.method !== 'operational-store-deletion' || completedAt < s.occurredAt) refuse('StartedDestructionRequired');
+      s.method !== 'operational-store-deletion' || at < s.occurredAt) refuse('StartedDestructionRequired');
   const [y, m, d] = s.dueDay.split('-').map(Number);
   const due = new Date(Date.UTC(y, m - 1, d + 1) - SEOUL_MS).toISOString();
-  const timeliness = completedAt < due ? 'within-five-days' as const : 'overdue' as const;
+  const timeliness = at < due ? 'within-five-days' as const : 'overdue' as const;
   const justifiedDelay = s.justifiedDelay === null ? null : parseJustifiedDelay(s.justifiedDelay);
-  return freeze({ ...structuredClone(s), phase: 'completed' as const, occurredAt: completedAt, day: seoulDay(completedAt), timeliness,
+  return freeze({ ...structuredClone(s), phase, occurredAt: at, day: seoulDay(at), timeliness,
     delayReasonStatus: timeliness === 'within-five-days' ? 'not-required' as const : justifiedDelay ? 'recorded' as const : 'missing' as const,
   }) as Readonly<DestructionRecord>;
 }
+export function completedFromStarted(input: unknown, completedAt: string): Readonly<DestructionRecord> { return fromStarted(input, 'completed', completedAt); }
+export function failedFromStarted(input: unknown, failedAt: string): Readonly<DestructionRecord> { return fromStarted(input, 'failed', failedAt); }
 /** One execution (a unit or a whole SCC): durable execution set → started for every unit → operational deletion →
  * every completion in one write. A failure records `failed` at its actual time for every unit it can and stops. */
 async function executeSet<T>(store: DisposalAuditStore | BatchDisposalAuditStore, entries: readonly ExecutionEntry[], requestedAt: string,

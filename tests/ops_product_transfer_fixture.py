@@ -124,7 +124,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261029130000_emr_preparation_manifest_index/migration.sql',
               'api/prisma/migrations/20261030120000_preload_cache_key/migration.sql',
               'api/prisma/migrations/20261030130000_writer_institution/migration.sql',
-              'api/prisma/migrations/20261102140000_cd10_access_seen/migration.sql']
+              'api/prisma/migrations/20261102140000_cd10_access_seen/migration.sql',
+              'api/prisma/migrations/20261103120000_cd09_retention_journal/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -146,7 +147,7 @@ PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences', 'em
 # EMR-B1: schema emr_access, observed schema-qualified (the public catalog above never sees it).
 EMR_TABLES = sorted(['access_entry', 'access_target', 'audit_projection', 'clause_version', 'duty_request_event',
     'legal_hold_event', 'member_identity', 'order_fact', 'ledger_metadata', 'operation', 'attempt', 'attempt_outcome',
-    'entry_receipt', 'failure_entry', 'disposal_fact'])
+    'entry_receipt', 'failure_entry', 'disposal_fact', 'retention_journal', 'retention_unit', 'retention_execution', 'retention_commit'])
 EMR_ROLES = ['kin_emr_owner', 'kin_emr_reader', 'kin_emr_retention', 'kin_runtime']
 # The read-only fixture container's only writable non-data mount; the compose deployment uses its own volume.
 EMR_TABLESPACE = '/tmp/emr-access/ts'

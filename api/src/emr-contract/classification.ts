@@ -128,6 +128,9 @@ export const SQL_STORAGE_CLASSIFICATION: Readonly<Record<string, readonly Record
   'emr_access.member_identity': ['identity-access'],
   'emr_access.legal_hold_event': ['legal-duty'], 'emr_access.duty_request_event': ['legal-duty'],
   'emr_access.clause_version': ['legal-reference'],
+  // CD-09a: H's own process records. The unit mapping and execution rows are erased with the unit they name.
+  'emr_access.retention_journal': ['system-operation'], 'emr_access.retention_unit': ['system-operation'],
+  'emr_access.retention_execution': ['system-operation'], 'emr_access.retention_commit': ['system-operation'],
   'emr_access.order_fact': ['order', 'order-indication', 'exam-clinical-info', 'received-order', 'order-exam-component'],
 });
 /** D-19 storage boundary: chart incorporation facts come from the hospital EMR or the treating physician's chart (C/H). */

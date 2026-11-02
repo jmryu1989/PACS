@@ -1,7 +1,7 @@
 """One host-scheduled daily invocation of the opt-in retention Compose profile.
 
-CD-09 is incomplete: only the existing PG ledger sweep is wired. The worker
-returns nonzero while clinical inventory, destruction and journals are unbound.
+CD-09a wires the PG ledger sweep and native report units. The worker returns
+nonzero until every phase is connected (images: CD-09b) and nothing is unread.
 This command neither installs a schedule nor enables production retention.
 """
 from __future__ import annotations

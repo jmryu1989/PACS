@@ -304,6 +304,8 @@
       "api/prisma/schema.prisma",
       "api/src/emr-contract/**",
       "api/src/emr-retention/**",
+      "api/src/emr-runtime/**",
+      "api/src/emr-signature/**",
       "api/tsconfig*.json",
       "docker-compose*.yml",
       "keycloak/**",

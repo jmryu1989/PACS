@@ -27,7 +27,7 @@ def fixture_compose(directory, project, image, https_port, orthanc_port):
         service.pop('container_name', None)
         service['restart'] = 'no'
         if 'build' in service:
-            if name in ('api', 'api-migrate'):
+            if name in ('api', 'api-migrate', 'retention'):
                 service.pop('build')
                 service['image'] = image
             else:

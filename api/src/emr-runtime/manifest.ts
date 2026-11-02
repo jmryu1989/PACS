@@ -11,7 +11,9 @@ export const EMR_STORAGE = freeze({
   schema: 'emr_access', tablespace: 'kin_emr_access',
   roles: { owner: 'kin_emr_owner', runtime: 'kin_runtime', reader: 'kin_emr_reader', retention: 'kin_emr_retention' },
   tables: ['access_entry','access_target','audit_projection','clause_version','duty_request_event','legal_hold_event',
-    'member_identity','order_fact','ledger_metadata','operation','attempt','attempt_outcome','entry_receipt','failure_entry','disposal_fact'],
+    'member_identity','order_fact','ledger_metadata','operation','attempt','attempt_outcome','entry_receipt','failure_entry','disposal_fact',
+    // CD-09a: H's destruction journal, unit mapping, execution fence and commit marker.
+    'retention_journal','retention_unit','retention_execution','retention_commit'],
 });
 
 /** Prisma's parameterized raw query surface, from a client or an interactive transaction. */

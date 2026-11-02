@@ -188,7 +188,7 @@ services:
       - ./api/prisma:/app/prisma:ro
 
   # CD-09: invoked once by ops_retention_sweep.py from the host daily scheduler.
-  # Profile remains opt-in; clinical destruction is not yet connected (exit 1).
+  # Profile remains opt-in. CD-09a connects native report units (PostgreSQL); images are CD-09b, so a run exits 1.
   retention:
     profiles: [retention]
     build:

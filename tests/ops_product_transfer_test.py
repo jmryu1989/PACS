@@ -479,7 +479,8 @@ class Pure(unittest.TestCase):
                          {'access_entry': 2, 'access_target': 0, 'audit_projection': 0, 'clause_version': 1,
                           'duty_request_event': 0, 'legal_hold_event': 2, 'member_identity': 1, 'order_fact': 1,
                           'ledger_metadata': 1, 'operation': 2, 'attempt': 2, 'attempt_outcome': 2, 'entry_receipt': 2,
-                          'failure_entry': 0, 'disposal_fact': 0})
+                          'failure_entry': 0, 'disposal_fact': 0, 'retention_journal': 0, 'retention_unit': 0,
+                          'retention_execution': 0, 'retention_commit': 0})
         first, second = emr['access_entry']
         for entry, operation, attempt, outcome, receipt in zip(emr['access_entry'], emr['operation'], emr['attempt'],
                 emr['attempt_outcome'], emr['entry_receipt']):

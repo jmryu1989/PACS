@@ -106,7 +106,11 @@
       "legal_hold_event",
       "member_identity",
       "operation",
-      "order_fact"
+      "order_fact",
+      "retention_commit",
+      "retention_execution",
+      "retention_journal",
+      "retention_unit"
     ],
     "runtime_functions": [
       "storage_placement()",
@@ -150,7 +154,13 @@
       "expire_entry(uuid)",
       "expire_entry(uuid,jsonb)",
       "expire_failure(uuid)",
-      "restore_expiry_sweep(jsonb)"
+      "restore_expiry_sweep(jsonb)",
+      "register_retention_units(text,text[])",
+      "retention_uncovered()",
+      "abandon_retention_execution(uuid)",
+      "begin_retention_execution(uuid,text[],text[],timestamptz,text,jsonb)",
+      "delete_operational_rows(uuid)",
+      "confirm_operational_commit(uuid)"
     ],
     "access_retention": {
       "source": "D1770/D1794/D1796 and retained A/H calendar/classification contract",
