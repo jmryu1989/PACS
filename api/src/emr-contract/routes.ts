@@ -59,6 +59,7 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['POST dicom/lookup'] },
   { kinds: ['study-metadata'], operation: 'write', causes: ['service-job'],
     routes: ['POST gateway/announce'] },
+  { kinds: ['image'], operation: 'write', causes: ['service-job'], routes: ['POST gateway/stow/:uid'] },
   { kinds: ['study-metadata'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET clinician/studies', 'GET clinician/studies/:uid/timeline'] },
   // D1882: an administrator's confirmed sending device or InstitutionName spelling; the held studies it now decides are
@@ -189,7 +190,7 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
   // MG-08 (D1877(2)): the image reads nginx used to send straight to Orthanc behind authz/dicom (the external surfaces
   // below) now pass the API's relay (image-relay.controller.ts): worklist previews and thumbnails, report and print pixel
   // reads, encapsulated PDFs, rendered, bulk data and whole objects, plus the plain descriptions (QIDO, metadata, tags)
-  // the relay passes without a delivery. The viewer's WADO-RS frame reads and strip previews go to the range reader
+  // the relay records as study metadata unless this session already read the study. The viewer's WADO-RS frame reads and strip previews go to the range reader
   // (the next two groups); the relay still answers them if they reach it. Read as the person looks and ahead of it, so
   // both causes are real. Admission is authzDicom's; the study delivery's pair is image-delivery-record.ts's.
   { kinds: ['image', 'external-sr-seg', 'pdf', 'thumbnail', 'key-image', 'study-metadata'], operation: 'read',

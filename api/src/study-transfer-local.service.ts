@@ -6,7 +6,7 @@
  * before the first byte, per-object checkpoints, no byte after a lost right or a lost lease). Every import write goes
  * through DicomImportGateService. A refusal never names another institution's study, a patient value or an upstream body.
  */
-import { ForbiddenException, HttpException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { ForbiddenException, HttpException, Inject, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { PrismaService } from './prisma.service';
 import { StudyAccessService } from './study-access.service';
@@ -20,6 +20,7 @@ import type { ArchiveObjectResult, ManifestObjectInput, OriginalManifest } from 
 import { DicomImportGateService, IMPORT_FILE_SLOTS, IMPORT_STORAGE_MESSAGE, StoredFormatError, exactKeys, precheckFile, storedTime } from './dicom-import-gate.service';
 import type { ImportOwner } from './dicom-import-gate.service';
 import type { RequestWorkContext } from './emr-runtime/request-context';
+import { REQUEST_CONTEXT_SOURCE, RequestContextSource } from './emr-runtime/request-context';
 import type { EmrRecordTransaction } from './emr-runtime/record-port';
 import type { RecordMutation } from './emr-runtime/store';
 import { newAuditLinkId } from './emr-contract/access-event';
@@ -231,7 +232,8 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
   private stopping = false;
 
   constructor(private readonly prisma: PrismaService, private readonly gate: DicomImportGateService,
-    private readonly studyAccess: StudyAccessService, private readonly auth: AuthService) {}
+    private readonly studyAccess: StudyAccessService, private readonly auth: AuthService,
+    @Inject(REQUEST_CONTEXT_SOURCE) private readonly requests: RequestContextSource) {}
 
   onModuleInit() {
     // Expired download attempts are closed beside the server, never in front of it (the same as the import pass).
@@ -359,6 +361,7 @@ export class StudyTransferLocalService implements OnModuleInit, OnModuleDestroy 
     }, importStorage);
     const answer = await this.gate.importFile({ owner, operationId: operationId.toLowerCase(), index: Number(indexText),
       expectedStudyUid: typeof expected === 'string' ? expected : null, bytes, sha256, precheck,
+      facts: await this.requests.facts(req),
       recheck: async () => {
         // The request's own credential too: a logout, an ended provider session or an expired token before the dispatch
         // is a refusal here (403, IMPORT_PERMISSION_REVOKED, no POST /instances), never a write under a session that ended.
