@@ -35,6 +35,9 @@ services:
   emr-provision:
     logging: *bounded-logging
 
+  retention:
+    logging: *bounded-logging
+
   # EMR-B1: 운영 이관도 같은 운영 이미지의 일회성 프로세스(설치 자격)로만 한다. 호스트 파일은 덮지 않는다.
   api-migrate:
     build:

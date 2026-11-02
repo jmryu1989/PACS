@@ -102,6 +102,8 @@ services:
       PGDATABASE: kin
       PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD를 .env에 설정하세요}
       KIN_EMR_RUNTIME_PASSWORD: ${KIN_EMR_RUNTIME_PASSWORD:?KIN_EMR_RUNTIME_PASSWORD를 .env에 설정하세요}
+      # Optional existing retention role login; an unset host variable stays absent.
+      KIN_EMR_RETENTION_PASSWORD:
     entrypoint: ["sh", "-ec"]
     command:
       - |
@@ -184,6 +186,20 @@ services:
         condition: service_completed_successfully
     volumes:
       - ./api/prisma:/app/prisma:ro
+
+  # CD-09: invoked once by ops_retention_sweep.py from the host daily scheduler.
+  # Profile remains opt-in; clinical destruction is not yet connected (exit 1).
+  retention:
+    profiles: [retention]
+    build:
+      context: ./api
+      target: production
+      args:
+        VCS_REF: ${KIN_REVISION:-unknown}
+    restart: "no"
+    command: ["node", "dist/emr-retention/entry.js"]
+    environment:
+      DATABASE_URL: postgresql://kin_emr_retention:${KIN_EMR_RETENTION_PASSWORD:-}@db:5432/kin
 
   # ── 인증: Keycloak (OIDC) ──
   # 렐름·클라이언트·개발용 계정은 keycloak/kin-realm.json 에서 자동으로 들어온다.

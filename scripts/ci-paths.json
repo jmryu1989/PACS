@@ -309,7 +309,10 @@
       "proxy/**",
       "scripts/emr-compose.py",
       "scripts/record-run.py",
-      "tests/emr/h/**"
+      "tests/emr/h/**",
+      "tests/emr/retention/**",
+      "tests/e2e/test_cd09_retention_worker.py",
+      "scripts/ops_retention_sweep.py"
     ],
     "hanging-protocols": [
       "api/package-lock.json",

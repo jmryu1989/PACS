@@ -977,6 +977,8 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/emr-h-r1/runs/typecheck --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json -- npx --no-install --prefix api tsc --noEmit -p api
     - name: Inventory contracts
       run: python3 scripts/record-run.py --run-dir tmp/emr-h-r1/runs/contract --cwd . --tree api/src/emr-contract --tree api/src/emr-retention --tree tests/emr/h -- node --test --test-reporter=tap tests/emr/h/contract_test.cjs
+    - name: Retention worker ledger sweep boundary
+      run: python3 scripts/record-run.py --run-dir tmp/emr-h-r1/runs/worker --cwd . --tree api/src/emr-retention --tree tests/emr/retention --file api/package-lock.json -- node --test --test-reporter=tap tests/emr/retention/worker_test.cjs
     - name: Retain raw evidence
       if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
