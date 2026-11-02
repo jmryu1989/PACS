@@ -436,11 +436,27 @@ mainTest('A-HTTP-OBSERVE: the new request takes the existing report-history acce
     preReviewer: 'synthetic-senior@example.test' } });
   const preliminary = await observe(held, report(heldRow.accessRef)).done;
   assert.equal(preliminary.status, 403, preliminary.text);
-  // A clinician-only member stays outside the report-history scope (the Guard allowlist is not widened).
+  // D-S5-NONFINAL-VIEW (owner, 2026-11-02): clinicians read report history and report its display
+  // under the radiologist's institution/P rules (REQ-S5-U1b-CLINICIAN-READ / RISK-S5-U1b-NONFINAL-BODY).
   const clinician = await observe(moved, report(movedRow.accessRef), { member: members.clinician }).done;
-  assert.equal(clinician.status, 403, clinician.text);
-  assert.equal(clinician.body.code, 'CLINICIAN_ROUTE_DENIED');
+  assert.equal(clinician.status, gone.status, clinician.text);
+  assert.deepEqual(clinician.body, gone.body);
+  const clinicianPreliminary = await observe(held, report(heldRow.accessRef), { member: members.clinician }).done;
+  assert.equal(clinicianPreliminary.status, preliminary.status, clinicianPreliminary.text);
   assert.equal(await allShown(), before);
+  // An own-institution non-final history row is readable and its own provision can be reported as displayed.
+  const own = await study({ rs: 'T' });
+  await version(own, 1, { action: 'save' });
+  const [ownRow] = await history(own, { member: members.clinician });
+  assert.equal(ownRow.findings, 'SYN findings 1');
+  const source = await prepared(ownRow.accessRef);
+  const sent = report(ownRow.accessRef);
+  const accepted = await observe(own, sent, { member: members.clinician }).done;
+  assert.equal(accepted.status, 200, accepted.text);
+  const records = await shown(ownRow.accessRef);
+  assert.equal(records.length, 1);
+  assertShown(records[0], source, sent, BEARER);
+  assert.equal(await allShown(), before + 1);
 });
 
 mainTest('A-HTTP-OBSERVE: a cookie session reports only its own provisions; account switch and re-login keep old references out', async () => {

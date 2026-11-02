@@ -1,8 +1,8 @@
 // REQ-S7-U3b-HOSPITAL-COLUMN -> RISK-S7-U3b-PREF-BREAK / RISK-S7-U3b-TELE-MISLABEL
 // -> TEST-S7-U3b-COLUMNS (server half: sc01-sc04) and TEST-S7-U3b-ROWS (sc05).
 // Runs inside kin-api:ci with no network, no DB and no Orthanc: the compiled normalizer over the shared pre-unit documents
-// (tests/worklist_columns_vectors.json, expectations written by hand), the compiled PacsService column read/write over a fake
-// store (a stored pre-unit row is answered with Hospital added and never rewritten by the read; an old client's PUT is
+// (tests/worklist_columns_vectors.json, server_expect written by hand; expect remains the deferred screen contract), the compiled PacsService column read/write over a fake
+// store (a stored pre-unit row is answered with missing Hospital and physician defaults added and never rewritten by the read; an old client's PUT is
 // stored with it; refusals and conflicts as before), and the compiled PacsService.listStudies over a fake store whose
 // registry names differ from the ids, so a row showing an id, the caller's name or a guessed tele fails.
 // KIN_WORKLIST_COLUMNS_SERVER names the compiled module directory (default /app/dist); only the local mutant runs point it
@@ -22,23 +22,23 @@ const status=error=>typeof error?.getStatus==='function'?error.getStatus():null;
 const caller={institution:'hallym',sub:'syn-sub-a',actor:'syn-reader-a@synthetic.test',roles:['radiologist'],kind:'member'};
 const OWNER={institution:'hallym',subject:'syn-sub-a'};
 
-test('sc01 the compiled normalizer keeps every pre-unit document and shows Hospital last in Radiology only',()=>{
+test('sc01 the compiled normalizer keeps every pre-unit document and appends Hospital and physician defaults in Radiology only',()=>{
   for(const v of V.accepted){
     const before=JSON.stringify(v.document);
-    assert.deepEqual(normalizeWorklistColumns(clone(v.document)),v.expect,v.id+': '+v.why);
+    assert.deepEqual(normalizeWorklistColumns(clone(v.document)),v.server_expect,v.id+': '+v.why);
     assert.equal(JSON.stringify(v.document),before,v.id+' input untouched');
-    assert.deepEqual(normalizeWorklistColumns(clone(v.document)).modes.Technician.order,v.expect.modes.Technician.order,v.id+' Technician');
+    assert.deepEqual(normalizeWorklistColumns(clone(v.document)).modes.Technician.order,v.server_expect.modes.Technician.order,v.id+' Technician');
   }
-  // Preserving pair: another permutation of the stored order stays that permutation, Hospital after it.
+  // Preserving pair: another permutation of the stored order stays that permutation, missing defaults after it: Hospital, referring physician, requesting physician.
   const permuted=clone(byId.V02.document);permuted.modes.Radiology.order.reverse();
-  assert.deepEqual(normalizeWorklistColumns(permuted).modes.Radiology.order,[...clone(byId.V02.document).modes.Radiology.order].reverse().concat('institutionName'));
+  assert.deepEqual(normalizeWorklistColumns(permuted).modes.Radiology.order,[...clone(byId.V02.document).modes.Radiology.order].reverse().concat('institutionName','referringPhysician','requestingPhysician'));
   // PF-10: both modes with every key at the widest width and all but ID and Name hidden still fit the 8192 bound.
-  const widest=mode=>{const keys=byId.V01.expect.modes[mode].order;
+  const widest=mode=>{const keys=byId.V01.server_expect.modes[mode].order;
     return {order:[...keys],hidden:keys.filter(k=>k!=='id'&&k!=='name'),appearance:{widths:Object.fromEntries(keys.map(k=>[k,600])),font:'mono',size:20,color:'warm'}};};
   const wide={version:1,modes:{Radiology:widest('Radiology'),Technician:widest('Technician')}};
   assert.ok(JSON.stringify(wide).length<=8192,String(JSON.stringify(wide).length));
   assert.deepEqual(normalizeWorklistColumns(clone(wide)),wide);
-  // A synthetic document over the bound is refused whole (no valid-key document can reach it: 23 keys at most).
+  // A synthetic document over the bound is refused whole (no valid-key document can reach it: 25 keys at most).
   const big=clone(byId.V01.document);big.modes.Radiology.appearance={widths:Object.fromEntries(Array.from({length:1000},(_,i)=>['k'+i,64])),font:'default',size:13,color:'default'};
   assert.ok(JSON.stringify(big).length>8192);assert.equal(normalizeWorklistColumns(big),null,'over the 8192 bound');
 });
@@ -46,12 +46,12 @@ test('sc01 the compiled normalizer keeps every pre-unit document and shows Hospi
 test('sc02 refused documents stay refused whole; a document that already places Hospital keeps that place',()=>{
   for(const v of V.refused)assert.equal(normalizeWorklistColumns(clone(v.document)),null,v.id+': '+v.why);
   for(const v of V.idempotent){
-    assert.deepEqual(normalizeWorklistColumns(clone(v.document)),v.expect,v.id+': '+v.why);
-    assert.deepEqual(normalizeWorklistColumns(clone(v.expect)),v.expect,v.id+' twice');
+    assert.deepEqual(normalizeWorklistColumns(clone(v.document)),v.server_expect,v.id+': '+v.why);
+    assert.deepEqual(normalizeWorklistColumns(clone(v.server_expect)),v.server_expect,v.id+' twice');
   }
   // The same key in the Radiology order is accepted (R07's pair).
   const radiology=clone(byId.R07.document);radiology.modes.Technician.order=['id','name'];radiology.modes.Radiology.order=['id','name','institutionName'];
-  assert.equal(normalizeWorklistColumns(radiology).modes.Radiology.order.at(-1),'preReviewer');
+  assert.deepEqual(normalizeWorklistColumns(radiology).modes.Radiology.order.slice(-3),['preReviewer','referringPhysician','requestingPhysician']);
   assert.deepEqual(normalizeWorklistColumns(radiology).modes.Radiology.order.slice(0,3),['id','name','institutionName']);
 });
 
@@ -73,12 +73,12 @@ function columnsService(initial){
 }
 const stored=(document,revision=3)=>({...OWNER,revision,value:JSON.stringify(document),updatedAt:new Date('2026-09-01T00:00:00.000Z')});
 
-test('sc03 GET answers a stored pre-unit row with Hospital added and leaves the row as it was',async()=>{
+test('sc03 GET answers a stored pre-unit row with missing Hospital and physician defaults added and leaves the row as it was',async()=>{
   for(const id of ['V01','V02','V03','V05']){
     const v=byId[id],store=columnsService(stored(v.document));
     const answer=await store.svc.worklistColumns(caller);
     assert.deepEqual(answer.owner,['hallym','syn-sub-a'],id);
-    assert.equal(answer.revision,3,id);assert.deepEqual(answer.columns,v.expect,id+': '+v.why);
+    assert.equal(answer.revision,3,id);assert.deepEqual(answer.columns,v.server_expect,id+': '+v.why);
     assert.deepEqual(store.writes,[],id+' the read writes nothing');
     assert.equal(store.row().value,JSON.stringify(v.document),id+' stored value unchanged');assert.equal(store.row().revision,3,id);
   }
@@ -90,16 +90,16 @@ test('sc03 GET answers a stored pre-unit row with Hospital added and leaves the 
   assert.deepEqual(bad.writes,[]);assert.equal(bad.row().value,JSON.stringify(byId.R01.document));
 });
 
-test('sc04 PUT stores an old client document with Hospital added; refusals and conflicts write nothing',async()=>{
+test('sc04 PUT stores an old client document with missing Hospital and physician defaults added; refusals and conflicts write nothing',async()=>{
   const v=byId.V02,store=columnsService(stored(byId.V01.document));
   const answer=await store.svc.writeWorklistColumns({expectedOwner:['hallym','syn-sub-a'],revision:3,columns:clone(v.document)},caller,false);
-  assert.deepEqual(answer.columns,v.expect);assert.equal(answer.revision,4);
-  assert.deepEqual(JSON.parse(store.row().value),v.expect,'the stored value is the normalized document');
+  assert.deepEqual(answer.columns,v.server_expect);assert.equal(answer.revision,4);
+  assert.deepEqual(JSON.parse(store.row().value),v.server_expect,'the stored value is the normalized document');
   assert.equal(store.writes.length,1);assert.equal(store.writes[0][0],'updateMany');
   // First save of a partial document (revision 0 creates the row).
   const first=columnsService(null);
   const created=await first.svc.writeWorklistColumns({expectedOwner:['hallym','syn-sub-a'],revision:0,columns:clone(byId.V03.document)},caller,false);
-  assert.deepEqual(created.columns,byId.V03.expect);assert.equal(created.revision,1);assert.deepEqual(JSON.parse(first.row().value),byId.V03.expect);
+  assert.deepEqual(created.columns,byId.V03.server_expect);assert.equal(created.revision,1);assert.deepEqual(JSON.parse(first.row().value),byId.V03.server_expect);
   // R07 (Hospital in Technician) and every other refused document: 400, nothing written.
   for(const r of V.refused){
     const kept=columnsService(stored(byId.V01.document));
@@ -115,7 +115,7 @@ test('sc04 PUT stores an old client document with Hospital added; refusals and c
   // The idempotent document keeps Hospital where the user put it.
   const moved=columnsService(stored(byId.V01.document));
   const kept=await moved.svc.writeWorklistColumns({expectedOwner:['hallym','syn-sub-a'],revision:3,columns:clone(byId.R06.document)},caller,false);
-  assert.deepEqual(kept.columns,byId.R06.expect);
+  assert.deepEqual(kept.columns,byId.R06.server_expect);
 });
 
 // ── the list rows over a fake store (registry names differ from ids) ──
