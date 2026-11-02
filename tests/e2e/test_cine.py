@@ -48,13 +48,13 @@ class CineE2E(ViewerLayoutE2E):
 
  def play(self,p,i=0):p.locator('[data-cy=viewport-grid] > div').nth(i).locator('[data-cy="cine-player-play-pause"]').click()
  def watch(self,p):
+  # Sample the asserted moving marker only; an unused full-canvas maximum scan delays the next render.
   p.evaluate('''()=>{window.cineRenders=[];for(const v of cornerstone.getRenderingEngines().filter(e=>e.id!=='_thumbnails').flatMap(e=>e.getViewports())){
    v.element.addEventListener(cornerstone.Enums.Events.IMAGE_RENDERED,()=>{const i=v.getCurrentImageIdIndex(),image=v.getCurrentImageId(),c=v.element.querySelector('.cornerstone-canvas');
-   const pixels=c.getContext('2d').getImageData(0,0,c.width,c.height).data;let hi=0;for(let n=0;n<pixels.length;n+=4)hi=Math.max(hi,pixels[n]);
    const origin=cornerstone.metaData.get('imagePlaneModule',image).imagePositionPatient,xy=v.worldToCanvas([origin[0]+40+i*10,origin[1]+105,origin[2]]);
    const marker=c.getContext('2d').getImageData(Math.round(xy[0]),Math.round(xy[1]),1,1).data[0];
    const heading=v.element.closest('[data-cy="viewport-pane"]')?.querySelector('.kin-viewer-info-bar');
-   cineRenders.push({id:v.id,index:i,image,t:performance.now(),hi,marker,canvasHeight:c.height,headingHeight:heading?.getBoundingClientRect().height??null,headingText:heading?.children[0].textContent,viewportStatus:v.viewportStatus});});}}''')
+   cineRenders.push({id:v.id,index:i,image,t:performance.now(),marker,canvasHeight:c.height,headingHeight:heading?.getBoundingClientRect().height??null,headingText:heading?.children[0].textContent,viewportStatus:v.viewportStatus});});}}''')
 
  def wait_index(self,p,i,n):p.wait_for_function('a=>services.cornerstoneViewportService.getCornerstoneViewport([...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.x-b.x)[a[0]].viewportId).getCurrentImageIdIndex()===a[1]',arg=[i,n])
 

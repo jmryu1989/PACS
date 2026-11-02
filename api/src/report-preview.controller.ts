@@ -5,7 +5,6 @@ import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
 import { Caller, PacsService } from './pacs.service';
 import { viewerUid } from './viewer-input';
-import { CLINICIAN_ROUTE_DENIED, clinicianOnly } from './clinician-policy';
 import { LocalReadResponse } from './emr-viewing/local-read';
 import { consumerSource, viewerSources } from './emr-viewing/consumer-read';
 
@@ -19,7 +18,7 @@ export class ReportPreviewController {
 
   /**
    * S5-U1b clinician reads. They live here, beside the report preview, because both answer "what may this
-   * person read of the report"; the controller is already no-store (main.ts API middleware). The worklist route GET studies stays denied for clinician-only.
+   * person read of the report"; the controller is already no-store (main.ts API middleware). The worklist and preview also admit clinician readers under the same Preliminary rule.
    */
   @Get('clinician/studies')
   clinicianStudies(@Query() query: any, @Req() req: any) {
@@ -44,10 +43,6 @@ export class ReportPreviewController {
   @Get('studies/:uid/report-preview')
   async read(@Param('uid') uid: string, @Req() caller: any) {
     viewerUid(uid);
-    // S5-U1b: this answer carries the body at every RS (T/P/H/W included). clinician-only never reaches it
-    // through the guard allowlist; this second line keeps a widened allowlist from turning it into a
-    // non-final body for clinicians. Their read is GET clinician/studies/:uid/report.
-    if (clinicianOnly(caller.roles)) throw new ForbiddenException({ code: CLINICIAN_ROUTE_DENIED });
     // Same read rule as PacsService.visible()/versions(): owner or current
     // tele grant, and the P author/reviewer pair. A hold only restricts writes.
     // patchState clears teleInstitutionId when the owner cancels the referral;

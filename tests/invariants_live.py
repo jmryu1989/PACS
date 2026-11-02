@@ -107,11 +107,16 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "emr-audit/roster/:grantId"): Route(Kind.TENANT),
     ("POST", "emr-audit/investigations"): Route(Kind.TENANT),
     ("POST", "emr-audit/exports"): Route(Kind.TENANT),
+    ("GET", "emr-audit/inspections"): Route(Kind.TENANT),
+    ("GET", "emr-audit/inspections/:month"): Route(Kind.TENANT),
+    ("POST", "emr-audit/inspections/:month/report"): Route(Kind.TENANT),
+    ("POST", "emr-audit/inspections/:month/steps"): Route(Kind.TENANT),
     ("POST", "emr-audit/requests"): Route(Kind.TENANT),
     ("POST", "emr-audit/issuances"): Route(Kind.TENANT),
     ("POST", "emr-audit/issuances/:id/issue"): Route(Kind.TENANT),
     ("POST", "emr-audit/issuances/:id/delivery"): Route(Kind.TENANT),
     ("GET", "emr-audit/requests/:id"): Route(Kind.TENANT),
+    ("GET", "emr-audit/issuances/:id"): Route(Kind.TENANT),
     ("POST", "emr-audit/requests/:id/extend"): Route(Kind.TENANT),
     ("POST", "emr-audit/requests/:id/resolve"): Route(Kind.TENANT),
     ("GET", "studies/:uid/tech-note"): Route(Kind.TENANT),
@@ -136,6 +141,7 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames"): Route(Kind.TENANT),
     ("GET", "instances/:id/preview"): Route(Kind.TENANT),
     ("POST", "gateway/announce"): Route(Kind.TENANT),
+    ("POST", "gateway/stow/:uid"): Route(Kind.TENANT),
     ("POST", "gateway/receipt"): Route(Kind.TENANT),
     ("GET", "gateway/retry-requests"): Route(Kind.TENANT),
     ("POST", "studies/:uid/gateway-retry"): Route(Kind.TENANT),
@@ -4319,7 +4325,7 @@ class LiveInvariantTests(unittest.TestCase):
         # 25 -> 26: S4-EG1 added OrthancConnectionTests (local reads never reuse a pooled connection).
         # The number is the suite as authored; tests/gateway_receipt_source_test.py pins it to an AST
         # count of test_agent.py, so neither can move without the other.
-        self.assertIn("Ran 26 tests", completed.stderr + completed.stdout)
+        self.assertIn("Ran 29 tests", completed.stderr + completed.stdout)
 
     def test_production_gateway_contract_is_declared(self) -> None:
         completed = subprocess.run(

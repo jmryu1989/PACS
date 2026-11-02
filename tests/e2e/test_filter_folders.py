@@ -58,7 +58,9 @@ class FilterFoldersE2E(manager.SavedFilterManagerE2E):
         expect(fresh.locator(f'#rows tr[data-uid="{first.uid}"]')).to_be_visible()
         expect(fresh.locator(f'#rows tr[data-uid="{second.uid}"]')).to_have_count(0)
         self.assertEqual(self.snapshot()['revision'], persisted['revision'])
-        fresh.get_by_role('navigation', name='Folders').get_by_role('button', name=re.compile('^'+prefix+' shortcut')).click()
+        self.close_toolbar_groups(fresh)
+        fresh.get_by_role('navigation', name='Folders').get_by_role('list', name='My Shortcuts', exact=True).get_by_role(
+            'button', name=re.compile('^'+re.escape(prefix+' shortcut')+r' \([^)]*\)$')).click()
         expect(fresh.locator('#rows tr[data-uid]')).to_have_count(1)
         expect(fresh.locator(f'#rows tr[data-uid="{second.uid}"]')).to_be_visible()
         expect(fresh.locator('#active-filter-name')).to_have_text(prefix+' shortcut')

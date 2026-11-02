@@ -6,7 +6,7 @@ const identity=uid=>({RequestedTags:{StudyInstanceUID:uid}}),row=uid=>({'0020000
 test('inventory requests indexed UID/institution; invalid identity rejects',async()=>{
  const o=new OrthancService();let args;o.get=async(...a)=>{args=a;return [identity('1'),identity('2')];};
  assert.deepEqual(await o.studyIdentities(),[{'0020000D':{Value:['1']},'00080080':{Value:['']}},{'0020000D':{Value:['2']},'00080080':{Value:['']}}]);
- assert.equal(args[0],'/tools/find');assert.deepEqual(args[1],{Level:'Study',Query:{},ResponseContent:['RequestedTags'],RequestedTags:['StudyInstanceUID','InstitutionName']});
+ assert.equal(args[0],'/tools/find');assert.deepEqual(args[1],{Level:'Study',Query:{},ResponseContent:['RequestedTags'],RequestedTags:['StudyInstanceUID','InstitutionName','ReferringPhysicianName','RequestingPhysician']});
  for(const invalid of [[identity('1,2')],[identity('')],[{}],{}]){o.get=async()=>invalid;await assert.rejects(o.studyIdentities(),e=>e.getStatus()===503);}
 });
 // WORKLIST-SPLIT-UID TEST-WSU-01: one row per original Study resource. A UID that two patient resources share is two
@@ -23,13 +23,14 @@ test('TEST-WSU-01 inventory keeps every resource of a shared UID in both answer 
  o.get=async()=>[patient('1','A','HALLYM'),{RequestedTags:{StudyInstanceUID:'1',InstitutionName:42}}];await assert.rejects(o.studyIdentities(),e=>e.getStatus()===503);
  o.get=async()=>[patient('1','A','HALLYM'),{RequestedTags:{StudyInstanceUID:'1',PatientID:7}}];await assert.rejects(o.studyIdentities(true),e=>e.getStatus()===503);
 });
-// The enumeration's request is part of the source contract (S4-U2): by default only the indexed UID and institution; the
-// access-condition tags and the AccessionNumber are opt-in, and an unreadable accession is '' (not comparable).
-test('TEST-WSU-01 enumeration default asks for UID and institution only; metadata and accession are opt-in',async()=>{
+// The source contract includes physician tags (2026-11-02 decision); access-condition tags and AccessionNumber
+// remain opt-in, and an unreadable accession is '' (not comparable).
+test('TEST-WSU-01 enumeration default includes physician tags; metadata and accession are opt-in',async()=>{
  const o=new OrthancService(),asked=[];
  o.get=async(path,body)=>{asked.push(body.RequestedTags);return [{RequestedTags:{StudyInstanceUID:'1',InstitutionName:'H',PatientID:'P',StudyDate:'20261001',ModalitiesInStudy:'CT\\SR',AccessionNumber:7}}];};
  const plain=await o.studyIdentities(),both=await o.studyIdentities(true,true),accessionOnly=await o.studyIdentities(false,true);
- assert.deepEqual(asked,[['StudyInstanceUID','InstitutionName'],['StudyInstanceUID','InstitutionName','PatientID','StudyDate','ModalitiesInStudy','AccessionNumber'],['StudyInstanceUID','InstitutionName','AccessionNumber']]);
+ const identityTags=['StudyInstanceUID','InstitutionName','ReferringPhysicianName','RequestingPhysician'];
+ assert.deepEqual(asked,[identityTags,[...identityTags,'PatientID','StudyDate','ModalitiesInStudy','AccessionNumber'],[...identityTags,'AccessionNumber']]);
  assert.deepEqual(Object.keys(plain[0]).sort(),['00080080','0020000D']);
  assert.deepEqual(both[0]['00080061'].Value,['CT','SR']);assert.equal(both[0]['00080050'].Value[0],'','an unreadable accession is not comparable');
  assert.deepEqual(Object.keys(accessionOnly[0]).sort(),['00080050','00080080','0020000D']);

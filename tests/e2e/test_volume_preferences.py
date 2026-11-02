@@ -75,6 +75,9 @@ class VolumePreferencesE2E(VolumeSyncE2E):
   self.open_toolbar_group(other,'#reading-appearance-open')
   other.locator('#reading-appearance-open').click();expect(other.locator('#appearance-account-save')).to_be_enabled();other.locator('#appearance-account-load').click();expect(other.locator('#appearance-account-status')).to_contain_text('계정의 표시 설정을 불러왔습니다')
   self.assertTrue(f.get_by_label('Show MPR Windowing',exact=True).is_checked());other.locator('#reading-appearance-close').click();self.tools(f);expect(f.get_by_label('Show MPR Windowing',exact=True)).not_to_be_checked();expect(f.get_by_label('MPR left mouse button',exact=True)).to_have_value('StackScroll');expect(f.get_by_role('checkbox',name='Sync MPR Zoom',exact=True)).to_be_checked()
+  # Loading the saved closed dock and reopening Tools changes the native canvas height twice.
+  # Wait for that resize, as mpr() does on entry, before comparing the exact retained pixels.
+  f.wait_for_function("""()=>[...services.viewportGridService.getState().viewports.keys()].every(id=>{const c=services.cornerstoneViewportService.getCornerstoneViewport(id).getCanvas();return c.width===Math.floor(c.clientWidth*devicePixelRatio)&&c.height===Math.floor(c.clientHeight*devicePixelRatio)})""")
   self.preserved_volume(before,self.volume_state(f));expect(other.locator('#findings')).to_have_value('KEEP MPR ACCOUNT REPORT');self.assertEqual(document_request(other, "GET", self.stack.api+'/reading-appearance').json(),stored)
   expect(f.get_by_label('MPR Progressive Rendering',exact=True)).to_be_checked()
   key='kin-mpr-preferences:v1:'+json.dumps(stored['owner'],separators=(',',':'),ensure_ascii=False)

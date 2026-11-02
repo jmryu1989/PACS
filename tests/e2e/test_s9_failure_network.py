@@ -163,7 +163,7 @@ class FailureCases:
         page.locator("#worklist-refresh").select_option("0")
         # The existing Manual option isolates the user-triggered list request.
         with page.expect_response(lambda r: r.request.method == "GET" and "/api/studies?" in r.url):
-            page.locator("#refresh").click()
+            page.locator("#m-refresh").click()
         expect(page.locator("#study-fetch-cancel")).not_to_be_visible()
         before = page.locator("#rows tr[data-uid]").evaluate_all("rows => rows.map(r => r.dataset.uid)")
         versions = self.versions(fixture)
@@ -181,7 +181,7 @@ class FailureCases:
 
         pattern = "**/api/studies?*"
         page.route(pattern, unavailable)
-        page.locator("#refresh").click()
+        page.locator("#m-refresh").click()
         expect(page.locator("#err")).not_to_be_empty()
         expect(page.locator("#err")).to_be_visible()
         expect(page.locator("#study-fetch-resume")).to_be_visible()

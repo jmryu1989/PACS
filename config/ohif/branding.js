@@ -43,7 +43,12 @@ function KinViewerBrand({ React }) {
       slot.dataset.kinHeaderLayout = '';
       // These tabs belong to our extension, not React. Normal document flow reserves their full height.
       const tabs = scope.parentElement.querySelector(':scope > .kin-patient-tabs');
-      if (tabs && scope.nextElementSibling !== tabs) scope.after(tabs);
+      if (tabs && scope.nextElementSibling !== tabs) {
+        // Reparenting a focused tab blurs it, including the tab selected after Delete.
+        const focused = tabs.contains(document.activeElement) ? document.activeElement : null;
+        scope.after(tabs);
+        focused?.focus({ preventScroll: true });
+      }
       const bar = row.getBoundingClientRect(), control = slot.getBoundingClientRect();
       const left = (parseFloat(slot.style.left) || 0) + bar.right - control.width - control.left;
       const top = (parseFloat(slot.style.top) || 0) + bar.top + (bar.height - control.height) / 2 - control.top;

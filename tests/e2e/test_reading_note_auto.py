@@ -32,7 +32,7 @@ class ReadingNoteAutoE2E(ReadingNoteE2E):
   # A different loaded image without a memo must not open an empty modal.
   self.choose(p,b);expect(p.locator('#reading-status')).to_have_text('영상 작업공간 연결됨',timeout=60000)
   p.wait_for_timeout(750);expect(p.locator('#tech-note-dialog')).not_to_be_visible()
-  self.note(b,'LATER NOTE');p.locator('#refresh').click();expect(p.locator('#reading-tech-note')).to_contain_text('있음')
+  self.note(b,'LATER NOTE');p.locator('#m-refresh').click();expect(p.locator('#reading-tech-note')).to_contain_text('Yes')
   p.wait_for_timeout(750);expect(p.locator('#tech-note-dialog')).not_to_be_visible()
   end_document(p)
   expect(p.locator('#reading-note-auto')).to_be_disabled()
@@ -65,9 +65,9 @@ class ReadingNoteAutoE2E(ReadingNoteE2E):
     if row.get('uid')==a.uid:row.pop('techNote',None)
    route.fulfill(response=response,json=body)
   p.route('**/api/studies?*',omit);p.reload();expect(p.locator('#dbstat')).to_contain_text('DB Connected');self.workspace(p,a)
-  expect(p.locator('#reading-tech-note')).to_contain_text('미확인');p.locator('#reading-note-auto').check()
+  expect(p.locator('#reading-tech-note')).to_contain_text('Unknown');p.locator('#reading-note-auto').check()
   expect(p.locator('body')).to_contain_text('메모 상태가 미확인입니다.');expect(p.locator('#tech-note-dialog')).not_to_be_visible()
-  p.unroute('**/api/studies?*');p.locator('#refresh').click();expect(p.locator('#reading-tech-note')).to_contain_text('있음')
+  p.unroute('**/api/studies?*');p.locator('#m-refresh').click();expect(p.locator('#reading-tech-note')).to_contain_text('Yes')
   p.wait_for_timeout(750);expect(p.locator('#tech-note-dialog')).not_to_be_visible()
   p.locator('#reading-tech-note').click();expect(p.locator('#tech-note-text')).to_have_value('NOTE WITH UNKNOWN SUMMARY')
 

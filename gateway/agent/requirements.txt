@@ -1,1 +1,6 @@
+# Full Python 3.12 resolver result: worklist-v0/legal/licenses/gateway-resolution.json
+certifi==2026.10.23
+charset-normalizer==3.5.2
+idna==3.20
 requests==2.32.5
+urllib3==2.8.0

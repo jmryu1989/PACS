@@ -1,0 +1,17 @@
+req,risk,test_id,test_file,source_file:line,in_ci,ci_job,last_run_command,last_run_exit,last_run_inputs_sha256
+REQ-FX-ALPHA,RISK-FX-ALPHA-LOSS,TEST-FX-ALPHA,tests/fx_alpha_test.py,README.md:5,yes,validate:pure,python3 scripts/run-tests.py --module tests/fx_alpha_test.py --mode pure,1,2aa2473fdceab4b533ecd667321d756b1a7224875bc94016c23c0fcd17877cc8
+REQ-FX-BETA,RISK-FX-B1,TEST-FX-BETA,tests/fx_beta_test.cjs,README.md:6,selection-only,ci-paths:fx-select,,,
+REQ-FX-BETA,RISK-FX-B2,TEST-FX-BETA,tests/fx_beta_test.cjs,README.md:6,selection-only,ci-paths:fx-select,,,
+REQ-FX-DELTA,RISK-FX-DELTA,,,README.md:8,,,,,
+REQ-FX-EPS,RISK-FX-EPS,TEST-FX-EPS,tests/fx_alpha_test.py,docs/README.md:3,yes,validate:pure,python3 scripts/run-tests.py --module tests/fx_alpha_test.py --mode pure,1,2aa2473fdceab4b533ecd667321d756b1a7224875bc94016c23c0fcd17877cc8
+REQ-FX-EPS,RISK-FX-EPS,TEST-FX-ZETA,,docs/README.md:3,,,,,
+REQ-FX-FILE,RISK-FX-FILE,,tests/fx_file_test.cjs,README.md:7,yes,validate:pure,,,
+REQ-FX-GAMMA,RISK-FX-B1,TEST-FX-BETA,tests/fx_beta_test.cjs,README.md:6,selection-only,ci-paths:fx-select,,,
+REQ-FX-GAMMA,RISK-FX-B2,TEST-FX-BETA,tests/fx_beta_test.cjs,README.md:6,selection-only,ci-paths:fx-select,,,
+REQ-FX-IDLE,RISK-FX-IDLE,TEST-FX-IDLE,tests/fx_idle_live.py,README.md:11,no,,,,
+REQ-FX-PAREN,RISK-FX-PAREN,TEST-FX-EPS,tests/fx_alpha_test.py,docs/README.md:6,yes,validate:pure,python3 scripts/run-tests.py --module tests/fx_alpha_test.py --mode pure,1,2aa2473fdceab4b533ecd667321d756b1a7224875bc94016c23c0fcd17877cc8
+REQ-FX-RUNNER,RISK-FX-RUNNER,TEST-FX-RUNNER,tests/fx_runner_test.py,README.md:10,yes,validate:fx-live(measurement_ci:fx-profile),,,
+REQ-FX-SRC,RISK-FX-SRC,,tests/fx_beta_test.cjs,tests/fx_beta_test.cjs:2,selection-only,ci-paths:fx-select,,,
+REQ-FX-SUITE,RISK-FX-SUITE,TEST-FX-SUITE,tests/fx_alpha_test.py,tests/fx_cases.json:29,yes,validate:pure,python3 scripts/run-tests.py --module tests/fx_alpha_test.py --mode pure,1,2aa2473fdceab4b533ecd667321d756b1a7224875bc94016c23c0fcd17877cc8
+REQ-FX-TABLE,RISK-FX-TABLE,TEST-FX-TABLE-1,tests/fx_table_test.cjs,tests/fx_cases.json:8,yes,validate:pure,,,
+REQ-FX-TABLE,RISK-FX-TABLE,TEST-FX-TABLE-2,tests/fx_table_test.cjs,tests/fx_cases.json:14,yes,validate:pure,,,

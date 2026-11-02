@@ -469,6 +469,8 @@
       stop: $("#dictation-stop"), cancel: $("#dictation-cancel"), retry: $("#dictation-retry"), repin: $("#dictation-repin"),
       insert: $("#dictation-insert"), close: $("#dictation-close"),
     }, {
+      // Follow the reader's dictation step without stealing focus from a report field on a later reply.
+      reveal: () => $(".report-p .rbtns").scrollIntoView({ block: "nearest", inline: "nearest" }),
       inserted: field => {
         $("#" + field)?.focus();
         toast("받아쓴 글을 판독문에 넣었습니다 — 확정하려면 Save 또는 Approve", "ok");
@@ -4590,7 +4592,8 @@
       clearRelatedReport();
       renderClinical(); renderRelated(); renderThumbs(); renderTemplates();
       if (left) { criticalInbox?.sync(); updateReportButtons(); renderDraftBar(); relatedMode.restore(left); return; }
-      $("#related-current").focus({ preventScroll: true });
+      // The old duplicate target caption is hidden in the stacked layout.
+      $("#clinical").focus({ preventScroll: true });
     }
 
     /**
@@ -13174,9 +13177,11 @@
         onPreview:value=>imagePreview?.open(value),onBack:()=>renderThumbs()}) || null;
       worklistSearch = KinWorklistSearch.mount({host:document.querySelector('#toolbar-filters .toolbar-menu-panel'),owner:()=>KinViewerOpening.key(KinAuth.session()),snapshot:searchCriteria,render});
       rowNavigation = KinWorklistRowNavigation.mount({tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,
+        // 키보드로 목록을 읽던 중 행이 사라지면 보이는 검색칸으로 돌아가야 한다; 숨은 칸은 포커스를 body로 떨어뜨린다.
+        fallback:()=>$('#filterrow [data-f="id"]'),
         current:()=>selectedUid,reveal:uid=>render(uid),activate:uid=>whenSelected(select(uid),uid,()=>{if(mode==='Radiology')focusReportEditor();})});
       relatedRowNavigation = KinWorklistRowNavigation.mount({tbody:$('#relrows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:()=>relatedRows,
-        current:()=>relatedUid||selectedUid,fallback:()=>$('#related-modality').disabled?$('#related-current'):$('#related-modality'),
+        current:()=>relatedUid||selectedUid,fallback:()=>$('#related-modality').disabled?$('#clinical'):$('#related-modality'),
         reveal:uid=>{const index=relatedRows.findIndex(row=>row.uid===uid);if(index>=0){relatedPage=Math.floor(index/50);renderRelated();}},
         activate:uid=>uid===selectedUid?returnToReportStudy():relatedActivate(uid,{focus:true})});
       mountViewerWindows();

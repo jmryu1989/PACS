@@ -1246,6 +1246,15 @@ class RelatedModePage(unittest.TestCase):
         expect(self.page.locator("#prior-findings")).to_have_text("")
         self.assertEqual("SYN A kept", self.value())
 
+        # Returning after Back leaves no held editor to restore; focus the visible current-study region.
+        self.enter()
+        self.page.locator("#related-mode-back").click()
+        self.page.locator("#related-return").focus()
+        self.page.locator("#related-return").press("Enter")
+        expect(self.page.locator("#clinical")).to_be_focused()
+        expect(self.page.locator("#clinical")).to_be_visible()
+        self.assertEqual("SYN A kept", self.value())
+
     def test_w5_clean_navigation_closes_the_mode_and_moves_and_prev_next_stay_available(self):
         self.open()
         self.open_target()

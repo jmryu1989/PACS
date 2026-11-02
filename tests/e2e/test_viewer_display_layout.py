@@ -70,6 +70,7 @@ class ViewerDisplayLayoutE2E(PhysicalMonitorsE2E):
         folder=Path('../tmp/viewer-display-layout/screens');folder.mkdir(parents=True,exist_ok=True)
         p.screenshot(path=str(folder/'display-selection.png'))
         v.get_by_label('Job Title',exact=True).fill('');v.close();p.locator('#viewer-windows-done').click()
+        self.close_toolbar_groups(p)
         with p.context.expect_page() as reopened:p.locator('#thumbwrap img').first.dblclick()
         restored=reopened.value;restored.wait_for_url('**/ohif/viewer?**');canvas_ready(restored,1)
         rect=restored.evaluate('({left:screenX,top:screenY,width:outerWidth,height:outerHeight})')
@@ -103,6 +104,7 @@ class ViewerDisplayLayoutE2E(PhysicalMonitorsE2E):
         expected=p.evaluate('async()=>KinViewerDisplayLayout.fit(popupRect(ohifPopupHandle),KinViewerDisplayLayout.screens(await getScreenDetails())[1])')
         self.hold_screen_details(p);control.click();p.wait_for_function('typeof __resumeMove==="function"')
         expect(control).to_be_disabled();expect(p.locator('#viewer-windows-done')).to_be_focused();p.locator('#viewer-windows-done').click()
+        self.close_toolbar_groups(p)
         p.evaluate('__resumeMove()')
         p.wait_for_function('expected=>{const r=JSON.parse(localStorage.getItem(OHIF_RECT_KEY));return r&&Object.keys(expected).every(k=>Math.abs(r[k]-expected[k])<=16)&&r.left===ohifPopupHandle.screenX;}',arg=expected)
         self.assertGreaterEqual(v.evaluate('screenX'),0);self.assertEqual(v.evaluate('__displayDocument'),marker)
@@ -132,6 +134,7 @@ class ViewerDisplayLayoutE2E(PhysicalMonitorsE2E):
 
     def test_display_06_two_patients_move_independently_and_keep_report_target(self):
         p,first,a,first_marker=self.setup_viewer();p.locator('#viewer-windows-done').click()
+        self.close_toolbar_groups(p)
         b=self.ct('DISPLAY-OTHER-'+uuid.uuid4().hex[:12],'other','20260802');self.seed_report(b,findings='DISPLAY SECOND BASE')
         original=self.originals()
         p.locator('#filterrow [data-f="id"]').fill('');p.evaluate('load()');self.select(p,b);self.thumbs(p,1)
@@ -149,7 +152,9 @@ class ViewerDisplayLayoutE2E(PhysicalMonitorsE2E):
         p.evaluate('''()=>{const native=window.getScreenDetails.bind(window);window.__heldMoves=[];
           window.getScreenDetails=async()=>{const details=await native();return new Promise(resolve=>__heldMoves.push(()=>resolve(details)));};}''')
         for i in [0,1]:p.locator(f'[data-window-index="{i}"][data-window-action="display-{i}"]').click()
-        p.wait_for_function('__heldMoves.length===2');p.locator('#viewer-windows-done').click();p.evaluate('__heldMoves.forEach(release=>release())')
+        p.wait_for_function('__heldMoves.length===2');p.locator('#viewer-windows-done').click()
+        self.close_toolbar_groups(p)
+        p.evaluate('__heldMoves.forEach(release=>release())')
         p.wait_for_function('''expected=>expected.every((rect,i)=>{const saved=JSON.parse(localStorage.getItem(OHIF_RECT_KEY+(i?':'+i:'')));
           return saved&&Object.keys(rect).every(k=>Math.abs(rect[k]-saved[k])<=16);})''',arg=expected)
         for viewer,fixture,marker,title in [(first,a,first_marker,'FIRST PATIENT UNSAVED JOB'),(second,b,second_marker,'SECOND PATIENT UNSAVED JOB')]:

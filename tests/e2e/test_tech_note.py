@@ -141,20 +141,22 @@ class TechNoteE2E(WorklistE2E):
   canvas_ready(frame,1)
 
  def test_note_06_list_badge_open_preserves_report_and_refreshes(self):
-  a=self.fixture();b=self.fixture(patient_id=a.patient_id);p=self.login('tech');self.select(p,a)
+  a=self.fixture();b=self.fixture(patient_id=a.patient_id);p=self.login('tech');self.show_worklist_column(p, 'techNote');self.select(p,a)
   badge=p.locator(f'[data-tech-note="{b.uid}"]')
-  expect(badge).to_have_text('없음');badge.focus();p.keyboard.press('Enter')
+  expect(badge).to_have_text('None');badge.focus();p.keyboard.press('Enter')
   expect(p.locator('#tech-note-target')).to_contain_text(b.uid)
   expect(p.locator('#rows tr.sel')).to_have_attribute('data-uid',a.uid)
   p.locator('#tech-note-text').fill('SYNTHETIC LIST NOTE');p.locator('#tech-note-save').click()
   expect(p.locator('#tech-note-status')).to_have_text('입력이 v1로 저장되었습니다.')
-  expect(badge).to_have_text('있음');p.locator('#tech-note-close').click();expect(badge).to_be_focused()
+  expect(badge).to_have_text('Yes');p.locator('#tech-note-close').click();expect(badge).to_be_focused()
   badge.click();expect(p.locator('#tech-note-text')).to_have_value('SYNTHETIC LIST NOTE')
   p.locator('#tech-note-text').fill('');p.locator('#tech-note-reason').fill('clear list note');p.locator('#tech-note-save').click()
-  expect(p.locator('#tech-note-status')).to_have_text('입력이 v2로 저장되었습니다.');expect(badge).to_have_text('비움·이력')
+  expect(p.locator('#tech-note-status')).to_have_text('입력이 v2로 저장되었습니다.');expect(badge).to_have_text('Cleared')
   p.locator('#tech-note-close').click();p.reload();expect(p.locator('#dbstat')).to_contain_text('DB Connected');p.locator('#filterrow [data-f="id"]').fill(a.patient_id)
-  expect(badge).to_have_text('비움·이력')
-  reader=self.login();self.select(reader,a);reader.locator('#findings').fill('UNSAVED READING TARGET')
+  # This Window column choices reset on reload; reveal the column before checking the stored note state.
+  self.show_worklist_column(p, 'techNote')
+  expect(badge).to_have_text('Cleared')
+  reader=self.login();self.show_worklist_column(reader, 'techNote');self.select(reader,a);reader.locator('#findings').fill('UNSAVED READING TARGET')
   reader.locator(f'[data-tech-note="{b.uid}"]').click();expect(reader.locator('#tech-note-status')).to_contain_text('읽기 전용')
   expect(reader.locator('#rows tr.sel')).to_have_attribute('data-uid',a.uid)
   reader.locator('#tech-note-close').click();expect(reader.locator('#findings')).to_have_value('UNSAVED READING TARGET')
@@ -170,7 +172,7 @@ class TechNoteE2E(WorklistE2E):
   self.assertNotIn('SYNTHETIC HIDDEN BODY',result.text)
 
  def test_note_08_old_list_response_cannot_rollback_saved_badge(self):
-  f=self.fixture();p=self.login('tech');self.select(p,f)
+  f=self.fixture();p=self.login('tech');self.show_worklist_column(p, 'techNote');self.select(p,f)
   badge=p.locator(f'[data-tech-note="{f.uid}"]');badge.click()
   p.locator('#tech-note-text').fill('SYNTHETIC local save');p.locator('#tech-note-save').click()
   expect(p.locator('#tech-note-status')).to_have_text('입력이 v1로 저장되었습니다.');p.locator('#tech-note-close').click()
@@ -181,7 +183,7 @@ class TechNoteE2E(WorklistE2E):
    route.fulfill(response=response,json=body)
   p.route('**/api/studies?*',old_list);p.locator('#m-refresh').click()
   expect(p.locator(f'#rows tr[data-uid="{f.uid}"]')).to_contain_text('SYNTHETIC stale list applied')
-  expect(badge).to_have_text('있음');p.unroute('**/api/studies?*')
+  expect(badge).to_have_text('Yes');p.unroute('**/api/studies?*')
 
 
  def test_note_09_attempt_ids_idempotent_resend_reuse_and_reads(self):

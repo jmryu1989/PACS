@@ -19,6 +19,58 @@ import { dump } from './values';
 import { need, needExact, inst } from './access';
 import type { Caller, PacsAccess } from './access';
 import type { PacsInstitutions } from './institutions';
+import { randomUUID } from 'node:crypto';
+import type { EmrRecordPort } from '../emr-runtime/record-port';
+import { studyPatientLink } from '../emr-clinical/routes';
+
+export const GATEWAY_STOW_SURFACE = 'POST gateway/stow/:uid';
+
+/** STOW's successful SOP sequence is the archive's acceptance, not its failure sequence or the announce call. */
+export async function recordGatewayStow(records: EmrRecordPort, orthanc: OrthancService,
+  req: any, uid: string, payload: any): Promise<void> {
+  const sequences = Array.isArray(payload) ? payload : [payload];
+  const sops: string[] = [];
+  for (const row of sequences) {
+    if (!row || (!row['00081199'] && !row['00081198'])) throw new Error('STOW acceptance unavailable');
+    const values = row['00081199']?.Value ?? [];
+    if (!Array.isArray(values)) throw new Error('STOW acceptance unavailable');
+    for (const item of values) {
+      const sop = item?.['00081155']?.Value?.[0];
+      if (typeof sop !== 'string' || !/^[0-9.]+$/.test(sop)) throw new Error('STOW accepted SOP unavailable');
+      sops.push(sop);
+    }
+  }
+  const accepted = [...new Set(sops)];
+  if (!accepted.length) return;
+  const sourceAE = String(req.headers?.['x-kin-source-ae'] ?? '').trim();
+  const gateway = String(req.headers?.['x-kin-gateway'] ?? '').trim();
+  // The institution is the verified token's binding. A configured header cannot change ownership.
+  const subject = JSON.stringify({ institution: req.institution, gateway: gateway || req.sub,
+    sourceAE: sourceAE || null, account: req.sub,
+    label: sourceAE ? 'gateway' : 'gateway (unknown source AE)' });
+  const work = records.begin();
+  try {
+    const issuer = 'kin-gateway-source';
+    const id = await work.resolveRequestIdentity(issuer, subject);
+    const patient = await orthanc.connectStudyIdentity(uid);
+    const revision = await orthanc.studyRevision(uid);
+    const known = <T>(value: T) => ({ status: 'known' as const, value });
+    const targets = accepted.map(sop => ({ kind: 'image' as const,
+      patientLinkSnapshot: known(studyPatientLink(req.institution, patient.patientId)), studyId: known(uid),
+      recordId: known(sop), versionId: known(`orthanc-study:${revision.id}@${revision.lastUpdate}`) }));
+    // One record per accepted object keeps the existing ledger's event size independent of a multipart batch size.
+    await work.transactionWithRecords(async (_tx, record) => {
+      for (const target of targets) await record({ formatVersion: 1, surface: GATEWAY_STOW_SURFACE,
+        eventId: randomUUID(), userId: known({ id, issuer, subject }), rolesAtTime: known(req.roles ?? ['gateway']),
+        actingInstitution: known(req.institution), managingInstitution: known(req.institution),
+        occurredAt: new Date().toISOString(), trustedProxyIp: { status: 'unresolved', reason: 'not-observed' },
+        cause: 'service-job', context: { basis: 'service-job', studyId: uid, relatedStudyId: null, reason: null },
+        executor: 'service', targets: [target], action: 'write', result: 'succeeded', requestId: randomUUID(),
+        auditLinkId: 'audit:' + randomUUID(), relatedEventId: null },
+      async () => ({ kind: 'OrthancInstance', id: target.recordId.value, version: target.versionId.value }));
+    });
+  } finally { work.end(); }
+}
 
 /**
  * What the gate observed, on this request, of the study an admitted read names: its managing institution and the patient

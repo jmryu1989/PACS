@@ -151,8 +151,6 @@ TOP = ['toolbar-search', 'worklist-folders-toggle', 'toolbar-filters', 'toolbar-
        'search-row']
 # The row: one box per top-level group (the <details> groups draw only their summary).
 SEARCH_ROW = '.userfilter > span:has(> button[data-search-apply])'
-ROW = ['#toolbar-search', '#worklist-folders-toggle', '#toolbar-filters > summary', '#m-refresh', '#toolbar-refresh-menu > summary',
-       '#toolbar-view > summary', '#toolbar-more > summary', '#toolbar-status', SEARCH_ROW]
 # Tab order through the closed toolbar, left to right. The status group is a focus stop of its own (fix1 F01): focus
 # there shows its texts in full. It is not a control, so the list of controls in view leaves it out.
 TAB_ORDER = ['quick', 'quick-match', 'clearfilter', 'worklist-folders-toggle', 'toolbar-filters>summary', 'refresh', 'toolbar-refresh-menu>summary',

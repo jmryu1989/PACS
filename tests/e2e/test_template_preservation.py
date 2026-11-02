@@ -13,6 +13,11 @@ import test_worklist as base
 
 
 class TemplatePreservationE2E(base.WorklistE2E):
+    def login(self, actor="doctor"):
+        page = super().login(actor)
+        self.show_workspace_panels(page, 'Reading Template')
+        return page
+
     def fixture(self, **kwargs):
         fixture = super().fixture(**kwargs)
         rows = self.stack._orthanc_request("POST", "/tools/lookup", fixture.uid.encode("ascii")).body
@@ -125,6 +130,9 @@ class TemplatePreservationE2E(base.WorklistE2E):
         self.select(page, current)
         page.locator(f'#relrows tr[data-uid="{prior.uid}"]').click()
         expect(page.locator("#prior-findings")).to_contain_text(prior.secret)
+        expect(page.locator("#report-editor-state")).to_have_text("Read Only")
+        page.locator("#report-editor-resume").click()
+        expect(page.locator("#report-editor-state")).to_have_text("Editable")
         commits = []
         # Observe actual requests; double-click is a draft edit, never a report commit.
         page.on("request", lambda r: commits.append(r.url) if "/report/commit" in r.url else None)

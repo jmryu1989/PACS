@@ -32,6 +32,8 @@ const { StudyAccessService } = require('/app/dist/study-access.service');
 const { AuthService } = require('/app/dist/auth.service');
 const { AuthGuard } = require('/app/dist/auth.guard');
 const { createRequestContext, REQUEST_CONTEXT_CAPTURE, REQUEST_CONTEXT_SOURCE } = require('/app/dist/emr-runtime/request-context');
+const { EMR_RECORD_PORT } = require('/app/dist/emr-runtime/record-port');
+const { parseAccessEvent } = require('/app/dist/emr-contract/access-event');
 const { createRequestIngress } = require('/app/dist/emr-runtime/request-ingress');
 const { readDicomPart10 } = require('/app/dist/dicom-part10-reader');
 
@@ -247,7 +249,7 @@ function store({ institutions } = {}) {
     rights: new Map(), auditFailure: null, failNextWrite: null, writes: 0, onQuery: null, onAuth: null, expiredTokens: new Set(), idpEnded: new Set(), reads: [],
     sessionSubs: new Map(), guardCalls: [],
     institutions: institutions ?? [{ id: 'inst-a', name: 'Synthetic A', dicomNames: 'SYN A,SYNTHETIC-A' }, { id: 'inst-b', name: 'Synthetic B', dicomNames: 'SYN B' }] };
-  for (const c of [TECH, TECH2, RAD, ADMIN, ADMIN2, TECH_B, ADMIN_B]) s.rights.set(c.sub, { sub: c.sub, approved: true, suspended: false, institution: c.institution, roles: c.roles });
+  for (const c of [TECH, TECH2, RAD, ADMIN, ADMIN2, TECH_B, ADMIN_B]) s.rights.set(c.sub, { sub: c.sub, version: 1, approved: true, suspended: false, institution: c.institution, roles: c.roles });
   const advisory = new Map(), rows = new Map();
   const lock = async (map, key, held) => {
     if (held.keys.has(map === advisory ? 'a:' + key : 'r:' + key)) return;
@@ -361,7 +363,7 @@ function store({ institutions } = {}) {
       $executeRaw: async (strings, ...values) => {
         const sql = strings.join('?');
         if (sql.includes('pg_advisory_xact_lock(')) { if (!tx) throw new Error('advisory lock outside a transaction'); await lock(advisory, values[0], tx.held); return 1; }
-        if (sql.includes('SET LOCAL lock_timeout')) return 0;
+        if (sql.includes('SET LOCAL lock_timeout') || sql === 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED') return 0;
         throw new Error('unexpected SQL ' + sql);
       },
       $queryRaw: async (strings, ...values) => {
@@ -369,6 +371,7 @@ function store({ institutions } = {}) {
         // A test may hold or slow one statement (a DB delay, a lock wait elsewhere) before it runs.
         if (s.onQuery) await s.onQuery(sql, values, tx);
         // clock_timestamp(): the database's time when the statement runs, i.e. after the locks taken before it.
+        if (sql.includes('emr_access.resolve_member_identity')) return [{ id: randomUUID() }];
         if (sql.includes('clock_timestamp() AS now')) return [{ now: new Date(s.clock) }];
         if (sql.includes("download->'attempts'->-1")) {
           // The attempt CAS of a download chunk: the row lock (if the row exists), then the last attempt's fields as
@@ -520,6 +523,7 @@ function fakeAuth(s) {
  */
 function guardAuth(s) {
   const base = fakeAuth(s);
+  const auditRefs = s.sessionAuditRefs ??= new Map();
   const ref = sid => 'ref:' + sid;
   const refusal = (status, code, message) => new common.HttpException({ code, message }, status);
   const count = name => { s.guardCalls.push(name); };
@@ -535,7 +539,8 @@ function guardAuth(s) {
     authenticateSession: async sid => {
       count('authenticateSession');
       if (!s.sessions.has(sid)) throw refusal(401, 'AUTH_SESSION_ENDED', '인증 세션이 없습니다');
-      return { sid, sub: s.sessionSubs.get(sid), accessToken: 'tok:' + s.sessionSubs.get(sid) };
+      if (!auditRefs.has(sid)) auditRefs.set(sid, 'authref:' + randomUUID());
+      return { sid, auditRef: auditRefs.get(sid), sub: s.sessionSubs.get(sid), accessToken: 'tok:' + s.sessionSubs.get(sid) };
     },
     verifyAccessToken: async raw => {
       count('verifyAccessToken');
@@ -579,7 +584,8 @@ async function harness(options = {}) {
   const access = new StudyAccessService(s.prisma, { studyIdentityResources, ...(options.accessOrthanc ?? {}) }, {});
   class TestModule {}
   const identities = new Map();
-  const requests = createRequestContext(createRequestIngress({proxyPeers:[]}), {
+  const recorded = [];
+  const records = {
     begin() {
       return {
         resolveRequestIdentity: async (issuer, subject) => {
@@ -589,14 +595,27 @@ async function harness(options = {}) {
         },
         // This recording store models the port's transaction only. The live
         // HTTP/PG test exercises B2 admission, parsing and durable appends.
-        transactionWithRecords: (task, bounds) => s.prisma.$transaction(tx => task(tx, (_event, effect) => effect()), bounds),
+        transactionWithRecords: async (task, bounds) => {
+          options.onRecordTransaction?.();
+          const staged = [];
+          const result = await s.prisma.$transaction(tx => task(tx, async (event, effect) => {
+            if (options.recordFailure?.()) throw new Error('synthetic ledger failure');
+            const reference = await effect();
+            if (reference) staged.push(parseAccessEvent(event));
+            return reference;
+          }), bounds);
+          recorded.push(...staged);
+          return result;
+        },
         end() {},
       };
     },
-  });
+  };
+  const requests = createRequestContext(createRequestIngress({proxyPeers:[]}), records);
   common.Module({ controllers: [StudyTransferLocalController], providers: [StudyTransferLocalService, Gate.DicomImportGateService,
     { provide: REQUEST_CONTEXT_CAPTURE, useValue: requests.capture },
     { provide: REQUEST_CONTEXT_SOURCE, useValue: requests.source },
+    { provide: EMR_RECORD_PORT, useValue: records },
     { provide: PrismaService, useValue: s.prisma }, { provide: StudyAccessService, useValue: access },
     { provide: AuthService, useValue: options.realGuard ? guardAuth(s) : fakeAuth(s) },
     { provide: APP_GUARD, useClass: options.realGuard ? AuthGuard : TestGuard }] })(TestModule);
@@ -642,13 +661,80 @@ async function harness(options = {}) {
   const send = (bytes, { id = randomUUID(), index = 0, as = TECH, expect, headers = {} } = {}) =>
     request('POST', '/api/dicom-import', { as, raw: bytes, headers: { 'content-type': 'application/dicom', 'x-kin-operation-id': id,
       'x-kin-file-index': String(index), ...(expect ? { 'x-kin-expect-study': expect } : {}), ...headers } }).then(r => ({ ...r, id }));
-  return { s, orthanc, gate, transfer, request, send, close, port };
+  return { s, orthanc, gate, transfer, request, send, close, port, recorded };
 }
 
 const posts = o => o.calls.filter(c => c.method === 'POST' && c.path === '/instances').length;
 const audits = (s, action) => s.audits.filter(a => a.action === action).map(a => ({ ...a, detail: JSON.parse(a.detail) }));
 const own = (s, uid, institutionId = 'inst-a', origin = 'dicom') => s.states.set(uid, { uid, institutionId, teleInstitutionId: null, origin, ss: 'Verified' });
 const noPatientValue = (value, ...forbidden) => { const text = JSON.stringify(value); for (const f of forbidden) assert.ok(!text.includes(f), `no ${f} in ${text.slice(0, 200)}`); };
+
+test('CD10 import records the importing account and patient before success; rejection and replay add no entry', async () => {
+  let recordTransactions = 0;
+  const h = await harness({ onRecordTransaction: () => { recordTransactions++; } });
+  const study = uid(), bytes = dicom({ study, id: 'CD10-PATIENT' });
+  const first = await h.send(bytes);
+  assert.equal(first.body.outcome, 'stored', JSON.stringify(first.body));
+  const [event] = h.recorded;
+  assert.equal(event.action, 'write');
+  assert.equal(event.userId.value.subject, TECH.sub);
+  assert.deepEqual(event.rolesAtTime.value, TECH.roles);
+  assert.deepEqual(event.targets[0].patientLinkSnapshot.value,
+    { linkId: JSON.stringify(['inst-a', 'CD10-PATIENT']), patientId: 'CD10-PATIENT', assigningAuthority: 'inst-a' });
+  assert.equal(event.targets[0].studyId.value, study);
+  await h.send(bytes, { id: first.id });
+  const rejected = await h.send(dicom({ study: uid(), id: '' }));
+  assert.equal(rejected.body.outcome, 'rejected');
+  assert.equal(h.recorded.length, 1);
+  assert.equal(recordTransactions, 1, 'only the stored settlement needs the record transaction; intake, dispatch, refusal and replay do not');
+  await h.close();
+});
+
+test('CD10 ledger failure leaves import unconfirmed; recovery preserves original account and roles', async () => {
+  let fail = true;
+  const h = await harness({ recordFailure: () => fail });
+  const first = await h.send(dicom({ study: uid(), id: 'CD10-RECOVERY' }));
+  assert.equal(first.body.outcome, 'unconfirmed', JSON.stringify(first.body));
+  assert.equal(h.recorded.length, 0);
+  assert.equal(h.orthanc.count(), 1);
+  const original = structuredClone(h.s.file(first.id, 0).access);
+  fail = false;
+  h.s.advance(31000);
+  const resolved = await recovery(h, first.id,
+    { basis: 'orthanc-restarted', checkedAt: new Date(T0 + 30000).toISOString() }, ADMIN2);
+  assert.equal(resolved.body.outcome, 'stored', JSON.stringify(resolved.body));
+  assert.equal(h.recorded.length, 1);
+  assert.deepEqual(h.recorded[0].userId.value, original.actor);
+  assert.deepEqual(h.recorded[0].rolesAtTime.value, original.roles);
+  assert.deepEqual(h.s.file(first.id, 0).access.binding, original.binding);
+  await h.close();
+});
+
+test('CD10 pre-upgrade unconfirmed imports recover under their original owner with unresolved roles', async () => {
+  let fail = true;
+  const h = await harness({ recordFailure: () => fail });
+  try {
+    const first = await h.send(dicom({ study: uid(), id: 'CD10-LEGACY' }));
+    assert.equal(first.body.outcome, 'unconfirmed');
+    const op = h.s.ops.get(first.id);
+    delete op.results[0].access;
+    fail = false;
+    h.s.advance(31000);
+    const resolved = await recovery(h, first.id,
+      { basis: 'orthanc-restarted', checkedAt: new Date(T0 + 30000).toISOString() }, ADMIN2);
+    assert.equal(resolved.body.outcome, 'stored', JSON.stringify(resolved.body));
+    assert.equal(h.recorded.length, 1);
+    const event = h.recorded[0];
+    assert.equal(event.userId.value.issuer, op.ownerIssuer);
+    assert.equal(event.userId.value.subject, op.ownerSubject);
+    assert.equal(event.formatVersion, 1);
+    assert.deepEqual(event.rolesAtTime, { status: 'unresolved', reason: 'legacy-import-roles-not-stored' });
+    assert.deepEqual(event.trustedProxyIp, { status: 'unresolved', reason: 'not-observed' });
+    assert.equal(event.context.basis, 'out-of-context');
+    assert.ok(event.context.reason);
+    assert.equal(event.targets[0].patientLinkSnapshot.value.patientId, 'CD10-LEGACY');
+  } finally { await h.close(); }
+});
 
 // ════════════════════════════════════════ the import route ════════════════════════════════════════
 
@@ -4763,7 +4849,7 @@ test('S9U4-B77 DG-T01/T04 grant issue: a bound cookie session only (Bearer 403 D
   assert.equal((await grantRequest(h, study, id, 'sid-t2')).status, 404, 'another owner: the same 404 as no operation');
   sessionOf(h, 'sid-tb', TECH_B);
   assert.equal((await grantRequest(h, study, id, 'sid-tb')).status, 404, 'another institution');
-  h.s.rights.set('clin-a-sub', { sub: 'clin-a-sub', approved: true, suspended: false, institution: 'inst-a', roles: ['clinician'] });
+  h.s.rights.set('clin-a-sub', { sub: 'clin-a-sub', version: 1, approved: true, suspended: false, institution: 'inst-a', roles: ['clinician'] });
   h.s.sessions.add('sid-c'); h.s.sessionSubs.set('sid-c', 'clin-a-sub');
   assert.equal((await grantRequest(h, study, id, 'sid-c')).status, 403, 'a clinician-only member never reaches the route');
   const gateway = await h.request('POST', archivePath(study, id) + '/grant', { as: null, headers: { authorization: 'Bearer tok:gw-sub' }, body: {} });

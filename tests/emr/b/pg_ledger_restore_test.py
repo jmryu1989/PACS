@@ -1200,11 +1200,12 @@ class PgLedgerUpgradeCarryLive(PgLedgerFixture):
             result = self.deploy(database)
             (evidence / (database + '.deploy.log')).write_text(result.stdout + result.stderr, encoding='utf-8')
             upgrades[database] = result
+        release = sum(1 for p in (source / 'migrations').iterdir() if p.is_dir())
         for database in ('upgrade_probe', 'upgrade_empty'):
             result = upgrades[database]
             self.assertEqual(result.returncode, 0, database + ': ' + result.stdout[-2000:] + result.stderr[-2000:])
             self.assertEqual(self.psql(database, 'SELECT count(*) FILTER (WHERE finished_at IS NOT NULL), count(*) '
-                                       'FROM _prisma_migrations;').stdout.strip(), '67|67')
+                                       'FROM _prisma_migrations;').stdout.strip(), f'{release}|{release}')
         self.assertNotEqual(upgrades['upgrade_expiry'].returncode, 0, 'An expiry checkpoint must refuse the upgrade')
         # Prisma reports only the aborted transaction; the server log names the refusal.
         server = self.command(['docker', 'logs', self.container])

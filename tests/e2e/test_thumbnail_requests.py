@@ -176,6 +176,7 @@ class ThumbnailRequestsE2E(PortraitWorkspaceE2E):
         self.addCleanup(lambda:self.assertEqual(self.hashes(),before))
         self.seed_report(fixture)
         page = self.login()
+        self.show_workspace_panels(page, "Thumbnail")
         self.observe(page,[fixture],before)
         self.select(page,fixture)
         self.ready(page,24)
@@ -210,6 +211,7 @@ class ThumbnailRequestsE2E(PortraitWorkspaceE2E):
         before = self.hashes()
         self.addCleanup(lambda:self.assertEqual(self.hashes(),before))
         page = self.login()
+        self.show_workspace_panels(page, "Thumbnail")
         cdp = self.observe(page,[a,b],before)
         cdp.send('Network.emulateNetworkConditions',{'offline':False,'latency':500,
                   'downloadThroughput':1024*1024,'uploadThroughput':1024*1024})
@@ -245,6 +247,7 @@ class ThumbnailRequestsE2E(PortraitWorkspaceE2E):
         before = self.hashes()
         self.addCleanup(lambda:self.assertEqual(self.hashes(),before))
         page = self.login()
+        self.show_workspace_panels(page, "Thumbnail")
         self.observe(page,[a,b],before)
         faults = []
         def fail_one(route):

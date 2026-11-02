@@ -10,12 +10,17 @@
  * Orthanc chose its answer, relays that answer unchanged (status, media type,
  * body; the query carries rendering and windowing as before). Descriptions without the image are not deliveries of the
  * image: the instance tag dumps and attachment info relayed here record a 열람 of the study's metadata of their own
- * (StudyImageDeliveryRecorder.describe), durable before their first byte; QIDO and DICOMweb metadata go from nginx to
- * Orthanc behind auth_request and are not recorded. The auth_request route refuses every image read
+ * (StudyImageDeliveryRecorder.describe), durable before their first byte; QIDO and DICOMweb metadata reuse a session read or prepare one through ViewingRecordService. The auth_request route refuses every image read
  * (pacs.controller.ts), so an image byte has no unrecorded way out.
  */
-import { Controller, Get, NotFoundException, Req, Res } from '@nestjs/common';
-import { archiveRead, RECORDED_STUDY_HEADER, StudyImageDeliveryRecorder } from './image-delivery-record';
+import { Controller, Get, Inject, NotFoundException, Param, Post, Req, Res, ServiceUnavailableException } from '@nestjs/common';
+import { EMR_RECORD_PORT, EmrRecordPort } from './emr-runtime/record-port';
+import { recordGatewayStow } from './pacs/dicom-gateway';
+import { archiveRead, imageRead, RECORDED_STUDY_HEADER, StudyImageDeliveryRecorder } from './image-delivery-record';
+import { PrismaService } from './prisma.service';
+import { REQUEST_CONTEXT_SOURCE, RequestContextSource } from './emr-runtime/request-context';
+import { ViewingRecordService } from './emr-viewing/viewing-record.service';
+import { DicomwebReadRecorder } from './emr-viewing/dicomweb-read';
 import { OrthancService } from './orthanc.service';
 import { Caller, PacsService } from './pacs.service';
 
@@ -35,12 +40,40 @@ function relayTarget(url: string): { path: string; query: string } | null {
 const member = (req: any): Caller => ({ sub: req.sub, actor: req.actor, roles: req.roles ?? [],
   institution: req.institution ?? null, kind: req.kind ?? 'member' });
 
-@Controller('image-relay')
+@Controller()
 export class ImageRelayController {
+  private readonly metadata: DicomwebReadRecorder;
   constructor(private readonly pacs: PacsService, private readonly orthanc: OrthancService,
-    private readonly deliveries: StudyImageDeliveryRecorder) {}
+    private readonly deliveries: StudyImageDeliveryRecorder,
+    @Inject(EMR_RECORD_PORT) private readonly records: EmrRecordPort,
+    prisma: PrismaService, @Inject(REQUEST_CONTEXT_SOURCE) requests: RequestContextSource,
+    viewing: ViewingRecordService) { this.metadata = new DicomwebReadRecorder(prisma, requests, viewing); }
 
-  @Get('*')
+  @Post('gateway/stow/:uid')
+  async stow(@Param('uid') uid: string, @Req() req: any, @Res() res: any) {
+    await this.pacs.authzDicom('/dicom-web/studies/' + uid, 'POST', member(req));
+    const abort = new AbortController(), stop = () => abort.abort();
+    req.once('aborted', stop);
+    try {
+      const user = process.env.ORTHANC_USER, pass = process.env.ORTHANC_PASS;
+      if (!user || !pass) throw new Error('Orthanc credentials unavailable');
+      const upstream = await fetch((process.env.ORTHANC_URL ?? 'http://orthanc:8042').replace(/\/$/, '') + '/dicom-web/studies/' + uid, {
+        method: 'POST', redirect: 'error', body: req, duplex: 'half', signal: abort.signal,
+        headers: { Authorization: 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64'),
+          'Content-Type': String(req.headers['content-type'] ?? ''), Accept: 'application/dicom+json' },
+      } as RequestInit);
+      const bytes = Buffer.from(await upstream.arrayBuffer());
+      if (upstream.ok) await recordGatewayStow(this.records, this.orthanc, req, uid, JSON.parse(bytes.toString('utf8')));
+      res.status(upstream.status);
+      const type = upstream.headers.get('content-type');
+      if (type) res.setHeader('Content-Type', type);
+      res.end(bytes);
+    } catch {
+      throw new ServiceUnavailableException('영상 수신 또는 기재 기록을 확인하지 못했습니다. 같은 전송을 다시 확인하세요.');
+    } finally { req.off('aborted', stop); }
+  }
+
+  @Get('image-relay/*')
   async read(@Req() req: any, @Res() res: any) {
     const target = relayTarget(String(req.originalUrl ?? req.url ?? ''));
     if (!target) throw new NotFoundException('영상 경로가 올바르지 않습니다');
@@ -66,7 +99,11 @@ export class ImageRelayController {
     try {
       // Orthanc selects what it answers when the request reaches it, after the lease read the study: the answer is
       // copied only once the archive still holds the patient and revision the record names (C6/C7, I3).
-      await this.orthanc.relay(uri, String(req.headers?.accept ?? '*/*'), res, abort.signal, origin, selected);
+      if (target.path.startsWith('/dicom-web/') && !imageRead(target.path)) {
+        await this.metadata.relay(req, res, this.orthanc, uri, origin, admitted!, abort.signal);
+      } else {
+        await this.orthanc.relay(uri, String(req.headers?.accept ?? '*/*'), res, abort.signal, origin, selected);
+      }
       relayed = true;
     } catch (error) {
       // After the headers a JSON error cannot follow; cutting the connection is the truthful end of a partial image.

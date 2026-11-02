@@ -25,7 +25,7 @@ class WorklistRefreshE2E(WorklistE2E):
         p.wait_for_timeout(31000)
         self.assertEqual(requests,[],'Manual must not issue an automatic study list request')
         self.assertNotIn(b.uid,p.evaluate('studies.map(s=>s.uid)'))
-        p.locator('#refresh').click()
+        p.locator('#m-refresh').click()
         p.wait_for_function('(uid)=>studies.some(s=>s.uid===uid)',arg=b.uid)
         expect(p.locator('#findings')).to_have_value('REFRESH UNSAVED INPUT')
         self.open_toolbar_group(p,'#worklist-refresh')
@@ -58,7 +58,7 @@ class WorklistRefreshE2E(WorklistE2E):
         expect(p.locator('#dbstat')).to_contain_text('DB Connected')
         self.assertEqual(p.evaluate('selectedUid'),a.uid)
         p.unroute('**/api/studies?*',hold)
-        p.locator('#refresh').click()
+        p.locator('#m-refresh').click()
         p.wait_for_function('(uid)=>studies.some(s=>s.uid===uid)',arg=b.uid)
         self.assertEqual(p.evaluate('selectedUid'),a.uid)
 

@@ -140,6 +140,7 @@ if '--boundary' not in sys.argv:
             expect(p.locator('.viewer-window-row')).to_have_count(0)
             self.assertTrue(viewer.is_closed())
             p.locator('#viewer-windows-done').click()
+            self.close_toolbar_groups(p)
             viewer = self.open_first(p, a)
             self.assertEqual(len(opened), 2)
             self.assertEqual(p.evaluate('__u1OpenCalls.length'), 2)
@@ -320,6 +321,7 @@ if '--boundary' not in sys.argv:
             self.control(p, 0, 'close').click()
             self.assertTrue(viewer.is_closed())
             p.locator('#viewer-windows-done').click()
+            self.close_toolbar_groups(p)
             restored = self.open_first(p, a)
             restored.wait_for_function("""expected => {
               const actual={left:screenX,top:screenY,width:outerWidth,height:outerHeight};
@@ -425,6 +427,7 @@ if '--boundary' not in sys.argv:
             self.assertEqual(len(p.context.pages), 2)
             viewer.close()
             p.locator('#viewer-windows-done').click()
+            self.close_toolbar_groups(p)
             with p.context.expect_page() as opened:
                 p.locator('#thumbwrap img').first.dblclick()
             restored = opened.value

@@ -41,7 +41,7 @@ class SourceKeysE2E(WorklistE2E):
   legacy=self.stack.request('GET','/studies','doctor');self.assertEqual(legacy.status,200);self.assertIn(valid.uid,[r['uid'] for r in legacy.body['studies']]);self.assertNotIn(key,[r['uid'] for r in legacy.body['studies']])
   paged=self.stack.request('GET','/studies?limit=100','doctor');self.assertEqual(paged.status,200);self.assertIn(valid.uid,[r['uid'] for r in paged.body['studies']]);self.assertNotIn(key,[r['uid'] for r in paged.body['studies']])
   page=self.login();self.select(page,valid);expect(page.locator('#findings')).to_have_value(valid.secret)
-  page.locator('#findings').fill('Keep normal report with opaque source key');page.locator('#refresh').click();expect(page.locator('#study-fetch')).not_to_be_visible();expect(page.locator('#findings')).to_have_value('Keep normal report with opaque source key')
+  page.locator('#findings').fill('Keep normal report with opaque source key');page.locator('#m-refresh').click();expect(page.locator('#study-fetch')).not_to_be_visible();expect(page.locator('#findings')).to_have_value('Keep normal report with opaque source key')
   # D1882: the unknown-source study is held: in no list, and the operator alert names its device and raw text only.
   held=self.stack.request('GET','/admin/held-sources','jmryu');self.assertEqual(held.status,200);self.assertNotIn(key,json.dumps(held.body))
   self.assertTrue(any(g['device']=='KIN_SOURCE_KEY' and marker in g['institutionText'] and g['count']>=1 for g in held.body['groups']),held.body)

@@ -398,22 +398,15 @@ test('CC-S02 members are included exactly when the caller may read them now (own
   assert.equal(policy.contextAccess(null, A), null);
 });
 
-test('CC-S02 roles: radiologist, admin and a mixed clinician+radiologist pass; technician-only and clinician-only are 403', async () => {
-  // A mixed user keeps its legacy role (RISK-S5-U1c-MIXED-DOWNGRADE): the controller's second line refuses clinician-only,
-  // never "has clinician". This case, not a source pin, is what clinician_policy_fixtures.json behaviour_checked_sites names.
-  for (const caller of [reader, admin, member('mixed', ['clinician', 'radiologist']), member('mixed-admin', ['clinician', 'admin'])]) {
+test('CC-S02 roles: physicians, radiologists and admins read; technician-only and gateway remain refused', async () => {
+  // Owner decision 2026-11-02 admits physician reads; prior bodies retain the shared signed-only contract.
+  for (const caller of [reader, admin, member('mixed', ['clinician', 'radiologist']), member('mixed-admin', ['clinician', 'admin']), member('clinician', ['clinician']), member('mixed-tech', ['clinician', 'technician'])]) {
     assert.equal((await call(fullWorld(), caller)).status, 200, caller.actor);
   }
   const techWorld = fullWorld();
   const tech = await call(techWorld, member('tech', ['technician']));
   assert.deepEqual([tech.status, tech.body.code], [403, 'CLINICAL_CONTEXT_ROLE']);
   assert.deepEqual([techWorld.calls.delegates.length, techWorld.calls.orthanc.length], [0, 0], 'refused before any read');
-  const mixedTech = await call(fullWorld(), member('mixed-tech', ['clinician', 'technician']));
-  assert.deepEqual([mixedTech.status, mixedTech.body.code], [403, 'CLINICAL_CONTEXT_ROLE']);
-  const w = fullWorld();
-  const clinician = await call(w, member('clinician', ['clinician']));
-  assert.deepEqual([clinician.status, clinician.body], [403, { code: 'CLINICIAN_ROUTE_DENIED' }]);
-  assert.deepEqual([w.calls.delegates.length, w.calls.orthanc.length], [0, 0], 'refused before any read');
   const gateway = await call(fullWorld(), { ...reader, kind: 'gateway' });
   assert.equal(gateway.status, 403);
 });
