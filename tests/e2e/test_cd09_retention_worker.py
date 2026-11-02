@@ -3,15 +3,24 @@
 REQ-EMR-17, REQ-EMR-19 -> RISK-H-06 -> TEST-CD09-LEDGER-LIVE, TEST-CD09-S01/S02/S04/S05/S09 (PostgreSQL part).
 The shipped retention entry, under the retention login, against a fixture database migrated by the same image:
 native report units destroyed with their versions, signatures, signing operations and head; retained, held,
-released-hold and unsigned units untouched; drafts and the shared StudyState untouched; the deleting fence, the ACL
-and the all-or-nothing deletion step. Images (Orthanc, derived copies) are CD-09b, so every run is incomplete (exit 1).
+released-hold, unsigned, reverse-referenced and still-projected units untouched; drafts and the shared StudyState
+untouched; the deleting fence on every writer of the unit and of a reference to it, the ACL and the all-or-nothing
+deletion step; a report save, a CVR and a second worker overlapping a live deletion (no deadlock, nothing lost).
+Images (Orthanc, derived copies) are CD-09b, so every run is incomplete (exit 1).
 Run through scripts/run-tests.py with the existing PgLedgerFixture admission.
+
+The overlapping writers below send commitReport's and CriticalResultService.create's statement order as SQL (study row,
+then fixed-record lock, then the report rows); the services themselves run in tests/e2e/test_worklist.py and the CVR
+suites. A worker is paused between its execution and its started journal by a held lock on the journal table.
 """
-import hashlib
 import json
 from pathlib import Path
+import queue
 import secrets
+import subprocess
 import sys
+import threading
+import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -90,6 +99,76 @@ class RetentionFixture(pg.PgLedgerFixture):
           (SELECT count(*) FROM emr_signing.operation WHERE outcome->>'recordId'={q}) || ',' ||
           (SELECT count(*) FROM "Report" WHERE uid={q})""")
 
+    @staticmethod
+    def cvr(uid, version, record=None):
+        """One valid created CVR pinning (uid, version), as CriticalResultService.create writes it."""
+        return f"""INSERT INTO "CriticalResult"(id,"studyUid","institutionId","senderInstitutionId","senderSub","senderActor","senderName",
+          "recipientSub","recipientActor","recipientName","recipientRole","sourceVersion","sourceAction","sourceAuthor","sourceAt",
+          "origName","origPatientId","origBirth","origStudyDate",message,state,revision,"changedBy","updatedAt")
+          VALUES ('{record or uuid.uuid4()}',{literal(uid)},'SYNTHETIC-hospital','SYNTHETIC-hospital','SYNTHETIC-sender','SYNTHETIC-sender',
+          'SYNTHETIC sender','SYNTHETIC-recipient','SYNTHETIC-recipient','SYNTHETIC recipient','radiologist',{version},'approve',
+          'SYNTHETIC-doctor',now(),'SYNTHETIC','SYNTHETIC','19000101','20150302','SYNTHETIC critical','created',1,'SYNTHETIC-sender',now());"""
+
+    def session(self):
+        """A second, concurrently open psql session on the fixture database (admin)."""
+        return Session(self)
+
+    def blocked(self, pattern, count=1, timeout=90):
+        """Waits until `count` backends wait on a lock while running a statement matching `pattern`."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if int(self.scalar(f"""SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'
+                AND query LIKE {literal(pattern)}""")) >= count:
+                return
+            time.sleep(0.2)
+        self.fail('no backend blocked on ' + pattern)
+
+    def entry_process(self, url, name):
+        """The shipped entry in the background, in its own run-owned container."""
+        args = self.image_args(['node', '/app/dist/emr-retention/entry.js'], {'DATABASE_URL': url})
+        owned = args[args.index('--name') + 1] = self.container + '-' + name + '-' + uuid.uuid4().hex[:6]
+        # A worker left blocked by a failed case is removed before the fixture's network.
+        self.addCleanup(self.command, ['docker', 'rm', '-f', owned], check=False)
+        return subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8')
+
+    def entry_result(self, process, timeout=240):
+        out, err = process.communicate(timeout=timeout)
+        return process.returncode, (json.loads(out) if out.strip() else None), err
+
+
+class Session:
+    """psql reading statements from a pipe; `mark` waits until everything sent before it has run."""
+
+    def __init__(self, fixture):
+        self.process = subprocess.Popen(['docker', 'exec', '-i', fixture.container, 'psql', '-X', '-q', '-t', '-A',
+                                         '-v', 'ON_ERROR_STOP=0', '-U', fixture.admin_user, '-d', fixture.database_name],
+                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        text=True, encoding='utf-8')
+        self.lines, self.errors = queue.Queue(), []
+        threading.Thread(target=lambda: [self.lines.put(line.strip()) for line in self.process.stdout], daemon=True).start()
+        threading.Thread(target=lambda: [self.errors.append(line) for line in self.process.stderr], daemon=True).start()
+
+    def send(self, statements):
+        self.process.stdin.write(statements + '\n')
+        self.process.stdin.flush()
+
+    def mark(self, name, timeout=90):
+        self.send(f"SELECT 'mark-{name}';")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if self.lines.get(timeout=1) == 'mark-' + name:
+                    return
+            except queue.Empty:
+                pass
+        raise AssertionError('session did not reach ' + name + ': ' + ''.join(self.errors)[-2000:])
+
+    def close(self, timeout=90):
+        self.process.stdin.close()
+        self.process.wait(timeout=timeout)
+        time.sleep(0.2)
+        return ''.join(self.errors)
+
 
 class RetentionWorkerLedgerLive(RetentionFixture):
     def test_shipped_entry_expiry_hold_retry_and_incomplete_status(self):
@@ -139,12 +218,25 @@ class RetentionWorkerReportLive(RetentionFixture):
             self.assertIn('permission denied', self.sql(statement, 'kin_runtime', check=False).stderr, statement)
 
         old = ['2015-03-02T01:00:00.000Z', '2015-03-02T02:00:00.000Z']
-        expired, recent, held, released, unsigned = (f'1.2.826.0.1.3680043.9.{n}' for n in range(5))
+        expired, recent, held, released, unsigned, incorporated, approved, pinned = (f'1.2.826.0.1.3680043.9.{n}' for n in range(8))
+        # The expired unit keeps the product's state after a cancelled reading: rs W, no reader, no confirmation date.
         self.seed_report(expired, ['approve', 'addendum'], old)
         self.seed_report(recent, ['approve'], ['2025-06-01T00:00:00.000Z'])
         self.seed_report(held, ['approve'], old[:1])
         self.seed_report(released, ['approve'], old[:1])
         self.seed_report(unsigned, ['approve'], old[:1], sign=False)
+        for uid in (incorporated, approved, pinned):
+            self.seed_report(uid, ['approve', 'addendum'], old)
+        # CD09-P05 (P1): a 2019 chart incorporation of the 2015 report, stored as a B order fact; never read as "none".
+        fact = dict(recordId='SYNTHETIC-order-1', eventId='SYNTHETIC-order-event-2019', facts=dict(objectKind='registration',
+                    chartIncorporation=dict(eventId='SYNTHETIC-ci-2019', at='2019-05-01T00:00:00.000Z', recordId=incorporated, versionId='2')),
+                    event=dict(eventId='SYNTHETIC-order-event-2019', at='2019-05-01T00:00:00.000Z',
+                               components=[dict(recordId=incorporated, partId='2', sha256='0' * 64)]))
+        self.sql(f"""INSERT INTO emr_access.order_fact(record_id,event_id,sequence,previous_event_id,body,recorded_at)
+          VALUES ('SYNTHETIC-order-1','SYNTHETIC-order-event-2019',1,NULL,{literal(json.dumps(fact))},'2019-05-01T00:00:00Z');""")
+        # An approved reading still projected on the study, and a CVR made before the run pinning version 2.
+        self.sql(f"""UPDATE "StudyState" SET rs='A', "repDoc"='SYNTHETIC-doctor', confirm='2015-03-02' WHERE uid={literal(approved)};""")
+        self.sql(self.cvr(pinned, 2))
         for record, release in [(held, False), (released, True)]:
             hold = 'SYNTHETIC-hold-' + record[-1]
             body = json.dumps(dict(holdId=hold, recordId=record, release=None, basis='synthetic', actorId='fixture', at='2016-01-01T00:00:00.000Z'))
@@ -155,7 +247,7 @@ class RetentionWorkerReportLive(RetentionFixture):
         self.sql(f"""INSERT INTO "ReportDraft"(uid,author,findings,conclusion,recommendation,present,"updatedAt") VALUES
           ({literal(expired)},'SYNTHETIC-other','SYNTHETIC live draft','','',true,now()),
           ({literal(expired)},'SYNTHETIC-doctor','','','',false,now());""")
-        kept = {uid: self.report_rows(uid) for uid in (recent, held, released, unsigned)}
+        kept = {uid: self.report_rows(uid) for uid in (recent, held, released, unsigned, incorporated, approved, pinned)}
         drafts = self.scalar(f'SELECT md5(string_agg(row_to_json(d)::text, \',\' ORDER BY author)) FROM "ReportDraft" d')
 
         run, result = self.run_entry(url)
@@ -163,10 +255,12 @@ class RetentionWorkerReportLive(RetentionFixture):
         self.assertEqual(result['status'], 'incomplete', result)
         self.assertEqual(result['failure'], None)
         self.assertEqual(result['open'], ['image-destruction'])
-        self.assertEqual(result['uncovered'], [])
+        self.assertEqual(result['uncovered'], ['public."CriticalResult"'])
         # Expired in 2020 and destroyed only now: the completion is recorded late, with the missing reason flagged.
         self.assertEqual(result['statutory'], dict(due=1, destroyed=1, retained=1, held=1, overdue=1, delayReasonMissing=1,
-                                                   unsupported={'released-hold-history': 1, 'report-version-unsigned': 1}))
+                                                   unsupported={'released-hold-history': 1, 'report-version-unsigned': 1,
+                                                                'reverse-reference:order-fact': 1, 'report-projection': 1,
+                                                                'reverse-reference:critical-result': 1}))
         self.assertEqual(result['purpose'], dict(live=1, cleared=1, inconsistent=0))
         # CD09-S01: no operational row of the expired unit is left; the receipt and the set completion agree.
         self.assertEqual(self.remaining(expired), '0,0,0,0')
@@ -185,7 +279,7 @@ class RetentionWorkerReportLive(RetentionFixture):
         self.assertNotIn('1.2.826', json.dumps(journal), 'the destruction ledger names no study')
         self.assertEqual(self.scalar("SELECT count(*) || ',' || bool_and(confirmed_at IS NOT NULL)::text FROM emr_access.retention_commit"), '1,true')
         self.assertEqual(self.scalar(f"""SELECT count(*) FROM emr_access.retention_unit WHERE record_id={literal(expired)}"""), '0')
-        self.assertEqual(self.scalar("SELECT count(*) FROM emr_access.retention_unit"), '4')
+        self.assertEqual(self.scalar("SELECT count(*) FROM emr_access.retention_unit"), '7')
         self.assertEqual(self.scalar("SELECT count(*) FROM emr_access.retention_execution"), '0')
         units = self.scalar("SELECT string_agg(disposal_unit_id, ',' ORDER BY record_id) FROM emr_access.retention_unit")
 
@@ -200,7 +294,7 @@ class RetentionWorkerReportLive(RetentionFixture):
           VALUES ('SYNTHETIC-hospital','SYNTHETIC-user',1,NULL,now());""")
         third, census = self.run_entry(url)
         self.assertEqual(third.returncode, 1, third.stderr)
-        self.assertEqual(census['uncovered'], ['public."WorklistColumns"'])
+        self.assertEqual(census['uncovered'], ['public."CriticalResult"', 'public."WorklistColumns"'])
 
 
 class RetentionWorkerFenceLive(RetentionFixture):
@@ -242,14 +336,29 @@ class RetentionWorkerFenceLive(RetentionFixture):
               ARRAY[(SELECT disposal_unit_id FROM emr_access.register_retention_units('report', ARRAY[{literal(fenced)}]))], ARRAY[{literal(fenced)}],
               '2020-03-01T15:00:00Z','SYNTHETIC',{literal(json.dumps(bad))}::jsonb)""", 'kin_emr_retention', check=False).stderr
             self.assertIn(code, stderr)
+        question = str(uuid.uuid4())
+        self.sql(f"""INSERT INTO "StudyQuestion"(id,"studyUid","institutionId","authorSub","authorActor","authorName",state,revision,
+          "entryCount","changedBy","updatedAt") VALUES ('{question}',{literal(fenced)},'SYNTHETIC-hospital','SYNTHETIC-clinician',
+          'SYNTHETIC-clinician','SYNTHETIC clinician','Open',1,1,'SYNTHETIC-clinician',now());""")
         operation, unit = self.begin(fenced, self.targets(fenced))
-        # CD09-S05: while the set is being deleted no writer adds a version, signature, head change or hold to it.
+        # CD09-S05: while the set is being deleted no writer adds a version, signature, head change or hold to it, and
+        # no writer adds a reference to it (CVR pin, question entry, Related Report insertion, F issuance).
         before = self.report_rows(fenced)
+        manifest = json.dumps(dict(manifest=dict(records=[dict(recordId=fenced, versionId='2', sha256='0' * 64)])))
         for statement in [f"""INSERT INTO "ReportVersion"(uid,version,action,findings,conclusion,recommendation,author)
                               VALUES ({literal(fenced)},3,'addendum','SYNTHETIC late','','','SYNTHETIC-doctor');""",
                           f"""UPDATE "Report" SET findings='SYNTHETIC late' WHERE uid={literal(fenced)};""",
                           f"""INSERT INTO emr_signing.signed_version(record_id,version_id,kid,outcome)
-                              VALUES ({literal(fenced)},'9','{KID}','{{}}'::jsonb);"""]:
+                              VALUES ({literal(fenced)},'9','{KID}','{{}}'::jsonb);""",
+                          self.cvr(fenced, 2),
+                          f"""INSERT INTO "StudyQuestionEntry"(id,"questionId",seq,kind,body,"authorSub","authorActor","authorName",
+                              "authorRole","reportRs","reportVersion",fingerprint,"appliedRevision",result) VALUES ('{uuid.uuid4()}','{question}',
+                              2,'followup','SYNTHETIC','SYNTHETIC-clinician','SYNTHETIC-clinician','SYNTHETIC','clinician','A',2,
+                              '{'0' * 64}',2,'{{}}');""",
+                          f"""INSERT INTO "ReportDraftInsertReceipt"("insertRequestId","targetUid","sourceUid","sourceVersion",state)
+                              VALUES ('{uuid.uuid4()}','SYNTHETIC-target',{literal(fenced)},2,'applied');""",
+                          f"""INSERT INTO emr_audit.issuance_event(issuance_id,institution_id,body)
+                              VALUES ('SYNTHETIC-issuance','SYNTHETIC-hospital',{literal(manifest)});"""]:
             self.assertIn('RetentionDeleting', self.sql(statement, check=False).stderr, statement)
         hold_body = json.dumps(dict(holdId='SYNTHETIC-late-hold', recordId=fenced, release=None, basis='synthetic', actorId='fixture', at='2026-01-01T00:00:00.000Z'))
         self.assertIn('RetentionDeleting', self.sql(f"SELECT emr_access.place_hold('SYNTHETIC-late-hold',{literal(fenced)},{literal(hold_body)})",
@@ -298,3 +407,124 @@ class RetentionWorkerFenceLive(RetentionFixture):
         self.assertEqual((second['status'], second['failure']), ('failed', 'OperationalRowRemains'))
         self.assertEqual(self.report_rows(partial), partial_before)
         self.assertEqual(self.remaining(unstarted), '2,2,2,1')
+
+
+class RetentionWorkerOverlapLive(RetentionFixture):
+    """CD09-S05 with live sessions: one lock order for the report writer, a CVR writer, H and a second H."""
+
+    OLD = ['2015-03-02T01:00:00.000Z', '2015-03-02T02:00:00.000Z']
+    JOURNAL_INSERT = '%INSERT INTO emr_access.retention_journal%'
+
+    def writer_prelude(self, session, uid):
+        """commitReport's order: the study row (draftTransaction), then the fixed-record lock, then the Report row."""
+        session.send(f"""BEGIN; SELECT uid FROM "StudyState" WHERE uid = {literal(uid)} FOR UPDATE;
+          SELECT emr_access.fixed_record_lock({literal(uid)});""")
+
+    def pause_after_execution(self):
+        """Holds the journal so a worker stops right after its execution became durable, holding its record locks."""
+        pause = self.session()
+        pause.send('BEGIN; LOCK TABLE emr_access.retention_journal IN SHARE ROW EXCLUSIVE MODE;')
+        pause.mark('journal-held')
+        return pause
+
+    def journal(self):
+        return self.scalar("SELECT coalesce(string_agg(phase, ',' ORDER BY sequence), '') FROM emr_access.retention_journal")
+
+    def test_save_before_the_lock_is_judged_and_save_after_deletion_started_is_refused(self):
+        url = self.retention_url()
+        early, late = '1.2.826.0.1.3680043.7.1', '1.2.826.0.1.3680043.7.2'
+        self.seed_report(early, ['approve', 'addendum'], self.OLD)
+        # A save that holds its record lock (and the Report row) when H arrives: H waits for it, then judges the new
+        # unsigned version under the lock and starts nothing - the save is part of the new inventory, never lost.
+        writer = self.session()
+        self.writer_prelude(writer, early)
+        writer.send(f"""SELECT version FROM "Report" WHERE uid = {literal(early)} FOR UPDATE;
+          INSERT INTO "ReportVersion"(uid,version,action,findings,conclusion,recommendation,author)
+            VALUES ({literal(early)},3,'save','SYNTHETIC concurrent save','','','SYNTHETIC-doctor');
+          UPDATE "Report" SET findings='SYNTHETIC concurrent save', version=3 WHERE uid={literal(early)};""")
+        writer.mark('saved')
+        h = self.entry_process(url, 'h1')
+        self.blocked('%pg_advisory_lock%')
+        writer.send('COMMIT;')
+        writer.mark('committed')
+        self.assertEqual(writer.close(), '')
+        code, result, err = self.entry_result(h)
+        self.assertEqual(code, 1, err)
+        self.assertEqual((result['status'], result['failure']), ('failed', 'ReferenceSnapshotStale'))
+        self.assertEqual(self.remaining(early), '3,2,2,1')
+        self.assertEqual((self.journal(), self.scalar('SELECT count(*) FROM emr_access.retention_execution')), ('', '0'))
+
+        # A save that arrives after the deletion started waits for H's record lock without holding a report row (no
+        # deadlock), and then finds its base version gone: commitReport's version check refuses it.
+        self.seed_report(late, ['approve', 'addendum'], self.OLD)
+        pause = self.pause_after_execution()
+        h = self.entry_process(url, 'h2')
+        self.blocked(self.JOURNAL_INSERT)
+        writer = self.session()
+        self.writer_prelude(writer, late)
+        writer.send(f"""DO $$ BEGIN
+            IF NOT EXISTS (SELECT FROM "Report" WHERE uid = {literal(late)} AND version = 2) THEN RAISE EXCEPTION 'SYNTHETIC base version changed'; END IF;
+          END $$;
+          ROLLBACK;""")
+        self.blocked('%fixed_record_lock%')
+        pause.send('COMMIT;')
+        self.assertEqual(pause.close(), '')
+        writer.mark('done')
+        errors = writer.close()
+        self.assertIn('SYNTHETIC base version changed', errors)
+        self.assertNotIn('deadlock', errors)
+        code, result, err = self.entry_result(h)
+        self.assertEqual(code, 1, err)
+        self.assertEqual((result['status'], result['failure'], result['statutory']['destroyed']), ('incomplete', None, 1))
+        self.assertEqual(self.remaining(late), '0,0,0,0')
+        self.assertNotIn('deadlock', err)
+
+    def test_cvr_made_during_deletion_waits_and_is_refused_no_execution_left_blocked(self):
+        url = self.retention_url()
+        uid = '1.2.826.0.1.3680043.7.3'
+        self.seed_report(uid, ['approve', 'addendum'], self.OLD)
+        pause = self.pause_after_execution()
+        h = self.entry_process(url, 'h1')
+        self.blocked(self.JOURNAL_INSERT)
+        cvr = self.session()
+        cvr.send(f"""BEGIN; SELECT uid FROM "StudyState" WHERE uid = {literal(uid)} FOR UPDATE; {self.cvr(uid, 2)} COMMIT;""")
+        self.blocked('%INSERT INTO "CriticalResult"%')
+        pause.send('COMMIT;')
+        self.assertEqual(pause.close(), '')
+        cvr.mark('done')
+        errors = cvr.close()
+        # The CVR waited for H's record lock; the version it pins was gone when it got it.
+        self.assertIn('CriticalResult_studyUid_sourceVersion_fkey', errors)
+        code, result, err = self.entry_result(h)
+        self.assertEqual(code, 1, err)
+        self.assertEqual((result['failure'], result['statutory']['destroyed']), (None, 1))
+        self.assertEqual(self.remaining(uid), '0,0,0,0')
+        self.assertEqual(self.scalar('SELECT count(*) FROM "CriticalResult"') + ',' + self.scalar('SELECT count(*) FROM emr_access.retention_execution'), '0,0')
+
+    def test_second_worker_never_releases_a_live_execution(self):
+        url = self.retention_url()
+        uid = '1.2.826.0.1.3680043.7.4'
+        self.seed_report(uid, ['approve', 'addendum'], self.OLD)
+        pause = self.pause_after_execution()
+        first = self.entry_process(url, 'h1')
+        self.blocked(self.JOURNAL_INSERT)
+        operation = self.scalar('SELECT operation_id FROM emr_access.retention_execution')
+        # The owner is alive with no started record yet: releasing it here is refused, whoever asks.
+        self.assertIn('RetentionExecutionBusy', self.sql(f"SELECT emr_access.abandon_retention_execution('{operation}')",
+                                                         'kin_emr_retention', check=False).stderr)
+        self.assertIn('RetentionExecutionBusy', self.sql(f"SELECT emr_access.delete_operational_rows('{operation}')",
+                                                         'kin_emr_retention', check=False).stderr)
+        second = self.entry_process(url, 'h2')
+        self.blocked('%pg_advisory_lock%')
+        self.assertIsNone(second.poll(), 'the second worker waits for the owner instead of judging its execution')
+        pause.send('COMMIT;')
+        self.assertEqual(pause.close(), '')
+        code, result, err = self.entry_result(first)
+        self.assertEqual(code, 1, err)
+        self.assertEqual((result['failure'], result['statutory']['destroyed']), (None, 1))
+        code, again, err = self.entry_result(second)
+        self.assertEqual(code, 1, err)
+        self.assertEqual((again['failure'], again['reconcile']['abandoned'], again['reconcile']['resumed'], again['statutory']['due']),
+                         (None, 0, 0, 0))
+        self.assertEqual(self.journal(), 'started,completed')
+        self.assertEqual(self.remaining(uid), '0,0,0,0')

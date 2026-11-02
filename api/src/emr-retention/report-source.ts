@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import { resolveStoredRecord } from '../emr-contract/classification';
 import { emrAdapters } from '../emr-contract/composition';
-import { RetentionRecord, newRetentionRecord, parseRetentionRecord, recordVersionAdded } from '../emr-contract/lawful-defaults';
+import {
+  RetentionGraph, RetentionRecord, newRetentionRecord, parseRetentionRecord, recordVersionAdded, retentionState,
+} from '../emr-contract/lawful-defaults';
 import { snapshotFromRows, transactionScope, withSnapshot } from '../emr-runtime/context';
 import type { HoldRow } from '../emr-runtime/contract';
 import { verifyRegisteredServerEnvelope } from '../emr-signature/server-verification';
@@ -80,4 +82,44 @@ export function reportRetentionRecord(uid: string, versions: readonly ReportVers
   } catch (error) {
     return unsupported('report-retention-refused:' + ((error as { code?: string }).code ?? 'invalid'));
   }
+}
+
+/** One row of emr_access.retention_report_retainers: a stored fact outside the unit that names it, or its projection. */
+export interface StoredRetainer { source: string; fromRecordId: string; fromPartId: string | null; toPartId: string | null }
+/** Everything H read for one report unit under its record lock. A missing list is an unread store, never "none". */
+export interface ReportUnitRows {
+  uid: string; disposalUnitId: string; versions: readonly ReportVersionRow[]; signed: readonly SignedVersionRow[];
+  holds: readonly { holdId: string; phase: string }[]; openDuty: boolean; retainers: readonly StoredRetainer[];
+}
+export type ReportUnitJudgement =
+  | { status: 'due'; record: Readonly<RetentionRecord>; eligibleAt: string }
+  | { status: 'retained' | 'held' | 'unsupported'; reason: string | null };
+
+/**
+ * H's judgement of one native report unit at `at`. Before A sees it: a unit that anything outside it names (CVR pin,
+ * question entry, Related Report insertion, D attachment, order fact, another record's signed attachment, F issuance)
+ * or whose StudyState still projects a report state is unsupported, because no adapter here builds the referrer as an
+ * A record and dropping the reference would drop its retention duty. Only then holds, duties and A's own deadline.
+ */
+export function judgeReportUnit(rows: ReportUnitRows, at: string): ReportUnitJudgement {
+  if (!Array.isArray(rows.retainers) || !Array.isArray(rows.holds) || !Array.isArray(rows.versions) || !Array.isArray(rows.signed))
+    throw Object.assign(new Error('ReportUnitRowsUnread'), { code: 'ReportUnitRowsUnread' });
+  const sources = [...new Set(rows.retainers.map(r => r.source))].sort();
+  if (sources.includes('report-projection')) return { status: 'unsupported', reason: 'report-projection' };
+  if (sources.length) return { status: 'unsupported', reason: 'reverse-reference:' + sources[0] };
+  const active = rows.holds.filter(h => h.phase === 'placed' && !rows.holds.some(r => r.holdId === h.holdId && r.phase === 'released'));
+  if (active.length) return { status: 'held', reason: 'legal-hold' };
+  // A released hold moves the earliest destruction to its release; reading its basis is not part of this slice.
+  if (rows.holds.length) return { status: 'unsupported', reason: 'released-hold-history' };
+  if (rows.openDuty) return { status: 'held', reason: 'open-duty-request' };
+  const built = reportRetentionRecord(rows.uid, rows.versions, rows.signed, rows.disposalUnitId);
+  if (built.status !== 'built') return { status: 'unsupported', reason: built.reason };
+  // The references read for this unit: none (any retainer returned above), so A's graph holds exactly what was read.
+  const graph: RetentionGraph = { records: [built.record], references: [], complete: true, revision: 'unit', checkedAt: at };
+  let state: ReturnType<typeof retentionState>;
+  try { state = retentionState(built.record, graph, at); }
+  catch (error) { return { status: 'unsupported', reason: 'report-retention-refused:' + ((error as { code?: string }).code ?? 'invalid') }; }
+  if (state.destroyNotBefore === null) return { status: 'held', reason: 'retention-state-held' };
+  if (state.destroyNotBefore > at) return { status: 'retained', reason: null };
+  return { status: 'due', record: built.record, eligibleAt: state.destroyNotBefore };
 }

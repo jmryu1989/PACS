@@ -17,6 +17,8 @@ GRANT SELECT ON emr_clinical.online_command, emr_clinical.online_version, emr_cl
   public."UserFilter", public."UserFilterCollection", public."SharedFilterLibrary", public."WorklistColumns",
   public."ReadingPreferences", public."ReadingAppearance", public."WorkspaceLayout", public."WorkspaceShortcuts",
   public."HangingProtocolPreference", public."StudyTagCatalog", public."FavoriteWorkspace", emr_audit.fixed_copy TO kin_emr_owner;
+-- The reverse references and the report projection retention_report_retainers reads for the owner.
+GRANT SELECT ON public."StudyState", public."ReportDraftInsertReceipt", emr_access.order_fact, emr_audit.issuance_event TO kin_emr_owner;
 -- H's inventory reads. Private keys, wrapped secrets and session credentials are not readable.
 GRANT SELECT ON public."Report", public."ReportVersion", public."ReportDraft", public."ReportDraftInsertReceipt",
   public."CriticalResult", emr_signing.signed_version, emr_signing.operation, emr_signing.doctor_key TO kin_emr_retention;
@@ -78,11 +80,32 @@ CREATE TABLE emr_access.retention_commit (
   confirmed_at timestamptz CHECK (confirmed_at IS NULL OR confirmed_at >= deleted_at)
 );
 
+-- Lock order of every party that writes, holds or deletes a fixed record (writers, hold/duty, H, reconciliation):
+--   app row locks of StudyState  ->  fixed-record locks, ascending  ->  legal-fact lock (77104,2)  ->  rows of Report,
+--   ReportVersion and the signing tables.
+-- H holds its fixed-record locks as session locks across its separately committed steps, so no one may take a Report or
+-- signing row lock before the record lock (commitReport takes lockFixedRecord before `Report FOR UPDATE`). The
+-- execution-owner lock (`["emr-retention-execution",op]`) is taken before any record lock by a reconciler; the owner
+-- mints it, unseen by anyone else, while it already holds the records.
 CREATE FUNCTION emr_access.fixed_record_lock(p_record text) RETURNS void
 LANGUAGE sql SET search_path = pg_catalog, pg_temp AS $$
   -- The same key bytes as lockFixedRecord (JSON.stringify(['emr-fixed-record', recordId])).
   SELECT pg_advisory_xact_lock(hashtextextended('["emr-fixed-record",' || to_json(p_record)::text || ']', 0));
 $$;
+-- True when no other session holds the execution's owner lock (its owner is gone, or this session is the owner or the
+-- reconciler that took it). The key bytes are JSON.stringify(['emr-retention-execution', operationId]).
+CREATE FUNCTION emr_access.retention_owner_free(p_operation uuid) RETURNS boolean
+LANGUAGE sql SET search_path = pg_catalog, pg_temp AS $$
+  SELECT pg_try_advisory_xact_lock(hashtextextended('["emr-retention-execution",' || to_json(p_operation::text)::text || ']', 0));
+$$;
+-- The signed payload of a stored approval (flattened JWS, base64url). An outcome without one is an error, never "none".
+CREATE FUNCTION emr_access.signed_payload(p_outcome jsonb) RETURNS jsonb
+LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, pg_temp AS $$
+DECLARE p text := p_outcome -> 'envelope' ->> 'payload';
+BEGIN
+  IF p IS NULL THEN RAISE EXCEPTION 'SignedPayloadUnreadable'; END IF;
+  RETURN convert_from(decode(translate(p, '-_', '+/') || repeat('=', (4 - pg_catalog.length(p) % 4) % 4), 'base64'), 'UTF8')::jsonb;
+END $$;
 
 -- Registration is idempotent: the first sweep that sees a record mints its opaque ID; later sweeps receive the same one.
 CREATE FUNCTION emr_access.register_retention_units(p_kind text, p_records text[])
@@ -125,20 +148,76 @@ BEGIN
   END IF;
 END $$;
 
+-- Every stored fact outside a report unit that names it, and the study's report projection, for these Study UIDs.
+-- A unit with any row is not judged by H in this slice: the referrer is no A record H can build, so dropping the row
+-- would ignore its retention duty (a 2019 chart incorporation of a 2015 report keeps the report). The JSON documents
+-- whose shape H does not own (order facts, F issuances) count any string equal to the UID. Read under H's record locks;
+-- every writer below except order facts takes the same lock first (fence triggers), and an unreadable row is an error.
+CREATE FUNCTION emr_access.retention_report_retainers(p_records text[])
+RETURNS TABLE (record_id text, source text, from_record text, from_part text, to_part text)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+  WITH t AS (SELECT DISTINCT r FROM unnest(p_records) AS r)
+  -- A CVR pins its report version (FK Restrict).
+  SELECT c."studyUid", 'critical-result', c.id::text, c.revision::text, c."sourceVersion"::text
+    FROM public."CriticalResult" c JOIN t ON t.r = c."studyUid"
+  UNION ALL
+  -- A clinician question entry records the report version it was asked against.
+  SELECT q."studyUid", 'clinical-question-entry', q.id::text, e.seq::text, e."reportVersion"::text
+    FROM public."StudyQuestionEntry" e JOIN public."StudyQuestion" q ON q.id = e."questionId" JOIN t ON t.r = q."studyUid"
+    WHERE e."reportVersion" IS NOT NULL
+  UNION ALL
+  -- A Related Report insertion copied this report's approved text into another study's draft.
+  SELECT i."sourceUid", 'related-report-insert', i."targetUid", i."insertRequestId"::text, i."sourceVersion"::text
+    FROM public."ReportDraftInsertReceipt" i JOIN t ON t.r = i."sourceUid"
+  UNION ALL
+  -- A D version incorporating it (D attachment kinds exclude reports today; read, not assumed).
+  SELECT o.source_record_id, 'clinical-attachment', v.record_id, o.version_id, o.source_version_id
+    FROM emr_clinical.online_reference o JOIN emr_clinical.online_version v ON v.version_id = o.version_id
+    JOIN t ON t.r = o.source_record_id
+  UNION ALL
+  -- Order facts: chart incorporation, components, inherited duties, source and fulfilment links.
+  SELECT DISTINCT t.r, 'order-fact', f.record_id, f.event_id, NULL::text
+    FROM emr_access.order_fact f, jsonb_path_query(f.body::jsonb, 'strict $.**') AS s(v), t
+    WHERE jsonb_typeof(s.v) = 'string' AND s.v #>> '{}' = t.r AND f.record_id <> t.r
+  UNION ALL
+  -- Another record's signed attachments (native report signatures carry none; read, not assumed).
+  SELECT a ->> 'recordId', 'signed-attachment', s.record_id, s.version_id, a ->> 'versionId'
+    FROM emr_signing.signed_version s, jsonb_array_elements(emr_access.signed_payload(s.outcome) -> 'attachments') AS a, t
+    WHERE a ->> 'recordId' = t.r AND s.record_id <> t.r
+  UNION ALL
+  -- An F issuance whose fixed copy holds it.
+  SELECT DISTINCT t.r, 'issued-copy', i.issuance_id, i.sequence::text, NULL::text
+    FROM emr_audit.issuance_event i, jsonb_path_query(i.body::jsonb, 'strict $.**') AS s(v), t
+    WHERE jsonb_typeof(s.v) = 'string' AND s.v #>> '{}' = t.r
+  UNION ALL
+  -- rs/repDoc/confirm change only through commitReport (AGENTS §1-6); a deleted report under an approved or
+  -- preliminary state would read as an empty approved report. The state after destruction is not designed yet.
+  SELECT s.uid, 'report-projection', s.uid, s.rs, NULL::text
+    FROM public."StudyState" s JOIN t ON t.r = s.uid
+    WHERE s.rs <> 'W' OR s."repDoc" IS NOT NULL OR s.confirm IS NOT NULL
+$$;
+
 -- An execution whose started journal is not durable for every unit deleted nothing (deletion requires all of them), so
--- it is released for a fresh judgement. One with a complete started journal is resumed, never released.
-CREATE FUNCTION emr_access.abandon_retention_execution(p_operation uuid) RETURNS boolean
+-- it is released for a fresh judgement. One with a complete started journal is resumed, never released. An execution
+-- whose owner still holds its owner lock is live (its started records may be on their way) and is never released;
+-- the caller re-reads it after taking that lock itself. Locks: records, then the legal-fact lock (order above).
+CREATE FUNCTION emr_access.abandon_retention_execution(p_operation uuid) RETURNS text
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-DECLARE e emr_access.retention_execution%ROWTYPE;
+DECLARE e emr_access.retention_execution%ROWTYPE; r text;
 BEGIN
+  IF NOT emr_access.retention_owner_free(p_operation) THEN RAISE EXCEPTION 'RetentionExecutionBusy'; END IF;
+  SELECT * INTO e FROM emr_access.retention_execution WHERE operation_id = p_operation;
+  IF NOT FOUND THEN RETURN 'absent'; END IF;
+  FOR r IN SELECT DISTINCT unnest(e.record_ids) ORDER BY 1 LOOP PERFORM emr_access.fixed_record_lock(r); END LOOP;
   PERFORM pg_advisory_xact_lock(77104, 2);
   SELECT * INTO e FROM emr_access.retention_execution WHERE operation_id = p_operation FOR UPDATE;
-  IF NOT FOUND OR NOT EXISTS (SELECT FROM unnest(e.disposal_unit_ids) u WHERE NOT EXISTS (SELECT FROM emr_access.retention_journal j
+  IF NOT FOUND THEN RETURN 'absent'; END IF;
+  IF NOT EXISTS (SELECT FROM unnest(e.disposal_unit_ids) u WHERE NOT EXISTS (SELECT FROM emr_access.retention_journal j
       WHERE j.operation_id = p_operation AND j.disposal_unit_id = u AND j.kind = 'operational-deletion' AND j.phase = 'started')) THEN
-    RETURN false;
+    RETURN 'started';
   END IF;
   DELETE FROM emr_access.retention_execution WHERE operation_id = p_operation;
-  RETURN true;
+  RETURN 'released';
 END $$;
 
 -- Closed list: table -> the column naming the record the row belongs to. A target outside it, or a row of another record,
@@ -161,8 +240,9 @@ CREATE FUNCTION emr_access.begin_retention_execution(p_operation uuid, p_units t
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE r text; t jsonb; owner_column text; keys text[]; supplied text[]; rel regclass; owner_value text;
 BEGIN
-  PERFORM pg_advisory_xact_lock(77104, 2);
+  -- The caller (H) already holds the records as session locks and the new execution's owner lock.
   FOR r IN SELECT DISTINCT unnest(p_records) ORDER BY 1 LOOP PERFORM emr_access.fixed_record_lock(r); END LOOP;
+  PERFORM pg_advisory_xact_lock(77104, 2);
   IF p_eligible > clock_timestamp() THEN RAISE EXCEPTION 'RetentionNotElapsed'; END IF;
   IF cardinality(p_units) <> cardinality(p_records) OR (SELECT count(DISTINCT u) FROM unnest(p_units) u) <> cardinality(p_units)
      OR EXISTS (SELECT FROM unnest(p_units, p_records) AS x(u, rec) WHERE NOT EXISTS
@@ -209,6 +289,12 @@ CREATE FUNCTION emr_access.delete_operational_rows(p_operation uuid) RETURNS tim
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE e emr_access.retention_execution%ROWTYPE; t jsonb; rel regclass; keys text[]; r text; done_at timestamptz; n bigint;
 BEGIN
+  -- Only the owner, or a reconciler holding the owner lock, deletes; records first, then the legal-fact lock.
+  IF NOT emr_access.retention_owner_free(p_operation) THEN RAISE EXCEPTION 'RetentionExecutionBusy'; END IF;
+  SELECT * INTO e FROM emr_access.retention_execution WHERE operation_id = p_operation;
+  IF FOUND THEN
+    FOR r IN SELECT DISTINCT unnest(e.record_ids) ORDER BY 1 LOOP PERFORM emr_access.fixed_record_lock(r); END LOOP;
+  END IF;
   PERFORM pg_advisory_xact_lock(77104, 2);
   SELECT * INTO e FROM emr_access.retention_execution WHERE operation_id = p_operation FOR UPDATE;
   IF NOT FOUND THEN
@@ -216,7 +302,6 @@ BEGIN
     IF FOUND THEN RETURN done_at; END IF;
     RAISE EXCEPTION 'RetentionExecutionRequired';
   END IF;
-  FOR r IN SELECT DISTINCT unnest(e.record_ids) ORDER BY 1 LOOP PERFORM emr_access.fixed_record_lock(r); END LOOP;
   IF e.eligible_at > clock_timestamp() THEN RAISE EXCEPTION 'RetentionNotElapsed'; END IF;
   IF EXISTS (SELECT FROM unnest(e.disposal_unit_ids) u WHERE NOT EXISTS (SELECT FROM emr_access.retention_journal j
        WHERE j.operation_id = p_operation AND j.disposal_unit_id = u AND j.kind = 'operational-deletion' AND j.phase = 'started')) THEN
@@ -281,11 +366,44 @@ BEGIN
   RETURN NEW;
 END $$;
 
--- The existing legal-fact lock now also refuses a new hold or duty on a record that is being deleted.
+-- The fence of the writers that add a reference to a report from outside it: under the referenced record's lock they are
+-- refused while it is being deleted, and a reference to a report version that no longer exists (destroyed while the
+-- writer waited for that lock) is refused as the CVR foreign key refuses it. F issuances lock every manifest record.
+CREATE FUNCTION emr_access.refuse_reference_while_deleting() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE f jsonb := to_jsonb(NEW); ids text[]; r text; v integer;
+BEGIN
+  IF TG_TABLE_NAME = 'StudyQuestionEntry' THEN
+    IF f ->> 'reportVersion' IS NULL THEN RETURN NEW; END IF;
+    SELECT ARRAY[q."studyUid"] INTO ids FROM public."StudyQuestion" q WHERE q.id = (f ->> 'questionId')::uuid;
+    v := (f ->> 'reportVersion')::integer;
+  ELSIF TG_TABLE_NAME = 'ReportDraftInsertReceipt' THEN
+    -- A refused receipt may name a version that never existed (the refusal is the record); only an applied one copied text.
+    ids := ARRAY[f ->> 'sourceUid']; v := CASE WHEN f ->> 'state' = 'applied' THEN (f ->> 'sourceVersion')::integer END;
+  ELSE
+    SELECT array_agg(DISTINCT x #>> '{}') INTO ids FROM jsonb_path_query(f -> 'body', 'lax $.manifest.records[*].recordId') AS x;
+  END IF;
+  FOR r IN SELECT DISTINCT unnest(ids) ORDER BY 1 LOOP PERFORM emr_access.fixed_record_lock(r); END LOOP;
+  IF EXISTS (SELECT FROM emr_access.retention_execution WHERE record_ids && ids) THEN
+    RAISE EXCEPTION 'RetentionDeleting' USING ERRCODE = 'EB020';
+  END IF;
+  IF v IS NOT NULL AND NOT EXISTS (SELECT FROM public."ReportVersion" WHERE uid = ids[1] AND version = v) THEN
+    RAISE EXCEPTION 'ReferencedReportVersionMissing' USING ERRCODE = 'EB021';
+  END IF;
+  RETURN NEW;
+END $$;
+
+-- The existing legal-fact lock now also refuses a new hold or duty on a record that is being deleted. It takes the named
+-- records' locks before the legal-fact lock (the order above); writers that already hold them re-enter.
 CREATE OR REPLACE FUNCTION emr_access.lock_retention_facts() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
-DECLARE f jsonb := to_jsonb(NEW);
+DECLARE f jsonb := to_jsonb(NEW); r text;
 BEGIN
+  FOR r IN SELECT DISTINCT x FROM (SELECT f ->> 'record_id' AS x WHERE TG_TABLE_NAME = 'legal_hold_event'
+      UNION ALL SELECT jsonb_array_elements_text(COALESCE((f ->> 'body')::jsonb -> 'recordIds', '[]'::jsonb))
+        WHERE TG_TABLE_NAME = 'duty_request_event') ids WHERE x IS NOT NULL ORDER BY 1 LOOP
+    PERFORM emr_access.fixed_record_lock(r);
+  END LOOP;
   PERFORM pg_advisory_xact_lock(77104,2);
   IF TG_TABLE_NAME = 'legal_hold_event' AND f ->> 'phase' = 'placed'
      AND EXISTS (SELECT FROM emr_access.retention_execution WHERE f ->> 'record_id' = ANY(record_ids)) THEN
@@ -310,20 +428,34 @@ CREATE TRIGGER retention_fence BEFORE INSERT ON emr_signing.signed_version
   FOR EACH ROW EXECUTE FUNCTION emr_access.refuse_while_deleting('record_id');
 CREATE TRIGGER retention_fence BEFORE INSERT ON emr_clinical.online_version
   FOR EACH ROW EXECUTE FUNCTION emr_access.refuse_while_deleting('record_id');
+-- A CVR creation or supersession pins a report version: it waits for H's record lock and is refused while deleting, so
+-- a started execution is never blocked forever by a CVR made after H's re-read (the FK would refuse the deletion).
+CREATE TRIGGER retention_fence BEFORE INSERT ON public."CriticalResult"
+  FOR EACH ROW EXECUTE FUNCTION emr_access.refuse_while_deleting('studyUid');
+GRANT EXECUTE ON FUNCTION emr_access.refuse_reference_while_deleting() TO CURRENT_USER;
+CREATE TRIGGER retention_fence BEFORE INSERT ON public."StudyQuestionEntry"
+  FOR EACH ROW EXECUTE FUNCTION emr_access.refuse_reference_while_deleting();
+CREATE TRIGGER retention_fence BEFORE INSERT OR UPDATE ON public."ReportDraftInsertReceipt"
+  FOR EACH ROW EXECUTE FUNCTION emr_access.refuse_reference_while_deleting();
+CREATE TRIGGER retention_fence BEFORE INSERT ON emr_audit.issuance_event
+  FOR EACH ROW EXECUTE FUNCTION emr_access.refuse_reference_while_deleting();
 
 REVOKE ALL ON emr_access.retention_journal, emr_access.retention_unit, emr_access.retention_execution, emr_access.retention_commit
   FROM PUBLIC, kin_runtime, kin_emr_reader, kin_emr_retention;
 REVOKE ALL ON SEQUENCE emr_access.retention_journal_sequence_seq FROM PUBLIC, kin_runtime, kin_emr_reader, kin_emr_retention;
-REVOKE EXECUTE ON FUNCTION emr_access.fixed_record_lock(text), emr_access.register_retention_units(text,text[]),
-  emr_access.retention_uncovered(), emr_access.abandon_retention_execution(uuid),
+REVOKE EXECUTE ON FUNCTION emr_access.fixed_record_lock(text), emr_access.retention_owner_free(uuid), emr_access.signed_payload(jsonb),
+  emr_access.register_retention_units(text,text[]), emr_access.retention_uncovered(), emr_access.retention_report_retainers(text[]),
+  emr_access.abandon_retention_execution(uuid),
   emr_access.retention_target_owner(text,text), emr_access.begin_retention_execution(uuid,text[],text[],timestamptz,text,jsonb),
-  emr_access.delete_operational_rows(uuid), emr_access.confirm_operational_commit(uuid), emr_access.refuse_while_deleting()
+  emr_access.delete_operational_rows(uuid), emr_access.confirm_operational_commit(uuid), emr_access.refuse_while_deleting(),
+  emr_access.refuse_reference_while_deleting()
   FROM PUBLIC;
 GRANT SELECT, INSERT ON emr_access.retention_journal TO kin_emr_retention;
 GRANT USAGE ON SEQUENCE emr_access.retention_journal_sequence_seq TO kin_emr_retention;
 GRANT SELECT ON emr_access.retention_unit, emr_access.retention_execution, emr_access.retention_commit,
   emr_access.legal_hold_event, emr_access.duty_request_event TO kin_emr_retention;
 GRANT EXECUTE ON FUNCTION emr_access.register_retention_units(text,text[]), emr_access.retention_uncovered(),
+  emr_access.retention_report_retainers(text[]),
   emr_access.abandon_retention_execution(uuid), emr_access.begin_retention_execution(uuid,text[],text[],timestamptz,text,jsonb),
   emr_access.delete_operational_rows(uuid), emr_access.confirm_operational_commit(uuid) TO kin_emr_retention;
 GRANT SELECT ON emr_access.retention_journal TO kin_emr_reader;

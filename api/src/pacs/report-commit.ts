@@ -8,6 +8,7 @@ import type { StudyAccessService } from '../study-access.service';
 import { BadRequestException, ConflictException, ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
 import type { NativeReportSigning } from '../emr-report/native-signing';
 import { ContractError } from '../emr-contract/validation';
+import { lockFixedRecord } from '../emr-runtime/fixed-record-lock';
 import type { KeycloakService } from '../keycloak.service';
 import { applyKeepList, citationArray, citationUnion } from '../report-citation';
 import { applyStructureKeepList, commitStructureSelection, structureArray, structureUnion } from '../report-structure';
@@ -209,6 +210,9 @@ export class PacsReportCommit {
         // 검사 행(StudyState)은 `draftTransaction`이 이미 잠갔다 — 첫 확정에는 아직 Report 행이 없어 FOR UPDATE만으로
         // 잠글 수 없으므로, 항상 존재하는 그 부모 잠금이 첫 판부터 같은 uid의 확정을 직렬화한다.
         // 안정된 부모 행을 잡은 뒤 현재 Report를 잠근 채 판 번호를 읽는다.
+        // 파기 작업자(H)는 이 기록 잠금을 세션 잠금으로 쥔 채 Report 행을 지운다. Report 행 잠금보다 먼저 잡아야
+        // "Report 행 ↔ 기록 잠금" 교착이 없고, 파기가 끝난 뒤에는 사라진 판을 읽어 판 번호 대조에서 거절된다.
+        await lockFixedRecord(tx, uid);
         const [cur] = await tx.$queryRaw<any[]>`
           SELECT version, "updatedBy", findings, conclusion, recommendation
           FROM "Report" WHERE uid = ${uid} FOR UPDATE`;

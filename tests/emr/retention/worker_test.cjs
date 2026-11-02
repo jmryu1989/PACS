@@ -17,7 +17,7 @@ const src = name => require(path.join(root, 'api/src', name + '.ts'));
 const { composeEmrAdapters } = src('emr-contract/composition');
 const { runtimeAdapters } = src('emr-runtime/context');
 const D = src('emr-contract/lawful-defaults');
-const { reportRetentionRecord, withStoredHolds } = src('emr-retention/report-source');
+const { judgeReportUnit, reportRetentionRecord, withStoredHolds } = src('emr-retention/report-source');
 const { runRetentionWorker, sweepLedgerExpiry } = src('emr-retention/worker');
 const { signedReports } = require('./signed_report.cjs');
 composeEmrAdapters(runtimeAdapters);
@@ -183,6 +183,28 @@ test('CD09-P05 retained, held and unsupported units are never handed to a destru
   assert.equal(journal.length, 0); assert(!log.some(x => x.startsWith('lock') || x.startsWith('destroy')));
   const onlyKept = world({ units: units.slice(0, 3) });
   assert.equal((await runRetentionWorker(onlyKept.ports)).status, 'complete', 'retained and held are lawful outcomes, not gaps');
+});
+
+test('CD09-P05 a stored reverse reference or report projection keeps an expired report: never judged by its own five years', async () => {
+  // A 2015 report whose own five years ended in 2020, still incorporated into a chart by a 2019 order fact.
+  const r = report('1.2.4.9', ['approve', 'addendum'], '2015-03-02T01:00:00.000Z');
+  const rows = { uid: r.uid, disposalUnitId: unitId(), versions: r.rows, signed: r.signed, holds: [], openDuty: false, retainers: [] };
+  const alone = judgeReportUnit(rows, NOW);
+  assert.equal(alone.status, 'due', 'without the reference the unit is due by its own deadline');
+  const incorporated = { source: 'order-fact', fromRecordId: 'order-2019', fromPartId: 'chart-incorporation-2019', toPartId: null };
+  assert.deepEqual(judgeReportUnit({ ...rows, retainers: [incorporated] }, NOW), { status: 'unsupported', reason: 'reverse-reference:order-fact' });
+  for (const source of ['critical-result', 'clinical-question-entry', 'related-report-insert', 'clinical-attachment', 'signed-attachment', 'issued-copy'])
+    assert.deepEqual(judgeReportUnit({ ...rows, retainers: [{ ...incorporated, source }] }, NOW), { status: 'unsupported', reason: 'reverse-reference:' + source });
+  // An approved state left on the study would read as an approved, empty report after deletion; it is kept, not deleted.
+  assert.deepEqual(judgeReportUnit({ ...rows, retainers: [incorporated, { source: 'report-projection', fromRecordId: r.uid, fromPartId: 'A', toPartId: null }] }, NOW),
+    { status: 'unsupported', reason: 'report-projection' });
+  // A held unit stays held only when nothing names it; an unread retainer list is an error, never "no references".
+  assert.throws(() => judgeReportUnit({ ...rows, retainers: undefined }, NOW), { code: 'ReportUnitRowsUnread' });
+  const { ports, log, journal } = world({ units: [{ recordId: r.uid, disposalUnitId: rows.disposalUnitId,
+    ...judgeReportUnit({ ...rows, retainers: [incorporated] }, NOW), record: null }] });
+  const run = await runRetentionWorker(ports);
+  assert.equal(run.status, 'incomplete'); assert.deepEqual(run.statutory.unsupported, { 'reverse-reference:order-fact': 1 });
+  assert.equal(journal.length, 0); assert(!log.some(x => x.startsWith('destroy')));
 });
 
 test('CD09-P06 an unreadable store fails the run; unread tables, inconsistent drafts and open phases keep it incomplete', async () => {

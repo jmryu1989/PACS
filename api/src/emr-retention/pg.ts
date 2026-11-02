@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import {
-  BatchDisposalAuditStore, DestructionReceipt, DestructionRecord, DisposalRequest, RetentionGraph, RetentionRecord,
-  completedFromStarted, failedFromStarted, retentionState,
+  BatchDisposalAuditStore, DestructionReceipt, DestructionRecord, DisposalRequest, RetentionGraph,
+  completedFromStarted, failedFromStarted,
 } from '../emr-contract/lawful-defaults';
 import { freeze, refuse } from '../emr-contract/validation';
-import { ReportVersionRow, SignedVersionRow, reportRetentionRecord, withStoredHolds } from './report-source';
+import { ReportVersionRow, SignedVersionRow, StoredRetainer, judgeReportUnit, withStoredHolds } from './report-source';
 import { DraftCheck, HPorts, InventoryUnit, ReconcileResult, refusalCode, sweepLedgerExpiry } from './worker';
 
 /** PG rows of one execution, child first: the deletion function accepts only these closed-list tables. */
@@ -13,6 +13,8 @@ interface Target { schema: string; table: string; key: Record<string, string | n
 interface UnitPlan { recordId: string; disposalUnitId: string; eligibleAt: string; targets: Target[] }
 const iso = (value: Date | string) => new Date(value).toISOString();
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+/** The execution-owner lock key; emr_access.retention_owner_free builds the same bytes. */
+const ownerKey = (operationId: string) => JSON.stringify(['emr-retention-execution', operationId]);
 const CHUNK = 200;
 
 /**
@@ -33,9 +35,21 @@ export class PgRetention {
     return iso(row.now);
   }
 
+  /** Every stored reverse reference and report projection of these UIDs (one scan of each source per call). */
+  private async retainers(uids: readonly string[]): Promise<Map<string, StoredRetainer[]>> {
+    const rows = await this.db.$queryRaw<{ record_id: string; source: string; from_record: string; from_part: string | null; to_part: string | null }[]>`
+      SELECT record_id, source, from_record, from_part, to_part FROM emr_access.retention_report_retainers(${[...uids]}::text[])
+      ORDER BY record_id, source, from_record, from_part`;
+    const out = new Map<string, StoredRetainer[]>(uids.map(id => [id, []]));
+    for (const r of rows) out.get(r.record_id)?.push({ source: r.source, fromRecordId: r.from_record, fromPartId: r.from_part, toPartId: r.to_part });
+    return out;
+  }
+
   /** Builds every report unit of these study UIDs from the stored rows, judged at `at`, with the stable unit IDs. */
-  private async units(uids: readonly string[], at: string): Promise<{ units: InventoryUnit[]; plans: UnitPlan[]; raw: unknown[] }> {
+  private async units(uids: readonly string[], at: string, retained?: ReadonlyMap<string, readonly StoredRetainer[]>):
+    Promise<{ units: InventoryUnit[]; plans: UnitPlan[]; raw: unknown[] }> {
     const ids = [...uids];
+    const retainers = retained ?? await this.retainers(ids);
     const versions = await this.db.$queryRaw<any[]>`SELECT id, uid, version, action, findings, conclusion, recommendation, reason,
       citations::text AS citations, structured::text AS structured FROM "ReportVersion" WHERE uid = ANY(${ids}::text[]) ORDER BY uid, version`;
     const signed = await this.db.$queryRaw<any[]>`SELECT record_id, version_id, outcome::text AS outcome
@@ -43,7 +57,6 @@ export class PgRetention {
     const operations = await this.db.$queryRaw<{ operation_id: string; record_id: string }[]>`SELECT operation_id, outcome ->> 'recordId' AS record_id
       FROM emr_signing.operation WHERE outcome ->> 'recordId' = ANY(${ids}::text[]) ORDER BY operation_id`;
     const heads = await this.db.$queryRaw<{ uid: string }[]>`SELECT uid FROM "Report" WHERE uid = ANY(${ids}::text[])`;
-    const pinned = await this.db.$queryRaw<{ uid: string }[]>`SELECT DISTINCT "studyUid" AS uid FROM "CriticalResult" WHERE "studyUid" = ANY(${ids}::text[])`;
     const holds = await this.db.$queryRaw<{ record_id: string; hold_id: string; phase: string }[]>`SELECT record_id, hold_id, phase
       FROM emr_access.legal_hold_event WHERE record_id = ANY(${ids}::text[]) ORDER BY hold_id, phase`;
     const duties = await this.db.$queryRaw<{ body: string }[]>`SELECT d.body FROM emr_access.duty_request_event d WHERE d.phase = 'received'
@@ -59,24 +72,14 @@ export class PgRetention {
         findings: v.findings, conclusion: v.conclusion, recommendation: v.recommendation, reason: v.reason, citations: v.citations, structured: v.structured }));
       const sigs: SignedVersionRow[] = signed.filter(s => s.record_id === uid).map(s => ({ recordId: uid, versionId: s.version_id, outcome: JSON.parse(s.outcome) }));
       const unitHolds = holds.filter(h => h.record_id === uid), ops = operations.filter(o => o.record_id === uid);
-      raw.push({ uid, rows, sigs, ops, head: heads.some(h => h.uid === uid), pinned: pinned.some(p => p.uid === uid), unitHolds, duty: dutyRecords.has(uid) });
-      const unit = (status: InventoryUnit['status'], reason: string | null, record: Readonly<RetentionRecord> | null = null) =>
-        units.push(freeze({ recordId: uid, disposalUnitId, status, reason, record }));
-      // A CVR pins its report version (FK Restrict); no CVR adapter exists in this slice, so the unit is not judged here.
-      if (pinned.some(p => p.uid === uid)) { unit('unsupported', 'critical-result-pins-report'); continue; }
-      const active = unitHolds.filter(h => h.phase === 'placed' && !unitHolds.some(r => r.hold_id === h.hold_id && r.phase === 'released'));
-      if (active.length) { unit('held', 'legal-hold'); continue; }
-      // A released hold moves the earliest destruction to its release; reading its basis is not part of this slice.
-      if (unitHolds.length) { unit('unsupported', 'released-hold-history'); continue; }
-      if (dutyRecords.has(uid)) { unit('held', 'open-duty-request'); continue; }
-      const built = reportRetentionRecord(uid, rows, sigs, disposalUnitId);
-      if (built.status !== 'built') { unit('unsupported', built.reason); continue; }
-      const graph: RetentionGraph = { records: [built.record], references: [], complete: true, revision: 'unit', checkedAt: at };
-      const state = retentionState(built.record, graph, at);
-      if (state.destroyNotBefore === null) { unit('held', 'retention-state-held'); continue; }
-      if (state.destroyNotBefore > at) { unit('retained', null); continue; }
-      unit('due', null, built.record);
-      plans.push({ recordId: uid, disposalUnitId, eligibleAt: state.destroyNotBefore, targets: [
+      const unitRetainers = retainers.get(uid);
+      if (!unitRetainers) refuse('ReferenceSnapshotIncomplete');
+      raw.push({ uid, rows, sigs, ops, head: heads.some(h => h.uid === uid), retainers: unitRetainers, unitHolds, duty: dutyRecords.has(uid) });
+      const judged = judgeReportUnit({ uid, disposalUnitId, versions: rows, signed: sigs, retainers: unitRetainers,
+        holds: unitHolds.map(h => ({ holdId: h.hold_id, phase: h.phase })), openDuty: dutyRecords.has(uid) }, at);
+      if (judged.status !== 'due') { units.push(freeze({ recordId: uid, disposalUnitId, status: judged.status, reason: judged.reason, record: null })); continue; }
+      units.push(freeze({ recordId: uid, disposalUnitId, status: 'due' as const, reason: null, record: judged.record }));
+      plans.push({ recordId: uid, disposalUnitId, eligibleAt: judged.eligibleAt, targets: [
         ...sigs.map(s => ({ schema: 'emr_signing', table: 'signed_version', key: { record_id: uid, version_id: s.versionId } })),
         ...ops.map(o => ({ schema: 'emr_signing', table: 'operation', key: { operation_id: o.operation_id } })),
         ...rows.map(r => ({ schema: 'public', table: 'ReportVersion', key: { id: r.id } })),
@@ -89,7 +92,9 @@ export class PgRetention {
   async inventory(at: string) {
     const uids = (await this.db.$queryRaw<{ uid: string }[]>`SELECT DISTINCT uid FROM "ReportVersion" ORDER BY uid`).map(r => r.uid);
     const units: InventoryUnit[] = [];
-    for (let i = 0; i < uids.length; i += CHUNK) units.push(...(await this.units(uids.slice(i, i + CHUNK), at)).units);
+    // One scan of every reverse-reference source for the whole store; the due units are read again under the lock.
+    const retainers = await this.retainers(uids);
+    for (let i = 0; i < uids.length; i += CHUNK) units.push(...(await this.units(uids.slice(i, i + CHUNK), at, retainers)).units);
     const uncovered = (await this.db.$queryRaw<{ name: string }[]>`SELECT name FROM emr_access.retention_uncovered() AS name`).map(r => r.name);
     const [drafts] = await this.db.$queryRaw<any[]>`SELECT count(*) FILTER (WHERE present)::int AS live,
       count(*) FILTER (WHERE NOT present AND findings = '' AND conclusion = '' AND recommendation = '' AND citations IS NULL AND structured IS NULL)::int AS cleared,
@@ -98,7 +103,9 @@ export class PgRetention {
     return { units, uncovered, drafts: drafts as DraftCheck };
   }
 
-  /** The due units' graph, re-read from storage; A compares it with the one read again under the lock. */
+  /** The due units' graph, re-read from storage; A compares it with the one read again under the lock. Every reverse
+   * reference of these units was read with them (retention_report_retainers) and a unit with any is not due, so the
+   * graph's references are exactly what was read: none. */
   async graphFor(recordIds: readonly string[], at: string): Promise<RetentionGraph> {
     const { units, plans, raw } = await this.units(recordIds, at);
     if (units.some(u => u.status !== 'due')) refuse('ReferenceSnapshotStale');
@@ -126,6 +133,9 @@ export class PgRetention {
         const plans = disposalUnitIds.map(id => this.plans.get(id));
         if (plans.some(p => !p) || new Set(disposalUnitIds).size !== disposalUnitIds.length) refuse('ErasurePlanRequired');
         const operationId = randomUUID(), fixed = plans as UnitPlan[];
+        // Owner lock before the execution becomes visible: while this session lives, no reconciler releases or resumes
+        // it (abandon/delete refuse RetentionExecutionBusy; a reconciler waits for it). Released with the batch locks.
+        await this.db.$queryRaw`SELECT pg_advisory_lock(hashtextextended(${ownerKey(operationId)}, 0))::text`;
         const eligible = fixed.map(p => p.eligibleAt).sort().slice(-1)[0];
         await this.db.$queryRaw`SELECT emr_access.begin_retention_execution(${operationId}::uuid, ${fixed.map(p => p.disposalUnitId)}::text[],
           ${fixed.map(p => p.recordId)}::text[], ${eligible}::timestamptz, ${this.revision}, ${JSON.stringify(fixed.flatMap(p => p.targets))}::jsonb)::text`;
@@ -185,26 +195,36 @@ export class PgRetention {
    */
   async reconcile(): Promise<ReconcileResult> {
     const result = { resumed: 0, abandoned: 0, unfinished: 0, failures: [] as string[] };
-    const live = await this.db.$queryRaw<{ operation_id: string; units: string[] }[]>`SELECT operation_id::text, disposal_unit_ids AS units
+    const live = await this.db.$queryRaw<{ operation_id: string }[]>`SELECT operation_id::text
       FROM emr_access.retention_execution ORDER BY started_at, operation_id`;
-    for (const { operation_id: op, units } of live) {
-      const started = await this.started(op);
-      if (started.length < units.length) {
-        const [row] = await this.db.$queryRaw<{ released: boolean }[]>`SELECT emr_access.abandon_retention_execution(${op}::uuid) AS released`;
-        if (!row.released) refuse('RetentionReconcileConflict');
-        // Nothing was deleted; the started records it did write end as failed, and the units are judged afresh.
-        const at = new Date(Date.now() + this.offset).toISOString();
-        for (const event of started) await this.append(failedFromStarted(event, at));
-        result.abandoned++; continue;
-      }
-      try {
-        await this.completeFromStarted(op, started, await this.deleteAndConfirm(op));
-        result.resumed++;
-      } catch (error) {
-        const at = new Date(Date.now() + this.offset).toISOString();
-        for (const event of started) await this.append(failedFromStarted(event, at));
-        result.unfinished++; result.failures.push(refusalCode(error));
+    for (const { operation_id: op } of live) {
+      // Waits while another worker still owns it; everything below is re-read after that owner has finished or died.
+      const failure = await this.asOwner(op, async () => {
+        const [state] = await this.db.$queryRaw<{ units: string[] | null }[]>`SELECT (SELECT disposal_unit_ids FROM emr_access.retention_execution
+          WHERE operation_id = ${op}::uuid) AS units`;
+        if (!state.units) return null; // Its owner finished it; a missing completion is found by the pass below.
+        const started = await this.started(op);
+        if (started.length < state.units.length) {
+          const [row] = await this.db.$queryRaw<{ outcome: string }[]>`SELECT emr_access.abandon_retention_execution(${op}::uuid) AS outcome`;
+          if (row.outcome === 'absent') return null;
+          if (row.outcome !== 'released') refuse('RetentionReconcileConflict');
+          // Nothing was deleted; the started records it did write end as failed, and the units are judged afresh.
+          const at = new Date(Date.now() + this.offset).toISOString();
+          for (const event of started) await this.append(failedFromStarted(event, at));
+          result.abandoned++; return null;
+        }
+        try {
+          await this.completeFromStarted(op, started, await this.deleteAndConfirm(op));
+          result.resumed++; return null;
+        } catch (error) {
+          const at = new Date(Date.now() + this.offset).toISOString();
+          for (const event of started) await this.append(failedFromStarted(event, at));
+          return refusalCode(error);
+        }
+      });
+      if (failure !== null) {
         // The same failed set is retried on the next run; no later set starts before it completes.
+        result.unfinished++; result.failures.push(failure);
         return result;
       }
     }
@@ -214,11 +234,20 @@ export class PgRetention {
           WHERE j.operation_id = c.operation_id AND j.disposal_unit_id = u AND j.phase = 'completed'))
       ORDER BY c.deleted_at, c.operation_id`;
     for (const { operation_id: op } of lost) {
-      const [row] = await this.db.$queryRaw<{ at: Date }[]>`SELECT emr_access.confirm_operational_commit(${op}::uuid) AS at`;
-      await this.completeFromStarted(op, await this.started(op), iso(row.at));
-      result.resumed++;
+      // A live owner may be writing this completion right now; after its lock the missing set is read again.
+      await this.asOwner(op, async () => {
+        const [row] = await this.db.$queryRaw<{ at: Date }[]>`SELECT emr_access.confirm_operational_commit(${op}::uuid) AS at`;
+        if (await this.completeFromStarted(op, await this.started(op), iso(row.at))) result.resumed++;
+      });
     }
     return result;
+  }
+
+  /** Runs `work` holding the execution's owner lock (a session lock: the work commits in several transactions). */
+  private async asOwner<T>(operationId: string, work: () => Promise<T>): Promise<T> {
+    await this.db.$queryRaw`SELECT pg_advisory_lock(hashtextextended(${ownerKey(operationId)}, 0))::text`;
+    try { return await work(); }
+    finally { await this.db.$queryRaw`SELECT pg_advisory_unlock(hashtextextended(${ownerKey(operationId)}, 0))::text`; }
   }
 
   private async started(operationId: string): Promise<DestructionRecord[]> {
@@ -227,11 +256,13 @@ export class PgRetention {
     return rows.map(r => JSON.parse(r.body));
   }
 
-  private async completeFromStarted(operationId: string, started: readonly DestructionRecord[], completedAt: string): Promise<void> {
+  /** Appends the completions a committed execution still lacks; true when it wrote any. */
+  private async completeFromStarted(operationId: string, started: readonly DestructionRecord[], completedAt: string): Promise<boolean> {
     const done = new Set((await this.db.$queryRaw<{ unit: string }[]>`SELECT disposal_unit_id AS unit FROM emr_access.retention_journal
       WHERE operation_id = ${operationId}::uuid AND kind = 'operational-deletion' AND phase = 'completed'`).map(r => r.unit));
     const missing = started.filter(s => !done.has(s.disposalUnitId)).map(s => completedFromStarted(s, completedAt));
     if (missing.length) await this.appendCompletedSet(missing);
+    return missing.length > 0;
   }
 
   ports(openPhases: readonly string[]): HPorts {
