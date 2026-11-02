@@ -803,24 +803,20 @@ class StudyPanelPageDOM(unittest.TestCase):
                 page.locator('#b-save').scroll_into_view_if_needed()
                 settle(page)
                 # Judged as the served tests judge their reveal (report_column_reach.py): one report-column scroller
-                # moved, not the page, and Save is whole after it. Exception, 768x1024 portrait only: this branch's
-                # report card layout puts the card's own scroller inside the reading column, so the reveal moves both
-                # (main 620de16 moves the reading column alone). A reader's wheel still reaches Save there, so the
-                # layout is kept provisionally until Minhoon confirms (11-03 commander): exactly two report-column
-                # scrollers move and nothing else. Delete this exception when that size reaches Save through one
-                # scroller again, or when Minhoon rejects the two-layer scroll and the layout is changed.
+                # moved, not the page, and Save is whole on all four sides after it. Two explicit exceptions:
+                # - 768x1024 portrait only: this branch's report card layout puts the card's own scroller inside the
+                #   reading column, so the reveal moves both (main 620de16 moves the reading column alone). A reader's
+                #   wheel still reaches Save there, so the layout is kept provisionally until Minhoon confirms (11-03
+                #   commander): exactly two report-column scrollers move and nothing else. Delete this exception when
+                #   that size reaches Save through one scroller again, or when Minhoon rejects the two-layer scroll.
+                # - Every size, bottom edge only, up to this file's 0.5 px (VISIBLE): the reveal scrolls whole pixels,
+                #   so Save at a fractional position can stop short of its scroller's edge by less than one. That part
+                #   is really cut off: 1024x768 on the Linux runner needed 13.45 px, scrolled 13, and left Save's bottom
+                #   0.45 px under the card's edge at 761 (Save not whole). The card had 122 px of scroll left, so the
+                #   reader's next wheel step shows Save whole. Top, left and right are still judged exactly.
                 revealed = page.evaluate(column_reach.READ, SAVE_ROW)
-                problems = column_reach.reach_problems(arrival, revealed)
-                if (width, height) == (768, 1024):
-                    moved = [b for b, a in zip(arrival['scrollers'], revealed['scrollers']) if b['top'] != a['top']]
-                    self.assertEqual(2, len(moved), moved)
-                    self.assertTrue(all(s['user'] and s['reportColumn'] for s in moved), moved)
-                    problems = [p for p in problems if not p.startswith('reach: 2 scroll containers moved')]
-                # The reveal scrolls whole pixels, so an entry at a fractional position can stop short of its scroller's
-                # edge by less than one (1024x768 on the Linux runner: 13.45 px needed, 13 scrolled, Save's bottom 761.45
-                # against the card's 761, with 122 px of scroll left for a reader's wheel). Whether Save is whole after
-                # the reveal is judged just below with this file's whole-in-view measure (VISIBLE, 0.5 px).
-                problems = [p for p in problems if not p.startswith('reach: after the scroll the entry')]
+                problems = column_reach.reach_problems(arrival, revealed, bottom_rounding=0.5,
+                                                       report_scrolls=2 if (width, height) == (768, 1024) else 1)
                 self.assertEqual([], problems, 'Save is not one report-column scroll away')
                 self.assert_drawer_place(page, width, height)
                 scrolled = self.assert_report_usable(page, 'scrolled to the report')
@@ -829,6 +825,36 @@ class StudyPanelPageDOM(unittest.TestCase):
                 page.keyboard.press('Escape')
                 expect(page.get_by_role('complementary', name='Study Panel', exact=True)).to_have_count(0)
                 self.doCleanups()
+
+    def test_save_reveal_judgment_rejects_a_cut_save(self):
+        """The judgment above, in a real browser on a bare 100x100 report card (no product page): the bottom rounding it
+        allows covers less than one pixel of bottom edge and nothing else - a Save cut on its side or by many pixels
+        after the reveal fails (review fix11: a 160 px Save in a 100 px card passed the earlier judgment)."""
+        page = self.page
+        card = '''<style>body{margin:0}.right{width:300px;height:300px}.report-p{position:relative;width:100px;
+          height:100px;overflow:auto}.rbtns{position:absolute;left:%s;top:%s;width:%s;height:20px}
+          button{width:100%%;height:20px;padding:0;border:0}.spacer{height:300px}</style>
+          <div class=right><div class=report-p><div class=rbtns><button id=b-save>Save</button></div>
+          <div class=spacer></div></div></div>'''
+        cases = (  # (label, left, top, width, how the test reveals Save, passes with bottom_rounding=0.5)
+            ('160 px wide, scrolled into view (60 px cut on the right)', '0', '150px', '160px', None, False),
+            ('bottom 0.45 px under the edge after a whole-pixel scroll', '0', '150.45px', '100px', 70, True),
+            ('bottom 60.45 px under the edge', '0', '150.45px', '100px', 10, False),
+            ('0.45 px cut on the right', '0.45px', '150px', '100px', 70, False),
+        )
+        for label, left, top, width, scroll, passes in cases:
+            with self.subTest(label):
+                page.set_content(card % (left, top, width))
+                arrival = page.evaluate(column_reach.READ, SAVE_ROW)
+                if scroll is None:
+                    page.locator('#b-save').scroll_into_view_if_needed()
+                else:
+                    page.locator('.report-p').evaluate('(card, top) => { card.scrollTop = top; }', scroll)
+                revealed = page.evaluate(column_reach.READ, SAVE_ROW)
+                self.assertFalse(revealed['entryWhole'], revealed)
+                self.assertTrue(column_reach.reach_problems(arrival, revealed), 'without the rounding every cut fails')
+                problems = column_reach.reach_problems(arrival, revealed, bottom_rounding=0.5)
+                self.assertEqual(passes, not problems, (problems, revealed))
 
     def test_inbox_failure_does_not_add_drawer_obstruction(self):
         """WS7-RW-RELOCATION: an inbox failure remains visible and the drawer adds
