@@ -946,6 +946,9 @@
       "tests/candidate_ci.py"
     ],
     "source-regressions": [
+      "scripts/ops_soup_vulns.py",
+      "scripts/ops_notify.py",
+      "scripts/test_ops_soup_vulns.py",
       "worklist-v0/legal/licenses/**",
       "gateway/**",
       "proxy/Dockerfile",
