@@ -354,6 +354,7 @@ test('TEST-WSPACE-PANELS-05 reportWindow: mode shares, placeholders own no colum
     ['Radiology', ['thumbnail', 'clinical', 'template'], 'tabs', true],
     ['Radiology', ['thumbnail', 'imageReport', 'clinical', 'template'], 'tabs', true],
     ['Radiology', ['thumbnail', 'aiReport', 'imageReport', 'clinical', 'template'], 'empty', false],
+    ['Radiology', ['thumbnail', 'aiReport', 'clinical', 'template'], 'empty', false],
     ['Radiology', ['thumbnail', 'aiReport', 'imageReport', 'clinical'], 'content', false],
     ['Technician', ['thumbnail', 'clinical'], 'tabs', true],
     ['Technician', ['thumbnail', 'aiReport', 'imageReport', 'clinical'], 'empty', false],
@@ -366,6 +367,13 @@ test('TEST-WSPACE-PANELS-05 reportWindow: mode shares, placeholders own no colum
     assert.equal(band.classes['kin-report-window-empty'], state === 'empty');
     assert.equal(band.classes['kin-report-window-strip'], strip);
   }
+  // A reserved Image Report preference survives normalization but cannot create a tab or an empty strip.
+  for (const mode of ['Radiology', 'Technician']) {
+    assert.deepEqual(layout.reportWindow(mode, []).tabs, ['aiReport']);
+    assert.deepEqual(layout.reportWindow(mode, ['imageReport']), layout.reportWindow(mode, []));
+    assert.equal(layout.reportWindow(mode, []).classes['kin-hide-imageReport'], true);
+  }
+  assert.deepEqual(layout.hiddenPanels(layout.withHiddenPanels(v3(), ['imageReport'])), ['imageReport']);
   assert.equal(layout.reportWindow('Technician', []).classes['kin-hide-template'], true);
   assert.equal(layout.reportWindow('Radiology', []).classes['kin-hide-template'], false);
 });

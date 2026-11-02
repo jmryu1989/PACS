@@ -4783,7 +4783,7 @@ class LiveInvariantTests(unittest.TestCase):
             self.assertEqual(reset.body["rs"], "W")
             # 화면도 같은 말을 한다 — 잠금은 안내일 뿐이지만, 눌러보고 거절당하는 것보다 회색이 낫다
             page = read_page_source(ROOT / "worklist-v0" / "hpacs-lite" / "main.html")
-            self.assertIn('for (const id of ["#b-save", "#b-transcribe", "#b-approve"])', page)
+            # D73: retired the button-list source pin; E2E-B2-11 checks approved Save/Approve rejection in the UI.
             self.assertIn("승인된 판독문은 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다", page)
 
     # ── R15 구조화 판독 본문: 실스택 첫 사용 ────────────────────────────────────────────────

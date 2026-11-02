@@ -1814,7 +1814,7 @@
       const locked = !!appState[selectedUid]?.prelimHidden;
       // Clear·Paste가 여기 들어와야 하는 이유: 둘 다 textarea의 `.value`에 직접 쓴다.
       // `readOnly`는 스크립트 대입을 안 막으므로, 잠긴 판독문이 이 두 버튼으로 지워졌다.
-      for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste", "#b-defer"]) {
+      for (const id of ["#b-approve", "#b-save", "#b-unread", "#b-clear", "#b-paste", "#b-defer"]) {
         const el = $(id);
         if (!el) continue;
         el.disabled = !rad || locked || filming || !!held;
@@ -1831,9 +1831,9 @@
       if (s?.rs === "A" && rad && !locked && !filming && !held) {
         $("#b-clear").disabled = true;
         $("#b-clear").title = "승인된 판독문은 판독 취소(Reset)로만 비울 수 있습니다";
-        // 승인에서 나가는 길은 Addendum·Reset뿐이다. Save(Transcribe도 save다)는 사유 없이 승인을 풀고
+        // 승인에서 나가는 길은 Addendum·Reset뿐이다. Save는 사유 없이 승인을 풀고
         // Approve는 승인자를 갈아치우는 재승인이었다 — 서버가 400으로 막고, 여기서는 회색으로 미리 말해준다.
-        for (const id of ["#b-save", "#b-transcribe", "#b-approve"]) {
+        for (const id of ["#b-save", "#b-approve"]) {
           $(id).disabled = true;
           $(id).title = "승인된 판독문은 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다";
         }
@@ -1857,7 +1857,7 @@
       for (const id of ["#findings", "#conclusion", "#recommendation"]) {
         $(id).readOnly = !rad || locked || filming || !!held;
       }
-      if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-transcribe','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
+      if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
         const button=$(id);if(button){button.disabled=true;button.title='응급 상태 저장 결과를 확인한 뒤 판독을 저장하세요';}
       }
       // W5 (설계 v5 §1.6): in Related Report mode the report commands wait for Back, with the reason said on each control;
@@ -1865,7 +1865,7 @@
       // the move gate. Placed before the identity rule below, whose titles then stand.
       const relatedWhy = relatedMode.active() ? relatedMode.reason() : relatedInsertPending(selectedUid) ? RELATED_PENDING_REASON : null;
       if (relatedWhy)
-        for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste", "#b-defer", "#b-addendum",
+        for (const id of ["#b-approve", "#b-save", "#b-unread", "#b-clear", "#b-paste", "#b-defer", "#b-addendum",
           "#b-prelim"]) {
           const el = $(id);
           if (el) { el.disabled = true; el.title = relatedWhy; }
@@ -1874,7 +1874,7 @@
       // every write and the paste/clear editors are off. The server refuses the same actions on its own.
       const unresolved = !!appState[selectedUid]?.identityUnresolved;
       if (unresolved) {
-        for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste", "#b-defer", "#b-addendum",
+        for (const id of ["#b-approve", "#b-save", "#b-unread", "#b-clear", "#b-paste", "#b-defer", "#b-addendum",
           "#b-prelim", "#b-draft-keep", "#b-draft-load", "#b-draft-discard", "#b-report-reload", "#b-report-template", "#b-mark-cvr"]) {
           const el = $(id);
           if (el) { el.disabled = true; el.title = "환자 식별 불일치로 이 검사를 사용할 수 없습니다. 원본 확인이 필요합니다."; }
@@ -7452,7 +7452,7 @@
         commitInFlight = true;
         // 요청이 나가 있는 동안 버튼을 회색으로. 플래그만으로도 두 번째 호출은 막히지만,
         // 눌리는데 아무 일도 안 일어나는 버튼은 "먹통"으로 읽혀 또 누르게 만든다.
-        for (const id of ["#b-approve", "#b-approve-next", "#b-save", "#b-transcribe", "#b-addendum", "#b-unread", "#b-prelim", "#b-defer"])
+        for (const id of ["#b-approve", "#b-approve-next", "#b-save", "#b-addendum", "#b-unread", "#b-prelim", "#b-defer"])
           if ($(id)) $(id).disabled = true;
         // 내 글을 확정하는 중이라면(초안이 있거나 편집기가 dirty) 기준은 **화면에 그려진 판**이다.
         // `appState.version`은 본문을 다시 그리지 않고도 올라가므로, 그대로 보내면
@@ -7747,7 +7747,6 @@
     }
     $("#b-prelim")?.addEventListener("click", doPreliminary);
     $("#b-save").addEventListener("click", () => commitReport("save"));
-    $("#b-transcribe").addEventListener("click", () => commitReport("save"));
     $("#b-approve").addEventListener("click", () => {
       const why = reportCommandBlocked("approve");
       if (why) { toast(why, "err"); return; }
@@ -11850,7 +11849,7 @@
       // Restore legacy display state as it was saved. Adopt v3 only on an
       // explicit edit/open/save, so new geometry cannot affect the first paint.
       workspaceState = result.state;
-      // First use (nothing saved yet): start with Clinical Information only. Thumbnail, AI Report, Image Report and Reading
+      // First use (nothing saved yet): start with Clinical Information only. Thumbnail, AI Report and Reading
       // Template stay one click away in Panels; a saved choice always wins and nothing is saved by this line.
       // A layout saved before this default existed is switched once per browser (flag below); after that the reader's own
       // Panels choice, including Show All Panels, is kept.
@@ -11936,15 +11935,15 @@
     // ── Panel Settings (Minhoon 2026-10-27 item 9) ──
     // Which report window panels stay on screen. Kept in the same layout record as the rail and panel sizes, so
     // Account Layout carries it to another browser and Reset Layout shows every panel again. Display only: the panels
-    // and their content stay in the document; AI Report / Image Report remain the placeholder tabs.
+    // and their content stay in the document. AI Report remains a placeholder; imageReport is reserved but never rendered.
     const panelDialog = document.createElement('dialog');
     panelDialog.id = 'panel-settings-dialog'; panelDialog.setAttribute('aria-labelledby', 'panel-settings-title');
     panelDialog.innerHTML = `<h2 id="panel-settings-title">Panel Settings</h2>
       <p>판독 창 위쪽 패널을 보이거나 숨깁니다. 숨긴 패널의 자리는 옆 패널과 관련 검사·판독문 영역이 씁니다.
       Study Panel과 판독 화면의 검사 정보 열기에서는 모든 패널을 볼 수 있습니다.</p>
-      <fieldset><legend>Show Panels</legend>${[['thumbnail', 'Thumbnail'], ['aiReport', 'AI Report'], ['imageReport', 'Image Report'],
+      <fieldset><legend>Show Panels</legend>${[['thumbnail', 'Thumbnail'], ['aiReport', 'AI Report'],
         ['clinical', 'Clinical Information'], ['template', 'Reading Template']].map(([key, label]) =>
-        `<label${key === 'aiReport' || key === 'imageReport' ? ' title="추후 구현 탭입니다. 표시 여부만 정합니다."' : ''}><input type="checkbox" data-panel="${key}"> ${label}</label>`).join('')}</fieldset>
+        `<label${key === 'aiReport' ? ' title="추후 구현 탭입니다. 표시 여부만 정합니다."' : ''}><input type="checkbox" data-panel="${key}"> ${label}</label>`).join('')}</fieldset>
       <p>이 브라우저에 계정별로 기억합니다. 다른 기기에서는 View &gt; Account Layout으로 계정에 저장하고 불러오세요.</p>
       <p id="panel-settings-status" role="status"></p>
       <footer><button type="button" id="panel-settings-show-all">Show All Panels</button><button type="button" id="panel-settings-close">Close</button></footer>`;
@@ -12890,7 +12889,7 @@
         button.hidden = !studyPanelAvailable().includes(button.dataset.studyPanelTab);
       });
       // Clear·Paste도 판독문을 고치는 버튼이다. 목록에서 빠져 있어서 기사에게도 열려 있었다.
-      ["#b-approve", "#b-approve-next", "#b-save", "#b-transcribe", "#b-unread", "#b-addendum", "#b-defer",
+      ["#b-approve", "#b-approve-next", "#b-save", "#b-unread", "#b-addendum", "#b-defer",
        "#b-clear", "#b-paste"].forEach(s => {
         const el = $(s); if (!el) return;
         el.disabled = !rad;

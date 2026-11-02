@@ -221,7 +221,7 @@ class PortraitWorkspaceE2E(base.WorklistE2E):
         template = self.template()
         doctor.reload()
         self.select(doctor, fixture)
-        for button in ("#b-save", "#b-transcribe", "#b-approve"):
+        for button in ("#b-save", "#b-approve"):
             expect(doctor.locator(button)).to_be_disabled()
         expect(doctor.locator("#b-addendum")).to_be_enabled()
         history = self.versions(fixture)
