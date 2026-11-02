@@ -2,18 +2,19 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const model=require('../worklist-v0/hpacs-lite/worklist-columns.js');
 const columns={Radiology:[{k:'id'},{k:'name'},{k:'date'},{k:'desc'}],Technician:[{k:'id'},{k:'name'},{k:'ward'}]};
-test('server accepts physician columns in personal Radiology order and preserves legacy preferences',()=>{
+test('server refuses deferred physician columns and appends only Hospital to a legacy document',()=>{
   require('./service_test_loader.cjs');
   const { normalizeWorklistColumns } = require('/app/dist/worklist-columns');
-  const value = {version:1,modes:{Radiology:{order:['name','id','referringPhysician','requestingPhysician'],hidden:['requestingPhysician']},
-    Technician:{order:['name','id'],hidden:[]}}};
-  const saved = normalizeWorklistColumns(value);
-  assert.ok(saved);
-  assert.deepEqual(saved.modes.Radiology.order.slice(0,4), value.modes.Radiology.order);
-  assert.deepEqual(saved.modes.Radiology.hidden,['requestingPhysician']);
-  const legacy = normalizeWorklistColumns({version:1,modes:{Radiology:{order:['id','name'],hidden:[]},Technician:{order:['id','name'],hidden:[]}}});
-  assert.ok(legacy.modes.Radiology.order.includes('referringPhysician'));
-  assert.ok(legacy.modes.Radiology.order.includes('requestingPhysician'));
+  const vectors = require('./worklist_columns_vectors.json');
+  const legacy = vectors.accepted.find(v=>v.id==='V02');
+  for (const key of ['referringPhysician','requestingPhysician']) {
+    const value = structuredClone(legacy.document);
+    value.modes.Radiology.order.push(key);
+    assert.equal(normalizeWorklistColumns(value), null, key+' is not in the shipped catalogue');
+  }
+  const saved = normalizeWorklistColumns(structuredClone(legacy.document));
+  assert.deepEqual(saved, legacy.expect);
+  assert.deepEqual(saved.modes.Radiology.order, [...legacy.document.modes.Radiology.order, 'institutionName']);
 });
 test('defaults and mode-specific ordering do not mutate the column schema',()=>{
   const state=model.defaults(columns); state.modes.Radiology.order.reverse();state.modes.Radiology.hidden=['desc'];

@@ -443,6 +443,7 @@ mainTest('A-HTTP-OBSERVE: the new request takes the existing report-history acce
   assert.deepEqual(clinician.body, gone.body);
   const clinicianPreliminary = await observe(held, report(heldRow.accessRef), { member: members.clinician }).done;
   assert.equal(clinicianPreliminary.status, preliminary.status, clinicianPreliminary.text);
+  assert.deepEqual(clinicianPreliminary.body, preliminary.body);
   assert.equal(await allShown(), before);
   // An own-institution non-final history row is readable and its own provision can be reported as displayed.
   const own = await study({ rs: 'T' });

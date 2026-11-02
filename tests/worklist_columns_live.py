@@ -113,9 +113,8 @@ class WorklistColumnsLive(unittest.TestCase):
 
     def test_08_stored_pre_unit_row_reads_with_hospital_and_old_client_writes(self):
         # S7-U3b (TEST-S7-U3b-COLUMNS live half, OP-4 b): a row stored before the Hospital column existed is answered with
-        # missing Hospital/referringPhysician/requestingPhysician defaults in that order, leaving storage unchanged.
-        # An old client's write gets those defaults; Hospital in Technician stays refused. The shared server_expect
-        # values are hand-written separately from the deferred screen catalogue (physician-api-20261102).
+        # Hospital last and the read leaves it as stored; an old client's document is stored with Hospital added; Hospital
+        # in the Technician order stays refused. Documents and expectations are the shared vectors (written by hand).
         vectors=json.loads((Path(__file__).resolve().parent/'worklist_columns_vectors.json').read_text(encoding='utf-8'))
         v={x['id']:x for x in vectors['accepted']+vectors['refused']}
         head=self.get();self.assertIsNone(head['columns']);institution,subject=head['owner']
@@ -124,13 +123,13 @@ class WorklistColumnsLive(unittest.TestCase):
         stored=json.dumps(v['V02']['document'],separators=(',',':'))
         psql(f'''INSERT INTO "WorklistColumns" (institution,subject,revision,value,"updatedAt")
           VALUES ('{institution}','{subject}',3,'{stored.replace("'","''")}',now())''')
-        read=self.get();self.assertEqual(read['revision'],3);self.assertEqual(read['columns'],v['V02']['server_expect'])
+        read=self.get();self.assertEqual(read['revision'],3);self.assertEqual(read['columns'],v['V02']['expect'])
         self.assertEqual(psql(f'SELECT revision,value FROM "WorklistColumns" WHERE {where}'),['3|'+stored])
         body=dict(expectedOwner=head['owner'],revision=3,columns=v['V03']['document'])
         r=self.write(body);self.assertEqual(r.status,200,r.text)
-        self.assertEqual((r.body['revision'],r.body['columns']),(4,v['V03']['server_expect']))
+        self.assertEqual((r.body['revision'],r.body['columns']),(4,v['V03']['expect']))
         row=psql(f'SELECT revision,value FROM "WorklistColumns" WHERE {where}')[0].split('|',1)
-        self.assertEqual((row[0],json.loads(row[1])),('4',v['V03']['server_expect']))
+        self.assertEqual((row[0],json.loads(row[1])),('4',v['V03']['expect']))
         refused=dict(expectedOwner=head['owner'],revision=4,columns=v['R07']['document'])
         self.assertEqual(self.write(refused).status,400);self.assertEqual(self.get(),r.body)
 
