@@ -798,10 +798,12 @@ class StudyPanelPageDOM(unittest.TestCase):
                 page.locator('#b-save').scroll_into_view_if_needed()
                 settle(page)
                 # Judged as the served tests judge their reveal (report_column_reach.py): one report-column scroller
-                # moved, not the page, and Save is whole after it. In the 768x1024 portrait stack the report card's own
-                # scroller sits inside the reading column, which scrolls as well (main's contract here was a wheel over
-                # the work area): there exactly two report-column scrollers move and nothing else. Making that one
-                # scroller is a product decision (fix9 report), not something this test loosens further.
+                # moved, not the page, and Save is whole after it. Exception, 768x1024 portrait only: this branch's
+                # report card layout puts the card's own scroller inside the reading column, so the reveal moves both
+                # (main 620de16 moves the reading column alone). A reader's wheel still reaches Save there, so the
+                # layout is kept provisionally until Minhoon confirms (11-03 commander): exactly two report-column
+                # scrollers move and nothing else. Delete this exception when that size reaches Save through one
+                # scroller again, or when Minhoon rejects the two-layer scroll and the layout is changed.
                 revealed = page.evaluate(column_reach.READ, SAVE_ROW)
                 problems = column_reach.reach_problems(arrival, revealed)
                 if (width, height) == (768, 1024):
