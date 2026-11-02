@@ -36,6 +36,7 @@ export const CLINICIAN_BUSINESS_ROUTES: readonly string[] = Object.freeze([
   'POST emr-audit/roster/:grantId',
   'POST emr-audit/investigations',
   'POST emr-audit/exports',
+  'POST emr-audit/rights-requests', 'GET emr-audit/rights-requests', 'GET emr-audit/rights-requests/:id', 'POST emr-audit/rights-requests/:id/decide', 'POST emr-audit/rights-requests/:id/notify',
   'GET emr-audit/inspections',
   'GET emr-audit/inspections/:month',
   'POST emr-audit/inspections/:month/report',

@@ -8,7 +8,7 @@ class AuditContractFilter implements ExceptionFilter {
     const denied = ['AuditorNotDesignated','AuditScopeNotGranted','AuditorDesignationAuthorityRequired'];
     const status = denied.includes(error.code) ? 403 :
       ['IssuanceNotFound','RequestNotFound'].includes(error.code) ? 404 :
-      ['AuditRequestInvalid','InvestigationQueryRefused','DisclosureRequestRefused','AuditIdentityUnknown'].includes(error.code) ? 400 :
+      ['AuditRequestInvalid','InvestigationQueryRefused','DisclosureRequestRefused','RightsRequestRefused','AuditIdentityUnknown'].includes(error.code) ? 400 :
       error.code === 'InvestigationTimedOut' ? 503 : 409;
     const message = error.code === 'InvestigationTimedOut' ? '조회 시간이 초과되었습니다. 기간이나 조회 조건을 좁혀 다시 시도하세요.' :
       error.code === 'AuditIdentityUnknown' ? '등록된 계정이 없습니다. issuer와 subject를 확인하고 대상자가 한 번 로그인한 뒤 다시 지정하세요.' :
@@ -22,6 +22,16 @@ class AuditContractFilter implements ExceptionFilter {
 @UseFilters(AuditContractFilter)
 export class EmrAuditController {
   constructor(private readonly audit: EmrAuditService) {}
+  @Post('rights-requests') @HttpCode(200)
+  receiveRights(@Req() req: any, @Body() body: unknown) { return this.audit.receiveRights(req, body); }
+  @Get('rights-requests')
+  listRights(@Req() req: any) { return this.audit.listRights(req); }
+  @Get('rights-requests/:id')
+  readRights(@Req() req: any, @Param('id') id: string) { return this.audit.rightsAction(req, id, 'read'); }
+  @Post('rights-requests/:id/decide') @HttpCode(200)
+  decideRights(@Req() req: any, @Param('id') id: string) { return this.audit.rightsAction(req, id, 'decide'); }
+  @Post('rights-requests/:id/notify') @HttpCode(200)
+  notifyRights(@Req() req: any, @Param('id') id: string, @Body() body: unknown) { return this.audit.rightsAction(req, id, 'notify', body); }
   @Post('roster/:grantId') @HttpCode(200)
   roster(@Req() req: any, @Param('grantId') id: string, @Body() body: unknown) { return this.audit.changeRoster(req, id, body); }
   @Post('investigations') @HttpCode(200)

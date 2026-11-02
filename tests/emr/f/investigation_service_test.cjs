@@ -16,6 +16,8 @@ require.extensions['.ts'] = (module, filename) => module._compile(ts.transpileMo
   { compilerOptions, fileName: filename }).outputText, filename);
 const { EmrAuditService } = require(path.join(API, 'src/emr-audit/service.ts'));
 const { EmrAuditController } = require(path.join(API, 'src/emr-audit/audit.controller.ts'));
+const { routeController, routeSurface } = require('./inspection_harness.cjs');
+const { parseAccessEvent } = require(path.join(API, 'src/emr-contract/access-event.ts'));
 const known = value => ({ status: 'known', value });
 const actor = { id: 'synthetic-auditor', issuer: 'synthetic', subject: 'auditor' };
 const institution = 'synthetic-site', at = '2026-10-15T00:00:00.000Z';
@@ -47,12 +49,12 @@ function fixture(scopes = ['investigate', 'export']) {
     throw new Error('Unexpected synthetic SQL: ' + sql);
   } };
   const ctx = { facts: { actor, institution, roles: ['radiologist'], ingress: known({ address: '127.0.0.1', source: 'trusted-proxy' }),
-    requestId: 'synthetic-request', surface: 'POST emr-audit/investigations' },
+    requestId: 'synthetic-request' },
     requireCurrent: async () => {}, assertActive: () => {}, work: {
-      transactionWithRecords: async fn => fn(tx, async (event, effect) => { records.push(event); return effect(); }),
+      transactionWithRecords: async fn => fn(tx, async (event, effect) => { records.push(parseAccessEvent(event)); return effect(); }),
     } };
-  const service = new EmrAuditService({}, { withWork: async (_request, fn) => fn(ctx) });
-  return { controller: new EmrAuditController(service), reads, records };
+  const service = new EmrAuditService({}, { withWork: async (request, fn) => fn({ ...ctx, facts: { ...ctx.facts, surface: request[routeSurface] } }) });
+  return { controller: routeController(new EmrAuditController(service)), reads, records };
 }
 test('exhausted history is not read or recorded again while viewing continues', async () => {
   const f = fixture();

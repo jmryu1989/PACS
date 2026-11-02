@@ -18,7 +18,8 @@
     form { display: flex; flex-wrap: wrap; align-items: end; gap: 14px; }
     .export-action { display: flex; align-items: center; gap: 10px; }
     label { display: grid; gap: 5px; color: var(--muted); }
-    button, input, select { font: inherit; border: 1px solid #355272; border-radius: 6px; padding: 8px 10px; background: #0b1625; color: var(--text); }
+    button, input, select, textarea { font: inherit; border: 1px solid #355272; border-radius: 6px; padding: 8px 10px; background: #0b1625; color: var(--text); }
+    #audit-rights-receive textarea, #audit-rights-notify textarea { min-width: 420px; min-height: 90px; }
     button { background: #19304b; cursor: pointer; }
     button:disabled { opacity: .45; cursor: default; }
     #audit-search { background: #24649e; }
@@ -184,6 +185,51 @@
             </div>
           </fieldset></form>
         </div>
+        </div>
+      </section>
+      <section aria-labelledby="audit-rights-title">
+        <h2 id="audit-rights-title">Rights Requests</h2>
+        <p id="audit-rights-message" aria-live="polite">정정·삭제·처리정지 요구의 접수, 결정과 실제 통지를 기록합니다.</p>
+        <div id="audit-rights-workspace">
+          <button id="audit-rights-load" type="button" disabled>Load Requests</button>
+          <div class="table-wrap"><table aria-label="Rights Request List"><thead><tr><th>Request ID</th><th>Kind</th><th>Received At</th><th>Status</th><th>Notice Due By</th></tr></thead><tbody id="audit-rights-list"></tbody></table></div>
+          <form id="audit-rights-open" class="inspection-actions">
+            <label>Rights Request ID<input id="audit-rights-id" required></label>
+            <button id="audit-rights-open-button" type="submit" disabled>Open Request</button>
+          </form>
+          <form id="audit-rights-receive"><fieldset><legend>Receive Request</legend>
+            <p>원본 저장소의 기록 ID와 환자 식별자를 입력하세요. 현재 판독문과 연결된 업무 기록의 저장된 판을 확인합니다.</p>
+            <div class="inspection-actions">
+              <label>Rights Kind<select name="kind"><option value="correction">Correction</option><option value="deletion">Deletion</option><option value="processing-suspension">Processing Suspension</option></select></label>
+              <label>Rights Patient ID<input name="patientId" required></label>
+              <label>Rights Assigning Authority<input name="assigningAuthority" required></label>
+              <label>Rights Patient Link ID<input name="linkId" required></label>
+              <label>Rights Record IDs<input name="recordIds" required></label>
+              <label>Rights Received At (UTC)<input name="receivedAt" type="datetime-local" required></label>
+            </div>
+            <p>여러 기록 ID는 쉼표로 구분하세요. 보존 분류와 결정은 서버 계약에서 가져옵니다.</p>
+            <label>Statement<textarea name="statement" required></textarea></label>
+            <button id="audit-rights-receive-button" type="submit" disabled>Receive Request</button>
+          </fieldset></form>
+          <div id="audit-rights-detail" hidden>
+            <h3>Request State</h3><pre id="audit-rights-state" class="inspection-summary"></pre>
+            <button id="audit-rights-decide" type="button">Decide</button>
+            <p id="audit-rights-correction" hidden>정정은 원본을 보존한 채 기존 판독 작업공간의 Addendum 또는 새 서명판 경로에서 담당자가 수행하세요. 이 화면은 판독문을 바꾸지 않습니다. <a href="main.html">Open Worklist</a></p>
+            <h3>Notice Draft</h3><pre id="audit-rights-notice" class="inspection-summary"></pre>
+            <form id="audit-rights-notify"><fieldset><legend>Record Notification</legend>
+              <p>아래에는 실제 통지한 문안과 전달 증빙을 기록하세요. 결정·통지 기록은 정정·파기·처리정지 실행이나 자동 발송을 뜻하지 않습니다. 기한이 지난 경우도 기록할 수 있습니다.</p>
+              <p>요구자가 철회한 경우 Withdrawn을 선택하고 철회 증빙 ID를 입력하세요. 접수 또는 결정 상태에서 철회를 기록할 수 있습니다.</p>
+              <div class="inspection-actions">
+                <label>Rights Closure<select name="outcome"><option value="notified">Notified</option><option value="withdrawn">Withdrawn</option></select></label>
+                <label>Notified At (UTC)<input name="notifiedAt" type="datetime-local" step="0.001" required></label>
+                <label>Notice Recipient<input name="recipient" required></label>
+                <label>Notice Method<input name="method" required></label>
+                <label>Notice Evidence ID<input name="evidenceId" required></label>
+              </div>
+              <label>Notice Content<textarea name="content" required></textarea></label>
+              <button id="audit-rights-notify-button" type="submit">Record Notification</button>
+            </fieldset></form>
+          </div>
         </div>
       </section>
     </main>
