@@ -152,7 +152,7 @@ class TechNoteE2E(WorklistE2E):
   badge.click();expect(p.locator('#tech-note-text')).to_have_value('SYNTHETIC LIST NOTE')
   p.locator('#tech-note-text').fill('');p.locator('#tech-note-reason').fill('clear list note');p.locator('#tech-note-save').click()
   expect(p.locator('#tech-note-status')).to_have_text('입력이 v2로 저장되었습니다.');expect(badge).to_have_text('비움·이력')
-  p.locator('#tech-note-close').click();p.reload();expect(p.locator('#dbstat')).to_contain_text('DB Connected');p.locator('#quick').fill(a.patient_id)
+  p.locator('#tech-note-close').click();p.reload();expect(p.locator('#dbstat')).to_contain_text('DB Connected');p.locator('#filterrow [data-f="id"]').fill(a.patient_id)
   expect(badge).to_have_text('비움·이력')
   reader=self.login();self.select(reader,a);reader.locator('#findings').fill('UNSAVED READING TARGET')
   reader.locator(f'[data-tech-note="{b.uid}"]').click();expect(reader.locator('#tech-note-status')).to_contain_text('읽기 전용')
@@ -179,7 +179,7 @@ class TechNoteE2E(WorklistE2E):
    row=next(r for r in body['studies'] if r['uid']==f.uid)
    row['techNote']=dict(version=0,present=False);row['desc']='SYNTHETIC stale list applied'
    route.fulfill(response=response,json=body)
-  p.route('**/api/studies?*',old_list);p.locator('#refresh').click()
+  p.route('**/api/studies?*',old_list);p.locator('#m-refresh').click()
   expect(p.locator(f'#rows tr[data-uid="{f.uid}"]')).to_contain_text('SYNTHETIC stale list applied')
   expect(badge).to_have_text('있음');p.unroute('**/api/studies?*')
 

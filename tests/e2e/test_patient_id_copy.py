@@ -48,10 +48,10 @@ class PatientIdCopyE2E(RelatedContextE2E):
 
  def test_copy_03_input_modal_preservation_and_session(self):
   f=self.ct('000C-'+uuid.uuid4().hex[:12],'preserve','20260801');self.seed_report(f);p=self.login();self.permit(p);self.select(p,f)
-  draft='COPY private draft 123';p.locator('#findings').fill(draft);p.locator('#quick').click();self.wait_state(p,f,lambda s:(s.get('draft') or {}).get('findings')==draft,timeout=25000)
+  draft='COPY private draft 123';p.locator('#findings').fill(draft);p.locator('#filterrow [data-f="id"]').click();self.wait_state(p,f,lambda s:(s.get('draft') or {}).get('findings')==draft,timeout=25000)
   rows=self.report_rows(f);originals=self.originals();holder=self.state(f).get('holder');self.assertEqual(holder,self.stack.actor('doctor'))
   writes=self.source_writes(p);p.evaluate('()=>navigator.clipboard.writeText("COPY-SENTINEL")')
-  for selector in ['#findings','#quick','#t-body']:
+  for selector in ['#findings','#filterrow [data-f="id"]','#t-body']:
    p.locator(selector).focus();p.keyboard.press('Control+Alt+c');self.assertEqual(self.clipboard(p),'COPY-SENTINEL')
   p.evaluate('()=>{const e=document.createElement("div");e.id="copy-editable-test";e.contentEditable="true";e.textContent="editable";document.body.append(e);e.focus();}')
   p.keyboard.press('Control+Alt+c');self.assertEqual(self.clipboard(p),'COPY-SENTINEL');p.locator('#copy-editable-test').evaluate('e=>e.remove()')

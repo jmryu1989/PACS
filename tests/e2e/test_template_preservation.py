@@ -67,7 +67,7 @@ class TemplatePreservationE2E(base.WorklistE2E):
         """EDIT/LOSS: editing a title must round-trip existing fields and order."""
         original = self.template()
         page = self.login()
-        page.locator("#quick").fill("D09A-NO-STUDY-" + uuid.uuid4().hex[:12])
+        self.quick_search(page, "D09A-NO-STUDY-" + uuid.uuid4().hex[:12])
         self.edit(page, original["title"])
         # A short window must keep both the scrolling fields and Save/Cancel reachable.
         page.set_viewport_size({"width": 900, "height": 600})

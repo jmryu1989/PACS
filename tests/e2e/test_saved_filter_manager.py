@@ -39,7 +39,7 @@ class SavedFilterManagerE2E(base.WorklistE2E):
         self.seed_report(first)
         page = self.login(); self.select(page, first)
         expect(page.locator('#findings')).to_have_value(first.secret)
-        page.locator('#quick').fill(prefix)
+        self.quick_search(page, prefix)
         expect(page.locator('#rows tr[data-uid]')).to_have_count(2)
         self.open_manager(page)
         name = prefix + '"><img src=x onerror="window.badFilter=1">'
@@ -204,7 +204,7 @@ class SavedFilterManagerE2E(base.WorklistE2E):
         second = self.fixture(patient_id=prefix + '-B')
         self.seed_report(first)
         page = self.login(); self.select(page, first)
-        page.locator('#quick').fill(prefix)
+        self.quick_search(page, prefix)
         self.open_manager(page)
         page.locator('#sfm-name').fill(prefix)
         page.locator('#sfm-folder').fill('Synthetic/Copy')

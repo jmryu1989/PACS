@@ -28,9 +28,12 @@ class WorklistStartupE2E(SavedFilterManagerE2E):
         self.sign_out(p);fresh=self.sign_in(context)
         fresh.wait_for_function('(uid)=>selectedUid===uid',arg=a.uid)
         expect(fresh.locator('#rows tr[data-uid]')).to_have_count(1)
-        expect(fresh.locator('#quick-match')).to_have_value('exact');self.assertEqual(len(context.pages),1)
+        # D73: verify the match mode in its shipped editor, not the removed toolbar selector.
+        self.open_manager(fresh)
+        expect(fresh.locator('#sfm-quick-match')).to_have_value('exact')
+        fresh.locator('#sfm-close').click();self.assertEqual(len(context.pages),1)
         fresh.screenshot(path='../tmp/worklist-startup/first-result.png')
-        c=self.fixture();fresh.locator('#refresh').click()
+        c=self.fixture();fresh.locator('#m-refresh').click()
         fresh.wait_for_function('(uid)=>studies.some(s=>s.uid===uid)',arg=c.uid)
         self.assertEqual(fresh.evaluate('selectedUid'),a.uid)
         self.open_toolbar_group(fresh,'#image-opening-open')
@@ -45,7 +48,7 @@ class WorklistStartupE2E(SavedFilterManagerE2E):
     def test_startup_02_user_input_during_initial_read_prevents_selection(self):
         a=self.fixture();b=self.fixture();context=self.device();p=self.sign_in(context);self.select(p,a);self.enable(p);self.sign_out(p)
         waiting=[];context.route('**/api/studies?*',lambda route:waiting.append(route))
-        fresh=self.sign_in(context);fresh.locator('#quick').fill(b.patient_id)
+        fresh=self.sign_in(context);fresh.locator('#filterrow [data-f="id"]').fill(b.patient_id)
         deadline=time.monotonic()+10
         while not waiting and time.monotonic()<deadline:fresh.wait_for_timeout(100)
         self.assertEqual(len(waiting),1);waiting[0].continue_();context.unroute('**/api/studies?*')

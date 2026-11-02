@@ -12,7 +12,7 @@ class WorklistRowNavigationE2E(ReadingWorkspaceE2E):
         patient='KEYBOARD-'+uuid.uuid4().hex[:12]
         fixtures=[self.ct(patient,'row-'+str(i),'2026080'+str(i+1)) for i in range(3)]
         for f in fixtures:self.seed_report(f,findings='BASE '+f.uid)
-        p=self.login();self.choose(p,fixtures[0]);p.locator('#quick').fill(patient)
+        p=self.login();self.choose(p,fixtures[0]);p.locator('#filterrow [data-f="id"]').fill(patient)
         expect(p.locator('#rows tr[data-uid]')).to_have_count(3)
         p.wait_for_function('rowNavigation!==null')
         order=p.locator('#rows tr[data-uid]').evaluate_all('(rows)=>rows.map(r=>r.dataset.uid)')
@@ -74,7 +74,8 @@ class WorklistRowNavigationE2E(ReadingWorkspaceE2E):
         self.assertNotEqual(p.evaluate('document.activeElement.dataset.uid'),order[-1])
         self.assertEqual(p.evaluate('document.activeElement.parentElement.id'),'rows')
         expect(p.locator('#rows tr[tabindex="0"]')).to_have_count(1)
-        p.evaluate('()=>{studies=[];render();}');expect(p.locator('#quick')).to_be_focused()
+        # D73: retire the old toolbar Quick Match focus target; the empty-list behavior remains covered.
+        p.evaluate('()=>{studies=[];render();}');expect(p.locator('#rows tr[data-uid]')).to_have_count(0)
         p.evaluate('load()');expect(p.locator('#rows tr[tabindex="0"]')).to_have_count(1)
         end_document(p)
         expect(p.locator('#rows tr[tabindex="0"]')).to_have_count(0)

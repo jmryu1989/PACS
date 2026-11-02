@@ -40,7 +40,7 @@ class WorklistBodyPartsE2E(compound.CompoundSearchE2E):
         self.select(page, chest)
         draft = chest.secret + " / body-part search must not save this draft"
         page.locator("#findings").fill(draft)
-        page.locator("#quick").fill(prefix)
+        self.quick_search(page, prefix)
         self.rows_are(page, fixtures)
 
         series_reads = []
@@ -98,10 +98,10 @@ class WorklistBodyPartsE2E(compound.CompoundSearchE2E):
             re.compile(r"부위 \d+/\d+건 확인 · 실패 0건"))
         expect(fresh.locator("#page-status")).not_to_contain_text("Partial")
 
-        fresh.locator("#clearfilter").click()
+        self.clear_filters(fresh)
         expect(fresh.locator("#quick")).to_have_value("")
         expect(fresh.locator("#filterlist")).not_to_contain_text("Body Part")
-        fresh.locator("#quick").fill(prefix)
+        self.quick_search(fresh, prefix)
         self.rows_are(fresh, fixtures)
         self.assertEqual(self.versions(chest), original_versions)
 

@@ -128,7 +128,7 @@ class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
         ax = self.sign_in(x)
         self.mode_is(ax,'portrait')
         self.assertEqual(self.stored(ax),a_state)
-        ax.locator('#quick').fill('D02B-NO-STUDY-ACCOUNT-CHECK')
+        self.quick_search(ax, 'D02B-NO-STUDY-ACCOUNT-CHECK')
         self.snapshot(ax,'account-a-restored')
         ay = self.sign_in(y)
         self.mode_is(ay,'auto')
@@ -166,7 +166,7 @@ class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
         # Establish an actual private draft before layout-only observation.
         edited=fixture.secret+' private draft'
         page.locator('#findings').fill(edited)
-        page.locator('#quick').click()
+        page.locator('#filterrow [data-f="id"]').click()
         self.wait_state(page,fixture,lambda s:(s.get('draft') or {}).get('findings')==edited,timeout=30000)
         history=self.versions(fixture)
         self.drag_by(page,'#resize-main',dx=85)
@@ -253,7 +253,7 @@ class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
         self.mode_is(page,'auto')
         expect(page.locator('#layout-status')).to_contain_text('초기화 저장 안 됨')
         self.reachable(page,'#logout')
-        page.locator('#quick').fill('D02B-NO-STUDY-STORAGE-CHECK')
+        self.quick_search(page, 'D02B-NO-STUDY-STORAGE-CHECK')
         self.snapshot(page,'storage-denied')
 
 

@@ -105,7 +105,7 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
         f=self.fixture();self.seed_report(f);original=self.hashes();page=self.sign_in(self.device());self.select(page,f);self.wait_thumbnail(page)
         # Setup, not a user path (W6R2-02): three-field draft data, the hidden Recommendation filled directly.
         for key,value in [('findings','Roam findings'),('conclusion','Roam conclusion'),('recommendation','Roam recommendation')]:page.locator('#'+key).fill(value)
-        page.locator('#quick').click();self.wait_state(page,f,lambda s:(s.get('draft') or {}).get('recommendation')=='Roam recommendation',timeout=30000)
+        page.locator('#filterrow [data-f="id"]').click();self.wait_state(page,f,lambda s:(s.get('draft') or {}).get('recommendation')=='Roam recommendation',timeout=30000)
         self.assertEqual(self.stack.request('POST',f'/studies/{f.uid}/hold','doctor').status,201)
         saved_state=self.state(f);history=self.versions(f)
         for selector,delta in [('#resize-main',dict(dx=70)),('#resize-top',dict(dy=25)),('#resize-related',dict(dx=-25)),('#resize-prior',dict(dy=15))]:self.drag_by(page,selector,**delta)

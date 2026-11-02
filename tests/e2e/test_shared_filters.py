@@ -266,7 +266,7 @@ class SharedFiltersE2E(manager.SavedFilterManagerE2E):
         saved=next(f for f in copied['filters'] if f['name']==self.prefix+' Exact')
         self.assertEqual(saved['cols']['$compound'],expression)
         page=self.login()
-        page.locator('#quick').fill(self.prefix)
+        self.quick_search(page, self.prefix)
         expect(page.locator(f'#rows tr[data-uid="{first.uid}"]')).to_be_visible()
         self.open_manager(page)
         page.locator('#sfm-search').fill(saved['name'])
@@ -277,7 +277,10 @@ class SharedFiltersE2E(manager.SavedFilterManagerE2E):
         expect(page.locator('#rows tr[data-uid]')).to_have_count(1)
         expect(page.locator(f'#rows tr[data-uid="{first.uid}"]')).to_be_visible()
         expect(page.locator(f'#rows tr[data-uid="{second.uid}"]')).to_have_count(0)
-        expect(page.locator('#quick-match')).to_have_value('exact')
+        # D73: verify the match mode in its shipped editor, not the removed toolbar selector.
+        self.open_manager(page)
+        expect(page.locator('#sfm-quick-match')).to_have_value('exact')
+        page.locator('#sfm-close').click()
 
 
 def load_tests(loader,tests,pattern):

@@ -203,12 +203,34 @@ class WorklistE2E(unittest.TestCase):
         return self.stack.create_fixture(**kwargs)
 
     def select(self, page, fixture):
-        page.locator("#quick").fill(fixture.patient_id)
+        # Replace a saved/popup quick condition before choosing a new patient from the header.
+        if page.locator('#quick').input_value():
+            self.open_toolbar_group(page, '#quick')
+            page.locator('#quick').fill('')
+            page.locator('#toolbar-filters > summary').click()
+        page.locator('#filterrow [data-f="id"]').fill(fixture.patient_id)
         row = page.locator(f'#rows tr[data-uid="{fixture.uid}"]')
         expect(row).to_be_visible()
         row.click()
         expect(row).to_have_class(re.compile(r"\bsel\b"))
         return row
+
+    def quick_search(self, page, value, *, preserve_id=False):
+        # select() now uses the header ID condition; replace it when testing ID-or-name search.
+        if not preserve_id and page.locator('#filterrow [data-f="id"]').input_value():
+            self.close_toolbar_groups(page)
+            page.locator('#filterrow [data-f="id"]').fill('')
+        self.open_toolbar_group(page, '#quick')
+        page.locator('#quick').fill(value)
+
+    def close_toolbar_groups(self, page):
+        for menu in page.locator('.menubar > .toolbar-menu[open]').all():
+            menu.locator(':scope > summary').click()
+
+    def clear_filters(self, page):
+        # Expanded top menus can cover the header's Clear button after editing a saved search.
+        self.close_toolbar_groups(page)
+        page.locator('#filterrow .col-clear').click()
 
     def open_toolbar_group(self, page, selector):
         # S5-UI2: the worklist toolbar keeps most controls in <details> groups (Filters, View, More, the Auto Refresh
@@ -455,7 +477,7 @@ class WorklistE2E(unittest.TestCase):
         self.locked(second)
         second.locator(f'#rows tr[data-uid="{fixture.uid}"]').click(button="right")
         expect(second.locator("#ctx").get_by_text("점유 강제 해제 (관리자)", exact=True)).to_have_count(0)
-        second.locator("#quick").click()
+        second.locator('#filterrow [data-f="id"]').click()
         self.wait_state(first, fixture, lambda s: (s.get("draft") or {}).get("findings") == fixture.secret, timeout=25000)
         self.assertIsNone(self.state(fixture, "doctor2").get("draft"))
         self.assertEqual(self.state(fixture)["findings"], "")
