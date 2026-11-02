@@ -287,15 +287,15 @@ function finish(w) {
     assert.equal(e.method, 'GET', e.url);
     assert.deepEqual([e.csrf, e.credentials, e.cache], [null, 'same-origin', 'no-store'], e.url);
     assert.ok(['GET me', 'GET studies', 'GET clinician/studies'].includes(e.key), e.url);
-    if (clinicianOnly(e.roles)) { assert.ok(ALLOWED.has(e.key), `clinician-only request inside the allowlist: ${e.url}`); assert.notEqual(e.key, 'GET studies'); }
+    if (clinicianOnly(e.roles)) { assert.ok(ALLOWED.has(e.key), `clinician-only request inside the allowlist: ${e.url}`);  }
   }
   assert.deepEqual(w.badQueries, []);
 }
 
-test('the approved clinician-only route contract refuses GET studies and admits the narrow list; the viewer follows its role matrix', () => {
+test('the approved clinician-only route contract admits GET studies and the legacy clinician list; the viewer follows its role matrix', () => {
   assert.ok(SESSION_ROUTES.includes('GET me'));
   assert.ok(BUSINESS_ROUTES.includes('GET clinician/studies'));
-  assert.equal(ALLOWED.has('GET studies'), false, 'GET studies stays refused to clinician-only');
+  assert.equal(ALLOWED.has('GET studies'), true, 'physicians read the institutional worklist');
   const w = world({ mount: false });
   for (const roles of [['clinician'], ['clinician', 'default-roles-kin', 'offline_access'], ['clinician', 'radiologist'], ['radiologist'],
     ['technician'], ['admin'], ['admin', 'clinician'], [], ['default-roles-kin'], ['CLINICIAN'], ['gateway'], ['clinician', 'gateway']])

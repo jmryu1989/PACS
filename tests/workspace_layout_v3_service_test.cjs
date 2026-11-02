@@ -201,12 +201,12 @@ test('TEST-W3-SERVER-07 changed owners and stale revisions preserve stored v3 fo
 
 test('TEST-W3-SERVER-08 facade retains member/role/subject/institution boundaries', async () => {
   const f = fixture();
-  for (const roles of [['radiologist'], ['technician'], ['admin'], ['clinician', 'radiologist']]) {
+  for (const roles of [['radiologist'], ['technician'], ['admin'], ['clinician'], ['clinician', 'radiologist']]) {
     const c = { ...caller, roles, sub: roles.join('-') };
     const saved = await f.service.writeWorkspaceLayout(request(layout(), 0, c), c, false);
     assert.deepEqual(saved.owner, owner(c)); assert.deepEqual(saved.layout, layout());
   }
-  for (const c of [{ ...caller, kind: 'gateway' }, { ...caller, roles: ['clinician'] },
+  for (const c of [{ ...caller, kind: 'gateway' },
     { ...caller, roles: [] }, { ...caller, institution: null }, { ...caller, sub: '' }]) {
     const before = f.snapshot();
     await assert.rejects(f.service.workspaceLayout(c), status(403));

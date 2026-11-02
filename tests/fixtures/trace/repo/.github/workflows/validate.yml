@@ -1,0 +1,23 @@
+name: Trace fixture
+'on':
+  pull_request:
+jobs:
+  pure:
+    runs-on: ubuntu-24.04
+    steps:
+    - name: Alpha, with the unreferenced test only declared as a hashed input
+      run: python3 scripts/record-run.py --run-dir tmp/fx/alpha --cwd . --file tests/fx_unref_test.py --file tests/fx_alpha_test.py -- python3 -B tests/fx_alpha_test.py
+    - name: File-named test
+      run: |
+        node --test tests/fx_file_test.cjs
+        node --test tests/fx_table_test.cjs
+  fx-live:
+    runs-on: ubuntu-24.04
+    steps:
+    - name: Runner profile; its suite table names the test
+      run: python3 tests/measurement_ci.py --profile fx-profile
+  fx-select:
+    runs-on: ubuntu-24.04
+    steps:
+    - name: Path-selected job whose commands name no test
+      run: echo "selected by path only"

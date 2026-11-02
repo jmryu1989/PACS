@@ -60,7 +60,7 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
   { kinds: ['study-metadata'], operation: 'write', causes: ['service-job'],
     routes: ['POST gateway/announce'] },
   { kinds: ['image'], operation: 'write', causes: ['service-job'], routes: ['POST gateway/stow/:uid'] },
-  { kinds: ['study-metadata'], operation: 'read', causes: ['user-view', 'background-fetch'],
+  { kinds: ['study-metadata', 'report-head'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET clinician/studies', 'GET clinician/studies/:uid/timeline'] },
   // D1882: an administrator's confirmed sending device or InstitutionName spelling; the held studies it now decides are
   // attached by the server's own registration (StudyState owner), never by a per-study choice.

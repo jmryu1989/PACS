@@ -11,8 +11,8 @@ const conflict=()=>new ConflictException('태그 목록이 바뀌었습니다. �
 @Injectable()
 export class StudyTagsService {
   constructor(private prisma:PrismaService, private studyAccess:StudyAccessService) {}
-  private member(c:Caller){
-    if(c.kind!=='member'||!c.roles.some(r=>['admin','radiologist','technician'].includes(r))||![c.institution,c.sub].every(x=>typeof x==='string'&&x.length>0&&x.length<=256))throw new ForbiddenException('소속 기관이 있는 회원 전용입니다');
+  private member(c:Caller, read = false){
+    if(c.kind!=='member'||!c.roles.some(r=>['admin','radiologist','technician',...(read?['clinician']:[])].includes(r))||![c.institution,c.sub].every(x=>typeof x==='string'&&x.length>0&&x.length<=256))throw new ForbiddenException('소속 기관이 있는 회원 전용입니다');
   }
   private async run<T>(c:Caller,fn:(tx:any)=>Promise<T>):Promise<T>{
     try{return await this.prisma.$transaction(async tx=>{await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`; await this.studyAccess.snapshot(c,tx);return fn(tx);},{maxWait:4000,timeout:8000});}
@@ -32,7 +32,7 @@ export class StudyTagsService {
     const seen=await this.visible(tx,catalogs.flatMap(x=>x.tags.flatMap(t=>t.uids)),c);
     return {owner:[c.institution,c.sub],canManageInstitution:c.roles.includes('admin'),catalogs:catalogs.map(x=>({...x,tags:x.tags.map(t=>({id:t.id,name:t.name,uids:t.uids.filter(x=>seen.has(x)),unavailable:restricted?0:t.uids.filter(x=>!seen.has(x)).length}))}))};
   }
-  async read(c:Caller){ await this.studyAccess.prepare(c);this.member(c);return this.run(c,tx=>this.result(tx,c));}
+  async read(c:Caller){ await this.studyAccess.prepare(c);this.member(c,true);return this.run(c,tx=>this.result(tx,c));}
   async write(c:Caller,b:any){ await this.studyAccess.prepare(c);
     this.member(c);const action=b?.action,extras=['create','rename'].includes(action)?['name']:['add','remove'].includes(action)?['uid']:[];
     const fields=['expectedOwner','scope','revision','requestId','tagId','action',...extras].sort();

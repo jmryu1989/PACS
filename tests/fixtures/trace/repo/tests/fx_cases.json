@@ -1,0 +1,36 @@
+{
+  "note": "TEST-FX-JSON-NOTE in free text is not an input.",
+  "cases": [
+    {
+      "id": "C1",
+      "requirement": "REQ-FX-TABLE",
+      "risk": "RISK-FX-TABLE",
+      "testId": "TEST-FX-TABLE-1"
+    },
+    {
+      "id": "C2",
+      "requirement": "REQ-FX-TABLE",
+      "risk": "RISK-FX-TABLE",
+      "testId": "TEST-FX-TABLE-2"
+    },
+    {
+      "id": "C3",
+      "requirement": "REQ-FX-TABLE",
+      "risk": "RISK-FX-TABLE",
+      "test": "FX-CASE-3"
+    }
+  ],
+  "suites": [
+    {
+      "file": "tests/fx_alpha_test.py",
+      "cases": [
+        {
+          "name": "a case of a suite that declares its file",
+          "test": "TEST-FX-SUITE",
+          "req": "REQ-FX-SUITE",
+          "risk": "RISK-FX-SUITE"
+        }
+      ]
+    }
+  ]
+}
