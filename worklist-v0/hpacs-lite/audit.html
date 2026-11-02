@@ -99,6 +99,93 @@
           <h3>Recorded Steps</h3><div id="audit-inspection-history"></div>
         </div>
       </section>
+      <section aria-labelledby="disclosure-title">
+        <h2 id="disclosure-title">Record Copy Requests</h2>
+        <p id="audit-disclosure-message" aria-live="polite"></p>
+        <div id="audit-disclosure-workspace">
+        <p>요청 접수 후 판 목록을 고정하고 발급합니다. 발급 성공과 실제 전달은 별개이며 전달 증빙을 기록해야 Delivered가 됩니다.</p>
+        <form id="audit-disclosure-open">
+          <label>Request ID<input id="audit-disclosure-id" required autocomplete="off"></label>
+          <button type="submit">Open Request</button>
+        </form>
+        <p>접수한 요청 ID로 다시 열 수 있습니다. 다른 요청 ID를 입력하면 이전 요청의 표시를 지웁니다.</p>
+        <form id="audit-disclosure-receive">
+          <fieldset><legend>Receive Request</legend>
+            <p>요청자와 실제 확인한 자격 증빙, 접수 시각 및 처리 기한을 입력하세요. 기본 범위는 원본과 수정본 전체 판입니다.</p>
+            <div class="inspection-actions">
+              <label>Copy Patient ID<input name="patientId" required></label>
+              <label>Copy Assigning Authority<input name="assigningAuthority" required></label>
+              <label>Patient Link ID<input name="linkId" required></label>
+              <label>Requester Kind<select name="requesterKind"><option value="patient">Patient</option><option value="family">Family</option><option value="designated-agent">Designated Agent</option><option value="statutory-authority">Statutory Authority</option></select></label>
+              <label>Requester Name<input name="requesterName" required></label>
+              <label>Requester Organization<input name="organization"></label>
+              <label>Request Basis<input name="clauseId" value="medical:21.1" required></label>
+              <label>Request Purpose<input name="purpose" required></label>
+              <label>Received At (UTC)<input name="receivedAt" type="datetime-local" required></label>
+              <label>Due At (UTC)<input name="dueAt" type="datetime-local" required></label>
+            </div>
+            <p>증빙을 확인한 사람의 등록 식별자와 확인 시각을 입력하세요. 필요한 증빙 종류는 서버가 요청 근거에 따라 확인합니다.</p>
+            <div class="inspection-actions">
+              <label>Verifier ID<input name="verifierId" required></label>
+              <label>Verifier Issuer<input name="verifierIssuer" required></label>
+              <label>Verifier Subject<input name="verifierSubject" required></label>
+              <label>Checked At (UTC)<input name="checkedAt" type="datetime-local" required></label>
+            </div>
+            <div id="audit-disclosure-evidence"></div><button id="audit-disclosure-add-evidence" type="button">Add Evidence</button>
+            <p>기록마다 전체 판 또는 요청자가 지정한 판 ID를 선택하세요. 일부 판은 쉼표로 구분하며 입력한 판만 발급합니다.</p>
+            <div id="audit-disclosure-scope"></div><button id="audit-disclosure-add-scope" type="button">Add Record</button>
+            <p>전자 전달은 서명 원문을 담은 JSON, 방문·우편 전달은 인쇄용 HTML로 고정됩니다. 발급 뒤 다른 형식으로 변환하지 않습니다.</p>
+            <div class="inspection-actions">
+              <label>Recipient<input name="recipient" required></label>
+              <label>Delivery Method<select name="method"><option value="electronic">Electronic</option><option value="in-person">In Person</option><option value="postal">Postal</option></select></label>
+              <button id="audit-disclosure-receive-button" type="submit" disabled>Receive Request</button>
+            </div>
+          </fieldset>
+        </form>
+        <div id="audit-disclosure-detail" hidden>
+          <h3>Request State</h3><pre id="audit-disclosure-state" class="inspection-summary"></pre>
+          <h3>Fixed Versions</h3>
+          <div class="table-wrap"><table aria-label="Fixed Versions"><thead><tr><th>Record</th><th>Selection</th><th>Version</th><th>Act</th><th>SHA-256</th></tr></thead><tbody id="audit-disclosure-versions"></tbody></table></div>
+          <p>Prepare Issuance는 현재 원본의 판 목록을 고정합니다. 원본이 변경되었다면 다시 준비하세요.</p>
+          <button id="audit-disclosure-prepare" type="button">Prepare Issuance</button>
+          <p>Issue는 고정된 발급물을 생성합니다. 전달 사실을 기록하지는 않습니다.</p>
+          <button id="audit-disclosure-issue" type="button">Issue</button>
+          <div><button id="audit-disclosure-json" type="button" disabled>Download JSON</button> <span id="audit-disclosure-json-sha"></span></div>
+          <div><button id="audit-disclosure-html" type="button" disabled>Download Print HTML</button> <span id="audit-disclosure-html-sha"></span></div>
+          <p>요청에 고정된 형식만 내려받을 수 있습니다. 해시는 서버가 보고한 값이며 다운로드 바이트를 그대로 보존합니다.</p>
+          <form id="audit-disclosure-delivery"><fieldset><legend>Record Delivery</legend>
+            <p>실제 전달 방법·시각·수령자와 증빙을 입력하세요. 기록 시각은 서버가 별도로 남깁니다.</p>
+            <div class="inspection-actions">
+              <label>Delivery Outcome<select name="outcome"><option value="delivered">Delivered</option><option value="failed">Failed</option><option value="unknown">Unknown</option></select></label>
+              <label>Delivery Evidence Kind<select name="kind"><option value="electronic-receipt">Electronic Receipt</option><option value="recipient-signed-receipt">Recipient Signed Receipt</option><option value="staff-attested-handover">Staff Attested Handover</option><option value="returned-mail">Returned Mail</option><option value="recipient-declined">Recipient Declined</option><option value="electronic-failure">Electronic Failure</option></select></label>
+              <label>Delivery Evidence ID<input name="evidenceId"></label>
+              <label>Delivered At (UTC)<input name="deliveredAt" type="datetime-local" required></label>
+              <label>Delivered To<input name="recipient" required></label>
+              <label>Delivery Note<input name="note" required></label>
+              <button id="audit-disclosure-delivery-button" type="submit">Record Delivery</button>
+            </div>
+          </fieldset></form>
+          <form id="audit-disclosure-extend"><fieldset><legend>Extend</legend>
+            <p>연장 기한과 보존 근거, 통지 증빙을 기록합니다. 기간을 자동으로 정하지 않습니다.</p>
+            <div class="inspection-actions">
+              <label>Extended Due At (UTC)<input name="dueAt" type="datetime-local" required></label>
+              <label>Extension Basis<input name="clauseId" required></label>
+              <label>Basis Version<input name="version" required></label>
+              <label>Notification Evidence<input name="evidenceId" required></label>
+              <button id="audit-disclosure-extend-button" type="submit">Extend</button>
+            </div>
+          </fieldset></form>
+          <form id="audit-disclosure-resolve"><fieldset><legend>Resolve</legend>
+            <p>실제 전달 완료, 요청 철회 또는 적법한 거절의 증빙으로 종결합니다. 원본이 없더라도 철회·거절 종결이 가능합니다.</p>
+            <div class="inspection-actions">
+              <label>Resolution<select name="outcome"><option value="fulfilled">Fulfilled</option><option value="withdrawn">Withdrawn</option><option value="lawfully-refused">Lawfully Refused</option></select></label>
+              <label>Resolution Evidence<input name="evidenceId" required></label>
+              <button id="audit-disclosure-resolve-button" type="submit">Resolve</button>
+            </div>
+          </fieldset></form>
+        </div>
+        </div>
+      </section>
     </main>
   </div>
   <p id="audit-message" role="status" aria-live="polite">세션을 확인하고 있습니다.</p>

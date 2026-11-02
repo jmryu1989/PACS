@@ -119,6 +119,7 @@ REGRESSION_SUITES = {
     'admin-session-dom': """
         tests/audit_page_dom_test.py
         tests/audit_inspection_dom_test.py
+        tests/audit_disclosure_dom_test.py
         tests/admin_audit_dom_test.py
         tests/admin_gateway_status_dom_test.py
         tests/admin_member_roles_dom_test.py

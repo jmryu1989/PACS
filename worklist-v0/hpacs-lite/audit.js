@@ -14,6 +14,7 @@
   let ready = false, denied = false, pending = false, sequence = 0, selection = null;
   let pages = {}, downloaded = null;
   let inspectionSequence = 0, inspectionPending = false, inspectionSnapshot = null, inspectionFinished = false;
+  let disclosureSequence = 0, disclosurePending = false, disclosureSnapshot = null, disclosureCopy = null;
   const message = text => { el('message').textContent = text; };
   const value = item => item == null ? 'Not Recorded' : typeof item === 'string' ? item : JSON.stringify(item);
   const fact = item => !item ? 'Not Recorded' : item.status === 'known' ? value(item.value) : `${item.status}: ${item.reason}`;
@@ -23,7 +24,7 @@
     el('export').disabled = !ready || denied || pending;
     el('more').disabled = !ready || denied || pending;
     el('more').hidden = !streams.some(key => pages[key]?.next);
-    inspectionControls();
+    inspectionControls(); disclosureControls();
   }
   function clear() {
     sequence++; pending = false; selection = null; pages = {};
@@ -34,7 +35,7 @@
     controls();
   }
   function refuse() {
-    denied = true; clear(); clearInspection(); el('workspace').hidden = true;
+    denied = true; clear(); clearInspection(); clearDisclosure(true); el('workspace').hidden = true;
     el('form').reset();
     message('감사 기록을 조회할 권한이 없습니다.');
   }
@@ -282,6 +283,185 @@
       if (current === inspectionSequence) { inspectionPending = false; inspectionControls(); }
     }
   }
+
+  const disclosureEl = name => el(`disclosure-${name}`);
+  const disclosureMessage = text => { disclosureEl('message').textContent = text; };
+  const formValues = name => Object.fromEntries(new FormData(disclosureEl(name)));
+  const utcInput = text => {
+    const date = new Date(`${text}Z`);
+    if (!Number.isFinite(+date)) throw new Error('시각을 확인하세요.');
+    return date.toISOString();
+  };
+  function disclosureControls() {
+    const busy = !ready || denied || disclosurePending, state = disclosureCopy?.status.state;
+    disclosureEl('open').querySelector('button').disabled = !ready || denied;
+    disclosureEl('receive-button').disabled = busy || !!disclosureSnapshot;
+    disclosureEl('prepare').disabled = busy || !disclosureSnapshot || !!disclosureSnapshot.facts.resolution ||
+      (!!disclosureSnapshot.issuanceId && state !== 'Prepared');
+    disclosureEl('issue').disabled = busy || state !== 'Prepared' || !!disclosureSnapshot?.facts.resolution;
+    disclosureEl('delivery-button').disabled = busy || !['Issued', 'ReceiptUnknown', 'DeliveryFailed'].includes(state) || !!disclosureSnapshot?.facts.resolution;
+    for (const name of ['extend', 'resolve']) disclosureEl(`${name}-button`).disabled = busy || !disclosureSnapshot || !!disclosureSnapshot.facts.resolution;
+    for (const [name, type] of [['json', 'signed-electronic'], ['html', 'paper-print']])
+      disclosureEl(name).disabled = busy || !disclosureCopy?.artifact || disclosureCopy.issuance.manifest.delivery.format !== type;
+  }
+  function clearDisclosure(all = false) {
+    disclosureSequence++; disclosurePending = false; disclosureSnapshot = null; disclosureCopy = null;
+    disclosureEl('workspace').hidden = false; disclosureEl('receive').hidden = false;
+    disclosureEl('detail').hidden = true; disclosureEl('state').textContent = ''; disclosureEl('versions').replaceChildren();
+    for (const name of ['json', 'html']) disclosureEl(`${name}-sha`).textContent = '';
+    disclosureMessage('');
+    for (const name of ['delivery', 'extend', 'resolve']) disclosureEl(name).reset();
+    if (all) {
+      disclosureEl('id').value = ''; disclosureEl('receive').reset();
+      disclosureEl('evidence').replaceChildren(); disclosureEl('scope').replaceChildren();
+      addDisclosureEvidence(); addDisclosureScope();
+    }
+    disclosureControls();
+  }
+  function addDisclosureEvidence() {
+    const row = document.createElement('div'); row.className = 'inspection-actions';
+    row.append(field('Evidence Kind', 'evidenceKind', [['identity-check', 'Identity Check'], ['patient-consent', 'Patient Consent'],
+      ['relationship-proof', 'Relationship Proof'], ['agency-proof', 'Agency Proof'], ['consent-impossible', 'Consent Impossible'], ['official-request', 'Official Request']]),
+      field('Evidence Document ID', 'documentId'));
+    disclosureEl('evidence').append(row);
+  }
+  function addDisclosureScope() {
+    const row = document.createElement('div'); row.className = 'inspection-actions';
+    row.append(field('Record ID', 'recordId'), field('Version Scope', 'versionScope', [['all', 'All Versions'], ['part', 'Requested Part']]), field('Requested Version IDs', 'versions'));
+    const versions = row.querySelector('[name=versions]'), select = row.querySelector('select');
+    versions.required = false; versions.disabled = true;
+    select.addEventListener('change', () => { versions.disabled = select.value === 'all'; versions.required = select.value !== 'all'; });
+    disclosureEl('scope').append(row);
+  }
+  function disclosureIntake(id) {
+    const v = formValues('receive'), checkedBy = { id: v.verifierId, issuer: v.verifierIssuer, subject: v.verifierSubject };
+    return { dueAt: utcInput(v.dueAt), request: { requestId: id, receivedAt: utcInput(v.receivedAt),
+      patient: { patientId: v.patientId, assigningAuthority: v.assigningAuthority, linkId: v.linkId },
+      basis: { clauseId: v.clauseId, purpose: v.purpose },
+      requester: { kind: v.requesterKind, name: v.requesterName, organization: v.organization || null },
+      evidence: Array.from(disclosureEl('evidence').children, row => ({ kind: row.querySelector('[name=evidenceKind]').value,
+        documentId: row.querySelector('[name=documentId]').value, checkedBy, checkedAt: utcInput(v.checkedAt) })),
+      scope: Array.from(disclosureEl('scope').children, row => ({ recordId: row.querySelector('[name=recordId]').value,
+        versions: row.querySelector('select').value === 'all' ? 'all' : row.querySelector('[name=versions]').value.split(',').map(id => id.trim()).filter(Boolean) })),
+      delivery: { recipient: v.recipient, method: v.method, format: v.method === 'electronic' ? 'signed-electronic' : 'paper-print' } } };
+  }
+  function showDisclosure(snapshot, copy) {
+    disclosureSnapshot = snapshot; disclosureCopy = copy;
+    const request = snapshot.request, facts = snapshot.facts;
+    disclosureEl('receive').hidden = true;
+    disclosureEl('detail').hidden = false;
+    const labels = { pending: 'Pending', 'pending-overdue': 'Pending Overdue', 'release-required': 'Release Required',
+      'hold-out-of-sync': 'Hold Out of Sync', released: 'Released' };
+    disclosureEl('state').textContent = `Request ID: ${facts.requestId}\nPatient: ${request.patient.patientId} / ${request.patient.assigningAuthority}\n` +
+      `Requester: ${request.requester.name}\nRecipient: ${request.delivery.recipient}\nMethod: ${request.delivery.method}\n` +
+      `Request: ${facts.resolution ? 'Resolved' : 'Pending'}\nIssuance ID: ${snapshot.issuanceId ?? 'null'}\n` +
+      `Issuance: ${copy?.status.state ?? (snapshot.issuanceId ? 'Unavailable' : 'Not Prepared')}\n` +
+      snapshot.states.map(h => `Hold: ${labels[h.state] || h.state} / Due At: ${h.dueAt}`).join('\n') +
+      (snapshot.issuanceId === null ? '\n발급 준비가 아직 완료되지 않았습니다. 원본 누락 또는 준비 실패 상태에서도 연장·종결할 수 있습니다.' : '') +
+      `\nResolution: ${facts.resolution ? JSON.stringify(facts.resolution) : 'Not Recorded'}`;
+    if (copy) {
+      const history = copy.issuance.events.filter(e => e.kind === 'delivery');
+      for (const event of history) disclosureEl('state').textContent +=
+        `\nDelivery: ${event.outcome} / Recorded At: ${event.at}\nEvidence: ${event.evidence?.evidenceId ?? 'Not Recorded'}\n${event.note || ''}`;
+    }
+    disclosureEl('versions').replaceChildren();
+    for (const record of copy?.issuance.manifest.records || []) for (const version of record.versions) {
+      const row = document.createElement('tr');
+      for (const text of [record.recordId, record.selection === 'all-versions' ? 'All Versions' : 'Requested Part', version.versionId, version.act, version.sha256]) {
+        const td = document.createElement('td'); td.textContent = text; row.append(td);
+      }
+      disclosureEl('versions').append(row);
+    }
+    for (const [name, format] of [['json', 'signed-electronic'], ['html', 'paper-print']])
+      disclosureEl(`${name}-sha`).textContent = copy?.artifact && copy.issuance.manifest.delivery.format === format ? `SHA-256: ${copy.sha256} (서버 보고)` : '';
+    const extend = disclosureEl('extend');
+    extend.elements.clauseId.value = snapshot.holds[0].basis.clauseId;
+    extend.elements.version.value = snapshot.holds[0].basis.clause.version;
+    disclosureEl('delivery').elements.recipient.value = request.delivery.recipient;
+    disclosureEl('delivery').elements.kind.value = request.delivery.method === 'electronic' ? 'electronic-receipt' : 'recipient-signed-receipt';
+    disclosureControls();
+  }
+  async function disclosureRequest(mode) {
+    if (!ready || denied || disclosurePending) return;
+    const id = disclosureEl('id').value.trim();
+    if (!id) { disclosureMessage('요청 ID를 입력하세요.'); return; }
+    let body, path = `requests/${encodeURIComponent(id)}`;
+    try {
+      if (mode === 'receive') { body = disclosureIntake(id); path = 'requests'; }
+      else if (mode === 'prepare') { body = { request: disclosureSnapshot.request, dueAt: disclosureSnapshot.facts.initialDueAt }; path = 'issuances'; }
+      else if (mode === 'issue' || mode === 'delivery') {
+        path = `issuances/${encodeURIComponent(disclosureSnapshot.issuanceId)}/${mode}`;
+        if (mode === 'delivery') {
+          const v = formValues('delivery');
+          body = { outcome: v.outcome, evidence: v.outcome === 'unknown' ? null : { kind: v.kind, evidenceId: v.evidenceId },
+            note: `Method: ${disclosureSnapshot.request.delivery.method}\nDelivered At: ${utcInput(v.deliveredAt)}\nRecipient: ${v.recipient}\n${v.note}` };
+        }
+      } else if (mode === 'extend') {
+        const v = formValues('extend'); path += '/extend';
+        body = { extensionId: crypto.randomUUID(), previousDueAt: disclosureSnapshot.states[0].dueAt, dueAt: utcInput(v.dueAt),
+          basis: { clauseId: v.clauseId, version: v.version }, evidenceId: v.evidenceId };
+      } else if (mode === 'resolve') { body = formValues('resolve'); path += '/resolve'; }
+    } catch (error) { disclosureMessage(error.message || '입력을 확인하세요.'); return; }
+    const current = ++disclosureSequence, context = KinWorkContext.capture('document');
+    const admits = () => current === disclosureSequence && id === disclosureEl('id').value.trim() && KinWorkContext.admits(context);
+    disclosurePending = true; disclosureMessage('요청을 처리하고 있습니다.'); disclosureControls();
+    const call = async (route, method = 'GET', json) => {
+      const response = await KinSessionTransport.page().request(`${location.origin}/api/emr-audit/${route}`,
+        { method, ...(json ? { json } : {}), context });
+      if (!admits()) throw { stale: true };
+      if (response.status === 403 && response.body?.code === 'AuditorNotDesignated') { refuse(); throw { stale: true }; }
+      if (response.status === 403 && response.body?.code === 'AuditScopeNotGranted') throw { scope: true };
+      if (!response.ok || response.incomplete) throw { code: response.body?.code || 'ResponseUnavailable' };
+      return response.body;
+    };
+    try {
+      let failure = null;
+      if (mode !== 'open') {
+        try { await call(path, 'POST', body); }
+        catch (error) { if (error.stale || error.scope) throw error; failure = error; }
+      }
+      // Intake survives failed preparation. Re-read it even after an unsuccessful action or lost response.
+      const snapshot = await call(`requests/${encodeURIComponent(id)}`);
+      let copy = null;
+      if (snapshot.issuanceId) {
+        try { copy = await call(`issuances/${encodeURIComponent(snapshot.issuanceId)}`); }
+        catch (error) { if (error.stale || error.scope) throw error; failure = error; }
+      }
+      if (!admits()) return;
+      showDisclosure(snapshot, copy);
+      disclosureMessage(failure ? `처리 결과를 확인하세요 (${failure.code}). 아래는 다시 조회한 상태입니다. 입력은 유지했습니다.` : '저장된 요청과 발급 상태를 다시 조회했습니다.');
+    } catch (error) {
+      if (!admits() || error.stale) return;
+      if (error.scope) { clearDisclosure(); disclosureEl('workspace').hidden = true; disclosureMessage('이 계정에는 진료기록 사본 발급 권한이 없습니다.'); }
+      else {
+        // A failed refresh cannot leave old action buttons presenting a confirmed state.
+        disclosureSnapshot = null; disclosureCopy = null; disclosureEl('detail').hidden = true;
+        disclosureMessage(`요청 상태를 확인하지 못했습니다 (${error.code || 'ResponseUnavailable'}). 입력은 유지했습니다. Open Request로 다시 확인하세요.`);
+      }
+    } finally {
+      if (current === disclosureSequence) { disclosurePending = false; disclosureControls(); }
+    }
+  }
+  function downloadDisclosure(format) {
+    if (disclosurePending || denied || !ready || !disclosureCopy?.artifact || disclosureCopy.issuance.manifest.delivery.format !== format) return;
+    const bytes = Uint8Array.from(atob(disclosureCopy.artifact), c => c.charCodeAt(0));
+    const url = URL.createObjectURL(new Blob([bytes], { type: disclosureCopy.contentType }));
+    const link = document.createElement('a'); link.href = url;
+    link.download = `record-copy-${disclosureCopy.issuance.issuanceId.replace(/[^a-zA-Z0-9-]/g, '-')}.${format === 'paper-print' ? 'html' : 'json'}`;
+    document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  disclosureEl('id').addEventListener('input', () => clearDisclosure());
+  disclosureEl('open').addEventListener('submit', event => { event.preventDefault(); clearDisclosure(); disclosureRequest('open'); });
+  for (const mode of ['receive', 'delivery', 'extend', 'resolve']) disclosureEl(mode).addEventListener('submit', event => {
+    event.preventDefault(); disclosureRequest(mode);
+  });
+  for (const mode of ['prepare', 'issue']) disclosureEl(mode).addEventListener('click', () => disclosureRequest(mode));
+  disclosureEl('add-evidence').addEventListener('click', addDisclosureEvidence);
+  disclosureEl('add-scope').addEventListener('click', addDisclosureScope);
+  disclosureEl('json').addEventListener('click', () => downloadDisclosure('signed-electronic'));
+  disclosureEl('html').addEventListener('click', () => downloadDisclosure('paper-print'));
+  addDisclosureEvidence(); addDisclosureScope();
+
   el('inspection-load').addEventListener('click', () => { clearInspection(); inspectionRequest('months'); });
   el('inspection-month').addEventListener('change', () => { clearInspection(); inspectionRequest('month'); });
   el('inspection-start').addEventListener('click', () => inspectionRequest('report'));
@@ -301,7 +481,7 @@
   el('logout').addEventListener('click', () => KinAuth.logout());
   KinAuth.onLifecycle(state => {
     if (['ending', 'unconfirmed', 'confirmed'].includes(state.state)) {
-      ready = false; clear(); clearInspection(); el('workspace').hidden = true;
+      ready = false; clear(); clearInspection(); clearDisclosure(true); el('workspace').hidden = true;
       el('form').reset(); message('세션을 확인하고 다시 로그인하세요.');
     }
   });
@@ -312,6 +492,8 @@
     const today = new Date(); today.setUTCHours(0, 0, 0, 0);
     const tomorrow = new Date(today); tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
     el('from').value = today.toISOString().slice(0, 16); el('to').value = tomorrow.toISOString().slice(0, 16);
+    disclosureEl('id').value = crypto.randomUUID();
+    for (const name of ['receivedAt', 'checkedAt']) disclosureEl('receive').elements[name].value = new Date().toISOString().slice(0, 16);
     ready = true; el('workspace').hidden = false; controls(); message('조건을 선택하고 Search로 조회하세요.');
   }).catch(() => message('세션을 확인할 수 없습니다. 다시 로그인하세요.'));
 })();
