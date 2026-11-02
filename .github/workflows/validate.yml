@@ -347,6 +347,10 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/ohif-config-check --cwd . --file scripts/build-ohif-config.py --tree config/ohif --file config/ohif.js -- python3 scripts/build-ohif-config.py --check
     - name: OHIF builder byte and stale-output boundaries
       run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/ohif-config-build --cwd . --file scripts/build-ohif-config.py --tree config/ohif --file config/ohif.js --file tests/s9_u0e_build_test.py -- python3 scripts/run-tests.py --module tests/s9_u0e_build_test.py --mode pure --unit ci-s9-u0e-build
+    - name: CD-14 trace matrix generator over the fixed fixture tree
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/trace-matrix-test --cwd . --file scripts/build-trace-matrix.py --file scripts/test_trace_matrix.py --file scripts/ci_select.py --file tests/ci_workflows.py --tree tests/fixtures/trace -- python3 -B scripts/test_trace_matrix.py
+    - name: CD-14 trace matrix of this checkout (an execution record, not committed)
+      run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/trace-matrix-build --cwd . --file scripts/build-trace-matrix.py --file scripts/ci_select.py --file tests/ci_workflows.py --file scripts/ci-paths.json --tree .github/workflows --file AGENTS.md --file README.md --tree docs --tree gateway --tree keycloak --tree tools --tree tests --tree api/src --tree scripts --tree worklist-v0/hpacs-lite -- python3 -B scripts/build-trace-matrix.py --out tmp/runtime-ci/trace-matrix --run-id "$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT"
     - name: Build the production target
       env:
         CODE_SHA: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
