@@ -36,6 +36,11 @@
   font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
 .related-mode-card h4 { margin: 0 0 3px; font-size: 11px; }
 .related-mode-card.related-mode-source { border: 2px solid #d29a3a; }
+/* 현재 판독 대상은 작업공간에 있으므로 중복 카드는 접는다. 비교 원본의 환자·기관·접수번호는
+   짧은 줄로 함께 표시해 다른 기관이나 접수 건의 판독문을 같은 원본으로 오인하지 않게 한다. */
+#related-mode-target { display: none; }
+#related-mode-source { display: flex; flex-wrap: wrap; gap: 0 12px; padding: 2px 8px; }
+#related-mode-source > h4, #related-mode-source .related-mode-label { display: none; }
 .related-mode-line { display: flex; gap: 6px; }
 .related-mode-label { flex: none; min-width: 6.5em; color: #9fb0c8; }
 .related-mode-badge { display: inline-block; margin-top: 4px; padding: 1px 6px; border: 1px solid #d29a3a; border-radius: 3px;

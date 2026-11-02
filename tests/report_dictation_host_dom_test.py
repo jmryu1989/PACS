@@ -135,13 +135,13 @@ MARKERS = {
     "PANEL_CSS": ("    .panel { display: flex;", "\n"),
     "REPORT_CSS": ("    /* Report */", "    .citefield {"),
     "MODAL_CSS": (".modal { display: none;", "/* ══ 클릭 피드백"),
-    "RBTNS_HTML": ('<div class="rbtns">', "\n        </div>"),
+    "RBTNS_HTML": ('<div class="rfoot2 rbtns">', "\n        </div>"),
     # W4: the Notice row that says why a study move did not happen sits right above the draft bar.
     "BARS_HTML": ('<div class="draftbar" id="report-notice"', '<div id="citelist"'),
     # The citation list and the dictation pane, up to the report fields.
     "DICTATION_HTML": ('<div id="citelist"', '<div class="redit">'),
     "REDIT_HTML": ('<div class="redit">', "\n        </div>"),
-    "RFOOT_HTML": ('<div class="rfoot2">', "\n        </div>"),
+    "RFOOT_HTML": ('<div class="rfoot2 rbtns">', "\n        </div>"),
     "PANE_HTML": ('<div class="modal" id="stalemodal"', "\n  </div>"),
     "CITE_HTML": ('<div class="modal" id="cite-preview"', "\n  </div>"),
     "STRUCT_HTML": ('<div class="modal" id="structmodal"', "\n  </div>"),
@@ -170,6 +170,8 @@ for name in ("RBTNS_HTML", "REDIT_HTML", "RFOOT_HTML"):
     S[name] += "\n        </div>"
 for name in ("PANE_HTML", "CITE_HTML", "STRUCT_HTML"):
     S[name] += "\n  </div>"
+# The product has one action row below the editor. Do not duplicate it in the component host.
+S["RBTNS_HTML"] = ""
 API_FN = extract_function(MAIN, "api")
 WRITE_BLOCK_FN = extract_function(MAIN, "reportWriteBlock")
 EDITOR_BLOCK_FN = extract_function(MAIN, "reportEditorBlock")
@@ -1076,6 +1078,20 @@ class ReportDictationHostDOMTest(unittest.TestCase):
         self.assertTrue(self.snap()["pane"]["hidden"])
         self.assertEqual("b-dictate", self.snap()["focused"])
 
+    def assert_footer_reachable(self, where):
+        facts = self.page.evaluate("""() => {
+          const button = document.querySelector('#b-save'), saved = [];
+          for (let e = button.parentElement; e; e = e.parentElement) saved.push([e, e.scrollTop, e.scrollLeft]);
+          button.scrollIntoView({block: 'nearest', inline: 'nearest'});
+          const r = button.getBoundingClientRect(), hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+          const result = {hit: hit === button || button.contains(hit), whole: r.top >= 0 && r.bottom <= innerHeight,
+            wheel: saved.filter(([e, top, left]) => e.scrollTop !== top || e.scrollLeft !== left)
+              .every(([e]) => /^(auto|scroll)$/.test(getComputedStyle(e).overflowY))};
+          for (const [e, top, left] of saved) { e.scrollTop = top; e.scrollLeft = left; }
+          return result;
+        }""")
+        self.assertEqual(dict(hit=True, whole=True, wheel=True), facts, where)
+
     # ── HD-13 ──────────────────────────────────────────────────────────────────────────────
     def test_hd13_the_pane_is_bounded_and_the_report_layout_is_unchanged_at_both_viewports(self):
         for width, height, frame in ((1680, 1100, None), (1366, 768, None), (1366, 768, (460, 420))):
@@ -1094,9 +1110,9 @@ class ReportDictationHostDOMTest(unittest.TestCase):
             opened = self.page.evaluate("boxes()")
             where = "%dx%d frame=%s" % (width, height, frame)
             self.assertLessEqual(opened["pane"]["height"], 168.5, where)
-            self.assertLessEqual(opened["rbtns"]["bottom"], opened["pane"]["top"] + 0.5, where)
+            self.assertLessEqual(opened["redit"]["bottom"], opened["rbtns"]["top"] + 0.5, where)
             self.assertLessEqual(opened["pane"]["bottom"], opened["redit"]["top"] + 0.5, where)
-            self.assertLessEqual(opened["rfoot"]["bottom"], opened["frame"]["bottom"] + 0.5, where)
+            self.assert_footer_reachable(where)
             for name, field in opened["fields"].items():
                 self.assertGreaterEqual(field["height"] + 0.5, field["min"], "%s %s" % (where, name))
             self.assertEqual({"insert": True, "cancel": True}, self.page.evaluate("hits()"), where)
@@ -1266,19 +1282,18 @@ class ReportDictationHostDOMTest(unittest.TestCase):
         notice = self.page.locator("#recnote")
         self.assertEqual(recommendation, notice.is_visible())
         if recommendation:
-            self.assertTrue(notice.get_by_text("Recommendation (existing value · read only)", exact=True).is_visible())
+            self.assertIn("Recommendation:", notice.inner_text())
 
     def assert_stacked(self, value, where, footer="column"):
-        """Top to bottom in the column: buttons, review pane, notice (when shown), report fields, then the footer:
+        """Top to bottom: review pane, notice (when shown), report fields, then the merged action row:
         "column" - inside the column; "scroll" - inside the column or in the report panel's own scroll range (the W3/W6
         rule for short windows: on screen or in a container the reader scrolls with the wheel); None - not checked."""
-        self.assertLessEqual(value["rbtns"]["bottom"], value["pane"]["top"] + 0.5, where)
+        self.assertLessEqual(value["redit"]["bottom"], value["rbtns"]["top"] + 0.5, where)
         below_pane = value["note"] if value["note"]["height"] else value["redit"]
         self.assertLessEqual(value["pane"]["bottom"], below_pane["top"] + 0.5, where)
         self.assertLessEqual(value["note"]["bottom"] if value["note"]["height"] else 0, value["redit"]["top"] + 0.5, where)
         if footer:
-            inside = value["rfoot"]["bottom"] <= value["frame"]["bottom"] + 0.5
-            self.assertTrue(inside or (footer == "scroll" and value["panelScrolls"]), "the footer is reachable: " + where)
+            self.assert_footer_reachable(where)
         for name, height, minimum in value["fields"]:
             self.assertGreaterEqual(height + 0.5, minimum, "%s %s" % (where, name))
         # The pane's own rows are whole inside it: status, a transcript of at least one whole line that scrolls in its own
@@ -1336,7 +1351,7 @@ class ReportDictationHostDOMTest(unittest.TestCase):
                     self.assertLess(value["pane"]["height"], value["cap"] - 1, "a short column: the pane gives way: " + where)
                     self.assertGreaterEqual(value["editorRow"]["height"] + 0.5, value["editorRowMin"], where)
                 self.assertGreater(value["editorRowMin"], 0, "the reading layout's editor row minimum applies: " + where)
-                self.assert_stacked(value, where, footer="column")
+                self.assert_stacked(value, where, footer="scroll")
                 self.assertGreater(value["text"]["line"], 0, "the transcript line has a stated pitch: " + where)
                 self.assertLess(value["actions"]["width"], value["paneContentWidth"] - 1,
                                 "the actions are a row of their own size beside meta, not a stretched block: " + where)

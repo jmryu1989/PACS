@@ -362,6 +362,7 @@ with (synScope) {
 """
 
 TAIL = """
+window.synSelected = () => selectedUid;
 window.synPick = uid => { selectedUid = uid; relatedUid = null; renderClinical(); };
 window.synRelated = uid => { relatedUid = uid; renderClinical(); };
 window.synReturn = () => { relatedUid = null; renderClinical(); };
@@ -586,8 +587,11 @@ class ClinicalContextDOMTest(unittest.TestCase):
     def panel(self):
         return self.page.evaluate("() => window.synPanel()")
 
-    def refresh_button(self):
-        return self.page.get_by_role("region", name="Clinical Context").get_by_role("button", name="Refresh")
+    def reread(self):
+        """Re-select the study, the compact page's user path to a fresh context read."""
+        uid = self.js("synSelected")
+        self.pick(None)
+        self.pick(uid)
 
     def sections(self):
         return {s["name"]: s for s in self.panel()["sections"]}
@@ -686,8 +690,8 @@ class ClinicalContextDOMTest(unittest.TestCase):
         self.show(A, vector="A-MIXED")
         region = self.page.get_by_role("region", name="Clinical Context")
         expect(region).to_be_visible()
-        expect(region.get_by_role("heading", name="Clinical Context")).to_be_visible()
-        expect(region.get_by_role("button", name="Refresh")).to_be_enabled()
+        expect(self.page.get_by_role("heading", name=re.compile("Clinical Context"))).to_be_visible()
+        expect(self.page.locator("#clinical-context-refresh")).to_be_enabled()
         panel = self.panel()
         self.assertEqual([s["name"] for s in panel["sections"]], SECTIONS)
         states = {s["name"]: s["state"] for s in panel["sections"]}
@@ -738,7 +742,7 @@ class ClinicalContextDOMTest(unittest.TestCase):
         self.assertEqual(calls[-1]["query"], "?cursor=1")
         expect(self.page.get_by_role("region", name="Clinical Context").get_by_role("button", name="Next Page")).to_have_count(0)
         self.answer(A, raw=json.dumps(first), status=200)
-        self.refresh_button().click()
+        self.reread()
         self.settle()
         self.assertEqual(self.js("synCallView")[-1]["query"], "")
 
@@ -1161,7 +1165,7 @@ class ClinicalContextDOMTest(unittest.TestCase):
         self.frames()
         self.assertEqual(self.state_of("history"), "stale")
 
-    def test_cd06_a_failed_reread_keeps_the_answer_as_stale_and_marks_stay_until_a_new_answer(self):
+    def test_cd06_stale_marks_persist_until_the_user_switches_and_rereads(self):
         self.open_reader(clock=True)
         self.show(A, vector="A-PRESENT-OWNER")
         self.js("synObserve", LISTS["L-Y-ADDENDUM"])
@@ -1174,20 +1178,18 @@ class ClinicalContextDOMTest(unittest.TestCase):
         self.frames()
         self.assertEqual(len(self.calls()), asked, "no read by time")
         self.assertEqual(self.state_of("history"), "stale", "no unmark by time")
-        # Refresh -> 503: items kept, the read sections Stale with the failed re-read, the status says so
+        # The compact page re-reads by study switch. Leaving clears the old patient's content;
+        # a failed read on return must not resurrect it as a stale answer.
         self.answer(A, status=503, json={"code": "CLINICAL_CONTEXT_BUSY", "message": "SYN busy"})
-        self.refresh_button().click()
+        self.reread()
         self.settle()
         panel = self.panel()
-        self.assertIn("SYN CT CHEST", panel["text"])
-        self.assertIn(TEXTS["staleCauses"]["refresh_failed"], panel["status"])
-        self.assertIn(TEXTS["stateLabels"]["stale"], panel["status"])
-        s = self.sections()
-        self.assertEqual({n: s[n]["state"] for n in SECTIONS}, {n: "stale" for n in SECTIONS})
-        self.assertIn(TEXTS["staleCauses"]["refresh_failed"], s["techNote"]["text"])
+        self.assertNotIn("SYN CT CHEST", panel["all"])
+        self.assertEqual([], panel["sections"])
+        self.assertIn(TEXTS["stateLabels"]["failed"], panel["status"])
         # a new answer clears every mark (F-10 / F-14)
         self.answer(A, vector="A-PRESENT-OWNER-2")
-        self.refresh_button().click()
+        self.reread()
         self.settle()
         s = self.sections()
         self.assertEqual({n: s[n]["state"] for n in SECTIONS}, {n: "present" for n in SECTIONS})
@@ -1203,7 +1205,7 @@ class ClinicalContextDOMTest(unittest.TestCase):
                 self.show(A, vector="A-PRESENT-OWNER")
                 body = {"message": "SYN refused"} if code is None else {"code": code, "message": "SYN refused"}
                 self.answer(A, status=status, json=body)
-                self.refresh_button().click()
+                self.reread()
                 self.settle()
                 panel = self.panel()
                 self.assertEqual(panel["sections"], [])
@@ -1215,13 +1217,14 @@ class ClinicalContextDOMTest(unittest.TestCase):
                 if code:
                     self.assertIn(code, panel["status"])
                 expect(self.page.get_by_role("region", name="Clinical Context").get_by_role("button", name="Retry")).to_be_enabled()
-        # the pair: a busy re-read keeps the items as Stale
+        # A busy answer after switching back is a new failed read, with no previous content to retain.
         self.show(A, vector="A-PRESENT-OWNER")
         self.answer(A, status=503, json={"code": "CLINICAL_CONTEXT_BUSY", "message": "SYN busy"})
-        self.refresh_button().click()
+        self.reread()
         self.settle()
-        self.assertIn("SYN CT CHEST", self.panel()["text"])
-        self.assertEqual(self.state_of("history"), "stale")
+        self.assertNotIn("SYN CT CHEST", self.panel()["text"])
+        self.assertEqual([], self.panel()["sections"])
+        self.assertIn(TEXTS["stateLabels"]["failed"], self.panel()["status"])
 
     # ── cd08 ──
     def test_cd08_identity_conflict_alert_and_row_marks(self):
@@ -1366,7 +1369,7 @@ class ClinicalContextDOMTest(unittest.TestCase):
         self.assertNotIn(TEXTS["stateLabels"]["failed"], self.panel()["status"])
         # F-08: while a read is out, Refresh and Retry are off and pressing them sends nothing
         self.answer(A, vector="A-PRESENT-OWNER", hold=True)
-        self.refresh_button().click()
+        self.reread()
         held = self.take(A)
         asked = len(self.calls())
         self.assertEqual([b for b in self.panel()["buttons"] if not b[1]], [])
@@ -1401,7 +1404,7 @@ class ClinicalContextDOMTest(unittest.TestCase):
                 self.open_reader()
                 self.show(A, vector="A-PRESENT-OWNER")
                 self.answer(A, vector="A-PRESENT-OWNER-2", hold=True)
-                self.refresh_button().click()
+                self.reread()
                 held = self.take(A)
                 self.page.evaluate(script)
                 self.page.wait_for_timeout(50)
@@ -1424,7 +1427,7 @@ class ClinicalContextDOMTest(unittest.TestCase):
         self.open_reader()
         self.show(A, vector="A-PRESENT-OWNER")
         self.answer(A, vector="A-PRESENT-OWNER-2")
-        self.refresh_button().click()
+        self.reread()
         self.settle()
         self.assertIn("SYN reason: refreshed", self.panel()["text"])
 
@@ -1436,14 +1439,14 @@ class ClinicalContextDOMTest(unittest.TestCase):
         self.show(A, vector="A-PRESENT-OWNER")
         self.stub.hold_logout = True
         self.answer(A, status=401, json={"message": "SYN refused"})
-        self.refresh_button().click()
+        self.reread()
         self.settle()
         panel = self.panel()
         self.assertTrue(panel["shown"])
         self.assertIn(TEXTS["stateLabels"]["failed"], panel["all"])
         self.assertEqual(("active", []), (self.page.evaluate("() => KinWorkContext.state()"), self.stub.logouts))
         self.answer(A, status=401, json={"code": "AUTH_SESSION_ENDED", "message": "SYN ended"})
-        self.refresh_button().click()
+        self.reread()
         self.wait_until(lambda: self.page.evaluate("() => KinWorkContext.state()") not in ("active", "preparing"),
                         "the end the server told")
         self.frames()
@@ -1465,7 +1468,7 @@ class ClinicalContextDOMTest(unittest.TestCase):
                 self.show(A, vector="A-PRESENT-OWNER")
                 self.page.evaluate("() => { window.synHold = true; }")
                 index = len(self.calls())
-                self.refresh_button().click()
+                self.reread()
                 self.wait_calls(index + 1)
                 kind, value = ending
                 if kind == "owner":
@@ -1540,7 +1543,7 @@ class ClinicalContextDOMTest(unittest.TestCase):
         self.assertEqual(self.state_of("techNote"), "stale")
         self.assertEqual(self.sections()["priorReports"]["open"], [True, False])
 
-    def test_cd13_a_large_answer_stays_in_its_column_beside_the_editor(self):
+    def test_cd13_a_large_answer_stays_in_its_half_beside_clinical_info(self):
         """Minhoon item 8 (2026-10-27): Clinical Context is read while writing, so it sits beside the report editor in the
         report panel at a normal and at a small window. A large answer scrolls inside its own column: it neither moves the
         editor nor runs past the row or sideways."""
@@ -1551,17 +1554,17 @@ class ClinicalContextDOMTest(unittest.TestCase):
                 self.page.set_viewport_size({"width": width, "height": height})
                 box = self.page.evaluate("""() => {
                   const r = s => document.querySelector(s).getBoundingClientRect(), panel = document.querySelector('#clinical-context');
-                  const p = r('#clinical-context'), e = r('.report-editor'), row = r('.report-compose');
+                  const p = r('#clinical-context'), e = r('#clinical'), row = r('.clin-pair');
                   return { left: p.left, editorRight: e.right, top: p.top, editorTop: e.top, height: p.height, rowHeight: row.height,
                            width: p.width, editorWidth: e.width, scroll: panel.scrollWidth, client: panel.clientWidth,
                            scrolls: panel.scrollHeight > panel.clientHeight,
-                           inReport: document.querySelector('.report-p').contains(panel) && !document.querySelector('.rw').contains(panel) };
+                           inClinical: document.querySelector('.s-clinical').contains(panel) && !document.querySelector('.report-p').contains(panel) };
                 }""")
-                self.assertTrue(box["inReport"], box)
+                self.assertTrue(box["inClinical"], box)
                 self.assertGreaterEqual(box["left"], box["editorRight"] - 0.5, box)
                 self.assertAlmostEqual(box["top"], box["editorTop"], delta=0.5, msg=box)
                 self.assertLessEqual(box["height"], box["rowHeight"] + 0.5, box)
-                self.assertGreater(box["editorWidth"], box["width"], box)
+                self.assertAlmostEqual(box["editorWidth"], box["width"], delta=1, msg=box)
                 self.assertLessEqual(box["scroll"], box["client"], box)
                 self.assertTrue(box["scrolls"], box)
 
@@ -1658,7 +1661,7 @@ class ClinicalContextDOMTest(unittest.TestCase):
         self.page.evaluate("() => { window.synRejections = []; window.addEventListener('unhandledrejection', "
                            "event => window.synRejections.push(String(event.reason && event.reason.stack || event.reason))); }")
         region = self.page.get_by_role("region", name="Clinical Context")
-        retry, refresh = region.get_by_role("button", name="Retry"), region.get_by_role("button", name="Refresh")
+        retry, refresh = region.get_by_role("button", name="Retry"), self.page.locator("#clinical-context-refresh")
         self.show(A, status=200, raw="<html>not json</html>")
         malformed = self.panel()["status"]
         self.assertIn(TEXTS["stateLabels"]["failed"], malformed)
@@ -1671,7 +1674,7 @@ class ClinicalContextDOMTest(unittest.TestCase):
                         self.show(A, vector=entry["derivedFrom"])
                         self.assertEqual(len(self.panel()["sections"]), 4)
                         self.answer(A, malformed=name)
-                        refresh.click()
+                        self.reread()
                         self.settle()
                     panel = self.panel()
                     self.assertEqual(panel["sections"], [])
@@ -1739,14 +1742,15 @@ class ClinicalContextDOMTest(unittest.TestCase):
         self.pick(B)
         self.settle()
         self.assertIn("SYN-B-MARK", self.panel()["text"])
-        # (b) a re-read of A answered with B's answer: A's panel as it was just before (Loading…, A's items, controls off)
+        # (b) switching back to A is answered with B's answer: the empty Loading panel must remain unchanged.
         self.show(A, vector="A-PRESENT-OWNER")
         self.answer(A, vector="A-B", hold=True)
-        self.refresh_button().click()
+        self.reread()
         held = self.take(A)
         self.frames()
         before = self.panel()
-        self.assertIn("SYN CT CHEST", before["text"])
+        self.assertNotIn("SYN CT CHEST", before["text"])
+        self.assertEqual([], before["sections"])
         mark = len(self.page.evaluate("() => window.synSeen"))
         self.respond(held)
         self.settle()

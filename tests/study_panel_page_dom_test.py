@@ -1,4 +1,7 @@
-"""REQ-WS1/WS2/WS7 -> RISK-WS1/WS2/WS7 -> WS1-LAYOUT-ROAM / WS7-RW-RELOCATION.
+"""Retired W2 first-paint byte/geometry identity: Minhoon 2026-11-01 removed Rail and the toolbar.
+Current first-screen reachability is checked on the served page (AGENTS 1-B.14).
+
+REQ-WS1/WS2/WS7 -> RISK-WS1/WS2/WS7 -> WS1-LAYOUT-ROAM / WS7-RW-RELOCATION.
 
 Serve the real page and dependency assets. Only HTTP answers are synthetic.
 Node identity is itself the relocation contract; all other assertions observe
@@ -438,6 +441,17 @@ class WorkspaceSite(auth.Site):
         self.layout, self.layout_revision = None, 0
         self.fail_read, self.held_read = False, None
         self.layout_writes = []
+        self.study_count = None
+
+    def list_body(self, account, rename=None):
+        body = super().list_body(account, rename)
+        if self.study_count is not None:
+            body['studies'].extend(self.study_row(account, f'{auth.UID}.{i}', f'SYN SCROLL {i}', f'SYN-P-{i:03d}')
+                                   for i in range(3, self.study_count + 1))
+            # The real pagination contract requires strictly increasing study UIDs.
+            body['studies'].sort(key=lambda row: row['uid'])
+            body['pagination']['total'] = len(body['studies'])
+        return body
 
     def api(self, route, request, method, path, query):
         if (method == 'GET' and path == '/api/critical-results'
@@ -504,6 +518,7 @@ class StudyPanelPageDOM(unittest.TestCase):
         self.page.goto(auth.MAIN_URL)
         expect(self.page.locator('#rows')).to_contain_text(auth.PATIENT)
         wait_startup(self.page, self.site)
+        auth.show_all_panels(self.page)
         expect(self.page.locator('#study-panel-open')).to_have_attribute('aria-expanded', 'false')
 
     def drawer(self):
@@ -640,6 +655,7 @@ class StudyPanelPageDOM(unittest.TestCase):
                 self.page.reload()
                 expect(self.page.locator('#rows')).to_contain_text(auth.PATIENT)
                 wait_startup(self.page, self.site)
+                auth.show_all_panels(self.page)
                 self.open_drawer(True)
                 saved = self.local()
                 self.assertEqual(3, saved['version'])
@@ -674,7 +690,8 @@ class StudyPanelPageDOM(unittest.TestCase):
           return names.map(s => { const node = document.querySelector(s); if (!node || !node.getClientRects().length) return [s, null];
             const fact = seen(node), [x, y, w, h] = fact.visible;
             const covered = !!panel && w > 0 && h > 0 && x < panel.right && x + w > panel.left && y < panel.bottom && y + h > panel.top;
-            const points = w > 0 && h > 0 ? [[x + 2, y + 2], [x + w - 2, y + 2], [x + w / 2, y + h / 2], [x + 2, y + h - 2], [x + w - 2, y + h - 2]] : [];
+            const dx = Math.min(2, w / 4), dy = Math.min(2, h / 4);
+            const points = w > 0 && h > 0 ? [[x + dx, y + dy], [x + w - dx, y + dy], [x + w / 2, y + h / 2], [x + dx, y + h - dy], [x + w - dx, y + h - dy]] : [];
             return [s, {...fact, covered, on_top: points.every(([px, py]) => { const hit = document.elementFromPoint(px, py); return hit === node || node.contains(hit); })}]; }); }''',
             ['#b-approve', '#b-save', '#b-prelim', '#findings', '#conclusion'])
         for name, fact in facts:
@@ -763,21 +780,9 @@ class StudyPanelPageDOM(unittest.TestCase):
                 if width >= 1080 and height >= 1920:
                     for name in ('#b-approve', '#b-save', '#findings', '#conclusion'):
                         self.assertTrue(opened[name]['whole'], f'{name} whole in view with the panel open')
-                # Where the report starts low in the window, the reader turns the wheel over
-                # the work area below the panel until the buttons and the start of Findings
-                # are in view; the panel follows the report up and never covers it.
-                # (In the 180 px portrait report section of 900x1200 and 768x1024 the report
-                # editor itself is squeezed by the panels below it, on main as well; the
-                # fields' own visibility there is not this panel's to change.)
-                for _ in range(24):
-                    now = self.assert_report_usable(page, 'scrolling to the report')
-                    if now['#b-approve']['whole'] and now['#b-save']['whole']:
-                        break
-                    panel = page.get_by_role('complementary', name='Study Panel', exact=True).bounding_box()
-                    report = page.locator('.report-p').bounding_box()
-                    page.mouse.move(width - 30, (panel['y'] + panel['height'] + min(report['y'], height)) / 2)
-                    page.mouse.wheel(0, 60)
-                    settle(page)
+                # The bottom action row is reached through the report card's own scroller.
+                page.locator('#b-save').scroll_into_view_if_needed()
+                settle(page)
                 self.assert_drawer_place(page, width, height)
                 scrolled = self.assert_report_usable(page, 'scrolled to the report')
                 for name in ('#b-approve', '#b-save'):
@@ -978,6 +983,7 @@ class StudyPanelPageDOM(unittest.TestCase):
         """A fresh login at one window size serving one or two studies; returns (page, site, context)."""
         site = WorkspaceSite()
         site.second_study = studies > 1
+        site.study_count = studies
         context = self.browser.new_context(viewport=dict(width=width, height=height))
         context.route('**/*', lambda route, request: site.handle(route, request))
         self.addCleanup(context.close)
@@ -989,6 +995,7 @@ class StudyPanelPageDOM(unittest.TestCase):
         page.goto(auth.MAIN_URL)
         expect(page.locator('#rows tr[data-uid]')).to_have_count(studies)
         wait_startup(page, site)
+        auth.show_all_panels(page)
         settle(page)
         return page, site, context
 
@@ -1057,7 +1064,7 @@ class StudyPanelPageDOM(unittest.TestCase):
         for width, height in ((840, 768), (860, 700), (900, 768), (1024, 768), (900, 600), (1280, 720)):
             with self.subTest(width=width, height=height):
                 page, _, _ = self.page_at(width, height)
-                expect(page.get_by_role('button', name='Folders', exact=True)).to_have_attribute('aria-expanded', 'true')
+                expect(page.locator('#worklist-folders-panel')).to_have_attribute('open', '')
                 self.assert_layout_stacked(page, False)
                 area = page.evaluate(LIST)
                 self.assertGreaterEqual(area['grid'][1] - area['grid'][0] + 0.5, area['head'] + area['row'] + area['scrollbar'])
@@ -1070,9 +1077,9 @@ class StudyPanelPageDOM(unittest.TestCase):
     def test_narrow_sheet_keeps_header_selected_and_next_row(self):
         """W3R5-02: a narrow landscape window stacks the work area when a study is
         selected; its fixed list band keeps the header, the selected row and the next
-        row whole (no keyboard-only path), right after the selection and after a
-        drawer round trip, together with the Related header and the prior report's
-        first line (D383)."""
+        row whole (no keyboard-only path), right after selection and a drawer round trip.
+        The relocated Related Exam table remains reachable in the left column.
+        Its former place above the prior report is no longer a first-paint contract."""
         for width, height in ((840, 768), (860, 700), (800, 768)):
             with self.subTest(width=width, height=height):
                 page, _, _ = self.page_at(width, height)
@@ -1086,9 +1093,16 @@ class StudyPanelPageDOM(unittest.TestCase):
                         expect(page.get_by_role('complementary', name='Study Panel', exact=True)).to_have_count(0)
                         settle(page)
                     self.assertTrue(self.assert_row_in_view(page, 0, phase)['selected'])
+                    reach = page.evaluate(W6_REACH, ['.related-list-pane thead'])['below']['.related-list-pane thead']
+                    self.assertTrue(reach['window'])
+                    self.assertIsNone(reach['clipped'])
+                    self.assertTrue(all(wheel for _, wheel in reach['scrolled']), reach)
+                    page.locator('.related-list-pane thead').scroll_into_view_if_needed()
                     related = page.evaluate(RELATED)
-                    self.assertTrue(related['head']['whole'], f'{phase}: Related header {related}')
+                    self.assertTrue(related['head']['whole'], f'{phase}: Related header reachable {related}')
                     self.assertGreaterEqual(related['line_visible'], 8, f'{phase}: prior report first line {related}')
+                    page.locator('#rows tr[data-uid]').first.scroll_into_view_if_needed()
+                    settle(page)
                 # The next row: whole in a 768 px window's band; in a shorter window the band
                 # yields to the prior report line and the wheel brings the next row up.
                 if (width, height) != (860, 700):
@@ -1103,7 +1117,7 @@ class StudyPanelPageDOM(unittest.TestCase):
         reader's pointer instead of jumping to the beginning of the list."""
         for width, height in ((860, 700), (900, 600)):
             with self.subTest(width=width, height=height):
-                page, _, _ = self.page_at(width, height)
+                page, _, _ = self.page_at(width, height, studies=40)
                 grid = page.locator('.left > .grid').bounding_box()
                 page.mouse.move(grid['x'] + 40, grid['y'] + grid['height'] - 10)
                 page.mouse.wheel(0, 60)
@@ -1117,8 +1131,8 @@ class StudyPanelPageDOM(unittest.TestCase):
                 self.doCleanups()
 
     def test_scrolling_work_area_keeps_open_panel_above_report(self):
-        """WS7-RW-RELOCATION: continue scrolling after the first buttons appear;
-        the open panel must shrink as the report moves further up the window."""
+        """The report's own scroller and the surrounding work area remain usable
+        with the Study Panel open after the editor and prior report are stacked."""
         for width, height in ((840, 768), (860, 700)):
             with self.subTest(width=width, height=height):
                 page, _, _ = self.page_at(width, height)
@@ -1127,18 +1141,19 @@ class StudyPanelPageDOM(unittest.TestCase):
                 drawer = page.get_by_role('complementary', name='Study Panel', exact=True)
                 expect(drawer).to_be_visible()
                 settle(page)
-                initial_report = page.locator('.report-p').bounding_box()['y']
-                initial_height = drawer.bounding_box()['height']
-                for _ in range(4):
-                    page.mouse.move(width - 5, height - 40)
-                    page.mouse.wheel(0, 80)
-                    settle(page)
-                report = page.locator('.report-p').bounding_box()
-                panel = drawer.bounding_box()
-                self.assertLess(report['y'], initial_report - 100, 'the work area must actually scroll')
-                self.assertLess(panel['height'], initial_height)
+                # Scroll to an actual report action; no fixed document-y movement
+                # is expected now that the report card can scroll independently.
+                reach = page.evaluate(W6_REACH, ['#b-save'])['below']['#b-save']
+                self.assertTrue(reach['window'])
+                self.assertIsNone(reach['clipped'])
+                self.assertTrue(all(wheel for _, wheel in reach['scrolled']), reach)
+                page.locator('#b-save').scroll_into_view_if_needed()
+                settle(page)
+                report, panel = page.locator('.report-p').bounding_box(), drawer.bounding_box()
                 self.assertLessEqual(panel['y'] + panel['height'], report['y'] - 12 + .5)
-                self.assert_report_usable(page, 'scrolled open panel')
+                facts = self.assert_report_usable(page, 'scrolled open panel')
+                self.assertIsNotNone(facts['#b-save'])
+                self.assertTrue(facts['#b-save']['whole'])
                 self.doCleanups()
 
     def test_list_floor_follows_a_row_height_change(self):
@@ -1210,6 +1225,7 @@ class StudyPanelPageDOM(unittest.TestCase):
         wait_startup(self.page, self.site)
         settle(self.page)
         self.assertAlmostEqual(portrait_default, self.page.locator('.left').bounding_box()['height'], delta=1)
+        auth.show_all_panels(self.page)
         self.open_drawer()
         self.drawer().get_by_role('tab', name='Images', exact=True).click()
         self.page.keyboard.press('Escape')
@@ -1222,11 +1238,15 @@ class StudyPanelPageDOM(unittest.TestCase):
         value = dict(version=3, mode='auto', portrait={}, landscape={}, reading=READING,
                      workspace=dict(version=1, rail=240, worklist=700, related=250, prior=180,
                                     railCollapsed=False, studyPanelTab='templates'))
-        self.boot()
+        self.page.goto(auth.MAIN_URL)
+        expect(self.page.locator('#rows')).to_contain_text(auth.PATIENT)
         self.page.evaluate('([k,v]) => localStorage.setItem(k,JSON.stringify(v))', [KEY, value])
+        # Treat the seeded record as a previous login's choice.
+        self.site.sign_in(auth.RAD)
         self.page.reload()
         expect(self.page.locator('#rows')).to_contain_text(auth.PATIENT)
         wait_startup(self.page, self.site)
+        auth.show_all_panels(self.page)
         # The visible default must not depend on what the last login saved.
         self.open_drawer()
         info = self.drawer().get_by_role('tab', name='Info', exact=True)
@@ -1243,6 +1263,7 @@ class StudyPanelPageDOM(unittest.TestCase):
         self.page.reload()
         expect(self.page.locator('#rows')).to_contain_text(auth.PATIENT)
         wait_startup(self.page, self.site)
+        auth.show_all_panels(self.page)
         expect(self.drawer()).to_have_count(0)
         self.open_drawer()
         expect(self.drawer().get_by_role('tab', name='Templates', exact=True)).to_have_attribute('aria-selected', 'true')
@@ -1256,6 +1277,7 @@ class StudyPanelPageDOM(unittest.TestCase):
         self.page.reload()
         expect(self.page.locator('#rows')).to_contain_text(auth.PATIENT)
         wait_startup(self.page, self.site)
+        auth.show_all_panels(self.page)
         self.open_drawer()
         expect(self.drawer().get_by_role('tab', name='Info', exact=True)).to_have_attribute('aria-selected', 'true')
         self.drawer().get_by_role('tab', name='Images', exact=True).click()
@@ -1269,7 +1291,7 @@ class StudyPanelPageDOM(unittest.TestCase):
         self.page.locator('#rows tr[data-uid]').first.click()
         # D1041 6-②: the landed W2 opens Folders on every login; the drawer
         # opens beside an already open Folders panel (no click closes it).
-        expect(self.page.get_by_role('button', name='Folders', exact=True)).to_have_attribute('aria-expanded', 'true')
+        expect(self.page.locator('#worklist-folders-panel')).to_have_attribute('open', '')
         panels = ['.left', '.right', '.related-p', '.report-p', '#worklist-folders-panel']
         before = [self.page.locator(s).bounding_box() for s in panels]
         self.page.locator('#findings').fill('SYN left drawer keeps this draft')
@@ -1290,7 +1312,7 @@ class StudyPanelPageDOM(unittest.TestCase):
         self.page.keyboard.press('Escape')
         expect(self.page.locator('#findings')).to_be_focused()
         expect(self.page.locator('#findings')).to_have_value('SYN left drawer keeps this draft')
-        expect(self.page.get_by_role('button', name='Folders', exact=True)).to_have_attribute('aria-expanded', 'true')
+        expect(self.page.locator('#worklist-folders-panel')).to_have_attribute('open', '')
         self.assertEqual(before, [self.page.locator(s).bounding_box() for s in panels])
         # Integrated reading has an image viewport on the left. The same overlay
         # leaves its/report geometry and resize directions intact.
@@ -1307,29 +1329,29 @@ class StudyPanelPageDOM(unittest.TestCase):
         self.page.keyboard.press('Escape')
         expect(opener).to_be_focused()
 
-    def test_rail_and_panel_keyboard_resize_persist_as_v3(self):
+    def test_rail_keyboard_resize_saves_workspace_width(self):
         self.boot()
-        # D1041 6-②: Folders is open on login (landed W2), so its rail is
-        # reachable without a click; a click here would close the panel.
-        folders = self.page.get_by_role('button', name='Folders', exact=True)
-        expect(folders).to_have_attribute('aria-expanded', 'true')
-        rail = self.page.get_by_role('separator', name='폴더 너비 조절', exact=True)
+        rail = self.page.locator('#resize-rail')
         before = self.page.locator('#worklist-folders-panel').bounding_box()['width']
         rail.focus()
         self.page.keyboard.press('ArrowRight')
-        settle(self.page)
-        self.assertGreater(self.page.locator('#worklist-folders-panel').bounding_box()['width'], before)
-        self.assertIsInstance(self.local(), dict)
-        self.assertIsInstance(self.local()['workspace']['rail'], int)
-        self.page.get_by_role('button', name='Rail', exact=True).click()
-        self.assertTrue(self.local()['workspace']['railCollapsed'])
+        self.page.wait_for_function('(before) => document.querySelector("#worklist-folders-panel").getBoundingClientRect().width > before', arg=before)
+        width = self.page.locator('#worklist-folders-panel').bounding_box()['width']
+        self.page.wait_for_function('(key) => JSON.parse(localStorage.getItem(key)).workspace.rail > 0', arg=KEY)
+        self.assertEqual(round(width), self.local()['workspace']['rail'])
         self.page.reload()
-        expect(self.page.locator('#rows')).to_contain_text(auth.PATIENT)
-        wait_startup(self.page, self.site)
-        # Same login: W2 keeps the never-closed panel open; W3 restores the
-        # collapsed rail from the v3 record.
-        expect(folders).to_have_attribute('aria-expanded', 'true')
-        expect(self.page.get_by_role('button', name='Rail', exact=True)).to_have_attribute('aria-expanded', 'false')
+        self.page.wait_for_selector('#rows tr[data-uid]')
+        self.assertAlmostEqual(width, self.page.locator('#worklist-folders-panel').bounding_box()['width'], delta=1)
+
+    def test_folder_title_collapses_and_restores_the_panel(self):
+        self.boot()
+        folders = self.page.locator('#worklist-folders-panel')
+        before = folders.bounding_box()['width']
+        folders.locator('summary').first.click()
+        self.assertAlmostEqual(28, folders.bounding_box()['width'], delta=1)
+        self.assertEqual(0, self.page.get_by_role('button', name='Rail', exact=True).count())
+        folders.locator('summary').first.click()
+        self.assertAlmostEqual(before, folders.bounding_box()['width'], delta=1)
 
     def test_end_invalidates_resize_and_drawer_callbacks(self):
         self.boot()
@@ -1342,7 +1364,7 @@ class StudyPanelPageDOM(unittest.TestCase):
         # Server session-end response exercises the page's existing common end hooks.
         self.site.ended.add(self.site.cookie)
         self.page.route('**/worklist/hpacs-lite/index.html', lambda route: route.fulfill(status=204))
-        self.page.locator('#refresh').dispatch_event('click')
+        self.page.locator('#m-refresh').dispatch_event('click')
         expect(self.page.get_by_role('complementary', name='Study Panel', exact=True, include_hidden=True)).to_have_count(0)
         self.page.set_viewport_size(dict(width=768,height=1024))
         self.page.keyboard.press('Control+Alt+t')
@@ -1442,75 +1464,32 @@ class StudyPanelPageDOM(unittest.TestCase):
             self.assertFalse(result.get('outside') or result.get('size'), result)
             self.assertEqual(0, result['over'], f'moved first-paint pixels differ: {result}')
 
-    def test_first_paint_matches_w2_for_empty_v1_and_v2_records(self):
-        # D1004 requires identical first paint. This fixed landed-input comparison
-        # is a deliberate byte-provenance use; compare visible geometry and pixels.
-        # The baseline is the landed W2 (main 9d6984b: PR #164 W2-LAND + PR #168
-        # W2-FU): D1041 6-② made W2 open Folders on every login, so W2's own first
-        # paint changed by decision after the earlier W2 input 9d4ba0f, and W2-FU
-        # then changed how the footer wraps beside it. Three decided differences:
-        # - W3's Rail control shows in that open panel's title row; its measured
-        #   box is masked in both pictures (the folder tree keeps W2's place).
-        # - W3R-09: where W2's stacked list cannot show its header and one whole
-        #   row, W3's list grows by the missing height in whole pixels. Toolbar,
-        #   focus, Folders and the list's place stay W2's; every panel below is W2's
-        #   panel moved down (the report window band may yield for D383's prior
-        #   report line), geometry and pixels alike (assert_moved_work_area).
-        # - W6-PAGE-22 (D1300, W6_REPORT_FIELDS above): the Findings/Conclusion boxes
-        #   are left out of the geometry and each picture covers its own W6 scroller;
-        #   what lies below the scroller in its column is compared where the scroller
-        #   leaves it (w6_moved, w6_regions) and stays reachable (assert_w6_reachable).
-        # - W9-UI (HIDE_W9 above): the Selected toolbar's Open Selected Studies
-        #   button is taken out of the layout before anything is measured (HIDE_W9).
-        # - D1880 preload (HIDE_PRELOAD above): the same for the toolbar's Preload button.
-        # - #259 caution census (HIDE_CENSUS above): its removed commands are hidden in the baseline
-        #   too before anything is measured.
-        # - Minhoon item 8 (EDITOR above): the Report Editor's head row takes the top of the scroller's
-        #   place, and a report column wider than its room is narrower (item8_narrowing).
-        # Pixels count as equal within ANTIALIAS (16/255 per channel), not exact.
-        current = auth.ROOT
-        pictures = Path(os.environ.get('KIN_W3_PILOT_DIR', ROOT / 'tmp/w3-land/pilot')) / 'first-paint'
-        pictures.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix='kin-w3-w2-') as temporary:
-            raw = subprocess.check_output(['git', 'archive', '--format=zip', W2_LANDED,
-                'worklist-v0/hpacs-lite', 'scripts/main-split-order.json', 'proxy/branding'], cwd=ROOT)
-            zipfile.ZipFile(io.BytesIO(raw)).extractall(temporary)
-            with_palette(temporary, current)   # W-SPACE item 11 decided difference, see THEME
-            try:
-                for version in (None, 1, 2):
-                    for width, height in ((1366,768),(1920,1080),(2560,1440),(900,1200),(768,1024),(1080,1920)):
-                        mine, area, rail, _, mine_w6 = self.first_paint(current, version, width, height)
-                        self.assertIsNotNone(rail)
-                        name = f'v{version or 0}-{width}x{height}.png'
-                        picture = (width, height) in ((1920,1080), (900,1200), (1080,1920), (768,1024))
-                        w2, w2_area, w2_rail, w2_pixels, w2_w6 = self.first_paint(Path(temporary), version, width, height, rail,
-                            pictures / ('w2-' + name) if picture else None)
-                        self.assertIsNone(w2_rail)
-                        missing = w2_area['head'] + w2_area['row'] + w2_area['scrollbar'] - (w2_area['grid'][1] - w2_area['grid'][0])
-                        pixels = None
-                        if picture:
-                            again, _, _, pixels, _ = self.first_paint(current, version, width, height, rail, pictures / ('current-' + name))
-                            self.assertEqual(mine, again)
-                        difference_of = (lambda regions: picture_difference(self.browser, w2_pixels, pixels, regions)) if picture else None
-                        with self.subTest(version=version, width=width, height=height):
-                            assert_w6_reachable(self, mine_w6, name)
-                            if missing <= 0.5:
-                                narrowing = item8_narrowing(self, w2_w6, mine_w6, name)   # Minhoon item 8, see EDITOR
-                                self.assertEqual(without_w6_fields(item8_columns(w2, narrowing)), without_w6_fields(mine))
-                                w6_moved(self, w2_w6, mine_w6, 0, name)
-                                if picture:
-                                    for result in difference_of(w6_regions(w2_w6, mine_w6, width, height)):
-                                        self.assertFalse(result.get('outside') or result.get('size'), result)
-                                        self.assertEqual(0, result['over'], f'first-paint pixels differ outside the logo/native checkbox/Rail/W6 scroller: {result}')
-                                continue
-                            self.assertGreater(height, width, 'only a stacked list grows')
-                            need = area['head'] + area['row'] + area['scrollbar']
-                            self.assertAlmostEqual(need, area['grid'][1] - area['grid'][0], delta=1)
-                            for key in ('focus', 'toolbar', 'folders', 'headings'):
-                                self.assertEqual(w2[key], mine[key], key)
-                            self.assert_moved_work_area(w2, w2_area, mine, width, height, difference_of, w2_w6, mine_w6)
-            finally:
-                auth.ROOT = current
+    def test_first_screen_controls_reachable_for_empty_v1_and_v2_records(self):
+        for version in (None, 1, 2):
+            for width, height in ((1366,768),(1920,1080),(2560,1440),(900,1200),(768,1024),(1080,1920)):
+                with self.subTest(version=version, viewport=(width,height)):
+                    site = WorkspaceSite()
+                    context = self.browser.new_context(viewport=dict(width=width,height=height))
+                    context.route('**/*', lambda route, request: site.handle(route, request))
+                    try:
+                        if version:
+                            value = dict(version=version, mode='auto', landscape={'main':650}, portrait={'main':310})
+                            if version == 2: value['reading'] = READING
+                            context.add_init_script('localStorage.setItem('+json.dumps(KEY)+','+json.dumps(json.dumps(value))+')')
+                        page = context.new_page(); page.goto(auth.MAIN_URL)
+                        expect(page.locator('#rows')).to_contain_text(auth.PATIENT)
+                        wait_startup(page, site)
+                        for selector in ('#toolbar-view > summary','#toolbar-more > summary','#m-refresh','#logout','#toolbar-filters > summary'):
+                            expect(page.locator(selector)).to_be_in_viewport()
+                        page.locator('#toolbar-view > summary').click()
+                        expect(page.locator('#columnsettings')).to_be_visible()
+                        page.locator('#toolbar-view > summary').click()
+                        page.locator('#rows tr[data-uid]').first.click()
+                        expect(page.locator('#findings')).to_be_editable()
+                        self.assert_report_usable(page, 'first selected study')
+                        self.assertEqual([], site.violations)
+                    finally:
+                        context.close()
 
 
 if __name__ == '__main__':

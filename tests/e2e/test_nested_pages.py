@@ -58,7 +58,7 @@ class NestedPagesE2E(CompoundSearchE2E):
         # Browser-only synthetic scale response: no dummy study or report is stored.
         me=document_request(page, "GET", self.stack.api+'/me').json();owner=[me['institution'],me['sub']]
         page.route('**/api/studies?*',lambda route:fulfill_page(route,items,owner))
-        page.locator('#refresh').click();page.locator('#quick').fill(prefix)
+        page.locator('#m-refresh').click();page.locator('#quick').fill(prefix)
         page.locator('#heads [data-key=id]').click();page.locator('#page-size').select_option('25')
         expect(page.locator('#page-status')).to_contain_text('1–25 / 1001건')
         expect(page.locator('#rows tr[data-uid]')).to_have_count(25)

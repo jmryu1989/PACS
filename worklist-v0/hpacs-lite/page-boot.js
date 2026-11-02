@@ -294,7 +294,7 @@
       imagePreview = KinWorklistImagePreview.mount({owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api});
       imageThumbnails = window.KinWorklistImageThumbnails?.mount?.({host:$('#thumbwrap'),owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api,
         onPreview:value=>imagePreview?.open(value),onBack:()=>renderThumbs()}) || null;
-      worklistSearch = KinWorklistSearch.mount({host:document.querySelector('.userfilter'),owner:()=>KinViewerOpening.key(KinAuth.session()),snapshot:searchCriteria,render});
+      worklistSearch = KinWorklistSearch.mount({host:document.querySelector('#toolbar-filters .toolbar-menu-panel'),owner:()=>KinViewerOpening.key(KinAuth.session()),snapshot:searchCriteria,render});
       rowNavigation = KinWorklistRowNavigation.mount({tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,
         current:()=>selectedUid,reveal:uid=>render(uid),activate:uid=>whenSelected(select(uid),uid,()=>{if(mode==='Radiology')focusReportEditor();})});
       relatedRowNavigation = KinWorklistRowNavigation.mount({tbody:$('#relrows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:()=>relatedRows,

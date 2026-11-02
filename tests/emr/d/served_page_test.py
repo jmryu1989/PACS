@@ -167,7 +167,8 @@ class ServedClinicalPages(unittest.TestCase):
         old = self.site.account
         self.site.account = {**old, 'sub': h.RAD_OTHER['sub'], 'actor': h.RAD_OTHER['actor'], 'displayName': 'SYN switched doctor'}
         if name == 'main':
-            self.page.get_by_role('group', name='Refresh').get_by_role('button', name='Refresh', exact=True).click(no_wait_after=True)
+            # The compact worklist exposes Refresh directly; the retired group is not a session contract.
+            self.page.get_by_role('button', name='↻ Refresh', exact=True).click(no_wait_after=True)
         else:
             self.page.locator('#refresh').click(no_wait_after=True)
         # Replacement closes the old document and automatically enters the new

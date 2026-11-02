@@ -673,8 +673,11 @@ class ReportTextBoundaries(h.LogoutDOMTest):
                 self.site.answer(route, 200, body)
                 patient = h.PATIENT if arrival == "poll" else "SYN PATIENT UPDATED"
                 row = self.page.locator("#rows tr", has_text=patient).first
+                self.page.get_by_role("button", name="Choose columns", exact=True).click()
+                self.page.locator('#column-picker [data-column="count"]').get_by_role("checkbox").check()
+                self.page.locator("#column-picker").get_by_role("button", name="Close", exact=True).click()
                 expect(row.get_by_role("cell", name="42", exact=True)).to_be_visible()
-                expect(row.get_by_role("cell", name="T", exact=True)).to_be_visible()
+                expect(row.get_by_role("cell", name="In Progress", exact=True)).to_be_visible()
                 row.click()
                 self.assertEqual(h.FIELDS, self.editor())
                 self.assertEqual("SYNEPOCH1:0", self.site.puts[0]["expectedRevision"])
@@ -1043,6 +1046,8 @@ class ReportTextBoundaries(h.LogoutDOMTest):
                     self.assertEqual(h.FIELDS, self.site.stored_for(h.UID), "the refused clear changed nothing on the server")
 
     def insert_template(self):
+        h.show_all_panels(self.page)
+        self.page.keyboard.press("Control+Alt+T")
         self.page.locator("#tplrows tr", has_text=TEMPLATE["title"]).first.dblclick()
         return TEMPLATE["findings"]
 
@@ -1263,7 +1268,7 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.site.report = {"version": 1, "rs": "T", **{k: body.get(k, "") for k in h.FIELDS}}
         route.fulfill(json={**self.site.envelope(h.RAD), "state": self.site.state(h.RAD)})
         row = self.page.locator("#rows tr", has_text=h.PATIENT).first
-        expect(row.get_by_role("cell", name="T", exact=True)).to_be_visible()
+        expect(row.get_by_role("cell", name="In Progress", exact=True)).to_be_visible()
 
     def test_a_save_accepted_after_the_study_was_left_is_not_reported_as_failed(self):
         self.open_main()
@@ -1322,7 +1327,7 @@ class ReportTextBoundaries(h.LogoutDOMTest):
                 self.site.report = {"version": 1, "rs": rs, **{k: body.get(k, "") for k in h.FIELDS}}
                 route.fulfill(json={**self.site.envelope(h.RAD), "state": self.site.state(h.RAD)})
                 row = self.page.locator("#rows tr", has_text=h.PATIENT).first
-                expect(row.get_by_role("cell", name=rs, exact=True)).to_be_visible()
+                expect(row.get_by_role("cell", name={"A": "Approved", "T": "In Progress", "W": "Unread", "P": "Preliminary", "H": "On Hold"}[rs], exact=True)).to_be_visible()
                 # The command carried the earlier text and that is what was saved; the later text is still on screen.
                 self.assertEqual(h.FIELDS, {k: self.site.report[k] for k in h.FIELDS})
                 self.assertEqual(later, self.editor(), "the accepted command redrew the editor over text typed meanwhile")
@@ -1569,7 +1574,7 @@ class ReportTextBoundaries(h.LogoutDOMTest):
             self.page.wait_for_timeout(200)
         self.site.accept(self.site.held_commits.pop(), self.site.commits[-1], rs)
         row = self.page.locator("#rows tr", has_text=h.PATIENT).first
-        expect(row.get_by_role("cell", name=rs, exact=True)).to_be_visible()
+        expect(row.get_by_role("cell", name={"A": "Approved", "T": "In Progress", "W": "Unread", "P": "Preliminary", "H": "On Hold"}[rs], exact=True)).to_be_visible()
         self.assertEqual(h.FIELDS, {k: self.site.report[k] for k in h.FIELDS}, "the accepted report is the text sent")
 
     def late_notice(self, notices):
@@ -1831,7 +1836,7 @@ class ReportTextBoundaries(h.LogoutDOMTest):
                 self.select_and_type()
                 self.page.locator(control).click()
                 row = self.page.locator("#rows tr", has_text=h.PATIENT).first
-                expect(row.get_by_role("cell", name=rs, exact=True)).to_be_visible()
+                expect(row.get_by_role("cell", name={"A": "Approved", "T": "In Progress", "W": "Unread", "P": "Preliminary", "H": "On Hold"}[rs], exact=True)).to_be_visible()
                 self.wait_until(lambda: notices, "the notice of the command")
                 self.page.wait_for_timeout(300)
                 # One notice, of success, that speaks of nothing left out; no bar, no question, no draft afterwards.
@@ -2069,7 +2074,7 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.lose_a_save()
         self.page.locator("#b-save").click()
         row = self.page.locator("#rows tr", has_text=h.PATIENT).first
-        expect(row.get_by_role("cell", name="T", exact=True)).to_be_visible()
+        expect(row.get_by_role("cell", name="In Progress", exact=True)).to_be_visible()
         self.page.wait_for_timeout(400)
         self.assertEqual((1, 1, []), (len(self.site.commits), self.site.report["version"], self.dialogs))
         self.assertEqual({"editor": h.FIELDS, "bar": False, "discard": False}, self.shown())

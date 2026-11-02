@@ -3,8 +3,12 @@
 No source slicing: serve main.html and every shipped asset. Reuse the wire server
 from the already migrated logout suite; all routes are intercepted, with no live stack.
 These cases complement the detailed citation/cursor/structure component scenarios.
+D73 studio-1101: Refresh moved to the compact top bar; SS/TS are optional columns.
+The metadata cases enable those columns through View before observing the same
+accepted wire answer. Draft contents, base version and revision assertions remain.
 """
 import os
+import re
 import time
 import unittest
 from pathlib import Path
@@ -211,6 +215,16 @@ class ReportSessionPageTest(unittest.TestCase):
         self.wait(lambda: len(self.site.held_patches) == 1)
 
     def unconfirmed_study_survives(self, update):
+        if update in ('patch', 'tele'):
+            view = self.page.locator('details').filter(
+                has=self.page.get_by_role('group', name='View', exact=True, include_hidden=True)).last
+            view.locator(':scope > summary').click()
+            view.get_by_role('button', name='Columns', exact=True).click()
+            dialog = self.page.get_by_role('dialog', name=re.compile(r'^Worklist Columns'))
+            dialog.get_by_role('checkbox', name='Show ' + ('SS' if update == 'patch' else 'TS'), exact=True).check()
+            dialog.get_by_role('button', name='Apply for This Window', exact=True).click()
+            expect(dialog).to_be_hidden()
+            view.locator(':scope > summary').click()
         self.prepare_two_studies()
         if update in ('patch', 'refused-patch', 'tele'):
             self.begin_metadata_change(update)
@@ -224,7 +238,7 @@ class ReportSessionPageTest(unittest.TestCase):
         self.assertIsNone(self.site.stored())
         lists = self.site.count('GET', '/api/studies')
         if update == 'refresh':
-            self.page.locator('#refresh').click()
+            self.page.get_by_role('button', name='↻ Refresh', exact=True).click()
         elif update == 'arrival':
             self.site.arrival = True
             self.page.clock.run_for(30001)
@@ -271,7 +285,7 @@ class ReportSessionPageTest(unittest.TestCase):
         self.site.rows[auth.RAD['actor']] = {**auth.MORE, 'baseVersion': 7, 'citations': [], 'structured': []}
         lists = self.site.count('GET', '/api/studies')
         if update == 'refresh':
-            self.page.locator('#refresh').click()
+            self.page.get_by_role('button', name='↻ Refresh', exact=True).click()
             self.wait(lambda: self.site.count('GET', '/api/studies') > lists)
         elif update == 'arrival':
             self.site.arrival = True

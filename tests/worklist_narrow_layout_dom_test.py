@@ -32,7 +32,7 @@ class WorklistNarrowLayoutDOMTest(unittest.TestCase):
               document.querySelector('#rows').innerHTML='<tr tabindex="0" data-uid="2.25.10" style="position:relative"><td>Synthetic Patient</td><td>CT <button type="button" data-tech-note="2.25.10" style="position:absolute;left:42%;top:0;height:100%;width:30%">Tech Note</button></td></tr>';
               document.querySelector('#filterrow').innerHTML='<th><input aria-label="Patient filter"></th><th><input aria-label="Study filter"></th>';
               document.querySelector('#page-status').textContent='불러온 목록 중 1–1 / 1건 · 1/1페이지';
-              document.querySelector('#countlist').textContent='W:1 · A:0 · H:0 · O:0 · T:0 · P:0';
+              document.querySelector('#countlist').textContent='Unread:1 · In Progress:0 · Preliminary:0 · On Hold:0 · Approved:0 · Unverified:0';
               document.querySelector('#rows').addEventListener('click',event=>{if(event.target.closest('[data-tech-note]')){window.techNoteOpened=true;return}window.rowClicked=true});
               document.querySelector('#findings').value='Unchanged editor text';
             }""")
@@ -68,7 +68,7 @@ class WorklistNarrowLayoutDOMTest(unittest.TestCase):
                 out = ROOT / 'tmp/image-thumbnails/narrow-layout'
                 out.mkdir(parents=True, exist_ok=True)
                 page.screenshot(path=str(out / 'latest.png'), full_page=True)
-                print(page.evaluate("""()=>Object.fromEntries(['.menubar','.userfilter','.split','.left','.left .grid','.right'].map(s=>{const r=document.querySelector(s).getBoundingClientRect();return [s,{x:r.x,y:r.y,w:r.width,h:r.height}]}))"""))
+                print(page.evaluate("""()=>Object.fromEntries(['.menubar','.split','.left','.left .grid','.right'].map(s=>{const r=document.querySelector(s).getBoundingClientRect();return [s,{x:r.x,y:r.y,w:r.width,h:r.height}]}))"""))
                 browser.close()
 
 

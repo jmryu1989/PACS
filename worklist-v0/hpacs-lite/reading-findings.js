@@ -97,6 +97,7 @@ window.KinReadingFindings = function (app) {
    */
   const fields = () => document.querySelector('.report-p .redit');
   const reportColumn = () => document.querySelector('.report-p');
+  const actions = () => document.querySelector('.report-p .rfoot2');
   const relatedList = () => document.querySelector('.related-p .related-list-pane');
   // Padding, border and the title line with Close: less than this shows nothing a reader can use.
   function leastHeight() {
@@ -112,7 +113,12 @@ window.KinReadingFindings = function (app) {
     // than writing a bound nobody measured.
     let top = '', bottom = '';
     if (box && box.height) {
-      if (innerHeight - 12 - box.top >= leastHeight()) top = Math.max(0, Math.round(box.top)) + 'px';
+      // 저장·승인 단추가 입력칸 아래로 이동했으므로 서랍의 아래 경계도 현재 단추 줄에서 잰다.
+      const buttons = actions()?.getBoundingClientRect();
+      const inset = buttons?.height ? Math.max(12, Math.round(innerHeight - buttons.top + 4)) : 12;
+      if (innerHeight - inset - box.top >= leastHeight()) {
+        top = Math.max(0, Math.round(box.top)) + 'px'; bottom = inset + 'px';
+      }
       else {
         const report = reportColumn().getBoundingClientRect(), list = relatedList()?.getBoundingClientRect();
         bottom = Math.max(12, Math.round(innerHeight - report.top + 4)) + 'px';
@@ -165,7 +171,7 @@ window.KinReadingFindings = function (app) {
           for (let node = box; node; node = node.previousElementSibling) sizeWatch.observe(node);
         // A Related height or list/report separator move shifts the report and the list's bottom
         // without resizing anything above `.redit`; the docked panel reads both.
-        for (const node of [region, relatedList()]) if (node) sizeWatch.observe(node);
+        for (const node of [region, relatedList(), actions()]) if (node) sizeWatch.observe(node);
       }
     } else {
       window.removeEventListener('resize', onLayout);

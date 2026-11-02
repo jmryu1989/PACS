@@ -23,7 +23,7 @@ class RelatedContextE2E(previous.PriorSelectionE2E):
 
     def refresh(self, page):
         with page.expect_response(lambda r: r.request.method == "GET" and r.url.split("?")[0].endswith("/api/studies")):
-            page.locator("#refresh").click()
+            page.locator("#m-refresh").click()
 
     def source_writes(self, page):
         writes = []
