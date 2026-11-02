@@ -27,6 +27,13 @@ function requestValue<T>(parse: () => T): T {
   try { return parse(); } catch { return refuse('AuditRequestInvalid'); }
 }
 const requestBody = (input: unknown, keys: readonly string[]) => requestValue(() => object(input, keys));
+type InspectionSnapshot = {
+  summary: { institutionId: string; month: string; from: string; to: string; top: string; eventCount: number;
+    byAction: Record<string, number>; ledgerSha256: string };
+  downloads: AccessEventV1[];
+  cycle: F.InspectionCycle | null;
+  status: ReturnType<typeof F.inspectionStatus> | null;
+};
 
 /** RequestContextSource owns current session/member facts. F adds only its
  * designated-auditor roster; the general admin role is not an audit grant. */
@@ -127,7 +134,10 @@ export class EmrAuditService {
   async investigate(request: IncomingMessage, input: unknown, mode: 'view' | 'export' = 'view') {
     try { return await this.run(request, async (tx, ctx, record) => {
       const authority = await this.authority(tx, ctx);
-      const { changesAfter, viewsAfter, ...query } = requestBody(input, Object.keys(input ?? {}));
+      const { changesAfter, viewsAfter, changesDone, viewsDone, ...query } = requestBody(input, Object.keys(input ?? {}));
+      if ([changesDone, viewsDone].some(value => value !== undefined && typeof value !== 'boolean') ||
+          (changesDone && viewsDone) || (changesDone && changesAfter) || (viewsDone && viewsAfter) ||
+          (mode === 'export' && (changesDone || viewsDone))) refuse('InvestigationQueryRefused');
       if ('after' in query) refuse('InvestigationQueryRefused');
       const changes = F.planInvestigation(authority, { ...query, ...(changesAfter ? { after: changesAfter } : {}) }, mode);
       const views = F.planInvestigation(authority, { ...query, ...(viewsAfter ? { after: viewsAfter } : {}) }, mode);
@@ -143,7 +153,10 @@ export class EmrAuditService {
         if (!event) { event = JSON.parse(payload); parsed.set(payload, event); }
         return event;
       };
-      const source = (stream: 'history' | 'viewing'): F.InvestigationLedger => ({
+      // An explicitly unrequested stream must not query storage or generate access targets.
+      // Keep the contract's stream-bound cursors; expose omitted streams as null below.
+      const source = (stream: 'history' | 'viewing'): F.InvestigationLedger =>
+        (stream === 'history' ? changesDone : viewsDone) ? { top: async () => 0, count: async () => 0, rows: async () => [] } : ({
         // The ceiling is the stream's highest in-window entry, matching or not. A filtered read returns no row when
         // nothing matches, which would report "nothing found up to sequence 0" instead of up to the ceiling.
         top: async () => Number((await fetch(stream, null, null, 1, {}))[0]?.snapshot_top ?? 0),
@@ -187,9 +200,160 @@ export class EmrAuditService {
       const event = F.investigationLedgerEvent(page.changes), viewEvent = F.investigationLedgerEvent(page.views);
       const targets = [...new Map([...event.targets, ...viewEvent.targets].map(t => [JSON.stringify(t), t])).values()];
       await this.recorded(record, ctx, event.action, targets, changes.planId);
-      return { ...page, images, sourceManifests };
+      return { ...page, changes: changesDone ? null : page.changes, views: viewsDone ? null : page.views,
+        totalEntries: changesDone || viewsDone ? null : page.totalEntries, images, sourceManifests };
     }); } catch (error) {
       if (error?.code === 'P2028' || error?.meta?.code === '57014') F.ledgerReadFailure(error);
+      throw error;
+    }
+  }
+
+  private inspectionKey(institution: string) { return JSON.stringify(['emr-f-inspection', institution]); }
+  private inspectionWindow(month: string, at: string) {
+    // Reuse the contract's month validator and ended-month rule, including Seoul boundaries.
+    F.newInspectionCycle('validation', month);
+    if (month >= F.inspectionMonth(at)) refuse('InspectionMonthNotEnded');
+    const from = new Date(`${month}-01T00:00:00+09:00`);
+    // from is the preceding UTC date; derive the next local calendar first explicitly.
+    const [year, part] = month.split('-').map(Number);
+    return { from: from.toISOString(), to: new Date(Date.UTC(year, part, 1) - 9 * 3600_000).toISOString() };
+  }
+  private async savedInspection(tx: Tx, institution: string, month: string): Promise<InspectionSnapshot | null> {
+    const where = { target: this.inspectionKey(institution), action: `inspection:${month}` };
+    const report = await tx.auditLog.findFirst({ where, orderBy: { id: 'asc' } });
+    if (!report) return null;
+    // The first row owns the immutable report; subsequent rows carry only the latest cycle.
+    const latest = await tx.auditLog.findFirst({ where, orderBy: { id: 'desc' } });
+    const saved: InspectionSnapshot = JSON.parse(report.detail), { cycle } = JSON.parse(latest.detail);
+    if (saved.cycle?.institutionId !== institution || saved.cycle.month !== month ||
+        cycle?.cycleId !== saved.cycle.cycleId || cycle?.institutionId !== institution || cycle.month !== month) refuse('InspectionCycleRefused');
+    return { ...saved, cycle, status: F.inspectionStatus(cycle) };
+  }
+  private async inspectionSnapshot(tx: Tx, institutionId: string, month: string, at: string): Promise<InspectionSnapshot> {
+    const window = this.inspectionWindow(month, at), digest = createHash('sha256');
+    let top: string | null = null, below: string | null = null, eventCount = 0;
+    const byAction: Record<string, number> = Object.create(null), downloads: AccessEventV1[] = [];
+    // The viewing stream also contains changes: scanning it once avoids counting them twice.
+    // Pin its ceiling for the whole scan, and fail the transaction rather than store a partial report.
+    for (;;) {
+      const rows: { sequence: bigint; payload: string; snapshot_top: bigint }[] = await tx.$queryRaw`
+        SELECT * FROM emr_access.investigation_entries(${'viewing'},${institutionId},${window.from}::timestamptz,
+          ${window.to}::timestamptz,${top}::bigint,${below}::bigint,${500}::integer,${'{}'}::jsonb)`;
+      if (top === null) top = String(rows[0]?.snapshot_top ?? 0);
+      for (const row of rows) {
+        const event: AccessEventV1 = JSON.parse(row.payload);
+        digest.update(`${row.sequence}:${Buffer.byteLength(row.payload)}:`).update(row.payload);
+        eventCount++; byAction[event.action] = (byAction[event.action] || 0) + 1;
+        if ((F.DOWNLOAD_ACTIONS as readonly string[]).includes(event.action)) downloads.push(event);
+      }
+      if (rows.length < 500) break;
+      below = String(rows[rows.length - 1].sequence);
+    }
+    return { summary: { institutionId, month, ...window, top, eventCount,
+      byAction: Object.fromEntries(Object.entries(byAction).sort(([a], [b]) => a.localeCompare(b))), ledgerSha256: digest.digest('hex') },
+      downloads, cycle: null, status: null };
+  }
+  private async saveInspection(tx: Tx, ctx: RequestWorkContext, snapshot: InspectionSnapshot | { cycle: F.InspectionCycle }) {
+    await tx.auditLog.create({ data: { actor: ctx.facts.actor.id, action: `inspection:${snapshot.cycle.month}`,
+      target: this.inspectionKey(ctx.facts.institution), detail: JSON.stringify(snapshot) } });
+  }
+  private inspectionTarget(month: string): F.InvestigationAuditTarget {
+    return { kind: 'access-audit', patientLinkSnapshot: none, studyId: none, recordId: known(`inspection:${month}`), versionId: none };
+  }
+  private inspectionDownloadTargets(events: readonly AccessEventV1[]): F.InvestigationAuditTarget[] {
+    const targets: F.InvestigationAuditTarget[] = [];
+    for (const event of events) {
+      const shown = new Map<string, F.InvestigationAuditTarget>();
+      for (const target of event.targets) {
+        const reference = { kind: 'access-audit' as const, studyId: target.studyId,
+          recordId: known(event.eventId), versionId: known(event.eventId) };
+        let viewed: F.InvestigationAuditTarget, key: string;
+        if ('sourcePatientId' in target) {
+          viewed = { ...reference, sourcePatientId: target.sourcePatientId, sourceInstitution: target.sourceInstitution };
+          key = JSON.stringify(['local', target.sourcePatientId, target.sourceInstitution, target.studyId]);
+        } else if (target.patientLinkSnapshot.status === 'known') {
+          viewed = { ...reference, patientLinkSnapshot: target.patientLinkSnapshot };
+          key = JSON.stringify([target.patientLinkSnapshot.value.patientId, target.patientLinkSnapshot.value.assigningAuthority, target.studyId]);
+        } else continue;
+        if (!shown.has(key)) shown.set(key, viewed);
+      }
+      // A patient-less event is still shown; local observations never become formal links.
+      targets.push(...(shown.size ? shown.values() : [{ kind: 'access-audit' as const, patientLinkSnapshot: none,
+        studyId: none, recordId: known(event.eventId), versionId: known(event.eventId) }]));
+    }
+    return targets;
+  }
+  async inspectionMonths(request: IncomingMessage) {
+    try { return await this.run(request, async (tx, ctx, record) => {
+      const authority = F.requireScope(await this.authority(tx, ctx), 'inspection'), at = now();
+      const institution = await tx.institution.findUnique({ where: { id: authority.institutionId }, select: { createdAt: true } });
+      if (!institution) refuse('AuditRequestInvalid');
+      // Include empty months from institution registration; report generation alone is not human inspection.
+      const first = F.inspectionMonth(institution.createdAt.toISOString()), months = [];
+      for (const month of F.inspectionMonthsDue(first, at)) {
+        const saved = await this.savedInspection(tx, authority.institutionId, month);
+        if (!saved || !['ready-to-close', 'closed'].includes(saved.status.state)) months.push({ month, state: saved?.status.state ?? 'awaiting-report' });
+      }
+      await this.recorded(record, ctx, 'provide-prepared', months.map(m => this.inspectionTarget(m.month)), this.inspectionKey(authority.institutionId));
+      return { period: F.INSPECTION_PERIOD, firstMonth: first, months };
+    }); } catch (error) {
+      if (error?.code === 'P2028' || error?.code === '57014' || error?.meta?.code === '57014') F.ledgerReadFailure(error);
+      throw error;
+    }
+  }
+  async inspection(request: IncomingMessage, month: string, start = false) {
+    try { return await this.run(request, async (tx, ctx, record) => {
+      const authority = F.requireScope(await this.authority(tx, ctx), 'inspection'), at = now();
+      this.inspectionWindow(month, at);
+      await this.lock(tx, JSON.stringify(['emr-f-inspection', authority.institutionId, month]));
+      let snapshot = await this.savedInspection(tx, authority.institutionId, month);
+      if (!snapshot) {
+        snapshot = await this.inspectionSnapshot(tx, authority.institutionId, month, at);
+        if (start) {
+          const cycle = F.recordInspectionReport(F.newInspectionCycle(authority.institutionId, month), {
+            reportSha256: hash(Buffer.from(JSON.stringify(snapshot.summary))), eventCount: snapshot.summary.eventCount,
+            downloadEventIds: snapshot.downloads.map(e => e.eventId) }, at);
+          snapshot = { ...snapshot, cycle, status: F.inspectionStatus(cycle) };
+          await this.saveInspection(tx, ctx, snapshot);
+        }
+      }
+      await this.recorded(record, ctx, 'provide-prepared', [this.inspectionTarget(month),
+        ...this.inspectionDownloadTargets(snapshot.downloads)], `inspection:${month}`);
+      return snapshot;
+    }); } catch (error) {
+      if (error?.code === 'P2028' || error?.code === '57014' || error?.meta?.code === '57014') F.ledgerReadFailure(error);
+      throw error;
+    }
+  }
+  // 감사자 화면의 모든 응답은 보여주는 만큼만 기록하고, 기록하지 않는 응답은 환자 식별자를 담지 않는다.
+  async inspectionStep(request: IncomingMessage, month: string, input: unknown) {
+    try { return await this.run(request, async (tx, ctx, record) => {
+      const authority = F.requireScope(await this.authority(tx, ctx), 'inspection');
+      this.inspectionWindow(month, now());
+      await this.lock(tx, JSON.stringify(['emr-f-inspection', authority.institutionId, month]));
+      const snapshot = await this.savedInspection(tx, authority.institutionId, month);
+      if (!snapshot) refuse('InspectionReportRequired');
+      const at = now();
+      const kind = requestValue(() => choice((input as any)?.kind, ['download-check', 'reviewed', 'action-recorded', 'rechecked']));
+      let cycle = snapshot.cycle;
+      if (kind === 'download-check') {
+        const v = requestBody(input, ['kind', 'eventId', 'reason', 'outcome', 'followUp']);
+        const followUp = requestValue(() => string(v.followUp)), reason = requestValue(() => string(v.reason));
+        cycle = F.recordInspectionStep(authority, cycle, { kind: 'download-reason', at, eventId: v.eventId,
+          reason: `${reason}\n후속조치: ${followUp}`, outcome: v.outcome });
+        if (v.outcome === 'investigate') cycle = F.recordInspectionStep(authority, cycle, {
+          kind: 'action-recorded', at, investigationId: (cycle.events[cycle.events.length - 1] as any).investigationId, action: followUp });
+      } else {
+        const v = requestBody(input, kind === 'reviewed' ? ['kind', 'conclusion', 'note'] :
+          kind === 'action-recorded' ? ['kind', 'investigationId', 'action'] : ['kind', 'investigationId', 'result', 'note']);
+        cycle = F.recordInspectionStep(authority, cycle, { ...v, at });
+      }
+      const next = { cycle, status: F.inspectionStatus(cycle) };
+      await this.saveInspection(tx, ctx, { cycle });
+      await this.recorded(record, ctx, 'write', [this.inspectionTarget(month)], cycle.cycleId);
+      return next;
+    }); } catch (error) {
+      if (error?.code === 'P2028' || error?.code === '57014' || error?.meta?.code === '57014') F.ledgerReadFailure(error);
       throw error;
     }
   }
@@ -289,6 +453,20 @@ export class EmrAuditService {
       }
       await this.recorded(record, ctx, 'provide-prepared', F.disclosureLedgerTargets(issuance), issuance.issuanceId);
       return issuance;
+    });
+  }
+
+  async readIssuance(request: IncomingMessage, issuanceId: string) {
+    return this.run(request, async (tx, ctx, record) => {
+      const authority = F.requireScope(await this.authority(tx, ctx), 'disclosure');
+      const issuance = await this.issuance(tx, issuanceId, authority.institutionId), status = F.issuanceState(issuance);
+      const [copy] = await tx.$queryRaw<{ body: Buffer; sha256: string }[]>`SELECT body,sha256 FROM emr_audit.fixed_copy WHERE issuance_id=${issuanceId}`;
+      // Reopening must neither issue a prepared package nor reconstruct missing issued bytes.
+      if (copy ? hash(copy.body) !== copy.sha256 || copy.sha256 !== status.issuedArtifactSha256 : status.issuedArtifactSha256 !== null)
+        refuse('FixedCopyIntegrityMismatch');
+      await this.recorded(record, ctx, 'provide-prepared', F.disclosureLedgerTargets(issuance), issuanceId);
+      return { issuance, status, artifact: copy ? copy.body.toString('base64') : null,
+        sha256: copy?.sha256 ?? null, contentType: fixedContentType(issuance.manifest) };
     });
   }
 

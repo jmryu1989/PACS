@@ -110,7 +110,10 @@ async function syntheticOrthanc() {
       if (p === '/dicom-web/studies' && url.searchParams.get('StudyInstanceUID') === STUDY_UID)
         return json([{ '0020000D': { vr: 'UI', Value: [STUDY_UID] }, '00100020': { vr: 'LO', Value: [behaviour.patient] }, '00080080': { vr: 'LO', Value: ['SYN HOSPITAL A'] } }]);
       if (p === `/instances/${INSTANCE_ID}/simplified-tags`) return json({ StudyInstanceUID: STUDY_UID, Rows: '2' });
-      if (p === `/dicom-web/studies/${STUDY_UID}/metadata`) return json([{ '0020000D': { vr: 'UI', Value: [STUDY_UID] } }]);
+      if (p === `/dicom-web/studies/${STUDY_UID}/metadata` || p === '/dicom-web/studies') {
+        res.setHeader('Content-Type', 'application/dicom+json');
+        return res.end(' [ { "0020000D": { "vr": "UI", "Value": ["' + STUDY_UID + '"] } } ]\n');
+      }
       if (p === `/instances/${INSTANCE_ID}/frames/0/rendered`) return image('image/png', PNG);
       if (p === `/instances/${INSTANCE_ID}/image-uint16`) return image('image/x-portable-arbitrarymap', PAM);
       if (p === `/dicom-web/studies/${STUDY_UID}/series/${SERIES_UID}/instances/${SOP_UID}/frames/1`) return image('multipart/related; type="application/octet-stream"; boundary=b', FRAME);
@@ -145,13 +148,20 @@ async function stack({ idleMs = IDLE_MS } = {}) {
   const orthanc = new OrthancService();
   const records = ledger(parseAccessEvent, mintDurableReceipt, createRecordPort);
   const states = new Map([[STUDY_UID, { uid: STUDY_UID, institutionId: SITE, teleInstitutionId: null }]]);
-  const sql = async strings => {
+  const sql = async (strings, ...values) => {
+    if (strings.join().includes("emr_access.access_seen")) {
+      const [issuer, subject, uid, start, session] = values;
+      return [{ present: records.entries.some(({ event: e }) => new Date(e.occurredAt) >= start &&
+        e.userId.value.issuer === issuer && e.userId.value.subject === subject &&
+        ["provide-prepared", "transfer-ended", "client-shown"].includes(e.action) &&
+        (session === null || !e.session || e.session.sessionRef === session) && e.targets.some(t => t.studyId?.value === uid)) }];
+    }
     const text = strings.join('?');
     if (text.includes('pg_advisory')) return [{ locked: 1 }];
     if (text.includes('StudyAccessPolicy')) return [];   // no restriction row: an unrestricted member
     throw new Error('SYN unexpected SQL ' + text);
   };
-  const prisma = { studyState: { findUnique: async ({ where }) => states.get(where.uid) ?? null }, $queryRaw: sql,
+  const prisma = { authSession: { findUnique: async () => ({ createdAt: new Date('2026-01-01') }) }, studyState: { findUnique: async ({ where }) => states.get(where.uid) ?? null }, $queryRaw: sql,
     auditLog: { create: async () => { throw new Error('SYN audit write refused'); } } };
   Object.assign(records.tx, { studyState: prisma.studyState, $queryRaw: sql });
   const studyAccess = new StudyAccessService(prisma, orthanc, {});
@@ -163,7 +173,8 @@ async function stack({ idleMs = IDLE_MS } = {}) {
   // transaction over the same in-memory rows.
   const checks = { $transaction: async work => work({ ...records.tx, $executeRaw: async () => 0 }) };
   const recorder = new StudyImageDeliveryRecorder(records.port, contexts.source, clinical, background.work, orthanc, idleMs, checks);
-  const controller = new ImageRelayController({ authzDicom: (...args) => gate.authzDicom(...args) }, orthanc, recorder);
+  const controller = new ImageRelayController({ authzDicom: (...args) => gate.authzDicom(...args) }, orthanc, recorder, records.port, prisma, contexts.source,
+    new (require('/app/dist/emr-viewing/viewing-record.service.js').ViewingRecordService)(contexts.source));
   // The viewer's frame reader on the same recorder, on an installation without the storage mount: it relays every frame.
   const { DicomFrameController } = require('/app/dist/dicom-frame.controller.js');
   const { DicomFrameService } = require('/app/dist/dicom-frame.service.js');
@@ -177,11 +188,13 @@ async function stack({ idleMs = IDLE_MS } = {}) {
     // read goes `location /instances/ { proxy_pass http://api:3000/api/image-relay/instances/; }` (and /dicom-web/).
     const frames = /^\/api\/dicom-web\/studies\/([0-9.]+)\/series\/([0-9.]+)\/instances\/([0-9.]+)\/frames\/([0-9,]+)$/.exec(req.url);
     if (!frames) req.originalUrl = '/api/image-relay' + req.url;
+    const bearer = req.headers['x-synthetic-bearer'] === 'yes';
+    req.sid = bearer ? undefined : 'synthetic-session-cookie';
     req.sub = req.headers['x-synthetic-sub'] ?? 'syn-doctor-sub'; req.actor = req.sub; req.roles = ['radiologist'];
     req.institution = req.headers['x-synthetic-site'] ?? SITE; req.kind = 'member';
     res.status = code => { res.statusCode = code; return res; };
     contexts.capture.capture(req, res, { issuer: ISSUER, subject: req.sub, roles: req.roles, institution: req.institution, rightsVersion: 1,
-      binding: { method: 'session', sessionRef: req.headers['x-synthetic-session'] ?? 'authref:session-a' } },
+      binding: bearer ? { method: 'bearer', sessionRef: null } : { method: 'session', sessionRef: req.headers['x-synthetic-session'] ?? 'authref:session-a' } },
       { method: 'GET', route: frames ? 'dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames' : 'image-relay/*', purpose: 'clinical' }, async () => {});
     const observation = { path: req.url, firstByte: null };
     observations.push(observation);
@@ -202,7 +215,7 @@ async function stack({ idleMs = IDLE_MS } = {}) {
   const get = async (route, headers = {}, method = 'GET') => {
     try {
       const response = await fetch(origin + route, { method, headers: { Connection: 'close', ...headers } });
-      return { status: response.status, type: response.headers.get('content-type'), body: Buffer.from(await response.arrayBuffer()) };
+      return { status: response.status, type: response.headers.get('content-type'), length: response.headers.get('content-length'), body: Buffer.from(await response.arrayBuffer()) };
     } catch (error) { return { status: 'cut', error }; }
   };
   const routes = {
@@ -338,6 +351,92 @@ test('opening contract O4: one viewer opening spans the frame reader and the rel
     await wait(IDLE_MS * 2);
     assert.equal(prepared().length, 3, 'no record for the description or the HEAD');
     assert.deepEqual(ended().sort(), prepared().map(e => e.eventId).sort(), 'each delivery closed by its own terminal');
+  } finally { await s.close(); }
+});
+
+test('CD10 metadata bytes wait for durable preparation and concurrent QIDO reads reuse the session', async () => {
+  const s = await stack();
+  try {
+    const qido = '/dicom-web/studies?StudyInstanceUID=' + STUDY_UID;
+    const answers = await Promise.all([s.get(s.routes.metadata), s.get(qido), s.get(s.routes.metadata)]);
+    assert.deepEqual(answers.map(a => a.status), [200, 200, 200]);
+    const expected = Buffer.from(' [ { "0020000D": { "vr": "UI", "Value": ["' + STUDY_UID + '"] } } ]\n');
+    for (const answer of [answers[0], answers[2]]) {
+      assert.deepEqual(answer.body, expected);
+      assert.equal(answer.type, 'application/dicom+json');
+      assert.equal(answer.length, String(expected.length));
+    }
+    assert.equal(answers[1].type, 'application/json');
+    assert.equal(answers[1].length, String(answers[1].body.length));
+    assert.equal(JSON.parse(answers[1].body)[0]['0020000D'].Value[0], STUDY_UID);
+    const prepared = () => s.records.entries.filter(e => e.event.action === 'provide-prepared').map(e => e.event);
+    assert.equal(prepared().length, 1);
+    assert.equal(prepared()[0].targets[0].sourcePatientId.value, 'SYN-PID-1');
+    assert.equal(prepared()[0].session.sessionRef, 'authref:session-a');
+    for (const observation of s.observations) assert.ok(observation.firstByte.includes('provide-prepared'));
+    assert.equal((await s.get(qido, { 'X-Synthetic-Session': 'authref:session-b' })).status, 200);
+    assert.equal(prepared().length, 2);
+    assert.equal((await s.get(qido, { 'X-Synthetic-Sub': 'syn-other-doctor' })).status, 200);
+    assert.equal(prepared().length, 3);
+  } finally { await s.close(); }
+});
+
+test('CD10 bearer HTTP reads reuse one study opening independently per subject', async () => {
+  const s = await stack();
+  try {
+    const headers = { 'X-Synthetic-Bearer': 'yes' };
+    const qido = '/dicom-web/studies?StudyInstanceUID=' + STUDY_UID;
+    const prepared = () => s.records.entries.filter(e => e.event.action === 'provide-prepared');
+    assert.equal((await s.get(qido, headers)).status, 200);
+    assert.equal((await s.get(s.routes.metadata, headers)).status, 200);
+    assert.equal(prepared().length, 1);
+    assert.equal((await s.get(qido, { ...headers, 'X-Synthetic-Sub': 'other-bearer' })).status, 200);
+    assert.equal(prepared().length, 2);
+  } finally { await s.close(); }
+});
+
+test('CD10 bearer idle expiry starts a fresh ledger interval for that study', async () => {
+  const { DicomwebReadRecorder } = require('/app/dist/emr-viewing/dicomweb-read.js');
+  const { Writable, Readable } = require('node:stream');
+  const { StreamableFile } = require('/app/node_modules/@nestjs/common');
+  const firstSeen = [], durable = [];
+  const db = { $queryRaw: async (_sql, _issuer, _subject, _study, since) => {
+    firstSeen.push(since);
+    return [{ present: durable.some(at => at >= since) }];
+  } };
+  const facts = { issuer: ISSUER, subject: 'synthetic-bearer', binding: { method: 'bearer', sessionRef: null } };
+  const viewing = { prepare: async (_req, _res, response) => {
+    durable.push(new Date());
+    return { body: new StreamableFile(Readable.from([response.json])), settled: Promise.resolve() };
+  } };
+  const recorder = new DicomwebReadRecorder(db, { read: () => facts }, viewing, 20);
+  const read = async () => {
+    const res = Object.assign(new Writable({ write(_chunk, _enc, done) { done(); } }), { status() {}, setHeader() {} });
+    await recorder.relay({ method: 'GET', headers: {} }, res,
+      { relay: async (_uri, _accept, target) => { target.write(Buffer.from('[{}]')); } },
+      '/dicom-web/studies/1.2/metadata', 'https://synthetic.invalid',
+      { studyUid: '1.2', managingInstitutionId: SITE, sourcePatientId: 'SYN-ID' }, new AbortController().signal);
+  };
+  await read();
+  await read();
+  assert.equal(durable.length, 1);
+  await wait(40);
+  await read();
+  assert.equal(durable.length, 2);
+  assert.ok(firstSeen[1] > firstSeen[0]);
+});
+
+test('CD10 a failed metadata append sends no clinical body and a retry records the read', async () => {
+  const s = await stack();
+  try {
+    s.records.state.failing = true;
+    const failed = await s.get(s.routes.metadata);
+    assert.equal(failed.status, 503);
+    assert.equal(failed.body.includes(Buffer.from(STUDY_UID)), false);
+    assert.equal(s.records.entries.length, 0);
+    s.records.state.failing = false;
+    assert.equal((await s.get(s.routes.metadata)).status, 200);
+    assert.equal(s.records.entries.filter(e => e.event.action === 'provide-prepared').length, 1);
   } finally { await s.close(); }
 });
 
@@ -785,3 +884,86 @@ test('MG-08 the auth_request admission refuses every image read and still admits
   await ask('/statistics');
   assert.deepEqual(admitted.map(([m]) => m), ['GET', 'GET', 'POST', 'GET']);
 });
+
+// CD-10 STOW receipt boundary shares this relay regression suite.
+{
+'use strict';
+// CD-10: real HTTP request streams through the shipped STOW handler. Synthetic archive and ledger boundaries only.
+require('./service_test_loader.cjs');
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const http = require('node:http');
+const { randomUUID } = require('node:crypto');
+const { ImageRelayController } = require('/app/dist/image-relay.controller');
+const { parseAccessEvent } = require('/app/dist/emr-contract/access-event');
+const listen = server => new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${server.address().port}`)));
+const close = server => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); });
+const success = { '00081199': { vr: 'SQ', Value: [{ '00081155': { vr: 'UI', Value: ['1.2.3.4'] } }] } };
+
+test('CD10 STOW commits accepted patient-linked entries before sending identical archive bytes, including legacy agents', async t => {
+  const events = [], received = [];
+  let answer = success, fail = false, release, entered;
+  let hold = null;
+  const records = { begin: () => ({ resolveRequestIdentity: async () => randomUUID(), end() {},
+    transactionWithRecords: async task => {
+      const staged = [];
+      await task({}, async (event, effect) => {
+        if (entered) entered();
+        if (hold) await hold;
+        if (fail) throw new Error('synthetic ledger failure');
+        const reference = await effect();
+        staged.push(parseAccessEvent(event));
+        return reference;
+      });
+      events.push(...staged);
+    } }) };
+  const upstream = http.createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    received.push(Buffer.concat(chunks));
+    res.setHeader('Content-Type', 'application/dicom+json');
+    res.end(JSON.stringify(answer));
+  });
+  const previous = { ORTHANC_URL: process.env.ORTHANC_URL, ORTHANC_USER: process.env.ORTHANC_USER, ORTHANC_PASS: process.env.ORTHANC_PASS };
+  Object.assign(process.env, { ORTHANC_URL: await listen(upstream), ORTHANC_USER: 'synthetic', ORTHANC_PASS: 'synthetic' });
+  t.after(async () => { await close(upstream); for (const [key, value] of Object.entries(previous)) value === undefined ? delete process.env[key] : process.env[key] = value; });
+  const controller = new ImageRelayController({ authzDicom: async (uri, method, caller) => {
+    assert.equal(uri, '/dicom-web/studies/1.2.3'); assert.equal(method, 'POST'); assert.equal(caller.kind, 'gateway');
+  } }, { connectStudyIdentity: async uid => { assert.equal(uid, '1.2.3'); return { patientId: 'SYN-CD10' }; },
+    studyRevision: async () => ({ id: 'synthetic-study', lastUpdate: '20261102T020000' }) }, {}, records);
+  const server = http.createServer(async (req, res) => {
+    Object.assign(req, { sub: 'service-account-gw-a', roles: ['gateway'], kind: 'gateway', institution: 'inst-a' });
+    res.status = code => { res.statusCode = code; return res; };
+    try { await controller.stow('1.2.3', req, res); }
+    catch (error) { res.statusCode = error.getStatus?.() || 500; res.end(); }
+  });
+  const origin = await listen(server); t.after(() => close(server));
+  const body = Buffer.from('--synthetic\r\nContent-Type: application/dicom\r\n\r\nORIGINAL\r\n--synthetic--');
+  const send = headers => fetch(origin, { method: 'POST', body,
+    headers: { 'content-type': 'multipart/related; boundary=synthetic', ...headers } });
+  const admitted = new Promise(resolve => { entered = resolve; });
+  hold = new Promise(resolve => { release = resolve; });
+  let replied = false;
+  const pending = send({ 'x-kin-source-ae': 'CT_A', 'x-kin-gateway': 'gw-inst-a', 'x-kin-institution': 'wrong-header' })
+    .then(response => { replied = true; return response; });
+  await Promise.race([admitted, pending.then(response => {
+    assert.fail(`STOW replied ${response.status} before its entry was admitted`);
+  })]);
+  assert.equal(replied, false); assert.equal(events.length, 0);
+  release(); const response = await pending; hold = null; entered = null;
+  assert.equal(response.status, 200); assert.equal(await response.text(), JSON.stringify(success));
+  assert.deepEqual(received[0], body);
+  assert.equal(events[0].action, 'write');
+  const subject = JSON.parse(events[0].userId.value.subject);
+  assert.deepEqual([subject.institution, subject.gateway, subject.sourceAE], ['inst-a', 'gw-inst-a', 'CT_A']);
+  assert.equal(events[0].targets[0].patientLinkSnapshot.value.patientId, 'SYN-CD10');
+  assert.equal((await send({})).status, 200);
+  assert.equal(JSON.parse(events[1].userId.value.subject).label, 'gateway (unknown source AE)');
+  answer = { '00081198': { vr: 'SQ', Value: [{ '00081155': { Value: ['1.2.3.5'] } }] } };
+  assert.equal((await send({})).status, 200); assert.equal(events.length, 2, 'rejected objects add no entry');
+  answer = success; fail = true;
+  assert.equal((await send({})).status, 503); assert.equal(events.length, 2);
+  fail = false; answer = { '00081199': { Value: [{}] } };
+  assert.equal((await send({})).status, 503); assert.equal(events.length, 2, 'unknown accepted object is not an unrecorded success');
+});
+
+}

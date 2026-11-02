@@ -138,7 +138,11 @@ test('owner and revision CAS, create/update races and write failure preserve sto
 test('read isolation, role denial and corrupt stored shape do not repair or leak data',async()=>{
   const f=fixture();f.seed(v2());
   for(const c of [{...caller,institution:'other'},{...caller,sub:'other'}])assert.equal((await f.service.workspaceShortcuts(c)).bindings,null);
-  const denied={...caller,roles:['clinician']};
+  const physician={...caller,roles:['clinician']};
+  assert.deepEqual((await f.service.workspaceShortcuts(physician)).bindings,v2());
+  const saved=await f.service.saveWorkspaceShortcuts(request(v2(),7,physician),physician);
+  assert.deepEqual((await f.service.workspaceShortcuts(physician)).bindings,saved.bindings);
+  const denied={...caller,roles:[]};
   await assert.rejects(f.service.workspaceShortcuts(denied),status(403));
   await assert.rejects(f.service.saveWorkspaceShortcuts(request(null),denied),status(403));
   f.seed({...v2(),finalize:'Enter'});const before=f.snapshot();

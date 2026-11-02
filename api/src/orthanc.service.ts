@@ -375,7 +375,7 @@ export class OrthancService {
    */
   studies(): Promise<any[]> {
     return this.get(
-      '/dicom-web/studies?includefield=00081030,00201206,00201208,00080080,00100020,00080020,00080061',
+      '/dicom-web/studies?includefield=00081030,00201206,00201208,00080080,00100020,00080020,00080061,00080090,00321032',
     );
   }
 
@@ -390,7 +390,7 @@ export class OrthancService {
    */
   async studyIdentities(accessMetadata = false, accession = false, signal?: AbortSignal): Promise<any[]> {
     const rows = await this.get('/tools/find', { Level:'Study', Query:{},
-      ResponseContent:['RequestedTags'], RequestedTags:['StudyInstanceUID','InstitutionName',
+      ResponseContent:['RequestedTags'], RequestedTags:['StudyInstanceUID','InstitutionName','ReferringPhysicianName','RequestingPhysician',
         ...(accessMetadata ? ['PatientID','StudyDate','ModalitiesInStudy'] : []), ...(accession ? ['AccessionNumber'] : [])] }, signal);
     if (!Array.isArray(rows)) throw new ServiceUnavailableException('원본 검사 목록 형식을 확인할 수 없습니다');
     return rows.map(row => {
@@ -501,7 +501,7 @@ export class OrthancService {
     if (!uids.length) return [];
     // QIDO UID-list matching uses commas, not DIMSE's backslash separator.
     const rows = await this.get('/dicom-web/studies?StudyInstanceUID=' + encodeURIComponent(uids.join(','))
-      + '&includefield=00081030,00201206,00201208,00080080,00100020,00080020,00080061');
+      + '&includefield=00081030,00201206,00201208,00080080,00100020,00080020,00080061,00080090,00321032');
     const changed = () => new ConflictException({ code:'STUDY_LIST_CHANGED', message:'원본 검사 목록이 바뀌었습니다. 새로고침하세요.' });
     if (!Array.isArray(rows)) throw changed();
     const byUid = new Map<string, any[]>(uids.map(uid => [uid, []]));

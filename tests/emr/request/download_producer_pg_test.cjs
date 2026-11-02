@@ -23,6 +23,7 @@ const { DicomImportGateService } = product('dicom-import-gate.service');
 const { PrismaService } = product('prisma.service');
 const { StudyAccessService } = product('study-access.service');
 const { AuthService } = product('auth.service');
+const { EMR_RECORD_PORT } = product('emr-runtime/record-port');
 const audit = product('emr-audit/contract');
 const listen = server => new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 
@@ -85,6 +86,7 @@ async function main() {
     const source = { studyIdentityResources: async () => [{ '0020000D': { Value: [uid] } }] };
     class DownloadFixture {}
     Module({ controllers: [StudyTransferLocalController], providers: [PrismaService, StudyTransferLocalService, DicomImportGateService,
+      { provide: EMR_RECORD_PORT, useValue: runtime.port },
       { provide: REQUEST_CONTEXT_SOURCE, useValue: requests.source }, { provide: APP_GUARD, useValue: guard },
       { provide: StudyAccessService, useFactory: db => new StudyAccessService(db, source, {}), inject: [PrismaService] },
       { provide: AuthService, useValue: { hasSession: async () => true } }] })(DownloadFixture);

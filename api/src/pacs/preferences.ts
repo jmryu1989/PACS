@@ -61,7 +61,7 @@ export class PacsPreferences {
 
   private workspaceOwner(c: Caller) {
     if (c.kind !== 'member') throw new ForbiddenException('회원 전용 배치입니다');
-    need(c.roles, c.roles.includes('technician') ? 'technician' : 'radiologist', '작업공간 배치');
+    need(c.roles, c.roles.includes('technician') ? 'technician' : c.roles.includes('clinician') ? 'clinician' : 'radiologist', '작업공간 배치');
     const institution = inst(c);
     if (![institution, c.sub].every(x => typeof x === 'string' && x.length > 0 && x.length <= 256))
       throw new ForbiddenException('계정 정보를 확인할 수 없습니다');
@@ -190,7 +190,7 @@ export class PacsPreferences {
    */
   private siteOwner(c: Caller) {
     if (c.kind !== 'member') throw new ForbiddenException('회원 전용 배치입니다');
-    need(c.roles, c.roles.includes('technician') ? 'technician' : 'radiologist', '기관 Hanging Protocol');
+    need(c.roles, c.roles.includes('technician') ? 'technician' : c.roles.includes('clinician') ? 'clinician' : 'radiologist', '기관 Hanging Protocol');
     const institution = inst(c);
     if (typeof institution !== 'string' || institution.length === 0 || institution.length > 256)
       throw new ForbiddenException('계정 정보를 확인할 수 없습니다');

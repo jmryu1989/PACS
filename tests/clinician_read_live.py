@@ -305,10 +305,15 @@ class ClinicianReadLive(unittest.TestCase):
         return self.call("GET", f"/studies/{quote(uid)}/viewer-items{query}", user, status=status)
 
     def assert_open(self, answer: dict, uid: str, rs: str | None, *secrets: str) -> None:
-        self.assertEqual(sorted(answer), sorted(C["report_read_keys"]))
         self.assertEqual(answer["uid"], uid)
-        self.assertEqual(answer["report"], {"final": False, "rs": rs})
-        self.assertIsNone(answer["keys"], "keys are withheld (null), not an empty list")
+        self.assertEqual(answer["report"]["rs"], rs)
+        self.assertFalse(answer["report"]["final"])
+        if rs == "P":
+            self.assertEqual(answer["report"], {"final": False, "rs": "P"})
+            self.assertIsNone(answer["keys"])
+        else:
+            self.assertIsInstance(answer["report"]["findings"], str)
+            self.assertIsInstance(answer["keys"], list)
         for secret in secrets:
             self.assertNotIn(secret, json.dumps(answer, ensure_ascii=False))
         self.assert_clean(answer, "open report " + uid)
@@ -492,12 +497,14 @@ class ClinicianReadLive(unittest.TestCase):
             self.assertIn(uid, listed)
             row = listed[uid]
             self.assertEqual(row["report"], {"final": True, "rs": "A", "action": "approve", "version": 1,
-                                             "repDoc": self.stack.actor("doctor").split("@")[0], "confirm": row["report"]["confirm"]})
+                                             "repDoc": self.stack.actor("doctor").split("@")[0], "confirm": row["report"]["confirm"],
+                                             "findings": row["report"]["findings"], "conclusion": row["report"]["conclusion"],
+                                             "recommendation": row["report"]["recommendation"]})
             self.assertIn(row["report"]["confirm"], {datetime.now(timezone.utc).date().isoformat(), date.today().isoformat()})
             self.assertEqual((row["tele"], row["institutionName"] != ""), (False, True))
             text = json.dumps(rows, ensure_ascii=False)
-            for secret in (fixture.secret, draft):
-                self.assertNotIn(secret, text, "the list carries status only, never a body or a draft")
+            self.assertEqual(row["report"]["findings"], fixture.secret)
+            self.assertNotIn(draft, text, "another author draft is never returned")
             # COUNT-LEAK / TENANT-UID: the clinician sees exactly the studies the same institution's worklist sees.
             self.assertEqual(set(listed), self.worklist_uids("doctor"))
             unpaged = self.call("GET", "/clinician/studies", "clinician").body
@@ -518,16 +525,14 @@ class ClinicianReadLive(unittest.TestCase):
                 with self.subTest(wrong_role=user):
                     self.assert_role_denied("/clinician/studies", user)
             self.call("GET", "/clinician/studies?limit=0", "clinician", status=400)
-            # the broad surfaces stay closed to clinician-only
-            for method, path in (("GET", "/studies"), ("GET", "/bootstrap"), ("GET", "/prefs"),
-                                 ("GET", f"/studies/{quote(uid)}/report-preview"), ("GET", f"/audit?uid={quote(uid)}"),
-                                 ("GET", f"/studies/{quote(uid)}/report/versions")):
-                with self.subTest(denied=path):
-                    self.assert_route_denied(method, path, "clinician")
+            for path in ("/studies", "/bootstrap", "/prefs", f"/studies/{quote(uid)}/report-preview",
+                         f"/studies/{quote(uid)}/report/versions"):
+                self.call("GET", path, "clinician")
+            self.assert_route_denied("GET", f"/audit?uid={quote(uid)}", "clinician")
             actor = self.stack.actor("clinician").replace("'", "''")
             self.assertEqual(psql(f"SELECT count(*) FROM \"AuditLog\" WHERE actor='{actor}'"), ["0"], "reads write no audit")
 
-    def test_02_report_read_follows_the_head_row_final_then_reset_back_to_status(self) -> None:
+    def test_02_report_read_follows_current_body_and_keeps_preliminary_status_only(self) -> None:
         with self.stack.fixture() as fixture:
             uid, secret = fixture.uid, fixture.secret
             draft = "U1B-DRAFT-" + uuid.uuid4().hex
@@ -536,10 +541,11 @@ class ClinicianReadLive(unittest.TestCase):
                       {"findings": draft, "conclusion": "", "recommendation": "", "baseVersion": 0})
             key = self.add_key(uid, "S5-U1b key " + uuid.uuid4().hex[:8])
             self.assert_open(self.report(uid).body, uid, "W", draft)
-            self.assertEqual(self.items(uid).body, {"uid": uid, "final": False, "items": None, "nextCursor": None})
+            self.assertEqual([row["id"] for row in self.items(uid).body["items"]], [key["id"]])
 
             v = self.commit(uid, "save", 0, findings=secret + " saved")
-            self.assert_open(self.report(uid).body, uid, "T", secret, draft)
+            self.assert_open(self.report(uid).body, uid, "T", draft)
+            self.assertEqual(self.report(uid).body["report"]["findings"], secret + " saved")
             v = self.commit(uid, "approve", v, findings=secret, conclusion="approved", recommendation="none")
             answer = self.report(uid).body
             self.assertEqual(sorted(answer), sorted(C["report_read_keys"]))
@@ -554,21 +560,21 @@ class ClinicianReadLive(unittest.TestCase):
             self.assertNotIn(draft, json.dumps(answer, ensure_ascii=False), "another radiologist's draft never rides along")
             self.assert_clean(answer, "final report")
             page = self.items(uid).body
-            self.assertEqual((page["uid"], page["final"], [i["id"] for i in page["items"]]), (uid, True, [key["id"]]))
-            self.assert_clean(page, "final viewer items")
+            self.assertEqual([i["id"] for i in page["items"]], [key["id"]])
+            self.assertEqual(page, self.items(uid, "doctor").body)
 
             v = self.commit(uid, "addendum", v, findings=secret + " addendum", conclusion="approved", recommendation="none")
             answer = self.report(uid).body
             self.assertEqual((answer["report"]["action"], answer["report"]["version"], answer["report"]["findings"]),
                              ("addendum", v, secret + " addendum"))
 
-            # NONFINAL-BODY: reset turns the approved body into status only, for the report and the viewer items.
+            # Reset clears the current body; existing viewer marks remain readable. P still withholds its body.
             v = self.commit(uid, "reset", v, reason="S5-U1b reset")
             self.assert_open(self.report(uid).body, uid, "W", secret, draft)
-            self.assertEqual(self.items(uid).body, {"uid": uid, "final": False, "items": None, "nextCursor": None})
+            self.assertEqual([row["id"] for row in self.items(uid).body["items"]], [key["id"]])
             v = self.commit(uid, "preliminary", v, findings=secret + " prelim", reviewer=self.stack.actor("jmryu"))
             self.assert_open(self.report(uid).body, uid, "P", secret, draft)
-            self.assertEqual(self.items(uid).body["final"], False)
+            self.items(uid, status=403)
 
             for user in ("doctor", "tech"):
                 with self.subTest(wrong_role=user):
@@ -586,13 +592,13 @@ class ClinicianReadLive(unittest.TestCase):
             # the referral is open, and loses all of it when the owner cancels
             self.call("PATCH", f"/studies/{quote(uid)}", "doctor", {"ts": "wait", "teleTo": "kin-center"})
             received = next(r for r in self.clinician_rows("kclinician") if r["uid"] == uid)
-            self.assertEqual((received["tele"], received["report"]), (True, {"final": False, "rs": "W"}))
+            self.assertEqual((received["tele"], received["report"]["rs"]), (True, "W"))
             self.assert_open(self.report(uid, "kclinician").body, uid, "W")
-            self.assertEqual(self.items(uid, "kclinician").body["final"], False)
+            self.assertEqual([row["id"] for row in self.items(uid, "kclinician").body["items"]], [key["id"]])
             self.assertEqual(self.stack.dicom_request(metadata, "kclinician").status, 200)
             self.call("PATCH", f"/studies/{quote(uid)}", "doctor", {"ts": "cancelled"})
             self.report(uid, "kclinician", status=404)
-            self.items(uid, "kclinician", status=404)
+            self.items(uid, "kclinician", status=403)
             self.assertNotIn(uid, {r["uid"] for r in self.clinician_rows("kclinician")})
             self.assertEqual(self.stack.dicom_request(metadata, "kclinician").status, 403)
 
@@ -615,20 +621,16 @@ class ClinicianReadLive(unittest.TestCase):
             self.assertEqual(self.stack.dicom_request("/statistics", "clinician").status, 403)
             self.assertEqual(self.stack.dicom_request("/statistics", "doctor").status, 200)
 
-            # saved viewer items: narrow for clinician-only, unchanged for the radiologist
+            # The physician reads the same current items and revisions as the radiologist.
             page = self.items(uid).body
-            self.assertEqual(sorted(page), sorted(C["viewer_page_keys"]))
-            self.assertEqual((page["final"], [i["id"] for i in page["items"]]), (True, [key["id"]]))
-            self.assertEqual(sorted(page["items"][0]), sorted(C["viewer_item_keys"]))
-            self.assert_clean(page, "clinician viewer items")
-            legacy = self.items(uid, "doctor").body
-            self.assertIn("authorSub", legacy["items"][0], "the radiologist path keeps its full answer")
-            self.items(uid, query="?includeHidden=true", status=400)
+            self.assertEqual(page, self.items(uid, "doctor").body)
+            self.assertEqual([i["id"] for i in page["items"]], [key["id"]])
+            self.items(uid, query="?includeHidden=true")
             self.items(uid, query="?includeHidden=false&limit=1")
-            self.items(uid, "kclinician", status=404)
+            self.items(uid, "kclinician", status=403)
             gateway = self.stack.bearer_request("GET", f"/studies/{quote(uid)}/viewer-items", self.stack.service_token("gateway"))
             self.assertEqual(gateway.status, 403, gateway.text)
-            self.assert_route_denied("GET", f"/studies/{quote(uid)}/viewer-items/{key['id']}/revisions", "clinician")
+            self.call("GET", f"/studies/{quote(uid)}/viewer-items/{key['id']}/revisions", "clinician")
             self.assert_route_denied("POST", f"/studies/{quote(uid)}/viewer-items", "clinician", {})
 
             # a hidden key leaves both the item page and the report's key list
@@ -748,169 +750,44 @@ class ClinicianReadLive(unittest.TestCase):
             self.assertEqual(reads[0], reads[2], "the same study read again answers the same")
             self.assertEqual(reads[0]["report"]["findings"], first.secret)
             self.assertNotIn(second.secret, json.dumps(reads[0], ensure_ascii=False))
-            self.assert_open(reads[1], b, "T", first.secret, second.secret)
+            self.assert_open(reads[1], b, "T", first.secret)
+            self.assertEqual(reads[1]["report"]["findings"], second.secret)
             pages = [self.items(uid).body for uid in (a, b, a)]
-            self.assertEqual([(p["uid"], p["final"]) for p in pages], [(a, True), (b, False), (a, True)])
+            self.assertEqual([p["items"][0]["studyUid"] for p in pages], [a, b, a])
             self.assertEqual(pages[0], pages[2])
             listed = {r["uid"]: r["report"] for r in self.clinician_rows("clinician")}
-            self.assertEqual((listed[a]["final"], listed[b]), (True, {"final": False, "rs": "T"}))
+            self.assertEqual((listed[a]["findings"], listed[b]["findings"]), (first.secret, second.secret))
 
     def hide(self, uid: str, item: dict, reason: str) -> None:
         self.call("POST", f"/studies/{quote(uid)}/viewer-items/{item['id']}/revisions", "doctor",
                   {"requestId": str(uuid.uuid4()), "expectedRevision": item["revision"], "action": "hide", "reason": reason,
                    "item": {k: v for k, v in item["item"].items() if k != "hidden"}})
 
-    def test_06_viewer_items_stay_on_one_signed_version_across_a_reset_and_reapproval(self) -> None:
-        """S5-U1b-F01 on the compiled ViewerController/ViewerService/PacsService, the reset placed between the gates."""
+    def test_06_viewer_items_follow_current_rows_across_reset_and_reapproval(self) -> None:
         with self.stack.fixture() as fixture:
             uid = fixture.uid
-            key = self.add_key(uid, "S5-U1b signed key")
-            v = self.commit(uid, "approve", 0, findings=fixture.secret, conclusion="approved")
+            key = self.add_key(uid, "SYN physician current item")
+            v = self.commit(uid, "approve", 0, findings=fixture.secret)
+            self.assertEqual(self.items(uid).body, self.items(uid, "doctor").body)
+            v = self.commit(uid, "reset", v, reason="SYN reopen")
+            self.assertEqual([row["id"] for row in self.items(uid).body["items"]], [key["id"]])
+            self.hide(uid, key, "SYN current item hidden")
+            self.assertEqual(self.items(uid).body["items"], [])
+            self.commit(uid, "approve", v, findings=fixture.secret + " revised")
+            self.assertEqual(self.items(uid).body, self.items(uid, "doctor").body)
 
-            # control: nothing moves at the pauses -> exactly the page the HTTP route answers
-            control = self.drive("viewer", uid, {})[-1]
-            self.assertEqual((control["status"], control["heads"]), (200, [v, v]), control)
-            self.assertEqual((control["body"]["final"], [i["id"] for i in control["body"]["items"]]), (True, [key["id"]]))
-            self.assertEqual(control["body"], self.items(uid).body)
-
-            # the reported race: gate sees v; reset; an item written and read while open; hidden; re-approved
-            box: dict[str, Any] = {}
-
-            def reopen(event: dict) -> None:
-                self.assertEqual(event["version"], v)
-                box["reset"] = self.commit(uid, "reset", v, reason="S5-U1b-F01 reset between the gates")
-                box["open_item"] = self.add_key(uid, "S5-U1b open-only " + uuid.uuid4().hex[:8])
-
-            def reapprove(event: dict) -> None:
-                # the pinned read ran while the report was open: that statement saw no signed head, so no items
-                self.assertEqual((event["finalVersion"], event["ids"]), (None, []))
-                self.hide(uid, box["open_item"], "S5-U1b-F01 hidden before re-approval")
-                box["signed"] = self.commit(uid, "approve", box["reset"], findings=fixture.secret, conclusion="re-approved")
-
-            events = self.drive("viewer", uid, {"head": reopen, "read": reapprove})
-            result = events[-1]
-            # both gates saw a signed head (a boolean recheck passed here) but not the same one
-            self.assertEqual(result["heads"], [v, box["signed"]])
-            self.assertTrue(all(isinstance(h, int) and h > 0 for h in result["heads"]), result["heads"])
-            self.assertEqual(outcome(result), (409, C["viewer_changed_code"]), result)
-            self.assertNotIn(box["open_item"]["id"], json.dumps(events), "an item of the open interval reached the answer")
-
-            # the last gate: the read sees the signed head, then reset -> re-approve lands before the answer
-            v, late = box["signed"], {}
-
-            def change_after_read(event: dict) -> None:
-                self.assertEqual((event["finalVersion"], event["ids"]), (v, [key["id"]]))
-                late["reset"] = self.commit(uid, "reset", v, reason="S5-U1b-F01 reset after the read")
-                late["signed"] = self.commit(uid, "approve", late["reset"], findings=fixture.secret, conclusion="approved again")
-
-            result = self.drive("viewer", uid, {"read": change_after_read})[-1]
-            self.assertEqual(result["heads"], [v, late["signed"]])
-            self.assertEqual(outcome(result), (409, C["viewer_changed_code"]), result)
-
-            # settled: the signed page, still without the item that only lived while the report was open
-            page = self.items(uid).body
-            self.assertEqual((page["final"], [i["id"] for i in page["items"]]), (True, [key["id"]]))
-            # a plain reset between the gates is refused the same way, and afterwards the answer is withheld
-            reset = {}
-            result = self.drive("viewer", uid, {"head": lambda event: reset.setdefault(
-                "v", self.commit(uid, "reset", event["version"], reason="S5-U1b-F01 plain reset"))})[-1]
-            self.assertEqual((result["heads"], *outcome(result)),
-                             ([late["signed"], None], 409, C["viewer_changed_code"]), result)
-            self.assertEqual(self.items(uid).body, {"uid": uid, "final": False, "items": None, "nextCursor": None})
-
-    def revise_key(self, uid: str, item: dict, title: str) -> dict:
-        snapshot = {k: v for k, v in item["item"].items() if k != "hidden"}
-        return self.call("POST", f"/studies/{quote(uid)}/viewer-items/{item['id']}/revisions", "doctor",
-                         {"requestId": str(uuid.uuid4()), "expectedRevision": item["revision"], "action": "edit",
-                          "item": {**snapshot, "title": title}}).body
-
-    def test_06b_viewer_pages_continue_only_on_the_signed_version_they_started(self) -> None:
-        """S5-U1b-F04 over HTTP: one page chain is one signed Report.version, and every page names that version.
-
-        test_06 holds one request to one version; here the version moves BETWEEN requests, so a continuation kept from an
-        earlier page must be refused (409) instead of answering the next page of another version.
-        """
+    def test_06b_viewer_pages_use_the_same_current_cursor_as_the_radiologist(self) -> None:
         with self.stack.fixture() as fixture:
             uid = fixture.uid
-            first, second, third = sorted((self.add_key(uid, f"S5-U1b chain key {n}") for n in range(3)),
-                                          key=lambda item: item["id"])
-
-            def ids(page: dict) -> list[str]:
-                return [item["id"] for item in page["items"]]
-
-            def query(cursor: str | None = None) -> str:
-                return "?limit=1" + ("&cursor=" + quote(cursor, safe="") if cursor is not None else "")
-
-            def refused(cursor: str, label: str) -> HttpResult:
-                result = self.items(uid, query=query(cursor), status=409)
-                self.assertEqual(code(result), C["viewer_changed_code"], label)
-                return result
-
-            v = self.commit(uid, "approve", 0, findings=fixture.secret, conclusion="approved")
-
-            # control: an unchanged signed version pages through every key, and each page names the version it read
-            pages = [self.items(uid, query=query()).body]
-            while pages[-1]["nextCursor"] is not None and len(pages) < 4:
-                pages.append(self.items(uid, query=query(pages[-1]["nextCursor"])).body)
-            self.assertEqual([ids(page) for page in pages], [[first["id"]], [second["id"]], [third["id"]]])
-            for page in pages:
-                self.assertEqual(sorted(page), sorted(C["viewer_page_keys"]))
-                self.assertEqual((page["uid"], page["final"], page["reportVersion"]), (uid, True, v))
-                self.assert_clean(page, "clinician viewer page chain")
-            self.assertEqual(ids(self.items(uid).body), [first["id"], second["id"], third["id"]])
-            self.assertEqual(self.report(uid).body["report"]["version"], v, "the pages name the version the report read shows")
-            # the continuation is the study, the version and the boundary, signed; never the bare item id
-            first_cursor = pages[0]["nextCursor"]
-            payload, signature = first_cursor.split(".")
-            self.assertEqual(json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))),
-                             {"v": 1, "uid": uid, "version": v, "after": first["id"]})
-
-            # an addendum between pages: still signed, another version -> the kept continuation is refused
-            v2 = self.commit(uid, "addendum", v, findings=fixture.secret + " addendum", conclusion="approved")
-            refused(pages[1]["nextCursor"], "addendum between pages")
-
-            # Astra S5-U1b-F04: page 1 read under v2; reset; the first key hidden and the second edited while open;
-            # re-approved. The kept continuation must not answer the edited key as page 2 of the chain begun under v2.
-            chain = self.items(uid, query=query()).body
-            self.assertEqual((chain["reportVersion"], ids(chain)), (v2, [first["id"]]))
-            reset = self.commit(uid, "reset", v2, reason="S5-U1b-F04 reset between pages")
-            # while no signed head exists the continuation is refused too, never answered as a withheld page
-            refused(chain["nextCursor"], "reset between pages")
-            self.assertEqual(self.items(uid).body, {"uid": uid, "final": False, "items": None, "nextCursor": None})
-            self.hide(uid, first, "S5-U1b-F04 hidden before re-approval")
-            title = "S5-U1b-F04 edited " + uuid.uuid4().hex[:8]
-            self.revise_key(uid, second, title)
-            m = self.commit(uid, "approve", reset, findings=fixture.secret, conclusion="re-approved")
-            late = refused(chain["nextCursor"], "reset, hide, edit and re-approval between pages")
-            self.assertNotIn(title, late.text, "an item of the re-approved version reached the chain begun before it")
-            self.assertNotIn(second["id"], late.text)
-
-            # a continuation without a version this API signed does not continue on the current head either: the version
-            # moved to the new head under the old signature, and the radiologist path's bare item id
-            forged = base64.urlsafe_b64encode(json.dumps({"v": 1, "uid": uid, "version": m, "after": first["id"]},
-                                                         separators=(",", ":")).encode("utf-8")).decode("ascii").rstrip("=")
-            for label, cursor in (("forged version", forged + "." + signature), ("bare item id", first["id"])):
-                with self.subTest(cursor=label):
-                    refused(cursor, label)
-            # shape errors are the caller's: too long, or with a single-item recheck
-            self.items(uid, query=query("a" * (C["viewer_cursor_max"] + 1)), status=400)
-            self.items(uid, query=query(first_cursor) + "&recheck=" + second["id"], status=400)
-
-            # a new chain starts on the new version, names it, and shows the edited key; the report read agrees
-            fresh = [self.items(uid, query=query()).body]
-            fresh.append(self.items(uid, query=query(fresh[0]["nextCursor"])).body)
-            self.assertEqual([(page["reportVersion"], ids(page)) for page in fresh], [(m, [second["id"]]), (m, [third["id"]])])
-            self.assertEqual(fresh[0]["items"][0]["item"]["title"], title)
-            self.assertIsNone(fresh[1]["nextCursor"])
-            self.assertEqual(self.report(uid).body["report"]["version"], m)
-
-            # the radiologist path is unchanged: its continuation is the bare item id, and it takes no clinician cursor
-            legacy = self.items(uid, "doctor", query="?includeHidden=true&limit=1").body
-            self.assertEqual((ids(legacy), legacy["nextCursor"]), ([first["id"]], first["id"]))
-            self.assertNotIn("reportVersion", legacy)
-            legacy = self.items(uid, "doctor", query="?includeHidden=true&limit=1&cursor=" + first["id"]).body
-            self.assertEqual((ids(legacy), legacy["nextCursor"]), ([second["id"]], second["id"]))
-            self.items(uid, "doctor", query=query(fresh[0]["nextCursor"]), status=400)
+            keys = [self.add_key(uid, "SYN page " + str(i)) for i in range(2)]
+            expected = sorted(key["id"] for key in keys)
+            first = self.items(uid, query="?limit=1").body
+            self.assertEqual(first, self.items(uid, "doctor", query="?limit=1").body)
+            self.assertEqual(first["nextCursor"], expected[0])
+            self.commit(uid, "save", 0, findings=fixture.secret)
+            second = self.items(uid, query="?limit=1&cursor=" + quote(first["nextCursor"])).body
+            self.assertEqual([row["id"] for row in first["items"] + second["items"]], expected)
+            self.assertIsNone(second["nextCursor"])
 
     def test_07_list_status_is_one_snapshot_when_an_addendum_lands_mid_list(self) -> None:
         """S5-U1b-F02 on the compiled PacsService: an Addendum between listStudies' StudyState and Report reads."""
@@ -933,7 +810,9 @@ class ClinicianReadLive(unittest.TestCase):
                     row = next(r for r in self.clinician_rows("clinician") if r["uid"] == uid)
                     self.assertEqual(row["report"], {"final": True, "rs": "A", "action": "addendum", "version": box["v"],
                                                      "repDoc": self.stack.actor(signer).split("@")[0],
-                                                     "confirm": row["report"]["confirm"]})
+                                                     "confirm": row["report"]["confirm"],
+                                             "findings": row["report"]["findings"], "conclusion": row["report"]["conclusion"],
+                                             "recommendation": row["report"]["recommendation"]})
             # control: nothing moves at the pause -> the driver's row is the row of the same (unpaged) HTTP read
             control = self.drive("list", uid, {})[-1]
             self.assertEqual((control["status"], control["paused"]), (200, True), control)
