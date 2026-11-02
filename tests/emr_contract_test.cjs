@@ -526,6 +526,50 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.throws(() => A.parseAccessEvent({ ...event, rolesAtTime: { ...rolesAtTime, extra: true } }));
   });
 
+  test('CD05/CD07 V1 response-only exceptions preserve surface, kind, exact facts and V2 boundaries', () => {
+    const none = { status: 'not-applicable', reason: 'non-record-target' };
+    const unresolved = { status: 'unresolved', reason: 'not-resolved' };
+    const summary = { kind: 'access-audit', patientLinkSnapshot: none, studyId: none, recordId: known('cycle'), versionId: none };
+    const details = ['GET emr-audit/inspections/:month', 'POST emr-audit/inspections/:month/report'];
+    for (const surface of [...details, 'GET emr-audit/inspections', 'POST emr-audit/inspections/:month/steps', 'GET emr-audit/rights-requests']) {
+      const target = { ...summary, kind: surface.includes('rights-requests') ? 'disclosure' : 'access-audit' };
+      const event = access({ surface, targets: [target] });
+      assert.deepEqual(A.parseAccessEvent(event).targets, [target]);
+      for (const field of ['patientLinkSnapshot', 'studyId', 'recordId', 'versionId']) {
+        assert.throws(() => A.parseAccessEvent({ ...event, targets: [{ ...target, [field]: unresolved }] }), surface + ' ' + field);
+        assert.throws(() => A.parseAccessEvent({ ...event, targets: [{ ...target, [field]: { ...none, reason: 'not-observed' } }] }));
+      }
+      assert.throws(() => A.parseAccessEvent({ ...event, targets: [{ ...target, kind: 'report-version' }] }));
+      assert.throws(() => A.parseAccessEvent({ ...event, formatVersion: 2 }));
+      assert.throws(() => A.parseAccessEvent({ ...event, formatVersion: 2, branch: 'local-read' }));
+      for (const other of ['GET studies/:uid/report/versions', 'GET emr-audit/issuances/:id', 'POST emr-audit/investigations', 'POST emr-audit/exports'])
+        assert.throws(() => A.parseAccessEvent({ ...event, surface: other }), other);
+    }
+    const download = { ...summary, recordId: known('event'), versionId: known('event') };
+    const local = { kind: 'access-audit', sourcePatientId: unresolved, sourceInstitution: known('hospital-a'),
+      studyId: unresolved, recordId: known('event'), versionId: known('event') };
+    for (const surface of details) {
+      assert.deepEqual(A.parseAccessEvent(access({ surface, targets: [download, local] })).targets, [download, local]);
+      assert.throws(() => A.parseAccessEvent(access({ surface, targets: [{ ...download, versionId: known('another') }] })));
+      for (const field of ['sourcePatientId', 'sourceInstitution', 'studyId', 'recordId', 'versionId'])
+        assert.throws(() => A.parseAccessEvent(access({ surface, targets: [{ ...local, [field]: none }] })));
+    }
+    for (const surface of ['GET emr-audit/inspections', 'POST emr-audit/inspections/:month/steps', 'GET emr-audit/rights-requests']) {
+      assert.throws(() => A.parseAccessEvent(access({ surface, targets: [download] })));
+      assert.throws(() => A.parseAccessEvent(access({ surface, targets: [local] })));
+    }
+    const request = { kind: 'disclosure', patientLinkSnapshot: known(patient), studyId: unresolved, recordId: known('request'), versionId: unresolved };
+    for (const surface of ['POST emr-audit/rights-requests', 'GET emr-audit/rights-requests/:id',
+      'POST emr-audit/rights-requests/:id/decide', 'POST emr-audit/rights-requests/:id/notify']) {
+      assert.deepEqual(A.parseAccessEvent(access({ surface, targets: [request] })).targets, [request]);
+      for (const field of ['patientLinkSnapshot', 'recordId'])
+        assert.throws(() => A.parseAccessEvent(access({ surface, targets: [{ ...request, [field]: unresolved }] })));
+      for (const field of ['patientLinkSnapshot', 'studyId', 'recordId', 'versionId'])
+        assert.throws(() => A.parseAccessEvent(access({ surface, targets: [{ ...request, [field]: none }] })));
+    }
+    for (const surface of ['GET emr-audit/rights-requests', 'GET emr-audit/issuances/:id', 'POST emr-audit/issuances/:id/issue'])
+      assert.throws(() => A.parseAccessEvent(access({ surface, targets: [request] })));
+  });
   test('TEST-EMR-07-A: every required event and target field is checked at runtime', () => {
     const valid = access(); assert.equal(A.parseAccessEvent(valid).action, 'provide-prepared');
     for (const field of Object.keys(valid)) { const bad = clone(valid); delete bad[field]; assert.throws(() => A.parseAccessEvent(bad), field); }
@@ -1807,6 +1851,18 @@ if (process.argv.includes('--emr-inventory-generator')) {
         assert.throws(() => D.liftLegalHold(held, h.holdId, dutyReader(releaseFacts(h, at, patch))), { code: 'HoldReleaseBindingRefused' });
       const released = D.liftLegalHold(held, h.holdId, dutyReader(releaseFacts(h, at, { reason, evidenceId: outcome })));
       assert.equal((await expire(durable, disposal({ record: released, requestedAt: at }), destroyed)).phase, 'completed');
+    }
+  });
+  test('TEST-EMR-17-A rights withdrawal and replay use the existing close surface with resolved patient/record facts', () => {
+    const unresolved = { status: 'unresolved', reason: 'not-resolved' };
+    const target = { kind: 'disclosure', patientLinkSnapshot: known(patient), studyId: unresolved,
+      recordId: known('withdrawn-record'), versionId: unresolved };
+    for (const [action, result] of [['write', 'succeeded'], ['provide-prepared', 'prepared']]) {
+      const event = access({ surface: 'POST emr-audit/rights-requests/:id/notify', action, result, targets: [target] });
+      assert.deepEqual(A.parseAccessEvent(event).targets, [target]);
+      for (const key of ['patientLinkSnapshot', 'recordId'])
+        assert.throws(() => A.parseAccessEvent({ ...event, targets: [{ ...target, [key]: unresolved }] }));
+      assert.throws(() => A.parseAccessEvent({ ...event, formatVersion: 2 }));
     }
   });
   test('TEST-EMR-19-A R5-P1: ending one fact never releases another hold or an indefinite order', async () => {

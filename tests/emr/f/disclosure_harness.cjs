@@ -1,5 +1,5 @@
 /* Synthetic storage ports, real F controller/service/contract and signed-original reader.
- * Shares the inspection harness request/roster/recording fixture; no database or network.
+ * Shares real route metadata and parseAccessEvent admission with the inspection fixture; no database or network.
  */
 'use strict';
 const { fixture: inspectionFixture, actor, F, EmrAuditController } = require('./inspection_harness.cjs');
@@ -7,7 +7,7 @@ const { generateServerKeyPair, signServerPayload } = require('../../../api/src/e
 const patient = { linkId: 'SYN-LINK', patientId: 'SYN-PATIENT', assigningAuthority: 'SYN-SITE' };
 function fixture(scopes = ['disclosure'], institution = 'SYN-SITE') {
   const f = inspectionFixture(scopes, institution), baseQuery = f.tx.$queryRaw;
-  const requests = [], issuances = [], copies = new Map();
+  const requests = [], issuances = [], duties = [], copies = new Map();
   const key = generateServerKeyPair(), kid = 'SYN-KEY';
   const doctor = { identity: actor, identityRegistrationId: 'SYN-DOCTOR', institutionId: 'SYN-SITE', canSign: true };
   const registration = { kid, publicKey: key.publicKey, doctor, registeredAt: '2026-01-01T00:00:00.000Z', status: 'active', endedAt: null };
@@ -28,7 +28,8 @@ function fixture(scopes = ['disclosure'], institution = 'SYN-SITE') {
     if (sql.includes('FROM emr_audit.fixed_copy')) return copies.has(values[0]) ? [copies.get(values[0])] : [];
     if (sql.includes('FROM emr_clinical.online_version')) return [];
     if (sql.includes('FROM emr_signing.signed_version')) return values[0] === 'SYN-RECORD' ? originals.map(outcome => ({ outcome })) : [];
-    if (['record_duty_request', 'place_hold', 'release_hold'].some(name => sql.includes(name))) return [];
+    if (sql.includes('record_duty_request')) { duties.push({ sql, values: structuredClone(values) }); return []; }
+    if (['place_hold', 'release_hold'].some(name => sql.includes(name))) return [];
     return baseQuery(parts, ...values);
   };
   f.tx.$executeRaw = async (parts, ...values) => {
@@ -39,7 +40,7 @@ function fixture(scopes = ['disclosure'], institution = 'SYN-SITE') {
     else throw Error('Unexpected synthetic write: ' + sql);
     return 1;
   };
-  return { ...f, requests, issuances, copies, originals };
+  return { ...f, requests, issuances, copies, originals, duties };
 }
 function intake(id = 'SYN-REQUEST', method = 'electronic', versions = 'all', recordId = 'SYN-RECORD') {
   const at = new Date(Date.now() - 1000).toISOString();
