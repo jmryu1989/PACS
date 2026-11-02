@@ -212,15 +212,18 @@ class ImageRouteTests(unittest.TestCase):
                 self.assertEqual([], seen)
 
     def test_derived_representations_and_stow_keep_their_routes(self):
-        # Descriptions without the image (DICOMweb metadata, the QIDO study query): authorization subrequest, then Orthanc.
+        # Descriptions without the image (DICOMweb metadata, the QIDO study query): authorization subrequest, then the recording relay.
         for target in (f"{INSTANCE}/metadata", f"/dicom-web/studies/{STUDY}/series/{SERIES}/metadata",
-                       f"/dicom-web/studies?StudyInstanceUID={STUDY}"):
+                       f"/dicom-web/studies/{STUDY}/metadata", f"/dicom-web/studies?StudyInstanceUID={STUDY}",
+                       f"/dicom-web/series?StudyInstanceUID={STUDY}", f"/dicom-web/instances?StudyInstanceUID={STUDY}",
+                       f"/dicom-web/studies/{STUDY}/series", f"/dicom-web/studies/{STUDY}/instances",
+                       f"/dicom-web/studies/{STUDY}/series/{SERIES}/instances"):
             with self.subTest(target=target):
                 status, _, seen = self.send("GET", target)
                 self.assertEqual(200, status)
-                self.assertEqual([("GET", AUTHZ), ("GET", target)], [(m, p) for m, p, _ in seen])
+                self.assertEqual([("GET", AUTHZ), ("GET", RELAY + target)], [(m, p) for m, p, _ in seen])
                 self.assertEqual(target, seen[0][2].get("x-original-uri"))
-                self.assertEqual(ORTHANC_BASIC, seen[1][2].get("authorization"))
+                self.assertIsNone(seen[1][2].get("authorization"))
         # A rendered frame is an image representation: the API's recorded relay (MG-08), no authorization subrequest and
         # no Orthanc credential from the proxy.
         rendered = f"{INSTANCE}/frames/1/rendered"
@@ -228,12 +231,12 @@ class ImageRouteTests(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertEqual([("GET", RELAY + rendered)], [(m, p) for m, p, _ in seen])
         self.assertIsNone(seen[0][2].get("authorization"))
-        # The Gateway's study-UID STOW still goes to Orthanc after the authorization subrequest.
+        # CD-10 keeps authorization and sends accepted objects through the recording receiver.
         status, _, seen = self.send("POST", f"/dicom-web/studies/{STUDY}", body=b"dicom")
         self.assertEqual(200, status)
-        self.assertEqual([("GET", AUTHZ), ("POST", f"/dicom-web/studies/{STUDY}")], [(m, p) for m, p, _ in seen])
+        self.assertEqual([("GET", AUTHZ), ("POST", f"/api/gateway/stow/{STUDY}")], [(m, p) for m, p, _ in seen])
         self.assertEqual("POST", seen[0][2].get("x-original-method"))
-        self.assertEqual(ORTHANC_BASIC, seen[1][2].get("authorization"))
+        self.assertIsNone(seen[1][2].get("authorization"))
 
 
 class ProductionImageRouteTests(ImageRouteTests):
@@ -306,7 +309,7 @@ class WithoutAssetCatalogImageRouteTests(ImageRouteTests):
         for target in (f"{INSTANCE}/metadata", f"/dicom-web/studies/{STUDY}/series/{SERIES}/metadata"):
             with self.subTest(target=target):
                 _, _, seen = self.send("GET", target)
-                self.assertEqual([AUTHZ, target], [p for _, p, _ in seen])
+                self.assertEqual([AUTHZ, RELAY + target], [p for _, p, _ in seen])
 
 
 def load_tests(loader, tests, pattern):

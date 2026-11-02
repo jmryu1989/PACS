@@ -5,6 +5,7 @@
     "scripts/ci-paths.json"
   ],
   "shared_browser": [
+    "tests/e2e/test_cd10_access_records.py",
     "api/Dockerfile*",
     "api/nest-cli.json",
     "api/package*.json",
@@ -2401,7 +2402,24 @@
       "worklist-v0/hpacs-lite/workspace-layout.js",
       "worklist-v0/hpacs-lite/workspace-panels.js",
       "worklist-v0/hpacs-lite/workspace-roaming.js",
-      "worklist-v0/hpacs-lite/workspace-shortcuts.js"
+      "worklist-v0/hpacs-lite/workspace-shortcuts.js",
+      "tests/audit_page_dom_test.py",
+      "worklist-v0/hpacs-lite/audit.html",
+      "worklist-v0/hpacs-lite/audit.js",
+      "tests/audit_inspection_dom_test.py",
+      "tests/audit_disclosure_dom_test.py",
+      "tests/emr/f/disclosure_harness.cjs",
+      "tests/emr/f/disclosure_service_test.cjs",
+      "tests/emr/f/inspection_harness.cjs",
+      "api/src/emr-audit/**",
+      "api/src/emr-contract/**",
+      "api/src/emr-runtime/**",
+      "api/src/emr-signature/**",
+      "api/src/emr-clinical/**",
+      "api/src/emr-report/**",
+      "api/src/prisma.service.ts",
+      "api/tsconfig.json",
+      "api/package-lock.json"
     ],
     "related-layout-dom": [
       "worklist-v0/hpacs-lite/preload-disk.js",

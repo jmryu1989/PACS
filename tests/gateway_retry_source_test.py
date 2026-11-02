@@ -423,10 +423,7 @@ class AgentPins(unittest.TestCase):
         cls = next(n for n in ast.parse(AGENT_TESTS).body if isinstance(n, ast.ClassDef) and n.name == "RetryNowTests")
         names = [item.name for item in cls.body if isinstance(item, ast.FunctionDef) and item.name.startswith("test")]
         self.assertEqual([name[:8] for name in names], ["test_t1_", "test_t2_", "test_t3_", "test_t4_", "test_t4_", "test_t5_", "test_t6_"])
-        method_text = between(INVARIANTS, "    def test_gateway_agent_queue_and_batch_contract(self) -> None:",
-                              "    def test_production_gateway_contract_is_declared")
-        self.assertIn('self.assertIn("Ran 26 tests"', method_text)
-        self.assertIn("18 -> 25: S4-U4 added RetryNowTests", method_text)
+        # The retry cases run in test_agent.py; another test's assertion text and total are not this contract.
 
 
 # ── the server ──

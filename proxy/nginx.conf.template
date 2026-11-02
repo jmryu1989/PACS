@@ -330,8 +330,9 @@ server {
         if ($kin_image_read_method) { return 418; }
         auth_request /kin-authz;
         auth_request_set $kin_auth_code $upstream_http_x_kin_auth_code;
-        proxy_pass http://orthanc:8042;
-        include /etc/nginx/snippets/orthanc-basic-auth.conf;
+        # STOW 수락 객체의 기재 기록을 확정한 뒤 archive 응답을 전달한다. 기존 auth_request는 유지한다.
+        rewrite ^/dicom-web/studies/([0-9.]+)$ /api/gateway/stow/$1 break;
+        proxy_pass http://api:3000;
     }
 
     # MG-LOADING (Minhoon P0, 2026-10-27): the viewer's frame reads and the series strip's previews go to the API's
@@ -351,14 +352,15 @@ server {
 
     # 4242만 닫아도 STOW-RS가 열려 있으면 HTTPS로 영상을 쓸 수 있다.
     # 조회도 먼저 API의 토큰 검증을 통과해야 Orthanc 자격증명을 대신 붙인다.
-    # 영상이 없는 기술(QIDO 목록·DICOMweb metadata)만 여기서 Orthanc로 간다. 같은 목록이 API의 imageRead
-    # (api/src/image-relay.controller.ts)에 있고, 이 밖의 경로가 auth_request에 오면 API가 403으로 거절한다.
+    # QIDO 목록·DICOMweb metadata도 환자/임상 필드를 반환하므로 제23조④ 열람 대상이다(CD-10).
+    # 기존 auth_request를 유지하고, API 중계가 세션의 기존 열람을 대조·기록한 뒤 원문을 전달한다.
+    # HEAD는 환자/임상 본문을 전달하지 않는 헤더 확인이므로 전자의무기록 열람을 기록하지 않는다.
+    # 조회 권한 관문은 기존 기관·검사 범위를 그대로 확인한다.
     location ~ ^/dicom-web/(studies|series|instances|studies/[0-9.]+/(series|instances|series/[0-9.]+/instances)|studies/[0-9.]+(/series/[0-9.]+(/instances/[0-9.]+)?)?/metadata)$ {
         limit_except GET HEAD { deny all; }
         auth_request /kin-authz;
         auth_request_set $kin_auth_code $upstream_http_x_kin_auth_code;
-        proxy_pass http://orthanc:8042;
-        include /etc/nginx/snippets/orthanc-basic-auth.conf;
+        proxy_pass http://api:3000/api/image-relay$request_uri;
     }
 
     # MG-08(D1877(2)): 영상 바이트(WADO-RS frame·rendered·thumbnail·bulk·객체 전체)는 API의 기록 중계로 간다. auth_request는
@@ -379,7 +381,7 @@ server {
     }
 
     # 워크리스트 미리보기·썸네일(frames/N/rendered), 판독문·출력 화소(image-uint16/int16), strip preview, pdf 등 저장 객체의
-    # 모든 읽기. 같은 이유로 API의 기록 중계로 간다(태그 읽기는 기록 없이 관문만). 읽기만 — DELETE /instances/{id}는 영상을 지운다.
+    # 모든 읽기. 태그 설명도 중계에서 별도 열람을 기록한다. 읽기만 — DELETE /instances/{id}는 영상을 지운다.
     location /instances/ {
         limit_except GET HEAD { deny all; }
         proxy_buffering off;
@@ -387,6 +389,7 @@ server {
     }
 
     location = /statistics {
+        # 환자/임상 필드 없는 저장소 집계는 전자의무기록 열람이 아니다. 영상 프레임은 위 기존 기록 경로가 담당한다.
         limit_except GET HEAD { deny all; }
         auth_request /kin-authz;
         auth_request_set $kin_auth_code $upstream_http_x_kin_auth_code;
@@ -395,6 +398,7 @@ server {
     }
 
     location = /system {
+        # 버전·기능 등 서버 정보만 반환하고 환자/임상 필드가 없으므로 전자의무기록 열람이 아니다.
         limit_except GET HEAD { deny all; }
         auth_request /kin-authz;
         auth_request_set $kin_auth_code $upstream_http_x_kin_auth_code;

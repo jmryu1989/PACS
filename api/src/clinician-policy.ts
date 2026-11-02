@@ -47,8 +47,10 @@ export const CLINICIAN_SESSION_ROUTES: readonly string[] = Object.freeze(['GET m
 export const CLINICIAN_BUSINESS_ROUTES: readonly string[] = Object.freeze([
   // F resolves the separate institutional designation; an app role grants no audit authority.
   'POST emr-audit/roster/:grantId', 'POST emr-audit/investigations', 'POST emr-audit/exports',
+  'GET emr-audit/inspections', 'GET emr-audit/inspections/:month',
+  'POST emr-audit/inspections/:month/report', 'POST emr-audit/inspections/:month/steps',
   'POST emr-audit/requests', 'POST emr-audit/issuances', 'POST emr-audit/issuances/:id/issue', 'POST emr-audit/issuances/:id/delivery',
-  'GET emr-audit/requests/:id', 'POST emr-audit/requests/:id/extend', 'POST emr-audit/requests/:id/resolve',
+  'GET emr-audit/requests/:id', 'GET emr-audit/issuances/:id', 'POST emr-audit/requests/:id/extend', 'POST emr-audit/requests/:id/resolve',
   'GET images/dicom-web', 'HEAD images/dicom-web',
   'POST studies/:uid/viewer-context-events',
   'GET authz/dicom', 'POST dicom/lookup', 'GET studies/:uid/viewer-items',

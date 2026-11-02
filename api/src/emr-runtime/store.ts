@@ -49,6 +49,12 @@ export class PrismaLedgerSql {
     const rows = await this.db.$queryRaw<any[]>`SELECT * FROM emr_access.entry_for_event(${stream}::text, ${eventId}::text)`;
     return rows.length ? entry(rows[0]) : null;
   }
+  async accessSeen(issuer: string, subject: string, studyUid: string, since: Date, session: string | null): Promise<boolean> {
+    const [row] = await this.db.$queryRaw<{ present: boolean }[]>`
+      SELECT emr_access.access_seen(${issuer}::text, ${subject}::text, ${studyUid}::text,
+        ${since}::timestamptz, ${session}::text) AS present`;
+    return row.present;
+  }
   async result(operationId: string): Promise<OperationResult | null> {
     const [row] = await this.db.$queryRaw<{ value: OperationResult | null }[]>`SELECT emr_access.operation_result(${operationId}::uuid) AS value`;
     return row.value;

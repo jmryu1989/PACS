@@ -28,10 +28,20 @@ export class EmrAuditController {
   investigate(@Req() req: any, @Body() body: unknown) { return this.audit.investigate(req, body); }
   @Post('exports') @HttpCode(200)
   export(@Req() req: any, @Body() body: unknown) { return this.audit.investigate(req, body, 'export'); }
+  @Get('inspections')
+  inspectionMonths(@Req() req: any) { return this.audit.inspectionMonths(req); }
+  @Get('inspections/:month')
+  inspection(@Req() req: any, @Param('month') month: string) { return this.audit.inspection(req, month); }
+  @Post('inspections/:month/report') @HttpCode(200)
+  inspectionReport(@Req() req: any, @Param('month') month: string) { return this.audit.inspection(req, month, true); }
+  @Post('inspections/:month/steps') @HttpCode(200)
+  inspectionStep(@Req() req: any, @Param('month') month: string, @Body() body: unknown) { return this.audit.inspectionStep(req, month, body); }
   @Post('requests') @HttpCode(200)
   register(@Req() req: any, @Body() body: unknown) { return this.audit.register(req, body); }
   @Post('issuances') @HttpCode(200)
   prepare(@Req() req: any, @Body() body: unknown) { return this.audit.prepare(req, body); }
+  @Get('issuances/:id')
+  issuance(@Req() req: any, @Param('id') id: string) { return this.audit.readIssuance(req, id); }
   @Post('issuances/:id/issue') @HttpCode(200)
   issue(@Req() req: any, @Param('id') id: string) { return this.audit.issue(req, id); }
   @Post('issuances/:id/delivery') @HttpCode(200)

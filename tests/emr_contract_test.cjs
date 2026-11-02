@@ -510,6 +510,22 @@ if (process.argv.includes('--emr-inventory-generator')) {
       targets: [{ kind: 'report-version', patientLinkSnapshot: known(patient), studyId: known('study-1'), recordId: known('report-1'), versionId: known('version-1') }],
       action: 'provide-prepared', result: 'prepared', requestId: 'request-1', auditLinkId: A.newAuditLinkId(), relatedEventId: null, ...overrides };
   }
+  test('CD10 legacy import roles are unresolved only for the dedicated V1 successful write', () => {
+    const rolesAtTime = { status: 'unresolved', reason: 'legacy-import-roles-not-stored' };
+    const event = access({ surface: 'POST dicom-import', action: 'write', result: 'succeeded', rolesAtTime,
+      targets: [{ kind: 'image', patientLinkSnapshot: known(patient), studyId: known('study-1'),
+        recordId: known('sop-1'), versionId: known('ab'.repeat(32)) }] });
+    assert.deepEqual(A.parseAccessEvent(event).rolesAtTime, rolesAtTime);
+    assert.deepEqual(A.parseAccessEvent(event).userId, event.userId);
+    const other = { ...event, surface: 'POST gateway/stow/:uid' };
+    assert.doesNotThrow(() => A.parseAccessEvent({ ...other, rolesAtTime: known(['gateway']) }));
+    assert.throws(() => A.parseAccessEvent(other));
+    assert.throws(() => A.parseAccessEvent({ ...event, action: 'modify' }));
+    assert.throws(() => A.parseAccessEvent({ ...event, rolesAtTime: { status: 'unresolved', reason: 'not-observed' } }));
+    assert.throws(() => A.parseAccessEvent({ ...event, userId: { status: 'unresolved', reason: 'not-observed' } }));
+    assert.throws(() => A.parseAccessEvent({ ...event, rolesAtTime: { ...rolesAtTime, extra: true } }));
+  });
+
   test('TEST-EMR-07-A: every required event and target field is checked at runtime', () => {
     const valid = access(); assert.equal(A.parseAccessEvent(valid).action, 'provide-prepared');
     for (const field of Object.keys(valid)) { const bad = clone(valid); delete bad[field]; assert.throws(() => A.parseAccessEvent(bad), field); }
