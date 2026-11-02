@@ -456,6 +456,20 @@ export class EmrAuditService {
     });
   }
 
+  async readIssuance(request: IncomingMessage, issuanceId: string) {
+    return this.run(request, async (tx, ctx, record) => {
+      const authority = F.requireScope(await this.authority(tx, ctx), 'disclosure');
+      const issuance = await this.issuance(tx, issuanceId, authority.institutionId), status = F.issuanceState(issuance);
+      const [copy] = await tx.$queryRaw<{ body: Buffer; sha256: string }[]>`SELECT body,sha256 FROM emr_audit.fixed_copy WHERE issuance_id=${issuanceId}`;
+      // Reopening must neither issue a prepared package nor reconstruct missing issued bytes.
+      if (copy ? hash(copy.body) !== copy.sha256 || copy.sha256 !== status.issuedArtifactSha256 : status.issuedArtifactSha256 !== null)
+        refuse('FixedCopyIntegrityMismatch');
+      await this.recorded(record, ctx, 'provide-prepared', F.disclosureLedgerTargets(issuance), issuanceId);
+      return { issuance, status, artifact: copy ? copy.body.toString('base64') : null,
+        sha256: copy?.sha256 ?? null, contentType: fixedContentType(issuance.manifest) };
+    });
+  }
+
   async issue(request: IncomingMessage, issuanceId: string) {
     return this.run(request, async (tx, ctx, record) => {
       const authority = await this.authority(tx, ctx); F.requireScope(authority, 'disclosure');

@@ -712,7 +712,7 @@ jobs:
     needs: select
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['admin-session-dom']) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 77
+    timeout-minutes: 80
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -764,6 +764,10 @@ jobs:
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 3
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/audit-inspection-dom --cwd . --file worklist-v0/hpacs-lite/audit.html --file worklist-v0/hpacs-lite/audit.js --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file tests/audit_inspection_dom_test.py --file tests/audit_page_dom_test.py --file tests/emr/f/inspection_harness.cjs --tree api/src/emr-audit --tree api/src/emr-contract --file api/tsconfig.json --file api/package-lock.json -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/audit_inspection_dom_test.py
+    - name: CD-06 record copy intake, issuance, delivery and request recovery DOM
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      timeout-minutes: 3
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/audit-disclosure-dom --cwd . --file worklist-v0/hpacs-lite/audit.html --file worklist-v0/hpacs-lite/audit.js --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file tests/audit_disclosure_dom_test.py --file tests/audit_page_dom_test.py --file tests/emr/f/inspection_harness.cjs --file tests/emr/f/disclosure_harness.cjs --tree api/src/emr-audit --tree api/src/emr-contract --tree api/src/emr-signature --tree api/src/emr-clinical --tree api/src/emr-report --tree api/src/emr-runtime --file api/src/prisma.service.ts --file api/tsconfig.json --file api/package-lock.json -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/audit_disclosure_dom_test.py
     - name: S5-U5a Members console role round trip, unknown-role passthrough and wording DOM
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 3

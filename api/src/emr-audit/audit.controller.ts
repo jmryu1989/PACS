@@ -40,6 +40,8 @@ export class EmrAuditController {
   register(@Req() req: any, @Body() body: unknown) { return this.audit.register(req, body); }
   @Post('issuances') @HttpCode(200)
   prepare(@Req() req: any, @Body() body: unknown) { return this.audit.prepare(req, body); }
+  @Get('issuances/:id')
+  issuance(@Req() req: any, @Param('id') id: string) { return this.audit.readIssuance(req, id); }
   @Post('issuances/:id/issue') @HttpCode(200)
   issue(@Req() req: any, @Param('id') id: string) { return this.audit.issue(req, id); }
   @Post('issuances/:id/delivery') @HttpCode(200)
