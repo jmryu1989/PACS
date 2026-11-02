@@ -73,6 +73,52 @@ Placement uses A's `clauseVersionAt(HOLD_CLAUSE_VERSIONS['privacy:35.3'], at)`;
 it records the publication in force at the hold time rather than the current
 publication at reopening. Extensions preserve that placement basis.
 
+Rights Requests uses the existing `request_event` append-only store with the distinct
+`rights-request` body kind. It shares request ID locking with copy requests and refuses
+an ID already used by the other workflow. No migration or clinical write is involved.
+
+| Routes | Auditor scope | Response recording |
+| --- | --- | --- |
+| POST rights-requests | disclosure | Intake patient/record references; replay records a read |
+| GET rights-requests | disclosure | Request IDs/status only; no patient identifiers |
+| GET rights-requests/:id | disclosure | Exactly the requested patient/record references |
+| POST rights-requests/:id/decide | disclosure | Decision patient/record references; replay records a read |
+| POST rights-requests/:id/notify | disclosure | Actual notice or withdrawal evidence and patient/record references |
+
+All paths above are under `/api/emr-audit`. Designation, current session and institution
+checks are the same as the copy workflow; a clinician role alone grants nothing.
+F's `decideRightsRequest` alone supplies outcomes, grounds and deadline. Intake calls
+it to validate the stored subject and obtain the deadline; an explicit decision reloads
+the verified D/C2 originals. The shipped contract classifies statutory records regardless
+of age; this binding does not reinterpret expiry. Unknown original stores and a unit
+whose stored versions have different retention dispositions are refused for follow-up;
+the binding does not invent one classification for a mixed unit.
+Correction guides the operator to Addendum/new signed version; deletion and suspension
+decisions execute no mutation. `Notified` requires an actual notice timestamp, recipient,
+method, text and evidence; it never means automatic dispatch or action completion.
+Missing P5 text remains a grounds-only placeholder with the objection method marked pending.
+Late notices are accepted and displayed as late. The first decision and notice are immutable.
+
+REQ-EMR-17 → TEST-F-RIGHTS / TEST-AUDIT-RIGHTS. 위험 ID 미배정: 문서 트랙 대기.
+(`tests/emr/f/rights_service_test.cjs`, `tests/audit_rights_dom_test.py`).
+
+Intake also writes B's existing `correction-request` duty as `received`. Decision leaves it open.
+The shipped decision contract has no closure event: this binding closes the response duty at
+evidenced `Notified` (`resolved`), pending CD-07-Q4. The response outcome is `lawfully-refused`
+when every record is refused, otherwise `fulfilled`; it does not assert execution of the decision.
+Open duties block ledger expiry and supply the `privacy:36.2` hold reader without a new migration.
+The same close endpoint accepts `{outcome: 'withdrawn', evidenceId}` from `Received` or `Decided`.
+It appends a withdrawal to the existing request history and `resolved` with outcome `withdrawn`
+to the append-only duty ledger; it never replaces the received fact or an earlier decision.
+The status is `Withdrawn`, and the operator/evidence/time remain readable in detail and list.
+The same evidence replays the saved withdrawal without another duty or request event; conflicting
+evidence, a later decision or notification are refused. A notified outcome cannot be replaced by withdrawal.
+Withdrawal does not reload originals, so an undecidable request can still be withdrawn with evidence.
+
+접수 뒤 원본 재검증이나 결정 계약이 거절되면 요구는 Received로 남고, 열린 응답 의무가 접속기록 만료를 계속 막는다(CD-07-Q4). 철회가 아니면 닫지 않는다.
+The page reserves Q3 guidance for failed intake and shows the separate Q4 line on a refused decision.
+Transport failures retain the recovery guidance to reopen the request; they do not assert an unconfirmed state.
+
 Investigation uses an indexed institution/stream/sequence snapshot and keyset pages.
 SQL applies the same filters to pages and totals. Continuations carry the snapshot total;
 replay stops after the page and its next matching event.

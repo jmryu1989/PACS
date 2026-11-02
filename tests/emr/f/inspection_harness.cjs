@@ -10,6 +10,19 @@ require.extensions['.ts'] = (module, filename) => module._compile(ts.transpileMo
 const { EmrAuditService } = require(path.join(API, 'src/emr-audit/service.ts'));
 const { EmrAuditController } = require(path.join(API, 'src/emr-audit/audit.controller.ts'));
 const F = require(path.join(API, 'src/emr-audit/contract.ts'));
+const { parseAccessEvent } = require(path.join(API, 'src/emr-contract/access-event.ts'));
+const { RequestMethod } = require(path.join(API, 'node_modules/@nestjs/common'));
+const routeSurface = Symbol('routeSurface');
+// Use Nest's real handler metadata, including nested service calls on the same request.
+function routeController(controller) {
+  for (const name of Object.getOwnPropertyNames(EmrAuditController.prototype)) {
+    const handler = controller[name], method = Reflect.getMetadata('method', handler);
+    if (method === undefined) continue;
+    const surface = `${RequestMethod[method]} ${Reflect.getMetadata('path', EmrAuditController)}/${Reflect.getMetadata('path', handler)}`;
+    controller[name] = (req, ...args) => handler.call(controller, { ...req, [routeSurface]: surface }, ...args);
+  }
+  return controller;
+}
 const known = value => ({ status: 'known', value });
 const actor = { id: 'synthetic-auditor', issuer: 'synthetic', subject: 'auditor' };
 function fixture(scopes = ['inspection'], institution = 'SYN-SITE', storage = [], requestActor = actor) {
@@ -43,12 +56,13 @@ function fixture(scopes = ['inspection'], institution = 'SYN-SITE', storage = []
     },
   };
   const ctx = { facts: { actor: requestActor, institution, roles: ['radiologist'], ingress: known({ address: '127.0.0.1', source: 'trusted-proxy' }),
-    requestId: 'SYN-REQUEST', surface: 'POST emr-audit/inspections/:month/report' }, requireCurrent: async () => {}, assertActive: () => {},
-    work: { transactionWithRecords: async fn => fn(tx, async (event, effect) => { records.push(event); return effect(); }) } };
-  return { controller: new EmrAuditController(new EmrAuditService({}, { withWork: async (_req, fn) => fn(ctx) })), storage, reads, records, events, tx };
+    requestId: 'SYN-REQUEST' }, requireCurrent: async () => {}, assertActive: () => {},
+    work: { transactionWithRecords: async fn => fn(tx, async (event, effect) => { records.push(parseAccessEvent(event)); return effect(); }) } };
+  return { controller: routeController(new EmrAuditController(new EmrAuditService({}, { withWork: async (req, fn) =>
+    fn({ ...ctx, facts: { ...ctx.facts, surface: req[routeSurface] } }) }))), storage, reads, records, events, tx };
 }
 
-module.exports = { fixture, actor, F, EmrAuditController };
+module.exports = { fixture, actor, F, EmrAuditController, routeController, routeSurface };
 if (require.main === module) {
   const readline = require('node:readline');
   let f = fixture();
