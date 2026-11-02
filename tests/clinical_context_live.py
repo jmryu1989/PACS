@@ -316,8 +316,11 @@ class ClinicalContextLive(unittest.TestCase):
                 self.context(anchor.uid, user)
         tech = self.context(anchor.uid, "tech", 403)
         self.assertEqual(tech.body.get("code"), "CLINICAL_CONTEXT_ROLE")
-        clinician = self.context(anchor.uid, "ccclinician", 403)
-        self.assertEqual(clinician.body.get("code"), DENIED)
+        clinician = self.context(anchor.uid, "ccclinician", 200)
+        self.assertNotIn("code", clinician.body)
+        refused = self.stack.request("POST", f"/studies/{quote(anchor.uid)}/report/commit", "ccclinician",
+                                     {"action": "save", "baseVersion": 0, "findings": "SYN refused physician write"})
+        self.assertEqual((refused.status, refused.body.get("code")), (403, DENIED))
         pending = self.stack.bearer_request("GET", f"/studies/{quote(anchor.uid)}/clinical-context", self.pending_token())
         self.assertEqual((pending.status, pending.body.get("code")), (403, "INSTITUTION_PENDING"))
         request = Request(self.stack.api + f"/studies/{quote(anchor.uid)}/clinical-context",
@@ -581,7 +584,12 @@ class ClinicalContextLive(unittest.TestCase):
         marker("L10-provenance", owner="owner", tele="tele")
 
     def test_cc_l11_no_patient_key(self) -> None:
-        anchor = self.upload(pid="", series=(("CT", {"ReasonForStudy": "SYN L11"}),))
+        # D1887 holds patientless originals out of the worklist. Observation still registers
+        # their owning institution; exercise the context's no-key response without Verify.
+        anchor = self.upload(pid="", series=(("CT", {"ReasonForStudy": "SYN L11"}),), register=False)
+        listed = self.stack.request("GET", "/studies", "jmryu")
+        self.assertEqual(listed.status, 200, listed.text)
+        self.assertNotIn(anchor.uid, [row["uid"] for row in listed.body["studies"]])
         body = self.context(anchor.uid, "doctor").body
         for name in ("priorReports", "history"):
             section = body["sections"][name]

@@ -45,7 +45,7 @@ export class PacsClinician {
     const uids: string[] = list.studies.map((row: any) => row.uid);
     const current = !uids.length ? [] : await this.prisma.$queryRaw<any[]>`
       SELECT s.uid, s."institutionId", s."teleInstitutionId", s.rs, s."repDoc", s.confirm,
-        COALESCE(r.version, 0) AS version, v.action
+        COALESCE(r.version, 0) AS version, v.action, r.findings, r.conclusion, r.recommendation
       FROM "StudyState" s
       LEFT JOIN "Report" r ON r.uid = s.uid
       LEFT JOIN "ReportVersion" v ON v.uid = r.uid AND v.version = r.version
@@ -54,10 +54,15 @@ export class PacsClinician {
       throw new ConflictException({ code: 'STUDY_LIST_CHANGED', message: '검사 목록 또는 판독 상태가 바뀌었습니다. 새로고침하세요.' });
     const body = clinicianList(list, current);
     return new LocalReadResponse(body, [
-      ...body.studies.map((row, index) => {
+      ...body.studies.flatMap((row, index) => {
         const original = list.studies[index];
-        return consumerSource('study-metadata', row.uid, original.state.institutionId, row.uid, null, ['studies', index],
-          identities.get(row.uid));
+        const sources = [consumerSource('study-metadata', row.uid, original.state.institutionId, row.uid, null, ['studies', index],
+          identities.get(row.uid))];
+        const head = current.find(record => record.uid === row.uid);
+        if (head?.version > 0 && head.rs !== 'P')
+          sources.push(consumerSource('report-head', row.uid, original.state.institutionId, row.uid, head.version,
+            ['studies', index, 'report'], identities.get(row.uid), ['version', 'findings', 'conclusion', 'recommendation']));
+        return sources;
       }),
       // An announced split UID is a returned study too. Its owner is the selection's stored institution; which patient
       // resource it belongs to is exactly what is unresolved, so no source identity is attached (as worklistRead does).
@@ -67,16 +72,16 @@ export class PacsClinician {
   }
 
   /**
-   * 임상의 판독 읽기. 머리 판이 확정본(clinicianFinal)이면 **그 행의** 본문과 key image를, 아니면 상태만 준다
-   * (S5-F5, D-S5-NONFINAL-VIEW 미결). 초안·이력·인용·구조화·작성자 칸은 없다. 예비 판독(P)도 상태만이라
-   * 지정된 두 사람 규칙(canReadPrelim)을 넓히지 않는다. key image는 판독문 미리보기와 같은 조회다
-   * (숨기지 않은 kind=key, 512건 한도).
+   * REQ-S5-U1b-CLINICIAN-READ / RISK-S5-U1b-NONFINAL-BODY:
+   * D-S5-NONFINAL-VIEW decided 2026-11-02 by owner on clinical lead request.
+   * Read the current body and keys under radiologist rules; P remains status-only.
+   * No private draft is selected. The head and scope share one transaction.
    */
   async clinicianReportRead(uid: string, c: Caller) {
     return this.clinicianScope(uid, c, async (tx, state, head) => {
       const report = clinicianReport(state, head);
       const identity = this.studyAccess.assertUnsplitSource(c, uid);
-      if (!report.final) {
+      if (state.rs === 'P') {
         const body = { uid, report, keys: null };
         return new LocalReadResponse(body, [consumerSource('study-metadata', uid, state.institutionId, uid, null, [], identity)]);
       }
@@ -85,7 +90,9 @@ export class PacsClinician {
         select: { id: true, revision: true, hidden: true, snapshot: true } });
       if (rows.length > 512) throw new ForbiddenException('키 이미지 목록 한도를 초과했습니다');
       const body = { uid, report, keys: rows.map(clinicianKeyImage).filter(Boolean) };
-      return new LocalReadResponse(body, [consumerSource('report-version', uid, state.institutionId, String(head.id), head.version, ['report'], identity),
+      return new LocalReadResponse(body, [
+        ...(head ? [consumerSource('report-version', uid, state.institutionId, String(head.id), head.version, ['report'], identity)]
+          : [consumerSource('study-metadata', uid, state.institutionId, uid, null, ['report'], identity)]),
         ...viewerSources(uid, state.institutionId, body.keys, ['keys'], identity)]);
     });
   }
@@ -161,7 +168,7 @@ export class PacsClinician {
     const uids: string[] = window.rows.map((row: any) => row.uid);
     const current = !uids.length ? [] : await this.prisma.$queryRaw<any[]>`
       SELECT s.uid, s."institutionId", s."teleInstitutionId", s.rs, s."repDoc", s.confirm,
-        COALESCE(r.version, 0) AS version, v.action
+        COALESCE(r.version, 0) AS version, v.action, r.findings, r.conclusion, r.recommendation
       FROM "StudyState" s
       LEFT JOIN "Report" r ON r.uid = s.uid
       LEFT JOIN "ReportVersion" v ON v.uid = r.uid AND v.version = r.version
@@ -174,10 +181,15 @@ export class PacsClinician {
     return new LocalReadResponse(body, [
       consumerSource('study-metadata', uid, anchor.state.institutionId, uid, null, [],
         identities.get(uid), ['uid', 'patientKey', 'identity']),
-      ...body.studies.map((row, index) => {
+      ...body.studies.flatMap((row, index) => {
         const original = window.rows[index];
-        return consumerSource('study-metadata', row.uid, original.state.institutionId, row.uid, null, ['studies', index],
-          identities.get(row.uid));
+        const sources = [consumerSource('study-metadata', row.uid, original.state.institutionId, row.uid, null, ['studies', index],
+          identities.get(row.uid))];
+        const head = current.find(record => record.uid === row.uid);
+        if (head?.version > 0 && head.rs !== 'P')
+          sources.push(consumerSource('report-head', row.uid, original.state.institutionId, row.uid, head.version,
+            ['studies', index, 'report'], identities.get(row.uid), ['version', 'findings', 'conclusion', 'recommendation']));
+        return sources;
       }),
     ]);
   }

@@ -7,6 +7,82 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { PacsService, qidoCount } = require('/app/dist/pacs.service');
 const UID = '2.25.901', OTHER = '2.25.902';
+
+test('PHYSICIAN-SETTINGS admits own preferences, favourites and tag reads while clinical writes remain refused', async () => {
+  const { PacsPreferences } = require('/app/dist/pacs/preferences');
+  const { FavoriteService } = require('/app/dist/favorite.service');
+  const { StudyTagsService } = require('/app/dist/study-tags.service');
+  const { clinicalContextCallerRefusal, contextSigned } = require('/app/dist/clinical-context-policy');
+  const c = { kind: 'member', sub: 'syn-physician', actor: 'syn-physician@local.test', institution: 'syn-a', roles: ['clinician'] };
+  const empty = { findUnique: async () => null };
+  const tx = { $executeRaw: async () => 0, $queryRaw: async () => [],
+    studyTagCatalog: { findMany: async () => [] } };
+  const db = { $transaction: async fn => fn(tx), workspaceLayout: empty, workspaceShortcuts: empty,
+    readingAppearance: empty, readingPreferences: empty, worklistColumns: empty, hangingProtocolPreference: empty };
+  const access = { prepare: async () => {}, snapshot: async () => ({ policy: { restricted: false } }), allowed: async (_c, ids) => new Set(ids) };
+  const prefs = new PacsPreferences(db);
+  for (const method of ['workspaceLayout', 'workspaceShortcuts', 'readingAppearance', 'readingPreferences', 'worklistColumns']) {
+    const answer = await prefs[method](c);
+    assert.deepEqual(answer.owner, [c.institution, c.sub], method);
+    assert.equal(answer.revision, 0, method);
+  }
+  assert.equal((await prefs.hangingProtocols(c)).owner.subject, c.sub);
+  assert.equal((await prefs.siteHangingProtocols(c)).canManageSite, false);
+  const forbidden = e => e.getStatus() === 403;
+  await assert.rejects(prefs.saveSiteHangingProtocols({}, c), forbidden);
+  await assert.rejects(prefs.saveTemplate({}, c), forbidden);
+  const favorites = new FavoriteService(db, {}, access);
+  assert.deepEqual((await favorites.read(c)).folders, []);
+  // Invalid input is validated after admission; the served matrix exercises a persisted create.
+  await assert.rejects(favorites.write(c, {}), e => e.getStatus() === 400);
+  const tags = new StudyTagsService(db, access);
+  assert.deepEqual((await tags.read(c)).catalogs.map(x => x.tags), [[], []]);
+  await assert.rejects(tags.write(c, {}), forbidden);
+  assert.equal(clinicalContextCallerRefusal(c), null);
+  assert.equal(contextSigned({ state: { rs: 'T' }, report: { version: 1 }, head: { action: 'save' } }), false);
+});
+
+test('PHYSICIAN-TAGS Orthanc HTTP requests and worklist rows preserve raw PN and absent values', async () => {
+  const http = require('node:http');
+  const { OrthancService } = require('/app/dist/orthanc.service');
+  const requests = [];
+  // PN shape recorded from a synthetic Orthanc 24.12.0 study-level QIDO read (2026-11-02).
+  // The extra Ideographic representation also checks lossless PN decoding; served evidence is retained with the unit.
+  const tags = { '0020000D': { Value: [UID] }, '00080080': { Value: ['syn-a'] }, '00100020': { Value: ['SYN-ID'] },
+    '00080090': { vr: 'PN', Value: [{ Alphabetic: 'Ref^Doctor', Ideographic: '참조^의사' }] },
+    '00321032': { vr: 'PN', Value: [{ Alphabetic: 'Req^Doctor' }] } };
+  const server = http.createServer(async (req, res) => {
+    let body = ''; for await (const chunk of req) body += chunk;
+    requests.push({ url: req.url, body: body ? JSON.parse(body) : null });
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify(req.url === '/tools/find'
+      ? [{ RequestedTags: { StudyInstanceUID: UID, InstitutionName: 'syn-a',
+        ReferringPhysicianName: 'Ref^Doctor', RequestingPhysician: 'Req^Doctor' } }] : [tags]));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const env = Object.fromEntries(['ORTHANC_URL', 'ORTHANC_USER', 'ORTHANC_PASS'].map(k => [k, process.env[k]]));
+  try {
+    process.env.ORTHANC_URL = `http://127.0.0.1:${server.address().port}`;
+    process.env.ORTHANC_USER = 'synthetic'; process.env.ORTHANC_PASS = 'synthetic';
+    const source = new OrthancService();
+    await source.studyIdentities();
+    const page = await source.studiesByUid([UID]);
+    await source.studies();
+    assert.ok(requests[0].body.RequestedTags.includes('ReferringPhysicianName'));
+    assert.ok(requests[0].body.RequestedTags.includes('RequestingPhysician'));
+    for (const request of requests.slice(1)) {
+      const fields = new URL(request.url, process.env.ORTHANC_URL).searchParams.get('includefield').split(',');
+      assert.ok(fields.includes('00080090')); assert.ok(fields.includes('00321032'));
+    }
+    const row = (await fixture({ qido: page }).service.listStudies(caller(['clinician']))).studies[0];
+    assert.equal(row.referringPhysician, 'Ref^Doctor=참조^의사'); assert.equal(row.requestingPhysician, 'Req^Doctor');
+    const absent = (await fixture().service.listStudies(caller(['clinician']))).studies[0];
+    assert.equal(absent.referringPhysician, null); assert.equal(absent.requestingPhysician, null);
+  } finally {
+    for (const [k, value] of Object.entries(env)) { if (value === undefined) delete process.env[k]; else process.env[k] = value; }
+    await new Promise(resolve => server.close(resolve));
+  }
+});
 const caller = (roles = ['technician']) => ({ kind: 'member', institution: 'syn-a', sub: 'syn-sub', actor: 'syn-user', roles });
 const project = (row, select) => select ? Object.fromEntries(Object.keys(select).map(key => [key, row[key]])) : { ...row };
 function fixture(options = {}) {
@@ -53,7 +129,7 @@ function fixture(options = {}) {
       $executeRaw: async () => 0,
       $queryRaw: async (_sql, ...values) => {
         calls.push([`${label}:sql`, values]);
-        return states().map(row => ({ ...row, version: report.version, action: head.action, ...options.snapshot }));
+        return states().map(row => ({ ...row, version: report.version, action: head.action, findings: report.findings, conclusion: report.conclusion, recommendation: report.recommendation, ...options.snapshot }));
       },
     };
   }
@@ -122,14 +198,15 @@ test('U0B-CLINICIAN-ROLES mixed members keep statistics; clinician-only and gate
   }
 });
 
-test('U0B-CLINICIAN-SNAPSHOT report read is final-only, tenant-gated and transaction-bound', async () => {
+test('U0B-CLINICIAN-SNAPSHOT report read exposes W/T/H/A, withholds P, and remains tenant-gated and transaction-bound', async () => {
   const c = caller(['clinician']);
-  for (const rs of ['W', 'T', 'R', 'A']) {
-    const f = fixture({ state: { rs } }), out = readBody(await f.service.clinicianReportRead(UID, c));
+  for (const rs of ['W', 'T', 'H', 'P', 'A']) {
+    const f = fixture({ state: { rs } }), selected = await f.service.clinicianReportRead(UID, c), out = readBody(selected);
+    assert.equal(selected.sources.some(source => source.target.kind === 'report-version'), rs !== 'P');
     assert.equal(out.report.final, rs === 'A');
-    assert.equal(JSON.stringify(out).includes('FINAL'), rs === 'A');
+    assert.equal(JSON.stringify(out).includes('FINAL'), rs !== 'P');
     assert.equal(JSON.stringify(out).includes('DO NOT SEND'), false);
-    assert.equal(f.calls.includes('keys'), rs === 'A');
+    assert.equal(f.calls.includes('keys'), rs !== 'P');
     assert.equal(f.calls[0], 'prepare');
     assert.equal(f.calls.find(Array.isArray)[1].isolationLevel, 'RepeatableRead');
     assert.ok(f.calls.includes('access:tx'));
@@ -145,7 +222,14 @@ test('U0B-CLINICIAN-SNAPSHOT report read is final-only, tenant-gated and transac
 
 test('U0B-CLINICIAN-LIST public enumeration narrows rows and refuses a changed snapshot', async () => {
   const c = caller(['clinician']), f = fixture({ state: { rs: 'A' } });
-  const out = readBody(await f.service.clinicianStudies(c));
+  const selected = await f.service.clinicianStudies(c), out = readBody(selected);
+  assert.equal(out.studies[0].report.findings, 'FINAL');
+  const headSource = selected.sources.find(source => source.target.kind === 'report-head');
+  assert.equal(headSource.target.versionId.value, '4');
+  assert.deepEqual(headSource.path, ['studies', 0, 'report']);
+  const preliminary = await fixture({ state: { rs: 'P' } }).service.clinicianStudies(c);
+  assert.equal(preliminary.sources.some(source => source.target.kind === 'report-head'), false);
+  assert.equal(JSON.stringify(readBody(preliminary)).includes('FINAL'), false);
   assert.equal(out.studies.length, 1);
   for (const field of ['notObserved', 'orderReconciliation', 'gatewayReceipt']) assert.equal(field in out, false);
   assert.equal(JSON.stringify(out).includes('DO NOT SEND'), false);
@@ -155,56 +239,39 @@ test('U0B-CLINICIAN-LIST public enumeration narrows rows and refuses a changed s
     await refused(fixture({ state: { rs: 'A' }, snapshot }).service.clinicianStudies(c), 409);
 });
 
-// S5-U1b viewer items through the real controller: a clinician-only member reads only the items of the signed version
-// the gate saw, checked again after the read; mixed and legacy roles keep the existing recorded read.
-test('U0B-CLINICIAN-VIEWER items are pinned to one signed version; mixed and legacy roles keep the existing read', async () => {
+// Both reader roles reach the same current-item read; the service enforces P and institution boundaries.
+test('U0B-CLINICIAN-VIEWER current items and revisions use the radiologist read for every reader role', async () => {
   const { ViewerController } = require('/app/dist/viewer.controller');
   const ITEM_ID = '00000000-0000-4000-8000-0000000000a1';
-  const item = { id: ITEM_ID, revision: 2, hidden: false, item: { kind: 'key', author: 'SECRET-AUTHOR' } };
-  const world = ({ heads = [4, 4], finalVersion = 4, nextCursor = null } = {}) => {
-    const calls = [], queue = [...heads];
-    const svc = {
-      selectFinal: async (_uid, query, _c, version) => { calls.push(['selectFinal', version, query.cursor ?? null]);
-        return { institution: 'syn-a', body: { items: [item], nextCursor, finalVersion } }; },
-      listRead: async () => { calls.push('listRead'); return 'legacy-read'; },
-    };
-    const pacs = { clinicianViewerHead: async () => { calls.push('head'); return queue.shift(); } };
-    return { calls, controller: new ViewerController(svc, pacs, {}) };
-  };
-  const req = roles => ({ ...caller(roles), headers: {} });
-  const pinned = world(), answer = await pinned.controller.list(UID, {}, req(['clinician']));
-  assert.deepEqual(pinned.calls, ['head', ['selectFinal', 4, null], 'head']);
-  const body = readBody(answer);
-  assert.deepEqual([body.final, body.reportVersion, body.items.map(row => row.id)], [true, 4, [ITEM_ID]]);
-  assert.equal(JSON.stringify(body).includes('SECRET-AUTHOR'), false);
-  // The returned item is the recorded target, under the institution the selection read with it.
-  assert.deepEqual(answer.sources.map(s => [s.path, s.managingInstitution, s.target.kind, s.target.recordId.value]),
-    [[['items', 0], 'syn-a', 'key-image', ITEM_ID]]);
-  const viewerChanged = async promise => assert.rejects(promise, error =>
-    error.getStatus?.() === 409 && error.getResponse().code === 'VIEWER_REPORT_CHANGED');
-  for (const changed of [{ heads: [4, 5] }, { finalVersion: 3 }, { heads: [4, null] }])
-    await viewerChanged(world(changed).controller.list(UID, {}, req(['clinician'])));
-  // A continuation reaches the read only as the boundary it signed, and only on the version it signed.
-  const first = readBody(await world({ nextCursor: ITEM_ID }).controller.list(UID, {}, req(['clinician'])));
-  assert.equal(typeof first.nextCursor, 'string');
-  assert.notEqual(first.nextCursor, ITEM_ID);
-  const next = world();
-  await next.controller.list(UID, { cursor: first.nextCursor }, req(['clinician']));
-  assert.deepEqual(next.calls, ['head', ['selectFinal', 4, ITEM_ID], 'head']);
-  const reapproved = world({ heads: [5, 5] });
-  await viewerChanged(reapproved.controller.list(UID, { cursor: first.nextCursor }, req(['clinician'])));
-  assert.deepEqual(reapproved.calls, ['head']);
-  const forged = world();
-  await viewerChanged(forged.controller.list(UID, { cursor: ITEM_ID }, req(['clinician'])));
-  assert.deepEqual(forged.calls, []);
-  const withheld = world({ heads: [null] });
-  assert.deepEqual(await withheld.controller.list(UID, {}, req(['clinician'])), { uid: UID, final: false, items: null, nextCursor: null });
-  assert.deepEqual(withheld.calls, ['head']);
-  for (const roles of [['clinician', 'radiologist'], ['radiologist'], ['technician'], ['admin']]) {
-    const legacy = world();
-    assert.equal(await legacy.controller.list(UID, {}, req(roles)), 'legacy-read');
-    assert.deepEqual(legacy.calls, ['listRead'], roles.join('+'));
+  const calls = [], selected = { current: true };
+  const controller = new ViewerController({ listRead: async (...args) => { calls.push(args); return selected; } }, {}, {});
+  for (const roles of [['clinician'], ['clinician', 'radiologist'], ['radiologist'], ['technician'], ['admin']]) {
+    const req = caller(roles), query = { limit: '20', cursor: ITEM_ID };
+    assert.equal(await controller.list(UID, query, req), selected);
+    assert.deepEqual(calls.pop(), [UID, query, req]);
+    assert.equal(await controller.revisions(UID, ITEM_ID, query, req), selected);
+    assert.deepEqual(calls.pop(), [UID, query, req, ITEM_ID]);
   }
+});
+
+test('U0B-CLINICIAN-PREVIEW reads non-final text with an access target and refuses P and other institutions', async () => {
+  const { ReportPreviewController } = require('/app/dist/report-preview.controller');
+  let state = { uid: UID, institutionId: 'syn-a', rs: 'T', preDoc: 'other-author', preReviewer: 'other-reviewer' };
+  const report = { version: 2, findings: 'SYN non-final body', conclusion: '', recommendation: '' };
+  const db = { studyState: { findUnique: async () => state }, report: { findUnique: async () => report },
+    reportVersion: { findUnique: async () => ({ version: 2, action: 'save', author: 'other-author' }) },
+    viewerItem: { findMany: async () => [] } };
+  db.$transaction = async fn => fn(db);
+  const controller = new ReportPreviewController(db, { reportPreviewStudy: async () => ({}) }, { require: async () => {} }, {});
+  const req = caller(['clinician']);
+  const selected = await controller.read(UID, req);
+  assert.equal(readBody(selected).report.findings, report.findings);
+  assert.equal(readBody(selected).canPreviewEditor, false);
+  assert.equal(selected.sources.find(s => s.target.kind === 'report-head').target.versionId.value, '2');
+  state = { ...state, rs: 'P' };
+  await refused(controller.read(UID, req), 403);
+  state = { ...state, rs: 'T', institutionId: 'syn-b' };
+  await refused(controller.read(UID, req), 403);
 });
 
 test('U0B-IDENTITY-PATCH overlay vectors retain role, ownership, preliminary and state refusal precedence', async () => {
