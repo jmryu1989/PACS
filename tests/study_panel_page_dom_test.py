@@ -16,12 +16,16 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
 from urllib.parse import parse_qs
 from playwright.sync_api import expect, sync_playwright
 import auth_logout_dom_test as auth
+
+sys.path.append(str(Path(__file__).resolve().parent / 'e2e'))
+import report_column_reach as column_reach  # noqa: E402  (the served tests' judgment of the report row reveal)
 
 ROOT = Path(__file__).resolve().parents[1]
 if os.environ.get('KIN_W3_ASSET_ROOT'):
@@ -177,6 +181,9 @@ W6_REACH = '''(names) => {
     for (const [e, top, left] of saved) { e.scrollTop = top; e.scrollLeft = left; }
   }
   return facts; }'''
+# The report action row and Save in it, for column_reach.READ around a test's own scroll to Save. W6_REACH above says a
+# wheel can reach Save; reach_problems says the test's scroll was that: the one report column moved, not the page.
+SAVE_ROW = ['.report-p .rbtns', '#b-save']
 # Each shown element of the report column outside those rows that paints over one of them: its box as painted (cut to
 # every ancestor up to the column that does not let its overflow show) against the row's box. The top layer (an open
 # popover or dialog) is drawn above the page on purpose and is not counted.
@@ -783,12 +790,26 @@ class StudyPanelPageDOM(unittest.TestCase):
                 # The bottom action row is reached through the report card's own scroller. Provisional until
                 # Minhoon confirms (11-03 commander): the row may start below the first screen, so the arrival
                 # state is judged first - a reader's wheel reaches it - and only then does the test scroll for them.
+                arrival = page.evaluate(column_reach.READ, SAVE_ROW)
                 reach = page.evaluate(W6_REACH, ['#b-save'])['below']['#b-save']
                 self.assertTrue(reach['window'], reach)
                 self.assertIsNone(reach['clipped'], reach)
                 self.assertTrue(all(wheel for _, wheel in reach['scrolled']), reach)
                 page.locator('#b-save').scroll_into_view_if_needed()
                 settle(page)
+                # Judged as the served tests judge their reveal (report_column_reach.py): one report-column scroller
+                # moved, not the page, and Save is whole after it. In the 768x1024 portrait stack the report card's own
+                # scroller sits inside the reading column, which scrolls as well (main's contract here was a wheel over
+                # the work area): there exactly two report-column scrollers move and nothing else. Making that one
+                # scroller is a product decision (fix9 report), not something this test loosens further.
+                revealed = page.evaluate(column_reach.READ, SAVE_ROW)
+                problems = column_reach.reach_problems(arrival, revealed)
+                if (width, height) == (768, 1024):
+                    moved = [b for b, a in zip(arrival['scrollers'], revealed['scrollers']) if b['top'] != a['top']]
+                    self.assertEqual(2, len(moved), moved)
+                    self.assertTrue(all(s['user'] and s['reportColumn'] for s in moved), moved)
+                    problems = [p for p in problems if not p.startswith('reach: 2 scroll containers moved')]
+                self.assertEqual([], problems, 'Save is not one report-column scroll away')
                 self.assert_drawer_place(page, width, height)
                 scrolled = self.assert_report_usable(page, 'scrolled to the report')
                 for name in ('#b-approve', '#b-save'):

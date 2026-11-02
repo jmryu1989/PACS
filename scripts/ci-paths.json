@@ -819,6 +819,7 @@
       "tests/e2e/test_worklist*",
       "tests/e2e/viewer_precision_fixture.py",
       "tests/e2e/viewer_precision_support.py",
+      "tests/e2e/report_column_reach.py",
       "tests/execution_selection_test.py",
       "tests/filter_shortcuts_service_test.cjs",
       "tests/fixtures/w5-ui/related-mode-page.json",

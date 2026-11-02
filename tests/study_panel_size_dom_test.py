@@ -957,12 +957,16 @@ class StudyPanelSizeDOM(unittest.TestCase):
                 page.keyboard.press('End')
                 settle(page)
                 # Provisional until Minhoon confirms (11-03 commander): at 1366x768 the report row may start below
-                # the first screen. Judge the arrival state first - a reader's wheel reaches Save - then scroll for them.
+                # the first screen. Judge the arrival state first - a reader's wheel reaches Save - then scroll for them,
+                # and judge that scroll as the served tests judge theirs: one report-column scroller moved, not the page.
+                arrival = page.evaluate(dom.column_reach.READ, dom.SAVE_ROW)
                 reach = page.evaluate(dom.W6_REACH, ['#b-save'])['below']['#b-save']
                 self.assertTrue(reach['window'], reach)
                 self.assertIsNone(reach['clipped'], reach)
                 self.assertTrue(all(wheel for _, wheel in reach['scrolled']), reach)
                 page.locator('#b-save').scroll_into_view_if_needed()
+                revealed = page.evaluate(dom.column_reach.READ, dom.SAVE_ROW)
+                self.assertEqual([], dom.column_reach.reach_problems(arrival, revealed), 'Save is not one report-column scroll away')
                 closed = self.assert_report_usable(page, 'closed')
                 page.get_by_role('button', name='Study Info & Templates', exact=True).click()
                 drawer = page.get_by_role('complementary', name='Study Panel', exact=True)
