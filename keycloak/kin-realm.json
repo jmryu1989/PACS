@@ -2,6 +2,11 @@
   "realm": "kin",
   "displayName": "Korea Imaging Network",
   "enabled": true,
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": true,
+  "attributes": {
+    "adminEventsExpiration": "94694400"
+  },
   "sslRequired": "external",
   "registrationAllowed": true,
   "resetPasswordAllowed": true,
