@@ -209,7 +209,17 @@ const removeContainer = (containerId, locations = LOCATION_IDS) => { for (const 
   world.containers.set(where, world.containers.get(where).filter(c => c.containerId !== containerId)); remove(where, c => c.containerId === containerId); } };
 const restoredOk = at => ({ checkedAt: at, outcome: 'restored', signatures: 'verified', permissions: 'verified', missingLive: 0 });
 const durable = { append: async e => ({ durableAt: `${e.day}T23:59:59.999Z` }) };
-const receipt = at => ({ completedAt: at, method: 'irreversible-permanent-deletion' });
+// CD-09 format 2: one execution per unit/SCC; the receipt names exactly that execution's units.
+let execution = null;
+function executing(store) {
+  return { now: () => '2099-01-01T00:00:00.000Z',
+    beginSet: async disposalUnitIds => { execution = { operationId: crypto.randomUUID(), disposalUnitIds: [...disposalUnitIds] };
+      return { operationId: execution.operationId }; },
+    appendCompletedSet: async events => { let durableAt;
+      for (const e of events) durableAt = (await store.append(e)).durableAt; return { durableAt }; }, ...store };
+}
+const receipt = at => ({ formatVersion: 2, kind: 'operational-deletion', method: 'operational-store-deletion',
+  operationId: execution.operationId, disposalUnitIds: execution.disposalUnitIds, completedAt: at });
 /** A synthetic round-2 worker: it erases exactly the plan fixed under the lock, nothing it decides itself. */
 function worker(at) {
   return async set => {
@@ -227,12 +237,12 @@ async function destroy(records, at, graph, destroySet = worker(at), lock = {}) {
   const counted = async set => { deletes++; return destroySet(set); };
   let result;
   if (records.length === 1 && !lock.batch) {
-    const store = H.inventoryGate({ append, withRetentionLock: async (id, time, work) => work(graph) });
-    result = await D.destroyAtExpiry(store, { record: records[0], versionIds: records[0].parts.map(p => p.partId), requestedAt: at, graph },
+    const store = H.inventoryGate(executing({ append, withRetentionLock: async (id, time, work) => work(graph) }));
+    result = await D.destroyAtExpiry(store, { record: records[0], versionIds: records[0].parts.map(p => p.partId), justifiedDelay: null, requestedAt: at, graph },
       request => counted([request]));
   } else {
-    const store = H.inventoryGate({ append, withRetentionBatchLock: async (ids, time, work) => work(graph) });
-    result = await D.destroyBatchAtExpiry(store, { units: records.map(record => ({ record, versionIds: record.parts.map(p => p.partId) })), requestedAt: at, graph }, counted);
+    const store = H.inventoryGate(executing({ append, withRetentionBatchLock: async (ids, time, work) => work(graph) }));
+    result = await D.destroyBatchAtExpiry(store, { units: records.map(record => ({ record, versionIds: record.parts.map(p => p.partId), justifiedDelay: null })), requestedAt: at, graph }, counted);
   }
   return { result, journal, deletes };
 }
@@ -593,7 +603,7 @@ test('TEST-H-04/expired_restore_impossible: the completion record holds kinds, c
   const secrets = [report.recordId, ...report.parts.flatMap(p => [p.partId, p.evidence.event.sha256, p.evidence.event.eventId]),
     'backup-old', 'k-old', 'k-shared', 'SYN-PATIENT-1', ...assessment.items.map(i => i.copyId)];
   for (const secret of secrets) assert(!text.includes(secret), 'the completion record carries no identifier or digest');
-  assert.equal(summary.units, 1); assert.equal(summary.method, 'irreversible-permanent-deletion');
+  assert.equal(summary.units, 1); assert.equal(summary.method, 'operational-store-deletion');
   assert(summary.locations.some(l => l.locationClass === 'backup-snapshot' && l.replacedContainers === 1));
 });
 
@@ -818,10 +828,19 @@ test('TEST-H-03/inventory_refusal: a fixed SCC plan cannot be consumed by a subs
   }, { batch: true });
 });
 
-test('TEST-H-03/inventory_refusal: independent sets need separate plans before any started journal', async () => {
+test('TEST-H-03/inventory_refusal: independent sets each get their own plan before any started journal (CD09-P01)', async () => {
   const a = signedReport('independent-a'), b = signedReport('independent-b');
-  const at = D.retentionDeadline(a), graph = snapshotFor([a, b], at);
-  await refused([a, b], at, graph, 'SingleDisposalSetRequired', 'a multi-set batch requires round-2 coordination');
+  const at = D.retentionDeadline(a), graph = snapshotFor([a, b], at), plans = [];
+  const { result, journal, deletes } = await destroy([a, b], at, graph, async set => {
+    plans.push([...H.fixedErasurePlan(set).recordIds]); return worker(at)(set); });
+  assert.equal(deletes, 2, 'one callback per independent set, never one merged plan');
+  assert.deepEqual(plans, [[a.recordId], [b.recordId]]);
+  assert.deepEqual(journal.map(e => e.phase), ['started', 'completed', 'started', 'completed']);
+  assert.equal(new Set(result.map(e => e.operationId)).size, 2, 'each set is its own execution');
+  // A set that cannot be erased stops the whole batch before any started record, including the erasable set.
+  const c = signedReport('independent-c'), d = signedReport('independent-d');
+  put('terminals', { copyId: 'terminals/pending-d', content: 'pending-original', recordId: d.recordId, partId: d.parts[0].partId, containerId: null });
+  await refused([c, d], at, snapshotFor([c, d], at), 'ErasureBlocked', 'every set plan is fixed before the first set starts');
 });
 
 test('TEST-H-04/expired_restore_impossible: every replaced backup location must preserve and restore live records', () => {

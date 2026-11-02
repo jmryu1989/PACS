@@ -15,7 +15,7 @@ export const PRODUCT_DEFAULTS = freeze({
   keepEveryVersion: true, recordAuthorTimeHash: true, logEveryAccess: true, automaticDestruction: true,
   retentionStart: 'each-content-part-own-start; unit-latest-part-expiry; Asia/Seoul-civil-calendar',
   linkedEvidence: 'complete-direct-components; own-deadlines-only; no-inherited-deadline-repropagation; navigation-excluded',
-  disposal: 'irreversible-permanent-deletion-at-expiry; no-personal-data-in-destruction-record',
+  disposal: 'operational-store-deletion-at-expiry; recovery-only-backups-supervised-and-reapplied-on-restore; no-personal-data-in-destruction-record',
   extension: 'continuing-treatment-only; once-per-record; at-most-its-statutory-period',
   retentionOnly: 'explicit-purpose-end-with-stored-lifecycle-event; separate-storage-and-restricted-access',
   clinicalContentInOperationalRecord: 'add-clinical-classification-before-saving',
@@ -612,19 +612,55 @@ export function retentionState(input: RetentionRecord, graph?: RetentionGraph, a
   return freeze({ state: held ? 'legal-hold' : review ? 'order-review' : 'retained', deadline, releaseNotRecorded,
     destroyNotBefore: held || review || releaseNotRecorded.length ? null : [deadline, ...releases].sort().slice(-1)[0] });
 }
-export interface DisposalRequest { record: RetentionRecord; versionIds: readonly string[]; requestedAt: string; graph: RetentionGraph }
-/** disposalUnitId is random, never a source ID/hash; its source mapping must be erased with the unit. */
+/** An actual operational reason without patient data. Recording one is a fact, not a software verdict that the delay was lawful. */
+export interface JustifiedDelay { reason: string; recordedAt: string }
+export interface DisposalRequest {
+  record: RetentionRecord; versionIds: readonly string[]; requestedAt: string; graph: RetentionGraph;
+  justifiedDelay: Readonly<JustifiedDelay> | null;
+}
+/** disposalUnitId is random, never a source ID/hash; its source mapping must be erased with the unit.
+ * Format 2 (CD-09): completion means operational-store deletion. Recovery-only backups are supervised separately
+ * (backup-generation-expired, restore-reapplied) and are not a completion condition. Format 1 is never reinterpreted. */
 export interface DestructionRecord {
-  formatVersion: 1; phase: 'started' | 'completed' | 'failed'; day: string;
+  formatVersion: 2; kind: 'operational-deletion';
+  /** 1 for the original fact; only a later delay-reason supplement adds a revision, never a change of the deletion. */
+  revision: number; operationId: string; phase: 'started' | 'completed' | 'failed';
+  occurredAt: string; day: string;
   disposalUnitId: string; classes: readonly StatutoryClass[]; clauseIds: readonly string[]; partCount: number;
   expiryDay: string; extensionUsed: boolean; dueDay: string; timeliness: 'within-five-days' | 'overdue';
-  method: 'irreversible-permanent-deletion'; basis: 'privacy-act-21-and-decree-16-1-1';
+  method: 'operational-store-deletion';
+  justifiedDelay: Readonly<JustifiedDelay> | null; delayReasonStatus: 'not-required' | 'recorded' | 'missing';
+  basis: 'privacy-act-21-and-decree-16-1-1';
 }
 export interface DisposalAuditStore {
   append(event: Readonly<DestructionRecord>): Promise<{ durableAt: string }>;
   /** Hold the lock through journal, deletion and completion. No request-provided callback/flags. */
   withRetentionLock<T>(recordId: string, at: string, work: (current: RetentionGraph) => Promise<T>): Promise<T>;
+  /** The store's current time; a failure is recorded when it happened, not at the request time. */
+  now(): string;
+  /** Durably records the execution set (the `deleting` state) for exactly these units and binds its operation ID. */
+  beginSet(disposalUnitIds: readonly string[]): Promise<{ operationId: string }>;
+  /** All completions of one execution in one durable write; never a partial set. */
+  appendCompletedSet(events: readonly Readonly<DestructionRecord>[]): Promise<{ durableAt: string }>;
 }
+/** Supervision metadata bound to a destruction; not an event kind. Python reads the generation count from its definition. */
+export interface BackupSupervisionPlan {
+  policySource: 'scripts/ops_backup.py:DAILY_GENERATIONS'; observedAt: string; generations: number;
+  expectedExpiredAt: string | null; state: 'scheduled' | 'exception' | 'unverified';
+}
+/** Supervision record: the last recovery-only generation holding the unit was confirmed gone. Not a completion condition. */
+export interface BackupGenerationExpired {
+  formatVersion: 2; kind: 'backup-generation-expired'; disposalUnitId: string; operationId: string;
+  occurredAt: string; expectedExpiredAt: string | null; policySource: 'scripts/ops_backup.py:DAILY_GENERATIONS';
+  generations: number; observationId: string;
+}
+/** Supervision record: every completed destruction after the restored backup point was reapplied before service resumed. */
+export interface RestoreReapplied {
+  formatVersion: 2; kind: 'restore-reapplied'; restoreId: string; installationId: string; snapshotId: string;
+  backupPointAt: string; ledgerThrough: string; operationIds: readonly string[];
+  appliedUnits: number; alreadyAbsentUnits: number; completedAt: string; serviceResumeAllowed: true;
+}
+export type RetentionJournalEvent = DestructionRecord | BackupGenerationExpired | RestoreReapplied;
 /** B commits the returned decision while this same lock is held; a concurrent hold/append cannot be lost. */
 export async function withRetentionChange<T>(store: Pick<DisposalAuditStore, 'withRetentionLock'>, record: RetentionRecord,
   graph: RetentionGraph, at: string, changeAndPersist: (current: RetentionGraph) => Promise<T>): Promise<T> {
@@ -637,7 +673,11 @@ export async function withRetentionChange<T>(store: Pick<DisposalAuditStore, 'wi
     return changeAndPersist(current);
   });
 }
-export interface DestructionReceipt { completedAt: string; method: 'irreversible-permanent-deletion' }
+/** H's proof that the operational stores of exactly this execution's units no longer hold them. */
+export interface DestructionReceipt {
+  formatVersion: 2; kind: 'operational-deletion'; method: 'operational-store-deletion';
+  operationId: string; disposalUnitIds: readonly string[]; completedAt: string;
+}
 function seoulDay(at: string): string { return new Date(Date.parse(utc(at)) + SEOUL_MS).toISOString().slice(0, 10); }
 function dueBy(at: string): string {
   const local = new Date(Date.parse(utc(at)) + SEOUL_MS);
@@ -646,38 +686,110 @@ function dueBy(at: string): string {
   return new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() + 5) - SEOUL_MS).toISOString();
 }
 type DestructionDetails = Pick<DestructionRecord, 'disposalUnitId' | 'classes' | 'clauseIds' | 'partCount' | 'expiryDay' | 'extensionUsed'>;
-function destructionJournal(store: Pick<DisposalAuditStore, 'append'>, eligibleAt: string, details: DestructionDetails) {
+function parseJustifiedDelay(input: unknown): Readonly<JustifiedDelay> | null {
+  if (input === null) return null;
+  let v: Record<string, any>;
+  try { v = object(input, ['reason', 'recordedAt']); string(v.reason); utc(v.recordedAt); } catch { refuse('JustifiedDelayInvalid'); }
+  if (v.reason.length > 1000) refuse('JustifiedDelayInvalid');
+  return freeze({ reason: v.reason, recordedAt: v.recordedAt });
+}
+/** One unit's journal inside one execution. occurredAt, day and timeliness come from each event's own time; the
+ * deadline rules (dueBy, civilPeriodEnd) are unchanged. A missing reason past the boundary is recorded, never a stop. */
+function destructionJournal(store: Pick<DisposalAuditStore, 'append'>, eligibleAt: string, details: DestructionDetails,
+  operationId: string, justifiedDelay: Readonly<JustifiedDelay> | null) {
   const due = dueBy(eligibleAt);
-  return async (phase: DestructionRecord['phase'], at: string) => {
-    const event: Readonly<DestructionRecord> = freeze({ formatVersion: 1, phase, day: seoulDay(at), ...details,
-      dueDay: seoulDay(new Date(Date.parse(due) - 1).toISOString()), timeliness: at < due ? 'within-five-days' : 'overdue',
-      method: 'irreversible-permanent-deletion', basis: 'privacy-act-21-and-decree-16-1-1' });
+  const make = (phase: DestructionRecord['phase'], at: string): Readonly<DestructionRecord> => {
+    const timeliness = at < due ? 'within-five-days' as const : 'overdue' as const;
+    return freeze({ formatVersion: 2 as const, kind: 'operational-deletion' as const, revision: 1, operationId, phase,
+      occurredAt: at, day: seoulDay(at), ...details, dueDay: seoulDay(new Date(Date.parse(due) - 1).toISOString()), timeliness,
+      method: 'operational-store-deletion' as const, justifiedDelay,
+      delayReasonStatus: timeliness === 'within-five-days' ? 'not-required' as const : justifiedDelay ? 'recorded' as const : 'missing' as const,
+      basis: 'privacy-act-21-and-decree-16-1-1' as const });
+  };
+  const append = async (phase: 'started' | 'failed', at: string) => {
+    const event = make(phase, at);
     let receipt: Record<string, any>;
     try { receipt = object(await store.append(event), ['durableAt']); }
     catch { refuse('DestructionJournalUnavailable'); }
     if (utc(receipt.durableAt) < at) refuse('DestructionJournalReceiptInvalid');
     return event;
   };
+  return { make, append };
 }
-async function destroyWithJournal<T>(store: DisposalAuditStore, request: T, requestedAt: string, eligibleAt: string,
-  details: DestructionDetails,
-  destroy: (request: T) => Promise<DestructionReceipt>): Promise<Readonly<DestructionRecord>> {
-  if (requestedAt < eligibleAt) refuse('RetentionNotElapsed');
-  const append = destructionJournal(store, eligibleAt, details);
-  await append('started', requestedAt);
+interface ExecutionEntry { details: DestructionDetails; eligibleAt: string; justifiedDelay: Readonly<JustifiedDelay> | null }
+function requireExecutionStore(store: Partial<DisposalAuditStore>): void {
+  if (typeof store?.append !== 'function' || typeof store.now !== 'function' || typeof store.beginSet !== 'function' ||
+      typeof store.appendCompletedSet !== 'function') refuse('RetentionExecutionRequired');
+}
+function receiptCompletedAt(value: unknown, operationId: string, unitIds: readonly string[], requestedAt: string): string {
+  let r: Record<string, any>;
+  try { r = object(value, ['formatVersion', 'kind', 'method', 'operationId', 'disposalUnitIds', 'completedAt']); utc(r.completedAt); }
+  catch { refuse('DestructionReceiptInvalid'); }
+  // A format-1 "permanent deletion" receipt or another execution's units is never accepted as this one's completion.
+  if (r.formatVersion !== 2 || r.kind !== 'operational-deletion' || r.method !== 'operational-store-deletion' || r.operationId !== operationId ||
+      !Array.isArray(r.disposalUnitIds) || JSON.stringify([...r.disposalUnitIds].sort()) !== JSON.stringify([...unitIds].sort()) ||
+      r.completedAt < requestedAt) refuse('DestructionReceiptInvalid');
+  return r.completedAt;
+}
+const DESTRUCTION_KEYS = ['formatVersion', 'kind', 'revision', 'operationId', 'phase', 'occurredAt', 'day', 'disposalUnitId', 'classes',
+  'clauseIds', 'partCount', 'expiryDay', 'extensionUsed', 'dueDay', 'timeliness', 'method', 'justifiedDelay', 'delayReasonStatus', 'basis'];
+/** H's reconciliation when the deletion committed but its completion write was lost: the same execution's started
+ * record, completed at the durable deletion confirmation. Timeliness comes from the stored due day, so a late
+ * confirmation stays late; the unit, classes and delay reason are the started record's own. */
+export function completedFromStarted(input: unknown, completedAt: string): Readonly<DestructionRecord> {
+  let s: Record<string, any>;
+  try {
+    s = object(input, DESTRUCTION_KEYS); string(s.operationId); opaqueUnit(s.disposalUnitId); utc(s.occurredAt); utc(completedAt);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s.dueDay)) throw new Error('due day');
+  } catch { refuse('StartedDestructionRequired'); }
+  if (s.formatVersion !== 2 || s.kind !== 'operational-deletion' || s.phase !== 'started' || s.revision !== 1 ||
+      s.method !== 'operational-store-deletion' || completedAt < s.occurredAt) refuse('StartedDestructionRequired');
+  const [y, m, d] = s.dueDay.split('-').map(Number);
+  const due = new Date(Date.UTC(y, m - 1, d + 1) - SEOUL_MS).toISOString();
+  const timeliness = completedAt < due ? 'within-five-days' as const : 'overdue' as const;
+  const justifiedDelay = s.justifiedDelay === null ? null : parseJustifiedDelay(s.justifiedDelay);
+  return freeze({ ...structuredClone(s), phase: 'completed' as const, occurredAt: completedAt, day: seoulDay(completedAt), timeliness,
+    delayReasonStatus: timeliness === 'within-five-days' ? 'not-required' as const : justifiedDelay ? 'recorded' as const : 'missing' as const,
+  }) as Readonly<DestructionRecord>;
+}
+/** One execution (a unit or a whole SCC): durable execution set → started for every unit → operational deletion →
+ * every completion in one write. A failure records `failed` at its actual time for every unit it can and stops. */
+async function executeSet<T>(store: DisposalAuditStore | BatchDisposalAuditStore, entries: readonly ExecutionEntry[], requestedAt: string,
+  request: T, destroy: (request: T) => Promise<DestructionReceipt>): Promise<readonly Readonly<DestructionRecord>[]> {
+  const unitIds = entries.map(e => e.details.disposalUnitId);
+  let begun: Record<string, any>;
+  try { begun = object(await store.beginSet(freeze([...unitIds])), ['operationId']); string(begun.operationId); }
+  catch { refuse('RetentionExecutionUnavailable'); }
+  const journals = entries.map(e => destructionJournal(store, e.eligibleAt, e.details, begun.operationId, e.justifiedDelay));
+  for (const journal of journals) await journal.append('started', requestedAt);
   let completedAt: string;
   try {
-    const receipt = object(await destroy(request), ['completedAt', 'method']);
-    completedAt = utc(receipt.completedAt);
-    if (receipt.method !== 'irreversible-permanent-deletion' || completedAt < requestedAt) refuse('DestructionReceiptInvalid');
-  } catch (error) { await append('failed', requestedAt); throw error; }
-  return append('completed', completedAt);
+    completedAt = receiptCompletedAt(await destroy(request), begun.operationId, unitIds, requestedAt);
+  } catch (error) {
+    let failedAt: string;
+    try { failedAt = utc(store.now()); } catch { failedAt = requestedAt; }
+    if (failedAt < requestedAt) failedAt = requestedAt; // A store clock behind the request cannot predate the start.
+    const journalErrors: unknown[] = [];
+    for (const journal of journals) {
+      try { await journal.append('failed', failedAt); } catch (journalError) { journalErrors.push(journalError); }
+    }
+    if (journalErrors.length) throw new AggregateError([error, ...journalErrors], 'DestructionFailureJournalIncomplete');
+    throw error;
+  }
+  const completed = freeze(journals.map(j => j.make('completed', completedAt)));
+  let receipt: Record<string, any>;
+  try { receipt = object(await store.appendCompletedSet(completed), ['durableAt']); }
+  catch { refuse('DestructionJournalUnavailable'); }
+  if (utc(receipt.durableAt) < completedAt) refuse('DestructionJournalReceiptInvalid');
+  return completed;
 }
-/** H erases all parts/signatures/replicas/recoverable backups atomically against the reference/hold snapshot. */
+/** Operational stores of the unit, against the reference/hold snapshot. Recovery-only backups are supervised separately;
+ * a partial deletion has no success receipt. */
 export async function destroyAtExpiry(store: DisposalAuditStore, input: DisposalRequest,
   destroy: (request: Readonly<DisposalRequest>) => Promise<DestructionReceipt>): Promise<Readonly<DestructionRecord>> {
   let v: Record<string, any>;
-  try { v = object(input, ['record', 'versionIds', 'requestedAt', 'graph']); } catch { refuse('DisposalRequestInvalid'); }
+  try { v = object(input, ['record', 'versionIds', 'requestedAt', 'graph', 'justifiedDelay']); } catch { refuse('DisposalRequestInvalid'); }
+  const justifiedDelay = parseJustifiedDelay(v.justifiedDelay);
   const record = parseRetentionRecord(v.record), requestedAt = utc(v.requestedAt);
   if (record.destroyedAt !== null) refuse('RecordDestroyed');
   if (!Array.isArray(v.versionIds) || new Set(v.versionIds).size !== v.versionIds.length ||
@@ -685,6 +797,7 @@ export async function destroyAtExpiry(store: DisposalAuditStore, input: Disposal
   if (v.graph === undefined || v.graph === null) refuse('ReferenceSnapshotRequired');
   retainingUnits(record, v.graph);
   if (typeof store.withRetentionLock !== 'function') refuse('RetentionLockRequired');
+  requireExecutionStore(store);
   return store.withRetentionLock(record.recordId, requestedAt, async current => {
   retainingUnits(record, current);
   if (!current || current.checkedAt !== requestedAt || JSON.stringify(current) !== JSON.stringify(v.graph)) refuse('ReferenceSnapshotStale');
@@ -696,21 +809,32 @@ export async function destroyAtExpiry(store: DisposalAuditStore, input: Disposal
   // Order units that are due together. A later inherited period for other bytes cannot re-propagate here.
   if (retainingUnits(record, current).some(r => r.recordId !== record.recordId && r.destroyedAt === null &&
       retentionDeadline(r, current) <= requestedAt)) refuse('IncorporatorStillPresent');
-  const request = freeze({ record, versionIds: [...v.versionIds], requestedAt, graph: v.graph }) as Readonly<DisposalRequest>;
+  const request = freeze({ record, versionIds: [...v.versionIds], requestedAt, graph: v.graph, justifiedDelay }) as Readonly<DisposalRequest>;
   const classes = statutoryClasses(record.kinds);
-  return destroyWithJournal(store, request, requestedAt, state.destroyNotBefore, {
+  const [completed] = await executeSet(store, [{ eligibleAt: state.destroyNotBefore, justifiedDelay, details: {
     disposalUnitId: record.disposalUnitId, classes, clauseIds: classes.map(c => STATUTORY_MINIMUM[c].clauseId), partCount: record.parts.length,
     expiryDay: seoulDay(new Date(Date.parse(state.deadline) - 1).toISOString()), extensionUsed: retainingUnits(record, v.graph).some(r => r.extension !== null),
-  }, destroy);
+  } }], requestedAt, request, destroy);
+  return completed;
   });
 }
 export interface BatchDisposalRequest {
-  units: readonly { record: RetentionRecord; versionIds: readonly string[] }[];
+  units: readonly { record: RetentionRecord; versionIds: readonly string[]; justifiedDelay: Readonly<JustifiedDelay> | null }[];
   requestedAt: string; graph: RetentionGraph;
 }
-export interface BatchDisposalAuditStore extends Pick<DisposalAuditStore, 'append'> {
+export interface BatchDisposalAuditStore extends Pick<DisposalAuditStore, 'append' | 'now' | 'beginSet' | 'appendCompletedSet'> {
   /** One lock covers every member, reverse reference, hold, journal and deletion through completion. */
   withRetentionBatchLock<T>(recordIds: readonly string[], at: string, work: (current: RetentionGraph) => Promise<T>): Promise<T>;
+}
+/** The SCC order destroyBatchAtExpiry executes, so H fixes one plan per set under the same batch lock. */
+export function disposalSets(recordIds: readonly string[], graph: RetentionGraph): readonly (readonly string[])[] {
+  const ids = [...recordIds].sort(), incoming = new Map<string, string[]>();
+  for (const id of ids) {
+    const record = graph.records.find(r => r?.recordId === id);
+    if (!record) refuse('ReferenceSnapshotStale');
+    incoming.set(id, retainingUnits(record, graph).filter(r => r.recordId !== id).map(r => r.recordId));
+  }
+  return freeze(orderedDisposalSets(ids, incoming));
 }
 /** Tarjan SCCs keep lawful older-version incorporation intact; the condensation is ordered incorporator-first. */
 function orderedDisposalSets(ids: readonly string[], incoming: ReadonlyMap<string, readonly string[]>): string[][] {
@@ -738,30 +862,33 @@ function orderedDisposalSets(ids: readonly string[], incoming: ReadonlyMap<strin
   }
   return ordered;
 }
-/** H's callback must atomically erase the entire supplied SCC, including replicas/backups and source mappings.
- * It must never implement the callback as independently committed per-record deletions.
+/** H's callback deletes the entire supplied SCC from the operational stores and confirms the remainder; the final
+ * PostgreSQL change is one commit for the set. External stores resume from the durable execution set; a partial
+ * deletion is never returned as success. A remaining recovery-only backup is not a reason to refuse it.
  */
 export async function destroyBatchAtExpiry(store: BatchDisposalAuditStore, input: BatchDisposalRequest,
   destroySet: (requests: readonly Readonly<DisposalRequest>[]) => Promise<DestructionReceipt>): Promise<readonly Readonly<DestructionRecord>[]> {
   const v = object(input, ['units', 'requestedAt', 'graph']), requestedAt = utc(v.requestedAt);
   if (!Array.isArray(v.units) || !v.units.length) refuse('DisposalRequestInvalid');
   const units = v.units.map(unit => {
-    object(unit, ['record', 'versionIds']);
+    try { object(unit, ['record', 'versionIds', 'justifiedDelay']); } catch { refuse('DisposalRequestInvalid'); }
+    const justifiedDelay = parseJustifiedDelay(unit.justifiedDelay);
     const record = parseRetentionRecord(unit.record);
     requireCurrentGraph(record, v.graph, requestedAt);
     if (!Array.isArray(unit.versionIds) || new Set(unit.versionIds).size !== unit.versionIds.length ||
         unit.versionIds.length !== record.parts.length || record.parts.some(p => !unit.versionIds.includes(p.partId))) refuse('CompleteVersionSetRequired');
-    return { record, versionIds: [...unit.versionIds] };
+    return { record, versionIds: [...unit.versionIds], justifiedDelay };
   });
   const ids: string[] = units.map(u => u.record.recordId).sort();
   if (new Set(ids).size !== ids.length) refuse('DisposalRequestInvalid');
   if (typeof store.withRetentionBatchLock !== 'function') refuse('RetentionLockRequired');
+  requireExecutionStore(store as Partial<DisposalAuditStore>);
   return store.withRetentionBatchLock(ids, requestedAt, async current => {
     if (JSON.stringify(current) !== JSON.stringify(v.graph)) refuse('ReferenceSnapshotStale');
     const incoming = new Map<string, string[]>(), requests = new Map<string, Readonly<DisposalRequest>>();
-    const journals = new Map<string, ReturnType<typeof destructionJournal>>();
-    // Validate the entire batch before any started record or destructive callback.
-    for (const { record, versionIds } of units) {
+    const entries = new Map<string, ExecutionEntry>();
+    // Validate the entire batch before any execution set, started record or destructive callback.
+    for (const { record, versionIds, justifiedDelay } of units) {
       requireCurrentGraph(record, current, requestedAt);
       const retainers = retainingUnits(record, current); retainers.forEach(requireStoredHolds);
       const state = retentionState(record, current, requestedAt);
@@ -769,27 +896,17 @@ export async function destroyBatchAtExpiry(store: BatchDisposalAuditStore, input
       if (state.destroyNotBefore === null) refuse('LegalHoldActive');
       if (requestedAt < state.destroyNotBefore) refuse('RetentionNotElapsed');
       incoming.set(record.recordId, retainers.filter(r => r.recordId !== record.recordId).map(r => r.recordId));
-      requests.set(record.recordId, freeze({ record, versionIds, requestedAt, graph: current }));
+      requests.set(record.recordId, freeze({ record, versionIds, requestedAt, graph: current, justifiedDelay }));
       const classes = statutoryClasses(record.kinds);
-      journals.set(record.recordId, destructionJournal(store, state.destroyNotBefore, {
+      entries.set(record.recordId, { eligibleAt: state.destroyNotBefore, justifiedDelay, details: {
         disposalUnitId: record.disposalUnitId, classes, clauseIds: classes.map(c => STATUTORY_MINIMUM[c].clauseId), partCount: record.parts.length,
         expiryDay: seoulDay(new Date(Date.parse(state.deadline) - 1).toISOString()), extensionUsed: retainers.some(r => r.extension !== null),
-      }));
+      } });
     }
     const sets = orderedDisposalSets(ids, incoming), completed: Readonly<DestructionRecord>[] = [];
-    for (const set of sets) {
-      for (const id of set) await journals.get(id)!('started', requestedAt);
-      let completedAt: string;
-      try {
-        const receipt = object(await destroySet(freeze(set.map(id => requests.get(id)!))), ['completedAt', 'method']);
-        completedAt = utc(receipt.completedAt);
-        if (receipt.method !== 'irreversible-permanent-deletion' || completedAt < requestedAt) refuse('DestructionReceiptInvalid');
-      } catch (error) {
-        for (const id of set) await journals.get(id)!('failed', requestedAt);
-        throw error;
-      }
-      for (const id of set) completed.push(await journals.get(id)!('completed', completedAt));
-    }
+    // A failed SCC (deletion, receipt or completion journal) throws here: the next SCC is never started.
+    for (const set of sets) completed.push(...await executeSet(store, set.map(id => entries.get(id)!), requestedAt,
+      freeze(set.map(id => requests.get(id)!)), destroySet));
     return freeze(completed);
   });
 }
@@ -894,7 +1011,8 @@ export async function withPurposeChange<T>(store: Pick<PurposeDisposalStore, 'wi
 }
 /** The stored end identifies THIS draft's result, not an earlier approval of its parent. */
 export async function destroyAtPurposeEnd(store: PurposeDisposalStore, record: PurposeRecord, event: PurposeEndEvent, requestedAt: string,
-  destroy: (record: Readonly<PurposeRecord>) => Promise<DestructionReceipt>): Promise<Readonly<DestructionRecord>> {
+  destroy: (record: Readonly<PurposeRecord>) => Promise<DestructionReceipt>, justifiedDelay: Readonly<JustifiedDelay> | null): Promise<Readonly<DestructionRecord>> {
+  const delay = parseJustifiedDelay(justifiedDelay);
   const parsed = parsePurposeRecord(record);
   if (parsed.destroyedAt !== null) refuse('RecordDestroyed');
   const e = event;
@@ -921,21 +1039,28 @@ export async function destroyAtPurposeEnd(store: PurposeDisposalStore, record: P
         (f.action === 'amend-window-closed' && b.action !== 'amend')) refuse('PurposeBindingRefused');
   } else if (e.superseded !== null) refuse('PurposeBindingRefused');
   if (typeof store.withPurposeLock !== 'function') refuse('RetentionLockRequired');
+  requireExecutionStore(store);
   return store.withPurposeLock(parsed.recordId, utc(requestedAt), async current => {
   if (JSON.stringify(parsePurposeRecord(current)) !== JSON.stringify(parsed)) refuse('PurposeSnapshotStale');
   requireStoredHolds(parsed);
   if (parsed.holds.some(h => !h.release && h.basis.validity.until !== null && h.basis.validity.until <= requestedAt)) refuse('HoldReleaseRequired');
   parsed.holds.forEach(h => checkHoldEnd(h, requestedAt));
   if (parsed.holds.some(h => !h.release)) refuse('LegalHoldActive');
-  return destroyWithJournal(store, freeze(parsed), utc(requestedAt), [e.at, ...parsed.holds.map(h => h.release!.at)].sort().slice(-1)[0], { disposalUnitId: parsed.disposalUnitId, classes: [], clauseIds: ['privacy:21.1'],
-    partCount: parsed.partIds.length, expiryDay: seoulDay(e.at), extensionUsed: false }, destroy);
+  const eligibleAt = [e.at, ...parsed.holds.map(h => h.release!.at)].sort().slice(-1)[0];
+  if (utc(requestedAt) < eligibleAt) refuse('RetentionNotElapsed');
+  const [completed] = await executeSet(store, [{ eligibleAt, justifiedDelay: delay, details: { disposalUnitId: parsed.disposalUnitId,
+    classes: [], clauseIds: ['privacy:21.1'], partCount: parsed.partIds.length, expiryDay: seoulDay(e.at), extensionUsed: false } }],
+    utc(requestedAt), freeze(parsed), destroy);
+  return completed;
   });
 }
 export interface DestructionConfirmation {
   action: 'destruction-confirmed'; batchId: string; disposalUnitIds: readonly string[]; officerId: string; role: 'privacy-officer'; at: string;
 }
 export function confirmDestruction(batchId: string, completed: readonly DestructionRecord[], officerId: string, at: string): Readonly<DestructionConfirmation> {
-  if (!completed.length || completed.some(e => e.phase !== 'completed' || e.day > seoulDay(at))) throw new Error('Completed batch required');
+  // Only operational-deletion completions; a supervision record or a format-1 receipt is not a completed destruction.
+  if (!completed.length || completed.some(e => e.formatVersion !== 2 || e.kind !== 'operational-deletion' || e.phase !== 'completed' ||
+      e.day > seoulDay(at))) throw new Error('Completed batch required');
   return freeze({ action: 'destruction-confirmed', batchId: string(batchId), disposalUnitIds: completed.map(e => opaqueUnit(e.disposalUnitId)),
     officerId: string(officerId), role: 'privacy-officer', at: utc(at) });
 }

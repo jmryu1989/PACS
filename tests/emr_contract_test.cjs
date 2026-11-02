@@ -352,14 +352,14 @@ if (process.argv.includes('--emr-inventory-generator')) {
   function disposal(overrides = {}) {
     const record = overrides.record ?? baseRecord(), requestedAt = overrides.requestedAt ?? '2031-10-04T15:00:00.000Z';
     const graph = Object.hasOwn(overrides, 'graph') ? overrides.graph : graphOf([record]);
-    return { record, versionIds: record.parts.map(p => p.partId), ...overrides, requestedAt,
+    return { record, versionIds: record.parts.map(p => p.partId), justifiedDelay: null, ...overrides, requestedAt,
       graph: graph && { ...graph, checkedAt: requestedAt } };
   }
   function expire(store, request, destroy) {
-    return D.destroyAtExpiry({ withRetentionLock: async (id, at, work) => work(request.graph), ...store }, request, destroy);
+    return D.destroyAtExpiry(executing({ withRetentionLock: async (id, at, work) => work(request.graph), ...store }), request, destroy);
   }
-  function endPurpose(store, record, event, at, destroy) {
-    return D.destroyAtPurposeEnd({ withPurposeLock: async (id, at, work) => work(record), ...store }, record, event, at, destroy);
+  function endPurpose(store, record, event, at, destroy, justifiedDelay = null) {
+    return D.destroyAtPurposeEnd(executing({ withPurposeLock: async (id, at, work) => work(record), ...store }), record, event, at, destroy, justifiedDelay);
   }
   async function refuseExpiry(request, code, extraStore = {}) {
     let deletes = 0; const journal = [];
@@ -380,7 +380,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
   async function refusePurpose(record, event, at, code, extraStore = {}) {
     let deletes = 0; const journal = [];
     await assert.rejects(endPurpose({ append: async e => { journal.push(e); return durable.append(e); }, ...extraStore }, record, event, at,
-      async () => { deletes++; return { completedAt: at, method: 'irreversible-permanent-deletion' }; }), { code });
+      async () => { deletes++; return removed(at); }), { code });
     assert.equal(deletes, 0); assert.equal(journal.filter(e => e.phase === 'started').length, 0);
   }
   const holdFacts = (recordId, overrides = {}) => ({ holdId: 'order-1', recordId, actorId: 'custodian', at: t0, release: null,
@@ -407,7 +407,19 @@ if (process.argv.includes('--emr-inventory-generator')) {
     requestRows.set(h.basis.requestId, { requestId: h.basis.requestId, recordIds: [recordId], receivedAt: at, responseDueAt: until, resolution: null });
     return h;
   }
-  const destroyed = request => ({ completedAt: request.requestedAt, method: 'irreversible-permanent-deletion' });
+  // CD-09 format 2: H binds one execution per unit/SCC; its receipt names exactly that execution's units.
+  let execution = null;
+  function executing(store) {
+    return { now: () => store.clock ?? '2099-01-01T00:00:00.000Z',
+      beginSet: async disposalUnitIds => { execution = { operationId: crypto.randomUUID(), disposalUnitIds: [...disposalUnitIds] };
+        return { operationId: execution.operationId }; },
+      appendCompletedSet: async events => { let durableAt;
+        for (const e of events) durableAt = (await store.append(e)).durableAt; return { durableAt }; }, ...store };
+  }
+  const removed = completedAt => ({ formatVersion: 2, kind: 'operational-deletion', method: 'operational-store-deletion',
+    operationId: execution.operationId, disposalUnitIds: execution.disposalUnitIds, completedAt });
+  const destroyed = request => removed(request.requestedAt);
+  const batch = (store, request, destroySet) => D.destroyBatchAtExpiry(executing(store), request, destroySet);
   const durable = { append: async e => ({ durableAt: `${e.day}T23:59:59.999Z` }) };
   test('TEST-EMR-19-A: every statutory record class has a fixed expiry and cited clause', () => {
     const expected = { patientRegister: [5, 1], chart: [10, 2], prescription: [2, 3], surgery: [10, 4],
@@ -457,11 +469,13 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.deepEqual(order, ['started', 'erase-original-and-amendment', 'completed']);
     assert.equal(result.phase, 'completed');
     for (const event of events) {
-      assert.deepEqual(Object.keys(event).sort(), ['basis', 'classes', 'clauseIds', 'day', 'disposalUnitId', 'dueDay', 'expiryDay', 'extensionUsed', 'formatVersion', 'method', 'partCount', 'phase', 'timeliness']);
+      assert.deepEqual(Object.keys(event).sort(), ['basis', 'classes', 'clauseIds', 'day', 'delayReasonStatus', 'disposalUnitId', 'dueDay', 'expiryDay',
+        'extensionUsed', 'formatVersion', 'justifiedDelay', 'kind', 'method', 'occurredAt', 'operationId', 'partCount', 'phase', 'revision', 'timeliness']);
       assert.equal(event.disposalUnitId, request.record.disposalUnitId);
       assert.equal(event.partCount, 2);
       assert(!JSON.stringify(event).includes('synthetic'));
-      assert.equal(event.method, 'irreversible-permanent-deletion'); complete(event);
+      assert.equal(event.formatVersion, 2); assert.equal(event.kind, 'operational-deletion');
+      assert.equal(event.method, 'operational-store-deletion'); complete(event);
     }
   });
   test('TEST-EMR-19-A: logging and deletion failures never manufacture successful destruction', async () => {
@@ -981,7 +995,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
           eventId: 'another-approval', reportId: 'parent', at: deadline, action: 'approve', authorId: 'another-reader', draftId: 'another-draft', versionId: 'approved-v1' } } : {});
         const events = [];
         const result = await endPurpose({ append: async e => { events.push(e); return durable.append(e); } }, record, end, deadline,
-          async target => { assert.deepEqual(target.partIds, record.partIds); return { completedAt: deadline, method: 'irreversible-permanent-deletion' }; });
+          async target => { assert.deepEqual(target.partIds, record.partIds); return removed(deadline); });
         assert.equal(result.phase, 'completed'); assert.deepEqual(events.map(e => e.phase), ['started', 'completed']);
         await refusePurpose(record, purposeEnd(record, 'arbitrary-timer'), deadline, 'PurposeBindingRefused');
       }
@@ -1086,7 +1100,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
     const lifted = D.liftPurposeLegalHold(held, hold.holdId, dutyReader(releaseFacts(hold, releasedAt)));
     await refusePurpose(lifted, end, deadline, 'RetentionNotElapsed');
     assert.equal((await endPurpose(durable, lifted, end, releasedAt,
-      async () => ({ completedAt: releasedAt, method: 'irreversible-permanent-deletion' }))).phase, 'completed');
+      async () => (removed(releasedAt)))).phase, 'completed');
   });
 
   test('TEST-EMR-19-A R2-04: only a new lawful content event changes the clock; expired units cannot revive', () => {
@@ -1228,7 +1242,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.throws(() => D.resolvePurposeEnd(endReader, end.eventId), { code: 'PurposeBindingRefused' });
     for (const event of [end, purposeEnd(draft, 'explicit-discard', at)]) {
       let deletes = 0;
-      assert.equal((await endPurpose(durable, draft, event, at, async () => { deletes++; return { completedAt: at, method: 'irreversible-permanent-deletion' }; })).phase, 'completed');
+      assert.equal((await endPurpose(durable, draft, event, at, async () => { deletes++; return removed(at); })).phase, 'completed');
       assert.equal(deletes, 1);
     }
   });
@@ -1360,7 +1374,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
       const draft = purposeRecord('overtaken-' + action, 'private-draft', 'owner', t0, ['d1'], { row: { draftBinding: { reportId: 'parent', intentId: action + '-intent', action } } });
       const end = purposeEnd(draft, 'intent-superseded', at, { superseded: fact });
       let deletes = 0;
-      const result = await endPurpose(durable, draft, end, at, async () => { deletes++; return { completedAt: at, method: 'irreversible-permanent-deletion' }; });
+      const result = await endPurpose(durable, draft, end, at, async () => { deletes++; return removed(at); });
       assert.equal(deletes, 1); assert.equal(result.phase, 'completed'); assert.equal(result.expiryDay, '2026-10-06');
       await refusePurpose(draft, purposeEnd(draft, 'intent-superseded', at, { superseded: { ...fact, reportId: 'other-parent' } }), at, 'PurposeBindingRefused');
       await refusePurpose(draft, purposeEnd(draft, 'report-finalized', at), at, 'PurposeBindingRefused');
@@ -1555,7 +1569,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
     const loaded = D.reloadPurposeRecord(JSON.parse(JSON.stringify(released)));
     assert.deepEqual(loaded, released);
     assert.equal((await endPurpose(durable, loaded, end, deadline,
-      async () => ({ completedAt: deadline, method: 'irreversible-permanent-deletion' }))).phase, 'completed');
+      async () => (removed(deadline)))).phase, 'completed');
   });
   test('TEST-EMR-19-A R4-02: either batch input order destroys incorporators then components at the shared deadline', async () => {
     for (const reversed of [false, true]) {
@@ -1826,10 +1840,10 @@ if (process.argv.includes('--emr-inventory-generator')) {
     return [a2, b1];
   }
   const batchRequest = (records, at, graph = snapshotFor(null, at, records)) => ({
-    units: records.map(record => ({ record, versionIds: record.parts.map(p => p.partId) })), requestedAt: at, graph });
+    units: records.map(record => ({ record, versionIds: record.parts.map(p => p.partId), justifiedDelay: null })), requestedAt: at, graph });
   async function refuseBatch(request, code, overrides = {}) {
     let deletes = 0; const journal = [];
-    await assert.rejects(D.destroyBatchAtExpiry({ withRetentionBatchLock: async (ids, at, work) => work(request.graph),
+    await assert.rejects(batch({ withRetentionBatchLock: async (ids, at, work) => work(request.graph),
       append: async e => { journal.push(e); return durable.append(e); }, ...overrides }, request,
       async () => { deletes++; return destroyed(request); }), { code });
     assert.equal(deletes, 0); assert.equal(journal.filter(e => e.phase === 'started').length, 0);
@@ -1839,7 +1853,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
       const records = cyclicRecords(), at = D.retentionDeadline(records[0]), graph = snapshotFor(null, at, records);
       for (const record of records) await refuseExpiry(disposal({ record, requestedAt: at, graph }), 'IncorporatorStillPresent');
       const request = batchRequest(reverse ? [...records].reverse() : records, at, graph), journal = []; let locked = false, calls = 0;
-      const completed = await D.destroyBatchAtExpiry({
+      const completed = await batch({
         withRetentionBatchLock: async (ids, time, work) => { assert.deepEqual(ids, ['cycle-A', 'cycle-B']); assert.equal(time, at); locked = true;
           try { return await work(graph); } finally { locked = false; } },
         append: async e => { assert(locked); journal.push(e); return durable.append(e); },
@@ -1861,7 +1875,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
     const at = D.retentionDeadline(cvr);
     for (const records of [[image, report, cvr], [cvr, report, image]]) {
       const request = batchRequest(records, at), deleted = [];
-      await D.destroyBatchAtExpiry({ ...durable, withRetentionBatchLock: async (ids, time, work) => work(request.graph) }, request,
+      await batch({ ...durable, withRetentionBatchLock: async (ids, time, work) => work(request.graph) }, request,
         async set => { deleted.push(set.map(r => r.record.recordId)); return destroyed(request); });
       assert.deepEqual(deleted, [[cvr.recordId], [report.recordId], [image.recordId]]);
     }
@@ -1891,14 +1905,14 @@ if (process.argv.includes('--emr-inventory-generator')) {
     const released = D.liftLegalHold(held, h.holdId, dutyReader(releaseFacts(h, at, {
       reason: 'effect-ended', endingFact: { kind: 'validity-expired', at: deadline } })));
     const request = batchRequest([records[0], released], at); let calls = 0;
-    const results = await D.destroyBatchAtExpiry({ ...durable, withRetentionBatchLock: async (ids, time, work) => work(request.graph) }, request,
+    const results = await batch({ ...durable, withRetentionBatchLock: async (ids, time, work) => work(request.graph) }, request,
       async set => { calls++; assert.equal(set.length, 2); return destroyed(request); });
     assert.equal(calls, 1); assert.equal(results.length, 2);
   });
   test('TEST-EMR-19-A R5-P2: failed atomic deletion journals the whole set and never reports a completed member', async () => {
     const records = cyclicRecords(), at = D.retentionDeadline(records[0]), request = batchRequest(records, at), journal = [];
     let calls = 0;
-    await assert.rejects(D.destroyBatchAtExpiry({ withRetentionBatchLock: async (ids, time, work) => work(request.graph),
+    await assert.rejects(batch({ withRetentionBatchLock: async (ids, time, work) => work(request.graph),
       append: async e => { journal.push(e); return durable.append(e); } }, request, async set => {
         calls++; assert.equal(set.length, 2); throw new Error('atomic storage refused');
       }), /atomic storage refused/);
@@ -1972,7 +1986,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
       await refusePurpose(draft, purposeEnd(draft, 'intent-superseded', deadline, { superseded: fact }), deadline, 'PurposeBindingRefused');
     const cancel = { eventId: 'parent-cancelled', reportId: 'parent', at: deadline, action: 'cancel', versionId: 'v2', reason: '검사 연결 정정' };
     const result = await endPurpose(durable, draft, purposeEnd(draft, 'intent-superseded', deadline, { superseded: cancel }), deadline,
-      async () => ({ completedAt: deadline, method: 'irreversible-permanent-deletion' }));
+      async () => (removed(deadline)));
     assert.equal(result.phase, 'completed');
   });
 }

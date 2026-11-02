@@ -1,5 +1,5 @@
 import { emrAdapters } from '../emr-contract/composition';
-import { BatchDisposalAuditStore, DisposalAuditStore, DisposalRequest, RetentionGraph, RetentionRecord, parseRetentionRecord,
+import { BatchDisposalAuditStore, DisposalAuditStore, DisposalRequest, RetentionGraph, RetentionRecord, disposalSets, parseRetentionRecord,
   retentionState } from '../emr-contract/lawful-defaults';
 import { choice, freeze, integer, object, refuse, sha256, string, utc } from '../emr-contract/validation';
 import { ACCESS_STREAMS, AccessFacts, AccessStream, COPY_CONTENTS, CopyContent, LocationClass, LocationDeletion, LocationRegistry,
@@ -374,12 +374,14 @@ export function requireErasable(input: ErasureAssessment): Readonly<ErasureAsses
 }
 
 const fixedPlans = new Set<{ graph: string; assessment: Readonly<ErasureAssessment> }>();
-type GatedStore = Partial<Pick<DisposalAuditStore, 'append' | 'withRetentionLock'> & Pick<BatchDisposalAuditStore, 'withRetentionBatchLock'>>;
+type GatedStore = Partial<Pick<DisposalAuditStore, 'append' | 'withRetentionLock' | 'now' | 'beginSet' | 'appendCompletedSet'> &
+  Pick<BatchDisposalAuditStore, 'withRetentionBatchLock'>>;
 /** Wraps B's lock so the inventory is read and judged under it before A writes any started record. Units A will
  * refuse (not due, held) skip the reading and reach A's own refusal; no plan is fixed for them. */
 export function inventoryGate(store: GatedStore): Readonly<GatedStore> {
   const gated: GatedStore = {};
-  if (typeof store?.append === 'function') gated.append = store.append.bind(store);
+  for (const method of ['append', 'now', 'beginSet', 'appendCompletedSet'] as const)
+    if (typeof store?.[method] === 'function') (gated as any)[method] = (store[method] as Function).bind(store);
   if (typeof store?.withRetentionLock === 'function')
     gated.withRetentionLock = (recordId, at, work) => store.withRetentionLock(recordId, at, current => gatedWork([recordId], at, current, work));
   if (typeof store?.withRetentionBatchLock === 'function')
@@ -397,18 +399,12 @@ async function gatedWork<T>(recordIds: readonly string[], at: string, current: R
     return state.destroyNotBefore !== null && time >= state.destroyNotBefore;
   });
   if (!due) return work(current);
-  // A calls the worker once per SCC. A shared backup cannot be split into independent per-record plans.
-  // R1 accepts one SCC; R2 must coordinate durable fences and replacements across a multi-SCC batch.
-  for (const id of recordIds) {
-    const reached = new Set([id]);
-    for (const from of reached) for (const ref of current.references)
-      if (ref.relation === 'incorporation' && ref.fromRecordId === from && recordIds.includes(ref.toRecordId)) reached.add(ref.toRecordId);
-    if (reached.size !== recordIds.length) refuse('SingleDisposalSetRequired');
-  }
-  const assessment = requireErasable(assessErasure(units, current, time));
-  const entry = { graph: JSON.stringify(current), assessment };
-  fixedPlans.add(entry);
-  try { return await work(current); } finally { fixedPlans.delete(entry); }
+  // A calls the worker once per SCC, in A's own order. Every SCC's plan is fixed under this one lock before any
+  // started record; a shared container cannot be split into per-record plans, and sets are never merged.
+  const graph = JSON.stringify(current), entries = disposalSets(recordIds, current).map(set =>
+    ({ graph, assessment: requireErasable(assessErasure(units.filter(u => set.includes(u!.recordId)) as RetentionRecord[], current, time)) }));
+  entries.forEach(entry => fixedPlans.add(entry));
+  try { return await work(current); } finally { entries.forEach(entry => fixedPlans.delete(entry)); }
 }
 /** The destroy callback reads the plan fixed under its own lock; outside a gated lock there is no plan. */
 export function fixedErasurePlan(requests: readonly Readonly<DisposalRequest>[]): Readonly<ErasureAssessment> {
@@ -494,7 +490,7 @@ export function verifyErasure(input: ErasureAssessment, at: string): Readonly<Er
 }
 
 export interface ErasureSummary {
-  formatVersion: 1; day: string; verifiedAt: string; units: number; method: 'irreversible-permanent-deletion';
+  formatVersion: 2; day: string; verifiedAt: string; units: number; method: 'operational-store-deletion';
   locations: readonly { locationClass: LocationClass; erasedCopies: number; erasedContainers: number; replacedContainers: number; erasedKeys: number }[];
   institutionEvidence: 'missing' | 'linked';
 }
@@ -510,7 +506,7 @@ export function erasureSummary(verification: ErasureVerification): Readonly<Eras
     erasedContainers: assessment.containers.filter(c => c.disposition === 'erase-container' && c.locationClasses.includes(locationClass)).length,
     replacedContainers: assessment.containers.filter(c => c.disposition === 'replace-container' && c.locationClasses.includes(locationClass)).length,
     erasedKeys: assessment.keys.filter(k => k.disposition === 'erase' && k.locationClasses.includes(locationClass)).length }));
-  return freeze({ formatVersion: 1 as const, day: new Date(Date.parse(verification.at) + 9 * 3_600_000).toISOString().slice(0, 10),
-    verifiedAt: verification.at, units: assessment.recordIds.length, method: 'irreversible-permanent-deletion' as const, locations,
+  return freeze({ formatVersion: 2 as const, day: new Date(Date.parse(verification.at) + 9 * 3_600_000).toISOString().slice(0, 10),
+    verifiedAt: verification.at, units: assessment.recordIds.length, method: 'operational-store-deletion' as const, locations,
     institutionEvidence: assessment.institutionEvidence.status });
 }
