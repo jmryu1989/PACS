@@ -89,6 +89,12 @@ jobs:
             echo "::error::${#failed[@]} PG ledger classes failed: ${failed[*]}"
             exit 1
           fi
+      - name: Retention worker on a migrated database
+        if: ${{ !cancelled() && !github.event.pull_request.draft }}
+        timeout-minutes: 15
+        env:
+          KIN_LIVE_ENVIRONMENT: ci-cd09-retention
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/cd09-retention --tree api/src --tree api/prisma --tree tests/emr/retention --file tests/e2e/test_cd09_retention_worker.py --file tests/emr/b/pg_ledger_restore_test.py -- python3 scripts/run-tests.py --module tests/e2e/test_cd09_retention_worker.py --mode live --unit ci-cd09-retention --timeout 600
       - name: Request facts through registered HTTP and PostgreSQL
         if: ${{ !cancelled() && !github.event.pull_request.draft }}
         timeout-minutes: 5
