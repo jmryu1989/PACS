@@ -956,6 +956,12 @@ class StudyPanelSizeDOM(unittest.TestCase):
                 page.get_by_role('separator', name='Image and Report Size', exact=True).focus()
                 page.keyboard.press('End')
                 settle(page)
+                # Provisional until Minhoon confirms (11-03 commander): at 1366x768 the report row may start below
+                # the first screen. Judge the arrival state first - a reader's wheel reaches Save - then scroll for them.
+                reach = page.evaluate(dom.W6_REACH, ['#b-save'])['below']['#b-save']
+                self.assertTrue(reach['window'], reach)
+                self.assertIsNone(reach['clipped'], reach)
+                self.assertTrue(all(wheel for _, wheel in reach['scrolled']), reach)
                 page.locator('#b-save').scroll_into_view_if_needed()
                 closed = self.assert_report_usable(page, 'closed')
                 page.get_by_role('button', name='Study Info & Templates', exact=True).click()

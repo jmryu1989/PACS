@@ -419,7 +419,7 @@ jobs:
     needs: select
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['viewer-dom']) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 92
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -521,6 +521,10 @@ jobs:
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 3
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/identity-position --cwd . --file worklist-v0/hpacs-lite/viewer-identity.js --file worklist-v0/hpacs-lite/reading-appearance.js --file worklist-v0/hpacs-lite/reading-appearance-account.js --file worklist-v0/hpacs-lite/volume-preferences.js --file tests/viewer_identity_position_dom_test.py --file tests/module_session_harness.py --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_identity_position_dom_test.py
+    - name: Viewer branding header placement keeps the focused patient tab or header control
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      timeout-minutes: 2
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-header-focus --cwd . --file config/ohif/branding.js --file tests/viewer_header_focus_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_header_focus_dom_test.py
     - name: S7-U5 viewer documents - session boundary, pause held by a Web Lock, end before any start, resource guard and clinician entry DOM
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 8

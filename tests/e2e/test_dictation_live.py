@@ -60,6 +60,7 @@ from report_dictation_capture_dom_test import (  # noqa: E402  (U4b-accepted hel
     log_entry, csp_log_verdict, UNCHANGED, BROWSER_VERSION)
 import dictation_capture_signal as signal  # noqa: E402
 import measurement_ci  # noqa: E402  (its sanitize() is the one CI redaction rule)
+import report_column_reach as column_reach  # noqa: E402  (shared with test_finding_worklist.py)
 
 ROOT = Path(__file__).resolve().parents[2]
 MAIN_PATH = '/worklist/hpacs-lite/main.html'
@@ -98,6 +99,7 @@ GEO_CONTROLS = {'recording': ('dictation-stop', 'dictation-cancel'), 'failed': (
                 'review': ('dictation-insert', 'dictation-cancel')}
 GEO_HIT_IDS = ('b-dictate', 'dictation-status', 'dictation-stop', 'dictation-cancel', 'dictation-insert',
                'dictation-close', 'dictation-repin', 'b-copy', 'm-reading', 'reading-findings-open')
+REACH_TARGET = ['.report-p .rbtns', '#b-dictate']
 
 # ── P10 through the browser's own NetLog (Astra decision 2026-09-23, review F1-F5). The proof object is the
 # original one: the worklet response the browser itself received, status 200, COOP same-origin, COEP
@@ -320,6 +322,7 @@ PROBES = {
               "return d ? { hidden: !!d.hidden, state: d.dataset.state || null, study: d.dataset.studyUid || null } : null; }",
     'geometry': GEOMETRY,
     'toggle_reach': TOGGLE_REACH,
+    'entry_reach': column_reach.READ,
     'frames2': "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))",
 }
 
@@ -1231,6 +1234,7 @@ def oracle_self_check():
                            ('unobserved', (api, None, api))):
         if gcsp_input(*args) != expected:
             problems.append('gcsp_input must classify %s' % expected)
+    problems += column_reach.self_check()
     # G0-G6.
     initial = sample_geometry(state_ok=False)
     if geo_entry_problems(initial):
@@ -2672,13 +2676,19 @@ class DictationLiveE2E(test_worklist.WorklistE2E):
             rec['drawer_reopen'] = self.reopen_drawer(run)
             run.js('frames2')
             rec['before_entry_reveal'] = run.js('geometry')
-            # The stacked card may start below the viewport. Reveal the entry as a reader would;
-            # G0 still rejects interception, and all subsequent geometry reads remain observational.
+            arrival = run.js('entry_reach', REACH_TARGET)
+            # Provisional until Minhoon confirms (11-03 commander): at 1366x768 Reading Workspace the stacked
+            # card may start the action row below the first screen. The arrival state is recorded above, and the
+            # reveal below must be one scroll of the scrollable report column that shows Dictate whole
+            # (report_column_reach.py). If Minhoon answers that the row belongs on the first screen, delete the
+            # reveal and this check so G0 reads the arrival state again.
             page.locator('#b-dictate').scroll_into_view_if_needed()
             run.js('frames2')
+            rec['entry_reach'] = {'arrival': arrival, 'revealed': run.js('entry_reach', REACH_TARGET)}
             initial = rec['initial'] = run.js('geometry')
             rec['reached'].append('initial')
-            entry = geo_entry_problems(initial)
+            entry = ['G0 ' + problem for problem in column_reach.reach_problems(arrival, rec['entry_reach']['revealed'])]
+            entry += geo_entry_problems(initial)
             rec['problems'] += entry
             if entry:
                 raise Stop('G0', entry)

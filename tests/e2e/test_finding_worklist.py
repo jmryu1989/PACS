@@ -13,6 +13,7 @@ import test_finding_navigation as navigation
 from test_viewer_history import expect, literal, synthetic_ct
 from viewer_precision_support import hook
 from viewer_session import end_document, observe_viewer
+import report_column_reach as column_reach
 
 ACTIVE = "()=>{const s=__d05c1.services;return s.cornerstoneViewportService.getCornerstoneViewport(s.viewportGridService.getActiveViewportId())?.getCurrentImageId?.()||''}"
 SHOWS = "sop=>{const s=__d05c1.services;return !!s.cornerstoneViewportService.getCornerstoneViewport(s.viewportGridService.getActiveViewportId())?.getCurrentImageId?.().includes('/instances/'+sop+'/frames/1')}"
@@ -62,6 +63,7 @@ ENTRY_GEOMETRY = """()=>{
   for(const id of ['b-structured','reading-findings-open','struct-value-text','struct-apply','struct-cancel'])
     out.controls[id]=Object.assign({rect:box(q('#'+id))},seen(q('#'+id)));
   return out;}"""
+REACH_TARGET = ['.report-p .rbtns', '#b-structured']
 # S2-V: the frozen copies read with names and units; the ellipse numbers are API-seeded, never recomputed.
 ELLIPSE_VALUES = [400.26, 45.0, -20.0, 80.0, 1234]
 LENGTH_TEXT = '★ Length · 길이 · 프레임 1 · r1 · 20.0 mm · Current'
@@ -732,18 +734,25 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         w.evaluate(COPY_PROBE)
         expect(w.locator('#reading-findings')).to_be_visible()
         expect(w.locator('#structmodal')).to_be_hidden()
-        initial, measured, before_scroll, reached = None, None, None, []
+        initial, measured, before_scroll, reach, reached = None, None, None, {}, []
         try:
             before_scroll = w.evaluate(ENTRY_GEOMETRY)
+            reach['arrival'] = w.evaluate(column_reach.READ, REACH_TARGET)
             self.bound_holds(before_scroll, 'before scrolling at %dx%d' % (width, height))
             button = before_scroll['controls']['b-structured']['rect']
             if button['b'] > height or button['y'] < 30:
-                # More expands below the stacked editor. Reveal its lower controls with a real
-                # wheel in the report's scrollable column; the drawer remains open throughout.
+                # Provisional until Minhoon confirms (11-03 commander): at 1366x768 Reading Workspace the
+                # expanded More starts below the first screen. The wheel stays a real one in the report's
+                # scrollable column, and the arrival state above is what reach_problems judges: one scroll
+                # of that column must show Structured whole. If Minhoon answers that the row belongs on the
+                # first screen, delete this wheel and the reach check so the entry hit test reads arrival.
                 report = w.locator('.report-p').bounding_box()
                 w.mouse.move(report['x'] + 12, min(height - 15, report['y'] + report['height'] - 15))
                 w.mouse.wheel(0, height if button['b'] > height else -height)
                 w.evaluate('()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))')
+            reach['revealed'] = w.evaluate(column_reach.READ, REACH_TARGET)
+            self.assertEqual([], column_reach.reach_problems(reach['arrival'], reach['revealed']),
+                             'the Structured entry at %dx%d is not one report-column scroll away' % (width, height))
             initial = w.evaluate(ENTRY_GEOMETRY)
             # The bound, from rendered rectangles rather than from the stylesheet's text. The drawer
             # is opened once, before the first viewport, so on the second pass this is also the
@@ -810,7 +819,8 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
             # Keep the raw resized geometry, the user-revealed entry and the modal/failure state
             # separate so a reader can distinguish scrolling from drawer interception.
             print('R15-ENTRY ' + json.dumps(dict(viewport=[width, height], reached=reached,
-                                                 beforeScroll=before_scroll, initial=initial, measured=measured),
+                                                 beforeScroll=before_scroll, reach=reach, initial=initial,
+                                                 measured=measured),
                                             ensure_ascii=False), flush=True)
 
     def test_worklist_07_structured_entry_over_the_findings_drawer_and_the_copy_shortcut(self):

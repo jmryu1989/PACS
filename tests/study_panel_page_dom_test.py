@@ -780,7 +780,13 @@ class StudyPanelPageDOM(unittest.TestCase):
                 if width >= 1080 and height >= 1920:
                     for name in ('#b-approve', '#b-save', '#findings', '#conclusion'):
                         self.assertTrue(opened[name]['whole'], f'{name} whole in view with the panel open')
-                # The bottom action row is reached through the report card's own scroller.
+                # The bottom action row is reached through the report card's own scroller. Provisional until
+                # Minhoon confirms (11-03 commander): the row may start below the first screen, so the arrival
+                # state is judged first - a reader's wheel reaches it - and only then does the test scroll for them.
+                reach = page.evaluate(W6_REACH, ['#b-save'])['below']['#b-save']
+                self.assertTrue(reach['window'], reach)
+                self.assertIsNone(reach['clipped'], reach)
+                self.assertTrue(all(wheel for _, wheel in reach['scrolled']), reach)
                 page.locator('#b-save').scroll_into_view_if_needed()
                 settle(page)
                 self.assert_drawer_place(page, width, height)
