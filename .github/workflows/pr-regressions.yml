@@ -712,7 +712,7 @@ jobs:
     needs: select
     if: ${{ !cancelled() && (needs.select.result != 'success' || fromJSON(needs.select.outputs.jobs)['admin-session-dom']) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 71
+    timeout-minutes: 77
     steps:
     - name: Path selection completed
       if: ${{ needs.select.result != 'success' }}
@@ -756,6 +756,14 @@ jobs:
         python3 -m venv "$RUNNER_TEMP/measurement-python"
         "$RUNNER_TEMP/measurement-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
         "$RUNNER_TEMP/measurement-python/bin/python" -m playwright install --with-deps chromium
+    - name: CD-04 auditor search, scope refusals, continuation and export DOM
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      timeout-minutes: 3
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/audit-page-dom --cwd . --file worklist-v0/hpacs-lite/audit.html --file worklist-v0/hpacs-lite/audit.js --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file tests/audit_page_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/audit_page_dom_test.py
+    - name: CD-05 Monthly inspection report, append-only reason checks and session boundaries DOM
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      timeout-minutes: 3
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/audit-inspection-dom --cwd . --file worklist-v0/hpacs-lite/audit.html --file worklist-v0/hpacs-lite/audit.js --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file tests/audit_inspection_dom_test.py --file tests/audit_page_dom_test.py --file tests/emr/f/inspection_harness.cjs --tree api/src/emr-audit --tree api/src/emr-contract --file api/tsconfig.json --file api/package-lock.json -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/audit_inspection_dom_test.py
     - name: S5-U5a Members console role round trip, unknown-role passthrough and wording DOM
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 3
