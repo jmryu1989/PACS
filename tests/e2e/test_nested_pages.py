@@ -15,7 +15,7 @@ class NestedPagesE2E(CompoundSearchE2E):
         prefix='NEST-'+uuid.uuid4().hex[:8]
         a=self.fixture(patient_id=prefix+'A');b=self.fixture(patient_id=prefix+'B');c=self.fixture(patient_id=prefix+'C')
         self.seed_report(a);page=self.login();self.select(page,a)
-        page.locator('#findings').fill('Nested search unsaved report');page.locator('#quick').fill(prefix)
+        page.locator('#findings').fill('Nested search unsaved report');page.locator('#filterrow [data-f="id"]').fill(prefix)
         self.open_manager(page);page.locator('#sfm-add-group').click()
         group=page.locator('#sfm-rules > .sfm-group')
         page.locator('#sfm-preview').click();expect(page.locator('#sfm-status')).to_contain_text('비어 있을 수 없')
@@ -58,7 +58,7 @@ class NestedPagesE2E(CompoundSearchE2E):
         # Browser-only synthetic scale response: no dummy study or report is stored.
         me=document_request(page, "GET", self.stack.api+'/me').json();owner=[me['institution'],me['sub']]
         page.route('**/api/studies?*',lambda route:fulfill_page(route,items,owner))
-        page.locator('#m-refresh').click();page.locator('#quick').fill(prefix)
+        page.locator('#m-refresh').click();page.locator('#filterrow [data-f="id"]').fill(prefix)
         page.locator('#heads [data-key=id]').click();page.locator('#page-size').select_option('25')
         expect(page.locator('#page-status')).to_contain_text('1–25 / 1001건')
         expect(page.locator('#rows tr[data-uid]')).to_have_count(25)
@@ -73,17 +73,17 @@ class NestedPagesE2E(CompoundSearchE2E):
         expect(page.locator('#findings')).to_have_value('Page browsing preserves this report')
         page.locator('#page-size').select_option('100');expect(page.locator('#rows tr[data-uid]')).to_have_count(100)
         page.locator('#page-size').evaluate("e=>e.value='25'")
-        page.locator('#quick').fill(prefix)
+        page.locator('#filterrow [data-f="id"]').fill(prefix)
         expect(page.locator('#page-size')).to_have_value('100');expect(page.locator('#rows tr[data-uid]')).to_have_count(100)
         page.locator('#heads [data-key=id]').click()
         expect(page.locator('#rows tr').first).to_have_attribute('data-uid','synthetic-page-1000')
         page.locator('#page-next').click();expect(page.locator('#rows tr[data-uid]')).to_have_count(100)
-        page.locator('#quick').fill(prefix+'1000');expect(page.locator('#rows tr[data-uid]')).to_have_count(1)
+        page.locator('#filterrow [data-f="id"]').fill(prefix+'1000');expect(page.locator('#rows tr[data-uid]')).to_have_count(1)
         expect(page.locator('#page-status')).to_contain_text('1–1 / 1건')
         expect(page.locator('#page-next')).to_be_disabled();expect(page.locator('#page-current')).to_be_disabled()
-        page.locator('#quick').fill('NO-MATCH-'+prefix);expect(page.locator('#page-status')).to_contain_text('0–0 / 0건')
+        self.quick_search(page, 'NO-MATCH-'+prefix);expect(page.locator('#page-status')).to_contain_text('0–0 / 0건')
         expect(page.locator('#page-prev')).to_be_disabled();expect(page.locator('#page-next')).to_be_disabled()
-        page.locator('#quick').fill(prefix);self.screenshot(page,'paged-worklist.png')
+        self.quick_search(page, prefix);self.screenshot(page,'paged-worklist.png')
 
 def load_tests(loader,tests,pattern):
     return unittest.TestSuite(NestedPagesE2E(name) for name in loader.getTestCaseNames(NestedPagesE2E) if name.startswith('test_nested_'))

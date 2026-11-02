@@ -180,7 +180,7 @@ class PortraitWorkspaceE2E(base.WorklistE2E):
         expected = current.secret + "\n" + template["findings"]
         expect(page.locator("#findings")).to_have_value(expected)
         expect(page.locator("#conclusion")).to_have_value("E2E conclusion\n" + template["conclusion"])
-        page.locator("#quick").click()
+        page.locator('#filterrow [data-f="id"]').click()
         self.wait_state(page, current, lambda s: (s.get("draft") or {}).get("findings") == expected, timeout=30000)
         self.portrait(page, 768, 1024)
         self.reachable(page, "#findings")
@@ -230,7 +230,7 @@ class PortraitWorkspaceE2E(base.WorklistE2E):
         doctor.locator("#tplrows").get_by_text(template["title"], exact=True).dblclick()
         expected = fixture.secret + "\n" + template["findings"]
         expect(doctor.locator("#findings")).to_have_value(expected)
-        doctor.locator("#quick").click()
+        doctor.locator('#filterrow [data-f="id"]').click()
         self.wait_state(doctor, fixture, lambda s: (s.get("draft") or {}).get("findings") == expected, timeout=30000)
         self.assertEqual(self.state(fixture)["rs"], "A")
         self.assertEqual(self.state(fixture)["findings"], fixture.secret)

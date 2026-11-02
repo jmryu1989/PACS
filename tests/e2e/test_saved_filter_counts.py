@@ -21,7 +21,7 @@ class SavedFilterCountsE2E(previous.WorklistE2E):
         shared_id = "FILTER-" + uuid.uuid4().hex[:10]
         first, second = self.fixture(patient_id=shared_id), self.fixture(patient_id=shared_id)
         page = self.login()
-        page.locator("#quick").fill(shared_id)
+        self.quick_search(page, shared_id)
         page.locator('#filterrow input[data-f="desc"]').fill("Invariant route fixture")
         expect(page.locator("#rows tr[data-uid]" )).to_have_count(2)
 
@@ -55,14 +55,14 @@ class SavedFilterCountsE2E(previous.WorklistE2E):
         expect(page.locator("#toast")).to_have_text(f'"{name}" 을 기본 필터로 지정했습니다')
         expect(chip).to_have_attribute("aria-label", re.compile(r"기본 필터"))
 
-        page.locator("#quick").fill("NO-SUCH-PATIENT")
+        self.quick_search(page, "NO-SUCH-PATIENT")
         page.locator('#filterrow input[data-f="desc"]').fill("NO-SUCH-DESCRIPTION")
         expect(page.locator("#rows tr[data-uid]")).to_have_count(0)
         expect(chip).to_contain_text("(2)")
 
         third = self.fixture(patient_id=shared_id)
         with page.expect_response(lambda r: r.request.method == "GET" and r.url.split("?")[0].endswith("/api/studies")):
-            page.locator("#refresh").click()
+            page.locator("#m-refresh").click()
         expect(chip).to_contain_text("(3)")
         self.open_toolbar_group(page, '#chips')
         chip.locator("span").click()

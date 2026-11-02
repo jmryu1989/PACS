@@ -134,7 +134,7 @@ class ViewerDisplayLayoutE2E(PhysicalMonitorsE2E):
         p,first,a,first_marker=self.setup_viewer();p.locator('#viewer-windows-done').click()
         b=self.ct('DISPLAY-OTHER-'+uuid.uuid4().hex[:12],'other','20260802');self.seed_report(b,findings='DISPLAY SECOND BASE')
         original=self.originals()
-        p.locator('#quick').fill('');p.evaluate('load()');self.select(p,b);self.thumbs(p,1)
+        p.locator('#filterrow [data-f="id"]').fill('');p.evaluate('load()');self.select(p,b);self.thumbs(p,1)
         expect(p.locator('#findings')).to_have_value('DISPLAY SECOND BASE');p.locator('#findings').fill('SECOND PATIENT UNSAVED REPORT')
         second=retained_window(p,b.uid)
         second.wait_for_function('typeof kinViewerJobWorkspaceState==="function"')

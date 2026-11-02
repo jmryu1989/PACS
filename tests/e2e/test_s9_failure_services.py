@@ -52,6 +52,7 @@ class FailureServicesE2E(unittest.TestCase):
     login = worklist.WorklistE2E.login
     login_page = worklist.WorklistE2E.login_page
     select = worklist.WorklistE2E.select
+    open_toolbar_group = worklist.WorklistE2E.open_toolbar_group
     close_contexts = worklist.WorklistE2E.close_contexts
     cleanup_fixtures = worklist.WorklistE2E.cleanup_fixtures
 

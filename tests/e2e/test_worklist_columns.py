@@ -54,7 +54,7 @@ class WorklistColumnsE2E(base.WorklistE2E):
         self.seed_report(first)
         page=self.login();self.select(page,first)
         page.locator('#findings').fill(first.secret+' unsaved')
-        page.locator('#quick').fill(prefix)
+        page.locator('#filterrow [data-f="id"]').fill(prefix)
         page.locator('#filterrow [data-f="desc"]').fill('Invariant')
         page.locator('#heads [data-key="desc"]').click()
         original=page.locator('#heads th').evaluate_all('els=>els.map(e=>e.dataset.key)')
@@ -103,7 +103,7 @@ class WorklistColumnsE2E(base.WorklistE2E):
         prefix='COL-COMPOUND-'+uuid.uuid4().hex[:8]
         first=self.fixture(patient_id=prefix+'A');second=self.fixture(patient_id=prefix+'B')
         self.patch(first,ov={'desc':'match'});self.patch(second,ov={'desc':'other'})
-        page=self.login();page.locator('#quick').fill(prefix)
+        page=self.login();page.locator('#filterrow [data-f="id"]').fill(prefix)
         self.open_toolbar_group(page,'#managefilters')
         page.locator('#managefilters').click();page.locator('#sfm-add-rule').click()
         row=page.locator('#sfm-rules .sfm-rule')
@@ -116,7 +116,7 @@ class WorklistColumnsE2E(base.WorklistE2E):
         expect(page.locator('#rows tr[data-uid]')).to_have_count(1)
         expect(page.locator(f'#rows tr[data-uid="{first.uid}"]')).to_be_visible()
         expect(page.locator('#filterlist')).to_contain_text('복합 (StudyDesc 같음 match)')
-        page.locator('#clearfilter').click();page.locator('#quick').fill(prefix)
+        self.clear_filters(page);page.locator('#filterrow [data-f="id"]').fill(prefix)
         expect(page.locator('#rows tr[data-uid]')).to_have_count(2)
 
     def test_columns_02_conflict_failure_corrupt_and_cancel(self):

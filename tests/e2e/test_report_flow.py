@@ -27,7 +27,7 @@ class W4ReportFlowE2E(TemplatePreservationE2E):
         by_uid = {fixture.uid: fixture for fixture in studies}
         template = self.template(findings="SYN W4 FINDINGS", conclusion="SYN W4 CONCLUSION", recommendation=RECOMMENDATION)
         page = self.login()
-        page.locator("#quick").fill(patient)
+        page.locator('#filterrow [data-f="id"]').fill(patient)
         rows = page.locator("#rows tr[data-uid]")
         expect(rows).to_have_count(3)
         page.select_option("#filterrow [data-f=rs]", "W")
