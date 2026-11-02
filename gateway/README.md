@@ -7,6 +7,15 @@ Transfer 수신 API가 추가되는 후속 커밋 전에는 열지 않는다.
 MG·DBT·XA/US 시네를 포함한 DICOM 원본을 전송한다. 큰 단일 인스턴스도 분할하지 않고
 하나의 STOW part로 보내며, 전송 본문은 임시 파일에 스트리밍하여 준비한다.
 
+CD-10: 각 STOW 요청은 로컬 Orthanc의 `RemoteAET`(실제 C-STORE association의 송신 AE)를
+`X-Kin-Source-AE`에, 설정된 `KIN_CLIENT_ID`를 `X-Kin-Gateway`에,
+그 `gw-<institutionId>`의 기관 ID를 `X-Kin-Institution`에 보낸다.
+서로 다른 송신 AE의 객체는 별도 배치로 보내며 DICOM 원본과 multipart 형식은 유지한다.
+로컬 REST 반입 등으로 송신 AE가 없으면 빈 값이다. 서버는 기관을 기존 검증 자격증명으로 판정한다.
+구형 agent의 헤더 없는 요청도 수용하고 기재 주체를 `gateway (unknown source AE)`로 기록하는 것이
+서버 수신 계약이다. 서버는 archive가 수락한 SOP의 환자 연결과 기재 기록을 확정한 뒤 STOW 응답을 보낸다.
+기재 기록을 확인하지 못하면 503을 반환하며, 원본은 지우지 않고 기존 큐 재시도로 결과를 다시 확인한다.
+
 ## 설치
 
 1. `.env.example`을 `.env`로 복사하고 실제 값을 채운다. `.env`와 SQLite 큐는 커밋하지 않는다.
@@ -58,3 +67,5 @@ UID·단계·병원 보유 N건 중 보낸 M건·재시도 횟수·고정 오류
 로그와 큐에는 UID·SOP UID·개수·바이트 수만 남기며 환자 이름과 PatientID는 남기지 않는다.
 `KIN_TLS_VERIFY=false`는 자체 서명 인증서를 쓰는 로컬 검증 전용이다. 운영에서는 신뢰할 수 있는
 CA 인증서를 사용하고 기본값 `true`를 유지한다.
+
+CD-10 수신 기록: Orthanc가 성공 SOP 목록에 포함한 재전송 객체도 Gateway 경로에서는 기재로 다시 기록합니다. 로컬 반입의 `already-present`는 새 기재를 남기지 않습니다. 이 차이는 누락이 아닌 중복 기록이며, 경로 간 정렬은 후속 관련 묶음에서 다룹니다.

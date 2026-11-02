@@ -448,7 +448,10 @@ class Orthanc:
             size = int(item.get("FileSize", 0))
             if not sop or not instance_id or size <= 0:
                 raise GatewayError("local instance metadata incomplete")
-            normalized.append({"sop": sop, "id": instance_id, "size": size})
+            # RemoteAET is Orthanc's C-STORE association fact, not a DICOM patient-supplied tag.
+            metadata = self.request("GET", f"/instances/{instance_id}/metadata?expand").json()
+            normalized.append({"sop": sop, "id": instance_id, "size": size,
+                               "source_ae": str(metadata.get("RemoteAET", ""))})
         if len({item["sop"] for item in normalized}) != len(normalized):
             raise GatewayError("duplicate local SOPInstanceUID")
         normalized.sort(key=lambda item: item["sop"])
@@ -537,10 +540,12 @@ class Cloud:
         # Only this queue's epoch goes out: KIN answers with this institution's UIDs for this epoch and nothing else.
         return self.request("GET", "/api/gateway/retry-requests", params={"epoch": epoch})
 
-    def stow(self, uid: str, body: bytes, content_type: str) -> set[str]:
+    def stow(self, uid: str, body: bytes, content_type: str, source_ae: str) -> set[str]:
         response = self.request(
             "POST", f"/dicom-web/studies/{uid}", data=body,
-            headers={"Content-Type": content_type, "Accept": "application/dicom+json"},
+            headers={"Content-Type": content_type, "Accept": "application/dicom+json",
+                     "X-Kin-Source-AE": source_ae, "X-Kin-Gateway": self.client_id,
+                     "X-Kin-Institution": self.client_id.removeprefix("gw-")},
             timeout=self.stow_timeout,
         )
         if not response.ok:
@@ -576,7 +581,7 @@ def plan_batches(instances: list[dict[str, Any]], budget: int) -> list[list[dict
     used = 128
     for item in instances:
         estimated = int(item["size"]) + 512
-        if current and used + estimated > budget:
+        if current and (used + estimated > budget or item.get("source_ae", "") != current[0].get("source_ae", "")):
             batches.append(current)
             current = []
             used = 128
@@ -774,7 +779,7 @@ class Agent:
         for batch_index, batch in enumerate(batches, int(row["batch_index"]) + 1):
             self.queue.phase(uid, "sending", batch_index)
             with multipart(batch, self.orthanc.copy_file) as (body, content_type, body_size):
-                failures = self.cloud.stow(uid, body, content_type)
+                failures = self.cloud.stow(uid, body, content_type, batch[0].get("source_ae", ""))
             batch_sops = {item["sop"] for item in batch}
             unknown = failures - batch_sops
             if unknown:

@@ -365,7 +365,8 @@ class AgentPins(unittest.TestCase):
         self.assertEqual(re.findall(r'self\.assertIn\("Ran (\d+) tests"', method), [str(count)])
         # 18 -> 25: S4-U4 RetryNowTests (seven cases); tests/gateway_retry_source_test.py pins that class by name.
         # 25 -> 26: S4-EG1 OrthancConnectionTests (one case).
-        self.assertEqual(count, 26)
+        # CD-10 adds source-AE association, forwarded provenance and mixed-device batch coverage.
+        self.assertEqual(count, 29)
 
 
 class ServerPins(unittest.TestCase):

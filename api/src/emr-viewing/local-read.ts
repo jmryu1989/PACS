@@ -17,6 +17,11 @@ export interface LocalReadSource {
   context?: Readonly<WorkContext>;
 }
 
+/** An upstream JSON representation whose whitespace and encoding must survive the recording boundary. */
+export class SerializedLocalReadBody {
+  constructor(readonly json: string) { Object.freeze(this); }
+}
+
 /** Returned by A2/A3 after their existing source snapshot and authorization checks. */
 export class LocalReadResponse {
   readonly json: string;
@@ -25,7 +30,7 @@ export class LocalReadResponse {
     readonly unavailable: Readonly<{ code: string; message: string }> = LOCAL_READ_UNAVAILABLE) {
     // Serialization happens once, before admission. toJSON, omitted fields and
     // serialization failures therefore describe the response we actually chose.
-    const json = JSON.stringify(body);
+    const json = body instanceof SerializedLocalReadBody ? body.json : JSON.stringify(body);
     if (json === undefined) throw new Error('A local read needs a JSON response');
     const projection = JSON.parse(json);
     this.json = json;
