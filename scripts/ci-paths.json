@@ -942,6 +942,11 @@
       "tests/candidate_ci.py"
     ],
     "source-regressions": [
+      "worklist-v0/legal/licenses/**",
+      "gateway/**",
+      "proxy/Dockerfile",
+      "tests/fixtures/asr/Dockerfile",
+      "scripts/asr_engine_attest.py",
       "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       ".github/workflows/gateway-e2e.yml",
@@ -1139,6 +1144,8 @@
       "tests/image_route_probe_test.py",
       "tests/invariants_live.py",
       "tests/legal_pages_test.py",
+      "scripts/test_open_source_notices.py",
+      "scripts/build-open-source-notices.py",
       "tests/live_admin_credential.py",
       "tests/live_test_gate.py",
       "tests/main_move_contract.cjs",
