@@ -1,4 +1,9 @@
 # coding: utf-8
+# CD-13 realm import contract: 개인정보의 안전성 확보조치 기준 제5조③ requires
+# grant/change/revocation history for at least three years. Keycloak 26.7.3 stores
+# all admin events; representation preserves the changed content. The configured
+# 94694400 seconds = (3 * 365 + 1) days includes a leap day. These assertions read
+# the real import JSON, not implementation text or a simulated event store.
 """S5-U1a clinician role and clinician-only default denial, S5-U1b read allowlist: pure stdlib spec and source check.
 
 REQ-S5-U1a-ROLE-DEFAULT-DENY -> RISK-S5-CLINICIAN-WRITER-LEAK/UNCLASSIFIED-ROUTE/ROLE-LIST-DRIFT
@@ -3491,6 +3496,22 @@ class ClinicianPolicySpec(unittest.TestCase):
         with mock.patch.object(COMPILER, "class_properties", return_value=frozenset()):
             with self.assertRaises(AssertionError):
                 check_properties()
+
+
+class KeycloakAdminHistorySpec(unittest.TestCase):
+    def setUp(self):
+        self.realm = json.loads(REALM.read_text(encoding="utf-8"))
+
+    def test_admin_changes_are_stored(self):
+        self.assertIs(self.realm.get("adminEventsEnabled"), True)
+
+    def test_changed_content_is_stored(self):
+        self.assertIs(self.realm.get("adminEventsDetailsEnabled"), True)
+
+    def test_admin_retention_covers_three_years_with_a_leap_day(self):
+        # Keycloak reads this realm attribute, not user-event eventsExpiration.
+        seconds = self.realm.get("attributes", {}).get("adminEventsExpiration")
+        self.assertEqual(seconds, str((3 * 365 + 1) * 24 * 60 * 60))
 
 
 if __name__ == "__main__":
