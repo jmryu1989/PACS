@@ -19,6 +19,10 @@ export interface RouteContract {
  * Connect transfer routes manage requests/bases; actual delivery belongs to EXTERNAL_SURFACES.
  */
 const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
+  { kinds: ['access-audit'], operation: 'read', causes: ['user-view'],
+    routes: ['GET emr-audit/inspections', 'GET emr-audit/inspections/:month'] },
+  { kinds: ['access-audit'], operation: 'write', causes: ['user-view'],
+    routes: ['POST emr-audit/inspections/:month/report', 'POST emr-audit/inspections/:month/steps'] },
   { kinds: ['identity-access'], operation: 'write', causes: ['user-view'],
     routes: ['POST emr-audit/roster/:grantId'] },
   { kinds: ['access-audit'], operation: 'read', causes: ['user-view'],
