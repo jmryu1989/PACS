@@ -4,12 +4,12 @@
   "legacy_roles": ["radiologist", "technician", "admin"],
   "clinician_role": "clinician",
   "session_routes": ["GET me", "POST auth/logout"],
-  "business_routes": ["POST emr-audit/roster/:grantId", "POST emr-audit/investigations", "POST emr-audit/exports", "POST emr-audit/requests", "POST emr-audit/issuances", "POST emr-audit/issuances/:id/issue", "POST emr-audit/issuances/:id/delivery", "GET emr-audit/requests/:id", "POST emr-audit/requests/:id/extend", "POST emr-audit/requests/:id/resolve", "GET images/dicom-web", "HEAD images/dicom-web", "POST studies/:uid/viewer-context-events", "GET authz/dicom", "POST dicom/lookup", "GET studies/:uid/viewer-items", "GET clinician/studies", "GET clinician/studies/:uid/report", "GET clinician/studies/:uid/timeline",
+  "business_routes": ["POST emr-audit/roster/:grantId", "POST emr-audit/investigations", "POST emr-audit/exports", "GET emr-audit/inspections", "GET emr-audit/inspections/:month", "POST emr-audit/inspections/:month/report", "POST emr-audit/inspections/:month/steps", "POST emr-audit/requests", "POST emr-audit/issuances", "POST emr-audit/issuances/:id/issue", "POST emr-audit/issuances/:id/delivery", "GET emr-audit/requests/:id", "POST emr-audit/requests/:id/extend", "POST emr-audit/requests/:id/resolve", "GET images/dicom-web", "HEAD images/dicom-web", "POST studies/:uid/viewer-context-events", "GET authz/dicom", "POST dicom/lookup", "GET studies/:uid/viewer-items", "GET clinician/studies", "GET clinician/studies/:uid/report", "GET clinician/studies/:uid/timeline",
     "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
     "GET image-requests", "GET image-requests/:id", "GET studies/:uid/image-requests", "POST studies/:uid/image-requests", "POST image-requests/:id",
     "GET critical-results", "GET critical-results/:id", "POST critical-results/:id/ack",
     "GET image-relay/*", "GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames", "GET instances/:id/preview"],
-  "allowed_additions": ["POST emr-audit/roster/:grantId", "POST emr-audit/investigations", "POST emr-audit/exports", "POST emr-audit/requests", "POST emr-audit/issuances", "POST emr-audit/issuances/:id/issue", "POST emr-audit/issuances/:id/delivery", "GET emr-audit/requests/:id", "POST emr-audit/requests/:id/extend", "POST emr-audit/requests/:id/resolve", "GET images/dicom-web", "HEAD images/dicom-web", "GET clinician/studies", "GET clinician/studies/:uid/report", "GET clinician/studies/:uid/timeline",
+  "allowed_additions": ["GET emr-audit/inspections", "GET emr-audit/inspections/:month", "POST emr-audit/inspections/:month/report", "POST emr-audit/inspections/:month/steps", "POST emr-audit/roster/:grantId", "POST emr-audit/investigations", "POST emr-audit/exports", "POST emr-audit/requests", "POST emr-audit/issuances", "POST emr-audit/issuances/:id/issue", "POST emr-audit/issuances/:id/delivery", "GET emr-audit/requests/:id", "POST emr-audit/requests/:id/extend", "POST emr-audit/requests/:id/resolve", "GET images/dicom-web", "HEAD images/dicom-web", "GET clinician/studies", "GET clinician/studies/:uid/report", "GET clinician/studies/:uid/timeline",
     "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
     "GET image-requests", "GET image-requests/:id", "GET studies/:uid/image-requests", "POST studies/:uid/image-requests", "POST image-requests/:id",
     "GET critical-results", "GET critical-results/:id", "POST critical-results/:id/ack", "POST studies/:uid/viewer-context-events",
@@ -55,6 +55,10 @@
     {"id": "gateway-no-group", "method": "bearer", "azp": "gw-kin-center", "groups": [], "roles": ["gateway"], "valid": false}
   ],
   "route_metadata_cases": [
+    {"method": 0, "controller": "emr-audit", "handler": "inspections", "key": "GET emr-audit/inspections", "allowed": true},
+    {"method": 0, "controller": "emr-audit", "handler": "inspections/:month", "key": "GET emr-audit/inspections/:month", "allowed": true},
+    {"method": 1, "controller": "emr-audit", "handler": "inspections/:month/report", "key": "POST emr-audit/inspections/:month/report", "allowed": true},
+    {"method": 1, "controller": "emr-audit", "handler": "inspections/:month/steps", "key": "POST emr-audit/inspections/:month/steps", "allowed": true},
     {"method": 1, "controller": "/", "handler": "studies/:uid/viewer-context-events", "key": "POST studies/:uid/viewer-context-events", "allowed": true},
     {"method": 0, "controller": "/", "handler": "me", "key": "GET me", "allowed": true},
     {"method": 1, "controller": "auth", "handler": "logout", "key": "POST auth/logout", "allowed": true},
@@ -163,7 +167,7 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 168, "public": 6, "session": 2, "business": 36, "denied": 124},
+    "counts": {"routes": 172, "public": 6, "session": 2, "business": 40, "denied": 124},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
@@ -246,6 +250,10 @@
     },
     "post_baseline": {
       "POST gateway/stow/:uid": {"decision": "denied", "unit": "CD-10", "commit": null, "basis": "Gateway STOW receiving relay; authzDicom retains the existing needExact gateway and institution binding before archive receipt and entry recording"},
+      "GET emr-audit/inspections": {"decision": "business", "unit": "emr-f-inspection", "commit": null, "basis": "CD-05: the existing institutional auditor designation and separate inspection scope gate every monthly inspection operation; the clinician role alone grants nothing."},
+      "GET emr-audit/inspections/:month": {"decision": "business", "unit": "emr-f-inspection", "commit": null, "basis": "CD-05: the existing institutional auditor designation and separate inspection scope gate every monthly inspection operation; the clinician role alone grants nothing."},
+      "POST emr-audit/inspections/:month/report": {"decision": "business", "unit": "emr-f-inspection", "commit": null, "basis": "CD-05: the existing institutional auditor designation and separate inspection scope gate every monthly inspection operation; the clinician role alone grants nothing."},
+      "POST emr-audit/inspections/:month/steps": {"decision": "business", "unit": "emr-f-inspection", "commit": null, "basis": "CD-05: the existing institutional auditor designation and separate inspection scope gate every monthly inspection operation; the clinician role alone grants nothing."},
       "GET preload/cache-key": {"decision": "denied", "unit": "D1890-retention-cache", "commit": null, "basis": "server-issued cache key for reading worklist members; clinician-only reads live"},
       "GET presence": {"decision": "denied", "unit": "emr-p-viewing-fix1", "commit": null, "basis": "transient staff-name presence for visible studies in the caller's institution; clinician-only users are excluded by the approved viewing-presence scope"},
       "POST presence": {"decision": "denied", "unit": "emr-p-viewing-fix1", "commit": null, "basis": "session-bound transient viewing-presence update; clinician-only users are excluded by the approved viewing-presence scope"},
@@ -776,7 +784,12 @@
         "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "CRITICAL_RESULT_NOT_FOUND"}
       }
     },
-    "pending_routes": {"GET image-relay/*": "NOT_RUN: in LiveStack the clinician image reads it carries (/instances/{id}/preview) are the existing rows of clinician_read_live.py through nginx; the gate is authzDicom (its own live rows above); served proof on the synthetic mgxa stack is tmp/image-delivery-record (2026-10-28).",
+    "pending_routes": {
+      "GET emr-audit/inspections": "NOT_RUN: CD-05 served AuthGuard/OIDC and PostgreSQL verification needs the assigned isolated VM. The synthetic service/controller and clinicianRouteAllowed tests cover the inspection grant and role-route gate locally.",
+      "GET emr-audit/inspections/:month": "NOT_RUN: CD-05 served AuthGuard/OIDC and PostgreSQL verification needs the assigned isolated VM. The synthetic service/controller and clinicianRouteAllowed tests cover the inspection grant and role-route gate locally.",
+      "POST emr-audit/inspections/:month/report": "NOT_RUN: CD-05 served AuthGuard/OIDC and PostgreSQL verification needs the assigned isolated VM. The synthetic service/controller and clinicianRouteAllowed tests cover the inspection grant and role-route gate locally.",
+      "POST emr-audit/inspections/:month/steps": "NOT_RUN: CD-05 served AuthGuard/OIDC and PostgreSQL verification needs the assigned isolated VM. The synthetic service/controller and clinicianRouteAllowed tests cover the inspection grant and role-route gate locally.",
+      "GET image-relay/*": "NOT_RUN: in LiveStack the clinician image reads it carries (/instances/{id}/preview) are the existing rows of clinician_read_live.py through nginx; the gate is authzDicom (its own live rows above); served proof on the synthetic mgxa stack is tmp/image-delivery-record (2026-10-28).",
     "GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames": "NOT_RUN: the positive case needs a stored multi-frame object the LiveStack fixture does not carry; the gate is authzDicom (its own live rows above) and the bytes are tests/dicom_frame_test.cjs; the mgxa synthetic MG stack run of 2026-10-27 (tmp/mg-loading) exercised the served path end to end.",
     "GET instances/:id/preview": "NOT_RUN: the positive case needs a stored object id the LiveStack fixture does not carry; the gate is authzDicom on /instances/{id} (its own live rows above) and the PNG is tests/dicom_frame_test.cjs; the mgxa synthetic MG stack run of 2026-10-27 (tmp/mg-loading) exercised the served path end to end.",
     "GET images/dicom-web": "NOT_RUN: REQUEST_FACTS #211 authoritative identity, patient/source/decoder and StudyAccess adapters; E online_live.py separately checks the registered unavailable seam.", "HEAD images/dicom-web": "NOT_RUN: REQUEST_FACTS #211 authoritative identity, patient/source/decoder and StudyAccess adapters; E online_live.py separately checks the registered unavailable seam.",

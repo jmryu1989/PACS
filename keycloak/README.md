@@ -39,6 +39,45 @@ Authentication → Required actions(또는 `GET /admin/realms/kin/authentication
 > import 자체를 거부하고 서버가 뜨지 않는다 (`Unrecognized field ... not marked as ignorable`).
 > 설명은 전부 이 README에 쓴다.
 
+## 관리 접근 변경 이력 — 3년 보존
+
+`kin` 렐름은 `adminEventsEnabled=true`, `adminEventsDetailsEnabled=true`로 관리 사건과 변경 내용
+(`representation`)을 Keycloak PostgreSQL에 저장한다. 근거는 **개인정보의 안전성 확보조치 기준 제5조③**의
+접근권한 부여·변경·말소 내역 최소 3년 보관이다. `attributes.adminEventsExpiration="94694400"`은
+윤년 하루를 포함한 `(3 × 365 + 1) × 24 × 60 × 60`초(1096일)다. 사용자 사건의 `eventsExpiration`과
+다른 설정이며, 사용자 사건 설정은 변경하지 않는다.
+
+고정 버전 26.7.3은 관리 사건의 선택 저장을 지원하지 않아 **모든 관리 사건**을 저장한다.
+조회 시 쓰는 `operationTypes`는 저장 필터가 아니다. 변경 내용도 함께 남겨 누가 어느 계정·권한을
+어떻게 변경했는지 확인한다. 제품의 업무 권한 이력은 기존 MemberRights 경로가 계속 기록하며,
+Keycloak의 로그인 가능 여부·인증 수단 변경은 이 관리 이력에서 확인한다.
+기술 근거: [26.7.3 AdminEventBuilder](https://github.com/keycloak/keycloak/blob/26.7.3/services/src/main/java/org/keycloak/services/resources/admin/AdminEventBuilder.java),
+[JpaEventStoreProvider](https://github.com/keycloak/keycloak/blob/26.7.3/model/jpa/src/main/java/org/keycloak/events/jpa/JpaEventStoreProvider.java).
+
+**기존 설치:** import JSON은 이미 PostgreSQL에 있는 렐름을 덮어쓰지 않는다. 관리 콘솔에서 `kin` 선택 →
+Realm settings → Events → Admin events settings로 이동하여 Save events와 Include representation을 On으로,
+Expiration을 **1096 Days**(저장값 94694400초)로 지정하고 Save한다. User events settings는 그대로 둔다.
+저장 뒤 같은 화면을 다시 열어 값이 유지되는지 확인한다.
+
+같은 설정을 CLI로 적용하려면, 해당 설치의 관리자 인증이 이미 된 `KC_ADMIN_CONFIG` 경로를 사용하여
+Keycloak 컨테이너 안에서 다음을 실행한다(Bash). `kcadm.sh update`의 기본 GET 후 병합 방식을 사용하므로
+기존 렐름 속성과 사용자 사건 설정을 보존한다(`--no-merge`를 붙이지 않는다).
+
+```bash
+/opt/keycloak/bin/kcadm.sh update realms/kin --config "$KC_ADMIN_CONFIG" \
+  -s 'attributes.adminEventsExpiration="94694400"'
+/opt/keycloak/bin/kcadm.sh update events/config -r kin --config "$KC_ADMIN_CONFIG" \
+  -s adminEventsEnabled=true -s adminEventsDetailsEnabled=true
+/opt/keycloak/bin/kcadm.sh get events/config -r kin --config "$KC_ADMIN_CONFIG" \
+  --fields adminEventsEnabled,adminEventsDetailsEnabled
+/opt/keycloak/bin/kcadm.sh get realms/kin --config "$KC_ADMIN_CONFIG" \
+  --fields 'attributes(adminEventsExpiration)'
+```
+
+두 조회에서 각각 `true`, `true`, `"94694400"`인지 확인한다. 재import·DB 초기화·계정 재생성은 필요 없다.
+설정 적용 이후 생성되는 사건에 대한 보존이며, 과거에 저장하지 않은 사건을 복구하지 않는다.
+관리 콘솔의 Clear admin events는 보존기간 전 이력을 지우므로 보존 대상 이력을 정리하는 데 사용하지 않는다.
+
 ## 사용자 세션 캐시는 끈다 (`--spi-user-sessions--infinispan--use-caches=false`)
 
 두 compose의 Keycloak command에 이 옵션을 둔다(`docker-compose.yml`, 그리고 그 command를 통째로 덮어쓰는
