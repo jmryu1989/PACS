@@ -427,8 +427,13 @@ class RetentionWorkerOverlapLive(RetentionFixture):
         pause.mark('journal-held')
         return pause
 
+    def setUp(self):
+        # The class shares one database: each case reads only the journal it wrote.
+        self.first = self.scalar('SELECT coalesce(max(sequence), 0) FROM emr_access.retention_journal')
+
     def journal(self):
-        return self.scalar("SELECT coalesce(string_agg(phase, ',' ORDER BY sequence), '') FROM emr_access.retention_journal")
+        return self.scalar("SELECT coalesce(string_agg(phase, ',' ORDER BY sequence), '') FROM emr_access.retention_journal"
+                           f" WHERE sequence > {self.first}")
 
     def test_save_before_the_lock_is_judged_and_save_after_deletion_started_is_refused(self):
         url = self.retention_url()

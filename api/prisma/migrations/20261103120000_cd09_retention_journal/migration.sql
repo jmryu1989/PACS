@@ -367,28 +367,24 @@ BEGIN
 END $$;
 
 -- The fence of the writers that add a reference to a report from outside it: under the referenced record's lock they are
--- refused while it is being deleted, and a reference to a report version that no longer exists (destroyed while the
--- writer waited for that lock) is refused as the CVR foreign key refuses it. F issuances lock every manifest record.
+-- refused while it is being deleted, so H's re-read under that lock sees every committed reference and none is added to
+-- a started execution. F issuances lock every manifest record. (Whether the version still exists when a writer that
+-- waited for the lock proceeds is the writer's own read; only the CVR has a foreign key for it.)
 CREATE FUNCTION emr_access.refuse_reference_while_deleting() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-DECLARE f jsonb := to_jsonb(NEW); ids text[]; r text; v integer;
+DECLARE f jsonb := to_jsonb(NEW); ids text[]; r text;
 BEGIN
   IF TG_TABLE_NAME = 'StudyQuestionEntry' THEN
     IF f ->> 'reportVersion' IS NULL THEN RETURN NEW; END IF;
     SELECT ARRAY[q."studyUid"] INTO ids FROM public."StudyQuestion" q WHERE q.id = (f ->> 'questionId')::uuid;
-    v := (f ->> 'reportVersion')::integer;
   ELSIF TG_TABLE_NAME = 'ReportDraftInsertReceipt' THEN
-    -- A refused receipt may name a version that never existed (the refusal is the record); only an applied one copied text.
-    ids := ARRAY[f ->> 'sourceUid']; v := CASE WHEN f ->> 'state' = 'applied' THEN (f ->> 'sourceVersion')::integer END;
+    ids := ARRAY[f ->> 'sourceUid'];
   ELSE
     SELECT array_agg(DISTINCT x #>> '{}') INTO ids FROM jsonb_path_query(f -> 'body', 'lax $.manifest.records[*].recordId') AS x;
   END IF;
   FOR r IN SELECT DISTINCT unnest(ids) ORDER BY 1 LOOP PERFORM emr_access.fixed_record_lock(r); END LOOP;
   IF EXISTS (SELECT FROM emr_access.retention_execution WHERE record_ids && ids) THEN
     RAISE EXCEPTION 'RetentionDeleting' USING ERRCODE = 'EB020';
-  END IF;
-  IF v IS NOT NULL AND NOT EXISTS (SELECT FROM public."ReportVersion" WHERE uid = ids[1] AND version = v) THEN
-    RAISE EXCEPTION 'ReferencedReportVersionMissing' USING ERRCODE = 'EB021';
   END IF;
   RETURN NEW;
 END $$;
