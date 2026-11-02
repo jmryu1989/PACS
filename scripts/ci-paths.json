@@ -927,7 +927,10 @@
       "tests/mgxa_acceptance_test.py",
       "tests/measurement_ci*.py",
       "tests/execution_selection_test.py",
-      "tests/ci_workflows.py"
+      "tests/ci_workflows.py",
+      "scripts/build-trace-matrix.py",
+      "scripts/test_trace_matrix.py",
+      "tests/fixtures/trace/**"
     ],
     "emr-b": [
       "api/**",

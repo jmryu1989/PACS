@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "command": [
+    "python3",
+    "scripts/run-tests.py",
+    "--module",
+    "tests/fx_alpha_test.py",
+    "--mode",
+    "pure"
+  ],
+  "status": "completed",
+  "started_at_utc": "2026-11-01T01:00:00+00:00",
+  "ended_at_utc": "2026-11-01T01:00:09+00:00",
+  "exit_code": 1,
+  "files_before": [
+    {
+      "requested": "tests/fx_alpha_test.py",
+      "status": "present",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ],
+  "declared_inputs": {
+    "files": [
+      "tests/fx_alpha_test.py"
+    ],
+    "trees": []
+  }
+}

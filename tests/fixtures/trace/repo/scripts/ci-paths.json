@@ -1,0 +1,16 @@
+{
+  "common": [
+    ".github/workflows/**"
+  ],
+  "shared_browser": [],
+  "browser_jobs": [],
+  "jobs": {
+    "fx-select": [
+      "tests/fx_beta_*.cjs",
+      "tests/fx_*_mutants.py"
+    ],
+    "fx-absent": [
+      "tests/fx_unref_test.py"
+    ]
+  }
+}
