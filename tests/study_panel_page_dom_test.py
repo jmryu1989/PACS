@@ -699,7 +699,12 @@ class StudyPanelPageDOM(unittest.TestCase):
             const covered = !!panel && w > 0 && h > 0 && x < panel.right && x + w > panel.left && y < panel.bottom && y + h > panel.top;
             const dx = Math.min(2, w / 4), dy = Math.min(2, h / 4);
             const points = w > 0 && h > 0 ? [[x + dx, y + dy], [x + w - dx, y + dy], [x + w / 2, y + h / 2], [x + dx, y + h - dy], [x + w - dx, y + h - dy]] : [];
-            return [s, {...fact, covered, on_top: points.every(([px, py]) => { const hit = document.elementFromPoint(px, py); return hit === node || node.contains(hit); })}]; }); }''',
+            // Chromium hit-tests nothing in the window's last half pixel (y 767.5 of 768 gives null even on a blank
+            // page), so a field showing 1.5 px at the bottom edge has points that hit no element at all. Such a point
+            // is not another element on top: every point that hits must hit the field, and at least one must.
+            const hits = points.map(([px, py]) => document.elementFromPoint(px, py)).filter(hit => hit !== null);
+            const on_top = !points.length || (hits.length > 0 && hits.every(hit => hit === node || node.contains(hit)));
+            return [s, {...fact, covered, on_top}]; }); }''',
             ['#b-approve', '#b-save', '#b-prelim', '#findings', '#conclusion'])
         for name, fact in facts:
             if fact is None or fact['visible'][3] <= 0:
@@ -811,6 +816,11 @@ class StudyPanelPageDOM(unittest.TestCase):
                     self.assertEqual(2, len(moved), moved)
                     self.assertTrue(all(s['user'] and s['reportColumn'] for s in moved), moved)
                     problems = [p for p in problems if not p.startswith('reach: 2 scroll containers moved')]
+                # The reveal scrolls whole pixels, so an entry at a fractional position can stop short of its scroller's
+                # edge by less than one (1024x768 on the Linux runner: 13.45 px needed, 13 scrolled, Save's bottom 761.45
+                # against the card's 761, with 122 px of scroll left for a reader's wheel). Whether Save is whole after
+                # the reveal is judged just below with this file's whole-in-view measure (VISIBLE, 0.5 px).
+                problems = [p for p in problems if not p.startswith('reach: after the scroll the entry')]
                 self.assertEqual([], problems, 'Save is not one report-column scroll away')
                 self.assert_drawer_place(page, width, height)
                 scrolled = self.assert_report_usable(page, 'scrolled to the report')

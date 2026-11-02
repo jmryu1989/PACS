@@ -782,6 +782,9 @@ class WorklistFoldersDOM(unittest.TestCase):
             if not self.page.locator('#quick').is_visible():
                 self.menu('filters')
             self.page.locator('#quick').fill('SYN MR')
+            # The open Filters menu lies over the top of the folder tree (on the Linux runner its Search Mode label
+            # covers 'CT'); a reader closes it before choosing a folder.
+            self.close_menus()
             self.folder(name).click()
             expect(self.page.locator('#quick')).to_have_value('')
             expect(self.page.locator('#rows tr[data-uid]')).to_have_count(count)
