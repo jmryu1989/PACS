@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Audit — KIN</title>
+  <style>
+    :root { color-scheme: dark; --bg: #07101d; --panel: #101b2a; --line: #29405d; --text: #eef4ff; --muted: #9fb0c5; }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, sans-serif; }
+    header { display: flex; align-items: center; gap: 18px; padding: 14px 22px; border-bottom: 1px solid var(--line); }
+    header a { color: #86bdf2; }
+    h1 { font-size: 20px; margin: 0; flex: 1; }
+    h2 { font-size: 17px; margin: 0 0 12px; }
+    main { padding: 22px; }
+    section { padding: 18px; margin-bottom: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+    form { display: flex; flex-wrap: wrap; align-items: end; gap: 14px; }
+    .export-action { display: flex; align-items: center; gap: 10px; }
+    label { display: grid; gap: 5px; color: var(--muted); }
+    button, input, select { font: inherit; border: 1px solid #355272; border-radius: 6px; padding: 8px 10px; background: #0b1625; color: var(--text); }
+    button { background: #19304b; cursor: pointer; }
+    button:disabled { opacity: .45; cursor: default; }
+    #audit-search { background: #24649e; }
+    p { color: var(--muted); }
+    #audit-message { margin: 16px 22px; }
+    .table-wrap { overflow: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+    th { color: var(--muted); font-weight: 500; }
+    td { min-width: 140px; max-width: 420px; }
+    fieldset { border: 1px solid var(--line); margin: 14px 0; padding: 14px; min-width: 0; }
+    .inspection-summary, #audit-inspection-history { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .inspection-actions { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
+  </style>
+</head>
+<body>
+  <div id="audit-workspace" hidden>
+    <header><a href="main.html">KIN</a><h1>Audit</h1><button id="audit-logout" type="button">Log out</button></header>
+    <main>
+      <section aria-labelledby="investigation-title">
+        <h2 id="investigation-title">Patient Access Records</h2>
+        <form id="audit-form">
+          <label>Patient ID<input id="audit-patient" autocomplete="off"></label>
+          <label>Assigning Authority<input id="audit-authority" autocomplete="off"></label>
+          <label>From (UTC)<input id="audit-from" type="datetime-local" required></label>
+          <label>Until (UTC, exclusive)<input id="audit-to" type="datetime-local" required></label>
+          <label>Event Kind<select id="audit-kind">
+            <option value="all">All Events</option>
+            <option value="entry" title="기재">Entry</option>
+            <option value="addition" title="추가기재">Addition</option>
+            <option value="correction" title="수정">Correction</option>
+            <option value="access" title="열람">Access</option>
+          </select></label>
+          <button id="audit-search" type="submit" disabled>Search</button>
+          <div class="export-action"><button id="audit-export" type="button" disabled>Export</button>
+            <span id="audit-export-message" aria-live="polite"></span></div>
+        </form>
+        <p>환자별 조회에는 ID와 발급 기관을 함께 입력하세요. 내보내기는 현재 조건의 전체 기록을 JSON 파일로 저장합니다.</p>
+      </section>
+      <div id="audit-results" hidden>
+      <section aria-labelledby="changes-title">
+        <h2 id="changes-title">Change History</h2><p id="audit-changes-summary"></p>
+        <div class="table-wrap"><table aria-label="Change History"><thead><tr><th>Time (UTC)</th><th>Actor</th><th>Patient / Record</th><th>Event</th></tr></thead><tbody id="audit-changes-rows"></tbody></table></div>
+      </section>
+      <section aria-labelledby="views-title">
+        <h2 id="views-title">Access</h2><p id="audit-views-summary"></p>
+        <div class="table-wrap"><table aria-label="Access"><thead><tr><th>Time (UTC)</th><th>Actor</th><th>Patient / Record</th><th>Event</th></tr></thead><tbody id="audit-views-rows"></tbody></table></div>
+      </section>
+      <button id="audit-more" type="button" hidden>Load More</button>
+      </div>
+      <section aria-labelledby="inspection-title">
+        <h2 id="inspection-title">Monthly Inspection</h2>
+        <p>점검 주기는 매월 1회(Asia/Seoul 역월)입니다. 기관 등록월부터 지난 달까지 점검이 남은 달을 표시합니다.
+          기한이 지난 달도 점검할 수 있으며 차단하지 않습니다.</p>
+        <p>Start Inspection으로 시작할 때 해당 월 접속기록 요약의 해시와 사건 수를 보고서로 한 번 저장합니다.
+          사유 확인·후속조치·검토 기록은 그 보고서에 추가되며 기존 기록을 고치거나 지우지 않습니다.
+          Finish는 화면에서 작업을 마치는 동작이며 새 보고서나 완료 기록을 저장하지 않습니다.</p>
+        <p>감사자 화면의 모든 응답은 보여주는 만큼만 기록하고, 기록하지 않는 응답은 환자 식별자를 담지 않는다.
+          Record 응답은 변경된 점검 기록만 전달하며 다운로드 목록은 앞서 조회한 내용을 유지합니다.</p>
+        <div class="inspection-actions">
+          <button id="audit-inspection-load" type="button" disabled>Load Months</button>
+          <label>Inspection Month<select id="audit-inspection-month" disabled><option value="">Select Month</option></select></label>
+          <button id="audit-inspection-start" type="button" disabled>Start Inspection</button>
+          <button id="audit-inspection-finish" type="button" disabled>Finish</button>
+        </div>
+        <p id="audit-inspection-message" aria-live="polite"></p>
+        <div id="audit-inspection-detail" hidden>
+          <p id="audit-inspection-summary" class="inspection-summary"></p>
+          <div id="audit-inspection-downloads"></div>
+          <form id="audit-inspection-review" hidden>
+            <fieldset><legend>Review</legend><div class="inspection-actions">
+              <label>Conclusion<select name="conclusion"><option value="no-anomaly">No Anomaly</option><option value="anomaly-found">Anomaly Found</option></select></label>
+              <label>Review Note<input name="note" required autocomplete="off"></label>
+              <button type="submit">Record</button>
+            </div></fieldset>
+          </form>
+          <div id="audit-inspection-followups"></div>
+          <h3>Recorded Steps</h3><div id="audit-inspection-history"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <p id="audit-message" role="status" aria-live="polite">세션을 확인하고 있습니다.</p>
+  <script src="auth.js"></script>
+  <script src="work-context.js"></script>
+  <script src="session-transport.js"></script>
+  <script>KinWorkContext.follow(KinAuth);</script>
+  <script src="audit.js"></script>
+</body>
+</html>
