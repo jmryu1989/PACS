@@ -10,12 +10,14 @@ import { DestructionOutcome, DraftPurposeDisposal, PurposeLedgerFile, purposeLed
  * run is the recovery, never the first attempt.
  *
  * One JSON line: each unit's outcome (only the opaque unit) and the counts. Exit 0 only when every ended work was destroyed,
- * re-applied, already absent or is held by a live legal hold; any refusal, unsettled delivery or error is exit 1.
+ * re-applied, already absent or is held by a live legal hold; any refusal, delivery the server has not settled, or error is
+ * exit 1.
  */
 const SETTLED: readonly DestructionOutcome['outcome'][] = ['destroyed', 'reapplied', 'absent', 'held'];
 
 export async function runDraftPurposeSweep(db: PrismaClient, directory = purposeLedgerDirectory()) {
-  const results = await new DraftPurposeDisposal(db, new PurposeLedgerFile(directory)).sweep();
+  // This process does not serve drafts: a work whose delivery the server has not settled is reported, never skipped.
+  const results = await new DraftPurposeDisposal(db, new PurposeLedgerFile(directory), null).sweep();
   const counts: Record<string, number> = {};
   for (const result of results) counts[result.outcome] = (counts[result.outcome] ?? 0) + 1;
   return { ran: true, results, counts, complete: results.every(r => SETTLED.includes(r.outcome)) };

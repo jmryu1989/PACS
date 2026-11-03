@@ -135,7 +135,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
 # written: estimated at about 6 KB of catalog and rows, well inside the cap above.
 # CD-09-P (55 tables, 69 migrations): ReportDraftPurposeEnd with one held ended work (its payload kept, a citation in its JSONB),
 # PurposeLedgerAnchor with its one row, and ReportDraft's work unit/start/intent on both present rows (NULL on the emptied one):
-# two tables, three columns, two primary keys, nine checks, one unique and one plain index. Not measured on a stack when
+# two tables, three columns, two primary keys, ten checks, one unique and one plain index, and EMR-B's place_hold redefined with
+# its record lock (the catalog digest of emr_access functions). Not measured on a stack when
 # written: estimated at about 7 KB of catalog and rows.
 TABLES = sorted(['PreloadCacheKey', 'ImportOperation', 'AuthSession', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'ReportDraftInsertReceipt', 'ReportDraftPurposeEnd', 'PurposeLedgerAnchor', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
@@ -287,7 +288,10 @@ def expected_rows(uid):
         eventId='00000000-0000-4000-8000-0000000000e4', actorId='SYNTHETIC-reader4', endedAt='2026-09-06T00:00:01.123',
         signedRecordId=None, signedVersionId=None, findings='SYNTHETIC held private', conclusion='', recommendation='',
         baseVersion=2, citations=citation, structured=None, deliverySettled=True, attempts=1, lastRefusal='LegalHoldActive')]
-    rows['PurposeLedgerAnchor'] = [dict(id=1, ledgerId='00000000-0000-4000-8000-0000000000e5', seq=3)]
+    # The anchor of a database that has its ledger (initialized) and whose last committed destruction it names: a restore
+    # that lost either would open a copy without its ledger or rewrite a completion with a new time.
+    rows['PurposeLedgerAnchor'] = [dict(id=1, ledgerId='00000000-0000-4000-8000-0000000000e5', seq=3, initialized=True,
+        lastCompletedUnit='disposal:00000000-0000-4000-8000-0000000000e6', lastCompletedAt='2026-09-06T00:00:02.456')]
     # S4-U2: the Order table had no synthetic row, so a dump that lost the new accession value would
     # pass on an empty table. One unlinked synthetic order carries a real (synthetic) accession.
     rows['Order'] = [dict(oid='SYNTHETIC-order-1', institutionId='SYNTHETIC-hospital', patientId='SYNTHETIC-patient',

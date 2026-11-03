@@ -408,9 +408,12 @@ model ReportDraftPurposeEnd {
 /// seq 0). Each completed destruction moves `seq` to its ledger position, so a restored copy names the ledger and the
 /// position it last saw: a missing or shorter ledger, or a ledger of another ID, keeps the server closed.
 model PurposeLedgerAnchor {
-  id       Int    @id
-  ledgerId String @db.Uuid
-  seq      Int
+  id                Int       @id
+  ledgerId          String    @db.Uuid
+  seq               Int
+  initialized       Boolean   @default(false)
+  lastCompletedUnit String?
+  lastCompletedAt   DateTime?
 }
 
 /// W5 Related Report 삽입의 **영수증** (O4 R1, D1423). 다른 판독문의 승인본 원문을 내 초안 한 칸 끝에 넣는 명시 삽입

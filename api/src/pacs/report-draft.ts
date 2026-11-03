@@ -234,8 +234,11 @@ export class PacsReportDraft {
      * unit; writing into a present row continues that work (its intent follows the author's own save); emptying the row
      * ends it here - the caller that ends a purpose has already moved the payload with `endWork`.
      */
+    const continues = !!(content && row?.present && row.workUnit);
+    // A new work needs its destruction ledger to exist first: a copy of this database without it then never opens.
+    if (content && !continues) await draftPurpose()?.ensureLedger(tx);
     const work = !content ? { workUnit: null, workSince: null, workIntent: null }
-      : row?.present && row.workUnit ? { workUnit: row.workUnit, workSince: row.workSince, workIntent: intent }
+      : continues ? { workUnit: row.workUnit, workSince: row.workSince, workIntent: intent }
       : { workUnit: newWorkUnit(), workSince: new Date(), workIntent: intent };
     const text = content
       ? { present: true, findings: content.findings, conclusion: content.conclusion,

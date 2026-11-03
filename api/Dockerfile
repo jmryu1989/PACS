@@ -6,6 +6,9 @@
 # 하루를 아낀다.
 FROM node:22-slim AS base
 ENV NODE_OPTIONS=--max-old-space-size=3072
+# CD-09-P: the draft destruction ledger's own directory. The server refuses to start without one, or with one inside the
+# backed-up EMR state; a deployment keeps it on its own volume (compose `purpose-ledger`) so a restore never brings it back.
+ENV KIN_PURPOSE_LEDGER_DIR=/var/lib/kin-purpose
 
 # Prisma 엔진이 요구하는 OpenSSL (slim 이미지에는 빠져 있을 수 있음)
 RUN apt-get update -y \

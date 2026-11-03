@@ -61,13 +61,48 @@ CREATE TABLE "ReportDraftPurposeEnd" (
 );
 CREATE INDEX "ReportDraftPurposeEnd_uid_author_idx" ON "ReportDraftPurposeEnd"("uid", "author");
 
+-- initialized: the ledger file exists for this database. It is set (with the file written first) before the first work
+--   unit this database hands out through the server, or at the first start that finds works this migration numbered. A
+--   copy with initialized=true and no ledger beside it is a copy whose later destructions are unknown: the server stays
+--   closed. A copy with initialized=false never held a work the ledger could have destroyed.
+-- lastCompletedUnit / lastCompletedAt: the destruction whose committed deletion moved seq to its value, and when it
+--   completed. The ledger's completed record is written only after that commit; if the process stops between the two,
+--   the next start writes it from these facts (the original completion time, never a new one).
 CREATE TABLE "PurposeLedgerAnchor" (
   "id" INTEGER NOT NULL,
   "ledgerId" UUID NOT NULL,
   "seq" INTEGER NOT NULL,
+  "initialized" BOOLEAN NOT NULL DEFAULT false,
+  "lastCompletedUnit" TEXT,
+  "lastCompletedAt" TIMESTAMP(3),
   CONSTRAINT "PurposeLedgerAnchor_pkey" PRIMARY KEY ("id"),
   CONSTRAINT "PurposeLedgerAnchor_one_check" CHECK ("id" = 1),
-  CONSTRAINT "PurposeLedgerAnchor_seq_check" CHECK ("seq" >= 0)
+  CONSTRAINT "PurposeLedgerAnchor_seq_check" CHECK ("seq" >= 0),
+  CONSTRAINT "PurposeLedgerAnchor_completion_check" CHECK (("lastCompletedUnit" IS NULL) = ("lastCompletedAt" IS NULL)
+    AND ("lastCompletedUnit" IS NULL OR ("seq" > 0 AND "initialized"
+      AND "lastCompletedUnit" ~ '^disposal:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')))
 );
 INSERT INTO "PurposeLedgerAnchor" ("id", "ledgerId", "seq") VALUES (1, gen_random_uuid(), 0);
+
+-- A hold placed on a record and the destruction of that record's ended private draft work take the same per-record
+-- transaction lock: the destruction reads the record's holds only after any placement in flight has committed, and a
+-- placement that starts after the destruction read them waits for its commit. Same body as EMR-B's place_hold plus
+-- that lock; the grants on the function stay as they were.
+CREATE OR REPLACE FUNCTION emr_access.place_hold(p_hold_id text, p_record_id text, p_body text) RETURNS void
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE doc json := emr_access.append_fact_checked(p_body, ARRAY['holdId', 'recordId', 'basis', 'actorId', 'at', 'release']); existing text;
+BEGIN
+  PERFORM emr_access.require_placement();
+  PERFORM pg_advisory_xact_lock(hashtextextended('kin-hold:' || p_record_id, 0));
+  IF doc ->> 'holdId' IS DISTINCT FROM p_hold_id OR doc ->> 'recordId' IS DISTINCT FROM p_record_id OR json_typeof(doc -> 'release') <> 'null' THEN
+    RAISE EXCEPTION 'DutyFactInvalid' USING ERRCODE = 'EB003';
+  END IF;
+  SELECT body INTO existing FROM emr_access.legal_hold_event WHERE hold_id = p_hold_id AND phase = 'placed';
+  IF FOUND THEN
+    IF existing = p_body THEN RETURN; END IF;
+    RAISE EXCEPTION 'HoldConflict' USING ERRCODE = 'EB002';
+  END IF;
+  INSERT INTO emr_access.legal_hold_event (hold_id, phase, record_id, body, recorded_at) VALUES (p_hold_id, 'placed', p_record_id, p_body, clock_timestamp());
+END
+$$;
 COMMIT;

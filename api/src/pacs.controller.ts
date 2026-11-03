@@ -294,6 +294,7 @@ export class PacsController {
 
   @Patch('studies/:uid')
   patch(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
+    draftDeliveries.track(caller(req).actor, req, req.res);   // the answer's state carries my draft
     return this.svc.patchState(uid, body, caller(req), req);
   }
 
@@ -368,6 +369,7 @@ export class PacsController {
   /** 인용 — 머리 판과 내 초안의 증언. 소견 가독을 여기서 다시 건다 */
   @Get('studies/:uid/report/citations')
   citations(@Param('uid') uid: string, @Req() req: any) {
+    draftDeliveries.track(caller(req).actor, req, req.res);   // my draft's citations
     return this.svc.reportCitations(uid, caller(req));
   }
 
@@ -380,6 +382,7 @@ export class PacsController {
   /** 구조화 항목 — 머리 판과 내 초안의 타입 있는 값. 관문은 `versions()`와 같다 */
   @Get('studies/:uid/report/structure')
   structure(@Param('uid') uid: string, @Req() req: any) {
+    draftDeliveries.track(caller(req).actor, req, req.res);   // my draft's structured entries and text
     return this.svc.reportStructure(uid, caller(req));
   }
 
@@ -408,11 +411,13 @@ export class PacsController {
 
   @Post('match')
   match(@Body() body: any, @Req() req: any) {
+    draftDeliveries.track(caller(req).actor, req, req.res);   // the answer's state carries my draft
     return this.svc.match(body.uid, body.oid, body.patient, caller(req), req);
   }
 
   @Post('unmatch')
   unmatch(@Body() body: any, @Req() req: any) {
+    draftDeliveries.track(caller(req).actor, req, req.res);   // the answer's state carries my draft
     return this.svc.unmatch(body.uid, caller(req), req);
   }
 
