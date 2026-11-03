@@ -1,10 +1,5 @@
 
 
-    $("#qf").addEventListener("click", e => {
-      const b = e.target.closest("button"); if (!b || !b.dataset.days) return;
-      document.querySelectorAll("#qf button").forEach(x => x.classList.remove("on"));
-      b.classList.add("on"); quickDays = +b.dataset.days; worklistSearch?.change(); render();
-    });
 
     $("#heads").addEventListener("click", e => {
       const th = e.target.closest("th"); if (!th) return;

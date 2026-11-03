@@ -52,6 +52,8 @@ class FailureServicesE2E(unittest.TestCase):
     login = worklist.WorklistE2E.login
     login_page = worklist.WorklistE2E.login_page
     select = worklist.WorklistE2E.select
+    open_toolbar_group = worklist.WorklistE2E.open_toolbar_group
+    show_worklist_column = worklist.WorklistE2E.show_worklist_column
     close_contexts = worklist.WorklistE2E.close_contexts
     cleanup_fixtures = worklist.WorklistE2E.cleanup_fixtures
 
@@ -233,6 +235,8 @@ class FailureServicesE2E(unittest.TestCase):
         self.select(page, other)
         page.wait_for_function("""() => [...document.querySelectorAll('#thumbwrap img')]
             .some(img => img.complete && img.naturalWidth > 0)""")
+        # Count is not a default Radiology column; the reader turns it on in Worklist Columns.
+        self.show_worklist_column(page, "count")
         table = page.locator("#rows").locator("xpath=..")
         count_column = table.get_by_role("columnheader", name="Count", exact=True).evaluate("el => el.cellIndex")
         other_row = page.locator(f'#rows tr[data-uid="{other.uid}"]')
@@ -242,7 +246,7 @@ class FailureServicesE2E(unittest.TestCase):
         with self.stopped("orthanc"):
             with self.subTest(boundary="list_and_arrival_observation"):
                 with page.expect_response(lambda r: "/api/studies?" in r.url) as response:
-                    page.get_by_role("group", name="Refresh", exact=True).get_by_role("button", name="Refresh", exact=True).click()
+                    page.locator("#m-refresh").click()
                 self.assertGreaterEqual(response.value.status, 500)
                 expect(page.locator("#err")).not_to_be_empty()
                 expect(page.locator("#observation-status")).to_contain_text("관측 불가")
@@ -287,7 +291,7 @@ class FailureServicesE2E(unittest.TestCase):
                     self.select(page, other)
                     with self.read_response(page, lambda r: r.url.startswith(
                             self.stack.proxy + "/api/studies?"), recovery=True) as response:
-                        page.get_by_role("group", name="Refresh", exact=True).get_by_role("button", name="Refresh", exact=True).click()
+                        page.locator("#m-refresh").click()
                     self.assertEqual(response.value.status, 200)
                     returned = response.value.json()
                     observed = next(row for row in returned["studies"] if row["uid"] == fixture.uid)

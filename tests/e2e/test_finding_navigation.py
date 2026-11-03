@@ -366,6 +366,7 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         w.locator('[data-window-action="close"]').click()
         expect(w.locator('#viewer-windows-status')).to_contain_text('창을 닫지 않았습니다'); self.assertFalse(popup.is_closed())
         w.locator('#viewer-windows-done').click()
+        self.close_toolbar_groups(w)
         # Discarding the draft makes the same window reusable: it now shows the selected study.
         self.panel(popup).get_by_role('button', name='Discard Draft', exact=True).click()
         popup.wait_for_function('()=>!kinViewerHistoryWorkspaceState().dirty&&!kinViewerHistoryWorkspaceState().busy')

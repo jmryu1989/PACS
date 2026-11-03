@@ -57,6 +57,7 @@ class ThumbnailSeriesE2E(previous.ReturnToCurrentE2E):
         return result
 
     def thumbs(self,page,count=2):
+        self.show_workspace_panels(page, "Thumbnail")
         expect(page.locator("#thumbwrap img")).to_have_count(count)
         page.wait_for_function("[...document.querySelectorAll('#thumbwrap img')].every(i=>i.naturalWidth>0)")
 

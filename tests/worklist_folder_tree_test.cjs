@@ -1,4 +1,8 @@
 // REQ-WS3/REQ-WS7 -> RISK-WS3/RISK-WS7 -> TEST-WS3/TEST-WS7: public folder behavior with synthetic rows.
+// D73 (studio-1101): retired Add Shortcut form/option assertions. Creation now
+// belongs to Filter Exams (same-name saved-search reuse is covered by
+// worklist_folders_dom_test.py). Here shortcuts point to search IDs; duplicate
+// refusal and literal names remain covered through Rename and Saved Searches.
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const tree = require('../worklist-v0/hpacs-lite/worklist-folder-tree.js');
@@ -408,10 +412,10 @@ test('TEST-WS3-NAMES: trim and refuse case-insensitive shortcut/default duplicat
       assert.deepEqual([changes.length,selections.length], counts);
     }
   }
-  const form = nodes(host).find(node => node.tagName === 'FORM');
-  nodes(form).find(node => node.tagName === 'INPUT').value = '  ct  ';
-  nodes(form).find(node => node.tagName === 'SELECT').value = 'ct';
-  form.onsubmit({preventDefault(){}});
+  const editor = nodes(host).find(node => node.tagName === 'DETAILS');
+  editor.open = true;
+  nodes(editor).find(node => node.tagName === 'INPUT').value = '  ct  ';
+  button(editor,'Rename').click();
   assert.match(nodes(host).find(node => node.getAttribute('role') === 'status').textContent, /이미 사용 중인/);
   assert.deepEqual(api.snapshot(), before);
   assert.deepEqual([changes.length,selections.length], counts);
@@ -421,6 +425,14 @@ test('TEST-WS3-NAMES: trim and refuse case-insensitive shortcut/default duplicat
   assert.equal(api.snapshot().shortcuts.at(-1).name,'padded');
   assert.equal(api.snapshot().selectedId,'shortcut:a');
   assert.equal(get(api,'shortcut:a').unavailable,true);
+  // Saved-search names are a separate namespace: the shortcut points to that search.
+  api.add(shortcut('saved', searches[0].name));
+  assert.equal(api.snapshot().shortcuts.at(-1).searchId, searches[0].id);
+  for (const section of ['My Shortcuts', 'Saved Searches']) {
+    assert.ok(button(button(host, section).parent, searches[0].name + ' (—)'));
+  }
+  api.select('shortcut:saved');
+  assert.deepEqual(api.filter([{modality:'CT'}, {modality:'MR'}]), [{modality:'CT'}]);
 });
 
 test('TEST-WS3-VALIDATION: invalid edits refuse atomically before callbacks or state changes', () => {
@@ -525,7 +537,8 @@ test('TEST-WS3-INCOMING-SEARCH-NAMES: long and multiline saved names stay usable
       assert.equal(get(api,'shortcut:b').unavailable,false);
       assert.equal(api.snapshot().selectedId,incoming === 'mount' ? 'all' : 'modality:CT');
       assert.equal(selections.length,incoming === 'mount' ? 0 : 1);
-      assert.ok(nodes(host).some(node => node.tagName === 'OPTION' && node.textContent === name));
+      const saved = button(host,'Saved Searches').parent;
+      assert.ok(button(saved, name + ' (1)'));
       assert.equal(nodes(host).some(node => node.tagName === 'IMG'),false);
       api.select('shortcut:b'); assert.deepEqual(api.filter(rows),[rows[1]]);
       assert.equal(changes.length,0);
@@ -578,7 +591,9 @@ test('TEST-WS3-INCOMING-SEARCH-DUPLICATES: first id wins, even when its adapter 
       if (incoming === 'update') api.update(options);
       assert.equal(get(api,'all').count,'2');
       assert.ok(api.snapshot().items.filter(item => item.kind !== 'shortcut').every(item => /^\d+$/.test(item.count)));
-      assert.equal(nodes(host).filter(node => node.tagName === 'OPTION').length,first.matches ? 1 : 0);
+      const saved = button(host,'Saved Searches').parent;
+      assert.equal(nodes(saved).filter(node => node.tagName === 'BUTTON' && node !== button(host,'Saved Searches')).length,first.matches ? 1 : 0);
+      assert.equal(button(saved,'Later (2)'),undefined);
       if (first.matches) {
         assert.equal(get(api,'shortcut:a').count,'1');
         api.select('shortcut:a'); assert.deepEqual(api.filter(rows),[rows[0]]);
@@ -654,16 +669,19 @@ test('TEST-WS7-DOM: native buttons, nested lists, English names, pressed selecti
   assert.equal(button(host,'Modality').getAttribute('aria-expanded'), 'false');
 });
 
-test('TEST-WS7-EDIT-UI: form callbacks, literal names and draft preservation', () => {
-  const { api, host, changes } = setup({ searches });
-  const form = nodes(host).find(node => node.tagName === 'FORM');
-  nodes(form).find(node => node.tagName === 'INPUT').value = '<img src=x onerror=bad()>한글';
-  nodes(form).find(node => node.tagName === 'SELECT').value = 'ct';
-  form.onsubmit({preventDefault(){}});
+test('TEST-WS7-EDIT-UI: rename callbacks, literal names and draft preservation', () => {
+  const { api, host, changes } = setup({ searches, shortcuts:[shortcut('a')] });
+  const initialEditor = nodes(host).find(node => node.tagName === 'DETAILS');
+  initialEditor.open = true;
+  const literal = '<img src=x onerror=bad()>한글';
+  nodes(initialEditor).find(node => node.tagName === 'INPUT').value = literal;
+  button(initialEditor,'Rename').click();
   assert.equal(changes.length,1);
   assert.ok(button(host,'<img src=x onerror=bad()>한글 (—)'));
   assert.equal(nodes(host).some(node => node.tagName === 'IMG'),false);
   const details = nodes(host).find(node => node.tagName === 'DETAILS'); details.open = true;
+  assert.equal(nodes(details).find(node => node.tagName === 'INPUT').value,literal);
+  assert.equal(api.snapshot().shortcuts[0].searchId,'ct');
   const input = nodes(details).find(node => node.tagName === 'INPUT'); input.value = 'Draft'; input.focus();
   api.update({rows:[{modality:'CT'}],loadState:'complete'});
   assert.equal(nodes(host).find(node => node.tagName === 'DETAILS').open,true);

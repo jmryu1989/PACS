@@ -107,7 +107,7 @@ class MultiStudyViewE2E(base.WorklistE2E):
                     for i, date in enumerate(("20260803", "20260802", "20260801"))]
         originals, clinical = self.originals(), self.clinical(fixtures)
         page = self.login()
-        page.locator("#quick").fill(patient)
+        page.locator('#filterrow [data-f="id"]').fill(patient)
         for f in fixtures:
             row = page.locator(f'#rows tr[data-uid="{f.uid}"]')
             expect(row).to_be_visible()
@@ -180,7 +180,7 @@ class MultiStudyViewE2E(base.WorklistE2E):
                     for i, date in enumerate(('20260805','20260804','20260803','20260802','20260801'))]
         originals, clinical = self.originals(), self.clinical(fixtures)
         page = self.login(); page.set_viewport_size({'width':1366,'height':768})
-        page.locator('#quick').fill(patient)
+        page.locator('#filterrow [data-f="id"]').fill(patient)
         for f in fixtures: expect(page.locator(f'#rows tr[data-uid="{f.uid}"]')).to_be_visible()
         order = page.locator('#rows tr[data-uid]').evaluate_all('(rows) => rows.map(r=>r.dataset.uid)')
         self.assertEqual(sorted(order), sorted(f.uid for f in fixtures))

@@ -13,7 +13,7 @@ class WorklistSelectionE2E(ReadingWorkspaceE2E):
 
     def test_selection_01_details_filter_keyboard_and_unsaved_target(self):
         a,b=self.pair();c=self.ct('SYNTHETIC-other','other','20260802');p=self.login();self.choose(p,a)
-        p.locator('#findings').fill('SYNTHETIC MULTI UNSAVED');p.evaluate('clearInterval(poll)');p.locator('#quick').fill('')
+        p.locator('#findings').fill('SYNTHETIC MULTI UNSAVED');p.evaluate('clearInterval(poll)');p.locator('#filterrow [data-f="id"]').fill('')
         self.mark(p,a.uid);self.mark(p,b.uid)
         expect(p.locator('#multi-selection-count')).to_have_text('Selected: 2')
         self.assertEqual(p.evaluate('selectedUid'),a.uid);expect(p.locator('#findings')).to_have_value('SYNTHETIC MULTI UNSAVED')
@@ -21,7 +21,7 @@ class WorklistSelectionE2E(ReadingWorkspaceE2E):
         expect(d.locator('tbody tr')).to_have_count(2);expect(d.locator('[data-compare]')).to_be_enabled()
         d.locator('[data-close]').click();self.mark(p,c.uid);p.locator('#multi-selection-details').click()
         expect(d.locator('[data-compare]')).to_be_disabled();d.locator('[data-close]').click()
-        p.locator('#quick').fill(a.patient_id)
+        p.locator('#filterrow [data-f="id"]').fill(a.patient_id)
         expect(p.locator('#multi-selection-count')).to_have_text('Selected: 2')
         p.locator('#multi-selection-clear').click();expect(p.locator('#multi-selection-count')).to_have_text('Selected: 0')
         row=p.locator('#rows tr[data-uid="'+b.uid+'"]');row.focus();row.press('Space')

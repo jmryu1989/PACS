@@ -70,6 +70,8 @@
       stop: $("#dictation-stop"), cancel: $("#dictation-cancel"), retry: $("#dictation-retry"), repin: $("#dictation-repin"),
       insert: $("#dictation-insert"), close: $("#dictation-close"),
     }, {
+      // Follow the reader's dictation step without stealing focus from a report field on a later reply.
+      reveal: () => $(".report-p .rbtns").scrollIntoView({ block: "nearest", inline: "nearest" }),
       inserted: field => {
         $("#" + field)?.focus();
         toast("받아쓴 글을 판독문에 넣었습니다 — 확정하려면 Save 또는 Approve", "ok");

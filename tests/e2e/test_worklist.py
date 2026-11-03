@@ -203,12 +203,51 @@ class WorklistE2E(unittest.TestCase):
         return self.stack.create_fixture(**kwargs)
 
     def select(self, page, fixture):
-        page.locator("#quick").fill(fixture.patient_id)
+        # Replace a saved/popup quick condition before choosing a new patient from the header.
+        if page.locator('#quick').input_value():
+            self.open_toolbar_group(page, '#quick')
+            page.locator('#quick').fill('')
+            page.locator('#toolbar-filters > summary').click()
+        page.locator('#filterrow [data-f="id"]').fill(fixture.patient_id)
         row = page.locator(f'#rows tr[data-uid="{fixture.uid}"]')
         expect(row).to_be_visible()
         row.click()
         expect(row).to_have_class(re.compile(r"\bsel\b"))
         return row
+
+    def quick_search(self, page, value, *, preserve_id=False):
+        # select() now uses the header ID condition; replace it when testing ID-or-name search.
+        if not preserve_id and page.locator('#filterrow [data-f="id"]').input_value():
+            self.close_toolbar_groups(page)
+            page.locator('#filterrow [data-f="id"]').fill('')
+        self.open_toolbar_group(page, '#quick')
+        page.locator('#quick').fill(value)
+
+    def close_toolbar_groups(self, page):
+        for menu in page.locator('.menubar > .toolbar-menu[open]').all():
+            menu.locator(':scope > summary').click()
+
+    def show_workspace_panels(self, page, *names):
+        """Reveal the requested optional panels using the shipped Panel Settings dialog."""
+        self.open_toolbar_group(page, '#panel-settings-open')
+        page.locator('#panel-settings-open').click()
+        dialog = page.get_by_role('dialog', name='Panel Settings', exact=True)
+        for name in names:
+            dialog.get_by_role('checkbox', name=name, exact=True).check()
+        dialog.get_by_role('button', name='Close', exact=True).click()
+        WorklistE2E.close_toolbar_groups(self, page)
+
+    def show_worklist_column(self, page, key):
+        self.open_toolbar_group(page, '#columnsettings')
+        page.locator('#columnsettings').click()
+        page.locator(f'#wc-list [data-column="{key}"] input[type=checkbox]').check()
+        page.locator('#wc-memory').click()
+        WorklistE2E.close_toolbar_groups(self, page)
+
+    def clear_filters(self, page):
+        # Expanded top menus can cover the header's Clear button after editing a saved search.
+        self.close_toolbar_groups(page)
+        page.locator('#filterrow .col-clear').click()
 
     def open_toolbar_group(self, page, selector):
         # S5-UI2: the worklist toolbar keeps most controls in <details> groups (Filters, View, More, the Auto Refresh
@@ -337,7 +376,7 @@ class WorklistE2E(unittest.TestCase):
             tech.locator("#t-verify").click()
         self.assertEqual(reply.value.status, 200)
         self.assertEqual(self.state(fixture)["ss"], "Verified")
-        doctor.locator("#refresh").click()
+        doctor.locator("#m-refresh").click()
         for button in ("#b-save", "#b-transcribe", "#b-approve"):
             expect(doctor.locator(button)).to_be_enabled()
         expect(doctor.locator("#findings")).to_have_js_property("readOnly", False)
@@ -431,7 +470,7 @@ class WorklistE2E(unittest.TestCase):
         first.locator("#findings").fill(fixture.secret)
         self.wait_state(first, fixture, lambda s: s.get("holder") == self.stack.actor("doctor"))
         self.select(second, fixture)
-        second.locator("#refresh").click()
+        second.locator("#m-refresh").click()
         try:
             expect(second.locator("#holdbar")).to_be_visible()
         except AssertionError:
@@ -455,7 +494,7 @@ class WorklistE2E(unittest.TestCase):
         self.locked(second)
         second.locator(f'#rows tr[data-uid="{fixture.uid}"]').click(button="right")
         expect(second.locator("#ctx").get_by_text("점유 강제 해제 (관리자)", exact=True)).to_have_count(0)
-        second.locator("#quick").click()
+        second.locator('#filterrow [data-f="id"]').click()
         self.wait_state(first, fixture, lambda s: (s.get("draft") or {}).get("findings") == fixture.secret, timeout=25000)
         self.assertIsNone(self.state(fixture, "doctor2").get("draft"))
         self.assertEqual(self.state(fixture)["findings"], "")
@@ -484,7 +523,7 @@ class WorklistE2E(unittest.TestCase):
         second.locator("#findings").fill("Second writer after administrator release")
         self.wait_state(second, fixture, lambda s: s.get("holder") == self.stack.actor("doctor2"))
         self.assertEqual(self.state(fixture)["draft"]["findings"], fixture.secret)
-        first.locator("#refresh").click()
+        first.locator("#m-refresh").click()
         self.locked(first)
 
     def test_09_defer_reason_cancel_and_commit(self):

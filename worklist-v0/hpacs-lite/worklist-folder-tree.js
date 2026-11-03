@@ -36,7 +36,7 @@
   // On conflict/unknown outcome, retain the draft and block writes until a fresh
   // collection read; update({shortcuts}) can restore an authoritative array silently.
   // Account end must destroy this module. It owns neither storage nor transport.
-  function mount({ host, rows = [], loadState = 'unknown', searches = [], shortcuts = [], onSelect, onChange }) {
+  function mount({ host, rows = [], loadState = 'unknown', searches = [], shortcuts = [], onSelect, onChange, onShortcutsMenu }) {
     if (!host?.ownerDocument || typeof onSelect !== 'function' || typeof onChange !== 'function') {
       throw new Error('폴더 표시 영역과 변경 콜백을 확인해 주세요.');
     }
@@ -240,7 +240,11 @@
       const all = items(); itemRow(all[0], list);
       for (const [kind, title] of [['shortcut', 'My Shortcuts'], ['modality', 'Modality'], ['search', 'Saved Searches']]) {
         const group = element('li'), children = element('ul'); children.hidden = collapsed.has(kind);
-        const toggle = button(title, () => { collapsed.has(kind) ? collapsed.delete(kind) : collapsed.add(kind); render(); }, 'section:' + kind);
+        // With a menu handler, the My Shortcuts title opens the exam-filter popup instead of folding the list.
+        const opensMenu = kind === 'shortcut' && typeof onShortcutsMenu === 'function';
+        const toggle = button(title, opensMenu ? () => onShortcutsMenu(toggle)
+          : () => { collapsed.has(kind) ? collapsed.delete(kind) : collapsed.add(kind); render(); }, 'section:' + kind);
+        if (opensMenu) { children.hidden = false; toggle.setAttribute('aria-haspopup', 'dialog'); toggle.title = '검사 필터 창을 엽니다.'; }
         toggle.setAttribute('id', sectionPrefix + '-' + kind);
         children.setAttribute('aria-labelledby', toggle.getAttribute('id'));
         toggle.setAttribute('aria-expanded', String(!children.hidden)); group.append(toggle, children); list.append(group);
@@ -260,23 +264,9 @@
           li.append(editor);
         }
       }
-      const form = element('form'), name = remember(element('input'), 'add-name'), search = remember(element('select'), 'add-search');
-      name.required = true; name.maxLength = 400;
-      const nameLabel = element('label', 'Shortcut Name'), searchLabel = element('label', 'Saved Search');
-      nameLabel.append(name); searchLabel.append(search);
-      for (const source of state.searches) { const option = element('option', source.name); option.value = source.id; search.append(option); }
-      const submit = remember(element('button', 'Add Shortcut'), 'add'); submit.type = 'submit'; submit.disabled = !state.searches.length;
-      form.append(nameLabel, searchLabel, submit);
-      form.onsubmit = event => {
-        event.preventDefault(); attempt(() => {
-          let id = 1; while (state.shortcuts.some(item => item.id === String(id))) ++id;
-          add({ id: String(id), name: name.value, searchId: search.value });
-          controls.get('add-name').value = '';
-        });
-      };
       const guidance = selected.length ? '' : '선택된 Modality가 없습니다. All Studies 또는 Modality를 선택해 주세요.';
       if (selectionStatus.textContent !== guidance) selectionStatus.textContent = guidance;
-      content.replaceChildren(list, form);
+      content.replaceChildren(list);
       for (const [key, value] of drafts) {
         const node = controls.get(key);
         if (node && (node.tagName !== 'SELECT' || state.searches.some(search => search.id === value))) node.value = value;

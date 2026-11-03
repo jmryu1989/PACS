@@ -47,9 +47,18 @@ class ViewingCellDOM(MultiInstitutionWorklist):
     def cell(self, screen, pid):
         return screen.data_row(pid).get_by_role('cell').nth(screen.heads().index('Viewing'))
 
+    def boot_viewing(self, server):
+        # Viewing is not a default Radiology column; the reader turns it on with the header's column chooser.
+        screen = self.boot(server)
+        picker = screen.page.locator('#column-picker')
+        screen.page.get_by_role('button', name='Choose columns', exact=True).click()
+        picker.get_by_role('checkbox', name='Viewing', exact=True).check()
+        picker.get_by_role('button', name='Close', exact=True).click()
+        return screen
+
     def test_viewing_all_rows_poll_clear_recover_and_escape(self):
         server = PresenceServer()
-        screen = self.boot(server)
+        screen = self.boot_viewing(server)
         expect(self.cell(screen, 'SYN-CURRENT')).to_have_text('Viewing: SYN Colleague')
         expect(self.cell(screen, 'SYN-PRIOR')).to_have_text(
             'Viewing: SYN Colleague, <img src=x onerror=window.synXss=1>')
@@ -101,7 +110,7 @@ class ViewingCellDOM(MultiInstitutionWorklist):
 
     def test_viewing_saved_width_survives_presence_update_and_clear(self):
         server = PresenceServer()
-        screen = self.boot(server)
+        screen = self.boot_viewing(server)
         cell = self.cell(screen, 'SYN-CURRENT')
         expect(cell).to_have_text('Viewing: SYN Colleague')
         dialog = screen.open_columns()
@@ -130,7 +139,7 @@ class ViewingCellDOM(MultiInstitutionWorklist):
         server.rows[0]['state']['holder'] = writer
         server.rows[1]['state']['holder'] = SESSION_A['actor']
         server.people = {}
-        screen = self.boot(server)
+        screen = self.boot_viewing(server)
         other, own = self.cell(screen, 'SYN-CURRENT'), self.cell(screen, 'SYN-PRIOR')
         expect(other).to_have_text('✎ ' + writer)
         expect(own).to_have_text('✎ 나')
@@ -154,7 +163,7 @@ class ViewingCellDOM(MultiInstitutionWorklist):
         server = PresenceServer()
         writer = 'syn.long.reader.name@synthetic-hospital.example'
         server.rows[0]['state']['holder'] = writer
-        screen = self.boot(server)
+        screen = self.boot_viewing(server)
         cell = self.cell(screen, 'SYN-CURRENT')
         expect(cell).to_have_text('✎ ' + writer + ' · Viewing: SYN Colleague')
         dialog = screen.open_columns()
@@ -193,7 +202,7 @@ class ViewingCellDOM(MultiInstitutionWorklist):
         server = PresenceServer()
         server.rows[0]['state']['holder'] = '다른 기관'
         server.people = {}
-        screen = self.boot(server)
+        screen = self.boot_viewing(server)
         cell = self.cell(screen, 'SYN-CURRENT')
         expect(cell).to_have_text('✎ 다른 기관')
         expect(cell.get_by_text('✎ 다른 기관', exact=True)).to_have_attribute('title', '다른 기관 판독의가 작성 중')
@@ -212,7 +221,7 @@ class ViewingCellDOM(MultiInstitutionWorklist):
 
     def test_viewing_slow_response_outlasts_poll_without_blanking_or_overlap(self):
         server = PresenceServer()
-        screen = self.boot(server)
+        screen = self.boot_viewing(server)
         screen.set_manual_refresh()
         cell = self.cell(screen, 'SYN-CURRENT')
         expect(cell).to_have_text('Viewing: SYN Colleague')
@@ -231,7 +240,7 @@ class ViewingCellDOM(MultiInstitutionWorklist):
 
     def test_viewing_stalled_read_expires_and_session_end_discards_response(self):
         server = PresenceServer()
-        screen = self.boot(server)
+        screen = self.boot_viewing(server)
         expect(self.cell(screen, 'SYN-CURRENT')).to_have_text('Viewing: SYN Colleague')
         server.hold = True
         until(lambda: len(server.pending) > 0, 10, 'stalled poll')

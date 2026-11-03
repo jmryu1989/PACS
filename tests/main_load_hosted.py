@@ -707,7 +707,7 @@ def visit(stack, browser_context, clock_start, patient, metadata):
         answered = time.perf_counter()
         stack.me_release.set()  # same observation point as the PRE route fixture
         wait(page, lambda: patient in page.locator("#rows").inner_text(), "usable list")
-        page.locator("#quick").fill(patient)
+        page.locator('#filterrow [data-f="name"]').fill(patient)
         wait(page, lambda: page.locator('#rows tr[data-uid]').count() > 0, "usable search")
         usable = time.perf_counter()
         performance = waterfall.performance()

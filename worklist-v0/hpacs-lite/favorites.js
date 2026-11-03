@@ -2,13 +2,13 @@
 window.KinFavorites = function (app) {
   const work=window.KinWorkContext;
   const d=document.createElement('dialog');d.id='favorite-dialog';d.setAttribute('aria-labelledby','favorite-title');
-  d.innerHTML=`<h2 id="favorite-title">개인 즐겨찾기</h2><p>검사 링크를 계정에 저장합니다. 폴더·링크를 제거해도 원검사와 판독문은 유지됩니다.</p>
-    <div class="favorite-layout"><aside><label>새 폴더 이름<input id="favorite-new-name" maxlength="120"></label><button id="favorite-create" type="button">폴더 만들기</button><div id="favorite-folders"></div></aside>
-    <section><label>폴더 이름<input id="favorite-name" maxlength="120"></label><button id="favorite-rename" type="button">이름 변경</button> <button id="favorite-delete" type="button">폴더 삭제</button>
-    <button id="favorite-apply" type="button">이 폴더의 검사 목록 보기</button><p>기존 검색 조건과 함께 적용합니다. 목록의 범위 해제로 돌아갈 수 있습니다.</p>
-    <p id="favorite-current"></p><button id="favorite-add" type="button">현재 선택 검사 추가</button><p id="favorite-count"></p><div id="favorite-links"></div></section></div>
-    <section id="favorite-view-editor" hidden><label>연결할 저장 보기<select id="favorite-view-choice"></select></label> <button id="favorite-view-save" type="button">보기 연결 저장</button> <button id="favorite-view-cancel" type="button">취소</button><p>저장한 영상 배치·표시 상태에 연결합니다. 열 때 원본과 현재 접근 권한을 다시 확인합니다.</p></section>
-    <p id="favorite-status" role="status"></p><footer><button id="favorite-retry" type="button" hidden>같은 요청 다시 시도</button><button id="favorite-reload" type="button">최신 목록 다시 읽기</button><button id="favorite-close" type="button">닫기</button></footer>`;
+  d.innerHTML=`<h2 id="favorite-title">Favorites</h2><p>검사 링크를 계정에 저장합니다. 폴더·링크를 제거해도 원검사와 판독문은 유지됩니다.</p>
+    <div class="favorite-layout"><aside><label>새 폴더 이름<input id="favorite-new-name" maxlength="120"></label><button id="favorite-create" type="button" title="새 폴더 만들기">New Folder</button><div id="favorite-folders"></div></aside>
+    <section><label>폴더 이름<input id="favorite-name" maxlength="120"></label><button id="favorite-rename" type="button" title="폴더 이름 변경">Rename</button> <button id="favorite-delete" type="button" title="폴더 삭제 (원검사·판독문은 유지)">Delete Folder</button>
+    <button id="favorite-apply" type="button" title="이 폴더의 검사만 목록에 보기">Show in Worklist</button><p>기존 검색 조건과 함께 적용합니다. 목록의 범위 해제로 돌아갈 수 있습니다.</p>
+    <p id="favorite-current"></p><button id="favorite-add" type="button" title="지금 선택한 검사를 이 폴더에 추가">Add Selected</button><p id="favorite-count"></p><div id="favorite-links"></div></section></div>
+    <section id="favorite-view-editor" hidden><label>연결할 저장 보기<select id="favorite-view-choice"></select></label> <button id="favorite-view-save" type="button" title="저장 보기 연결 저장">Save Link</button> <button id="favorite-view-cancel" type="button" title="취소">Cancel</button><p>저장한 영상 배치·표시 상태에 연결합니다. 열 때 원본과 현재 접근 권한을 다시 확인합니다.</p></section>
+    <p id="favorite-status" role="status"></p><footer><button id="favorite-retry" type="button" title="같은 요청 다시 시도" hidden>Retry</button><button id="favorite-reload" type="button" title="최신 목록 다시 읽기">Reload</button><button id="favorite-close" type="button" title="닫기">Close</button></footer>`;
   document.body.append(d);const $=id=>d.querySelector('#favorite-'+id);
   let owner=null,state=null,selected=null,current=null,seq=0,busy=false,pending=null,abort=null,ended=false,opener=null,viewUid=null;
   const same=()=>work.state()==='active'&&!ended&&d.open&&app.allowed()&&JSON.stringify(owner)===JSON.stringify(app.identity());

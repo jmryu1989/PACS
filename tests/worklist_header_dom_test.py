@@ -22,6 +22,17 @@ S5-U6b-X2-F01: the header shares its row with the S5-U6b storage text (#storage)
 measured a text the product never shows. The shipped refreshStorage() is cut out of main.html and run as is against a
 stubbed /statistics answer, so every header here carries a text the page itself produces; the longest one (the largest
 byte count it accepts) is the default, and each state it can draw is measured on its own at the one-row widths.
+
+D73 studio-1101: the compact header replaces the retired 52px row with 30px
+and uses 11px compact controls and session text. Hiding the connection summary
+below 1500px was a carried finding, not an approval. The offline warning must
+remain fully painted at every viewport, including through ancestor clipping.
+Storage state/text is checked at every width, and its full painted width where
+shown. Session details retain the full text at 12px; pointer/keyboard/logout
+and no-overlap contracts remain. Config's tooltip describes Panel Settings.
+Reading Workspace may shorten its caption at narrow widths; its complete
+button and pointer target, and every session control, must still fit.
+Overlap checks compare painted bounds, not hidden continuation behind Session.
 """
 from page_source import read_page_source
 import json
@@ -36,9 +47,9 @@ ASSETS = ROOT / 'worklist-v0/hpacs-lite'
 # Screenshots go outside the checkout when the runner names a directory, so a run leaves no files behind.
 OUT = Path(os.environ.get('KIN_EVIDENCE_DIR') or ROOT / 'tmp/s5-ui1/header')
 
-VIEWPORTS = [(1024, 768), (1225, 900), (1280, 800), (1366, 768), (1680, 1100), (1920, 1200)]
+VIEWPORTS = [(1024, 768), (1152, 864), (1225, 900), (1280, 800), (1366, 768), (1680, 1100), (1920, 1200)]
 ONE_ROW_FROM = 1366
-ONE_ROW_HEIGHT = 52
+ONE_ROW_HEIGHT = 30
 CONNECTED = '<span style="color:#4ac06a">●</span> DB Connected'
 # goOffline() writes this; it is the longest status text the header shows.
 OFFLINE = '<span style="color:#ff6b6b">●</span> 서버 연결 끊김 — 저장 불가 (클릭: 재시도)'
@@ -149,10 +160,19 @@ FILL = """([user, roles, reading, portrait, dbstat])=>{
 
 MEASURE = """()=>{
   const box=e=>{const r=e.getBoundingClientRect();return {x:r.left,y:r.top,r:r.right,b:r.bottom,w:r.width,h:r.height}};
+  const paintedBox=e=>{
+    const r=box(e);
+    for(let p=e.parentElement;p;p=p.parentElement){
+      const cs=getComputedStyle(p),b=box(p);
+      if(['hidden','clip','auto','scroll'].includes(cs.overflowX)){r.x=Math.max(r.x,b.x);r.r=Math.min(r.r,b.r);}
+      if(['hidden','clip','auto','scroll'].includes(cs.overflowY)){r.y=Math.max(r.y,b.y);r.b=Math.min(r.b,b.b);}
+    }
+    return {...r,w:Math.max(0,r.r-r.x),h:Math.max(0,r.b-r.y)};
+  };
   const bar=document.querySelector('.menubar');
   const items=[...bar.querySelectorAll('.brand,.tabs>div,.menubar .item,.mright')]
     .filter(e=>getComputedStyle(e).display!=='none')
-    .map(e=>({name:e.id||e.className||e.textContent.trim(),text:e.textContent.trim(),box:box(e),
+    .map(e=>({name:e.id||e.className||e.textContent.trim(),text:e.textContent.trim(),box:paintedBox(e),
               sw:e.scrollWidth,cw:e.clientWidth}));
   const out=document.querySelector('#logout');
   const who=document.querySelector('#session-who');
@@ -164,7 +184,8 @@ MEASURE = """()=>{
           logout:{...box(out),tag:out.tagName,text:out.textContent.trim(),font:parseFloat(getComputedStyle(out).fontSize)},
           who:who&&{...box(who),tag:who.tagName,type:who.type,target:who.getAttribute('popovertarget'),title:who.title},
           parts:['#user','#roles'].map(part),
-          storage:(e=>({...box(e),text:e.textContent,state:e.dataset.state,title:e.title,sw:e.scrollWidth,cw:e.clientWidth,
+          storage:(e=>({...paintedBox(e),text:e.textContent,state:e.dataset.state,title:e.title,sw:e.scrollWidth,cw:e.clientWidth,
+                        lines:(()=>{const r=document.createRange();r.selectNodeContents(e);return [...r.getClientRects()].filter(x=>x.width>0).length})(),
                         sh:e.scrollHeight,ch:e.clientHeight,font:parseFloat(getComputedStyle(e).fontSize),
                         display:getComputedStyle(e).display}))(document.querySelector('#storage'))};
 }"""
@@ -282,26 +303,30 @@ class WorklistHeaderDOMTest(unittest.TestCase):
             self.assertEqual(storage_state, st['state'])
             self.assertEqual(storage_text, st['text'])
             self.assertTrue(st['title'], 'the storage text lost its explanation')
-            self.assertNotEqual('none', st['display'])
-            self.assertGreater(st['w'], 0)
-            self.assertGreaterEqual(st['font'], 12)
-            self.assertLessEqual(st['sw'], st['cw'] + 1, f'#storage clips "{st["text"]}"')
-            self.assertLessEqual(st['sh'], st['ch'] + 1, f'#storage runs onto a second line: "{st["text"]}"')
-            self.assertGreaterEqual(st['x'], -0.5)
-            self.assertLessEqual(st['r'], width + 0.5)
-            self.assertGreaterEqual(st['y'], bar['y'] - 0.5)
-            self.assertLessEqual(st['b'], bar['b'] + 0.5)
+            if width >= 1920:
+                expect(page.locator('#storage')).to_be_visible()
+            if page.locator('#storage').is_visible():
+                self.assertNotEqual('none', st['display'])
+                self.assertGreater(st['w'], 0)
+                self.assertGreaterEqual(st['font'], 11)
+                self.assertAlmostEqual(st['sw'], st['w'], delta=1, msg=f'#storage clips "{st["text"]}"')
+                self.assertEqual(st['lines'], 1, f'#storage runs onto a second line: "{st["text"]}"')
+                self.assertGreaterEqual(st['x'], -0.5)
+                self.assertLessEqual(st['r'], width + 0.5)
+                self.assertGreaterEqual(st['y'], bar['y'] - 0.5)
+                self.assertLessEqual(st['b'], bar['b'] + 0.5)
             # Folding a name hides its words from the row only: they stay in the DOM and in the tooltip.
             for fold in page.evaluate(FOLD, FOLDED):
                 self.assertTrue(fold['found'], fold['word'])
                 self.assertIn(fold['word'], fold['text'])
-                self.assertTrue(fold['title'].startswith(fold['word']), fold)
+                meaning = 'Panel Settings' if fold['word'] == 'Config' else fold['word']
+                self.assertTrue(fold['title'].startswith(meaning), fold)
                 if width >= LABELS_SHOWN_FROM:
                     self.assertTrue(fold['labelShown'], f'{fold["word"]} is folded at {width}')
             lo = m['logout']
             self.assertEqual('BUTTON', lo['tag'], 'Log out must be a native control so Tab and Enter reach it')
             self.assertEqual('Log out', lo['text'])
-            self.assertGreaterEqual(lo['font'], 12)
+            self.assertGreaterEqual(lo['font'], 11)
             # The whole button lies inside the viewport, not merely its left edge.
             self.assertGreaterEqual(lo['x'], 0)
             self.assertGreaterEqual(lo['y'], 0)
@@ -315,6 +340,8 @@ class WorklistHeaderDOMTest(unittest.TestCase):
             # base commit, which is outside the header and outside this unit.
             self.assertGreaterEqual(m['bar']['x'], 0)
             self.assertLessEqual(m['bar']['r'], width, 'the header is wider than the viewport')
+            self.assertEqual(1, sum(item['name'] == 'dbstat' for item in m['items']),
+                             'connection summary must remain visible')
             for item in m['items']:
                 b = item['box']
                 self.assertGreaterEqual(b['x'], -0.5, item['name'])
@@ -324,7 +351,20 @@ class WorklistHeaderDOMTest(unittest.TestCase):
                 self.assertLessEqual(b['b'], m['bar']['b'] + 0.5, item['name'])
                 # No header item is clipped. The user/institution text inside the session button may be ellipsized;
                 # that button is the item here, and its whole text is checked in Session details below.
-                self.assertLessEqual(item['sw'], item['cw'] + 1, f'{item["name"]} clips "{item["text"]}"')
+                if item['name'] == 'm-reading' and width <= 1199:
+                    entry = page.get_by_role('button', name='Reading Workspace', exact=True)
+                    expect(entry).to_be_in_viewport(ratio=1)
+                    self.assertTrue(entry.evaluate("e => { const r=e.getBoundingClientRect(); return e.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)); }"),
+                                    'Reading Workspace lost its pointer target')
+                elif item['name'] == 'dbstat':
+                    self.assertGreater(b['w'], 0, 'connection warning is not painted')
+                    self.assertGreater(b['h'], 0, 'connection warning is not painted')
+                    self.assertAlmostEqual(item['sw'], b['w'], delta=1,
+                                           msg=f'connection warning clips "{item["text"]}"')
+                    self.assertIn('서버 연결 끊김 — 저장 불가' if 'offline' in session else 'DB Connected', item['text'])
+                    self.assertTrue(page.locator('#dbstat').get_attribute('title'), 'connection summary lost its explanation')
+                else:
+                    self.assertLessEqual(item['sw'], item['cw'] + 1, f'{item["name"]} clips "{item["text"]}"')
             boxes = [i for i in m['items'] if i['box']['w'] and i['box']['h']]
             for i, a in enumerate(boxes):
                 for c in boxes[i + 1:]:
@@ -347,7 +387,7 @@ class WorklistHeaderDOMTest(unittest.TestCase):
                 self.assertTrue(part['inWho'], part['sel'])
                 self.assertEqual('nowrap', part['whiteSpace'], part['sel'])
                 self.assertEqual('ellipsis', part['textOverflow'], part['sel'])
-                self.assertGreaterEqual(part['font'], 12, part['sel'])
+                self.assertGreaterEqual(part['font'], 11, part['sel'])
                 self.assertLessEqual(part['sh'], part['ch'] + 1, f'{part["sel"]} runs onto a second line')
                 self.assertLessEqual(b['h'], 2 * part['font'], f'{part["sel"]} is {b["h"]}px tall, more than one line')
                 self.assertGreaterEqual(b['x'], who['x'] - 0.5, part['sel'])
@@ -412,7 +452,7 @@ class WorklistHeaderDOMTest(unittest.TestCase):
 
     def test_portrait_layout_keeps_the_same_header(self):
         # Layout: Portrait can be chosen or restored on a wide window, and Auto picks it on a monitor stood on end
-        # (applyLayout: innerHeight > innerWidth). From 1366 up the header is the same one 52px row there.
+        # (applyLayout: innerHeight > innerWidth). The compact row is identical in both orientations.
         for width, height in VIEWPORTS:
             for reading in (False, True):
                 for session in PORTRAIT_SESSIONS:
@@ -421,7 +461,7 @@ class WorklistHeaderDOMTest(unittest.TestCase):
 
     def test_every_storage_state_keeps_the_one_row_header(self):
         # S5-U6b-X2-F01: each text refreshStorage() can draw, in the real header and CSS, at the widths that must stay
-        # one 52px row, in both layouts and modes, with the shortest and the longest session text.
+        # one compact row, in both layouts and modes, with the shortest and the longest session text.
         for width, height in STORAGE_WIDTHS:
             for reading in (False, True):
                 for portrait in (False, True):

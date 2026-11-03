@@ -71,7 +71,7 @@ class CompoundSearchE2E(manager.SavedFilterManagerE2E):
         page = self.login(); self.select(page, first)
         unsaved = first.secret + ' / not committed while filtering'
         page.locator('#findings').fill(unsaved)
-        page.locator('#quick').fill(prefix)
+        self.quick_search(page, prefix)
         self.rows_are(page, [first, second, third])
         posts = []
         page.on('request', lambda request: posts.append(request.post_data_json)
@@ -135,10 +135,10 @@ class CompoundSearchE2E(manager.SavedFilterManagerE2E):
         self.assertEqual(prefs.status, 200)
         self.assertFalse(any(f['name'] == name for f in prefs.body['filters']))
 
-        fresh.locator('#clearfilter').click()
+        self.clear_filters(fresh)
         expect(fresh.locator('#quick')).to_have_value('')
         expect(fresh.locator('#filterlist')).not_to_contain_text('복합')
-        fresh.locator('#quick').fill(prefix)
+        self.quick_search(fresh, prefix)
         self.rows_are(fresh, [first, second, third])
         self.open_manager(fresh)
         expect(fresh.locator('#sfm-rules .sfm-rule')).to_have_count(0)
@@ -154,7 +154,7 @@ class CompoundSearchE2E(manager.SavedFilterManagerE2E):
         # The overlay contract carries text only; '' blanks the source description, which is the missing value.
         for fixture, description in zip(fixtures, ('Chest', 'Chest followup', 'Abdomen', '')):
             self.patch(fixture, ov={'desc': description})
-        page = self.login(); page.locator('#quick').fill(prefix)
+        page = self.login(); self.quick_search(page, prefix)
         self.rows_are(page, fixtures)
         self.open_manager(page)
         for op, value, count in (('contains', 'chest', 2), ('eq', 'CHEST', 1),
@@ -207,7 +207,7 @@ class CompoundSearchE2E(manager.SavedFilterManagerE2E):
         """A failed write retains rules; an unknown stored expression cannot broaden results."""
         prefix = 'CMP-fail-' + uuid.uuid4().hex[:8]
         first, second = self.fixture(patient_id=prefix + '-A'), self.fixture(patient_id=prefix + '-B')
-        page = self.login(); page.locator('#quick').fill(prefix)
+        page = self.login(); self.quick_search(page, prefix)
         self.open_manager(page)
         name = prefix + '-good'
         page.locator('#sfm-name').fill(name)
@@ -323,7 +323,7 @@ class CompoundSearchE2E(manager.SavedFilterManagerE2E):
             expect(fresh.locator('#dbstat')).to_contain_text('DB Connected')
             with fresh.expect_response(lambda response: response.request.method == 'GET'
                                        and response.url.split('?')[0].endswith('/api/studies')):
-                fresh.locator('#refresh').click()
+                fresh.locator('#m-refresh').click()
             fresh.wait_for_function(
                 'uids => uids.every(uid => studies.some(study => study.uid === uid))',
                 arg=[first.uid, second.uid])
@@ -338,9 +338,9 @@ class CompoundSearchE2E(manager.SavedFilterManagerE2E):
                     route.abort()
             finally:
                 fresh.unroute('**/api/colleagues', hold_colleagues)
-        fresh.locator('#clearfilter').click()
+        self.clear_filters(fresh)
         expect(fresh.locator('#filterlist')).not_to_contain_text('복합 조건 오류')
-        fresh.locator('#quick').fill(prefix)
+        self.quick_search(fresh, prefix)
         self.rows_are(fresh, [first, second])
         self.assertEqual(self.versions(first), [])
 
@@ -349,7 +349,7 @@ class CompoundSearchE2E(manager.SavedFilterManagerE2E):
         prefix = 'CMP-mode-' + uuid.uuid4().hex[:8]
         first, second = self.fixture(patient_id=prefix + '-A'), self.fixture(patient_id=prefix + '-B')
         self.patch(first, ward='ER'); self.patch(second, ward='OPD')
-        page = self.login(); page.locator('#quick').fill(prefix)
+        page = self.login(); self.quick_search(page, prefix)
         self.open_manager(page)
         page.locator('#sfm-name').fill(prefix)
         page.locator('#sfm-mode').select_option('Technician')
@@ -379,7 +379,7 @@ class CompoundSearchE2E(manager.SavedFilterManagerE2E):
         self.assertEqual(page.evaluate('mode'), 'Technician')
         # The toolbar's older save path must enforce the same contract as the
         # manager after a main worklist tab makes a condition unavailable.
-        page.locator('.tabs > [data-tab="Radiology"]').click()
+        page.locator('[data-tab="Radiology"]').click()
         self.rows_are(page, [])
         expect(page.locator('#filterlist')).to_contain_text('복합 조건 오류')
         toolbar_writes, prompts = [], []
@@ -396,7 +396,7 @@ class CompoundSearchE2E(manager.SavedFilterManagerE2E):
         self.assertEqual(toolbar_writes, [])
         page.remove_listener('dialog', unexpected_prompt)
         self.rows_are(page, [])
-        page.locator('.tabs > [data-tab="Technician"]').click()
+        page.locator('[data-tab="Technician"]').click()
         self.rows_are(page, [first])
         self.open_manager(page)
         page.set_viewport_size({'width': 900, 'height': 600})
@@ -422,11 +422,15 @@ class CompoundSearchE2E(manager.SavedFilterManagerE2E):
         page = self.login(); self.select(page, third)
         draft = third.secret + ' / unsaved quick-match'
         page.locator('#findings').fill(draft)
-        page.locator('#quick').fill(prefix.lower())
+        self.quick_search(page, prefix.lower())
         self.rows_are(page, [first, second, third])
-        page.locator('#quick-match').select_option('prefix')
+        self.open_manager(page)
+        page.locator('#sfm-quick-match').select_option('prefix')
+        self.preview(page)
         self.rows_are(page, [first, second])
-        page.locator('#quick-match').select_option('exact')
+        self.open_manager(page)
+        page.locator('#sfm-quick-match').select_option('exact')
+        self.preview(page)
         self.rows_are(page, [first])
         expect(page.locator('#findings')).to_have_value(draft)
         self.assertEqual(page.evaluate('selectedUid'), third.uid)
@@ -442,8 +446,9 @@ class CompoundSearchE2E(manager.SavedFilterManagerE2E):
         expect(page.locator('#chips button', has_text=name)).to_contain_text('(1)')
         fresh = self.login()
         self.rows_are(fresh, [first])
-        expect(fresh.locator('#quick-match')).to_have_value('exact')
+        # The removed toolbar match selector is inspected in Saved Search Manager (D73).
         self.open_manager(fresh)
+        expect(fresh.locator('#sfm-quick-match')).to_have_value('exact')
         fresh.locator('#sfm-search').fill(name)
         fresh.locator('#sfm-list button', has_text=name).click()
         fresh.locator('#sfm-quick-match').select_option('prefix')
@@ -452,10 +457,14 @@ class CompoundSearchE2E(manager.SavedFilterManagerE2E):
         self.count_is(fresh, 1)
         self.preview(fresh)
         self.rows_are(fresh, [second])
-        expect(fresh.locator('#quick-match')).to_have_value('prefix')
-        fresh.locator('#clearfilter').click()
-        expect(fresh.locator('#quick-match')).to_have_value('contains')
-        fresh.locator('#quick').fill(prefix)
+        self.open_manager(fresh)
+        expect(fresh.locator('#sfm-quick-match')).to_have_value('prefix')
+        fresh.locator('#sfm-close').click()
+        self.clear_filters(fresh)
+        self.open_manager(fresh)
+        expect(fresh.locator('#sfm-quick-match')).to_have_value('contains')
+        fresh.locator('#sfm-close').click()
+        self.quick_search(fresh, prefix)
         self.rows_are(fresh, [first, second, third])
         self.screenshot(fresh, 'quick-match-list.png')
         self.assertEqual(self.versions(third), before)
