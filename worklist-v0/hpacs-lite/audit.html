@@ -33,6 +33,7 @@
     fieldset { border: 1px solid var(--line); margin: 14px 0; padding: 14px; min-width: 0; }
     .inspection-summary, #audit-inspection-history { white-space: pre-wrap; overflow-wrap: anywhere; }
     .inspection-actions { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
+    #audit-incident-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 28rem; overflow: auto; }
   </style>
 </head>
 <body>
@@ -229,6 +230,118 @@
               <label>Notice Content<textarea name="content" required></textarea></label>
               <button id="audit-rights-notify-button" type="submit">Record Notification</button>
             </fieldset></form>
+          </div>
+        </div>
+      </section>
+      <section aria-labelledby="audit-incident-title">
+        <h2 id="audit-incident-title">Incident</h2>
+        <p>사건 판단과 기한은 기존 계약 결과입니다. 통지·신고는 담당자가 직접 보내며 이 화면은 초안과 실제 이행 증빙을 기록합니다. 클라우드 의무 #69는 조건부입니다.</p>
+        <p id="audit-incident-message" role="status"></p>
+        <div id="audit-incident-workspace">
+          <form id="audit-incident-open"><label>Incident ID<input id="audit-incident-id" required></label><button type="submit">Open Incident</button><button id="audit-incident-list" type="button">Load Incidents</button></form>
+          <div id="audit-incident-listing"></div>
+          <form id="audit-incident-register"><fieldset><legend>Registration / Finding</legend>
+            <p>CVR 오발송은 CD-12 연결 전까지 수동으로 등록하세요. 범위는 등록 시점 원장의 고정된 조회 결과이며, 원장 밖 영향은 별도 확인 근거를 입력하세요.</p>
+            <div class="inspection-actions">
+              <label>Incident Type<select name="incidentType"><option value="other">Other</option><option value="cvr-misdelivery">CVR Misdelivery</option></select></label>
+              <label>Awareness At (UTC)<input name="awarenessAt" type="datetime-local" step="0.001" required></label>
+              <label>Determination At (UTC)<input name="determinationAt" type="datetime-local" step="0.001" required></label>
+              <label>Verdict<select name="status"><option value="possible">Possible</option><option value="confirmed">Confirmed</option><option value="not-a-leak">Not a Leak</option></select></label>
+              <label>Possible Ground<select name="possibleGround"><option value="illegal-access-unidentifiable">Illegal Access / Unidentifiable</option><option value="other-subjects-at-risk">Other Subjects at Risk</option></select></label>
+              <label>Finding Evidence ID<input name="evidenceId" required></label>
+              <label>Details Complete<input name="detailsComplete" type="checkbox"></label>
+              <label>Newly Confirmed At (UTC)<input name="newlyConfirmedAt" type="datetime-local" step="0.001"></label>
+            </div>
+            <fieldset><legend>Scope</legend><div class="inspection-actions">
+              <label>Incident From (UTC)<input name="from" type="datetime-local" step="0.001" required></label>
+              <label>Incident Until (UTC, exclusive)<input name="to" type="datetime-local" step="0.001" required></label>
+              <label>Incident Patient ID<input name="patientId"></label><label>Incident Assigning Authority<input name="assigningAuthority"></label>
+              <label>Incident Act<select name="act"><option value="">All</option><option value="entry">Entry</option><option value="addition">Addition</option><option value="correction">Correction</option><option value="access">Access</option></select></label>
+              <label>Scope Finding<select name="scopeKind"><option value="">Ledger Only</option><option value="access-outside-ledger">Access Outside Ledger</option><option value="records-not-attributable">Records Not Attributable</option></select></label>
+              <label>Scope Evidence<textarea name="scopeNote"></textarea></label>
+            </div></fieldset>
+            <fieldset><legend>Report Facts</legend><div class="inspection-actions">
+              <label>1,000 Subjects<input type="checkbox" name="trigger" value="1000-subjects"></label>
+              <label>Sensitive / Unique Data<input type="checkbox" name="trigger" value="sensitive-or-unique"></label>
+              <label>External Illegal Access<input type="checkbox" name="trigger" value="external-illegal-access"></label>
+              <label>Medical Incident<select name="medicalType"><option value="">None Recorded</option><option value="theft-leak">Theft / Leak</option><option value="destruction-damage-concealment-loss">Destruction / Damage / Concealment / Loss</option><option value="system-disruption">System Disruption</option></select></label>
+              <label>Medical Occurred At (UTC)<input name="medicalOccurredAt" type="datetime-local" step="0.001"></label>
+              <label>Medical Discovered At (UTC)<input name="medicalDiscoveredAt" type="datetime-local" step="0.001"></label>
+              <label>Electronic Intrusion<input name="electronicIntrusion" type="checkbox"></label>
+              <label>Network Attack<input name="networkAttack" type="checkbox"></label>
+              <label>Network Event ID<input name="networkEventId"></label>
+              <label>ISP Applicability<select name="ispStatus"><option value="unknown">Unverified</option><option value="true">Applicable</option><option value="false">Not Applicable</option></select></label>
+              <label>Telecom Business<input name="telecomBusiness" type="checkbox"></label>
+              <label>For-profit Telecom Information<input name="forProfitTelecomInformation" type="checkbox"></label>
+              <label>ISP Verification Evidence<input name="ispEvidence"></label>
+              <label>ISP Non-applicability Basis<input name="ispBasis"></label>
+              <label>Network Occurred At (UTC)<input name="networkOccurredAt" type="datetime-local" step="0.001"></label>
+            </div></fieldset>
+            <button type="submit">Register Incident</button><button id="audit-incident-finding" type="button">Record Finding</button>
+          </fieldset></form>
+          <div id="audit-incident-detail" hidden>
+            <h3>Incident State</h3><pre id="audit-incident-state"></pre>
+            <h3>Impact Scope</h3><pre id="audit-incident-scope"></pre>
+            <h3>Obligations</h3><div id="audit-incident-obligations"></div>
+            <form id="audit-incident-notice"><fieldset><legend>Actual Performance</legend>
+              <p>실제 전달한 증빙만 기록하세요. 초안 출력이나 HTTP 성공은 이행이 아닙니다. 기한이 지난 이행도 기록할 수 있습니다.</p>
+              <div class="inspection-actions">
+                <label>Record Type<select name="recordType"><option value="notice">Actual Notice</option><option value="exemption">Report Exemption</option><option value="delay">Delay</option></select></label>
+                <label>Obligation<select name="obligation"></select></label>
+              </div>
+              <fieldset data-incident-record="notice"><legend>Delivery</legend><div class="inspection-actions">
+                <label>Sent At (UTC)<input name="sentAt" type="datetime-local" step="0.001" required></label>
+                <label>Delivery Evidence ID<input name="evidenceId" required></label>
+                <label>Delivery Channel<select name="channel"><option value="affected-users">Affected Subjects / Users</option><option value="PIPC">PIPC</option><option value="KISA">KISA</option><option value="MSIT">MSIT</option><option value="MOHW-official">MOHW Official</option><option value="MOHW-delegated">MOHW Delegated</option></select></label>
+                <label>All Recipients Covered<input name="coversAll" type="checkbox"></label>
+              </div><p>아래 항목 중 실제 통지에 포함된 항목만 선택하세요.</p><div id="audit-incident-fields"></div>
+              </fieldset>
+              <fieldset data-incident-record="exemption delay" hidden disabled><legend>Decision / Delay Evidence</legend>
+                <p>면제와 지연 수용은 담당자의 증빙 있는 판단을 입력합니다. 제품이 면제를 자동 판단하지 않습니다. 결정자 신원·기관·지정 문서는 서버의 등록 사실로 연결합니다.</p>
+                <div class="inspection-actions">
+                  <label>Decision ID<input name="decisionId"></label>
+                  <label>Decision / Delay Evidence ID<input name="decisionEvidenceId" required></label>
+                  <label>Decision / Delay Reason<textarea name="decisionReason" required></textarea></label>
+                </div>
+              </fieldset>
+              <fieldset data-incident-record="exemption" hidden disabled><legend>Report Exemption</legend>
+                <label>Decision At (UTC)<input name="decisionAt" type="datetime-local" step="0.001" required></label>
+                <label>Decision Authority Evidence ID<input name="authorityEvidenceId" required></label>
+                <p>권익 침해 가능성이 현저히 낮아졌다는 결정의 증거를 입력하세요. 계약 근거: privacy-decree:40.1:last-sentence.</p>
+              </fieldset>
+              <fieldset data-incident-record="delay" hidden disabled><legend>Delay</legend><div class="inspection-actions">
+                <label>Delay ID<input name="delayId" required></label>
+                <label>Delay Clause<input name="delayClause" required></label>
+                <label>Delay Clause Version<input name="delayVersion" required></label>
+                <label>Delay Category<select name="delayCategory"><option value="force-majeure">Force Majeure</option><option value="urgent-containment">Urgent Containment</option></select></label>
+                <label>Delay Started At (UTC)<input name="startedAt" type="datetime-local" step="0.001" required></label>
+                <label>Delay Cleared At (UTC)<input name="clearedAt" type="datetime-local" step="0.001"></label>
+                <label>Supersedes Delay ID<input name="supersedesDelay"></label>
+                <label>Delay Accepted<input name="accepted" type="checkbox"></label>
+              </div><p>해당 의무의 조문·시행 버전과 인과 근거를 입력하세요. 수용 전 주장은 원래 기한을 바꾸지 않습니다.</p>
+                <fieldset id="audit-incident-causal" hidden disabled><legend>Causal Review</legend><div class="inspection-actions">
+                  <label>Causal Evidence ID<input name="causalEvidenceId" required></label>
+                  <label>Causal Review At (UTC)<input name="reviewedAt" type="datetime-local" step="0.001" required></label>
+                  <label>Causal Evidence Created At (UTC)<input name="createdAt" type="datetime-local" step="0.001" required></label>
+                  <label>Causal Evidence Received At (UTC)<input name="receivedAt" type="datetime-local" step="0.001" required></label>
+                  <label>Causal Review Reason<textarea name="causalReason" required></textarea></label>
+                </div></fieldset>
+              </fieldset>
+              <fieldset id="audit-incident-decider" hidden disabled><legend>Decision Authority</legend><div class="inspection-actions">
+                <label>Authority Verified At (UTC)<input name="verifiedAt" type="datetime-local" step="0.001" required></label>
+                <label>Designation Basis<select name="designationBasis"><option value="privacy-decree:32.2.1">Privacy Decree 32.2.1</option><option value="privacy-decree:32.2.2">Privacy Decree 32.2.2</option></select></label>
+                <label>Designation Category Evidence ID<input name="categoryEvidenceId" required></label>
+                <label>Qualification Assessment Evidence ID<input name="qualificationAssessmentEvidenceId" required></label>
+                <label>Qualification Required<input name="qualificationRequired" type="checkbox"></label>
+                <label>Qualification Evidence ID<input name="qualificationEvidenceId"></label>
+                <label>Representative Exemption Evidence ID<input name="exemptionEvidenceId"></label>
+              </div><p>지정·자격 검토 증빙을 입력하세요. 기관 대표자의 경우 해당 면제 증빙도 필요합니다.</p></fieldset>
+              <button type="submit">Record Performance</button>
+            </fieldset></form>
+            <form id="audit-incident-close"><label>Closure Evidence ID<input name="evidenceId" required></label><label>Superseded By Incident ID<input name="supersededBy"></label><p>잘못 등록한 사건은 같은 기관에 올바른 사건을 먼저 등록한 뒤 대체 사건 ID를 입력하세요. 원래 범위·판정·서식은 보존됩니다.</p><button type="submit">Close Incident</button></form>
+            <form id="audit-incident-draft"><label>Draft Form<select name="form"><option value="possibility">Possible Leak Notice</option><option value="confirmed">Confirmed / Priority / Additional Notice</option><option value="not-a-leak">No Leak Notice</option><option value="report">PIPC / KISA Report</option><option value="medical">MOHW Notice Materials</option><option value="network">Network Incident Report Materials</option></select></label><button type="submit">Download Draft</button></form>
+            <pre id="audit-incident-draft-content"></pre>
+            <h3>Evidence History</h3><pre id="audit-incident-history"></pre>
           </div>
         </div>
       </section>
