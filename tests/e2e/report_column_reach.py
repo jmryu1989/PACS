@@ -2,10 +2,12 @@
 
 Provisional until Minhoon confirms (11-03 commander): at 1366x768 in Reading Workspace the stacked report card may
 start the action row (`.report-p .rbtns`) below the first screen. Nobody uses the product before release, so the
-layout stays while the question is open. A test that scrolls for the reader may only do so after this module has
-recorded the arrival state, and the entry must be reachable by ordinary scrolling: whatever moved is a
-user-scrollable container of the report column (how many is not judged), the page itself stays put, and the entry is
-then whole in view. If Minhoon answers that the row must be on the first screen (or the product pins `.rbtns` in view), the
+layout stays while the question is open. A test that brings the entry into view may only do so after this module has
+recorded the arrival state, and the move is judged here: whatever moved is a user-scrollable container of the report
+column (how many is not judged), the page itself stays put, and the entry is then whole in view. Whether the move was
+the reader's input is the caller's part: this module compares two states and cannot tell a wheel from a script
+scroll. The Study Panel DOM tests move by the reader's wheel and Tab (study_panel_page_dom_test.wheel_into_view,
+tab_into_view). If Minhoon answers that the row must be on the first screen (or the product pins `.rbtns` in view), the
 callers delete their reveal and G0 / the entry hit test read the arrival state again, as before 92ddc62.
 
 READ only reads. It never scrolls, focuses or clicks.
@@ -33,13 +35,15 @@ READ = r"""([rowSelector, entrySelector]) => {
       && r.left >= c.left - LU && r.right <= c.right + LU; };
   // Every scroll container between the row and the page, user-scrollable or not: a script can move an
   // overflow:hidden box that no wheel reaches, and such a move must not count as the reader's scroll.
+  // A container of the report column is the column itself, one around it inside `.right`, or one inside it
+  // (review fix13 F3: a scrolling wrapper within the report card is the same reader's scroll).
   const scrollers = [];
   for (let a = row ? row.parentElement : null; a && a !== doc; a = a.parentElement) {
     const cs = getComputedStyle(a);
     if (cs.overflowY === 'visible') continue;
     scrollers.push({ name: name(a), top: a.scrollTop, max: a.scrollHeight - a.clientHeight,
       user: cs.overflowY === 'auto' || cs.overflowY === 'scroll',
-      reportColumn: !!column && !!side && (a === column || a.contains(column)) && (a === side || side.contains(a)) });
+      reportColumn: !!column && !!side && (a.contains(column) || column.contains(a)) && side.contains(a) });
   }
   return { viewport: [innerWidth, innerHeight],
     present: !!row && !!entry && !!column && column.contains(row) && row.contains(entry),
@@ -68,8 +72,8 @@ def reach_problems(before, after, bottom_rounding=0):
 
     Explicit exception a caller turns on for itself (the default is the served tests' judgment):
     `bottom_rounding` - how far, in px, the entry's bottom may still pass
-    its clip after the reveal: a script scroll moves whole pixels, so an entry at a fractional position can stop short
-    of the edge by less than one. That part is really cut off until the reader's next wheel step. Top, left and right
+    its clip after the reveal: the browser's scroll to a focused control (Tab) moves whole pixels, so an entry at a
+    fractional position can stop short of the edge by less than one (fix14: 0.453 px at 900x768; the wheel needs none). That part is really cut off until the reader's next wheel step. Top, left and right
     are still judged exactly."""
     if not isinstance(before, dict) or not isinstance(after, dict):
         return ['reach: unreadable (%r, %r)' % (before, after)]
@@ -113,9 +117,13 @@ def self_check():
     revealed = dict(below, entryWhole=True, scrollers=[inner, dict(column, top=69)])
     problems = []
     nested = dict(revealed, scrollers=[dict(inner, top=14), dict(column, top=55)])
-    for label, after in (('one report-column scroll', revealed), ('two report-column scrolls', nested)):
-        if reach_problems(below, after):
-            problems.append('%s revealing the entry must pass: %r' % (label, reach_problems(below, after)))
+    # Review fix13 F3: a scroll container inside the report card (READ counts it as the report column) moving alone.
+    wrapper = {'name': 'inner', 'top': 0, 'max': 120, 'user': True, 'reportColumn': True}
+    inside = (dict(below, scrollers=[wrapper]), dict(revealed, scrollers=[dict(wrapper, top=70)]))
+    for label, before, after in (('one report-column scroll', below, revealed), ('two report-column scrolls', below, nested),
+                                 ('a scroll container inside the report card', *inside)):
+        if reach_problems(before, after):
+            problems.append('%s revealing the entry must pass: %r' % (label, reach_problems(before, after)))
     shown = dict(below, entryWhole=True)
     if reach_problems(shown, shown):
         problems.append('an entry already in view with nothing scrolled must pass')

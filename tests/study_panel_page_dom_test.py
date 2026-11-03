@@ -181,9 +181,128 @@ W6_REACH = '''(names) => {
     for (const [e, top, left] of saved) { e.scrollTop = top; e.scrollLeft = left; }
   }
   return facts; }'''
-# The report action row and Save in it, for column_reach.READ around a test's own scroll to Save. W6_REACH above says a
-# wheel can reach Save; reach_problems says the test's scroll was that: only the report column moved, not the page.
+# The report action row and Save in it, for column_reach.READ before and after the reader brings Save into view
+# (wheel_into_view, tab_into_view); reach_problems says that the move was the report column's, not the page's.
 SAVE_ROW = ['.report-p .rbtns', '#b-save']
+# Review fix13 F1 (the commander's acceptance condition of 11-03): a report control is reached the way a reader
+# reaches it - the mouse wheel over the report column, or Tab from the field before it - and judged on the geometry
+# that input leaves. A script scroll (scrollIntoView) moves a box whatever the page does with the reader's wheel and
+# keys, so it proves nothing about them. WHEEL_SPOT: a point of the report column the reader sees whose wheel goes
+# only to scroll containers holding the entry (not the open panel, no other scroller first); the way to turn now; a
+# step no longer than the smallest such container's height less the entry's, so one step cannot carry it past both
+# edges; and how many steps the containers' scroll range allows.
+WHEEL_SPOT = r'''(selector) => {
+  const entry = document.querySelector(selector), column = document.querySelector('.report-p');
+  if (!entry || !column || !column.contains(entry) || !entry.getClientRects().length)
+    return {problem: 'no shown ' + selector + ' in the report column'};
+  const n = v => parseFloat(v) || 0;
+  const scrolls = e => /^(auto|scroll)$/.test(getComputedStyle(e).overflowY) && e.scrollHeight > e.clientHeight;
+  const clipOf = el => { let c = {top: 0, bottom: innerHeight, left: 0, right: innerWidth};
+    for (let a = el.parentElement; a && a !== document.documentElement; a = a.parentElement) {
+      const cs = getComputedStyle(a);
+      if (cs.overflowX === 'visible' && cs.overflowY === 'visible') continue;
+      const r = a.getBoundingClientRect();
+      c = {top: Math.max(c.top, r.top + n(cs.borderTopWidth)), bottom: Math.min(c.bottom, r.bottom - n(cs.borderBottomWidth)),
+           left: Math.max(c.left, r.left + n(cs.borderLeftWidth)), right: Math.min(c.right, r.right - n(cs.borderRightWidth))};
+    }
+    return c; };
+  const r = entry.getBoundingClientRect(), c = clipOf(entry);
+  const way = r.bottom > c.bottom ? 1 : r.top < c.top ? -1 : 0;
+  // Nested containers: the clip grows as an outer one scrolls, so the step follows the smallest container's height.
+  const own = [];
+  for (let a = entry.parentElement; a && a !== document.documentElement; a = a.parentElement) if (scrolls(a)) own.push(a);
+  const range = own.reduce((sum, a) => sum + a.scrollHeight - a.clientHeight, 0);
+  const step = Math.min(100, Math.floor(Math.min(innerHeight, ...own.map(a => a.clientHeight)) - r.height));
+  const limit = step > 0 ? Math.ceil(range / step) + own.length : 0;
+  // The wheel goes to the innermost container under the pointer that can still move that way (one at its end passes
+  // it outwards). With the report card mostly below the window (768x1024, panel open) the card would scroll in its
+  // sliver while the column around it never moves, so the reader turns the outermost container that can still move.
+  const side = document.querySelector('.right');
+  const movable = a => way > 0 ? a.scrollTop < a.scrollHeight - a.clientHeight - 0.5 : a.scrollTop > 0.5;
+  for (const target of own.slice().reverse()) {
+    if (!side || !side.contains(target) || !movable(target)) continue;
+    const box = target.getBoundingClientRect(), tc = clipOf(target);
+    const v = {top: Math.max(box.top, tc.top), bottom: Math.min(box.bottom, tc.bottom),
+               left: Math.max(box.left, tc.left), right: Math.min(box.right, tc.right)};
+    for (let i = 1; i < 10; i++) for (let j = 1; j < 10; j++) {
+      const x = v.left + (v.right - v.left) * j / 10, y = v.top + (v.bottom - v.top) * i / 10;
+      const hit = document.elementFromPoint(x, y);
+      if (!hit || !target.contains(hit) || hit.closest('#study-panel-host')) continue;
+      let first = hit;
+      while (first !== target && !(scrolls(first) && movable(first))) first = first.parentElement;
+      if (first === target) return {point: [x, y], way, step, limit, target: target.id || String(target.className)};
+    }
+  }
+  return {problem: 'no point of the report column the reader sees turns the wheel for ' + selector, way, step};
+}'''
+# Every scroll position of the page (as a handle), and putting them back: test setup that returns the page to its
+# arrival state between the wheel path and the keyboard path, never a reveal itself.
+SCROLLS = """() => [...document.querySelectorAll('*')].filter(e => e.scrollHeight > e.clientHeight || e.scrollWidth > e.clientWidth)
+  .map(e => [e, e.scrollTop, e.scrollLeft])"""
+RESTORE = "(saved) => { for (const [e, top, left] of saved) { e.scrollTop = top; e.scrollLeft = left; } }"
+# Tab moves focus through the report column's own controls at most once each.
+TABBABLE = "() => document.querySelectorAll('.report-p :is(a[href], button, input, select, textarea, summary, [tabindex])').length"
+
+
+def read_entry(page, entry, row=None):
+    """column_reach.READ of `entry` (in `row`, by default the entry itself)."""
+    return page.evaluate(column_reach.READ, [row or entry, entry])
+
+
+def wheel_into_view(page, entry, row=None):
+    """The reader's wheel over the report column (WHEEL_SPOT), one step at a time, until `entry` is whole in view.
+    Returns (READ after the last step, why the wheel did not bring it whole into view or None)."""
+    state = read_entry(page, entry, row)
+    if state['entryWhole']:
+        return state, None
+    spot = page.evaluate(WHEEL_SPOT, entry)
+    if 'point' not in spot:
+        return state, f'{spot["problem"]} {spot}'
+    limit = spot['limit']
+    where = lambda s: [x['top'] for x in s['scrollers']] + s['document']
+    seen = [where(state)]
+    for _ in range(limit):
+        page.mouse.move(*spot['point'])
+        page.mouse.wheel(0, spot['way'] * spot['step'])
+        settle(page)
+        now = read_entry(page, entry, row)
+        if now['entryWhole']:
+            return now, None
+        if where(now) in seen:
+            return now, f'the wheel over {spot["target"]} at {spot["point"]} moved nothing new'
+        seen.append(where(now))
+        state, spot = now, page.evaluate(WHEEL_SPOT, entry)
+        if 'point' not in spot:
+            return state, f'{spot["problem"]} {spot}'
+    return state, f'{entry} not whole after {limit} wheel steps'
+
+
+def tab_into_view(page, entry, row=None):
+    """From the control the reader has focused, Tab until `entry` has focus; the browser scrolls a focused control into
+    view, and the caller judges where it left it. Returns (READ then, why Tab did not reach it or None)."""
+    focused = '(s) => document.activeElement === document.querySelector(s)'
+    for _ in range(page.evaluate(TABBABLE)):
+        if page.evaluate(focused, entry):
+            break
+        page.keyboard.press('Tab')
+    settle(page)
+    return read_entry(page, entry, row), None if page.evaluate(focused, entry) else f'Tab did not reach {entry}'
+
+
+def click_center(page, state):
+    """A reader's click in the middle of an entry READ found whole in view."""
+    box = state['entry']
+    page.mouse.click((box['left'] + box['right']) / 2, (box['top'] + box['bottom']) / 2)
+
+
+def wait_until(page, check, what, timeout=5000):
+    for _ in range(timeout // 50):
+        if check():
+            return
+        page.wait_for_timeout(50)
+    raise AssertionError(f'{what}: not within {timeout} ms')
+
+
 # Each shown element of the report column outside those rows that paints over one of them: its box as painted (cut to
 # every ancestor up to the column that does not let its overflow show) against the row's box. The top layer (an open
 # popover or dialog) is drawn above the page on purpose and is not counted.
@@ -449,6 +568,9 @@ class WorkspaceSite(auth.Site):
         self.fail_read, self.held_read = False, None
         self.layout_writes = []
         self.study_count = None
+        # The server's dictation capability in the bootstrap (review fix13 F2: Dictate enabled where the reader needs
+        # it). Off by default, as in the first-paint baselines; nothing is ever recorded.
+        self.dictation = None
 
     def list_body(self, account, rename=None):
         body = super().list_body(account, rename)
@@ -492,7 +614,28 @@ class WorkspaceSite(auth.Site):
                 self.layout = copy.deepcopy(body.get('layout'))
                 self.layout_revision += 1
             return route.fulfill(json=dict(owner=owner, revision=self.layout_revision, layout=self.layout, updatedAt=None))
+        if method == 'GET' and path == '/api/bootstrap' and self.dictation:
+            route = WithDictation(route, self.dictation)
         return super().api(route, request, method, path, query)
+
+
+class WithDictation:
+    """The bootstrap answer the harness decides, with the server's dictation capability added."""
+
+    def __init__(self, route, capability):
+        self._route, self._capability = route, capability
+
+    def __getattr__(self, name):
+        return getattr(self._route, name)
+
+    def fulfill(self, **kwargs):
+        if isinstance(kwargs.get('json'), dict):
+            kwargs['json'] = {**kwargs['json'], 'dictation': self._capability}
+        return self._route.fulfill(**kwargs)
+
+
+DICTATION = {'available': True, 'maxBytes': 1048576, 'timeoutMs': 60000, 'languagePin': 'ko', 'enginePin': 'SYN-ENGINE',
+             'modelPin': 'SYN-MODEL'}
 
 
 class StudyPanelPageDOM(unittest.TestCase):
@@ -688,7 +831,7 @@ class StudyPanelPageDOM(unittest.TestCase):
                 self.assertEqual(before, len(self.site.layout_writes))
                 self.assertEqual(saved, self.local())
 
-    def assert_report_usable(self, page, what):
+    def assert_report_usable(self, page, what, names=('#b-approve', '#b-save', '#b-prelim', '#findings', '#conclusion')):
         """W3R5-03 ②: with the panel open, the report's buttons and fields keep every
         visible pixel and stay on top: nothing of Approve/Save/Prelim, Findings or
         Conclusion that a reader saw before is under the panel."""
@@ -704,14 +847,54 @@ class StudyPanelPageDOM(unittest.TestCase):
             // is not another element on top: every point that hits must hit the field, and at least one must.
             const hits = points.map(([px, py]) => document.elementFromPoint(px, py)).filter(hit => hit !== null);
             const on_top = !points.length || (hits.length > 0 && hits.every(hit => hit === node || node.contains(hit)));
-            return [s, {...fact, covered, on_top}]; }); }''',
-            ['#b-approve', '#b-save', '#b-prelim', '#findings', '#conclusion'])
+            return [s, {...fact, covered, on_top}]; }); }''', list(names))
         for name, fact in facts:
             if fact is None or fact['visible'][3] <= 0:
                 continue
             self.assertFalse(fact['covered'], f'{what}: {name} under the open panel {fact}')
             self.assertTrue(fact['on_top'], f'{what}: {name} not on top {fact}')
         return dict(facts)
+
+    def operate_report(self, page, site, arrival, saved, what):
+        """Review fix13 F2, with the Study Panel open: the report works, not only shows. From the arrival state again
+        (`saved`, put back by the test), the reader wheels to Findings and Conclusion, clicks into each and types; Tab
+        from Conclusion brings Save whole into view, judged like the wheel; the wheel finds Dictate whole, on top and
+        enabled; Save and then Approve, each pressed where it is seen, reach the server with the typed text."""
+        drawer = page.get_by_role('complementary', name='Study Panel', exact=True)
+        page.evaluate(RESTORE, saved)
+        settle(page)
+        self.assertEqual(arrival, page.evaluate(column_reach.READ, SAVE_ROW), f'{what}: the arrival state is back')
+        typed = {'#findings': f'SYN findings {what}', '#conclusion': f'SYN conclusion {what}'}
+        for field, text in typed.items():
+            state, why = wheel_into_view(page, field)
+            self.assertIsNone(why, f'{what}: {field} {state}')
+            click_center(page, state)
+            expect(page.locator(field)).to_be_focused()
+            page.keyboard.type(text)
+            expect(page.locator(field)).to_have_value(text)
+        revealed, why = tab_into_view(page, '#b-save', SAVE_ROW[0])
+        self.assertIsNone(why, f'{what}: Tab from Conclusion {revealed}')
+        # The one place bottom_rounding is still needed (measured fix14): the browser's own focus scroll moves whole
+        # pixels and stops short of a fractional edge - 900x768 focused Save with 0.453 px of its bottom under the card
+        # edge at 761. The wheel path above needs no rounding. Top, left and right are judged exactly.
+        self.assertEqual([], column_reach.reach_problems(arrival, revealed, bottom_rounding=0.5),
+                         f'{what}: Tab from Conclusion to Save')
+        state, why = wheel_into_view(page, '#b-dictate', SAVE_ROW[0])
+        self.assertIsNone(why, f'{what}: Dictate {state}')
+        expect(page.locator('#b-dictate')).to_be_enabled()
+        self.assertTrue(self.assert_report_usable(page, f'{what}, Dictate', ('#b-dictate',))['#b-dictate']['whole'])
+        for count, (button, action) in enumerate((('#b-save', 'save'), ('#b-approve', 'approve')), 1):
+            state, why = wheel_into_view(page, button, SAVE_ROW[0])
+            self.assertIsNone(why, f'{what}: {button} {state}')
+            expect(page.locator(button)).to_be_enabled()
+            expect(drawer).to_be_visible()
+            click_center(page, state)
+            wait_until(page, lambda: len(site.commits) == count, f'{what}: {button} pressed')
+            body = site.commits[-1]
+            self.assertEqual((action, typed['#findings'], typed['#conclusion']),
+                             (body.get('action'), body.get('findings'), body.get('conclusion')), f'{what}: {button}')
+        self.assertEqual('A', site.report['rs'], f'{what}: the approval stands')
+        expect(drawer).to_be_visible()
 
     def assert_drawer_place(self, page, width, height):
         """D1041: LEFT 12/360 px beside the report in wide landscape windows. Stacked
@@ -778,7 +961,7 @@ class StudyPanelPageDOM(unittest.TestCase):
         the work area scrolls, so the report never slides under it."""
         for width, height in ((1200, 1920), (1440, 2560), (1536, 2048), (1080, 1920), (900, 1200), (768, 1024), (1024, 768), (900, 768)):
             with self.subTest(width=width, height=height):
-                page, _, _ = self.page_at(width, height)
+                page, site, _ = self.page_at(width, height, dictation=DICTATION)
                 self.click_row(page, 0, 'select')
                 closed = self.assert_report_usable(page, 'closed')
                 page.keyboard.press('Control+Alt+5')
@@ -793,31 +976,24 @@ class StudyPanelPageDOM(unittest.TestCase):
                     for name in ('#b-approve', '#b-save', '#findings', '#conclusion'):
                         self.assertTrue(opened[name]['whole'], f'{name} whole in view with the panel open')
                 # The bottom action row is reached through the report card's own scroller. Provisional until
-                # Minhoon confirms (11-03 commander): the row may start below the first screen, so the arrival
-                # state is judged first - a reader's wheel reaches it - and only then does the test scroll for them.
+                # Minhoon confirms (11-03 commander): the row may start below the first screen. The reader's wheel
+                # over the report column brings Save whole into view (review fix13 F1), judged as the served tests
+                # judge their reveal (report_column_reach.py): only user-scrollable report-column containers moved,
+                # not the page, and Save is whole on all four sides.
                 arrival = page.evaluate(column_reach.READ, SAVE_ROW)
-                reach = page.evaluate(W6_REACH, ['#b-save'])['below']['#b-save']
-                self.assertTrue(reach['window'], reach)
-                self.assertIsNone(reach['clipped'], reach)
-                self.assertTrue(all(wheel for _, wheel in reach['scrolled']), reach)
-                page.locator('#b-save').scroll_into_view_if_needed()
-                settle(page)
-                # Judged as the served tests judge their reveal (report_column_reach.py): only user-scrollable
-                # report-column scrollers moved, not the page, and Save is whole on all four sides after it. One
-                # explicit exception, every size, bottom edge only, up to this file's 0.5 px (VISIBLE): the reveal
-                # scrolls whole pixels, so Save at a fractional position can stop short of its scroller's edge by less
-                # than one. That part is really cut off: 1024x768 on the Linux runner needed 13.45 px, scrolled 13, and
-                # left Save's bottom 0.45 px under the card's edge at 761 (Save not whole). The card had 122 px of
-                # scroll left, so the reader's next wheel step shows Save whole. Top, left and right are judged exactly.
-                revealed = page.evaluate(column_reach.READ, SAVE_ROW)
-                problems = column_reach.reach_problems(arrival, revealed, bottom_rounding=0.5)
-                self.assertEqual([], problems, 'Save is not reached by scrolling the report column')
+                saved = page.evaluate_handle(SCROLLS)
+                revealed, why = wheel_into_view(page, '#b-save', SAVE_ROW[0])
+                self.assertIsNone(why, f'the wheel over the report column does not bring Save into view {revealed}')
+                self.assertEqual([], column_reach.reach_problems(arrival, revealed), 'Save is not reached by scrolling the report column')
                 self.assert_drawer_place(page, width, height)
-                scrolled = self.assert_report_usable(page, 'scrolled to the report')
+                scrolled = self.assert_report_usable(page, 'wheeled to the report')
                 for name in ('#b-approve', '#b-save'):
-                    self.assertTrue(scrolled[name]['whole'], f'{name} whole after scrolling to the report {scrolled[name]}')
-                page.keyboard.press('Escape')
-                expect(page.get_by_role('complementary', name='Study Panel', exact=True)).to_have_count(0)
+                    self.assertTrue(scrolled[name]['whole'], f'{name} whole after the wheel {scrolled[name]}')
+                self.operate_report(page, site, arrival, saved, f'{width}x{height}')
+                # Focus is on Approve in the report column, where Escape is not the panel's (study-panel.js).
+                drawer = page.get_by_role('complementary', name='Study Panel', exact=True)
+                drawer.get_by_role('button', name='Close', exact=True).click()
+                expect(drawer).to_have_count(0)
                 self.doCleanups()
 
     def test_save_reveal_judgment_rejects_a_cut_save(self):
@@ -849,6 +1025,50 @@ class StudyPanelPageDOM(unittest.TestCase):
                 self.assertTrue(column_reach.reach_problems(arrival, revealed), 'without the rounding every cut fails')
                 problems = column_reach.reach_problems(arrival, revealed, bottom_rounding=0.5)
                 self.assertEqual(passes, not problems, (problems, revealed))
+
+    def test_reader_reach_needs_working_wheel_and_keys(self):
+        """Review fix13 F1 and F3, in a real browser on a bare report card (no product page): wheel_into_view and
+        tab_into_view reach Save only through the reader's own input. With the page's wheel and keydown cancelled in
+        the capture phase (the review's counterexample, where the earlier script reveal still reached Save) neither
+        does. A scrolling wrapper inside the report card is the report column's own scroll (F3)."""
+        page = self.page
+        card = '''<style>body{margin:0}.right{width:300px;height:300px}.report-p{position:relative;width:100px;
+          height:100px;overflow:auto;scrollbar-width:none}.rbtns{position:absolute;left:0;top:150px;width:100px;height:20px}
+          button{display:block;width:100%;height:20px;padding:0;border:0}textarea{display:block;width:90px;height:20px}
+          .spacer{height:300px}</style><div class=right><div class=report-p><textarea id=conclusion></textarea>
+          <div class=rbtns><button id=b-save>Save</button></div><div class=spacer></div></div></div>'''
+        block = '''() => { document.addEventListener('wheel', e => e.preventDefault(), {capture: true, passive: false});
+          document.addEventListener('keydown', e => e.preventDefault(), {capture: true}); }'''
+        for blocked in (False, True):
+            with self.subTest(blocked=blocked):
+                page.set_content(card)
+                if blocked:
+                    page.evaluate(block)
+                arrival, saved = page.evaluate(column_reach.READ, SAVE_ROW), page.evaluate_handle(SCROLLS)
+                self.assertFalse(arrival['entryWhole'], arrival)
+                revealed, why = wheel_into_view(page, '#b-save', SAVE_ROW[0])
+                problems = column_reach.reach_problems(arrival, revealed)
+                self.assertEqual(blocked, why is not None, (why, revealed))
+                self.assertEqual(blocked, bool(problems), problems)
+                page.evaluate(RESTORE, saved)
+                click_center(page, read_entry(page, '#conclusion'))
+                expect(page.locator('#conclusion')).to_be_focused()
+                revealed, why = tab_into_view(page, '#b-save', SAVE_ROW[0])
+                problems = column_reach.reach_problems(arrival, revealed, bottom_rounding=0.5)
+                self.assertEqual(blocked, why is not None, (why, revealed))
+                self.assertEqual(blocked, bool(problems), problems)
+        with self.subTest('a scrolling wrapper inside the report card'):
+            page.set_content('''<style>body{margin:0}.right{width:300px;height:300px}.inner{height:100px;overflow:auto}
+              .spacer{height:150px}button{display:block;width:100px;height:20px;padding:0;border:0}</style>
+              <div class=right><div class=report-p><div class=inner><div class=spacer></div>
+              <div class=rbtns><button id=b-save>Save</button></div></div></div></div>''')
+            arrival = page.evaluate(column_reach.READ, SAVE_ROW)
+            revealed, why = wheel_into_view(page, '#b-save', SAVE_ROW[0])
+            self.assertIsNone(why, revealed)
+            self.assertEqual([], column_reach.reach_problems(arrival, revealed))
+            self.assertEqual([0, 0], revealed['document'])
+            click_center(page, revealed)
+            expect(page.locator('#b-save')).to_be_focused()
 
     def test_inbox_failure_does_not_add_drawer_obstruction(self):
         """WS7-RW-RELOCATION: an inbox failure remains visible and the drawer adds
@@ -1038,11 +1258,12 @@ class StudyPanelPageDOM(unittest.TestCase):
                 finally:
                     context.close()
 
-    def page_at(self, width, height, studies=2):
+    def page_at(self, width, height, studies=2, dictation=None):
         """A fresh login at one window size serving one or two studies; returns (page, site, context)."""
         site = WorkspaceSite()
         site.second_study = studies > 1
         site.study_count = studies
+        site.dictation = dictation
         context = self.browser.new_context(viewport=dict(width=width, height=height))
         context.route('**/*', lambda route, request: site.handle(route, request))
         self.addCleanup(context.close)
@@ -1200,14 +1421,12 @@ class StudyPanelPageDOM(unittest.TestCase):
                 drawer = page.get_by_role('complementary', name='Study Panel', exact=True)
                 expect(drawer).to_be_visible()
                 settle(page)
-                # Scroll to an actual report action; no fixed document-y movement
+                # The reader's wheel to an actual report action; no fixed document-y movement
                 # is expected now that the report card can scroll independently.
-                reach = page.evaluate(W6_REACH, ['#b-save'])['below']['#b-save']
-                self.assertTrue(reach['window'])
-                self.assertIsNone(reach['clipped'])
-                self.assertTrue(all(wheel for _, wheel in reach['scrolled']), reach)
-                page.locator('#b-save').scroll_into_view_if_needed()
-                settle(page)
+                arrival = page.evaluate(column_reach.READ, SAVE_ROW)
+                revealed, why = wheel_into_view(page, '#b-save', SAVE_ROW[0])
+                self.assertIsNone(why, revealed)
+                self.assertEqual([], column_reach.reach_problems(arrival, revealed), 'Save is not reached by scrolling the report column')
                 report, panel = page.locator('.report-p').bounding_box(), drawer.bounding_box()
                 self.assertLessEqual(panel['y'] + panel['height'], report['y'] - 12 + .5)
                 facts = self.assert_report_usable(page, 'scrolled open panel')
