@@ -56,7 +56,8 @@ Cases (the RL ids are test-plan section 3 of the S7-RELATED-LAYOUT diagnosis, PA
   rl12 (S7-U5 S4 GEO) Image Findings open in the Reading Workspace (1366x768 as is and with the report's button row at
        the window's bottom edge, 1280x720, 1920x1080, 900x1200, 768x1024): the panel is apart from Approve, Save, Prelim,
        Dictate and its own toggle, each of them whole and on top, its Close reachable, and the first Related row apart
-       from it and clickable.
+       from it and clickable. Each case reads the column before its Critical Results row joins it, as the row joins
+       under the open panel (its read out, then answered) and settled, each in a painted frame.
   RelatedLayoutEquivalence rl06/rl08: RETIRED (studio-1101 fix3, P3-N2).
        Equality with the pre-UX layout no longer describes the product: Related Exam,
        Related Report and Clinical Context have intentionally moved. The historical
@@ -95,6 +96,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TESTS))
@@ -449,6 +451,18 @@ class Window:
         case.assertLessEqual(context["y"], report["y"], f"{tag}: information band precedes Related Report")
 
 
+class _ScriptedBrowser:
+    """The browser the shared boot sees: each context it makes runs `script` before any page script."""
+
+    def __init__(self, browser, script):
+        self.browser, self.script = browser, script
+
+    def new_context(self, **options):
+        context = self.browser.new_context(**options)
+        context.add_init_script(self.script)
+        return context
+
+
 class Base(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -460,8 +474,18 @@ class Base(unittest.TestCase):
         cls.browser.close()
         cls.playwright.stop()
 
-    def boot(self, server, **options):
-        screen = harness.MultiInstitutionWorklist.boot(self, server, **options)
+    def boot(self, server, *, init_script=None, **options):
+        if init_script is None:
+            screen = harness.MultiInstitutionWorklist.boot(self, server, **options)
+        else:
+            # The shared boot makes the context and goes to the page at once; a script that must run before the page's
+            # own scripts is added to that context as it is made.
+            browser = self.browser
+            self.browser = _ScriptedBrowser(browser, init_script)
+            try:
+                screen = harness.MultiInstitutionWorklist.boot(self, server, **options)
+            finally:
+                self.browser = browser
         return Window(self, screen)
 
     def open_state(self, state, *, size=SMALL, row_set=None, notice=False, storage=None):
@@ -838,9 +862,9 @@ class RelatedLayoutDOMTest(Base):
     # Supported windows, landscape and portrait, the narrow stacked layout included.
     READING_SIZES = [(1280, 720), (1366, 768), (1024, 768), (1600, 1050), (1920, 1080), (900, 1200), (768, 1024), (900, 1400)]
 
-    def open_reading(self, size, row_set=None, target=CURRENT_DESC):
+    def open_reading(self, size, row_set=None, target=CURRENT_DESC, init_script=None):
         """Boot large, choose the reading target, open the Reading Workspace, then size the window."""
-        w = self.boot(harness.Server(rows=row_set or rows()), viewport=LARGE)
+        w = self.boot(harness.Server(rows=row_set or rows()), viewport=LARGE, init_script=init_script)
         # The workspace's viewer frame: an empty document here (the viewer is not what this case measures).
         w.page.route("**/ohif/**", lambda route: route.fulfill(status=200, content_type="text/html",
                                                                body="<!doctype html><title>SYN viewer</title>"))
@@ -944,36 +968,75 @@ class RelatedLayoutDOMTest(Base):
                       ((900, 1200), False), ((768, 1024), False)]
     REPORT_BUTTONS = ("Approve", "Save", "Prelim", "Dictate")
 
+    # The report column's Critical Results row joins it when the inbox's periodic admission check (about a second
+    # apart while timers run normally) first finds the session eligible: the row is shown before its first read is
+    # sent, so holding that read alone does not keep the row out. The row raises the button row by its height (31px at
+    # 1920x1080) and the panel follows in an observer callback. Left to the check's phase, the row came before the panel
+    # opened, under the open panel, or between a measurement's reads (CI fc2f77a; c9ec65c 2 of 8 runs locally). Here
+    # the case decides: it holds the timers the inbox's own script sets (found by that script in the caller's stack)
+    # and, on release, runs the check that came due, so each state below is reached on every run.
+    INBOX_HOLD = r"""(() => {
+      const native = {set: window.setInterval, clear: window.clearInterval}, timers = new Map();
+      let holding = true;
+      window.setInterval = function (callback, delay, ...rest) {
+        if (typeof callback !== 'function' || !/\/critical-result-inbox\.js:/.test(new Error().stack || ''))
+          return native.set.call(window, callback, delay, ...rest);
+        const timer = {due: false, run: () => callback(...rest)};
+        const id = native.set.call(window, () => { if (holding) timer.due = true; else timer.run(); }, delay);
+        timers.set(id, timer);
+        return id;
+      };
+      window.clearInterval = function (id) { timers.delete(id); return native.clear.call(window, id); };
+      window.__rlInboxDue = () => [...timers.values()].some(timer => timer.due);
+      window.__rlReleaseInbox = () => {
+        holding = false;
+        const due = [...timers.values()].filter(timer => timer.due);
+        for (const timer of due) { timer.due = false; timer.run(); }
+        return {timers: timers.size, ran: due.length};
+      };
+    })();"""
+
+    def hold_received_reads(self, page):
+        """This page's reads of the received Critical Results list wait here until the case lets one through
+        (`fallback()`, to the synthetic server); other Critical Results reads pass."""
+        held = []
+
+        def received(route):
+            if parse_qs(urlparse(route.request.url).query).get("view") == ["received"]:
+                held.append(route)
+            else:
+                route.fallback()
+        page.route(lambda url: urlparse(url).path == "/api/critical-results", received)
+        self.addCleanup(lambda: [r.abort() for r in held])
+        return held
+
     def test_rl12_image_findings_never_covers_the_report_buttons_or_the_first_related_row(self):
         long_rows = [harness.row("2.25.7001", PID, date="20261005", rs="W", modality="CT", desc=self.LONG_DESC)] + rows()[1:]
         for size, long in self.FINDINGS_CASES:
             name = f"{size[0]}x{size[1]}" + (" long description" if long else "")
             with self.subTest(case=name):
-                w = self.open_reading(size, long_rows, self.LONG_DESC) if long else self.open_reading(size)
+                w = (self.open_reading(size, long_rows, self.LONG_DESC, init_script=self.INBOX_HOLD) if long
+                     else self.open_reading(size, init_script=self.INBOX_HOLD))
                 page, tag = w.page, f"RL-12 {name}"
-                # The report column's Critical Results row joins it on the inbox's 1 s admission check, up to a second
-                # after the workspace opens, and its first read raises the button row by the row's height (31px at
-                # 1920x1080). The panel follows in that frame's observer callback, before paint, but a read between the
-                # two sees the buttons moved and the panel not yet (CI fc2f77a, and c9ec65c 2 of 8 locally). Measure
-                # the column once it is complete.
-                inbox = page.get_by_role("region", name="Critical Results", exact=True)
-                harness.expect(inbox).to_be_visible()
-                harness.expect(inbox.get_by_text("Loading", exact=True)).to_have_count(0)
+                # The row's first read of the received list is held too, so the row is also seen while it loads.
+                reads = self.hold_received_reads(page)
+                inbox = page.get_by_role("region", name="Critical Results", exact=True, include_hidden=True)
+                badge = inbox.get_by_role("status")   # the bar's badge; the folded details are not shown
+                harness.expect(inbox).to_be_hidden()
                 toggle = page.get_by_role("button", name="Image Findings", exact=True)
                 toggle.click()
                 panel = page.get_by_role("region", name="Image Findings", exact=True)
                 harness.expect(panel).to_be_visible()
                 buttons = [(label, page.get_by_role("button", name=label, exact=True)) for label in self.REPORT_BUTTONS]
-                # Bring the complete action row into the column. Nearest alignment can leave a fractional
-                # border at the viewport edge; the full-visibility and pointer assertions below remain exact.
-                buttons[-1][1].evaluate("e => e.scrollIntoView({block: 'center', inline: 'nearest'})")
-                page.wait_for_timeout(150)
-                w.assert_no_document_scroll(f"{tag} buttons in view")
-                box = w.visible(panel)["box"]
                 row = w.related_table.get_by_role("row").nth(1)
-                measure(tag, panel=box, toggle=w.visible(toggle)["box"], row=w.visible(row)["box"],
-                        buttons={label: w.visible(button)["box"] for label, button in buttons})
-                def assert_panel_apart(control, label):
+
+                def painted():
+                    # The first callback runs in the next rendering step, before its layout and observers; the second
+                    # in the step after, once those observers ran and the frame was painted. What is read then is a
+                    # frame the reader saw, not the moment between a change and the observer that answers it.
+                    page.evaluate("() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done())))")
+
+                def assert_panel_apart(control, label, stage):
                     # Scroll and late notices can move both together between observer callbacks.
                     # Compare one layout snapshot, never an earlier panel against a later button.
                     pair = page.evaluate("""([panel, control]) => {
@@ -983,21 +1046,53 @@ class RelatedLayoutDOMTest(Base):
                     }""", [panel.element_handle(), control.element_handle()])
                     a, b = pair["panel"], pair["control"]
                     apart = b[2] <= a[0] + 0.5 or b[0] >= a[2] - 0.5 or b[3] <= a[1] + 0.5 or b[1] >= a[3] - 0.5
-                    self.assertTrue(apart, f"{tag}: the panel {a} lies over {label} {b}")
-                # The panel itself still shows its title line and Close, so docking did not shrink it out of use.
-                self.assertTrue(w.pointable(panel.get_by_role("button", name="Close Image Findings", exact=True)),
-                                f"{tag}: Close Image Findings reachable")
-                for label, control in buttons:
-                    seen = w.visible(control)
-                    assert_panel_apart(control, label)
-                    self.assertGreaterEqual(seen["ratio"], 0.999, f"{tag}: {label} whole in the window")
-                    self.assertEqual([], w.covered_points(control), f"{tag}: points of {label} under another element")
-                # The toggle scrolls with its column (out of view once the button row is brought up); the panel is
-                # never what hides it.
-                assert_panel_apart(toggle, "its own toggle")
+                    self.assertTrue(apart, f"{stage}: the panel {a} lies over {label} {b}")
+
+                def assert_report_buttons(state, bring_up):
+                    stage = f"{tag} {state}"
+                    if bring_up:
+                        # Bring the complete action row into the column. Nearest alignment can leave a fractional
+                        # border at the viewport edge; the full-visibility and pointer assertions below remain exact.
+                        buttons[-1][1].evaluate("e => e.scrollIntoView({block: 'center', inline: 'nearest'})")
+                        page.wait_for_timeout(150)
+                    painted()
+                    w.assert_no_document_scroll(f"{stage} buttons in view")
+                    measure(stage, panel=w.visible(panel)["box"], toggle=w.visible(toggle)["box"], row=w.visible(row)["box"],
+                            buttons={label: w.visible(button)["box"] for label, button in buttons},
+                            critical_results=inbox.is_visible() and w.visible(inbox)["box"])
+                    # The panel itself still shows its title line and Close, so docking did not shrink it out of use.
+                    self.assertTrue(w.pointable(panel.get_by_role("button", name="Close Image Findings", exact=True)),
+                                    f"{stage}: Close Image Findings reachable")
+                    for label, control in buttons:
+                        seen = w.visible(control)
+                        assert_panel_apart(control, label, stage)
+                        self.assertGreaterEqual(seen["ratio"], 0.999, f"{stage}: {label} whole in the window")
+                        self.assertEqual([], w.covered_points(control), f"{stage}: points of {label} under another element")
+                    # The toggle scrolls with its column (out of view once the button row is brought up); the panel is
+                    # never what hides it.
+                    assert_panel_apart(toggle, "its own toggle", stage)
+
+                # The column before the row joins it.
+                assert_report_buttons("before Critical Results", bring_up=True)
+                harness.expect(inbox).to_be_hidden()
+                # The row joins under the open panel, with nothing else moved: shown while its read is out, then answered.
+                # A held check has come due, so the release runs it at once rather than at the next tick's phase.
+                harness.until(lambda: page.evaluate("() => window.__rlInboxDue()"), 5, f"{tag}: an admission check came due")
+                released = page.evaluate("() => window.__rlReleaseInbox()")
+                measure(f"{tag} inbox released", released=released)
+                self.assertGreaterEqual(released["ran"], 1, f"{tag}: the release ran the held admission check")
+                harness.expect(inbox).to_be_visible()
+                harness.until(lambda: reads, 5, f"{tag}: the row's first read")
+                harness.expect(badge).to_have_text("Loading")
+                assert_report_buttons("Critical Results loading", bring_up=False)
+                reads.pop().fallback()
+                harness.expect(badge).not_to_have_text("Loading")
+                assert_report_buttons("Critical Results answered", bring_up=False)
+                # The settled column, its button row brought up again.
+                assert_report_buttons("settled", bring_up=True)
                 w.scroll_into_view(row)
                 page.wait_for_timeout(150)
-                assert_panel_apart(row, "the first Related row")
+                assert_panel_apart(row, "the first Related row", tag)
                 self.assert_row_on_top_in_its_table(w, f"{tag} first Related row", row)
                 w.screen.finish()
 
