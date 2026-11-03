@@ -545,8 +545,10 @@ test('A-REMAINDER worklist: returned page, own draft, hidden preliminary, and or
   const uid = await consumerStudy();
   await version(uid, 1, { findings: 'SYN approved' });
   await ctx.witness.report.create({ data: { uid, version: 1, findings: 'SYN approved' } });
-  await ctx.witness.reportDraft.create({ data: { uid, author: actor, findings: 'SYN private', revision: 3 } });
-  await ctx.witness.reportDraft.create({ data: { uid, author: 'other@example.test', findings: 'SYN other draft' } });
+  // Each present draft holds its own work (CD-09-P ReportDraft_work_check); on an approved study it is written for an Addendum.
+  const work = () => ({ workUnit: 'disposal:' + randomUUID(), workSince: new Date(), workIntent: 'addendum' });
+  await ctx.witness.reportDraft.create({ data: { uid, author: actor, findings: 'SYN private', revision: 3, ...work() } });
+  await ctx.witness.reportDraft.create({ data: { uid, author: 'other@example.test', findings: 'SYN other draft', ...work() } });
   const hidden = await consumerStudy({ rs: 'P', preDocSub: 'other-author', preReviewerSub: 'other-reviewer' });
   await ctx.witness.report.create({ data: { uid: hidden, version: 2, findings: 'SYN withheld' } });
   const { answer, selected } = await readRecorded('/studies?limit=100', uid);

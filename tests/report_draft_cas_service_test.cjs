@@ -319,8 +319,10 @@ async function world() {
       await base.reportVersion.create({ data: { uid, version: 1, action: 'approve', findings: 'SYN approved head', conclusion: 'SYN head c',
         author: REVIEWER.actor, citations: [] } });
     }
+    // A present draft holds its work (CD-09-P ReportDraft_work_check), written for the result this study's next commit makes.
     if (draft) await base.reportDraft.create({ data: { uid, author: A.actor, findings: 'SYN first draft', conclusion: '',
-      recommendation: '', baseVersion: rs === 'A' && !staleBase ? 1 : 0, revision: 1, present: true } });
+      recommendation: '', baseVersion: rs === 'A' && !staleBase ? 1 : 0, revision: 1, present: true,
+      workUnit: 'disposal:' + randomUUID(), workSince: new Date(), workIntent: rs === 'A' ? 'addendum' : 'approve' } });
     return uid;
   };
   w.session = async principal => {
@@ -687,7 +689,8 @@ for (const ender of ['clear', 'discard', 'approve']) {
 test('D04 force-discard archives present drafts, advances their owners, rotates the epoch; every older boundary is refused', async () => {
   const w = await world();
   const uid = await w.study();
-  await w.base.reportDraft.create({ data: { uid, author: B.actor, findings: 'SYN draft of b', revision: 4, present: true } });
+  await w.base.reportDraft.create({ data: { uid, author: B.actor, findings: 'SYN draft of b', revision: 4, present: true,
+    workUnit: 'disposal:' + randomUUID(), workSince: new Date(), workIntent: 'approve' } });
   await w.base.reportDraft.create({ data: { uid, author: REVIEWER.actor, revision: 2, present: false } });
   const epoch = await w.epoch(uid);
   const stale = { a: `${epoch}:1`, b: `${epoch}:4`, unseen: `${epoch}:0` };

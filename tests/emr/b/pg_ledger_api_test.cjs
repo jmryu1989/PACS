@@ -417,7 +417,9 @@ async function clinicalHttp() {
       await witness.report.create({data:{uid:sourceUid,version:1,findings:sourceText,conclusion:'',recommendation:''}});
       await witness.reportVersion.create({data:{uid:sourceUid,version:1,action:'approve',author,
         findings:sourceText,conclusion:'',recommendation:''}});
-      await witness.reportDraft.create({data:{uid,author,revision:1,present:true,findings:seed,conclusion:'',recommendation:'',baseVersion:0}});
+      // A present draft holds its work (CD-09-P ReportDraft_work_check): the unit, start and intent a first save would draw.
+      await witness.reportDraft.create({data:{uid,author,revision:1,present:true,findings:seed,conclusion:'',recommendation:'',baseVersion:0,
+        workUnit:'disposal:'+randomUUID(),workSince:new Date(),workIntent:'approve'}});
       const text='\n'+sourceText;
       const body={...input(state.draftEpoch+':1',seed+text),relatedInsert:{intent:'apply',insertRequestId:randomUUID(),
         source:{uid:sourceUid,version:1,action:'approve',parts:[{field:'findings',start:0,end:sourceText.length}]},
