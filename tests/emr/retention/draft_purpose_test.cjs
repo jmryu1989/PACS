@@ -765,6 +765,7 @@ function endWorld({ commit, reject, confirmFails = 0 }) {
     if (/FROM "StudyState"/.test(text)) return [structuredClone(study)];
     if (/FROM "ReportDraftPurposeEnd"/.test(text)) return s.ended.has(values[0]) ? [{ present: 1 }] : [];
     if (/FROM "ReportDraft"/.test(text)) return s.draft ? [structuredClone(s.draft)] : [];
+    if (/FROM "Report" WHERE uid/.test(text)) return [];             // the commit's head report: none yet
     throw new Error('unexpected read: ' + text);
   };
   const confirmFail = () => { if (confirmFails > 0) { confirmFails--; seen.confirmFailed++; throw Object.assign(new Error('SYN lock timeout'), { code: 'P2010', meta: { code: '55P03' } }); } };
@@ -787,7 +788,10 @@ function endWorld({ commit, reject, confirmFails = 0 }) {
         updateMany: async ({ data }) => { Object.assign(local.draft, data); return { count: 1 }; },
         findUnique: async () => structuredClone(local.draft), create: async ({ data }) => { local.draft = data; return data; },
       },
-      auditLog: { create: async () => ({}) }, report: { findUnique: async () => null },
+      auditLog: { create: async () => ({}) },
+      report: { findUnique: async () => null, upsert: async ({ create }) => structuredClone(create) },
+      reportVersion: { findFirst: async () => null, create: async ({ data }) => structuredClone(data) },
+      studyState: { update: async ({ data }) => ({ ...structuredClone(study), ...data }) },
     };
     const value = await fn(tx, async () => {});
     if (commit) Object.assign(durable, local);
@@ -801,8 +805,12 @@ function endWorld({ commit, reject, confirmFails = 0 }) {
   const service = new RD.PacsReportDraft(prisma, studyAccess, { visible: () => true }, {}, { reportLimitChecked: fn => fn() }, {});
   const body = { expectedOwner: { institution: 'syn-inst', sub: 'syn-sub', author: AUTHOR }, expectedRevision: V.draftToken(epoch, 3) };
   endDb.current = prisma;
-  return { service, durable, seen, work, c, facts, body };
+  return { service, durable, seen, work, c, facts, body, studyAccess };
 }
+const RC = require(path.join(api, 'src/pacs/report-commit.ts'));
+// The commit's own evidence reads: no head version and no citation or structure in this synthetic work.
+const commitEvidence = { citationKeys: v => v ?? [], structureKeys: v => v ?? [], versionCitations: async () => [],
+  versionStructured: async () => [], citationBudget: async () => {}, structureBudget: async () => {} };
 async function outcome(promise) {
   try { const value = await promise; return { status: 200, value }; }
   catch (error) { return { status: error.getStatus?.() ?? 500, code: error.getResponse?.()?.code ?? error.code, message: error.getResponse?.()?.message ?? error.message }; }
@@ -813,6 +821,9 @@ const ENTRY = {
   Discard: w => w.service.discardDraft(UID, w.body, w.c, null, w.facts),
   Clear: w => w.service.putReport(UID, { ...w.body, findings: '', conclusion: '', recommendation: '', baseVersion: 0, citationIds: [], structureIds: [] },
     w.c, null, w.facts),
+  // The author's Reset of a study with no report yet: an explicit discard inside the commit's own transaction.
+  Reset: w => new RC.PacsReportCommit({}, w.studyAccess, commitEvidence, w.service).commitReport(UID,
+    { ...w.body, action: 'reset', reason: 'SYN reset', baseVersion: 0, findings: '', conclusion: '', recommendation: '' }, w.c, null, w.facts),
 };
 
 for (const [name, call] of Object.entries(ENTRY)) {
