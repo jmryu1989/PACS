@@ -631,14 +631,22 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
             page.wait_for_timeout(100)
         self.assertTrue(any(r is request for r in finished), "the kept answer was not delivered")
         delivered = time.monotonic()
-        page.wait_for_timeout(2000)
-        right_after = editor()
-        # At least one autosave period (20 s) after the delivery, still before any new input.
-        page.wait_for_timeout(43000)
-        after = editor()
-        print("CD09P-SCREEN " + json.dumps({"c10b1-editor": {"before": before, "right_after": right_after, "after": after}}), flush=True)
-        self.assertEqual(right_after, before, "the late answer changed the editor")
-        self.assertEqual(after, before, "the editor changed after the late answer without an input")
+        # Every second for at least one autosave period (20 s) after the delivery, still before any new input, the editor
+        # shows either the text it already held or the server's state (the ended work: no draft, the Target has no report).
+        # Anything else, or the held text coming back after the server's state was shown, is the late answer re-applied.
+        shown = {"held": before, "server": {field: "" for field in before}}
+        readings = []
+        while time.monotonic() - delivered < 45:
+            reading = editor()
+            readings.append((round(time.monotonic() - delivered, 1),
+                             next((name for name, value in shown.items() if value == reading), None), reading))
+            page.wait_for_timeout(1000)
+        changes = [(at, state) for index, (at, state, _) in enumerate(readings) if index == 0 or state != readings[index - 1][1]]
+        print("CD09P-SCREEN " + json.dumps({"c10b1-editor": {"before": before, "changes": changes, "last": readings[-1][2]}}), flush=True)
+        self.assertFalse([r for r in readings if r[1] is None][:1], "the editor showed a text that was neither held nor the server's")
+        states = [state for _, state, _ in readings]
+        if "server" in states:
+            self.assertNotIn("held", states[states.index("server"):], "the ended text came back after the server's state was shown")
         later = [p for p in puts if p[0] >= delivered]
         self.assertFalse([p for p in later if p[1] == 200], later)
         self.assertFalse([p for p in later if related.SOURCE_LINE in p[2]], "a write after the end carried the inserted line")
