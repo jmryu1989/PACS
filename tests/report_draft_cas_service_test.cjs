@@ -250,7 +250,10 @@ async function world() {
       links: [{ linkState: 'current', headRevision: 1 }] }] : [] };
     // This suite checks draft/CAS transactions. C2 signing and key failures are
     // exercised by emr/d/report_commit_pg_test.cjs with the real signer.
-    const nativeSigning = { sign: async () => ({ fixture: 'native-signature' }) };
+    // It answers the fields of NativeReportSigning's StoredApproval that a commit reads: the signed version and its server
+    // time (CD-09-P: a signed result ends the author's draft work at that version and time).
+    const nativeSigning = { sign: async (_tx, _request, _operationId, version) => ({ fixture: 'native-signature',
+      recordId: version.uid, versionId: String(version.version), signedAt: new Date().toISOString() }) };
     const svc = new PacsService(recorder, orthanc, keycloak, access, findings, ledger, nativeSigning);
     const controllers = new Map();
     return { svc, controller(cls) { if (!controllers.has(cls)) controllers.set(cls, new cls(svc, w.auth, requests.source)); return controllers.get(cls); } };
