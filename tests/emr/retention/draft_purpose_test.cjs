@@ -824,6 +824,10 @@ const ENTRY = {
   // The author's Reset of a study with no report yet: an explicit discard inside the commit's own transaction.
   Reset: w => new RC.PacsReportCommit({}, w.studyAccess, commitEvidence, w.service).commitReport(UID,
     { ...w.body, action: 'reset', reason: 'SYN reset', baseVersion: 0, findings: '', conclusion: '', recommendation: '' }, w.c, null, w.facts),
+  // The author's signed approval of this work: the signature step answers what a server signature row would name.
+  Approve: w => new RC.PacsReportCommit({}, w.studyAccess, commitEvidence, w.service, { sign: async (_tx, _request, _id, saved) =>
+    ({ recordId: UID, versionId: String(saved.version), signedAt: END }) }).commitReport(UID,
+    { ...w.body, action: 'approve', baseVersion: 0, findings: 'SYN end text', conclusion: 'SYN c', recommendation: '' }, w.c, null, w.facts),
 };
 
 for (const [name, call] of Object.entries(ENTRY)) {
