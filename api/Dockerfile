@@ -6,6 +6,9 @@
 # 하루를 아낀다.
 FROM node:22-slim AS base
 ENV NODE_OPTIONS=--max-old-space-size=3072
+# CD-09-P: the draft destruction ledger's own directory. The server refuses to start without one, or with one inside the
+# backed-up EMR state; a deployment keeps it on its own volume (compose `purpose-ledger`) so a restore never brings it back.
+ENV KIN_PURPOSE_LEDGER_DIR=/var/lib/kin-purpose
 
 # Prisma 엔진이 요구하는 OpenSSL (slim 이미지에는 빠져 있을 수 있음)
 RUN apt-get update -y \
@@ -32,7 +35,7 @@ EXPOSE 3000
 # EMR-B1: 검토된 migration은 설치 자격의 일회성 서비스(compose `api-migrate`)가 먼저 적용하고, 이 서버는
 # 최소권한 runtime 자격으로만 시작한다. 기존 DB는 baseline.mjs로 이력을 한 번 등록해야 한다. 여기서 자동
 # resolve/db push를 하면 누락된 변경까지 적용으로 위장한다. PG가 원장을 보관하며 상태 볼륨에는 실패 전달 스풀만 둔다.
-RUN install -d -m 700 /var/lib/kin-emr
+RUN install -d -m 700 /var/lib/kin-emr /var/lib/kin-purpose
 CMD ["npm", "run", "start:dev"]
 
 FROM development AS build
@@ -54,9 +57,9 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/prisma ./prisma
 COPY start-production.sh ./start-production.sh
 # 운영 서버의 legacy builder도 지원한다(COPY --chmod는 BuildKit 전용).
-# 실패 전달 스풀 디렉터리: node만 읽고 쓴다. 이름 있는 볼륨은 이 소유·권한을 처음 한 번 물려받는다.
+# 실패 전달 스풀 디렉터리와 CD-09-P 초안 파기 원장(백업 밖 볼륨): node만 읽고 쓴다. 이름 있는 볼륨은 이 소유·권한을 처음 한 번 물려받는다.
 RUN chmod 644 /app/start-production.sh \
- && install -d -o node -g node -m 700 /var/lib/kin-emr
+ && install -d -o node -g node -m 700 /var/lib/kin-emr /var/lib/kin-purpose
 USER node
 EXPOSE 3000
 CMD ["sh", "/app/start-production.sh", "serve"]

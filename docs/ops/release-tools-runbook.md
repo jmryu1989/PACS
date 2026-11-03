@@ -319,6 +319,53 @@ approval on the installed host itself. The LiveStack suites run only on a
 disposable synthetic stack through `scripts/run-tests.py` (AGENTS §2), not on a
 site.
 
+## Draft purpose ledger: first start (CD-09-P)
+
+The API keeps its draft destruction ledger in the `purpose-ledger` volume, which
+no database backup contains. At every start the API matches the database with
+that directory and opens only when they belong together:
+
+- A database that never handed out a draft work opens; its first new work
+  creates the ledger.
+- A server that already had drafts opens on its first start only if the
+  operator prepared it **before** the P migration, with the API image of the
+  new release and the API's own credential and volume:
+
+  ```bash
+  docker compose run --rm --no-deps api node dist/emr-retention/draft-purpose-prepare.js
+  ```
+
+  Expected: one line `{"prepared":true,"state":"prepared"}` and exit 0. It
+  refuses (exit 1, nothing written) when the directory is not the deployment's
+  own, a ledger or an adoption record is already there, the database already
+  has the P migration, or the database cannot be reached. The first start
+  consumes the record once.
+- Closed (the API does not open; the log names the code): drafts with nothing
+  prepared (`PurposeLedgerInitializationRequired`), a consumed preparation or an
+  initialized database without its ledger (`PurposeLedgerMissing`), a ledger of
+  another ID (`PurposeLedgerMismatch`), a ledger shorter than the database saw
+  or with another record at the anchor's position (`PurposeLedgerBehind`,
+  `PurposeLedgerAnchorMismatch`), or a started destruction this server cannot
+  settle (`PurposeIntentIncomplete`). The ledger and every stored draft are
+  kept as they are.
+- A ledger with the same ID as the database (a restore of the database alone):
+  the API re-applies the completed destructions the restored copy holds again,
+  confirms them in the committed database, and opens only after that
+  confirmation (`PurposeReapplyNotCommitted` or `PurposeReapplyUnconfirmed`
+  keep it closed).
+
+The product cannot tell a copy of the database **and** the `purpose-ledger`
+volume taken together before the first start from a real first start. That
+copy is excluded by procedure:
+
+> 기존 초안이 있는 서버에 CD-09-P를 처음 올릴 때는 migration 전에 준비 명령을 한 번 실행한다. 그 뒤 첫 기동 전에 떠 둔 서버 통째 사본(DB와 `purpose-ledger` 볼륨)은 첫 기동이 끝나면 폐기하고 복원·기동에 쓰지 않는다.
+> 업그레이드·재기동은 배포 도구로만 하고, `purpose-ledger` 볼륨을 사본으로 바꾸거나 지우지 않는다.
+> P 도입 전 백업을 복원해 준비 명령을 다시 실행하는 것은 그 서버에서 P 첫 기동이 아직 없었을 때만 쓰는 복구다. 첫 기동 뒤에는 쓰지 않는다.
+
+The deployment tools here are the site Compose command above, which mounts the
+volume. The `ops_deploy_*` path does not mount it: a server with draft work
+started that way stays closed.
+
 # Rollback to the previous release (N → N-1)
 
 Applies to a host installed and upgraded with the plain Compose list of the clean

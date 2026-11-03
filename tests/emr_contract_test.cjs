@@ -1393,7 +1393,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.throws(() => D.newRetentionRecord(lateSource), { code: 'ReferenceSnapshotRequired' });
   });
 
-  test('TEST-EMR-12/19-A R3-04: overtaken approval cancellation and closed amendment each explicitly end draft intent', async () => {
+  test('TEST-EMR-12/19-A S2 (정모 님 11-03, D593 replaced for native): another reader\'s approval, the parent\'s cancellation and the closed amend window never end a private draft', async () => {
     const at = deadline;
     const scenarios = [
       ['approve', { eventId: 'other-sign', reportId: 'parent', at, action: 'approve', authorId: 'other-reader', draftId: 'other-draft', versionId: 'approved-v1' }],
@@ -1402,11 +1402,14 @@ if (process.argv.includes('--emr-inventory-generator')) {
     ];
     for (const [action, fact] of scenarios) {
       const draft = purposeRecord('overtaken-' + action, 'private-draft', 'owner', t0, ['d1'], { row: { draftBinding: { reportId: 'parent', intentId: action + '-intent', action } } });
-      const end = purposeEnd(draft, 'intent-superseded', at, { superseded: fact });
-      let deletes = 0;
-      const result = await endPurpose(durable, draft, end, at, async () => { deletes++; return { completedAt: at, method: 'irreversible-permanent-deletion' }; });
-      assert.equal(deletes, 1); assert.equal(result.phase, 'completed'); assert.equal(result.expiryDay, '2026-10-06');
+      // The stored fact itself is well formed and resolves; it is not an end of this draft: no record, no deletion.
+      await refusePurpose(draft, purposeEnd(draft, 'intent-superseded', at, { superseded: fact }), at, 'PurposeBindingRefused');
       await refusePurpose(draft, purposeEnd(draft, 'intent-superseded', at, { superseded: { ...fact, reportId: 'other-parent' } }), at, 'PurposeBindingRefused');
+      // The author's own ends stay: the discard, and the signed result of this work.
+      const own = await endPurpose(durable, draft, purposeEnd(draft, 'explicit-discard', at), at, async () => ({ completedAt: at, method: 'irreversible-permanent-deletion' }));
+      assert.equal(own.phase, 'completed');
+      // A result signed by someone else is not the author's end.
+      await refusePurpose(draft, purposeEnd(draft, 'result-version-signed', at, { actorId: 'other-reader' }), at, 'PurposeOwnerRefused');
       await refusePurpose(draft, purposeEnd(draft, 'report-finalized', at), at, 'PurposeBindingRefused');
       await refusePurpose(draft, purposeEnd(draft, 'release', at), at, 'PurposeBindingRefused');
       await refusePurpose(draft, purposeEnd(draft, 'intent-superseded', at), at, 'PurposeBindingRefused');
@@ -2020,14 +2023,14 @@ if (process.argv.includes('--emr-inventory-generator')) {
       version: { recordId: record.recordId, versionId: 'ordinary', sha256: ordinary.event.sha256 } }), record, ordinary, snapshotFor(record, within));
     assert(normal.effects.includes('publish-immediately')); assert.equal(L.reportRetentionAccess(normal.facts, null).ordinaryClinicalAccess, true);
   });
-  test('TEST-EMR-12/19-A D593: parent cancellation ends an Addendum draft, parent approval and amend window never do', async () => {
-    const draft = purposeRecord('addendum-d593', 'private-draft', 'owner', t0, ['d1'], {
+  test('TEST-EMR-12/19-A S2 (정모 님 11-03): an Addendum draft outlives its parent\'s approval, amend window and cancellation; its own signed Addendum ends it', async () => {
+    const draft = purposeRecord('addendum-s2', 'private-draft', 'owner', t0, ['d1'], {
       row: { draftBinding: { reportId: 'parent', intentId: 'addendum-purpose', action: 'addendum' } } });
     for (const fact of [{ eventId: 'parent-approved', reportId: 'parent', at: deadline, action: 'approve', authorId: 'other', draftId: 'other-draft', versionId: 'v1' },
-      { eventId: 'window-end', reportId: 'parent', at: deadline, action: 'amend-window-closed', firstApprovedAt: t0, amendUntil: deadline }])
+      { eventId: 'window-end', reportId: 'parent', at: deadline, action: 'amend-window-closed', firstApprovedAt: t0, amendUntil: deadline },
+      { eventId: 'parent-cancelled', reportId: 'parent', at: deadline, action: 'cancel', versionId: 'v2', reason: '검사 연결 정정' }])
       await refusePurpose(draft, purposeEnd(draft, 'intent-superseded', deadline, { superseded: fact }), deadline, 'PurposeBindingRefused');
-    const cancel = { eventId: 'parent-cancelled', reportId: 'parent', at: deadline, action: 'cancel', versionId: 'v2', reason: '검사 연결 정정' };
-    const result = await endPurpose(durable, draft, purposeEnd(draft, 'intent-superseded', deadline, { superseded: cancel }), deadline,
+    const result = await endPurpose(durable, draft, purposeEnd(draft, 'result-version-signed', deadline), deadline,
       async () => ({ completedAt: deadline, method: 'irreversible-permanent-deletion' }));
     assert.equal(result.phase, 'completed');
   });

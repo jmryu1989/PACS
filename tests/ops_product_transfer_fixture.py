@@ -124,7 +124,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261029130000_emr_preparation_manifest_index/migration.sql',
               'api/prisma/migrations/20261030120000_preload_cache_key/migration.sql',
               'api/prisma/migrations/20261030130000_writer_institution/migration.sql',
-              'api/prisma/migrations/20261102140000_cd10_access_seen/migration.sql']
+              'api/prisma/migrations/20261102140000_cd10_access_seen/migration.sql',
+              'api/prisma/migrations/20261103150000_cd09p_draft_purpose/migration.sql']
 # S9-U4b (52 tables, 47 migrations): ImportOperation, its twelve synthetic rows (one import with every attempt phase over four
 # studies, a prepared, a Sent and a still-sending download, four Study and four SOP reservations with their holders), one
 # primary key, two checks and three indexes. Not measured on a stack when written: estimated at about 16 KB of catalog and
@@ -132,8 +133,13 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
 # W5-API (53 tables, 48 migrations with S9-U4b): ReportDraftInsertReceipt, its three synthetic rows (refused, applied,
 # discarded), one primary key, two checks, one index and the terminal guard's two triggers. Not measured on a stack when
 # written: estimated at about 6 KB of catalog and rows, well inside the cap above.
+# CD-09-P (55 tables, 69 migrations): ReportDraftPurposeEnd with one held ended work (its payload kept, a citation in its JSONB),
+# PurposeLedgerAnchor with its one row, and ReportDraft's work unit/start/intent on both present rows (NULL on the emptied one):
+# two tables, three columns, two primary keys, ten checks, one unique and one plain index, and EMR-B's place_hold redefined with
+# its record lock (the catalog digest of emr_access functions). Not measured on a stack when
+# written: estimated at about 7 KB of catalog and rows.
 TABLES = sorted(['PreloadCacheKey', 'ImportOperation', 'AuthSession', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'StudyState', 'Report', 'ReportVersion',
-                 'ReportDraft', 'ReportDraftInsertReceipt', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
+                 'ReportDraft', 'ReportDraftInsertReceipt', 'ReportDraftPurposeEnd', 'PurposeLedgerAnchor', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
@@ -267,10 +273,25 @@ def expected_rows(uid):
         structured=structured if number == 1 else None,
         # S7-U5: the stored boundary. Two present drafts at different revisions and one emptied row (a tombstone:
         # no content, its revision kept) - a restore that lost the revision or the tombstone would let an old write back in.
-        revision=4 - number, present=True, updatedAt=STAMP) for number in (1, 2)]
+        revision=4 - number, present=True, updatedAt=STAMP,
+        # CD-09-P: each present row holds its own work (an opaque unit, its server start and intent); the emptied row none.
+        workUnit='disposal:00000000-0000-4000-8000-0000000000e'+str(number), workSince=STAMP,
+        workIntent='addendum' if number == 1 else 'approve') for number in (1, 2)]
     rows['ReportDraft'].append(dict(uid=uid, author='SYNTHETIC-reader3', findings='', conclusion='', recommendation='',
-        baseVersion=0, citations=None, structured=None, revision=5, present=False, updatedAt=STAMP))
+        baseVersion=0, citations=None, structured=None, revision=5, present=False, updatedAt=STAMP,
+        workUnit=None, workSince=None, workIntent=None))
     rows['ReportDraftInsertReceipt'] = insert_receipt_rows(uid)
+    # CD-09-P: one ended work whose destruction a legal hold keeps waiting - its exact payload must survive a restore
+    # unchanged (the restored copy is re-matched against the external ledger by its unit, never by a re-drawn one).
+    rows['ReportDraftPurposeEnd'] = [dict(disposalUnitId='disposal:00000000-0000-4000-8000-0000000000e3', uid=uid,
+        author='SYNTHETIC-reader4', workSince=STAMP, workIntent='approve', trigger='explicit-discard',
+        eventId='00000000-0000-4000-8000-0000000000e4', actorId='SYNTHETIC-reader4', endedAt='2026-09-06T00:00:01.123',
+        signedRecordId=None, signedVersionId=None, findings='SYNTHETIC held private', conclusion='', recommendation='',
+        baseVersion=2, citations=citation, structured=None, deliverySettled=True, attempts=1, lastRefusal='LegalHoldActive')]
+    # The anchor of a database that has its ledger (initialized) and whose last committed destruction it names: a restore
+    # that lost either would open a copy without its ledger or rewrite a completion with a new time.
+    rows['PurposeLedgerAnchor'] = [dict(id=1, ledgerId='00000000-0000-4000-8000-0000000000e5', seq=3, initialized=True,
+        lastCompletedUnit='disposal:00000000-0000-4000-8000-0000000000e6', lastCompletedAt='2026-09-06T00:00:02.456')]
     # S4-U2: the Order table had no synthetic row, so a dump that lost the new accession value would
     # pass on an empty table. One unlinked synthetic order carries a real (synthetic) accession.
     rows['Order'] = [dict(oid='SYNTHETIC-order-1', institutionId='SYNTHETIC-hospital', patientId='SYNTHETIC-patient',
@@ -821,12 +842,14 @@ def create_product(name, db, uid):
         execute(name, db, raw.decode())
     seed_emr(name, db)
     data = expected_rows(uid)
+    # CD-09-P: the migration draws its own ledger ID; the synthetic product names a fixed one.
+    execute(name, db, 'DELETE FROM "PurposeLedgerAnchor"; COMMIT')
     for table in ('PreloadCacheKey', 'Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft', 'Order', 'UserFilter',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
                   'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt', 'ReportDraftInsertReceipt',
-                  'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport',
+                  'ReportDraftPurposeEnd', 'PurposeLedgerAnchor', 'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport',
                   'ImportOperation', 'GatewayReceipt', 'GatewayRetryRequest'):
         rows = data[table]
         for row in rows:

@@ -262,6 +262,13 @@ const BUILT_IN = [
     ([uid], t) => (t.studyState ?? []).filter(r => r.uid === uid).map(r => ({ institutionId: r.institutionId, teleInstitutionId: r.teleInstitutionId }))],
   [/FROM "AuthSession" WHERE sid = \? FOR KEY SHARE$/, ([sid], t) => (t.authSession ?? []).filter(r => r.sid === sid).map(() => ({ held: 1 }))],
   [/FROM "ReportDraft" WHERE uid = \? AND author = \? FOR UPDATE$/, ([uid, author], t) => (t.reportDraft ?? []).filter(r => r.uid === uid && r.author === author).map(copy)],
+  // CD-09-P: the commit judgement after a transaction that ended a draft work (draft-purpose judgeCommit) re-reads the end
+  // row and the author's row from what committed.
+  [/^SELECT 1 AS present FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = \?$/,
+    ([unit], t) => (t.reportDraftPurposeEnd ?? []).filter(r => r.disposalUnitId === unit).map(() => ({ present: 1 }))],
+  [/^SELECT revision, present, "workUnit" FROM "ReportDraft" WHERE uid = \? AND author = \?$/,
+    ([uid, author], t) => (t.reportDraft ?? []).filter(r => r.uid === uid && r.author === author)
+      .map(r => ({ revision: r.revision, present: r.present, workUnit: r.workUnit ?? null }))],
   [/FROM "ReportDraft" WHERE uid = \? AND present ORDER BY author FOR UPDATE$/,
     ([uid], t) => sorted((t.reportDraft ?? []).filter(r => r.uid === uid && r.present), { author: 'asc' }).map(copy)],
   [/FROM "Report" WHERE uid = \? FOR UPDATE$/, ([uid], t) => (t.report ?? []).filter(r => r.uid === uid)

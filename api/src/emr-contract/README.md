@@ -16,7 +16,7 @@ V1의 네 inspection surface에서 `access-audit` 월/주기 참조는 알려진
 
 CD-10의 의료법 제23조④(법률 제21776호) 기재 접속기록은 누가 기재했는지 재구성할 수 있어야 한다. CD-10 이전 로컬 반입은 원 소유자 계정은 보존했지만 당시 역할은 저장하지 않았으므로, 복구 시 역할을 꾸며내지 않고 V1 `POST dicom-import`의 성공 `write`에만 `rolesAtTime = { status: 'unresolved', reason: 'legacy-import-roles-not-stored' }`를 허용한다. 이 사유의 제품 생성부는 로컬 반입 복구가 사용하는 `dicom-import-gate.service.ts`의 기존 사실 누락 분기 하나이며, `userId`는 보존된 owner로 확인해야 한다. 다른 경로·행위 또는 일반 `not-observed` 역할에는 이 예외가 적용되지 않는다. 새 반입은 요청 당시 역할을 저장하고 V2 계약은 변경하지 않는다.
 
-순수 계약만 제공하며 API·DB·인증·화면에 연결하지 않는다. D589·D591의 설계 자문 ①–④와 D593의 Addendum 초안 종료 명확화를 적용하며 충돌하는 이전 지휘 설계는 대체한다. 순수 시험은 후속 저장소·키·실제 삭제·법령 준수 인증의 완료 증거가 아니다.
+순수 계약만 제공하며 API·DB·인증·화면에 연결하지 않는다. D589·D591의 설계 자문 ①–④를 적용하며 충돌하는 이전 지휘 설계는 대체한다. 개인 초안의 목적 종료는 정모 님 11-03 결정("본인 종료까지 보존", D593을 native에 대해 대체)을 따른다. 순수 시험은 후속 저장소·키·실제 삭제·법령 준수 인증의 완료 증거가 아니다.
 
 | 파일 | 내용 / 소비자 |
 |---|---|
@@ -124,7 +124,7 @@ H/B는 파기/추가 잠금 안에서 명령·요청의 현재 유효 조건도 
 
 | 목적 자료 | 종료 사건 |
 |---|---|
-| 개인 초안·dictation 및 이전/비운 초안판 | 해당 결과판 서명·소유자의 명시적 discard 또는 `intent-superseded`: approve 초안의 타 판독자 승인, 부모 판독 취소, amend 초안의 수정창 종료 |
+| 개인 초안·dictation 및 이전/비운 초안판 | 작성자 본인의 명시적 discard 또는 그 작업 결과판에 대한 본인 서명뿐(정모 님 11-03, D593을 native에 대해 대체). 타 판독자의 승인·부모 판독 취소·수정창 종료(`intent-superseded`)는 목적 종료가 아니다 |
 | study-organization·comparison-layout·reading-template | 소유자 삭제 |
 | preferences | 설정 교체 또는 소유자 삭제 |
 | assignment·identity-access | 배정/권한 관계 종료; 남겨야 할 변경 증거는 별도 접속기록 단위 |
@@ -135,8 +135,9 @@ H/B는 파기/추가 잠금 안에서 명령·요청의 현재 유효 조건도 
 
 `PurposeRecord`는 서버가 저장한 소유자·생성 시각·draftBinding(부모 기록·작업 intent·approve/addendum/amend)을 가진다. `resolvePurposeEnd()`가 저장 종료 사건을 읽고 `destroyAtPurposeEnd()`가 그 초안·intent·결과판·서명 action·실제 서명 시각과 초안 생성 **이후** 여부를 대조한다. 과거 부모 승인에 현재 시각을 붙이거나 Finalized timer로 새 Addendum 초안을 끝낼 수 없다. 해당 초안 소유자의 명시적 discard도 실제 저장된 사건이어야 한다. 모든 파기 거절은 구체적인 오류 code와 삭제 호출 0회·시작 원장 0건으로 시험한다.
 
-`intent-superseded`는 원인이 된 저장 사건을 포함하고 별도 `loadIntentEndingFact()` 결과와 대조한다. 다른 독자의 승인판·작성자·초안, 사유 있는 취소판, 최초 승인으로 고정된 amendUntil 도달을 구별한다. D593: Addendum 초안의 목적은 해당 Addendum 서명·명시적 discard·부모 판독 취소에서 끝난다. 타 판독자의 본문 승인과 24시간 amend 창은 Addendum 초안을 끝내지 않는다. 취소는 해당 부모의 초안에, 수정창 종료는 amend intent에만 적용한다. 단순 Finalized·Release·이전 부모 승인은 새 Addendum 초안의 종료 사건이 아니다. 실제 종료 즉시 제21조① 파기 경로를 사용한다.
+정모 님 11-03 결정 "본인 종료까지 보존"(D593을 native에 대해 대체): 개인 초안의 목적은 작성자 본인의 명시 폐기(Discard·Clear·본인 Reset) 또는 그 작업의 결과판에 대한 본인 서명에서만 끝난다. 다른 판독의의 승인, 부모 판독의 취소, 수정창 종료는 목적 종료가 **아니다** — 그 뒤에도 초안은 작성자가 직접 끝낼 때까지 보존되고 본인이 열면 그대로 보인다. `destroyAtPurposeEnd()`는 `intent-superseded` 사건과 `superseded` 사실을 `PurposeBindingRefused`로 거절하고, 결과판 서명도 소유자 본인이 아니면 `PurposeOwnerRefused`로 거절한다. `resolvePurposeEnd()`의 `loadIntentEndingFact()` 대조는 저장 사실을 읽는 형식 검사로 남지만 어떤 목적도 끝내지 않는다. 단순 Finalized·Release·이전 부모 승인은 종료 사건이 아니다. 실제 종료 즉시 제21조① 파기 경로를 사용한다.
 
+**native 연결(CD-09-P).** native `ReportDraft(uid, author)`의 present 행은 작업 하나를 가진다: 처음 내용을 쓸 때 불투명 `workUnit`(`disposal:<uuid4>`)·서버 시작 시각·intent를 한 번 정하고, 비운 행은 작업이 없다. 지원하는 종료는 두 가지다. ① 작성자 본인의 Discard·Clear(세 칸 모두 비움)·본인의 Reset(초안 내용을 어느 판에도 남기지 않음) = `explicit-discard`, ② 그 작업으로 만든 approve/addendum 판의 서버 서명(`emr_signing.signed_version`과 그 `ReportVersion.action`으로 대조) = `result-version-signed`. 종료 트랜잭션이 정확한 payload를 `ReportDraftPurposeEnd`로 옮기고 행을 비운 뒤, 별도 트랜잭션이 hold를 다시 읽어 `destroyAtPurposeEnd()`로 그 행을 지운다. Save·Preliminary·Defer는 글을 무서명 판에 남기고, 관리자 강제 해제는 `discarded` 판으로 남기므로 목적 종료가 아니다. 다른 판독의의 승인·부모 취소는 위 결정에 따라 **목적 종료 아님**이다: 남의 초안을 끝내거나 지우지 않고 작성자가 다시 열면 그대로 보인다(`loadIntentEndingFact()`는 읽을 목적 사실이 없어 `EmrRecordUnsupported`). amend 기능은 native에 없다. 파기 트랜잭션은 그 초안 기록의 hold 잠금(`emr_access.place_hold`가 같은 잠금을 잡는다)을 잡은 뒤 hold를 다시 읽으므로, 진행 중인 hold 등록은 커밋된 뒤 읽히고 파기가 hold를 읽은 뒤 시작한 등록은 파기 커밋을 기다린다. `completed`는 삭제가 PostgreSQL에 커밋된 것을 확인한 뒤에만 쓴다: 커밋이 실패하면(행이 남아 있으면) `failed`이고 재시도는 새 `started`부터다. 커밋과 `completed` 사이에 멈추면 DB anchor가 그 단위와 완료 시각을 갖고 있어 다음 대조에서 원래 완료 시각으로 기록한다. 파기 원장은 DB·백업 밖 파일(`KIN_PURPOSE_LEDGER_DIR`, 없거나 백업되는 `KIN_EMR_STATE_DIR` 안이면 기동 거절)이며 단위 ID와 위 법정 필드만 싣는다. 서버가 첫 작업 단위를 내주기 전에 원장을 만들고 DB에 `initialized`를 남기므로, 작업을 낸 적 있는 사본은 파기 전(seq 0)이라도 원장 없이 열리지 않는다. 서버는 시작 전에 그 원장으로 복원본의 완료 단위를 다시 적용하고, 원장 부재·다른 원장·짧은 원장·끝나지 않은 시작 기록이면 열리지 않는다. 별도 sweep 실행은 서버가 아직 보내는 중일 수 있는 작업을 `delivery-pending`으로 보고하고 성공(exit 0)으로 세지 않는다(`api/src/emr-retention/draft-purpose.ts`).
 `destroyAtPurposeEnd()`는 최신 목적 자료/hold를 `withPurposeLock()` 아래 다시 확인하고 지체 없이 파기·시작/완료/실패 원장을 남긴다. 목적 자료의 hold 등록도 `withPurposeChange()` 안에서 최신 자료를 확인하고 저장한다. 목적은 종료됐어도 아직 파기되지 않은 자료에는 실제 hold를 등록할 수 있으며, `destroyedAt`이 있는 자료의 hold 등록/재파기는 거절한다. 승인 전 Save/Release는 개인 자료를 보존한다. 승인/새 Addendum/수정의 서명은 해당 결과판 초안의 `end-private-draft-purpose` 효과를 내지만 단순 최종화는 초안 종료 효과를 내지 않는다. 다른 intent의 후속 입력은 별도 목적 자료로 보존한다.
 
 `destroyAtExpiry()`는 모든 단위 판의 정확한 집합을 요구하고, 내구성 있는 시작 기록 → 원본·이전 판·서명 payload·사본·복제본·복구 가능한 백업의 복원 불가능한 영구 삭제 → 성공 영수증 → 완료 기록 순서를 강제한다(제21조①②, 시행령 제16조①1). 실패/중단 및 완료 기록 실패는 H가 실제 삭제 상태와 대조·복구한다. 파기 지연은 파기를 더 막지 않으며, 표준 개인정보 보호지침 제10조①의 5일 경계를 넘어선 요청/완료에는 `overdue`를 남긴다. 작업은 만료/해제/목적 종료 즉시 실행하고 5일을 대기 설정으로 쓰지 않는다.
