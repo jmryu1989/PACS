@@ -60,8 +60,10 @@ export class PacsReportCommit {
     const wanted = action === 'preliminary' ? String(body.reviewer ?? '').trim() : '';
     let candidate: { sub: string } | null = null;
 
+    // CD-09-P: the work this commit ends by its own signed result, or by the author's Reset that keeps none of it.
+    let ended: { unit: string; author: string } | null = null;
     try {
-      return await this.reportDraft.draftTransaction(uid, c, session, expected.epoch, async () => {
+      const committed = await this.reportDraft.draftTransaction(uid, c, session, expected.epoch, async () => {
         await this.studyAccess.prepare(c,[uid]);
         if (action === 'preliminary') {
           // Resolve the current picker identity before holding study/session locks over network I/O.
@@ -355,6 +357,10 @@ export class PacsReportCommit {
         }
         // 확정에 실패하면 초안도 남아야 하므로 같은 트랜잭션에서 비운다. 초안이 없던 확정도 경계를 올린다 —
         // 이 확정보다 앞서 보낸 초안 쓰기가 뒤늦게 닿아 확정 뒤에 초안을 만들지 못한다.
+        if ((action === 'approve' || action === 'addendum') && signature)
+          ended = await this.reportDraft.endWork(tx, mine, c.actor, { trigger: 'result-version-signed', action: action as 'approve' | 'addendum', signed: signature });
+        else if (action === 'reset')
+          ended = await this.reportDraft.endWork(tx, mine, c.actor, { trigger: 'explicit-discard' });
         const cleared = await this.reportDraft.storeDraft(tx, uid, c.actor, mine, null);
 
         /**
@@ -377,6 +383,8 @@ export class PacsReportCommit {
       }, undefined, { facts, surface: 'POST studies/:uid/report/commit',
         action: action === 'approve' ? 'approve-sign' : action === 'addendum' ? 'addendum'
           : action === 'reset' ? 'cancel' : 'write', target: 'report-version' });
+      this.reportDraft.destroyEnded(ended);
+      return committed;
     } catch (e: any) {
       // CHECK 백스톱도 서버 고장이 아니라 명명된 409다. 우리 제약 이름일 때만 옮긴다.
       if (isCitationCheck(e)) citationLimit();

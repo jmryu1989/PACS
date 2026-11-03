@@ -11,7 +11,8 @@ import { ClauseRow, HoldRow, RequestRow, StoredEntry, OrderFact, parseOrderFact 
  * AsyncLocalStorage). The readers composed once at server start answer only from the current context: no context, an ID
  * the snapshot did not read, or a snapshot of another transaction is refused - never answered with an empty set or a
  * current-time reconstruction. There is no process-global "current user/transaction" and no per-request composition.
- * Facts B does not store (C's reports and signatures, F's requests to unseal) are explicitly unsupported here.
+ * Facts B does not store (C's reports and signatures, F's requests to unseal) are explicitly unsupported here. A private draft's
+ * purpose end (CD-09-P) is answered only from the facts its destruction transaction read into the snapshot.
  */
 export interface SnapshotRequest {
   recordIds?: readonly string[]; accessRequestIds?: readonly string[]; correctionRequestIds?: readonly string[];
@@ -26,6 +27,8 @@ export interface EmrSnapshot {
   readonly clauseVersions: ReadonlyMap<string, readonly unknown[]>;
   readonly accessEvents: ReadonlyMap<string, unknown>;
   readonly orderFacts: ReadonlyMap<string, readonly Readonly<OrderFact>[]>;
+  readonly purposeEnds: ReadonlyMap<string, unknown>;
+  readonly signedResults: ReadonlyMap<string, unknown>;
 }
 interface Frame { scope: object; snapshot: EmrSnapshot }
 const context = new AsyncLocalStorage<Frame>();
@@ -61,6 +64,9 @@ export interface SnapshotRows {
   clauseVersions: ReadonlyMap<string, readonly ClauseRow[]>;
   accessEvents: ReadonlyMap<string, StoredEntry | null>;
   orderFacts?: ReadonlyMap<string, readonly Readonly<OrderFact>[]>;
+  /** CD-09-P: stored purpose ends by event ID, and the signed result each names, keyed by JSON [recordId, versionId]. */
+  purposeEnds?: ReadonlyMap<string, unknown>;
+  signedResults?: ReadonlyMap<string, unknown>;
 }
 /** The immutable snapshot of those rows, bound to the transaction scope they were read in. */
 export function snapshotFromRows(scope: object, rows: SnapshotRows): EmrSnapshot {
@@ -90,7 +96,10 @@ export function snapshotFromRows(scope: object, rows: SnapshotRows): EmrSnapshot
     orderFacts.set(id, freeze(parsed));
   }
   const fixedRecords = new Map([...rows.fixedRecords ?? []].map(([id, row]) => [id, freeze(structuredClone(row))]));
-  const snapshot: EmrSnapshot = Object.freeze({ fixedRecords, holdListings, holds, accessRequests, correctionRequests, clauseVersions, accessEvents, orderFacts });
+  const purposeEnds = new Map([...rows.purposeEnds ?? []].map(([id, row]) => [string(id), freeze(structuredClone(row))]));
+  const signedResults = new Map([...rows.signedResults ?? []].map(([id, row]) => [string(id), freeze(structuredClone(row))]));
+  const snapshot: EmrSnapshot = Object.freeze({ fixedRecords, holdListings, holds, accessRequests, correctionRequests, clauseVersions, accessEvents, orderFacts,
+    purposeEnds, signedResults });
   owners.set(snapshot, scope);
   return snapshot;
 }
@@ -141,9 +150,11 @@ export const runtimeAdapters: EmrAdapters = Object.freeze({
     loadCorrectionRequest(requestId: string) { return read(snapshot().correctionRequests, requestId); },
     loadClauseVersions(clauseId: string) { return read(snapshot().clauseVersions, clauseId) as any; },
   }),
+  // CD-09-P: the native product stores no intent-ending fact (another member's approval never ends a private draft), so
+  // that reader stays unsupported; an end or signed result the snapshot did not read is refused, never reconstructed.
   purpose: Object.freeze({
-    load(): unknown { return refuse('EmrRecordUnsupported'); },
-    loadSignedResult(): unknown { return refuse('EmrRecordUnsupported'); },
+    load(eventId: string): unknown { return read(snapshot().purposeEnds, eventId); },
+    loadSignedResult(recordId: string, versionId: string): unknown { return read(snapshot().signedResults, JSON.stringify([recordId, versionId])); },
     loadIntentEndingFact(): unknown { return refuse('EmrRecordUnsupported'); },
   }),
   clinical: Object.freeze({

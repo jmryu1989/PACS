@@ -6,6 +6,8 @@ import { Public } from './auth.guard';
 import { AuthService } from './auth.service';
 import { imageRead } from './image-delivery-record';
 import { bootstrapRead, studyAuditRead } from './emr-viewing/consumer-read';
+// CD-09-P: every response that can carry the caller's private draft registers before it reads (destruction waits for it).
+import { draftDeliveries } from './emr-retention/draft-purpose';
 
 /**
  * URL의 `:id`를 정수로. **`+id`를 그대로 쓰면 안 된다.**
@@ -268,6 +270,7 @@ export class PacsController {
   @Get('bootstrap')
   @Header('Cache-Control', 'no-store')
   async bootstrap(@Req() req: any, @Query() query: any) {
+    draftDeliveries.track(caller(req).actor, req, req.res);
     return bootstrapRead(await this.svc.bootstrap(caller(req), query), req.actor, req.institution);
   }
 
@@ -278,6 +281,7 @@ export class PacsController {
   @Get('studies')
   @Header('Cache-Control', 'no-store')
   async studies(@Req() req: any, @Query() query: any) {
+    draftDeliveries.track(caller(req).actor, req, req.res);
     return this.svc.readStudies(caller(req), query);
   }
 
@@ -322,6 +326,7 @@ export class PacsController {
    */
   @Put('studies/:uid/report')
   report(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
+    draftDeliveries.track(caller(req).actor, req, req.res);
     return this.withDraftFacts(req, facts => this.svc.putReport(uid, body, caller(req), draftSession(req), facts));
   }
 
@@ -332,6 +337,7 @@ export class PacsController {
   @Get('studies/:uid/draft')
   @Header('Cache-Control', 'no-store')
   draft(@Param('uid') uid: string, @Req() req: any, @Query('insertRequestId') insertRequestId?: string) {
+    draftDeliveries.track(caller(req).actor, req, req.res);
     return this.withDraftFacts(req, facts => this.svc.readDraft(uid, caller(req), facts, insertRequestId));
   }
 

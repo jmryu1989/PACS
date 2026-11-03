@@ -273,9 +273,18 @@ function contractSuite() {
     const snapshotA = CTX.snapshotFromRows(scopeA, { ...empty(), ...snap([v1, v2]) });
     code(() => CTX.withSnapshot(scopeB, snapshotA, () => D.reloadLegalHolds(recordId)), 'EmrContextTransactionMismatch');
     code(() => CTX.withSnapshot(scopeA, snapshotA, () => CTX.withSnapshot(scopeB, CTX.snapshotFromRows(scopeB, empty()), () => 1)), 'EmrContextTransactionMismatch');
-    // What B does not store is unsupported, never an empty success.
-    for (const call of [() => CTX.runtimeAdapters.purpose.load('x'), () => CTX.runtimeAdapters.clinical.loadStudy('x'), () => CTX.runtimeAdapters.clinical.loadReportPatient('x'),
+    // What B does not store is unsupported, never an empty success. CD-09-P: no intent-ending fact is stored natively.
+    for (const call of [() => CTX.runtimeAdapters.purpose.loadIntentEndingFact('x'), () => CTX.runtimeAdapters.clinical.loadStudy('x'), () => CTX.runtimeAdapters.clinical.loadReportPatient('x'),
       () => inSnapshot({}, () => CTX.runtimeAdapters.stored.load('report-1', 'event-1'))]) code(call, 'EmrRecordUnsupported');
+    // CD-09-P: a private draft's purpose end and its signed result are answered only from the facts the destruction
+    // transaction read: no context, or an end/result that snapshot did not read, is refused.
+    code(() => CTX.runtimeAdapters.purpose.load('end-1'), 'EmrContextRequired');
+    code(() => inSnapshot({}, () => CTX.runtimeAdapters.purpose.load('end-1')), 'EmrContextRecordMissing');
+    code(() => inSnapshot({}, () => CTX.runtimeAdapters.purpose.loadSignedResult('2.25.1', '3')), 'EmrContextRecordMissing');
+    const end = { eventId: 'end-1', recordId: '["2.25.1","a"]' }, signed = { versionId: '3' };
+    assert.deepEqual(inSnapshot({ purposeEnds: new Map([['end-1', end]]) }, () => CTX.runtimeAdapters.purpose.load('end-1')), end);
+    assert.deepEqual(inSnapshot({ signedResults: new Map([[JSON.stringify(['2.25.1', '3']), signed]]) },
+      () => CTX.runtimeAdapters.purpose.loadSignedResult('2.25.1', '3')), signed);
   });
 
   const orderAt = '2026-01-02T00:00:00.000Z';

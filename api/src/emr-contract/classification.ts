@@ -284,6 +284,10 @@ export const MODEL_CLASSIFICATION: Readonly<Record<string, readonly RecordKind[]
   GatewayReceipt: ['delivery-receipt'], GatewayRetryRequest: ['delivery-receipt'],
   TechNoteRevision: ['tech-note', 'operational-note'], TransferBasis: ['transfer-governance'], ProcessingAgreement: ['transfer-governance'], Transfer: ['transfer-governance', 'patient-match'],
   Report: ['report-head'], ReportDraft: ['private-draft', 'report-evidence'],
+  // CD-09-P: an ended private draft work's own payload, held only until its purpose destruction (or a hold's release).
+  ReportDraftPurposeEnd: ['private-draft'],
+  // CD-09-P: the database's position in the external destruction ledger; no record content or identifier of a record.
+  PurposeLedgerAnchor: ['system-operation'],
   // W5-API (O4 R1): the receipt of one Related Report insertion into the owner's draft - a delivery receipt of that fixed
   // request, bound to the Source version and the draft revision it wrote (no text of either).
   ReportDraftInsertReceipt: ['delivery-receipt', 'report-evidence'],

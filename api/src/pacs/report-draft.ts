@@ -22,6 +22,7 @@ import { relatedInsertInput, relatedInsertId, relatedEvidenceIds, relatedRequest
 import type { RelatedInsertRefusal } from '../report-related-insert';
 import type { AccessAction, AccessEventV1 } from '../emr-contract/access-event';
 import type { EmrRecordPort } from '../emr-runtime/record-port';
+import { draftPurpose, newWorkUnit } from '../emr-retention/draft-purpose';
 
 import type { RequestWorkContext } from '../emr-runtime/request-context';
 
@@ -211,7 +212,8 @@ export class PacsReportDraft {
   /** 내 초안 행을 잠그고 요청이 본 revision과 대조한다. 행이 없으면 이 세대의 revision 0이다. */
   async ownDraft(tx: Prisma.TransactionClient, uid: string, c: Caller, revision: number) {
     const rows = await tx.$queryRaw<any[]>`
-      SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, revision, present, "updatedAt"
+      SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, revision, present, "updatedAt",
+        "workUnit", "workSince", "workIntent"
       FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
     const row = rows[0] ?? null;
     if ((row?.revision ?? 0) !== revision) throw draftConflict();
@@ -225,12 +227,20 @@ export class PacsReportDraft {
    */
   async storeDraft(tx: Prisma.TransactionClient, uid: string, author: string, row: any,
       content: { findings: string; conclusion: string; recommendation: string; baseVersion: number;
-        citations: any[]; structured: any[] } | null) {
+        citations: any[]; structured: any[] } | null, intent: 'approve' | 'addendum' = 'approve') {
     const revision = (row?.revision ?? 0) + 1;
+    /**
+     * CD-09-P: a present row holds one work. Writing content into an absent row starts a new work with its own opaque
+     * unit; writing into a present row continues that work (its intent follows the author's own save); emptying the row
+     * ends it here - the caller that ends a purpose has already moved the payload with `endWork`.
+     */
+    const work = !content ? { workUnit: null, workSince: null, workIntent: null }
+      : row?.present && row.workUnit ? { workUnit: row.workUnit, workSince: row.workSince, workIntent: intent }
+      : { workUnit: newWorkUnit(), workSince: new Date(), workIntent: intent };
     const text = content
       ? { present: true, findings: content.findings, conclusion: content.conclusion,
-          recommendation: content.recommendation, baseVersion: content.baseVersion }
-      : { present: false, findings: '', conclusion: '', recommendation: '', baseVersion: 0 };
+          recommendation: content.recommendation, baseVersion: content.baseVersion, ...work }
+      : { present: false, findings: '', conclusion: '', recommendation: '', baseVersion: 0, ...work };
     // "없음"의 모양은 SQL NULL 하나다(P13). 빈 배열을 저장하면 읽는 쪽이 두 가지를 구분해야 한다.
     const citations = content?.citations.length ? content.citations : null;
     const structured = content?.structured.length ? content.structured : null;
@@ -243,6 +253,43 @@ export class PacsReportDraft {
     });
     if (changed.count !== 1) throw draftConflict();
     return tx.reportDraft.findUnique({ where: { uid_author: { uid, author } } });
+  }
+
+  /**
+   * CD-09-P: the purpose of the author's live work ends here, in the transaction that ends it, before `storeDraft` empties
+   * the row. Only two ends: the author's own discard (Discard, Clear, or the author's Reset of the report, which keeps
+   * nothing of the draft) and the signed result version made from this work. A save, Preliminary or Defer carries the text
+   * into an unsigned report version and an administrator's forced release keeps it as a `discarded` version: those empty
+   * the row without a purpose end, and another member's approval never ends this author's draft. Returns the unit to
+   * destroy after commit, or null when the row held no work.
+   */
+  async endWork(tx: Prisma.TransactionClient, row: any, actor: string,
+      end: { trigger: 'explicit-discard' } | { trigger: 'result-version-signed'; action: 'approve' | 'addendum';
+        signed: { recordId: string; versionId: string; signedAt: string } }): Promise<{ unit: string; author: string } | null> {
+    if (!row?.present || !row.workUnit) return null;
+    if (row.author !== actor) throw new ForbiddenException('다른 작성자의 초안 목적을 종료할 수 없습니다');
+    let endedAt = end.trigger === 'result-version-signed' ? new Date(end.signed.signedAt) : new Date();
+    // The end is a later instant than the work's start on the server clock; never an adjusted one.
+    while (end.trigger === 'explicit-discard' && endedAt.getTime() <= new Date(row.workSince).getTime()) {
+      await new Promise(resolve => setTimeout(resolve, 1));
+      endedAt = new Date();
+    }
+    await tx.reportDraftPurposeEnd.create({ data: {
+      disposalUnitId: row.workUnit, uid: row.uid, author: row.author, workSince: row.workSince,
+      workIntent: end.trigger === 'result-version-signed' ? end.action : row.workIntent,
+      trigger: end.trigger, eventId: randomUUID(), actorId: actor, endedAt,
+      signedRecordId: end.trigger === 'result-version-signed' ? end.signed.recordId : null,
+      signedVersionId: end.trigger === 'result-version-signed' ? end.signed.versionId : null,
+      findings: row.findings, conclusion: row.conclusion, recommendation: row.recommendation, baseVersion: row.baseVersion,
+      ...(row.citations === null || row.citations === undefined ? {} : { citations: row.citations }),
+      ...(row.structured === null || row.structured === undefined ? {} : { structured: row.structured }),
+    } });
+    return { unit: row.workUnit, author: row.author };
+  }
+
+  /** After the ending transaction committed: destroy now (the configured server), else leave it to the sweep. */
+  destroyEnded(ended: { unit: string; author: string } | null) {
+    if (ended) draftPurpose()?.scheduleDestruction(ended.unit, ended.author);
   }
 
   /**
@@ -376,7 +423,8 @@ export class PacsReportDraft {
             `예비 판독(RS: P) 중입니다. ${state?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
         // 잠금 순서의 나머지: 내 초안 행 → 영수증 행. 경쟁한 요청의 적용·취소는 이 잠금 뒤에 읽히므로 놓치지 않는다.
         const drafts = await tx.$queryRaw<any[]>`
-          SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, revision, present, "updatedAt"
+          SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, revision, present, "updatedAt",
+        "workUnit", "workSince", "workIntent"
           FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
         const row = drafts[0] ?? null;
         const receipts = await tx.$queryRaw<any[]>`
@@ -463,7 +511,7 @@ export class PacsReportDraft {
         const cited = await this.reportEvidence.draftCitations(tx, uid, prior, body, content, c, head?.version ?? 0);
         const structure = await this.reportEvidence.draftStructure(tx, uid, prior, body, content, c, head?.version ?? 0);
         const saved = await this.storeDraft(tx, uid, c.actor, row,
-          { ...content, citations: cited.entries, structured: structure.entries });
+          { ...content, citations: cited.entries, structured: structure.entries }, state.rs === 'A' ? 'addendum' : 'approve');
         await audit(c.actor, 'report.draft', uid, {
           institution: inst(c),
           len: [content.findings.length, content.conclusion.length, content.recommendation.length],
@@ -483,7 +531,8 @@ export class PacsReportDraft {
       return outcome.body;
     }
     const empty = !(content.findings || content.conclusion || content.recommendation);
-    return this.reportEvidence.reportLimitChecked(() => this.draftTransaction(uid, c, session, expected.epoch, async () => {
+    let ended: { unit: string; author: string } | null = null;
+    const answer = await this.reportEvidence.reportLimitChecked(() => this.draftTransaction(uid, c, session, expected.epoch, async () => {
       await this.studyAccess.prepare(c,[uid]);
       /**
        * 소견 계보의 접근 정책은 **트랜잭션 밖에서** 준비되어야 한다.
@@ -512,6 +561,8 @@ export class PacsReportDraft {
       if (body.structure !== undefined)
         throw new ConflictException({ code: 'REPORT_STRUCTURE_TEXT',
           message: '구조화 항목의 문장이 그 칸의 본문에 줄 단위로 그대로 있지 않습니다' });
+      // Clearing every field is the author ending this draft (CD-09-P explicit discard): its text is destroyed after commit.
+      ended = await this.endWork(tx, row, c.actor, { trigger: 'explicit-discard' });
       const cleared = await this.storeDraft(tx, uid, c.actor, row, null);
       await audit(c.actor, 'report.draft.clear', uid, { institution: inst(c) });
       return draftEnvelope(uid, owner, state.draftEpoch, cleared);
@@ -541,7 +592,7 @@ export class PacsReportDraft {
     const structure = await this.reportEvidence.draftStructure(tx, uid, prior, body, content, c, head?.version ?? 0);
 
     const saved = await this.storeDraft(tx, uid, c.actor, row,
-      { ...content, citations: cited.entries, structured: structure.entries });
+      { ...content, citations: cited.entries, structured: structure.entries }, state.rs === 'A' ? 'addendum' : 'approve');
     // 판독문 전문을 감사로그에 통째로 넣지 않는다 — 길이와 개인정보 때문. 길이만 남긴다.
     await audit(c.actor, 'report.draft', uid, {
       institution: inst(c),
@@ -564,6 +615,8 @@ export class PacsReportDraft {
       // 요청이 `structure`를 실어 보냈을 때만 이 칸이 있다(P9). 화면은 이 `sid` 하나로 유지 목록을 넓힌다.
       ...(structure.applied ? { applied: structure.applied } : {}) };
     }, undefined, { facts, surface: 'PUT studies/:uid/report', action: empty ? 'clear' : 'draft-save' }));
+    this.destroyEnded(ended);
+    return answer;
   }
 
   /**
@@ -576,9 +629,12 @@ export class PacsReportDraft {
     const owner = draftOwner(body, c);
     const expected = draftExpected(body);
     // 버리기는 초안의 수정(제23조④)이고, 답은 확정본(`state`)을 다시 내준다. 둘 다 같은 commit의 접속기록이다.
-    return this.draftTransaction(uid, c, session, expected.epoch, () => this.studyAccess.prepare(c,[uid]),
+    let ended: { unit: string; author: string } | null = null;
+    const answer = await this.draftTransaction(uid, c, session, expected.epoch, () => this.studyAccess.prepare(c,[uid]),
       async (tx, state, audit, record) => {
         const row = await this.ownDraft(tx, uid, c, expected.revision);
+        // CD-09-P: the author's Discard ends this work's purpose; its exact text is destroyed after this commit.
+        ended = await this.endWork(tx, row, c.actor, { trigger: 'explicit-discard' });
         // 초안이 없었어도 경계는 올린다 — 이 버리기보다 앞서 보낸 쓰기가 뒤늦게 닿아 초안을 만들지 못하게.
         const cleared = await this.storeDraft(tx, uid, c.actor, row, null);
         await audit(c.actor, 'report.draft.discard', uid, { institution: inst(c) });
@@ -589,6 +645,8 @@ export class PacsReportDraft {
         if (rep && !answer.state.prelimHidden) await record!(state, null, 'provide-prepared', { uid, version: rep.version });
         return answer;
       }, undefined, { facts, surface: 'DELETE studies/:uid/draft', action: 'discard', ownTargets: true });
+    this.destroyEnded(ended);
+    return answer;
   }
 
   /**
@@ -614,7 +672,8 @@ export class PacsReportDraft {
       async (tx, state, _audit, record) => {
       // 비운 자리(present=false)는 초안이 아니다: 판으로 보존하지도, 건수에 넣지도 않는다.
       const drafts = await tx.$queryRaw<any[]>`
-        SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, revision, present, "updatedAt"
+        SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, revision, present, "updatedAt",
+        "workUnit", "workSince", "workIntent"
         FROM "ReportDraft"
         WHERE uid = ${uid} AND present
         ORDER BY author
