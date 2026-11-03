@@ -135,9 +135,11 @@ class DraftPurposeScreen(worklist.WorklistE2E):
         fixture = self.fixture()
         secret = "SYN-S2 " + uuid.uuid4().hex
         context = self.profile("doctor")
-        first, second = self.open_main(context), self.open_main(context)
+        first = self.open_main(context)
         self.select(first, fixture)
         self.type_and_save(first, fixture, secret)
+        # The second tab opens after the save, so its list carries the saved draft (as a tab opened later does).
+        second = self.open_main(context)
         self.select(second, fixture)
         expect(second.locator("#findings")).to_have_value(secret)
         with second.expect_response(lambda r: r.request.method == "DELETE" and r.url.endswith(f"/{fixture.uid}/draft")) as gone:
@@ -196,9 +198,10 @@ class DraftPurposeScreen(worklist.WorklistE2E):
         ended = self.stack.request("DELETE", f"/studies/{quote(a.uid)}/draft", "doctor", {})
         self.assertEqual(ended.status, 200, ended.text)
         self.wait_no_ended_rows(a)
-        page.unroute(of_a)
+        # Deliver the held answers first, then stop intercepting (unroute would hand the held routes on by itself).
         for route in held:
             route.continue_()
+        page.unroute(of_a)
         page.wait_for_timeout(2000)
         expect(page.locator("#findings")).to_have_value(text_b)
         self.assertNotIn(secret_a, page.locator("#findings").input_value())
