@@ -21,7 +21,12 @@ from __future__ import annotations
 
 import json
 import os
+import base64
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import queue
+import random
+import re
 import subprocess
 import sys
 import threading
@@ -135,6 +140,25 @@ def compose_api_logs(since):
                           timeout=120).stdout.decode(errors="replace")
 
 
+def compose_db_logs(since):
+    return subprocess.run(["docker", "compose", "logs", "--no-color", "--since", since, "db"], cwd=ROOT, capture_output=True,
+                          timeout=120).stdout.decode(errors="replace")
+
+
+def compose_run_api_open(script):
+    """A one-off process of the API service while the API itself is stopped: the same service definition, so the same
+    purpose-ledger volume, runtime credential and mounted source; --no-deps, so no migration runs. The development image
+    has no dist in a new container: it builds first (to stderr, keeping stdout's last line the command's JSON)."""
+    return subprocess.Popen(["docker", "compose", "run", "--rm", "--no-deps", "-T", "api", "sh", "-c", script], cwd=ROOT,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def compose_run_api(script, timeout=600):
+    process = compose_run_api_open(script)
+    out, err = process.communicate(timeout=timeout)
+    return process.returncode, out.decode(errors="replace"), err.decode(errors="replace")
+
+
 def sql_text(value):
     return "'" + str(value).replace("'", "''") + "'"
 
@@ -163,6 +187,69 @@ class HeldTransaction:
         # communicate() flushes and closes stdin itself: the closing statement goes as its input.
         out, err = self.process.communicate(input=verb + ";\n" if self.process.poll() is None else None, timeout=60)
         return self.process.returncode, out, err
+
+
+class Session:
+    """r3: one psql session of this stack's database that stays open; each statement's answer is read back up to a
+    marker line, with a finite wait. Used for the key holder K, the lock session L and the observer O (a polling
+    connection: one `docker compose exec` per poll would be too slow to see a 3-second lock wait)."""
+
+    def __init__(self, tag):
+        self.tag = tag
+        self.process = compose_exec_open("db", "psql", "-U", "kin", "-d", "kin", "-qAt")
+        self.lines = queue.Queue()
+        threading.Thread(target=self._pump, daemon=True).start()
+        self.pending = None
+        self.pid = int(self.query("SELECT pg_backend_pid()")[0])
+
+    def _pump(self):
+        for line in self.process.stdout:
+            self.lines.put(line.rstrip("\n"))
+        self.lines.put(None)
+
+    def _send(self, sql):
+        marker = "END-" + uuid.uuid4().hex
+        self.process.stdin.write(sql.rstrip().rstrip(";") + ";\nSELECT '" + marker + "';\n")
+        self.process.stdin.flush()
+        return marker
+
+    def _until(self, marker, timeout):
+        out, deadline = [], time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(f"session {self.tag}: no answer within {timeout}s")
+            try:
+                line = self.lines.get(timeout=remaining)
+            except queue.Empty:
+                raise AssertionError(f"session {self.tag}: no answer within {timeout}s") from None
+            if line is None:
+                raise AssertionError(f"session {self.tag} ended")
+            if line == marker:
+                return out
+            out.append(line)
+
+    def query(self, sql, timeout=30):
+        return self._until(self._send(sql), timeout)
+
+    def start(self, sql):
+        """A statement expected to wait (a lock request); its answer is collected by `answered`."""
+        self.pending = self._send(sql)
+
+    def answered(self, timeout):
+        marker, self.pending = self.pending, None
+        return self._until(marker, timeout)
+
+    def close(self):
+        try:
+            self.process.stdin.write("ROLLBACK;\n\\q\n")
+            self.process.stdin.flush()
+        except (OSError, ValueError):
+            pass
+        try:
+            self.process.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
 
 
 class DraftPurposeServed(unittest.TestCase):
@@ -981,6 +1068,623 @@ class DraftPurposeServed(unittest.TestCase):
         self.wait_api()
         self.assertEqual(self.row(doctor)["findings"], "SYN-P16 legacy draft")
         event("p16", legacy_migrated_closed=True)
+
+
+SWEEP_CLI = "npm run build >&2 && exec node dist/emr-retention/draft-purpose-sweep.js"
+PREPARE_CLI = "npm run build >&2 && exec node dist/emr-retention/draft-purpose-prepare.js"
+ADOPTION = "/var/lib/kin-purpose/purpose-adoption.json"
+
+
+class DraftPurposeCommitJudgement(DraftPurposeServed):
+    """CD-09-P r3 (consult-cd09p-r3-precheck-report.md C2-C5, C8; plan claude-plan-cd-09p-r3.md section 4, review
+    astra-review-cd-09p-r3-plan3.md attachments 1-2): every path answers from one commit judgement.
+
+    The controls are external and synthetic. K is a psql session that only holds an advisory key; T1 is a deferred
+    constraint trigger on the target row only, which waits for that key at COMMIT (and then passes or raises); L is a
+    second psql session that queues for the row (or table) the target transaction holds, so that the product's own
+    confirmation read P_R waits behind L and meets its 3-second lock wait. Each case observes the branch first - P_C
+    waiting at COMMIT on K, L queued behind P_C, L granted, the durable state, P_R waiting on L (P_R is neither K nor L)
+    and its lock timeout in the database log - and only then asserts the product's outcome.
+    """
+
+    # ── controls ──
+
+    def setUp(self):
+        super().setUp()
+        self.sessions = []
+        self.observer = self.session("O")
+        self.since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    def session(self, tag):
+        session = Session(tag)
+        self.sessions.append(session)
+        # LIFO cleanup: L before K before the observer, each with a finite wait.
+        self.addCleanup(session.close)
+        return session
+
+    def key_holder(self):
+        key = random.randint(1 << 20, 1 << 30)
+        holder = self.session("K")
+        holder.query(f"BEGIN; SELECT pg_advisory_xact_lock({key})")
+        self.assertEqual(self.observer.query(f"SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND granted AND pid={holder.pid}"), ["1"])
+        return key, holder
+
+    def t1(self, table, event_name, condition, key, fail):
+        """The target transaction's COMMIT waits for K, then passes (fail=False) or raises (fail=True)."""
+        action = "RAISE EXCEPTION 'SYN-CD09P commit failure'; " if fail else ""
+        psql("CREATE OR REPLACE FUNCTION public.cd09p_t1() RETURNS trigger LANGUAGE plpgsql AS "
+             f"$$BEGIN IF {condition} THEN PERFORM pg_advisory_xact_lock({key}); {action}END IF; RETURN NULL; END$$")
+        psql(f'CREATE CONSTRAINT TRIGGER cd09p_t1 AFTER {event_name} ON "{table}" DEFERRABLE INITIALLY DEFERRED '
+             "FOR EACH ROW EXECUTE FUNCTION public.cd09p_t1()")
+        self.addCleanup(lambda: psql(f'DROP TRIGGER IF EXISTS cd09p_t1 ON "{table}"'))
+        return lambda: psql(f'DROP TRIGGER IF EXISTS cd09p_t1 ON "{table}"')
+
+    def poll(self, sql, what, timeout, interval=0.05):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            rows = [row for row in self.observer.query(sql) if row]
+            if rows:
+                return rows
+            time.sleep(interval)
+        self.fail(f"not observed within {timeout}s: {what}")
+
+    def commit_waiting(self, holder, timeout=60):
+        """P_C: a backend whose COMMIT waits for K's advisory key."""
+        rows = self.poll("SELECT pid FROM pg_stat_activity WHERE query = 'COMMIT' AND wait_event_type = 'Lock' "
+                         f"AND wait_event = 'advisory' AND {holder.pid} = ANY(pg_blocking_pids(pid))",
+                         "the target COMMIT waiting on K", timeout)
+        return int(rows[0])
+
+    def queue_behind(self, lock_sql, p_c):
+        """L queues for what P_C holds; returns L once it is seen waiting on P_C."""
+        lock = self.session("L")
+        lock.query("BEGIN; SET LOCAL lock_timeout = '120s'")
+        lock.start(lock_sql)
+        self.poll(f"SELECT pid FROM pg_stat_activity WHERE pid = {lock.pid} AND wait_event_type = 'Lock' "
+                  f"AND {p_c} = ANY(pg_blocking_pids(pid))", "L queued behind P_C", 30)
+        return lock
+
+    def confirmation_waiting(self, holder, lock, timeout=30):
+        """P_R: the product's confirmation read waiting on L (never K or L itself)."""
+        rows = self.poll(f"SELECT pid::text || '|' || query FROM pg_stat_activity WHERE pid NOT IN ({holder.pid}, {lock.pid}, "
+                         f"{self.observer.pid}) AND wait_event_type = 'Lock' AND {lock.pid} = ANY(pg_blocking_pids(pid))",
+                         "the confirmation read waiting on L", timeout)
+        pid, query = rows[0].split("|", 1)
+        self.assertNotIn(int(pid), (holder.pid, lock.pid))
+        return int(pid), query
+
+    def lock_timeout_logged(self, pid, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            log = compose_db_logs(self.since)
+            if re.search(rf"\[{pid}\] ERROR:\s+canceling statement due to lock timeout", log):
+                return True
+            time.sleep(1)
+        self.fail(f"no lock timeout of the confirmation read [{pid}] in the database log")
+
+    def commit_failure_logged(self, pid, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if re.search(rf"\[{pid}\] ERROR:\s+SYN-CD09P commit failure", compose_db_logs(self.since)):
+                return True
+            time.sleep(1)
+        self.fail(f"no commit failure of [{pid}] in the database log")
+
+    def stopped_ledger(self):
+        code, out, err = compose_run_api(f"if [ -f {LEDGER} ]; then cat {LEDGER}; fi", timeout=300)
+        self.assertEqual(code, 0, err)
+        return out.encode()
+
+    def stopped_file(self, path):
+        code, out, err = compose_run_api(f"if [ -f {path} ]; then cat {path}; else echo ABSENT; fi", timeout=300)
+        self.assertEqual(code, 0, err)
+        return out
+
+    def cli(self, process, timeout=600):
+        out, err = process.communicate(timeout=timeout)
+        lines = out.decode(errors="replace").strip().splitlines()
+        return process.returncode, json.loads(lines[-1]) if lines else None, err.decode(errors="replace")[-3000:]
+
+    def held_end(self, user, secret):
+        """An ended work whose payload is still stored (a hold keeps it): the copy a backup takes between end and destruction."""
+        self.assertEqual(self.save(user, secret).status, 200)
+        unit = self.row(user)["workUnit"]
+        record = json.dumps([self.uid, self.stack.actor(user)], separators=(",", ":"))
+        time.sleep(1.1)
+        hold = self.place_hold(record)
+        psql(f"SELECT emr_access.place_hold({sql_text(hold['holdId'])}, {sql_text(record)}, {sql_text(json.dumps(hold))})::text")
+        self.assertEqual(self.discard(user).status, 200)
+        self.assertEqual(self.wait_refusal(unit)["lastRefusal"], "LegalHoldActive")
+        return unit, hold
+
+    def reopen(self):
+        compose_start_api()
+        self.reload_proxy()
+        self.wait_api()
+
+    # ── C3: a new destruction whose confirmation read cannot run ──
+
+    def test_c3a_a_committed_deletion_whose_confirmation_times_out_is_neither_completed_nor_failed_until_judged(self):
+        doctor, secret = "doctor", "SYN-R3-C3a " + uuid.uuid4().hex
+        self.assertEqual(self.save(doctor, secret).status, 200)
+        unit, before = self.row(doctor)["workUnit"], self.anchor()
+        key, holder = self.key_holder()
+        self.t1("ReportDraftPurposeEnd", "DELETE", f'OLD."disposalUnitId" = {sql_text(unit)}', key, fail=False)
+        self.assertEqual(self.discard(doctor).status, 200)
+        p_c = self.commit_waiting(holder)
+        lock = self.queue_behind('SELECT 1 FROM "PurposeLedgerAnchor" WHERE id = 1 FOR UPDATE', p_c)
+        holder.query("COMMIT")
+        lock.answered(30)
+        # L holds the anchor: the deletion committed (durable), its confirmation must wait for L.
+        self.assertEqual(self.ended(unit), None)
+        anchor = self.anchor()
+        self.assertEqual(anchor["lastCompletedUnit"], unit)
+        p_r, query = self.confirmation_waiting(holder, lock)
+        self.assertEqual(self.phases(unit), ["started"], "until the first judgement: started only")
+        self.lock_timeout_logged(p_r)
+        self.assertNotIn("failed", self.phases(unit), "an unknown outcome is never written as failed")
+        # Recovery, while L still holds the anchor: the committed anchor proves the deletion (R1).
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and "completed" not in self.phases(unit):
+            time.sleep(0.5)
+        self.assertEqual(self.phases(unit), ["started", "completed"])
+        completed = [e["record"] for e in self.ledger()[1] if e["record"]["disposalUnitId"] == unit and e["record"]["phase"] == "completed"][0]
+        at = datetime.fromisoformat(anchor["lastCompletedAt"][:19]).replace(tzinfo=timezone.utc)
+        self.assertEqual(completed["day"], (at + timedelta(hours=9)).date().isoformat(), "the commit's own completion time")
+        lock.query("COMMIT")
+        time.sleep(2)
+        self.assertEqual(self.phases(unit), ["started", "completed"])
+        self.assertEqual(int(self.anchor()["seq"]), int(anchor["seq"]))
+        self.assertGreater(int(anchor["seq"]), int(before["seq"]))
+        event("c3a", p_c=p_c, p_r=p_r, confirmation=query[:120], phases=self.phases(unit))
+
+    def test_c3a2_c3db_a_rolled_back_deletion_whose_confirmation_times_out_blocks_other_units_then_fails_once(self):
+        doctor, other = "doctor", "doctor2"
+        secret, kept = "SYN-R3-C3a2 " + uuid.uuid4().hex, "SYN-R3-C3db " + uuid.uuid4().hex
+        self.assertEqual(self.save(doctor, secret).status, 200)
+        self.assertEqual(self.save(other, kept).status, 200)
+        unit, b_unit, before = self.row(doctor)["workUnit"], self.row(other)["workUnit"], self.anchor()
+        key, holder = self.key_holder()
+        drop = self.t1("ReportDraftPurposeEnd", "DELETE", f'OLD."disposalUnitId" = {sql_text(unit)}', key, fail=True)
+        self.assertEqual(self.discard(doctor).status, 200)
+        p_c = self.commit_waiting(holder)
+        lock = self.queue_behind('SELECT 1 FROM "PurposeLedgerAnchor" WHERE id = 1 FOR UPDATE', p_c)
+        holder.query("COMMIT")
+        lock.answered(30)
+        self.commit_failure_logged(p_c)
+        self.assertEqual(self.ended(unit)["findings"], secret, "the deletion rolled back")
+        self.assertEqual((self.anchor()["seq"], self.anchor()["lastCompletedUnit"]), (before["seq"], before["lastCompletedUnit"]))
+        p_r, _ = self.confirmation_waiting(holder, lock)
+        self.lock_timeout_logged(p_r)
+        self.assertEqual(self.phases(unit), ["started"], "unknown: no failed while it cannot be judged")
+        # C3-d(b): B ends now; its destruction does not start while A is unknown.
+        self.assertEqual(self.discard(other).status, 200)
+        refused = self.wait_refusal(b_unit)
+        self.assertEqual(refused["lastRefusal"], "PurposeIntentIncomplete")
+        self.assertEqual((self.phases(b_unit), refused["findings"]), ([], kept))
+        self.assertEqual(self.phases(unit), ["started"])
+        # L released: A is judged not committed -> failed (then its retries fail on the trigger); once the trigger is gone
+        # the sweep destroys A and B, each completed once.
+        lock.query("COMMIT")
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline and "failed" not in self.phases(unit):
+            time.sleep(0.5)
+        self.assertEqual(self.phases(unit)[:2], ["started", "failed"])
+        drop()
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            code, report = self.sweep()
+            if code == 0:
+                break
+            time.sleep(2)
+        self.assertEqual(code, 0, report)
+        self.assertEqual((self.ended(unit), self.ended(b_unit)), (None, None))
+        self.assertEqual(self.phases(unit).count("completed"), 1)
+        self.assertEqual(self.phases(b_unit), ["started", "completed"])
+        event("c3a2_c3db", p_c=p_c, p_r=p_r, a=self.phases(unit), b=self.phases(b_unit))
+
+    # ── C8-b: an end whose commit cannot be confirmed ──
+
+    def test_c8b_an_end_whose_confirmation_times_out_answers_unconfirmed_then_ends_once(self):
+        doctor, secret = "doctor", "SYN-R3-C8b " + uuid.uuid4().hex
+        self.assertEqual(self.save(doctor, secret).status, 200)
+        unit = self.row(doctor)["workUnit"]
+        key, holder = self.key_holder()
+        self.t1("ReportDraftPurposeEnd", "INSERT", f'NEW."disposalUnitId" = {sql_text(unit)}', key, fail=False)
+        answers = []
+        request = threading.Thread(target=lambda: answers.append(self.discard(doctor)))
+        request.start()
+        p_c = self.commit_waiting(holder)
+        lock = self.queue_behind(f'SELECT 1 FROM "StudyState" WHERE uid = {sql_text(self.uid)} FOR UPDATE', p_c)
+        holder.query("COMMIT")
+        lock.answered(30)
+        ended = self.ended(unit)
+        self.assertEqual((ended or {}).get("findings"), secret, "the end committed")
+        self.assertEqual(self.row(doctor)["present"], False)
+        p_r, _ = self.confirmation_waiting(holder, lock)
+        request.join(60)
+        self.assertEqual(len(answers), 1)
+        answer = answers[0]
+        self.assertEqual((answer.status, (answer.body or {}).get("code")), (503, "REPORT_DRAFT_END_UNCONFIRMED"), answer.text)
+        self.assertRegex(json.dumps(answer.body, ensure_ascii=False), "[가-힣]")
+        self.assertNotIn("그대로", json.dumps(answer.body, ensure_ascii=False))
+        self.lock_timeout_logged(p_r)
+        time.sleep(2)
+        self.assertEqual(self.phases(unit), [], "nothing destroyed while the end is unconfirmed")
+        lock.query("COMMIT")
+        self.wait_destroyed(unit, timeout=60)
+        self.assertEqual(self.phases(unit), ["started", "completed"])
+        event("c8b", p_c=p_c, p_r=p_r, answer=answer.status)
+
+    # ── C3-c and C4-d: what the ledger says that this copy cannot settle ──
+
+    def test_c3c_c4d_a_ledger_that_contradicts_the_anchor_or_ends_in_an_unsettled_start_keeps_everything_closed(self):
+        doctor, secret = "doctor", "SYN-R3-C3c " + uuid.uuid4().hex
+        self.assertEqual(self.save(doctor, "SYN-R3-C3c first").status, 200)
+        first = self.row(doctor)["workUnit"]
+        self.assertEqual(self.discard(doctor).status, 200)
+        self.wait_destroyed(first)
+        whole = self.ledger_bytes()
+        lines = whole.decode().splitlines(keepends=True)
+        last = json.loads(lines[-1])
+        self.assertEqual((last["record"]["phase"], int(self.anchor()["seq"])), ("completed", last["seq"]))
+        # C3-c: same length, another meaning at the anchor's position.
+        changed = dict(last, record=dict(last["record"], phase="failed"))
+        damaged = "".join(lines[:-1]).encode() + (json.dumps(changed) + "\n").encode()
+        self.closed_then_reopened("PurposeLedgerAnchorMismatch",
+            lambda: compose_exec("-T", "api", "sh", "-c", f"cat > {LEDGER}", stdin=damaged),
+            lambda: compose_exec("-T", "api", "sh", "-c", f"cat > {LEDGER}", stdin=whole))
+        self.assertEqual(self.ledger_bytes(), whole)
+        # C4-d: A ended (held), and the ledger ends with a started of A that no process can settle.
+        unit, hold = self.held_end(doctor, secret)
+        whole = self.ledger_bytes()
+        header, entries = self.ledger()
+        started = dict(entries[-1]["record"], phase="started", disposalUnitId=unit)
+        line = json.dumps({"kind": "entry", "seq": len(entries) + 1, "ledgerId": header["ledgerId"],
+                           "appendedAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()), "record": started}) + "\n"
+        self.assertNotEqual(self.anchor()["lastCompletedUnit"], unit)
+        self.closed_then_reopened("PurposeIntentIncomplete",
+            lambda: compose_exec("-T", "api", "sh", "-c", f"cat >> {LEDGER}", stdin=line.encode()),
+            lambda: compose_exec("-T", "api", "sh", "-c", f"cat > {LEDGER}", stdin=whole))
+        self.assertEqual(self.ledger_bytes(), whole, "no failed synthesized from this copy")
+        self.assertEqual(self.ended(unit)["findings"], secret)
+        self.release_hold(hold)
+        code, report = self.sweep()
+        self.assertEqual(code, 0, report)
+        self.assertEqual(self.phases(unit), ["started", "completed"])
+        event("c3c_c4d", closed=["PurposeLedgerAnchorMismatch", "PurposeIntentIncomplete"])
+
+    # ── C4: re-application to a restored copy, by the sweep run and by the gate ──
+
+    def test_c4a_c4b_a_restored_ended_copy_whose_reapplication_does_not_commit_is_not_reported_done(self):
+        doctor, secret = "doctor", "SYN-R3-C4a " + uuid.uuid4().hex
+        unit, hold = self.held_end(doctor, secret)
+        self.dump("cd09p-c4a.dump")
+        self.release_hold(hold)
+        code, report = self.sweep()
+        self.assertEqual(code, 0, report)
+        self.assertEqual(self.phases(unit), ["started", "completed"])
+        ledger_after = self.ledger_bytes()
+        compose_stop_api()
+        try:
+            self.restore("cd09p-c4a.dump")
+            self.assertEqual(self.ended(unit)["findings"], secret, "the restored copy holds the destroyed payload")
+            key, holder = self.key_holder()
+            drop = self.t1("ReportDraftPurposeEnd", "DELETE", f'OLD."disposalUnitId" = {sql_text(unit)}', key, fail=True)
+            run = compose_run_api_open(SWEEP_CLI)
+            p_c = self.commit_waiting(holder, timeout=600)
+            holder.query("COMMIT")
+            code, report, err = self.cli(run)
+            self.commit_failure_logged(p_c)
+            self.assertEqual(code, 1, err)
+            self.assertIn({"unit": unit, "outcome": "reapply-not-committed"}, report["results"])
+            self.assertFalse(report["complete"])
+            self.assertEqual(self.ended(unit)["findings"], secret)
+            self.assertEqual(self.stopped_ledger(), ledger_after, "the original completed stands; nothing new is recorded")
+            drop()
+            code, report, err = self.cli(compose_run_api_open(SWEEP_CLI))
+            self.assertEqual(code, 0, err)
+            self.assertIn({"unit": unit, "outcome": "reapplied"}, report["results"])
+            self.assertIsNone(self.ended(unit))
+            event("c4a", p_c=p_c, sweep="reapply-not-committed then reapplied")
+            # C4-b: the gate meets the same failing re-application and stays closed.
+            self.restore("cd09p-c4a.dump")
+            self.assertEqual(self.ended(unit)["findings"], secret)
+            key, holder = self.key_holder()
+            drop = self.t1("ReportDraftPurposeEnd", "DELETE", f'OLD."disposalUnitId" = {sql_text(unit)}', key, fail=True)
+            since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            compose_start_api()
+            p_c = self.commit_waiting(holder, timeout=300)
+            holder.query("COMMIT")
+            self.wait_api(healthy=False, code="PurposeReapplyNotCommitted", since=since)
+            self.assertEqual(self.ended(unit)["findings"], secret)
+            drop()
+            self.restart_api()
+            self.reload_proxy()
+            self.wait_api()
+        finally:
+            compose_start_api()
+            self.reload_proxy()
+        self.wait_api()
+        self.assertIsNone(self.ended(unit))
+        self.assertEqual(self.ledger_bytes(), ledger_after)
+        event("c4b", p_c=p_c, gate="PurposeReapplyNotCommitted then opened")
+
+    def test_c4a2_a_restored_live_copy_is_reapplied_by_the_sweep_run_only_when_it_commits(self):
+        doctor, secret = "doctor", "SYN-R3-C4a2 " + uuid.uuid4().hex
+        self.assertEqual(self.save(doctor, secret).status, 200)
+        unit = self.row(doctor)["workUnit"]
+        self.dump("cd09p-c4a2.dump")
+        self.assertEqual(self.discard(doctor).status, 200)
+        self.wait_destroyed(unit)
+        ledger_after = self.ledger_bytes()
+        compose_stop_api()
+        try:
+            self.restore("cd09p-c4a2.dump")
+            restored = self.row(doctor)
+            self.assertEqual((restored["workUnit"], restored["findings"], self.ended(unit)), (unit, secret, None))
+            key, holder = self.key_holder()
+            drop = self.t1("ReportDraft", "UPDATE", f'OLD."workUnit" = {sql_text(unit)}', key, fail=True)
+            run = compose_run_api_open(SWEEP_CLI)
+            p_c = self.commit_waiting(holder, timeout=600)
+            holder.query("COMMIT")
+            code, report, err = self.cli(run)
+            self.commit_failure_logged(p_c)
+            self.assertEqual(code, 1, err)
+            self.assertIn({"unit": unit, "outcome": "reapply-not-committed"}, report["results"])
+            self.assertEqual(self.row(doctor)["findings"], secret)
+            drop()
+            code, report, err = self.cli(compose_run_api_open(SWEEP_CLI))
+            self.assertEqual(code, 0, err)
+            self.assertIn({"unit": unit, "outcome": "reapplied"}, report["results"])
+            emptied = self.row(doctor)
+            self.assertEqual((emptied["present"], emptied["findings"], emptied["workUnit"], emptied["revision"]),
+                             (False, "", None, restored["revision"] + 1))
+            self.assertEqual(self.stopped_ledger(), ledger_after)
+        finally:
+            compose_start_api()
+            self.reload_proxy()
+        self.wait_api()
+        event("c4a2", p_c=p_c, sweep="reapply-not-committed then reapplied")
+
+    def test_c4e_a_reapplication_whose_confirmation_times_out_is_unconfirmed_for_the_sweep_and_closes_the_gate(self):
+        doctor, secret = "doctor", "SYN-R3-C4e " + uuid.uuid4().hex
+        unit, hold = self.held_end(doctor, secret)
+        self.dump("cd09p-c4e.dump")
+        self.release_hold(hold)
+        code, report = self.sweep()
+        self.assertEqual(code, 0, report)
+        ledger_after = self.ledger_bytes()
+        table = 'LOCK TABLE "ReportDraftPurposeEnd" IN ACCESS EXCLUSIVE MODE'
+        count = f'SELECT count(*) FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = {sql_text(unit)}'
+        compose_stop_api()
+        try:
+            for door in ("sweep", "gate"):
+                self.restore("cd09p-c4e.dump")
+                self.assertEqual(self.ended(unit)["findings"], secret)
+                key, holder = self.key_holder()
+                drop = self.t1("ReportDraftPurposeEnd", "DELETE", f'OLD."disposalUnitId" = {sql_text(unit)}', key, fail=False)
+                since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                if door == "sweep":
+                    run = compose_run_api_open(SWEEP_CLI)
+                else:
+                    compose_start_api()
+                p_c = self.commit_waiting(holder, timeout=600)
+                lock = self.queue_behind(table, p_c)
+                holder.query("COMMIT")
+                lock.answered(30)
+                # Attachment 2: the durable state is read in L's own transaction (any other reader would queue behind L).
+                self.assertEqual(lock.query(count), ["0"], "the re-application committed")
+                p_r, _ = self.confirmation_waiting(holder, lock)
+                self.lock_timeout_logged(p_r)
+                if door == "sweep":
+                    code, report, err = self.cli(run)
+                    self.assertEqual(code, 1, err)
+                    self.assertIn({"unit": unit, "outcome": "reapply-unconfirmed"}, report["results"])
+                else:
+                    self.wait_api(healthy=False, code="PurposeReapplyUnconfirmed", since=since)
+                lock.query("COMMIT")
+                drop()
+                compose_stop_api()
+                self.assertEqual(self.stopped_ledger(), ledger_after, "the original completed stands; nothing new is recorded")
+                event("c4e", door=door, p_c=p_c, p_r=p_r)
+            # Once the read can run, the same database opens (its re-application had committed).
+            self.reopen()
+        finally:
+            compose_start_api()
+            self.reload_proxy()
+        self.wait_api()
+        self.assertIsNone(self.ended(unit))
+        self.assertEqual(self.ledger_bytes(), ledger_after)
+
+    # ── C7: citations inserted through the real API ──
+
+    def test_c7_non_empty_citations_are_held_whole_then_destroyed_with_the_work_and_kept_everywhere_else(self):
+        doctor, colleague, signer = "doctor", "doctor2", "jmryu"
+        # A key image of this study and one finding citing it, both through the product API.
+        found = self.stack._orthanc_request("POST", "/tools/lookup", self.uid.encode())
+        study = next(x["ID"] for x in found.body if x["Type"] == "Study")
+        instance = self.stack._orthanc_request("GET", "/studies/" + study + "/instances").body[0]
+        tags = self.stack._orthanc_request("GET", "/instances/" + instance["ID"] + "/simplified-tags").body
+        key = self.stack.request("POST", self.path("/viewer-items"), doctor, {"requestId": str(uuid.uuid4()), "item": {
+            "schemaVersion": 1, "kind": "key", "seriesUid": tags["SeriesInstanceUID"], "sopUid": tags["SOPInstanceUID"], "frame": 1,
+            "title": "SYN key", "description": ""}})
+        self.assertEqual(key.status, 200, key.text)
+        finding = self.stack.request("POST", self.path("/findings"), doctor, {"requestId": str(uuid.uuid4()), "item": {
+            "schemaVersion": 1, "title": "SYN-R3-C7 finding", "text": "SYN cited text " + uuid.uuid4().hex, "primary": 0,
+            "sources": [{"itemId": key.body["id"], "revision": key.body["revision"]}]}})
+        self.assertEqual(finding.status, 200, finding.text)
+        block = finding.body["item"]["title"] + "\n" + finding.body["item"]["text"]
+
+        def cite(user, text):
+            body = {"findings": text + "\n" + block, "conclusion": "SYN conclusion", "recommendation": "", "baseVersion": 0,
+                    "citationIds": [], "structureIds": [], "insert": {
+                        "field": "findings", "findingId": finding.body["id"], "findingRevision": 1, "sourceIndex": 0,
+                        "insertedText": block, "expectedLinkState": "current", "expectedHeadRevision": key.body["revision"]}}
+            result = self.stack.request("PUT", self.path("/report"), user, body)
+            self.assertEqual(result.status, 200, result.text)
+            return result.body["inserted"]["cid"]
+
+        secret = "SYN-R3-C7 private " + uuid.uuid4().hex
+        mine, theirs = cite(doctor, secret), cite(colleague, "SYN-R3-C7 colleague")
+        signed_cid = cite(signer, "SYN-R3-C7 signed")
+        approved = self.stack.request("POST", self.path("/report/commit"), signer, {
+            "action": "approve", "baseVersion": 0, "findings": "SYN-R3-C7 signed\n" + block, "conclusion": "SYN conclusion",
+            "recommendation": "", "citationIds": [signed_cid]})
+        self.assertEqual(approved.status, 201, approved.text)
+        # ① the citation is readable as the author's ② both drafts carry one ③ the signed version carries one.
+        self.assertEqual([c["cid"] for c in self.citations(doctor)["draft"]], [mine])
+        stored = {u: psql(f'SELECT citations::text FROM "ReportDraft" WHERE uid={sql_text(self.uid)} AND author={sql_text(self.stack.actor(u))}')
+                  for u in (doctor, colleague)}
+        self.assertIn(mine, stored[doctor][0]); self.assertIn(theirs, stored[colleague][0])
+        head = self.citations(signer)["head"]
+        self.assertEqual([c["cid"] for c in head], [signed_cid])
+        unit = self.row(doctor)["workUnit"]
+        record = json.dumps([self.uid, self.stack.actor(doctor)], separators=(",", ":"))
+        time.sleep(1.1)
+        hold = self.place_hold(record)
+        psql(f"SELECT emr_access.place_hold({sql_text(hold['holdId'])}, {sql_text(record)}, {sql_text(json.dumps(hold))})::text")
+        discarded = self.discard(doctor)
+        self.assertEqual(discarded.status, 200, discarded.text)
+        held = self.wait_refusal(unit)
+        self.assertEqual(held["lastRefusal"], "LegalHoldActive")
+        # ④ the ended row holds the exact citations while the hold lasts; the ledger has nothing of the unit.
+        self.assertEqual(psql(f'SELECT citations::text FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId"={sql_text(unit)}'), stored[doctor])
+        self.assertEqual(self.phases(unit), [])
+        self.release_hold(hold)
+        code, report = self.sweep()
+        self.assertEqual(code, 0, report)
+        self.assertIsNone(self.ended(unit))
+        self.assertEqual(self.phases(unit), ["started", "completed"])
+        row = self.row(doctor)
+        self.assertEqual((row["present"], row["revision"]), (False, int(discarded.body["revision"].rsplit(":", 1)[1])))
+        self.assertEqual(psql(f'SELECT citations IS NULL FROM "ReportDraft" WHERE uid={sql_text(self.uid)} AND author={sql_text(self.stack.actor(doctor))}'), ["t"])
+        self.assertEqual(psql(f'SELECT citations::text FROM "ReportDraft" WHERE uid={sql_text(self.uid)} AND author={sql_text(self.stack.actor(colleague))}'),
+                         stored[colleague])
+        self.assertEqual(self.citations(signer)["head"], head)
+        self.assert_ledger_names_nothing(mine, secret, block, finding.body["id"])
+        event("c7", held_citations=True, destroyed=True, colleague_kept=True, signed_kept=True)
+
+    def citations(self, user):
+        result = self.stack.request("GET", self.path("/report/citations"), user)
+        self.assertEqual(result.status, 200, result.text)
+        return result.body
+
+    # ── C5: the first start, and the copies the product can tell apart ──
+
+    def test_c5_a_prepared_first_start_opens_once_and_every_distinguishable_copy_stays_closed(self):
+        doctor, legacy = "doctor", "doctor2"
+        self.assertEqual(self.save(legacy, "SYN-R3-C5 legacy draft").status, 200)
+        self.dump("cd09p-c5-original.dump")
+        original_ledger = self.ledger_bytes()
+        compose_exec("-T", "api", "sh", "-c", f"mv {LEDGER} {LEDGER}.c5saved; rm -f {ADOPTION}")
+        compose_stop_api()
+
+        def directory(ledger=None, adoption=None):
+            """The ledger directory's two files set exactly (absent when None); bytes travel base64-encoded."""
+            script = f"rm -f {LEDGER} {ADOPTION}"
+            for path, content in ((LEDGER, ledger), (ADOPTION, adoption)):
+                if content is not None:
+                    data = content if isinstance(content, bytes) else content.encode()
+                    script += f"; echo {base64.b64encode(data).decode()} | base64 -d > {path}"
+            code, _, err = compose_run_api(script, timeout=300)
+            self.assertEqual(code, 0, err)
+
+        def closed(code_name):
+            since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            compose_start_api()
+            self.wait_api(healthy=False, code=code_name, since=since)
+            compose_stop_api()
+
+        try:
+            # Common preparation: the legacy shape (before the P migration), an empty ledger directory, the preparation,
+            # then the stack's own migration.
+            psql('BEGIN; DROP TABLE "ReportDraftPurposeEnd"; DROP TABLE "PurposeLedgerAnchor"; '
+                 'ALTER TABLE "ReportDraft" DROP COLUMN "workUnit", DROP COLUMN "workSince", DROP COLUMN "workIntent"; '
+                 "DELETE FROM _prisma_migrations WHERE migration_name = '20261103150000_cd09p_draft_purpose'; COMMIT")
+            self.dump("cd09p-c5-legacy.dump")
+            directory()
+            code, out, err = compose_run_api(PREPARE_CLI)
+            self.assertEqual((code, json.loads(out.strip().splitlines()[-1])), (0, {"prepared": True, "state": "prepared"}), err)
+            prepared = self.stopped_file(ADOPTION)
+            compose_migrate()
+            # S0
+            self.assertEqual(json.loads(prepared)["state"], "prepared")
+            self.assertEqual(self.stopped_ledger(), b"")
+            self.assertEqual((self.anchor()["initialized"], int(self.anchor()["seq"])), (False, 0))
+            self.assertEqual(psql(f'SELECT count(*) FROM "ReportDraft" WHERE uid={sql_text(self.uid)} AND "workUnit" IS NOT NULL'), ["1"])
+            self.dump("cd09p-c5-d0.dump")
+            # C5-5 P4: the preparation after the migration refuses and writes nothing.
+            code, out, err = compose_run_api(PREPARE_CLI)
+            self.assertEqual((code, json.loads(out.strip().splitlines()[-1])["error"]), (1, "PurposeAdoptionExists"), err)
+            directory(adoption=None)
+            code, out, err = compose_run_api(PREPARE_CLI)
+            self.assertEqual((code, json.loads(out.strip().splitlines()[-1])["error"]), (1, "PurposeAdoptionAfterMigration"), err)
+            self.assertEqual(self.stopped_file(ADOPTION).strip(), "ABSENT")
+            directory(adoption=prepared)
+            # C5-2 (I2): the first start consumes it - S1.
+            self.reopen()
+            anchor = self.anchor()
+            adoption = json.loads(compose_exec("-T", "api", "cat", ADOPTION).stdout)
+            self.assertEqual((adoption["state"], adoption["ledgerId"]), ("consumed", anchor["ledgerId"]))
+            self.assertEqual((self.ledger()[0]["ledgerId"], anchor["initialized"]), (anchor["ledgerId"], True))
+            self.assertEqual(self.row(legacy)["findings"], "SYN-R3-C5 legacy draft")
+            consumed = compose_exec("-T", "api", "cat", ADOPTION).stdout.decode()
+            # S2: a normal end and destruction.
+            self.assertEqual(self.save(doctor, "SYN-R3-C5 after").status, 200)
+            unit = self.row(doctor)["workUnit"]
+            self.assertEqual(self.discard(doctor).status, 200)
+            self.wait_destroyed(unit)
+            latest = self.ledger_bytes()
+            compose_stop_api()
+            self.dump("cd09p-c5-s2.dump")
+            event("c5_2", adopted=True)
+            # C5-3 (I3): no ledger, no adoption, D0 -> closed, nothing created; C5-6: the sweep run refuses too.
+            directory()
+            self.restore("cd09p-c5-d0.dump")
+            closed("PurposeLedgerInitializationRequired")
+            code, report, err = self.cli(compose_run_api_open(SWEEP_CLI))
+            self.assertEqual((code, report), (1, {"ran": False, "error": "PurposeLedgerInitializationRequired"}), err)
+            self.assertEqual(self.stopped_ledger(), b"")
+            self.assertEqual(self.row(legacy)["findings"], "SYN-R3-C5 legacy draft")
+            # C5-4 (I4): the consumed adoption without its ledger beside D0 -> missing.
+            directory(adoption=consumed)
+            closed("PurposeLedgerMissing")
+            # C5-8 (I5): the current database beside the directory as it was before the first start (prepared only).
+            self.restore("cd09p-c5-s2.dump")
+            directory(adoption=prepared)
+            closed("PurposeLedgerMissing")
+            self.assertEqual(json.loads(self.stopped_file(ADOPTION))["state"], "prepared", "not consumed")
+            # C5-4b (I6, attachment 1): the pre-migration shape migrated again beside the latest ledger: another ledger ID.
+            directory(ledger=latest, adoption=consumed)
+            self.restore("cd09p-c5-legacy.dump")
+            compose_migrate()
+            self.assertNotEqual(self.anchor()["ledgerId"], json.loads(latest.decode().splitlines()[0])["ledgerId"])
+            closed("PurposeLedgerMismatch")
+            self.assertEqual(self.stopped_ledger(), latest)
+            self.assertEqual(self.row(legacy)["findings"], "SYN-R3-C5 legacy draft")
+            # The same-ID input (D0 beside the latest ledger) is not I6: the gate matches it, re-applies what it holds of
+            # the completed units (nothing: U was created after D0) and opens.
+            self.restore("cd09p-c5-d0.dump")
+            self.reopen()
+            self.assertEqual(self.ledger_bytes(), latest)
+            self.assertEqual(self.row(legacy)["findings"], "SYN-R3-C5 legacy draft")
+            compose_stop_api()
+            event("c5", closed=["PurposeLedgerInitializationRequired", "PurposeLedgerMissing", "PurposeLedgerMissing", "PurposeLedgerMismatch"])
+        finally:
+            compose_stop_api()
+            self.restore("cd09p-c5-original.dump")
+            compose_run_api(f"rm -f {ADOPTION} {LEDGER}; if [ -f {LEDGER}.c5saved ]; then mv {LEDGER}.c5saved {LEDGER}; fi", timeout=300)
+            self.reopen()
+        self.assertEqual(self.ledger_bytes(), original_ledger)
+
+
+def load_tests(loader, tests, pattern):
+    suite = loader.loadTestsFromTestCase(DraftPurposeServed)
+    # The r3 class reuses the fixture's helpers; only its own cases run under it.
+    suite.addTests(DraftPurposeCommitJudgement(name) for name in sorted(vars(DraftPurposeCommitJudgement))
+                   if name.startswith("test_"))
+    return suite
 
 
 if __name__ == "__main__":

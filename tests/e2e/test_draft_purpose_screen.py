@@ -269,8 +269,224 @@ class DraftPurposeScreen(worklist.WorklistE2E):
         self.shot(page, "s4-after-explicit-insert")
 
 
+class DraftPurposeScreenR3(DraftPurposeScreen):
+    """CD-09-P r3 on the real HTTPS entry (consult-cd09p-r3-precheck-report.md C9-C11; review attachment 3).
+
+    Interception only keeps or loses a real answer: `route.fetch()` sends the request to the server and the case then
+    either delivers that real answer later or drops it (abort), so the server has acted and only the page did not hear.
+    Each case checks that the branch happened (the request reached the server, the page saw the loss, the state it
+    shows) before it asserts the product's outcome.
+    """
+
+    def click_row(self, page, fixture):
+        """The person's click on a study row, without requiring that the page moved (the leave gate may keep it)."""
+        page.locator('#filterrow [data-f="id"]').fill(fixture.patient_id)
+        row = page.locator(f'#rows tr[data-uid="{fixture.uid}"]')
+        expect(row).to_be_visible()
+        row.click()
+
+    def requests_of(self, page, fixture):
+        seen = []
+        page.on("request", lambda r: seen.append((time.monotonic(), r.method, urlsplit(r.url).path, r.post_data or ""))
+                if f"/{fixture.uid}/" in r.url and r.method in ("GET", "PUT", "DELETE") else None)
+        return seen
+
+    def test_c10a_a_write_with_only_a_replaced_epoch_is_refused_and_writes_nothing_without_a_choice(self):
+        fixture = self.fixture()
+        secret = "SYN-C10a " + uuid.uuid4().hex
+        page = self.open_main(self.profile("doctor"))
+        self.select(page, fixture)
+        self.type_and_save(page, fixture, secret)
+        with page.expect_response(lambda r: r.request.method == "DELETE" and r.url.endswith(f"/{fixture.uid}/draft")) as gone:
+            page.locator("#b-draft-discard").click()
+        self.assertEqual(gone.value.status, 200, gone.value.text())
+        self.wait_no_ended_rows(fixture)
+        old_epoch, revision = self.server_draft(fixture)["revision"].split(":")
+        versions = psql(f'SELECT count(*) FROM "ReportVersion" WHERE uid={sql_text(fixture.uid)}')
+        # The administrator's forced release with no draft to keep: only the epoch changes.
+        forced = self.stack.request("DELETE", f"/studies/{quote(fixture.uid)}/draft/force", "jmryu", {})
+        self.assertEqual((forced.status, forced.body.get("count")), (200, 0), forced.text)
+        new_epoch, new_revision = self.server_draft(fixture)["revision"].split(":")
+        self.assertNotEqual(new_epoch, old_epoch)
+        self.assertEqual(new_revision, revision, "the revision did not move: only the epoch is stale")
+        puts = []
+        page.on("response", lambda r: puts.append((r.status, (r.request.post_data_json or {}).get("expectedRevision")))
+                if r.request.method == "PUT" and r.url.endswith(f"/{fixture.uid}/report") else None)
+        typed = "SYN-C10a new " + uuid.uuid4().hex
+        page.locator("#findings").fill(typed)
+        expect(page.locator("#draftmsg")).to_contain_text("서버의 초안이 이 화면과 다릅니다", timeout=35000)
+        expect(page.locator("#b-draft-keep")).to_have_text("Keep This Text")
+        expect(page.locator("#b-draft-load")).to_have_text("Load Server Draft")
+        self.assertIn((409, f"{old_epoch}:{revision}"), puts, puts)
+        self.assertFalse([p for p in puts if p[0] == 200], puts)
+        page.wait_for_timeout(3000)
+        server = self.server_draft(fixture)
+        self.assertEqual((server["present"], server["snapshot"]), (False, None))
+        self.assertEqual(psql(f'SELECT count(*) FROM "ReportVersion" WHERE uid={sql_text(fixture.uid)}'), versions)
+        self.shot(page, "c10a-epoch-conflict")
+        # The explicit choice: load the server's state, then a new work under the new epoch.
+        page.locator("#b-draft-load").click()
+        expect(page.locator("#findings")).not_to_have_value(typed)
+        self.type_and_save(page, fixture, "SYN-C10a after load")
+        self.assertTrue(any(p[0] == 200 and str(p[1]).startswith(new_epoch + ":") for p in puts), puts)
+        self.assertTrue(self.work_unit(fixture).startswith("disposal:"))
+        self.shot(page, "c10a-new-work-after-load")
+
+    def test_c11_an_end_the_server_cannot_confirm_is_re_read_and_explained_in_korean(self):
+        import test_draft_purpose as served
+        fixture = self.fixture()
+        secret = "SYN-C11 " + uuid.uuid4().hex
+        page = self.open_main(self.profile("doctor"))
+        self.select(page, fixture)
+        self.type_and_save(page, fixture, secret)
+        unit = self.work_unit(fixture)
+        seen = self.requests_of(page, fixture)
+        observer, holder = served.Session("O"), served.Session("K")
+        lock = None
+        self.addCleanup(observer.close)
+        self.addCleanup(holder.close)
+        key = 0x4b0000 + int(uuid.uuid4().hex[:4], 16)
+        holder.query(f"BEGIN; SELECT pg_advisory_xact_lock({key})")
+        psql("CREATE OR REPLACE FUNCTION public.cd09p_t1() RETURNS trigger LANGUAGE plpgsql AS "
+             f"$$BEGIN IF NEW.\"disposalUnitId\" = {sql_text(unit)} THEN PERFORM pg_advisory_xact_lock({key}); END IF; RETURN NULL; END$$")
+        psql('CREATE CONSTRAINT TRIGGER cd09p_t1 AFTER INSERT ON "ReportDraftPurposeEnd" DEFERRABLE INITIALLY DEFERRED '
+             "FOR EACH ROW EXECUTE FUNCTION public.cd09p_t1()")
+        self.addCleanup(lambda: psql('DROP TRIGGER IF EXISTS cd09p_t1 ON "ReportDraftPurposeEnd"'))
+
+        def poll(sql, what, timeout=30):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                rows = [r for r in observer.query(sql) if r]
+                if rows:
+                    return rows
+                time.sleep(0.05)
+            self.fail("not observed: " + what)
+        with page.expect_response(lambda r: r.request.method == "DELETE" and r.url.endswith(f"/{fixture.uid}/draft"),
+                                  timeout=90000) as gone:
+            page.locator("#b-draft-discard").click()
+            p_c = int(poll("SELECT pid FROM pg_stat_activity WHERE query = 'COMMIT' AND wait_event_type = 'Lock' "
+                           f"AND {holder.pid} = ANY(pg_blocking_pids(pid))", "the end's COMMIT waiting on K")[0])
+            lock = served.Session("L")
+            self.addCleanup(lock.close)
+            lock.query("BEGIN; SET LOCAL lock_timeout = '120s'")
+            lock.start(f'SELECT 1 FROM "StudyState" WHERE uid = {sql_text(fixture.uid)} FOR UPDATE')
+            poll(f"SELECT pid FROM pg_stat_activity WHERE pid = {lock.pid} AND {p_c} = ANY(pg_blocking_pids(pid))", "L behind P_C")
+            holder.query("COMMIT")
+            lock.answered(30)
+            p_r = int(poll(f"SELECT pid FROM pg_stat_activity WHERE pid NOT IN ({holder.pid}, {lock.pid}, {observer.pid}) "
+                           f"AND {lock.pid} = ANY(pg_blocking_pids(pid))", "the confirmation read waiting on L")[0])
+        answered_at = time.monotonic()
+        self.assertEqual(gone.value.status, 503, gone.value.text())
+        self.assertEqual(gone.value.json().get("code"), "REPORT_DRAFT_END_UNCONFIRMED")
+        self.assertNotEqual(p_r, p_c)
+        # The page treats it as an unknown result: it re-reads the server's draft after that answer.
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not [s for s in seen if s[0] > answered_at and s[1] == "GET" and s[2].endswith("/draft")]:
+            page.wait_for_timeout(200)
+        self.assertTrue([s for s in seen if s[0] > answered_at and s[1] == "GET" and s[2].endswith("/draft")], seen[-5:])
+        expect(page.locator("#toast")).to_contain_text("버렸습니다", timeout=20000)
+        self.assertRegex(page.locator("#toast").inner_text(), "[가-힣]")
+        expect(page.locator("#findings")).not_to_have_value(secret)
+        expect(page.locator("#b-draft-discard")).to_have_text("Discard Draft")
+        self.shot(page, "c11-unconfirmed-end-re-read")
+        lock.query("COMMIT")
+        self.wait_no_ended_rows(fixture)
+        self.assertEqual(self.server_draft(fixture)["present"], False)
+        print("CD09P-SCREEN " + json.dumps({"c11": {"p_c": p_c, "p_r": p_r, "answer": 503}}), flush=True)
+
+    def test_c9_an_old_answer_of_a_kept_before_its_end_is_delivered_after_a_new_a_and_changes_nothing(self):
+        a, b = self.fixture(), self.fixture()
+        secret, text_b = "SYN-C9-A " + uuid.uuid4().hex, "SYN-C9-B " + uuid.uuid4().hex
+        saved = self.stack.request("PUT", f"/studies/{quote(b.uid)}/report", "doctor",
+                                   {"findings": text_b, "conclusion": "", "recommendation": "", "baseVersion": 0})
+        self.assertEqual(saved.status, 200, saved.text)
+        page = self.open_main(self.profile("doctor"))
+        self.select(page, a)
+        self.type_and_save(page, a, secret)
+        draft_path, report_path = f"/api/studies/{a.uid}/draft", f"/api/studies/{a.uid}/report"
+        state = {"phase": "leave"}
+        kept, log, puts = [], [], []
+
+        def control(route):
+            request = route.request
+            path, method, phase = urlsplit(request.url).path, request.method, state["phase"]
+            log.append((phase, method, path))
+            if method == "PUT":
+                puts.append((phase, request.post_data or ""))
+            if phase == "leave" and (method == "PUT" and path == report_path or method == "GET" and path == draft_path):
+                route.fetch(); route.abort(); return               # the server acted; the page never hears
+            if phase == "check" and method == "GET" and path == draft_path:
+                kept.append((route, route.fetch())); return         # the old A answer, kept
+            if phase == "discard" and method == "DELETE" and path == draft_path:
+                state["phase"] = "lost-discard"
+                route.fetch(); route.abort(); return
+            if phase == "lost-discard" and method == "GET" and path == draft_path:
+                route.fetch(); route.abort(); return
+            if phase == "away" and method == "GET" and path == draft_path:
+                route.abort(); return                                # an early learn read is ended, not applied
+            route.continue_()
+        page.route(lambda url: urlsplit(url).path in (draft_path, report_path), control)
+        # ① saved ② one more line, then B: the leave gate's save of A reaches the server, its answer and checks are lost.
+        page.locator("#findings").fill(secret + "\nSYN-C9 more")
+        self.click_row(page, b)
+        expect(page.locator("#report-notice-check")).to_be_visible(timeout=30000)
+        expect(page.locator("#report-notice-msg")).to_contain_text("Result Unknown")
+        self.assertTrue([e for e in log if e[0] == "leave" and e[1] == "PUT"], log)
+        # ③ Check: its read of A is sent and its real answer kept.
+        state["phase"] = "check"
+        page.locator("#report-notice-check").click()
+        deadline = time.monotonic() + 20
+        while not kept and time.monotonic() < deadline:
+            page.wait_for_timeout(100)
+        self.assertTrue(kept, "the Check read of A was not sent")
+        old = kept[0][1]
+        old_body = json.loads(old.body().decode("utf-8"))
+        self.assertEqual((old.status, old_body.get("uid")), (200, a.uid))
+        self.assertIn(secret, json.dumps(old_body))
+        # ④ Discard Draft on A: its settle read passes, the DELETE reaches the server and its answer is lost.
+        state["phase"] = "discard"
+        expect(page.locator("#b-draft-discard")).to_be_enabled(timeout=10000)
+        page.locator("#b-draft-discard").click()
+        deadline = time.monotonic() + 30
+        while state["phase"] != "lost-discard" and time.monotonic() < deadline:
+            page.wait_for_timeout(100)
+        self.assertEqual(state["phase"], "lost-discard", "the DELETE was not sent")
+        page.wait_for_timeout(5000)
+        # ⑤ the server ended and destroyed A's work.
+        self.wait_no_ended_rows(a)
+        self.assertEqual(self.server_draft(a)["present"], False)
+        # ⑥ B, then A again; only after A is selected again may the new read of A pass.
+        state["phase"] = "away"
+        self.click_row(page, b)
+        expect(page.locator("#findings")).to_have_value(text_b)
+        self.select(page, a)
+        state["phase"] = "learn"
+        selected_at = len(log)
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline and not [e for e in log[selected_at:] if e[1] == "GET" and e[2] == draft_path]:
+            page.wait_for_timeout(200)
+        self.assertTrue([e for e in log[selected_at:] if e[1] == "GET" and e[2] == draft_path], "no new read of A after it was selected again")
+        expect(page.locator("#findings")).not_to_have_value(secret + "\nSYN-C9 more", timeout=20000)
+        self.assertNotIn(secret, page.locator("#findings").input_value())
+        # ⑦ the old answer is delivered now.
+        route, response = kept[0]
+        route.fulfill(response=response)
+        page.wait_for_timeout(3000)
+        self.assertNotIn(secret, page.locator("#findings").input_value())
+        self.assertFalse([p for p in puts if p[0] in ("away", "learn") and secret in p[1]], "a write carried the ended text")
+        self.assertEqual(self.server_draft(a)["present"], False)
+        self.shot(page, "c9-old-answer-after-new-a")
+        # ⑧ NEW-A is a new work.
+        self.type_and_save(page, a, "SYN-C9 NEW-A")
+        self.assertEqual(self.server_draft(a)["snapshot"]["findings"], "SYN-C9 NEW-A")
+        self.assertEqual(self.server_draft(b)["snapshot"]["findings"], text_b)
+
+
 def load_tests(loader, tests, pattern):
-    return loader.loadTestsFromTestCase(DraftPurposeScreen)
+    suite = loader.loadTestsFromTestCase(DraftPurposeScreen)
+    # The r3 class reuses the screen helpers; only its own cases run under it.
+    suite.addTests(DraftPurposeScreenR3(name) for name in sorted(vars(DraftPurposeScreenR3)) if name.startswith("test_"))
+    return suite
 
 
 if __name__ == "__main__":

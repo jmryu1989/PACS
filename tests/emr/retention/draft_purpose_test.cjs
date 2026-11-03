@@ -171,10 +171,14 @@ const sample = (patch = {}) => ({ formatVersion: 1, phase: 'started', day: '2026
   partCount: 1, expiryDay: '2026-11-01', extensionUsed: false, dueDay: '2026-11-06', timeliness: 'within-five-days',
   method: 'irreversible-permanent-deletion', basis: 'privacy-act-21-and-decree-16-1-1', ...patch });
 
-test('P09 the ledger is created by its first append with the database\'s ledger ID and reads back in order', () => {
+test('P09 the ledger is created only as its header with the database\'s ledger ID, never by an append, and reads back in order', () => {
   const dir = ledgerDir(), ledger = new P.PurposeLedgerFile(dir), id = randomUUID();
   assert.equal(ledger.read(), null);
   const a = sample(), b = sample({ phase: 'completed', disposalUnitId: a.disposalUnitId });
+  // r3 C5: a missing ledger is the gate's question (lost, or never initialized); an append never answers it with a header.
+  assert.throws(() => ledger.append(id, a), e => e.code === 'PurposeLedgerMissing');
+  assert.equal(ledger.read(), null, 'the refused append wrote nothing');
+  ledger.create(id);
   assert.equal(ledger.append(id, a).seq, 1);
   assert.equal(ledger.append(id, b).seq, 2);
   const view = ledger.read();
@@ -186,6 +190,7 @@ test('P09 the ledger is created by its first append with the database\'s ledger 
 
 test('P10 a record carrying anything but the destruction facts is refused before it is written', () => {
   const dir = ledgerDir(), ledger = new P.PurposeLedgerFile(dir), id = randomUUID();
+  ledger.create(id);
   ledger.append(id, sample());
   const before = fs.readFileSync(ledger.file);
   for (const bad of [{ ...sample(), uid: UID }, { ...sample(), disposalUnitId: UID }, { ...sample(), phase: 'reapplied' }])
@@ -202,7 +207,7 @@ test('P11 a partial last line, an edited line or a renumbered line makes the led
   ];
   for (const damage of cases) {
     const ledger = new P.PurposeLedgerFile(ledgerDir());
-    ledger.append(id, sample()); ledger.append(id, sample());
+    ledger.create(id); ledger.append(id, sample()); ledger.append(id, sample());
     damage(ledger.file);
     assert.throws(() => ledger.read(), e => /^PurposeLedger/.test(e.code));
     assert.throws(() => ledger.append(id, sample()), e => /^PurposeLedger/.test(e.code));
@@ -278,8 +283,25 @@ function database(state) {
   const sql = strings => strings.join('?').replace(/\s+/g, ' ');
   const view = s => ({ ...s.anchor });
   function handle(text, values, writes, mode) {
+    if (state.dbDown) throw Object.assign(new Error('SYN database unreachable'), { code: 'P1001' });
+    // r3: the confirmation read opens its own bounded transaction. `confirmFails` makes that read time out (the lock
+    // it waits on is held elsewhere) without touching anything the attempt itself did.
+    if (/^SET LOCAL lock_timeout/.test(text)) {
+      state.log.push('confirm');
+      if (state.confirmFails > 0) { state.confirmFails--; throw Object.assign(new Error('SYN lock timeout'), { code: 'P2010', meta: { code: '55P03' } }); }
+      return 0;
+    }
     if (/pg_advisory_xact_lock/.test(text)) { state.log.push(/hashtextextended/.test(text) ? 'hold-lock' : 'ledger-lock'); return mode === 'q' ? [] : 0; }
-    if (/AS any/.test(text)) return [{ any: state.works }];
+    if (/to_regclass/.test(text)) return [{ anchor: state.migrated ? 'PurposeLedgerAnchor' : null, ended: state.migrated ? 'ReportDraftPurposeEnd' : null }];
+    if (/FROM "StudyState" WHERE uid = \? FOR UPDATE/.test(text)) return [{ uid: values[0] }];
+    if (/AS "left"/.test(text))
+      return [{ left: [...state.ended.keys(), ...state.live.keys()].filter(unit => values[0].includes(unit)).length }];
+    if (/= ANY\(/.test(text) && /FROM "ReportDraftPurposeEnd"/.test(text))
+      return [...state.ended.keys()].filter(u => values[0].includes(u)).map(u => ({ disposalUnitId: u }));
+    if (/= ANY\(/.test(text) && /FROM "ReportDraft"/.test(text))
+      return [...state.live.keys()].filter(u => values[0].includes(u)).map(u => ({ workUnit: u }));
+    if (/FROM "ReportDraft" WHERE "workUnit" = \?/.test(text) && /^SELECT/.test(text)) return [{ n: state.live.has(values[0]) ? 1 : 0 }];
+    if (/AS any/.test(text)) return [{ any: state.works || state.live.size > 0 || state.ended.size > 0 }];
     if (/AS "left"/.test(text)) return [{ left: [...state.ended.keys()].filter(unit => values[0].includes(unit)).length }];
     if (/FROM "PurposeLedgerAnchor"/.test(text) && /^SELECT initialized/.test(text)) return [{ initialized: state.anchor.initialized }];
     if (/FROM "PurposeLedgerAnchor"/.test(text)) return [view(state)];
@@ -302,7 +324,10 @@ function database(state) {
     }
     if (/^UPDATE "ReportDraftPurposeEnd" SET "deliverySettled" = true WHERE NOT/.test(text)) { writes.push(s => s.ended.forEach(r => { r.deliverySettled = true; })); return 0; }
     if (/^UPDATE "ReportDraftPurposeEnd" SET attempts/.test(text)) { writes.push(s => { const r = s.ended.get(values[2] ?? values[1]); if (r) r.attempts++; }); return 1; }
-    if (/^UPDATE "ReportDraft" SET present = false/.test(text)) return 0;
+    if (/^UPDATE "ReportDraft" SET present = false/.test(text)) {
+      // A live copy's row of that work (state.live): emptied by the re-application.
+      const n = state.live.has(values[0]) ? 1 : 0; writes.push(s => s.live.delete(values[0])); return n;
+    }
     throw new Error('unexpected statement: ' + text);
   }
   const client = writes => ({
@@ -317,6 +342,8 @@ function database(state) {
       // What the served stack showed: COMMIT failed in PostgreSQL and the client still saw a resolved transaction.
       if (writes.length && state.silentCommitFails > 0) { state.silentCommitFails--; return result; }
       writes.forEach(w => w(state));
+      // r3: the COMMIT took effect and its answer was lost (the client sees an error for a committed transaction).
+      if (writes.length && state.rejectAfterCommit > 0) { state.rejectAfterCommit--; throw Object.assign(new Error('SYN answer lost after COMMIT'), { code: 'P1017' }); }
       return result;
     },
   };
@@ -331,7 +358,8 @@ function database(state) {
 }
 function stateWith(rows, anchor = {}) {
   return { anchor: { ledgerId: randomUUID(), seq: 0, initialized: true, lastCompletedUnit: null, lastCompletedAt: null, ...anchor },
-    ended: new Map(rows.map(r => [r.disposalUnitId, r])), works: true, log: [], commitFails: 0, silentCommitFails: 0, settleFails: 0 };
+    ended: new Map(rows.map(r => [r.disposalUnitId, r])), works: true, log: [], commitFails: 0, silentCommitFails: 0, settleFails: 0,
+    live: new Map(), confirmFails: 0, rejectAfterCommit: 0, migrated: true, dbDown: false };
 }
 const NOW = () => new Date('2026-11-01T02:00:00.000Z');
 /** A ledger file holding only its header for this database (the file format is the contract; written here directly). */
@@ -393,13 +421,16 @@ test('P16 F4: a copy that ever handed out a work never opens without its ledger,
   const fresh = stateWith([], { initialized: false }); fresh.works = false;
   assert.deepEqual(await new P.DraftPurposeDisposal(database(fresh), missing, null, NOW).openGate(), { reapplied: 0, units: 0, resolved: 0 });
   assert.equal(missing.read(), null); assert.equal(fresh.anchor.initialized, false);
-  // A copy whose drafts the migration numbered gets its ledger before it opens, and is initialized from then on.
+  // r3 C5 (R2-03): a copy whose drafts the migration numbered, with no ledger and no prepared adoption, is the same input
+  // as a pre-first-start copy restored after destructions: it stays closed and nothing is created for it.
   const numbered = stateWith([], { initialized: false });
-  await new P.DraftPurposeDisposal(database(numbered), missing, null, NOW).openGate();
-  assert.equal(missing.read().ledgerId, numbered.anchor.ledgerId);
-  assert.equal(numbered.anchor.initialized, true);
+  await assert.rejects(new P.DraftPurposeDisposal(database(numbered), missing, null, NOW).openGate(),
+    e => e.code === 'PurposeLedgerInitializationRequired');
+  assert.equal(missing.read(), null);
+  assert.equal(numbered.anchor.initialized, false);
   // The first work handed out through the server writes the ledger first, then the database's flag (same transaction).
   const first = stateWith([], { initialized: false }), firstLedger = new P.PurposeLedgerFile(path.join(ledgerDir(), 'first'));
+  first.works = false;
   const db = database(first);
   await db.$transaction(tx => new P.DraftPurposeDisposal(db, firstLedger, null, NOW).ensureLedger(tx));
   assert.equal(firstLedger.read().ledgerId, first.anchor.ledgerId);
@@ -429,3 +460,400 @@ test('P17 F5: the sweep run reports a work whose delivery is not settled and is 
   assert.ok(errors.some(e => /retry 1/.test(e)), errors.join('\n'));
   assert.deepEqual(ledger.read().entries.map(e => e.record.phase), ['started', 'completed']);
 });
+
+// ── r3: one commit judgement (committed / not committed / unknown) for every path ──
+//
+// consult-cd09p-r3-precheck-report.md C2-C5. Each case first makes the branch happen through the double (what the
+// transaction did, what its answer said, whether the confirmation read could run) and checks that it happened, then
+// asserts the product's outcome: the ledger's lines, the payload, the answer or the gate.
+
+const phasesOf = (ledger, u) => (ledger.read()?.entries ?? []).filter(e => e.record.disposalUnitId === u).map(e => e.record.phase);
+const quiet = async work => {
+  const original = console.error; console.error = () => {};
+  try { return await work(); } finally { console.error = original; }
+};
+
+test('R3-C2b new destruction: a confirmation read that fails leaves only started, then converges from the real outcome', async () => {
+  // (1) The deletion committed, its confirmation read timed out.
+  const row = ended(), state = stateWith([row]);
+  const ledger = ledgerFor(state.anchor.ledgerId);
+  const service = new P.DraftPurposeDisposal(database(state), ledger, null, NOW);
+  state.confirmFails = 1;
+  await assert.rejects(service.destroy(row.disposalUnitId));
+  assert.equal(state.confirmFails, 0, 'the confirmation read was reached and failed');
+  assert.ok(!state.ended.has(row.disposalUnitId), 'the deletion itself committed');
+  assert.deepEqual(phasesOf(ledger, row.disposalUnitId), ['started'], 'neither completed nor a failed that says rolled back');
+  // The next attempt matches the anchor the committed deletion moved: completed once, with the commit's own time.
+  const again = await service.destroy(row.disposalUnitId);
+  assert.equal(again.outcome, 'absent');
+  assert.deepEqual(phasesOf(ledger, row.disposalUnitId), ['started', 'completed']);
+  // (2) The deletion rolled back, its confirmation read timed out.
+  const kept = ended(), rolled = stateWith([kept]);
+  const ledger2 = ledgerFor(rolled.anchor.ledgerId);
+  const service2 = new P.DraftPurposeDisposal(database(rolled), ledger2, null, NOW);
+  rolled.commitFails = 1; rolled.confirmFails = 1;
+  await assert.rejects(service2.destroy(kept.disposalUnitId));
+  assert.equal(rolled.confirmFails, 0);
+  assert.ok(rolled.ended.has(kept.disposalUnitId), 'the deletion rolled back');
+  assert.deepEqual(phasesOf(ledger2, kept.disposalUnitId), ['started']);
+  assert.equal(rolled.anchor.seq, 0);
+  // The same process judges its own attempt again: not committed -> failed, then a new attempt completes.
+  const retried = await service2.destroy(kept.disposalUnitId);
+  assert.equal(retried.outcome, 'destroyed');
+  assert.deepEqual(phasesOf(ledger2, kept.disposalUnitId), ['started', 'failed', 'started', 'completed']);
+  assert.ok(!rolled.ended.has(kept.disposalUnitId));
+});
+
+test('R3-C3d(b) while one attempt is unknown no other unit starts; another process cannot settle it', async () => {
+  const a = ended(), b = ended(), state = stateWith([a, b]);
+  const ledger = ledgerFor(state.anchor.ledgerId);
+  const service = new P.DraftPurposeDisposal(database(state), ledger, null, NOW);
+  state.commitFails = 1; state.confirmFails = 2;
+  await assert.rejects(service.destroy(a.disposalUnitId));
+  assert.deepEqual(phasesOf(ledger, a.disposalUnitId), ['started']);
+  // B: refused before any record (the unknown A must not be buried under another unit's records).
+  await quiet(async () => { await assert.rejects(service.destroy(b.disposalUnitId), e => e.code === 'PurposeIntentIncomplete'); });
+  assert.equal(state.confirmFails, 0, 'A was judged again and stayed unknown');
+  assert.deepEqual(phasesOf(ledger, b.disposalUnitId), []);
+  assert.ok(state.ended.has(b.disposalUnitId));
+  // A process without the attempt (the sweep run, a restart) has no evidence: R4, closed, nothing written.
+  const before = fs.readFileSync(ledger.file);
+  const sweep = new P.DraftPurposeDisposal(database(state), ledger, null, NOW);
+  await assert.rejects(sweep.sweep(), e => e.code === 'PurposeIntentIncomplete');
+  await assert.rejects(sweep.openGate(), e => e.code === 'PurposeIntentIncomplete');
+  assert.deepEqual(fs.readFileSync(ledger.file), before);
+  // The process that holds the attempt resolves it once it can read: failed, then both units are destroyed.
+  assert.equal((await service.destroy(a.disposalUnitId)).outcome, 'destroyed');
+  assert.equal((await service.destroy(b.disposalUnitId)).outcome, 'destroyed');
+  assert.deepEqual(phasesOf(ledger, a.disposalUnitId), ['started', 'failed', 'started', 'completed']);
+  assert.deepEqual(phasesOf(ledger, b.disposalUnitId), ['started', 'completed']);
+});
+
+test('R3-C3c a ledger as long as the anchor says but with another meaning at the anchor\'s position stays closed', async () => {
+  const a = ended(), state = stateWith([a]);
+  const ledger = ledgerFor(state.anchor.ledgerId);
+  const started = { formatVersion: 1, phase: 'started', day: '2026-11-01', disposalUnitId: a.disposalUnitId, classes: [],
+    clauseIds: ['privacy:21.1'], partCount: 1, expiryDay: '2026-11-01', extensionUsed: false, dueDay: '2026-11-06',
+    timeliness: 'within-five-days', method: 'irreversible-permanent-deletion', basis: 'privacy-act-21-and-decree-16-1-1' };
+  ledger.append(state.anchor.ledgerId, started);
+  ledger.append(state.anchor.ledgerId, { ...started, phase: 'failed' });
+  Object.assign(state.anchor, { seq: 2, lastCompletedUnit: a.disposalUnitId, lastCompletedAt: '2026-11-01T01:30:00.000Z' });
+  assert.equal(ledger.read().entries.length, state.anchor.seq, 'same length: only the meaning differs');
+  const before = fs.readFileSync(ledger.file);
+  await assert.rejects(new P.DraftPurposeDisposal(database(state), ledger, null, NOW).openGate(), e => e.code === 'PurposeLedgerAnchorMismatch');
+  const S = require(path.join(api, 'src/emr-retention/draft-purpose-sweep.ts'));
+  await assert.rejects(S.runDraftPurposeSweep(database(state), ledger.directory), e => e.code === 'PurposeLedgerAnchorMismatch');
+  assert.deepEqual(fs.readFileSync(ledger.file), before);
+  assert.equal(state.anchor.seq, 2);
+});
+
+test('R3-C4d a started attempt with no evidence (another process stopped after it) closes the gate and the sweep', async () => {
+  const a = ended(), state = stateWith([a]);
+  const ledger = ledgerFor(state.anchor.ledgerId);
+  ledger.append(state.anchor.ledgerId, { formatVersion: 1, phase: 'started', day: '2026-11-01', disposalUnitId: a.disposalUnitId,
+    classes: [], clauseIds: ['privacy:21.1'], partCount: 1, expiryDay: '2026-11-01', extensionUsed: false, dueDay: '2026-11-06',
+    timeliness: 'within-five-days', method: 'irreversible-permanent-deletion', basis: 'privacy-act-21-and-decree-16-1-1' });
+  assert.notEqual(state.anchor.lastCompletedUnit, a.disposalUnitId);
+  assert.ok(state.ended.has(a.disposalUnitId));
+  const before = fs.readFileSync(ledger.file);
+  await assert.rejects(new P.DraftPurposeDisposal(database(state), ledger, null, NOW).openGate(), e => e.code === 'PurposeIntentIncomplete');
+  const S = require(path.join(api, 'src/emr-retention/draft-purpose-sweep.ts'));
+  await assert.rejects(S.runDraftPurposeSweep(database(state), ledger.directory), e => e.code === 'PurposeIntentIncomplete');
+  assert.deepEqual(fs.readFileSync(ledger.file), before, 'no failed is synthesized from this copy');
+  assert.ok(state.ended.has(a.disposalUnitId));
+});
+
+test('R3-C3f(나) a started record whose append fails: nothing is deleted, the anchor and the payload stay', async () => {
+  const a = ended(), state = stateWith([a]);
+  const ledger = ledgerFor(state.anchor.ledgerId);
+  let reached = 0;
+  const append = ledger.append.bind(ledger);
+  ledger.append = (id, record) => { if (record.phase === 'started') { reached++; throw new Error('SYN disk full'); } return append(id, record); };
+  const out = await new P.DraftPurposeDisposal(database(state), ledger, null, NOW).destroy(a.disposalUnitId);
+  assert.equal(reached, 1, 'the started append was reached');
+  assert.deepEqual([out.outcome, out.code], ['refused', 'DestructionJournalUnavailable']);
+  assert.ok(state.ended.has(a.disposalUnitId));
+  assert.deepEqual([state.anchor.seq, state.anchor.lastCompletedUnit], [0, null]);
+  assert.deepEqual(phasesOf(ledger, a.disposalUnitId), []);
+});
+
+/** A completed unit whose payload a restored copy holds again (ended row, or the live row of a copy taken before the end). */
+function restoredCompleted({ live = false } = {}) {
+  const row = ended(), state = stateWith([row]);
+  const ledger = ledgerFor(state.anchor.ledgerId);
+  return (async () => {
+    await new P.DraftPurposeDisposal(database(state), ledger, null, NOW).destroy(row.disposalUnitId);
+    assert.deepEqual(phasesOf(ledger, row.disposalUnitId), ['started', 'completed']);
+    if (live) state.live.set(row.disposalUnitId, { uid: row.uid, author: row.author, findings: row.findings });
+    else state.ended.set(row.disposalUnitId, structuredClone(row));
+    return { row, state, ledger, bytes: fs.readFileSync(ledger.file) };
+  })();
+}
+
+test('R3-C2b/C4 sweep re-application: committed, not committed and unknown are three outcomes; the original completed stands', async () => {
+  const S = require(path.join(api, 'src/emr-retention/draft-purpose-sweep.ts'));
+  // committed
+  let r = await restoredCompleted();
+  let report = await S.runDraftPurposeSweep(database(r.state), r.ledger.directory);
+  assert.deepEqual(report.results, [{ unit: r.row.disposalUnitId, outcome: 'reapplied' }]);
+  assert.equal(report.complete, true);
+  assert.ok(!r.state.ended.has(r.row.disposalUnitId));
+  assert.deepEqual(fs.readFileSync(r.ledger.file), r.bytes);
+  // not committed (the re-application's COMMIT failed but answered success)
+  r = await restoredCompleted();
+  r.state.silentCommitFails = 1;
+  report = await S.runDraftPurposeSweep(database(r.state), r.ledger.directory);
+  assert.equal(r.state.silentCommitFails, 0, 'the failing COMMIT was reached');
+  assert.deepEqual(report.results, [{ unit: r.row.disposalUnitId, outcome: 'reapply-not-committed' }]);
+  assert.equal(report.complete, false);
+  assert.ok(r.state.ended.has(r.row.disposalUnitId));
+  assert.deepEqual(fs.readFileSync(r.ledger.file), r.bytes, 'the original completed stands; no failed for a re-application');
+  // unknown (committed, the confirmation read timed out)
+  r = await restoredCompleted();
+  r.state.confirmFails = 1;
+  report = await S.runDraftPurposeSweep(database(r.state), r.ledger.directory);
+  assert.equal(r.state.confirmFails, 0);
+  assert.deepEqual(report.results, [{ unit: r.row.disposalUnitId, outcome: 'reapply-unconfirmed' }]);
+  assert.equal(report.complete, false);
+  assert.deepEqual(fs.readFileSync(r.ledger.file), r.bytes);
+});
+
+test('R3-C4a′ the sweep re-applies a completed unit a live copy still holds in the author\'s row', async () => {
+  const S = require(path.join(api, 'src/emr-retention/draft-purpose-sweep.ts'));
+  const r = await restoredCompleted({ live: true });
+  assert.ok(r.state.live.has(r.row.disposalUnitId) && !r.state.ended.has(r.row.disposalUnitId));
+  r.state.silentCommitFails = 1;
+  let report = await S.runDraftPurposeSweep(database(r.state), r.ledger.directory);
+  assert.deepEqual(report.results, [{ unit: r.row.disposalUnitId, outcome: 'reapply-not-committed' }]);
+  assert.ok(r.state.live.has(r.row.disposalUnitId));
+  report = await S.runDraftPurposeSweep(database(r.state), r.ledger.directory);
+  assert.deepEqual(report.results, [{ unit: r.row.disposalUnitId, outcome: 'reapplied' }]);
+  assert.equal(report.complete, true);
+  assert.ok(!r.state.live.has(r.row.disposalUnitId));
+  assert.deepEqual(fs.readFileSync(r.ledger.file), r.bytes);
+});
+
+test('R3-C2b/C4b gate re-application opens only when the committed database confirms it', async () => {
+  let r = await restoredCompleted();
+  assert.equal((await new P.DraftPurposeDisposal(database(r.state), r.ledger, null, NOW).openGate()).reapplied, 1);
+  r = await restoredCompleted();
+  r.state.commitFails = 1;
+  await assert.rejects(new P.DraftPurposeDisposal(database(r.state), r.ledger, null, NOW).openGate(), e => e.code === 'PurposeReapplyNotCommitted');
+  assert.deepEqual(fs.readFileSync(r.ledger.file), r.bytes);
+  r = await restoredCompleted({ live: true });
+  r.state.confirmFails = 1;
+  await assert.rejects(new P.DraftPurposeDisposal(database(r.state), r.ledger, null, NOW).openGate(), e => e.code === 'PurposeReapplyUnconfirmed');
+  assert.equal(r.state.confirmFails, 0);
+  assert.deepEqual(fs.readFileSync(r.ledger.file), r.bytes);
+  // Once the read can run again, the same database opens (the re-application had committed).
+  await new P.DraftPurposeDisposal(database(r.state), r.ledger, null, NOW).openGate();
+});
+
+// ── r3 C5: the first start and what the product can tell apart ──
+
+function emptyDir() { return path.join(ledgerDir(), 'purpose'); }
+
+test('R3-C5 I2 a prepared adoption is consumed once by the first gate: consumed, header, initialized, in that order', async () => {
+  const dir = emptyDir(), state = stateWith([], { initialized: false });
+  state.migrated = false;
+  const prepared = await P.prepareLedgerAdoption(database(state), { KIN_PURPOSE_LEDGER_DIR: dir });
+  assert.equal(prepared.state, 'prepared');
+  const ledger = new P.PurposeLedgerFile(dir);
+  assert.equal(ledger.read(), null);
+  assert.equal(ledger.readAdoption().state, 'prepared');
+  state.migrated = true;            // the P migration runs after the preparation
+  assert.ok(state.works && !state.anchor.initialized && state.anchor.seq === 0);
+  await new P.DraftPurposeDisposal(database(state), ledger, null, NOW).openGate();
+  assert.deepEqual([ledger.readAdoption().state, ledger.readAdoption().ledgerId], ['consumed', state.anchor.ledgerId]);
+  assert.equal(ledger.read().ledgerId, state.anchor.ledgerId);
+  assert.equal(state.anchor.initialized, true);
+});
+
+test('R3-C5 I3/I4/I5/I6 inputs the product can tell apart stay closed and create nothing', async () => {
+  // I3: works, no ledger, no adoption.
+  let dir = emptyDir(), state = stateWith([], { initialized: false }), ledger = new P.PurposeLedgerFile(dir);
+  await assert.rejects(new P.DraftPurposeDisposal(database(state), ledger, null, NOW).openGate(), e => e.code === 'PurposeLedgerInitializationRequired');
+  assert.equal(fs.existsSync(dir), false, 'nothing created');
+  // I9: only an ended row.
+  state = stateWith([ended()], { initialized: false }); state.works = false;
+  await assert.rejects(new P.DraftPurposeDisposal(database(state), new P.PurposeLedgerFile(emptyDir()), null, NOW).openGate(),
+    e => e.code === 'PurposeLedgerInitializationRequired');
+  // I4: the adoption was consumed and the ledger is gone (the database is the one from before the first start).
+  dir = emptyDir(); state = stateWith([], { initialized: false }); state.migrated = false;
+  await P.prepareLedgerAdoption(database(state), { KIN_PURPOSE_LEDGER_DIR: dir }); state.migrated = true;
+  ledger = new P.PurposeLedgerFile(dir);
+  await new P.DraftPurposeDisposal(database(state), ledger, null, NOW).openGate();
+  fs.rmSync(ledger.file);
+  const d0 = stateWith([], { initialized: false, ledgerId: state.anchor.ledgerId });
+  await assert.rejects(new P.DraftPurposeDisposal(database(d0), ledger, null, NOW).openGate(), e => e.code === 'PurposeLedgerMissing');
+  assert.equal(ledger.read(), null);
+  // I5 (C5-8): an initialized database beside an older directory that still holds the prepared adoption: not consumed.
+  dir = emptyDir(); state = stateWith([], { initialized: false }); state.migrated = false;
+  await P.prepareLedgerAdoption(database(state), { KIN_PURPOSE_LEDGER_DIR: dir }); state.migrated = true;
+  const current = stateWith([], { initialized: true });
+  ledger = new P.PurposeLedgerFile(dir);
+  await assert.rejects(new P.DraftPurposeDisposal(database(current), ledger, null, NOW).openGate(), e => e.code === 'PurposeLedgerMissing');
+  assert.equal(ledger.readAdoption().state, 'prepared');
+  assert.equal(ledger.read(), null);
+  // I6: a ledger of another ID beside a database that never saw it.
+  const other = ledgerFor(randomUUID());
+  await assert.rejects(new P.DraftPurposeDisposal(database(stateWith([], { initialized: false })), other, null, NOW).openGate(),
+    e => e.code === 'PurposeLedgerMismatch');
+});
+
+test('R3-C5-6 no other door opens an uninitialized copy: destroy, sweep and the first save refuse and create nothing', async () => {
+  const dir = emptyDir(), row = ended(), state = stateWith([row], { initialized: false }), ledger = new P.PurposeLedgerFile(dir);
+  const service = new P.DraftPurposeDisposal(database(state), ledger, null, NOW);
+  await quiet(async () => { await assert.rejects(service.destroy(row.disposalUnitId), e => e.code === 'PurposeLedgerInitializationRequired'); });
+  await assert.rejects(service.sweep(), e => e.code === 'PurposeLedgerInitializationRequired');
+  const db = database(state);
+  await assert.rejects(db.$transaction(tx => new P.DraftPurposeDisposal(db, ledger, null, NOW).ensureLedger(tx)),
+    e => e.code === 'PurposeLedgerInitializationRequired');
+  assert.equal(fs.existsSync(dir), false);
+  assert.ok(state.ended.has(row.disposalUnitId));
+  assert.equal(state.anchor.initialized, false);
+});
+
+test('R3-C5-5 the preparation refuses P1-P5 and changes nothing', async () => {
+  const fresh = () => { const s = stateWith([], { initialized: false }); s.migrated = false; return s; };
+  // P1: no directory, a relative one, or one inside the backed-up EMR state.
+  for (const env of [{}, { KIN_PURPOSE_LEDGER_DIR: 'relative' }, { KIN_PURPOSE_LEDGER_DIR: '/var/lib/kin-emr/p', KIN_EMR_STATE_DIR: '/var/lib/kin-emr' }])
+    await assert.rejects(P.prepareLedgerAdoption(database(fresh()), env), e => /^PurposeLedger(DirectoryRequired|InsideBackup)$/.test(e.code));
+  // P2: a ledger is already there.
+  let dir = emptyDir(); const l2 = new P.PurposeLedgerFile(dir); l2.create(randomUUID());
+  let bytes = fs.readFileSync(l2.file);
+  await assert.rejects(P.prepareLedgerAdoption(database(fresh()), { KIN_PURPOSE_LEDGER_DIR: dir }), e => e.code === 'PurposeAdoptionLedgerExists');
+  assert.deepEqual(fs.readFileSync(l2.file), bytes); assert.equal(l2.readAdoption(), null);
+  // P3: an adoption record is already there (prepared, or consumed).
+  dir = emptyDir();
+  await P.prepareLedgerAdoption(database(fresh()), { KIN_PURPOSE_LEDGER_DIR: dir });
+  const l3 = new P.PurposeLedgerFile(dir); bytes = fs.readFileSync(l3.adoptionFile);
+  await assert.rejects(P.prepareLedgerAdoption(database(fresh()), { KIN_PURPOSE_LEDGER_DIR: dir }), e => e.code === 'PurposeAdoptionExists');
+  assert.deepEqual(fs.readFileSync(l3.adoptionFile), bytes);
+  // P4: the database already has the P migration.
+  dir = emptyDir(); const migrated = fresh(); migrated.migrated = true;
+  await assert.rejects(P.prepareLedgerAdoption(database(migrated), { KIN_PURPOSE_LEDGER_DIR: dir }), e => e.code === 'PurposeAdoptionAfterMigration');
+  assert.equal(fs.existsSync(dir), false);
+  // P5: the database cannot be reached.
+  dir = emptyDir(); const down = fresh(); down.dbDown = true;
+  await assert.rejects(P.prepareLedgerAdoption(database(down), { KIN_PURPOSE_LEDGER_DIR: dir }), e => e.code === 'PurposeAdoptionDatabaseUnavailable');
+  assert.equal(fs.existsSync(dir), false);
+});
+
+// ── r3 C2-a: the public end entry points (Discard, Clear) against a transaction double ──
+//
+// The real PacsReportDraft.discardDraft / putReport run their own transaction through the request's record port. The
+// double decides, per case, whether that transaction's writes become durable and what its answer says, and whether the
+// confirmation read can run. The destruction service is the real one with its scheduling observed.
+
+const RD = require(path.join(api, 'src/pacs/report-draft.ts'));
+const V = require(path.join(api, 'src/pacs/values.ts'));
+const scheduled = [];
+const endDb = { current: null };
+const forward = new Proxy({}, { get: (_, key) => endDb.current[key] });
+const endService = P.configureDraftPurpose(new P.DraftPurposeDisposal(forward, new P.PurposeLedgerFile(ledgerDir()), null, NOW));
+endService.scheduleDestruction = u => { scheduled.push(u); };
+
+function endWorld({ commit, reject, confirmFails = 0 }) {
+  const epoch = randomUUID(), work = unit();
+  const durable = { draft: { uid: UID, author: AUTHOR, findings: 'SYN end text', conclusion: 'SYN c', recommendation: '', baseVersion: 0,
+    citations: null, structured: null, revision: 3, present: true, updatedAt: new Date(START), workUnit: work, workSince: new Date(START),
+    workIntent: 'approve' }, ended: new Map() };
+  const study = { uid: UID, institutionId: 'syn-inst', draftEpoch: epoch, rs: 'N', ss: 'Verified', em: 'N' };
+  const seen = { confirms: 0, confirmFailed: 0, transactions: 0 };
+  const read = (s, text, values) => {
+    if (/FROM "StudyState"/.test(text)) return [structuredClone(study)];
+    if (/FROM "ReportDraftPurposeEnd"/.test(text)) return s.ended.has(values[0]) ? [{ present: 1 }] : [];
+    if (/FROM "ReportDraft"/.test(text)) return s.draft ? [structuredClone(s.draft)] : [];
+    throw new Error('unexpected read: ' + text);
+  };
+  const confirmFail = () => { if (confirmFails > 0) { confirmFails--; seen.confirmFailed++; throw Object.assign(new Error('SYN lock timeout'), { code: 'P2010', meta: { code: '55P03' } }); } };
+  const prisma = {
+    // The confirmation read (its own bounded transaction).
+    async $transaction(fn) {
+      seen.confirms++; confirmFail();
+      return fn({ $executeRaw: async () => 0, $queryRaw: async (strings, ...values) => read(durable, strings.join('?'), values) });
+    },
+    async $queryRaw(strings, ...values) { seen.confirms++; confirmFail(); return read(durable, strings.join('?'), values); },
+  };
+  const transactionWithRecords = async fn => {
+    seen.transactions++;
+    const local = structuredClone(durable);
+    const tx = {
+      $executeRaw: async () => 0,
+      $queryRaw: async (strings, ...values) => read(local, strings.join('?'), values),
+      reportDraftPurposeEnd: { create: async ({ data }) => { local.ended.set(data.disposalUnitId, data); return data; } },
+      reportDraft: {
+        updateMany: async ({ data }) => { Object.assign(local.draft, data); return { count: 1 }; },
+        findUnique: async () => structuredClone(local.draft), create: async ({ data }) => { local.draft = data; return data; },
+      },
+      auditLog: { create: async () => ({}) }, report: { findUnique: async () => null },
+    };
+    const value = await fn(tx, async () => {});
+    if (commit) Object.assign(durable, local);
+    if (reject) throw Object.assign(new Error('SYN answer lost'), { code: 'P1017' });
+    return value;
+  };
+  const c = { roles: ['radiologist'], institution: 'syn-inst', sub: 'syn-sub', actor: AUTHOR, kind: 'user' };
+  const facts = { request: { work: { transactionWithRecords }, requireCurrent: async () => {},
+    facts: { surface: 'syn', actor: AUTHOR, roles: ['radiologist'], institution: 'syn-inst' } }, issuer: 'syn', ip: null, requestId: 'syn-req' };
+  const studyAccess = { prepare: async () => {}, prepareSourceIdentity: async () => {}, require: async () => {}, assertUnsplitSource: () => {} };
+  const service = new RD.PacsReportDraft(prisma, studyAccess, { visible: () => true }, {}, { reportLimitChecked: fn => fn() }, {});
+  const body = { expectedOwner: { institution: 'syn-inst', sub: 'syn-sub', author: AUTHOR }, expectedRevision: V.draftToken(epoch, 3) };
+  endDb.current = prisma;
+  return { service, durable, seen, work, c, facts, body };
+}
+async function outcome(promise) {
+  try { const value = await promise; return { status: 200, value }; }
+  catch (error) { return { status: error.getStatus?.() ?? 500, code: error.getResponse?.()?.code ?? error.code, message: error.getResponse?.()?.message ?? error.message }; }
+}
+const settle = () => new Promise(r => setTimeout(r, 1300));
+
+const ENTRY = {
+  Discard: w => w.service.discardDraft(UID, w.body, w.c, null, w.facts),
+  Clear: w => w.service.putReport(UID, { ...w.body, findings: '', conclusion: '', recommendation: '', baseVersion: 0, citationIds: [], structureIds: [] },
+    w.c, null, w.facts),
+};
+
+for (const [name, call] of Object.entries(ENTRY)) {
+  test(`R3-C2a ${name}: the six transaction outcomes are answered from the committed database, never from the promise`, async () => {
+    const run = async mode => {
+      scheduled.length = 0;
+      const w = endWorld(mode);
+      const out = await outcome(call(w));
+      assert.equal(w.seen.transactions, 1, 'the entry point ran its transaction');
+      return { w, out, durableEnded: w.durable.ended.has(w.work) };
+    };
+    // commit + resolve
+    let r = await run({ commit: true, reject: false });
+    assert.equal(r.durableEnded, true); assert.equal(r.out.status, 200); assert.deepEqual(scheduled, [r.w.work]);
+    // rollback + reject: the original error
+    r = await run({ commit: false, reject: true });
+    assert.equal(r.durableEnded, false); assert.equal(r.out.code, 'P1017'); assert.deepEqual(scheduled, []);
+    // rollback + resolve (a COMMIT that failed answered as success)
+    r = await run({ commit: false, reject: false });
+    assert.equal(r.durableEnded, false);
+    assert.deepEqual([r.out.status, r.out.code], [503, 'REPORT_DRAFT_END_NOT_SAVED']); assert.deepEqual(scheduled, []);
+    // commit + reject: saved, the client re-reads; the destruction is scheduled
+    r = await run({ commit: true, reject: true });
+    assert.equal(r.durableEnded, true);
+    assert.deepEqual([r.out.status, r.out.code], [503, 'REPORT_DRAFT_END_SAVED']);
+    assert.match(r.out.message, /[가-힣]/);
+    assert.deepEqual(scheduled, [r.w.work]);
+    // commit + confirmation failure: unknown, nothing scheduled yet; the server judges again and then schedules
+    r = await quiet(() => run({ commit: true, reject: false, confirmFails: 1 }));
+    assert.equal(r.w.seen.confirmFailed, 1, 'the confirmation read was reached and failed');
+    assert.deepEqual([r.out.status, r.out.code], [503, 'REPORT_DRAFT_END_UNCONFIRMED']);
+    assert.doesNotMatch(r.out.message, /그대로/, 'unknown never says the draft is as it was');
+    assert.deepEqual(scheduled, []);
+    await settle();
+    assert.deepEqual(scheduled, [r.w.work], 'converged: committed, destroyed once');
+    // rollback + confirmation failure: unknown, then nothing
+    r = await quiet(() => run({ commit: false, reject: false, confirmFails: 1 }));
+    assert.equal(r.w.seen.confirmFailed, 1);
+    assert.deepEqual([r.out.status, r.out.code], [503, 'REPORT_DRAFT_END_UNCONFIRMED']);
+    await settle();
+    assert.deepEqual(scheduled, [], 'converged: not committed, nothing to destroy');
+    assert.equal(r.w.durable.draft.findings, 'SYN end text');
+  });
+}
