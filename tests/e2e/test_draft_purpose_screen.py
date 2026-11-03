@@ -500,10 +500,160 @@ class DraftPurposeScreenR3(DraftPurposeScreen):
         self.assertEqual(self.server_draft(b)["snapshot"]["findings"], text_b)
 
 
+import test_related_report_mode as related
+
+
+class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
+    """CD-09-P r3 C10-b: a Related Report insertion into a Target whose work then ends (the author's other session) and
+    is destroyed. The existing Related fixture (test_related_report_mode.py) with the insertion's real answer kept or
+    read-and-lost; nothing is faked."""
+
+    def open_related(self, on_put):
+        patient = "W5-" + uuid.uuid4().hex[:16]
+        target, source = self.fixture(patient_id=patient), self.fixture(patient_id=patient)
+        self.seed_report(source, action="approve", findings=related.SOURCE_FINDINGS)
+        page = self.login()
+        if not page.locator(".left").is_visible():
+            page.get_by_role("button", name="Worklist", exact=True).click()
+        self.select(page, target)
+        page.locator("#findings").fill(related.TARGET_OWN)
+        page.route(lambda url: url.endswith(f"/studies/{target.uid}/report"), on_put)
+        row = page.locator(f'#relrows tr[data-uid="{source.uid}"]')
+        expect(row).to_be_visible()
+        row.locator("td").first.click()
+        expect(page.locator("#related-mode")).to_be_visible()
+        source_text = page.locator('#related-mode [data-related-source="findings"]')
+        expect(source_text).to_have_text(related.SOURCE_FINDINGS)
+        source_text.evaluate("""(node, length) => {
+            const range = document.createRange(); range.setStart(node.firstChild, 0); range.setEnd(node.firstChild, length);
+            const selection = document.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+        }""", len(related.SOURCE_LINE))
+        page.locator("#related-mode-insert").click()
+        return page, target, source
+
+    def end_target(self, target):
+        ended = self.stack.request("DELETE", f"/studies/{target.uid}/draft", "doctor", {})
+        self.assertEqual(ended.status, 200, ended.text)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            if psql(f'SELECT count(*) FROM "ReportDraftPurposeEnd" WHERE uid={sql_text(target.uid)}') == ["0"]:
+                return
+            time.sleep(0.5)
+        self.fail("the Target's ended work was not destroyed")
+
+    def receipt(self, request_id):
+        return psql(f'SELECT state || \'|\' || "receiptRevision" FROM "ReportDraftInsertReceipt" '
+                    f'WHERE "insertRequestId"={sql_text(request_id)}::uuid')
+
+    @staticmethod
+    def related_body(request):
+        try:
+            body = request.post_data_json if request.method == "PUT" and request.post_data else None
+        except Exception:
+            return None
+        return body if isinstance(body, dict) and "relatedInsert" in body else None
+
+    def test_c10b1_a_late_insert_answer_delivered_after_the_end_writes_nothing_back(self):
+        kept, sent = [], []
+
+        def keep(route):
+            body = self.related_body(route.request)
+            if body is None:
+                route.fallback(); return
+            sent.append(body)
+            kept.append((route, route.fetch()))                      # the server applied it; the page waits
+        page, target, source = self.open_related(keep)
+        source_versions = self.versions(source)
+        deadline = time.monotonic() + 30
+        while not kept and time.monotonic() < deadline:
+            page.wait_for_timeout(100)
+        self.assertTrue(kept, "the insertion was not sent")
+        route, response = kept[0]
+        self.assertEqual(response.status, 200, response.text())
+        request_id = sent[0]["relatedInsert"]["insertRequestId"]
+        # While the answer is kept: the server wrote the inserted line and an applied receipt.
+        stored = psql(f'SELECT findings FROM "ReportDraft" WHERE uid={sql_text(target.uid)} AND author={sql_text(self.stack.actor("doctor"))}')
+        self.assertIn(related.SOURCE_LINE, stored[0])
+        self.assertEqual(self.receipt(request_id)[0].split("|")[0], "applied")
+        self.end_target(target)
+        puts, finished, failed = [], [], []
+        page.on("response", lambda r: puts.append((time.monotonic(), r.status, r.request.post_data or ""))
+                if r.request.method == "PUT" and r.url.endswith(f"/studies/{target.uid}/report") else None)
+        page.on("requestfinished", lambda r: finished.append(r))
+        page.on("requestfailed", lambda r: failed.append(r))
+        request = route.request
+        route.fulfill(response=response)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not any(r is request for r in finished + failed):
+            page.wait_for_timeout(100)
+        self.assertTrue(any(r is request for r in finished), "the kept answer was not delivered")
+        delivered = time.monotonic()
+        # At least one autosave period (20 s) after the delivery.
+        page.wait_for_timeout(45000)
+        later = [p for p in puts if p[0] >= delivered]
+        self.assertFalse([p for p in later if p[1] == 200], later)
+        self.assertFalse([p for p in later if related.SOURCE_LINE in p[2]], "a write after the end carried the inserted line")
+        server = self.draft(target)
+        self.assertEqual((server["present"], server["snapshot"]), (False, None))
+        self.assertEqual(self.versions(source), source_versions)
+        print("CD09P-SCREEN " + json.dumps({"c10b1": {"puts_after_delivery": len(later)}}), flush=True)
+
+    def test_c10b2_a_replayed_insert_after_the_end_is_checked_and_never_writes_the_draft_again(self):
+        sent, answers = [], []
+
+        def read_then_lose(route):
+            body = self.related_body(route.request)
+            if body is None:
+                route.fallback(); return
+            sent.append(body)
+            real = route.fetch()
+            answers.append((real.status, real.text()))
+            route.abort("connectionreset")
+        page, target, source = self.open_related(read_then_lose)
+        notice = page.locator("#report-notice")
+        expect(notice).to_contain_text("Result Unknown")
+        self.assertEqual((len(sent), answers[0][0]), (1, 200), "the server applied the first insertion")
+        request_id = sent[0]["relatedInsert"]["insertRequestId"]
+        receipt = self.receipt(request_id)
+        self.end_target(target)
+        statuses = []
+        page.on("response", lambda r: statuses.append(r.status)
+                if r.request.method == "PUT" and r.url.endswith(f"/studies/{target.uid}/report") else None)
+        # Retry: the same ID and body reach the server; its answer (the receipt's replay) is read, then lost.
+        page.locator("#report-notice-retry").click()
+        deadline = time.monotonic() + 30
+        while len(sent) < 2 and time.monotonic() < deadline:
+            page.wait_for_timeout(100)
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(sent[1], sent[0])
+        self.assertEqual(self.receipt(request_id), receipt, "the replay wrote no receipt row")
+        replay = answers[1]
+        self.assertIn(replay[0], (200, 409), replay)
+        # The operation stays unknown: Check is shown and enabled before it is pressed, and its read goes after the press.
+        check = page.locator("#report-notice-check")
+        expect(check).to_be_visible(timeout=20000)
+        expect(check).to_be_enabled()
+        reads = []
+        page.on("request", lambda r: reads.append(time.monotonic())
+                if r.method == "GET" and f"/studies/{target.uid}/draft" in r.url and "insertRequestId" in r.url else None)
+        pressed = time.monotonic()
+        check.click()
+        deadline = time.monotonic() + 20
+        while not [t for t in reads if t >= pressed] and time.monotonic() < deadline:
+            page.wait_for_timeout(100)
+        self.assertTrue([t for t in reads if t >= pressed], "Check sent no read")
+        page.wait_for_timeout(3000)
+        checked = self.draft(target, request_id)
+        self.assertEqual((checked["present"], checked["relatedInsert"]["currentMatches"]), (False, False))
+        self.assertFalse([s for s in statuses if s == 200], statuses)
+        print("CD09P-SCREEN " + json.dumps({"c10b2": {"replay": replay[0], "receipt": receipt}}), flush=True)
+
+
 def load_tests(loader, tests, pattern):
     suite = loader.loadTestsFromTestCase(DraftPurposeScreen)
-    # The r3 class reuses the screen helpers; only its own cases run under it.
-    suite.addTests(DraftPurposeScreenR3(name) for name in sorted(vars(DraftPurposeScreenR3)) if name.startswith("test_"))
+    # The r3 classes reuse the screen and Related helpers; only their own cases run under them.
+    for case in (DraftPurposeScreenR3, DraftPurposeRelatedR3):
+        suite.addTests(case(name) for name in sorted(vars(case)) if name.startswith("test_"))
     return suite
 
 
