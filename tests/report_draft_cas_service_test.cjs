@@ -1066,7 +1066,12 @@ test('D10 commit and discard answer the envelope and the state; the commit audit
     committed.body.state.findings], ['A', 1, null, `${epoch}:2`, 'SYN approve by X']);
   assert.deepEqual(await w.audits(uid), [`${A.actor} report.approve`]);
   const points = w.points.filter(p => p.startsWith('X:'));
-  assert.deepEqual(points.slice(-2), ['X:audit', 'X:commit'], 'the audit row is written before the commit of the same transaction');
+  // The next transaction boundary after the audit row is a commit, not a new transaction. (CD-09-P: an approval that ends
+  // the author's draft work is then judged in a read transaction of its own, so the commit's is no longer the last one.)
+  const audited = points.indexOf('X:audit');
+  assert.ok(audited >= 0, JSON.stringify(points));
+  assert.equal(points.slice(audited + 1).find(p => p === 'X:commit' || p === 'X:tx-start'), 'X:commit',
+    'the audit row is written before the commit of the same transaction');
   // own discard of an absent draft is a mutation of the boundary too
   const second = await w.study({ draft: false }), e2 = await w.epoch(second);
   const gone = await w.send('X', 'discard', { as: A, uid: second, body: request('discard', A, { token: `${e2}:0`, head: 0, mark: 'X' })[1] });
