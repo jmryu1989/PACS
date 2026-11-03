@@ -122,6 +122,7 @@ REGRESSION_SUITES = {
         tests/audit_page_dom_test.py
         tests/audit_inspection_dom_test.py
         tests/audit_disclosure_dom_test.py
+        tests/audit_incident_dom_test.py
         tests/audit_rights_dom_test.py
         tests/admin_audit_dom_test.py
         tests/admin_gateway_status_dom_test.py
@@ -2108,7 +2109,7 @@ class MeasurementCiTests(unittest.TestCase):
         import ast
         for suite, class_name, prefix, count in (
                 ('e2e/test_volume_sync.py', 'VolumeSyncE2E', 'test_sync_', 16),
-                ('e2e/test_volume_preferences.py', 'VolumePreferencesE2E', 'test_properties_', 18)):
+                ('e2e/test_volume_preferences.py', 'VolumePreferencesE2E', 'test_properties_', 19)):
             tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
             cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
                        and node.name == class_name)

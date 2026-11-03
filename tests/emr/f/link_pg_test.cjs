@@ -270,6 +270,7 @@ if(process.argv.includes('--serve')){
     const c2=await reportProducer(port,witness,doctor,study,wrap);
     const signed=await c2.approve();
     await rightsAndInspection(port,db,witness,ok,call,identities.auditor,patient,signed);
+    await incidentsHttp(witness,ok,call,query,recordId,patient,identities.officer);
     const c2input=copy();c2input.request.scope=[{recordId:signed.recordId,versions:'all'}];
     const stale=await ok('auditor','POST','issuances',c2input);
     const added=await c2.approve('addendum',signed.versionId);
@@ -375,6 +376,106 @@ if(process.argv.includes('--serve')){
     await app?.close();if(runtime)await runtime.stop(Date.now()+15000);await close(provider);await db.$disconnect();await witness.$disconnect();
   }
 });
+
+async function incidentsHttp(witness,ok,call,query,recordId,patient,officer) {
+  const id=randomUUID(), base=Date.now(), at=ms=>new Date(base+ms).toISOString();
+  const input={incidentId:id,incidentType:'cvr-misdelivery',query:{...query,recordId},
+    determinations:[{kind:'access-outside-ledger',note:'Synthetic CVR misdelivery outside ledger'}],
+    facts:{incidentId:id,awarenessAt:at(-5000),determinationAt:at(-5000),status:'possible',
+      possibleGround:'illegal-access-unidentifiable',detailsComplete:true,newlyConfirmedAt:null,reportTriggers:[],medicalIncident:null,evidenceId:'synthetic-finding'}};
+  delete input.query.limit;
+  let state=await ok('auditor','POST','incidents',input);
+  assert.equal(state.scope.subjectsIdentifiable,false);
+  assert.ok(state.scope.identified.some(p=>p.patient.patientId===patient.patientId));
+  assert.equal((await ok('auditor','POST','incidents',input)).incidentId,id);
+  assert.ok((await ok('auditor','GET','incidents')).incidents.some(i=>i.incidentId===id));
+  const perform=async obligation=>ok('auditor','POST',`incidents/${id}/notices`,{operationId:obligation.kind,notice:{
+    kind:obligation.kind,triggeredAt:obligation.triggeredAt,triggerEventId:obligation.triggerEventId,
+    recipientScopeRef:obligation.recipientScopeRef,noticeId:obligation.kind,sentAt:at(-1000),coversAll:true,
+    evidenceId:'synthetic-'+obligation.kind,coveredFields:obligation.requiredFields,channel:'affected-users'}});
+  state=await perform(state.plan.obligations[0]);
+  const finding={operationId:'no-leak',facts:{...input.facts,status:'not-a-leak',possibleGround:null,
+    determinationAt:at(-2000),evidenceId:'synthetic-no-leak'}};
+  state=await ok('auditor','POST',`incidents/${id}/findings`,finding);
+  assert.equal((await call('auditor','POST',`incidents/${id}/close`,{evidenceId:'synthetic-close'})).body.code,'IncidentDutiesOpen');
+  state=await perform(state.plan.obligations.find(o=>o.kind==='not-a-leak'));
+  for(const form of ['possibility','confirmed','not-a-leak','report','medical','network']) {
+    const draft=await ok('auditor','GET',`incidents/${id}/drafts/${form}`);
+    assert.equal(draft.status,'Draft');assert.match(draft.wording,/P5/);
+    assert.ok(draft.scope.identified.some(p=>p.patient.patientId===patient.patientId));
+  }
+  state=await ok('auditor','POST',`incidents/${id}/close`,{evidenceId:'synthetic-close'});assert.equal(state.status,'Closed');
+  await ok('auditor','POST',`incidents/${id}/close`,{evidenceId:'synthetic-close'});
+  await ok('auditor','POST',`incidents/${id}/findings`,finding);
+  assert.equal((await call('auditor','POST',`incidents/${id}/findings`,{...finding,operationId:'after-close'})).body.code,'IncidentClosed');
+  assert.equal((await ok('auditor','GET',`incidents/${id}`)).plan.verdict,'not-a-leak');
+  for(const [method,path,body] of [['POST','incidents',input],['GET','incidents'],['GET',`incidents/${id}`],
+    ['POST',`incidents/${id}/findings`,finding],['POST',`incidents/${id}/notices`,{}],['POST',`incidents/${id}/close`,{evidenceId:'x'}],
+    ['GET',`incidents/${id}/drafts/possibility`]]) assert.equal((await call('doctor',method,path,body)).status,403);
+  const records=await witness.$queryRaw`SELECT payload::jsonb AS event FROM emr_access.access_entry
+    WHERE payload::jsonb->>'surface' LIKE '%emr-audit/incidents%'`;
+  const downloads=records.filter(r=>r.event.action==='download');assert.equal(downloads.length,6);
+  assert.ok(downloads.every(r=>r.event.targets.some(t=>t.patientLinkSnapshot?.value?.patientId===patient.patientId)));
+  const history=await witness.$queryRaw`SELECT body FROM emr_audit.request_event WHERE request_id=${id} ORDER BY sequence`;
+  assert.equal(history.length,5);assert.equal(history[0].body.steps.length,1);assert.equal(history.at(-1).body.closed.evidenceId,'synthetic-close');
+  console.log('CD-08 HTTP/PG: 7 routes, six recorded drafts, no-leak followup, closure/replay, denial and append-only history PASS');
+  await ok('officer','POST','roster/incident-officer',{kind:'granted',subject:{issuer:officer.issuer,subject:officer.subject},
+    scopes:['investigate','export'],validFrom:time(-1000),validUntil:null});
+  const exemptId=randomUUID(), exemptInput={...input,incidentId:exemptId,facts:{...input.facts,incidentId:exemptId,
+    status:'confirmed',possibleGround:null,reportTriggers:['sensitive-or-unique']}};
+  let exempt=await ok('auditor','POST','incidents',exemptInput);
+  const report=exempt.plan.obligations.find(o=>o.family==='report');
+  const decision={operationId:'exemption',decision:{decisionId:'exemption',obligationKey:report.obligationKey,at:at(-1000),
+    authorityEvidenceId:'synthetic-authority',evidenceId:'synthetic-risk-reduction',reason:'Synthetic documented report exemption',
+    effect:'report-exemption',category:'risk-substantially-reduced',basis:'privacy-decree:40.1:last-sentence',stillOwed:false,
+    decider:{verifiedAt:at(-5000),designation:{categoryBasis:'privacy-decree:32.2.1',categoryEvidenceId:'synthetic-category',
+      qualificationRequired:false,qualificationAssessmentEvidenceId:'synthetic-qualification'}}}};
+  assert.equal((await call('auditor','POST',`incidents/${exemptId}/findings`,decision)).body.code,'AuditorDesignationAuthorityRequired');
+  assert.equal((await call('officer','POST',`incidents/${exemptId}/findings`,{...decision,decision:{...decision.decision,basis:'wrong'}})).body.code,'IncidentResponseRefused');
+  exempt=await ok('officer','POST',`incidents/${exemptId}/findings`,decision);
+  assert.equal(exempt.plan.obligations.find(o=>o.family==='report').status,'exempt');
+  assert.equal(exempt.plan.ledger.decisions[0].decider.by.id,officer.id);
+  assert.equal(exempt.plan.ledger.decisions[0].decider.evidenceId,'synthetic-designation-authority');
+  for(const o of exempt.plan.obligations.filter(o=>o.stillOwed)) await ok('auditor','POST',`incidents/${exemptId}/notices`,{
+    operationId:o.kind,notice:{kind:o.kind,triggeredAt:o.triggeredAt,triggerEventId:o.triggerEventId,recipientScopeRef:o.recipientScopeRef,
+      noticeId:o.kind,sentAt:at(-500),coversAll:true,evidenceId:'synthetic-notice',coveredFields:o.requiredFields,channel:'affected-users'}});
+  exempt=await ok('auditor','POST',`incidents/${exemptId}/close`,{evidenceId:'synthetic-exempt-close'});
+  assert.equal(exempt.status,'Closed');
+  await ok('officer','POST',`incidents/${exemptId}/findings`,decision);
+  const reopened=await ok('auditor','GET',`incidents/${exemptId}`);
+  assert.equal(reopened.plan.obligations.find(o=>o.family==='report').closureGround,'report-exemption');
+  assert.ok(reopened.plan.ledger.notices.every(n=>!n.kind.startsWith('pipc-kisa')));
+  const exemptRows=await witness.$queryRaw`SELECT body FROM emr_audit.request_event WHERE request_id=${exemptId} ORDER BY sequence`;
+  assert.equal(exemptRows.length,4);assert.equal(exemptRows[0].body.closed,null);
+  assert.equal(exemptRows[1].body.steps.at(-1).decisions[0].evidenceId,'synthetic-risk-reduction');
+
+  const oldId=randomUUID(),newId=randomUUID();
+  const replacementInput=incidentId=>({...input,incidentId,facts:{...input.facts,incidentId}});
+  const original=await ok('auditor','POST','incidents',replacementInput(oldId));
+  const replacement=await ok('auditor','POST','incidents',replacementInput(newId));
+  for(const [target,code] of [[oldId,'IncidentConflict'],[randomUUID(),'IncidentNotFound'],[id,'IncidentClosed']])
+    assert.equal((await call('auditor','POST',`incidents/${oldId}/close`,{evidenceId:'synthetic-corrected',supersededBy:target})).body.code,code);
+  // Opposite requests share the same ordered locks. Exactly one replacement may commit.
+  const race=await Promise.all([
+    call('auditor','POST',`incidents/${oldId}/close`,{evidenceId:'synthetic-corrected',supersededBy:newId}),
+    call('auditor','POST',`incidents/${newId}/close`,{evidenceId:'synthetic-corrected',supersededBy:oldId})]);
+  assert.equal(race.filter(r=>r.body.status==='Closed').length,1);
+  assert.equal(race.find(r=>r.body.status!=='Closed').body.code,'IncidentClosed');
+  const retired=race.find(r=>r.body.status==='Closed').body, retiredId=retired.incidentId;
+  const oldScope=retiredId===oldId?original.scope:replacement.scope;
+  await ok('auditor','POST',`incidents/${retiredId}/close`,{evidenceId:'synthetic-corrected',supersededBy:retired.closed.supersededBy});
+  const read=await ok('auditor','GET',`incidents/${retiredId}`);
+  assert.equal(read.plan.verdict,'possible');assert.equal(read.history.length,1);
+  assert.deepEqual(read.scope,oldScope);
+  for(const form of ['possibility','confirmed','not-a-leak','report','medical','network']){
+    const draft=await ok('auditor','GET',`incidents/${retiredId}/drafts/${form}`);
+    assert.equal(draft.verdict,'possible');assert.deepEqual(draft.scope,oldScope);
+  }
+  const replacedRows=await witness.$queryRaw`SELECT body FROM emr_audit.request_event WHERE request_id=${retiredId} ORDER BY sequence`;
+  assert.equal(replacedRows.length,2);assert.equal(replacedRows[0].body.closed,null);
+  assert.equal(replacedRows[1].body.closed.supersededBy,retired.closed.supersededBy);
+  console.log('CD-08 r2 HTTP/PG: report exemption closure/reopen, superseded closure/reopen, unchanged scope/drafts, concurrent cycle refusal and append-only history PASS');
+}
 
 async function rightsAndInspection(port,db,witness,ok,call,auditor,patient,signed) {
   const {withSnapshot}=load('emr-runtime/context'), {reloadLegalHolds}=load('emr-contract/lawful-defaults');

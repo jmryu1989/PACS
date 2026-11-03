@@ -16,6 +16,7 @@
   let inspectionSequence = 0, inspectionPending = false, inspectionSnapshot = null, inspectionFinished = false;
   let disclosureSequence = 0, disclosurePending = false, disclosureSnapshot = null, disclosureCopy = null;
   let rightsSequence = 0, rightsPending = false, rightsSnapshot = null;
+  let incidentSequence = 0, incidentPending = false, incidentSnapshot = null, incidentDownload = null;
   const message = text => { el('message').textContent = text; };
   const value = item => item == null ? 'Not Recorded' : typeof item === 'string' ? item : JSON.stringify(item);
   const fact = item => !item ? 'Not Recorded' : item.status === 'known' ? value(item.value) : `${item.status}: ${item.reason}`;
@@ -25,7 +26,7 @@
     el('export').disabled = !ready || denied || pending;
     el('more').disabled = !ready || denied || pending;
     el('more').hidden = !streams.some(key => pages[key]?.next);
-    inspectionControls(); disclosureControls(); rightsControls();
+    inspectionControls(); disclosureControls(); rightsControls(); incidentControls();
   }
   function clear() {
     sequence++; pending = false; selection = null; pages = {};
@@ -36,7 +37,7 @@
     controls();
   }
   function refuse() {
-    denied = true; clear(); clearInspection(); clearDisclosure(true); clearRights(true); el('workspace').hidden = true;
+    denied = true; clear(); clearInspection(); clearDisclosure(true); clearRights(true); clearIncident(); el('workspace').hidden = true;
     el('form').reset();
     message('감사 기록을 조회할 권한이 없습니다.');
   }
@@ -596,6 +597,229 @@
   rightsEl('decide').addEventListener('click', () => rightsRequest('decide'));
   rightsEl('notify').elements.outcome.addEventListener('change', rightsControls);
 
+  const incidentEl = name => el(`incident-${name}`);
+  function incidentControls() {
+    const disabled = !ready || denied || incidentPending;
+    for (const button of incidentEl('workspace').querySelectorAll('button')) button.disabled = disabled;
+    incidentEl('finding').disabled = disabled || !incidentSnapshot || incidentSnapshot.status === 'Closed';
+    for (const mode of ['notice', 'close']) incidentEl(mode).querySelector('button').disabled = disabled || !incidentSnapshot || incidentSnapshot.status === 'Closed';
+  }
+  function clearIncident() {
+    incidentSequence++; incidentPending = false; incidentSnapshot = null;
+    incidentEl('detail').hidden = true; incidentEl('listing').replaceChildren();
+    for (const name of ['state', 'scope', 'history', 'draft-content']) incidentEl(name).textContent = '';
+    if (incidentDownload) { URL.revokeObjectURL(incidentDownload); incidentDownload = null; }
+    incidentControls();
+  }
+  const incidentJson = v => JSON.stringify(v, null, 2);
+  const incidentDateInput = at => {
+    if (!at) return '';
+    const value = new Date(at).toISOString().replace(/Z$/, '').replace(/0+$/, '').replace(/\.$/, '');
+    return value.endsWith(':00') ? value.slice(0, -3) : value;
+  };
+  function incidentScopeText(scope) {
+    return [scope.subjectsIdentifiable ? '원장 조회 범위에서 식별되었습니다.' : '영향 대상자를 전부 특정할 수 없습니다. 아래 식별된 일부를 전체 대상 또는 0명으로 해석하지 마세요.',
+      `Period: ${scope.filters.from} — ${scope.filters.to}`, ...scope.reasons.map(r => `확인 근거: ${r.note || r.code || r.kind}`),
+      ...scope.identified.map(p => `Patient: ${p.patient.patientId} / ${p.patient.assigningAuthority}\nEvents: ${p.eventIds.join(', ')}\nFirst / Last: ${p.firstAt} / ${p.lastAt}`),
+      ...scope.identifiedLocally.map(p => `Local Patient: ${fact(p.source.sourcePatientId)} / ${fact(p.source.sourceInstitution)}\nStudies: ${p.studyIds.join(', ')}\nEvents: ${p.eventIds.join(', ')}`)].join('\n\n');
+  }
+  function incidentDraftText(draft) {
+    return [draft.title, `Status: ${draft.status}`, draft.wording, ...(draft.applicabilityNote ? [draft.applicabilityNote] : []), `Incident: ${draft.incidentId} / ${draft.incidentType}`,
+      `Awareness: ${draft.awarenessAt}`, `Verdict: ${draft.verdict} / ${draft.determinationAt}`,
+      `Evidence: ${draft.facts.evidenceId}`, `Basis: ${draft.basis.join(', ')}`, draft.cloud, 'Impact Scope', incidentScopeText(draft.scope),
+      ...draft.obligations.map(o => `${o.kind}\nRecipient: ${o.recipient}\nDue: ${o.dueAt || o.timing}\nStatus: ${o.status}\n` +
+        o.requiredFields.map(field => `${field}: 문안 확정 전 (P5)`).join('\n')),
+      'Recorded Facts', incidentJson(draft.facts), 'Performance Evidence', incidentJson(draft.evidence)].join('\n\n');
+  }
+  function incidentFields() {
+    const select = incidentEl('notice').elements.obligation;
+    const duty = incidentSnapshot?.plan.obligations.find(o => o.obligationKey === select.value);
+    incidentEl('fields').replaceChildren();
+    for (const field of duty?.requiredFields || []) {
+      const label = document.createElement('label'), input = document.createElement('input');
+      input.type = 'checkbox'; input.name = 'coveredFields'; input.value = field;
+      label.append(document.createTextNode(field.replaceAll('-', ' ')), input); incidentEl('fields').append(label);
+    }
+  }
+  function incidentRecordType() {
+    const form = incidentEl('notice'), type = form.elements.recordType.value;
+    for (const group of form.querySelectorAll('[data-incident-record]')) {
+      group.hidden = !group.dataset.incidentRecord.split(' ').includes(type); group.disabled = group.hidden;
+    }
+    const accepted = type === 'delay' && form.elements.accepted.checked;
+    for (const [name, active] of [['causal', accepted], ['decider', accepted || type === 'exemption']]) {
+      incidentEl(name).hidden = !active; incidentEl(name).disabled = !active;
+    }
+    form.elements.decisionId.required = type === 'exemption' || accepted;
+  }
+  const incidentStatus = data => (data.closed?.supersededBy || data.supersededBy) ?
+    `Closed (Superseded by ${data.closed?.supersededBy || data.supersededBy})` : data.status;
+  function showIncident(data) {
+    incidentSnapshot = data; incidentEl('detail').hidden = false;
+    incidentEl('state').textContent = `${data.incidentId}\nStatus: ${incidentStatus(data)}\nVerdict: ${data.plan.verdict}\nAs of: ${data.plan.asOf}\n${data.cloud}`;
+    incidentEl('scope').textContent = incidentScopeText(data.scope);
+    incidentEl('history').textContent = incidentJson({ history: data.history, closure: data.closed, notices: data.plan.ledger.notices,
+      decisions: data.plan.ledger.decisions, delays: data.plan.ledger.delays, assessments: data.plan.ispAssessments });
+    const table = document.createElement('table'), header = document.createElement('tr');
+    for (const name of ['Duty', 'Recipient', 'Due / Timing', 'Remaining', 'Status / Performance']) { const th = document.createElement('th'); th.textContent = name; header.append(th); }
+    table.append(header); const select = incidentEl('notice').elements.obligation; select.replaceChildren();
+    for (const duty of data.plan.obligations) {
+      const tr = document.createElement('tr'), remaining = duty.dueAt === null ? '별도 숫자 기한 없음' : `${Math.trunc((Date.parse(duty.dueAt) - Date.parse(data.plan.asOf)) / 60000)} min`;
+      const delays = data.plan.ledger.delays.filter(d => duty.delayRefs.includes(d.delayId));
+      const delayText = delays.map(d => `\nDelay: ${d.delayId} / ${d.accepted ? 'Accepted' : 'Pending Review'} / ${d.clause} / ${d.version}\n${d.reason} / Evidence: ${d.evidenceId}` +
+        (d.causalReview ? `\n${d.causalReview.reason} / Evidence: ${d.causalReview.evidenceId}` : '')).join('');
+      for (const text of [duty.kind, duty.recipient, `${duty.dueAt || '—'} / ${duty.timing}${delays.length ? `\nOriginal Due: ${duty.originalDueAt || '—'}` : ''}${delayText}`, remaining,
+        `${duty.status} / ${duty.stillOwed ? 'Pending' : 'Resolved'} / ${duty.noticeRefs.join(', ')}`]) {
+        const td = document.createElement('td'); td.textContent = text; tr.append(td);
+      }
+      table.append(tr);
+      if (duty.stillOwed) { const option = document.createElement('option'); option.value = duty.obligationKey; option.textContent = `${duty.kind} / ${duty.recipient}`; select.append(option); }
+    }
+    const cloud = document.createElement('tr');
+    for (const text of ['cloud-incident (클라우드컴퓨팅법 제25조)', '조건부 (#69, 공급 구조 결정 전)', '—', '—', 'Not Tracked']) {
+      const td = document.createElement('td'); td.textContent = text; cloud.append(td);
+    }
+    table.append(cloud);
+    incidentEl('obligations').replaceChildren(table); incidentFields();
+    const latest = data.history.at(-1).facts, form = incidentEl('register');
+    for (const name of ['awarenessAt', 'determinationAt', 'newlyConfirmedAt']) form.elements[name].value = incidentDateInput(latest[name]);
+    for (const name of ['status', 'evidenceId']) form.elements[name].value = latest[name];
+    form.elements.detailsComplete.checked = latest.detailsComplete;
+    if (latest.possibleGround) form.elements.possibleGround.value = latest.possibleGround;
+    form.elements.incidentType.value = data.incidentType;
+    const filters = data.scope.filters;
+    form.elements.from.value = incidentDateInput(filters.from); form.elements.to.value = incidentDateInput(filters.to);
+    form.elements.patientId.value = filters.patient?.patientId || ''; form.elements.assigningAuthority.value = filters.patient?.assigningAuthority || '';
+    form.elements.act.value = Object.keys(actions).find(key => JSON.stringify(actions[key]) === JSON.stringify(filters.actions)) || '';
+    const determination = data.scope.reasons.find(r => ['access-outside-ledger', 'records-not-attributable'].includes(r.kind));
+    form.elements.scopeKind.value = determination?.kind || ''; form.elements.scopeNote.value = determination?.note || '';
+    for (const input of form.querySelectorAll('[name="trigger"]')) input.checked = latest.reportTriggers.includes(input.value);
+    form.elements.medicalType.value = latest.medicalIncident?.type || '';
+    form.elements.medicalOccurredAt.value = incidentDateInput(latest.medicalIncident?.occurredAt);
+    form.elements.medicalDiscoveredAt.value = incidentDateInput(latest.medicalIncident?.discoveredAt);
+    form.elements.electronicIntrusion.checked = latest.medicalIncident?.electronicIntrusion || false;
+    const isp = latest.ispIncident;
+    form.elements.networkAttack.checked = isp?.attackCaused || false;
+    form.elements.networkEventId.value = isp?.eventId || ''; form.elements.ispStatus.value = String(isp?.status ?? 'unknown');
+    form.elements.telecomBusiness.checked = isp?.verification?.types.telecomBusiness || false;
+    form.elements.forProfitTelecomInformation.checked = isp?.verification?.types.forProfitTelecomInformation || false;
+    form.elements.ispEvidence.value = isp?.verification?.evidenceId || ''; form.elements.ispBasis.value = isp?.verification?.nonApplicabilityBasis || '';
+    form.elements.networkOccurredAt.value = incidentDateInput(isp?.occurrence?.occurredAt);
+    incidentControls();
+  }
+  function incidentFacts() {
+    const form = incidentEl('register'), data = new FormData(form), v = Object.fromEntries(data);
+    const previous = incidentSnapshot?.history.at(-1).facts;
+    const facts = { ...(previous || {}), incidentId: incidentEl('id').value.trim(), awarenessAt: utcInput(v.awarenessAt),
+      determinationAt: utcInput(v.determinationAt), status: v.status, possibleGround: v.status === 'possible' ? v.possibleGround : null,
+      detailsComplete: data.has('detailsComplete'), newlyConfirmedAt: v.newlyConfirmedAt ? utcInput(v.newlyConfirmedAt) : null,
+      evidenceId: v.evidenceId, reportTriggers: data.getAll('trigger'), medicalIncident: v.medicalType ? {
+        type: v.medicalType, occurredAt: utcInput(v.medicalOccurredAt), discoveredAt: utcInput(v.medicalDiscoveredAt), electronicIntrusion: data.has('electronicIntrusion') } : null };
+    delete facts.recordedAt; delete facts.verdictId; delete facts.supersedes;
+    if (data.has('networkAttack')) {
+      const occurredAt = v.networkOccurredAt ? utcInput(v.networkOccurredAt) : null;
+      facts.ispIncident = { ...(previous?.ispIncident || {}), eventId: v.networkEventId, attackCaused: true, status: v.ispStatus === 'unknown' ? 'unknown' : v.ispStatus === 'true',
+        occurrence: occurredAt === previous?.ispIncident?.occurrence?.occurredAt ? previous.ispIncident.occurrence :
+          { occurredAt, endedAt: null, evidenceId: v.evidenceId, ...(previous?.ispIncident?.occurrence ? { correction: {
+            supersedes: previous.ispIncident.occurrence.evidenceId, at: facts.determinationAt, reason: '사고 발생 시각 확인 정정', evidenceId: v.evidenceId } } : {}) } };
+      delete facts.ispIncident.verification;
+      if (v.ispStatus !== 'unknown') facts.ispIncident.verification = { at: facts.determinationAt, evidenceId: v.ispEvidence,
+        types: { telecomBusiness: data.has('telecomBusiness'), forProfitTelecomInformation: data.has('forProfitTelecomInformation') },
+        ...(v.ispStatus === 'false' ? { nonApplicabilityBasis: v.ispBasis } : {}) };
+    }
+    return facts;
+  }
+  async function incidentRequest(mode) {
+    if (!ready || denied || incidentPending) return;
+    const id = incidentEl('id').value.trim(); let path = 'incidents', body;
+    try {
+      if (mode === 'register') {
+        const v = Object.fromEntries(new FormData(incidentEl('register')));
+        if (!!v.patientId !== !!v.assigningAuthority) throw Error('환자 ID와 발급 기관을 함께 입력하세요.');
+        body = { incidentId: id, incidentType: v.incidentType, facts: incidentFacts(), query: { from: utcInput(v.from), to: utcInput(v.to),
+          ...(v.patientId ? { patient: { patientId: v.patientId, assigningAuthority: v.assigningAuthority } } : {}),
+          ...(actions[v.act] ? { actions: actions[v.act] } : {}) }, determinations: v.scopeKind ? [{ kind: v.scopeKind, note: v.scopeNote }] : [] };
+      } else if (mode !== 'list') {
+        path += `/${encodeURIComponent(id)}`;
+        if (mode === 'finding') { path += '/findings'; const facts = incidentFacts(); body = { operationId: `finding:${facts.evidenceId}:${facts.determinationAt}`, facts }; }
+        if (mode === 'notice') {
+          const data = new FormData(incidentEl('notice')), v = Object.fromEntries(data);
+          const o = incidentSnapshot.plan.obligations.find(o => o.obligationKey === v.obligation);
+          if (!o) throw Error('기록할 의무를 선택하세요.');
+          if (v.recordType === 'notice') {
+            path += '/notices'; body = { operationId: `notice:${v.evidenceId}`, notice: { kind: o.kind, triggeredAt: o.triggeredAt, triggerEventId: o.triggerEventId,
+            recipientScopeRef: o.recipientScopeRef, noticeId: v.evidenceId, evidenceId: v.evidenceId, sentAt: utcInput(v.sentAt),
+            channel: v.channel, coversAll: data.has('coversAll'), coveredFields: data.getAll('coveredFields') } };
+          } else {
+            path += '/findings';
+            const decider = v.recordType === 'exemption' || data.has('accepted') ? {
+              verifiedAt: utcInput(v.verifiedAt), ...(v.exemptionEvidenceId ? { exemptionEvidenceId: v.exemptionEvidenceId } : {}),
+              designation: { categoryBasis: v.designationBasis, categoryEvidenceId: v.categoryEvidenceId,
+                qualificationAssessmentEvidenceId: v.qualificationAssessmentEvidenceId, qualificationRequired: data.has('qualificationRequired'),
+                ...(v.qualificationEvidenceId ? { qualificationEvidenceId: v.qualificationEvidenceId } : {}) } } : undefined;
+            const common = { obligationKey: o.obligationKey, evidenceId: v.decisionEvidenceId, reason: v.decisionReason };
+            if (v.recordType === 'exemption') body = { operationId: `decision:${v.decisionId}`, decision: { ...common,
+              decisionId: v.decisionId, at: utcInput(v.decisionAt), authorityEvidenceId: v.authorityEvidenceId,
+              effect: 'report-exemption', category: 'risk-substantially-reduced', basis: 'privacy-decree:40.1:last-sentence', stillOwed: false, decider } };
+            else body = { operationId: `delay:${v.delayId}`, delay: { ...common, delayId: v.delayId, clause: v.delayClause, version: v.delayVersion,
+              startedAt: utcInput(v.startedAt), clearedAt: v.clearedAt ? utcInput(v.clearedAt) : null, accepted: data.has('accepted'),
+              decisionId: v.decisionId || null, supersedes: v.supersedesDelay || null, category: v.delayCategory,
+              ...(decider ? { decider, causalReview: { evidenceId: v.causalEvidenceId, reviewedAt: utcInput(v.reviewedAt),
+                relatesToTime: utcInput(v.startedAt), createdAt: utcInput(v.createdAt), receivedAt: utcInput(v.receivedAt), reason: v.causalReason } } : {}) } };
+          }
+        }
+        if (mode === 'close') {
+          path += '/close'; body = Object.fromEntries(new FormData(incidentEl('close')));
+          body.supersededBy = body.supersededBy.trim(); if (!body.supersededBy) delete body.supersededBy;
+        }
+        if (mode === 'draft') path += `/drafts/${encodeURIComponent(incidentEl('draft').elements.form.value)}`;
+      }
+    } catch (error) { incidentEl('message').textContent = error.message; return; }
+    const current = ++incidentSequence, context = KinWorkContext.capture('document');
+    const admits = () => current === incidentSequence && id === incidentEl('id').value.trim() && KinWorkContext.admits(context);
+    incidentPending = true; incidentControls(); incidentEl('message').textContent = '사건을 확인하고 있습니다.';
+    try {
+      const response = await KinSessionTransport.page().request(`${location.origin}/api/emr-audit/${path}`,
+        { method: ['list', 'open', 'draft'].includes(mode) ? 'GET' : 'POST', ...(body ? { json: body } : {}), context });
+      if (!admits()) return;
+      if (response.status === 403 && response.body?.code === 'AuditorNotDesignated') { refuse(); return; }
+      if (response.status === 403 && response.body?.code === 'AuditScopeNotGranted') {
+        clearIncident(); incidentEl('workspace').hidden = true; incidentEl('message').textContent = '이 계정에는 사건 조사와 전체 범위 내보내기 권한이 없습니다.'; return;
+      }
+      if (!response.ok || response.incomplete) throw Error(response.body?.code || 'ResponseUnavailable');
+      if (mode === 'draft') {
+        const text = incidentDraftText(response.body); incidentEl('draft-content').textContent = text;
+        if (incidentDownload) URL.revokeObjectURL(incidentDownload);
+        incidentDownload = URL.createObjectURL(new Blob([text + '\n'], { type: 'text/plain;charset=utf-8' }));
+        const link = document.createElement('a'); link.href = incidentDownload; link.download = `incident-${response.body.form}-draft.txt`; link.click();
+      } else if (mode === 'list') {
+        const list = document.createElement('ul');
+        for (const item of response.body.incidents) {
+          const li = document.createElement('li'), button = document.createElement('button');
+          button.textContent = `${item.incidentId} / ${incidentStatus(item)} / ${item.verdict}`;
+          button.addEventListener('click', () => { clearIncident(); incidentEl('id').value = item.incidentId; incidentRequest('open'); }); li.append(button); list.append(li);
+        }
+        incidentEl('listing').replaceChildren(list);
+      } else showIncident(response.body);
+      incidentEl('message').textContent = mode === 'draft' ? '초안을 내려받았습니다. 발송하거나 이행으로 기록하지 않았습니다.' : '저장된 사건 상태입니다. 음수 남은 시간은 기한 경과를 뜻하며 기록을 막지 않습니다.';
+    } catch (error) {
+      if (!admits()) return;
+      incidentSnapshot = null; incidentEl('detail').hidden = true;
+      incidentEl('message').textContent = error.message === 'IncidentDutiesOpen' ? '계약상 확인 또는 이행할 의무가 남아 종결하지 않았습니다. Open Incident로 확인하세요.' :
+        `사건 상태를 확인하지 못했습니다 (${error.message}). 입력은 유지했습니다. Open Incident로 다시 확인하세요.`;
+    } finally { if (current === incidentSequence) { incidentPending = false; incidentControls(); } }
+  }
+  incidentEl('id').addEventListener('input', clearIncident);
+  incidentEl('list').addEventListener('click', () => incidentRequest('list'));
+  incidentEl('finding').addEventListener('click', () => incidentRequest('finding'));
+  incidentEl('notice').elements.obligation.addEventListener('change', incidentFields);
+  incidentEl('notice').elements.recordType.addEventListener('change', incidentRecordType);
+  incidentEl('notice').elements.accepted.addEventListener('change', incidentRecordType);
+  incidentRecordType();
+  for (const mode of ['register', 'open', 'notice', 'close', 'draft']) incidentEl(mode).addEventListener('submit', event => {
+    event.preventDefault(); if (mode === 'open') clearIncident(); incidentRequest(mode);
+  });
+
   el('inspection-load').addEventListener('click', () => { clearInspection(); inspectionRequest('months'); });
   el('inspection-month').addEventListener('change', () => { clearInspection(); inspectionRequest('month'); });
   el('inspection-start').addEventListener('click', () => inspectionRequest('report'));
@@ -615,7 +839,7 @@
   el('logout').addEventListener('click', () => KinAuth.logout());
   KinAuth.onLifecycle(state => {
     if (['ending', 'unconfirmed', 'confirmed'].includes(state.state)) {
-      ready = false; clear(); clearInspection(); clearDisclosure(true); clearRights(true); el('workspace').hidden = true;
+      ready = false; clear(); clearInspection(); clearDisclosure(true); clearRights(true); clearIncident(); el('workspace').hidden = true;
       el('form').reset(); message('세션을 확인하고 다시 로그인하세요.');
     }
   });
@@ -628,6 +852,10 @@
     el('from').value = today.toISOString().slice(0, 16); el('to').value = tomorrow.toISOString().slice(0, 16);
     disclosureEl('id').value = crypto.randomUUID();
     rightsEl('id').value = crypto.randomUUID();
+    incidentEl('id').value = crypto.randomUUID();
+    for (const name of ['awarenessAt', 'determinationAt']) incidentEl('register').elements[name].value = new Date().toISOString().slice(0, 16);
+    incidentEl('register').elements.from.value = today.toISOString().slice(0, 16);
+    incidentEl('register').elements.to.value = tomorrow.toISOString().slice(0, 16);
     rightsEl('receive').elements.receivedAt.value = new Date().toISOString().slice(0, 16);
     for (const name of ['receivedAt', 'checkedAt']) disclosureEl('receive').elements[name].value = new Date().toISOString().slice(0, 16);
     ready = true; el('workspace').hidden = false; controls(); message('조건을 선택하고 Search로 조회하세요.');

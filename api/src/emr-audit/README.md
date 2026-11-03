@@ -1,5 +1,63 @@
 # F online binding
 
+Incident binds `incidentScope` and `planIncidentResponse` unchanged. Every incident
+route requires the institution's auditor designation and both `investigate` and
+`export`: its impact scope is a complete read, never a single page.
+
+| Routes under `/api/emr-audit` | Response recording |
+| --- | --- |
+| POST incidents | Registration / exact replay: incident ID and all returned scope targets |
+| GET incidents | IDs, type, effective verdict, status and awareness only; no patient identifiers |
+| GET incidents/:id | Fixed impact scope, projected duties and evidence history |
+| POST incidents/:id/findings | Exactly one of facts, decision or delay with operationId; contract validation and exact replay |
+| POST incidents/:id/notices | Actual performance evidence and scope; no dispatch; exact replay |
+| POST incidents/:id/close | Evidence with no owed duty/unresolved decision, or supersededBy an existing open same-institution incident |
+| GET incidents/:id/drafts/:form | Six draft families with all scope targets recorded as download |
+
+The existing append-only `request_event` holds a distinct `incident` body. It stores
+the registration query and fixed viewing-stream snapshot (also containing changes),
+scope determinations, accepted findings/notices with actor/roles/time, and closure
+evidence. The shared request-ID lock prevents copy/rights collisions. No migration,
+clinical write or external dispatch is involved. Historical authority is reconstructed
+from the original subject's roster at acceptance; current authority gates every route.
+Plans/scopes are reconstructed through the real contract constructors, preserving the
+original findings' attribution. Raw source rows do not cross the response boundary.
+Returned patient/local-source/event references are recorded on every detail and draft.
+An unreadable/corrupt snapshot stays explicitly unidentifiable, never zero affected.
+
+Closure requires a non-possible verdict and the absence of remaining contract duties.
+Not-a-leak after a possibility notice still requires the contract's follow-up. Late
+performance is accepted and keeps the original clock/delay. Closed incidents allow
+reads/drafts/exact replay but refuse new findings/notices or replacement closure.
+Listing uses the effective contract verdict, including retroactively recorded facts.
+Decisions and delays are saved on their acceptance step and replayed through the
+unchanged contract. Decision makers bind to the current actor's institution grantor
+record; designation/qualification and causal evidence still require contract validation.
+Report exemption is a recorded human decision, never an automatic product conclusion.
+Accepted delays display their cause and evidence while retaining the original deadline.
+Superseded closure records evidenceId and supersededBy without changing any verdict,
+scope or draft. Both request IDs are locked in sorted order; self, foreign, missing
+or closed replacements refuse. Exact closure replay remains readable even after the
+replacement later closes. An open replacement requirement prevents cycles.
+
+Snapshot storage/list-read performance re-check trigger (P3-3): before a larger
+hospital, or when an incident query covers a whole month of an institution.
+
+Form keys: `possibility`, `confirmed` (full/priority/additional), `not-a-leak`, `report`
+(PIPC/KISA), `medical` (MOHW), `network` (ISP report/supplement/user notice). Drafts
+contain actual facts/scope, matching duties with required fields, legal grounds and
+performance evidence. P5 wording remains pending; #69 is `조건부`. The cloud duty
+is represented by a display-only cloud-incident row (클라우드컴퓨팅법 제25조,
+조건부 #69, 공급 구조 결정 전); it creates no tracked obligation. A form without
+matching contract obligations has no static legal basis and explicitly says
+"현재 계약 결과에 이 서식의 의무가 없습니다(조회 사실만 포함)". CVR Misdelivery
+is manual until CD-12. Printing/downloading is never notice performance. Numeric,
+immediate and provisional deadlines are taken from the date-sensitive contract.
+
+REQ-EMR-15/19 → RISK-F-07 → TEST-F-INCIDENT / TEST-AUDIT-INCIDENT / TEST-F-LINK-INCIDENT.
+Service, browser and HTTP/PG tests: `incident_service_test.cjs`,
+`audit_incident_dom_test.py`, `link_pg_test.cjs`.
+
 `EmrAuditController` is registered in `AppModule`. Its routes use `AuthGuard`
 and `RequestContextSource`; identity, institution and current rights are server
 facts. On a clean install, after migrations the institution's configuration owner

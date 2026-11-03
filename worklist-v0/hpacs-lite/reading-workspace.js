@@ -492,9 +492,13 @@ window.KinReadingWorkspace = function (app) {
     requestAnimationFrame(() => {
       if (!active || ended || !loaded || retained !== frame || !sameTarget() || frame.hidden) return;
       try {
-        const w = frame.contentWindow;
+        const w = frame.contentWindow, viewports = w.services?.cornerstoneViewportService;
         w.dispatchEvent(new w.Event('resize'));
-        w.cornerstone?.getRenderingEngines?.().filter(engine => engine.id !== '_thumbnails')
+        // The viewer's own resize keeps each plane's zoom and pan relative to its new size. A bare engine
+        // resize keeps the absolute camera instead: run while the image area changes size (a dock closing in
+        // the same frame) and ahead of the viewer's queued resize, it left the planes 1.5x enlarged for good.
+        if (typeof viewports?.performResize === 'function') viewports.performResize();
+        else w.cornerstone?.getRenderingEngines?.().filter(engine => engine.id !== '_thumbnails')
           .forEach(engine => engine.resize(true, true));
       } catch (_) { /* Its loading/error state is handled by the document check. */ }
     });

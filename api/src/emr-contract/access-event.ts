@@ -141,12 +141,14 @@ function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manif
 function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manifest: readonly ResolvedRecord[] | undefined, failure: boolean,
     surface?: string): (AccessTarget | LocalAuditTarget)[] {
   if (!Array.isArray(input)) throw new Error('Actual returned target set required');
+  const incident = ['POST emr-audit/incidents', 'GET emr-audit/incidents', 'GET emr-audit/incidents/:id', 'POST emr-audit/incidents/:id/findings', 'POST emr-audit/incidents/:id/notices', 'POST emr-audit/incidents/:id/close', 'GET emr-audit/incidents/:id/drafts/:form'].includes(surface);
+  const incidentDetails = incident && surface !== 'GET emr-audit/incidents';
   const inspectionDetails = ['GET emr-audit/inspections/:month', 'POST emr-audit/inspections/:month/report'].includes(surface);
   const inspection = inspectionDetails || ['GET emr-audit/inspections', 'POST emr-audit/inspections/:month/steps'].includes(surface);
   return input.map((target, index) => {
     // Preserve A1's observed subject when F records access to that audit row.
     // Clinical record reads still require their existing patient-linked target contract.
-    if ((inspectionDetails || ['POST emr-audit/investigations', 'POST emr-audit/exports'].includes(surface)) &&
+    if ((incidentDetails || inspectionDetails || ['POST emr-audit/investigations', 'POST emr-audit/exports'].includes(surface)) &&
         target?.kind === 'access-audit' && 'sourcePatientId' in target) {
       const t = object(target, ['kind', 'studyId', 'recordId', 'versionId', 'sourcePatientId', 'sourceInstitution']);
       const parsed: LocalAuditTarget = { kind: 'access-audit', studyId: fact(t.studyId, string),
@@ -177,6 +179,7 @@ function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manif
     const absent = (f: EvidenceFact<unknown>) => f.status === 'not-applicable' && f.reason === 'non-record-target';
     if (parsed.recordId.status === 'known' && absent(parsed.patientLinkSnapshot) && absent(parsed.studyId) && (
         (surface === 'GET emr-audit/rights-requests' && kind === 'disclosure' && absent(parsed.versionId)) ||
+        (incident && kind === 'access-audit' && absent(parsed.versionId)) ||
         (inspection && kind === 'access-audit' && (absent(parsed.versionId) ||
           (inspectionDetails && parsed.versionId.status === 'known' && parsed.versionId.value === parsed.recordId.value))))) return parsed;
     const facts = [parsed.patientLinkSnapshot, parsed.studyId, parsed.recordId, parsed.versionId];
@@ -194,7 +197,7 @@ function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manif
       'GET emr-audit/requests/:id', 'POST emr-audit/requests/:id/extend', 'POST emr-audit/requests/:id/resolve',
       'POST emr-audit/rights-requests', 'GET emr-audit/rights-requests/:id',
       'POST emr-audit/rights-requests/:id/decide', 'POST emr-audit/rights-requests/:id/notify'].includes(surface);
-    const investigatedEvent = kind === 'access-audit' && (inspectionDetails || ['POST emr-audit/investigations', 'POST emr-audit/exports'].includes(surface));
+    const investigatedEvent = kind === 'access-audit' && (incidentDetails || inspectionDetails || ['POST emr-audit/investigations', 'POST emr-audit/exports'].includes(surface));
     const required = requestFacts ? [parsed.patientLinkSnapshot, parsed.recordId] :
       investigatedEvent ? [parsed.patientLinkSnapshot, parsed.recordId, parsed.versionId] :
       nativeRecord ? [parsed.studyId, parsed.recordId, parsed.versionId] : facts;
