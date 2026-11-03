@@ -16,7 +16,7 @@ import { need, inst } from './access';
 import type { Caller } from './access';
 import { citationLimit, structureLimit, isStructureCheck, isCitationCheck } from './report-evidence';
 import type { PacsReportEvidence } from './report-evidence';
-import type { PacsReportDraft, DraftRequestFacts } from './report-draft';
+import type { PacsReportDraft, DraftRequestFacts, EndedWork } from './report-draft';
 
 export class PacsReportCommit {
   constructor(
@@ -61,9 +61,10 @@ export class PacsReportCommit {
     let candidate: { sub: string } | null = null;
 
     // CD-09-P: the work this commit ends by its own signed result, or by the author's Reset that keeps none of it.
-    let ended: { unit: string; author: string } | null = null;
+    let ended: EndedWork | null = null;
     try {
-      const committed = await this.reportDraft.draftTransaction(uid, c, session, expected.epoch, async () => {
+      // The answer follows the commit judgement of the end (settleEnding), never the transaction's promise alone.
+      return await this.reportDraft.settleEnding(() => this.reportDraft.draftTransaction(uid, c, session, expected.epoch, async () => {
         await this.studyAccess.prepare(c,[uid]);
         if (action === 'preliminary') {
           // Resolve the current picker identity before holding study/session locks over network I/O.
@@ -382,9 +383,7 @@ export class PacsReportCommit {
         return { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, report, c, cleared), signature };
       }, undefined, { facts, surface: 'POST studies/:uid/report/commit',
         action: action === 'approve' ? 'approve-sign' : action === 'addendum' ? 'addendum'
-          : action === 'reset' ? 'cancel' : 'write', target: 'report-version' });
-      await this.reportDraft.settleEnd(ended);
-      return committed;
+          : action === 'reset' ? 'cancel' : 'write', target: 'report-version' }), () => ended);
     } catch (e: any) {
       // CHECK 백스톱도 서버 고장이 아니라 명명된 409다. 우리 제약 이름일 때만 옮긴다.
       if (isCitationCheck(e)) citationLimit();

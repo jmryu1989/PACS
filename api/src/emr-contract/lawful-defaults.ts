@@ -638,6 +638,14 @@ export async function withRetentionChange<T>(store: Pick<DisposalAuditStore, 'wi
   });
 }
 export interface DestructionReceipt { completedAt: string; method: 'irreversible-permanent-deletion' }
+/**
+ * The destroyer could not tell whether its deletion committed (the confirmation read failed or timed out). Neither
+ * completed nor failed is true of it: started stays the last record until the destroyer settles the attempt.
+ */
+export class CommitOutcomeUnknown extends Error {
+  readonly code = 'DestructionCommitUnknown';
+  constructor() { super('DestructionCommitUnknown'); this.name = 'CommitOutcomeUnknown'; }
+}
 function seoulDay(at: string): string { return new Date(Date.parse(utc(at)) + SEOUL_MS).toISOString().slice(0, 10); }
 function dueBy(at: string): string {
   const local = new Date(Date.parse(utc(at)) + SEOUL_MS);
@@ -670,7 +678,11 @@ async function destroyWithJournal<T>(store: DisposalAuditStore, request: T, requ
     const receipt = object(await destroy(request), ['completedAt', 'method']);
     completedAt = utc(receipt.completedAt);
     if (receipt.method !== 'irreversible-permanent-deletion' || completedAt < requestedAt) refuse('DestructionReceiptInvalid');
-  } catch (error) { await append('failed', requestedAt); throw error; }
+  } catch (error) {
+    // failed says the deletion did not happen; an unknown outcome is not that.
+    if (!(error instanceof CommitOutcomeUnknown)) await append('failed', requestedAt);
+    throw error;
+  }
   return append('completed', completedAt);
 }
 /** H erases all parts/signatures/replicas/recoverable backups atomically against the reference/hold snapshot. */

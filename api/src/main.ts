@@ -37,7 +37,8 @@ async function bootstrap() {
     const opened = await purpose.openGate();
     console.log(`[KIN API] Draft purpose ledger: ${opened.reapplied} re-applied, ${opened.resolved} unfinished attempts closed`);
     const swept = await purpose.sweep();
-    if (swept.some(r => r.outcome === 'refused')) console.error('[KIN API] Some ended draft works were not destroyed; the sweep reports them.');
+    if (swept.some(r => !['destroyed', 'reapplied', 'absent', 'held', 'delivery-pending'].includes(r.outcome)))
+      console.error('[KIN API] Some ended draft works were not destroyed or not confirmed; the sweep reports them.');
   } catch (error) {
     await purposeDb.$disconnect().catch(() => undefined);
     await runtime.stop(Date.now() + 5000);

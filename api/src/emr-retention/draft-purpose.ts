@@ -5,8 +5,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { PrismaClient } from '@prisma/client';
 import { resolveStoredRecord } from '../emr-contract/classification';
 import { emrAdapters } from '../emr-contract/composition';
-import { DestructionReceipt, DestructionRecord, PurposeDisposalStore, destroyAtPurposeEnd, newPurposeRecord, reloadPurposeRecord,
-  resolvePurposeEnd } from '../emr-contract/lawful-defaults';
+import { CommitOutcomeUnknown, DestructionReceipt, DestructionRecord, PurposeDisposalStore, destroyAtPurposeEnd, newPurposeRecord,
+  reloadPurposeRecord, resolvePurposeEnd } from '../emr-contract/lawful-defaults';
 import { ContractError, refuse, string } from '../emr-contract/validation';
 import { snapshotFromRows, transactionScope, withSnapshot } from '../emr-runtime/context';
 import type { ClauseRow, HoldRow, RequestRow } from '../emr-runtime/contract';
@@ -57,8 +57,10 @@ function parseRecord(value: any): Readonly<DestructionRecord> {
   return Object.freeze(value);
 }
 
-/** The append-only destruction ledger: one JSON line per record, fsync before a record counts. Created by its first
- * append with the ledger ID the database's anchor names. A partial last line is never repaired here. */
+/** The append-only destruction ledger: one JSON line per record, fsync before a record counts. Only `create` writes its
+ * header (the ledger ID the database's anchor names); an append to a missing file is refused, because a missing ledger
+ * is the gate's question (lost, or never initialized) and a new header would answer it wrongly. A partial last line is
+ * never repaired here. */
 export class PurposeLedgerFile {
   readonly file: string;
   constructor(readonly directory: string) {
@@ -95,11 +97,10 @@ export class PurposeLedgerFile {
   append(ledgerId: string, record: DestructionRecord): { seq: number; durableAt: string } {
     const parsed = parseRecord(JSON.parse(JSON.stringify(record)));
     const current = this.read();
-    if (current && current.ledgerId !== ledgerId) refuse('PurposeLedgerMismatch');
-    const lines: string[] = current ? [] : [this.header(ledgerId)];
-    const seq = (current?.entries.length ?? 0) + 1;
-    lines.push(JSON.stringify({ kind: 'entry', seq, ledgerId, appendedAt: new Date().toISOString(), record: parsed }));
-    this.write(lines, !current);
+    if (!current) refuse('PurposeLedgerMissing');
+    if (current.ledgerId !== ledgerId) refuse('PurposeLedgerMismatch');
+    const seq = current.entries.length + 1;
+    this.write([JSON.stringify({ kind: 'entry', seq, ledgerId, appendedAt: new Date().toISOString(), record: parsed })], false);
     return { seq, durableAt: new Date().toISOString() };
   }
   private header(ledgerId: string): string {
@@ -287,10 +288,72 @@ export async function decidePurposeEnd(store: Omit<PurposeDisposalStore, 'withPu
 export type DestructionOutcome =
   | { unit: string; outcome: 'destroyed'; seq: number }
   | { unit: string; outcome: 'reapplied' }
+  | { unit: string; outcome: 'reapply-not-committed' }
+  | { unit: string; outcome: 'reapply-unconfirmed' }
+  | { unit: string; outcome: 'unconfirmed' }
   | { unit: string; outcome: 'absent' }
   | { unit: string; outcome: 'delivery-pending' }
   | { unit: string; outcome: 'held'; code: string }
   | { unit: string; outcome: 'refused'; code: string };
+
+/**
+ * r3: one judgement for every path that changes the database for a work's purpose (its end, its destruction, a
+ * re-application to a restored copy). Neither the transaction's answer nor an error reading back is evidence: a failed
+ * COMMIT has answered as success on the served stack, and an error answering COMMIT does not say nothing committed.
+ *
+ * The judgement reads in a new transaction after locking a row the attempt's own transaction locked, so it reads only
+ * once that transaction has settled; the wait is bounded (the server's 3 s lock wait), and a read that cannot be made -
+ * the lock not granted in time, a lost connection - is `unknown`. A row that is merely absent is never the evidence by
+ * itself: each target names what the committed and the not-committed database each look like, and anything else
+ * (including contradicting facts) is unknown.
+ */
+export type CommitOutcome = 'committed' | 'not-committed' | 'unknown';
+export type CommitTarget =
+  // An ending transaction (Discard, Clear, the author's Reset, a signed result) on (uid, author) from `revision`.
+  | { kind: 'ended'; uid: string; author: string; unit: string; revision: number }
+  // A destruction attempt: the anchor before it, and the started record's position.
+  | { kind: 'destroyed'; unit: string; startedSeq: number; before: { seq: number; lastCompletedUnit: string | null } }
+  // A re-application of completed units to a restored copy (sweep or gate).
+  | { kind: 'reapplied'; units: readonly string[] };
+
+export async function judgeCommit(db: any, target: CommitTarget, ledger: PurposeLedgerFile | null): Promise<CommitOutcome> {
+  try {
+    return await db.$transaction(async (tx: Tx) => {
+      await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+      if (target.kind === 'ended') {
+        // The ending transaction held the study row (draftTransaction's lock order) until it settled.
+        await tx.$queryRaw`SELECT uid FROM "StudyState" WHERE uid = ${target.uid} FOR UPDATE`;
+        const end = await tx.$queryRaw`SELECT 1 AS present FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = ${target.unit}`;
+        const [draft] = await tx.$queryRaw`SELECT revision, present, "workUnit" FROM "ReportDraft"
+          WHERE uid = ${target.uid} AND author = ${target.author}`;
+        const moved = !!draft && Number(draft.revision) >= target.revision + 1 && draft.workUnit !== target.unit;
+        if (moved && end.length) return 'committed';
+        // The end row is gone only when a destruction of this unit followed the committed end.
+        const recorded = !end.length && moved && !!ledger && unitPhases(ledger.read()).has(target.unit);
+        if (recorded) return 'committed';
+        if (!end.length && draft?.present === true && Number(draft.revision) === target.revision && draft.workUnit === target.unit &&
+            !(ledger && unitPhases(ledger.read()).has(target.unit))) return 'not-committed';
+        return 'unknown';
+      }
+      if (target.kind === 'destroyed') {
+        // The destruction's transaction moved the anchor row: this lock waits for it to settle.
+        const anchor = await anchorOf(tx, true);
+        const end = await tx.$queryRaw`SELECT 1 AS present FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = ${target.unit}`;
+        const [live] = await tx.$queryRaw`SELECT count(*)::int AS n FROM "ReportDraft" WHERE "workUnit" = ${target.unit}`;
+        if (!end.length && !Number(live?.n) && anchor.seq === target.startedSeq + 1 && anchor.lastCompletedUnit === target.unit)
+          return 'committed';
+        if (end.length && anchor.seq === target.before.seq && anchor.lastCompletedUnit === target.before.lastCompletedUnit)
+          return 'not-committed';
+        return 'unknown';
+      }
+      // The re-application deleted the ended rows and emptied the live rows of these units: locking them waits for it.
+      const units = [...target.units];
+      const ended = await tx.$queryRaw`SELECT "disposalUnitId" FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = ANY(${units}::text[]) FOR UPDATE`;
+      const live = await tx.$queryRaw`SELECT "workUnit" FROM "ReportDraft" WHERE "workUnit" = ANY(${units}::text[]) FOR UPDATE`;
+      return ended.length || live.length ? 'not-committed' : 'committed';
+    }, { maxWait: 5000, timeout: 15000 });
+  } catch { return 'unknown'; }
+}
 const HELD = new Set(['LegalHoldActive', 'HoldReleaseRequired']);
 // A failed attempt the server itself retries (a database error: the settle update, the destruction transaction or its
 // commit). A refusal (hold, ledger the database cannot be matched with) waits for the sweep after its cause is cleared.
@@ -315,6 +378,12 @@ async function anchorOf(tx: Tx, forUpdate: boolean): Promise<Anchor> {
     lastCompletedAt: r.lastCompletedAt ?? null };
 }
 const holdLock = (row: any) => 'kin-hold:' + draftRecordId(row.uid, row.author);
+/** Whether this database ever handed out a work (a numbered live draft or an ended one). */
+async function anyWork(tx: Tx): Promise<boolean> {
+  const [works] = await tx.$queryRaw`SELECT EXISTS (SELECT 1 FROM "ReportDraft" WHERE "workUnit" IS NOT NULL)
+    OR EXISTS (SELECT 1 FROM "ReportDraftPurposeEnd") AS any`;
+  return works?.any === true;
+}
 
 /** Delete the stored payload of a unit the ledger already completed (a destruction whose commit was lost, or a restored
  * older copy). No new ledger record: the original completion and its day stand. */
@@ -341,6 +410,9 @@ export class DraftPurposeDisposal {
   // One ledger writer per process at a time (each holds two pooled connections: the ledger lock and the work).
   private chain: Promise<unknown> = Promise.resolve();
   private initializedSeen = false;
+  // Attempts of this process whose commit could not be judged (their started record is the ledger's last). Only the
+  // process that made the attempt knows what the anchor was before it; another process finds no evidence and refuses.
+  private readonly attempts = new Map<string, Extract<CommitTarget, { kind: 'destroyed' }>>();
   /**
    * `deliveries` is this process's registry of responses that carry drafts: the API server's own. A process without
    * one (the sweep run) cannot know what the server is still sending and reports such a work as delivery-pending.
@@ -364,7 +436,9 @@ export class DraftPurposeDisposal {
       if (result.outcome === 'refused') console.error(`[CD-09-P] Destruction of ${unit} refused: ${result.code}`);
       return result;
     })().catch(error => {
-      const retry = !(error instanceof ContractError) && !(error instanceof PurposeGateClosed) && attempt < RETRY_MS.length;
+      // An attempt of this unit whose outcome is unknown is this process's to settle: keep trying until it can read.
+      const retry = (this.attempts.has(unit) || !(error instanceof ContractError) && !(error instanceof PurposeGateClosed)) &&
+        attempt < RETRY_MS.length;
       console.error(`[CD-09-P] Destruction attempt failed${retry ? `; retry ${attempt + 1} in ${RETRY_MS[attempt]} ms` : ''}:`,
         error?.code ?? error?.name ?? 'error');
       if (retry) setTimeout(() => this.scheduleDestruction(unit, author, attempt + 1), RETRY_MS[attempt]).unref();
@@ -375,16 +449,34 @@ export class DraftPurposeDisposal {
   async drained(): Promise<void> { await Promise.allSettled([...this.inflight]); }
 
   /**
+   * An end whose commit could not be confirmed (its answer was 503 REPORT_DRAFT_END_UNCONFIRMED): judged again here
+   * with the same growing wait. Committed: destroyed like any end. Not committed: nothing to do (the draft is as it was).
+   */
+  recheckEnd(target: Extract<CommitTarget, { kind: 'ended' }>, attempt = 0): void {
+    if (attempt >= RETRY_MS.length) {
+      console.error(`[CD-09-P] End of ${target.unit} still unconfirmed; the sweep or the author's next request settles it`);
+      return;
+    }
+    setTimeout(() => {
+      void judgeCommit(this.db, target, this.ledger).then(outcome => {
+        if (outcome === 'committed') this.scheduleDestruction(target.unit, target.author);
+        else if (outcome === 'unknown') this.recheckEnd(target, attempt + 1);
+      });
+    }, RETRY_MS[attempt]).unref();
+  }
+
+  /**
    * One unit under the ledger lock (its own transaction): the database and the ledger are matched first, then one work
    * transaction locks the ended row, takes the record's hold lock, reads the facts and lets A decide. A records started,
-   * the delete and the anchor are committed, and only a committed delete is answered to A as done - A then records
-   * completed. A commit that fails (the row is still there) is A's failed; the row stays for the next attempt.
+   * the delete and the anchor are committed, and A is answered from the commit judgement: committed is done (A records
+   * completed), not committed is A's failed (the row stays for the next attempt), unknown leaves started as the last
+   * record for this process to settle (CommitOutcomeUnknown).
    */
   async destroy(unit: string): Promise<DestructionOutcome> {
     return this.serial(() => this.db.$transaction(async (lock: Tx) => {
       await lock.$executeRaw`SELECT pg_advisory_xact_lock(${LEDGER_LOCK}::bigint)`;
-      const { anchor, view } = await this.matchedLedger(lock);
-      return this.destroyLocked(unit, anchor.ledgerId, view);
+      const { anchor, view } = await this.matchedLedger(lock, 'destroy');
+      return this.destroyLocked(unit, anchor, view);
     }, { maxWait: 10000, timeout: 60000 })).then(async (result: DestructionOutcome) => {
       if (result.outcome === 'held' || result.outcome === 'refused')
         await this.db.$executeRaw`UPDATE "ReportDraftPurposeEnd" SET attempts = attempts + 1, "lastRefusal" = ${result.code}
@@ -398,23 +490,21 @@ export class DraftPurposeDisposal {
     });
   }
 
-  private async destroyLocked(unit: string, ledgerId: string, view: LedgerView | null): Promise<DestructionOutcome> {
+  private async destroyLocked(unit: string, anchor: Anchor, view: LedgerView | null): Promise<DestructionOutcome> {
+    const ledgerId = anchor.ledgerId;
     type Ready = { early: DestructionOutcome } | { tx: Tx; row: any; facts: PurposeFacts };
     const ready = deferred<Ready>(), finish = deferred<'commit' | 'rollback'>();
     const work = this.db.$transaction(async (tx: Tx) => {
       const [row] = await tx.$queryRaw`SELECT * FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = ${unit} FOR UPDATE`;
-      if (!row) return ready.resolve({ early: { unit, outcome: 'absent' } });
       const phases = unitPhases(view).get(unit);
+      // A unit the ledger completed: whatever of it this database holds again (its ended row, or the live row of a copy
+      // taken before the end) is re-applied. Nothing held is absent.
       if (completed(phases)) {
-        await reapply(tx, unit);
-        return ready.resolve({ early: { unit, outcome: 'reapplied' } });
+        const held = await reapply(tx, unit);
+        return ready.resolve({ early: { unit, outcome: held ? 'reapplied' : 'absent' } });
       }
+      if (!row) return ready.resolve({ early: { unit, outcome: 'absent' } });
       if (!row.deliverySettled) return ready.resolve({ early: { unit, outcome: 'delivery-pending' } });
-      if (dangling(phases)) {
-        // A started record whose transaction did not commit: the row is still here, so the attempt failed. Close it
-        // with its own facts before a new attempt; the ledger never shows two open attempts for one unit.
-        this.ledger.append(ledgerId, ending(phases![phases!.length - 1].record, 'failed', this.now().toISOString()));
-      }
       // The record's holds are read after any placement in flight committed (emr_access.place_hold takes this lock).
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${holdLock(row)}, 0))`;
       ready.resolve({ tx, row, facts: await readPurposeFacts(tx, row) });
@@ -422,7 +512,15 @@ export class DraftPurposeDisposal {
     }, { maxWait: 10000, timeout: 30000 });
     work.catch(error => ready.reject(error));
     const state = await ready.promise;
-    if ('early' in state) { await work; return state.early; }
+    if ('early' in state) {
+      let answer: unknown = null;
+      try { await work; } catch (error) { answer = error; }
+      if (state.early.outcome !== 'reapplied') { if (answer) throw answer; return state.early; }
+      // A re-application is answered from the committed database, whatever the transaction answered. Its failure never
+      // touches the ledger: the original completed stands.
+      const outcome = await judgeCommit(this.db, { kind: 'reapplied', units: [unit] }, null);
+      return { unit, outcome: outcome === 'committed' ? 'reapplied' : outcome === 'not-committed' ? 'reapply-not-committed' : 'reapply-unconfirmed' };
+    }
 
     const { tx, row, facts } = state;
     let startedSeq = 0;
@@ -442,11 +540,14 @@ export class DraftPurposeDisposal {
         finish.resolve('commit');
         let commitError: unknown = null;
         try { await work; } catch (error) { commitError = error; }
-        // The row decides, both ways: a failed COMMIT can reach the client as a resolved transaction (a deferred
+        // The judgement decides, both ways: a failed COMMIT can reach the client as a resolved transaction (a deferred
         // constraint's error at COMMIT was answered as success on the served stack), and an error answering COMMIT is
         // not proof that nothing committed.
-        const left = await this.db.$queryRaw<unknown[]>`SELECT 1 FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = ${unit}`;
-        if (left.length) throw commitError ?? Object.assign(new Error('The deletion did not commit'), { code: 'PurposeDeleteNotCommitted' });
+        const target = { kind: 'destroyed' as const, unit, startedSeq, before: { seq: anchor.seq, lastCompletedUnit: anchor.lastCompletedUnit } };
+        const outcome = await judgeCommit(this.db, target, null);
+        if (outcome === 'not-committed')
+          throw commitError ?? Object.assign(new Error('The deletion did not commit'), { code: 'PurposeDeleteNotCommitted' });
+        if (outcome === 'unknown') { this.attempts.set(unit, target); throw new CommitOutcomeUnknown(); }
         return { completedAt, method: 'irreversible-permanent-deletion' };
       });
     } catch (error) {
@@ -466,14 +567,21 @@ export class DraftPurposeDisposal {
    */
   async sweep(): Promise<readonly DestructionOutcome[]> {
     // A database the ledger cannot be matched with is not swept: that is the startup gate's refusal, not a unit's.
-    await this.serial(() => this.db.$transaction(async (tx: Tx) => {
+    const view = await this.serial(() => this.db.$transaction(async (tx: Tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LEDGER_LOCK}::bigint)`;
-      await this.matchedLedger(tx);
+      return (await this.matchedLedger(tx, 'sweep')).view;
     }));
     const rows: { disposalUnitId: string; author: string; deliverySettled: boolean }[] = await this.db.$queryRaw`
       SELECT "disposalUnitId", author, "deliverySettled" FROM "ReportDraftPurposeEnd" ORDER BY "endedAt", "disposalUnitId"`;
+    // A copy taken while a work the ledger completed was still live holds it in the author's row, with no ended row.
+    const done = [...unitPhases(view)].filter(([, phases]) => completed(phases)).map(([unit]) => unit);
+    const liveUnits: { workUnit: string }[] = done.length ? await this.db.$queryRaw`
+      SELECT DISTINCT "workUnit" FROM "ReportDraft" WHERE "workUnit" = ANY(${done}::text[])` : [];
+    const ended = new Set(rows.map(r => r.disposalUnitId));
+    const targets = [...rows, ...liveUnits.filter(r => !ended.has(r.workUnit))
+      .map(r => ({ disposalUnitId: r.workUnit, author: '', deliverySettled: true }))];
     const results: DestructionOutcome[] = [];
-    for (const { disposalUnitId, author, deliverySettled } of rows) {
+    for (const { disposalUnitId, author, deliverySettled } of targets) {
       try {
         if (!deliverySettled) {
           if (!this.deliveries) { results.push({ unit: disposalUnitId, outcome: 'delivery-pending' }); continue; }
@@ -481,35 +589,62 @@ export class DraftPurposeDisposal {
           await this.db.$executeRaw`UPDATE "ReportDraftPurposeEnd" SET "deliverySettled" = true WHERE "disposalUnitId" = ${disposalUnitId}`;
         }
         results.push(await this.destroy(disposalUnitId));
-      } catch (error: any) { results.push({ unit: disposalUnitId, outcome: 'refused', code: error?.code ?? error?.name ?? 'Error' }); }
+      } catch (error: any) {
+        results.push(error instanceof CommitOutcomeUnknown ? { unit: disposalUnitId, outcome: 'unconfirmed' }
+          : { unit: disposalUnitId, outcome: 'refused', code: error?.code ?? error?.name ?? 'Error' });
+      }
     }
     return results;
   }
 
   /**
-   * The database and the ledger belong together: same ledger ID, and the ledger at least as long as the database saw.
-   * No ledger is accepted only beside a copy that never had one (not initialized). A ledger one record short whose
-   * last record is the started of the destruction the anchor names as committed gets that completed record now, from
-   * the anchor's completion time. Runs under the ledger lock; reads the anchor without locking its row.
+   * The database and the ledger belong together. Runs under the ledger lock; reads the anchor without locking its row.
+   * No ledger is accepted only beside a copy that never had one (not initialized).
+   *
+   * A ledger: the same ID (I6), the anchor's completion at the anchor's position (R2), and at least as long as the
+   * database saw - one record short only when the anchor proves the started destruction committed (R1: its completed
+   * record is written now from the anchor's completion time). A last started record (an attempt with no end) is settled
+   * only by the process that made it, from the commit judgement (R3); no other evidence exists (R4), and while it stays
+   * unknown no other unit starts (R5): both refuse with PurposeIntentIncomplete and leave the ledger as it is.
    */
-  private async matchedLedger(tx: Tx): Promise<{ anchor: Anchor; view: LedgerView | null }> {
+  private async matchedLedger(tx: Tx, mode: 'gate' | 'destroy' | 'sweep'):
+      Promise<{ anchor: Anchor; view: LedgerView | null; adopt: boolean }> {
     const anchor = await anchorOf(tx, false);
     let view: LedgerView | null;
     try { view = this.ledger.read(); }
     catch (error) { throw new PurposeGateClosed(error instanceof ContractError ? error.code : 'PurposeLedgerUnreadable'); }
     if (!view) {
       if (anchor.initialized || anchor.seq > 0) throw new PurposeGateClosed('PurposeLedgerMissing');
-      return { anchor, view };
+      return { anchor, view, adopt: mode === 'gate' };
     }
     if (view.ledgerId !== anchor.ledgerId) throw new PurposeGateClosed('PurposeLedgerMismatch');
+    if (anchor.seq > 0 && view.entries.length >= anchor.seq) {
+      const at = view.entries[anchor.seq - 1].record;
+      if (at.phase !== 'completed' || at.disposalUnitId !== anchor.lastCompletedUnit) throw new PurposeGateClosed('PurposeLedgerAnchorMismatch');
+    }
     if (view.entries.length < anchor.seq) {
       const last = view.entries[view.entries.length - 1]?.record;
       if (view.entries.length !== anchor.seq - 1 || !anchor.lastCompletedUnit || !anchor.lastCompletedAt || last?.phase !== 'started' ||
           last.disposalUnitId !== anchor.lastCompletedUnit) throw new PurposeGateClosed('PurposeLedgerBehind');
       this.ledger.append(anchor.ledgerId, ending(last, 'completed', anchor.lastCompletedAt));
+      this.attempts.delete(last.disposalUnitId);
       view = this.ledger.read();
     }
-    return { anchor, view };
+    const last = view!.entries[view!.entries.length - 1]?.record;
+    if (last?.phase === 'started') {
+      const attempt = this.attempts.get(last.disposalUnitId);
+      if (!attempt) throw new PurposeGateClosed('PurposeIntentIncomplete');
+      const outcome = await judgeCommit(this.db, attempt, null);
+      if (outcome === 'unknown') throw new PurposeGateClosed('PurposeIntentIncomplete');
+      if (outcome === 'committed') {
+        // Committed after the anchor read above: the anchor now names it (R1 from the committed values).
+        const now = await anchorOf(this.db, false);
+        this.ledger.append(anchor.ledgerId, ending(last, 'completed', now.lastCompletedAt ?? this.now().toISOString()));
+      } else this.ledger.append(anchor.ledgerId, ending(last, 'failed', this.now().toISOString()));
+      this.attempts.delete(last.disposalUnitId);
+      view = this.ledger.read();
+    }
+    return { anchor: await anchorOf(tx, false), view, adopt: false };
   }
 
   /**
@@ -534,46 +669,52 @@ export class DraftPurposeDisposal {
    */
   async openGate(): Promise<{ reapplied: number; units: number; resolved: number }> {
     const done: string[] = [];
-    const result = await this.serial(() => this.db.$transaction(async (tx: Tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LEDGER_LOCK}::bigint)`;
-      const { anchor, view } = await this.matchedLedger(tx);
-      if (!view) {
-        // Never initialized: a new database, or one whose drafts this migration numbered and no server has started on.
-        // The latter gets its ledger now, before any of those works can end.
-        const [works] = await tx.$queryRaw`SELECT EXISTS (SELECT 1 FROM "ReportDraft" WHERE "workUnit" IS NOT NULL)
-          OR EXISTS (SELECT 1 FROM "ReportDraftPurposeEnd") AS any`;
-        if (works?.any) {
+    let adopted = false, answer: unknown = null;
+    let result: { reapplied: number; units: number; resolved: number } | null = null;
+    try {
+      result = await this.serial(() => this.db.$transaction(async (tx: Tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LEDGER_LOCK}::bigint)`;
+        const { anchor, view, adopt } = await this.matchedLedger(tx, 'gate');
+        if (adopt && await anyWork(tx)) {
+          // Never initialized: a new database, or one whose drafts this migration numbered and no server has started on.
+          // The latter gets its ledger now, before any of those works can end.
           this.ledger.create(anchor.ledgerId);
           await tx.$executeRaw`UPDATE "PurposeLedgerAnchor" SET initialized = true WHERE id = 1`;
+          adopted = true;
         }
+        if (!view) {
+          await tx.$executeRaw`UPDATE "ReportDraftPurposeEnd" SET "deliverySettled" = true WHERE NOT "deliverySettled"`;
+          return { reapplied: 0, units: 0, resolved: 0 };
+        }
+        if (!anchor.initialized) await tx.$executeRaw`UPDATE "PurposeLedgerAnchor" SET initialized = true WHERE id = 1`;
+        const units = unitPhases(view);
+        let reapplied = 0;
+        for (const [unit, phases] of units) {
+          if (completed(phases)) { done.push(unit); if (await reapply(tx, unit)) reapplied++; continue; }
+          // matchedLedger settled the last record; an attempt with no end anywhere else has no evidence in this copy.
+          if (dangling(phases)) throw new PurposeGateClosed('PurposeIntentIncomplete');
+        }
+        // This process starts with no response in flight: whatever an earlier process was sending has ended.
         await tx.$executeRaw`UPDATE "ReportDraftPurposeEnd" SET "deliverySettled" = true WHERE NOT "deliverySettled"`;
-        return { reapplied: 0, units: 0, resolved: 0 };
-      }
-      if (!anchor.initialized) await tx.$executeRaw`UPDATE "PurposeLedgerAnchor" SET initialized = true WHERE id = 1`;
-      const units = unitPhases(view);
-      let reapplied = 0, resolved = 0;
-      for (const [unit, phases] of units) {
-        if (completed(phases)) { done.push(unit); if (await reapply(tx, unit)) reapplied++; continue; }
-        if (!dangling(phases)) continue;
-        // An attempt with no end. Only an ended row still present here proves it did not commit; anything else (a live
-        // work of an older copy, or nothing) cannot be settled from this copy.
-        const [row] = await tx.$queryRaw`SELECT 1 AS present FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = ${unit}`;
-        if (!row) throw new PurposeGateClosed('PurposeIntentIncomplete');
-        this.ledger.append(anchor.ledgerId, ending(phases[phases.length - 1].record, 'failed', this.now().toISOString()));
-        resolved++;
-      }
-      // This process starts with no response in flight: whatever an earlier process was sending has ended.
-      await tx.$executeRaw`UPDATE "ReportDraftPurposeEnd" SET "deliverySettled" = true WHERE NOT "deliverySettled"`;
-      return { reapplied, units: units.size, resolved };
-    }, { maxWait: 10000, timeout: 60000 }));
-    // The re-application is checked in the committed database, not taken from the transaction's answer (a failed
-    // COMMIT can come back as success): nothing of a completed unit may be left before the server opens.
-    if (done.length) {
-      const [left] = await this.db.$queryRaw<any[]>`SELECT (SELECT count(*) FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = ANY(${done}::text[]))
-        + (SELECT count(*) FROM "ReportDraft" WHERE "workUnit" = ANY(${done}::text[])) AS "left"`;
-      if (Number(left?.left ?? 1)) throw new PurposeGateClosed('PurposeReapplyNotCommitted');
+        return { reapplied, units: units.size, resolved: 0 };
+      }, { maxWait: 10000, timeout: 60000 }));
+    } catch (error) {
+      if (!done.length && !adopted) throw error;
+      answer = error;
     }
-    return result;
+    // The re-application is judged in the committed database, not taken from the transaction's answer (a failed COMMIT
+    // can come back as success): the server opens only when every completed unit is confirmed gone.
+    if (done.length) {
+      const outcome = await judgeCommit(this.db, { kind: 'reapplied', units: done }, null);
+      if (outcome === 'not-committed') throw new PurposeGateClosed('PurposeReapplyNotCommitted');
+      if (outcome === 'unknown') throw new PurposeGateClosed('PurposeReapplyUnconfirmed');
+    }
+    if (adopted) {
+      const [anchor] = await this.db.$queryRaw<any[]>`SELECT initialized FROM "PurposeLedgerAnchor" WHERE id = 1`;
+      if (anchor?.initialized !== true) throw new PurposeGateClosed('PurposeAdoptionNotCommitted');
+    }
+    if (answer) throw answer;
+    return result!;
   }
 }
 
@@ -602,3 +743,4 @@ export function purposeLedgerDirectory(env: NodeJS.ProcessEnv = process.env): st
 
 /** A new opaque unit for a new work. */
 export function newWorkUnit(): string { return 'disposal:' + randomUUID(); }
+
