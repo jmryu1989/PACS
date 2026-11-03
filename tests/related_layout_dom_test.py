@@ -951,6 +951,14 @@ class RelatedLayoutDOMTest(Base):
             with self.subTest(case=name):
                 w = self.open_reading(size, long_rows, self.LONG_DESC) if long else self.open_reading(size)
                 page, tag = w.page, f"RL-12 {name}"
+                # The report column's Critical Results row joins it on the inbox's 1 s admission check, up to a second
+                # after the workspace opens, and its first read raises the button row by the row's height (31px at
+                # 1920x1080). The panel follows in that frame's observer callback, before paint, but a read between the
+                # two sees the buttons moved and the panel not yet (CI fc2f77a, and c9ec65c 2 of 8 locally). Measure
+                # the column once it is complete.
+                inbox = page.get_by_role("region", name="Critical Results", exact=True)
+                harness.expect(inbox).to_be_visible()
+                harness.expect(inbox.get_by_text("Loading", exact=True)).to_have_count(0)
                 toggle = page.get_by_role("button", name="Image Findings", exact=True)
                 toggle.click()
                 panel = page.get_by_role("region", name="Image Findings", exact=True)
