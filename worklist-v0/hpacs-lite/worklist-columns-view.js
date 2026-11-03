@@ -162,7 +162,8 @@
       ss: "SS (촬영 확인 상태)\nVerified: 촬영 확인됨\nUnverified: 촬영 미확인",
     };
     function renderHeads() {
-      $("#heads").innerHTML = shownColumns().map((c, i) => `<th data-key="${c.k}" class="${c.num ? "num" : ""}"${HEAD_HELP[c.k] ? ` title="${esc(HEAD_HELP[c.k])}"` : ""}>${i === 0 ? '<button type="button" class="col-add" aria-haspopup="dialog" aria-label="Choose columns" title="표시할 열을 고릅니다.">+</button>' : ""}${c.t}</th>`).join("");
+      // The first header also holds the "+" button; its own label keeps the column named by its title, not "Choose columns <title>".
+      $("#heads").innerHTML = shownColumns().map((c, i) => `<th data-key="${c.k}" class="${c.num ? "num" : ""}"${i === 0 ? ` aria-label="${esc(c.t)}"` : ""}${HEAD_HELP[c.k] ? ` title="${esc(HEAD_HELP[c.k])}"` : ""}>${i === 0 ? '<button type="button" class="col-add" aria-haspopup="dialog" aria-label="Choose columns" title="표시할 열을 고릅니다.">+</button>' : ""}${c.t}</th>`).join("");
       $("#heads .col-add")?.addEventListener("click", e => { e.stopPropagation(); openColumnPicker(e.currentTarget); });
       bindColumnResize();
       $("#filterrow").innerHTML = shownColumns().map((c, i) => {
@@ -195,15 +196,17 @@
         const grip = document.createElement("span");
         grip.className = "col-grip";
         grip.title = "열 너비: 끌어서 조절, 두 번 클릭하면 자동 너비로 돌아갑니다.";
+        // Pointer-only handle (the keyboard path is the picker's width field). Exposed, its tooltip joined every column header's name.
+        grip.setAttribute("aria-hidden", "true");
         grip.addEventListener("click", e => e.stopPropagation());
         grip.addEventListener("dblclick", e => { e.stopPropagation(); columnPrefs?.setWidth(mode, th.dataset.key, null); });
         grip.addEventListener("pointerdown", e => {
           if (e.button !== 0 || !columnPrefs) return;
           e.preventDefault(); e.stopPropagation(); grip.setPointerCapture(e.pointerId);
-          const key = th.dataset.key, startX = e.clientX, start = th.getBoundingClientRect().width;
+          // Saved widths are content widths, not the header boxes the pointer moves (those also hold the cell padding).
+          const key = th.dataset.key, startX = e.clientX, content = columnPrefs.contentWidths(mode), start = content[key];
           const original = columnPrefs.widths(mode);
-          const widths = Object.fromEntries([...heads.children].map(h => [h.dataset.key,
-            Math.max(64, Math.min(600, Math.round(h.getBoundingClientRect().width)))]));
+          const widths = Object.fromEntries(Object.entries(content).map(([k, w]) => [k, Math.max(64, Math.min(600, Math.round(w)))]));
           const move = ev => {
             widths[key] = Math.max(64, Math.min(600, Math.round(start + ev.clientX - startX)));
             columnPrefs.setWidths(mode, widths, false);

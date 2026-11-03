@@ -1382,15 +1382,47 @@ class StudioWorklistDOM(unittest.TestCase):
         expect(self.page.get_by_label("StudyDate From", exact=True)).to_be_visible()
         self.assertAlmostEqual(before, row.bounding_box()["height"], delta=1)
 
+    def drag_column_edge(self, key, dx):
+        # A widened column can push its edge past the list pane; the reader scrolls the list to reach it.
+        handle = self.page.locator(f'#heads th[data-key="{key}"] .col-grip')
+        handle.scroll_into_view_if_needed()
+        grip = handle.bounding_box()
+        y = grip["y"] + grip["height"] / 2
+        self.page.mouse.move(grip["x"] + grip["width"] / 2, y)
+        self.page.mouse.down()
+        self.page.mouse.move(grip["x"] + grip["width"] / 2 + dx, y)
+        self.page.mouse.up()
+
+    def saved_widths(self):
+        return self.page.evaluate("""() => {
+          const key = Object.keys(localStorage).find(k => k.startsWith('kin-worklist-columns:'));
+          return JSON.parse(localStorage.getItem(key)).modes.Radiology.appearance.widths;
+        }""")
+
     def test_column_width_drag_and_picker_share_dialog_state(self):
         self.open()
         head = self.page.locator('#heads th[data-key="name"]')
         before = head.bounding_box()["width"]
-        grip = head.locator(".col-grip").bounding_box()
-        self.page.mouse.move(grip["x"] + grip["width"] / 2, grip["y"] + grip["height"] / 2)
-        self.page.mouse.down()
-        self.page.mouse.move(grip["x"] + 45, grip["y"] + grip["height"] / 2)
-        self.page.mouse.up()
+        self.drag_column_edge("name", 45)
+        # The column edge follows the pointer; the saved value is the content width inside it, and the
+        # content it sizes stays inside the cell (saved width = .wc-cell box, not the padded column).
+        self.assertAlmostEqual(before + 45, head.bounding_box()["width"], delta=1)
+        first = self.saved_widths()
+        name_cell = self.page.locator("#rows tr[data-uid]").first.locator("td").nth(
+            self.page.locator("#heads th").evaluate_all("els => els.findIndex(e => e.dataset.key === 'name')"))
+        expect(name_cell.locator(".wc-cell")).to_have_css("width", f"{first['name']}px")
+        self.assertTrue(name_cell.evaluate("e => e.scrollWidth <= e.clientWidth + 1"))
+        self.assertLess(first["name"], before + 45)
+        # A second drag starts from the saved content width: neither the dragged column nor the others grow
+        # by their cell padding on each drag.
+        id_head = self.page.locator('#heads th[data-key="id"]')
+        id_before = id_head.bounding_box()["width"]
+        self.drag_column_edge("name", 30)
+        second = self.saved_widths()
+        self.assertEqual(first["name"] + 30, second["name"])
+        self.assertEqual(first["id"], second["id"])
+        self.assertAlmostEqual(before + 75, head.bounding_box()["width"], delta=1)
+        self.assertAlmostEqual(id_before, id_head.bounding_box()["width"], delta=1)
         self.page.get_by_role("button", name="Choose columns", exact=True).click()
         self.page.locator('#column-picker [data-column="age"]').get_by_role('checkbox').uncheck()
         self.page.locator("#column-picker").get_by_role("button", name="Close", exact=True).click()
@@ -1400,7 +1432,7 @@ class StudioWorklistDOM(unittest.TestCase):
         width = int(self.page.get_by_label("Name content width (px)", exact=True).input_value())
         self.assertGreaterEqual(width, 64)
         self.assertLessEqual(width, 600)
-        self.assertAlmostEqual(width, min(600, max(64, before + 45 - grip["width"] / 2)), delta=1)
+        self.assertEqual(width, second["name"])
 
     def test_tech_note_words_keep_korean_help(self):
         self.site.notes = [dict(version=1, present=True), dict(version=0, present=False),
