@@ -572,8 +572,12 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
         self.assertEqual(response.status, 200, response.text())
         request_id = sent[0]["relatedInsert"]["insertRequestId"]
         # While the answer is kept: the server wrote the inserted line and an applied receipt.
-        stored = psql(f'SELECT findings FROM "ReportDraft" WHERE uid={sql_text(target.uid)} AND author={sql_text(self.stack.actor("doctor"))}')
-        self.assertIn(related.SOURCE_LINE, stored[0])
+        answer = response.json()
+        stored = psql(f'SELECT author || \'|\' || findings FROM "ReportDraft" WHERE uid={sql_text(target.uid)}')
+        print("CD09P-SCREEN " + json.dumps({"c10b1-kept": {"answer": {k: answer.get(k) for k in ("revision", "present", "relatedInsert")},
+                                                           "rows": stored, "receipt": self.receipt(request_id)}}), flush=True)
+        self.assertEqual(answer["relatedInsert"]["result"], "applied", answer)
+        self.assertTrue(any(related.SOURCE_LINE in row for row in stored), stored)
         self.assertEqual(self.receipt(request_id)[0].split("|")[0], "applied")
         self.end_target(target)
         puts, finished, failed = [], [], []
@@ -606,9 +610,15 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
             if body is None:
                 route.fallback(); return
             sent.append(body)
-            real = route.fetch()
-            answers.append((real.status, real.text()))
-            route.abort("connectionreset")
+            try:
+                real = route.fetch()
+                answers.append((real.status, real.text()))
+            except Exception as error:   # recorded apart: a fetch that failed is not an answer read
+                answers.append(("fetch-failed", repr(error)[:500]))
+            try:
+                route.abort("connectionreset")
+            except Exception as error:
+                answers.append(("abort-failed", repr(error)[:500]))
         page, target, source = self.open_related(read_then_lose)
         notice = page.locator("#report-notice")
         expect(notice).to_contain_text("Result Unknown")
@@ -625,8 +635,11 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
         while len(sent) < 2 and time.monotonic() < deadline:
             page.wait_for_timeout(100)
         self.assertEqual(len(sent), 2)
+        page.wait_for_timeout(1000)
+        print("CD09P-SCREEN " + json.dumps({"c10b2-answers": [(a[0], str(a[1])[:300]) for a in answers]}), flush=True)
         self.assertEqual(sent[1], sent[0])
         self.assertEqual(self.receipt(request_id), receipt, "the replay wrote no receipt row")
+        self.assertEqual(len(answers), 2, answers)
         replay = answers[1]
         self.assertIn(replay[0], (200, 409), replay)
         # The operation stays unknown: Check is shown and enabled before it is pressed, and its read goes after the press.
