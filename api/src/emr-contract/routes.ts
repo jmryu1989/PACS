@@ -20,9 +20,9 @@ export interface RouteContract {
  */
 const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
   { kinds: ['access-audit'], operation: 'read', causes: ['user-view'],
-    routes: ['GET emr-audit/inspections', 'GET emr-audit/inspections/:month'] },
+    routes: ['GET emr-audit/incidents', 'GET emr-audit/incidents/:id', 'GET emr-audit/incidents/:id/drafts/:form', 'GET emr-audit/inspections', 'GET emr-audit/inspections/:month'] },
   { kinds: ['access-audit'], operation: 'write', causes: ['user-view'],
-    routes: ['POST emr-audit/inspections/:month/report', 'POST emr-audit/inspections/:month/steps'] },
+    routes: ['POST emr-audit/incidents', 'POST emr-audit/incidents/:id/findings', 'POST emr-audit/incidents/:id/notices', 'POST emr-audit/incidents/:id/close', 'POST emr-audit/inspections/:month/report', 'POST emr-audit/inspections/:month/steps'] },
   { kinds: ['identity-access'], operation: 'write', causes: ['user-view'],
     routes: ['POST emr-audit/roster/:grantId'] },
   { kinds: ['access-audit'], operation: 'read', causes: ['user-view'],

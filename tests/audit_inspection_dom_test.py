@@ -125,7 +125,7 @@ class MonthlyInspection(AuditPage):
         expect(self.page.get_by_role('button', name='Search', exact=True)).to_be_enabled()
         self.backend_call(reset=True, scopes=[])
         self.page.get_by_role('button', name='Load Months', exact=True).click()
-        expect(self.page.get_by_role('status')).to_have_text('감사 기록을 조회할 권한이 없습니다.')
+        expect(self.document_status()).to_have_text('감사 기록을 조회할 권한이 없습니다.')
         self.assertEqual(self.page.locator('body').inner_text(), '감사 기록을 조회할 권한이 없습니다.')
 
     def test_missing_investigate_scope_does_not_block_inspection(self):

@@ -82,6 +82,10 @@ class AuditPage(unittest.TestCase):
         expect(self.page.get_by_role('button', name='Search', exact=True)).to_be_enabled()
         if status != 200 or body is not None: self.search(answer() if body is None else body, status)
 
+    def document_status(self):
+        # The page-wide query/session status is outside the feature regions.
+        return self.page.locator('body > *').and_(self.page.get_by_role('status'))
+
     def filters(self):
         self.page.get_by_label('Patient ID', exact=True).fill('SYN-PATIENT')
         self.page.get_by_label('Assigning Authority', exact=True).fill('SYN-AUTHORITY')
@@ -141,12 +145,14 @@ class AuditPage(unittest.TestCase):
             self.page.get_by_label('Event Kind').select_option(kind)
             self.search(answer())
             self.assertEqual(set(self.calls[-1][1]['actions']), set(actions))
-            expect(self.page.get_by_role('status')).to_contain_text('표시할 기록이 없습니다.')
+            expect(self.document_status()).to_be_visible()
+            expect(self.document_status()).to_contain_text('표시할 기록이 없습니다.')
 
     def test_non_auditor_admin_has_only_403_sentence(self):
         self.roles = ['admin']
         self.open(403, dict(code='AuditorNotDesignated'))
-        expect(self.page.get_by_role('status')).to_have_text('감사 기록을 조회할 권한이 없습니다.')
+        expect(self.document_status()).to_be_visible()
+        expect(self.document_status()).to_have_text('감사 기록을 조회할 권한이 없습니다.')
         self.assertEqual(self.page.locator('body').inner_text(), '감사 기록을 조회할 권한이 없습니다.')
         self.assertEqual(len(self.calls), 1)
         self.screenshot('forbidden.png')
@@ -154,7 +160,8 @@ class AuditPage(unittest.TestCase):
     def test_timeout_retry_and_export_exact_query_and_download(self):
         self.open(); self.filters()
         self.search(dict(code='InvestigationTimedOut'), 503)
-        expect(self.page.get_by_role('status')).to_have_text('기간이나 조건을 좁혀 다시 시도')
+        expect(self.document_status()).to_be_visible()
+        expect(self.document_status()).to_have_text('기간이나 조건을 좁혀 다시 시도')
         self.search(answer([event('ROW')], (), 'MORE'))
         exported = answer([event('EXPORT-ROW')], [event('EXPORT-VIEW', '열람')])
         self.replies.append((200, exported))
@@ -183,14 +190,17 @@ class AuditPage(unittest.TestCase):
         self.search(answer([event('KEPT')], (), 'C-NEXT'))
         self.replies.append((503, dict(code='InvestigationTimedOut')))
         self.page.get_by_role('button', name='Load More', exact=True).click()
-        expect(self.page.get_by_role('status')).to_contain_text('기간이나 조건을 좁혀 다시 시도')
-        expect(self.page.get_by_role('status')).to_contain_text('표시된 기록은 일부입니다.')
+        expect(self.document_status()).to_be_visible()
+        expect(self.document_status()).to_contain_text('기간이나 조건을 좁혀 다시 시도')
+        expect(self.document_status()).to_be_visible()
+        expect(self.document_status()).to_contain_text('표시된 기록은 일부입니다.')
         expect(self.page.get_by_role('region', name='Change History')).to_contain_text('KEPT')
         downloads = []
         self.page.on('download', lambda download: downloads.append(download))
         self.replies.append((500, dict(code='LedgerReadFailed')))
         self.page.get_by_role('button', name='Export', exact=True).click()
-        expect(self.page.get_by_role('status')).to_contain_text('내보내기에 실패했습니다.')
+        expect(self.document_status()).to_be_visible()
+        expect(self.document_status()).to_contain_text('내보내기에 실패했습니다.')
         self.assertEqual(downloads, [])
         self.replies.append((403, dict(code='AuditScopeNotGranted')))
         self.page.get_by_role('button', name='Export', exact=True).click()
@@ -226,7 +236,8 @@ class AuditPage(unittest.TestCase):
         expect(self.page.get_by_role('region', name='Change History')).to_contain_text('STILL-ALLOWED')
         self.replies.append((403, dict(code='AuditorNotDesignated')))
         self.page.get_by_role('button', name='Export', exact=True).click()
-        expect(self.page.get_by_role('status')).to_have_text('감사 기록을 조회할 권한이 없습니다.')
+        expect(self.document_status()).to_be_visible()
+        expect(self.document_status()).to_have_text('감사 기록을 조회할 권한이 없습니다.')
         self.assertEqual(self.page.locator('body').inner_text(), '감사 기록을 조회할 권한이 없습니다.')
 
     def test_open_only_shows_filters_without_reading_records(self):
@@ -234,14 +245,15 @@ class AuditPage(unittest.TestCase):
         self.assertEqual(self.calls, [])
         expect(self.page.get_by_role('region', name='Change History')).to_be_hidden()
         expect(self.page.get_by_role('region', name='Access', exact=True)).to_be_hidden()
-        expect(self.page.get_by_role('status')).not_to_contain_text('다시 로그인')
+        expect(self.document_status()).not_to_contain_text('다시 로그인')
         self.screenshot('filters-only.png')
 
     def test_startup_does_not_claim_session_failure(self):
         sessions = []
         self.page.route('**/api/me', lambda route: sessions.append(route))
         self.page.goto(f'http://127.0.0.1:{self.server.server_port}/worklist-v0/hpacs-lite/audit.html', wait_until='domcontentloaded')
-        expect(self.page.get_by_role('status')).to_have_text('세션을 확인하고 있습니다.')
+        expect(self.document_status()).to_be_visible()
+        expect(self.document_status()).to_have_text('세션을 확인하고 있습니다.')
         self.assertEqual(self.calls, [])
         sessions.pop().fulfill(json=dict(sub='SYN-AUDITOR', user='Synthetic Auditor', roles=self.roles,
                                         institution='SYN-SITE', sessionId='SYN-SESSION'))
@@ -250,7 +262,8 @@ class AuditPage(unittest.TestCase):
     def test_missing_investigate_scope_keeps_workspace_available(self):
         self.open()
         self.search(dict(code='AuditScopeNotGranted'), 403)
-        expect(self.page.get_by_role('status')).to_have_text('이 계정에는 접속기록 조회 권한이 없습니다.')
+        expect(self.document_status()).to_be_visible()
+        expect(self.document_status()).to_have_text('이 계정에는 접속기록 조회 권한이 없습니다.')
         expect(self.page.get_by_role('button', name='Search', exact=True)).to_be_enabled()
         expect(self.page.get_by_role('button', name='Log out', exact=True)).to_be_visible()
 
