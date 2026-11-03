@@ -31,6 +31,20 @@
       value.closest(".prior-report-section").hidden = !value.textContent;
     }
 
+    /**
+     * The Related Report line for a study with no approved report to show. Only approved reports are read here, so a prior
+     * whose report is Preliminary or In Progress is not "no report": the line names the list's status (English) and says
+     * why the text is not shown (Korean), matching the Related Exam row.
+     */
+    function relatedNoReportText(s) {
+      return ({
+        P: "Preliminary · 승인 전 판독문은 여기 보이지 않습니다 (승인본만 열람)",
+        T: "In Progress · 판독 중이라 아직 승인된 판독문이 없습니다 (승인본만 열람)",
+        H: "On Hold · 보류 중이라 아직 승인된 판독문이 없습니다 (승인본만 열람)",
+        W: "Unread · 아직 판독되지 않은 검사입니다 (승인본만 열람)",
+      })[s?.rs] || "판독문 없음 · 이 검사에는 승인된 판독문이 없습니다";
+    }
+
     function relatedReportHead(list) {
       const top = (Array.isArray(list) ? list : []).filter(v => v?.action !== "discarded").sort((a, b) => b.version - a.version)[0];
       return top && Number.isSafeInteger(top.version) && ["approve", "addendum"].includes(top.action) ? top : null;
@@ -60,10 +74,10 @@
       const shown = view => relatedMode.showSource({ seq, uid, ...view });
       $("#prior-report-meta").textContent = relatedReportMeta(s);
       $("#prior-report-meta").title = $("#prior-report-meta").textContent;
-      $("#prior-report-status").textContent = s.rs === "A" ? "승인 판독문 불러오는 중…" : "판독문 없음";
+      $("#prior-report-status").textContent = s.rs === "A" ? "승인 판독문 불러오는 중…" : relatedNoReportText(s);
       $("#prior-report-status").style.display = "";
       $("#prior-report-content").style.display = "none";
-      shown({ state: s.rs === "A" ? "loading" : "none" });
+      shown({ state: s.rs === "A" ? "loading" : "none", message: s.rs === "A" ? null : relatedNoReportText(s) });
 
       let report = null;
       try {
@@ -91,7 +105,7 @@
       if (stale()) return;
       if (!report) {
         KinReportViews.end("related");
-        $("#prior-report-status").textContent = "판독문 없음"; shown({ state: "none" }); return;
+        $("#prior-report-status").textContent = relatedNoReportText(s); shown({ state: "none", message: relatedNoReportText(s) }); return;
       }
       $("#prior-report-meta").textContent =
         `${relatedReportMeta(s)} · 판독의 ${displayActor(report.author) || "-"}`;
@@ -125,7 +139,8 @@
       clearRelatedReport();
       renderClinical(); renderRelated(); renderThumbs(); renderTemplates();
       if (left) { criticalInbox?.sync(); updateReportButtons(); renderDraftBar(); relatedMode.restore(left); return; }
-      $("#related-current").focus({ preventScroll: true });
+      // The old duplicate target caption is hidden in the stacked layout.
+      $("#clinical").focus({ preventScroll: true });
     }
 
     /**

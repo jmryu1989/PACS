@@ -27,7 +27,7 @@ class W4ReportFlowE2E(TemplatePreservationE2E):
         by_uid = {fixture.uid: fixture for fixture in studies}
         template = self.template(findings="SYN W4 FINDINGS", conclusion="SYN W4 CONCLUSION", recommendation=RECOMMENDATION)
         page = self.login()
-        page.locator("#quick").fill(patient)
+        page.locator('#filterrow [data-f="id"]').fill(patient)
         rows = page.locator("#rows tr[data-uid]")
         expect(rows).to_have_count(3)
         page.select_option("#filterrow [data-f=rs]", "W")
@@ -38,13 +38,13 @@ class W4ReportFlowE2E(TemplatePreservationE2E):
         row.click()
         expect(row).to_have_class(re.compile(r"\bsel\b"))
         expect(page.locator("#recnote")).to_be_hidden()
+        self.show_workspace_panels(page, "Reading Template")
         page.locator("#tpl-search").fill(template["title"])
         page.locator("#tplrows").get_by_text(template["title"], exact=True).dblclick()
         expect(page.locator("#findings")).to_have_value(re.compile("SYN W4 FINDINGS"))
         notice = page.locator("#recnote")
         expect(notice).to_be_visible()
-        expect(notice.locator("summary")).to_have_text("Recommendation (existing value · read only)")
-        notice.locator("summary").click()
+        expect(notice).to_contain_text("Recommendation:")
         expect(page.locator("#recnote-text")).to_have_text(RECOMMENDATION)
         expected = page.locator("#findings").input_value()
         with page.expect_response(lambda r: r.request.method == "POST"
@@ -65,7 +65,6 @@ class W4ReportFlowE2E(TemplatePreservationE2E):
         reopened.click()
         expect(reopened).to_have_class(re.compile(r"\bsel\b"))
         expect(notice).to_be_visible()
-        notice.locator("summary").click()
         expect(page.locator("#recnote-text")).to_have_text(RECOMMENDATION)
 
 

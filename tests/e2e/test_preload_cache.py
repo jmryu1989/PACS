@@ -334,7 +334,7 @@ class PreloadCacheE2E(ViewerWindowsE2E):
         p = self.sign_in(context)
         self.limit(p, 2)
         if not p.locator('.left').is_visible(): p.get_by_role('button', name='Worklist', exact=True).click()
-        p.locator('#quick').fill(patient)
+        p.locator('#filterrow [data-f="id"]').fill(patient)
         # The queue follows the reader's row order, which the worklist's sort decides (run 1028c listed A last). The
         # small study A is queued by itself first, then B and C in one multi-selection, so A is the head of the queue;
         # the small E goes last.
@@ -659,7 +659,7 @@ class PreloadCacheE2E(ViewerWindowsE2E):
         page = self.sign_in(context)
         self.limit(page, 2)
         if not page.locator('.left').is_visible(): page.get_by_role('button', name='Worklist', exact=True).click()
-        page.locator('#quick').fill(patient)
+        page.locator('#filterrow [data-f="id"]').fill(patient)
         row = page.locator(f'#rows tr[data-uid="{fixture.uid}"]')
         expect(row).to_be_visible()
         row.click(modifiers=['Control'])

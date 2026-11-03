@@ -815,6 +815,10 @@ class ClinicianHomeDOMTest(unittest.TestCase):
 
     def test_03_non_final_answers_show_status_only_and_failures_are_shown_as_sent(self):
         self.open_home()
+        self.assertGreater(self.page.locator('.status').count(), 0)
+        for badge in self.page.locator('.status').all():
+            self.assertIn(FINAL_ONLY, badge.get_attribute('title') or '')
+            self.assertRegex(badge.get_attribute('title'), '[가-힣]')
         notes = {3: ("Preliminary", "예비 판독 단계입니다."), 4: ("Unknown", "판독 상태를 확인할 수 없습니다."),
                  5: ("Awaiting Report", "아직 판독되지 않은 검사입니다."), 6: ("On Hold", "판독이 보류된 검사입니다."),
                  7: ("In Progress", "판독이 진행 중입니다.")}

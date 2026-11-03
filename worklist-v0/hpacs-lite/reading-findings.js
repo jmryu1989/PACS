@@ -71,14 +71,15 @@ window.KinReadingFindings = function (app) {
 
   /* ---------- keeping the panel off the report's controls ---------- */
   /**
-   * This panel is fixed to the bottom-right corner, so its top edge is `viewport − 12px − height`
-   * and rises as the screen gets shorter. At 1366×768 that put it over the report's button row and
+   * With the original fixed 12px bottom inset, the panel rose as the screen got shorter.
+   * At 1366×768 that put it over the report's button row and
    * `Structured` could not be pressed at all - measured on a real run, not predicted.
    *
    * The upper bound is not a number anyone picked. It is the top of the report's **field region**
    * at the current width, read back into the panel's own `max-height` (reading-workspace.css:84).
-   * That answer accounts for the button row wrapping and for the bars and the dictation pane
-   * appearing above the fields, in both layouts - provided it is read again whenever one of them
+   * The stacked layout also bounds the bottom four pixels above the action row below the fields.
+   * Both bounds follow the bars and dictation pane above the fields and the action row below them,
+   * in both layouts - provided they are read again whenever one of them
    * changes, which is what the sources below are for. Leaving the property off means
    * `100vh − 12px`, which is larger than both caps - the behaviour that shipped before this bound
    * existed.
@@ -97,6 +98,7 @@ window.KinReadingFindings = function (app) {
    */
   const fields = () => document.querySelector('.report-p .redit');
   const reportColumn = () => document.querySelector('.report-p');
+  const actions = () => document.querySelector('.report-p .rfoot2');
   const relatedList = () => document.querySelector('.related-p .related-list-pane');
   // Padding, border and the title line with Close: less than this shows nothing a reader can use.
   function leastHeight() {
@@ -112,7 +114,12 @@ window.KinReadingFindings = function (app) {
     // than writing a bound nobody measured.
     let top = '', bottom = '';
     if (box && box.height) {
-      if (innerHeight - 12 - box.top >= leastHeight()) top = Math.max(0, Math.round(box.top)) + 'px';
+      // 저장·승인 단추가 입력칸 아래로 이동했으므로 서랍의 아래 경계도 현재 단추 줄에서 잰다.
+      const buttons = actions()?.getBoundingClientRect();
+      const inset = buttons?.height ? Math.max(12, Math.round(innerHeight - buttons.top + 4)) : 12;
+      if (innerHeight - inset - box.top >= leastHeight()) {
+        top = Math.max(0, Math.round(box.top)) + 'px'; bottom = inset + 'px';
+      }
       else {
         const report = reportColumn().getBoundingClientRect(), list = relatedList()?.getBoundingClientRect();
         bottom = Math.max(12, Math.round(innerHeight - report.top + 4)) + 'px';
@@ -165,7 +172,7 @@ window.KinReadingFindings = function (app) {
           for (let node = box; node; node = node.previousElementSibling) sizeWatch.observe(node);
         // A Related height or list/report separator move shifts the report and the list's bottom
         // without resizing anything above `.redit`; the docked panel reads both.
-        for (const node of [region, relatedList()]) if (node) sizeWatch.observe(node);
+        for (const node of [region, relatedList(), actions()]) if (node) sizeWatch.observe(node);
       }
     } else {
       window.removeEventListener('resize', onLayout);

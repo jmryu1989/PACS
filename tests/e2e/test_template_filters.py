@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import unittest
 import uuid
 
@@ -81,11 +82,12 @@ class TemplateFiltersE2E(previous.TemplatePreservationE2E):
             for row in data["studies"]:
                 if row["uid"] in variants:row["modality"] = variants[row["uid"]]
             route.fulfill(response=reply, json=data)
-        page.route("**/api/studies", synthetic_modality)
-        self.addCleanup(page.unroute, "**/api/studies")
+        pattern = re.compile(r"/api/studies(?:\?.*)?$")
+        page.route(pattern, synthetic_modality)
+        self.addCleanup(page.unroute, pattern)
         def refresh():
-            with page.expect_response(lambda r: r.request.method == "GET" and r.url.endswith("/api/studies")):
-                page.locator("#refresh").click()
+            with page.expect_response(lambda r: r.request.method == "GET" and r.url.split("?", 1)[0].endswith("/api/studies")):
+                page.locator("#m-refresh").click()
         refresh(); self.select(page, b)
         expect(page.locator("#tpl-filter-status")).to_contain_text("Modality: PT")
         self.assertEqual(self.titles(page), [items[n]["title"] for n in (1, 4)])

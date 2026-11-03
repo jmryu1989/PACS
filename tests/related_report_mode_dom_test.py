@@ -476,15 +476,25 @@ class RelatedModePage(unittest.TestCase):
         return self.page.locator(f'[data-related-source="{field}"]').text_content()
 
     def open_insert(self):
+        """Open the retained refusal notice using a read-only Recommendation selection."""
+        self.select_source("recommendation")
         self.page.locator("#related-mode-insert").click()
-        expect(self.page.locator("#related-insert-dialog")).to_be_visible()
-        expect(self.page.locator("#related-insert-confirm")).to_be_enabled()
+        expect(self.page.locator("#related-mode-status")).to_have_text("넣을 글이 없거나 선택한 범위를 확인할 수 없습니다. Findings 또는 Conclusion 한 칸에서 선택하세요.")
+        expect(self.page.locator("#related-mode-insert")).to_be_focused()
+        self.assertEqual(0, self.page.locator("dialog[open]").count())
+
+    def select_source(self, field):
+        self.page.locator(f'[data-related-source="{field}"]').evaluate("""node => {
+          const r = document.createRange(); r.selectNodeContents(node);
+          const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+        }""")
 
     def insert(self, section="findings"):
-        self.open_insert()
-        if section != "findings":
-            self.page.locator(f'#related-insert-dialog input[value="{section}"]').check()
-        self.page.locator("#related-insert-confirm").click()
+        # Receipt/retry cases select one source field; the whole-report case below exercises both operations.
+        if self.js("getSelection().isCollapsed"):
+            self.select_source(section)
+        self.page.locator("#related-mode-insert").click()
+        self.assertEqual(0, self.page.locator("dialog[open]").count())
 
     def op_state(self, uid=UID_A):
         return self.js("uid => relatedInserts.get(uid)?.state ?? null", uid)
@@ -505,7 +515,7 @@ class RelatedModePage(unittest.TestCase):
         expect(self.mode()).to_be_hidden()
 
     def whole(self):
-        return PRIOR_B["findings"] + "\n\n" + PRIOR_B["conclusion"] + "\n\n" + PRIOR_B["recommendation"]
+        return PRIOR_B["findings"]
 
     def autosave(self):
         """The page's own 20 s autosave stores the typed text and the draft line knows it (no W5 path involved)."""
@@ -591,7 +601,7 @@ class RelatedModePage(unittest.TestCase):
         resume = self.page.locator("#report-editor-resume")
         resume.scroll_into_view_if_needed()
         expect(resume).to_be_visible()
-        expect(self.page.locator("#clinical-context")).to_be_visible()
+        # Clinical Context moved to Clinical Info; Resume Editing still owns its hit area.
         inside = self.js("""() => { const e = document.getElementById('report-editor').getBoundingClientRect(),
           b = document.getElementById('report-editor-resume').getBoundingClientRect();
           return b.left >= e.left - 0.5 && b.right <= e.right + 0.5; }""")
@@ -729,35 +739,22 @@ class RelatedModePage(unittest.TestCase):
         self.assertEqual("", self.source_text("findings"))
         expect(self.page.locator("#related-mode-insert")).to_be_disabled()
 
-    def test_w5b_recommendation_shows_only_with_text_and_a_whole_insert_carries_only_what_is_shown(self):
-        """W-07b (gap report: hide when empty). Findings and Conclusion are the report's sections. A stored Recommendation is
-        shown read-only only when it has text, in the mode and in the Related Report pane alike; an empty one shows no heading.
-        A whole-report Insert carries exactly the sections on screen, and the Target's own hidden Recommendation is kept.
-        Minhoon item 8: the mode opens in the place of the pane's plain view, so the plain view is checked by its sections'
-        own hidden state, which is what it shows after Back."""
-        self.open()
-        self.open_target()
+    def test_w5b_recommendation_is_read_only_and_whole_insert_copies_the_two_editable_fields(self):
+        self.open(); self.open_target(); self.enter()
         sections = self.page.locator("#related-mode .related-mode-section h4:visible")
         pane = self.page.locator(".prior-report-section:not([hidden]) h4")
-        self.enter()
         expect(self.page.locator(".prior-report-body")).to_be_hidden()
         expect(sections).to_have_text(["Findings", "Conclusion", "Recommendation"])
         expect(pane).to_have_text(["Findings", "Conclusion", "Recommendation"])
-        expect(self.page.locator('#related-mode [data-related-source="recommendation"]')).to_have_text(PRIOR_B["recommendation"])
-        # C's approved addendum has no Recommendation: neither place shows the heading, the two sections stay.
+        expect(self.page.locator('[data-related-source="recommendation"]')).to_have_text(PRIOR_B["recommendation"])
         self.related_row(UID_C).locator("td").first.click()
         self.wait(lambda: self.source_text("findings") == PRIOR_C["findings"], "C's text")
         expect(sections).to_have_text(["Findings", "Conclusion"])
         expect(pane).to_have_text(["Findings", "Conclusion"])
-        self.open_insert()
-        shown = PRIOR_C["findings"] + "\n\n" + PRIOR_C["conclusion"]
-        expect(self.page.locator("#related-insert-text")).to_have_text(shown)
-        self.page.locator("#related-insert-confirm").click()
-        self.wait(lambda: self.op_state() == "applied", "the applied receipt")
-        ri = self.site.related_puts[-1][1]["relatedInsert"]
-        self.assertEqual(["findings", "conclusion"], [p["field"] for p in ri["source"]["parts"]], "no invisible Source field")
-        self.assertEqual({"findings": shown, "conclusion": "", "recommendation": ""}, self.stored())
-        # Back to B: its Recommendation is shown again (the value was never dropped).
+        self.page.locator("#related-mode-insert").click()
+        self.wait(lambda: len(self.site.related_puts) == 2 and self.op_state() == "applied", "two fields saved")
+        self.assertEqual({"findings": PRIOR_C["findings"], "conclusion": PRIOR_C["conclusion"], "recommendation": ""}, self.stored())
+        self.assertEqual(["findings", "conclusion"], [body["relatedInsert"]["section"] for _, body in self.site.related_puts])
         self.related_row(UID_B).locator("td").first.click()
         self.wait(lambda: self.source_text("findings") == PRIOR_B["findings"], "B's text")
         expect(sections).to_have_text(["Findings", "Conclusion", "Recommendation"])
@@ -773,7 +770,7 @@ class RelatedModePage(unittest.TestCase):
         self.assertEqual(0, self.page.locator("#related-mode img").count())
         # WORKLIST-SPLIT-UID mid-mode: the Source the list now reports as split is unavailable — no text, no Insert, Back works.
         self.site.identity_issues = [UID_B]
-        self.page.locator("#refresh").click()
+        self.page.locator("#m-refresh").click()
         self.wait(lambda: self.js("uid => appState[uid]?.identityUnresolved === true", UID_B), "the Source's identity issue")
         expect(self.page.locator("#related-mode-source")).to_contain_text("지금 목록에 없어")
         self.assertEqual("", self.source_text("findings"))
@@ -781,7 +778,7 @@ class RelatedModePage(unittest.TestCase):
         self.back()
         # A Target the list reports as split never enters the mode (and is never a Target at all).
         self.site.identity_issues = [UID_A]
-        self.page.locator("#refresh").click()
+        self.page.locator("#m-refresh").click()
         self.wait(lambda: self.js("uid => appState[uid]?.identityUnresolved === true", UID_A), "the Target's identity issue")
         self.js("uid => enterRelatedMode(uid, { focus: true })", UID_C)
         self.settle()
@@ -789,71 +786,138 @@ class RelatedModePage(unittest.TestCase):
         self.assertEqual([], self.site.related_puts)
 
     # ── PAGE-04/05: one reviewed Insert, its receipt ──
-    def test_w5_insert_applies_once_with_its_receipt_and_back_returns_to_the_insertion_end(self):
+    def test_evening_editor_target_identity_changes_and_clears_with_selection(self):
         self.open()
+        target = self.page.locator('#report-editor-target')
+        expect(target).to_have_text('')
         self.open_target()
+        expect(target).to_have_text(ALPHA + ' · SYN-P-001 · 2026-10-03 · CT')
         self.enter()
-        self.open_insert()
-        expect(self.page.locator("#related-insert-text")).to_have_text(self.whole())
-        expect(self.page.locator("#related-insert-target")).to_contain_text(ALPHA)
-        self.page.locator("#related-insert-confirm").click()
-        self.wait(lambda: self.op_state() == "applied", "the applied receipt")
-        self.assertEqual(1, len(self.site.related_puts), "one request")
-        uid, body = self.site.related_puts[0]
-        ri = body["relatedInsert"]
-        self.assertTrue(UUID.match(ri["insertRequestId"]))
-        self.assertEqual(("apply", UID_A, "findings", "end", 0, self.whole(), "empty", UID_B, 1, "approve"),
-                         (ri["intent"], ri["targetUid"], ri["section"], ri["position"], ri["offset"], ri["text"], ri["seedKind"],
-                          ri["source"]["uid"], ri["source"]["version"], ri["source"]["action"]))
-        self.assertEqual([{"field": "findings", "start": 0, "end": len(PRIOR_B["findings"])},
-                          {"field": "conclusion", "start": 0, "end": len(PRIOR_B["conclusion"])},
-                          {"field": "recommendation", "start": 0, "end": len(PRIOR_B["recommendation"])}], ri["source"]["parts"])
-        self.assertEqual((body["baseVersion"], [], []), (ri["targetBaseVersion"], body["citationIds"], body["structureIds"]))
-        self.assertEqual({"findings": self.whole(), "conclusion": "", "recommendation": ""}, self.stored())
-        self.assertEqual([], [p for p in self.site.flow_puts if "relatedInsert" not in p[1]], "no ordinary draft write")
-        self.assertEqual("applied", self.site.receipts[ri["insertRequestId"]]["state"])
-        expect(self.page.locator("#related-mode-target")).to_contain_text("Draft Saved")
-        expect(self.page.locator("#related-mode-status")).to_contain_text("삽입됨")
-        self.assertFalse(self.js("reportConverge.has(selectedUid)"), "saved: the receipt and the whole draft match")
-        expect(self.page.locator("#related-mode-title")).to_be_focused()
+        expect(target).to_have_text(ALPHA + ' · SYN-P-001 · 2026-10-03 · CT')
         self.back()
-        expect(self.page.locator("#findings")).to_be_focused()
-        self.assertEqual(self.whole(), self.value())
-        self.assertEqual([len(self.whole())] * 2, self.js("[$('#findings').selectionStart, $('#findings').selectionEnd]"))
-        self.assertEqual([False, False], self.editor_held())
-        # Native history: one Undo removes the insertion, Redo puts it back (W6 frame unchanged).
+        self.site.hidden.add(UID_A)
+        self.page.locator('#m-refresh').click()
+        expect(target).to_have_text('')
+
+    def test_evening_related_intervals_and_filter_position(self):
+        self.open(); self.open_target()
+        expect(self.related_row(UID_B)).to_contain_text('1m before')
+        expect(self.related_row(UID_C)).to_contain_text('1y 2m before')
+        for width in (1920, 768):
+            self.page.set_viewport_size({'width':width, 'height':1024})
+            button = self.page.locator('#related-options-open')
+            button.click()
+            panel = self.page.locator('#related-options')
+            expect(panel).to_be_visible()
+            a, b = button.bounding_box(), panel.bounding_box()
+            self.assertAlmostEqual(a['y'] + a['height'] + 4, b['y'], delta=1)
+            self.assertGreaterEqual(b['x'], 0)
+            self.assertLessEqual(b['x']+b['width'], width)
+            panel.get_by_role('button', name='Close', exact=True).click()
+
+    def test_evening_related_exam_and_report_show_real_status_words(self):
+        self.open(); self.open_target()
+        for rs, label in [('P','Preliminary'),('T','In Progress'),('H','On Hold'),('W','Unread'),('A','Approved')]:
+            self.site.store[UID_B]['report']['rs'] = rs
+            self.page.locator('#m-refresh').click()
+            expect(self.related_row(UID_B).locator('td').last).to_contain_text(label)
+            expect(self.related_row(UID_B).locator('td').first).to_contain_text('Prior')
+            self.enter(ready=rs == 'A')
+            expect(self.related_row(UID_B).locator('td').first).to_contain_text('Showing')
+            if rs != 'A':
+                expect(self.page.locator('.related-mode-state')).to_contain_text(label)
+                expect(self.page.locator('.related-mode-state')).to_contain_text('승인본만 열람')
+                self.assertEqual('', self.source_text('findings'))
+            self.back()
+
+    def test_w5_insert_applies_two_receipts_in_order_and_back_returns_to_conclusion_end(self):
+        self.open(); self.open_target()
+        self.page.locator("#findings").fill("Current Findings")
+        self.page.locator("#conclusion").fill("Current Conclusion")
+        self.autosave()
+        writes = len(self.site.flow_puts)
+        self.enter()
+        self.site.related_answers = ["hold"]
+        self.page.locator("#related-mode-insert").click()
+        self.wait(lambda: len(self.site.related_puts) == 1, "Findings sent")
+        self.assertEqual(0, self.page.locator("dialog[open]").count())
+        self.assertEqual("findings", self.site.related_puts[0][1]["relatedInsert"]["section"])
+        self.assertEqual("Current Conclusion", self.value("conclusion"), "Conclusion waits for the first receipt")
+        self.site.finish_related()
+        self.wait(lambda: len(self.site.related_puts) == 2 and self.op_state() == "applied", "both receipts")
+        ids = []
+        for (uid, body), field in zip(self.site.related_puts, ("findings", "conclusion")):
+            ri = body["relatedInsert"]; ids.append(ri["insertRequestId"])
+            self.assertEqual(UID_A, uid)
+            self.assertEqual((field, "\n" + PRIOR_B[field]), (ri["section"], ri["text"]))
+            self.assertEqual(len("Current " + field.title()), ri["offset"])
+            self.assertEqual([{"field": field, "start": 0, "end": len(PRIOR_B[field])}], ri["source"]["parts"])
+            self.assertEqual("applied", self.site.receipts[ids[-1]]["state"])
+        self.assertEqual(2, len(set(ids)))
+        expect(self.page.locator("#related-mode-status")).to_contain_text("삽입됨")
+        self.assertFalse(self.js("uid => reportConverge.has(uid)", UID_A))
+        expect(self.page.locator("#related-mode-target")).to_contain_text("Draft Saved")
+        expect(self.page.locator("#related-mode-title")).to_be_focused()
+        self.assertNotEqual(self.site.related_puts[0][1]["expectedRevision"], self.site.related_puts[1][1]["expectedRevision"])
+        self.assertEqual({"findings": "Current Findings\n" + PRIOR_B["findings"], "conclusion": "Current Conclusion\n" + PRIOR_B["conclusion"], "recommendation": ""}, self.stored())
+        self.assertEqual([], [p for p in self.site.flow_puts[writes:] if "relatedInsert" not in p[1]])
+        self.back()
+        expect(self.page.locator("#conclusion")).to_be_focused()
+        self.assertEqual([len("Current Conclusion\n" + PRIOR_B["conclusion"])] * 2, self.js("[$('#conclusion').selectionStart, $('#conclusion').selectionEnd]"))
         self.page.keyboard.press("Control+z")
-        self.assertEqual("", self.value())
+        self.assertEqual("Current Conclusion", self.value("conclusion"))
+        self.assertEqual("Current Findings\n" + PRIOR_B["findings"], self.value())
         self.page.keyboard.press("Control+Shift+z")
-        self.assertEqual(self.whole(), self.value())
+        self.assertEqual("Current Conclusion\n" + PRIOR_B["conclusion"], self.value("conclusion"))
 
     def test_w5_insert_of_a_selection_into_conclusion_keeps_the_line_rule_and_the_hidden_recommendation(self):
         self.site.templates = [rf.TEMPLATE]
         self.open()
         self.open_target()
         # The hidden Recommendation gets its value through a real template application, then the autosave stores it.
-        if not self.page.locator("#tplrows tr", has_text=rf.TEMPLATE["title"]).first.is_visible():
-            self.page.locator("[data-study-panel-tab=templates]").first.click()
+        rf.h.show_all_panels(self.page)
+        self.page.keyboard.press("Control+Alt+T")
         self.page.locator("#tplrows tr", has_text=rf.TEMPLATE["title"]).first.dblclick()
         self.wait(lambda: self.value("recommendation") == rf.TEMPLATE["recommendation"], "the template's Recommendation")
         self.autosave()
+        self.page.get_by_role("complementary", name="Study Panel", exact=True).get_by_role("button", name="Close", exact=True).click()
         self.enter()
-        # Select from the middle of the Source Conclusion into its Recommendation.
+        # Select a suffix of Conclusion; Recommendation stays read-only.
         self.js("""() => { const c = document.querySelector('[data-related-source="conclusion"]').firstChild;
-          const r = document.querySelector('[data-related-source="recommendation"]').firstChild;
-          const range = document.createRange(); range.setStart(c, 4); range.setEnd(r, 8);
+          const range = document.createRange(); range.setStart(c, 4); range.setEnd(c, c.length);
           const s = document.getSelection(); s.removeAllRanges(); s.addRange(range); }""")
         self.insert("conclusion")
         self.wait(lambda: self.op_state() == "applied", "applied")
         ri = self.site.related_puts[0][1]["relatedInsert"]
-        expected = "\n" + PRIOR_B["conclusion"][4:] + "\n\n" + PRIOR_B["recommendation"][:8]
+        expected = "\n" + PRIOR_B["conclusion"][4:]
         self.assertEqual(("conclusion", "private-draft", len(rf.TEMPLATE["conclusion"]), expected),
                          (ri["section"], ri["seedKind"], ri["offset"], ri["text"]))
-        self.assertEqual([{"field": "conclusion", "start": 4, "end": len(PRIOR_B["conclusion"])},
-                          {"field": "recommendation", "start": 0, "end": 8}], ri["source"]["parts"])
+        self.assertEqual([{"field": "conclusion", "start": 4, "end": len(PRIOR_B["conclusion"])}], ri["source"]["parts"])
         self.assertEqual({"findings": rf.TEMPLATE["findings"], "conclusion": rf.TEMPLATE["conclusion"] + expected,
                           "recommendation": rf.TEMPLATE["recommendation"]}, self.stored())
         self.assertEqual(rf.TEMPLATE["recommendation"], self.value("recommendation"), "the Target Recommendation is untouched")
+
+    def test_two_field_insert_stops_when_first_receipt_is_refused(self):
+        self.open(); self.open_target(); self.enter()
+        self.site.refuse_reason = "TARGET_HELD"
+        self.page.locator("#related-mode-insert").click()
+        self.wait(lambda: self.op_state() == "refused", "first refused")
+        self.assertEqual(1, len(self.site.related_puts))
+        self.assertEqual("", self.value("conclusion"))
+        expect(self.notice()).to_be_visible()
+
+    def test_two_field_insert_keeps_applied_findings_when_conclusion_is_refused(self):
+        self.open(); self.open_target(); self.enter()
+        self.site.related_answers = ["hold"]
+        self.page.locator("#related-mode-insert").click()
+        self.wait(lambda: len(self.site.related_puts) == 1, "first held")
+        self.site.finish_related()
+        self.site.refuse_reason = "TARGET_HELD"
+        self.wait(lambda: len(self.site.related_puts) == 2 and self.op_state() == "refused", "second refused")
+        self.assertEqual(PRIOR_B["findings"], self.stored()["findings"])
+        self.assertEqual("", self.stored()["conclusion"])
+        self.assertEqual(["applied", "refused"], [self.site.receipts[b["relatedInsert"]["insertRequestId"]]["state"] for _, b in self.site.related_puts])
+        expect(self.notice()).to_be_visible()
 
     def test_w5_lost_answer_is_unknown_and_check_promotes_only_with_the_receipt_and_the_whole_draft(self):
         self.open()
@@ -1159,7 +1223,7 @@ class RelatedModePage(unittest.TestCase):
         self.enter()
         self.site.hidden.add(UID_A)
         lists = self.site.count("GET", "/api/studies")
-        self.page.get_by_role("group", name="Refresh").get_by_role("button", name="Refresh", exact=True).click()
+        self.page.locator("#m-refresh").click()
         self.wait(lambda: self.site.count("GET", "/api/studies") > lists, "the refresh")
         self.settle(300)
         expect(self.page.locator("#related-current")).to_have_text("판독 대상을 선택하세요")
@@ -1180,6 +1244,15 @@ class RelatedModePage(unittest.TestCase):
         expect(self.page.locator("#findings")).to_be_focused()
         self.assertEqual((UID_A, None), (self.js("selectedUid"), self.js("relatedUid")))
         expect(self.page.locator("#prior-findings")).to_have_text("")
+        self.assertEqual("SYN A kept", self.value())
+
+        # Returning after Back leaves no held editor to restore; focus the visible current-study region.
+        self.enter()
+        self.page.locator("#related-mode-back").click()
+        self.page.locator("#related-return").focus()
+        self.page.locator("#related-return").press("Enter")
+        expect(self.page.locator("#clinical")).to_be_focused()
+        expect(self.page.locator("#clinical")).to_be_visible()
         self.assertEqual("SYN A kept", self.value())
 
     def test_w5_clean_navigation_closes_the_mode_and_moves_and_prev_next_stay_available(self):
@@ -1260,7 +1333,7 @@ class RelatedModePage(unittest.TestCase):
                   "the usable viewer frame")
         return viewer
 
-    def test_w5_escape_closes_the_confirmation_first_then_leaves_and_the_keys_enter_and_back(self):
+    def test_w5_refusal_keeps_focus_and_escape_leaves_then_shortcuts_enter_and_back(self):
         viewer = self.viewer_stand_in()
         self.open()
         self.open_target()
@@ -1275,8 +1348,7 @@ class RelatedModePage(unittest.TestCase):
         expect(self.page.locator("#related-mode-title")).to_be_focused()
         self.wait(lambda: self.source_text("findings") == PRIOR_B["findings"], "the Source")
         self.open_insert()
-        self.page.keyboard.press("Escape")
-        expect(self.page.locator("#related-insert-dialog")).to_be_hidden()
+        self.assertEqual(0, self.page.locator("dialog[open]").count())
         expect(self.mode()).to_be_visible()
         expect(self.page.locator("#related-mode-insert")).to_be_focused()
         self.page.keyboard.press("Escape")
@@ -1324,30 +1396,30 @@ class RelatedModePage(unittest.TestCase):
         self.open()
         self.open_target()
         self.enter()
-        self.open_insert()
         # A focus listener makes the field read-only in the middle of the native edit (a hold arriving at that moment).
-        self.js("() => document.addEventListener('focus', e => { if (e.target.id === 'findings') e.target.readOnly = true; }, { capture: true, once: true })")
-        self.page.locator("#related-insert-confirm").click()
-        expect(self.page.locator("#related-insert-dialog")).to_be_visible()
-        expect(self.page.locator("#related-insert-error")).to_contain_text("넣지 못했습니다")
+        self.js("() => document.querySelector('#findings').addEventListener('focus', e => { e.target.readOnly = true; }, { once: true })")
+        self.select_source("findings")
+        self.page.locator("#related-mode-insert").click()
+        expect(self.page.locator("#related-mode-status")).to_have_text("현재 초안에 넣지 못했습니다. 편집기의 글을 확인한 뒤 다시 시도하세요.")
+        expect(self.page.locator("#related-mode-title")).to_be_focused()
+        expect(self.page.locator("#related-mode-status")).to_contain_text("넣지 못했습니다")
         self.assertEqual([False, True], self.editor_held())
         self.assertEqual("", self.value())
         self.assertEqual([], self.site.related_puts)
         self.assertIsNone(self.op_state())
-        self.assertTrue(self.js("document.querySelector('#related-insert-dialog').contains(document.activeElement)"))
+        expect(self.page.locator("#related-mode-title")).to_be_focused()
 
     def test_w5_reentrant_writes_during_the_native_edit_are_refused_and_the_text_is_exactly_the_insertion(self):
         self.site.templates = [rf.TEMPLATE]
         self.open()
         self.open_target()
         self.enter()
-        self.open_insert()
         self.js("""() => {
           const once = { capture: true, once: true };
-          document.addEventListener('focus', e => { if (e.target.id === 'findings') { window.__synTemplate = insertTemplate(templates[0]); stashReport(); } }, once);
-          document.addEventListener('input', e => { if (e.target.id === 'findings') { window.__synInput = editReport([{ field: 'conclusion', start: 0, end: 0, text: 'SYN reentrant' }]); stashReport(); } }, once);
+          document.querySelector('#findings').addEventListener('focus', () => { window.__synTemplate = insertTemplate(templates[0]); stashReport(); }, once);
+          document.querySelector('#findings').addEventListener('input', () => { window.__synInput = editReport([{ field: 'conclusion', start: 0, end: 0, text: 'SYN reentrant' }]); stashReport(); }, once);
         }""")
-        self.page.locator("#related-insert-confirm").click()
+        self.insert()
         self.wait(lambda: self.op_state() == "applied", "applied")
         self.assertEqual((False, False), (self.js("window.__synTemplate"), self.js("window.__synInput")))
         self.assertEqual((self.whole(), "", ""), (self.value(), self.value("conclusion"), self.value("recommendation")))
@@ -1455,17 +1527,16 @@ class RelatedModePage(unittest.TestCase):
         print('SOURCE_CARD '+json.dumps(text),flush=True)
         self.assertIn('syn-rad2@synthetic.test',text,'PAGE_03: Source signer must be visible')
         self.assertIn('2026-09-01 10:00',text,'PAGE_03: Source signing time must be visible')
-        self.open_insert()
-        confirmation = self.page.locator('#related-insert-dialog').inner_text()
+        confirmation = text
         for value in ('v1', 'Approved', 'syn-rad2@synthetic.test', '2026-09-01 10:00'):
-            self.assertIn(value, confirmation, 'PAGE_03: confirmation provenance')
+            self.assertIn(value, confirmation, 'PAGE_03: source provenance before one-click Insert')
 
     def prepare_refused_source_issue(self):
         self.open();self.open_target();self.enter()
         self.site.refuse_reason='TARGET_HELD';self.insert()
         self.wait(lambda:self.op_state()=='refused','refused insertion')
         self.site.identity_issues=[UID_B]
-        self.page.locator('#refresh').click()
+        self.page.locator('#m-refresh').click()
         self.wait(lambda:self.js('uid => appState[uid]?.identityUnresolved === true',UID_B),'source flagged unresolved')
         self.site.refuse_reason=None
         for name in ('#report-notice-retry', '#report-notice-discard'):
@@ -1494,7 +1565,7 @@ class RelatedModePage(unittest.TestCase):
         self.site.related_answers=['abort'];self.insert()
         self.wait(lambda:self.op_state()=='unknown','unknown insertion')
         # Public list refresh has flagged the original Source by the time the user retries.
-        self.site.identity_issues=[UID_B];self.page.locator('#refresh').click()
+        self.site.identity_issues=[UID_B];self.page.locator('#m-refresh').click()
         self.wait(lambda:self.js('uid => appState[uid]?.identityUnresolved === true',UID_B),'source unresolved')
         before=len(self.site.related_puts)
         retry=self.page.locator('#report-notice-retry')
@@ -1585,7 +1656,7 @@ class RelatedModePage(unittest.TestCase):
         text=self.r2_refused();self.site.related_answers=['hold']
         self.page.locator('#report-notice-discard').click()
         self.wait(lambda:len(self.site.held_related)==1,'discard request held')
-        self.site.identity_issues=[UID_B];self.page.locator('#refresh').click()
+        self.site.identity_issues=[UID_B];self.page.locator('#m-refresh').click()
         self.wait(lambda:self.js('uid => appState[uid]?.identityUnresolved === true',UID_B),'Source is now unresolved')
         self.site.finish_related();self.settle(300)
         print('LATE_DISCARD_UNRESOLVED_SOURCE '+json.dumps({'state':self.op_state(),'insert_text_preserved':self.value()==text}),flush=True)
@@ -1674,7 +1745,7 @@ class RelatedModePage(unittest.TestCase):
         self.assertTrue(self.js('uid => Boolean(appState[uid]?.identityUnresolved)', UID_B), 'focus listener ran')
         self.assertEqual(text, self.value(), 'W5A-03: final frame admission keeps native text')
         self.assertEqual('discard-unknown', self.op_state(), 'W5A-03: identity changed during native admission; keep operation')
-        self.page.locator('#refresh').click()
+        self.page.locator('#m-refresh').click()
         self.wait(lambda: not self.js('uid => Boolean(appState[uid]?.identityUnresolved)', UID_B), 'complete list resolves Source')
         self.page.locator('#report-notice-check').click()
         self.wait(lambda: self.op_state() == 'discarded', 'same tombstone resolves')
@@ -1685,13 +1756,13 @@ class RelatedModePage(unittest.TestCase):
         self.site.related_answers = ['abort']; self.insert()
         self.wait(lambda: self.op_state() == 'unknown', 'unknown apply')
         frozen = self.site.related_puts[0][1]
-        self.site.identity_issues = [UID_B]; self.page.locator('#refresh').click()
+        self.site.identity_issues = [UID_B]; self.page.locator('#m-refresh').click()
         self.wait(lambda: self.js('appState[relatedUid]?.identityUnresolved === true'), 'Source unresolved')
         self.js('() => { const op = relatedInserts.get(selectedUid); relatedInsertRetry(op); relatedInsertCheck(op); relatedInsertSend(op, "apply"); }')
         self.settle(200)
         self.assertEqual((1, 0), (len(self.site.related_puts), len(self.site.checks)), 'W5A-03: entry points block unresolved identities')
         self.assertEqual('unknown', self.op_state())
-        self.site.identity_issues = []; self.page.locator('#refresh').click()
+        self.site.identity_issues = []; self.page.locator('#m-refresh').click()
         self.wait(lambda: not self.js('Boolean(appState[relatedUid]?.identityUnresolved)'), 'complete list resolves Source')
         self.page.locator('#report-notice-retry').click()
         self.wait(lambda: self.op_state() == 'applied', 'same operation resumes')
@@ -1709,7 +1780,7 @@ class RelatedModePage(unittest.TestCase):
         }''')
         self.page.locator('#report-notice-retry').click()
         self.wait(lambda: self.js('digestReleases.length') == 2, 'digest computation held')
-        self.site.identity_issues = [UID_B]; self.page.locator('#refresh').click()
+        self.site.identity_issues = [UID_B]; self.page.locator('#m-refresh').click()
         self.wait(lambda: self.js('appState[relatedUid]?.identityUnresolved === true'), 'Source unresolved during queued write')
         self.js('restoreDigest()'); self.settle(200)
         self.assertEqual(1, len(self.site.related_puts), 'W5A-03: final admission after hashing')
@@ -1722,12 +1793,12 @@ class RelatedModePage(unittest.TestCase):
         self.wait(lambda: bool(self.site.held_related), 'apply held')
         _, uid, body, account = self.site.held_related[0]
         self.assertEqual(200, self.site.related_put(uid, body, account)[0], 'server applied before identity update')
-        self.site.identity_issues = [UID_B]; self.page.locator('#refresh').click()
+        self.site.identity_issues = [UID_B]; self.page.locator('#m-refresh').click()
         self.wait(lambda: self.js('appState[relatedUid]?.identityUnresolved === true'), 'Source unresolved')
         self.site.finish_related(); self.settle(200)
         self.assertEqual('unknown', self.op_state(), 'W5A-03: late reply cannot retire while Source unresolved')
         self.assertEqual(self.whole(), self.value())
-        self.site.identity_issues = []; self.page.locator('#refresh').click()
+        self.site.identity_issues = []; self.page.locator('#m-refresh').click()
         self.wait(lambda: not self.js('Boolean(appState[relatedUid]?.identityUnresolved)'), 'complete list resolves Source')
         self.page.locator('#report-notice-check').click()
         self.wait(lambda: self.op_state() == 'applied', 'same receipt resolves after identity')
@@ -2309,8 +2380,8 @@ class RelatedModePage(unittest.TestCase):
     # it does not shrink the Related Report mode (its box keeps its place and size); the list is visible, on top at its
     # own centre, and Hide Received closes it with the mode unchanged.
     # The box inside its report column (the click on the toggle may scroll the column into view; that is not a resize).
-    BOX = """selector => { const r = document.querySelector(selector).getBoundingClientRect(),
-      p = document.querySelector(".report-p"), c = p.getBoundingClientRect();
+    BOX = """selector => { const e = document.querySelector(selector), r = e.getBoundingClientRect(),
+      p = e.closest(".prior-report-pane, .report-p"), c = p.getBoundingClientRect();
       return [Math.round(r.top - c.top + p.scrollTop), Math.round(r.height)]; }"""
     ON_TOP = """selector => { const e = document.querySelector(selector), r = e.getBoundingClientRect();
       const x = r.left + r.width / 2, y = Math.max(r.top, 0) + Math.min(r.height, innerHeight) / 2;
@@ -2337,6 +2408,7 @@ class RelatedModePage(unittest.TestCase):
         body.scroll_into_view_if_needed()
         expect(body).to_be_in_viewport()
         self.assertTrue(self.js(self.ON_TOP, "#cvr-inbox-body"), "the opened list is drawn over the report area")
+        toggle.scroll_into_view_if_needed()
         expect(toggle).to_be_in_viewport()
         toggle.click()
         expect(body).to_be_hidden()
@@ -2365,7 +2437,6 @@ class RelatedModePage(unittest.TestCase):
             self.page.locator(selector).scroll_into_view_if_needed()
             self.assertTrue(self.js(self.ON_TOP, selector), f"{selector} is covered by the list that opened by itself")
         self.open_insert()
-        self.page.locator("#related-insert-cancel").click()
         self.back()
         expect(self.page.locator("#findings")).to_be_focused()
         self.assertEqual("SYN typed under a self-opened list", self.value())
@@ -2664,11 +2735,18 @@ class RelatedModePage(unittest.TestCase):
                     self.autosave()
                     target = self.page.locator("#" + field)
                     # A reader clicks where the field is on screen: a field taller than the editor's scroller is clicked
-                    # inside the scroller's view, not at its own centre (which the scroller can hold out of view).
+                    # inside the visible intersection of the editor and report card, not an off-screen field centre.
                     target.scroll_into_view_if_needed()
-                    self.page.mouse.click(*self.js("""id => { const a = document.getElementById(id).getBoundingClientRect(),
-                      b = document.querySelector('.redit').getBoundingClientRect();
-                      return [a.left + a.width / 2, (Math.max(a.top, b.top) + Math.min(a.bottom, b.bottom)) / 2]; }""", field))
+                    self.page.mouse.click(*self.js("""id => {
+                      const node = document.getElementById(id), r = node.getBoundingClientRect();
+                      let left = Math.max(0, r.left), right = Math.min(innerWidth, r.right);
+                      let top = Math.max(0, r.top), bottom = Math.min(innerHeight, r.bottom);
+                      for (let a = node.parentElement; a; a = a.parentElement) {
+                        const s = getComputedStyle(a), b = a.getBoundingClientRect();
+                        if (s.overflowX !== 'visible') { left = Math.max(left, b.left + a.clientLeft); right = Math.min(right, b.left + a.clientLeft + a.clientWidth); }
+                        if (s.overflowY !== 'visible') { top = Math.max(top, b.top + a.clientTop); bottom = Math.min(bottom, b.top + a.clientTop + a.clientHeight); }
+                      }
+                      return [(left + right) / 2, (top + bottom) / 2]; }""", field))
                     expect(target).to_be_focused()
                     self.page.keyboard.press("Control+End")
                     self.assertTrue(self.js(self.CARET_VISIBLE, field), "caret is visible before arrival")
@@ -2688,7 +2766,8 @@ class RelatedModePage(unittest.TestCase):
                     value = target.input_value()
                     self.page.keyboard.type(" typed")
                     self.assertEqual(value + " typed", target.input_value())
-                    self.assertTrue(self.js(self.CARET_VISIBLE, field))
+                    # Native selectionchange/scroll can follow the input reply; observe the resulting painted hit area.
+                    self.page.wait_for_function(self.CARET_VISIBLE, arg=field)
                     self.arrival_server.add(recipient.rec(182, case="R2"))
                     after_typing = self.js(snapshot)
                     self.poll_arrivals()
@@ -2780,9 +2859,8 @@ class RelatedModePage(unittest.TestCase):
                 self.poll_arrivals()
                 self.assertEqual(focused, self.js("document.activeElement.id"))
                 self.assertEqual(before, self.js(self.BOX, "#related-mode"))
-                self.assertTrue(self.js(self.ON_TOP, "#related-insert-confirm"))
-                self.page.keyboard.press("Escape")
-                expect(self.page.locator("#related-insert-dialog")).to_be_hidden()
+                self.assertTrue(self.js(self.ON_TOP, "#related-mode-insert"))
+                self.assertEqual(0, self.page.locator("dialog[open]").count())
                 expect(self.mode()).to_be_visible()
                 expect(self.page.locator("#cvr-inbox-body")).to_be_visible()
                 self.page.keyboard.press("Escape")

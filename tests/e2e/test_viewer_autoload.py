@@ -185,6 +185,7 @@ class ViewerAutoloadE2E(ViewerWindowsE2E):
         expect(first.get_by_label('Job Title', exact=True)).to_have_value('KEEP FIRST PATIENT')
         self.assertEqual(len(p.context.pages), 3)
         p.locator('#viewer-windows-done').click()
+        self.close_toolbar_groups(p)
         comparison = second.get_by_role('button', name='Comparison', exact=True)
         if comparison.get_attribute('aria-expanded') != 'true':
             comparison.click()
@@ -194,6 +195,7 @@ class ViewerAutoloadE2E(ViewerWindowsE2E):
         expect(p.locator('#viewer-windows-dialog')).to_be_visible()
         self.assertEqual(self.ids(second), [b.uid])
         p.locator('#viewer-windows-done').click()
+        self.close_toolbar_groups(p)
         self.limit(p, 1)
         p.locator('#m-filmbox').click()
         expect(p.locator('#viewer-windows-dialog')).to_be_visible()

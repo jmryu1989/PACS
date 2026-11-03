@@ -36,7 +36,7 @@ class RelatedKeyboardE2E(ReadingWorkspaceE2E):
   p.locator('#findings').focus();p.evaluate('renderRelated()');expect(p.locator('#findings')).to_be_focused()
   button.focus();p.evaluate("()=>{relatedModality=JSON.stringify('MR');renderRelated()}");expect(p.locator('#related-modality')).to_be_focused();expect(p.locator('#relrows tr[tabindex="0"]')).to_have_count(0)
   p.evaluate("()=>{relatedModality='';renderRelated()}");expect(p.locator('#relrows tr[tabindex="0"]')).to_have_count(1)
-  button.focus();p.evaluate("()=>{selectedUid=null;renderRelated()}");expect(p.locator('#related-current')).to_be_focused()
+  button.focus();p.evaluate("()=>{selectedUid=null;renderRelated()}");expect(p.locator('#clinical')).to_be_focused()
   p.evaluate('uid=>{selectedUid=uid;renderRelated()}',a.uid)
   expect(button).to_be_visible();retired=button.element_handle();pages=len(p.context.pages)
   end_document(p);expect(p.locator('#relrows tr[tabindex="0"]')).to_have_count(0);expect(button).to_have_count(0)

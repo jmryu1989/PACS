@@ -18,7 +18,7 @@ class TemplateSnapshotE2E(previous.ReportTemplateE2E):
     def refresh(self, page):
         # Existing UI event may arrive while an editor is open; do not change app variables.
         with page.expect_response(lambda r: r.request.method == "GET" and urlsplit(r.url).path == "/api/studies"):
-            page.locator("#refresh").dispatch_event("click")
+            page.locator("#m-refresh").dispatch_event("click")
 
     def test_d09e_01_delayed_draft_discard_preserves_copied_editor(self):
         """SNAPSHOT/LOSS: a real pending discard may finish after the user opens the template editor."""

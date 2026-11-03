@@ -97,7 +97,7 @@ class S9RoleSweepE2E(StudyAccessE2E):
         try:
             with member.expect_request(lambda request:
                     urlsplit(request.url).path == '/api/studies'):
-                member.locator('#refresh').click()
+                member.locator('#m-refresh').click()
             dialog.locator('[name=role][value=radiologist]').uncheck()
             path = '/api/admin/users/' + subject
             with admin.expect_response(lambda response:
@@ -225,7 +225,7 @@ class S9RoleSweepE2E(StudyAccessE2E):
         reviewed = self.stack.request('POST', '/admin/users/' + subject + '/study-access',
                                      receiver, self.body(policy(restricted=False), actor=receiver))
         self.assertEqual(reviewed.status, 201)
-        fresh.locator('#refresh').click()
+        fresh.locator('#m-refresh').click()
         expect(fresh.locator('#rows tr[data-uid="' + destination.uid + '"]').first).to_be_visible()
         expect(fresh.locator('#rows tr[data-uid="' + home.uid + '"]')).to_have_count(0)
         listed = document_request(fresh, 'GET', self.stack.api + '/studies')

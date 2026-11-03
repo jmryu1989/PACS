@@ -145,13 +145,13 @@ def extract_function(source, name):
 # hand-written copy of it would only assert this file against itself.
 MARKERS = {
     "MODAL_CSS": (".modal { display: none;", "/* ══ 클릭 피드백"),
-    "RBTNS_HTML": ('<div class="rbtns">', "\n        </div>"),
+    "RBTNS_HTML": ('<div class="rfoot2 rbtns">', "\n        </div>"),
     # W4: the Notice row that says why a study move did not happen sits right above the draft bar.
     "BARS_HTML": ('<div class="draftbar" id="report-notice"', '<div id="citelist"'),
     "REDIT_HTML": ('<div class="redit">', "\n        </div>"),
     # Not asserted here, but `commitReport` addresses #b-unread/#b-defer by id: a missing element
     # would throw at runtime instead of at load, which is the harder failure to read.
-    "RFOOT_HTML": ('<div class="rfoot2">', "\n        </div>"),
+    "RFOOT_HTML": ('<div class="rfoot2 rbtns">', "\n        </div>"),
     "PANE_HTML": ('<div class="modal" id="stalemodal"', "\n  </div>"),
     "CITE_HTML": ('<div class="modal" id="cite-preview"', "\n  </div>"),
     "STRUCT_HTML": ('<div class="modal" id="structmodal"', "\n  </div>"),
@@ -160,11 +160,11 @@ MARKERS = {
 }
 
 MODAL_CSS = slice_between(MAIN, *MARKERS["MODAL_CSS"])
-RBTNS_HTML = slice_between(MAIN, *MARKERS["RBTNS_HTML"]) + "\n        </div>"
+RBTNS_HTML = ""  # The merged action row is included once as RFOOT_HTML below.
 BARS_HTML = (slice_between(MAIN, *MARKERS["BARS_HTML"])
              + '<div id="citelist" hidden aria-label="Report Citations"></div>')
 # W4: the read-only Recommendation notice right above the report fields belongs to the fields' region.
-REDIT_HTML = (slice_between(MAIN, '<details class="recnote" id="recnote"', '<div class="redit">')
+REDIT_HTML = (slice_between(MAIN, '<div class="recnote" id="recnote"', '<div class="redit">')
               + slice_between(MAIN, *MARKERS["REDIT_HTML"]) + "\n        </div>")
 RFOOT_HTML = slice_between(MAIN, *MARKERS["RFOOT_HTML"]) + "\n        </div>"
 PANE_HTML = slice_between(MAIN, *MARKERS["PANE_HTML"]) + "\n  </div>"
@@ -187,7 +187,7 @@ LITE = ROOT / "worklist-v0" / "hpacs-lite"
 DICTATION_JS = [(LITE / name).read_text(encoding="utf-8")
                 for name in ("dictation-session.js", "dictation-capture.js", "dictation.js")]
 # The pane ends where the next element of the column starts (W4: the read-only Recommendation notice), not at a comment.
-DICTATION_PANE_HTML = (slice_between(MAIN, '<div id="dictation-pane"', '<details class="recnote" id="recnote"')
+DICTATION_PANE_HTML = (slice_between(MAIN, '<div id="dictation-pane"', '<div class="recnote" id="recnote"')
                        if '<div id="dictation-pane"' in MAIN else "")
 DICTATION_WIRING = (slice_between(MAIN, "    // ══════════ 받아쓰기 (S3-ASR-U4) ══════════",
                                   '    $("#t-mod").addEventListener("change", renderTemplates);')

@@ -98,7 +98,14 @@ SESSION_B = {**SESSION_A, "sub": "syn-sub-b", "actor": "syn-reader-b@synthetic.t
              "displayName": "SYN Reader B"}
 COLUMNS_KEY = "kin-worklist-columns:v1:"
 DEFAULT_ORDER = V["V01"]["expect"]["modes"]["Radiology"]["order"]
-DEFAULT_TITLES = [TITLES[k] for k in DEFAULT_ORDER]
+# Studio default: partial legacy orders keep their specified prefix; missing keys
+# follow the new default order. Full stored orders are still checked against the shared vectors.
+DEFAULT_TITLES = ['No', 'Assigned Reader', 'RS', 'StudyDate', 'ID', 'Name', 'Age', 'StudyDesc', 'Modality', 'Hospital']
+RESTORED_TITLES = {
+    "V03": ['Name', 'ID', 'No', 'Assigned Reader', 'RS', 'StudyDate', 'StudyDesc', 'Modality', 'Hospital',
+            'PF', 'Tech Note', 'Viewing', 'Count', 'Series', 'EM', 'SS', 'Accession No', 'TS', 'BirthDate', 'Sex', 'PreDoc', 'PreReviewer'],
+    "V05": DEFAULT_TITLES + ['PF', 'Tech Note', 'Viewing', 'Count', 'Series', 'EM', 'SS', 'Accession No', 'TS', 'BirthDate', 'Sex', 'PreDoc', 'PreReviewer'],
+}
 # Words the legend, the Hospital header and the Tele label never carry (IC-09; UXR-SP-34/G-18 and S7-U1p §16.3, written
 # here rather than imported).
 AVOIDED = re.compile(r"진단|검출|판정|우선순위|diagnos|detect|priorit|\bAI\b", re.I)
@@ -341,7 +348,7 @@ STORAGE_RECORDER = """(() => {
 })();"""
 TABLE_VIEW = """t => {
   const clean = s => s.replace(/\\s+/g, ' ').trim();
-  const head = [...t.tHead.rows[0].cells].map(c => clean(c.innerText));
+  const head = [...t.tHead.rows[0].cells].map(c => [...c.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent).join('').trim());
   const rows = [...t.tBodies[0].rows].filter(r => r.cells.length === head.length && head.length > 1)
     .map(r => [...r.cells].map(c => clean(c.innerText)));
   return { head, rows };
@@ -349,7 +356,7 @@ TABLE_VIEW = """t => {
 STYLE_VIEW = """t => {
   const props = ['color', 'background-color', 'font-weight', 'font-style', 'text-decoration-line', 'opacity', 'box-shadow', 'outline'];
   const sig = e => { const s = getComputedStyle(e); return props.map(p => p + ':' + s.getPropertyValue(p)).join(';'); };
-  const head = [...t.tHead.rows[0].cells].map(c => c.innerText.replace(/\\s+/g, ' ').trim());
+  const head = [...t.tHead.rows[0].cells].map(c => [...c.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent).join('').trim());
   // One read of texts and styles together, so a redraw can never pair one row's text with another row's style.
   const rows = [...t.tBodies[0].rows].filter(r => r.cells.length === head.length).map(r => ({
     row: sig(r),
@@ -397,11 +404,11 @@ class Screen:
             dialog.dismiss()
 
     def table(self):
-        # The worklist is the table with the Name column, which no layout can hide (ID and Name are required); the
-        # Technician Order List also has Name but is the one with ScheduledDate. A stored layout may hide any other column.
+        # Mandatory ID/Name filters identify the worklist even when a header's
+        # accessible name includes help or the column-picker button.
         return self.page.get_by_role("table").filter(
-            has=self.page.get_by_role("columnheader", name="Name", exact=True)).filter(
-            has_not=self.page.get_by_role("columnheader", name="ScheduledDate", exact=True))
+            has=self.page.get_by_role("textbox", name="Name Filter", exact=True)).filter(
+            has=self.page.get_by_role("textbox", name="ID Filter", exact=True))
 
     def view(self):
         return self.table().evaluate(TABLE_VIEW)
@@ -429,20 +436,31 @@ class Screen:
         return self.table().get_by_role("row").filter(has=self.page.get_by_role("cell", name=pid, exact=True))
 
     def menu(self, name, open_=True):
-        summary = self.page.locator("summary").filter(has_text=re.compile("^" + re.escape(name) + "▾?$"))
-        details = summary.locator("xpath=..")
+        # The toolbar's named group distinguishes its More menu from Report More.
+        details = self.page.locator("details").filter(has=self.page.get_by_role("group", name=name, exact=True, include_hidden=True)).last
+        summary = details.locator(":scope > summary")
         if (details.get_attribute("open") is None) == open_:
             summary.click()
         return details
 
+    def header(self, title):
+        return self.table().get_by_role("columnheader").filter(has_text=re.compile(r"^\+?" + re.escape(title) + r"$"))
+
+    def show_column(self, title):
+        dialog = self.open_columns()
+        dialog.get_by_role("checkbox", name="Show " + title, exact=True).check()
+        dialog.get_by_role("button", name="Apply for This Window", exact=True).click()
+        expect(dialog).to_be_hidden()
+        self.menu("View", open_=False)
+
     def refresh(self):
-        self.page.get_by_role("group", name="Refresh").get_by_role("button", name="Refresh", exact=True).click()
+        self.page.get_by_role("button", name="↻ Refresh", exact=True).click()
 
     def set_manual_refresh(self):
-        group = self.page.get_by_role("group", name="Refresh")
-        group.locator("summary").click()
+        more = self.menu("More")
+        more.locator('summary[aria-label="Auto Refresh"]').click()
         self.page.get_by_role("combobox", name="Auto Refresh").select_option(label="Manual")
-        group.locator("summary").click()
+        self.menu("More", open_=False)
 
     def filter_line(self):
         return self.page.get_by_text(re.compile(r"^(Draft Filter \(not applied\) : |Filter : )")).inner_text()
@@ -532,15 +550,16 @@ class MultiInstitutionWorklist(unittest.TestCase):
         server = Server(rows=self.hospital_rows())
         screen = self.boot(server)
         self.check_hospital(screen, A, B)
-        # The label is not smaller than the row text and at least 12px.
+        # The label follows the approved compact 11px default and is no smaller than the row.
         sizes = screen.data_row("SYN-TELE-01").get_by_title(TELE_TIP).evaluate(
             "e => [parseFloat(getComputedStyle(e).fontSize), parseFloat(getComputedStyle(e.closest('td')).fontSize)]")
-        self.assertGreaterEqual(sizes[0], 12)
+        self.assertGreaterEqual(sizes[0], 11)
         self.assertGreaterEqual(sizes[0], sizes[1])
         with_column = self.focus_names(screen, "SYN-TELE-01")
         screen.finish()
         # The cell adds no focus target: the same row with Hospital hidden (a stored layout) has the same Tab order.
-        hidden = {"version": 1, "modes": {"Radiology": {"order": list(DEFAULT_ORDER), "hidden": ["institutionName"]},
+        hidden = {"version": 1, "modes": {"Radiology": {"order": [next(k for k, v in TITLES.items() if v == title) for title in DEFAULT_TITLES],
+                                                        "hidden": [k for k, v in TITLES.items() if v not in DEFAULT_TITLES or v == HOSPITAL]},
                                           "Technician": {"order": [], "hidden": []}}}
         screen = self.boot(Server(rows=self.hospital_rows()), storage={layout_key(SESSION_A): json.dumps(hidden)})
         self.assertNotIn(HOSPITAL, screen.heads())
@@ -670,11 +689,14 @@ class MultiInstitutionWorklist(unittest.TestCase):
     @staticmethod
     def search_controls(screen):
         page = screen.page
+        screen.menu("Filters")
         mode = page.get_by_role("combobox", name="Search Mode")
         clear = page.get_by_role("checkbox", name="Clear Results on Clear")
-        return {"mode": mode.input_value(), "mode_disabled": mode.is_disabled(),
+        result = {"mode": mode.input_value(), "mode_disabled": mode.is_disabled(),
                 "search_disabled": page.get_by_role("button", name="Search", exact=True).is_disabled(),
                 "clear": clear.is_checked(), "clear_disabled": clear.is_disabled()}
+        screen.menu("Filters", open_=False)
+        return result
 
     @staticmethod
     def wait_demo_rows(screen, message):
@@ -963,6 +985,7 @@ class MultiInstitutionWorklist(unittest.TestCase):
         screen.wait_rows(["SYN-T-CT"])
         self.type_filter(screen, HOSPITAL, "")
         screen.wait_rows(self.ALL_IDS + ["SYN-T-CT"])
+        screen.menu("Filters")
         screen.page.get_by_role("combobox", name="Search Mode").select_option("manual")
         self.type_filter(screen, HOSPITAL, "center b")
         until(lambda: "조건 변경 미적용" in screen.page.get_by_text(re.compile("조건 변경 미적용")).first.inner_text())
@@ -982,7 +1005,7 @@ class MultiInstitutionWorklist(unittest.TestCase):
         screen = self.boot(server)
         self.type_filter(screen, HOSPITAL, "center")
         screen.wait_rows(["SYN-S-B1", "SYN-S-B2"])
-        header = screen.table().get_by_role("columnheader", name=HOSPITAL, exact=True)
+        header = screen.header(HOSPITAL)
         header.click()
         header.click()   # descending
         screen.wait_rows(["SYN-S-B2", "SYN-S-B1"])
@@ -1047,7 +1070,7 @@ class MultiInstitutionWorklist(unittest.TestCase):
             with self.subTest(vector):
                 raw = json.dumps(V[vector]["document"])
                 screen = self.boot(Server(rows=self.column_rows()), storage={key: raw})
-                self.assertEqual(titles_of(V[vector]["expect"]), screen.heads())
+                self.assertEqual(RESTORED_TITLES.get(vector, titles_of(V[vector]["expect"])), screen.heads())
                 self.assertEqual(raw, self.stored_value(screen, key), "reading does not rewrite the stored value")
                 self.assertEqual([], self.column_writes(screen))
                 if vector == "V02":
@@ -1084,7 +1107,7 @@ class MultiInstitutionWorklist(unittest.TestCase):
         self.assertEqual(titles_of(V["V02"]["expect"]), screen.heads())
         screen.finish()
         screen = self.boot(Server(rows=self.column_rows(), session=SESSION_B), storage=storage)
-        self.assertEqual(titles_of(V["V03"]["expect"]), screen.heads())
+        self.assertEqual(RESTORED_TITLES["V03"], screen.heads())
         screen.finish()
         # Pair: B without a stored layout sees the default, not A's order.
         screen = self.boot(Server(rows=self.column_rows(), session=SESSION_B), storage={a_key: storage[a_key]})
@@ -1151,15 +1174,20 @@ class MultiInstitutionWorklist(unittest.TestCase):
                 dialog = screen.open_columns()
                 dialog.get_by_role("button", name="Check Account Settings", exact=True).click()
                 expect(dialog.get_by_text("계정에 저장된 열 설정이 있습니다.")).to_be_visible()
+                before = dialog.get_by_role("checkbox", name=re.compile(r"^Show ")).evaluate_all(
+                    "boxes => boxes.map(b => b.getAttribute('aria-label').slice(5))")
+                expected = before[:]
+                at = expected.index(HOSPITAL)
+                expected[at - 1], expected[at] = expected[at], expected[at - 1]
                 dialog.get_by_role("button", name="Hospital Up", exact=True).click()
                 dialog.get_by_role("button", name="Save Draft to Account", exact=True).click()
                 expect(dialog.get_by_text(sentence)).to_be_visible()
                 shown = dialog.get_by_role("checkbox", name=re.compile(r"^Show ")).evaluate_all(
                     "boxes => boxes.map(b => b.getAttribute('aria-label').slice(5))")
-                self.assertEqual([HOSPITAL, "PreReviewer"], shown[-2:], "the edit is kept")
+                self.assertEqual(expected, shown, "the one-position move is kept")
                 put = [body for method, body in server.column_answers if method == "PUT"]
                 self.assertEqual(1, len(put))
-                self.assertEqual(["preDoc", "institutionName", "preReviewer"], put[0]["columns"]["modes"]["Radiology"]["order"][-3:])
+                self.assertEqual(expected, [TITLES[k] for k in put[0]["columns"]["modes"]["Radiology"]["order"]])
                 dialog.get_by_role("button", name="Close", exact=True).click()
                 screen.finish(dialogs=1)
 
@@ -1256,6 +1284,7 @@ class MultiInstitutionWorklist(unittest.TestCase):
         state = {"minute": 0}
         server = Server(rows=self.mi06_rows(boot, 0), clock=lambda: self.T0 + timedelta(minutes=state["minute"]))
         screen = self.boot(server, clock_at=self.T0 - timedelta(minutes=1))
+        screen.show_column("EM")
         screen.set_manual_refresh()
         observations = {}
         for minute in self.MINUTES:
@@ -1323,6 +1352,7 @@ class MultiInstitutionWorklist(unittest.TestCase):
     def test_mi06_urgency_comes_from_em_not_the_description(self):
         rows = [row("2.25.651", "SYN-STAT-N", desc="STAT CT", em="N"), row("2.25.652", "SYN-STAT-E", desc="STAT CT", em="E")]
         screen = self.boot(Server(rows=rows))
+        screen.show_column("EM")
         self.assertEqual({"SYN-STAT-N": "", "SYN-STAT-E": "E"}, screen.cells_by_id("EM"))
         screen.finish()
 
@@ -1338,7 +1368,7 @@ class MultiInstitutionWorklist(unittest.TestCase):
                 screen = self.boot(Server(rows=rows))
                 server_order = ["SYN-SO-1", "SYN-SO-2", "SYN-SO-3"]
                 screen.wait_rows(server_order)
-                header = screen.table().get_by_role("columnheader", name=HOSPITAL, exact=True)
+                header = screen.header(HOSPITAL)
                 header.click()
                 screen.wait_rows(ascending)
                 header.click()
@@ -1392,7 +1422,7 @@ class MultiInstitutionWorklist(unittest.TestCase):
         screen.page.get_by_role("button", name="Clear", exact=True).click()
         screen.wait_rows(["SYN-T-OWN", "SYN-T-TELE"])
         # A Hospital sort does not survive the Technician tab (no such column there).
-        screen.table().get_by_role("columnheader", name=HOSPITAL, exact=True).click()
+        screen.header(HOSPITAL).click()
         screen.wait_rows(["SYN-T-TELE", "SYN-T-OWN"])   # ascending by name: SYN Center B before SYN Hospital A
         screen.page.get_by_text("Technician", exact=True).first.click()
         until(lambda: "ReqHosp" in screen.heads(), 10, "Technician columns")

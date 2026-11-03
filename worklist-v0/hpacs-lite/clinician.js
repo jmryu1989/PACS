@@ -438,7 +438,11 @@
 
   function statusBadge(report) {
     const kind = report && report.final === true ? 'final' : report && OPEN_STATUS[report.rs] ? 'open' : 'unknown';
-    return node('span', `status ${kind}`, statusName(report));
+    const badge = node('span', `status ${kind}`, statusName(report));
+    // 상태 뜻과, 확정 전에는 본문·키 이미지가 보이지 않는 이유를 툴팁으로 알린다(설명은 한국어, AGENTS §4).
+    badge.title = kind === 'final' ? FINAL_ONLY
+      : kind === 'open' ? `${OPEN_NOTE[report.rs]} ${FINAL_ONLY}` : `${TEXT.unknown} ${FINAL_ONLY}`;
+    return badge;
   }
 
   function studyRow(row) {

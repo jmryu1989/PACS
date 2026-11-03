@@ -80,3 +80,17 @@ test('TEST-D03A-TIE/COST: existing UID descending tie is stable and inputs remai
   assert.equal(vm.runInContext('typeof fetch + typeof window + typeof localStorage', sandbox),
     'undefinedundefinedundefined');
 });
+
+// Exercise the shipped related-study consumer with a synthetic selected target, not a copied date formula.
+test('Related Exam interval uses completed calendar months and UTC days in both directions', () => {
+  const realm = vm.createContext({ target: null, cur: () => realm.target, $: () => ({ addEventListener() {} }) });
+  vm.runInContext(`${fmtD}\n${html.slice(start, end)}\n` + readFileSync(join(__dirname, '../worklist-v0/hpacs-lite/related-studies.js'), 'utf8'), realm);
+  for (const [date, prior, expected] of [
+    ['2026-10-03','2025-08-01','1y 2m before'], ['2026-10-03','2026-11-03','1m after'],
+    ['2026-10-03','2026-10-06','3d after'], ['2026-10-03','2026-10-03','same day'],
+    ['2026-03-01','2026-02-28','1d before'], ['2024-03-01','2024-02-28','2d before'],
+    ['2026-02-28','2026-01-31','28d before'], ['2026-03-31','2026-01-31','2m before'],
+    ['2026-03-30','2026-01-31','1m before'], ['2026-01-01','2025-01-01','1y before'],
+    ['2026-10-03','2026-02-30',''], ['', '2026-01-01','']
+  ]) { realm.target = { date }; assert.equal(realm.relatedInterval({ date: prior }), expected, `${date} / ${prior}`); }
+});

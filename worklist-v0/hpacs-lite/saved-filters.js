@@ -25,8 +25,9 @@
     function shortcutStatus(message) {
       const status = $('#shortcuts-status');
       if (status && status.textContent !== message) status.textContent = message;
-      const save = $('#shortcuts-save');
-      if (save) save.disabled = !shortcutDraft || !filterCollection || shortcutBusy || !serverMode || offline || work.state() !== 'active';
+      // 저장 도중 화면 전환을 취소한 경우 팝업도 미확정 상태를 보여 주어야 다시 저장 여부를 판단할 수 있다.
+      const popupStatus = examFilterDialog?.open && examFilterDialog.querySelector('[role=status]');
+      if (popupStatus && message && popupStatus.textContent !== message) popupStatus.textContent = message;
     }
     async function reloadFolderSearches(at = work.capture('document')) {
       const sequence = ++filterReadSequence;
@@ -47,11 +48,11 @@
         try {
           if (personal.status === 'rejected') throw personal.reason;
           acceptFilterCollection(personal.value);
-          shortcutStatus(shortcutDraft ? '편집 내용을 유지했습니다. 확인 후 Save Shortcuts로 저장하세요.'
+          shortcutStatus(shortcutDraft ? '편집 내용을 유지했습니다. Filter Exams에서 이름을 확인하고 Save as Shortcut으로 다시 저장하세요.'
             : shared.status === 'rejected' ? '기관 검색을 불러오지 못했습니다. 다시 불러오세요.' : '');
         } catch (error) {
           filterCollection = null;
-          shortcutStatus('검색 모음을 읽지 못해 저장을 막았습니다. Reload Shortcuts로 다시 불러오세요. ' + error.message);
+          shortcutStatus('검색 모음을 읽지 못해 저장을 막았습니다. Filter Exams를 다시 열어 불러오세요. ' + error.message);
         }
         updateWorklistFolders(); render();
       });
@@ -61,7 +62,7 @@
       shortcutDraft = JSON.parse(JSON.stringify(next));
       if (shortcutBusy) { shortcutStatus('저장 중입니다. 추가 편집은 현재 저장 뒤에 반영합니다.'); return; }
       if (!filterCollection || !serverMode || offline) {
-        shortcutStatus('검색 모음 버전을 확인해야 저장할 수 있습니다. Reload Shortcuts로 다시 불러오세요.'); return;
+        shortcutStatus('검색 모음 버전을 확인해야 저장할 수 있습니다. Filter Exams를 다시 열어 불러오세요.'); return;
       }
       const at = work.capture('document'), sent = JSON.stringify(shortcutDraft);
       const body = { expectedOwner: [...filterCollection.owner], revision: filterCollection.revision,
@@ -80,7 +81,7 @@
       } catch (error) {
         work.commit(at, () => {
           filterCollection = null;
-          shortcutStatus('저장 결과를 확인하지 못했습니다. 편집은 유지됩니다. Reload Shortcuts 후 확인해 주세요. ' + error.message);
+          shortcutStatus('저장 결과를 확인하지 못했습니다. 편집은 유지됩니다. Filter Exams를 다시 열어 확인해 주세요. ' + error.message);
         });
       } finally {
         work.commit(at, () => {
@@ -88,14 +89,15 @@
           if (saved) shortcutStatus('바로가기를 저장했습니다.');
         });
       }
-      if (saved && shortcutDraft && work.admits(at)) await saveFolderShortcuts(shortcutDraft);
+      if (saved && shortcutDraft && work.admits(at)) return saveFolderShortcuts(shortcutDraft);
+      return saved;
     }
     work.onInvalidate(event => {
       if (event.reason === 'prepare') {
         ++filterReadSequence; ++sharedFilterReadSequence;
         if (shortcutBusy) {
           shortcutBusy = false; filterCollection = null;
-          shortcutStatus('저장 결과를 확인해야 합니다. 편집으로 돌아온 뒤 Reload Shortcuts로 확인해 주세요.');
+          shortcutStatus('저장 결과를 확인해야 합니다. 편집으로 돌아온 뒤 Filter Exams를 다시 열어 확인해 주세요.');
         } else shortcutStatus($('#shortcuts-status')?.textContent || '');
       } else if (event.reason === 'cancel') {
         // Resuming never revives the previous write ticket or silently resends its array.
@@ -104,15 +106,20 @@
     });
 
     const snapshotFilter = () => ({
-      quick: $("#quick").value, days: quickDays, mode, cols: { ...fval },
+      quick: $("#quick").value, days: -1, mode, cols: { ...fval },
       sortKey, sortDir,
     });
     function filterCriteriaKey(filter) {
       const canonical = value => Array.isArray(value) ? value.map(canonical)
         : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(k => [k, canonical(value[k])])) : value;
       const cols = Object.fromEntries(Object.entries(filter.cols || {}).filter(([, v]) => v !== '' && v != null));
+      const days = savedFilterDays(filter.days);
+      if (!cols.date && days >= 0) {
+        const to = new Date(), from = new Date(to); from.setDate(from.getDate() - days);
+        cols.date = `${ymd(from)}..${ymd(to)}`;
+      }
       const key = COLS[filter.mode]?.some(c => c.k === filter.sortKey) ? filter.sortKey : null;
-      return JSON.stringify(canonical({ mode: filter.mode, quick: filter.quick ?? '', days: savedFilterDays(filter.days),
+      return JSON.stringify(canonical({ mode: filter.mode, quick: filter.quick ?? '', days: -1,
         cols, sortKey: key, sortDir: key ? filter.sortDir || 0 : 0 }));
     }
     function focusFilterChip(name) {
@@ -220,7 +227,7 @@
       },
       restoreFocus(opener) {
         if (opener?.isConnected && !opener.disabled && !opener.closest('[hidden]')) opener.focus();
-        else if (opener?.id === 'edit-active-filter') $('#clearfilter').focus();
+        else if (opener?.id === 'edit-active-filter') $('#filterrow .col-clear')?.focus();
         else if (opener?.dataset.name) focusFilterChip(opener.dataset.name);
         else $('#managefilters').focus();
       },
@@ -265,10 +272,14 @@
       const source = folderId && folderSearches().find(saved => saved.treeId === (f.treeId || 'own:' + f.id));
       folderAppliedSearch = source ? { id: source.treeId, name: source.name, criteria: filterCriteriaKey(f) } : null;
       $("#quick").value = f.quick ?? "";
-      quickDays = savedFilterDays(f.days);
-      document.querySelectorAll("#qf button").forEach(x => x.classList.toggle("on", +x.dataset.days === quickDays));
       Object.keys(fval).forEach(k => delete fval[k]);
       Object.assign(fval, f.cols ?? {});
+      // 옛 상대 날짜 검색도 적용할 때 헤더의 단일 날짜 조건으로 옮긴다.
+      const days = savedFilterDays(f.days);
+      if (!fval.date && days >= 0) {
+        const to = new Date(), from = new Date(to); from.setDate(from.getDate() - days);
+        fval.date = `${ymd(from)}..${ymd(to)}`;
+      }
       // setMode()가 정렬을 지우므로 모드를 먼저 바꾸고 정렬을 나중에 얹는다
       if (f.mode && f.mode !== mode) setMode(f.mode);
       /**
@@ -372,15 +383,13 @@
     });
     renderChips();
 
-    $("#clearfilter").addEventListener("click", () => {
+    function clearWorklistFilters() {
       activeFilterName = null;
       folderAppliedSearch = null;
       favoriteList?.clear();studyTagList?.clear();consultationFilter=null;
       $("#quick").value = "";
       Object.keys(fval).forEach(k => delete fval[k]);
-      quickDays = -1;
-      document.querySelectorAll("#qf button").forEach(x => x.classList.toggle("on", x.dataset.days === "-1"));
       worklistSearch?.clear();
       alignWorklistFolder(null);
       renderHeads(); render();
-    });
+    }

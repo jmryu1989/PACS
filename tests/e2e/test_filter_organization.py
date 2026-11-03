@@ -14,7 +14,7 @@ class FilterOrganizationE2E(manager.SavedFilterManagerE2E):
         fixture = self.fixture(patient_id=prefix)
         self.seed_report(fixture)
         page = self.login(); self.select(page, fixture)
-        page.locator('#quick').fill(prefix)
+        self.quick_search(page, prefix)
         self.open_manager(page)
         description = 'needle <img src=x onerror="window.badFolder=1">'
         saved = []
