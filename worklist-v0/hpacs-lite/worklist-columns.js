@@ -319,8 +319,20 @@
       changed();
     }
     const style = document.createElement('style'); document.head.append(style);
+    // A saved width is the content's (the .wc-cell box). The fixed table's column also has to hold the padding and
+    // border of the cell around that content, or the content's right edge is clipped. Read them from the cell
+    // that holds the content (the header when the list is empty) so the stored value keeps its meaning.
+    const sides = cell => { const s = getComputedStyle(cell);
+      return ['paddingLeft','paddingRight','borderLeftWidth','borderRightWidth'].reduce((n, k) => n + (parseFloat(s[k]) || 0), 0); };
+    const contentCell = (heads, i) => document.querySelector('#rows tr[data-uid]')?.cells[i] || heads[i];
     const controller = { columns: m => visible(columns, state, m),
       widths: m => copy(state.modes[m].appearance?.widths || {}),
+      // Current content width of each shown column, the inverse of decorate's outer width: a drag that starts
+      // from these values and saves them back does not grow the columns by their padding each time.
+      contentWidths: m => {
+        const heads = [...document.querySelectorAll('#heads th')];
+        return Object.fromEntries(heads.map((th, i) => [th.dataset.key, th.getBoundingClientRect().width - sides(contentCell(heads, i))]));
+      },
       setWidth: (m, k, width) => {
         const widths = controller.widths(m);
         if (width == null) delete widths[k]; else widths[k] = width;
@@ -361,9 +373,11 @@
         table.classList.toggle('cols-fixed', fixed);
         let total = 0;
         heads.forEach((th, i) => {
-          const width = a?.widths[shown[i]?.k] || Math.max(64, Math.min(600, Math.round(th.getBoundingClientRect().width)));
-          th.style.width = fixed ? width + 'px' : '';
-          total += width;
+          const saved = a?.widths[shown[i]?.k];
+          const outer = saved ? saved + sides(contentCell(heads, i)) : Math.max(64, Math.min(600, Math.round(th.getBoundingClientRect().width)));
+          // th.style.width is the border box only under border-box sizing; otherwise it is the header's content box.
+          th.style.width = fixed ? (getComputedStyle(th).boxSizing === 'border-box' ? outer : outer - sides(th)) + 'px' : '';
+          total += outer;
         });
         table.style.width = fixed ? total + 'px' : '';
       }

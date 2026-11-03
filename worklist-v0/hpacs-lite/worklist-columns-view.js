@@ -203,10 +203,10 @@
         grip.addEventListener("pointerdown", e => {
           if (e.button !== 0 || !columnPrefs) return;
           e.preventDefault(); e.stopPropagation(); grip.setPointerCapture(e.pointerId);
-          const key = th.dataset.key, startX = e.clientX, start = th.getBoundingClientRect().width;
+          // Saved widths are content widths, not the header boxes the pointer moves (those also hold the cell padding).
+          const key = th.dataset.key, startX = e.clientX, content = columnPrefs.contentWidths(mode), start = content[key];
           const original = columnPrefs.widths(mode);
-          const widths = Object.fromEntries([...heads.children].map(h => [h.dataset.key,
-            Math.max(64, Math.min(600, Math.round(h.getBoundingClientRect().width)))]));
+          const widths = Object.fromEntries(Object.entries(content).map(([k, w]) => [k, Math.max(64, Math.min(600, Math.round(w)))]));
           const move = ev => {
             widths[key] = Math.max(64, Math.min(600, Math.round(start + ev.clientX - startX)));
             columnPrefs.setWidths(mode, widths, false);
