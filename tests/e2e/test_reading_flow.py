@@ -14,7 +14,7 @@ from test_template_preservation import TemplatePreservationE2E
 class ReadingFlowE2E(ReadingWorkspaceE2E):
  def test_flow_01_navigation_follows_visible_sort(self):
   a,b=self.pair();p=self.login();self.choose(p,a)
-  p.locator('#quick').fill(a.patient_id)
+  p.locator('#filterrow [data-f="id"]').fill(a.patient_id)
   expect(p.locator('#rows tr[data-uid]')).to_have_count(2)
   # Exercise both sort directions; one necessarily reverses the API order.
   for _ in range(2):
@@ -85,11 +85,11 @@ class ReadingFlowE2E(ReadingWorkspaceE2E):
   expect(p.locator('#reading-position')).to_have_text('현재 목록 2 / 2')
   expect(p.get_by_role('button',name='Next Study',exact=True)).to_be_disabled()
   # The visible list can change without changing the active reading target.
-  p.keyboard.press('Control+Alt+1');p.locator('#quick').fill('NO-SUCH-READING-FLOW-PATIENT')
+  p.keyboard.press('Control+Alt+1');self.quick_search(p, 'NO-SUCH-READING-FLOW-PATIENT')
   expect(p.locator('#reading-position')).to_have_text('현재 목록 0건')
   expect(p.get_by_role('button',name='Previous Study',exact=True)).to_be_disabled()
   expect(p.get_by_role('button',name='Next Study',exact=True)).to_be_disabled()
-  p.locator('#quick').fill(a.patient_id);p.keyboard.press('Escape')
+  self.quick_search(p, a.patient_id);p.keyboard.press('Escape')
   current=p.locator('#reading-target').inner_text()
   p.evaluate("() => { const d=document.createElement('dialog');d.id='flow-test-dialog';d.textContent='synthetic dialog';document.body.append(d);d.showModal(); }")
   p.keyboard.press('Control+Alt+ArrowLeft');p.keyboard.press('Control+Alt+1')
@@ -155,6 +155,7 @@ class W6DoctorPathE2E(TemplatePreservationE2E):
    self.select(page,fixture);checkpoint('open study')
    page.locator('#findings').click();page.keyboard.press('Control+A');page.keyboard.type('SYN W6 TYPED')
    checkpoint('type')
+   self.show_workspace_panels(page, 'Reading Template')
    page.locator('#tpl-search').fill(template['title'])
    page.locator('#tplrows').get_by_text(template['title'],exact=True).dblclick()
    expect(page.locator('#findings')).to_have_value('SYN W6 TYPED\nSYN W6 TEMPLATE')

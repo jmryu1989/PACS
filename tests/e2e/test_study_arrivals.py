@@ -107,7 +107,7 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         self.seed_report(fixture)
         work = self.login(); self.select(work, fixture); self.manual(work); self.watch_notices(work)
         draft = "ARRIVAL UNSAVED DRAFT " + fixture.uid
-        work.locator("#findings").fill(draft); work.locator("#quick").click()
+        work.locator("#findings").fill(draft); work.locator('#filterrow [data-f="id"]').click()
         self.wait_state(work, fixture, lambda state: (state.get("draft") or {}).get("findings") == draft, timeout=25000)
         holder = self.state(fixture)["holder"]; self.assertEqual(self.stack.actor("doctor"), holder)
         versions, report_rows, originals = self.versions(fixture), self.report_rows(fixture), self.originals()
@@ -238,7 +238,7 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         # S4-U1b: the discarded answer is not an observation either; the session keeps its last one.
         self.assertEqual(observed_before, page.evaluate("studyObservationModel.observedAt"))
         self.assertTrue(page.evaluate("studyObservationModel.available"))
-        page.unroute("**/api/studies?*", hold); page.locator("#refresh").click()
+        page.unroute("**/api/studies?*", hold); page.locator("#m-refresh").click()
         self.wait_count(page, fixture, before["count"] + 1, before["series"])
         expect(page.locator("#findings")).to_have_value(draft)
         self.shot(page, "stale-recovered")

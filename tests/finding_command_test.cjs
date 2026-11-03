@@ -740,30 +740,32 @@ test('adapter: the open panel observes the field region and every element above 
   const h = worklist({ resizeObserver: true });
   const doc = h.document;
   const make = (className, id) => { const el = doc.createElement('div'); el.className = className || ''; el.id = id || ''; return el; };
-  const report = make('panel report-p'), rbtns = make('rbtns'), draftbar = make('draftbar', 'draftbar'), citelist = make('', 'citelist');
-  const pane = make('', 'dictation-pane'), redit = make('redit'), rfoot = make('rfoot2');
+  const report = make('panel report-p'), rbtns = make('rfoot2 rbtns'), draftbar = make('draftbar', 'draftbar'), citelist = make('', 'citelist');
+  const pane = make('', 'dictation-pane'), redit = make('redit');
   // Minhoon item 8: the page's editor row - the editor column (its head row above `.redit`) with Clinical Context beside it.
   const row = make('report-compose'), editor = make('report-editor', 'report-editor'), head = make('report-editor-head');
   const context = make('clinical-context', 'clinical-context');
   editor.append(head, redit);
   row.append(editor, context);
-  report.append(rbtns, draftbar, doc.createTextNode(' '), citelist, pane, row, rfoot);
+  report.append(draftbar, doc.createTextNode(' '), citelist, pane, row, rbtns);
   doc.body.append(report);
   // The Related region is watched too (S4 GEO): a separator move shifts the report by resizing it.
   const region = h.document.querySelector('.related-p');
-  const above = new Set([redit, head, editor, row, pane, citelist, draftbar, rbtns, region]);
+  const movedBounds = [redit, head, editor, row, pane, citelist, draftbar, rbtns, region];
   let top = 576;
   redit.getBoundingClientRect = () => ({ top, height: 180 });
+  let buttonsTop = 1002;
+  rbtns.getBoundingClientRect = () => ({ top: buttonsTop, bottom: buttonsTop + 29, height: 29 });
   await h.open();
   assert.equal(h.observers.length, 1, 'one observer while the panel is open');
   const [first] = h.observers;
   // Whatever else it watches (Clinical Context beside the editor is free either way), every box whose resize moves the
   // field region is watched, once.
-  for (const el of above) assert.ok(first.targets.includes(el), `observes ${el.className || el.id}`);
+  for (const el of movedBounds) assert.ok(first.targets.includes(el), `observes changed boundary ${el.className || el.id}`);
   assert.equal(new Set(first.targets).size, first.targets.length, 'each observed once');
-  assert.ok(!first.targets.includes(rfoot) && !first.targets.includes(report), 'nothing below it and not the column itself');
   const bound = () => h.panel().style.getPropertyValue('--reading-findings-top');
   assert.equal(bound(), '576px');
+  assert.equal(h.panel().style.getPropertyValue('--reading-findings-bottom'), '102px', 'ends four pixels above the action row below the editor');
   // The pane grows above the pinned field region: `.redit` moves 100px down at the same height, and
   // the only thing that reports it is the pane's own resize.
   top = 676;
@@ -771,6 +773,8 @@ test('adapter: the open panel observes the field region and every element above 
   assert.equal(bound(), '676px', 'the bound follows the moved field region');
   first.fire();
   assert.equal(bound(), '676px', 'a callback with nothing moved changes nothing');
+  buttonsTop = 950; first.fire();
+  assert.equal(h.panel().style.getPropertyValue('--reading-findings-bottom'), '154px', 'the lower boundary follows the action row too');
   // Closing gives the observer back; reopening observes the same elements afresh and measures again.
   await h.click(h.named(h.panel(), 'Close Image Findings')[0]);
   assert.equal(first.live, false, 'closed with the panel');
@@ -779,7 +783,7 @@ test('adapter: the open panel observes the field region and every element above 
   await h.open();
   assert.equal(h.observers.length, 2, 'a fresh observer on reopen, never the closed one again');
   const second = h.observers[1];
-  assert.deepEqual(new Set(second.targets), above);
+  for (const el of movedBounds) assert.ok(second.targets.includes(el));
   assert.equal(bound(), '640px', 'reopening measures the field region where it is now');
   // Ending the session gives it back too, with the scroll listener.
   h.ui.end();
@@ -789,21 +793,21 @@ test('adapter: the open panel observes the field region and every element above 
 });
 
 test('adapter: with no room below the field region for its first line the panel docks above the report column, under the Related list', async () => {
-  // S4 GEO, hosted 1366x768 reading layout after fix-up D: the button row at 736-764 and the field region at
-  // 764, so `100vh - 12 - top` was -8 and the panel kept its 22px of padding and border on Approve, Save,
-  // Prelim and Dictate. This realm has no layout: every box is placed by hand with those numbers.
+  // Retain the cramped 1366x768 field-region case, with the shipped action row following the editor.
+  // No usable room remains below the fields; padding alone must not cover report controls.
   const h = worklist({ resizeObserver: true, innerHeight: 768 });
   const doc = h.document;
   const list = doc.createElement('div'); list.className = 'related-list-pane';
   doc.querySelector('.related-p').append(list);
   const report = doc.createElement('div'); report.className = 'panel report-p';
-  const rbtns = doc.createElement('div'); rbtns.className = 'rbtns';
+  const rbtns = doc.createElement('div'); rbtns.className = 'rfoot2 rbtns';
   const redit = doc.createElement('div'); redit.className = 'redit';
-  report.append(rbtns, redit); doc.body.append(report);
+  report.append(redit, rbtns); doc.body.append(report);
   let fieldsTop = 764;
   list.getBoundingClientRect = () => ({ top: 358, bottom: 553, height: 195 });
   report.getBoundingClientRect = () => ({ top: 676, bottom: 1076, height: 400 });
   redit.getBoundingClientRect = () => ({ top: fieldsTop, height: 180 });
+  rbtns.getBoundingClientRect = () => ({ top: fieldsTop + 180, bottom: fieldsTop + 208, height: 28 });
   // The panel's first line: 10px padding and 1px border each side, Close 22px tall.
   h.sandbox.getComputedStyle = () => ({ paddingTop: '10px', paddingBottom: '10px', borderTopWidth: '1px', borderBottomWidth: '1px' });
   await h.open();
@@ -820,7 +824,7 @@ test('adapter: with no room below the field region for its first line the panel 
   // Room for the first line again (the column scrolled): back to the shipped bound and the 12px inset.
   fieldsTop = 700; watch.fire();
   assert.equal(prop('--reading-findings-top'), '700px');
-  assert.equal(prop('--reading-findings-bottom'), '', 'the inset variable is removed, not left behind');
+  assert.equal(parseFloat(prop('--reading-findings-bottom') || '12'), 12, 'the normal inset is restored');
   h.ui.end();
 });
 

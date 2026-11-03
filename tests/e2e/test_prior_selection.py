@@ -184,7 +184,7 @@ class PriorSelectionE2E(base.WorklistE2E):
         self.select(page, current)
         draft = current.secret + " private draft"
         page.locator("#findings").fill(draft)
-        page.locator("#quick").click()
+        page.locator('#filterrow [data-f="id"]').click()
         self.wait_state(page, current, lambda s: (s.get("draft") or {}).get("findings") == draft, timeout=25000)
         related = page.locator(f'#relrows tr[data-uid="{future.uid}"]')
         expect(related).to_contain_text("2026-09-07")

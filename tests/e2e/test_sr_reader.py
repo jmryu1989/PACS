@@ -112,7 +112,7 @@ class SRReaderE2E(RelatedContextE2E):
 
  def test_sr_04_report_draft_keyboard_small_window_and_reload(self):
   f=self.ct('SR-PRESERVE-'+uuid.uuid4().hex[:12],'current','20260801');source=self.source(f);self.seed_report(f)
-  p=self.login();self.select(p,f);draft='SR private draft 12345';p.locator('#findings').fill(draft);p.locator('#quick').click();self.wait_state(p,f,lambda s:(s.get('draft') or {}).get('findings')==draft,timeout=25000)
+  p=self.login();self.select(p,f);draft='SR private draft 12345';p.locator('#findings').fill(draft);p.locator('#filterrow [data-f="id"]').click();self.wait_state(p,f,lambda s:(s.get('draft') or {}).get('findings')==draft,timeout=25000)
   rows=self.report_rows(f);originals=self.originals();state=self.state(f);writes=self.source_writes(p)
   p.set_viewport_size(dict(width=900,height=700));p.locator('#sr-open').focus();p.keyboard.press('Enter');expect(p.locator('#sr-dialog')).to_be_visible();p.keyboard.press('Escape');expect(p.locator('#sr-dialog')).not_to_be_visible()
   self.open_source(p,source);self.read_source(p);p.screenshot(path=str(Path(__file__).parent/'artifacts/SR-small.png'));p.locator('#sr-close').click();expect(p.locator('#findings')).to_have_value(draft)

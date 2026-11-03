@@ -120,6 +120,9 @@ class TemplatePreviewE2E(previous.TemplatePreservationE2E):
         self.select(page, current)
         page.locator(f'#relrows tr[data-uid="{prior.uid}"]').click()
         expect(page.locator("#prior-findings")).to_contain_text(prior.secret)
+        expect(page.locator("#report-editor-state")).to_have_text("Read Only")
+        page.locator("#report-editor-resume").click()
+        expect(page.locator("#report-editor-state")).to_have_text("Editable")
         self.preview(page, template)
         expect(page.locator("#tpl-preview-target")).to_have_attribute("data-uid", current.uid)
         with page.expect_response(lambda r: r.request.method == "POST" and r.url.endswith(f"/studies/{current.uid}/hold")) as hold:

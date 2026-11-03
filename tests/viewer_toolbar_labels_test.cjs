@@ -117,6 +117,8 @@ function world(){
   // An embedded viewer (window.top is another window) showing one study, as the Tech Note bridge reads it.
   const stored=new Map();
   const ctx={document:doc,MutationObserver,Node:{ELEMENT_NODE:1},BroadcastChannel:class{addEventListener(){}removeEventListener(){}close(){}},
+    // This attribute-only model has no layout frames. Header geometry runs in the real served OHIF check.
+    ResizeObserver:class{observe(){}disconnect(){}},requestAnimationFrame:()=>1,cancelAnimationFrame(){},
     queueMicrotask,URLSearchParams,location:{search:'?StudyInstanceUIDs=1.2.840.99.1',hash:''},top:{},
     localStorage:{getItem:k=>stored.has(k)?stored.get(k):null,setItem:(k,v)=>{stored.set(k,String(v));},removeItem:k=>{stored.delete(k);}},
     getComputedStyle:e=>({visibility:e.style.getPropertyValue('visibility')||'visible'}),addEventListener(){},removeEventListener(){}};

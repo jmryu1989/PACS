@@ -87,9 +87,9 @@ class StudyTagsE2E(WorklistE2E):
   expect(p.locator('#study-tag-create')).to_be_disabled();expect(p.locator('#study-tag-rename')).to_be_disabled();expect(p.locator('#study-tag-delete')).to_be_disabled();expect(p.locator('#study-tag-add')).to_be_enabled()
   p.locator('#study-tag-add').click();expect(p.locator('#study-tag-assigned')).to_contain_text('부여된');p.locator('#study-tag-apply').click();expect(p.locator('#rows tr[data-uid]')).to_have_count(1)
   psql('UPDATE "StudyState" SET "institutionId"='+literal('kin-center')+' WHERE uid='+literal(a.uid))
-  try:p.locator('#refresh').click();expect(p.locator('#rows tr[data-uid]')).to_have_count(0)
+  try:p.locator('#m-refresh').click();expect(p.locator('#rows tr[data-uid]')).to_have_count(0)
   finally:psql('UPDATE "StudyState" SET "institutionId"='+literal('hallym')+' WHERE uid='+literal(a.uid))
-  p.locator('#refresh').click();expect(p.locator('#rows tr[data-uid]')).to_have_count(1)
+  p.locator('#m-refresh').click();expect(p.locator('#rows tr[data-uid]')).to_have_count(1)
  def test_tags_04_lost_response_conflict_and_late_session(self):
   a=self.fixture();self.account();p=self.login();self.select(p,a);self.open_toolbar_group(p,'#study-tag-open');p.locator('#study-tag-open').click();expect(p.locator('#study-tag-status')).to_contain_text('최신 태그')
   def lost(route):

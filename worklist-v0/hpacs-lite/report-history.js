@@ -124,15 +124,18 @@
         const list = await api("GET", `/studies/${encodeURIComponent(uid)}/report/versions`, undefined, undefined, at);
         // 늦게 온 답이 새 열람의 목록을 덮지 않는다.
         if (!work.admits(at) || !historyLive(epoch, uid)) return;
-        const LABEL = { save: "임시저장", approve: "승인", addendum: "추가기재", reset: "판독취소",
-                        preliminary: "예비판독", discarded: "폐기된 초안" };
+        // Status names are English (AGENTS.md §4) and match the editor buttons; the Korean meaning stays in the tooltip.
+        const LABEL = { save: "Save", approve: "Approve", addendum: "Addendum", reset: "Reset",
+                        preliminary: "Prelim", discarded: "Discarded draft" };
+        const HINT = { save: "임시저장", approve: "승인", addendum: "추가기재", reset: "판독취소",
+                       preliminary: "예비판독", discarded: "폐기된 초안" };
         box.innerHTML = list.length ? list.map(v => `
           <div class="ver" data-version="${esc(v.version)}">
             <div class="vh">
               <b>v${v.version}</b>
-              <span class="tag ${esc(v.action)}">${esc(LABEL[v.action] ?? v.action)}</span>
+              <span class="tag ${esc(v.action)}" title="${esc(HINT[v.action] ?? "")}">${esc(LABEL[v.action] ?? v.action)}</span>
               <span>${esc(displayActor(v.author))}</span>
-              <span style="color:#667">${esc(String(v.at).replace("T", " ").slice(0, 19))}</span>
+              <span style="color:#b4b4b4">${esc(String(v.at).replace("T", " ").slice(0, 19))}</span>
             </div>
             ${v.reason ? `<div class="vr">사유: ${esc(v.reason)}</div>` : ""}
             ${v.findings || v.conclusion || v.recommendation

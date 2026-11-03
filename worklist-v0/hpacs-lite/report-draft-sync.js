@@ -305,7 +305,7 @@
     function relatedInsertSubmit(op) {
       if (relatedInserts.get(op.uid) !== op || op.state !== "editing") return;
       op.turn = reportEditedAt.get(op.uid) ?? reportEdits;
-      relatedInsertSend(op, "apply");
+      return relatedInsertSend(op, "apply");
     }
     async function relatedInsertSend(op, kind, context = work.capture("document"), session = undefined) {
       const admit = () => relatedInserts.get(op.uid) === op && relatedInsertIdentityResolved(op);

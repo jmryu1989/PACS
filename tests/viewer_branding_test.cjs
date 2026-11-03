@@ -30,6 +30,8 @@ class El{
   // Only the class-list selector the branding block uses for its menu boundary.
   closest(sel){assert.match(sel,/^(\.[\w-]+)+$/);const want=sel.slice(1).split('.');
     for(let n=this;n;n=n.parentElement){const has=(n.getAttribute('class')||'').split(/\s+/);if(want.every(c=>has.includes(c)))return n;}return null;}
+  // This menu-only fixture has no native logo row or Layout control; the served viewer checks their geometry.
+  querySelector(){return null;}
   querySelectorAll(sel){assert.equal(sel,'*');const out=[];const walk=e=>e.children.forEach(c=>{out.push(c);walk(c);});walk(this);return out;}
   append(...kids){kids.forEach(k=>{k.parentElement=this;this.children.push(k);});if(this.doc.connected(this))this.doc.notify({target:this,addedNodes:kids});return this;}
   // A text node's data changes in place: a characterData record whose target is the text node, nothing added.
@@ -50,7 +52,7 @@ function world(){
       return (kind==='attributes'?!!(o.attributes||o.attributeFilter):!!o[kind])&&(kind!=='attributes'||!o.attributeFilter||o.attributeFilter.includes(r.attributeName))
         &&(r.target===this.target||!!o.subtree&&this.target.contains(r.target));}}
   const el=(tag,text,...kids)=>{const e=new El(doc,tag,text);kids.forEach(k=>{k.parentElement=e;e.children.push(k);});return e;};
-  const ctx={document:doc,MutationObserver,Node:{ELEMENT_NODE:1},BroadcastChannel:class{addEventListener(){}removeEventListener(){}close(){}},
+  const ctx={document:doc,MutationObserver,ResizeObserver:class{observe(){}disconnect(){}},requestAnimationFrame:fn=>setImmediate(fn),cancelAnimationFrame:clearImmediate,Node:{ELEMENT_NODE:1},BroadcastChannel:class{addEventListener(){}removeEventListener(){}close(){}},
     window:{addEventListener(){},removeEventListener(){}},queueMicrotask};
   vm.createContext(ctx);
   const Brand=vm.runInContext(block+';KinViewerBrand',ctx);

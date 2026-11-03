@@ -7,18 +7,26 @@
   const COLORS = { default: '', cool: '#d9ecff', warm: '#ffe6c4' };
   const FONTS = { default: '', sans: 'Arial, "Malgun Gothic", sans-serif', mono: 'Consolas, "Malgun Gothic", monospace' };
   const RELATED = { date: 1, modality: 2, desc: 3, count: 4, rs: 5 };
-  const appearanceDefault = () => ({ widths: {}, font: 'default', size: 13, color: 'default' });
+  const appearanceDefault = () => ({ widths: {}, font: 'default', size: 11, color: 'default' });
   function appearance(value, keys) {
     if (!object(value) || Object.keys(value).sort().join() !== 'color,font,size,widths'
       || typeof value.color !== 'string' || typeof value.font !== 'string'
       || !Object.hasOwn(COLORS, value.color) || !Object.hasOwn(FONTS, value.font)
-      || !Number.isInteger(value.size) || value.size < 12 || value.size > 20 || !object(value.widths)
+      || !Number.isInteger(value.size) || value.size < 10 || value.size > 20 || !object(value.widths)
       || Object.entries(value.widths).some(([k,w]) => !keys.includes(k) || !Number.isInteger(w) || w < 64 || w > 600)) return null;
     return copy(value);
   }
+  // Radiology opens with these columns, in this order (ID and Name are required columns and always shown).
+  // The other columns stay available in Worklist Columns and come back with a checkbox.
+  const DEFAULT_SHOWN = { Radiology: ['no', 'assignedReader', 'rs', 'date', 'id', 'name', 'age', 'desc', 'modality', 'institutionName'] };
+  function defaultPart(mode, columns) {
+    const all = columns[mode].map(c => c.k), shown = (DEFAULT_SHOWN[mode] || []).filter(k => all.includes(k));
+    if (!shown.length) return { order: all, hidden: [] };
+    const rest = all.filter(k => !shown.includes(k));
+    return { order: [...shown, ...rest], hidden: rest.filter(k => !REQUIRED.includes(k)) };
+  }
   function defaults(columns) {
-    return { version: 1, modes: Object.fromEntries(MODES.map(mode => [mode,
-      { order: columns[mode].map(c => c.k), hidden: [] }])) };
+    return { version: 1, modes: Object.fromEntries(MODES.map(mode => [mode, defaultPart(mode, columns)])) };
   }
   function normalize(value, columns) {
     if (!object(value) || value.version !== 1 || Object.keys(value).sort().join() !== 'modes,version'
@@ -78,7 +86,7 @@
       <p>ID·Name은 항상 표시합니다. 숨긴 열의 검색 조건과 정렬은 유지됩니다.</p>
       <section id="wc-appearance" aria-label="Worklist appearance">
       <label>Font <select id="wc-font"><option value="default">Default</option><option value="sans">Sans Serif</option><option value="mono">Monospace</option></select></label>
-      <label>Text Size <select id="wc-size">${Array.from({length:9},(_,i)=>`<option value="${i+12}">${i+12}px</option>`).join('')}</select></label>
+      <label>Text Size <select id="wc-size">${Array.from({length:11},(_,i)=>`<option value="${i+10}">${i+10}px</option>`).join('')}</select></label>
       <label>Text Color <select id="wc-color"><option value="default">Default</option><option value="cool">Light Blue</option><option value="warm">Light Yellow</option></select></label>
       <p>열 내용 너비는 64–600px, 빈칸은 자동입니다. 상태 표식의 색은 유지됩니다.</p>
       <p>글자·도구 설정에 저장하거나 직접 적용한 목록 글자 설정이 있으면 이곳의 글자 설정보다 우선합니다.</p>
@@ -303,15 +311,83 @@
       $('save').disabled = !owner; renderEditor(); status(saved.message); dialog.showModal(); $('close').focus(); refreshServer();
       $('server-status').textContent = '계정 저장 상태를 확인하거나 불러오세요.';
     });
+    // Picker changes apply and are remembered in this browser immediately.
+    function commit(next) {
+      const valid = normalize(next, columns); if (!valid) return;
+      state = valid;
+      if (owner) { try { const raw = JSON.stringify(valid); storage.setItem(owner, raw); lastRaw = raw; stateRaw = raw; } catch (_) {} }
+      changed();
+    }
     const style = document.createElement('style'); document.head.append(style);
-    return { columns: m => visible(columns, state, m), decorate: m => {
+    // A saved width is the content's (the .wc-cell box). The fixed table's column also has to hold the padding and
+    // border of the cell around that content, or the content's right edge is clipped. Read them from the cell
+    // that holds the content (the header when the list is empty) so the stored value keeps its meaning.
+    const sides = cell => { const s = getComputedStyle(cell);
+      return ['paddingLeft','paddingRight','borderLeftWidth','borderRightWidth'].reduce((n, k) => n + (parseFloat(s[k]) || 0), 0); };
+    const contentCell = (heads, i) => document.querySelector('#rows tr[data-uid]')?.cells[i] || heads[i];
+    const controller = { columns: m => visible(columns, state, m),
+      widths: m => copy(state.modes[m].appearance?.widths || {}),
+      // Current content width of each shown column, the inverse of decorate's outer width: a drag that starts
+      // from these values and saves them back does not grow the columns by their padding each time.
+      contentWidths: m => {
+        const heads = [...document.querySelectorAll('#heads th')];
+        return Object.fromEntries(heads.map((th, i) => [th.dataset.key, th.getBoundingClientRect().width - sides(contentCell(heads, i))]));
+      },
+      setWidth: (m, k, width) => {
+        const widths = controller.widths(m);
+        if (width == null) delete widths[k]; else widths[k] = width;
+        controller.setWidths(m, widths, true);
+      },
+      setWidths: (m, widths, persist = true) => {
+        if (ended || !state.modes[m]) return;
+        const next = copy(state), part = next.modes[m];
+        part.appearance ||= appearanceDefault(); part.appearance.widths = copy(widths);
+        const valid = normalize(next, columns); if (!valid) return;
+        if (persist) commit(valid);
+        else { state = valid; controller.decorate(m); }
+      },
+      // Header "+" picker: every column of the mode with its shown flag; ID and Name stay on.
+      // Listed in the saved column order, so the picker shows the same order as the worklist.
+      all: m => state.modes[m].order.map(k => columns[m].find(c => c.k === k)).map(c => ({ k: c.k, t: c.t, shown: !state.modes[m].hidden.includes(c.k), required: REQUIRED.includes(c.k), width: state.modes[m].appearance?.widths[c.k] })),
+      setShown: (m, k, shown) => {
+        if (ended || REQUIRED.includes(k)) return;
+        const next = copy(state), part = next.modes[m];
+        part.hidden = shown ? part.hidden.filter(x => x !== k) : [...part.hidden.filter(x => x !== k), k];
+        commit(next);
+      },
+      // Drag and drop: move column `k` before (or after) column `target`; the worklist follows at once.
+      move: (m, k, target, after) => {
+        if (ended || k === target) return;
+        const next = copy(state), part = next.modes[m], order = part.order.filter(x => x !== k);
+        const at = order.indexOf(target); if (at < 0 || !part.order.includes(k)) return;
+        order.splice(at + (after ? 1 : 0), 0, k); part.order = order;
+        commit(next);
+      },
+      decorate: m => {
       const a = state.modes[m].appearance;
       style.textContent = a ? `#rows {--kin-column-text:${a.size}px;--kin-column-font:${FONTS[a.font] || 'inherit'};--kin-column-color:${COLORS[a.color] || 'var(--kin-text)'};} #rows td {font-size:var(--kin-list-text,var(--kin-column-text));font-family:var(--kin-list-font,var(--kin-column-font));color:var(--kin-list-color,var(--kin-column-color));}` : '';
       const shown = visible(columns, state, m);
+      const heads = [...document.querySelectorAll('#heads th')], table = heads[0]?.closest('table');
+      const fixed = shown.some(c => a?.widths[c.k]);
+      if (table) {
+        table.classList.toggle('cols-fixed', fixed);
+        let total = 0;
+        heads.forEach((th, i) => {
+          const saved = a?.widths[shown[i]?.k];
+          const outer = saved ? saved + sides(contentCell(heads, i)) : Math.max(64, Math.min(600, Math.round(th.getBoundingClientRect().width)));
+          // th.style.width is the border box only under border-box sizing; otherwise it is the header's content box.
+          th.style.width = fixed ? (getComputedStyle(th).boxSizing === 'border-box' ? outer : outer - sides(th)) + 'px' : '';
+          total += outer;
+        });
+        table.style.width = fixed ? total + 'px' : '';
+      }
       for (const row of document.querySelectorAll('#rows tr[data-uid]')) {
         shown.forEach((c,i) => {
+          const cell = row.cells[i];
+          const old = cell.querySelector(':scope > .wc-cell');
+          if (old) old.replaceWith(...old.childNodes);
           const width = a?.widths[c.k]; if (!width) return;
-          const cell = row.cells[i], content = document.createElement('div');
+          const content = document.createElement('div');
           content.className = 'wc-cell'; content.style.width = width + 'px';
           content.append(...cell.childNodes); cell.append(content);
         });
@@ -325,6 +401,7 @@
         content.append(...cell.childNodes); cell.append(content);
       }
     } };
+    return controller;
   }
   const api = { defaults, normalize, key, visible, mount };
   if (typeof module === 'object' && module.exports) module.exports = api;

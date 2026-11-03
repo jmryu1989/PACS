@@ -128,7 +128,7 @@ class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
         ax = self.sign_in(x)
         self.mode_is(ax,'portrait')
         self.assertEqual(self.stored(ax),a_state)
-        ax.locator('#quick').fill('D02B-NO-STUDY-ACCOUNT-CHECK')
+        self.quick_search(ax, 'D02B-NO-STUDY-ACCOUNT-CHECK')
         self.snapshot(ax,'account-a-restored')
         ay = self.sign_in(y)
         self.mode_is(ay,'auto')
@@ -161,18 +161,19 @@ class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
         fixture=self.fixture()
         self.seed_report(fixture)
         page=self.sign_in(self.device())
+        self.show_workspace_panels(page, 'Thumbnail', 'Reading Template')
         self.select(page,fixture)
         self.wait_thumbnail(page)
         # Establish an actual private draft before layout-only observation.
         edited=fixture.secret+' private draft'
         page.locator('#findings').fill(edited)
-        page.locator('#quick').click()
+        page.locator('#filterrow [data-f="id"]').click()
         self.wait_state(page,fixture,lambda s:(s.get('draft') or {}).get('findings')==edited,timeout=30000)
         history=self.versions(fixture)
         self.drag_by(page,'#resize-main',dx=85)
         self.drag_by(page,'#resize-top',dy=35)
-        self.drag_by(page,'#resize-related',dx=-30)
-        self.drag_by(page,'#resize-prior',dy=45)
+        self.drag_by(page,'#resize-related',dy=-30)
+        self.drag_by(page,'#resize-left-split',dy=45)
         landscape=self.stored(page)['landscape']
         self.assertEqual(set(landscape),{'main','top','related','prior'})
         before=self.stored(page)
@@ -187,14 +188,15 @@ class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
             self.drag_by(page,'#resize-main',dy=30)
             self.drag_by(page,'#resize-top',dy=25)
             self.drag_by(page,'#resize-related',dy=15)
-            self.drag_by(page,'#resize-prior',dy=20)
+            self.drag_by(page,'#resize-left-split',dy=20)
             portrait=self.stored(page)['portrait']
             self.assertEqual(set(portrait),{'main','top','related','prior'})
             page.set_viewport_size({'width':768,'height':1024})
-            self.open_toolbar_group(page,'#layout-reset')
-            self.open_toolbar_group(page,'#b-history')
             for selector in ['#thumbwrap img','#clinical','#t-mod','#b-history','#layout-reset']:
-                self.reachable(page,selector)
+                self.open_toolbar_group(page, selector)
+                with self.subTest(reachable=selector):
+                    self.reachable(page,selector)
+                self.close_toolbar_groups(page)
             self.assertEqual(self.stored(page)['portrait'],portrait)
             page.set_viewport_size({'width':900,'height':1400})
             self.size_is(page,'.rw','height',portrait['top'])
@@ -253,7 +255,7 @@ class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
         self.mode_is(page,'auto')
         expect(page.locator('#layout-status')).to_contain_text('초기화 저장 안 됨')
         self.reachable(page,'#logout')
-        page.locator('#quick').fill('D02B-NO-STUDY-STORAGE-CHECK')
+        self.quick_search(page, 'D02B-NO-STUDY-STORAGE-CHECK')
         self.snapshot(page,'storage-denied')
 
 

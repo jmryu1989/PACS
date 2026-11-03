@@ -57,7 +57,7 @@ class ReaderAssignmentE2E(WorklistE2E):
   a=self.fixture();tech=self.read(a);admin=self.read(a,'jmryu');b1=self.body(tech,'doctor');b2=self.body(admin,'doctor2')
   with ThreadPoolExecutor(max_workers=2) as pool:
    results=list(pool.map(lambda x:self.stack.request('POST',f'/studies/{a.uid}/reader-assignment',x[0],x[1]),[('tech',b1),('jmryu',b2)]))
-  self.assertEqual(sorted(r.status for r in results),[201,409]);winner=0 if results[0].status==201 else 1;role=['tech','jmryu'][winner];body=[b1,b2][winner];self.change(a,body,role);self.assertEqual(len(self.read(a)['history']),1)
+  self.assertEqual(sorted(r.status for r in results),[201,409],[(r.status,r.text) for r in results]);winner=0 if results[0].status==201 else 1;role=['tech','jmryu'][winner];body=[b1,b2][winner];self.change(a,body,role);self.assertEqual(len(self.read(a)['history']),1)
   self.assertEqual(self.stack.request('POST',f'/studies/{a.uid}/hold','doctor').status,201);s=self.read(a);self.assertTrue(s['blocked']);self.change(a,self.body(s,None),status=409);self.assertEqual(self.stack.request('POST',f'/studies/{a.uid}/release','doctor').status,201)
   for status in ['T','P','A','O']:
    psql('UPDATE "StudyState" SET rs='+lit(status)+' WHERE uid='+lit(a.uid))
@@ -73,7 +73,7 @@ class ReaderAssignmentE2E(WorklistE2E):
   tech=self.login('tech');self.select(tech,a);self.open(tech,a);tech.locator('#ra-reader').select_option(self.stack.user_ids['doctor']);tech.locator('#ra-save').click();expect(tech.locator('#ra-status')).to_contain_text('저장되었습니다');tech.locator('#ra-close').click()
   p=self.login();self.select(p,c);p.locator('#findings').fill('KEEP ASSIGNMENT REPORT');self.open(p,a);expect(p.locator('#ra-current')).to_contain_text(self.stack.actor('doctor'));p.locator('#ra-close').click();expect(p.locator('#findings')).to_have_value('KEEP ASSIGNMENT REPORT');expect(p.locator(f'#rows tr[data-uid="{c.uid}"]')).to_have_class(__import__('re').compile(r'\bsel\b'))
   p.locator('#filterrow [data-f="assignedReader"]').fill(self.stack.actor('doctor'));expect(p.locator('#rows tr[data-uid]')).to_have_count(1);expect(p.locator('#findings')).to_have_value('KEEP ASSIGNMENT REPORT');p.locator('#filterrow [data-f="assignedReader"]').fill('');expect(p.locator('#rows tr[data-uid]')).to_have_count(3)
-  self.change(a,self.body(self.read(a),'doctor2'));p.locator('#refresh').click();expect(p.locator(f'[data-reader-assignment="{a.uid}"]')).to_contain_text(self.stack.actor('doctor2'));expect(p.locator('#findings')).to_have_value('KEEP ASSIGNMENT REPORT')
+  self.change(a,self.body(self.read(a),'doctor2'));p.locator('#m-refresh').click();expect(p.locator(f'[data-reader-assignment="{a.uid}"]')).to_contain_text(self.stack.actor('doctor2'));expect(p.locator('#findings')).to_have_value('KEEP ASSIGNMENT REPORT')
   self.open(tech,a);expect(tech.locator('#ra-history li')).to_have_count(2);folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);tech.screenshot(path=str(folder/'reader-assignment.png'));self.assertEqual(len(self.versions(c)),1)
  def test_assignment_04_retry_conflict_late_session(self):
   a=self.fixture();p=self.login('tech');self.select(p,a);self.open(p,a)
@@ -168,7 +168,7 @@ class ReaderAssignmentE2E(WorklistE2E):
   p.locator('#ra-close').click();expect(chip).to_contain_text(self.stack.actor('kdoctor'))
   tech=self.login('tech');self.select(tech,a);expect(tech.locator(f'[data-reader-assignment="{a.uid}"]')).to_contain_text(self.stack.actor('doctor'))
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);p.screenshot(path=str(folder/'reader-assignment-tele-receiver.png'))
-  self.tele(a,{'ts':'cancelled'});p.locator('#refresh').click();expect(p.locator(f'#rows tr[data-uid="{a.uid}"]')).to_have_count(0)
+  self.tele(a,{'ts':'cancelled'});p.locator('#m-refresh').click();expect(p.locator(f'#rows tr[data-uid="{a.uid}"]')).to_have_count(0)
  def test_assignment_08_every_close_gives_the_receiver_a_new_revision(self):
   # S7-U3a-R-001-F02: a request kin-center prepared in one channel never lands once the channel has closed and reopened,
   # whether kin-center had no row (the close makes a closed one at revision 1) or its row was already closed and nothing

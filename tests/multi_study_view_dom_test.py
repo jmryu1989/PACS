@@ -399,14 +399,14 @@ class MultiStudyViewPage(unittest.TestCase):
         order = self.visible_order()
         button = self.page.locator("#multi-selection-open-set")
         expect(button).to_be_disabled()
-        # The Selected toolbar keeps the action whole in view at first paint, also where the list column is narrow and the
-        # toolbar line wraps (the Study Panel first-paint comparisons take this one button out: HIDE_W9 there).
+        expect(button).to_be_hidden()
+        self.choose(order[0])
+        # A selection reveals the action, including narrow list columns.
         for width, height in ((1920, 1080), (1366, 768), (900, 1200), (768, 1024)):
             with self.subTest(width=width, height=height):
                 self.page.set_viewport_size({"width": width, "height": height})
                 expect(button).to_be_in_viewport(ratio=1)
         self.page.set_viewport_size({"width": 1400, "height": 900})
-        self.choose(order[0])
         expect(button).to_be_disabled()
         self.assertIn("2개 이상", button.get_attribute("title"))
         self.choose(order[1])
@@ -535,6 +535,7 @@ class MultiStudyViewPage(unittest.TestCase):
         self.assertEqual(n, body["studyUids"])
         self.wait_viewer(n[2:4])
         # A filter that hides frozen members: the set and its next resolve are unchanged, no row is made up.
+        self.page.locator("#toolbar-filters > summary").click()
         self.page.locator("#quick").fill("SYN-P-009")
         self.page.keyboard.press("Enter")
         body = self.press("#multi-study-prev")
@@ -806,6 +807,7 @@ class MultiStudyViewPage(unittest.TestCase):
         self.page.locator('#image-opening-open').click()
         self.page.locator('#image-opening-target').select_option('workspace')
         self.page.locator('#image-opening-done').click()
+        self.page.locator('#toolbar-view > summary').click()
         order = self.visible_order()
         self.row(order[0]).click()
         self.wait(lambda: self.target() == order[0], 'the Reading Target')
@@ -873,6 +875,7 @@ class MultiStudyViewPage(unittest.TestCase):
         self.page.locator('#image-opening-open').click()
         self.page.locator('#image-opening-target').select_option('workspace')
         self.page.locator('#image-opening-done').click()
+        self.page.locator('#toolbar-view > summary').click()
         order = self.visible_order()
         self.row(order[0]).click()
         self.wait(lambda: self.target() == order[0], 'Reading Target')
@@ -933,6 +936,7 @@ class MultiStudyViewPage(unittest.TestCase):
         self.page.locator('#image-opening-open').click()
         self.page.locator('#image-opening-target').select_option('workspace')
         self.page.locator('#image-opening-done').click()
+        self.page.locator('#toolbar-view > summary').click()
         order = self.visible_order()
         self.row(order[0]).click()
         self.wait(lambda: self.target() == order[0], 'Reading Target')
@@ -971,7 +975,8 @@ class MultiStudyViewPage(unittest.TestCase):
         for width, height in ((1024, 768), (900, 700), (900, 600)):
             with self.subTest(width=width, height=height):
                 self.page.set_viewport_size({'width': width, 'height': height})
-                self.page.locator('#copy-patient-id').click(trial=True)
+                expect(self.page.locator('#copy-patient-id')).to_be_hidden()
+                expect(self.page.locator('#copy-patient-id')).to_be_enabled()
                 member = self.member(order[1])
                 member.scroll_into_view_if_needed()
                 expect(member).to_be_in_viewport(ratio=1)
@@ -1055,6 +1060,7 @@ class MultiStudyViewPage(unittest.TestCase):
         self.page.locator('#image-opening-open').click()
         self.page.locator('#image-opening-target').select_option(mode)
         self.page.locator('#image-opening-done').click()
+        self.page.locator('#toolbar-view > summary').click()
         order = self.visible_order()
         self.row(order[0]).click()
         self.wait(lambda: self.target() == order[0], 'Reading Target')
@@ -1096,6 +1102,7 @@ class MultiStudyViewPage(unittest.TestCase):
         self.page.locator('#image-opening-open').click()
         self.page.locator('#image-opening-target').select_option('workspace')
         self.page.locator('#image-opening-done').click()
+        self.page.locator('#toolbar-view > summary').click()
         order = self.visible_order()
         self.row(order[0]).click()
         self.wait(lambda: self.target() == order[0], 'Reading Target')

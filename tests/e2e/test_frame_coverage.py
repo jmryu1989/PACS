@@ -14,6 +14,7 @@ class FrameCoverageE2E(ViewerWindowsE2E):
         self.manager(page)
         expect(self.control(page, 0, 'latest')).to_be_enabled(timeout=30000)
         page.locator('#viewer-windows-done').click()
+        self.close_toolbar_groups(page)
         return viewer
 
     def enable(self, viewer):
@@ -80,9 +81,12 @@ class FrameCoverageE2E(ViewerWindowsE2E):
         v.unroute('**/dicom-web/studies/*/metadata')
         v.locator('#kin-frame-reload').click();v.wait_for_function("() => kinViewerFrameCoverageState().phase==='ready'")
         v.evaluate("window.__coverageKeep='retry-kept'");self.choose(p,b)
-        p.once('dialog',lambda d:d.dismiss());p.locator('#m-filmbox').click()
+        # Patient-tab admission owns this warning in the viewer document.
+        v.once('dialog',lambda d:d.dismiss())
+        with v.expect_event('dialog'):p.locator('#m-filmbox').click()
         self.assertEqual(self.ids(v),[a.uid]);self.assertEqual(v.evaluate('window.__coverageKeep'),'retry-kept')
-        p.once('dialog',lambda d:d.accept());p.locator('#m-filmbox').click()
+        v.once('dialog',lambda d:d.accept())
+        with v.expect_event('dialog'):p.locator('#m-filmbox').click()
         v.wait_for_url('**StudyInstanceUIDs='+b.uid+'**');self.assertEqual(self.ids(v),[b.uid])
 
     def test_coverage_03_embedded_cancel_preserves_document_and_report(self):
@@ -104,14 +108,18 @@ class FrameCoverageE2E(ViewerWindowsE2E):
         a,b=self.pair();context=self.device();p=self.sign_in(context);self.limit(p,2);v=self.separate(p,a);self.enable(v)
         persisted=v.evaluate("Object.entries(localStorage).filter(([k])=>k.startsWith('kin-frame-warning:'))")
         self.assertEqual(len(persisted),1);self.assertEqual(persisted[0][1],'true');self.assertNotIn(a.uid,str(persisted))
-        # Normal opening reuses the single viewer; the preference must survive
-        # that new document, after accepting the unseen-frame warning.
+        # Normal opening admits a patient tab in the single viewer. Reload after
+        # admission to also verify the stored preference in a fresh document.
         self.choose(p,b)
         prompts=[]
-        p.once('dialog',lambda d:(prompts.append(d.message),d.accept()))
-        p.locator('#m-filmbox').click()
+        v.once('dialog',lambda d:(prompts.append(d.message),d.accept()))
+        with v.expect_event('dialog'):p.locator('#m-filmbox').click()
         self.assertEqual(len(prompts),1);self.assertIn('원본 프레임',prompts[0])
         v.wait_for_url('**StudyInstanceUIDs='+b.uid+'**')
+        accept_reload=lambda d:d.accept()
+        v.on('dialog',accept_reload)
+        try:v.reload()
+        finally:v.remove_listener('dialog',accept_reload)
         second=v
         second.wait_for_function("() => window.kinViewerFrameCoverageState?.().phase==='ready'")
         self.assertTrue(second.evaluate('kinViewerFrameCoverageState().enabled'))

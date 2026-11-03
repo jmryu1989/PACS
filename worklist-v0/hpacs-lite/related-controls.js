@@ -4,6 +4,15 @@
     $('#related-body-part').addEventListener('change',e=>{if(cur()){relatedBodyPart=e.target.value;renderRelated();}});
     $('#related-load-parts').addEventListener('click',()=>{if(cur()&&serverMode&&!offline&&!demoMode)relatedParts.load(relatedCandidates().map(x=>x.uid));});
     $('#related-cancel-parts').addEventListener('click',()=>relatedParts.cancel());
+    // Keep the filter next to the related-study control even after the workspace scrolls or resizes.
+    function positionRelatedOptions() {
+      const b=$('#related-options-open').getBoundingClientRect(),s=$('#related-options').style,w=Math.min(360,innerWidth-48);
+      s.inset='auto';s.margin='0';s.left=Math.max(8,Math.min(b.left,innerWidth-w-8))+'px';
+      s.top=(b.bottom+4)+'px';s.maxHeight=Math.max(0,innerHeight-b.bottom-12)+'px';
+    }
+    $('#related-options').addEventListener('beforetoggle',e=>{if(e.newState==='open')positionRelatedOptions();});
+    window.addEventListener('resize',()=>{if($('#related-options').matches(':popover-open'))positionRelatedOptions();});
+    document.addEventListener('scroll',()=>{if($('#related-options').matches(':popover-open'))positionRelatedOptions();},true);
     $("#related-return").addEventListener("click", returnToReportStudy);
     // Minhoon item 8: the editor stays on screen in Related Report mode; its Resume Editing is the mode's Back.
     $("#report-editor-resume").addEventListener("click", () => { backToCurrentDraft(); });

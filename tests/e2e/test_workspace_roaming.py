@@ -77,9 +77,11 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
         menu=page.locator('#workspace-server-menu')
         if menu.get_attribute('open') is None:menu.locator('summary').click()
         expect(page.get_by_role('button',name='Load from Account',exact=True)).to_be_enabled()
-    def close_toolbar_groups(self,page,selector):
+    def close_toolbar_groups(self,page,selector=None):
         """Close every open toolbar group that holds `selector`, innermost first, by clicking its summary - as a person
         does after using a menu. An open group is a second toolbar row in the flow; closing it gives the space back."""
+        if selector is None:
+            return super().close_toolbar_groups(page)
         groups=page.locator(selector).first.evaluate("""e => { const out = [];
             for (let d = e.closest('details'); d; d = d.parentElement.closest('details')) out.push(d.id); return out; }""")
         for group in groups:
@@ -96,21 +98,22 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
         for axis,viewport in [('landscape',dict(width=1600,height=1000)),('portrait',dict(width=900,height=1400))]:
             page.set_viewport_size(viewport)
             for key,selector in [('main','.left'),('top','.rw'),('related','.related-p'),('prior','.related-list-pane')]:
-                dim='width' if axis=='landscape' and key in ('main','related') else 'height'
+                dim='width' if axis=='landscape' and key == 'main' else 'height'
                 with failure_details(page,'ROAM size failure '+json.dumps(dict(axis=axis,selector=selector,dimension=dim,expected=layout[axis][key])),"() => Object.fromEntries(['.left','.rw','.related-p','.related-list-pane'].map(k=>{const r=document.querySelector(k).getBoundingClientRect();return [k,{width:r.width,height:r.height}]}))"):
                     self.size_is(page,selector,dim,layout[axis][key])
         print('ROAM actual sizes '+json.dumps(page.evaluate("() => Object.fromEntries(['.left','.rw','.related-p','.related-list-pane'].map(k=>{const r=document.querySelector(k).getBoundingClientRect();return [k,{width:r.width,height:r.height}]}))")),flush=True)
 
     def test_roam_01_two_browsers_all_panels_and_report(self):
-        f=self.fixture();self.seed_report(f);original=self.hashes();page=self.sign_in(self.device());self.select(page,f);self.wait_thumbnail(page)
+        f=self.fixture();self.seed_report(f);original=self.hashes();page=self.sign_in(self.device());self.show_workspace_panels(page, 'Thumbnail', 'Reading Template');self.select(page,f);self.wait_thumbnail(page)
         # Setup, not a user path (W6R2-02): three-field draft data, the hidden Recommendation filled directly.
-        for key,value in [('findings','Roam findings'),('conclusion','Roam conclusion'),('recommendation','Roam recommendation')]:page.locator('#'+key).fill(value)
-        page.locator('#quick').click();self.wait_state(page,f,lambda s:(s.get('draft') or {}).get('recommendation')=='Roam recommendation',timeout=30000)
+        for key,value in [('findings','Roam findings'),('conclusion','Roam conclusion')]:page.locator('#'+key).fill(value)
+        page.locator('#recommendation').evaluate("e=>{e.value='Roam recommendation';e.dispatchEvent(new Event('input',{bubbles:true}));}")
+        page.locator('#filterrow [data-f="id"]').click();self.wait_state(page,f,lambda s:(s.get('draft') or {}).get('recommendation')=='Roam recommendation',timeout=30000)
         self.assertEqual(self.stack.request('POST',f'/studies/{f.uid}/hold','doctor').status,201)
         saved_state=self.state(f);history=self.versions(f)
-        for selector,delta in [('#resize-main',dict(dx=70)),('#resize-top',dict(dy=25)),('#resize-related',dict(dx=-25)),('#resize-prior',dict(dy=15))]:self.drag_by(page,selector,**delta)
+        for selector,delta in [('#resize-main',dict(dx=70)),('#resize-top',dict(dy=25)),('#resize-related',dict(dy=-25)),('#resize-left-split',dict(dy=15))]:self.drag_by(page,selector,**delta)
         page.set_viewport_size(dict(width=900,height=1400))
-        for selector,delta in [('#resize-main',20),('#resize-top',20),('#resize-related',10),('#resize-prior',10)]:self.drag_by(page,selector,dy=delta)
+        for selector,delta in [('#resize-main',20),('#resize-top',20),('#resize-related',10),('#resize-left-split',10)]:self.drag_by(page,selector,dy=delta)
         layout=self.stored(page);self.assertEqual(layout['mode'],'auto');self.assertEqual(set(layout['portrait']),{'main','top','related','prior'})
         self.action(page,'Save to Account','계정에 저장했습니다');self.assertEqual(self.remote(page)['layout'],layout)
         y=self.sign_in(self.device());self.select(y,f);self.wait_thumbnail(y)
@@ -121,9 +124,10 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
         self.action(y,'Load from Account','불러왔습니다');self.assertEqual(self.stored(y),layout)
         self.close_toolbar_groups(y,'#workspace-server-menu');self.same_sizes(y,layout);self.shot(y,'portrait-restored')
         y.set_viewport_size(dict(width=768,height=1024))
-        self.open_toolbar_group(y,'#layout-reset')
-        self.open_toolbar_group(y,'#b-history')
-        for selector in ['#thumbwrap img','#clinical','#t-mod','#b-history','#layout-reset','#workspace-server-menu summary']:self.reachable(y,selector)
+        for selector in ['#thumbwrap img','#clinical','#t-mod','#b-history','#layout-reset','#workspace-server-menu summary']:
+            self.open_toolbar_group(y,selector)
+            with self.subTest(reachable=selector):self.reachable(y,selector)
+            self.close_toolbar_groups(y)
         self.assertEqual(self.stored(y),layout);self.shot(y,'small-clamped')
         for key,value in [('findings','Roam findings'),('conclusion','Roam conclusion'),('recommendation','Roam recommendation')]:expect(y.locator('#'+key)).to_have_value(value)
         self.action(y,'Reset Account Layout','현재 창의 배치는 유지');self.assertIsNone(self.remote(y)['layout']);self.assertEqual(self.stored(y),layout)

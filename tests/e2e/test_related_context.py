@@ -23,12 +23,17 @@ class RelatedContextE2E(previous.PriorSelectionE2E):
 
     def refresh(self, page):
         with page.expect_response(lambda r: r.request.method == "GET" and r.url.split("?")[0].endswith("/api/studies")):
-            page.locator("#refresh").click()
+            page.locator("#m-refresh").click()
 
-    def source_writes(self, page):
+    def source_writes(self, page, allowed_draft_uid=None):
+        """Study/report mutations; the POST-only observation audit does not edit either source."""
         writes = []
+        observation = re.compile(re.escape(self.stack.proxy) + r"/api/studies/[^/]+/view-observations")
+        draft = f"{self.stack.proxy}/api/studies/{allowed_draft_uid}/report" if allowed_draft_uid else None
         page.on("request", lambda r: writes.append(r.url) if r.method in ("POST", "PUT", "PATCH", "DELETE")
-                and "/api/studies/" in r.url else None)
+                and "/api/studies/" in r.url
+                and not (r.method == "PUT" and r.url.split("?")[0] == draft)
+                and not (r.method == "POST" and observation.fullmatch(r.url.split("?")[0])) else None)
         return writes
 
     def test_d03b_01_real_dates_manual_comparison_keeps_report_target(self):
@@ -53,12 +58,13 @@ class RelatedContextE2E(previous.PriorSelectionE2E):
         for part in ("판독 대상", patient, "2026-08-01", "CT", "D03A current"):
             self.assertIn(part, expected_current)
         self.assertEqual(page.locator("#relrows tr[data-uid]").count(), 3)
+        # Viewing each report records its observation without changing study/report content.
         writes = self.source_writes(page)
-        for fixture, label in ((past, "과거"), (same, "같은 날짜 · 선후 미확인"), (future, "이후")):
+        for fixture, label in ((past, "Prior"), (same, "Same Day"), (future, "Later")):
             row = self.related(page, fixture)
-            expect(row.locator("td").first).to_have_text(label + " · 비교")
+            expect(row.locator("td").first).to_have_text(label + " · Compare")
             row.click()
-            expect(row.locator("td").first).to_have_text(label + " · 👁 열람 중")
+            expect(row.locator("td").first).to_have_text(label + " · 👁 Showing")
             expect(page.locator("#prior-findings")).to_have_text(fixture.secret)
             expect(page.locator("#prior-report-meta")).to_contain_text(label + " · ")
             expect(page.locator("#prior-report-meta")).to_contain_text(patient)
@@ -103,11 +109,11 @@ class RelatedContextE2E(previous.PriorSelectionE2E):
         self.related(page, target).click()
         expect(page.locator("#prior-report-meta")).to_contain_text(literal)
         writes = self.source_writes(page)
-        for current_date, target_date, label in (("20260801", "", "날짜 미확인"),
-                ("20260801", "20260230", "날짜 미확인"), ("", "20260701", "날짜 미확인"),
-                ("20260230", "20260701", "날짜 미확인"), ("20260801", "20260801", "같은 날짜 · 선후 미확인")):
+        for current_date, target_date, label in (("20260801", "", "Date Unknown"),
+                ("20260801", "20260230", "Date Unknown"), ("", "20260701", "Date Unknown"),
+                ("20260230", "20260701", "Date Unknown"), ("20260801", "20260801", "Same Day")):
             variants.update({current.uid: current_date, target.uid: target_date}); self.refresh(page)
-            expect(self.related(page, target).locator("td").first).to_have_text(label + " · 👁 열람 중")
+            expect(self.related(page, target).locator("td").first).to_have_text(label + " · 👁 Showing")
             expect(page.locator("#prior-report-meta")).to_contain_text(label + " · ")
             self.assertIsNone(page.evaluate("window.d03bBad"))
             expect(page.locator("#related-current img, #relrows img, #prior-report-meta img")).to_have_count(0)
@@ -130,7 +136,7 @@ class RelatedContextE2E(previous.PriorSelectionE2E):
         self.related(page, past).click()
         self.related(page, future).click()
         expect(page.locator("#prior-findings")).to_have_text(future.secret)
-        expect(page.locator("#prior-report-meta")).to_contain_text("이후 · ")
+        expect(page.locator("#prior-report-meta")).to_contain_text("Later · ")
         self.related(page, past).click()
         expect(page.locator("#prior-report-content")).not_to_be_visible()
         page.wait_for_timeout(100)
@@ -142,13 +148,13 @@ class RelatedContextE2E(previous.PriorSelectionE2E):
         pending[0].fulfill(response=reply, json=old)
         page.wait_for_timeout(150)
         expect(page.locator("#prior-findings")).to_have_text(past.secret)
-        expect(page.locator("#prior-report-meta")).to_contain_text("과거 · ")
+        expect(page.locator("#prior-report-meta")).to_contain_text("Prior · ")
         fail_pattern = f"**/api/studies/{future.uid}/report/versions"
         page.route(fail_pattern, lambda route: route.fulfill(status=503, json={"message": "D03B synthetic failure"}))
         self.related(page, future).click()
         expect(page.locator("#prior-report-status")).to_contain_text("판독문 조회 실패")
         expect(page.locator("#prior-report-content")).not_to_be_visible()
-        expect(page.locator("#prior-report-meta")).to_contain_text("이후 · ")
+        expect(page.locator("#prior-report-meta")).to_contain_text("Later · ")
         page.unroute(fail_pattern); page.unroute(pattern)
         self.refresh(page)
         expect(page.locator("#prior-findings")).to_have_text(future.secret)
@@ -158,7 +164,7 @@ class RelatedContextE2E(previous.PriorSelectionE2E):
             # Minhoon item 8: the opened Source shows in the Related panel either in its plain view or in Related Report mode,
             # which stands in that view's place; the one on screen has the "Related Report" head and its Findings section.
             panel = page.locator(".related-p")
-            for locator in (page.locator("#related-current"), panel.get_by_text("Related Report", exact=True).filter(visible=True),
+            for locator in (page.locator("#related-return"), panel.get_by_text("Related Report", exact=True).filter(visible=True),
                             panel.get_by_text("Findings", exact=True).filter(visible=True)):
                 expect(locator).to_be_in_viewport()
             self.related(page, future).scroll_into_view_if_needed()

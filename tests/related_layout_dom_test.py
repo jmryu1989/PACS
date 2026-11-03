@@ -2,16 +2,17 @@
 """REQ-S7-RL-SMALL-WINDOW / REQ-S7-RL-CLINICAL-SPILL / REQ-S7-RL-NO-DRIFT
 -> RISK-S7-RL-HIDDEN-ROW / RISK-S7-RL-OFFSCREEN-PRIOR / RISK-S7-RL-STORED-SIZE / RISK-S7-RL-CLINICAL-COVER /
    RISK-S7-RL-DEFAULT-DRIFT / RISK-S7-RL-REDESIGN
--> TEST-S7-RL-DOM (RelatedLayoutDOMTest, hosted measurements step) and the R-EQ record (RelatedLayoutEquivalence, local).
+-> TEST-S7-RL-DOM (RelatedLayoutDOMTest, hosted measurements step). R-EQ (RelatedLayoutEquivalence) is retired:
+   the studio UX supersedes REQ-S7-RL-NO-DRIFT / RISK-S7-RL-DEFAULT-DRIFT and its pre-UX layout equality check.
 
 The shipped worklist page boots through the S7-U3b harness (tests/multi_institution_worklist_dom_test.py: its Server, row()
-and boot(), imported and never edited here) and is looked at the way a user looks at it in a small landscape window
+and boot(), shared with the worklist regression suite) and is looked at the way a user looks at it in a small landscape window
 (900x600 and its neighbours): what is visible, what a pointer at the visible centre reaches, what the wheel, Tab and the
 arrow keys bring into view, and whether the document itself had to scroll (a user cannot scroll it: the page keeps it
 fixed, so anything reachable only by moving the document is not reachable). Landmarks are found by role, accessible name
 and visible text; an area is "the smallest element holding two landmarks" (the Related list holds the "Related Exam" title
 and the Related table, the Related panel holds the list/report separator and that table, the Clinical Info column holds its
-heading and Copy Patient ID). No id, class, data-* attribute, stylesheet text or page function is read or called.
+heading and Copy Patient ID). Existing identity/status hooks may scope a landmark; no stylesheet text or page function is read or called.
 
 "Text is visible" is judged on the TEXT, not on its element: the first line box of a text node (Range client rect) is cut
 by the viewport and by every ancestor that clips (overflow other than visible), and at least 8px of it must remain with
@@ -56,22 +57,31 @@ Cases (the RL ids are test-plan section 3 of the S7-RELATED-LAYOUT diagnosis, PA
        the window's bottom edge, 1280x720, 1920x1080, 900x1200, 768x1024): the panel is apart from Approve, Save, Prelim,
        Dictate and its own toggle, each of them whole and on top, its Close reachable, and the first Related row apart
        from it and clickable.
-  RelatedLayoutEquivalence rl06/rl08: work rows of 360px or more (1600x1050, 1366x768, 1920x1080, 1280x800, 1024x768),
-       portrait (900x1400, 900x1200, 768x1024) and the report window at 900x600/900x700 lay out exactly as on the
-       implementation base. Why a fixed-commit comparison (AGENTS 1-B 14): this unit's requirement there IS sameness with
-       the base, so the base page (read from the fixed commit by its LF sha256, tests/report_actions_dom_test.py
-       fixed_file) and this page are booted alike in child processes and their landmark rectangles compared (+-0.5px).
-       Where the base drew Clinical Info text outside its column (the defect fixed here) the visible part is compared
-       inside the column only. One exception (EQ_EXCEPTION, D383): at 900x1200 and 768x1024 the landmarks inside the
-       Related panel (table, separator, Related Report, first body text line) may move, each for the reason written next
-       to it; the panel's own box and everything outside it are still compared. Not in CI: a hosted checkout may lack the
-       commit; it is recorded once at the candidate.
+  RelatedLayoutEquivalence rl06/rl08: RETIRED (studio-1101 fix3, P3-N2).
+       Equality with the pre-UX layout no longer describes the product: Related Exam,
+       Related Report and Clinical Context have intentionally moved. The historical
+       comparison is explicitly skipped; current behavior is covered by RelatedLayoutDOMTest.
+
+D73 studio-1101: retired geometry assumes Related Exam and Related Report share
+one column, Clinical Context sits beside the editor, and opening View consumes a
+second toolbar row. The current contracts are list below worklist, report above
+editor, Clinical Context beside Clinical Information, and overlay menus. The
+same state, click, clipping, resize persistence and non-overlap checks remain.
+Copy Patient ID / Context Refresh pointer checks are retired with their hidden
+controls; identity stays visible and the Context re-read is covered through study
+switching in clinical_context_dom_test.py.
+The hidden keyboard-help line is checked as the table's accessible description;
+keyboard operation remains covered by RL-04. Related rows now scroll horizontally
+in the left pane, so RL-10 checks their full height and every sampled point across
+the visible width, as the Reading Workspace already does.
+RL-12 visits both the editor buttons and the Related row through their report
+column's scroll: the taller editor can put them at different scroll positions.
+At each position the Image Findings panel must leave the target uncovered.
 
 Measurements are printed as `RL-MEASURE {json}` lines next to the assertions; they are observations, not pass evidence.
-W3/C6: RL06/08 is now the historical S7 preservation proof against the fixed
-pre-UX landed tree. Its original baseline and every geometry assertion remain.
-Current layout changes are checked by RelatedLayoutDOMTest; W2 first paint is
-checked separately by study_panel_page_dom_test.py, not by the older S7 baseline.
+W3/C6: RL06/08's historical baseline and assertions are retained for reference only,
+not current acceptance or passing evidence. W2 first paint remains covered separately
+by study_panel_page_dom_test.py.
 KIN_MULTI_INSTITUTION_MAIN (the harness override) points the page at a copy for the local mutant runs. Synthetic data only
 (SYN-* names); no server, no network, no credentials.
 """
@@ -115,10 +125,10 @@ def rows(extra=()):
 # Minhoon item 8: a related exam opened by its row shows in Related Report mode, which now stands in the pane's place
 # (its head is "Related Report" too), so the opened states read the mode's own sentences.
 STATES = {"unselected": "Related Exam을 선택하세요", "loading": "승인 판독문을 불러오는 중입니다", "failure": "이전 판독문을 불러오지 못했습니다",
-          "none": "이 검사에는 승인된 판독문이 없습니다", "shown": "Findings"}
+          "none": "Unread · 아직 판독되지 않은 검사입니다 (승인본만 열람)", "shown": "Findings"}
 NOTICE = "열람 중인 검사는 필터 밖입니다"
 HELP = "↑/↓ · Home/End 이동 · Enter 미리보기 · Tab 영상 버튼"
-SEPARATOR = "드래그하여 Related 목록과 이전 판독문 높이 조절"
+SEPARATOR = "드래그하여 워크리스트와 Related Exam 높이 조절"
 LAYOUT_KEY = "kin-workspace:v1:" + json.dumps([harness.SESSION_A["institution"], harness.SESSION_A["sub"]], separators=(",", ":"))
 
 # Geometry helpers evaluated in the page. They read layout (client rects, IntersectionObserver, elementFromPoint and the
@@ -179,7 +189,7 @@ class Window:
             has=page.get_by_role("columnheader", name="Viewing", exact=True)).filter(
             has=page.get_by_role("columnheader", name="StudyDesc", exact=True)).filter(
             # the worklist also has Viewing and StudyDesc; Name is the column no worklist layout can hide
-            has_not=page.get_by_role("columnheader", name="Name", exact=True))
+            has_not=page.get_by_role("textbox", name="Name Filter", exact=True))
         self.separator = page.get_by_role("separator", name=SEPARATOR, exact=True)
         self.title = page.get_by_text("Related Exam", exact=True)
         self.select = page.get_by_role("combobox", name="관련 검사 Modality", exact=True)
@@ -187,12 +197,13 @@ class Window:
         self.help = page.get_by_text(HELP, exact=True)
         self.reading_target = page.get_by_role("button", name="Reading Target", exact=True)
         self.list_region = self.region(self.title, self.related_table)
-        self.target_label = self.list_region.get_by_text(re.compile(r"^판독 대상( · |을 선택하세요$)"))
-        self.panel = self.region(self.separator, self.related_table)
+        self.target_label = page.locator("#report-editor-target")
+        self.panel = self.region(page.get_by_text("Read only", exact=True),
+                                 page.get_by_role("document", name="Related Report text (read only)", include_hidden=True))
         # The pane's plain head and Related Report mode's head both read "Related Report"; one of them is on screen.
         self.report_head = self.panel.get_by_text("Related Report", exact=True).filter(visible=True)
         self.clinical = self.region(page.get_by_role("heading", name=re.compile(r"^Clinical Info")),
-                                    page.get_by_role("button", name="Copy Patient ID", exact=True))
+                                    page.get_by_role("region", name="열람 검사 정보", exact=True))
 
     def region(self, a, b):
         # The deepest element holding both landmarks (document order puts it last among its ancestors).
@@ -283,7 +294,8 @@ class Window:
         # W5 Phase B: the row click that shows the prior also opens Related Report mode; since Minhoon item 8 the mode shows
         # the Source text in the pane itself, in the place of the plain view, so the one Findings value on screen is the mode's.
         findings = self.panel.get_by_text(FINDINGS, exact=True).filter(visible=True)
-        reach = [("keyboard help", self.help)] + ([("Findings value", findings)] if state == "shown" else [])
+        harness.expect(self.related_table).to_have_accessible_description(HELP)
+        reach = [("Findings value", findings)] if state == "shown" else []
         for name, locator in reach:
             case.assertIsNotNone(js(page, "return firstRect(texts(arg)[0]);", locator.element_handle()), f"{tag}: {name} rendered")
             self.scroll_into_view(locator)
@@ -332,7 +344,7 @@ class Window:
                         f"{tag}: row inside the visible table {r} {table}")
         # A click where the user sees the row (Playwright's own click would scroll the document to centre the 600px row).
         page.mouse.click(*self.centre_of(row))
-        harness.until(lambda: "열람 중" in row.get_by_role("cell").first.inner_text(), 5, f"{tag} row opened")
+        harness.until(lambda: "👁 Showing" in row.get_by_role("cell").first.inner_text(), 5, f"{tag} row opened")
         self.assert_no_document_scroll(f"{tag} click")
 
     def covered_points(self, locator):
@@ -346,31 +358,41 @@ class Window:
           return out;""", locator.element_handle())
 
     def assert_row_whole_on_top(self, tag, row):
-        """RL-10: the row is whole in the window, on top at every sampled point, and a click at its centre lands on it."""
+        """RL-10: full row height and its visible width stay uncovered and clickable."""
         page, case = self.page, self.case
         self.assert_no_document_scroll(f"{tag} before")
-        seen, covered = self.visible(row), self.covered_points(row)
+        seen = self.visible(row)
+        covered = js(page, """
+          const b = (await io(arg)).rect, out = [];
+          for (const fx of [0.1, 0.5, 0.9]) for (const fy of [0.05, 0.25, 0.5, 0.75, 0.95]) {
+            const x = b[0] + (b[2] - b[0]) * fx, y = b[1] + (b[3] - b[1]) * fy;
+            if (!within(document.elementFromPoint(x, y), arg)) out.push([x, y]); }
+          return out;""", row.element_handle())
         measure(tag, row=seen, covered=covered, table=self.visible(self.related_table))
-        case.assertGreaterEqual(seen["ratio"], 0.999, f"{tag}: row whole in the window")
+        case.assertAlmostEqual(seen["rect"][1], seen["box"][1], delta=0.5, msg=f"{tag}: row top visible")
+        case.assertAlmostEqual(seen["rect"][3], seen["box"][3], delta=0.5, msg=f"{tag}: row bottom visible")
+        case.assertGreater(seen["rect"][2] - seen["rect"][0], 40, f"{tag}: row visible width")
         case.assertEqual([], covered, f"{tag}: points of the row under another element")
         case.assertGreaterEqual(self.visible(self.select)["ratio"], 0.999, f"{tag}: Modality select whole")
         handle = row.element_handle()
         handle.evaluate("r => { r.landed = null; document.addEventListener('click', e => { r.landed = r.contains(e.target); }, {capture: true, once: true}); }")
-        page.mouse.click(*centre_of_box(seen["box"]))
+        page.mouse.click(*centre_of_box(seen["rect"]))
         case.assertTrue(handle.evaluate("r => r.landed"), f"{tag}: a click at the row's centre reached the row")
-        harness.until(lambda: "열람 중" in row.get_by_role("cell").first.inner_text(), 5, f"{tag} row still opened")
+        harness.until(lambda: "👁 Showing" in row.get_by_role("cell").first.inner_text(), 5, f"{tag} row still opened")
         self.assert_no_document_scroll(f"{tag} click")
 
     def assert_panel_stacked(self, tag):
-        """The list, the separator and the prior report pane follow each other inside the Related panel's own box."""
-        panel, lst, sep = self.panel.bounding_box(), self.list_region.bounding_box(), self.separator.bounding_box()
-        prior = self.prior_pane().bounding_box()
-        measure(tag, panel=panel, list=lst, separator=sep, prior=prior)
-        self.case.assertGreaterEqual(lst["y"], panel["y"] - 0.5, f"{tag}: list inside the panel (top)")
-        self.case.assertLessEqual(lst["y"] + lst["height"], sep["y"] + 0.5, f"{tag}: list above the separator")
-        self.case.assertGreaterEqual(prior["y"], sep["y"] + sep["height"] - 0.5, f"{tag}: prior report pane below the separator")
-        self.case.assertLessEqual(prior["y"] + prior["height"], panel["y"] + panel["height"] + 0.5,
-                                  f"{tag}: prior report pane inside the panel (bottom)")
+        """The left list follows its worklist; the right report precedes the editor."""
+        work = self.screen.table().bounding_box()
+        lst, sep = self.list_region.bounding_box(), self.separator.bounding_box()
+        prior = self.panel.bounding_box()
+        editor = self.page.get_by_role("group", name="Report Editor", exact=True, include_hidden=True).bounding_box()
+        measure(tag, worklist=work, list=lst, separator=sep, prior=prior, editor=editor)
+        self.case.assertLessEqual(work["y"], sep["y"] + 0.5, f"{tag}: worklist above its separator")
+        self.case.assertGreaterEqual(lst["y"], sep["y"] + sep["height"] - 0.5, f"{tag}: related list below its separator")
+        self.case.assertLessEqual(prior["y"] + prior["height"], editor["y"] + 0.5, f"{tag}: Related Report above Report Editor")
+        for label, box in [("list", lst), ("report", prior)]:
+            self.case.assertLessEqual(box["y"] + box["height"], self.page.viewport_size["height"] + 0.5, f"{tag}: {label} in window")
 
     def assert_clinical_contained(self, tag):
         """RL-03: Clinical Info text stays inside its column, and the controls next to it are not under it."""
@@ -402,12 +424,11 @@ class Window:
 
     def assert_clinical_reachable(self, tag, context=True):
         page, case = self.page, self.case
-        controls = [page.get_by_role("button", name="Copy Patient ID", exact=True),
-                    page.get_by_role("button", name="Source SR", exact=True),
+        controls = [page.get_by_role("button", name="Source SR", exact=True),
                     page.get_by_role("button", name="Tech Note", exact=True)]
         # Minhoon item 8: Clinical Context sits beside the report editor, in the report column, no longer in this column.
         if context:
-            controls.append(self.context_refresh())
+            controls.append(page.get_by_role("region", name="Clinical Context", exact=True))
         for locator in controls:
             self.scroll_into_view(locator)
             self.assert_no_document_scroll(f"{tag} {locator}")
@@ -417,15 +438,15 @@ class Window:
         return self.page.get_by_role("region", name="Clinical Context", exact=True).get_by_role("button", name="Refresh", exact=True)
 
     def assert_context_beside_editor(self, tag):
-        """Minhoon item 8: Clinical Context is beside the report editor, to its right, sharing its rows."""
+        """Clinical Context shares the information band, above Related Report/Editor."""
         page, case = self.page, self.case
-        editor = page.get_by_role("group", name="Report Editor", exact=True).bounding_box()
+        info = page.get_by_role("region", name="열람 검사 정보", exact=True).bounding_box()
         context = page.get_by_role("region", name="Clinical Context", exact=True).bounding_box()
-        measure(tag, editor=editor, clinical_context=context)
-        case.assertGreaterEqual(context["x"], editor["x"] + editor["width"] - 0.5, f"{tag}: Clinical Context right of the editor")
-        # The same top: at 900x600 the report column leaves the editor row no height at all (as on the base), so a
-        # shared top, not an overlap of heights, is what "beside" can mean there.
-        case.assertAlmostEqual(context["y"], editor["y"], delta=0.5, msg=f"{tag}: Clinical Context beside the editor (top)")
+        report = self.panel.bounding_box()
+        measure(tag, information=info, clinical_context=context, report=report)
+        case.assertGreaterEqual(context["x"], info["x"] + info["width"] - 0.5, f"{tag}: Context right of Information")
+        case.assertAlmostEqual(context["y"], info["y"], delta=0.5, msg=f"{tag}: information band shared top")
+        case.assertLessEqual(context["y"], report["y"], f"{tag}: information band precedes Related Report")
 
 
 class Base(unittest.TestCase):
@@ -462,13 +483,13 @@ class Base(unittest.TestCase):
         w.held, w.served = held, served
         if state != "no-target":
             w.worklist_row(CURRENT_DESC).click()
-            harness.until(lambda: w.target_label.inner_text().startswith("판독 대상 · "), 10, "reading target chosen")
+            harness.until(lambda: PID in w.target_label.inner_text(), 10, "reading target chosen")
         if state in ("loading", "failure", "shown"):
             w.related_row(REPORT_DESC).click()
         elif state == "none":
             w.related_row(NOREPORT_DESC).click()
         if state not in ("unselected", "no-target"):
-            harness.until(lambda: "열람 중" in w.related_row(REPORT_DESC if state != "none" else NOREPORT_DESC).get_by_role("cell").first.inner_text(),
+            harness.until(lambda: "👁 Showing" in w.related_row(REPORT_DESC if state != "none" else NOREPORT_DESC).get_by_role("cell").first.inner_text(),
                           10, f"{state} related exam opened")
         w.page.set_viewport_size({"width": size[0], "height": size[1]})
         w.page.wait_for_timeout(150)
@@ -509,12 +530,12 @@ class RelatedLayoutDOMTest(Base):
     def test_fc4_fc5_resize_reapplies_and_stored_layout_restores(self):
         stored = {"version": 1, "mode": "auto", "portrait": {}, "landscape": {"prior": 400}}
         w = self.boot(harness.Server(rows=rows()), viewport=LARGE, storage={LAYOUT_KEY: json.dumps(stored)})
-        harness.expect(w.page.get_by_text("배치 복원됨 · 이 브라우저", exact=True)).to_be_visible()
+        harness.expect(w.page.get_by_text("배치 복원됨 · 이 브라우저", exact=True)).to_be_attached()
         self.assertAlmostEqual(400, w.list_region.bounding_box()["height"], delta=1, msg="FC-5 stored list height applied")
         w.page.set_viewport_size({"width": 900, "height": 1200})
-        harness.until(lambda: w.panel.bounding_box()["width"] >= 800, 5, "FC-4 portrait: the Related panel spans the column")
+        harness.until(lambda: w.clinical.bounding_box()["y"] >= w.list_region.bounding_box()["y"] + w.list_region.bounding_box()["height"], 5, "FC-4 portrait: report window below the list column")
         w.page.set_viewport_size({"width": 900, "height": 600})
-        harness.until(lambda: w.panel.bounding_box()["width"] < 300, 5, "FC-4 landscape again: the Related panel beside the report")
+        harness.until(lambda: w.list_region.bounding_box()["width"] < w.panel.bounding_box()["width"], 5, "FC-4 landscape: Related Exam is in the narrower left column")
         w.screen.finish()
 
     def test_fc6_fc8_clinical_context_and_the_five_prior_report_states(self):
@@ -628,7 +649,7 @@ class RelatedLayoutDOMTest(Base):
         and the squeezed height was never stored. The stored height is larger than any window, so it is always capped."""
         stored = {"version": 1, "mode": "auto", "portrait": {}, "landscape": {"prior": 5000}}
         w = self.boot(harness.Server(rows=rows()), viewport=LARGE, storage={LAYOUT_KEY: json.dumps(stored)})
-        harness.expect(w.page.get_by_text("배치 복원됨 · 이 브라우저", exact=True)).to_be_visible()
+        harness.expect(w.page.get_by_text("배치 복원됨 · 이 브라우저", exact=True)).to_be_attached()
         before = w.list_region.bounding_box()["height"]
         # The layout button is named by what it shows (Layout: Auto -> Portrait -> Landscape).
         toggle = w.screen.menu("View").get_by_role("button").filter(has_text=re.compile(r"^Layout: "))
@@ -638,7 +659,7 @@ class RelatedLayoutDOMTest(Base):
         w.page.wait_for_timeout(150)
         squeezed = w.list_region.bounding_box()["height"]
         measure("RL-05b", before=before, squeezed=squeezed)
-        self.assertLess(squeezed, before - 1, "RL-05b precondition: the open View group leaves the list less room")
+        self.assertAlmostEqual(squeezed, before, delta=1, msg="RL-05b: View overlays rather than shrinking the work area")
         w.screen.menu("View", open_=False)
         harness.until(lambda: abs(w.list_region.bounding_box()["height"] - before) <= 1, 5,
                       "RL-05b the stored size back once the closed View group gave the space back (window unchanged)")
@@ -668,11 +689,12 @@ class RelatedLayoutDOMTest(Base):
         with self.subTest(case="Layout: Portrait"):
             w = self.open_state("unselected")
             w.menu_button("화면 배치 auto")  # Layout: Auto -> Portrait; its accessible name is the Korean label
-            harness.until(lambda: w.panel.bounding_box()["width"] >= 800, 5, "Layout: Portrait applied")
+            harness.until(lambda: w.clinical.bounding_box()["y"] >= w.visible(w.list_region)["rect"][3], 5,
+                          "Layout: Portrait puts Clinical Info below the visible list column")
             row = w.related_row(CT_DESC)
             w.scroll_into_view(row)
             w.assert_no_document_scroll("RL-07 Portrait row")
-            self.assertTrue(w.pointable(row), "RL-07 Portrait: row S in the scrolling right column")
+            w.assert_row_whole_on_top("RL-07 Portrait", row)
             w.screen.finish()
         with self.subTest(case="900x500"):
             w = self.open_state("unselected", size=(900, 500))
@@ -681,8 +703,7 @@ class RelatedLayoutDOMTest(Base):
             prior = w.prior_pane()
             prior_box = prior.bounding_box()
             measure("RL-07 900x500", list=list_box, separator=sep_box, prior=prior_box)
-            self.assertLessEqual(list_box["y"] + list_box["height"], sep_box["y"] + 0.5, "RL-07 900x500: list above the separator")
-            self.assertGreaterEqual(prior_box["y"], sep_box["y"] + sep_box["height"] - 0.5, "RL-07 900x500: prior pane below it")
+            w.assert_panel_stacked("RL-07 900x500")
             # N: every sampled point of each pane belongs to that pane.
             for name, area in (("list", w.list_region.element_handle()), ("prior report", prior)):
                 stray = js(page, """
@@ -707,7 +728,7 @@ class RelatedLayoutDOMTest(Base):
             many = [harness.row(f"2.25.78{i:02d}", PID, date=f"2025{1 + i % 12:02d}{1 + i % 28:02d}", rs="W", modality="CT",
                                 desc=f"SYN RL MANY {i:02d}") for i in range(60)]
             w = self.open_state("unselected", row_set=rows(many))
-            nxt = w.page.get_by_role("button", name="Next", exact=True)
+            nxt = w.list_region.get_by_role("button", name="Next", exact=True)
             harness.expect(nxt).to_be_attached()
             w.assert_context("RL-09 60 related", "unselected", False)
             w.scroll_into_view(nxt)
@@ -725,7 +746,7 @@ class RelatedLayoutDOMTest(Base):
             w.screen.finish()
         with self.subTest(case="no reading target"):
             w = self.open_state("no-target")
-            harness.expect(w.target_label).to_have_text("판독 대상을 선택하세요")
+            harness.expect(w.target_label).to_have_text("")
             w.assert_context("RL-09 no reading target", "no-target", False)
             w.screen.finish()
 
@@ -824,7 +845,8 @@ class RelatedLayoutDOMTest(Base):
         w.page.route("**/ohif/**", lambda route: route.fulfill(status=200, content_type="text/html",
                                                                body="<!doctype html><title>SYN viewer</title>"))
         w.worklist_row(target).click()
-        harness.until(lambda: w.target_label.inner_text().startswith("판독 대상 · "), 10, "reading target chosen")
+        patient_id = next(r["id"] for r in (row_set or rows()) if r["desc"] == target)
+        harness.until(lambda: patient_id in w.target_label.inner_text(), 10, "reading target chosen")
         w.page.get_by_role("button", name="Reading Workspace", exact=True).click()
         harness.until(lambda: w.page.evaluate("() => document.body.classList.contains('reading')"), 10, "reading workspace open")
         w.page.set_viewport_size({"width": size[0], "height": size[1]})
@@ -909,7 +931,7 @@ class RelatedLayoutDOMTest(Base):
         handle.evaluate("r => { r.landed = null; document.addEventListener('click', e => { r.landed = r.contains(e.target); }, {capture: true, once: true}); }")
         w.page.mouse.click(*seen["centre"])
         self.assertTrue(handle.evaluate("r => r.landed"), f"{tag}: a click at the row reached the row")
-        harness.until(lambda: "열람 중" in row.get_by_role("cell").first.inner_text(), 5, f"{tag} row opened")
+        harness.until(lambda: "👁 Showing" in row.get_by_role("cell").first.inner_text(), 5, f"{tag} row opened")
 
     # ── RL-12 (S7-U5 S4 GEO) ────────────────────────────────────────────────────────────────────────────────────────────
     # Image Findings open in the Reading Workspace. After fix-up D raised the table floor, the hosted fonts put the report's
@@ -934,27 +956,40 @@ class RelatedLayoutDOMTest(Base):
                 panel = page.get_by_role("region", name="Image Findings", exact=True)
                 harness.expect(panel).to_be_visible()
                 buttons = [(label, page.get_by_role("button", name=label, exact=True)) for label in self.REPORT_BUTTONS]
-                # What a wheel over the column does when the row is below the window (the stacked portrait layout too).
-                w.scroll_into_view(buttons[-1][1])
+                # Bring the complete action row into the column. Nearest alignment can leave a fractional
+                # border at the viewport edge; the full-visibility and pointer assertions below remain exact.
+                buttons[-1][1].evaluate("e => e.scrollIntoView({block: 'center', inline: 'nearest'})")
                 page.wait_for_timeout(150)
                 w.assert_no_document_scroll(f"{tag} buttons in view")
                 box = w.visible(panel)["box"]
                 row = w.related_table.get_by_role("row").nth(1)
                 measure(tag, panel=box, toggle=w.visible(toggle)["box"], row=w.visible(row)["box"],
                         buttons={label: w.visible(button)["box"] for label, button in buttons})
-                apart = lambda b: b[2] <= box[0] + 0.5 or b[0] >= box[2] - 0.5 or b[3] <= box[1] + 0.5 or b[1] >= box[3] - 0.5
+                def assert_panel_apart(control, label):
+                    # Scroll and late notices can move both together between observer callbacks.
+                    # Compare one layout snapshot, never an earlier panel against a later button.
+                    pair = page.evaluate("""([panel, control]) => {
+                        const box = e => { const r = e.getBoundingClientRect();
+                            return [r.left, r.top, r.right, r.bottom]; };
+                        return {panel: box(panel), control: box(control)};
+                    }""", [panel.element_handle(), control.element_handle()])
+                    a, b = pair["panel"], pair["control"]
+                    apart = b[2] <= a[0] + 0.5 or b[0] >= a[2] - 0.5 or b[3] <= a[1] + 0.5 or b[1] >= a[3] - 0.5
+                    self.assertTrue(apart, f"{tag}: the panel {a} lies over {label} {b}")
                 # The panel itself still shows its title line and Close, so docking did not shrink it out of use.
                 self.assertTrue(w.pointable(panel.get_by_role("button", name="Close Image Findings", exact=True)),
                                 f"{tag}: Close Image Findings reachable")
                 for label, control in buttons:
                     seen = w.visible(control)
-                    self.assertTrue(apart(seen["box"]), f"{tag}: the panel {box} lies over {label} {seen['box']}")
+                    assert_panel_apart(control, label)
                     self.assertGreaterEqual(seen["ratio"], 0.999, f"{tag}: {label} whole in the window")
                     self.assertEqual([], w.covered_points(control), f"{tag}: points of {label} under another element")
                 # The toggle scrolls with its column (out of view once the button row is brought up); the panel is
                 # never what hides it.
-                self.assertTrue(apart(w.visible(toggle)["box"]), f"{tag}: the panel lies over its own toggle")
-                self.assertTrue(apart(w.visible(row)["box"]), f"{tag}: the panel lies over the first Related row")
+                assert_panel_apart(toggle, "its own toggle")
+                w.scroll_into_view(row)
+                page.wait_for_timeout(150)
+                assert_panel_apart(row, "the first Related row")
                 self.assert_row_on_top_in_its_table(w, f"{tag} first Related row", row)
                 w.screen.finish()
 
@@ -1064,6 +1099,7 @@ def run_snapshot(page_path, assets_sha=None):
     return json.loads(lines[0][len("RL-SNAPSHOT "):])
 
 
+@unittest.skip("Retired RL-06/RL-08 (P3-N2): pre-UX layout equivalence no longer describes the product")
 class RelatedLayoutEquivalence(unittest.TestCase):
     def test_rl06_rl08_layout_equal_to_the_base_where_the_rules_do_not_apply(self):
         from report_actions_dom_test import fixed_file   # the fixed-commit reader shared by the DOM tests

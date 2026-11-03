@@ -52,6 +52,9 @@ class ReportTemplateE2E(previous.TemplatePreservationE2E):
         expect(page.locator("#recommendation")).to_have_value(values["recommendation"])
         page.locator(f'#relrows tr[data-uid="{prior.uid}"]').click()
         expect(page.locator("#prior-findings")).to_contain_text(prior.secret)
+        expect(page.locator("#report-editor-state")).to_have_text("Read Only")
+        page.locator("#report-editor-resume").click()
+        expect(page.locator("#report-editor-state")).to_have_text("Editable")
         writes = self.template_writes(page)
         self.capture(page)
         expect(page.locator("#tpl-source")).to_have_attribute("data-uid", current.uid)
@@ -233,7 +236,7 @@ class ReportTemplateE2E(previous.TemplatePreservationE2E):
         page.locator("#tpl-t").fill("Must not save")
         self.assertEqual(self.stack.request("POST", f"/studies/{normal.uid}/hold", "doctor2").status, 201)
         # Refresh is a real UI event arriving while the editor is open.
-        page.locator("#refresh").dispatch_event("click")
+        page.locator("#m-refresh").dispatch_event("click")
         expect(page.locator("#findings")).to_have_js_property("readOnly", True)
         expect(page.locator("#tpl-save")).to_be_disabled()
         page.locator("#tpl-save").dispatch_event("click")
