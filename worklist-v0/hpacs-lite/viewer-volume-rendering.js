@@ -253,7 +253,10 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
   closeButton.onclick=close;dialog.addEventListener('cancel',e=>{e.preventDefault();close();});
   // Keep browser input/Tab/Escape behavior while isolating native viewer hotkeys.
   for(const name of ['keydown','keyup','keypress'])dialog.addEventListener(name,e=>e.stopPropagation(),true);
-  const observer=new ResizeObserver(()=>{const op=operation;if(op?.ready&&current(op)){try{sculpt.cancel();op.engine.resize(true,true);render(op);}catch(error){fail(op,error);}}});observer.observe(canvasHost);
+  // VR shares the MPR planes' engine (see viewer-volume-mip.js): OHIF's own resize keeps the planes' zoom when a window
+  // resize reaches this observer before OHIF's queued resize; a bare engine resize left them at 0.8x behind the dialog.
+  const resizeEngine=engine=>{const service=window.services?.cornerstoneViewportService;if(typeof service?.performResize==='function'&&service.getRenderingEngine?.()===engine)service.performResize();else engine.resize(true,true);};
+  const observer=new ResizeObserver(()=>{const op=operation;if(op?.ready&&current(op)){try{sculpt.cancel();resizeEngine(op.engine);render(op);}catch(error){fail(op,error);}}});observer.observe(canvasHost);
   const windowResized=()=>{if(operation?.ready)sculpt.cancel();};window.addEventListener('resize',windowResized);
   const watch=()=>{const op=operation;if(op)mayStartFrame(op);};
   const timer=setInterval(watch,250);
