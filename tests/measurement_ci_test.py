@@ -122,6 +122,7 @@ REGRESSION_SUITES = {
         tests/audit_page_dom_test.py
         tests/audit_inspection_dom_test.py
         tests/audit_disclosure_dom_test.py
+        tests/audit_incident_dom_test.py
         tests/audit_rights_dom_test.py
         tests/admin_audit_dom_test.py
         tests/admin_gateway_status_dom_test.py
