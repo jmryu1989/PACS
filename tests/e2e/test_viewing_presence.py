@@ -39,8 +39,14 @@ class ViewingPresenceE2E(ServedViewerFlow, ViewerUXPriorsE2E):
             observer.wait_for_timeout(100)
         self.assertEqual(read(), expected)
 
+    def watch(self, actor):
+        # Viewing is not a default Radiology column; the reader turns it on in Worklist Columns.
+        page = self.login(actor)
+        self.show_worklist_column(page, 'viewing')
+        return page
+
     def open_as(self, fixture, actor):
-        work = self.login(actor)
+        work = self.watch(actor)
         self.open_toolbar_group(work, '#image-opening-open')
         work.locator('#image-opening-open').click()
         work.get_by_label('Include Latest Prior', exact=True).uncheck()
@@ -99,7 +105,7 @@ class ViewingPresenceE2E(ServedViewerFlow, ViewerUXPriorsE2E):
 
     def test_presence_02_real_cadence_network_reconnect_and_page_crash(self):
         study = self.ct('PRESENCE-' + uuid.uuid4().hex[:12], 'presence drop', '20260801')
-        observer = self.login('doctor2')
+        observer = self.watch('doctor2')
         work, viewer = self.open_as(study, 'doctor')
         name = document_request(work, 'GET', self.stack.api + '/me').json()['displayName']
         self.until(observer, lambda: self.names(study), [name])
