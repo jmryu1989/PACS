@@ -53,7 +53,6 @@ class DraftPurposeScreen(worklist.WorklistE2E):
         self.contexts.append(context)
         context.add_cookies([{"name": "kin_sid", "value": session.sid(), "url": self.stack.proxy,
                               "httpOnly": True, "secure": True, "sameSite": "Strict"}])
-        context.on("page", lambda p: p.on("dialog", lambda d: d.accept()))
         return context
 
     def open_main(self, context):
