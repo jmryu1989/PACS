@@ -323,7 +323,7 @@ export class DraftPurposeDisposal {
   /** One unit, one transaction: ledger lock → row lock → A's decision → started, delete, completed → anchor. */
   async destroy(unit: string): Promise<DestructionOutcome> {
     return this.db.$transaction(async (tx: Tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LEDGER_LOCK})`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LEDGER_LOCK}::bigint)`;
       const [row] = await tx.$queryRaw`SELECT * FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = ${unit} FOR UPDATE`;
       if (!row) return { unit, outcome: 'absent' as const };
       const anchor = await anchorOf(tx);
@@ -381,7 +381,7 @@ export class DraftPurposeDisposal {
   async sweep(): Promise<readonly DestructionOutcome[]> {
     // A database the ledger cannot be matched with is not swept: that is the startup gate's refusal, not a unit's.
     await this.db.$transaction(async (tx: Tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LEDGER_LOCK})`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LEDGER_LOCK}::bigint)`;
       await this.matchedLedger(tx);
     });
     const rows: { disposalUnitId: string }[] = await this.db.$queryRaw`SELECT "disposalUnitId" FROM "ReportDraftPurposeEnd"
@@ -415,7 +415,7 @@ export class DraftPurposeDisposal {
 
   async openGate(): Promise<{ reapplied: number; units: number; resolved: number }> {
     return this.db.$transaction(async (tx: Tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LEDGER_LOCK})`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LEDGER_LOCK}::bigint)`;
       const { anchor, view } = await this.matchedLedger(tx);
       if (!view) {
         await tx.$executeRaw`UPDATE "ReportDraftPurposeEnd" SET "deliverySettled" = true WHERE NOT "deliverySettled"`;
