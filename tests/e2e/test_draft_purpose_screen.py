@@ -601,11 +601,16 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
         request_id = sent[0]["relatedInsert"]["insertRequestId"]
         # While the answer is kept: the server wrote the inserted line and an applied receipt.
         answer = response.json()
-        stored = psql(f'SELECT author || \'|\' || findings FROM "ReportDraft" WHERE uid={sql_text(target.uid)}')
+        # The author's own draft row, whole (row_to_json keeps a multi-line findings on one output line).
+        stored = [json.loads(line) for line in psql(
+            'SELECT row_to_json(d)::text FROM (SELECT author, findings FROM "ReportDraft" '
+            f'WHERE uid={sql_text(target.uid)} AND author={sql_text(self.stack.actor("doctor"))}) d')]
         print("CD09P-SCREEN " + json.dumps({"c10b1-kept": {"answer": {k: answer.get(k) for k in ("revision", "present", "relatedInsert")},
                                                            "rows": stored, "receipt": self.receipt(request_id)}}), flush=True)
         self.assertEqual(answer["relatedInsert"]["result"], "applied", answer)
-        self.assertTrue(any(related.SOURCE_LINE in row for row in stored), stored)
+        self.assertEqual(len(stored), 1, stored)
+        self.assertIn(related.SOURCE_LINE, stored[0]["findings"])
+        self.assertIn(related.TARGET_OWN, stored[0]["findings"])
         self.assertEqual(self.receipt(request_id)[0].split("|")[0], "applied")
         self.end_target(target)
         puts, finished, failed = [], [], []
@@ -614,14 +619,26 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
         page.on("requestfinished", lambda r: finished.append(r))
         page.on("requestfailed", lambda r: failed.append(r))
         request = route.request
+
+        def editor():
+            return {field: page.locator("#" + field).input_value() for field in ("findings", "conclusion", "recommendation")}
+        # The editor just before the late answer: the text this page already holds (the Target's own and the inserted line).
+        before = editor()
+        self.assertIn(related.TARGET_OWN, before["findings"])
         route.fulfill(response=response)
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline and not any(r is request for r in finished + failed):
             page.wait_for_timeout(100)
         self.assertTrue(any(r is request for r in finished), "the kept answer was not delivered")
         delivered = time.monotonic()
-        # At least one autosave period (20 s) after the delivery.
-        page.wait_for_timeout(45000)
+        page.wait_for_timeout(2000)
+        right_after = editor()
+        # At least one autosave period (20 s) after the delivery, still before any new input.
+        page.wait_for_timeout(43000)
+        after = editor()
+        print("CD09P-SCREEN " + json.dumps({"c10b1-editor": {"before": before, "right_after": right_after, "after": after}}), flush=True)
+        self.assertEqual(right_after, before, "the late answer changed the editor")
+        self.assertEqual(after, before, "the editor changed after the late answer without an input")
         later = [p for p in puts if p[0] >= delivered]
         self.assertFalse([p for p in later if p[1] == 200], later)
         self.assertFalse([p for p in later if related.SOURCE_LINE in p[2]], "a write after the end carried the inserted line")
@@ -654,9 +671,12 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
         request_id = sent[0]["relatedInsert"]["insertRequestId"]
         receipt = self.receipt(request_id)
         self.end_target(target)
-        statuses = []
+        statuses, reads, finished = [], [], []
         page.on("response", lambda r: statuses.append(r.status)
                 if r.request.method == "PUT" and r.url.endswith(f"/studies/{target.uid}/report") else None)
+        page.on("request", lambda r: reads.append((time.monotonic(), r))
+                if r.method == "GET" and f"/studies/{target.uid}/draft" in r.url and "insertRequestId" in r.url else None)
+        page.on("requestfinished", lambda r: finished.append(r))
         # Retry: the same ID and body reach the server; its answer (the receipt's replay) is read, then lost.
         page.locator("#report-notice-retry").click()
         deadline = time.monotonic() + 30
@@ -674,20 +694,44 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
         check = page.locator("#report-notice-check")
         expect(check).to_be_visible(timeout=20000)
         expect(check).to_be_enabled()
-        reads = []
-        page.on("request", lambda r: reads.append(time.monotonic())
-                if r.method == "GET" and f"/studies/{target.uid}/draft" in r.url and "insertRequestId" in r.url else None)
+        before_press = len(reads)
         pressed = time.monotonic()
         check.click()
         deadline = time.monotonic() + 20
-        while not [t for t in reads if t >= pressed] and time.monotonic() < deadline:
+        while not [r for t, r in reads if t >= pressed] and time.monotonic() < deadline:
             page.wait_for_timeout(100)
-        self.assertTrue([t for t in reads if t >= pressed], "Check sent no read")
+        sent_by_click = [r for t, r in reads if t >= pressed]
+        self.assertTrue(sent_by_click, "Check sent no read")
+        # The answer to that very read, as the page received it.
+        clicked = sent_by_click[0]
+        answer = clicked.response()
+        self.assertIsNotNone(answer, "the Check read got no answer")
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not any(r is clicked for r in finished):
+            page.wait_for_timeout(100)
+        self.assertTrue(any(r is clicked for r in finished), "the page did not receive the Check answer")
+        self.assertEqual(answer.status, 200, answer.text())
+        body = answer.json()
+        self.assertEqual((body["uid"], body["present"], body["relatedInsert"]["insertRequestId"], body["relatedInsert"]["currentMatches"]),
+                         (target.uid, False, request_id, False), body)
+        # The screen after that answer: the insertion is handed to the explicit choice, never applied again.
+        notice = page.locator("#report-notice-msg")
+        expect(notice).to_contain_text("Draft Conflict", timeout=20000)
+        self.assertRegex(notice.inner_text(), "[가-힣]")
+        expect(check).to_be_hidden()
+        expect(page.locator("#b-draft-keep")).to_have_text("Keep This Text")
+        expect(page.locator("#b-draft-load")).to_have_text("Load Server Draft")
+        expect(page.locator("#b-draft-load")).to_be_visible()
+        page.screenshot(path=str(EVIDENCE / "c10b2-check-answer-on-screen.png"))
         page.wait_for_timeout(3000)
+        # Server comparison only (the test process's own read, not the page's Check).
         checked = self.draft(target, request_id)
         self.assertEqual((checked["present"], checked["relatedInsert"]["currentMatches"]), (False, False))
         self.assertFalse([s for s in statuses if s == 200], statuses)
-        print("CD09P-SCREEN " + json.dumps({"c10b2": {"replay": replay[0], "receipt": receipt}}), flush=True)
+        print("CD09P-SCREEN " + json.dumps({"c10b2": {"replay": replay[0], "receipt": receipt, "reads_before_press": before_press,
+                                                      "check_answer": {"status": answer.status, "present": body["present"],
+                                                                       "relatedInsert": body["relatedInsert"]},
+                                                      "notice": notice.inner_text()}}, ensure_ascii=True), flush=True)
 
 
 def load_tests(loader, tests, pattern):
