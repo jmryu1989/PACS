@@ -177,6 +177,10 @@
       if (answer.status === 409 && answer.code === 'REPORT_DRAFT_OWNER_CHANGED') return { outcome: 'owner', answer };
       // 앞단 프록시가 대신 답한 것: 서버가 그 요청을 받았는지, 끝냈는지 알 수 없다.
       if (answer.status === 502 || answer.status === 504) return { outcome: 'unknown', answer };
+      // CD-09-P: the server saved the end but could not finish its answer, or could not yet confirm whether the end was
+      // saved. Either way only a re-read says what is stored (the same path as an answer that never arrived).
+      if (answer.status === 503 && (answer.code === 'REPORT_DRAFT_END_SAVED' || answer.code === 'REPORT_DRAFT_END_UNCONFIRMED'))
+        return { outcome: 'unknown', answer };
       return { outcome: 'refused', answer, code: answer.code, message: answer.body && typeof answer.body.message === 'string'
         ? answer.body.message : `HTTP ${answer.status}` };
     }
