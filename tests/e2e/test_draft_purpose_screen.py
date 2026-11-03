@@ -403,6 +403,10 @@ class DraftPurposeScreenR3(DraftPurposeScreen):
         page = self.open_main(self.profile("doctor"))
         self.select(page, a)
         self.type_and_save(page, a, secret)
+        original = self.work_unit(a)
+        finished, failed = [], []
+        page.on("requestfinished", lambda r: finished.append(r))
+        page.on("requestfailed", lambda r: failed.append(r))
         draft_path, report_path = f"/api/studies/{a.uid}/draft", f"/api/studies/{a.uid}/report"
         state = {"phase": "leave"}
         kept, log, puts = [], [], []
@@ -468,17 +472,31 @@ class DraftPurposeScreenR3(DraftPurposeScreen):
         self.assertTrue([e for e in log[selected_at:] if e[1] == "GET" and e[2] == draft_path], "no new read of A after it was selected again")
         expect(page.locator("#findings")).not_to_have_value(secret + "\nSYN-C9 more", timeout=20000)
         self.assertNotIn(secret, page.locator("#findings").input_value())
-        # ⑦ the old answer is delivered now.
+        # ⑦ the old answer is delivered now, and the page receives it (finished, not failed or cancelled).
         route, response = kept[0]
+        request = route.request
         route.fulfill(response=response)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not any(r is request for r in finished + failed):
+            page.wait_for_timeout(100)
+        self.assertTrue(any(r is request for r in finished), "the kept answer was not delivered to the page")
+        self.assertFalse(any(r is request for r in failed), "the kept answer's request failed instead of finishing")
+        delivered = time.monotonic()
         page.wait_for_timeout(3000)
+        self.assertGreaterEqual(time.monotonic() - delivered, 2)
         self.assertNotIn(secret, page.locator("#findings").input_value())
         self.assertFalse([p for p in puts if p[0] in ("away", "learn") and secret in p[1]], "a write carried the ended text")
         self.assertEqual(self.server_draft(a)["present"], False)
         self.shot(page, "c9-old-answer-after-new-a")
-        # ⑧ NEW-A is a new work.
+        print("CD09P-SCREEN " + json.dumps({"c9": {"early_reads_ended": len([e for e in log if e[0] == "away" and e[1] == "GET"]),
+                                                   "lost_discard_reads": len([e for e in log if e[0] == "lost-discard" and e[1] == "GET"])}}),
+              flush=True)
+        # ⑧ NEW-A is a new work; the ended work is not created again; B's text is as it was.
         self.type_and_save(page, a, "SYN-C9 NEW-A")
         self.assertEqual(self.server_draft(a)["snapshot"]["findings"], "SYN-C9 NEW-A")
+        fresh = self.work_unit(a)
+        self.assertTrue(fresh.startswith("disposal:") and fresh != original, (fresh, original))
+        self.assertEqual(psql(f'SELECT count(*) FROM "ReportDraft" WHERE "workUnit"={sql_text(original)}'), ["0"])
         self.assertEqual(self.server_draft(b)["snapshot"]["findings"], text_b)
 
 
