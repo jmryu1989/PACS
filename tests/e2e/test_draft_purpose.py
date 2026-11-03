@@ -613,14 +613,20 @@ class DraftPurposeServed(unittest.TestCase):
         # Big enough that the paused connection backs up: each answer carries this text.
         secret = "SYN-P10 " + uuid.uuid4().hex + " " + "x" * 90000
         marker = secret[:40]
-        cases = [("GET", self.path("/draft"), None, "read"), ("PATCH", self.path(), {}, "cut"), ("GET", self.path("/draft"), None, "cut")]
-        for method, path, body, ending in cases:
-            self.assertEqual(self.save(doctor, secret).status, 200)
-            unit = self.row(doctor)["workUnit"]
-            client = self.hold_open(doctor, method, path, 40, marker, body)
+        # The PATCH is a real study-state change whose answer carries the caller's draft: its author must be allowed to
+        # change a technician field and to write a draft (jmryu: radiologist and technician of the fixture's institution).
+        cases = [(doctor, "GET", self.path("/draft"), None, "read"), ("jmryu", "PATCH", self.path(), {"ward": "SYN-P10 ward"}, "cut"),
+                 (doctor, "GET", self.path("/draft"), None, "cut")]
+        for user, method, path, body, ending in cases:
+            self.assertEqual(self.save(user, secret).status, 200)
+            unit = self.row(user)["workUnit"]
+            probe = self.stack.request(method, path, user, body)
+            self.assertEqual(probe.status, 200, probe.text)
+            self.assertIn(marker, probe.text, "the answer of this route carries the caller's draft")
+            client = self.hold_open(user, method, path, 40, marker, body)
             try:
                 time.sleep(3)   # the handlers run, read the draft and build their answers; the connection holds them
-                self.assertEqual(self.discard(doctor).status, 200)
+                self.assertEqual(self.discard(user).status, 200)
                 time.sleep(5)
                 pending = self.ended(unit)
                 self.assertIsNotNone(pending, f"{method} {path}: destroyed while a response that read the draft was open")
