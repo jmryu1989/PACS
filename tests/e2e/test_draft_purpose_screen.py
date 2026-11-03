@@ -409,7 +409,7 @@ class DraftPurposeScreenR3(DraftPurposeScreen):
         page.on("requestfailed", lambda r: failed.append(r))
         draft_path, report_path = f"/api/studies/{a.uid}/draft", f"/api/studies/{a.uid}/report"
         state = {"phase": "leave"}
-        kept, log, puts = [], [], []
+        kept, log, puts, early, learned = [], [], [], [], []
 
         def control(route):
             request = route.request
@@ -427,7 +427,16 @@ class DraftPurposeScreenR3(DraftPurposeScreen):
             if phase == "lost-discard" and method == "GET" and path == draft_path:
                 route.fetch(); route.abort(); return
             if phase == "away" and method == "GET" and path == draft_path:
+                early.append(request)
                 route.abort(); return                                # an early learn read is ended, not applied
+            if phase == "learn" and method == "GET" and path == draft_path:
+                response = route.fetch()                             # the new read of A: its real answer, passed on
+                try:
+                    body = json.loads(response.body().decode("utf-8"))
+                except ValueError:
+                    body = None
+                learned.append((request, response.status, body))
+                route.fulfill(response=response); return
             route.continue_()
         page.route(lambda url: urlsplit(url).path in (draft_path, report_path), control)
         # ① saved ② one more line, then B: the leave gate's save of A reaches the server, its answer and checks are lost.
@@ -458,20 +467,38 @@ class DraftPurposeScreenR3(DraftPurposeScreen):
         page.wait_for_timeout(5000)
         # ⑤ the server ended and destroyed A's work.
         self.wait_no_ended_rows(a)
-        self.assertEqual(self.server_draft(a)["present"], False)
-        # ⑥ B, then A again; only after A is selected again may the new read of A pass.
+        ended = self.server_draft(a)
+        self.assertEqual(ended["present"], False)
+        # ⑥ B, then A again; only after A is selected again may the new read of A pass. A read of A sent while B is shown
+        # is aborted, and its end is the page's own requestfailed for that request.
         state["phase"] = "away"
         self.click_row(page, b)
         expect(page.locator("#findings")).to_have_value(text_b)
-        self.select(page, a)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not all(any(f is r for f in failed) for r in early):
+            page.wait_for_timeout(100)
+        early_ended = [r for r in early if any(f is r for f in failed)]
+        self.assertEqual(len(early_ended), len(early), "an aborted early read of A did not end on the page")
         state["phase"] = "learn"
-        selected_at = len(log)
+        self.select(page, a)
+        # The new read of A is answered (A, the ended work's revision, no draft), the page receives that answer, and it is
+        # applied to the screen (the unknown discard is reported as done, the editor holds no ended text) - all before the
+        # old answer is delivered.
+        def received():
+            return [entry for entry in learned if any(f is entry[0] for f in finished)]
         deadline = time.monotonic() + 40
-        while time.monotonic() < deadline and not [e for e in log[selected_at:] if e[1] == "GET" and e[2] == draft_path]:
+        while time.monotonic() < deadline and not received():
             page.wait_for_timeout(200)
-        self.assertTrue([e for e in log[selected_at:] if e[1] == "GET" and e[2] == draft_path], "no new read of A after it was selected again")
-        expect(page.locator("#findings")).not_to_have_value(secret + "\nSYN-C9 more", timeout=20000)
+        self.assertTrue(received(), f"no new read of A was answered and received after A was selected again: {learned}")
+        answers = [(status, (body or {}).get("uid"), (body or {}).get("revision"), (body or {}).get("present"))
+                   for _, status, body in received()]
+        self.assertIn((200, a.uid, ended["revision"], False), answers, answers)
+        self.assertFalse([e for e in learned if any(f is e[0] for f in failed)], "a new read of A failed instead of finishing")
+        expect(page.locator("#toast")).to_contain_text("서버에서 처리된 것을 확인했습니다", timeout=20000)
+        expect(page.locator("#findings")).not_to_have_value(secret + "\nSYN-C9 more")
         self.assertNotIn(secret, page.locator("#findings").input_value())
+        self.assertFalse(any(r is kept[0][0].request for r in finished + failed), "the old answer ended before the new read was applied")
+        self.shot(page, "c9-new-a-applied-before-old-answer")
         # ⑦ the old answer is delivered now, and the page receives it (finished, not failed or cancelled).
         route, response = kept[0]
         request = route.request
@@ -488,7 +515,8 @@ class DraftPurposeScreenR3(DraftPurposeScreen):
         self.assertFalse([p for p in puts if p[0] in ("away", "learn") and secret in p[1]], "a write carried the ended text")
         self.assertEqual(self.server_draft(a)["present"], False)
         self.shot(page, "c9-old-answer-after-new-a")
-        print("CD09P-SCREEN " + json.dumps({"c9": {"early_reads_ended": len([e for e in log if e[0] == "away" and e[1] == "GET"]),
+        print("CD09P-SCREEN " + json.dumps({"c9": {"early_reads_aborted": len(early), "early_reads_ended": len(early_ended),
+                                                   "new_a_answers_before_old": answers,
                                                    "lost_discard_reads": len([e for e in log if e[0] == "lost-discard" and e[1] == "GET"])}}),
               flush=True)
         # ⑧ NEW-A is a new work; the ended work is not created again; B's text is as it was.
