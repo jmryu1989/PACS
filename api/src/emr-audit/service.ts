@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { IncomingMessage } from 'node:http';
 import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
-import { identity, newAuditLinkId } from '../emr-contract/access-event';
+import { identity, newAuditLinkId, patientLink } from '../emr-contract/access-event';
 import type { AccessTarget, AccessEventV1 } from '../emr-contract/access-event';
 import { clauseVersionAt, HOLD_CLAUSE_VERSIONS } from '../emr-contract/legal-basis';
 import type { LegalHold } from '../emr-contract/lawful-defaults';
@@ -16,6 +16,8 @@ import * as F from './contract';
 import { loadFixedVersions } from './fixed-versions';
 import { fixedOriginals, onlineFixedListing } from './fixed-listing';
 import { fixedContentType, fixedDocument } from './fixed-document';
+import { rightsRecords } from './rights-records';
+import { RightsIntake, RightsState, rightsView } from './rights-state';
 
 type Tx = Prisma.TransactionClient;
 type HeldRequest = { kind: 'access-request'; request: F.DisclosureRequest; facts: F.RequestDeadlineFacts; holds: LegalHold[]; issuanceId: string | null };
@@ -374,6 +376,7 @@ export class EmrAuditService {
     const [row] = await tx.$queryRaw<{ body: HeldRequest; institution_id: string }[]>`SELECT body,institution_id
       FROM emr_audit.request_event WHERE request_id=${requestId} ORDER BY sequence DESC LIMIT 1`;
     if (row && row.institution_id !== institution) refuse('AuditScopeNotGranted');
+    if (row && row.body.kind !== 'access-request') refuse('DisclosureRequestConflict');
     return row?.body ?? null;
   }
   private async saveHeld(tx: Tx, institution: string, state: HeldRequest) {
@@ -383,6 +386,123 @@ export class EmrAuditService {
   private async fixed(tx: Tx, ids: readonly string[]) {
     for (const id of [...ids].sort()) await lockFixedRecord(tx, id);
     return Promise.all(ids.map(id => loadFixedVersions(tx, id)));
+  }
+
+  private async rightsAuthority(tx: Tx, ctx: RequestWorkContext) {
+    return F.requireScope(await this.authority(tx, ctx), 'disclosure');
+  }
+  private async savedRights(tx: Tx, id: string, institution: string): Promise<RightsState | null> {
+    await this.lock(tx, JSON.stringify(['emr-f-request', id]));
+    const [row] = await tx.$queryRaw<{ body: RightsState; institution_id: string }[]>`SELECT body,institution_id
+      FROM emr_audit.request_event WHERE request_id=${id} ORDER BY sequence DESC LIMIT 1`;
+    if (row && row.institution_id !== institution) refuse('RequestNotFound');
+    if (row && row.body.kind !== 'rights-request') refuse('RightsRequestConflict');
+    return row?.body ?? null;
+  }
+  private async saveRights(tx: Tx, state: RightsState) {
+    await tx.$executeRaw`INSERT INTO emr_audit.request_event(request_id,institution_id,body)
+      VALUES(${state.request.requestId},${state.institutionId},${JSON.stringify(state)}::json)`;
+  }
+  private rightsTargets(state: RightsState): F.InvestigationAuditTarget[] {
+    return state.request.recordIds.map(id => ({ kind: 'disclosure', patientLinkSnapshot: known(state.request.patient),
+      studyId: { status: 'unresolved', reason: 'not-resolved' }, recordId: known(id),
+      versionId: { status: 'unresolved', reason: 'not-resolved' } }));
+  }
+  async receiveRights(request: IncomingMessage, input: unknown) {
+    return this.run(request, async (tx, ctx, record) => {
+      const authority = await this.rightsAuthority(tx, ctx), at = now();
+      const value: RightsIntake = requestValue(() => {
+        const v = object(input, ['requestId', 'kind', 'receivedAt', 'patient', 'recordIds', 'statement']);
+        if (!Array.isArray(v.recordIds) || !v.recordIds.length || new Set(v.recordIds).size !== v.recordIds.length) refuse('RightsRequestRefused');
+        return { requestId: string(v.requestId), kind: choice(v.kind, ['correction', 'deletion', 'processing-suspension']),
+          receivedAt: utc(v.receivedAt), patient: patientLink(v.patient), recordIds: v.recordIds.map(id => string(id)), statement: string(v.statement) };
+      });
+      let state = await this.savedRights(tx, value.requestId, authority.institutionId);
+      if (state && !isDeepStrictEqual(state.request, value)) refuse('RightsRequestConflict');
+      if (!state) {
+        // The intake preview supplies the contract's deadline and validates stored subject facts.
+        // It is not a recorded decision; the explicit decision reloads originals under the same locks.
+        const preview = F.decideRightsRequest(authority, value, await rightsRecords(tx, value.recordIds), at);
+        state = { kind: 'rights-request', institutionId: authority.institutionId, request: value,
+          receivedBy: ctx.facts.actor, recordedAt: at, dueBy: preview.notice.dueBy, decision: null, notification: null };
+        await tx.$queryRaw`SELECT emr_access.record_duty_request('correction-request',${value.requestId},'received',
+          ${JSON.stringify({ requestId: value.requestId, recordIds: value.recordIds, receivedAt: value.receivedAt,
+            responseDueAt: state.dueBy, resolution: null })})::text`;
+        await this.saveRights(tx, state);
+        await this.recorded(record, ctx, 'write', this.rightsTargets(state), value.requestId);
+      } else await this.recorded(record, ctx, 'provide-prepared', this.rightsTargets(state), value.requestId);
+      return rightsView(state, at);
+    });
+  }
+  async listRights(request: IncomingMessage) {
+    return this.run(request, async (tx, ctx, record) => {
+      const authority = await this.rightsAuthority(tx, ctx), at = now();
+      const rows = await tx.$queryRaw<{ body: RightsState }[]>`SELECT DISTINCT ON(request_id) body
+        FROM emr_audit.request_event WHERE institution_id=${authority.institutionId} AND body->>'kind'='rights-request'
+        ORDER BY request_id,sequence DESC`;
+      // The list exposes request identifiers/status only. Patient/record details are recorded on detail reads.
+      const requests = rows.map(({ body }) => { const v = rightsView(body, at); return {
+        requestId: body.request.requestId, kind: body.request.kind, receivedAt: body.request.receivedAt,
+        dueBy: body.dueBy, status: v.status, overdue: v.overdue,
+      }; }).sort((a, b) => a.dueBy.localeCompare(b.dueBy) || a.requestId.localeCompare(b.requestId));
+      await this.recorded(record, ctx, 'provide-prepared', requests.map(r => ({ kind: 'disclosure',
+        patientLinkSnapshot: none, studyId: none, recordId: known(r.requestId), versionId: none })), 'rights-requests');
+      return { requests };
+    });
+  }
+  async rightsAction(request: IncomingMessage, id: string, action: 'read' | 'decide' | 'notify', input?: unknown) {
+    return this.run(request, async (tx, ctx, record) => {
+      const authority = await this.rightsAuthority(tx, ctx), at = now();
+      const state = await this.savedRights(tx, requestValue(() => string(id)), authority.institutionId);
+      if (!state) refuse('RequestNotFound');
+      let changed = false;
+      const withdrawing = action === 'notify' && input !== null && typeof input === 'object' &&
+        (input as { outcome?: unknown }).outcome === 'withdrawn';
+      if (state.withdrawal && (action === 'decide' || (action === 'notify' && !withdrawing))) refuse('RightsRequestWithdrawn');
+      if (withdrawing) {
+        const withdrawal = requestValue(() => {
+          const v = object(input, ['outcome', 'evidenceId']);
+          return { evidenceId: string(v.evidenceId) };
+        });
+        if (state.notification || (state.withdrawal && state.withdrawal.evidenceId !== withdrawal.evidenceId)) refuse('RightsRequestConflict');
+        if (!state.withdrawal) {
+          // Withdrawal closes the received duty even when originals can no longer be decided.
+          // Preserve the prior request/decision and append only the evidenced ending fact.
+          state.withdrawal = { ...withdrawal, recordedBy: ctx.facts.actor, recordedAt: at }; changed = true;
+          await tx.$queryRaw`SELECT emr_access.record_duty_request('correction-request',${id},'resolved',
+            ${JSON.stringify({ requestId: id, recordIds: state.request.recordIds, receivedAt: state.request.receivedAt,
+              responseDueAt: state.dueBy, resolution: { at, eventId: withdrawal.evidenceId, outcome: 'withdrawn' } })})::text`;
+        }
+      }
+      if (action === 'decide' && !state.decision) {
+        state.decision = F.decideRightsRequest(authority, state.request, await rightsRecords(tx, state.request.recordIds), at);
+        changed = true;
+      }
+      if (action === 'notify' && !withdrawing) {
+        if (!state.decision) refuse('RightsDecisionRequired');
+        const notice = requestValue(() => {
+          const v = object(input, ['notifiedAt', 'recipient', 'method', 'evidenceId', 'content']);
+          return { notifiedAt: utc(v.notifiedAt), recipient: string(v.recipient), method: string(v.method),
+            evidenceId: string(v.evidenceId), content: string(v.content) };
+        });
+        if (notice.notifiedAt < state.decision.decidedAt || notice.notifiedAt > at) refuse('RightsNoticeTimeInvalid');
+        if (state.notification) {
+          const { recordedBy, recordedAt, ...previous } = state.notification;
+          if (!isDeepStrictEqual(previous, notice)) refuse('RightsRequestConflict');
+        } else {
+          state.notification = { ...notice, recordedBy: ctx.facts.actor, recordedAt: at }; changed = true;
+          // The shipped decision contract has no closure event. CD-07 binds closure
+          // to evidenced notification; execution of correction/destruction remains separate.
+          await tx.$queryRaw`SELECT emr_access.record_duty_request('correction-request',${id},'resolved',
+            ${JSON.stringify({ requestId: id, recordIds: state.request.recordIds, receivedAt: state.request.receivedAt,
+              responseDueAt: state.dueBy, resolution: { at: notice.notifiedAt, eventId: notice.evidenceId,
+                outcome: state.decision.records.every(r => r.outcome.startsWith('refused-')) ? 'lawfully-refused' : 'fulfilled' } })})::text`;
+        }
+      }
+      if (changed) await this.saveRights(tx, state);
+      await this.recorded(record, ctx, changed ? 'write' : 'provide-prepared', this.rightsTargets(state), id);
+      return rightsView(state, at);
+    });
   }
 
   private requestTargets(state: HeldRequest): readonly AccessTarget[] {

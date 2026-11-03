@@ -15,6 +15,7 @@
   let pages = {}, downloaded = null;
   let inspectionSequence = 0, inspectionPending = false, inspectionSnapshot = null, inspectionFinished = false;
   let disclosureSequence = 0, disclosurePending = false, disclosureSnapshot = null, disclosureCopy = null;
+  let rightsSequence = 0, rightsPending = false, rightsSnapshot = null;
   const message = text => { el('message').textContent = text; };
   const value = item => item == null ? 'Not Recorded' : typeof item === 'string' ? item : JSON.stringify(item);
   const fact = item => !item ? 'Not Recorded' : item.status === 'known' ? value(item.value) : `${item.status}: ${item.reason}`;
@@ -24,7 +25,7 @@
     el('export').disabled = !ready || denied || pending;
     el('more').disabled = !ready || denied || pending;
     el('more').hidden = !streams.some(key => pages[key]?.next);
-    inspectionControls(); disclosureControls();
+    inspectionControls(); disclosureControls(); rightsControls();
   }
   function clear() {
     sequence++; pending = false; selection = null; pages = {};
@@ -35,7 +36,7 @@
     controls();
   }
   function refuse() {
-    denied = true; clear(); clearInspection(); clearDisclosure(true); el('workspace').hidden = true;
+    denied = true; clear(); clearInspection(); clearDisclosure(true); clearRights(true); el('workspace').hidden = true;
     el('form').reset();
     message('감사 기록을 조회할 권한이 없습니다.');
   }
@@ -462,6 +463,139 @@
   disclosureEl('html').addEventListener('click', () => downloadDisclosure('paper-print'));
   addDisclosureEvidence(); addDisclosureScope();
 
+  const rightsEl = name => el(`rights-${name}`);
+  function rightsControls() {
+    const off = !ready || denied || rightsPending;
+    for (const name of ['load', 'open-button', 'receive-button']) rightsEl(name).disabled = off;
+    const closed = !!rightsSnapshot?.notification || !!rightsSnapshot?.withdrawal;
+    const form = rightsEl('notify'), withdrawing = form.elements.outcome.value === 'withdrawn';
+    rightsEl('decide').disabled = off || !rightsSnapshot || !!rightsSnapshot.decision || closed;
+    form.elements.outcome.disabled = off || !rightsSnapshot || closed;
+    for (const input of form.querySelectorAll('input, textarea, button')) {
+      const noticeOnly = ['notifiedAt', 'recipient', 'method', 'content'].includes(input.name);
+      input.disabled = off || !rightsSnapshot || closed || (withdrawing ? noticeOnly : !rightsSnapshot.decision);
+      if (noticeOnly) input.required = !withdrawing;
+    }
+    rightsEl('notify-button').textContent = withdrawing ? 'Record Withdrawal' : 'Record Notification';
+  }
+  function clearRights(all = false) {
+    rightsSequence++; rightsPending = false; rightsSnapshot = null;
+    rightsEl('detail').hidden = true; rightsEl('state').textContent = ''; rightsEl('notice').textContent = '';
+    rightsEl('correction').hidden = true;
+    if (all) { rightsEl('list').replaceChildren(); rightsEl('receive').reset(); rightsEl('notify').reset(); rightsEl('id').value = ''; }
+    rightsControls();
+  }
+  function noticeDraft(state) {
+    if (!state.decision) return '결정 후 계약의 근거 조문을 표시합니다.';
+    const d = state.decision;
+    return ['통지 문안 확정 전 (P5). 아래는 계약의 결정 및 근거 조문 자리표시입니다.',
+      ...d.records.map(r => `${r.recordId}: ${r.outcome}\n근거 조문: ${r.basis.join(', ') || '계약에 별도 조문 없음'}`),
+      ...(d.records.some(r => r.outcome.startsWith('refused-')) ? ['보존기간 경과 여부는 이 결정에 반영되지 않습니다(CD-07-Q1 미정). 보존기간이 끝난 기록이면 통지 전에 확인하세요.'] : []),
+      d.notice.content === 'refusal-with-reason-and-objection-method' ?
+        '거절 사유: 위 계약의 결정·근거 조문.\n이의제기 방법: 문안 확정 전 (P5).' :
+        '조치 결과 통지: 실제 수행 결과를 확인하여 문안을 작성하세요.'].join('\n');
+  }
+  function showRights(state) {
+    rightsSnapshot = state; rightsEl('detail').hidden = false;
+    rightsEl('state').textContent = [`Request: ${state.status}`, `Request ID: ${state.request.requestId}`,
+      `Kind: ${state.request.kind}`, `Patient ID: ${state.request.patient.patientId}`,
+      `Assigning Authority: ${state.request.patient.assigningAuthority}`, `Patient Link ID: ${state.request.patient.linkId}`,
+      `Records: ${state.request.recordIds.join(', ')}`, `Statement: ${state.request.statement}`,
+      `Received At: ${state.request.receivedAt}`, `Received By: ${state.receivedBy.subject}`, `Recorded At: ${state.recordedAt}`,
+      `Notice Due By: ${state.dueBy}`,
+      state.overdue ? '통지 기한 경과: 철회 기록 시각, 실제 통지 시각 또는 현재 시각 기준입니다.' : '통지 기한 내',
+      ...(state.decision ? [`Decided At: ${state.decision.decidedAt}`, `Decided By: ${state.decision.decidedBy.subject}`] : []),
+      ...(state.notification ? [`Notified At: ${state.notification.notifiedAt}`, `Evidence: ${state.notification.evidenceId}`,
+        `Notice: ${state.notification.content}`, `Recorded By: ${state.notification.recordedBy.subject}`,
+        `Notification Recorded At: ${state.notification.recordedAt}`] : []),
+      ...(state.withdrawal ? [`Withdrawn At: ${state.withdrawal.recordedAt}`, `Evidence: ${state.withdrawal.evidenceId}`,
+        `Recorded By: ${state.withdrawal.recordedBy.subject}`, '철회 증빙으로 요구와 응답 의무를 닫았습니다.'] : [])].join('\n');
+    rightsEl('notice').textContent = noticeDraft(state);
+    rightsEl('correction').hidden = !state.decision?.records.some(r => r.outcome === 'correct-by-new-signed-version');
+    if (state.notification) for (const key of ['notifiedAt', 'recipient', 'method', 'evidenceId', 'content'])
+      rightsEl('notify').elements[key].value = key === 'notifiedAt' ? state.notification[key].replace(/Z$/, '') : state.notification[key];
+    if (state.notification) rightsEl('notify').elements.outcome.value = 'notified';
+    if (state.withdrawal) {
+      rightsEl('notify').elements.outcome.value = 'withdrawn';
+      rightsEl('notify').elements.evidenceId.value = state.withdrawal.evidenceId;
+    }
+    rightsControls();
+  }
+  function showRightsList(rows) {
+    rightsEl('list').replaceChildren();
+    for (const r of rows) {
+      const tr = document.createElement('tr'), td = document.createElement('td'), open = document.createElement('button');
+      open.type = 'button'; open.textContent = r.requestId;
+      open.addEventListener('click', () => {
+        if (rightsEl('id').value !== r.requestId) rightsEl('notify').reset();
+        rightsEl('id').value = r.requestId; clearRights(); rightsRequest('open');
+      });
+      td.append(open); tr.append(td);
+      for (const text of [r.kind, r.receivedAt, r.status, r.dueBy + (r.overdue ? ' — 통지 기한 경과' : '')]) {
+        const cell = document.createElement('td'); cell.textContent = text; tr.append(cell);
+      }
+      rightsEl('list').append(tr);
+    }
+  }
+  async function rightsRequest(mode) {
+    if (!ready || denied || rightsPending) return;
+    const id = rightsEl('id').value.trim();
+    let path = 'rights-requests', body;
+    try {
+      if (mode !== 'list' && !id) throw Error('요구 ID를 입력하세요.');
+      if (mode === 'receive') {
+        const v = Object.fromEntries(new FormData(rightsEl('receive')));
+        body = { requestId: id, kind: v.kind, receivedAt: utcInput(v.receivedAt),
+          patient: { patientId: v.patientId, assigningAuthority: v.assigningAuthority, linkId: v.linkId },
+          recordIds: v.recordIds.split(',').map(s => s.trim()).filter(Boolean), statement: v.statement };
+      } else if (mode !== 'list') {
+        path += `/${encodeURIComponent(id)}`;
+        if (mode !== 'open') path += `/${mode}`;
+        if (mode === 'notify') {
+          body = Object.fromEntries(new FormData(rightsEl('notify')));
+          if (body.outcome === 'withdrawn') body = { outcome: 'withdrawn', evidenceId: body.evidenceId };
+          else { delete body.outcome; body.notifiedAt = utcInput(body.notifiedAt); }
+        }
+      }
+    } catch (error) { rightsEl('message').textContent = error.message || '입력을 확인하세요.'; return; }
+    const current = ++rightsSequence, context = KinWorkContext.capture('document');
+    const admits = () => current === rightsSequence && id === rightsEl('id').value.trim() && KinWorkContext.admits(context);
+    rightsPending = true; rightsControls(); rightsEl('message').textContent = '요구를 처리하고 있습니다.';
+    let decisionRefused = false;
+    try {
+      const response = await KinSessionTransport.page().request(`${location.origin}/api/emr-audit/${path}`,
+        { method: ['list', 'open'].includes(mode) ? 'GET' : 'POST', ...(body ? { json: body } : {}), context });
+      if (!admits()) return;
+      if (response.status === 403 && response.body?.code === 'AuditorNotDesignated') { refuse(); return; }
+      if (response.status === 403 && response.body?.code === 'AuditScopeNotGranted') {
+        clearRights(true); rightsEl('workspace').hidden = true; rightsEl('message').textContent = '이 계정에는 정정·삭제·처리정지 요구 처리 권한이 없습니다.'; return;
+      }
+      if (!response.ok || response.incomplete) {
+        decisionRefused = mode === 'decide' && !response.incomplete && [400, 409].includes(response.status) &&
+          !['RightsRequestWithdrawn', 'RightsRequestConflict'].includes(response.body?.code);
+        throw Error(response.body?.code || 'ResponseUnavailable');
+      }
+      if (mode === 'list') showRightsList(response.body.requests); else showRights(response.body);
+      rightsEl('message').textContent = mode === 'list' ? '저장된 요구 목록입니다.' : response.body.status === 'Withdrawn' ?
+        '철회 증빙으로 요구와 응답 의무를 닫았습니다.' : '저장된 요구 상태입니다. 실제 통지는 증빙을 입력하여 기록하세요.';
+    } catch (error) {
+      if (!admits()) return;
+      if (!decisionRefused) { rightsSnapshot = null; rightsEl('detail').hidden = true; }
+      rightsEl('message').textContent = decisionRefused ?
+        `결정이 거절되어 요구는 Received로 남고, 열린 응답 의무가 접속기록 만료를 계속 막습니다(CD-07-Q4). 철회가 아니면 닫지 않습니다 (${error.message}).` :
+        mode === 'receive' && ['RightsRecordUnsupported', 'RightsRecordAmbiguous', 'VersionListingIncomplete'].includes(error.message) ?
+        '이 기록 종류는 아직 이 화면에서 처리할 수 없습니다(CD-07-Q3 미정). 접수 사실은 별도로 기록하세요.' :
+        `요구 상태를 확인하지 못했습니다 (${error.message}). 입력은 유지했습니다. Open Request로 다시 확인하세요.`;
+    } finally { if (current === rightsSequence) { rightsPending = false; rightsControls(); } }
+  }
+  rightsEl('id').addEventListener('input', () => { rightsEl('notify').reset(); clearRights(); });
+  rightsEl('load').addEventListener('click', () => rightsRequest('list'));
+  for (const mode of ['open', 'receive', 'notify']) rightsEl(mode).addEventListener('submit', event => {
+    event.preventDefault(); if (mode === 'open') clearRights(); rightsRequest(mode);
+  });
+  rightsEl('decide').addEventListener('click', () => rightsRequest('decide'));
+  rightsEl('notify').elements.outcome.addEventListener('change', rightsControls);
+
   el('inspection-load').addEventListener('click', () => { clearInspection(); inspectionRequest('months'); });
   el('inspection-month').addEventListener('change', () => { clearInspection(); inspectionRequest('month'); });
   el('inspection-start').addEventListener('click', () => inspectionRequest('report'));
@@ -481,7 +615,7 @@
   el('logout').addEventListener('click', () => KinAuth.logout());
   KinAuth.onLifecycle(state => {
     if (['ending', 'unconfirmed', 'confirmed'].includes(state.state)) {
-      ready = false; clear(); clearInspection(); clearDisclosure(true); el('workspace').hidden = true;
+      ready = false; clear(); clearInspection(); clearDisclosure(true); clearRights(true); el('workspace').hidden = true;
       el('form').reset(); message('세션을 확인하고 다시 로그인하세요.');
     }
   });
@@ -493,6 +627,8 @@
     const tomorrow = new Date(today); tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
     el('from').value = today.toISOString().slice(0, 16); el('to').value = tomorrow.toISOString().slice(0, 16);
     disclosureEl('id').value = crypto.randomUUID();
+    rightsEl('id').value = crypto.randomUUID();
+    rightsEl('receive').elements.receivedAt.value = new Date().toISOString().slice(0, 16);
     for (const name of ['receivedAt', 'checkedAt']) disclosureEl('receive').elements[name].value = new Date().toISOString().slice(0, 16);
     ready = true; el('workspace').hidden = false; controls(); message('조건을 선택하고 Search로 조회하세요.');
   }).catch(() => message('세션을 확인할 수 없습니다. 다시 로그인하세요.'));

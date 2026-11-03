@@ -743,8 +743,8 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
             if button['b'] > height or button['y'] < 30:
                 # Provisional until Minhoon confirms (11-03 commander): at 1366x768 Reading Workspace the
                 # expanded More starts below the first screen. The wheel stays a real one in the report's
-                # scrollable column, and the arrival state above is what reach_problems judges: one scroll
-                # of that column must show Structured whole. If Minhoon answers that the row belongs on the
+                # scrollable column, and the arrival state above is what reach_problems judges: scrolling
+                # that column must show Structured whole. If Minhoon answers that the row belongs on the
                 # first screen, delete this wheel and the reach check so the entry hit test reads arrival.
                 report = w.locator('.report-p').bounding_box()
                 w.mouse.move(report['x'] + 12, min(height - 15, report['y'] + report['height'] - 15))
@@ -752,7 +752,7 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
                 w.evaluate('()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))')
             reach['revealed'] = w.evaluate(column_reach.READ, REACH_TARGET)
             self.assertEqual([], column_reach.reach_problems(reach['arrival'], reach['revealed']),
-                             'the Structured entry at %dx%d is not one report-column scroll away' % (width, height))
+                             'the Structured entry at %dx%d is not reached by scrolling the report column' % (width, height))
             initial = w.evaluate(ENTRY_GEOMETRY)
             # The bound, from rendered rectangles rather than from the stylesheet's text. The drawer
             # is opened once, before the first viewport, so on the second pass this is also the

@@ -1,5 +1,14 @@
 # EMR 단위 A — 분류와 계약
 
+CD-05의 계약은 “감사자 화면의 모든 응답은 보여주는 만큼만 기록하고, 기록하지 않는 응답은 환자 식별자를 담지 않는다”이다.
+V1의 네 inspection surface에서 `access-audit` 월/주기 참조는 알려진 `recordId`만 기록하며 patient/study/version은
+`not-applicable/non-record-target`이다. 상세/보고서 두 surface의 환자 없는 내려받기 행은 환자·study만 같은 방식으로
+비우고 record/version은 동일한 실제 event ID를 기록한다. 환자 연결이 있는 행은 관찰한 환자와 event ID를 보존하고,
+로컬 관찰 행은 정식 환자 연결을 만들지 않고 sourcePatientId/sourceInstitution과 알려진 event ID를 보존한다.
+목록·step에는 내려받기 대상 예외를 적용하지 않는다. CD-07 목록의 `disclosure`도 알려진 요구 ID 외 세 칸만 같은 방식으로
+비운다. 접수·상세·결정·통지 네 surface는 환자/기록 ID를 필수로 하고 study/version은 미해결 사실을 허용한다.
+이 예외들은 지정 surface·kind·칸에만 적용하며 다른 라우트와 V2 계약은 유지한다.
+
 CD-10의 의료법 제23조④(법률 제21776호) 기재 접속기록은 누가 기재했는지 재구성할 수 있어야 한다. CD-10 이전 로컬 반입은 원 소유자 계정은 보존했지만 당시 역할은 저장하지 않았으므로, 복구 시 역할을 꾸며내지 않고 V1 `POST dicom-import`의 성공 `write`에만 `rolesAtTime = { status: 'unresolved', reason: 'legacy-import-roles-not-stored' }`를 허용한다. 이 사유의 제품 생성부는 로컬 반입 복구가 사용하는 `dicom-import-gate.service.ts`의 기존 사실 누락 분기 하나이며, `userId`는 보존된 owner로 확인해야 한다. 다른 경로·행위 또는 일반 `not-observed` 역할에는 이 예외가 적용되지 않는다. 새 반입은 요청 당시 역할을 저장하고 V2 계약은 변경하지 않는다.
 
 순수 계약만 제공하며 API·DB·인증·화면에 연결하지 않는다. D589·D591의 설계 자문 ①–④와 D593의 Addendum 초안 종료 명확화를 적용하며 충돌하는 이전 지휘 설계는 대체한다. 순수 시험은 후속 저장소·키·실제 삭제·법령 준수 인증의 완료 증거가 아니다.

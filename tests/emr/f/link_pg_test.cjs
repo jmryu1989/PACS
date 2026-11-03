@@ -1,6 +1,7 @@
 /* REQ-EMR-07/15/19 -> RISK-F-01/02 -> TEST-F-LINK-AUDIT
  * REQ-EMR-16 -> RISK-F-03/04 -> TEST-F-LINK-COPY
  * REQ-EMR-17 -> RISK-F-06 -> TEST-F-LINK-HOLD
+ * REQ-EMR-17 -> TEST-F-LINK-RIGHTS. 위험 ID 미배정: 문서 트랙 대기.
  * Real Nest HTTP, B1 PG transactions, D/C2 writes and E HTTP/copy facts.
  * Signed OIDC transport and D's not-yet-landed source adapters are synthetic.
  * The shipped AppModule, AuthGuard and current MemberRights admission run unchanged.
@@ -101,7 +102,7 @@ if(process.argv.includes('--serve')){
     assert.equal(settings.length,3);assert.ok(settings.every(r=>r.proconfig.includes('jit=off')));
     // RED on base main is the real HTTP 404, before attempting F-only storage.
     assert.equal((await call('admin','POST','investigations',query)).status,403,'general admin needs a stored auditor designation');
-    const grant={kind:'granted',subject:{issuer,subject:'auditor'},scopes:['investigate','export','disclosure'],validFrom:time(-1000),validUntil:null};
+    const grant={kind:'granted',subject:{issuer,subject:'auditor'},scopes:['investigate','export','disclosure','inspection'],validFrom:time(-1000),validUntil:null};
     assert.equal((await call('admin','POST','roster/auditor',grant)).status,403);
     const unknownIdentity = await call('officer','POST','roster/typo',{...grant,subject:{issuer,subject:'audtior'}});
     assert.equal(unknownIdentity.status,400);assert.equal(unknownIdentity.body.code,'AuditIdentityUnknown');
@@ -268,6 +269,7 @@ if(process.argv.includes('--serve')){
       scope:[{recordId,versions:'all'}],delivery:{recipient:'Synthetic patient',method:'electronic',format:'signed-electronic'}},dueAt:time(86400000)});
     const c2=await reportProducer(port,witness,doctor,study,wrap);
     const signed=await c2.approve();
+    await rightsAndInspection(port,db,witness,ok,call,identities.auditor,patient,signed);
     const c2input=copy();c2input.request.scope=[{recordId:signed.recordId,versions:'all'}];
     const stale=await ok('auditor','POST','issuances',c2input);
     const added=await c2.approve('addendum',signed.versionId);
@@ -290,6 +292,8 @@ if(process.argv.includes('--serve')){
     const input=copy(), prepared=await ok('auditor','POST','issuances',input);
     assert.equal(prepared.manifest.records[0].versions.length,2);
     const issued=await ok('auditor','POST',`issuances/${encodeURIComponent(prepared.issuanceId)}/issue`);
+    const readCopy=await ok('auditor','GET',`issuances/${encodeURIComponent(prepared.issuanceId)}`);
+    assert.equal(readCopy.artifact,issued.artifact);assert.equal(readCopy.status.state,'Issued');
     const bytes=Buffer.from(issued.artifact,'base64');assert.equal(hash(bytes),issued.sha256);
     const pkg=JSON.parse(bytes);assert.equal(pkg.originals.length,2);
     assert.ok(JSON.parse(pkg.originals[0].original).plan.includes('Synthetic fixed original'));
@@ -371,6 +375,102 @@ if(process.argv.includes('--serve')){
     await app?.close();if(runtime)await runtime.stop(Date.now()+15000);await close(provider);await db.$disconnect();await witness.$disconnect();
   }
 });
+
+async function rightsAndInspection(port,db,witness,ok,call,auditor,patient,signed) {
+  const {withSnapshot}=load('emr-runtime/context'), {reloadLegalHolds}=load('emr-contract/lawful-defaults');
+  const {newAuditLinkId}=load('emr-contract/access-event');
+  const institution='synthetic-hospital', recordId=signed.recordId;
+  const oldEvent=(action='provide-prepared',patientless=false)=>({formatVersion:1,
+    surface:patientless?'GET admin/audit':'GET studies/:uid/report/versions',eventId:randomUUID(),
+    userId:known(auditor),rolesAtTime:known(['clinician']),actingInstitution:known(institution),managingInstitution:known(institution),
+    occurredAt:'2020-01-15T00:00:00.000Z',trustedProxyIp:known({address:'127.0.0.1',source:'trusted-proxy'}),cause:'user-view',
+    context:{basis:'out-of-context',studyId:null,relatedStudyId:null,reason:null},executor:'member',
+    targets:[patientless?{kind:'access-audit',patientLinkSnapshot:{status:'not-applicable',reason:'non-record-target'},
+      studyId:{status:'not-applicable',reason:'non-record-target'},recordId:known('synthetic-patientless-event'),versionId:{status:'not-applicable',reason:'non-record-target'}}:
+      {kind:'report-version',patientLinkSnapshot:known(patient),studyId:known('2.25.901'),recordId:known(recordId),versionId:known(signed.versionId)}],
+    action,result:action==='provide-prepared'?'prepared':'succeeded',requestId:randomUUID(),auditLinkId:newAuditLinkId(),relatedEventId:null});
+  const append=async event=>{
+    const work=port.begin();
+    try {await work.transactionWithRecords(async(tx,record)=>record(event,async()=>({kind:'synthetic-access',id:event.eventId,version:null})));}
+    finally {work.end();}
+    return (await witness.$queryRaw`SELECT entry_id::text AS id FROM emr_access.access_entry WHERE event_id=${event.eventId} AND stream='viewing'`)[0].id;
+  };
+  const expire=id=>witness.$queryRaw`SELECT emr_access.expire_entry(${id}::uuid) AS expired`;
+  assert.equal((await expire(await append(oldEvent())))[0].expired,true,'no pre-existing copy hold masks the duty check');
+  const entry=await append(oldEvent()), input={requestId:randomUUID(),kind:'correction',receivedAt:time(-1000),patient,recordIds:[recordId],statement:'합성 정정 요구'};
+  let received=await ok('auditor','POST','rights-requests',input);
+  assert.equal(received.status,'Received'); assert.equal(received.decision,null);
+  assert.equal((await ok('auditor','POST','rights-requests',input)).status,'Received');
+  assert.ok((await ok('auditor','GET','rights-requests')).requests.some(r=>r.requestId===input.requestId));
+  assert.equal((await ok('auditor','GET',`rights-requests/${input.requestId}`)).request.statement,input.statement);
+  await assert.rejects(expire(entry),error=>/LegalDutyActive/.test(error.message));
+  // Read privacy:36.2 through the real B snapshot/A adapter. Roll back this test hold
+  // so the later expiry assertion can only be blocked by the response duty itself.
+  const hold={holdId:randomUUID(),recordId,basis:{type:'statutory-duty',clauseId:'privacy:36.2',
+    clause:{law:'privacy',article:'36.2',version:'21445'},requestId:input.requestId,authorityId:institution,
+    authorityKind:'personal-information-controller',managingInstitutionId:institution,scope:[recordId],verified:true,
+    validity:{from:input.receivedAt,until:received.dueBy,condition:'duty-active'}},actorId:auditor.id,at:time(0),release:null};
+  const rollback=new Error('rollback synthetic hold'), work=port.begin();
+  try {await assert.rejects(work.transactionWithRecords(async tx=>{
+    await tx.$queryRaw`SELECT emr_access.place_hold(${hold.holdId},${recordId},${JSON.stringify(hold)})::text`;
+    const scope={},snap=await work.snapshot(tx,scope,{recordIds:[recordId],correctionRequestIds:[input.requestId]});
+    assert.equal(snap.correctionRequests.get(input.requestId).resolution,null);
+    assert.equal(withSnapshot(scope,snap,()=>reloadLegalHolds(recordId))[0].basis.clauseId,'privacy:36.2');
+    throw rollback;
+  }),error=>error===rollback);} finally {work.end();}
+  assert.equal((await ok('auditor','POST',`rights-requests/${input.requestId}/decide`)).decision.records[0].outcome,'correct-by-new-signed-version');
+  assert.equal((await ok('auditor','POST',`rights-requests/${input.requestId}/decide`)).status,'Decided');
+  await assert.rejects(expire(entry),error=>/LegalDutyActive/.test(error.message));
+  const notice={notifiedAt:time(0),recipient:'합성 수령자',method:'electronic',evidenceId:randomUUID(),content:'실제 통지 증빙'};
+  assert.equal((await ok('auditor','POST',`rights-requests/${input.requestId}/notify`,notice)).status,'Notified');
+  assert.equal((await ok('auditor','POST',`rights-requests/${input.requestId}/notify`,notice)).status,'Notified');
+  assert.equal((await expire(entry))[0].expired,true,'notification resolves the duty; no permanent hold is invented');
+  const duties=await witness.$queryRaw`SELECT phase,body FROM emr_access.duty_requests('correction-request',${input.requestId})`;
+  assert.deepEqual(duties.map(d=>d.phase),['resolved','received']);
+  assert.equal(JSON.parse(duties[0].body).resolution.eventId,notice.evidenceId);
+  assert.equal((await witness.$queryRaw`SELECT count(*)::int AS n FROM emr_audit.request_event WHERE request_id=${input.requestId}`)[0].n,3);
+  assert.equal((await call('auditor','POST','rights-requests',{...input,requestId:randomUUID(),receivedAt:'2099-01-01T00:00:00.000Z'})).status,400);
+  for (const decided of [false,true]) {
+    const withdrawnEntry=await append(oldEvent()), request={...input,requestId:randomUUID()}, withdrawal={outcome:'withdrawn',evidenceId:randomUUID()};
+    await ok('auditor','POST','rights-requests',request);
+    if(decided)await ok('auditor','POST',`rights-requests/${request.requestId}/decide`);
+    await assert.rejects(expire(withdrawnEntry),error=>/LegalDutyActive/.test(error.message));
+    const before=await witness.$queryRaw`SELECT phase,body FROM emr_access.duty_requests('correction-request',${request.requestId})`;
+    const closed=await ok('auditor','POST',`rights-requests/${request.requestId}/notify`,withdrawal);
+    assert.equal(closed.status,'Withdrawn');assert.equal(closed.notification,null);assert.equal(!!closed.decision,decided);
+    assert.equal(closed.withdrawal.evidenceId,withdrawal.evidenceId);
+    assert.deepEqual(await ok('auditor','POST',`rights-requests/${request.requestId}/notify`,withdrawal),closed);
+    assert.deepEqual(await ok('auditor','POST','rights-requests',request),closed);
+    assert.deepEqual(await ok('auditor','GET',`rights-requests/${request.requestId}`),closed);
+    assert.equal((await ok('auditor','GET','rights-requests')).requests.find(r=>r.requestId===request.requestId).status,'Withdrawn');
+    for(const [step,body] of [['decide',undefined],['notify',notice]]) {
+      const refused=await call('auditor','POST',`rights-requests/${request.requestId}/${step}`,body);
+      assert.equal(refused.status,409);assert.equal(refused.body.code,'RightsRequestWithdrawn');
+    }
+    assert.equal((await call('auditor','POST',`rights-requests/${request.requestId}/notify`,{...withdrawal,evidenceId:randomUUID()})).status,409);
+    const after=await witness.$queryRaw`SELECT phase,body FROM emr_access.duty_requests('correction-request',${request.requestId})`;
+    assert.deepEqual(after.map(d=>d.phase),['resolved','received']);assert.deepEqual(after[1],before[0]);
+    assert.deepEqual(JSON.parse(after[0].body).resolution,{at:closed.withdrawal.recordedAt,eventId:withdrawal.evidenceId,outcome:'withdrawn'});
+    assert.equal((await witness.$queryRaw`SELECT count(*)::int AS n FROM emr_audit.request_event WHERE request_id=${request.requestId}`)[0].n,decided?3:2);
+    assert.equal((await expire(withdrawnEntry))[0].expired,true,'withdrawal clears LegalDutyActive from both Received and Decided');
+    console.log(`CD07 withdrawal ${decided?'Decided':'Received'} HTTP-PG: replay/list/detail, later decide/notify refusal, append-only duty, LegalDutyActive released PASS`);
+  }
+  // Real PG history contains both patient-bearing and patientless downloads.
+  const download=oldEvent('download'),patientless=oldEvent('download',true);
+  await append(download);await append(patientless);
+  await witness.institution.upsert({where:{id:institution},create:{id:institution,name:'Synthetic hospital',createdAt:new Date('2026-09-01T00:00:00Z')},update:{}});
+  assert.ok((await ok('auditor','GET','inspections')).months.length>0);
+  const preview=await ok('auditor','GET','inspections/2020-01'); assert.equal(preview.cycle,null);
+  const report=await ok('auditor','POST','inspections/2020-01/report');
+  assert.ok(report.downloads.some(d=>d.eventId===download.eventId));
+  assert.ok(report.downloads.some(d=>d.eventId===patientless.eventId));
+  assert.deepEqual(await ok('auditor','POST','inspections/2020-01/report'),report);
+  assert.deepEqual(await ok('auditor','GET','inspections/2020-01'),report);
+  const step=await ok('auditor','POST','inspections/2020-01/steps',{kind:'download-check',eventId:download.eventId,reason:'합성 사본 요청',outcome:'legitimate',followUp:'없음'});
+  assert.deepEqual(Object.keys(step).sort(),['cycle','status']);
+  assert.equal((await ok('auditor','GET','inspections/2020-01')).cycle.events.length,step.cycle.events.length);
+  console.log('CD05/CD07 HTTP-PG: inspection list/detail/report/retry/step, patientless download, rights intake/list/detail/decide/notify/retries, LegalDutyActive and privacy:36.2 PASS');
+}
 
 async function imageDelivery(port,db,actor,study,servers){
   const {buildImageManifest}=load('emr-image/manifest'),E=load('emr-image/contract');
