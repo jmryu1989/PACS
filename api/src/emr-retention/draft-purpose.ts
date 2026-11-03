@@ -24,10 +24,12 @@ import { syncDirectory } from '../emr-runtime/journal-file';
  *
  * A restored older database brings back rows the ledger already destroyed. The startup gate (openGate) runs before the
  * server accepts a request: it re-applies every completed unit the restored copy still holds, and stays closed when it
- * cannot tell what happened (no ledger beside a copy that had one, another ledger, a shorter ledger, an intent with no end).
+ * cannot tell what happened (no ledger beside a copy that had one, drafts with no ledger and no prepared first start,
+ * another ledger, a shorter ledger, an intent with no end). Every path answers from one commit judgement (judgeCommit).
  */
 
 export const PURPOSE_LEDGER_FILE = 'purpose-ledger.jsonl';
+export const PURPOSE_ADOPTION_FILE = 'purpose-adoption.json';
 const LINE_MAX = 4096;
 // One writer at a time across the API and the sweep process: every ledger append and every destruction or re-application
 // runs under this transaction lock, so the ledger order is the commit order.
@@ -57,15 +59,46 @@ function parseRecord(value: any): Readonly<DestructionRecord> {
   return Object.freeze(value);
 }
 
+export interface Adoption { state: 'prepared' | 'consumed'; ledgerId: string | null }
+
 /** The append-only destruction ledger: one JSON line per record, fsync before a record counts. Only `create` writes its
  * header (the ledger ID the database's anchor names); an append to a missing file is refused, because a missing ledger
  * is the gate's question (lost, or never initialized) and a new header would answer it wrongly. A partial last line is
- * never repaired here. */
+ * never repaired here. Beside it, the adoption record of a server that had drafts before CD-09-P (one file). */
 export class PurposeLedgerFile {
   readonly file: string;
+  readonly adoptionFile: string;
   constructor(readonly directory: string) {
     if (!directory || !path.isAbsolute(directory)) throw new PurposeGateClosed('PurposeLedgerDirectoryRequired');
     this.file = path.join(directory, PURPOSE_LEDGER_FILE);
+    this.adoptionFile = path.join(directory, PURPOSE_ADOPTION_FILE);
+  }
+  readAdoption(): Adoption | null {
+    if (!fs.existsSync(this.adoptionFile)) return null;
+    let value: any;
+    try { value = JSON.parse(fs.readFileSync(this.adoptionFile, 'utf8')); } catch { refuse('PurposeAdoptionInvalid'); }
+    const prepared = exactKeys(value, ['kind', 'formatVersion', 'state', 'preparedAt']) && value.state === 'prepared';
+    const consumed = exactKeys(value, ['kind', 'formatVersion', 'state', 'preparedAt', 'ledgerId', 'consumedAt']) &&
+      value.state === 'consumed' && typeof value.ledgerId === 'string';
+    if (value?.kind !== 'adoption' || value.formatVersion !== 1 || !(prepared || consumed)) refuse('PurposeAdoptionInvalid');
+    return { state: value.state, ledgerId: consumed ? value.ledgerId : null };
+  }
+  /** The operator's preparation, before the P migration of a server that already has drafts. */
+  prepareAdoption(): void {
+    this.replaceAdoption({ kind: 'adoption', formatVersion: 1, state: 'prepared', preparedAt: new Date().toISOString() });
+  }
+  /** The first gate consumes the preparation once, naming the ledger it is about to create. */
+  consumeAdoption(ledgerId: string): void {
+    const raw = JSON.parse(fs.readFileSync(this.adoptionFile, 'utf8'));
+    this.replaceAdoption({ ...raw, state: 'consumed', ledgerId, consumedAt: new Date().toISOString() });
+  }
+  private replaceAdoption(value: object): void {
+    fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
+    const temporary = this.adoptionFile + '.tmp';
+    const fd = fs.openSync(temporary, 'w', 0o600);
+    try { fs.writeSync(fd, JSON.stringify(value) + '\n'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    fs.renameSync(temporary, this.adoptionFile);
+    syncDirectory(this.directory);
   }
   read(): LedgerView | null {
     if (!fs.existsSync(this.file)) return null;
@@ -599,7 +632,12 @@ export class DraftPurposeDisposal {
 
   /**
    * The database and the ledger belong together. Runs under the ledger lock; reads the anchor without locking its row.
-   * No ledger is accepted only beside a copy that never had one (not initialized).
+   *
+   * No ledger (C5): accepted only beside a database that never handed out a work (I1), or - for the gate only - beside
+   * a database that did, never initialized, whose operator prepared its adoption before the P migration (I2; the gate
+   * consumes it). Everything else the product can tell apart stays closed: works with nothing prepared (I3/I9), an
+   * adoption already consumed (I4), an initialized or advanced database (I5). A database and directory copied together
+   * before the first start cannot be told from a real first start; that copy is excluded by the operating procedure.
    *
    * A ledger: the same ID (I6), the anchor's completion at the anchor's position (R2), and at least as long as the
    * database saw - one record short only when the anchor proves the started destruction committed (R1: its completed
@@ -610,12 +648,14 @@ export class DraftPurposeDisposal {
   private async matchedLedger(tx: Tx, mode: 'gate' | 'destroy' | 'sweep'):
       Promise<{ anchor: Anchor; view: LedgerView | null; adopt: boolean }> {
     const anchor = await anchorOf(tx, false);
-    let view: LedgerView | null;
-    try { view = this.ledger.read(); }
+    let view: LedgerView | null, adoption: Adoption | null;
+    try { view = this.ledger.read(); adoption = this.ledger.readAdoption(); }
     catch (error) { throw new PurposeGateClosed(error instanceof ContractError ? error.code : 'PurposeLedgerUnreadable'); }
     if (!view) {
-      if (anchor.initialized || anchor.seq > 0) throw new PurposeGateClosed('PurposeLedgerMissing');
-      return { anchor, view, adopt: mode === 'gate' };
+      if (anchor.initialized || anchor.seq > 0 || adoption?.state === 'consumed') throw new PurposeGateClosed('PurposeLedgerMissing');
+      if (mode === 'gate' && adoption?.state === 'prepared') return { anchor, view, adopt: true };
+      if (!await anyWork(tx)) return { anchor, view, adopt: false };
+      throw new PurposeGateClosed('PurposeLedgerInitializationRequired');
     }
     if (view.ledgerId !== anchor.ledgerId) throw new PurposeGateClosed('PurposeLedgerMismatch');
     if (anchor.seq > 0 && view.entries.length >= anchor.seq) {
@@ -658,7 +698,18 @@ export class DraftPurposeDisposal {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LEDGER_LOCK}::bigint)`;
     const locked = await anchorOf(tx, true);
     if (locked.initialized) return;
-    this.ledger.create(locked.ledgerId);
+    // The same reading as the gate's: the header is created here only for a database that never handed out a work.
+    // A ledger already there (this header written by an earlier transaction that did not commit) must be this one.
+    let view: LedgerView | null, adoption: Adoption | null;
+    try { view = this.ledger.read(); adoption = this.ledger.readAdoption(); }
+    catch (error) { throw new PurposeGateClosed(error instanceof ContractError ? error.code : 'PurposeLedgerUnreadable'); }
+    if (view && view.ledgerId !== locked.ledgerId) throw new PurposeGateClosed('PurposeLedgerMismatch');
+    if (!view) {
+      if (locked.seq > 0 || adoption) throw new PurposeGateClosed(adoption?.state === 'prepared'
+        ? 'PurposeLedgerInitializationRequired' : 'PurposeLedgerMissing');
+      if (await anyWork(tx)) throw new PurposeGateClosed('PurposeLedgerInitializationRequired');
+      this.ledger.create(locked.ledgerId);
+    }
     await tx.$executeRaw`UPDATE "PurposeLedgerAnchor" SET initialized = true WHERE id = 1`;
   }
 
@@ -675,9 +726,10 @@ export class DraftPurposeDisposal {
       result = await this.serial(() => this.db.$transaction(async (tx: Tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LEDGER_LOCK}::bigint)`;
         const { anchor, view, adopt } = await this.matchedLedger(tx, 'gate');
-        if (adopt && await anyWork(tx)) {
-          // Never initialized: a new database, or one whose drafts this migration numbered and no server has started on.
-          // The latter gets its ledger now, before any of those works can end.
+        if (adopt) {
+          // I2, in this order: the preparation is consumed (naming this ledger), the header is written, the database
+          // says so. A stop between the first two leaves a consumed adoption and no ledger: closed (I4), never re-opened.
+          this.ledger.consumeAdoption(anchor.ledgerId);
           this.ledger.create(anchor.ledgerId);
           await tx.$executeRaw`UPDATE "PurposeLedgerAnchor" SET initialized = true WHERE id = 1`;
           adopted = true;
@@ -744,3 +796,24 @@ export function purposeLedgerDirectory(env: NodeJS.ProcessEnv = process.env): st
 /** A new opaque unit for a new work. */
 export function newWorkUnit(): string { return 'disposal:' + randomUUID(); }
 
+/**
+ * C5: the operator's one preparation of a server that already has drafts, run before the P migration (its own command,
+ * draft-purpose-prepare). It records only that this directory was prepared before the migration: the first gate
+ * consumes it once (I2). It refuses, writing nothing, when the directory is not the deployment's own (P1), a ledger
+ * (P2) or an adoption record (P3) is already there, the database already has the P migration (P4), or the database
+ * cannot be read (P5). No flag or declaration can make a prepared record later.
+ */
+export async function prepareLedgerAdoption(db: any, env: NodeJS.ProcessEnv = process.env): Promise<Adoption> {
+  const ledger = new PurposeLedgerFile(purposeLedgerDirectory(env));
+  if (fs.existsSync(ledger.file)) throw new PurposeGateClosed('PurposeAdoptionLedgerExists');
+  if (fs.existsSync(ledger.adoptionFile)) throw new PurposeGateClosed('PurposeAdoptionExists');
+  let tables: any;
+  try {
+    [tables] = await db.$queryRaw`SELECT to_regclass('public."PurposeLedgerAnchor"')::text AS anchor,
+      to_regclass('public."ReportDraftPurposeEnd"')::text AS ended`;
+  } catch { throw new PurposeGateClosed('PurposeAdoptionDatabaseUnavailable'); }
+  if (!tables) throw new PurposeGateClosed('PurposeAdoptionDatabaseUnavailable');
+  if (tables.anchor || tables.ended) throw new PurposeGateClosed('PurposeAdoptionAfterMigration');
+  ledger.prepareAdoption();
+  return ledger.readAdoption()!;
+}
