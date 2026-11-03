@@ -437,12 +437,13 @@ export class DraftPurposeDisposal {
         await tx.$executeRaw`UPDATE "PurposeLedgerAnchor" SET seq = ${startedSeq + 1}, initialized = true,
           "lastCompletedUnit" = ${unit}, "lastCompletedAt" = (${completedAt}::timestamptz AT TIME ZONE 'UTC') WHERE id = 1`;
         finish.resolve('commit');
-        try { await work; }
-        catch (error) {
-          // An error answering COMMIT is not proof that nothing committed: the row decides.
-          const left = await this.db.$queryRaw<unknown[]>`SELECT 1 FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = ${unit}`;
-          if (left.length) throw error;
-        }
+        let commitError: unknown = null;
+        try { await work; } catch (error) { commitError = error; }
+        // The row decides, both ways: a failed COMMIT can reach the client as a resolved transaction (a deferred
+        // constraint's error at COMMIT was answered as success on the served stack), and an error answering COMMIT is
+        // not proof that nothing committed.
+        const left = await this.db.$queryRaw<unknown[]>`SELECT 1 FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = ${unit}`;
+        if (left.length) throw commitError ?? Object.assign(new Error('The deletion did not commit'), { code: 'PurposeDeleteNotCommitted' });
         return { completedAt, method: 'irreversible-permanent-deletion' };
       });
     } catch (error) {
@@ -529,7 +530,8 @@ export class DraftPurposeDisposal {
    * the one the anchor proves committed (matchedLedger).
    */
   async openGate(): Promise<{ reapplied: number; units: number; resolved: number }> {
-    return this.serial(() => this.db.$transaction(async (tx: Tx) => {
+    const done: string[] = [];
+    const result = await this.serial(() => this.db.$transaction(async (tx: Tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LEDGER_LOCK}::bigint)`;
       const { anchor, view } = await this.matchedLedger(tx);
       if (!view) {
@@ -548,7 +550,7 @@ export class DraftPurposeDisposal {
       const units = unitPhases(view);
       let reapplied = 0, resolved = 0;
       for (const [unit, phases] of units) {
-        if (completed(phases)) { if (await reapply(tx, unit)) reapplied++; continue; }
+        if (completed(phases)) { done.push(unit); if (await reapply(tx, unit)) reapplied++; continue; }
         if (!dangling(phases)) continue;
         // An attempt with no end. Only an ended row still present here proves it did not commit; anything else (a live
         // work of an older copy, or nothing) cannot be settled from this copy.
@@ -561,6 +563,14 @@ export class DraftPurposeDisposal {
       await tx.$executeRaw`UPDATE "ReportDraftPurposeEnd" SET "deliverySettled" = true WHERE NOT "deliverySettled"`;
       return { reapplied, units: units.size, resolved };
     }, { maxWait: 10000, timeout: 60000 }));
+    // The re-application is checked in the committed database, not taken from the transaction's answer (a failed
+    // COMMIT can come back as success): nothing of a completed unit may be left before the server opens.
+    if (done.length) {
+      const [left] = await this.db.$queryRaw<any[]>`SELECT (SELECT count(*) FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = ANY(${done}::text[]))
+        + (SELECT count(*) FROM "ReportDraft" WHERE "workUnit" = ANY(${done}::text[])) AS "left"`;
+      if (Number(left?.left ?? 1)) throw new PurposeGateClosed('PurposeReapplyNotCommitted');
+    }
+    return result;
   }
 }
 

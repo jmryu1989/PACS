@@ -160,10 +160,8 @@ class HeldTransaction:
         raise AssertionError("the held transaction did not start: " + self.tag)
 
     def end(self, verb="COMMIT"):
-        if self.process.poll() is None:
-            self.send(verb + ";")
-            self.process.stdin.close()
-        out, err = self.process.communicate(timeout=60)
+        # communicate() flushes and closes stdin itself: the closing statement goes as its input.
+        out, err = self.process.communicate(input=verb + ";\n" if self.process.poll() is None else None, timeout=60)
         return self.process.returncode, out, err
 
 
@@ -627,11 +625,6 @@ class DraftPurposeServed(unittest.TestCase):
                 pending = self.ended(unit)
                 self.assertIsNotNone(pending, f"{method} {path}: destroyed while a response that read the draft was open")
                 self.assertEqual((pending["deliverySettled"], self.phases(unit)), (False, []))
-                # F5: the sweep run cannot see the server's deliveries: it reports this work pending and does not succeed.
-                code, report = self.sweep()
-                self.assertEqual(code, 1, report)
-                self.assertFalse(report["complete"])
-                self.assertIn({"unit": unit, "outcome": "delivery-pending"}, report["results"])
             finally:
                 outcome = self.release_held(client, ending)
             if ending == "read":
@@ -640,6 +633,29 @@ class DraftPurposeServed(unittest.TestCase):
                 self.assertTrue(200 in outcome["statuses"] and set(outcome["statuses"]) <= {200, 503}, outcome["statuses"])
             self.wait_destroyed(unit)
             event("p10", route=method + " " + path.rsplit("/", 1)[-1], ending=ending)
+
+    def test_p17_the_sweep_run_reports_an_unsettled_delivery_and_the_server_retries_a_failed_settle(self):
+        doctor = "doctor"
+        secret = "SYN-P17 " + uuid.uuid4().hex + " " + "x" * 90000
+        marker = secret[:40]
+        # F5: while the server is still sending a response that read the draft, the sweep run cannot settle that work:
+        # it reports it delivery-pending and does not count the run as complete.
+        self.assertEqual(self.save(doctor, secret).status, 200)
+        unit = self.row(doctor)["workUnit"]
+        client = self.hold_open(doctor, "GET", self.path("/draft"), 40, marker)
+        try:
+            time.sleep(3)
+            self.assertEqual(self.discard(doctor).status, 200)
+            time.sleep(2)
+            code, report = self.sweep()
+            self.assertEqual(code, 1, report)
+            self.assertFalse(report["complete"])
+            self.assertIn({"unit": unit, "outcome": "delivery-pending"}, report["results"])
+            self.assertEqual(self.ended(unit)["findings"], secret)
+        finally:
+            self.release_held(client, "cut")
+        self.wait_destroyed(unit)
+        event("p17", sweep_reported_pending=True)
         # F5: the settle step fails once (its database connection is cut while it waits on a row lock); the server
         # retries it and the work is destroyed without a restart or a sweep.
         self.assertEqual(self.save(doctor, secret).status, 200)
@@ -668,7 +684,7 @@ class DraftPurposeServed(unittest.TestCase):
                 lock.end("ROLLBACK")
         self.wait_destroyed(unit, timeout=90)
         self.assertEqual(self.phases(unit), ["started", "completed"])
-        event("p10", settle_failure_retried=True)
+        event("p17", settle_failure_retried=True)
 
     # ── F2: a hold placed while the destruction runs ──
 
@@ -743,7 +759,9 @@ class DraftPurposeServed(unittest.TestCase):
         before = self.row(doctor)
         self.failing_commit("ReportDraftPurposeEnd", "INSERT")
         failed = self.discard(doctor)
-        self.assertNotEqual(failed.status, 200, failed.text)
+        # Not a success: the end did not commit (the server checks its committed row) and says so in Korean.
+        self.assertEqual(failed.status, 503, failed.text)
+        self.assertRegex(json.dumps(failed.body, ensure_ascii=False), "[가-힣]")
         after = self.row(doctor)
         self.assertEqual((after["present"], after["findings"], after["workUnit"], after["revision"]),
                          (True, secret, before["workUnit"], before["revision"]))
@@ -912,9 +930,15 @@ class DraftPurposeServed(unittest.TestCase):
         # What a stop between the commit and the completed record leaves: the ledger ends with that unit's started.
         # Nothing else writes the ledger in between (the server reads it only to destroy, and the next start's gate).
         compose_exec("-T", "api", "sh", "-c", f"cat > {LEDGER}", stdin="".join(lines[:-1]).encode())
-        self.restart_api()
-        self.reload_proxy()
-        self.wait_api()
+        try:
+            self.restart_api()
+            self.reload_proxy()
+            self.wait_api()
+        except AssertionError:
+            # Leave the stack open for the cases after this one; the failure stands.
+            compose_exec("-T", "api", "sh", "-c", f"cat > {LEDGER}", stdin=whole)
+            self.restart_api(); self.reload_proxy(); self.wait_api()
+            raise
         header, entries = self.ledger()
         rewritten = entries[-1]
         self.assertEqual((rewritten["seq"], rewritten["record"]), (last["seq"], last["record"]),

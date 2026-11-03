@@ -5,7 +5,7 @@
  */
 import { canReadPreliminary } from '../preliminary-reader';
 import type { StudyAccessService } from '../study-access.service';
-import { BadRequestException, ConflictException, ForbiddenException, NotFoundException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import type { PrismaService } from '../prisma.service';
@@ -290,9 +290,19 @@ export class PacsReportDraft {
     return { unit: row.workUnit, author: row.author };
   }
 
-  /** After the ending transaction committed: destroy now (the configured server), else leave it to the sweep. */
-  destroyEnded(ended: { unit: string; author: string } | null) {
-    if (ended) draftPurpose()?.scheduleDestruction(ended.unit, ended.author);
+  /**
+   * After the ending transaction returned: the end is real only if its row is in the committed database (a failed
+   * COMMIT has come back as a resolved transaction on the served stack), and only then is the answer a success and the
+   * work destroyed now (the configured server; otherwise the sweep). An end that did not commit answers 503 - the draft
+   * is as it was, and the client re-reads it.
+   */
+  async settleEnd(ended: { unit: string; author: string } | null) {
+    if (!ended) return;
+    const rows = await this.prisma.$queryRaw<unknown[]>`SELECT 1 FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = ${ended.unit}`;
+    if (!rows.length)
+      throw new ServiceUnavailableException({ code: 'REPORT_DRAFT_END_NOT_SAVED',
+        message: '초안 정리가 서버에 기록되지 않았습니다 — 초안은 그대로입니다. 다시 시도하세요' });
+    draftPurpose()?.scheduleDestruction(ended.unit, ended.author);
   }
 
   /**
@@ -618,7 +628,7 @@ export class PacsReportDraft {
       // 요청이 `structure`를 실어 보냈을 때만 이 칸이 있다(P9). 화면은 이 `sid` 하나로 유지 목록을 넓힌다.
       ...(structure.applied ? { applied: structure.applied } : {}) };
     }, undefined, { facts, surface: 'PUT studies/:uid/report', action: empty ? 'clear' : 'draft-save' }));
-    this.destroyEnded(ended);
+    await this.settleEnd(ended);
     return answer;
   }
 
@@ -648,7 +658,7 @@ export class PacsReportDraft {
         if (rep && !answer.state.prelimHidden) await record!(state, null, 'provide-prepared', { uid, version: rep.version });
         return answer;
       }, undefined, { facts, surface: 'DELETE studies/:uid/draft', action: 'discard', ownTargets: true });
-    this.destroyEnded(ended);
+    await this.settleEnd(ended);
     return answer;
   }
 

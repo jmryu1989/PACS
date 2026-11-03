@@ -268,6 +268,7 @@ function database(state) {
   function handle(text, values, writes, mode) {
     if (/pg_advisory_xact_lock/.test(text)) { state.log.push(/hashtextextended/.test(text) ? 'hold-lock' : 'ledger-lock'); return mode === 'q' ? [] : 0; }
     if (/AS any/.test(text)) return [{ any: state.works }];
+    if (/AS "left"/.test(text)) return [{ left: [...state.ended.keys()].filter(unit => values[0].includes(unit)).length }];
     if (/FROM "PurposeLedgerAnchor"/.test(text) && /^SELECT initialized/.test(text)) return [{ initialized: state.anchor.initialized }];
     if (/FROM "PurposeLedgerAnchor"/.test(text)) return [view(state)];
     if (/SELECT \* FROM "ReportDraftPurposeEnd"/.test(text)) return state.ended.has(values[0]) ? [structuredClone(state.ended.get(values[0]))] : [];
@@ -301,6 +302,8 @@ function database(state) {
       const writes = [];
       const result = await fn(client(writes));
       if (writes.length && state.commitFails > 0) { state.commitFails--; throw new Error('SYN COMMIT FAILURE; transaction rolled back'); }
+      // What the served stack showed: COMMIT failed in PostgreSQL and the client still saw a resolved transaction.
+      if (writes.length && state.silentCommitFails > 0) { state.silentCommitFails--; return result; }
       writes.forEach(w => w(state));
       return result;
     },
@@ -316,7 +319,7 @@ function database(state) {
 }
 function stateWith(rows, anchor = {}) {
   return { anchor: { ledgerId: randomUUID(), seq: 0, initialized: true, lastCompletedUnit: null, lastCompletedAt: null, ...anchor },
-    ended: new Map(rows.map(r => [r.disposalUnitId, r])), works: true, log: [], commitFails: 0, settleFails: 0 };
+    ended: new Map(rows.map(r => [r.disposalUnitId, r])), works: true, log: [], commitFails: 0, silentCommitFails: 0, settleFails: 0 };
 }
 const NOW = () => new Date('2026-11-01T02:00:00.000Z');
 /** A ledger file holding only its header for this database (the file format is the contract; written here directly). */
@@ -337,12 +340,17 @@ test('P14 F3: completed is written only after the deletion committed; a failed c
   assert.equal(state.anchor.seq, 0);
   // The holds were read only under the record's hold lock.
   assert.ok(state.log.indexOf('hold-lock') >= 0 && state.log.indexOf('hold-lock') < state.log.indexOf('holds'), state.log.join());
+  // A COMMIT that fails while the transaction still resolves for the client: the row decides, so it is failed too.
+  state.silentCommitFails = 1;
+  await assert.rejects(service.destroy(row.disposalUnitId), e => e.code === 'PurposeDeleteNotCommitted');
+  assert.deepEqual(ledger.read().entries.map(e => e.record.phase), ['started', 'failed', 'started', 'failed']);
+  assert.ok(state.ended.has(row.disposalUnitId));
   // The next attempt commits: completed follows its own started, and the anchor names the completion.
   const done = await service.destroy(row.disposalUnitId);
   assert.equal(done.outcome, 'destroyed');
   const phases = ledger.read().entries.map(e => e.record.phase);
-  assert.deepEqual(phases, ['started', 'failed', 'started', 'completed']);
-  assert.equal(state.anchor.seq, 4);
+  assert.deepEqual(phases, ['started', 'failed', 'started', 'failed', 'started', 'completed']);
+  assert.equal(state.anchor.seq, 6);
   assert.equal(state.anchor.lastCompletedUnit, row.disposalUnitId);
   assert.ok(!state.ended.has(row.disposalUnitId));
 });

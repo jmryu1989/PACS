@@ -383,7 +383,7 @@ export class PacsReportCommit {
       }, undefined, { facts, surface: 'POST studies/:uid/report/commit',
         action: action === 'approve' ? 'approve-sign' : action === 'addendum' ? 'addendum'
           : action === 'reset' ? 'cancel' : 'write', target: 'report-version' });
-      this.reportDraft.destroyEnded(ended);
+      await this.reportDraft.settleEnd(ended);
       return committed;
     } catch (e: any) {
       // CHECK 백스톱도 서버 고장이 아니라 명명된 409다. 우리 제약 이름일 때만 옮긴다.
