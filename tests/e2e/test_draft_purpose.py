@@ -1102,6 +1102,16 @@ class DraftPurposeCommitJudgement(DraftPurposeServed):
         self.addCleanup(session.close)
         return session
 
+    def restore(self, name):
+        # DROP DATABASE ... WITH (FORCE) ends every session of the old database, the observer's too.
+        super().restore(name)
+        self.observer = self.session("O")
+
+    def last_json(self, code, out, err):
+        lines = out.strip().splitlines()
+        self.assertTrue(lines, f"the command printed no JSON line (exit {code}): {err[-2000:]}")
+        return json.loads(lines[-1])
+
     def key_holder(self):
         key = random.randint(1 << 20, 1 << 30)
         holder = self.session("K")
@@ -1182,8 +1192,8 @@ class DraftPurposeCommitJudgement(DraftPurposeServed):
 
     def cli(self, process, timeout=600):
         out, err = process.communicate(timeout=timeout)
-        lines = out.decode(errors="replace").strip().splitlines()
-        return process.returncode, json.loads(lines[-1]) if lines else None, err.decode(errors="replace")[-3000:]
+        out, err = out.decode(errors="replace"), err.decode(errors="replace")
+        return process.returncode, self.last_json(process.returncode, out, err), err[-3000:]
 
     def held_end(self, user, secret):
         """An ended work whose payload is still stored (a hold keeps it): the copy a backup takes between end and destruction."""
@@ -1298,9 +1308,9 @@ class DraftPurposeCommitJudgement(DraftPurposeServed):
         lock = self.queue_behind(f'SELECT 1 FROM "StudyState" WHERE uid = {sql_text(self.uid)} FOR UPDATE', p_c)
         holder.query("COMMIT")
         lock.answered(30)
-        ended = self.ended(unit)
-        self.assertEqual((ended or {}).get("findings"), secret, "the end committed")
-        self.assertEqual(self.row(doctor)["present"], False)
+        # The end committed (durable): the author's row is the emptied boundary and the unit is no longer its work.
+        row = self.row(doctor)
+        self.assertEqual((row["present"], row["workUnit"]), (False, None), "the end committed")
         p_r, _ = self.confirmation_waiting(holder, lock)
         request.join(60)
         self.assertEqual(len(answers), 1)
@@ -1311,6 +1321,7 @@ class DraftPurposeCommitJudgement(DraftPurposeServed):
         self.lock_timeout_logged(p_r)
         time.sleep(2)
         self.assertEqual(self.phases(unit), [], "nothing destroyed while the end is unconfirmed")
+        self.assertEqual(self.ended(unit)["findings"], secret)
         lock.query("COMMIT")
         self.wait_destroyed(unit, timeout=60)
         self.assertEqual(self.phases(unit), ["started", "completed"])
@@ -1501,6 +1512,14 @@ class DraftPurposeCommitJudgement(DraftPurposeServed):
 
     def test_c7_non_empty_citations_are_held_whole_then_destroyed_with_the_work_and_kept_everywhere_else(self):
         doctor, colleague, signer = "doctor", "doctor2", "jmryu"
+        # The finding and viewer rows reference the study with RESTRICT: this case removes its own, child first.
+        uid = sql_text(self.uid)
+        self.addCleanup(lambda: psql(
+            f'BEGIN; DELETE FROM "FindingRevision" WHERE "findingId" IN (SELECT id FROM "Finding" WHERE "studyUid"={uid}); '
+            f'DELETE FROM "Finding" WHERE "studyUid"={uid}; '
+            f'DELETE FROM "ViewerRequest" WHERE "itemId" IN (SELECT id FROM "ViewerItem" WHERE "studyUid"={uid}); '
+            f'DELETE FROM "ViewerRevision" WHERE "itemId" IN (SELECT id FROM "ViewerItem" WHERE "studyUid"={uid}); '
+            f'DELETE FROM "ViewerItem" WHERE "studyUid"={uid}; DELETE FROM "ViewerStorageBudget" WHERE "studyUid"={uid}; COMMIT;'))
         # A key image of this study and one finding citing it, both through the product API.
         found = self.stack._orthanc_request("POST", "/tools/lookup", self.uid.encode())
         study = next(x["ID"] for x in found.body if x["Type"] == "Study")
@@ -1605,7 +1624,7 @@ class DraftPurposeCommitJudgement(DraftPurposeServed):
             self.dump("cd09p-c5-legacy.dump")
             directory()
             code, out, err = compose_run_api(PREPARE_CLI)
-            self.assertEqual((code, json.loads(out.strip().splitlines()[-1])), (0, {"prepared": True, "state": "prepared"}), err)
+            self.assertEqual((code, self.last_json(code, out, err)), (0, {"prepared": True, "state": "prepared"}), err)
             prepared = self.stopped_file(ADOPTION)
             compose_migrate()
             # S0
@@ -1616,10 +1635,10 @@ class DraftPurposeCommitJudgement(DraftPurposeServed):
             self.dump("cd09p-c5-d0.dump")
             # C5-5 P4: the preparation after the migration refuses and writes nothing.
             code, out, err = compose_run_api(PREPARE_CLI)
-            self.assertEqual((code, json.loads(out.strip().splitlines()[-1])["error"]), (1, "PurposeAdoptionExists"), err)
+            self.assertEqual((code, self.last_json(code, out, err)["error"]), (1, "PurposeAdoptionExists"), err)
             directory(adoption=None)
             code, out, err = compose_run_api(PREPARE_CLI)
-            self.assertEqual((code, json.loads(out.strip().splitlines()[-1])["error"]), (1, "PurposeAdoptionAfterMigration"), err)
+            self.assertEqual((code, self.last_json(code, out, err)["error"]), (1, "PurposeAdoptionAfterMigration"), err)
             self.assertEqual(self.stopped_file(ADOPTION).strip(), "ABSENT")
             directory(adoption=prepared)
             # C5-2 (I2): the first start consumes it - S1.
