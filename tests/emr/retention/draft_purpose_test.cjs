@@ -100,10 +100,14 @@ test('P04 a signed result ends the work only with the server\'s signature row of
   for (const out of [await decide(ended(base), noFacts())]) { assert.deepEqual(out.lines, []); assert.equal(out.deleted, 0); }
 });
 
-test('P05 no stored intent-ending fact exists natively: another member\'s approval is not an end the reader can supply', async () => {
+test('P05 S2 (정모 님 11-03): another member\'s approval or a parent cancellation is not an end; a result signed by another is not the author\'s end', async () => {
   const out = await decide(ended({ trigger: 'intent-superseded' }));
-  assert.ok(out.error, 'refused');
+  assert.equal(out.error, 'PurposeBindingRefused');
   assert.deepEqual(out.lines, []); assert.equal(out.deleted, 0);
+  const signedFacts = { ...noFacts(), signed: { outcome: { recordId: UID, versionId: '3', signedAt: END }, action: 'approve' } };
+  const foreign = await decide(ended({ trigger: 'result-version-signed', signedRecordId: UID, signedVersionId: '3', actorId: OTHER }), signedFacts);
+  assert.equal(foreign.error, 'PurposeOwnerRefused');
+  assert.deepEqual(foreign.lines, []); assert.equal(foreign.deleted, 0);
   assert.throws(() => CTX.withSnapshot(CTX.transactionScope(), CTX.snapshotFromRows(CTX.transactionScope(), {
     holds: new Map(), accessRequests: new Map(), correctionRequests: new Map(), clauseVersions: new Map(), accessEvents: new Map() }), () => 1),
     /EmrContextTransactionMismatch/);

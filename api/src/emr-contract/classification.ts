@@ -55,7 +55,9 @@ export const RECORD_CLASSIFICATION = freeze({
   // 검사소견 (시행규칙 제15조①6·5, 5 years); 진료기록부 (10 years) applies only through a recorded chart incorporation.
   'report-head': record('Report.updatedBy; immutable ReportVersion projection', clinical, images),
   'report-version': record('ReportVersion.author; immutable author/signer identity', clinical, images),
-  'private-draft': record('ReportDraft.author; private to (uid, author)', conditional('개인 작업 초안 자체의 별도 서명 의무는 명시되지 않음; 진료기록으로 기재/사용할 때 서명, 적용 보유기간 중 모든 저장판 보존'), [], 'emr-candidate', 'purpose', ['result-version-signed', 'intent-superseded', 'explicit-discard']),
+  // 정모 님 11-03 결정(D593을 native에 대해 대체): 개인 초안·음성 초안의 목적은 작성자 본인의 명시 폐기와 그 작업 결과판의 본인
+  // 서명에서만 끝난다. 다른 판독의의 승인·부모 판독 취소·수정창 종료(intent-superseded)는 목적 종료가 아니다.
+  'private-draft': record('ReportDraft.author; private to (uid, author)', conditional('개인 작업 초안 자체의 별도 서명 의무는 명시되지 않음; 진료기록으로 기재/사용할 때 서명, 적용 보유기간 중 모든 저장판 보존'), [], 'emr-candidate', 'purpose', ['result-version-signed', 'explicit-discard']),
   'report-evidence': record('Pinned ReportVersion/ReportDraft provenance', source('첨부·인용 해시 보존; 임상 기재를 담은 문서는 해당 작성자의 서명 보존'), [], 'emr-candidate', 'source-record'),
   // D-3 (delta map MAP-D03): a radiographer's own Tech Note is a signed entry of its author - every version signed with the
   // author's own key, never standing in for a physician's record duty; an administrator's note on the same surface is
@@ -93,7 +95,7 @@ export const RECORD_CLASSIFICATION = freeze({
   'exam-clinical-info': record('Exam clinical information author; own signed entry', signed('검사내용으로 처음 작성한 임상정보; 작성자 본인 서명'), [FLOOR.examination]),
   'order-exam-component': record('Verified fulfilment event; pinned adopted part', source('이행 확인으로 검사에 채택한 부분; 원기재 단위·원서명은 별도로 존속'), [FLOOR.examination]),
   'received-order': record('Verified feed and per-record obligations; unchanged original evidence', source('원판·원서명·출처·원 기산 증거는 승계 의무를 따르며 단순 수신 영수증과 분리'), [], 'evidence-record', 'purpose', ['order-purpose-ended', 'lawful-return', 'unnecessary-operations']),
-  dictation: record('Radiologist; preserved voice/transcript versions', conditional('개인 음성 초안 자체의 별도 서명 의무는 명시되지 않음; 진료기록으로 기재할 때 서명'), [], 'emr-candidate', 'purpose', ['result-version-signed', 'intent-superseded', 'explicit-discard']),
+  dictation: record('Radiologist; preserved voice/transcript versions', conditional('개인 음성 초안 자체의 별도 서명 의무는 명시되지 않음; 진료기록으로 기재할 때 서명'), [], 'emr-candidate', 'purpose', ['result-version-signed', 'explicit-discard']),
   assignment: record('ReaderAssignment.changedBy; allocation only', unsigned('업무 배정'), [], 'operational-record', 'purpose', ['assignment-ended']),
   preferences: record('Account/site setting author', unsigned('필터·배치 설정만; 환자 임상 문구가 있으면 임상 종류로 추가 분류'), [], 'operational-record', 'purpose', ['setting-replaced', 'owner-deleted']),
   'reading-template': record('ReadingTemplate.owner', unsigned('환자 없는 문구 양식; 환자별 채택 내용은 서명된 임상 기재'), [], 'operational-record', 'purpose', ['owner-deleted']),

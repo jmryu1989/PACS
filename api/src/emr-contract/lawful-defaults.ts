@@ -900,7 +900,9 @@ export async function destroyAtPurposeEnd(store: PurposeDisposalStore, record: P
   const e = event;
   if (!verifiedEnds.has(e) || !RECORD_CLASSIFICATION[parsed.kind].retention.purposeEnds.includes(e.trigger) ||
       e.recordId !== parsed.recordId || e.at <= parsed.createdAt) refuse('PurposeBindingRefused');
-  if (['explicit-discard', 'owner-deleted'].includes(e.trigger) && e.actorId !== parsed.ownerId) refuse('PurposeOwnerRefused');
+  // 정모 님 11-03(D593을 native에 대해 대체): a private draft ends only by its own author - the author's discard or the
+  // author's signature of the result made from it.
+  if (['explicit-discard', 'owner-deleted', 'result-version-signed'].includes(e.trigger) && e.actorId !== parsed.ownerId) refuse('PurposeOwnerRefused');
   if (['order', 'received-order'].includes(parsed.kind)) {
     const facts = parseOrderFacts(parsed.source.row), decision = facts.procedure?.decision;
     if (orderProcedureState(facts, requestedAt) !== 'clear') refuse('OrderReviewRequired');
@@ -914,12 +916,10 @@ export async function destroyAtPurposeEnd(store: PurposeDisposalStore, record: P
     if (!b || !r || r.draftId !== parsed.recordId || r.intentId !== b.intentId || r.recordId !== b.reportId ||
         r.action !== b.action || r.signedAt !== e.at) refuse('PurposeBindingRefused');
   } else if (e.result !== null) refuse('PurposeBindingRefused');
-  if (e.trigger === 'intent-superseded') {
-    const b = parsed.source.row.draftBinding, f = e.superseded;
-    if (!b || !f || f.reportId !== b.reportId || f.at !== e.at ||
-        (f.action === 'approve' && (b.action !== 'approve' || f.authorId === parsed.ownerId || f.draftId === parsed.recordId)) ||
-        (f.action === 'amend-window-closed' && b.action !== 'amend')) refuse('PurposeBindingRefused');
-  } else if (e.superseded !== null) refuse('PurposeBindingRefused');
+  // 정모 님 11-03 "본인 종료까지 보존"(D593을 native에 대해 대체): another reader's approval, the parent report's
+  // cancellation and the amend window's close are not the end of anyone's private draft. No kind ends on
+  // `intent-superseded` any more (the classification lists none); a stored intent-ending fact never ends a purpose here.
+  if (e.trigger === 'intent-superseded' || e.superseded !== null) refuse('PurposeBindingRefused');
   if (typeof store.withPurposeLock !== 'function') refuse('RetentionLockRequired');
   return store.withPurposeLock(parsed.recordId, utc(requestedAt), async current => {
   if (JSON.stringify(parsePurposeRecord(current)) !== JSON.stringify(parsed)) refuse('PurposeSnapshotStale');

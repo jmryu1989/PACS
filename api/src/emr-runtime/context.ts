@@ -150,8 +150,9 @@ export const runtimeAdapters: EmrAdapters = Object.freeze({
     loadCorrectionRequest(requestId: string) { return read(snapshot().correctionRequests, requestId); },
     loadClauseVersions(clauseId: string) { return read(snapshot().clauseVersions, clauseId) as any; },
   }),
-  // CD-09-P: the native product stores no intent-ending fact (another member's approval never ends a private draft), so
-  // that reader stays unsupported; an end or signed result the snapshot did not read is refused, never reconstructed.
+  // CD-09-P: another member's approval or the parent's cancellation is not the end of a private draft's purpose
+  // (정모 님 11-03, D593 replaced for native), so there is no intent-ending fact to read; an end or signed result the
+  // snapshot did not read is refused, never reconstructed.
   purpose: Object.freeze({
     load(eventId: string): unknown { return read(snapshot().purposeEnds, eventId); },
     loadSignedResult(recordId: string, versionId: string): unknown { return read(snapshot().signedResults, JSON.stringify([recordId, versionId])); },
