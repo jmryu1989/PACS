@@ -148,15 +148,18 @@ export class DraftDeliveries {
   track(author: string, request: IncomingMessage, response: ServerResponse | undefined): void {
     // A handler invoked without an HTTP response (a direct call) delivers nothing over the network.
     if (!response || typeof response.once !== 'function' || typeof request?.once !== 'function') return;
+    // The connection's own close also ends it: a pipelined response still queued behind an earlier one when the client
+    // cuts the connection never gets the socket, so it emits neither finish nor close (served p10 waited forever on it).
+    const connection = request.socket;
     const settled = new Promise<void>(resolve => {
       const done = () => {
         response.off('finish', done); response.off('close', done); response.off('error', done);
-        request.off('aborted', done);
+        request.off('aborted', done); connection?.off('close', done);
         resolve();
       };
       response.once('finish', done); response.once('close', done); response.once('error', done);
-      request.once('aborted', done);
-      if (response.writableFinished || response.destroyed) done();
+      request.once('aborted', done); connection?.once('close', done);
+      if (response.writableFinished || response.destroyed || connection?.destroyed) done();
     });
     const set = this.open.get(author) ?? new Set<Promise<void>>();
     set.add(settled); this.open.set(author, set);

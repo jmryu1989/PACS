@@ -224,10 +224,11 @@ test('P12 the ledger directory is the deployment\'s own and outside the backed-u
 
 // ── S6: delivery of content read before the end ──
 
-function exchange() {
+function exchange(socket = new EventEmitter()) {
   const request = new EventEmitter(), response = new EventEmitter();
   response.writableFinished = false; response.destroyed = false;
-  return { request, response };
+  socket.destroyed = false; request.socket = socket;
+  return { request, response, socket };
 }
 const state = promise => Promise.race([promise.then(() => 'settled'), new Promise(r => setImmediate(() => r('waiting')))]);
 
@@ -254,6 +255,17 @@ test('P13 a destruction waits for the author\'s responses registered before it, 
   assert.equal(await state(second), 'settled');
   deliveries.track(AUTHOR, {}, undefined);
   assert.equal(await state(deliveries.settled(AUTHOR)), 'settled');
+  // Pipelined answers on one connection: the second is still queued (it never gets the socket) when the client cuts the
+  // connection - only the connection's close says it ended.
+  const shared = new EventEmitter();
+  const head = exchange(shared), queued = exchange(shared);
+  deliveries.track(AUTHOR, head.request, head.response);
+  deliveries.track(AUTHOR, queued.request, queued.response);
+  const third = deliveries.settled(AUTHOR);
+  assert.equal(await state(third), 'waiting');
+  shared.destroyed = true; shared.emit('close');
+  assert.equal(await state(third), 'settled');
+  assert.equal(deliveries.pending(AUTHOR), 0);
 });
 
 // ── F3/F4/F5: the destruction service against a transaction double of the database ──
