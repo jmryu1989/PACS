@@ -474,6 +474,11 @@ class DraftPurposeScreenR3(DraftPurposeScreen):
         state["phase"] = "away"
         self.click_row(page, b)
         expect(page.locator("#findings")).to_have_value(text_b)
+        # Stay on B for up to one autosave period and a margin: the page's periodic learn read of the unknown discard
+        # (work-exit) then goes out while B is shown. The plan does not require one; when it goes, its end is observed.
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not early:
+            page.wait_for_timeout(200)
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline and not all(any(f is r for f in failed) for r in early):
             page.wait_for_timeout(100)
