@@ -581,6 +581,41 @@ class DraftPurposeServed(unittest.TestCase):
         self.assertEqual(self.phases(unit), ["started", "completed"])
         self.assertEqual(self.read(doctor)["present"], False)
         event("p05", retries=sorted(results), lost_answer_committed=not envelope["present"], retry=retry.status)
+        # C8(i), T3: the answer is held unread while the end commits; the commit is observed in the database first, and
+        # only then is the connection cut. The client never heard the answer: it re-reads, retries with the revision it
+        # held and meets the moved boundary; the unit is ended and destroyed exactly once.
+        self.assertEqual(self.save(doctor, "SYN-P5 committed " + uuid.uuid4().hex).status, 200)
+        before = self.row(doctor)
+        unit, revision = before["workUnit"], self.read(doctor)["revision"]
+        client = self.hold_open(doctor, "DELETE", self.path("/draft"), 1, "SYN-P5",
+                                body={"expectedOwner": owner, "expectedRevision": revision})
+        try:
+            deadline, stored = time.monotonic() + 30, before
+            while time.monotonic() < deadline:
+                stored = self.row(doctor)
+                if not stored["present"] and stored["revision"] > before["revision"]:
+                    break
+                time.sleep(0.2)
+            committed = not stored["present"] and stored["revision"] > before["revision"]
+            ended_row, phases_at_cut = self.ended(unit), self.phases(unit)
+            self.assertTrue(committed, f"the end was not observed committed before the cut: {stored}")
+            self.assertTrue(ended_row is not None or "started" in phases_at_cut, (ended_row, phases_at_cut))
+        finally:
+            cut = self.release_held(client, "cut")
+        self.assertEqual(cut, {"cut": True})
+        envelope = self.read(doctor)
+        self.assertEqual((envelope["present"], envelope["snapshot"]), (False, None))
+        self.assertNotEqual(envelope["revision"], revision)
+        retry = self.stack._send("DELETE", self.path("/draft"), doctor, {"expectedOwner": owner, "expectedRevision": revision})
+        self.assertEqual(retry.status, 409, retry.text)
+        self.wait_destroyed(unit)
+        self.assertEqual(self.phases(unit), ["started", "completed"])
+        self.assertIsNone(self.ended(unit))
+        self.assertEqual(psql(f'SELECT count(*) FROM "ReportDraft" WHERE "workUnit"={sql_text(unit)}'), ["0"])
+        self.assertEqual(self.read(doctor)["present"], False)
+        event("p05", branch="t3", lost_answer_committed=committed, observed_before_cut={
+            "present": stored["present"], "revision_moved": stored["revision"] - before["revision"],
+            "ended_row": ended_row is not None, "phases": phases_at_cut}, retry=retry.status, phases=self.phases(unit))
 
     def test_p06_reads_overlapping_the_discard_never_return_the_text_after_the_end(self):
         doctor, secret = "doctor", "SYN-P6 " + uuid.uuid4().hex
