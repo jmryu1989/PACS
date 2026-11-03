@@ -191,7 +191,7 @@ class RecordCopyRequests(AuditPage):
         self.screenshot('disclosure-scope-missing.png')
         self.backend_call(reset=True, scopes=[]); self.page.reload()
         self.section.get_by_label('Request ID', exact=True).fill('SYN-A'); self.click('Open Request')
-        expect(self.page.get_by_role('status')).to_have_text('감사 기록을 조회할 권한이 없습니다.')
+        expect(self.document_status()).to_have_text('감사 기록을 조회할 권한이 없습니다.')
         self.assertEqual(self.page.locator('body').inner_text(), '감사 기록을 조회할 권한이 없습니다.')
 
     def test_a_b_a_and_logout_discard_late_request_response(self):
