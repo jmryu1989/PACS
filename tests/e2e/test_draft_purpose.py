@@ -92,7 +92,7 @@ class DraftPurposeServed(unittest.TestCase):
         # Ended rows (held or refused cases) of this fixture study only; the study's own cleanup removes the drafts.
         psql(f'DELETE FROM "ReportDraftPurposeEnd" WHERE uid={sql_text(self.uid)}')
 
-    # ── product calls ──
+    # ── product calls (a commit is a POST: 201 Created; the draft routes answer 200) ──
 
     def path(self, tail=""):
         return f"/studies/{quote(self.uid)}" + tail
@@ -224,7 +224,7 @@ class DraftPurposeServed(unittest.TestCase):
         saved = self.stack.request("POST", self.path("/report/commit"), doctor,
                                    {"action": "save", "baseVersion": 0, "findings": "SYN-P2 saved", "conclusion": "SYN conclusion",
                                     "recommendation": ""})
-        self.assertEqual(saved.status, 200, saved.text)
+        self.assertEqual(saved.status, 201, saved.text)
         self.assertEqual(self.phases(unit), [])
         self.assertIsNone(self.ended(unit))
         self.assertEqual(psql(f'SELECT findings FROM "ReportVersion" WHERE uid={sql_text(self.uid)} AND action=\'save\''), ["SYN-P2 saved"])
@@ -242,7 +242,7 @@ class DraftPurposeServed(unittest.TestCase):
         reset = self.stack.request("POST", self.path("/report/commit"), doctor,
                                    {"action": "reset", "baseVersion": 1, "reason": "SYN reset", "findings": "", "conclusion": "",
                                     "recommendation": ""})
-        self.assertEqual(reset.status, 200, reset.text)
+        self.assertEqual(reset.status, 201, reset.text)
         self.wait_destroyed(unit)
         event("p2", clear=True, save_kept=True, forced_kept=True, reset=True)
 
@@ -254,7 +254,7 @@ class DraftPurposeServed(unittest.TestCase):
         approved = self.stack.request("POST", self.path("/report/commit"), doctor,
                                       {"action": "approve", "baseVersion": 0, "findings": "SYN-P3 to sign",
                                        "conclusion": "SYN conclusion", "recommendation": ""})
-        self.assertEqual(approved.status, 200, approved.text)
+        self.assertEqual(approved.status, 201, approved.text)
         self.wait_destroyed(unit)
         self.assertEqual(psql(f'SELECT action FROM "ReportVersion" WHERE uid={sql_text(self.uid)} AND findings=\'SYN-P3 to sign\''),
                          ["approve"])
