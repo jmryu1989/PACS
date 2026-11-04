@@ -9,6 +9,7 @@ import { CLINICAL_SURFACES } from './contract';
 import { ClinicalWritePlan, planClinicalWrite, prepareClinicalWrite, WriteInput } from './records';
 import type { ClinicalSigner, ClinicalSignature } from './signing';
 import { ClinicalStore, StoredClinicalCommand } from './store';
+import { lockFixedRecords } from '../emr-runtime/fixed-record-lock';
 
 export interface ClinicalRequestFacts {
   actor: ActorFacts;
@@ -57,6 +58,14 @@ function eventFor(facts: ClinicalRequestFacts, plan: ClinicalWritePlan): Readonl
     cause: 'user-view', context: { basis: v.kind === 'clinical-question' || v.kind === 'image-request' ? 'clinical-request' : 'worklist',
       studyId: v.studyId, relatedStudyId: null, reason: null }, executor: 'member', targets: [plan.access.target],
     action: plan.access.action, result: 'succeeded', requestId: facts.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null } as AccessEventV1) as Readonly<AccessEventV1>;
+}
+
+/** A question's projection locks its study's StudyState and reads that study's report head, so
+ * its set holds the stored Study UID as well; a native report commit on the same study then waits
+ * at that key instead of meeting the question at the signer key. Tech Note's record id is the Study
+ * UID. Other generic records keep their own id; collecting their references belongs to W-G. */
+function fixedRecords(plan: Readonly<ClinicalWritePlan>): string[] {
+  return plan.record === 'question' ? [plan.version.studyId, plan.version.recordId] : [plan.version.recordId];
 }
 
 /** One online write, one B2 operation. Lookup never signs or runs a projector. */
@@ -137,6 +146,10 @@ export class ClinicalRuntime {
         const facts = await this.parts.context.facts(tx, request);
         const study = await this.parts.context.study(tx, request, plan.version.studyId);
         await this.parts.store.lockUnit(tx, plan.record, plan.version.recordId);
+        // The whole fixed-record set comes before the signing key and any service row, in
+        // the order native report writers, Related and Tech Note use. Taking the question's
+        // own id first and its study later would wait on the study while holding the id.
+        await lockFixedRecords(tx, fixedRecords(plan));
         const unit = await this.parts.store.unit(tx, plan.record, plan.version.recordId);
         // A's verified-record capability cannot be serialized in command JSON.
         // Re-read source/party facts under the owning service's current checks,
