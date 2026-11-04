@@ -1276,29 +1276,31 @@ test('B2-COMMIT K11 a draft read whose read record a deferred trigger fails send
   assert.equal(read.body.snapshot.findings, 'SYN first draft');
 });
 
-test('B2-COMMIT K2 W-R T8 a Related apply whose receipt a deferred 23514 fails at COMMIT is REPORT_DRAFT_NOT_COMMITTED: nothing stored, the same insertRequestId applies once', async () => {
+test('B2-COMMIT K2/K3 W-R T8 a Related apply whose receipt a deferred 23514 or P0001 fails at COMMIT is REPORT_DRAFT_NOT_COMMITTED: nothing stored, the same insertRequestId applies once', async () => {
   const w = await world();
-  const source = await w.study({ rs: 'A', draft: false }), uid = await w.study(), epoch = await w.epoch(uid);
-  const body = relatedBody(await w.token(uid, A), uid, source);
-  const before = await w.state(uid), entries = await ledgerEntries(w);
-  const fault = await failAtCommit(w, '"ReportDraftInsertReceipt"', '23514');
-  let answer;
-  try { answer = await w.send('X', 'put', { as: A, uid, body }); } finally { await fault.drop(); }
-  const seen = await fault.observed();
-  report(JSON.stringify({ b2_commit: 'related-apply', ...seen, answer: brief(answer) }));
-  assert.deepEqual(seen.trigger, { deferrable: true, initiallyDeferred: true });
-  assert.deepEqual([seen.stage, seen.status], ['COMMIT', 'aborted'], 'the receipt\'s trigger failed the COMMIT');
-  assert.deepEqual(brief(answer), { ok: false, status: 503, code: 'REPORT_DRAFT_NOT_COMMITTED' });
-  assert.equal(answer.body.relatedInsert, undefined, 'no applied answer');
-  assert.deepEqual(await w.state(uid), before, 'no draft revision or audit row was added');
-  assert.equal(await receiptOf(w, body), null, 'no receipt');
-  assert.equal(await ledgerEntries(w), entries, 'no access record was added');
-  const again = await w.send('X', 'put', { as: A, uid, body });
-  assert.deepEqual([again.ok, again.body.relatedInsert?.result, again.body.revision], [true, 'applied', `${epoch}:2`], JSON.stringify(again.body));
-  const replay = await w.send('X', 'put', { as: A, uid, body });
-  assert.deepEqual([replay.body.relatedInsert?.result, replay.body.revision], ['applied', `${epoch}:2`], 'applied once, then replayed');
-  assert.deepEqual((await receiptOf(w, body)).state, 'applied');
-  assert.deepEqual((await w.state(uid)).audits.slice(before.audits.length), [`${A.actor} report.draft`]);
+  for (const errcode of ['23514', 'P0001']) {
+    const source = await w.study({ rs: 'A', draft: false }), uid = await w.study(), epoch = await w.epoch(uid);
+    const body = relatedBody(await w.token(uid, A), uid, source);
+    const before = await w.state(uid), entries = await ledgerEntries(w);
+    const fault = await failAtCommit(w, '"ReportDraftInsertReceipt"', errcode);
+    let answer;
+    try { answer = await w.send('X', 'put', { as: A, uid, body }); } finally { await fault.drop(); }
+    const seen = await fault.observed();
+    report(JSON.stringify({ b2_commit: 'related-apply', errcode, ...seen, answer: brief(answer) }));
+    assert.deepEqual(seen.trigger, { deferrable: true, initiallyDeferred: true });
+    assert.deepEqual([seen.stage, seen.status], ['COMMIT', 'aborted'], 'the receipt\'s trigger failed the COMMIT');
+    assert.deepEqual(brief(answer), { ok: false, status: 503, code: 'REPORT_DRAFT_NOT_COMMITTED' });
+    assert.equal(answer.body.relatedInsert, undefined, 'no applied answer');
+    assert.deepEqual(await w.state(uid), before, 'no draft revision or audit row was added');
+    assert.equal(await receiptOf(w, body), null, 'no receipt');
+    assert.equal(await ledgerEntries(w), entries, 'no access record was added');
+    const again = await w.send('X', 'put', { as: A, uid, body });
+    assert.deepEqual([again.ok, again.body.relatedInsert?.result, again.body.revision], [true, 'applied', `${epoch}:2`], JSON.stringify(again.body));
+    const replay = await w.send('X', 'put', { as: A, uid, body });
+    assert.deepEqual([replay.body.relatedInsert?.result, replay.body.revision], ['applied', `${epoch}:2`], 'applied once, then replayed');
+    assert.deepEqual((await receiptOf(w, body)).state, 'applied');
+    assert.deepEqual((await w.state(uid)).audits.slice(before.audits.length), [`${A.actor} report.draft`]);
+  }
 });
 
 // The served process composes one draft-purpose service; this file composes a recorder in its place, which is "none"
