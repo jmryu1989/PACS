@@ -38,6 +38,9 @@ REGRESSION_SUITES = {
         tests/clinician_policy_test.py
         tests/clinician_read_serializer_test.cjs
         tests/emr/b/contract_test.cjs
+        tests/emr/retention/draft_purpose_test.cjs
+        tests/emr/retention/ledger_file_test.cjs
+        tests/emr/retention/ledger_location_test.py
         tests/emr_contract_test.cjs
         tests/execution_guard_test.py
         tests/gateway_pipeline_contract_test.py
