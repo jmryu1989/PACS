@@ -1181,6 +1181,14 @@ class ClinicianRequestDOMTest(Harness):
             (403, err("IMAGE_REQUEST_ACTION_FORBIDDEN", "이 영상 요청에 이 동작을 할 수 없습니다"), "failed",
              C_CODES["IMAGE_REQUEST_ACTION_FORBIDDEN"], False),
             (503, err("IMAGE_REQUEST_BUSY", "영상 요청 처리 중입니다. 같은 요청으로 다시 시도하세요"), "unknown", C_CODES["IMAGE_REQUEST_BUSY"], False),
+            # B2-COMMIT: a write whose commit the server judged not committed (command step), or whose provide record did not
+            # commit or could not be confirmed after the write committed (provide step). The screen cannot tell what was
+            # stored: unknown, the attempt and its request ID are kept for Retry.
+            (503, err("AppendNotCommitted", "저장이 완료되지 않았습니다. 입력은 유지됩니다."), "unknown", UNKNOWN, False),
+            (503, err("ProvideNotRecorded", "열람 기록을 남기지 못해 내용을 보내지 않았습니다. 입력은 유지됩니다. 다시 열거나 같은 요청으로 다시 확인하세요."),
+             "unknown", UNKNOWN, False),
+            (503, err("OutcomeUnknown", "열람 기록이 저장됐는지 확인하지 못해 내용을 보내지 않았습니다. 입력은 유지됩니다. 다시 열거나 같은 요청으로 다시 확인하세요."),
+             "unknown", UNKNOWN, False),
             (409, err("STUDY_ACCESS_CHANGED", "검사 접근 조건이 바뀌었습니다"), "unknown", C_CODES["STUDY_ACCESS_CHANGED"], False),
         ]
         second.locator('[data-field="note"]').fill("SYN changed plans")
@@ -1205,7 +1213,8 @@ class ClinicianRequestDOMTest(Harness):
                 else:
                     self.assertEqual(("idle", "SYN changed plans", False, True),
                                      (cancel["state"], cancel["value"], cancel["readOnly"], cancel["send"]))
-                if reply["code"] == "IMAGE_REQUEST_BUSY":
+                # Every unknown one but the last is discarded to free the composer; the last one is retried below.
+                if state == "unknown" and reply["code"] != "STUDY_ACCESS_CHANGED":
                     second.locator("[data-discard]").click()
                     self.note_state(second, "discarded")
                     self.wait_until(lambda: len(self.reads) == reads + 1, "the list read again after Discard")
