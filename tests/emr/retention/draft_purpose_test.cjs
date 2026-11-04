@@ -160,6 +160,17 @@ test('P07 a failed deletion is recorded failed after started and the payload is 
   assert.equal(deleted, 0, 'no deletion before a durable started record');
 });
 
+test('P07b CD-09-C: a deletion that ran but answered with an invalid receipt is neither failed nor completed', async () => {
+  for (const receipt of [at => ({ completedAt: at, method: 'soft-delete' }), at => ({ completedAt: '2026-11-01T01:59:59.999Z', method: 'operational-store-deletion' }),
+    at => ({ completedAt: at, method: 'operational-store-deletion', unit: 'extra' })]) {
+    const store = journal(), stored = { payload: true }, at = '2026-11-01T02:00:00.000Z';
+    await assert.rejects(P.decidePurposeEnd(store, ended(), noFacts(), at, async () => { stored.payload = false; return receipt(at); }),
+      e => e.code === 'DestructionReceiptInvalid');
+    assert.equal(stored.payload, false, 'the payload was deleted before the receipt was read');
+    assert.deepEqual(store.lines.map(l => l.phase), ['started'], 'started stays the last record');
+  }
+});
+
 test('P08 the operating window: a destruction after the fifth Seoul day is completed but marked overdue', async () => {
   const out = await decide(ended(), noFacts(), '2026-11-08T02:00:00.000Z');
   assert.equal(out.error, undefined);

@@ -471,12 +471,31 @@ if (process.argv.includes('--emr-inventory-generator')) {
   test('TEST-EMR-19-A: logging and deletion failures never manufacture successful destruction', async () => {
     await refuseExpiry(disposal(), 'DestructionJournalUnavailable', { append: async () => { throw Error('audit unavailable'); } });
     await refuseExpiry(disposal(), 'DestructionJournalReceiptInvalid', { append: async () => ({ durableAt: t0 }) });
-    for (const callback of [async () => { throw Error('synthetic-private-error'); }, async () => ({ ...destroyed(disposal()), method: 'soft-delete' }),
-      async () => ({ ...destroyed(disposal()), recordId: 'synthetic-record' }), async () => ({ ...destroyed(disposal()), completedAt: t0 })]) {
-      const events = [];
-      await assert.rejects(expire({ append: async e => { events.push(e); return durable.append(e); } }, disposal(), callback));
+    // A deletion that did not happen (the destroyer throws and erased nothing): failed, after started.
+    {
+      const events = []; let erased = false;
+      await assert.rejects(expire({ append: async e => { events.push(e); return durable.append(e); } }, disposal(),
+        async () => { if (erased) throw Error('unreachable'); throw Error('synthetic-private-error'); }), /synthetic-private-error/);
+      assert.equal(erased, false, 'nothing was erased');
       assert.deepEqual(events.map(e => e.phase), ['started', 'failed']);
       assert(!JSON.stringify(events).includes('synthetic'));
+    }
+    // CD-09-C: the destroyer returned after erasing, with a receipt that is not the operational deletion's. That says nothing
+    // of whether the deletion stands, so it is refused and neither completed nor failed is written: started stays last.
+    for (const receipt of [r => ({ ...r, method: 'soft-delete' }), r => ({ ...r, recordId: 'synthetic-record' }), r => ({ ...r, completedAt: t0 }), () => null]) {
+      const events = []; let erased = false;
+      await assert.rejects(expire({ append: async e => { events.push(e); return durable.append(e); } }, disposal(),
+        async request => { erased = true; return receipt(destroyed(request)); }), { code: 'DestructionReceiptInvalid' });
+      assert.equal(erased, true, 'the deletion ran before its receipt was read');
+      assert.deepEqual(events.map(e => e.phase), ['started'], 'an invalid receipt is not a confirmed failure');
+      assert(!JSON.stringify(events).includes('synthetic'));
+    }
+    // Control: the same destroyer with the operational deletion's receipt completes; the receipt check is the same check.
+    {
+      const events = []; let erased = false;
+      await expire({ append: async e => { events.push(e); return durable.append(e); } }, disposal(), async request => { erased = true; return destroyed(request); });
+      assert.equal(erased, true);
+      assert.deepEqual(events.map(e => e.phase), ['started', 'completed']);
     }
     let erased = 0;
     await assert.rejects(expire({ append: async e => {
@@ -1985,6 +2004,23 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.deepEqual(journal.map(e => [e.phase, e.occurredAt]), [['started', at], ['started', at], ['failed', later], ['failed', later]]);
     assert.equal(new Set(journal.map(e => e.operationId)).size, 2, 'one operation per member, shared by its started and failed');
     assert.ok(journal.every(e => e.dueDay === journal[0].dueDay));
+  });
+  test('TEST-EMR-19-A CD-09-C: a batch deletion that ran but answered with an invalid receipt keeps only started', async () => {
+    const records = cyclicRecords(), at = D.retentionDeadline(records[0]), request = batchRequest(records, at);
+    const lock = { withRetentionBatchLock: async (ids, time, work) => work(request.graph) };
+    for (const receipt of [r => ({ ...r, method: 'soft-delete' }), r => ({ ...r, completedAt: t0 }), r => ({ ...r, extra: true })]) {
+      const journal = []; let erased = 0;
+      await assert.rejects(D.destroyBatchAtExpiry({ ...lock, append: async e => { journal.push(e); return durable.append(e); } }, request,
+        async set => { erased += set.length; return receipt(destroyed(request)); }), { code: 'DestructionReceiptInvalid' });
+      assert.equal(erased, 2, 'the whole set was erased before its receipt was read');
+      assert.deepEqual(journal.map(e => e.phase), ['started', 'started'], 'neither completed nor failed');
+    }
+    // Control: the operational deletion's receipt completes every member.
+    const journal = []; let erased = 0;
+    const results = await D.destroyBatchAtExpiry({ ...lock, append: async e => { journal.push(e); return durable.append(e); } }, request,
+      async set => { erased += set.length; return destroyed(request); });
+    assert.equal(erased, 2);
+    assert.deepEqual([results.length, journal.map(e => e.phase)], [2, ['started', 'started', 'completed', 'completed']]);
   });
   test('TEST-EMR-19-A R5-P3: pre-September holds reload and release with built-in and externally verified history', () => {
     for (const [at, version, supplied] of [['2026-08-01T00:00:00.000Z', '20897', false], ['2024-01-01T00:00:00.000Z', '19234', true]]) {
