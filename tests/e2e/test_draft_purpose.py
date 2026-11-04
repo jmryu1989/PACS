@@ -1919,6 +1919,10 @@ class DraftPurposeUpgradeServed(DraftPurposeServed):
                  f'initialized={"true" if saved_anchor["initialized"] else "false"}, '
                  f'"lastCompletedUnit"={literal(saved_anchor["lastCompletedUnit"])}, '
                  f'"lastCompletedAt"={literal(saved_anchor["lastCompletedAt"], "::timestamp")} WHERE id=1')
+            # The ended rows this case made in the P era (a held work) are not in the state being put back: on a stack
+            # whose anchor was never initialized they would keep the API closed (PurposeLedgerInitializationRequired,
+            # VM run cd09c-c2-7425d24). The fixture's own cleanup removes them later anyway; it runs after this one.
+            self.drop_ended_rows()
             compose_start_api()
             self.reload_proxy()
             self.wait_api()
