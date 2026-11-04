@@ -906,6 +906,34 @@ test('DRAFT-02 a lost answer, a partial envelope or a 504: one automatic read de
   }
 });
 
+// B2-COMMIT: the server could not confirm a draft change's commit (503 REPORT_DRAFT_COMMIT_UNKNOWN), or did not send a
+// draft view because its read record did not commit or could not be confirmed (REPORT_DRAFT_VIEW_*). Like an answer that
+// never arrived, only a read says what is stored; the write is not sent again. A change the server says did not commit
+// (REPORT_DRAFT_NOT_COMMITTED) is a refusal of that one write: nothing was stored, and the next command reads first.
+test('DRAFT-02b a commit or view the server could not confirm is decided by one read; a change that did not commit is refused', async () => {
+  for (const [code, stored] of [['REPORT_DRAFT_COMMIT_UNKNOWN', true], ['REPORT_DRAFT_COMMIT_UNKNOWN', false],
+    ['REPORT_DRAFT_VIEW_NOT_RECORDED', true], ['REPORT_DRAFT_VIEW_UNCONFIRMED', true]]) {
+    const { server, client, at, serve, next } = drafting();
+    const writing = client.write('A', TEXT('SYN typed'), { owner: OWNER, context: at() });
+    server.answer(await next());
+    const put = await next();
+    if (stored) server.apply(put);
+    put.answer(503, { code, message: 'SYN 확인하지 못했습니다' });
+    const result = await serve(writing);
+    assert.equal(result.outcome, stored ? 'saved' : 'unknown', `${code} stored=${stored}`);
+    assert.equal(server.puts, stored ? 1 : 0, 'the write was not sent again');
+  }
+  const { server, client, at, serve, next, net } = drafting();
+  const writing = client.write('A', TEXT('SYN typed'), { owner: OWNER, context: at() });
+  server.answer(await next());
+  (await next()).answer(503, { code: 'REPORT_DRAFT_NOT_COMMITTED', message: 'SYN 저장되지 않았습니다' });
+  const refused = await serve(writing);
+  assert.equal(refused.outcome, 'refused');
+  assert.equal(refused.code, 'REPORT_DRAFT_NOT_COMMITTED');
+  assert.equal(server.puts, 0);
+  assert.equal(net.calls.filter(call => call.init.method === 'PUT').length, 1, 'no write left by itself');
+});
+
 test('DRAFT-03 an unknown outcome is never re-sent by itself; the next command reads the stored draft first', async () => {
   for (const reading of ['the read shows nothing stored', 'the read fails too']) {
     const { server, client, at, serve, next, net } = drafting();

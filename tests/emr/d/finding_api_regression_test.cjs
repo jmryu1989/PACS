@@ -78,10 +78,10 @@ test('tenant boundary: institution change before the list snapshot is concealed'
 
 // Only the persistence/identity/signature ports are synthetic. Planning, request
 // fingerprinting, replay selection and API outcome translation are production code.
-function writeFixture({ pauseAdmission = false, commitUnknown = false, loseCommitReply = false } = {}) {
+function writeFixture({ pauseAdmission = false, commitUnknown = false, loseCommitReply = false, commandFails = null } = {}) {
   let command = null, version = null, unit = null, operation = null, result = null;
   let signCount = 0, projectionCount = 0, accessCount = 0, prepareCount = 0, blocked = false;
-  const admitted = deferred(), release = deferred();
+  const admitted = deferred(), release = deferred(), provide = [];
   const actor = { identity: { id: 'reader-id', issuer: 'https://synthetic.invalid', subject: caller.sub },
     kind: 'member', roles: caller.roles, institutionId: caller.institution, signingRegistrationId: 'synthetic-registration' };
   const study = { studyId: uid, managingInstitutionId: 'inst-a',
@@ -122,12 +122,22 @@ function writeFixture({ pauseAdmission = false, commitUnknown = false, loseCommi
       if (result.outcome === 'pending') {
         if (commitUnknown) throw Object.assign(new Error('unreadable COMMIT outcome'), { code: 'CommitUnknown' });
         const reference = await project(tx);
+        // B2 judged the write's own COMMIT aborted: its effect rolled back and the operation settled negative.
+        if (commandFails) { result = { ...result, outcome: 'negative' }; unit = null; version = null;
+          throw Object.assign(new Error(commandFails), { code: commandFails }); }
         result = { ...result, outcome: 'committed', result: reference };
         if (loseCommitReply) throw Object.assign(new Error('lost COMMIT acknowledgement'), { code: 'CommitUnknown' });
       }
       return result;
     },
-    transactionWithRecords: async fn => fn(tx, async (_event, effect) => { accessCount++; return effect(); }),
+    // The provide record of the stored result: a transaction of its own after the write committed. w.provide makes B2
+    // judge that transaction not committed (AppendNotCommitted) or unreadable (CommitUnknown), once per entry.
+    transactionWithRecords: async fn => {
+      const value = await fn(tx, async (_event, effect) => { accessCount++; return effect(); });
+      const failed = provide.shift();
+      if (failed) { accessCount--; throw Object.assign(new Error(failed), { code: failed }); }
+      return value;
+    },
     confirm: async () => ({ eventId: operation.event.eventId, durableAt: '2026-10-30T00:00:00.000Z' }),
   };
   const routes = new ClinicalRoutes({ store, records: { begin: () => work },
@@ -146,7 +156,7 @@ function writeFixture({ pauseAdmission = false, commitUnknown = false, loseCommi
       }) };
     } catch (error) { if (!error.getStatus) throw error; return { status: error.getStatus(), body: error.getResponse() }; }
   };
-  return { invoke, admitted, release, block: () => { blocked = true; },
+  return { invoke, admitted, release, provide, block: () => { blocked = true; },
     counts: () => ({ signCount, projectionCount, accessCount, prepareCount }), write };
 }
 
@@ -196,4 +206,75 @@ test('replays reject changed payloads and recheck comparison access without anot
   assert.equal((await f.invoke()).status, 404);
   assert.equal(f.counts().signCount, 1);
   assert.equal(f.counts().projectionCount, 1);
+});
+
+// B2-COMMIT (plan section 3, K11/K12 pure): the write's own transaction and the record of providing its stored result are
+// answered as different steps. A provide record that did not commit or cannot be told never says the finding was not
+// saved and never answers the code after which the page drops its request ID (finding-link-model.js); the same request
+// ID then reads the stored result again with no second signature or projection.
+const PROVIDE_WORDS = { forbidden: [/저장이 완료되지 않았습니다/, /저장되지 않았습니다/, /그대로/] };
+test('B2-COMMIT a provide record that did not commit is ProvideNotRecorded and the same request converges', async () => {
+  const f = writeFixture();
+  f.provide.push('AppendNotCommitted');
+  const first = await f.invoke();
+  assert.equal(first.status, 503);
+  assert.deepEqual([first.body.code, first.body.stage], ['ProvideNotRecorded', 'provide']);
+  assert.match(first.body.message, /[가-힣]/);
+  for (const word of PROVIDE_WORDS.forbidden) assert.doesNotMatch(first.body.message, word);
+  assert.deepEqual([f.counts().signCount, f.counts().projectionCount, f.counts().accessCount], [1, 1, 0]);
+  const again = await f.invoke();
+  assert.equal(again.status, 200);
+  assert.equal(again.body.emr.replayed, true);
+  assert.deepEqual([f.counts().signCount, f.counts().projectionCount, f.counts().accessCount], [1, 1, 1]);
+});
+
+test('B2-COMMIT a provide record whose commit cannot be told is OutcomeUnknown of the provide step, not of the write', async () => {
+  const f = writeFixture();
+  f.provide.push('CommitUnknown');
+  const first = await f.invoke();
+  assert.equal(first.status, 503);
+  assert.deepEqual([first.body.code, first.body.stage], ['OutcomeUnknown', 'provide']);
+  for (const word of PROVIDE_WORDS.forbidden) assert.doesNotMatch(first.body.message, word);
+  const command = writeFixture({ commitUnknown: true });
+  const unknownWrite = await command.invoke();
+  assert.deepEqual([unknownWrite.body.code, unknownWrite.body.stage], ['OutcomeUnknown', 'command']);
+  assert.notEqual(first.body.message, unknownWrite.body.message, 'each step says what it is unsure of');
+  assert.equal((await f.invoke()).status, 200);
+  assert.deepEqual([f.counts().signCount, f.counts().projectionCount], [1, 1]);
+});
+
+test('B2-COMMIT a write whose own COMMIT did not commit is AppendNotCommitted of the command step', async () => {
+  const f = writeFixture({ commandFails: 'AppendNotCommitted' });
+  const out = await f.invoke();
+  assert.equal(out.status, 503);
+  assert.deepEqual([out.body.code, out.body.stage], ['AppendNotCommitted', 'command']);
+  assert.match(out.body.message, /[가-힣]/);
+});
+
+/** A clinical read route whose provide record B2 judged `code`; the route never sends the body it read. */
+function readFailure(code) {
+  const tx = { studyState: { findUnique: async () => state }, $executeRaw: async () => {}, $queryRaw: async () => [] };
+  const fail = async () => { throw Object.assign(new Error(code), { code }); };
+  return new ClinicalRoutes({ records: { begin: () => ({ end() {}, transactionWithRecords: fail }) },
+    context: { facts: async () => ({ actor: {} }), scope: async () => ({ studyId: uid, managingInstitutionId: 'inst-a' }),
+      study: async () => ({ studyId: uid, managingInstitutionId: 'inst-a' }) },
+    store: { unit: async () => ({ studyId: uid }) } }, () => { throw new Error('read cannot prepare a write'); });
+}
+const refusal = async action => {
+  try { await action(); return null; } catch (error) { if (!error.getStatus) throw error; return { status: error.getStatus(), ...error.getResponse() }; }
+};
+test('B2-COMMIT reads, lists, the assignment read and its follow-up answer the provide step; a workflow answers the command step', async () => {
+  for (const [code, expected] of [['AppendNotCommitted', 'ProvideNotRecorded'], ['CommitUnknown', 'OutcomeUnknown']]) {
+    const routes = readFailure(code);
+    for (const [name, call] of [['read', () => routes.read({}, 'finding', id, async () => ({ items: [] }))],
+      ['collection', () => routes.collection({}, 'GET studies/:uid/findings', 'finding', async () => ({ items: [] }), uid)],
+      ['assignment', () => routes.assignment({}, uid, async () => ({ revision: 1 }))]]) {
+      const out = await refusal(call);
+      assert.deepEqual([out.status, out.code, out.stage], [503, expected, 'provide'], `${name} ${code}`);
+      for (const word of PROVIDE_WORDS.forbidden) assert.doesNotMatch(out.message, word, `${name} ${code}`);
+    }
+    const workflow = await refusal(() => routes.workflow({}, async () => 'changed'));
+    assert.deepEqual([workflow.status, workflow.code, workflow.stage],
+      [503, code === 'CommitUnknown' ? 'OutcomeUnknown' : 'AppendNotCommitted', 'command'], `workflow ${code}`);
+  }
 });

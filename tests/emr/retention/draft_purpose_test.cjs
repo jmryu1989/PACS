@@ -790,7 +790,7 @@ const forward = new Proxy({}, { get: (_, key) => endDb.current[key] });
 const endService = P.configureDraftPurpose(new P.DraftPurposeDisposal(forward, new P.PurposeLedgerFile(ledgerDir()), null, NOW));
 endService.scheduleDestruction = u => { scheduled.push(u); };
 
-function endWorld({ commit, reject, confirmFails = 0 }) {
+function endWorld({ commit, reject, confirmFails = 0, ledger = null, refusal = null }) {
   const epoch = randomUUID(), work = unit();
   const durable = { draft: { uid: UID, author: AUTHOR, findings: 'SYN end text', conclusion: 'SYN c', recommendation: '', baseVersion: 0,
     citations: null, structured: null, revision: 3, present: true, updatedAt: new Date(START), workUnit: work, workSince: new Date(START),
@@ -830,8 +830,11 @@ function endWorld({ commit, reject, confirmFails = 0 }) {
       studyState: { update: async ({ data }) => ({ ...structuredClone(study), ...data }) },
     };
     const value = await fn(tx, async () => {});
+    if (refusal) throw refusal;                        // the callback's own refusal: nothing committed
     if (commit) Object.assign(durable, local);
     if (reject) throw Object.assign(new Error('SYN answer lost'), { code: 'P1017' });
+    // B2-COMMIT: B2 judged this transaction's COMMIT itself (store.ts LedgerFailure), after it settled either way.
+    if (ledger) throw new LedgerFailure(ledger);
     return value;
   };
   const c = { roles: ['radiologist'], institution: 'syn-inst', sub: 'syn-sub', actor: AUTHOR, kind: 'user' };
@@ -909,6 +912,97 @@ for (const [name, call] of Object.entries(ENTRY)) {
   });
 }
 
+// ── B2-COMMIT: B2's commit judgement reaching the draft entry points (plan section 3, B6/B7, K12) ──
+//
+// B2 now throws when a draft transaction's COMMIT did not commit (AppendNotCommitted) or cannot be told (CommitUnknown).
+// The end paths still answer from P's own judgement of the end; a plain refusal keeps its own answer. A change that is not
+// an end answers B2's two outcomes with two codes; a view whose read record failed sends no body.
+const { LedgerFailure } = require(path.join(api, 'src/emr-runtime/store.ts'));
+const { ForbiddenException } = require(path.join(api, 'node_modules/@nestjs/common'));
+const UNKNOWN_WORDS = [/그대로/, /저장되지 않았습니다/];
+
+for (const [name, call] of Object.entries(ENTRY)) {
+  test(`B2-COMMIT ${name}: B2's commit failure is answered from P's judgement of the end; a refusal keeps its answer`, async () => {
+    const run = async mode => {
+      scheduled.length = 0;
+      const w = endWorld(mode);
+      return { w, out: await outcome(call(w)), durableEnded: w.durable.ended.has(w.work) };
+    };
+    for (const ledger of ['AppendNotCommitted', 'CommitUnknown']) {
+      // B2 says it did not commit (or cannot tell) and P reads the end absent: not saved, nothing destroyed.
+      let r = await run({ commit: false, reject: false, ledger });
+      assert.equal(r.durableEnded, false);
+      assert.deepEqual([r.out.status, r.out.code], [503, 'REPORT_DRAFT_END_NOT_SAVED'], ledger);
+      assert.deepEqual(scheduled, []);
+      // P reads the end committed: saved, re-read it; the destruction is scheduled.
+      r = await run({ commit: true, reject: false, ledger });
+      assert.deepEqual([r.out.status, r.out.code], [503, 'REPORT_DRAFT_END_SAVED'], ledger);
+      assert.deepEqual(scheduled, [r.w.work]);
+      // P cannot read the end: unknown, never "as it was".
+      r = await quiet(() => run({ commit: false, reject: false, ledger, confirmFails: 1 }));
+      assert.deepEqual([r.out.status, r.out.code], [503, 'REPORT_DRAFT_END_UNCONFIRMED'], ledger);
+      for (const word of UNKNOWN_WORDS) assert.doesNotMatch(r.out.message, word);
+      await settle();
+    }
+    // A refusal inside the transaction keeps its own answer: P reads the end absent and the refusal is what is sent.
+    const r = await run({ commit: false, reject: false, refusal: new ForbiddenException('SYN refused') });
+    assert.equal(r.out.status, 403);
+    assert.deepEqual(scheduled, []);
+  });
+}
+
+test('B2-COMMIT a draft save that is no end answers B2\'s not-committed and unknown with two codes, input kept', async () => {
+  const save = w => w.service.putReport(UID, { ...w.body, findings: 'SYN changed text', conclusion: 'SYN c', recommendation: '',
+    baseVersion: 0, citationIds: [], structureIds: [] }, w.c, null, w.facts);
+  const answers = {};
+  for (const ledger of ['AppendNotCommitted', 'CommitUnknown']) {
+    scheduled.length = 0;
+    const w = endWorld({ commit: false, reject: false, ledger });
+    // This work keeps no citation or structure: the evidence service answers empty lists.
+    w.service.reportEvidence = { reportLimitChecked: fn => fn(), draftCitations: async () => ({ entries: [] }),
+      draftStructure: async () => ({ entries: [] }) };
+    answers[ledger] = await outcome(save(w));
+    assert.equal(answers[ledger].status, 503, ledger + ' ' + answers[ledger].message);
+    assert.match(answers[ledger].message, /[가-힣]/);
+    assert.equal(w.durable.draft.findings, 'SYN end text', 'nothing was stored');
+    assert.deepEqual(scheduled, []);
+  }
+  assert.equal(answers.AppendNotCommitted.code, 'REPORT_DRAFT_NOT_COMMITTED');
+  assert.equal(answers.CommitUnknown.code, 'REPORT_DRAFT_COMMIT_UNKNOWN');
+  for (const word of UNKNOWN_WORDS) assert.doesNotMatch(answers.CommitUnknown.message, word);
+});
+
+test('B2-COMMIT a draft view whose read record did not commit or cannot be told sends no body and says nothing of the draft', async () => {
+  for (const [ledger, code] of [['AppendNotCommitted', 'REPORT_DRAFT_VIEW_NOT_RECORDED'], ['CommitUnknown', 'REPORT_DRAFT_VIEW_UNCONFIRMED']]) {
+    const w = endWorld({ commit: false, reject: false, ledger });
+    const study = { uid: UID, institutionId: 'syn-inst', draftEpoch: randomUUID(), rs: 'N', ss: 'Verified', em: 'N' };
+    const reader = new RD.PacsReportDraft({ $transaction: async fn => fn({}) }, w.studyAccess,
+      { visible: () => true, gate: async () => study, myDraft: async () => structuredClone(w.durable.draft) }, {}, {}, {});
+    const out = await outcome(reader.readDraft(UID, w.c, w.facts));
+    assert.deepEqual([out.status, out.code], [503, code], ledger);
+    assert.equal(out.value, undefined, 'no draft body is sent');
+    for (const word of [/저장되지 않았습니다/, /그대로/]) assert.doesNotMatch(out.message, word);
+  }
+});
+
+test('B2-COMMIT a refusal whose snapshot view cannot be recorded answers the view code, not an unmapped failure', async () => {
+  for (const [ledger, code] of [['AppendNotCommitted', 'REPORT_DRAFT_VIEW_NOT_RECORDED'], ['CommitUnknown', 'REPORT_DRAFT_VIEW_UNCONFIRMED']]) {
+    const w = endWorld({ commit: false, reject: false });
+    let calls = 0;
+    const refusal = Object.assign(new ForbiddenException({ code: 'SYN_REFUSED', snapshot: { findings: 'SYN' } }), {});
+    // The first transaction refuses with a view of its captured draft; the second records that view and B2 judges it.
+    w.facts.request.work.transactionWithRecords = async fn => {
+      calls++;
+      await fn({ $executeRaw: async () => 0, $queryRaw: async () => [{ uid: UID, institutionId: 'syn-inst', draftEpoch: 'E' }] },
+        async () => {});
+      if (calls === 2) throw new LedgerFailure(ledger);
+    };
+    const out = await outcome(w.service.draftTransaction(UID, w.c, null, 'E', async () => {}, async () => { throw refusal; },
+      { source: null }, { facts: w.facts, surface: 'PUT studies/:uid/report', action: 'provide-prepared' }));
+    assert.equal(calls, 2, 'the view was recorded before the refusal would be sent');
+    assert.deepEqual([out.status, out.code], [503, code], ledger);
+  }
+});
 // ── CD-09-C: format 2, the P release's format-1 ledgers, and the composed startup gate ──
 //
 // claude-plan-cd-09c.md sections 2-5 with the plan review's section 6 corrections. Format-1 ledgers are the bytes the P
@@ -1271,39 +1365,53 @@ test('C07 RC4 a format-1 completion is not counted as a format-2 operational com
 
 // ── CD-09-C C-F4: the commit judgement every retention unit shares (commit-judgement.ts), with P as its consumer ──
 
-/** A database double for the shared judgement: each transaction's statements in order, and where it can fail. */
+/** A database double for the shared judgement. A locking read of a row the attempt still holds waits - for ever, unless
+ * the reading transaction bounded its lock wait, when it fails as PostgreSQL's lock_timeout does. `fail` is where the
+ * judgement's own transaction fails: its connection, that lock, or its COMMIT answer. B2-COMMIT replaced the earlier
+ * statement-list double: the judgement's contract is its behaviour, not its SQL text (AGENTS 1-B 14). */
 function judgeDb(fail = null) {
-  const log = [];
-  const tx = {
-    $executeRaw: async (strings) => { log.push(strings.join('?')); if (fail === 'lock') throw Object.assign(new Error('lock timeout'), { code: 'P2010' }); return 0; },
-    $queryRaw: async (strings) => { log.push(strings.join('?')); return []; },
-  };
-  return { log, $transaction: async (work) => {
-    log.push('BEGIN');
+  const seen = { transactions: [] };
+  return { seen, $transaction: async (work, options) => {
+    const t = { options, boundedLockWait: false };
+    seen.transactions.push(t);
     if (fail === 'connect') throw new Error('connection lost');
+    const tx = {
+      $executeRaw: async strings => { if (/lock_timeout\s*=\s*'[1-9][0-9]*(ms|s)?'/.test(strings.join(''))) t.boundedLockWait = true; return 0; },
+      $queryRaw: async strings => {
+        if (fail === 'lock' && /\bFOR (UPDATE|SHARE|NO KEY UPDATE|KEY SHARE)\b/.test(strings.join(''))) {
+          if (!t.boundedLockWait) await new Promise(() => {});
+          throw Object.assign(new Error('canceling statement due to lock timeout'), { code: 'P2010', meta: { code: '55P03' } });
+        }
+        return [];
+      },
+    };
     const value = await work(tx);
     if (fail === 'commit') throw new Error('error answering COMMIT');
-    log.push('COMMIT'); return value;
+    return value;
   } };
 }
+const within = (promise, ms = 2000) => Promise.race([promise,
+  new Promise((_, reject) => setTimeout(() => reject(new Error('the judgement did not finish within its bound')), ms))]);
+const finite = options => Number.isFinite(options?.maxWait) && Number.isFinite(options?.timeout);
 
 test('C08 C-F4 the shared judgement reads in a new transaction with a bounded lock wait, and anything it cannot read is unknown', async () => {
   const J = require(path.join(api, 'src/emr-retention/commit-judgement.ts'));
   for (const outcome of ['committed', 'not-committed', 'unknown']) {
     const db = judgeDb();
-    let seen = null;
-    assert.equal(await J.judgeSettled(db, async tx => { seen = db.log.slice(); await tx.$queryRaw(['SELECT 1']); return outcome; }), outcome);
-    // The reader runs after the lock wait is bounded, inside a transaction of its own.
-    assert.deepEqual(seen, ['BEGIN', "SET LOCAL lock_timeout = '3s'"]);
-    assert.deepEqual(db.log, ['BEGIN', "SET LOCAL lock_timeout = '3s'", 'SELECT 1', 'COMMIT']);
+    assert.equal(await J.judgeSettled(db, async tx => { await tx.$queryRaw(['SELECT 1']); return outcome; }), outcome);
+    assert.equal(db.seen.transactions.length, 1, 'the reader runs in one transaction of its own');
+    assert.ok(finite(db.seen.transactions[0].options), 'its connection wait and run time are bounded');
   }
-  // The read cannot be made: the lock not granted in time, a lost connection, an error answering; or the reader throws, or
-  // answers something that is not one of the three. Each is unknown, never committed or not committed.
+  // A row the attempt still holds: the read ends unknown within its bound, never waits for ever.
   let reached = 0;
-  for (const fail of ['lock', 'connect', 'commit']) {
+  assert.equal(await within(J.judgeSettled(judgeDb('lock'), async tx => {
+    reached++; await tx.$queryRaw(['SELECT 1 FROM syn_attempt FOR UPDATE']); return 'not-committed'; })), 'unknown', 'lock');
+  // The read cannot be made: a lost connection, an error answering; or the reader throws, or answers something that is
+  // not one of the three. Each is unknown, never committed or not committed.
+  for (const fail of ['connect', 'commit']) {
     assert.equal(await J.judgeSettled(judgeDb(fail), async () => { reached++; return 'not-committed'; }), 'unknown', fail);
   }
-  assert.equal(reached, 1, 'only the failed COMMIT reached the reader');
+  assert.equal(reached, 2, 'a lost connection never reached the reader');
   assert.equal(await J.judgeSettled(judgeDb(), async () => { throw new Error('row read failed'); }), 'unknown');
   assert.equal(await J.judgeSettled(judgeDb(), async () => true), 'unknown');
 });
@@ -1329,10 +1437,14 @@ test('C08b C-F4 the destroyer answer A receives follows the judgement: receipt, 
 });
 
 test('C08c C-F4 P judges through the shared judgement: its read is bounded and a read that fails is unknown', async () => {
-  const target = { kind: 'destroyed', unit: unit(), startedSeq: 1, before: { seq: 0, lastCompletedUnit: null } };
-  for (const fail of ['lock', 'connect', 'commit']) assert.equal(await P.judgeCommit(judgeDb(fail), target, null), 'unknown', fail);
+  const targets = [{ kind: 'destroyed', unit: unit(), startedSeq: 1, before: { seq: 0, lastCompletedUnit: null } },
+    { kind: 'ended', uid: UID, author: AUTHOR, unit: unit(), revision: 3 }, { kind: 'reapplied', units: [unit()] }];
+  for (const target of targets) {
+    for (const fail of ['lock', 'connect', 'commit'])
+      assert.equal(await within(P.judgeCommit(judgeDb(fail), target, null)), 'unknown', `${target.kind} ${fail}`);
+  }
   const db = judgeDb();
   await P.judgeCommit(db, { kind: 'reapplied', units: [unit()] }, null);
-  assert.deepEqual(db.log.slice(0, 2), ['BEGIN', "SET LOCAL lock_timeout = '3s'"]);
-  assert.equal(db.log.at(-1), 'COMMIT');
+  assert.equal(db.seen.transactions.length, 1, 'P reads in one transaction of its own');
+  assert.ok(finite(db.seen.transactions[0].options));
 });
