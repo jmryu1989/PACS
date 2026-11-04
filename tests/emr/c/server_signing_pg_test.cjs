@@ -400,6 +400,132 @@ test('T-HISTORY addendum/cancellation preserve the exact original and reject a s
   assert.equal((await counts(cmd.recordId)).signatures,3);
 });
 
+// CD-09 W-G TG9: input -> the branch observed on the database (holder, waiter, probes, what the boundary
+// returned) -> the approval result. Lock keys are built here from their stored JSON form.
+const witnessLog = (label, value) => console.log('WG-WITNESS ' + JSON.stringify({ label, ...value }));
+const probeRollback = new Error('probe completed; release by rollback');
+async function probe(label, statement) {
+  let code = 'acquired';
+  try { await db.$transaction(async tx => { await statement(tx); throw probeRollback; }); }
+  catch (error) { if (error !== probeRollback) code = error.meta?.code ?? error.code ?? String(error); }
+  witnessLog(label, { code }); return code;
+}
+async function holdKey(key) {
+  let entered, release;
+  const ready = new Promise(resolve => { entered = resolve; }), stop = new Promise(resolve => { release = resolve; });
+  const pending = db.$transaction(async tx => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key},0))::text`;
+    const [{ pid }] = await tx.$queryRaw`SELECT pg_backend_pid() AS pid`;
+    entered(pid); await stop;
+  }, { timeout: 20000, maxWait: 5000 });
+  pending.catch(() => {});
+  const pid = await Promise.race([ready, pending.then(() => { throw new Error('holder ended before ready'); })]);
+  return { pid, async end() { release(); await pending.catch(() => {}); } };
+}
+async function waiterOf(blocker, label) {
+  for (let i = 0; i < 300; i++) {
+    const rows = await db.$queryRaw`SELECT pid, wait_event_type, left(query, 160) AS query, pg_blocking_pids(pid) AS blockers
+      FROM pg_stat_activity WHERE ${blocker} = ANY(pg_blocking_pids(pid))`;
+    if (rows.length) { witnessLog(label, { blocker, rows }); return rows[0]; }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error(label + ': waiter was not observed');
+}
+const signingCounts = async (cmd, kid) => ({ ...await counts(cmd.recordId),
+  operations: (await db.$queryRaw`SELECT count(*)::int AS n FROM emr_signing.operation WHERE operation_id=${cmd.operationId}`)[0].n,
+  keyHistory: (await db.$queryRaw`SELECT count(*)::int AS n FROM emr_signing.key_history WHERE kid=${kid}`)[0].n });
+const doctorKid = async doctor => (await db.$transaction(tx => new OnlineSigningStore().currentKey(tx, 'hospital-1', doctor))).kid;
+
+test('TG9 (E5) an approval takes its record fixed key before the operation row, the report boundary and the signer key', async () => {
+  const cmd = await report('doctor-1'), holder = await holdKey(JSON.stringify(['emr-fixed-record', cmd.recordId]));
+  let pending, out;
+  try {
+    pending = service.approval.approve(request('doctor-1'), cmd).then(value => ({ value }), error => ({ error }));
+    const waiter = await waiterOf(holder.pid, 'approval-at-fixed');
+    const held = await db.$queryRaw`SELECT granted FROM pg_locks WHERE pid=${waiter.pid} AND locktype='advisory' AND objsubid=1
+      AND classid::bigint=((hashtextextended(${JSON.stringify(['emr-fixed-record', cmd.recordId])},0) >> 32) & 4294967295)
+      AND objid::bigint=(hashtextextended(${JSON.stringify(['emr-fixed-record', cmd.recordId])},0) & 4294967295)`;
+    witnessLog('approval-fixed-key', { held });
+    assert.deepEqual(held.map(r => r.granted), [false], 'the approval waits at its record key');
+    // An uncommitted operation row is invisible to a SELECT; a second INSERT of the same id would wait on it.
+    assert.equal(await probe('operation-insert', async tx => {
+      await tx.$executeRaw`SET LOCAL lock_timeout = '200ms'`;
+      await tx.$executeRaw`INSERT INTO emr_signing.operation(operation_id,fingerprint) VALUES (${cmd.operationId},'wg-probe')`;
+    }), 'acquired', 'the operation row is not written yet');
+    assert.equal(await probe('report-row', tx => tx.$queryRaw`SELECT record_id FROM c2_fixture.report WHERE record_id=${cmd.recordId} FOR UPDATE NOWAIT`),
+      'acquired', 'the report boundary is not locked yet');
+    const signer = await db.$transaction(async tx => {
+      const [row] = await tx.$queryRaw`SELECT pg_try_advisory_xact_lock(hashtextextended(${JSON.stringify(['c2-key', 'hospital-1', 'doctor-1'])},0)) AS free`;
+      return row.free;
+    });
+    witnessLog('signer-key', { free: signer });
+    assert.equal(signer, true, 'the signer key is free');
+  } finally { await holder.end(); if (pending) out = await pending; }
+  witnessLog('approval-after-release', { error: out?.error && String(out.error), versionId: out?.value?.versionId });
+  assert.ok(out.value, String(out.error));
+  assert.deepEqual(await counts(cmd.recordId), { signatures: 1, events: 1, drafts: 0, published: true });
+});
+
+test('TG9 an approval whose report boundary returns an attachment is refused before signing and leaves nothing', async () => {
+  const cmd = await report('doctor-1'), kid = await doctorKid('doctor-1');
+  await db.$executeRaw`UPDATE c2_fixture.report SET current=jsonb_set(current,'{attachments}',
+    ${JSON.stringify([{ kind: 'measurement', recordId: 'synthetic-source', versionId: '1', sha256: 'b'.repeat(64) }])}::jsonb) WHERE record_id=${cmd.recordId}`;
+  const returned = [], published = [];
+  const observed = core({ reports: { ...reports,
+    async lock(...args) { const current = await reports.lock(...args); returned.push(current.attachments); return current; },
+    async publish(...args) { published.push(args[3].versionId); return reports.publish(...args); } } });
+  const before = await signingCounts(cmd, kid);
+  const outcome = await observed.approval.approve(request('doctor-1'), cmd).then(value => ({ value }), error => ({ error }));
+  witnessLog('attachment-approval', { returned, published, code: outcome.error?.code, versionId: outcome.value?.versionId });
+  assert.equal(returned.length, 1); assert.equal(returned[0].length, 1, 'the boundary returned the attachment');
+  assert.equal(outcome.error?.code, 'AttachmentKindUnsupported', String(outcome.error ?? 'signed'));
+  assert.deepEqual(published, []);
+  assert.deepEqual(await signingCounts(cmd, kid), before);
+  assert.deepEqual(before, { signatures: 0, events: 0, drafts: 1, published: false, operations: 0, keyHistory: before.keyHistory });
+});
+
+test('TG9 (E2) a signing predecessor must be a version C2 signed for this record with its stored digest', async t => {
+  const editFacts = async (recordId, edit) => {
+    const [row] = await db.$queryRaw`SELECT current FROM c2_fixture.report WHERE record_id=${recordId}`;
+    const current = row.current; edit(current.facts);
+    await db.$executeRaw`UPDATE c2_fixture.report SET current=${JSON.stringify(current)}::jsonb WHERE record_id=${recordId}`;
+    return current.facts;
+  };
+  const other = await report('doctor-1'), otherFirst = await service.approval.approve(request('doctor-1'), other);
+  const cases = {
+    missing: { edit: f => { f.publishedVersion = { ...f.publishedVersion, versionId: crypto.randomUUID() }; }, code: 'SigningPredecessorMissing' },
+    changed: { edit: f => { f.publishedVersion = { ...f.publishedVersion, sha256: 'c'.repeat(64) }; }, code: 'SigningPredecessorChanged' },
+    'other-record': { edit: f => { f.publishedVersion = { recordId: other.recordId, versionId: otherFirst.versionId, sha256: otherFirst.versionSha256 }; },
+      code: 'SigningPredecessorUnsupported' },
+  };
+  for (const [name, { edit, code }] of Object.entries(cases)) await t.test(name, async () => {
+    const cmd = await report('doctor-1'), first = await service.approval.approve(request('doctor-1'), cmd);
+    const facts = await editFacts(cmd.recordId, edit);
+    const stored = await db.$queryRaw`SELECT version_id, outcome->>'versionSha256' AS sha256 FROM emr_signing.signed_version WHERE record_id=${cmd.recordId}`;
+    witnessLog('predecessor-input', { name, published: facts.publishedVersion, stored });
+    const addendum = { ...cmd, operationId: crypto.randomUUID(), action: 'addendum', expectedClaimGeneration: facts.claimGeneration,
+      expectedPublishedVersionId: facts.publishedVersion.versionId, text: { ...cmd.text, findings: '추가 기재' } };
+    const before = await counts(cmd.recordId);
+    const outcome = await service.approval.approve(request('doctor-1'), addendum).then(value => ({ value }), error => ({ error }));
+    witnessLog('predecessor-result', { name, code: outcome.error?.code, error: outcome.error && String(outcome.error), signed: outcome.value?.versionId });
+    assert.equal(outcome.error?.code, code, String(outcome.error ?? 'signed'));
+    assert.deepEqual(await counts(cmd.recordId), before, 'no signature, event or publication');
+    assert.equal(before.signatures, 1); assert.equal(first.recordId, cmd.recordId);
+  });
+  await t.test('opening approval over a signed history', async () => {
+    const cmd = await report('doctor-1'), initial = (await db.$queryRaw`SELECT current FROM c2_fixture.report WHERE record_id=${cmd.recordId}`)[0].current.facts;
+    await service.approval.approve(request('doctor-1'), cmd);
+    await editFacts(cmd.recordId, f => Object.assign(f, initial));
+    const before = await counts(cmd.recordId);
+    witnessLog('opening-input', { facts: initial, signatures: before.signatures });
+    const outcome = await service.approval.approve(request('doctor-1'), { ...cmd, operationId: crypto.randomUUID() })
+      .then(value => ({ value }), error => ({ error }));
+    witnessLog('opening-result', { code: outcome.error?.code, error: outcome.error && String(outcome.error), signed: outcome.value?.versionId });
+    assert.equal(outcome.error?.code, 'SigningPredecessorRequired', String(outcome.error ?? 'signed'));
+    assert.equal((await counts(cmd.recordId)).signatures, before.signatures);
+  });
+});
+
 test('T-LOG key custody changes remain non-clinical and carry real operator facts', async () => {
   const rows = await db.$queryRaw`SELECT stream,retention_class,payload::jsonb AS facts FROM emr_access.access_entry
     WHERE payload::jsonb->>'surface'='server:doctor-key-management'`;
