@@ -11,6 +11,7 @@ import { ContractError, refuse, string } from '../emr-contract/validation';
 import { snapshotFromRows, transactionScope, withSnapshot } from '../emr-runtime/context';
 import type { ClauseRow, HoldRow, RequestRow } from '../emr-runtime/contract';
 import { destructionRecordDecoder } from './destruction-record';
+import type { RetentionAdapter } from './retention-gate';
 import { AppendOnlyLedger, LedgerIo, LedgerEntry as FileEntry, LedgerView as FileView, ledgerDirectory, nodeLedgerIo,
   replaceAtomically } from './ledger-file';
 
@@ -709,6 +710,28 @@ export class DraftPurposeDisposal {
     if (answer) throw answer;
     return result!;
   }
+}
+
+// What the server's own sweep may leave without that being anything but a normal open unit (a hold, a delivery still
+// in flight, nothing left): the classification main.ts used before the gate was composed.
+const SERVER_SETTLED: readonly DestructionOutcome['outcome'][] = ['destroyed', 'reapplied', 'absent', 'held', 'delivery-pending'];
+
+/**
+ * The draft purpose unit in the server's retention gate (retention-gate.ts). `service` builds the one disposal service
+ * when the gate opens this adapter, so a missing or backed-up ledger directory is this adapter's closure, named as such.
+ * open = openGate (match, re-apply, judge); afterOpen = the server's sweep of ended works.
+ */
+export function draftPurposeAdapter(service: () => DraftPurposeDisposal): RetentionAdapter {
+  let built: DraftPurposeDisposal | null = null;
+  const get = () => built ??= service();
+  return {
+    name: 'draft-purpose',
+    open: async () => {
+      const opened = await get().openGate();
+      return `${opened.reapplied} re-applied, ${opened.resolved} unfinished attempts closed`;
+    },
+    afterOpen: async () => ({ unsettled: (await get().sweep()).filter(r => !SERVER_SETTLED.includes(r.outcome)).length }),
+  };
 }
 
 let configured: DraftPurposeDisposal | null = null;

@@ -325,7 +325,14 @@ function database(state) {
       const rows = [...state.ended.values()].filter(r => !/WHERE "deliverySettled"/.test(text) || r.deliverySettled);
       return rows.map(r => ({ disposalUnitId: r.disposalUnitId, author: r.author, deliverySettled: r.deliverySettled }));
     }
-    if (/emr_access.holds_for/.test(text)) { state.log.push('holds'); return []; }
+    if (/emr_access.holds_for/.test(text)) {
+      state.log.push('holds');
+      // CD-09-C: the holds a case stored for this record (rows as P06's hold() builds them), and their clause versions.
+      return (state.holds ?? []).filter(h => JSON.parse(h.body).recordId === values[0]).map(h => ({ hold_id: h.holdId, phase: h.phase, body: h.body }));
+    }
+    if (/emr_access.clause_versions/.test(text))
+      return (clauses.get(values[0]) ?? []).map(c => ({ law: c.law, article: c.article, publication: c.publication,
+        published_at: c.publishedAt, effective_at: c.effectiveAt }));
     if (/^DELETE FROM "ReportDraftPurposeEnd"/.test(text)) { const n = state.ended.has(values[0]) ? 1 : 0; writes.push(s => s.ended.delete(values[0])); return n; }
     if (/^UPDATE "PurposeLedgerAnchor" SET seq/.test(text)) {
       const move = s => Object.assign(s.anchor, { seq: values[0], initialized: true, lastCompletedUnit: values[1], lastCompletedAt: values[2] });
@@ -1207,12 +1214,26 @@ test('C06 RC6 the composed gate opens adapters in order, each on its own; the fi
   assert.equal(await start([P.draftPurposeAdapter(() => again), second(calls)], calls), null);
   assert.equal(results[0].reapplied, 0, 'idempotent at the next start');
   assert.deepEqual(fs.readFileSync(restored.ledger.file), restored.bytes);
-  // (e) a normal pending work is still an open adapter (the sweep reports it); a sweep that throws closes the server.
-  row = ended({ deliverySettled: false }); state = stateWith([row]); ledger = ledgerFor(state.anchor.ledgerId); calls = [];
+  // (e) after every open: a work under a live hold is a normal open unit, nothing reported; a destruction the sweep
+  // could not finish is reported and the server still opens (as before the gate was composed); a sweep that throws
+  // closes it.
+  row = ended(); state = stateWith([row]); ledger = ledgerFor(state.anchor.ledgerId); calls = [];
+  state.holds = hold(P.draftRecordId(row.uid, row.author), '2026-11-01T00:30:00.000Z');
   p = new P.DraftPurposeDisposal(database(state), ledger, null, NOW);
-  const errors = [];
+  let errors = [];
   await new G.RetentionGate([P.draftPurposeAdapter(() => p), second(calls)]).open({ log: () => {}, error: (...a) => errors.push(a.join(' ')) });
-  assert.ok(state.ended.has(row.disposalUnitId), 'pending, not destroyed and not a closure');
+  assert.ok(state.log.includes('holds'), 'the sweep read the hold');
+  assert.ok(state.ended.has(row.disposalUnitId), 'held, not destroyed and not a closure');
+  assert.deepEqual([phasesOf(ledger, row.disposalUnitId), errors], [[], []]);
+  row = ended(); state = stateWith([row]); ledger = ledgerFor(state.anchor.ledgerId); calls = []; errors = [];
+  p = new P.DraftPurposeDisposal(database(state), ledger, null, NOW);
+  const real = P.draftPurposeAdapter(() => p);
+  // The sweep's deletion fails to commit (set after the open, whose own transaction must commit).
+  const failing = { name: real.name, open: real.open, afterOpen: async () => { state.commitFails = 1; return real.afterOpen(); } };
+  await quiet(() => new G.RetentionGate([failing, second(calls)]).open({ log: () => {}, error: (...a) => errors.push(a.join(' ')) }));
+  assert.equal(state.commitFails, 0, 'the failing commit was reached');
+  assert.ok(state.ended.has(row.disposalUnitId));
+  assert.deepEqual(phasesOf(ledger, row.disposalUnitId), ['started', 'failed']);
   assert.equal(errors.length, 1, 'the unsettled work is reported');
   row = ended(); state = stateWith([row]); ledger = ledgerFor(state.anchor.ledgerId); calls = [];
   p = new P.DraftPurposeDisposal(database(state), ledger, null, NOW);
