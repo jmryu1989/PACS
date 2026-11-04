@@ -290,6 +290,8 @@ REQ-S9-U0a-PRE-ORDER → RISK-B1-03/05/15/41/42/45/57/58·PRE-X1~X3·PRE-P3(clas
 
 순수 Node 계약 시험 `node --test tests/emr_contract_test.cjs`는 D589/D591의 법정 기록 분류·접속사건 형식·서명 payload·판독 수명주기와 적법 기본값을 결속한다.
 
+CD-09-P/C 초안 목적 원장의 순수 시험은 `node --test tests/emr/retention/draft_purpose_test.cjs tests/emr/retention/ledger_file_test.cjs`와 `python -B tests/emr/retention/ledger_location_test.py`다. 판본1 원장 fixture(`tests/fixtures/retention/`)는 CD-09-P 릴리스(1f8249a)의 writer가 직접 만든 바이트이며 생성 명령은 `make_v1_ledger.cjs` 머리에 있다. 손으로 고치지 않고, 바꿔야 하면 그 명령으로 다시 만든다. C 절(C01–C07)은 P 원장의 업그레이드·판본 거절·R1/R4·판본2 시각과 operation·삭제와 anchor의 같은 트랜잭션(분리 트랜잭션 반례 포함)·합성 기동 gate를 본다. 두 번째 gate adapter는 시험 쪽 대역이며 제품 adapter가 아니다. `ledger_location_test.py`는 선언된 Compose 구성과 백업 도구의 선택 규칙만 대조하고 백업을 실행하지 않는다. PostgreSQL·served 동작은 `tests/e2e/test_draft_purpose.py`다.
+
 현행 PostgreSQL 접속기록 원장은 `.github/workflows/validate.yml`의 배포 안전·공개 경계·복원 시험을 따른다. `emr/units/b.json`은 배포 catalog·복원 설명·REQ-B2R→RISK→TEST 연결과 C 시험이 읽는 소유 경계를 남기며, migration·case·mutant 정확 목록을 중복 선언하지 않는다. `scripts/emr-compose.py check`는 Compose의 런타임 자격·설치 비밀 비노출·state 볼륨·기동 순서·운영 이미지와 host bind 금지를 확인한다. 계약 시험은 Node 실행 결과와 TAP SKIP/TODO 거절로 판정하며, G3 선택·수집 일치는 `candidate_ci`가 확인한다. 이전 B1 성능 관문과 `emr-b.yml` 참조는 역사 기록이며 현행 출시 조건이 아니다.
 
 
