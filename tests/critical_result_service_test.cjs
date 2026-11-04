@@ -1931,9 +1931,10 @@ test('WV3 a fixed-record holder on the study: create and supersede wait for it b
   const run = async (label, uid, call, requestId) => {
     const s = await fixedSlot(w, uid);
     const held = await holdFixed(w, uid);
+    let pending = null;
     try {
       assert.deepEqual(held.advisory.map(a => [a.classid, a.objid, a.objsubid]), [[s.classid, s.objid, 1]], 'the holder owns the contract key');
-      const pending = call();
+      pending = call();
       const waiter = await waiterBehind(w, held.pid, pending);
       assert.ok(waiter, label + ': the write never waited on the study fixed-record key (it ran without it)');
       assert.deepEqual([waiter.locktype, waiter.classid, waiter.objid, waiter.objsubid, waiter.mode], ['advisory', s.classid, s.objid, 1, 'ExclusiveLock'],
@@ -1946,20 +1947,21 @@ test('WV3 a fixed-record holder on the study: create and supersede wait for it b
       assert.equal(out.replayed, false, label);
       const head = await headWitness(w, uid);
       assert.equal((await w.record(requestId)).sourceVersion, head.report, label + ': the witnessed head is pinned');
-    } finally { await held.release(); }
+    } finally { await held.release(); if (pending) await pending.catch(() => {}); }
   };
   await run('create', UID, () => w.svc.create(UID, S(), createBody(S(), id(4302), 'P', 1)), id(4302));
   await run('supersede', UID2, () => w.svc.supersede(id(4301), S(), supersedeBody(S(), id(4303), 1, 1)), id(4303));
   // held past the 3 s lock timeout: 503 BUSY, nothing written, the same request applies later
   await w.svc.cancel(id(4302), S(), cancelBody(S(), id(4304)));
   const held = await holdFixed(w, UID);
+  let pending = null;
   try {
     const counts = await w.count();
-    const pending = w.svc.create(UID, S(), createBody(S(), id(4305), 'P', 1));
+    pending = w.svc.create(UID, S(), createBody(S(), id(4305), 'P', 1));
     assert.ok(await waiterBehind(w, held.pid, pending), 'the timed-out create waited on the key');
     await assert.rejects(pending, code(503, 'CRITICAL_RESULT_BUSY'));
     assert.deepEqual([await w.count(), await w.receipt(id(4305))], [counts, null]);
-  } finally { await held.release(); }
+  } finally { await held.release(); if (pending) await pending.catch(() => {}); }
   assert.equal((await w.svc.create(UID, S(), createBody(S(), id(4305), 'P', 1))).replayed, false);
   await pause(1100);
   witness('WV3 deadlocks', { before, after: await deadlocks(w), slot });
@@ -1974,10 +1976,11 @@ test('WV4 the other side: with the recipient member lock held, create and supers
   const before = await deadlocks(w);
   const run = async (label, uid, call, requestId) => {
     const held = await holdMember(w, 'P');
+    let pending = null;
     try {
       const key = memberKey(SUBS.P);
       assert.deepEqual(held.advisory.map(a => [a.classid, a.objid, a.objsubid]), [[String(MEMBER_CLASS), String(key >>> 0), 2]], 'the holder owns the member key');
-      const pending = call();
+      pending = call();
       const waiter = await waiterBehind(w, held.pid, pending);
       assert.ok(waiter, label + ': the write never reached the member lock');
       assert.deepEqual([waiter.locktype, waiter.classid, waiter.objid, waiter.objsubid], ['advisory', String(MEMBER_CLASS), String(key >>> 0), 2]);
@@ -1986,7 +1989,7 @@ test('WV4 the other side: with the recipient member lock held, create and supers
       await held.release();
       assert.equal((await pending).replayed, false, label);
       assert.equal((await w.record(requestId)).sourceVersion, 1);
-    } finally { await held.release(); }
+    } finally { await held.release(); if (pending) await pending.catch(() => {}); }
   };
   await run('create', UID, () => w.svc.create(UID, S(), createBody(S(), id(4402), 'P', 1)), id(4402));
   await run('supersede', UID2, () => w.svc.supersede(id(4401), S(), supersedeBody(S(), id(4403), 1, 1)), id(4403));
@@ -2001,8 +2004,9 @@ test('WV5 a policy write queued behind a create that waits on the fixed-record k
   const held = await holdFixed(w, UID);
   let exclusive = null;
   const order = [];
+  let pending = null;
   try {
-    const pending = w.svc.create(UID, S(), createBody(S(), id(4501), 'P', 1));
+    pending = w.svc.create(UID, S(), createBody(S(), id(4501), 'P', 1));
     const waiter = await waiterBehind(w, held.pid, pending);
     assert.ok(waiter, 'the create waits on the study fixed-record key');
     const cvr = waiter.pid;
@@ -2019,21 +2023,22 @@ test('WV5 a policy write queued behind a create that waits on the fixed-record k
     assert.equal((await pending).replayed, false);
     await exclusive;
     assert.deepEqual(order, ['create', 'policy write']);
-  } finally { await held.release(); if (exclusive) await exclusive.catch(() => {}); }
+  } finally { await held.release(); if (pending) await pending.catch(() => {}); if (exclusive) await exclusive.catch(() => {}); }
 });
 
 test('WV6 a study row held past the lock timeout: the create waits on the row (after the fixed-record key), answers 503 BUSY, writes nothing; the same request applies later', async () => {
   const w = await world();
   await w.commit(UID, 'approve');
   const held = await holdStudy(w, UID);
+  let pending = null;
   try {
     const counts = await w.count();
-    const pending = w.svc.create(UID, S(), createBody(S(), id(4601), 'P', 1));
+    pending = w.svc.create(UID, S(), createBody(S(), id(4601), 'P', 1));
     const waiter = await waiterBehind(w, held.pid, pending);
     assert.ok(waiter && waiter.locktype !== 'advisory', 'the create waits on the study row');
     await assert.rejects(pending, code(503, 'CRITICAL_RESULT_BUSY'));
     assert.deepEqual([await w.count(), await w.receipt(id(4601))], [counts, null]);
-  } finally { await held.release(); }
+  } finally { await held.release(); if (pending) await pending.catch(() => {}); }
   assert.equal((await w.svc.create(UID, S(), createBody(S(), id(4601), 'P', 1))).replayed, false);
 });
 
@@ -2121,27 +2126,50 @@ test('WV8 a COMMIT refused by a deferred constraint: no success answer, no busin
   const w = await world();
   await w.commit(UID, 'approve');
   const MARK = 'SYNTHETIC-WV-COMMIT-REFUSED';
+  const settle = promise => promise.then(value => ({ value }), error => ({ error }));
   await w.base.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION public.wv_refuse_commit() RETURNS trigger LANGUAGE plpgsql AS
     $$ BEGIN RAISE EXCEPTION 'WV synthetic commit refusal' USING ERRCODE = 'P0001'; END $$`);
+  await w.base.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS public.wv_commit_probe (id integer NOT NULL)`);
+  await w.base.$executeRawUnsafe(`CREATE CONSTRAINT TRIGGER wv_refuse_probe AFTER INSERT ON public.wv_commit_probe DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION public.wv_refuse_commit()`);
   await w.base.$executeRawUnsafe(`CREATE CONSTRAINT TRIGGER wv_refuse_commit AFTER INSERT ON "CriticalResult" DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW WHEN (NEW.message = '${MARK}') EXECUTE FUNCTION public.wv_refuse_commit()`);
   const b2 = ledgerController(w);
   const body = createBody(S(), id(4801), 'P', 1, MARK);
   try {
-    const [deferred] = await w.base.$queryRaw`SELECT tgname, tgdeferrable, tginitdeferred FROM pg_trigger WHERE tgname = 'wv_refuse_commit'`;
-    assert.deepEqual([deferred.tgdeferrable, deferred.tginitdeferred], [true, true], 'witness: the refusal runs at COMMIT only');
+    const triggers = await w.base.$queryRaw`SELECT tgname, tgdeferrable, tginitdeferred, tgenabled::text AS enabled FROM pg_trigger
+      WHERE tgname IN ('wv_refuse_commit', 'wv_refuse_probe') ORDER BY tgname`;
+    witness('WV8 triggers', triggers);
+    assert.deepEqual(triggers.map(t => [t.tgdeferrable, t.tginitdeferred]), [[true, true], [true, true]], 'witness: the refusal runs at COMMIT only');
+    // The branch must exist before the product is judged: a plain interactive transaction over the same client whose
+    // COMMIT the same refusal fails. If that resolves, this harness cannot produce a COMMIT failure (no product claim).
+    const plain = await settle(w.base.$transaction(async tx => {
+      const [{ role }] = await tx.$queryRaw`SELECT current_setting('session_replication_role') AS role`;
+      await tx.$executeRaw`INSERT INTO public.wv_commit_probe (id) VALUES (1)`;
+      return role;
+    }));
+    const [{ n: probeRows }] = await w.base.$queryRaw`SELECT count(*)::int AS n FROM public.wv_commit_probe`;
+    witness('WV8 plain', { resolved: 'value' in plain, value: plain.value ?? null, error: plain.error ? String(plain.error.message).slice(0, 300) : null, probeRows });
+    assert.equal(probeRows, 0, 'precondition: the deferred refusal rolled the plain transaction back');
+    assert.ok(plain.error && /WV synthetic commit refusal/.test(String(plain.error.message)),
+      'precondition: the client surfaces the COMMIT failure of a plain interactive transaction');
+
     const counts = await w.count();
-    let answer = null;
-    await assert.rejects(b2.controller.create(UID, b2.request(S()), body), e => { answer = e; return true; });
-    witness('WV8 answer', { status: answer.getStatus?.() ?? null, name: answer.name, message: String(answer.message), journal: b2.journal });
-    assert.ok(!(typeof answer.getStatus === 'function' && answer.getStatus() < 300), 'never a success answer');
+    const answer = await settle(b2.controller.create(UID, b2.request(S()), body));
+    const record = await w.record(id(4801)), receipt = await w.receipt(id(4801));
+    const committed = (await w.base.$queryRaw`SELECT count(*)::int AS n FROM emr_access.attempt_outcome
+      WHERE result_kind = 'CriticalResult' AND result_id = ${id(4801)} AND outcome = 'committed'`)[0].n;
+    witness('WV8 answer', { resolved: 'value' in answer, value: answer.value ?? null, status: answer.error?.getStatus?.() ?? null,
+      name: answer.error?.name ?? null, message: answer.error ? String(answer.error.message).slice(0, 300) : null,
+      record: record !== null, receipt: receipt !== null, committed, journal: b2.journal.map(e => e[0]), seen: b2.seen });
     assert.equal(b2.seen.length, 1, 'the business transaction ran');
-    assert.deepEqual([await w.count(), await w.record(id(4801)), await w.receipt(id(4801))], [counts, null, null]);
-    const committed = await w.base.$queryRaw`SELECT count(*)::int AS n FROM emr_access.attempt_outcome
-      WHERE result_kind = 'CriticalResult' AND result_id = ${id(4801)} AND outcome = 'committed'`;
-    assert.equal(committed[0].n, 0, 'no committed B2 outcome for the rolled back write');
+    assert.ok(!('value' in answer && record === null), 'false success: a success answer for a write that did not commit');
+    assert.equal(record, null, 'the deferred refusal rolled the write back (if not, the branch was not produced)');
+    assert.ok('error' in answer && !(typeof answer.error.getStatus === 'function' && answer.error.getStatus() < 300), 'never a success answer');
+    assert.deepEqual([await w.count(), receipt, committed], [counts, null, 0], 'no business row, receipt or committed B2 outcome');
   } finally {
     await w.base.$executeRawUnsafe(`DROP TRIGGER IF EXISTS wv_refuse_commit ON "CriticalResult"`);
+    await w.base.$executeRawUnsafe(`DROP TABLE IF EXISTS public.wv_commit_probe`);
     await w.base.$executeRawUnsafe(`DROP FUNCTION IF EXISTS public.wv_refuse_commit()`);
   }
   const applied = await b2.controller.create(UID, b2.request(S()), body);
