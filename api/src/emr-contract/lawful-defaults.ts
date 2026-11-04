@@ -656,7 +656,8 @@ export async function withRetentionChange<T>(store: Pick<DisposalAuditStore, 'wi
 export interface DestructionReceipt { completedAt: string; method: 'operational-store-deletion' }
 /**
  * The destroyer could not tell whether its deletion committed (the confirmation read failed or timed out). Neither
- * completed nor failed is true of it: started stays the last record until the destroyer settles the attempt.
+ * completed nor failed is true of it: started stays the last record until the destroyer settles the attempt. The same
+ * holds for a destroyer that returned with an invalid receipt (DestructionReceiptInvalid).
  */
 export class CommitOutcomeUnknown extends Error {
   readonly code = 'DestructionCommitUnknown';
@@ -700,23 +701,35 @@ function confirmedAt(store: Pick<DisposalAuditStore, 'now'>, requestedAt: string
   const now = utc(typeof store.now === 'function' ? store.now() : new Date().toISOString());
   return now < requestedAt ? requestedAt : now;
 }
+/**
+ * The completion time of a destroyer that returned. Its receipt must be the operational deletion's; any other answer is
+ * refused. The destroyer did return, so its deletion may stand: the caller writes neither completed nor failed for it.
+ */
+function receiptCompletedAt(receipt: unknown, requestedAt: string): string {
+  let completedAt: string;
+  try {
+    const r = object(receipt, ['completedAt', 'method']);
+    completedAt = utc(r.completedAt);
+    if (r.method !== 'operational-store-deletion') throw new Error('method');
+  } catch { refuse('DestructionReceiptInvalid'); }
+  if (completedAt < requestedAt) refuse('DestructionReceiptInvalid');
+  return completedAt;
+}
 async function destroyWithJournal<T>(store: DisposalAuditStore, request: T, requestedAt: string, eligibleAt: string,
   details: DestructionDetails,
   destroy: (request: T) => Promise<DestructionReceipt>): Promise<Readonly<DestructionRecordV2>> {
   if (requestedAt < eligibleAt) refuse('RetentionNotElapsed');
   const append = destructionJournal(store, eligibleAt, details);
   await append('started', requestedAt);
-  let completedAt: string;
-  try {
-    const receipt = object(await destroy(request), ['completedAt', 'method']);
-    completedAt = utc(receipt.completedAt);
-    if (receipt.method !== 'operational-store-deletion' || completedAt < requestedAt) refuse('DestructionReceiptInvalid');
-  } catch (error) {
-    // failed says the deletion did not happen; an unknown outcome is not that.
+  let receipt: unknown;
+  try { receipt = await destroy(request); }
+  catch (error) {
+    // The destroyer throws only for a deletion that did not commit (failed), or CommitOutcomeUnknown when it cannot tell.
     if (!(error instanceof CommitOutcomeUnknown)) await append('failed', confirmedAt(store, requestedAt));
     throw error;
   }
-  return append('completed', completedAt);
+  // An invalid receipt is not a confirmed failure: started stays the last record, as for an unknown outcome.
+  return append('completed', receiptCompletedAt(receipt, requestedAt));
 }
 /** H deletes every part and signature from the operational store atomically against the reference/hold snapshot. The
  * receipt says that much; replicas and recovery-only backups end under their own supervision, not by this record. */
@@ -826,12 +839,9 @@ export async function destroyBatchAtExpiry(store: BatchDisposalAuditStore, input
     const sets = orderedDisposalSets(ids, incoming), completed: Readonly<DestructionRecordV2>[] = [];
     for (const set of sets) {
       for (const id of set) await journals.get(id)!('started', requestedAt);
-      let completedAt: string;
-      try {
-        const receipt = object(await destroySet(freeze(set.map(id => requests.get(id)!))), ['completedAt', 'method']);
-        completedAt = utc(receipt.completedAt);
-        if (receipt.method !== 'operational-store-deletion' || completedAt < requestedAt) refuse('DestructionReceiptInvalid');
-      } catch (error) {
+      let receipt: unknown;
+      try { receipt = await destroySet(freeze(set.map(id => requests.get(id)!))); }
+      catch (error) {
         // As for one record: failed only when the set's deletion did not happen, at the time that was confirmed.
         if (!(error instanceof CommitOutcomeUnknown)) {
           const at = confirmedAt(store, requestedAt);
@@ -839,6 +849,8 @@ export async function destroyBatchAtExpiry(store: BatchDisposalAuditStore, input
         }
         throw error;
       }
+      // The set's deletion ran: an invalid receipt leaves every member's started as its last record.
+      const completedAt = receiptCompletedAt(receipt, requestedAt);
       for (const id of set) completed.push(await journals.get(id)!('completed', completedAt));
     }
     return freeze(completed);
