@@ -16,6 +16,7 @@
 const assert = require('node:assert/strict');
 const net = require('node:net');
 const path = require('node:path');
+const fs = require('node:fs');
 const { randomUUID } = require('node:crypto');
 const build = process.env.KIN_B2R_BUILD;
 if (!build) throw new Error('Compiled candidate path required');
@@ -183,6 +184,12 @@ async function prepare(witness) {
   await run('GRANT SELECT, INSERT ON public.b2c_effect TO kin_runtime');
   await run('CREATE SEQUENCE public.b2c_stage');
   await run('CREATE SEQUENCE public.b2c_xid');
+  // K10's settlement trigger keeps its own pair, so the business and the settlement XIDs are both kept to compare.
+  await run('CREATE SEQUENCE public.b2c_settle_stage');
+  await run('CREATE SEQUENCE public.b2c_settle_xid');
+  // The triggers keep an XID in a bigint sequence, exact below 2^63; the server log prints the same xid8 as text.
+  const [now] = await witness.$queryRawUnsafe('SELECT pg_current_xact_id()::text AS xid');
+  assert.ok(BigInt(now.xid) < 2n ** 62n, 'the synthetic database\'s XIDs fit the sequences the triggers write');
   // fail:<SQLSTATE>:<key> raises at COMMIT; probe:<key> only records; hold[:<SQLSTATE>]:<key> first waits for the
   // witness's advisory lock 4242 (with no lock wait bound of its own), then raises if given a SQLSTATE.
   await run(`CREATE FUNCTION public.b2c_at_commit() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
@@ -208,15 +215,19 @@ async function prepare(witness) {
   assert.deepEqual(trigger, { deferrable: true, initiallyDeferred: true }, '(iii) the trigger is deferred');
 }
 async function resetStage(witness) {
-  await witness.$queryRawUnsafe(`SELECT setval('public.b2c_stage', 1)::text AS s, setval('public.b2c_xid', 1)::text AS x`);
+  await witness.$queryRawUnsafe(`SELECT setval('public.b2c_stage', 1)::text AS s, setval('public.b2c_xid', 1)::text AS x,
+    setval('public.b2c_settle_stage', 1)::text AS ss, setval('public.b2c_settle_xid', 1)::text AS sx`);
 }
-/** (i)+(ii): where the trigger fired, the XID it fired in and PostgreSQL's status of that XID now. */
-async function observed(witness) {
-  const [row] = await witness.$queryRawUnsafe(`SELECT (SELECT last_value FROM public.b2c_stage)::int AS stage,
-    (SELECT last_value FROM public.b2c_xid)::text AS xid`);
-  // The sequence is a bigint: this witness serves the synthetic database's small XIDs only (epoch 0, below 2^31).
+/** (i)+(ii): where a trigger fired, the XID it fired in and PostgreSQL's status of that XID now. Each observation is
+ * printed, so the Python side binds every XID seen at COMMIT to the server log's own line for that XID (iv). */
+async function observed(witness, which = 'business') {
+  const prefix = which === 'settlement' ? 'b2c_settle' : 'b2c';
+  const [row] = await witness.$queryRawUnsafe(`SELECT (SELECT last_value FROM public.${prefix}_stage)::int AS stage,
+    (SELECT last_value FROM public.${prefix}_xid)::text AS xid`);
   const [status] = await witness.$queryRawUnsafe('SELECT pg_xact_status($1::xid8)::text AS status', row.xid);
-  return { stage: { 1: 'not fired', 2: 'COMMIT', 3: 'statement' }[row.stage], xid: row.xid, status: status.status };
+  const seen = { stage: { 1: 'not fired', 2: 'COMMIT', 3: 'statement' }[row.stage], xid: row.xid, status: status.status };
+  console.log(JSON.stringify({ observed: which, ...seen }));
+  return seen;
 }
 const effects = async (witness, id) => (await witness.$queryRawUnsafe('SELECT count(*)::int AS n FROM public.b2c_effect WHERE id = $1', id))[0].n;
 const operation = async (witness, id) =>
@@ -232,11 +243,12 @@ async function main() {
   const relay = new Relay(target.hostname, Number(target.port || 5432));
   const relayed = new URL(target); relayed.hostname = '127.0.0.1'; relayed.port = String(await relay.listen());
   const db = new EmrLedgerClient(relayed.toString());
-  const spool = process.env.KIN_B2R_SPOOL;
-  const store = new AccessLedgerStore(db, new FailureJournal(db, new FailureSpool(spool + '/product')));
-  // K6/K7 block or cut the product's connections; their journal is the witness's, so a blocked journal write does not
-  // stand for the judgement under test.
-  const witnessStore = new AccessLedgerStore(db, new FailureJournal(witness, new FailureSpool(spool + '/witness')));
+  // The product's composition (application.ts): the failure journal on the ledger's own client, so K6's partition stops
+  // the journal's database writes as it stops the judgement read; what the journal kept is then read from its spool.
+  const spool = path.join(process.env.KIN_B2R_SPOOL, 'product');
+  const store = new AccessLedgerStore(db, new FailureJournal(db, new FailureSpool(spool)));
+  const spooled = () => { try { return fs.readFileSync(path.join(spool, 'failure-spool.jsonl'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)); }
+    catch (error) { if (error.code === 'ENOENT') return []; throw error; } };
   const results = {}, problems = [];
   // Each case runs on its own: a failure is recorded with its stack and the next case still runs.
   const check = async (name, work) => {
@@ -311,20 +323,39 @@ async function main() {
 
     // K8 (a) facts with no operation, journaled against their event; (b) effect-null only; (c) mixed operations.
     await check('K8', async () => {
+      // Each input's own COMMIT is seen failing (its XID aborted, the trigger fired at COMMIT) before its answer counts.
       const owed = randomUUID();
       await resetStage(witness);
       const k8a = await settled(store.transactionWithRecords(async tx => { await insert(tx, 'fail:23514:k8a'); return 'fact'; }, undefined, owed), 30000);
-      log('K8a', { seen: await observed(witness), code: k8a.code, journal: await failures(witness, owed) });
+      const k8aSeen = await observed(witness);
+      log('K8a', { seen: k8aSeen, code: k8a.code, journal: await failures(witness, owed) });
+      assert.deepEqual([k8aSeen.stage, k8aSeen.status], ['COMMIT', 'aborted'], 'K8a');
       assert.equal(k8a.code, 'AppendNotCommitted');
+      assert.equal(await effects(witness, 'fail:23514:k8a'), 0);
       assert.deepEqual(await failures(witness, owed), ['business-rollback']);
-      const k8b = await settled(store.transactionWithRecords(async (tx, record) => { await record(event(), async () => null);
+      await resetStage(witness);
+      const noop = event();
+      const k8b = await settled(store.transactionWithRecords(async (tx, record) => { await record(noop, async () => null);
         await insert(tx, 'fail:23514:k8b'); return 'noop'; }), 30000);
+      const k8bSeen = await observed(witness);
+      const [k8bOp] = await witness.$queryRawUnsafe('SELECT operation_id::text AS id FROM emr_access.operation WHERE event_id = $1', noop.eventId);
+      log('K8b', { seen: k8bSeen, code: k8b.code });
+      assert.deepEqual([k8bSeen.stage, k8bSeen.status], ['COMMIT', 'aborted'], 'K8b');
       assert.equal(k8b.code, 'AppendNotCommitted');
+      assert.notEqual((await operation(witness, k8bOp.id)).outcome, 'committed', 'the silent no-op is not a success');
+      await resetStage(witness);
       const mixed = [event(), event()];
       const k8c = await settled(store.transactionWithRecords(async (tx, record) => { await record(mixed[0], async () => null);
         await record(mixed[1], async () => { await insert(tx, 'fail:23514:k8c'); return reference('k8c'); }); return 'mixed'; }), 30000);
-      log('K8bc', { b: k8b.code, c: k8c.code });
+      const k8cSeen = await observed(witness);
+      log('K8c', { seen: k8cSeen, code: k8c.code });
+      assert.deepEqual([k8cSeen.stage, k8cSeen.status], ['COMMIT', 'aborted'], 'K8c');
       assert.equal(k8c.code, 'AppendNotCommitted');
+      assert.equal(await effects(witness, 'fail:23514:k8c'), 0);
+      for (const ev of mixed) {
+        const [op] = await witness.$queryRawUnsafe('SELECT operation_id::text AS id FROM emr_access.operation WHERE event_id = $1', ev.eventId);
+        assert.notEqual((await operation(witness, op.id)).outcome, 'committed', 'no operation of the mixed transaction committed');
+      }
     });
 
     // K9 a committed operation replayed inside a transaction whose own change fails at COMMIT.
@@ -347,7 +378,9 @@ async function main() {
     await check('K10', async () => {
       await witness.$executeRawUnsafe(`CREATE FUNCTION public.b2c_fail_negative() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
         BEGIN
-          PERFORM setval('public.b2c_xid', pg_current_xact_id()::text::bigint);
+          PERFORM setval('public.b2c_settle_stage', CASE WHEN upper(btrim(current_query(), E' \\n;')) = 'COMMIT' THEN 2 ELSE 3 END);
+          PERFORM setval('public.b2c_settle_xid', pg_current_xact_id()::text::bigint);
+          RAISE LOG 'syn-settle xid8=%', pg_current_xact_id();
           RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'SYN deferred settlement refusal';
         END $$`);
       await witness.$executeRawUnsafe(`CREATE CONSTRAINT TRIGGER b2c_fail_negative AFTER INSERT ON emr_access.attempt_outcome
@@ -355,12 +388,15 @@ async function main() {
       const k10event = event();
       let k10;
       try {
+        await resetStage(witness);
         k10 = await settled(store.transactionWithRecords(async (tx, record) => record(k10event, async () => {
           await insert(tx, 'fail:23514:k10'); return reference('k10'); })), 60000);
-        const settlement = await observed(witness);
+        const business = await observed(witness), settlement = await observed(witness, 'settlement');
         const [op] = await witness.$queryRawUnsafe('SELECT operation_id::text AS id, pending FROM emr_access.operation WHERE event_id = $1', k10event.eventId);
-        log('K10', { settlement, code: k10.code, pending: op.pending });
-        assert.equal(settlement.status, 'aborted', 'the settlement transaction rolled back');
+        log('K10', { business, settlement, code: k10.code, pending: op.pending });
+        assert.deepEqual([business.stage, business.status], ['COMMIT', 'aborted'], 'the business transaction failed at its COMMIT');
+        assert.deepEqual([settlement.stage, settlement.status], ['COMMIT', 'aborted'], 'the settlement failed at its own COMMIT');
+        assert.notEqual(business.xid, settlement.xid, 'two transactions, two XIDs');
         assert.equal(k10.code, 'AppendNotCommitted', 'the business transaction aborted');
         assert.equal((await operation(witness, op.id)).outcome, 'pending', 'no unconfirmed negative is the result');
         await assert.rejects(store.recoverPending(), error => error.code === 'CommitUnknown');
@@ -396,11 +432,11 @@ async function main() {
     await check('K6', async () => {
       for (const [label, key, actual] of [['committed', 'probe:k6c', 'committed'], ['aborted', 'fail:23514:k6a', 'aborted']]) {
         await resetStage(witness);
-        const op = await witnessStore.admit(event(), undefined, { operationId: randomUUID(), attemptId: randomUUID() });
+        const op = await store.admit(event(), undefined, { operationId: randomUUID(), attemptId: randomUUID() });
         let callbacks = 0, next = key;
         const effect = async tx => { callbacks++; await insert(tx, next); return reference(next); };
         const held = relay.holdNextCommit();                         // (1) hold the COMMIT answer
-        const answer = witnessStore.transaction(op, effect);
+        const answer = store.transaction(op, effect);
         const hold = await held;
         const seen = await observed(witness);                         // (2) the real outcome, while the answer is held
         log('K6-held', { label, seen, answerType: hold.type });
@@ -418,8 +454,12 @@ async function main() {
         assert.ok(blocked.length > 0, 'the judgement read was actually blocked');
         assert.equal(out.timedOut, undefined, 'the answer came within its bound');
         assert.equal(out.code, 'CommitUnknown', label + ': neither a success nor a failure it could not see');
+        // The journal's database write was cut off with the rest; the failure is kept in the spool, not dropped.
+        const kept = spooled().filter(r => r.operationId === op.operationId);
+        log('K6-journal', { label, kept: kept.map(r => r.cause) });
+        assert.deepEqual(kept.map(r => r.cause), ['commit-unknown'], label + ': the failure record was kept');
         next = 'probe:k6-retry-' + label;
-        const again = await settled(witnessStore.transaction(op, effect), 60000);
+        const again = await settled(store.transaction(op, effect), 60000);
         log('K6-converged', { label, outcome: again.value?.outcome ?? again.code, callbacks });
         assert.equal(again.value?.outcome, 'committed', label);
         assert.equal(callbacks, actual === 'committed' ? 1 : 2, label + ': replayed once, or applied once');
@@ -440,7 +480,7 @@ async function main() {
         }, { timeout: 60000, maxWait: 10000 });
         await lockedNow;
         const ev = event();
-        const answer = settled(witnessStore.transactionWithRecords(async (tx, record) => record(ev, async () => {
+        const answer = settled(store.transactionWithRecords(async (tx, record) => record(ev, async () => {
           await insert(tx, key); return reference(key); })), 60000);
         const waiting = await until(async () => (await witness.$queryRawUnsafe(`SELECT pid, pg_blocking_pids(pid) AS blockers
           FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND wait_event = 'advisory'`))[0], 'COMMIT waiting in its trigger');

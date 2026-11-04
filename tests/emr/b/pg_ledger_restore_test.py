@@ -691,8 +691,24 @@ class PgLedgerCommitJudgementLive(PgLedgerFixture):
             evidence.mkdir(parents=True, exist_ok=True)
             (evidence / 'postgres.log').write_text(logs.stdout + logs.stderr, encoding='utf-8')
         server = (evidence / 'postgres.log').read_text(encoding='utf-8')
-        self.assertIn('syn-commit xid8=', server, 'the deferred triggers logged the XIDs they fired in')
-        self.assertRegex(server, r'STATEMENT:\s+COMMIT', 'PostgreSQL logged the failed COMMIT itself')
+        # (iv) Each XID the node side saw a trigger fire in at COMMIT (the sequence's value) must be the xid8 the same
+        # trigger logged, and that backend's statement must be the COMMIT itself - not merely some such line in the log.
+        statement_of, waiting = {}, {}
+        for line in server.splitlines():
+            entry = re.search(r'\[(\d+)\]\s+(LOG|STATEMENT):\s+(.*)$', line)
+            if not entry:
+                continue
+            pid, kind, text = entry.groups()
+            fired = re.match(r'syn-(?:commit|settle) xid8=(\d+)\b', text) if kind == 'LOG' else None
+            if fired:
+                waiting[pid] = fired.group(1)
+            elif kind == 'STATEMENT' and pid in waiting:
+                statement_of.setdefault(waiting.pop(pid), text.strip())
+        seen = [json.loads(line) for line in output.splitlines() if line.startswith('{"observed":')]
+        at_commit = [s for s in seen if s.get('stage') == 'COMMIT']
+        self.assertTrue(at_commit, 'the node cases observed triggers firing at COMMIT')
+        for s in at_commit:
+            self.assertEqual(statement_of.get(s['xid']), 'COMMIT', f"{s['observed']} xid8={s['xid']} is the logged COMMIT's XID")
         self.assertIn('"status":"PASS"', output)
 
 
