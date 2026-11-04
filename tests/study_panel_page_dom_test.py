@@ -240,6 +240,41 @@ WHEEL_SPOT = r'''(selector) => {
 SCROLLS = """() => [...document.querySelectorAll('*')].filter(e => e.scrollHeight > e.clientHeight || e.scrollWidth > e.clientWidth)
   .map(e => [e, e.scrollTop, e.scrollLeft])"""
 RESTORE = "(saved) => { for (const [e, top, left] of saved) { e.scrollTop = top; e.scrollLeft = left; } }"
+# Which of the boxes in SCROLLS (taken at arrival) the reader's input has moved since: every scroll container of the
+# document counts, the page and `.split` included, not only those around the action row.
+MOVED = """(saved) => saved.filter(([e, top, left]) => e.scrollTop !== top || e.scrollLeft !== left)
+  .map(([e]) => e.id || String(e.className || '') || e.tagName.toLowerCase())"""
+# Minhoon 11-03 "single scroll" (Jungmo 11-04: the portrait work area with the Study Panel open too): places in the
+# report column where a reader rests the pointer and turns the wheel towards Save - on the report card, on its
+# Findings field, and on the column outside the card (the separator above it, the report window tabs). Each point is
+# seen (inside every clip, not under the panel) and hit-tests to its own element.
+WHEEL_PLACES = r'''() => {
+  const side = document.querySelector('.right'), panel = document.querySelector('#study-panel-host');
+  const n = v => parseFloat(v) || 0;
+  const clipOf = el => { let c = {top: 0, bottom: innerHeight, left: 0, right: innerWidth};
+    for (let a = el.parentElement; a && a !== document.documentElement; a = a.parentElement) {
+      const cs = getComputedStyle(a);
+      if (cs.overflowX === 'visible' && cs.overflowY === 'visible') continue;
+      const r = a.getBoundingClientRect();
+      c = {top: Math.max(c.top, r.top + n(cs.borderTopWidth)), bottom: Math.min(c.bottom, r.bottom - n(cs.borderBottomWidth)),
+           left: Math.max(c.left, r.left + n(cs.borderLeftWidth)), right: Math.min(c.right, r.right - n(cs.borderRightWidth))};
+    }
+    return c; };
+  const places = {};
+  for (const [name, selector] of [['card', '.report-p'], ['findings', '#findings'], ['separator', '#resize-related'], ['tabs', '.rtabs']]) {
+    const el = document.querySelector(selector);
+    if (!el || !side || !side.contains(el) || !el.getClientRects().length) continue;
+    const r = el.getBoundingClientRect(), c = clipOf(el);
+    const v = {top: Math.max(r.top, c.top), bottom: Math.min(r.bottom, c.bottom), left: Math.max(r.left, c.left), right: Math.min(r.right, c.right)};
+    if (v.bottom - v.top < 2 || v.right - v.left < 2) continue;
+    for (const [fx, fy] of [[0.5, 0.5], [0.5, 0.25], [0.5, 0.75], [0.25, 0.5]]) {
+      const x = v.left + (v.right - v.left) * fx, y = v.top + (v.bottom - v.top) * fy;
+      const hit = document.elementFromPoint(x, y);
+      if (hit && el.contains(hit) && !(panel && panel.contains(hit))) { places[name] = [x, y]; break; }
+    }
+  }
+  return places;
+}'''
 # Tab moves focus through the report column's own controls at most once each.
 TABBABLE = "() => document.querySelectorAll('.report-p :is(a[href], button, input, select, textarea, summary, [tabindex])').length"
 
@@ -275,6 +310,25 @@ def wheel_into_view(page, entry, row=None):
         if 'point' not in spot:
             return state, f'{spot["problem"]} {spot}'
     return state, f'{entry} not whole after {limit} wheel steps'
+
+
+def wheel_here_into_view(page, point, entry, row=None, step=100, limit=60):
+    """The reader's wheel at one resting point, one step at a time, until `entry` is whole in view. Whatever sits under
+    the point as the page moves takes the wheel. Returns (READ after the last step, why it did not get there or None)."""
+    state = read_entry(page, entry, row)
+    where = lambda s: [x['top'] for x in s['scrollers']] + s['document']
+    seen = [where(state)]
+    for _ in range(limit):
+        if state['entryWhole']:
+            return state, None
+        page.mouse.move(*point)
+        page.mouse.wheel(0, step)
+        settle(page)
+        state = read_entry(page, entry, row)
+        if not state['entryWhole'] and where(state) in seen:
+            return state, f'the wheel at {point} moved nothing new'
+        seen.append(where(state))
+    return state, None if state['entryWhole'] else f'{entry} not whole after {limit} wheel steps at {point}'
 
 
 def tab_into_view(page, entry, row=None):
@@ -995,6 +1049,58 @@ class StudyPanelPageDOM(unittest.TestCase):
                 drawer.get_by_role('button', name='Close', exact=True).click()
                 expect(drawer).to_have_count(0)
                 self.doCleanups()
+
+    def test_portrait_open_panel_reaches_save_with_one_scroll(self):
+        """Minhoon 11-03 "single scroll", which Jungmo applied on 11-04 to the portrait work area with the Study Panel
+        open: from the arrival state, wherever in the report column the reader turns the wheel (the outermost container
+        that can still move, the report card, its Findings field, the column outside the card) and by Tab from
+        Conclusion after wheeling to it, exactly one scroll container of the whole document moves before Save is whole
+        in view, and report_column_reach judges that move as it judges the other reveals."""
+        for width, height in ((768, 1024), (900, 1200)):
+            page, _, _ = self.page_at(width, height, dictation=DICTATION)
+            self.click_row(page, 0, 'select')
+            page.keyboard.press('Control+Alt+5')
+            drawer = page.get_by_role('complementary', name='Study Panel', exact=True)
+            expect(drawer).to_be_visible()
+            settle(page)
+            arrival = page.evaluate(column_reach.READ, SAVE_ROW)
+            if (width, height) == (768, 1024):
+                self.assertFalse(arrival['entryWhole'], f'Save starts below the first screen here {arrival}')
+            saved = page.evaluate_handle(SCROLLS)
+            places = page.evaluate(WHEEL_PLACES)
+            self.assertIn('card', places, f'{width}x{height}: no seen point of the report card {places}')
+            self.assertTrue({'separator', 'tabs'} & set(places), f'{width}x{height}: no seen point of the column outside the card {places}')
+
+            def tab_from_conclusion():
+                state, why = wheel_into_view(page, '#conclusion')
+                if why:
+                    return state, f'Conclusion: {why}'
+                click_center(page, state)
+                expect(page.locator('#conclusion')).to_be_focused()
+                return tab_into_view(page, '#b-save', SAVE_ROW[0])
+
+            ways = [('wheel over the outermost movable container', lambda: wheel_into_view(page, '#b-save', SAVE_ROW[0]), 0)]
+            ways += [(f'wheel over the {name}', lambda point=point: wheel_here_into_view(page, point, '#b-save', SAVE_ROW[0]), 0)
+                     for name, point in places.items()]
+            # The browser's focus scroll moves whole pixels (operate_report): the same half-pixel bottom rounding.
+            ways.append(('Tab from Conclusion', tab_from_conclusion, 0.5))
+            for label, way, rounding in ways:
+                with self.subTest(width=width, height=height, way=label):
+                    page.evaluate(RESTORE, saved)
+                    settle(page)
+                    self.assertEqual(arrival, page.evaluate(column_reach.READ, SAVE_ROW), f'{label}: the arrival state is back')
+                    revealed, why = way()
+                    self.assertIsNone(why, f'{label}: {revealed}')
+                    moved = page.evaluate(MOVED, saved)
+                    self.assertEqual(0 if arrival['entryWhole'] else 1, len(moved), f'{label}: scroll containers moved {moved}')
+                    self.assertEqual([], column_reach.reach_problems(arrival, revealed, bottom_rounding=rounding), label)
+                    self.assertTrue(self.assert_report_usable(page, label, ('#b-save',))['#b-save']['whole'], label)
+                    expect(drawer).to_be_visible()
+                    # The action row is drawn on the report card, not past its border onto the column behind it.
+                    card, actions = page.locator('.report-p').bounding_box(), page.locator(SAVE_ROW[0]).bounding_box()
+                    self.assertLessEqual(card['y'], actions['y'], f'{label}: {card} {actions}')
+                    self.assertLessEqual(actions['y'] + actions['height'], card['y'] + card['height'] + 0.5, f'{label}: {card} {actions}')
+            self.doCleanups()
 
     def test_save_reveal_judgment_rejects_a_cut_save(self):
         """The judgment above, in a real browser on a bare 100x100 report card (no product page): the bottom rounding it
