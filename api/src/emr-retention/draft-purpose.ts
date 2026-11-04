@@ -10,7 +10,8 @@ import { CommitOutcomeUnknown, DestructionReceipt, DestructionRecord, PurposeDis
 import { ContractError, refuse, string } from '../emr-contract/validation';
 import { snapshotFromRows, transactionScope, withSnapshot } from '../emr-runtime/context';
 import type { ClauseRow, HoldRow, RequestRow } from '../emr-runtime/contract';
-import { syncDirectory } from '../emr-runtime/journal-file';
+import { AppendOnlyLedger, LedgerIo, LedgerEntry as FileEntry, LedgerView as FileView, ledgerDirectory, nodeLedgerIo,
+  replaceAtomically } from './ledger-file';
 
 /*
  * CD-09-P: the end of a private draft work's purpose and the destruction of its content.
@@ -30,7 +31,6 @@ import { syncDirectory } from '../emr-runtime/journal-file';
 
 export const PURPOSE_LEDGER_FILE = 'purpose-ledger.jsonl';
 export const PURPOSE_ADOPTION_FILE = 'purpose-adoption.json';
-const LINE_MAX = 4096;
 // One writer at a time across the API and the sweep process: every ledger append and every destruction or re-application
 // runs under this transaction lock, so the ledger order is the commit order.
 const LEDGER_LOCK = 0x4b494e50; // 'KINP'
@@ -43,8 +43,8 @@ export class PurposeGateClosed extends Error {
   constructor(readonly code: string) { super(code); this.name = 'PurposeGateClosed'; }
 }
 
-export interface LedgerEntry { seq: number; appendedAt: string; record: Readonly<DestructionRecord> }
-export interface LedgerView { ledgerId: string; entries: readonly LedgerEntry[] }
+export type LedgerEntry = FileEntry<DestructionRecord>;
+export type LedgerView = FileView<DestructionRecord>;
 
 function exactKeys(value: any, keys: readonly string[]): boolean {
   return !!value && typeof value === 'object' && !Array.isArray(value) &&
@@ -61,17 +61,20 @@ function parseRecord(value: any): Readonly<DestructionRecord> {
 
 export interface Adoption { state: 'prepared' | 'consumed'; ledgerId: string | null }
 
-/** The append-only destruction ledger: one JSON line per record, fsync before a record counts. Only `create` writes its
- * header (the ledger ID the database's anchor names); an append to a missing file is refused, because a missing ledger
- * is the gate's question (lost, or never initialized) and a new header would answer it wrongly. A partial last line is
- * never repaired here. Beside it, the adoption record of a server that had drafts before CD-09-P (one file). */
+/** The draft purpose ledger: the common append-only file (ledger-file.ts) under the name `purpose-ledger.jsonl` and the
+ * PurposeLedger codes, read through this unit's record decoder. Only `create` writes its header (the ledger ID the
+ * database's anchor names); an append to a missing file is refused, because a missing ledger is the gate's question
+ * (lost, or never initialized) and a new header would answer it wrongly. Beside it, the adoption record of a server that
+ * had drafts before CD-09-P (one file, replaced whole). Another unit's ledger in the same directory is not read here. */
 export class PurposeLedgerFile {
   readonly file: string;
   readonly adoptionFile: string;
-  constructor(readonly directory: string) {
+  private readonly log: AppendOnlyLedger<DestructionRecord>;
+  constructor(readonly directory: string, private readonly io: LedgerIo = nodeLedgerIo) {
     if (!directory || !path.isAbsolute(directory)) throw new PurposeGateClosed('PurposeLedgerDirectoryRequired');
     this.file = path.join(directory, PURPOSE_LEDGER_FILE);
     this.adoptionFile = path.join(directory, PURPOSE_ADOPTION_FILE);
+    this.log = new AppendOnlyLedger(this.file, 'PurposeLedger', () => ({ decode: value => parseRecord(value) }), io);
   }
   readAdoption(): Adoption | null {
     if (!fs.existsSync(this.adoptionFile)) return null;
@@ -93,67 +96,11 @@ export class PurposeLedgerFile {
     this.replaceAdoption({ ...raw, state: 'consumed', ledgerId, consumedAt: new Date().toISOString() });
   }
   private replaceAdoption(value: object): void {
-    fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
-    const temporary = this.adoptionFile + '.tmp';
-    const fd = fs.openSync(temporary, 'w', 0o600);
-    try { fs.writeSync(fd, JSON.stringify(value) + '\n'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-    fs.renameSync(temporary, this.adoptionFile);
-    syncDirectory(this.directory);
+    replaceAtomically(this.directory, this.adoptionFile, JSON.stringify(value) + '\n', this.io);
   }
-  read(): LedgerView | null {
-    if (!fs.existsSync(this.file)) return null;
-    const bytes = fs.readFileSync(this.file);
-    if (!bytes.length || bytes[bytes.length - 1] !== 10) refuse('PurposeLedgerPartialTail');
-    const lines = bytes.toString('utf8').split('\n');
-    lines.pop();
-    let header: any;
-    try { header = JSON.parse(lines[0]); } catch { refuse('PurposeLedgerHeaderInvalid'); }
-    if (!exactKeys(header, ['kind', 'formatVersion', 'ledgerId', 'createdAt']) || header.kind !== 'header' ||
-        header.formatVersion !== 1 || typeof header.ledgerId !== 'string') refuse('PurposeLedgerHeaderInvalid');
-    const entries = lines.slice(1).map((line, index) => {
-      if (Buffer.byteLength(line) > LINE_MAX) refuse('PurposeLedgerRecordInvalid');
-      let entry: any;
-      try { entry = JSON.parse(line); } catch { refuse('PurposeLedgerRecordInvalid'); }
-      if (!exactKeys(entry, ['kind', 'seq', 'ledgerId', 'appendedAt', 'record']) || entry.kind !== 'entry' ||
-          entry.seq !== index + 1 || entry.ledgerId !== header.ledgerId || typeof entry.appendedAt !== 'string')
-        refuse('PurposeLedgerRecordInvalid');
-      return Object.freeze({ seq: entry.seq, appendedAt: entry.appendedAt, record: parseRecord(entry.record) });
-    });
-    return Object.freeze({ ledgerId: header.ledgerId, entries: Object.freeze(entries) });
-  }
-  /** The header alone: the ledger this database's anchor names, written before the database records that it exists. */
-  create(ledgerId: string): void {
-    const current = this.read();
-    if (current) { if (current.ledgerId !== ledgerId) refuse('PurposeLedgerMismatch'); return; }
-    this.write([this.header(ledgerId)], true);
-  }
-  append(ledgerId: string, record: DestructionRecord): { seq: number; durableAt: string } {
-    const parsed = parseRecord(JSON.parse(JSON.stringify(record)));
-    const current = this.read();
-    if (!current) refuse('PurposeLedgerMissing');
-    if (current.ledgerId !== ledgerId) refuse('PurposeLedgerMismatch');
-    const seq = current.entries.length + 1;
-    this.write([JSON.stringify({ kind: 'entry', seq, ledgerId, appendedAt: new Date().toISOString(), record: parsed })], false);
-    return { seq, durableAt: new Date().toISOString() };
-  }
-  private header(ledgerId: string): string {
-    return JSON.stringify({ kind: 'header', formatVersion: 1, ledgerId, createdAt: new Date().toISOString() });
-  }
-  private write(lines: readonly string[], created: boolean): void {
-    if (created) fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
-    const bytes = Buffer.from(lines.map(line => line + '\n').join(''));
-    const fd = fs.openSync(this.file, 'a', 0o600);
-    try {
-      let written = 0;
-      while (written < bytes.length) {
-        const n = fs.writeSync(fd, bytes, written, bytes.length - written);
-        if (!n) refuse('PurposeLedgerWriteFailed');
-        written += n;
-      }
-      fs.fsyncSync(fd);
-    } finally { fs.closeSync(fd); }
-    if (created) syncDirectory(this.directory);
-  }
+  read(): LedgerView | null { return this.log.read(); }
+  create(ledgerId: string): void { this.log.create(ledgerId); }
+  append(ledgerId: string, record: DestructionRecord): { seq: number; durableAt: string } { return this.log.append(ledgerId, record); }
 }
 
 /** Per unit, the phases the ledger holds in order. */
@@ -783,14 +730,7 @@ export function draftPurpose(): DraftPurposeDisposal | null { return configured;
  * EMR state would come back with an older database and prove nothing - so a missing or contained directory refuses.
  */
 export function purposeLedgerDirectory(env: NodeJS.ProcessEnv = process.env): string {
-  const directory = env.KIN_PURPOSE_LEDGER_DIR;
-  if (!directory || !path.isAbsolute(directory)) throw new PurposeGateClosed('PurposeLedgerDirectoryRequired');
-  const state = env.KIN_EMR_STATE_DIR;
-  if (state) {
-    const inside = path.relative(path.resolve(state), path.resolve(directory));
-    if (!inside || (!inside.startsWith('..') && !path.isAbsolute(inside))) throw new PurposeGateClosed('PurposeLedgerInsideBackup');
-  }
-  return directory;
+  return ledgerDirectory(env.KIN_PURPOSE_LEDGER_DIR, env.KIN_EMR_STATE_DIR, code => { throw new PurposeGateClosed('PurposeLedger' + code); });
 }
 
 /** A new opaque unit for a new work. */
