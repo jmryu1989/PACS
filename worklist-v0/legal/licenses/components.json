@@ -1652,7 +1652,7 @@
       "version": "4.1.0"
     },
     {
-      "integrity": "sha512-ZTgYYLMOXY9qKU/57FAo8F+HA2dGX7bqGc71txDRC1rS4frdFI5R7NhluHxH6M0YItAP0sHB4uqAOcYKxO6uGA==",
+      "integrity": "sha512-FISIQxV5u91Y9gvuFq3q/tA/qTqLJn3AhRcEvyozyhJTh5OBFFtv827AdHU7Rbyct4r+Ba1/99oFa1Y3yuFsdw==",
       "license": "MIT",
       "missing": [],
       "name": "body-parser",
@@ -1663,15 +1663,15 @@
           "name": "LICENSE",
           "path": "texts/23d466b1b134b415b66fa50c6526b4cf3e7b9258554da88d3abb371721e7ce68.txt",
           "sha256": "23d466b1b134b415b66fa50c6526b4cf3e7b9258554da88d3abb371721e7ce68",
-          "source": "https://registry.npmjs.org/body-parser/-/body-parser-1.20.4.tgz#package/LICENSE"
+          "source": "https://registry.npmjs.org/body-parser/-/body-parser-1.20.9.tgz#package/LICENSE"
         }
       ],
-      "resolved": "https://registry.npmjs.org/body-parser/-/body-parser-1.20.4.tgz",
+      "resolved": "https://registry.npmjs.org/body-parser/-/body-parser-1.20.9.tgz",
       "scope": "Runtime",
       "section": "API",
       "source": "expressjs/body-parser",
       "supplier": "Unverified",
-      "version": "1.20.4"
+      "version": "1.20.9"
     },
     {
       "integrity": "sha512-Edep/X9fGqVNmzKBVsDYIOtD+z1tuezV70LBjdCst9Tqu76lsnvRiZ6oTic1n+/BIwX6QDGAO94PN4N2SADvtw==",
@@ -5852,6 +5852,28 @@
       "version": "6.14.2"
     },
     {
+      "integrity": "sha512-VYdnB5S7/0IeXzBacUtwNAaM6d7Y/PgYnNC7bJCI6meqA/OgnsQbZMtVW8Dt2D1PHgbHGtYmhSoEIgvt7xZ2ZA==",
+      "license": "BSD-3-Clause",
+      "missing": [],
+      "name": "qs",
+      "notes": [],
+      "origin": "api/package-lock.json:node_modules/body-parser/node_modules/qs",
+      "originals": [
+        {
+          "name": "LICENSE.md",
+          "path": "texts/e7dc37bf662d7f786efcb46c545615e70c1daf458a38385521c63cf6607cdfe1.txt",
+          "sha256": "e7dc37bf662d7f786efcb46c545615e70c1daf458a38385521c63cf6607cdfe1",
+          "source": "https://registry.npmjs.org/qs/-/qs-6.16.2.tgz#package/LICENSE.md"
+        }
+      ],
+      "resolved": "https://registry.npmjs.org/qs/-/qs-6.16.2.tgz",
+      "scope": "Runtime",
+      "section": "API",
+      "source": "https://github.com/ljharb/qs.git",
+      "supplier": "Unverified",
+      "version": "6.16.2"
+    },
+    {
       "integrity": "sha512-Hrgsx+orqoygnmhFbKaHE6c296J+HTAQXoxEF6gNupROmmGJRoyzfG3ccAveqCBrwr/2yxQ5BVd/GTl5agOwSg==",
       "license": "MIT",
       "missing": [],
@@ -9402,7 +9424,7 @@
     }
   ],
   "counts": {
-    "API": 353,
+    "API": 354,
     "ASR": 2,
     "Containers": 14,
     "Gateway": 5,
@@ -9411,7 +9433,7 @@
   },
   "inputs": {
     "api/Dockerfile": "49fe41044546fbef4574ee2c5d85e20cd80243825195277cda694c2e4be55321",
-    "api/package-lock.json": "aa86620edc3b56c755f5d92300c0f4e59785765074717a2b9c18fb5a13fe2994",
+    "api/package-lock.json": "e363988db1c398bc5103304bfae1784e5460a3700778ca50f6fa7ebfcbf609a6",
     "docker-compose.monitor.yml": "3ec33e73df32c484bf2187bc0ab1b95c77eaacf74fe18deeab482d3de4af1395",
     "docker-compose.prod.yml": "f15abd84d40e7b0e0960f6c2f8f76008270f1ffd3e3068d46c5259f42a89a622",
     "docker-compose.runtime-test.yml": "6b87c7d9e784ad471c1701ba750bad4405d86d3f1b0a68551716e47c84451e82",
@@ -9424,7 +9446,7 @@
     "scripts/asr_engine_attest.py": "898682d3ec50f6f41c41db1b24aa15e3eb8455d34ac92a64761ba44db2fa816c",
     "scripts/sof3/kin_sof3.c": "7645ce429e01514a4f152e1d0c0f3c2150bee32a0f135be88c39573647799ea2",
     "tests/fixtures/asr/Dockerfile": "96765ceaaa32a3e648b30600466e413a0056f54f8b243dbe0e0c2c33a4545df1",
-    "worklist-v0/legal/licenses/catalog.json": "cac54b125b5db1f6e47e5ada2f74fc21237ead8b88f7e4a191d19c46fdacc322",
+    "worklist-v0/legal/licenses/catalog.json": "0d0808da433d8acdcc4c30e92c44c3f315d771170aca83c365b1369b9ed1f062",
     "worklist-v0/legal/licenses/gateway-resolution.json": "b579c64ebc6cc2ec413a6845bd41f787fed71a6763e8fa2031cfc3a645f94e9f",
     "worklist-v0/legal/licenses/orthanc-build-matrix-24.12.0.json": "44634b06fb56d94013c80b77df9c882a0029391ea17510ee41368ebfb76cd59f",
     "worklist-v0/legal/licenses/texts/0154425673db15cdfa80ecba2c9b1f1a867f7197a006764712849bfc3a93cbb7.txt": "0154425673db15cdfa80ecba2c9b1f1a867f7197a006764712849bfc3a93cbb7",

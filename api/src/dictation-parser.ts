@@ -9,7 +9,7 @@ export function dictationParser() {
     if (req.method !== 'POST') return next();
     const fail = (status: number, code: string) => {
       // Preserve the global guard and report refusal ordering even for invalid audio.
-      // body-parser 1.20.4 uses _body to skip subsequent JSON/urlencoded parsers.
+      // body-parser 1.20 uses _body to skip subsequent JSON/urlencoded parsers.
       req._body = true;
       req.body = Buffer.alloc(0);
       req.dictationError = { status, code };

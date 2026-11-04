@@ -221,7 +221,7 @@
         commitInFlight = true;
         // 요청이 나가 있는 동안 버튼을 회색으로. 플래그만으로도 두 번째 호출은 막히지만,
         // 눌리는데 아무 일도 안 일어나는 버튼은 "먹통"으로 읽혀 또 누르게 만든다.
-        for (const id of ["#b-approve", "#b-approve-next", "#b-save", "#b-transcribe", "#b-addendum", "#b-unread", "#b-prelim", "#b-defer"])
+        for (const id of ["#b-approve", "#b-approve-next", "#b-save", "#b-addendum", "#b-unread", "#b-prelim", "#b-defer"])
           if ($(id)) $(id).disabled = true;
         // 내 글을 확정하는 중이라면(초안이 있거나 편집기가 dirty) 기준은 **화면에 그려진 판**이다.
         // `appState.version`은 본문을 다시 그리지 않고도 올라가므로, 그대로 보내면
@@ -516,7 +516,6 @@
     }
     $("#b-prelim")?.addEventListener("click", doPreliminary);
     $("#b-save").addEventListener("click", () => commitReport("save"));
-    $("#b-transcribe").addEventListener("click", () => commitReport("save"));
     $("#b-approve").addEventListener("click", () => {
       const why = reportCommandBlocked("approve");
       if (why) { toast(why, "err"); return; }

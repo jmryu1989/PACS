@@ -141,7 +141,7 @@ class WorklistSplitUidDOMTest(unittest.TestCase):
         self.assertEqual([4, 7], self.page.evaluate("() => { const f = document.querySelector('#findings'); return [f.selectionStart, f.selectionEnd]; }"))
         for name in auth.FIELDS:
             self.assertTrue(self.page.locator("#" + name).evaluate("e => e.readOnly"), name)
-        for button in ("#b-save", "#b-approve", "#b-clear", "#b-paste", "#b-defer", "#b-prelim", "#b-transcribe"):
+        for button in ("#b-save", "#b-approve", "#b-clear", "#b-paste", "#b-defer", "#b-prelim"):
             expect(self.page.locator(button)).to_be_disabled()
         # Autosave, a programmatic commit and an image launch send nothing for this study.
         self.page.clock.run_for(20001)
