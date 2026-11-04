@@ -45,12 +45,16 @@ async function decide(row, facts = noFacts(), at = '2026-11-01T02:00:00.000Z') {
   const store = journal(); let deleted = 0;
   try {
     const record = await P.decidePurposeEnd(store, row, facts, at, async () => {
-      deleted++; return { completedAt: at, method: 'irreversible-permanent-deletion' };
+      deleted++; return { completedAt: at, method: 'operational-store-deletion' };
     });
     return { record, lines: store.lines, deleted };
   } catch (error) { return { error: error.code ?? error.message, lines: store.lines, deleted }; }
 }
-const RECORD_FIELDS = ['basis', 'classes', 'clauseIds', 'day', 'disposalUnitId', 'dueDay', 'expiryDay', 'extensionUsed', 'formatVersion',
+// CD-09-C: the record every new attempt writes (format 2). Format 1 (the P release's) is read only: its field set is
+// V1_RECORD_FIELDS and its lines come from tests/fixtures/retention (written by the P release's own writer).
+const RECORD_FIELDS = ['basis', 'classes', 'clauseIds', 'day', 'delayReasonStatus', 'disposalUnitId', 'dueDay', 'expiryDay',
+  'extensionUsed', 'formatVersion', 'justifiedDelay', 'kind', 'method', 'occurredAt', 'operationId', 'partCount', 'phase', 'timeliness'];
+const V1_RECORD_FIELDS = ['basis', 'classes', 'clauseIds', 'day', 'disposalUnitId', 'dueDay', 'expiryDay', 'extensionUsed', 'formatVersion',
   'method', 'partCount', 'phase', 'timeliness'];
 
 // ── A1: only the stored ends of this work, by the right actor, end its purpose ──
@@ -167,14 +171,22 @@ test('P08 the operating window: a destruction after the fifth Seoul day is compl
 // ── the external ledger file ──
 
 function ledgerDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'cd09p-ledger-')); }
-const sample = (patch = {}) => ({ formatVersion: 1, phase: 'started', day: '2026-11-01', disposalUnitId: unit(), classes: [], clauseIds: ['privacy:21.1'],
+/** A valid format-2 started record (a new attempt), and the terminal record of the same attempt. */
+const sample = (patch = {}) => ({ formatVersion: 2, kind: 'operational-deletion', operationId: randomUUID(), phase: 'started',
+  occurredAt: '2026-11-01T02:00:00.000Z', day: '2026-11-01', disposalUnitId: unit(), classes: [], clauseIds: ['privacy:21.1'],
   partCount: 1, expiryDay: '2026-11-01', extensionUsed: false, dueDay: '2026-11-06', timeliness: 'within-five-days',
-  method: 'irreversible-permanent-deletion', basis: 'privacy-act-21-and-decree-16-1-1', ...patch });
+  delayReasonStatus: 'not-required', justifiedDelay: null, method: 'operational-store-deletion', basis: 'privacy-act-21-and-decree-16-1-1', ...patch });
+const seoulDay = at => new Date(Date.parse(at) + 9 * 3600_000).toISOString().slice(0, 10);
+function closing(started, phase, occurredAt = started.occurredAt) {
+  const timeliness = seoulDay(occurredAt) <= started.dueDay ? 'within-five-days' : 'overdue';
+  return { ...started, phase, occurredAt, day: seoulDay(occurredAt), timeliness,
+    delayReasonStatus: timeliness === 'within-five-days' ? 'not-required' : started.justifiedDelay === null ? 'missing' : 'recorded' };
+}
 
 test('P09 the ledger is created only as its header with the database\'s ledger ID, never by an append, and reads back in order', () => {
   const dir = ledgerDir(), ledger = new P.PurposeLedgerFile(dir), id = randomUUID();
   assert.equal(ledger.read(), null);
-  const a = sample(), b = sample({ phase: 'completed', disposalUnitId: a.disposalUnitId });
+  const a = sample(), b = closing(a, 'completed');
   // r3 C5: a missing ledger is the gate's question (lost, or never initialized); an append never answers it with a header.
   assert.throws(() => ledger.append(id, a), e => e.code === 'PurposeLedgerMissing');
   assert.equal(ledger.read(), null, 'the refused append wrote nothing');
@@ -282,7 +294,9 @@ test('P13 a destruction waits for the author\'s responses registered before it, 
 function database(state) {
   const sql = strings => strings.join('?').replace(/\s+/g, ' ');
   const view = s => ({ ...s.anchor });
-  function handle(text, values, writes, mode) {
+  function handle(text, values, writes, mode, tx) {
+    // CD-09-C RC5: every statement with the transaction it ran in (an autocommit statement is its own transaction).
+    state.txlog?.push({ tx, text });
     if (state.dbDown) throw Object.assign(new Error('SYN database unreachable'), { code: 'P1001' });
     // r3: the confirmation read opens its own bounded transaction. `confirmFails` makes that read time out (the lock
     // it waits on is held elsewhere) without touching anything the attempt itself did.
@@ -314,7 +328,14 @@ function database(state) {
     if (/emr_access.holds_for/.test(text)) { state.log.push('holds'); return []; }
     if (/^DELETE FROM "ReportDraftPurposeEnd"/.test(text)) { const n = state.ended.has(values[0]) ? 1 : 0; writes.push(s => s.ended.delete(values[0])); return n; }
     if (/^UPDATE "PurposeLedgerAnchor" SET seq/.test(text)) {
-      writes.push(s => Object.assign(s.anchor, { seq: values[0], initialized: true, lastCompletedUnit: values[1], lastCompletedAt: values[2] }));
+      const move = s => Object.assign(s.anchor, { seq: values[0], initialized: true, lastCompletedUnit: values[1], lastCompletedAt: values[2] });
+      // The counterexample of RC5: an anchor move that commits in a transaction of its own, before the deletion's.
+      if (state.splitAnchor) {
+        const own = ++state.txseq, entry = state.txlog?.at(-1);
+        if (entry) entry.tx = own;                 // this statement ran in that transaction, not the caller's
+        state.txlog?.push({ tx: own, text: 'COMMIT' }); move(state);
+      }
+      else writes.push(move);
       return 1;
     }
     if (/^UPDATE "PurposeLedgerAnchor" SET initialized/.test(text)) { writes.push(s => { s.anchor.initialized = true; }); return 1; }
@@ -330,18 +351,19 @@ function database(state) {
     }
     throw new Error('unexpected statement: ' + text);
   }
-  const client = writes => ({
-    $queryRaw: async (strings, ...values) => handle(sql(strings), values, writes, 'q'),
-    $executeRaw: async (strings, ...values) => handle(sql(strings), values, writes, 'x'),
+  const client = (writes, tx) => ({
+    $queryRaw: async (strings, ...values) => handle(sql(strings), values, writes, 'q', tx),
+    $executeRaw: async (strings, ...values) => handle(sql(strings), values, writes, 'x', tx),
   });
   const db = {
     async $transaction(fn) {
-      const writes = [];
-      const result = await fn(client(writes));
+      const writes = [], tx = ++state.txseq;
+      const result = await fn(client(writes, tx));
       if (writes.length && state.commitFails > 0) { state.commitFails--; throw new Error('SYN COMMIT FAILURE; transaction rolled back'); }
       // What the served stack showed: COMMIT failed in PostgreSQL and the client still saw a resolved transaction.
       if (writes.length && state.silentCommitFails > 0) { state.silentCommitFails--; return result; }
       writes.forEach(w => w(state));
+      state.txlog?.push({ tx, text: 'COMMIT' });
       // r3: the COMMIT took effect and its answer was lost (the client sees an error for a committed transaction).
       if (writes.length && state.rejectAfterCommit > 0) { state.rejectAfterCommit--; throw Object.assign(new Error('SYN answer lost after COMMIT'), { code: 'P1017' }); }
       return result;
@@ -349,7 +371,7 @@ function database(state) {
   };
   // Outside a transaction a statement commits on its own.
   const autocommit = mode => async (strings, ...values) => {
-    const writes = [], result = handle(sql(strings), values, writes, mode);
+    const writes = [], result = handle(sql(strings), values, writes, mode, ++state.txseq);
     writes.forEach(w => w(state)); return result;
   };
   db.$queryRaw = autocommit('q');
@@ -359,7 +381,7 @@ function database(state) {
 function stateWith(rows, anchor = {}) {
   return { anchor: { ledgerId: randomUUID(), seq: 0, initialized: true, lastCompletedUnit: null, lastCompletedAt: null, ...anchor },
     ended: new Map(rows.map(r => [r.disposalUnitId, r])), works: true, log: [], commitFails: 0, silentCommitFails: 0, settleFails: 0,
-    live: new Map(), confirmFails: 0, rejectAfterCommit: 0, migrated: true, dbDown: false };
+    live: new Map(), confirmFails: 0, rejectAfterCommit: 0, migrated: true, dbDown: false, txseq: 0, txlog: null, splitAnchor: false };
 }
 const NOW = () => new Date('2026-11-01T02:00:00.000Z');
 /** A ledger file holding only its header for this database (the file format is the contract; written here directly). */
@@ -532,11 +554,9 @@ test('R3-C3d(b) while one attempt is unknown no other unit starts; another proce
 test('R3-C3c a ledger as long as the anchor says but with another meaning at the anchor\'s position stays closed', async () => {
   const a = ended(), state = stateWith([a]);
   const ledger = ledgerFor(state.anchor.ledgerId);
-  const started = { formatVersion: 1, phase: 'started', day: '2026-11-01', disposalUnitId: a.disposalUnitId, classes: [],
-    clauseIds: ['privacy:21.1'], partCount: 1, expiryDay: '2026-11-01', extensionUsed: false, dueDay: '2026-11-06',
-    timeliness: 'within-five-days', method: 'irreversible-permanent-deletion', basis: 'privacy-act-21-and-decree-16-1-1' };
+  const started = sample({ disposalUnitId: a.disposalUnitId });
   ledger.append(state.anchor.ledgerId, started);
-  ledger.append(state.anchor.ledgerId, { ...started, phase: 'failed' });
+  ledger.append(state.anchor.ledgerId, closing(started, 'failed'));
   Object.assign(state.anchor, { seq: 2, lastCompletedUnit: a.disposalUnitId, lastCompletedAt: '2026-11-01T01:30:00.000Z' });
   assert.equal(ledger.read().entries.length, state.anchor.seq, 'same length: only the meaning differs');
   const before = fs.readFileSync(ledger.file);
@@ -550,9 +570,7 @@ test('R3-C3c a ledger as long as the anchor says but with another meaning at the
 test('R3-C4d a started attempt with no evidence (another process stopped after it) closes the gate and the sweep', async () => {
   const a = ended(), state = stateWith([a]);
   const ledger = ledgerFor(state.anchor.ledgerId);
-  ledger.append(state.anchor.ledgerId, { formatVersion: 1, phase: 'started', day: '2026-11-01', disposalUnitId: a.disposalUnitId,
-    classes: [], clauseIds: ['privacy:21.1'], partCount: 1, expiryDay: '2026-11-01', extensionUsed: false, dueDay: '2026-11-06',
-    timeliness: 'within-five-days', method: 'irreversible-permanent-deletion', basis: 'privacy-act-21-and-decree-16-1-1' });
+  ledger.append(state.anchor.ledgerId, sample({ disposalUnitId: a.disposalUnitId }));
   assert.notEqual(state.anchor.lastCompletedUnit, a.disposalUnitId);
   assert.ok(state.ended.has(a.disposalUnitId));
   const before = fs.readFileSync(ledger.file);
@@ -872,3 +890,347 @@ for (const [name, call] of Object.entries(ENTRY)) {
     assert.equal(r.w.durable.draft.findings, 'SYN end text');
   });
 }
+
+// ── CD-09-C: format 2, the P release's format-1 ledgers, and the composed startup gate ──
+//
+// claude-plan-cd-09c.md sections 2-5 with the plan review's section 6 corrections. Format-1 ledgers are the bytes the P
+// release (1f8249a) wrote itself (tests/fixtures/retention/make_v1_ledger.cjs); format-2 lines come from the writer of
+// this tree through the service. A changed line is built from a record that is valid on its own (shown first), so each
+// refusal is the targeted rule and not another decoder error. The second gate adapter is this test's own double.
+
+const crypto = require('node:crypto');
+const A = require(path.join(api, 'src/emr-contract/lawful-defaults.ts'));
+const FIX = path.join(root, 'tests/fixtures/retention');
+const META = JSON.parse(fs.readFileSync(path.join(FIX, 'v1-fixtures.json'), 'utf8'));
+const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+const linesOf = file => fs.readFileSync(file, 'utf8').split('\n').slice(0, -1).map(line => JSON.parse(line));
+const entryLine = (seq, ledgerId, record) =>
+  JSON.stringify({ kind: 'entry', seq, ledgerId, appendedAt: '2026-11-03T00:00:00.000Z', record }) + '\n';
+const codeOf = fn => { try { fn(); return null; } catch (error) { return error.code; } };
+/** A clock that answers the given instants in order (then keeps the last). */
+const clockOf = (...instants) => { let i = 0; return () => new Date(instants[Math.min(i++, instants.length - 1)]); };
+const ticking = start => { let t = Date.parse(start); return () => new Date(t += 1000); };
+
+/** The P server's ledger: the P writer's bytes, copied as-is into a fresh ledger directory. */
+function pLedger(which) {
+  const ledger = new P.PurposeLedgerFile(ledgerDir());
+  fs.copyFileSync(path.join(FIX, META[which].file), ledger.file);
+  const bytes = fs.readFileSync(ledger.file);
+  assert.equal(sha256(bytes), META[which].sha256, 'the fixture is the P writer\'s output');
+  const lines = linesOf(ledger.file);
+  assert.ok(lines.slice(1).every(e => e.record.formatVersion === 1 &&
+    JSON.stringify(Object.keys(e.record).sort()) === JSON.stringify(V1_RECORD_FIELDS)), 'every record is format 1');
+  return { ledger, bytes, lines };
+}
+/** C01's upgraded server: the P ledger, then one destruction by this tree (unit D). */
+async function upgraded() {
+  const p = pLedger('closed');
+  const d = ended(), state = stateWith([d], { ledgerId: META.ledgerId, ...META.closed.anchor });
+  const service = new P.DraftPurposeDisposal(database(state), p.ledger, null, ticking('2026-11-03T01:00:00.000Z'));
+  await service.openGate();
+  assert.equal((await service.destroy(d.disposalUnitId)).outcome, 'destroyed');
+  return { ...p, d, state, after: fs.readFileSync(p.ledger.file), added: linesOf(p.ledger.file).slice(p.lines.length).map(e => e.record) };
+}
+
+test('C01 F1/F2 a P server\'s format-1 ledger opens without preparation, keeps its bytes, and new attempts are format 2', async () => {
+  const { ledger, bytes, lines, d, state, after, added } = await upgraded();
+  assert.equal(lines.at(-1).record.phase, 'completed', 'the P ledger ends closed');
+  assert.ok(!state.ended.has(d.disposalUnitId));
+  assert.deepEqual(after.subarray(0, bytes.length), bytes, 'the P lines stay byte for byte as the P server wrote them');
+  assert.deepEqual(added.map(r => [r.formatVersion, r.phase]), [[2, 'started'], [2, 'completed']]);
+  for (const r of added) {
+    assert.deepEqual(Object.keys(r).sort(), RECORD_FIELDS);
+    assert.deepEqual([r.kind, r.method, r.disposalUnitId], ['operational-deletion', 'operational-store-deletion', d.disposalUnitId]);
+  }
+  assert.equal(added[0].operationId, added[1].operationId, 'one attempt, one operation');
+  // A database restored from before both releases' destructions (A ended, B still live in its author's row, D ended):
+  // the P release's completed units and the format-2 one are all re-applied, with no new record.
+  const restored = stateWith([ended({ disposalUnitId: META.units.a }), structuredClone(d)], { ledgerId: META.ledgerId, ...META.closed.anchor });
+  restored.live.set(META.units.b, { uid: UID, author: AUTHOR, findings: 'SYN live copy' });
+  assert.deepEqual([restored.ended.size, restored.live.size], [2, 1], 'the restored copy holds the payloads again');
+  const reopened = await new P.DraftPurposeDisposal(database(restored), ledger, null, NOW).openGate();
+  assert.equal(reopened.reapplied, 3);
+  assert.deepEqual([restored.ended.size, restored.live.size], [0, 0]);
+  assert.deepEqual(fs.readFileSync(ledger.file), after, 'a re-application writes nothing');
+});
+
+test('C02 F3-F8 a format change the product can tell apart closes with its own code and changes nothing', async () => {
+  const base = await upgraded();
+  const id = META.ledgerId, n = base.added.length + base.lines.length - 1;   // entries in the base ledger
+  const v1 = base.lines[1].record;                                             // a P record (unit A started)
+  const v2 = base.added[0];                                                    // this tree's started record (unit D)
+  const started = sample({ disposalUnitId: unit() });
+  const omit = (record, key) => { const copy = { ...record }; delete copy[key]; return copy; };
+  // Each case: records appended to the base ledger as valid envelope lines, and the expected code.
+  const cases = [
+    ['F3 a format-1 record after format 2', [{ ...v1, disposalUnitId: unit() }], 'PurposeLedgerRecordInvalid'],
+    ['F5 a terminal record of another operation', [started, closing({ ...started, operationId: randomUUID() }, 'completed')], 'PurposeLedgerRecordInvalid'],
+    ['F5 a terminal record with no started', [closing(sample(), 'completed')], 'PurposeLedgerRecordInvalid'],
+    ['F5 a new attempt over an open one', [started, { ...started, operationId: randomUUID() }], 'PurposeLedgerRecordInvalid'],
+    ['F5 an operation ID used again', [{ ...v2, disposalUnitId: unit() }], 'PurposeLedgerRecordInvalid'],
+    ['F6 an unsupported record format', [{ ...sample(), formatVersion: 3 }], 'PurposeLedgerFormatUnsupported'],
+    ['F6 an unsupported format with its own fields', [{ formatVersion: 99, phase: 'started', anything: 'x' }], 'PurposeLedgerFormatUnsupported'],
+    ['F6 no format at all', [omit(sample(), 'formatVersion')], 'PurposeLedgerRecordInvalid'],
+    ['F6 a format that is not an integer', [{ ...sample(), formatVersion: '2' }], 'PurposeLedgerRecordInvalid'],
+    ['F7 a format-2 record without a field', [omit(sample(), 'justifiedDelay')], 'PurposeLedgerRecordInvalid'],
+    ['F7 a format-2 record with another field', [{ ...sample(), uid: UID }], 'PurposeLedgerRecordInvalid'],
+    ['F8 the format-1 method in format 2', [sample({ method: 'irreversible-permanent-deletion' })], 'PurposeLedgerRecordInvalid'],
+    ['F8 a day that is not the occurrence\'s Seoul day', [sample({ day: '2026-11-02' })], 'PurposeLedgerRecordInvalid'],
+    ['F8 a timeliness its day contradicts', [sample({ timeliness: 'overdue', delayReasonStatus: 'missing' })], 'PurposeLedgerRecordInvalid'],
+    ['F8 a missing reason within the window', [sample({ delayReasonStatus: 'missing' })], 'PurposeLedgerRecordInvalid'],
+    ['F8 a reason that is free text', [sample({ occurredAt: '2026-11-08T02:00:00.000Z', day: '2026-11-08', timeliness: 'overdue',
+      delayReasonStatus: 'recorded', justifiedDelay: 'SYN patient asked to wait' })], 'PurposeLedgerRecordInvalid'],
+  ];
+  // Controls: each added record is valid where the targeted rule does not apply.
+  const header = base.bytes.toString('utf8').split('\n')[0] + '\n';
+  const alone = new P.PurposeLedgerFile(ledgerDir());
+  fs.writeFileSync(alone.file, header + entryLine(1, id, { ...v1, disposalUnitId: unit() }));
+  assert.equal(alone.read().entries.length, 1, 'F3 control: that format-1 record is valid in a format-1 ledger');
+  const pair = new P.PurposeLedgerFile(ledgerDir());
+  fs.writeFileSync(pair.file, header + entryLine(1, id, started) + entryLine(2, id, closing(started, 'completed')));
+  assert.equal(pair.read().entries.length, 2, 'F4/F5 control: the same started and its own terminal read back');
+  assert.equal(codeOf(() => base.ledger.read()), null, 'the base ledger reads');
+  const overdue = sample({ occurredAt: '2026-11-08T02:00:00.000Z', day: '2026-11-08', timeliness: 'overdue', delayReasonStatus: 'missing' });
+  assert.equal(codeOf(() => { const l = new P.PurposeLedgerFile(ledgerDir()); l.create(id); l.append(id, overdue); }), null,
+    'F8 control: an overdue record with a missing reason is valid');
+  for (const [label, extra, code] of cases) {
+    const ledger = new P.PurposeLedgerFile(ledgerDir());
+    const damaged = base.after.toString('utf8') + extra.map((record, i) => entryLine(n + 1 + i, id, record)).join('');
+    fs.writeFileSync(ledger.file, damaged);
+    assert.equal(codeOf(() => ledger.read()), code, label);
+    const state = stateWith([], { ledgerId: id, ...base.state.anchor });
+    await assert.rejects(new P.DraftPurposeDisposal(database(state), ledger, null, NOW).openGate(), e => e.code === code, label + ' (gate)');
+    assert.equal(fs.readFileSync(ledger.file, 'utf8'), damaged, label + ': the file is unchanged');
+  }
+  // F4: the P release's open started (unit C, format 1) closed by a format-2 record.
+  const open = pLedger('openStarted');
+  fs.appendFileSync(open.ledger.file, entryLine(META.openStarted.startedSeq + 1, id, closing(sample({ disposalUnitId: META.units.c }), 'completed')));
+  assert.equal(codeOf(() => open.ledger.read()), 'PurposeLedgerRecordInvalid', 'F4');
+  // The writer side of the same contract: a new attempt is never written in format 1, an unsupported format never at all.
+  const fresh = new P.PurposeLedgerFile(ledgerDir()); fresh.create(id);
+  assert.equal(codeOf(() => fresh.append(id, { ...v1, disposalUnitId: unit() })), 'PurposeLedgerRecordInvalid', 'no new format-1 attempt');
+  assert.equal(codeOf(() => fresh.append(id, { ...sample(), formatVersion: 3 })), 'PurposeLedgerFormatUnsupported');
+  assert.equal(fresh.read().entries.length, 0);
+});
+
+test('C03 R1/R4 on the P release\'s open started: R1 closes it in format 1 from the anchor, R4 stays closed and keeps it', async () => {
+  // R1: C's deletion committed (its payload is gone, the anchor names C one past the started record), its completed lost.
+  const r1 = pLedger('openStarted');
+  const last = r1.lines.at(-1);
+  assert.deepEqual([last.seq, last.record.formatVersion, last.record.phase, last.record.disposalUnitId],
+    [META.openStarted.startedSeq, 1, 'started', META.units.c]);
+  const committed = stateWith([], { ledgerId: META.ledgerId, ...META.openStarted.committedAnchor });
+  assert.deepEqual([committed.anchor.seq, committed.anchor.lastCompletedUnit], [META.openStarted.startedSeq + 1, META.units.c]);
+  assert.ok(!committed.ended.has(META.units.c) && !committed.live.has(META.units.c), 'no payload of C: the deletion committed');
+  const service = new P.DraftPurposeDisposal(database(committed), r1.ledger, null, ticking('2026-11-03T05:00:00.000Z'));
+  await service.openGate();
+  const closed = linesOf(r1.ledger.file);
+  assert.deepEqual(fs.readFileSync(r1.ledger.file).subarray(0, r1.bytes.length), r1.bytes);
+  const completion = closed.at(-1).record;
+  assert.deepEqual(Object.keys(completion).sort(), V1_RECORD_FIELDS, 'closed in its own format (no operation ID)');
+  assert.deepEqual({ ...completion, phase: 'started', day: last.record.day }, last.record);
+  assert.deepEqual([completion.phase, completion.day], ['completed', '2026-11-02']);
+  // After it, a new destruction is format 2.
+  const next = ended(); committed.ended.set(next.disposalUnitId, next);
+  await service.destroy(next.disposalUnitId);
+  assert.deepEqual(linesOf(r1.ledger.file).slice(closed.length).map(e => e.record.formatVersion), [2, 2]);
+  // R4: nothing proves C committed (the anchor is still B's, C's payload is still there): closed, nothing written.
+  const r4 = pLedger('openStarted');
+  const uncommitted = stateWith([ended({ disposalUnitId: META.units.c })], { ledgerId: META.ledgerId, ...META.openStarted.uncommittedAnchor });
+  assert.equal(uncommitted.anchor.lastCompletedUnit, META.units.b);
+  const other = ended(); uncommitted.ended.set(other.disposalUnitId, other);
+  const stranger = new P.DraftPurposeDisposal(database(uncommitted), r4.ledger, null, NOW);
+  await assert.rejects(stranger.openGate(), e => e.code === 'PurposeIntentIncomplete');
+  await quiet(async () => { await assert.rejects(stranger.destroy(other.disposalUnitId), e => e.code === 'PurposeIntentIncomplete'); });
+  await assert.rejects(stranger.sweep(), e => e.code === 'PurposeIntentIncomplete');
+  assert.deepEqual(fs.readFileSync(r4.ledger.file), r4.bytes, 'the P record stays the last, no failed is synthesized');
+  assert.ok(uncommitted.ended.has(META.units.c) && uncommitted.ended.has(other.disposalUnitId));
+});
+
+test('C04 RC3 format 2 records each phase at its own time, failed only for a confirmed rollback, and a retry keeps the due day', async () => {
+  const records = (ledger, u) => (ledger.read()?.entries ?? []).map(e => e.record).filter(r => r.disposalUnitId === u);
+  // (a) committed: started at the request, completed at the deletion; one operation.
+  let row = ended(), state = stateWith([row]), ledger = ledgerFor(state.anchor.ledgerId);
+  await new P.DraftPurposeDisposal(database(state), ledger, null, clockOf('2026-11-02T00:00:00.000Z', '2026-11-02T00:00:05.000Z')).destroy(row.disposalUnitId);
+  assert.ok(!state.ended.has(row.disposalUnitId) && state.anchor.seq === 2 && state.anchor.lastCompletedUnit === row.disposalUnitId);
+  let r = records(ledger, row.disposalUnitId);
+  assert.deepEqual(r.map(x => [x.phase, x.occurredAt, x.day]), [['started', '2026-11-02T00:00:00.000Z', '2026-11-02'],
+    ['completed', '2026-11-02T00:00:05.000Z', '2026-11-02']]);
+  assert.equal(new Set(r.map(x => x.operationId)).size, 1);
+  assert.deepEqual(r.map(x => [x.dueDay, x.timeliness, x.delayReasonStatus, x.justifiedDelay]),
+    [['2026-11-05', 'within-five-days', 'not-required', null], ['2026-11-05', 'within-five-days', 'not-required', null]]);
+  // (b) not committed: failed at the time it was confirmed (not the request time), same operation; the retry is a new one.
+  row = ended(); state = stateWith([row]); ledger = ledgerFor(state.anchor.ledgerId); state.commitFails = 1;
+  const service = new P.DraftPurposeDisposal(database(state), ledger, null, clockOf('2026-11-02T00:00:00.000Z',
+    '2026-11-02T00:00:05.000Z', '2026-11-02T00:00:09.000Z', '2026-11-06T00:00:00.000Z', '2026-11-06T00:00:01.000Z'));
+  await assert.rejects(service.destroy(row.disposalUnitId), /SYN COMMIT FAILURE/);
+  assert.ok(state.ended.has(row.disposalUnitId) && state.anchor.seq === 0, 'the deletion rolled back');
+  r = records(ledger, row.disposalUnitId);
+  assert.deepEqual(r.map(x => [x.phase, x.occurredAt]), [['started', '2026-11-02T00:00:00.000Z'], ['failed', '2026-11-02T00:00:09.000Z']]);
+  assert.equal(r[0].operationId, r[1].operationId);
+  await service.destroy(row.disposalUnitId);
+  r = records(ledger, row.disposalUnitId);
+  assert.deepEqual(r.map(x => x.phase), ['started', 'failed', 'started', 'completed']);
+  assert.notEqual(r[2].operationId, r[0].operationId, 'a new attempt is a new operation');
+  assert.equal(r[3].operationId, r[2].operationId);
+  assert.ok(r.every(x => x.dueDay === '2026-11-05'), 'the retry keeps the original due day');
+  assert.deepEqual(r.slice(2).map(x => [x.timeliness, x.delayReasonStatus, x.justifiedDelay]),
+    [['overdue', 'missing', null], ['overdue', 'missing', null]], 'past the window: overdue, the reason missing, not invented');
+  // (c) committed, its judgement unknown: started only; the next match closes the same operation from the anchor.
+  row = ended(); state = stateWith([row]); ledger = ledgerFor(state.anchor.ledgerId); state.confirmFails = 1;
+  const unknown = new P.DraftPurposeDisposal(database(state), ledger, null,
+    clockOf('2026-11-02T00:00:00.000Z', '2026-11-02T00:00:05.000Z', '2026-11-02T00:01:00.000Z'));
+  await assert.rejects(unknown.destroy(row.disposalUnitId));
+  assert.ok(!state.ended.has(row.disposalUnitId) && state.anchor.seq === 2, 'the deletion committed');
+  assert.deepEqual(records(ledger, row.disposalUnitId).map(x => x.phase), ['started']);
+  assert.equal((await unknown.destroy(row.disposalUnitId)).outcome, 'absent');
+  r = records(ledger, row.disposalUnitId);
+  assert.deepEqual(r.map(x => [x.phase, x.occurredAt]), [['started', '2026-11-02T00:00:00.000Z'], ['completed', '2026-11-02T00:00:05.000Z']]);
+  assert.equal(r[1].operationId, r[0].operationId, 'the same operation, not a new event');
+  // (d) rolled back, its judgement unknown: started only; the same process later confirms the rollback (failed, same
+  // operation, at that time), then a new operation completes.
+  row = ended(); state = stateWith([row]); ledger = ledgerFor(state.anchor.ledgerId); state.commitFails = 1; state.confirmFails = 1;
+  const rolled = new P.DraftPurposeDisposal(database(state), ledger, null, clockOf('2026-11-02T00:00:00.000Z',
+    '2026-11-02T00:00:05.000Z', '2026-11-02T00:02:00.000Z', '2026-11-02T00:03:00.000Z', '2026-11-02T00:03:01.000Z'));
+  await assert.rejects(rolled.destroy(row.disposalUnitId));
+  assert.ok(state.ended.has(row.disposalUnitId) && state.anchor.seq === 0, 'the deletion rolled back');
+  assert.deepEqual(records(ledger, row.disposalUnitId).map(x => x.phase), ['started']);
+  await rolled.destroy(row.disposalUnitId);
+  r = records(ledger, row.disposalUnitId);
+  assert.deepEqual(r.map(x => x.phase), ['started', 'failed', 'started', 'completed']);
+  assert.equal(r[1].operationId, r[0].operationId);
+  assert.equal(r[1].occurredAt, '2026-11-02T00:02:00.000Z', 'failed when the rollback was confirmed');
+  assert.notEqual(r[2].operationId, r[0].operationId);
+  // (e) the window's edge between phases: started within, completed past it (Seoul day 11-06).
+  row = ended(); state = stateWith([row]); ledger = ledgerFor(state.anchor.ledgerId);
+  await new P.DraftPurposeDisposal(database(state), ledger, null, clockOf('2026-11-05T14:59:59.000Z', '2026-11-05T15:00:01.000Z')).destroy(row.disposalUnitId);
+  r = records(ledger, row.disposalUnitId);
+  assert.deepEqual(r.map(x => [x.day, x.timeliness, x.delayReasonStatus]),
+    [['2026-11-05', 'within-five-days', 'not-required'], ['2026-11-06', 'overdue', 'missing']]);
+});
+
+test('C05 RC5 the deletion and the anchor move commit in one transaction; the judgement reads after it in another; completed follows', async () => {
+  const run = async split => {
+    const row = ended(), state = stateWith([row]);
+    state.txlog = []; state.splitAnchor = split;
+    const ledger = ledgerFor(state.anchor.ledgerId), append = ledger.append.bind(ledger);
+    ledger.append = (id, record) => { state.txlog.push({ tx: null, text: 'APPEND ' + record.phase }); return append(id, record); };
+    const out = await new P.DraftPurposeDisposal(database(state), ledger, null, NOW).destroy(row.disposalUnitId);
+    return { out, log: state.txlog };
+  };
+  const atomic = log => {
+    const at = re => log.findIndex(e => re.test(e.text));
+    const del = log[at(/^DELETE FROM "ReportDraftPurposeEnd"/)], move = log[at(/^UPDATE "PurposeLedgerAnchor" SET seq/)];
+    assert.ok(del && move, 'both writes were made');
+    assert.ok(at(/^APPEND started/) < at(/^DELETE FROM "ReportDraftPurposeEnd"/), 'started is durable before the deletion');
+    assert.equal(move.tx, del.tx, 'the anchor moves in the deletion\'s transaction');
+    const commit = log.findIndex(e => e.tx === del.tx && e.text === 'COMMIT');
+    const judge = log.findIndex((e, i) => i > commit && /^SET LOCAL lock_timeout/.test(e.text));
+    assert.ok(commit >= 0 && judge > commit, 'the judgement starts after that commit');
+    assert.notEqual(log[judge].tx, del.tx);
+    assert.ok(at(/^APPEND completed/) > judge, 'completed is written after the judgement');
+  };
+  const normal = await run(false);
+  assert.equal(normal.out.outcome, 'destroyed');
+  atomic(normal.log);
+  // Counterexample (this harness only): the same product call with the anchor move committed apart. The check fails on it.
+  const split = await run(true);
+  assert.ok(split.log.some(e => /SET seq/.test(e.text) && e.tx !== null), 'the counterexample reached the anchor move');
+  assert.throws(() => atomic(split.log), /anchor moves in the deletion/);
+});
+
+test('C06 RC6 the composed gate opens adapters in order, each on its own; the first that closes stops the rest and the listen', async () => {
+  const G = require(path.join(api, 'src/emr-retention/retention-gate.ts'));
+  const watched = (adapter, calls) => ({ name: adapter.name,
+    open: async () => { calls.push(adapter.name + '.open'); return adapter.open(); },
+    afterOpen: async () => { calls.push(adapter.name + '.afterOpen'); return adapter.afterOpen(); } });
+  const second = (calls, { before, openCode, afterCode } = {}) => ({ name: 'syn-second',
+    open: async () => {
+      calls.push('syn-second.open');
+      if (before) await before();
+      if (openCode) throw Object.assign(new Error('SYN second closed'), { code: openCode });
+      return 'opened';
+    },
+    afterOpen: async () => {
+      calls.push('syn-second.afterOpen');
+      if (afterCode) throw Object.assign(new Error('SYN sweep'), { code: afterCode });
+      return { unsettled: 0 };
+    } });
+  const quietLog = { log: () => {}, error: () => {} };
+  const start = async (adapters, calls) => {
+    try { await new G.RetentionGate(adapters).open(quietLog); calls.push('listen'); return null; } catch (error) { return error; }
+  };
+  // (a) both open: opens in order, then each sweep in order, then the listen.
+  let row = ended(), state = stateWith([row]), ledger = ledgerFor(state.anchor.ledgerId), calls = [];
+  let p = new P.DraftPurposeDisposal(database(state), ledger, null, NOW);
+  assert.equal(await start([watched(P.draftPurposeAdapter(() => p), calls), second(calls)], calls), null);
+  assert.deepEqual(calls, ['draft-purpose.open', 'syn-second.open', 'draft-purpose.afterOpen', 'syn-second.afterOpen', 'listen']);
+  assert.ok(!state.ended.has(row.disposalUnitId), 'the draft purpose sweep ran after every adapter opened');
+  // (b) the second closes: no sweep of anyone, no listen; the P ended work is still pending.
+  row = ended(); state = stateWith([row]); ledger = ledgerFor(state.anchor.ledgerId); calls = [];
+  p = new P.DraftPurposeDisposal(database(state), ledger, null, NOW);
+  let error = await start([watched(P.draftPurposeAdapter(() => p), calls), second(calls, { openCode: 'SynSecondClosed' })], calls);
+  assert.deepEqual([error?.adapter, error?.code], ['syn-second', 'SynSecondClosed']);
+  assert.deepEqual(calls, ['draft-purpose.open', 'syn-second.open']);
+  assert.ok(state.ended.has(row.disposalUnitId));
+  // (c) the draft purpose adapter closes (another ledger): the second is never opened.
+  calls = [];
+  p = new P.DraftPurposeDisposal(database(stateWith([])), ledgerFor(randomUUID()), null, NOW);
+  error = await start([watched(P.draftPurposeAdapter(() => p), calls), second(calls)], calls);
+  assert.deepEqual([error?.adapter, error?.code], ['draft-purpose', 'PurposeLedgerMismatch']);
+  assert.match(error.message, /draft-purpose/); assert.match(error.message, /PurposeLedgerMismatch/);
+  assert.deepEqual(calls, ['draft-purpose.open']);
+  // An adapter whose service cannot even be built (no ledger directory) is that adapter's closure, before any other.
+  calls = [];
+  error = await start([watched(P.draftPurposeAdapter(() => new P.DraftPurposeDisposal(database(stateWith([])),
+    new P.PurposeLedgerFile(P.purposeLedgerDirectory({})), null, NOW)), calls), second(calls)], calls);
+  assert.deepEqual([error?.adapter, error?.code, calls], ['draft-purpose', 'PurposeLedgerDirectoryRequired', ['draft-purpose.open']]);
+  // (d) the draft purpose re-application commits, then the second closes: that commit stays (each adapter's own
+  // transaction), the server does not listen, and the next start finds nothing more to re-apply.
+  const restored = await restoredCompleted();
+  const db = database(restored.state);
+  let observed = null;
+  calls = [];
+  error = await start([watched(P.draftPurposeAdapter(() => new P.DraftPurposeDisposal(db, restored.ledger, null, NOW)), calls),
+    second(calls, { openCode: 'SynSecondClosed', before: async () => {
+      observed = { gone: !restored.state.ended.has(restored.row.disposalUnitId),
+        judged: await P.judgeCommit(db, { kind: 'reapplied', units: [restored.row.disposalUnitId] }, null) };
+    } })], calls);
+  assert.deepEqual(observed, { gone: true, judged: 'committed' }, 'the first adapter\'s re-application had committed before the second closed');
+  assert.deepEqual([error?.adapter, calls.includes('listen')], ['syn-second', false]);
+  assert.ok(!restored.state.ended.has(restored.row.disposalUnitId), 'the committed re-application is not undone');
+  const again = new P.DraftPurposeDisposal(db, restored.ledger, null, NOW), results = [], realOpen = again.openGate.bind(again);
+  again.openGate = async () => { const out = await realOpen(); results.push(out); return out; };
+  calls = [];
+  assert.equal(await start([P.draftPurposeAdapter(() => again), second(calls)], calls), null);
+  assert.equal(results[0].reapplied, 0, 'idempotent at the next start');
+  assert.deepEqual(fs.readFileSync(restored.ledger.file), restored.bytes);
+  // (e) a normal pending work is still an open adapter (the sweep reports it); a sweep that throws closes the server.
+  row = ended({ deliverySettled: false }); state = stateWith([row]); ledger = ledgerFor(state.anchor.ledgerId); calls = [];
+  p = new P.DraftPurposeDisposal(database(state), ledger, null, NOW);
+  const errors = [];
+  await new G.RetentionGate([P.draftPurposeAdapter(() => p), second(calls)]).open({ log: () => {}, error: (...a) => errors.push(a.join(' ')) });
+  assert.ok(state.ended.has(row.disposalUnitId), 'pending, not destroyed and not a closure');
+  assert.equal(errors.length, 1, 'the unsettled work is reported');
+  row = ended(); state = stateWith([row]); ledger = ledgerFor(state.anchor.ledgerId); calls = [];
+  p = new P.DraftPurposeDisposal(database(state), ledger, null, NOW);
+  error = await start([watched(P.draftPurposeAdapter(() => p), calls), second(calls, { afterCode: 'SynSweepFailed' })], calls);
+  assert.deepEqual([error?.adapter, error?.code], ['syn-second', 'SynSweepFailed']);
+  assert.deepEqual(calls, ['draft-purpose.open', 'syn-second.open', 'draft-purpose.afterOpen', 'syn-second.afterOpen']);
+  // The server composes its gate once.
+  G.composeRetentionGate([second([])]);
+  assert.throws(() => G.composeRetentionGate([second([])]), /RetentionGateAlreadyComposed/);
+});
+
+test('C07 RC4 a format-1 completion is not counted as a format-2 operational completion', async () => {
+  const v1 = pLedger('closed').lines.at(-1).record;
+  const { added } = await upgraded();
+  const v2 = added.at(-1);
+  assert.deepEqual([v1.phase, v2.phase], ['completed', 'completed']);
+  assert.equal(codeOf(() => A.confirmDestruction('syn-batch', [v1], 'privacy-officer', '2026-11-04T00:00:00.000Z')), 'OperationalDeletionRequired');
+  const confirmed = A.confirmDestruction('syn-batch', [v2], 'privacy-officer', '2026-11-04T00:00:00.000Z');
+  assert.deepEqual(confirmed.disposalUnitIds, [v2.disposalUnitId]);
+  // The method names the operational store only; nothing here says a backup or a WAL segment is gone.
+  assert.equal(v2.method, 'operational-store-deletion');
+  assert.doesNotMatch(A.PRODUCT_DEFAULTS.disposal, /irreversible|permanent/);
+});
