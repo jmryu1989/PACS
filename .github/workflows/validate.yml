@@ -585,6 +585,8 @@ jobs:
         ref: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
     - name: Pure fixture canonicalization and attestation refusals
       run: python3 scripts/record-run.py --run-dir tmp/asr-ci/fixture-pure --cwd . --file scripts/asr_fixture.py --file scripts/asr_engine_attest.py --file tests/asr_fixture_test.py --file .github/workflows/validate.yml -- python3 -B tests/asr_fixture_test.py
+    - name: Korean dictation measurement scoring and patient-information refusal (pure)
+      run: python3 scripts/record-run.py --run-dir tmp/asr-ci/measure-pure --cwd . --file scripts/asr_measure.py --file scripts/asr_measure_aihub208.json --file scripts/asr_fixture.py --file scripts/asr_engine_attest.py --file tests/asr_measure_test.py -- python3 -B tests/asr_measure_test.py
     - name: Reproduce a private deployment checkout
       run: chmod -R go-rwx api
     - name: Build the production target under test
@@ -682,6 +684,7 @@ jobs:
         name: synthetic-asr-engine-runtime
         path: |
           tmp/asr-ci/fixture-pure/
+          tmp/asr-ci/measure-pure/
           tmp/asr-ci/generate/
           tmp/asr-ci/canonicalize/
           tmp/asr-ci/attest/
