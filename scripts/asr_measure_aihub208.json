@@ -1,0 +1,757 @@
+{
+  "schema": "kin-asr-measure-set/1",
+  "set_id": "aihub208-telemedicine-dictation-real-voice-20261029",
+  "patient_information": {
+    "declaration": "none",
+    "declared_by": "CD-15 implementer (Claude Opus), 2026-11-04, from the AI Hub 208 dataset description; set owner confirmation pending",
+    "basis": "AI Hub 208 '비대면 진료를 위한 의료진 및 환자 음성' 공개 샘플(경량) 데이터. AI Hub 설명: 크라우드워커 1,500명이 대화 응답 시나리오에 따라 수집한 의료진·환자 구어 발화. 이 세트는 파일명 분류 01(의사) 60개와 03(모의 환자) 20개이며, 실제 진료 중 환자를 녹음한 것이 아니다. 샘플 데이터는 민감 정보가 마스킹(*)될 수 있다고 AI Hub가 밝힌다."
+  },
+  "language": "ko",
+  "label_reference_field": [
+    "전사정보",
+    "LabelText"
+  ],
+  "source": {
+    "dataset": "AI Hub 208 비대면 진료를 위한 의료진 및 환자 음성 (sample)",
+    "dataset_page": "https://www.aihub.or.kr/aihubdata/data/view.do?aihubDataSe=data&currMenu=115&dataSetSn=208&topMenu=100",
+    "archive": "aihub208-sample.zip",
+    "archive_sha256": "b04cbaefdee3cabebd0d35aad8570fada273b50e6bd2e32f6bd3febee34f8089",
+    "root_layout": "--root is the extracted archive: 원천데이터/<역할>/<폴더>/*.wav and 라벨링데이터/<역할>/<폴더>/*.json",
+    "selection": "Doctors only: official filename category 01; SHA256(seed + LF + POSIX label path) ascending within folder+gender+age+region strata; round-robin allocation until 60 (11/25/24). Patients: unchanged v1 selection, 10 per folder using v1 seed. No outcome-based filtering.",
+    "doctor_seed": "dictation-real-voice-20261029-v2-doctors",
+    "patient_seed": "dictation-real-voice-20261029-v1",
+    "official_category_source": "https://aihub.or.kr/web-nas/aihub21/files/public/2021-06/%EA%B7%B8%EB%A6%BC1_0.png",
+    "official_layout_source": "https://aihub.or.kr/web-nas/aihub21/files/public/2021-06/%EA%B7%B8%EB%A6%BC2.png",
+    "first_measured": "2026-10-29 dictation-real-voice (browser capture path through the KIN API)",
+    "terms_of_use": "audio and transcripts are not in the repository; only paths, hashes and the selection rule are"
+  },
+  "interpretation_limits": [
+    "이 세트는 판독문 받아쓰기가 아니라 비대면 진료 대화(짧은 문장, 1.56~11.04초)다. 판독 받아쓰기의 수용성을 증명하지 않는다.",
+    "의사 발화 60개는 폴더 3개·인구 프로필 3개, 모의 환자 20개는 폴더 2개뿐이다. 모집단을 대표하지 않으며 영상의학 용어·영한 혼용·판독문 길이 발화가 없다.",
+    "WER은 라벨 띄어쓰기에 민감한 어절 오류율이다. 임상 용어 재현율은 고정된 30개 용어의 정확 일치이며 부정·문맥·오삽입·임상적 정확성을 판정하지 않는다.",
+    "엔진에 파일을 직접 보내므로 브라우저 마이크 수집·실제 마이크·판독실 환경·의사 수용 확인을 포함하지 않는다.",
+    "합격 기준값은 없다. 기준값은 정모 님 또는 민훈 님이 정하기 전까지 비워 둔다."
+  ],
+  "items": [
+    {
+      "id": "HB_0001-759-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-759-01-01-F-05-A.wav",
+      "audio_sha256": "ce5cfc0141f85b3f0006c66fc19ab8491d044b10b0f1269aff3bed464c6481fc",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-759-01-01-F-05-A.json",
+      "label_sha256": "704b909ca1c8d6fc0b3270dac01f299c60efc6323bb47ce2b0dfb482fbad9266"
+    },
+    {
+      "id": "HB_0001-6-01-01-M-07-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-6-01-01-M-07-A.wav",
+      "audio_sha256": "32add9580571b61c64a4e1d2d30a1690365f0c3e7acd62491666fb40bd5fdf7e",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-6-01-01-M-07-A.json",
+      "label_sha256": "966a994b5aff38d31c5bfbeba79453811f5eb16658f3e0de08d36f178509f9fd"
+    },
+    {
+      "id": "HB_0002-102-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-102-01-01-F-05-A.wav",
+      "audio_sha256": "04d83a44682adde0cb7fd99046d4e6dd9da7af587fe49ed92977f1cf5c71e840",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-102-01-01-F-05-A.json",
+      "label_sha256": "9237bc3462db896eaef3357f5e730ee8f9398252ed40ab07e7a50be6ddce4f59"
+    },
+    {
+      "id": "HB_0001-857-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-857-01-01-F-05-A.wav",
+      "audio_sha256": "d5e5f4d2b2750b2ced4ad450b1f9d97e14c2f6a3e5af08707db67a1daa321946",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-857-01-01-F-05-A.json",
+      "label_sha256": "793f94e8168a6855fcbd2e475e9f9a5052871900605011b6b4101af6f9cea534"
+    },
+    {
+      "id": "HB_0001-8-01-01-M-07-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-8-01-01-M-07-A.wav",
+      "audio_sha256": "7637ad232501083ca3877d66a1d9c0c022caf2951b7faae25ec403927b7cf91d",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-8-01-01-M-07-A.json",
+      "label_sha256": "9c7ff5a8fa8457c46ed7492b01533785d73a3fd31355a619fa6daf8d594e4560"
+    },
+    {
+      "id": "HB_0002-358-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-358-01-01-F-05-A.wav",
+      "audio_sha256": "b78d915007ec0e450e9113c42494e2d6f08090c10145f14779286b8e430b8ae5",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-358-01-01-F-05-A.json",
+      "label_sha256": "ded8797aaa75c6df7967cd352b68b48785bcc740d0f083d740a4296f4296543f"
+    },
+    {
+      "id": "HB_0001-966-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-966-01-01-F-05-A.wav",
+      "audio_sha256": "811f70a5491a7d3f014853d3d8b1aac3f4dfa96414e8e0eab2dbd84eb01a965a",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-966-01-01-F-05-A.json",
+      "label_sha256": "e200059f9f9f8952ff8172c4083b58203aa7d65eac354866de67638f58dfcd46"
+    },
+    {
+      "id": "HB_0001-4-01-01-M-07-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-4-01-01-M-07-A.wav",
+      "audio_sha256": "2019e845c0a41416a59668d3dab9f42c743466d43d975977e2036e7ed70cd8ef",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-4-01-01-M-07-A.json",
+      "label_sha256": "8511d8a86cf58e000f4659cf7c5a3f96982b448b975bb59c1cea7b58107ab259"
+    },
+    {
+      "id": "HB_0002-502-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-502-01-01-F-05-A.wav",
+      "audio_sha256": "6aa4e10a55758c4cd4f0ef87eed2d11a37b5848445a802562699036e63efab24",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-502-01-01-F-05-A.json",
+      "label_sha256": "2ceff4ab92741ff9194e1e16debf12106f0c7eaaaa45183ea0caee9f716e56b8"
+    },
+    {
+      "id": "HB_0001-796-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-796-01-01-F-05-A.wav",
+      "audio_sha256": "891e3dc62a3b402be6150040dc24dcbe3d83b3c86117887f3ef1af630e31c70c",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-796-01-01-F-05-A.json",
+      "label_sha256": "42139e3342c5d9124c13457e7224e06e2d488b430bfee82ed6b14c46b8ecddcf"
+    },
+    {
+      "id": "HB_0001-1-01-01-M-07-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-1-01-01-M-07-A.wav",
+      "audio_sha256": "c46a282bb2a58ca48fd4d2a23a886664a7ea232c214fd82f837b311bd7d06ff9",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-1-01-01-M-07-A.json",
+      "label_sha256": "2dcd2f6ff20247da4b37a64b5320be93ff8d1fbcc25b50e1fa560b6d41615f48"
+    },
+    {
+      "id": "HB_0002-107-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-107-01-01-F-05-A.wav",
+      "audio_sha256": "d1277388d554fe48bab9bd9397a6af810df07c0aa0ec46fdc461312a32b4beca",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-107-01-01-F-05-A.json",
+      "label_sha256": "e2eb1d868ec460fd8ae1bfe4f334ffc58f3ccad427d365b56fda63d0e076cb5b"
+    },
+    {
+      "id": "HB_0001-169-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-169-01-01-F-05-A.wav",
+      "audio_sha256": "c19790820e9507d04556261cbfbf37b387068b509ea2bffc21db5912533358f6",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-169-01-01-F-05-A.json",
+      "label_sha256": "27d312c40dd8ff45efd6dc1f2d5f8b12000a77721c6643ba4854d1b35d20bedc"
+    },
+    {
+      "id": "HB_0001-5-01-01-M-07-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-5-01-01-M-07-A.wav",
+      "audio_sha256": "5e96d3834238f445c0a38f83af6fe0e32f028344ccc1546e02012d7e0635050d",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-5-01-01-M-07-A.json",
+      "label_sha256": "cf659b41b2c51b369d4e79113763abe81f734b42087905a2dc7465a0849e6f58"
+    },
+    {
+      "id": "HB_0002-391-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-391-01-01-F-05-A.wav",
+      "audio_sha256": "9f57eb737bbca61d477e5f732659f253c44206200a7224c10d45ef713d300a4c",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-391-01-01-F-05-A.json",
+      "label_sha256": "e93b111e1cb4104aea96d4acc439c5c8e8e0e6e6230451b09e51e82aaa873bdc"
+    },
+    {
+      "id": "HB_0001-414-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-414-01-01-F-05-A.wav",
+      "audio_sha256": "bda6bdf73d3d01483caf821aa007bafc599c21a9898e80b29311df5c847bb6e3",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-414-01-01-F-05-A.json",
+      "label_sha256": "4e8426608c1a22ff737ffa291cc858f657cd467f03d93523e2b127a74a92b707"
+    },
+    {
+      "id": "HB_0001-11-01-01-M-07-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-11-01-01-M-07-A.wav",
+      "audio_sha256": "07640e90a1f343d545272373766c861ea5c5f89d16c31a455bed0b85e79fac19",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-11-01-01-M-07-A.json",
+      "label_sha256": "8505d7ae1d7c56ab733569c3af34c2442c37bc2bbbcf0e8abad7473983d786a0"
+    },
+    {
+      "id": "HB_0002-323-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-323-01-01-F-05-A.wav",
+      "audio_sha256": "90154bc87104c96379f6044b5f6089273a0888a9b393d8421b91f88ce872e0c3",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-323-01-01-F-05-A.json",
+      "label_sha256": "47a221549843cb513f23ae9522934b32fd60532122d03e92bb6e44e4f937c89e"
+    },
+    {
+      "id": "HB_0001-657-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-657-01-01-F-05-A.wav",
+      "audio_sha256": "d8f49b4397036f08b463c01a2c234424427273faa075c58af25219a166fafad4",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-657-01-01-F-05-A.json",
+      "label_sha256": "4a49b5a548356154e387e2c1660550e5378b4726004129cb332a3fc42a6d857a"
+    },
+    {
+      "id": "HB_0001-2-01-01-M-07-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-2-01-01-M-07-A.wav",
+      "audio_sha256": "6512c3c3f01896e6f10af5bdb8c662ed89c66aefc3dd4bd9e2fd449b51cc68e9",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-2-01-01-M-07-A.json",
+      "label_sha256": "fd4041903755e2cbc825b55cc126e3bbc6dcbf7c49d579e8c6b9c75ef43dff04"
+    },
+    {
+      "id": "HB_0002-642-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-642-01-01-F-05-A.wav",
+      "audio_sha256": "eab920b1fa28804fa21cae582a0e9821a37f463f52c979197a21e3f806f82c1a",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-642-01-01-F-05-A.json",
+      "label_sha256": "157fb27a275fbe0deb0cc62e1df862ced24b8a3f03d68f648a1eb4c0aeb469ce"
+    },
+    {
+      "id": "HB_0001-564-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-564-01-01-F-05-A.wav",
+      "audio_sha256": "56771e718fbbcea937bfbff13a056de1a5135617a7a75d6fd76f4d0b2612478d",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-564-01-01-F-05-A.json",
+      "label_sha256": "44218ca1ddc8b549c033111e6a5cff4e23474fd03155ff26672db2002e4ba2b1"
+    },
+    {
+      "id": "HB_0001-3-01-01-M-07-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-3-01-01-M-07-A.wav",
+      "audio_sha256": "82071380c4db6e4ad20fa2ad58d1224efa58ed4d40c83ef8584a4c4b6077fc3f",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-3-01-01-M-07-A.json",
+      "label_sha256": "2b934d3c4b595e6348387c92909cdde5e18aae70e0b6a11dad1d97a343d0d73f"
+    },
+    {
+      "id": "HB_0002-940-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-940-01-01-F-05-A.wav",
+      "audio_sha256": "257fa4f29b177ffa9c570d1cb2409371f4bbef6385cc0db242f109ae755c33ce",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-940-01-01-F-05-A.json",
+      "label_sha256": "0412239e5dfaf6738b5e864fa02ba94506de51fa580ae23366d15d1c62374f78"
+    },
+    {
+      "id": "HB_0001-391-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-391-01-01-F-05-A.wav",
+      "audio_sha256": "15ae784254acfd5b55ac92167b4fefdfd5b1f5c57351ef5e441bfa6e2bebcf4b",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-391-01-01-F-05-A.json",
+      "label_sha256": "7de89d858535f2d1b509b1fa794413e9fc1ab076722b370ecea5192072d74d9c"
+    },
+    {
+      "id": "HB_0001-7-01-01-M-07-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-7-01-01-M-07-A.wav",
+      "audio_sha256": "c73d05b1d772761ba9a731302e0da5524d4bc0e9676f78b2c1b8e8031d2e3cdf",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-7-01-01-M-07-A.json",
+      "label_sha256": "bc375471d039c5a9406b9faf1d2e1956ce84a88f3874d72e3f4e818dfa89fc5e"
+    },
+    {
+      "id": "HB_0002-124-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-124-01-01-F-05-A.wav",
+      "audio_sha256": "1624d1b0b68cb61c6958397234d3d7b98cd31237474fc88eb96efa6b0b8be834",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-124-01-01-F-05-A.json",
+      "label_sha256": "ef010873b5a6cc021fc97bafa252f8035c04fd47eed75c397ef8f4a15e7f2db0"
+    },
+    {
+      "id": "HB_0001-408-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-408-01-01-F-05-A.wav",
+      "audio_sha256": "6a00a4d64e5e73a498054f44bdb42e1eee9506bcd945526fbe2ea8b37d6275ea",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-408-01-01-F-05-A.json",
+      "label_sha256": "84f6d3d42786673fb106db046c802645384e356e794fd723751258eb9f60cf53"
+    },
+    {
+      "id": "HB_0001-9-01-01-M-07-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-9-01-01-M-07-A.wav",
+      "audio_sha256": "326c7f19ce501172f3657bd03a30594310c3f53b6ec47cc2478248e57cd30184",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-9-01-01-M-07-A.json",
+      "label_sha256": "26ca835761308265ace30a88101a85a484bba79e9c4cfb3cdfd16a9b5a1a28cf"
+    },
+    {
+      "id": "HB_0002-513-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-513-01-01-F-05-A.wav",
+      "audio_sha256": "3a9927a2971e622f14d4e82dbdfe7b1ed1f17fdbae88ca82a8e9d501105fabe5",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-513-01-01-F-05-A.json",
+      "label_sha256": "515b3fdc72755b32751740ee07f2516f2aef823379ecd53b17d2694499a9697f"
+    },
+    {
+      "id": "HB_0001-737-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-737-01-01-F-05-A.wav",
+      "audio_sha256": "eaa29dc88f2798dfbd29ae9ca7c4e813ec018516929355335f5fce1d35da1ca0",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-737-01-01-F-05-A.json",
+      "label_sha256": "c3cba33acc91b516aed37c5b43c800e958585e1f8f2d12d57dc107b47174f2ca"
+    },
+    {
+      "id": "HB_0001-10-01-01-M-07-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-10-01-01-M-07-A.wav",
+      "audio_sha256": "c9e0275af80f261ca58f4b04932a917d4adde27e277aa547a9951c5e5a10d760",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-10-01-01-M-07-A.json",
+      "label_sha256": "f77f1ed8473dad33b4721d77f06f294e5fc8bce334e422a9621e4a22e5d50b9d"
+    },
+    {
+      "id": "HB_0002-104-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-104-01-01-F-05-A.wav",
+      "audio_sha256": "7c9aa20f2d322a527b41656b8eb03da368e939e66aed39bb2316b1e2773bfa58",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-104-01-01-F-05-A.json",
+      "label_sha256": "36d411f822df1e54639045810efb87d16f4e18bf00b90ca7bf607d6bd8a85452"
+    },
+    {
+      "id": "HB_0001-52-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-52-01-01-F-05-A.wav",
+      "audio_sha256": "902b88bea065ee0a7fcbf1c633ba390c70b0ae71e30ea4b30f50b9071aaeb03e",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-52-01-01-F-05-A.json",
+      "label_sha256": "adf0094f363458f7e2e53c66bd197b3a88ae2a12fe10fdd575d93ed9516ad5ac"
+    },
+    {
+      "id": "HB_0002-4-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-4-01-01-F-05-A.wav",
+      "audio_sha256": "76a9b439bfd7e405ed6119756dbf9e4ab64fe573450a3ca90b6bce84dfe1af6b",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-4-01-01-F-05-A.json",
+      "label_sha256": "62b5d38469b3138412413458b7600d65009185c458d98f2af852bccc49ff29dc"
+    },
+    {
+      "id": "HB_0001-815-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-815-01-01-F-05-A.wav",
+      "audio_sha256": "edd4933543f805060940429f13afb46a2d56f8e6ffde62fcd4271eca43535340",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-815-01-01-F-05-A.json",
+      "label_sha256": "123072951ba33506909f9366b21a345c788f374f9863cd977f0c4e928f1709d2"
+    },
+    {
+      "id": "HB_0002-704-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-704-01-01-F-05-A.wav",
+      "audio_sha256": "a1a3fcef352ce2a085619a48a7de8361937feadce17452ff9b7506e22e254be5",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-704-01-01-F-05-A.json",
+      "label_sha256": "bd497402fee5b978fea6a11020a404694dc9e4f3f459637740594eae38cc450f"
+    },
+    {
+      "id": "HB_0001-852-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-852-01-01-F-05-A.wav",
+      "audio_sha256": "def0558cabff19f1a583f5fcef395edc2290a9bcf843927704959f1a938f6b9a",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-852-01-01-F-05-A.json",
+      "label_sha256": "e4df4656ea444d58526474b3281b3bc802afc8e5ed1d00afbcfcb63dd39bf5c6"
+    },
+    {
+      "id": "HB_0002-499-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-499-01-01-F-05-A.wav",
+      "audio_sha256": "f45969215edec6417ffcab8543e1173e1127f49a3e8ccd6642cb287aca4419a9",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-499-01-01-F-05-A.json",
+      "label_sha256": "36056cc800b3c7ad7f21d49ff9b7fc54a2cd236ed136a374bc206019a70ddb3e"
+    },
+    {
+      "id": "HB_0001-636-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-636-01-01-F-05-A.wav",
+      "audio_sha256": "6a0d48039fbef3759bd97694fa6dacbde297adcb148f15b49031b7b6aeda8995",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-636-01-01-F-05-A.json",
+      "label_sha256": "2dc31a8ceeae6efcef6d5f544d3c6e586b7d1c25aa1edb952ff98c7afed85d7c"
+    },
+    {
+      "id": "HB_0002-5-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-5-01-01-F-05-A.wav",
+      "audio_sha256": "fcfb295aa40def812b80a0eb18217efddce1b593f44483dabb39d5bf0d5beadd",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-5-01-01-F-05-A.json",
+      "label_sha256": "f47852e068187b310d800b4e80575b87262ce051616c40df545c5de996d5f803"
+    },
+    {
+      "id": "HB_0001-70-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-70-01-01-F-05-A.wav",
+      "audio_sha256": "337648add3ad6b4b762e1434cc263a2fc2238b27b5796dd4d79cd0dd2b5e0029",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-70-01-01-F-05-A.json",
+      "label_sha256": "02a5b7eea9fb5649a5bc9601ad7ccbdfb5ea892c0df1d0481247a0fd4eefd855"
+    },
+    {
+      "id": "HB_0002-711-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-711-01-01-F-05-A.wav",
+      "audio_sha256": "bc4c6850ee224f7af8ee9ef55288339512d170ca5599d629282583da4ebd9f0f",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-711-01-01-F-05-A.json",
+      "label_sha256": "9e09697cf73988e44632248aff4e336439bbcf6f24eec1edd405e034fe12785d"
+    },
+    {
+      "id": "HB_0001-422-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-422-01-01-F-05-A.wav",
+      "audio_sha256": "b3c1a0937dbb234755b02d37caf4282e669a64bb93fc50b9ff4bb2451dc20869",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-422-01-01-F-05-A.json",
+      "label_sha256": "74a44ceceb85e5e4fbfac651b3f76526785671c53ab71dce656ca3b6beb3bb0e"
+    },
+    {
+      "id": "HB_0002-570-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-570-01-01-F-05-A.wav",
+      "audio_sha256": "ff6144425e009c412662002500568d7b26b352c233d86a3476d4f8f695591724",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-570-01-01-F-05-A.json",
+      "label_sha256": "52dfcab846cb12f1583f27ee6b97ec9b6f1c1560d0623570d852d8bc0f0c111b"
+    },
+    {
+      "id": "HB_0001-945-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-945-01-01-F-05-A.wav",
+      "audio_sha256": "30a7bbcbf1a502ac1ecc591b32313b1bf7ffe72eaab294a74006f1219ff02507",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-945-01-01-F-05-A.json",
+      "label_sha256": "9566e70fb396a75537882cd8c04fca69cb74f55ab915242a1935507d154ddb04"
+    },
+    {
+      "id": "HB_0002-967-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-967-01-01-F-05-A.wav",
+      "audio_sha256": "40dc8fe1d3a409be909c0a7f7f43dba336ffba47aba0f3fa3163b4f11222da47",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-967-01-01-F-05-A.json",
+      "label_sha256": "a566fe669e398be3b7070366bd0e18af843f7ca636c33cfeaf75446351656c21"
+    },
+    {
+      "id": "HB_0001-368-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-368-01-01-F-05-A.wav",
+      "audio_sha256": "77d87b1a67461fd357fa3fd3f160d2224ac5e68fab5ed640e50cec07cb2523a6",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-368-01-01-F-05-A.json",
+      "label_sha256": "7ad8cfed4337e75a0a2b0d63ce08fb34595f15db43c434da1b0a8b3f42693b5e"
+    },
+    {
+      "id": "HB_0002-918-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-918-01-01-F-05-A.wav",
+      "audio_sha256": "22e2ad08b4bdbb34de4e0663d501414e28a19db07654cd34c19fcea3da658148",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-918-01-01-F-05-A.json",
+      "label_sha256": "35ad52a0c6076a913b807d216d62185ec65b8444594b24410b75fb9032b3e09c"
+    },
+    {
+      "id": "HB_0001-735-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-735-01-01-F-05-A.wav",
+      "audio_sha256": "fedda35490bd02bd929952964f99d6ff453a36d42a1e98e53f390cb55ff836c1",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-735-01-01-F-05-A.json",
+      "label_sha256": "9aced7580f3694debc70382280a5e49a7758f9a601277327a7cc085dfcee4dbc"
+    },
+    {
+      "id": "HB_0002-218-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-218-01-01-F-05-A.wav",
+      "audio_sha256": "cdabf8fcff367797e9e5ef8ef54c8305590f67d42d8df23135e14375c4b8a99f",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-218-01-01-F-05-A.json",
+      "label_sha256": "9404633643077360c6f9a38332eaf2305cfa58ad4e6502f2eac84926a25d4bf1"
+    },
+    {
+      "id": "HB_0001-598-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-598-01-01-F-05-A.wav",
+      "audio_sha256": "e9558e6c04522b4d7a6d8298bf1e0b52ceb9b98d216d93c20f33183b39eee453",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-598-01-01-F-05-A.json",
+      "label_sha256": "9f49998e175541506ff0d2ab69525c5525c0ba6394647985c5b77560021d8193"
+    },
+    {
+      "id": "HB_0002-307-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-307-01-01-F-05-A.wav",
+      "audio_sha256": "8b3e3779d635215b88574797e53abdb8f9bef96c4cecf3eac3c1f6f87151f8c5",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-307-01-01-F-05-A.json",
+      "label_sha256": "e3c42a88d544b14d5dbb39c4b8c35a1835382a44400ba174ef00c41940097220"
+    },
+    {
+      "id": "HB_0001-906-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-906-01-01-F-05-A.wav",
+      "audio_sha256": "de0ac9af7ae58c39ea7f2197ead9eab7feb5fe7376e1bd513eef992bff6932a3",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-906-01-01-F-05-A.json",
+      "label_sha256": "f0098a64619a2f5de5320b6a4487d125d92c4e51cb56c7f51d62cfd354ba2b41"
+    },
+    {
+      "id": "HB_0002-177-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-177-01-01-F-05-A.wav",
+      "audio_sha256": "57fec1c224aed085fc1fec94a3bc17dc2811a598eebf537ca3abd329cd4bd471",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-177-01-01-F-05-A.json",
+      "label_sha256": "2fad59f390615242168f60f9f099a7fb64148d5c0d6a5ca8687d8ae6078baa94"
+    },
+    {
+      "id": "HB_0001-189-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-189-01-01-F-05-A.wav",
+      "audio_sha256": "79d6f3a92d768b5ecb0eb559b1854ccb5e216c2bc52e67c04ae21925f2987d94",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-189-01-01-F-05-A.json",
+      "label_sha256": "3dc99393959f71f066f755f6935a5ce7b7478d08ae64ac9707344ed6f611a8a4"
+    },
+    {
+      "id": "HB_0002-556-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-556-01-01-F-05-A.wav",
+      "audio_sha256": "6d87390d289f95b8295c8ea82418431f08c593011002d0df7ca7d10fb68da69f",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-556-01-01-F-05-A.json",
+      "label_sha256": "8efcde503206ec6238032a3e27c0cef50c6c98d9648856fd0ad43f30c54d9040"
+    },
+    {
+      "id": "HB_0001-876-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-876-01-01-F-05-A.wav",
+      "audio_sha256": "290070ba482dde469a6c5b29fc4f1309c5c382cc0d2c5d54073141eb05f9c20e",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-876-01-01-F-05-A.json",
+      "label_sha256": "6457add4ff49b609e9f0e712e7c16a8b3f753b7ed7ac5efb59f4cdab21a5b82b"
+    },
+    {
+      "id": "HB_0002-426-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0002",
+      "audio": "원천데이터/의료진/HB_0002/HB_0002-426-01-01-F-05-A.wav",
+      "audio_sha256": "aa7b40b43d51042252127ab8f586be9c663cc0c1b57d925474f322e4c0308aef",
+      "label": "라벨링데이터/의료진/HB_0002/HB_0002-426-01-01-F-05-A.json",
+      "label_sha256": "c6e0e30c275a608dd64db473628d3861af5935fe6611367bb4574d0a12a45562"
+    },
+    {
+      "id": "HB_0001-949-01-01-F-05-A",
+      "group": "clinician",
+      "speaker": "HB_0001",
+      "audio": "원천데이터/의료진/HB_0001/HB_0001-949-01-01-F-05-A.wav",
+      "audio_sha256": "b424a268d05278268ee8f8d4a05029f9ed7185c8561defc98c227644219ea414",
+      "label": "라벨링데이터/의료진/HB_0001/HB_0001-949-01-01-F-05-A.json",
+      "label_sha256": "381a93297da7564014846dfdb047fdc0270341ceff17c43c29a8261a975362b5"
+    },
+    {
+      "id": "PA_0001-263-01-03-F-05-A",
+      "group": "patient",
+      "speaker": "PA_0001",
+      "audio": "원천데이터/환자/PA_0001/PA_0001-263-01-03-F-05-A.wav",
+      "audio_sha256": "f4fd19d563905f1c62af8e5f7d1ed62a5b7172bcd416dcb7558dd0ef859d14f4",
+      "label": "라벨링데이터/환자/PA_0001/PA_0001-263-01-03-F-05-A.json",
+      "label_sha256": "be30b5ab5b4954b0f79c348e8973e03305b1627fa2f919e2d07b58e1352cd8da"
+    },
+    {
+      "id": "PA_0001-137-01-03-F-05-A",
+      "group": "patient",
+      "speaker": "PA_0001",
+      "audio": "원천데이터/환자/PA_0001/PA_0001-137-01-03-F-05-A.wav",
+      "audio_sha256": "89fc7a650ce7b4ac75f4936ae18a706f85c3a440e0435448506a7c6b92b664e9",
+      "label": "라벨링데이터/환자/PA_0001/PA_0001-137-01-03-F-05-A.json",
+      "label_sha256": "503611fa3b8c9dc9fcd27d340e0b85a8b3a4fa16818df0efc0d40b238f88ef35"
+    },
+    {
+      "id": "PA_0001-76-01-03-F-05-A",
+      "group": "patient",
+      "speaker": "PA_0001",
+      "audio": "원천데이터/환자/PA_0001/PA_0001-76-01-03-F-05-A.wav",
+      "audio_sha256": "43489461644993c40a0c19e5de336eb7ac70c5e99eea01bc7d1c27c11b3b5b1c",
+      "label": "라벨링데이터/환자/PA_0001/PA_0001-76-01-03-F-05-A.json",
+      "label_sha256": "18682f1c758d7c812faf60e3b1be948340a753ae0ecc776411c01fc2a9d3a983"
+    },
+    {
+      "id": "PA_0001-62-01-03-F-05-A",
+      "group": "patient",
+      "speaker": "PA_0001",
+      "audio": "원천데이터/환자/PA_0001/PA_0001-62-01-03-F-05-A.wav",
+      "audio_sha256": "46e8e22e3aaab499dd5dae4a2acb24023746b0caa1df0cde5c70df3427d614b5",
+      "label": "라벨링데이터/환자/PA_0001/PA_0001-62-01-03-F-05-A.json",
+      "label_sha256": "132bee811828fb9fc67eb490d93a4f9d9ebbb2d7658d5696573c8c72565996fe"
+    },
+    {
+      "id": "PA_0001-109-01-03-F-05-A",
+      "group": "patient",
+      "speaker": "PA_0001",
+      "audio": "원천데이터/환자/PA_0001/PA_0001-109-01-03-F-05-A.wav",
+      "audio_sha256": "a579d37e1c809bf23a1afc4d4565800e403d1dfd3374829d02b220b1c91aa492",
+      "label": "라벨링데이터/환자/PA_0001/PA_0001-109-01-03-F-05-A.json",
+      "label_sha256": "960451baac0abaf6823eed7618ba7357111f06ffc04a4a60606436000213cc2b"
+    },
+    {
+      "id": "PA_0001-193-01-03-F-05-A",
+      "group": "patient",
+      "speaker": "PA_0001",
+      "audio": "원천데이터/환자/PA_0001/PA_0001-193-01-03-F-05-A.wav",
+      "audio_sha256": "15dae40cb2b66061c9ed6f1f542efebe2a5cfc913efc56b4b7cc4c29ba2da886",
+      "label": "라벨링데이터/환자/PA_0001/PA_0001-193-01-03-F-05-A.json",
+      "label_sha256": "29efbf9122c52bd7bba7c425daa0e34b918a5ae98d78b3ba6333fa06214f323d"
+    },
+    {
+      "id": "PA_0001-112-01-03-F-05-A",
+      "group": "patient",
+      "speaker": "PA_0001",
+      "audio": "원천데이터/환자/PA_0001/PA_0001-112-01-03-F-05-A.wav",
+      "audio_sha256": "1bf8ce53c82d66df508119eb78083a1833c6a9942b5c92a9a46792f53818aa99",
+      "label": "라벨링데이터/환자/PA_0001/PA_0001-112-01-03-F-05-A.json",
+      "label_sha256": "ee5753c6cab43e03db840724b7632a0c8338a5ccacc1128141151f17f2d15199"
+    },
+    {
+      "id": "PA_0001-149-01-03-F-05-A",
+      "group": "patient",
+      "speaker": "PA_0001",
+      "audio": "원천데이터/환자/PA_0001/PA_0001-149-01-03-F-05-A.wav",
+      "audio_sha256": "7817ebe0fa971da20f9ef8af08ca31cff33a020025c76539df999429bb8a9931",
+      "label": "라벨링데이터/환자/PA_0001/PA_0001-149-01-03-F-05-A.json",
+      "label_sha256": "ae6d3db51d58725f01b5284f14dc772a29324d5d532c80400bb7908bb4f38e72"
+    },
+    {
+      "id": "PA_0001-358-01-03-F-05-A",
+      "group": "patient",
+      "speaker": "PA_0001",
+      "audio": "원천데이터/환자/PA_0001/PA_0001-358-01-03-F-05-A.wav",
+      "audio_sha256": "3ed96b01febdac58ed4933c4c36a7600598d083b6cd3e7d90a12b587ff247e9d",
+      "label": "라벨링데이터/환자/PA_0001/PA_0001-358-01-03-F-05-A.json",
+      "label_sha256": "530e57f6a90ca4dacc8703efc9727ddd76abc65089242f83d0815558e2b30a45"
+    },
+    {
+      "id": "PA_0001-374-01-03-F-05-A",
+      "group": "patient",
+      "speaker": "PA_0001",
+      "audio": "원천데이터/환자/PA_0001/PA_0001-374-01-03-F-05-A.wav",
+      "audio_sha256": "165abcd477dba2153a2b622d67c038b93f501ec072540c3c150732547f08e05c",
+      "label": "라벨링데이터/환자/PA_0001/PA_0001-374-01-03-F-05-A.json",
+      "label_sha256": "7b73faa22dd7e8713bcc4a945ecd48fefa4cfd2a578d31ef933a10289af96b9f"
+    },
+    {
+      "id": "PA_0002-67-01-03-M-07-A",
+      "group": "patient",
+      "speaker": "PA_0002",
+      "audio": "원천데이터/환자/PA_0002/PA_0002-67-01-03-M-07-A.wav",
+      "audio_sha256": "6f97b1b82bd7a1b67fd1dd62fd01661df1ce0727b3c9cca10e8a588a67456045",
+      "label": "라벨링데이터/환자/PA_0002/PA_0002-67-01-03-M-07-A.json",
+      "label_sha256": "f5606c0966e2538a77f4bc1a5c656aac079a3a12c9f372cc9ce3b41e53e8e634"
+    },
+    {
+      "id": "PA_0002-56-01-03-M-07-A",
+      "group": "patient",
+      "speaker": "PA_0002",
+      "audio": "원천데이터/환자/PA_0002/PA_0002-56-01-03-M-07-A.wav",
+      "audio_sha256": "28482ccb1aa287d6291ab2c902b20a5489c34c805fde8ff42aced7d028c925d6",
+      "label": "라벨링데이터/환자/PA_0002/PA_0002-56-01-03-M-07-A.json",
+      "label_sha256": "6578408e0777df7e4aa8856a92b3edabaf1ec440e28a7f2eb70cca8459cfb6df"
+    },
+    {
+      "id": "PA_0002-234-01-03-M-07-A",
+      "group": "patient",
+      "speaker": "PA_0002",
+      "audio": "원천데이터/환자/PA_0002/PA_0002-234-01-03-M-07-A.wav",
+      "audio_sha256": "6f13d3b4617b4f26fa35e92ca011dd78f8ff5b86368a6e91deb3339234341764",
+      "label": "라벨링데이터/환자/PA_0002/PA_0002-234-01-03-M-07-A.json",
+      "label_sha256": "4284aa3fb9040bfa386ced5f5809a2aba6b29fb34cb81590b410b4aecd1e0157"
+    },
+    {
+      "id": "PA_0002-270-01-03-M-07-A",
+      "group": "patient",
+      "speaker": "PA_0002",
+      "audio": "원천데이터/환자/PA_0002/PA_0002-270-01-03-M-07-A.wav",
+      "audio_sha256": "bbe8e54323bb22d5dec8f8dea9ef9e97d3b0e062fdb1263b9524103c137b2209",
+      "label": "라벨링데이터/환자/PA_0002/PA_0002-270-01-03-M-07-A.json",
+      "label_sha256": "7504d74a8524479ce40ed6c31a6caa9a332facae0b31d44af412a15626cddf67"
+    },
+    {
+      "id": "PA_0002-123-01-03-M-07-A",
+      "group": "patient",
+      "speaker": "PA_0002",
+      "audio": "원천데이터/환자/PA_0002/PA_0002-123-01-03-M-07-A.wav",
+      "audio_sha256": "fc3f8b84916b9b59db057621508afe66def639a4c20f2754180915b54ae64a12",
+      "label": "라벨링데이터/환자/PA_0002/PA_0002-123-01-03-M-07-A.json",
+      "label_sha256": "d9e2260c2adffc4fd9140ca6aa585f2502128c895471ce6e697421b8d0f93c41"
+    },
+    {
+      "id": "PA_0002-68-01-03-M-07-A",
+      "group": "patient",
+      "speaker": "PA_0002",
+      "audio": "원천데이터/환자/PA_0002/PA_0002-68-01-03-M-07-A.wav",
+      "audio_sha256": "5a71b2d97f5cecba555f044fce074f714c392ec5764e873e1dd847a7a931d316",
+      "label": "라벨링데이터/환자/PA_0002/PA_0002-68-01-03-M-07-A.json",
+      "label_sha256": "b530c688f0bac5aa0754b243fce5d6cd63abda95031726d8376aa91c324f185b"
+    },
+    {
+      "id": "PA_0002-228-01-03-M-07-A",
+      "group": "patient",
+      "speaker": "PA_0002",
+      "audio": "원천데이터/환자/PA_0002/PA_0002-228-01-03-M-07-A.wav",
+      "audio_sha256": "b1c206915f2023af7ddd7d3ba150819a3fef88c15c16fa72df240d2d67ad0f3a",
+      "label": "라벨링데이터/환자/PA_0002/PA_0002-228-01-03-M-07-A.json",
+      "label_sha256": "9e37f9dab17c98cda04b439046f0881359ae6303a640faee9a0194768d45f613"
+    },
+    {
+      "id": "PA_0002-48-01-03-M-07-A",
+      "group": "patient",
+      "speaker": "PA_0002",
+      "audio": "원천데이터/환자/PA_0002/PA_0002-48-01-03-M-07-A.wav",
+      "audio_sha256": "9c84077b9bbf69871b0d0ed483666d1050ddf87a5c66eb40eb9b0946c36f1221",
+      "label": "라벨링데이터/환자/PA_0002/PA_0002-48-01-03-M-07-A.json",
+      "label_sha256": "79ca36f0c97858c55b2b86f3fd10dea2c027f50f239dbdc26250d672b40cadbc"
+    },
+    {
+      "id": "PA_0002-295-01-03-M-07-A",
+      "group": "patient",
+      "speaker": "PA_0002",
+      "audio": "원천데이터/환자/PA_0002/PA_0002-295-01-03-M-07-A.wav",
+      "audio_sha256": "83a564a61eaa0d03172c52b16113ff4db8a13b001f7f912727048b3505db0b75",
+      "label": "라벨링데이터/환자/PA_0002/PA_0002-295-01-03-M-07-A.json",
+      "label_sha256": "2360f157798c2317712825595482b1cfc9712e82fbf0f12ad6b071ac7bcfaac9"
+    },
+    {
+      "id": "PA_0002-111-01-03-M-07-A",
+      "group": "patient",
+      "speaker": "PA_0002",
+      "audio": "원천데이터/환자/PA_0002/PA_0002-111-01-03-M-07-A.wav",
+      "audio_sha256": "4d8c47f6eee425eea3a08bff3e31fe5ea7ec1c69b654f4309a69785230c6b7ce",
+      "label": "라벨링데이터/환자/PA_0002/PA_0002-111-01-03-M-07-A.json",
+      "label_sha256": "2ec6e16e542596e0a785f1d0a05121d8fbbe4c46cb046d0c608580674321cf4b"
+    }
+  ]
+}

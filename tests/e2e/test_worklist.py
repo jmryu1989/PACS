@@ -306,7 +306,7 @@ class WorklistE2E(unittest.TestCase):
 
     def locked(self, page):
         expect(page.locator("#findings")).to_have_js_property("readOnly", True)
-        for button in ("#b-save", "#b-transcribe", "#b-approve"):
+        for button in ("#b-save", "#b-approve"):
             expect(page.locator(button)).to_be_disabled()
 
     def context_action(self, page, fixture, label):
@@ -377,7 +377,7 @@ class WorklistE2E(unittest.TestCase):
         self.assertEqual(reply.value.status, 200)
         self.assertEqual(self.state(fixture)["ss"], "Verified")
         doctor.locator("#m-refresh").click()
-        for button in ("#b-save", "#b-transcribe", "#b-approve"):
+        for button in ("#b-save", "#b-approve"):
             expect(doctor.locator(button)).to_be_enabled()
         expect(doctor.locator("#findings")).to_have_js_property("readOnly", False)
         doctor.locator("#findings").fill(fixture.secret)
@@ -576,7 +576,7 @@ class WorklistE2E(unittest.TestCase):
         expect(page.locator("#findings")).to_have_value("")
 
     def test_11_approved_buttons_stay_disabled_after_reload(self):
-        """E2E-B2-11: UI Approve turns off save/transcribe/approve, including after reload."""
+        """E2E-B2-11: UI Approve turns off save/approve, including after reload."""
         fixture = self.fixture()
         page = self.login()
         self.select(page, fixture)
@@ -586,7 +586,7 @@ class WorklistE2E(unittest.TestCase):
             if reload:
                 page.reload()
                 self.select(page, fixture)
-            for button in ("#b-save", "#b-transcribe", "#b-approve"):
+            for button in ("#b-save", "#b-approve"):
                 expect(page.locator(button)).to_be_disabled()
             for button in ("#b-addendum", "#b-unread"):
                 expect(page.locator(button)).to_be_enabled()

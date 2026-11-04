@@ -585,6 +585,8 @@ jobs:
         ref: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
     - name: Pure fixture canonicalization and attestation refusals
       run: python3 scripts/record-run.py --run-dir tmp/asr-ci/fixture-pure --cwd . --file scripts/asr_fixture.py --file scripts/asr_engine_attest.py --file tests/asr_fixture_test.py --file .github/workflows/validate.yml -- python3 -B tests/asr_fixture_test.py
+    - name: Korean dictation measurement scoring and patient-information refusal (pure)
+      run: python3 scripts/record-run.py --run-dir tmp/asr-ci/measure-pure --cwd . --file scripts/asr_measure.py --file scripts/asr_measure_aihub208.json --file scripts/asr_fixture.py --file scripts/asr_engine_attest.py --file tests/asr_measure_test.py -- python3 -B tests/asr_measure_test.py
     - name: Reproduce a private deployment checkout
       run: chmod -R go-rwx api
     - name: Build the production target under test
@@ -682,6 +684,7 @@ jobs:
         name: synthetic-asr-engine-runtime
         path: |
           tmp/asr-ci/fixture-pure/
+          tmp/asr-ci/measure-pure/
           tmp/asr-ci/generate/
           tmp/asr-ci/canonicalize/
           tmp/asr-ci/attest/
@@ -1652,6 +1655,9 @@ jobs:
     - name: W9 multi-study view on the delivered split page
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/multi-study-view-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/multi_study_view_dom_test.py
+    - name: W-SPACE report-window band, worklist columns and palette on the delivered split page
+      if: ${{ !cancelled() && !github.event.pull_request.draft }}
+      run: KIN_WSPACE_OUT="$PWD/tmp/workspace-ui-ci/w-space-screens" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/w-space-page --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py -- $RUNNER_TEMP/measurement-python/bin/python -B tests/w_space_dom_test.py
     - name: S9 worklist shortcut and accessible-name boundary
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/s9-u4a-keys --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/run-tests.py -- $RUNNER_TEMP/measurement-python/bin/python -B scripts/run-tests.py --module tests/s9_a11y_dom_test.py --class S9AccessibilityPage --mode pure --unit s9-u4a-keys

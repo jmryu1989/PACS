@@ -111,7 +111,7 @@
       // Restore legacy display state as it was saved. Adopt v3 only on an
       // explicit edit/open/save, so new geometry cannot affect the first paint.
       workspaceState = result.state;
-      // First use (nothing saved yet): start with Clinical Information only. Thumbnail, AI Report, Image Report and Reading
+      // First use (nothing saved yet): start with Clinical Information only. Thumbnail, AI Report and Reading
       // Template stay one click away in Panels; a saved choice always wins and nothing is saved by this line.
       // A layout saved before this default existed is switched once per browser (flag below); after that the reader's own
       // Panels choice, including Show All Panels, is kept.
@@ -197,15 +197,15 @@
     // ── Panel Settings (Minhoon 2026-10-27 item 9) ──
     // Which report window panels stay on screen. Kept in the same layout record as the rail and panel sizes, so
     // Account Layout carries it to another browser and Reset Layout shows every panel again. Display only: the panels
-    // and their content stay in the document; AI Report / Image Report remain the placeholder tabs.
+    // and their content stay in the document. AI Report remains a placeholder; imageReport is reserved but never rendered.
     const panelDialog = document.createElement('dialog');
     panelDialog.id = 'panel-settings-dialog'; panelDialog.setAttribute('aria-labelledby', 'panel-settings-title');
     panelDialog.innerHTML = `<h2 id="panel-settings-title">Panel Settings</h2>
       <p>판독 창 위쪽 패널을 보이거나 숨깁니다. 숨긴 패널의 자리는 옆 패널과 관련 검사·판독문 영역이 씁니다.
       Study Panel과 판독 화면의 검사 정보 열기에서는 모든 패널을 볼 수 있습니다.</p>
-      <fieldset><legend>Show Panels</legend>${[['thumbnail', 'Thumbnail'], ['aiReport', 'AI Report'], ['imageReport', 'Image Report'],
+      <fieldset><legend>Show Panels</legend>${[['thumbnail', 'Thumbnail'], ['aiReport', 'AI Report'],
         ['clinical', 'Clinical Information'], ['template', 'Reading Template']].map(([key, label]) =>
-        `<label${key === 'aiReport' || key === 'imageReport' ? ' title="추후 구현 탭입니다. 표시 여부만 정합니다."' : ''}><input type="checkbox" data-panel="${key}"> ${label}</label>`).join('')}</fieldset>
+        `<label${key === 'aiReport' ? ' title="추후 구현 탭입니다. 표시 여부만 정합니다."' : ''}><input type="checkbox" data-panel="${key}"> ${label}</label>`).join('')}</fieldset>
       <p>이 브라우저에 계정별로 기억합니다. 다른 기기에서는 View &gt; Account Layout으로 계정에 저장하고 불러오세요.</p>
       <p id="panel-settings-status" role="status"></p>
       <footer><button type="button" id="panel-settings-show-all">Show All Panels</button><button type="button" id="panel-settings-close">Close</button></footer>`;
