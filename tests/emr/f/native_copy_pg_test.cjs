@@ -492,6 +492,46 @@ test('FT8c a Tech Note write waits on the record held by a paused F prepare of t
   }
 });
 
+test('FT7 a rights decision and a native addendum meet on the fixed record in both orders', async () => {
+  const receive = async uid => ok('POST', 'rights-requests', { requestId: 'fn-r-' + randomUUID(), kind: 'correction',
+    receivedAt: new Date(Date.now() - 1000).toISOString(), patient: patientOf(uid), recordIds: [{ recordId: uid, recordKind: 'report' }], statement: '합성' });
+  // Decision first: paused at its request_event INSERT after reading the record set; the addendum waits on the record.
+  {
+    const s = await study(); await commit(s, 'approve', '확정');
+    const received = await receive(s.uid); await draft(s, '결정 중 추가');
+    const table = holdTable('emr_audit.request_event'); await table.pid;
+    let decide, writer;
+    try {
+      decide = audit('POST', `rights-requests/${encodeURIComponent(received.request.requestId)}/decide`);
+      const decider = await until('decision holds the record', () => holderOf(keys.fixed(s.uid)));
+      writer = call('fn-doctor', 'POST', `studies/${s.uid}/report/commit`, { ...commitBody(s, 'addendum', '결정 중 추가'), expectedRevision: s.revision, action: 'addendum' });
+      const waiting = await waiterOn(keys.fixed(s.uid), decider);
+      const held = await studyStateHeld(s.uid);
+      note('ft7-decision-first', { decider, writer: waiting.pid, studyStateHeldByWaitingWriter: held });
+      assert.equal(held, false, 'the waiting writer took the fixed record before StudyState (W-R order)');
+    } finally { await table.release(); }
+    const [decided, written] = await Promise.all([decide, writer]);
+    assert.equal(decided.status, 200, JSON.stringify(decided.body)); assert.equal(written.status, 201, JSON.stringify(written.body));
+    assert.equal(decided.body.decision.records[0].outcome, 'correct-by-new-signed-version');
+  }
+  // Addendum first: paused at its ReportVersion INSERT holding the record; the decision waits, then reads after it.
+  {
+    const s = await study(); await commit(s, 'approve', '확정');
+    const received = await receive(s.uid); await draft(s, '먼저 추가');
+    const table = holdTable('"ReportVersion"'); await table.pid;
+    let decide, writer;
+    try {
+      writer = call('fn-doctor', 'POST', `studies/${s.uid}/report/commit`, { ...commitBody(s, 'addendum', '먼저 추가'), expectedRevision: s.revision, action: 'addendum' });
+      const writing = await until('writer holds the record', () => holderOf(keys.fixed(s.uid)));
+      decide = audit('POST', `rights-requests/${encodeURIComponent(received.request.requestId)}/decide`);
+      const waiting = await waiterOn(keys.fixed(s.uid), writing);
+      note('ft7-writer-first', { writer: writing, decider: waiting.pid });
+    } finally { await table.release(); }
+    const [written, decided] = await Promise.all([writer, decide]);
+    assert.equal(written.status, 201, JSON.stringify(written.body)); assert.equal(decided.status, 200, JSON.stringify(decided.body));
+  }
+});
+
 test('FT9 issue and withdrawal write their rows and B2 records in one transaction', async () => {
   const s = await study(); await commit(s, 'approve', '확정');
   const input = copy(s.uid), prepared = await ok('POST', 'issuances', input), id = prepared.issuanceId;
