@@ -37,6 +37,7 @@ FACTS = json.loads((ROOT / "api/src/product-info-data.ts").read_text(encoding="u
                    .split("=", 1)[1].rsplit(" as const;", 1)[0])
 NOTICES = json.loads((ROOT / "config/product-info.json").read_text(encoding="utf-8"))["notices"]
 WRITES = {"POST", "PUT", "PATCH", "DELETE"}
+READS_BY_POST = {("POST", "/api/dicom/lookup")}
 
 
 class ProductInformationE2E(WorklistE2E):
@@ -95,6 +96,8 @@ class ProductInformationE2E(WorklistE2E):
         self.select(page, fixture)
         draft = "CD-01 product information must not touch this draft"
         page.locator("#findings").fill(draft)
+        versions = self.versions(fixture)
+        rs = self.state(fixture).get("rs")
         requests = []
         page.on("request", lambda request: requests.append((request.method, urlsplit(request.url).path)))
         entry = page.locator(".menubar").get_by_role("button", name="Product Information")
@@ -107,8 +110,13 @@ class ProductInformationE2E(WorklistE2E):
         expect(dialog).to_have_count(0)
         self.assertEqual("m-product-info", page.evaluate("() => document.activeElement.id"))
         self.assertEqual(draft, page.locator("#findings").input_value())
-        self.assertEqual([], [r for r in requests if r[0] in WRITES], "opening the panel writes nothing")
+        # The page keeps loading the selected study's thumbnails meanwhile; POST dicom/lookup is that loader's UID
+        # lookup (a read the route matrix allows clinicians too), not a write. Every other non-GET would be one.
+        self.assertEqual([], [r for r in requests if r[0] in WRITES and r not in READS_BY_POST],
+                         "opening the panel writes nothing")
         self.assertIn(("GET", "/api/version"), requests)
+        self.assertEqual((versions, rs), (self.versions(fixture), self.state(fixture).get("rs")),
+                         "the study's report versions and state are as before")
 
         # 3. admin.html: ready, never opened, then offline.
         admin = self.login("jmryu")
