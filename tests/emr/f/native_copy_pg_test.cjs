@@ -422,8 +422,8 @@ test('FT6 resolve and issue of one request serialize on request -> issuance -> f
   }
 });
 
-test('FT8 native commit and F prepare meet first on the fixed record; the writer holds no StudyState while waiting', async () => {
-  // (i) F first: prepare is paused after the record lock (its issuance_event INSERT waits on a witness table lock).
+test('FT8a F first: a paused prepare holds the record; the native writer waits on it holding no StudyState', async () => {
+  // Prepare is paused after the record lock: its issuance_event INSERT waits on a witness table lock.
   {
     const s = await study(); await commit(s, 'approve', '확정');
     const input = copy(s.uid, 'report');
@@ -448,7 +448,10 @@ test('FT8 native commit and F prepare meet first on the fixed record; the writer
     const issue = await audit('POST', `issuances/${encodeURIComponent(prepared.body.issuanceId)}/issue`);
     assert.deepEqual([issue.status, issue.body.code], [409, 'RecordHeadChanged']);
   }
-  // (ii) writer first: the addendum is paused at its ReportVersion INSERT; prepare waits on the record it holds.
+});
+
+test('FT8b writer first: a paused native addendum holds the record; prepare waits and then reads the new head', async () => {
+  // The addendum is paused at its ReportVersion INSERT.
   {
     const s = await study(); await commit(s, 'approve', '확정');
     const input = copy(s.uid, 'report');
@@ -467,7 +470,9 @@ test('FT8 native commit and F prepare meet first on the fixed record; the writer
     assert.equal(written.status, 201, JSON.stringify(written.body)); assert.equal(prepared.status, 200, JSON.stringify(prepared.body));
     assert.deepEqual(prepared.body.manifest.records[0].versions.map(v => v.act), ['approve', 'addendum'], 'the new head is prepared');
   }
-  // (iii) a Tech Note append waits on the record held by a paused F prepare of the same UID, then both commit.
+});
+
+test('FT8c a Tech Note write waits on the record held by a paused F prepare of the same UID, then both commit', async () => {
   {
     const s = await study(); await techNote(s.uid);
     const input = copy(s.uid, 'clinical');
@@ -596,9 +601,10 @@ test('FT11/FT12 only the designated auditor issues; an issued copy is independen
   const html = Buffer.from(issued.artifact, 'base64').toString('utf8');
   fs.writeFileSync(path.join(spool, 'native-fixed-copy.html'), html);
   assert.equal(stored.sha256, sha(Buffer.from(issued.artifact, 'base64')));
-  const grants = await ctx.witness.$queryRaw`SELECT privilege_type FROM information_schema.role_table_grants
-    WHERE grantee='kin_runtime' AND table_schema='emr_audit' AND table_name='fixed_copy' ORDER BY privilege_type`;
-  assert.deepEqual(grants.map(g => g.privilege_type), ['INSERT', 'SELECT']);
+  const [grants] = await ctx.witness.$queryRaw`SELECT has_table_privilege('kin_runtime','emr_audit.fixed_copy','SELECT') AS s,
+    has_table_privilege('kin_runtime','emr_audit.fixed_copy','INSERT') AS i, has_table_privilege('kin_runtime','emr_audit.fixed_copy','UPDATE') AS u,
+    has_table_privilege('kin_runtime','emr_audit.fixed_copy','DELETE') AS d, has_table_privilege('kin_runtime','emr_audit.fixed_copy','TRUNCATE') AS t`;
+  assert.deepEqual(grants, { s: true, i: true, u: false, d: false, t: false }, 'the runtime can only read and add copies');
   await commit(s, 'addendum', '발급 뒤 추가'); await techNote(s.uid, '발급 뒤 Tech Note', 1);
   const read = await ok('GET', `issuances/${encodeURIComponent(prepared.issuanceId)}`);
   assert.equal(read.artifact, issued.artifact); assert.equal(read.sha256, stored.sha256);
