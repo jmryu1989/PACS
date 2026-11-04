@@ -49,7 +49,11 @@ RUN npm run build \
 # Prisma CLI만은 이관 컨테이너(`start-production.sh migrate`)가 검토된 migration을 적용하므로 runtime dependency다.
 FROM base AS production
 ARG VCS_REF=unknown
+# CD-01: the tag that points at VCS_REF (scripts/build-product-info.py build-args); empty when none.
+ARG KIN_BUILD_TAG=
 LABEL org.opencontainers.image.revision=$VCS_REF
+# GET /api/version reports the same build argument the label carries, so the image, the API and the page agree.
+ENV KIN_BUILD_REVISION=$VCS_REF KIN_BUILD_TAG=$KIN_BUILD_TAG
 ENV NODE_ENV=production
 COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules

@@ -41,6 +41,7 @@ services:
       target: production
       args:
         VCS_REF: ${KIN_REVISION:-unknown}
+        KIN_BUILD_TAG: ${KIN_BUILD_TAG:-}
     volumes: !reset []
     logging: *bounded-logging
 
@@ -59,6 +60,7 @@ services:
       target: production
       args:
         VCS_REF: ${KIN_REVISION:-unknown}
+        KIN_BUILD_TAG: ${KIN_BUILD_TAG:-}
     environment:
       DEPLOYMENT_MODE: production
       KC_ISSUER: https://pacs.koreaimagingnetwork.com/auth/realms/kin
