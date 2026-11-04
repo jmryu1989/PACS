@@ -1029,7 +1029,8 @@ class StudyPanelPageDOM(unittest.TestCase):
                 if width >= 1080 and height >= 1920:
                     for name in ('#b-approve', '#b-save', '#findings', '#conclusion'):
                         self.assertTrue(opened[name]['whole'], f'{name} whole in view with the panel open')
-                # The bottom action row is reached through the report card's own scroller. Provisional until
+                # The bottom action row is reached by scrolling the report column (the card's own scroller in
+                # landscape, the work column alone in the portrait work area: the one-scroll test below). Provisional until
                 # Minhoon confirms (11-03 commander): the row may start below the first screen. The reader's wheel
                 # over the report column brings Save whole into view (review fix13 F1), judged as the served tests
                 # judge their reveal (report_column_reach.py): only user-scrollable report-column containers moved,
