@@ -666,6 +666,36 @@ class PgLedgerClinicalHttpLive(PgLedgerFixture):
         self.node_case('clinical-http')
 
 
+class PgLedgerCommitJudgementLive(PgLedgerFixture):
+    """B2-COMMIT: the store's commit judgement on this fixture (tests/emr/b/commit_judgement_pg_test.cjs, plan section 5).
+
+    The server log is kept beside the node output: the failing triggers RAISE LOG the full XID they fired in, and a
+    failed COMMIT is logged with its statement - witness (iv), read before the node case's own assertions are trusted.
+    """
+    def test_commit_judgement_cases(self):
+        evidence = ROOT / 'tmp/emr-b2-replace-20261023' / ('commit-judgement-' + self.token)
+        script = ROOT / 'tests/emr/b/commit_judgement_pg_test.cjs'
+        if self.image:
+            command = self.image_args(['node', '--max-old-space-size=3072', '/app/commit_judgement_pg_test.cjs'], {
+                'DATABASE_URL': self.runtime_url, 'KIN_B2R_WITNESS_URL': self.witness_url, 'KIN_B2R_BUILD': '/app/dist',
+                'KIN_B2R_SPOOL': '/tmp/b2c-failure-spool'}, remove=False, mounts=[(script, '/app/commit_judgement_pg_test.cjs')])
+            env = None
+        else:
+            command = [os.environ['KIN_B2R_NODE'], '--max-old-space-size=3072', str(script)]
+            env = {**os.environ, 'DATABASE_URL': self.runtime_url, 'KIN_B2R_WITNESS_URL': self.witness_url,
+                   'KIN_B2R_BUILD': str(ROOT / 'api/dist'), 'KIN_B2R_SPOOL': str(evidence)}
+        try:
+            output = self.run_node_case(command, evidence, env=env, timeout=900, label='commit-judgement')
+        finally:
+            logs = self.command(['docker', 'logs', self.container], check=False)
+            evidence.mkdir(parents=True, exist_ok=True)
+            (evidence / 'postgres.log').write_text(logs.stdout + logs.stderr, encoding='utf-8')
+        server = (evidence / 'postgres.log').read_text(encoding='utf-8')
+        self.assertIn('syn-commit xid8=', server, 'the deferred triggers logged the XIDs they fired in')
+        self.assertRegex(server, r'STATEMENT:\s+COMMIT', 'PostgreSQL logged the failed COMMIT itself')
+        self.assertIn('"status":"PASS"', output)
+
+
 class PgLedgerRetentionLive(PgLedgerFixture):
     def test_failure_expiry_and_delayed_spool_replay(self):
         current, expired, held = [str(uuid.uuid4()) for _ in range(3)]

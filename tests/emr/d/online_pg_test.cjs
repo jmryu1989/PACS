@@ -201,6 +201,38 @@ test('D online exact versions, B2 result recovery and current access on PostgreS
     assert.equal((await runtime.write({}, blocked)).status, 'rejected');
     assert.equal((await runtime.write({}, create('synthetic retry after lock'))).status, 'committed');
 
+    // B2-COMMIT K11 (plan section 5): the write commits; only the transaction recording that its stored result was
+    // provided fails at COMMIT (a deferred trigger on provide-prepared entries, which Prisma has answered as success).
+    // Observed first: the write's version and projection are stored and the provide transaction's XID is aborted. The
+    // answer is then the provide step's own code - never the write's AppendNotCommitted - and the same request converges.
+    await witness.$executeRawUnsafe('CREATE SEQUENCE IF NOT EXISTS public.d_b2c_xid');
+    await witness.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION public.d_b2c_fail_provide() RETURNS trigger LANGUAGE plpgsql
+      SECURITY DEFINER AS $$ BEGIN
+        PERFORM setval('public.d_b2c_xid', pg_current_xact_id()::text::bigint);
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'SYN deferred provide refusal';
+      END $$`);
+    await witness.$executeRawUnsafe(`CREATE CONSTRAINT TRIGGER d_b2c_fail_provide AFTER INSERT ON emr_access.access_entry
+      DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.payload LIKE '%"action":"provide-prepared"%')
+      EXECUTE FUNCTION public.d_b2c_fail_provide()`);
+    const provided = create('synthetic provide record failure'), beforeProvideSign = signCalls;
+    const beforeProvideVersions = await count('emr_clinical.online_version');
+    let unrecorded;
+    try { unrecorded = await runtime.write({}, provided); }
+    finally { await witness.$executeRawUnsafe('DROP TRIGGER IF EXISTS d_b2c_fail_provide ON emr_access.access_entry'); }
+    const [{ xid }] = await witness.$queryRawUnsafe('SELECT last_value::text AS xid FROM public.d_b2c_xid');
+    const [{ status: provideStatus }] = await witness.$queryRawUnsafe('SELECT pg_xact_status($1::xid8)::text AS status', xid);
+    const storedVersions = await count('emr_clinical.online_version');
+    console.log('B2-COMMIT K11 clinical', JSON.stringify({ provideXid: xid, provideStatus, versions: storedVersions - beforeProvideVersions,
+      answer: unrecorded }));
+    assert.equal(provideStatus, 'aborted', 'the provide transaction rolled back at COMMIT');
+    assert.equal(storedVersions, beforeProvideVersions + 1, 'the write itself committed');
+    assert.deepEqual([unrecorded.status, unrecorded.code, unrecorded.stage], ['unrecorded', 'ProvideNotRecorded', 'provide']);
+    assert.equal(signCalls, beforeProvideSign + 1);
+    const providedAgain = await runtime.write({}, provided);
+    assert.equal(providedAgain.status, 'replayed', 'the same request ID reads the stored result once');
+    assert.equal(signCalls, beforeProvideSign + 1, 'no second signature');
+    assert.equal(await count('emr_clinical.online_version'), storedVersions, 'no second version');
+
     const beforeKeyFailure = await count('emr_clinical.online_version');
     await witness.$executeRaw`UPDATE emr_signing.doctor_key SET status='suspended' WHERE kid=${kid}`;
     await assert.rejects(runtime.write({}, create()), /DoctorSigningKeyUnavailable/);
