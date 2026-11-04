@@ -1700,7 +1700,11 @@ for (const point of ['audit', 'commit']) {
     const before = await w.state(uid);
     w.fault('X', point, new Error('SYN failure at ' + point));
     const failed = await w.send('X', 'put', { as: A, uid, body });
-    assert.deepEqual([failed.ok, failed.code], [false, 'NOT_HTTP'], 'an unknown outcome, never a refusal');
+    // B2-COMMIT: the 'commit' point fails the transaction after its callback returned, as a failed COMMIT does; B2 reads
+    // that XID aborted and answers 503 REPORT_DRAFT_NOT_COMMITTED (Related's client treats a 503 as unknown and checks).
+    // The 'audit' point fails inside the callback, whose own error is kept.
+    assert.deepEqual([failed.ok, failed.code], [false, point === 'commit' ? 'REPORT_DRAFT_NOT_COMMITTED' : 'NOT_HTTP'],
+      'an unknown outcome to the client, never a refusal');
     assert.deepEqual(await w.state(uid), before);
     assert.equal(await receiptOf(w, body), null, 'no receipt of a rolled back insertion, and no refused row');
     const check = await w.send('R', 'read', { as: A, uid, query: { insertRequestId: body.relatedInsert.insertRequestId } });

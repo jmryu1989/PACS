@@ -214,10 +214,14 @@ test('D online exact versions, B2 result recovery and current access on PostgreS
     await witness.$executeRawUnsafe(`CREATE CONSTRAINT TRIGGER d_b2c_fail_provide AFTER INSERT ON emr_access.access_entry
       DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.payload LIKE '%"action":"provide-prepared"%')
       EXECUTE FUNCTION public.d_b2c_fail_provide()`);
+    // A provide record is written only for a write whose projector answered a response (runtime.ts answer()): this
+    // fixture's projector answers none, so this write's projector returns the projected row as its response.
+    const responding = composeClinicalRuntime({ ...parts, async project(...args) {
+      await parts.project(...args); return { synthetic: 'projected response' }; } });
     const provided = create('synthetic provide record failure'), beforeProvideSign = signCalls;
     const beforeProvideVersions = await count('emr_clinical.online_version');
     let unrecorded;
-    try { unrecorded = await runtime.write({}, provided); }
+    try { unrecorded = await responding.write({}, provided); }
     finally { await witness.$executeRawUnsafe('DROP TRIGGER IF EXISTS d_b2c_fail_provide ON emr_access.access_entry'); }
     const [{ xid }] = await witness.$queryRawUnsafe('SELECT last_value::text AS xid FROM public.d_b2c_xid');
     const [{ status: provideStatus }] = await witness.$queryRawUnsafe('SELECT pg_xact_status($1::xid8)::text AS status', xid);
@@ -228,7 +232,7 @@ test('D online exact versions, B2 result recovery and current access on PostgreS
     assert.equal(storedVersions, beforeProvideVersions + 1, 'the write itself committed');
     assert.deepEqual([unrecorded.status, unrecorded.code, unrecorded.stage], ['unrecorded', 'ProvideNotRecorded', 'provide']);
     assert.equal(signCalls, beforeProvideSign + 1);
-    const providedAgain = await runtime.write({}, provided);
+    const providedAgain = await responding.write({}, provided);
     assert.equal(providedAgain.status, 'replayed', 'the same request ID reads the stored result once');
     assert.equal(signCalls, beforeProvideSign + 1, 'no second signature');
     assert.equal(await count('emr_clinical.online_version'), storedVersions, 'no second version');
