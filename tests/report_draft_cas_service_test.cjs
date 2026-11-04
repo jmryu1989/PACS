@@ -1276,6 +1276,71 @@ test('B2-COMMIT K11 a draft read whose read record a deferred trigger fails send
   assert.equal(read.body.snapshot.findings, 'SYN first draft');
 });
 
+test('B2-COMMIT K2 W-R T8 a Related apply whose receipt a deferred 23514 fails at COMMIT is REPORT_DRAFT_NOT_COMMITTED: nothing stored, the same insertRequestId applies once', async () => {
+  const w = await world();
+  const source = await w.study({ rs: 'A', draft: false }), uid = await w.study(), epoch = await w.epoch(uid);
+  const body = relatedBody(await w.token(uid, A), uid, source);
+  const before = await w.state(uid), entries = await ledgerEntries(w);
+  const fault = await failAtCommit(w, '"ReportDraftInsertReceipt"', '23514');
+  let answer;
+  try { answer = await w.send('X', 'put', { as: A, uid, body }); } finally { await fault.drop(); }
+  const seen = await fault.observed();
+  report(JSON.stringify({ b2_commit: 'related-apply', ...seen, answer: brief(answer) }));
+  assert.deepEqual(seen.trigger, { deferrable: true, initiallyDeferred: true });
+  assert.deepEqual([seen.stage, seen.status], ['COMMIT', 'aborted'], 'the receipt\'s trigger failed the COMMIT');
+  assert.deepEqual(brief(answer), { ok: false, status: 503, code: 'REPORT_DRAFT_NOT_COMMITTED' });
+  assert.equal(answer.body.relatedInsert, undefined, 'no applied answer');
+  assert.deepEqual(await w.state(uid), before, 'no draft revision or audit row was added');
+  assert.equal(await receiptOf(w, body), null, 'no receipt');
+  assert.equal(await ledgerEntries(w), entries, 'no access record was added');
+  const again = await w.send('X', 'put', { as: A, uid, body });
+  assert.deepEqual([again.ok, again.body.relatedInsert?.result, again.body.revision], [true, 'applied', `${epoch}:2`], JSON.stringify(again.body));
+  const replay = await w.send('X', 'put', { as: A, uid, body });
+  assert.deepEqual([replay.body.relatedInsert?.result, replay.body.revision], ['applied', `${epoch}:2`], 'applied once, then replayed');
+  assert.deepEqual((await receiptOf(w, body)).state, 'applied');
+  assert.deepEqual((await w.state(uid)).audits.slice(before.audits.length), [`${A.actor} report.draft`]);
+});
+
+// The served process composes one draft-purpose service; this file composes a recorder in its place, which is "none"
+// in every other respect (no ledger, nothing to ensure), so an ending's destruction reservation can be seen.
+const reservations = [];
+let endingsObserved = false;
+function observeEndings() {
+  if (endingsObserved) return;
+  require('/app/dist/emr-retention/draft-purpose').configureDraftPurpose({ ledger: null, ensureLedger: async () => {},
+    scheduleDestruction: (unit, author) => { reservations.push({ unit, author }); }, recheckEnd: target => { reservations.push({ recheck: target.unit }); } });
+  endingsObserved = true;
+}
+
+test('B2-COMMIT K3 a Clear or Discard whose COMMIT a deferred P0001 fails is REPORT_DRAFT_END_NOT_SAVED: the draft as it was, no destruction reserved', async () => {
+  observeEndings();
+  const w = await world();
+  for (const ender of ['clear', 'discard']) {
+    // A draft written through the server, so that it is a work the ending ends.
+    const uid = await w.study({ draft: false }), epoch = await w.epoch(uid);
+    const written = await w.send('W', 'put', { as: A, uid, body: request('put', A, { token: `${epoch}:0`, head: 0, mark: 'work' })[1] });
+    assert.equal(written.ok, true, JSON.stringify(written.body));
+    const before = await w.state(uid), entries = await ledgerEntries(w), reserved = reservations.length;
+    const ends = await w.base.reportDraftPurposeEnd.count({ where: { uid } });
+    const [route, body] = request(ender, A, { token: `${epoch}:1`, head: 0, mark: 'end' });
+    const fault = await failAtCommit(w, '"ReportDraft"', 'P0001');
+    let answer;
+    try { answer = await w.send('E', route, { as: A, uid, body }); } finally { await fault.drop(); }
+    const seen = await fault.observed();
+    report(JSON.stringify({ b2_commit: 'draft-end', ender, ...seen, answer: brief(answer) }));
+    assert.deepEqual([seen.stage, seen.status], ['COMMIT', 'aborted'], ender + ': the trigger failed the COMMIT');
+    assert.deepEqual(brief(answer), { ok: false, status: 503, code: 'REPORT_DRAFT_END_NOT_SAVED' }, ender);
+    assert.equal(answer.body.revision, undefined, ender + ': no value of the undecided end');
+    assert.deepEqual(await w.state(uid), before, ender + ': the draft as it was');
+    assert.equal(await w.base.reportDraftPurposeEnd.count({ where: { uid } }), ends, ender + ': no purpose end recorded');
+    assert.equal(await ledgerEntries(w), entries, ender);
+    assert.equal(reservations.length, reserved, ender + ': no destruction reserved');
+    const again = await w.send('E', route, { as: A, uid, body });
+    assert.deepEqual([again.ok, again.body.present], [true, false], ender + ': the same request ends it once the fault is gone');
+    assert.deepEqual(reservations.slice(reserved).map(r => r.unit !== undefined), [true], ender + ': reserved once, after its commit');
+  }
+});
+
 test('REQ-18 migration: existing drafts become present at revision 1 with their content, existing states get distinct epochs', async () => {
   const w = await world();
   const sql = fs.readFileSync('/app/prisma/migrations/20261004120000_draft_revision_session_entry/migration.sql', 'utf8');
