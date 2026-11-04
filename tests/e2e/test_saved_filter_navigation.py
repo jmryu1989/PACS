@@ -224,8 +224,8 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         expect(page.locator('#sfm-name')).to_have_value(prefix)
         expect(page.locator('#sfm-col-id')).to_have_value(second.patient_id)
         expect(page.locator('#sfm-default')).to_be_checked()
-        self.open_toolbar_group(page, '#active-filter-info')
-        expect(page.locator('#active-filter-info')).not_to_be_visible()
+        # The manager stays open over the closed Filters menu (P3-1), so read the element's own state: no search applied.
+        expect(page.locator('#active-filter-info')).to_have_js_property('hidden', True)
         self.expect_rows(page, first, second)
         expect(page.locator('#findings')).to_have_value(draft)
         page.unroute('**/api/filters', fail)
