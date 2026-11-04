@@ -10,6 +10,7 @@ import { FailureJournal } from './failure-journal';
 import { RawQuery } from './manifest';
 import { admitAppend } from './admission';
 import { EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS, EMR_APPEND_POOL_SIZE, boundEmrStatements } from './limits';
+import { CommitOutcome, judgeSettled, transactionToken, xactOutcome } from './commit-outcome';
 
 export type LedgerFailureCode = 'CommitUnknown' | 'AppendNotCommitted' | 'LedgerRefused' | 'LedgerUnreachable' | 'ResultExpired';
 export class LedgerFailure extends Error {
@@ -102,92 +103,102 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
    * names were not written, even if the process ends before a retry (R244-GPT-02). */
   async transactionWithRecords<T>(work: (tx: Prisma.TransactionClient, record: RecordMutation) => Promise<T>,
     transactionOptions = options, failureEvent?: string): Promise<T> {
-    const operations: { operation: AdmittedOperation; expected?: 'committed' | 'negative' }[] = [];
-    let value: T, entered = false, returned = false, wroteOutcome = false;
-    try {
-      return await admitAppend(this.db, this.poolSize, () => this.db.$transaction(async tx => {
-        entered = true;
-        await boundEmrStatements(tx);
-        const record: RecordMutation = async (event, effect) => {
-          const operation = await this.admitSql(event);
-          const tracked: typeof operations[number] = { operation };
-          operations.push(tracked);
-          const [locked] = await tx.$queryRaw<{ value: string }[]>`SELECT emr_access.lock_operation(${operation.operationId}::uuid) AS value`;
-          if (locked.value !== 'pending') {
-            const previous = await new PrismaLedgerSql(tx).result(operation.operationId);
-            if (previous?.outcome !== 'committed') throw new LedgerFailure('AppendNotCommitted');
-            if (previous.entries.some(row => row.expired)) throw new LedgerFailure('ResultExpired');
-            tracked.expected = 'committed';
-            return previous.result;
-          }
-          const reference = await effect();
-          if (reference === null) {
-            await tx.$queryRaw`SELECT emr_access.settle_operation(${operation.operationId}::uuid)`;
-            tracked.expected = 'negative';
-            return null;
-          }
-          this.transactions.set(tx, operation);
-          try {
-            await this.appendInTransaction(tx, operation, reference);
-            wroteOutcome = true;
-            if (reference.kind === 'AuditLog') await this.recordProjection(tx, event.eventId, integer(Number(reference.id), 1));
-          } finally { this.transactions.delete(tx); }
-          tracked.expected = 'committed';
-          return reference;
-        };
-        value = await work(tx, record);
-        returned = true;
-        return value;
-      }, transactionOptions));
-    } catch (error) {
-      // A confirmed negative could have been created by settlement after a
-      // rollback. Only an outcome written by this transaction proves its commit.
-      let resolved = returned && wroteOutcome;
-      for (const tracked of operations) {
-        await this.journal.record(returned ? 'commit-unknown' : 'business-rollback',
-          tracked.operation.event.eventId, tracked.operation.operationId);
-        const outcome = await this.settle(tracked.operation.operationId);
-        if (!tracked.expected || outcome?.outcome !== tracked.expected) resolved = false;
-      }
-      if (failureEvent !== undefined && !operations.length)
-        await this.journal.record(returned ? 'commit-unknown' : entered ? 'business-rollback' :
-          (error as Error | null)?.message === 'EmrAdmissionCapacity' ? 'capacity' : 'ledger-unreachable', string(failureEvent), null);
-      if (resolved) return value;
-      if (returned) throw new LedgerFailure('CommitUnknown');
-      throw error;
+    const operations: AdmittedOperation[] = [];
+    const run = await this.execute(async tx => {
+      await boundEmrStatements(tx);
+      const record: RecordMutation = async (event, effect) => {
+        const operation = await this.admitSql(event);
+        operations.push(operation);
+        const [locked] = await tx.$queryRaw<{ value: string }[]>`SELECT emr_access.lock_operation(${operation.operationId}::uuid) AS value`;
+        if (locked.value !== 'pending') {
+          const previous = await new PrismaLedgerSql(tx).result(operation.operationId);
+          if (previous?.outcome !== 'committed') throw new LedgerFailure('AppendNotCommitted');
+          if (previous.entries.some(row => row.expired)) throw new LedgerFailure('ResultExpired');
+          return previous.result;
+        }
+        const reference = await effect();
+        if (reference === null) {
+          await tx.$queryRaw`SELECT emr_access.settle_operation(${operation.operationId}::uuid)`;
+          return null;
+        }
+        this.transactions.set(tx, operation);
+        try {
+          await this.appendInTransaction(tx, operation, reference);
+          if (reference.kind === 'AuditLog') await this.recordProjection(tx, event.eventId, integer(Number(reference.id), 1));
+        } finally { this.transactions.delete(tx); }
+        return reference;
+      };
+      return work(tx, record);
+    }, transactionOptions, true);
+    if (run.outcome === 'committed') return run.value as T;
+    // Settlement runs on its own judged transaction; what it answers never decides this transaction's outcome.
+    const cause = run.outcome === 'unknown' ? 'commit-unknown' : 'business-rollback';
+    for (const operation of operations) {
+      await this.journal.record(cause, operation.event.eventId, operation.operationId);
+      await this.settle(operation.operationId);
     }
+    if (failureEvent !== undefined && !operations.length)
+      await this.journal.record(run.phase !== 'before' ? cause :
+        (run.error as Error | null)?.message === 'EmrAdmissionCapacity' ? 'capacity' : 'ledger-unreachable', string(failureEvent), null);
+    if (run.phase !== 'returned') throw run.error;
+    throw new LedgerFailure(run.outcome === 'not-committed' ? 'AppendNotCommitted' : 'CommitUnknown');
   }
   /** Recheck current authorization inside callback. Return only the stored
    * result reference: exact retries read that version, never rerun mutation. */
   async transaction(operation: AdmittedOperation, work: (tx: Prisma.TransactionClient) => Promise<BusinessReference | null>): Promise<OperationResult> {
     if (!this.admitted.has(operation)) refuse('AdmittedOperationRequired');
-    let callbackFailed = false;
-    try {
-      const result = await admitAppend(this.db, this.poolSize, () => this.db.$transaction(async tx => {
-        await boundEmrStatements(tx);
-        const [state] = await tx.$queryRaw<{ value: string }[]>`SELECT emr_access.lock_operation(${operation.operationId}::uuid) AS value`;
-        if (state.value !== 'pending') return new PrismaLedgerSql(tx).result(operation.operationId);
-        this.transactions.set(tx, operation);
-        try {
-          const reference = await work(tx);
-          await this.appendInTransaction(tx, operation, reference);
-          if (reference?.kind === 'AuditLog')
-            await this.recordProjection(tx, operation.event.eventId, integer(Number(reference.id), 1));
-          return await new PrismaLedgerSql(tx).result(operation.operationId);
-        } catch (error) { callbackFailed = true; throw error; }
-        finally { this.transactions.delete(tx); }
-      }, options));
-      // This Promise resolves only after PostgreSQL's COMMIT acknowledgement.
-      if (!result) throw new LedgerFailure('CommitUnknown');
-      return result;
-    } catch (error) {
-      await this.journal.record(callbackFailed ? 'business-rollback' : 'commit-unknown', operation.event.eventId, operation.operationId);
-      const settled = await this.settle(operation.operationId);
-      if (settled?.outcome === 'committed') return settled;
-      if (callbackFailed) throw error;
-      if (settled?.outcome === 'negative') throw new LedgerFailure('AppendNotCommitted');
-      throw new LedgerFailure('CommitUnknown');
-    }
+    const run = await this.execute(async tx => {
+      await boundEmrStatements(tx);
+      const [state] = await tx.$queryRaw<{ value: string }[]>`SELECT emr_access.lock_operation(${operation.operationId}::uuid) AS value`;
+      if (state.value !== 'pending') return new PrismaLedgerSql(tx).result(operation.operationId);
+      this.transactions.set(tx, operation);
+      try {
+        const reference = await work(tx);
+        await this.appendInTransaction(tx, operation, reference);
+        if (reference?.kind === 'AuditLog')
+          await this.recordProjection(tx, operation.event.eventId, integer(Number(reference.id), 1));
+        return await new PrismaLedgerSql(tx).result(operation.operationId);
+      } finally { this.transactions.delete(tx); }
+    }, options, true);
+    if (run.outcome === 'committed' && run.value) return run.value;
+    const callbackFailed = run.phase === 'callback';
+    await this.journal.record(callbackFailed || run.outcome === 'not-committed' ? 'business-rollback' : 'commit-unknown',
+      operation.event.eventId, operation.operationId);
+    // A stored committed result answers an exact retry whatever this attempt did; settle reports it only once its own
+    // transaction is judged committed, so its negative is a settled fact, never this attempt's rollback assumed.
+    const settled = await this.settle(operation.operationId);
+    if (settled?.outcome === 'committed') return settled;
+    if (callbackFailed) throw run.error;
+    if (run.outcome === 'unknown') throw new LedgerFailure('CommitUnknown');
+    if (settled?.outcome === 'negative') throw new LedgerFailure('AppendNotCommitted');
+    throw new LedgerFailure('CommitUnknown');
+  }
+  /**
+   * The one way B2 runs a transaction (transactionWithRecords, transaction, settle, identity). The callback's value is
+   * this transaction's answer only once PostgreSQL's commit log says its own top-level XID committed: Prisma has resolved
+   * a COMMIT that a deferred trigger failed, so neither the promise nor a row read inside the transaction is evidence.
+   * The XID is taken as the callback's last statement - after any SET TRANSACTION it opened with - so every transaction,
+   * read-only ones included, has one. Its status is read after the transaction settled and after its append lane was
+   * released, in a new transaction (judgeSettled): never on the business connection while it holds locks.
+   *  - phase 'before'/'callback': no COMMIT was asked for; the error is the original one and nothing is judged;
+   *  - phase 'returned': committed, not-committed (aborted) or unknown (in progress, NULL, no token, no answer).
+   */
+  private async execute<T>(work: (tx: Prisma.TransactionClient) => Promise<T>, transactionOptions: typeof options,
+    laned: boolean): Promise<{ phase: 'before' | 'callback' | 'returned'; outcome: CommitOutcome | null; value?: T; error?: unknown }> {
+    const run: { phase: 'before' | 'callback' | 'returned'; token: string | null; value?: T; error?: unknown } =
+      { phase: 'before', token: null };
+    const transaction = () => this.db.$transaction(async tx => {
+      run.phase = 'callback';
+      run.value = await work(tx);
+      run.phase = 'returned';
+      run.token = await transactionToken(tx);
+      return run.value;
+    }, transactionOptions);
+    try { await (laned ? admitAppend(this.db, this.poolSize, transaction) : transaction()); }
+    catch (caught) { run.error = caught; }
+    if (run.phase !== 'returned') return { phase: run.phase, outcome: null, error: run.error };
+    const outcome = run.token === null ? 'unknown' : await judgeSettled(this.db, xactOutcome(run.token));
+    return { phase: run.phase, outcome, value: run.value, error: run.error };
   }
   async appendInTransaction(tx: Prisma.TransactionClient, operation: AdmittedOperation,
     reference: BusinessReference | null = null): Promise<ProvisionalAppend> {
@@ -222,14 +233,15 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
       return sql.result(operationId);
     }, options);
   }
+  /** The operation's settled result, only from a settlement whose own transaction committed: otherwise UNKNOWN (null),
+   * including a lock timeout - never a timed negative, and never a negative that rolled back with its transaction. */
   async settle(operationId: string): Promise<OperationResult | null> {
-    try {
-      return await this.db.$transaction(async tx => {
-        await boundEmrStatements(tx);
-        const [row] = await tx.$queryRaw<{ value: OperationResult }[]>`SELECT emr_access.settle_operation(${operationId}::uuid) AS value`;
-        return row.value;
-      }, options);
-    } catch { return null; } // UNKNOWN, including lock timeout; never a timed negative.
+    const run = await this.execute(async tx => {
+      await boundEmrStatements(tx);
+      const [row] = await tx.$queryRaw<{ value: OperationResult }[]>`SELECT emr_access.settle_operation(${operationId}::uuid) AS value`;
+      return row.value;
+    }, options, false);
+    return run.outcome === 'committed' ? run.value ?? null : null;
   }
   async recoverPending(): Promise<void> {
     const rows = await this.db.$queryRaw<{ operation_id: string }[]>`SELECT operation_id::text FROM emr_access.pending_operations(128)`;
@@ -300,8 +312,11 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
     const key = JSON.stringify([string(issuer), string(subject)]);
     const established = this.identities.get(key);
     if (established) return established;
-    const id = await admitAppend(this.db, this.poolSize, () => this.db.$transaction(
-      tx => this.resolveIdentity(tx, issuer, subject), options));
+    // Cached only once its binding committed: an id from a transaction that rolled back names no member.
+    const run = await this.execute(tx => this.resolveIdentity(tx, issuer, subject), options, true);
+    if (run.phase !== 'returned') throw run.error;
+    if (run.outcome !== 'committed') throw new LedgerFailure(run.outcome === 'not-committed' ? 'AppendNotCommitted' : 'CommitUnknown');
+    const id = run.value as string;
     this.identities.set(key, id);
     return id;
   }
