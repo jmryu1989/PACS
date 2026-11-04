@@ -20,6 +20,8 @@ class WorklistRowNavigationE2E(ReadingWorkspaceE2E):
 
     def test_keyboard_01_tab_arrow_multi_selection_enter_and_report_return(self):
         p,fixtures,order=self.setup_rows();first=fixtures[0]
+        # Tech Note is an optional column; enable it before exercising its keyboard path.
+        self.show_worklist_column(p, 'techNote')
         original=self.originals();p.locator('#findings').fill('KEYBOARD UNSAVED CURRENT')
         # Enter the list through the actual tab order from its last filter control.
         last_filter=p.locator('#filterrow input,#filterrow select').last
@@ -74,8 +76,8 @@ class WorklistRowNavigationE2E(ReadingWorkspaceE2E):
         self.assertNotEqual(p.evaluate('document.activeElement.dataset.uid'),order[-1])
         self.assertEqual(p.evaluate('document.activeElement.parentElement.id'),'rows')
         expect(p.locator('#rows tr[tabindex="0"]')).to_have_count(1)
-        # D73: retire the old toolbar Quick Match focus target; the empty-list behavior remains covered.
         p.evaluate('()=>{studies=[];render();}');expect(p.locator('#rows tr[data-uid]')).to_have_count(0)
+        expect(p.locator('#filterrow [data-f="id"]')).to_be_focused()
         p.evaluate('load()');expect(p.locator('#rows tr[tabindex="0"]')).to_have_count(1)
         end_document(p)
         expect(p.locator('#rows tr[tabindex="0"]')).to_have_count(0)

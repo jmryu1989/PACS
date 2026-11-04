@@ -12,7 +12,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
  * 기본값이 deny인 이유: clinician을 APP_ROLES에 넣는 순간 memberState()가 APPROVED를 주므로,
  * 역할 이름 추가와 아래 allowlist 게이트는 **같은 커밋**에 있어야 한다. 이름만 먼저 넣은 후보는
  * 기존 writer 경로 전체를 임상의에게 여는 중간 상태다. U1a의 업무 allowlist는 비어 있었고
- * S5-U1b가 narrow DTO가 준비된 읽기 행만 채웠다(아래 CLINICIAN_BUSINESS_ROUTES).
+ * S5-U1b의 읽기 경로는 2026-11-02 결정으로 판독의의 읽기·개인 화면 설정 범위로 넓혔다.
  */
 export const CLINICIAN_ROLE = 'clinician';
 
@@ -26,45 +26,94 @@ export const APP_ROLES: ReadonlySet<string> = new Set([...LEGACY_APP_ROLES, CLIN
 export const CLINICIAN_SESSION_ROUTES: readonly string[] = Object.freeze(['GET me', 'POST auth/logout']);
 
 /**
- * clinician-only 업무 allowlist(S5-U1b). 항목 형식은 `METHOD controller/handler/template`.
- * 좁은 응답이 준비된 읽기만 있다 — 행 하나를 더하는 일은 그 행의 응답 칸을 정하는 일과 같은 변경이다.
- *  - `GET authz/dicom`·`POST dicom/lookup`: 뷰어 읽기 쌍. 하나만 열면 영상 한 장도 열리지 않는다.
- *  - `GET studies/:uid/viewer-items`: clinician-only에게는 확정본일 때만, 아래 투영으로 좁혀서 준다.
- *  - `GET clinician/studies`: 워크리스트의 기관·원격판독·StudyAccess·페이지 파이프라인에 좁은 행을 얹는다.
- *  - `GET clinician/studies/:uid/report`: 머리 판이 확정본이면 본문과 key image, 아니면 상태만.
- *  - `GET clinician/studies/:uid/timeline`(S5-U3): 같은 서버 환자 키의 검사 행(목록 행과 같은 칸)과 원본 생년월일·성별의
- *    관계만. 본문·값은 싣지 않는다(clinicianTimeline).
- *  - S5-U4a 질문 여섯 행(clinician-question.controller.ts): 게이트 통과는 서비스에 닿는다는 뜻일 뿐이고
- *    동작별 역할(view=inbox·답변은 radiologist 등)과 기관·StudyAccess·작성자 경계는 서비스가 판정한다.
- *  - S5-U4c 영상 요청 다섯 행(image-request.controller.ts): 같은 뜻이다. 처리(accept·close·decline)는
- *    technician·admin만, 취소는 요청자·admin만 서비스가 허용하고, 요청은 전송이 아니다(Connect route는 계속 거절).
- *  - S7-U1a 중요 결과 세 행(critical-result.controller.ts): 받은 목록·한 건·ACK. view=sent는 서비스가 403, 남의 기록은
- *    404, 확정 원천이 아닌 기록(C3/C4)의 ACK는 409다 — 게이트 통과는 원문 권한이 아니다.
- * `GET preload/cache-key` remains a worklist-only route; clinician-only sessions read images live.
- * `GET studies`·`GET bootstrap`·`GET studies/:uid/report-preview`·`GET audit`는 계속 거절한다 —
- * 초안·오더·상용구·작성자 칸이나 확정 전 본문을 싣는 응답이다.
+ * REQ-S5-U1b-CLINICIAN-READ / RISK-S5-U1b-NONFINAL-BODY.
+ * D-S5-NONFINAL-VIEW decided 2026-11-02 by the owner on the clinical lead's request:
+ * worklist/report reads follow radiologist rules, including W/T/H bodies; P remains restricted
+ * to its designated author/reviewer. Clinical writes remain outside this allowlist.
+ * Own screen settings are writable. Institution and resource checks still run in the services.
  */
 export const CLINICIAN_BUSINESS_ROUTES: readonly string[] = Object.freeze([
-  // F resolves the separate institutional designation; an app role grants no audit authority.
-  'POST emr-audit/roster/:grantId', 'POST emr-audit/investigations', 'POST emr-audit/exports',
-  'POST emr-audit/requests', 'POST emr-audit/issuances', 'POST emr-audit/issuances/:id/issue', 'POST emr-audit/issuances/:id/delivery',
-  'GET emr-audit/requests/:id', 'POST emr-audit/requests/:id/extend', 'POST emr-audit/requests/:id/resolve',
-  'GET images/dicom-web', 'HEAD images/dicom-web',
+  'POST emr-audit/roster/:grantId',
+  'POST emr-audit/investigations',
+  'POST emr-audit/exports',
+  'POST emr-audit/incidents', 'GET emr-audit/incidents', 'GET emr-audit/incidents/:id', 'POST emr-audit/incidents/:id/findings', 'POST emr-audit/incidents/:id/notices', 'POST emr-audit/incidents/:id/close', 'GET emr-audit/incidents/:id/drafts/:form',
+  'POST emr-audit/rights-requests', 'GET emr-audit/rights-requests', 'GET emr-audit/rights-requests/:id', 'POST emr-audit/rights-requests/:id/decide', 'POST emr-audit/rights-requests/:id/notify',
+  'GET emr-audit/inspections',
+  'GET emr-audit/inspections/:month',
+  'POST emr-audit/inspections/:month/report',
+  'POST emr-audit/inspections/:month/steps',
+  'POST emr-audit/requests',
+  'POST emr-audit/issuances',
+  'POST emr-audit/issuances/:id/issue',
+  'POST emr-audit/issuances/:id/delivery',
+  'GET emr-audit/requests/:id',
+  'GET emr-audit/issuances/:id',
+  'POST emr-audit/requests/:id/extend',
+  'POST emr-audit/requests/:id/resolve',
+  'GET images/dicom-web',
+  'HEAD images/dicom-web',
   'POST studies/:uid/viewer-context-events',
-  'GET authz/dicom', 'POST dicom/lookup', 'GET studies/:uid/viewer-items',
-  'GET clinician/studies', 'GET clinician/studies/:uid/report', 'GET clinician/studies/:uid/timeline',
-  // S5-U4a
-  'GET questions', 'GET questions/:id', 'GET studies/:uid/questions',
-  'POST studies/:uid/questions', 'POST questions/:id/entries', 'POST questions/:id/close',
-  // S5-U4c
-  'GET image-requests', 'GET image-requests/:id', 'GET studies/:uid/image-requests',
-  'POST studies/:uid/image-requests', 'POST image-requests/:id',
-  // S7-U1a — 중요 결과 수신(받은 목록·한 건·명시 ACK). 발신·취소·대체·후보·검사별 목록은 clinician-only에게 계속 거절한다.
-  'GET critical-results', 'GET critical-results/:id', 'POST critical-results/:id/ack',
-  // MG-08: image reads routed by nginx to the recorded API relay, behind the same gate as authz/dicom.
+  'GET authz/dicom',
+  'POST dicom/lookup',
+  'GET studies/:uid/viewer-items',
+  'GET clinician/studies',
+  'GET clinician/studies/:uid/report',
+  'GET clinician/studies/:uid/timeline',
+  'GET questions',
+  'GET questions/:id',
+  'GET studies/:uid/questions',
+  'POST studies/:uid/questions',
+  'POST questions/:id/entries',
+  'POST questions/:id/close',
+  'GET image-requests',
+  'GET image-requests/:id',
+  'GET studies/:uid/image-requests',
+  'POST studies/:uid/image-requests',
+  'POST image-requests/:id',
+  'GET critical-results',
+  'GET critical-results/:id',
+  'POST critical-results/:id/ack',
   'GET image-relay/*',
-  // MG-LOADING: viewer frame bytes and strip previews come through the API behind the same gate as authz/dicom.
-  'GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames', 'GET instances/:id/preview',
+  'GET dicom-web/studies/:study/series/:series/instances/:sop/frames/:frames',
+  'GET instances/:id/preview',
+  'GET studies',
+  'GET bootstrap',
+  'GET prefs',
+  'GET studies/:uid/report/versions',
+  'GET studies/:uid/report/citations',
+  'GET studies/:uid/report/versions/:version/citations',
+  'GET studies/:uid/report/structure',
+  'GET studies/:uid/report-preview',
+  'GET studies/:uid/viewer-items/:id/revisions',
+  'GET studies/:uid/findings',
+  'GET studies/:uid/findings/:id/revisions',
+  'GET studies/:uid/clinical-context',
+  'POST studies/:uid/view-observations',
+  'GET filter-folders',
+  'POST filter-folders',
+  'POST filters',
+  'DELETE filters/:id',
+  'PATCH filters/:id/default',
+  'GET shared-filters',
+  'POST shared-filters/copy',
+  'GET favorite-folders',
+  'POST favorite-folders',
+  'GET study-tags',
+  'GET worklist-columns',
+  'PUT worklist-columns',
+  'DELETE worklist-columns',
+  'GET workspace-layout',
+  'PUT workspace-layout',
+  'DELETE workspace-layout',
+  'GET workspace-shortcuts',
+  'PUT workspace-shortcuts',
+  'GET reading-appearance',
+  'PUT reading-appearance',
+  'GET reading-preferences',
+  'PUT reading-preferences',
+  'GET hanging-protocols',
+  'PUT hanging-protocols',
+  'GET hanging-protocols/site',
 ]);
 
 export const CLINICIAN_ALLOWED_ROUTES: ReadonlySet<string> =
@@ -112,16 +161,11 @@ export function clinicianRouteAllowed(key: string | null): boolean {
 // 쓰지 않는다 — 서비스 행에 새 칸(초안·오더·영수증처럼 뒤에 붙은 칸)이 생기면 지우는 목록이
 // 따라가지 못해 그대로 새기 때문이다. 이 파일은 순수 함수만 둔다(DB·Orthanc·Nest 예외 없음).
 
-/**
- * S5-F5 보수 기본값 — D-S5-NONFINAL-VIEW는 미결이다. 임상의에게 본문·key image·표시 항목이
- * 나가는 것은 머리 판(ReportVersion(uid, Report.version))의 action이 approve/addendum이고
- * 같은 순간 RS가 A일 때뿐이다. 둘 중 하나만 보면 기록이 어긋난 행(RS만 A이거나, 머리 판만
- * 승인)이 확정본으로 나간다. 그 밖의 상태는 본문 없이 상태만 알리고 확정이라고 부르지 않는다.
- */
+/** Final is a status label, not permission to read a body (owner decision 2026-11-02). */
 export const CLINICIAN_FINAL_ACTIONS: readonly string[] = Object.freeze(['approve', 'addendum']);
 
-/** 본문 없이 그대로 알려도 되는 진행 상태. 그 밖(확정 머리가 아닌 A, 모르는 값)은 null — 모름. */
-export const CLINICIAN_OPEN_STATES: readonly string[] = Object.freeze(['W', 'T', 'P', 'H']);
+/** 그대로 알려도 되는 진행 상태. 모르는 값은 null로 표시한다. */
+export const CLINICIAN_OPEN_STATES: readonly string[] = Object.freeze(['W', 'T', 'P', 'H', 'A']);
 
 /** 확정본 판정. head는 Report.version 번 ReportVersion 행이다(없으면 null). */
 export function clinicianFinal(rs: unknown, head: any): boolean {
@@ -135,13 +179,15 @@ const own = (value: any, key: string): boolean =>
   !!value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, key);
 
 /**
- * 판독 상태. 확정본이면 누가(repDoc)·언제(confirm)·어느 판인지를, 아니면 RS만 싣는다.
+ * 판독 상태. P는 상태만, 그 밖의 머리 판은 판·작성·확정 정보를 싣되 final 표시는 실제 승인 상태를 따른다.
  * holdReason·preDoc·preReviewer·holder·초안은 작성자 쪽 칸이라 어느 경우에도 없다.
  */
 export function clinicianReportStatus(state: any, head: any) {
-  if (!clinicianFinal(state?.rs, head))
-    return { final: false, rs: CLINICIAN_OPEN_STATES.includes(state?.rs) ? state.rs as string : null };
-  return { final: true, rs: 'A', action: head.action as string, version: head.version as number,
+  const final = clinicianFinal(state?.rs, head);
+  const rs = CLINICIAN_OPEN_STATES.includes(state?.rs) ? state.rs as string : null;
+  if (rs === 'P' || rs === null || !Number.isSafeInteger(head?.version) || head.version < 1)
+    return { final: false, rs };
+  return { final, rs, action: typeof head.action === 'string' ? head.action : null, version: head.version as number,
     repDoc: typeof state.repDoc === 'string' ? state.repDoc : null,
     confirm: typeof state.confirm === 'string' ? state.confirm : null };
 }
@@ -149,9 +195,9 @@ export function clinicianReportStatus(state: any, head: any) {
 /** 판독문 읽기. 본문은 **머리 판 행 자신의** 세 칸이다 — 판정한 action과 같은 불변 행에서 읽는다. */
 export function clinicianReport(state: any, head: any) {
   const status = clinicianReportStatus(state, head);
-  if (!status.final) return status;
-  return { ...status, findings: text(head.findings), conclusion: text(head.conclusion),
-    recommendation: text(head.recommendation) };
+  if (state?.rs === 'P' || !CLINICIAN_OPEN_STATES.includes(state?.rs)) return status;
+  return { ...status, findings: text(head?.findings), conclusion: text(head?.conclusion),
+    recommendation: text(head?.recommendation) };
 }
 
 const SNAPSHOT_COMMON = ['schemaVersion', 'kind', 'seriesUid', 'sopUid', 'frame'];
@@ -328,9 +374,11 @@ export function clinicianStudyRow(row: any, snapshot: any) {
     count: Number.isSafeInteger(row?.count) ? row.count as number : null,
     series: Number.isSafeInteger(row?.series) ? row.series as number : null,
     sourcePatientKey: typeof row?.sourcePatientKey === 'string' ? row.sourcePatientKey : null,
+    referringPhysician: typeof row?.referringPhysician === 'string' ? row.referringPhysician : null,
+    requestingPhysician: typeof row?.requestingPhysician === 'string' ? row.requestingPhysician : null,
     institutionName: text(row?.institutionName),
     tele: row?.tele === true,
-    report: clinicianReportStatus(record, record ? { version: record.version, action: record.action } : null),
+    report: clinicianReport(record, record),
   };
 }
 
@@ -419,7 +467,7 @@ export function clinicianIdentityRelation(values: readonly string[]): ClinicianI
  * 화면 덮어쓰기 값으로 비교하면 불일치 표식이 Modify 한 번으로 사라진다(S4-U5 P12와 같은 이유).
  *  - identity: 타임라인 전체의 관계. 쪽마다 같은 값이라 화면은 쪽 사이에서 달라지면 답 전체를 버릴 수 있다.
  *  - studies[].identity: 그 검사와 기준 검사의 관계. 어느 검사가 다른지 알리되 값은 싣지 않는다.
- * 행의 나머지 칸은 목록 행(clinicianStudyRow)과 같다 — 본문·초안·작성자 칸은 어느 경우에도 없다.
+ * 행의 나머지 칸과 판독 본문은 목록 행(clinicianStudyRow)과 같다. P 본문과 개인 초안은 싣지 않는다.
  * 환자 키는 응답 본문에만 있고 이어받기 값(주소)에는 없다.
  */
 export function clinicianTimeline(uid: string, anchor: any, members: any[], window: any, snapshots: any[], serverTime: unknown,

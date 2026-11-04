@@ -35,6 +35,24 @@ if (TARGET.endsWith('.ts')) {
 }
 const P = require(TARGET);
 
+test('physician decision 2026-11-02: current W/T/H bodies, P withheld, DICOM physician names preserved', () => {
+  for (const rs of ['W', 'T', 'H', 'A']) {
+    const result = P.clinicianReport({ rs }, { version: 4, action: 'save', findings: 'current body',
+      conclusion: 'current conclusion', recommendation: '', draft: { findings: 'another author' } });
+    assert.equal(result.findings, 'current body', rs);
+    assert.equal(result.rs, rs);
+    assert.equal(result.draft, undefined);
+  }
+  assert.equal(P.clinicianReport({ rs: 'P' }, { version: 4, findings: 'preliminary' }).findings, undefined);
+  const row = P.clinicianStudyRow({ uid: '1.2.3', referringPhysician: 'Ref^Doctor=참조',
+    requestingPhysician: 'Req^Doctor' }, null);
+  assert.equal(row.referringPhysician, 'Ref^Doctor=참조');
+  assert.equal(row.requestingPhysician, 'Req^Doctor');
+  const absent = P.clinicianStudyRow({ uid: '1.2.3' }, null);
+  assert.equal(absent.referringPhysician, null);
+  assert.equal(absent.requestingPhysician, null);
+});
+
 const sorted = value => [...value].sort();
 const keys = value => sorted(Object.keys(value));
 const FORBIDDEN = new Set(C.forbidden_keys);
@@ -104,15 +122,11 @@ test('the U1b allowlist and the S5-F5 constants are exactly the fixture values',
   assert.deepEqual(Object.fromEntries(Object.entries(P.CLINICIAN_SNAPSHOT_FIELDS).map(([k, v]) => [k, [...v]])), C.snapshot_keys);
   for (const route of FIXTURES.business_routes) assert.equal(P.clinicianRouteAllowed(route), true, route);
   for (const route of FIXTURES.must_stay_denied) assert.equal(P.clinicianRouteAllowed(route), false, route);
-  // The clinician's workflow writes use the S5-U4p §6.1 question thread's three routes (create, answer or
-  // follow-up, close), the S5-U4c image request's two routes (create, action) and the S7-U1p §6.1 explicit
-  // acknowledgement of a critical result it received; each is idempotent on requestId with a stored receipt.
-  // S8-CTX also records finite viewer diagnostics after image-read admission; it exposes no report write.
-  // F auditor writes use their real HTTP/PG designation test; this assertion covers clinician workflow writes.
-  // Besides read-only GET/HEAD, the remaining row is the viewer's SOP lookup, which answers an Orthanc id and writes nothing.
-  assert.deepEqual(FIXTURES.business_routes.filter(route => !/^(GET|HEAD) /.test(route) && !route.startsWith('POST emr-audit/')),
-    ['POST studies/:uid/viewer-context-events', 'POST dicom/lookup', 'POST studies/:uid/questions', 'POST questions/:id/entries', 'POST questions/:id/close',
-      'POST studies/:uid/image-requests', 'POST image-requests/:id', 'POST critical-results/:id/ack']);
+  for (const route of ['PUT studies/:uid/report', 'POST studies/:uid/report/commit',
+    'POST studies/:uid/viewer-items', 'POST studies/:uid/viewer-items/:id/revisions',
+    'POST studies/:uid/findings', 'POST studies/:uid/hold'])
+    assert.equal(P.clinicianRouteAllowed(route), false, route);
+
 });
 
 test('final means rs A and a head row whose own action is approve or addendum, nothing looser', () => {
@@ -150,22 +164,23 @@ test('final report: status, signer and the head row body only; every writer fiel
   assert.equal(P.clinicianReport(writerState(), head('approve', { findings: { x: 1 } })).findings, '');
 });
 
-test('non-final report: RS only, never a body, never labelled final, unknown states are null', () => {
-  const cases = [
-    ['W', null, 'W'], ['W', head('reset', { findings: '' }), 'W'], ['T', head('save'), 'T'], ['P', head('preliminary'), 'P'],
-    ['P', head('save'), 'P'], ['H', head('defer'), 'H'], ['A', head('save'), null], ['A', null, null],
-    ['A', head('approve', { version: 0 }), null], ['O', head('save'), null], ['X', head('approve'), null],
-    [undefined, head('approve'), null], ['W', head('approve'), 'W'], ['T', head('addendum'), 'T'],
-  ];
-  for (const [rs, row, expected] of cases) {
-    const label = `${String(rs)}/${row?.action ?? 'none'}`;
-    const read = P.clinicianReport(writerState({ rs }), row);
-    assert.deepEqual(keys(read), sorted(C.report_open_keys), label);
-    assert.deepEqual(read, { final: false, rs: expected }, label);
-    assert.ok(!JSON.stringify(read).includes(SECRET) && !JSON.stringify(read).includes(DRAFT), label + ': body leaked');
-    clean(read, label);
-    assert.deepEqual(P.clinicianReportStatus(writerState({ rs }), row), read, label + ': list status = read status');
+test('non-final bodies follow radiologist rules; P and unknown states are status-only', () => {
+  for (const rs of ['W', 'T', 'H', 'A']) {
+    const read = P.clinicianReport(writerState({ rs }), head('save'));
+    assert.equal(read.final, false);
+    assert.equal(read.rs, rs);
+    assert.equal(read.findings, SECRET + '-F');
+    assert.equal(read.version, 3);
+    assert.ok(!JSON.stringify(read).includes(DRAFT));
+    clean(read, rs);
   }
+  for (const rs of ['P', 'O', 'X', undefined]) {
+    const read = P.clinicianReport(writerState({ rs }), head('preliminary'));
+    assert.deepEqual(read, { final: false, rs: rs === 'P' ? 'P' : null });
+    assert.ok(!JSON.stringify(read).includes(SECRET));
+  }
+  const absent = P.clinicianReport({ rs: 'W' }, null);
+  assert.equal(absent.findings, '');
 });
 
 test('key images: only unhidden kind=key, with id, revision and the key fields; no author, no hidden flag', () => {
@@ -358,12 +373,12 @@ test('list row: allowlisted identity and status from a full worklist row; overla
     acc: 'ACC-FIXED', desc: 'CT FIXED', modality: 'MR', ward: 'W9', age: 44 };
   const row = P.clinicianStudyRow(worklistRow({}, { ov: overlay }), snap());
   assert.deepEqual(keys(row), sorted(C.list_row_keys));
-  assert.deepEqual(keys(row.report), sorted(C.report_final_keys));
+  assert.deepEqual(keys(row.report), sorted([...C.report_final_keys, ...C.report_body_keys]));
   assert.deepEqual([row.id, row.name, row.birth, row.sex, row.date, row.acc, row.desc, row.modality],
     ['PID-FIXED', 'LEE FIXED', '19810202', 'F', '20260925', 'ACC-FIXED', 'CT FIXED', 'MR']);
   assert.equal(row.sourcePatientKey, 'hallym|PID-1', 'the grouping key stays the worklist\'s original-PatientID key');
   assert.deepEqual([row.uid, row.count, row.series, row.institutionName, row.tele], ['1.2.3', 120, 3, 'Hallym', false]);
-  assert.deepEqual(row.report, { final: true, rs: 'A', action: 'approve', version: 3, repDoc: 'doc', confirm: '2026-09-26' });
+  assert.deepEqual(row.report, { final: true, rs: 'A', action: 'approve', version: 3, repDoc: 'doc', confirm: '2026-09-26', findings: '', conclusion: '', recommendation: '' });
   const text = JSON.stringify(row);
   for (const secret of [SECRET, DRAFT, 'W9', 'hold reason', 'O-1', 'doctor@x', 'reader@x', 'orig', 'engineering_only'])
     assert.ok(!text.includes(secret), secret);
@@ -384,7 +399,7 @@ test('list row: allowlisted identity and status from a full worklist row; overla
   // Non-final rows carry RS only; a P row stays P without its (already hidden) body.
   const open = { repDoc: null, confirm: null };
   assert.deepEqual(P.clinicianStudyRow(worklistRow({}, { rs: 'T', ...open, version: 4 }), snap({ rs: 'T', ...open, version: 4, action: 'save' })).report,
-    { final: false, rs: 'T' });
+    { final: false, rs: 'T', action: 'save', version: 4, repDoc: null, confirm: null, findings: '', conclusion: '', recommendation: '' });
   assert.deepEqual(P.clinicianStudyRow(worklistRow({}, { rs: 'P', prelimHidden: true, ...open, version: 4 }),
     snap({ rs: 'P', ...open, version: 4, action: 'preliminary' })).report, { final: false, rs: 'P' });
 });
@@ -395,13 +410,13 @@ test('list row status comes only from the one-statement snapshot, never from the
   const mixed = worklistRow({}, { repDoc: 'old-doc', confirm: '2026-09-25', version: 4 });
   const addendum = snap({ repDoc: 'new-doc', confirm: '2026-09-26', version: 4, action: 'addendum' });
   const row = P.clinicianStudyRow(mixed, addendum);
-  assert.deepEqual(row.report, { final: true, rs: 'A', action: 'addendum', version: 4, repDoc: 'new-doc', confirm: '2026-09-26' });
+  assert.deepEqual(row.report, { final: true, rs: 'A', action: 'addendum', version: 4, repDoc: 'new-doc', confirm: '2026-09-26', findings: '', conclusion: '', recommendation: '' });
   assert.ok(!JSON.stringify(row).includes('old-doc') && !JSON.stringify(row).includes('2026-09-25'), 'a signer of another version leaked');
   // ...and the service never sends that row: the recheck sees the signer the worklist row carried move.
   assert.equal(P.clinicianListChanged([mixed], [addendum]), true);
   // The worklist row saying "signed" does not make the row signed, and the reverse.
   assert.deepEqual(P.clinicianStudyRow(worklistRow(), snap({ rs: 'W', repDoc: null, confirm: null, version: 5, action: 'reset' })).report,
-    { final: false, rs: 'W' });
+    { final: false, rs: 'W', action: 'reset', version: 5, repDoc: null, confirm: null, findings: '', conclusion: '', recommendation: '' });
   assert.deepEqual(P.clinicianStudyRow(worklistRow({}, { rs: 'W', version: 0 }), snap()).report.final, true,
     'the projection follows the snapshot; the recheck below is what refuses a list that disagrees with it');
   // No snapshot, a snapshot of another study, or a row without a uid: unknown, never signed.
@@ -409,11 +424,14 @@ test('list row status comes only from the one-statement snapshot, never from the
     ['another study', worklistRow(), snap({ uid: '1.2.4' })], ['row without uid', { state: clientState() }, snap()],
     ['row with a non-string uid', worklistRow({ uid: 7 }), snap({ uid: 7 })]])
     assert.deepEqual(P.clinicianStudyRow(listRow, snapshot).report, { final: false, rs: null }, label);
-  // Only a signed head in the snapshot itself is final: its version and action, not the worklist row's.
-  for (const [label, over, rs] of [['version as text', { version: '3' }, null], ['no Report row', { version: 0, action: null }, null],
-    ['head not a sign-off', { action: 'save' }, null], ['head a discarded row', { action: 'discarded' }, null],
-    ['head missing', { action: undefined }, null], ['rs H over a signed head', { rs: 'H' }, 'H']])
-    assert.deepEqual(P.clinicianStudyRow(worklistRow(), snap(over)).report, { final: false, rs }, label);
+  // A body read does not claim an unsigned or missing head was approved.
+  for (const over of [{ version: '3' }, { version: 0, action: null }, { action: 'save' },
+    { action: 'discarded' }, { action: undefined }, { rs: 'H' }]) {
+    const report = P.clinicianStudyRow(worklistRow(), snap(over)).report;
+    assert.equal(report.final, false);
+    assert.equal(report.rs, over.rs ?? 'A');
+    assert.equal(report.findings, '');
+  }
 });
 
 test('list answer: narrowed rows, serverTime and counts-only pagination; engineering surfaces dropped', () => {

@@ -9,6 +9,7 @@ No browser, server, network or third-party Python dependency is used.
 from collections import Counter
 from html.parser import HTMLParser
 import json
+import subprocess
 from pathlib import Path
 import re
 import sys
@@ -26,8 +27,7 @@ VERIFY_TABLES = (
     FIXTURES / 'verified-statutes.md',
     FIXTURES / 'verified-statutes-addendum-20261006.md',
 )
-MISSING_LICENSE = '라이선스 파일 없음 — 배포 전 확인'
-MISSING_LICENSE_PACKAGES = {('busboy', '1.6.0'), ('streamsearch', '1.1.0')}
+
 
 
 def normalized(value):
@@ -205,26 +205,6 @@ def verified_citations():
     return verification_citations(VERIFY_TABLES[0]) | verification_citations(VERIFY_TABLES[1], 9)
 
 
-def dependency_rows(root):
-    manifest = json.loads((root / 'api/package.json').read_text(encoding='utf-8'))
-    lock = json.loads((root / 'api/package-lock.json').read_text(encoding='utf-8'))
-    for section in ('dependencies', 'devDependencies'):
-        if manifest.get(section, {}) != lock['packages'][''].get(section, {}):
-            raise AssertionError('manifest/lock mismatch: ' + section)
-    rows = []
-    for path, item in lock['packages'].items():
-        if not path:
-            continue
-        name = path.split('node_modules/')[-1]
-        direct = path == 'node_modules/' + name and any(name in manifest.get(key, {}) for key in ('dependencies', 'devDependencies'))
-        scope = ('직접 · ' if direct else '간접 · ') + ('개발' if item.get('dev') else '실행')
-        license_name = item.get('license')
-        if not license_name:
-            if (name, item['version']) not in MISSING_LICENSE_PACKAGES:
-                raise AssertionError('라이선스 원문 확인이 필요한 새 패키지: ' + path)
-            license_name = MISSING_LICENSE
-        rows.append((name, item['version'], license_name, scope, path))
-    return Counter(rows)
 
 
 class LegalPagesTest(unittest.TestCase):
@@ -256,6 +236,9 @@ class LegalPagesTest(unittest.TestCase):
 
     def test_all_draft_headings_and_sentences_are_preserved(self):
         for name, requirements in CONTRACT['pages'].items():
+            # CD-02 replaces the hand-authored notice contract with declaration-derived behavior.
+            if name == 'open-source-notices.html':
+                continue
             doc = self.docs[name]
             headings = [normalized(node.text()) for node in doc.root.all('h2', 'h3', 'h4', 'h5', 'h6')]
             self.assertEqual(Counter(headings), Counter(requirements['headings']), name)
@@ -264,18 +247,11 @@ class LegalPagesTest(unittest.TestCase):
             expected = Counter(normalized(text) for text in (
                 requirements['text'] + requirements.get('presentation_text', [])
                 + CONTRACT['common_presentation_text']))
-            if name == 'open-source-notices.html':
-                expected.update(requirements['inventory_headers'])
-                for row, count in dependency_rows(ROOT).items():
-                    for cell in row:
-                        expected[cell] += count
             # Equality detects additions, alterations and duplicate statements,
             # not just whether an approved sentence occurs somewhere on the page.
             with self.subTest(page=name):
                 self.assertEqual(actual, expected, name)
             allowed_captions = set(requirements['headings'])
-            if name == 'open-source-notices.html':
-                allowed_captions.add(f'API 잠금 파일의 구성요소 {sum(dependency_rows(ROOT).values())}개')
             for caption in main.all('caption'):
                 self.assertIn(normalized(caption.text()), allowed_captions, name)
 
@@ -309,21 +285,43 @@ class LegalPagesTest(unittest.TestCase):
             counts[name] = len(observed)
         print('business_placeholders=' + str(sum(counts.values())))
 
-    def test_open_source_components_match_manifest_and_lock(self):
-        doc = self.docs['open-source-notices.html']
-        actual = Counter(tuple(normalized(cell.text()) for cell in row.all('td')) for row in doc.root.all('tr') if list(row.all('td')))
-        expected = dependency_rows(ROOT)
-        self.assertEqual(actual, expected)
-        marked = {(row[0], row[1]) for row in actual if row[2] == MISSING_LICENSE}
-        self.assertEqual(marked, MISSING_LICENSE_PACKAGES)
-        for name, version in MISSING_LICENSE_PACKAGES:
-            self.assertEqual([row[2] for row in actual if row[:2] == (name, version)], [MISSING_LICENSE])
-        print('dependency_rows=' + str(sum(expected.values())))
+    def test_open_source_inventory_matches_inputs_and_rendered_components(self):
+        inventory = json.loads((PAGES / 'licenses/components.json').read_text(encoding='utf-8'))
+        rows = inventory['components']
+        lock = json.loads((ROOT / 'api/package-lock.json').read_text(encoding='utf-8'))
+        manifest = json.loads((ROOT / 'api/package.json').read_text(encoding='utf-8'))
+        for section in ('dependencies', 'devDependencies'):
+            self.assertEqual(manifest.get(section, {}), lock['packages'][''].get(section, {}),
+                             'manifest/lock mismatch: ' + section)
         # New browser manifests or vendored trees require explicit inventory; no silent omission.
         for path in (ROOT / 'worklist-v0').rglob('*'):
             if path.is_file():
                 self.assertNotEqual(path.name, 'package.json', '새 브라우저 의존성을 고지에 반영해야 합니다')
                 self.assertFalse({'vendor', 'vendored', 'node_modules'} & set(path.parts), str(path))
+        expected_api = Counter((item.get('name') or path.rsplit('node_modules/', 1)[-1], item['version'])
+                               for path, item in lock['packages'].items() if path)
+        self.assertEqual(Counter((r['name'],r['version']) for r in rows if r['section']=='API'), expected_api)
+        requirements = (ROOT / 'gateway/agent/requirements.txt').read_text().splitlines()
+        self.assertEqual(Counter((r['name'],r['version']) for r in rows if r['section']=='Gateway' and r['scope']=='Declared dependency'),
+                         Counter(tuple(line.split('==')) for line in requirements if line.strip() and not line.startswith('#')))
+        doc = self.docs['open-source-notices.html']
+        rendered = Counter(tuple(normalized(c.text()) for c in row.all('td'))[:2]
+                           for row in doc.root.all('tr') if list(row.all('td')))
+        self.assertEqual(rendered, Counter((r['name'],r['version']) for r in rows))
+        self.assertEqual(sum(rendered.values()), len(rows))
+        headings = {normalized(h.text()) for h in doc.root.all('h2')}
+        self.assertTrue({'API', 'Gateway', 'OHIF', 'Containers', 'ASR', 'Source Offer'} <= headings)
+        self.assertEqual(inventory['counts'], dict(Counter(r['section'] for r in rows)))
+        for row in rows:
+            for original in row['originals']:
+                self.assertTrue((PAGES / 'licenses' / original['path']).is_file())
+        marked_rows = sum('원문 미확보' in row.text() for row in doc.root.all('tr') if list(row.all('td')))
+        self.assertEqual(marked_rows, sum(bool(r['missing']) for r in rows))
+
+    def test_generator_fixed_inputs_and_reproducibility(self):
+        result = subprocess.run([sys.executable, '-B', str(ROOT / 'scripts/test_open_source_notices.py')],
+                                cwd=ROOT, capture_output=True, text=True, encoding='utf-8', timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_every_statute_citation_exists_in_verified_table(self):
         verified = verified_citations()
@@ -343,6 +341,9 @@ class LegalPagesTest(unittest.TestCase):
             for node in doc.root.all('a', 'link', 'img', 'script'):
                 value = node.attrs.get('href', node.attrs.get('src', ''))
                 parsed = urlsplit(value)
+                if name == 'open-source-notices.html' and parsed.scheme in ('https', 'http'):
+                    self.assertTrue(parsed.netloc, value)
+                    continue
                 self.assertFalse(parsed.scheme or parsed.netloc, value)
                 self.assertTrue(value, name)
                 if parsed.path.startswith('/kin-brand/'):

@@ -1,0 +1,134 @@
+{
+  "base_commit": "fixture-commit",
+  "irregular_notation": [
+    {
+      "reason": "test-by-file",
+      "source": "README.md:7",
+      "text": "REQ-FX-FILE -> RISK-FX-FILE -> `fx_file_test.cjs`: 시험 id 대신 파일 이름."
+    },
+    {
+      "reason": "test-not-id",
+      "source": "README.md:8",
+      "text": "REQ-FX-DELTA → RISK-FX-DELTA → **FX-DELTA-NAME**: 시험 id도 파일도 아닌 비정형 줄."
+    },
+    {
+      "reason": "abbreviated-label",
+      "source": "README.md:14",
+      "text": "REQ-FX-SHORT / FX-CASE-LABEL remains open: 축약 표기, 사례 이름으로 id를 만들지 않는다."
+    },
+    {
+      "reason": "no-chain",
+      "source": "docs/README.md:4",
+      "text": "U5S-REQ-01 -> U5S-RISK-01 -> U5S-TEST-01"
+    },
+    {
+      "reason": "missing-test",
+      "source": "tests/fx_beta_test.cjs:2",
+      "text": "// REQ-FX-SRC -> RISK-FX-SRC"
+    },
+    {
+      "reason": "table-test-not-id",
+      "source": "tests/fx_cases.json:20",
+      "text": "\"test\": \"FX-CASE-3\""
+    }
+  ],
+  "req_without_test": [
+    {
+      "req": "REQ-FX-CSV-ONLY",
+      "sources": [
+        "requirements.csv:3"
+      ]
+    },
+    {
+      "req": "REQ-FX-DELTA",
+      "sources": [
+        "README.md:8"
+      ]
+    },
+    {
+      "req": "REQ-FX-ORPHAN",
+      "sources": [
+        "README.md:13"
+      ]
+    },
+    {
+      "req": "REQ-FX-SHORT",
+      "sources": [
+        "README.md:14"
+      ]
+    }
+  ],
+  "run_id": "fixture-run-7",
+  "statement": "이 표는 저장소의 REQ/RISK/TEST 표기와 CI 명령·실행 기록을 모은 실행 기록이다. 검증·유효성 확인(V&V) 완료를 뜻하지 않으며, 같은 CI를 다시 실행한 결과도 V&V 완료로 표시하지 않는다.",
+  "test_ci_unverified": [
+    {
+      "ci_job": "ci-paths:fx-select",
+      "in_ci": "selection-only",
+      "reason": "selection-only",
+      "test_file": "tests/fx_beta_test.cjs",
+      "test_id": ""
+    },
+    {
+      "ci_job": "ci-paths:fx-select",
+      "in_ci": "selection-only",
+      "reason": "selection-only",
+      "test_file": "tests/fx_beta_test.cjs",
+      "test_id": "TEST-FX-BETA"
+    },
+    {
+      "ci_job": "ci-paths:fx-select",
+      "in_ci": "selection-only",
+      "reason": "selection-only",
+      "test_file": "tests/fx_print_mutants.py",
+      "test_id": "TEST-FX-MUTANTS"
+    }
+  ],
+  "test_not_in_ci": [
+    {
+      "ci_job": "",
+      "in_ci": "no",
+      "reason": "no",
+      "test_file": "tests/fx_idle_live.py",
+      "test_id": "TEST-FX-IDLE"
+    },
+    {
+      "ci_job": "",
+      "in_ci": "no",
+      "reason": "no-test-file",
+      "test_file": "",
+      "test_id": "TEST-FX-MDONLY"
+    },
+    {
+      "ci_job": "",
+      "in_ci": "no",
+      "reason": "no",
+      "test_file": "tests/fx_unref_test.py",
+      "test_id": "TEST-FX-UNREF"
+    },
+    {
+      "ci_job": "",
+      "in_ci": "no",
+      "reason": "no-test-file",
+      "test_file": "",
+      "test_id": "TEST-FX-ZETA"
+    }
+  ],
+  "test_without_req": [
+    {
+      "files": [],
+      "test_id": "TEST-FX-MDONLY"
+    },
+    {
+      "files": [
+        "tests/fx_print_mutants.py"
+      ],
+      "test_id": "TEST-FX-MUTANTS"
+    },
+    {
+      "files": [
+        "tests/fx_unref_test.py"
+      ],
+      "test_id": "TEST-FX-UNREF"
+    }
+  ]
+}

@@ -956,7 +956,13 @@ class StudyPanelSizeDOM(unittest.TestCase):
                 page.get_by_role('separator', name='Image and Report Size', exact=True).focus()
                 page.keyboard.press('End')
                 settle(page)
-                page.locator('#b-save').scroll_into_view_if_needed()
+                # Provisional until Minhoon confirms (11-03 commander): at 1366x768 the report row may start below
+                # the first screen. The reader's wheel over the report column brings Save whole into view (review fix13
+                # F1), judged as the served tests judge their reveal: only report-column scrollers moved, not the page.
+                arrival = page.evaluate(dom.column_reach.READ, dom.SAVE_ROW)
+                revealed, why = dom.wheel_into_view(page, '#b-save', dom.SAVE_ROW[0])
+                self.assertIsNone(why, revealed)
+                self.assertEqual([], dom.column_reach.reach_problems(arrival, revealed), 'Save is not reached by scrolling the report column')
                 closed = self.assert_report_usable(page, 'closed')
                 page.get_by_role('button', name='Study Info & Templates', exact=True).click()
                 drawer = page.get_by_role('complementary', name='Study Panel', exact=True)

@@ -12,7 +12,7 @@
  * redirect error, 5 s to body EOF, size caps, fatal UTF-8 then JSON). Upstream bodies and tag values never reach an
  * error, a log line or an audit detail. Claim rows hold patient identity values; nothing here returns them to a caller.
  */
-import { HttpException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
+import { HttpException, Inject, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { PrismaService } from './prisma.service';
@@ -20,6 +20,10 @@ import type { DicomReadResult } from './dicom-part10-reader';
 import { DICOM_READER_MESSAGES } from './dicom-part10-reader';
 import { birthKey, nameKey, sexKey } from './study-identity';
 import { institutionValues } from './institution-values';
+import { EMR_RECORD_PORT, EmrRecordPort } from './emr-runtime/record-port';
+import type { RecordMutation } from './emr-runtime/store';
+import type { RequestFacts } from './emr-runtime/request-context';
+import { studyPatientLink } from './emr-clinical/routes';
 
 export const IMPORT_MIGRATION = '20261015013945_import_operation';
 /** Files of one import operation are indexed 0-99 (a screen selects at most 100). */
@@ -125,6 +129,8 @@ export interface ImportFileEntry {
   expectedStudyUid: string | null; outcome: ImportOutcome; code: ImportCode | null;
   identity: null | 'new-study' | 'matched' | 'not_comparable'; writeDisposition: WriteDisposition | null; at: string;
   attempts: ImportAttempt[];
+  /** Original import facts survive retries and administrator recovery in the existing JSON row. */
+  access?: RequestFacts;
 }
 
 /** The file facts of an accepted read: what the gate binds and compares. */
@@ -140,6 +146,7 @@ export type FilePrecheck = AcceptedFile | RefusedFile;
 export interface ImportRequest {
   owner: ImportOwner; operationId: string; index: number; expectedStudyUid: string | null;
   bytes: Buffer; sha256: string; precheck: FilePrecheck;
+  facts: RequestFacts;
   /** Contract 3: the current role, institution and StudyAccess immediately before the first Orthanc write; throws the refusal. */
   recheck: () => Promise<void>;
 }
@@ -268,7 +275,8 @@ function checkAttempt(a: unknown, generation: number, last: boolean): a is Impor
 }
 
 function checkEntry(e: unknown, seen: { indexes: Set<number>; attempts: Set<string> }): e is ImportFileEntry {
-  if (!exactKeys(e, ENTRY_KEYS)) return false;
+  if (!exactKeys(e, ENTRY_KEYS) && !exactKeys(e, [...ENTRY_KEYS, 'access'])) return false;
+  if (e.access !== undefined && (!e.access?.actor || !Array.isArray(e.access.roles) || !e.access.binding)) return false;
   if (!count(e.index, IMPORT_FILE_SLOTS - 1) || seen.indexes.has(e.index) || !(typeof e.sha256 === 'string' && HEX64.test(e.sha256))
       || !count(e.bytes, Number.MAX_SAFE_INTEGER) || !(e.expectedStudyUid === null || uidText(e.expectedStudyUid))
       || !outcomeWithCode(e.outcome, e.code) || !(e.identity === null || oneOf(e.identity, ['new-study', 'matched', 'not_comparable']))
@@ -573,7 +581,9 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
   readonly bootId = randomUUID();
   private stopping = false;
 
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly transactionRecords = new WeakMap<object, RecordMutation>();
+  constructor(private readonly prisma: PrismaService,
+    @Inject(EMR_RECORD_PORT) private readonly records: EmrRecordPort) {}
 
   onModuleInit() {
     // Startup reconciliation runs beside the server, never in front of it: a slow Orthanc must not hold the API down.
@@ -879,7 +889,7 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
   private async autoRecheck(r: ImportRequest, attempt: ImportAttempt, token: string): Promise<ImportAnswer> {
     const file = r.precheck as AcceptedFile;
     const reading = await this.readSop(file, r.bytes.length, r.sha256, null);
-    return this.storage(() => this.write(async tx => {
+    return this.storage(() => this.importWrite(async tx => {
       const claims = await this.lockClaims(tx, [studyKey(file.studyUid), sopKey(file.sopUid)]);
       const op = await this.lockOperation(tx, r.operationId);
       const now = await this.clock(tx);
@@ -931,7 +941,7 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
     transport: ImportAttempt['transport']; disposition: WriteDisposition | null; release: boolean; from: string[]; phase?: 'unknown' }): Promise<ImportAnswer> {
     const file = r.precheck as AcceptedFile;
     const said = { institutionNameMismatch: file.institutionNameMismatch };
-    return this.write(async tx => {
+    return (change.outcome === 'stored' ? this.importWrite.bind(this) : this.write.bind(this))(async tx => {
       const claims = await this.lockClaims(tx, [studyKey(file.studyUid), sopKey(file.sopUid)]);
       const op = await this.lockOperation(tx, r.operationId);
       const now = await this.clock(tx);
@@ -1178,7 +1188,7 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
       if (!taken) return;
       const reading = await this.readSop({ studyUid: seen.studyUid, seriesUid: seen.seriesUid, sopUid: seen.sopUid, patientId: taken.patientId } as AcceptedFile,
         seen.bytes, seen.sha256, null);
-      await this.write(async tx => {
+      await this.importWrite(async tx => {
         const claims = await this.lockClaims(tx, keys);
         const locked = await this.lockOperation(tx, operationId);
         const now = await this.clock(tx);
@@ -1335,7 +1345,7 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
       write = true) => {
       // The Orthanc re-read took time: the reach is read again for the policy in force now, outside the lock (U4BB3-03).
       await inReach(seen.studyUid!);
-      return this.write(async tx => {
+      return (requested.unknown && reading.kind === 'exact' ? this.importWrite.bind(this) : this.write.bind(this))(async tx => {
         const claims = await this.lockClaims(tx, keys);
         const locked = await this.lockOperation(tx, operationId);
         const results: ImportFileEntry[] = clone(locked.results);
@@ -1447,7 +1457,8 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
   private newEntry(r: ImportRequest, file: { studyUid: string; seriesUid: string; sopUid: string } | null, now: Date): ImportFileEntry {
     return { index: r.index, sha256: r.sha256, bytes: r.bytes.length, studyUid: file?.studyUid ?? null, seriesUid: file?.seriesUid ?? null,
       sopUid: file?.sopUid ?? null, expectedStudyUid: r.expectedStudyUid, outcome: 'unconfirmed', code: 'IMPORT_UNCONFIRMED', identity: null,
-      writeDisposition: null, at: iso(now), attempts: [] };
+      writeDisposition: null, at: iso(now), attempts: [],
+      access: clone(r.facts) };
   }
 
   private newAttempt(entry: ImportFileEntry, actor: string, now: Date): ImportAttempt {
@@ -1528,6 +1539,30 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
         studyUid: entry.studyUid, seriesUid: entry.seriesUid, sopUid: entry.sopUid, sha256: entry.sha256, bytes: entry.bytes,
         outcome: entry.outcome, code: entry.code, writeDisposition: entry.writeDisposition, transport: attempt?.transport ?? null, ...signal,
         at: iso(now) }) } });
+    // An already-present object is not a new entry. Recovery records the original importer, never its administrator.
+    if (entry.outcome === 'stored') {
+      const facts = entry.access;
+      const claim = await tx.importOperation.findUnique({ where: { claimKey: studyKey(entry.studyUid) } });
+      if ((!facts && (!op?.ownerIssuer || !op?.ownerSubject)) || !claim?.claim?.patientId) throw new Error('Original import request facts unavailable');
+      const known = <T>(value: T) => ({ status: 'known' as const, value });
+      const unresolved = { status: 'unresolved' as const, reason: 'not-observed' as const };
+      // Pre-CD10 entries retained the owner but not request roles/IP; recovery must not invent those facts.
+      const actor = facts?.actor ?? { issuer: op.ownerIssuer, subject: op.ownerSubject,
+        id: (await tx.$queryRaw<any[]>`SELECT emr_access.resolve_member_identity(${op.ownerIssuer}::text, ${op.ownerSubject}::text)::text AS id`)[0].id };
+      const record = this.transactionRecords.get(tx);
+      if (!record) throw new Error('Import record transaction unavailable');
+      await record({ formatVersion: 1, surface: 'POST dicom-import', eventId: randomUUID(),
+        userId: known(actor), rolesAtTime: facts ? known(facts.roles) : { status: 'unresolved', reason: 'legacy-import-roles-not-stored' },
+        actingInstitution: known(facts?.institution ?? institutionId), managingInstitution: known(institutionId),
+        occurredAt: iso(now), trustedProxyIp: facts?.ingress ?? unresolved, cause: 'user-view', executor: 'member',
+        context: { basis: facts ? 'worklist' : 'out-of-context', studyId: entry.studyUid, relatedStudyId: null,
+          reason: facts ? null : '기존 반입 작업의 원래 소유자 계정으로 기록함; 반입 당시 역할·접속 정보는 보존되지 않음' },
+        targets: [{ kind: 'image', patientLinkSnapshot: known(studyPatientLink(institutionId, claim.claim.patientId)),
+          studyId: known(entry.studyUid), recordId: known(entry.sopUid), versionId: known(entry.sha256) }],
+        action: 'write', result: 'succeeded', requestId: facts?.requestId ?? randomUUID(),
+        auditLinkId: 'audit:' + randomUUID(), relatedEventId: null },
+      async () => ({ kind: 'ImportOperation', id: operationId, version: entry.sha256 }));
+    }
   }
 
   // ── locks and transactions ──
@@ -1576,6 +1611,19 @@ export class DicomImportGateService implements OnModuleInit, OnModuleDestroy {
   dbNow(): Promise<Date> { return this.clock(this.prisma); }
 
   /** One short transaction: lock timeout 3 s, no network inside; the work reads the clock after taking its locks. */
+  private async importWrite<T>(work: (tx: Tx) => Promise<T>): Promise<T> {
+    const records = this.records.begin();
+    try {
+      return await records.transactionWithRecords(async (tx, record) => {
+        await tx.$executeRaw`SET TRANSACTION ISOLATION LEVEL READ COMMITTED`;
+        await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+        this.transactionRecords.set(tx, record);
+        try { return await work(tx); } finally { this.transactionRecords.delete(tx); }
+      }, { maxWait: 4000, timeout: 8000 });
+    } finally { records.end(); }
+  }
+
+  /** State-only import and download writes do not reserve the access-record append lane. */
   write<T>(work: (tx: Tx) => Promise<T>): Promise<T> {
     return this.prisma.$transaction(async tx => {
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;

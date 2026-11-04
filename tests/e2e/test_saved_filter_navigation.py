@@ -151,6 +151,7 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         expect(page.locator('#edit-active-filter')).to_be_focused()
         self.quick_search(page, prefix, preserve_id=True)
         expect(page.locator('#active-filter-state')).to_have_text('Saved')
+        self.close_toolbar_groups(page)
         page.locator('#heads th[data-key="id"]').click()
         expect(page.locator('#active-filter-state')).to_have_text('Modified')
         self.open_toolbar_group(page, '#chips')

@@ -75,6 +75,9 @@ class VolumePreferencesE2E(VolumeSyncE2E):
   self.open_toolbar_group(other,'#reading-appearance-open')
   other.locator('#reading-appearance-open').click();expect(other.locator('#appearance-account-save')).to_be_enabled();other.locator('#appearance-account-load').click();expect(other.locator('#appearance-account-status')).to_contain_text('계정의 표시 설정을 불러왔습니다')
   self.assertTrue(f.get_by_label('Show MPR Windowing',exact=True).is_checked());other.locator('#reading-appearance-close').click();self.tools(f);expect(f.get_by_label('Show MPR Windowing',exact=True)).not_to_be_checked();expect(f.get_by_label('MPR left mouse button',exact=True)).to_have_value('StackScroll');expect(f.get_by_role('checkbox',name='Sync MPR Zoom',exact=True)).to_be_checked()
+  # Loading the saved closed dock and reopening Tools changes the native canvas height twice.
+  # Wait for that resize, as mpr() does on entry, before comparing the exact retained pixels.
+  f.wait_for_function("""()=>[...services.viewportGridService.getState().viewports.keys()].every(id=>{const c=services.cornerstoneViewportService.getCornerstoneViewport(id).getCanvas();return c.width===Math.floor(c.clientWidth*devicePixelRatio)&&c.height===Math.floor(c.clientHeight*devicePixelRatio)})""")
   self.preserved_volume(before,self.volume_state(f));expect(other.locator('#findings')).to_have_value('KEEP MPR ACCOUNT REPORT');self.assertEqual(document_request(other, "GET", self.stack.api+'/reading-appearance').json(),stored)
   expect(f.get_by_label('MPR Progressive Rendering',exact=True)).to_be_checked()
   key='kin-mpr-preferences:v1:'+json.dumps(stored['owner'],separators=(',',':'),ensure_ascii=False)
@@ -191,6 +194,29 @@ class VolumePreferencesE2E(VolumeSyncE2E):
   with self.subTest('a rebind and a second retirement still restore the toolbar choice'):self.assertEqual(original['tools'],second['tools'])
   with self.subTest('retirement raises no CORNERSTONE_ELEMENT_DISABLED listener error'):self.assertEqual([],disabled)
   expect(work.locator('#findings')).to_have_value('KEEP HP BINDING REPORT');self.assertEqual(self.originals(),sources)
+ def test_properties_19_dock_and_panel_geometry_in_one_frame_keep_mpr_zoom_and_pixels(self):
+  # A Reading Appearance account load (06) closes the image dock and re-applies the page's panel geometry. When both land in
+  # one frame, the page's redraw of the image frame runs while the planes change size and ahead of the viewer's own queued
+  # resize; CI #334/#345 and 9 of 30 VM repetitions of 06 left all three planes at 1.5197x zoom. Here one task closes the
+  # dock and moves a Related panel separator, so that order is the only one: the reader's zoom holds with the dock closed,
+  # and every pixel and camera is the reader's again once the dock is back.
+  from workspace_roaming_support import cleanup_workspace
+  self.addCleanup(cleanup_workspace,self.stack)
+  a,p,v=self.starting();w=self.login();f=self.workspace(w,a,count=1);self.tools(f);self.mpr(f);self.choose_volume(w,f,0);w.locator('#findings').fill('KEEP MPR RESIZE REPORT')
+  f.evaluate('()=>{window.prefPlanes=()=>[...services.viewportGridService.getState().viewports.keys()].map(id=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(id),c=v.getCanvas();return {zoom:v.getZoom(),height:c.height,settled:c.width===Math.floor(c.clientWidth*devicePixelRatio)&&c.height===Math.floor(c.clientHeight*devicePixelRatio)}})}')
+  before=self.volume_state(f);opened=f.evaluate('()=>prefPlanes()');self.assertTrue(all(x['settled'] for x in opened))
+  moved=w.evaluate('''()=>{let moved=false;
+   for(const id of ['#reading-resize-prior','#reading-resize-related'])for(const key of ['ArrowDown','ArrowUp']){
+    const separator=document.querySelector(id),now=separator.getAttribute('aria-valuenow');if(moved)break;
+    separator.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true}));moved=separator.getAttribute('aria-valuenow')!==now;}
+   document.querySelector('#reading-frame').contentDocument.querySelector('#kin-workspace-dock nav button[aria-controls="kin-viewer-layout"][aria-expanded="true"]').click();
+   return moved}''')
+  self.assertTrue(moved,'no Related panel separator could move')
+  f.wait_for_function('opened=>!document.body.classList.contains("kin-dock-open")&&prefPlanes().every((x,i)=>x.settled&&x.height>opened[i].height)',arg=opened)
+  self.volume_state(f);closed=f.evaluate('()=>prefPlanes()')
+  for old,new in zip(opened,closed):self.assertAlmostEqual(old['zoom'],new['zoom'],delta=1e-9,msg='zoom with the dock closed')
+  self.tools(f);f.wait_for_function('opened=>prefPlanes().every((x,i)=>x.settled&&x.height===opened[i].height)',arg=opened)
+  self.preserved_volume(before,self.volume_state(f));expect(w.locator('#findings')).to_have_value('KEEP MPR RESIZE REPORT')
 
 
 # Declared order without inherited sync/display cases; the loader applies unittest's own -k matching,

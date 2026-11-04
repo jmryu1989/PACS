@@ -641,7 +641,11 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
   closeButton.onclick=userClose;dialog.addEventListener('cancel',e=>{e.preventDefault();userClose();});
   // Keep browser input/Tab/Escape behavior while isolating native viewer hotkeys.
   for(const name of ['keydown','keyup','keypress'])dialog.addEventListener(name,e=>e.stopPropagation(),true);
-  const observer=new ResizeObserver(()=>{const op=operation;if(op?.ready&&!contextLost(op)&&current(op)){try{op.engine.resize(true,true);}catch(error){fail(op,error);}}});observer.observe(canvasHost);
+  // The MIP display shares the MPR planes' engine, and a window resize reaches this observer in the frame that resizes
+  // the planes too. OHIF's own resize keeps each plane's zoom relative to its new size; a bare engine resize ahead of
+  // OHIF's queued one kept their absolute cameras and left the planes behind the dialog at 0.8x.
+  const resizeEngine=engine=>{const service=window.services?.cornerstoneViewportService;if(typeof service?.performResize==='function'&&service.getRenderingEngine?.()===engine)service.performResize();else engine.resize(true,true);};
+  const observer=new ResizeObserver(()=>{const op=operation;if(op?.ready&&!contextLost(op)&&current(op)){try{resizeEngine(op.engine);}catch(error){fail(op,error);}}});observer.observe(canvasHost);
   const timer=setInterval(()=>{const op=operation;if(!op||contextLost(op))return;if(!current(op)){fail(op,Error('원본·선택 또는 계정이 변경되었습니다.'));return;}if(op.ready&&!op.checking&&Date.now()-op.checkedAt>15000){op.checking=true;op.accessTimer=setTimeout(()=>fail(op,Error('MIP 접근 확인 시간이 지났습니다.')),15000);access(op).catch(error=>fail(op,error)).finally(()=>{op.checking=false;clearTimeout(op.accessTimer);});}refreshJob(op);},250);
   // The MIP Viewer Job capability viewer-volume-orientation.js lends to viewer-volume-job.js as window.kinVolumeMipJob.
   const job={

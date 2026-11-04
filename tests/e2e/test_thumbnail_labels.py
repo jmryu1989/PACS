@@ -46,6 +46,7 @@ class ThumbnailLabelsE2E(ThumbnailSeriesE2E):
             number = str(source['00200011']['Value'][0])
             description = source['0008103E']['Value'][0]
             card = self.label(page, index, index+1, number, description, rep['series'])
+            card.locator('.thumb-description').scroll_into_view_if_needed()
             expect(card.locator('.thumb-number')).to_be_in_viewport()
             expect(card.locator('.thumb-description')).to_be_in_viewport()
             expect(card.locator('img')).to_have_attribute('alt', f'항목 {index+1} · 번호 {number} · {description}')

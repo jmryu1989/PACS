@@ -7,8 +7,8 @@ class AuditContractFilter implements ExceptionFilter {
   catch(error: ContractError, host: ArgumentsHost) {
     const denied = ['AuditorNotDesignated','AuditScopeNotGranted','AuditorDesignationAuthorityRequired'];
     const status = denied.includes(error.code) ? 403 :
-      ['IssuanceNotFound','RequestNotFound'].includes(error.code) ? 404 :
-      ['AuditRequestInvalid','InvestigationQueryRefused','DisclosureRequestRefused','AuditIdentityUnknown'].includes(error.code) ? 400 :
+      ['IssuanceNotFound','RequestNotFound','IncidentNotFound'].includes(error.code) ? 404 :
+      ['AuditRequestInvalid','InvestigationQueryRefused','DisclosureRequestRefused','RightsRequestRefused','AuditIdentityUnknown','IncidentResponseRefused','IncidentDeterminationRefused'].includes(error.code) ? 400 :
       error.code === 'InvestigationTimedOut' ? 503 : 409;
     const message = error.code === 'InvestigationTimedOut' ? '조회 시간이 초과되었습니다. 기간이나 조회 조건을 좁혀 다시 시도하세요.' :
       error.code === 'AuditIdentityUnknown' ? '등록된 계정이 없습니다. issuer와 subject를 확인하고 대상자가 한 번 로그인한 뒤 다시 지정하세요.' :
@@ -22,16 +22,50 @@ class AuditContractFilter implements ExceptionFilter {
 @UseFilters(AuditContractFilter)
 export class EmrAuditController {
   constructor(private readonly audit: EmrAuditService) {}
+  @Post('incidents') @HttpCode(200)
+  registerIncident(@Req() req: any, @Body() body: unknown) { return this.audit.registerIncident(req, body); }
+  @Get('incidents')
+  listIncidents(@Req() req: any) { return this.audit.listIncidents(req); }
+  @Get('incidents/:id')
+  readIncident(@Req() req: any, @Param('id') id: string) { return this.audit.incidentAction(req, id, 'read'); }
+  @Post('incidents/:id/findings') @HttpCode(200)
+  incidentFinding(@Req() req: any, @Param('id') id: string, @Body() body: unknown) { return this.audit.incidentAction(req, id, 'finding', body); }
+  @Post('incidents/:id/notices') @HttpCode(200)
+  incidentNotice(@Req() req: any, @Param('id') id: string, @Body() body: unknown) { return this.audit.incidentAction(req, id, 'notice', body); }
+  @Post('incidents/:id/close') @HttpCode(200)
+  closeIncident(@Req() req: any, @Param('id') id: string, @Body() body: unknown) { return this.audit.incidentAction(req, id, 'close', body); }
+  @Get('incidents/:id/drafts/:form')
+  incidentDraft(@Req() req: any, @Param('id') id: string, @Param('form') form: string) { return this.audit.incidentAction(req, id, 'draft', form); }
+  @Post('rights-requests') @HttpCode(200)
+  receiveRights(@Req() req: any, @Body() body: unknown) { return this.audit.receiveRights(req, body); }
+  @Get('rights-requests')
+  listRights(@Req() req: any) { return this.audit.listRights(req); }
+  @Get('rights-requests/:id')
+  readRights(@Req() req: any, @Param('id') id: string) { return this.audit.rightsAction(req, id, 'read'); }
+  @Post('rights-requests/:id/decide') @HttpCode(200)
+  decideRights(@Req() req: any, @Param('id') id: string) { return this.audit.rightsAction(req, id, 'decide'); }
+  @Post('rights-requests/:id/notify') @HttpCode(200)
+  notifyRights(@Req() req: any, @Param('id') id: string, @Body() body: unknown) { return this.audit.rightsAction(req, id, 'notify', body); }
   @Post('roster/:grantId') @HttpCode(200)
   roster(@Req() req: any, @Param('grantId') id: string, @Body() body: unknown) { return this.audit.changeRoster(req, id, body); }
   @Post('investigations') @HttpCode(200)
   investigate(@Req() req: any, @Body() body: unknown) { return this.audit.investigate(req, body); }
   @Post('exports') @HttpCode(200)
   export(@Req() req: any, @Body() body: unknown) { return this.audit.investigate(req, body, 'export'); }
+  @Get('inspections')
+  inspectionMonths(@Req() req: any) { return this.audit.inspectionMonths(req); }
+  @Get('inspections/:month')
+  inspection(@Req() req: any, @Param('month') month: string) { return this.audit.inspection(req, month); }
+  @Post('inspections/:month/report') @HttpCode(200)
+  inspectionReport(@Req() req: any, @Param('month') month: string) { return this.audit.inspection(req, month, true); }
+  @Post('inspections/:month/steps') @HttpCode(200)
+  inspectionStep(@Req() req: any, @Param('month') month: string, @Body() body: unknown) { return this.audit.inspectionStep(req, month, body); }
   @Post('requests') @HttpCode(200)
   register(@Req() req: any, @Body() body: unknown) { return this.audit.register(req, body); }
   @Post('issuances') @HttpCode(200)
   prepare(@Req() req: any, @Body() body: unknown) { return this.audit.prepare(req, body); }
+  @Get('issuances/:id')
+  issuance(@Req() req: any, @Param('id') id: string) { return this.audit.readIssuance(req, id); }
   @Post('issuances/:id/issue') @HttpCode(200)
   issue(@Req() req: any, @Param('id') id: string) { return this.audit.issue(req, id); }
   @Post('issuances/:id/delivery') @HttpCode(200)

@@ -40,6 +40,7 @@ class ViewerWindowsE2E(ViewerOpeningE2E):
     def limit(self, p, count):
         self.settings(p, 'window', False)
         self.close_settings(p)
+        self.close_toolbar_groups(p)
         # Real persisted preference from a pre-U1 browser; normal opening must
         # ignore its window count, without losing the other opening choices.
         p.evaluate('''count => {
@@ -103,6 +104,7 @@ class ViewerWindowsE2E(ViewerOpeningE2E):
         expect(p.locator('.viewer-window-row')).to_have_count(1)
         self.assertTrue(first.is_closed())
         p.locator('#viewer-windows-done').click()
+        self.close_toolbar_groups(p)
         self.choose(p, c)
         p.locator('#m-filmbox').click()
         second.wait_for_url('**StudyInstanceUIDs=' + c.uid + '**')
@@ -113,6 +115,7 @@ class ViewerWindowsE2E(ViewerOpeningE2E):
         expect(p.locator('.viewer-window-row')).to_have_count(1)
         self.capture(p, 'windows-limit')
         p.locator('#viewer-windows-done').click()
+        self.close_toolbar_groups(p)
         self.choose(p, a)
         p.locator('#m-filmbox').click()
         second.wait_for_url('**StudyInstanceUIDs=' + a.uid + '**')
@@ -179,6 +182,7 @@ class ViewerWindowsE2E(ViewerOpeningE2E):
         self.assertFalse(first.is_closed())
         expect(first.locator('#tech-note-text')).to_have_value('KEEP UNSAVED TECH NOTE')
         p.locator('#viewer-windows-done').click()
+        self.close_toolbar_groups(p)
         self.choose(p, b)
         p.locator('#m-filmbox').click()
         expect(p.locator('#toast')).to_contain_text('저장·복원 또는 상태 확인')

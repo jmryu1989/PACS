@@ -19,14 +19,18 @@ export interface RouteContract {
  * Connect transfer routes manage requests/bases; actual delivery belongs to EXTERNAL_SURFACES.
  */
 const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
+  { kinds: ['access-audit'], operation: 'read', causes: ['user-view'],
+    routes: ['GET emr-audit/incidents', 'GET emr-audit/incidents/:id', 'GET emr-audit/incidents/:id/drafts/:form', 'GET emr-audit/inspections', 'GET emr-audit/inspections/:month'] },
+  { kinds: ['access-audit'], operation: 'write', causes: ['user-view'],
+    routes: ['POST emr-audit/incidents', 'POST emr-audit/incidents/:id/findings', 'POST emr-audit/incidents/:id/notices', 'POST emr-audit/incidents/:id/close', 'POST emr-audit/inspections/:month/report', 'POST emr-audit/inspections/:month/steps'] },
   { kinds: ['identity-access'], operation: 'write', causes: ['user-view'],
     routes: ['POST emr-audit/roster/:grantId'] },
   { kinds: ['access-audit'], operation: 'read', causes: ['user-view'],
     routes: ['POST emr-audit/investigations', 'POST emr-audit/exports'] },
   { kinds: ['disclosure'], operation: 'write', causes: ['user-view'],
-    routes: ['POST emr-audit/requests', 'POST emr-audit/issuances', 'POST emr-audit/issuances/:id/issue', 'POST emr-audit/issuances/:id/delivery',
+    routes: ['POST emr-audit/rights-requests', 'POST emr-audit/rights-requests/:id/decide', 'POST emr-audit/rights-requests/:id/notify', 'POST emr-audit/requests', 'POST emr-audit/issuances', 'POST emr-audit/issuances/:id/issue', 'POST emr-audit/issuances/:id/delivery',
       'POST emr-audit/requests/:id/extend', 'POST emr-audit/requests/:id/resolve'] },
-  { kinds: ['disclosure'], operation: 'read', causes: ['user-view'], routes: ['GET emr-audit/requests/:id'] },
+  { kinds: ['disclosure'], operation: 'read', causes: ['user-view'], routes: ['GET emr-audit/rights-requests', 'GET emr-audit/rights-requests/:id', 'GET emr-audit/requests/:id', 'GET emr-audit/issuances/:id'] },
   { kinds: ['image', 'external-sr-seg', 'pdf', 'thumbnail', 'download', 'study-metadata'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET images/dicom-web', 'HEAD images/dicom-web'] },
   { kinds: ['system-operation'], operation: 'read', causes: ['user-view', 'service-job'],
@@ -55,7 +59,8 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['POST dicom/lookup'] },
   { kinds: ['study-metadata'], operation: 'write', causes: ['service-job'],
     routes: ['POST gateway/announce'] },
-  { kinds: ['study-metadata'], operation: 'read', causes: ['user-view', 'background-fetch'],
+  { kinds: ['image'], operation: 'write', causes: ['service-job'], routes: ['POST gateway/stow/:uid'] },
+  { kinds: ['study-metadata', 'report-head'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET clinician/studies', 'GET clinician/studies/:uid/timeline'] },
   // D1882: an administrator's confirmed sending device or InstitutionName spelling; the held studies it now decides are
   // attached by the server's own registration (StudyState owner), never by a per-study choice.
@@ -185,7 +190,7 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
   // MG-08 (D1877(2)): the image reads nginx used to send straight to Orthanc behind authz/dicom (the external surfaces
   // below) now pass the API's relay (image-relay.controller.ts): worklist previews and thumbnails, report and print pixel
   // reads, encapsulated PDFs, rendered, bulk data and whole objects, plus the plain descriptions (QIDO, metadata, tags)
-  // the relay passes without a delivery. The viewer's WADO-RS frame reads and strip previews go to the range reader
+  // the relay records as study metadata unless this session already read the study. The viewer's WADO-RS frame reads and strip previews go to the range reader
   // (the next two groups); the relay still answers them if they reach it. Read as the person looks and ahead of it, so
   // both causes are real. Admission is authzDicom's; the study delivery's pair is image-delivery-record.ts's.
   { kinds: ['image', 'external-sr-seg', 'pdf', 'thumbnail', 'key-image', 'study-metadata'], operation: 'read',

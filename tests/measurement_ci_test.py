@@ -32,6 +32,7 @@ HOST_OS_ENV = {key: os.environ[key] for key in ('SYSTEMROOT', 'USERPROFILE') if 
 # Keep the inventory independent of the workflow so removing a command fails.
 REGRESSION_SUITES = {
     'source-regressions': """
+        scripts/test_ops_soup_vulns.py
         tests/access_record_writes_test.cjs
         tests/admin_audit_attribution_test.cjs
         tests/clinician_policy_test.py
@@ -92,6 +93,7 @@ REGRESSION_SUITES = {
         tests/viewer_display_scope_dom_test.py
         tests/viewer_hanging_protocol_dom_test.py
         tests/viewer_hanging_protocol_mount_dom_test.py
+        tests/viewer_header_focus_dom_test.py
         tests/viewer_identity_fields_dom_test.py
         tests/viewer_identity_position_dom_test.py
         tests/viewer_image_text_dom_test.py
@@ -117,6 +119,11 @@ REGRESSION_SUITES = {
         tests/critical_result_sender_dom_test.py
     """.split(),
     'admin-session-dom': """
+        tests/audit_page_dom_test.py
+        tests/audit_inspection_dom_test.py
+        tests/audit_disclosure_dom_test.py
+        tests/audit_incident_dom_test.py
+        tests/audit_rights_dom_test.py
         tests/admin_audit_dom_test.py
         tests/admin_gateway_status_dom_test.py
         tests/admin_member_roles_dom_test.py
@@ -186,7 +193,7 @@ class MeasurementCiTests(unittest.TestCase):
                     args = shlex.split(re.sub(r'\$\{\{[^}]+\}\}', 'EXPRESSION', line), comments=True)
                     if '--' in args:
                         args = args[args.index('--') + 1:]
-                    actual.update(a for a in args if a.startswith('tests/')
+                    actual.update(a for a in args if a.startswith(('tests/', 'scripts/test_'))
                                   and a.endswith(('.py', '.cjs')) and a != 'tests/measurement_ci.py')
                     if 'discover' in args:
                         actual.update(p.relative_to(ci.ROOT).as_posix()
@@ -2102,7 +2109,7 @@ class MeasurementCiTests(unittest.TestCase):
         import ast
         for suite, class_name, prefix, count in (
                 ('e2e/test_volume_sync.py', 'VolumeSyncE2E', 'test_sync_', 16),
-                ('e2e/test_volume_preferences.py', 'VolumePreferencesE2E', 'test_properties_', 18)):
+                ('e2e/test_volume_preferences.py', 'VolumePreferencesE2E', 'test_properties_', 19)):
             tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
             cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
                        and node.name == class_name)

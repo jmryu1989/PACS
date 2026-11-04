@@ -164,9 +164,32 @@ async function within(promise, what, ms = 8000) {
   finally { clearTimeout(timer); }
 }
 
+// The rows a commit changes for its study, and the delegate calls that write them.
+const REPORT_ROWS = ['report', 'reportVersion', 'studyState'];
+const ROW_WRITES = new Set(['create', 'createMany', 'update', 'updateMany', 'upsert', 'delete', 'deleteMany']);
+/**
+ * U5S-REQ-03: the report change of request `label` on `uid` (its Report, ReportVersion and StudyState rows) and its
+ * audit row were written in one transaction, and that transaction committed. An audit committed in a transaction of
+ * its own is refused even if the change commits after it. Transactions that write neither (the read that judges an
+ * ended draft work, the ledger's) are not counted, whatever their number or order.
+ */
+function assertAuditInCommitTransaction(txs, label, uid) {
+  const mine = txs.filter(t => t.label === label);
+  const trace = JSON.stringify(mine);
+  const writing = models => mine.filter(t => t.writes.some(entry => models.includes(entry.model) && entry.uid === uid));
+  const [change, ...moreChanges] = writing(REPORT_ROWS);
+  assert.ok(change && !moreChanges.length, 'one transaction changes the report: ' + trace);
+  assert.deepEqual(REPORT_ROWS.filter(model => change.writes.some(entry => entry.model === model && entry.uid === uid)), REPORT_ROWS,
+    'the report change writes the report, its version and the study state: ' + trace);
+  const audits = writing(['auditLog']);
+  assert.equal(audits.length, 1, 'one transaction writes the audit row: ' + trace);
+  assert.equal(audits[0], change, 'the audit row is written in the transaction of the report change: ' + trace);
+  assert.equal(change.committed, true, 'the transaction of the report change and its audit committed: ' + trace);
+}
+
 async function world() {
   const base = await database();
-  const w = { base, gates: [], faults: [], points: [], open: 0 };
+  const w = { base, gates: [], faults: [], points: [], txs: [], open: 0 };
   for(const p of [A,B,C,ADMIN,OTHER_ADMIN,REVIEWER]) await base.memberRights.upsert({where:{sub:p.sub},update:{},create:{
     sub:p.sub,username:p.actor,email:p.actor,name:p.actor,emailVerified:true,approved:true,suspended:false,institution:p.institution,roles:p.roles}});
   /** Holds the request `label` at `point` (prepare | commit) until released; `fault` makes its next audit write throw. */
@@ -184,33 +207,53 @@ async function world() {
     const n = w.faults.findIndex(f => f.label === label && f.point === point);
     if (n >= 0) { const [fault] = w.faults.splice(n, 1); throw fault.error; }
   }
-  const view = tx => new Proxy({}, { get(_t, key) {
+  // A write is entered in the record of the transaction that made it, once it succeeded: the study's report rows and its
+  // audit rows, each with the study UID it names (D10 reads which transaction changed the report and which wrote the audit).
+  const written = (record, model, target, method, uidOf) => async args => {
+    const out = await target[method](args);
+    record.writes.push({ model, uid: uidOf(args) ?? null });
+    return out;
+  };
+  const view = (tx, record) => new Proxy({}, { get(_t, key) {
     if (key === 'auditLog') return new Proxy({}, { get(_a, method) {
-      const real = tx.auditLog[method];
-      return method === 'create' ? async args => { await hit('audit'); return real.call(tx.auditLog, args); } : real.bind(tx.auditLog);
+      if (method !== 'create') return tx.auditLog[method].bind(tx.auditLog);
+      const create = written(record, 'auditLog', tx.auditLog, 'create', args => args.data?.target);
+      return async args => { await hit('audit'); return create(args); };
+    } });
+    if (REPORT_ROWS.includes(key)) return new Proxy({}, { get(_m, method) {
+      const value = tx[key][method];
+      if (typeof value !== 'function') return value;
+      return ROW_WRITES.has(method) ? written(record, key, tx[key], method, args => args?.where?.uid ?? args?.data?.uid) : value.bind(tx[key]);
     } });
     const value = tx[key];
     return typeof value === 'function' ? value.bind(tx) : value;
   } });
   const recorder = new Proxy({}, { get(_t, key) {
-    if (key === '$transaction') return (fn, options) => base.$transaction(async tx => {
-      w.open++;
-      try {
-      await hit('tx-start');
-      const out = await fn(view(tx));
-      // Pause the actual business transaction. Identity/admission transactions
-      // touch only the ledger schema and do not hold the study/member/session.
-      const [{ business }] = await tx.$queryRawUnsafe(`SELECT EXISTS (
-        SELECT 1 FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
-        JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE l.pid=pg_backend_pid() AND l.granted AND n.nspname='public'
-      ) AS business`);
-      const [{ holds }] = await tx.$queryRawUnsafe('SELECT txid_current_if_assigned() IS NOT NULL AS holds');
-      if (business && !holds) await hit('read-commit');
-      if (business && holds) await hit('commit', async () => { w.backend = (await tx.$queryRawUnsafe('SELECT pg_backend_pid() AS pid'))[0].pid; });
-      return out;
-      } finally { w.open--; }
-    }, options);
+    // Every transaction is one record of w.txs: the request it served, its writes, and whether its commit returned.
+    if (key === '$transaction') return async (fn, options) => {
+      const record = { label: flow.getStore()?.label, writes: [], committed: false };
+      w.txs.push(record);
+      const result = await base.$transaction(async tx => {
+        w.open++;
+        try {
+        await hit('tx-start');
+        const out = await fn(view(tx, record));
+        // Pause the actual business transaction. Identity/admission transactions
+        // touch only the ledger schema and do not hold the study/member/session.
+        const [{ business }] = await tx.$queryRawUnsafe(`SELECT EXISTS (
+          SELECT 1 FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
+          JOIN pg_namespace n ON n.oid=c.relnamespace
+          WHERE l.pid=pg_backend_pid() AND l.granted AND n.nspname='public'
+        ) AS business`);
+        const [{ holds }] = await tx.$queryRawUnsafe('SELECT txid_current_if_assigned() IS NOT NULL AS holds');
+        if (business && !holds) await hit('read-commit');
+        if (business && holds) await hit('commit', async () => { w.backend = (await tx.$queryRawUnsafe('SELECT pg_backend_pid() AS pid'))[0].pid; });
+        return out;
+        } finally { w.open--; }
+      }, options);
+      record.committed = true;
+      return result;
+    };
     const value = base[key];
     return typeof value === 'function' ? value.bind(base) : value;
   } });
@@ -250,7 +293,10 @@ async function world() {
       links: [{ linkState: 'current', headRevision: 1 }] }] : [] };
     // This suite checks draft/CAS transactions. C2 signing and key failures are
     // exercised by emr/d/report_commit_pg_test.cjs with the real signer.
-    const nativeSigning = { sign: async () => ({ fixture: 'native-signature' }) };
+    // It answers the fields of NativeReportSigning's StoredApproval that a commit reads: the signed version and its server
+    // time (CD-09-P: a signed result ends the author's draft work at that version and time).
+    const nativeSigning = { sign: async (_tx, _request, _operationId, version) => ({ fixture: 'native-signature',
+      recordId: version.uid, versionId: String(version.version), signedAt: new Date().toISOString() }) };
     const svc = new PacsService(recorder, orthanc, keycloak, access, findings, ledger, nativeSigning);
     const controllers = new Map();
     return { svc, controller(cls) { if (!controllers.has(cls)) controllers.set(cls, new cls(svc, w.auth, requests.source)); return controllers.get(cls); } };
@@ -319,8 +365,10 @@ async function world() {
       await base.reportVersion.create({ data: { uid, version: 1, action: 'approve', findings: 'SYN approved head', conclusion: 'SYN head c',
         author: REVIEWER.actor, citations: [] } });
     }
+    // A present draft holds its work (CD-09-P ReportDraft_work_check), written for the result this study's next commit makes.
     if (draft) await base.reportDraft.create({ data: { uid, author: A.actor, findings: 'SYN first draft', conclusion: '',
-      recommendation: '', baseVersion: rs === 'A' && !staleBase ? 1 : 0, revision: 1, present: true } });
+      recommendation: '', baseVersion: rs === 'A' && !staleBase ? 1 : 0, revision: 1, present: true,
+      workUnit: 'disposal:' + randomUUID(), workSince: new Date(), workIntent: rs === 'A' ? 'addendum' : 'approve' } });
     return uid;
   };
   w.session = async principal => {
@@ -687,7 +735,8 @@ for (const ender of ['clear', 'discard', 'approve']) {
 test('D04 force-discard archives present drafts, advances their owners, rotates the epoch; every older boundary is refused', async () => {
   const w = await world();
   const uid = await w.study();
-  await w.base.reportDraft.create({ data: { uid, author: B.actor, findings: 'SYN draft of b', revision: 4, present: true } });
+  await w.base.reportDraft.create({ data: { uid, author: B.actor, findings: 'SYN draft of b', revision: 4, present: true,
+    workUnit: 'disposal:' + randomUUID(), workSince: new Date(), workIntent: 'approve' } });
   await w.base.reportDraft.create({ data: { uid, author: REVIEWER.actor, revision: 2, present: false } });
   const epoch = await w.epoch(uid);
   const stale = { a: `${epoch}:1`, b: `${epoch}:4`, unseen: `${epoch}:0` };
@@ -1059,8 +1108,9 @@ test('D10 commit and discard answer the envelope and the state; the commit audit
   assert.deepEqual([committed.body.state.rs, committed.body.state.version, committed.body.state.draft, committed.body.state.draftRevision,
     committed.body.state.findings], ['A', 1, null, `${epoch}:2`, 'SYN approve by X']);
   assert.deepEqual(await w.audits(uid), [`${A.actor} report.approve`]);
-  const points = w.points.filter(p => p.startsWith('X:'));
-  assert.deepEqual(points.slice(-2), ['X:audit', 'X:commit'], 'the audit row is written before the commit of the same transaction');
+  // Judged by the transaction each write was made in, not by the order of transaction boundaries (CD-09-P: an approval
+  // that ends the author's draft work is then judged in a read transaction of its own, after the commit's).
+  assertAuditInCommitTransaction(w.txs, 'X', uid);
   // own discard of an absent draft is a mutation of the boundary too
   const second = await w.study({ draft: false }), e2 = await w.epoch(second);
   const gone = await w.send('X', 'discard', { as: A, uid: second, body: request('discard', A, { token: `${e2}:0`, head: 0, mark: 'X' })[1] });

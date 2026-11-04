@@ -545,8 +545,10 @@ test('A-REMAINDER worklist: returned page, own draft, hidden preliminary, and or
   const uid = await consumerStudy();
   await version(uid, 1, { findings: 'SYN approved' });
   await ctx.witness.report.create({ data: { uid, version: 1, findings: 'SYN approved' } });
-  await ctx.witness.reportDraft.create({ data: { uid, author: actor, findings: 'SYN private', revision: 3 } });
-  await ctx.witness.reportDraft.create({ data: { uid, author: 'other@example.test', findings: 'SYN other draft' } });
+  // Each present draft holds its own work (CD-09-P ReportDraft_work_check); on an approved study it is written for an Addendum.
+  const work = () => ({ workUnit: 'disposal:' + randomUUID(), workSince: new Date(), workIntent: 'addendum' });
+  await ctx.witness.reportDraft.create({ data: { uid, author: actor, findings: 'SYN private', revision: 3, ...work() } });
+  await ctx.witness.reportDraft.create({ data: { uid, author: 'other@example.test', findings: 'SYN other draft', ...work() } });
   const hidden = await consumerStudy({ rs: 'P', preDocSub: 'other-author', preReviewerSub: 'other-reviewer' });
   await ctx.witness.report.create({ data: { uid: hidden, version: 2, findings: 'SYN withheld' } });
   const { answer, selected } = await readRecorded('/studies?limit=100', uid);
@@ -600,7 +602,8 @@ test('A-REMAINDER preview, report evidence, keys and revisions preserve the exac
   assert.equal(targetOf(clinical.selected, 'report-version')[0].recordId.value, String(stored.id));
   assert.equal(targetOf(clinical.selected, 'key-image').length, 1);
   const list = await readRecorded('/clinician/studies?limit=100', uid, { token: ctx.clinicianToken });
-  assert.equal(targetOf(list.selected, 'report-head').length, 0, 'clinician list has status, not report text');
+  assert.equal(targetOf(list.selected, 'report-head').length, 1, 'clinician list records the returned current body');
+  assert.equal(list.answer.studies.find(row => row.uid === uid).report.findings, stored.findings);
   const timeline = await readRecorded('/clinician/studies/' + uid + '/timeline?limit=100', uid, { token: ctx.clinicianToken });
   assert.equal(targetOf(timeline.selected, 'study-metadata').length, 2);
 });

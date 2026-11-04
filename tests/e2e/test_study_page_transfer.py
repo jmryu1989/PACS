@@ -27,7 +27,7 @@ class StudyPageTransferE2E(WorklistE2E):
             if offset==100 and phase['name']=='hold':held.append(route);return
             fulfill_page(route,items,owner)
         page.route('**/api/studies?*',response)
-        before=page.locator('#rows tr[data-uid]').count();page.locator('#refresh').click()
+        before=page.locator('#rows tr[data-uid]').count();page.locator('#m-refresh').click()
         expect(page.locator('#study-fetch-resume')).to_be_visible();expect(page.locator('#study-fetch-status')).to_contain_text('100/201')
         expect(page.locator('#rows tr[data-uid]')).to_have_count(before)
         expect(page.locator('#findings')).to_have_value('Transfer keeps unsaved report');self.assertEqual(page.evaluate('selectedUid'),a.uid)
@@ -40,7 +40,7 @@ class StudyPageTransferE2E(WorklistE2E):
         expect(page.locator('#related-page-status')).to_have_text('2/4페이지')
         self.assertEqual(page.evaluate('relatedUid'),related_before);self.assertEqual(page.evaluate('selectedUid'),a.uid)
         expect(page.locator('#findings')).to_have_value('Transfer keeps unsaved report')
-        phase['name']='hold';page.locator('#refresh').click()
+        phase['name']='hold';page.locator('#m-refresh').click()
         expect(page.locator('#study-fetch-status')).to_contain_text('100/201')
         page.locator('#study-fetch-cancel').click();expect(page.locator('#study-fetch-resume')).to_be_visible()
         self.assertTrue(held);fulfill_page(held.pop(),items,owner)
@@ -56,7 +56,7 @@ class StudyPageTransferE2E(WorklistE2E):
         pattern='**/api/studies?*'
         page.route(pattern,lambda route:route.fulfill(status=200,json={'studies':[], 'pagination':{'owner':['other','other'],'limit':100,'offset':0,'total':0,'next':None}}))
         with page.expect_response(lambda r:r.url.endswith('/api/me')):
-            page.locator('#refresh').click()
+            page.locator('#m-refresh').click()
         page.wait_for_timeout(200)
         self.assertEqual(page.evaluate('KinWorkContext.state()'),'active')
         expect(page.locator('#rows tr[data-uid]')).to_have_count(before)
@@ -65,14 +65,14 @@ class StudyPageTransferE2E(WorklistE2E):
         other=page.context.new_page();ViewerLayoutE2E.relog(self,other,'doctor2')
         # 첫 탭은 이 세션에 묶어 보내는 자기 요청 어느 것으로든 교체를 안다 — 이 Refresh일 수도, relog 사이에 나간 시작·주기 요청일
         # 수도 있다. 이미 닫혔으면 Refresh는 숨어 있고(:70) 눌러도 요청이 없다(:71-72): 보임과 상관없이 같은 클릭 사건을 보낸다.
-        page.locator('#refresh').dispatch_event('click');page.wait_for_function("KinWorkContext.state() !== 'active'")
+        page.locator('#m-refresh').dispatch_event('click');page.wait_for_function("KinWorkContext.state() !== 'active'")
         self.assertEqual(page.evaluate('KinAuth.endState()'),{'state':'unconfirmed','reason':'replaced'})
         self.assertTrue(landing);self.assertEqual(logouts,[])
         self.assertIsNone(page.evaluate("localStorage.getItem('kin-session-end')"),'replacement must not write a logout record')
         protected=[]
         page.on('request',lambda request:protected.append(request.url) if '/api/' in request.url else None)
-        expect(page.locator('#refresh')).not_to_be_visible()
-        page.locator('#refresh').dispatch_event('click');page.wait_for_timeout(300)
+        expect(page.locator('#m-refresh')).not_to_be_visible()
+        page.locator('#m-refresh').dispatch_event('click');page.wait_for_timeout(300)
         self.assertEqual(protected,[],'An ended document must not fetch another account\'s list')
 
     def test_transfer_03_poll_retry_offline_and_final_apply_barrier(self):

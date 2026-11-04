@@ -365,7 +365,8 @@ class AgentPins(unittest.TestCase):
         self.assertEqual(re.findall(r'self\.assertIn\("Ran (\d+) tests"', method), [str(count)])
         # 18 -> 25: S4-U4 RetryNowTests (seven cases); tests/gateway_retry_source_test.py pins that class by name.
         # 25 -> 26: S4-EG1 OrthancConnectionTests (one case).
-        self.assertEqual(count, 26)
+        # CD-10 adds source-AE association, forwarded provenance and mixed-device batch coverage.
+        self.assertEqual(count, 29)
 
 
 class ServerPins(unittest.TestCase):
@@ -534,7 +535,8 @@ class MigrationPins(unittest.TestCase):
         # 47 -> 48 migrations and 52 -> 53 tables: W5-API added 20261016120000_related_report_insert_receipt (ReportDraftInsertReceipt).
         # 53 -> 52 tables: product cuts 3 dropped IdpSessionEnd (20261025120000_auth_flow_subtraction).
         # 52 -> 53 tables: D1890 added 20261030120000_preload_cache_key (PreloadCacheKey).
-        self.assertEqual(len(restore_fixture.TABLES), 53)
+        # 53 -> 55 tables: CD-09-P added 20261103150000_cd09p_draft_purpose (ReportDraftPurposeEnd, PurposeLedgerAnchor).
+        self.assertEqual(len(restore_fixture.TABLES), 55)
         self.assertEqual(len(restore_fixture.expected_rows("2.25.1")["GatewayReceipt"]), 1)
 
 

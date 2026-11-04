@@ -37,6 +37,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const { execFileSync } = require('node:child_process');
+const { randomUUID } = require('node:crypto');
 const { from, lastValueFrom } = require('/app/node_modules/rxjs');
 const { ConflictException, ServiceUnavailableException } = require('/app/node_modules/@nestjs/common');
 const P = require('/app/dist/critical-result-policy');
@@ -156,8 +157,9 @@ async function world({ policies = {} } = {}) {
     if (action === 'preliminary') { preDoc = author; preReviewer = reviewer; }
     if (action === 'reset' || action === 'approve') { preDoc = null; preReviewer = null; }
     await base.$executeRaw`UPDATE "StudyState" SET rs = ${rs}, "preDoc" = ${preDoc}, "preReviewer" = ${preReviewer}, "updatedAt" = now() WHERE uid = ${uid}`;
-    await base.$executeRaw`INSERT INTO "ReportDraft" (uid, author, findings, conclusion, recommendation, "updatedAt")
-      VALUES (${uid}, 'syn-draft-author@synthetic.test', ${DRAFT_BODY}, ${DRAFT_BODY}, ${DRAFT_BODY}, now())
+    // A present draft holds its work (CD-09-P ReportDraft_work_check); a later version keeps the work it already has.
+    await base.$executeRaw`INSERT INTO "ReportDraft" (uid, author, findings, conclusion, recommendation, "updatedAt", "workUnit", "workSince", "workIntent")
+      VALUES (${uid}, 'syn-draft-author@synthetic.test', ${DRAFT_BODY}, ${DRAFT_BODY}, ${DRAFT_BODY}, now(), ${'disposal:' + randomUUID()}, now(), 'approve')
       ON CONFLICT (uid, author) DO UPDATE SET findings = EXCLUDED.findings, "updatedAt" = now()`;
     return version;
   };

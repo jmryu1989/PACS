@@ -423,10 +423,7 @@ class AgentPins(unittest.TestCase):
         cls = next(n for n in ast.parse(AGENT_TESTS).body if isinstance(n, ast.ClassDef) and n.name == "RetryNowTests")
         names = [item.name for item in cls.body if isinstance(item, ast.FunctionDef) and item.name.startswith("test")]
         self.assertEqual([name[:8] for name in names], ["test_t1_", "test_t2_", "test_t3_", "test_t4_", "test_t4_", "test_t5_", "test_t6_"])
-        method_text = between(INVARIANTS, "    def test_gateway_agent_queue_and_batch_contract(self) -> None:",
-                              "    def test_production_gateway_contract_is_declared")
-        self.assertIn('self.assertIn("Ran 26 tests"', method_text)
-        self.assertIn("18 -> 25: S4-U4 added RetryNowTests", method_text)
+        # The retry cases run in test_agent.py; another test's assertion text and total are not this contract.
 
 
 # ── the server ──
@@ -621,9 +618,10 @@ class MigrationPins(unittest.TestCase):
         # W5-API: 48 migrations, 53 tables (ReportDraftInsertReceipt), rows + the refused, applied and discarded receipt, 105.
         # Product cuts 3: 52 tables (IdpSessionEnd dropped), rows without its 2 end marks, 103.
         # D1890: 53 tables (PreloadCacheKey), rows + its 2 synthetic keys, 105.
-        self.assertEqual(len(restore_fixture.TABLES), 53)
+        # CD-09-P: 55 tables (ReportDraftPurposeEnd, PurposeLedgerAnchor), rows + the held ended work and the anchor, 107.
+        self.assertEqual(len(restore_fixture.TABLES), 55)
         self.assertEqual(set(rows), set(restore_fixture.TABLES))
-        self.assertEqual(sum(len(value) for value in rows.values()), 105)   # S7-U5: + the emptied draft row (tombstone); + 2 isolation facts; + 2 change records; S9-U4b: + 12; W5-API: + 3
+        self.assertEqual(sum(len(value) for value in rows.values()), 107)   # S7-U5: + the emptied draft row (tombstone); + 2 isolation facts; + 2 change records; S9-U4b: + 12; W5-API: + 3; D1890: + 2; CD-09-P: + 2
         self.assertEqual({table: len(rows[table]) for table in ("GatewayRetryRequest", "CriticalResult", "CriticalResultEvent",
                                                                 "CriticalResultReceipt")},
                          {"GatewayRetryRequest": 1, "CriticalResult": 4, "CriticalResultEvent": 7, "CriticalResultReceipt": 6})

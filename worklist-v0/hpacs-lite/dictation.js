@@ -560,6 +560,7 @@
       if (paneFocus && (advanced || lost)) {
         const target = primary(v);
         if (target && doc.activeElement !== target) target.focus();
+        if (hooks.reveal) hooks.reveal();
       }
     }
     el.pane.addEventListener('focusin', () => { paneFocus = true; });

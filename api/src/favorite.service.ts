@@ -15,7 +15,7 @@ const conflict = () => new ConflictException('즐겨찾기가 바뀌었습니다
 export class FavoriteService {
   constructor(private prisma: PrismaService, private jobs: ViewerJobService, private studyAccess:StudyAccessService) {}
   private owner(c: Caller) {
-    if (c.kind !== 'member' || !c.roles.some(r => ['admin','radiologist','technician'].includes(r))
+    if (c.kind !== 'member' || !c.roles.some(r => ['admin','radiologist','technician','clinician'].includes(r))
         || ![c.institution,c.sub].every(x => typeof x === 'string' && x.length > 0 && x.length <= 256))
       throw new ForbiddenException('소속 기관이 있는 회원 전용입니다');
     return { institution:c.institution!, subject:c.sub };

@@ -65,7 +65,7 @@ class NestedPagesE2E(CompoundSearchE2E):
         expect(page.locator(f'#rows tr[data-uid="{a.uid}"]')).to_be_visible()
         page.locator('#page-next').click();expect(page.locator('#page-status')).to_contain_text('26–50 / 1001건')
         self.assertEqual(page.evaluate('selectedUid'),a.uid);expect(page.locator('#findings')).to_have_value('Page browsing preserves this report')
-        page.locator('#page-current').click();expect(page.locator('#page-status')).to_contain_text('1–25 / 1001건')
+        page.locator('#page-prev').click();expect(page.locator('#page-status')).to_contain_text('1–25 / 1001건')
         # Existing report move crosses the display page boundary using the full queue.
         page.locator('#b-next').click();expect(page.locator('#findings')).to_have_value(b.secret)
         self.assertEqual(page.evaluate('selectedUid'),b.uid);expect(page.locator('#page-status')).to_contain_text('26–50 / 1001건')

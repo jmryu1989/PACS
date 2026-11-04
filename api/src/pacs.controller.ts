@@ -6,6 +6,8 @@ import { Public } from './auth.guard';
 import { AuthService } from './auth.service';
 import { imageRead } from './image-delivery-record';
 import { bootstrapRead, studyAuditRead } from './emr-viewing/consumer-read';
+// CD-09-P: every response that can carry the caller's private draft registers before it reads (destruction waits for it).
+import { draftDeliveries } from './emr-retention/draft-purpose';
 
 /**
  * URL의 `:id`를 정수로. **`+id`를 그대로 쓰면 안 된다.**
@@ -268,6 +270,7 @@ export class PacsController {
   @Get('bootstrap')
   @Header('Cache-Control', 'no-store')
   async bootstrap(@Req() req: any, @Query() query: any) {
+    draftDeliveries.track(caller(req).actor, req, req.res);
     return bootstrapRead(await this.svc.bootstrap(caller(req), query), req.actor, req.institution);
   }
 
@@ -278,6 +281,7 @@ export class PacsController {
   @Get('studies')
   @Header('Cache-Control', 'no-store')
   async studies(@Req() req: any, @Query() query: any) {
+    draftDeliveries.track(caller(req).actor, req, req.res);
     return this.svc.readStudies(caller(req), query);
   }
 
@@ -290,6 +294,7 @@ export class PacsController {
 
   @Patch('studies/:uid')
   patch(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
+    draftDeliveries.track(caller(req).actor, req, req.res);   // the answer's state carries my draft
     return this.svc.patchState(uid, body, caller(req), req);
   }
 
@@ -322,6 +327,7 @@ export class PacsController {
    */
   @Put('studies/:uid/report')
   report(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
+    draftDeliveries.track(caller(req).actor, req, req.res);
     return this.withDraftFacts(req, facts => this.svc.putReport(uid, body, caller(req), draftSession(req), facts));
   }
 
@@ -332,6 +338,7 @@ export class PacsController {
   @Get('studies/:uid/draft')
   @Header('Cache-Control', 'no-store')
   draft(@Param('uid') uid: string, @Req() req: any, @Query('insertRequestId') insertRequestId?: string) {
+    draftDeliveries.track(caller(req).actor, req, req.res);
     return this.withDraftFacts(req, facts => this.svc.readDraft(uid, caller(req), facts, insertRequestId));
   }
 
@@ -362,6 +369,7 @@ export class PacsController {
   /** 인용 — 머리 판과 내 초안의 증언. 소견 가독을 여기서 다시 건다 */
   @Get('studies/:uid/report/citations')
   citations(@Param('uid') uid: string, @Req() req: any) {
+    draftDeliveries.track(caller(req).actor, req, req.res);   // my draft's citations
     return this.svc.reportCitations(uid, caller(req));
   }
 
@@ -374,6 +382,7 @@ export class PacsController {
   /** 구조화 항목 — 머리 판과 내 초안의 타입 있는 값. 관문은 `versions()`와 같다 */
   @Get('studies/:uid/report/structure')
   structure(@Param('uid') uid: string, @Req() req: any) {
+    draftDeliveries.track(caller(req).actor, req, req.res);   // my draft's structured entries and text
     return this.svc.reportStructure(uid, caller(req));
   }
 
@@ -402,11 +411,13 @@ export class PacsController {
 
   @Post('match')
   match(@Body() body: any, @Req() req: any) {
+    draftDeliveries.track(caller(req).actor, req, req.res);   // the answer's state carries my draft
     return this.svc.match(body.uid, body.oid, body.patient, caller(req), req);
   }
 
   @Post('unmatch')
   unmatch(@Body() body: any, @Req() req: any) {
+    draftDeliveries.track(caller(req).actor, req, req.res);   // the answer's state carries my draft
     return this.svc.unmatch(body.uid, caller(req), req);
   }
 

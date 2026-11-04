@@ -51,6 +51,7 @@ class WorklistSearchE2E(ThumbnailSeriesE2E):
         self.open_toolbar_group(p, '[data-search-mode]');p.locator('[data-search-mode]').select_option('manual');p.reload();self.open_toolbar_group(p, '[data-search-mode]')
         expect(p.locator('[data-search-mode]')).to_have_value('manual');expect(p.locator('[data-search-clear]')).to_be_checked()
         expect(p.locator('#filterrow [data-f="id"]')).to_have_value('')
+        expect(p.locator('#quick')).to_have_value('')
 
 def load_tests(loader,tests,pattern):
     return unittest.TestSuite(WorklistSearchE2E(name) for name in WorklistSearchE2E.__dict__ if name.startswith('test_search_'))

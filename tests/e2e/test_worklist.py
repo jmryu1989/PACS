@@ -227,6 +227,23 @@ class WorklistE2E(unittest.TestCase):
         for menu in page.locator('.menubar > .toolbar-menu[open]').all():
             menu.locator(':scope > summary').click()
 
+    def show_workspace_panels(self, page, *names):
+        """Reveal the requested optional panels using the shipped Panel Settings dialog."""
+        self.open_toolbar_group(page, '#panel-settings-open')
+        page.locator('#panel-settings-open').click()
+        dialog = page.get_by_role('dialog', name='Panel Settings', exact=True)
+        for name in names:
+            dialog.get_by_role('checkbox', name=name, exact=True).check()
+        dialog.get_by_role('button', name='Close', exact=True).click()
+        WorklistE2E.close_toolbar_groups(self, page)
+
+    def show_worklist_column(self, page, key):
+        self.open_toolbar_group(page, '#columnsettings')
+        page.locator('#columnsettings').click()
+        page.locator(f'#wc-list [data-column="{key}"] input[type=checkbox]').check()
+        page.locator('#wc-memory').click()
+        WorklistE2E.close_toolbar_groups(self, page)
+
     def clear_filters(self, page):
         # Expanded top menus can cover the header's Clear button after editing a saved search.
         self.close_toolbar_groups(page)

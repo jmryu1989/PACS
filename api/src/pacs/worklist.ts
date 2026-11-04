@@ -324,6 +324,15 @@ export class PacsWorklist {
       const birth = OrthancService.tag(st, '00100030');
       const date = OrthancService.tag(st, '00080020');
       const patientId = OrthancService.tag(st, '00100020');
+      // DICOM JSON PN has up to three representations; preserve their separators, without display-name translation.
+      const physician = (key: string): string | null => {
+        const pn = st?.[key]?.Value?.[0];
+        if (typeof pn === 'string') return pn || null;
+        if (!pn || typeof pn !== 'object') return null;
+        const parts = ['Alphabetic', 'Ideographic', 'Phonetic'];
+        const last = parts.reduce((index, part, i) => Object.prototype.hasOwnProperty.call(pn, part) ? i : index, -1);
+        return parts.slice(0, last + 1).map(part => typeof pn[part] === 'string' ? pn[part] : '').join('=') || null;
+      };
       out.push({
         uid,
         techNote: noteByUid.get(uid) ?? { version: 0, present: false },
@@ -338,6 +347,8 @@ export class PacsWorklist {
         count: qidoCount(st, '00201208'),
         series: qidoCount(st, '00201206'),
         acc: OrthancService.tag(st, '00080050'),
+        referringPhysician: physician('00080090'),
+        requestingPhysician: physician('00321032'),
         id: patientId,
         // 화면 오버레이가 PatientID를 바꿔도 Related의 기관 경계는 원본 DICOM 값에 남는다.
         sourcePatientKey: s.institutionId == null || !patientId ? null : `${s.institutionId}|${patientId}`,

@@ -42,7 +42,12 @@ class ImageThumbnailsE2E(WorklistImagePreviewE2E):
         self.assertEqual([multi["sops"][0]] * 12, cards.evaluate_all("xs=>xs.map(x=>x.dataset.sop)"))
         self.assertEqual([str(i) for i in range(12)], cards.evaluate_all("xs=>xs.map(x=>x.dataset.frame)"))
         expect(cards.first.locator(".thumb-description")).to_have_text(f"SOP {multi['sops'][0]} · Frame 1 / 14")
-        self.assertTrue(requests); expected = document_request(page, "GET", requests[0], headers={"Accept": "image/png"})
+        # Parallel frame requests may start out of order; identify the reference by source and frame.
+        lookup = self.stack.request("POST", "/dicom/lookup", "doctor", {"studyUid": f.uid, "sopUid": multi["sops"][0]})
+        self.assertEqual(200, lookup.status)
+        expected_url = self.stack.proxy + f"/instances/{lookup.body['id']}/frames/0/rendered?width=256&height=256"
+        self.assertIn(expected_url, requests)
+        expected = document_request(page, "GET", expected_url, headers={"Accept": "image/png"})
         self.assertEqual(200, expected.status)
         np.testing.assert_array_equal(self.pixels(cards.first.locator("img")), np.asarray(Image.open(io.BytesIO(expected.body())).convert("RGB")))
         view.locator("#thumb-images-next").click(); cards = self.ready(view, 2)

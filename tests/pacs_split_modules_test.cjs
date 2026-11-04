@@ -262,6 +262,13 @@ const BUILT_IN = [
     ([uid], t) => (t.studyState ?? []).filter(r => r.uid === uid).map(r => ({ institutionId: r.institutionId, teleInstitutionId: r.teleInstitutionId }))],
   [/FROM "AuthSession" WHERE sid = \? FOR KEY SHARE$/, ([sid], t) => (t.authSession ?? []).filter(r => r.sid === sid).map(() => ({ held: 1 }))],
   [/FROM "ReportDraft" WHERE uid = \? AND author = \? FOR UPDATE$/, ([uid, author], t) => (t.reportDraft ?? []).filter(r => r.uid === uid && r.author === author).map(copy)],
+  // CD-09-P: the commit judgement after a transaction that ended a draft work (draft-purpose judgeCommit) re-reads the end
+  // row and the author's row from what committed.
+  [/^SELECT 1 AS present FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = \?$/,
+    ([unit], t) => (t.reportDraftPurposeEnd ?? []).filter(r => r.disposalUnitId === unit).map(() => ({ present: 1 }))],
+  [/^SELECT revision, present, "workUnit" FROM "ReportDraft" WHERE uid = \? AND author = \?$/,
+    ([uid, author], t) => (t.reportDraft ?? []).filter(r => r.uid === uid && r.author === author)
+      .map(r => ({ revision: r.revision, present: r.present, workUnit: r.workUnit ?? null }))],
   [/FROM "ReportDraft" WHERE uid = \? AND present ORDER BY author FOR UPDATE$/,
     ([uid], t) => sorted((t.reportDraft ?? []).filter(r => r.uid === uid && r.present), { author: 'asc' }).map(copy)],
   [/FROM "Report" WHERE uid = \? FOR UPDATE$/, ([uid], t) => (t.report ?? []).filter(r => r.uid === uid)
@@ -272,13 +279,13 @@ const BUILT_IN = [
   [/^SELECT a\.\*, CASE .* FROM "AuditLog" a LEFT JOIN "StudyState" s/, () => []],
   [/^SELECT id, name, "dicomNames", "dicomAets" FROM "Institution" ORDER BY id FOR UPDATE$/,
     (_p, t) => sorted(t.institution ?? [], { id: 'asc' }).map(r => ({ dicomAets: '', ...copy(r) }))],
-  [/^SELECT s\.uid, s\."institutionId", s\."teleInstitutionId", s\.rs, s\."repDoc", s\.confirm, COALESCE\(r\.version, 0\) AS version, v\.action FROM "StudyState" s/,
+  [/^SELECT s\.uid, s\."institutionId", s\."teleInstitutionId", s\.rs, s\."repDoc", s\.confirm, COALESCE\(r\.version, 0\) AS version, v\.action, r\.findings, r\.conclusion, r\.recommendation FROM "StudyState" s/,
     ([uids], t) => uids.values.map(uid => {
       const s = (t.studyState ?? []).find(r => r.uid === uid);
       if (!s) return null;
       const r = (t.report ?? []).find(x => x.uid === uid), v = r && (t.reportVersion ?? []).find(x => x.uid === uid && x.version === r.version);
       return { uid, institutionId: s.institutionId, teleInstitutionId: s.teleInstitutionId, rs: s.rs, repDoc: s.repDoc, confirm: s.confirm,
-        version: r?.version ?? 0, action: v?.action ?? null };
+        version: r?.version ?? 0, action: v?.action ?? null, findings: r?.findings ?? null, conclusion: r?.conclusion ?? null, recommendation: r?.recommendation ?? null };
     }).filter(Boolean)],
 ];
 
@@ -1266,7 +1273,7 @@ test('SPLIT-19 account settings and shared searches: a write on a stale revision
   await refused(() => w.preferences.saveReadingPreferences({ autoNote: false, expectedOwner: owner, revision: 0 }, RAD_A), 409);
   await refused(() => w.preferences.saveReadingPreferences({ autoNote: false, expectedOwner: [INST_B, RAD_A.sub], revision: 1 }, RAD_A), 409);
   assert.deepEqual(await w.preferences.readingPreferences(RAD_A), { owner, revision: 1, autoNote: true });
-  await refused(() => w.preferences.readingPreferences(CLIN_A), 403);
+  assert.deepEqual(await w.preferences.readingPreferences(CLIN_A), { owner: [INST_A, CLIN_A.sub], revision: 0, autoNote: null });
   await refused(() => w.filters.writeSharedFilters({ command: { action: 'create-folder', path: 'x' }, expectedOwner: owner, revision: 0 }, RAD_A), 403);
   assert.equal(w.db.writes.filter(x => x.model === 'sharedFilterLibrary').length, 0);
 });

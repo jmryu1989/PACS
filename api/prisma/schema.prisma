@@ -363,9 +363,57 @@ model ReportDraft {
   revision       Int      @default(1)
   present        Boolean  @default(true)
   updatedAt      DateTime @updatedAt
+  /// CD-09-P: the live work this present row holds - an opaque `disposal:<uuid4>` drawn once when the work starts
+  /// (absent → present), its server start time and the result action it is written for. A present=false row has none:
+  /// the next work of the same author draws a new unit, so an ended work and a later one never share an identity.
+  workUnit       String?   @unique
+  workSince      DateTime?
+  workIntent     String?
 
   @@id([uid, author])
   @@index([uid])
+}
+
+/// CD-09-P: one private draft work whose purpose ended (the author's explicit discard, or the signed result version made
+/// from it) and whose content is not yet destroyed. The row is written in the transaction that ends the work and holds
+/// the exact payload until the destruction transaction deletes it - immediately, or after a legal hold on that draft is
+/// released. Nobody reads it as a draft: the author's row is already empty. The `disposalUnitId` is the only key the
+/// external destruction ledger knows; this row is also the backup's mapping from that unit to the draft (uid, author).
+model ReportDraftPurposeEnd {
+  disposalUnitId  String   @id
+  uid             String
+  author          String
+  workSince       DateTime
+  workIntent      String
+  trigger         String
+  eventId         String   @db.Uuid
+  actorId         String
+  endedAt         DateTime
+  signedRecordId  String?
+  signedVersionId String?
+  findings        String
+  conclusion      String
+  recommendation  String
+  baseVersion     Int
+  citations       Json?
+  structured      Json?
+  deliverySettled Boolean  @default(false)
+  attempts        Int      @default(0)
+  lastRefusal     String?
+
+  @@index([uid, author])
+}
+
+/// CD-09-P: the database's reference to the external purpose-destruction ledger (one row, drawn by its migration with
+/// seq 0). Each completed destruction moves `seq` to its ledger position, so a restored copy names the ledger and the
+/// position it last saw: a missing or shorter ledger, or a ledger of another ID, keeps the server closed.
+model PurposeLedgerAnchor {
+  id                Int       @id
+  ledgerId          String    @db.Uuid
+  seq               Int
+  initialized       Boolean   @default(false)
+  lastCompletedUnit String?
+  lastCompletedAt   DateTime?
 }
 
 /// W5 Related Report 삽입의 **영수증** (O4 R1, D1423). 다른 판독문의 승인본 원문을 내 초안 한 칸 끝에 넣는 명시 삽입

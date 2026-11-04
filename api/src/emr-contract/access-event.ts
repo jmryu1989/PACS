@@ -51,7 +51,7 @@ export interface AccessEventV1 {
   surface: string;
   eventId: string;
   userId: EvidenceFact<ImmutableIdentity>;
-  rolesAtTime: EvidenceFact<readonly string[]>;
+  rolesAtTime: EvidenceFact<readonly string[]> | Readonly<{ status: 'unresolved'; reason: 'legacy-import-roles-not-stored' }>;
   actingInstitution: EvidenceFact<string>;
   managingInstitution: EvidenceFact<string>;
   occurredAt: string;
@@ -141,10 +141,14 @@ function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manif
 function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manifest: readonly ResolvedRecord[] | undefined, failure: boolean,
     surface?: string): (AccessTarget | LocalAuditTarget)[] {
   if (!Array.isArray(input)) throw new Error('Actual returned target set required');
+  const incident = ['POST emr-audit/incidents', 'GET emr-audit/incidents', 'GET emr-audit/incidents/:id', 'POST emr-audit/incidents/:id/findings', 'POST emr-audit/incidents/:id/notices', 'POST emr-audit/incidents/:id/close', 'GET emr-audit/incidents/:id/drafts/:form'].includes(surface);
+  const incidentDetails = incident && surface !== 'GET emr-audit/incidents';
+  const inspectionDetails = ['GET emr-audit/inspections/:month', 'POST emr-audit/inspections/:month/report'].includes(surface);
+  const inspection = inspectionDetails || ['GET emr-audit/inspections', 'POST emr-audit/inspections/:month/steps'].includes(surface);
   return input.map((target, index) => {
     // Preserve A1's observed subject when F records access to that audit row.
     // Clinical record reads still require their existing patient-linked target contract.
-    if (['POST emr-audit/investigations', 'POST emr-audit/exports'].includes(surface) &&
+    if ((incidentDetails || inspectionDetails || ['POST emr-audit/investigations', 'POST emr-audit/exports'].includes(surface)) &&
         target?.kind === 'access-audit' && 'sourcePatientId' in target) {
       const t = object(target, ['kind', 'studyId', 'recordId', 'versionId', 'sourcePatientId', 'sourceInstitution']);
       const parsed: LocalAuditTarget = { kind: 'access-audit', studyId: fact(t.studyId, string),
@@ -170,6 +174,14 @@ function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manif
     if (surface === 'GET admin/audit' && kind === 'access-audit' && parsed.recordId.status === 'known' &&
         [parsed.patientLinkSnapshot, parsed.studyId, parsed.versionId].every(f =>
           f.status === 'not-applicable' && f.reason === 'non-record-target')) return parsed;
+    // CD-05: record only what the response shows. A cycle/list exposes no patient,
+    // and a patientless download exposes its event identity, not a clinical link.
+    const absent = (f: EvidenceFact<unknown>) => f.status === 'not-applicable' && f.reason === 'non-record-target';
+    if (parsed.recordId.status === 'known' && absent(parsed.patientLinkSnapshot) && absent(parsed.studyId) && (
+        (surface === 'GET emr-audit/rights-requests' && kind === 'disclosure' && absent(parsed.versionId)) ||
+        (incident && kind === 'access-audit' && absent(parsed.versionId)) ||
+        (inspection && kind === 'access-audit' && (absent(parsed.versionId) ||
+          (inspectionDetails && parsed.versionId.status === 'known' && parsed.versionId.value === parsed.recordId.value))))) return parsed;
     const facts = [parsed.patientLinkSnapshot, parsed.studyId, parsed.recordId, parsed.versionId];
     if (facts.some(f => f.status === 'not-applicable' && (!NON_RECORD_TARGETS.includes(kind) || f.reason !== 'non-record-target')))
       throw new Error('Patient-bearing record facts cannot be waived');
@@ -182,8 +194,10 @@ function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manif
     // Request intake and hold administration disclose request facts even when an original
     // cannot yet be packaged. Preserve its patient/record; do not invent a study or version.
     const requestFacts = kind === 'disclosure' && ['POST emr-audit/requests', 'POST emr-audit/issuances',
-      'GET emr-audit/requests/:id', 'POST emr-audit/requests/:id/extend', 'POST emr-audit/requests/:id/resolve'].includes(surface);
-    const investigatedEvent = kind === 'access-audit' && ['POST emr-audit/investigations', 'POST emr-audit/exports'].includes(surface);
+      'GET emr-audit/requests/:id', 'POST emr-audit/requests/:id/extend', 'POST emr-audit/requests/:id/resolve',
+      'POST emr-audit/rights-requests', 'GET emr-audit/rights-requests/:id',
+      'POST emr-audit/rights-requests/:id/decide', 'POST emr-audit/rights-requests/:id/notify'].includes(surface);
+    const investigatedEvent = kind === 'access-audit' && (incidentDetails || inspectionDetails || ['POST emr-audit/investigations', 'POST emr-audit/exports'].includes(surface));
     const required = requestFacts ? [parsed.patientLinkSnapshot, parsed.recordId] :
       investigatedEvent ? [parsed.patientLinkSnapshot, parsed.recordId, parsed.versionId] :
       nativeRecord ? [parsed.studyId, parsed.recordId, parsed.versionId] : facts;
@@ -205,7 +219,12 @@ function parseAccessEventV1(input: unknown, served?: readonly ResolvedRecord[]):
   const result = choice(v.result, ['prepared', 'succeeded', 'aborted', 'refused', 'failed', 'reported']);
   if (result !== expectedResult(action)) throw new Error('Event result does not describe the observed stage');
   const userId = fact(v.userId, identity);
-  const rolesAtTime = fact(v.rolesAtTime, roles => {
+  // Only pre-CD10 import recovery lacks stored roles; a new unresolved request must still fail.
+  const legacyImportRoles = surface === 'POST dicom-import' && action === 'write' && result === 'succeeded'
+    && v.rolesAtTime?.status === 'unresolved' && v.rolesAtTime?.reason === 'legacy-import-roles-not-stored';
+  const rolesAtTime: AccessEventV1['rolesAtTime'] = legacyImportRoles
+    ? { status: 'unresolved', reason: choice(object(v.rolesAtTime, ['status', 'reason']).reason, ['legacy-import-roles-not-stored']) }
+    : fact(v.rolesAtTime, roles => {
     const internalService = v.executor === 'service' && v.cause === 'service-job'
       && Object.prototype.hasOwnProperty.call(INTERNAL_SURFACES, surface);
     if (!Array.isArray(roles) || (!roles.length && !internalService) || new Set(roles).size !== roles.length)
@@ -225,7 +244,7 @@ function parseAccessEventV1(input: unknown, served?: readonly ResolvedRecord[]):
   // A member-rights command has no patient scope. An unobserved ingress address
   // stays unknown for every event (B2 v2 item 2); it must never be invented.
   const rightsOnly = Array.isArray(v.targets) && v.targets.length > 0 && v.targets.every(t => t.kind === 'identity-access');
-  if ((!failure && [userId, rolesAtTime, ...(!rightsOnly ? [actingInstitution, managingInstitution] : [])].some(f => f.status !== 'known')) ||
+  if ((!failure && [userId, ...(!legacyImportRoles ? [rolesAtTime] : []), ...(!rightsOnly ? [actingInstitution, managingInstitution] : [])].some(f => f.status !== 'known')) ||
       (!failure && !rightsOnly && trustedProxyIp.status !== 'known' && !inProcess
         && !(trustedProxyIp.status === 'unresolved' && trustedProxyIp.reason === 'not-observed')) ||
       (trustedProxyIp.status === 'not-applicable' && !inProcess) ||

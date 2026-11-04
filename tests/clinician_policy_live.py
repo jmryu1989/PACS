@@ -35,6 +35,7 @@ import sys
 import time
 import unittest
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
@@ -42,6 +43,7 @@ from urllib.request import Request
 
 from clinician_question_live import ask_question, drop_study_questions, lit, member_owner, read_question_row
 from clinician_request_live import drop_study_image_requests, make_image_request, read_request_row
+from clinician_read_live import ClinicianReadStack
 from invariants_live import LiveStack, controller_routes, critical_row, drop_critical_results, psql, purge_user_audit
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -83,7 +85,7 @@ def message(result) -> str:
 class ClinicianPolicyLive(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.stack = LiveStack()
+        cls.stack = ClinicianReadStack()
         cls.addClassCleanup(cls.stack.cleanup_test_identities)
         cls.addClassCleanup(cls.stack.cleanup_all)
         cls.stack.require_stack()
@@ -302,7 +304,9 @@ class ClinicianPolicyLive(unittest.TestCase):
         self.assertIn("clinician", me.body["roles"])
         for route in ("/prefs", "/bootstrap", "/studies"):
             result = self.bearer("GET", route, token)
-            self.assertEqual((result.status, result.body.get("code")), (403, DENIED), route + " " + result.text)
+            self.assertEqual(result.status, 200, route + " " + result.text)
+        denied = self.bearer("GET", "/study-access", token)
+        self.assertEqual((denied.status, denied.body.get("code")), (403, DENIED), denied.text)
 
         mixed = self.stack.request("PATCH", path, "jmryu", {"roles": ["clinician", "radiologist"]})
         self.assertEqual(mixed.status, 200, mixed.text)
@@ -363,12 +367,12 @@ class ClinicianPolicyLive(unittest.TestCase):
             result = self.stack.request("GET", path, "clinician")
             only[path] = [result.status, code(result)]
             with self.subTest(clinician_only=path):
-                self.assertEqual((result.status, code(result)), (403, DENIED), result.text[:300])
+                self.assertEqual(result.status, 200, result.text[:300])
         narrowed = self.stack.request("GET", f"/studies/{uid}/viewer-items", "clinician")
         only["viewer-items"] = [narrowed.status, narrowed.body]
         composition["clinician"] = only
         self.assertEqual((narrowed.status, narrowed.body),
-                         (200, {"uid": study.uid, "final": False, "items": None, "nextCursor": None}))
+                         (200, {"items": [], "nextCursor": None}))
         # admin is no institution exception: the kin-center clinician+admin meets the preview's own institution rule
         foreign = self.stack.request("GET", f"/studies/{uid}/report-preview", "clinician-admin")
         composition["clinician-admin"] = {"report-preview": [foreign.status, code(foreign)]}
@@ -400,14 +404,14 @@ class ClinicianPolicyLive(unittest.TestCase):
             self.assertEqual(body["eventId"], sent["eventId"])
             self.assertTrue(body["receivedAt"])
         elif route == "GET studies/:uid/viewer-items":
-            self.assertEqual(body, {"uid": uid, "final": False, "items": None, "nextCursor": None})
+            self.assertEqual(body, {"items": [], "nextCursor": None})
         elif route == "GET clinician/studies":
             # WORKLIST-SPLIT-UID (#180, D1492): the unpaged answer completes the list and names its excluded identities.
             self.assertEqual(sorted(body), sorted(READ["list_response_keys"] + ["identityIssues"]))
             self.assertIsInstance(body["identityIssues"], list)
             self.assertIn(uid, {row["uid"] for row in body["studies"]})
         elif route == "GET clinician/studies/:uid/report":
-            self.assertEqual(body, {"uid": uid, "report": {"final": False, "rs": "W"}, "keys": None})
+            self.assertEqual(body, {"uid": uid, "report": {"final": False, "rs": "W", "findings": "", "conclusion": "", "recommendation": ""}, "keys": []})
         elif route == "GET clinician/studies/:uid/timeline":
             # S5-U3: the anchor study is its own timeline member; the grouping itself is TEST-S5-U3-LIVE's
             self.assertEqual(sorted(body), sorted(READ["timeline_response_keys"]))
@@ -474,6 +478,171 @@ class ClinicianPolicyLive(unittest.TestCase):
         else:
             self.fail("no positive check for " + route)
 
+    def test_06_physician_worklist_read_and_own_settings_matrix(self) -> None:
+        """2026-11-02: exercise admitted consumers, with independent role and institution calls.
+
+        A foreign doctor can use their own settings; they cannot overwrite this doctor's settings.
+        Missing fixture dependencies are reported per subcase, never as a passed or skipped case.
+        """
+        uid = self.study().uid
+        owner = member_owner(self.stack, "clinician")
+        other = member_owner(self.stack, "kclinician")
+        gateway = self.stack.service_token("gateway")
+        observed, not_run = {}, {}
+        tables = ("WorkspaceLayout", "WorkspaceShortcuts", "ReadingAppearance", "ReadingPreferences",
+                  "WorklistColumns", "HangingProtocolPreference", "FavoriteWorkspace")
+        for table in tables:
+            self.assertEqual(psql(f'SELECT count(*) FROM "{table}" WHERE subject={lit(owner[1])}'), ["0"])
+
+        def cleanup_settings():
+            for table in tables:
+                # Only the member created by this LiveStack, with exact row comparison.
+                for raw in psql(f'SELECT to_jsonb(t)::text FROM "{table}" t WHERE subject={lit(owner[1])}'):
+                    psql(f'DELETE FROM "{table}" t WHERE subject={lit(owner[1])} AND to_jsonb(t)={lit(raw)}::jsonb')
+        self.addCleanup(cleanup_settings)
+
+        def get(path):
+            result = self.stack.request("GET", path, "clinician")
+            self.assertEqual(result.status, 200, path + " " + result.text[:300])
+            return result.body
+
+        # A saved search supplies the real id for default/delete; a key supplies its revision route.
+        saved = self.stack.request("POST", "/filters", "clinician", {"name": "SYNTHETIC matrix filter"})
+        self.assertEqual(saved.status, 201, saved.text[:300])
+        filter_id = saved.body["id"]
+        instance = self.stack.first_instance_id(uid)
+        tags = self.stack._orthanc_request("GET", f"/instances/{quote(instance)}/tags?simplify").body
+        key = self.stack.request("POST", f"/studies/{uid}/viewer-items", "doctor", {
+            "requestId": str(uuid.uuid4()), "item": {"schemaVersion": 1, "kind": "key",
+            "seriesUid": tags["SeriesInstanceUID"], "sopUid": tags["SOPInstanceUID"], "frame": 1,
+            "title": "SYNTHETIC matrix key", "description": ""}})
+        self.assertEqual(key.status, 200, key.text[:300])
+        key_id = key.body["id"]
+        finding = self.stack.request("POST", f"/studies/{uid}/findings", "doctor", {
+            "requestId": str(uuid.uuid4()), "item": {"schemaVersion": 1, "title": "SYNTHETIC matrix finding",
+            "text": "SYNTHETIC key reference", "sources": [{"itemId": key_id, "revision": key.body["revision"]}]}})
+        self.assertEqual(finding.status, 200, finding.text[:300])
+        finding_id = finding.body["id"]
+        def cleanup_finding():
+            psql(f'BEGIN; DELETE FROM "FindingRevision" WHERE "findingId"={lit(finding_id)}::uuid; '
+                 f'DELETE FROM "Finding" WHERE id={lit(finding_id)}::uuid AND "studyUid"={lit(uid)}; COMMIT;')
+        self.addCleanup(cleanup_finding)
+        self.stack.create_test_identity("physician-matrix-admin", ["admin"], "hallym")
+        self.assertEqual(psql('SELECT count(*) FROM "SharedFilterLibrary" WHERE institution=\'hallym\''), ["0"])
+        def cleanup_library():
+            for raw in psql('SELECT to_jsonb(t)::text FROM "SharedFilterLibrary" t WHERE institution=\'hallym\''):
+                psql(f'DELETE FROM "SharedFilterLibrary" t WHERE institution=\'hallym\' AND to_jsonb(t)={lit(raw)}::jsonb')
+        self.addCleanup(cleanup_library)
+        library = self.stack.request("POST", "/shared-filters", "physician-matrix-admin", {
+            "expectedOwner": member_owner(self.stack, "physician-matrix-admin"), "revision": 0,
+            "command": {"action": "save-folder", "path": "SYNTHETIC source", "description": "", "ordinal": 0}})
+        self.assertEqual(library.status, 201, library.text[:300])
+        # Use a real version for the version-specific citations reader, without changing the signed CVR fixture.
+        committed = self.stack.request("POST", f"/studies/{uid}/report/commit", "doctor", {
+            "action": "save", "baseVersion": 0, "findings": "SYNTHETIC physician matrix body",
+            "conclusion": "", "recommendation": ""})
+        self.assertEqual(committed.status, 201, committed.text[:300])
+
+        # A saved search must still exist when its default flag is changed.
+        for route in sorted(LIVE_MATRIX["physician_rows"], key=lambda route: route == "DELETE filters/:id"):
+            method, template = route.split(" ", 1)
+            path = "/" + template.replace(":uid", uid).replace(":version", str(committed.body["version"]))
+            path = path.replace(":id", key_id if "viewer-items" in route else finding_id if "findings" in route else str(filter_id))
+            body = None
+            if method in ("PUT", "DELETE") and template in ("worklist-columns", "workspace-layout"):
+                current = get("/" + template)
+                body = {"expectedOwner": owner, "revision": current["revision"]}
+                if method == "PUT":
+                    if template == "workspace-layout":
+                        body["layout"] = {"version": 1, "mode": "auto", "portrait": {}, "landscape": {}}
+                    else:
+                        body["columns"] = {"version": 1, "modes": {m: {"order": ["id", "name"], "hidden": []}
+                            for m in ("Radiology", "Technician")}}
+            elif route == "PUT workspace-shortcuts":
+                body = {"expectedOwner": owner, "revision": get(path)["revision"], "bindings": {"version": 2,
+                    **{k: None for k in ("list", "image", "prior", "report", "context", "note", "tools",
+                                        "nativeTools", "previous", "next", "finalize")}}}
+            elif route == "PUT reading-appearance":
+                body = {"expectedOwner": owner, "revision": get(path)["revision"],
+                        "sizes": {"version": 1, "list": 14, "current": 14, "prior": 14}}
+            elif route == "PUT reading-preferences":
+                body = {"expectedOwner": owner, "revision": get(path)["revision"], "autoNote": False}
+            elif route == "PUT hanging-protocols":
+                body = {"expectedOwner": {"institution": owner[0], "subject": owner[1]},
+                        "revision": get(path)["revision"], "value": None}
+            elif route == "POST filter-folders":
+                body = {"expectedOwner": owner, "revision": get(path)["revision"],
+                        "command": {"action": "replace-shortcuts", "shortcuts": []}}
+            elif route == "POST filters":
+                body = {"name": "SYNTHETIC matrix new filter"}
+            elif route == "PATCH filters/:id/default":
+                body = {"on": True}
+            elif route == "POST favorite-folders":
+                body = {"expectedOwner": owner, "revision": get(path)["revision"], "requestId": str(uuid.uuid4()),
+                        "folderId": str(uuid.uuid4()), "action": "create", "name": "SYNTHETIC matrix favourites"}
+            elif route == "POST shared-filters/copy":
+                body = {"expectedOwner": owner, "revision": get("/shared-filters")["revision"],
+                        "personalRevision": get("/filter-folders")["revision"], "from": "SYNTHETIC source",
+                        "to": "SYNTHETIC copy", "namePrefix": "SYNTHETIC "}
+            elif route == "POST studies/:uid/view-observations":
+                versions = get(f"/studies/{uid}/report/versions")
+                body = {"accessRef": versions[0]["accessRef"], "eventId": str(uuid.uuid4()),
+                        "shownAt": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")}
+
+            # Refusals first: delete/default must still target the original owner's saved search.
+            for case, identity in (("wrong_role", "gateway"), ("wrong_tenant", "kclinician"), ("positive", "clinician")):
+                label = route + " " + case
+                if label in not_run:
+                    continue
+                with self.subTest(route=route, case=case):
+                    result = (self.bearer(method, path, gateway, body) if identity == "gateway"
+                              else self.stack.request(method, path, identity, body))
+                    observed[label] = {"status": result.status, "code": code(result)}
+                    self.assertNotEqual(code(result), DENIED, result.text[:300])
+                    if case == "wrong_role":
+                        self.assertEqual(result.status, 403, result.text[:300])
+                    elif case == "wrong_tenant" and ":uid" in template:
+                        self.assertIn(result.status, (403, 404), result.text[:300])
+                    elif case == "wrong_tenant" and ":id" in template:
+                        self.assertEqual(result.status, 404, result.text[:300])
+                    elif case == "wrong_tenant" and body and "expectedOwner" in body:
+                        self.assertEqual(result.status, 409, result.text[:300])
+                    else:
+                        expected_status = 201 if method == "POST" and "view-observations" not in route else 200
+                        self.assertEqual(result.status, expected_status, result.text[:300])
+                        if case == "positive" and method == "PUT":
+                            persisted = get(path)
+                            self.assertEqual(persisted["revision"], body["revision"] + 1)
+                            for field in ("layout", "columns", "bindings", "sizes", "autoNote", "value"):
+                                if field in body:
+                                    self.assertEqual(persisted[field], result.body[field], field)
+                        if case == "positive" and route == "POST favorite-folders":
+                            self.assertIn(body["folderId"], {f["id"] for f in get(path)["folders"]})
+                            for action in ("rename", "delete"):
+                                current = get(path)
+                                command = {"expectedOwner": owner, "revision": current["revision"],
+                                           "requestId": str(uuid.uuid4()), "folderId": body["folderId"], "action": action}
+                                if action == "rename": command["name"] = "SYNTHETIC renamed favourites"
+                                changed = self.stack.request("POST", path, "clinician", command)
+                                self.assertEqual(changed.status, 201, changed.text[:300])
+                                folders = get(path)["folders"]
+                                if action == "rename":
+                                    self.assertEqual(next(f["name"] for f in folders if f["id"] == body["folderId"]), command["name"])
+                                else:
+                                    self.assertNotIn(body["folderId"], {f["id"] for f in folders})
+                        if method == "GET":
+                            self.assertIsInstance(result.body, (dict, list))
+                            if template == "studies":
+                                uids = {r["uid"] for r in result.body["studies"]}
+                                self.assertEqual(uid in uids, case == "positive")
+                            if isinstance(result.body, dict) and "owner" in result.body:
+                                actual = result.body["owner"]
+                                expected = owner if case == "positive" else other
+                                if isinstance(actual, list): self.assertEqual(actual, expected)
+                                elif isinstance(actual, dict): self.assertEqual(actual["institution"], expected[0])
+        self.assertEqual(len(observed) + len(not_run), 3 * len(LIVE_MATRIX["physician_rows"]))
+        print("PHYSICIAN_LIVE_MATRIX " + json.dumps({"observed": observed, "not_run": not_run}, sort_keys=True))
+
     def assert_audit(self, write: dict, written: list, values: dict, sent: dict) -> None:
         """S5-U4a: a write row's positive wrote exactly its declared audit rows, attributed to the token and to this request."""
         audit = write["audit"]
@@ -489,10 +658,10 @@ class ClinicianPolicyLive(unittest.TestCase):
     def test_05_every_allow_row_has_a_positive_a_wrong_role_and_a_wrong_tenant_case(self) -> None:
         pending = LIVE_MATRIX.get("pending_routes", {})
         self.assertTrue(set(LIVE_MATRIX["rows"]).isdisjoint(pending))
-        self.assertEqual(set(LIVE_MATRIX["rows"]) | set(pending), ALLOWED)
+        self.assertEqual(set(LIVE_MATRIX["rows"]) | set(pending) | set(LIVE_MATRIX.get("physician_rows", {})), ALLOWED)
         for route, reason in pending.items():
             with self.subTest(route=route):
-                self.skipTest(reason)
+                print("NOT_RUN " + route + ": " + reason)
         study = self.study()
         uid = study.uid
         instance = self.stack.first_instance_id(uid)

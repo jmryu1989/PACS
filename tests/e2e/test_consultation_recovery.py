@@ -50,7 +50,7 @@ class ConsultationRecoveryE2E(ConsultationE2E):
         for fixture in fixtures:self.create_request(fixture)
         p=self.login('doctor2')
         expect(p.locator('#rows tr[data-uid]')).not_to_have_count(0)
-        p.locator('#clearfilter').click();p.locator('#page-size').select_option('25')
+        self.clear_filters(p);p.locator('#page-size').select_option('25')
         p.locator('#page-next').click();expect(p.locator('#page-prev')).to_be_enabled()
         self.open_dialog(p);expect(p.locator('#co-count')).to_have_text('26 shown / 26 loaded')
         p.locator('#co-filter').click();expect(p.locator('#consultations-dialog')).not_to_be_visible()

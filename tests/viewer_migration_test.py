@@ -393,8 +393,11 @@ report(async()=>{
                  + f"('{self.uid}','SYNTHETIC 인용 줄','','',1,'SYNTHETIC-reader','2026-09-20'); "
                  + 'INSERT INTO "ReportVersion" (uid,version,action,findings,conclusion,recommendation,author) VALUES '
                  + f"('{self.uid}',1,'save','SYNTHETIC 인용 줄','','','SYNTHETIC-reader'); "
-                 + 'INSERT INTO "ReportDraft" (uid,author,findings,conclusion,recommendation,"baseVersion","updatedAt") VALUES '
-                 + f"('{self.uid}','SYNTHETIC-reader','SYNTHETIC 인용 줄','','',1,'2026-09-20')")
+                 # Every migration is applied here: a present draft holds its work (CD-09-P ReportDraft_work_check).
+                 + 'INSERT INTO "ReportDraft" (uid,author,findings,conclusion,recommendation,"baseVersion","updatedAt",'
+                 + '"workUnit","workSince","workIntent") VALUES '
+                 + f"('{self.uid}','SYNTHETIC-reader','SYNTHETIC 인용 줄','','',1,'2026-09-20',"
+                 + "'disposal:00000000-0000-4000-8000-0000000000f1','2026-09-20','approve')")
         run = ['--network', 'container:'+self.db,
                '-e', 'DATABASE_URL=postgresql://postgres@127.0.0.1:5432/citations_runtime',
                '-e', 'SYNTHETIC_UID='+self.uid, '--entrypoint', 'node', image, '-e']

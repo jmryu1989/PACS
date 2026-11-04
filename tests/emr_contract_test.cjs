@@ -510,6 +510,66 @@ if (process.argv.includes('--emr-inventory-generator')) {
       targets: [{ kind: 'report-version', patientLinkSnapshot: known(patient), studyId: known('study-1'), recordId: known('report-1'), versionId: known('version-1') }],
       action: 'provide-prepared', result: 'prepared', requestId: 'request-1', auditLinkId: A.newAuditLinkId(), relatedEventId: null, ...overrides };
   }
+  test('CD10 legacy import roles are unresolved only for the dedicated V1 successful write', () => {
+    const rolesAtTime = { status: 'unresolved', reason: 'legacy-import-roles-not-stored' };
+    const event = access({ surface: 'POST dicom-import', action: 'write', result: 'succeeded', rolesAtTime,
+      targets: [{ kind: 'image', patientLinkSnapshot: known(patient), studyId: known('study-1'),
+        recordId: known('sop-1'), versionId: known('ab'.repeat(32)) }] });
+    assert.deepEqual(A.parseAccessEvent(event).rolesAtTime, rolesAtTime);
+    assert.deepEqual(A.parseAccessEvent(event).userId, event.userId);
+    const other = { ...event, surface: 'POST gateway/stow/:uid' };
+    assert.doesNotThrow(() => A.parseAccessEvent({ ...other, rolesAtTime: known(['gateway']) }));
+    assert.throws(() => A.parseAccessEvent(other));
+    assert.throws(() => A.parseAccessEvent({ ...event, action: 'modify' }));
+    assert.throws(() => A.parseAccessEvent({ ...event, rolesAtTime: { status: 'unresolved', reason: 'not-observed' } }));
+    assert.throws(() => A.parseAccessEvent({ ...event, userId: { status: 'unresolved', reason: 'not-observed' } }));
+    assert.throws(() => A.parseAccessEvent({ ...event, rolesAtTime: { ...rolesAtTime, extra: true } }));
+  });
+
+  test('CD05/CD07 V1 response-only exceptions preserve surface, kind, exact facts and V2 boundaries', () => {
+    const none = { status: 'not-applicable', reason: 'non-record-target' };
+    const unresolved = { status: 'unresolved', reason: 'not-resolved' };
+    const summary = { kind: 'access-audit', patientLinkSnapshot: none, studyId: none, recordId: known('cycle'), versionId: none };
+    const details = ['GET emr-audit/inspections/:month', 'POST emr-audit/inspections/:month/report'];
+    for (const surface of [...details, 'GET emr-audit/inspections', 'POST emr-audit/inspections/:month/steps', 'GET emr-audit/rights-requests']) {
+      const target = { ...summary, kind: surface.includes('rights-requests') ? 'disclosure' : 'access-audit' };
+      const event = access({ surface, targets: [target] });
+      assert.deepEqual(A.parseAccessEvent(event).targets, [target]);
+      for (const field of ['patientLinkSnapshot', 'studyId', 'recordId', 'versionId']) {
+        assert.throws(() => A.parseAccessEvent({ ...event, targets: [{ ...target, [field]: unresolved }] }), surface + ' ' + field);
+        assert.throws(() => A.parseAccessEvent({ ...event, targets: [{ ...target, [field]: { ...none, reason: 'not-observed' } }] }));
+      }
+      assert.throws(() => A.parseAccessEvent({ ...event, targets: [{ ...target, kind: 'report-version' }] }));
+      assert.throws(() => A.parseAccessEvent({ ...event, formatVersion: 2 }));
+      assert.throws(() => A.parseAccessEvent({ ...event, formatVersion: 2, branch: 'local-read' }));
+      for (const other of ['GET studies/:uid/report/versions', 'GET emr-audit/issuances/:id', 'POST emr-audit/investigations', 'POST emr-audit/exports'])
+        assert.throws(() => A.parseAccessEvent({ ...event, surface: other }), other);
+    }
+    const download = { ...summary, recordId: known('event'), versionId: known('event') };
+    const local = { kind: 'access-audit', sourcePatientId: unresolved, sourceInstitution: known('hospital-a'),
+      studyId: unresolved, recordId: known('event'), versionId: known('event') };
+    for (const surface of details) {
+      assert.deepEqual(A.parseAccessEvent(access({ surface, targets: [download, local] })).targets, [download, local]);
+      assert.throws(() => A.parseAccessEvent(access({ surface, targets: [{ ...download, versionId: known('another') }] })));
+      for (const field of ['sourcePatientId', 'sourceInstitution', 'studyId', 'recordId', 'versionId'])
+        assert.throws(() => A.parseAccessEvent(access({ surface, targets: [{ ...local, [field]: none }] })));
+    }
+    for (const surface of ['GET emr-audit/inspections', 'POST emr-audit/inspections/:month/steps', 'GET emr-audit/rights-requests']) {
+      assert.throws(() => A.parseAccessEvent(access({ surface, targets: [download] })));
+      assert.throws(() => A.parseAccessEvent(access({ surface, targets: [local] })));
+    }
+    const request = { kind: 'disclosure', patientLinkSnapshot: known(patient), studyId: unresolved, recordId: known('request'), versionId: unresolved };
+    for (const surface of ['POST emr-audit/rights-requests', 'GET emr-audit/rights-requests/:id',
+      'POST emr-audit/rights-requests/:id/decide', 'POST emr-audit/rights-requests/:id/notify']) {
+      assert.deepEqual(A.parseAccessEvent(access({ surface, targets: [request] })).targets, [request]);
+      for (const field of ['patientLinkSnapshot', 'recordId'])
+        assert.throws(() => A.parseAccessEvent(access({ surface, targets: [{ ...request, [field]: unresolved }] })));
+      for (const field of ['patientLinkSnapshot', 'studyId', 'recordId', 'versionId'])
+        assert.throws(() => A.parseAccessEvent(access({ surface, targets: [{ ...request, [field]: none }] })));
+    }
+    for (const surface of ['GET emr-audit/rights-requests', 'GET emr-audit/issuances/:id', 'POST emr-audit/issuances/:id/issue'])
+      assert.throws(() => A.parseAccessEvent(access({ surface, targets: [request] })));
+  });
   test('TEST-EMR-07-A: every required event and target field is checked at runtime', () => {
     const valid = access(); assert.equal(A.parseAccessEvent(valid).action, 'provide-prepared');
     for (const field of Object.keys(valid)) { const bad = clone(valid); delete bad[field]; assert.throws(() => A.parseAccessEvent(bad), field); }
@@ -1333,7 +1393,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.throws(() => D.newRetentionRecord(lateSource), { code: 'ReferenceSnapshotRequired' });
   });
 
-  test('TEST-EMR-12/19-A R3-04: overtaken approval cancellation and closed amendment each explicitly end draft intent', async () => {
+  test('TEST-EMR-12/19-A S2 (정모 님 11-03, D593 replaced for native): another reader\'s approval, the parent\'s cancellation and the closed amend window never end a private draft', async () => {
     const at = deadline;
     const scenarios = [
       ['approve', { eventId: 'other-sign', reportId: 'parent', at, action: 'approve', authorId: 'other-reader', draftId: 'other-draft', versionId: 'approved-v1' }],
@@ -1342,11 +1402,14 @@ if (process.argv.includes('--emr-inventory-generator')) {
     ];
     for (const [action, fact] of scenarios) {
       const draft = purposeRecord('overtaken-' + action, 'private-draft', 'owner', t0, ['d1'], { row: { draftBinding: { reportId: 'parent', intentId: action + '-intent', action } } });
-      const end = purposeEnd(draft, 'intent-superseded', at, { superseded: fact });
-      let deletes = 0;
-      const result = await endPurpose(durable, draft, end, at, async () => { deletes++; return { completedAt: at, method: 'irreversible-permanent-deletion' }; });
-      assert.equal(deletes, 1); assert.equal(result.phase, 'completed'); assert.equal(result.expiryDay, '2026-10-06');
+      // The stored fact itself is well formed and resolves; it is not an end of this draft: no record, no deletion.
+      await refusePurpose(draft, purposeEnd(draft, 'intent-superseded', at, { superseded: fact }), at, 'PurposeBindingRefused');
       await refusePurpose(draft, purposeEnd(draft, 'intent-superseded', at, { superseded: { ...fact, reportId: 'other-parent' } }), at, 'PurposeBindingRefused');
+      // The author's own ends stay: the discard, and the signed result of this work.
+      const own = await endPurpose(durable, draft, purposeEnd(draft, 'explicit-discard', at), at, async () => ({ completedAt: at, method: 'irreversible-permanent-deletion' }));
+      assert.equal(own.phase, 'completed');
+      // A result signed by someone else is not the author's end.
+      await refusePurpose(draft, purposeEnd(draft, 'result-version-signed', at, { actorId: 'other-reader' }), at, 'PurposeOwnerRefused');
       await refusePurpose(draft, purposeEnd(draft, 'report-finalized', at), at, 'PurposeBindingRefused');
       await refusePurpose(draft, purposeEnd(draft, 'release', at), at, 'PurposeBindingRefused');
       await refusePurpose(draft, purposeEnd(draft, 'intent-superseded', at), at, 'PurposeBindingRefused');
@@ -1793,6 +1856,18 @@ if (process.argv.includes('--emr-inventory-generator')) {
       assert.equal((await expire(durable, disposal({ record: released, requestedAt: at }), destroyed)).phase, 'completed');
     }
   });
+  test('TEST-EMR-17-A rights withdrawal and replay use the existing close surface with resolved patient/record facts', () => {
+    const unresolved = { status: 'unresolved', reason: 'not-resolved' };
+    const target = { kind: 'disclosure', patientLinkSnapshot: known(patient), studyId: unresolved,
+      recordId: known('withdrawn-record'), versionId: unresolved };
+    for (const [action, result] of [['write', 'succeeded'], ['provide-prepared', 'prepared']]) {
+      const event = access({ surface: 'POST emr-audit/rights-requests/:id/notify', action, result, targets: [target] });
+      assert.deepEqual(A.parseAccessEvent(event).targets, [target]);
+      for (const key of ['patientLinkSnapshot', 'recordId'])
+        assert.throws(() => A.parseAccessEvent({ ...event, targets: [{ ...target, [key]: unresolved }] }));
+      assert.throws(() => A.parseAccessEvent({ ...event, formatVersion: 2 }));
+    }
+  });
   test('TEST-EMR-19-A R5-P1: ending one fact never releases another hold or an indefinite order', async () => {
     const record = baseRecord(), at = '2032-01-01T00:00:00.000Z', order = holdFacts(record.recordId);
     const ordered = holdRecord(record, order), request = requestHold(record, 'access', t0, deadline), both = holdRecord(ordered, request);
@@ -1948,14 +2023,14 @@ if (process.argv.includes('--emr-inventory-generator')) {
       version: { recordId: record.recordId, versionId: 'ordinary', sha256: ordinary.event.sha256 } }), record, ordinary, snapshotFor(record, within));
     assert(normal.effects.includes('publish-immediately')); assert.equal(L.reportRetentionAccess(normal.facts, null).ordinaryClinicalAccess, true);
   });
-  test('TEST-EMR-12/19-A D593: parent cancellation ends an Addendum draft, parent approval and amend window never do', async () => {
-    const draft = purposeRecord('addendum-d593', 'private-draft', 'owner', t0, ['d1'], {
+  test('TEST-EMR-12/19-A S2 (정모 님 11-03): an Addendum draft outlives its parent\'s approval, amend window and cancellation; its own signed Addendum ends it', async () => {
+    const draft = purposeRecord('addendum-s2', 'private-draft', 'owner', t0, ['d1'], {
       row: { draftBinding: { reportId: 'parent', intentId: 'addendum-purpose', action: 'addendum' } } });
     for (const fact of [{ eventId: 'parent-approved', reportId: 'parent', at: deadline, action: 'approve', authorId: 'other', draftId: 'other-draft', versionId: 'v1' },
-      { eventId: 'window-end', reportId: 'parent', at: deadline, action: 'amend-window-closed', firstApprovedAt: t0, amendUntil: deadline }])
+      { eventId: 'window-end', reportId: 'parent', at: deadline, action: 'amend-window-closed', firstApprovedAt: t0, amendUntil: deadline },
+      { eventId: 'parent-cancelled', reportId: 'parent', at: deadline, action: 'cancel', versionId: 'v2', reason: '검사 연결 정정' }])
       await refusePurpose(draft, purposeEnd(draft, 'intent-superseded', deadline, { superseded: fact }), deadline, 'PurposeBindingRefused');
-    const cancel = { eventId: 'parent-cancelled', reportId: 'parent', at: deadline, action: 'cancel', versionId: 'v2', reason: '검사 연결 정정' };
-    const result = await endPurpose(durable, draft, purposeEnd(draft, 'intent-superseded', deadline, { superseded: cancel }), deadline,
+    const result = await endPurpose(durable, draft, purposeEnd(draft, 'result-version-signed', deadline), deadline,
       async () => ({ completedAt: deadline, method: 'irreversible-permanent-deletion' }));
     assert.equal(result.phase, 'completed');
   });

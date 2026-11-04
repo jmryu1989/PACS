@@ -109,7 +109,7 @@ class FakeCloud:
     def announce(self, uid, institution_name):
         self.announced.append(uid)
 
-    def stow(self, uid, body, content_type):
+    def stow(self, uid, body, content_type, source_ae):
         self.stowed.append(uid)
         return set()
 
@@ -118,6 +118,36 @@ class FakeCloud:
 
 
 class AgentUnitTests(unittest.TestCase):
+    def test_stow_preserves_original_source_and_configured_gateway(self):
+        cloud = agent_module.Cloud(config("unused", client_id="gw-inst-a"))
+        self.addCleanup(cloud.session.close)
+        calls = []
+        response = FakeResponse(200, {})
+        response.content = b"{}"
+        cloud.request = lambda *args, **kwargs: calls.append((args, kwargs)) or response
+        self.assertEqual(cloud.stow("1.2.3", b"original", "multipart/related", "SCANNER_A"), set())
+        headers = calls[0][1]["headers"]
+        self.assertEqual([headers["X-Kin-Source-AE"], headers["X-Kin-Gateway"], headers["X-Kin-Institution"]],
+                         ["SCANNER_A", "gw-inst-a", "inst-a"])
+        self.assertEqual(calls[0][1]["data"], b"original")
+
+    def test_different_sending_devices_get_separate_stow_batches(self):
+        instances = [{"sop": str(i), "id": str(i), "size": 16, "source_ae": ae}
+                     for i, ae in enumerate(["CT_A", "CT_A", "CT_B", ""])]
+        batches = plan_batches(instances, 24 * 1024 * 1024)
+        self.assertEqual([len(batch) for batch in batches], [2, 1, 1])
+        self.assertEqual([item for batch in batches for item in batch], instances)
+
+    def test_source_ae_comes_from_local_association_metadata(self):
+        orthanc = agent_module.Orthanc(config("unused"))
+        self.addCleanup(orthanc.session.close)
+        orthanc.study = lambda *args: ("study", {})
+        answers = {"/studies/study/instances": [{"ID": "one", "FileSize": 16,
+                   "MainDicomTags": {"SOPInstanceUID": "1.2.3", "SourceApplicationEntityTitle": "NOT_THE_CALLER"}}],
+                   "/instances/one/metadata?expand": {"RemoteAET": "ACTUAL_CALLER", "Origin": "DicomProtocol"}}
+        orthanc.request = lambda method, path: FakeResponse(200, answers[path])
+        self.assertEqual(orthanc.instances("1.2", "study")[2][0]["source_ae"], "ACTUAL_CALLER")
+
     def test_batches_never_exceed_budget(self):
         budget = 24 * 1024 * 1024
         instances = [
@@ -514,7 +544,7 @@ class RetryCloud:
     def announce(self, uid, institution_name):
         self.announced.append(uid)
 
-    def stow(self, uid, body, content_type):
+    def stow(self, uid, body, content_type, source_ae):
         self.stowed.append(uid)
         if self.stow_error:
             raise self.stow_error()
