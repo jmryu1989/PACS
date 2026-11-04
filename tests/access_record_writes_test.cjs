@@ -259,8 +259,14 @@ function criticalDatabase() {
   const state = { uid: UID, institutionId: INST, teleInstitutionId: null, rs: 'A', preDoc: null, preReviewer: null, preDocSub: null,
     preReviewerSub: null, ov: null };
   const head = { headVersion: 1, headAction: 'approve', headAuthor: SENDER.actor, headAt: new Date(0) };
+  // The study's version rows (Report.version = head.headVersion). A case may add one above the head to damage it.
+  const versions = [{ version: 1, action: 'approve' }];
   const store = { records: new Map(), receipts: new Map(), events: [], audit: [] };
-  const client = s => ({
+  // Per transaction: the order of the locks it took (advisory keys, the StudyState row) and whether it committed.
+  // Transaction-level locks end with the transaction; `held` must be empty whenever no transaction is open.
+  const transactions = [], held = new Set();
+  const take = (tx, lock) => { tx.locks.push(lock); held.add(lock); };
+  const client = (s, tx = { locks: [] }) => ({
     memberRights: { findUnique: async ({ where }) => [SENDER, RECIPIENT].filter(c => c.sub === where.sub).map(rightsRow)[0] ?? null },
     studyState: { findUnique: async () => ({ ...state }) },
     criticalResultReceipt: { findUnique: async ({ where }) => s.receipts.get(where.requestId) ?? null,
@@ -270,11 +276,20 @@ function criticalDatabase() {
       update: async ({ where, data }) => { s.records.set(where.id, { ...s.records.get(where.id), ...data }); } },
     criticalResultEvent: { create: async ({ data }) => { s.events.push(data); } },
     auditLog: { create: async ({ data }) => { s.audit.push(data); return { id: s.audit.length }; } },
-    $executeRaw: async () => 0,
+    // The member lock (two int keys) is the only advisory lock a critical result write takes through $executeRaw.
+    $executeRaw: async (strings, ...values) => { if (strings.join('?').includes('pg_advisory_xact_lock')) take(tx, 'member:' + values[1]); return 0; },
     $queryRaw: async (strings, ...values) => {
       const sql = strings.join('?');
-      if (sql.includes('FROM "StudyState"')) return [{ ...state }];
+      // The fixed-record key is the EMR record contract's text, JSON ['emr-fixed-record', <Study UID>].
+      if (sql.includes('pg_advisory_xact_lock')) {
+        const [kind, recordId] = JSON.parse(values[0]);
+        assert.equal(kind, 'emr-fixed-record');
+        take(tx, 'fixed:' + recordId);
+        return [{}];
+      }
+      if (sql.includes('FROM "StudyState"')) { if (sql.includes('FOR UPDATE')) take(tx, 'study:' + values[0]); return [{ ...state }]; }
       if (sql.includes('FROM "Report" r')) return [{ ...head }];
+      if (sql.includes('FROM "ReportVersion"')) return [{ beyond: versions.filter(v => v.version > values[1] && v.action !== 'discarded').length }];
       if (sql.includes('"supersedesId"=')) return [...s.records.values()].filter(r => r.supersedesId === values[0]).map(r => ({ id: r.id, sourceVersion: r.sourceVersion }));
       if (sql.includes('SELECT id FROM "CriticalResult"')) return [...s.records.values()].filter(r => r.studyUid === values[0] && r.senderSub === values[1]
         && r.recipientSub === values[2] && r.state === 'created').map(r => ({ id: r.id }));
@@ -283,7 +298,16 @@ function criticalDatabase() {
     },
   });
   const copy = s => ({ records: new Map([...s.records].map(([k, v]) => [k, { ...v }])), receipts: new Map(s.receipts), events: [...s.events], audit: [...s.audit] });
-  return { store, ...client(store), $transaction: async work => { const staged = copy(store); const out = await work(client(staged)); Object.assign(store, staged); return out; } };
+  return { store, versions, transactions, held, ...client(store), $transaction: async work => {
+    const staged = copy(store), tx = { locks: [], committed: false };
+    transactions.push(tx);
+    try {
+      const out = await work(client(staged, tx));
+      Object.assign(store, staged);
+      tx.committed = true;
+      return out;
+    } finally { for (const lock of tx.locks) held.delete(lock); }
+  } };
 }
 const source = { reportPreviewStudy: async () => ({ '00100010': { Value: [{ Alphabetic: 'SYNTHETIC^PATIENT' }] }, '00100020': { Value: ['SYN-PID-1'] },
   '00100030': { Value: ['19700101'] }, '00080020': { Value: ['20261031'] } }) };
@@ -323,4 +347,47 @@ test('B2-04 a critical result is 기재 when sent and acknowledged, 수정 when 
     ['POST critical-results/:id/supersede', 'critical-result', third, '2', INST, 'modify', '수정'],
     ['POST critical-results/:id/supersede', 'critical-result', replacement, '1', INST, 'write', '기재']]);
   assert.equal(db.store.audit.length, 7, 'one audit row per state change, as before');
+});
+
+// CD-09 W-V: the lock order each write's transaction took, as this double observes it. Real PostgreSQL waits and the
+// pinned row are proven by tests/critical_result_service_test.cjs (WV cases); this binds which writes take the key.
+test('B2-04 W-V a write that pins a version takes the study fixed-record key before the study row; ACK and cancel do not; a damaged head records nothing', async () => {
+  const db = criticalDatabase(), committed = [];
+  const svc = new CriticalResultService(db, access, {}, source);
+  const fixed = 'fixed:' + UID, study = 'study:' + UID;
+  const last = () => db.transactions.at(-1);
+  const member = tx => tx.locks.filter(lock => lock.startsWith('member:'));
+  const send = requestId => svc.create(UID, SENDER, { requestId, expectedOwner: owner(SENDER), recipientSub: RECIPIENT.sub, sourceVersion: 1,
+    message: MESSAGE }, recorded(db, committed));
+  const supersede = (id, requestId) => svc.supersede(id, SENDER, { requestId, expectedOwner: owner(SENDER), revision: 1, sourceVersion: 1,
+    message: MESSAGE + ' corrected' }, recorded(db, committed));
+  const invalid = error => error.getStatus?.() === 409 && error.getResponse().code === 'CRITICAL_RESULT_SOURCE_INVALID';
+
+  await send(sub(31));
+  assert.equal(member(last()).length, 1, 'the recipient member lock');
+  assert.deepEqual([last().committed, last().locks], [true, [fixed, study, ...member(last())]]);
+  assert.equal(db.held.size, 0, 'transaction locks end with their transaction');
+  await svc.ack(sub(31), RECIPIENT, { requestId: sub(32), expectedOwner: owner(RECIPIENT), revision: 1 }, recorded(db, committed));
+  assert.deepEqual([last().committed, last().locks], [true, [study]], 'an ACK pins nothing');
+  await send(sub(33));
+  await svc.cancel(sub(33), SENDER, { requestId: sub(34), expectedOwner: owner(SENDER), revision: 1, reason: 'SYNTHETIC reason' }, recorded(db, committed));
+  assert.deepEqual([last().committed, last().locks], [true, [study]], 'a cancel pins nothing');
+  assert.equal(committed.length, 4);
+
+  // A non-discarded version above Report.version: neither the head nor the top version is pinned.
+  db.versions.push({ version: 2, action: 'approve' });
+  await assert.rejects(send(sub(35)), invalid);
+  assert.deepEqual([last().committed, last().locks, committed.length, db.store.records.size], [false, [fixed, study], 4, 2]);
+  assert.equal(db.held.size, 0);
+  db.versions.pop();
+  await send(sub(35));
+  db.versions.push({ version: 2, action: 'approve' });
+  await assert.rejects(supersede(sub(35), sub(36)), invalid);
+  assert.deepEqual([last().committed, last().locks, committed.length, db.store.records.get(sub(35)).state], [false, [fixed, study], 5, 'created']);
+  // force-discard's discarded version above the head does not move the head: the head is pinned.
+  db.versions[1].action = 'discarded';
+  await supersede(sub(35), sub(36));
+  assert.deepEqual([last().committed, last().locks], [true, [fixed, study, ...member(last())]]);
+  assert.deepEqual([db.store.records.get(sub(36)).sourceVersion, committed.length], [1, 7]);
+  assert.equal(db.held.size, 0);
 });
