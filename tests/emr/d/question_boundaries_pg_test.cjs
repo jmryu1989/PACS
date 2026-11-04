@@ -579,13 +579,22 @@ test('CD-09 W-Q question writes: report anchor, lock order against native, Tech 
           await witness.$executeRawUnsafe('DROP FUNCTION public.wq_fail_commit()');
         }
         // E5: the HTTP status of a refused COMMIT is recorded as observed; it is not counted as a 503 pass.
-        log('deferred-commit', { out, outcome: await outcome(id), counts: await counts(q, id) });
+        const first = await outcome(id);
+        log('deferred-commit', { out, outcome: first, counts: await counts(q, id) });
         assert.ok(out.status >= 500, JSON.stringify(out));
         assert.deepEqual(await counts(q, id), before);
-        const again = await reply(q, 'doctor', 1, id);
-        log('deferred-commit-same-id', { again, outcome: await outcome(id) });
-        assert.ok(again.status >= 400, JSON.stringify(again)); assert.equal((await counts(q, id)).mine, 0);
-        ok(await reply(q, 'doctor', 1), 201, 'new id');
+        // E2: only a negative B2 settlement fixes the request ID to its failure. An operation the failed COMMIT left
+        // unsettled may be applied by its retry, once; it is never applied twice and never answered from nothing.
+        const again = await reply(q, 'doctor', 1, id), after = await counts(q, id);
+        log('deferred-commit-same-id', { again, outcome: await outcome(id), after, firstSettlement: first.map(o => o.outcome) });
+        if (first.some(o => o.outcome === 'negative') || again.status >= 400) {
+          assert.ok(again.status >= 400, JSON.stringify(again)); assert.equal(after.mine, 0);
+        } else {
+          ok(again, 201, 'retry of an unsettled operation');
+          assert.deepEqual([after.mine, after.myAudits, after.versions, after.revision],
+            [1, 1, before.versions + 1, before.revision + 1], 'applied once');
+        }
+        ok(await reply(q, 'doctor', after.revision), 201, 'new id');
       });
     });
   } finally {
