@@ -220,8 +220,43 @@ export function draftEnvelope(uid: string, owner: DraftOwner, epoch: string, row
     snapshot: draftSnapshot(row), updatedAt: row?.present ? row.updatedAt : null };
 }
 
+/**
+ * B2가 판정한 이 트랜잭션의 COMMIT(emr-runtime/store.ts LedgerFailure). change는 초안 변경과 그 기록이 한 트랜잭션인 경우로,
+ * 커밋되지 않음은 저장되지 않음이다. view는 이미 읽은 초안 상태를 보내기 전의 열람 기록으로, 실패하면 내용을 보내지 않을 뿐
+ * 초안·Related 적용의 저장 여부는 말하지 않는다. 확인하지 못함(CommitUnknown)은 어느 쪽에서도 저장되지 않았다고 하지 않는다.
+ * 입력과 고정 요청 ID·revision은 화면에 남고, 다시 읽기(Check)가 서버 상태를 정한다.
+ */
+const DRAFT_LEDGER = {
+  change: {
+    AppendNotCommitted: { code: 'REPORT_DRAFT_NOT_COMMITTED',
+      message: '판독문 변경이 서버에 저장되지 않았습니다. 입력한 내용은 이 화면에 남아 있습니다 — 다시 시도하세요.' },
+    CommitUnknown: { code: 'REPORT_DRAFT_COMMIT_UNKNOWN',
+      message: '판독문 변경이 서버에 저장됐는지 아직 확인하지 못했습니다. 입력한 내용은 이 화면에 남아 있고, 저장된 상태를 다시 불러와 확인합니다.' },
+  },
+  view: {
+    AppendNotCommitted: { code: 'REPORT_DRAFT_VIEW_NOT_RECORDED',
+      message: '판독문 초안 상태를 보내기 전에 열람 기록을 저장하지 못해 내용을 보내지 않았습니다. 입력한 내용은 이 화면에 남아 있습니다 — 다시 불러오세요.' },
+    CommitUnknown: { code: 'REPORT_DRAFT_VIEW_UNCONFIRMED',
+      message: '판독문 초안 상태의 열람 기록이 저장됐는지 확인하지 못해 내용을 보내지 않았습니다. 입력한 내용은 이 화면에 남아 있고, 다시 불러와 확인합니다.' },
+  },
+} as const;
+const DRAFT_COMMIT_CODES: readonly unknown[] = [DRAFT_LEDGER.change.AppendNotCommitted.code, DRAFT_LEDGER.change.CommitUnknown.code];
+
+/** B2의 COMMIT 판정이면 그 단계의 503을 던진다. 그 밖의 오류는 그대로 둔다(호출한 쪽이 이어서 다룬다). */
+export function draftLedgerError(error: any, stage: 'change' | 'view'): void {
+  if (error?.code === 'AppendNotCommitted' || error?.code === 'CommitUnknown')
+    throw new ServiceUnavailableException(DRAFT_LEDGER[stage][error.code as 'AppendNotCommitted' | 'CommitUnknown']);
+}
+
+/** 초안 변경 트랜잭션의 COMMIT이 커밋되지 않았거나 확인되지 않은 답(변환 전후 모두). 종료 판정(settleEnding)이 일반 거절과 가른다. */
+export function draftCommitFailure(error: any): boolean {
+  if (error?.code === 'AppendNotCommitted' || error?.code === 'CommitUnknown') return true;
+  return DRAFT_COMMIT_CODES.includes(error?.getResponse?.()?.code);
+}
+
 /** 트랜잭션 획득·잠금·제한 시간 초과. 한도를 넘긴 요청은 끝없이 기다리지 않고 저장되지 않은 채 503으로 끝난다. */
 export function draftTransactionError(error: any): never {
+  draftLedgerError(error, 'change');
   if (error?.code === 'P2028' || error?.code === 'P2034'
       || error?.code === 'P2010' && ['55P03', '57014', '40P01'].includes(error?.meta?.code))
     throw draftUnavailable();

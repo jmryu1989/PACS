@@ -10,7 +10,7 @@ import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import type { PrismaService } from '../prisma.service';
 import { dump, holdAlive, reportHeld, toClient, draftConflict, draftOwner, draftEpochOf, draftExpected, draftSnapshotInput,
-  draftEnvelope, draftTransactionError, draftBounded, visibleDraftSummary, draftToken } from './values';
+  draftEnvelope, draftTransactionError, draftBounded, visibleDraftSummary, draftToken, draftLedgerError, draftCommitFailure } from './values';
 import type { DraftOwner } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
@@ -202,11 +202,12 @@ export class PacsReportDraft {
     return (observation ? this.recorded(uid, c, observation, perform, options)
       : this.prisma.$transaction(tx => perform(tx), options)).catch(async error => {
         // A receipt race can roll back the business transaction but still return
-        // its captured draft. Commit that view before sending the refusal.
+        // its captured draft. Commit that view before sending the refusal; a view
+        // whose record did not commit is not sent, and says nothing of the draft.
         if (rolledBackView && observation) await this.recorded(uid, c,
           { ...observation, action: 'provide-prepared' }, async (_tx, record) => {
             await record(rolledBackView.state, rolledBackView.value);
-          }, options);
+          }, options).catch(viewError => { draftLedgerError(viewError, 'view'); throw viewError; });
         return draftTransactionError(error);
       });
   }
@@ -316,7 +317,9 @@ export class PacsReportDraft {
         message: '초안 정리는 서버에 저장됐지만 응답을 완성하지 못했습니다. 저장된 상태를 다시 불러옵니다' });
     }
     if (outcome === 'not-committed') {
-      if (failed) throw failure;
+      // A refusal keeps its own answer. B2's answer that the COMMIT did not commit or cannot be told is about the same
+      // transaction this judgement just settled: the end is not saved, said in the end's own words.
+      if (failed && !draftCommitFailure(failure)) throw failure;
       throw new ServiceUnavailableException({ code: 'REPORT_DRAFT_END_NOT_SAVED',
         message: '초안 정리가 서버에 기록되지 않았습니다 — 초안은 그대로입니다. 다시 시도하세요' });
     }
@@ -357,7 +360,7 @@ export class PacsReportDraft {
     return this.recorded(uid, c, { facts, surface: 'GET studies/:uid/draft', action: 'provide-prepared' }, async (_tx, record) => {
       await record(snapshot.state, snapshot.value);
       return snapshot.value;
-    }, { maxWait: 2000, timeout: 5000 });
+    }, { maxWait: 2000, timeout: 5000 }).catch(error => { draftLedgerError(error, 'view'); throw error; });
   }
 
   async dictationGate(uid: string, c: Caller) {
@@ -438,7 +441,7 @@ export class PacsReportDraft {
       if (earlyView) await this.recorded(uid, c,
         { facts, surface: 'PUT studies/:uid/report', action: 'provide-prepared' }, async (_tx, record) => {
           await record(early.state, earlyView);
-        }, { maxWait: 2000, timeout: 5000 });
+        }, { maxWait: 2000, timeout: 5000 }).catch(error => { draftLedgerError(error, 'view'); throw error; });
       if (early.outcome?.refusal) throw early.outcome.refusal;
       if (early.outcome) return early.outcome.body;
       const outcome = await this.reportEvidence.reportLimitChecked(() => this.draftTransaction(uid, c, session, expected.epoch,

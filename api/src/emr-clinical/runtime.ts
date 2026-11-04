@@ -41,13 +41,21 @@ export interface ClinicalRuntimeParts {
    * only on the B2 transaction supplied here. */
   project(tx: Prisma.TransactionClient, request: object, plan: Readonly<ClinicalWritePlan>, projection: unknown): Promise<unknown>;
 }
+/** `stage` says which transaction an answer is about: the write itself (command), or the record of providing its stored
+ * result after the write committed (provide). A provide failure never says the write was not saved. */
 export type OnlineClinicalOutcome =
   | { status: 'committed' | 'replayed'; receipt: WriteReceipt; response?: unknown; signature?: ClinicalSignature;
       access: { eventId: string; durableAt: string } }
-  | { status: 'unknown'; code: 'OutcomeUnknown'; retry: 'same-request' }
-  | { status: 'rejected'; code: 'AppendNotCommitted' };
-const unknown = (): OnlineClinicalOutcome => ({ status: 'unknown', code: 'OutcomeUnknown', retry: 'same-request' });
+  | { status: 'unknown'; code: 'OutcomeUnknown'; stage: 'command' | 'provide'; retry: 'same-request' }
+  | { status: 'unrecorded'; code: 'ProvideNotRecorded'; stage: 'provide'; retry: 'same-request' }
+  | { status: 'rejected'; code: 'AppendNotCommitted'; stage: 'command' };
+const unknown = (stage: 'command' | 'provide' = 'command'): OnlineClinicalOutcome =>
+  ({ status: 'unknown', code: 'OutcomeUnknown', stage, retry: 'same-request' });
+const rejected = (): OnlineClinicalOutcome => ({ status: 'rejected', code: 'AppendNotCommitted', stage: 'command' });
 const known = <T>(value: T) => ({ status: 'known' as const, value });
+/** B2's judgement of one transaction's COMMIT (store.ts LedgerFailure), told apart from every other error. */
+const ledger = (error: any): 'AppendNotCommitted' | 'CommitUnknown' | null =>
+  error?.code === 'AppendNotCommitted' || error?.code === 'CommitUnknown' ? error.code : null;
 
 function eventFor(facts: ClinicalRequestFacts, plan: ClinicalWritePlan): Readonly<AccessEventV1> {
   const v = plan.version;
@@ -77,30 +85,40 @@ export class ClinicalRuntime {
   private async answer(work: EmrRecordWork, request: object, command: StoredClinicalCommand,
     result: OperationResult | null, replay: boolean, prepare: OnlineClinicalWrite['prepare']): Promise<OnlineClinicalOutcome> {
     if (!result || result.outcome === 'pending') return unknown();
-    if (result.outcome === 'negative') return { status: 'rejected', code: 'AppendNotCommitted' };
+    if (result.outcome === 'negative') return rejected();
     const plan = command.plan;
     if (result.result?.kind !== 'emr-clinical' || result.result.id !== plan.version.recordId ||
         result.result.version !== plan.version.versionId) refuse('ClinicalResultMismatch');
-    const stored = await work.transactionWithRecords(async (tx, record) => {
-      const facts = await this.parts.context.facts(tx, request);
-      await this.parts.context.study(tx, request, plan.version.studyId);
-      if (facts.actor.identity.id !== plan.version.author.id || facts.actor.institutionId !== plan.version.actingInstitutionId) refuse('OwnerChanged');
-      // A replay skips the projector. Findings still need their owning reader's
-      // current comparison-lineage checks before returning the old source copy.
-      if (replay && plan.record === 'finding') await prepare(tx, facts);
-      const stored = await this.parts.store.version(tx, plan.version.versionId);
-      if (!stored || stored.operationId !== command.operationId || stored.plan.version.sha256 !== plan.version.sha256) refuse('ClinicalResultMismatch');
-      if (plan.signing) {
-        if (!stored.signature) refuse('SignatureRequired');
-        this.parts.signer.verify(stored.signature, plan.signing);
-      }
-      if (stored.response !== undefined) {
-        const event = { ...eventFor(facts, plan), eventId: randomUUID(), action: 'provide-prepared' as const,
-          result: 'prepared' as const, occurredAt: new Date().toISOString() };
-        await record(event, async () => ({ kind: 'emr-clinical', id: plan.version.recordId, version: plan.version.versionId }));
-      }
-      return stored;
-    });
+    // The write is committed here. Its provide record is a transaction of its own: when that one did not commit, or its
+    // commit cannot be told, the stored result is not sent and the same request ID reads it again (no projector reruns).
+    let stored: Awaited<ReturnType<ClinicalStore['version']>>;
+    try {
+      stored = await work.transactionWithRecords(async (tx, record) => {
+        const facts = await this.parts.context.facts(tx, request);
+        await this.parts.context.study(tx, request, plan.version.studyId);
+        if (facts.actor.identity.id !== plan.version.author.id || facts.actor.institutionId !== plan.version.actingInstitutionId) refuse('OwnerChanged');
+        // A replay skips the projector. Findings still need their owning reader's
+        // current comparison-lineage checks before returning the old source copy.
+        if (replay && plan.record === 'finding') await prepare(tx, facts);
+        const stored = await this.parts.store.version(tx, plan.version.versionId);
+        if (!stored || stored.operationId !== command.operationId || stored.plan.version.sha256 !== plan.version.sha256) refuse('ClinicalResultMismatch');
+        if (plan.signing) {
+          if (!stored.signature) refuse('SignatureRequired');
+          this.parts.signer.verify(stored.signature, plan.signing);
+        }
+        if (stored.response !== undefined) {
+          const event = { ...eventFor(facts, plan), eventId: randomUUID(), action: 'provide-prepared' as const,
+            result: 'prepared' as const, occurredAt: new Date().toISOString() };
+          await record(event, async () => ({ kind: 'emr-clinical', id: plan.version.recordId, version: plan.version.versionId }));
+        }
+        return stored;
+      });
+    } catch (error) {
+      const failed = ledger(error);
+      if (failed === 'AppendNotCommitted') return { status: 'unrecorded', code: 'ProvideNotRecorded', stage: 'provide', retry: 'same-request' };
+      if (failed === 'CommitUnknown') return unknown('provide');
+      throw error;
+    }
     const receipt = await work.confirm({ provisional: true, operationId: command.operationId, eventId: command.event.eventId });
     return freeze({ status: replay ? 'replayed' : 'committed', receipt: plan.receipt,
       ...(stored.response !== undefined ? { response: stored.response, signature: stored.signature } : {}),
@@ -132,23 +150,30 @@ export class ClinicalRuntime {
       }
       const operation = await work.admit(command.event, undefined,
         { operationId: command.operationId, attemptId: command.attemptId });
-      const result = await work.transaction(operation, async tx => {
-        const plan = command.plan;
-        const facts = await this.parts.context.facts(tx, request);
-        const study = await this.parts.context.study(tx, request, plan.version.studyId);
-        await this.parts.store.lockUnit(tx, plan.record, plan.version.recordId);
-        const unit = await this.parts.store.unit(tx, plan.record, plan.version.recordId);
-        // A's verified-record capability cannot be serialized in command JSON.
-        // Re-read source/party facts under the owning service's current checks,
-        // then require the exact originally selected version before signing.
-        const { projection: _projection, ...prepared } = await w.prepare(tx, facts);
-        const current = planClinicalWrite({ ...command.input, ...prepared, actor: facts.actor, study, unit });
-        if (current.version.sha256 !== plan.version.sha256) refuse('StaleRevision');
-        const signature = plan.signing ? await this.parts.signer.sign(tx, request, plan.signing) : null;
-        const response = await this.parts.project(tx, request, plan, command.projection);
-        await this.parts.store.append(tx, command, signature, response);
-        return { kind: 'emr-clinical', id: plan.version.recordId, version: plan.version.versionId };
-      });
+      let result: OperationResult;
+      try {
+        result = await work.transaction(operation, async tx => {
+          const plan = command.plan;
+          const facts = await this.parts.context.facts(tx, request);
+          const study = await this.parts.context.study(tx, request, plan.version.studyId);
+          await this.parts.store.lockUnit(tx, plan.record, plan.version.recordId);
+          const unit = await this.parts.store.unit(tx, plan.record, plan.version.recordId);
+          // A's verified-record capability cannot be serialized in command JSON.
+          // Re-read source/party facts under the owning service's current checks,
+          // then require the exact originally selected version before signing.
+          const { projection: _projection, ...prepared } = await w.prepare(tx, facts);
+          const current = planClinicalWrite({ ...command.input, ...prepared, actor: facts.actor, study, unit });
+          if (current.version.sha256 !== plan.version.sha256) refuse('StaleRevision');
+          const signature = plan.signing ? await this.parts.signer.sign(tx, request, plan.signing) : null;
+          const response = await this.parts.project(tx, request, plan, command.projection);
+          await this.parts.store.append(tx, command, signature, response);
+          return { kind: 'emr-clinical', id: plan.version.recordId, version: plan.version.versionId };
+        });
+      } catch (error) {
+        // The write's own transaction settled never committed. A COMMIT it cannot tell reaches the unknown below.
+        if (ledger(error) === 'AppendNotCommitted') return rejected();
+        throw error;
+      }
       return await this.answer(work, request, command, result, !created, w.prepare);
     } catch (error) {
       if (error?.code === 'CommitUnknown') return unknown();

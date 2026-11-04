@@ -179,7 +179,10 @@
       if (answer.status === 502 || answer.status === 504) return { outcome: 'unknown', answer };
       // CD-09-P: the server saved the end but could not finish its answer, or could not yet confirm whether the end was
       // saved. Either way only a re-read says what is stored (the same path as an answer that never arrived).
-      if (answer.status === 503 && (answer.code === 'REPORT_DRAFT_END_SAVED' || answer.code === 'REPORT_DRAFT_END_UNCONFIRMED'))
+      // B2-COMMIT: so does a draft change whose commit the server could not confirm, and a draft view it did not send
+      // because its read record did not commit or could not be confirmed (that says nothing of the draft itself).
+      if (answer.status === 503 && ['REPORT_DRAFT_END_SAVED', 'REPORT_DRAFT_END_UNCONFIRMED', 'REPORT_DRAFT_COMMIT_UNKNOWN',
+        'REPORT_DRAFT_VIEW_NOT_RECORDED', 'REPORT_DRAFT_VIEW_UNCONFIRMED'].includes(answer.code))
         return { outcome: 'unknown', answer };
       return { outcome: 'refused', answer, code: answer.code, message: answer.body && typeof answer.body.message === 'string'
         ? answer.body.message : `HTTP ${answer.status}` };

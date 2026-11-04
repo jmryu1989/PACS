@@ -93,7 +93,7 @@ export class ClinicalRoutes {
           requestId: facts.requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null },
         async () => ({ kind: 'ReaderAssignment', id, version: String(value.revision) }));
         return value;
-      }).catch(routeError);
+      }).catch(error => routeError(error, undefined, 'provide'));
     } finally { work.end(); }
   }
   async workflow<T>(request: object, execute: (workflow: ClinicalWorkflow) => Promise<T>): Promise<T> {
@@ -128,7 +128,7 @@ export class ClinicalRoutes {
             action: entry.action, result: 'succeeded', requestId: facts.requestId, auditLinkId: 'audit:' + randomUUID(), relatedEventId: null },
           async () => entry.reference);
         } });
-      }).catch(routeError);
+      }).catch(error => routeError(error, undefined, 'workflow'));
     } finally { work.end(); }
   }
   recorder(request: object): RecordedTransaction {
@@ -141,10 +141,8 @@ export class ClinicalRoutes {
     const runtime = composeClinicalRuntime({ ...this.parts, project: (tx, _request, plan) => project(tx, plan) });
     const outcome = await runtime.write(request, { ...write, prepare: tx => this.sources(tx, request, write) })
       .catch(error => routeError(error, write.surface));
-    if (outcome.status === 'unknown') throw new ServiceUnavailableException({ code: 'OutcomeUnknown',
-      message: '저장 결과를 확인하지 못했습니다. 입력을 유지하고 같은 요청을 다시 확인하세요.' });
-    if (outcome.status === 'rejected') throw new ServiceUnavailableException({ code: outcome.code,
-      message: '저장이 완료되지 않았습니다. 입력은 유지됩니다.' });
+    if (outcome.status === 'unknown' || outcome.status === 'unrecorded' || outcome.status === 'rejected')
+      throw new ServiceUnavailableException(LEDGER_ANSWERS[outcome.stage][outcome.status === 'unknown' ? 'unknown' : 'not-committed']);
     const response = outcome.response as T;
     return { ...response, ...(Object.prototype.hasOwnProperty.call(response, 'replayed') ?
       { replayed: outcome.status === 'replayed' } : {}), emr: { receipt: outcome.receipt, signature: outcome.signature ?? null,
@@ -193,7 +191,7 @@ export class ClinicalRoutes {
           { kind: 'emr-clinical', id: item.id, version: head.plan.version.versionId });
         }
         return response;
-      }).catch(routeError);
+      }).catch(error => routeError(error, undefined, 'provide'));
     } finally { work.end(); }
   }
 
@@ -253,7 +251,7 @@ export class ClinicalRoutes {
             // signing facts, not additional bodies outside this read's result.
             signature: v.signature ? { signedAt: v.signature.signedAt, payloadSha256: v.signature.payloadSha256,
               kid: v.signature.registration.kid, signer: v.signature.registration.doctor.identity } : null })) } };
-      }, recordType === 'tech-note' ? 'ReadCommitted' : 'RepeatableRead').catch(routeError);
+      }, recordType === 'tech-note' ? 'ReadCommitted' : 'RepeatableRead').catch(error => routeError(error, undefined, 'provide'));
     } finally { work.end(); }
   }
 }
@@ -276,7 +274,30 @@ function verifySigned(signer: ClinicalRuntimeParts['signer'], versions: readonly
   }
 }
 
-function routeError(error: unknown, surface?: SurfaceKey): never {
+/**
+ * B2's judgement of a transaction's COMMIT, answered for the step it was about. command: the write and its own record
+ * (a workflow writes both in one transaction) - not committed means not saved. provide: the record of serving a body,
+ * including the read that follows a committed write - its failure means the body was not sent, never that a write was
+ * not saved, so it neither uses the write's code nor says so. Unknown is never answered as not saved.
+ */
+const LEDGER_ANSWERS = {
+  command: {
+    'not-committed': { code: 'AppendNotCommitted', stage: 'command', message: '저장이 완료되지 않았습니다. 입력은 유지됩니다.' },
+    unknown: { code: 'OutcomeUnknown', stage: 'command', message: '저장 결과를 확인하지 못했습니다. 입력을 유지하고 같은 요청을 다시 확인하세요.' },
+  },
+  provide: {
+    'not-committed': { code: 'ProvideNotRecorded', stage: 'provide',
+      message: '열람 기록을 남기지 못해 내용을 보내지 않았습니다. 입력은 유지됩니다. 다시 열거나 같은 요청으로 다시 확인하세요.' },
+    unknown: { code: 'OutcomeUnknown', stage: 'provide',
+      message: '열람 기록이 저장됐는지 확인하지 못해 내용을 보내지 않았습니다. 입력은 유지됩니다. 다시 열거나 같은 요청으로 다시 확인하세요.' },
+  },
+} as const;
+
+function routeError(error: unknown, surface?: SurfaceKey, context?: 'provide' | 'workflow'): never {
+  const failure = (error as { code?: unknown } | null)?.code;
+  if (context && (failure === 'AppendNotCommitted' || failure === 'CommitUnknown'))
+    throw new ServiceUnavailableException(LEDGER_ANSWERS[context === 'provide' ? 'provide' : 'command'][
+      failure === 'CommitUnknown' ? 'unknown' : 'not-committed']);
   if (!(error instanceof ContractError)) throw error;
   const codes = { OwnerChanged: 'OWNER_CHANGED', RequestIdReused: 'REQUEST_ID_REUSED' };
   const changed = error.code === 'StaleRevision' || error.code === 'StateTransitionRefused';
