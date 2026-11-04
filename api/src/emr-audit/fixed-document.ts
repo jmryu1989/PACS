@@ -1,4 +1,5 @@
 import type { DisclosureManifest } from './contract';
+import { storedClinicalPlan } from './fixed-listing';
 
 type Original = { recordId: string; versionId: string; original: string };
 const esc = (value: string) => value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -26,11 +27,12 @@ export function fixedDocument(manifest: DisclosureManifest, originals: Original[
   const sections = originals.map(item => {
     const source = JSON.parse(item.original);
     if (source.reportVersion !== undefined) return reportSection(item, JSON.parse(source.reportVersion), null);
-    const content = source.plan ? JSON.parse(source.plan).version :
+    const plan = source.plan ? storedClinicalPlan(source.plan) : null;
+    const content = plan ? plan.version :
       JSON.parse(Buffer.from(source.envelope.payload, 'base64url').toString('utf8'));
     const signing = source.plan ? JSON.parse(source.signature ?? 'null')?.registration?.doctor : source.keyAtSigning?.doctor;
     // 의료법 제22조①: retain the registered signer identity carried by this original.
-    const author = signing?.identityRegistrationId ?? (source.plan ? JSON.parse(source.plan).signing?.identityRegistrationId : content.identityRegistrationId);
+    const author = signing?.identityRegistrationId ?? (plan ? plan.signing?.identityRegistrationId : content.identityRegistrationId);
     // A signed native report version carries its stored row as the signed body (native-signing.ts).
     if (content.recordKind === 'report-version' && content.text?.kind === 'clinical-entry')
       return reportSection(item, JSON.parse(content.text.body), { at: content.serverTime, author: author ?? content.author.subject });

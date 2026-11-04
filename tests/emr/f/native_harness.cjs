@@ -51,13 +51,14 @@ function fixture(scopes = ['disclosure'], institution = 'SYN-SITE') {
     rows.push(saved); return saved;
   }
   /** A real D Tech Note plan stored under the Study UID, as pacs-routes.ts:51 writes it. */
-  function techNote(uid, text = '합성 Tech Note') {
+  function techNote(uid, text = '합성 Tech Note', response) {
     const plan = planClinicalWrite({ surface: 'tech-note.write', actor: { identity: actor, kind: 'member', roles: ['admin'],
       institutionId: 'SYN-SITE', signingRegistrationId: null }, study: { studyId: uid, patient, managingInstitutionId: 'SYN-SITE' },
       unit: null, body: { baseVersion: 0, text, reason: '', attemptId: randomUUID() }, content: null,
       attachments: [], navigation: [], recipientId: null, readerId: null, workContext: null,
       ids: { recordId: uid, versionId: randomUUID() }, at: new Date(clock += 1000).toISOString() });
-    clinical.set(uid, [...(clinical.get(uid) ?? []), { body: JSON.stringify(plan), signature: null }]);
+    // A route write whose projector answered is stored as {plan, response} (emr-clinical/store.ts append).
+    clinical.set(uid, [...(clinical.get(uid) ?? []), { body: JSON.stringify(response === undefined ? plan : { plan, response }), signature: null }]);
     return plan;
   }
   f.tx.reportVersion = { findMany: async ({ where, orderBy }) => {

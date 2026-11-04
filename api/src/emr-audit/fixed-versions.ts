@@ -9,7 +9,7 @@ import type { StoredClinicalVersion } from '../emr-clinical/store';
 import type { StoredApproval } from '../emr-report/online-store';
 import { verifyRegisteredServerEnvelope } from '../emr-signature/server-verification';
 import type { PackageVersion, RecordKind } from './contract';
-import { bindFixedListing, FixedListing } from './fixed-listing';
+import { bindFixedListing, FixedListing, storedClinicalPlan } from './fixed-listing';
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 // native-signing.ts digest(): the previous version's hash is over the stored row as Prisma returns it.
 const digest = (value: unknown) => hash(JSON.stringify(value));
@@ -53,7 +53,7 @@ function clinicalVersions(recordId: string, clinical: Stored['clinical']): Read 
   let subject: FixedListing['subject'], unit: ReturnType<typeof applyPlan> = null;
   const versions: PackageVersion[] = [], bytes: string[] = [];
   for (const row of clinical) {
-    const plan: StoredClinicalVersion['plan'] = JSON.parse(row.body);
+    const plan: StoredClinicalVersion['plan'] = storedClinicalPlan(row.body);
     unit = applyPlan(unit, plan); projectUnit(unit);
     const v = plan.version;
     if (v.recordId !== recordId) refuse('VersionListingRefused');

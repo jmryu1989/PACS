@@ -100,6 +100,18 @@ test('the same Study UID names a Tech Note and a report: recordKind selects one,
   await assert.rejects(g.controller.issue({}, pending.issuanceId), { code: 'RecordKindAmbiguous' });
 });
 
+test('a Tech Note stored with its route response is copied, printed and decided like a bare plan', async () => {
+  const f = fixture(), plan = f.techNote(UID, '조영제 주입 후 오심', { note: { version: 1 } });
+  for (const format of ['signed-electronic', 'paper-print']) {
+    const prepared = await f.controller.prepare({}, copyIntake('SYN-RESPONSE-' + format, all('clinical'), format));
+    assert.deepEqual(prepared.manifest.records[0].versions.map(v => v.versionId), [plan.version.versionId]);
+    const issued = await f.controller.issue({}, prepared.issuanceId), bytes = Buffer.from(issued.artifact, 'base64').toString('utf8');
+    if (format === 'signed-electronic') assert.equal(JSON.parse(bytes).originals[0].original, JSON.stringify({ plan: f.clinical.get(UID)[0].body, signature: null }), 'stored text kept');
+    else assert.ok(bytes.includes('조영제 주입 후 오심'));
+  }
+  await f.controller.receiveRights({}, rightsIntake('SYN-R-RESPONSE', [{ recordId: UID, recordKind: 'clinical' }]));
+  assert.equal((await f.controller.decideRights({}, 'SYN-R-RESPONSE')).decision.records[0].recordKind, 'clinical');
+});
 test('rights requests select the record kind and keep string record IDs for holds, duties and audit targets', async () => {
   const f = fixture();
   f.techNote(UID); f.commit(UID, 'approve', '판독 소견');

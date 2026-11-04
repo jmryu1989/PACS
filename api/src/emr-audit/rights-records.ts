@@ -6,7 +6,7 @@ import { CLINICAL_SURFACES, ClinicalVersion } from '../emr-clinical/contract';
 import { snapshotFromRows, transactionScope, withSnapshot } from '../emr-runtime/context';
 import { lockFixedRecords } from '../emr-runtime/fixed-record-lock';
 import { loadFixedVersions } from './fixed-versions';
-import { fixedOriginals, onlineFixedListing } from './fixed-listing';
+import { fixedOriginals, onlineFixedListing, storedClinicalPlan } from './fixed-listing';
 import type { RecordKind, RightsRecord } from './contract';
 
 /** Reuse F's verified D/C2/native originals. Model/discriminators come from stored versions,
@@ -22,7 +22,7 @@ export async function rightsRecords(tx: Prisma.TransactionClient, ids: readonly 
       const original = JSON.parse(originals[index].original);
       let model = 'ReportVersion', row: Record<string, unknown> = {};
       if (original.plan) {
-        const v: ClinicalVersion = JSON.parse(original.plan).version;
+        const v: ClinicalVersion = storedClinicalPlan(original.plan).version;
         const spec = CLINICAL_SURFACES[v.surface];
         if (!spec) refuse('RightsRecordUnsupported');
         model = spec.model;
