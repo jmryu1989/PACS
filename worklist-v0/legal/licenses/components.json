@@ -9410,10 +9410,10 @@
     "Orthanc": 21
   },
   "inputs": {
-    "api/Dockerfile": "8e2071e1252c3fd8fe94b2f7903f933ad5dfef21b2b04c5dcd5c66cb9daa100e",
+    "api/Dockerfile": "49fe41044546fbef4574ee2c5d85e20cd80243825195277cda694c2e4be55321",
     "api/package-lock.json": "aa86620edc3b56c755f5d92300c0f4e59785765074717a2b9c18fb5a13fe2994",
     "docker-compose.monitor.yml": "3ec33e73df32c484bf2187bc0ab1b95c77eaacf74fe18deeab482d3de4af1395",
-    "docker-compose.prod.yml": "f20f72ae05294fc4911807c5ce651ba63b8211e2ad9541084c1fbbe11672b6c2",
+    "docker-compose.prod.yml": "f15abd84d40e7b0e0960f6c2f8f76008270f1ffd3e3068d46c5259f42a89a622",
     "docker-compose.runtime-test.yml": "6b87c7d9e784ad471c1701ba750bad4405d86d3f1b0a68551716e47c84451e82",
     "docker-compose.yml": "08539aaa245bab82eb5b12e9e916bd9c561120632f56ed01ec60d28b0b963fdd",
     "emr/deploy/docker-compose.signing.yml": "74a3e444b5618fface6a9a3cfb0ce9f00622ff8d5324fe0bf4ef664ea9844e1b",
