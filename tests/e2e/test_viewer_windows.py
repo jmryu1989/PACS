@@ -254,8 +254,10 @@ class ViewerWindowsE2E(ViewerOpeningE2E):
         popup = opened.value
         popup.wait_for_url('**/ohif/viewer?**')
         self.assertEqual(self.ids(popup), [a.uid, b.uid])
-        # Back in the list, where every entry is offered (Reading Workspace hides Panels).
-        self.choose(p, a)
+        # Back to the list, where every entry is offered (Reading Workspace hides Panels).
+        p.locator('#m-reading').click()
+        expect(p.locator('#m-reading')).to_have_text('Reading Workspace')
+        self.assertFalse(p.evaluate('document.body.classList.contains("reading")'))
         modal = 'document.querySelector("dialog:modal")'
         for menu, opener in self.MENU_DIALOGS:
             group = p.locator(menu)
