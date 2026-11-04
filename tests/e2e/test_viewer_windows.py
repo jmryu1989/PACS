@@ -216,6 +216,57 @@ class ViewerWindowsE2E(ViewerOpeningE2E):
         expect(p.locator('#viewer-windows-dialog')).not_to_be_visible();self.assertFalse(p.locator('#viewer-windows-dialog').evaluate_all('nodes => nodes.some(node => node.open)'),'An ended document retained an open dialog')
         expect(p.locator('#viewer-windows-open')).to_be_disabled()
 
+    # Every other top-menu entry that opens a modal for this account, with its menu (main.html). Viewer Windows is checked
+    # with its own Done below, where the expanded menu used to cover the reading header.
+    MENU_DIALOGS = (('#toolbar-view', '#image-opening-open'), ('#toolbar-view', '#panel-settings-open'),
+                    ('#toolbar-view', '#columnsettings'), ('#toolbar-view', '#reading-appearance-open'),
+                    ('#toolbar-more', '#consultations-open'), ('#toolbar-more', '#study-access-open'),
+                    ('#toolbar-more', '#worklist-alerts-open'), ('#toolbar-filters', '#managefilters'),
+                    ('#toolbar-filters', '#favorite-open'), ('#toolbar-filters', '#study-tag-open'))
+
+    def test_windows_06_top_menu_closes_for_its_dialog_and_frees_the_page(self):
+        """Opus fix7 P3-1: a dialog opened from a top menu left that menu expanded after it closed. At 1680x1100 the View
+        panel's Account section lay over Open Viewer Window, so a doctor's real click landed on the menu, not the chip."""
+        a, b = self.pair()
+        p = self.sign_in(self.device())
+        p.set_viewport_size(dict(width=1680, height=1100))
+        self.workspace(p, a)
+        view = p.locator('#toolbar-view')
+        view.locator(':scope > summary').click()
+        panel = view.locator(':scope > .toolbar-menu-panel').bounding_box()
+        p.locator('#viewer-windows-open').click()
+        expect(p.locator('#viewer-windows-dialog')).to_be_visible()
+        open_under_dialog = view.evaluate('menu => menu.open')
+        p.locator('#viewer-windows-done').click()
+        expect(p.locator('#viewer-windows-dialog')).not_to_be_visible()
+        # The reported symptom first: the chip under the panel takes the pointer, and so does the panel's former centre.
+        chip = p.get_by_role('button', name='Open Viewer Window', exact=True)
+        box = chip.bounding_box()
+        x, y = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
+        self.assertTrue(chip.evaluate('(chip, [x, y]) => chip.contains(document.elementFromPoint(x, y))', [x, y]))
+        hit = '([x, y]) => document.querySelector("#toolbar-view").contains(document.elementFromPoint(x, y))'
+        self.assertFalse(p.evaluate(hit, [panel['x'] + panel['width'] / 2, panel['y'] + panel['height'] / 2]))
+        self.assertFalse(open_under_dialog, 'View stayed expanded under the Viewer Windows dialog')
+        expect(view).to_have_js_property('open', False)
+        expect(view.locator(':scope > summary')).to_be_focused()
+        with p.context.expect_page() as opened:
+            p.mouse.click(x, y)
+        popup = opened.value
+        popup.wait_for_url('**/ohif/viewer?**')
+        self.assertEqual(self.ids(popup), [a.uid, b.uid])
+        modal = 'document.querySelector("dialog:modal")'
+        for menu, opener in self.MENU_DIALOGS:
+            group = p.locator(menu)
+            group.locator(':scope > summary').click()
+            expect(p.locator(opener)).to_be_enabled()
+            p.locator(opener).click()
+            p.wait_for_function('() => !!' + modal)
+            expect(group, opener).to_have_js_property('open', False)
+            p.keyboard.press('Escape')
+            p.wait_for_function('() => !' + modal)
+            expect(group, opener).to_have_js_property('open', False)
+            expect(group.locator(':scope > summary'), opener).to_be_focused()
+
 
 def load_tests(loader, tests, pattern):
     return unittest.TestSuite(ViewerWindowsE2E(name) for name in ViewerWindowsE2E.__dict__ if name.startswith('test_windows_'))
