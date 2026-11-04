@@ -541,7 +541,7 @@ test('FT9 issue and withdrawal write their rows and B2 records in one transactio
   const ledger = await ctx.witness.$queryRaw`SELECT o.xmin::text AS outcome_tx, array_agg(DISTINCT e.xmin::text) AS entry_tx, array_agg(DISTINCT r.xmin::text) AS receipt_tx
     FROM emr_access.attempt_outcome o JOIN emr_access.access_entry e ON e.operation_id=o.operation_id
     JOIN emr_access.entry_receipt r ON r.operation_id=o.operation_id
-    WHERE o.outcome='committed' AND o.result_kind='emr-audit' AND o.result_id=${id} GROUP BY o.xmin`;
+    WHERE o.outcome='committed' AND o.result_kind='emr-audit' AND o.result_id=${id} GROUP BY o.xmin::text`;
   note('ft9-issue', { copy: copyRow.tx, issued: issuedRow.tx, prepared: preparedRow.tx, ledger });
   const same = ledger.filter(l => l.outcome_tx === copyRow.tx);
   assert.equal(issuedRow.tx, copyRow.tx, 'issued event and stored bytes');
