@@ -130,7 +130,7 @@ jobs:
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/legal-pages --cwd . --file tests/legal_pages_test.py --file scripts/build-open-source-notices.py --file scripts/test_open_source_notices.py --tree worklist-v0/legal/licenses --file tests/fixtures/legal/draft-contract.json --file tests/fixtures/legal/verified-statutes.md --file tests/fixtures/legal/verified-statutes-addendum-20261006.md --file api/package.json --file api/package-lock.json --file worklist-v0/legal/privacy.html --file worklist-v0/legal/privacy-date.js --file worklist-v0/legal/operator-notice.html --file worklist-v0/legal/open-source-notices.html --file worklist-v0/legal/accessibility.html --file worklist-v0/legal/legal.css -- python3 -B tests/legal_pages_test.py
     - name: CD-01 Product Information config rules, generated page and API facts, build arguments and the version route
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
-      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/product-info --cwd . --file config/product-info.json --file scripts/build-product-info.py --file worklist-v0/hpacs-lite/product-info-data.js --file api/src/product-info-data.ts --file api/src/product-info.controller.ts --file api/src/auth.guard.ts --file api/package-lock.json --file tests/product_info_test.py -- python3 -B tests/product_info_test.py
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/product-info --cwd . --file config/product-info.json --file scripts/build-product-info.py --file worklist-v0/hpacs-lite/product-info-data.js --file api/src/product-info-data.ts --file api/src/product-info.controller.ts --file api/src/auth.guard.ts --file api/package-lock.json --tree worklist-v0 --file tests/product_info_test.py -- python3 -B tests/product_info_test.py
     - name: SOUP vulnerability history and notification boundaries
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/soup-vulns --cwd . --file scripts/ops_soup_vulns.py --file scripts/ops_notify.py --file scripts/ops_monitor.py --file scripts/test_ops_soup_vulns.py -- python3 -B scripts/test_ops_soup_vulns.py
@@ -819,7 +819,7 @@ jobs:
     - name: CD-01 Product Information panel - facts, server check, offline first open, documents, notices and the login theme DOM
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 3
-      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/product-info-dom --cwd . --file config/product-info.json --file scripts/build-product-info.py --file worklist-v0/hpacs-lite/product-info.js --file worklist-v0/hpacs-lite/product-info-data.js --file keycloak/themes/kin-login/login/resources/js/legal-links.js --tree worklist-v0/legal --file tests/product_info_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/product_info_dom_test.py
+      run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/product-info-dom --cwd . --file config/product-info.json --file scripts/build-product-info.py --file worklist-v0/hpacs-lite/product-info.js --file worklist-v0/hpacs-lite/product-info-data.js --file keycloak/themes/kin-login/login/resources/js/legal-links.js --tree worklist-v0 --file tests/product_info_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/product_info_dom_test.py
     - name: S7-U5 admin and clinician pages on the session-bound transport - plain failures, coded ends, late answers, entry and history DOM
       if: ${{ !cancelled() && !github.event.pull_request.draft }}
       timeout-minutes: 6
@@ -1114,12 +1114,6 @@ jobs:
       run: |
         command -v nginx >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq nginx; }
         python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/proxy-grant-log --cwd . --file proxy/nginx.conf.template --file proxy/15-kin-config.envsh --file tests/proxy_grant_log_test.py -- python3 -B tests/proxy_grant_log_test.py
-    - name: CD-01 proxy stamps the deployment's build commit on the business pages only (real nginx)
-      if: ${{ !cancelled() && !github.event.pull_request.draft }}
-      timeout-minutes: 5
-      run: |
-        command -v nginx >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq nginx; }
-        python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/proxy-static-build --cwd . --file proxy/nginx.conf.template --file proxy/15-kin-config.envsh --file tests/proxy_grant_log_test.py --file tests/proxy_static_build_test.py -- python3 -B tests/proxy_static_build_test.py
     - name: Synthetic workspace DOM evidence
       if: ${{ always() && !github.event.pull_request.draft }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

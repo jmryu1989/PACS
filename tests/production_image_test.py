@@ -173,11 +173,12 @@ const facts=require('./dist/product-info.controller').buildFacts();
 const label=process.argv[2];
 assert.strictEqual(facts.build.revision,/^[0-9a-f]{40}$/.test(label)?label:null);
 assert.strictEqual(facts.factsDigest,process.argv[3]);
+assert.strictEqual(facts.staticDigest,process.argv[4]);
 """
         facts = json.loads(Path(ops.ROOT, "api/src/product-info-data.ts").read_text(encoding="utf-8")
                            .split("=", 1)[1].rsplit(" as const;", 1)[0])
         ops.temporary_run(["--network", "none", "--entrypoint", "node", self.image_id, "-e", script,
-                           json.dumps(MIGRATIONS), expected, facts["factsDigest"]])
+                           json.dumps(MIGRATIONS), expected, facts["factsDigest"], facts["staticDigest"]])
 
     def test_02_migrate_boot_restart_preserves_data_and_history(self):
         """TEST-C1-02/03: real Prisma engines, empty migration, auth guard and exec signal path.

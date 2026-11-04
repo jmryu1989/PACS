@@ -4,11 +4,12 @@
 REQ-CD01-PRODUCT-INFO -> RISK-CD01-FABRICATED-VALUE / RISK-CD01-MIXED-BUILD / RISK-CD01-OFFLINE -> TEST-CD01-E2E.
 One user flow on the real proxy, API, Keycloak and the shipped pages (synthetic identities and one owned fixture):
 
-  1. C06 GET /api/version without a session answers 200 with the build facts only, the facts digest the pages embed,
-     and a revision that is null or this checkout's (KIN_EXPECTED_REVISION when given); a protected read still 401s.
-  2. C01/C05 main.html: the build commit stamped on the served page is the API's; a reader with a draft in the report
-     editor opens Product Information from the menu bar; the server check reads Match; closing returns focus, keeps
-     the draft and sent no write.
+  1. C06 GET /api/version without a session answers 200 with the build facts only, the facts digest and static
+     files digest this checkout generates, and a revision that is null or this checkout's (KIN_EXPECTED_REVISION when
+     given); a protected read still 401s.
+  2. C01/C05 main.html: the static files digest the served page carries is the API's; a reader with a draft in the
+     report editor opens Product Information from the menu bar; the server check reads Match; closing returns focus,
+     keeps the draft and sent no write.
   3. C07 admin.html, ready and never opened: the network is cut; the first open and a reopen show the embedded facts
      and Unverified.
   4. C01/C11 Clinician Home: the panel's Open Source Notices opens CD-02's generated file in a new tab, the home page
@@ -81,9 +82,10 @@ class ProductInformationE2E(WorklistE2E):
         status, headers, body = self.unauthenticated("/api/version")
         self.assertEqual(200, status)
         self.assertIn("no-store", headers.get("Cache-Control", ""))
-        self.assertEqual({"schema", "factsDigest", "productVersion", "build"}, set(body))
+        self.assertEqual({"schema", "factsDigest", "staticDigest", "productVersion", "build"}, set(body))
         self.assertEqual({"revision", "tag"}, set(body["build"]))
-        self.assertEqual((FACTS["factsDigest"], FACTS["productVersion"]), (body["factsDigest"], body["productVersion"]))
+        self.assertEqual((FACTS["factsDigest"], FACTS["staticDigest"], FACTS["productVersion"]),
+                         (body["factsDigest"], body["staticDigest"], body["productVersion"]))
         expected = os.environ.get("KIN_EXPECTED_REVISION")
         if expected and re.fullmatch(r"[0-9a-f]{40}", expected):
             self.assertEqual(expected, body["build"]["revision"])
@@ -101,10 +103,8 @@ class ProductInformationE2E(WorklistE2E):
         rs = self.state(fixture).get("rs")
         requests = []
         page.on("request", lambda request: requests.append((request.method, urlsplit(request.url).path)))
-        # C05: the commit the proxy stamped on the served page is the API's (both null on a stack built without one).
-        stamped = page.evaluate("() => { const m = document.querySelector('meta[name=\"kin-build-revision\"]');"
-                                " return m ? m.getAttribute('content') : null; }")
-        self.assertEqual(body["build"]["revision"], stamped)
+        # C05: the static files digest shipped with the served page is the one the API was built with.
+        self.assertEqual(body["staticDigest"], page.evaluate("() => window.KinProductInfoData.staticDigest"))
         entry = page.locator(".menubar").get_by_role("button", name="Product Information")
         expect(entry).to_have_count(1)
         entry.click()

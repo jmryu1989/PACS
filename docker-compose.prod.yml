@@ -13,8 +13,6 @@ services:
       DEPLOYMENT_MODE: production
       PUBLIC_PORT: "443"
       SERVER_NAME: pacs.koreaimagingnetwork.com
-      # CD-01 C05: the API image's VCS_REF input, stamped on the pages this proxy serves (proxy/15-kin-config.envsh).
-      KIN_BUILD_REVISION: ${KIN_REVISION:-unknown}
     ports: !override
       - "80:80"
       - "443:443"

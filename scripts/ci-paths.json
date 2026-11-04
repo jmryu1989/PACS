@@ -953,6 +953,7 @@
     ],
     "source-regressions": [
       "tests/product_info_test.py",
+      "worklist-v0/**",
       "worklist-v0/hpacs-lite/product-info.js",
       "scripts/build-product-info.py",
       "config/product-info.json",
@@ -2675,8 +2676,7 @@
       "proxy/nginx.conf.template",
       "scripts/record-run.py",
       "tests/ci_workflows.py",
-      "tests/proxy_grant_log_test.py",
-      "tests/proxy_static_build_test.py"
+      "tests/proxy_grant_log_test.py"
     ],
     "measurements": [
       "emr/deploy/**",

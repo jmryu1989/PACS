@@ -259,8 +259,6 @@ server {
         add_header Cross-Origin-Embedder-Policy "require-corp" always;
         proxy_pass http://orthanc:8042;
         include /etc/nginx/snippets/orthanc-basic-auth.conf;
-        # CD-01 C05: the deployment's build commit on every HTML page (15-kin-config.envsh); empty without one.
-        include /etc/nginx/snippets/static-build.conf;
     }
 
     # 내장 뷰어의 번들을 포크하지 않는다. 브라우저 셸에 필요한 KIN 자산만 프록시가

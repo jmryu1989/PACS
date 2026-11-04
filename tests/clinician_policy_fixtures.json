@@ -444,7 +444,7 @@
       "POST studies/:uid/assign": {"unit": "D1882-held-unknown-source", "basis": "no per-study assignment of an unknown sending hospital; only a device or InstitutionName registration confirmed with the hospital attaches held studies"}
     },
     "post_baseline": {
-      "GET version": {"decision": "public", "unit": "CD-01", "commit": null, "basis": "Product Information build facts (factsDigest, product version status, build revision and tag) for every page and the login; no account, patient, path or environment data, like GET health."},
+      "GET version": {"decision": "public", "unit": "CD-01", "commit": null, "basis": "Product Information build facts (factsDigest, static files digest, product version status, build revision and tag) for every page and the login; no account, patient, path or environment data, like GET health."},
       "POST emr-audit/incidents": {"decision": "business", "unit": "CD-08", "commit": null, "basis": "Designated institution auditor; investigate and export scopes; no role-only access."},
       "GET emr-audit/incidents": {"decision": "business", "unit": "CD-08", "commit": null, "basis": "Designated institution auditor; investigate and export scopes; no role-only access."},
       "GET emr-audit/incidents/:id": {"decision": "business", "unit": "CD-08", "commit": null, "basis": "Designated institution auditor; investigate and export scopes; no role-only access."},

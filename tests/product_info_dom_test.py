@@ -9,11 +9,11 @@ legal documents are the shipped files. Each case: input -> the branch observed o
   01  C02/C09/C10/C12 the shipped facts: every section and statutory item, the placeholders' Korean reasons,
       separate end-of-support schedule and after-support plan, AI training method and data, no expert-use item;
       headers and states English, explanations Korean.
-  02  C05 the server check: the same build reads Match with its revision and tag; another facts digest reads
-      Mismatch, and so does the same facts digest from another commit than the one stamped on the page (page A +
-      API B); an error, a malformed answer and a timeout-free network failure read Unverified; a commit on one side
-      only reads Unverified and a server without a revision or tag says so; a late answer for a closed panel is not
-      painted on the reopened one.
+  02  C05 the server check: the same build reads Match with its revision and tag; another facts digest, another
+      product version and another static files digest read Mismatch; an error, a malformed answer, an answer without
+      a static files digest and a timeout-free network failure read Unverified; a server built without a revision or
+      tag still compares the files and says it has no commit; a late answer for a closed panel is not painted on the
+      reopened one.
   03  C07 after the page is ready and the network is cut, the first open and a reopen show the embedded facts and
       Unverified, without any request succeeding.
   04  C03 a hostile config value is shown as text and runs nothing; a confirmed synthetic value replaces its
@@ -23,6 +23,9 @@ legal documents are the shipped files. Each case: input -> the branch observed o
       the Keycloak theme script appends the same four links to a login page.
   07  C01 keyboard: Enter on the trigger opens with focus on Close, Escape closes and returns focus; the draft is
       unchanged, nothing is written and no browser dialog appears.
+  08  C05 the static files of build A (one served script differs, everything else and the product facts the same)
+      beside an API of build B reads Mismatch with both static digests, even when the page claims B's commit in a
+      meta; the same files beside their own API read Match.
   09  C01/C07 closing and reopening inside one task (button and Escape's cancel), and Escape then Enter from the
       keyboard: the closed panel's late close event leaves the reopened panel open.
 
@@ -35,6 +38,7 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -48,11 +52,19 @@ SPEC = importlib.util.spec_from_file_location("build_product_info", ROOT / "scri
 product = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(product)
 CONFIG = json.loads((ROOT / "config" / "product-info.json").read_text(encoding="utf-8"))
-MODEL = product.build_model(copy.deepcopy(CONFIG))
+
+
+def built(config, root=ROOT):
+    """The generator's model and page data for a config, with the static files digest of root's worklist-v0."""
+    model, files = product.outputs(root, json.dumps(config, ensure_ascii=False).encode("utf-8"))
+    return model, files[product.PAGE_DATA]
+
+
+MODEL, DATA = built(CONFIG)
 ORIGIN = "https://product.test"
 BASE = "/worklist/hpacs-lite/"
-# <!--stamp--> is where the production proxy's sub_filter puts the deployment's build commit (proxy/15-kin-config.envsh).
-HOST = """<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>SYN host</title><!--stamp--></head><body>
+# <!--head--> takes extra head markup per case (test_08: a build commit a deployment added to the page).
+HOST = """<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>SYN host</title><!--head--></head><body>
 <button type="button" id="before">SYN Before</button>
 <button type="button" id="trigger" data-product-info>Product Information</button>
 <textarea id="draft">SYN draft</textarea>
@@ -74,13 +86,9 @@ READ_PANEL = """() => { const dialog = document.querySelector('dialog[open]'); i
     modal: dialog.matches(':modal')}; }"""
 
 
-def page_data(model):
-    return product.page_bytes(model)
-
-
-def version_answer(model, revision=SHA, tag="v0.0.0-syn", digest=None):
-    return {"schema": 1, "factsDigest": digest or model["factsDigest"], "productVersion": model["productVersion"],
-            "build": {"revision": revision, "tag": tag}}
+def version_answer(model, revision=SHA, tag="v0.0.0-syn", digest=None, static=None):
+    return {"schema": 1, "factsDigest": digest or model["factsDigest"], "staticDigest": static or model["staticDigest"],
+            "productVersion": model["productVersion"], "build": {"revision": revision, "tag": tag}}
 
 
 class ProductInfoDomTest(unittest.TestCase):
@@ -95,9 +103,9 @@ class ProductInfoDomTest(unittest.TestCase):
         cls.pw.stop()
 
     def setUp(self):
-        self.data = page_data(MODEL)
+        self.data = DATA
         self.version = ("json", version_answer(MODEL))
-        self.page_revision = SHA
+        self.head = ""
         self.held = []
         self.requests, self.unexpected, self.errors, self.dialogs = [], [], [], []
         self.extra_files = {}
@@ -121,8 +129,7 @@ class ProductInfoDomTest(unittest.TestCase):
             self.unexpected.append(route.request.url)
             return route.abort()
         if path == BASE + "host.html":
-            stamp = f'<meta name="kin-build-revision" content="{self.page_revision}">' if self.page_revision else ""
-            return route.fulfill(body=HOST.replace("<!--stamp-->", stamp), content_type="text/html; charset=utf-8")
+            return route.fulfill(body=HOST.replace("<!--head-->", self.head), content_type="text/html; charset=utf-8")
         if path == "/auth/login.html":
             return route.fulfill(body=LOGIN, content_type="text/html; charset=utf-8")
         if path == "/auth/resources/legal-links.js":
@@ -242,20 +249,28 @@ class ProductInfoDomTest(unittest.TestCase):
                     self.assertIn("확인하지 못했습니다", rows["Build Check"][2])
                     self.assertEqual("Unverified", rows["Server Build"][1])
                 self.close()
-        # Page A + API B: the same product facts from another code build is not the same build.
-        self.version = ("json", version_answer(MODEL, revision="f" * 40))
+        # The same product facts beside another build's files: not the same build, both file digests shown.
+        self.version = ("json", version_answer(MODEL, static="f" * 64))
         self.open_panel()
         rows = self.rows(self.wait_check("Mismatch"))
         self.assertIn("서로 다른 빌드", rows["Build Check"][2])
-        self.assertIn(SHA[:12], rows["Build Check"][2])
+        self.assertIn(MODEL["staticDigest"][:12], rows["Build Check"][2])
         self.assertIn("f" * 12, rows["Build Check"][2])
         self.close()
-        # A stamped page beside a development server (no revision, no tag): the facts agree, the build cannot be
-        # confirmed, so it is not a Match; the server rows say it has no identity.
+        # A server that does not report its files' digest cannot confirm the build.
+        answer = version_answer(MODEL)
+        del answer["staticDigest"]
+        self.version = ("json", answer)
+        self.open_panel()
+        self.assertIn("확인하지 못했습니다", self.rows(self.wait_check("Unverified"))["Build Check"][2])
+        self.close()
+        # A development server (no revision, no tag): the files and facts still decide, and the rows say it has no
+        # build identity.
         self.version = ("json", version_answer(MODEL, revision=None, tag=None))
         self.open_panel()
-        rows = self.rows(self.wait_check("Unverified"))
-        self.assertIn("서버에 빌드 커밋이 없어", rows["Build Check"][2])
+        rows = self.rows(self.wait_check("Match"))
+        self.assertIn("빌드 커밋 없이", rows["Build Check"][2])
+        self.assertIn(MODEL["staticDigest"][:12], rows["Build Check"][2])
         self.assertEqual(("Unverified", "None"), (rows["Server Build"][1], rows["Build Tag"][1]))
         self.assertTrue(rows["Server Build"][2].startswith("빌드 식별 없음"))
         self.assertTrue(rows["Build Tag"][2].startswith("해당 빌드 태그 없음"))
@@ -273,18 +288,6 @@ class ProductInfoDomTest(unittest.TestCase):
         expect(self.page.get_by_role("row").filter(has_text="Build Check")).to_contain_text("Checking")
         second.fulfill(json=version_answer(MODEL))
         self.wait_check("Match")
-        self.close()
-        # A page served without a deployment commit: beside a stamped server it cannot be confirmed; beside a
-        # development server neither side has a commit and only the product facts are compared.
-        self.page_revision = None
-        self.page.reload()
-        self.version = ("json", version_answer(MODEL))
-        self.open_panel()
-        self.assertIn("이 화면에 빌드 커밋이 없어", self.rows(self.wait_check("Unverified"))["Build Check"][2])
-        self.close()
-        self.version = ("json", version_answer(MODEL, revision=None, tag=None))
-        self.open_panel()
-        self.assertIn("모두 빌드 커밋이 없습니다", self.rows(self.wait_check("Match"))["Build Check"][2])
         self.close()
 
     def test_03_offline_first_open_and_reopen(self):
@@ -314,8 +317,7 @@ class ProductInfoDomTest(unittest.TestCase):
         hostile = '<img src=x onerror="document.body.dataset.pwned=1">SYN & "상호"'
         config = copy.deepcopy(CONFIG)
         config["manufacturer"]["name"] = {"status": "confirmed", "value": hostile, "note": "SYN 상호입니다. <b>bold</b>"}
-        model = product.build_model(config)
-        self.data = page_data(model)
+        model, self.data = built(config)
         self.version = ("json", version_answer(model))
         self.open_host()
         self.open_panel()
@@ -346,9 +348,8 @@ class ProductInfoDomTest(unittest.TestCase):
             config["documents"]["instructions"] = {"status": "confirmed", "value": "SYN 사용자 취급설명서", "documentVersion": "IFU-SYN-1",
                                                    "href": "/worklist/docs/syn-ifu.html", "productVersion": "1.0.0-syn",
                                                    "note": "SYN 승인 본문입니다."}
-            model = product.build_model(config, root)
+            model, self.data = built(config, root)
         self.extra_files["/worklist/docs/syn-ifu.html"] = "<!doctype html><title>SYN IFU 1.0.0-syn</title><h1>SYN IFU</h1>"
-        self.data = page_data(model)
         self.version = ("json", version_answer(model))
         self.page.reload()
         self.open_panel()
@@ -422,6 +423,38 @@ class ProductInfoDomTest(unittest.TestCase):
         self.assertEqual([0, 0, 2], self.page.evaluate("""() => [document.querySelectorAll('table').length,
           document.querySelectorAll('h2, h3').length, document.querySelectorAll('button').length]"""))
         self.assertEqual({("GET", "/api/version")}, {r for r in self.requests if r[1].startswith("/api/")})
+
+    def test_08_static_files_of_another_build_read_mismatch(self):
+        # Build A: the served tree with one script changed and the product facts untouched, built by the generator.
+        with tempfile.TemporaryDirectory() as folder:
+            older = Path(folder)
+            (older / "config").mkdir()
+            shutil.copy2(ROOT / "config" / "product-info.json", older / "config" / "product-info.json")
+            shutil.copytree(ROOT / "worklist-v0", older / "worklist-v0")
+            script = older / "worklist-v0" / "hpacs-lite" / "worklist-view.js"
+            script.write_bytes(script.read_bytes() + b"\n// SYN build A\n")
+            model_a, files_a = product.outputs(older)
+        model_b, files_b = product.outputs(ROOT)
+        self.assertEqual(model_a["factsDigest"], model_b["factsDigest"], "only a served file differs")
+        # A's files, B's API, and the page claiming B's commit as the r2 deployment stamp did.
+        self.data = files_a[product.PAGE_DATA]
+        self.head = f'<meta name="kin-build-revision" content="{SHA}">'
+        self.version = ("json", version_answer(model_b, revision=SHA))
+        self.open_host()
+        self.open_panel()
+        note = self.rows(self.wait_check("Mismatch"))["Build Check"][2]
+        self.assertIn("서로 다른 빌드", note)
+        self.assertIn(model_a["staticDigest"][:12], note)
+        self.assertIn(model_b["staticDigest"][:12], note)
+        self.close()
+        # B's files beside B's API: the same build.
+        self.data = files_b[product.PAGE_DATA]
+        self.page.reload()
+        self.open_panel()
+        note = self.rows(self.wait_check("Match"))["Build Check"][2]
+        self.assertIn(SHA[:12], note)
+        self.assertIn(model_b["staticDigest"][:12], note)
+        self.close()
 
     def test_09_a_late_close_event_leaves_the_reopened_panel_open(self):
         self.open_host()

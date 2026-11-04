@@ -81,7 +81,8 @@ SCRIPTS = {
 }
 # CD-01: the server's answer for the same build (the generated facts the API compiles).
 _FACTS = json.loads(lf_text(ROOT / "api" / "src" / "product-info-data.ts").split("=", 1)[1].rsplit(" as const;", 1)[0])
-VERSION = {"schema": 1, "factsDigest": _FACTS["factsDigest"], "productVersion": _FACTS["productVersion"],
+VERSION = {"schema": 1, "factsDigest": _FACTS["factsDigest"], "staticDigest": _FACTS["staticDigest"],
+           "productVersion": _FACTS["productVersion"],
            "build": {"revision": None, "tag": None}}
 INSTITUTION = "SYN-INST-A"
 ME = {"sub": "SYN-ADMIN-SUB", "user": "syn-admin", "displayName": "SYN Admin", "roles": ["admin"],

@@ -4,7 +4,8 @@
 REQ-CD01-PRODUCT-INFO -> RISK-CD01-FABRICATED-VALUE / RISK-CD01-MIXED-BUILD -> TEST-CD01-PURE.
 Each case gives an input, observes the branch the generator or the API took, and asserts the result:
 
-  01  C03/C12 the committed page and API outputs are what config/product-info.json builds today (--check).
+  01  C03/C12 the committed page and API outputs are what config/product-info.json and worklist-v0 build today
+      (--check), with the same facts digest and static files digest on both sides.
   02  C02/C09/C10 the shipped facts carry every statutory item, the conditional ones in their own state, the support
       schedule and the after-support plan as two items, the AI training method and data, and no expert-use item.
   03  C03 a placeholder carries no value, every non-confirmed item states its reason, unissued reads 발급 전,
@@ -19,6 +20,9 @@ Each case gives an input, observes the branch the generator or the API took, and
       tags (refused); a dirty tracked tree is refused.
   09  C05/C06 the compiled controller: GET version, public metadata, only build facts; a malformed or "unknown"
       revision and a tag without a revision read null.
+  10  C05 the static files digest is the served files': a changed page, script or notice, an added, renamed or
+      removed file each change it and --check then reports both outputs stale; CRLF and the page data file itself
+      do not change it.
 """
 from __future__ import annotations
 
@@ -72,6 +76,9 @@ class ProductInfoConfigTest(unittest.TestCase):
         # Both sides carry the same digest: the page embeds it, the API reports it.
         self.assertIn(model["factsDigest"].encode(), files[product.PAGE_DATA])
         self.assertIn(model["factsDigest"].encode(), files[product.API_DATA])
+        self.assertRegex(model["staticDigest"], r"^[0-9a-f]{64}$")
+        self.assertIn(model["staticDigest"].encode(), files[product.PAGE_DATA])
+        self.assertIn(model["staticDigest"].encode(), files[product.API_DATA])
         # Control: a changed fact changes the digest, so a page from the old build would read Mismatch.
         changed = copy.deepcopy(CONFIG)
         changed["support"]["contact"]["note"] = "연락처 확정 전: SYN 변경"
@@ -295,10 +302,65 @@ class VersionRouteTest(unittest.TestCase):
                           "noisy": {"revision": sha, "tag": None}}, builds)
         for name, case in answer["cases"].items():
             with self.subTest(case=name):
-                self.assertEqual({"schema", "factsDigest", "productVersion", "build"}, set(case))
+                self.assertEqual({"schema", "factsDigest", "staticDigest", "productVersion", "build"}, set(case))
                 self.assertEqual(facts["factsDigest"], case["factsDigest"])
+                self.assertEqual(facts["staticDigest"], case["staticDigest"])
                 self.assertEqual(facts["productVersion"], case["productVersion"])
                 self.assertNotIn("secret", json.dumps(case))
+
+
+class StaticDigestTest(unittest.TestCase):
+    def test_10_static_digest_is_the_served_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "config").mkdir()
+            shutil.copy2(ROOT / "config" / "product-info.json", root / "config" / "product-info.json")
+            shutil.copytree(ROOT / "worklist-v0", root / "worklist-v0")
+            hpacs = root / "worklist-v0" / "hpacs-lite"
+            model, files = product.outputs(root)
+            # A copy of the served tree is the same build as the checkout.
+            self.assertEqual(product.outputs(ROOT)[0]["staticDigest"], model["staticDigest"])
+            for relative, body in files.items():
+                (root / relative).parent.mkdir(parents=True, exist_ok=True)
+                (root / relative).write_bytes(body)
+
+            def check():
+                return subprocess.run([sys.executable, "-B", str(ROOT / "scripts" / "build-product-info.py"), "--check",
+                                       "--root", str(root)], capture_output=True, text=True, encoding="utf-8")
+
+            self.assertEqual(0, check().returncode)
+            seen = {model["staticDigest"]: "shipped"}
+
+            def changed(name):
+                digest = product.static_digest(root)
+                self.assertNotIn(digest, seen, f"{name} repeats {seen.get(digest)}")
+                seen[digest] = name
+                return digest
+
+            def append(path, data):
+                path.write_bytes(path.read_bytes() + data)
+
+            append(hpacs / "main.html", b"\n<!-- SYN -->\n")
+            changed("page")
+            result = check()
+            self.assertEqual(1, result.returncode)
+            self.assertEqual(sorted(p.as_posix() for p in (product.PAGE_DATA, product.API_DATA)),
+                             sorted(json.loads(result.stdout)["stale"]))
+            append(hpacs / "worklist-view.js", b"\n// SYN\n")
+            changed("script")
+            append(root / "worklist-v0" / "legal" / "privacy.html", b"\n<!-- SYN -->\n")
+            edited = changed("notice")
+            (hpacs / "syn-added.js").write_bytes(b"// SYN\n")
+            changed("added")
+            (hpacs / "syn-added.js").rename(hpacs / "syn-renamed.js")
+            changed("renamed")
+            (hpacs / "syn-renamed.js").unlink()
+            self.assertEqual(edited, product.static_digest(root), "removing the file returns to the tree before it")
+            # The same text with CRLF (a Windows checkout) and a rewritten page data file are the same build.
+            privacy = root / "worklist-v0" / "legal" / "privacy.html"
+            privacy.write_bytes(privacy.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+            (root / product.PAGE_DATA).write_bytes(b"// SYN rewritten\n")
+            self.assertEqual(edited, product.static_digest(root))
 
 
 if __name__ == "__main__":
