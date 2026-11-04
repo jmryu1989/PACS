@@ -13,6 +13,7 @@ Menus and states are English and explanations Korean (AGENTS.md 4): the visible 
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import time
 import unittest
@@ -655,9 +656,10 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
         self.assertEqual(self.versions(source), source_versions)
         print("CD09P-SCREEN " + json.dumps({"c10b1": {"puts_after_delivery": len(later)}}), flush=True)
 
-    def test_c10b3_old_related_check_finishes_only_after_new_a_is_applied(self):
-        # Input: a committed insert with its PUT answer lost. Check's real applied
-        # body is held, then the author ends the work in another session.
+    def test_c10b3_an_unsettled_related_check_keeps_the_target_and_its_late_answer_writes_nothing_back(self):
+        # Input: a committed insert whose PUT answer is lost, then a Check whose real applied body is held while the
+        # author ends the work in another session. D1423 R3: an unsettled Related insert keeps the Target, so a new A
+        # answer cannot be applied before this old answer; the move refusal is observed first, then the late delivery.
         def lose(route):
             if self.related_body(route.request) is None:
                 route.fallback(); return
@@ -666,13 +668,16 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
             route.abort("connectionreset")
         page, target, source = self.open_related(lose)
         expect(page.locator("#report-notice")).to_contain_text("Result Unknown")
-        kept, fresh, finished, failed, writes = [], [], [], [], []
+        kept, fresh, finished, failed, puts = [], [], [], [], []
         phase = {"value": "old"}
         path = f"/api/studies/{target.uid}/draft"
         page.on("requestfinished", lambda r: finished.append(r))
         page.on("requestfailed", lambda r: failed.append(r))
-        page.on("request", lambda r: writes.append(r.post_data or "")
-                if r.method == "PUT" and r.url.endswith(f"/studies/{target.uid}/report") else None)
+        page.on("response", lambda r: puts.append((time.monotonic(), r.status, r.request.post_data or ""))
+                if r.request.method == "PUT" and r.url.endswith(f"/studies/{target.uid}/report") else None)
+
+        def ended_request(request):
+            return any(r is request for r in finished + failed)
 
         def keep_check(route):
             request = route.request
@@ -692,6 +697,7 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
             page.wait_for_timeout(100)
         self.assertTrue(kept, "the old Related Check response was not captured")
         route, response, old = kept[0]
+        request = route.request
         self.assertEqual((response.status, old["uid"]), (200, target.uid))
         self.assertEqual(old["relatedInsert"]["state"], "applied")
         self.assertIn(related.SOURCE_LINE, old["snapshot"]["findings"])
@@ -700,42 +706,75 @@ class DraftPurposeRelatedR3(related.RelatedReportModeE2E):
         ended = self.draft(target)
         self.assertFalse(ended["present"])
         self.assertNotEqual(ended["revision"], old["revision"])
-        phase["value"] = "away"
+        # Observation: while the Check is held the person's move to the Source is refused; the Target stays selected and
+        # no read of it can be answered for a new selection.
         if page.locator("#related-mode-back").is_visible():
             page.locator("#related-mode-back").click()
+        page.locator('#filterrow [data-f="id"]').fill(source.patient_id)
+        page.locator(f'#rows tr[data-uid="{source.uid}"]').click()
+        page.wait_for_timeout(5000)
+        expect(page.locator(f'#rows tr[data-uid="{target.uid}"]')).to_have_class(re.compile(r"\bsel\b"))
+        expect(page.locator(f'#rows tr[data-uid="{source.uid}"]')).not_to_have_class(re.compile(r"\bsel\b"))
+        expect(page.locator("#report-notice")).to_be_visible()
+        self.assertFalse(ended_request(request), "the held Check ended before its delivery")
+        page.screenshot(path=str(EVIDENCE / "c10b3-move-kept-while-related-unsettled.png"))
+
+        def editor():
+            return {field: page.locator("#" + field).input_value() for field in ("findings", "conclusion", "recommendation")}
+        # The text this page already holds just before the late answer (the Target's own and the inserted line).
+        held = editor()
+        self.assertIn(related.TARGET_OWN, held["findings"])
+        # The old answer is delivered after the end and finishes (not aborted or cancelled).
+        route.fulfill(response=response)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not ended_request(request):
+            page.wait_for_timeout(100)
+        self.assertTrue(any(r is request for r in finished), "the kept Check answer was not delivered")
+        self.assertFalse(any(r is request for r in failed), "the kept Check request failed instead of finishing")
+        delivered = time.monotonic()
+        shown = {"held": held, "server": {field: "" for field in held}}
+        readings = []
+        # One autosave period and more: the editor shows the text it held or the server's ended state, never the held text
+        # again after the server's state, and no write sends the ended text.
+        while time.monotonic() - delivered < 45:
+            reading = editor()
+            readings.append((round(time.monotonic() - delivered, 1),
+                             next((name for name, value in shown.items() if value == reading), None)))
+            page.wait_for_timeout(1000)
+        states = [state for _, state in readings]
+        self.assertNotIn(None, states, readings)
+        if "server" in states:
+            self.assertNotIn("held", states[states.index("server"):], "the ended text came back after the server's state")
+        later = [p for p in puts if p[0] >= delivered]
+        self.assertFalse([p for p in later if p[1] == 200], later)
+        self.assertFalse([p for p in later if related.SOURCE_LINE in p[2]], "a write after the end carried the inserted line")
+        self.assertFalse(self.draft(target)["present"])
+        # B->A after the settled Check: the new read of A is the ended work and the editor stays empty.
         self.select(page, source)
         expect(page.locator("#findings")).to_have_value(related.SOURCE_FINDINGS)
         phase["value"] = "new-a"
         self.select(page, target)
         deadline = time.monotonic() + 30
+
         def new_answer_finished():
-            return any(r in finished and (b["uid"], b["revision"], b["present"]) ==
+            return any(any(f is r for f in finished) and (b["uid"], b["revision"], b["present"]) ==
                        (target.uid, ended["revision"], False) for r, b in fresh)
         while time.monotonic() < deadline and not new_answer_finished():
             page.wait_for_timeout(100)
-        self.assertTrue(new_answer_finished(), "the exact ended A answer must finish first")
-        expect(page.locator("#findings")).to_have_value("")
-        expect(page.locator("#conclusion")).to_have_value("")
-        expect(page.locator("#recommendation")).to_have_value("")
-        self.assertNotIn(route.request, finished + failed)
-        page.screenshot(path=str(EVIDENCE / "c10b3-new-a-before-old-related.png"))
-        # Observation precedes outcome: deliver the exact old body and require
-        # requestfinished, not cancellation, after the new A screen above.
-        route.fulfill(response=response)
-        deadline = time.monotonic() + 15
-        while route.request not in finished + failed and time.monotonic() < deadline:
-            page.wait_for_timeout(100)
-        self.assertIn(route.request, finished)
-        self.assertNotIn(route.request, failed)
+        self.assertTrue(new_answer_finished(), [(b.get("uid"), b.get("revision"), b.get("present")) for _, b in fresh])
+        for field in ("findings", "conclusion", "recommendation"):
+            expect(page.locator("#" + field)).to_have_value("")
         page.wait_for_timeout(22000)
         for field in ("findings", "conclusion", "recommendation"):
             expect(page.locator("#" + field)).to_have_value("")
-        self.assertFalse(any(related.SOURCE_LINE in body or related.TARGET_OWN in body for body in writes))
+        self.assertFalse([p for p in puts if related.SOURCE_LINE in p[2] and p[0] >= delivered])
         self.assertFalse(self.draft(target)["present"])
+        page.screenshot(path=str(EVIDENCE / "c10b3-new-a-after-late-related-check.png"))
         print("CD09P-SCREEN " + json.dumps({"c10b3": {"uid": target.uid, "old_revision": old["revision"],
-            "ended_revision": ended["revision"],
-            "new_a_revisions": [b["revision"] for r, b in fresh if r in finished],
-            "old_finished_after_new_screen": True, "writes": len(writes)}}), flush=True)
+            "ended_revision": ended["revision"], "move_kept": True,
+            "editor": [(at, state) for index, (at, state) in enumerate(readings) if index == 0 or state != readings[index - 1][1]],
+            "new_a_revisions": [b["revision"] for r, b in fresh if any(f is r for f in finished)],
+            "puts_after_delivery": len(later)}}), flush=True)
 
     def test_c10b2_a_replayed_insert_after_the_end_is_checked_and_never_writes_the_draft_again(self):
         sent, answers = [], []
