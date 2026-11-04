@@ -23,6 +23,8 @@ legal documents are the shipped files. Each case: input -> the branch observed o
       the Keycloak theme script appends the same four links to a login page.
   07  C01 keyboard: Enter on the trigger opens with focus on Close, Escape closes and returns focus; the draft is
       unchanged, nothing is written and no browser dialog appears.
+  09  C01/C07 closing and reopening inside one task (button and Escape's cancel), and Escape then Enter from the
+      keyboard: the closed panel's late close event leaves the reopened panel open.
 
 Synthetic data only; no server, no credentials.
 """
@@ -420,6 +422,36 @@ class ProductInfoDomTest(unittest.TestCase):
         self.assertEqual([0, 0, 2], self.page.evaluate("""() => [document.querySelectorAll('table').length,
           document.querySelectorAll('h2, h3').length, document.querySelectorAll('button').length]"""))
         self.assertEqual({("GET", "/api/version")}, {r for r in self.requests if r[1].startswith("/api/")})
+
+    def test_09_a_late_close_event_leaves_the_reopened_panel_open(self):
+        self.open_host()
+        dialog = self.page.get_by_role("dialog", name="Product Information")
+        for how in ("button", "cancel"):
+            with self.subTest(close=how):
+                self.open_panel()
+                self.wait_check("Match")
+                # Close and reopen in one task: the closed dialog's native close event is still queued when the
+                # new panel opens, and it fires afterwards.
+                self.page.evaluate("""how => { const old = document.querySelector('dialog[open]');
+                  if (how === 'button') old.querySelector('#product-info-close').click();
+                  else old.dispatchEvent(new Event('cancel', {cancelable: true}));
+                  document.querySelector('#trigger').click(); }""", how)
+                self.page.evaluate("() => new Promise(resolve => setTimeout(resolve, 100))")
+                expect(dialog).to_have_count(1)
+                expect(dialog).to_be_visible()
+                self.assertTrue(self.page.evaluate("() => window.KinProductInfo.isOpen()"))
+                self.close()
+        # The keyboard sequence the Clinician Home regression used: Escape, then Enter on the trigger.
+        self.page.locator("#trigger").focus()
+        self.page.keyboard.press("Enter")
+        expect(dialog).to_be_visible()
+        self.page.keyboard.press("Escape")
+        self.page.keyboard.press("Enter")
+        self.page.evaluate("() => new Promise(resolve => setTimeout(resolve, 100))")
+        expect(dialog).to_have_count(1)
+        expect(dialog).to_be_visible()
+        self.close()
+        self.assertEqual("SYN draft", self.page.locator("#draft").input_value())
 
 
 if __name__ == "__main__":

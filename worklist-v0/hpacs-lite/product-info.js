@@ -239,8 +239,11 @@ dialog.kpi-dialog :focus-visible { outline: 2px solid #9cc3ff; outline-offset: 2
       const dialog = build(data);
       const seq = ++sequence;
       current = { dialog, trigger: trigger || doc.activeElement, seq };
-      dialog.addEventListener('close', () => api.close());
-      dialog.addEventListener('cancel', (event) => { event.preventDefault(); api.close(); });
+      // dialog.close() fires its close event in a later task, after a quick reopen may already have made another
+      // panel current; an event acts only on the panel whose dialog sent it.
+      const own = () => !!current && current.dialog === dialog;
+      dialog.addEventListener('close', () => { if (own()) api.close(); });
+      dialog.addEventListener('cancel', (event) => { event.preventDefault(); if (own()) api.close(); });
       showVersion(dialog, data, null, { status: 'checking', label: 'Checking', note: '서버 빌드 정보를 확인하는 중입니다.' });
       doc.body.append(dialog);
       dialog.showModal();
