@@ -11,9 +11,9 @@ import type { LegalHold } from '../emr-contract/lawful-defaults';
 import { choice, object, refuse, string, utc } from '../emr-contract/validation';
 import { REQUEST_CONTEXT_SOURCE, RequestContextSource, RequestWorkContext } from '../emr-runtime/request-context';
 import type { RecordMutation } from '../emr-runtime/store';
-import { lockFixedRecord } from '../emr-runtime/fixed-record-lock';
+import { lockFixedRecords } from '../emr-runtime/fixed-record-lock';
 import * as F from './contract';
-import { loadFixedVersions } from './fixed-versions';
+import { loadFixedVersions, requireRecordKind } from './fixed-versions';
 import { fixedOriginals, onlineFixedListing } from './fixed-listing';
 import { fixedContentType, fixedDocument } from './fixed-document';
 import { rightsRecords } from './rights-records';
@@ -591,9 +591,14 @@ export class EmrAuditService {
     await tx.$executeRaw`INSERT INTO emr_audit.request_event(request_id,institution_id,body)
       VALUES(${state.facts.requestId},${institution},${JSON.stringify(state)}::json)`;
   }
-  private async fixed(tx: Tx, ids: readonly string[]) {
-    for (const id of [...ids].sort()) await lockFixedRecord(tx, id);
-    return Promise.all(ids.map(id => loadFixedVersions(tx, id)));
+  /** The complete record set is taken in one sorted pass, after request and issuance: every F path uses
+   * roster → request → issuance → fixed records, and nothing after the fixed set but its own rows and the
+   * retention trigger (77104,2). The selector names the store; the lock key stays the record ID. */
+  private async fixed(tx: Tx, items: readonly { recordId: string; recordKind?: F.RecordKind }[]) {
+    await lockFixedRecords(tx, items.map(i => i.recordId));
+    const listings: object[] = [];
+    for (const i of items) listings.push(await loadFixedVersions(tx, i.recordId, i.recordKind));
+    return listings;
   }
 
   private async rightsAuthority(tx: Tx, ctx: RequestWorkContext) {
@@ -621,16 +626,26 @@ export class EmrAuditService {
       const authority = await this.rightsAuthority(tx, ctx), at = now();
       const value: RightsIntake = requestValue(() => {
         const v = object(input, ['requestId', 'kind', 'receivedAt', 'patient', 'recordIds', 'statement']);
-        if (!Array.isArray(v.recordIds) || !v.recordIds.length || new Set(v.recordIds).size !== v.recordIds.length) refuse('RightsRequestRefused');
+        if (!Array.isArray(v.recordIds) || !v.recordIds.length) refuse('RightsRequestRefused');
+        // A record ID may name its store ({recordId, recordKind}); the stored request keeps the plain IDs.
+        const recordKinds: Record<string, F.RecordKind> = {};
+        const recordIds = v.recordIds.map(item => {
+          if (typeof item === 'string') return string(item);
+          const x = object(item, ['recordId', 'recordKind']), id = string(x.recordId);
+          recordKinds[id] = choice(x.recordKind, ['report', 'clinical']);
+          return id;
+        });
+        if (new Set(recordIds).size !== recordIds.length) refuse('RightsRequestRefused');
         return { requestId: string(v.requestId), kind: choice(v.kind, ['correction', 'deletion', 'processing-suspension']),
-          receivedAt: utc(v.receivedAt), patient: patientLink(v.patient), recordIds: v.recordIds.map(id => string(id)), statement: string(v.statement) };
+          receivedAt: utc(v.receivedAt), patient: patientLink(v.patient), recordIds, statement: string(v.statement),
+          ...(Object.keys(recordKinds).length ? { recordKinds } : {}) };
       });
       let state = await this.savedRights(tx, value.requestId, authority.institutionId);
       if (state && !isDeepStrictEqual(state.request, value)) refuse('RightsRequestConflict');
       if (!state) {
         // The intake preview supplies the contract's deadline and validates stored subject facts.
         // It is not a recorded decision; the explicit decision reloads originals under the same locks.
-        const preview = F.decideRightsRequest(authority, value, await rightsRecords(tx, value.recordIds), at);
+        const preview = F.decideRightsRequest(authority, value, await rightsRecords(tx, value.recordIds, value.recordKinds), at);
         state = { kind: 'rights-request', institutionId: authority.institutionId, request: value,
           receivedBy: ctx.facts.actor, recordedAt: at, dueBy: preview.notice.dueBy, decision: null, notification: null };
         await tx.$queryRaw`SELECT emr_access.record_duty_request('correction-request',${value.requestId},'received',
@@ -683,7 +698,7 @@ export class EmrAuditService {
         }
       }
       if (action === 'decide' && !state.decision) {
-        state.decision = F.decideRightsRequest(authority, state.request, await rightsRecords(tx, state.request.recordIds), at);
+        state.decision = F.decideRightsRequest(authority, state.request, await rightsRecords(tx, state.request.recordIds, state.request.recordKinds), at);
         changed = true;
       }
       if (action === 'notify' && !withdrawing) {
@@ -732,7 +747,9 @@ export class EmrAuditService {
         return previous;
       }
       const ids = approval.request.scope.map(s => s.recordId);
-      for (const id of [...ids].sort()) await lockFixedRecord(tx, id);
+      await lockFixedRecords(tx, ids);
+      // An unselected Study UID holding both its report and its Tech Note is not a request F can answer.
+      for (const s of approval.request.scope) await requireRecordKind(tx, s.recordId, s.recordKind);
       const facts: F.RequestDeadlineFacts = { requestId: approval.request.requestId, recordIds: ids,
         receivedAt: approval.request.receivedAt, initialDueAt: dueAt, extensions: [], resolution: null };
       // 개인정보 보호법 제35조③: retain the request while access is pending.
@@ -766,10 +783,11 @@ export class EmrAuditService {
       const saved = state.issuanceId ? await this.issuance(tx, state.issuanceId, authority.institutionId) : null;
       let issuance = saved;
       if (!saved || F.issuanceState(saved).state === 'Prepared') {
-        const listings = await this.fixed(tx, state.facts.recordIds);
+        const listings = await this.fixed(tx, state.request.scope);
         const changed = !saved || listings.some(l => {
           const fixed = onlineFixedListing(l), prior = saved.manifest.records.find(r => r.recordId === fixed.recordId);
-          return !prior || prior.revision !== fixed.revision;
+          // A manifest prepared before the store was recorded is prepared again with the store it reads now.
+          return !prior || prior.revision !== fixed.revision || prior.recordKind !== fixed.recordKind;
         });
         if (changed) {
           issuance = F.prepareDisclosurePackage(authority, approval, listings, at,
@@ -801,7 +819,14 @@ export class EmrAuditService {
   async issue(request: IncomingMessage, issuanceId: string) {
     return this.run(request, async (tx, ctx, record) => {
       const authority = await this.authority(tx, ctx); F.requireScope(authority, 'disclosure');
+      // The issuance names its request. Read it unlocked within the institution, then take request → issuance
+      // like prepare and resolve, so a resolution and an issue of the same request never wait on each other in reverse.
+      const [found] = await tx.$queryRaw<{ body: F.Issuance }[]>`SELECT body FROM emr_audit.issuance_event
+        WHERE issuance_id=${issuanceId} AND institution_id=${authority.institutionId} ORDER BY sequence DESC LIMIT 1`;
+      if (!found) refuse('IssuanceNotFound');
+      const state = await this.held(tx, found.body.manifest.requestId, authority.institutionId);
       const issuance = await this.issuance(tx, issuanceId, authority.institutionId);
+      if (!state || state.facts.requestId !== issuance.manifest.requestId) refuse('IssuanceRecordRefused');
       const [existing] = await tx.$queryRaw<{ body: Buffer; sha256: string }[]>`SELECT body,sha256 FROM emr_audit.fixed_copy WHERE issuance_id=${issuanceId}`;
       if (existing) {
         const actual = hash(existing.body);
@@ -810,7 +835,9 @@ export class EmrAuditService {
         await this.recorded(record, ctx, 'disclosure', F.disclosureLedgerTargets(issuance), issuanceId);
         return { issuance, artifact: existing.body.toString('base64'), sha256: existing.sha256, contentType: fixedContentType(issuance.manifest) };
       }
-      const listings = await this.fixed(tx, issuance.manifest.records.map(r => r.recordId));
+      // Stored bytes above stay available; an ended request generates no new copy.
+      if (state.facts.resolution) refuse('RequestAlreadyResolved');
+      const listings = await this.fixed(tx, issuance.manifest.records);
       const originals = listings.flatMap(l => {
         const item = issuance.manifest.records.find(r => r.recordId === onlineFixedListing(l).recordId);
         return fixedOriginals(l, item.versions.map(v => v.versionId));
@@ -863,7 +890,7 @@ export class EmrAuditService {
       });
       const state = await this.held(tx, requestId, a.institutionId);
       if (!state) refuse('RequestNotFound');
-      for (const id of [...state.facts.recordIds].sort()) await lockFixedRecord(tx, id);
+      await lockFixedRecords(tx, state.facts.recordIds);
       const prior = state.facts.extensions.find(e => e.extensionId === v.extensionId);
       if (prior) {
         if (['previousDueAt','dueAt','basis','evidenceId'].some(k => !isDeepStrictEqual(prior[k], v[k]))) refuse('DeadlineExtensionConflict');
@@ -886,15 +913,21 @@ export class EmrAuditService {
       requestValue(() => { choice(v.outcome, ['fulfilled','withdrawn','lawfully-refused']); string(v.evidenceId); });
       const state = await this.held(tx, requestId, a.institutionId);
       if (!state) refuse('RequestNotFound');
-      for (const id of [...state.facts.recordIds].sort()) await lockFixedRecord(tx, id);
+      // Issuance before the record set, as in prepare and issue.
+      const current = state.issuanceId ? await this.issuance(tx, state.issuanceId, a.institutionId) : null;
+      await lockFixedRecords(tx, state.facts.recordIds);
       if (state.facts.resolution) {
         if (state.facts.resolution.eventId !== v.evidenceId || state.facts.resolution.outcome !== v.outcome) refuse('RequestAlreadyResolved');
         await this.recorded(record, ctx, 'provide-prepared', this.requestTargets(state), requestId);
         return state;
       }
       const at = now(), facts = { ...state.facts, resolution: { at, eventId: requestValue(() => string(v.evidenceId)), outcome: v.outcome } };
-      if (v.outcome === 'fulfilled' && (!state.issuanceId ||
-          F.issuanceState(await this.issuance(tx, state.issuanceId, a.institutionId)).state !== 'Delivered')) refuse('DeliveryEvidenceRequired');
+      const issued = current && F.issuanceState(current).state;
+      if (v.outcome === 'fulfilled' && issued !== 'Delivered') refuse('DeliveryEvidenceRequired');
+      // Withdrawal or a lawful refusal ends the request: a prepared copy is stopped in the same transaction.
+      // A copy already issued keeps its bytes and history.
+      if (v.outcome !== 'fulfilled' && issued === 'Prepared')
+        await this.saveIssuance(tx, F.abortIssuance(a, current, { reason: '요구가 종결되어 발급을 중단함', at }));
       const holds = state.holds.map(h => ({ ...h, release: F.planRequestHoldRelease(a, facts, h,
         { reason: 'effect-ended', evidenceId: v.evidenceId, endingFact: { kind: 'request-resolved', at, eventId: v.evidenceId } }, at) }));
       const next = { ...state, facts, holds };

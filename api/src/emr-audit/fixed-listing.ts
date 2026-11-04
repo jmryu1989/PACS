@@ -1,8 +1,8 @@
 import type { PatientLinkSnapshot } from '../emr-contract/access-event';
 import { freeze, refuse } from '../emr-contract/validation';
-import type { PackageVersion } from './contract';
+import type { PackageVersion, RecordKind } from './contract';
 
-export type FixedListing = { recordId: string; revision: string;
+export type FixedListing = { recordId: string; recordKind?: RecordKind; revision: string;
   subject: { patient: PatientLinkSnapshot; studyId: string; managingInstitutionId: string };
   versions: PackageVersion[] };
 const listings = new WeakMap<object, FixedListing>();

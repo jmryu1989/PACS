@@ -83,7 +83,7 @@ separately, retaining their own cursors and retention. Recorded patient and
 institution attribution is preserved. E preparation, transport and staging-copy
 observations accompany the selected event; transport is not display evidence.
 
-Issuance consumes D `online_version` and C2 `signed_version`, verifies their
+Issuance consumes D `online_version`, C2 `signed_version` and native `ReportVersion`, verifies their
 original signatures and packages the exact selected originals. Preparation
 fixes the version list; a changed head requires new preparation. The issued
 electronic UTF-8 JSON document contains the manifest and original signed
@@ -99,6 +99,28 @@ Missing/unavailable originals or a failed preparation leave `issuanceId: null`, 
 GET/extend/resolve still operate on that request. Fulfillment needs actual delivery
 evidence; withdrawal/refusal can resolve an unpackageable request.
 
+Native reports (CD-09 F). A Study UID with `ReportVersion` rows is read as its shared head chain: every row except
+`discarded` (a content reset's snapshot or a force-discarded private draft), in version order with gaps, and the
+`Report` head must be the last of them. Approve, addendum and a reset of an existing report must carry the C2
+signature that native signing stored: its payload binds the stored row as the signed body and the previous head
+row's digest. Unsigned saves stay in the chain with `signature: null` and print as Not Signed; a chain with no
+signed version is `VersionListingIncomplete`, a missing required signature `SignatureEvidenceRequired`, and a
+signature on no head row or with another body `SignatureEvidenceMismatch`. The electronic copy keeps a signed
+version's stored C2 original and an unsigned row as `{reportVersion}`; paper shows Findings, Conclusion,
+Recommendation and Reason. C2 originals without native rows keep the previous chain rule.
+
+A Study UID is the record ID of its native report and its Tech Note. A scope item or rights record may name the
+store with `recordKind: 'report' | 'clinical'`; without it only a record held by one store is accepted, and one
+held by both is refused at intake as `RecordKindAmbiguous` with nothing stored. Record IDs remain the hold, duty,
+lock and audit target; new manifest records carry the `recordKind` read. Requests and issuances saved earlier
+replay unchanged; an earlier Prepared manifest is prepared again with the store it reads now.
+
+Every F path takes `emr-f-roster` (shared), `emr-f-request`, `emr-f-issuance`, then the complete fixed-record set
+through `lockFixedRecords` (deduplicated, code-unit sorted, the key shared with native, Tech Note and C2 writers).
+Issue finds its request by an unlocked institution-scoped read before taking request then issuance. After the
+record set F takes no StudyState, signing or member key; its duty/hold functions take `77104,2` after it. A
+resolved request generates no new copy (`RequestAlreadyResolved`); withdrawal or a lawful refusal aborts a
+Prepared issuance in the resolving transaction, while issued bytes and their replay stay as they were.
 Request intake supplies the actual due date and qualification evidence. The
 designated auditor records the extension's legal basis and notice evidence;
 the software does not invent a statutory extension duration. Request history
@@ -134,6 +156,8 @@ publication at reopening. Extensions preserve that placement basis.
 Rights Requests uses the existing `request_event` append-only store with the distinct
 `rights-request` body kind. It shares request ID locking with copy requests and refuses
 an ID already used by the other workflow. No migration or clinical write is involved.
+A record ID may be sent as `{recordId, recordKind}`; the request keeps plain `recordIds` and, only then,
+`recordKinds`. The decision names each selected record's `recordKind`.
 
 | Routes | Auditor scope | Response recording |
 | --- | --- | --- |
