@@ -1002,7 +1002,7 @@ test('W9API-25 R3-A01..A06 (W9A2-1): every raw source request of OrthancService 
     for (const mode of ['U', 'T']) for (const exit of ['return-before-reader', 'return-after-chunk', 'throw-before-reader', 'throw-after-chunk']) {
       lb.calls.length = 0; lb.retained.length = 0; lb.route(() => [mode, 200, '[1,']);
       const label = `A05/A06 owner ${mode} ${exit}`;
-      const run = rejection(owner.withSourceResponse('/statistics', { method: 'GET' }, undefined, async (_response, read) => {
+      const run = rejection(owner.withSourceResponse('/statistics', 'check', { method: 'GET' }, undefined, async (_response, read) => {
         if (exit.endsWith('chunk')) await read().read();
         if (exit.startsWith('throw')) throw new Error('SYN primary');
         return 'SYN early';
