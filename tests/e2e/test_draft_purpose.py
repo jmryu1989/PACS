@@ -1856,13 +1856,26 @@ class DraftPurposeUpgradeServed(DraftPurposeServed):
                               json.dumps(body) if body is not None else ""], capture_output=True, timeout=120).stdout
         return json.loads(out.decode().strip().splitlines()[-1])
 
+    def p_document(self, user):
+        """What a page that has just read the study sends with a draft mutation (LiveStack._as_document), read from the
+        P server itself: the account and the draft boundary of this study."""
+        me = json.loads(self.p_request("GET", "/me", user)["text"])
+        read = self.p_request("GET", self.path("/draft"), user)
+        mine = json.loads(read["text"]) if read["status"] == 200 else None
+        revision = mine.get("revision") if isinstance(mine, dict) else None
+        if not revision:
+            boot = json.loads(self.p_request("GET", "/bootstrap", user)["text"])
+            revision = ((boot.get("states") or {}).get(self.uid) or {}).get("draftRevision") or LiveStack._NO_EPOCH + ":0"
+        return {"expectedOwner": {"institution": me["institution"], "sub": me["sub"], "author": me["actor"]}, "expectedRevision": revision}
+
     def p_save(self, user, text):
-        body = {"findings": text, "conclusion": "SYN conclusion", "recommendation": "", "baseVersion": 0, "citationIds": [], "structureIds": []}
+        body = {"findings": text, "conclusion": "SYN conclusion", "recommendation": "", "baseVersion": 0, "citationIds": [],
+                "structureIds": [], **self.p_document(user)}
         answer = self.p_request("PUT", self.path("/report"), user, body)
         self.assertEqual(answer["status"], 200, answer["text"])
 
     def p_discard(self, user):
-        answer = self.p_request("DELETE", self.path("/draft"), user, {})
+        answer = self.p_request("DELETE", self.path("/draft"), user, self.p_document(user))
         self.assertEqual(answer["status"], 200, answer["text"])
 
     def stop_p(self):
