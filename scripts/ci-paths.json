@@ -828,6 +828,7 @@
       "tests/module_session_harness.cjs",
       "tests/multi_study_view_service_test.cjs",
       "tests/multi_study_view_*",
+      "tests/orthanc_transport_test.cjs",
       "tests/e2e/test_multi_study_view.py",
       "tests/reading*",
       "tests/related*",

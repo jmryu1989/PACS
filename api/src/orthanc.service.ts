@@ -3,6 +3,7 @@ import { ViewerSourceFailure, ViewerSourceUnavailable, warnViewerSource } from '
 import { STUDY_IDENTITY_UNRESOLVED, STUDY_IDENTITY_UNRESOLVED_MESSAGE } from './study-source-groups';
 import type { ImageSource } from './emr-image/stream';
 import { ImageManifest, verifiedManifest } from './emr-image/manifest';
+import { OrthancLane, orthancFetch } from './orthanc-transport';
 
 // A lookup key is not a DICOM conformance assertion. Preserve legacy opaque
 // keys verbatim, but exclude path/query syntax and plain-object map collisions.
@@ -126,7 +127,7 @@ export class OrthancService {
         // fetching a mutable URL here would silently substitute a later version.
         throw new ServiceUnavailableException('영상 표현의 고정 원본 연결이 필요합니다');
       }
-      return this.withSourceResponse(path, { method: 'GET', redirect: 'error',
+      return this.withSourceResponse(path, 'body', { method: 'GET', redirect: 'error',
         headers: { Authorization: this.auth, Accept: '*/*', 'Accept-Encoding': 'identity' } }, signal,
       async (response, read, owned) => {
         if (response.status !== 200 || !response.body) throw new ServiceUnavailableException('영상 원본을 읽지 못했습니다');
@@ -161,9 +162,10 @@ export class OrthancService {
    * (tmp/w9-api/runs/r9-counterexample-signal-only). A consumer reads only through `read()` and calls
    * `signal.throwIfAborted()` after its read loop, since a cancelled reader ends like a finished body.
    * A body read to its end (or a response without one) is complete and is not aborted afterwards: its connection may go
-   * back to the pool (D1562: returning a fully consumed connection is valid).
+   * back to the pool (D1562: returning a fully consumed connection is valid). `lane` is the request's Orthanc connection
+   * pool (orthanc-transport.ts): 'body' when the consumer may keep the answer open while it asks Orthanc anything else.
    */
-  private async withSourceResponse<T>(path: string, init: RequestInit, signal: AbortSignal | undefined,
+  private async withSourceResponse<T>(path: string, lane: OrthancLane, init: RequestInit, signal: AbortSignal | undefined,
       consume: (response: Response, read: () => SourceReader, signal: AbortSignal) => Promise<T>,
       transport?: (error: any) => Error): Promise<T> {
     const controller = new AbortController();
@@ -182,7 +184,7 @@ export class OrthancService {
     try {
       try {
         controller.signal.throwIfAborted();
-        response = await fetch(this.base + path, { ...init, signal: controller.signal });
+        response = await orthancFetch(this.base + path, { ...init, signal: controller.signal }, lane);
       } catch (error) { throw transport ? transport(error) : error; }
       controller.signal.throwIfAborted();
       return await consume(response, read, controller.signal);
@@ -216,7 +218,7 @@ export class OrthancService {
     const bounds = OrthancService.readLimit(signal, () => { timedOut = true; }), bound = bounds.signal;
     try {
       failure = 'transport';
-      return await this.withSourceResponse(path, {
+      return await this.withSourceResponse(path, 'check', {
         method: body === undefined ? 'GET' : 'POST', redirect: 'error',
         headers: { Authorization: this.auth, 'Content-Type': 'text/plain' }, body,
       }, bound, async (response, read, owned) => {
@@ -286,7 +288,7 @@ export class OrthancService {
   private async srBytes(path: string, limit: number, body?: Buffer, accept = 'application/octet-stream', signal?: AbortSignal): Promise<Buffer> {
     const bounds = OrthancService.readLimit(signal), bound = bounds.signal;
     try {
-      return await this.withSourceResponse(path, { method: body ? 'POST' : 'GET', redirect: 'error',
+      return await this.withSourceResponse(path, 'body', { method: body ? 'POST' : 'GET', redirect: 'error',
         headers: { Authorization: this.auth, Accept: accept, 'Content-Type': 'application/dicom' }, body: body ? new Uint8Array(body).buffer : undefined },
       bound, async (res, read, owned) => {
         if (!res.ok || !res.body) throw new Error('response');
@@ -346,7 +348,7 @@ export class OrthancService {
 
   /** `signal` (optional) is the caller's deadline: it cancels the fetch and, after the headers, the body read. */
   private get(path: string, body?: unknown, signal?: AbortSignal): Promise<any> {
-    return this.withSourceResponse(path, { method: body === undefined ? 'GET' : 'POST',
+    return this.withSourceResponse(path, 'check', { method: body === undefined ? 'GET' : 'POST',
       headers: { Authorization: this.auth, 'Content-Type':'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body) }, signal, async (res, read, owned) => {
       // A refusal leaves its body to the owner, which cancels it: an error body is never read to its end.
@@ -561,7 +563,7 @@ export class OrthancService {
   /** SOP Instance UID를 Orthanc 내부 ID로 찾는다. 기관 판정은 호출자가 Study로 환원한 뒤 한다. */
   /** `signal` (optional): a caller-owned cancellation; the current caller (PacsDicomGateway) passes none and keeps no deadline. */
   lookupInstance(sopUid: string, signal?: AbortSignal): Promise<any[]> {
-    return this.withSourceResponse('/tools/lookup', {
+    return this.withSourceResponse('/tools/lookup', 'check', {
       method: 'POST',
       headers: { Authorization: this.auth, 'Content-Type': 'text/plain' },
       body: sopUid,
@@ -613,7 +615,7 @@ export class OrthancService {
   private async viewerText(path: string, signal?: AbortSignal, limit = 4096): Promise<string | null> {
     const bounds = OrthancService.readLimit(signal), bound = bounds.signal;
     try {
-      return await this.withSourceResponse(path, { method: 'GET', redirect: 'error', headers: { Authorization: this.auth } },
+      return await this.withSourceResponse(path, 'check', { method: 'GET', redirect: 'error', headers: { Authorization: this.auth } },
         bound, async (response, read, owned) => {
           if (response.status === 404) return null;
           if (!response.ok || !response.body) throw new Error('response');
@@ -656,7 +658,7 @@ export class OrthancService {
       for (const event of ['drain', 'close', 'error'] as const) target.once(event, done);
     });
     try {
-      for (let again = true; again;) again = await this.withSourceResponse(path, { method: 'GET', redirect: 'error',
+      for (let again = true; again;) again = await this.withSourceResponse(path, 'body', { method: 'GET', redirect: 'error',
         headers: { Authorization: this.auth, Accept: accept, 'Accept-Encoding': 'identity',
           ...(forwarded ? { 'X-Forwarded-Proto': forwarded[1], 'X-Forwarded-Host': forwarded[2] } : {}) } }, lifetime.signal,
       async (response, read, owned) => {
