@@ -209,7 +209,7 @@ const removeContainer = (containerId, locations = LOCATION_IDS) => { for (const 
   world.containers.set(where, world.containers.get(where).filter(c => c.containerId !== containerId)); remove(where, c => c.containerId === containerId); } };
 const restoredOk = at => ({ checkedAt: at, outcome: 'restored', signatures: 'verified', permissions: 'verified', missingLive: 0 });
 const durable = { append: async e => ({ durableAt: `${e.day}T23:59:59.999Z` }) };
-const receipt = at => ({ completedAt: at, method: 'irreversible-permanent-deletion' });
+const receipt = at => ({ completedAt: at, method: 'operational-store-deletion' });
 /** A synthetic round-2 worker: it erases exactly the plan fixed under the lock, nothing it decides itself. */
 function worker(at) {
   return async set => {

@@ -4,6 +4,7 @@ import { createReadStream } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { PrismaService } from '../prisma.service';
+import { OrthancLane, orthancFetch } from '../orthanc-transport';
 import { ClinicalContextSource, ClinicalRequestFacts } from '../emr-clinical/runtime';
 import { CURRENT_CLINICAL_CONTEXT } from '../emr-clinical/startup';
 import { StudyFacts } from '../emr-clinical/contract';
@@ -110,25 +111,26 @@ export class OrthancImageCatalog implements ImageCatalogSource, OnModuleInit, On
   }
   onModuleDestroy() { this.stopFollowing?.(); }
 
-  private async request(path: string, signal: AbortSignal, body?: string) {
+  /** `lane`: the digest streams are 'body' (orthanc-transport.ts); every answer read whole before the next request is 'check'. */
+  private async request(path: string, signal: AbortSignal, lane: OrthancLane, body?: string) {
     const user = process.env.ORTHANC_USER, pass = process.env.ORTHANC_PASS;
     if (!user || !pass) unavailable('ImageSourceUnavailable');
-    return fetch((process.env.ORTHANC_URL ?? 'http://orthanc:8042').replace(/\/$/, '') + path, {
+    return orthancFetch((process.env.ORTHANC_URL ?? 'http://orthanc:8042').replace(/\/$/, '') + path, {
       method: body === undefined ? 'GET' : 'POST', body, signal, redirect: 'error',
       headers: { Authorization: 'Basic ' + Buffer.from(user + ':' + pass).toString('base64'), 'Accept-Encoding': 'identity' },
-    });
+    }, lane);
   }
-  private async response(path: string, signal: AbortSignal, body?: string) {
-    const response = await this.request(path, signal, body);
+  private async response(path: string, signal: AbortSignal, lane: OrthancLane, body?: string) {
+    const response = await this.request(path, signal, lane, body);
     if (!response.ok || !response.body) { await response.body?.cancel(); unavailable('ImageSourceUnavailable'); }
     return response;
   }
   private async json(path: string, signal: AbortSignal, body?: string) {
-    const text = await (await this.response(path, signal, body)).text();
+    const text = await (await this.response(path, signal, 'check', body)).text();
     try { return JSON.parse(text); } catch { return unavailable('ImageSourceUnavailable'); }
   }
   private async digest(path: string, signal: AbortSignal) {
-    const response = await this.response(path, signal), digest = createHash('sha256');
+    const response = await this.response(path, signal, 'body'), digest = createHash('sha256');
     let bytes = 0;
     for await (const part of response.body as any as AsyncIterable<Uint8Array>) {
       signal.throwIfAborted(); digest.update(part); bytes += part.length;
@@ -241,7 +243,7 @@ export class OrthancImageCatalog implements ImageCatalogSource, OnModuleInit, On
   /** Whether Orthanc no longer has the study: it answers 404 for a removed resource. Any other answer, or none, is not a removal. */
   private async removed(orthancId: unknown, signal: AbortSignal) {
     try {
-      const response = await this.request(`/studies/${this.resource(orthancId)}`, signal);
+      const response = await this.request(`/studies/${this.resource(orthancId)}`, signal, 'check');
       await response.body?.cancel();
       return response.status === 404;
     } catch { signal.throwIfAborted(); return false; }

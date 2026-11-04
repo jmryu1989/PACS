@@ -5,12 +5,16 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { PrismaClient } from '@prisma/client';
 import { resolveStoredRecord } from '../emr-contract/classification';
 import { emrAdapters } from '../emr-contract/composition';
-import { CommitOutcomeUnknown, DestructionReceipt, DestructionRecord, PurposeDisposalStore, destroyAtPurposeEnd, newPurposeRecord,
-  reloadPurposeRecord, resolvePurposeEnd } from '../emr-contract/lawful-defaults';
+import { CommitOutcomeUnknown, DestructionReceipt, DestructionRecord, PurposeDisposalStore, closeDestructionRecord, destroyAtPurposeEnd,
+  newPurposeRecord, reloadPurposeRecord, resolvePurposeEnd } from '../emr-contract/lawful-defaults';
 import { ContractError, refuse, string } from '../emr-contract/validation';
 import { snapshotFromRows, transactionScope, withSnapshot } from '../emr-runtime/context';
 import type { ClauseRow, HoldRow, RequestRow } from '../emr-runtime/contract';
-import { syncDirectory } from '../emr-runtime/journal-file';
+import { CommitOutcome, destroyerAnswer, judgeSettled } from './commit-judgement';
+import { destructionRecordDecoder } from './destruction-record';
+import type { RetentionAdapter } from './retention-gate';
+import { AppendOnlyLedger, LedgerIo, LedgerEntry as FileEntry, LedgerView as FileView, ledgerDirectory, nodeLedgerIo,
+  replaceAtomically } from './ledger-file';
 
 /*
  * CD-09-P: the end of a private draft work's purpose and the destruction of its content.
@@ -30,48 +34,39 @@ import { syncDirectory } from '../emr-runtime/journal-file';
 
 export const PURPOSE_LEDGER_FILE = 'purpose-ledger.jsonl';
 export const PURPOSE_ADOPTION_FILE = 'purpose-adoption.json';
-const LINE_MAX = 4096;
 // One writer at a time across the API and the sweep process: every ledger append and every destruction or re-application
 // runs under this transaction lock, so the ledger order is the commit order.
 const LEDGER_LOCK = 0x4b494e50; // 'KINP'
-const UNIT = /^disposal:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SEOUL_MS = 9 * 3600_000;
-const RECORD_KEYS = ['formatVersion', 'phase', 'day', 'disposalUnitId', 'classes', 'clauseIds', 'partCount', 'expiryDay',
-  'extensionUsed', 'dueDay', 'timeliness', 'method', 'basis'];
 
 export class PurposeGateClosed extends Error {
   constructor(readonly code: string) { super(code); this.name = 'PurposeGateClosed'; }
 }
 
-export interface LedgerEntry { seq: number; appendedAt: string; record: Readonly<DestructionRecord> }
-export interface LedgerView { ledgerId: string; entries: readonly LedgerEntry[] }
+export type LedgerEntry = FileEntry<DestructionRecord>;
+export type LedgerView = FileView<DestructionRecord>;
 
 function exactKeys(value: any, keys: readonly string[]): boolean {
   return !!value && typeof value === 'object' && !Array.isArray(value) &&
     JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
 }
-function parseRecord(value: any): Readonly<DestructionRecord> {
-  // A closed field set: nothing but the disposal unit and the destruction facts can be read back from (or written to) a line.
-  if (!exactKeys(value, RECORD_KEYS) || value.formatVersion !== 1 || !['started', 'completed', 'failed'].includes(value.phase) ||
-      typeof value.disposalUnitId !== 'string' || !UNIT.test(value.disposalUnitId) || !/^\d{4}-\d{2}-\d{2}$/.test(value.day) ||
-      !/^\d{4}-\d{2}-\d{2}$/.test(value.dueDay) || !['within-five-days', 'overdue'].includes(value.timeliness))
-    refuse('PurposeLedgerRecordInvalid');
-  return Object.freeze(value);
-}
 
 export interface Adoption { state: 'prepared' | 'consumed'; ledgerId: string | null }
 
-/** The append-only destruction ledger: one JSON line per record, fsync before a record counts. Only `create` writes its
- * header (the ledger ID the database's anchor names); an append to a missing file is refused, because a missing ledger
- * is the gate's question (lost, or never initialized) and a new header would answer it wrongly. A partial last line is
- * never repaired here. Beside it, the adoption record of a server that had drafts before CD-09-P (one file). */
+/** The draft purpose ledger: the common append-only file (ledger-file.ts) under the name `purpose-ledger.jsonl` and the
+ * PurposeLedger codes, read through the destruction record decoder (format 1 read only, format 2 for new attempts). Only `create` writes its header (the ledger ID the
+ * database's anchor names); an append to a missing file is refused, because a missing ledger is the gate's question
+ * (lost, or never initialized) and a new header would answer it wrongly. Beside it, the adoption record of a server that
+ * had drafts before CD-09-P (one file, replaced whole). Another unit's ledger in the same directory is not read here. */
 export class PurposeLedgerFile {
   readonly file: string;
   readonly adoptionFile: string;
-  constructor(readonly directory: string) {
+  private readonly log: AppendOnlyLedger<DestructionRecord>;
+  constructor(readonly directory: string, private readonly io: LedgerIo = nodeLedgerIo) {
     if (!directory || !path.isAbsolute(directory)) throw new PurposeGateClosed('PurposeLedgerDirectoryRequired');
     this.file = path.join(directory, PURPOSE_LEDGER_FILE);
     this.adoptionFile = path.join(directory, PURPOSE_ADOPTION_FILE);
+    this.log = new AppendOnlyLedger(this.file, 'PurposeLedger', destructionRecordDecoder('PurposeLedger'), io);
   }
   readAdoption(): Adoption | null {
     if (!fs.existsSync(this.adoptionFile)) return null;
@@ -93,67 +88,11 @@ export class PurposeLedgerFile {
     this.replaceAdoption({ ...raw, state: 'consumed', ledgerId, consumedAt: new Date().toISOString() });
   }
   private replaceAdoption(value: object): void {
-    fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
-    const temporary = this.adoptionFile + '.tmp';
-    const fd = fs.openSync(temporary, 'w', 0o600);
-    try { fs.writeSync(fd, JSON.stringify(value) + '\n'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-    fs.renameSync(temporary, this.adoptionFile);
-    syncDirectory(this.directory);
+    replaceAtomically(this.directory, this.adoptionFile, JSON.stringify(value) + '\n', this.io);
   }
-  read(): LedgerView | null {
-    if (!fs.existsSync(this.file)) return null;
-    const bytes = fs.readFileSync(this.file);
-    if (!bytes.length || bytes[bytes.length - 1] !== 10) refuse('PurposeLedgerPartialTail');
-    const lines = bytes.toString('utf8').split('\n');
-    lines.pop();
-    let header: any;
-    try { header = JSON.parse(lines[0]); } catch { refuse('PurposeLedgerHeaderInvalid'); }
-    if (!exactKeys(header, ['kind', 'formatVersion', 'ledgerId', 'createdAt']) || header.kind !== 'header' ||
-        header.formatVersion !== 1 || typeof header.ledgerId !== 'string') refuse('PurposeLedgerHeaderInvalid');
-    const entries = lines.slice(1).map((line, index) => {
-      if (Buffer.byteLength(line) > LINE_MAX) refuse('PurposeLedgerRecordInvalid');
-      let entry: any;
-      try { entry = JSON.parse(line); } catch { refuse('PurposeLedgerRecordInvalid'); }
-      if (!exactKeys(entry, ['kind', 'seq', 'ledgerId', 'appendedAt', 'record']) || entry.kind !== 'entry' ||
-          entry.seq !== index + 1 || entry.ledgerId !== header.ledgerId || typeof entry.appendedAt !== 'string')
-        refuse('PurposeLedgerRecordInvalid');
-      return Object.freeze({ seq: entry.seq, appendedAt: entry.appendedAt, record: parseRecord(entry.record) });
-    });
-    return Object.freeze({ ledgerId: header.ledgerId, entries: Object.freeze(entries) });
-  }
-  /** The header alone: the ledger this database's anchor names, written before the database records that it exists. */
-  create(ledgerId: string): void {
-    const current = this.read();
-    if (current) { if (current.ledgerId !== ledgerId) refuse('PurposeLedgerMismatch'); return; }
-    this.write([this.header(ledgerId)], true);
-  }
-  append(ledgerId: string, record: DestructionRecord): { seq: number; durableAt: string } {
-    const parsed = parseRecord(JSON.parse(JSON.stringify(record)));
-    const current = this.read();
-    if (!current) refuse('PurposeLedgerMissing');
-    if (current.ledgerId !== ledgerId) refuse('PurposeLedgerMismatch');
-    const seq = current.entries.length + 1;
-    this.write([JSON.stringify({ kind: 'entry', seq, ledgerId, appendedAt: new Date().toISOString(), record: parsed })], false);
-    return { seq, durableAt: new Date().toISOString() };
-  }
-  private header(ledgerId: string): string {
-    return JSON.stringify({ kind: 'header', formatVersion: 1, ledgerId, createdAt: new Date().toISOString() });
-  }
-  private write(lines: readonly string[], created: boolean): void {
-    if (created) fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
-    const bytes = Buffer.from(lines.map(line => line + '\n').join(''));
-    const fd = fs.openSync(this.file, 'a', 0o600);
-    try {
-      let written = 0;
-      while (written < bytes.length) {
-        const n = fs.writeSync(fd, bytes, written, bytes.length - written);
-        if (!n) refuse('PurposeLedgerWriteFailed');
-        written += n;
-      }
-      fs.fsyncSync(fd);
-    } finally { fs.closeSync(fd); }
-    if (created) syncDirectory(this.directory);
-  }
+  read(): LedgerView | null { return this.log.read(); }
+  create(ledgerId: string): void { this.log.create(ledgerId); }
+  append(ledgerId: string, record: DestructionRecord): { seq: number; durableAt: string } { return this.log.append(ledgerId, record); }
 }
 
 /** Per unit, the phases the ledger holds in order. */
@@ -331,16 +270,13 @@ export type DestructionOutcome =
 
 /**
  * r3: one judgement for every path that changes the database for a work's purpose (its end, its destruction, a
- * re-application to a restored copy). Neither the transaction's answer nor an error reading back is evidence: a failed
- * COMMIT has answered as success on the served stack, and an error answering COMMIT does not say nothing committed.
+ * re-application to a restored copy), read through the judgement every retention unit shares (commit-judgement.ts: a
+ * new transaction after the attempt settled, a bounded lock wait, unknown for a read that cannot be made).
  *
- * The judgement reads in a new transaction after locking a row the attempt's own transaction locked, so it reads only
- * once that transaction has settled; the wait is bounded (the server's 3 s lock wait), and a read that cannot be made -
- * the lock not granted in time, a lost connection - is `unknown`. A row that is merely absent is never the evidence by
- * itself: each target names what the committed and the not-committed database each look like, and anything else
- * (including contradicting facts) is unknown.
+ * Each target locks a row the attempt's own transaction locked and names what the committed and the not-committed
+ * database each look like. A row that is merely absent is never the evidence by itself; anything else (including
+ * contradicting facts) is unknown.
  */
-export type CommitOutcome = 'committed' | 'not-committed' | 'unknown';
 export type CommitTarget =
   // An ending transaction (Discard, Clear, the author's Reset, a signed result) on (uid, author) from `revision`.
   | { kind: 'ended'; uid: string; author: string; unit: string; revision: number }
@@ -350,9 +286,7 @@ export type CommitTarget =
   | { kind: 'reapplied'; units: readonly string[] };
 
 export async function judgeCommit(db: any, target: CommitTarget, ledger: PurposeLedgerFile | null): Promise<CommitOutcome> {
-  try {
-    return await db.$transaction(async (tx: Tx) => {
-      await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+  return judgeSettled(db, async (tx: Tx) => {
       if (target.kind === 'ended') {
         // The ending transaction held the study row (draftTransaction's lock order) until it settled.
         await tx.$queryRaw`SELECT uid FROM "StudyState" WHERE uid = ${target.uid} FOR UPDATE`;
@@ -384,8 +318,7 @@ export async function judgeCommit(db: any, target: CommitTarget, ledger: Purpose
       const ended = await tx.$queryRaw`SELECT "disposalUnitId" FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = ANY(${units}::text[]) FOR UPDATE`;
       const live = await tx.$queryRaw`SELECT "workUnit" FROM "ReportDraft" WHERE "workUnit" = ANY(${units}::text[]) FOR UPDATE`;
       return ended.length || live.length ? 'not-committed' : 'committed';
-    }, { maxWait: 5000, timeout: 15000 });
-  } catch { return 'unknown'; }
+  });
 }
 const HELD = new Set(['LegalHoldActive', 'HoldReleaseRequired']);
 // A failed attempt the server itself retries (a database error: the settle update, the destruction transaction or its
@@ -393,9 +326,13 @@ const HELD = new Set(['LegalHoldActive', 'HoldReleaseRequired']);
 const RETRY_MS = [1000, 5000, 30_000, 120_000, 600_000];
 
 function seoulDay(at: string) { return new Date(Date.parse(at) + SEOUL_MS).toISOString().slice(0, 10); }
-/** The record of an attempt that started: completed or failed at `at`, judged against the started record's own due day. */
+/** The record of an attempt that started: completed or failed at `at`, judged against the started record's own due day.
+ * An attempt closes in the format it started in: an open format-1 attempt (a P release's) gets a format-1 terminal
+ * record, since format 1 has no operation to tie a format-2 one to. */
 function ending(started: Readonly<DestructionRecord>, phase: 'completed' | 'failed', at: string): DestructionRecord {
-  return { ...started, phase, day: seoulDay(at), timeliness: seoulDay(at) <= started.dueDay ? 'within-five-days' : 'overdue' };
+  if (started.formatVersion === 1)
+    return { ...started, phase, day: seoulDay(at), timeliness: seoulDay(at) <= started.dueDay ? 'within-five-days' : 'overdue' };
+  return closeDestructionRecord(started, phase, at);
 }
 
 interface Anchor { ledgerId: string; seq: number; initialized: boolean; lastCompletedUnit: string | null; lastCompletedAt: string | null }
@@ -562,7 +499,7 @@ export class DraftPurposeDisposal {
         const appended = this.ledger.append(ledgerId, event);
         if (event.phase === 'started') startedSeq = appended.seq;
         return { durableAt: appended.durableAt };
-      } }, row, facts, this.now().toISOString(), async () => {
+      }, now: () => this.now().toISOString() }, row, facts, this.now().toISOString(), async () => {
         const deleted = await tx.$executeRaw`DELETE FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = ${unit}`;
         if (deleted !== 1) refuse('PurposeRowChanged');
         const completedAt = this.now().toISOString();
@@ -578,10 +515,9 @@ export class DraftPurposeDisposal {
         // not proof that nothing committed.
         const target = { kind: 'destroyed' as const, unit, startedSeq, before: { seq: anchor.seq, lastCompletedUnit: anchor.lastCompletedUnit } };
         const outcome = await judgeCommit(this.db, target, null);
-        if (outcome === 'not-committed')
-          throw commitError ?? Object.assign(new Error('The deletion did not commit'), { code: 'PurposeDeleteNotCommitted' });
-        if (outcome === 'unknown') { this.attempts.set(unit, target); throw new CommitOutcomeUnknown(); }
-        return { completedAt, method: 'irreversible-permanent-deletion' };
+        if (outcome === 'unknown') this.attempts.set(unit, target);
+        return destroyerAnswer(outcome, { completedAt, method: 'operational-store-deletion' },
+          () => commitError ?? Object.assign(new Error('The deletion did not commit'), { code: 'PurposeDeleteNotCommitted' }));
       });
     } catch (error) {
       finish.resolve('rollback');
@@ -770,6 +706,28 @@ export class DraftPurposeDisposal {
   }
 }
 
+// What the server's own sweep may leave without that being anything but a normal open unit (a hold, a delivery still
+// in flight, nothing left): the classification main.ts used before the gate was composed.
+const SERVER_SETTLED: readonly DestructionOutcome['outcome'][] = ['destroyed', 'reapplied', 'absent', 'held', 'delivery-pending'];
+
+/**
+ * The draft purpose unit in the server's retention gate (retention-gate.ts). `service` builds the one disposal service
+ * when the gate opens this adapter, so a missing or backed-up ledger directory is this adapter's closure, named as such.
+ * open = openGate (match, re-apply, judge); afterOpen = the server's sweep of ended works.
+ */
+export function draftPurposeAdapter(service: () => DraftPurposeDisposal): RetentionAdapter {
+  let built: DraftPurposeDisposal | null = null;
+  const get = () => built ??= service();
+  return {
+    name: 'draft-purpose',
+    open: async () => {
+      const opened = await get().openGate();
+      return `${opened.reapplied} re-applied, ${opened.resolved} unfinished attempts closed`;
+    },
+    afterOpen: async () => ({ unsettled: (await get().sweep()).filter(r => !SERVER_SETTLED.includes(r.outcome)).length }),
+  };
+}
+
 let configured: DraftPurposeDisposal | null = null;
 /** Server startup composes the one disposal service; product code reads it (null when a process composed none). */
 export function configureDraftPurpose(service: DraftPurposeDisposal): DraftPurposeDisposal {
@@ -783,14 +741,7 @@ export function draftPurpose(): DraftPurposeDisposal | null { return configured;
  * EMR state would come back with an older database and prove nothing - so a missing or contained directory refuses.
  */
 export function purposeLedgerDirectory(env: NodeJS.ProcessEnv = process.env): string {
-  const directory = env.KIN_PURPOSE_LEDGER_DIR;
-  if (!directory || !path.isAbsolute(directory)) throw new PurposeGateClosed('PurposeLedgerDirectoryRequired');
-  const state = env.KIN_EMR_STATE_DIR;
-  if (state) {
-    const inside = path.relative(path.resolve(state), path.resolve(directory));
-    if (!inside || (!inside.startsWith('..') && !path.isAbsolute(inside))) throw new PurposeGateClosed('PurposeLedgerInsideBackup');
-  }
-  return directory;
+  return ledgerDirectory(env.KIN_PURPOSE_LEDGER_DIR, env.KIN_EMR_STATE_DIR, code => { throw new PurposeGateClosed('PurposeLedger' + code); });
 }
 
 /** A new opaque unit for a new work. */

@@ -7388,6 +7388,28 @@
       "version": "1.5.0"
     },
     {
+      "integrity": "sha512-EvRlUt/QqAEvXdQeRMYUfwOQsfzpDztykrG2owGEE/rBOBoYv9uF39ZzsNDh4lTFHhTr2XOZjKkYgueD12ZmGA==",
+      "license": "MIT",
+      "missing": [],
+      "name": "undici",
+      "notes": [],
+      "origin": "api/package-lock.json:node_modules/undici",
+      "originals": [
+        {
+          "name": "LICENSE",
+          "path": "texts/a6db8096b2707bc0102d256917d4d33f298ba36d8c3f25de067a2b5bb379db27.txt",
+          "sha256": "a6db8096b2707bc0102d256917d4d33f298ba36d8c3f25de067a2b5bb379db27",
+          "source": "https://registry.npmjs.org/undici/-/undici-6.29.1.tgz#package/LICENSE"
+        }
+      ],
+      "resolved": "https://registry.npmjs.org/undici/-/undici-6.29.1.tgz",
+      "scope": "Runtime",
+      "section": "API",
+      "source": "git+https://github.com/nodejs/undici.git",
+      "supplier": "Unverified",
+      "version": "6.29.1"
+    },
+    {
       "integrity": "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==",
       "license": "MIT",
       "missing": [],
@@ -9424,7 +9446,7 @@
     }
   ],
   "counts": {
-    "API": 354,
+    "API": 355,
     "ASR": 2,
     "Containers": 14,
     "Gateway": 5,
@@ -9433,7 +9455,7 @@
   },
   "inputs": {
     "api/Dockerfile": "8e2071e1252c3fd8fe94b2f7903f933ad5dfef21b2b04c5dcd5c66cb9daa100e",
-    "api/package-lock.json": "e363988db1c398bc5103304bfae1784e5460a3700778ca50f6fa7ebfcbf609a6",
+    "api/package-lock.json": "d80e556ad2d702cf2df5129f005140ee3dfe0bb8a73513b3e4bfa6954fac4452",
     "docker-compose.monitor.yml": "3ec33e73df32c484bf2187bc0ab1b95c77eaacf74fe18deeab482d3de4af1395",
     "docker-compose.prod.yml": "f20f72ae05294fc4911807c5ce651ba63b8211e2ad9541084c1fbbe11672b6c2",
     "docker-compose.runtime-test.yml": "6b87c7d9e784ad471c1701ba750bad4405d86d3f1b0a68551716e47c84451e82",
@@ -9446,7 +9468,7 @@
     "scripts/asr_engine_attest.py": "898682d3ec50f6f41c41db1b24aa15e3eb8455d34ac92a64761ba44db2fa816c",
     "scripts/sof3/kin_sof3.c": "7645ce429e01514a4f152e1d0c0f3c2150bee32a0f135be88c39573647799ea2",
     "tests/fixtures/asr/Dockerfile": "96765ceaaa32a3e648b30600466e413a0056f54f8b243dbe0e0c2c33a4545df1",
-    "worklist-v0/legal/licenses/catalog.json": "0d0808da433d8acdcc4c30e92c44c3f315d771170aca83c365b1369b9ed1f062",
+    "worklist-v0/legal/licenses/catalog.json": "7b9167e1a954f8b2095e1ff78a4d6261ac292b664eb5da9cdd164264166eeda4",
     "worklist-v0/legal/licenses/gateway-resolution.json": "b579c64ebc6cc2ec413a6845bd41f787fed71a6763e8fa2031cfc3a645f94e9f",
     "worklist-v0/legal/licenses/orthanc-build-matrix-24.12.0.json": "44634b06fb56d94013c80b77df9c882a0029391ea17510ee41368ebfb76cd59f",
     "worklist-v0/legal/licenses/texts/0154425673db15cdfa80ecba2c9b1f1a867f7197a006764712849bfc3a93cbb7.txt": "0154425673db15cdfa80ecba2c9b1f1a867f7197a006764712849bfc3a93cbb7",
