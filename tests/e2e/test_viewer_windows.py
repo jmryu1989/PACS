@@ -2,6 +2,7 @@
 """REQ-D-WORKSPACE-WINDOWS / RISK-D-WORKSPACE-UNSAVED/ACCESS/WINDOW-LOST / TEST-VIEWER-WINDOWS."""
 import json
 import sys
+import time
 import unittest
 from playwright.sync_api import expect
 from test_viewer_opening import ViewerOpeningE2E
@@ -266,8 +267,13 @@ class ViewerWindowsE2E(ViewerOpeningE2E):
             p.locator(opener).click()
             p.wait_for_function('() => !!' + modal)
             expect(group, opener).to_have_js_property('open', False)
-            p.keyboard.press('Escape')
-            p.wait_for_function('() => !' + modal)
+            # Favorites, Study Tags, Consultations and the saved-search manager refuse to close while their first read is
+            # in flight, so Escape is pressed again until the dialog has closed.
+            deadline = time.monotonic() + 30
+            while p.evaluate('() => !!' + modal):
+                self.assertLess(time.monotonic(), deadline, opener + ' did not close on Escape')
+                p.keyboard.press('Escape')
+                p.wait_for_timeout(250)
             expect(group, opener).to_have_js_property('open', False)
             expect(group.locator(':scope > summary'), opener).to_be_focused()
 
