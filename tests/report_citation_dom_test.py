@@ -141,7 +141,7 @@ HARNESS = """<!doctype html><html><head><style>MODALCSS</style></head><body>
      the element the whole sliced script dies at load and every case below fails before its
      first assertion. -->
 <button id="b-print"></button>
-<button id="b-approve"></button><button id="b-save"></button><button id="b-transcribe"></button>
+<button id="b-approve"></button><button id="b-save"></button>
 <button id="b-addendum"></button><button id="b-unread"></button><button id="b-prelim"></button><button id="b-defer"></button>
 <button id="logout"></button>
 PANEHTML

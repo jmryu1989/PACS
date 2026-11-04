@@ -25,5 +25,8 @@
     "@nestjs/cli": "^10.4.9",
     "@types/node": "^22.10.2",
     "typescript": "^5.7.2"
+  },
+  "overrides": {
+    "body-parser": "1.20.9"
   }
 }

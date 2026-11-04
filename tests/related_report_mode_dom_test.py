@@ -1145,7 +1145,7 @@ class RelatedModePage(unittest.TestCase):
         self.open_target()
         self.enter()
         calls = len(self.site.calls)
-        for button in ("#b-approve", "#b-approve-next", "#b-save", "#b-prelim", "#b-transcribe", "#b-addendum", "#b-defer",
+        for button in ("#b-approve", "#b-approve-next", "#b-save", "#b-prelim", "#b-addendum", "#b-defer",
                        "#b-unread", "#b-clear", "#b-paste"):
             control = self.page.locator(button)
             self.assertTrue(control.is_disabled(), button)
@@ -1915,7 +1915,7 @@ class RelatedModePage(unittest.TestCase):
         self.page.locator('#tpl-save').dispatch_event('click')
         self.assertIn(MODE_REASON, self.page.locator('#tpl-source').text_content())
         self.js('closeTemplateEditor(false)')
-        for selector in ('#b-save', '#b-transcribe', '#b-approve', '#b-approve-next', '#b-addendum',
+        for selector in ('#b-save', '#b-approve', '#b-approve-next', '#b-addendum',
                          '#b-clear', '#b-paste', '#b-report-template', '#b-draft-discard', '#b-draft-load', '#b-report-reload'):
             with self.subTest(entry=selector, reading=reading):
                 self.page.locator(selector).dispatch_event('click')
