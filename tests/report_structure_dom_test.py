@@ -132,7 +132,7 @@ HARNESS = """<!doctype html><html><head><style>MODALCSS</style></head><body>
 <button id="b-cite-list"></button><button id="b-cite-reload"></button></div>
 <div id="citelist" hidden></div>
 <textarea id="findings"></textarea><textarea id="conclusion"></textarea><textarea id="recommendation"></textarea>
-<button id="b-approve"></button><button id="b-save"></button><button id="b-transcribe"></button>
+<button id="b-approve"></button><button id="b-save"></button>
 <button id="b-addendum"></button><button id="b-unread"></button><button id="b-prelim"></button><button id="b-defer"></button>
 <button id="b-print"></button>
 PANEHTML

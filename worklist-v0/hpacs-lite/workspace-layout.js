@@ -33,6 +33,7 @@
   }
   // Report window panels the reader hid in Panel Settings (Minhoon 2026-10-27 item 9). Sparse like studyPanel: a
   // record without the field shows every panel, so records written before it need no migration.
+  // imageReport is reserved for saved-layout compatibility; it is never rendered before the drawing feature exists.
   const PANELS = Object.freeze(['thumbnail', 'aiReport', 'imageReport', 'clinical', 'template']);
   function normalizeHidden(value) {
     if (!Array.isArray(value) || new Set(value).size !== value.length || value.some(k => !PANELS.includes(k))) return null;
@@ -163,14 +164,14 @@
   // The report window band's one allocation (W-SPACE layout contract 2026-10-29). Each workflow mode has its content
   // panels with the shares it has always painted (main.html: Thumbnail 34%, Clinical 30%, Template the rest; Technician
   // drops Template and gives Clinical 66%). A shown panel's width is its share of the shares still shown, so hiding one
-  // gives its width only to the others, in proportion. AI Report / Image Report are placeholder tabs: they own no
+  // gives its width only to the others, in proportion. AI Report remains a placeholder tab: it owns no
   // column, and with Thumbnail hidden they are a full-width strip above the content row. Two separate width authorities
   // (a fixed flex share against the mode's inline 66%) let a placeholder toggle shrink Technician's Clinical (WS-05).
   const MODE_PANELS = Object.freeze({
     Radiology: Object.freeze([['thumbnail', 34], ['clinical', 30], ['template', 36]]),
     Technician: Object.freeze([['thumbnail', 34], ['clinical', 66]]),
   });
-  const PLACEHOLDERS = Object.freeze(['aiReport', 'imageReport']);
+  const PLACEHOLDERS = Object.freeze(['aiReport']);
   // `hidden` is the reader's choice and is never edited here: a panel the mode lacks stays chosen for the other mode.
   function reportWindow(mode, hidden = []) {
     const off = new Set(hidden);
