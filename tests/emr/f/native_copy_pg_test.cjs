@@ -331,8 +331,9 @@ test('FT3 one Study UID with a Tech Note and a report: recordKind selects, an un
   assert.deepEqual(report.manifest.records[0].versions.map(v => v.act), ['approve']);
   const clinical = await ok('POST', 'issuances', copy(s.uid, 'clinical'));
   assert.equal(clinical.manifest.records[0].recordKind, 'clinical');
+  // The D store keeps {plan, response} when the projector answered; the witness reads the plan the same way.
   const stored = await ctx.witness.$queryRaw`SELECT body FROM emr_clinical.online_version WHERE record_id=${s.uid} ORDER BY sequence`;
-  assert.deepEqual(clinical.manifest.records[0].versions.map(v => v.versionId), stored.map(r => JSON.parse(r.body).version.versionId));
+  assert.deepEqual(clinical.manifest.records[0].versions.map(v => v.versionId), stored.map(r => { const b = JSON.parse(r.body); return ('plan' in b ? b.plan : b).version.versionId; }));
   const rightsRefused = await audit('POST', 'rights-requests', { requestId: 'fn-r-' + randomUUID(), kind: 'correction',
     receivedAt: new Date(Date.now() - 1000).toISOString(), patient: patientOf(s.uid), recordIds: [s.uid], statement: '합성' });
   assert.deepEqual([rightsRefused.status, rightsRefused.body.code], [409, 'RecordKindAmbiguous']);
