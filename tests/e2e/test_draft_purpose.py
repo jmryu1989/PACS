@@ -1770,7 +1770,7 @@ s.on('error', () => console.log('closed'));
 """
 
 
-class DraftPurposeUpgradeServed(DraftPurposeServed):
+class DraftPurposeUpgradeServed(DraftPurposeCommitJudgement):
     """CD-09-C RC8 (claude-plan-cd-09c.md section 5, plan review section 6 item 2): the P release's own image writes the
     format-1 ledger, this tree's API takes it over without preparation, and the way back is refused.
 
@@ -1780,7 +1780,7 @@ class DraftPurposeUpgradeServed(DraftPurposeServed):
     ledger and anchor are set aside (the P server adopts a fresh ledger through the prepared first start it supports)
     and put back exactly at the end. Three separate flows: the normal upgrade with a mixed-format restore and the
     rollback (no unsettled started in it), the R1 recovery of a completion the P server lost, and the R4 refusal of a
-    started record no process can settle."""
+    P destruction stopped before its commit (the r3 controls K, T1 and the observer, from DraftPurposeCommitJudgement)."""
 
     @classmethod
     def setUpClass(cls):
@@ -2046,45 +2046,68 @@ class DraftPurposeUpgradeServed(DraftPurposeServed):
         self.assertEqual(sorted(rewritten["record"]), V1_RECORD_FIELDS)
         event("cd09c_u2_r1", closed_format=1)
 
-    def test_u3_a_started_the_p_server_left_unsettled_keeps_c_closed_and_everything_kept(self):
-        doctor, other = "doctor", "doctor2"
-        secret = "SYN-CD09C-U3 " + uuid.uuid4().hex
+    def p_ledger(self):
+        """The ledger while the P server runs, read in its own container."""
+        return subprocess.run(["docker", "exec", self.p_name, "sh", "-c", f"cat {LEDGER}"], capture_output=True, timeout=60,
+                              check=True).stdout
+
+    def test_u3_a_p_destruction_stopped_before_its_commit_keeps_c_closed_and_everything_kept(self):
+        """R4 from a real P attempt (GPT review C-F2): the P server's own destruction writes its format-1 started, deletes
+        and moves the anchor, and waits at COMMIT (T1 on K). The P process is then killed; its backend, still waiting with
+        no client, is ended, so PostgreSQL rolls the transaction back. Only after that settled state is observed - started
+        last, the payload and the anchor as before - does this tree's API start, as a new process with no record of the
+        attempt."""
+        doctor, secret = "doctor", "SYN-CD09C-U3 " + uuid.uuid4().hex
         self.p_era()
         self.p_save(doctor, secret)
-        unit = self.row(doctor)["workUnit"]
-        hold = self.hold_work(doctor)
+        unit, before = self.row(doctor)["workUnit"], self.anchor()
+        key, holder = self.key_holder()
+        drop = self.t1("ReportDraftPurposeEnd", "DELETE", f'OLD."disposalUnitId" = {sql_text(unit)}', key, fail=False)
         self.p_discard(doctor)
-        self.assertEqual(self.wait_refusal(unit)["lastRefusal"], "LegalHoldActive")
-        self.p_save(other, "SYN-CD09C-U3 other")
-        unit_other = self.row(other)["workUnit"]
-        self.p_discard(other)
-        self.wait_p_completed(unit_other)
-        self.stop_p()
-        whole = self.volume_ledger()
-        entries = self.records(whole)
-        header = json.loads(whole.decode().splitlines()[0])
-        template = next(e["record"] for e in entries if e["record"]["phase"] == "started")
-        self.assertEqual(template["formatVersion"], 1)
-        started = dict(template, disposalUnitId=unit)
-        line = json.dumps({"kind": "entry", "seq": len(entries) + 1, "ledgerId": header["ledgerId"],
-                           "appendedAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()), "record": started}) + "\n"
-        self.volume_sh(f"cat >> {LEDGER}", stdin=line.encode())
-        # The input: a format-1 started of a unit whose payload is still there and that the anchor does not name.
-        self.assertNotEqual(self.anchor()["lastCompletedUnit"], unit)
-        self.assertEqual(self.ended(unit)["findings"], secret)
-        damaged = self.volume_ledger()
+        # Where the attempt is: P_C (the P server's destruction transaction) waits at COMMIT on K, holding the end row's
+        # delete and the anchor's update; the ledger's last record is its format-1 started. A separate session sees the
+        # committed state: the payload still stored, the anchor as before.
+        p_c = self.commit_waiting(holder)
+        held = self.observer.query("SELECT c.relname FROM pg_locks l JOIN pg_class c ON c.oid = l.relation WHERE l.pid = "
+                                   f"{p_c} AND l.mode = 'RowExclusiveLock' AND c.relname IN ('ReportDraftPurposeEnd', "
+                                   "'PurposeLedgerAnchor') ORDER BY 1")
+        self.assertEqual(held, ["PurposeLedgerAnchor", "ReportDraftPurposeEnd"], "the delete and the anchor update are in P_C")
+        running = self.p_ledger()
+        last = self.records(running)[-1]["record"]
+        self.assertEqual((last["formatVersion"], last["phase"], last["disposalUnitId"]), (1, "started", unit))
+        self.assertEqual(self.observer.query(f'SELECT findings FROM "ReportDraftPurposeEnd" WHERE "disposalUnitId" = {sql_text(unit)}'),
+                         [secret])
+        anchor_sql = 'SELECT seq || \'|\' || coalesce("lastCompletedUnit", \'\') FROM "PurposeLedgerAnchor" WHERE id = 1'
+        self.assertEqual(self.observer.query(anchor_sql), [f'{before["seq"]}|{before["lastCompletedUnit"] or ""}'])
+        # The P server stops abruptly. PostgreSQL notices a lost client only when it next reads from it, so the backend
+        # still waits at COMMIT; ending it is what PostgreSQL does with it once it notices, and rolls the transaction back.
+        subprocess.run(["docker", "kill", self.p_name], capture_output=True, timeout=120, check=True)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and (self.p_state() or {}).get("Running"):
+            time.sleep(0.5)
+        self.assertFalse((self.p_state() or {}).get("Running"), "the P server is stopped")
+        # K is still held, so P_C cannot have committed meanwhile; whichever ends it, it ends rolled back.
+        orphaned = self.observer.query(f"SELECT count(*) FROM pg_stat_activity WHERE pid = {p_c}") == ["1"]
+        if orphaned:
+            self.assertEqual(self.observer.query(f"SELECT pg_terminate_backend({p_c})"), ["t"])
+        self.poll(f"SELECT 'gone' WHERE NOT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = {p_c})", "P_C ended", 30)
+        holder.query("COMMIT")
+        drop()
+        # The settled state, before C starts: rolled back (payload and anchor as before), started still the last record.
+        settled = self.volume_ledger()
+        self.assertEqual(settled, running, "nothing was written after the started")
+        self.assertEqual(self.ended(unit)["findings"], secret, "the deletion rolled back")
+        self.assertEqual(self.anchor(), before, "the anchor does not name the attempt")
         since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         compose_start_api()
         self.wait_api(healthy=False, code="PurposeIntentIncomplete", since=since)
         self.assertIn("draft-purpose PurposeIntentIncomplete", compose_api_logs(since))
         time.sleep(3)
         self.assertFalse(self.api_listening(), "closed means not listening")
-        self.assertEqual(self.ledger_bytes(), damaged, "no failed is synthesized")
+        self.assertEqual(self.ledger_bytes(), settled, "no failed is synthesized")
         self.assertEqual(self.ended(unit)["findings"], secret)
-        compose_stop_api()
-        self.volume_sh(f"cat > {LEDGER}", stdin=whole)
-        self.release_hold(hold)
-        event("cd09c_u3_r4", closed="PurposeIntentIncomplete")
+        self.assertEqual(self.anchor(), before)
+        event("cd09c_u3_r4", p_c=p_c, orphaned_backend_ended=orphaned, closed="PurposeIntentIncomplete")
 
 
 def load_tests(loader, tests, pattern):
