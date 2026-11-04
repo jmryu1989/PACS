@@ -194,6 +194,14 @@ CODES = {
 STATUSES = {400: "서버가 입력을 거절했습니다.", 403: "서버가 이 동작을 거절했습니다."}
 NO_SERVER = "서버에 연결하지 못했습니다."
 CLOSING = "세션을 닫았습니다. 로그인 화면으로 이동하는 중입니다…"
+# B2-COMMIT 503 answers of a clinical write (emr-clinical routes): (code, server message, whether the write was stored).
+# The command step was not stored; at the provide step the write was stored but its provide record was not, or could not
+# be confirmed. The page cannot tell which, so each is an unknown outcome kept for Retry with the same request.
+B2_ANSWERS = [
+    ("AppendNotCommitted", "저장이 완료되지 않았습니다. 입력은 유지됩니다.", False),
+    ("ProvideNotRecorded", "열람 기록을 남기지 못해 내용을 보내지 않았습니다. 입력은 유지됩니다. 다시 열거나 같은 요청으로 다시 확인하세요.", True),
+    ("OutcomeUnknown", "열람 기록이 저장됐는지 확인하지 못해 내용을 보내지 않았습니다. 입력은 유지됩니다. 다시 열거나 같은 요청으로 다시 확인하세요.", True),
+]
 
 # UXR-SP-34 / UXR-G-18 avoided words and UXR-S5-15 acknowledgement words (as tests/clinician_home_dom_test.py).
 AVOIDED = re.compile(r"진단|검출|판정|우선순위|diagnos|detect|priorit|\bAI\b", re.IGNORECASE)
@@ -1366,6 +1374,35 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.settled_note("saved")
         self.assertNotEqual(dropped, self.requests("reply")[-1]["body"]["requestId"])
 
+    def test_04b_b2_commit_answers_keep_the_text_and_retry_the_same_request(self):
+        opened, _, _ = self.seed_threads()
+        self.open_home()
+        self.pick(A)
+        self.open_questions("ready")
+        self.open_thread(opened["id"], "Open")
+        entries = 1
+        for code, message, applied in B2_ANSWERS:
+            with self.subTest(code=code):
+                text = f"SYN {code} follow-up"
+                self.faults.append({"kind": "reply", "apply": applied, "status": 503, "body": {"code": code, "message": message}})
+                self.write("reply", text)
+                self.settled_note("unknown")
+                seen = self.view()
+                # The page cannot tell what was stored: never "not saved", the text and its request kept for Retry.
+                self.assertEqual([{"state": "unknown", "text": UNKNOWN, "detail": f"{message} (HTTP 503 · {code})"}], seen["notes"])
+                reply = next(c for c in seen["composers"] if c["action"] == "reply")
+                self.assertEqual(("unknown", text, True, False, True, True),
+                                 (reply["state"], reply["value"], reply["readOnly"], reply["send"], reply["retry"], reply["discard"]))
+                first = self.requests("reply")[-1]["body"]
+                self.page.locator('.question-compose[data-action="reply"] button[data-retry]').click()
+                self.settled_note("saved")
+                self.assertEqual(first, self.requests("reply")[-1]["body"], "Retry sends the same requestId, revision and text")
+                entries += 1
+                expect(self.page.locator("#question-entries > li")).to_have_count(entries)
+                seen = self.threaded(opened["id"], "Open")
+                self.assertEqual([{"state": "saved", "text": REPLAYED if applied else SAVED, "detail": ""}], seen["notes"])
+                self.assertEqual(entries, len(self.server.threads[opened["id"]]["entries"]), "one entry per request")
+
     def test_05_a_b_a_late_answers_never_paint(self):
         for label, script in (("shipped", None), ("uid-only control", self.home_uid_only)):
             with self.subTest(file=label):
@@ -2234,6 +2271,33 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.page.locator('#question-thread .question-compose[data-action="reply"] button[data-send]').click()
         self.reader_note("saved")
         self.assertNotEqual(dropped, self.requests("reply")[-1]["body"]["requestId"])
+
+    def test_13b_reader_b2_commit_answers_keep_the_text_and_retry_the_same_request(self):
+        opened, _, _ = self.seed_threads()
+        self.open_reader(me(RADIOLOGIST, ["radiologist"]))
+        self.target(A)
+        self.reader_state("ready")
+        self.page.locator("#question-toggle").click()
+        self.reader_thread(opened["id"], "Open")
+        entries = 1
+        for code, message, applied in B2_ANSWERS:
+            with self.subTest(code=code):
+                text = f"SYN {code} answer"
+                self.faults.append({"kind": "reply", "apply": applied, "status": 503, "body": {"code": code, "message": message}})
+                self.reader_write("reply", text)
+                seen = self.reader_note("unknown")
+                self.assertEqual([{"state": "unknown", "text": UNKNOWN, "detail": f"{message} (HTTP 503 · {code})"}], seen["notes"])
+                reply = seen["composers"][0]
+                self.assertEqual(("unknown", text, True, False, True, True),
+                                 (reply["state"], reply["value"], reply["readOnly"], reply["send"], reply["retry"], reply["discard"]))
+                first = self.requests("reply")[-1]["body"]
+                self.page.locator('#question-thread .question-compose[data-action="reply"] button[data-retry]').click()
+                seen = self.reader_note("saved")
+                self.assertEqual(first, self.requests("reply")[-1]["body"], "Retry sends the same requestId, revision and text")
+                self.assertEqual(REPLAYED if applied else SAVED, seen["notes"][0]["text"])
+                entries += 1
+                expect(self.page.locator("#question-entries > li")).to_have_count(entries)
+                self.assertEqual(entries, len(self.server.threads[opened["id"]]["entries"]), "one entry per request")
 
     def test_14_reader_a_b_a_drafts_and_late_writes(self):
         # A1 is answered from the store with one thread, A2 from the store with two; A2 arrives first, then A1, B and C.

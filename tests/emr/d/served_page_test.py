@@ -18,6 +18,15 @@ sys.path.insert(0, str(ROOT / 'tests'))
 import auth_logout_dom_test as h
 from playwright.sync_api import sync_playwright, expect
 
+# B2-COMMIT 503 answers of a clinical write (emr-clinical routes): (code, server message, whether the write was stored).
+# The command step was not stored; at the provide step the write was stored but its provide record was not, or could not
+# be confirmed. The page cannot tell which: the choice or text and the same request stay for Retry or a Check.
+B2_ANSWERS = [
+    ('AppendNotCommitted', '저장이 완료되지 않았습니다. 입력은 유지됩니다.', False),
+    ('ProvideNotRecorded', '열람 기록을 남기지 못해 내용을 보내지 않았습니다. 입력은 유지됩니다. 다시 열거나 같은 요청으로 다시 확인하세요.', True),
+    ('OutcomeUnknown', '열람 기록이 저장됐는지 확인하지 못해 내용을 보내지 않았습니다. 입력은 유지됩니다. 다시 열거나 같은 요청으로 다시 확인하세요.', True),
+]
+
 
 class Site(h.Site):
     def __init__(self):
@@ -29,6 +38,43 @@ class Site(h.Site):
         self.assignment = None
         self.assignment_revision = 0
         self.refuse_assignment = False
+        # B2-COMMIT answers for the next write: (code, message, whether the write was stored). A write already stored for
+        # its requestId answers that stored result again (the clinical routes' idempotent replay).
+        self.assignment_answers, self.assignment_posts, self.assignment_receipts = [], [], set()
+        self.consultations, self.consultation_answers, self.consultation_posts, self.consultation_receipts = {}, [], [], {}
+
+    def consultation(self, cid, uid, state, revision, requester, recipient, reason, reply=None):
+        return {'id': cid, 'studyUid': uid, 'institutionId': h.INSTITUTION, 'state': state, 'revision': revision,
+                'requesterSub': requester['sub'], 'requesterActor': requester['actor'], 'recipientSub': recipient['sub'],
+                'recipientActor': recipient['actor'], 'recipientName': recipient['displayName'], 'reason': reason,
+                'reply': reply, 'cancelReason': None, 'updatedAt': '2026-10-03T00:00:00.000Z', 'changedBy': requester['actor']}
+
+    def consultation_write(self, route, request, account, path):
+        """POST create (/studies/:uid/consultations) or action (/consultations/:id) with the requestId replay and the
+        revision check of the consultation service."""
+        body = request.post_data_json
+        self.consultation_posts.append((path, body))
+        answer = self.consultation_answers.pop(0) if self.consultation_answers else None
+        owner = [h.INSTITUTION, account['sub']]
+        rid = body['requestId']
+        if rid not in self.consultation_receipts and (answer is None or answer[2]):
+            found = re.fullmatch(r'/api/studies/([^/]+)/consultations', path)
+            if found:
+                recipient = next(r for r in (h.RAD, h.RAD_OTHER) if r['sub'] == body['recipientSub'])
+                self.consultations[rid] = self.consultation(rid, found[1], 'Requested', 1, account, recipient, body['reason'])
+                self.consultation_receipts[rid] = rid
+            else:
+                item = self.consultations[path.rsplit('/', 1)[-1]]
+                if body['revision'] != item['revision']:
+                    return route.fulfill(status=409, json={'code': 'CONSULTATION_CHANGED', 'message': 'SYN changed'})
+                state = {'accept': 'Accepted', 'complete': 'Completed', 'cancel': 'Cancelled'}[body['action']]
+                item.update(state=state, revision=item['revision'] + 1, changedBy=account['actor'],
+                            **({'reply': body['note']} if body['action'] == 'complete' else {}))
+                self.consultation_receipts[rid] = item['id']
+        if answer is not None:
+            return route.fulfill(status=503, json={'code': answer[0], 'message': answer[1]})
+        return route.fulfill(status=201, json={'owner': owner, 'item': deepcopy(self.consultations[self.consultation_receipts[rid]]),
+                                               'emr': None})
 
     def question(self, uid, old=False):
         at = '2001-01-01T00:00:00.000Z' if old else '2030-01-01T00:00:00.000Z'
@@ -48,8 +94,9 @@ class Site(h.Site):
 
     def api(self, route, request, method, path, query):
         custom = (path.startswith('/api/clinician/studies') or path.startswith('/api/questions/')
-                  or path == '/api/reader-candidates'
-                  or re.fullmatch(r'/api/studies/[^/]+/(questions|reader-assignment)', path))
+                  or path in ('/api/reader-candidates', '/api/consultations', '/api/consultation-candidates')
+                  or path.startswith('/api/consultations/')
+                  or re.fullmatch(r'/api/studies/[^/]+/(questions|reader-assignment|consultations)', path))
         if custom:
             _, refused = self.authenticate(request)
             if refused:
@@ -84,11 +131,32 @@ class Site(h.Site):
                 if self.refuse_assignment:
                     return route.fulfill(status=403, json={'message': '현재 배정 권한이 없습니다'})
                 body = request.post_data_json
-                self.assignment_revision += 1
-                self.assignment = {'sub': account['sub'], 'actor': account['actor'], 'name': account['displayName']} if body['readerSub'] else None
+                self.assignment_posts.append(body)
+                answer = self.assignment_answers.pop(0) if self.assignment_answers else None
+                if body['requestId'] not in self.assignment_receipts and (answer is None or answer[2]):
+                    if body['revision'] != self.assignment_revision:
+                        return route.fulfill(status=409, json={'code': 'READER_ASSIGNMENT_CHANGED', 'message': 'SYN changed'})
+                    self.assignment_revision += 1
+                    self.assignment = {'sub': account['sub'], 'actor': account['actor'], 'name': account['displayName']} if body['readerSub'] else None
+                    self.assignment_receipts.add(body['requestId'])
+                if answer is not None:
+                    return route.fulfill(status=503, json={'code': answer[0], 'message': answer[1]})
             return route.fulfill(status=201 if method == 'POST' else 200, json={
                 'owner': [h.INSTITUTION, account['sub']], 'studyUid': found[1], 'revision': self.assignment_revision,
                 'reader': self.assignment, 'canManage': False, 'blocked': None, 'history': []})
+        owner = [h.INSTITUTION, account['sub']] if custom else None
+        if method == 'POST' and (path.startswith('/api/consultations/') or re.fullmatch(r'/api/studies/[^/]+/consultations', path)):
+            return self.consultation_write(route, request, account, path)
+        if method == 'GET' and path == '/api/consultations':
+            direction = parse_qs(query)['direction'][0]
+            mine = 'recipientSub' if direction == 'received' else 'requesterSub'
+            items = [deepcopy(c) for c in self.consultations.values() if c[mine] == account['sub']]
+            return route.fulfill(json={'owner': owner, 'direction': direction, 'items': items, 'nextCursor': None})
+        if method == 'GET' and path.startswith('/api/consultations/'):
+            return route.fulfill(json={'owner': owner, 'item': deepcopy(self.consultations[path.rsplit('/', 1)[-1]]), 'emr': None})
+        if method == 'GET' and path == '/api/consultation-candidates':
+            return route.fulfill(json={'owner': owner, 'readers': [
+                {'sub': h.RAD_OTHER['sub'], 'actor': h.RAD_OTHER['actor'], 'name': h.RAD_OTHER['displayName']}]})
         return super().api(route, request, method, path, query)
 
 
@@ -215,6 +283,113 @@ class ServedClinicalPages(unittest.TestCase):
         expect(self.page.locator('#findings')).to_have_value('SYN clinical input stays')
         self.open_questions('main')
         expect(self.page.locator('#question-thread')).to_contain_text('CURRENT-' + h.UID)
+
+    def test_assignment_b2_commit_answers_keep_the_choice_and_converge_on_the_same_request(self):
+        self.page.goto(h.MAIN_URL)
+        self.select('main', h.UID)
+        status, reader = self.page.locator('#ra-status'), self.page.locator('#ra-reader')
+        current = self.page.locator('#ra-current')
+        for (code, message, stored), want in zip(B2_ANSWERS, (h.RAD['sub'], '', h.RAD['sub'])):
+            with self.subTest(code=code):
+                self.page.locator('[data-reader-assignment]').first.click()
+                expect(reader).to_be_enabled()
+                before, revision = current.inner_text(), self.site.assignment_revision
+                reader.select_option(want)
+                self.site.assignment_answers = [(code, message, stored)]
+                self.page.locator('#ra-save').click()
+                # The page cannot tell what was stored: the choice and its request stay, Retry is offered.
+                expect(status).to_contain_text(message)
+                expect(status).to_contain_text('선택은 유지했습니다')
+                expect(self.page.locator('#ra-retry')).to_be_visible()
+                expect(reader).to_have_value(want)
+                expect(current).to_have_text(before)
+                first = self.site.assignment_posts[-1]
+                # Check: Reload Assignment reads the stored assignment and never writes.
+                self.page.locator('#ra-reload').click()
+                if stored:
+                    expect(self.page.locator('#ra-retry')).to_be_hidden()
+                else:
+                    expect(status).to_contain_text('같은 요청을 다시 시도하세요')
+                    expect(self.page.locator('#ra-retry')).to_be_visible()
+                    expect(reader).to_have_value(want)
+                    self.assertEqual(first, self.site.assignment_posts[-1], 'the read wrote nothing')
+                    # Retry sends the same requestId, revision and reader; the server applies it now.
+                    self.page.locator('#ra-retry').click()
+                    expect(status).to_have_text('배정이 저장되었습니다.')
+                    self.assertEqual(first, self.site.assignment_posts[-1])
+                self.assertEqual((want or None, revision), (first['readerSub'], first['revision']))
+                expect(current).to_contain_text(h.RAD['displayName'] if want else 'Unassigned')
+                self.assertEqual((revision + 1, want or None), (self.site.assignment_revision, (self.site.assignment or {}).get('sub')),
+                                 'the request applied once')
+                self.page.locator('#ra-close').click()
+                expect(self.page.locator('#reader-assignment-dialog')).to_be_hidden()
+        self.assertEqual(3, self.site.assignment_revision, 'each request applied once')
+
+    def open_consultations(self):
+        # Consultations sits in the toolbar's More menu.
+        self.page.locator('#toolbar-more > summary').click()
+        self.page.locator('#consultations-open').click()
+        expect(self.page.locator('#consultations-dialog')).to_be_visible()
+
+    def test_consultation_b2_commit_answers_keep_the_text_and_retry_the_same_request(self):
+        ids = {}
+        for code, _, _ in B2_ANSWERS:
+            ids[code] = str(uuid4())
+            self.site.consultations[ids[code]] = self.site.consultation(ids[code], h.UID, 'Accepted', 2, h.RAD_OTHER, h.RAD,
+                                                                         'SYN reason ' + code)
+        self.page.goto(h.MAIN_URL)
+        expect(self.page.locator('#rows')).to_contain_text(h.PATIENT)
+        self.select('main', h.UID)
+        self.open_consultations()
+        expect(self.page.locator('#co-list [data-consultation]')).to_have_count(3)
+        status, note, retry = self.page.locator('#co-status'), self.page.locator('#co-note'), self.page.locator('#co-retry')
+        # Complete with Reply: the reply text, the requestId and the revision stay for Retry Same Request.
+        for code, message, stored in B2_ANSWERS:
+            with self.subTest(action='complete', code=code):
+                self.page.locator(f'#co-list [data-consultation="{ids[code]}"]').click()
+                expect(self.page.locator('#co-original')).to_have_text('SYN reason ' + code)
+                reply = 'SYN reply after ' + code
+                note.fill(reply)
+                self.site.consultation_answers = [(code, message, stored)]
+                self.page.locator('#co-complete').click()
+                expect(status).to_contain_text(message)
+                expect(status).to_contain_text('입력은 유지했습니다')
+                expect(retry).to_be_visible()
+                expect(note).to_have_value(reply)
+                expect(self.page.locator('#co-current-state')).to_contain_text('Accepted')
+                path, first = self.site.consultation_posts[-1]
+                self.assertEqual((f'/api/consultations/{ids[code]}', 2, 'complete', reply),
+                                 (path, first['revision'], first['action'], first['note']))
+                retry.click()
+                expect(status).to_have_text('자문 요청을 저장했습니다. 목록은 Reload로 갱신할 수 있습니다.')
+                self.assertEqual((path, first), self.site.consultation_posts[-1], 'the same requestId, revision and text')
+                expect(retry).to_be_hidden()
+                expect(self.page.locator('#co-current-state')).to_contain_text('Completed')
+                expect(self.page.locator('#co-answer')).to_have_text(reply)
+                self.assertEqual(('Completed', 3, reply), tuple(self.site.consultations[ids[code]][k] for k in ('state', 'revision', 'reply')),
+                                 'applied once')
+        # A new request: the consultant, the reason and the requestId stay for Retry Same Request.
+        code, message, stored = B2_ANSWERS[1]
+        self.page.locator('#co-new').click()
+        expect(self.page.locator('#co-reader option')).to_have_count(2)
+        self.page.locator('#co-reader').select_option(h.RAD_OTHER['sub'])
+        self.page.locator('#co-reason').fill('SYN new consultation reason')
+        self.site.consultation_answers = [(code, message, stored)]
+        self.page.locator('#co-send').click()
+        expect(status).to_contain_text(message)
+        expect(retry).to_be_visible()
+        expect(self.page.locator('#co-reason')).to_have_value('SYN new consultation reason')
+        expect(self.page.locator('#co-reader')).to_have_value(h.RAD_OTHER['sub'])
+        path, first = self.site.consultation_posts[-1]
+        retry.click()
+        expect(status).to_have_text('자문 요청을 저장했습니다. 목록은 Reload로 갱신할 수 있습니다.')
+        self.assertEqual((path, first), self.site.consultation_posts[-1])
+        self.assertEqual(f'/api/studies/{h.UID}/consultations', path)
+        created = self.site.consultations[first['requestId']]
+        self.assertEqual(('Requested', 'SYN new consultation reason', h.RAD_OTHER['sub']),
+                         (created['state'], created['reason'], created['recipientSub']))
+        self.assertEqual(4, len(self.site.consultations), 'one consultation per request')
+        expect(self.page.locator('#co-current-state')).to_contain_text('Requested')
 
 
 if __name__ == '__main__':

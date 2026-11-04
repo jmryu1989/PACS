@@ -70,6 +70,13 @@ CLOSE_Q = '현재 입력이 마지막 확인본과 다른데 입력을 버리고
 CLOSE_U = '저장 결과가 미확정이고 닫아도 저장이 취소되지는 않는데 닫을까요?'
 HISTORY = '저장 이력을 표시하며 현재 입력은 유지됩니다.'
 PREPARING = '로그아웃 확인 중이며 입력은 유지됩니다.'
+# B2-COMMIT 503 answers of the clinical tech-note write: (code, server message, whether the write was stored). The command
+# step was not stored; at the provide step the write was stored but its provide record was not, or could not be confirmed.
+B2_ANSWERS = [
+    ('AppendNotCommitted', '저장이 완료되지 않았습니다. 입력은 유지됩니다.', False),
+    ('ProvideNotRecorded', '열람 기록을 남기지 못해 내용을 보내지 않았습니다. 입력은 유지됩니다. 다시 열거나 같은 요청으로 다시 확인하세요.', True),
+    ('OutcomeUnknown', '열람 기록이 저장됐는지 확인하지 못해 내용을 보내지 않았습니다. 입력은 유지됩니다. 다시 열거나 같은 요청으로 다시 확인하세요.', True),
+]
 
 
 class NoteApi:
@@ -210,6 +217,11 @@ class Harness:
                 return route.abort()
             if isinstance(mode, int):
                 return route.fulfill(status=mode, json={'message': 'SYN write refused'})
+            if isinstance(mode, tuple):  # a B2-COMMIT 503 answer: (code, message, whether the write was stored)
+                code, message, stored = mode
+                if stored:
+                    self.api.commit(body)
+                return route.fulfill(status=503, json={'code': code, 'message': message})
             if mode == 'foreign-409':  # another save lands just before this write reaches the version check
                 self.api.foreign('SYN v3 theirs')
                 return route.fulfill(status=409, json={'message': 'SYN write refused'})
@@ -526,6 +538,33 @@ class Vectors:
                 self.assertEqual(self.state(), {'dirty': True, 'busy': False, 'unknown': True})
                 self.answers.append(False); self.press('Close')
                 self.assertEqual(self.dialogs[-1], CLOSE_U)
+
+    def test_T13_b2_commit_answers_are_unknown_keep_the_input_and_converge_on_the_same_attempt(self):
+        for index, (code, message, stored) in enumerate(B2_ANSWERS):
+            with self.subTest(code=code):
+                if index:
+                    self.setUp_again()
+                self.opened_with('SYN v1')
+                self.edit('SYN v2 mine', 'SYN R1')
+                self.api.post_modes = [(code, message, stored)]
+                self.save()
+                # Never "not saved": the outcome is unknown and the input stays as typed.
+                expect(self.status).to_have_text(UNKNOWN)
+                self.assertEqual(self.state(), {'dirty': True, 'busy': False, 'unknown': True})
+                expect(self.note).to_have_value('SYN v2 mine'); expect(self.reason).to_have_value('SYN R1')
+                self.assertEqual(self.api.calls.count('POST'), 1, 'never resent by itself')
+                # Save Note reads first; the same attempt goes again only when the read still shows its base.
+                self.save()
+                if stored:
+                    expect(self.status).to_have_text(earlier(2))
+                    self.assertEqual(len(self.api.posts), 1, 'the read found its revision; nothing more is sent')
+                else:
+                    expect(self.status).to_have_text(saved(2))
+                    self.assertEqual(self.api.posts[0], self.api.posts[1], 'the same attempt id, base version and input')
+                self.assertEqual(len(self.api.notes), 2, 'one revision')
+                self.assertEqual(self.api.notes[-1]['attemptId'], self.api.posts[0]['attemptId'])
+                expect(self.note).to_have_value('SYN v2 mine')
+                self.assertFalse(self.state()['unknown'])
 
     def test_T12_an_unsent_resend_keeps_the_earlier_unknown_and_both_facts(self):
         self.lost_first_write('abort')
