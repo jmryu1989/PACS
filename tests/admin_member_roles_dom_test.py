@@ -44,6 +44,7 @@ not answer is aborted and fails the case. The service half (approve [clinician] 
 the real API and Keycloak) is tests/clinician_policy_live.py test_03, hosted only.
 """
 import copy
+import json
 from pathlib import Path
 import re
 import sys
@@ -74,7 +75,14 @@ SCRIPTS = {
     "/worklist/hpacs-lite/signing-key-admin.js": lf_text(HPACS / "signing-key-admin.js"),
     "/worklist/hpacs-lite/admin-access-review.js": lf_text(HPACS / "admin-access-review.js"),
     "/worklist/hpacs-lite/held-sources-admin.js": lf_text(HPACS / "held-sources-admin.js"),
+    # CD-01: the shared Product Information panel and its embedded facts.
+    "/worklist/hpacs-lite/product-info-data.js": lf_text(HPACS / "product-info-data.js"),
+    "/worklist/hpacs-lite/product-info.js": lf_text(HPACS / "product-info.js"),
 }
+# CD-01: the server's answer for the same build (the generated facts the API compiles).
+_FACTS = json.loads(lf_text(ROOT / "api" / "src" / "product-info-data.ts").split("=", 1)[1].rsplit(" as const;", 1)[0])
+VERSION = {"schema": 1, "factsDigest": _FACTS["factsDigest"], "productVersion": _FACTS["productVersion"],
+           "build": {"revision": None, "tag": None}}
 INSTITUTION = "SYN-INST-A"
 ME = {"sub": "SYN-ADMIN-SUB", "user": "syn-admin", "displayName": "SYN Admin", "roles": ["admin"],
       "institution": INSTITUTION, "sessionId": "SYN-SESSION-ADMIN"}
@@ -220,6 +228,7 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
         self.admin_body = ADMIN_HTML
         self.patches, self.resets, self.unexpected, self.errors = [], [], [], []
         self.list_reads = 0
+        self.version_reads = 0
         self.held_lists = None
         self.patch_error = None
         self.page = self.browser.new_page(viewport={"width": 1280, "height": 900})
@@ -251,6 +260,10 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
             return
         if method == "GET" and path == "/api/me":
             route.fulfill(json=ME)
+            return
+        if method == "GET" and path == "/api/version" and not url.query:
+            self.version_reads += 1
+            route.fulfill(json=VERSION)
             return
         if method == "GET" and path == "/api/admin/users" and parse_qs(url.query) == {"page": ["1"]}:
             self.list_reads += 1
@@ -699,6 +712,32 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
         expect(self.page.get_by_role("button", name="Retry Activate", exact=True)).to_have_count(0)
         self.assertEqual([("SYN-U-SUSPENDED", {"enabled": True, "version": 7})], self.patches)
 
+
+    def test_11_product_information_from_the_header_changes_nothing(self):
+        # CD-01 C01: the header's one Product Information entry, English like the other header controls, opens and
+        # closes over the member list by click and keyboard; nothing is written or re-read and focus comes back.
+        self.load()
+        header = self.page.locator("header")
+        trigger = header.get_by_role("button", name="Product Information", exact=True)
+        expect(trigger).to_have_count(1)
+        self.assertEqual("Worklist", self.page.evaluate("() => document.querySelector('header a.button-link').textContent"))
+        rows_before, reads_before = self.page.locator("#users").inner_text(), self.list_reads
+        trigger.click()
+        dialog = self.page.get_by_role("dialog", name="Product Information")
+        expect(dialog).to_be_visible()
+        # A server built without a revision: the facts still match, and the build says it has no identity.
+        expect(dialog.get_by_role("row").filter(has_text="Build Check")).to_contain_text("Match")
+        expect(dialog.get_by_role("row").filter(has_text="Server Build")).to_contain_text("빌드 식별 없음")
+        self.page.keyboard.press("Escape")
+        expect(dialog).to_have_count(0)
+        self.assertEqual("product-info-open", self.page.evaluate("() => document.activeElement.id"))
+        self.page.keyboard.press("Enter")
+        expect(dialog).to_be_visible()
+        dialog.get_by_role("button", name="Close", exact=True).click()
+        expect(dialog).to_have_count(0)
+        self.assertEqual((rows_before, reads_before, 2), (self.page.locator("#users").inner_text(), self.list_reads,
+                                                          self.version_reads))
+        self.assertEqual(([], []), (self.patches, self.resets))
 
 
 if __name__ == "__main__":

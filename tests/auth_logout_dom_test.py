@@ -170,6 +170,9 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/held-sources-admin.js",
     "worklist-v0/hpacs-lite/clinician.html",
     "worklist-v0/hpacs-lite/clinician.js",
+    # CD-01: the shared Product Information panel of main, admin and Clinician Home.
+    "worklist-v0/hpacs-lite/product-info-data.js",
+    "worklist-v0/hpacs-lite/product-info.js",
 )
 SERVED_FILES = include_moved_files(SERVED_FILES, ROOT)
 SERVED = set()

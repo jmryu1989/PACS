@@ -61,6 +61,7 @@ aborted and fails the case. The service half is tests/clinician_read_live.py (ho
 """
 from page_source import read_page_source
 import copy
+import json
 from pathlib import Path
 import re
 import sys
@@ -82,10 +83,14 @@ def lf_text(path):
 
 ORIGIN = "https://clinician.test"
 BASE = "/worklist/hpacs-lite/"
-SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "index.html", "auth.js", "work-context.js", "session-transport.js",
+SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "product-info-data.js", "product-info.js", "index.html", "auth.js", "work-context.js", "session-transport.js",
                                                     "critical-result-inbox.js", "clinical-signature.js")}
 MAIN_HTML = read_page_source(HPACS / "main.html")
 AUTH_CONTROLLER = lf_text(ROOT / "api" / "src" / "auth.controller.ts")
+# CD-01: the server's answer for the same build (the generated facts the API compiles).
+_FACTS = json.loads(lf_text(ROOT / "api" / "src" / "product-info-data.ts").split("=", 1)[1].rsplit(" as const;", 1)[0])
+VERSION = {"schema": 1, "factsDigest": _FACTS["factsDigest"], "productVersion": _FACTS["productVersion"],
+           "build": {"revision": "0123456789abcdef0123456789abcdef01234567", "tag": None}}
 EMBLEM = (HPACS / "kin-emblem-j1.svg").read_bytes()
 
 # main.html at its own path: the shipped auth.js, then main.html's boot opening (pinned in test_01). The beacon says
@@ -369,6 +374,8 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         self.inbox_items, self.inbox_pending = [], 0
         self.me_requests = 0
         self.unexpected, self.errors, self.dialogs, self.finished = [], [], [], []
+        # CD-01: GET /api/version reads of the Product Information panel, kept apart from self.calls.
+        self.version_reads = []
         self.context = None
         self.fresh_context()
 
@@ -495,6 +502,10 @@ class ClinicianHomeDOMTest(unittest.TestCase):
             self.inbox_reads.append(request.url)
             route.fulfill(json={"owner": [account.get("institution"), account.get("sub")], "view": "received",
                                 "items": copy.deepcopy(self.inbox_items), "nextCursor": None, "pending": self.inbox_pending})
+            return
+        if method == "GET" and path == "/api/version" and not url.query:
+            self.version_reads.append(request.url)
+            route.fulfill(json=VERSION)
             return
         self.unexpected.append(f"{method} {request.url}")
         route.abort()
@@ -1074,6 +1085,9 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         self.open_home()
         # Keyboard from the top: header, Refresh, then the list's single tab stop. Between the header and Refresh stand the
         # S7-U2a Critical Results region's own controls (the region is above Studies); every stop passed there is inside it.
+        # CD-01: Product Information is the header's first stop, Log out the next.
+        self.page.keyboard.press("Tab")
+        self.assertEqual("product-info-open", self.active()["id"])
         self.page.keyboard.press("Tab")
         self.assertEqual("logout", self.active()["id"])
         stops, landed = self.walk_past_region()
@@ -1110,7 +1124,7 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         self.assertEqual("Clinician Home — KIN", labels["title"])
         # DOM order: header, list Retry (hidden), rows in ORDER (B selected), report Retry (hidden), viewer slot,
         # membership card (hidden).
-        self.assertEqual(["Log out", "Refresh", "Retry", "View", "Viewing", "View", "View", "View", "View", "View", "Retry",
+        self.assertEqual(["Product Information", "Log out", "Refresh", "Retry", "View", "Viewing", "View", "View", "View", "View", "View", "Retry",
                           "Open Viewer", "Log out"], labels["buttons"])
         self.assertEqual(["Clinician Home", "Studies", "Study", "Report", "Findings", "Conclusion", "Recommendation",
                           "Key Images", ""], labels["headings"])
@@ -1288,10 +1302,44 @@ class ClinicianHomeDOMTest(unittest.TestCase):
           between.textContent = 'SYN Between'; document.getElementById('critical-results').after(between);
           document.activeElement.blur(); }""")
         self.page.keyboard.press("Tab")
+        self.assertEqual("product-info-open", self.active()["id"])
+        self.page.keyboard.press("Tab")
         self.assertEqual("logout", self.active()["id"])
         stops, landed = self.walk_past_region()
         self.assertGreater(stops, 0)
         self.assertEqual("syn-between", landed)
+
+    def test_14_product_information_opens_and_closes_over_the_selected_study(self):
+        # CD-01 C01: the header's one Product Information entry opens and closes over a selected study, by click and
+        # from the keyboard. The page reads nothing but the panel's server check, writes nothing, asks nothing, and the
+        # study, its report and the page's exact label lists are as before.
+        self.open_home()
+        self.row(1).click()
+        expect(self.page.locator("#report-state")).to_have_attribute("data-state", "final")
+        before = {"labels": self.page.evaluate(LABELS), "report": self.report(), "calls": list(self.calls),
+                  "current": self.row(1).get_attribute("aria-current")}
+        trigger = self.page.get_by_role("button", name="Product Information", exact=True)
+        expect(trigger).to_have_count(1)
+        trigger.click()
+        dialog = self.page.get_by_role("dialog", name="Product Information")
+        expect(dialog).to_be_visible()
+        expect(dialog.get_by_role("row").filter(has_text="Build Check")).to_contain_text("Match")
+        expect(dialog.get_by_role("row").filter(has_text="Serial Number")).to_contain_text("제조번호 확정 전")
+        expect(dialog.get_by_role("link", name="Open Source Notices", exact=True)).to_have_attribute(
+            "href", "/worklist/legal/open-source-notices.html")
+        self.page.keyboard.press("Escape")
+        expect(dialog).to_have_count(0)
+        self.assertEqual("product-info-open", self.active()["id"])
+        self.page.keyboard.press("Enter")
+        expect(dialog).to_be_visible()
+        self.assertEqual("product-info-close", self.active()["id"])
+        dialog.get_by_role("button", name="Close", exact=True).click()
+        expect(dialog).to_have_count(0)
+        self.assertEqual("product-info-open", self.active()["id"])
+        self.assertEqual(before, {"labels": self.page.evaluate(LABELS), "report": self.report(), "calls": list(self.calls),
+                                  "current": self.row(1).get_attribute("aria-current")})
+        self.assertEqual(2, len(self.version_reads))
+        self.assertEqual([], self.logouts)
 
 
 if __name__ == "__main__":
