@@ -70,8 +70,18 @@ dialog.kpi-dialog :focus-visible { outline: 2px solid #9cc3ff; outline-offset: 2
       productVersion: { status: version.status, value: version.value } };
   }
 
-  /** The page's embedded facts against the server's. Unknown is never reported as the same build. */
-  function compareBuild(local, server) {
+  /** The build commit the deployment stamped on this page (proxy/15-kin-config.envsh); null when it stamped none.
+   * The page files come from a checkout, not an image, so this is their only build identity. */
+  function pageRevision() {
+    const meta = doc.querySelector('meta[name="kin-build-revision"]');
+    const value = meta ? meta.getAttribute('content') : null;
+    return value && HEX40.test(value) ? value : null;
+  }
+
+  /** The page's embedded facts and stamped commit against the server's. Unknown is never reported as the same build:
+   * product facts can agree across code builds, so two known commits must also agree, and one known commit beside an
+   * unknown one cannot be confirmed either way. */
+  function compareBuild(local, server, page) {
     if (!server) return { status: 'unverified', label: 'Unverified',
       note: '서버 빌드 정보를 확인하지 못했습니다. 이 표의 값은 이 페이지에 내장된 제품 정보입니다.' };
     const same = server.factsDigest === local.factsDigest
@@ -80,8 +90,15 @@ dialog.kpi-dialog :focus-visible { outline: 2px solid #9cc3ff; outline-offset: 2
     if (!same) return { status: 'mismatch', label: 'Mismatch',
       note: `이 화면과 서버의 제품 정보가 서로 다른 빌드입니다(화면 ${local.factsDigest.slice(0, 12)}, 서버 `
         + `${server.factsDigest.slice(0, 12)}). 페이지를 새로 고친 뒤에도 같으면 관리자에게 알려 주십시오.` };
+    if (page && server.revision && page !== server.revision) return { status: 'mismatch', label: 'Mismatch',
+      note: `이 화면과 서버가 서로 다른 빌드입니다(화면 커밋 ${page.slice(0, 12)}, 서버 커밋 ${server.revision.slice(0, 12)}). `
+        + '페이지를 새로 고친 뒤에도 같으면 관리자에게 알려 주십시오.' };
+    if (!page !== !server.revision) return { status: 'unverified', label: 'Unverified',
+      note: `${page ? '서버' : '이 화면'}에 빌드 커밋이 없어 같은 빌드인지 확인할 수 없습니다. 제품 정보는 서로 같습니다.` };
+    if (page) return { status: 'match', label: 'Match',
+      note: `이 화면과 서버가 같은 빌드입니다(커밋 ${page.slice(0, 12)}, 제품 정보 ${local.factsDigest.slice(0, 12)}).` };
     return { status: 'match', label: 'Match',
-      note: `이 화면과 서버가 같은 제품 정보 빌드를 사용합니다(${local.factsDigest.slice(0, 12)}).` };
+      note: `이 화면과 서버가 같은 제품 정보 빌드를 사용합니다(${local.factsDigest.slice(0, 12)}). 화면과 서버 모두 빌드 커밋이 없습니다.` };
   }
 
   function serverRows(server, check) {
@@ -231,7 +248,7 @@ dialog.kpi-dialog :focus-visible { outline: 2px solid #9cc3ff; outline-offset: 2
       readVersion().then((server) => {
         // A late answer belongs to the panel that asked; a closed or reopened panel ignores it.
         if (!current || current.seq !== seq) return;
-        showVersion(dialog, data, server, compareBuild(data, server));
+        showVersion(dialog, data, server, compareBuild(data, server, pageRevision()));
       });
     },
     close() {

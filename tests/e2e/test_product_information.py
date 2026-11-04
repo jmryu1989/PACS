@@ -6,8 +6,9 @@ One user flow on the real proxy, API, Keycloak and the shipped pages (synthetic 
 
   1. C06 GET /api/version without a session answers 200 with the build facts only, the facts digest the pages embed,
      and a revision that is null or this checkout's (KIN_EXPECTED_REVISION when given); a protected read still 401s.
-  2. C01/C05 main.html: a reader with a draft in the report editor opens Product Information from the menu bar; the
-     server check reads Match; closing returns focus, keeps the draft and sent no write.
+  2. C01/C05 main.html: the build commit stamped on the served page is the API's; a reader with a draft in the report
+     editor opens Product Information from the menu bar; the server check reads Match; closing returns focus, keeps
+     the draft and sent no write.
   3. C07 admin.html, ready and never opened: the network is cut; the first open and a reopen show the embedded facts
      and Unverified.
   4. C01/C11 Clinician Home: the panel's Open Source Notices opens CD-02's generated file in a new tab, the home page
@@ -100,6 +101,10 @@ class ProductInformationE2E(WorklistE2E):
         rs = self.state(fixture).get("rs")
         requests = []
         page.on("request", lambda request: requests.append((request.method, urlsplit(request.url).path)))
+        # C05: the commit the proxy stamped on the served page is the API's (both null on a stack built without one).
+        stamped = page.evaluate("() => { const m = document.querySelector('meta[name=\"kin-build-revision\"]');"
+                                " return m ? m.getAttribute('content') : null; }")
+        self.assertEqual(body["build"]["revision"], stamped)
         entry = page.locator(".menubar").get_by_role("button", name="Product Information")
         expect(entry).to_have_count(1)
         entry.click()

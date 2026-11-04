@@ -89,8 +89,10 @@ MAIN_HTML = read_page_source(HPACS / "main.html")
 AUTH_CONTROLLER = lf_text(ROOT / "api" / "src" / "auth.controller.ts")
 # CD-01: the server's answer for the same build (the generated facts the API compiles).
 _FACTS = json.loads(lf_text(ROOT / "api" / "src" / "product-info-data.ts").split("=", 1)[1].rsplit(" as const;", 1)[0])
+# The shipped page is served as checked in, without a deployment's build commit, so the server it matches is one built
+# without a commit too (a commit on one side only reads Unverified: product_info_dom_test 02).
 VERSION = {"schema": 1, "factsDigest": _FACTS["factsDigest"], "productVersion": _FACTS["productVersion"],
-           "build": {"revision": "0123456789abcdef0123456789abcdef01234567", "tag": None}}
+           "build": {"revision": None, "tag": None}}
 EMBLEM = (HPACS / "kin-emblem-j1.svg").read_bytes()
 
 # main.html at its own path: the shipped auth.js, then main.html's boot opening (pinned in test_01). The beacon says

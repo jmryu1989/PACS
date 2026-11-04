@@ -959,6 +959,7 @@ Every `scripts/record-run.py --run-dir` in the workflows listed below sits under
 | `privacy-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/privacy-date` | `synthetic-privacy-dom-results` | Privacy article 8 KST effective-date display |
 | `viewer-native-dom` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/viewer-stack-restore-dom` | `synthetic-viewer-native-dom-results` | Viewer Job native initial-image and completion contracts |
 | `proxy-contracts` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/proxy-grant-log` | `synthetic-proxy-contracts-results` | S9-U4b proxy logs and redirects never carry an original-download grant (real nginx) |
+| `proxy-contracts` (`pr-regressions.yml`) | `tmp/workspace-ui-ci/proxy-static-build` | `synthetic-proxy-contracts-results` | CD-01 proxy stamps the deployment's build commit on the business pages only (real nginx) |
 | `volume-rendering.yml` / `volume-rendering` | `tmp/vr-ci/measurement-ci` | `synthetic-volume-rendering-results` | CI profile safeguards and artifact policy |
 | `volume-rendering.yml` / `volume-rendering` | `tmp/vr-ci/pure-vr` | `synthetic-volume-rendering-results` | Volume rendering, sculpt, and personal preset boundaries |
 | `volume-rendering.yml` / `volume-rendering` | `tmp/vr-ci/pure-volume-models` | `synthetic-volume-rendering-results` | Volume display, batch, crosshair, marks, curved MPR, orientation, job capture and preference models |

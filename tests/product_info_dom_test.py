@@ -10,8 +10,10 @@ legal documents are the shipped files. Each case: input -> the branch observed o
       separate end-of-support schedule and after-support plan, AI training method and data, no expert-use item;
       headers and states English, explanations Korean.
   02  C05 the server check: the same build reads Match with its revision and tag; another facts digest reads
-      Mismatch; an error, a malformed answer and a timeout-free network failure read Unverified; a server without a
-      revision or tag says so; a late answer for a closed panel is not painted on the reopened one.
+      Mismatch, and so does the same facts digest from another commit than the one stamped on the page (page A +
+      API B); an error, a malformed answer and a timeout-free network failure read Unverified; a commit on one side
+      only reads Unverified and a server without a revision or tag says so; a late answer for a closed panel is not
+      painted on the reopened one.
   03  C07 after the page is ready and the network is cut, the first open and a reopen show the embedded facts and
       Unverified, without any request succeeding.
   04  C03 a hostile config value is shown as text and runs nothing; a confirmed synthetic value replaces its
@@ -47,7 +49,8 @@ CONFIG = json.loads((ROOT / "config" / "product-info.json").read_text(encoding="
 MODEL = product.build_model(copy.deepcopy(CONFIG))
 ORIGIN = "https://product.test"
 BASE = "/worklist/hpacs-lite/"
-HOST = """<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>SYN host</title></head><body>
+# <!--stamp--> is where the production proxy's sub_filter puts the deployment's build commit (proxy/15-kin-config.envsh).
+HOST = """<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>SYN host</title><!--stamp--></head><body>
 <button type="button" id="before">SYN Before</button>
 <button type="button" id="trigger" data-product-info>Product Information</button>
 <textarea id="draft">SYN draft</textarea>
@@ -92,6 +95,7 @@ class ProductInfoDomTest(unittest.TestCase):
     def setUp(self):
         self.data = page_data(MODEL)
         self.version = ("json", version_answer(MODEL))
+        self.page_revision = SHA
         self.held = []
         self.requests, self.unexpected, self.errors, self.dialogs = [], [], [], []
         self.extra_files = {}
@@ -115,7 +119,8 @@ class ProductInfoDomTest(unittest.TestCase):
             self.unexpected.append(route.request.url)
             return route.abort()
         if path == BASE + "host.html":
-            return route.fulfill(body=HOST, content_type="text/html; charset=utf-8")
+            stamp = f'<meta name="kin-build-revision" content="{self.page_revision}">' if self.page_revision else ""
+            return route.fulfill(body=HOST.replace("<!--stamp-->", stamp), content_type="text/html; charset=utf-8")
         if path == "/auth/login.html":
             return route.fulfill(body=LOGIN, content_type="text/html; charset=utf-8")
         if path == "/auth/resources/legal-links.js":
@@ -235,10 +240,20 @@ class ProductInfoDomTest(unittest.TestCase):
                     self.assertIn("확인하지 못했습니다", rows["Build Check"][2])
                     self.assertEqual("Unverified", rows["Server Build"][1])
                 self.close()
-        # A development server: no revision, no tag. The facts still match; the build says it has no identity.
+        # Page A + API B: the same product facts from another code build is not the same build.
+        self.version = ("json", version_answer(MODEL, revision="f" * 40))
+        self.open_panel()
+        rows = self.rows(self.wait_check("Mismatch"))
+        self.assertIn("서로 다른 빌드", rows["Build Check"][2])
+        self.assertIn(SHA[:12], rows["Build Check"][2])
+        self.assertIn("f" * 12, rows["Build Check"][2])
+        self.close()
+        # A stamped page beside a development server (no revision, no tag): the facts agree, the build cannot be
+        # confirmed, so it is not a Match; the server rows say it has no identity.
         self.version = ("json", version_answer(MODEL, revision=None, tag=None))
         self.open_panel()
-        rows = self.rows(self.wait_check("Match"))
+        rows = self.rows(self.wait_check("Unverified"))
+        self.assertIn("서버에 빌드 커밋이 없어", rows["Build Check"][2])
         self.assertEqual(("Unverified", "None"), (rows["Server Build"][1], rows["Build Tag"][1]))
         self.assertTrue(rows["Server Build"][2].startswith("빌드 식별 없음"))
         self.assertTrue(rows["Build Tag"][2].startswith("해당 빌드 태그 없음"))
@@ -256,6 +271,19 @@ class ProductInfoDomTest(unittest.TestCase):
         expect(self.page.get_by_role("row").filter(has_text="Build Check")).to_contain_text("Checking")
         second.fulfill(json=version_answer(MODEL))
         self.wait_check("Match")
+        self.close()
+        # A page served without a deployment commit: beside a stamped server it cannot be confirmed; beside a
+        # development server neither side has a commit and only the product facts are compared.
+        self.page_revision = None
+        self.page.reload()
+        self.version = ("json", version_answer(MODEL))
+        self.open_panel()
+        self.assertIn("이 화면에 빌드 커밋이 없어", self.rows(self.wait_check("Unverified"))["Build Check"][2])
+        self.close()
+        self.version = ("json", version_answer(MODEL, revision=None, tag=None))
+        self.open_panel()
+        self.assertIn("모두 빌드 커밋이 없습니다", self.rows(self.wait_check("Match"))["Build Check"][2])
+        self.close()
 
     def test_03_offline_first_open_and_reopen(self):
         self.open_host()

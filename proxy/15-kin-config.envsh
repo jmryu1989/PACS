@@ -90,6 +90,25 @@ case "${KIN_ASR_MAX_BYTES:-}" in
 esac
 printf 'client_max_body_size %s;\n' "$DICTATION_BODY" > "$SNIPPET_DIR/dictation-body.conf"
 
+# CD-01 C05: 업무 화면 파일은 checkout bind mount에서 Orthanc가 그대로 내보내므로 자기 빌드 커밋이 없다. 운영 overlay는
+# API 이미지의 VCS_REF와 같은 KIN_REVISION을 여기 KIN_BUILD_REVISION으로 주고, /worklist/의 HTML마다 그 커밋을 meta로
+# 싣는다. 제품정보 패널이 이 값과 GET /api/version의 revision을 비교하므로 "화면 A + API B" 혼합이 Mismatch로 드러난다.
+# 40자리 소문자 hex가 아니면(미설정·unknown·짧은 SHA) 아무것도 싣지 않는다: 모르는 값을 빌드로 표시하지 않는다.
+# Orthanc가 압축해 보내면 치환이 되지 않으므로 원문을 받는다.
+BUILD_REVISION="${KIN_BUILD_REVISION:-}"
+case "$BUILD_REVISION" in
+  *[!0-9a-f]*) BUILD_REVISION= ;;
+esac
+if [ "${#BUILD_REVISION}" -eq 40 ]; then
+  printf '%s\n' \
+    'proxy_set_header Accept-Encoding "";' \
+    'sub_filter_once on;' \
+    "sub_filter '</head>' '<meta name=\"kin-build-revision\" content=\"$BUILD_REVISION\"></head>';" \
+    > "$SNIPPET_DIR/static-build.conf"
+else
+  : > "$SNIPPET_DIR/static-build.conf"
+fi
+
 # 개발 프록시도 외부 진입점이 될 수 있다. 배포 모드와 관계없이 관리 표면을 숨긴다.
 printf '%s\n' \
   'location = /auth/admin { return 404; }' \

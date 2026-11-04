@@ -152,6 +152,7 @@ REGRESSION_SUITES = {
     """.split(),
     'proxy-contracts': """
         tests/proxy_grant_log_test.py
+        tests/proxy_static_build_test.py
     """.split(),
     'measurements': """
         tests/e2e/test_cine.py
