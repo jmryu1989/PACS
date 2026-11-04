@@ -952,6 +952,7 @@
     ],
     "source-regressions": [
       "tests/product_info_test.py",
+      "worklist-v0/hpacs-lite/product-info.js",
       "scripts/build-product-info.py",
       "config/product-info.json",
       "worklist-v0/hpacs-lite/product-info-data.js",
@@ -2463,6 +2464,8 @@
       "api/package-lock.json"
     ],
     "related-layout-dom": [
+      "worklist-v0/hpacs-lite/product-info.js",
+      "worklist-v0/hpacs-lite/product-info-data.js",
       "worklist-v0/hpacs-lite/preload-disk.js",
       ".gitattributes",
       "api/package*.json",
