@@ -39,13 +39,7 @@ class AuditLinkPg(pg.PgLedgerFixture):
         cls.sql("SELECT emr_access.resolve_member_identity('https://synthetic.invalid/realms/f-link','officer')")
         cls.sql(bootstrap)
 
-    def test_audit_copy_hold_http(self):
-        logs = ROOT / 'tmp/emr-f-link' / ('pg-' + self.token)
-        logs.mkdir(parents=True)
-        spool = logs / 'spool'
-        spool.mkdir()
-        if self.image:
-            spool.chmod(0o777)  # Disposable synthetic output, writable by the image's node user.
+    def node_command(self, script, spool):
         env = {'DATABASE_URL': self.runtime_url, 'KIN_F_WITNESS_URL': self.witness_url,
                'KIN_F_SPOOL': '/evidence' if self.image else str(spool)}
         if self.image:
@@ -54,9 +48,33 @@ class AuditLinkPg(pg.PgLedgerFixture):
                        '-v', str(ROOT / 'tests/emr/f') + ':/tests:ro', '-v', str(spool) + ':/evidence', '-e', 'KIN_F_API=/app']
             for key, value in env.items():
                 command += ['-e', key + '=' + value]
-            command += ['--entrypoint', 'node', self.image, '--test', '/tests/link_pg_test.cjs']
+            command += ['--entrypoint', 'node', self.image, '--test', '/tests/' + script]
         else:
-            command = [os.environ['KIN_B2R_NODE'], '--test', str(ROOT / 'tests/emr/f/link_pg_test.cjs')]
+            command = [os.environ['KIN_B2R_NODE'], '--test', str(ROOT / 'tests/emr/f' / script)]
+        return env, command
+
+    def test_native_copy_http(self):
+        """CD-09 F: native reports from the real commit route, Tech Notes, and F's lock order on real PostgreSQL."""
+        logs = ROOT / 'tmp/emr-f-link' / ('native-' + self.token)
+        logs.mkdir(parents=True)
+        spool = logs / 'spool'
+        spool.mkdir()
+        if self.image:
+            spool.chmod(0o777)  # Disposable synthetic output, writable by the image's node user.
+        env, command = self.node_command('native_copy_pg_test.cjs', spool)
+        if '--rm' in command:
+            command.remove('--rm')  # run_node_case reads a failed child's exit state, then removes it.
+        print('F native PG/HTTP logs:', logs)
+        self.run_node_case(command, logs, env={**os.environ, **env}, timeout=600, label='native')
+
+    def test_audit_copy_hold_http(self):
+        logs = ROOT / 'tmp/emr-f-link' / ('pg-' + self.token)
+        logs.mkdir(parents=True)
+        spool = logs / 'spool'
+        spool.mkdir()
+        if self.image:
+            spool.chmod(0o777)  # Disposable synthetic output, writable by the image's node user.
+        env, command = self.node_command('link_pg_test.cjs', spool)
         try:
             result = self.command(command, env={**os.environ, **env}, check=False, timeout=360)
         except subprocess.TimeoutExpired as error:
