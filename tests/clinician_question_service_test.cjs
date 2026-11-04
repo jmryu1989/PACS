@@ -55,7 +55,7 @@ const code = (status, value) => e => typeof e?.getStatus === 'function' && e.get
 function world(policy, { questions = [] } = {}) {
   const events = [], statements = [], transactions = [], calls = [], audits = [];
   const writes = { question: 0, update: 0, entry: 0, audit: 0 };
-  const store = { questions: new Map(questions.map(q => [q.id, { ...q }])), entries: new Map(), study: { rs: 'W' }, versions: [] };
+  const store = { questions: new Map(questions.map(q => [q.id, { ...q }])), entries: new Map(), study: { rs: 'W' }, versions: [], report: null };
   const w = { events, statements, transactions, calls, audits, writes, store, policyRow: policy ? { institution, revision: 1, policy, reason: '', updatedBy: null, updatedAt: null } : null };
   let target = null, steps = new Map();
   w.between = next => { steps = new Map(Object.entries(next)); target = 'next'; };
@@ -67,9 +67,15 @@ function world(policy, { questions = [] } = {}) {
     steps.delete(event);
     await step();
   };
+  // A commit writes its version rows and moves the Report head to its last kept version, as commitReport does in one transaction.
+  w.publish = (...versions) => {
+    store.versions.push(...versions.map(v => ({ uid, ...v })));
+    const kept = versions.filter(v => v.action !== 'discarded');
+    if (kept.length) store.report = { uid, version: kept[kept.length - 1].version };
+  };
   const kind = sql => sql.includes('pg_advisory') ? 'advisory' : sql.includes('"StudyAccessPolicy"') ? 'policy'
     : sql.includes('FROM "StudyQuestion" q') ? 'list' : sql.includes('FROM "StudyQuestion" WHERE') ? 'question'
-      : sql.includes('"ReportVersion"') ? 'anchor' : sql.includes('"StudyState"') ? 'study' : 'unknown';
+      : sql.includes('JOIN "Report"') ? 'head' : sql.includes('"ReportVersion"') ? 'anchor' : sql.includes('"StudyState"') ? 'study' : 'unknown';
   const query = async (where, view, index, strings, values) => {
     const sql = strings.join('?'), k = kind(sql);
     log(where + ':' + k, sql.includes('FOR UPDATE') ? ' FOR UPDATE' : sql.includes('FOR SHARE') ? ' FOR SHARE' : '');
@@ -81,6 +87,13 @@ function world(policy, { questions = [] } = {}) {
     else if (k === 'anchor') {
       const kept = view.versions.filter(v => v.uid === values[0] && v.action !== 'discarded').map(v => v.version);
       rows = [{ version: kept.length ? Math.max(...kept) : null }];
+    } else if (k === 'head') {
+      // The Report row, the version row it names, and the highest kept version, as three independent facts of the store.
+      const versions = view.versions.filter(v => v.uid === values[0]);
+      const kept = versions.filter(v => v.action !== 'discarded').map(v => v.version);
+      const head = view.report && view.report.uid === values[0] ? view.report.version : null;
+      rows = [{ head, headAction: head === null ? null : versions.find(v => v.version === head)?.action ?? null,
+        kept: kept.length ? Math.max(...kept) : null }];
     } else if (k === 'study') rows = values[0] === uid ? [{ uid, institutionId: institution, rs: view.study.rs }] : [];
     else throw new Error('unexpected SQL in the stub: ' + sql);
     await after(index, where + ':' + k);
@@ -304,7 +317,7 @@ test('F01: commits between the statements of a thread read never reach its answe
   const w = world(null);
   await create(w, { ...clinician }, id(81));
   w.store.study.rs = 'A';
-  w.store.versions.push({ uid, version: 1, action: 'approve' });
+  w.publish({ version: 1, action: 'approve' });
   const reader = w.transactions.length;
   // An answer and a close commit right after the read's question row, a report reset (A -> W: discarded v2, reset v3)
   // right after its StudyState row. Read per statement, the answer was revision 1 / Open with three entries and
@@ -316,7 +329,7 @@ test('F01: commits between the statements of a thread read never reach its answe
     },
     'tx:study': async () => {
       w.store.study.rs = 'W';
-      w.store.versions.push({ uid, version: 2, action: 'discarded' }, { uid, version: 3, action: 'reset' });
+      w.publish({ version: 2, action: 'discarded' }, { version: 3, action: 'reset' });
     },
   });
   const { item } = await w.svc.read(id(81), { ...clinician });
@@ -371,4 +384,74 @@ test('F01: the write paths keep the default isolation and lock StudyState before
     ['reply', [WRITE], [...parent, 'tx:question FOR UPDATE', ...written]],
     ['close', [WRITE], [...parent, 'tx:question FOR UPDATE', ...written]],
   ]);
+});
+
+/* CD-09 W-Q (WQ2): the report anchor a question write records. Input: the Report head, the version row it names and the
+ * kept versions, set in the store before the write. Observed first: the store's three facts and that the write took the
+ * StudyState lock. Result: the recorded anchor, or 409 QUESTION_REPORT_UNAVAILABLE with no question, entry or audit row. */
+const anchorOf = w => [...w.store.entries.values()].map(e => e.reportVersion);
+const head = (w, before) => w.statements.slice(before).filter(s => s === 'tx:head' || s === 'tx:study FOR UPDATE');
+
+test('W-Q A1/A2: a write records null only without Report and kept versions, else the verified head', async () => {
+  const w = world(null);
+  await create(w, { ...clinician }, id(201));
+  w.store.versions.push({ uid, version: 1, action: 'discarded' });      // a discarded-only history (force-discarded drafts)
+  await reply(w, id(201), { ...radiologist }, id(202), 1);
+  w.publish({ version: 2, action: 'approve' });
+  await reply(w, id(201), { ...clinician }, id(203), 2);
+  w.publish({ version: 3, action: 'discarded' }, { version: 4, action: 'reset' });
+  const before = w.statements.length;
+  await close(w, id(201), { ...clinician }, id(204), 3);
+  assert.deepEqual(anchorOf(w), [null, null, 2, 4]);
+  assert.deepEqual(head(w, before), ['tx:study FOR UPDATE', 'tx:head'], 'the head is read under the StudyState lock');
+  // The thread read keeps its own meaning: the last kept version.
+  assert.deepEqual((await w.svc.read(id(201), { ...clinician })).item.current, { rs: 'W', version: 4 });
+});
+
+test('W-Q A3: a head that does not match its version rows is refused with no write; the read is unchanged', async () => {
+  const cases = {
+    'head row missing': w => { w.store.report = { uid, version: 2 }; },
+    'head row discarded': w => { w.store.versions.push({ uid, version: 2, action: 'discarded' }); w.store.report = { uid, version: 2 }; },
+    'kept above head': w => { w.store.versions.push({ uid, version: 2, action: 'approve' }); },
+    'kept without Report': w => { w.store.report = null; },
+  };
+  for (const [label, corrupt] of Object.entries(cases)) {
+    const w = world(null);
+    await create(w, { ...clinician }, id(211));
+    w.publish({ version: 1, action: 'approve' });
+    corrupt(w);
+    const writes = { ...w.writes }, before = w.statements.length;
+    await assert.rejects(reply(w, id(211), { ...radiologist }, id(212), 1), code(409, 'QUESTION_REPORT_UNAVAILABLE'), label);
+    await assert.rejects(create(w, { ...clinician }, id(213)), code(409, 'QUESTION_REPORT_UNAVAILABLE'), label);
+    assert.deepEqual(w.writes, writes, label + ': no question, entry or audit row');
+    assert.ok(head(w, before).indexOf('tx:head') > head(w, before).indexOf('tx:study FOR UPDATE'), label);
+    assert.equal((await w.svc.read(id(211), { ...clinician })).item.current.rs, 'W', label + ': the read still answers');
+  }
+});
+
+test('W-Q E1: a write whose locked study differs from the question row stops before any StudyState lock', async () => {
+  const w = world(null);
+  await create(w, { ...clinician }, id(221));
+  const writes = { ...w.writes }, before = w.statements.length;
+  const other = '2.25.4243';
+  await assert.rejects(w.svc.reply(id(221), { ...radiologist }, { requestId: id(222), expectedOwner: owner(radiologist), revision: 1,
+    body: 'SYNTHETIC answer' }, undefined, other), code(409, 'QUESTION_CHANGED'));
+  await assert.rejects(w.svc.create(uid, { ...clinician }, { requestId: id(223), expectedOwner: owner(clinician), body: 'SYNTHETIC' },
+    undefined, other), code(409, 'QUESTION_CHANGED'));
+  assert.equal(w.statements.slice(before).filter(s => s.endsWith('FOR UPDATE')).length, 0);
+  assert.deepEqual(w.writes, writes);
+  // The same study goes through.
+  await w.svc.reply(id(221), { ...radiologist }, { requestId: id(224), expectedOwner: owner(radiologist), revision: 1,
+    body: 'SYNTHETIC answer' }, undefined, uid);
+  assert.equal(w.writes.entry, writes.entry + 1);
+});
+
+test('W-Q E5: a finite lock wait that ends before the service runs is the question busy answer', () => {
+  const { questionWriteError } = require('/app/dist/clinician-question.service');
+  for (const sqlState of ['55P03', '40P01', '57014']) {
+    const mapped = questionWriteError(Object.assign(new Error('raw'), { code: 'P2010', meta: { code: sqlState } }));
+    assert.ok(code(503, 'QUESTION_BUSY')(mapped), sqlState);
+  }
+  const other = Object.assign(new Error('raw'), { code: 'P2010', meta: { code: '23514' } });
+  assert.equal(questionWriteError(other), other, 'other failures keep their own outcome');
 });
