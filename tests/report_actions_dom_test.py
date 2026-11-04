@@ -301,15 +301,24 @@ MEASURE = r"""()=>{
   const natural=[...row.children].map(c=>c.tagName==='DETAILS'?c.querySelector(':scope > summary'):c)
     .map(e=>[key(e),e.getBoundingClientRect().height]);
   row.style.alignItems=was;
-  const pane=q('#dictation-pane'), edit=q('.report-p .redit'), flex=edit.style.flex;
-  edit.style.flex='0 0 auto'; const editMinimum=edit.getBoundingClientRect().height; edit.style.flex=flex;
-  return {vw:innerWidth,vh:innerHeight,open:q('#report-more').open,rbtns:box(row),rfoot:box(q('.report-p .rfoot2')),
-    redit:box(q('.report-p .redit')),reditMin:editMinimum,pane:pane.hidden?null:box(pane),panel:box(q('#report-more > .toolbar-menu-panel')),
+  const pane=q('#dictation-pane'), edit=q('.report-p .redit');
+  const out={vw:innerWidth,vh:innerHeight,open:q('#report-more').open,rbtns:box(row),rfoot:box(q('.report-p .rfoot2')),
+    redit:box(q('.report-p .redit')),pane:pane.hidden?null:box(pane),panel:box(q('#report-more > .toolbar-menu-panel')),
     top,natural,foot:[...q('.report-p .rfoot2').children].map(c=>c.tagName==='DETAILS'?c.querySelector(':scope > summary'):c).map(one),menu:[...document.querySelectorAll('#report-more button')].filter(e=>!e.hidden).map(one),
     sections:[...document.querySelectorAll('#report-more .toolbar-section')].map(s=>{const h=getComputedStyle(s,'::before');
       return {id:s.id,...box(s),ids:[...s.children].filter(c=>!c.hidden).map(c=>c.id),kids:[...s.children].filter(c=>!c.hidden).map(c=>({key:c.id,...box(c)})),
         head:{label:s.getAttribute('aria-label'),content:h.content,font:h.fontSize,display:h.display}}}),
     fields:['findings','conclusion','recommendation'].map(i=>({id:i,...box(q('#'+i))}))};
+  // How far the field region yields: its height in a report panel squeezed to nothing, read after everything else and
+  // with every scroll offset put back. Where the region does not shrink that is its content; in the reading layout
+  // (Minhoon 2026-11-04) it scrolls its text and yields down to its own floor.
+  const panelBox=q('.report-p'), kept=panelBox.getAttribute('style'), offsets=[];
+  for(let e=panelBox;e;e=e.parentElement)offsets.push([e,e.scrollTop,e.scrollLeft]);
+  panelBox.style.cssText+=';flex:none;height:0;min-height:0';
+  out.reditMin=edit.getBoundingClientRect().height;
+  if(kept===null)panelBox.removeAttribute('style');else panelBox.setAttribute('style',kept);
+  for(const [e,t,l] of offsets){e.scrollTop=t;e.scrollLeft=l;}
+  return out;
 }"""
 
 # Where a control is drawn, whether a pointer reaches it at its centre, and whether it takes focus.

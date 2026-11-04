@@ -575,6 +575,13 @@
     body.portrait .related-list-pane .grid2 { min-height: 68px; }
     body.portrait .prior-report-pane { min-height: 116px; }
     body.portrait .report-p, body.portrait .order-p { min-height: 180px; }
+    /* Minhoon 11-03 "single scroll" (Jungmo 11-04: the portrait work area too). The report card starts near the bottom
+       of a 768x1024 window, so the work column (.right) has to scroll; the row and the card scrolling inside it as well
+       made the wheel and Tab move three boxes on the way to Save. Here the card is as tall as its content and only the
+       column scrolls; the related panel keeps its height because the row's own box does not grow. The typing line stays
+       in view by the browser's own caret scroll of the column. */
+    body.portrait:not(.reading) .workrow, body.portrait:not(.reading) .workrow > .report-p { overflow: visible; }
+    body.portrait:not(.reading) .workrow > .report-p { flex: 1 0 auto; }
     body.portrait #resize-main, body.portrait #resize-related { width: 100%; height: 6px; cursor: row-resize; }
     body.portrait #resize-main::after, body.portrait #resize-related::after {
       left: 0; right: 0; top: 2px; bottom: auto; width: auto; height: 2px;
@@ -593,6 +600,8 @@
          hidden panel, and Technician's Template, take no height and no column share applies. */
       body.portrait:not(.reading) .right > .rw { height: auto !important; display: flex; flex-direction: column; }
       body.portrait:not(.reading) .rw > section { width: 100%; flex: none; }
+      /* The Clinical card keeps its 6px side margins (:345); a bare 100% here pushed its right border 6px past the band. */
+      body.portrait:not(.reading) .rw > .s-clinical { width: calc(100% - 12px); }
       body.portrait:not(.reading) .s-thumb { height: 340px; }
       body.portrait:not(.reading) .s-clinical { height: 180px; }
       body.portrait:not(.reading) .s-template { height: 240px; }
